@@ -4,3 +4,8 @@ node_modules/
 # but ignore any local copies just in case)
 tokens.json
 .env
+
+# Firmware secrets (never commit real creds/token) + build artifacts
+firmware/src/secrets.h
+firmware/build/
+build/
