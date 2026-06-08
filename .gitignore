@@ -1,0 +1,6 @@
+node_modules/
+*.log
+# Never commit tokens (they're stored in ~/.config/live-claude-ui by default,
+# but ignore any local copies just in case)
+tokens.json
+.env
