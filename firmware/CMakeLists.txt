@@ -5,4 +5,6 @@ project(claude_usage_display)
 target_sources(app PRIVATE
 	src/main.c
 	src/net_wifi.c
-	src/time_sync.c)
+	src/time_sync.c
+	src/usage_parse.c
+	src/usage_client.c)
