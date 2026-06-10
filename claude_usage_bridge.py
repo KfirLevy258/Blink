@@ -50,8 +50,12 @@ def main():
             continue
         print(f"[bridge] connected on {port}", file=sys.stderr)
         reader = protocol.LineReader()
-        bridge = Bridge(write_msg=lambda m: ser.write(protocol.encode(m)),
-                        fetch_usage=fetch)
+
+        def send(m):
+            print(f"[bridge] -> {m}", file=sys.stderr)
+            ser.write(protocol.encode(m))
+
+        bridge = Bridge(write_msg=send, fetch_usage=fetch)
         next_poll = time.monotonic()
         try:
             while True:
