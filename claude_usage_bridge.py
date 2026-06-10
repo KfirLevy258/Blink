@@ -43,7 +43,16 @@ def main():
 
     while True:  # reconnect loop
         try:
-            ser = serial.Serial(port, args.baud, timeout=0.2)
+            # Open WITHOUT asserting DTR/RTS: on the ESP32-C6 native USB-Serial-JTAG
+            # the default open sequence toggles those lines and resets the chip into
+            # ROM download mode, which silences our firmware. Configure-then-open.
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = args.baud
+            ser.timeout = 0.2
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
         except Exception as e:
             print(f"[bridge] open {port} failed: {e}; retrying in 3s", file=sys.stderr)
             time.sleep(3)
@@ -61,6 +70,9 @@ def main():
             while True:
                 data = ser.read(256)
                 if data:
+                    # Echo raw board console (logs + its [usage] prints) for visibility.
+                    sys.stderr.buffer.write(data)
+                    sys.stderr.buffer.flush()
                     for msg in reader.feed(data):
                         print(f"[bridge] <- {msg}", file=sys.stderr)
                         bridge.on_message(msg)
