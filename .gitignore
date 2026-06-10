@@ -1,5 +1,9 @@
 node_modules/
 *.log
+
+# Python
+__pycache__/
+*.pyc
 # Never commit tokens (they're stored in ~/.config/live-claude-ui by default,
 # but ignore any local copies just in case)
 tokens.json
