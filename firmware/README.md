@@ -1,96 +1,68 @@
-# Claude Usage Display — ESP32-C6 firmware (Stage 1)
+# Claude Usage Display — ESP32-C6 firmware (UART bridge)
 
-Prints your Claude Code session (5h) and weekly (7d) usage to the serial console.
+The board no longer fetches anything itself. A **PC daemon** (`../claude_usage_bridge.py`)
+holds the Claude OAuth token (auto-refreshed by Claude Code), polls
+`/api/oauth/usage`, and **pushes** the numbers to this board over the USB-C serial
+link using a small NDJSON protocol. The board sends identity + keep-alive and
+displays whatever usage the PC sends. No WiFi / TLS / SNTP / token on the device.
 
-> **Hardware:** ESP32-C6-WROOM-1 (RISC-V, WiFi 6, native USB-Serial-JTAG).
-> The original brief assumed a classic ESP32-WROOM; the actual board is a C6, so
-> the board target is `esp32c6_devkitc/esp32c6/hpcore`.
+## Protocol (NDJSON, one JSON object per line, `t`=type, `v`=version)
 
-## Toolchain / workspace (this machine, an Intel Mac)
+- Board → PC: `hello` (on boot, with `board_id` from the chip MAC), `ping` (every 10 s).
+- PC → board: `welcome` (ack), `usage` (`session_pct`/`weekly_pct`/resets + optional
+  `models[]`), `status` (e.g. rate-limited).
+- Unknown `t` and non-`{` lines are ignored on both sides (forward-compatible; logs and
+  protocol coexist on the one serial stream).
 
-Stage 0 settled several environment constraints — use exactly this setup:
+## Toolchain / build (Intel Mac; see the prior plan for why)
 
-- **Zephyr v4.3.0** in an isolated workspace at `~/zephyr-v4.4.0` (dir name kept
-  for venv-path stability; the zephyr repo inside is checked out at v4.3.0).
-  Why not 4.4.0: it requires Zephyr SDK ≥1.0.1, which is **not published for
-  macOS x86_64**. 4.3.0 works with the installed SDK 0.17.4.
-- **Python 3.12 venv** at `~/zephyr-v4.4.0/.venv` (Zephyr 4.3 needs Python ≥3.12).
-- **Zephyr SDK 0.17.4** (`~/zephyr-sdk-0.17.4`, riscv64 toolchain for the C6).
-- **ccache disabled** — the system Homebrew `ccache` is broken (linked against a
-  missing `libfmt.11`). Always pass `-DUSE_CCACHE=0`. (Optional fix you can run
-  separately: `brew reinstall ccache`.)
-- WiFi blobs already fetched (`west blobs fetch hal_espressif`).
-
-Activate once per shell:
-```bash
-source ~/zephyr-v4.4.0/.venv/bin/activate
-source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
-```
-
-## Configure secrets
+- Zephyr **v4.3.0** in `~/zephyr-v4.4.0` (dir name kept; pinned to 4.3.0), Python 3.12
+  venv, SDK 0.17.4 (riscv64). ccache is broken on this host → always `-DUSE_CCACHE=0`.
 
 ```bash
-cp secrets.h.example src/secrets.h
-# edit src/secrets.h: WIFI_SSID, WIFI_PSK, CLAUDE_TOKEN
-```
-
-Get a fresh token (~8 h lifetime) and the ground-truth numbers to compare against:
-```bash
-python3 ../claude_usage_test.py
-```
-Paste the printed `#define CLAUDE_TOKEN "..."` into `src/secrets.h`.
-
-## Build
-
-```bash
+source ~/zephyr-v4.4.0/.venv/bin/activate && source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
 west build -p auto -b esp32c6_devkitc/esp32c6/hpcore . -- -DUSE_CCACHE=0
 ```
 
-## Flash
+## Flash (learned the hard way)
 
-The C6's native USB-Serial-JTAG enumerates as `/dev/cu.usbmodem*`. Auto-flashing
-over native USB can fail with checksum/format errors at the data-transfer stage —
-if so, force download mode (hold **BOOT**/GPIO9, tap **RESET/EN**, release BOOT)
-and/or use a known-good data cable directly into the Mac (not a hub):
+The C6 exposes **two** USB CDC interfaces on its two USB-C ports:
+- **UART bridge** (e.g. `/dev/cu.usbmodem143401`) — flash here with esptool.
+- **native USB-Serial-JTAG** (e.g. `/dev/cu.usbmodem58CD…`) — the firmware **console +
+  protocol** flow here (where the PC daemon connects).
+
+Auto-reset into the bootloader is unreliable; use manual download mode:
+1. Quit any serial monitor (only one process may own a port).
+2. Hold **BOOT**, tap **RESET/EN**, release **BOOT** (board is now in download mode).
+3. Flash:
+```bash
+esptool --port /dev/cu.usbmodem<UART-bridge> --before no-reset --after hard-reset \
+  write-flash --flash-mode dio --flash-freq 80m --flash-size 8MB 0x0 build/zephyr/zephyr.bin
+```
+Expect `Hash of data verified.`
+
+## Run the bridge (this is the whole app)
 
 ```bash
-west flash --esp-device /dev/cu.usbmodemXXXX
-# or directly:
-esptool --port /dev/cu.usbmodemXXXX --baud 115200 --before default-reset \
-  --after hard-reset write-flash --flash-mode dio --flash-freq 80m \
-  --flash-size 8MB 0x0 build/zephyr/zephyr.bin
+source ~/zephyr-v4.4.0/.venv/bin/activate           # has pyserial
+python3 ../claude_usage_bridge.py --port /dev/cu.usbmodem<native-USB-JTAG>
 ```
+The daemon reads your token (Keychain / `~/.claude/.credentials.json`), connects, and
+on the board's `hello` replies `welcome`+`usage`, then polls every 300 s. Its log shows
+**both directions** plus the board's echoed `[usage] Session…` display lines, so one
+terminal shows the whole loop. (`tio` and the daemon can't both own the port.)
 
-## Monitor
+Important: the daemon opens the port with **DTR/RTS de-asserted** — on the C6 native
+USB-Serial-JTAG the default open sequence resets the chip into ROM download mode and
+silences the firmware.
 
-```bash
-west espressif monitor          # Ctrl-] to exit
-# or: screen /dev/cu.usbmodemXXXX 115200
-```
+## Verified
 
-Expected output once configured:
-```
-[usage] HTTP 200
-[usage] Session (5h):  61.0%   resets 2026-06-08T21:50:01Z
-[usage] Weekly  (7d):  26.0%   resets 2026-06-10T06:00:01Z
-[usage] Weekly Sonnet:  2.0%
-[usage] next poll in 300s
-```
+Real round trip on hardware: board `hello`(+MAC id)/`ping` → daemon `welcome` + `usage`
+with live numbers (e.g. Session 38%, Weekly 14%, Sonnet 2%). FLASH ~1.6%.
 
-## Notes
-
-- Polls every 300 s; backs off to 600 s on HTTP 429. **Do not poll faster** —
-  the endpoint rate-limits aggressively.
-- HTTP 401 → the token expired; paste a fresh one and reflash.
-- CA verification is **on** (`src/certs.h` = GTS Root R4, the api.anthropic.com
-  trust anchor). If TLS ever fails on a chain change, re-capture with
-  `openssl s_client -connect api.anthropic.com:443 -servername api.anthropic.com -showcerts`.
-- The JSON parser is a small manual scanner (`src/usage_parse.c`); host tests in
-  `../tests/usage_parse/host_test.c` (`cc -I src ... && ./a.out`).
-
-## Status
-
-Built and compile-verified for the C6 (FLASH ~8.6%). **On-device run is not yet
-verified** — flashing was deferred pending a stable USB connection / download-mode
-step. Stage 0 sample bring-up (WiFi association, TLS handshake) likewise pending
-a flashing session.
+## Source map
+- `proto.c` — UART line reader, emits `hello`/`ping`, dispatches inbound by `t`.
+- `msg_parse.c` — flat-field JSON value extractors (host-tested: `tests/msg_parse/`).
+- `usage_view.c` — prints the latest usage (later: a display).
+- `main.c` — init + service loop.
