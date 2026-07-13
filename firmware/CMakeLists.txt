@@ -12,4 +12,6 @@ target_sources(app PRIVATE
 	src/net_wifi.c
 	src/portal.c
 	src/ui_setup.c
-	src/dns_hijack.c)
+	src/dns_hijack.c
+	src/oauth.c
+	src/usage_parse.c)
