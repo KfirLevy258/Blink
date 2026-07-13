@@ -39,22 +39,6 @@ void portal_idle_hook(void)
 
 /* ---- provisioning callbacks (portal owns HTTP, we own WiFi + OAuth) ---- */
 
-static int cb_connect_wifi(const char *ssid, const char *psk)
-{
-	int rc = net_wifi_connect(ssid, psk, 30);
-
-	if (rc == 0) {
-		cfg_set_wifi(ssid, psk);
-		/* TLS needs a real clock before the OAuth exchange. */
-		net_time_sync(10);
-		ui_setup_set_state(UI_SETUP_WIFI_OK, NULL);
-	} else {
-		ui_setup_set_state(UI_SETUP_PHONE, NULL);
-	}
-	pump_ui();
-	return rc;
-}
-
 static int cb_sign_in(const char *code)
 {
 	struct oauth_tokens tok;
@@ -62,14 +46,73 @@ static int cb_sign_in(const char *code)
 	ui_setup_set_state(UI_SETUP_SIGNIN, NULL);
 	pump_ui();
 
+	/* TLS certificate checks need a real wall clock; sync it now, the first
+	 * time we actually talk to Anthropic. */
+	if (!net_time_valid()) {
+		net_time_sync(10);
+	}
+
 	int rc = oauth_exchange_code(code, verifier, &tok);
 
 	if (rc == 0) {
 		cfg_set_token(tok.refresh);	/* write-before-use */
 		ui_setup_set_state(UI_SETUP_DONE, NULL);
+	} else {
+		ui_setup_set_state(UI_SETUP_ERROR, NULL);
 	}
 	pump_ui();
 	return rc;
+}
+
+/*
+ * Phase 1: run the AP until credentials arrive, then tear it down and try to
+ * join. On failure, restart the AP with the reason on the form and let the
+ * user rejoin the setup network. Returns 0 with creds stored, or negative on
+ * portal timeout / AP failure (caller reboots either way).
+ */
+static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen)
+{
+	const char *err = NULL;
+
+	for (;;) {
+		/* Scan before the AP comes up (scanning under SoftAP misses
+		 * most APs). Re-scan each round: the failure may have been
+		 * "network not found". */
+		static char nets[12][33];
+		int nn = net_wifi_scan(nets, 12, 8);
+
+		portal_set_networks(nets, nn > 0 ? nn : 0);
+
+		int rc = net_wifi_start_ap();
+
+		if (rc != 0) {
+			return rc;
+		}
+		dns_hijack_start();
+		ui_setup_set_state(UI_SETUP_WAIT, NULL);
+		pump_ui();
+
+		rc = portal_run_wifi(ssid, slen, psk, plen, err, 900);
+
+		dns_hijack_stop();
+		net_wifi_stop_ap();
+		if (rc != 0) {
+			return rc;	/* nobody set us up in time */
+		}
+
+		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
+		pump_ui();
+
+		if (net_wifi_connect(ssid, psk, 30) == 0) {
+			cfg_set_wifi(ssid, psk);
+			return 0;
+		}
+
+		err = net_wifi_last_error();
+		ui_setup_set_state(UI_SETUP_ERROR, err);
+		pump_ui();
+		k_msleep(2500);	/* let the reason land before the QR returns */
+	}
 }
 
 static void run_provisioning(void)
@@ -81,29 +124,36 @@ static void run_provisioning(void)
 	oauth_gen_verifier(verifier, sizeof(verifier));
 	oauth_authorize_url(verifier, authorize_url, sizeof(authorize_url));
 
-	/* Scan before the AP comes up (scanning under SoftAP misses most APs). */
-	static char nets[12][33];
-	int nn = net_wifi_scan(nets, 12, 8);
+	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
+	bool joined = false;
 
-	portal_set_networks(nets, nn > 0 ? nn : 0);
-
-	if (net_wifi_start_ap() == 0) {
-		dns_hijack_start();
+	/* Resume: stored credentials mean an earlier run already got through
+	 * phase 1 (e.g. reboot mid-setup) -- skip the AP and join directly. */
+	if (cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
+		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
+		pump_ui();
+		joined = (net_wifi_connect(ssid, psk, 30) == 0);
 	}
 
-	struct portal_cb cb = {
-		.authorize_url = authorize_url,
-		.connect_wifi = cb_connect_wifi,
-		.sign_in = cb_sign_in,
-	};
-	int rc = portal_run(&cb, 900);
+	if (!joined && phase1_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) != 0) {
+		goto out;
+	}
 
-	dns_hijack_stop();
-	net_wifi_stop_ap();
+	/* Phase 2: sign-in over the home LAN. */
+	char ip[16], url[32];
 
-	if (rc == 0) {
+	if (!net_wifi_sta_ip(ip, sizeof(ip))) {
+		goto out;
+	}
+	snprintf(url, sizeof(url), "http://%s/", ip);
+	printk("[usage] sign-in page at %s\n", url);
+	ui_setup_set_state(UI_SETUP_WIFI_OK, url);
+	pump_ui();
+
+	if (portal_run_signin(authorize_url, cb_sign_in, 900) == 0) {
 		cfg_set_mode(CFG_MODE_WIFI);
 	}
+out:
 	/* Reboot either way: on success come up standalone; on timeout, retry
 	 * setup from a clean slate. A cold restart also reclaims all the AP/TLS
 	 * memory before the standalone stack allocates it. */
