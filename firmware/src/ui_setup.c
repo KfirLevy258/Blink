@@ -45,7 +45,10 @@ static lv_obj_t *panel;
 static volatile int pending = -1;
 static char pending_detail[40];
 
-static int applied = UI_SETUP_WAIT;	/* last state apply() ran */
+/* Read by on_station() from the net-mgmt callback context, written on the
+ * LVGL thread -- volatile for the same cross-thread visibility reason as
+ * `pending` below. */
+static volatile int applied = UI_SETUP_WAIT;	/* last state apply() ran */
 
 static void on_station(int count)
 {
