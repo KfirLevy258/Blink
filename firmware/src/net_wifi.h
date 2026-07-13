@@ -38,6 +38,15 @@ int net_wifi_ap_lease_count(void);
  */
 int net_wifi_connect(const char *ssid, const char *psk, int timeout_s);
 
+/* Human-readable reason the last connect failed (e.g. "wrong password",
+ * "network not found", "no IP address"). Valid after net_wifi_connect != 0. */
+const char *net_wifi_last_error(void);
+
+/* The station's IPv4 as text (e.g. "192.168.1.23"), for the phase-2 URL the
+ * phone opens. Valid after net_wifi_connect() returned 0. Returns false if
+ * the station holds no address. */
+bool net_wifi_sta_ip(char *buf, size_t len);
+
 /* Become an open access point on 192.168.4.1 so a phone can reach the setup
  * portal. Used when there are no credentials yet, or after a factory reset.
  */

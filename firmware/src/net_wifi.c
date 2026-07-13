@@ -63,12 +63,22 @@ static K_SEM_DEFINE(sem_scan_done, 0, 1);
 static K_SEM_DEFINE(sem_ap_up, 0, 1);
 
 static bool have_ip;
+static const char *last_error;
 static int connect_status;
 
 /* Scan results are collected by the event callback into this table. */
 static char (*scan_out)[33];
 static int scan_max;
 static int scan_count;
+
+/* Remembered per-network security, so connect can pick PSK (WPA2) vs SAE
+ * (WPA3) instead of guessing -- guessing wrong looks like a wrong password. */
+#define SCANNED_MAX 16
+static struct {
+	char ssid[33];
+	enum wifi_security_type sec;
+} scanned[SCANNED_MAX];
+static int scanned_n;
 
 static void wifi_evt(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 		     struct net_if *iface)
@@ -103,6 +113,13 @@ static void wifi_evt(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 
 			memcpy(scan_out[scan_count], r->ssid, n);
 			scan_out[scan_count][n] = '\0';
+
+			if (scanned_n < SCANNED_MAX) {
+				memcpy(scanned[scanned_n].ssid, r->ssid, n);
+				scanned[scanned_n].ssid[n] = '\0';
+				scanned[scanned_n].sec = r->security;
+				scanned_n++;
+			}
 			scan_count++;
 		}
 		break;
@@ -183,6 +200,11 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	if (!iface) {
 		return -ENODEV;
 	}
+	if (!ssid || !ssid[0]) {
+		printk("[wifi] connect called with empty SSID\n");
+		last_error = "no network selected";
+		return -EINVAL;
+	}
 	if (!net_if_is_up(iface)) {
 		net_if_up(iface);
 		k_msleep(200);
@@ -194,8 +216,29 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	p.ssid = (const uint8_t *)ssid;
 	p.ssid_length = strlen(ssid);
 	p.channel = WIFI_CHANNEL_ANY;
-	p.security = (psk && psk[0]) ? WIFI_SECURITY_TYPE_PSK
-				     : WIFI_SECURITY_TYPE_NONE;
+
+	/* Pick the security type from the scan: the ESP32 driver only accepts
+	 * NONE / PSK / SAE, and using PSK on a WPA3-SAE network fails exactly like
+	 * a wrong password. Default to PSK for a typed/hidden network we didn't
+	 * scan. */
+	enum wifi_security_type sec = (psk && psk[0]) ? WIFI_SECURITY_TYPE_PSK
+						      : WIFI_SECURITY_TYPE_NONE;
+
+	for (int i = 0; i < scanned_n; i++) {
+		if (strcmp(scanned[i].ssid, ssid) == 0) {
+			if (scanned[i].sec == WIFI_SECURITY_TYPE_NONE) {
+				sec = WIFI_SECURITY_TYPE_NONE;
+			}
+			/* SAE (WPA3) is clamped to PSK: enabling the driver's SAE
+			 * path pulls in mbedTLS ECC prerequisites that conflict
+			 * with our TLS config. WPA2/WPA3-mixed networks (the common
+			 * case) accept PSK; pure WPA3-only would need SAE. */
+			break;
+		}
+	}
+	printk("[wifi] connecting sec=%d to \"%s\"\n", sec, ssid);
+
+	p.security = sec;
 	if (psk && psk[0]) {
 		p.psk = (const uint8_t *)psk;
 		p.psk_length = strlen(psk);
@@ -207,19 +250,39 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	have_ip = false;
 
 	printk("[wifi] connecting to \"%s\"\n", ssid);
-	int rc = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &p, sizeof(p));
+
+	/*
+	 * The request is rejected with -EIO/-EAGAIN until the station has finished
+	 * "starting" -- an async transition that, in AP+STA mode, lands a moment
+	 * after we bring the interface up. Retry for a few seconds rather than
+	 * failing instantly.
+	 */
+	int rc = -EIO;
+
+	for (int attempt = 0; attempt < 20; attempt++) {
+		rc = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &p, sizeof(p));
+		if (rc == 0) {
+			break;
+		}
+		printk("[wifi] connect request rc=%d (attempt %d), retrying\n",
+		       rc, attempt);
+		k_msleep(300);
+	}
 
 	if (rc) {
 		printk("[wifi] connect request failed: %d\n", rc);
+		last_error = "the WiFi radio wasn't ready";
 		return rc;
 	}
 
 	if (k_sem_take(&sem_connected, K_SECONDS(timeout_s)) != 0) {
 		printk("[wifi] connect timed out\n");
+		last_error = "network didn't respond (name/range?)";
 		return -ETIMEDOUT;
 	}
 	if (connect_status != 0) {
 		printk("[wifi] association failed (status %d)\n", connect_status);
+		last_error = "wrong password, or network refused";
 		return -ECONNREFUSED;
 	}
 
@@ -229,11 +292,36 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	net_dhcpv4_start(iface);
 	if (k_sem_take(&sem_got_ip, K_SECONDS(timeout_s)) != 0) {
 		printk("[wifi] no DHCP address\n");
+		last_error = "connected but got no IP address";
 		return -ETIMEDOUT;
 	}
 
 	printk("[wifi] connected, got an IP\n");
 	return 0;
+}
+
+const char *net_wifi_last_error(void)
+{
+	return last_error ? last_error : "connect failed";
+}
+
+bool net_wifi_sta_ip(char *buf, size_t len)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+
+	if (!iface) {
+		iface = net_if_get_first_wifi();
+	}
+	if (!iface) {
+		return false;
+	}
+
+	struct in_addr *a = net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED);
+
+	if (!a) {
+		return false;
+	}
+	return net_addr_ntop(AF_INET, a, buf, len) != NULL;
 }
 
 int net_wifi_start_ap(void)
@@ -316,6 +404,10 @@ int net_wifi_start_ap(void)
 	 * default interface, which is the station, and while provisioning the
 	 * station is down with no address. The symptom is a client that gets a
 	 * DHCP lease and then cannot ping the board or load the page.
+	 *
+	 * The radio never runs AP and STA together: the portal collects
+	 * credentials first, the AP is torn down, and only then does the
+	 * station come up to join (see run_provisioning in main.c).
 	 */
 	struct net_if *sta = net_if_get_wifi_sta();
 
@@ -375,6 +467,7 @@ int net_wifi_scan(char out[][33], int max, int timeout_s)
 	scan_out = out;
 	scan_max = max;
 	scan_count = 0;
+	scanned_n = 0;
 	k_sem_reset(&sem_scan_done);
 
 	int rc = net_mgmt(NET_REQUEST_WIFI_SCAN, iface, NULL, 0);
