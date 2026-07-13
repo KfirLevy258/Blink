@@ -55,7 +55,7 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 
 	g->arc = lv_arc_create(parent);
 	lv_obj_set_size(g->arc, 116, 116);
-	lv_obj_align(g->arc, LV_ALIGN_TOP_MID, cx, 30);
+	lv_obj_align(g->arc, LV_ALIGN_TOP_MID, cx, 44);
 	lv_arc_set_rotation(g->arc, 135);
 	lv_arc_set_bg_angles(g->arc, 0, 270);
 	lv_arc_set_range(g->arc, 0, 100);
@@ -71,18 +71,18 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_label_set_text(g->pct, "--%");
 	lv_obj_set_style_text_color(g->pct, COL_TEXT, 0);
 	lv_obj_set_style_text_font(g->pct, &lv_font_montserrat_20, 0);
-	lv_obj_align(g->pct, LV_ALIGN_TOP_MID, cx, 78);
+	lv_obj_align(g->pct, LV_ALIGN_TOP_MID, cx, 92);
 
 	lv_obj_t *name = lv_label_create(parent);
 
 	lv_label_set_text(name, title);
 	lv_obj_set_style_text_color(name, COL_DIM, 0);
-	lv_obj_align(name, LV_ALIGN_TOP_MID, cx, 152);
+	lv_obj_align(name, LV_ALIGN_TOP_MID, cx, 166);
 
 	g->countdown = lv_label_create(parent);
 	lv_label_set_text(g->countdown, "--");
 	lv_obj_set_style_text_color(g->countdown, COL_TEXT, 0);
-	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, 174);
+	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, 188);
 }
 
 static void render_countdown(struct gauge *g)
