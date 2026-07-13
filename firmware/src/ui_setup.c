@@ -170,6 +170,8 @@ void ui_setup_show(void)
 
 	cap = lv_label_create(panel);
 	lv_label_set_text(cap, "scan to\nbegin");
+	lv_obj_set_width(cap, 124);
+	lv_label_set_long_mode(cap, LV_LABEL_LONG_WRAP);
 	lv_obj_set_style_text_color(cap, COL_DIM, 0);
 	lv_obj_set_style_text_align(cap, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(cap, LV_ALIGN_BOTTOM_MID, 0, -22);

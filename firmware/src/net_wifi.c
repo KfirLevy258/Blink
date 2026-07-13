@@ -253,9 +253,8 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 
 	/*
 	 * The request is rejected with -EIO/-EAGAIN until the station has finished
-	 * "starting" -- an async transition that, in AP+STA mode, lands a moment
-	 * after we bring the interface up. Retry for a few seconds rather than
-	 * failing instantly.
+	 * "starting" -- an async transition that lands a moment after we bring
+	 * the interface up. Retry for a few seconds rather than failing instantly.
 	 */
 	int rc = -EIO;
 
@@ -332,6 +331,19 @@ int net_wifi_start_ap(void)
 		return -ENODEV;
 	}
 
+	/*
+	 * Park the station FIRST: on retry rounds net_wifi_connect() revived it
+	 * and a timed-out join may still be mid-association -- enabling the AP
+	 * around a live station transiently reinstates AP+STA, the concurrent
+	 * mode this design deletes. Downing the interface also aborts any
+	 * lingering association attempt.
+	 */
+	struct net_if *sta = net_if_get_wifi_sta();
+
+	if (sta && sta != iface && net_if_is_up(sta)) {
+		net_if_down(sta);
+	}
+
 	struct wifi_connect_req_params p = {0};
 
 	const char *ssid = net_wifi_ap_ssid();
@@ -397,23 +409,12 @@ int net_wifi_start_ap(void)
 	}
 
 	/*
-	 * Make the AP the default interface, and park the idle station.
-	 *
-	 * Without this the board RECEIVES fine -- DHCP requests arrive, stations
-	 * associate -- but its replies go nowhere: outbound packets follow the
-	 * default interface, which is the station, and while provisioning the
-	 * station is down with no address. The symptom is a client that gets a
-	 * DHCP lease and then cannot ping the board or load the page.
-	 *
-	 * The radio never runs AP and STA together: the portal collects
-	 * credentials first, the AP is torn down, and only then does the
-	 * station come up to join (see run_provisioning in main.c).
+	 * Make the AP the default interface. Without this the board RECEIVES
+	 * fine -- DHCP requests arrive, stations associate -- but its replies
+	 * follow the default interface (the parked station) and go nowhere:
+	 * the client gets a lease and then cannot load the page. The station
+	 * itself was parked at the top of this function, before the AP came up.
 	 */
-	struct net_if *sta = net_if_get_wifi_sta();
-
-	if (sta && sta != iface && net_if_is_up(sta)) {
-		net_if_down(sta);
-	}
 	net_if_set_default(iface);
 
 	printk("[wifi] AP up=%d oper=%d addr=%s leases from %s\n",
