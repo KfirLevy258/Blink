@@ -34,8 +34,11 @@ int main(void)
 		return -1;
 	}
 
-	usage_view_init();
-	lv_timer_handler();
+	/* The gauge screen and the setup screen are mutually exclusive modes and
+	 * must not coexist -- with no PSRAM the LVGL heap cannot hold both, and
+	 * building both at once exhausts it mid-style and faults. Create the gauge
+	 * screen only on the gauge path.
+	 */
 	display_blanking_off(display_dev);
 
 	/* Backlight last: the panel holds garbage until the first frame is
@@ -47,6 +50,30 @@ int main(void)
 
 	cfg_init();
 	net_wifi_init();
+
+#ifdef TEST_SCREEN
+	/* Design review: cycle the setup screen through every state so the
+	 * boarding-pass layout can be seen end-to-end without provisioning.
+	 */
+	ui_setup_show();
+	for (;;) {
+		const struct { enum ui_setup_state s; const char *d; } seq[] = {
+			{ UI_SETUP_WAIT, NULL },
+			{ UI_SETUP_PHONE, NULL },
+			{ UI_SETUP_WIFI_OK, "Stone Cottage" },
+			{ UI_SETUP_SIGNIN, NULL },
+			{ UI_SETUP_DONE, NULL },
+		};
+		for (int i = 0; i < 5; i++) {
+			ui_setup_set_state(seq[i].s, seq[i].d);
+			for (int t = 0; t < 250; t++) {
+				ui_setup_service();
+				lv_timer_handler();
+				k_sleep(K_MSEC(10));
+			}
+		}
+	}
+#endif
 
 #ifdef TEST_AP
 	/* Provisioning: become an AP, serve the setup page, take what the user
@@ -73,22 +100,27 @@ int main(void)
 		}
 
 		if (portal_run(url, &res, 600) == 0) {
-			ui_setup_status("saving...");
-			lv_timer_handler();
 			cfg_set_wifi(res.ssid, res.psk);
 			dns_hijack_stop();
 			net_wifi_stop_ap();
 
-			ui_setup_status("connecting...");
+			ui_setup_set_state(UI_SETUP_WIFI_OK, res.ssid);
 			lv_timer_handler();
 			int rc = net_wifi_connect(res.ssid, res.psk, 30);
 
-			ui_setup_status(rc == 0 ? "connected!" : "connect FAILED");
+			ui_setup_set_state(rc == 0 ? UI_SETUP_DONE : UI_SETUP_ERROR,
+					   rc == 0 ? NULL : "WiFi failed");
 			printk("[setup] connect rc=%d\n", rc);
 			lv_timer_handler();
 		}
 	}
 #endif
+
+	/* Gauge/USB path: build the gauge screen now (the setup screen, if any, is
+	 * gone by here) and start the UART bridge.
+	 */
+	usage_view_init();
+	lv_timer_handler();
 
 	proto_init();
 

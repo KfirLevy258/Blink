@@ -170,11 +170,24 @@ int net_wifi_init(void)
 
 int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 {
-	struct net_if *iface = net_if_get_first_wifi();
+	/* Explicitly the STATION interface, not net_if_get_first_wifi() -- with
+	 * both a station and a soft-AP present, "first" is ambiguous and may hand
+	 * back the AP. And the station was brought DOWN during AP provisioning,
+	 * so revive it before asking it to associate.
+	 */
+	struct net_if *iface = net_if_get_wifi_sta();
 
+	if (!iface) {
+		iface = net_if_get_first_wifi();
+	}
 	if (!iface) {
 		return -ENODEV;
 	}
+	if (!net_if_is_up(iface)) {
+		net_if_up(iface);
+		k_msleep(200);
+	}
+	net_if_set_default(iface);
 
 	struct wifi_connect_req_params p = {0};
 

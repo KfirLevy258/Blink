@@ -93,18 +93,32 @@ static bool form_field(const char *b, const char *key, char *out, size_t olen)
 	return true;
 }
 
+/*
+ * Send in small, paced chunks.
+ *
+ * This ESP32 AP hands the station the first ~1280-byte TCP segment and then
+ * the send stalls -- a single large blocking send() never completes and the
+ * phone waits forever for the rest of the page. Writing <=512 bytes at a time
+ * and pausing briefly lets each segment actually reach the phone and get
+ * ACKed before the next, so pages are no longer limited to one segment.
+ */
 static int send_all(int sock, const char *buf, size_t len)
 {
 	size_t off = 0;
+	const size_t CHUNK = 512;
 
 	while (off < len) {
-		int n = zsock_send(sock, buf + off, len - off, 0);
+		size_t want = MIN(CHUNK, len - off);
+		int n = zsock_send(sock, buf + off, want, 0);
 
 		if (n <= 0) {
-			last_tx = off;   /* record how far we got before failing */
+			last_tx += off;
 			return -1;
 		}
 		off += n;
+		if (off < len) {
+			k_msleep(15);	/* let the AP drain this segment */
+		}
 	}
 	last_tx += off;
 	return off;
@@ -112,36 +126,64 @@ static int send_all(int sock, const char *buf, size_t len)
 
 static void send_page(int sock, const char *authorize_url)
 {
-	ARG_UNUSED(authorize_url);
 	last_tx = 0;
 
-	/*
-	 * The ENTIRE response (headers + HTML) must fit in ONE TCP segment.
-	 * This ESP32 AP delivers the first ~1280-byte segment to a station and
-	 * then the send stalls -- a bigger page arrives truncated and the phone
-	 * waits forever for the rest. So this is deliberately tiny: no CSS, no
-	 * scanned-network dropdown (a typed SSID is more reliable anyway, and the
-	 * scan only ever found one or two). Keep it well under 1200 bytes, and
-	 * send it in a single write.
+	/* Body first, so Content-Length is exact. Chunked/paced send (above)
+	 * handles the size, so the page can be styled and carry the full network
+	 * list -- no longer bound to a single TCP segment.
 	 */
-	static char page[1024];
-	int blen = snprintf(page, sizeof(page),
-		"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-		"Content-Length: %d\r\nConnection: close\r\n\r\n%s", 0, "");
-	/* Two-pass so Content-Length is exact: build body first. */
-	static char body[768];
+	static char body[3072];
 	int n = snprintf(body, sizeof(body),
-		"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-		"<title>Claude setup</title>"
-		"<h2>Claude usage setup</h2>"
+		"<!doctype html><html><head>"
+		"<meta name=viewport content='width=device-width,initial-scale=1'>"
+		"<title>Claude usage setup</title><style>"
+		"*{box-sizing:border-box}"
+		"body{margin:0;background:#0e1116;color:#e6e8eb;"
+		"font-family:-apple-system,system-ui,Segoe UI,Roboto,sans-serif;padding:22px 18px}"
+		"h1{font-size:19px;margin:0 0 2px}p.sub{color:#8a9199;font-size:13px;margin:0 0 22px}"
+		".card{background:#161a20;border:1px solid #272c34;border-radius:14px;padding:16px;margin-bottom:16px}"
+		".card h2{font-size:14px;margin:0 0 12px;color:#2ecc71;letter-spacing:.03em}"
+		"label{display:block;font-size:12px;color:#8a9199;margin:12px 0 5px}"
+		"select,input,textarea{width:100%%;padding:11px;border-radius:9px;"
+		"border:1px solid #303743;background:#0e1116;color:#e6e8eb;font-size:16px}"
+		"a.btn{display:inline-block;color:#0e1116;background:#2ecc71;text-decoration:none;"
+		"padding:11px 14px;border-radius:9px;font-weight:600;font-size:14px;margin-top:4px}"
+		"button{width:100%%;margin-top:20px;padding:14px;border:0;border-radius:11px;"
+		"background:#2ecc71;color:#08130c;font-size:16px;font-weight:700}"
+		"</style></head><body>"
+		"<h1>Claude usage display</h1>"
+		"<p class=sub>Connect the device to your WiFi and your Claude account.</p>"
 		"<form method=POST action=/save>"
-		"WiFi name<br><input name=ssid2 style=width:95%% autocapitalize=off autocorrect=off><br><br>"
-		"WiFi password<br><input name=psk type=password style=width:95%%><br><br>"
-		"Login code<br><textarea name=code rows=3 style=width:95%%></textarea><br><br>"
-		"<button type=submit>Save and connect</button></form>");
+		"<div class=card><h2>1 &middot; WI-FI</h2>"
+		"<label>Network</label><select name=ssid>");
 
-	blen = snprintf(page, sizeof(page),
-		"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+	if (n_networks == 0) {
+		n += snprintf(body + n, sizeof(body) - n,
+			      "<option value=''>(no networks found)</option>");
+	}
+	for (int i = 0; i < n_networks && n < (int)sizeof(body) - 400; i++) {
+		n += snprintf(body + n, sizeof(body) - n,
+			      "<option>%s</option>", networks[i]);
+	}
+
+	n += snprintf(body + n, sizeof(body) - n,
+		"</select>"
+		"<label>or type a hidden network</label>"
+		"<input name=ssid2 autocapitalize=off autocorrect=off placeholder='network name'>"
+		"<label>Password</label><input name=psk type=password placeholder='WiFi password'>"
+		"</div>"
+		"<div class=card><h2>2 &middot; CLAUDE ACCOUNT</h2>"
+		"<a class=btn href='%s' target=_blank rel=noreferrer>Sign in to Anthropic</a>"
+		"<label>Paste the code you get back</label>"
+		"<textarea name=code rows=3 placeholder='paste login code here'></textarea>"
+		"</div>"
+		"<button type=submit>Save &amp; connect</button>"
+		"</form></body></html>",
+		authorize_url);
+
+	static char page[3200];
+	int blen = snprintf(page, sizeof(page),
+		"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
 		"Content-Length: %d\r\nConnection: close\r\n\r\n%s", n, body);
 
 	send_all(sock, page, blen);
@@ -149,16 +191,20 @@ static void send_page(int sock, const char *authorize_url)
 
 static void send_done(int sock, const char *ssid)
 {
-	char page[512];
-	int n = snprintf(page, sizeof(page),
-		"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+	/* One segment, same reason as send_page: this AP stalls after the first. */
+	static char body[256];
+	int n = snprintf(body, sizeof(body),
 		"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-		"<style>body{font-family:-apple-system,system-ui,sans-serif;background:#0e1116;"
-		"color:#e6e8eb;padding:24px}</style>"
-		"<h2>Saved</h2><p>Connecting to <b>%s</b>. This access point will now shut down "
-		"and the display will take over.</p>", ssid);
+		"<title>Saved</title><h2>Saved</h2>"
+		"<p>Connecting to <b>%s</b>. The setup network will now shut down and "
+		"the display takes over.</p>", ssid);
 
-	send_all(sock, page, n);
+	static char page[384];
+	int blen = snprintf(page, sizeof(page),
+		"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+		"Content-Length: %d\r\nConnection: close\r\n\r\n%s", n, body);
+
+	send_all(sock, page, blen);
 }
 
 int portal_run(const char *authorize_url, struct portal_result *out, int timeout_s)

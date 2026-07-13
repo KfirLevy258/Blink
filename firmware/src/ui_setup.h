@@ -2,20 +2,29 @@
 #define UI_SETUP_H
 
 /*
- * Full-screen setup instructions plus a QR.
- *
- * The QR is a WIFI: payload, not a link: scanning it JOINS the board's access
- * point. Combined with the captive-portal DNS, that means one scan and the
- * setup page opens by itself -- no SSID picking, no typing an IP address.
- * The Anthropic login link then lives inside that page, where the phone can
- * follow it over cellular.
+ * The provisioning screen ("boarding pass"): a two-step checklist on the left
+ * that ticks green as setup advances, and a QR on the right that a phone scans
+ * to join. Splits WiFi and account sign-in into two visible stages.
  */
+
+enum ui_setup_state {
+	UI_SETUP_WAIT = 0,	/* waiting for a phone to join the setup network */
+	UI_SETUP_PHONE,		/* phone joined; choosing WiFi in the page       */
+	UI_SETUP_WIFI_OK,	/* joined home WiFi; ready to sign in            */
+	UI_SETUP_SIGNIN,	/* signing in to Claude                          */
+	UI_SETUP_DONE,		/* both done; handing over to the gauges         */
+	UI_SETUP_ERROR,		/* something failed (detail carries the reason)  */
+};
+
 void ui_setup_show(void);
 
-/* Progress/error text at the bottom of the setup screen. */
-void ui_setup_status(const char *msg);
+/* Advance the screen. `detail` is an optional short line (e.g. the network
+ * name, or an error) or NULL. Safe to call from any context -- the change is
+ * applied on the LVGL thread by ui_setup_service().
+ */
+void ui_setup_set_state(enum ui_setup_state state, const char *detail);
 
-/* Pump station-join updates onto the screen. Call from the main LVGL loop. */
+/* Pump pending state changes onto the screen. Call from the main LVGL loop. */
 void ui_setup_service(void);
 
 #endif /* UI_SETUP_H */
