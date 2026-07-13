@@ -1,35 +1,40 @@
 #ifndef PORTAL_H
 #define PORTAL_H
 
+#include <stddef.h>
+
 /*
- * Two-stage setup portal on the SoftAP.
+ * Two-phase setup portal. Each phase is its own tiny HTTP/1.1 server; the
+ * two never run at once, because the radio never runs AP and STA at once.
  *
- *   GET  /       -> WiFi page, or (once WiFi is up) the sign-in page
- *   POST /wifi   -> {ssid,psk}: the board connects (AP stays up via APSTA), then
- *                   the sign-in page is served -- so each POST blocks until its
- *                   step finishes and returns the next page. No JS polling.
- *   POST /token  -> {code}: the board exchanges the OAuth code, then the done
- *                   page is served and portal_run returns.
+ * Phase 1 (SoftAP + captive DNS):
+ *   GET  /      -> WiFi form (scanned networks + password)
+ *   POST /wifi  -> credentials are RETURNED to the caller after acking the
+ *                  browser ("watch the device screen"); the caller tears the
+ *                  AP down and attempts the join itself.
+ *   other       -> 302 to /   (captive-portal probes)
  *
- * The callbacks let main.c own the actual WiFi-connect and OAuth-exchange while
- * the portal owns the HTTP.
+ * Phase 2 (home LAN, no DNS games):
+ *   GET  /      -> sign-in page: a real link to the authorize URL (the phone
+ *                  has internet here) and a paste box for the code
+ *   POST /token -> sign_in() blocks (SNTP + PKCE exchange); success serves
+ *                  the done page and returns 0, failure re-serves the form.
  */
 
-struct portal_cb {
-	const char *authorize_url;			/* PKCE authorize URL for the link */
-	int (*connect_wifi)(const char *ssid, const char *psk);	/* 0 = connected */
-	int (*sign_in)(const char *code);			/* 0 = signed in */
-};
-
-/* Networks to offer, scanned BEFORE the AP comes up (scanning while the SoftAP
- * runs sees only a fraction). */
+/* Networks to offer, scanned BEFORE the AP comes up (scanning while the
+ * SoftAP runs sees only a fraction). */
 void portal_set_networks(char list[][33], int n);
 
-/* Serve until sign-in completes (returns 0) or the timeout elapses
- * (-ETIMEDOUT). */
-int portal_run(const struct portal_cb *cb, int timeout_s);
+/* Serve the WiFi form until credentials are POSTed. Fills ssid/psk and
+ * returns 0 after acking the browser; -ETIMEDOUT if nobody submits in time.
+ * err_msg (may be NULL) is shown on the form -- the previous attempt's
+ * failure reason. */
+int portal_run_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len,
+		    const char *err_msg, int timeout_s);
 
-/* Stations currently joined -- surfaced on the setup screen. */
-int portal_conn_count(void);
+/* Serve the sign-in page until sign_in() returns 0 (done page served,
+ * returns 0) or the timeout elapses (-ETIMEDOUT). */
+int portal_run_signin(const char *authorize_url,
+		      int (*sign_in)(const char *code), int timeout_s);
 
 #endif /* PORTAL_H */

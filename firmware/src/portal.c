@@ -33,10 +33,6 @@ static char req[REQ_MAX];
 static char body[1024];
 static char networks[SCAN_MAX][33];
 static int n_networks;
-static volatile int conn_count;
-static bool wifi_done;
-
-int portal_conn_count(void) { return conn_count; }
 
 void portal_set_networks(char list[][33], int n)
 {
@@ -84,6 +80,64 @@ static bool form_field(const char *b, const char *key, char *out, size_t olen)
 	return true;
 }
 
+/*
+ * Read a whole HTTP request -- headers AND body -- into buf.
+ *
+ * A single recv() is not enough: the AP hands a station one TCP segment at a
+ * time, so a form POST arrives as headers first and the "ssid=...&psk=..." body
+ * in a later segment. Reading once captured only the headers and left the body
+ * empty, which reached the driver as a blank SSID (-EINVAL, mislabelled "radio
+ * not ready"). Loop until the headers are in and Content-Length bytes of body
+ * have followed, or the peer goes idle (GET requests, which carry no body).
+ */
+static int recv_request(int sock, char *buf, size_t buflen)
+{
+	size_t total = 0;
+	int hdr_end = -1;
+	size_t content_len = 0;
+	int64_t deadline = k_uptime_get() + 3000;
+
+	while (total < buflen - 1 && k_uptime_get() < deadline) {
+		struct zsock_pollfd p = { .fd = sock, .events = ZSOCK_POLLIN };
+
+		if (zsock_poll(&p, 1, 500) <= 0) {
+			if (hdr_end >= 0) {
+				break;	/* headers in, nothing more coming */
+			}
+			continue;
+		}
+
+		int n = zsock_recv(sock, buf + total, buflen - 1 - total, 0);
+
+		if (n <= 0) {
+			break;
+		}
+		total += n;
+		buf[total] = '\0';
+
+		if (hdr_end < 0) {
+			char *e = strstr(buf, "\r\n\r\n");
+
+			if (e) {
+				hdr_end = (int)(e - buf) + 4;
+
+				char *cl = strstr(buf, "Content-Length:");
+
+				if (!cl) {
+					cl = strstr(buf, "content-length:");
+				}
+				if (cl) {
+					content_len = strtoul(cl + 15, NULL, 10);
+				}
+			}
+		}
+		if (hdr_end >= 0 && total >= (size_t)hdr_end + content_len) {
+			break;	/* full body received */
+		}
+	}
+	return (int)total;
+}
+
 /* Paced, chunked send -- see file header. */
 static int send_all(int sock, const char *buf, size_t len)
 {
@@ -117,28 +171,43 @@ static int send_all(int sock, const char *buf, size_t len)
 	"a.b{display:inline-block;color:#08130c;background:#2ecc71;text-decoration:none;padding:12px 16px;" \
 	"border-radius:10px;font-weight:700;font-size:15px}" \
 	"button{width:100%;margin-top:20px;padding:15px;border:0;border-radius:12px;background:#2ecc71;" \
-	"color:#08130c;font-size:16px;font-weight:700}.e{color:#e74c3c;font-size:13px;margin-top:8px}</style>"
+	"color:#08130c;font-size:16px;font-weight:700}.e{color:#e74c3c;font-size:13px;margin-top:8px}" \
+	".spin{display:none;position:fixed;inset:0;background:rgba(14,17,22,.94);z-index:9;" \
+	"align-items:center;justify-content:center;flex-direction:column}.spin.on{display:flex}" \
+	".ring{width:46px;height:46px;border:4px solid #272c34;border-top-color:#2ecc71;" \
+	"border-radius:50%;animation:r 1s linear infinite}@keyframes r{to{transform:rotate(360deg)}}" \
+	".spin p{margin-top:16px;color:#8a9199;font-size:14px}</style>"
 
 static void send_html(int sock, const char *body_html)
 {
-	static char page[2560];
-	int n = snprintf(page, sizeof(page),
+	/* Send the headers, then the body, as two writes -- rather than composing
+	 * them into one big scratch buffer. On a board with ~3 KB of DRAM to spare,
+	 * a 3 KB static compose buffer is memory we don't have; send_all already
+	 * paces the body in small chunks regardless. */
+	char hdr[128];
+	size_t blen = strlen(body_html);
+	int n = snprintf(hdr, sizeof(hdr),
 		"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
-		"Content-Length: %d\r\nConnection: close\r\n\r\n%s",
-		(int)strlen(body_html), body_html);
+		"Content-Length: %d\r\nConnection: close\r\n\r\n", (int)blen);
 
-	send_all(sock, page, n);
+	if (send_all(sock, hdr, n) < 0) {
+		return;
+	}
+	send_all(sock, body_html, blen);
 }
 
-static void wifi_page(int sock, bool err)
+static void wifi_page(int sock, const char *err)
 {
-	static char b[2048];
+	static char b[2432];
 	int n = snprintf(b, sizeof(b),
 		"<!doctype html><html><head><meta name=viewport "
 		"content='width=device-width,initial-scale=1'><title>Setup</title>" CSS
-		"</head><body><h1>Connect to WiFi</h1>"
+		"</head><body>"
+		"<div class=spin id=sp><div class=ring></div><p>Connecting to your network\xE2\x80\xA6</p></div>"
+		"<h1>Connect to WiFi</h1>"
 		"<p class=s>Step 1 of 2 &middot; choose your network</p>"
-		"<form method=POST action=/wifi><div class=c>"
+		"<form method=POST action=/wifi "
+		"onsubmit=\"document.getElementById('sp').className='spin on'\"><div class=c>"
 		"<label>Network</label><select name=ssid>");
 
 	if (n_networks == 0) {
@@ -148,31 +217,55 @@ static void wifi_page(int sock, bool err)
 		n += snprintf(b + n, sizeof(b) - n, "<option>%s</option>", networks[i]);
 	}
 	n += snprintf(b + n, sizeof(b) - n,
-		"</select><label>or type a hidden network</label>"
-		"<input name=ssid2 autocapitalize=off autocorrect=off placeholder='network name'>"
+		"</select>"
 		"<label>Password</label><input name=psk type=password placeholder='WiFi password'>"
-		"%s</div><button type=submit>Connect</button></form></body></html>",
-		err ? "<div class=e>Couldn't connect. Check the password and try again.</div>" : "");
+		"%s%s%s</div><button type=submit>Connect</button></form></body></html>",
+		err ? "<div class=e>" : "", err ? err : "", err ? "</div>" : "");
 
 	send_html(sock, b);
 }
 
 static void signin_page(int sock, const char *authorize_url, bool err)
 {
-	static char b[1536];
+	static char b[2432];
 
 	snprintf(b, sizeof(b),
 		"<!doctype html><html><head><meta name=viewport "
 		"content='width=device-width,initial-scale=1'><title>Sign in</title>" CSS
-		"</head><body><h1>Sign in to Claude</h1>"
+		"</head><body>"
+		"<div class=spin id=sp><div class=ring></div><p>Signing in\xE2\x80\xA6</p></div>"
+		"<h1>Sign in to Claude</h1>"
 		"<p class=s>Step 2 of 2 &middot; WiFi connected \xE2\x9C\x93</p>"
-		"<div class=c><a class=b href='%s' target=_blank rel=noreferrer>Sign in to Anthropic</a>"
-		"<form method=POST action=/token>"
-		"<label>Paste the code you get back</label>"
+		"<div class=c>"
+		"<a class=b href='%s' target=_blank rel=noreferrer>Sign in to Anthropic</a>"
+		"<p style='margin:12px 0 0;font-size:15px;color:#e6e8eb'>"
+		"Sign in, copy the code Anthropic gives you, and paste it below.</p>"
+		"<form method=POST action=/token "
+		"onsubmit=\"document.getElementById('sp').className='spin on'\">"
+		"<label>Login code</label>"
 		"<textarea name=code rows=3 placeholder='paste login code here'></textarea>"
 		"%s<button type=submit>Finish setup</button></form></div></body></html>",
 		authorize_url,
-		err ? "<div class=e>That code didn't work. Try signing in again.</div>" : "");
+		err ? "<div class=e>That code didn't work. Sign in again and retry.</div>" : "");
+
+	send_html(sock, b);
+}
+
+/* Served in reply to POST /wifi, right before the AP is torn down. */
+static void ack_page(int sock, const char *ssid)
+{
+	static char b[1024];
+
+	snprintf(b, sizeof(b),
+		"<!doctype html><html><head><meta name=viewport "
+		"content='width=device-width,initial-scale=1'><title>Connecting</title>" CSS
+		"</head><body><h1>Joining %s\xE2\x80\xA6</h1>"
+		"<p class=s>This setup network is shutting down now.</p>"
+		"<div class=c><p style='margin:0;font-size:15px'>"
+		"Watch the device screen. When it shows a new QR code, the device is on "
+		"your WiFi \xE2\x80\x94 scan that code to finish signing in.<br><br>"
+		"If joining fails, reconnect to the setup network to try again."
+		"</p></div></body></html>", ssid);
 
 	send_html(sock, b);
 }
@@ -189,15 +282,14 @@ static void done_page(int sock)
 
 static void redirect(int sock)
 {
-	char r[128];
-	int n = snprintf(r, sizeof(r),
-		"HTTP/1.1 302 Found\r\nLocation: http://%s/\r\n"
-		"Content-Length: 0\r\nConnection: close\r\n\r\n", AP_IP);
+	static const char r[] =
+		"HTTP/1.1 302 Found\r\nLocation: /\r\n"
+		"Content-Length: 0\r\nConnection: close\r\n\r\n";
 
-	send_all(sock, r, n);
+	send_all(sock, r, sizeof(r) - 1);
 }
 
-int portal_run(const struct portal_cb *cb, int timeout_s)
+static int server_open(void)
 {
 	int srv = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
@@ -219,12 +311,13 @@ int portal_run(const struct portal_cb *cb, int timeout_s)
 		return -errno;
 	}
 	zsock_fcntl(srv, F_SETFL, O_NONBLOCK);
+	return srv;
+}
 
-	wifi_done = false;
-	printk("[portal] listening on http://%s\n", AP_IP);
-
-	int64_t deadline = k_uptime_get() + (int64_t)timeout_s * 1000;
-
+/* Poll+accept until a client connects or the deadline passes. Pumps the
+ * caller's idle hook (LVGL) while waiting. Returns the fd or -ETIMEDOUT. */
+static int wait_client(int srv, int64_t deadline)
+{
 	while (k_uptime_get() < deadline) {
 		struct zsock_pollfd pfd = { .fd = srv, .events = ZSOCK_POLLIN };
 
@@ -237,48 +330,104 @@ int portal_run(const struct portal_cb *cb, int timeout_s)
 		socklen_t clen = sizeof(ca);
 		int c = zsock_accept(srv, (struct sockaddr *)&ca, &clen);
 
-		if (c < 0) {
-			k_msleep(20);
-			continue;
+		if (c >= 0) {
+			return c;
 		}
-		conn_count++;
+		k_msleep(20);
+	}
+	return -ETIMEDOUT;
+}
 
-		struct zsock_pollfd cp = { .fd = c, .events = ZSOCK_POLLIN };
+int portal_run_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len,
+		    const char *err_msg, int timeout_s)
+{
+	int srv = server_open();
 
-		zsock_poll(&cp, 1, 2000);
-		int n = zsock_recv(c, req, sizeof(req) - 1, 0);
+	if (srv < 0) {
+		return srv;
+	}
+	printk("[portal] wifi phase on http://%s\n", AP_IP);
+
+	int64_t deadline = k_uptime_get() + (int64_t)timeout_s * 1000;
+
+	for (;;) {
+		int c = wait_client(srv, deadline);
+
+		if (c < 0) {
+			zsock_close(srv);
+			return -ETIMEDOUT;
+		}
+
+		int n = recv_request(c, req, sizeof(req));
 
 		if (n <= 0) {
 			zsock_close(c);
 			continue;
 		}
-		req[n] = '\0';
 
 		if (strncmp(req, "POST /wifi", 10) == 0) {
 			char *b = strstr(req, "\r\n\r\n");
-			struct portal_result { char ssid[33], psk[65]; } r = {0};
-			char typed[33] = "";
 
+			ssid[0] = '\0';
+			psk[0] = '\0';
 			if (b) {
 				strncpy(body, b + 4, sizeof(body) - 1);
 				body[sizeof(body) - 1] = '\0';
-				form_field(body, "ssid", r.ssid, sizeof(r.ssid));
-				form_field(body, "psk", r.psk, sizeof(r.psk));
-				if (form_field(body, "ssid2", typed, sizeof(typed)) && typed[0]) {
-					strncpy(r.ssid, typed, sizeof(r.ssid) - 1);
-				}
+				form_field(body, "ssid", ssid, ssid_len);
+				form_field(body, "psk", psk, psk_len);
 			}
-			printk("[portal] wifi ssid=\"%s\" psk=%s\n", r.ssid,
-			       r.psk[0] ? "(set)" : "(empty)");
+			printk("[portal] wifi ssid=\"%s\" psk=%s\n", ssid,
+			       psk[0] ? "(set)" : "(empty)");
 
-			int rc = cb->connect_wifi(r.ssid, r.psk);
-
-			if (rc == 0) {
-				wifi_done = true;
-				signin_page(c, cb->authorize_url, false);
-			} else {
-				wifi_page(c, true);
+			if (!ssid[0]) {
+				wifi_page(c, "no network selected");
+				zsock_close(c);
+				continue;
 			}
+
+			/* Ack, give the paced send time to reach the phone,
+			 * then hand the credentials back -- the caller tears
+			 * the AP down and attempts the join. */
+			ack_page(c, ssid);
+			k_msleep(2000);
+			zsock_close(c);
+			zsock_close(srv);
+			return 0;
+		}
+
+		if (strncmp(req, "GET / ", 6) == 0) {
+			wifi_page(c, err_msg);
+		} else {
+			redirect(c);	/* captive-portal probes and the rest */
+		}
+		zsock_close(c);
+	}
+}
+
+int portal_run_signin(const char *authorize_url,
+		      int (*sign_in)(const char *code), int timeout_s)
+{
+	int srv = server_open();
+
+	if (srv < 0) {
+		return srv;
+	}
+	printk("[portal] signin phase up on the LAN\n");
+
+	int64_t deadline = k_uptime_get() + (int64_t)timeout_s * 1000;
+	bool err = false;
+
+	for (;;) {
+		int c = wait_client(srv, deadline);
+
+		if (c < 0) {
+			zsock_close(srv);
+			return -ETIMEDOUT;
+		}
+
+		int n = recv_request(c, req, sizeof(req));
+
+		if (n <= 0) {
 			zsock_close(c);
 			continue;
 		}
@@ -295,34 +444,23 @@ int portal_run(const struct portal_cb *cb, int timeout_s)
 			}
 			printk("[portal] token code=%s\n", code[0] ? "(set)" : "(empty)");
 
-			int rc = cb->sign_in(code);
-
-			if (rc == 0) {
+			if (sign_in(code) == 0) {
 				done_page(c);
 				zsock_close(c);
 				zsock_close(srv);
 				return 0;
 			}
-			signin_page(c, cb->authorize_url, true);
+			err = true;
+			signin_page(c, authorize_url, true);
 			zsock_close(c);
 			continue;
 		}
 
 		if (strncmp(req, "GET / ", 6) == 0) {
-			if (wifi_done) {
-				signin_page(c, cb->authorize_url, false);
-			} else {
-				wifi_page(c, false);
-			}
-			zsock_close(c);
-			continue;
+			signin_page(c, authorize_url, err);
+		} else {
+			redirect(c);
 		}
-
-		/* captive-portal probe or anything else -> bounce to / */
-		redirect(c);
 		zsock_close(c);
 	}
-
-	zsock_close(srv);
-	return -ETIMEDOUT;
 }
