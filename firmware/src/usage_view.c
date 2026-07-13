@@ -31,8 +31,11 @@ struct gauge {
 static struct gauge session, weekly;
 static lv_obj_t *dot;
 static lv_obj_t *hint;
+static lv_obj_t *age_lbl;
 static lv_obj_t *overlay;	/* full-screen "no data" takeover */
 static bool built;
+static bool have_data;		/* distinguishes "no host yet" from "host lost" */
+static int32_t age_s = -1;	/* seconds since the last usage message */
 
 static lv_color_t severity(double pct)
 {
@@ -119,6 +122,15 @@ void usage_view_init(void)
 	lv_obj_set_style_text_color(hint, COL_DIM, 0);
 	lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
 
+	/* Data age. The countdowns tick locally and keep moving even when the
+	 * host is dead, so they look alive regardless; this is the only figure
+	 * on screen that reveals whether the numbers are actually fresh.
+	 */
+	age_lbl = lv_label_create(scr);
+	lv_label_set_text(age_lbl, "never");
+	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
+	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30, 8);
+
 	build_gauge(&session, scr, -78, "SESSION 5h");
 	build_gauge(&weekly, scr, 78, "WEEKLY 7d");
 
@@ -181,7 +193,17 @@ void usage_view_update(double session_pct, int32_t session_resets_in_s,
 	weekly.resets_in_s = weekly_resets_in_s;
 	render_countdown(&weekly);
 
+	have_data = true;
+	age_s = 0;
 	usage_view_set_status(USAGE_STATUS_OK);
+}
+
+static void render_age(void)
+{
+	char buf[FMT_COUNTDOWN_MAX];
+
+	fmt_age(age_s, buf, sizeof(buf));
+	lv_label_set_text(age_lbl, buf);
 }
 
 void usage_view_tick_1s(void)
@@ -197,6 +219,11 @@ void usage_view_tick_1s(void)
 			gs[i]->resets_in_s--;
 			render_countdown(gs[i]);
 		}
+	}
+
+	if (age_s >= 0) {
+		age_s++;
+		render_age();
 	}
 }
 
@@ -223,17 +250,30 @@ void usage_view_set_status(enum usage_status status)
 		text = "error - showing last known";
 		break;
 	default:
-		c = COL_GREY;
-		text = "";
+		/* Two very different situations wear the same status. */
+		if (have_data) {
+			/* The host died but we still hold real numbers. Keep them
+			 * on screen -- they were true once -- but stop implying
+			 * they are live. The countdowns go on ticking by
+			 * themselves, so without this the board would look
+			 * perfectly healthy while showing a frozen snapshot.
+			 */
+			c = COL_RED;
+			text = "HOST LOST - numbers are frozen";
+		} else {
+			c = COL_GREY;
+			text = "";
+		}
 		break;
 	}
 	lv_obj_set_style_bg_color(dot, c, 0);
 	lv_label_set_text(hint, text);
 
-	/* Full takeover only when disconnected. Stale and error still have real
-	 * numbers behind them, and hiding those would lose information.
+	/* The full takeover is only for "we never had any data". Every other
+	 * state has real numbers behind it, and covering those up would throw
+	 * away information the user wants.
 	 */
-	if (status == USAGE_STATUS_DISCONNECTED) {
+	if (status == USAGE_STATUS_DISCONNECTED && !have_data) {
 		lv_obj_clear_flag(overlay, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_move_foreground(overlay);
 	} else {

@@ -50,6 +50,17 @@ def welcome(app: str, app_ver: str) -> dict:
     return {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver}
 
 
+def pong() -> dict:
+    """Answer to the board's ping.
+
+    Liveness has to run both ways. Usage is only pushed every 300 s, so with
+    no answer to the board's 10 s ping the board cannot distinguish a host
+    that is merely between polls from one that has died -- and would sit
+    there showing a green dot over numbers that stopped updating.
+    """
+    return {"t": "pong", "v": VERSION}
+
+
 def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           session_resets_in_s=-1, weekly_resets_in_s=-1) -> dict:
     """A usage message.

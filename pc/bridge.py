@@ -23,6 +23,9 @@ class Bridge:
             self.poll_once()             # push current data immediately
         elif t == "ping":
             self._last_ping = self._now()
+            # Free: never fetch here. The usage endpoint is aggressively
+            # rate-limited and this fires every 10 s.
+            self._write(protocol.pong())
         # unknown types ignored
 
     def board_alive(self) -> bool:

@@ -19,4 +19,12 @@
  */
 void fmt_countdown(int32_t secs, char *buf, size_t buflen);
 
+/*
+ * How long ago the data arrived: "12s ago", "3m ago", "1h 20m ago".
+ * This is the one number on screen that cannot lie -- the countdowns keep
+ * ticking locally even when the host is dead, so age is what tells the user
+ * whether they are looking at live data or a corpse.
+ */
+void fmt_age(int32_t secs, char *buf, size_t buflen);
+
 #endif /* FMT_H */

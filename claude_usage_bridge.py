@@ -43,9 +43,20 @@ def main():
 
     while True:  # reconnect loop
         try:
-            # Open WITHOUT asserting DTR/RTS: on the ESP32-C6 native USB-Serial-JTAG
-            # the default open sequence toggles those lines and resets the chip into
-            # ROM download mode, which silences our firmware. Configure-then-open.
+            # Open WITHOUT asserting DTR/RTS, then deliberately reset the board.
+            #
+            # On the CYD, DTR drives GPIO0 and RTS drives EN through the CH340's
+            # auto-reset circuit. Opening a tty on macOS momentarily toggles both,
+            # so an open landing at the wrong moment (e.g. right after esptool's
+            # own reset, while the board is still coming up) can latch GPIO0 low
+            # and boot it into ROM download mode -- where it sits mute forever and
+            # looks, very convincingly, like dead firmware.
+            #
+            # Configure-then-open keeps both lines de-asserted, and the explicit
+            # RTS pulse below then reboots the board with GPIO0 held HIGH, so it
+            # always comes up in run mode. It also means we reliably catch the
+            # board's boot-time `hello` and can push usage immediately, instead of
+            # waiting up to 300 s for the next poll.
             ser = serial.Serial()
             ser.port = port
             ser.baudrate = args.baud
@@ -53,6 +64,12 @@ def main():
             ser.dtr = False
             ser.rts = False
             ser.open()
+            ser.dtr = False          # GPIO0 HIGH -> boot the app, not the ROM loader
+            ser.rts = True           # EN LOW  -> hold in reset
+            time.sleep(0.15)
+            ser.rts = False          # EN HIGH -> release; board boots
+            time.sleep(0.3)
+            ser.reset_input_buffer()
         except Exception as e:
             print(f"[bridge] open {port} failed: {e}; retrying in 3s", file=sys.stderr)
             time.sleep(3)

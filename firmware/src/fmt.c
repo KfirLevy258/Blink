@@ -28,3 +28,21 @@ void fmt_countdown(int32_t secs, char *buf, size_t buflen)
 		snprintf(buf, buflen, "%dm %02ds", mins, rem);
 	}
 }
+
+void fmt_age(int32_t secs, char *buf, size_t buflen)
+{
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	if (secs < 0) {
+		snprintf(buf, buflen, "never");
+		return;
+	}
+	if (secs < 60) {
+		snprintf(buf, buflen, "%ds ago", secs);
+	} else if (secs < 3600) {
+		snprintf(buf, buflen, "%dm ago", secs / 60);
+	} else {
+		snprintf(buf, buflen, "%dh %dm ago", secs / 3600, (secs % 3600) / 60);
+	}
+}

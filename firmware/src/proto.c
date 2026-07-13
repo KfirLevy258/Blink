@@ -13,8 +13,12 @@
 
 #define PROTO_VERSION 1
 #define PING_INTERVAL_MS 10000
-/* Daemon polls every 300 s; allow a comfortable margin before declaring it gone. */
-#define HOST_TIMEOUT_MS 420000
+/*
+ * The daemon answers every ping with a pong, so silence means it is genuinely
+ * gone -- not merely between its 300 s usage polls. Three missed pings (10 s
+ * apart) is enough to be sure without being twitchy about one dropped line.
+ */
+#define HOST_TIMEOUT_MS 35000
 #define LINE_MAX 512
 #define RX_RING_SIZE 1024
 
@@ -119,6 +123,8 @@ static void dispatch(const char *json)
 		usage_view_update(sp, (int32_t)ss, wp, (int32_t)ws);
 		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)\n",
 		       sp, (int)ss, wp, (int)ws);
+	} else if (strcmp(type, "pong") == 0) {
+		/* Liveness only: last_host_ms was already stamped above. */
 	} else if (strcmp(type, "welcome") == 0) {
 		printk("[proto] host connected\n");
 	} else if (strcmp(type, "status") == 0) {

@@ -36,6 +36,28 @@ class TestBridge(unittest.TestCase):
         self.clock.t += 31
         self.assertFalse(self.bridge.board_alive())
 
+    def test_ping_is_answered_with_pong(self):
+        """Liveness must be bidirectional. The daemon only pushes usage every
+        300 s, so without an answer to the board's 10 s ping the board cannot
+        tell 'host alive, not due to poll yet' from 'host died' -- and would
+        keep showing a green dot over frozen numbers."""
+        self.bridge.on_message({"t": "ping", "v": 1, "up_ms": 5})
+        self.assertEqual([m["t"] for m in self.sent], ["pong"])
+
+    def test_pong_costs_no_api_call(self):
+        """A pong must be free. The usage endpoint is aggressively rate-limited,
+        so answering a 10 s ping by fetching would get us 429'd."""
+        calls = []
+
+        def counting_fetch():
+            calls.append(1)
+            return protocol.usage(1.0, "R", 2.0, "R", [])
+
+        b = Bridge(write_msg=self.sent.append, fetch_usage=counting_fetch,
+                   now=self.clock.now)
+        b.on_message({"t": "ping", "v": 1, "up_ms": 5})
+        self.assertEqual(calls, [])
+
     def test_unknown_type_ignored(self):
         self.bridge.on_message({"t": "wat", "v": 1})
         self.assertEqual(self.sent, [])
