@@ -17,7 +17,21 @@ const char *net_wifi_ap_ssid(void);
 /* The AP as a WIFI: QR payload, so one scan joins the network. */
 const char *net_wifi_ap_qr(void);
 
+/* Called (from the net mgmt context) when a station associates to our AP and
+ * when one leaves. Lets the setup screen show "phone connected" without a
+ * serial cable -- which matters because opening the USB serial port resets
+ * this board, disrupting the very connection we are trying to observe.
+ */
+typedef void (*net_wifi_sta_cb)(int station_count);
+void net_wifi_set_sta_cb(net_wifi_sta_cb cb);
+
 int net_wifi_init(void);
+
+/* Number of DHCP leases currently granted on the AP. Lets the setup screen show
+ * whether the board actually handed the phone an address, vs the phone merely
+ * associating -- diagnosable without a serial cable (which resets this board).
+ */
+int net_wifi_ap_lease_count(void);
 
 /* Join a network as a station. Returns 0 once an IPv4 address is held, or a
  * negative errno on failure/timeout.

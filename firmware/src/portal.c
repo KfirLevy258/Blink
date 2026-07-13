@@ -22,6 +22,11 @@
 #include "portal.h"
 #include "net_wifi.h"
 
+/* Pumped while the portal waits, so the caller can keep LVGL alive and update
+ * the setup screen. Weak: overridden in main.c. Default does nothing.
+ */
+__weak void portal_idle_hook(void) { }
+
 #define PORT 80
 #define REQ_MAX 2048
 #define SCAN_MAX 12
@@ -30,6 +35,13 @@ static char req[REQ_MAX];
 static char body[1024];
 static char networks[SCAN_MAX][33];
 static int n_networks;
+static volatile int conn_count;
+static volatile int last_rx;
+static volatile int last_tx;
+
+int portal_conn_count(void) { return conn_count; }
+int portal_last_rx(void) { return last_rx; }
+int portal_last_tx(void) { return last_tx; }
 
 void portal_set_networks(char list[][33], int n)
 {
@@ -81,7 +93,7 @@ static bool form_field(const char *b, const char *key, char *out, size_t olen)
 	return true;
 }
 
-static void send_all(int sock, const char *buf, size_t len)
+static int send_all(int sock, const char *buf, size_t len)
 {
 	size_t off = 0;
 
@@ -89,54 +101,50 @@ static void send_all(int sock, const char *buf, size_t len)
 		int n = zsock_send(sock, buf + off, len - off, 0);
 
 		if (n <= 0) {
-			return;
+			last_tx = off;   /* record how far we got before failing */
+			return -1;
 		}
 		off += n;
 	}
+	last_tx += off;
+	return off;
 }
 
 static void send_page(int sock, const char *authorize_url)
 {
-	char head[128];
-	int hlen = snprintf(head, sizeof(head),
-			    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-			    "Connection: close\r\n\r\n");
+	ARG_UNUSED(authorize_url);
+	last_tx = 0;
 
-	send_all(sock, head, hlen);
-
-	static char page[2560];
-	int n = snprintf(page, sizeof(page),
+	/*
+	 * The ENTIRE response (headers + HTML) must fit in ONE TCP segment.
+	 * This ESP32 AP delivers the first ~1280-byte segment to a station and
+	 * then the send stalls -- a bigger page arrives truncated and the phone
+	 * waits forever for the rest. So this is deliberately tiny: no CSS, no
+	 * scanned-network dropdown (a typed SSID is more reliable anyway, and the
+	 * scan only ever found one or two). Keep it well under 1200 bytes, and
+	 * send it in a single write.
+	 */
+	static char page[1024];
+	int blen = snprintf(page, sizeof(page),
+		"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+		"Content-Length: %d\r\nConnection: close\r\n\r\n%s", 0, "");
+	/* Two-pass so Content-Length is exact: build body first. */
+	static char body[768];
+	int n = snprintf(body, sizeof(body),
 		"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-		"<style>body{font-family:-apple-system,system-ui,sans-serif;background:#0e1116;"
-		"color:#e6e8eb;margin:0;padding:20px;line-height:1.5}"
-		"h1{font-size:20px}label{display:block;margin:14px 0 4px;color:#8a9199;font-size:13px}"
-		"input,select,textarea{width:100%%;padding:10px;border-radius:8px;border:1px solid #272c34;"
-		"background:#161a20;color:#e6e8eb;font-size:16px;box-sizing:border-box}"
-		"button{margin-top:18px;width:100%%;padding:12px;border:0;border-radius:8px;"
-		"background:#2ecc71;color:#08130c;font-size:16px;font-weight:600}"
-		"a{color:#2ecc71}.s{color:#8a9199;font-size:13px}</style>"
-		"<h1>Claude usage display</h1>"
+		"<title>Claude setup</title>"
+		"<h2>Claude usage setup</h2>"
 		"<form method=POST action=/save>"
-		"<label>WiFi network</label><select name=ssid>");
+		"WiFi name<br><input name=ssid2 style=width:95%% autocapitalize=off autocorrect=off><br><br>"
+		"WiFi password<br><input name=psk type=password style=width:95%%><br><br>"
+		"Login code<br><textarea name=code rows=3 style=width:95%%></textarea><br><br>"
+		"<button type=submit>Save and connect</button></form>");
 
-	for (int i = 0; i < n_networks && n < (int)sizeof(page) - 256; i++) {
-		n += snprintf(page + n, sizeof(page) - n,
-			      "<option>%s</option>", networks[i]);
-	}
+	blen = snprintf(page, sizeof(page),
+		"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+		"Content-Length: %d\r\nConnection: close\r\n\r\n%s", n, body);
 
-	n += snprintf(page + n, sizeof(page) - n,
-		"</select>"
-		"<label>...or type the network name (if it is not listed)</label>"
-		"<input name=ssid2 placeholder='exact network name'>"
-		"<label>WiFi password</label><input name=psk type=password>"
-		"<label>Anthropic login code</label>"
-		"<p class=s>Open <a href='%s' target=_blank>this link</a> (or scan the QR on the "
-		"device), sign in, then paste the code it gives you below.</p>"
-		"<textarea name=code rows=3></textarea>"
-		"<button type=submit>Save and connect</button></form>",
-		authorize_url);
-
-	send_all(sock, page, n);
+	send_all(sock, page, blen);
 }
 
 static void send_done(int sock, const char *ssid)
@@ -197,8 +205,9 @@ int portal_run(const char *authorize_url, struct portal_result *out, int timeout
 	while (k_uptime_get() < deadline) {
 		struct zsock_pollfd pfd = { .fd = srv, .events = ZSOCK_POLLIN };
 
-		if (zsock_poll(&pfd, 1, 200) <= 0) {
-			continue;	/* nothing waiting; re-check the deadline */
+		if (zsock_poll(&pfd, 1, 100) <= 0) {
+			portal_idle_hook();	/* keep LVGL + screen status alive */
+			continue;
 		}
 
 		struct sockaddr_in ca;
@@ -209,7 +218,8 @@ int portal_run(const char *authorize_url, struct portal_result *out, int timeout
 			k_msleep(20);
 			continue;
 		}
-		printk("[portal] conn accepted\n");
+		conn_count++;
+		printk("[portal] conn accepted (%d)\n", conn_count);
 
 		/* Give the request a moment to arrive, then read what is there.
 		 * The client socket is left blocking, but recv finds the queued
@@ -221,6 +231,7 @@ int portal_run(const char *authorize_url, struct portal_result *out, int timeout
 
 		int n = zsock_recv(c, req, sizeof(req) - 1, 0);
 
+		last_rx = n;
 		if (n <= 0) {
 			zsock_close(c);
 			continue;

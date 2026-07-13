@@ -13,6 +13,7 @@
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/dhcpv4_server.h>
 #include <zephyr/net/dhcpv4.h>
+#include <zephyr/net/net_if.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/sys/printk.h>
 #include <stdio.h>
@@ -20,6 +21,8 @@
 
 #include "net_wifi.h"
 
+static net_wifi_sta_cb sta_cb;
+static int sta_count;
 static char ap_ssid[33];
 static char ap_qr[64];
 
@@ -111,7 +114,20 @@ static void wifi_evt(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 		k_sem_give(&sem_ap_up);
 		break;
 	case NET_EVENT_WIFI_AP_STA_CONNECTED:
-		printk("[wifi] a station joined the AP\n");
+		sta_count++;
+		printk("[wifi] station joined AP (now %d)\n", sta_count);
+		if (sta_cb) {
+			sta_cb(sta_count);
+		}
+		break;
+	case NET_EVENT_WIFI_AP_STA_DISCONNECTED:
+		if (sta_count > 0) {
+			sta_count--;
+		}
+		printk("[wifi] station left AP (now %d)\n", sta_count);
+		if (sta_cb) {
+			sta_cb(sta_count);
+		}
 		break;
 	default:
 		break;
@@ -130,6 +146,11 @@ static void ipv4_evt(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 	}
 }
 
+void net_wifi_set_sta_cb(net_wifi_sta_cb cb)
+{
+	sta_cb = cb;
+}
+
 int net_wifi_init(void)
 {
 	net_mgmt_init_event_callback(&wifi_cb, wifi_evt,
@@ -138,7 +159,8 @@ int net_wifi_init(void)
 				     NET_EVENT_WIFI_SCAN_RESULT |
 				     NET_EVENT_WIFI_SCAN_DONE |
 				     NET_EVENT_WIFI_AP_ENABLE_RESULT |
-				     NET_EVENT_WIFI_AP_STA_CONNECTED);
+				     NET_EVENT_WIFI_AP_STA_CONNECTED |
+				     NET_EVENT_WIFI_AP_STA_DISCONNECTED);
 	net_mgmt_add_event_callback(&wifi_cb);
 
 	net_mgmt_init_event_callback(&ipv4_cb, ipv4_evt, NET_EVENT_IPV4_ADDR_ADD);
@@ -303,6 +325,25 @@ int net_wifi_stop_ap(void)
 		return -ENODEV;
 	}
 	return net_mgmt(NET_REQUEST_WIFI_AP_DISABLE, iface, NULL, 0);
+}
+
+static void count_lease_cb(struct net_if *iface, struct dhcpv4_addr_slot *lease,
+			   void *user_data)
+{
+	ARG_UNUSED(iface); ARG_UNUSED(lease);
+	(*(int *)user_data)++;
+}
+
+int net_wifi_ap_lease_count(void)
+{
+	struct net_if *ap = net_if_get_wifi_sap();
+	int n = 0;
+
+	if (!ap) {
+		return 0;
+	}
+	net_dhcpv4_server_foreach_lease(ap, count_lease_cb, &n);
+	return n;
 }
 
 bool net_wifi_has_ip(void)

@@ -12,6 +12,15 @@
 #include "ui_setup.h"
 #include "dns_hijack.h"
 
+/* Called from portal_run's wait loop: keep the display alive and reflect
+ * station join/leave onto the setup screen during provisioning.
+ */
+void portal_idle_hook(void)
+{
+	ui_setup_service();
+	lv_timer_handler();
+}
+
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 static const struct gpio_dt_spec backlight =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(backlight), gpios);

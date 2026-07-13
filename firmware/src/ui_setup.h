@@ -15,4 +15,7 @@ void ui_setup_show(void);
 /* Progress/error text at the bottom of the setup screen. */
 void ui_setup_status(const char *msg);
 
+/* Pump station-join updates onto the screen. Call from the main LVGL loop. */
+void ui_setup_service(void);
+
 #endif /* UI_SETUP_H */
