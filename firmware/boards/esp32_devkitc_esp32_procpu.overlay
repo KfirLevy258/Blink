@@ -1,0 +1,84 @@
+/*
+ * ESP32-2432S028 "Cheap Yellow Display" (CYD).
+ *
+ * No upstream Zephyr board exists for this hardware, so we build against the
+ * stock esp32_devkitc and describe the board's wiring here.
+ *
+ * Display is on SPI2/HSPI: MISO 12, MOSI 13, SCLK 14, CS 15, DC 2, backlight 21.
+ * TFT reset is NOT wired to a GPIO on this board (it is tied high), so there is
+ * deliberately no reset-gpios property anywhere below.
+ *
+ * Note the pinctrl group below omits SPIM2_CSEL_GPIO15: chip-select must be a
+ * plain GPIO, not the SPI peripheral's hardware CS. The panel requires CS to be
+ * held low across a command byte *and* its following data phase (DC changes in
+ * between), which hardware CS cannot do -- it de-asserts after every transfer.
+ */
+#include <zephyr/dt-bindings/pinctrl/esp-pinctrl-common.h>
+#include <dt-bindings/pinctrl/esp32-pinctrl.h>
+#include <zephyr/dt-bindings/pinctrl/esp32-gpio-sigmap.h>
+#include <zephyr/dt-bindings/mipi_dbi/mipi_dbi.h>
+
+/ {
+	chosen {
+		zephyr,display = &ili9341;
+	};
+
+	/* Backlight is a plain active-high GPIO. */
+	leds {
+		compatible = "gpio-leds";
+		backlight: backlight {
+			gpios = <&gpio0 21 GPIO_ACTIVE_HIGH>;
+			label = "TFT backlight";
+		};
+	};
+
+	/*
+	 * The panel does not drive MISO on this board -- reads return zeros, so
+	 * the controller cannot be interrogated and the link is write-only.
+	 */
+	mipi_dbi {
+		compatible = "zephyr,mipi-dbi-spi";
+		dc-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		spi-dev = <&spi2>;
+		write-only;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ili9341: ili9341@0 {
+			compatible = "ilitek,ili9341";
+			reg = <0>;
+			mipi-max-frequency = <25000000>;
+			mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
+			pixel-format = <0>;   /* RGB565 */
+			/* Panel is portrait-native (240x320) but the board is mounted
+			 * landscape, so rotate to present 320x240.
+			 */
+			rotation = <90>;
+			width = <240>;
+			height = <320>;
+		};
+	};
+};
+
+&pinctrl {
+	spim2_cyd: spim2_cyd {
+		group1 {
+			pinmux = <SPIM2_MISO_GPIO12>,
+				 <SPIM2_SCLK_GPIO14>;
+		};
+
+		group2 {
+			pinmux = <SPIM2_MOSI_GPIO13>;
+			output-low;
+		};
+	};
+};
+
+&spi2 {
+	status = "okay";
+	pinctrl-0 = <&spim2_cyd>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpio0 15 GPIO_ACTIVE_LOW>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+};

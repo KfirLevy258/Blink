@@ -6,4 +6,5 @@ target_sources(app PRIVATE
 	src/main.c
 	src/proto.c
 	src/msg_parse.c
-	src/usage_view.c)
+	src/usage_view.c
+	src/panel_probe.c)
