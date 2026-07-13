@@ -8,7 +8,7 @@ int main(void)
 
 	while (1) {
 		proto_service();
-		k_sleep(K_MSEC(20));
+		k_sleep(K_MSEC(10));
 	}
 	return 0;
 }

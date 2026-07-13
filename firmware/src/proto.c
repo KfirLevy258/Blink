@@ -3,6 +3,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/ring_buffer.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -13,6 +14,7 @@
 #define PROTO_VERSION 1
 #define PING_INTERVAL_MS 10000
 #define LINE_MAX 512
+#define RX_RING_SIZE 1024
 
 static const struct device *const console_dev =
 	DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
@@ -20,6 +22,37 @@ static const struct device *const console_dev =
 static char line[LINE_MAX];
 static size_t line_len;
 static int64_t last_ping_ms;
+
+/*
+ * RX is interrupt-driven, not polled. On a real UART at 115200 baud the 128-byte
+ * hardware FIFO holds only ~11 ms of traffic, so any main-loop stall longer than
+ * that (an LVGL frame, a TLS handshake) would silently truncate an inbound line.
+ * The ISR drains the FIFO into this ring buffer; proto_service() consumes it at
+ * whatever pace the main loop happens to run.
+ */
+RING_BUF_DECLARE(rx_ring, RX_RING_SIZE);
+static uint32_t rx_dropped;
+
+static void uart_isr(const struct device *dev, void *user_data)
+{
+	ARG_UNUSED(user_data);
+
+	if (!uart_irq_update(dev)) {
+		return;
+	}
+
+	while (uart_irq_rx_ready(dev)) {
+		uint8_t buf[64];
+		int n = uart_fifo_read(dev, buf, sizeof(buf));
+
+		if (n <= 0) {
+			break;
+		}
+		if (ring_buf_put(&rx_ring, buf, n) < (uint32_t)n) {
+			rx_dropped++;
+		}
+	}
+}
 
 static void emit(const char *json)
 {
@@ -44,7 +77,7 @@ static void send_hello(void)
 
 	char buf[160];
 	snprintf(buf, sizeof(buf),
-		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"esp32c6\","
+		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
 		 "\"board_id\":\"%s\",\"fw\":\"0.2.0\",\"reset\":\"0x%x\"}",
 		 PROTO_VERSION, idhex, cause);
 	emit(buf);
@@ -84,9 +117,9 @@ static void dispatch(const char *json)
 
 static void drain_rx(void)
 {
-	unsigned char c;
+	uint8_t c;
 
-	while (console_dev && uart_poll_in(console_dev, &c) == 0) {
+	while (ring_buf_get(&rx_ring, &c, 1) == 1) {
 		if (c == '\n' || c == '\r') {
 			if (line_len > 0) {
 				line[line_len] = '\0';
@@ -99,11 +132,22 @@ static void drain_rx(void)
 			line_len = 0; /* overflow: drop the line */
 		}
 	}
+
+	if (rx_dropped) {
+		printk("[proto] rx ring overflow, dropped %u bytes\n", rx_dropped);
+		rx_dropped = 0;
+	}
 }
 
 void proto_init(void)
 {
 	line_len = 0;
+
+	if (console_dev && device_is_ready(console_dev)) {
+		uart_irq_callback_user_data_set(console_dev, uart_isr, NULL);
+		uart_irq_rx_enable(console_dev);
+	}
+
 	send_hello();
 	last_ping_ms = k_uptime_get();
 }
