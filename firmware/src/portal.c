@@ -101,8 +101,13 @@ static int recv_request(int sock, char *buf, size_t buflen)
 		struct zsock_pollfd p = { .fd = sock, .events = ZSOCK_POLLIN };
 
 		if (zsock_poll(&p, 1, 500) <= 0) {
-			if (hdr_end >= 0) {
-				break;	/* headers in, nothing more coming */
+			/* Idle. If we know no (more) body is owed, we're done;
+			 * with Content-Length still unmet, keep waiting -- the
+			 * body segment can lag the headers on a busy AP. The
+			 * outer deadline still bounds the total wait. */
+			if (hdr_end >= 0 &&
+			    total >= (size_t)hdr_end + content_len) {
+				break;
 			}
 			continue;
 		}
@@ -190,16 +195,26 @@ static void send_html(int sock, const char *body_html)
 		"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
 		"Content-Length: %d\r\nConnection: close\r\n\r\n", (int)blen);
 
+	if (n < 0) {
+		return;
+	}
+	n = MIN(n, (int)sizeof(hdr) - 1);
+
 	if (send_all(sock, hdr, n) < 0) {
 		return;
 	}
 	send_all(sock, body_html, blen);
 }
 
+/* One shared compose buffer for every page -- the server is single-threaded,
+ * so pages are never built concurrently. 3 KB covers the worst case (the
+ * sign-in page with a full-length 512-byte authorize URL) and replaces three
+ * per-page statics that together cost more DRAM. */
+static char page[3072];
+
 static void wifi_page(int sock, const char *err)
 {
-	static char b[2432];
-	int n = snprintf(b, sizeof(b),
+	int n = snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
 		"content='width=device-width,initial-scale=1'><title>Setup</title>" CSS
 		"</head><body>"
@@ -211,25 +226,23 @@ static void wifi_page(int sock, const char *err)
 		"<label>Network</label><select name=ssid>");
 
 	if (n_networks == 0) {
-		n += snprintf(b + n, sizeof(b) - n, "<option value=''>(none found)</option>");
+		n += snprintf(page + n, sizeof(page) - n, "<option value=''>(none found)</option>");
 	}
-	for (int i = 0; i < n_networks && n < (int)sizeof(b) - 300; i++) {
-		n += snprintf(b + n, sizeof(b) - n, "<option>%s</option>", networks[i]);
+	for (int i = 0; i < n_networks && n < (int)sizeof(page) - 300; i++) {
+		n += snprintf(page + n, sizeof(page) - n, "<option>%s</option>", networks[i]);
 	}
-	n += snprintf(b + n, sizeof(b) - n,
+	n += snprintf(page + n, sizeof(page) - n,
 		"</select>"
 		"<label>Password</label><input name=psk type=password placeholder='WiFi password'>"
 		"%s%s%s</div><button type=submit>Connect</button></form></body></html>",
 		err ? "<div class=e>" : "", err ? err : "", err ? "</div>" : "");
 
-	send_html(sock, b);
+	send_html(sock, page);
 }
 
 static void signin_page(int sock, const char *authorize_url, bool err)
 {
-	static char b[2432];
-
-	snprintf(b, sizeof(b),
+	snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
 		"content='width=device-width,initial-scale=1'><title>Sign in</title>" CSS
 		"</head><body>"
@@ -248,15 +261,13 @@ static void signin_page(int sock, const char *authorize_url, bool err)
 		authorize_url,
 		err ? "<div class=e>That code didn't work. Sign in again and retry.</div>" : "");
 
-	send_html(sock, b);
+	send_html(sock, page);
 }
 
 /* Served in reply to POST /wifi, right before the AP is torn down. */
 static void ack_page(int sock, const char *ssid)
 {
-	static char b[1024];
-
-	snprintf(b, sizeof(b),
+	snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
 		"content='width=device-width,initial-scale=1'><title>Connecting</title>" CSS
 		"</head><body><h1>Joining %s\xE2\x80\xA6</h1>"
@@ -267,7 +278,7 @@ static void ack_page(int sock, const char *ssid)
 		"If joining fails, reconnect to the setup network to try again."
 		"</p></div></body></html>", ssid);
 
-	send_html(sock, b);
+	send_html(sock, page);
 }
 
 static void done_page(int sock)
