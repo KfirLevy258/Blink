@@ -130,8 +130,8 @@ int oauth_gen_verifier(char *out, size_t outlen)
 }
 
 /* --- TLS POST to the token endpoint, JSON body, JSON reply --- */
-static uint8_t http_recv_buf[1536];
-static char tok_body[2048];
+static uint8_t http_recv_buf[1024];
+static char tok_body[1280];  /* token JSON is small */
 static size_t tok_body_len;
 static int tok_status;
 

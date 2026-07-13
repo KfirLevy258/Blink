@@ -14,6 +14,9 @@ enum usage_status {
 /* Build the screen. Call once, before any update. */
 void usage_view_init(void);
 
+/* Delete the gauge screen (before showing the setup screen). */
+void usage_view_deinit(void);
+
 /*
  * New numbers arrived.
  *

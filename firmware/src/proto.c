@@ -175,6 +175,11 @@ void proto_init(void)
 	last_ping_ms = k_uptime_get();
 }
 
+bool proto_host_seen(void)
+{
+	return host_seen;
+}
+
 void proto_service(void)
 {
 	drain_rx();

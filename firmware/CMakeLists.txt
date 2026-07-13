@@ -14,4 +14,6 @@ target_sources(app PRIVATE
 	src/ui_setup.c
 	src/dns_hijack.c
 	src/oauth.c
-	src/usage_parse.c)
+	src/usage_parse.c
+	src/usage_client.c
+	src/net_time.c)

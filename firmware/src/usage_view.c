@@ -93,12 +93,30 @@ static void render_countdown(struct gauge *g)
 	lv_label_set_text(g->countdown, buf);
 }
 
+static lv_obj_t *gauge_scr;
+
+void usage_view_deinit(void)
+{
+	/* Free the gauge screen so it never coexists with the setup screen --
+	 * with no PSRAM the LVGL heap cannot hold both. */
+	built = false;
+	if (gauge_scr) {
+		lv_obj_del(gauge_scr);
+		gauge_scr = NULL;
+	}
+}
+
 void usage_view_init(void)
 {
-	lv_obj_t *scr = lv_scr_act();
+	gauge_scr = lv_obj_create(NULL);
+	lv_obj_t *scr = gauge_scr;
 
+	lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_set_style_pad_all(scr, 0, 0);
+	lv_obj_set_style_border_width(scr, 0, 0);
 	lv_obj_set_style_bg_color(scr, COL_BG, 0);
 	lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+	lv_scr_load(scr);
 
 	lv_obj_t *title = lv_label_create(scr);
 
