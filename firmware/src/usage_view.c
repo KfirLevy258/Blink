@@ -30,6 +30,7 @@ struct gauge {
 
 static struct gauge session, weekly;
 static lv_obj_t *dot;
+static lv_obj_t *hint;
 static bool built;
 
 static lv_color_t severity(double pct)
@@ -108,6 +109,12 @@ void usage_view_init(void)
 	lv_obj_set_style_bg_color(dot, COL_GREY, 0);
 	lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -12, 8);
 
+	/* An idle board holding "--%" looks broken. Say what it is waiting for. */
+	hint = lv_label_create(scr);
+	lv_label_set_text(hint, "waiting for host...");
+	lv_obj_set_style_text_color(hint, COL_DIM, 0);
+	lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+
 	build_gauge(&session, scr, -78, "SESSION 5h");
 	build_gauge(&weekly, scr, 78, "WEEKLY 7d");
 
@@ -163,20 +170,26 @@ void usage_view_set_status(enum usage_status status)
 	}
 
 	lv_color_t c;
+	const char *text;
 
 	switch (status) {
 	case USAGE_STATUS_OK:
 		c = COL_GREEN;
+		text = "";
 		break;
 	case USAGE_STATUS_STALE:
 		c = COL_AMBER;
+		text = "rate-limited - showing last known";
 		break;
 	case USAGE_STATUS_ERROR:
 		c = COL_RED;
+		text = "error - showing last known";
 		break;
 	default:
 		c = COL_GREY;
+		text = "waiting for host...";
 		break;
 	}
 	lv_obj_set_style_bg_color(dot, c, 0);
+	lv_label_set_text(hint, text);
 }

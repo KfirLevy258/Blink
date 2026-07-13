@@ -13,6 +13,8 @@
 
 #define PROTO_VERSION 1
 #define PING_INTERVAL_MS 10000
+/* Daemon polls every 300 s; allow a comfortable margin before declaring it gone. */
+#define HOST_TIMEOUT_MS 420000
 #define LINE_MAX 512
 #define RX_RING_SIZE 1024
 
@@ -22,6 +24,8 @@ static const struct device *const console_dev =
 static char line[LINE_MAX];
 static size_t line_len;
 static int64_t last_ping_ms;
+static int64_t last_host_ms;
+static bool host_seen;
 
 /*
  * RX is interrupt-driven, not polled. On a real UART at 115200 baud the 128-byte
@@ -97,6 +101,9 @@ static void dispatch(const char *json)
 	if (!msg_get_str(json, "t", type, sizeof(type))) {
 		return; /* not a protocol line */
 	}
+
+	last_host_ms = k_uptime_get();
+	host_seen = true;
 	if (strcmp(type, "usage") == 0) {
 		double sp = 0, wp = 0;
 		/* Remaining seconds, not the absolute resets_at timestamps: the
@@ -170,5 +177,15 @@ void proto_service(void)
 	if (now - last_ping_ms >= PING_INTERVAL_MS) {
 		send_ping();
 		last_ping_ms = now;
+	}
+
+	/* If the host goes away, say so. Holding a green dot over numbers that
+	 * stopped updating is worse than admitting we are disconnected. The
+	 * daemon polls every 300 s, so the window must be comfortably longer.
+	 */
+	if (host_seen && (now - last_host_ms) > HOST_TIMEOUT_MS) {
+		printk("[proto] host went away\n");
+		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+		host_seen = false;
 	}
 }
