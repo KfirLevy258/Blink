@@ -9,4 +9,7 @@ target_sources(app PRIVATE
 	src/usage_view.c
 	src/fmt.c
 	src/cfg_store.c
-	src/net_wifi.c)
+	src/net_wifi.c
+	src/portal.c
+	src/ui_setup.c
+	src/dns_hijack.c)

@@ -23,6 +23,18 @@
 		zephyr,display = &ili9341;
 	};
 
+	/*
+	 * A SECOND WiFi instance, which becomes the soft-AP interface.
+	 * Without it the driver has only one net_if: the AP broadcasts and a
+	 * phone can associate, but nothing answers its DHCP request and it
+	 * spins forever on "obtaining IP address". Matches Zephyr's own
+	 * samples/net/wifi/apsta_mode overlay.
+	 */
+	wifi_ap: wifi_ap {
+		compatible = "espressif,esp32-wifi";
+		status = "okay";
+	};
+
 	/* Backlight is a plain active-high GPIO. */
 	leds {
 		compatible = "gpio-leds";

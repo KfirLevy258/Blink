@@ -3,8 +3,19 @@
 
 #include <stdbool.h>
 
-/* The SSID the board advertises while being set up. */
-#define SETUP_AP_SSID "claude-usage-setup"
+#define AP_IP "192.168.4.1"
+#define AP_DHCP_POOL_START "192.168.4.10"
+
+/*
+ * The SSID this board advertises while being set up, e.g. "claude-usage-5ead4c".
+ * Derived from the chip's MAC so that several of these devices in one room stay
+ * distinguishable -- a fixed name would be ambiguous the moment you build a
+ * second one. Stable across reboots.
+ */
+const char *net_wifi_ap_ssid(void);
+
+/* The AP as a WIFI: QR payload, so one scan joins the network. */
+const char *net_wifi_ap_qr(void);
 
 int net_wifi_init(void);
 
