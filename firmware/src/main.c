@@ -6,6 +6,8 @@
 
 #include "proto.h"
 #include "usage_view.h"
+#include "cfg_store.h"
+#include "net_wifi.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 static const struct gpio_dt_spec backlight =
@@ -30,6 +32,16 @@ int main(void)
 	if (gpio_is_ready_dt(&backlight)) {
 		gpio_pin_configure_dt(&backlight, GPIO_OUTPUT_ACTIVE);
 	}
+
+	cfg_init();
+	net_wifi_init();
+
+#ifdef TEST_AP
+	/* TEMPORARY: prove SoftAP works on real hardware before building the
+	 * provisioning portal on top of it.
+	 */
+	net_wifi_start_ap();
+#endif
 
 	proto_init();
 

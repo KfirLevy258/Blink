@@ -7,4 +7,6 @@ target_sources(app PRIVATE
 	src/proto.c
 	src/msg_parse.c
 	src/usage_view.c
-	src/fmt.c)
+	src/fmt.c
+	src/cfg_store.c
+	src/net_wifi.c)
