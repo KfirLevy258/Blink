@@ -2,15 +2,18 @@
 #define UI_SETUP_H
 
 /*
- * The provisioning screen ("boarding pass"): a two-step checklist on the left
- * that ticks green as setup advances, and a QR on the right that a phone scans
- * to join. Splits WiFi and account sign-in into two visible stages.
+ * The provisioning screen ("boarding pass"): a three-step checklist on the
+ * left that ticks green as setup advances, and a QR panel on the right that a
+ * phone scans to join. The panel QR shows the join-AP code first, then the
+ * sign-in page URL once WiFi is up -- the boarding pass stays on screen for
+ * the whole flow.
  */
 
 enum ui_setup_state {
 	UI_SETUP_WAIT = 0,	/* waiting for a phone to join the setup network */
 	UI_SETUP_PHONE,		/* phone joined; choosing WiFi in the page       */
-	UI_SETUP_WIFI_OK,	/* joined home WiFi; ready to sign in            */
+	UI_SETUP_CONNECTING,	/* AP torn down; joining the home network        */
+	UI_SETUP_WIFI_OK,	/* on home WiFi; detail = the sign-in page URL   */
 	UI_SETUP_SIGNIN,	/* signing in to Claude                          */
 	UI_SETUP_DONE,		/* both done; handing over to the gauges         */
 	UI_SETUP_ERROR,		/* something failed (detail carries the reason)  */

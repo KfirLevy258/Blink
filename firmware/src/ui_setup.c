@@ -39,12 +39,21 @@ static struct step steps[3];
 static lv_obj_t *qr;
 static lv_obj_t *cap;
 static lv_obj_t *pill;
+static lv_obj_t *brand;
+static lv_obj_t *panel;
 
 static volatile int pending = -1;
 static char pending_detail[40];
 
+static int applied = UI_SETUP_WAIT;	/* last state apply() ran */
+
 static void on_station(int count)
 {
+	/* Once the join attempt starts the AP is gone; stragglers must not
+	 * drag the screen back to the boarding-pass join steps. */
+	if (applied >= UI_SETUP_CONNECTING) {
+		return;
+	}
 	if (count > 0 && pending < UI_SETUP_PHONE) {
 		pending = UI_SETUP_PHONE;
 	} else if (count == 0 && (pending < 0 || pending <= UI_SETUP_PHONE)) {
@@ -120,7 +129,7 @@ void ui_setup_show(void)
 	lv_obj_set_style_pad_all(scr, 0, 0);
 	lv_obj_set_style_border_width(scr, 0, 0);
 
-	lv_obj_t *brand = lv_label_create(scr);
+	brand = lv_label_create(scr);
 
 	lv_label_set_text(brand, "CLAUDE USAGE");
 	lv_obj_set_style_text_color(brand, COL_DIM, 0);
@@ -132,7 +141,7 @@ void ui_setup_show(void)
 	build_step(&steps[2], scr, "3", "Sign in", "Claude account", 166);
 
 	/* QR panel -- darker ground, green seam on the left edge. */
-	lv_obj_t *panel = lv_obj_create(scr);
+	panel = lv_obj_create(scr);
 
 	lv_obj_set_size(panel, 132, 240);
 	lv_obj_align(panel, LV_ALIGN_TOP_RIGHT, 0, 0);
@@ -188,6 +197,8 @@ void ui_setup_show(void)
 
 static void apply(enum ui_setup_state st, const char *detail)
 {
+	applied = (int)st;
+
 	switch (st) {
 	case UI_SETUP_WAIT:
 		step_active(&steps[0]);  lv_label_set_text(steps[0].numlbl, "1");
@@ -198,7 +209,9 @@ static void apply(enum ui_setup_state st, const char *detail)
 		lv_obj_clear_flag(qr, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_clear_flag(cap, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_add_flag(pill, LV_OBJ_FLAG_HIDDEN);
+		lv_qrcode_update(qr, net_wifi_ap_qr(), strlen(net_wifi_ap_qr()));
 		lv_label_set_text(cap, "scan to\nbegin");
+		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_PHONE:
 		step_done(&steps[0]);
@@ -207,31 +220,38 @@ static void apply(enum ui_setup_state st, const char *detail)
 		step_active(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
 		lv_label_set_text(cap, "page open\non phone");
 		break;
+	case UI_SETUP_CONNECTING:
+		step_done(&steps[0]);
+		step_active(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
+		lv_label_set_text(steps[1].title, "Connect WiFi");
+		lv_label_set_text(steps[1].sub, detail ? detail : "joining\xE2\x80\xA6");
+		lv_obj_add_flag(qr, LV_OBJ_FLAG_HIDDEN);
+		lv_label_set_text(cap, "joining\nnetwork\xE2\x80\xA6");
+		lv_obj_set_style_text_color(cap, COL_DIM, 0);
+		break;
 	case UI_SETUP_WIFI_OK:
+		/* detail = the sign-in URL; it becomes the QR payload. */
 		step_done(&steps[0]);
 		step_done(&steps[1]);
-		/* Not the SSID -- just confirm the network is up. */
 		lv_label_set_text(steps[1].title, "WiFi connected");
-		lv_label_set_text(steps[1].sub, "");
 		step_active(&steps[2]); lv_label_set_text(steps[2].numlbl, "3");
-		lv_label_set_text(steps[2].sub, "finish on phone");
-		lv_label_set_text(cap, "sign in\non phone");
+		if (detail && detail[0]) {
+			lv_qrcode_update(qr, detail, strlen(detail));
+		}
+		lv_obj_clear_flag(qr, LV_OBJ_FLAG_HIDDEN);
+		lv_label_set_text(cap, detail ? detail : "scan to\nsign in");
+		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_SIGNIN:
-		step_done(&steps[0]);
-		step_done(&steps[1]);
-		step_active(&steps[2]); lv_label_set_text(steps[2].numlbl, "3");
-		lv_label_set_text(steps[2].sub, "signing in...");
+		lv_label_set_text(cap, "signing\nin\xE2\x80\xA6");
+		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_DONE:
-		step_done(&steps[0]);
-		step_done(&steps[1]);
 		step_done(&steps[2]);
-		lv_label_set_text(steps[2].title, "Signed in");
-		lv_label_set_text(steps[2].sub, "all set");
 		lv_obj_add_flag(qr, LV_OBJ_FLAG_HIDDEN);
-		lv_obj_add_flag(cap, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_clear_flag(pill, LV_OBJ_FLAG_HIDDEN);
+		lv_label_set_text(cap, "all set");
+		lv_obj_set_style_text_color(cap, COL_GREEN, 0);
 		break;
 	case UI_SETUP_ERROR:
 		lv_label_set_text(cap, detail ? detail : "error");
