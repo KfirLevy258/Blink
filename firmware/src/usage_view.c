@@ -31,6 +31,7 @@ struct gauge {
 static struct gauge session, weekly;
 static lv_obj_t *dot;
 static lv_obj_t *hint;
+static lv_obj_t *overlay;	/* full-screen "no data" takeover */
 static bool built;
 
 static lv_color_t severity(double pct)
@@ -109,14 +110,50 @@ void usage_view_init(void)
 	lv_obj_set_style_bg_color(dot, COL_GREY, 0);
 	lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -12, 8);
 
-	/* An idle board holding "--%" looks broken. Say what it is waiting for. */
+	/* Carries the amber/red explanation. Empty when all is well: the gauges
+	 * still hold real (if stale) numbers in those states, so they stay visible
+	 * rather than being covered up.
+	 */
 	hint = lv_label_create(scr);
-	lv_label_set_text(hint, "waiting for host...");
+	lv_label_set_text(hint, "");
 	lv_obj_set_style_text_color(hint, COL_DIM, 0);
 	lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
 
 	build_gauge(&session, scr, -78, "SESSION 5h");
 	build_gauge(&weekly, scr, 78, "WEEKLY 7d");
+
+	/* With no host there is genuinely nothing to show, so take over the whole
+	 * screen. A board sitting quietly at "--%" reads as broken; this says what
+	 * it is actually waiting for. Created last, so it sits above the gauges.
+	 */
+	overlay = lv_obj_create(scr);
+	lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(overlay, COL_BG, 0);
+	lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(overlay, 0, 0);
+	lv_obj_set_style_radius(overlay, 0, 0);
+	lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_center(overlay);
+
+	lv_obj_t *big = lv_label_create(overlay);
+
+	lv_label_set_text(big, "WAITING FOR HOST");
+	lv_obj_set_style_text_color(big, COL_TEXT, 0);
+	lv_obj_set_style_text_font(big, &lv_font_montserrat_20, 0);
+	lv_obj_align(big, LV_ALIGN_CENTER, 0, -18);
+
+	lv_obj_t *sub = lv_label_create(overlay);
+
+	lv_label_set_text(sub, "start the bridge daemon on the PC");
+	lv_obj_set_style_text_color(sub, COL_DIM, 0);
+	lv_obj_align(sub, LV_ALIGN_CENTER, 0, 10);
+
+	lv_obj_t *spin = lv_spinner_create(overlay);
+
+	lv_obj_set_size(spin, 28, 28);
+	lv_obj_align(spin, LV_ALIGN_CENTER, 0, 52);
+	lv_obj_set_style_arc_color(spin, COL_TRACK, LV_PART_MAIN);
+	lv_obj_set_style_arc_color(spin, COL_GREEN, LV_PART_INDICATOR);
 
 	built = true;
 }
@@ -187,9 +224,19 @@ void usage_view_set_status(enum usage_status status)
 		break;
 	default:
 		c = COL_GREY;
-		text = "waiting for host...";
+		text = "";
 		break;
 	}
 	lv_obj_set_style_bg_color(dot, c, 0);
 	lv_label_set_text(hint, text);
+
+	/* Full takeover only when disconnected. Stale and error still have real
+	 * numbers behind them, and hiding those would lose information.
+	 */
+	if (status == USAGE_STATUS_DISCONNECTED) {
+		lv_obj_clear_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_move_foreground(overlay);
+	} else {
+		lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+	}
 }
