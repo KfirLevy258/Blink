@@ -7,4 +7,4 @@ target_sources(app PRIVATE
 	src/proto.c
 	src/msg_parse.c
 	src/usage_view.c
-	src/panel_probe.c)
+	src/fmt.c)

@@ -99,18 +99,28 @@ static void dispatch(const char *json)
 	}
 	if (strcmp(type, "usage") == 0) {
 		double sp = 0, wp = 0;
-		char sr[40] = "", wr[40] = "";
+		/* Remaining seconds, not the absolute resets_at timestamps: the
+		 * board has no wall clock when tethered over USB, so the daemon
+		 * does the subtraction. -1 means unknown.
+		 */
+		double ss = -1, ws = -1;
+
 		msg_get_double(json, "session_pct", &sp);
 		msg_get_double(json, "weekly_pct", &wp);
-		msg_get_str(json, "session_resets_at", sr, sizeof(sr));
-		msg_get_str(json, "weekly_resets_at", wr, sizeof(wr));
-		usage_view_update(sp, sr, wp, wr);
+		msg_get_double(json, "session_resets_in_s", &ss);
+		msg_get_double(json, "weekly_resets_in_s", &ws);
+		usage_view_update(sp, (int32_t)ss, wp, (int32_t)ws);
+		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)\n",
+		       sp, (int)ss, wp, (int)ws);
 	} else if (strcmp(type, "welcome") == 0) {
 		printk("[proto] host connected\n");
 	} else if (strcmp(type, "status") == 0) {
 		char st[24] = "";
+
 		msg_get_str(json, "state", st, sizeof(st));
 		printk("[proto] host status: %s\n", st);
+		usage_view_set_status(strcmp(st, "rate_limited") == 0 ?
+				      USAGE_STATUS_STALE : USAGE_STATUS_ERROR);
 	}
 	/* unknown types ignored */
 }

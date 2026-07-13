@@ -1,6 +1,7 @@
 """Read the Claude OAuth token and fetch/map usage. Token-read logic mirrors
 claude_usage_test.py; mapping converts the Anthropic JSON to a flat usage message."""
 import json
+from datetime import datetime, timezone
 import os
 import subprocess
 import urllib.request
@@ -15,8 +16,26 @@ def _window(raw, key):
     return float(w.get("utilization", 0.0)), w.get("resets_at", "")
 
 
-def map_usage(raw: dict) -> dict:
+def _secs_until(iso: str, now: datetime) -> int:
+    """Seconds from `now` until the ISO-8601 instant `iso`. -1 if unknown.
+
+    -1 rather than 0 for missing/malformed input: 0 would render as "resets
+    now", which is a confident lie. -1 lets the display say "--".
+    """
+    if not iso:
+        return -1
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return -1
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return max(0, int((t - now).total_seconds()))
+
+
+def map_usage(raw: dict, now: datetime = None) -> dict:
     """Convert a /api/oauth/usage JSON dict to a 'usage' protocol message."""
+    now = now or datetime.now(timezone.utc)
     session_pct, session_reset = _window(raw, "five_hour")
     weekly_pct, weekly_reset = _window(raw, "seven_day")
     models = []
@@ -24,7 +43,11 @@ def map_usage(raw: dict) -> dict:
         w = raw.get(key)
         if isinstance(w, dict) and "utilization" in w:
             models.append({"name": name, "weekly_pct": float(w["utilization"])})
-    return protocol.usage(session_pct, session_reset, weekly_pct, weekly_reset, models)
+    return protocol.usage(
+        session_pct, session_reset, weekly_pct, weekly_reset, models,
+        session_resets_in_s=_secs_until(session_reset, now),
+        weekly_resets_in_s=_secs_until(weekly_reset, now),
+    )
 
 
 def read_token():

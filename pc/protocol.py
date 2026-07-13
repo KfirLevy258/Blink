@@ -50,11 +50,22 @@ def welcome(app: str, app_ver: str) -> dict:
     return {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver}
 
 
-def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models) -> dict:
+def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
+          session_resets_in_s=-1, weekly_resets_in_s=-1) -> dict:
+    """A usage message.
+
+    The *_resets_in_s fields carry the remaining seconds. The board has no
+    wall clock when tethered over USB, so it cannot derive a countdown from
+    the absolute resets_at timestamps; it ticks these down locally instead.
+    -1 means unknown. The absolute timestamps are kept for readability and
+    for any consumer that does know the time.
+    """
     return {
         "t": "usage", "v": VERSION,
         "session_pct": session_pct, "session_resets_at": session_resets_at,
+        "session_resets_in_s": session_resets_in_s,
         "weekly_pct": weekly_pct, "weekly_resets_at": weekly_resets_at,
+        "weekly_resets_in_s": weekly_resets_in_s,
         "models": models,
     }
 
