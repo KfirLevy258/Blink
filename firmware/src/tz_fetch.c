@@ -68,9 +68,11 @@ int tz_fetch_offset(int32_t *offset_min)
 	zsock_close(sock);
 	buf[len] = '\0';
 
+	/* Parse only the body: headers are not ours to grep for JSON keys. */
+	const char *body = strstr(buf, "\r\n\r\n");
 	double off_s;
 
-	if (!msg_get_double(buf, "offset", &off_s)) {
+	if (body == NULL || !msg_get_double(body, "offset", &off_s)) {
 		printk("[tz] no offset in reply\n");
 		return -EBADMSG;
 	}
