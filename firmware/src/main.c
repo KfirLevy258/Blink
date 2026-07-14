@@ -240,7 +240,7 @@ static void run_standalone(void)
 
 	/* Clock: last-known offset immediately (survives API outages), the
 	 * live answer replaces it below. */
-	int32_t tz_min;
+	int32_t tz_min = 0;
 
 	if (cfg_get_tz(&tz_min)) {
 		net_time_set_offset(tz_min);
@@ -275,20 +275,6 @@ static void run_standalone(void)
 			}
 		}
 
-		if (now >= next_tz) {
-			int32_t om;
-
-			if (tz_fetch_offset(&om) == 0) {
-				net_time_set_offset(om);
-				if (!cfg_get_tz(&tz_min) || tz_min != om) {
-					cfg_set_tz(om);	/* new last-known */
-				}
-				next_tz = now + 86400LL * 1000;	/* daily: tracks DST */
-			} else {
-				next_tz = now + 3600LL * 1000;	/* retry hourly */
-			}
-		}
-
 		if (now >= next_poll) {
 			struct usage_data d;
 			int status;
@@ -312,6 +298,20 @@ static void run_standalone(void)
 			} else {
 				usage_view_set_status(USAGE_STATUS_ERROR);
 				next_poll = now + 60 * 1000;
+			}
+		}
+
+		if (now >= next_tz) {
+			int32_t om;
+
+			if (tz_fetch_offset(&om) == 0) {
+				net_time_set_offset(om);
+				if (!cfg_get_tz(&tz_min) || tz_min != om) {
+					cfg_set_tz(om);	/* new last-known */
+				}
+				next_tz = now + 86400LL * 1000;	/* daily: tracks DST */
+			} else {
+				next_tz = now + 3600LL * 1000;	/* retry hourly */
 			}
 		}
 

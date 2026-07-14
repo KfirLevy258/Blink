@@ -325,7 +325,7 @@ void usage_view_set_clock(int hh, int mm)
 		return;
 	}
 
-	char buf[8];
+	char buf[16];
 
 	snprintf(buf, sizeof(buf), "%02d:%02d", hh, mm);
 	lv_label_set_text(clock_lbl, buf);

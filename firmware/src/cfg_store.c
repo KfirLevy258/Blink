@@ -184,9 +184,14 @@ int cfg_clear_token(void)
 
 int cfg_clear_wifi(void)
 {
+	int rc;
+
 	memset(cfg.ssid, 0, sizeof(cfg.ssid));
 	memset(cfg.psk, 0, sizeof(cfg.psk));
-	settings_delete(KEY_SSID);
+	rc = settings_delete(KEY_SSID);
+	if (rc) {
+		return rc;
+	}
 	return settings_delete(KEY_PSK);
 }
 

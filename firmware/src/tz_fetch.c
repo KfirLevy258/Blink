@@ -76,6 +76,13 @@ int tz_fetch_offset(int32_t *offset_min)
 		printk("[tz] no offset in reply\n");
 		return -EBADMSG;
 	}
+	/* Real offsets are within +/-14 h. The transport is plain HTTP, so a
+	 * tampered or garbage value (1e300, nan) must not reach the int cast
+	 * or NVS. */
+	if (!(off_s >= -840.0 * 60 && off_s <= 840.0 * 60)) {
+		printk("[tz] offset out of range\n");
+		return -EBADMSG;
+	}
 	*offset_min = (int32_t)(off_s / 60.0);
 	printk("[tz] utc offset %d min\n", (int)*offset_min);
 	return 0;

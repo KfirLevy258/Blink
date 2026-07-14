@@ -16,7 +16,7 @@
 #define PING_INTERVAL_MS 10000
 /*
  * The daemon answers every ping with a pong, so silence means it is genuinely
- * gone -- not merely between its 300 s usage polls. Three missed pings (10 s
+ * gone -- not merely between its 60 s usage polls. Three missed pings (10 s
  * apart) is enough to be sure without being twitchy about one dropped line.
  */
 #define HOST_TIMEOUT_MS 35000
@@ -128,9 +128,12 @@ static void dispatch(const char *json)
 		double epoch = 0, off = 0;
 
 		if (msg_get_double(json, "epoch", &epoch) &&
-		    msg_get_double(json, "utc_offset_min", &off)) {
+		    msg_get_double(json, "utc_offset_min", &off) &&
+		    epoch > 0 && epoch < 4102444800.0 &&	/* < year 2100 */
+		    off >= -840 && off <= 840) {
 			net_time_set_manual((int64_t)epoch);
 			net_time_set_offset((int32_t)off);
+			printk("[proto] host time synced\n");
 		}
 	} else if (strcmp(type, "pong") == 0) {
 		/* Liveness only: last_host_ms was already stamped above. */
@@ -201,7 +204,7 @@ void proto_service(void)
 
 	/* If the host goes away, say so. Holding a green dot over numbers that
 	 * stopped updating is worse than admitting we are disconnected. The
-	 * daemon polls every 300 s, so the window must be comfortably longer.
+	 * daemon polls every 60 s, so the window must be comfortably longer.
 	 */
 	if (host_seen && (now - last_host_ms) > HOST_TIMEOUT_MS) {
 		printk("[proto] host went away\n");
