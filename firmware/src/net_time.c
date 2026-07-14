@@ -21,6 +21,9 @@ static bool have_time;
 static int64_t sync_uptime_ms;
 static int64_t sync_unix_s;
 
+static bool have_offset;
+static int32_t offset_min;
+
 int net_time_sync(int timeout_s)
 {
 	struct sntp_time t;
@@ -50,6 +53,35 @@ bool net_time_valid(void)
 static int64_t now_unix(void)
 {
 	return sync_unix_s + (k_uptime_get() - sync_uptime_ms) / 1000;
+}
+
+void net_time_set_manual(int64_t unix_s)
+{
+	sync_unix_s = unix_s;
+	sync_uptime_ms = k_uptime_get();
+	have_time = true;
+}
+
+void net_time_set_offset(int32_t om)
+{
+	offset_min = om;
+	have_offset = true;
+}
+
+bool net_time_local(int *hh, int *mm)
+{
+	if (!have_time || !have_offset) {
+		return false;
+	}
+
+	int64_t sec_of_day = (now_unix() + (int64_t)offset_min * 60) % 86400;
+
+	if (sec_of_day < 0) {
+		sec_of_day += 86400;	/* western offsets near midnight */
+	}
+	*hh = (int)(sec_of_day / 3600);
+	*mm = (int)((sec_of_day % 3600) / 60);
+	return true;
 }
 
 /* Parse an unsigned decimal at *p, advancing past it. -1 if no digits. */
