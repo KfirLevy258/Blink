@@ -228,11 +228,16 @@ static void wifi_page(int sock, const char *err)
 	if (n_networks == 0) {
 		n += snprintf(page + n, sizeof(page) - n, "<option value=''>(none found)</option>");
 	}
-	for (int i = 0; i < n_networks && n < (int)sizeof(page) - 300; i++) {
+	for (int i = 0; i < n_networks && n < (int)sizeof(page) - 600; i++) {
 		n += snprintf(page + n, sizeof(page) - n, "<option>%s</option>", networks[i]);
 	}
+	/* The typed field is the escape hatch when the boot's scan came up
+	 * empty (it does, bimodally, on some reboots) and for hidden SSIDs;
+	 * a non-empty typed name overrides the dropdown. */
 	n += snprintf(page + n, sizeof(page) - n,
 		"</select>"
+		"<label>or type a network name</label>"
+		"<input name=ssid2 autocapitalize=off autocorrect=off placeholder='network name'>"
 		"<label>Password</label><input name=psk type=password placeholder='WiFi password'>"
 		"%s%s%s</div><button type=submit>Connect</button></form></body></html>",
 		err ? "<div class=e>" : "", err ? err : "", err ? "</div>" : "");
@@ -382,10 +387,17 @@ int portal_run_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len,
 			ssid[0] = '\0';
 			psk[0] = '\0';
 			if (b) {
+				char typed[33] = "";
+
 				strncpy(body, b + 4, sizeof(body) - 1);
 				body[sizeof(body) - 1] = '\0';
 				form_field(body, "ssid", ssid, ssid_len);
 				form_field(body, "psk", psk, psk_len);
+				if (form_field(body, "ssid2", typed, sizeof(typed)) &&
+				    typed[0]) {
+					strncpy(ssid, typed, ssid_len - 1);
+					ssid[ssid_len - 1] = '\0';
+				}
 			}
 			printk("[portal] wifi ssid=\"%s\" psk=%s\n", ssid,
 			       psk[0] ? "(set)" : "(empty)");
