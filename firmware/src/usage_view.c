@@ -32,6 +32,7 @@ static struct gauge session, weekly;
 static lv_obj_t *dot;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
+static lv_obj_t *clock_lbl;
 static lv_obj_t *overlay;	/* full-screen "no data" takeover */
 static bool built;
 static bool have_data;		/* distinguishes "no host yet" from "host lost" */
@@ -148,6 +149,14 @@ void usage_view_init(void)
 	lv_label_set_text(age_lbl, "never");
 	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
 	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30, 8);
+
+	/* Wall clock. Blank until a time source and timezone are known -- an
+	 * empty label beats a confidently wrong one. */
+	clock_lbl = lv_label_create(scr);
+	lv_label_set_text(clock_lbl, "");
+	lv_obj_set_style_text_color(clock_lbl, COL_TEXT, 0);
+	lv_obj_set_style_text_font(clock_lbl, &lv_font_montserrat_20, 0);
+	lv_obj_align(clock_lbl, LV_ALIGN_TOP_MID, 0, 2);
 
 	build_gauge(&session, scr, -78, "SESSION 5h");
 	build_gauge(&weekly, scr, 78, "WEEKLY 7d");
@@ -297,4 +306,20 @@ void usage_view_set_status(enum usage_status status)
 	} else {
 		lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
 	}
+}
+
+void usage_view_set_clock(int hh, int mm)
+{
+	if (!built) {
+		return;
+	}
+	if (hh < 0) {
+		lv_label_set_text(clock_lbl, "");
+		return;
+	}
+
+	char buf[8];
+
+	snprintf(buf, sizeof(buf), "%02d:%02d", hh, mm);
+	lv_label_set_text(clock_lbl, buf);
 }

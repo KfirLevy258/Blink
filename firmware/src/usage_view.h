@@ -32,6 +32,10 @@ void usage_view_update(double session_pct, int32_t session_resets_in_s,
  */
 void usage_view_tick_1s(void);
 
+/* Wall clock, top-center. hh < 0 hides it (unknown time is blanked, never
+ * shown wrong). */
+void usage_view_set_clock(int hh, int mm);
+
 void usage_view_set_status(enum usage_status status);
 
 #endif /* USAGE_VIEW_H */
