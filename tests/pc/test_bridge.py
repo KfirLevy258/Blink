@@ -52,7 +52,7 @@ class TestBridge(unittest.TestCase):
 
     def test_ping_is_answered_with_pong(self):
         """Liveness must be bidirectional. The daemon only pushes usage every
-        300 s, so without an answer to the board's 10 s ping the board cannot
+        60 s, so without an answer to the board's 10 s ping the board cannot
         tell 'host alive, not due to poll yet' from 'host died' -- and would
         keep showing a green dot over frozen numbers."""
         self.bridge.on_message({"t": "ping", "v": 1, "up_ms": 5})

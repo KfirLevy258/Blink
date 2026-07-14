@@ -56,7 +56,7 @@ def main():
             # RTS pulse below then reboots the board with GPIO0 held HIGH, so it
             # always comes up in run mode. It also means we reliably catch the
             # board's boot-time `hello` and can push usage immediately, instead of
-            # waiting up to 300 s for the next poll.
+            # waiting up to 60 s for the next poll.
             ser = serial.Serial()
             ser.port = port
             ser.baudrate = args.baud
@@ -94,7 +94,13 @@ def main():
                         print(f"[bridge] <- {msg}", file=sys.stderr)
                         bridge.on_message(msg)
                 if time.monotonic() >= next_poll:
-                    bridge.poll_once()
+                    # Poll only while the board is provably alive (pings within
+                    # the liveness window): the usage endpoint is aggressively
+                    # rate-limited, and a boardless daemon fetching all day
+                    # would burn that budget for nothing. The hello handler
+                    # still pushes immediately on (re)connect.
+                    if bridge.board_alive():
+                        bridge.poll_once()
                     next_poll = time.monotonic() + POLL_INTERVAL_S
         except (serial.SerialException, OSError) as e:
             print(f"[bridge] serial lost: {e}; reconnecting", file=sys.stderr)

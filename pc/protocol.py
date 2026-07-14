@@ -2,7 +2,7 @@
 
 One JSON object per line, UTF-8, '\n'-terminated. Every message carries
 `t` (type) and `v` (version). Non-JSON lines (logs) and unknown types are
-ignored by callers. v1.
+ignored by callers. v2.
 """
 import json
 
