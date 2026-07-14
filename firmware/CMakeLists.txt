@@ -17,4 +17,6 @@ target_sources(app PRIVATE
 	src/usage_parse.c
 	src/usage_client.c
 	src/net_time.c
-	src/tz_fetch.c)
+	src/tz_fetch.c
+	src/ui_boot.c
+)
