@@ -82,9 +82,10 @@ static int cb_sign_in(const char *code)
  * user rejoin the setup network. Returns 0 with creds stored, or negative on
  * portal timeout / AP failure (caller reboots either way).
  */
-static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen)
+static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
+			   const char *err0)
 {
-	const char *err = NULL;
+	const char *err = err0;
 	bool first_round = true;
 
 	for (;;) {
@@ -143,18 +144,21 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen)
 			return rc;	/* nobody set us up in time */
 		}
 
+		/*
+		 * Do NOT join here. On this driver a station brought up right
+		 * after AP_DISABLE accepts the connect request but never
+		 * completes it -- every post-AP join timed out on hardware
+		 * (3/3), while the same credentials joined instantly from a
+		 * fresh boot (resume path). So persist and reboot; the boot
+		 * path does the join. A wrong password self-corrects: the
+		 * resume join fails and lands back here with the reason on
+		 * the form.
+		 */
+		cfg_set_wifi(ssid, psk);
 		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
 		pump_ui();
-
-		if (net_wifi_connect(ssid, psk, 30) == 0) {
-			cfg_set_wifi(ssid, psk);
-			return 0;
-		}
-
-		err = net_wifi_last_error();
-		ui_setup_set_state(UI_SETUP_ERROR, err);
-		pump_ui();
-		k_msleep(2500);	/* let the reason land before the QR returns */
+		k_msleep(500);
+		sys_reboot(SYS_REBOOT_COLD);
 	}
 }
 
@@ -169,16 +173,24 @@ static void run_provisioning(void)
 
 	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
 	bool joined = false;
+	const char *join_err = NULL;
 
-	/* Resume: stored credentials mean an earlier run already got through
-	 * phase 1 (e.g. reboot mid-setup) -- skip the AP and join directly. */
+	/* The ONLY join path: from a clean boot, before any AP mode has run
+	 * this boot (a post-AP join never completes on this driver). Phase 1
+	 * stores credentials and reboots into this. */
 	if (cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
 		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
 		pump_ui();
 		joined = (net_wifi_connect(ssid, psk, 30) == 0);
+		if (!joined) {
+			join_err = net_wifi_last_error();
+		}
 	}
 
-	if (!joined && phase1_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) != 0) {
+	if (!joined) {
+		/* Collects credentials over the AP, then reboots (or returns
+		 * on timeout/AP failure -- reboot then too, via out). */
+		phase1_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk), join_err);
 		goto out;
 	}
 
