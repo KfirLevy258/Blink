@@ -16,4 +16,5 @@ target_sources(app PRIVATE
 	src/oauth.c
 	src/usage_parse.c
 	src/usage_client.c
-	src/net_time.c)
+	src/net_time.c
+	src/tz_fetch.c)
