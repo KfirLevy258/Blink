@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Where the board gets its numbers from. Persisted, so the choice survives a
  * power cycle -- being asked again on every boot would make it a worse device.
@@ -38,6 +39,17 @@ int cfg_set_wifi(const char *ssid, const char *psk);
 bool cfg_get_token(char *tok, size_t len);
 int cfg_set_token(const char *tok);
 int cfg_clear_token(void);
+
+/* Clear ONLY the WiFi credentials (settings-screen "Reset WiFi"): the token
+ * survives, so after re-provisioning the network the gauges come back without
+ * another sign-in. */
+int cfg_clear_wifi(void);
+
+/* Last known UTC offset (minutes east of UTC), fed by the tz API in WiFi mode
+ * so the clock survives API outages. cfg_get_tz() returns false until an
+ * offset has ever been stored. */
+bool cfg_get_tz(int32_t *offset_min);
+int cfg_set_tz(int32_t offset_min);
 
 /* Wipe everything (factory reset). */
 int cfg_reset(void);

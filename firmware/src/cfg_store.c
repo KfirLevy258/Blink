@@ -17,12 +17,15 @@
 #define KEY_SSID  KEY_ROOT "/ssid"
 #define KEY_PSK   KEY_ROOT "/psk"
 #define KEY_TOKEN KEY_ROOT "/rtok"
+#define KEY_TZ    KEY_ROOT "/tzmin"
 
 static struct {
 	enum cfg_mode mode;
 	char ssid[CFG_SSID_MAX];
 	char psk[CFG_PSK_MAX];
 	char token[CFG_TOKEN_MAX];
+	int32_t tz_min;
+	bool tz_set;
 } cfg;
 
 static int cfg_set_cb(const char *name, size_t len, settings_read_cb read_cb,
@@ -59,6 +62,15 @@ static int cfg_set_cb(const char *name, size_t len, settings_read_cb read_cb,
 
 		if (n > 0) {
 			cfg.token[n] = '\0';
+		}
+		return 0;
+	}
+	if (settings_name_steq(name, "tzmin", &next) && !next) {
+		int32_t v;
+
+		if (read_cb(cb_arg, &v, sizeof(v)) == sizeof(v)) {
+			cfg.tz_min = v;
+			cfg.tz_set = true;
 		}
 		return 0;
 	}
@@ -170,6 +182,30 @@ int cfg_clear_token(void)
 	return settings_delete(KEY_TOKEN);
 }
 
+int cfg_clear_wifi(void)
+{
+	memset(cfg.ssid, 0, sizeof(cfg.ssid));
+	memset(cfg.psk, 0, sizeof(cfg.psk));
+	settings_delete(KEY_SSID);
+	return settings_delete(KEY_PSK);
+}
+
+bool cfg_get_tz(int32_t *offset_min)
+{
+	if (!cfg.tz_set) {
+		return false;
+	}
+	*offset_min = cfg.tz_min;
+	return true;
+}
+
+int cfg_set_tz(int32_t offset_min)
+{
+	cfg.tz_min = offset_min;
+	cfg.tz_set = true;
+	return settings_save_one(KEY_TZ, &cfg.tz_min, sizeof(cfg.tz_min));
+}
+
 int cfg_reset(void)
 {
 	memset(&cfg, 0, sizeof(cfg));
@@ -177,5 +213,6 @@ int cfg_reset(void)
 	settings_delete(KEY_SSID);
 	settings_delete(KEY_PSK);
 	settings_delete(KEY_TOKEN);
+	settings_delete(KEY_TZ);
 	return 0;
 }
