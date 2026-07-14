@@ -21,8 +21,14 @@ displays whatever usage the PC sends. No WiFi / TLS / SNTP / token on the device
 
 ```bash
 source ~/zephyr-v4.4.0/.venv/bin/activate && source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
-west build -p auto -b esp32c6_devkitc/esp32c6/hpcore . -- -DUSE_CCACHE=0
+west build -p auto -b esp32_devkitc/esp32/procpu . -- -DUSE_CCACHE=0
 ```
+
+The board is the **CYD (ESP32, esp32_devkitc/esp32/procpu)** — the esp32c6 target
+above it replaced is long gone. Passing the wrong `-b` reconfigures `build/` for
+that board and every later incremental build fails in the device tree (this has
+happened; a `-p always` rebuild with the right board recovers it). For incremental
+builds just run `west build` with no flags inside an already-configured `build/`.
 
 ## Flash (learned the hard way)
 
