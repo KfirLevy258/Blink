@@ -27,6 +27,14 @@ int main(void)
 	CHECK(!msg_get_double(u, "missing", &d), "missing key -> false");
 	CHECK(!msg_get_str("not json", "t", buf, sizeof(buf)), "garbage -> false");
 
+	/* The v2 time message: epoch is large, the offset can be negative. */
+	const char *tm = "{\"t\":\"time\",\"v\":2,\"epoch\":1752444000,"
+		"\"utc_offset_min\":-300}";
+	CHECK(msg_get_double(tm, "epoch", &d) && fabs(d - 1752444000.0) < 0.5,
+	      "time epoch");
+	CHECK(msg_get_double(tm, "utc_offset_min", &d) && fabs(d + 300.0) < 0.01,
+	      "negative utc_offset_min");
+
 	printf("\n%s (%d failures)\n", failures ? "TESTS FAILED" : "ALL TESTS PASSED", failures);
 	return failures ? 1 : 0;
 }

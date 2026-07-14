@@ -14,4 +14,9 @@ void proto_service(void);
  * to choose USB mode over WiFi. */
 bool proto_host_seen(void);
 
+/* Re-announce to the host (fresh hello). Called when the gauge screen becomes
+ * ready: the daemon answers hello with an immediate time+usage push, so the
+ * screen fills right away instead of at its next 60 s poll. */
+void proto_resync(void);
+
 #endif /* PROTO_H */

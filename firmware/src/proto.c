@@ -10,8 +10,9 @@
 #include "proto.h"
 #include "msg_parse.h"
 #include "usage_view.h"
+#include "net_time.h"
 
-#define PROTO_VERSION 1
+#define PROTO_VERSION 2
 #define PING_INTERVAL_MS 10000
 /*
  * The daemon answers every ping with a pong, so silence means it is genuinely
@@ -123,6 +124,14 @@ static void dispatch(const char *json)
 		usage_view_update(sp, (int32_t)ss, wp, (int32_t)ws);
 		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)\n",
 		       sp, (int)ss, wp, (int)ws);
+	} else if (strcmp(type, "time") == 0) {
+		double epoch = 0, off = 0;
+
+		if (msg_get_double(json, "epoch", &epoch) &&
+		    msg_get_double(json, "utc_offset_min", &off)) {
+			net_time_set_manual((int64_t)epoch);
+			net_time_set_offset((int32_t)off);
+		}
 	} else if (strcmp(type, "pong") == 0) {
 		/* Liveness only: last_host_ms was already stamped above. */
 	} else if (strcmp(type, "welcome") == 0) {
@@ -199,4 +208,9 @@ void proto_service(void)
 		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
 		host_seen = false;
 	}
+}
+
+void proto_resync(void)
+{
+	send_hello();
 }
