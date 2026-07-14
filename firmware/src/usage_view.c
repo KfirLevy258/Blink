@@ -131,6 +131,9 @@ void usage_view_init(void)
 	lv_obj_set_style_border_width(dot, 0, 0);
 	lv_obj_set_style_bg_color(dot, COL_GREY, 0);
 	lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -12, 8);
+	/* A swipe starting on this dot must still reach the screen below it,
+	 * or the settings gesture goes dead whenever the touch lands here. */
+	lv_obj_add_flag(dot, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
 	/* Carries the amber/red explanation. Empty when all is well: the gauges
 	 * still hold real (if stale) numbers in those states, so they stay visible
@@ -172,6 +175,10 @@ void usage_view_init(void)
 	lv_obj_set_style_border_width(overlay, 0, 0);
 	lv_obj_set_style_radius(overlay, 0, 0);
 	lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+	/* Full-screen: without this a swipe starting here never reaches the
+	 * screen, so the settings gesture is dead the whole time we're
+	 * waiting for a host. */
+	lv_obj_add_flag(overlay, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_center(overlay);
 
 	lv_obj_t *big = lv_label_create(overlay);

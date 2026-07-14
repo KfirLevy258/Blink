@@ -16,6 +16,9 @@
 #include "dns_hijack.h"
 #include "oauth.h"
 #include "usage_client.h"
+#include "ui_boot.h"
+#include "ui_settings.h"
+#include "tz_fetch.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 static const struct gpio_dt_spec backlight =
@@ -164,9 +167,9 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 
 static void run_provisioning(void)
 {
-	usage_view_deinit();		/* free the gauge screen first */
 	ui_setup_show();
 	pump_ui();
+	ui_boot_teardown();	/* boot screen freed once setup screen is live */
 
 	oauth_gen_verifier(verifier, sizeof(verifier));
 	oauth_authorize_url(verifier, authorize_url, sizeof(authorize_url));
@@ -235,6 +238,14 @@ static void run_standalone(void)
 	}
 	net_time_sync(10);
 
+	/* Clock: last-known offset immediately (survives API outages), the
+	 * live answer replaces it below. */
+	int32_t tz_min;
+
+	if (cfg_get_tz(&tz_min)) {
+		net_time_set_offset(tz_min);
+	}
+
 	struct oauth_tokens tok;
 
 	if (oauth_refresh(refresh, &tok) != 0) {
@@ -250,6 +261,7 @@ static void run_standalone(void)
 
 	int64_t token_deadline = k_uptime_get() + (int64_t)tok.expires_in * 1000;
 	int64_t next_poll = 0;
+	int64_t next_tz = 0;	/* fetch as soon as we are online */
 	int64_t last_tick = k_uptime_get();
 
 	while (1) {
@@ -260,6 +272,20 @@ static void run_standalone(void)
 			if (oauth_refresh(tok.refresh, &tok) == 0) {
 				cfg_set_token(tok.refresh);
 				token_deadline = now + (int64_t)tok.expires_in * 1000;
+			}
+		}
+
+		if (now >= next_tz) {
+			int32_t om;
+
+			if (tz_fetch_offset(&om) == 0) {
+				net_time_set_offset(om);
+				if (!cfg_get_tz(&tz_min) || tz_min != om) {
+					cfg_set_tz(om);	/* new last-known */
+				}
+				next_tz = now + 86400LL * 1000;	/* daily: tracks DST */
+			} else {
+				next_tz = now + 3600LL * 1000;	/* retry hourly */
 			}
 		}
 
@@ -274,7 +300,7 @@ static void run_standalone(void)
 					net_time_secs_until(d.five_hour.resets_at),
 					d.seven_day.utilization,
 					net_time_secs_until(d.seven_day.resets_at));
-				next_poll = now + 300 * 1000;
+				next_poll = now + 60 * 1000;
 			} else if (r == USAGE_RATE_LIMITED) {
 				usage_view_set_status(USAGE_STATUS_STALE);
 				next_poll = now + 600 * 1000;
@@ -292,6 +318,11 @@ static void run_standalone(void)
 		if (now - last_tick >= 1000) {
 			usage_view_tick_1s();
 			last_tick = now;
+
+			int hh = -1, mm = 0;
+
+			net_time_local(&hh, &mm);
+			usage_view_set_clock(hh, mm);
 		}
 		lv_timer_handler();
 		k_sleep(K_MSEC(10));
@@ -312,6 +343,11 @@ static void run_usb(void)
 		if (now - last_tick >= 1000) {
 			usage_view_tick_1s();
 			last_tick = now;
+
+			int hh = -1, mm = 0;
+
+			net_time_local(&hh, &mm);
+			usage_view_set_clock(hh, mm);
 		}
 		lv_timer_handler();
 		k_sleep(K_MSEC(10));
@@ -349,31 +385,26 @@ int main(void)
 	}
 #endif
 
-	/* Gauge screen up front: it's what USB mode and standalone both show. */
-	usage_view_init();
-	lv_timer_handler();
+	/* proto first: its hello goes out now, so a daemon's reply is already
+	 * in flight during the splash and the selection can short-circuit. */
 	proto_init();
 
-	/*
-	 * Boot decision. Give a PC daemon a few seconds to speak over UART; if it
-	 * does, run USB mode. Otherwise fall to WiFi: standalone if we already
-	 * have credentials + a token, else first-time provisioning.
-	 */
-	bool usb = false;
-	int64_t t0 = k_uptime_get();
+	ui_boot_splash();
 
-	while (k_uptime_get() - t0 < 8000) {
-		proto_service();
-		if (proto_host_seen()) {
-			usb = true;
-			break;
-		}
-		lv_timer_handler();
-		k_sleep(K_MSEC(10));
+	enum cfg_mode mode = ui_boot_select(cfg_get_mode(), 10);
+
+	if (mode != cfg_get_mode()) {
+		cfg_set_mode(mode);	/* explicit choice becomes the new default */
 	}
 
-	if (usb) {
+	if (mode == CFG_MODE_USB) {
 		printk("[usage] mode: USB bridge\n");
+		usage_view_init();
+		lv_timer_handler();
+		ui_boot_teardown();	/* only after the new screen is loaded */
+		ui_settings_attach(lv_scr_act());
+		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+		proto_resync();		/* daemon re-pushes time+usage right away */
 		run_usb();
 	}
 
@@ -383,12 +414,14 @@ int main(void)
 
 	if (have_wifi && have_tok) {
 		printk("[usage] mode: standalone WiFi\n");
+		usage_view_init();
+		lv_timer_handler();
+		ui_boot_teardown();
+		ui_settings_attach(lv_scr_act());
 		run_standalone();
-	} else {
-		printk("[usage] mode: provisioning\n");
-		run_provisioning();	/* reboots when done */
 	}
 
-	run_usb();	/* unreachable fallback */
+	printk("[usage] mode: provisioning\n");
+	run_provisioning();	/* reboots when done */
 	return 0;
 }
