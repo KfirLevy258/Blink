@@ -228,6 +228,9 @@ static void run_standalone(void)
 	cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk));
 	cfg_get_token(refresh, sizeof(refresh));
 
+	/* The takeover's default text asks for a PC daemon -- wrong story in
+	 * this mode (seen on hardware 2026-07-14). Say what we actually do. */
+	usage_view_set_waiting("CONNECTING", "joining WiFi, first fetch on its way");
 	usage_view_set_status(USAGE_STATUS_DISCONNECTED);
 	lv_timer_handler();
 

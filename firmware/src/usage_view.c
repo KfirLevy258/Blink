@@ -34,6 +34,9 @@ static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
 static lv_obj_t *clock_lbl;
 static lv_obj_t *overlay;	/* full-screen "no data" takeover */
+static lv_obj_t *wait_big;	/* the takeover's title... */
+static lv_obj_t *wait_sub;	/* ...and explanation: what we are waiting FOR
+				 * differs by mode (PC daemon vs WiFi fetch) */
 static bool built;
 static bool have_data;		/* distinguishes "no host yet" from "host lost" */
 static int32_t age_s = -1;	/* seconds since the last usage message */
@@ -181,18 +184,18 @@ void usage_view_init(void)
 	lv_obj_add_flag(overlay, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_center(overlay);
 
-	lv_obj_t *big = lv_label_create(overlay);
+	wait_big = lv_label_create(overlay);
 
-	lv_label_set_text(big, "WAITING FOR HOST");
-	lv_obj_set_style_text_color(big, COL_TEXT, 0);
-	lv_obj_set_style_text_font(big, &lv_font_montserrat_20, 0);
-	lv_obj_align(big, LV_ALIGN_CENTER, 0, -18);
+	lv_label_set_text(wait_big, "WAITING FOR HOST");
+	lv_obj_set_style_text_color(wait_big, COL_TEXT, 0);
+	lv_obj_set_style_text_font(wait_big, &lv_font_montserrat_20, 0);
+	lv_obj_align(wait_big, LV_ALIGN_CENTER, 0, -18);
 
-	lv_obj_t *sub = lv_label_create(overlay);
+	wait_sub = lv_label_create(overlay);
 
-	lv_label_set_text(sub, "start the bridge daemon on the PC");
-	lv_obj_set_style_text_color(sub, COL_DIM, 0);
-	lv_obj_align(sub, LV_ALIGN_CENTER, 0, 10);
+	lv_label_set_text(wait_sub, "start the bridge daemon on the PC");
+	lv_obj_set_style_text_color(wait_sub, COL_DIM, 0);
+	lv_obj_align(wait_sub, LV_ALIGN_CENTER, 0, 10);
 
 	lv_obj_t *spin = lv_spinner_create(overlay);
 
@@ -313,6 +316,15 @@ void usage_view_set_status(enum usage_status status)
 	} else {
 		lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
 	}
+}
+
+void usage_view_set_waiting(const char *title, const char *sub)
+{
+	if (!built) {
+		return;
+	}
+	lv_label_set_text(wait_big, title);
+	lv_label_set_text(wait_sub, sub);
 }
 
 void usage_view_set_clock(int hh, int mm)

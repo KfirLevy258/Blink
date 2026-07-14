@@ -73,7 +73,11 @@ int tz_fetch_offset(int32_t *offset_min)
 	double off_s;
 
 	if (body == NULL || !msg_get_double(body, "offset", &off_s)) {
-		printk("[tz] no offset in reply\n");
+		/* Public data, so the reply's start is safe to log -- and it is
+		 * the only way to tell "empty read" from "unexpected shape"
+		 * (bitten on hardware 2026-07-14: the bare message could not
+		 * distinguish the two). */
+		printk("[tz] no offset in reply (%d bytes: \"%.32s\")\n", len, buf);
 		return -EBADMSG;
 	}
 	/* Real offsets are within +/-14 h. The transport is plain HTTP, so a

@@ -36,6 +36,11 @@ void usage_view_tick_1s(void);
  * shown wrong). */
 void usage_view_set_clock(int hh, int mm);
 
+/* Reword the full-screen "no data yet" takeover. The default text is USB
+ * mode's ("waiting for host"); standalone WiFi waits for something else
+ * entirely, and telling the user to start a PC daemon there is a lie. */
+void usage_view_set_waiting(const char *title, const char *sub);
+
 void usage_view_set_status(enum usage_status status);
 
 #endif /* USAGE_VIEW_H */
