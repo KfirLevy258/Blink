@@ -21,13 +21,27 @@ class TestBridge(unittest.TestCase):
                                                [{"name": "sonnet", "weekly_pct": 2.0}]),
             now=self.clock.now,
             app_ver="0.2.0",
+            wall=lambda: (1752444000, 180),
         )
 
-    def test_hello_triggers_welcome_then_usage(self):
+    def test_hello_triggers_welcome_time_usage(self):
         self.bridge.on_message({"t": "hello", "v": 1, "board_id": "ab"})
         types = [m["t"] for m in self.sent]
-        self.assertEqual(types, ["welcome", "usage"])
-        self.assertEqual(self.sent[1]["session_pct"], 61.0)
+        self.assertEqual(types, ["welcome", "time", "usage"])
+        self.assertEqual(self.sent[2]["session_pct"], 61.0)
+
+    def test_time_uses_injected_wall_clock(self):
+        b = Bridge(write_msg=self.sent.append,
+                   fetch_usage=lambda: protocol.usage(1.0, "R", 2.0, "R", []),
+                   now=self.clock.now, wall=lambda: (1752444000, 180))
+        b.on_message({"t": "hello", "v": 1})
+        t = [m for m in self.sent if m["t"] == "time"][0]
+        self.assertEqual(t["epoch"], 1752444000)
+        self.assertEqual(t["utc_offset_min"], 180)
+
+    def test_poll_pushes_time_then_usage(self):
+        self.bridge.poll_once()
+        self.assertEqual([m["t"] for m in self.sent], ["time", "usage"])
 
     def test_ping_updates_liveness(self):
         self.assertFalse(self.bridge.board_alive())

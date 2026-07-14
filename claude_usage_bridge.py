@@ -14,7 +14,7 @@ from serial.tools import list_ports
 from pc import protocol, usage_api
 from pc.bridge import Bridge
 
-POLL_INTERVAL_S = 300
+POLL_INTERVAL_S = 60
 PING_GRACE_LOG_S = 30
 
 
