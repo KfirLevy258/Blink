@@ -77,9 +77,18 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen)
 	for (;;) {
 		/* Scan before the AP comes up (scanning under SoftAP misses
 		 * most APs). Re-scan each round: the failure may have been
-		 * "network not found". */
+		 * "network not found". The scan comes up empty every few boots
+		 * (radio freshly started); an empty dropdown dead-ends the form
+		 * for the whole portal window, so give it a few tries. */
 		static char nets[12][33];
-		int nn = net_wifi_scan(nets, 12, 8);
+		int nn = 0;
+
+		for (int attempt = 0; attempt < 3 && nn <= 0; attempt++) {
+			if (attempt > 0) {
+				k_msleep(1000);
+			}
+			nn = net_wifi_scan(nets, 12, 8);
+		}
 
 		portal_set_networks(nets, nn > 0 ? nn : 0);
 
