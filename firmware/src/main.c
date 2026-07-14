@@ -25,6 +25,18 @@ static const struct gpio_dt_spec backlight =
 static char verifier[OAUTH_VERIFIER_LEN];
 static char authorize_url[OAUTH_URL_LEN];
 
+/*
+ * The radio sometimes comes out of a reset blind: every scan returns nothing
+ * and joins time out, for that entire boot; another reboot re-rolls it
+ * (observed on this hardware 2026-07-13, roughly every other soft reset).
+ * These counters live in .noinit RAM so they survive the reboot the retry
+ * depends on; the magic guards against power-on garbage.
+ */
+static __noinit uint32_t blind_boots;
+static __noinit uint32_t blind_magic;
+#define BLIND_MAGIC 0xb11dbea7u
+#define BLIND_MAX 4
+
 static void pump_ui(void)
 {
 	ui_setup_service();
@@ -73,13 +85,12 @@ static int cb_sign_in(const char *code)
 static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen)
 {
 	const char *err = NULL;
+	bool first_round = true;
 
 	for (;;) {
 		/* Scan before the AP comes up (scanning under SoftAP misses
 		 * most APs). Re-scan each round: the failure may have been
-		 * "network not found". The scan comes up empty every few boots
-		 * (radio freshly started); an empty dropdown dead-ends the form
-		 * for the whole portal window, so give it a few tries. */
+		 * "network not found". */
 		static char nets[12][33];
 		int nn = 0;
 
@@ -89,6 +100,29 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen)
 			}
 			nn = net_wifi_scan(nets, 12, 8);
 		}
+
+		if (blind_magic != BLIND_MAGIC) {
+			blind_magic = BLIND_MAGIC;
+			blind_boots = 0;
+		}
+		if (nn > 0) {
+			blind_boots = 0;
+		} else if (first_round) {
+			/* Blind boot. Reboot to re-roll the radio rather than
+			 * offer an empty network list. Bounded: after BLIND_MAX
+			 * consecutive blind boots, give up and serve the portal
+			 * anyway (its own 15-min timeout starts a new streak),
+			 * so a location with no networks can't reboot-loop. */
+			if (blind_boots < BLIND_MAX) {
+				blind_boots++;
+				printk("[wifi] radio blind (0 scans); reboot %u/%u to re-roll\n",
+				       blind_boots, BLIND_MAX);
+				k_msleep(300);
+				sys_reboot(SYS_REBOOT_COLD);
+			}
+			blind_boots = 0;
+		}
+		first_round = false;
 
 		portal_set_networks(nets, nn > 0 ? nn : 0);
 

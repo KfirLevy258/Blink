@@ -55,9 +55,15 @@ static void dns_loop(void *a, void *b, void *c)
 
 	net_addr_pton(AF_INET, AP_IP, &self);
 
+	/* Both directions bounded: the recv timeout is what lets the loop see
+	 * `running` go false, and the send timeout keeps a buffer-starved
+	 * sendto (phone spraying discovery packets) from wedging the thread
+	 * forever -- a wedged thread is what dns_hijack_stop must never leave
+	 * behind. */
 	struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
 
 	zsock_setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	zsock_setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
 	printk("[dns] hijacking all lookups -> %s\n", AP_IP);
 
@@ -128,5 +134,22 @@ void dns_hijack_start(void)
 
 void dns_hijack_stop(void)
 {
+	if (!running) {
+		return;
+	}
 	running = false;
+
+	/*
+	 * Wait for the thread to actually exit. Returning while it still runs
+	 * lets a later dns_hijack_start() re-create the thread ON TOP of the
+	 * live one -- k_thread_create on a running thread corrupts its kernel
+	 * object and the socket wait queues it sits on, which faulted the net
+	 * RX thread (k_condvar_signal -> sys_dlist_remove) on real hardware.
+	 * The loop's 1 s socket timeouts bound the wait; abort is the last
+	 * resort (it can leak the socket, but never corrupts the thread).
+	 */
+	if (k_thread_join(&dns_thread, K_SECONDS(5)) != 0) {
+		printk("[dns] thread stuck; aborting it\n");
+		k_thread_abort(&dns_thread);
+	}
 }
