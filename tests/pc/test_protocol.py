@@ -26,13 +26,24 @@ class TestProtocol(unittest.TestCase):
 
     def test_builders(self):
         self.assertEqual(protocol.welcome("app", "0.2.0"),
-                         {"t": "welcome", "v": 1, "app": "app", "app_ver": "0.2.0"})
+                         {"t": "welcome", "v": 2, "app": "app", "app_ver": "0.2.0"})
         u = protocol.usage(61.0, "R1", 26.0, "R2", [{"name": "sonnet", "weekly_pct": 2.0}])
         self.assertEqual(u["t"], "usage")
         self.assertEqual(u["session_pct"], 61.0)
         self.assertEqual(u["models"][0]["name"], "sonnet")
         self.assertEqual(protocol.status("rate_limited", "x"),
-                         {"t": "status", "v": 1, "state": "rate_limited", "detail": "x"})
+                         {"t": "status", "v": 2, "state": "rate_limited", "detail": "x"})
+
+    def test_time_msg_fields(self):
+        m = protocol.time_msg(1752444000, -300)
+        self.assertEqual(m["t"], "time")
+        self.assertEqual(m["epoch"], 1752444000)
+        self.assertEqual(m["utc_offset_min"], -300)
+        self.assertEqual(m["v"], protocol.VERSION)
+
+    def test_version_is_2(self):
+        """time_msg is new in v2; both sides bump together."""
+        self.assertEqual(protocol.VERSION, 2)
 
 
 if __name__ == "__main__":

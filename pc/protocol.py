@@ -6,7 +6,7 @@ ignored by callers. v1.
 """
 import json
 
-VERSION = 1
+VERSION = 2
 
 
 def encode(msg: dict) -> bytes:
@@ -59,6 +59,18 @@ def pong() -> dict:
     there showing a green dot over numbers that stopped updating.
     """
     return {"t": "pong", "v": VERSION}
+
+
+def time_msg(epoch: int, utc_offset_min: int) -> dict:
+    """Wall clock for the board.
+
+    Sent on hello and alongside every usage push: the board has no RTC, so it
+    anchors this epoch to its own uptime and re-anchors on each message,
+    bounding drift to one push interval. utc_offset_min is the PC's local
+    offset (DST included) -- the board does epoch + offset and renders HH:MM.
+    """
+    return {"t": "time", "v": VERSION, "epoch": int(epoch),
+            "utc_offset_min": int(utc_offset_min)}
 
 
 def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
