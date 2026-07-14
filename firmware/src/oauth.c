@@ -161,12 +161,14 @@ static int token_post(const char *json, struct oauth_tokens *out)
 	struct zsock_addrinfo *res = NULL;
 
 	if (zsock_getaddrinfo(TOKEN_HOST, TOKEN_PORT, &hints, &res) != 0 || !res) {
+		printk("[oauth] DNS lookup of %s failed\n", TOKEN_HOST);
 		return -ENETUNREACH;
 	}
 
 	int sock = zsock_socket(res->ai_family, res->ai_socktype, IPPROTO_TLS_1_2);
 
 	if (sock < 0) {
+		printk("[oauth] tls socket failed: %d\n", -errno);
 		zsock_freeaddrinfo(res);
 		return -errno;
 	}
@@ -180,6 +182,7 @@ static int token_post(const char *json, struct oauth_tokens *out)
 
 	zsock_freeaddrinfo(res);
 	if (rc < 0) {
+		printk("[oauth] TLS connect/handshake failed: %d\n", -errno);
 		zsock_close(sock);
 		return -errno;
 	}
@@ -204,8 +207,11 @@ static int token_post(const char *json, struct oauth_tokens *out)
 	rc = http_client_req(sock, &req, 15000, NULL);
 	zsock_close(sock);
 	if (rc < 0) {
+		printk("[oauth] http request failed: %d\n", rc);
 		return -EIO;
 	}
+	printk("[oauth] token endpoint: status %d, body %d bytes\n",
+	       tok_status, (int)tok_body_len);
 	if (tok_status == 400 || tok_status == 401) {
 		return -EACCES;	/* code/refresh-token rejected */
 	}
@@ -215,9 +221,15 @@ static int token_post(const char *json, struct oauth_tokens *out)
 
 	tok_body[tok_body_len] = '\0';
 
+	if (tok_body_len >= sizeof(tok_body) - 1) {
+		printk("[oauth] WARNING: response truncated at %d bytes\n",
+		       (int)tok_body_len);
+	}
+
 	double expires = 3600;
 
 	if (!msg_get_str(tok_body, "access_token", out->access, sizeof(out->access))) {
+		printk("[oauth] no access_token in response body\n");
 		return -EINVAL;
 	}
 	/* Anthropic may omit a new refresh token -- caller keeps the old one. */
