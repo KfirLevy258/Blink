@@ -354,11 +354,26 @@ static void run_standalone(void)
 	usage_view_set_status(USAGE_STATUS_DISCONNECTED);
 	lv_timer_handler();
 
-	/* No settle here: the boot scan (~8 s) that gated this path already
-	 * gave the radio its runway. */
+	/* Settle even after the scan: every hotspot join that succeeded
+	 * tonight ran behind this runway, and the one that skipped it
+	 * dropped mid-association (2026-07-15). */
+	wifi_settle();
 	if (net_wifi_connect(ssid, psk, 30) != 0) {
 		if (scan_said_absent) {
-			/* Invisible AND unjoinable: it is really not here. */
+			if (join_magic != JOIN_MAGIC) {
+				join_magic = JOIN_MAGIC;
+				join_fails = 0;
+			}
+			/* One retry boot even here: joins to barely-beaconing
+			 * hotspots flake, and for them scan-absent is chronic
+			 * -- without this, one flake costs a full re-setup. */
+			if (++join_fails <= 1) {
+				usage_view_set_status(USAGE_STATUS_ERROR);
+				k_sleep(K_SECONDS(5));
+				sys_reboot(SYS_REBOOT_COLD);
+			}
+			join_fails = 0;
+			/* Invisible AND repeatedly unjoinable: really not here. */
 			usage_view_deinit();
 			run_provisioning("network not found");	/* reboots */
 		}
