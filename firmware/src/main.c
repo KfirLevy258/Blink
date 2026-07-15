@@ -66,6 +66,13 @@ void portal_idle_hook(void)
 	pump_ui();
 }
 
+/* Same job during net_wifi's blocking waits (scan/join/DHCP/AP-up): keep
+ * whatever screen is up animating. */
+static void wifi_idle(void)
+{
+	lv_timer_handler();
+}
+
 /*
  * Radio settle before the first join of a boot. The pre-redesign flow never
  * joined before ~12 s of uptime (8 s sniff + selection screen) and connected
@@ -129,7 +136,10 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 
 		for (int attempt = 0; attempt < 3 && nn <= 0; attempt++) {
 			if (attempt > 0) {
-				k_msleep(1000);
+				for (int t = 0; t < 100; t++) {	/* 1 s, screen alive */
+					pump_ui();
+					k_sleep(K_MSEC(10));
+				}
 			}
 			nn = net_wifi_scan(nets, 12, 8);
 		}
@@ -271,7 +281,10 @@ static enum ssid_scan boot_ssid_scan(const char *ssid)
 
 	for (int attempt = 0; attempt < 3 && nn <= 0; attempt++) {
 		if (attempt > 0) {
-			k_msleep(1000);
+			for (int t = 0; t < 100; t++) {	/* 1 s, splash alive */
+				wifi_idle();
+				k_sleep(K_MSEC(10));
+			}
 		}
 		nn = net_wifi_scan(nets, 12, 8);
 	}
@@ -479,6 +492,7 @@ int main(void)
 
 	cfg_init();
 	net_wifi_init();
+	net_wifi_set_idle_hook(wifi_idle);
 
 #ifdef TEST_SCREEN
 	ui_setup_show();

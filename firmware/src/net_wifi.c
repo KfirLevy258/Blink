@@ -58,6 +58,47 @@ static struct net_mgmt_event_callback wifi_cb;
 static struct net_mgmt_event_callback ipv4_cb;
 
 static K_SEM_DEFINE(sem_connected, 0, 1);
+
+static void (*idle_hook)(void);
+
+void net_wifi_set_idle_hook(void (*hook)(void))
+{
+	idle_hook = hook;
+}
+
+/* k_sem_take in ~50 ms slices with the idle hook between them: these waits
+ * sit under live screens (splash spinner, CONNECTING), and a plain blocking
+ * take visibly freezes them for the whole wait (seen on hardware
+ * 2026-07-14). Returns 0 when the semaphore arrived. */
+static int sem_take_pumped(struct k_sem *sem, int timeout_s)
+{
+	int64_t deadline = k_uptime_get() + (int64_t)timeout_s * 1000;
+
+	for (;;) {
+		if (k_sem_take(sem, K_MSEC(50)) == 0) {
+			return 0;
+		}
+		if (k_uptime_get() >= deadline) {
+			return -EAGAIN;
+		}
+		if (idle_hook) {
+			idle_hook();
+		}
+	}
+}
+
+/* k_msleep that keeps the screen alive the same way. */
+static void idle_wait_ms(int ms)
+{
+	int64_t end = k_uptime_get() + ms;
+
+	do {
+		if (idle_hook) {
+			idle_hook();
+		}
+		k_msleep(50);
+	} while (k_uptime_get() < end);
+}
 static K_SEM_DEFINE(sem_got_ip, 0, 1);
 static K_SEM_DEFINE(sem_scan_done, 0, 1);
 static K_SEM_DEFINE(sem_ap_up, 0, 1);
@@ -276,7 +317,7 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 		}
 		printk("[wifi] connect request rc=%d (attempt %d), retrying\n",
 		       rc, attempt);
-		k_msleep(300);
+		idle_wait_ms(300);
 	}
 
 	if (rc) {
@@ -285,7 +326,7 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 		return rc;
 	}
 
-	if (k_sem_take(&sem_connected, K_SECONDS(timeout_s)) != 0) {
+	if (sem_take_pumped(&sem_connected, timeout_s) != 0) {
 		printk("[wifi] connect timed out\n");
 		last_error = "network didn't respond (name/range?)";
 		return -ETIMEDOUT;
@@ -300,7 +341,7 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	 * socket will work.
 	 */
 	net_dhcpv4_start(iface);
-	if (k_sem_take(&sem_got_ip, K_SECONDS(timeout_s)) != 0) {
+	if (sem_take_pumped(&sem_got_ip, timeout_s) != 0) {
 		printk("[wifi] no DHCP address\n");
 		last_error = "connected but got no IP address";
 		return -ETIMEDOUT;
@@ -382,7 +423,7 @@ int net_wifi_start_ap(void)
 	 * the result is an AP a phone can associate with but which never answers
 	 * DHCP: it spins on "obtaining IP address" forever.
 	 */
-	if (k_sem_take(&sem_ap_up, K_SECONDS(10)) != 0) {
+	if (sem_take_pumped(&sem_ap_up, 10) != 0) {
 		printk("[wifi] AP never came up\n");
 		return -ETIMEDOUT;
 	}
@@ -488,7 +529,7 @@ int net_wifi_scan(char out[][33], int max, int timeout_s)
 		scan_out = NULL;
 		return rc;
 	}
-	k_sem_take(&sem_scan_done, K_SECONDS(timeout_s));
+	sem_take_pumped(&sem_scan_done, timeout_s);
 	scan_out = NULL;
 	printk("[wifi] scan found %d networks\n", scan_count);
 	return scan_count;

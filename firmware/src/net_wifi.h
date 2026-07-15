@@ -27,6 +27,11 @@ void net_wifi_set_sta_cb(net_wifi_sta_cb cb);
 
 int net_wifi_init(void);
 
+/* Optional: called repeatedly (every ~50 ms) while net_wifi blocks on scans,
+ * joins, DHCP, or AP bring-up. LVGL has no thread of its own here, so without
+ * this every spinner on screen freezes for the duration of the wait. */
+void net_wifi_set_idle_hook(void (*hook)(void));
+
 /* Number of DHCP leases currently granted on the AP. Lets the setup screen show
  * whether the board actually handed the phone an address, vs the phone merely
  * associating -- diagnosable without a serial cable (which resets this board).
