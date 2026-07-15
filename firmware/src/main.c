@@ -40,6 +40,20 @@ static __noinit uint32_t blind_magic;
 #define BLIND_MAGIC 0xb11dbea7u
 #define BLIND_MAX 4
 
+/*
+ * Standalone join failures, counted across the reboot-retry the driver
+ * demands (joins only complete from a clean boot). One failure is usually
+ * the router rebooting or a DHCP hiccup; a STREAK means we moved or the
+ * password changed, and only then is the setup portal the right answer.
+ * A scan cannot make this call: this unit's scans provably miss real,
+ * joinable networks (Stone Cottage, 2026-07-14), as hidden SSIDs always
+ * would. The join itself is the only authoritative probe.
+ */
+static __noinit uint32_t join_fails;
+static __noinit uint32_t join_magic;
+#define JOIN_MAGIC 0x104e4a01u
+#define JOIN_MAX 2
+
 static void pump_ui(void)
 {
 	ui_setup_service();
@@ -221,54 +235,6 @@ out:
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
-/*
- * Is the stored network on the air? Same blind-radio discipline as the
- * provisioning scan: an empty result is bimodal radio luck, not evidence the
- * network is gone, so re-roll by rebooting (bounded); only a scan that SEES
- * networks -- just not ours -- gets to say "absent".
- */
-enum ssid_scan { SSID_VISIBLE, SSID_ABSENT, SSID_RADIO_BLIND };
-
-static enum ssid_scan boot_ssid_scan(const char *ssid)
-{
-	static char nets[12][33];
-	int nn = 0;
-
-	for (int attempt = 0; attempt < 3 && nn <= 0; attempt++) {
-		if (attempt > 0) {
-			k_msleep(1000);
-		}
-		nn = net_wifi_scan(nets, 12, 8);
-	}
-
-	if (blind_magic != BLIND_MAGIC) {
-		blind_magic = BLIND_MAGIC;
-		blind_boots = 0;
-	}
-	if (nn <= 0) {
-		if (blind_boots < BLIND_MAX) {
-			blind_boots++;
-			printk("[wifi] radio blind (0 scans); reboot %u/%u to re-roll\n",
-			       blind_boots, BLIND_MAX);
-			k_msleep(300);
-			sys_reboot(SYS_REBOOT_COLD);
-		}
-		/* Persistently blind across BLIND_MAX reboots: stop guessing.
-		 * The portal (with its typed-SSID field) is the honest next
-		 * step, and its timeout-reboot starts a fresh streak. */
-		blind_boots = 0;
-		return SSID_RADIO_BLIND;
-	}
-	blind_boots = 0;
-
-	for (int i = 0; i < nn; i++) {
-		if (strcmp(nets[i], ssid) == 0) {
-			return SSID_VISIBLE;
-		}
-	}
-	return SSID_ABSENT;
-}
-
 /* ---- standalone WiFi mode: fetch usage over TLS, feed the gauges ---- */
 
 static void run_standalone(void)
@@ -285,9 +251,29 @@ static void run_standalone(void)
 	lv_timer_handler();
 
 	if (net_wifi_connect(ssid, psk, 30) != 0) {
-		usage_view_set_status(USAGE_STATUS_ERROR);
-		k_sleep(K_SECONDS(10));
-		sys_reboot(SYS_REBOOT_COLD);	/* retry from boot */
+		if (join_magic != JOIN_MAGIC) {
+			join_magic = JOIN_MAGIC;
+			join_fails = 0;
+		}
+		if (++join_fails <= JOIN_MAX) {
+			/* Probably transient; the retry must come from a
+			 * clean boot on this driver. */
+			usage_view_set_status(USAGE_STATUS_ERROR);
+			k_sleep(K_SECONDS(10));
+			sys_reboot(SYS_REBOOT_COLD);
+		}
+		/* A streak: moved, network gone, or password changed. Offer
+		 * setup with the reason on the form instead of rebooting
+		 * forever. */
+		join_fails = 0;
+
+		const char *err = net_wifi_last_error();
+
+		usage_view_deinit();	/* 16K pool: gauges out before setup in */
+		run_provisioning(err);	/* reboots when done */
+	}
+	if (join_magic == JOIN_MAGIC) {
+		join_fails = 0;		/* success ends any streak */
 	}
 	net_time_sync(10);
 
@@ -464,25 +450,15 @@ int main(void)
 	bool have_tok = cfg_get_token(tok, sizeof(tok));
 
 	if (have_wifi && have_tok) {
-		switch (boot_ssid_scan(ssid)) {	/* may reboot (blind radio) */
-		case SSID_VISIBLE:
-			printk("[usage] mode: standalone WiFi\n");
-			usage_view_init();
-			lv_timer_handler();
-			ui_boot_teardown();
-			ui_settings_attach(lv_scr_act());
-			run_standalone();
-			break;			/* unreachable */
-		case SSID_ABSENT:
-			printk("[usage] mode: provisioning (\"%s\" not visible)\n",
-			       ssid);
-			run_provisioning("network not found");
-			break;			/* unreachable */
-		case SSID_RADIO_BLIND:
-			printk("[usage] mode: provisioning (radio blind)\n");
-			run_provisioning("no networks found; check antenna or power");
-			break;			/* unreachable */
-		}
+		/* No scan gate here: scans on this unit miss real networks
+		 * (and hidden SSIDs always would). run_standalone joins, and
+		 * a streak of join failures falls back to the portal. */
+		printk("[usage] mode: standalone WiFi\n");
+		usage_view_init();
+		lv_timer_handler();
+		ui_boot_teardown();
+		ui_settings_attach(lv_scr_act());
+		run_standalone();
 	}
 
 	printk("[usage] mode: provisioning\n");
