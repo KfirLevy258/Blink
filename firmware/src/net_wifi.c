@@ -90,13 +90,24 @@ static void wifi_evt(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 		const struct wifi_status *st = (const struct wifi_status *)cb->info;
 
 		connect_status = st->status;
+		if (st->status != 0) {
+			/* conn_status names WHY: 2 = wrong password, 3 = no
+			 * AP found, 4 = auth timeout (enum wifi_conn_status).
+			 * Telling "network gone" from "password rejected"
+			 * from serial is worth a printk. */
+			printk("[wifi] connect failed: status %d conn %d\n",
+			       st->status, st->conn_status);
+		}
 		k_sem_give(&sem_connected);
 		break;
 	}
-	case NET_EVENT_WIFI_DISCONNECT_RESULT:
+	case NET_EVENT_WIFI_DISCONNECT_RESULT: {
+		const struct wifi_status *st = (const struct wifi_status *)cb->info;
+
 		have_ip = false;
-		printk("[wifi] disconnected\n");
+		printk("[wifi] disconnected (reason %d)\n", st->disconn_reason);
 		break;
+	}
 	case NET_EVENT_WIFI_SCAN_RESULT: {
 		const struct wifi_scan_result *r =
 			(const struct wifi_scan_result *)cb->info;

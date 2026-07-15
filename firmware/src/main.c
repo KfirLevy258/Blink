@@ -66,6 +66,21 @@ void portal_idle_hook(void)
 	pump_ui();
 }
 
+/*
+ * Radio settle before the first join of a boot. The pre-redesign flow never
+ * joined before ~12 s of uptime (8 s sniff + selection screen) and connected
+ * every time; the detection flow's ~3 s join failed with a mid-handshake
+ * disconnect on every boot tried (2026-07-14). The driver evidently needs
+ * runway after init. Keeps the UI pumping so the spinner stays alive.
+ */
+static void wifi_settle(void)
+{
+	for (int i = 0; i < 500; i++) {	/* 5 s */
+		lv_timer_handler();
+		k_sleep(K_MSEC(10));
+	}
+}
+
 /* ---- provisioning callbacks (portal owns HTTP, we own WiFi + OAuth) ---- */
 
 static int cb_sign_in(const char *code)
@@ -202,6 +217,7 @@ static void run_provisioning(const char *skip_join_reason)
 	    cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
 		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
 		pump_ui();
+		wifi_settle();
 		joined = (net_wifi_connect(ssid, psk, 30) == 0);
 		if (!joined) {
 			join_err = net_wifi_last_error();
@@ -250,6 +266,7 @@ static void run_standalone(void)
 	usage_view_set_status(USAGE_STATUS_DISCONNECTED);
 	lv_timer_handler();
 
+	wifi_settle();
 	if (net_wifi_connect(ssid, psk, 30) != 0) {
 		if (join_magic != JOIN_MAGIC) {
 			join_magic = JOIN_MAGIC;
