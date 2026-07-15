@@ -374,6 +374,13 @@ static void run_standalone(void)
 	if (join_magic == JOIN_MAGIC) {
 		join_fails = 0;		/* success ends any streak */
 	}
+
+	/* The steps from here to the first gauge update are blocking library
+	 * calls (SNTP, two TLS exchanges) that nothing can pump the UI
+	 * through. Restating the takeover text before each one turns "the
+	 * spinner froze" into visible progress (user-reported 2026-07-14). */
+	usage_view_set_waiting("SYNCING CLOCK", "asking the time servers");
+	lv_timer_handler();
 	net_time_sync(10);
 
 	/* Clock: last-known offset immediately (survives API outages), the
@@ -383,6 +390,9 @@ static void run_standalone(void)
 	if (cfg_get_tz(&tz_min)) {
 		net_time_set_offset(tz_min);
 	}
+
+	usage_view_set_waiting("SIGNING IN", "refreshing your Anthropic session");
+	lv_timer_handler();
 
 	struct oauth_tokens tok;
 
@@ -396,6 +406,9 @@ static void run_standalone(void)
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 	cfg_set_token(tok.refresh);	/* persist a rotated token before use */
+
+	usage_view_set_waiting("FETCHING", "first usage numbers");
+	lv_timer_handler();
 
 	int64_t token_deadline = k_uptime_get() + (int64_t)tok.expires_in * 1000;
 	int64_t next_poll = 0;
