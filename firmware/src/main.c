@@ -54,6 +54,13 @@ static __noinit uint32_t join_magic;
 #define JOIN_MAGIC 0x104e4a01u
 #define JOIN_MAX 2
 
+/* The boot scan could not see the stored SSID. The join still runs -- scans
+ * miss hidden SSIDs and barely-beaconing phone hotspots (an iPhone hotspot
+ * with a fresh token got bounced to setup this way, 2026-07-15) -- but a
+ * join failure on top of a miss skips the transient-strike dance and goes
+ * straight to the portal: two independent "it's not there" signals. */
+static bool scan_said_absent;
+
 static void pump_ui(void)
 {
 	ui_setup_service();
@@ -350,6 +357,11 @@ static void run_standalone(void)
 	/* No settle here: the boot scan (~8 s) that gated this path already
 	 * gave the radio its runway. */
 	if (net_wifi_connect(ssid, psk, 30) != 0) {
+		if (scan_said_absent) {
+			/* Invisible AND unjoinable: it is really not here. */
+			usage_view_deinit();
+			run_provisioning("network not found");	/* reboots */
+		}
 		if (join_magic != JOIN_MAGIC) {
 			join_magic = JOIN_MAGIC;
 			join_fails = 0;
@@ -575,9 +587,17 @@ int main(void)
 			run_standalone();
 			break;			/* unreachable */
 		case SSID_ABSENT:
-			printk("[usage] mode: provisioning (\"%s\" not visible)\n",
+			/* Not in the scan -- but hidden SSIDs and phone
+			 * hotspots rarely are. The join is the authority;
+			 * the flag makes its failure decisive. */
+			printk("[usage] mode: standalone WiFi (\"%s\" not in scan; probing)\n",
 			       ssid);
-			run_provisioning("network not found");
+			scan_said_absent = true;
+			usage_view_init();
+			lv_timer_handler();
+			ui_boot_teardown();
+			ui_settings_attach(lv_scr_act());
+			run_standalone();
 			break;			/* unreachable */
 		case SSID_RADIO_BLIND:
 			printk("[usage] mode: provisioning (radio blind)\n");
