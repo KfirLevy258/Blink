@@ -251,6 +251,59 @@ out:
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
+/*
+ * Is the stored network on the air? First live run of this gate was right
+ * and got misread: it reported the SSID absent minutes after the device
+ * moved homes (2026-07-14), and the "scan must be broken" fix that replaced
+ * it made a move cost three failed-join boot cycles before the portal.
+ * Scan first: an answer in ~8 s. Same blind-radio discipline as the
+ * provisioning scan -- an empty result is bimodal radio luck, not evidence
+ * of absence, so re-roll by rebooting (bounded); only a scan that SEES
+ * networks, just not ours, gets to say "absent". Known limit: a hidden SSID
+ * would always read absent and live at the portal.
+ */
+enum ssid_scan { SSID_VISIBLE, SSID_ABSENT, SSID_RADIO_BLIND };
+
+static enum ssid_scan boot_ssid_scan(const char *ssid)
+{
+	static char nets[12][33];
+	int nn = 0;
+
+	for (int attempt = 0; attempt < 3 && nn <= 0; attempt++) {
+		if (attempt > 0) {
+			k_msleep(1000);
+		}
+		nn = net_wifi_scan(nets, 12, 8);
+	}
+
+	if (blind_magic != BLIND_MAGIC) {
+		blind_magic = BLIND_MAGIC;
+		blind_boots = 0;
+	}
+	if (nn <= 0) {
+		if (blind_boots < BLIND_MAX) {
+			blind_boots++;
+			printk("[wifi] radio blind (0 scans); reboot %u/%u to re-roll\n",
+			       blind_boots, BLIND_MAX);
+			k_msleep(300);
+			sys_reboot(SYS_REBOOT_COLD);
+		}
+		/* Persistently blind: stop guessing. The portal (typed-SSID
+		 * field) is the honest next step, and its timeout-reboot
+		 * starts a fresh streak. */
+		blind_boots = 0;
+		return SSID_RADIO_BLIND;
+	}
+	blind_boots = 0;
+
+	for (int i = 0; i < nn; i++) {
+		if (strcmp(nets[i], ssid) == 0) {
+			return SSID_VISIBLE;
+		}
+	}
+	return SSID_ABSENT;
+}
+
 /* ---- standalone WiFi mode: fetch usage over TLS, feed the gauges ---- */
 
 static void run_standalone(void)
@@ -266,7 +319,8 @@ static void run_standalone(void)
 	usage_view_set_status(USAGE_STATUS_DISCONNECTED);
 	lv_timer_handler();
 
-	wifi_settle();
+	/* No settle here: the boot scan (~8 s) that gated this path already
+	 * gave the radio its runway. */
 	if (net_wifi_connect(ssid, psk, 30) != 0) {
 		if (join_magic != JOIN_MAGIC) {
 			join_magic = JOIN_MAGIC;
@@ -467,15 +521,27 @@ int main(void)
 	bool have_tok = cfg_get_token(tok, sizeof(tok));
 
 	if (have_wifi && have_tok) {
-		/* No scan gate here: scans on this unit miss real networks
-		 * (and hidden SSIDs always would). run_standalone joins, and
-		 * a streak of join failures falls back to the portal. */
-		printk("[usage] mode: standalone WiFi\n");
-		usage_view_init();
-		lv_timer_handler();
-		ui_boot_teardown();
-		ui_settings_attach(lv_scr_act());
-		run_standalone();
+		switch (boot_ssid_scan(ssid)) {	/* may reboot (blind radio) */
+		case SSID_VISIBLE:
+			/* Join-failure strikes inside run_standalone remain
+			 * the backstop for a scan that said yes wrongly. */
+			printk("[usage] mode: standalone WiFi\n");
+			usage_view_init();
+			lv_timer_handler();
+			ui_boot_teardown();
+			ui_settings_attach(lv_scr_act());
+			run_standalone();
+			break;			/* unreachable */
+		case SSID_ABSENT:
+			printk("[usage] mode: provisioning (\"%s\" not visible)\n",
+			       ssid);
+			run_provisioning("network not found");
+			break;			/* unreachable */
+		case SSID_RADIO_BLIND:
+			printk("[usage] mode: provisioning (radio blind)\n");
+			run_provisioning("no networks found; check antenna or power");
+			break;			/* unreachable */
+		}
 	}
 
 	printk("[usage] mode: provisioning\n");
