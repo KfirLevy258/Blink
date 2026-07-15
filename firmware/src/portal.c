@@ -264,19 +264,34 @@ static void signin_page(int sock, const char *authorize_url, bool err)
 	send_html(sock, page);
 }
 
+static bool resume_flow;
+
+void portal_set_resume(bool token_already_stored)
+{
+	resume_flow = token_already_stored;
+}
+
 /* Served in reply to POST /wifi, right before the AP is torn down. */
 static void ack_page(int sock, const char *ssid)
 {
+	/* A device that already holds a token never shows the sign-in QR --
+	 * promising one here made a healthy re-provision look broken (seen
+	 * with a user 2026-07-14). */
+	const char *next_step = resume_flow
+		? "Watch the device screen. You are already signed in, so the "
+		  "usage gauges should appear within a minute.<br><br>"
+		: "Watch the device screen. When it shows a new QR code, the device is on "
+		  "your WiFi \xE2\x80\x94 scan that code to finish signing in.<br><br>";
+
 	snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
 		"content='width=device-width,initial-scale=1'><title>Connecting</title>" CSS
 		"</head><body><h1>Joining %s\xE2\x80\xA6</h1>"
 		"<p class=s>This setup network is shutting down now.</p>"
 		"<div class=c><p style='margin:0;font-size:15px'>"
-		"Watch the device screen. When it shows a new QR code, the device is on "
-		"your WiFi \xE2\x80\x94 scan that code to finish signing in.<br><br>"
+		"%s"
 		"If joining fails, reconnect to the setup network to try again."
-		"</p></div></body></html>", ssid);
+		"</p></div></body></html>", ssid, next_step);
 
 	send_html(sock, page);
 }

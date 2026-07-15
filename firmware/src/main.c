@@ -216,6 +216,12 @@ static void run_provisioning(const char *skip_join_reason)
 	oauth_gen_verifier(verifier, sizeof(verifier));
 	oauth_authorize_url(verifier, authorize_url, sizeof(authorize_url));
 
+	/* With a stored token the ack page must not promise a sign-in step --
+	 * after the join, boot goes straight to the gauges. */
+	char tok[CFG_TOKEN_MAX];
+
+	portal_set_resume(cfg_get_token(tok, sizeof(tok)));
+
 	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
 	bool joined = false;
 	const char *join_err = skip_join_reason;

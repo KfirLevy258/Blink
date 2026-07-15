@@ -1,6 +1,7 @@
 #ifndef PORTAL_H
 #define PORTAL_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /*
@@ -24,6 +25,12 @@
 /* Networks to offer, scanned BEFORE the AP comes up (scanning while the
  * SoftAP runs sees only a fraction). */
 void portal_set_networks(char list[][33], int n);
+
+/* Tell the phase-1 ack page what happens after the join. A device that
+ * already holds a sign-in token skips phase 2 entirely (that is the "sign in
+ * once" promise), and telling its user to expect a sign-in QR -- as the
+ * fresh-device copy does -- reads like a malfunction when none appears. */
+void portal_set_resume(bool token_already_stored);
 
 /* Serve the WiFi form until credentials are POSTed. Fills ssid/psk and
  * returns 0 after acking the browser; -ETIMEDOUT if nobody submits in time.

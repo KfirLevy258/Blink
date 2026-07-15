@@ -33,6 +33,16 @@ int tz_fetch_offset(int32_t *offset_min)
 		return -EIO;
 	}
 
+	/* Which address DNS handed us: a wrong or poisoned A record and a
+	 * filtered port 80 both present as "0 bytes back", and only this line
+	 * tells them apart (chasing exactly that on 2026-07-14). */
+	char ipstr[INET_ADDRSTRLEN] = "?";
+
+	zsock_inet_ntop(AF_INET,
+			&((struct sockaddr_in *)res->ai_addr)->sin_addr,
+			ipstr, sizeof(ipstr));
+	printk("[tz] resolved %s -> %s\n", HOST, ipstr);
+
 	struct timeval tv = { .tv_sec = 8 };
 
 	zsock_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -64,6 +74,12 @@ int tz_fetch_offset(int32_t *offset_min)
 	while (len < (int)sizeof(buf) - 1 &&
 	       (n = zsock_recv(sock, buf + len, sizeof(buf) - 1 - len, 0)) > 0) {
 		len += n;
+	}
+	if (n < 0 && len == 0) {
+		/* errno tells timeout (EAGAIN: nothing ever came, port
+		 * filtered?) from reset (ECONNRESET: something answered
+		 * with a slammed door). */
+		printk("[tz] recv failed: errno %d\n", errno);
 	}
 	zsock_close(sock);
 	buf[len] = '\0';
