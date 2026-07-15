@@ -49,15 +49,15 @@
 	 * the controller cannot be interrogated and the link is write-only.
 	 */
 	/*
-	 * Touch axes vs screen axes, measured (CYD-T4): a tap at the top-left
-	 * reads (low raw x, low raw y); a tap at the top-right reads (low raw x,
-	 * HIGH raw y). So raw Y runs along the screen's horizontal and raw X
-	 * along its vertical -- swapped, but neither axis inverted.
+	 * No transform: corner taps on this unit (2026-07-14, raw TL=(14,20),
+	 * TR=(203,16), BR=(219,300) at 240x320 scaling) show the controller
+	 * axes already match the landscape screen. The old swap-xy mirrored
+	 * every touch across the diagonal -- tapping the WiFi button landed
+	 * dead-center on the USB button.
 	 */
 	lvgl_pointer {
 		compatible = "zephyr,lvgl-pointer-input";
 		input = <&xpt2046>;
-		swap-xy;
 	};
 
 	mipi_dbi {
@@ -146,13 +146,15 @@
 		spi-max-frequency = <2000000>;	/* XPT2046 is a slow part */
 		int-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>;	/* GPIO36, input-only */
 
-		/* Measured on this board by tapping the corners (CYD-T4).
-		 * Sizes are the panel's NATIVE portrait 240x320, not the rotated
-		 * landscape: the touch panel's axes are in the panel frame, and
-		 * the lvgl_pointer node below does the swap into screen space.
+		/* Re-measured 2026-07-14 by corner taps on THIS unit: the touch
+		 * controller's X channel tracks the screen's horizontal (long)
+		 * edge and Y its vertical -- already in landscape screen frame,
+		 * NO swap (the earlier CYD-T4 measurement said the transpose;
+		 * that mapping put every tap on the mirrored button). Sizes are
+		 * therefore the landscape 320x240.
 		 */
-		touchscreen-size-x = <240>;
-		touchscreen-size-y = <320>;
+		touchscreen-size-x = <320>;
+		touchscreen-size-y = <240>;
 		min-x = <700>;
 		max-x = <3900>;
 		min-y = <400>;

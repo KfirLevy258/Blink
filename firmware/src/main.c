@@ -165,7 +165,10 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 	}
 }
 
-static void run_provisioning(void)
+/* skip_join_reason: non-NULL when the caller already knows a join is doomed
+ * (boot scan saw other networks but not ours) -- skip the 30 s attempt and
+ * put that reason on the portal form instead. */
+static void run_provisioning(const char *skip_join_reason)
 {
 	ui_setup_show();
 	pump_ui();
@@ -176,12 +179,13 @@ static void run_provisioning(void)
 
 	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
 	bool joined = false;
-	const char *join_err = NULL;
+	const char *join_err = skip_join_reason;
 
 	/* The ONLY join path: from a clean boot, before any AP mode has run
 	 * this boot (a post-AP join never completes on this driver). Phase 1
 	 * stores credentials and reboots into this. */
-	if (cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
+	if (skip_join_reason == NULL &&
+	    cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
 		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
 		pump_ui();
 		joined = (net_wifi_connect(ssid, psk, 30) == 0);
@@ -208,15 +212,61 @@ static void run_provisioning(void)
 	ui_setup_set_state(UI_SETUP_WIFI_OK, url);
 	pump_ui();
 
-	if (portal_run_signin(authorize_url, cb_sign_in, 900) == 0) {
-		cfg_set_mode(CFG_MODE_WIFI);
-	}
+	portal_run_signin(authorize_url, cb_sign_in, 900);
 out:
 	/* Reboot either way: on success come up standalone; on timeout, retry
 	 * setup from a clean slate. A cold restart also reclaims all the AP/TLS
 	 * memory before the standalone stack allocates it. */
 	k_msleep(1500);
 	sys_reboot(SYS_REBOOT_COLD);
+}
+
+/*
+ * Is the stored network on the air? Same blind-radio discipline as the
+ * provisioning scan: an empty result is bimodal radio luck, not evidence the
+ * network is gone, so re-roll by rebooting (bounded); only a scan that SEES
+ * networks -- just not ours -- gets to say "absent".
+ */
+enum ssid_scan { SSID_VISIBLE, SSID_ABSENT, SSID_RADIO_BLIND };
+
+static enum ssid_scan boot_ssid_scan(const char *ssid)
+{
+	static char nets[12][33];
+	int nn = 0;
+
+	for (int attempt = 0; attempt < 3 && nn <= 0; attempt++) {
+		if (attempt > 0) {
+			k_msleep(1000);
+		}
+		nn = net_wifi_scan(nets, 12, 8);
+	}
+
+	if (blind_magic != BLIND_MAGIC) {
+		blind_magic = BLIND_MAGIC;
+		blind_boots = 0;
+	}
+	if (nn <= 0) {
+		if (blind_boots < BLIND_MAX) {
+			blind_boots++;
+			printk("[wifi] radio blind (0 scans); reboot %u/%u to re-roll\n",
+			       blind_boots, BLIND_MAX);
+			k_msleep(300);
+			sys_reboot(SYS_REBOOT_COLD);
+		}
+		/* Persistently blind across BLIND_MAX reboots: stop guessing.
+		 * The portal (with its typed-SSID field) is the honest next
+		 * step, and its timeout-reboot starts a fresh streak. */
+		blind_boots = 0;
+		return SSID_RADIO_BLIND;
+	}
+	blind_boots = 0;
+
+	for (int i = 0; i < nn; i++) {
+		if (strcmp(nets[i], ssid) == 0) {
+			return SSID_VISIBLE;
+		}
+	}
+	return SSID_ABSENT;
 }
 
 /* ---- standalone WiFi mode: fetch usage over TLS, feed the gauges ---- */
@@ -394,13 +444,11 @@ int main(void)
 
 	ui_boot_splash();
 
-	enum cfg_mode mode = ui_boot_select(cfg_get_mode(), 10);
-
-	if (mode != cfg_get_mode()) {
-		cfg_set_mode(mode);	/* explicit choice becomes the new default */
-	}
-
-	if (mode == CFG_MODE_USB) {
+	/* Detection, not a menu. First match wins: a talking daemon, then a
+	 * reachable home network, then setup. Plugging into a PC later still
+	 * works -- the daemon opening the port resets this board, so it always
+	 * announces itself into a fresh splash. */
+	if (proto_host_seen()) {
 		printk("[usage] mode: USB bridge\n");
 		usage_view_init();
 		lv_timer_handler();
@@ -416,15 +464,28 @@ int main(void)
 	bool have_tok = cfg_get_token(tok, sizeof(tok));
 
 	if (have_wifi && have_tok) {
-		printk("[usage] mode: standalone WiFi\n");
-		usage_view_init();
-		lv_timer_handler();
-		ui_boot_teardown();
-		ui_settings_attach(lv_scr_act());
-		run_standalone();
+		switch (boot_ssid_scan(ssid)) {	/* may reboot (blind radio) */
+		case SSID_VISIBLE:
+			printk("[usage] mode: standalone WiFi\n");
+			usage_view_init();
+			lv_timer_handler();
+			ui_boot_teardown();
+			ui_settings_attach(lv_scr_act());
+			run_standalone();
+			break;			/* unreachable */
+		case SSID_ABSENT:
+			printk("[usage] mode: provisioning (\"%s\" not visible)\n",
+			       ssid);
+			run_provisioning("network not found");
+			break;			/* unreachable */
+		case SSID_RADIO_BLIND:
+			printk("[usage] mode: provisioning (radio blind)\n");
+			run_provisioning("no networks found; check antenna or power");
+			break;			/* unreachable */
+		}
 	}
 
 	printk("[usage] mode: provisioning\n");
-	run_provisioning();	/* reboots when done */
+	run_provisioning(NULL);	/* reboots when done */
 	return 0;
 }
