@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /*
  * Two-phase setup portal. Each phase is its own tiny HTTP/1.1 server; the
@@ -38,6 +39,12 @@ void portal_set_resume(bool token_already_stored);
  * failure reason. */
 int portal_run_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len,
 		    const char *err_msg, int timeout_s);
+
+/* The provisioning phone's UTC offset (minutes east), captured with the WiFi
+ * form. The phone is the one party that reliably knows the local timezone --
+ * the board's own HTTP lookup dies on captive-ish networks. False until a
+ * form carrying one has been submitted. */
+bool portal_last_tzmin(int32_t *out);
 
 /* Serve the sign-in page until sign_in() returns 0 (done page served,
  * returns 0) or the timeout elapses (-ETIMEDOUT). */

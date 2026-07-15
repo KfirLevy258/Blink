@@ -221,8 +221,14 @@ static void wifi_page(int sock, const char *err)
 		"<div class=spin id=sp><div class=ring></div><p>Connecting to your network\xE2\x80\xA6</p></div>"
 		"<h1>Connect to WiFi</h1>"
 		"<p class=s>Step 1 of 2 &middot; choose your network</p>"
+		/* The phone is the only party here that knows the local timezone
+		 * (the board can't fetch one reliably: hotel-style networks
+		 * black-hole plain HTTP for headless clients, seen 2026-07-14).
+		 * JS minutes are west-positive; negate to our east-positive. */
 		"<form method=POST action=/wifi "
-		"onsubmit=\"document.getElementById('sp').className='spin on'\"><div class=c>"
+		"onsubmit=\"document.getElementById('sp').className='spin on';"
+		"document.getElementById('tzmin').value=-new Date().getTimezoneOffset()\">"
+		"<input type=hidden name=tzmin id=tzmin value=''><div class=c>"
 		"<label>Network</label><select name=ssid>");
 
 	if (n_networks == 0) {
@@ -269,6 +275,19 @@ static bool resume_flow;
 void portal_set_resume(bool token_already_stored)
 {
 	resume_flow = token_already_stored;
+}
+
+/* The phone browser's UTC offset, harvested with the WiFi credentials. */
+#define TZMIN_NONE INT32_MIN
+static int32_t last_tzmin = TZMIN_NONE;
+
+bool portal_last_tzmin(int32_t *out)
+{
+	if (last_tzmin == TZMIN_NONE) {
+		return false;
+	}
+	*out = last_tzmin;
+	return true;
 }
 
 /* Served in reply to POST /wifi, right before the AP is torn down. */
@@ -397,13 +416,25 @@ int portal_run_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len,
 			ssid[0] = '\0';
 			psk[0] = '\0';
 			if (b) {
+				char tzs[8];
+
 				strncpy(body, b + 4, sizeof(body) - 1);
 				body[sizeof(body) - 1] = '\0';
 				form_field(body, "ssid", ssid, ssid_len);
 				form_field(body, "psk", psk, psk_len);
+				if (form_field(body, "tzmin", tzs, sizeof(tzs))) {
+					long v = strtol(tzs, NULL, 10);
+
+					/* Real offsets are within +/-14 h;
+					 * anything else is a mangled form. */
+					if (v >= -840 && v <= 840) {
+						last_tzmin = (int32_t)v;
+					}
+				}
 			}
-			printk("[portal] wifi ssid=\"%s\" psk=%s\n", ssid,
-			       psk[0] ? "(set)" : "(empty)");
+			printk("[portal] wifi ssid=\"%s\" psk=%s tz=%d\n", ssid,
+			       psk[0] ? "(set)" : "(empty)",
+			       last_tzmin == TZMIN_NONE ? 9999 : (int)last_tzmin);
 
 			if (!ssid[0]) {
 				wifi_page(c, "no network selected");

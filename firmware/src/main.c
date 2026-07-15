@@ -196,6 +196,15 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 		 * resume join fails and lands back here with the reason on
 		 * the form.
 		 */
+		/* The phone's timezone rides along with the credentials: the
+		 * board's own lookup is best-effort at most (captive-ish
+		 * networks eat it), and you re-provision exactly when you
+		 * change timezones. Boot wires cfg -> net_time. */
+		int32_t tzm;
+
+		if (portal_last_tzmin(&tzm)) {
+			cfg_set_tz(tzm);
+		}
 		cfg_set_wifi(ssid, psk);
 		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
 		pump_ui();
