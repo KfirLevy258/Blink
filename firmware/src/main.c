@@ -81,14 +81,27 @@ static void wifi_settle(void)
 	}
 }
 
+/*
+ * The one background thread. Used serially, never concurrently: the sign-in
+ * exchange during provisioning, or standalone mode's network loop -- a boot
+ * does one or the other. Lower priority than main (higher number): 1-2 s of
+ * ECDHE math must not starve the render loop on this single-core build.
+ */
+#define NET_WORKER_PRIO 5
+
+static K_THREAD_STACK_DEFINE(net_stack, 8192);	/* TLS-sized, like main's */
+static struct k_thread net_thread;
+
 /* ---- provisioning callbacks (portal owns HTTP, we own WiFi + OAuth) ---- */
 
+/* Runs ON THE WORKER THREAD -- no LVGL calls. ui_setup_set_state() is safe
+ * from here by design (volatile pending + apply on the LVGL thread), the
+ * same contract the net-mgmt callbacks use. */
 static int cb_sign_in(const char *code)
 {
 	struct oauth_tokens tok;
 
 	ui_setup_set_state(UI_SETUP_SIGNIN, NULL);
-	pump_ui();
 
 	/* TLS certificate checks need a real wall clock; sync it now, the first
 	 * time we actually talk to Anthropic. */
@@ -104,8 +117,38 @@ static int cb_sign_in(const char *code)
 	} else {
 		ui_setup_set_state(UI_SETUP_ERROR, NULL);
 	}
-	pump_ui();
 	return rc;
+}
+
+/*
+ * Async shell around cb_sign_in. The portal's server is single-threaded;
+ * with the 15-25 s exchange run inline it went deaf mid-sign-in, /status
+ * polls piled into the backlog, and the phone never learned the outcome
+ * (user-reported 2026-07-16, twice). The exchange runs on the worker
+ * thread instead, and the portal keeps answering polls throughout.
+ */
+static volatile int signin_result = 1;	/* <0 running, 0 ok, >0 fail */
+static char signin_code[256];
+
+static void signin_worker(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+	signin_result = (cb_sign_in(signin_code) == 0) ? 0 : 1;
+}
+
+static void cb_sign_in_start(const char *code)
+{
+	strncpy(signin_code, code, sizeof(signin_code) - 1);
+	signin_code[sizeof(signin_code) - 1] = '\0';
+	signin_result = -1;
+	k_thread_create(&net_thread, net_stack, K_THREAD_STACK_SIZEOF(net_stack),
+			signin_worker, NULL, NULL, NULL,
+			NET_WORKER_PRIO, 0, K_NO_WAIT);
+}
+
+static int cb_sign_in_poll(void)
+{
+	return signin_result;
 }
 
 /*
@@ -268,7 +311,8 @@ static void run_provisioning(const char *skip_join_reason)
 	ui_setup_set_state(UI_SETUP_WIFI_OK, url);
 	pump_ui();
 
-	signed_in = (portal_run_signin(authorize_url, cb_sign_in, 900) == 0);
+	signed_in = (portal_run_signin(authorize_url, cb_sign_in_start,
+				       cb_sign_in_poll, 900) == 0);
 out:
 	/* Reboot either way: on success come up standalone; on timeout, retry
 	 * setup from a clean slate. A cold restart also reclaims all the AP/TLS
@@ -360,10 +404,6 @@ K_MSGQ_DEFINE(net_evtq, sizeof(struct net_evt), 8, 4);
 
 /* Lower priority than main (higher number): 1-2 s of ECDHE math must not
  * starve the render loop on this single-core build. */
-#define NET_WORKER_PRIO 5
-
-static K_THREAD_STACK_DEFINE(net_stack, 8192);	/* TLS-sized, like main's */
-static struct k_thread net_thread;
 static char worker_refresh[CFG_TOKEN_MAX];
 
 static void post_stage(int stage)

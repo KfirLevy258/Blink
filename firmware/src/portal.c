@@ -543,7 +543,8 @@ int portal_run_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len,
 }
 
 int portal_run_signin(const char *authorize_url,
-		      int (*sign_in)(const char *code), int timeout_s)
+		      void (*sign_in_start)(const char *code),
+		      int (*sign_in_poll)(void), int timeout_s)
 {
 	int srv = server_open();
 
@@ -554,41 +555,26 @@ int portal_run_signin(const char *authorize_url,
 
 	int64_t deadline = k_uptime_get() + (int64_t)timeout_s * 1000;
 	bool err = false;
+	bool running = false;			/* exchange on the worker */
 	const char *status_now = "wait";	/* what /status answers */
 
 	for (;;) {
-		int c = wait_client(srv, deadline);
+		/* Short accept slices, so a finished exchange is noticed
+		 * within ~250 ms even with no client knocking. */
+		int64_t slice = k_uptime_get() + 250;
+		int c = wait_client(srv, MIN(slice, deadline));
 
-		if (c < 0) {
-			zsock_close(srv);
-			return -ETIMEDOUT;
-		}
+		if (running) {
+			int rc = sign_in_poll();
 
-		int n = recv_request(c, req, sizeof(req));
+			if (rc == 0) {
+				printk("[portal] sign-in ok; broadcasting\n");
+				running = false;
+				status_now = "done";
+				if (c >= 0) {
+					zsock_close(c);
+				}
 
-		if (n <= 0) {
-			zsock_close(c);
-			continue;
-		}
-
-		if (strncmp(req, "POST /token", 11) == 0) {
-			char *b = strstr(req, "\r\n\r\n");
-			static char code[256];
-
-			code[0] = '\0';
-			if (b) {
-				strncpy(body, b + 4, sizeof(body) - 1);
-				body[sizeof(body) - 1] = '\0';
-				form_field(body, "code", code, sizeof(code));
-			}
-			printk("[portal] token code=%s\n", code[0] ? "(set)" : "(empty)");
-
-			/* Answer first, exchange after: see working_page(). */
-			status_now = "wait";
-			working_page(c);
-			zsock_close(c);
-
-			if (sign_in(code) == 0) {
 				/* Grace window: every open copy of the page
 				 * polls /status; give them a few rounds to
 				 * hear "done" and fetch the done page before
@@ -612,11 +598,54 @@ int portal_run_signin(const char *authorize_url,
 				zsock_close(srv);
 				return 0;
 			}
-			/* Only the working page reacts to "fail" (it bounces
-			 * back to the form); the form itself ignores it, so
-			 * a stale "fail" can't cause a redirect loop. */
-			err = true;
-			status_now = "fail";
+			if (rc > 0) {
+				/* Only the working page reacts to "fail" (it
+				 * bounces back to the form); the form itself
+				 * ignores it, so a stale "fail" cannot cause
+				 * a redirect loop. */
+				running = false;
+				err = true;
+				status_now = "fail";
+			}
+		}
+
+		if (c < 0) {
+			if (k_uptime_get() >= deadline) {
+				zsock_close(srv);
+				return -ETIMEDOUT;
+			}
+			continue;	/* just the end of a slice */
+		}
+
+		int n = recv_request(c, req, sizeof(req));
+
+		if (n <= 0) {
+			zsock_close(c);
+			continue;
+		}
+
+		if (strncmp(req, "POST /token", 11) == 0) {
+			char *b = strstr(req, "\r\n\r\n");
+			static char code[256];
+
+			code[0] = '\0';
+			if (b) {
+				strncpy(body, b + 4, sizeof(body) - 1);
+				body[sizeof(body) - 1] = '\0';
+				form_field(body, "code", code, sizeof(code));
+			}
+			printk("[portal] token code=%s\n", code[0] ? "(set)" : "(empty)");
+
+			/* Answer first, exchange in the background: the
+			 * server stays responsive to /status polls the
+			 * whole time. */
+			working_page(c);
+			zsock_close(c);
+			if (!running) {
+				status_now = "wait";
+				sign_in_start(code);
+				running = true;
+			}
 			continue;
 		}
 

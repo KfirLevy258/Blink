@@ -46,9 +46,14 @@ int portal_run_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len,
  * form carrying one has been submitted. */
 bool portal_last_tzmin(int32_t *out);
 
-/* Serve the sign-in page until sign_in() returns 0 (done page served,
- * returns 0) or the timeout elapses (-ETIMEDOUT). */
+/* Serve the sign-in page. sign_in_start(code) must return quickly and kick
+ * the exchange off in the background; sign_in_poll() reports it (<0 still
+ * running, 0 success, >0 failure). The server answers /status polls the
+ * whole time -- that is how every open copy of the page, not just the tab
+ * that POSTed, learns the outcome. Returns 0 after a success has been
+ * broadcast, -ETIMEDOUT if the timeout elapses. */
 int portal_run_signin(const char *authorize_url,
-		      int (*sign_in)(const char *code), int timeout_s);
+		      void (*sign_in_start)(const char *code),
+		      int (*sign_in_poll)(void), int timeout_s);
 
 #endif /* PORTAL_H */
