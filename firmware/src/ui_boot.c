@@ -1,28 +1,39 @@
 /*
- * Boot splash. Doubles as the mode-detection window: proto_service() runs
- * under the animation, so a PC daemon's reply to our boot-time hello is
- * already in by the time main() decides USB vs WiFi. No selection screen --
- * v1 had one, and on hardware it was pure friction (the answer is always
- * detectable: a daemon talks, or it doesn't).
+ * Boot splash: the encoded eyes clip (see tools/encode_bootanim.py), which
+ * doubles as the mode-detection window: proto_service() runs between frames,
+ * so a PC daemon's reply to our boot-time hello is already in by the time
+ * main() decides USB vs WiFi. No selection screen -- v1 had one, and on
+ * hardware it was pure friction (the answer is always detectable: a daemon
+ * talks, or it doesn't).
+ *
+ * The panel is the framebuffer: frames are delta-RLE rects streamed with
+ * display_write() through a small strip buffer, and the ILI9341's GRAM
+ * retains everything between writes (there is no RAM for a 150 KB frame).
+ * LVGL coexists by ordering, not locking: the loaded screen is a bare
+ * rectangle in the clip's background color, flushed exactly once; nothing
+ * invalidates it afterwards, so the pump's lv_timer_handler() calls never
+ * repaint over the streamed frames.
  *
  * The device reboots itself on purpose all over the setup flow (the driver
  * only joins from a clean boot). Replaying the full animation after each of
  * those made every reboot feel like a fresh power-on, so intentional reboots
- * mark themselves in noinit RAM and the next boot renders the same screen
- * static, with just enough of a window for the daemon handshake.
+ * mark themselves in noinit RAM and the next boot renders only the clip's
+ * final frame, with just enough of a window for the daemon handshake.
  */
 #include <zephyr/kernel.h>
+#include <zephyr/drivers/display.h>
 #include <lvgl.h>
 
 #include "ui_boot.h"
 #include "proto.h"
+#include "bootanim.h"
+#include "bootanim_dec.h"
 
-#define COL_BG		lv_color_hex(0x0E1116)
-#define COL_TRACK	lv_color_hex(0x272C34)
-#define COL_TEXT	lv_color_hex(0xE6E8EB)
-#define COL_GREEN	lv_color_hex(0x2ECC71)
+static const struct device *const boot_disp =
+	DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
 static lv_obj_t *scr;
+static uint8_t strip_buf[4096];
 
 /* Survives a warm reset; the magic guards against power-on garbage. */
 static __noinit uint32_t skip_magic;
@@ -46,9 +57,43 @@ static void pump(int ms)
 	}
 }
 
-static void anim_opa_cb(void *obj, int32_t v)
+static void blit_cb(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+		    const uint8_t *pix, void *user)
 {
-	lv_obj_set_style_opa(obj, (lv_opa_t)v, 0);
+	struct display_buffer_descriptor desc = {
+		.buf_size = (size_t)w * h * 2,
+		.width = w,
+		.height = h,
+		.pitch = w,
+	};
+
+	ARG_UNUSED(user);
+	display_write(boot_disp, x, y, &desc, pix);
+}
+
+/* Play a BAN1 blob; frame pacing comes from the blob header, and the gaps
+ * between frames keep servicing the daemon protocol. */
+static void bootanim_play(const uint8_t *blob, size_t len)
+{
+	struct ba_header hdr;
+	size_t off;
+
+	if (!ba_parse_header(blob, len, &hdr, &off))
+		return;
+
+	int64_t next = k_uptime_get();
+
+	for (int i = 0; i < hdr.nframes; i++) {
+		if (ba_decode_frame(blob, len, &off, strip_buf,
+				    sizeof(strip_buf), blit_cb, NULL) < 0)
+			return;
+		next += 1000 / hdr.fps;
+		while (k_uptime_get() < next) {
+			proto_service();
+			lv_timer_handler();
+			k_sleep(K_MSEC(5));
+		}
+	}
 }
 
 void ui_boot_splash(void)
@@ -59,44 +104,23 @@ void ui_boot_splash(void)
 
 	scr = lv_obj_create(NULL);
 	lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_set_style_bg_color(scr, COL_BG, 0);
+	lv_obj_set_style_bg_color(scr, lv_color_hex(BOOTANIM_BG_RGB), 0);
 	lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 	lv_scr_load(scr);
-
-	lv_obj_t *title = lv_label_create(scr);
-
-	lv_label_set_text(title, "CLAUDE CODE");
-	lv_obj_set_style_text_color(title, COL_TEXT, 0);
-	lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-	lv_obj_align(title, LV_ALIGN_CENTER, 0, -14);
+	lv_refr_now(NULL);	/* the one and only LVGL paint of this screen */
 
 	if (skip) {
-		/* Same screen, no theater: the title lands at full opacity,
-		 * no spinner, and the dwell shrinks to just the daemon
-		 * round-trip (hello went out in proto_init; a live daemon
-		 * answers within milliseconds). The screen itself stays up
-		 * through the WiFi scan either way. */
+		/* Same picture, no theater: the final frame lands statically
+		 * and the dwell shrinks to the daemon round-trip (hello went
+		 * out in proto_init; a live daemon answers within
+		 * milliseconds). The screen stays up through the WiFi scan
+		 * either way. */
+		bootanim_play(bootanim_last, sizeof(bootanim_last));
 		pump(300);
 		return;
 	}
 
-	lv_obj_t *spin = lv_spinner_create(scr);
-
-	lv_obj_set_size(spin, 36, 36);
-	lv_obj_align(spin, LV_ALIGN_CENTER, 0, 34);
-	lv_obj_set_style_arc_color(spin, COL_TRACK, LV_PART_MAIN);
-	lv_obj_set_style_arc_color(spin, COL_GREEN, LV_PART_INDICATOR);
-
-	lv_anim_t a;
-
-	lv_anim_init(&a);
-	lv_anim_set_var(&a, title);
-	lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
-	lv_anim_set_duration(&a, 800);
-	lv_anim_set_exec_cb(&a, anim_opa_cb);
-	lv_anim_start(&a);
-
-	pump(2500);
+	bootanim_play(bootanim_blob, sizeof(bootanim_blob));
 }
 
 void ui_boot_teardown(void)
