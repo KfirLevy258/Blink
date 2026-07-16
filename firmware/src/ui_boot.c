@@ -72,21 +72,23 @@ static void blit_cb(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 }
 
 /* Play a BAN1 blob; frame pacing comes from the blob header, and the gaps
- * between frames keep servicing the daemon protocol. */
-static void bootanim_play(const uint8_t *blob, size_t len)
+ * between frames keep servicing the daemon protocol. Returns false if the
+ * blob is corrupt (bad header or a frame fails to decode), true once every
+ * frame has played. */
+static bool bootanim_play(const uint8_t *blob, size_t len)
 {
 	struct ba_header hdr;
 	size_t off;
 
 	if (!ba_parse_header(blob, len, &hdr, &off))
-		return;
+		return false;
 
 	int64_t next = k_uptime_get();
 
 	for (int i = 0; i < hdr.nframes; i++) {
 		if (ba_decode_frame(blob, len, &off, strip_buf,
 				    sizeof(strip_buf), blit_cb, NULL) < 0)
-			return;
+			return false;
 		next += 1000 / hdr.fps;
 		while (k_uptime_get() < next) {
 			proto_service();
@@ -94,6 +96,7 @@ static void bootanim_play(const uint8_t *blob, size_t len)
 			k_sleep(K_MSEC(5));
 		}
 	}
+	return true;
 }
 
 void ui_boot_splash(void)
@@ -115,12 +118,16 @@ void ui_boot_splash(void)
 		 * out in proto_init; a live daemon answers within
 		 * milliseconds). The screen stays up through the WiFi scan
 		 * either way. */
-		bootanim_play(bootanim_last, sizeof(bootanim_last));
+		(void)bootanim_play(bootanim_last, sizeof(bootanim_last));
 		pump(300);
 		return;
 	}
 
-	bootanim_play(bootanim_blob, sizeof(bootanim_blob));
+	if (!bootanim_play(bootanim_blob, sizeof(bootanim_blob))) {
+		/* Corrupt blob: keep the bare screen up for the same
+		 * daemon-detect window the old splash guaranteed. */
+		pump(2500);
+	}
 }
 
 void ui_boot_teardown(void)
