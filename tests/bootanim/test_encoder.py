@@ -15,8 +15,12 @@ import encode_bootanim as enc
 
 
 def synth_frames():
-    """3 frames, 16x12: flat field with a 3x3 square moving 2 px right."""
-    frames = np.full((3, 12, 16), 0x1234, dtype=np.uint16)
+    """3 frames, 16x12: noisy static field with a 3x3 square moving 2 px
+    right. The noise makes the keyframe expensive (literals) while deltas
+    stay confined to the square -- the property the size test asserts."""
+    rng = np.random.default_rng(42)
+    base = rng.integers(0, 0x10000, (12, 16), dtype=np.uint16)
+    frames = np.repeat(base[None, :, :], 3, axis=0)
     for i in range(3):
         frames[i, 4:7, 2 + 2 * i:5 + 2 * i] = 0xBEEF
     return list(frames)
