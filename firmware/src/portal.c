@@ -291,9 +291,18 @@ static void wifi_page(int sock, const char *err)
 
 static void signin_page(int sock, const char *authorize_url, bool err)
 {
+	/* The poll script is for every OTHER browser showing this page: only
+	 * the tab that POSTs the code gets the done page as its response, and
+	 * plain HTTP never updates the rest (a phone left on the QR-opened
+	 * page while the code was pasted on a computer sat on "Signing in"
+	 * forever, user-reported 2026-07-16). */
 	snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
 		"content='width=device-width,initial-scale=1'><title>Sign in</title>%s"
+		"<script>setInterval(function(){fetch('/status')"
+		".then(function(r){return r.text()})"
+		".then(function(t){if(t.indexOf('done')==0)location.href='/done'})"
+		".catch(function(){})},1000)</script>"
 		"</head><body>"
 		"<div class=spin id=sp><div class=ring></div><p>Signing in\xE2\x80\xA6</p></div>"
 		"<h1>Sign in to Claude</h1>"
@@ -550,6 +559,27 @@ int portal_run_signin(const char *authorize_url,
 			if (sign_in(code) == 0) {
 				done_page(c);
 				zsock_close(c);
+
+				/* Grace window: any other browser still on
+				 * the sign-in page polls /status; give it a
+				 * few rounds to hear "done" and fetch the
+				 * done page before the server goes away. */
+				int64_t grace = k_uptime_get() + 6000;
+
+				for (;;) {
+					int c2 = wait_client(srv, grace);
+
+					if (c2 < 0) {
+						break;
+					}
+					if (recv_request(c2, req, sizeof(req)) > 0 &&
+					    strncmp(req, "GET /status", 11) == 0) {
+						send_html(c2, "done");
+					} else {
+						done_page(c2);
+					}
+					zsock_close(c2);
+				}
 				zsock_close(srv);
 				return 0;
 			}
@@ -559,7 +589,9 @@ int portal_run_signin(const char *authorize_url,
 			continue;
 		}
 
-		if (strncmp(req, "GET / ", 6) == 0) {
+		if (strncmp(req, "GET /status", 11) == 0) {
+			send_html(c, "wait");
+		} else if (strncmp(req, "GET / ", 6) == 0) {
 			signin_page(c, authorize_url, err);
 		} else {
 			redirect(c);
