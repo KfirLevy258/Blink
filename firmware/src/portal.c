@@ -370,6 +370,32 @@ static void ack_page(int sock, const char *ssid)
 	send_html(sock, page);
 }
 
+/*
+ * Served immediately in reply to POST /token, BEFORE the exchange runs. The
+ * exchange is 15-25 s of TLS on this CPU with the server blocked; holding
+ * the POST open that long is exactly the response that kept dying on real
+ * phones (user-reported 2026-07-16). The page then learns the outcome the
+ * same way every other open copy does: by polling /status.
+ */
+static void working_page(int sock)
+{
+	snprintf(page, sizeof(page),
+		"<!doctype html><html><head><meta name=viewport "
+		"content='width=device-width,initial-scale=1'><title>Signing in</title>%s"
+		"<script>setInterval(function(){fetch('/status')"
+		".then(function(r){return r.text()})"
+		".then(function(t){if(t.indexOf('done')==0)location.href='/done';"
+		"else if(t.indexOf('fail')==0)location.href='/'})"
+		".catch(function(){})},1000)</script>"
+		"</head><body>"
+		"<div class='spin on'><div class=ring></div>"
+		"<p>Signing in on the device\xE2\x80\xA6<br>"
+		"This page updates by itself.</p></div>"
+		"</body></html>", CSS);
+
+	send_html(sock, page);
+}
+
 static void done_page(int sock)
 {
 	send_html(sock,
@@ -406,7 +432,7 @@ static int server_open(void)
 	};
 
 	if (zsock_bind(srv, (struct sockaddr *)&a, sizeof(a)) < 0 ||
-	    zsock_listen(srv, 2) < 0) {
+	    zsock_listen(srv, 4) < 0) {
 		zsock_close(srv);
 		return -errno;
 	}
@@ -528,6 +554,7 @@ int portal_run_signin(const char *authorize_url,
 
 	int64_t deadline = k_uptime_get() + (int64_t)timeout_s * 1000;
 	bool err = false;
+	const char *status_now = "wait";	/* what /status answers */
 
 	for (;;) {
 		int c = wait_client(srv, deadline);
@@ -556,14 +583,16 @@ int portal_run_signin(const char *authorize_url,
 			}
 			printk("[portal] token code=%s\n", code[0] ? "(set)" : "(empty)");
 
-			if (sign_in(code) == 0) {
-				done_page(c);
-				zsock_close(c);
+			/* Answer first, exchange after: see working_page(). */
+			status_now = "wait";
+			working_page(c);
+			zsock_close(c);
 
-				/* Grace window: any other browser still on
-				 * the sign-in page polls /status; give it a
-				 * few rounds to hear "done" and fetch the
-				 * done page before the server goes away. */
+			if (sign_in(code) == 0) {
+				/* Grace window: every open copy of the page
+				 * polls /status; give them a few rounds to
+				 * hear "done" and fetch the done page before
+				 * the server goes away. */
 				int64_t grace = k_uptime_get() + 6000;
 
 				for (;;) {
@@ -583,14 +612,16 @@ int portal_run_signin(const char *authorize_url,
 				zsock_close(srv);
 				return 0;
 			}
+			/* Only the working page reacts to "fail" (it bounces
+			 * back to the form); the form itself ignores it, so
+			 * a stale "fail" can't cause a redirect loop. */
 			err = true;
-			signin_page(c, authorize_url, true);
-			zsock_close(c);
+			status_now = "fail";
 			continue;
 		}
 
 		if (strncmp(req, "GET /status", 11) == 0) {
-			send_html(c, "wait");
+			send_html(c, status_now);
 		} else if (strncmp(req, "GET / ", 6) == 0) {
 			signin_page(c, authorize_url, err);
 		} else {
