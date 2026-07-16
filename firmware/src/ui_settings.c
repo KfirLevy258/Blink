@@ -13,6 +13,7 @@
 
 #include "ui_settings.h"
 #include "cfg_store.h"
+#include "ui_boot.h"
 
 #define COL_BG		lv_color_hex(0x0E1116)
 #define COL_TRACK	lv_color_hex(0x272C34)
@@ -52,6 +53,7 @@ static void do_pending(void)
 		break;
 	}
 	k_msleep(200);	/* let the NVS writes land */
+	ui_boot_mark_intentional_reboot();
 	sys_reboot(SYS_REBOOT_COLD);
 }
 

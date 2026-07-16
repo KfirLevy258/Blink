@@ -154,6 +154,7 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 				printk("[wifi] radio blind (0 scans); reboot %u/%u to re-roll\n",
 				       blind_boots, BLIND_MAX);
 				k_msleep(300);
+				ui_boot_mark_intentional_reboot();
 				sys_reboot(SYS_REBOOT_COLD);
 			}
 			blind_boots = 0;
@@ -207,6 +208,7 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 			pump_ui();
 			k_msleep(10);
 		}
+		ui_boot_mark_intentional_reboot();
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 }
@@ -277,6 +279,7 @@ out:
 		pump_ui();
 		k_sleep(K_MSEC(10));
 	}
+	ui_boot_mark_intentional_reboot();
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
@@ -318,6 +321,7 @@ static enum ssid_scan boot_ssid_scan(const char *ssid)
 			printk("[wifi] radio blind (0 scans); reboot %u/%u to re-roll\n",
 			       blind_boots, BLIND_MAX);
 			k_msleep(300);
+			ui_boot_mark_intentional_reboot();
 			sys_reboot(SYS_REBOOT_COLD);
 		}
 		/* Persistently blind: stop guessing. The portal (typed-SSID
@@ -396,6 +400,7 @@ static void net_worker(void *a, void *b, void *c)
 		cfg_clear_token();
 		post_status(USAGE_STATUS_ERROR);
 		k_sleep(K_SECONDS(3));
+		ui_boot_mark_intentional_reboot();
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 	cfg_set_token(tok.refresh);	/* persist a rotated token before use */

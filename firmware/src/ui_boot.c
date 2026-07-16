@@ -4,6 +4,12 @@
  * already in by the time main() decides USB vs WiFi. No selection screen --
  * v1 had one, and on hardware it was pure friction (the answer is always
  * detectable: a daemon talks, or it doesn't).
+ *
+ * The device reboots itself on purpose all over the setup flow (the driver
+ * only joins from a clean boot). Replaying the full animation after each of
+ * those made every reboot feel like a fresh power-on, so intentional reboots
+ * mark themselves in noinit RAM and the next boot renders the same screen
+ * static, with just enough of a window for the daemon handshake.
  */
 #include <zephyr/kernel.h>
 #include <lvgl.h>
@@ -17,6 +23,15 @@
 #define COL_GREEN	lv_color_hex(0x2ECC71)
 
 static lv_obj_t *scr;
+
+/* Survives a warm reset; the magic guards against power-on garbage. */
+static __noinit uint32_t skip_magic;
+#define SKIP_MAGIC 0xb007512bu
+
+void ui_boot_mark_intentional_reboot(void)
+{
+	skip_magic = SKIP_MAGIC;
+}
 
 /* Pump UI + protocol for `ms`, so the splash doubles as the daemon-detect
  * window. */
@@ -38,6 +53,10 @@ static void anim_opa_cb(void *obj, int32_t v)
 
 void ui_boot_splash(void)
 {
+	bool skip = (skip_magic == SKIP_MAGIC);
+
+	skip_magic = 0;
+
 	scr = lv_obj_create(NULL);
 	lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_set_style_bg_color(scr, COL_BG, 0);
@@ -50,6 +69,16 @@ void ui_boot_splash(void)
 	lv_obj_set_style_text_color(title, COL_TEXT, 0);
 	lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
 	lv_obj_align(title, LV_ALIGN_CENTER, 0, -14);
+
+	if (skip) {
+		/* Same screen, no theater: the title lands at full opacity,
+		 * no spinner, and the dwell shrinks to just the daemon
+		 * round-trip (hello went out in proto_init; a live daemon
+		 * answers within milliseconds). The screen itself stays up
+		 * through the WiFi scan either way. */
+		pump(300);
+		return;
+	}
 
 	lv_obj_t *spin = lv_spinner_create(scr);
 
