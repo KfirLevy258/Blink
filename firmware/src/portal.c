@@ -1,9 +1,11 @@
 /*
  * Two-stage setup portal: WiFi first, then Claude sign-in.
  *
- * Hand-rolled HTTP/1.1 on the SoftAP -- the whole surface is a few routes and
- * DRAM is the binding constraint (no PSRAM). Each POST blocks until its step
- * finishes and then returns the next page, so the flow needs no client-side JS.
+ * Hand-rolled HTTP/1.1 -- phase 1 on the SoftAP, phase 2 on the home LAN.
+ * The whole surface is a few routes and DRAM is the binding constraint (no
+ * PSRAM). Each POST blocks until its step finishes and then returns the next
+ * page; the only client-side JS is one onsubmit line harvesting the phone's
+ * UTC offset (the board cannot fetch a timezone reliably itself).
  *
  * Two device quirks are designed around, both learned the hard way:
  *  - Non-blocking accept()+poll, never blocking accept(): the blocking path
@@ -41,6 +43,41 @@ void portal_set_networks(char list[][33], int n)
 		strncpy(networks[i], list[i], sizeof(networks[i]) - 1);
 		networks[i][sizeof(networks[i]) - 1] = '\0';
 	}
+}
+
+/*
+ * Escape HTML specials. SSIDs are radio input: any neighbor can broadcast
+ * "<script>..." as a network name, and it would land verbatim in the
+ * phone's browser. Worst case one byte becomes six ("&quot;").
+ */
+static void html_escape(const char *src, char *dst, size_t dstlen)
+{
+	size_t o = 0;
+
+	while (src && *src && o + 1 < dstlen) {
+		const char *rep = NULL;
+
+		switch (*src) {
+		case '<':  rep = "&lt;";   break;
+		case '>':  rep = "&gt;";   break;
+		case '&':  rep = "&amp;";  break;
+		case '"':  rep = "&quot;"; break;
+		case '\'': rep = "&#39;";  break;
+		}
+		if (rep) {
+			size_t l = strlen(rep);
+
+			if (o + l + 1 > dstlen) {
+				break;
+			}
+			memcpy(dst + o, rep, l);
+			o += l;
+		} else {
+			dst[o++] = *src;
+		}
+		src++;
+	}
+	dst[o] = '\0';
 }
 
 static void url_decode(char *dst, size_t dlen, const char *src, size_t slen)
@@ -214,9 +251,12 @@ static char page[3072];
 
 static void wifi_page(int sock, const char *err)
 {
+	/* CSS rides in as a %s argument: its literal '%' (width:100%) inside a
+	 * format string is an unknown conversion -- undefined behavior that
+	 * happened to render. */
 	int n = snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
-		"content='width=device-width,initial-scale=1'><title>Setup</title>" CSS
+		"content='width=device-width,initial-scale=1'><title>Setup</title>%s"
 		"</head><body>"
 		"<div class=spin id=sp><div class=ring></div><p>Connecting to your network\xE2\x80\xA6</p></div>"
 		"<h1>Connect to WiFi</h1>"
@@ -229,13 +269,16 @@ static void wifi_page(int sock, const char *err)
 		"onsubmit=\"document.getElementById('sp').className='spin on';"
 		"document.getElementById('tzmin').value=-new Date().getTimezoneOffset()\">"
 		"<input type=hidden name=tzmin id=tzmin value=''><div class=c>"
-		"<label>Network</label><select name=ssid>");
+		"<label>Network</label><select name=ssid>", CSS);
 
 	if (n_networks == 0) {
 		n += snprintf(page + n, sizeof(page) - n, "<option value=''>(none found)</option>");
 	}
+	char esc[6 * 32 + 1];
+
 	for (int i = 0; i < n_networks && n < (int)sizeof(page) - 300; i++) {
-		n += snprintf(page + n, sizeof(page) - n, "<option>%s</option>", networks[i]);
+		html_escape(networks[i], esc, sizeof(esc));
+		n += snprintf(page + n, sizeof(page) - n, "<option>%s</option>", esc);
 	}
 	n += snprintf(page + n, sizeof(page) - n,
 		"</select>"
@@ -250,7 +293,7 @@ static void signin_page(int sock, const char *authorize_url, bool err)
 {
 	snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
-		"content='width=device-width,initial-scale=1'><title>Sign in</title>" CSS
+		"content='width=device-width,initial-scale=1'><title>Sign in</title>%s"
 		"</head><body>"
 		"<div class=spin id=sp><div class=ring></div><p>Signing in\xE2\x80\xA6</p></div>"
 		"<h1>Sign in to Claude</h1>"
@@ -264,7 +307,7 @@ static void signin_page(int sock, const char *authorize_url, bool err)
 		"<label>Login code</label>"
 		"<textarea name=code rows=3 placeholder='paste login code here'></textarea>"
 		"%s<button type=submit>Finish setup</button></form></div></body></html>",
-		authorize_url,
+		CSS, authorize_url,
 		err ? "<div class=e>That code didn't work. Sign in again and retry.</div>" : "");
 
 	send_html(sock, page);
@@ -302,15 +345,18 @@ static void ack_page(int sock, const char *ssid)
 		: "Watch the device screen. When it shows a new QR code, the device is on "
 		  "your WiFi \xE2\x80\x94 scan that code to finish signing in.<br><br>";
 
+	char esc[6 * 32 + 1];
+
+	html_escape(ssid, esc, sizeof(esc));
 	snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
-		"content='width=device-width,initial-scale=1'><title>Connecting</title>" CSS
+		"content='width=device-width,initial-scale=1'><title>Connecting</title>%s"
 		"</head><body><h1>Joining %s\xE2\x80\xA6</h1>"
 		"<p class=s>This setup network is shutting down now.</p>"
 		"<div class=c><p style='margin:0;font-size:15px'>"
 		"%s"
 		"If joining fails, reconnect to the setup network to try again."
-		"</p></div></body></html>", ssid, next_step);
+		"</p></div></body></html>", CSS, esc, next_step);
 
 	send_html(sock, page);
 }

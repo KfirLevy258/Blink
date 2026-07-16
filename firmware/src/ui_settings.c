@@ -19,6 +19,7 @@
 #define COL_TEXT	lv_color_hex(0xE6E8EB)
 #define COL_DIM		lv_color_hex(0x8A9199)
 #define COL_RED		lv_color_hex(0xE74C3C)
+#define COL_GREEN	lv_color_hex(0x2ECC71)
 
 enum action {
 	ACT_WIFI,	/* forget network, keep token */
@@ -74,6 +75,9 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
 
 	lv_obj_set_size(b, 200, 40);
 	lv_obj_set_style_bg_color(b, bg, 0);
+	/* A close-swipe starting ON a button must still reach the panel's
+	 * gesture handler instead of dying in the button. */
+	lv_obj_add_flag(b, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, user);
 
 	lv_obj_t *l = lv_label_create(b);
@@ -102,7 +106,10 @@ static void show_confirm(void)
 	lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(q, LV_ALIGN_TOP_MID, 0, 40);
 
-	lv_obj_t *yes = mk_btn(confirm, "Yes, do it", COL_RED,
+	/* Red is reserved for the one action that costs a full re-setup;
+	 * painting every confirm red made them all look equally scary. */
+	lv_obj_t *yes = mk_btn(confirm, "Yes, do it",
+			       pending == ACT_FACTORY ? COL_RED : COL_GREEN,
 			       confirm_yes_cb, NULL);
 
 	lv_obj_align(yes, LV_ALIGN_BOTTOM_MID, 0, -70);

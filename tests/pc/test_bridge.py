@@ -80,6 +80,19 @@ class TestBridge(unittest.TestCase):
         self.bridge.poll_once()
         self.assertEqual(self.sent[-1]["t"], "usage")
 
+    def test_hello_with_failed_fetch_still_welcomes(self):
+        """A dead API must not mute the handshake: the board needs welcome
+        (mode detection) and time (clock) even when usage is unavailable,
+        and the failure must arrive as a status message, not an exception."""
+        def boom():
+            raise RuntimeError("api down")
+        b = Bridge(write_msg=self.sent.append, fetch_usage=boom,
+                   now=self.clock.now, wall=lambda: (1752444000, 180))
+        b.on_message({"t": "hello", "v": 2, "board_id": "ab"})
+        self.assertEqual([m["t"] for m in self.sent],
+                         ["welcome", "time", "status"])
+        self.assertEqual(self.sent[-1]["state"], "error")
+
     def test_poll_error_sends_status(self):
         def boom():
             raise RuntimeError("429")

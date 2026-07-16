@@ -84,6 +84,15 @@ int tz_fetch_offset(int32_t *offset_min)
 	zsock_close(sock);
 	buf[len] = '\0';
 
+	/* A non-200 (redirect to a captive portal, 429, 5xx) can still carry a
+	 * JSON-ish body; grepping "offset" out of an error page would store
+	 * garbage as the timezone. */
+	if (strncmp(buf, "HTTP/1.1 200", 12) != 0 &&
+	    strncmp(buf, "HTTP/1.0 200", 12) != 0) {
+		printk("[tz] non-200 reply: \"%.32s\"\n", buf);
+		return -EBADMSG;
+	}
+
 	/* Parse only the body: headers are not ours to grep for JSON keys. */
 	const char *body = strstr(buf, "\r\n\r\n");
 	double off_s;
