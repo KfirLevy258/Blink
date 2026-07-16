@@ -379,14 +379,28 @@ static void ack_page(int sock, const char *ssid)
  */
 static void working_page(int sock)
 {
+	/* The poll script has to survive the phone missing the "done" window
+	 * entirely: browsers suspend timers the moment the screen dims, and
+	 * the user is usually watching the DEVICE at this point. If the
+	 * board answered us before and now refuses connections, it finished
+	 * and rebooted -- say so instead of spinning forever (user-reported
+	 * 2026-07-16). */
 	snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
 		"content='width=device-width,initial-scale=1'><title>Signing in</title>%s"
-		"<script>setInterval(function(){fetch('/status')"
+		"<script>var ok=0,bad=0;"
+		"setInterval(function(){fetch('/status')"
 		".then(function(r){return r.text()})"
-		".then(function(t){if(t.indexOf('done')==0)location.href='/done';"
+		".then(function(t){ok++;bad=0;"
+		"if(t.indexOf('done')==0)location.href='/done';"
 		"else if(t.indexOf('fail')==0)location.href='/'})"
-		".catch(function(){})},1000)</script>"
+		".catch(function(){bad++;"
+		"if(ok>0&&bad>=4){document.body.innerHTML="
+		"'<h1>All set \\u2713<\\/h1>"
+		"<p class=s>The device finished signing in and restarted. "
+		"When its screen shows the gauges, you are done \\u2014 "
+		"you can close this page.<\\/p>'}"
+		"})},800)</script>"
 		"</head><body>"
 		"<div class='spin on'><div class=ring></div>"
 		"<p>Signing in on the device\xE2\x80\xA6<br>"
@@ -578,8 +592,10 @@ int portal_run_signin(const char *authorize_url,
 				/* Grace window: every open copy of the page
 				 * polls /status; give them a few rounds to
 				 * hear "done" and fetch the done page before
-				 * the server goes away. */
-				int64_t grace = k_uptime_get() + 6000;
+				 * the server goes away. Pages that sleep
+				 * through this learn the outcome from the
+				 * connection-refused heuristic instead. */
+				int64_t grace = k_uptime_get() + 8000;
 
 				for (;;) {
 					int c2 = wait_client(srv, grace);
