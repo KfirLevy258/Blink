@@ -28,6 +28,24 @@ static const uint8_t blob[] = {
 	0x01, 0x12, 0x34, 0x56, 0x78,
 };
 
+/* Payload shorter than the rect's pixel count: a run of 7 cannot fill a
+ * 12-pixel rect; the decoder must hit the payload end and fail, not
+ * overread past it. */
+static const uint8_t short_run[] = {
+	'B', 'A', 'N', '1', 4, 0, 3, 0, 12, 1, 1, 0,
+	1,
+	0, 0, 0, 0, 4, 0, 3, 0, 3, 0, 0, 0,
+	0x85, 0xbe, 0xef,	/* run of 7, rect needs 12 */
+};
+
+/* Literal op promises 12 pixels but the payload holds only one. */
+static const uint8_t short_lit[] = {
+	'B', 'A', 'N', '1', 4, 0, 3, 0, 12, 1, 1, 0,
+	1,
+	0, 0, 0, 0, 4, 0, 3, 0, 3, 0, 0, 0,
+	0x0b, 0x12, 0x34,	/* ctrl says 12 literals, 1 present */
+};
+
 static uint8_t canvas[3][4][2];
 static int blits;
 
@@ -76,6 +94,15 @@ int main(void)
 	off = 12;
 	CHECK(ba_decode_frame(blob, 20, &off, strip, sizeof(strip),
 			      blit, NULL) == -1, "truncated blob -> -1");
+
+	off = 12;
+	CHECK(ba_decode_frame(short_run, sizeof(short_run), &off, strip,
+			      sizeof(strip), blit, NULL) == -1,
+	      "run underruns rect pixel count -> -1");
+	off = 12;
+	CHECK(ba_decode_frame(short_lit, sizeof(short_lit), &off, strip,
+			      sizeof(strip), blit, NULL) == -1,
+	      "literals underrun rect pixel count -> -1");
 
 	printf("%s\n", failures ? "FAILURES" : "all ok");
 	return failures != 0;
