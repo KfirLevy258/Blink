@@ -12,6 +12,7 @@
 
 #include "ui_setup.h"
 #include "net_wifi.h"
+#include "fmt.h"
 
 /* Backgrounds are deliberately two distinct values so the QR panel reads as its
  * own zone rather than blending into the screen.
@@ -52,9 +53,9 @@ static volatile int applied = UI_SETUP_WAIT;	/* last state apply() ran */
 
 static void on_station(int count)
 {
-	/* Once the join attempt starts the AP is gone; stragglers must not
-	 * drag the screen back to the boarding-pass join steps. */
-	if (applied >= UI_SETUP_CONNECTING) {
+	/* Once the AP is gone (reboot-to-join or the join itself), stragglers
+	 * must not drag the screen back to the boarding-pass join steps. */
+	if (applied >= UI_SETUP_REBOOT) {
 		return;
 	}
 	if (count > 0 && pending < UI_SETUP_PHONE) {
@@ -105,12 +106,15 @@ static void build_step(struct step *s, lv_obj_t *parent, const char *num,
 	/* Constrain the text column so a long title can never run under the QR
 	 * panel: it dots ("Sign in to C...") instead of overflowing the seam.
 	 * Left column is 188px wide (panel starts at 320-132); text starts at 56.
+	 * Height is pinned to one line: with auto height LONG_DOT never fires --
+	 * the label just wraps and the extra line lands on the next step (a long
+	 * SSID sat on top of the Stage 3 title, 2026-07-15).
 	 */
 	s->title = lv_label_create(parent);
 	lv_label_set_text(s->title, title);
 	lv_obj_set_style_text_font(s->title, &lv_font_montserrat_14, 0);
 	lv_obj_set_style_text_color(s->title, COL_TEXT, 0);
-	lv_obj_set_width(s->title, 128);
+	lv_obj_set_size(s->title, 128, 17);
 	lv_label_set_long_mode(s->title, LV_LABEL_LONG_DOT);
 	lv_obj_align(s->title, LV_ALIGN_TOP_LEFT, 56, y - 1);
 
@@ -118,7 +122,7 @@ static void build_step(struct step *s, lv_obj_t *parent, const char *num,
 	lv_label_set_text(s->sub, sub);
 	lv_obj_set_style_text_font(s->sub, &lv_font_montserrat_14, 0);
 	lv_obj_set_style_text_color(s->sub, COL_DIM, 0);
-	lv_obj_set_width(s->sub, 128);
+	lv_obj_set_size(s->sub, 128, 17);
 	lv_label_set_long_mode(s->sub, LV_LABEL_LONG_DOT);
 	lv_obj_align(s->sub, LV_ALIGN_TOP_LEFT, 56, y + 18);
 }
@@ -139,8 +143,8 @@ void ui_setup_show(void)
 	lv_obj_set_style_text_letter_space(brand, 2, 0);
 	lv_obj_align(brand, LV_ALIGN_TOP_LEFT, 16, 14);
 
-	build_step(&steps[0], scr, "1", "Join device", "scan the code", 54);
-	build_step(&steps[1], scr, "2", "Connect WiFi", "pick network", 110);
+	build_step(&steps[0], scr, "1", "Join device", "Scan the code", 54);
+	build_step(&steps[1], scr, "2", "Connect WiFi", "Pick network", 110);
 	build_step(&steps[2], scr, "3", "Sign in", "Claude account", 166);
 
 	/* QR panel -- darker ground, green seam on the left edge. */
@@ -169,7 +173,7 @@ void ui_setup_show(void)
 	lv_obj_align(qr, LV_ALIGN_TOP_MID, 0, 46);
 
 	cap = lv_label_create(panel);
-	lv_label_set_text(cap, "scan to\nbegin");
+	lv_label_set_text(cap, "Scan to\nbegin");
 	lv_obj_set_width(cap, 124);
 	lv_label_set_long_mode(cap, LV_LABEL_LONG_WRAP);
 	lv_obj_set_style_text_color(cap, COL_DIM, 0);
@@ -187,7 +191,7 @@ void ui_setup_show(void)
 
 	lv_obj_t *pl = lv_label_create(pill);
 
-	lv_label_set_text(pl, LV_SYMBOL_OK "  online");
+	lv_label_set_text(pl, LV_SYMBOL_OK "  Online");
 	lv_obj_set_style_text_color(pl, COL_GREEN, 0);
 	lv_obj_center(pl);
 	lv_obj_add_flag(pill, LV_OBJ_FLAG_HIDDEN);
@@ -208,30 +212,42 @@ static void apply(enum ui_setup_state st, const char *detail)
 	case UI_SETUP_WAIT:
 		step_active(&steps[0]);  lv_label_set_text(steps[0].numlbl, "1");
 		lv_label_set_text(steps[0].title, "Join device");
-		lv_label_set_text(steps[0].sub, "scan the code");
+		lv_label_set_text(steps[0].sub, "Scan the code");
 		step_pending(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
 		step_pending(&steps[2]); lv_label_set_text(steps[2].numlbl, "3");
 		lv_obj_clear_flag(qr, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_clear_flag(cap, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_add_flag(pill, LV_OBJ_FLAG_HIDDEN);
 		lv_qrcode_update(qr, net_wifi_ap_qr(), strlen(net_wifi_ap_qr()));
-		lv_label_set_text(cap, "scan to\nbegin");
+		lv_label_set_text(cap, "Scan to\nbegin");
 		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_PHONE:
 		step_done(&steps[0]);
 		lv_label_set_text(steps[0].title, "Phone joined");
-		lv_label_set_text(steps[0].sub, "use the page");
+		lv_label_set_text(steps[0].sub, "Use the page");
 		step_active(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
-		lv_label_set_text(cap, "page open\non phone");
+		lv_label_set_text(cap, "Page open\non phone");
+		break;
+	case UI_SETUP_REBOOT:
+		/* The join only works from a clean boot on this driver, so the
+		 * device restarts here by design -- say so, or the restart
+		 * reads as a crash (user-reported 2026-07-15). */
+		step_done(&steps[0]);
+		step_active(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
+		lv_label_set_text(steps[1].title, "Connect WiFi");
+		lv_label_set_text(steps[1].sub, detail ? detail : "Restarting...");
+		lv_obj_add_flag(qr, LV_OBJ_FLAG_HIDDEN);
+		lv_label_set_text(cap, "Restarting\nto join...");
+		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_CONNECTING:
 		step_done(&steps[0]);
 		step_active(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
 		lv_label_set_text(steps[1].title, "Connect WiFi");
-		lv_label_set_text(steps[1].sub, detail ? detail : "joining\xE2\x80\xA6");
+		lv_label_set_text(steps[1].sub, detail ? detail : "Joining...");
 		lv_obj_add_flag(qr, LV_OBJ_FLAG_HIDDEN);
-		lv_label_set_text(cap, "joining\nnetwork\xE2\x80\xA6");
+		lv_label_set_text(cap, "Joining\nnetwork...");
 		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_WIFI_OK:
@@ -244,22 +260,22 @@ static void apply(enum ui_setup_state st, const char *detail)
 			lv_qrcode_update(qr, detail, strlen(detail));
 		}
 		lv_obj_clear_flag(qr, LV_OBJ_FLAG_HIDDEN);
-		lv_label_set_text(cap, detail ? detail : "scan to\nsign in");
+		lv_label_set_text(cap, detail ? detail : "Scan to\nsign in");
 		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_SIGNIN:
-		lv_label_set_text(cap, "signing\nin\xE2\x80\xA6");
+		lv_label_set_text(cap, "Signing\nin...");
 		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_DONE:
 		step_done(&steps[2]);
 		lv_obj_add_flag(qr, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_clear_flag(pill, LV_OBJ_FLAG_HIDDEN);
-		lv_label_set_text(cap, "all set");
+		lv_label_set_text(cap, "All set");
 		lv_obj_set_style_text_color(cap, COL_GREEN, 0);
 		break;
 	case UI_SETUP_ERROR:
-		lv_label_set_text(cap, detail ? detail : "error");
+		lv_label_set_text(cap, detail ? detail : "Error");
 		lv_obj_set_style_text_color(cap, COL_RED, 0);
 		break;
 	}
@@ -268,8 +284,9 @@ static void apply(enum ui_setup_state st, const char *detail)
 void ui_setup_set_state(enum ui_setup_state state, const char *detail)
 {
 	if (detail) {
-		strncpy(pending_detail, detail, sizeof(pending_detail) - 1);
-		pending_detail[sizeof(pending_detail) - 1] = '\0';
+		/* Built-in fonts are ASCII-only; an SSID's smart quote would
+		 * draw as an empty box. (URLs pass through unchanged.) */
+		fmt_ascii(detail, pending_detail, sizeof(pending_detail));
 	} else {
 		pending_detail[0] = '\0';
 	}

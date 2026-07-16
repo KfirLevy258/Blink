@@ -41,6 +41,22 @@ static bool built;
 static bool have_data;		/* distinguishes "no host yet" from "host lost" */
 static int32_t age_s = -1;	/* seconds since the last usage message */
 
+/* One CONNECTING screen for the whole standalone boot: a segmented bar that
+ * fills green as the worker gets through it, current step named below
+ * (option D of the mockups, user-picked 2026-07-15). The clock sync still
+ * runs but is not worth a segment of its own -- it hides inside "Sign in". */
+#define BOOT_STEPS 3
+static lv_obj_t *boot_seg[BOOT_STEPS];
+static lv_obj_t *boot_cnt;	/* "1 / 3" over the bar */
+static lv_obj_t *boot_step;	/* current step name under the bar */
+static lv_obj_t *boot_spin;
+static int boot_active = -1;	/* segment currently pulsing, -1 = none */
+static const char *const boot_txt[BOOT_STEPS] = {
+	"Join the WiFi",
+	"Sign in to Anthropic",
+	"Fetch first usage",
+};
+
 static lv_color_t severity(double pct)
 {
 	if (pct >= 90.0) {
@@ -193,9 +209,36 @@ void usage_view_init(void)
 
 	wait_sub = lv_label_create(overlay);
 
-	lv_label_set_text(wait_sub, "start the bridge daemon on the PC");
+	lv_label_set_text(wait_sub, "Start the bridge daemon on the PC");
 	lv_obj_set_style_text_color(wait_sub, COL_DIM, 0);
 	lv_obj_align(wait_sub, LV_ALIGN_CENTER, 0, 10);
+
+	/* Boot progress bar (standalone mode): hidden until the first
+	 * usage_view_boot_stage() call swaps the takeover into bar form. */
+	boot_cnt = lv_label_create(overlay);
+	lv_label_set_text(boot_cnt, "");
+	lv_obj_set_style_text_color(boot_cnt, COL_DIM, 0);
+	lv_obj_set_style_text_letter_space(boot_cnt, 2, 0);
+	lv_obj_align(boot_cnt, LV_ALIGN_TOP_MID, 0, 88);
+	lv_obj_add_flag(boot_cnt, LV_OBJ_FLAG_HIDDEN);
+
+	for (int i = 0; i < BOOT_STEPS; i++) {
+		boot_seg[i] = lv_obj_create(overlay);
+		lv_obj_set_size(boot_seg[i], 76, 8);
+		lv_obj_set_style_radius(boot_seg[i], 4, 0);
+		lv_obj_set_style_border_width(boot_seg[i], 0, 0);
+		lv_obj_set_style_bg_color(boot_seg[i], COL_TRACK, 0);
+		lv_obj_set_style_bg_opa(boot_seg[i], LV_OPA_COVER, 0);
+		lv_obj_clear_flag(boot_seg[i], LV_OBJ_FLAG_SCROLLABLE);
+		lv_obj_align(boot_seg[i], LV_ALIGN_TOP_MID, (i - 1) * 82, 118);
+		lv_obj_add_flag(boot_seg[i], LV_OBJ_FLAG_HIDDEN);
+	}
+
+	boot_step = lv_label_create(overlay);
+	lv_label_set_text(boot_step, "");
+	lv_obj_set_style_text_color(boot_step, COL_DIM, 0);
+	lv_obj_align(boot_step, LV_ALIGN_TOP_MID, 0, 146);
+	lv_obj_add_flag(boot_step, LV_OBJ_FLAG_HIDDEN);
 
 	lv_obj_t *spin = lv_spinner_create(overlay);
 
@@ -203,6 +246,7 @@ void usage_view_init(void)
 	lv_obj_align(spin, LV_ALIGN_CENTER, 0, 52);
 	lv_obj_set_style_arc_color(spin, COL_TRACK, LV_PART_MAIN);
 	lv_obj_set_style_arc_color(spin, COL_GREEN, LV_PART_INDICATOR);
+	boot_spin = spin;
 
 	built = true;
 }
@@ -325,6 +369,70 @@ void usage_view_set_waiting(const char *title, const char *sub)
 	}
 	lv_label_set_text(wait_big, title);
 	lv_label_set_text(wait_sub, sub);
+}
+
+static void boot_pulse_cb(void *obj, int32_t v)
+{
+	lv_obj_set_style_bg_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
+}
+
+void usage_view_boot_stage(int stage)
+{
+	if (!built) {
+		return;
+	}
+	if (stage > BOOT_STEPS) {
+		stage = BOOT_STEPS;
+	}
+
+	/* Bar form: title high, USB-mode sub and spinner out of the way.
+	 * Idempotent, so every stage call may just restate it. */
+	lv_label_set_text(wait_big, "CONNECTING");
+	lv_obj_align(wait_big, LV_ALIGN_TOP_MID, 0, 44);
+	lv_obj_add_flag(wait_sub, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_add_flag(boot_spin, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_clear_flag(boot_cnt, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_clear_flag(boot_step, LV_OBJ_FLAG_HIDDEN);
+
+	if (boot_active >= 0 && boot_active != stage) {
+		lv_anim_delete(boot_seg[boot_active], boot_pulse_cb);
+	}
+
+	for (int i = 0; i < BOOT_STEPS; i++) {
+		lv_obj_clear_flag(boot_seg[i], LV_OBJ_FLAG_HIDDEN);
+		lv_obj_set_style_bg_opa(boot_seg[i], LV_OPA_COVER, 0);
+		lv_obj_set_style_bg_color(boot_seg[i],
+					  i < stage ? COL_GREEN : COL_TRACK, 0);
+	}
+
+	if (stage < BOOT_STEPS) {
+		/* The active segment breathes: with no spinner on this form,
+		 * this is the motion that says the board is alive. */
+		lv_obj_set_style_bg_color(boot_seg[stage], COL_GREEN, 0);
+		if (boot_active != stage) {
+			lv_anim_t a;
+
+			lv_anim_init(&a);
+			lv_anim_set_var(&a, boot_seg[stage]);
+			lv_anim_set_exec_cb(&a, boot_pulse_cb);
+			lv_anim_set_values(&a, LV_OPA_30, LV_OPA_COVER);
+			lv_anim_set_duration(&a, 600);
+			lv_anim_set_playback_duration(&a, 600);
+			lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+			lv_anim_start(&a);
+		}
+		lv_label_set_text(boot_step, boot_txt[stage]);
+
+		char cbuf[16];
+
+		snprintf(cbuf, sizeof(cbuf), "%d / %d", stage + 1, BOOT_STEPS);
+		lv_label_set_text(boot_cnt, cbuf);
+		boot_active = stage;
+	} else {
+		lv_label_set_text(boot_step, "Ready");
+		lv_label_set_text(boot_cnt, "");
+		boot_active = -1;
+	}
 }
 
 void usage_view_set_clock(int hh, int mm)

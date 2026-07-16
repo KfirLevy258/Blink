@@ -24,6 +24,11 @@ static int64_t sync_unix_s;
 static bool have_offset;
 static int32_t offset_min;
 
+/* The standalone net worker syncs/adjusts time while the UI thread reads the
+ * clock every second. The base is a 64-bit pair -- not atomic on this core --
+ * so reads and writes go through a spinlock (held for nanoseconds). */
+static struct k_spinlock time_lock;
+
 int net_time_sync(int timeout_s)
 {
 	struct sntp_time t;
@@ -33,9 +38,12 @@ int net_time_sync(int timeout_s)
 		int rc = sntp_simple(servers[i], timeout_s * 1000, &t);
 
 		if (rc == 0) {
+			k_spinlock_key_t key = k_spin_lock(&time_lock);
+
 			sync_unix_s = (int64_t)t.seconds;
 			sync_uptime_ms = k_uptime_get();
 			have_time = true;
+			k_spin_unlock(&time_lock, key);
 			printk("[time] synced via %s (unix %lld)\n", servers[i],
 			       (long long)sync_unix_s);
 			return 0;
@@ -52,14 +60,21 @@ bool net_time_valid(void)
 
 static int64_t now_unix(void)
 {
-	return sync_unix_s + (k_uptime_get() - sync_uptime_ms) / 1000;
+	k_spinlock_key_t key = k_spin_lock(&time_lock);
+	int64_t v = sync_unix_s + (k_uptime_get() - sync_uptime_ms) / 1000;
+
+	k_spin_unlock(&time_lock, key);
+	return v;
 }
 
 void net_time_set_manual(int64_t unix_s)
 {
+	k_spinlock_key_t key = k_spin_lock(&time_lock);
+
 	sync_unix_s = unix_s;
 	sync_uptime_ms = k_uptime_get();
 	have_time = true;
+	k_spin_unlock(&time_lock, key);
 }
 
 void net_time_set_offset(int32_t om)

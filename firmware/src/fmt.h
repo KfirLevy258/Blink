@@ -27,4 +27,12 @@ void fmt_countdown(int32_t secs, char *buf, size_t buflen);
  */
 void fmt_age(int32_t secs, char *buf, size_t buflen);
 
+/*
+ * Transliterate UTF-8 to the ASCII the built-in LVGL fonts can draw.
+ * Smart quotes/dashes/ellipsis map to their plain cousins; anything else
+ * non-ASCII becomes '?'. Without this an SSID like "someones iPhone" (U+2019)
+ * renders as an empty box on the panel. Always NUL-terminates.
+ */
+void fmt_ascii(const char *src, char *dst, size_t dstlen);
+
 #endif /* FMT_H */

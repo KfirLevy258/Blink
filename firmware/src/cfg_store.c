@@ -12,6 +12,14 @@
 
 #include "cfg_store.h"
 
+/*
+ * The standalone net worker rotates tokens and stores tz results while the
+ * main (LVGL) thread can clear config from the settings panel. Neither NVS
+ * nor the RAM mirror is thread-safe on its own, so every entry point takes
+ * this lock.
+ */
+static K_MUTEX_DEFINE(cfg_lock);
+
 #define KEY_ROOT  "claude"
 #define KEY_MODE  KEY_ROOT "/mode"
 #define KEY_SSID  KEY_ROOT "/ssid"
@@ -117,19 +125,27 @@ int cfg_set_mode(enum cfg_mode mode)
 {
 	uint8_t v = (uint8_t)mode;
 
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	cfg.mode = mode;
-	return settings_save_one(KEY_MODE, &v, sizeof(v));
+
+	int rc = settings_save_one(KEY_MODE, &v, sizeof(v));
+
+	k_mutex_unlock(&cfg_lock);
+	return rc;
 }
 
 bool cfg_get_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len)
 {
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	if (!cfg.ssid[0]) {
+		k_mutex_unlock(&cfg_lock);
 		return false;
 	}
 	strncpy(ssid, cfg.ssid, ssid_len - 1);
 	ssid[ssid_len - 1] = '\0';
 	strncpy(psk, cfg.psk, psk_len - 1);
 	psk[psk_len - 1] = '\0';
+	k_mutex_unlock(&cfg_lock);
 	return true;
 }
 
@@ -137,25 +153,30 @@ int cfg_set_wifi(const char *ssid, const char *psk)
 {
 	int rc;
 
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	strncpy(cfg.ssid, ssid, sizeof(cfg.ssid) - 1);
 	cfg.ssid[sizeof(cfg.ssid) - 1] = '\0';
 	strncpy(cfg.psk, psk ? psk : "", sizeof(cfg.psk) - 1);
 	cfg.psk[sizeof(cfg.psk) - 1] = '\0';
 
 	rc = settings_save_one(KEY_SSID, cfg.ssid, strlen(cfg.ssid));
-	if (rc) {
-		return rc;
+	if (!rc) {
+		rc = settings_save_one(KEY_PSK, cfg.psk, strlen(cfg.psk));
 	}
-	return settings_save_one(KEY_PSK, cfg.psk, strlen(cfg.psk));
+	k_mutex_unlock(&cfg_lock);
+	return rc;
 }
 
 bool cfg_get_token(char *tok, size_t len)
 {
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	if (!cfg.token[0]) {
+		k_mutex_unlock(&cfg_lock);
 		return false;
 	}
 	strncpy(tok, cfg.token, len - 1);
 	tok[len - 1] = '\0';
+	k_mutex_unlock(&cfg_lock);
 	return true;
 }
 
@@ -168,9 +189,14 @@ int cfg_set_token(const char *tok)
 	 * would be broken permanently and the user would have to sign in again.
 	 * So: persist first, and only report success once it is durable.
 	 */
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	strncpy(cfg.token, tok, sizeof(cfg.token) - 1);
 	cfg.token[sizeof(cfg.token) - 1] = '\0';
-	return settings_save_one(KEY_TOKEN, cfg.token, strlen(cfg.token));
+
+	int rc = settings_save_one(KEY_TOKEN, cfg.token, strlen(cfg.token));
+
+	k_mutex_unlock(&cfg_lock);
+	return rc;
 }
 
 int cfg_clear_token(void)
@@ -178,46 +204,63 @@ int cfg_clear_token(void)
 	/* Deliberately does NOT touch the WiFi credentials: a rejected token
 	 * should cost the user one pasted code, not a whole re-provision.
 	 */
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	memset(cfg.token, 0, sizeof(cfg.token));
-	return settings_delete(KEY_TOKEN);
+
+	int rc = settings_delete(KEY_TOKEN);
+
+	k_mutex_unlock(&cfg_lock);
+	return rc;
 }
 
 int cfg_clear_wifi(void)
 {
 	int rc;
 
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	memset(cfg.ssid, 0, sizeof(cfg.ssid));
 	memset(cfg.psk, 0, sizeof(cfg.psk));
 	rc = settings_delete(KEY_SSID);
-	if (rc) {
-		return rc;
+	if (!rc) {
+		rc = settings_delete(KEY_PSK);
 	}
-	return settings_delete(KEY_PSK);
+	k_mutex_unlock(&cfg_lock);
+	return rc;
 }
 
 bool cfg_get_tz(int32_t *offset_min)
 {
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	if (!cfg.tz_set) {
+		k_mutex_unlock(&cfg_lock);
 		return false;
 	}
 	*offset_min = cfg.tz_min;
+	k_mutex_unlock(&cfg_lock);
 	return true;
 }
 
 int cfg_set_tz(int32_t offset_min)
 {
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	cfg.tz_min = offset_min;
 	cfg.tz_set = true;
-	return settings_save_one(KEY_TZ, &cfg.tz_min, sizeof(cfg.tz_min));
+
+	int rc = settings_save_one(KEY_TZ, &cfg.tz_min, sizeof(cfg.tz_min));
+
+	k_mutex_unlock(&cfg_lock);
+	return rc;
 }
 
 int cfg_reset(void)
 {
+	k_mutex_lock(&cfg_lock, K_FOREVER);
 	memset(&cfg, 0, sizeof(cfg));
 	settings_delete(KEY_MODE);
 	settings_delete(KEY_SSID);
 	settings_delete(KEY_PSK);
 	settings_delete(KEY_TOKEN);
 	settings_delete(KEY_TZ);
+	k_mutex_unlock(&cfg_lock);
 	return 0;
 }

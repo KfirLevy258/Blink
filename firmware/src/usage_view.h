@@ -41,6 +41,15 @@ void usage_view_set_clock(int hh, int mm);
  * entirely, and telling the user to start a PC daemon there is a lie. */
 void usage_view_set_waiting(const char *title, const char *sub);
 
+/*
+ * Standalone boot progress: one CONNECTING screen with a segmented bar that
+ * fills green, current step named below. Segments before `stage` render as
+ * done, `stage` pulses, the rest stay dim.
+ * Stages: 0 join WiFi, 1 sign in (clock sync rides inside), 2 first fetch.
+ * The first call switches the takeover from title+sub to bar form.
+ */
+void usage_view_boot_stage(int stage);
+
 void usage_view_set_status(enum usage_status status);
 
 #endif /* USAGE_VIEW_H */

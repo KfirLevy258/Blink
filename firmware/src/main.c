@@ -40,25 +40,11 @@ static __noinit uint32_t blind_magic;
 #define BLIND_MAGIC 0xb11dbea7u
 #define BLIND_MAX 4
 
-/*
- * Standalone join failures, counted across the reboot-retry the driver
- * demands (joins only complete from a clean boot). One failure is usually
- * the router rebooting or a DHCP hiccup; a STREAK means we moved or the
- * password changed, and only then is the setup portal the right answer.
- * A scan cannot make this call: this unit's scans provably miss real,
- * joinable networks (Stone Cottage, 2026-07-14), as hidden SSIDs always
- * would. The join itself is the only authoritative probe.
- */
-static __noinit uint32_t join_fails;
-static __noinit uint32_t join_magic;
-#define JOIN_MAGIC 0x104e4a01u
-#define JOIN_MAX 2
-
 /* The boot scan could not see the stored SSID. The join still runs -- scans
  * miss hidden SSIDs and barely-beaconing phone hotspots (an iPhone hotspot
- * with a fresh token got bounced to setup this way, 2026-07-15) -- but a
- * join failure on top of a miss skips the transient-strike dance and goes
- * straight to the portal: two independent "it's not there" signals. */
+ * with a fresh token got bounced to setup this way, 2026-07-15) -- this
+ * flag only picks the honest reason to show on the setup form if that
+ * join fails too. */
 static bool scan_said_absent;
 
 static void pump_ui(void)
@@ -213,9 +199,14 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 			cfg_set_tz(tzm);
 		}
 		cfg_set_wifi(ssid, psk);
-		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
-		pump_ui();
-		k_msleep(500);
+		/* Long enough to actually read: the restart is by design, and
+		 * an unexplained one reads as a crash (user-reported
+		 * 2026-07-15). */
+		ui_setup_set_state(UI_SETUP_REBOOT, ssid);
+		for (int i = 0; i < 250; i++) {	/* 2.5 s, screen kept alive */
+			pump_ui();
+			k_msleep(10);
+		}
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 }
@@ -341,106 +332,74 @@ static enum ssid_scan boot_ssid_scan(const char *ssid)
 
 /* ---- standalone WiFi mode: fetch usage over TLS, feed the gauges ---- */
 
-static void run_standalone(void)
+/*
+ * The net worker owns every blocking network call in standalone mode; the
+ * main thread owns LVGL. They meet only at this queue: the worker posts UI
+ * work, main applies it. NEV_WAIT strings must be static -- the pointer
+ * crosses threads.
+ */
+struct net_evt {
+	enum { NEV_STAGE, NEV_USAGE, NEV_STATUS } kind;
+	int stage;				/* NEV_STAGE */
+	double s_pct, w_pct;			/* NEV_USAGE */
+	int32_t s_reset, w_reset;
+	enum usage_status status;		/* NEV_STATUS */
+};
+
+K_MSGQ_DEFINE(net_evtq, sizeof(struct net_evt), 8, 4);
+
+/* Lower priority than main (higher number): 1-2 s of ECDHE math must not
+ * starve the render loop on this single-core build. */
+#define NET_WORKER_PRIO 5
+
+static K_THREAD_STACK_DEFINE(net_stack, 8192);	/* TLS-sized, like main's */
+static struct k_thread net_thread;
+static char worker_refresh[CFG_TOKEN_MAX];
+
+static void post_stage(int stage)
 {
-	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], refresh[CFG_TOKEN_MAX];
+	struct net_evt e = { .kind = NEV_STAGE, .stage = stage };
 
-	cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk));
-	cfg_get_token(refresh, sizeof(refresh));
+	k_msgq_put(&net_evtq, &e, K_NO_WAIT);
+}
 
-	/* The takeover's default text asks for a PC daemon -- wrong story in
-	 * this mode (seen on hardware 2026-07-14). Say what we actually do. */
-	usage_view_set_waiting("CONNECTING", "joining WiFi, first fetch on its way");
-	usage_view_set_status(USAGE_STATUS_DISCONNECTED);
-	lv_timer_handler();
+static void post_status(enum usage_status st)
+{
+	struct net_evt e = { .kind = NEV_STATUS, .status = st };
 
-	/* Settle even after the scan: every hotspot join that succeeded
-	 * tonight ran behind this runway, and the one that skipped it
-	 * dropped mid-association (2026-07-15). */
-	wifi_settle();
-	if (net_wifi_connect(ssid, psk, 30) != 0) {
-		if (scan_said_absent) {
-			if (join_magic != JOIN_MAGIC) {
-				join_magic = JOIN_MAGIC;
-				join_fails = 0;
-			}
-			/* One retry boot even here: joins to barely-beaconing
-			 * hotspots flake, and for them scan-absent is chronic
-			 * -- without this, one flake costs a full re-setup. */
-			if (++join_fails <= 1) {
-				usage_view_set_status(USAGE_STATUS_ERROR);
-				k_sleep(K_SECONDS(5));
-				sys_reboot(SYS_REBOOT_COLD);
-			}
-			join_fails = 0;
-			/* Invisible AND repeatedly unjoinable: really not here. */
-			usage_view_deinit();
-			run_provisioning("network not found");	/* reboots */
-		}
-		if (join_magic != JOIN_MAGIC) {
-			join_magic = JOIN_MAGIC;
-			join_fails = 0;
-		}
-		if (++join_fails <= JOIN_MAX) {
-			/* Probably transient; the retry must come from a
-			 * clean boot on this driver. */
-			usage_view_set_status(USAGE_STATUS_ERROR);
-			k_sleep(K_SECONDS(10));
-			sys_reboot(SYS_REBOOT_COLD);
-		}
-		/* A streak: moved, network gone, or password changed. Offer
-		 * setup with the reason on the form instead of rebooting
-		 * forever. */
-		join_fails = 0;
+	k_msgq_put(&net_evtq, &e, K_NO_WAIT);
+}
 
-		const char *err = net_wifi_last_error();
+static void net_worker(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
 
-		usage_view_deinit();	/* 16K pool: gauges out before setup in */
-		run_provisioning(err);	/* reboots when done */
-	}
-	if (join_magic == JOIN_MAGIC) {
-		join_fails = 0;		/* success ends any streak */
-	}
-
-	/* The steps from here to the first gauge update are blocking library
-	 * calls (SNTP, two TLS exchanges) that nothing can pump the UI
-	 * through. Restating the takeover text before each one turns "the
-	 * spinner froze" into visible progress (user-reported 2026-07-14). */
-	usage_view_set_waiting("SYNCING CLOCK", "asking the time servers");
-	lv_timer_handler();
+	/* Advance the boot bar before each blocking step: visible progress on
+	 * one screen instead of a title per stage (user request 2026-07-15).
+	 * The clock sync rides inside the sign-in stage -- TLS needs the
+	 * clock, and it is too quick to deserve a segment. */
+	post_stage(1);
 	net_time_sync(10);
-
-	/* Clock: last-known offset immediately (survives API outages), the
-	 * live answer replaces it below. */
-	int32_t tz_min = 0;
-
-	if (cfg_get_tz(&tz_min)) {
-		net_time_set_offset(tz_min);
-	}
-
-	usage_view_set_waiting("SIGNING IN", "refreshing your Anthropic session");
-	lv_timer_handler();
 
 	struct oauth_tokens tok;
 
-	if (oauth_refresh(refresh, &tok) != 0) {
+	if (oauth_refresh(worker_refresh, &tok) != 0) {
 		/* Refresh token rejected -- the "log in once" chain is broken.
 		 * Drop it and reboot; with no token the board re-provisions,
 		 * keeping the WiFi credentials. */
 		cfg_clear_token();
-		usage_view_set_status(USAGE_STATUS_ERROR);
+		post_status(USAGE_STATUS_ERROR);
 		k_sleep(K_SECONDS(3));
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 	cfg_set_token(tok.refresh);	/* persist a rotated token before use */
 
-	usage_view_set_waiting("FETCHING", "first usage numbers");
-	lv_timer_handler();
+	post_stage(2);
 
 	int64_t token_deadline = k_uptime_get() + (int64_t)tok.expires_in * 1000;
 	int64_t next_poll = 0;
 	int64_t next_tz = 0;	/* fetch as soon as we are online */
-	int64_t last_tick = k_uptime_get();
+	int32_t tz_min = 0;
 
 	while (1) {
 		int64_t now = k_uptime_get();
@@ -459,14 +418,18 @@ static void run_standalone(void)
 			enum usage_result r = usage_client_fetch(tok.access, &d, &status);
 
 			if (r == USAGE_OK) {
-				usage_view_update(
-					d.five_hour.utilization,
-					net_time_secs_until(d.five_hour.resets_at),
-					d.seven_day.utilization,
-					net_time_secs_until(d.seven_day.resets_at));
+				struct net_evt e = {
+					.kind = NEV_USAGE,
+					.s_pct = d.five_hour.utilization,
+					.s_reset = net_time_secs_until(d.five_hour.resets_at),
+					.w_pct = d.seven_day.utilization,
+					.w_reset = net_time_secs_until(d.seven_day.resets_at),
+				};
+
+				k_msgq_put(&net_evtq, &e, K_NO_WAIT);
 				next_poll = now + 60 * 1000;
 			} else if (r == USAGE_RATE_LIMITED) {
-				usage_view_set_status(USAGE_STATUS_STALE);
+				post_status(USAGE_STATUS_STALE);
 				next_poll = now + 600 * 1000;
 			} else if (r == USAGE_UNAUTHORIZED) {
 				/* Token died mid-run: refresh now, retry soon. */
@@ -474,7 +437,7 @@ static void run_standalone(void)
 				cfg_set_token(tok.refresh);
 				next_poll = now + 5 * 1000;
 			} else {
-				usage_view_set_status(USAGE_STATUS_ERROR);
+				post_status(USAGE_STATUS_ERROR);
 				next_poll = now + 60 * 1000;
 			}
 		}
@@ -492,6 +455,81 @@ static void run_standalone(void)
 				next_tz = now + 3600LL * 1000;	/* retry hourly */
 			}
 		}
+
+		k_sleep(K_MSEC(250));	/* scheduling tick, not a UI pump */
+	}
+}
+
+static void run_standalone(void)
+{
+	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], refresh[CFG_TOKEN_MAX];
+
+	cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk));
+	cfg_get_token(refresh, sizeof(refresh));
+
+	/* The takeover's default text asks for a PC daemon -- wrong story in
+	 * this mode (seen on hardware 2026-07-14). Show the boot checklist. */
+	usage_view_boot_stage(0);
+	usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+	lv_timer_handler();
+
+	/* Settle even after the scan: every hotspot join that succeeded
+	 * tonight ran behind this runway, and the one that skipped it
+	 * dropped mid-association (2026-07-15). */
+	wifi_settle();
+	if (net_wifi_connect(ssid, psk, 30) != 0) {
+		/* No reboot-retry dance: a failed join goes straight to the
+		 * setup screen with the reason on the form (user decision
+		 * 2026-07-15 -- the silent self-restarts read as crashes).
+		 * The token survives, so this costs re-picking a network,
+		 * never re-signing-in. */
+		const char *err = scan_said_absent ? "network not found"
+						   : net_wifi_last_error();
+
+		usage_view_deinit();	/* gauges out before setup in */
+		run_provisioning(err);	/* reboots when done */
+	}
+
+	/* Clock: last-known offset immediately (survives API outages), the
+	 * live tz answer replaces it from the worker below. */
+	int32_t tz_min = 0;
+
+	if (cfg_get_tz(&tz_min)) {
+		net_time_set_offset(tz_min);
+	}
+
+	/* Everything network-bound from here (SNTP, TLS exchanges, the 60 s
+	 * poll loop) runs on the worker thread. These blocking library calls
+	 * used to run right here on the UI thread: the spinner froze during
+	 * every fetch and touch events overflowed their queues (user-reported
+	 * 2026-07-14/15). Main now only renders. */
+	strncpy(worker_refresh, refresh, sizeof(worker_refresh) - 1);
+	worker_refresh[sizeof(worker_refresh) - 1] = '\0';
+	k_thread_create(&net_thread, net_stack, K_THREAD_STACK_SIZEOF(net_stack),
+			net_worker, NULL, NULL, NULL,
+			NET_WORKER_PRIO, 0, K_NO_WAIT);
+
+	int64_t last_tick = k_uptime_get();
+
+	while (1) {
+		struct net_evt e;
+
+		while (k_msgq_get(&net_evtq, &e, K_NO_WAIT) == 0) {
+			switch (e.kind) {
+			case NEV_STAGE:
+				usage_view_boot_stage(e.stage);
+				break;
+			case NEV_USAGE:
+				usage_view_update(e.s_pct, e.s_reset,
+						  e.w_pct, e.w_reset);
+				break;
+			case NEV_STATUS:
+				usage_view_set_status(e.status);
+				break;
+			}
+		}
+
+		int64_t now = k_uptime_get();
 
 		if (now - last_tick >= 1000) {
 			usage_view_tick_1s();
@@ -592,10 +630,13 @@ int main(void)
 	if (have_wifi && have_tok) {
 		switch (boot_ssid_scan(ssid)) {	/* may reboot (blind radio) */
 		case SSID_VISIBLE:
-			/* Join-failure strikes inside run_standalone remain
-			 * the backstop for a scan that said yes wrongly. */
 			printk("[usage] mode: standalone WiFi\n");
 			usage_view_init();
+			/* Before the first frame: the takeover's default text
+			 * is USB mode's "waiting for host", and one rendered
+			 * frame of it flashes visibly on this panel
+			 * (user-reported 2026-07-15). */
+			usage_view_boot_stage(0);
 			lv_timer_handler();
 			ui_boot_teardown();
 			ui_settings_attach(lv_scr_act());
@@ -609,6 +650,7 @@ int main(void)
 			       ssid);
 			scan_said_absent = true;
 			usage_view_init();
+			usage_view_boot_stage(0);	/* same flash guard */
 			lv_timer_handler();
 			ui_boot_teardown();
 			ui_settings_attach(lv_scr_act());
