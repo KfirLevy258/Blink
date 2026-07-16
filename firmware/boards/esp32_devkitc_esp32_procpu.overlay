@@ -49,15 +49,21 @@
 	 * the controller cannot be interrogated and the link is write-only.
 	 */
 	/*
-	 * No transform: corner taps on this unit (2026-07-14, raw TL=(14,20),
-	 * TR=(203,16), BR=(219,300) at 240x320 scaling) show the controller
-	 * axes already match the landscape screen. The old swap-xy mirrored
-	 * every touch across the diagonal -- tapping the WiFi button landed
-	 * dead-center on the USB button.
+	 * Solved against lvgl_pointer_input.c's actual transform (invert
+	 * flags apply BEFORE its ROTATED_90 compensation, in the panel
+	 * frame -- naive flag-flipping from on-screen symptoms therefore
+	 * misleads: an invert-y here moves screen X). With the panel's
+	 * swapped channel frame above, the R90 compensation supplies the
+	 * un-swap, and screen-y needs the pre-rotation invert-x to cancel
+	 * the compensation's own flip:
+	 *   screen_x = ABS_Y                 (horizontal, 0..319)
+	 *   screen_y = 240 - (240 - ABS_X)   (vertical,   0..239)
+	 * Verified end-to-end with the on-screen touch marker 2026-07-14.
 	 */
 	lvgl_pointer {
 		compatible = "zephyr,lvgl-pointer-input";
 		input = <&xpt2046>;
+		invert-x;
 	};
 
 	mipi_dbi {
@@ -153,14 +159,23 @@
 		 * that mapping put every tap on the mirrored button). Sizes are
 		 * therefore the landscape 320x240.
 		 */
-		touchscreen-size-x = <320>;
-		touchscreen-size-y = <240>;
-		min-x = <700>;
-		max-x = <3900>;
-		min-y = <400>;
-		max-y = <3650>;
+		/* Channel frame (portrait): ABS_X is the panel's VERTICAL,
+		 * ABS_Y its HORIZONTAL -- the lvgl_pointer glue's rotation
+		 * compensation maps them into landscape screen space. ADC
+		 * ranges fitted from two measurement sessions (driver event
+		 * dump + on-screen marker, 2026-07-14). */
+		touchscreen-size-x = <240>;
+		touchscreen-size-y = <320>;
+		min-x = <850>;
+		max-x = <3650>;
+		min-y = <520>;
+		max-y = <3500>;
 
 		z-threshold = <400>;
+		/* Default is a single raw sample per report -- visibly jittery
+		 * on this panel (slides "not clean", 2026-07-15). 8 reads are
+		 * averaged per report; the 2 MHz SPI absorbs it easily. */
+		reads = <8>;
 		reads = <3>;
 	};
 };
