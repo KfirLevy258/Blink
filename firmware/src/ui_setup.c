@@ -274,6 +274,30 @@ static void apply(enum ui_setup_state st, const char *detail)
 		lv_label_set_text(cap, "All set");
 		lv_obj_set_style_text_color(cap, COL_GREEN, 0);
 		break;
+	case UI_SETUP_RESTART: {
+		/* Farewell toast: the reboot right after this is by design,
+		 * and an unannounced restart reads as a crash (same lesson
+		 * as UI_SETUP_REBOOT; user request 2026-07-15). */
+		lv_obj_t *box = lv_obj_create(scr);
+
+		lv_obj_set_size(box, 210, 68);
+		lv_obj_set_style_radius(box, 12, 0);
+		lv_obj_set_style_bg_color(box, COL_PANEL, 0);
+		lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+		lv_obj_set_style_border_color(box, COL_GREEN, 0);
+		lv_obj_set_style_border_width(box, 1, 0);
+		lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+		lv_obj_center(box);
+
+		lv_obj_t *l = lv_label_create(box);
+
+		lv_label_set_text_fmt(l, "%s\nRestarting now...",
+				      detail ? detail : "Setup finished");
+		lv_obj_set_style_text_color(l, COL_TEXT, 0);
+		lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+		lv_obj_center(l);
+		break;
+	}
 	case UI_SETUP_ERROR:
 		lv_label_set_text(cap, detail ? detail : "Error");
 		lv_obj_set_style_text_color(cap, COL_RED, 0);

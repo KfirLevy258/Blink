@@ -231,6 +231,7 @@ static void run_provisioning(const char *skip_join_reason)
 
 	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
 	bool joined = false;
+	bool signed_in = false;
 	const char *join_err = skip_join_reason;
 
 	/* The ONLY join path: from a clean boot, before any AP mode has run
@@ -265,12 +266,17 @@ static void run_provisioning(const char *skip_join_reason)
 	ui_setup_set_state(UI_SETUP_WIFI_OK, url);
 	pump_ui();
 
-	portal_run_signin(authorize_url, cb_sign_in, 900);
+	signed_in = (portal_run_signin(authorize_url, cb_sign_in, 900) == 0);
 out:
 	/* Reboot either way: on success come up standalone; on timeout, retry
 	 * setup from a clean slate. A cold restart also reclaims all the AP/TLS
-	 * memory before the standalone stack allocates it. */
-	k_msleep(1500);
+	 * memory before the standalone stack allocates it. The toast makes the
+	 * restart announced instead of crash-shaped (user request 2026-07-15). */
+	ui_setup_set_state(UI_SETUP_RESTART, signed_in ? "Setup complete" : NULL);
+	for (int i = 0; i < 300; i++) {	/* 3 s, screen kept alive */
+		pump_ui();
+		k_sleep(K_MSEC(10));
+	}
 	sys_reboot(SYS_REBOOT_COLD);
 }
 

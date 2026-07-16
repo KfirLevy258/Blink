@@ -17,6 +17,8 @@ enum ui_setup_state {
 	UI_SETUP_WIFI_OK,	/* on home WiFi; detail = the sign-in page URL   */
 	UI_SETUP_SIGNIN,	/* signing in to Claude                          */
 	UI_SETUP_DONE,		/* both done; handing over to the gauges         */
+	UI_SETUP_RESTART,	/* farewell toast right before the final reboot;
+				 * detail = optional first line ("Setup complete") */
 	UI_SETUP_ERROR,		/* something failed (detail carries the reason)  */
 };
 
