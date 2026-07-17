@@ -206,12 +206,24 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 
 		portal_set_networks(nets, nn > 0 ? nn : 0);
 
-		int rc = net_wifi_start_ap();
+		/* Portal socket and DNS capture BEFORE the AP beacons: a
+		 * remembered phone rejoins within a second, and its first
+		 * captive-portal probe must find a live portal or the OS
+		 * marks the network portal-less and never pops the sheet
+		 * (intermittent no-popup seen on hardware 2026-07-16). */
+		int rc = portal_preopen();
 
-		if (rc != 0) {
+		if (rc < 0) {
 			return rc;
 		}
 		dns_hijack_start();
+
+		rc = net_wifi_start_ap();
+		if (rc != 0) {
+			dns_hijack_stop();
+			portal_preclose();
+			return rc;
+		}
 		ui_setup_set_state(UI_SETUP_WAIT, err);	/* err on-device too */
 		pump_ui();
 
@@ -261,7 +273,18 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
  * put that reason on the portal form instead. */
 static void run_provisioning(const char *skip_join_reason)
 {
+	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
+	bool resume = skip_join_reason == NULL &&
+		      cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk));
+
 	ui_setup_show();
+	if (resume) {
+		/* The first rendered frame must already be CONNECTING:
+		 * letting the default scan-QR state flash for one frame
+		 * betrayed the reboot (user request 2026-07-16 -- the
+		 * restart should be invisible). */
+		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
+	}
 	pump_ui();
 	ui_boot_teardown();	/* boot screen freed once setup screen is live */
 
@@ -274,18 +297,15 @@ static void run_provisioning(const char *skip_join_reason)
 
 	portal_set_resume(cfg_get_token(tok, sizeof(tok)));
 
-	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
 	bool joined = false;
 	bool signed_in = false;
 	const char *join_err = skip_join_reason;
 
 	/* The ONLY join path: from a clean boot, before any AP mode has run
 	 * this boot (a post-AP join never completes on this driver). Phase 1
-	 * stores credentials and reboots into this. */
-	if (skip_join_reason == NULL &&
-	    cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
-		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
-		pump_ui();
+	 * stores credentials and reboots into this. The CONNECTING state has
+	 * been showing since the first frame above. */
+	if (resume) {
 		wifi_settle();
 		joined = (net_wifi_connect(ssid, psk, 30) == 0);
 		if (!joined) {
