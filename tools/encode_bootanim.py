@@ -257,6 +257,17 @@ def main():
     ap.add_argument("--split-col", type=int, default=CANVAS_W // 2,
                     help="column the split happens at (must cross only "
                          "background in every frame)")
+    ap.add_argument("--flatten", type=int, default=0,
+                    help="snap pixels within this per-channel distance of "
+                         "the background fill to exactly the fill color; "
+                         "kills source grain that RGB565 quantization would "
+                         "otherwise turn into visible mottling (0 = off)")
+    ap.add_argument("--bg", metavar="R,G,B",
+                    help="recolor the clip so the background becomes exactly "
+                         "this color: pixels are remapped as blend ratios "
+                         "between the detected fill and black, so dark "
+                         "content stays dark and anti-aliased edges re-blend "
+                         "toward the new color")
     ap.add_argument("--out", help="write C header here")
     ap.add_argument("--preview", help="write round-trip GIF here")
     args = ap.parse_args()
@@ -278,6 +289,16 @@ def main():
     for m in args.mask:
         x, y, w, h = (int(v) for v in m.split(","))
         src[:, y:y + h, x:x + w] = fill
+
+    if args.flatten:
+        dist = np.abs(src.astype(np.int16) - fill).max(axis=-1)
+        src[dist <= args.flatten] = fill
+
+    if args.bg:
+        target = np.array([int(v) for v in args.bg.split(",")], np.float64)
+        scale = target / np.maximum(fill.astype(np.float64), 1.0)
+        src = np.clip(src.astype(np.float64) * scale, 0, 255).astype(np.uint8)
+        fill = np.clip(target, 0, 255).astype(np.uint8)
 
     if args.split_gap:
         half, s = args.split_gap // 2, args.split_col
