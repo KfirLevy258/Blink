@@ -290,6 +290,13 @@ static void run_provisioning(const char *skip_join_reason)
 		joined = (net_wifi_connect(ssid, psk, 30) == 0);
 		if (!joined) {
 			join_err = net_wifi_last_error();
+			/* Drop the failed pair: leaving it in NVS makes every
+			 * later boot re-run this doomed join before the portal
+			 * (user request 2026-07-16). The next portal round
+			 * stores fresh credentials anyway. Established devices
+			 * (token present) never take this branch, so an AP
+			 * outage can't wipe a working setup. */
+			cfg_clear_wifi();
 		}
 	}
 
