@@ -108,20 +108,13 @@ static const char *last_error;
 static int connect_status;
 
 /* Set while net_wifi_connect() waits for association. A disconnect event in
- * that window is the driver's only timely word on a doomed join (wrong
- * password never yields a CONNECT_RESULT until the full timeout), so the
- * handler fails the wait fast instead of letting it run out. */
+ * that window is the driver's only timely word on a doomed join: wrong
+ * password never yields a CONNECT_RESULT until the full timeout, and this
+ * driver (a) swallows the ESP reason code (it raises the event with just a
+ * -1 status) and (b) does not retry without ESP32_WIFI_STA_RECONNECT, so the
+ * single disconnect event IS the verdict -- fail the wait on first sight. */
 static volatile bool connecting;
-static volatile int connect_disc_reason;
-static volatile int connect_disc_count;
-
-/* ESP32 disconnect reasons that mean the credentials were rejected: 2
- * AUTH_EXPIRE, 15 4WAY_HANDSHAKE_TIMEOUT (the classic wrong-password
- * signature), 202 AUTH_FAIL, 204 HANDSHAKE_TIMEOUT, 205 CONNECTION_FAIL. */
-static bool reason_is_auth(int r)
-{
-	return r == 2 || r == 15 || r == 202 || r == 204 || r == 205;
-}
+static volatile bool connect_dropped;
 
 /* Scan results are collected by the event callback into this table. */
 static char (*scan_out)[33];
@@ -164,15 +157,8 @@ static void wifi_evt(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 		have_ip = false;
 		printk("[wifi] disconnected (reason %d)\n", st->disconn_reason);
 		if (connecting) {
-			/* Auth-class reasons are decisive (wrong password
-			 * fails the same way every retry); anything else gets
-			 * one free retry before the join is called off. */
-			connect_disc_count++;
-			if (reason_is_auth(st->disconn_reason) ||
-			    connect_disc_count >= 2) {
-				connect_disc_reason = st->disconn_reason;
-				k_sem_give(&sem_connected);
-			}
+			connect_dropped = true;
+			k_sem_give(&sem_connected);
 		}
 		break;
 	}
@@ -327,8 +313,7 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	k_sem_reset(&sem_connected);
 	k_sem_reset(&sem_got_ip);
 	have_ip = false;
-	connect_disc_reason = 0;
-	connect_disc_count = 0;
+	connect_dropped = false;
 	connecting = true;
 
 	printk("[wifi] connecting to \"%s\"\n", ssid);
@@ -364,12 +349,12 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 		return -ETIMEDOUT;
 	}
 	connecting = false;
-	if (connect_disc_reason != 0) {
-		printk("[wifi] join failed mid-association (reason %d)\n",
-		       connect_disc_reason);
-		last_error = reason_is_auth(connect_disc_reason)
-				     ? "Wrong password"
-				     : "Network dropped the connection";
+	if (connect_dropped) {
+		/* The driver ate the ESP reason code, so wrong password and
+		 * a mid-join drop are indistinguishable here; password is by
+		 * far the common cause on a fresh-credentials join. */
+		printk("[wifi] join dropped mid-association\n");
+		last_error = "Wrong password, or weak signal";
 		return -ECONNREFUSED;
 	}
 	if (connect_status != 0) {

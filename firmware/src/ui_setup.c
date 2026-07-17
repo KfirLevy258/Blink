@@ -204,6 +204,51 @@ void ui_setup_show(void)
 	lv_scr_load(scr);
 }
 
+static void error_popup_ok_cb(lv_event_t *e)
+{
+	/* Deleting the popup from its own button's event: async, so LVGL
+	 * finishes the click processing on a live object first. */
+	lv_obj_del_async(lv_event_get_user_data(e));
+}
+
+/* Modal join-failure notice over the boarding pass; OK dismisses it and the
+ * normal WAIT screen (already applied underneath) carries on. */
+static void error_popup(const char *msg)
+{
+	lv_obj_t *box = lv_obj_create(scr);
+
+	lv_obj_set_size(box, 220, 110);
+	lv_obj_set_style_radius(box, 12, 0);
+	lv_obj_set_style_bg_color(box, COL_PANEL, 0);
+	lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(box, COL_RED, 0);
+	lv_obj_set_style_border_width(box, 1, 0);
+	lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_center(box);
+
+	lv_obj_t *l = lv_label_create(box);
+
+	lv_label_set_text(l, msg);
+	lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(l, 190);
+	lv_obj_set_style_text_color(l, COL_TEXT, 0);
+	lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 2);
+
+	lv_obj_t *btn = lv_btn_create(box);
+
+	lv_obj_set_size(btn, 84, 32);
+	lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -2);
+	lv_obj_set_style_bg_color(btn, COL_RED, 0);
+	lv_obj_add_event_cb(btn, error_popup_ok_cb, LV_EVENT_CLICKED, box);
+
+	lv_obj_t *bl = lv_label_create(btn);
+
+	lv_label_set_text(bl, "OK");
+	lv_obj_set_style_text_color(bl, COL_TEXT, 0);
+	lv_obj_center(bl);
+}
+
 static void apply(enum ui_setup_state st, const char *detail)
 {
 	applied = (int)st;
@@ -214,16 +259,16 @@ static void apply(enum ui_setup_state st, const char *detail)
 		lv_label_set_text(steps[0].title, "Join device");
 		lv_label_set_text(steps[0].sub, "Scan the code");
 		step_pending(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
-		/* Re-entry after a failed join carries the reason in detail:
-		 * say WHY on the device too, not only on the phone form
-		 * (user feedback 2026-07-16). Reset both text and color --
-		 * step_pending() touches neither. */
 		lv_label_set_text(steps[1].title, "Connect WiFi");
-		lv_label_set_text(steps[1].sub,
-				  (detail && detail[0]) ? detail : "Pick network");
-		lv_obj_set_style_text_color(steps[1].sub,
-					    (detail && detail[0]) ? COL_RED
-								  : COL_DIM, 0);
+		lv_label_set_text(steps[1].sub, "Pick network");
+		lv_obj_set_style_text_color(steps[1].sub, COL_DIM, 0);
+		if (detail && detail[0]) {
+			/* Re-entry after a failed join: the reason arrives in
+			 * detail and gets a dismissable popup -- the phone
+			 * form alone was too easy to miss (user feedback
+			 * 2026-07-16). */
+			error_popup(detail);
+		}
 		step_pending(&steps[2]); lv_label_set_text(steps[2].numlbl, "3");
 		lv_obj_clear_flag(qr, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_clear_flag(cap, LV_OBJ_FLAG_HIDDEN);
