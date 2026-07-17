@@ -81,12 +81,12 @@
 		ili9341: ili9341@0 {
 			compatible = "ilitek,ili9341";
 			reg = <0>;
-			/* 25 MHz is this unit's ceiling: the standard CYD 40 MHz
-			 * overclock gave a solid white screen here -- the panel
-			 * never latched its init sequence (tried on hardware
-			 * 2026-07-17). Do not raise without a display-alive
-			 * check in hand. */
-			mipi-max-frequency = <25000000>;
+			/* Overclock ladder on THIS unit (verified on hardware
+			 * 2026-07-17): 40 MHz = solid white (init never
+			 * latches); 32 MHz renders clean and is the keeper;
+			 * 25 MHz is the conservative fallback if a future
+			 * panel swap misbehaves. */
+			mipi-max-frequency = <32000000>;
 			mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
 			pixel-format = <0>;   /* RGB565 */
 			/* Panel is portrait-native (240x320) but the board is mounted
