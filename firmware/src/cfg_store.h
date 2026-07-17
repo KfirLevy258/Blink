@@ -45,6 +45,15 @@ int cfg_clear_token(void);
  * another sign-in. */
 int cfg_clear_wifi(void);
 
+#define CFG_AP_PSK_MAX 17	/* 16 + NUL; generated ones are 10 chars */
+
+/* The setup AP's WPA2 password: random, generated once at first boot and
+ * stable thereafter, so a printed/remembered QR keeps working. Rides in the
+ * join QR, never typed. cfg_get_ap_psk() returns false until one is stored.
+ * Cleared only by factory reset (a new one is generated on the next boot). */
+bool cfg_get_ap_psk(char *psk, size_t len);
+int cfg_set_ap_psk(const char *psk);
+
 /* Last known UTC offset (minutes east of UTC), fed by the tz API in WiFi mode
  * so the clock survives API outages. cfg_get_tz() returns false until an
  * offset has ever been stored. */

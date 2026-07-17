@@ -17,6 +17,7 @@
 #include <dt-bindings/pinctrl/esp32-pinctrl.h>
 #include <zephyr/dt-bindings/pinctrl/esp32-gpio-sigmap.h>
 #include <zephyr/dt-bindings/mipi_dbi/mipi_dbi.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
 
 / {
 	chosen {
@@ -35,11 +36,14 @@
 		status = "okay";
 	};
 
-	/* Backlight is a plain active-high GPIO. */
-	leds {
-		compatible = "gpio-leds";
+	/* Backlight on LEDC PWM channel 0 (it was a plain on/off GPIO), so
+	 * night mode can dim it instead of choosing between blinding and
+	 * blank. 1 kHz: far above flicker perception, low enough for the
+	 * LEDC low-speed timer at full resolution. */
+	pwmleds {
+		compatible = "pwm-leds";
 		backlight: backlight {
-			gpios = <&gpio0 21 GPIO_ACTIVE_HIGH>;
+			pwms = <&ledc0 0 PWM_HZ(1000) PWM_POLARITY_NORMAL>;
 			label = "TFT backlight";
 		};
 	};
@@ -77,6 +81,11 @@
 		ili9341: ili9341@0 {
 			compatible = "ilitek,ili9341";
 			reg = <0>;
+			/* 25 MHz is this unit's ceiling: the standard CYD 40 MHz
+			 * overclock gave a solid white screen here -- the panel
+			 * never latched its init sequence (tried on hardware
+			 * 2026-07-17). Do not raise without a display-alive
+			 * check in hand. */
 			mipi-max-frequency = <25000000>;
 			mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
 			pixel-format = <0>;   /* RGB565 */
@@ -103,6 +112,13 @@
 		};
 	};
 
+	ledc0_cyd: ledc0_cyd {
+		group1 {
+			pinmux = <LEDC_CH0_GPIO21>;
+			output-enable;
+		};
+	};
+
 	/* Touch bus: CS (GPIO33) is a plain GPIO, so no SPIM3_CSEL here. */
 	spim3_cyd: spim3_cyd {
 		group1 {
@@ -124,6 +140,19 @@
 	cs-gpios = <&gpio0 15 GPIO_ACTIVE_LOW>;
 	#address-cells = <1>;
 	#size-cells = <0>;
+};
+
+&ledc0 {
+	pinctrl-0 = <&ledc0_cyd>;
+	pinctrl-names = "default";
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel0@0 {
+		reg = <0x0>;
+		timer = <0>;
+	};
 };
 
 /*
@@ -174,8 +203,10 @@
 		z-threshold = <400>;
 		/* Default is a single raw sample per report -- visibly jittery
 		 * on this panel (slides "not clean", 2026-07-15). 8 reads are
-		 * averaged per report; the 2 MHz SPI absorbs it easily. */
+		 * averaged per report; the 2 MHz SPI absorbs it easily. (A
+		 * stray duplicate "reads = <3>" was silently winning here --
+		 * last-one-wins in DTS -- which is why touch felt worse than
+		 * this comment promised; removed 2026-07-17.) */
 		reads = <8>;
-		reads = <3>;
 	};
 };

@@ -24,7 +24,15 @@
 static net_wifi_sta_cb sta_cb;
 static int sta_count;
 static char ap_ssid[33];
-static char ap_qr[64];
+static char ap_qr[80];
+static char ap_psk[17];
+
+void net_wifi_set_ap_psk(const char *psk)
+{
+	strncpy(ap_psk, psk ? psk : "", sizeof(ap_psk) - 1);
+	ap_psk[sizeof(ap_psk) - 1] = '\0';
+	ap_qr[0] = '\0';	/* re-derive on next use */
+}
 
 const char *net_wifi_ap_ssid(void)
 {
@@ -33,10 +41,10 @@ const char *net_wifi_ap_ssid(void)
 		ssize_t n = hwinfo_get_device_id(id, sizeof(id));
 
 		if (n >= 3) {
-			snprintf(ap_ssid, sizeof(ap_ssid), "claude-usage-%02x%02x%02x",
+			snprintf(ap_ssid, sizeof(ap_ssid), "clauge-%02x%02x%02x",
 				 id[n - 3], id[n - 2], id[n - 1]);
 		} else {
-			snprintf(ap_ssid, sizeof(ap_ssid), "claude-usage-setup");
+			snprintf(ap_ssid, sizeof(ap_ssid), "clauge-setup");
 		}
 	}
 	return ap_ssid;
@@ -45,11 +53,17 @@ const char *net_wifi_ap_ssid(void)
 const char *net_wifi_ap_qr(void)
 {
 	if (!ap_qr[0]) {
-		/* Standard WIFI: payload -- phones join straight from the scan.
-		 * The AP is open, so T:nopass and no password field.
-		 */
-		snprintf(ap_qr, sizeof(ap_qr), "WIFI:T:nopass;S:%s;;",
-			 net_wifi_ap_ssid());
+		/* Standard WIFI: payload -- phones join straight from the
+		 * scan, password and all. The generated password contains no
+		 * QR-special characters (;:,\") by construction, so no
+		 * escaping is needed. */
+		if (ap_psk[0]) {
+			snprintf(ap_qr, sizeof(ap_qr), "WIFI:T:WPA;S:%s;P:%s;;",
+				 net_wifi_ap_ssid(), ap_psk);
+		} else {
+			snprintf(ap_qr, sizeof(ap_qr), "WIFI:T:nopass;S:%s;;",
+				 net_wifi_ap_ssid());
+		}
 	}
 	return ap_qr;
 }
@@ -429,7 +443,17 @@ int net_wifi_start_ap(void)
 	p.ssid = (const uint8_t *)ssid;
 	p.ssid_length = strlen(ssid);
 	p.channel = 6;
-	p.security = WIFI_SECURITY_TYPE_NONE;	/* open: the user has nothing to type */
+	/* WPA2 with the QR-carried password: the user still types nothing,
+	 * but the credentials POSTed to the portal ride an encrypted link
+	 * instead of an open one (user request 2026-07-17). Open only as a
+	 * fallback if no password was ever provisioned. */
+	if (ap_psk[0]) {
+		p.security = WIFI_SECURITY_TYPE_PSK;
+		p.psk = (uint8_t *)ap_psk;
+		p.psk_length = strlen(ap_psk);
+	} else {
+		p.security = WIFI_SECURITY_TYPE_NONE;
+	}
 	p.mfp = WIFI_MFP_DISABLE;
 
 	printk("[wifi] starting AP \"%s\"\n", ssid);

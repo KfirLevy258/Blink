@@ -54,9 +54,11 @@ static volatile int applied = UI_SETUP_WAIT;	/* last state apply() ran */
 
 static void on_station(int count)
 {
+	printk("[setup] on_station count=%d applied=%d pending=%d\n",
+	       count, applied, pending);
 	/* Once the AP is gone (reboot-to-join or the join itself), stragglers
 	 * must not drag the screen back to the boarding-pass join steps. */
-	if (applied >= UI_SETUP_REBOOT) {
+	if (applied >= UI_SETUP_CONNECTING) {
 		return;
 	}
 	if (count > 0 && pending < UI_SETUP_PHONE) {
@@ -139,7 +141,7 @@ void ui_setup_show(void)
 
 	brand = lv_label_create(scr);
 
-	lv_label_set_text(brand, "CLAUDE USAGE");
+	lv_label_set_text(brand, "CLAUGE");
 	lv_obj_set_style_text_color(brand, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(brand, 2, 0);
 	lv_obj_align(brand, LV_ALIGN_TOP_LEFT, 16, 14);
@@ -164,8 +166,11 @@ void ui_setup_show(void)
 
 	const char *payload = net_wifi_ap_qr();
 
+	/* 92 px + the white border leaves clear air between the code and the
+	 * green seam -- at 100 px the two nearly touched (user feedback
+	 * 2026-07-16). Payloads here are short; 92 px scans fine. */
 	qr = lv_qrcode_create(panel);
-	lv_qrcode_set_size(qr, 100);
+	lv_qrcode_set_size(qr, 92);
 	lv_qrcode_set_dark_color(qr, lv_color_black());
 	lv_qrcode_set_light_color(qr, lv_color_white());
 	lv_qrcode_update(qr, payload, strlen(payload));
@@ -173,13 +178,17 @@ void ui_setup_show(void)
 	lv_obj_set_style_border_color(qr, lv_color_white(), 0);
 	lv_obj_align(qr, LV_ALIGN_TOP_MID, 0, 46);
 
+	/* Directly under the QR (46 + 92 + 2*6 border + 14 gap), sharing its
+	 * center line -- one column, not code-at-top / text-at-bottom
+	 * (user feedback 2026-07-17). Fixed offsets, so no layout pass is
+	 * needed for them to agree. */
 	cap = lv_label_create(panel);
 	lv_label_set_text(cap, "Scan to\nbegin");
 	lv_obj_set_width(cap, 124);
 	lv_label_set_long_mode(cap, LV_LABEL_LONG_WRAP);
 	lv_obj_set_style_text_color(cap, COL_DIM, 0);
 	lv_obj_set_style_text_align(cap, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(cap, LV_ALIGN_BOTTOM_MID, 0, -22);
+	lv_obj_align(cap, LV_ALIGN_TOP_MID, 0, 164);
 
 	pill = lv_obj_create(panel);
 	lv_obj_set_size(pill, 104, 36);
@@ -266,7 +275,8 @@ static void apply(enum ui_setup_state st, const char *detail)
 	applied = (int)st;
 
 	/* Panel baseline every state starts from: spinner hidden, caption
-	 * parked at the bottom. States opt back in below. */
+	 * parked at the bottom. States opt back in below, and the QR check
+	 * after the switch re-hangs the caption under a visible code. */
 	lv_obj_add_flag(spin, LV_OBJ_FLAG_HIDDEN);
 	lv_obj_align(cap, LV_ALIGN_BOTTOM_MID, 0, -22);
 
@@ -301,18 +311,6 @@ static void apply(enum ui_setup_state st, const char *detail)
 		step_active(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
 		lv_label_set_text(cap, "Page open\non phone");
 		break;
-	case UI_SETUP_REBOOT:
-		/* The join only works from a clean boot on this driver, so the
-		 * device restarts here by design -- say so, or the restart
-		 * reads as a crash (user-reported 2026-07-15). */
-		step_done(&steps[0]);
-		step_active(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
-		lv_label_set_text(steps[1].title, "Connect WiFi");
-		lv_label_set_text(steps[1].sub, detail ? detail : "Restarting...");
-		lv_obj_add_flag(qr, LV_OBJ_FLAG_HIDDEN);
-		lv_label_set_text(cap, "Restarting\nto join...");
-		lv_obj_set_style_text_color(cap, COL_DIM, 0);
-		break;
 	case UI_SETUP_CONNECTING:
 		step_done(&steps[0]);
 		step_active(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
@@ -336,11 +334,13 @@ static void apply(enum ui_setup_state st, const char *detail)
 			lv_qrcode_update(qr, detail, strlen(detail));
 		}
 		lv_obj_clear_flag(qr, LV_OBJ_FLAG_HIDDEN);
-		lv_label_set_text(cap, detail ? detail : "Scan to\nsign in");
+		/* Never the raw URL: it reads as debug output, and the QR
+		 * carries it anyway (user feedback 2026-07-16). */
+		lv_label_set_text(cap, "Scan to\nsign in");
 		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_SIGNIN:
-		lv_label_set_text(cap, "Signing\nin...");
+		lv_label_set_text(cap, "Signing in...");
 		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
 	case UI_SETUP_DONE:
@@ -352,8 +352,8 @@ static void apply(enum ui_setup_state st, const char *detail)
 		break;
 	case UI_SETUP_RESTART: {
 		/* Farewell toast: the reboot right after this is by design,
-		 * and an unannounced restart reads as a crash (same lesson
-		 * as UI_SETUP_REBOOT; user request 2026-07-15). */
+		 * and an unannounced restart reads as a crash (user request
+		 * 2026-07-15). */
 		lv_obj_t *box = lv_obj_create(scr);
 
 		lv_obj_set_size(box, 210, 68);
@@ -375,9 +375,21 @@ static void apply(enum ui_setup_state st, const char *detail)
 		break;
 	}
 	case UI_SETUP_ERROR:
-		lv_label_set_text(cap, detail ? detail : "Error");
-		lv_obj_set_style_text_color(cap, COL_RED, 0);
+		/* A popup, like every other failure: the red caption in the
+		 * panel corner was too easy to miss (user feedback
+		 * 2026-07-16). The sign-in QR state stays live underneath,
+		 * so dismissing it leaves a usable screen. */
+		lv_label_set_text(cap, "Scan to\nsign in");
+		lv_obj_set_style_text_color(cap, COL_DIM, 0);
+		error_popup(detail && detail[0] ? detail
+			    : "Sign-in failed. Try again on the phone.");
 		break;
+	}
+
+	/* One column: whenever the QR is on screen, its caption hangs
+	 * directly under it at the same fixed offset as ui_setup_show(). */
+	if (!lv_obj_has_flag(qr, LV_OBJ_FLAG_HIDDEN)) {
+		lv_obj_align(cap, LV_ALIGN_TOP_MID, 0, 164);
 	}
 }
 
@@ -401,5 +413,6 @@ void ui_setup_service(void)
 		return;
 	}
 	pending = -1;
+	printk("[setup] apply state=%d\n", st);
 	apply((enum ui_setup_state)st, pending_detail[0] ? pending_detail : NULL);
 }

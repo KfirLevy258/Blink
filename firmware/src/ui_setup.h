@@ -12,8 +12,9 @@
 enum ui_setup_state {
 	UI_SETUP_WAIT = 0,	/* waiting for a phone to join the setup network */
 	UI_SETUP_PHONE,		/* phone joined; choosing WiFi in the page       */
-	UI_SETUP_REBOOT,	/* creds stored; restarting to run the join      */
-	UI_SETUP_CONNECTING,	/* AP torn down; joining the home network        */
+	UI_SETUP_CONNECTING,	/* creds stored; joining (spans the reboot --
+				 * shown before the restart and re-applied as the
+				 * first frame after it, so the reset is invisible) */
 	UI_SETUP_WIFI_OK,	/* on home WiFi; detail = the sign-in page URL   */
 	UI_SETUP_SIGNIN,	/* signing in to Claude                          */
 	UI_SETUP_DONE,		/* both done; handing over to the gauges         */

@@ -26,12 +26,14 @@ static K_MUTEX_DEFINE(cfg_lock);
 #define KEY_PSK   KEY_ROOT "/psk"
 #define KEY_TOKEN KEY_ROOT "/rtok"
 #define KEY_TZ    KEY_ROOT "/tzmin"
+#define KEY_APPSK KEY_ROOT "/appsk"
 
 static struct {
 	enum cfg_mode mode;
 	char ssid[CFG_SSID_MAX];
 	char psk[CFG_PSK_MAX];
 	char token[CFG_TOKEN_MAX];
+	char ap_psk[CFG_AP_PSK_MAX];
 	int32_t tz_min;
 	bool tz_set;
 } cfg;
@@ -70,6 +72,14 @@ static int cfg_set_cb(const char *name, size_t len, settings_read_cb read_cb,
 
 		if (n > 0) {
 			cfg.token[n] = '\0';
+		}
+		return 0;
+	}
+	if (settings_name_steq(name, "appsk", &next) && !next) {
+		int n = read_cb(cb_arg, cfg.ap_psk, sizeof(cfg.ap_psk) - 1);
+
+		if (n > 0) {
+			cfg.ap_psk[n] = '\0';
 		}
 		return 0;
 	}
@@ -228,6 +238,31 @@ int cfg_clear_wifi(void)
 	return rc;
 }
 
+bool cfg_get_ap_psk(char *psk, size_t len)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	if (!cfg.ap_psk[0]) {
+		k_mutex_unlock(&cfg_lock);
+		return false;
+	}
+	strncpy(psk, cfg.ap_psk, len - 1);
+	psk[len - 1] = '\0';
+	k_mutex_unlock(&cfg_lock);
+	return true;
+}
+
+int cfg_set_ap_psk(const char *psk)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	strncpy(cfg.ap_psk, psk, sizeof(cfg.ap_psk) - 1);
+	cfg.ap_psk[sizeof(cfg.ap_psk) - 1] = '\0';
+
+	int rc = settings_save_one(KEY_APPSK, cfg.ap_psk, strlen(cfg.ap_psk));
+
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
 bool cfg_get_tz(int32_t *offset_min)
 {
 	k_mutex_lock(&cfg_lock, K_FOREVER);
@@ -261,6 +296,7 @@ int cfg_reset(void)
 	settings_delete(KEY_PSK);
 	settings_delete(KEY_TOKEN);
 	settings_delete(KEY_TZ);
+	settings_delete(KEY_APPSK);	/* factory reset rotates the AP password */
 	k_mutex_unlock(&cfg_lock);
 	return 0;
 }

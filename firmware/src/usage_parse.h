@@ -13,7 +13,9 @@ struct usage_window {
 struct usage_data {
 	struct usage_window five_hour;
 	struct usage_window seven_day;
-	struct usage_window seven_day_sonnet;
+	struct usage_window seven_day_fable;	/* current accounts */
+	struct usage_window seven_day_sonnet;	/* older window split */
+	struct usage_window seven_day_opus;
 };
 
 /* Parse the usage JSON body. Returns 0 on success (five_hour + seven_day found),

@@ -1,7 +1,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
-#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/pwm.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/reboot.h>
 #include <lvgl.h>
 #include <string.h>
@@ -18,15 +19,61 @@
 #include "usage_client.h"
 #include "ui_boot.h"
 #include "ui_settings.h"
+#include "ui_anim.h"
 #include "tz_fetch.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
-static const struct gpio_dt_spec backlight =
-	GPIO_DT_SPEC_GET(DT_NODELABEL(backlight), gpios);
+static const struct pwm_dt_spec backlight = PWM_DT_SPEC_GET(DT_NODELABEL(backlight));
+
+/*
+ * Backlight: full by day, dimmed between 23:00 and 07:00 local (user request
+ * 2026-07-17 -- a full-brightness green arc at 2 AM gets old). Unknown time
+ * counts as day: better bright at night than dim at noon. Level changes are
+ * edge-triggered so the 1 s tick doesn't hammer the LEDC driver.
+ */
+static void backlight_apply(int hh)
+{
+	static int level = -1;		/* percent last written */
+	int want = (hh >= 23 || (hh >= 0 && hh < 7)) ? 25 : 100;
+
+	if (want == level || !pwm_is_ready_dt(&backlight)) {
+		return;
+	}
+	level = want;
+	pwm_set_pulse_dt(&backlight, backlight.period * want / 100);
+}
 
 /* Provisioning session state (one PKCE verifier per setup attempt). */
 static char verifier[OAUTH_VERIFIER_LEN];
 static char authorize_url[OAUTH_URL_LEN];
+
+/*
+ * The setup AP's WPA2 password: random once, persisted, carried by the QR.
+ * Random rather than MAC-derived on purpose -- the MAC's vendor bytes are
+ * guessable and its tail is broadcast in the SSID, so a derived password
+ * would protect nothing. Factory reset clears it; the next boot rolls a
+ * fresh one here.
+ */
+static void ap_psk_setup(void)
+{
+	/* No 0/O/1/l/I look-alikes: the password is only ever read by a
+	 * camera, but a human may need to type it once if the QR scan is
+	 * refused. */
+	static const char alphabet[] = "abcdefghjkmnpqrstuvwxyz23456789";
+	char psk[CFG_AP_PSK_MAX];
+
+	if (!cfg_get_ap_psk(psk, sizeof(psk))) {
+		uint8_t rnd[10];
+
+		sys_rand_get(rnd, sizeof(rnd));
+		for (int i = 0; i < 10; i++) {
+			psk[i] = alphabet[rnd[i] % (sizeof(alphabet) - 1)];
+		}
+		psk[10] = '\0';
+		cfg_set_ap_psk(psk);
+	}
+	net_wifi_set_ap_psk(psk);
+}
 
 /*
  * The radio sometimes comes out of a reset blind: every scan returns nothing
@@ -206,24 +253,12 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 
 		portal_set_networks(nets, nn > 0 ? nn : 0);
 
-		/* Portal socket and DNS capture BEFORE the AP beacons: a
-		 * remembered phone rejoins within a second, and its first
-		 * captive-portal probe must find a live portal or the OS
-		 * marks the network portal-less and never pops the sheet
-		 * (intermittent no-popup seen on hardware 2026-07-16). */
-		int rc = portal_preopen();
+		int rc = net_wifi_start_ap();
 
-		if (rc < 0) {
+		if (rc != 0) {
 			return rc;
 		}
 		dns_hijack_start();
-
-		rc = net_wifi_start_ap();
-		if (rc != 0) {
-			dns_hijack_stop();
-			portal_preclose();
-			return rc;
-		}
 		ui_setup_set_state(UI_SETUP_WAIT, err);	/* err on-device too */
 		pump_ui();
 
@@ -255,11 +290,14 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 			cfg_set_tz(tzm);
 		}
 		cfg_set_wifi(ssid, psk);
-		/* Long enough to actually read: the restart is by design, and
-		 * an unexplained one reads as a crash (user-reported
-		 * 2026-07-15). */
-		ui_setup_set_state(UI_SETUP_REBOOT, ssid);
-		for (int i = 0; i < 250; i++) {	/* 2.5 s, screen kept alive */
+		/* No "restarting" interstitial: CONNECTING goes up now, the
+		 * skip splash wears the same dark background, and the resume
+		 * boot re-applies CONNECTING as its very first frame -- one
+		 * continuous screen across the reset (user request
+		 * 2026-07-16; the old 2.5 s notice earned its keep back when
+		 * the reboot was visible). */
+		ui_setup_set_state(UI_SETUP_CONNECTING, ssid);
+		for (int i = 0; i < 50; i++) {	/* 0.5 s, state rendered */
 			pump_ui();
 			k_msleep(10);
 		}
@@ -420,14 +458,62 @@ static enum ssid_scan boot_ssid_scan(const char *ssid)
  * crosses threads.
  */
 struct net_evt {
-	enum { NEV_STAGE, NEV_USAGE, NEV_STATUS } kind;
+	enum { NEV_STAGE, NEV_USAGE, NEV_STATUS, NEV_MODELS } kind;
 	int stage;				/* NEV_STAGE */
-	double s_pct, w_pct;			/* NEV_USAGE */
+	double s_pct, w_pct;			/* NEV_USAGE; NEV_MODELS reuses
+						 * s_pct as fable's weekly */
 	int32_t s_reset, w_reset;
 	enum usage_status status;		/* NEV_STATUS */
 };
 
 K_MSGQ_DEFINE(net_evtq, sizeof(struct net_evt), 8, 4);
+
+/* The boot bar's step lists -- same screen in both modes, different words
+ * (user request 2026-07-16). */
+static const char *const wifi_boot_steps[] = {
+	"Join the WiFi",
+	"Sign in to Anthropic",
+	"Fetch first usage",
+};
+static const char *const usb_boot_steps[] = {
+	"Link the PC daemon",
+	"Fetch first usage",
+};
+
+static void apply_net_evt(const struct net_evt *e)
+{
+	switch (e->kind) {
+	case NEV_STAGE:
+		usage_view_boot_stage(e->stage);
+		break;
+	case NEV_USAGE:
+		usage_view_update(e->s_pct, e->s_reset, e->w_pct, e->w_reset);
+		break;
+	case NEV_STATUS:
+		usage_view_set_status(e->status);
+		break;
+	case NEV_MODELS:
+		usage_view_set_models(e->s_pct);
+		break;
+	}
+}
+
+/* Between boot-clip frames (ui_anim_run) the mode's background duties keep
+ * running through these: standalone drains the worker's queue, USB keeps
+ * the serial protocol alive. */
+static void standalone_anim_pump(void)
+{
+	struct net_evt e;
+
+	while (k_msgq_get(&net_evtq, &e, K_NO_WAIT) == 0) {
+		apply_net_evt(&e);
+	}
+}
+
+static void usb_anim_pump(void)
+{
+	proto_service();
+}
 
 /* Lower priority than main (higher number): 1-2 s of ECDHE math must not
  * starve the render loop on this single-core build. */
@@ -505,6 +591,14 @@ static void net_worker(void *a, void *b, void *c)
 				};
 
 				k_msgq_put(&net_evtq, &e, K_NO_WAIT);
+
+				struct net_evt m = {
+					.kind = NEV_MODELS,
+					.s_pct = d.seven_day_fable.present
+						 ? d.seven_day_fable.utilization : -1,
+				};
+
+				k_msgq_put(&net_evtq, &m, K_NO_WAIT);
 				next_poll = now + 60 * 1000;
 			} else if (r == USAGE_RATE_LIMITED) {
 				post_status(USAGE_STATUS_STALE);
@@ -545,9 +639,7 @@ static void run_standalone(void)
 	cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk));
 	cfg_get_token(refresh, sizeof(refresh));
 
-	/* The takeover's default text asks for a PC daemon -- wrong story in
-	 * this mode (seen on hardware 2026-07-14). Show the boot checklist. */
-	usage_view_boot_stage(0);
+	usage_view_boot_begin(wifi_boot_steps, 3);
 	usage_view_set_status(USAGE_STATUS_DISCONNECTED);
 	lv_timer_handler();
 
@@ -593,17 +685,75 @@ static void run_standalone(void)
 		struct net_evt e;
 
 		while (k_msgq_get(&net_evtq, &e, K_NO_WAIT) == 0) {
-			switch (e.kind) {
-			case NEV_STAGE:
-				usage_view_boot_stage(e.stage);
-				break;
-			case NEV_USAGE:
-				usage_view_update(e.s_pct, e.s_reset,
-						  e.w_pct, e.w_reset);
-				break;
-			case NEV_STATUS:
-				usage_view_set_status(e.status);
-				break;
+			apply_net_evt(&e);
+		}
+
+		if (ui_anim_pending()) {
+			ui_anim_run(standalone_anim_pump);
+		}
+
+		int64_t now = k_uptime_get();
+
+		if (now - last_tick >= 1000) {
+			usage_view_tick_1s();
+			last_tick = now;
+
+			int hh = -1, mm = 0;
+
+			net_time_local(&hh, &mm);
+			usage_view_set_clock(hh, mm);
+			backlight_apply(hh);
+		}
+		lv_timer_handler();
+		k_sleep(K_MSEC(10));
+	}
+}
+
+/* ---- USB bridge mode: PC daemon pushes usage over serial ---- */
+
+static void run_usb(void)
+{
+	int64_t last_tick = k_uptime_get();
+	int64_t start = last_tick;
+	int stage_shown = 1;
+
+	/* With stored WiFi + token the board can serve itself if the daemon
+	 * never delivers -- checked once; NVS doesn't change under us. */
+	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
+	bool can_fall_back = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
+			     cfg_get_token(tok, sizeof(tok));
+
+	while (1) {
+		proto_service();
+
+		if (ui_anim_pending()) {
+			ui_anim_run(usb_anim_pump);
+		}
+
+		if (!usage_view_have_data()) {
+			/* Keep the bar honest: hello was answered at boot,
+			 * but proto declares the host gone after 35 s of
+			 * silence -- drop back to the link step then. */
+			int want = proto_host_seen() ? 1 : 0;
+
+			if (want != stage_shown) {
+				usage_view_boot_stage(want);
+				stage_shown = want;
+			}
+
+			/* Waiting-for-host timeout (user request 2026-07-16):
+			 * a daemon that answered hello once but has since
+			 * gone silent, before ever pushing usage, is not
+			 * coming back on its own. Reboot into self-service --
+			 * a dead daemon won't answer the next boot's hello,
+			 * so the board comes up standalone. Requires the
+			 * host to be *gone*, not merely slow, so a live
+			 * daemon can never reboot-loop us. */
+			if (can_fall_back && !proto_host_seen() &&
+			    k_uptime_get() - start > 60 * 1000) {
+				printk("[usage] daemon gone before first push; standalone can serve -- rebooting\n");
+				ui_boot_mark_intentional_reboot();
+				sys_reboot(SYS_REBOOT_COLD);
 			}
 		}
 
@@ -617,31 +767,7 @@ static void run_standalone(void)
 
 			net_time_local(&hh, &mm);
 			usage_view_set_clock(hh, mm);
-		}
-		lv_timer_handler();
-		k_sleep(K_MSEC(10));
-	}
-}
-
-/* ---- USB bridge mode: PC daemon pushes usage over serial ---- */
-
-static void run_usb(void)
-{
-	int64_t last_tick = k_uptime_get();
-
-	while (1) {
-		proto_service();
-
-		int64_t now = k_uptime_get();
-
-		if (now - last_tick >= 1000) {
-			usage_view_tick_1s();
-			last_tick = now;
-
-			int hh = -1, mm = 0;
-
-			net_time_local(&hh, &mm);
-			usage_view_set_clock(hh, mm);
+			backlight_apply(hh);
 		}
 		lv_timer_handler();
 		k_sleep(K_MSEC(10));
@@ -657,13 +783,12 @@ int main(void)
 		return -1;
 	}
 	display_blanking_off(display_dev);
-	if (gpio_is_ready_dt(&backlight)) {
-		gpio_pin_configure_dt(&backlight, GPIO_OUTPUT_ACTIVE);
-	}
+	backlight_apply(-1);	/* full brightness until a clock exists */
 
 	cfg_init();
 	net_wifi_init();
 	net_wifi_set_idle_hook(wifi_idle);
+	ap_psk_setup();		/* before any QR or AP use */
 
 #ifdef TEST_SCREEN
 	ui_setup_show();
@@ -709,6 +834,11 @@ int main(void)
 	if (proto_host_seen()) {
 		printk("[usage] mode: USB bridge\n");
 		usage_view_init();
+		/* Same CONNECTING bar as standalone (user request
+		 * 2026-07-16); the link step is already done -- the daemon
+		 * spoke during the splash. */
+		usage_view_boot_begin(usb_boot_steps, 2);
+		usage_view_boot_stage(1);
 		lv_timer_handler();
 		ui_boot_teardown();	/* only after the new screen is loaded */
 		ui_settings_attach(lv_scr_act());
@@ -727,10 +857,10 @@ int main(void)
 		 * holding the splash color for the scan's 1-2 s (user
 		 * feedback 2026-07-16). The scan runs under the boot bar. */
 		usage_view_init();
-		/* Before the first frame: the takeover's default text is USB
-		 * mode's "waiting for host", and one rendered frame of it
-		 * flashes visibly on this panel (user-reported 2026-07-15). */
-		usage_view_boot_stage(0);
+		/* Step list before the first frame: one rendered frame of a
+		 * wrong takeover flashes visibly on this panel
+		 * (user-reported 2026-07-15). */
+		usage_view_boot_begin(wifi_boot_steps, 3);
 		lv_timer_handler();
 		ui_boot_teardown();
 		ui_settings_attach(lv_scr_act());

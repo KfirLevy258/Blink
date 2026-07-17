@@ -10,10 +10,15 @@
 #include <zephyr/sys/reboot.h>
 #include <zephyr/sys/printk.h>
 #include <lvgl.h>
+#include <stdio.h>
 
 #include "ui_settings.h"
 #include "cfg_store.h"
 #include "ui_boot.h"
+#include "ui_anim.h"
+#include "net_wifi.h"
+#include "fmt.h"
+#include "version.h"
 
 #define COL_BG		lv_color_hex(0x0E1116)
 #define COL_TRACK	lv_color_hex(0x272C34)
@@ -97,6 +102,7 @@ static void show_confirm(void)
 	lv_obj_set_style_bg_color(confirm, COL_BG, 0);
 	lv_obj_set_style_bg_opa(confirm, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(confirm, 0, 0);
+	lv_obj_set_style_pad_all(confirm, 0, 0);
 	lv_obj_clear_flag(confirm, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_center(confirm);
 
@@ -128,17 +134,52 @@ static void act_cb(lv_event_t *e)
 	show_confirm();
 }
 
-static void close_panel(void)
+/* The panel slides in from the right and back out again (user request
+ * 2026-07-17) -- the motion says where settings lives and which way leads
+ * home. 250 ms, ease-out. */
+static bool closing;
+
+static void slide_x(lv_obj_t *obj, int32_t from, int32_t to,
+		    lv_anim_completed_cb_t done)
 {
+	lv_anim_t a;
+
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, obj);
+	lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
+	lv_anim_set_values(&a, from, to);
+	lv_anim_set_duration(&a, 250);
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+	if (done) {
+		lv_anim_set_completed_cb(&a, done);
+	}
+	lv_anim_start(&a);
+}
+
+static void close_done(lv_anim_t *a)
+{
+	ARG_UNUSED(a);
 	lv_obj_del(panel);	/* deletes confirm with it, if open */
 	panel = NULL;
 	confirm = NULL;
+	closing = false;
+}
+
+static void close_panel(void)
+{
+	if (closing) {
+		return;
+	}
+	closing = true;
+	slide_x(panel, 0, LV_HOR_RES, close_done);
 }
 
 static void back_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	close_panel();
+	if (confirm == NULL) {
+		close_panel();
+	}
 }
 
 static void panel_gesture_cb(lv_event_t *e)
@@ -158,10 +199,14 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(panel, 0, 0);
 	lv_obj_set_style_radius(panel, 0, 0);
+	/* Kill the theme's default padding: it silently shifted every child
+	 * down, and the footer line landed on the last button (seen on
+	 * hardware 2026-07-17). */
+	lv_obj_set_style_pad_all(panel, 0, 0);
 	lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_add_flag(panel, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_add_event_cb(panel, panel_gesture_cb, LV_EVENT_GESTURE, NULL);
-	lv_obj_center(panel);
+	lv_obj_set_pos(panel, LV_HOR_RES, 0);	/* offstage; slid in below */
 
 	lv_obj_t *title = lv_label_create(panel);
 
@@ -169,11 +214,23 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_text_color(title, COL_DIM, 0);
 	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
 
-	lv_obj_t *back = mk_btn(panel, LV_SYMBOL_LEFT " Back", COL_TRACK,
-				back_cb, NULL);
+	/* The back chevron: same visual language as the gauge edges, but a
+	 * chevron reads as a button, so it IS one (tapped on hardware and
+	 * found dead, 2026-07-17) -- tap or swipe right, both go home. */
+	lv_obj_t *back = lv_btn_create(panel);
 
-	lv_obj_set_size(back, 84, 32);
-	lv_obj_align(back, LV_ALIGN_TOP_LEFT, 6, 4);
+	lv_obj_set_size(back, 44, 88);
+	lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_shadow_width(back, 0, 0);
+	lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
+	lv_obj_add_flag(back, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
+
+	lv_obj_t *bl = lv_label_create(back);
+
+	lv_label_set_text(bl, LV_SYMBOL_LEFT);
+	lv_obj_set_style_text_color(bl, COL_DIM, 0);
+	lv_obj_center(bl);
 
 	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
 
@@ -186,17 +243,88 @@ static void open_panel(lv_obj_t *parent_scr)
 
 		lv_obj_align(b, LV_ALIGN_TOP_MID, 0, 52 + i * 52);
 	}
+
+	/* Debug-me line: the first three questions a misbehaving device gets
+	 * asked -- what build, which network, what address -- answered
+	 * without a serial cable (which would reset the board). */
+	char line[72];
+	char ip[16], ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
+
+	if (net_wifi_sta_ip(ip, sizeof(ip)) &&
+	    cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
+		char ssid_a[CFG_SSID_MAX];
+
+		fmt_ascii(ssid, ssid_a, sizeof(ssid_a));
+		snprintf(line, sizeof(line), "Clauge %s  |  %s  |  %s",
+			 CLAUGE_FW_VERSION, ssid_a, ip);
+	} else {
+		snprintf(line, sizeof(line), "Clauge %s", CLAUGE_FW_VERSION);
+	}
+
+	lv_obj_t *info = lv_label_create(panel);
+
+	lv_label_set_text(info, line);
+	lv_obj_set_style_text_color(info, COL_DIM, 0);
+	/* One line, dotted if a long SSID would push it wider than the
+	 * screen -- an auto-sized label neither wraps nor clips. */
+	lv_obj_set_size(info, 308, 17);
+	lv_label_set_long_mode(info, LV_LABEL_LONG_DOT);
+	lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+	slide_x(panel, LV_HOR_RES, 0, NULL);
 }
 
 static void scr_gesture_cb(lv_event_t *e)
 {
-	if (panel == NULL &&
-	    lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_LEFT) {
-		open_panel(lv_event_get_current_target(e));
+	lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+
+	if (panel != NULL) {
+		return;
 	}
+	if (dir == LV_DIR_LEFT) {
+		open_panel(lv_event_get_current_target(e));
+	} else if (dir == LV_DIR_RIGHT) {
+		/* The left chevron's promise: the boot clip on loop. Only
+		 * flagged here -- the mode loop runs the player from thread
+		 * context, never from inside an LVGL event. */
+		ui_anim_request();
+	}
+}
+
+/* Invisible tap strips along both screen edges: the chevrons drawn there
+ * read as buttons, so tapping them must work too (tried on hardware
+ * 2026-07-17). GESTURE_BUBBLE keeps the swipes alive across the strips. */
+static void zone_settings_cb(lv_event_t *e)
+{
+	if (panel == NULL) {
+		open_panel(lv_obj_get_screen(lv_event_get_target(e)));
+	}
+}
+
+static void zone_anim_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (panel == NULL) {
+		ui_anim_request();
+	}
+}
+
+static void mk_edge_zone(lv_obj_t *scr, lv_align_t align, lv_event_cb_t cb)
+{
+	lv_obj_t *z = lv_btn_create(scr);
+
+	lv_obj_set_size(z, 44, 150);
+	lv_obj_set_style_bg_opa(z, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_shadow_width(z, 0, 0);
+	lv_obj_align(z, align, 0, 0);
+	lv_obj_add_flag(z, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(z, cb, LV_EVENT_CLICKED, NULL);
 }
 
 void ui_settings_attach(lv_obj_t *scr)
 {
 	lv_obj_add_event_cb(scr, scr_gesture_cb, LV_EVENT_GESTURE, NULL);
+	mk_edge_zone(scr, LV_ALIGN_RIGHT_MID, zone_settings_cb);
+	mk_edge_zone(scr, LV_ALIGN_LEFT_MID, zone_anim_cb);
 }

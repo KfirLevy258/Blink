@@ -7,7 +7,7 @@
 #define AP_DHCP_POOL_START "192.168.4.10"
 
 /*
- * The SSID this board advertises while being set up, e.g. "claude-usage-5ead4c".
+ * The SSID this board advertises while being set up, e.g. "clauge-5ead4c".
  * Derived from the chip's MAC so that several of these devices in one room stay
  * distinguishable -- a fixed name would be ambiguous the moment you build a
  * second one. Stable across reboots.
@@ -16,6 +16,12 @@ const char *net_wifi_ap_ssid(void);
 
 /* The AP as a WIFI: QR payload, so one scan joins the network. */
 const char *net_wifi_ap_qr(void);
+
+/* The setup AP's WPA2 password (persisted by the caller; see cfg_store).
+ * Must be set before the first net_wifi_ap_qr()/net_wifi_start_ap() call.
+ * Without it the AP stays open -- WPA2 protects the WiFi credentials the
+ * user types into the portal from anyone sniffing the setup network. */
+void net_wifi_set_ap_psk(const char *psk);
 
 /* Called (from the net mgmt context) when a station associates to our AP and
  * when one leaves. Lets the setup screen show "phone connected" without a

@@ -91,7 +91,9 @@ int usage_parse(const char *json, size_t len, struct usage_data *out)
 	memset(out, 0, sizeof(*out));
 	parse_named_window(scratch, "five_hour", &out->five_hour);
 	parse_named_window(scratch, "seven_day", &out->seven_day);
+	parse_named_window(scratch, "seven_day_fable", &out->seven_day_fable);
 	parse_named_window(scratch, "seven_day_sonnet", &out->seven_day_sonnet);
+	parse_named_window(scratch, "seven_day_opus", &out->seven_day_opus);
 
 	if (!out->five_hour.present || !out->seven_day.present) {
 		return -ENODATA;

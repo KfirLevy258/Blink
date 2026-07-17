@@ -13,6 +13,7 @@
 static const char SAMPLE[] =
 	"{\"five_hour\":{\"utilization\":61.0,\"resets_at\":\"2026-06-08T21:50:01Z\"},"
 	"\"seven_day\":{\"utilization\":26.0,\"resets_at\":\"2026-06-10T06:00:01Z\"},"
+	"\"seven_day_fable\":{\"utilization\":12.5,\"resets_at\":\"2026-06-10T06:00:01Z\"},"
 	"\"seven_day_sonnet\":{\"utilization\":2.0,\"resets_at\":\"2026-06-10T06:00:01Z\"},"
 	"\"seven_day_opus\":null,"
 	"\"extra_usage\":{\"used_credits\":0.0,\"monthly_limit\":8000}}";
@@ -36,10 +37,13 @@ int main(void)
 	CHECK(d.seven_day.present, "seven_day present");
 	CHECK(fabs(d.seven_day.utilization - 26.0) < 0.01, "7d utilization == 26.0");
 	CHECK(strcmp(d.seven_day.resets_at, "2026-06-10T06:00:01Z") == 0, "7d resets_at");
+	CHECK(d.seven_day_fable.present, "fable present");
+	CHECK(fabs(d.seven_day_fable.utilization - 12.5) < 0.01, "fable util == 12.5");
 	CHECK(d.seven_day_sonnet.present, "sonnet present");
 	CHECK(fabs(d.seven_day_sonnet.utilization - 2.0) < 0.01, "sonnet util == 2.0");
+	CHECK(!d.seven_day_opus.present, "null opus window reads absent");
 	CHECK(fabs(d.seven_day.utilization - 26.0) < 0.01,
-	      "7d not confused with seven_day_sonnet/opus siblings");
+	      "7d not confused with seven_day_fable/sonnet/opus siblings");
 
 	memset(&d, 0, sizeof(d));
 	CHECK(usage_parse("not json", 8, &d) < 0, "garbage rejected");

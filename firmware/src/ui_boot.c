@@ -33,7 +33,12 @@ static const struct device *const boot_disp =
 	DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
 static lv_obj_t *scr;
-static uint8_t strip_buf[4096];
+/* Borrowed from the LVGL pool for the splash only. A permanent 4 KB static
+ * here starved the WiFi driver's runtime heap: large TX frames silently
+ * dropped while small ones passed, breaking the captive portal in
+ * size-correlated ways (diagnosed on hardware 2026-07-16). */
+#define STRIP_BYTES 4096
+static uint8_t *strip_buf;
 
 /* Survives a warm reset; the magic guards against power-on garbage. */
 static __noinit uint32_t skip_magic;
@@ -92,7 +97,7 @@ static bool bootanim_play(const uint8_t *blob, size_t len)
 
 	for (int i = 0; i < hdr.nframes; i++) {
 		if (ba_decode_frame(blob, len, &off, strip_buf,
-				    sizeof(strip_buf), blit_cb, NULL) < 0)
+				    STRIP_BYTES, blit_cb, NULL) < 0)
 			return false;
 		next += 1000 / hdr.fps;
 		while (k_uptime_get() < next) {
@@ -112,30 +117,42 @@ void ui_boot_splash(void)
 
 	scr = lv_obj_create(NULL);
 	lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_set_style_bg_color(scr, lv_color_hex(BOOTANIM_BG_RGB), 0);
+	/* Intentional reboots wear the UI background, not the clip's clay:
+	 * even 300 ms of brand orange between two dark screens betrayed the
+	 * restart (user feedback 2026-07-16). Cold boots keep the clay so
+	 * the clip has its stage. */
+	lv_obj_set_style_bg_color(scr, skip ? lv_color_hex(0x0E1116)
+					    : lv_color_hex(BOOTANIM_BG_RGB), 0);
 	lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 	lv_scr_load(scr);
 	lv_refr_now(NULL);	/* the one and only LVGL paint of this screen */
 
 	if (skip) {
-		/* Intentional reboot mid-flow: no face, no theater -- just
-		 * the flat brand background while the daemon round-trip
-		 * window runs (hello went out in proto_init; a live daemon
-		 * answers within milliseconds). The screen stays up through
-		 * the WiFi scan either way. Flashing the clip's final frame
-		 * here read as an unexplained face pop during setup reboots
-		 * (user feedback 2026-07-16); bootanim_last stays available
-		 * in the generated header, and the linker drops it while
-		 * unreferenced. */
+		/* No face, no theater -- just a dark frame while the daemon
+		 * round-trip window runs (hello went out in proto_init; a
+		 * live daemon answers within milliseconds). The screen stays
+		 * up through the WiFi scan either way. Flashing the clip's
+		 * final frame here read as an unexplained face pop during
+		 * setup reboots (user feedback 2026-07-16); bootanim_last
+		 * stays available in the generated header, and the linker
+		 * drops it while unreferenced. */
 		pump(300);
 		return;
 	}
 
-	if (!bootanim_play(bootanim_blob, sizeof(bootanim_blob))) {
-		/* Corrupt blob: keep the bare screen up for the same
-		 * daemon-detect window the old splash guaranteed. */
-		pump(2500);
+	strip_buf = lv_malloc(STRIP_BYTES);
+	if (strip_buf) {
+		bool ok = bootanim_play(bootanim_blob, sizeof(bootanim_blob));
+
+		lv_free(strip_buf);
+		strip_buf = NULL;
+		if (ok) {
+			return;
+		}
 	}
+	/* No RAM for the player, or a corrupt blob: keep the bare screen up
+	 * for the same daemon-detect window the old splash guaranteed. */
+	pump(2500);
 }
 
 void ui_boot_teardown(void)

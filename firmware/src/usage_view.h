@@ -2,6 +2,7 @@
 #define USAGE_VIEW_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /* Connection state, shown as a coloured dot. Mirrors the web UI's convention. */
 enum usage_status {
@@ -36,19 +37,25 @@ void usage_view_tick_1s(void);
  * shown wrong). */
 void usage_view_set_clock(int hh, int mm);
 
-/* Reword the full-screen "no data yet" takeover. The default text is USB
- * mode's ("waiting for host"); standalone WiFi waits for something else
- * entirely, and telling the user to start a PC daemon there is a lie. */
-void usage_view_set_waiting(const char *title, const char *sub);
-
 /*
- * Standalone boot progress: one CONNECTING screen with a segmented bar that
- * fills green, current step named below. Segments before `stage` render as
- * done, `stage` pulses, the rest stay dim.
- * Stages: 0 join WiFi, 1 sign in (clock sync rides inside), 2 first fetch.
- * The first call switches the takeover from title+sub to bar form.
+ * Boot progress: one CONNECTING takeover with a segmented bar that fills
+ * green, current step named below. Both modes wear the same screen -- only
+ * the step list differs (USB: link daemon / first push; WiFi: join / sign
+ * in / first fetch). Call _begin once with the mode's steps (max 3), then
+ * _stage as the worker advances. Segments before `stage` render as done,
+ * `stage` pulses, the rest stay dim; stage == n means "Ready".
  */
+void usage_view_boot_begin(const char *const *steps, int nsteps);
 void usage_view_boot_stage(int stage);
+
+/* True once any usage numbers have arrived this boot -- lets the mode loops
+ * tell "still waiting for the first data" from "data went stale". */
+bool usage_view_have_data(void);
+
+/* Fable's weekly utilization for the long-press card (Claude's windows
+ * today are all-models + fable); -1 = unknown. Fed by either data source
+ * alongside the headline numbers. */
+void usage_view_set_models(double fable_pct);
 
 void usage_view_set_status(enum usage_status status);
 

@@ -11,6 +11,7 @@
 #include "msg_parse.h"
 #include "usage_view.h"
 #include "net_time.h"
+#include "version.h"
 
 #define PROTO_VERSION 2
 #define PING_INTERVAL_MS 10000
@@ -87,7 +88,8 @@ static void send_hello(void)
 	char buf[160];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
-		 "\"board_id\":\"%s\",\"fw\":\"0.2.0\",\"reset\":\"0x%x\"}",
+		 "\"board_id\":\"%s\",\"fw\":\"" CLAUGE_FW_VERSION "\","
+		 "\"reset\":\"0x%x\"}",
 		 PROTO_VERSION, idhex, cause);
 	emit(buf);
 }
@@ -122,6 +124,13 @@ static void dispatch(const char *json)
 		msg_get_double(json, "session_resets_in_s", &ss);
 		msg_get_double(json, "weekly_resets_in_s", &ws);
 		usage_view_update(sp, (int32_t)ss, wp, (int32_t)ws);
+
+		/* Flat model key (protocol.py flattens its models list for
+		 * us); an absent key leaves the -1 "unknown" default. */
+		double mf = -1;
+
+		msg_get_double(json, "fable_pct", &mf);
+		usage_view_set_models(mf);
 		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)\n",
 		       sp, (int)ss, wp, (int)ws);
 	} else if (strcmp(type, "time") == 0) {
