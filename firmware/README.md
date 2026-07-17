@@ -1,74 +1,100 @@
-# Claude Usage Display — ESP32-C6 firmware (UART bridge)
+# Clauge — CYD firmware (ESP32-2432S028 "Cheap Yellow Display")
 
-The board no longer fetches anything itself. A **PC daemon** (`../claude_usage_bridge.py`)
-holds the Claude OAuth token (auto-refreshed by Claude Code), polls
-`/api/oauth/usage`, and **pushes** the numbers to this board over the USB-C serial
-link using a small NDJSON protocol. The board sends identity + keep-alive and
-displays whatever usage the PC sends. No WiFi / TLS / SNTP / token on the device.
+A desk display for Claude Code usage: two 270° gauges (5-hour session, 7-day week)
+with live reset countdowns, a wall clock, and a status dot. Firmware version lives
+in `src/version.h` (currently **0.3.0**) and is reported in the serial `hello`.
 
-## Protocol (NDJSON, one JSON object per line, `t`=type, `v`=version)
+Two data modes, detected at boot — never asked:
 
-- Board → PC: `hello` (on boot, with `board_id` from the chip MAC), `ping` (every 10 s).
-- PC → board: `welcome` (ack), `usage` (`session_pct`/`weekly_pct`/resets + optional
-  `models[]`), `status` (e.g. rate-limited).
-- Unknown `t` and non-`{` lines are ignored on both sides (forward-compatible; logs and
-  protocol coexist on the one serial stream).
+- **USB bridge** — a PC daemon (`tools/dev.sh` / `pc/`) answers the boot `hello`
+  over serial and pushes usage as NDJSON. No WiFi or token on the device.
+- **Standalone WiFi** — the board holds WiFi credentials + an OAuth refresh token
+  (provisioned by phone) and fetches `/api/oauth/usage` itself over TLS every 60 s.
 
-## Toolchain / build (Intel Mac; see the prior plan for why)
+First match wins: a talking daemon, then a reachable stored network, then the
+provisioning flow (boarding-pass screen + phone captive portal). The setup AP is
+**WPA2** with a random per-device password carried inside the join QR; the phone
+types nothing. See the living screen map artifact for every screen and state.
 
-- Zephyr **v4.3.0** in `~/zephyr-v4.4.0` (dir name kept; pinned to 4.3.0), Python 3.12
-  venv, SDK 0.17.4 (riscv64). ccache is broken on this host → always `-DUSE_CCACHE=0`.
+## Build (Intel Mac)
+
+Zephyr **v4.3.0** in `~/zephyr-v4.4.0` (dir name kept), Python 3.12 venv, SDK 0.17.4.
+ccache is broken on this host → `-DUSE_CCACHE=0` on full builds.
 
 ```bash
 source ~/zephyr-v4.4.0/.venv/bin/activate && source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
 west build -p auto -b esp32_devkitc/esp32/procpu . -- -DUSE_CCACHE=0
 ```
 
-The board is the **CYD (ESP32, esp32_devkitc/esp32/procpu)** — the esp32c6 target
-above it replaced is long gone. Passing the wrong `-b` reconfigures `build/` for
-that board and every later incremental build fails in the device tree (this has
-happened; a `-p always` rebuild with the right board recovers it). For incremental
-builds just run `west build` with no flags inside an already-configured `build/`.
+The board target is **`esp32_devkitc/esp32/procpu`** (no upstream CYD board exists;
+`boards/esp32_devkitc_esp32_procpu.overlay` describes the wiring). Passing any other
+`-b` poisons `build/` — recover with `-p always` and the right board. Incremental
+builds: plain `west build` inside the configured `build/`.
 
-## Flash (learned the hard way)
+## Flash
 
-The C6 exposes **two** USB CDC interfaces on its two USB-C ports:
-- **UART bridge** (e.g. `/dev/cu.usbmodem143401`) — flash here with esptool.
-- **native USB-Serial-JTAG** (e.g. `/dev/cu.usbmodem58CD…`) — the firmware **console +
-  protocol** flow here (where the PC daemon connects).
-
-Auto-reset into the bootloader is unreliable; use manual download mode:
-1. Quit any serial monitor (only one process may own a port).
-2. Hold **BOOT**, tap **RESET/EN**, release **BOOT** (board is now in download mode).
-3. Flash:
-```bash
-esptool --port /dev/cu.usbmodem<UART-bridge> --before no-reset --after hard-reset \
-  write-flash --flash-mode dio --flash-freq 80m --flash-size 8MB 0x0 build/zephyr/zephyr.bin
-```
-Expect `Hash of data verified.`
-
-## Run the bridge (this is the whole app)
+The CYD has a single CH340 USB-serial (`/dev/cu.usbserial-14XX0`; digits change with
+the physical socket — glob first). Opening the port resets the board. 921600 baud
+fails on this CH340; use 115200:
 
 ```bash
-source ~/zephyr-v4.4.0/.venv/bin/activate           # has pyserial
-python3 ../claude_usage_bridge.py --port /dev/cu.usbmodem<native-USB-JTAG>
+west flash --esp-device /dev/cu.usbserial-14220 --esp-baud-rate 115200
 ```
-The daemon reads your token (Keychain / `~/.claude/.credentials.json`), connects, and
-on the board's `hello` replies `welcome`+`usage`, then polls every 300 s. Its log shows
-**both directions** plus the board's echoed `[usage] Session…` display lines, so one
-terminal shows the whole loop. (`tio` and the daemon can't both own the port.)
 
-Important: the daemon opens the port with **DTR/RTS de-asserted** — on the C6 native
-USB-Serial-JTAG the default open sequence resets the chip into ROM download mode and
-silences the firmware.
+- **Observe without disturbing:** `tools/passive_log.py <port>` (venv python; resets
+  once on open, then read-only). Only one process may own the port.
+- **Do not** use a flow that starts the USB daemon when testing provisioning — its
+  hello puts the board into USB-bridge mode.
+- **Fresh-provisioning test:** erase stored creds/token/AP-password:
+  `esptool.py --port <port> erase_region 0x3b0000 0x30000` (NVS partition).
+- **Display SPI is pinned at 25 MHz** — the common CYD 40 MHz overclock white-screens
+  this unit (panel never latches init). See the overlay comment.
 
-## Verified
+## Hardware quirks worth knowing (all learned on this unit)
 
-Real round trip on hardware: board `hello`(+MAC id)/`ping` → daemon `welcome` + `usage`
-with live numbers (e.g. Session 38%, Weekly 14%, Sonnet 2%). FLASH ~1.6%.
+- The radio boots blind (all scans empty) roughly every other soft reset; the
+  firmware self-reboots to re-roll it, bounded by a `.noinit` counter.
+- Touch (XPT2046) needs `reads = <8>` averaging — and DTS properties are
+  last-one-wins, so a stray duplicate silently degrades it.
+- The backlight (GPIO 21) runs on LEDC PWM; night mode dims to 25% between 23:00
+  and 07:00 local. Transitions log `[ui] backlight N%`.
+- A station join only completes from a clean boot on this driver — which is why the
+  provisioning flow reboots on purpose (invisibly: dark skip-splash, CONNECTING
+  spans the reset).
+
+## Security posture
+
+- **In transit:** the setup AP is WPA2 (random NVS-persisted password, rotated by
+  factory reset); the OAuth login code is PKCE-bound (useless without the verifier,
+  which never leaves the device); the refresh token travels only device↔Anthropic
+  over verified TLS. The phone browser still shows an HTTP warning on the portal —
+  inherent to plain HTTP; the link beneath it is encrypted.
+- **At rest:** the refresh token sits in plain NVS. The upgrade is ESP32 flash
+  encryption — **irreversible eFuse burn**, so it is deliberately not automated:
+  ```bash
+  # ONE-WAY. Test on a spare board first. Development mode shown.
+  espefuse.py --port <port> burn_efuse FLASH_CRYPT_CNT 1
+  espefuse.py --port <port> burn_efuse FLASH_CRYPT_CONFIG 0xF
+  # then build with CONFIG_ESP_FLASH_ENCRYPTION (see Zephyr ESP32 docs) and
+  # flash encrypted images from then on; plaintext flashing stops working.
+  ```
 
 ## Source map
-- `proto.c` — UART line reader, emits `hello`/`ping`, dispatches inbound by `t`.
-- `msg_parse.c` — flat-field JSON value extractors (host-tested: `tests/msg_parse/`).
-- `usage_view.c` — prints the latest usage (later: a display).
-- `main.c` — init + service loop.
+
+- `main.c` — boot decision, provisioning orchestration, standalone worker, USB loop,
+  backlight/night logic.
+- `ui_boot.c` / `bootanim_dec.c` — eyes-clip splash (skip variant on intentional
+  reboots), streamed past LVGL.
+- `ui_setup.c` — boarding-pass screen, 8 states, failure popups.
+- `portal.c` / `dns_hijack.c` — phone captive portal (WiFi form → ack → sign-in →
+  working → done) on a hand-rolled HTTP/1.1 server.
+- `usage_view.c` — gauges, unified CONNECTING boot bar, near-limit warnings, model
+  card (All models / Fable, persisted selection), edge chevrons.
+- `ui_settings.c` — edge tap/swipe navigation, settings panel (Reset WiFi /
+  Re-sign-in / Factory reset), version/SSID/IP footer.
+- `ui_anim.c` — the boot clip on loop (left chevron).
+- `net_wifi.c` / `net_time.c` / `oauth.c` / `usage_client.c` / `usage_parse.c` /
+  `tz_fetch.c` — radio, SNTP, PKCE OAuth, TLS usage fetch, response parsing, timezone.
+- `cfg_store.c` — NVS-backed settings (mode, WiFi, token, tz, AP password, weekly
+  selection).
+- `proto.c` / `msg_parse.c` — serial NDJSON protocol (host-tested in `tests/`).

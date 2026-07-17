@@ -10,6 +10,7 @@
 
 #include "usage_view.h"
 #include "fmt.h"
+#include "cfg_store.h"
 
 /* Severity colours: green under 60%, amber approaching, red near the limit. */
 #define COL_BG		lv_color_hex(0x0E1116)
@@ -202,6 +203,7 @@ static void peek_hide(void)
 static void peek_row_cb(lv_event_t *e)
 {
 	weekly_sel = (int)(intptr_t)lv_event_get_user_data(e);
+	cfg_set_weekly_sel((uint8_t)weekly_sel);	/* survives reboots */
 	render_weekly();
 	peek_hide();
 }
@@ -357,6 +359,14 @@ void usage_view_init(void)
 
 	lv_obj_add_event_cb(scr, peek_open_cb, LV_EVENT_LONG_PRESSED, NULL);
 	lv_obj_add_event_cb(scr, peek_scrim_cb, LV_EVENT_CLICKED, NULL);
+
+	/* The peek-card choice from last boot; render so the gauge's name
+	 * says which window it shows from the very first frame. */
+	weekly_sel = cfg_get_weekly_sel();
+	if (weekly_sel >= PEEK_ROWS) {
+		weekly_sel = 0;		/* stale NVS from an older layout */
+	}
+	render_weekly();
 
 	/* With no host there is genuinely nothing to show, so take over the whole
 	 * screen. A board sitting quietly at "--%" reads as broken; this says what
@@ -528,6 +538,11 @@ void usage_view_set_status(enum usage_status status)
 			tc = COL_RED;
 		} else if (last_w_pct >= 95.0) {
 			text = "Weekly almost used up";
+			tc = COL_RED;
+		} else if (model_fable >= 95.0) {
+			/* Fable's window is a real limit of its own; it can
+			 * run dry while the overall weekly still looks calm. */
+			text = "Fable weekly almost used up";
 			tc = COL_RED;
 		} else {
 			text = "";

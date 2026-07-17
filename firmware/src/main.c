@@ -40,6 +40,9 @@ static void backlight_apply(int hh)
 		return;
 	}
 	level = want;
+	/* One line per transition: night mode is verifiable from the log
+	 * without waiting for 23:00 (or trusting one's eyes at 25%). */
+	printk("[ui] backlight %d%% (hh=%d)\n", want, hh);
 	pwm_set_pulse_dt(&backlight, backlight.period * want / 100);
 }
 

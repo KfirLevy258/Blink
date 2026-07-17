@@ -27,6 +27,7 @@ static K_MUTEX_DEFINE(cfg_lock);
 #define KEY_TOKEN KEY_ROOT "/rtok"
 #define KEY_TZ    KEY_ROOT "/tzmin"
 #define KEY_APPSK KEY_ROOT "/appsk"
+#define KEY_WKSEL KEY_ROOT "/wksel"
 
 static struct {
 	enum cfg_mode mode;
@@ -36,6 +37,7 @@ static struct {
 	char ap_psk[CFG_AP_PSK_MAX];
 	int32_t tz_min;
 	bool tz_set;
+	uint8_t weekly_sel;
 } cfg;
 
 static int cfg_set_cb(const char *name, size_t len, settings_read_cb read_cb,
@@ -80,6 +82,14 @@ static int cfg_set_cb(const char *name, size_t len, settings_read_cb read_cb,
 
 		if (n > 0) {
 			cfg.ap_psk[n] = '\0';
+		}
+		return 0;
+	}
+	if (settings_name_steq(name, "wksel", &next) && !next) {
+		uint8_t v = 0;
+
+		if (read_cb(cb_arg, &v, sizeof(v)) > 0) {
+			cfg.weekly_sel = v;
 		}
 		return 0;
 	}
@@ -238,6 +248,23 @@ int cfg_clear_wifi(void)
 	return rc;
 }
 
+uint8_t cfg_get_weekly_sel(void)
+{
+	return cfg.weekly_sel;
+}
+
+int cfg_set_weekly_sel(uint8_t sel)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	cfg.weekly_sel = sel;
+
+	int rc = settings_save_one(KEY_WKSEL, &cfg.weekly_sel,
+				   sizeof(cfg.weekly_sel));
+
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
 bool cfg_get_ap_psk(char *psk, size_t len)
 {
 	k_mutex_lock(&cfg_lock, K_FOREVER);
@@ -297,6 +324,7 @@ int cfg_reset(void)
 	settings_delete(KEY_TOKEN);
 	settings_delete(KEY_TZ);
 	settings_delete(KEY_APPSK);	/* factory reset rotates the AP password */
+	settings_delete(KEY_WKSEL);
 	k_mutex_unlock(&cfg_lock);
 	return 0;
 }

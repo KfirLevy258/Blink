@@ -15,7 +15,7 @@ def _local_wall():
 
 
 class Bridge:
-    def __init__(self, write_msg, fetch_usage, now=time.monotonic, app_ver="0.2.0",
+    def __init__(self, write_msg, fetch_usage, now=time.monotonic, app_ver="0.3.0",
                  wall=_local_wall):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
@@ -28,7 +28,7 @@ class Bridge:
     def on_message(self, msg: dict):
         t = msg.get("t")
         if t == "hello":
-            self._write(protocol.welcome("claude-usage-bridge", self._app_ver))
+            self._write(protocol.welcome("clauge-bridge", self._app_ver))
             self.poll_once()             # push current data immediately
         elif t == "ping":
             self._last_ping = self._now()

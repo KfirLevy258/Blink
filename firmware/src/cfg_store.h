@@ -54,6 +54,11 @@ int cfg_clear_wifi(void);
 bool cfg_get_ap_psk(char *psk, size_t len);
 int cfg_set_ap_psk(const char *psk);
 
+/* Which window the weekly gauge shows (0 = all models, 1 = fable): the
+ * peek-card choice, persisted so a reboot keeps it. Defaults to 0. */
+uint8_t cfg_get_weekly_sel(void);
+int cfg_set_weekly_sel(uint8_t sel);
+
 /* Last known UTC offset (minutes east of UTC), fed by the tz API in WiFi mode
  * so the clock survives API outages. cfg_get_tz() returns false until an
  * offset has ever been stored. */
