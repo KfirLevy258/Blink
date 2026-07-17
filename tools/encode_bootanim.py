@@ -41,13 +41,31 @@ from PIL import Image
 CANVAS_W, CANVAS_H = 320, 240
 
 
-def extract_frames(path, start, duration, fps, width, height):
-    """Decode the clip via ffmpeg into (N, H, W, 3) uint8."""
+def probe_dims(path):
+    """Source pixel dimensions via ffprobe."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+        check=True, capture_output=True).stdout
+    w, h = (int(v) for v in out.decode().strip().split(","))
+    return w, h
+
+
+def extract_frames(path, start, duration, fps, width, height, zoom=1.0):
+    """Decode the clip via ffmpeg into (N, H, W, 3) uint8. zoom > 1 crops
+    into the source (centered) before scaling, making everything larger."""
+    vf = f"fps={fps}"
+    if zoom > 1.0:
+        src_w, src_h = probe_dims(path)
+        crop_h = int(src_h / zoom) // 2 * 2
+        crop_w = min(src_w, int(crop_h * width / height) // 2 * 2)
+        vf += f",crop={crop_w}:{crop_h}"
+    vf += f",scale={width}:{height}"
     cmd = [
         "ffmpeg", "-v", "error",
         "-ss", str(start), "-t", str(duration),
         "-i", path,
-        "-vf", f"fps={fps},scale={width}:{height}",
+        "-vf", vf,
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
     ]
     raw = subprocess.run(cmd, check=True, capture_output=True).stdout
@@ -218,26 +236,56 @@ def emit_header(path, blob, last, fps, nframes, bg_rgb, cmdline):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--input", required=True)
-    ap.add_argument("--start", type=float, default=0.0)
-    ap.add_argument("--duration", type=float, default=4.0)
+    ap.add_argument("--start", type=float, action="append", default=None,
+                    help="segment start; repeatable (paired with --duration) "
+                         "to splice segments together")
+    ap.add_argument("--duration", type=float, action="append", default=None,
+                    help="segment length; one per --start")
     ap.add_argument("--fps", type=int, default=12)
     ap.add_argument("--threshold", type=int, default=10,
                     help="per-channel noise gate vs displayed pixel (0-255)")
     ap.add_argument("--mask", action="append", default=[], metavar="X,Y,W,H",
                     help="paint the background fill over this rect of the "
                          "scaled video (e.g. a watermark); repeatable")
+    ap.add_argument("--zoom", type=float, default=1.0,
+                    help="crop into the source before scaling (1.33 fills "
+                         "the 4:3 canvas from a 16:9 clip)")
+    ap.add_argument("--split-gap", type=int, default=0,
+                    help="slide the two halves of the scaled video this many "
+                         "px apart (background fills the middle; must be "
+                         "even). Widens the eye spacing on flat clips.")
+    ap.add_argument("--split-col", type=int, default=CANVAS_W // 2,
+                    help="column the split happens at (must cross only "
+                         "background in every frame)")
     ap.add_argument("--out", help="write C header here")
     ap.add_argument("--preview", help="write round-trip GIF here")
     args = ap.parse_args()
 
-    vid_h = round(CANVAS_W * 9 / 16)  # 16:9 source scaled to canvas width
-    src = extract_frames(args.input, args.start, args.duration, args.fps,
-                         CANVAS_W, vid_h)
+    starts = args.start if args.start is not None else [0.0]
+    durations = args.duration if args.duration is not None else [4.0]
+    if len(starts) != len(durations):
+        sys.exit("need one --duration per --start")
+
+    # 16:9 source scaled to canvas width; zoom crops in, growing the video
+    # region up to the full canvas height.
+    vid_h = min(CANVAS_H, round(CANVAS_W * 9 / 16 * args.zoom / 2) * 2)
+    src = np.concatenate([
+        extract_frames(args.input, s, d, args.fps, CANVAS_W, vid_h,
+                       zoom=args.zoom)
+        for s, d in zip(starts, durations)])
     fill = np.median(src[0, :2].reshape(-1, 3), axis=0).astype(np.uint8)
 
     for m in args.mask:
         x, y, w, h = (int(v) for v in m.split(","))
         src[:, y:y + h, x:x + w] = fill
+
+    if args.split_gap:
+        half, s = args.split_gap // 2, args.split_col
+        spread = np.empty_like(src)
+        spread[:] = fill
+        spread[:, :, :s - half] = src[:, :, half:s]
+        spread[:, :, s + half:] = src[:, :, s:CANVAS_W - half]
+        src = spread
 
     y0 = (CANVAS_H - vid_h) // 2
     canvases = np.empty((len(src), CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
