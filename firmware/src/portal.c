@@ -132,18 +132,31 @@ static int recv_request(int sock, char *buf, size_t buflen)
 	size_t total = 0;
 	int hdr_end = -1;
 	size_t content_len = 0;
-	int64_t deadline = k_uptime_get() + 3000;
+	int64_t start = k_uptime_get();
+	int64_t deadline = start + 3000;
 
 	while (total < buflen - 1 && k_uptime_get() < deadline) {
 		struct zsock_pollfd p = { .fd = sock, .events = ZSOCK_POLLIN };
 
-		if (zsock_poll(&p, 1, 500) <= 0) {
+		if (zsock_poll(&p, 1, 100) <= 0) {
+			/* Serving must never freeze the screen: a phone fires
+			 * probes in parallel and abandons the losers, and a
+			 * storm of silent sockets each enjoying the full 3 s
+			 * here deafened the portal AND froze the UI (seen on
+			 * hardware 2026-07-16). */
+			portal_idle_hook();
+
 			/* Idle. If we know no (more) body is owed, we're done;
 			 * with Content-Length still unmet, keep waiting -- the
 			 * body segment can lag the headers on a busy AP. The
 			 * outer deadline still bounds the total wait. */
 			if (hdr_end >= 0 &&
 			    total >= (size_t)hdr_end + content_len) {
+				break;
+			}
+			/* A connection that never said anything gets a short
+			 * leash, not the full window. */
+			if (total == 0 && k_uptime_get() > start + 600) {
 				break;
 			}
 			continue;
