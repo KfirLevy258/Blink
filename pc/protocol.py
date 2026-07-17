@@ -82,7 +82,16 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
     the absolute resets_at timestamps; it ticks these down locally instead.
     -1 means unknown. The absolute timestamps are kept for readability and
     for any consumer that does know the time.
+
+    Known models are ALSO flattened into sonnet_pct/opus_pct: the board's
+    JSON scanner reads scalar keys only, and its per-model peek needs these
+    without growing a full array parser.
     """
+    flat = {}
+    for m in models or []:
+        name = m.get("name")
+        if name in ("fable", "sonnet", "opus") and "weekly_pct" in m:
+            flat[f"{name}_pct"] = float(m["weekly_pct"])
     return {
         "t": "usage", "v": VERSION,
         "session_pct": session_pct, "session_resets_at": session_resets_at,
@@ -90,6 +99,7 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
         "weekly_pct": weekly_pct, "weekly_resets_at": weekly_resets_at,
         "weekly_resets_in_s": weekly_resets_in_s,
         "models": models,
+        **flat,
     }
 
 

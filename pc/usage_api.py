@@ -39,7 +39,11 @@ def map_usage(raw: dict, now: datetime = None) -> dict:
     session_pct, session_reset = _window(raw, "five_hour")
     weekly_pct, weekly_reset = _window(raw, "seven_day")
     models = []
-    for key, name in (("seven_day_sonnet", "sonnet"), ("seven_day_opus", "opus")):
+    # Current accounts expose all-models + fable; the sonnet/opus keys are
+    # kept for accounts still on the older window split.
+    for key, name in (("seven_day_fable", "fable"),
+                      ("seven_day_sonnet", "sonnet"),
+                      ("seven_day_opus", "opus")):
         w = raw.get(key)
         if isinstance(w, dict) and "utilization" in w:
             models.append({"name": name, "weekly_pct": float(w["utilization"])})

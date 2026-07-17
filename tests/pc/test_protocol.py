@@ -34,6 +34,24 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(protocol.status("rate_limited", "x"),
                          {"t": "status", "v": 2, "state": "rate_limited", "detail": "x"})
 
+    def test_usage_flattens_known_models(self):
+        """The board's JSON scanner reads scalar keys only, so known models
+        are flattened next to the models list (which stays intact)."""
+        u = protocol.usage(61.0, "R1", 26.0, "R2",
+                           [{"name": "fable", "weekly_pct": 12.5},
+                            {"name": "sonnet", "weekly_pct": 2.0},
+                            {"name": "opus", "weekly_pct": 40.5},
+                            {"name": "haiku", "weekly_pct": 1.0}])
+        self.assertEqual(u["fable_pct"], 12.5)
+        self.assertEqual(u["sonnet_pct"], 2.0)
+        self.assertEqual(u["opus_pct"], 40.5)
+        self.assertNotIn("haiku_pct", u)  # unknown models stay list-only
+        self.assertEqual(len(u["models"]), 4)
+
+    def test_usage_flatten_handles_empty_and_none_models(self):
+        self.assertNotIn("sonnet_pct", protocol.usage(1.0, "R", 2.0, "R", []))
+        self.assertNotIn("sonnet_pct", protocol.usage(1.0, "R", 2.0, "R", None))
+
     def test_time_msg_fields(self):
         m = protocol.time_msg(1752444000, -300)
         self.assertEqual(m["t"], "time")
