@@ -138,25 +138,13 @@ static int recv_request(int sock, char *buf, size_t buflen)
 	while (total < buflen - 1 && k_uptime_get() < deadline) {
 		struct zsock_pollfd p = { .fd = sock, .events = ZSOCK_POLLIN };
 
-		if (zsock_poll(&p, 1, 100) <= 0) {
-			/* Serving must never freeze the screen: a phone fires
-			 * probes in parallel and abandons the losers, and a
-			 * storm of silent sockets each enjoying the full 3 s
-			 * here deafened the portal AND froze the UI (seen on
-			 * hardware 2026-07-16). */
-			portal_idle_hook();
-
+		if (zsock_poll(&p, 1, 500) <= 0) {
 			/* Idle. If we know no (more) body is owed, we're done;
 			 * with Content-Length still unmet, keep waiting -- the
 			 * body segment can lag the headers on a busy AP. The
 			 * outer deadline still bounds the total wait. */
 			if (hdr_end >= 0 &&
 			    total >= (size_t)hdr_end + content_len) {
-				break;
-			}
-			/* A connection that never said anything gets a short
-			 * leash, not the full window. */
-			if (total == 0 && k_uptime_get() > start + 600) {
 				break;
 			}
 			continue;
@@ -198,14 +186,35 @@ static int send_all(int sock, const char *buf, size_t len)
 {
 	size_t off = 0;
 	const size_t CHUNK = 512;
+	int starved = 0;
 
+	printk("[portal] send %u\n", (unsigned)len);
 	while (off < len) {
+		/* Small paced chunks are load-bearing, not politeness: they
+		 * keep most of the TX net_buf pool free, and Zephyr TCP needs
+		 * free bufs to CLONE a segment for retransmission -- with the
+		 * pool pinned by queued page data, one frame lost on air was
+		 * unrecoverable ("TCP failed to allocate buffer in
+		 * retransmission", diagnosed 2026-07-16). */
 		size_t want = MIN(CHUNK, len - off);
 		int n = zsock_send(sock, buf + off, want, 0);
 
 		if (n <= 0) {
+			/* TX buffer starvation is transient and worth riding
+			 * out -- giving up mid-page hands the phone a
+			 * truncated white sheet. Real peer errors stay
+			 * fatal. */
+			if ((errno == ENOBUFS || errno == ENOMEM ||
+			     errno == EAGAIN) && starved < 40) {
+				starved++;
+				k_msleep(50);
+				continue;
+			}
+			printk("[portal] send died at %u errno %d\n",
+			       (unsigned)off, errno);
 			return -1;
 		}
+		starved = 0;
 		off += n;
 		if (off < len) {
 			k_msleep(15);
@@ -223,8 +232,8 @@ static int send_all(int sock, const char *buf, size_t len)
 	"label{display:block;font-size:12px;color:#8a9199;margin:12px 0 5px}" \
 	"select,input,textarea{width:100%;padding:12px;border-radius:10px;border:1px solid #303743;" \
 	"background:#0e1116;color:#e6e8eb;font-size:16px}" \
-	"a.b{display:inline-block;color:#08130c;background:#2ecc71;text-decoration:none;padding:12px 16px;" \
-	"border-radius:10px;font-weight:700;font-size:15px}" \
+	"a.b{display:block;color:#08130c;background:#2ecc71;text-decoration:none;padding:12px 16px;" \
+	"border-radius:10px;font-weight:700;font-size:15px;text-align:center}" \
 	"button{width:100%;margin-top:20px;padding:15px;border:0;border-radius:12px;background:#2ecc71;" \
 	"color:#08130c;font-size:16px;font-weight:700}.e{color:#e74c3c;font-size:13px;margin-top:8px}" \
 	".spin{display:none;position:fixed;inset:0;background:rgba(14,17,22,.94);z-index:9;" \
@@ -269,7 +278,7 @@ static void wifi_page(int sock, const char *err)
 	 * happened to render. */
 	int n = snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
-		"content='width=device-width,initial-scale=1'><title>Setup</title>%s"
+		"content='width=device-width,initial-scale=1'><title>Clauge setup</title>%s"
 		"</head><body>"
 		"<div class=spin id=sp><div class=ring></div><p>Connecting to your network\xE2\x80\xA6</p></div>"
 		"<h1>Connect to WiFi</h1>"
@@ -311,7 +320,7 @@ static void signin_page(int sock, const char *authorize_url, bool err)
 	 * forever, user-reported 2026-07-16). */
 	snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
-		"content='width=device-width,initial-scale=1'><title>Sign in</title>%s"
+		"content='width=device-width,initial-scale=1'><title>Clauge sign in</title>%s"
 		"<script>setInterval(function(){fetch('/status')"
 		".then(function(r){return r.text()})"
 		".then(function(t){if(t.indexOf('done')==0)location.href='/done'})"
@@ -458,10 +467,13 @@ static int server_open(void)
 		.sin_family = AF_INET, .sin_port = htons(PORT), .sin_addr.s_addr = INADDR_ANY,
 	};
 
-	/* Backlog 8: a phone that just joined fires several captive-portal
-	 * probes in parallel; dropping one SYN can cost the popup. */
+	/* Backlog stays at 4: every queued-but-unaccepted connection holds one
+	 * of the NET_MAX_CONN=8 slots (see prj.conf), and a probe burst with a
+	 * bigger backlog jams the whole table -- DHCP included, so the phone
+	 * never even gets an address (seen on hardware 2026-07-16). Fast
+	 * accept turnaround, not a deeper queue, is what probes need. */
 	if (zsock_bind(srv, (struct sockaddr *)&a, sizeof(a)) < 0 ||
-	    zsock_listen(srv, 8) < 0) {
+	    zsock_listen(srv, 4) < 0) {
 		zsock_close(srv);
 		return -errno;
 	}
@@ -500,7 +512,9 @@ static int wait_client(int srv, int64_t deadline)
 		struct zsock_pollfd pfd = { .fd = srv, .events = ZSOCK_POLLIN };
 
 		if (zsock_poll(&pfd, 1, 100) <= 0) {
+			printk("[portal] idle-pump\n");
 			portal_idle_hook();
+			printk("[portal] pumped\n");
 			continue;
 		}
 
@@ -509,6 +523,7 @@ static int wait_client(int srv, int64_t deadline)
 		int c = zsock_accept(srv, (struct sockaddr *)&ca, &clen);
 
 		if (c >= 0) {
+			printk("[portal] accept fd=%d\n", c);
 			return c;
 		}
 		k_msleep(20);
@@ -539,6 +554,7 @@ int portal_run_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len,
 
 		int n = recv_request(c, req, sizeof(req));
 
+		printk("[portal] req %d: %.32s\n", n, n > 0 ? req : "");
 		if (n <= 0) {
 			zsock_close(c);
 			continue;
