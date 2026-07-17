@@ -24,7 +24,9 @@
 #define PATH "/api/oauth/usage"
 
 static uint8_t recv_buf[1536];
-static char body_buf[2048];  /* usage JSON is < 2 KB */
+static char body_buf[3072];  /* live usage JSON measured ~1.8 KB (2026-07-17);
+			      * headroom matters -- a truncated tail silently
+			      * drops the limits[] fable entry */
 static size_t body_len;
 static int captured_status;
 

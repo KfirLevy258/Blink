@@ -59,6 +59,27 @@ int main(void)
 	CHECK(strcmp(d.seven_day.resets_at, "2026-01-02T03:04:05Z") == 0, "7d resets_at (reordered)");
 	CHECK(d.five_hour.present && fabs(d.five_hour.utilization) < 0.01, "5h 0.0 parsed");
 
+	/* Current account shape: the flat model windows are null and fable
+	 * rides in limits[] as a weekly_scoped entry (live shape 2026-07-17). */
+	memset(&d, 0, sizeof(d));
+	const char *lim =
+		"{\"five_hour\":{\"utilization\":12.0,\"resets_at\":\"2026-07-18T00:40:00Z\"},"
+		"\"seven_day\":{\"utilization\":23.0,\"resets_at\":\"2026-07-22T06:00:00Z\"},"
+		"\"seven_day_fable\":null,\"seven_day_sonnet\":null,"
+		"\"limits\":[{\"kind\":\"session\",\"percent\":12,\"resets_at\":\"A\"},"
+		"{\"kind\":\"weekly_all\",\"percent\":23,\"resets_at\":\"B\"},"
+		"{\"kind\":\"weekly_scoped\",\"percent\":43,"
+		"\"resets_at\":\"2026-07-22T06:00:00Z\","
+		"\"scope\":{\"model\":{\"display_name\":\"Fable\"}},\"is_active\":true}]}";
+	ret = usage_parse(lim, strlen(lim), &d);
+	CHECK(ret == 0, "scoped-limits sample parses");
+	CHECK(d.seven_day_fable.present, "fable filled from weekly_scoped limit");
+	CHECK(fabs(d.seven_day_fable.utilization - 43.0) < 0.01, "fable == 43");
+	CHECK(strcmp(d.seven_day_fable.resets_at, "2026-07-22T06:00:00Z") == 0,
+	      "fable resets_at from its own entry");
+	CHECK(!d.seven_day_sonnet.present, "null sonnet stays absent");
+	CHECK(fabs(d.seven_day.utilization - 23.0) < 0.01, "7d unaffected by limits scan");
+
 	printf("\n%s (%d failure(s))\n", failures ? "TESTS FAILED" : "ALL TESTS PASSED", failures);
 	return failures ? 1 : 0;
 }

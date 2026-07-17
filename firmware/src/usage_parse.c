@@ -78,6 +78,59 @@ static int parse_named_window(const char *json, const char *key,
 	return w->present ? 0 : -1;
 }
 
+/*
+ * Current accounts report per-model weekly usage inside the "limits" array
+ * as a "weekly_scoped" entry ("percent", "resets_at", scope.model) -- the
+ * flat seven_day_<model> windows are the older layout and arrive null
+ * (verified against the live endpoint 2026-07-17). The scan is bounded to
+ * the entry: it stops at the next "kind" key, so a neighboring entry's
+ * fields cannot bleed in.
+ */
+static int parse_scoped_weekly(const char *json, struct usage_window *w)
+{
+	const char *k = strstr(json, "\"weekly_scoped\"");
+
+	if (k == NULL) {
+		return -1;
+	}
+
+	const char *lim = strstr(k + 1, "\"kind\"");
+	size_t span = lim ? (size_t)(lim - k) : strlen(k);
+
+	const char *p = strstr(k, "\"percent\"");
+
+	if (p == NULL || (size_t)(p - k) >= span) {
+		return -1;
+	}
+
+	const char *c = strchr(p, ':');
+
+	if (c == NULL) {
+		return -1;
+	}
+	w->utilization = strtod(c + 1, NULL);
+	w->present = true;
+
+	const char *r = strstr(k, "\"resets_at\"");
+
+	if (r != NULL && (size_t)(r - k) < span) {
+		const char *rc = strchr(r, ':');
+		const char *vq = rc ? strchr(rc, '"') : NULL;
+		const char *vend = vq ? strchr(vq + 1, '"') : NULL;
+
+		if (vend != NULL) {
+			size_t n = (size_t)(vend - (vq + 1));
+
+			if (n >= sizeof(w->resets_at)) {
+				n = sizeof(w->resets_at) - 1;
+			}
+			memcpy(w->resets_at, vq + 1, n);
+			w->resets_at[n] = '\0';
+		}
+	}
+	return 0;
+}
+
 int usage_parse(const char *json, size_t len, struct usage_data *out)
 {
 	/* strstr/strchr need a NUL terminator; copy into a bounded scratch. */
@@ -92,6 +145,9 @@ int usage_parse(const char *json, size_t len, struct usage_data *out)
 	parse_named_window(scratch, "five_hour", &out->five_hour);
 	parse_named_window(scratch, "seven_day", &out->seven_day);
 	parse_named_window(scratch, "seven_day_fable", &out->seven_day_fable);
+	if (!out->seven_day_fable.present) {
+		parse_scoped_weekly(scratch, &out->seven_day_fable);
+	}
 	parse_named_window(scratch, "seven_day_sonnet", &out->seven_day_sonnet);
 	parse_named_window(scratch, "seven_day_opus", &out->seven_day_opus);
 

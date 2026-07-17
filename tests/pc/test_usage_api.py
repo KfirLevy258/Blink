@@ -24,6 +24,28 @@ class TestMap(unittest.TestCase):
         names = {x["name"]: x["weekly_pct"] for x in m["models"]}
         self.assertEqual(names, {"sonnet": 2.0})  # opus is null -> omitted
 
+    def test_models_from_weekly_scoped_limits(self):
+        """Current accounts: flat model windows are null; per-model weekly
+        usage rides in limits[] as weekly_scoped entries (live 2026-07-17)."""
+        raw = dict(RAW, seven_day_sonnet=None, limits=[
+            {"kind": "session", "percent": 12, "resets_at": "A"},
+            {"kind": "weekly_all", "percent": 23, "resets_at": "B"},
+            {"kind": "weekly_scoped", "percent": 43, "resets_at": "C",
+             "scope": {"model": {"id": None, "display_name": "Fable"}},
+             "is_active": True},
+        ])
+        m = usage_api.map_usage(raw)
+        names = {x["name"]: x["weekly_pct"] for x in m["models"]}
+        self.assertEqual(names, {"fable": 43.0})
+
+    def test_scoped_limit_wins_over_flat_window_for_same_model(self):
+        raw = dict(RAW, seven_day_fable={"utilization": 10.0, "resets_at": "X"},
+                   limits=[{"kind": "weekly_scoped", "percent": 43,
+                            "scope": {"model": {"display_name": "Fable"}}}])
+        m = usage_api.map_usage(raw)
+        fable = [x for x in m["models"] if x["name"] == "fable"]
+        self.assertEqual(fable, [{"name": "fable", "weekly_pct": 43.0}])
+
     def test_missing_windows_default_zero(self):
         m = usage_api.map_usage({})
         self.assertEqual(m["session_pct"], 0.0)

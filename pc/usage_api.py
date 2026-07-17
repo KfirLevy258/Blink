@@ -39,14 +39,27 @@ def map_usage(raw: dict, now: datetime = None) -> dict:
     session_pct, session_reset = _window(raw, "five_hour")
     weekly_pct, weekly_reset = _window(raw, "seven_day")
     models = []
-    # Current accounts expose all-models + fable; the sonnet/opus keys are
-    # kept for accounts still on the older window split.
+
+    def add_model(name, pct):
+        if name and not any(m["name"] == name for m in models):
+            models.append({"name": name, "weekly_pct": float(pct)})
+
+    # Current accounts report per-model weekly usage inside limits[] as
+    # weekly_scoped entries (scope.model.display_name, e.g. "Fable") --
+    # verified against the live endpoint 2026-07-17; the flat
+    # seven_day_<model> windows are all null there.
+    for lim in raw.get("limits") or []:
+        if (isinstance(lim, dict) and lim.get("kind") == "weekly_scoped"
+                and "percent" in lim):
+            model = (lim.get("scope") or {}).get("model") or {}
+            add_model((model.get("display_name") or "").lower(), lim["percent"])
+    # Older accounts: flat per-model windows.
     for key, name in (("seven_day_fable", "fable"),
                       ("seven_day_sonnet", "sonnet"),
                       ("seven_day_opus", "opus")):
         w = raw.get(key)
         if isinstance(w, dict) and "utilization" in w:
-            models.append({"name": name, "weekly_pct": float(w["utilization"])})
+            add_model(name, w["utilization"])
     return protocol.usage(
         session_pct, session_reset, weekly_pct, weekly_reset, models,
         session_resets_in_s=_secs_until(session_reset, now),
