@@ -113,12 +113,15 @@ void ui_boot_splash(void)
 	lv_refr_now(NULL);	/* the one and only LVGL paint of this screen */
 
 	if (skip) {
-		/* Same picture, no theater: the final frame lands statically
-		 * and the dwell shrinks to the daemon round-trip (hello went
-		 * out in proto_init; a live daemon answers within
-		 * milliseconds). The screen stays up through the WiFi scan
-		 * either way. */
-		(void)bootanim_play(bootanim_last, sizeof(bootanim_last));
+		/* Intentional reboot mid-flow: no face, no theater -- just
+		 * the flat brand background while the daemon round-trip
+		 * window runs (hello went out in proto_init; a live daemon
+		 * answers within milliseconds). The screen stays up through
+		 * the WiFi scan either way. Flashing the clip's final frame
+		 * here read as an unexplained face pop during setup reboots
+		 * (user feedback 2026-07-16); bootanim_last stays available
+		 * in the generated header, and the linker drops it while
+		 * unreferenced. */
 		pump(300);
 		return;
 	}
