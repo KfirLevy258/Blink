@@ -679,18 +679,22 @@ int main(void)
 	bool have_tok = cfg_get_token(tok, sizeof(tok));
 
 	if (have_wifi && have_tok) {
+		/* Take over the screen BEFORE the scan: a setup-flow reboot
+		 * should land on the progress UI immediately instead of
+		 * holding the splash color for the scan's 1-2 s (user
+		 * feedback 2026-07-16). The scan runs under the boot bar. */
+		usage_view_init();
+		/* Before the first frame: the takeover's default text is USB
+		 * mode's "waiting for host", and one rendered frame of it
+		 * flashes visibly on this panel (user-reported 2026-07-15). */
+		usage_view_boot_stage(0);
+		lv_timer_handler();
+		ui_boot_teardown();
+		ui_settings_attach(lv_scr_act());
+
 		switch (boot_ssid_scan(ssid)) {	/* may reboot (blind radio) */
 		case SSID_VISIBLE:
 			printk("[usage] mode: standalone WiFi\n");
-			usage_view_init();
-			/* Before the first frame: the takeover's default text
-			 * is USB mode's "waiting for host", and one rendered
-			 * frame of it flashes visibly on this panel
-			 * (user-reported 2026-07-15). */
-			usage_view_boot_stage(0);
-			lv_timer_handler();
-			ui_boot_teardown();
-			ui_settings_attach(lv_scr_act());
 			run_standalone();
 			break;			/* unreachable */
 		case SSID_ABSENT:
@@ -700,11 +704,6 @@ int main(void)
 			printk("[usage] mode: standalone WiFi (\"%s\" not in scan; probing)\n",
 			       ssid);
 			scan_said_absent = true;
-			usage_view_init();
-			usage_view_boot_stage(0);	/* same flash guard */
-			lv_timer_handler();
-			ui_boot_teardown();
-			ui_settings_attach(lv_scr_act());
 			run_standalone();
 			break;			/* unreachable */
 		case SSID_RADIO_BLIND:
