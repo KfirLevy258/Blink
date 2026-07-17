@@ -325,7 +325,7 @@ void usage_view_init(void)
 	 * takeover overlay, which therefore keeps it unreachable while there
 	 * is no data to peek at. */
 	peek = lv_obj_create(scr);
-	lv_obj_set_size(peek, 210, 116);
+	lv_obj_set_size(peek, 240, 152);
 	lv_obj_set_style_radius(peek, 12, 0);
 	lv_obj_set_style_bg_color(peek, COL_PANEL, 0);
 	lv_obj_set_style_bg_opa(peek, LV_OPA_COVER, 0);
@@ -342,13 +342,15 @@ void usage_view_init(void)
 	lv_label_set_text(pt, "WEEKLY GAUGE SHOWS");
 	lv_obj_set_style_text_color(pt, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(pt, 1, 0);
-	lv_obj_align(pt, LV_ALIGN_TOP_MID, 0, 10);
+	lv_obj_align(pt, LV_ALIGN_TOP_MID, 0, 12);
 
+	/* 46 px rows, nearly card-wide: the 30 px originals were a miss-tap
+	 * lottery on this panel (user feedback 2026-07-17). */
 	for (int i = 0; i < PEEK_ROWS; i++) {
 		peek_row[i] = lv_btn_create(peek);
-		lv_obj_set_size(peek_row[i], 174, 30);
+		lv_obj_set_size(peek_row[i], 208, 46);
 		lv_obj_set_style_shadow_width(peek_row[i], 0, 0);
-		lv_obj_align(peek_row[i], LV_ALIGN_TOP_MID, 0, 36 + i * 36);
+		lv_obj_align(peek_row[i], LV_ALIGN_TOP_MID, 0, 40 + i * 54);
 		lv_obj_add_event_cb(peek_row[i], peek_row_cb,
 				    LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
