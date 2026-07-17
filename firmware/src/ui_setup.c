@@ -36,6 +36,7 @@ struct step {
 };
 
 static lv_obj_t *scr;
+static lv_obj_t *spin;
 static struct step steps[3];
 static lv_obj_t *qr;
 static lv_obj_t *cap;
@@ -196,6 +197,17 @@ void ui_setup_show(void)
 	lv_obj_center(pl);
 	lv_obj_add_flag(pill, LV_OBJ_FLAG_HIDDEN);
 
+	/* Busy spinner for the joining/waiting moments; per-state code
+	 * unhides it and parks the caption underneath. */
+	spin = lv_spinner_create(panel);
+	lv_obj_set_size(spin, 40, 40);
+	lv_obj_align(spin, LV_ALIGN_CENTER, 0, -26);
+	lv_obj_set_style_arc_color(spin, COL_TRACK, LV_PART_MAIN);
+	lv_obj_set_style_arc_color(spin, COL_GREEN, LV_PART_INDICATOR);
+	lv_obj_set_style_arc_width(spin, 5, LV_PART_MAIN);
+	lv_obj_set_style_arc_width(spin, 5, LV_PART_INDICATOR);
+	lv_obj_add_flag(spin, LV_OBJ_FLAG_HIDDEN);
+
 	step_active(&steps[0]);  lv_label_set_text(steps[0].numlbl, "1");
 	step_pending(&steps[1]);
 	step_pending(&steps[2]);
@@ -253,6 +265,11 @@ static void apply(enum ui_setup_state st, const char *detail)
 {
 	applied = (int)st;
 
+	/* Panel baseline every state starts from: spinner hidden, caption
+	 * parked at the bottom. States opt back in below. */
+	lv_obj_add_flag(spin, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_align(cap, LV_ALIGN_BOTTOM_MID, 0, -22);
+
 	switch (st) {
 	case UI_SETUP_WAIT:
 		step_active(&steps[0]);  lv_label_set_text(steps[0].numlbl, "1");
@@ -302,6 +319,10 @@ static void apply(enum ui_setup_state st, const char *detail)
 		lv_label_set_text(steps[1].title, "Connect WiFi");
 		lv_label_set_text(steps[1].sub, detail ? detail : "Joining...");
 		lv_obj_add_flag(qr, LV_OBJ_FLAG_HIDDEN);
+		/* Busy look, centered as a block on the panel: spinner above,
+		 * caption right under it (user request 2026-07-16). */
+		lv_obj_clear_flag(spin, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_align(cap, LV_ALIGN_CENTER, 0, 22);
 		lv_label_set_text(cap, "Joining\nnetwork...");
 		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
