@@ -657,6 +657,22 @@ int main(void)
 	 * in flight during the splash and the selection can short-circuit. */
 	proto_init();
 
+	/* A mid-provisioning reboot (WiFi stored, token not yet) has exactly
+	 * one destination: the setup flow. Route it straight there -- even
+	 * the brief splash-colored interstitial between setup screens read
+	 * as dead time on hardware (user feedback 2026-07-16). A PC daemon
+	 * never loses the board to this shortcut: the daemon opening the
+	 * port is a hard reset, which clears the intentional mark. */
+	if (ui_boot_intentional_pending()) {
+		char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
+
+		if (cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
+		    !cfg_get_token(tok, sizeof(tok))) {
+			printk("[usage] mode: provisioning (resume, no splash)\n");
+			run_provisioning(NULL);	/* reboots when done */
+		}
+	}
+
 	ui_boot_splash();
 
 	/* Detection, not a menu. First match wins: a talking daemon, then a

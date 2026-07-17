@@ -44,6 +44,11 @@ void ui_boot_mark_intentional_reboot(void)
 	skip_magic = SKIP_MAGIC;
 }
 
+bool ui_boot_intentional_pending(void)
+{
+	return skip_magic == SKIP_MAGIC;
+}
+
 /* Pump UI + protocol for `ms`, so the splash doubles as the daemon-detect
  * window. */
 static void pump(int ms)
