@@ -23,23 +23,36 @@ ccache is broken on this host → `-DUSE_CCACHE=0` on full builds.
 
 ```bash
 source ~/zephyr-v4.4.0/.venv/bin/activate && source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
-west build -p auto -b esp32_devkitc/esp32/procpu . -- -DUSE_CCACHE=0
+west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
+  -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0
 ```
+
+Sysbuild + MCUboot is **mandatory** since 2026-07-17 (flash encryption requires
+the MCUboot boot chain). The old single-image `west build` in `build/` produces
+a simple-boot image the encrypted chip can no longer boot.
 
 The board target is **`esp32_devkitc/esp32/procpu`** (no upstream CYD board exists;
 `boards/esp32_devkitc_esp32_procpu.overlay` describes the wiring). Passing any other
 `-b` poisons `build/` — recover with `-p always` and the right board. Incremental
 builds: plain `west build` inside the configured `build/`.
 
-## Flash
+## Flash — ENCRYPTED CHIP, use the script
 
-The CYD has a single CH340 USB-serial (`/dev/cu.usbserial-14XX0`; digits change with
-the physical socket — glob first). Opening the port resets the board. 921600 baud
-fails on this CH340; use 115200:
+**This board's flash-encryption eFuses are burned (2026-07-17).** The chip only
+boots images encrypted with its device key; a plain `west flash` writes
+plaintext the ROM cannot read and the board sits dead until re-flashed
+properly. The one true flashing path:
 
 ```bash
-west flash --esp-device /dev/cu.usbserial-14220 --esp-baud-rate 115200
+tools/flash_encrypted.sh            # picks the first /dev/cu.usbserial*
 ```
+
+The key lives at `~/.clauge/flash_key.bin` (override: `CLAUGE_FLASH_KEY`).
+The eFuse copy is sealed and unreadable — **that file is the only usable copy
+in the world; keep a backup off this disk.** No key file = no future updates.
+
+Port facts unchanged: single CH340 (`/dev/cu.usbserial-14XX0`, digits change
+with the socket — glob first), opening it resets the board, 115200 only.
 
 - **Observe without disturbing:** `tools/passive_log.py <port>` (venv python; resets
   once on open, then read-only). Only one process may own the port.
@@ -69,15 +82,16 @@ west flash --esp-device /dev/cu.usbserial-14220 --esp-baud-rate 115200
   which never leaves the device); the refresh token travels only device↔Anthropic
   over verified TLS. The phone browser still shows an HTTP warning on the portal —
   inherent to plain HTTP; the link beneath it is encrypted.
-- **At rest:** the refresh token sits in plain NVS. The upgrade is ESP32 flash
-  encryption — **irreversible eFuse burn**, so it is deliberately not automated:
-  ```bash
-  # ONE-WAY. Test on a spare board first. Development mode shown.
-  espefuse.py --port <port> burn_efuse FLASH_CRYPT_CNT 1
-  espefuse.py --port <port> burn_efuse FLASH_CRYPT_CONFIG 0xF
-  # then build with CONFIG_ESP_FLASH_ENCRYPTION (see Zephyr ESP32 docs) and
-  # flash encrypted images from then on; plaintext flashing stops working.
-  ```
+- **At rest (DONE 2026-07-17):** flash encryption is live — key in eFuse BLK1
+  (read-protected), `FLASH_CRYPT_CONFIG 0xF`, `FLASH_CRYPT_CNT 1`. A USB flash
+  dump returns ciphertext (verified: app region differs from the binary, and
+  the config region greps clean of the SSID/token). Two design consequences:
+  the boot chain is MCUboot via sysbuild, and `cfg_store.c` keeps its own A/B
+  CRC-sealed record instead of settings/NVS — NVS needs erased flash to read
+  as 0xFF, which encrypted flash never does (mount failed -EDEADLK on
+  hardware; ESP-IDF exempts NVS for the same reason). `FLASH_CRYPT_CNT` has a
+  few remaining flips as an emergency off switch; MCUboot signs with the
+  public dev key, which is fine because we rely on encryption, not signatures.
 
 ## Source map
 
