@@ -445,13 +445,38 @@ static int server_open(void)
 		.sin_family = AF_INET, .sin_port = htons(PORT), .sin_addr.s_addr = INADDR_ANY,
 	};
 
+	/* Backlog 8: a phone that just joined fires several captive-portal
+	 * probes in parallel; dropping one SYN can cost the popup. */
 	if (zsock_bind(srv, (struct sockaddr *)&a, sizeof(a)) < 0 ||
-	    zsock_listen(srv, 4) < 0) {
+	    zsock_listen(srv, 8) < 0) {
 		zsock_close(srv);
 		return -errno;
 	}
 	zsock_fcntl(srv, F_SETFL, O_NONBLOCK);
 	return srv;
+}
+
+/* The wifi phase's socket can be opened BEFORE the AP starts beaconing: a
+ * remembered phone rejoins within a second, and its very first probe must
+ * find a live portal or the OS marks the network portal-less and never pops
+ * the sign-in sheet (race seen on hardware 2026-07-16). portal_run_wifi()
+ * adopts the pre-opened socket. */
+static int preopened = -1;
+
+int portal_preopen(void)
+{
+	if (preopened < 0) {
+		preopened = server_open();
+	}
+	return preopened < 0 ? preopened : 0;
+}
+
+void portal_preclose(void)
+{
+	if (preopened >= 0) {
+		zsock_close(preopened);
+		preopened = -1;
+	}
 }
 
 /* Poll+accept until a client connects or the deadline passes. Pumps the
@@ -481,8 +506,9 @@ static int wait_client(int srv, int64_t deadline)
 int portal_run_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len,
 		    const char *err_msg, int timeout_s)
 {
-	int srv = server_open();
+	int srv = preopened >= 0 ? preopened : server_open();
 
+	preopened = -1;	/* ours now; every exit below closes it */
 	if (srv < 0) {
 		return srv;
 	}

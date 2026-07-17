@@ -33,6 +33,16 @@ void portal_set_networks(char list[][33], int n);
  * fresh-device copy does -- reads like a malfunction when none appears. */
 void portal_set_resume(bool token_already_stored);
 
+/* Open the wifi phase's listening socket ahead of time (binds INADDR_ANY, so
+ * it works before the AP exists). Call before net_wifi_start_ap() so the
+ * first captive-portal probe a joining phone fires finds a live portal;
+ * portal_run_wifi() adopts the socket. Returns 0 or -errno. */
+int portal_preopen(void);
+
+/* Close a pre-opened socket that portal_run_wifi() will not be adopting
+ * (e.g. the AP failed to start). Safe to call when nothing is open. */
+void portal_preclose(void);
+
 /* Serve the WiFi form until credentials are POSTed. Fills ssid/psk and
  * returns 0 after acking the browser; -ETIMEDOUT if nobody submits in time.
  * err_msg (may be NULL) is shown on the form -- the previous attempt's
