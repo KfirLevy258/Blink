@@ -201,7 +201,7 @@ void ui_setup_show(void)
 	 * unhides it and parks the caption underneath. */
 	spin = lv_spinner_create(panel);
 	lv_obj_set_size(spin, 40, 40);
-	lv_obj_align(spin, LV_ALIGN_CENTER, 0, -26);
+	lv_obj_align(spin, LV_ALIGN_CENTER, 0, 0);
 	lv_obj_set_style_arc_color(spin, COL_TRACK, LV_PART_MAIN);
 	lv_obj_set_style_arc_color(spin, COL_GREEN, LV_PART_INDICATOR);
 	lv_obj_set_style_arc_width(spin, 5, LV_PART_MAIN);
@@ -319,10 +319,10 @@ static void apply(enum ui_setup_state st, const char *detail)
 		lv_label_set_text(steps[1].title, "Connect WiFi");
 		lv_label_set_text(steps[1].sub, detail ? detail : "Joining...");
 		lv_obj_add_flag(qr, LV_OBJ_FLAG_HIDDEN);
-		/* Busy look, centered as a block on the panel: spinner above,
-		 * caption right under it (user request 2026-07-16). */
+		/* Busy look: spinner dead-center on the panel, caption right
+		 * under it (user request 2026-07-16). */
 		lv_obj_clear_flag(spin, LV_OBJ_FLAG_HIDDEN);
-		lv_obj_align(cap, LV_ALIGN_CENTER, 0, 22);
+		lv_obj_align(cap, LV_ALIGN_CENTER, 0, 44);
 		lv_label_set_text(cap, "Joining\nnetwork...");
 		lv_obj_set_style_text_color(cap, COL_DIM, 0);
 		break;
