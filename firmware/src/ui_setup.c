@@ -214,6 +214,16 @@ static void apply(enum ui_setup_state st, const char *detail)
 		lv_label_set_text(steps[0].title, "Join device");
 		lv_label_set_text(steps[0].sub, "Scan the code");
 		step_pending(&steps[1]); lv_label_set_text(steps[1].numlbl, "2");
+		/* Re-entry after a failed join carries the reason in detail:
+		 * say WHY on the device too, not only on the phone form
+		 * (user feedback 2026-07-16). Reset both text and color --
+		 * step_pending() touches neither. */
+		lv_label_set_text(steps[1].title, "Connect WiFi");
+		lv_label_set_text(steps[1].sub,
+				  (detail && detail[0]) ? detail : "Pick network");
+		lv_obj_set_style_text_color(steps[1].sub,
+					    (detail && detail[0]) ? COL_RED
+								  : COL_DIM, 0);
 		step_pending(&steps[2]); lv_label_set_text(steps[2].numlbl, "3");
 		lv_obj_clear_flag(qr, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_clear_flag(cap, LV_OBJ_FLAG_HIDDEN);

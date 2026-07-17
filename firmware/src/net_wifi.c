@@ -107,6 +107,22 @@ static bool have_ip;
 static const char *last_error;
 static int connect_status;
 
+/* Set while net_wifi_connect() waits for association. A disconnect event in
+ * that window is the driver's only timely word on a doomed join (wrong
+ * password never yields a CONNECT_RESULT until the full timeout), so the
+ * handler fails the wait fast instead of letting it run out. */
+static volatile bool connecting;
+static volatile int connect_disc_reason;
+static volatile int connect_disc_count;
+
+/* ESP32 disconnect reasons that mean the credentials were rejected: 2
+ * AUTH_EXPIRE, 15 4WAY_HANDSHAKE_TIMEOUT (the classic wrong-password
+ * signature), 202 AUTH_FAIL, 204 HANDSHAKE_TIMEOUT, 205 CONNECTION_FAIL. */
+static bool reason_is_auth(int r)
+{
+	return r == 2 || r == 15 || r == 202 || r == 204 || r == 205;
+}
+
 /* Scan results are collected by the event callback into this table. */
 static char (*scan_out)[33];
 static int scan_max;
@@ -147,6 +163,17 @@ static void wifi_evt(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 
 		have_ip = false;
 		printk("[wifi] disconnected (reason %d)\n", st->disconn_reason);
+		if (connecting) {
+			/* Auth-class reasons are decisive (wrong password
+			 * fails the same way every retry); anything else gets
+			 * one free retry before the join is called off. */
+			connect_disc_count++;
+			if (reason_is_auth(st->disconn_reason) ||
+			    connect_disc_count >= 2) {
+				connect_disc_reason = st->disconn_reason;
+				k_sem_give(&sem_connected);
+			}
+		}
 		break;
 	}
 	case NET_EVENT_WIFI_SCAN_RESULT: {
@@ -254,7 +281,7 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	}
 	if (!ssid || !ssid[0]) {
 		printk("[wifi] connect called with empty SSID\n");
-		last_error = "no network selected";
+		last_error = "No network selected";
 		return -EINVAL;
 	}
 	if (!net_if_is_up(iface)) {
@@ -300,6 +327,9 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	k_sem_reset(&sem_connected);
 	k_sem_reset(&sem_got_ip);
 	have_ip = false;
+	connect_disc_reason = 0;
+	connect_disc_count = 0;
+	connecting = true;
 
 	printk("[wifi] connecting to \"%s\"\n", ssid);
 
@@ -321,19 +351,30 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	}
 
 	if (rc) {
+		connecting = false;
 		printk("[wifi] connect request failed: %d\n", rc);
-		last_error = "the WiFi radio wasn't ready";
+		last_error = "The WiFi radio wasn't ready";
 		return rc;
 	}
 
 	if (sem_take_pumped(&sem_connected, timeout_s) != 0) {
+		connecting = false;
 		printk("[wifi] connect timed out\n");
-		last_error = "network didn't respond (name/range?)";
+		last_error = "Network didn't respond (name/range?)";
 		return -ETIMEDOUT;
+	}
+	connecting = false;
+	if (connect_disc_reason != 0) {
+		printk("[wifi] join failed mid-association (reason %d)\n",
+		       connect_disc_reason);
+		last_error = reason_is_auth(connect_disc_reason)
+				     ? "Wrong password"
+				     : "Network dropped the connection";
+		return -ECONNREFUSED;
 	}
 	if (connect_status != 0) {
 		printk("[wifi] association failed (status %d)\n", connect_status);
-		last_error = "wrong password, or network refused";
+		last_error = "Wrong password, or network refused";
 		return -ECONNREFUSED;
 	}
 
@@ -343,7 +384,7 @@ int net_wifi_connect(const char *ssid, const char *psk, int timeout_s)
 	net_dhcpv4_start(iface);
 	if (sem_take_pumped(&sem_got_ip, timeout_s) != 0) {
 		printk("[wifi] no DHCP address\n");
-		last_error = "connected but got no IP address";
+		last_error = "Connected but got no IP address";
 		return -ETIMEDOUT;
 	}
 

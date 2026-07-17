@@ -212,7 +212,7 @@ static int phase1_get_wifi(char *ssid, size_t slen, char *psk, size_t plen,
 			return rc;
 		}
 		dns_hijack_start();
-		ui_setup_set_state(UI_SETUP_WAIT, NULL);
+		ui_setup_set_state(UI_SETUP_WAIT, err);	/* err on-device too */
 		pump_ui();
 
 		rc = portal_run_wifi(ssid, slen, psk, plen, err, 900);
