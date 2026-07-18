@@ -268,17 +268,17 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_t *minus = mk_btn(panel, LV_SYMBOL_MINUS, COL_TRACK,
 				 bright_step_cb, (void *)(intptr_t)-1);
 	lv_obj_set_size(minus, 58, 54);
-	lv_obj_align(minus, LV_ALIGN_TOP_LEFT, 20, 48);
+	lv_obj_align(minus, LV_ALIGN_TOP_LEFT, 20, 56);
 
 	lv_obj_t *plus = mk_btn(panel, LV_SYMBOL_PLUS, COL_TRACK,
 				bright_step_cb, (void *)(intptr_t)1);
 	lv_obj_set_size(plus, 58, 54);
-	lv_obj_align(plus, LV_ALIGN_TOP_RIGHT, -20, 48);
+	lv_obj_align(plus, LV_ALIGN_TOP_RIGHT, -20, 56);
 
 	/* readout: percent + five pips, not a tap target */
 	pct_lbl = lv_label_create(panel);
 	lv_obj_set_style_text_color(pct_lbl, COL_TEXT, 0);
-	lv_obj_align(pct_lbl, LV_ALIGN_TOP_MID, 0, 54);
+	lv_obj_align(pct_lbl, LV_ALIGN_TOP_MID, 0, 62);
 
 	for (int i = 0; i < 5; i++) {
 		pips[i] = lv_obj_create(panel);
@@ -287,7 +287,7 @@ static void open_panel(lv_obj_t *parent_scr)
 		lv_obj_set_style_border_width(pips[i], 0, 0);
 		lv_obj_clear_flag(pips[i], LV_OBJ_FLAG_SCROLLABLE);
 		lv_obj_clear_flag(pips[i], LV_OBJ_FLAG_CLICKABLE);
-		lv_obj_align(pips[i], LV_ALIGN_TOP_MID, -50 + i * 25, 84);
+		lv_obj_align(pips[i], LV_ALIGN_TOP_MID, -50 + i * 25, 92);
 	}
 	bright_refresh();
 
@@ -297,7 +297,7 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_label_set_text(rlab, "RESET");
 	lv_obj_set_style_text_color(rlab, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(rlab, 1, 0);
-	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 114);
+	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 118);
 
 	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
 	static const char *const acticon[] = {
@@ -324,7 +324,7 @@ static void open_panel(lv_obj_t *parent_scr)
 			a == ACT_FACTORY ? COL_RED : COL_TRACK, 0);
 		lv_obj_set_style_shadow_width(tile, 0, 0);
 		lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
-		lv_obj_align(tile, tilepos[i], tiledx[i], 130);
+		lv_obj_align(tile, tilepos[i], tiledx[i], 140);
 		lv_obj_add_event_cb(tile, act_cb, LV_EVENT_CLICKED,
 				    (void *)(intptr_t)a);
 
@@ -332,13 +332,13 @@ static void open_panel(lv_obj_t *parent_scr)
 
 		lv_label_set_text(ic, acticon[a]);
 		lv_obj_set_style_text_color(ic, COL_TEXT, 0);
-		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 12);
+		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 10);
 
 		lv_obj_t *tx = lv_label_create(tile);
 
 		lv_label_set_text(tx, acttext[a]);
 		lv_obj_set_style_text_color(tx, COL_TEXT, 0);
-		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -12);
+		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -10);
 	}
 
 	/* Debug-me line: the first three questions a misbehaving device gets
