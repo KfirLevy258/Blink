@@ -59,6 +59,11 @@ int cfg_set_ap_psk(const char *psk);
 uint8_t cfg_get_weekly_sel(void);
 int cfg_set_weekly_sel(uint8_t sel);
 
+/* Screen brightness percent, one of 20/40/60/80/100. Persisted so a reboot
+ * keeps it. Returns 100 when never set (a fresh or pre-update device). */
+uint8_t cfg_get_bright_pct(void);
+int cfg_set_bright_pct(uint8_t pct);
+
 /* Last known UTC offset (minutes east of UTC), fed by the tz API in WiFi mode
  * so the clock survives API outages. cfg_get_tz() returns false until an
  * offset has ever been stored. */

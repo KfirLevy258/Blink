@@ -48,7 +48,7 @@ struct rec {
 	uint8_t mode;
 	uint8_t weekly_sel;
 	uint8_t tz_set;
-	uint8_t pad;
+	uint8_t bright_pct;	/* 0 = unset -> 100% default; else 20/40/60/80/100 */
 	int32_t tz_min;
 	char ssid[CFG_SSID_MAX];
 	char psk[CFG_PSK_MAX];
@@ -248,6 +248,22 @@ int cfg_set_weekly_sel(uint8_t sel)
 {
 	k_mutex_lock(&cfg_lock, K_FOREVER);
 	cfg.weekly_sel = sel;
+
+	int rc = persist();
+
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
+uint8_t cfg_get_bright_pct(void)
+{
+	return cfg.bright_pct == 0 ? 100 : cfg.bright_pct;
+}
+
+int cfg_set_bright_pct(uint8_t pct)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	cfg.bright_pct = pct;
 
 	int rc = persist();
 
