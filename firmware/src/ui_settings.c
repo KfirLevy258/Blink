@@ -286,6 +286,7 @@ static void open_panel(lv_obj_t *parent_scr)
 		lv_obj_set_style_radius(pips[i], 3, 0);
 		lv_obj_set_style_border_width(pips[i], 0, 0);
 		lv_obj_clear_flag(pips[i], LV_OBJ_FLAG_SCROLLABLE);
+		lv_obj_clear_flag(pips[i], LV_OBJ_FLAG_CLICKABLE);
 		lv_obj_align(pips[i], LV_ALIGN_TOP_MID, -50 + i * 25, 84);
 	}
 	bright_refresh();
