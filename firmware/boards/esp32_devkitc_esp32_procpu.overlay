@@ -223,3 +223,33 @@
 		reads = <8>;
 	};
 };
+
+/* --- OTA: scratch partition for MCUboot swap-with-revert ---
+ * The appcpu slots are dead weight on this single-image (procpu-only) build;
+ * their 0xF0000 hole between slot1 and storage becomes MCUboot's scratch.
+ * storage_partition does NOT move: WiFi creds, token, settings all survive.
+ *
+ * Under this Zephyr revision, partitions_0x1000_amp_4M.dtsi also carves
+ * lpcore slot0/slot1 (0x3A0000-0x3B0000) out of that same hole -- the ESP32
+ * has no LP core, this is just a shared AMP partition template -- and it
+ * already defines its own scratch_partition node (0x3E0000, 124 KB, past
+ * storage). All five must go: the lpcore slots so the new scratch can span
+ * the *entire* hole down to storage's start, and the old scratch_partition
+ * because MCUboot looks it up by devicetree node label (FIXED_PARTITION_ID),
+ * not by the "label" string, so two nodes named scratch_partition would
+ * collide.
+ */
+/delete-node/ &slot0_appcpu_partition;
+/delete-node/ &slot1_appcpu_partition;
+/delete-node/ &slot0_lpcore_partition;
+/delete-node/ &slot1_lpcore_partition;
+/delete-node/ &scratch_partition;
+
+&flash0 {
+	partitions {
+		scratch_partition: partition@2c0000 {
+			label = "image-scratch";
+			reg = <0x2C0000 0xF0000>;
+		};
+	};
+};
