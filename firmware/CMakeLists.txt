@@ -22,4 +22,5 @@ target_sources(app PRIVATE
 	src/bootanim_dec.c
 	src/ui_settings.c
 	src/ui_anim.c
+	src/backlight.c
 )
