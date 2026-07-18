@@ -44,7 +44,6 @@ static bool have_data;		/* distinguishes "no host yet" from "host lost" */
 static int32_t age_s = -1;	/* seconds since the last usage message */
 static double last_s_pct = -1;	/* latest numbers, for the near-limit hint */
 static double last_w_pct = -1;
-static bool weekly_data_expired;	/* the last update clamped an expired weekly */
 
 /* Long-press peek: a card of per-model weekly numbers that STAYS up -- tap
  * a row to point the weekly gauge at that model, tap anywhere else (or wait
@@ -66,10 +65,14 @@ static void peek_fill(void);
 
 void usage_view_set_models(double fable_pct)
 {
-	/* Per-model windows reset with the overall weekly; if the update that
-	 * just ran clamped an expired weekly, its fable number is equally
-	 * stale. Both feeds send models right after the usage update. */
-	if (weekly_data_expired && fable_pct >= 0) {
+	/* Per-model windows reset with the overall weekly, so a zero weekly
+	 * means the fable number is stale too. Derive that from the weekly
+	 * state itself (last_w_pct) rather than a flag set by an earlier call,
+	 * so BOTH ways the weekly can empty are covered: an update reporting
+	 * the reset, AND the local countdown ticking to zero via
+	 * expire_weekly(). fable is a component of the weekly, so weekly 0%
+	 * always implies fable 0%. */
+	if (last_w_pct == 0 && fable_pct >= 0) {
 		fable_pct = 0;
 	}
 	model_fable = fable_pct;
@@ -476,8 +479,7 @@ void usage_view_update(double session_pct, int32_t session_resets_in_s,
 		session_pct = 0;
 		session_resets_in_s = -1;
 	}
-	weekly_data_expired = (weekly_resets_in_s == 0);
-	if (weekly_data_expired) {
+	if (weekly_resets_in_s == 0) {
 		weekly_pct = 0;
 		weekly_resets_in_s = -1;
 	}
