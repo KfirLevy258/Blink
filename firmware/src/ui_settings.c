@@ -262,7 +262,7 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_label_set_text(blab, "BRIGHTNESS");
 	lv_obj_set_style_text_color(blab, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(blab, 1, 0);
-	lv_obj_align(blab, LV_ALIGN_TOP_LEFT, 26, 34);
+	lv_obj_align(blab, LV_ALIGN_TOP_MID, 0, 34);
 
 	/* minus / plus: big, opposite corners -- the whole button is the target */
 	lv_obj_t *minus = mk_btn(panel, LV_SYMBOL_MINUS, COL_TRACK,
@@ -297,7 +297,7 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_label_set_text(rlab, "RESET");
 	lv_obj_set_style_text_color(rlab, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(rlab, 1, 0);
-	lv_obj_align(rlab, LV_ALIGN_TOP_LEFT, 26, 114);
+	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 114);
 
 	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
 	static const char *const acticon[] = {
@@ -319,12 +319,12 @@ static void open_panel(lv_obj_t *parent_scr)
 		enum action a = acts[i];
 		lv_obj_t *tile = lv_btn_create(panel);
 
-		lv_obj_set_size(tile, 86, 64);
+		lv_obj_set_size(tile, 86, 72);
 		lv_obj_set_style_bg_color(tile,
 			a == ACT_FACTORY ? COL_RED : COL_TRACK, 0);
 		lv_obj_set_style_shadow_width(tile, 0, 0);
 		lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
-		lv_obj_align(tile, tilepos[i], tiledx[i], 132);
+		lv_obj_align(tile, tilepos[i], tiledx[i], 130);
 		lv_obj_add_event_cb(tile, act_cb, LV_EVENT_CLICKED,
 				    (void *)(intptr_t)a);
 
@@ -332,13 +332,13 @@ static void open_panel(lv_obj_t *parent_scr)
 
 		lv_label_set_text(ic, acticon[a]);
 		lv_obj_set_style_text_color(ic, COL_TEXT, 0);
-		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 10);
+		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 12);
 
 		lv_obj_t *tx = lv_label_create(tile);
 
 		lv_label_set_text(tx, acttext[a]);
 		lv_obj_set_style_text_color(tx, COL_TEXT, 0);
-		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -8);
+		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -12);
 	}
 
 	/* Debug-me line: the first three questions a misbehaving device gets
