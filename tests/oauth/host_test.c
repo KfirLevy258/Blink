@@ -48,7 +48,12 @@ int main(void)
 	oauth_authorize_url("VERIF123", url, sizeof(url));
 	CK(strstr(url, "response_type=code") != NULL, "url has response_type");
 	CK(strstr(url, "code_challenge_method=S256") != NULL, "url has S256");
-	CK(strstr(url, "state=VERIF123") != NULL, "url state == verifier");
+	/* Security invariant: the verifier must NEVER appear in the authorize
+	 * URL (it is served over plain HTTP on the LAN). state carries the
+	 * public challenge instead. */
+	CK(strstr(url, "VERIF123") == NULL, "verifier absent from authorize URL");
+	CK(strstr(url, "state=CHALLENGE") != NULL, "state == challenge (the hash)");
+	CK(strstr(url, "code_challenge=CHALLENGE") != NULL, "challenge present");
 	CK(strstr(url, "9d1c250a") != NULL, "url has client_id");
 	CK(strstr(url, "scope=org%3Acreate_api_key") != NULL, "url scope encoded");
 

@@ -99,11 +99,19 @@ int oauth_authorize_url(const char *verifier, char *out, size_t outlen)
 	urlenc(SCOPE, scope_enc, sizeof(scope_enc));
 	urlenc(REDIRECT, redir_enc, sizeof(redir_enc));
 
+	/* state = the CHALLENGE (a SHA-256 hash), never the verifier. This
+	 * URL is served to the phone over plain HTTP on the home LAN, so
+	 * anything in it is world-readable to a sniffer on that WiFi. The
+	 * challenge is designed to be public (it's already here as
+	 * code_challenge); the verifier is the secret that makes a captured
+	 * code useless, and it must stay off the LAN -- appearing only in
+	 * the device->Anthropic TLS token exchange. (It rode here as `state`
+	 * until 2026-07-17, which quietly defeated PKCE for a LAN attacker.) */
 	int n = snprintf(out, outlen,
 		"%s?code=true&response_type=code&client_id=%s"
 		"&redirect_uri=%s&scope=%s"
 		"&code_challenge=%s&code_challenge_method=S256&state=%s",
-		AUTHORIZE, CLIENT_ID, redir_enc, scope_enc, challenge, verifier);
+		AUTHORIZE, CLIENT_ID, redir_enc, scope_enc, challenge, challenge);
 
 	return (n > 0 && (size_t)n < outlen) ? n : -1;
 }
@@ -257,9 +265,11 @@ int oauth_exchange_code(const char *pasted, const char *verifier,
 		*hash = '\0';
 		strncpy(state, hash + 1, sizeof(state) - 1);
 		state[sizeof(state) - 1] = '\0';
-	} else {
-		strncpy(state, verifier, sizeof(state) - 1);
-		state[sizeof(state) - 1] = '\0';
+	} else if (oauth_pkce_challenge(verifier, state, sizeof(state)) < 0) {
+		/* Bare code (no "#state" pasted): reconstruct the state we
+		 * actually sent -- the challenge -- NOT the verifier, which
+		 * must never appear outside this TLS call. */
+		state[0] = '\0';
 	}
 
 	static char json[640];
