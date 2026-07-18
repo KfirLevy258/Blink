@@ -14,6 +14,17 @@
 #include <time.h>
 
 #include "net_time.h"
+#include "version.h"
+
+/* Sanity window for any accepted time source. The floor blocks the
+ * clock-rollback certificate attack (see CLAUGE_TIME_FLOOR); the ceiling
+ * matches the protocol's "before 2100" bound and catches garbage. */
+#define TIME_CEILING 4102444800LL	/* 2100-01-01T00:00:00Z */
+
+static bool time_sane(int64_t unix_s)
+{
+	return unix_s >= CLAUGE_TIME_FLOOR && unix_s < TIME_CEILING;
+}
 
 static bool have_time;
 /* Uptime (ms) at the moment of sync, and the Unix time then, so we can read the
@@ -37,6 +48,14 @@ int net_time_sync(int timeout_s)
 	for (int i = 0; i < 3; i++) {
 		int rc = sntp_simple(servers[i], timeout_s * 1000, &t);
 
+		if (rc == 0 && !time_sane((int64_t)t.seconds)) {
+			/* A "successful" sync outside the sane window is
+			 * worse than none: TLS would then trust certificates
+			 * against a lie. Try the next server. */
+			printk("[time] %s answered insane time %lld; rejected\n",
+			       servers[i], (long long)t.seconds);
+			rc = -EINVAL;
+		}
 		if (rc == 0) {
 			k_spinlock_key_t key = k_spin_lock(&time_lock);
 
@@ -69,6 +88,14 @@ static int64_t now_unix(void)
 
 void net_time_set_manual(int64_t unix_s)
 {
+	if (!time_sane(unix_s)) {
+		/* The USB daemon's time push gets the same scrutiny as SNTP:
+		 * the serial line is exactly as unauthenticated. */
+		printk("[time] manual time %lld outside sane window; ignored\n",
+		       (long long)unix_s);
+		return;
+	}
+
 	k_spinlock_key_t key = k_spin_lock(&time_lock);
 
 	sync_unix_s = unix_s;
