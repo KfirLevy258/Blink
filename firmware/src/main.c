@@ -1,7 +1,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
-#include <zephyr/drivers/pwm.h>
 #include <zephyr/random/random.h>
 #include <zephyr/sys/reboot.h>
 #include <lvgl.h>
@@ -10,6 +9,7 @@
 #include "proto.h"
 #include "usage_view.h"
 #include "cfg_store.h"
+#include "backlight.h"
 #include "net_wifi.h"
 #include "net_time.h"
 #include "portal.h"
@@ -23,28 +23,6 @@
 #include "tz_fetch.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
-static const struct pwm_dt_spec backlight = PWM_DT_SPEC_GET(DT_NODELABEL(backlight));
-
-/*
- * Backlight: full by day, dimmed between 23:00 and 07:00 local (user request
- * 2026-07-17 -- a full-brightness green arc at 2 AM gets old). Unknown time
- * counts as day: better bright at night than dim at noon. Level changes are
- * edge-triggered so the 1 s tick doesn't hammer the LEDC driver.
- */
-static void backlight_apply(int hh)
-{
-	static int level = -1;		/* percent last written */
-	int want = (hh >= 23 || (hh >= 0 && hh < 7)) ? 25 : 100;
-
-	if (want == level || !pwm_is_ready_dt(&backlight)) {
-		return;
-	}
-	level = want;
-	/* One line per transition: night mode is verifiable from the log
-	 * without waiting for 23:00 (or trusting one's eyes at 25%). */
-	printk("[ui] backlight %d%% (hh=%d)\n", want, hh);
-	pwm_set_pulse_dt(&backlight, backlight.period * want / 100);
-}
 
 /* Provisioning session state (one PKCE verifier per setup attempt). */
 static char verifier[OAUTH_VERIFIER_LEN];
@@ -705,7 +683,6 @@ static void run_standalone(void)
 
 			net_time_local(&hh, &mm);
 			usage_view_set_clock(hh, mm);
-			backlight_apply(hh);
 		}
 		lv_timer_handler();
 		k_sleep(K_MSEC(10));
@@ -770,7 +747,6 @@ static void run_usb(void)
 
 			net_time_local(&hh, &mm);
 			usage_view_set_clock(hh, mm);
-			backlight_apply(hh);
 		}
 		lv_timer_handler();
 		k_sleep(K_MSEC(10));
@@ -786,9 +762,9 @@ int main(void)
 		return -1;
 	}
 	display_blanking_off(display_dev);
-	backlight_apply(-1);	/* full brightness until a clock exists */
 
 	cfg_init();
+	backlight_init();	/* drive the PWM to the persisted level */
 	net_wifi_init();
 	net_wifi_set_idle_hook(wifi_idle);
 	ap_psk_setup();		/* before any QR or AP use */
