@@ -44,6 +44,7 @@ static bool have_data;		/* distinguishes "no host yet" from "host lost" */
 static int32_t age_s = -1;	/* seconds since the last usage message */
 static double last_s_pct = -1;	/* latest numbers, for the near-limit hint */
 static double last_w_pct = -1;
+static bool weekly_data_expired;	/* the last update clamped an expired weekly */
 
 /* Long-press peek: a card of per-model weekly numbers that STAYS up -- tap
  * a row to point the weekly gauge at that model, tap anywhere else (or wait
@@ -65,6 +66,12 @@ static void peek_fill(void);
 
 void usage_view_set_models(double fable_pct)
 {
+	/* Per-model windows reset with the overall weekly; if the update that
+	 * just ran clamped an expired weekly, its fable number is equally
+	 * stale. Both feeds send models right after the usage update. */
+	if (weekly_data_expired && fable_pct >= 0) {
+		fable_pct = 0;
+	}
 	model_fable = fable_pct;
 	if (built) {
 		render_weekly();
@@ -450,11 +457,29 @@ bool usage_view_have_data(void)
 	return have_data;
 }
 
+/*
+ * A window whose reset moment has passed is over, whatever percentage came
+ * with it: the usage API keeps reporting the ended window (old utilization,
+ * passed resets_at) for minutes afterwards, which left a stale gauge + "now"
+ * on screen long past the reset (user-reported 2026-07-17). 0 remaining
+ * seconds means "already reset" -- show the new, empty window instead, with
+ * an unknown countdown (the next window starts on the next activity).
+ */
 void usage_view_update(double session_pct, int32_t session_resets_in_s,
 		       double weekly_pct, int32_t weekly_resets_in_s)
 {
 	if (!built) {
 		return;
+	}
+
+	if (session_resets_in_s == 0) {
+		session_pct = 0;
+		session_resets_in_s = -1;
+	}
+	weekly_data_expired = (weekly_resets_in_s == 0);
+	if (weekly_data_expired) {
+		weekly_pct = 0;
+		weekly_resets_in_s = -1;
 	}
 
 	char buf[8];
@@ -493,6 +518,33 @@ static void render_age(void)
 	lv_label_set_text(age_lbl, buf);
 }
 
+/* The countdown just hit zero: this window is over right now, never mind
+ * that the API will keep echoing it for a while (see usage_view_update).
+ * Flip the gauge to the new, empty window immediately. */
+static void expire_session(void)
+{
+	session.resets_in_s = -1;
+	render_countdown(&session);
+	last_s_pct = 0;
+	lv_label_set_text(session.pct, "0%");
+	lv_arc_set_value(session.arc, 0);
+	lv_obj_set_style_arc_color(session.arc, severity(0), LV_PART_INDICATOR);
+}
+
+static void expire_weekly(void)
+{
+	weekly.resets_in_s = -1;
+	render_countdown(&weekly);
+	last_w_pct = 0;
+	if (model_fable >= 0) {
+		model_fable = 0;	/* per-model windows reset with the weekly */
+	}
+	render_weekly();
+	if (peek && !lv_obj_has_flag(peek, LV_OBJ_FLAG_HIDDEN)) {
+		peek_fill();
+	}
+}
+
 void usage_view_tick_1s(void)
 {
 	if (!built) {
@@ -503,8 +555,15 @@ void usage_view_tick_1s(void)
 
 	for (int i = 0; i < 2; i++) {
 		if (gs[i]->resets_in_s > 0) {
-			gs[i]->resets_in_s--;
-			render_countdown(gs[i]);
+			if (--gs[i]->resets_in_s == 0) {
+				if (gs[i] == &session) {
+					expire_session();
+				} else {
+					expire_weekly();
+				}
+			} else {
+				render_countdown(gs[i]);
+			}
 		}
 	}
 

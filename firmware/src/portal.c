@@ -4,7 +4,10 @@
  * Hand-rolled HTTP/1.1 -- phase 1 on the SoftAP, phase 2 on the home LAN.
  * The whole surface is a few routes and DRAM is the binding constraint (no
  * PSRAM). Each POST blocks until its step finishes and then returns the next
- * page; the only client-side JS is one onsubmit line harvesting the phone's
+ * page. Forms are POSTed from onsubmit via fetch(), never as plain form
+ * navigations: phone browsers interpose an "unsafe to send" confirmation on
+ * every plain-HTTP form navigation, but same-origin fetch() is exempt
+ * (user-reported 2026-07-17). The same onsubmit JS harvests the phone's
  * UTC offset (the board cannot fetch a timezone reliably itself).
  *
  * Two device quirks are designed around, both learned the hard way:
@@ -248,11 +251,16 @@ static void send_html(int sock, const char *body_html)
 	 * them into one big scratch buffer. On a board with ~3 KB of DRAM to spare,
 	 * a 3 KB static compose buffer is memory we don't have; send_all already
 	 * paces the body in small chunks regardless. */
-	char hdr[128];
+	char hdr[160];
 	size_t blen = strlen(body_html);
+	/* no-store: the pages are steps of a state machine on a device that
+	 * keeps its IP across provisionings, and with no cache headers at all
+	 * a phone happily re-rendered a months-old cached copy of this page --
+	 * old form, old behavior (user-reported 2026-07-17). */
 	int n = snprintf(hdr, sizeof(hdr),
 		"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
-		"Content-Length: %d\r\nConnection: close\r\n\r\n", (int)blen);
+		"Content-Length: %d\r\nCache-Control: no-store\r\n"
+		"Connection: close\r\n\r\n", (int)blen);
 
 	if (n < 0) {
 		return;
@@ -287,9 +295,17 @@ static void wifi_page(int sock, const char *err)
 		 * (the board can't fetch one reliably: hotel-style networks
 		 * black-hole plain HTTP for headless clients, seen 2026-07-14).
 		 * JS minutes are west-positive; negate to our east-positive. */
+		/* fetch, not a form navigation -- see file header. If the JS
+		 * throws (no fetch), return false is never reached and the
+		 * native POST below still works, warning popup and all. */
 		"<form method=POST action=/wifi "
 		"onsubmit=\"document.getElementById('sp').className='spin on';"
-		"document.getElementById('tzmin').value=-new Date().getTimezoneOffset()\">"
+		"document.getElementById('tzmin').value=-new Date().getTimezoneOffset();"
+		"fetch('/wifi',{method:'POST',body:new URLSearchParams(new FormData(this))})"
+		".then(function(r){return r.text()})"
+		".then(function(t){document.open();document.write(t);document.close()})"
+		".catch(function(){document.getElementById('sp').className='spin'});"
+		"return false\">"
 		"<input type=hidden name=tzmin id=tzmin value=''><div class=c>"
 		"<label>Network</label><select name=ssid>", CSS);
 
@@ -298,7 +314,11 @@ static void wifi_page(int sock, const char *err)
 	}
 	char esc[6 * 32 + 1];
 
-	for (int i = 0; i < n_networks && n < (int)sizeof(page) - 300; i++) {
+	/* Reserve enough for one full worst-case option (32 chars all escaped
+	 * to 6 bytes, ~209 with markup) admitted by this pre-add check PLUS
+	 * the fixed tail below (~230): 300 let a band of hostile SSIDs push
+	 * the tail out of the buffer entirely. */
+	for (int i = 0; i < n_networks && n < (int)sizeof(page) - 560; i++) {
 		html_escape(networks[i], esc, sizeof(esc));
 		n += snprintf(page + n, sizeof(page) - n, "<option>%s</option>", esc);
 	}
@@ -333,8 +353,15 @@ static void signin_page(int sock, const char *authorize_url, bool err)
 		"<a class=b href='%s' target=_blank rel=noreferrer>Sign in to Anthropic</a>"
 		"<p style='margin:12px 0 0;font-size:15px;color:#e6e8eb'>"
 		"Sign in, copy the code Anthropic gives you, and paste it below.</p>"
+		/* fetch, not a form navigation (file header); navigating to
+		 * /working afterwards replaces this document, so its poll
+		 * timer above dies with it instead of racing the new page's. */
 		"<form method=POST action=/token "
-		"onsubmit=\"document.getElementById('sp').className='spin on'\">"
+		"onsubmit=\"document.getElementById('sp').className='spin on';"
+		"fetch('/token',{method:'POST',body:new URLSearchParams(new FormData(this))})"
+		".then(function(){location.href='/working'})"
+		".catch(function(){document.getElementById('sp').className='spin'});"
+		"return false\">"
 		"<label>Login code</label>"
 		"<textarea name=code rows=3 placeholder='paste login code here'></textarea>"
 		"%s<button type=submit>Finish setup</button></form></div></body></html>",
@@ -393,11 +420,13 @@ static void ack_page(int sock, const char *ssid)
 }
 
 /*
- * Served immediately in reply to POST /token, BEFORE the exchange runs. The
- * exchange is 15-25 s of TLS on this CPU with the server blocked; holding
- * the POST open that long is exactly the response that kept dying on real
- * phones (user-reported 2026-07-16). The page then learns the outcome the
- * same way every other open copy does: by polling /status.
+ * Served on GET /working, which the sign-in page navigates to right after
+ * its fetch of POST /token resolves. The reply to the POST itself is sent
+ * BEFORE the exchange runs: the exchange is 15-25 s of TLS on this CPU with
+ * the server blocked, and holding the POST open that long is exactly the
+ * response that kept dying on real phones (user-reported 2026-07-16). The
+ * page then learns the outcome the same way every other open copy does: by
+ * polling /status.
  */
 static void working_page(int sock)
 {
@@ -446,7 +475,8 @@ static void redirect(int sock)
 {
 	static const char r[] =
 		"HTTP/1.1 302 Found\r\nLocation: /\r\n"
-		"Content-Length: 0\r\nConnection: close\r\n\r\n";
+		"Content-Length: 0\r\nCache-Control: no-store\r\n"
+		"Connection: close\r\n\r\n";
 
 	send_all(sock, r, sizeof(r) - 1);
 }
@@ -722,7 +752,11 @@ int portal_run_signin(const char *authorize_url,
 
 		if (strncmp(req, "GET /status", 11) == 0) {
 			send_html(c, status_now);
-		} else if (strncmp(req, "GET / ", 6) == 0) {
+		} else if (strncmp(req, "GET /working", 12) == 0) {
+			working_page(c);
+		} else if (strncmp(req, "GET / ", 6) == 0 ||
+			   strncmp(req, "GET /?", 6) == 0) {
+			/* "/?b=..." is the QR's cache-busting form of "/" */
 			signin_page(c, authorize_url, err);
 		} else {
 			redirect(c);

@@ -347,12 +347,16 @@ static void run_provisioning(const char *skip_join_reason)
 	}
 
 	/* Phase 2: sign-in over the home LAN. */
-	char ip[16], url[32];
+	char ip[16], url[48];
 
 	if (!net_wifi_sta_ip(ip, sizeof(ip))) {
 		goto out;
 	}
-	snprintf(url, sizeof(url), "http://%s/", ip);
+	/* The query is a cache-buster: the device keeps its LAN IP across
+	 * provisionings, and a phone that cached a previous incarnation's
+	 * page would re-render that instead of loading this one (seen
+	 * 2026-07-17). A fresh URL per boot can never be in its cache. */
+	snprintf(url, sizeof(url), "http://%s/?b=%u", ip, (unsigned)k_uptime_get());
 	printk("[usage] sign-in page at %s\n", url);
 	ui_setup_set_state(UI_SETUP_WIFI_OK, url);
 	pump_ui();
