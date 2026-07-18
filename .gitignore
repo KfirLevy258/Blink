@@ -12,4 +12,5 @@ tokens.json
 # Firmware secrets (never commit real creds/token) + build artifacts
 firmware/src/secrets.h
 firmware/build/
+firmware/build-sb/
 build/
