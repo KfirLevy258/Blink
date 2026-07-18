@@ -19,6 +19,7 @@
 #include "net_wifi.h"
 #include "fmt.h"
 #include "version.h"
+#include "backlight.h"
 
 #define COL_BG		lv_color_hex(0x0E1116)
 #define COL_TRACK	lv_color_hex(0x272C34)
@@ -93,6 +94,29 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
 	lv_obj_set_style_text_color(l, COL_TEXT, 0);
 	lv_obj_center(l);
 	return b;
+}
+
+static lv_obj_t *pct_lbl;	/* live "60%" readout */
+static lv_obj_t *pips[5];	/* five level pips, filled up to the level */
+
+static void bright_refresh(void)
+{
+	uint8_t p = backlight_get();
+	char b[8];
+
+	snprintf(b, sizeof(b), "%d%%", p);
+	lv_label_set_text(pct_lbl, b);
+	for (int i = 0; i < 5; i++) {
+		lv_obj_set_style_bg_color(pips[i],
+			(i + 1) * 20 <= p ? COL_GREEN : COL_TRACK, 0);
+	}
+}
+
+/* user_data carries the step direction (+1 / -1). */
+static void bright_step_cb(lv_event_t *e)
+{
+	backlight_step((int)(intptr_t)lv_event_get_user_data(e));
+	bright_refresh();
 }
 
 static void show_confirm(void)
@@ -232,16 +256,88 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_text_color(bl, COL_DIM, 0);
 	lv_obj_center(bl);
 
+	/* --- Brightness (manual scale, tap-safe stepper) --- */
+	lv_obj_t *blab = lv_label_create(panel);
+
+	lv_label_set_text(blab, "BRIGHTNESS");
+	lv_obj_set_style_text_color(blab, COL_DIM, 0);
+	lv_obj_set_style_text_letter_space(blab, 1, 0);
+	lv_obj_align(blab, LV_ALIGN_TOP_LEFT, 26, 34);
+
+	/* minus / plus: big, opposite corners -- the whole button is the target */
+	lv_obj_t *minus = mk_btn(panel, LV_SYMBOL_MINUS, COL_TRACK,
+				 bright_step_cb, (void *)(intptr_t)-1);
+	lv_obj_set_size(minus, 58, 54);
+	lv_obj_align(minus, LV_ALIGN_TOP_LEFT, 20, 48);
+
+	lv_obj_t *plus = mk_btn(panel, LV_SYMBOL_PLUS, COL_TRACK,
+				bright_step_cb, (void *)(intptr_t)1);
+	lv_obj_set_size(plus, 58, 54);
+	lv_obj_align(plus, LV_ALIGN_TOP_RIGHT, -20, 48);
+
+	/* readout: percent + five pips, not a tap target */
+	pct_lbl = lv_label_create(panel);
+	lv_obj_set_style_text_color(pct_lbl, COL_TEXT, 0);
+	lv_obj_align(pct_lbl, LV_ALIGN_TOP_MID, 0, 54);
+
+	for (int i = 0; i < 5; i++) {
+		pips[i] = lv_obj_create(panel);
+		lv_obj_set_size(pips[i], 20, 6);
+		lv_obj_set_style_radius(pips[i], 3, 0);
+		lv_obj_set_style_border_width(pips[i], 0, 0);
+		lv_obj_clear_flag(pips[i], LV_OBJ_FLAG_SCROLLABLE);
+		lv_obj_align(pips[i], LV_ALIGN_TOP_MID, -50 + i * 25, 84);
+	}
+	bright_refresh();
+
+	/* --- Reset actions, as icon tiles --- */
+	lv_obj_t *rlab = lv_label_create(panel);
+
+	lv_label_set_text(rlab, "RESET");
+	lv_obj_set_style_text_color(rlab, COL_DIM, 0);
+	lv_obj_set_style_text_letter_space(rlab, 1, 0);
+	lv_obj_align(rlab, LV_ALIGN_TOP_LEFT, 26, 114);
+
 	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
+	static const char *const acticon[] = {
+		[ACT_WIFI] = LV_SYMBOL_WIFI,
+		[ACT_SIGNIN] = LV_SYMBOL_REFRESH,
+		[ACT_FACTORY] = LV_SYMBOL_TRASH,
+	};
+	static const char *const acttext[] = {
+		[ACT_WIFI] = "Wi-Fi",
+		[ACT_SIGNIN] = "Sign-in",
+		[ACT_FACTORY] = "Factory",
+	};
+	static const lv_align_t tilepos[] = {
+		LV_ALIGN_TOP_LEFT, LV_ALIGN_TOP_MID, LV_ALIGN_TOP_RIGHT,
+	};
+	static const int tiledx[] = { 20, 0, -20 };
 
 	for (int i = 0; i < 3; i++) {
-		/* Factory reset wears red: it is the only one that costs a
-		 * full re-setup. */
-		lv_obj_t *b = mk_btn(panel, act_label[acts[i]],
-				     acts[i] == ACT_FACTORY ? COL_RED : COL_TRACK,
-				     act_cb, (void *)(intptr_t)acts[i]);
+		enum action a = acts[i];
+		lv_obj_t *tile = lv_btn_create(panel);
 
-		lv_obj_align(b, LV_ALIGN_TOP_MID, 0, 52 + i * 52);
+		lv_obj_set_size(tile, 86, 64);
+		lv_obj_set_style_bg_color(tile,
+			a == ACT_FACTORY ? COL_RED : COL_TRACK, 0);
+		lv_obj_set_style_shadow_width(tile, 0, 0);
+		lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
+		lv_obj_align(tile, tilepos[i], tiledx[i], 132);
+		lv_obj_add_event_cb(tile, act_cb, LV_EVENT_CLICKED,
+				    (void *)(intptr_t)a);
+
+		lv_obj_t *ic = lv_label_create(tile);
+
+		lv_label_set_text(ic, acticon[a]);
+		lv_obj_set_style_text_color(ic, COL_TEXT, 0);
+		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 10);
+
+		lv_obj_t *tx = lv_label_create(tile);
+
+		lv_label_set_text(tx, acttext[a]);
+		lv_obj_set_style_text_color(tx, COL_TEXT, 0);
+		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -8);
 	}
 
 	/* Debug-me line: the first three questions a misbehaving device gets
