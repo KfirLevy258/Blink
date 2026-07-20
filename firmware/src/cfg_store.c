@@ -54,7 +54,27 @@ struct rec {
 	char psk[CFG_PSK_MAX];
 	char token[CFG_TOKEN_MAX];
 	char ap_psk[CFG_AP_PSK_MAX];
+	uint8_t ota_state;		/* 0 idle, 1 install started (cleared on next boot) */
+	char ota_target[CFG_OTA_VER_MAX]; /* version the install aimed at */
 	uint32_t crc;		/* over everything above, always last */
+} __packed;
+
+/* Pre-OTA layout (shipped 0.3.0). A record sealed by that firmware fails the
+ * new CRC span; this loader keeps it readable so an update never wipes the
+ * user's WiFi/token. Remove only when no 0.3.x board can still exist. */
+struct rec_legacy {
+	uint32_t magic;
+	uint32_t seq;
+	uint8_t mode;
+	uint8_t weekly_sel;
+	uint8_t tz_set;
+	uint8_t bright_pct;
+	int32_t tz_min;
+	char ssid[CFG_SSID_MAX];
+	char psk[CFG_PSK_MAX];
+	char token[CFG_TOKEN_MAX];
+	char ap_psk[CFG_AP_PSK_MAX];
+	uint32_t crc;
 } __packed;
 
 /* On-flash footprint, padded to the 32-byte encrypted-write block. */
@@ -76,7 +96,34 @@ static bool slot_load(int off, struct rec *out)
 		return false;
 	}
 	memcpy(out, buf, sizeof(*out));
-	return out->magic == REC_MAGIC && out->crc == rec_crc(out);
+	if (out->magic == REC_MAGIC && out->crc == rec_crc(out)) {
+		return true;
+	}
+
+	/* Not a current record -- try the pre-OTA layout. */
+	struct rec_legacy old;
+
+	memcpy(&old, buf, sizeof(old));
+	if (old.magic != REC_MAGIC ||
+	    old.crc != crc32_ieee((const uint8_t *)&old,
+				  offsetof(struct rec_legacy, crc))) {
+		return false;
+	}
+	memset(out, 0, sizeof(*out));
+	out->magic = old.magic;
+	out->seq = old.seq;
+	out->mode = old.mode;
+	out->weekly_sel = old.weekly_sel;
+	out->tz_set = old.tz_set;
+	out->bright_pct = old.bright_pct;
+	out->tz_min = old.tz_min;
+	memcpy(out->ssid, old.ssid, sizeof(out->ssid));
+	memcpy(out->psk, old.psk, sizeof(out->psk));
+	memcpy(out->token, old.token, sizeof(out->token));
+	memcpy(out->ap_psk, old.ap_psk, sizeof(out->ap_psk));
+	out->crc = rec_crc(out);	/* valid in RAM; resealed on next persist */
+	printk("[cfg] migrated pre-OTA record (seq %u)\n", old.seq);
+	return true;
 }
 
 /* Called with cfg_lock held. */
@@ -314,6 +361,33 @@ int cfg_set_tz(int32_t offset_min)
 	cfg.tz_min = offset_min;
 	cfg.tz_set = 1;
 
+	int rc = persist();
+
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
+uint8_t cfg_get_ota_state(char *ver, size_t len)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	if (ver && len) {
+		strncpy(ver, cfg.ota_target, len - 1);
+		ver[len - 1] = '\0';
+	}
+	uint8_t st = cfg.ota_state;
+
+	k_mutex_unlock(&cfg_lock);
+	return st;
+}
+
+int cfg_set_ota_state(uint8_t st, const char *ver)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	cfg.ota_state = st;
+	memset(cfg.ota_target, 0, sizeof(cfg.ota_target));
+	if (ver) {
+		strncpy(cfg.ota_target, ver, sizeof(cfg.ota_target) - 1);
+	}
 	int rc = persist();
 
 	k_mutex_unlock(&cfg_lock);

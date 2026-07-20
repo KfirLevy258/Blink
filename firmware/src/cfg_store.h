@@ -70,6 +70,14 @@ int cfg_set_bright_pct(uint8_t pct);
 bool cfg_get_tz(int32_t *offset_min);
 int cfg_set_tz(int32_t offset_min);
 
+#define CFG_OTA_VER_MAX 16	/* "MAJOR.MINOR.PATCH" + NUL, with headroom */
+
+/* OTA handshake across the update reboot: state 1 + target version are
+ * written just before rebooting into a new image; the next boot compares the
+ * running version to the target to report success or revert. */
+uint8_t cfg_get_ota_state(char *ver, size_t len);
+int cfg_set_ota_state(uint8_t st, const char *ver);
+
 /* Wipe everything (factory reset). */
 int cfg_reset(void);
 
