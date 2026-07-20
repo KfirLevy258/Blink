@@ -2,9 +2,11 @@
 #define CERTS_H
 
 /*
- * Two trust anchors, because the two Anthropic endpoints chain to different roots:
- *   api.anthropic.com     (usage)  <- Google WE1 <- GTS Root R4
- *   console.anthropic.com (token)  <- Let's Encrypt <- ISRG Root X1
+ * Trust anchors, one per endpoint (they chain to different roots):
+ *   api.anthropic.com             (usage)         <- Google WE1 <- GTS Root R4
+ *   console.anthropic.com         (token)         <- Let's Encrypt <- ISRG Root X1
+ *   github.com                    (OTA check)     <- Sectigo E36/E46 <- USERTrust ECC Certification Authority
+ *   objects.githubusercontent.com (OTA download)  <- Let's Encrypt YR2 <- ISRG Root YR <- ISRG Root X1
  * Re-capture a chain with:
  *   openssl s_client -connect <host>:443 -servername <host> -showcerts
  */
@@ -58,5 +60,29 @@ static const unsigned char ca_cert_isrg_x1[] =
 	"mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d\n"
 	"emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=\n"
 	"-----END CERTIFICATE-----\n";
+
+/* USERTrust ECC Certification Authority -- for github.com (OTA manifest
+ * check). The served chain cross-signs Sectigo Root E46 with this root. */
+static const unsigned char ca_cert_github[] =
+	"-----BEGIN CERTIFICATE-----\n"
+	"MIICjzCCAhWgAwIBAgIQXIuZxVqUxdJxVt7NiYDMJjAKBggqhkjOPQQDAzCBiDEL\n"
+	"MAkGA1UEBhMCVVMxEzARBgNVBAgTCk5ldyBKZXJzZXkxFDASBgNVBAcTC0plcnNl\n"
+	"eSBDaXR5MR4wHAYDVQQKExVUaGUgVVNFUlRSVVNUIE5ldHdvcmsxLjAsBgNVBAMT\n"
+	"JVVTRVJUcnVzdCBFQ0MgQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkwHhcNMTAwMjAx\n"
+	"MDAwMDAwWhcNMzgwMTE4MjM1OTU5WjCBiDELMAkGA1UEBhMCVVMxEzARBgNVBAgT\n"
+	"Ck5ldyBKZXJzZXkxFDASBgNVBAcTC0plcnNleSBDaXR5MR4wHAYDVQQKExVUaGUg\n"
+	"VVNFUlRSVVNUIE5ldHdvcmsxLjAsBgNVBAMTJVVTRVJUcnVzdCBFQ0MgQ2VydGlm\n"
+	"aWNhdGlvbiBBdXRob3JpdHkwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAQarFRaqflo\n"
+	"I+d61SRvU8Za2EurxtW20eZzca7dnNYMYf3boIkDuAUU7FfO7l0/4iGzzvfUinng\n"
+	"o4N+LZfQYcTxmdwlkWOrfzCjtHDix6EznPO/LlxTsV+zfTJ/ijTjeXmjQjBAMB0G\n"
+	"A1UdDgQWBBQ64QmG1M8ZwpZ2dEl23OA1xmNjmjAOBgNVHQ8BAf8EBAMCAQYwDwYD\n"
+	"VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAwNoADBlAjA2Z6EWCNzklwBBHU6+4WMB\n"
+	"zzuqQhFkoJ2UOQIReVx7Hfpkue4WQrO/isIJxOzksU0CMQDpKmFHjFJKS04YcPbW\n"
+	"RNZu9YO6bVi9JNlWSOrvxKJGgYhqOkbRqZtNyWHa0V1Xahg=\n"
+	"-----END CERTIFICATE-----\n";
+
+/* objects.githubusercontent.com chains to ISRG Root X1, byte-identical to the
+ * token endpoint's anchor above. A #define alias keeps sizeof() working. */
+#define ca_cert_gh_cdn ca_cert_isrg_x1
 
 #endif /* CERTS_H */
