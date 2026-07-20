@@ -1,0 +1,39 @@
+/* MCUboot child-image devicetree overlay (sysbuild applies this ONLY to the
+ * mcuboot image; the app's board overlay is NOT inherited by child images).
+ *
+ * Two things must match the app image's view of flash exactly, or MCUboot
+ * makes its swap decisions against a different world than the one imgtool
+ * signed for (task-2 gate failure, 2026-07-18):
+ *
+ * 1. write-block-size = 32: flash encryption writes in 32-byte blocks.
+ *    This drives CONFIG_MCUBOOT_BOOT_MAX_ALIGN (defaults from this DT
+ *    property), which drives BOOT_MAX_ALIGN, which selects the trailer
+ *    magic variant. imgtool --align 32 writes the align-encoded magic
+ *    (leading bytes 0x20 0x00); a write-block-size=4 MCUboot compiles with
+ *    BOOT_MAX_ALIGN=8 and expects the classic magic instead, so it silently
+ *    ignores a perfectly valid pending image (config-1 failure mode).
+ *
+ * 2. The same 5-node partition surgery as
+ *    firmware/boards/esp32_devkitc_esp32_procpu.overlay: without it MCUboot
+ *    keeps the template's old scratch at 0x3E0000 while imgtool/the app use
+ *    0x2C0000, and the swap runs against the wrong scratch area (config-2
+ *    failure mode: encrypted-write alignment abort inside the OLD scratch).
+ */
+
+/delete-node/ &slot0_appcpu_partition;
+/delete-node/ &slot1_appcpu_partition;
+/delete-node/ &slot0_lpcore_partition;
+/delete-node/ &slot1_lpcore_partition;
+/delete-node/ &scratch_partition;
+
+&flash0 {
+	/* Flash encryption: 32-byte write granularity (see app overlay). */
+	write-block-size = <32>;
+
+	partitions {
+		scratch_partition: partition@2c0000 {
+			label = "image-scratch";
+			reg = <0x2C0000 0xF0000>;
+		};
+	};
+};

@@ -1,0 +1,159 @@
+diff --git a/drivers/flash/flash_esp32.c b/drivers/flash/flash_esp32.c
+index 88a3e5031f9..17f21828a15 100644
+--- a/drivers/flash/flash_esp32.c
++++ b/drivers/flash/flash_esp32.c
+@@ -341,6 +341,122 @@ static bool flash_esp32_is_aligned(off_t address, void *buffer, size_t length)
+ 	/* check if address, buffer pointer, and length are 4-byte aligned */
+ 	return ((address & 3) == 0) && (((uintptr_t)buffer & 3) == 0) && ((length & 3) == 0);
+ }
++
++/* LOCAL SDK PATCH -- LiveClaudeUi
++ * tools/patches/zephyr-esp32-mcuboot-encrypted-erase-refill.patch
++ *
++ * Flash-encryption compatibility for the MCUboot-context driver, mirroring
++ * the native MCUboot espressif port (boot/espressif/port/esp_mcuboot.c,
++ * aligned_flash_write/flash_area_erase):
++ *
++ * 1) Erase refills the erased range with ENCRYPTED 0xFF. Erased encrypted
++ *    flash otherwise DECRYPTS AS GARBAGE, and MCUboot's swap/revert state
++ *    machine relies on never-written trailer flags (image_ok) reading as
++ *    erased 0xFF. Without the refill, a TEST-swapped image never
++ *    auto-reverts: its unwritten image_ok decodes as BAD instead of UNSET
++ *    (hardware-proven 2026-07-18, .superpowers/sdd/task-2-debug-report.md).
++ * 2) Refilled bytes are programmed ciphertext, so later writes into an
++ *    erased region cannot be programmed directly any more (NOR flash can
++ *    only clear bits). Every encrypted write therefore becomes a full-sector
++ *    read-merge-erase-write, exactly like the native port's
++ *    aligned_flash_write(..., erase=true).
++ * 3) The hal's decrypt-read path (esp_rom_flash_read(..., true)) reads via a
++ *    cached 64 KB MMU window and only flushes the cache when the window
++ *    changes. After a write or erase we force the next mapped read to remap
++ *    (and thus flush) by touching a different window, so read-back never
++ *    returns stale pre-write bytes.
++ */
++#define MCUBOOT_ENC_SECTOR_SIZE 4096
++static uint8_t mcuboot_enc_sector_buf[MCUBOOT_ENC_SECTOR_SIZE] __aligned(32);
++
++static void mcuboot_enc_cache_inval(off_t near_addr)
++{
++	uint32_t tmp;
++	/* Slots/scratch all sit >= 0x20000, so the 64 KB windows at 0x0 and
++	 * 0x10000 are safe scapegoat mapping targets.
++	 */
++	off_t dummy = (((uint32_t)near_addr & 0xFFFF0000U) == 0x10000U) ? 0x0 : 0x10000;
++
++	(void)esp_rom_flash_read(dummy, &tmp, sizeof(tmp), true);
++}
++
++static int mcuboot_enc_flash_write(off_t dest_addr, const void *src, size_t size)
++{
++	const size_t sector = MCUBOOT_ENC_SECTOR_SIZE;
++	int ret;
++
++	if (IS_ALIGNED(dest_addr, sector) && IS_ALIGNED(size, sector)) {
++		/* Whole sectors: erase (no refill needed, content follows)
++		 * then program directly.
++		 */
++		ret = esp_rom_flash_erase_range(dest_addr, size);
++		if (ret != ESP_OK) {
++			return ret;
++		}
++		ret = esp_rom_flash_write(dest_addr, (void *)src, size, true);
++		mcuboot_enc_cache_inval(dest_addr);
++		return ret;
++	}
++
++	size_t write_addr = (size_t)dest_addr;
++	size_t bytes_remaining = size;
++	size_t src_offset = 0;
++
++	while (bytes_remaining > 0) {
++		size_t aligned_curr_addr = ROUND_DOWN(write_addr, sector);
++		size_t curr_buf_off = write_addr - aligned_curr_addr;
++		size_t chunk_len = MIN(bytes_remaining, sector - curr_buf_off);
++
++		/* Read-merge-erase-write one full sector */
++		ret = esp_rom_flash_read(aligned_curr_addr, mcuboot_enc_sector_buf,
++					 sector, true);
++		if (ret != ESP_OK) {
++			return ret;
++		}
++		ret = esp_rom_flash_erase_range(aligned_curr_addr, sector);
++		if (ret != ESP_OK) {
++			return ret;
++		}
++		memcpy(&mcuboot_enc_sector_buf[curr_buf_off],
++		       &((const uint8_t *)src)[src_offset], chunk_len);
++		ret = esp_rom_flash_write(aligned_curr_addr, mcuboot_enc_sector_buf,
++					  sector, true);
++		mcuboot_enc_cache_inval(aligned_curr_addr);
++		if (ret != ESP_OK) {
++			return ret;
++		}
++
++		write_addr += chunk_len;
++		src_offset += chunk_len;
++		bytes_remaining -= chunk_len;
++	}
++
++	return ESP_OK;
++}
++
++static int mcuboot_enc_flash_erase(off_t start, size_t len)
++{
++	int ret = esp_rom_flash_erase_range(start, len);
++
++	if (ret != ESP_OK) {
++		return ret;
++	}
++	/* Refill: erased encrypted flash must decrypt as 0xFF or MCUboot
++	 * trailer reads see garbage (see patch header comment).
++	 */
++	memset(mcuboot_enc_sector_buf, 0xFF, sizeof(mcuboot_enc_sector_buf));
++	for (off_t addr = start; addr < start + (off_t)len;
++	     addr += MCUBOOT_ENC_SECTOR_SIZE) {
++		ret = esp_rom_flash_write(addr, mcuboot_enc_sector_buf,
++					  MCUBOOT_ENC_SECTOR_SIZE, true);
++		if (ret != ESP_OK) {
++			return ret;
++		}
++	}
++	mcuboot_enc_cache_inval(start);
++	return ESP_OK;
++}
++/* END LOCAL SDK PATCH */
+ #endif
+ 
+ static int flash_esp32_read(const struct device *dev, off_t address, void *buffer, size_t length)
+@@ -424,7 +540,14 @@ static int flash_esp32_write(const struct device *dev, off_t address, const void
+ 
+ 	bool encrypt = esp_flash_encryption_enabled();
+ 
+-	ret = esp_rom_flash_write(address, (void *)buffer, length, encrypt);
++	if (encrypt) {
++		/* LOCAL SDK PATCH: sector read-merge-erase-write, required
++		 * because erased regions are refilled with encrypted 0xFF.
++		 */
++		ret = mcuboot_enc_flash_write(address, buffer, length);
++	} else {
++		ret = esp_rom_flash_write(address, (void *)buffer, length, encrypt);
++	}
+ #else
+ 	flash_esp32_sem_take(dev);
+ 
+@@ -461,7 +584,14 @@ static int flash_esp32_erase(const struct device *dev, off_t start, size_t len)
+ 	int ret = 0;
+ 
+ #ifdef CONFIG_MCUBOOT
+-	ret = esp_rom_flash_erase_range(start, len);
++	if (esp_flash_encryption_enabled()) {
++		/* LOCAL SDK PATCH: erase + encrypted-0xFF refill so erased
++		 * flash decrypts as 0xFF for MCUboot's trailer state machine.
++		 */
++		ret = mcuboot_enc_flash_erase(start, len);
++	} else {
++		ret = esp_rom_flash_erase_range(start, len);
++	}
+ #else
+ 	flash_esp32_sem_take(dev);
+ 
