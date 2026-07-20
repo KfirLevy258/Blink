@@ -20,6 +20,7 @@
 #include "fmt.h"
 #include "version.h"
 #include "backlight.h"
+#include "ota.h"
 
 #define COL_BG		lv_color_hex(0x0E1116)
 #define COL_TRACK	lv_color_hex(0x272C34)
@@ -37,6 +38,17 @@ enum action {
 static lv_obj_t *panel;		/* NULL when closed */
 static lv_obj_t *confirm;	/* NULL when no dialog is up */
 static enum action pending;
+
+/* Software-update widgets (all NULL when their owner is closed/absent). */
+static lv_obj_t *notice;	/* outcome popup on the top layer */
+static lv_obj_t *upd_btn;
+static lv_obj_t *upd_lbl;
+static lv_timer_t *upd_timer;	/* lives with the panel */
+static lv_obj_t *dl_overlay;	/* download progress; only a reboot ends it */
+static lv_obj_t *dl_bar;
+static lv_obj_t *dl_lbl;
+static enum ota_ui_state upd_seen = OTA_UI_IDLE;
+static int64_t upd_revert_at;	/* "Up to date" shows briefly, then idles */
 
 static const char *const act_label[] = {
 	[ACT_WIFI] = "Reset WiFi",
@@ -158,6 +170,184 @@ static void act_cb(lv_event_t *e)
 	show_confirm();
 }
 
+/* --- Software update: tile state machine, confirm, progress overlay --- */
+
+static void notice_ok_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	lv_obj_del(notice);
+	notice = NULL;
+}
+
+void ui_settings_notice(const char *txt)
+{
+	if (notice) {
+		lv_obj_del(notice);
+	}
+	notice = lv_obj_create(lv_layer_top());
+	lv_obj_set_size(notice, 300, 130);
+	lv_obj_set_style_bg_color(notice, COL_BG, 0);
+	lv_obj_set_style_bg_opa(notice, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(notice, COL_TRACK, 0);
+	lv_obj_set_style_border_width(notice, 1, 0);
+	lv_obj_clear_flag(notice, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_center(notice);
+
+	lv_obj_t *l = lv_label_create(notice);
+
+	lv_label_set_text(l, txt);
+	lv_obj_set_width(l, 270);
+	lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_color(l, COL_TEXT, 0);
+	lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 8);
+
+	lv_obj_t *ok = mk_btn(notice, "OK", COL_TRACK, notice_ok_cb, NULL);
+
+	lv_obj_set_size(ok, 120, 36);
+	lv_obj_align(ok, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
+
+static void install_yes_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	ota_request_install();
+	lv_obj_del(confirm);
+	confirm = NULL;
+}
+
+static void show_install_confirm(const struct ota_ui *snap)
+{
+	confirm = lv_obj_create(panel);
+	lv_obj_set_size(confirm, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(confirm, COL_BG, 0);
+	lv_obj_set_style_bg_opa(confirm, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(confirm, 0, 0);
+	lv_obj_set_style_pad_all(confirm, 0, 0);
+	lv_obj_clear_flag(confirm, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_center(confirm);
+
+	lv_obj_t *q = lv_label_create(confirm);
+
+	lv_label_set_text_fmt(q, "Install version %s?\nThe screen restarts when done.",
+			      snap->version);
+	lv_obj_set_style_text_color(q, COL_TEXT, 0);
+	lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(q, LV_ALIGN_TOP_MID, 0, 40);
+
+	lv_obj_t *yes = mk_btn(confirm, "Yes, do it", COL_GREEN,
+			       install_yes_cb, NULL);
+
+	lv_obj_align(yes, LV_ALIGN_BOTTOM_MID, 0, -70);
+
+	lv_obj_t *no = mk_btn(confirm, "Cancel", COL_TRACK,
+			      confirm_no_cb, NULL);
+
+	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 0, -18);
+}
+
+static void upd_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	struct ota_ui snap;
+
+	ota_ui_get(&snap);
+	if (snap.st == OTA_UI_IDLE || snap.st == OTA_UI_UP_TO_DATE) {
+		ota_request_check();
+	} else if (snap.st == OTA_UI_AVAILABLE && confirm == NULL) {
+		show_install_confirm(&snap);
+	}
+}
+
+static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
+{
+	if (!dl_overlay) {
+		/* Full-screen and clickable: it swallows every touch, so
+		 * nothing underneath (panel close included) can run. Only
+		 * the reboot removes it. */
+		dl_overlay = lv_obj_create(lv_layer_top());
+		lv_obj_set_size(dl_overlay, LV_PCT(100), LV_PCT(100));
+		lv_obj_set_style_bg_color(dl_overlay, COL_BG, 0);
+		lv_obj_set_style_bg_opa(dl_overlay, LV_OPA_COVER, 0);
+		lv_obj_set_style_border_width(dl_overlay, 0, 0);
+		lv_obj_set_style_radius(dl_overlay, 0, 0);
+		lv_obj_clear_flag(dl_overlay, LV_OBJ_FLAG_SCROLLABLE);
+		lv_obj_center(dl_overlay);
+
+		dl_lbl = lv_label_create(dl_overlay);
+		lv_obj_set_style_text_color(dl_lbl, COL_TEXT, 0);
+		lv_obj_align(dl_lbl, LV_ALIGN_CENTER, 0, -30);
+
+		dl_bar = lv_bar_create(dl_overlay);
+		lv_obj_set_size(dl_bar, 260, 12);
+		lv_bar_set_range(dl_bar, 0, 100);
+		lv_obj_set_style_bg_color(dl_bar, COL_TRACK, 0);
+		lv_obj_set_style_bg_color(dl_bar, COL_GREEN, LV_PART_INDICATOR);
+		lv_obj_align(dl_bar, LV_ALIGN_CENTER, 0, 10);
+	}
+	if (rebooting) {
+		lv_label_set_text(dl_lbl, "Restarting...");
+		lv_bar_set_value(dl_bar, 100, LV_ANIM_OFF);
+	} else {
+		lv_label_set_text_fmt(dl_lbl, "Downloading version %s...",
+				      snap->version);
+		lv_bar_set_value(dl_bar, snap->pct, LV_ANIM_OFF);
+	}
+}
+
+static void upd_timer_cb(lv_timer_t *t)
+{
+	ARG_UNUSED(t);
+	struct ota_ui snap;
+
+	ota_ui_get(&snap);
+
+	switch (snap.st) {
+	case OTA_UI_IDLE:
+		lv_label_set_text(upd_lbl, ota_badge() ?
+				  "Check for updates \xE2\x80\xA2" :
+				  "Check for updates");
+		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
+		break;
+	case OTA_UI_CHECKING:
+		lv_label_set_text(upd_lbl, "Checking...");
+		lv_obj_add_state(upd_btn, LV_STATE_DISABLED);
+		break;
+	case OTA_UI_UP_TO_DATE:
+		lv_label_set_text(upd_lbl, "Up to date");
+		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
+		if (upd_seen != OTA_UI_UP_TO_DATE) {
+			upd_revert_at = k_uptime_get() + 3000;
+		} else if (k_uptime_get() > upd_revert_at) {
+			ota_ui_set(OTA_UI_IDLE, NULL, 0);
+		}
+		break;
+	case OTA_UI_AVAILABLE:
+		lv_label_set_text_fmt(upd_lbl, "Install %s (%u KB)",
+				      snap.version,
+				      (unsigned)(snap.size / 1024));
+		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
+		break;
+	case OTA_UI_DOWNLOADING:
+		dl_overlay_show(&snap, false);
+		break;
+	case OTA_UI_REBOOTING:
+		dl_overlay_show(&snap, true);
+		break;
+	case OTA_UI_FAILED:
+		if (upd_seen != OTA_UI_FAILED) {
+			ui_settings_notice(upd_seen == OTA_UI_DOWNLOADING ?
+				"Update failed. The current version keeps running." :
+				"Couldn't check for updates.");
+			ota_ui_set(OTA_UI_IDLE, NULL, 0);
+		}
+		lv_label_set_text(upd_lbl, "Check for updates");
+		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
+		break;
+	}
+	upd_seen = snap.st;
+}
+
 /* The panel slides in from the right and back out again (user request
  * 2026-07-17) -- the motion says where settings lives and which way leads
  * home. 250 ms, ease-out. */
@@ -191,9 +381,15 @@ static void close_done(lv_anim_t *a)
 
 static void close_panel(void)
 {
-	if (closing) {
+	if (closing || dl_overlay) {	/* no closing under a download */
 		return;
 	}
+	if (upd_timer) {
+		lv_timer_del(upd_timer);
+		upd_timer = NULL;
+	}
+	upd_btn = NULL;		/* dies with the panel */
+	upd_lbl = NULL;
 	closing = true;
 	slide_x(panel, 0, LV_HOR_RES, close_done);
 }
@@ -262,23 +458,23 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_label_set_text(blab, "BRIGHTNESS");
 	lv_obj_set_style_text_color(blab, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(blab, 1, 0);
-	lv_obj_align(blab, LV_ALIGN_TOP_MID, 0, 34);
+	lv_obj_align(blab, LV_ALIGN_TOP_MID, 0, 28);
 
 	/* minus / plus: big, opposite corners -- the whole button is the target */
 	lv_obj_t *minus = mk_btn(panel, LV_SYMBOL_MINUS, COL_TRACK,
 				 bright_step_cb, (void *)(intptr_t)-1);
-	lv_obj_set_size(minus, 58, 54);
-	lv_obj_align(minus, LV_ALIGN_TOP_LEFT, 20, 56);
+	lv_obj_set_size(minus, 58, 48);
+	lv_obj_align(minus, LV_ALIGN_TOP_LEFT, 20, 44);
 
 	lv_obj_t *plus = mk_btn(panel, LV_SYMBOL_PLUS, COL_TRACK,
 				bright_step_cb, (void *)(intptr_t)1);
-	lv_obj_set_size(plus, 58, 54);
-	lv_obj_align(plus, LV_ALIGN_TOP_RIGHT, -20, 56);
+	lv_obj_set_size(plus, 58, 48);
+	lv_obj_align(plus, LV_ALIGN_TOP_RIGHT, -20, 44);
 
 	/* readout: percent + five pips, not a tap target */
 	pct_lbl = lv_label_create(panel);
 	lv_obj_set_style_text_color(pct_lbl, COL_TEXT, 0);
-	lv_obj_align(pct_lbl, LV_ALIGN_TOP_MID, 0, 62);
+	lv_obj_align(pct_lbl, LV_ALIGN_TOP_MID, 0, 52);
 
 	for (int i = 0; i < 5; i++) {
 		pips[i] = lv_obj_create(panel);
@@ -287,7 +483,7 @@ static void open_panel(lv_obj_t *parent_scr)
 		lv_obj_set_style_border_width(pips[i], 0, 0);
 		lv_obj_clear_flag(pips[i], LV_OBJ_FLAG_SCROLLABLE);
 		lv_obj_clear_flag(pips[i], LV_OBJ_FLAG_CLICKABLE);
-		lv_obj_align(pips[i], LV_ALIGN_TOP_MID, -50 + i * 25, 92);
+		lv_obj_align(pips[i], LV_ALIGN_TOP_MID, -50 + i * 25, 78);
 	}
 	bright_refresh();
 
@@ -297,7 +493,7 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_label_set_text(rlab, "RESET");
 	lv_obj_set_style_text_color(rlab, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(rlab, 1, 0);
-	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 118);
+	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 96);
 
 	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
 	static const char *const acticon[] = {
@@ -319,12 +515,12 @@ static void open_panel(lv_obj_t *parent_scr)
 		enum action a = acts[i];
 		lv_obj_t *tile = lv_btn_create(panel);
 
-		lv_obj_set_size(tile, 86, 72);
+		lv_obj_set_size(tile, 86, 64);
 		lv_obj_set_style_bg_color(tile,
 			a == ACT_FACTORY ? COL_RED : COL_TRACK, 0);
 		lv_obj_set_style_shadow_width(tile, 0, 0);
 		lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
-		lv_obj_align(tile, tilepos[i], tiledx[i], 140);
+		lv_obj_align(tile, tilepos[i], tiledx[i], 112);
 		lv_obj_add_event_cb(tile, act_cb, LV_EVENT_CLICKED,
 				    (void *)(intptr_t)a);
 
@@ -332,14 +528,23 @@ static void open_panel(lv_obj_t *parent_scr)
 
 		lv_label_set_text(ic, acticon[a]);
 		lv_obj_set_style_text_color(ic, COL_TEXT, 0);
-		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 10);
+		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 6);
 
 		lv_obj_t *tx = lv_label_create(tile);
 
 		lv_label_set_text(tx, acttext[a]);
 		lv_obj_set_style_text_color(tx, COL_TEXT, 0);
-		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -10);
+		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -6);
 	}
+
+	/* --- Software update row: one button whose label is the state --- */
+	upd_btn = mk_btn(panel, "Check for updates", COL_TRACK, upd_cb, NULL);
+	lv_obj_set_size(upd_btn, 280, 30);
+	lv_obj_align(upd_btn, LV_ALIGN_TOP_MID, 0, 182);
+	upd_lbl = lv_obj_get_child(upd_btn, 0);
+	upd_seen = OTA_UI_IDLE;
+	upd_timer = lv_timer_create(upd_timer_cb, 250, NULL);
+	upd_timer_cb(upd_timer);	/* correct label before the first tick */
 
 	/* Debug-me line: the first three questions a misbehaving device gets
 	 * asked -- what build, which network, what address -- answered
