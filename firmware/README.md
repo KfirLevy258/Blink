@@ -90,8 +90,37 @@ with the socket — glob first), opening it resets the board, 115200 only.
   CRC-sealed record instead of settings/NVS — NVS needs erased flash to read
   as 0xFF, which encrypted flash never does (mount failed -EDEADLK on
   hardware; ESP-IDF exempts NVS for the same reason). `FLASH_CRYPT_CNT` has a
-  few remaining flips as an emergency off switch; MCUboot signs with the
-  public dev key, which is fine because we rely on encryption, not signatures.
+  few remaining flips as an emergency off switch.
+- **Update authenticity (DONE with OTA):** MCUboot verifies an ECDSA P-256
+  signature (`~/.clauge/ota_signing_key_p256.pem`) on every image before it
+  swaps, so only releases signed with our private key ever run. Each layer
+  defends one thing: TLS + pinned roots authenticate the *download path*, the
+  manifest's SHA-256 pins the *exact bytes* end-to-end, the MCUboot signature
+  gates *what may boot* (even a hash-passing forgery dies here), and flash
+  encryption keeps *secrets at rest* unreadable. Publishing signed images is
+  safe by design — they hold no secrets, and installability is gated by the
+  signing key, not obscurity.
+
+## OTA updates
+
+- **Release flow:** bump `CLAUGE_FW_VERSION` in `firmware/src/version.h`
+  (and nudge `CLAUGE_TIME_FLOOR`), commit, then run `tools/release.sh`. It
+  rebuilds from the committed tree, refuses dirty trees and reused versions,
+  and publishes `clauge-fw.bin` + `manifest.json` to the public feed repo
+  (`KfirLevy258/clauge-releases`) as release `fw-v<version>`.
+- **Device flow:** Settings → "Check for updates" → "Install x.y.z". The board
+  streams the image into slot1 over TLS, verifies its SHA-256, reboots, and
+  MCUboot swaps it in. A daily background check marks the settings tile with a
+  dot when something newer is waiting.
+- **Auto-revert:** a new image boots in test mode and must prove itself within
+  90 s (first usage fetched, or the daemon's first push) before it
+  self-confirms. A hung or broken build stops confirming — the watchdog or the
+  deadline reboots the board and MCUboot restores the previous version, which
+  then reports "Update failed, previous version restored."
+- **Key hygiene:** the OTA signing key lives at
+  `~/.clauge/ota_signing_key_p256.pem`, same rules as the flash key — back it
+  up off-disk; losing it means new releases can't be installed OTA (USB
+  reflash with a new key is the only recovery).
 
 ## Source map
 
@@ -105,7 +134,10 @@ with the socket — glob first), opening it resets the board, 115200 only.
 - `usage_view.c` — gauges, unified CONNECTING boot bar, near-limit warnings, model
   card (All models / Fable, persisted selection), edge chevrons.
 - `ui_settings.c` — edge tap/swipe navigation, settings panel (Reset WiFi /
-  Re-sign-in / Factory reset), version/SSID/IP footer.
+  Re-sign-in / Factory reset), software-update tile + progress overlay,
+  version/SSID/IP footer.
+- `ota.c` / `ota_parse.c` — OTA engine: GitHub release check, slot1 streaming
+  install, SHA-256 verify, mark-pending (parsing host-tested in `tests/`).
 - `ui_anim.c` — the boot clip on loop (left chevron).
 - `net_wifi.c` / `net_time.c` / `oauth.c` / `usage_client.c` / `usage_parse.c` /
   `tz_fetch.c` — radio, SNTP, PKCE OAuth, TLS usage fetch, response parsing, timezone.
