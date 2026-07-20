@@ -10,4 +10,8 @@
  * then persist the change and reboot. */
 void ui_settings_attach(lv_obj_t *scr);
 
+/* One-line notice popup on the gauge screen (update outcome etc.). Safe to
+ * call once the screen exists; replaces any previous notice. */
+void ui_settings_notice(const char *txt);
+
 #endif /* UI_SETTINGS_H */

@@ -1,6 +1,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/drivers/watchdog.h>
+#include <zephyr/dfu/mcuboot.h>
 #include <zephyr/random/random.h>
 #include <zephyr/sys/reboot.h>
 #include <lvgl.h>
@@ -21,6 +23,8 @@
 #include "ui_settings.h"
 #include "ui_anim.h"
 #include "tz_fetch.h"
+#include "ota.h"
+#include "version.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
@@ -75,9 +79,86 @@ static __noinit uint32_t blind_magic;
  * join fails too. */
 static bool scan_said_absent;
 
+/* ---- OTA boot-side: test-boot self-confirm, else MCUboot reverts ---- */
+
+static bool ota_test_boot;
+static bool ota_health;		/* mode proved WiFi + TLS + usage (or daemon) */
+static int64_t ota_confirm_deadline;
+static const struct device *wdt;
+static int wdt_chan = -1;
+
+static void ota_boot_begin(void)
+{
+	if (boot_is_img_confirmed()) {
+		return;
+	}
+	ota_test_boot = true;
+	ota_confirm_deadline = k_uptime_get() + 90 * 1000;
+	printk("[ota] test boot of %s -- must confirm within 90 s\n",
+	       CLAUGE_FW_VERSION);
+
+	/* Hardware watchdog for hard hangs: a wedged main loop stops feeding,
+	 * the chip resets, and MCUboot reverts the unconfirmed image. */
+	wdt = DEVICE_DT_GET_OR_NULL(DT_ALIAS(watchdog0));
+	if (wdt && device_is_ready(wdt)) {
+		struct wdt_timeout_cfg cfg = {
+			.window.max = 30000,
+			.flags = WDT_FLAG_RESET_SOC,
+		};
+
+		wdt_chan = wdt_install_timeout(wdt, &cfg);
+		if (wdt_chan >= 0) {
+			wdt_setup(wdt, 0);
+		}
+	}
+}
+
+static void ota_boot_pump(void)
+{
+	if (!ota_test_boot) {
+		return;
+	}
+	if (wdt_chan >= 0) {
+		wdt_feed(wdt, wdt_chan);	/* alive != healthy; deadline judges health */
+	}
+	if (ota_health) {
+		boot_write_img_confirmed();
+		ota_test_boot = false;
+		if (wdt_chan >= 0) {
+			wdt_disable(wdt);
+			wdt_chan = -1;
+		}
+		printk("[ota] image confirmed\n");
+		return;
+	}
+	if (k_uptime_get() > ota_confirm_deadline) {
+		printk("[ota] not healthy within 90 s -- rebooting to revert\n");
+		ui_boot_mark_intentional_reboot();
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+}
+
+/* Did the previous boot's install land? Runs once the gauge screen exists so
+ * the notice popup has somewhere to live. */
+static void ota_report_outcome(void)
+{
+	char tgt[CFG_OTA_VER_MAX];
+
+	if (cfg_get_ota_state(tgt, sizeof(tgt)) != 1) {
+		return;
+	}
+	cfg_set_ota_state(0, "");
+	if (strcmp(tgt, CLAUGE_FW_VERSION) == 0) {
+		ui_settings_notice("Updated to version " CLAUGE_FW_VERSION ".");
+	} else {
+		ui_settings_notice("Update failed, previous version restored.");
+	}
+}
+
 static void pump_ui(void)
 {
 	ui_setup_service();
+	ota_boot_pump();
 	lv_timer_handler();
 }
 
@@ -472,6 +553,9 @@ static void apply_net_evt(const struct net_evt *e)
 		usage_view_boot_stage(e->stage);
 		break;
 	case NEV_USAGE:
+		/* First applied usage = WiFi + TLS + parse all proven: the
+		 * bar a test boot must clear before it self-confirms. */
+		ota_health = true;
 		usage_view_update(e->s_pct, e->s_reset, e->w_pct, e->w_reset);
 		break;
 	case NEV_STATUS:
@@ -548,6 +632,7 @@ static void net_worker(void *a, void *b, void *c)
 	int64_t token_deadline = k_uptime_get() + (int64_t)tok.expires_in * 1000;
 	int64_t next_poll = 0;
 	int64_t next_tz = 0;	/* fetch as soon as we are online */
+	int64_t next_ota = k_uptime_get() + 5 * 60 * 1000; /* first check 5 min in */
 	int32_t tz_min = 0;
 
 	while (1) {
@@ -613,6 +698,44 @@ static void net_worker(void *a, void *b, void *c)
 			}
 		}
 
+		/* --- OTA: daily background check + UI-requested actions --- */
+		bool manual = ota_take_check_request();
+
+		if (manual || now >= next_ota) {
+			struct ota_manifest m;
+			bool newer = false;
+
+			if (manual) {
+				ota_ui_set(OTA_UI_CHECKING, NULL, 0);
+			}
+			enum ota_result r = ota_check(&m, &newer);
+
+			if (r == OTA_OK && newer) {
+				ota_ui_set(OTA_UI_AVAILABLE, &m, 0);
+			} else if (manual) {
+				ota_ui_set(r == OTA_OK ? OTA_UI_UP_TO_DATE
+						       : OTA_UI_FAILED, NULL, 0);
+			}
+			next_ota = now + 86400LL * 1000;
+		}
+
+		if (ota_take_install_request()) {
+			struct ota_manifest m;
+
+			/* The UI snapshot doesn't carry the sha256; install
+			 * exactly what the last successful check verified. */
+			ota_last_manifest(&m);
+			ota_ui_set(OTA_UI_DOWNLOADING, &m, 0);
+			if (ota_install(&m) == OTA_OK) {
+				cfg_set_ota_state(1, m.version);
+				ota_ui_set(OTA_UI_REBOOTING, &m, 100);
+				k_sleep(K_SECONDS(1));	/* let the UI paint it */
+				ui_boot_mark_intentional_reboot();
+				sys_reboot(SYS_REBOOT_COLD);
+			}
+			ota_ui_set(OTA_UI_FAILED, &m, 0);
+		}
+
 		k_sleep(K_MSEC(250));	/* scheduling tick, not a UI pump */
 	}
 }
@@ -672,6 +795,7 @@ static void run_standalone(void)
 		while (k_msgq_get(&net_evtq, &e, K_NO_WAIT) == 0) {
 			apply_net_evt(&e);
 		}
+		ota_boot_pump();
 
 		if (ui_anim_pending()) {
 			ui_anim_run(standalone_anim_pump);
@@ -709,6 +833,11 @@ static void run_usb(void)
 
 	while (1) {
 		proto_service();
+
+		if (usage_view_have_data()) {
+			ota_health = true;	/* daemon delivered usage */
+		}
+		ota_boot_pump();
 
 		if (ui_anim_pending()) {
 			ui_anim_run(usb_anim_pump);
@@ -768,6 +897,7 @@ int main(void)
 	display_blanking_off(display_dev);
 
 	cfg_init();
+	ota_boot_begin();	/* unconfirmed image? start the confirm clock */
 	backlight_init();	/* drive the PWM to the persisted level */
 	net_wifi_init();
 	net_wifi_set_idle_hook(wifi_idle);
@@ -825,6 +955,7 @@ int main(void)
 		lv_timer_handler();
 		ui_boot_teardown();	/* only after the new screen is loaded */
 		ui_settings_attach(lv_scr_act());
+		ota_report_outcome();
 		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
 		proto_resync();		/* daemon re-pushes time+usage right away */
 		run_usb();
@@ -847,6 +978,7 @@ int main(void)
 		lv_timer_handler();
 		ui_boot_teardown();
 		ui_settings_attach(lv_scr_act());
+		ota_report_outcome();
 
 		switch (boot_ssid_scan(ssid)) {	/* may reboot (blind radio) */
 		case SSID_VISIBLE:
