@@ -37,10 +37,10 @@
 
 static uint8_t recv_buf[1536];
 
-/* --- redirect capture: GitHub answers latest/download with a 302 --- */
+/* --- redirect capture: latest/download answers with TWO 302s on GitHub today
+ * (github.com -> the tag URL on github.com -> the CDN), so we follow a chain,
+ * not a single hop. --- */
 static char redirect_url[768];
-static char cdn_host[64];
-static char cdn_path[768];	/* pre-signed CDN URLs carry a long token */
 static char small_body[512];	/* manifest.json is ~120 bytes */
 static size_t small_len;
 static int http_status;
@@ -210,45 +210,70 @@ static int https_get(const char *host, const char *path, sec_tag_t tag,
 	return http_status;
 }
 
-/* Follow github.com's 302 for `path` and leave cdn_host/cdn_path pointing at
- * the pre-signed CDN URL. Returns OTA_OK or an error. */
-static enum ota_result resolve_redirect(const char *path)
+/* github.com's cert (USERTrust root) vs the CDN's (ISRG Root X1) are different
+ * trust anchors, so each hop needs the right CA. Anything under
+ * *.githubusercontent.com is the release-asset CDN. */
+static bool host_is_cdn(const char *h)
 {
-	int st = https_get(OTA_HOST, path, CA_TAG_GITHUB, NULL, 15000);
+	size_t n = strlen(h);
+	static const char suf[] = "githubusercontent.com";
+	size_t sn = sizeof(suf) - 1;
 
-	if (st < 0) {
-		return OTA_ERR_NET;
-	}
-	if (st != 301 && st != 302) {
-		printk("[ota] %s: status %d, expected redirect\n", path, st);
+	return n >= sn && strncasecmp(h + n - sn, suf, sn) == 0;
+}
+
+/* GET `path` on github.com and follow the redirect chain (latest/download is
+ * two hops today: the tag URL, then the CDN) until a 200, feeding the final
+ * body to body_cb. The callbacks no-op on non-200, so intermediate 302s only
+ * yield their Location. Returns OTA_OK on a 200, else an error. */
+static enum ota_result fetch_follow(const char *path, http_response_cb_t body_cb,
+				    int32_t timeout_ms)
+{
+	char host[80];
+	char hpath[768];
+
+	strncpy(host, OTA_HOST, sizeof(host) - 1);
+	host[sizeof(host) - 1] = '\0';
+	strncpy(hpath, path, sizeof(hpath) - 1);
+	hpath[sizeof(hpath) - 1] = '\0';
+
+	for (int hop = 0; hop < 4; hop++) {
+		sec_tag_t tag = host_is_cdn(host) ? CA_TAG_GH_CDN : CA_TAG_GITHUB;
+		int st = https_get(host, hpath, tag, body_cb, timeout_ms);
+
+		if (st < 0) {
+			return OTA_ERR_NET;
+		}
+		if (st == 200) {
+			return OTA_OK;
+		}
+		if (st == 301 || st == 302 || st == 303 ||
+		    st == 307 || st == 308) {
+			/* ota_split_url reads redirect_url into host/hpath
+			 * before the next https_get clears it. */
+			if (!redirect_url[0] ||
+			    ota_split_url(redirect_url, host, sizeof(host),
+					  hpath, sizeof(hpath)) != 0) {
+				printk("[ota] bad redirect target\n");
+				return OTA_ERR_PARSE;
+			}
+			continue;
+		}
+		printk("[ota] %s: unexpected status %d\n", path, st);
 		return OTA_ERR_HTTP;
 	}
-	if (!redirect_url[0] ||
-	    ota_split_url(redirect_url, cdn_host, sizeof(cdn_host),
-			  cdn_path, sizeof(cdn_path)) != 0) {
-		return OTA_ERR_PARSE;
-	}
-	return OTA_OK;
+	printk("[ota] too many redirects for %s\n", path);
+	return OTA_ERR_HTTP;
 }
 
 enum ota_result ota_check(struct ota_manifest *out, bool *newer)
 {
 	*newer = false;
 
-	enum ota_result r = resolve_redirect(OTA_MANIFEST_PATH);
+	enum ota_result r = fetch_follow(OTA_MANIFEST_PATH, NULL, 15000);
 
 	if (r != OTA_OK) {
 		return r;
-	}
-
-	int st = https_get(cdn_host, cdn_path, CA_TAG_GH_CDN, NULL, 15000);
-
-	if (st < 0) {
-		return OTA_ERR_NET;
-	}
-	if (st != 200) {
-		printk("[ota] manifest fetch: status %d\n", st);
-		return OTA_ERR_HTTP;
 	}
 	if (ota_parse_manifest(small_body, small_len, out) != 0) {
 		return OTA_ERR_PARSE;
@@ -271,12 +296,6 @@ void ota_last_manifest(struct ota_manifest *out)
 
 enum ota_result ota_install(const struct ota_manifest *m)
 {
-	enum ota_result r = resolve_redirect(OTA_IMAGE_PATH);
-
-	if (r != OTA_OK) {
-		return r;
-	}
-
 	if (flash_img_init(&fictx) != 0) {
 		return OTA_ERR_FLASH;
 	}
@@ -288,17 +307,11 @@ enum ota_result ota_install(const struct ota_manifest *m)
 
 	printk("[ota] downloading %s (%u bytes)\n", m->version, m->size);
 
-	int st = https_get(cdn_host, cdn_path, CA_TAG_GH_CDN, stream_cb,
-			   300000);
+	enum ota_result r = fetch_follow(OTA_IMAGE_PATH, stream_cb, 300000);
 
-	if (st < 0) {
+	if (r != OTA_OK) {
 		mbedtls_sha256_free(&sha);
-		return OTA_ERR_NET;
-	}
-	if (st != 200) {
-		mbedtls_sha256_free(&sha);
-		printk("[ota] image fetch: status %d\n", st);
-		return OTA_ERR_HTTP;
+		return r;
 	}
 	if (stream_err) {
 		mbedtls_sha256_free(&sha);

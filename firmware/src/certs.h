@@ -6,7 +6,9 @@
  *   api.anthropic.com             (usage)         <- Google WE1 <- GTS Root R4
  *   console.anthropic.com         (token)         <- Let's Encrypt <- ISRG Root X1
  *   github.com                    (OTA check)     <- Sectigo E36/E46 <- USERTrust ECC Certification Authority
- *   objects.githubusercontent.com (OTA download)  <- Let's Encrypt YR2 <- ISRG Root YR <- ISRG Root X1
+ *   release-assets.githubusercontent.com (OTA dl) <- Let's Encrypt YR2 <- ISRG Root YR <- ISRG Root X1
+ *   (GitHub moved release-asset downloads off objects.githubusercontent.com to
+ *    release-assets.githubusercontent.com; same ISRG Root X1, so no cert change.)
  * Re-capture a chain with:
  *   openssl s_client -connect <host>:443 -servername <host> -showcerts
  */
@@ -81,7 +83,7 @@ static const unsigned char ca_cert_github[] =
 	"RNZu9YO6bVi9JNlWSOrvxKJGgYhqOkbRqZtNyWHa0V1Xahg=\n"
 	"-----END CERTIFICATE-----\n";
 
-/* objects.githubusercontent.com chains to ISRG Root X1, byte-identical to the
+/* release-assets.githubusercontent.com chains to ISRG Root X1, byte-identical to the
  * token endpoint's anchor above. A #define alias keeps sizeof() working. */
 #define ca_cert_gh_cdn ca_cert_isrg_x1
 
