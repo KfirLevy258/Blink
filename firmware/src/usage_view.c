@@ -44,6 +44,7 @@ static bool have_data;		/* distinguishes "no host yet" from "host lost" */
 static int32_t age_s = -1;	/* seconds since the last usage message */
 static double last_s_pct = -1;	/* latest numbers, for the near-limit hint */
 static double last_w_pct = -1;
+static enum usage_status last_status = USAGE_STATUS_DISCONNECTED;
 
 /* Long-press peek: a card of per-model weekly numbers that STAYS up -- tap
  * a row to point the weekly gauge at that model, tap anywhere else (or wait
@@ -80,6 +81,14 @@ void usage_view_set_models(double fable_pct)
 		render_weekly();
 		if (peek && !lv_obj_has_flag(peek, LV_OBJ_FLAG_HIDDEN)) {
 			peek_fill();
+		}
+		/* The near-limit hint is computed in set_status from model_fable,
+		 * but the models event usually lands right AFTER the usage update
+		 * that ran it -- so re-run it here or the Fable warning lags a
+		 * whole poll and is missing on the first frames after a reboot
+		 * (user-reported 2026-07-20). */
+		if (last_status == USAGE_STATUS_OK) {
+			usage_view_set_status(USAGE_STATUS_OK);
 		}
 	}
 }
@@ -584,6 +593,7 @@ void usage_view_set_status(enum usage_status status)
 	if (!built) {
 		return;
 	}
+	last_status = status;
 
 	lv_color_t c;
 	lv_color_t tc = COL_DIM;
@@ -595,12 +605,23 @@ void usage_view_set_status(enum usage_status status)
 		/* Near-limit call-out: the whole point of a glanceable
 		 * display is knowing this before the API tells you no
 		 * (user request 2026-07-17). Session first -- it bites
-		 * sooner. */
-		if (last_s_pct >= 95.0) {
+		 * sooner. At 100% (the display rounds >=99.5 up to "100%")
+		 * the limit is spent, not "almost" -- say so (user-reported
+		 * 2026-07-20). */
+		if (last_s_pct >= 99.5) {
+			text = "Session used up";
+			tc = COL_RED;
+		} else if (last_s_pct >= 95.0) {
 			text = "Session almost used up";
+			tc = COL_RED;
+		} else if (last_w_pct >= 99.5) {
+			text = "Weekly used up";
 			tc = COL_RED;
 		} else if (last_w_pct >= 95.0) {
 			text = "Weekly almost used up";
+			tc = COL_RED;
+		} else if (model_fable >= 99.5) {
+			text = "Fable weekly used up";
 			tc = COL_RED;
 		} else if (model_fable >= 95.0) {
 			/* Fable's window is a real limit of its own; it can
