@@ -208,10 +208,16 @@
 		 * dump + on-screen marker, 2026-07-14). */
 		touchscreen-size-x = <240>;
 		touchscreen-size-y = <320>;
-		min-x = <850>;
-		max-x = <3650>;
-		min-y = <520>;
-		max-y = <3500>;
+		/* Re-fitted 2026-07-21 with the on-screen 5-target calibration
+		 * (run_touch_cal), two passes -- the second with 3-tap median
+		 * averaging after the first pass's noisy single taps mis-set the
+		 * vertical. Horizontal (min-y/max-y) landed at ~1.0 in pass 1;
+		 * vertical (min-x/max-x) needed pass 2 to shed a +10% gain and a
+		 * ~24px "reads too high" offset. */
+		min-x = <559>;
+		max-x = <3818>;
+		min-y = <321>;
+		max-y = <3626>;
 
 		z-threshold = <400>;
 		/* Default is a single raw sample per report -- visibly jittery
@@ -219,8 +225,10 @@
 		 * averaged per report; the 2 MHz SPI absorbs it easily. (A
 		 * stray duplicate "reads = <3>" was silently winning here --
 		 * last-one-wins in DTS -- which is why touch felt worse than
-		 * this comment promised; removed 2026-07-17.) */
-		reads = <8>;
+		 * this comment promised; removed 2026-07-17.) 16 now: the cal
+		 * harness saw occasional 77px jitter on a hold; more averaging
+		 * per report smooths it, and 2 MHz SPI still absorbs it. */
+		reads = <16>;
 	};
 };
 
