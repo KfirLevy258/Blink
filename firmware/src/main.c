@@ -24,6 +24,7 @@
 #include "ui_anim.h"
 #include "tz_fetch.h"
 #include "ota.h"
+#include "ui_touchfx.h"
 #include "version.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
@@ -755,12 +756,26 @@ static void run_standalone(void)
 	 * tonight ran behind this runway, and the one that skipped it
 	 * dropped mid-association (2026-07-15). */
 	wifi_settle();
-	if (net_wifi_connect(ssid, psk, 30) != 0) {
-		/* No reboot-retry dance: a failed join goes straight to the
-		 * setup screen with the reason on the form (user decision
-		 * 2026-07-15 -- the silent self-restarts read as crashes).
-		 * The token survives, so this costs re-picking a network,
-		 * never re-signing-in. */
+	/* The FIRST join after a cold boot (and especially right after a flash)
+	 * is RF-warmup-flaky: it would fail once, drop to setup, and only a
+	 * manual reset made the identical credentials connect (user-reported
+	 * 2026-07-20). One silent retry behind the same CONNECTING screen -- a
+	 * settle, then try again -- turns that into an invisible hiccup. Still
+	 * no reboot-retry dance; two clean failures go to setup as before. */
+	bool joined = false;
+
+	for (int attempt = 0; attempt < 2 && !joined; attempt++) {
+		if (attempt > 0) {
+			printk("[wifi] first join failed; settling and retrying\n");
+			wifi_settle();
+		}
+		joined = (net_wifi_connect(ssid, psk, 30) == 0);
+	}
+	if (!joined) {
+		/* A failed join goes to the setup screen with the reason on the
+		 * form (user decision 2026-07-15 -- silent self-restarts read as
+		 * crashes). The token survives, so this costs re-picking a
+		 * network, never re-signing-in. */
 		const char *err = scan_said_absent ? "network not found"
 						   : net_wifi_last_error();
 
@@ -895,6 +910,7 @@ int main(void)
 		return -1;
 	}
 	display_blanking_off(display_dev);
+	ui_touchfx_init();	/* light touch-echo feedback on every press */
 
 	cfg_init();
 	ota_boot_begin();	/* unconfirmed image? start the confirm clock */
