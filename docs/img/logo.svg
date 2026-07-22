@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="180" viewBox="0 0 720 180" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"><defs><linearGradient id="grad" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#D97757"/><stop offset="1" stop-color="#E8A05C"/></linearGradient></defs><rect width="720" height="180" fill="none"/><rect x="2" y="2" width="716" height="176" rx="26" fill="#171B22" stroke="#2A313D"/><g transform="translate(92,90)"><line x1="-30.41" y1="30.41" x2="-36.77" y2="36.77" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-35.96" y1="23.58" x2="-43.48" y2="28.52" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-40.00" y1="15.77" x2="-48.37" y2="19.08" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-42.37" y1="7.31" x2="-51.24" y2="8.84" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-42.97" y1="-1.47" x2="-51.97" y2="-1.78" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-41.78" y1="-10.18" x2="-50.52" y2="-12.31" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-38.83" y1="-18.47" x2="-46.96" y2="-22.33" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-34.26" y1="-25.98" x2="-41.43" y2="-31.42" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-28.26" y1="-32.41" x2="-34.17" y2="-39.19" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-21.07" y1="-37.48" x2="-25.49" y2="-45.33" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-13.01" y1="-40.99" x2="-15.73" y2="-49.56" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="-4.40" y1="-42.77" x2="-5.32" y2="-51.73" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="4.40" y1="-42.77" x2="5.32" y2="-51.73" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="13.01" y1="-40.99" x2="15.73" y2="-49.56" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="21.07" y1="-37.48" x2="25.49" y2="-45.33" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="28.26" y1="-32.41" x2="34.17" y2="-39.19" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="34.26" y1="-25.98" x2="41.43" y2="-31.42" stroke="url(#grad)" stroke-opacity="1" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="38.83" y1="-18.47" x2="46.96" y2="-22.33" stroke="#8A8F98" stroke-opacity="0.30" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="41.78" y1="-10.18" x2="50.52" y2="-12.31" stroke="#8A8F98" stroke-opacity="0.30" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="42.97" y1="-1.47" x2="51.97" y2="-1.78" stroke="#8A8F98" stroke-opacity="0.30" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="42.37" y1="7.31" x2="51.24" y2="8.84" stroke="#8A8F98" stroke-opacity="0.30" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="40.00" y1="15.77" x2="48.37" y2="19.08" stroke="#8A8F98" stroke-opacity="0.30" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="35.96" y1="23.58" x2="43.48" y2="28.52" stroke="#8A8F98" stroke-opacity="0.30" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="30.41" y1="30.41" x2="36.77" y2="36.77" stroke="#8A8F98" stroke-opacity="0.30" stroke-width="3.2" stroke-linecap="round"/>
+<line x1="0" y1="0" x2="33.57" y2="-19.85" stroke="#F2EEE6" stroke-width="3.2" stroke-linecap="round"/>
+<circle cx="0" cy="0" r="5.1" fill="#F2EEE6"/><circle cx="0" cy="0" r="2.2" fill="#0E1116"/></g><text x="196" y="104" fill="#F2EEE6" font-size="82" font-weight="800" letter-spacing="-3">clauge</text><text x="200" y="138" fill="#8A8F98" font-size="20" letter-spacing="1.5" font-weight="500">your Claude usage, on a gauge</text></svg>

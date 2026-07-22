@@ -5,14 +5,18 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
-REPO="${OTA_REPO:-KfirLevy258/clauge-releases}"
+REPO="${OTA_REPO:-KfirLevy258/Clauge}"
+TAG="v$(sed -n 's/#define CLAUGE_FW_VERSION "\(.*\)"/\1/p' "$ROOT/firmware/src/version.h")"
 
-VER=$(sed -n 's/#define CLAUGE_FW_VERSION "\(.*\)"/\1/p' "$ROOT/firmware/src/version.h")
+VER="${TAG#v}"
 [ -n "$VER" ] || { echo "FATAL: no version in version.h"; exit 1; }
 [ -z "$(git -C "$ROOT" status --porcelain)" ] || {
 	echo "FATAL: working tree dirty -- releases come from committed code only"; exit 1; }
-gh release view "fw-v$VER" --repo "$REPO" >/dev/null 2>&1 && {
-	echo "FATAL: fw-v$VER already released -- bump version.h"; exit 1; }
+# The firmware feed lives on the same release as the source tag ($TAG). Refuse
+# to overwrite an existing firmware asset -- bump version.h for a new build.
+gh release view "$TAG" --repo "$REPO" --json assets \
+	-q '.assets[].name' 2>/dev/null | grep -qx clauge-fw.bin && {
+	echo "FATAL: $TAG already carries clauge-fw.bin -- bump version.h"; exit 1; }
 
 source ~/zephyr-v4.4.0/.venv/bin/activate
 source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
@@ -30,7 +34,14 @@ cp "$BIN" "$TMP/clauge-fw.bin"
 printf '{"version":"%s","size":%s,"sha256":"%s"}\n' "$VER" "$SIZE" "$SHA" \
 	> "$TMP/manifest.json"
 
-gh release create "fw-v$VER" --repo "$REPO" --title "Clauge firmware $VER" \
-	--notes "size $SIZE bytes, sha256 $SHA" \
-	"$TMP/clauge-fw.bin" "$TMP/manifest.json"
-echo "Released fw-v$VER ($SIZE bytes). Boards pick it up on their next check."
+# Attach the firmware + manifest to the version's release, creating it if the
+# source tag hasn't been released yet. --clobber lets a manifest-only retry win.
+if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+	gh release upload "$TAG" --repo "$REPO" --clobber \
+		"$TMP/clauge-fw.bin" "$TMP/manifest.json"
+else
+	gh release create "$TAG" --repo "$REPO" --title "Clauge $VER" \
+		--notes "Firmware $VER — size $SIZE bytes, sha256 $SHA" \
+		"$TMP/clauge-fw.bin" "$TMP/manifest.json"
+fi
+echo "Released $TAG ($SIZE bytes). Boards pick it up on their next check."

@@ -106,8 +106,8 @@ with the socket — glob first), opening it resets the board, 115200 only.
 - **Release flow:** bump `CLAUGE_FW_VERSION` in `firmware/src/version.h`
   (and nudge `CLAUGE_TIME_FLOOR`), commit, then run `tools/release.sh`. It
   rebuilds from the committed tree, refuses dirty trees and reused versions,
-  and publishes `clauge-fw.bin` + `manifest.json` to the public feed repo
-  (`KfirLevy258/clauge-releases`) as release `fw-v<version>`.
+  and attaches `clauge-fw.bin` + `manifest.json` to the `v<version>` release
+  on the main repo (`KfirLevy258/Clauge`), which the board reads as its feed.
 - **Device flow:** Settings → "Check for updates" → "Install x.y.z". The board
   streams the image into slot1 over TLS, verifies its SHA-256, reboots, and
   MCUboot swaps it in. A daily background check marks the settings tile with a
