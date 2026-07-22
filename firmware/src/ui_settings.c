@@ -28,6 +28,10 @@
 #define COL_DIM		lv_color_hex(0x8A9199)
 #define COL_RED		lv_color_hex(0xE74C3C)
 #define COL_GREEN	lv_color_hex(0x2ECC71)
+#define COL_PANEL	lv_color_hex(0x161A20)	/* card fill, sits above COL_BG */
+#define COL_LINE	lv_color_hex(0x20252D)	/* the full-width section rules */
+#define COL_DANGER_BG	lv_color_hex(0x1E1412)	/* factory tile: red-tinted, not solid red */
+#define COL_DANGER_BD	lv_color_hex(0x7A2B23)
 
 enum action {
 	ACT_WIFI,	/* forget network, keep token */
@@ -95,9 +99,12 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
 
 	lv_obj_set_size(b, 200, 40);
 	lv_obj_set_style_bg_color(b, bg, 0);
-	/* A close-swipe starting ON a button must still reach the panel's
-	 * gesture handler instead of dying in the button. */
-	lv_obj_add_flag(b, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	/* In LVGL 9 every child is born SCROLLABLE *and* GESTURE_BUBBLE. Clear
+	 * both: a tap that drifts a few px on the jittery panel was bubbling up
+	 * as a right-swipe and closing settings. A control's gesture now stops
+	 * at the control; swipe-to-close still works from the bare panel. */
+	lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(b, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, user);
 
 	lv_obj_t *l = lv_label_create(b);
@@ -108,8 +115,43 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
 	return b;
 }
 
-static lv_obj_t *pct_lbl;	/* live "60%" readout */
-static lv_obj_t *pips[5];	/* five level pips, filled up to the level */
+/* A full-width hairline rule at row y -- the grouped-list separator. */
+static void mk_line(lv_obj_t *parent, int y)
+{
+	lv_obj_t *l = lv_obj_create(parent);
+
+	lv_obj_set_size(l, LV_HOR_RES, 1);
+	lv_obj_align(l, LV_ALIGN_TOP_LEFT, 0, y);
+	lv_obj_set_style_bg_color(l, COL_LINE, 0);
+	lv_obj_set_style_bg_opa(l, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(l, 0, 0);
+	lv_obj_set_style_radius(l, 0, 0);
+	lv_obj_clear_flag(l, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+/* A raised panel-coloured card (decoration only -- not clickable, so the
+ * controls sitting on top of it still get every touch). */
+static lv_obj_t *mk_card(lv_obj_t *parent, int x, int y, int w, int h)
+{
+	lv_obj_t *c = lv_obj_create(parent);
+
+	lv_obj_set_size(c, w, h);
+	lv_obj_align(c, LV_ALIGN_TOP_LEFT, x, y);
+	lv_obj_set_style_bg_color(c, COL_PANEL, 0);
+	lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(c, COL_TRACK, 0);
+	lv_obj_set_style_border_width(c, 1, 0);
+	lv_obj_set_style_radius(c, 11, 0);
+	lv_obj_set_style_pad_all(c, 0, 0);
+	lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+	/* The card is clickable-by-default and sits under the brightness gap;
+	 * without this a drift-press between the steppers would bubble up and
+	 * close the panel. Swallow the gesture here. */
+	lv_obj_clear_flag(c, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	return c;
+}
+
+static lv_obj_t *pct_lbl;	/* live "70%" readout (the number is the level now) */
 
 static void bright_refresh(void)
 {
@@ -118,10 +160,6 @@ static void bright_refresh(void)
 
 	snprintf(b, sizeof(b), "%d%%", p);
 	lv_label_set_text(pct_lbl, b);
-	for (int i = 0; i < 5; i++) {
-		lv_obj_set_style_bg_color(pips[i],
-			(i + 1) * 20 <= p ? COL_GREEN : COL_TRACK, 0);
-	}
 }
 
 /* user_data carries the step direction (+1 / -1). */
@@ -304,17 +342,22 @@ static void upd_timer_cb(lv_timer_t *t)
 
 	switch (snap.st) {
 	case OTA_UI_IDLE:
-		lv_label_set_text(upd_lbl, ota_badge() ?
-				  "Check for updates \xE2\x80\xA2" :
-				  "Check for updates");
+		/* Left label + chevron already say "Software update"; the right
+		 * side is a STATUS, blank until there's something to report, so
+		 * it can't crowd the title. A pending badge is the exception. */
+		lv_label_set_text(upd_lbl, ota_badge() ? "Update ready" : "");
+		lv_obj_set_style_text_color(upd_lbl,
+					    ota_badge() ? COL_GREEN : COL_DIM, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	case OTA_UI_CHECKING:
 		lv_label_set_text(upd_lbl, "Checking...");
+		lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
 		lv_obj_add_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	case OTA_UI_UP_TO_DATE:
 		lv_label_set_text(upd_lbl, "Up to date");
+		lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		if (upd_seen != OTA_UI_UP_TO_DATE) {
 			upd_revert_at = k_uptime_get() + 3000;
@@ -326,6 +369,7 @@ static void upd_timer_cb(lv_timer_t *t)
 		lv_label_set_text_fmt(upd_lbl, "Install %s (%u KB)",
 				      snap.version,
 				      (unsigned)(snap.size / 1024));
+		lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	case OTA_UI_DOWNLOADING:
@@ -341,7 +385,8 @@ static void upd_timer_cb(lv_timer_t *t)
 				"Couldn't check for updates.");
 			ota_ui_set(OTA_UI_IDLE, NULL, 0);
 		}
-		lv_label_set_text(upd_lbl, "Check for updates");
+		lv_label_set_text(upd_lbl, "");
+		lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	}
@@ -424,26 +469,39 @@ static void open_panel(lv_obj_t *parent_scr)
 	 * hardware 2026-07-17). */
 	lv_obj_set_style_pad_all(panel, 0, 0);
 	lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_add_flag(panel, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	/* Do NOT bubble: with the default GESTURE_BUBBLE the panel's own swipes
+	 * travelled up to the screen (whose handler ignores gestures while the
+	 * panel is open), so swipe-to-close only ever worked by accident. Stop
+	 * gestures here and let panel_gesture_cb below act on them. */
+	lv_obj_clear_flag(panel, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_add_event_cb(panel, panel_gesture_cb, LV_EVENT_GESTURE, NULL);
 	lv_obj_set_pos(panel, LV_HOR_RES, 0);	/* offstage; slid in below */
 
-	lv_obj_t *title = lv_label_create(panel);
+	/* --- Header: green edge seam + back chevron + title + rule. The
+	 * chevron used to be a full-height LEFT_MID button that the reset tiles
+	 * kept covering; it now lives in the top bar (still a left-edge cue via
+	 * the seam). Tap or swipe-right both go home. */
+	lv_obj_t *seam = lv_obj_create(panel);
 
-	lv_label_set_text(title, "SETTINGS");
-	lv_obj_set_style_text_color(title, COL_DIM, 0);
-	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+	lv_obj_set_size(seam, 3, 30);
+	lv_obj_align(seam, LV_ALIGN_TOP_LEFT, 0, 0);
+	lv_obj_set_style_bg_color(seam, COL_GREEN, 0);
+	lv_obj_set_style_bg_opa(seam, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(seam, 0, 0);
+	lv_obj_set_style_radius(seam, 0, 0);
+	lv_obj_clear_flag(seam, LV_OBJ_FLAG_SCROLLABLE);
 
-	/* The back chevron: same visual language as the gauge edges, but a
-	 * chevron reads as a button, so it IS one (tapped on hardware and
-	 * found dead, 2026-07-17) -- tap or swipe right, both go home. */
 	lv_obj_t *back = lv_btn_create(panel);
 
-	lv_obj_set_size(back, 44, 88);
+	/* Narrow and short (x 2..42, y 2..28), no gesture-bubble: it used to be
+	 * 48 wide and sat right on top of the brightness "-" stepper, so a high
+	 * tap on "-" hit the chevron and bounced you home (user-reported
+	 * 2026-07-20). The steppers below now start at y=42 -- a 14px gap. */
+	lv_obj_set_size(back, 40, 26);
 	lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_shadow_width(back, 0, 0);
-	lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-	lv_obj_add_flag(back, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_align(back, LV_ALIGN_TOP_LEFT, 2, 2);
+	lv_obj_clear_flag(back, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
 
 	lv_obj_t *bl = lv_label_create(back);
@@ -452,48 +510,102 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_text_color(bl, COL_DIM, 0);
 	lv_obj_center(bl);
 
-	/* --- Brightness (manual scale, tap-safe stepper) --- */
-	lv_obj_t *blab = lv_label_create(panel);
+	lv_obj_t *title = lv_label_create(panel);
 
-	lv_label_set_text(blab, "BRIGHTNESS");
-	lv_obj_set_style_text_color(blab, COL_DIM, 0);
-	lv_obj_set_style_text_letter_space(blab, 1, 0);
-	lv_obj_align(blab, LV_ALIGN_TOP_MID, 0, 28);
+	lv_label_set_text(title, "Settings");
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
 
-	/* minus / plus: big, opposite corners -- the whole button is the target */
+	mk_line(panel, 30);
+
+	/* --- Brightness: card, big opposite-corner steppers, and a stacked
+	 * "Brightness / 70%" readout. The pips are gone -- the number already
+	 * says the level (user-reported the panel was too crowded). --- */
+	mk_card(panel, 12, 34, 296, 50);
+
+	/* Wide steppers filling the row to a 4px edge inset (minus x16..104, plus
+	 * x216..304), leaving ~112px in the centre for the value/label. Centred
+	 * in the 50px card (y39..79): the card runs y34..84, a 5px margin top and
+	 * bottom. The back chevron ends at y28, so the 11px gap keeps a high tap
+	 * on "-" off it even at the left edge. */
 	lv_obj_t *minus = mk_btn(panel, LV_SYMBOL_MINUS, COL_TRACK,
 				 bright_step_cb, (void *)(intptr_t)-1);
-	lv_obj_set_size(minus, 58, 48);
-	lv_obj_align(minus, LV_ALIGN_TOP_LEFT, 20, 44);
+	lv_obj_set_size(minus, 88, 40);
+	lv_obj_set_style_radius(minus, 8, 0);
+	lv_obj_align(minus, LV_ALIGN_TOP_LEFT, 16, 39);
 
 	lv_obj_t *plus = mk_btn(panel, LV_SYMBOL_PLUS, COL_TRACK,
 				bright_step_cb, (void *)(intptr_t)1);
-	lv_obj_set_size(plus, 58, 48);
-	lv_obj_align(plus, LV_ALIGN_TOP_RIGHT, -20, 44);
+	lv_obj_set_size(plus, 88, 40);
+	lv_obj_set_style_radius(plus, 8, 0);
+	lv_obj_align(plus, LV_ALIGN_TOP_RIGHT, -16, 39);
 
-	/* readout: percent + five pips, not a tap target */
+	lv_obj_t *blab = lv_label_create(panel);
+
+	lv_label_set_text(blab, "Brightness");
+	lv_obj_set_style_text_color(blab, COL_DIM, 0);
+	lv_obj_align(blab, LV_ALIGN_TOP_MID, 0, 40);
+
 	pct_lbl = lv_label_create(panel);
+	lv_obj_set_style_text_font(pct_lbl, &lv_font_montserrat_20, 0);
 	lv_obj_set_style_text_color(pct_lbl, COL_TEXT, 0);
-	lv_obj_align(pct_lbl, LV_ALIGN_TOP_MID, 0, 52);
-
-	for (int i = 0; i < 5; i++) {
-		pips[i] = lv_obj_create(panel);
-		lv_obj_set_size(pips[i], 20, 6);
-		lv_obj_set_style_radius(pips[i], 3, 0);
-		lv_obj_set_style_border_width(pips[i], 0, 0);
-		lv_obj_clear_flag(pips[i], LV_OBJ_FLAG_SCROLLABLE);
-		lv_obj_clear_flag(pips[i], LV_OBJ_FLAG_CLICKABLE);
-		lv_obj_align(pips[i], LV_ALIGN_TOP_MID, -50 + i * 25, 78);
-	}
+	lv_obj_align(pct_lbl, LV_ALIGN_TOP_MID, 0, 56);
 	bright_refresh();
 
-	/* --- Reset actions, as icon tiles --- */
+	/* --- Software update: its own row directly under brightness, fenced
+	 * by rules so it never reads as a fourth reset action --- */
+	mk_line(panel, 89);
+
+	upd_btn = lv_btn_create(panel);
+	lv_obj_set_size(upd_btn, 296, 30);
+	lv_obj_align(upd_btn, LV_ALIGN_TOP_LEFT, 12, 94);
+	lv_obj_set_style_bg_color(upd_btn, COL_PANEL, 0);
+	lv_obj_set_style_bg_opa(upd_btn, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(upd_btn, COL_TRACK, 0);
+	lv_obj_set_style_border_width(upd_btn, 1, 0);
+	lv_obj_set_style_radius(upd_btn, 9, 0);
+	lv_obj_set_style_shadow_width(upd_btn, 0, 0);
+	lv_obj_set_style_pad_all(upd_btn, 0, 0);
+	/* Same as the other controls: don't scroll its (wide) contents and don't
+	 * bubble drift-gestures into a close. A horizontal drag on a SCROLLABLE
+	 * button gets eaten as a scroll and the tap never fires -- that is why
+	 * this row felt dead (user-reported 2026-07-20). */
+	lv_obj_clear_flag(upd_btn, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(upd_btn, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(upd_btn, upd_cb, LV_EVENT_CLICKED, NULL);
+
+	lv_obj_t *swl = lv_label_create(upd_btn);
+
+	lv_label_set_text(swl, "Software update");
+	lv_obj_set_style_text_color(swl, COL_TEXT, 0);
+	lv_obj_align(swl, LV_ALIGN_LEFT_MID, 12, 0);
+
+	lv_obj_t *swchev = lv_label_create(upd_btn);
+
+	lv_label_set_text(swchev, LV_SYMBOL_RIGHT);
+	lv_obj_set_style_text_color(swchev, COL_DIM, 0);
+	lv_obj_align(swchev, LV_ALIGN_RIGHT_MID, -10, 0);
+
+	/* The right-hand label IS the OTA state readout (driven by
+	 * upd_timer_cb); "Software update" on the left never changes. */
+	upd_lbl = lv_label_create(upd_btn);
+	lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
+	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -26, 0);
+
+	upd_seen = OTA_UI_IDLE;
+	upd_timer = lv_timer_create(upd_timer_cb, 250, NULL);
+	upd_timer_cb(upd_timer);	/* correct label before the first tick */
+
+	/* --- Reset actions: divider, centred heading, three big tiles --- */
+	mk_line(panel, 129);
+
 	lv_obj_t *rlab = lv_label_create(panel);
 
 	lv_label_set_text(rlab, "RESET");
 	lv_obj_set_style_text_color(rlab, COL_DIM, 0);
-	lv_obj_set_style_text_letter_space(rlab, 1, 0);
-	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 96);
+	lv_obj_set_style_text_letter_space(rlab, 2, 0);
+	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 134);
 
 	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
 	static const char *const acticon[] = {
@@ -506,50 +618,49 @@ static void open_panel(lv_obj_t *parent_scr)
 		[ACT_SIGNIN] = "Sign-in",
 		[ACT_FACTORY] = "Factory",
 	};
-	static const lv_align_t tilepos[] = {
-		LV_ALIGN_TOP_LEFT, LV_ALIGN_TOP_MID, LV_ALIGN_TOP_RIGHT,
-	};
-	static const int tiledx[] = { 20, 0, -20 };
+	static const int tilex[] = { 12, 114, 216 };
 
 	for (int i = 0; i < 3; i++) {
 		enum action a = acts[i];
+		bool danger = a == ACT_FACTORY;
 		lv_obj_t *tile = lv_btn_create(panel);
+		lv_color_t fg = danger ? COL_RED : COL_TEXT;
 
-		lv_obj_set_size(tile, 86, 64);
+		lv_obj_set_size(tile, 92, 58);
 		lv_obj_set_style_bg_color(tile,
-			a == ACT_FACTORY ? COL_RED : COL_TRACK, 0);
+			danger ? COL_DANGER_BG : COL_PANEL, 0);
+		lv_obj_set_style_border_color(tile,
+			danger ? COL_DANGER_BD : COL_TRACK, 0);
+		lv_obj_set_style_border_width(tile, 1, 0);
+		lv_obj_set_style_radius(tile, 12, 0);
 		lv_obj_set_style_shadow_width(tile, 0, 0);
-		lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
-		lv_obj_align(tile, tilepos[i], tiledx[i], 112);
+		/* Zero the theme's button padding: it shrank the 58px content box
+		 * until the icon (top) and label (bottom) overprinted each other
+		 * (user-reported 2026-07-20). And no gesture-bubble -> a drift on
+		 * a tile can't close the panel. */
+		lv_obj_set_style_pad_all(tile, 0, 0);
+		lv_obj_clear_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
+		lv_obj_align(tile, LV_ALIGN_TOP_LEFT, tilex[i], 152);
 		lv_obj_add_event_cb(tile, act_cb, LV_EVENT_CLICKED,
 				    (void *)(intptr_t)a);
 
 		lv_obj_t *ic = lv_label_create(tile);
 
 		lv_label_set_text(ic, acticon[a]);
-		lv_obj_set_style_text_color(ic, COL_TEXT, 0);
-		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 6);
+		lv_obj_set_style_text_color(ic, fg, 0);
+		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 8);
 
 		lv_obj_t *tx = lv_label_create(tile);
 
 		lv_label_set_text(tx, acttext[a]);
-		lv_obj_set_style_text_color(tx, COL_TEXT, 0);
-		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -6);
+		lv_obj_set_style_text_color(tx, fg, 0);
+		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -8);
 	}
 
-	/* --- Software update row: one button whose label is the state --- */
-	upd_btn = mk_btn(panel, "Check for updates", COL_TRACK, upd_cb, NULL);
-	lv_obj_set_size(upd_btn, 280, 30);
-	lv_obj_align(upd_btn, LV_ALIGN_TOP_MID, 0, 182);
-	upd_lbl = lv_obj_get_child(upd_btn, 0);
-	upd_seen = OTA_UI_IDLE;
-	upd_timer = lv_timer_create(upd_timer_cb, 250, NULL);
-	upd_timer_cb(upd_timer);	/* correct label before the first tick */
-
-	/* Debug-me line: the first three questions a misbehaving device gets
-	 * asked -- what build, which network, what address -- answered
-	 * without a serial cable (which would reset the board). */
-	char line[72];
+	/* Debug-me line: build + network, answered without a serial cable
+	 * (which would reset the board). IP dropped at the user's request
+	 * (2026-07-20); the SSID gets more room, capped so it can't overrun. */
+	char line[56];
 	char ip[16], ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
 
 	if (net_wifi_sta_ip(ip, sizeof(ip)) &&
@@ -557,8 +668,8 @@ static void open_panel(lv_obj_t *parent_scr)
 		char ssid_a[CFG_SSID_MAX];
 
 		fmt_ascii(ssid, ssid_a, sizeof(ssid_a));
-		snprintf(line, sizeof(line), "Clauge %s  |  %s  |  %s",
-			 CLAUGE_FW_VERSION, ssid_a, ip);
+		snprintf(line, sizeof(line), "Clauge %s  |  %.20s",
+			 CLAUGE_FW_VERSION, ssid_a);
 	} else {
 		snprintf(line, sizeof(line), "Clauge %s", CLAUGE_FW_VERSION);
 	}
@@ -567,12 +678,12 @@ static void open_panel(lv_obj_t *parent_scr)
 
 	lv_label_set_text(info, line);
 	lv_obj_set_style_text_color(info, COL_DIM, 0);
-	/* One line, dotted if a long SSID would push it wider than the
-	 * screen -- an auto-sized label neither wraps nor clips. */
-	lv_obj_set_size(info, 308, 17);
+	/* One line, dotted if it would run wider than the screen. Narrower than
+	 * the screen so the dots land inside the right edge, not on it. */
+	lv_obj_set_size(info, 296, 17);
 	lv_label_set_long_mode(info, LV_LABEL_LONG_DOT);
 	lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -6);
+	lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -2);
 
 	slide_x(panel, LV_HOR_RES, 0, NULL);
 }
