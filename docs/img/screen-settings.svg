@@ -1,20 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="600" viewBox="0 0 760 600" font-family="Inter, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"><defs><linearGradient id="grad" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#D97757"/><stop offset="1" stop-color="#E8A05C"/></linearGradient></defs><rect width="760" height="600" fill="#0E1116"/><rect x="18" y="18" width="724" height="480" rx="34" fill="#0A0C10" stroke="#1C222B" stroke-width="2"/>
-<rect x="60" y="60" width="640" height="480" rx="12" fill="#0E1116"/>
-<clipPath id="clip"><rect x="60" y="60" width="640" height="480" rx="12"/></clipPath>
-<g clip-path="url(#clip)" transform="translate(60,60)"><text x="26" y="52" fill="#F2EEE6" font-size="30" font-weight="800">Settings</text>
-<rect x="26" y="74" width="588" height="84" rx="14" fill="#171B22"/>
-<text x="50" y="106" fill="#F2EEE6" font-size="23" font-weight="600">Screen brightness</text>
-<rect x="50" y="126" width="514" height="8" rx="4" fill="#2A313D"/>
-<rect x="50" y="126" width="360" height="8" rx="4" fill="url(#grad)"/>
-<circle cx="410" cy="130" r="11" fill="#F2EEE6"/>
-<rect x="26" y="174" width="588" height="72" rx="14" fill="#171B22"/>
-<text x="50" y="208" fill="#F2EEE6" font-size="23" font-weight="600">Software update</text>
-<text x="588" y="216" fill="#8A8F98" font-size="21" text-anchor="end">0.4.0 ›</text>
-<rect x="26" y="254" width="588" height="72" rx="14" fill="#171B22"/>
-<text x="50" y="288" fill="#F2EEE6" font-size="23" font-weight="600">Wi-Fi</text>
-<text x="588" y="296" fill="#8A8F98" font-size="21" text-anchor="end">Stone Cottage ›</text>
-<text x="30" y="360" fill="#5B616B" font-size="17" font-weight="700" letter-spacing="1.5">DEVICE</text>
-<rect x="26" y="374" width="588" height="72" rx="14" fill="#171B22"/>
-<text x="50" y="408" fill="#E06A5A" font-size="23" font-weight="600">Factory reset</text></g>
-<circle cx="690" cy="510" r="7" fill="#1E242E"/>
-<text x="380" y="566" fill="#8A8F98" font-size="22" text-anchor="middle" font-weight="600" letter-spacing="0.5">Grouped settings</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240" font-family="DejaVu Sans, Helvetica, Arial, sans-serif"><rect width="320" height="240" fill="#0E1116"/><rect x="0" y="0" width="3" height="30" fill="#2ECC71"/>
+<text x="16" y="20" fill="#8A9199" font-size="16">&#8249;</text>
+<text x="160" y="20" fill="#E6E8EB" font-size="16" font-weight="600" text-anchor="middle">Settings</text>
+<rect x="0" y="30" width="320" height="1" fill="#20252D"/>
+<rect x="12" y="34" width="296" height="50" rx="11" fill="#161A20" stroke="#272C34"/>
+<rect x="16" y="39" width="88" height="40" rx="8" fill="#272C34"/><text x="60" y="64" fill="#E6E8EB" font-size="20" text-anchor="middle">&#8722;</text>
+<rect x="216" y="39" width="88" height="40" rx="8" fill="#272C34"/><text x="260" y="64" fill="#E6E8EB" font-size="20" text-anchor="middle">+</text>
+<text x="160" y="53" fill="#8A9199" font-size="13" text-anchor="middle">Brightness</text>
+<text x="160" y="74" fill="#E6E8EB" font-size="20" font-weight="700" text-anchor="middle">70%</text>
+<rect x="0" y="89" width="320" height="1" fill="#20252D"/>
+<rect x="12" y="94" width="296" height="30" rx="9" fill="#161A20" stroke="#272C34"/>
+<text x="24" y="113" fill="#E6E8EB" font-size="14">Software update</text>
+<text x="242" y="113" fill="#2ECC71" font-size="13" text-anchor="end">Up to date</text>
+<text x="298" y="113" fill="#8A9199" font-size="14" text-anchor="end">&#8250;</text>
+<rect x="0" y="129" width="320" height="1" fill="#20252D"/>
+<text x="160" y="146" fill="#8A9199" font-size="12" text-anchor="middle" letter-spacing="2">RESET</text>
+<rect x="12" y="152" width="92" height="58" rx="12" fill="#161A20" stroke="#272C34"/>
+<path d="M 47.0 172.0 A 11 11 0 0 1 69.0 172.0" stroke="#E6E8EB" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M 50.5 172.0 A 7.5 7.5 0 0 1 65.5 172.0" stroke="#E6E8EB" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M 54.0 172.0 A 4 4 0 0 1 62.0 172.0" stroke="#E6E8EB" stroke-width="1.6" fill="none" stroke-linecap="round"/><circle cx="58" cy="174" r="1.4" fill="#E6E8EB"/>
+<text x="58" y="200" fill="#E6E8EB" font-size="13" text-anchor="middle">Wi-Fi</text>
+<rect x="114" y="152" width="92" height="58" rx="12" fill="#161A20" stroke="#272C34"/>
+<path d="M 167 172 A 7 7 0 1 1 160 165" stroke="#E6E8EB" stroke-width="1.6" fill="none"/><path d="M 158 163 L 160 165 L 162 163" stroke="#E6E8EB" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="160" y="200" fill="#E6E8EB" font-size="13" text-anchor="middle">Sign-in</text>
+<rect x="216" y="152" width="92" height="58" rx="12" fill="#1E1412" stroke="#7A2B23"/>
+<rect x="257" y="167" width="10" height="12" rx="1.5" stroke="#E74C3C" stroke-width="1.5" fill="none"/><line x1="255" y1="167" x2="269" y2="167" stroke="#E74C3C" stroke-width="1.5" stroke-linecap="round"/><line x1="260" y1="164" x2="264" y2="164" stroke="#E74C3C" stroke-width="1.5" stroke-linecap="round"/>
+<text x="262" y="200" fill="#E74C3C" font-size="13" text-anchor="middle">Factory</text>
+<text x="160" y="234" fill="#8A9199" font-size="12" text-anchor="middle">Clauge 0.4.0  |  MySpectrumWiFiA7-2G</text></svg>
