@@ -19,7 +19,7 @@ index 88a3e5031f9..17f21828a15 100644
 + *    machine relies on never-written trailer flags (image_ok) reading as
 + *    erased 0xFF. Without the refill, a TEST-swapped image never
 + *    auto-reverts: its unwritten image_ok decodes as BAD instead of UNSET
-+ *    (hardware-proven 2026-07-18, .superpowers/sdd/task-2-debug-report.md).
++ *    (hardware-proven on the encrypted ESP32 target, 2026-07-18).
 + * 2) Refilled bytes are programmed ciphertext, so later writes into an
 + *    erased region cannot be programmed directly any more (NOR flash can
 + *    only clear bits). Every encrypted write therefore becomes a full-sector

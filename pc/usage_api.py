@@ -1,5 +1,5 @@
-"""Read the Claude OAuth token and fetch/map usage. Token-read logic mirrors
-claude_usage_test.py; mapping converts the Anthropic JSON to a flat usage message."""
+"""Read the Claude OAuth token and fetch/map usage: the mapping converts the
+Anthropic usage JSON into the flat usage message the board renders."""
 import json
 from datetime import datetime, timezone
 import os

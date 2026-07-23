@@ -118,7 +118,7 @@ either serves the web page or feeds a connected Clauge board over USB.
 | `firmware/src/ota.c` | OTA engine — signed streaming install + auto-revert |
 | `tools/` | `release.sh`, `flash_encrypted.sh`, dev + logging helpers |
 | `pc/`, `server.js`, `usage.js` | PC bridge + web page |
-| `docs/superpowers/` | Design specs and implementation plans |
+| `docs/img/` | Logo, icon, and device screen renders |
 
 ## Security &amp; caveats
 
