@@ -68,7 +68,8 @@ source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
 
 cd firmware
 west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
-  -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0
+  -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
+  -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.clauge/ota_signing_key_p256.pem\""
 
 # flash the encrypted chip (wraps esptool with the right offsets):
 ../tools/flash_encrypted.sh

@@ -20,8 +20,11 @@ gh release view "$TAG" --repo "$REPO" --json assets \
 
 source ~/zephyr-v4.4.0/.venv/bin/activate
 source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
+KEY="${OTA_SIGNING_KEY:-$HOME/.clauge/ota_signing_key_p256.pem}"
+[ -f "$KEY" ] || { echo "FATAL: signing key missing at $KEY (set OTA_SIGNING_KEY)"; exit 1; }
 ( cd "$ROOT/firmware" && west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
-	-- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 )
+	-- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
+	-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$KEY\"" )   # inner quotes: it's a Kconfig string
 
 BIN="$ROOT/firmware/build-sb/firmware/zephyr/zephyr.signed.bin"
 SIZE=$(stat -f%z "$BIN")
