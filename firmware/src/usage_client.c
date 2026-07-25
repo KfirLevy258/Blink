@@ -4,7 +4,7 @@
  * runtime (from the board's own OAuth) rather than baked in at build time.
  *
  * The User-Agent MUST look like claude-code/<version>; without it the endpoint
- * drops into an aggressively rate-limited bucket (see usage.js).
+ * drops into an aggressively rate-limited bucket.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/net/socket.h>

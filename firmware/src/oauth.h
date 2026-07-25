@@ -6,7 +6,7 @@
 
 /*
  * OAuth (Authorization Code + PKCE) for the Claude Code OAuth client, ported
- * faithfully from the web app's auth.js. The board runs its OWN login and holds
+ * faithfully from the Claude Code CLI login. The board runs its OWN login and holds
  * its OWN refresh token, so it never touches Claude Code's credentials.
  */
 
@@ -41,7 +41,7 @@ int oauth_exchange_code(const char *pasted_code, const char *verifier,
 			struct oauth_tokens *out);
 
 /* Refresh using a stored refresh token. If the endpoint returns no new refresh
- * token, the caller keeps the old one (as auth.js does). Returns 0 on success,
+ * token, the caller keeps the old one (as the CLI does). Returns 0 on success,
  * or a negative errno; a rejected refresh token surfaces as -EACCES. */
 int oauth_refresh(const char *refresh_token, struct oauth_tokens *out);
 

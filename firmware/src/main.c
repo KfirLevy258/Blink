@@ -639,7 +639,7 @@ static void net_worker(void *a, void *b, void *c)
 	while (1) {
 		int64_t now = k_uptime_get();
 
-		/* Refresh proactively, 5 min before expiry (tokens.js rule). */
+		/* Refresh proactively, 5 min before expiry. */
 		if (now > token_deadline - 5 * 60 * 1000) {
 			if (oauth_refresh(tok.refresh, &tok) == 0) {
 				cfg_set_token(tok.refresh);

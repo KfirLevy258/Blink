@@ -1,5 +1,5 @@
 /*
- * OAuth PKCE for the Claude Code client -- ported from auth.js.
+ * OAuth PKCE for the Claude Code client -- mirrors the Claude Code CLI login.
  *
  * The base64url encoder is pure and host-tested. The SHA-256 (PKCE challenge)
  * and the TLS token calls use mbedTLS / Zephyr sockets and run on-device; the
@@ -252,7 +252,7 @@ static int token_post(const char *json, struct oauth_tokens *out)
 int oauth_exchange_code(const char *pasted, const char *verifier,
 			struct oauth_tokens *out)
 {
-	/* The copy/paste code is "<code>#<state>"; split it, as auth.js does. */
+	/* The copy/paste code is "<code>#<state>"; split it, as the CLI login does. */
 	char code[256];
 	char state[OAUTH_VERIFIER_LEN];
 

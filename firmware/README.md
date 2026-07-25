@@ -1,147 +1,139 @@
-# Clauge — CYD firmware (ESP32-2432S028 "Cheap Yellow Display")
+# Clauge firmware
 
-A desk display for Claude Code usage: two 270° gauges (5-hour session, 7-day week)
-with live reset countdowns, a wall clock, and a status dot. Firmware version lives
-in `src/version.h` (currently **0.3.0**) and is reported in the serial `hello`.
+The firmware that runs on the **ESP32-2432S028 "Cheap Yellow Display" (CYD)**: two
+270° gauges for your Claude Code **session (5 h)** and **weekly (7 d)** usage, a wall
+clock, per-model breakdown, and over-the-air updates. Built on **Zephyr** + LVGL,
+booting through **MCUboot** with flash encryption on.
 
-Two data modes, detected at boot — never asked:
+The firmware version lives in [`src/version.h`](src/version.h) and is reported over
+serial in the boot `hello` message.
 
-- **USB bridge** — a PC daemon (`tools/dev.sh` / `pc/`) answers the boot `hello`
-  over serial and pushes usage as NDJSON. No WiFi or token on the device.
-- **Standalone WiFi** — the board holds WiFi credentials + an OAuth refresh token
-  (provisioned by phone) and fetches `/api/oauth/usage` itself over TLS every 60 s.
+## How it gets your usage
 
-First match wins: a talking daemon, then a reachable stored network, then the
-provisioning flow (boarding-pass screen + phone captive portal). The setup AP is
-**WPA2** with a random per-device password carried inside the join QR; the phone
-types nothing. See the living screen map artifact for every screen and state.
+The board picks a data source at boot - you never choose one:
 
-## Build (Intel Mac)
+1. **USB bridge.** If a host daemon answers the boot `hello` over serial, the board
+   takes its usage from there (streamed as NDJSON). No Wi-Fi or token on the device.
+2. **Wi-Fi.** Otherwise, if it has stored Wi-Fi credentials and a sign-in token, it
+   fetches usage itself over TLS, about once a minute.
+3. **First-time setup.** With neither available, it shows a setup screen and hosts a
+   short phone flow to get onto Wi-Fi and signed in. The setup Wi-Fi is WPA2 with a
+   random per-device password carried in the on-screen QR, so the phone types nothing.
 
-Zephyr **v4.3.0** in `~/zephyr-v4.4.0` (dir name kept), Python 3.12 venv, SDK 0.17.4.
-ccache is broken on this host → `-DUSE_CCACHE=0` on full builds.
+## Prerequisites
+
+- **Zephyr** (v4.3.x) with its Python venv and SDK, e.g. under `~/zephyr-v4.4.0`.
+- The **CYD board** on USB (a CH340 serial port, `/dev/cu.usbserial-*` on macOS).
+- Your **signing keys** (see [Keys](#keys)).
+
+## Build
 
 ```bash
-source ~/zephyr-v4.4.0/.venv/bin/activate && source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
+source ~/zephyr-v4.4.0/.venv/bin/activate
+source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
+
 west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
   -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
   -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.clauge/ota_signing_key_p256.pem\""
 ```
 
-Sysbuild + MCUboot is **mandatory** since 2026-07-17 (flash encryption requires
-the MCUboot boot chain). The old single-image `west build` in `build/` produces
-a simple-boot image the encrypted chip can no longer boot.
+Notes:
 
-The board target is **`esp32_devkitc/esp32/procpu`** (no upstream CYD board exists;
-`boards/esp32_devkitc_esp32_procpu.overlay` describes the wiring). Passing any other
-`-b` poisons `build/` — recover with `-p always` and the right board. Incremental
-builds: plain `west build` inside the configured `build/`.
+- **Sysbuild + MCUboot is required.** Flash encryption needs the MCUboot boot chain;
+  a plain single-image build produces something the encrypted chip can't boot.
+- The board target is **`esp32_devkitc/esp32/procpu`** - there's no upstream CYD board,
+  so [`boards/esp32_devkitc_esp32_procpu.overlay`](boards/) describes the wiring.
+  Building with a different `-b` pollutes the build dir; recover with `-p always`.
+- **Display SPI is pinned at 25 MHz.** The common 40 MHz CYD overclock white-screens
+  some panels (init never latches) - see the overlay comment.
 
-## Flash — ENCRYPTED CHIP, use the script
+## Flash
 
-**This board's flash-encryption eFuses are burned (2026-07-17).** The chip only
-boots images encrypted with its device key; a plain `west flash` writes
-plaintext the ROM cannot read and the board sits dead until re-flashed
-properly. The one true flashing path:
+The chip's flash-encryption eFuses are burned, so it only boots images encrypted with
+its device key. **Use the script** - a plain `west flash` writes plaintext the ROM
+can't read and leaves the board dark until re-flashed properly:
 
 ```bash
-tools/flash_encrypted.sh            # picks the first /dev/cu.usbserial*
+tools/flash_encrypted.sh        # defaults to the first /dev/cu.usbserial* port
 ```
 
-The key lives at `~/.clauge/flash_key.bin` (override: `CLAUGE_FLASH_KEY`).
-The eFuse copy is sealed and unreadable — **that file is the only usable copy
-in the world; keep a backup off this disk.** No key file = no future updates.
+Port notes: opening the port resets the board, and only one process can own it at a
+time. To watch the console without disturbing behavior, use
+`tools/passive_log.py <port>` (resets once on open, then read-only). To wipe stored
+Wi-Fi / token / setup password for a clean first-run test, erase the NVS region:
+`esptool.py --port <port> erase_region 0x3b0000 0x30000`.
 
-Port facts unchanged: single CH340 (`/dev/cu.usbserial-14XX0`, digits change
-with the socket — glob first), opening it resets the board, 115200 only.
+## Keys
 
-- **Observe without disturbing:** `tools/passive_log.py <port>` (venv python; resets
-  once on open, then read-only). Only one process may own the port.
-- **Do not** use a flow that starts the USB daemon when testing provisioning — its
-  hello puts the board into USB-bridge mode.
-- **Fresh-provisioning test:** erase stored creds/token/AP-password:
-  `esptool.py --port <port> erase_region 0x3b0000 0x30000` (NVS partition).
-- **Display SPI is pinned at 25 MHz** — the common CYD 40 MHz overclock white-screens
-  this unit (panel never latches init). See the overlay comment.
+Two secrets live **outside the repo**, in `~/.clauge/`:
 
-## Hardware quirks worth knowing (all learned on this unit)
+| Key | Purpose |
+|-----|---------|
+| `flash_key.bin` | Encrypts what's written to flash. Override with `CLAUGE_FLASH_KEY`. |
+| `ota_signing_key_p256.pem` | Signs firmware images (ECDSA P-256) so the board will boot them. Override with `OTA_SIGNING_KEY`. |
 
-- The radio boots blind (all scans empty) roughly every other soft reset; the
-  firmware self-reboots to re-roll it, bounded by a `.noinit` counter.
-- Touch (XPT2046) needs `reads = <8>` averaging — and DTS properties are
-  last-one-wins, so a stray duplicate silently degrades it.
-- The backlight (GPIO 21) runs on LEDC PWM; night mode dims to 25% between 23:00
-  and 07:00 local. Transitions log `[ui] backlight N%`.
-- A station join only completes from a clean boot on this driver — which is why the
-  provisioning flow reboots on purpose (invisibly: dark skip-splash, CONNECTING
-  spans the reset).
+**Back both up off this machine.** The eFuse copy of the flash key is sealed and
+unreadable - the file is the only usable copy. Lose the signing key and you can no
+longer ship updates that installed devices will accept (only a USB reflash with a new
+key recovers).
 
-## Security posture
+## Releasing an update
 
-- **In transit:** the setup AP is WPA2 (random NVS-persisted password, rotated by
-  factory reset); the OAuth login code is PKCE-bound (useless without the verifier,
-  which never leaves the device); the refresh token travels only device↔Anthropic
-  over verified TLS. The phone browser still shows an HTTP warning on the portal —
-  inherent to plain HTTP; the link beneath it is encrypted.
-- **At rest (DONE 2026-07-17):** flash encryption is live — key in eFuse BLK1
-  (read-protected), `FLASH_CRYPT_CONFIG 0xF`, `FLASH_CRYPT_CNT 1`. A USB flash
-  dump returns ciphertext (verified: app region differs from the binary, and
-  the config region greps clean of the SSID/token). Two design consequences:
-  the boot chain is MCUboot via sysbuild, and `cfg_store.c` keeps its own A/B
-  CRC-sealed record instead of settings/NVS — NVS needs erased flash to read
-  as 0xFF, which encrypted flash never does (mount failed -EDEADLK on
-  hardware; ESP-IDF exempts NVS for the same reason). `FLASH_CRYPT_CNT` has a
-  few remaining flips as an emergency off switch.
-- **Update authenticity (DONE with OTA):** MCUboot verifies an ECDSA P-256
-  signature (`~/.clauge/ota_signing_key_p256.pem`) on every image before it
-  swaps, so only releases signed with our private key ever run. Each layer
-  defends one thing: TLS + pinned roots authenticate the *download path*, the
-  manifest's SHA-256 pins the *exact bytes* end-to-end, the MCUboot signature
-  gates *what may boot* (even a hash-passing forgery dies here), and flash
-  encryption keeps *secrets at rest* unreadable. Publishing signed images is
-  safe by design — they hold no secrets, and installability is gated by the
-  signing key, not obscurity.
+```bash
+# 1. bump CLAUGE_FW_VERSION in src/version.h, commit
+# 2. from the repo root:
+tools/release.sh
+```
 
-## OTA updates
+`release.sh` builds from the committed tree (it refuses a dirty tree or a reused
+version), signs the image, and attaches `clauge-fw.bin` + `manifest.json` to the
+`v<version>` release on **`KfirLevy258/Clauge`** - which is the feed every board reads.
 
-- **Release flow:** bump `CLAUGE_FW_VERSION` in `firmware/src/version.h`
-  (and nudge `CLAUGE_TIME_FLOOR`), commit, then run `tools/release.sh`. It
-  rebuilds from the committed tree, refuses dirty trees and reused versions,
-  and attaches `clauge-fw.bin` + `manifest.json` to the `v<version>` release
-  on the main repo (`KfirLevy258/Clauge`), which the board reads as its feed.
-- **Device flow:** Settings → "Check for updates" → "Install x.y.z". The board
-  streams the image into slot1 over TLS, verifies its SHA-256, reboots, and
-  MCUboot swaps it in. A daily background check marks the settings tile with a
-  dot when something newer is waiting.
-- **Auto-revert:** a new image boots in test mode and must prove itself within
-  90 s (first usage fetched, or the daemon's first push) before it
-  self-confirms. A hung or broken build stops confirming — the watchdog or the
-  deadline reboots the board and MCUboot restores the previous version, which
-  then reports "Update failed, previous version restored."
-- **Key hygiene:** the OTA signing key lives at
-  `~/.clauge/ota_signing_key_p256.pem`, same rules as the flash key — back it
-  up off-disk; losing it means new releases can't be installed OTA (USB
-  reflash with a new key is the only recovery).
+On the device: **Settings → Software update → Install x.y.z.** The board streams the
+image into its spare slot, verifies the SHA-256, reboots, and MCUboot swaps it in. A
+daily background check flags the tile when something newer is waiting.
+
+## How updates stay safe
+
+Four independent layers, each guarding one thing:
+
+- **TLS with pinned roots** authenticates the *download*.
+- **The manifest's SHA-256** pins the *exact bytes*, end to end.
+- **MCUboot's ECDSA P-256 signature check** gates *what may boot* - only images signed
+  with your private key run, so even a hash-passing forgery is rejected.
+- **Automatic rollback** - a fresh image boots in test mode and must prove itself
+  (fetch usage) within 90 s. If it hangs or crashes, the watchdog reboots and MCUboot
+  restores the previous version, which then reports *"Update failed, previous version
+  restored."*
+
+Flash encryption keeps secrets (Wi-Fi password, token) unreadable at rest. Published
+images hold no secrets - installability is gated by the signing key, not secrecy.
+
+## Hardware notes
+
+Things worth knowing when hacking on the CYD:
+
+- The radio occasionally boots blind (all scans empty) after a soft reset; the firmware
+  self-reboots to re-roll it, bounded by a `.noinit` counter.
+- Touch (XPT2046) needs averaging (`reads = <8>`), and devicetree properties are
+  last-one-wins - a stray duplicate silently degrades it.
+- The backlight (GPIO 21) runs on LEDC PWM and is adjustable in Settings.
+- A Wi-Fi join only completes from a clean boot on this driver, which is why the
+  first-run flow reboots on purpose (invisibly - the CONNECTING bar spans the reset).
 
 ## Source map
 
-- `main.c` — boot decision, provisioning orchestration, standalone worker, USB loop,
-  backlight/night logic.
-- `ui_boot.c` / `bootanim_dec.c` — eyes-clip splash (skip variant on intentional
-  reboots), streamed past LVGL.
-- `ui_setup.c` — boarding-pass screen, 8 states, failure popups.
-- `portal.c` / `dns_hijack.c` — phone captive portal (WiFi form → ack → sign-in →
-  working → done) on a hand-rolled HTTP/1.1 server.
-- `usage_view.c` — gauges, unified CONNECTING boot bar, near-limit warnings, model
-  card (All models / Fable, persisted selection), edge chevrons.
-- `ui_settings.c` — edge tap/swipe navigation, settings panel (Reset WiFi /
-  Re-sign-in / Factory reset), software-update tile + progress overlay,
-  version/SSID/IP footer.
-- `ota.c` / `ota_parse.c` — OTA engine: GitHub release check, slot1 streaming
-  install, SHA-256 verify, mark-pending (parsing host-tested in `tests/`).
-- `ui_anim.c` — the boot clip on loop (left chevron).
-- `net_wifi.c` / `net_time.c` / `oauth.c` / `usage_client.c` / `usage_parse.c` /
-  `tz_fetch.c` — radio, SNTP, PKCE OAuth, TLS usage fetch, response parsing, timezone.
-- `cfg_store.c` — NVS-backed settings (mode, WiFi, token, tz, AP password, weekly
-  selection).
-- `proto.c` / `msg_parse.c` — serial NDJSON protocol (host-tested in `tests/`).
+| Area | Files |
+|------|-------|
+| Boot, orchestration, workers | `main.c` |
+| Boot splash (streamed past LVGL) | `ui_boot.c`, `bootanim_dec.c` |
+| First-run setup screen | `ui_setup.c` |
+| Phone captive portal | `portal.c`, `dns_hijack.c` |
+| Gauges, warnings, model card | `usage_view.c` |
+| Settings + software-update UI | `ui_settings.c` |
+| OTA engine (check, install, verify) | `ota.c`, `ota_parse.c` |
+| Networking, time, sign-in, fetch | `net_wifi.c`, `net_time.c`, `oauth.c`, `usage_client.c`, `usage_parse.c`, `tz_fetch.c` |
+| Persisted config (A/B, CRC-sealed) | `cfg_store.c` |
+| Serial NDJSON protocol | `proto.c`, `msg_parse.c` |
+
+Parsers and the protocol have host-side unit tests under [`../tests/`](../tests/).
