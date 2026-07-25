@@ -29,3 +29,40 @@ index 99658754..3a54e31e 100644
  #endif
  
  #if defined(MCUBOOT_SWAP_USING_OFFSET) && defined(MCUBOOT_ENC_IMAGES)
+diff --git a/boot/zephyr/main.c b/boot/zephyr/main.c
+index 1494002e..2dad9e17 100644
+--- a/boot/zephyr/main.c
++++ b/boot/zephyr/main.c
+@@ -494,6 +494,10 @@ static void boot_serial_enter()
+ }
+ #endif
+ 
++/* LOCAL SDK PATCH -- LiveClaudeUi: defined by drivers/flash/flash_esp32.c
++ * under CONFIG_MCUBOOT. Weak so other targets link with it absent. */
++__weak void mcuboot_enc_flash_flush_pending(void);
++
+ int main(void)
+ {
+     struct boot_rsp rsp;
+@@ -674,6 +678,21 @@ int main(void)
+ 
+     mcuboot_status_change(MCUBOOT_STATUS_BOOTABLE_IMAGE_FOUND);
+ 
++    /* LOCAL SDK PATCH -- LiveClaudeUi
++     * tools/patches/mcuboot-flush-deferred-encrypted-fill.patch
++     *
++     * The esp32 flash driver defers the encrypted-0xFF fill that an erase owes
++     * (drivers/flash/flash_esp32.c), because the bulk swap overwrites nearly
++     * every erased sector and the fill would be wasted. A range erased and then
++     * NEVER written -- an unset trailer flag, which is exactly what revert
++     * depends on -- still has to read back as 0xFF, so the fill must be
++     * materialised before control leaves the bootloader. This is that point:
++     * last call before the image runs. Weak, so non-esp32 targets link fine.
++     */
++    if (mcuboot_enc_flash_flush_pending != NULL) {
++        mcuboot_enc_flash_flush_pending();
++    }
++
+     ZEPHYR_BOOT_LOG_STOP();
+     do_boot(&rsp);
+ 

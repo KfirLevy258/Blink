@@ -1,8 +1,8 @@
 diff --git a/drivers/flash/flash_esp32.c b/drivers/flash/flash_esp32.c
-index 88a3e5031f9..17f21828a15 100644
+index 88a3e5031f9..3abd9a3c5d1 100644
 --- a/drivers/flash/flash_esp32.c
 +++ b/drivers/flash/flash_esp32.c
-@@ -341,6 +341,122 @@ static bool flash_esp32_is_aligned(off_t address, void *buffer, size_t length)
+@@ -341,6 +341,189 @@ static bool flash_esp32_is_aligned(off_t address, void *buffer, size_t length)
  	/* check if address, buffer pointer, and length are 4-byte aligned */
  	return ((address & 3) == 0) && (((uintptr_t)buffer & 3) == 0) && ((length & 3) == 0);
  }
@@ -19,7 +19,7 @@ index 88a3e5031f9..17f21828a15 100644
 + *    machine relies on never-written trailer flags (image_ok) reading as
 + *    erased 0xFF. Without the refill, a TEST-swapped image never
 + *    auto-reverts: its unwritten image_ok decodes as BAD instead of UNSET
-+ *    (hardware-proven on the encrypted ESP32 target, 2026-07-18).
++ *    (hardware-proven 2026-07-18, .superpowers/sdd/task-2-debug-report.md).
 + * 2) Refilled bytes are programmed ciphertext, so later writes into an
 + *    erased region cannot be programmed directly any more (NOR flash can
 + *    only clear bits). Every encrypted write therefore becomes a full-sector
@@ -45,16 +45,50 @@ index 88a3e5031f9..17f21828a15 100644
 +	(void)esp_rom_flash_read(dummy, &tmp, sizeof(tmp), true);
 +}
 +
++
++/* Deferred-fill state. Declared here because mcuboot_enc_flash_write() below
++ * consults it; the fill itself is materialised by
++ * mcuboot_enc_flash_flush_pending() further down. */
++static off_t mcuboot_enc_pend_start;
++static size_t mcuboot_enc_pend_len;
++
++static bool mcuboot_enc_overlaps(off_t a, size_t alen, off_t b, size_t blen)
++{
++	return (a < b + (off_t)blen) && (b < a + (off_t)alen);
++}
++
++void mcuboot_enc_flash_flush_pending(void);
++
 +static int mcuboot_enc_flash_write(off_t dest_addr, const void *src, size_t size)
 +{
 +	const size_t sector = MCUBOOT_ENC_SECTOR_SIZE;
++	bool blank = false;	/* target still erased from a deferred fill */
 +	int ret;
++
++	if (mcuboot_enc_pend_len != 0) {
++		if (dest_addr <= mcuboot_enc_pend_start &&
++		    dest_addr + (off_t)size >=
++			    mcuboot_enc_pend_start + (off_t)mcuboot_enc_pend_len) {
++			/* Fully overwritten: the fill would have been erased
++			 * again a moment later, so drop it -- and the range is
++			 * still blank, so this write needs no erase either. */
++			mcuboot_enc_pend_len = 0;
++			blank = true;
++		} else if (mcuboot_enc_overlaps(dest_addr, size,
++						mcuboot_enc_pend_start,
++						mcuboot_enc_pend_len)) {
++			/* Partial: the untouched remainder must still read as
++			 * 0xFF, so materialise the fill before writing. */
++			mcuboot_enc_flash_flush_pending();
++		}
++	}
 +
 +	if (IS_ALIGNED(dest_addr, sector) && IS_ALIGNED(size, sector)) {
 +		/* Whole sectors: erase (no refill needed, content follows)
 +		 * then program directly.
 +		 */
-+		ret = esp_rom_flash_erase_range(dest_addr, size);
++		ret = blank ? ESP_OK
++			    : esp_rom_flash_erase_range(dest_addr, size);
 +		if (ret != ESP_OK) {
 +			return ret;
 +		}
@@ -99,25 +133,58 @@ index 88a3e5031f9..17f21828a15 100644
 +	return ESP_OK;
 +}
 +
-+static int mcuboot_enc_flash_erase(off_t start, size_t len)
++/* DEFERRED REFILL (2026-07-26). Writing encrypted 0xFF over an erased range is
++ * only observable if something READS that range before writing it -- which is
++ * true for trailer flags (the reason the refill exists) and false for the bulk
++ * image copy, where MCUboot erases a sector and immediately overwrites it. Done
++ * eagerly, every sector of a swap paid a wasted 4 KB write AND forced a second
++ * erase in the write path, because the fill left programmed ciphertext behind.
++ *
++ * So the fill is recorded, not performed. It is materialised on any overlapping
++ * read or partial write, and unconditionally before MCUboot boots -- see
++ * mcuboot_enc_flash_flush_pending(), called from boot/zephyr/main.c just ahead
++ * of do_boot(). A pending fill that is fully overwritten is simply dropped, and
++ * the covering write also skips its own erase since the sector is still blank.
++ *
++ * Only one range is ever pending: a second erase flushes the first.
++ */
++/* Exported: MCUboot calls this immediately before jumping to the image, so a
++ * region erased and never written still decrypts as 0xFF. Without that call an
++ * unwritten image_ok would read as BAD instead of UNSET and a test image would
++ * never auto-revert. */
++void mcuboot_enc_flash_flush_pending(void)
 +{
-+	int ret = esp_rom_flash_erase_range(start, len);
++	off_t start = mcuboot_enc_pend_start;
++	size_t len = mcuboot_enc_pend_len;
 +
-+	if (ret != ESP_OK) {
-+		return ret;
++	if (len == 0) {
++		return;
 +	}
-+	/* Refill: erased encrypted flash must decrypt as 0xFF or MCUboot
-+	 * trailer reads see garbage (see patch header comment).
-+	 */
++	mcuboot_enc_pend_len = 0;	/* clear first: writes re-enter here */
++
 +	memset(mcuboot_enc_sector_buf, 0xFF, sizeof(mcuboot_enc_sector_buf));
 +	for (off_t addr = start; addr < start + (off_t)len;
 +	     addr += MCUBOOT_ENC_SECTOR_SIZE) {
-+		ret = esp_rom_flash_write(addr, mcuboot_enc_sector_buf,
-+					  MCUBOOT_ENC_SECTOR_SIZE, true);
-+		if (ret != ESP_OK) {
-+			return ret;
++		if (esp_rom_flash_write(addr, mcuboot_enc_sector_buf,
++					MCUBOOT_ENC_SECTOR_SIZE, true) != ESP_OK) {
++			return;
 +		}
 +	}
++	mcuboot_enc_cache_inval(start);
++}
++
++static int mcuboot_enc_flash_erase(off_t start, size_t len)
++{
++	int ret;
++
++	mcuboot_enc_flash_flush_pending();	/* only one pending range */
++
++	ret = esp_rom_flash_erase_range(start, len);
++	if (ret != ESP_OK) {
++		return ret;
++	}
++	mcuboot_enc_pend_start = start;
++	mcuboot_enc_pend_len = len;
 +	mcuboot_enc_cache_inval(start);
 +	return ESP_OK;
 +}
@@ -125,7 +192,25 @@ index 88a3e5031f9..17f21828a15 100644
  #endif
  
  static int flash_esp32_read(const struct device *dev, off_t address, void *buffer, size_t length)
-@@ -424,7 +540,14 @@ static int flash_esp32_write(const struct device *dev, off_t address, const void
+@@ -358,6 +541,17 @@ static int flash_esp32_read(const struct device *dev, off_t address, void *buffe
+ 	size_t aligned_size = 0;
+ 	bool allow_decrypt = esp_flash_encryption_enabled();
+ 
++	/* A deferred 0xFF fill is invisible to the flash itself, so a read that
++	 * lands in it would see raw erased ciphertext (decrypt garbage) instead
++	 * of 0xFF. Materialise it first. Overlap-checked deliberately: the bulk
++	 * copy reads the SOURCE slot while a fill is pending on the DESTINATION,
++	 * and flushing on every read would give back the whole saving. */
++	if (mcuboot_enc_pend_len != 0 &&
++	    mcuboot_enc_overlaps(address, length, mcuboot_enc_pend_start,
++				 mcuboot_enc_pend_len)) {
++		mcuboot_enc_flash_flush_pending();
++	}
++
+ 	if (flash_esp32_is_aligned(address, buffer, length)) {
+ 		ret = esp_rom_flash_read(address, buffer, length, allow_decrypt);
+ 		return (ret == ESP_OK) ? 0 : -EIO;
+@@ -424,7 +618,14 @@ static int flash_esp32_write(const struct device *dev, off_t address, const void
  
  	bool encrypt = esp_flash_encryption_enabled();
  
@@ -141,7 +226,7 @@ index 88a3e5031f9..17f21828a15 100644
  #else
  	flash_esp32_sem_take(dev);
  
-@@ -461,7 +584,14 @@ static int flash_esp32_erase(const struct device *dev, off_t start, size_t len)
+@@ -461,7 +662,14 @@ static int flash_esp32_erase(const struct device *dev, off_t start, size_t len)
  	int ret = 0;
  
  #ifdef CONFIG_MCUBOOT

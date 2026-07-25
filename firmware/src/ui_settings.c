@@ -365,7 +365,17 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 
 		dl_sub = lv_label_create(dl_overlay);
 		lv_obj_set_style_text_color(dl_sub, COL_DIM, 0);
-		lv_obj_align(dl_sub, LV_ALIGN_CENTER, 0, 32);
+		/* Bounded and wrapping, not free-running. A single centred line
+		 * runs off both edges of a 320 px panel at about 45 characters,
+		 * which is how "This takes a few minutes. Keep the device
+		 * powered." ended up hanging off the screen (user-reported
+		 * 2026-07-26 -- the second overflow of the evening, after the
+		 * update row). Constraining the label means future copy wraps
+		 * instead of silently escaping. */
+		lv_obj_set_width(dl_sub, 280);
+		lv_label_set_long_mode(dl_sub, LV_LABEL_LONG_WRAP);
+		lv_obj_set_style_text_align(dl_sub, LV_TEXT_ALIGN_CENTER, 0);
+		lv_obj_align(dl_sub, LV_ALIGN_CENTER, 0, 34);
 		lv_label_set_text(dl_sub, "");
 
 		dl_first_ms = 0;
@@ -397,7 +407,7 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		 * read 17.3 s and 0.9 s for those same two swaps. */
 		lv_label_set_text(dl_lbl, "Installing update...");
 		lv_label_set_text(dl_sub,
-				  "This takes a few minutes. Keep the device powered.");
+				  "This takes a few minutes.\nKeep the device powered.");
 		lv_bar_set_value(dl_bar, 100, LV_ANIM_OFF);
 		return;
 	}
