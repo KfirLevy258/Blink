@@ -43,6 +43,7 @@ static lv_obj_t *cap;
 static lv_obj_t *pill;
 static lv_obj_t *brand;
 static lv_obj_t *panel;
+static lv_obj_t *err_box;	/* the single live join-failure popup, or NULL */
 
 static volatile int pending = -1;
 static char pending_detail[40];
@@ -229,6 +230,7 @@ static void error_popup_ok_cb(lv_event_t *e)
 {
 	/* Deleting the popup from its own button's event: async, so LVGL
 	 * finishes the click processing on a live object first. */
+	err_box = NULL;
 	lv_obj_del_async(lv_event_get_user_data(e));
 }
 
@@ -236,8 +238,16 @@ static void error_popup_ok_cb(lv_event_t *e)
  * normal WAIT screen (already applied underneath) carries on. */
 static void error_popup(const char *msg)
 {
+	/* Singleton. A phone hopping on/off the setup AP flaps the state back
+	 * through WAIT, which re-enters here -- without this, each pass stacks a
+	 * fresh popup over the last. Never keep more than one on screen. */
+	if (err_box) {
+		lv_obj_del(err_box);
+	}
+
 	lv_obj_t *box = lv_obj_create(scr);
 
+	err_box = box;
 	lv_obj_set_size(box, 220, 110);
 	lv_obj_set_style_radius(box, 12, 0);
 	lv_obj_set_style_bg_color(box, COL_PANEL, 0);
@@ -259,6 +269,12 @@ static void error_popup(const char *msg)
 	lv_obj_t *btn = lv_btn_create(box);
 
 	lv_obj_set_size(btn, 84, 32);
+	/* LVGL 9 births every child SCROLLABLE + GESTURE_BUBBLE. On the jittery
+	 * XPT2046 panel a tap that drifts a few px can then be eaten as a scroll or
+	 * gesture so CLICKED never fires; clear both, exactly as the settings
+	 * buttons do, so a slightly-smeared tap still registers. */
+	lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(btn, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -2);
 	lv_obj_set_style_bg_color(btn, COL_RED, 0);
 	lv_obj_add_event_cb(btn, error_popup_ok_cb, LV_EVENT_CLICKED, box);
