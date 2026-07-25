@@ -51,6 +51,27 @@ static lv_timer_t *upd_timer;	/* lives with the panel */
 static lv_obj_t *dl_overlay;	/* download progress; only a reboot ends it */
 static lv_obj_t *dl_bar;
 static lv_obj_t *dl_lbl;
+static lv_obj_t *dl_sub;	/* time remaining, under the bar */
+/*
+ * Download-rate estimator. A fixed baseline (first percent seen, extrapolated
+ * to the end) was the first attempt and was unusable: for the first ~20 s it
+ * divides a 1-2 percent delta by a couple of seconds, so a single slow TCP
+ * window swings the answer by minutes, and because the baseline never moves
+ * the early noise never washes out (user-reported 2026-07-25).
+ *
+ * Instead: measure ms-per-percent over each percent step, smooth it with an
+ * exponential moving average, and hold back any number at all until a few
+ * steps have landed. Between steps the shown value counts down off the clock
+ * rather than sitting still, so it reads as a timer instead of a stutter.
+ */
+static int64_t dl_first_ms;	/* first non-zero percent: warm-up reference */
+static int64_t dl_last_ms;	/* when dl_last_pct was observed */
+static uint8_t dl_last_pct;
+static int dl_mspp;		/* EMA of milliseconds per percent */
+static int dl_samples;
+static int64_t dl_eta_ms;	/* remaining, as computed at dl_eta_at_ms */
+static int64_t dl_eta_at_ms;
+static int dl_shown_left = -1;	/* last printed value, to stop 1 s jitter */
 static enum ota_ui_state upd_seen = OTA_UI_IDLE;
 static int64_t upd_revert_at;	/* "Up to date" shows briefly, then idles */
 
@@ -322,14 +343,115 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		lv_obj_set_style_bg_color(dl_bar, COL_TRACK, 0);
 		lv_obj_set_style_bg_color(dl_bar, COL_GREEN, LV_PART_INDICATOR);
 		lv_obj_align(dl_bar, LV_ALIGN_CENTER, 0, 10);
+
+		dl_sub = lv_label_create(dl_overlay);
+		lv_obj_set_style_text_color(dl_sub, COL_DIM, 0);
+		lv_obj_align(dl_sub, LV_ALIGN_CENTER, 0, 32);
+		lv_label_set_text(dl_sub, "");
+
+		dl_first_ms = 0;
+		dl_last_ms = 0;
+		dl_last_pct = 0;
+		dl_mspp = 0;
+		dl_samples = 0;
+		dl_eta_ms = 0;
+		dl_eta_at_ms = 0;
+		dl_shown_left = -1;
 	}
 	if (rebooting) {
-		lv_label_set_text(dl_lbl, "Restarting...");
+		/* NOT "Restarting...": this frame is the LAST thing the panel
+		 * draws, and it stays frozen on screen for as long as MCUboot
+		 * spends swapping slot1 into slot0 -- nothing repaints until the
+		 * new image boots. Claiming a restart that visibly is not
+		 * happening reads as a hang (user-reported 2026-07-25).
+		 *
+		 * Deliberately no duration: swap time is not a constant we can
+		 * honestly quote. One instrumented run completed in ~10 s, but a
+		 * user-driven run on the same board ran into minutes -- every
+		 * write goes through the encrypted-flash read-modify-write path,
+		 * so it depends on sector state. A promised "about 15 seconds"
+		 * that overruns is exactly the hang it was meant to prevent. Say
+		 * the one thing that is always true and actionable instead. */
+		lv_label_set_text(dl_lbl, "Installing update...");
+		lv_label_set_text(dl_sub, "Keep the device powered.");
 		lv_bar_set_value(dl_bar, 100, LV_ANIM_OFF);
+		return;
+	}
+
+	lv_label_set_text_fmt(dl_lbl, "Downloading version %s...", snap->version);
+	lv_bar_set_value(dl_bar, snap->pct, LV_ANIM_OFF);
+
+	int64_t now = k_uptime_get();
+
+	if (snap->pct == 0) {
+		return;			/* no body bytes yet */
+	}
+	if (dl_last_ms == 0) {		/* first percent: start the clock */
+		dl_first_ms = now;
+		dl_last_ms = now;
+		dl_last_pct = snap->pct;
+		return;
+	}
+
+	if (snap->pct > dl_last_pct) {
+		int dp = snap->pct - dl_last_pct;
+		int inst = (int)((now - dl_last_ms) / dp);
+
+		/* EMA, alpha 1/4. Slow enough to ride out a stalled window,
+		 * quick enough to track a genuine rate change. */
+		dl_mspp = dl_mspp ? (dl_mspp * 3 + inst) / 4 : inst;
+		dl_last_pct = snap->pct;
+		dl_last_ms = now;
+		dl_samples++;
+
+		dl_eta_ms = (int64_t)dl_mspp * (100 - snap->pct);
+		dl_eta_at_ms = now;
+	}
+
+	/* Warm-up: say nothing rather than something wrong. The bar is already
+	 * showing that work is happening. */
+	if (dl_samples < 4 || now - dl_first_ms < 5000) {
+		return;
+	}
+
+	int64_t remain = dl_eta_ms - (now - dl_eta_at_ms);
+	int left = remain > 0 ? (int)(remain / 1000) : 0;
+
+	/* Coarser buckets further out: nobody needs 1 s resolution on a
+	 * two-minute estimate, and the quantisation is what kills the twitch. */
+	if (left > 90) {
+		left = (left + 5) / 10 * 10;
+	} else if (left > 30) {
+		left = (left + 2) / 5 * 5;
+	}
+
+	if (left <= 5) {
+		if (dl_shown_left != 0) {
+			dl_shown_left = 0;
+			lv_label_set_text(dl_sub, "Almost done...");
+		}
+		return;
+	}
+
+	/* Let it fall freely but resist rising: an estimate that keeps growing
+	 * feels broken even when it is honest, so only admit a slowdown once it
+	 * is unmistakable (>20% worse than what is on screen). */
+	if (dl_shown_left > 0 && left > dl_shown_left) {
+		int slack = dl_shown_left / 5 + 3;
+
+		if (left - dl_shown_left < slack) {
+			return;
+		}
+	}
+	if (left == dl_shown_left) {
+		return;
+	}
+	dl_shown_left = left;
+	if (left >= 60) {
+		lv_label_set_text_fmt(dl_sub, "About %d min %d s left",
+				      left / 60, left % 60);
 	} else {
-		lv_label_set_text_fmt(dl_lbl, "Downloading version %s...",
-				      snap->version);
-		lv_bar_set_value(dl_bar, snap->pct, LV_ANIM_OFF);
+		lv_label_set_text_fmt(dl_sub, "About %d s left", left);
 	}
 }
 
