@@ -200,6 +200,12 @@ static void wifi_settle(void)
  */
 #define NET_WORKER_PRIO 5
 
+/* Re-join backoff. Starts quick because most drops are momentary, doubles up
+ * to five minutes because a router that is genuinely down stays down and
+ * retrying the radio in a tight loop is what starved the WiFi heap before. */
+#define REJOIN_WAIT_MIN_MS (15 * 1000)
+#define REJOIN_WAIT_MAX_MS (5 * 60 * 1000)
+
 static K_THREAD_STACK_DEFINE(net_stack, 8192);	/* TLS-sized, like main's */
 static struct k_thread net_thread;
 
@@ -589,6 +595,11 @@ static void usb_anim_pump(void)
 /* Lower priority than main (higher number): 1-2 s of ECDHE math must not
  * starve the render loop on this single-core build. */
 static char worker_refresh[CFG_TOKEN_MAX];
+/* Credentials the worker re-joins with. The initial join happens on the UI
+ * thread in run_standalone(); these copies let the worker recover the link on
+ * its own without reaching back into cfg_store from another thread. */
+static char worker_ssid[CFG_SSID_MAX];
+static char worker_psk[CFG_PSK_MAX];
 
 static void post_stage(int stage)
 {
@@ -636,9 +647,61 @@ static void net_worker(void *a, void *b, void *c)
 	int64_t next_tz = 0;	/* fetch as soon as we are online */
 	int64_t next_ota = k_uptime_get() + 5 * 60 * 1000; /* first check 5 min in */
 	int32_t tz_min = 0;
+	int64_t next_rejoin = 0;
+	int rejoin_wait_ms = REJOIN_WAIT_MIN_MS;
 
 	while (1) {
 		int64_t now = k_uptime_get();
+
+		/*
+		 * Keep the link alive. The station drops on its own after long
+		 * uptimes -- AP idle-timeout, a roam, a radio glitch -- and
+		 * NOTHING here ever re-joined: net_wifi's disconnect handler
+		 * only clears have_ip, and the initial join happens once, on
+		 * the UI thread, before this loop starts. The board therefore
+		 * stayed offline until it was power-cycled, and a drop during a
+		 * download killed an OTA install outright (user-reported
+		 * 2026-07-26).
+		 */
+		if (!net_wifi_has_ip()) {
+			post_status(USAGE_STATUS_DISCONNECTED);
+
+			if (now >= next_rejoin) {
+				printk("[wifi] link down -- rejoining\n");
+
+				/* net_wifi_connect() pumps the idle hook while
+				 * it waits, and that hook drives LVGL. We are
+				 * NOT the LVGL thread, so calling it from here
+				 * would touch LVGL from two threads -- the same
+				 * class of corruption as the SoftAP crash. Drop
+				 * the hook for the duration; main keeps
+				 * rendering on its own regardless. */
+				net_wifi_set_idle_hook(NULL);
+				int rc = net_wifi_connect(worker_ssid,
+							  worker_psk, 30);
+				net_wifi_set_idle_hook(wifi_idle);
+
+				if (rc == 0) {
+					printk("[wifi] rejoined\n");
+					rejoin_wait_ms = REJOIN_WAIT_MIN_MS;
+					next_poll = 0;	/* refresh at once */
+					next_tz = 0;
+				} else {
+					/* Back off: a router that is down stays
+					 * down for minutes, and hammering the
+					 * radio every few seconds is how the
+					 * heap got starved before. */
+					rejoin_wait_ms = MIN(rejoin_wait_ms * 2,
+							     REJOIN_WAIT_MAX_MS);
+					next_rejoin = k_uptime_get() +
+						      rejoin_wait_ms;
+					printk("[wifi] rejoin failed, retry in %d s\n",
+					       rejoin_wait_ms / 1000);
+				}
+			}
+			k_sleep(K_MSEC(500));
+			continue;	/* nothing else works while offline */
+		}
 
 		/* Refresh proactively, 5 min before expiry. */
 		if (now > token_deadline - 5 * 60 * 1000) {
@@ -799,6 +862,10 @@ static void run_standalone(void)
 	 * 2026-07-14/15). Main now only renders. */
 	strncpy(worker_refresh, refresh, sizeof(worker_refresh) - 1);
 	worker_refresh[sizeof(worker_refresh) - 1] = '\0';
+	strncpy(worker_ssid, ssid, sizeof(worker_ssid) - 1);
+	worker_ssid[sizeof(worker_ssid) - 1] = '\0';
+	strncpy(worker_psk, psk, sizeof(worker_psk) - 1);
+	worker_psk[sizeof(worker_psk) - 1] = '\0';
 	k_thread_create(&net_thread, net_stack, K_THREAD_STACK_SIZEOF(net_stack),
 			net_worker, NULL, NULL, NULL,
 			NET_WORKER_PRIO, 0, K_NO_WAIT);
