@@ -6,6 +6,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/sys/reboot.h>
 #include <lvgl.h>
+#include <mbedtls/platform.h>
 #include <string.h>
 
 #include "proto.h"
@@ -904,6 +905,22 @@ static void run_usb(void)
 int main(void)
 {
 	printk("[usage] firmware boot OK\n");
+
+	/* Route mbedTLS at the kernel heap. prj.conf sets MBEDTLS_ENABLE_HEAP=n
+	 * so no static _mbedtls_heap is reserved: TLS and WiFi now share
+	 * HEAP_MEM_POOL_SIZE, which is sized for the larger of the two peaks
+	 * instead of their sum (they never overlap -- the SoftAP is down
+	 * whenever OTA runs, and TLS is idle during provisioning). That is what
+	 * frees enough DRAM for the 16 KB inbound record buffer the release
+	 * CDN's full-size records require.
+	 *
+	 * MUST happen before any TLS use: without it mbedTLS falls back to libc
+	 * calloc, and picolibc's heap here is ~5 KB, so every handshake would
+	 * fail. k_calloc/k_free match mbedTLS's expected signatures exactly. */
+	if (mbedtls_platform_set_calloc_free(k_calloc, k_free) != 0) {
+		printk("[usage] FATAL: mbedTLS allocator hookup failed\n");
+		return -1;
+	}
 
 	if (!device_is_ready(display_dev)) {
 		printk("[usage] display not ready\n");

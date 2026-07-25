@@ -35,12 +35,24 @@
 #define OTA_MANIFEST_PATH OTA_BASE "manifest.json"
 #define OTA_IMAGE_PATH    OTA_BASE "clauge-fw.bin"
 
-static uint8_t recv_buf[1536];
+/* Must hold a whole 302 response head fragment INCLUDING the Location header:
+ * capture_headers() scans one fragment at a time and cannot stitch a header
+ * across a boundary, so a Location that straddles two fragments is captured
+ * short. GitHub's release-asset Location is ~905 chars today (SAS params + a
+ * JWT), and their 302 heads run ~5 KB, so 1536 left too little room -- 3072
+ * keeps the header comfortably inside one fragment. */
+static uint8_t recv_buf[3072];
 
 /* --- redirect capture: latest/download answers with TWO 302s on GitHub today
  * (github.com -> the tag URL on github.com -> the CDN), so we follow a chain,
  * not a single hop. --- */
-static char redirect_url[768];
+/* GitHub's release-asset redirect is ~905 chars and grew there over time (SAS
+ * query params plus a JWT). At the old 768 it was silently truncated mid-JWT:
+ * the CDN then answered the mangled URL with a non-HTTP status (618 observed),
+ * which is what actually broke the update check -- verified on hardware
+ * 2026-07-25 by tracing each hop. Sized with headroom for further growth; a
+ * truncation here is not a graceful degradation, it is an outage. */
+static char redirect_url[1536];
 static char small_body[512];	/* manifest.json is ~120 bytes */
 static size_t small_len;
 static int http_status;
@@ -65,7 +77,8 @@ static void capture_headers(struct http_response *rsp)
 
 	if ((http_status == 301 || http_status == 302) && !redirect_url[0]) {
 		/* Scan the raw buffer: Zephyr's client exposes no per-header
-		 * hook, and the whole 302 head fits one 1536-byte fragment. */
+		 * hook. This sees ONE fragment, so the Location header must land
+		 * whole inside it -- see recv_buf's sizing note. */
 		const char *p = rsp->recv_buf;
 		size_t n = rsp->data_len;
 
@@ -84,14 +97,6 @@ static void capture_headers(struct http_response *rsp)
 				redirect_url[o++] = p[i++];
 			}
 			redirect_url[o] = '\0';
-			/* KNOWN LIMITATION (measured on hardware 2026-07-25):
-			 * GitHub's release-asset redirect is now ~905 chars, so
-			 * this truncates at 767. It still works today only
-			 * because the cut lands inside the trailing jwt param
-			 * and the authorizing sig survives -- reorder those and
-			 * OTA breaks. Enlarging this (and hpath in fetch_follow)
-			 * is deferred to the OTA download work, which is blocked
-			 * on a separate record-size problem anyway. */
 			break;
 		}
 	}
@@ -238,7 +243,10 @@ static enum ota_result fetch_follow(const char *path, http_response_cb_t body_cb
 				    int32_t timeout_ms)
 {
 	char host[80];
-	char hpath[768];
+	/* static, not stack: it must match redirect_url's capacity (1536) and the
+	 * net worker's 8 KB stack already carries the TLS handshake. Safe because
+	 * ota.c is single-worker by contract and fetch_follow never recurses. */
+	static char hpath[1536];
 
 	strncpy(host, OTA_HOST, sizeof(host) - 1);
 	host[sizeof(host) - 1] = '\0';
@@ -247,6 +255,7 @@ static enum ota_result fetch_follow(const char *path, http_response_cb_t body_cb
 
 	for (int hop = 0; hop < 4; hop++) {
 		sec_tag_t tag = host_is_cdn(host) ? CA_TAG_GH_CDN : CA_TAG_GITHUB;
+
 		int st = https_get(host, hpath, tag, body_cb, timeout_ms);
 
 		if (st < 0) {
