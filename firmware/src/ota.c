@@ -191,6 +191,19 @@ static int https_get(const char *host, const char *path, sec_tag_t tag,
 	zsock_setsockopt(sock, SOL_TLS, TLS_SEC_TAG_LIST, tags, sizeof(tags));
 	zsock_setsockopt(sock, SOL_TLS, TLS_HOSTNAME, host, strlen(host) + 1);
 
+	/* STALL timeout, not a transfer deadline. http_client_req's timeout is a
+	 * budget for the WHOLE request, which is the wrong shape for a 1.28 MB
+	 * download over WiFi: it has to be generous enough for a slow link, and
+	 * that same generosity would leave a genuinely dead connection hanging
+	 * for the entire budget. Bounding each recv instead means a stalled
+	 * transfer fails in 30 s while a slow-but-progressing one runs as long
+	 * as it needs. Requires CONFIG_NET_CONTEXT_RCVTIMEO (set in prj.conf) --
+	 * without it these are silent no-ops. */
+	struct timeval tv = { .tv_sec = 30 };
+
+	zsock_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	zsock_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
 	int rc = zsock_connect(sock, res->ai_addr, res->ai_addrlen);
 
 	zsock_freeaddrinfo(res);
@@ -324,7 +337,21 @@ enum ota_result ota_install(const struct ota_manifest *m)
 
 	printk("[ota] downloading %s (%u bytes)\n", m->version, m->size);
 
-	enum ota_result r = fetch_follow(OTA_IMAGE_PATH, stream_cb, 300000);
+	/* 20 minutes, not 5. The old 300 s was a TOTAL-request deadline, so any
+	 * download slower than that died -- and because it expired near the end
+	 * of a transfer that was otherwise fine, it looked like a server-side
+	 * failure "just before the finish" (user-reported twice, 2026-07-25, at
+	 * ~96%). Measured: this image needs ~3-4 min on a good link but over
+	 * 8 min on a weak one, so 5 minutes was simply too tight.
+	 *
+	 * Safe to be this generous only because https_get now sets a 30 s recv
+	 * stall timeout: a dead connection still fails quickly, and this bound
+	 * exists purely to stop a pathological transfer running forever. The
+	 * signed CDN URL's own 300 s token life is NOT a constraint here --
+	 * measured 2026-07-25: a deliberately rate-limited 412 s download
+	 * completed with HTTP 200, so the token is checked when the request is
+	 * made, not while it streams. */
+	enum ota_result r = fetch_follow(OTA_IMAGE_PATH, stream_cb, 1200000);
 
 	if (r != OTA_OK) {
 		mbedtls_sha256_free(&sha);
