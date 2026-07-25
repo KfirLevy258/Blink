@@ -48,7 +48,12 @@ static lv_obj_t *notice;	/* outcome popup on the top layer */
 static lv_obj_t *upd_btn;
 static lv_obj_t *upd_lbl;
 static lv_timer_t *upd_timer;	/* lives with the panel */
-static lv_obj_t *dl_overlay;	/* download progress; only a reboot ends it */
+/* Download progress. Full-screen and touch-swallowing on purpose, so it must
+ * be torn down the moment the download stops -- a successful install ends in a
+ * reboot, but a FAILED one returns to a live UI, and leaving this up locked the
+ * screen against every tap (user-reported 2026-07-25: "after I confirmed the
+ * popup the screen looks stuck"). It was never deleted anywhere. */
+static lv_obj_t *dl_overlay;
 static lv_obj_t *dl_bar;
 static lv_obj_t *dl_lbl;
 static lv_obj_t *dl_sub;	/* time remaining, under the bar */
@@ -318,6 +323,20 @@ static void upd_cb(lv_event_t *e)
 	}
 }
 
+/* Children go with the parent; null the handles so a later show() rebuilds
+ * them instead of writing through dangling pointers. */
+static void dl_overlay_hide(void)
+{
+	if (!dl_overlay) {
+		return;
+	}
+	lv_obj_del(dl_overlay);
+	dl_overlay = NULL;
+	dl_lbl = NULL;
+	dl_bar = NULL;
+	dl_sub = NULL;
+}
+
 static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 {
 	if (!dl_overlay) {
@@ -461,6 +480,13 @@ static void upd_timer_cb(lv_timer_t *t)
 	struct ota_ui snap;
 
 	ota_ui_get(&snap);
+
+	/* Any state that is not an in-flight install must not leave the
+	 * full-screen progress overlay up. Done here rather than in the FAILED
+	 * branch alone so no future state can reintroduce the lock-out. */
+	if (snap.st != OTA_UI_DOWNLOADING && snap.st != OTA_UI_REBOOTING) {
+		dl_overlay_hide();
+	}
 
 	switch (snap.st) {
 	case OTA_UI_IDLE:
