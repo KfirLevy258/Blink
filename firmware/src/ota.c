@@ -62,6 +62,17 @@ static struct flash_img_context fictx;
 static mbedtls_sha256_context sha;
 static uint32_t dl_total, dl_got;
 static int stream_err;
+/* Heartbeat for the download. A 1.28 MB image over WiFi runs for MINUTES
+ * (measured: 416 s on a weak link, ~3 KB/s average), and without this the
+ * serial log goes silent for the whole transfer -- so a stalled download, a
+ * slow one, and a healthy one all look identical from outside, and a user
+ * reporting "it sat at 100% for ages" cannot be checked against anything.
+ * The rate is per-interval, not cumulative, so a collapsing link shows up
+ * immediately instead of being hidden by a good average. */
+#define DL_LOG_INTERVAL_MS 5000
+static int64_t dl_started_ms;
+static int64_t dl_logged_ms;
+static uint32_t dl_logged_bytes;
 
 /* --- UI snapshot + request flags --- */
 static struct ota_ui ui;
@@ -146,6 +157,19 @@ static void stream_cb(struct http_response *rsp, enum http_final_call final,
 		if (pct != last_pct) {
 			last_pct = pct;
 			ota_ui_set(OTA_UI_DOWNLOADING, NULL, pct);
+		}
+
+		int64_t now = k_uptime_get();
+
+		if (now - dl_logged_ms >= DL_LOG_INTERVAL_MS) {
+			uint32_t span = (uint32_t)(now - dl_logged_ms);
+			uint32_t rate = (dl_got - dl_logged_bytes) * 1000U / span;
+
+			printk("[ota] %3u%%  %u/%u bytes  %u B/s  t+%us\n",
+			       pct, dl_got, dl_total, rate,
+			       (unsigned)((now - dl_started_ms) / 1000));
+			dl_logged_ms = now;
+			dl_logged_bytes = dl_got;
 		}
 	}
 }
@@ -335,6 +359,10 @@ enum ota_result ota_install(const struct ota_manifest *m)
 	dl_got = 0;
 	stream_err = 0;
 
+	dl_started_ms = k_uptime_get();
+	dl_logged_ms = dl_started_ms;
+	dl_logged_bytes = 0;
+
 	printk("[ota] downloading %s (%u bytes)\n", m->version, m->size);
 
 	/* 20 minutes, not 5. The old 300 s was a TOTAL-request deadline, so any
@@ -352,6 +380,15 @@ enum ota_result ota_install(const struct ota_manifest *m)
 	 * completed with HTTP 200, so the token is checked when the request is
 	 * made, not while it streams. */
 	enum ota_result r = fetch_follow(OTA_IMAGE_PATH, stream_cb, 1200000);
+
+	/* Separate from the last heartbeat on purpose: the bar reaches 100% on
+	 * the final data fragment, but the request is not done until the server
+	 * closes the connection. Any gap between the last heartbeat and this
+	 * line is time the UI has been showing a full bar with nothing left to
+	 * report -- exactly the "it sat there for ages" window, and previously
+	 * invisible. */
+	printk("[ota] transfer ended: %u/%u bytes in %us\n", dl_got, dl_total,
+	       (unsigned)((k_uptime_get() - dl_started_ms) / 1000));
 
 	if (r != OTA_OK) {
 		mbedtls_sha256_free(&sha);
