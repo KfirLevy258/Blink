@@ -366,9 +366,14 @@ static void upd_timer_cb(lv_timer_t *t)
 		}
 		break;
 	case OTA_UI_AVAILABLE:
-		lv_label_set_text_fmt(upd_lbl, "Install %s (%u KB)",
-				      snap.version,
-				      (unsigned)(snap.size / 1024));
+		/* Version only: this row shares 296 px with "Software update" on
+		 * the left, which leaves ~13 characters here before the two
+		 * collide (the size string made it 23 and they overlapped --
+		 * user-reported 2026-07-25). Keep any future state text within
+		 * the same budget as "Update ready". The size is dropped from
+		 * the UI entirely: the download overlay reports progress as a
+		 * percentage bar, which is what a user actually watches. */
+		lv_label_set_text_fmt(upd_lbl, "Install %s", snap.version);
 		lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;

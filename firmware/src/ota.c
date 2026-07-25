@@ -84,6 +84,14 @@ static void capture_headers(struct http_response *rsp)
 				redirect_url[o++] = p[i++];
 			}
 			redirect_url[o] = '\0';
+			/* KNOWN LIMITATION (measured on hardware 2026-07-25):
+			 * GitHub's release-asset redirect is now ~905 chars, so
+			 * this truncates at 767. It still works today only
+			 * because the cut lands inside the trailing jwt param
+			 * and the authorizing sig survives -- reorder those and
+			 * OTA breaks. Enlarging this (and hpath in fetch_follow)
+			 * is deferred to the OTA download work, which is blocked
+			 * on a separate record-size problem anyway. */
 			break;
 		}
 	}
