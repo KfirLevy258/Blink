@@ -384,15 +384,20 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		 * new image boots. Claiming a restart that visibly is not
 		 * happening reads as a hang (user-reported 2026-07-25).
 		 *
-		 * Deliberately no duration: swap time is not a constant we can
-		 * honestly quote. One instrumented run completed in ~10 s, but a
-		 * user-driven run on the same board ran into minutes -- every
-		 * write goes through the encrypted-flash read-modify-write path,
-		 * so it depends on sector state. A promised "about 15 seconds"
-		 * that overruns is exactly the hang it was meant to prevent. Say
-		 * the one thing that is always true and actionable instead. */
+		 * "A few minutes", not a number. Measured host-clock swap times
+		 * for a 1.28 MB image: 357 s on the pre-2026-07-26 bootloader,
+		 * 179 s after the sector-sized copy buffer landed. The app cannot
+		 * tell which bootloader it is running on -- MCUboot is not
+		 * delivered over the air, so an OTA'd image may sit on either --
+		 * and a device that promises "3 minutes" then takes six has
+		 * recreated the exact "is it stuck?" problem this text exists to
+		 * prevent. Vague and true beats precise and wrong.
+		 *
+		 * Do NOT re-derive this from MCUboot's own log timestamps: they
+		 * read 17.3 s and 0.9 s for those same two swaps. */
 		lv_label_set_text(dl_lbl, "Installing update...");
-		lv_label_set_text(dl_sub, "Keep the device powered.");
+		lv_label_set_text(dl_sub,
+				  "This takes a few minutes. Keep the device powered.");
 		lv_bar_set_value(dl_bar, 100, LV_ANIM_OFF);
 		return;
 	}
