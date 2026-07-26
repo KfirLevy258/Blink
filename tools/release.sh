@@ -22,9 +22,27 @@ source ~/zephyr-v4.4.0/.venv/bin/activate
 source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
 KEY="${OTA_SIGNING_KEY:-$HOME/.clauge/ota_signing_key_p256.pem}"
 [ -f "$KEY" ] || { echo "FATAL: signing key missing at $KEY (set OTA_SIGNING_KEY)"; exit 1; }
+# Stamp the real version into the MCUboot image header. Zephyr's default for
+# CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION is "0.0.0+0" (it only auto-fills from an
+# app VERSION file, which this app does not use -- version.h is the one source
+# of truth), so every image ever released before 2026-07-26 carried 0.0.0.
+#
+# It changes nothing today: swap-using-move is told which image to boot by the
+# flag ota.c sets via boot_request_upgrade(), and MCUboot never reads the
+# version field in that mode. It matters for DIRECT-XIP, which has no copy and
+# therefore no flag, and picks a slot by COMPARING these versions -- with both
+# slots claiming 0.0.0 the tie-break is arbitrary and an update can silently
+# no-op forever. Stamping it now means the field is already correct whenever
+# direct-XIP lands, instead of being a trap waiting at the end of that work.
+#
+# "firmware" is the sysbuild image name (see build-sb/domains.yaml), not a path.
+# Note this is a RELEASE-path fix: a plain `west build` still produces 0.0.0+0,
+# which is fine and even desirable -- a dev image should never out-rank a
+# released one under direct-XIP.
 ( cd "$ROOT/firmware" && west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
 	-- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
-	-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$KEY\"" )   # inner quotes: it's a Kconfig string
+	-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$KEY\"" \
+	-Dfirmware_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$VER\"" )   # inner quotes: Kconfig strings
 
 BIN="$ROOT/firmware/build-sb/firmware/zephyr/zephyr.signed.bin"
 SIZE=$(stat -f%z "$BIN")
