@@ -396,7 +396,9 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		 *
 		 * "A few minutes", not a number. Measured host-clock swap times
 		 * for a 1.28 MB image: 357 s on the pre-2026-07-26 bootloader,
-		 * 179 s after the sector-sized copy buffer landed. The app cannot
+		 * 179 s after the sector-sized copy buffer landed (0.4.6), and
+		 * 121 s once the encrypted 0xFF fill was deferred (0.4.7). The
+		 * spread is the whole point of staying vague. The app cannot
 		 * tell which bootloader it is running on -- MCUboot is not
 		 * delivered over the air, so an OTA'd image may sit on either --
 		 * and a device that promises "3 minutes" then takes six has

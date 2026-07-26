@@ -200,9 +200,20 @@ static void wifi_settle(void)
  */
 #define NET_WORKER_PRIO 5
 
-/* Re-join backoff. Starts quick because most drops are momentary, doubles up
- * to five minutes because a router that is genuinely down stays down and
- * retrying the radio in a tight loop is what starved the WiFi heap before. */
+/* Re-join backoff, doubling up to five minutes because a router that is
+ * genuinely down stays down and retrying the radio in a tight loop is what
+ * starved the WiFi heap before.
+ *
+ * MIN is the value the backoff RESETS to after a success, not the first wait:
+ * the failure path doubles before it waits, so the observed sequence is
+ * 30 -> 60 -> 120 -> 240 -> 300 s and "retry in 15 s" is never printed. Worth
+ * knowing when reading a capture -- 30 s first is correct, not a malfunction.
+ *
+ * Also note a failed net_wifi_connect(.., 30) can itself block this thread for
+ * ~36-66 s (up to 6 s in its request-retry loop, then the 30 s timeout applied
+ * to association AND again to DHCP). An outage shorter than that can be ridden
+ * out entirely inside one attempt, so a brief router reboot may never reach
+ * this backoff at all. */
 #define REJOIN_WAIT_MIN_MS (15 * 1000)
 #define REJOIN_WAIT_MAX_MS (5 * 60 * 1000)
 
