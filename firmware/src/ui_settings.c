@@ -663,15 +663,29 @@ static void open_panel(lv_obj_t *parent_scr)
 
 	lv_obj_t *back = lv_btn_create(panel);
 
-	/* Narrow and short (x 2..42, y 2..28), no gesture-bubble: it used to be
-	 * 48 wide and sat right on top of the brightness "-" stepper, so a high
-	 * tap on "-" hit the chevron and bounced you home (user-reported
-	 * 2026-07-20). The steppers below now start at y=42 -- a 14px gap. */
+	/* Drawn narrow and short (x 2..42, y 2..28), no gesture-bubble: it used
+	 * to be 48 wide and sat right on top of the brightness "-" stepper, so a
+	 * high tap on "-" hit the chevron and bounced you home (user-reported
+	 * 2026-07-20). The steppers below start at y=39 -- an 11px gap. */
 	lv_obj_set_size(back, 40, 26);
 	lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_shadow_width(back, 0, 0);
 	lv_obj_align(back, LV_ALIGN_TOP_LEFT, 2, 2);
 	lv_obj_clear_flag(back, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	/*
+	 * 40x26 is too small to hit reliably on a resistive panel that already
+	 * needs 16 averaged reads per report -- reported as "not really
+	 * clickable" 2026-07-27. Grow the TOUCH area without growing the drawn
+	 * button: the chevron stays visually where it belongs in the top bar,
+	 * but answers to a 64x50 region.
+	 *
+	 * Safe against the 2026-07-20 regression even though the extended area
+	 * now reaches into the stepper row: lv_indev hit-tests children last to
+	 * first and takes the first hit, and "minus" is created after this, so
+	 * it wins wherever the two overlap. Keep it that way -- moving this
+	 * button's creation below the steppers would silently restore the bug.
+	 */
+	lv_obj_set_ext_click_area(back, 12);
 	lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
 
 	lv_obj_t *bl = lv_label_create(back);
