@@ -217,6 +217,12 @@ static void wifi_settle(void)
 #define REJOIN_WAIT_MIN_MS (15 * 1000)
 #define REJOIN_WAIT_MAX_MS (5 * 60 * 1000)
 
+/* Same shape for a refresh that failed on transport rather than credentials.
+ * Unlike the re-join backoff this one DOES wait its minimum first, because the
+ * caller retries before waiting rather than after. */
+#define REFRESH_RETRY_MIN_MS (15 * 1000)
+#define REFRESH_RETRY_MAX_MS (5 * 60 * 1000)
+
 static K_THREAD_STACK_DEFINE(net_stack, 8192);	/* TLS-sized, like main's */
 static struct k_thread net_thread;
 
@@ -638,16 +644,37 @@ static void net_worker(void *a, void *b, void *c)
 	net_time_sync(10);
 
 	struct oauth_tokens tok;
+	int refresh_wait_ms = REFRESH_RETRY_MIN_MS;
+	int rc;
 
-	if (oauth_refresh(worker_refresh, &tok) != 0) {
-		/* Refresh token rejected -- the "log in once" chain is broken.
-		 * Drop it and reboot; with no token the board re-provisions,
-		 * keeping the WiFi credentials. */
-		cfg_clear_token();
+	/*
+	 * Only a 400/401 from the token endpoint means the credential is dead.
+	 * This used to treat EVERY non-zero return as a rejection, so a TLS
+	 * reset mid-handshake wiped a perfectly good refresh token and dropped
+	 * the board back into provisioning -- a momentary network blip logged
+	 * the user out for good. Observed twice on hardware 2026-07-26, both
+	 * times as "[oauth] TLS connect/handshake failed: -104".
+	 *
+	 * Transport failures retry here instead, with the same doubling backoff
+	 * the re-join path uses, and the token is left alone: the network comes
+	 * back, the credential was never the problem.
+	 */
+	while ((rc = oauth_refresh(worker_refresh, &tok)) != 0) {
+		if (oauth_creds_rejected(rc)) {
+			/* The "log in once" chain really is broken. Drop the
+			 * token and reboot; with none stored the board
+			 * re-provisions, keeping the WiFi credentials. */
+			cfg_clear_token();
+			post_status(USAGE_STATUS_ERROR);
+			k_sleep(K_SECONDS(3));
+			ui_boot_mark_intentional_reboot();
+			sys_reboot(SYS_REBOOT_COLD);
+		}
+		printk("[oauth] refresh failed (%d) -- transport, token kept, retry in %d s\n",
+		       rc, refresh_wait_ms / 1000);
 		post_status(USAGE_STATUS_ERROR);
-		k_sleep(K_SECONDS(3));
-		ui_boot_mark_intentional_reboot();
-		sys_reboot(SYS_REBOOT_COLD);
+		k_sleep(K_MSEC(refresh_wait_ms));
+		refresh_wait_ms = MIN(refresh_wait_ms * 2, REFRESH_RETRY_MAX_MS);
 	}
 	cfg_set_token(tok.refresh);	/* persist a rotated token before use */
 
@@ -750,9 +777,13 @@ static void net_worker(void *a, void *b, void *c)
 				post_status(USAGE_STATUS_STALE);
 				next_poll = now + 600 * 1000;
 			} else if (r == USAGE_UNAUTHORIZED) {
-				/* Token died mid-run: refresh now, retry soon. */
-				oauth_refresh(tok.refresh, &tok);
-				cfg_set_token(tok.refresh);
+				/* Token died mid-run: refresh now, retry soon.
+				 * Persist only on success -- the return was
+				 * being discarded, so a failed refresh wrote
+				 * whatever `tok` happened to hold back to NVS. */
+				if (oauth_refresh(tok.refresh, &tok) == 0) {
+					cfg_set_token(tok.refresh);
+				}
 				next_poll = now + 5 * 1000;
 			} else {
 				post_status(USAGE_STATUS_ERROR);

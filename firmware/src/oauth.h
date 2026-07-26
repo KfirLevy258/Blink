@@ -45,4 +45,16 @@ int oauth_exchange_code(const char *pasted_code, const char *verifier,
  * or a negative errno; a rejected refresh token surfaces as -EACCES. */
 int oauth_refresh(const char *refresh_token, struct oauth_tokens *out);
 
+/*
+ * Does this oauth_exchange_code/oauth_refresh return mean the STORED CREDENTIAL
+ * is dead, as opposed to the network being briefly unavailable?
+ *
+ * Only the token endpoint answering 400/401 (-EACCES) says the credential is
+ * bad. Everything else -- TLS resets, DNS, no route, 5xx, unparseable bodies --
+ * is transport, and the refresh token is still perfectly good. Callers must
+ * consult this before erasing it: treating any failure as a rejection logs the
+ * device out for good on a momentary blip.
+ */
+bool oauth_creds_rejected(int rc);
+
 #endif /* OAUTH_H */

@@ -4,6 +4,7 @@
  * on-device against the RFC 7636 vector instead. A stub is provided so the
  * URL builder links.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include "oauth.h"
@@ -56,6 +57,23 @@ int main(void)
 	CK(strstr(url, "code_challenge=CHALLENGE") != NULL, "challenge present");
 	CK(strstr(url, "9d1c250a") != NULL, "url has client_id");
 	CK(strstr(url, "scope=org%3Acreate_api_key") != NULL, "url scope encoded");
+
+	/*
+	 * Which failures invalidate the stored refresh token.
+	 *
+	 * Regression guard for a device that logged itself out on any network
+	 * blip: main.c treated every non-zero oauth_refresh() return as "the
+	 * credential was rejected", wiped it, and rebooted into provisioning.
+	 * A TLS reset mid-handshake (-ECONNRESET, seen on hardware 2026-07-26)
+	 * says nothing at all about the credential -- only the token endpoint
+	 * answering 400/401 does, and oauth.c already reports that as -EACCES.
+	 */
+	CK(oauth_creds_rejected(-EACCES), "400/401 rejects the credential");
+	CK(!oauth_creds_rejected(-ECONNRESET), "TLS reset keeps the token");
+	CK(!oauth_creds_rejected(-ENETUNREACH), "no route keeps the token");
+	CK(!oauth_creds_rejected(-EIO), "5xx/garbled response keeps the token");
+	CK(!oauth_creds_rejected(-EINVAL), "unparseable body keeps the token");
+	CK(!oauth_creds_rejected(0), "success is not a rejection");
 
 	printf("\n%s (%d failures)\n", failures ? "FAILURES" : "ALL PASSED", failures);
 	return failures != 0;

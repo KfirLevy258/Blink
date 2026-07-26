@@ -6,6 +6,7 @@
  * full challenge is checked against the RFC 7636 vector at boot in debug builds.
  */
 #include <string.h>
+#include <errno.h>
 #include <stdio.h>
 #include "oauth.h"
 
@@ -114,6 +115,13 @@ int oauth_authorize_url(const char *verifier, char *out, size_t outlen)
 		AUTHORIZE, CLIENT_ID, redir_enc, scope_enc, challenge, challenge);
 
 	return (n > 0 && (size_t)n < outlen) ? n : -1;
+}
+
+/* See oauth.h. Deliberately lives outside the OAUTH_HOST_TEST guard: it is pure
+ * classification, and the invariant it encodes is worth a host test. */
+bool oauth_creds_rejected(int rc)
+{
+	return rc == -EACCES;
 }
 
 #ifndef OAUTH_HOST_TEST
