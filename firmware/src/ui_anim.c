@@ -160,4 +160,26 @@ void ui_anim_run(void (*pump)(void))
 	lv_scr_load_anim(prev, LV_SCR_LOAD_ANIM_MOVE_LEFT, UI_SLIDE_MS, 0, false);
 	pump_ms(UI_SLIDE_SETTLE_MS);
 	lv_obj_del(scr);
+
+	/*
+	 * Drop any request raised on the way out, or the clip replays instead of
+	 * handing the gauges back (user-reported 2026-07-27, intermittently).
+	 *
+	 * The exit gesture is a horizontal swipe, and a RIGHT swipe on the gauge
+	 * screen is exactly what ASKS for the clip. Once lv_scr_load_anim puts
+	 * those gauges back on screen, the pump above keeps feeding LVGL input
+	 * for the whole transition -- so the tail of the exit swipe, or a release
+	 * landing on the left edge zone, reaches usage_view's handlers and sets
+	 * pending again. The mode loop then sees it and comes straight back here.
+	 *
+	 * A request made while the player was running is stale by definition:
+	 * the user was looking at the clip, not asking for it. Clearing at the
+	 * start of this function is not enough, because the offending request
+	 * arrives after that point.
+	 *
+	 * Widening the settle window (250 -> 400 ms slides, 2026-07-26) made this
+	 * likelier by giving the stray event 150 ms more to land in -- the race
+	 * predates that change, but that is why it surfaced now.
+	 */
+	pending = false;
 }
