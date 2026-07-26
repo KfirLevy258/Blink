@@ -150,6 +150,20 @@
 	status = "okay";
 	pinctrl-0 = <&spim2_cyd>;
 	pinctrl-names = "default";
+	/*
+	 * Feed the panel by DMA instead of hand-loading the SPI FIFO. Measured
+	 * on hardware 2026-07-26: a full 320x240x2 frame took 63 ms polled --
+	 * 19.5 Mbit/s against a 32 MHz wire, so a third of every frame was
+	 * per-transfer CPU overhead rather than clock. The flush half of an
+	 * LVGL refresh measured 65-67 ms, matching that almost exactly.
+	 *
+	 * esp32_common.dtsi already supplies dma-clk and dma-host = <0>; this
+	 * only switches the path on. The ESP32 predates GDMA, so the driver
+	 * takes its own DPORT_SPI_DMA_CHAN_SEL_REG branch, not the gdma one.
+	 * Note DMA caps a single transfer at 4092 bytes, so the 6144-byte VDB
+	 * chunk is split in two -- more descriptors, still far less overhead.
+	 */
+	dma-enabled;
 	cs-gpios = <&gpio0 15 GPIO_ACTIVE_LOW>;
 	#address-cells = <1>;
 	#size-cells = <0>;
