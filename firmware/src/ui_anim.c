@@ -112,8 +112,8 @@ void ui_anim_run(void (*pump)(void))
 	/* Slide in from the left, the way the swipe pointed (user request
 	 * 2026-07-17). The clip starts only after the slide settles -- the
 	 * streamed frames bypass LVGL and would tear a moving screen. */
-	lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 250, 0, false);
-	pump_ms(300);
+	lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_MOVE_RIGHT, UI_SLIDE_MS, 0, false);
+	pump_ms(UI_SLIDE_SETTLE_MS);
 	lv_refr_now(NULL);	/* painted once; frames stream over it */
 
 	/* Borrowed from the LVGL pool for the show only, same as the splash
@@ -157,7 +157,7 @@ void ui_anim_run(void (*pump)(void))
 	}
 	/* Slide the gauges back over the show; delete the clip screen only
 	 * once the transition is done rendering it. */
-	lv_scr_load_anim(prev, LV_SCR_LOAD_ANIM_MOVE_LEFT, 250, 0, false);
-	pump_ms(300);
+	lv_scr_load_anim(prev, LV_SCR_LOAD_ANIM_MOVE_LEFT, UI_SLIDE_MS, 0, false);
+	pump_ms(UI_SLIDE_SETTLE_MS);
 	lv_obj_del(scr);
 }

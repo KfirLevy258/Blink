@@ -565,7 +565,7 @@ static void upd_timer_cb(lv_timer_t *t)
 
 /* The panel slides in from the right and back out again (user request
  * 2026-07-17) -- the motion says where settings lives and which way leads
- * home. 250 ms, ease-out. */
+ * home. UI_SLIDE_MS, ease-out; see ui_anim.h for why it is as long as it is. */
 static bool closing;
 
 static void slide_x(lv_obj_t *obj, int32_t from, int32_t to,
@@ -577,7 +577,7 @@ static void slide_x(lv_obj_t *obj, int32_t from, int32_t to,
 	lv_anim_set_var(&a, obj);
 	lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
 	lv_anim_set_values(&a, from, to);
-	lv_anim_set_duration(&a, 250);
+	lv_anim_set_duration(&a, UI_SLIDE_MS);
 	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
 	if (done) {
 		lv_anim_set_completed_cb(&a, done);
