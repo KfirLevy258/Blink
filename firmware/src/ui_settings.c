@@ -671,13 +671,23 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_shadow_width(back, 0, 0);
 	lv_obj_align(back, LV_ALIGN_TOP_LEFT, 2, 2);
-	lv_obj_clear_flag(back, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	/* Gestures MUST bubble from here. The extended touch area below covers
+	 * the green seam and a strip of bare panel, and whatever the hit test
+	 * lands on becomes the gesture's origin -- so with bubbling off, a
+	 * swipe-right starting anywhere in that region died on this button
+	 * instead of reaching panel_gesture_cb, silently un-closing ~814 px of
+	 * a panel whose own seam comment promises the swipe works.
+	 * close_panel() is idempotent (its `closing` guard), so a release that
+	 * also fires back_cb costs nothing. */
+	lv_obj_add_flag(back, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	/*
 	 * 40x26 is too small to hit reliably on a resistive panel that already
 	 * needs 16 averaged reads per report -- reported as "not really
 	 * clickable" 2026-07-27. Grow the TOUCH area without growing the drawn
 	 * button: the chevron stays visually where it belongs in the top bar,
-	 * but answers to a 64x50 region.
+	 * but answers to a region 12 px larger on every side. That is 64x50 nominally;
+	 * 10 px of it falls off the top and left edges of the screen, so the reachable
+	 * area is 54x40.
 	 *
 	 * Safe against the 2026-07-20 regression even though the extended area
 	 * now reaches into the stepper row: lv_indev hit-tests children last to
