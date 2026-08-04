@@ -799,7 +799,7 @@ static void net_worker(void *a, void *b, void *c)
 						 &token_deadline) == 0) {
 				refresh_wait_ms = REFRESH_RETRY_MIN_MS;
 			} else {
-				next_refresh = now + refresh_wait_ms;
+				next_refresh = k_uptime_get() + refresh_wait_ms;
 				printk("[oauth] proactive refresh failed -- retry in %d s\n",
 				       refresh_wait_ms / 1000);
 				refresh_wait_ms = MIN(refresh_wait_ms * 2,
@@ -837,17 +837,22 @@ static void net_worker(void *a, void *b, void *c)
 			} else if (r == USAGE_UNAUTHORIZED) {
 				/* Token died mid-run. A REVOKED one never comes
 				 * back from here -- worker_refresh_token reboots
-				 * into provisioning -- so this branch only ever
-				 * handles a transport failure. It used to discard
-				 * the return and never classify, which left a
-				 * revoked key hot-looping two full handshakes
-				 * every 5 s, silently, forever. */
+				 * into provisioning -- so a refresh FAILURE below
+				 * is always transport, and backs off like one.
+				 *
+				 * A refresh that SUCCEEDS while the fetch keeps
+				 * 401ing is a third case this does not solve: a
+				 * scope mismatch or a 401 from an intermediary
+				 * loops here at the 5 s cadence indefinitely.
+				 * That predates this change and is left as it
+				 * was; closing it needs a consecutive-401 count,
+				 * which is a behaviour change, not a fix. */
 				if (worker_refresh_token(tok.refresh, &tok,
 							 &token_deadline) == 0) {
-					next_poll = now + 5 * 1000;
+					next_poll = k_uptime_get() + 5 * 1000;
 				} else {
 					post_status(USAGE_STATUS_ERROR);
-					next_poll = now + 60 * 1000;
+					next_poll = k_uptime_get() + 60 * 1000;
 				}
 			} else {
 				post_status(USAGE_STATUS_ERROR);
