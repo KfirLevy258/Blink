@@ -1000,6 +1000,30 @@ git status --short
 
 Expected: clean (the memory directory lives outside the repo). If the tree is dirty, something in Steps 1-8 left a stray file — investigate before finishing.
 
+- [ ] **Step 11: Measure the net worker's stack high-water mark**
+
+Nothing currently does. Add `CONFIG_THREAD_ANALYZER=y` and `CONFIG_THREAD_ANALYZER_AUTO=y` for one run, or printk `k_thread_stack_space_get(&net_thread, &unused)` right after the first successful refresh and again after a proactive refresh. Record the number. Expected: if unused space is under ~1 KB, make `fresh` static in `worker_refresh_token` before launch (safe — it is called only from the net worker thread). Note this branch adds ~688 B of peak depth on the TLS path, taking the deepest chain from 1888 B to 2576 B on an 8192 B stack.
+
+- [ ] **Step 12: Exercise the proactive refresh**
+
+Steps 1-10 never reach it — it fires only ~5 min before token expiry, roughly 55 minutes in. Either leave the board running past a full token lifetime or temporarily shorten the deadline to force it. Expected: the backoff printk on failure and the stored token surviving.
+
+- [ ] **Step 13: Watch for real gaps in Step 7's router test backoff ladder**
+
+On Step 7's router test, watch for real gaps between `retry in 10 s`, `20 s` and `40 s`. Expected: the gaps are real and increasing. Before this branch's fix the stamp was stale and three attempts ran back-to-back, so this test would have passed without exercising the ladder it exists to prove.
+
+- [ ] **Step 14: Run Step 3 (touch) before Step 4 (swipe) and treat the result as evidence**
+
+Expected: if touch is reliable after the SPI revert, the "not really clickable" report of 2026-07-27 was an SPI bug rather than a hit-area bug, and the chevron's 12 px extension should be revisited rather than kept by default.
+
+- [ ] **Step 15: Enter the clip ten times, watching for an entry that exits immediately**
+
+The entry settle now deliberately drains buffered touch onto the newly-active clip screen, whose gesture handler sets `leave`. Expected: LVGL's `gesture_sent` latch prevents a second gesture from the same press, on every one of the ten entries — this is the one path hardware can falsify and reading cannot.
+
+- [ ] **Step 16: Test an OTA revert, not just the confirm**
+
+Boot a test image with the router off so `ota_health` never sets, start the clip, and watch it through the confirm window. Expected: the board reverts at ~90 s with `[ota] not healthy within 90 s` rather than resetting silently at 30 s. That watchdog-at-30 s to deadline-at-90 s transition is exactly what the watchdog task changed, and nothing else tests it.
+
 ---
 
 ## Notes on what this plan does not do
