@@ -61,13 +61,36 @@ static void blit_cb(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 	display_write(disp, x, y, &desc, pix);
 }
 
-/* Let a screen-load slide finish: LVGL animates it from the timer handler,
- * and streaming (or deleting the old screen) mid-slide would tear it. */
-static void pump_ms(int ms)
+/*
+ * Wait for a screen-load transition to actually finish, then absorb the input
+ * it held back.
+ *
+ * A fixed sleep was wrong twice over. LVGL animates the transition from the
+ * timer handler, and each handler pass here costs ~129 ms at this panel's
+ * ~124 ms full redraw -- so against a 400 ms slide the samples land at
+ * 0/129/258/387 and the last one is still inside the transition. Returning
+ * there meant deleting a screen LVGL still held in disp->prev_scr, which it
+ * lays out and draws on the next pass.
+ *
+ * And LVGL blocks ALL input while prev_scr is set (lv_indev.c), so the touch
+ * samples taken during the slide are not dropped -- they queue, and flush on
+ * the mode loop's next handler pass, which runs before ui_anim_pending() is
+ * read. That is how the tail of an exit swipe re-requested the clip and
+ * replayed it. Pumping a few passes after the transition clears delivers them
+ * while we are still here to drop the request.
+ *
+ * The deadline is a hang guard, not a schedule.
+ */
+static void settle_transition(void)
 {
-	int64_t end = k_uptime_get() + ms;
+	int64_t deadline = k_uptime_get() + UI_SLIDE_MS * 4;
 
-	while (k_uptime_get() < end) {
+	while (lv_display_get_screen_prev(NULL) != NULL &&
+	       k_uptime_get() < deadline) {
+		lv_timer_handler();
+		k_sleep(K_MSEC(5));
+	}
+	for (int i = 0; i < 4; i++) {
 		lv_timer_handler();
 		k_sleep(K_MSEC(5));
 	}
@@ -113,7 +136,7 @@ void ui_anim_run(void (*pump)(void))
 	 * 2026-07-17). The clip starts only after the slide settles -- the
 	 * streamed frames bypass LVGL and would tear a moving screen. */
 	lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_MOVE_RIGHT, UI_SLIDE_MS, 0, false);
-	pump_ms(UI_SLIDE_SETTLE_MS);
+	settle_transition();
 	lv_refr_now(NULL);	/* painted once; frames stream over it */
 
 	/* Borrowed from the LVGL pool for the show only, same as the splash
@@ -155,31 +178,17 @@ void ui_anim_run(void (*pump)(void))
 	if (strip) {
 		lv_free(strip);
 	}
-	/* Slide the gauges back over the show; delete the clip screen only
-	 * once the transition is done rendering it. */
-	lv_scr_load_anim(prev, LV_SCR_LOAD_ANIM_MOVE_LEFT, UI_SLIDE_MS, 0, false);
-	pump_ms(UI_SLIDE_SETTLE_MS);
-	lv_obj_del(scr);
+	/* Slide the gauges back. auto_del = true hands the clip screen to
+	 * LVGL's own completion callback, which is the only place that both
+	 * deletes it and clears disp->prev_scr; deleting it ourselves left that
+	 * pointer live whenever the transition had not finished. */
+	lv_scr_load_anim(prev, LV_SCR_LOAD_ANIM_MOVE_LEFT, UI_SLIDE_MS, 0, true);
+	settle_transition();
 
-	/*
-	 * Drop any request raised on the way out, or the clip replays instead of
-	 * handing the gauges back (user-reported 2026-07-27, intermittently).
-	 *
-	 * The exit gesture is a horizontal swipe, and a RIGHT swipe on the gauge
-	 * screen is exactly what ASKS for the clip. Once lv_scr_load_anim puts
-	 * those gauges back on screen, the pump above keeps feeding LVGL input
-	 * for the whole transition -- so the tail of the exit swipe, or a release
-	 * landing on the left edge zone, reaches usage_view's handlers and sets
-	 * pending again. The mode loop then sees it and comes straight back here.
-	 *
-	 * A request made while the player was running is stale by definition:
-	 * the user was looking at the clip, not asking for it. Clearing at the
-	 * start of this function is not enough, because the offending request
-	 * arrives after that point.
-	 *
-	 * Widening the settle window (250 -> 400 ms slides, 2026-07-26) made this
-	 * likelier by giving the stray event 150 ms more to land in -- the race
-	 * predates that change, but that is why it surfaced now.
-	 */
+	/* Drop any request the exit swipe itself raised. A right swipe on the
+	 * gauge screen is exactly what ASKS for the clip, so the tail of the
+	 * gesture -- or a release landing on the left edge zone -- sets pending
+	 * again through ui_settings' handlers. settle_transition above has
+	 * already let those events land, so clearing here is the last word. */
 	pending = false;
 }

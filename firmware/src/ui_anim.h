@@ -9,8 +9,7 @@
  */
 
 /*
- * How long a screen transition runs, and how long a caller must keep pumping
- * LVGL afterwards for it to actually finish.
+ * How long a screen transition runs.
  *
  * 400 ms, up from 250. Measured on hardware 2026-07-26: a full-screen redraw
  * costs ~124 ms, so a 250 ms transition got through barely two frames and read
@@ -19,14 +18,11 @@
  * afford across enough time that the eye reads them as travel instead of a
  * stutter.
  *
- * SETTLE must stay comfortably above SLIDE. ui_anim streams decoded frames
- * straight at the panel behind LVGL's back, and beginning that -- or deleting
- * the outgoing screen -- while a transition is still animating tears the
- * display. The two move together; that is why they live here rather than as a
- * literal at each call site.
+ * There is no companion SETTLE constant any more. ui_anim waits on LVGL's own
+ * prev_scr signal instead of a timeout, because a timeout tuned to one slide
+ * duration silently stopped covering the next one.
  */
-#define UI_SLIDE_MS        400
-#define UI_SLIDE_SETTLE_MS (UI_SLIDE_MS + 50)
+#define UI_SLIDE_MS 400
 
 /* Called from LVGL event context (the swipe handler); the mode loop notices
  * via ui_anim_pending() and runs the player from thread context. */
