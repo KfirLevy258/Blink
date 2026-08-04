@@ -8,6 +8,7 @@
 #include <lvgl.h>
 #include <mbedtls/platform.h>
 #include <string.h>
+#include <errno.h>
 
 #include "proto.h"
 #include "usage_view.h"
@@ -632,6 +633,51 @@ static void post_status(enum usage_status st)
 	k_msgq_put(&net_evtq, &e, K_NO_WAIT);
 }
 
+/*
+ * The worker's only way to refresh. Returns 0 with *tok holding a usable
+ * credential and *deadline reset; returns a negative errno on TRANSPORT
+ * failure, leaving *tok untouched so the caller still has something valid to
+ * retry with. It does not return at all on a REJECTED credential: that is the
+ * one failure a retry cannot fix, so it drops the token and reboots into
+ * provisioning.
+ *
+ * The reply lands in a separate `fresh` rather than in *tok, so a caller
+ * passing tok->refresh as `sent` (all of them do) is not reading a buffer this
+ * function is writing.
+ */
+static int worker_refresh_token(const char *sent, struct oauth_tokens *tok,
+				int64_t *deadline)
+{
+	struct oauth_tokens fresh;
+	int rc = oauth_refresh(sent, &fresh);
+
+	if (oauth_creds_rejected(rc)) {
+		/* The "log in once" chain really is broken. Drop the token and
+		 * reboot; with none stored the board re-provisions, keeping the
+		 * WiFi credentials. */
+		printk("[oauth] refresh rejected -- dropping the token, re-provisioning\n");
+		cfg_clear_token();
+		post_status(USAGE_STATUS_ERROR);
+		k_sleep(K_SECONDS(3));
+		ui_boot_mark_intentional_reboot();
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+	if (rc != 0) {
+		return rc;
+	}
+	if (fresh.refresh[0] == '\0') {
+		/* oauth_refresh guarantees this cannot happen. Belt and braces:
+		 * persisting it would look exactly like having no token at all,
+		 * and the next boot would re-provision. */
+		printk("[oauth] refresh returned an empty token -- keeping the stored one\n");
+		return -EINVAL;
+	}
+	*tok = fresh;
+	cfg_set_token(tok->refresh);	/* persist a rotated token before use */
+	*deadline = k_uptime_get() + (int64_t)tok->expires_in * 1000;
+	return 0;
+}
+
 static void net_worker(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
@@ -682,6 +728,7 @@ static void net_worker(void *a, void *b, void *c)
 
 	int64_t token_deadline = k_uptime_get() + (int64_t)tok.expires_in * 1000;
 	int64_t next_poll = 0;
+	int64_t next_refresh = 0;
 	int64_t next_tz = 0;	/* fetch as soon as we are online */
 	int64_t next_ota = k_uptime_get() + 5 * 60 * 1000; /* first check 5 min in */
 	int32_t tz_min = 0;
@@ -741,11 +788,22 @@ static void net_worker(void *a, void *b, void *c)
 			continue;	/* nothing else works while offline */
 		}
 
-		/* Refresh proactively, 5 min before expiry. */
-		if (now > token_deadline - 5 * 60 * 1000) {
-			if (oauth_refresh(tok.refresh, &tok) == 0) {
-				cfg_set_token(tok.refresh);
-				token_deadline = now + (int64_t)tok.expires_in * 1000;
+		/* Refresh proactively, 5 min before expiry. Backed off on
+		 * failure: without a next-attempt stamp this condition stays
+		 * true once the window opens, and a failing refresh re-fired a
+		 * full DNS + TLS + ECDHE round on every 250 ms tick of this
+		 * loop -- on the single core LVGL shares, against the heap whose
+		 * starvation once crashed the board in z_swap. */
+		if (now > token_deadline - 5 * 60 * 1000 && now >= next_refresh) {
+			if (worker_refresh_token(tok.refresh, &tok,
+						 &token_deadline) == 0) {
+				refresh_wait_ms = REFRESH_RETRY_MIN_MS;
+			} else {
+				next_refresh = now + refresh_wait_ms;
+				printk("[oauth] proactive refresh failed -- retry in %d s\n",
+				       refresh_wait_ms / 1000);
+				refresh_wait_ms = MIN(refresh_wait_ms * 2,
+						      REFRESH_RETRY_MAX_MS);
 			}
 		}
 
@@ -777,14 +835,20 @@ static void net_worker(void *a, void *b, void *c)
 				post_status(USAGE_STATUS_STALE);
 				next_poll = now + 600 * 1000;
 			} else if (r == USAGE_UNAUTHORIZED) {
-				/* Token died mid-run: refresh now, retry soon.
-				 * Persist only on success -- the return was
-				 * being discarded, so a failed refresh wrote
-				 * whatever `tok` happened to hold back to NVS. */
-				if (oauth_refresh(tok.refresh, &tok) == 0) {
-					cfg_set_token(tok.refresh);
+				/* Token died mid-run. A REVOKED one never comes
+				 * back from here -- worker_refresh_token reboots
+				 * into provisioning -- so this branch only ever
+				 * handles a transport failure. It used to discard
+				 * the return and never classify, which left a
+				 * revoked key hot-looping two full handshakes
+				 * every 5 s, silently, forever. */
+				if (worker_refresh_token(tok.refresh, &tok,
+							 &token_deadline) == 0) {
+					next_poll = now + 5 * 1000;
+				} else {
+					post_status(USAGE_STATUS_ERROR);
+					next_poll = now + 60 * 1000;
 				}
-				next_poll = now + 5 * 1000;
 			} else {
 				post_status(USAGE_STATUS_ERROR);
 				next_poll = now + 60 * 1000;
