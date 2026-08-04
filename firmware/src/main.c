@@ -222,10 +222,14 @@ static void wifi_settle(void)
  * Used by the not-yet-signed-in state at the top of the worker loop and by the
  * proactive pre-expiry refresh below it.
  *
- * 10 s first, not 15: on an OTA test boot the image has 90 s to prove itself,
- * and 10/20/40 fits four attempts inside that window where 15/30/60 fits three.
- * The cap is unreachable on a test boot by design -- an image that cannot reach
- * Anthropic in 90 s has not proven itself and SHOULD revert. */
+ * 10 s first, not 15, so a brief outage recovers a little sooner. Do not read
+ * the ladder as a schedule: a failing attempt can itself burn 45-60 s
+ * (net_time_sync walks three servers at 10 s each, then the token POST carries
+ * a 15 s timeout plus DNS and a handshake), so the real cadence is whichever of
+ * the two is longer. On an OTA test boot that means roughly two attempts inside
+ * the 90 s confirm window, not four. The cap is unreachable there by design --
+ * an image that cannot reach Anthropic in 90 s has not proven itself and SHOULD
+ * revert. */
 #define REFRESH_RETRY_MIN_MS (10 * 1000)
 #define REFRESH_RETRY_MAX_MS (5 * 60 * 1000)
 
@@ -741,6 +745,8 @@ static void net_worker(void *a, void *b, void *c)
 					rejoin_wait_ms = REJOIN_WAIT_MIN_MS;
 					next_poll = 0;	/* refresh at once */
 					next_tz = 0;
+					next_refresh = 0;	/* sign in again at once */
+					refresh_wait_ms = REFRESH_RETRY_MIN_MS;
 				} else {
 					/* Back off: a router that is down stays
 					 * down for minutes, and hammering the
@@ -800,7 +806,7 @@ static void net_worker(void *a, void *b, void *c)
 			post_status(USAGE_STATUS_DISCONNECTED);
 			printk("[oauth] refresh failed (%d) -- transport, token kept, retry in %d s\n",
 			       rc, refresh_wait_ms / 1000);
-			next_refresh = now + refresh_wait_ms;
+			next_refresh = k_uptime_get() + refresh_wait_ms;
 			refresh_wait_ms = MIN(refresh_wait_ms * 2,
 					      REFRESH_RETRY_MAX_MS);
 			continue;
