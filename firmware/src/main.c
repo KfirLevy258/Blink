@@ -603,8 +603,15 @@ static void apply_net_evt(const struct net_evt *e)
 }
 
 /* Between boot-clip frames (ui_anim_run) the mode's background duties keep
- * running through these: standalone drains the worker's queue, USB keeps
- * the serial protocol alive. */
+ * running through these: standalone drains the worker's queue, USB keeps the
+ * serial protocol alive, and both feed the OTA test-boot state.
+ *
+ * That last one is not optional. ota_boot_pump is the only watchdog feeder and
+ * the only caller of boot_write_img_confirmed, and the clip player's loop is
+ * unbounded -- so on a test boot, watching the eyes for 30 s used to trip the
+ * watchdog and revert a healthy image. Standalone made it worse: draining the
+ * queue below sets ota_health, so the board proved itself and reverted anyway.
+ */
 static void standalone_anim_pump(void)
 {
 	struct net_evt e;
@@ -612,11 +619,16 @@ static void standalone_anim_pump(void)
 	while (k_msgq_get(&net_evtq, &e, K_NO_WAIT) == 0) {
 		apply_net_evt(&e);
 	}
+	ota_boot_pump();
 }
 
 static void usb_anim_pump(void)
 {
 	proto_service();
+	if (usage_view_have_data()) {
+		ota_health = true;	/* daemon delivered usage */
+	}
+	ota_boot_pump();
 }
 
 /* Lower priority than main (higher number): 1-2 s of ECDHE math must not
