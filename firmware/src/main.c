@@ -219,9 +219,14 @@ static void wifi_settle(void)
 #define REJOIN_WAIT_MAX_MS (5 * 60 * 1000)
 
 /* Same shape for a refresh that failed on transport rather than credentials.
- * Unlike the re-join backoff this one DOES wait its minimum first, because the
- * caller retries before waiting rather than after. */
-#define REFRESH_RETRY_MIN_MS (15 * 1000)
+ * Used by the not-yet-signed-in state at the top of the worker loop and by the
+ * proactive pre-expiry refresh below it.
+ *
+ * 10 s first, not 15: on an OTA test boot the image has 90 s to prove itself,
+ * and 10/20/40 fits four attempts inside that window where 15/30/60 fits three.
+ * The cap is unreachable on a test boot by design -- an image that cannot reach
+ * Anthropic in 90 s has not proven itself and SHOULD revert. */
+#define REFRESH_RETRY_MIN_MS (10 * 1000)
 #define REFRESH_RETRY_MAX_MS (5 * 60 * 1000)
 
 static K_THREAD_STACK_DEFINE(net_stack, 8192);	/* TLS-sized, like main's */
@@ -682,58 +687,23 @@ static void net_worker(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
 
-	/* Advance the boot bar before each blocking step: visible progress on
-	 * one screen instead of a title per stage (user request 2026-07-15).
-	 * The clock sync rides inside the sign-in stage -- TLS needs the
-	 * clock, and it is too quick to deserve a segment. */
-	post_stage(1);
-	net_time_sync(10);
-
 	struct oauth_tokens tok;
-	int refresh_wait_ms = REFRESH_RETRY_MIN_MS;
-	int rc;
-
-	/*
-	 * Only a 400/401 from the token endpoint means the credential is dead.
-	 * This used to treat EVERY non-zero return as a rejection, so a TLS
-	 * reset mid-handshake wiped a perfectly good refresh token and dropped
-	 * the board back into provisioning -- a momentary network blip logged
-	 * the user out for good. Observed twice on hardware 2026-07-26, both
-	 * times as "[oauth] TLS connect/handshake failed: -104".
-	 *
-	 * Transport failures retry here instead, with the same doubling backoff
-	 * the re-join path uses, and the token is left alone: the network comes
-	 * back, the credential was never the problem.
-	 */
-	while ((rc = oauth_refresh(worker_refresh, &tok)) != 0) {
-		if (oauth_creds_rejected(rc)) {
-			/* The "log in once" chain really is broken. Drop the
-			 * token and reboot; with none stored the board
-			 * re-provisions, keeping the WiFi credentials. */
-			cfg_clear_token();
-			post_status(USAGE_STATUS_ERROR);
-			k_sleep(K_SECONDS(3));
-			ui_boot_mark_intentional_reboot();
-			sys_reboot(SYS_REBOOT_COLD);
-		}
-		printk("[oauth] refresh failed (%d) -- transport, token kept, retry in %d s\n",
-		       rc, refresh_wait_ms / 1000);
-		post_status(USAGE_STATUS_ERROR);
-		k_sleep(K_MSEC(refresh_wait_ms));
-		refresh_wait_ms = MIN(refresh_wait_ms * 2, REFRESH_RETRY_MAX_MS);
-	}
-	cfg_set_token(tok.refresh);	/* persist a rotated token before use */
-
-	post_stage(2);
-
-	int64_t token_deadline = k_uptime_get() + (int64_t)tok.expires_in * 1000;
+	int64_t token_deadline = 0;
 	int64_t next_poll = 0;
-	int64_t next_refresh = 0;
 	int64_t next_tz = 0;	/* fetch as soon as we are online */
 	int64_t next_ota = k_uptime_get() + 5 * 60 * 1000; /* first check 5 min in */
 	int32_t tz_min = 0;
 	int64_t next_rejoin = 0;
 	int rejoin_wait_ms = REJOIN_WAIT_MIN_MS;
+	int64_t next_refresh = 0;
+	int refresh_wait_ms = REFRESH_RETRY_MIN_MS;
+	bool authed = false;
+
+	/* Advance the boot bar before each blocking step: visible progress on
+	 * one screen instead of a title per stage (user request 2026-07-15).
+	 * The clock sync rides inside the sign-in stage -- TLS needs the clock,
+	 * and it is too quick to deserve a segment. */
+	post_stage(1);
 
 	while (1) {
 		int64_t now = k_uptime_get();
@@ -786,6 +756,54 @@ static void net_worker(void *a, void *b, void *c)
 			}
 			k_sleep(K_MSEC(500));
 			continue;	/* nothing else works while offline */
+		}
+
+		/*
+		 * Not signed in yet. This used to run ABOVE the loop, which put
+		 * it above the only rejoin path there is: a link drop during
+		 * the first refresh -- the likeliest moment, right after a join
+		 * -- wedged this thread in a backoff sleep forever, with no
+		 * rejoin, no clock sync, and the boot bar frozen on "Sign in to
+		 * Anthropic" until someone power-cycled the board. As a loop
+		 * state it gets the rejoin above it for free.
+		 */
+		if (!authed) {
+			if (now < next_refresh) {
+				k_sleep(K_MSEC(250));
+				continue;
+			}
+
+			/* TLS certificate checks need a real wall clock. Inside
+			 * the loop so it re-runs after a rejoin, not once before
+			 * the network was ever up. */
+			if (!net_time_valid()) {
+				net_time_sync(10);
+			}
+
+			int rc = worker_refresh_token(worker_refresh, &tok,
+						      &token_deadline);
+
+			if (rc == 0) {
+				authed = true;
+				refresh_wait_ms = REFRESH_RETRY_MIN_MS;
+				next_poll = 0;
+				post_stage(2);
+				continue;
+			}
+
+			/* DISCONNECTED, not ERROR: with no data yet, usage_view's
+			 * overlay IS the boot screen, and it restores that screen
+			 * only for DISCONNECTED. Posting ERROR here hid the
+			 * CONNECTING bar behind bare "--%" gauges captioned
+			 * "error - showing last known" -- when there was no last
+			 * known -- and nothing ever brought it back. */
+			post_status(USAGE_STATUS_DISCONNECTED);
+			printk("[oauth] refresh failed (%d) -- transport, token kept, retry in %d s\n",
+			       rc, refresh_wait_ms / 1000);
+			next_refresh = now + refresh_wait_ms;
+			refresh_wait_ms = MIN(refresh_wait_ms * 2,
+					      REFRESH_RETRY_MAX_MS);
+			continue;
 		}
 
 		/* Refresh proactively, 5 min before expiry. Backed off on
