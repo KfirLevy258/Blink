@@ -46,6 +46,21 @@ int oauth_exchange_code(const char *pasted_code, const char *verifier,
 int oauth_refresh(const char *refresh_token, struct oauth_tokens *out);
 
 /*
+ * Snapshot / restore pair for the refresh token across a token call. Pure, and
+ * host-tested for exactly the aliasing below.
+ *
+ * Callers pass out->refresh AS the refresh_token argument -- main.c does it at
+ * three sites -- and the endpoint's reply is parsed straight into *out. So by
+ * the time we know whether a new refresh token came back, the old one is
+ * already gone. Take the snapshot BEFORE the call; hand it back after.
+ *
+ * oauth_refresh() uses these itself; they are exposed so a host test can reach
+ * the logic, which the TLS path around it cannot be.
+ */
+void oauth_refresh_snapshot(const char *refresh_token, char *keep, size_t keeplen);
+void oauth_refresh_retain(const char *keep, struct oauth_tokens *out);
+
+/*
  * Does this oauth_exchange_code/oauth_refresh return mean the STORED CREDENTIAL
  * is dead, as opposed to the network being briefly unavailable?
  *

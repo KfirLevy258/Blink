@@ -75,6 +75,37 @@ int main(void)
 	CK(!oauth_creds_rejected(-EINVAL), "unparseable body keeps the token");
 	CK(!oauth_creds_rejected(0), "success is not a rejection");
 
+	/*
+	 * The stored refresh token must survive a refresh that returns no new
+	 * one -- including under the aliasing every caller uses.
+	 *
+	 * main.c calls oauth_refresh(tok.refresh, &tok): the argument IS the
+	 * output field, and token_post() blanks that field before the fallback
+	 * runs. Snapshotting before the call is the whole fix; these two
+	 * functions are the seam that lets a host test reach it.
+	 */
+	{
+		struct oauth_tokens tok;
+		char keep[OAUTH_TOKEN_LEN];
+
+		memset(&tok, 0, sizeof(tok));
+		strcpy(tok.refresh, "OLD-REFRESH");
+
+		oauth_refresh_snapshot(tok.refresh, keep, sizeof(keep));
+		tok.refresh[0] = '\0';	/* what token_post does on a reply with no refresh_token */
+		oauth_refresh_retain(keep, &tok);
+		CK(strcmp(tok.refresh, "OLD-REFRESH") == 0,
+		   "omitted refresh_token keeps the stored one (aliased caller)");
+
+		strcpy(tok.refresh, "NEW-REFRESH");
+		oauth_refresh_retain(keep, &tok);
+		CK(strcmp(tok.refresh, "NEW-REFRESH") == 0,
+		   "rotated refresh_token is kept, not overwritten");
+
+		oauth_refresh_snapshot("", keep, sizeof(keep));
+		CK(keep[0] == '\0', "empty snapshot stays empty");
+	}
+
 	printf("\n%s (%d failures)\n", failures ? "FAILURES" : "ALL PASSED", failures);
 	return failures != 0;
 }

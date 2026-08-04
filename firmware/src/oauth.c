@@ -124,6 +124,26 @@ bool oauth_creds_rejected(int rc)
 	return rc == -EACCES;
 }
 
+/* See oauth.h. Outside the OAUTH_HOST_TEST guard on purpose: pure, and the
+ * invariant it carries is what a permanent logout hinges on. */
+void oauth_refresh_snapshot(const char *refresh_token, char *keep, size_t keeplen)
+{
+	if (keeplen == 0) {
+		return;
+	}
+	strncpy(keep, refresh_token ? refresh_token : "", keeplen - 1);
+	keep[keeplen - 1] = '\0';
+}
+
+void oauth_refresh_retain(const char *keep, struct oauth_tokens *out)
+{
+	if (out->refresh[0] != '\0') {
+		return;		/* the endpoint rotated it -- keep the new one */
+	}
+	strncpy(out->refresh, keep, sizeof(out->refresh) - 1);
+	out->refresh[sizeof(out->refresh) - 1] = '\0';
+}
+
 #ifndef OAUTH_HOST_TEST
 
 int oauth_pkce_challenge(const char *verifier, char *out, size_t outlen)
@@ -294,18 +314,22 @@ int oauth_exchange_code(const char *pasted, const char *verifier,
 int oauth_refresh(const char *refresh_token, struct oauth_tokens *out)
 {
 	static char json[512];
+	char keep[OAUTH_TOKEN_LEN];
+
+	/* BEFORE token_post, not after: callers pass out->refresh in here, and
+	 * token_post parses the reply straight into *out. A reply that omits
+	 * refresh_token blanks the argument we were about to fall back on. */
+	oauth_refresh_snapshot(refresh_token, keep, sizeof(keep));
 
 	snprintf(json, sizeof(json),
 		"{\"grant_type\":\"refresh_token\",\"refresh_token\":\"%s\","
 		"\"client_id\":\"%s\"}",
-		refresh_token, CLIENT_ID);
+		keep, CLIENT_ID);
 
 	int rc = token_post(json, out);
 
-	/* Keep the old refresh token if the endpoint didn't rotate it. */
-	if (rc == 0 && out->refresh[0] == '\0') {
-		strncpy(out->refresh, refresh_token, sizeof(out->refresh) - 1);
-		out->refresh[sizeof(out->refresh) - 1] = '\0';
+	if (rc == 0) {
+		oauth_refresh_retain(keep, out);
 	}
 	return rc;
 }
