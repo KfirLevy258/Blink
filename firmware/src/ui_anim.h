@@ -19,8 +19,10 @@
  * stutter.
  *
  * There is no companion SETTLE constant any more. ui_anim waits on LVGL's own
- * prev_scr signal instead of a timeout, because a timeout tuned to one slide
- * duration silently stopped covering the next one.
+ * prev_scr signal instead of a timeout -- in two stages, because that flag is
+ * not raised until the anim timer starts the transition on a later handler
+ * pass. A timeout tuned to one slide duration silently stopped covering the
+ * next one.
  */
 #define UI_SLIDE_MS 400
 

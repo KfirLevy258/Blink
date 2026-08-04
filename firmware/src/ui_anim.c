@@ -72,25 +72,43 @@ static void blit_cb(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
  * there meant deleting a screen LVGL still held in disp->prev_scr, which it
  * lays out and draws on the next pass.
  *
- * And LVGL blocks ALL input while prev_scr is set (lv_indev.c), so the touch
- * samples taken during the slide are not dropped -- they queue, and flush on
- * the mode loop's next handler pass, which runs before ui_anim_pending() is
- * read. That is how the tail of an exit swipe re-requested the clip and
- * replayed it. Pumping a few passes after the transition clears delivers them
- * while we are still here to drop the request.
+ * Waiting on prev_scr takes two loops, not one. lv_screen_load_anim() clears
+ * prev_scr before it returns, and the callback that sets it is the animation's
+ * start_cb, which the anim timer fires on a LATER handler pass -- so on entry
+ * the flag reads NULL for a transition that has not begun. Watching for it to
+ * go NULL without first watching it become non-NULL is a no-op that silently
+ * degrades to the fixed sleep this replaced.
  *
- * The deadline is a hang guard, not a schedule.
+ * LVGL blocks ALL input while prev_scr is set (lv_indev.c), so the touch
+ * samples taken during the slide are not dropped -- they queue, and flush on
+ * a later pass. That is how the tail of an exit swipe re-requested the clip
+ * and replayed it. One indev read drains the whole queue (the Zephyr glue
+ * sets continue_reading while the msgq is non-empty), but lv_timer_handler
+ * walks newest timer first, so the indev read in any given pass runs BEFORE
+ * the anim timer that ends the transition -- the drain cannot happen until
+ * the pass after completion. Hence more than one trailing pass.
+ *
+ * Both deadlines are hang guards, not schedules.
  */
 static void settle_transition(void)
 {
-	int64_t deadline = k_uptime_get() + UI_SLIDE_MS * 4;
+	int64_t start_by = k_uptime_get() + UI_SLIDE_MS;
 
-	while (lv_display_get_screen_prev(NULL) != NULL &&
-	       k_uptime_get() < deadline) {
+	while (lv_display_get_screen_prev(NULL) == NULL &&
+	       k_uptime_get() < start_by) {
 		lv_timer_handler();
 		k_sleep(K_MSEC(5));
 	}
-	for (int i = 0; i < 4; i++) {
+
+	int64_t end_by = k_uptime_get() + UI_SLIDE_MS * 4;
+
+	while (lv_display_get_screen_prev(NULL) != NULL &&
+	       k_uptime_get() < end_by) {
+		lv_timer_handler();
+		k_sleep(K_MSEC(5));
+	}
+
+	for (int i = 0; i < 4; i++) {	/* drain the input held back by the slide */
 		lv_timer_handler();
 		k_sleep(K_MSEC(5));
 	}
