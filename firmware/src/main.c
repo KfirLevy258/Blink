@@ -804,6 +804,7 @@ static void net_worker(void *a, void *b, void *c)
 			if (rc == 0) {
 				authed = true;
 				refresh_wait_ms = REFRESH_RETRY_MIN_MS;
+				next_refresh = 0;
 				next_poll = 0;
 				post_stage(2);
 				continue;
@@ -871,18 +872,24 @@ static void net_worker(void *a, void *b, void *c)
 				post_status(USAGE_STATUS_STALE);
 				next_poll = now + 600 * 1000;
 			} else if (r == USAGE_UNAUTHORIZED) {
-				/* Token died mid-run. A REVOKED one never comes
-				 * back from here -- worker_refresh_token reboots
-				 * into provisioning -- so a refresh FAILURE below
-				 * is always transport, and backs off like one.
+				/* Token died mid-run. A refresh rejected with
+				 * 400/401 never comes back from here --
+				 * worker_refresh_token reboots into provisioning.
 				 *
-				 * A refresh that SUCCEEDS while the fetch keeps
-				 * 401ing is a third case this does not solve: a
-				 * scope mismatch or a 401 from an intermediary
-				 * loops here at the 5 s cadence indefinitely.
-				 * That predates this change and is left as it
-				 * was; closing it needs a consecutive-401 count,
-				 * which is a behaviour change, not a fix. */
+				 * Two other kinds of dead credential do come back,
+				 * misclassified: oauth_creds_rejected() keys on
+				 * -EACCES alone, so a 403 (entitlement pulled, org
+				 * removed) arrives as -EIO and a 200 carrying
+				 * invalid_grant arrives as -EINVAL. Both back off
+				 * as if the network were at fault and retry for
+				 * good. So does the case where the refresh
+				 * SUCCEEDS while the fetch keeps 401ing -- a scope
+				 * mismatch, or a 401 from an intermediary.
+				 *
+				 * All three want the same thing: a consecutive-
+				 * failure count that escalates to ERROR and then
+				 * re-provisions. That is a behaviour change, so it
+				 * is deliberately not in this fix. */
 				if (worker_refresh_token(tok.refresh, &tok,
 							 &token_deadline) == 0) {
 					next_poll = k_uptime_get() + 5 * 1000;

@@ -13,3 +13,4 @@ firmware/src/secrets.h
 firmware/build/
 firmware/build-sb/
 build/
+build-sb/
