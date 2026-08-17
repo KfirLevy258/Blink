@@ -565,10 +565,40 @@ static void upd_timer_cb(lv_timer_t *t)
 
 /* The panel slides in from the right and back out again (user request
  * 2026-07-17) -- the motion says where settings lives and which way leads
- * home. UI_SLIDE_MS, ease-out; see ui_anim.h for why it is as long as it is. */
-static bool closing;
+ * home.
+ *
+ * It used to slide at full screen size, and that is unaffordable here. LVGL
+ * invalidates an object's old AND new coords on every position change, so a
+ * 320x240 panel dirtied all 76800 px per frame -- a ~124 ms full redraw on
+ * this panel (see prj.conf), which over the old 400 ms fit about THREE frames.
+ * That is not a slow animation, it is three still positions, and it reads as a
+ * stutter rather than motion.
+ *
+ * Note it is the object's SIZE that governs this, not how it is painted:
+ * lv_obj_invalidate() works off lv_obj_get_coords() and never looks at
+ * bg_opa. Making the panel transparent for the slide would have changed
+ * nothing and in fact costs more, because the gauge screen behind it then has
+ * to be redrawn too.
+ *
+ * So the panel travels as its header bar alone -- PANEL_HDR_H tall, body
+ * hidden -- and only becomes full size once it has landed. 320x34 is 10880 px,
+ * ~9 ms a frame against the ~5 ms/6080 px partial redraw this panel measures,
+ * so the slide runs at roughly 60 FPS and PANEL_SLIDE_MS actually buys ~28
+ * frames of it. The full-screen repaint still happens exactly once, at the
+ * end, where it reads as the body arriving instead of smearing across the
+ * whole transition.
+ *
+ * The other half of the win is input latency: lv_timer_handler() reads the
+ * touch indev at the top of the same pass that does the drawing, so a ~124 ms
+ * frame also meant ~124 ms of unresponsive panel. At ~9 ms it tracks a finger.
+ */
+#define PANEL_HDR_H	34	/* seam/chevron/title sit in y0..28, rule at y30 */
+#define PANEL_SLIDE_MS	250	/* fillable now; UI_SLIDE_MS was sized for 3 frames */
 
-static void slide_x(lv_obj_t *obj, int32_t from, int32_t to,
+static bool closing;
+static uint32_t body_first;	/* first child below the header, set in open_panel */
+
+static void slide_x(lv_obj_t *obj, int32_t from, int32_t to, uint32_t ms,
 		    lv_anim_completed_cb_t done)
 {
 	lv_anim_t a;
@@ -577,12 +607,40 @@ static void slide_x(lv_obj_t *obj, int32_t from, int32_t to,
 	lv_anim_set_var(&a, obj);
 	lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
 	lv_anim_set_values(&a, from, to);
-	lv_anim_set_duration(&a, UI_SLIDE_MS);
+	lv_anim_set_duration(&a, ms);
 	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
 	if (done) {
 		lv_anim_set_completed_cb(&a, done);
 	}
 	lv_anim_start(&a);
+}
+
+/* Header-sized and body-hidden while travelling, full screen once parked.
+ * Everything from body_first on is below the rule, so hiding it leaves exactly
+ * the bar the panel slides as. `confirm` is created after the body and is
+ * caught by the same sweep, which is what we want: a close under an open
+ * confirm should not drag a full-screen child along for the ride. */
+static void panel_set_travelling(bool travelling)
+{
+	uint32_t n = lv_obj_get_child_count(panel);
+
+	for (uint32_t i = body_first; i < n; i++) {
+		lv_obj_t *c = lv_obj_get_child(panel, i);
+
+		if (travelling) {
+			lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+		} else {
+			lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN);
+		}
+	}
+	lv_obj_set_size(panel, LV_PCT(100),
+			travelling ? PANEL_HDR_H : LV_PCT(100));
+}
+
+static void open_done(lv_anim_t *a)
+{
+	ARG_UNUSED(a);
+	panel_set_travelling(false);	/* the one full repaint, once, on arrival */
 }
 
 static void close_done(lv_anim_t *a)
@@ -606,7 +664,10 @@ static void close_panel(void)
 	upd_btn = NULL;		/* dies with the panel */
 	upd_lbl = NULL;
 	closing = true;
-	slide_x(panel, 0, LV_HOR_RES, close_done);
+	/* Shrink to the header before travelling, same as the way in: one
+	 * full-screen repaint as the body vanishes, then a cheap slide. */
+	panel_set_travelling(true);
+	slide_x(panel, 0, LV_HOR_RES, PANEL_SLIDE_MS, close_done);
 }
 
 static void back_cb(lv_event_t *e)
@@ -712,6 +773,12 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
 
 	mk_line(panel, 30);
+
+	/* Header ends here. Everything created below is body, and gets hidden
+	 * for the slide -- see panel_set_travelling(). Recorded as a count
+	 * rather than a marker object so adding a header element needs no
+	 * bookkeeping beyond staying above this line. */
+	body_first = lv_obj_get_child_count(panel);
 
 	/* --- Brightness: card, big opposite-corner steppers, and a stacked
 	 * "Brightness / 70%" readout. The pips are gone -- the number already
@@ -879,7 +946,11 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -2);
 
-	slide_x(panel, LV_HOR_RES, 0, NULL);
+	/* Built full size and offstage (x = LV_HOR_RES clips it entirely away,
+	 * so none of the above cost a visible redraw), then shrunk to the bar
+	 * that actually travels. */
+	panel_set_travelling(true);
+	slide_x(panel, LV_HOR_RES, 0, PANEL_SLIDE_MS, open_done);
 }
 
 static void scr_gesture_cb(lv_event_t *e)
