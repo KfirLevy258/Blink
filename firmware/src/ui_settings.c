@@ -960,6 +960,9 @@ static void scr_gesture_cb(lv_event_t *e)
 	if (panel != NULL) {
 		return;
 	}
+	if (ui_anim_gesture_muted()) {
+		return;	/* the swipe that just closed the clip, replayed */
+	}
 	if (dir == LV_DIR_LEFT) {
 		open_panel(lv_event_get_current_target(e));
 	} else if (dir == LV_DIR_RIGHT) {
