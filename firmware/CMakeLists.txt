@@ -26,6 +26,7 @@ target_sources(app PRIVATE
 	src/bootanim_dec.c
 	src/ui_settings.c
 	src/ui_anim.c
+	src/ui_slide.c
 	src/backlight.c
 	src/ota_parse.c
 	src/ota.c

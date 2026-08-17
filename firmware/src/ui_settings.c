@@ -16,6 +16,7 @@
 #include "cfg_store.h"
 #include "ui_boot.h"
 #include "ui_anim.h"
+#include "ui_slide.h"
 #include "net_wifi.h"
 #include "fmt.h"
 #include "version.h"
@@ -563,93 +564,89 @@ static void upd_timer_cb(lv_timer_t *t)
 	upd_seen = snap.st;
 }
 
-/* The panel slides in from the right and back out again (user request
+/*
+ * The panel slides in from the right and back out again (user request
  * 2026-07-17) -- the motion says where settings lives and which way leads
- * home.
+ * home. The WHOLE screen moves, and does so without LVGL redrawing it.
  *
- * It used to slide at full screen size, and that is unaffordable here. LVGL
- * invalidates an object's old AND new coords on every position change, so a
- * 320x240 panel dirtied all 76800 px per frame -- a ~124 ms full redraw on
- * this panel (see prj.conf), which over the old 400 ms fit about THREE frames.
- * That is not a slow animation, it is three still positions, and it reads as a
- * stutter rather than motion.
+ * Two earlier attempts are worth recording, because both look like tuning
+ * problems and are not.
  *
- * Note it is the object's SIZE that governs this, not how it is painted:
- * lv_obj_invalidate() works off lv_obj_get_coords() and never looks at
- * bg_opa. Making the panel transparent for the slide would have changed
- * nothing and in fact costs more, because the gauge screen behind it then has
- * to be redrawn too.
+ * Sliding it with LVGL costs a full redraw per frame -- ~124 ms here, so a
+ * 400 ms transition rendered about three frames and read as a stutter. Note it
+ * is the object's SIZE that governs that, not how it is painted:
+ * lv_obj_invalidate() works off lv_obj_get_coords() and never looks at bg_opa.
  *
- * So the panel travels as its header bar alone -- PANEL_HDR_H tall, body
- * hidden -- and only becomes full size once it has landed. 320x34 is 10880 px,
- * ~9 ms a frame against the ~5 ms/6080 px partial redraw this panel measures,
- * so the slide runs at roughly 60 FPS and PANEL_SLIDE_MS actually buys ~28
- * frames of it. The full-screen repaint still happens exactly once, at the
- * end, where it reads as the body arriving instead of smearing across the
- * whole transition.
+ * Travelling as a header-height bar and expanding on arrival did fix the
+ * framerate -- measured ~14 ms a frame against ~124 -- but a bar sliding while
+ * the rest of the screen appears from nowhere is incoherent motion, and being
+ * smooth does not redeem it (user-reported 2026-08-17, twice). Anything
+ * between the two only trades one complaint for the other: cost scales with
+ * the area that moves, so "more of the screen" and "more frames" are one dial
+ * pulled in opposite directions.
  *
- * The other half of the win is input latency: lv_timer_handler() reads the
- * touch indev at the top of the same pass that does the drawing, so a ~124 ms
- * frame also meant ~124 ms of unresponsive panel. At ~9 ms it tracks a finger.
+ * The way out is not to redraw at all. See ui_slide.c -- the panel's own
+ * scroll register moves the image already sitting in its GRAM, so a transition
+ * costs ONE full render spread across forty steps instead of one per frame.
+ *
+ * The consequence here is that open and close cannot run where they are asked
+ * for. ui_slide_run() drives lv_refr_now() itself, and re-entering the refresh
+ * from inside lv_timer_handler() is not safe, so the gesture handlers only
+ * raise a flag and the mode loop runs the transition from thread context --
+ * exactly as ui_anim does for the clip.
  */
-#define PANEL_HDR_H	34	/* seam/chevron/title sit in y0..28, rule at y30 */
-#define PANEL_SLIDE_MS	250	/* fillable now; UI_SLIDE_MS was sized for 3 frames */
-
 static bool closing;
-static uint32_t body_first;	/* first child below the header, set in open_panel */
+static volatile bool want_open;
+static volatile bool want_close;
+static lv_obj_t *want_open_scr;
 
-static void slide_x(lv_obj_t *obj, int32_t from, int32_t to, uint32_t ms,
-		    lv_anim_completed_cb_t done)
+static void build_panel(lv_obj_t *parent_scr);
+
+/* Thread context. The tree surgery happens frozen: creating the panel would
+ * otherwise invalidate the screen, and refreshing that invalidation would
+ * repaint over the very gauge pixels the scroll is about to move away. */
+static void do_open(void (*pump)(void))
 {
-	lv_anim_t a;
+	ui_slide_freeze(true);
+	build_panel(want_open_scr);
+	lv_obj_update_layout(panel);
+	ui_slide_freeze(false);
 
-	lv_anim_init(&a);
-	lv_anim_set_var(&a, obj);
-	lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
-	lv_anim_set_values(&a, from, to);
-	lv_anim_set_duration(&a, ms);
-	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-	if (done) {
-		lv_anim_set_completed_cb(&a, done);
+	/* Gauges exit left, settings enters from the right. */
+	ui_slide_run(UI_SLIDE_LEFT, pump);
+}
+
+static void do_close(void (*pump)(void))
+{
+	ui_slide_freeze(true);
+	if (upd_timer) {
+		lv_timer_del(upd_timer);
+		upd_timer = NULL;
 	}
-	lv_anim_start(&a);
-}
-
-/* Header-sized and body-hidden while travelling, full screen once parked.
- * Everything from body_first on is below the rule, so hiding it leaves exactly
- * the bar the panel slides as. `confirm` is created after the body and is
- * caught by the same sweep, which is what we want: a close under an open
- * confirm should not drag a full-screen child along for the ride. */
-static void panel_set_travelling(bool travelling)
-{
-	uint32_t n = lv_obj_get_child_count(panel);
-
-	for (uint32_t i = body_first; i < n; i++) {
-		lv_obj_t *c = lv_obj_get_child(panel, i);
-
-		if (travelling) {
-			lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
-		} else {
-			lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN);
-		}
-	}
-	lv_obj_set_size(panel, LV_PCT(100),
-			travelling ? PANEL_HDR_H : LV_PCT(100));
-}
-
-static void open_done(lv_anim_t *a)
-{
-	ARG_UNUSED(a);
-	panel_set_travelling(false);	/* the one full repaint, once, on arrival */
-}
-
-static void close_done(lv_anim_t *a)
-{
-	ARG_UNUSED(a);
+	upd_btn = NULL;		/* dies with the panel */
+	upd_lbl = NULL;
 	lv_obj_del(panel);	/* deletes confirm with it, if open */
 	panel = NULL;
 	confirm = NULL;
+	lv_obj_update_layout(lv_screen_active());
+	ui_slide_freeze(false);
+
+	/* Settings exits right, the gauges come back in from the left. */
+	ui_slide_run(UI_SLIDE_RIGHT, pump);
 	closing = false;
+}
+
+void ui_settings_service(void (*pump)(void))
+{
+	if (want_open && panel == NULL) {
+		want_open = false;
+		do_open(pump);
+	} else if (want_close && panel != NULL) {
+		want_close = false;
+		do_close(pump);
+	}
+	want_open = false;
+	want_close = false;
 }
 
 static void close_panel(void)
@@ -657,17 +654,8 @@ static void close_panel(void)
 	if (closing || dl_overlay) {	/* no closing under a download */
 		return;
 	}
-	if (upd_timer) {
-		lv_timer_del(upd_timer);
-		upd_timer = NULL;
-	}
-	upd_btn = NULL;		/* dies with the panel */
-	upd_lbl = NULL;
 	closing = true;
-	/* Shrink to the header before travelling, same as the way in: one
-	 * full-screen repaint as the body vanishes, then a cheap slide. */
-	panel_set_travelling(true);
-	slide_x(panel, 0, LV_HOR_RES, PANEL_SLIDE_MS, close_done);
+	want_close = true;	/* serviced from the mode loop; see do_close */
 }
 
 static void back_cb(lv_event_t *e)
@@ -687,7 +675,7 @@ static void panel_gesture_cb(lv_event_t *e)
 	}
 }
 
-static void open_panel(lv_obj_t *parent_scr)
+static void build_panel(lv_obj_t *parent_scr)
 {
 	panel = lv_obj_create(parent_scr);
 	lv_obj_set_size(panel, LV_PCT(100), LV_PCT(100));
@@ -706,7 +694,9 @@ static void open_panel(lv_obj_t *parent_scr)
 	 * gestures here and let panel_gesture_cb below act on them. */
 	lv_obj_clear_flag(panel, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_add_event_cb(panel, panel_gesture_cb, LV_EVENT_GESTURE, NULL);
-	lv_obj_set_pos(panel, LV_HOR_RES, 0);	/* offstage; slid in below */
+	/* Parked. Nothing animates the panel itself any more -- the whole
+	 * screen moves under it, in ui_slide_run(). */
+	lv_obj_set_pos(panel, 0, 0);
 
 	/* --- Header: green edge seam + back chevron + title + rule. The
 	 * chevron used to be a full-height LEFT_MID button that the reset tiles
@@ -773,12 +763,6 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
 
 	mk_line(panel, 30);
-
-	/* Header ends here. Everything created below is body, and gets hidden
-	 * for the slide -- see panel_set_travelling(). Recorded as a count
-	 * rather than a marker object so adding a header element needs no
-	 * bookkeeping beyond staying above this line. */
-	body_first = lv_obj_get_child_count(panel);
 
 	/* --- Brightness: card, big opposite-corner steppers, and a stacked
 	 * "Brightness / 70%" readout. The pips are gone -- the number already
@@ -946,11 +930,6 @@ static void open_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -2);
 
-	/* Built full size and offstage (x = LV_HOR_RES clips it entirely away,
-	 * so none of the above cost a visible redraw), then shrunk to the bar
-	 * that actually travels. */
-	panel_set_travelling(true);
-	slide_x(panel, LV_HOR_RES, 0, PANEL_SLIDE_MS, open_done);
 }
 
 static void scr_gesture_cb(lv_event_t *e)
@@ -964,7 +943,8 @@ static void scr_gesture_cb(lv_event_t *e)
 		return;	/* the swipe that just closed the clip, replayed */
 	}
 	if (dir == LV_DIR_LEFT) {
-		open_panel(lv_event_get_current_target(e));
+		want_open_scr = lv_event_get_current_target(e);
+		want_open = true;	/* run from the mode loop; see do_open */
 	} else if (dir == LV_DIR_RIGHT) {
 		/* The left chevron's promise: the boot clip on loop. Only
 		 * flagged here -- the mode loop runs the player from thread
@@ -979,7 +959,8 @@ static void scr_gesture_cb(lv_event_t *e)
 static void zone_settings_cb(lv_event_t *e)
 {
 	if (panel == NULL) {
-		open_panel(lv_obj_get_screen(lv_event_get_target(e)));
+		want_open_scr = lv_obj_get_screen(lv_event_get_target(e));
+		want_open = true;
 	}
 }
 

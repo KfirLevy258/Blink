@@ -9,21 +9,16 @@
  */
 
 /*
- * How long the clip transition runs.
+ * Gesture-mute window, not a slide duration.
  *
- * Back to 250 ms. It was raised to 400 on 2026-07-26 for a reason that has
- * since been removed rather than solved: a full-screen redraw costs ~124 ms,
- * so 250 ms got through barely two frames, and stretching it to 400 spread
- * those few frames far enough apart to read as travel instead of a jump cut.
- * It bought no frames -- it only hid how few there were.
+ * It was both, once. The clip transition no longer has a duration to set here
+ * at all: ui_slide.c scrolls the panel a fixed number of steps and blocks
+ * until it is done, so the length is however long eighty renders take.
  *
- * The clip now slides as a bar rather than a whole screen (see ui_anim.c), so
- * the frames are actually there: ~14 ms each measured on hardware, about ten
- * of them across 250 ms. Holding 400 would just make a smooth animation slow.
- *
- * There is no companion SETTLE constant. ui_anim waits on the overlay's own
- * geometry -- see settle_slide(), which replaced a two-stage wait on LVGL's
- * prev_scr flag that an overlay never sets.
+ * What survives is the timing of the mutes built on it. ui_slide_run() blocks
+ * with pump() still feeding LVGL input, so the swipe that started a transition
+ * is still arriving while it runs -- the handlers stay muted for a multiple of
+ * this across the slide, then a short tail past it.
  */
 #define UI_SLIDE_MS 250
 

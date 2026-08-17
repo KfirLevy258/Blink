@@ -1037,6 +1037,7 @@ static void run_standalone(void)
 		if (ui_anim_pending()) {
 			ui_anim_run(standalone_anim_pump);
 		}
+		ui_settings_service(standalone_anim_pump);
 
 		int64_t now = k_uptime_get();
 
@@ -1079,6 +1080,7 @@ static void run_usb(void)
 		if (ui_anim_pending()) {
 			ui_anim_run(usb_anim_pump);
 		}
+		ui_settings_service(usb_anim_pump);
 
 		if (!usage_view_have_data()) {
 			/* Keep the bar honest: hello was answered at boot,

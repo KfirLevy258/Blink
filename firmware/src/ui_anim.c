@@ -28,14 +28,9 @@
 #include "usage_view.h"
 #include "bootanim.h"
 #include "bootanim_dec.h"
+#include "ui_slide.h"
 
 #define STRIP_BYTES 4096
-
-/* The height the overlay travels at. Matches ui_settings.c's PANEL_HDR_H for
- * the same reason -- 320x34 is ~14 ms a frame against a full screen's ~124 --
- * but is independent of it: nothing about the clip has to agree with the
- * settings header, and the clay bar has no content that fixes its height. */
-#define CLIP_BAR_H 34
 
 static const struct device *const disp =
 	DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
@@ -102,51 +97,6 @@ static void blit_cb(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 	display_write(disp, x, y, &desc, pix);
 }
 
-static void slide_to(lv_obj_t *obj, int32_t from, int32_t to)
-{
-	lv_anim_t a;
-
-	lv_anim_init(&a);
-	lv_anim_set_var(&a, obj);
-	lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
-	lv_anim_set_values(&a, from, to);
-	lv_anim_set_duration(&a, UI_SLIDE_MS);
-	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-	lv_anim_start(&a);
-}
-
-/*
- * Wait for the overlay slide to finish.
- *
- * This replaced a two-stage wait on disp->prev_scr. That flag was the only
- * honest signal a screen-load transition gave -- it needed two loops because
- * lv_screen_load_anim() clears it before returning and the anim's start_cb
- * only raises it on a LATER handler pass, so watching for NULL without first
- * watching for non-NULL silently degraded to no wait at all. An overlay never
- * sets prev_scr, so none of that applies and the geometry is the whole truth.
- *
- * lv_obj_update_layout() first because coords are stale until a layout pass
- * runs, and lv_obj_get_x() reads coords: without it a freshly positioned
- * object reads x=0 and a wait for x==0 returns before the slide has begun.
- *
- * The deadline is a hang guard, not a schedule. `pump` is the caller's
- * background duty -- protocol service and, on a test boot, the only watchdog
- * feeder -- so it has to keep running for however long this waits.
- */
-static void settle_slide(lv_obj_t *ov, int32_t target, void (*pump)(void))
-{
-	int64_t end_by = k_uptime_get() + UI_SLIDE_MS * 4;
-
-	lv_obj_update_layout(ov);
-	while (lv_obj_get_x(ov) != target && k_uptime_get() < end_by) {
-		if (pump) {
-			pump();
-		}
-		lv_timer_handler();
-		k_sleep(K_MSEC(5));
-	}
-}
-
 /*
  * Blank (or restore) everything sharing the overlay's parent.
  *
@@ -211,9 +161,16 @@ void ui_anim_run(void (*pump)(void))
 	pending = false;
 	leave = false;
 
+	/*
+	 * Built frozen and already full size. Creating it would otherwise
+	 * invalidate the screen, and refreshing that invalidation repaints over
+	 * the gauge pixels the scroll is about to carry away.
+	 */
+	ui_slide_freeze(true);
+
 	lv_obj_t *ov = lv_obj_create(lv_scr_act());
 
-	lv_obj_set_size(ov, LV_PCT(100), CLIP_BAR_H);
+	lv_obj_set_size(ov, LV_PCT(100), LV_PCT(100));
 	lv_obj_set_style_bg_color(ov, lv_color_hex(BOOTANIM_BG_RGB), 0);
 	lv_obj_set_style_bg_opa(ov, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(ov, 0, 0);
@@ -224,26 +181,27 @@ void ui_anim_run(void (*pump)(void))
 	 * handler, which would open settings underneath the clip. */
 	lv_obj_clear_flag(ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_add_event_cb(ov, gesture_cb, LV_EVENT_GESTURE, NULL);
-	lv_obj_set_pos(ov, -LV_HOR_RES, 0);	/* offstage, left */
-
-	/* Slide in from the left, the way the swipe pointed (user request
-	 * 2026-07-17) -- as a bar, not the whole screen.
-	 *
-	 * Mute BOTH handlers across it. gesture_cb because the opening swipe's
-	 * tail would otherwise exit the clip in the same motion that started
-	 * it, and the gauge screen's because until the bar has covered it a
-	 * stray gesture there still opens settings behind the show. */
-	enter_mute_until = k_uptime_get() + UI_SLIDE_MS + 250;
-	mute_until = enter_mute_until;
-	slide_to(ov, -LV_HOR_RES, 0);
-	settle_slide(ov, 0, pump);
-
-	/* Full size only once parked -- the streamed frames bypass LVGL and
-	 * would tear a moving object. Then blank what is underneath, and only
-	 * then paint the clay the frames stream over. */
-	lv_obj_set_size(ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_pos(ov, 0, 0);
+	lv_obj_update_layout(ov);
 	peers_set_hidden(ov, true);
-	lv_refr_now(NULL);	/* painted once; frames stream over it */
+	ui_slide_freeze(false);
+
+	/*
+	 * In from the left, the way the swipe pointed (user request
+	 * 2026-07-17) -- the gauges leave rightwards and the clay arrives
+	 * behind them, the whole screen moving at once. Settings goes the other
+	 * way, so the two easter eggs stay opposite.
+	 *
+	 * The mute is set wide before the run and tightened after, because
+	 * ui_slide_run() blocks for the whole transition while pump() keeps
+	 * feeding LVGL input: without it the tail of the opening swipe reaches
+	 * gesture_cb, which exits on either direction, and the show closes
+	 * itself in the motion that started it.
+	 */
+	enter_mute_until = k_uptime_get() + UI_SLIDE_MS * 6;
+	mute_until = enter_mute_until;
+	ui_slide_run(UI_SLIDE_RIGHT, pump);
+	enter_mute_until = k_uptime_get() + 250;
 
 	/* Borrowed from the LVGL pool for the show only, same as the splash
 	 * (a permanent buffer starved the WiFi driver -- see ui_boot.c). */
@@ -285,10 +243,11 @@ void ui_anim_run(void (*pump)(void))
 		lv_free(strip);
 	}
 	/*
-	 * Restore the gauges BEFORE the bar shrinks off them, so the strip it
-	 * uncovers has something to draw. They are repainted here while the
-	 * overlay still covers the screen, which costs one full redraw and
-	 * shows nothing; the visible change is the shrink on the line after.
+	 * Unhide the gauges and drop the overlay before the slide, so the
+	 * strips it paints have the restored screen to draw. All of it frozen:
+	 * either operation would invalidate the screen, and refreshing that
+	 * would repaint over the clip pixels still in GRAM that the scroll is
+	 * about to carry off.
 	 *
 	 * Mute the gauge screen's gestures across the slide: the tail of the
 	 * exit swipe lands on the RESTORED screen, where a LEFT swipe replays
@@ -297,17 +256,14 @@ void ui_anim_run(void (*pump)(void))
 	 * direction, so both halves of that were reachable; clearing `pending`
 	 * afterwards only ever caught the right-swipe one.
 	 */
+	ui_slide_freeze(true);
 	peers_set_hidden(ov, false);
-	mute_until = k_uptime_get() + UI_SLIDE_MS * 6;
-	lv_obj_set_size(ov, LV_PCT(100), CLIP_BAR_H);
-	slide_to(ov, 0, -LV_HOR_RES);
-	settle_slide(ov, -LV_HOR_RES, pump);
-
-	/* Kill the animation before the object it drives. settle_slide's
-	 * deadline is a hang guard, so it can return with the slide still
-	 * running, and the anim would then be stepping freed memory. */
-	lv_anim_delete(ov, NULL);
 	lv_obj_del(ov);
+	lv_obj_update_layout(lv_screen_active());
+	ui_slide_freeze(false);
+
+	mute_until = k_uptime_get() + UI_SLIDE_MS * 6;
+	ui_slide_run(UI_SLIDE_LEFT, pump);
 
 	/* Short tail past the drain, then hand gestures back -- long enough to
 	 * cover the replay, short enough that a deliberate second swipe works. */
@@ -316,7 +272,7 @@ void ui_anim_run(void (*pump)(void))
 	/* Drop any request the exit swipe itself raised. A right swipe on the
 	 * gauge screen is exactly what ASKS for the clip, so the tail of the
 	 * gesture -- or a release landing on the left edge zone -- sets pending
-	 * again through ui_settings' handlers. settle_slide above has already
-	 * let those events land, so clearing here is the last word. */
+	 * again through ui_settings' handlers. The exit slide above blocks long
+	 * enough for those events to land, so clearing here is the last word. */
 	pending = false;
 }

@@ -14,4 +14,10 @@ void ui_settings_attach(lv_obj_t *scr);
  * call once the screen exists; replaces any previous notice. */
 void ui_settings_notice(const char *txt);
 
+/* Run any pending open/close transition. MUST be called from a mode loop in
+ * thread context, not from an LVGL callback: the transition drives
+ * lv_refr_now() itself (see ui_slide.h). `pump` (may be NULL) runs each step
+ * so background duties and the boot watchdog stay alive. */
+void ui_settings_service(void (*pump)(void));
+
 #endif /* UI_SETTINGS_H */
