@@ -9,6 +9,17 @@
  * real animation later replaces only this function.
  * After a reboot marked with ui_boot_mark_intentional_reboot() the same
  * screen renders static (no fade, no spinner, ~0.3 s dwell). */
+/*
+ * Hand the boot screen the caller's periodic duty, run inside its wait loops.
+ *
+ * The splash blocks for several seconds of animation, and main.c arms a 30 s
+ * hardware watchdog BEFORE it runs whose only feeder is that callback. Nothing
+ * fed it here, so the whole splash was dead time against that window on a test
+ * boot -- survivable at today's lengths, and a reset waiting for whoever makes
+ * the animation longer. Set it before ui_boot_splash().
+ */
+void ui_boot_set_pump(void (*fn)(void));
+
 void ui_boot_splash(void);
 
 /* Call right before an on-purpose sys_reboot: the next boot skips the splash

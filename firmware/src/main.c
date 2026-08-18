@@ -1003,10 +1003,23 @@ static void net_worker(void *a, void *b, void *c)
 				had_usage = true;
 				unauth_wait_ms = UNAUTH_WAIT_MIN_MS;
 				unauth_refresh_done = 0;	/* 401s are over */
-				next_poll = now + 60 * 1000;
+				/*
+				 * Stamped from a FRESH reading, not the `now`
+				 * at the top of the loop. Everything between
+				 * the two blocks: a rejoin, a sign-in, the
+				 * proactive refresh, then the fetch itself --
+				 * 45-60 s of it on a bad link. Measuring the
+				 * interval from before all that leaves the
+				 * deadline already past, so the next poll
+				 * fires at once and the "one a minute" the
+				 * endpoint is sized for becomes a much faster
+				 * knock. Same reason the PC bridge holds off
+				 * on a 429.
+				 */
+				next_poll = k_uptime_get() + 60 * 1000;
 			} else if (r == USAGE_RATE_LIMITED) {
 				post_status(USAGE_STATUS_STALE);
-				next_poll = now + 600 * 1000;
+				next_poll = k_uptime_get() + 600 * 1000;
 			} else if (r == USAGE_UNAUTHORIZED) {
 				/* Token died mid-run. A refresh rejected with
 				 * 400/401 never comes back from here --
@@ -1070,7 +1083,7 @@ static void net_worker(void *a, void *b, void *c)
 			} else {
 				post_status(had_usage ? USAGE_STATUS_ERROR
 						      : USAGE_STATUS_DISCONNECTED);
-				next_poll = now + 60 * 1000;
+				next_poll = k_uptime_get() + 60 * 1000;
 			}
 		}
 
@@ -1334,6 +1347,9 @@ int main(void)
 
 	cfg_init();
 	ota_boot_begin();	/* unconfirmed image? start the confirm clock */
+	/* ...and from here the boot screen's own wait loops feed it too; they
+	 * block for seconds against a 30 s window. */
+	ui_boot_set_pump(ota_boot_pump);
 	backlight_init();	/* drive the PWM to the persisted level */
 	net_wifi_init();
 	net_wifi_set_idle_hook(wifi_idle);

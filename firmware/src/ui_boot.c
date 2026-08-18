@@ -54,6 +54,25 @@ bool ui_boot_intentional_pending(void)
 	return skip_magic == SKIP_MAGIC;
 }
 
+/*
+ * Set by main.c to its watchdog feeder. NULL until then, and NULL for good on
+ * an ordinary boot -- the feeder is a no-op unless this is an unconfirmed test
+ * boot, but calling through a hook keeps that knowledge in main.c.
+ */
+static void (*host_pump)(void);
+
+void ui_boot_set_pump(void (*fn)(void))
+{
+	host_pump = fn;
+}
+
+static void host_pump_run(void)
+{
+	if (host_pump) {
+		host_pump();
+	}
+}
+
 /* Pump UI + protocol for `ms`, so the splash doubles as the daemon-detect
  * window. */
 static void pump(int ms)
@@ -63,6 +82,7 @@ static void pump(int ms)
 	while (k_uptime_get() < end) {
 		proto_service();
 		lv_timer_handler();
+		host_pump_run();
 		k_sleep(K_MSEC(10));
 	}
 }
@@ -103,6 +123,7 @@ static bool bootanim_play(const uint8_t *blob, size_t len)
 		while (k_uptime_get() < next) {
 			proto_service();
 			lv_timer_handler();
+			host_pump_run();
 			k_sleep(K_MSEC(5));
 		}
 	}
