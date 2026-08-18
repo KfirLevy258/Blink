@@ -137,13 +137,6 @@ void ui_slide_begin(void)
 	top_layer_hide(true);
 }
 
-void ui_slide_reset(void)
-{
-	if (area_defined) {
-		scroll_to(0);
-	}
-}
-
 void ui_slide_run(int dir, void (*pump)(void))
 {
 	lv_display_t *disp = lv_display_get_default();

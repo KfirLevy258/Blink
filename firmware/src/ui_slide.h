@@ -102,8 +102,14 @@ void ui_slide_top_hide(bool hide);
  */
 void ui_slide_freeze(bool frozen);
 
-/* Return the panel to an unscrolled state. Called on the paths that abandon a
- * transition; a completed one already lands on zero. */
-void ui_slide_reset(void);
+/*
+ * There is deliberately no ui_slide_reset() here.
+ *
+ * A completed run lands on offset 0 by construction, and the only way to
+ * abandon one part-way is the sys_reboot() inside a caller's pump -- after
+ * which Zephyr's ili9xxx driver issues both a hardware reset pulse and a
+ * SWRESET before the first pixel, so VSCRSADD and VSCRDEF are back to their
+ * defaults anyway. A reset entry point had no caller and nothing to fix.
+ */
 
 #endif /* UI_SLIDE_H */
