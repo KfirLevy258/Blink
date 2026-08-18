@@ -171,6 +171,25 @@ class TestRateLimit(unittest.TestCase):
         self.assertEqual([m["t"] for m in self.sent], ["time", "status"])
         self.assertEqual(self.sent[-1]["state"], "rate_limited")
 
+    def test_zero_retry_after_does_not_disable_the_backoff(self):
+        """The live endpoint sends `Retry-After: 0` (observed 2026-08-18).
+        Taken literally that is an invitation to keep knocking every cadence,
+        which is precisely what got us throttled. Retry-After is the EARLIEST
+        a retry is allowed, not a recommended interval: it may only extend our
+        own ladder, never shorten it."""
+        b = self._bridge(self._counting_429(retry_after=0))
+        b.poll_once()
+        self.clock.t += 60
+        b.poll_once()
+        self.assertEqual(len(self.calls), 1, "Retry-After: 0 must not mean 'no backoff'")
+
+    def test_retry_after_longer_than_our_ladder_wins(self):
+        b = self._bridge(self._counting_429(retry_after=300))
+        b.poll_once()
+        self.clock.t += 200         # past our 120 s floor, inside the server's 300
+        b.poll_once()
+        self.assertEqual(len(self.calls), 1)
+
     def test_retry_after_is_honoured(self):
         b = self._bridge(self._counting_429(retry_after=300))
         b.poll_once()

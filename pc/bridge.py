@@ -1,6 +1,7 @@
 """Transport-agnostic bridge logic: react to board messages, poll usage, track
 liveness. I/O (serial) is injected so this is unit-testable without hardware."""
 import datetime
+import sys
 import time
 import urllib.error
 
@@ -15,6 +16,9 @@ LIVENESS_WINDOW_S = 30.0
 # WiFi-mode fetch already does for the same response.
 RATE_LIMIT_MIN_S = 120.0
 RATE_LIMIT_MAX_S = 600.0
+# Upper bound on a server-supplied Retry-After, so one absurd header cannot
+# park the display on stale numbers for a day.
+RATE_LIMIT_CEILING_S = 3600.0
 
 
 def _http_code(exc):
@@ -106,16 +110,27 @@ class Bridge:
         self._write(usage)
 
     def _throttle(self, retry_after):
-        """Arm the next hold-off: the server's number if it gave one, else our
-        own ladder from RATE_LIMIT_MIN_S, doubling to the ceiling."""
-        if retry_after is not None:
-            wait = min(retry_after, RATE_LIMIT_MAX_S)
-        elif self._throttle_step:
+        """Arm the next hold-off: our own ladder from RATE_LIMIT_MIN_S doubling
+        to RATE_LIMIT_MAX_S, which a server-supplied Retry-After may EXTEND but
+        never shorten.
+
+        Retry-After names the earliest moment a retry is allowed; it is not a
+        recommended interval. This endpoint sends `Retry-After: 0` (observed
+        2026-08-18), and taking that literally disabled the backoff entirely --
+        the daemon went straight back to knocking every 60 s, which is what got
+        it throttled in the first place.
+        """
+        if self._throttle_step:
             wait = min(self._throttle_step * 2, RATE_LIMIT_MAX_S)
         else:
             wait = RATE_LIMIT_MIN_S
+        if retry_after is not None:
+            wait = max(wait, min(retry_after, RATE_LIMIT_CEILING_S))
         self._throttle_step = wait
         self._throttled_until = self._now() + wait
+        print("[bridge] rate limited; holding off %.0fs (Retry-After: %s)"
+              % (wait, "absent" if retry_after is None else "%.0fs" % retry_after),
+              file=sys.stderr)
 
     def _clear_throttle(self):
         self._throttled_until = 0.0
