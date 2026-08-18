@@ -10,7 +10,7 @@
 # esptool talks to the board. `flash` sequences that for you.
 set -euo pipefail
 
-PORT="${PORT:-/dev/cu.usbserial-14420}"
+PORT="${PORT:-$(ls /dev/cu.usbserial* 2>/dev/null | head -1 || true)}"
 BOARD="esp32_devkitc/esp32/procpu"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG="/tmp/claude-usage-bridge.log"
@@ -48,6 +48,40 @@ up() {
 case "${1:-flash}" in
 flash)
 	down
+	# dev.sh writes PLAINTEXT. A fused chip's ROM cannot read that, and the
+	# board goes dark until tools/flash_encrypted.sh restores it -- the exact
+	# mirror of the mistake that script refuses. Ask the chip, before the build.
+	if [ "${CLAUGE_SKIP_EFUSE_CHECK:-0}" != "1" ]; then
+		# shellcheck source=lib_efuse.sh
+		. "$ROOT/tools/lib_efuse.sh"
+		efuse_probe "$PORT"
+		case "$EFUSE_STATE" in
+		plaintext)
+			;;	# what this script is for
+		encrypted)
+			{
+				echo "FATAL: this chip is FUSED (FLASH_CRYPT_CNT = 0b$EFUSE_BITS${EFUSE_MAC:+, MAC $EFUSE_MAC})."
+				echo "       dev.sh writes plaintext, which a fused ROM cannot read -- the board"
+				echo "       would go dark until re-flashed. Use the encrypted path instead:"
+				echo "         cd $ROOT/firmware && west build --sysbuild -d build-sb -b $BOARD . \\"
+				echo "           -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \\"
+				# Single-quoted so the key path reaches the user's shell unexpanded,
+				# and the nested quotes survive: sysbuild needs the value quoted, and
+				# a build that omits this silently signs with MCUboot's bundled dev
+				# key -- the board boots, but every later OTA is rejected and reverts.
+				echo '             -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.clauge/ota_signing_key_p256.pem\"" \'
+				echo "           && $ROOT/tools/flash_encrypted.sh $PORT"
+				echo "       CLAUGE_SKIP_EFUSE_CHECK=1 overrides."
+			} >&2
+			exit 1
+			;;
+		*)
+			echo "FATAL: cannot tell whether this chip is fused -- $EFUSE_REASON" >&2
+			echo "       Refusing to flash blind. CLAUGE_SKIP_EFUSE_CHECK=1 overrides." >&2
+			exit 1
+			;;
+		esac
+	fi
 	activate
 	# shellcheck disable=SC1090
 	source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh >/dev/null 2>&1
