@@ -16,9 +16,12 @@
  * until it is done, so the length is however long eighty renders take.
  *
  * What survives is the timing of the mutes built on it. ui_slide_run() blocks
- * with pump() still feeding LVGL input, so the swipe that started a transition
- * is still arriving while it runs -- the handlers stay muted for a multiple of
- * this across the slide, then a short tail past it.
+ * for the whole transition, and pump() does NOT run lv_timer_handler() -- see
+ * ui_slide.h -- so nothing is dispatched to LVGL while it runs. Touch points
+ * queue in the input msgq instead and are delivered in one burst by the first
+ * lv_timer_handler() afterwards. The mute therefore has to outlive the slide
+ * and then some: it is held for a multiple of this across the transition, so
+ * the window is still open when the burst lands, plus a short tail past it.
  */
 #define UI_SLIDE_MS 250
 
@@ -32,6 +35,17 @@ bool ui_anim_pending(void);
  * it holds, or the swipe that left the clip acts a second time on what it
  * uncovered. */
 bool ui_anim_gesture_muted(void);
+
+/*
+ * Arm that window for `ms` from now.
+ *
+ * Exposed so ui_settings can guard its own open/close transitions with it.
+ * Those block for a full slide with no input dispatched, exactly like the
+ * clip's, so the buffered swipe lands on whatever the transition uncovered --
+ * and a RIGHT swipe there is what asks for the clip, so settings closing could
+ * start the eyes by itself.
+ */
+void ui_anim_gesture_mute(int ms);
 
 /* Play until the user swipes back; returns with the previous screen
  * reloaded. `pump` (may be NULL) runs between frames so the mode's

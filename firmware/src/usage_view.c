@@ -664,16 +664,41 @@ void usage_view_set_status(enum usage_status status)
 	lv_obj_set_style_text_color(hint, tc, 0);
 	lv_label_set_text(hint, text);
 
-	/* The full takeover is only for "we never had any data". Every other
-	 * state has real numbers behind it, and covering those up would throw
-	 * away information the user wants.
-	 */
-	if (status == USAGE_STATUS_DISCONNECTED && !have_data) {
+	usage_view_sync_takeover();
+}
+
+/*
+ * Apply the takeover rule from the CURRENT state.
+ *
+ * The full takeover is only for "we never had any data". Every other state has
+ * real numbers behind it, and covering those up would throw away information
+ * the user wants.
+ *
+ * Split out from set_status so it can be re-asserted. ui_anim hides every
+ * sibling of its overlay for the length of the clip and restores them after,
+ * from a record taken when the clip STARTED -- so if the first data arrives
+ * mid-clip, that record is stale and the restore would put the CONNECTING bar
+ * back over live gauges (user-reported 2026-08-18). This function is the one
+ * authority on whether the bar belongs on screen; the restore calls it rather
+ * than deciding for itself.
+ */
+void usage_view_sync_takeover(void)
+{
+	if (!built || overlay == NULL) {
+		return;
+	}
+	if (last_status == USAGE_STATUS_DISCONNECTED && !have_data) {
 		lv_obj_clear_flag(overlay, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_move_foreground(overlay);
 	} else {
 		lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
 	}
+}
+
+bool usage_view_takeover_active(void)
+{
+	return built && overlay != NULL &&
+	       lv_obj_has_flag(overlay, LV_OBJ_FLAG_HIDDEN) == false;
 }
 
 static void boot_pulse_cb(void *obj, int32_t v)

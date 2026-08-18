@@ -52,6 +52,23 @@ void usage_view_boot_stage(int stage);
  * tell "still waiting for the first data" from "data went stale". */
 bool usage_view_have_data(void);
 
+/*
+ * Is the full-screen CONNECTING takeover currently covering the gauges?
+ *
+ * Exposed so the gesture handlers can refuse to act on a screen the user
+ * cannot actually see. It is not enough for them to test have_data: the
+ * takeover is what is DRAWN, and that is what the user is swiping on.
+ */
+bool usage_view_takeover_active(void);
+
+/*
+ * Re-apply the takeover's visibility from the current status and have_data.
+ *
+ * For callers that blanket-restore screen children and would otherwise put a
+ * stale decision back on screen; see the definition.
+ */
+void usage_view_sync_takeover(void);
+
 /* Fable's weekly utilization for the long-press card (Claude's windows
  * today are all-models + fable); -1 = unknown. Fed by either data source
  * alongside the headline numbers. */

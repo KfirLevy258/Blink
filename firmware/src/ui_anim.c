@@ -55,6 +55,15 @@ bool ui_anim_gesture_muted(void)
 	return k_uptime_get() < mute_until;
 }
 
+void ui_anim_gesture_mute(int ms)
+{
+	int64_t until = k_uptime_get() + ms;
+
+	if (until > mute_until) {	/* never shorten a window already open */
+		mute_until = until;
+	}
+}
+
 static void gesture_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
@@ -97,6 +106,11 @@ static void blit_cb(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 	display_write(disp, x, y, &desc, pix);
 }
 
+/* Marks a sibling this file hid, so the restore pass can tell it from one that
+ * was already hidden before the clip started. Free for application use; no
+ * other module in the tree touches the USER flags. */
+#define PEER_HID_BY_US	LV_OBJ_FLAG_USER_1
+
 /*
  * Blank (or restore) everything sharing the overlay's parent.
  *
@@ -108,11 +122,23 @@ static void blit_cb(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
  *
  * Hiding stops it at the source rather than chasing individual widgets:
  * lv_obj_area_is_visible() returns false for a hidden object AND for any
- * object with a hidden parent, so nothing beneath can invalidate no matter how
- * deeply nested or what starts it -- a countdown label, a spinner, a status
- * change arriving over the wire. The countdown keeps running and stays
- * correct; it simply never reaches the display, so the gauges are current the
- * moment they are uncovered rather than frozen at the time the clip started.
+ * object with a hidden parent, so no descendant of one of these siblings can
+ * invalidate no matter how deeply nested or what starts it -- a countdown
+ * label, a spinner, a status change arriving over the wire. The countdown
+ * keeps running and stays correct; it simply never reaches the display, so the
+ * gauges are current the moment they are uncovered rather than frozen at the
+ * time the clip started. (It reaches the overlay's SIBLINGS only. Anything
+ * parented to lv_layer_top() is drawn unconditionally by every refresh and is
+ * not covered here -- ui_slide_top_hide() is what handles that layer, and
+ * ui_anim_run holds it hidden for the length of the show.)
+ *
+ * Restoring is not "clear HIDDEN on everything": two of the gauge screen's own
+ * children are legitimately hidden in the steady state -- the long-press peek
+ * card, and the full-screen CONNECTING overlay once data has arrived. Blanket
+ * clearing brings both back, and neither reliably hides itself again: the peek
+ * only decrements its TTL while already visible, so it would sit over the
+ * gauges indefinitely. So the hide pass marks what it actually hid with
+ * USER_1, and the restore pass unhides exactly that set.
  */
 static void peers_set_hidden(lv_obj_t *ov, bool hide)
 {
@@ -126,9 +152,12 @@ static void peers_set_hidden(lv_obj_t *ov, bool hide)
 			continue;
 		}
 		if (hide) {
-			lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
-		} else {
-			lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN);
+			if (lv_obj_has_flag(c, LV_OBJ_FLAG_HIDDEN)) {
+				continue;	/* already hidden; not ours */
+			}
+			lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN | PEER_HID_BY_US);
+		} else if (lv_obj_has_flag(c, PEER_HID_BY_US)) {
+			lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN | PEER_HID_BY_US);
 		}
 	}
 }
@@ -166,7 +195,7 @@ void ui_anim_run(void (*pump)(void))
 	 * invalidate the screen, and refreshing that invalidation repaints over
 	 * the gauge pixels the scroll is about to carry away.
 	 */
-	ui_slide_freeze(true);
+	ui_slide_begin();
 
 	lv_obj_t *ov = lv_obj_create(lv_scr_act());
 
@@ -193,15 +222,28 @@ void ui_anim_run(void (*pump)(void))
 	 * way, so the two easter eggs stay opposite.
 	 *
 	 * The mute is set wide before the run and tightened after, because
-	 * ui_slide_run() blocks for the whole transition while pump() keeps
-	 * feeding LVGL input: without it the tail of the opening swipe reaches
-	 * gesture_cb, which exits on either direction, and the show closes
-	 * itself in the motion that started it.
+	 * ui_slide_run() blocks for the whole transition and nothing dispatches
+	 * input while it does -- pump() does not run lv_timer_handler(). The
+	 * tail of the opening swipe is therefore still sitting in the input
+	 * msgq when the slide ends, and arrives in the burst just after it.
+	 * Without the mute it reaches gesture_cb, which exits on either
+	 * direction, and the show closes itself in the motion that started it.
 	 */
 	enter_mute_until = k_uptime_get() + UI_SLIDE_MS * 6;
 	mute_until = enter_mute_until;
 	ui_slide_run(UI_SLIDE_RIGHT, pump);
 	enter_mute_until = k_uptime_get() + 250;
+
+	/*
+	 * That slide's settle restored lv_layer_top(); hide it again for the
+	 * show. The clip streams frames straight to GRAM, and anything on that
+	 * layer is drawn by every refresh no matter what area is being
+	 * refreshed -- ui_touchfx's press echo lives there and its timer keeps
+	 * running inside idle_until(), so each touch (the exit swipe included)
+	 * blooms a circle over the streamed image and leaves a flat clay hole
+	 * where the overlay repaints behind it. Restored by the exit slide.
+	 */
+	ui_slide_top_hide(true);
 
 	/* Borrowed from the LVGL pool for the show only, same as the splash
 	 * (a permanent buffer starved the WiFi driver -- see ui_boot.c). */
@@ -256,8 +298,13 @@ void ui_anim_run(void (*pump)(void))
 	 * direction, so both halves of that were reachable; clearing `pending`
 	 * afterwards only ever caught the right-swipe one.
 	 */
-	ui_slide_freeze(true);
+	ui_slide_begin();
 	peers_set_hidden(ov, false);
+	/* The restore above replays what was visible when the clip STARTED. Let
+	 * the view re-decide the one piece of that which can legitimately have
+	 * changed since: the first data can arrive mid-clip, and putting the
+	 * CONNECTING bar back over live gauges is the 2026-08-18 report. */
+	usage_view_sync_takeover();
 	lv_obj_del(ov);
 	lv_obj_update_layout(lv_screen_active());
 	ui_slide_freeze(false);
