@@ -175,6 +175,15 @@ void portal_idle_hook(void)
  * whatever screen is up animating. */
 static void wifi_idle(void)
 {
+	/* Feed the boot watchdog here too. This hook is what net_wifi pumps
+	 * through scan, association and DHCP -- up to ~66 s on a failed join,
+	 * against a 30 s window -- and it fed nothing, so the watchdog reset a
+	 * perfectly healthy board and MCUboot reverted a good image: the exact
+	 * opposite of its job. Fed from the loops themselves rather than a
+	 * k_timer on purpose: a timer would keep feeding from ISR context even
+	 * with the main thread wedged, which is the hang this is here to catch.
+	 */
+	ota_boot_pump();
 	lv_timer_handler();
 }
 
@@ -188,6 +197,7 @@ static void wifi_idle(void)
 static void wifi_settle(void)
 {
 	for (int i = 0; i < 500; i++) {	/* 5 s */
+		ota_boot_pump();	/* 5 s of the 30 s window; see wifi_idle */
 		lv_timer_handler();
 		k_sleep(K_MSEC(10));
 	}
@@ -232,6 +242,12 @@ static void wifi_settle(void)
  * revert. */
 #define REFRESH_RETRY_MIN_MS (10 * 1000)
 #define REFRESH_RETRY_MAX_MS (5 * 60 * 1000)
+/* A 401 that survives a SUCCESSFUL refresh is not a stale access token -- a
+ * scope mismatch, a 401 from an intermediary, an entitlement pulled. Backing
+ * the refresh off would be wrong (it worked), so the POLL backs off instead;
+ * otherwise that state re-POSTs a token every 5 s indefinitely. */
+#define UNAUTH_WAIT_MIN_MS (5 * 1000)
+#define UNAUTH_WAIT_MAX_MS (10 * 60 * 1000)
 
 static K_THREAD_STACK_DEFINE(net_stack, 8192);	/* TLS-sized, like main's */
 static struct k_thread net_thread;
@@ -655,16 +671,90 @@ static void post_status(enum usage_status st)
 }
 
 /*
+ * One owner for the refresh backoff ladder. It was open-coded at three sites
+ * that each got a different subset right -- one reset it on success and one
+ * did not, one stamped the next attempt and one did not, and the mid-run site
+ * sat outside it entirely.
+ */
+static int refresh_backoff_arm(int64_t *next, int *wait_ms)
+{
+	int used = *wait_ms;
+
+	*next = k_uptime_get() + used;
+	*wait_ms = MIN(used * 2, REFRESH_RETRY_MAX_MS);
+	return used;	/* the wait actually scheduled, for the log line */
+}
+
+static void refresh_backoff_reset(int64_t *next, int *wait_ms)
+{
+	*next = 0;
+	*wait_ms = REFRESH_RETRY_MIN_MS;
+}
+
+/*
+ * A rejected credential is only fatal once it REPEATS. oauth.c maps both 400
+ * and 401 to -EACCES, so one bad response -- an intermediary, a brief
+ * server-side fault, a clock skew that resolves itself -- used to wipe the
+ * token and reboot into provisioning, from any of the three call sites. This
+ * is the consecutive-failure count the mid-run comment used to ask for; it
+ * lives here because every refresh funnels through the function below.
+ */
+#define REFRESH_REJECT_LIMIT 3
+/*
+ * ...and only after the rejections have persisted this long.
+ *
+ * The count alone is not a measure of anything: the retry ladder starts at
+ * REFRESH_RETRY_MIN_MS and doubles, so three rejections land at t=0, t=10 s and
+ * t=30 s. A token-endpoint fault lasting under a minute -- or a hotel/office
+ * portal answering 4xx to everything, which oauth.c cannot distinguish from a
+ * genuine invalid_grant because it maps both 400 and 401 to -EACCES -- would
+ * wipe a perfectly good credential and force a full re-login. Requiring the
+ * streak to SPAN half an hour makes the test "this has been broken for a
+ * while", which is what the decision actually rests on.
+ */
+#define REFRESH_REJECT_MIN_SPAN_MS (30 * 60 * 1000)
+
+static int refresh_rejects;
+static int64_t refresh_reject_since;	/* uptime of the streak's first rejection */
+
+/*
+ * When the last token POST went out, successful or not.
+ *
+ * The mid-run 401 path needs to know "did we just refresh?", and it used to
+ * ask next_refresh -- which is a FAILURE stamp, cleared to 0 by
+ * refresh_backoff_reset(). After a SUCCESSFUL refresh that test reads
+ * `now < 0`, i.e. false, so the guard it was written to provide could not fire
+ * exactly when it was needed. This is the question it was actually asking.
+ */
+static int64_t last_refresh_ms;
+#define REFRESH_MIN_GAP_MS (60 * 1000)
+
+/*
+ * How many times a mid-run 401 may be answered with a refresh that SUCCEEDS.
+ *
+ * If the credential refreshes cleanly and the very next fetch still 401s, the
+ * credential was never the problem -- a scope mismatch, an intermediary, or one
+ * of the misclassified cases below. Refreshing again cannot help, but the code
+ * did it on every retry forever: a full DNS + TLS + ECDHE POST and an NVS token
+ * rewrite, ~144 a day at the 10-minute ceiling, each rotating the refresh
+ * token. After this many, back off the poll and leave the credential alone.
+ */
+#define UNAUTH_REFRESH_TRIES 2
+static int unauth_refresh_done;
+
+/*
  * The worker's only way to refresh. Returns 0 with *tok holding a usable
- * credential and *deadline reset; returns a negative errno on TRANSPORT
- * failure, leaving *tok untouched so the caller still has something valid to
- * retry with. It does not return at all on a REJECTED credential: that is the
- * one failure a retry cannot fix, so it drops the token and reboots into
- * provisioning.
+ * credential and *deadline reset; returns a negative errno on failure, leaving
+ * *tok untouched so the caller still has something valid to retry with. It
+ * does not return at all once a REJECTED credential has been rejected
+ * REFRESH_REJECT_LIMIT times running AND has stayed that way for
+ * REFRESH_REJECT_MIN_SPAN_MS: at that point a retry cannot fix it, so it drops
+ * the token and reboots into provisioning. Both conditions matter -- see the
+ * span constant for why the count on its own measures nothing.
  *
  * The reply lands in a separate `fresh` rather than in *tok, so a caller
- * passing tok->refresh as `sent` (all of them do) is not reading a buffer this
- * function is writing.
+ * passing tok->refresh as `sent` is not reading a buffer this function is
+ * writing. (The !authed site passes the stored bootstrap copy instead.)
  */
 static int worker_refresh_token(const char *sent, struct oauth_tokens *tok,
 				int64_t *deadline)
@@ -672,11 +762,27 @@ static int worker_refresh_token(const char *sent, struct oauth_tokens *tok,
 	struct oauth_tokens fresh;
 	int rc = oauth_refresh(sent, &fresh);
 
+	last_refresh_ms = k_uptime_get();	/* attempted, whatever the outcome */
+
 	if (oauth_creds_rejected(rc)) {
+		if (refresh_rejects == 0) {
+			refresh_reject_since = k_uptime_get();
+		}
+		if (++refresh_rejects < REFRESH_REJECT_LIMIT ||
+		    k_uptime_get() - refresh_reject_since < REFRESH_REJECT_MIN_SPAN_MS) {
+			/* Hand it back as an ordinary failure: the caller backs
+			 * off and keeps the credential, and a one-off 400/401
+			 * costs a retry instead of the whole provisioning. */
+			printk("[oauth] refresh rejected (%d/%d, %lld s into the streak) -- token kept, backing off\n",
+			       refresh_rejects, REFRESH_REJECT_LIMIT,
+			       (k_uptime_get() - refresh_reject_since) / 1000);
+			return rc;
+		}
 		/* The "log in once" chain really is broken. Drop the token and
 		 * reboot; with none stored the board re-provisions, keeping the
 		 * WiFi credentials. */
-		printk("[oauth] refresh rejected -- dropping the token, re-provisioning\n");
+		printk("[oauth] refresh rejected %d times -- dropping the token, re-provisioning\n",
+		       refresh_rejects);
 		cfg_clear_token();
 		post_status(USAGE_STATUS_ERROR);
 		k_sleep(K_SECONDS(3));
@@ -684,6 +790,12 @@ static int worker_refresh_token(const char *sent, struct oauth_tokens *tok,
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 	if (rc != 0) {
+		/* Transport, not rejection -- so the streak is broken. Both
+		 * comments here call this a CONSECUTIVE count; without this it
+		 * was a since-the-last-success count, and three isolated 400s
+		 * spread across a day reached the limit just as surely as a
+		 * genuinely dead credential. */
+		refresh_rejects = 0;
 		return rc;
 	}
 	if (fresh.refresh[0] == '\0') {
@@ -693,6 +805,7 @@ static int worker_refresh_token(const char *sent, struct oauth_tokens *tok,
 		printk("[oauth] refresh returned an empty token -- keeping the stored one\n");
 		return -EINVAL;
 	}
+	refresh_rejects = 0;
 	*tok = fresh;
 	cfg_set_token(tok->refresh);	/* persist a rotated token before use */
 	*deadline = k_uptime_get() + (int64_t)tok->expires_in * 1000;
@@ -713,7 +826,13 @@ static void net_worker(void *a, void *b, void *c)
 	int rejoin_wait_ms = REJOIN_WAIT_MIN_MS;
 	int64_t next_refresh = 0;
 	int refresh_wait_ms = REFRESH_RETRY_MIN_MS;
+	int unauth_wait_ms = UNAUTH_WAIT_MIN_MS;
 	bool authed = false;
+	/* Whether the gauges have ever shown real numbers. usage_view restores
+	 * the CONNECTING overlay only for DISCONNECTED, so posting ERROR before
+	 * any data has landed hides the boot screen behind bare "--%" gauges
+	 * captioned "error - showing last known" when there is no last known. */
+	bool had_usage = false;
 
 	/* Advance the boot bar before each blocking step: visible progress on
 	 * one screen instead of a title per stage (user request 2026-07-15).
@@ -757,8 +876,19 @@ static void net_worker(void *a, void *b, void *c)
 					rejoin_wait_ms = REJOIN_WAIT_MIN_MS;
 					next_poll = 0;	/* refresh at once */
 					next_tz = 0;
-					next_refresh = 0;	/* sign in again at once */
-					refresh_wait_ms = REFRESH_RETRY_MIN_MS;
+					/* Re-opens the refresh gate and clears
+					 * the ladder so the first attempt after
+					 * a rejoin is not stuck behind a stale
+					 * backoff. It does NOT re-run sign-in:
+					 * `authed` is never cleared. Do not
+					 * "fix" that by clearing it here -- the
+					 * !authed path re-sends worker_refresh,
+					 * the bootstrap token, which the
+					 * endpoint has long since rotated. That
+					 * is a 400 invalid_grant on every WiFi
+					 * flap, and now a wipe once it repeats. */
+					refresh_backoff_reset(&next_refresh,
+							      &refresh_wait_ms);
 				} else {
 					/* Back off: a router that is down stays
 					 * down for minutes, and hammering the
@@ -816,12 +946,14 @@ static void net_worker(void *a, void *b, void *c)
 			 * CONNECTING bar behind bare "--%" gauges captioned
 			 * "error - showing last known" -- when there was no last
 			 * known -- and nothing ever brought it back. */
+			int wait = refresh_backoff_arm(&next_refresh,
+						       &refresh_wait_ms);
+
 			post_status(USAGE_STATUS_DISCONNECTED);
-			printk("[oauth] refresh failed (%d) -- transport, token kept, retry in %d s\n",
-			       rc, refresh_wait_ms / 1000);
-			next_refresh = k_uptime_get() + refresh_wait_ms;
-			refresh_wait_ms = MIN(refresh_wait_ms * 2,
-					      REFRESH_RETRY_MAX_MS);
+			printk("[oauth] refresh failed (%d) -- %s, token kept, retry in %d s\n",
+			       rc,
+			       oauth_creds_rejected(rc) ? "rejected" : "transport",
+			       wait / 1000);
 			continue;
 		}
 
@@ -834,13 +966,14 @@ static void net_worker(void *a, void *b, void *c)
 		if (now > token_deadline - 5 * 60 * 1000 && now >= next_refresh) {
 			if (worker_refresh_token(tok.refresh, &tok,
 						 &token_deadline) == 0) {
-				refresh_wait_ms = REFRESH_RETRY_MIN_MS;
+				refresh_backoff_reset(&next_refresh,
+						      &refresh_wait_ms);
 			} else {
-				next_refresh = k_uptime_get() + refresh_wait_ms;
+				int wait = refresh_backoff_arm(&next_refresh,
+							       &refresh_wait_ms);
+
 				printk("[oauth] proactive refresh failed -- retry in %d s\n",
-				       refresh_wait_ms / 1000);
-				refresh_wait_ms = MIN(refresh_wait_ms * 2,
-						      REFRESH_RETRY_MAX_MS);
+				       wait / 1000);
 			}
 		}
 
@@ -867,6 +1000,9 @@ static void net_worker(void *a, void *b, void *c)
 				};
 
 				k_msgq_put(&net_evtq, &m, K_NO_WAIT);
+				had_usage = true;
+				unauth_wait_ms = UNAUTH_WAIT_MIN_MS;
+				unauth_refresh_done = 0;	/* 401s are over */
 				next_poll = now + 60 * 1000;
 			} else if (r == USAGE_RATE_LIMITED) {
 				post_status(USAGE_STATUS_STALE);
@@ -886,19 +1022,54 @@ static void net_worker(void *a, void *b, void *c)
 				 * SUCCEEDS while the fetch keeps 401ing -- a scope
 				 * mismatch, or a 401 from an intermediary.
 				 *
-				 * All three want the same thing: a consecutive-
-				 * failure count that escalates to ERROR and then
-				 * re-provisions. That is a behaviour change, so it
-				 * is deliberately not in this fix. */
-				if (worker_refresh_token(tok.refresh, &tok,
-							 &token_deadline) == 0) {
-					next_poll = k_uptime_get() + 5 * 1000;
+				 * The consecutive-failure count now lives in
+				 * worker_refresh_token, so a repeated rejection
+				 * does re-provision; the misclassified 403 and
+				 * invalid_grant cases still retry, but under the
+				 * ladder below rather than forever at 5 s. */
+				if (now < next_refresh ||
+				    now - last_refresh_ms < REFRESH_MIN_GAP_MS ||
+				    unauth_refresh_done >= UNAUTH_REFRESH_TRIES) {
+					/*
+					 * Don't POST. Three ways that is the
+					 * right answer: the ladder has already
+					 * scheduled an attempt; we refreshed
+					 * moments ago (the proactive refresh
+					 * runs earlier in this same iteration,
+					 * and testing next_refresh could not
+					 * catch that -- see last_refresh_ms);
+					 * or refreshing has already been tried
+					 * and demonstrably does not fix this
+					 * 401, so repeating it is just token
+					 * churn.
+					 */
+					post_status(had_usage ? USAGE_STATUS_ERROR
+							      : USAGE_STATUS_DISCONNECTED);
+					next_poll = k_uptime_get() + unauth_wait_ms;
+					unauth_wait_ms = MIN(unauth_wait_ms * 2,
+							     UNAUTH_WAIT_MAX_MS);
+				} else if (worker_refresh_token(tok.refresh, &tok,
+								&token_deadline) == 0) {
+					/* The refresh worked, so this 401 is not
+					 * a stale access token. Leave the refresh
+					 * ladder clear and back off the poll. */
+					unauth_refresh_done++;
+					refresh_backoff_reset(&next_refresh,
+							      &refresh_wait_ms);
+					next_poll = k_uptime_get() + unauth_wait_ms;
+					unauth_wait_ms = MIN(unauth_wait_ms * 2,
+							     UNAUTH_WAIT_MAX_MS);
 				} else {
-					post_status(USAGE_STATUS_ERROR);
-					next_poll = k_uptime_get() + 60 * 1000;
+					int wait = refresh_backoff_arm(&next_refresh,
+								       &refresh_wait_ms);
+
+					post_status(had_usage ? USAGE_STATUS_ERROR
+							      : USAGE_STATUS_DISCONNECTED);
+					next_poll = k_uptime_get() + wait;
 				}
 			} else {
-				post_status(USAGE_STATUS_ERROR);
+				post_status(had_usage ? USAGE_STATUS_ERROR
+						      : USAGE_STATUS_DISCONNECTED);
 				next_poll = now + 60 * 1000;
 			}
 		}
@@ -1026,6 +1197,11 @@ static void run_standalone(void)
 
 	int64_t last_tick = k_uptime_get();
 
+	/* Anything the user tapped during the scan and the settle above was
+	 * latched with nothing to service it -- up to a minute ago. Acting on
+	 * it now would slide the panel in unprompted. See ui_settings.h. */
+	ui_settings_drop_pending();
+
 	while (1) {
 		struct net_evt e;
 
@@ -1068,6 +1244,10 @@ static void run_usb(void)
 	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
 	bool can_fall_back = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
 			     cfg_get_token(tok, sizeof(tok));
+
+	/* Same as run_standalone: drop anything latched before this loop
+	 * existed to service it. See ui_settings.h. */
+	ui_settings_drop_pending();
 
 	while (1) {
 		proto_service();
