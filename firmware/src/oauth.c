@@ -30,6 +30,10 @@
 #define TOKEN_PATH   "/v1/oauth/token"
 #define CA_TAG_ISRG  2
 
+/* Bounds on the server-supplied expires_in, in seconds. See oauth_expires_clamp. */
+#define EXPIRES_MIN  600
+#define EXPIRES_MAX  (7 * 24 * 3600)
+
 /* --- base64url (no padding). Pure, host-tested. --- */
 int oauth_base64url(const unsigned char *in, size_t inlen, char *out, size_t outlen)
 {
@@ -115,6 +119,43 @@ int oauth_authorize_url(const char *verifier, char *out, size_t outlen)
 		AUTHORIZE, CLIENT_ID, redir_enc, scope_enc, challenge, challenge);
 
 	return (n > 0 && (size_t)n < outlen) ? n : -1;
+}
+
+/*
+ * See oauth.h. Outside the OAUTH_HOST_TEST guard on purpose: pure, and the
+ * case that matters most here is one only a host test can reach.
+ *
+ * Bounded at BOTH ends, with the floor phrased as !(x >= MIN) so a NaN lands
+ * in it: every comparison against a NaN is false, so the plain `x < MIN` waves
+ * one straight through to the cast.
+ *
+ * The floor is why this exists. The proactive refresh fires inside a fixed
+ * 5-minute pre-expiry window, so any expires_in at or below 300 s leaves that
+ * window permanently open: the condition is true again on the very next loop
+ * tick, turning it into a DNS + TLS + ECDHE POST (and a config write) every
+ * 250 ms. An absent field safely defaults to 3600 at the call site, but a
+ * zero, negative or tiny value was taken verbatim.
+ *
+ * The ceiling closes the same door from the other side. msg_get_double is a
+ * bare strtod: it accepts "nan" and "inf", and a truncated body or an upstream
+ * format change can hand back a magnitude past int range. Casting any of those
+ * to int is undefined behaviour, and in practice it lands negative -- which
+ * puts main.c's token_deadline in the past and reopens the very storm the
+ * floor prevents.
+ *
+ * Anthropic sends 3600/28800 today, so both bounds only shape the pathological
+ * case; a token that really did expire sooner surfaces as a 401 on the mid-run
+ * path, which backs off.
+ */
+int oauth_expires_clamp(double expires)
+{
+	if (!(expires >= EXPIRES_MIN)) {
+		return EXPIRES_MIN;
+	}
+	if (expires > EXPIRES_MAX) {
+		return EXPIRES_MAX;
+	}
+	return (int)expires;
 }
 
 /* See oauth.h. Deliberately lives outside the OAUTH_HOST_TEST guard: it is pure
@@ -273,7 +314,7 @@ static int token_post(const char *json, struct oauth_tokens *out)
 		out->refresh[0] = '\0';
 	}
 	msg_get_double(tok_body, "expires_in", &expires);
-	out->expires_in = (int)expires;
+	out->expires_in = oauth_expires_clamp(expires);
 	return 0;
 }
 

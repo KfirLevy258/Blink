@@ -5,6 +5,7 @@
  * URL builder links.
  */
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include "oauth.h"
@@ -104,6 +105,31 @@ int main(void)
 
 		oauth_refresh_snapshot("", keep, sizeof(keep));
 		CK(keep[0] == '\0', "empty snapshot stays empty");
+	}
+
+	/*
+	 * expires_in bounds. The NaN and infinity cases are the reason this is
+	 * a host test at all: msg_get_double is a bare strtod, so a body can
+	 * hand back either, every comparison against a NaN is false (so the
+	 * obvious `x < MIN` form lets one reach an undefined cast), and a
+	 * result at or below zero puts main.c's token_deadline in the past --
+	 * a token POST every 250 ms, forever.
+	 */
+	{
+		CK(oauth_expires_clamp(3600) == 3600, "typical 3600 passes through");
+		CK(oauth_expires_clamp(28800) == 28800, "typical 28800 passes through");
+		CK(oauth_expires_clamp(600) == 600, "at the floor");
+		CK(oauth_expires_clamp(599) == 600, "just under the floor");
+		CK(oauth_expires_clamp(0) == 600, "zero floored");
+		CK(oauth_expires_clamp(-1) == 600, "negative floored");
+		CK(oauth_expires_clamp(NAN) >= 600, "NaN floored, not cast");
+		CK(oauth_expires_clamp(INFINITY) > 0 &&
+		   oauth_expires_clamp(INFINITY) <= 7 * 24 * 3600,
+		   "+inf capped");
+		CK(oauth_expires_clamp(-INFINITY) == 600, "-inf floored");
+		CK(oauth_expires_clamp(1e300) <= 7 * 24 * 3600, "1e300 capped");
+		CK(oauth_expires_clamp(3e9) <= 7 * 24 * 3600,
+		   "past INT_MAX capped, never negative");
 	}
 
 	printf("\n%s (%d failures)\n", failures ? "FAILURES" : "ALL PASSED", failures);

@@ -46,11 +46,15 @@ int oauth_exchange_code(const char *pasted_code, const char *verifier,
 int oauth_refresh(const char *refresh_token, struct oauth_tokens *out);
 
 /*
- * Snapshot / restore pair for the refresh token across a token call. Pure, and
- * host-tested for exactly the aliasing below.
+ * Snapshot / restore pair for the refresh token across a token call. Pure.
+ * Host-tested only as helpers: host_test.c performs the snapshot-before-call
+ * ordering itself rather than exercising code that decides it, so it passes
+ * unchanged with the aliasing bug reintroduced. Treat the ordering below as
+ * unguarded by tests until oauth_refresh grows a stubbable token_post seam.
  *
- * Callers pass out->refresh AS the refresh_token argument -- main.c does it at
- * three sites -- and the endpoint's reply is parsed straight into *out. So by
+ * Callers pass out->refresh AS the refresh_token argument -- main.c's refresh
+ * funnel does, for the two post-sign-in sites -- and the endpoint's reply is
+ * parsed straight into *out. So by
  * the time we know whether a new refresh token came back, the old one is
  * already gone. Take the snapshot BEFORE the call; hand it back after.
  *
@@ -71,5 +75,12 @@ void oauth_refresh_retain(const char *keep, struct oauth_tokens *out);
  * device out for good on a momentary blip.
  */
 bool oauth_creds_rejected(int rc);
+
+/*
+ * Bound a server-supplied expires_in (seconds) into something main.c can build
+ * a deadline from. Rejects NaN and infinities as well as out-of-range values;
+ * see the definition for why each end matters.
+ */
+int oauth_expires_clamp(double expires);
 
 #endif /* OAUTH_H */
