@@ -8,13 +8,43 @@
 
 **Tech Stack:** Zephyr 4.4 / ESP32 (CYD board, `esp32_devkitc/esp32/procpu`), LVGL 9.3, mbedTLS, MCUboot + sysbuild, flash encryption. Host tests are plain C compiled with `cc`.
 
+## Status (2026-08-18)
+
+Tasks 1-8 are implemented and merged to `main`; the step checkboxes below were
+never ticked as the work went in, and are left as written rather than
+back-filled from memory -- `git log` is the honest record. A follow-up review on
+2026-08-18 found fourteen further defects in this branch, fixed on top.
+
+Task 9's hardware pass is **partly done**. Verified on the unfused board:
+builds, boots, live data over USB, and the touch-crash regression that follow-up
+introduced and fixed. Still outstanding, and none of it is optional before
+calling this closed:
+
+- The fused unit has never been flashed with this branch.
+- The router-off test that exercises the WiFi rejoin backoff and the OAuth
+  transport-retry branch -- neither has ever run on hardware.
+- On-panel confirmation of the transition behaviour (settings open/close, the
+  clip, the CONNECTING takeover rules).
+
 ## Global Constraints
 
 - **Commits must NOT carry a `Co-Authored-By: Claude` trailer.** This repo pushes to the public `KfirLevy258/Clauge`.
 - **Every on-screen sentence starts with a capital letter** (sentence case).
 - **"Done" means flashed to the board and boot-verified, not merely built.** Task 9 is not optional.
-- **Build is sysbuild + MCUboot only**, into `build-sb`, board `esp32_devkitc/esp32/procpu`. A different `-b` poisons the build dir; recover with `-p always`.
-- **Flash only via `tools/flash_encrypted.sh`.** A plain `west flash` writes plaintext the encrypted ROM cannot boot and leaves the board dark.
+- **The board decides the build and the flash path, because there are two of
+  them.** This was written as "sysbuild only, `flash_encrypted.sh` only", which
+  is right for the FUSED unit and wrong for the other one -- it contradicted
+  both READMEs and `tools/dev.sh`, and following it on an unfused board writes
+  encrypted images its ROM cannot read.
+  - Fused (flash encryption on): sysbuild + MCUboot into `build-sb`, flashed
+    with `tools/flash_encrypted.sh`. Required for anything touching OTA, since
+    MCUboot is only in that image.
+  - Unfused (stock CYD): `west build -b esp32_devkitc/esp32/procpu` into
+    `build`, flashed with `tools/dev.sh flash`.
+  - Ask the chip rather than guessing -- `espefuse.py summary | grep
+    FLASH_CRYPT_CNT`, odd bits set means encrypted. Both scripts now check this
+    themselves and refuse a board they would break (`tools/lib_efuse.sh`).
+- A different `-b` poisons a build dir; recover with `-p always`.
 - Opening the serial port resets the board, and the port name varies by USB socket. Stop any logger before flashing.
 
 **The build command, used verbatim in every task that builds:**
