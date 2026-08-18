@@ -1,6 +1,19 @@
 import unittest
+import urllib.error
 from pc import protocol
 from pc.bridge import Bridge
+
+
+def http_error(code, retry_after=None):
+    """A urllib HTTPError shaped like the real thing, headers included."""
+    hdrs = {"Retry-After": str(retry_after)} if retry_after is not None else {}
+    return urllib.error.HTTPError("http://x", code, "boom", hdrs, None)
+
+
+def raising(exc):
+    def _f():
+        raise exc
+    return _f
 
 
 class FakeClock:
@@ -105,3 +118,115 @@ class TestBridge(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRateLimit(unittest.TestCase):
+    """A 429 is not a failure: the numbers already on screen are still true,
+    and the board has an amber "showing last known" state for exactly this.
+    Reporting it as an error paints a healthy board red, and retrying at the
+    usual cadence keeps the throttle closed."""
+
+    def setUp(self):
+        self.sent = []
+        self.clock = FakeClock()
+        self.calls = []
+
+    def _bridge(self, fetch):
+        return Bridge(write_msg=self.sent.append, fetch_usage=fetch,
+                      now=self.clock.now, wall=lambda: (1752444000, 180))
+
+    def _counting_429(self, retry_after=None):
+        def _f():
+            self.calls.append(self.clock.t)
+            raise http_error(429, retry_after)
+        return _f
+
+    def test_429_reports_rate_limited_not_error(self):
+        b = self._bridge(self._counting_429())
+        b.poll_once()
+        self.assertEqual(self.sent[-1]["t"], "status")
+        self.assertEqual(self.sent[-1]["state"], "rate_limited")
+
+    def test_429_suppresses_the_next_fetch(self):
+        b = self._bridge(self._counting_429())
+        b.poll_once()
+        self.clock.t += 60          # the normal poll cadence
+        b.poll_once()
+        self.assertEqual(len(self.calls), 1, "second poll must not hit the API")
+
+    def test_backoff_expires(self):
+        b = self._bridge(self._counting_429())
+        b.poll_once()
+        self.clock.t += 10000
+        b.poll_once()
+        self.assertEqual(len(self.calls), 2)
+
+    def test_still_reports_while_backed_off(self):
+        """Silence would leave the board showing a stale green dot."""
+        b = self._bridge(self._counting_429())
+        b.poll_once()
+        self.sent.clear()
+        self.clock.t += 60
+        b.poll_once()
+        self.assertEqual([m["t"] for m in self.sent], ["time", "status"])
+        self.assertEqual(self.sent[-1]["state"], "rate_limited")
+
+    def test_retry_after_is_honoured(self):
+        b = self._bridge(self._counting_429(retry_after=300))
+        b.poll_once()
+        self.clock.t += 299
+        b.poll_once()
+        self.assertEqual(len(self.calls), 1)
+        self.clock.t += 2
+        b.poll_once()
+        self.assertEqual(len(self.calls), 2)
+
+    def test_backoff_grows_then_resets_on_success(self):
+        state = {"fail": True}
+
+        def flaky():
+            self.calls.append(self.clock.t)
+            if state["fail"]:
+                raise http_error(429)
+            return protocol.usage(1.0, "R1", 2.0, "R2", [])
+
+        b = self._bridge(flaky)
+        b.poll_once()                       # 1st 429 -> min backoff
+        self.clock.t += 120
+        b.poll_once()                       # 2nd 429 -> doubled
+        self.clock.t += 120
+        b.poll_once()                       # still inside the longer window
+        self.assertEqual(len(self.calls), 2)
+        state["fail"] = False
+        self.clock.t += 10000
+        b.poll_once()                       # succeeds -> backoff cleared
+        self.assertEqual(self.sent[-1]["t"], "usage")
+        self.clock.t += 60
+        b.poll_once()
+        self.assertEqual(len(self.calls), 4, "success must clear the backoff")
+
+    def test_other_http_errors_stay_errors(self):
+        b = self._bridge(raising(http_error(500)))
+        b.poll_once()
+        self.assertEqual(self.sent[-1]["state"], "error")
+
+    def test_other_errors_do_not_block_polling(self):
+        def boom():
+            self.calls.append(self.clock.t)
+            raise RuntimeError("api down")
+        b = self._bridge(boom)
+        b.poll_once()
+        self.clock.t += 60
+        b.poll_once()
+        self.assertEqual(len(self.calls), 2)
+
+    def test_reconnect_while_throttled_does_not_refetch(self):
+        """Every board reboot sends hello, and hello pushes immediately --
+        so a flashing session used to fire an off-cadence call each time."""
+        b = self._bridge(self._counting_429())
+        b.poll_once()
+        self.sent.clear()
+        b.on_message({"t": "hello", "v": 2, "board_id": "ab"})
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual([m["t"] for m in self.sent],
+                         ["welcome", "time", "status"])
