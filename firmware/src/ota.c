@@ -20,6 +20,7 @@
 #include <zephyr/sys/printk.h>
 #include <mbedtls/sha256.h>
 #include <string.h>
+#include <strings.h>	/* strncasecmp; string.h does not declare it */
 #include <stdio.h>
 
 #include "ota.h"
@@ -113,8 +114,18 @@ static void capture_headers(struct http_response *rsp)
 	}
 }
 
-static void capture_cb(struct http_response *rsp, enum http_final_call final,
-		       void *u)
+/*
+ * Returns int, not void, and the type matters.
+ *
+ * Zephyr's http_response_cb_t returns int, and http_client.c propagates it: a
+ * negative value from the HTTP_DATA_MORE path is taken as "aborted by the
+ * application" and fails the transfer with -ECONNABORTED. Declared void, the
+ * return register holds whatever was last in it, so a multi-fragment response
+ * -- which is every reply here big enough to span two reads -- could abort on
+ * garbage. Always 0: nothing below wants to stop the transfer early.
+ */
+static int capture_cb(struct http_response *rsp, enum http_final_call final,
+		      void *u)
 {
 	ARG_UNUSED(final); ARG_UNUSED(u);
 	capture_headers(rsp);
@@ -129,16 +140,17 @@ static void capture_cb(struct http_response *rsp, enum http_final_call final,
 			small_len += n;
 		}
 	}
+	return 0;
 }
 
-static void stream_cb(struct http_response *rsp, enum http_final_call final,
-		      void *u)
+static int stream_cb(struct http_response *rsp, enum http_final_call final,
+		     void *u)
 {
 	ARG_UNUSED(final); ARG_UNUSED(u);
 	capture_headers(rsp);
 	if (http_status != 200 || stream_err ||
 	    !rsp->body_frag_start || !rsp->body_frag_len) {
-		return;
+		return 0;
 	}
 
 	mbedtls_sha256_update(&sha, rsp->body_frag_start, rsp->body_frag_len);
@@ -147,7 +159,14 @@ static void stream_cb(struct http_response *rsp, enum http_final_call final,
 					      rsp->body_frag_len, false);
 	if (stream_err) {
 		printk("[ota] slot1 write failed: %d\n", stream_err);
-		return;
+		/* 0, not an error: returning negative here WOULD abort the
+		 * transfer (http_client.c treats it as "aborted by the
+		 * application"), and stopping a download whose flash writes are
+		 * already failing is arguably right -- but the caller decides
+		 * the outcome from stream_err either way, and changing when the
+		 * socket closes is not something to do untested. The guard
+		 * above means the remaining fragments cost only a memcpy. */
+		return 0;
 	}
 	dl_got += rsp->body_frag_len;
 	if (dl_total) {
@@ -172,6 +191,7 @@ static void stream_cb(struct http_response *rsp, enum http_final_call final,
 			dl_logged_bytes = dl_got;
 		}
 	}
+	return 0;
 }
 
 /* One TLS GET. body_cb==NULL captures into small_body. Returns http status

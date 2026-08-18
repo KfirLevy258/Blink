@@ -212,7 +212,17 @@ static char tok_body[1280];  /* token JSON is small */
 static size_t tok_body_len;
 static int tok_status;
 
-static void tok_cb(struct http_response *rsp, enum http_final_call final, void *u)
+/*
+ * Returns int, not void, and the type matters.
+ *
+ * Zephyr's http_response_cb_t returns int, and http_client.c propagates it: a
+ * negative value from the HTTP_DATA_MORE path is taken as "aborted by the
+ * application" and fails the transfer with -ECONNABORTED. Declared void, the
+ * return register holds whatever was last in it, so a multi-fragment response
+ * -- which is every reply here big enough to span two reads -- could abort on
+ * garbage. Always 0: nothing below wants to stop the transfer early.
+ */
+static int tok_cb(struct http_response *rsp, enum http_final_call final, void *u)
 {
 	ARG_UNUSED(final); ARG_UNUSED(u);
 	tok_status = rsp->http_status_code;
@@ -227,6 +237,7 @@ static void tok_cb(struct http_response *rsp, enum http_final_call final, void *
 			tok_body_len += n;
 		}
 	}
+	return 0;
 }
 
 static int token_post(const char *json, struct oauth_tokens *out)

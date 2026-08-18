@@ -30,7 +30,17 @@ static char body_buf[3072];  /* live usage JSON measured ~1.8 KB (2026-07-17);
 static size_t body_len;
 static int captured_status;
 
-static void response_cb(struct http_response *rsp, enum http_final_call final, void *u)
+/*
+ * Returns int, not void, and the type matters.
+ *
+ * Zephyr's http_response_cb_t returns int, and http_client.c propagates it: a
+ * negative value from the HTTP_DATA_MORE path is taken as "aborted by the
+ * application" and fails the transfer with -ECONNABORTED. Declared void, the
+ * return register holds whatever was last in it, so a multi-fragment response
+ * -- which is every reply here big enough to span two reads -- could abort on
+ * garbage. Always 0: nothing below wants to stop the transfer early.
+ */
+static int response_cb(struct http_response *rsp, enum http_final_call final, void *u)
 {
 	ARG_UNUSED(final); ARG_UNUSED(u);
 	captured_status = rsp->http_status_code;
@@ -45,6 +55,7 @@ static void response_cb(struct http_response *rsp, enum http_final_call final, v
 			body_len += n;
 		}
 	}
+	return 0;
 }
 
 enum usage_result usage_client_fetch(const char *access_token,
