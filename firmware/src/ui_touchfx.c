@@ -40,11 +40,31 @@ static void done_cb(lv_anim_t *a)
 	lv_obj_add_flag(echo, LV_OBJ_FLAG_HIDDEN);
 }
 
+static bool suspended;
+
+void ui_touchfx_suspend(bool on)
+{
+	suspended = on;
+	if (on && echo) {
+		/* Anything mid-bloom stops where it is; done_cb would only hide
+		 * it again anyway. */
+		lv_anim_delete(echo, NULL);
+		lv_obj_add_flag(echo, LV_OBJ_FLAG_HIDDEN);
+	}
+}
+
 static void poll_cb(lv_timer_t *t)
 {
 	ARG_UNUSED(t);
 	static bool was_pressed;
 	lv_indev_t *in = NULL;
+
+	if (suspended) {
+		/* Clear the edge state too, so resuming mid-press does not bloom
+		 * for a touch that started while the effect was off. */
+		was_pressed = true;
+		return;
+	}
 
 	while ((in = lv_indev_get_next(in)) != NULL) {
 		if (lv_indev_get_type(in) == LV_INDEV_TYPE_POINTER) {

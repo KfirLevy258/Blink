@@ -49,8 +49,47 @@
  *
  * `pump` (may be NULL) runs each step so the caller's background duties, and
  * on a test boot the watchdog, stay alive.
+ *
+ * `pump` must NOT call lv_timer_handler(). This drives lv_refr_now() itself,
+ * and re-entering the refresh from inside the handler is the same unsafe
+ * nesting the note above forbids -- and it would let LVGL timers create and
+ * delete objects halfway through a transition. The consequence, which callers
+ * have to design around rather than fix here, is that NO input is dispatched
+ * for the length of a transition: touch points accumulate in the input msgq
+ * and are delivered in one burst by the first lv_timer_handler() after it.
+ * That is what the gesture mutes in ui_anim exist to absorb.
  */
 void ui_slide_run(int dir, void (*pump)(void));
+
+/*
+ * Open a transition: render what is already dirty, then freeze.
+ *
+ * The freeze only blocks NEW invalidations -- LVGL's existing invalid-area
+ * list survives it untouched, and ui_slide_run's first lv_refr_now() would
+ * draw those areas too, at whatever scroll offset the panel had already moved
+ * to. Callers reach a transition straight out of the network-event drain in
+ * main.c with no lv_timer_handler() in between, so anything those handlers
+ * invalidated is still queued: a status overlay that just un-hid itself is a
+ * FULL-SCREEN area, which would paint the whole destination into every line at
+ * once and leave nothing to slide.
+ *
+ * Draining first costs one honest repaint of the outgoing screen, at offset 0,
+ * where it is invisible. Use this instead of ui_slide_freeze(true) wherever a
+ * transition begins.
+ */
+void ui_slide_begin(void);
+
+/*
+ * Hide or restore lv_layer_top() outside a transition.
+ *
+ * ui_slide_begin() hides it and ui_slide_run() restores it, which covers the
+ * slides themselves. Callers that hold the display between two slides -- the
+ * clip player streams frames straight to GRAM for as long as the user watches
+ * -- need it hidden for that stretch too: anything up there repaints over the
+ * streamed image, and ui_touchfx's press echo lives exactly there, so every
+ * touch would punch a hole through the animation.
+ */
+void ui_slide_top_hide(bool hide);
 
 /*
  * Suspend/resume LVGL invalidation around the tree surgery a transition needs.

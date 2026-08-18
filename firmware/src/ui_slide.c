@@ -7,6 +7,7 @@
 #include <lvgl.h>
 
 #include "ui_slide.h"
+#include "ui_touchfx.h"
 
 /* The panel's scroll axis is its native vertical: 320 lines, which rotation=90
  * presents as the landscape screen's horizontal. So a "line" here is a screen
@@ -63,6 +64,79 @@ void ui_slide_freeze(bool frozen)
 	lv_display_enable_invalidation(lv_display_get_default(), !frozen);
 }
 
+/*
+ * Take lv_layer_top() out of the picture for the length of a transition.
+ *
+ * lv_refr.c draws the top and sys layers on EVERY refresh, unconditionally and
+ * regardless of what area is being refreshed -- so a per-step strip render
+ * composites whatever lives up there into the arriving lines, while the same
+ * object's old pixels are still scrolling away with the outgoing image. An OTA
+ * outcome notice is a 300x130 opaque box on that layer: the user would watch
+ * two copies of it for the whole transition, one travelling and one
+ * materialising in place.
+ *
+ * Hiding is enough -- the layer still gets "drawn", it just has nothing
+ * visible to contribute -- and the end-of-run settle brings it back in one
+ * honest repaint at offset 0. lv_layer_sys() is left alone: nothing in this
+ * application puts anything on it.
+ */
+/*
+ * Its CHILDREN, never the layer itself.
+ *
+ * lv_obj_remove_flag() ends its LV_OBJ_FLAG_HIDDEN branch with
+ * lv_obj_mark_layout_as_dirty(lv_obj_get_parent(obj)) -- unconditionally, and
+ * a layer has NO parent, so clearing the flag on lv_layer_top() dereferences
+ * NULL and takes the board down with EXCCAUSE 28 at VADDR 0x2a. Setting it is
+ * fine (lv_obj_add_flag guards the same call behind lv_obj_is_layout_positioned,
+ * which is false without a parent), so the crash lands on the RESTORE, at the
+ * end of the first transition -- board reset on the first swipe into settings
+ * (2026-08-18). Children of the layer have a real parent and are safe;
+ * ui_touchfx hides and unhides its echo there on every touch.
+ *
+ * Marked rather than blanket-restored, for the same reason peers_set_hidden
+ * marks: the echo spends most of its life legitimately hidden, and unhiding it
+ * would park a stray dot on screen.
+ */
+#define TOP_HID_BY_US	LV_OBJ_FLAG_USER_2
+
+static void top_layer_hide(bool hide)
+{
+	lv_obj_t *top = lv_layer_top();
+	uint32_t n = lv_obj_get_child_count(top);
+
+	/* The echo would otherwise un-hide itself on the next press-down: its
+	 * poll timer runs throughout the clip. */
+	ui_touchfx_suspend(hide);
+
+	for (uint32_t i = 0; i < n; i++) {
+		lv_obj_t *c = lv_obj_get_child(top, i);
+
+		if (hide) {
+			if (lv_obj_has_flag(c, LV_OBJ_FLAG_HIDDEN)) {
+				continue;	/* already hidden; not ours */
+			}
+			lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN | TOP_HID_BY_US);
+		} else if (lv_obj_has_flag(c, TOP_HID_BY_US)) {
+			lv_obj_clear_flag(c, LV_OBJ_FLAG_HIDDEN | TOP_HID_BY_US);
+		}
+	}
+}
+
+void ui_slide_top_hide(bool hide)
+{
+	top_layer_hide(hide);
+}
+
+void ui_slide_begin(void)
+{
+	/* Order matters: drain, THEN freeze, THEN hide -- so the drain still
+	 * paints the top layer where it currently is (no flicker as it goes),
+	 * and the hide's own invalidation is dropped by the freeze. */
+	lv_refr_now(lv_display_get_default());
+	ui_slide_freeze(true);
+	top_layer_hide(true);
+}
+
 void ui_slide_reset(void)
 {
 	if (area_defined) {
@@ -80,6 +154,7 @@ void ui_slide_run(int dir, void (*pump)(void))
 		/* No scroll: fall back to simply painting the new screen once.
 		 * Ugly, but a transition that does not happen beats a screen
 		 * that never gets drawn. */
+		top_layer_hide(false);	/* begin() hid it; nothing will scroll */
 		lv_obj_invalidate(scr);
 		lv_refr_now(disp);
 		return;
@@ -88,14 +163,19 @@ void ui_slide_run(int dir, void (*pump)(void))
 	/*
 	 * Frozen for the whole run, not just the caller's setup.
 	 *
-	 * pump() runs lv_timer_handler(), so the countdown and status widgets
-	 * keep invalidating themselves throughout -- and a repaint of theirs
-	 * writes to un-scrolled GRAM coordinates, which the live scroll offset
-	 * then presents somewhere else entirely. That is the stray fragment of
-	 * one screen appearing on the far side of the other (user-reported
-	 * 2026-08-17). Freezing drops those invalidations; the widgets are
-	 * repainted by the settle below, and the countdown re-ticks within a
-	 * second anyway.
+	 * The caller's own code keeps invalidating widgets throughout -- the
+	 * event drains in pump(), and anything the mode loop touched before it
+	 * got here -- and a repaint of theirs writes to un-scrolled GRAM
+	 * coordinates, which the live scroll offset then presents somewhere
+	 * else entirely. That is the stray fragment of one screen appearing on
+	 * the far side of the other (user-reported 2026-08-17). Freezing drops
+	 * those invalidations; the widgets are repainted by the settle below,
+	 * and the countdown re-ticks within a second anyway.
+	 *
+	 * (pump() does NOT run lv_timer_handler() -- see ui_slide.h. LVGL timers
+	 * cannot fire for the length of a transition, so the countdown does not
+	 * tick during one; the freeze is about the invalidations that reach the
+	 * list by other routes.)
 	 */
 	ui_slide_freeze(true);
 
@@ -167,6 +247,7 @@ void ui_slide_run(int dir, void (*pump)(void))
 	 * visible -- unlike the same repaint in the middle of a transition,
 	 * which is the whole problem this file exists to avoid.
 	 */
+	top_layer_hide(false);
 	ui_slide_freeze(false);
 	lv_obj_invalidate(scr);
 	lv_refr_now(disp);
