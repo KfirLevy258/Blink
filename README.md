@@ -74,7 +74,18 @@ west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
   -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
   -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.clauge/ota_signing_key_p256.pem\""
 
-../tools/flash_encrypted.sh          # writes the encrypted image to the board
+# Which flash path you need depends on the board -- stock CYDs are unfused,
+# and the two kinds cannot boot each other's images:
+espefuse.py --port <port> summary | grep FLASH_CRYPT_CNT   # odd bits set = encrypted
+
+# Unfused board -- two commands, because west flash writes only the app at
+# 0x20000 and leaves MCUboot at 0x1000 untouched:
+west flash -d build-sb --esp-device <port> --esp-baud-rate 115200
+esptool.py --port <port> --baud 115200 write_flash 0x1000 build-sb/mcuboot/zephyr/zephyr.bin
+
+# Fused board (flash-encryption eFuses burned) -- the script re-checks the
+# chip itself and refuses one it would leave dark:
+../tools/flash_encrypted.sh
 ```
 
 Full details - the signing key, the encrypted-flash setup, and the release flow - are in **[firmware/README.md](firmware/README.md)**.

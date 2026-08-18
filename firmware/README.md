@@ -3,7 +3,7 @@
 The firmware that runs on the **ESP32-2432S028 "Cheap Yellow Display" (CYD)**: two
 270° gauges for your Claude Code **session (5 h)** and **weekly (7 d)** usage, a wall
 clock, per-model breakdown, and over-the-air updates. Built on **Zephyr** + LVGL,
-booting through **MCUboot** with flash encryption on.
+booting through **MCUboot**, with flash encryption on units whose eFuses are burned.
 
 The firmware version lives in [`src/version.h`](src/version.h) and is reported over
 serial in the boot `hello` message.
@@ -49,12 +49,32 @@ Notes:
 
 ## Flash
 
-The chip's flash-encryption eFuses are burned, so it only boots images encrypted with
-its device key. **Use the script** - a plain `west flash` writes plaintext the ROM
-can't read and leaves the board dark until re-flashed properly:
+**Not every CYD is fused, so check which one you have first.** A unit whose
+flash-encryption eFuses are burned boots *only* images encrypted with its device key;
+an unfused unit boots plaintext and cannot read an encrypted image at all. Cross the
+two and the board sits in a boot loop (`invalid header: ...`) until it is re-flashed
+the other way. Nothing is bricked - flashing burns no eFuses - but a cycle is lost
+finding out.
+
+```bash
+espefuse.py --port <port> summary | grep FLASH_CRYPT_CNT
+```
+
+An **odd** number of bits set means encryption is on; `0` is a plaintext board.
+
+**Fused unit** - use the script, which re-reads the eFuse itself and refuses a
+plaintext chip (override with `CLAUGE_SKIP_EFUSE_CHECK=1`):
 
 ```bash
 tools/flash_encrypted.sh        # defaults to the first /dev/cu.usbserial* port
+```
+
+**Plaintext unit** - two commands, because `west flash` writes only the app at
+`0x20000` and leaves MCUboot at `0x1000` untouched:
+
+```bash
+west flash -d build-sb --esp-device <port> --esp-baud-rate 115200
+esptool.py --port <port> --baud 115200 write_flash 0x1000 build-sb/mcuboot/zephyr/zephyr.bin
 ```
 
 Port notes: opening the port resets the board, and only one process can own it at a
@@ -106,8 +126,11 @@ Four independent layers, each guarding one thing:
   restores the previous version, which then reports *"Update failed, previous version
   restored."*
 
-Flash encryption keeps secrets (Wi-Fi password, token) unreadable at rest. Published
-images hold no secrets - installability is gated by the signing key, not secrecy.
+On a fused unit, flash encryption keeps secrets (Wi-Fi password, token) unreadable at
+rest. **An unfused development board has no such protection** - its stored Wi-Fi
+password and OAuth token are readable from a flash dump, so treat one as a device that
+holds live credentials in the clear. Published images hold no secrets either way -
+installability is gated by the signing key, not secrecy.
 
 ## Hardware notes
 

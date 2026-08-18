@@ -1000,9 +1000,15 @@ git status --short
 
 Expected: clean (the memory directory lives outside the repo). If the tree is dirty, something in Steps 1-8 left a stray file — investigate before finishing.
 
-- [ ] **Step 11: Measure the net worker's stack high-water mark**
+- [x] **Step 11: Measure the net worker's stack high-water mark**
 
 Nothing currently does. Add `CONFIG_THREAD_ANALYZER=y` and `CONFIG_THREAD_ANALYZER_AUTO=y` for one run, or printk `k_thread_stack_space_get(&net_thread, &unused)` right after the first successful refresh and again after a proactive refresh. Record the number. Expected: if unused space is under ~1 KB, make `fresh` static in `worker_refresh_token` before launch (safe — it is called only from the net worker thread). Note this branch adds ~688 B of peak depth on the TLS path, taking the deepest chain from 1888 B to 2576 B on an 8192 B stack.
+
+**MEASURED 2026-08-10 — no action needed.** `CONFIG_INIT_STACKS=y` plus a `k_thread_stack_space_get(&net_thread, &unused)` printk at the success return of `worker_refresh_token`, read after the boot refresh (`token endpoint: status 200`): **3228 B unused of 8192 B**, i.e. a peak depth of **4964 B**, with `sizeof(struct oauth_tokens)` = **644 B**. That is far above the ~1 KB trigger, so **`fresh` stays on the stack** — do not make it static.
+
+Two caveats worth carrying forward. First, the estimate above (deepest chain 1888 B → 2576 B) **understated the real peak by ~2.4 KB**; the margin is comfortable today but is 39% of the stack, not the ~69% the estimate implied, so treat future additions on this path against 4964 B rather than 2576 B. Second, `CONFIG_THREAD_ANALYZER_AUTO` was tried first and is **not usable on this board** — its own thread stack overflowed `dram1_0_seg` by 612 B. Use `INIT_STACKS` plus a direct printk instead; it costs no RAM. The instrumentation was reverted and the board reflashed with clean `0.4.8` after the reading.
+
+This was measured on the **non-encrypted** unit (`a4f00f5e7b14`), which is fine — stack depth is identical across units — but see the two-units note before running any OTA step here.
 
 - [ ] **Step 12: Exercise the proactive refresh**
 
