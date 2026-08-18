@@ -22,6 +22,7 @@
 #include "version.h"
 #include "backlight.h"
 #include "ota.h"
+#include "usage_view.h"
 
 #define COL_BG		lv_color_hex(0x0E1116)
 #define COL_TRACK	lv_color_hex(0x272C34)
@@ -598,7 +599,6 @@ static void upd_timer_cb(lv_timer_t *t)
 static bool closing;
 static volatile bool want_open;
 static volatile bool want_close;
-static lv_obj_t *want_open_scr;
 
 static void build_panel(lv_obj_t *parent_scr);
 
@@ -607,18 +607,53 @@ static void build_panel(lv_obj_t *parent_scr);
  * repaint over the very gauge pixels the scroll is about to move away. */
 static void do_open(void (*pump)(void))
 {
-	ui_slide_freeze(true);
-	build_panel(want_open_scr);
+	ui_slide_begin();
+	/* The live screen, not one cached when the gesture landed. The cached
+	 * pointer outlived its object on the failed-join path, where
+	 * usage_view_deinit() deletes the gauge screen before provisioning. */
+	build_panel(lv_screen_active());
 	lv_obj_update_layout(panel);
 	ui_slide_freeze(false);
 
+	/*
+	 * Mute across the transition, the way ui_anim does for the clip.
+	 * ui_slide_run() blocks for the whole slide with no input dispatched
+	 * (pump() does not run lv_timer_handler()), so every touch point of the
+	 * opening swipe -- and any impatient second one -- is delivered in a
+	 * burst afterwards, against a screen that has changed underneath it.
+	 */
+	ui_anim_gesture_mute(UI_SLIDE_MS * 6);
+
 	/* Gauges exit left, settings enters from the right. */
 	ui_slide_run(UI_SLIDE_LEFT, pump);
+	ui_anim_gesture_mute(250);	/* short tail past the input burst */
 }
 
 static void do_close(void (*pump)(void))
 {
-	ui_slide_freeze(true);
+	/*
+	 * Re-test the download guard here, not just in close_panel().
+	 *
+	 * close_panel() refuses while an overlay is up, but it now only LATCHES
+	 * the request -- and the overlay can appear in the gap before this
+	 * runs: the worker raises OTA_UI_DOWNLOADING on its own 250 ms tick and
+	 * upd_timer_cb shows the overlay from the next lv_timer_handler, both
+	 * of which can land after a swipe has already passed the guard.
+	 *
+	 * Deleting the panel below takes upd_timer with it, and upd_timer_cb is
+	 * the ONLY caller of dl_overlay_hide(). That would leave a full-screen,
+	 * opaque, touch-swallowing object orphaned on lv_layer_top() with
+	 * nothing alive to remove it -- and if the install fails there is no
+	 * reboot to mask it. That is the screen locked against every tap,
+	 * user-reported 2026-07-25. Keep the panel; the swipe is dropped and
+	 * closing works again once the download resolves.
+	 */
+	if (dl_overlay) {
+		closing = false;
+		return;
+	}
+
+	ui_slide_begin();
 	if (upd_timer) {
 		lv_timer_del(upd_timer);
 		upd_timer = NULL;
@@ -631,8 +666,24 @@ static void do_close(void (*pump)(void))
 	lv_obj_update_layout(lv_screen_active());
 	ui_slide_freeze(false);
 
+	/*
+	 * Same mute as do_open, and it matters more here: this uncovers the
+	 * gauge screen, where a replayed RIGHT swipe is exactly what ASKS for
+	 * the eye clip. Without it, closing settings could start the clip by
+	 * itself.
+	 */
+	ui_anim_gesture_mute(UI_SLIDE_MS * 6);
+
 	/* Settings exits right, the gauges come back in from the left. */
 	ui_slide_run(UI_SLIDE_RIGHT, pump);
+	ui_anim_gesture_mute(250);
+	closing = false;
+}
+
+void ui_settings_drop_pending(void)
+{
+	want_open = false;
+	want_close = false;
 	closing = false;
 }
 
@@ -943,7 +994,12 @@ static void scr_gesture_cb(lv_event_t *e)
 		return;	/* the swipe that just closed the clip, replayed */
 	}
 	if (dir == LV_DIR_LEFT) {
-		want_open_scr = lv_event_get_current_target(e);
+		/* Not off the CONNECTING screen. A swipe is the ACCIDENTAL
+		 * route -- see the edge zones below, which stay open on
+		 * purpose. */
+		if (usage_view_takeover_active()) {
+			return;
+		}
 		want_open = true;	/* run from the mode loop; see do_open */
 	} else if (dir == LV_DIR_RIGHT) {
 		/* The left chevron's promise: the boot clip on loop. Only
@@ -953,13 +1009,46 @@ static void scr_gesture_cb(lv_event_t *e)
 	}
 }
 
-/* Invisible tap strips along both screen edges: the chevrons drawn there
+/*
+ * Invisible tap strips along both screen edges: the chevrons drawn there
  * read as buttons, so tapping them must work too (tried on hardware
- * 2026-07-17). GESTURE_BUBBLE keeps the swipes alive across the strips. */
+ * 2026-07-17). GESTURE_BUBBLE keeps the swipes alive across the strips.
+ *
+ * Both zones consult the gesture mute, which is not obvious: they are CLICKED
+ * handlers, and a swipe is not a click. But LVGL sends CLICKED on release
+ * whenever the object was pressed and nothing scrolled -- it does not suppress
+ * it because it already sent GESTURE (lv_indev.c) -- so a swipe whose release
+ * happens to land inside a 44x150 strip fires that strip's button as well. The
+ * mute is what stops the replayed tail of a transition swipe from re-opening
+ * the thing the transition just closed.
+ *
+ * Both routes into settings check the takeover, because there are two of them
+ * and they are covered differently. The swipe arrives because usage_view marks
+ * the takeover GESTURE_BUBBLE on purpose; the tap arrives because these strips
+ * are created by ui_settings_attach(), which main.c runs AFTER
+ * usage_view_init(), so they sit ABOVE the overlay and it never occludes them.
+ *
+ * The two routes are treated DIFFERENTLY while the CONNECTING bar is up (user
+ * request 2026-08-18, refined the same day).
+ *
+ * The swipe is blocked. A board that has not connected yet has nothing in
+ * settings the user can act on, and sliding away from the one screen that says
+ * what it is waiting for reads as the board losing its place. That reverses
+ * the intent recorded on the overlay's GESTURE_BUBBLE flag, which exists so
+ * "the settings gesture is dead the whole time we're waiting for a host"
+ * would not happen -- that is now the behaviour we want for swipes.
+ *
+ * This tap is NOT blocked, and that is deliberate. Blocking both would strand
+ * the board: a WiFi join that succeeds while the fetch never does leaves the
+ * bar up indefinitely with have_data false, and with no way into settings
+ * there is no way to sign out or change network short of a power cycle. A tap
+ * on the edge chevron is a deliberate act rather than an accidental one, so it
+ * stays as the escape hatch.
+ */
 static void zone_settings_cb(lv_event_t *e)
 {
-	if (panel == NULL) {
-		want_open_scr = lv_obj_get_screen(lv_event_get_target(e));
+	ARG_UNUSED(e);
+	if (panel == NULL && !ui_anim_gesture_muted()) {
 		want_open = true;
 	}
 }
@@ -967,7 +1056,7 @@ static void zone_settings_cb(lv_event_t *e)
 static void zone_anim_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (panel == NULL) {
+	if (panel == NULL && !ui_anim_gesture_muted()) {
 		ui_anim_request();
 	}
 }

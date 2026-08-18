@@ -18,6 +18,19 @@ void ui_settings_notice(const char *txt);
  * thread context, not from an LVGL callback: the transition drives
  * lv_refr_now() itself (see ui_slide.h). `pump` (may be NULL) runs each step
  * so background duties and the boot watchdog stay alive. */
+/*
+ * Discard any open/close the handlers latched but nobody serviced.
+ *
+ * ui_settings_attach() arms the gestures long before either mode loop exists:
+ * main.c runs boot_ssid_scan() and the WiFi settle in between, which pump
+ * lv_timer_handler() with touch fully live and can take a minute on a failed
+ * join. A tap latched in that window would otherwise be acted on by the mode
+ * loop's first iteration -- the panel sliding in by itself long after the user
+ * gave up on it. Call this once before entering a mode loop; a deliberate tap
+ * repeats, and from there on the latch is serviced within one iteration.
+ */
+void ui_settings_drop_pending(void);
+
 void ui_settings_service(void (*pump)(void));
 
 #endif /* UI_SETTINGS_H */
