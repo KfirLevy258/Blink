@@ -1,0 +1,19 @@
+/* Touch-trace diagnostic overlay.
+ *
+ * reads stays at the production 16. An earlier revision of this file forced
+ * reads=<1> to expose the per-conversion settling curve, and the board then
+ * reported NO touch events at all across two 100 s captures: with a single
+ * unaveraged round, the driver's z (Z1 + 4096 - Z2) is one noisy sample
+ * against z-threshold=400, so `pressed` never asserts and nothing is reported.
+ *
+ * It was also the wrong experiment. The transient being measured spans the
+ * first few REPORTS after pen-down, not the reads inside one report, so the
+ * production value is what should be characterised.
+ *
+ * The file is kept (rather than dropped) so the trace build keeps an explicit,
+ * documented DTS state -- DTS is last-one-wins here and silence is how the
+ * stray reads=<3> went unnoticed for days.
+ */
+&xpt2046 {
+	reads = <16>;
+};

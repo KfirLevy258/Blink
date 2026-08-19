@@ -32,3 +32,7 @@ target_sources(app PRIVATE
 	src/ota.c
 	src/ui_touchfx.c
 )
+
+# Diagnostic only; CONFIG_CLAUGE_TOUCH_TRACE is off in release builds.
+target_sources_ifdef(CONFIG_CLAUGE_TOUCH_TRACE app PRIVATE src/touch_trace.c)
+

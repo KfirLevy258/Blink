@@ -27,7 +27,10 @@ set -euo pipefail
 PORT="${1:-$(ls /dev/cu.usbserial* 2>/dev/null | head -1 || true)}"
 KEY="${CLAUGE_FLASH_KEY:-$HOME/.clauge/flash_key.bin}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BUILD="$(cd "$HERE/.." && pwd)/firmware/build-sb"
+# Overridable so a diagnostic image (build-trace) can be flashed without
+# overwriting the release artifacts in build-sb -- which are what a restore
+# flashes back. Unset behaves exactly as before.
+BUILD="${CLAUGE_BUILD_DIR:-$(cd "$HERE/.." && pwd)/firmware/build-sb}"
 ETOOLS="/Library/Frameworks/Python.framework/Versions/3.10/bin"
 
 [ -f "$KEY" ] || { echo "FATAL: flash key missing at $KEY -- no key, no flashing (see firmware/README security section)"; exit 1; }

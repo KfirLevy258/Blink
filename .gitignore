@@ -12,5 +12,6 @@ tokens.json
 firmware/src/secrets.h
 firmware/build/
 firmware/build-sb/
+firmware/build-trace/
 build/
 build-sb/

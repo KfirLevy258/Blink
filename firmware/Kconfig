@@ -1,0 +1,17 @@
+# Application Kconfig. Zephyr sources this in place of its own root, so the
+# trailing `source "Kconfig.zephyr"` is mandatory -- without it every upstream
+# symbol disappears.
+
+menu "Clauge"
+
+config CLAUGE_TOUCH_TRACE
+	bool "Touch trace diagnostic"
+	depends on INPUT_XPT2046
+	help
+	  Record every XPT2046 report into a RAM ring and dump it as CSV over
+	  the console when the finger lifts. Diagnostic only -- enable via
+	  trace.conf, never in a release build.
+
+endmenu
+
+source "Kconfig.zephyr"
