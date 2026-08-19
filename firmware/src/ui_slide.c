@@ -23,8 +23,82 @@
  * avoid: GRAM is exactly one screen, so there is nowhere off-screen to stage a
  * strip, and a line is briefly visible between arriving at the incoming edge
  * and being painted. 4 px of that is a seam; 8 was a visible band.
+ *
+ * Do NOT narrow this to chase the pale band at the OUTGOING edge -- that is a
+ * DIFFERENT artifact and STEP_COLS does not move it. Measured 2026-08-20 from
+ * 240 fps video: STEP_COLS=2 left the band visually unchanged while pushing
+ * clip->gauges from 679 ms to 1154 ms.
+ *
+ * That band is the panel latching VSCRSADD at its OWN frame boundary rather
+ * than when we write it. scroll_to() returns immediately, we paint the strip,
+ * and for up to one frame period (14.3 ms at the default 70 Hz) the panel is
+ * still scanning at the PREVIOUS offset -- where those freshly-painted lines
+ * sit at the outgoing edge. Reordering paint and scroll cannot fix it: the
+ * line about to be revealed at one edge is, at the current offset, displayed
+ * at the other. GRAM is one screen; there is nowhere else to put it. The
+ * 2026-08-17 reorder changed WHICH edge shimmers, not whether it does.
+ *
+ *   band_px = 320 * frame_period_ms / total_duration_ms
+ *
+ * STEP_COLS cancels out. Verified at four points: 232 ms -> ~20 px; 650 ms ->
+ * ~7 px ("much smaller"); 650 ms with STEP_COLS=2 -> ~6.5 px (unchanged);
+ * 650 ms at 119 Hz -> ~4 px. Raising the panel rate via frmctr1 does shrink
+ * it, but visibly changed brightness and was rejected (2026-08-20).
+ *
+ * The real fixes are unavailable here: the ILI9341's TE pin would let us paint
+ * inside vblank, but the CYD does not route it, and a second framebuffer wants
+ * 150 KB this board has not got. The only remaining lever is duration, and
+ * that is set by what feels right, not by what makes the band small.
  */
 #define STEP_COLS	4
+
+/*
+ * Reveal style. 1 = wipe (no panel scroll), 0 = the hardware slide below.
+ *
+ * The slide moves both screens at once, which is the motion originally asked
+ * for (2026-07-17). But it drives the panel's scroll register, and the panel
+ * latches VSCRSADD at its own frame boundary -- see the STEP_COLS note above
+ * for the full mechanism and the band_px invariant it forces. That band was
+ * rejected at 20 px, 7 px and 5 px (2026-08-19/20).
+ *
+ * The wipe paints the incoming screen straight into its final screen columns
+ * and never touches the scroll register, so there is no latch to lag and no
+ * band at all. It costs the same as the slide -- both render 320 columns
+ * exactly once -- so the durations are unchanged. What is lost is the motion:
+ * the outgoing screen sits still and is covered, rather than travelling off.
+ */
+#define UI_SLIDE_WIPE	1
+
+/*
+ * Floor on a transition's wall-clock duration, and the step count it spreads
+ * over.
+ *
+ * Pacing purely by render time makes the duration depend on how expensive the
+ * INCOMING screen is to draw, and the two directions here are nearly 3x apart.
+ * Measured on hardware 2026-08-20, 80 steps each:
+ *
+ *   clip->gauges  679 ms  (avg 7071 us/step, varying 3892..9460 -- arcs and
+ *                          labels, cost tracks where the content sits)
+ *   gauges->clip  232 ms  (avg 2182 us/step, flat 2094..2772 -- the clip
+ *                          overlay is one filled rect, same cost every strip)
+ *
+ * The slow one is the one that reads correctly; the fast one was reported as
+ * "too fast" (2026-08-19). 650 fixed that; 900 then traded a little more speed
+ * for a narrower shimmer band at the outgoing edge (see STEP_COLS above --
+ * band_px = 320 * frame_period / duration, so 650 -> ~7 px, 900 -> ~5 px).
+ * Above 679 ms this also pads clip->gauges, which used to run unfloored at its
+ * natural cost, so both directions now sit at the same 900 ms. So the floor is the measured duration of the good
+ * direction, NOT the UI_SLIDE_MS gesture-mute constant -- an earlier attempt
+ * used 250 here purely because that constant existed, which is below what the
+ * fast direction already took and therefore did nothing.
+ *
+ * A floor, not a fixed per-step sleep: a step that has already overrun its
+ * share is not delayed further, so clip->gauges still costs exactly its 679 ms
+ * and has nothing added. That is what the old unconditional k_sleep got wrong.
+ */
+#define SLIDE_MIN_MS	650
+#define SLIDE_STEPS	(SCROLL_LINES / STEP_COLS)
+
 
 static const struct device *const dbi =
 	DEVICE_DT_GET(DT_PARENT(DT_CHOSEN(zephyr_display)));
@@ -33,6 +107,7 @@ static const struct mipi_dbi_config dbi_cfg =
 			   SPI_OP_MODE_MASTER | SPI_WORD_SET(8), 0);
 
 static bool area_defined;
+
 
 /* VSCRDEF: top fixed 0, scrolling 320, bottom fixed 0 -- the whole panel
  * scrolls. Sent once; it survives until the panel is reset. */
@@ -142,8 +217,19 @@ void ui_slide_run(int dir, void (*pump)(void))
 	lv_display_t *disp = lv_display_get_default();
 	lv_obj_t *scr = lv_screen_active();
 
+	if (UI_SLIDE_WIPE) {
+		/* Guarantee offset 0 once, in case a previous build left the
+		 * panel scrolled. Harmless: nothing is painted until after the
+		 * panel has had a whole step to latch it, and it is already 0
+		 * after any completed transition. */
+		define_scroll_area();
+		if (area_defined) {
+			scroll_to(0);
+		}
+	}
+
 	define_scroll_area();
-	if (!area_defined) {
+	if (!UI_SLIDE_WIPE && !area_defined) {
 		/* No scroll: fall back to simply painting the new screen once.
 		 * Ugly, but a transition that does not happen beats a screen
 		 * that never gets drawn. */
@@ -172,6 +258,9 @@ void ui_slide_run(int dir, void (*pump)(void))
 	 */
 	ui_slide_freeze(true);
 
+	const int64_t t0 = k_uptime_get();
+	int step = 0;
+
 	for (int j = STEP_COLS; j <= SCROLL_LINES; j += STEP_COLS) {
 		lv_area_t strip;
 		int off;
@@ -189,7 +278,21 @@ void ui_slide_run(int dir, void (*pump)(void))
 		 * L, so at the final step the offset is 0 and GRAM is simply
 		 * the new screen, in order, with nothing to correct.
 		 */
-		if (dir == UI_SLIDE_LEFT) {
+		if (UI_SLIDE_WIPE) {
+			/*
+			 * Screen columns, not GRAM lines: with no scroll the two
+			 * are the same thing, so the strip is painted where it
+			 * will be seen. The incoming screen arrives from the side
+			 * it used to slide in from -- LEFT means it entered from
+			 * the right, so wipe right-to-left, and vice versa. Note
+			 * this is the OPPOSITE assignment to the scrolled branch,
+			 * where x1 is a GRAM line that the offset then maps to
+			 * the far edge.
+			 */
+			strip.x1 = (dir == UI_SLIDE_LEFT) ? SCROLL_LINES - j
+							  : j - STEP_COLS;
+			off = 0;
+		} else if (dir == UI_SLIDE_LEFT) {
 			strip.x1 = j - STEP_COLS;
 			off = j;
 		} else {
@@ -209,7 +312,9 @@ void ui_slide_run(int dir, void (*pump)(void))
 		 * After the scroll those same lines are at the incoming edge,
 		 * which is where their content belongs.
 		 */
-		scroll_to(off % SCROLL_LINES);
+		if (!UI_SLIDE_WIPE) {
+			scroll_to(off % SCROLL_LINES);
+		}
 
 		/* Unfrozen for exactly one call: this strip must be the ONLY
 		 * area LVGL considers dirty. See the freeze around the loop. */
@@ -226,6 +331,17 @@ void ui_slide_run(int dir, void (*pump)(void))
 		 * transition feel slow; the render is the pacing, and pump()
 		 * has already serviced the protocol and fed the watchdog. */
 		k_yield();
+
+		step++;
+
+		/* Hold this step until its share of SLIDE_MIN_MS has elapsed,
+		 * and only if it got there early. */
+		int64_t slack = t0 + (int64_t)SLIDE_MIN_MS * step / SLIDE_STEPS
+				- k_uptime_get();
+
+		if (slack > 0) {
+			k_sleep(K_MSEC(slack));
+		}
 	}
 
 	/*
@@ -244,4 +360,5 @@ void ui_slide_run(int dir, void (*pump)(void))
 	ui_slide_freeze(false);
 	lv_obj_invalidate(scr);
 	lv_refr_now(disp);
+
 }
