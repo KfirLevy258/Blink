@@ -85,9 +85,24 @@ static void gesture_cb(lv_event_t *e)
 		return;
 	}
 
-	/* Any horizontal swipe leaves -- the user is "sliding back", and
-	 * being fussy about the direction of an exit gesture helps nobody. */
-	if (d == LV_DIR_LEFT || d == LV_DIR_RIGHT) {
+	/*
+	 * Only the "back" direction leaves; the other one stops dead.
+	 *
+	 * The screens sit in a row -- clip, gauges, settings -- and the clip is
+	 * the far left of it. A physical LEFT swipe here is asking to go further
+	 * left, where there is nothing, so it must do nothing. It used to exit,
+	 * which meant the gesture that carried you INTO the clip threw you back
+	 * out of it when repeated (user-reported 2026-08-20).
+	 *
+	 * The lvgl_pointer node carries invert-x, so the LVGL direction is the
+	 * mirror of the finger: physical RIGHT arrives here as LV_DIR_LEFT. That
+	 * is the one that goes back to the gauges.
+	 *
+	 * This does drop the old "any swipe gets you out" safety net (the clip
+	 * has no other exit), so the wall is deliberately the direction with
+	 * nowhere to go -- a sloppy back-swipe still lands on LV_DIR_LEFT.
+	 */
+	if (d == LV_DIR_LEFT) {
 		leave = true;
 	}
 }
