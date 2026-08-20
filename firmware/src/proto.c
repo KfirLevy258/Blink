@@ -9,6 +9,8 @@
 
 #include "proto.h"
 #include "msg_parse.h"
+#include "ota.h"
+#include "version.h"
 #include "usage_view.h"
 #include "net_time.h"
 #include "version.h"
@@ -102,6 +104,67 @@ static void send_ping(void)
 	emit(buf);
 }
 
+
+/*
+ * --- OTA while tethered ---
+ *
+ * USB-bridge mode has no network of its own: run_usb() never starts
+ * net_worker, so ota.c's HTTPS updater is unreachable and the update row did
+ * nothing here. The daemon has both an internet connection and the board's
+ * USB serial link, so the split is: the board asks and approves, the daemon
+ * fetches and writes.
+ *
+ * The board does NOT receive the image. An earlier revision pushed it down
+ * this protocol in base64 chunks and it was hopeless -- 33% encoding overhead
+ * on top of a stop-and-wait round trip per chunk, measured at 213 B/s, and
+ * then MCUboot still had to swap slot1 into slot0 afterwards (121-357 s by the
+ * notes in ui_settings.c). The daemon instead runs esptool against slot0
+ * directly, which this project has been doing by hand all along at ~17 KB/s:
+ * about 75 s for a 1.3 MB image, and no swap at all because the bytes land
+ * where the bootloader already looks.
+ *
+ * So all that crosses this link is consent. The board sends ota_flash and puts
+ * up a "keep it connected" screen; the next thing it experiences is esptool
+ * resetting it into the ROM loader.
+ *
+ * The trade is real and worth stating: writing slot0 in place gives up
+ * MCUboot's test-boot and auto-revert, so a bad image needs a reflash rather
+ * than recovering by itself. That is acceptable *here specifically* because
+ * this path only exists while a machine with esptool is physically cabled to
+ * the board -- the recovery is the same cable that caused it.
+ */
+static struct ota_manifest ota_m;
+static bool ota_staged;		/* ota_avail seen: ota_m is valid */
+
+void proto_ota_check(void)
+{
+	char buf[96];
+
+	ota_staged = false;
+	ota_ui_set(OTA_UI_CHECKING, NULL, 0);
+	snprintf(buf, sizeof(buf),
+		 "{\"t\":\"ota_query\",\"v\":%d,\"cur\":\"%s\"}",
+		 PROTO_VERSION, CLAUGE_FW_VERSION);
+	emit(buf);
+}
+
+bool proto_ota_install(void)
+{
+	char buf[64];
+
+	if (!ota_staged) {
+		return false;
+	}
+	/* Percent stays at 0 throughout: the board cannot see esptool's
+	 * progress, and a bar that does not move is worse than no bar. The UI
+	 * shows the "keep it connected" wording for this source instead. */
+	ota_ui_set(OTA_UI_DOWNLOADING, &ota_m, 0);
+	snprintf(buf, sizeof(buf), "{\"t\":\"ota_flash\",\"v\":%d}",
+		 PROTO_VERSION);
+	emit(buf);
+	return true;
+}
+
 static void dispatch(const char *json)
 {
 	char type[16];
@@ -148,6 +211,28 @@ static void dispatch(const char *json)
 		/* Liveness only: last_host_ms was already stamped above. */
 	} else if (strcmp(type, "welcome") == 0) {
 		printk("[proto] host connected\n");
+	} else if (strcmp(type, "ota_avail") == 0) {
+		double sz = 0;
+
+		if (msg_get_str(json, "version", ota_m.version,
+				sizeof(ota_m.version)) &&
+		    msg_get_str(json, "sha256", ota_m.sha256,
+				sizeof(ota_m.sha256)) &&
+		    msg_get_double(json, "size", &sz) && sz > 0) {
+			ota_m.size = (uint32_t)sz;
+			ota_staged = true;
+			ota_ui_set(OTA_UI_AVAILABLE, &ota_m, 0);
+			printk("[proto] daemon offers %s (%u bytes)\n",
+			       ota_m.version, ota_m.size);
+		} else {
+			ota_ui_set(OTA_UI_FAILED, NULL, 0);
+		}
+	} else if (strcmp(type, "ota_none") == 0) {
+		ota_staged = false;
+		ota_ui_set(OTA_UI_UP_TO_DATE, NULL, 0);
+	} else if (strcmp(type, "ota_error") == 0) {
+		ota_staged = false;
+		ota_ui_set(OTA_UI_FAILED, NULL, 0);
 	} else if (strcmp(type, "status") == 0) {
 		char st[24] = "";
 

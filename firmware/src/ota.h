@@ -48,6 +48,17 @@ struct ota_ui {
 };
 
 void ota_ui_get(struct ota_ui *out);
+/* Which link an install is running over. The progress screen needs it because
+ * the two behave differently: over WiFi the board downloads and can show a
+ * percentage, while over USB the daemon runs esptool and the board is not part
+ * of the transfer at all, so it has no byte count to report. */
+enum ota_source {
+	OTA_SRC_WIFI,
+	OTA_SRC_USB,
+};
+
+enum ota_source ota_ui_source(void);
+
 void ota_request_check(void);	/* UI: settings tile tapped */
 void ota_request_install(void);	/* UI: user confirmed install */
 bool ota_take_check_request(void);	/* worker side */

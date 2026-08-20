@@ -1279,6 +1279,7 @@ static void run_usb(void)
 	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
 	bool can_fall_back = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
 			     cfg_get_token(tok, sizeof(tok));
+	bool ota_boot_checked = false;
 
 	/* Same as run_standalone: drop anything latched before this loop
 	 * existed to service it. See ui_settings.h. */
@@ -1291,6 +1292,34 @@ static void run_usb(void)
 			ota_health = true;	/* daemon delivered usage */
 		}
 		ota_boot_pump();
+
+		/*
+		 * OTA, via the daemon. This mode has no network of its own --
+		 * nothing here starts net_worker -- so ota_check()/ota_install()
+		 * cannot run and the update row used to do nothing at all when
+		 * tethered (user-reported 2026-08-20). The daemon has both an
+		 * internet connection and this link, so it does the fetching and
+		 * pushes the image down; see the OTA block in proto.c.
+		 *
+		 * Same gate as standalone: the first check waits until the
+		 * daemon has actually delivered usage, which is this mode's
+		 * equivalent of the boot stages completing.
+		 */
+		if (ota_health && !ota_boot_checked) {
+			ota_boot_checked = true;
+			proto_ota_check();
+		}
+		if (ota_take_check_request()) {
+			proto_ota_check();
+		}
+		if (ota_take_install_request()) {
+			proto_ota_install();
+		}
+
+		/* No completion handling: the daemon writes slot0 with esptool
+		 * and resets the board itself, so the next thing that happens
+		 * here is a boot. See the OTA block in proto.c.
+		 */
 
 		if (ui_anim_pending()) {
 			ui_anim_run(usb_anim_pump);

@@ -59,6 +59,7 @@ static lv_obj_t *dl_overlay;
 static lv_obj_t *dl_bar;
 static lv_obj_t *dl_lbl;
 static lv_obj_t *dl_sub;	/* time remaining, under the bar */
+static lv_obj_t *dl_src;	/* which link the image is coming over */
 /*
  * Download-rate estimator. A fixed baseline (first percent seen, extrapolated
  * to the end) was the first attempt and was unusable: for the first ~20 s it
@@ -325,6 +326,11 @@ static void upd_prompt_show(const struct ota_ui *snap)
 	lv_obj_set_style_bg_opa(upd_prompt, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_color(upd_prompt, COL_GREEN, 0);
 	lv_obj_set_style_border_width(upd_prompt, 1, 0);
+	/* Zero the container padding before laying anything out. lv_obj_create
+	 * inherits the theme's default pad, which shrinks the usable width --
+	 * two 130 px buttons at +/-12 px from the edges then did not fit inside
+	 * it and overlapped (user-reported 2026-08-20). */
+	lv_obj_set_style_pad_all(upd_prompt, 0, 0);
 	lv_obj_clear_flag(upd_prompt, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_center(upd_prompt);
 
@@ -337,17 +343,24 @@ static void upd_prompt_show(const struct ota_ui *snap)
 	lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 10);
 
+	/*
+	 * Placed from the CENTRE, not from the edges: +/-70 either side of the
+	 * midline puts two 132 px buttons at x 14..146 and 154..286 inside the
+	 * 300 px popup, an 8 px gap between them and 14 px to each edge -- and
+	 * it stays symmetric whatever the container padding turns out to be,
+	 * which edge-relative offsets did not.
+	 */
 	lv_obj_t *yes = mk_btn(upd_prompt, "Update now", COL_GREEN,
 			       upd_prompt_now_cb, NULL);
 
-	lv_obj_set_size(yes, 130, 36);
-	lv_obj_align(yes, LV_ALIGN_BOTTOM_LEFT, 12, -8);
+	lv_obj_set_size(yes, 132, 36);
+	lv_obj_align(yes, LV_ALIGN_BOTTOM_MID, -70, -10);
 
 	lv_obj_t *no = mk_btn(upd_prompt, "Later", COL_TRACK,
 			      upd_prompt_later_cb, NULL);
 
-	lv_obj_set_size(no, 130, 36);
-	lv_obj_align(no, LV_ALIGN_BOTTOM_RIGHT, -12, -8);
+	lv_obj_set_size(no, 132, 36);
+	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 70, -10);
 }
 
 static void install_yes_cb(lv_event_t *e)
@@ -413,6 +426,7 @@ static void dl_overlay_hide(void)
 	dl_lbl = NULL;
 	dl_bar = NULL;
 	dl_sub = NULL;
+	dl_src = NULL;
 }
 
 static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
@@ -433,6 +447,14 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		dl_lbl = lv_label_create(dl_overlay);
 		lv_obj_set_style_text_color(dl_lbl, COL_TEXT, 0);
 		lv_obj_align(dl_lbl, LV_ALIGN_CENTER, 0, -30);
+
+		/* Which link this is arriving on. Serial tops out near 11 KB/s
+		 * against WiFi's hundreds, so a USB update legitimately takes
+		 * minutes -- saying so up front is the difference between
+		 * "slow" and "stuck" (user request 2026-08-20). */
+		dl_src = lv_label_create(dl_overlay);
+		lv_obj_set_style_text_color(dl_src, COL_DIM, 0);
+		lv_obj_align(dl_src, LV_ALIGN_CENTER, 0, -8);
 
 		dl_bar = lv_bar_create(dl_overlay);
 		lv_obj_set_size(dl_bar, 260, 12);
@@ -486,13 +508,33 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		 * Do NOT re-derive this from MCUboot's own log timestamps: they
 		 * read 17.3 s and 0.9 s for those same two swaps. */
 		lv_label_set_text(dl_lbl, "Installing update...");
+		lv_label_set_text(dl_src, "");
 		lv_label_set_text(dl_sub,
 				  "This takes a few minutes.\nKeep the device powered.");
 		lv_bar_set_value(dl_bar, 100, LV_ANIM_OFF);
 		return;
 	}
 
+	if (ota_ui_source() == OTA_SRC_USB) {
+		/*
+		 * Over USB the daemon drives esptool and the board is not part
+		 * of the transfer at all -- it cannot see a byte count, so
+		 * there is no honest percentage to show. A bar frozen at 0 for
+		 * a minute reads as a hang, which is the exact failure the
+		 * "Installing update..." wording elsewhere in this file exists
+		 * to avoid, so hide it and say what is actually happening.
+		 */
+		lv_label_set_text_fmt(dl_lbl, "Updating to %s...", snap->version);
+		lv_label_set_text(dl_src, "Over the USB cable");
+		lv_obj_add_flag(dl_bar, LV_OBJ_FLAG_HIDDEN);
+		lv_label_set_text(dl_sub,
+				  "Keep the cable connected.\nThis takes about a minute.");
+		return;
+	}
+
+	lv_obj_clear_flag(dl_bar, LV_OBJ_FLAG_HIDDEN);
 	lv_label_set_text_fmt(dl_lbl, "Downloading version %s...", snap->version);
+	lv_label_set_text(dl_src, "Over WiFi");
 	lv_bar_set_value(dl_bar, snap->pct, LV_ANIM_OFF);
 
 	int64_t now = k_uptime_get();

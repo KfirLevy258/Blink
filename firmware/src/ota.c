@@ -143,6 +143,9 @@ static int capture_cb(struct http_response *rsp, enum http_final_call final,
 	return 0;
 }
 
+static void stream_consume(const uint8_t *d, size_t n);
+static enum ota_result stream_seal(const struct ota_manifest *m);
+
 static int stream_cb(struct http_response *rsp, enum http_final_call final,
 		     void *u)
 {
@@ -153,10 +156,21 @@ static int stream_cb(struct http_response *rsp, enum http_final_call final,
 		return 0;
 	}
 
-	mbedtls_sha256_update(&sha, rsp->body_frag_start, rsp->body_frag_len);
-	stream_err = flash_img_buffered_write(&fictx,
-					      rsp->body_frag_start,
-					      rsp->body_frag_len, false);
+	stream_consume(rsp->body_frag_start, rsp->body_frag_len);
+	return 0;
+}
+
+/*
+ * Hash and write one fragment, and drive the progress readout.
+ *
+ * Split out of the body callback so the write path and the HTTP plumbing stay
+ * separable; flash_img_buffered_write() does not care where the bytes came
+ * from.
+ */
+static void stream_consume(const uint8_t *d, size_t n)
+{
+	mbedtls_sha256_update(&sha, d, n);
+	stream_err = flash_img_buffered_write(&fictx, (uint8_t *)d, n, false);
 	if (stream_err) {
 		printk("[ota] slot1 write failed: %d\n", stream_err);
 		/* 0, not an error: returning negative here WOULD abort the
@@ -166,9 +180,9 @@ static int stream_cb(struct http_response *rsp, enum http_final_call final,
 		 * the outcome from stream_err either way, and changing when the
 		 * socket closes is not something to do untested. The guard
 		 * above means the remaining fragments cost only a memcpy. */
-		return 0;
+		return;
 	}
-	dl_got += rsp->body_frag_len;
+	dl_got += n;
 	if (dl_total) {
 		uint8_t pct = (uint8_t)((uint64_t)dl_got * 100 / dl_total);
 		static uint8_t last_pct = 255;
@@ -191,7 +205,6 @@ static int stream_cb(struct http_response *rsp, enum http_final_call final,
 			dl_logged_bytes = dl_got;
 		}
 	}
-	return 0;
 }
 
 /* One TLS GET. body_cb==NULL captures into small_body. Returns http status
@@ -368,8 +381,16 @@ void ota_last_manifest(struct ota_manifest *out)
 	*out = last_m;
 }
 
+static enum ota_source ui_src = OTA_SRC_WIFI;
+
+enum ota_source ota_ui_source(void)
+{
+	return ui_src;
+}
+
 enum ota_result ota_install(const struct ota_manifest *m)
 {
+	ui_src = OTA_SRC_WIFI;
 	if (flash_img_init(&fictx) != 0) {
 		return OTA_ERR_FLASH;
 	}
@@ -414,6 +435,19 @@ enum ota_result ota_install(const struct ota_manifest *m)
 		mbedtls_sha256_free(&sha);
 		return r;
 	}
+	return stream_seal(m);
+}
+
+/*
+ * Close a completed transfer: flush the writer, check the length, verify the
+ * hash, and only then hand slot1 to MCUboot.
+ *
+ * Nothing is handed to MCUboot until the length and the hash both agree, so a
+ * truncated or corrupted download leaves slot1 as garbage that is simply never
+ * marked pending.
+ */
+static enum ota_result stream_seal(const struct ota_manifest *m)
+{
 	if (stream_err) {
 		mbedtls_sha256_free(&sha);
 		return OTA_ERR_FLASH;
@@ -451,6 +485,7 @@ enum ota_result ota_install(const struct ota_manifest *m)
 	printk("[ota] %s verified and marked pending\n", m->version);
 	return OTA_OK;
 }
+
 
 /* --- UI <-> worker handshake --- */
 
