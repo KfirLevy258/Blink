@@ -6,7 +6,7 @@
 Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 <p>
-  <img src="https://img.shields.io/badge/firmware-v0.4.0-D97757?style=flat-square&labelColor=171B22">
+  <img src="https://img.shields.io/badge/firmware-v0.5.0-D97757?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-8A8F98?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/RTOS-Zephyr-6FBF8B?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/updates-over--the--air-E8A05C?style=flat-square&labelColor=171B22">
@@ -55,11 +55,15 @@ A 3D-printable case gives the bare board a home on your desk. **[Download the CA
 Clauge needs to know your usage numbers. It figures out the best way to get them on its own - you don't choose a mode, it just works:
 
 - **Wi-Fi - the default.** Give the board your Wi-Fi and it fetches your usage itself, over a secure connection. First power-on walks you through it right on the screen.
-- **USB cable - if Wi-Fi isn't an option.** On a network where you'd rather not put the board online, plug it into your computer instead and run the small bridge below. Your usage streams over the cable, and no Wi-Fi or login ever touches the device.
+- **USB cable - if Wi-Fi isn't an option.** On a network where you'd rather not put the board online, plug it into your computer instead and run the small bridge below. Your usage streams over the cable, and no Wi-Fi or login ever touches the device. The bridge also handles updates for you - see below.
 
   ```bash
-  tools/dev.sh up      # starts the USB bridge; tools/dev.sh down stops it
+  python3 -m pip install pyserial esptool   # once; any Python 3.9+
+  tools/dev.sh up                            # start it (tools/dev.sh down stops it)
   ```
+
+  It finds the board by itself. `pyserial` is how it talks to the board and
+  `esptool` is how it updates it, so install both.
 
 ## Build &amp; flash
 
@@ -92,7 +96,12 @@ Full details - the signing key, the encrypted-flash setup, and the release flow 
 
 ## Updates
 
-Clauge updates itself over the air. Publish a new firmware release and the board notices, downloads it over a secure connection, checks it, and restarts into the new version. If a new build ever misbehaves, the board **automatically rolls back** to the version that was working - so a bad update can't brick it.
+Clauge checks for a new release as soon as it starts up, and if it finds one it asks you - **Update now** or **Later** - right on the gauge screen. How the update arrives depends on how the board is connected, and you don't have to pick:
+
+- **Over Wi-Fi.** The board fetches the release itself over a secure connection, verifies it, and restarts into it. If a new build ever misbehaves it **automatically rolls back** to the version that was working, so a bad update can't brick it. Allow several minutes - most of it is the changeover at the end, during which the screen holds its last frame.
+- **Over the USB cable.** A tethered board has no network of its own, so the bridge does the work: it downloads the release and writes it over the same cable, in about a minute. The screen goes dark while that happens - it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
+
+Either way you get a confirmation on screen once the new version is up.
 
 Every image is **signed with a private key only you hold**, and the board only accepts firmware carrying that signature. That means nobody else can push updates to your device - not by forking this repo, not by uploading a release - even though the repo itself is public.
 

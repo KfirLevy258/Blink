@@ -109,9 +109,22 @@ tools/release.sh
 version), signs the image, and attaches `clauge-fw.bin` + `manifest.json` to the
 `v<version>` release on **`KfirLevy258/Clauge`** - which is the feed every board reads.
 
-On the device: **Settings → Software update → Install x.y.z.** The board streams the
-image into its spare slot, verifies the SHA-256, reboots, and MCUboot swaps it in. A
-daily background check flags the tile when something newer is waiting.
+On the device there are two ways in, and it picks by itself:
+
+- **Standalone (WiFi).** The board streams the image into its spare slot, verifies the
+  SHA-256, reboots, and MCUboot swaps it in.
+- **Tethered (USB bridge).** This mode has no network of its own -- `run_usb()` never
+  starts `net_worker` -- so the board only *approves*, and the daemon fetches the
+  release and writes slot0 with esptool. About 75 s, and no swap, because the bytes
+  land where the bootloader already looks. The trade is no automatic rollback on that
+  route; it is acceptable only because a machine that can reflash the board is by
+  definition already cabled to it. Requires `pip install esptool` wherever the daemon
+  runs.
+
+A check runs as soon as the board is up (and daily after that). Anything newer raises a
+prompt on the gauge screen -- **Update now** / **Later** -- and the settings row still
+offers **Software update → Install x.y.z** on demand. Either route reports the outcome
+on the next boot.
 
 ## How updates stay safe
 
@@ -125,6 +138,12 @@ Four independent layers, each guarding one thing:
   (fetch usage) within 90 s. If it hangs or crashes, the watchdog reboots and MCUboot
   restores the previous version, which then reports *"Update failed, previous version
   restored."*
+
+The first three hold on both routes. The fourth does not apply to the USB one, which
+writes the running slot in place -- there is no spare copy to fall back to. The daemon
+compensates where it can: it verifies the asset against its manifest before writing,
+and it reads the chip's eFuses and refuses outright if it cannot tell whether flash
+encryption is burned, since a plaintext write to a fused board leaves it dark.
 
 On a fused unit, flash encryption keeps secrets (Wi-Fi password, token) unreadable at
 rest. **An unfused development board has no such protection** - its stored Wi-Fi
