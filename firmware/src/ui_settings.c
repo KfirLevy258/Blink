@@ -527,8 +527,13 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		lv_label_set_text_fmt(dl_lbl, "Updating to %s...", snap->version);
 		lv_label_set_text(dl_src, "Over the USB cable");
 		lv_obj_add_flag(dl_bar, LV_OBJ_FLAG_HIDDEN);
+		/* Warn about the blackout explicitly. esptool resets the board
+		 * into the ROM loader to write it, so the panel stops being
+		 * driven at all and simply goes dark for the duration -- with
+		 * no warning that reads as a crash, not an update. */
 		lv_label_set_text(dl_sub,
-				  "Keep the cable connected.\nThis takes about a minute.");
+				  "The screen goes dark for about 2 minutes.\n"
+				  "Keep the cable connected.");
 		return;
 	}
 

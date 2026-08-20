@@ -58,6 +58,7 @@ enum ota_source {
 };
 
 enum ota_source ota_ui_source(void);
+void ota_ui_set_source(enum ota_source src);
 
 void ota_request_check(void);	/* UI: settings tile tapped */
 void ota_request_install(void);	/* UI: user confirmed install */

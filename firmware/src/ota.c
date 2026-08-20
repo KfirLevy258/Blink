@@ -388,6 +388,11 @@ enum ota_source ota_ui_source(void)
 	return ui_src;
 }
 
+void ota_ui_set_source(enum ota_source src)
+{
+	ui_src = src;
+}
+
 enum ota_result ota_install(const struct ota_manifest *m)
 {
 	ui_src = OTA_SRC_WIFI;

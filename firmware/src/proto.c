@@ -11,9 +11,11 @@
 #include "msg_parse.h"
 #include "ota.h"
 #include "version.h"
+#include "cfg_store.h"
 #include "usage_view.h"
 #include "net_time.h"
 #include "version.h"
+#include "cfg_store.h"
 
 #define PROTO_VERSION 2
 #define PING_INTERVAL_MS 10000
@@ -155,6 +157,25 @@ bool proto_ota_install(void)
 	if (!ota_staged) {
 		return false;
 	}
+	/*
+	 * Say which link this is on BEFORE raising the state: ota_ui_source()
+	 * otherwise still reads WIFI (its default) and the progress screen
+	 * announces a download that is not happening -- reported 2026-08-21,
+	 * where a USB flash was labelled "Over WiFi".
+	 */
+	ota_ui_set_source(OTA_SRC_USB);
+
+	/*
+	 * Record the intent before handing over, so the next boot can report
+	 * the outcome. ota_report_outcome() in main.c already does exactly
+	 * this for the WiFi path: it compares the stored target against the
+	 * running version and shows "Updated to ..." or "Update failed,
+	 * previous version restored." Setting it here gets that for free, and
+	 * gets the failure case right too -- if esptool dies mid-write the
+	 * board comes back on the OLD version and the mismatch says so.
+	 */
+	cfg_set_ota_state(1, ota_m.version);
+
 	/* Percent stays at 0 throughout: the board cannot see esptool's
 	 * progress, and a bar that does not move is worse than no bar. The UI
 	 * shows the "keep it connected" wording for this source instead. */

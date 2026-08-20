@@ -1301,11 +1301,15 @@ static void run_usb(void)
 		 * internet connection and this link, so it does the fetching and
 		 * pushes the image down; see the OTA block in proto.c.
 		 *
-		 * Same gate as standalone: the first check waits until the
-		 * daemon has actually delivered usage, which is this mode's
-		 * equivalent of the boot stages completing.
+		 * Gated on the daemon TALKING, not on it having delivered
+		 * usage. Those are unrelated: the usage endpoint is
+		 * aggressively rate-limited (the bridge backs off 120-600 s on
+		 * a 429), and gating here on ota_health meant a throttled
+		 * session never checked for updates at all -- observed
+		 * 2026-08-21. Unlike standalone, this mode needs no clock and
+		 * no token of its own: the daemon does the fetching.
 		 */
-		if (ota_health && !ota_boot_checked) {
+		if (proto_host_seen() && !ota_boot_checked) {
 			ota_boot_checked = true;
 			proto_ota_check();
 		}
