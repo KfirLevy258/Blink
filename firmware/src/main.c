@@ -820,7 +820,13 @@ static void net_worker(void *a, void *b, void *c)
 	int64_t token_deadline = 0;
 	int64_t next_poll = 0;
 	int64_t next_tz = 0;	/* fetch as soon as we are online */
-	int64_t next_ota = k_uptime_get() + 5 * 60 * 1000; /* first check 5 min in */
+	/*
+	 * Fallback only. The first check normally rides the end of the boot
+	 * sequence (see the ota_boot_checked block below) -- this timer just
+	 * catches a board that never reaches that point.
+	 */
+	int64_t next_ota = k_uptime_get() + 5 * 60 * 1000;
+	bool ota_boot_checked = false;
 	int32_t tz_min = 0;
 	int64_t next_rejoin = 0;
 	int rejoin_wait_ms = REJOIN_WAIT_MIN_MS;
@@ -1099,6 +1105,22 @@ static void net_worker(void *a, void *b, void *c)
 			} else {
 				next_tz = now + 3600LL * 1000;	/* retry hourly */
 			}
+		}
+
+		/*
+		 * First check as soon as the board is genuinely up, rather than
+		 * five minutes later (user request 2026-08-20: tell me at boot,
+		 * with the choice to update or carry on).
+		 *
+		 * had_usage is the right gate, not "WiFi associated": it means
+		 * the join, the clock, the token and a real fetch have ALL
+		 * worked -- which is exactly the three boot stages completing.
+		 * Checking earlier would race the clock, and TLS without a
+		 * valid clock fails.
+		 */
+		if (had_usage && !ota_boot_checked) {
+			ota_boot_checked = true;
+			next_ota = now;
 		}
 
 		/* --- OTA: daily background check + UI-requested actions --- */

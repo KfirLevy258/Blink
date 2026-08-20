@@ -49,7 +49,7 @@ static enum action pending;
 static lv_obj_t *notice;	/* outcome popup on the top layer */
 static lv_obj_t *upd_btn;
 static lv_obj_t *upd_lbl;
-static lv_timer_t *upd_timer;	/* lives with the panel */
+static lv_timer_t *upd_timer;	/* whole session, not just the panel */
 /* Download progress. Full-screen and touch-swallowing on purpose, so it must
  * be torn down the moment the download stops -- a successful install ends in a
  * reboot, but a FAILED one returns to a live UI, and leaving this up locked the
@@ -272,6 +272,82 @@ void ui_settings_notice(const char *txt)
 
 	lv_obj_set_size(ok, 120, 36);
 	lv_obj_align(ok, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
+
+/*
+ * Boot-time "an update is waiting" prompt.
+ *
+ * Lives on lv_layer_top() like the notice, NOT inside the settings panel:
+ * it has to appear on the gauge screen with nothing else open, which is
+ * exactly where show_install_confirm() cannot go (that one is a child of
+ * `panel`). Shown at most once per boot -- an update the user answered
+ * "Later" to must not re-ask on every OTA state tick.
+ */
+static lv_obj_t *upd_prompt;
+static bool upd_prompt_done;
+
+static void upd_prompt_close(void)
+{
+	if (upd_prompt) {
+		lv_obj_del(upd_prompt);
+		upd_prompt = NULL;
+	}
+}
+
+static void upd_prompt_later_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	upd_prompt_close();
+}
+
+static void upd_prompt_now_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	upd_prompt_close();
+	/* The download overlay is screen-level and upd_timer now runs whether
+	 * or not the panel is open, so the bar appears without going through
+	 * settings. */
+	ota_request_install();
+}
+
+static void upd_prompt_show(const struct ota_ui *snap)
+{
+	/* Never stack on top of something the user is already answering. */
+	if (upd_prompt_done || upd_prompt || panel || confirm || notice ||
+	    dl_overlay) {
+		return;
+	}
+	upd_prompt_done = true;
+
+	upd_prompt = lv_obj_create(lv_layer_top());
+	lv_obj_set_size(upd_prompt, 300, 130);
+	lv_obj_set_style_bg_color(upd_prompt, COL_BG, 0);
+	lv_obj_set_style_bg_opa(upd_prompt, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(upd_prompt, COL_GREEN, 0);
+	lv_obj_set_style_border_width(upd_prompt, 1, 0);
+	lv_obj_clear_flag(upd_prompt, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_center(upd_prompt);
+
+	lv_obj_t *l = lv_label_create(upd_prompt);
+
+	lv_label_set_text_fmt(l, "Version %s is available.", snap->version);
+	lv_obj_set_width(l, 270);
+	lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_color(l, COL_TEXT, 0);
+	lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 10);
+
+	lv_obj_t *yes = mk_btn(upd_prompt, "Update now", COL_GREEN,
+			       upd_prompt_now_cb, NULL);
+
+	lv_obj_set_size(yes, 130, 36);
+	lv_obj_align(yes, LV_ALIGN_BOTTOM_LEFT, 12, -8);
+
+	lv_obj_t *no = mk_btn(upd_prompt, "Later", COL_TRACK,
+			      upd_prompt_later_cb, NULL);
+
+	lv_obj_set_size(no, 130, 36);
+	lv_obj_align(no, LV_ALIGN_BOTTOM_RIGHT, -12, -8);
 }
 
 static void install_yes_cb(lv_event_t *e)
@@ -500,11 +576,54 @@ static void upd_timer_cb(lv_timer_t *t)
 
 	ota_ui_get(&snap);
 
-	/* Any state that is not an in-flight install must not leave the
-	 * full-screen progress overlay up. Done here rather than in the FAILED
-	 * branch alone so no future state can reintroduce the lock-out. */
+	/*
+	 * Screen-level state first, and unconditionally.
+	 *
+	 * This timer runs for the whole session now, not only while the panel
+	 * is open, so an install started from the boot prompt still gets its
+	 * progress bar and its outcome popup -- both of those live on
+	 * lv_layer_top() and never needed the panel. Everything touching
+	 * upd_lbl/upd_btn is fenced below instead: those die with the panel,
+	 * and writing through them once it is shut is a NULL deref.
+	 */
 	if (snap.st != OTA_UI_DOWNLOADING && snap.st != OTA_UI_REBOOTING) {
 		dl_overlay_hide();
+	}
+
+	switch (snap.st) {
+	case OTA_UI_DOWNLOADING:
+		dl_overlay_show(&snap, false);
+		break;
+	case OTA_UI_REBOOTING:
+		dl_overlay_show(&snap, true);
+		break;
+	case OTA_UI_AVAILABLE:
+		upd_prompt_show(&snap);
+		break;
+	case OTA_UI_UP_TO_DATE:
+		/* Bounce back to IDLE even with the panel shut, so a stale
+		 * "Up to date" cannot greet the next open. */
+		if (upd_seen != OTA_UI_UP_TO_DATE) {
+			upd_revert_at = k_uptime_get() + 3000;
+		} else if (k_uptime_get() > upd_revert_at) {
+			ota_ui_set(OTA_UI_IDLE, NULL, 0);
+		}
+		break;
+	case OTA_UI_FAILED:
+		if (upd_seen != OTA_UI_FAILED) {
+			ui_settings_notice(upd_seen == OTA_UI_DOWNLOADING ?
+				"Update failed. The current version keeps running." :
+				"Couldn't check for updates.");
+			ota_ui_set(OTA_UI_IDLE, NULL, 0);
+		}
+		break;
+	default:
+		break;
+	}
+
+	if (upd_lbl == NULL) {		/* panel shut: no row to update */
+		upd_seen = snap.st;
+		return;
 	}
 
 	switch (snap.st) {
@@ -526,40 +645,23 @@ static void upd_timer_cb(lv_timer_t *t)
 		lv_label_set_text(upd_lbl, "Up to date");
 		lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
-		if (upd_seen != OTA_UI_UP_TO_DATE) {
-			upd_revert_at = k_uptime_get() + 3000;
-		} else if (k_uptime_get() > upd_revert_at) {
-			ota_ui_set(OTA_UI_IDLE, NULL, 0);
-		}
 		break;
 	case OTA_UI_AVAILABLE:
 		/* Version only: this row shares 296 px with "Software update" on
 		 * the left, which leaves ~13 characters here before the two
 		 * collide (the size string made it 23 and they overlapped --
 		 * user-reported 2026-07-25). Keep any future state text within
-		 * the same budget as "Update ready". The size is dropped from
-		 * the UI entirely: the download overlay reports progress as a
-		 * percentage bar, which is what a user actually watches. */
+		 * the same budget as "Update ready". */
 		lv_label_set_text_fmt(upd_lbl, "Install %s", snap.version);
 		lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
-	case OTA_UI_DOWNLOADING:
-		dl_overlay_show(&snap, false);
-		break;
-	case OTA_UI_REBOOTING:
-		dl_overlay_show(&snap, true);
-		break;
 	case OTA_UI_FAILED:
-		if (upd_seen != OTA_UI_FAILED) {
-			ui_settings_notice(upd_seen == OTA_UI_DOWNLOADING ?
-				"Update failed. The current version keeps running." :
-				"Couldn't check for updates.");
-			ota_ui_set(OTA_UI_IDLE, NULL, 0);
-		}
 		lv_label_set_text(upd_lbl, "");
 		lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
+		break;
+	default:
 		break;
 	}
 	upd_seen = snap.st;
@@ -640,13 +742,13 @@ static void do_close(void (*pump)(void))
 	 * upd_timer_cb shows the overlay from the next lv_timer_handler, both
 	 * of which can land after a swipe has already passed the guard.
 	 *
-	 * Deleting the panel below takes upd_timer with it, and upd_timer_cb is
-	 * the ONLY caller of dl_overlay_hide(). That would leave a full-screen,
-	 * opaque, touch-swallowing object orphaned on lv_layer_top() with
-	 * nothing alive to remove it -- and if the install fails there is no
-	 * reboot to mask it. That is the screen locked against every tap,
-	 * user-reported 2026-07-25. Keep the panel; the swipe is dropped and
-	 * closing works again once the download resolves.
+	 * upd_timer_cb is the ONLY caller of dl_overlay_hide(). It used to die
+	 * with the panel, which left a full-screen, opaque, touch-swallowing
+	 * object orphaned on lv_layer_top() with nothing alive to remove it --
+	 * the screen locked against every tap, user-reported 2026-07-25. The
+	 * timer now outlives the panel (see upd_timer_cb), so that particular
+	 * trap is gone; this guard stays because closing mid-download still
+	 * tears down the panel under a live install for no gain.
 	 */
 	if (dl_overlay) {
 		closing = false;
@@ -654,10 +756,8 @@ static void do_close(void (*pump)(void))
 	}
 
 	ui_slide_begin();
-	if (upd_timer) {
-		lv_timer_del(upd_timer);
-		upd_timer = NULL;
-	}
+	/* upd_timer deliberately survives the panel -- see upd_timer_cb. It is
+	 * created once in ui_settings_attach(). */
 	upd_btn = NULL;		/* dies with the panel */
 	upd_lbl = NULL;
 	lv_obj_del(panel);	/* deletes confirm with it, if open */
@@ -889,9 +989,7 @@ static void build_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
 	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -26, 0);
 
-	upd_seen = OTA_UI_IDLE;
-	upd_timer = lv_timer_create(upd_timer_cb, 250, NULL);
-	upd_timer_cb(upd_timer);	/* correct label before the first tick */
+	upd_timer_cb(NULL);	/* correct the row before the first tick */
 
 	/* --- Reset actions: divider, centred heading, three big tiles --- */
 	mk_line(panel, 129);
@@ -1078,4 +1176,11 @@ void ui_settings_attach(lv_obj_t *scr)
 	lv_obj_add_event_cb(scr, scr_gesture_cb, LV_EVENT_GESTURE, NULL);
 	mk_edge_zone(scr, LV_ALIGN_RIGHT_MID, zone_settings_cb);
 	mk_edge_zone(scr, LV_ALIGN_LEFT_MID, zone_anim_cb);
+
+	/* The OTA watcher runs from here on, not from the panel build: the boot
+	 * prompt, the download bar and the outcome popup are all screen-level
+	 * and have to work with settings shut. See upd_timer_cb. */
+	if (upd_timer == NULL) {
+		upd_timer = lv_timer_create(upd_timer_cb, 250, NULL);
+	}
 }
