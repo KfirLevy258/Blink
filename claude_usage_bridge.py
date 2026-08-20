@@ -11,6 +11,7 @@ import time
 import serial  # pyserial
 from serial.tools import list_ports
 
+from pc import ota as ota_mod
 from pc import protocol, usage_api
 from pc.bridge import Bridge
 
@@ -78,14 +79,51 @@ def main():
         reader = protocol.LineReader()
 
         def send(m):
-            print(f"[bridge] -> {m}", file=sys.stderr)
+            # ota_data is not logged: an image is ~5000 chunks and each line
+            # carries 344 characters of base64, which would bury every other
+            # message in the log. Bridge prints its own progress every 200.
+            if m.get("t") != "ota_data":
+                print(f"[bridge] -> {m}", file=sys.stderr)
             ser.write(protocol.encode(m))
 
-        bridge = Bridge(write_msg=send, fetch_usage=fetch)
+        # The board approved an update. esptool needs the port to itself, so
+        # close it, write slot0, and let the outer reconnect loop pick the
+        # board back up -- esptool resets it into the new image on the way out.
+        class Reflashed(Exception):
+            pass
+
+        def flash_image(blob, version):
+            # Let the board paint its warning first. esptool resets it into
+            # the ROM loader, after which the panel is dead until the new
+            # image boots -- so the "the screen goes dark for about 2 minutes"
+            # frame has to be on screen BEFORE we take the port away, or the
+            # blackout arrives with no explanation.
+            time.sleep(4)
+            print(f"[bridge] ota: closing port to flash {version}",
+                  file=sys.stderr)
+            try:
+                ser.close()
+            except Exception:
+                pass
+            ok, why = ota_mod.flash(port, blob)
+            print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
+                  file=sys.stderr)
+            raise Reflashed()
+
+        bridge = Bridge(write_msg=send, fetch_usage=fetch,
+                        flash_image=flash_image)
         next_poll = time.monotonic()
         try:
             while True:
-                data = ser.read(256)
+                # in_waiting first, then a blocking read(1) as the idle wait.
+                #
+                # ser.read(n) does NOT return early on partial data: it waits
+                # for n bytes or the full timeout. With a 0.2 s timeout that
+                # cost 0.2 s per OTA chunk -- and since the transfer is
+                # stop-and-wait, that stall WAS the transfer rate: 213 B/s
+                # measured, ~100 minutes for a 1.3 MB image. Draining what has
+                # actually arrived keeps the link busy instead.
+                data = ser.read(ser.in_waiting or 1)
                 if data:
                     # Echo raw board console (logs + its [usage] prints) for visibility.
                     sys.stderr.buffer.write(data)
@@ -102,6 +140,11 @@ def main():
                     if bridge.board_alive():
                         bridge.poll_once()
                     next_poll = time.monotonic() + POLL_INTERVAL_S
+        except Reflashed:
+            # Expected: the port is already closed and the board is rebooting
+            # into what we just wrote. Give it a moment, then reconnect.
+            time.sleep(2)
+            continue
         except (serial.SerialException, OSError) as e:
             print(f"[bridge] serial lost: {e}; reconnecting", file=sys.stderr)
             try:

@@ -1,0 +1,181 @@
+"""Release fetch and serial push, for OTA while the board is tethered.
+
+USB-bridge mode has no network on the board -- run_usb() never starts
+net_worker, so the firmware's own HTTPS updater is unreachable and the update
+row did nothing there. We have both an internet connection and the board's
+serial link, so the split is: we fetch from the same GitHub release feed the
+WiFi path uses, and push the image down; the board writes and verifies it with
+exactly the same code either way.
+
+Nothing here trusts the transport. The board re-hashes what it received and
+compares against the manifest before marking slot1 pending, which matters more
+over serial than over HTTPS -- there is no TLS underneath this.
+"""
+import importlib.util
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+RELEASE_BASE = "https://github.com/KfirLevy258/Clauge/releases/latest/download/"
+MANIFEST_URL = RELEASE_BASE + "manifest.json"
+FIRMWARE_URL = RELEASE_BASE + "clauge-fw.bin"
+
+
+
+# Serve a locally built release instead of GitHub's. Set CLAUGE_OTA_DIR to a
+# directory holding manifest.json + clauge-fw.bin.
+#
+# This exists because the published feed cannot exercise the update path during
+# development: the board usually runs something newer than the latest release,
+# so a check can only ever answer "up to date". Pointing this at a local build
+# is the only way to test a real transfer without publishing one.
+OTA_DIR_ENV = "CLAUGE_OTA_DIR"
+
+
+def _local_dir():
+    d = os.environ.get(OTA_DIR_ENV)
+    return pathlib.Path(d) if d else None
+
+
+def _get(url, timeout=30):
+    local = _local_dir()
+    if local is not None:
+        return (local / url.rsplit("/", 1)[-1]).read_bytes()
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return r.read()
+
+
+def fetch_manifest(get=_get):
+    """{"version","size","sha256"} for the latest release, or None."""
+    try:
+        m = json.loads(get(MANIFEST_URL).decode("utf-8"))
+    except Exception:
+        return None
+    if not all(k in m for k in ("version", "size", "sha256")):
+        return None
+    return m
+
+
+def fetch_firmware(get=_get):
+    """The release binary. ~1.3 MB, so this blocks for a few seconds."""
+    return get(FIRMWARE_URL, timeout=300)
+
+
+def _parts(v):
+    try:
+        return tuple(int(x) for x in v.strip().split("."))
+    except (AttributeError, ValueError):
+        return None
+
+
+def is_newer(cand, cur):
+    """True if `cand` is a strictly later version than `cur`.
+
+    Mirrors ota_version_newer() in the firmware: a malformed version on either
+    side means "no", so a bad manifest can never trigger an install.
+    """
+    a, b = _parts(cand), _parts(cur)
+    if a is None or b is None or len(a) != 3 or len(b) != 3:
+        return False
+    return a > b
+
+
+
+# --- writing it to the board -------------------------------------------
+#
+# esptool against slot0, which is what this project has always done by hand.
+# The image is a signed app and 0x20000 is where the bootloader looks, so a
+# plain write lands somewhere already bootable -- no MCUboot swap afterwards,
+# which is the slower half of an over-the-air update on this hardware.
+
+APP_OFFSET = "0x20000"
+
+
+def _tool(module, script):
+    """How to invoke an esptool-family tool on THIS machine.
+
+    `python -m <module>` first: that works wherever the daemon's own
+    interpreter has esptool installed, which is the portable answer and the
+    one `pip install esptool` produces. Only if the module is absent do we go
+    looking for a standalone script on PATH -- which is how it happened to be
+    installed on the machine this was first written on, and relying on that
+    would have made the daemon work there and nowhere else.
+    """
+    if importlib.util.find_spec(module) is not None:
+        return [sys.executable, "-m", module]
+    for name in (script, script[:-3] if script.endswith(".py") else script):
+        found = shutil.which(name)
+        if found:
+            return [found]
+    return None
+
+
+def _esptool():
+    return _tool("esptool", "esptool.py")
+
+
+def _espefuse():
+    return _tool("espefuse", "espefuse.py")
+
+
+def flash_encrypted_chip(port, run=subprocess.run):
+    """True if the chip has flash encryption burned, None if we cannot tell.
+
+    Writing a plaintext image to a fused chip produces a board that cannot
+    boot until it is flashed the other way -- recoverable, but not something
+    to do to someone's device by accident. Two of these boards exist here and
+    only one is fused, so this asks the chip rather than assuming.
+    """
+    espefuse = _espefuse()
+    if not espefuse:
+        return None
+    try:
+        out = run(espefuse + ["--port", port, "summary"],
+                  capture_output=True, text=True, timeout=60).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if "FLASH_CRYPT_CNT" in line:
+            digits = [t for t in line.replace("=", " ").split() if t.isdigit()]
+            if digits:
+                return digits[-1] != "0"
+    return None
+
+
+def flash(port, blob, run=subprocess.run):
+    """Write `blob` to the app slot. Returns (ok, message)."""
+    exe = _esptool()
+    if not exe:
+        return False, ("esptool not found -- pip install esptool"
+                       " into the interpreter running this daemon")
+
+    enc = flash_encrypted_chip(port, run=run)
+    if enc is None:
+        return False, "could not read the chip's eFuses; refusing to flash"
+    if enc:
+        # tools/flash_encrypted.sh exists for this and needs the key file;
+        # doing it from here would mean handling that key, so decline loudly.
+        return False, "chip has flash encryption; use tools/flash_encrypted.sh"
+
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        f.write(blob)
+        img = f.name
+    try:
+        r = run(exe + ["--port", port, "--baud", "115200",
+                       "write_flash", APP_OFFSET, img],
+                capture_output=True, text=True, timeout=900)
+        if r.returncode != 0:
+            return False, (r.stderr or r.stdout or "").strip()[-200:]
+        return True, "written"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        try:
+            os.unlink(img)
+        except OSError:
+            pass

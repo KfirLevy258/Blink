@@ -13,5 +13,6 @@ firmware/src/secrets.h
 firmware/build/
 firmware/build-sb/
 firmware/build-trace/
+firmware/build-ota/
 build/
 build-sb/

@@ -105,3 +105,21 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
 
 def status(state: str, detail: str = "") -> dict:
     return {"t": "status", "v": VERSION, "state": state, "detail": detail}
+
+
+# --- OTA over the serial link (see pc/ota.py and the OTA block in proto.c) ---
+
+
+def ota_avail(version, size, sha256):
+    return {"t": "ota_avail", "v": VERSION, "version": version,
+            "size": int(size), "sha256": sha256}
+
+
+def ota_none():
+    return {"t": "ota_none", "v": VERSION}
+
+
+
+
+def ota_error(why=""):
+    return {"t": "ota_error", "v": VERSION, "why": why}
