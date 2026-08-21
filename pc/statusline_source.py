@@ -43,8 +43,7 @@ def _secs_until(resets_at, now_epoch: float) -> int:
     """Seconds until `resets_at`. -1 when unknown.
 
     -1 rather than 0 for missing input: 0 renders as "resets now", which is a
-    confident lie. -1 lets the display say "--". Same contract the old
-    usage_api._secs_until had.
+    confident lie. -1 lets the display say "--".
     """
     if resets_at is None:
         return -1

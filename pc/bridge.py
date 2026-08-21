@@ -171,6 +171,9 @@ class Bridge:
                 self._write(protocol.status("error", str(e)[:80]))
             return
 
+        if usage is None:
+            return          # No statusline payload yet -- board keeps its last values.
+
         self._clear_throttle()
         self._write(usage)
 

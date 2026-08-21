@@ -89,10 +89,9 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
 
     `stale` is a declared field, not an afterthought bolted on by a caller:
     this function is the one place the wire contract is defined, and the
-    firmware parses `stale` same as any other key. A pushed-payload source
-    (see pc/statusline_source.py) sets it when its data outlived its own
-    freshness window; a polled source (pc/usage_api.py) leaves it False --
-    a fresh fetch is never stale by definition.
+    firmware parses `stale` same as any other key. pc/statusline_source.py,
+    the only producer of usage messages, sets it when the payload it read
+    has outlived its own freshness window.
     """
     flat = {}
     for m in models or []:

@@ -12,7 +12,7 @@ import serial  # pyserial
 from serial.tools import list_ports
 
 from pc import ota as ota_mod
-from pc import protocol, usage_api
+from pc import protocol, statusline_source
 from pc.bridge import Bridge
 
 POLL_INTERVAL_S = 60
@@ -35,12 +35,9 @@ def main():
     if not port:
         sys.exit("No serial port found; pass --port /dev/cu.usbmodemXXXX")
 
-    token = usage_api.read_token()
-    if not token:
-        sys.exit("No Claude OAuth token (Keychain/creds).")
-
-    def fetch():
-        return usage_api.map_usage(usage_api.fetch_usage_raw(token))
+    # Claude Code owns the credential and computes these numbers; we read the file
+    # its statusline shim writes. Nothing here authenticates to Anthropic.
+    fetch = statusline_source.make_fetch()
 
     while True:  # reconnect loop
         try:

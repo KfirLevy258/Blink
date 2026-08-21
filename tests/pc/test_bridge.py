@@ -56,6 +56,16 @@ class TestBridge(unittest.TestCase):
         self.bridge.poll_once()
         self.assertEqual([m["t"] for m in self.sent], ["time", "usage"])
 
+    def test_poll_with_no_payload_yet_sends_time_only(self):
+        """statusline_source.make_fetch() returns None before Claude Code has
+        ever written a payload. That is not an error -- there is simply
+        nothing to report yet -- so no 'usage' or 'status' message should
+        follow, and the board just keeps whatever it last had."""
+        b = Bridge(write_msg=self.sent.append, fetch_usage=lambda: None,
+                   now=self.clock.now, wall=lambda: (1752444000, 180))
+        b.poll_once()
+        self.assertEqual([m["t"] for m in self.sent], ["time"])
+
     def test_ping_updates_liveness(self):
         self.assertFalse(self.bridge.board_alive())
         self.bridge.on_message({"t": "ping", "v": 1, "up_ms": 5})
