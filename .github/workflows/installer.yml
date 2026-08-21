@@ -5,8 +5,11 @@ name: installer
 # merges on it running everywhere rather than on the one Mac it was written on.
 on:
   pull_request:
+  # Every branch, not just main. Waiting for a pull request to find out that
+  # the installer breaks on Linux means finding out late, and the work that
+  # produced this file was several commits deep on a branch before anything
+  # could have run at all.
   push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
