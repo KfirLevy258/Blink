@@ -27,14 +27,13 @@ jobs:
       fail-fast: false
       matrix:
         # Spelled out rather than a cross product: setup-python publishes no
-        # arm64 build for 3.9, so macos-latest x 3.9 fails on the runner rather
-        # than on anything we wrote. The 3.9 floor -- which install.sh checks
-        # for and the README promises -- is still tested on both OSes, using
-        # the x86 macOS image for it.
+        # arm64 build for 3.9, so macos-latest x 3.9 would fail on the runner
+        # rather than on anything we wrote. The macOS side of the 3.9 floor is
+        # covered by the macos-system-python job below, on a better
+        # interpreter than setup-python could have given us anyway.
         include:
           - {os: ubuntu-latest, python: '3.9'}
           - {os: ubuntu-latest, python: '3.13'}
-          - {os: macos-13, python: '3.9'}
           - {os: macos-latest, python: '3.13'}
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +42,26 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --quiet -r tests/requirements.txt
       - run: python -m pytest tests/ -q
+
+  # The Python a Mac already has. This started as a macos-13 x py3.9 entry in
+  # the matrix above, which never once got scheduled across four runs -- x86
+  # macOS runners are scarce, and gating every merge on the scarcest image is
+  # a bad trade. Using the system interpreter is not a workaround, it is the
+  # better test: macOS ships python3 3.9.x with the command line tools, so
+  # this is the exact interpreter most customers will run the daemon on, and
+  # the floor install.sh enforces.
+  macos-system-python:
+    name: tests (macOS system python3)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: which python does macOS ship
+        run: /usr/bin/python3 --version
+      - name: run the suite on it
+        run: |
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/sysvenv"
+          "$RUNNER_TEMP/sysvenv/bin/python" -m pip install --quiet -r tests/requirements.txt
+          "$RUNNER_TEMP/sysvenv/bin/python" -m pytest tests/ -q
 
   # The two steps the unit tests always skip, because they touch the machine:
   # building the virtualenv, and registering a login service. One runner per
@@ -171,13 +190,33 @@ jobs:
       - name: what does uname say
         shell: bash
         run: uname -s
+      # `|| true` keeps this non-blocking, so the result has to be REPORTED or
+      # the job is green for the wrong reason -- the exact shape that let a
+      # machine-dependent test pass for months. Both outcomes land in the job
+      # summary, so the gap is a number someone can read.
       - name: pytest under Git Bash
         shell: bash
         run: |
           python -m pip install --quiet -r tests/requirements.txt
-          python -m pytest tests/ -q || true
+          python -m pytest tests/ -q > result.txt 2>&1 || true
+          tail -3 result.txt
+          {
+            echo "### Windows (unsupported target)"
+            echo '```'
+            tail -3 result.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: install.sh under Git Bash
         shell: bash
         run: |
-          sh tests/ci/check_install.sh no-statusline || \
+          if sh tests/ci/check_install.sh no-statusline > install.txt 2>&1; then
+            echo "install.sh COMPLETED on Windows" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
             echo "::warning::install.sh does not complete on Windows -- expected, unsupported"
+            {
+              echo "install.sh did not complete on Windows:"
+              echo '```'
+              tail -5 install.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
