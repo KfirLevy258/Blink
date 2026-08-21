@@ -58,13 +58,21 @@ Clauge needs to know your usage numbers. It figures out the best way to get them
 - **USB cable - if Wi-Fi isn't an option.** On a network where you'd rather not put the board online, plug it into your computer instead and run the small bridge below. Your usage streams over the cable, and no Wi-Fi or login ever touches the device. The bridge also handles updates for you - see below.
 
   ```bash
-  python3 -m pip install pyserial esptool   # once; any Python 3.9+
-  python3 -m pc.install_statusline install   # once; see "What the installer changes"
-  tools/dev.sh up                            # start it (tools/dev.sh down stops it)
+  ./install.sh          # once; any Python 3.9+. See "What the installer changes"
   ```
 
-  It finds the board by itself. `pyserial` is how it talks to the board and
-  `esptool` is how it updates it, so install both.
+  That is the whole setup. It finds the board by itself, and starts again on
+  its own every time you log in - plug the cable in and the panel comes up.
+
+  **Needs Claude Code 2.1.100 or newer.** Clauge reads the usage figures from
+  the status line, and older versions do not put them there - 2.1.0 has no
+  usage figures in that payload at all, so the panel would stay blank. Update
+  Claude Code first if yours is older.
+
+  ```bash
+  ./install.sh status      # is the panel getting data?
+  ./install.sh uninstall   # put everything back
+  ```
 
   ### What the installer changes
 
@@ -73,20 +81,20 @@ Clauge needs to know your usage numbers. It figures out the best way to get them
   to whatever command is set as its **status line**, so that is the one setting
   Clauge has to change.
 
-  `install_statusline` edits exactly one key in `~/.claude/settings.json`:
-
   | | |
   |---|---|
-  | Changes | `statusLine.command` |
-  | Leaves alone | every other key in the file, and the file's own formatting and permissions |
+  | Changes | `statusLine.command` in `~/.claude/settings.json` |
+  | Creates | `~/.clauge/` - a private Python environment for the bridge (`pyserial`, `esptool`), and a copy of the status line shim |
+  | Creates | a login item, so the bridge starts with your session (`~/Library/LaunchAgents` on macOS, a user systemd unit on Linux) |
+  | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Your system Python is not modified |
   | Reads or stores | nothing else - no credential, no token, no account data |
 
   **It does this without asking**, so that plugging the board in is the whole
-  setup. It prints exactly what it changed before it changes it, and the change
-  is reversible:
+  setup. It prints all of the above before it changes anything, and every part
+  of it is reversible:
 
   ```bash
-  python3 -m pc.install_statusline uninstall
+  ./install.sh uninstall
   ```
 
   **If you already have your own status line, it keeps working.** Clauge records

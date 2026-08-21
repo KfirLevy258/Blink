@@ -102,6 +102,14 @@ def _sniff_format(settings_path: str):
 def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> None:
     """Write via a temp file so a crash cannot truncate the user's settings."""
     tmp = settings_path + ".clauge-tmp"
+    # The temp file is a sibling of the target (it has to be, for os.replace to
+    # be atomic), so an absent parent directory fails the write rather than the
+    # read that came before it. ~/.claude is absent on a machine where Claude
+    # Code has never written a setting -- a case install() otherwise handles
+    # fine, since _load() already treats a missing file as {}.
+    parent = os.path.dirname(settings_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(tmp, "w") as f:
         json.dump(data, f, indent=indent)
         if trailing_newline:
@@ -260,6 +268,12 @@ def main(argv=None) -> int:
         "--settings", default="~/.claude/settings.json",
         help="Path to Claude Code's settings.json (default: %(default)s)")
     parser.add_argument(
+        "--undo-hint", default=None,
+        help="Command to print as the way back (default: this module's own "
+             "uninstall). install.sh passes its own command, because from a "
+             "customer's side that is the undo that puts everything back, "
+             "not just this one key.")
+    parser.add_argument(
         "--shim", default=None,
         help="Path to the Clauge statusline shim "
              "(default: this repo's tools/clauge-statusline.sh)")
@@ -272,14 +286,14 @@ def main(argv=None) -> int:
     shim_path = args.shim or _default_shim_path()
 
     if args.action == "install":
-        _announce(settings_path, shim_path)
+        _announce(settings_path, shim_path, args.undo_hint)
         print(install(settings_path, shim_path))
     else:
         print(uninstall(settings_path, shim_path))
     return 0
 
 
-def _announce(settings_path: str, shim_path: str) -> None:
+def _announce(settings_path: str, shim_path: str, undo_hint: str = None) -> None:
     """Say what is about to change, before changing it.
 
     Install is deliberately unattended -- it asks nothing, because the product
@@ -289,22 +303,48 @@ def _announce(settings_path: str, shim_path: str) -> None:
     stdout is redirected: a log that records what changed is the point.
     """
     previous = (_load(settings_path).get("statusLine") or {}).get("command", "")
+    new_command = f"sh {shlex.quote(shim_path)}"
+    # The SAME is_ours test install() applies, for the same reason it applies
+    # it: what happens to `previous` depends entirely on whether it is a
+    # customer command or our own shim from an earlier install. Reading
+    # `previous` without that test described an upgrade-in-place as "your
+    # command is recorded and still runs" -- said of a command that was
+    # (correctly) not recorded at all, because the real customer command was
+    # already in the chain file. A disclosure that guesses at the branch is
+    # worse than no disclosure: it is the one thing here nobody can verify
+    # afterwards.
+    is_ours = previous == new_command or previous == _read_marker()
     print("Clauge is about to change one setting in Claude Code.")
     print()
     print(f"  File     {settings_path}")
     print("  Key      statusLine.command  (nothing else in the file is touched)")
-    if previous:
+    if previous and is_ours:
+        chained = ""
+        try:
+            with open(_chain_path()) as f:
+                chained = f.read().strip()
+        except OSError:
+            pass
         print(f"  Was      {previous}")
-        print(f"  Now      sh {shlex.quote(shim_path)}")
+        print(f"  Now      {new_command}")
+        print()
+        print("  That is Clauge's own shim from an earlier install, so this")
+        print("  updates it in place rather than recording it.")
+        if chained:
+            print("  The status line it runs after capturing usage is unchanged:")
+            print(f"    {chained}")
+    elif previous:
+        print(f"  Was      {previous}")
+        print(f"  Now      {new_command}")
         print()
         print("  Your existing status line keeps working -- Clauge records the")
         print("  command above and runs it after capturing usage, so your bar")
         print("  renders exactly as before.")
     else:
         print("  Was      (no status line configured)")
-        print(f"  Now      sh {shlex.quote(shim_path)}")
+        print(f"  Now      {new_command}")
     print()
-    print("  To undo:  python3 -m pc.install_statusline uninstall")
+    print(f"  To undo:  {undo_hint or 'python3 -m pc.install_statusline uninstall'}")
     print()
 
 
