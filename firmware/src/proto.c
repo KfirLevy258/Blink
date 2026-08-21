@@ -215,8 +215,31 @@ static void dispatch(const char *json)
 
 		msg_get_double(json, "fable_pct", &mf);
 		usage_view_set_models(mf);
-		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)\n",
-		       sp, (int)ss, wp, (int)ws);
+
+		/* Every usage message says whether its own numbers can be
+		 * trusted, so the dot is decided here rather than by a
+		 * separate status message arriving afterwards.
+		 *
+		 * This must run AFTER usage_view_update() and
+		 * usage_view_set_models(), both of which set OK internally --
+		 * ordering it earlier would have the amber immediately
+		 * overwritten by green.
+		 *
+		 * Before this existed the daemon had to fake it, sending
+		 * status "rate_limited" purely because that string already
+		 * mapped to amber -- which made a stale reading and a real
+		 * rate limit indistinguishable on the panel. An absent key
+		 * leaves `stale` false, so a daemon older than this firmware
+		 * still reads as OK rather than as a warning.
+		 */
+		bool stale = false;
+
+		msg_get_bool(json, "stale", &stale);
+		if (stale) {
+			usage_view_set_status(USAGE_STATUS_STALE);
+		}
+		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)%s\n",
+		       sp, (int)ss, wp, (int)ws, stale ? "  STALE" : "");
 	} else if (strcmp(type, "time") == 0) {
 		double epoch = 0, off = 0;
 

@@ -176,25 +176,14 @@ class Bridge:
 
         self._clear_throttle()
         self._write(usage)
-        if usage.get("stale"):
-            # The firmware does not read the usage message's own `stale`
-            # field yet (see the docstring on protocol.usage()) -- so
-            # without this, a customer who quits Claude Code on Friday sees
-            # Friday's numbers under a green "OK" dot all weekend, because
-            # nothing ever tells the board the payload stopped moving.
-            #
-            # "rate_limited" is the wrong name for what is actually
-            # happening here -- Claude Code isn't running, or hasn't
-            # refreshed the statusline payload recently, which has nothing
-            # to do with an API 429. We reuse it anyway, ONLY because
-            # unmodified firmware already maps this exact status string to
-            # USAGE_STATUS_STALE (proto.c) and renders the correct amber
-            # "showing last known" indicator for it -- the same UI this
-            # condition actually needs. This should become a first-class
-            # "stale" status (with its own firmware mapping) once that
-            # firmware task lands; until then this is the only way to make
-            # staleness visible on the board at all.
-            self._write(protocol.status("rate_limited", "usage data is stale"))
+        # No second message for staleness any more. The usage message carries
+        # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
+        # board colours its own dot from the reading it was just given.
+        #
+        # What was here sent status "rate_limited" whenever the payload was
+        # stale, purely because that string already mapped to amber -- which
+        # left a stale reading and a real rate limit indistinguishable on the
+        # panel, and put the wrong words in the log.
 
     def _throttle(self, retry_after):
         """Arm the next hold-off: our own ladder from RATE_LIMIT_MIN_S doubling

@@ -92,15 +92,15 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
     pc/statusline_source.py, the only producer of usage messages, sets it
     when the payload it read has outlived its own freshness window.
 
-    As of this writing the firmware does NOT read this field -- proto.c's
-    "usage" handler only pulls session_pct, weekly_pct, session_resets_in_s,
-    weekly_resets_in_s, and fable_pct, and msg_parse.h has no bool getter at
-    all, so `stale` currently round-trips over the wire unread. Until a
-    native firmware reader lands, pc/bridge.py works around the gap by also
-    emitting a `status` message (state "rate_limited") when this is true,
-    which unmodified firmware already maps to its amber STALE state -- see
-    the comment at that call site in poll_once() for why that particular
-    status name was reused.
+The firmware reads this field: proto.c's "usage" handler calls
+    msg_get_bool(json, "stale", ...) and sets USAGE_STATUS_STALE when it is
+    true, after the update and models calls that set OK internally.
+
+    An absent key leaves it false on the board, so a daemon older than that
+    firmware reads as OK rather than as a permanent warning. Older firmware
+    given this field simply ignores it -- it degrades to a green dot on a
+    stale reading, which is the behaviour that existed before either side
+    knew about the field.
     """
     flat = {}
     for m in models or []:
