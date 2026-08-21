@@ -40,6 +40,12 @@ SKIP_SERVICE="${CLAUGE_SKIP_SERVICE:-0}"
 
 OS=$(uname -s)
 
+# The oldest Claude Code that carries usage figures in its status line
+# payload. 2.1.0 does not carry rate_limits at all; 2.1.100 does. Below this,
+# every part of the install succeeds and the panel stays blank forever --
+# which is why this is checked here and not only stated in the README.
+MIN_CLAUDE="2.1.100"
+
 die() { printf '%s\n' "$@" >&2; exit 1; }
 
 find_python() {
@@ -53,6 +59,47 @@ find_python() {
 	die "Clauge needs Python 3.9 or newer, and I could not find it." \
 		"  macOS:  brew install python3   (or install Xcode command line tools)" \
 		"  Linux:  your package manager's python3"
+}
+
+claude_version() {
+	command -v claude >/dev/null 2>&1 || return 1
+	# `claude --version` prints e.g. "2.1.229 (Claude Code)".
+	claude --version 2>/dev/null | sed -n 's/^\([0-9][0-9.]*\).*/\1/p'
+}
+
+claude_is_new_enough() {
+	"$PY" - "$1" "$MIN_CLAUDE" <<-'EOF'
+		import sys
+
+		def parts(v):
+		    out = []
+		    for piece in v.split(".")[:3]:
+		        out.append(int(piece) if piece.isdigit() else 0)
+		    while len(out) < 3:
+		        out.append(0)
+		    return tuple(out)
+
+		sys.exit(0 if parts(sys.argv[1]) >= parts(sys.argv[2]) else 1)
+	EOF
+}
+
+check_claude_version() {
+	v=$(claude_version) || return 0     # not on PATH; nothing to compare
+	[ -n "$v" ] || return 0             # unrecognised output; do not guess
+	claude_is_new_enough "$v" && return 0
+
+	# A warning, not a refusal. Everything installed here is correct and
+	# stays correct: the moment they update Claude Code the panel starts
+	# working, with nothing to redo. Refusing would make them run this
+	# again for no reason.
+	echo
+	echo "  !! Your Claude Code is $v, and Clauge needs $MIN_CLAUDE or newer."
+	echo "     Older versions do not put the usage figures in the status line"
+	echo "     at all, so the panel will sit blank until you update:"
+	echo
+	echo "       npm install -g @anthropic-ai/claude-code@latest"
+	echo
+	echo "     Nothing else needs redoing -- it starts working on its own."
 }
 
 # --------------------------------------------------------------------------
@@ -273,6 +320,8 @@ do_install() {
 	install_service
 	echo
 	echo "Done. Plug the board in over USB -- it picks it up on its own."
+	# Last, so it is the thing left on screen rather than scrolled past.
+	check_claude_version
 	case "$OS" in
 	Darwin) echo "  Log:     $LOG" ;;
 	Linux) echo "  Log:     journalctl --user -u clauge-bridge -f" ;;
@@ -366,6 +415,18 @@ do_status() {
 		;;
 	*) echo "unknown on $OS" ;;
 	esac
+
+	# Where someone debugging a blank panel will look, so the floor belongs
+	# here too, not only at install time.
+	printf 'Claude Code '
+	cv=$(claude_version) || cv=""
+	if [ -z "$cv" ]; then
+		echo "not found on PATH"
+	elif claude_is_new_enough "$cv"; then
+		echo "$cv"
+	else
+		echo "$cv -- TOO OLD, needs $MIN_CLAUDE+ (panel will stay blank)"
+	fi
 
 	printf 'Status line '
 	if [ -f "$SHIM" ]; then echo "installed at $SHIM"; else echo "not installed"; fi
