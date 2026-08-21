@@ -15,7 +15,26 @@ import time
 from pc import protocol
 
 PAYLOAD_PATH = os.path.expanduser("~/.clauge/statusline.json")
-STALE_AFTER_S = 120
+# How old the payload may get before we stop vouching for it.
+#
+# This was 120 s, and 120 s was wrong in kind, not just in value. Claude Code
+# writes this file only when it RENDERS its status line, which happens when
+# the user is doing something. So the age of the file measures how long the
+# person has been idle -- not how wrong the numbers are. On a real desk it
+# made the panel flap amber/green every few minutes: observed alternating
+# STALE -> usage -> STALE -> usage while its owner simply paused to read.
+#
+# The numbers do not rot with wall-clock time. They go wrong two ways, and
+# both are checked below:
+#   - the window they describe resets, after which the reading is definitely
+#     wrong (usage went back to near zero and this file still says 47%).
+#     That is `_window_has_reset`, and it is exact rather than a guess.
+#   - usage happens somewhere we cannot see -- claude.ai, the phone app --
+#     so an old reading can understate the truth. Nothing detects that, so
+#     this bound stays as the backstop. Half an hour is long enough that
+#     ordinary pauses are silent, short enough that a genuinely abandoned
+#     Claude Code is not presented as live.
+STALE_AFTER_S = 1800
 
 
 def _window(rate_limits: dict, key: str):
@@ -50,18 +69,35 @@ def _secs_until(resets_at, now_epoch: float) -> int:
     return max(0, int(resets_at - now_epoch))
 
 
+def _window_has_reset(resets_at, now_epoch: float) -> bool:
+    """True once the window this reading describes has rolled over.
+
+    At that moment the percentage is not merely old, it is wrong: usage went
+    back to near zero and the file still says whatever it said. Age cannot
+    detect this -- a reading taken one minute before a reset is stale the
+    moment the reset lands -- so it is checked directly.
+    """
+    return resets_at is not None and now_epoch >= resets_at
+
+
 def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
     """Convert a statusline payload into a 'usage' protocol message."""
     rate_limits = payload.get("rate_limits") or {}
     session_pct, session_resets = _window(rate_limits, "five_hour")
     weekly_pct, weekly_resets = _window(rate_limits, "seven_day")
 
+    stale = (
+        (now_epoch - mtime_epoch) > STALE_AFTER_S
+        or _window_has_reset(session_resets, now_epoch)
+        or _window_has_reset(weekly_resets, now_epoch)
+    )
+
     # No per-model rows: the statusline payload has no per-model breakdown.
     return protocol.usage(
         session_pct, "", weekly_pct, "", [],
         session_resets_in_s=_secs_until(session_resets, now_epoch),
         weekly_resets_in_s=_secs_until(weekly_resets, now_epoch),
-        stale=(now_epoch - mtime_epoch) > STALE_AFTER_S,
+        stale=stale,
     )
 
 

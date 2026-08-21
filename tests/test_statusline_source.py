@@ -54,11 +54,16 @@ def test_rate_limits_absent_entirely_reports_unknown_not_zero():
     assert msg["weekly_resets_in_s"] == -1
 
 
-def test_old_payload_is_marked_stale():
+def test_an_abandoned_payload_is_marked_stale():
+    """Was written against a 120s threshold with a ten-minute-old payload.
+    Ten minutes is now deliberately not stale -- it is someone reading their
+    screen -- so this pins the case the rule is actually for: a Claude Code
+    that stopped writing hours ago, presented as live.
+    """
     payload = {"rate_limits": {"five_hour": {"used_percentage": 5.0,
                                              "resets_at": 1_787_203_200}}}
     msg = ss.map_statusline(payload, now_epoch=1_787_200_000,
-                            mtime_epoch=1_787_200_000 - 600)
+                            mtime_epoch=1_787_200_000 - 7200)
     assert msg["stale"] is True
 
 
@@ -102,3 +107,29 @@ def test_read_payload_malformed_json_returns_none_none(tmp_path):
 def test_make_fetch_returns_none_with_no_payload(tmp_path):
     fetch = ss.make_fetch(str(tmp_path / "does_not_exist.json"))
     assert fetch() is None
+
+
+def test_a_short_pause_is_not_stale():
+    """The file's age measures how long the user has been idle, not how wrong
+    the numbers are. A 120s threshold made the panel flap amber/green while
+    its owner simply paused to read -- observed on hardware.
+    """
+    now = 1_000_000
+    payload = {"rate_limits": {
+        "five_hour": {"used_percentage": 50, "resets_at": now + 3600},
+        "seven_day": {"used_percentage": 20, "resets_at": now + 90000}}}
+    msg = ss.map_statusline(payload, now, now - 600)   # ten minutes idle
+    assert msg["stale"] is False
+
+
+def test_a_reading_whose_window_has_reset_is_stale_however_fresh():
+    """Age cannot catch this: a reading taken a minute before the reset is
+    wrong the moment the reset lands. It says 50% when usage is back at zero.
+    """
+    now = 1_000_000
+    payload = {"rate_limits": {
+        "five_hour": {"used_percentage": 50, "resets_at": now - 1},
+        "seven_day": {"used_percentage": 20, "resets_at": now + 90000}}}
+    msg = ss.map_statusline(payload, now, now - 5)     # five seconds old
+    assert msg["stale"] is True
+
