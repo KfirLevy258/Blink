@@ -5,4 +5,5 @@
 # first time it ran. A list in a workflow file would have drifted again.
 pytest
 pyserial          # claude_usage_bridge imports serial at module scope
-numpy             # tests/bootanim/test_encoder.py
+numpy             # tests/bootanim/test_encoder.py -> tools/encode_bootanim.py
+pillow            # same module's other import, found the round after numpy
