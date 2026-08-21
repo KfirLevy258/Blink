@@ -17,3 +17,7 @@ firmware/build-pilot/
 firmware/build-ota/
 build/
 build-sb/
+
+# Local-only: implementation plans reference the concerns doc (public repo)
+docs/superpowers/
+.superpowers/
