@@ -272,10 +272,40 @@ def main(argv=None) -> int:
     shim_path = args.shim or _default_shim_path()
 
     if args.action == "install":
+        _announce(settings_path, shim_path)
         print(install(settings_path, shim_path))
     else:
         print(uninstall(settings_path, shim_path))
     return 0
+
+
+def _announce(settings_path: str, shim_path: str) -> None:
+    """Say what is about to change, before changing it.
+
+    Install is deliberately unattended -- it asks nothing, because the product
+    is meant to be plug-and-play. That makes disclosure the only thing standing
+    between us and silently editing a file the user owns, so it is not
+    optional and it runs before the first write, not after. Printed even when
+    stdout is redirected: a log that records what changed is the point.
+    """
+    previous = (_load(settings_path).get("statusLine") or {}).get("command", "")
+    print("Clauge is about to change one setting in Claude Code.")
+    print()
+    print(f"  File     {settings_path}")
+    print("  Key      statusLine.command  (nothing else in the file is touched)")
+    if previous:
+        print(f"  Was      {previous}")
+        print(f"  Now      sh {shlex.quote(shim_path)}")
+        print()
+        print("  Your existing status line keeps working -- Clauge records the")
+        print("  command above and runs it after capturing usage, so your bar")
+        print("  renders exactly as before.")
+    else:
+        print("  Was      (no status line configured)")
+        print(f"  Now      sh {shlex.quote(shim_path)}")
+    print()
+    print("  To undo:  python3 -m pc.install_statusline uninstall")
+    print()
 
 
 if __name__ == "__main__":

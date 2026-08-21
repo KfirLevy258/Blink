@@ -59,11 +59,40 @@ Clauge needs to know your usage numbers. It figures out the best way to get them
 
   ```bash
   python3 -m pip install pyserial esptool   # once; any Python 3.9+
+  python3 -m pc.install_statusline install   # once; see "What the installer changes"
   tools/dev.sh up                            # start it (tools/dev.sh down stops it)
   ```
 
   It finds the board by itself. `pyserial` is how it talks to the board and
   `esptool` is how it updates it, so install both.
+
+  ### What the installer changes
+
+  Over USB, Clauge reads the usage figures Claude Code has already worked out,
+  rather than asking Anthropic for them itself. Claude Code hands those figures
+  to whatever command is set as its **status line**, so that is the one setting
+  Clauge has to change.
+
+  `install_statusline` edits exactly one key in `~/.claude/settings.json`:
+
+  | | |
+  |---|---|
+  | Changes | `statusLine.command` |
+  | Leaves alone | every other key in the file, and the file's own formatting and permissions |
+  | Reads or stores | nothing else - no credential, no token, no account data |
+
+  **It does this without asking**, so that plugging the board in is the whole
+  setup. It prints exactly what it changed before it changes it, and the change
+  is reversible:
+
+  ```bash
+  python3 -m pc.install_statusline uninstall
+  ```
+
+  **If you already have your own status line, it keeps working.** Clauge records
+  your existing command, and runs it after capturing the usage figures - your bar
+  renders exactly as before. Uninstalling puts your command back unchanged, and
+  will not touch a status line Clauge did not install.
 
 ## Build &amp; flash
 
