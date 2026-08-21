@@ -350,3 +350,36 @@ def test_install_with_no_previous_statusline_clears_a_ghost_chain_file(tmp_path,
     ins.uninstall(path)
     got = json.loads(open(path).read())
     assert "statusLine" not in got
+
+
+def test_install_with_marker_but_no_statusline_preserves_a_live_chain(tmp_path, monkeypatch):
+    """Regression: 'statusLine is currently absent' is NOT proof the chain
+    file is a ghost -- a marker surviving from an earlier install means the
+    chain may still hold a real, still-live original that a later
+    uninstall() needs to restore.
+
+    Sequence: install over a real customer command (chains it); the
+    statusLine key then gets cleared by some means other than uninstall()
+    (hand edit, settings migration, a merge); install() runs again at the
+    same shim path. The chain file must survive that reinstall, and the
+    following uninstall() must restore the original customer command --
+    not report 'Removed the Clauge statusline' with nothing to restore."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {
+        "statusLine": {"type": "command", "command": "sh ~/original.sh"}
+    })
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+    chain_path = tmp_path / ".clauge" / "statusline-chain"
+    assert chain_path.read_text().strip() == "sh ~/original.sh"
+
+    data = json.loads(open(path).read())
+    del data["statusLine"]
+    open(path, "w").write(json.dumps(data))
+
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+    assert chain_path.exists(), "chain file must survive a reinstall over a cleared statusLine"
+    assert chain_path.read_text().strip() == "sh ~/original.sh"
+
+    ins.uninstall(path)
+    got = json.loads(open(path).read())
+    assert got["statusLine"]["command"] == "sh ~/original.sh"

@@ -142,27 +142,37 @@ def install(settings_path: str, shim_path: str) -> str:
     # A foreign command can equal neither (short of an adversarial customer
     # literally choosing our exact former command text, which is the same
     # irreducible edge every exact-match scheme has) and is always chained.
-    is_ours = previous == new_command or previous == _read_marker()
+    marker = _read_marker()
+    is_ours = previous == new_command or previous == marker
     if previous and not is_ours:
         with open(_chain_path(), "w") as f:
             f.write(previous + "\n")
         chained = f"chained previous statusline: {previous}"
-    elif not previous:
-        # Nothing in statusLine right now, so anything already sitting in
-        # the chain file predates this install and is a ghost from an
-        # unrelated era (e.g. the key was removed by hand, or a previous
-        # install/uninstall cycle left it behind). Clear it -- otherwise a
-        # later uninstall() would "restore" that ghost command as if it
-        # were the customer's real previous statusline.
+    elif not previous and not marker:
+        # Absent statusLine key AND no marker from any earlier install --
+        # nothing ties a chain file to a still-live Clauge install, so if
+        # one exists here it is a ghost from something else entirely (a
+        # hand-placed file, leftovers from an unrelated flow). Clear it --
+        # otherwise a later uninstall() would "restore" that ghost command
+        # as if it were the customer's real previous statusline.
+        #
+        # Checking the marker (not just "statusLine is absent") matters: a
+        # marker surviving from an earlier install means that install's
+        # chain content, if any, may still hold the real pre-Clauge
+        # original even though statusLine was since cleared by some other
+        # means (hand edit, settings migration). Treating "no statusLine"
+        # alone as proof of "nothing to protect" deleted exactly that
+        # original in the reproduction this comment is guarding against.
         try:
             os.remove(_chain_path())
         except OSError:
             pass
         chained = "no previous statusline to chain"
     else:
-        # previous exists and is ours (a reinstall over our own shim): the
-        # chain file, if any, still holds the real original from before
-        # Clauge was first installed. Leave it untouched.
+        # Either previous is ours (a reinstall over our own shim), or
+        # statusLine is currently absent but a marker survives from an
+        # earlier install. Either way the chain file, if any, may still
+        # hold the real pre-Clauge original and must not be touched.
         chained = "no previous statusline to chain"
 
     data["statusLine"] = {"type": "command", "command": new_command}
