@@ -88,10 +88,19 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
     without growing a full array parser.
 
     `stale` is a declared field, not an afterthought bolted on by a caller:
-    this function is the one place the wire contract is defined, and the
-    firmware parses `stale` same as any other key. pc/statusline_source.py,
-    the only producer of usage messages, sets it when the payload it read
-    has outlived its own freshness window.
+    this function is the one place the wire contract is defined.
+    pc/statusline_source.py, the only producer of usage messages, sets it
+    when the payload it read has outlived its own freshness window.
+
+    As of this writing the firmware does NOT read this field -- proto.c's
+    "usage" handler only pulls session_pct, weekly_pct, session_resets_in_s,
+    weekly_resets_in_s, and fable_pct, and msg_parse.h has no bool getter at
+    all, so `stale` currently round-trips over the wire unread. Until a
+    native firmware reader lands, pc/bridge.py works around the gap by also
+    emitting a `status` message (state "rate_limited") when this is true,
+    which unmodified firmware already maps to its amber STALE state -- see
+    the comment at that call site in poll_once() for why that particular
+    status name was reused.
     """
     flat = {}
     for m in models or []:

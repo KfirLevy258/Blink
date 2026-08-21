@@ -125,6 +125,27 @@ class TestBridge(unittest.TestCase):
         self.assertEqual(self.sent[-1]["t"], "status")
         self.assertEqual(self.sent[-1]["state"], "error")
 
+    def test_stale_usage_is_followed_by_a_status_the_firmware_maps_to_amber(self):
+        """The firmware doesn't read the usage message's own `stale` field
+        (see protocol.usage()'s docstring), so without a status message
+        nothing on the board ever changes when the payload goes stale --
+        the last good numbers sit under a green dot forever. proto.c maps
+        state "rate_limited" to USAGE_STATUS_STALE (amber) today, so that's
+        what must follow, in order, after the usage message itself (the
+        firmware sets STATUS_OK unconditionally at the end of its usage
+        handler, so the status message has to come second to win)."""
+        b = Bridge(write_msg=self.sent.append,
+                   fetch_usage=lambda: protocol.usage(
+                       61.0, "R1", 26.0, "R2", [], stale=True),
+                   now=self.clock.now, wall=lambda: (1752444000, 180))
+        b.poll_once()
+        self.assertEqual([m["t"] for m in self.sent], ["time", "usage", "status"])
+        self.assertEqual(self.sent[-1]["state"], "rate_limited")
+
+    def test_fresh_usage_sends_no_extra_status(self):
+        self.bridge.poll_once()
+        self.assertEqual([m["t"] for m in self.sent], ["time", "usage"])
+
 
 if __name__ == "__main__":
     unittest.main()
