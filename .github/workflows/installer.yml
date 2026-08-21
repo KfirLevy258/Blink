@@ -199,11 +199,14 @@ jobs:
         run: |
           python -m pip install --quiet -r tests/requirements.txt
           python -m pytest tests/ -q > result.txt 2>&1 || true
-          tail -3 result.txt
+          tail -25 result.txt
+          # -25, not -3: the first version of this truncated the failure list
+          # to the totals line, so diagnosing the gap meant re-running an
+          # older workflow to get output this one had already thrown away.
           {
             echo "### Windows (unsupported target)"
             echo '```'
-            tail -3 result.txt
+            tail -25 result.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: install.sh under Git Bash

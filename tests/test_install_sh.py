@@ -12,6 +12,19 @@ import json
 import os
 import subprocess
 
+import pytest
+
+# install.sh is POSIX shell and registers a launchd or systemd service. On
+# Windows it fails on two concrete things, both found by the exploratory CI
+# job rather than assumed: a venv puts its interpreter in Scripts/ rather than
+# bin/, and there is no Scheduled Task path. A third is unresolved -- whether
+# Claude Code on Windows runs statusLine.command through cmd.exe, where
+# `sh <path>` needs Git Bash on PATH. Skipping says that; failing 9 tests
+# implies a port is nearly done when it has not been started.
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="install.sh is POSIX-only; Windows is not a supported target")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "install.sh")
 
@@ -20,6 +33,7 @@ def _run(action, home, expect_ok=True):
     env = dict(os.environ)
     env.update({
         "HOME": str(home),
+        "USERPROFILE": str(home),   # what ~ means to Python on Windows
         "CLAUGE_SKIP_DEPS": "1",
         "CLAUGE_SKIP_SERVICE": "1",
     })
