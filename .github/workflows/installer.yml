@@ -41,7 +41,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install --quiet pytest pyserial
+      - run: python -m pip install --quiet -r tests/requirements.txt
       - run: python -m pytest tests/ -q
 
   # The two steps the unit tests always skip, because they touch the machine:
@@ -128,9 +128,22 @@ jobs:
   lint:
     name: shellcheck
     runs-on: ubuntu-latest
+    # Job level, not step level: a step's own `env` is not in scope for that
+    # step's `name`, so the version would render blank in the log.
+    env:
+      SHELLCHECK_VERSION: v0.11.0
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      # Pinned, not apt's. Ubuntu ships an older shellcheck than a developer
+      # is likely to have, and the first run failed on a finding that the
+      # newer local version does not emit -- a CI failure nobody could
+      # reproduce. Same binary here and on a laptop.
+      - name: install shellcheck ${{ env.SHELLCHECK_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/$SHELLCHECK_VERSION/shellcheck-$SHELLCHECK_VERSION.linux.x86_64.tar.xz" \
+            | tar -xJf - -C /tmp
+          sudo install "/tmp/shellcheck-$SHELLCHECK_VERSION/shellcheck" /usr/local/bin/
+          shellcheck --version
       # -s sh: these must be POSIX. Checking them as bash would let a bashism
       # through that breaks the /bin/sh they actually run under.
       - run: shellcheck -s sh install.sh tools/clauge-statusline.sh tests/ci/*.sh
@@ -161,7 +174,7 @@ jobs:
       - name: pytest under Git Bash
         shell: bash
         run: |
-          python -m pip install --quiet pytest pyserial
+          python -m pip install --quiet -r tests/requirements.txt
           python -m pytest tests/ -q || true
       - name: install.sh under Git Bash
         shell: bash

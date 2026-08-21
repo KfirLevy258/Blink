@@ -305,8 +305,12 @@ do_uninstall() {
 			systemctl --user disable --now clauge-bridge.service >/dev/null 2>&1 || true
 		fi
 		rm -f "$UNIT"
-		command -v systemctl >/dev/null 2>&1 &&
+		# An if, not `A && B || true`: in that form the `|| true` also swallows
+		# a failure of the test itself, so it reads as "ignore daemon-reload
+		# errors" while actually meaning something broader. shellcheck SC2015.
+		if command -v systemctl >/dev/null 2>&1; then
 			systemctl --user daemon-reload >/dev/null 2>&1 || true
+		fi
 		echo "removed"
 		;;
 	*) echo "nothing to remove" ;;

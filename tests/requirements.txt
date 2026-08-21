@@ -1,0 +1,8 @@
+# What the Python test suite needs, so CI and a developer's machine agree.
+#
+# This file exists because they did not: the suite passed locally inside the
+# Zephyr venv, which happens to carry numpy, and failed on every CI runner the
+# first time it ran. A list in a workflow file would have drifted again.
+pytest
+pyserial          # claude_usage_bridge imports serial at module scope
+numpy             # tests/bootanim/test_encoder.py
