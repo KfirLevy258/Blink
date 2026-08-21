@@ -117,6 +117,20 @@ class TestFlash(unittest.TestCase):
 class TestFlashGuards(unittest.TestCase):
     """ota.flash() must not write a chip it cannot vouch for."""
 
+    def setUp(self):
+        # These tests inject `run`, so the only thing still reaching outside is
+        # tool DISCOVERY: _esptool()/_espefuse() look for esptool in whatever
+        # interpreter runs the tests. That made the outcome depend on the
+        # machine -- green in a venv that happens to carry esptool, three
+        # failures on a clean CI runner -- and in neither case was it testing
+        # the guards it names. Pin the discovery; the guards are the subject.
+        self._tools = (ota._esptool, ota._espefuse)
+        ota._esptool = lambda: ["python", "-m", "esptool"]
+        ota._espefuse = lambda: ["python", "-m", "espefuse"]
+
+    def tearDown(self):
+        ota._esptool, ota._espefuse = self._tools
+
     def _run(self, efuse_out=None, rc=0, fail_probe=False):
         calls = []
 
