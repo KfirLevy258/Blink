@@ -122,9 +122,11 @@ install_deps() {
 			die "Could not create a Python environment at $VENV." \
 				"  Debian/Ubuntu: sudo apt install python3-venv, then rerun."
 	fi
-	# pyserial talks to the board; esptool is how the bridge updates it.
+	# pyserial talks to the board; esptool is how the bridge updates it. Both
+	# pinned in pc/requirements.txt -- see the reasoning there. Unpinned, each
+	# customer gets whatever PyPI serves that day.
 	"$VENV/bin/python" -m pip install --quiet --disable-pip-version-check \
-		pyserial esptool >/dev/null 2>&1 ||
+		-r "$ROOT/pc/requirements.txt" >/dev/null 2>&1 ||
 		die "Could not install pyserial and esptool into $VENV." \
 			"  Check your network connection and rerun; nothing has been changed yet."
 	echo "ok"

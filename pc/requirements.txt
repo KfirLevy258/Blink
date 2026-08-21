@@ -1,0 +1,15 @@
+# What the daemon runs against on a customer's machine.
+#
+# Pinned, not floating. `pip install pyserial esptool` resolves to whatever
+# PyPI has on the day someone installs, so a future esptool release would
+# break flashing for every NEW install while every existing one kept working
+# -- a failure that reaches people who just bought the device and cannot be
+# reproduced on any machine that installed earlier.
+#
+# These two are the versions verified against real hardware on 2026-08-21:
+# MCUboot and the app were flashed to an unfused CYD with esptool 5.3.1, and
+# the daemon ran the full hello/usage/OTA exchange over pyserial 3.5.
+#
+# Raising a pin is a deliberate act: re-flash a board with it first.
+pyserial==3.5
+esptool==5.3.1
