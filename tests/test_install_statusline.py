@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 
 from pc import install_statusline as ins
 
@@ -203,3 +205,148 @@ def test_stale_marker_never_matches_a_customers_unrelated_command(tmp_path, monk
     ins.install(path, "/usr/local/bin/clauge-statusline.sh")
     chain = (tmp_path / ".clauge" / "statusline-chain").read_text().strip()
     assert chain == "sh ~/customers-own-script.sh"
+
+
+# --- uninstall() symmetry: never touch a statusLine it doesn't recognize ---
+
+
+def test_uninstall_does_not_clobber_a_command_switched_to_after_install(tmp_path, monkeypatch):
+    """Reproduction (a): install, then the customer points statusLine at a
+    brand NEW command of their own (bypassing uninstall entirely -- a direct
+    edit of settings.json). uninstall() must leave that new command alone,
+    not overwrite it with whatever is sitting in the (stale, unrelated)
+    chain file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {
+        "statusLine": {"type": "command", "command": "sh ~/original.sh"}
+    })
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+
+    data = json.loads(open(path).read())
+    data["statusLine"]["command"] = "sh ~/brand-new-command.sh"
+    open(path, "w").write(json.dumps(data))
+
+    msg = ins.uninstall(path)
+    got = json.loads(open(path).read())
+    assert got["statusLine"]["command"] == "sh ~/brand-new-command.sh"
+    assert "leaving it alone" in msg.lower() or "isn't clauge" in msg.lower()
+
+
+def test_uninstall_never_installed_leaves_unrelated_command_untouched(tmp_path, monkeypatch):
+    """Reproduction (b): uninstall() is run against a settings.json holding
+    someone else's command, and Clauge never installed here (no marker, no
+    chain file -- e.g. ~/.clauge was wiped, or this machine never ran
+    install()). Must not delete or replace that command."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {
+        "statusLine": {"type": "command", "command": "sh ~/someone-elses-script.sh"}
+    })
+    ins.uninstall(path)
+    got = json.loads(open(path).read())
+    assert got["statusLine"]["command"] == "sh ~/someone-elses-script.sh"
+
+
+def test_uninstall_after_clauge_directory_wiped_leaves_statusline_alone(tmp_path, monkeypatch):
+    """~/.clauge (marker + chain) gone entirely, but settings.json still
+    names the Clauge shim as statusLine (a real, currently-active install).
+    With no way left to prove what to restore, uninstall() must do nothing
+    rather than guess -- pop()'ing the key here would delete a live,
+    correctly-configured statusline with no way to recover it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {})
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+
+    import shutil
+    shutil.rmtree(tmp_path / ".clauge")
+
+    msg = ins.uninstall(path)
+    got = json.loads(open(path).read())
+    assert got["statusLine"]["command"] == "sh /opt/clauge/clauge-statusline.sh"
+    assert "leaving it alone" in msg.lower() or "isn't clauge" in msg.lower()
+
+
+def test_uninstall_with_shim_path_recognizes_ours_even_without_marker(tmp_path, monkeypatch):
+    """The CLI always knows its own shim_path. When passed, uninstall() can
+    recognize the current command as ours statelessly (matches what
+    install() would write for that path today), the same way install()
+    already does -- so losing just the marker (not all of ~/.clauge) still
+    allows a clean uninstall."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {
+        "statusLine": {"type": "command", "command": "sh ~/original.sh"}
+    })
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+    (tmp_path / ".clauge" / "statusline-installed-command").unlink()
+
+    ins.uninstall(path, "/opt/clauge/clauge-statusline.sh")
+    got = json.loads(open(path).read())
+    assert got["statusLine"]["command"] == "sh ~/original.sh"
+
+
+# --- _save() preserves the original file's permission bits ---
+
+
+def test_install_and_uninstall_preserve_0600_permissions(tmp_path, monkeypatch):
+    """settings.json can legitimately hold env.ANTHROPIC_API_KEY or
+    apiKeyHelper; a customer who locked it down to 0600 must get 0600 back,
+    not the process umask's default (typically 0644)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {
+        "statusLine": {"type": "command", "command": "sh ~/original.sh"}
+    })
+    os.chmod(path, 0o600)
+
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+    ins.uninstall(path)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+# --- shim_path containing a space is quoted, not split ---
+
+
+def test_install_quotes_shim_path_containing_a_space(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {})
+    spaced = "/Users/kfir/Application Support/clauge/clauge-statusline.sh"
+    ins.install(path, spaced)
+    got = json.loads(open(path).read())
+    assert got["statusLine"]["command"] == "sh '" + spaced + "'"
+
+
+def test_install_twice_with_spaced_shim_path_does_not_self_chain(tmp_path, monkeypatch):
+    """Quoting must not break the same-path reinstall recognition that
+    keeps the shim from being chained to itself."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {})
+    spaced = "/Users/kfir/Application Support/clauge/clauge-statusline.sh"
+    ins.install(path, spaced)
+    ins.install(path, spaced)
+    chain = tmp_path / ".clauge" / "statusline-chain"
+    assert not chain.exists() or "clauge-statusline.sh" not in chain.read_text()
+
+
+# --- install() clears a stale/ghost chain file when there's nothing to chain ---
+
+
+def test_install_with_no_previous_statusline_clears_a_ghost_chain_file(tmp_path, monkeypatch):
+    """A chain file can outlive its relevance (the statusLine key it was
+    meant to protect got removed by hand, or by some other flow). If the
+    next install() has no current statusLine to chain, any pre-existing
+    chain content is a ghost from an unrelated era and must be cleared --
+    otherwise a later uninstall() would "restore" it as if it were the
+    customer's real previous statusline."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {})
+    clauge_dir = tmp_path / ".clauge"
+    clauge_dir.mkdir(parents=True)
+    (clauge_dir / "statusline-chain").write_text("sh ~/ghost-command.sh\n")
+
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+    chain = clauge_dir / "statusline-chain"
+    assert not chain.exists() or chain.read_text().strip() == ""
+
+    ins.uninstall(path)
+    got = json.loads(open(path).read())
+    assert "statusLine" not in got

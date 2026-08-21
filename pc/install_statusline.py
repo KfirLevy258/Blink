@@ -7,6 +7,8 @@ but `statusLine`.
 """
 import json
 import os
+import shlex
+import shutil
 
 CHAIN_PATH = "~/.clauge/statusline-chain"
 
@@ -104,6 +106,12 @@ def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> Non
         json.dump(data, f, indent=indent)
         if trailing_newline:
             f.write("\n")
+    # open(tmp, "w") creates at the process umask (typically 0644), not the
+    # mode the original file had. This file can legitimately hold
+    # env.ANTHROPIC_API_KEY or apiKeyHelper, so a customer who chmod'd it
+    # 0600 must get 0600 back, not a silently widened copy.
+    if os.path.exists(settings_path):
+        shutil.copymode(settings_path, tmp)
     os.replace(tmp, settings_path)
 
 
@@ -111,7 +119,14 @@ def install(settings_path: str, shim_path: str) -> str:
     indent, trailing_newline = _sniff_format(settings_path)
     data = _load(settings_path)
     previous = (data.get("statusLine") or {}).get("command", "")
-    new_command = f"sh {shim_path}"
+    # shlex.quote: an unquoted path is one space away from a silent no-op on
+    # macOS (a very live case -- "/Users/kfir/Application Support/..."). An
+    # unquoted `sh /a b/c` splits into three argv words and does nothing.
+    # The shim's own self-invocation guard (`[ "$chain_cmd" != "sh $0" ]`)
+    # has to keep agreeing with whatever quoting we do here -- see
+    # tools/clauge-statusline.sh, which mirrors shlex.quote's exact rule in
+    # shell so the two sides never drift apart.
+    new_command = f"sh {shlex.quote(shim_path)}"
 
     os.makedirs(os.path.dirname(_chain_path()), exist_ok=True)
     # Guard against chaining the shim to itself. `previous` counts as ours
@@ -132,7 +147,22 @@ def install(settings_path: str, shim_path: str) -> str:
         with open(_chain_path(), "w") as f:
             f.write(previous + "\n")
         chained = f"chained previous statusline: {previous}"
+    elif not previous:
+        # Nothing in statusLine right now, so anything already sitting in
+        # the chain file predates this install and is a ghost from an
+        # unrelated era (e.g. the key was removed by hand, or a previous
+        # install/uninstall cycle left it behind). Clear it -- otherwise a
+        # later uninstall() would "restore" that ghost command as if it
+        # were the customer's real previous statusline.
+        try:
+            os.remove(_chain_path())
+        except OSError:
+            pass
+        chained = "no previous statusline to chain"
     else:
+        # previous exists and is ours (a reinstall over our own shim): the
+        # chain file, if any, still holds the real original from before
+        # Clauge was first installed. Leave it untouched.
         chained = "no previous statusline to chain"
 
     data["statusLine"] = {"type": "command", "command": new_command}
@@ -141,9 +171,43 @@ def install(settings_path: str, shim_path: str) -> str:
     return f"Clauge statusline installed ({chained})."
 
 
-def uninstall(settings_path: str) -> str:
+def uninstall(settings_path: str, shim_path: str = None) -> str:
+    """Undo install(), but only when it is safe to.
+
+    install() has an is_ours guard before it touches statusLine; uninstall()
+    needs the exact same guard, or symmetrically. Two ways this goes wrong
+    without one:
+      - the customer installs Clauge, later points statusLine at a NEW
+        command of their own (editing settings.json directly, bypassing
+        uninstall), then runs uninstall -- which must leave their new
+        command alone, not clobber it with stale chain-file content that
+        predates it.
+      - ~/.clauge is wiped, or uninstall runs having never installed --
+        data.pop("statusLine") would then delete a command Clauge never
+        wrote, with no way to recover it.
+    So: only touch statusLine when the command currently sitting there is
+    recognisably ours -- it matches the marker install() recorded, or (when
+    the caller passes shim_path, as the CLI does) it equals the command
+    install() would write for that path today. Anything else is left
+    completely alone; we say so rather than guessing.
+    """
     indent, trailing_newline = _sniff_format(settings_path)
     data = _load(settings_path)
+    current = (data.get("statusLine") or {}).get("command", "")
+
+    if not current:
+        return "No Clauge statusline installed; nothing to do."
+
+    marker = _read_marker()
+    expected = f"sh {shlex.quote(shim_path)}" if shim_path else None
+    is_ours = current == marker or (expected is not None and current == expected)
+    if not is_ours:
+        # Do not touch settings.json, the chain file, or the marker: we
+        # cannot tell what this command is, and guessing wrong here is the
+        # unrecoverable failure mode this function exists to avoid.
+        return ("Current statusline isn't Clauge's (changed since install); "
+                "leaving it alone.")
+
     previous = ""
     try:
         with open(_chain_path()) as f:
@@ -165,3 +229,44 @@ def uninstall(settings_path: str) -> str:
         pass
     _remove_marker()
     return msg
+
+
+def _default_shim_path() -> str:
+    """This repo's tools/clauge-statusline.sh, from this file's location."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(repo_root, "tools", "clauge-statusline.sh")
+
+
+def main(argv=None) -> int:
+    """Minimal CLI so install()/uninstall() are actually reachable. Full
+    user-facing docs (README section, etc.) are a separate task -- this just
+    gives them a command to run."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Install or remove the Clauge statusline shim in Claude "
+                     "Code's settings.")
+    parser.add_argument(
+        "--settings", default="~/.claude/settings.json",
+        help="Path to Claude Code's settings.json (default: %(default)s)")
+    parser.add_argument(
+        "--shim", default=None,
+        help="Path to the Clauge statusline shim "
+             "(default: this repo's tools/clauge-statusline.sh)")
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("install", help="Install the Clauge statusline shim.")
+    sub.add_parser("uninstall", help="Remove the Clauge statusline shim.")
+
+    args = parser.parse_args(argv)
+    settings_path = os.path.expanduser(args.settings)
+    shim_path = args.shim or _default_shim_path()
+
+    if args.action == "install":
+        print(install(settings_path, shim_path))
+    else:
+        print(uninstall(settings_path, shim_path))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
