@@ -70,14 +70,19 @@ def test_reset_countdown_never_goes_negative():
     assert msg["session_resets_in_s"] == 0
 
 
-def test_synthetic_fixture_maps_without_error():
-    """FIXTURE is a synthetic stand-in matching the documented schema, not a
-    real capture -- see its "_comment" field. This only proves the mapping
-    doesn't choke on a payload shaped like the real thing."""
+def test_real_capture_maps_without_error():
+    """FIXTURE is a real Claude Code 2.1.229 capture (2026-08-21) with
+    identifying fields redacted; rate_limits is verbatim -- see its "_comment".
+    Asserts the values, not just the keys: this is the payload shape the
+    product actually depends on, so a schema change here should fail loudly."""
     payload = json.loads(FIXTURE.read_text())
     msg = ss.map_statusline(payload, now_epoch=1_787_200_000,
                             mtime_epoch=1_787_200_000)
-    assert "session_pct" in msg
+    assert msg["session_pct"] == 25.0
+    assert msg["weekly_pct"] == 42.0
+    assert msg["session_resets_in_s"] == 120_800
+    assert msg["weekly_resets_in_s"] == 524_000
+    assert msg["models"] == []
 
 
 def test_read_payload_missing_file_returns_none_none(tmp_path):
