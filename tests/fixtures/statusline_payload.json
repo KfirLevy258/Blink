@@ -1,0 +1,7 @@
+{
+  "model": {"display_name": "Opus 5"},
+  "rate_limits": {
+    "five_hour": {"used_percentage": 37.2, "resets_at": 1787203200},
+    "seven_day": {"used_percentage": 12.9, "resets_at": 1787644800}
+  }
+}

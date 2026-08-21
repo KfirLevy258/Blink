@@ -74,7 +74,7 @@ def time_msg(epoch: int, utc_offset_min: int) -> dict:
 
 
 def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
-          session_resets_in_s=-1, weekly_resets_in_s=-1) -> dict:
+          session_resets_in_s=-1, weekly_resets_in_s=-1, stale=False) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -86,6 +86,13 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
     Known models are ALSO flattened into sonnet_pct/opus_pct: the board's
     JSON scanner reads scalar keys only, and its per-model peek needs these
     without growing a full array parser.
+
+    `stale` is a declared field, not an afterthought bolted on by a caller:
+    this function is the one place the wire contract is defined, and the
+    firmware parses `stale` same as any other key. A pushed-payload source
+    (see pc/statusline_source.py) sets it when its data outlived its own
+    freshness window; a polled source (pc/usage_api.py) leaves it False --
+    a fresh fetch is never stale by definition.
     """
     flat = {}
     for m in models or []:
@@ -99,6 +106,7 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
         "weekly_pct": weekly_pct, "weekly_resets_at": weekly_resets_at,
         "weekly_resets_in_s": weekly_resets_in_s,
         "models": models,
+        "stale": stale,
         **flat,
     }
 
