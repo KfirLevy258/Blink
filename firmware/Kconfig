@@ -12,6 +12,42 @@ config CLAUGE_TOUCH_TRACE
 	  the console when the finger lifts. Diagnostic only -- enable via
 	  trace.conf, never in a release build.
 
+
+config CLAUGE_PANEL_PILOT
+	bool "Build for the two pilot (POC) display panels"
+	help
+	  The production batch and the two pilot boards carry different
+	  display modules. Measured on hardware 2026-08-21, the production
+	  panels differ three ways: they render mirrored, they are wired RGB
+	  where the ILI9341 driver hardcodes BGR, and their backlight is far
+	  brighter at the same PWM duty. The firmware compensates for all
+	  three by default, because production is what ships.
+
+	  Set this when building for one of the two pilot boards, which need
+	  none of that compensation and would otherwise come out mirrored,
+	  colour-swapped and dim. Enable it through pilot.conf:
+
+	    west build -b esp32_devkitc/esp32/procpu . -- \
+	      -DEXTRA_CONF_FILE=pilot.conf
+
+	  Deliberately NOT derived from flash encryption. The pilots happen to
+	  be the only fused boards today, so keying off FLASH_CRYPT_CNT would
+	  work right now and then quietly break: production units get fused
+	  before shipping, and the rule would build pilot firmware for them.
+
+config CLAUGE_BL_SCALE_PCT
+	int "Backlight duty as a percent of the nominal level"
+	range 10 100
+	default 100 if CLAUGE_PANEL_PILOT
+	default 60
+	help
+	  Scales every brightness step, so that a given user-facing percent
+	  means the same amount of light on either batch. Compared side by
+	  side at an identical setting, the production panel had to be
+	  stepped down before it matched a pilot, so it is scaled here rather
+	  than by lowering the default level -- which would have shrunk the
+	  usable 20..100 range instead of recentring it.
+
 endmenu
 
 source "Kconfig.zephyr"

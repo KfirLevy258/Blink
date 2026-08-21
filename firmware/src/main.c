@@ -1,6 +1,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/drivers/mipi_dbi.h>
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/random/random.h>
@@ -30,6 +31,81 @@
 #include "version.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+
+/*
+ * MADCTL correction for the production batch.
+ *
+ * These panels differ from the pilot units in two independent ways, and both
+ * land in MADCTL (36h), so one write fixes both. Pilot boards must build with
+ * CONFIG_CLAUGE_PANEL_PILOT, which compiles this away entirely.
+ *
+ * The pilot units and the production panels are driven with byte-identical
+ * registers, yet production renders mirrored -- so the difference is in the
+ * module, not in anything we send. The usual cure for that, the SS bit in
+ * DISCTRL (B6h), was tried on hardware 2026-08-21: the built devicetree
+ * carried it (disctrl = [0a a2 27 04]) and the image did not budge, which
+ * rules the B6h route out on this controller. MADCTL is honoured, so the
+ * compensation lives there instead.
+ *
+ * It cannot be a devicetree `rotation`. The ili9xxx driver's CMD_SET_1 table
+ * reaches only MV (90 deg) and MV|MX|MY (270 deg) in landscape, and those two
+ * differ by a pure 180 deg turn -- neither un-mirrors. What this panel needs is
+ * MV|MY, which no rotation value can produce. So we re-issue MADCTL ourselves
+ * once, straight onto the DBI bus, after the driver has finished its init.
+ *
+ * Second, the colour order. The driver hardcodes the BGR bit for every
+ * orientation, but these panels are wired RGB, so red and blue arrived
+ * swapped. Measured 2026-08-21 with a six-bar test pattern of known values:
+ * the RED bar read blue and the BLUE bar read red, while GREEN stayed green
+ * and white/black were exact -- a clean channel exchange, with no inversion
+ * or gamma error. Clearing bit 3 restores it. (Green surviving a red/blue
+ * swap untouched is why eyeballing a green UI element misdiagnosed this.)
+ *
+ * Safe to overwrite: the driver writes MADCTL only from set_orientation(),
+ * which runs during init and is never called again (nothing in the LVGL glue
+ * touches orientation), so this value is the one that sticks. Partial updates
+ * stay correct because MY flips the row-address mapping wholesale -- LVGL's
+ * window coordinates and its pixels mirror together, and the panel's own
+ * reversed wiring cancels them back out.
+ */
+#ifdef CONFIG_CLAUGE_PANEL_PILOT
+
+/* Pilot panels need none of it: the stock rotation=90 MADCTL (BGR|MV) that the
+ * driver writes is already correct for them, mirror and colour order alike. */
+static void panel_fix_madctl(void)
+{
+}
+
+#else
+
+#define PANEL_MADCTL_MV   BIT(5)
+#define PANEL_MADCTL_MY   BIT(7)
+
+static const struct device *const panel_dbi =
+	DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(ili9341)));
+static const struct mipi_dbi_config panel_dbi_cfg =
+	MIPI_DBI_CONFIG_DT(DT_NODELABEL(ili9341),
+			   SPI_OP_MODE_MASTER | SPI_WORD_SET(8), 0);
+
+static void panel_fix_madctl(void)
+{
+	uint8_t madctl = PANEL_MADCTL_MV | PANEL_MADCTL_MY;	/* BGR bit clear = RGB */
+	int r;
+
+	if (!device_is_ready(panel_dbi)) {
+		printk("[usage] panel: DBI bus not ready, MADCTL uncorrected\n");
+		return;
+	}
+
+	r = mipi_dbi_command_write(panel_dbi, &panel_dbi_cfg, 0x36, &madctl, 1);
+	if (r < 0) {
+		printk("[usage] panel: MADCTL write failed (%d)\n", r);
+	} else {
+		printk("[usage] panel: MADCTL=0x%02x\n", madctl);
+	}
+}
+
+#endif /* CONFIG_CLAUGE_PANEL_PILOT */
 
 /* Provisioning session state (one PKCE verifier per setup attempt). */
 static char verifier[OAUTH_VERIFIER_LEN];
@@ -1397,6 +1473,7 @@ int main(void)
 		printk("[usage] display not ready\n");
 		return -1;
 	}
+	panel_fix_madctl();
 	display_blanking_off(display_dev);
 	ui_touchfx_init();	/* light touch-echo feedback on every press */
 
