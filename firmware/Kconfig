@@ -13,6 +13,28 @@ config CLAUGE_TOUCH_TRACE
 	  trace.conf, never in a release build.
 
 
+config CLAUGE_WIFI_MODE
+	bool "Standalone WiFi mode (on-device sign-in and usage fetch)"
+	help
+	  Build the board's own network path: the captive-portal setup flow,
+	  the OAuth sign-in, the refresh-token store, and the usage fetch it
+	  performs for itself.
+
+	  Default n, and that default is the point. With it off, none of that
+	  code is handed to the compiler -- no client id, no User-Agent, no
+	  token writer in the shipped binary -- and the board takes its usage,
+	  its clock and its updates from the daemon over USB. The source stays
+	  in the tree, reviewable and buildable, rather than deleted to a
+	  branch where it would stop compiling within a few refactors.
+
+	  Turning it on needs wifi.conf too, which brings in the WiFi driver,
+	  the IP stack, TLS and the HTTP client:
+
+	    west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
+	      -- -DEXTRA_CONF_FILE=wifi.conf
+
+	  wifi.conf sets this symbol, so that one flag is the whole switch.
+
 config CLAUGE_PANEL_PILOT
 	bool "Build for the two pilot (POC) display panels"
 	help

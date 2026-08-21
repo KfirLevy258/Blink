@@ -17,7 +17,9 @@
 #include "ui_boot.h"
 #include "ui_anim.h"
 #include "ui_slide.h"
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 #include "net_wifi.h"
+#endif
 #include "fmt.h"
 #include "version.h"
 #include "backlight.h"
@@ -1048,7 +1050,15 @@ static void build_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_text_letter_space(rlab, 2, 0);
 	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 134);
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
+#else
+	/* No radio and no sign-in in this build, so "Reset WiFi" and
+	 * "Re-sign-in" would be buttons that clear settings nothing reads --
+	 * the persistent dead state this project has been bitten by before.
+	 * One tile, centred. */
+	static const enum action acts[] = { ACT_FACTORY };
+#endif
 	static const char *const acticon[] = {
 		[ACT_WIFI] = LV_SYMBOL_WIFI,
 		[ACT_SIGNIN] = LV_SYMBOL_REFRESH,
@@ -1059,7 +1069,11 @@ static void build_panel(lv_obj_t *parent_scr)
 		[ACT_SIGNIN] = "Sign-in",
 		[ACT_FACTORY] = "Factory",
 	};
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	static const int tilex[] = { 12, 114, 216 };
+#else
+	static const int tilex[] = { 114 };
+#endif
 
 	for (int i = 0; i < 3; i++) {
 		enum action a = acts[i];
@@ -1102,8 +1116,11 @@ static void build_panel(lv_obj_t *parent_scr)
 	 * (which would reset the board). IP dropped at the user's request
 	 * (2026-07-20); the SSID gets more room, capped so it can't overrun. */
 	char line[56];
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	char ip[16], ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
+#endif
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	if (net_wifi_sta_ip(ip, sizeof(ip)) &&
 	    cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
 		char ssid_a[CFG_SSID_MAX];
@@ -1111,7 +1128,9 @@ static void build_panel(lv_obj_t *parent_scr)
 		fmt_ascii(ssid, ssid_a, sizeof(ssid_a));
 		snprintf(line, sizeof(line), "Clauge %s  |  %.20s",
 			 CLAUGE_FW_VERSION, ssid_a);
-	} else {
+	} else
+#endif
+	{
 		snprintf(line, sizeof(line), "Clauge %s", CLAUGE_FW_VERSION);
 	}
 

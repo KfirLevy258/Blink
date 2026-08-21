@@ -45,6 +45,28 @@ KEY="${OTA_SIGNING_KEY:-$HOME/.clauge/ota_signing_key_p256.pem}"
 	-Dfirmware_CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION="\"$VER\"" )   # inner quotes: Kconfig strings
 
 BIN="$ROOT/firmware/build-sb/firmware/zephyr/zephyr.signed.bin"
+
+# A release must not carry the on-device network path. CONFIG_CLAUGE_WIFI_MODE
+# defaults to n, but a default is not a guarantee: a stray EXTRA_CONF_FILE or a
+# sticky build directory flips it silently, and nobody would find out until a
+# customer's board signed itself in to Anthropic as Claude Code.
+#
+# Checks the ARTIFACT, not only the config, because the artifact is what ships.
+# If the OAuth path were ever linked in, these strings would be in the image.
+CFG="$ROOT/firmware/build-sb/firmware/zephyr/.config"
+if grep -q "^CONFIG_CLAUGE_WIFI_MODE=y" "$CFG"; then
+	echo "FATAL: CONFIG_CLAUGE_WIFI_MODE=y in a release build." >&2
+	echo "       That ships the on-device sign-in and the token store." >&2
+	exit 1
+fi
+for pat in "/api/oauth/usage" "refresh_token" "claude-code/"; do
+	if strings "$BIN" | grep -qF -- "$pat"; then
+		echo "FATAL: release image contains '$pat' -- the network path is" >&2
+		echo "       linked in even though the Kconfig symbol looks off." >&2
+		exit 1
+	fi
+done
+
 SIZE=$(stat -f%z "$BIN")
 SHA=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
 SLOT=$((0x150000))

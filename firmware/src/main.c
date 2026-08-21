@@ -234,6 +234,10 @@ static void ota_report_outcome(void)
 	}
 }
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+/* Everything from here to usb_anim_pump() is the board's own network path:
+ * the captive portal, the sign-in, the scan. Whole functions, so this is a
+ * region rather than a sprinkle -- see firmware/Kconfig. */
 static void pump_ui(void)
 {
 	ui_setup_service();
@@ -668,10 +672,6 @@ static const char *const wifi_boot_steps[] = {
 	"Sign in to Anthropic",
 	"Fetch first usage",
 };
-static const char *const usb_boot_steps[] = {
-	"Link the PC daemon",
-	"Fetch first usage",
-};
 
 static void apply_net_evt(const struct net_evt *e)
 {
@@ -714,6 +714,15 @@ static void standalone_anim_pump(void)
 	ota_boot_pump();
 }
 
+#endif /* CONFIG_CLAUGE_WIFI_MODE */
+
+/* Outside the gate: this is the tethered path's own step list, and it was
+ * only sitting next to wifi_boot_steps out of habit. */
+static const char *const usb_boot_steps[] = {
+	"Link the PC daemon",
+	"Fetch first usage",
+};
+
 static void usb_anim_pump(void)
 {
 	proto_service();
@@ -723,6 +732,7 @@ static void usb_anim_pump(void)
 	ota_boot_pump();
 }
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 /* Lower priority than main (higher number): 1-2 s of ECDHE math must not
  * starve the render loop on this single-core build. */
 static char worker_refresh[CFG_TOKEN_MAX];
@@ -1342,6 +1352,8 @@ static void run_standalone(void)
 	}
 }
 
+#endif /* CONFIG_CLAUGE_WIFI_MODE */
+
 /* ---- USB bridge mode: PC daemon pushes usage over serial ---- */
 
 static void run_usb(void)
@@ -1352,9 +1364,15 @@ static void run_usb(void)
 
 	/* With stored WiFi + token the board can serve itself if the daemon
 	 * never delivers -- checked once; NVS doesn't change under us. */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
 	bool can_fall_back = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
 			     cfg_get_token(tok, sizeof(tok));
+#else
+	/* There is no standalone mode to reboot into. Waiting is the whole
+	 * behaviour, and run_usb()'s own waiting-for-host screen covers it. */
+	const bool can_fall_back = false;
+#endif
 	bool ota_boot_checked = false;
 
 	/* Same as run_standalone: drop anything latched before this loop
@@ -1483,9 +1501,25 @@ int main(void)
 	 * block for seconds against a 30 s window. */
 	ui_boot_set_pump(ota_boot_pump);
 	backlight_init();	/* drive the PWM to the persisted level */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	net_wifi_init();
 	net_wifi_set_idle_hook(wifi_idle);
 	ap_psk_setup();		/* before any QR or AP use */
+#else
+	/* Nothing in this build can use a refresh token -- the OAuth code is
+	 * not compiled in. But a unit flashed with a WiFi build still has one
+	 * in NVS, and unfused flash is readable over USB with esptool, so
+	 * compiling the writer out does not make the customer's token go
+	 * away. Erase it on the first boot that cannot use it. */
+	{
+		char tok[CFG_TOKEN_MAX];
+
+		if (cfg_get_token(tok, sizeof(tok))) {
+			cfg_clear_token();
+			printk("[usage] cleared a stored refresh token: no WiFi in this build\n");
+		}
+	}
+#endif
 
 #ifdef TEST_SCREEN
 	ui_setup_show();
@@ -1512,6 +1546,7 @@ int main(void)
 	 * as dead time on hardware (user feedback 2026-07-16). A PC daemon
 	 * never loses the board to this shortcut: the daemon opening the
 	 * port is a hard reset, which clears the intentional mark. */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	if (ui_boot_intentional_pending()) {
 		char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
 
@@ -1521,6 +1556,7 @@ int main(void)
 			run_provisioning(NULL);	/* reboots when done */
 		}
 	}
+#endif
 
 	ui_boot_splash();
 
@@ -1545,6 +1581,7 @@ int main(void)
 		run_usb();
 	}
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	char tok[CFG_TOKEN_MAX], ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
 	bool have_wifi = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk));
 	bool have_tok = cfg_get_token(tok, sizeof(tok));
@@ -1587,5 +1624,24 @@ int main(void)
 
 	printk("[usage] mode: provisioning\n");
 	run_provisioning(NULL);	/* reboots when done */
+#else
+	/*
+	 * No radio in this build, so there is nothing to fall through TO. The
+	 * detection above had three destinations; this one has one, and
+	 * run_usb() already owns the case it lands in: it shows the
+	 * waiting-for-host step and times out on its own if no daemon ever
+	 * speaks. Deliberately no proto_resync() here -- that exists to make a
+	 * daemon that already said hello re-push, and by definition none has.
+	 */
+	printk("[usage] mode: USB bridge (no host yet)\n");
+	usage_view_init();
+	usage_view_boot_begin(usb_boot_steps, 2);
+	lv_timer_handler();
+	ui_boot_teardown();
+	ui_settings_attach(lv_scr_act());
+	ota_report_outcome();
+	usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+	run_usb();
+#endif
 	return 0;
 }

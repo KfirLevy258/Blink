@@ -7,7 +7,9 @@
  * does this instead).
  */
 #include <zephyr/kernel.h>
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 #include <zephyr/net/sntp.h>
+#endif
 #include <zephyr/sys/timeutil.h>
 #include <zephyr/sys/printk.h>
 #include <string.h>
@@ -40,6 +42,10 @@ static int32_t offset_min;
  * so reads and writes go through a spinlock (held for nanoseconds). */
 static struct k_spinlock time_lock;
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+/* The only part of this file that needs a network. The rest -- set_manual,
+ * set_offset, local, secs_until -- is arithmetic on a clock the daemon sets
+ * over USB, and is what a tethered board actually uses. */
 int net_time_sync(int timeout_s)
 {
 	struct sntp_time t;
@@ -71,6 +77,7 @@ int net_time_sync(int timeout_s)
 	}
 	return -ETIMEDOUT;
 }
+#endif /* CONFIG_CLAUGE_WIFI_MODE */
 
 bool net_time_valid(void)
 {
