@@ -1,0 +1,167 @@
+name: installer
+
+# The installer is part of the device now: it edits a file the customer owns,
+# without asking, on a machine we have never seen. That is the case for gating
+# merges on it running everywhere rather than on the one Mac it was written on.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Every scenario, hermetically, on both OSes and at both ends of the Python
+  # range the installer claims to support. Fast, and it is where a broken
+  # scenario is easiest to read.
+  unit:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Spelled out rather than a cross product: setup-python publishes no
+        # arm64 build for 3.9, so macos-latest x 3.9 fails on the runner rather
+        # than on anything we wrote. The 3.9 floor -- which install.sh checks
+        # for and the README promises -- is still tested on both OSes, using
+        # the x86 macOS image for it.
+        include:
+          - {os: ubuntu-latest, python: '3.9'}
+          - {os: ubuntu-latest, python: '3.13'}
+          - {os: macos-13, python: '3.9'}
+          - {os: macos-latest, python: '3.13'}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --quiet pytest pyserial
+      - run: python -m pytest tests/ -q
+
+  # The two steps the unit tests always skip, because they touch the machine:
+  # building the virtualenv, and registering a login service. One runner per
+  # scenario, installing for real.
+  real-install:
+    name: install (${{ matrix.os }}, ${{ matrix.scenario }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        scenario:
+          - no-claude          # Claude Code never installed
+          - no-settings        # ~/.claude exists, settings.json does not
+          - no-statusline      # settings.json with no statusLine key
+          - with-statusline    # their own bar, must survive and still render
+          - reinstall          # twice in a row, must not chain to itself
+          - foreign-uninstall  # never installed; must not touch their bar
+          - spaced-home        # a HOME path containing spaces
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # HOME is redirected inside the script, but the launchd label and the
+      # systemd unit name are constants -- fine on a throwaway runner, which is
+      # the whole reason this job cannot be a local test.
+      - run: sh tests/ci/check_install.sh ${{ matrix.scenario }}
+
+  # The shim runs on every single status line render, under whatever /bin/sh
+  # the customer's machine has. A bashism here is a broken bar for everyone.
+  shim-posix:
+    name: shim under ${{ matrix.shell }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [dash, busybox, bash]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq dash busybox
+      - run: sh tests/ci/check_shim.sh ${{ matrix.shell }}
+
+  # We read a field of Claude Code's status line payload that carries no
+  # stability commitment. That is the risk you cannot design around, only
+  # watch -- so watch it here, on every merge, across the versions customers
+  # actually have. A red job here means the daemon's mapping needs updating
+  # before anything ships, not after boards go dark together.
+  #
+  # It runs credential-free, so it proves the contract is PRESENT in a release,
+  # not that a signed-in user's payload is populated. That distinction is
+  # written into tests/ci/check_claude_version.sh.
+  claude-versions:
+    name: claude ${{ matrix.label }} (${{ matrix.version }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 2.1.100 is not arbitrary: 2.1.0 does not carry rate_limits at all
+          # and 2.1.100 does, so this is near the real floor. Anything older is
+          # a version this product cannot work on, whatever the README says.
+          - {label: old, version: '2.1.100', experimental: false}
+          - {label: stable, version: 'stable', experimental: false}
+          - {label: latest, version: 'latest', experimental: false}
+          # The preview channel: an early warning, never a merge blocker. A
+          # contract change landing in `next` is exactly the signal worth
+          # having weeks before it reaches customers.
+          - {label: next, version: 'next', experimental: true}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: npm install -g @anthropic-ai/claude-code@${{ matrix.version }}
+      - run: claude --version
+      - run: sh tests/ci/check_claude_version.sh
+
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      # -s sh: these must be POSIX. Checking them as bash would let a bashism
+      # through that breaks the /bin/sh they actually run under.
+      - run: shellcheck -s sh install.sh tools/clauge-statusline.sh tests/ci/*.sh
+      - name: reject CRLF line endings
+        run: |
+          if grep -rlU $'\r' install.sh tools/clauge-statusline.sh tests/ci/; then
+            echo "CRLF found: a shim with CRLF fails with 'bad interpreter'" >&2
+            exit 1
+          fi
+
+  # Windows is NOT a supported target: the installer is POSIX sh, the status
+  # line is invoked as `sh <path>`, and service registration is launchd and
+  # systemd only -- there is no Scheduled Task path. This job exists to report
+  # how far it actually gets under Git Bash, so the gap is measured rather than
+  # assumed. It must never block a merge on a claim the product does not make.
+  windows-exploratory:
+    name: windows (exploratory, non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: what does uname say
+        shell: bash
+        run: uname -s
+      - name: pytest under Git Bash
+        shell: bash
+        run: |
+          python -m pip install --quiet pytest pyserial
+          python -m pytest tests/ -q || true
+      - name: install.sh under Git Bash
+        shell: bash
+        run: |
+          sh tests/ci/check_install.sh no-statusline || \
+            echo "::warning::install.sh does not complete on Windows -- expected, unsupported"
