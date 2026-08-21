@@ -5,6 +5,7 @@ Run inside the Zephyr venv (has pyserial) or `pip install pyserial`:
     python3 claude_usage_bridge.py --port /dev/cu.usbmodemXXXX
 """
 import argparse
+import os
 import sys
 import time
 
@@ -19,11 +20,65 @@ POLL_INTERVAL_S = 60
 PING_GRACE_LOG_S = 30
 
 
+# The USB-serial bridge chips these boards actually ship with, by VID:PID.
+#
+# Identify by ID, not by name: on macOS the CYD's CH340 reports manufacturer
+# None and a device node of /dev/cu.usbserial-14140 -- neither "usbmodem" nor
+# "espressif", the two things the old heuristic looked for. So autodetect never
+# once matched the hardware this product runs on. It went unnoticed because
+# tools/dev.sh always passes --port explicitly; nothing but a customer plugging
+# in a board would have hit it.
+KNOWN_USB_SERIAL = {
+    (0x1A86, 0x7523),   # CH340/CH341 -- the common CYD
+    (0x1A86, 0x7522),
+    (0x1A86, 0x5523),
+    (0x10C4, 0xEA60),   # CP2102/CP2104 -- the other CYD variant
+    (0x0403, 0x6001),   # FT232R
+}
+ESPRESSIF_VID = 0x303A  # native USB-serial on -S2/-S3 parts
+
+
 def autodetect_port():
+    for p in list_ports.comports():
+        if (p.vid, p.pid) in KNOWN_USB_SERIAL or p.vid == ESPRESSIF_VID:
+            return p.device
+    # Name heuristics kept as a fallback for a variant carrying a chip that is
+    # not in the table yet. Bluetooth ports have no VID and no matching name,
+    # so they cannot be picked up by either pass.
     for p in list_ports.comports():
         if "usbmodem" in p.device or (p.manufacturer or "").lower().startswith("espressif"):
             return p.device
     return None
+
+
+def wait_for_port(explicit=None, poll_s=3.0):
+    """Block until there is a board to talk to, then return its device path.
+
+    Waiting rather than exiting is what keeps the installed service honest
+    about "plug it in and it works". install.sh registers this daemon with
+    launchd (KeepAlive) or systemd (Restart=always), which bring it back after
+    every exit -- so exiting when no board is attached turns "the cable is
+    unplugged" into a process launch and a log line every 10 seconds, all day,
+    growing bridge.log without bound. One sleeping process is the cheaper
+    answer, and the user never had to do anything for it.
+
+    Re-detecting on each call also survives the board returning on a different
+    device node, which a port resolved once at startup would not.
+    """
+    announced = False
+    while True:
+        port = explicit or autodetect_port()
+        if port and os.path.exists(port):
+            if announced:
+                print(f"[bridge] board found at {port}", file=sys.stderr)
+            return port
+        if not announced:
+            # Once, not per attempt: this is the steady state on a machine
+            # whose board is simply unplugged, and it is not an error.
+            print(f"[bridge] waiting for the board ({explicit or 'USB'})...",
+                  file=sys.stderr)
+            announced = True
+        time.sleep(poll_s)
 
 
 def main():
@@ -31,13 +86,12 @@ def main():
     ap.add_argument("--port", default=None)
     ap.add_argument("--baud", type=int, default=115200)
     args = ap.parse_args()
-    port = args.port or autodetect_port()
-    if not port:
-        sys.exit("No serial port found; pass --port /dev/cu.usbmodemXXXX")
+    port = wait_for_port(args.port)
 
     # Claude Code owns the credential and computes these numbers; we read the file
     # its statusline shim writes. Nothing here authenticates to Anthropic.
     fetch = statusline_source.make_fetch()
+    last_err = None
 
     while True:  # reconnect loop
         try:
@@ -69,9 +123,19 @@ def main():
             time.sleep(0.3)
             ser.reset_input_buffer()
         except Exception as e:
-            print(f"[bridge] open {port} failed: {e}; retrying in 3s", file=sys.stderr)
+            # Deduplicated: a board left unplugged, or a port the user lacks
+            # permission to open, would otherwise write this same line to
+            # bridge.log every three seconds for as long as the service runs.
+            err = f"open {port} failed: {e}"
+            if err != last_err:
+                print(f"[bridge] {err}; waiting for the board", file=sys.stderr)
+                last_err = err
             time.sleep(3)
+            port = wait_for_port(args.port)
             continue
+        # Cleared on success so a later, genuine failure is reported again
+        # rather than silenced by having happened once before.
+        last_err = None
         print(f"[bridge] connected on {port}", file=sys.stderr)
         reader = protocol.LineReader()
 
