@@ -140,3 +140,66 @@ def test_install_uninstall_preserves_hand_formatting(tmp_path, monkeypatch):
     ins.install(str(path), "/opt/clauge/clauge-statusline.sh")
     ins.uninstall(str(path))
     assert path.read_text() == original
+
+
+def test_marker_lost_reinstall_at_same_path_does_not_self_chain(tmp_path, monkeypatch):
+    """~/.clauge also holds transient scratch data (statusline.json), so a
+    user or cleanup script clearing it -- losing the marker while
+    settings.json is untouched -- is plausible, not exotic. A same-path
+    reinstall after that must still be recognized as ours via the
+    stateless check (it needs no marker to have survived), or we'd chain
+    our own command into the chain file and the shim would invoke itself
+    forever on every render."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {})
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+    (tmp_path / ".clauge" / "statusline-installed-command").unlink()
+
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+    chain = tmp_path / ".clauge" / "statusline-chain"
+    assert not chain.exists() or "clauge-statusline.sh" not in chain.read_text()
+
+    ins.uninstall(path)
+    assert "statusLine" not in json.loads(open(path).read())
+
+
+def test_marker_lost_reinstall_at_different_path_chains_rather_than_drops(tmp_path, monkeypatch):
+    """When BOTH recognition mechanisms are unavailable at once -- the
+    marker is gone AND this call also targets a different shim_path --
+    there is no way to prove the current command is ours. The safe default
+    is to treat it as foreign and chain it: worst case is a stale
+    self-referencing chain entry (a hang, visible and recoverable by
+    clearing the chain file or uninstalling), not a silently discarded
+    customer command (invisible and unrecoverable). This documents that
+    known, accepted residual gap rather than claiming it's closed."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {})
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+    (tmp_path / ".clauge" / "statusline-installed-command").unlink()
+
+    ins.install(path, "/usr/local/bin/clauge-statusline.sh")
+    chain = (tmp_path / ".clauge" / "statusline-chain").read_text().strip()
+    assert chain == "sh /opt/clauge/clauge-statusline.sh"
+
+
+def test_stale_marker_never_matches_a_customers_unrelated_command(tmp_path, monkeypatch):
+    """A marker naming a command that is no longer in settings.json (left
+    behind by a manual edit) must never cause a genuinely different,
+    customer-authored command to be treated as ours and dropped -- it is
+    only ever compared for exact equality, and the customer's real command
+    here is not equal to it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _settings(tmp_path, {})
+    ins.install(path, "/opt/clauge/clauge-statusline.sh")
+    marker = (tmp_path / ".clauge" / "statusline-installed-command").read_text().strip()
+    assert marker == "sh /opt/clauge/clauge-statusline.sh"
+
+    # Customer overwrites statusLine by hand; the marker is left stale,
+    # naming a command no longer present anywhere in settings.json.
+    data = json.loads(open(path).read())
+    data["statusLine"]["command"] = "sh ~/customers-own-script.sh"
+    open(path, "w").write(json.dumps(data))
+
+    ins.install(path, "/usr/local/bin/clauge-statusline.sh")
+    chain = (tmp_path / ".clauge" / "statusline-chain").read_text().strip()
+    assert chain == "sh ~/customers-own-script.sh"
