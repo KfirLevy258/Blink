@@ -1,4 +1,5 @@
 {
+  "_comment": "SYNTHETIC fixture matching Claude Code's documented statusline schema -- not a real capture. Replace with an actual captured payload when one is available.",
   "model": {"display_name": "Opus 5"},
   "rate_limits": {
     "five_hour": {"used_percentage": 37.2, "resets_at": 1787203200},

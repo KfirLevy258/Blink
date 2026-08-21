@@ -19,10 +19,18 @@ STALE_AFTER_S = 120
 
 
 def _window(rate_limits: dict, key: str):
-    """(used_percentage, resets_at_epoch|None) for one window."""
+    """(used_percentage, resets_at_epoch|None) for one window.
+
+    Claude Code documents each window as individually optional -- a session
+    can report five_hour with no seven_day, or neither. A window that is
+    entirely absent returns pct=-1.0, the same "unknown" sentinel already
+    used below for *_resets_in_s, rather than 0.0: 0.0 reads as a confident
+    "0% used", which is a stronger claim than "we don't have this number" and
+    is exactly the frozen-meter failure mode this module exists to avoid.
+    """
     w = rate_limits.get(key)
     if not isinstance(w, dict):
-        return 0.0, None
+        return -1.0, None
     try:
         pct = float(w.get("used_percentage", 0.0))
     except (TypeError, ValueError):
