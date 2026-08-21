@@ -2,6 +2,8 @@ import json
 import os
 import stat
 
+import pytest
+
 from pc import install_statusline as ins
 
 
@@ -300,6 +302,11 @@ def test_uninstall_with_shim_path_recognizes_ours_even_without_marker(tmp_path, 
 # --- _save() preserves the original file's permission bits ---
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows has no POSIX mode bits: chmod only toggles the read-only "
+           "flag, so 0600 cannot be preserved or asserted. The property is "
+           "real on the platforms this ships to.")
 def test_install_and_uninstall_preserve_0600_permissions(tmp_path, monkeypatch):
     """settings.json can legitimately hold env.ANTHROPIC_API_KEY or
     apiKeyHelper; a customer who locked it down to 0600 must get 0600 back,
