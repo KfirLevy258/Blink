@@ -11,13 +11,38 @@
 input=$(cat)
 
 # Atomic write: the daemon may read this file at any moment, and a half-written
-# file would parse as malformed and blank the panel.
-mkdir -p "$HOME/.clauge"
-printf '%s' "$input" > "$HOME/.clauge/statusline.json.tmp" 2>/dev/null &&
+# file would parse as malformed and blank the panel. Failures here (disk full,
+# unwritable HOME, ...) degrade silently -- Clauge's own capture is allowed to
+# be broken, but that must never print to the terminal on every render.
+mkdir -p "$HOME/.clauge" 2>/dev/null
+# 2>/dev/null must come BEFORE the '>' target on this line, not after: if
+# opening the target itself fails (e.g. the mkdir above also failed), the
+# shell reports that failure using whatever stderr was in effect when the '>'
+# was processed. A trailing '2>/dev/null' hasn't been applied yet at that
+# point, so it looks like it suppresses the error but doesn't -- confirmed
+# leaking "Permission denied" on every render under both sh and dash before
+# this was reordered.
+printf '%s' "$input" 2>/dev/null > "$HOME/.clauge/statusline.json.tmp" &&
   mv -f "$HOME/.clauge/statusline.json.tmp" "$HOME/.clauge/statusline.json" 2>/dev/null
 
 # Delegate to the previously configured command, if any. Never fail the status
 # bar because Clauge had a problem.
+#
+# Deliberately no timeout on the chain call below. A hang here is not a
+# regression: this same command ran directly as the user's statusline before
+# Clauge existed, so it hung identically then, and whatever timeout Claude
+# Code applies to a statusline command still bounds this whole script from
+# the outside. POSIX sh has no portable timeout(1) (absent on stock macOS),
+# and a background-plus-kill substitute would fork two extra processes on
+# every render -- many times a minute -- to guard a failure mode the user
+# already had.
+#
+# The payload write above MUST stay above this line. Capture happens before
+# delegation on purpose, so a wedged chain command cannot starve the panel of
+# fresh data: Clauge keeps getting current numbers even while the user's own
+# statusline is hung. Do not reorder this to "only record on success" -- that
+# would let a hanging chain block Clauge's own capture too, which is exactly
+# the failure this ordering exists to prevent.
 CHAIN="$HOME/.clauge/statusline-chain"
 if [ -s "$CHAIN" ]; then
   printf '%s' "$input" | sh -c "$(cat "$CHAIN")"
