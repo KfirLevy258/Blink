@@ -45,6 +45,24 @@ printf '%s' "$input" 2>/dev/null > "$HOME/.clauge/statusline.json.tmp" &&
 # the failure this ordering exists to prevent.
 CHAIN="$HOME/.clauge/statusline-chain"
 if [ -s "$CHAIN" ]; then
-  printf '%s' "$input" | sh -c "$(cat "$CHAIN")"
+  chain_cmd=$(cat "$CHAIN")
+  # Refuse to chain into ourselves. The installer has one ambiguous case (its
+  # own marker lost, shim path changed since the last install) where it
+  # deliberately records our own old shim as "previous" rather than silently
+  # discarding what might be a real customer command -- so the chain file can
+  # legitimately contain a Clauge shim invocation. Without this guard that
+  # would either loop or, once the old shim hits this same check against its
+  # own $0, execute one harmless extra hop; with it, the very first hop stops.
+  #
+  # This is a literal string comparison, not a resolved-path comparison: the
+  # installer always writes this line as exactly "sh <shim_path>", and POSIX
+  # guarantees a script run as `sh <path>` sees $0 set to that path operand
+  # verbatim, uncanonicalised. Both sides trace back to the same install-time
+  # string, so byte equality answers the question that matters -- "would this
+  # line re-run this exact invocation?" -- without needing realpath/readlink
+  # -f, neither of which stock macOS ships reliably.
+  if [ "$chain_cmd" != "sh $0" ]; then
+    printf '%s' "$input" | sh -c "$chain_cmd"
+  fi
 fi
 exit 0
