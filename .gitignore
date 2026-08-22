@@ -21,3 +21,6 @@ build-sb/
 # Local-only: implementation plans reference the concerns doc (public repo)
 docs/superpowers/
 .superpowers/
+
+# PyInstaller output; binaries are built per-platform in CI, never committed.
+/dist/

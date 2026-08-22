@@ -1,0 +1,449 @@
+"""One binary: the setup, the status check, and the bridge itself.
+
+A customer downloads a single file and runs it. There is no Python to install,
+no virtualenv to build, no repository to clone, and nothing left behind that
+they have to keep in place -- `clauge install` copies the binary into
+~/.clauge/bin and points the login service at that copy, so the download is
+disposable the moment it finishes.
+
+This replaces install.sh. The shell version needed Python 3.9+ on the machine,
+built a virtualenv, and pulled two packages from PyPI at install time -- three
+things that could fail on a customer's machine for reasons they could do
+nothing about, and one of them (an unpinned PyPI resolve) meant two people
+installing a week apart could get different software.
+
+The status line shim stays a shell script on purpose. It runs on EVERY status
+line render, many times a minute, and a frozen binary takes 100-400 ms to start
+because it unpacks itself first -- that delay would land in the customer's
+prompt. A few lines of sh start in single-digit milliseconds.
+"""
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+from pc import install_statusline
+
+# Resolved per call, not at import. These used to be module constants, which
+# meant every path was fixed by whatever HOME happened to be when the module
+# loaded -- untestable without a subprocess, and quietly wrong for any caller
+# that changes HOME.
+LABEL = "com.clauge.bridge"
+
+
+def _home():
+    return os.path.expanduser("~")
+
+
+def clauge_home():
+    return os.path.join(_home(), ".clauge")
+
+
+def bin_dir():
+    return os.path.join(clauge_home(), "bin")
+
+
+def installed_bin():
+    return os.path.join(bin_dir(), "clauge")
+
+
+def shim_path():
+    return os.path.join(clauge_home(), "clauge-statusline.sh")
+
+
+def log_path():
+    return os.path.join(clauge_home(), "bridge.log")
+
+
+def settings_path():
+    return os.path.join(_home(), ".claude", "settings.json")
+
+
+def plist_path():
+    return os.path.join(_home(), "Library", "LaunchAgents", LABEL + ".plist")
+
+
+def unit_path():
+    return os.path.join(_home(), ".config", "systemd", "user",
+                        "clauge-bridge.service")
+
+# The oldest Claude Code that carries usage figures in its status line payload.
+# 2.1.0 does not carry rate_limits at all; 2.1.100 does. Below this every step
+# of the install succeeds and the panel stays blank forever.
+MIN_CLAUDE = (2, 1, 100)
+
+# Set by the tests to skip registering a real login service. The launchd label
+# and the systemd unit name are constants while everything else is scoped to
+# $HOME, so without this a test under a temporary HOME still boots out the
+# real agent of whoever is logged in.
+def _skip_service():
+    return os.environ.get("CLAUGE_SKIP_SERVICE") == "1"
+
+
+def _frozen() -> bool:
+    return getattr(sys, "frozen", False)
+
+
+def _self_path() -> str:
+    """The binary to copy into place. sys.executable is the frozen binary."""
+    return sys.executable if _frozen() else os.path.abspath(sys.argv[0])
+
+
+def _shim_source() -> str:
+    """The shim's text, from the bundle when frozen, the tree when not.
+
+    One source of truth either way -- tools/clauge-statusline.sh is what the
+    build embeds, so the shipped shim and the one in the repository cannot
+    drift apart.
+    """
+    if _frozen():
+        base = getattr(sys, "_MEIPASS", os.path.dirname(_self_path()))
+        return open(os.path.join(base, "clauge-statusline.sh")).read()
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return open(os.path.join(here, "tools", "clauge-statusline.sh")).read()
+
+
+# ---------------------------------------------------------------- Claude Code
+
+
+def claude_version():
+    """(text, tuple) for the Claude Code on PATH, or (None, None)."""
+    exe = shutil.which("claude")
+    if not exe:
+        return None, None
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                             timeout=30).stdout.strip()
+    except Exception:
+        return None, None
+    head = out.split()[0] if out else ""
+    parts = []
+    for piece in head.split(".")[:3]:
+        parts.append(int(piece) if piece.isdigit() else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return (out or None), tuple(parts)
+
+
+def _warn_if_claude_too_old():
+    text, ver = claude_version()
+    if ver is None or ver >= MIN_CLAUDE:
+        return
+    # A warning, not a refusal. Everything installed is correct and stays
+    # correct, so the moment they update it starts working with nothing to
+    # redo; refusing would make them run this again for no reason.
+    m = ".".join(str(n) for n in MIN_CLAUDE)
+    print()
+    print(f"  !! Your Claude Code is {text}, and Clauge needs {m} or newer.")
+    print("     Older versions do not put the usage figures in the status line")
+    print("     at all, so the panel will sit blank until you update:")
+    print()
+    print("       npm install -g @anthropic-ai/claude-code@latest")
+    print()
+    print("     Nothing else needs redoing -- it starts working on its own.")
+
+
+# -------------------------------------------------------------------- service
+
+
+_PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD plist_path() 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+{args}  </array>
+  <!-- Frozen Python buffers stdout when it is a file, so without this the
+       log lags minutes behind the daemon and reads as a hang. -->
+  <key>EnvironmentVariables</key>
+  <dict><key>PYTHONUNBUFFERED</key><string>1</string></dict>
+  <key>RunAtLoad</key><true/>
+  <!-- The bridge waits for a board rather than exiting, so KeepAlive is a
+       backstop for a crash, not the normal path. ThrottleInterval keeps a
+       repeatable crash from becoming a spin. -->
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
+</dict>
+</plist>
+"""
+
+_UNIT_TEMPLATE = """[Unit]
+Description=Clauge USB bridge
+
+[Service]
+ExecStart={command}
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _xml_escape(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _service_command():
+    """What the login service should run.
+
+    Frozen, that is the copy in ~/.clauge/bin. From a checkout it is this
+    interpreter and module -- there is no single-file binary to point at, and
+    a developer running from source should still get a working service rather
+    than one aimed at a path that does not exist.
+    """
+    if _frozen():
+        return [installed_bin(), "run"]
+    return [sys.executable, "-m", "pc.cli", "run"]
+
+
+def _install_service() -> str:
+    if _skip_service():
+        return "skipped (CLAUGE_SKIP_SERVICE=1)"
+    if sys.platform == "darwin":
+        os.makedirs(os.path.dirname(plist_path()), exist_ok=True)
+        with open(plist_path(), "w") as f:
+            args = "".join(f"    <string>{_xml_escape(a)}</string>\n"
+                           for a in _service_command())
+            f.write(_PLIST_TEMPLATE.format(label=LABEL, args=args,
+                                           log=_xml_escape(log_path())))
+        uid = os.getuid()
+        # bootout first so a rerun replaces the running agent rather than
+        # failing with "service already loaded".
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"],
+                       capture_output=True)
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", plist_path()],
+                           capture_output=True)
+        if r.returncode == 0:
+            return "running (launchd)"
+        return f"installed, but could not be started: launchctl bootstrap gui/{uid} {plist_path()}"
+    if sys.platform.startswith("linux"):
+        os.makedirs(os.path.dirname(unit_path()), exist_ok=True)
+        with open(unit_path(), "w") as f:
+            f.write(_UNIT_TEMPLATE.format(
+                command=" ".join(_service_command())))
+        if not shutil.which("systemctl"):
+            return f"no systemd here; run it yourself: {installed_bin()} run"
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        r = subprocess.run(["systemctl", "--user", "enable", "--now",
+                            "clauge-bridge.service"], capture_output=True)
+        if r.returncode == 0:
+            return "running (systemd)"
+        return "installed, but could not be started: systemctl --user enable --now clauge-bridge"
+    return f"not supported on {sys.platform}; run it yourself: {installed_bin()} run"
+
+
+def _remove_service() -> str:
+    if _skip_service():
+        return "skipped (CLAUGE_SKIP_SERVICE=1)"
+    if sys.platform == "darwin":
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
+                       capture_output=True)
+        _rm(plist_path())
+        return "removed"
+    if sys.platform.startswith("linux"):
+        if shutil.which("systemctl"):
+            subprocess.run(["systemctl", "--user", "disable", "--now",
+                            "clauge-bridge.service"], capture_output=True)
+        _rm(unit_path())
+        if shutil.which("systemctl"):
+            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        return "removed"
+    return "nothing to remove"
+
+
+def _rm(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+# -------------------------------------------------------------------- install
+
+
+def _announce():
+    """Say what is about to change, before changing it.
+
+    Install is deliberately unattended -- it asks nothing, because plugging the
+    board in is meant to be the whole setup. That makes disclosure the only
+    thing standing between us and silently editing a file the customer owns,
+    so it is not optional and it runs before the first write.
+    """
+    print("Clauge setup. Here is everything it is about to do, before it does any of it.")
+    print()
+    print(f"  Creates    {installed_bin()}")
+    print("             a copy of this program, so the file you downloaded")
+    print("             can be deleted when this finishes.")
+    print(f"  Creates    {shim_path()}")
+    print("             the small script Claude Code runs to hand over the")
+    print("             usage figures.")
+    print(f"  Changes    {settings_path()}")
+    print("             the statusLine.command key, and nothing else in the file.")
+    previous = install_statusline._load(settings_path()).get("statusLine") or {}
+    prev_cmd = previous.get("command", "")
+    if prev_cmd:
+        print(f"             Your current command is kept and still runs:")
+        print(f"               {prev_cmd}")
+    if sys.platform == "darwin":
+        print(f"  Creates    {plist_path()}")
+    elif sys.platform.startswith("linux"):
+        print(f"  Creates    {unit_path()}")
+    print("             so the bridge starts when you log in.")
+    print()
+    print("  It reads or stores nothing else -- no credential, no token, no")
+    print("  account data. The usage figures come from Claude Code, which has")
+    print("  already worked them out.")
+    print()
+    print(f"  To undo all of it:  {installed_bin()} uninstall")
+    print()
+
+
+def cmd_install(_args) -> int:
+    _announce()
+
+    print("[1/3] Program ... ", end="", flush=True)
+    os.makedirs(bin_dir(), exist_ok=True)
+    if _frozen():
+        src = _self_path()
+        # Copying onto a running binary is fine on macOS and Linux (the inode
+        # stays alive for this process), but only when it is not literally the
+        # same path -- a re-run of the installed copy would otherwise truncate
+        # itself mid-execution.
+        if os.path.abspath(src) != os.path.abspath(installed_bin()):
+            shutil.copy2(src, installed_bin())
+            os.chmod(installed_bin(), 0o755)
+        print(installed_bin())
+    else:
+        # From a checkout there is nothing to copy; the service points at this
+        # interpreter instead. Customers never take this path.
+        print("running from a checkout, nothing to copy")
+
+    print("[2/3] Status line ... ", end="", flush=True)
+    os.makedirs(clauge_home(), exist_ok=True)
+    with open(shim_path(), "w") as f:
+        f.write(_shim_source())
+    os.chmod(shim_path(), 0o755)
+    install_statusline._announce(settings_path(), shim_path(),
+                                 undo_hint=f"{installed_bin()} uninstall")
+    print("      " + install_statusline.install(settings_path(), shim_path()))
+
+    print("[3/3] Background service ... ", end="", flush=True)
+    print(_install_service())
+
+    print()
+    print("Done. Plug the board in over USB -- it picks it up on its own.")
+    print(f"  Log:     {log_path()}")
+    print(f"  Check:   {installed_bin()} status")
+    print(f"  Undo:    {installed_bin()} uninstall")
+    print()
+    print("  You can delete the file you downloaded.")
+    _warn_if_claude_too_old()
+    return 0
+
+
+def cmd_uninstall(_args) -> int:
+    print("Clauge uninstall.")
+    print()
+    print("[1/3] Background service ... ", end="", flush=True)
+    print(_remove_service())
+
+    print("[2/3] Claude Code setting:")
+    print("      " + install_statusline.uninstall(settings_path(), shim_path()))
+
+    print("[3/3] Files ... ", end="", flush=True)
+    # Only what install created. NOT ~/.clauge itself: it also holds the OTA
+    # signing key, which cannot be regenerated -- every board already flashed
+    # with its public half would stop accepting updates.
+    shutil.rmtree(bin_dir(), ignore_errors=True)
+    for p in (shim_path(), os.path.join(clauge_home(), "statusline.json"),
+              os.path.join(clauge_home(), "statusline.json.tmp")):
+        _rm(p)
+    print("removed")
+    print()
+    print("Done. Nothing of Clauge's is left running.")
+    return 0
+
+
+def cmd_status(_args) -> int:
+    if _skip_service():
+        # The launchd label and systemd unit name are global while everything
+        # else is scoped to $HOME, so querying them under a test HOME reports
+        # the real user's agent -- which read as "installed" for an install
+        # that never happened.
+        print("Bridge      not checked (CLAUGE_SKIP_SERVICE=1)")
+    elif sys.platform == "darwin":
+        r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
+                           capture_output=True)
+        print("Bridge      " + ("registered with launchd" if r.returncode == 0
+                                else "not installed"))
+    elif sys.platform.startswith("linux") and shutil.which("systemctl"):
+        r = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
+                            "clauge-bridge.service"], capture_output=True)
+        print("Bridge      " + ("running" if r.returncode == 0 else "not running"))
+    else:
+        print(f"Bridge      unknown on {sys.platform}")
+
+    text, ver = claude_version()
+    if ver is None:
+        print("Claude Code not found on PATH")
+    elif ver < MIN_CLAUDE:
+        m = ".".join(str(n) for n in MIN_CLAUDE)
+        print(f"Claude Code {text} -- TOO OLD, needs {m}+ (panel will stay blank)")
+    else:
+        print(f"Claude Code {text}")
+
+    print("Status line " + (f"installed at {shim_path()}" if os.path.exists(shim_path())
+                            else "not installed"))
+
+    # The most useful support answer: is fresh data actually arriving?
+    payload = os.path.join(clauge_home(), "statusline.json")
+    if os.path.exists(payload):
+        age = int(time.time() - os.path.getmtime(payload))
+        if age < 120:
+            print(f"Usage data  fresh ({age}s old)")
+        else:
+            print(f"Usage data  {age}s old -- open Claude Code to refresh it")
+    else:
+        print("Usage data  none yet -- open Claude Code once so it renders "
+              "its status line")
+    return 0
+
+
+def cmd_run(_args) -> int:
+    """The daemon. This is what the login service starts."""
+    import claude_usage_bridge
+    claude_usage_bridge.main()
+    return 0
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="clauge", description="Clauge desk gauge: setup and bridge.")
+    sub = parser.add_subparsers(dest="cmd")
+    sub.add_parser("install", help="set everything up (default)")
+    sub.add_parser("uninstall", help="put it all back")
+    sub.add_parser("status", help="is the panel getting data?")
+    sub.add_parser("run", help="run the bridge in the foreground")
+    args = parser.parse_args(argv)
+
+    # Bare `./clauge` installs. Someone who just downloaded a file and
+    # double-clicked it meant "set this up", and making them discover a
+    # subcommand first is the opposite of the point.
+    return {
+        None: cmd_install,
+        "install": cmd_install,
+        "uninstall": cmd_uninstall,
+        "status": cmd_status,
+        "run": cmd_run,
+    }[args.cmd](args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

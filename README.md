@@ -36,7 +36,7 @@ It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the
 |------|--------------|
 | `firmware/` | The device firmware (Zephyr, C) - this is the product |
 | `firmware/src/ota.c` | The update engine: signed install + automatic rollback |
-| `pc/`, `claude_usage_bridge.py`, `install.sh` | The USB bridge and its setup - this is how a board gets its numbers |
+| `pc/`, `claude_usage_bridge.py` | The USB bridge and its setup, shipped as one binary - this is how a board gets its numbers |
 | `tools/` | Build, flash, and release helpers |
 | `docs/img/` | Logo, icons, and the screen renders above |
 
@@ -56,59 +56,67 @@ Clauge reads your usage over the **USB cable**, from Claude Code itself. Plug th
 
 The device never joins your network, never signs in to anything, and never holds a credential - the numbers come from the Claude Code already running on your machine.
 
-  Download **`clauge-setup-<version>.tar.gz`** from the
-  [latest release](https://github.com/KfirLevy258/Clauge/releases/latest),
-  then:
+### Setting it up
 
-  ```bash
-  tar xzf clauge-setup-*.tar.gz
-  cd clauge-*
-  ./install.sh          # once; any Python 3.9+
-  ```
+**One file. Download it, run it, done.** No Python, no package manager,
+nothing to keep installed.
 
-  That is the whole setup. It finds the board by itself, and starts again on
-  its own every time you log in - plug the cable in and the panel comes up.
+```bash
+# macOS (Apple silicon)
+curl -fsSL -o clauge https://github.com/KfirLevy258/Clauge/releases/latest/download/clauge-macos-arm64
+# macOS (Intel):  .../clauge-macos-x86_64
+# Linux:          .../clauge-linux-x86_64
 
-  **You can delete the folder afterwards.** Everything it needs is copied to
-  `~/.clauge`, so nothing keeps running out of your Downloads.
+chmod +x clauge && ./clauge
+```
 
-  **Needs Claude Code 2.1.100 or newer.** Clauge reads the usage figures from
-  the status line, and older versions do not put them there - 2.1.0 has no
-  usage figures in that payload at all, so the panel would stay blank. Update
-  Claude Code first if yours is older.
+That is the whole setup. It finds the board by itself and starts again every
+time you log in - plug the cable in and the panel comes up.
 
-  ```bash
-  ./install.sh status      # is the panel getting data?
-  ./install.sh uninstall   # put everything back
-  ```
+**Then delete the file.** It copies itself to `~/.clauge/bin` on the way
+through, so nothing has to stay in your Downloads folder.
 
-  ### What the installer changes
+```bash
+~/.clauge/bin/clauge status      # is the panel getting data?
+~/.clauge/bin/clauge uninstall   # put everything back
+```
 
-  Over USB, Clauge reads the usage figures Claude Code has already worked out,
-  rather than asking Anthropic for them itself. Claude Code hands those figures
-  to whatever command is set as its **status line**, so that is the one setting
-  Clauge has to change.
+*Downloading with `curl` rather than a browser is deliberate: macOS marks
+browser downloads as quarantined and refuses to run them until the app is
+notarised. `curl` does not, so this works today.*
 
-  | | |
-  |---|---|
-  | Changes | `statusLine.command` in `~/.claude/settings.json` |
-  | Creates | `~/.clauge/` - a private Python environment (`pyserial`, `esptool`), plus copies of the status line shim and the bridge, so the folder you downloaded can be deleted |
-  | Creates | a login item, so the bridge starts with your session (`~/Library/LaunchAgents` on macOS, a user systemd unit on Linux) |
-  | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Your system Python is not modified |
-  | Reads or stores | nothing else - no credential, no token, no account data |
+**Needs Claude Code 2.1.100 or newer.** Clauge reads the usage figures from
+the status line, and older versions do not put them there - 2.1.0 has no
+usage figures in that payload at all, so the panel would stay blank. Update
+Claude Code first if yours is older.
 
-  **It does this without asking**, so that plugging the board in is the whole
-  setup. It prints all of the above before it changes anything, and every part
-  of it is reversible:
+### What the installer changes
 
-  ```bash
-  ./install.sh uninstall
-  ```
+Over USB, Clauge reads the usage figures Claude Code has already worked out,
+rather than asking Anthropic for them itself. Claude Code hands those figures
+to whatever command is set as its **status line**, so that is the one setting
+Clauge has to change.
 
-  **If you already have your own status line, it keeps working.** Clauge records
-  your existing command, and runs it after capturing the usage figures - your bar
-  renders exactly as before. Uninstalling puts your command back unchanged, and
-  will not touch a status line Clauge did not install.
+| | |
+|---|---|
+| Changes | `statusLine.command` in `~/.claude/settings.json` |
+| Creates | `~/.clauge/` - a copy of the program itself and the small status line script, so the file you downloaded can be deleted |
+| Creates | a login item, so the bridge starts with your session (`~/Library/LaunchAgents` on macOS, a user systemd unit on Linux) |
+| Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
+| Reads or stores | nothing else - no credential, no token, no account data |
+
+**It does this without asking**, so that plugging the board in is the whole
+setup. It prints all of the above before it changes anything, and every part
+of it is reversible:
+
+```bash
+~/.clauge/bin/clauge uninstall
+```
+
+**If you already have your own status line, it keeps working.** Clauge records
+your existing command, and runs it after capturing the usage figures - your bar
+renders exactly as before. Uninstalling puts your command back unchanged, and
+will not touch a status line Clauge did not install.
 
 ## Build &amp; flash
 

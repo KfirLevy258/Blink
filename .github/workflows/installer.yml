@@ -63,11 +63,35 @@ jobs:
           "$RUNNER_TEMP/sysvenv/bin/python" -m pip install --quiet -r tests/requirements.txt
           "$RUNNER_TEMP/sysvenv/bin/python" -m pytest tests/ -q
 
-  # The two steps the unit tests always skip, because they touch the machine:
-  # building the virtualenv, and registering a login service. One runner per
-  # scenario, installing for real.
+  # Build the shipped artifact once per platform, then let every scenario test
+  # THAT rather than the source. A scenario passing against the module while
+  # the frozen binary is missing a data file would be a green tick on the one
+  # thing customers actually run.
+  build:
+    name: build binary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: sh tools/build_binary.sh
+      - run: ./dist/clauge status || true      # smoke: it starts at all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clauge-${{ matrix.os }}
+          path: dist/clauge
+          retention-days: 7
+
+  # The step no unit test reaches, because it touches the machine: registering
+  # a login service. One runner per scenario, installing for real.
   real-install:
     name: install (${{ matrix.os }}, ${{ matrix.scenario }})
+    needs: build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -83,9 +107,11 @@ jobs:
           - spaced-home        # a HOME path containing spaces
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/download-artifact@v4
         with:
-          python-version: '3.11'
+          name: clauge-${{ matrix.os }}
+          path: dist
+      - run: chmod +x dist/clauge
       # HOME is redirected inside the script, but the launchd label and the
       # systemd unit name are constants -- fine on a throwaway runner, which is
       # the whole reason this job cannot be a local test.
@@ -142,6 +168,7 @@ jobs:
           python-version: '3.11'
       - run: npm install -g @anthropic-ai/claude-code@${{ matrix.version }}
       - run: claude --version
+      - run: sh tools/build_binary.sh
       - run: sh tests/ci/check_claude_version.sh
 
   lint:
@@ -165,10 +192,10 @@ jobs:
           shellcheck --version
       # -s sh: these must be POSIX. Checking them as bash would let a bashism
       # through that breaks the /bin/sh they actually run under.
-      - run: shellcheck -s sh install.sh tools/clauge-statusline.sh tests/ci/*.sh
+      - run: shellcheck -s sh tools/clauge-statusline.sh tools/build_binary.sh tests/ci/*.sh
       - name: reject CRLF line endings
         run: |
-          if grep -rlU $'\r' install.sh tools/clauge-statusline.sh tests/ci/; then
+          if grep -rlU $'\r' tools/clauge-statusline.sh tools/build_binary.sh tests/ci/; then
             echo "CRLF found: a shim with CRLF fails with 'bad interpreter'" >&2
             exit 1
           fi
@@ -209,17 +236,17 @@ jobs:
             tail -25 result.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: install.sh under Git Bash
+      - name: can the binary even be built here
         shell: bash
         run: |
-          if sh tests/ci/check_install.sh no-statusline > install.txt 2>&1; then
-            echo "install.sh COMPLETED on Windows" | tee -a "$GITHUB_STEP_SUMMARY"
+          if sh tools/build_binary.sh > build.txt 2>&1; then
+            echo "binary BUILDS on Windows" | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning::install.sh does not complete on Windows -- expected, unsupported"
+            echo "::warning::the binary does not build on Windows -- expected, unsupported"
             {
-              echo "install.sh did not complete on Windows:"
+              echo "build failed on Windows:"
               echo '```'
-              tail -5 install.txt
+              tail -8 build.txt
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi

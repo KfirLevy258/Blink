@@ -1,0 +1,54 @@
+name: release binaries
+
+# What a customer downloads. PyInstaller cannot cross-compile, so each
+# platform's binary is built on that platform and attached to the release.
+#
+# Runs when a release is published -- tools/release.sh creates it with the
+# firmware, and these arrive alongside a moment later.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: release tag to attach binaries to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: macos-latest, label: macos-arm64}
+          - {os: macos-13, label: macos-x86_64}
+          - {os: ubuntu-latest, label: linux-x86_64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: sh tools/build_binary.sh
+
+      # Prove the artifact installs before it is published. A binary missing a
+      # bundled data file fails on a customer's machine at the one moment they
+      # are deciding whether this product works -- and PyInstaller missing a
+      # data file is exactly the failure that does not show up at build time.
+      - name: verify it installs and uninstalls
+        run: |
+          CLAUGE_SKIP_SERVICE=1 sh tests/ci/check_install.sh with-statusline
+          CLAUGE_SKIP_SERVICE=1 sh tests/ci/check_install.sh no-claude
+
+      - name: name it for the platform
+        run: mv dist/clauge "dist/clauge-${{ matrix.label }}"
+
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" "dist/clauge-${{ matrix.label }}" --clobber

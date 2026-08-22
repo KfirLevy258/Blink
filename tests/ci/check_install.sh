@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run install.sh for real against one scenario, and check what it did.
+# Run the packaged binary for real against one scenario, and check what it did.
 #
 # The pytest suite covers the same scenarios hermetically, but always with
 # CLAUGE_SKIP_DEPS=1 and CLAUGE_SKIP_SERVICE=1 -- so the two steps that touch
@@ -12,6 +12,9 @@
 # Scenarios: no-claude, no-settings, no-statusline, with-statusline,
 #            reinstall, foreign-uninstall, spaced-home
 #
+# CLAUGE_BIN names the binary to test (default: dist/clauge, as built by
+# tools/build_binary.sh). CI builds it once per platform and hands the path in.
+#
 # Set CLAUGE_SKIP_SERVICE=1 to skip the login-service assertions. Do that when
 # running this on a machine you care about: the launchd label is a constant, so
 # a real run here would bootout whatever agent is already installed and replace
@@ -21,6 +24,8 @@ set -eu
 SCENARIO="${1:?usage: check_install.sh <scenario> [work-dir]}"
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 WORK="${2:-${TMPDIR:-/tmp}/clauge-ci-$SCENARIO}"
+BIN="${CLAUGE_BIN:-$ROOT/dist/clauge}"
+[ -x "$BIN" ] || { echo "no binary at $BIN -- run tools/build_binary.sh" >&2; exit 1; }
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -115,7 +120,7 @@ if [ "$SCENARIO" = "foreign-uninstall" ]; then
 	# Never installed. Uninstall must be a no-op on someone else's setup --
 	# the case where a person runs it "just to be sure" and would otherwise
 	# lose a status line Clauge never touched.
-	"$ROOT/install.sh" uninstall >"$WORK/out.txt" 2>&1 ||
+	"$BIN" uninstall >"$WORK/out.txt" 2>&1 ||
 		fail "uninstall exited non-zero: $(cat "$WORK/out.txt")"
 	[ "$(json_get statusLine.command)" = "sh $THEIR_BAR" ] ||
 		fail "uninstall clobbered a status line it never installed"
@@ -123,15 +128,15 @@ if [ "$SCENARIO" = "foreign-uninstall" ]; then
 	exit 0
 fi
 
-"$ROOT/install.sh" >"$WORK/out.txt" 2>&1 || {
+"$BIN" >"$WORK/out.txt" 2>&1 || {
 	cat "$WORK/out.txt" >&2
-	fail "install.sh exited non-zero"
+	fail "clauge exited non-zero"
 }
 
 if [ "$SCENARIO" = "reinstall" ]; then
-	"$ROOT/install.sh" >"$WORK/out2.txt" 2>&1 || {
+	"$BIN" >"$WORK/out2.txt" 2>&1 || {
 		cat "$WORK/out2.txt" >&2
-		fail "second install.sh exited non-zero"
+		fail "second clauge run exited non-zero"
 	}
 	ok "second run succeeded"
 fi
@@ -140,11 +145,11 @@ fi
 
 # Disclosure: it asks nothing, so this is the only safeguard. It has to name
 # the file, the key and the way back, and do it before the first step runs.
-head -n "$(grep -n '^\[1/4\]' "$WORK/out.txt" | head -1 | cut -d: -f1)" \
+head -n "$(grep -n '^\[1/3\]' "$WORK/out.txt" | head -1 | cut -d: -f1)" \
 	"$WORK/out.txt" >"$WORK/disclosure.txt" 2>/dev/null || true
 grep -q "$(settings)" "$WORK/disclosure.txt" || fail "disclosure omits settings.json path"
 grep -q "statusLine.command" "$WORK/disclosure.txt" || fail "disclosure omits the key"
-grep -q "install.sh uninstall" "$WORK/disclosure.txt" || fail "disclosure omits the undo"
+grep -q "clauge uninstall" "$WORK/disclosure.txt" || fail "disclosure omits the undo"
 ok "disclosure precedes the first step and names file, key, undo"
 
 SHIM="$HOME/.clauge/clauge-statusline.sh"
@@ -162,22 +167,12 @@ case "$got" in
 esac
 ok "statusLine.command -> the installed copy"
 
-# The venv is the half no unit test reaches. Importing is the assertion:
-# a directory that exists but cannot import pyserial is a broken install that
-# only shows up when a board is plugged in.
-"$HOME/.clauge/venv/bin/python" -c "import serial, esptool" ||
-	fail "venv cannot import pyserial/esptool"
-ok "venv built and imports pyserial + esptool"
-
-# The daemon has to run from its own copy, or the customer can never delete
-# what they downloaded -- the login service names an absolute path.
-[ -f "$HOME/.clauge/app/claude_usage_bridge.py" ] || fail "daemon not installed"
-[ -f "$HOME/.clauge/app/pc/statusline_source.py" ] || fail "pc package not installed"
-"$HOME/.clauge/venv/bin/python" -c "
-import sys; sys.path.insert(0, '$HOME/.clauge/app')
-import claude_usage_bridge, pc.statusline_source
-" || fail "the installed copy does not import on its own"
-ok "daemon installed as a copy and imports standalone"
+# The half no unit test reaches: the binary must copy ITSELF somewhere stable
+# and be runnable from there, because the login service names that path and
+# the customer is told they can delete the download.
+[ -x "$HOME/.clauge/bin/clauge" ] || fail "the binary did not install itself"
+"$HOME/.clauge/bin/clauge" status >/dev/null || fail "the installed copy does not run"
+ok "binary installed itself and runs from ~/.clauge/bin"
 
 if [ "${CLAUGE_SKIP_SERVICE:-0}" != "1" ]; then
 	case "$(uname -s)" in
@@ -232,7 +227,7 @@ fi
 
 # ----------------------------------------------------------------- undo --
 
-"$ROOT/install.sh" uninstall >"$WORK/undo.txt" 2>&1 || {
+"$BIN" uninstall >"$WORK/undo.txt" 2>&1 || {
 	cat "$WORK/undo.txt" >&2
 	fail "uninstall exited non-zero"
 }
@@ -246,8 +241,7 @@ with-statusline | reinstall | spaced-home)
 		fail "uninstall left a statusLine behind" ;;
 esac
 [ ! -e "$SHIM" ] || fail "uninstall left the shim behind"
-[ ! -e "$HOME/.clauge/venv" ] || fail "uninstall left the venv behind"
-[ ! -e "$HOME/.clauge/app" ] || fail "uninstall left the daemon behind"
+[ ! -e "$HOME/.clauge/bin" ] || fail "uninstall left the binary behind"
 [ "$(cat "$HOME/.clauge/ota_signing_key_p256.pem")" = "PRIVATE KEY" ] ||
 	fail "uninstall destroyed the OTA signing key"
 ok "uninstall restored everything and kept the signing key"

@@ -75,30 +75,11 @@ SLOT=$((0x150000))
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 cp "$BIN" "$TMP/clauge-fw.bin"
 
-# The PC side, packaged. Until this existed a customer had to clone the whole
-# repo -- firmware sources, build scripts and the rest -- to run one installer,
-# and there was no answer to "what do I download?" that did not involve git.
-#
-# Deliberately NOT the whole tree: this is everything install.sh reads and
-# nothing else, so what a customer unpacks is what a customer needs.
-PKG="clauge-$VER"
-mkdir -p "$TMP/$PKG/pc" "$TMP/$PKG/tools"
-cp "$ROOT/install.sh" "$TMP/$PKG/"
-cp "$ROOT/claude_usage_bridge.py" "$TMP/$PKG/"
-cp "$ROOT"/pc/*.py "$ROOT/pc/requirements.txt" "$TMP/$PKG/pc/"
-cp "$ROOT/tools/clauge-statusline.sh" "$TMP/$PKG/tools/"
-chmod 755 "$TMP/$PKG/install.sh" "$TMP/$PKG/tools/clauge-statusline.sh"
-( cd "$TMP" && tar czf "clauge-setup-$VER.tar.gz" "$PKG" )
-
-# Prove the package can install itself before it is published. A tarball that
-# is missing a file fails on a customer's machine, at the one moment they are
-# deciding whether this product works.
-( cd "$TMP" && rm -rf verify && mkdir verify && tar xzf "clauge-setup-$VER.tar.gz" -C verify \
-	&& HOME="$TMP/verify-home" CLAUGE_SKIP_SERVICE=1 sh "verify/$PKG/install.sh" >/dev/null ) || {
-	echo "FATAL: the setup package cannot install itself -- a file is missing" >&2
-	exit 1
-}
-echo "setup package verified: it installs from a clean unpack"
+# The PC side is no longer packaged here. It is a single binary now, and
+# PyInstaller cannot cross-compile, so each platform's build happens on that
+# platform in .github/workflows/release-binaries.yml -- which fires when this
+# script publishes the release and attaches clauge-macos-arm64,
+# clauge-macos-x86_64 and clauge-linux-x86_64 alongside the firmware.
 printf '{"version":"%s","size":%s,"sha256":"%s"}\n' "$VER" "$SIZE" "$SHA" \
 	> "$TMP/manifest.json"
 
@@ -106,12 +87,10 @@ printf '{"version":"%s","size":%s,"sha256":"%s"}\n' "$VER" "$SIZE" "$SHA" \
 # source tag hasn't been released yet. --clobber lets a manifest-only retry win.
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
 	gh release upload "$TAG" --repo "$REPO" --clobber \
-		"$TMP/clauge-fw.bin" "$TMP/manifest.json" \
-		"$TMP/clauge-setup-$VER.tar.gz"
+		"$TMP/clauge-fw.bin" "$TMP/manifest.json"
 else
 	gh release create "$TAG" --repo "$REPO" --title "Clauge $VER" \
 		--notes "Firmware $VER — size $SIZE bytes, sha256 $SHA" \
-		"$TMP/clauge-fw.bin" "$TMP/manifest.json" \
-		"$TMP/clauge-setup-$VER.tar.gz"
+		"$TMP/clauge-fw.bin" "$TMP/manifest.json"
 fi
 echo "Released $TAG ($SIZE bytes). Boards pick it up on their next check."
