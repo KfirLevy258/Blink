@@ -101,7 +101,12 @@ static int64_t upd_revert_at;	/* "Up to date" shows briefly, then idles */
  * late the flash still succeeds and the next boot reports the new version --
  * whereas expiring early on a slow machine would call a working update failed.
  */
-#define USB_DL_DEADLINE_MS 90000
+/* Long enough for the slowest thing that can legitimately happen before the
+ * board is taken away: in a PAIR update the app downloads a ~12 MB binary,
+ * self-tests it, replaces itself and reconnects, all while this screen is up
+ * and no message arrives. 90 s covered a firmware-only install and would have
+ * expired in the middle of that. */
+#define USB_DL_DEADLINE_MS 300000
 static int64_t usb_dl_deadline;
 
 static const char *const act_label[] = {
@@ -634,15 +639,13 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		 * into the ROM loader to write it, so the panel stops being
 		 * driven at all and simply goes dark for the duration -- with
 		 * no warning that reads as a crash, not an update. */
-		/* Four, not two: the daemon now reads the image back off the
-		 * chip after writing it, and the read is not compressed. 1 MB
-		 * measured at 96 s on this board's CH340, against ~75 s to
-		 * write the whole 1.3 MB image. Raising the baud to pay for it
-		 * was tried and does not work here -- see FLASH_BAUD in
-		 * pc/ota.py. Promising two and taking four would recreate the
-		 * "is it stuck?" problem this whole screen exists to prevent. */
+		/* Back to two. It was raised to four for a second esptool pass
+		 * that read the image back off the chip -- a check write_flash
+		 * had already performed by MD5, so the two minutes bought
+		 * nothing and are gone again. Vague and true beats precise and
+		 * wrong, and both halves of that apply to being too pessimistic. */
 		lv_label_set_text(dl_sub,
-				  "The screen goes dark for about 4 minutes.\n"
+				  "The screen goes dark for about 2 minutes.\n"
 				  "Keep the cable connected.");
 		return;
 	}
@@ -1433,7 +1436,7 @@ static void build_panel(lv_obj_t *parent_scr)
 		[ACT_FACTORY] = LV_SYMBOL_TRASH,
 	};
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+	/* (already inside the WiFi-only branch that opens above) */
 	/* Three actions: a centred heading over a row of three tiles.
 	 *
 	 * The labels are one word each because three of them share 296 px; the
@@ -1498,73 +1501,15 @@ static void build_panel(lv_obj_t *parent_scr)
 		lv_obj_set_style_text_color(tx, fg, 0);
 		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -8);
 	}
-#else
-	/*
-	 * One action, so no grid and no heading.
-	 *
-	 * "Reset WiFi" and "Re-sign-in" would clear settings nothing in this
-	 * build reads -- the persistent dead state this project has been bitten
-	 * by before -- so only the factory reset survives. A single 92px tile
-	 * centred in a 296px row read as two thirds of a grid that failed to
-	 * draw, and the "RESET" heading above it was labelling a section with
-	 * one item in it.
-	 *
-	 * Full-width row instead, the same shape as "Software update"
-	 * immediately above: same x, same width, same height, same radius and
-	 * chevron. The panel then reads as three stacked sections separated by
-	 * rules, and the row names itself so the heading is not needed. Danger
-	 * colours keep it distinct from the update row it now resembles; the
-	 * confirmation step is unchanged.
-	 */
-	lv_obj_t *fact = lv_btn_create(panel);
-
-	lv_obj_set_size(fact, 296, 30);
-	/* 5 px below its rule, exactly like the update row is below its own
-	 * (line 89 -> row 94). The consistency is the point of this layout. */
-	lv_obj_align(fact, LV_ALIGN_TOP_LEFT, 12, 134);
-	lv_obj_set_style_bg_color(fact, COL_DANGER_BG, 0);
-	lv_obj_set_style_bg_opa(fact, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(fact, COL_DANGER_BD, 0);
-	lv_obj_set_style_border_width(fact, 1, 0);
-	lv_obj_set_style_radius(fact, 9, 0);
-	lv_obj_set_style_shadow_width(fact, 0, 0);
-	lv_obj_set_style_pad_all(fact, 0, 0);
-	/* Same two flags as every other control on this panel: a horizontal
-	 * drag on a SCROLLABLE button is eaten as a scroll and the tap never
-	 * fires, and a drifting press must not bubble into a panel close. */
-	lv_obj_clear_flag(fact, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(fact, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	lv_obj_add_event_cb(fact, act_cb, LV_EVENT_CLICKED,
-			    (void *)(intptr_t)ACT_FACTORY);
-
-	lv_obj_t *fic = lv_label_create(fact);
-
-	lv_label_set_text(fic, acticon[ACT_FACTORY]);
-	lv_obj_set_style_text_color(fic, COL_RED, 0);
-	lv_obj_align(fic, LV_ALIGN_LEFT_MID, 12, 0);
-
-	lv_obj_t *fl = lv_label_create(fact);
-
-	lv_label_set_text(fl, "Factory reset");
-	lv_obj_set_style_text_color(fl, COL_RED, 0);
-	lv_obj_align(fl, LV_ALIGN_LEFT_MID, 34, 0);
-
-	lv_obj_t *fchev = lv_label_create(fact);
-
-	lv_label_set_text(fchev, LV_SYMBOL_RIGHT);
-	lv_obj_set_style_text_color(fchev, COL_RED, 0);
-	lv_obj_align(fchev, LV_ALIGN_RIGHT_MID, -10, 0);
-#endif
 
 	/* Debug-me line: build + network, answered without a serial cable
 	 * (which would reset the board). IP dropped at the user's request
 	 * (2026-07-20); the SSID gets more room, capped so it can't overrun. */
 	char line[56];
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+	/* (already inside the WiFi-only branch that opens above) */
 	char ip[16], ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
-#endif
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+	/* (already inside the WiFi-only branch that opens above) */
 	if (net_wifi_sta_ip(ip, sizeof(ip)) &&
 	    cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
 		char ssid_a[CFG_SSID_MAX];
@@ -1573,7 +1518,6 @@ static void build_panel(lv_obj_t *parent_scr)
 		snprintf(line, sizeof(line), "Clauge %s  |  %.20s",
 			 CLAUGE_FW_VERSION, ssid_a);
 	} else
-#endif
 	{
 		/* Both halves when the daemon has introduced itself: they ship
 		 * from one tag, so the useful support question is which of the

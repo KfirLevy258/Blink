@@ -54,7 +54,8 @@ class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  app_ver=RELEASE_VERSION,
                  wall=_local_wall, fetch_manifest=None, fetch_firmware=None,
-                 flash_image=None, self_update=None, pending=None):
+                 flash_image=None, self_update=None, pending=None,
+                 fetch_signed_manifest=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         self._now = now
@@ -73,9 +74,15 @@ class Bridge:
         self._board_fw = None
         self._announced_ahead = False
         # Pair updates. self_update replaces this program and does not return
-        # when it works; pending remembers the consent across that restart.
+        # when it works; pending remembers the consent across that restart;
+        # _fetch_signed is the only manifest source allowed to decide that a
+        # binary should be installed (see _app_available).
         self._self_update = self_update
         self._pending = pending
+        if fetch_signed_manifest is None:
+            from pc import update as _u
+            fetch_signed_manifest = _u.fetch_signed_manifest
+        self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
 
     # --- inbound ---
@@ -175,12 +182,27 @@ class Bridge:
                                        app=app))
 
     def _app_available(self, manifest):
-        """(version, artifact) if this release has a newer daemon for us."""
+        """(version, artifact) if this release has a newer daemon for us.
+
+        Deliberately ignores the manifest it is handed. That one came from
+        ota.fetch_manifest(), which does NOT check the signature -- and does
+        not need to for firmware, because MCUboot will refuse an image that
+        was not signed with the release key no matter what a manifest claims.
+
+        A daemon binary has no such backstop. It is about to be run as a login
+        service on the customer's machine, and the only thing standing between
+        it and an attacker who can answer for the release URL is the manifest
+        signature. Taking the version, size and sha256 from an unverified
+        manifest would have meant the board-initiated update -- the one a
+        customer actually taps -- skipping the check that the whole signing
+        arrangement exists to perform, while the daily background check kept
+        it. Fetch a signed one instead.
+        """
         if self._self_update is None:
             return None
         try:
             from pc import update
-            return update.available(manifest)
+            return update.available(self._fetch_signed())
         except Exception:
             return None
 

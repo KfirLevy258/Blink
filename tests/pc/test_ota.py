@@ -6,8 +6,11 @@ from pc.bridge import Bridge
 from pc.version import PROTO_VERSION, RELEASE_VERSION
 
 
+_SAME = object()   # "the signed feed serves the same thing as the plain one"
+
+
 def bridge(manifest=None, firmware=b"", fw_raises=None, flasher=True,
-           self_update=None, pending=None):
+           self_update=None, pending=None, signed=_SAME):
     """A Bridge with the network and the flasher replaced.
 
     Returns (bridge, sent, flashed) -- `flashed` collects (blob, version)
@@ -24,7 +27,12 @@ def bridge(manifest=None, firmware=b"", fw_raises=None, flasher=True,
                fetch_manifest=lambda: manifest, fetch_firmware=fetch_fw,
                flash_image=(lambda blob, v: flashed.append((blob, v)))
                if flasher else None,
-               self_update=self_update, pending=pending)
+               self_update=self_update, pending=pending,
+               # The app-update decision reads a SIGNED manifest, never the
+               # one the firmware path uses. Default it to the same object so
+               # a test that does not care about signing behaves as before.
+               fetch_signed_manifest=lambda: (manifest if signed is _SAME
+                                              else signed))
     return b, sent, flashed
 
 
@@ -251,16 +259,14 @@ class TestFlashGuards(unittest.TestCase):
         self.assertTrue(ok, why)
         self.assertTrue(any("write_flash" in " ".join(c) for c in calls))
 
-    def test_the_image_is_read_back_after_writing(self):
-        """slot0 is written in place: nothing downstream catches a bad write.
-
-        MCUboot's signature check does catch it, but only at boot, and by then
-        the outcome is a board that will not start -- which is a support call,
-        not a recovery.
-        """
+    def test_it_does_not_pay_for_a_read_back_esptool_already_did(self):
+        """write_flash ends by comparing the written region's MD5 off the chip
+        -- "Hash of data verified." is in the output of every flash this
+        project has run. A second verify_flash pass repeated that check at the
+        cost of about two minutes of dark screen on a 1.3 MB image."""
         run, calls = self._run(efuse_out="FLASH_CRYPT_CNT (BLOCK0) = 0 R/W")
         ota.flash("/dev/null", b"x", run=run)
-        self.assertTrue(any("verify_flash" in " ".join(c) for c in calls))
+        self.assertFalse(any("verify_flash" in " ".join(c) for c in calls))
 
     def test_it_does_not_try_to_go_faster_than_115200(self):
         """Measured on the CYD's CH340 on 2026-08-22: three attempts at 460800
@@ -274,15 +280,15 @@ class TestFlashGuards(unittest.TestCase):
                  and "espefuse" not in " ".join(c)}
         self.assertEqual(bauds, {"115200"})
 
-    def test_a_failed_read_back_rewrites_before_giving_up(self):
-        state = {"verifies": 0}
+    def test_a_failed_write_is_retried_once(self):
+        state = {"writes": 0}
 
         def run(cmd, **kw):
             joined = " ".join(cmd)
             rc = 0
-            if "verify_flash" in joined:
-                state["verifies"] += 1
-                rc = 1 if state["verifies"] == 1 else 0   # second one passes
+            if "write_flash" in joined:
+                state["writes"] += 1
+                rc = 1 if state["writes"] == 1 else 0   # the second one lands
 
             class R:
                 returncode = rc
@@ -294,14 +300,14 @@ class TestFlashGuards(unittest.TestCase):
         ok, why = ota.flash("/dev/null", b"x", run=run)
         self.assertTrue(ok, why)
         self.assertIn("second try", why)
-        self.assertEqual(state["verifies"], 2)
+        self.assertEqual(state["writes"], 2)
 
-    def test_a_read_back_that_never_agrees_reports_failure(self):
+    def test_a_write_that_never_lands_reports_failure(self):
         def run(cmd, **kw):
             joined = " ".join(cmd)
 
             class R:
-                returncode = 1 if "verify_flash" in joined else 0
+                returncode = 1 if "write_flash" in joined else 0
                 stdout = ("FLASH_CRYPT_CNT (BLOCK0) = 0 R/W"
                           if "espefuse" in joined else "ok")
                 stderr = "content mismatch at 0x20000"
@@ -353,6 +359,26 @@ class TestPairUpdate(unittest.TestCase):
         b, sent, _ = bridge(manifest=self.M, self_update=lambda v, a: True)
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
         self.assertEqual(sent[0]["app"], "99.0.0")
+
+    def test_the_app_offer_comes_from_the_SIGNED_manifest(self):
+        """The manifest the firmware path uses is not signature-checked, and
+        does not need to be: MCUboot refuses an image that was not signed with
+        the release key whatever a manifest claims. A daemon binary has no such
+        backstop, and this is the path a customer actually taps -- so it must
+        not be decided by a manifest nobody verified."""
+        unsigned = dict(self.M, daemon={"version": "99.9.9", "artifacts": {
+            "macos-arm64": {"size": 1, "sha256": "ff" * 32}}})
+        b, sent, _ = bridge(manifest=unsigned, signed=self.M,
+                            self_update=lambda v, a: True)
+        b.on_message({"t": "ota_query", "cur": "0.4.8"})
+        self.assertEqual(sent[0]["app"], "99.0.0",
+                         "took the version from the unsigned manifest")
+
+    def test_an_unverifiable_manifest_offers_no_app_update(self):
+        b, sent, _ = bridge(manifest=self.M, signed=None,
+                            self_update=lambda v, a: True)
+        b.on_message({"t": "ota_query", "cur": "0.4.8"})
+        self.assertNotIn("app", sent[0])
 
     def test_a_current_app_is_not_mentioned(self):
         """The field is an annotation on a firmware offer, not a fixture: a

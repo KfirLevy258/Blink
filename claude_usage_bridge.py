@@ -76,7 +76,12 @@ def wait_for_port(explicit=None, poll_s=3.0):
     announced = False
     while True:
         port = explicit or autodetect_port()
-        if port and os.path.exists(port):
+        # os.path.exists() only means anything on POSIX, where a serial port
+        # IS a filesystem node. Windows ports are DOS device names -- COM3 --
+        # and os.stat on one fails, so this test was false for every Windows
+        # machine with a board plugged in and the daemon there waited forever
+        # for hardware it had already found.
+        if port and (sys.platform == "win32" or os.path.exists(port)):
             if announced:
                 print(f"[bridge] board found at {port}", file=sys.stderr)
             return port
