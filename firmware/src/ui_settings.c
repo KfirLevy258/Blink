@@ -1612,8 +1612,19 @@ static void build_panel(lv_obj_t *parent_scr)
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
 
 	/* Neutral, not danger. Nothing here is destructive: there is no
-	 * credential, no token and no network on this device to lose. */
-	mk_row(panel, 176, "Reset to defaults", "Brightness and gauge view",
+	 * credential, no token and no network on this device to lose.
+	 *
+	 * The subtitle names everything the reset actually clears, so it has to
+	 * be kept honest as that list shrinks. It said "Brightness and gauge
+	 * view" until the per-model gauge selection was compiled out of this
+	 * build (see HAVE_PER_MODEL in usage_view.c) -- at which point there
+	 * was one preference left and the row was still promising two.
+	 *
+	 * Named by its effect rather than by the setting: "Brightness" alone
+	 * would sit two rows under a row called Brightness and read as a
+	 * heading for it. cfg_reset zeroes the record and cfg_get_bright_pct
+	 * returns 100 for a zero, so 100% is what this actually does. */
+	mk_row(panel, 176, "Reset to defaults", "Puts brightness back to 100%",
 	       false, act_cb, (void *)(intptr_t)ACT_FACTORY, NULL);
 #endif
 
