@@ -240,11 +240,15 @@ with-statusline | reinstall | spaced-home)
 	ok "their bar still renders through the shim"
 
 	[ -s "$HOME/.clauge/statusline.json" ] || fail "shim wrote no payload"
-	py -c "
-import json,sys
-d=json.load(open('$HOME/.clauge/statusline.json'))
-assert d['rate_limits']['five_hour']['used_percentage'] == 11, d
-" || fail "payload is not what was piped in"
+	# The path goes in as an ARGUMENT, not inside the source. Under Git Bash a
+	# POSIX path handed to a native Windows program is auto-converted to
+	# Windows form; a path embedded in a string is not, so the identical check
+	# passed for json_get and failed here.
+	py - "$HOME/.clauge/statusline.json" <<-'EOF' || fail "payload is not what was piped in"
+		import json, sys
+		d = json.load(open(sys.argv[1]))
+		assert d["rate_limits"]["five_hour"]["used_percentage"] == 11, d
+	EOF
 	ok "payload captured for the daemon"
 	;;
 esac
