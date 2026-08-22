@@ -145,6 +145,21 @@ def main(argv=None):
     clauge_home = _clauge_home()
     update.recover(self_bin)
 
+    # Record the pid so uninstall can stop US specifically.
+    #
+    # Ending the Scheduled Task is not the same as ending this program:
+    # PyInstaller's onefile bootloader re-executes the same .exe as a child,
+    # and the child outlives the parent the task knows about -- still looping
+    # here, still holding clauge.exe open, so Windows will not let anything
+    # delete it. Killing by image name instead is how the uninstaller once
+    # killed itself; a pid is unambiguous.
+    try:
+        os.makedirs(clauge_home, exist_ok=True)
+        with open(os.path.join(clauge_home, "bridge.pid"), "w") as f:
+            f.write(str(os.getpid()))
+    except OSError as e:
+        print(f"[bridge] could not record the pid: {e}", file=sys.stderr)
+
     port = wait_for_port(args.port)
 
     # Claude Code owns the credential and computes these numbers; we read the file

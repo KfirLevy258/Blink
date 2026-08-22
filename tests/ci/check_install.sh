@@ -286,7 +286,22 @@ while [ -e "$HOME/.clauge/bin" ] && [ "$n" -lt 30 ]; do
 	sleep 1
 	n=$((n + 1))
 done
-[ ! -e "$HOME/.clauge/bin" ] || fail "uninstall left the binary behind (waited ${n}s)"
+if [ -e "$HOME/.clauge/bin" ]; then
+	# Say WHO is holding it. Three rounds were spent guessing at this from a
+	# bare "left the binary behind", and the answer -- which process, and
+	# whether the task was still registered -- was never in the log.
+	case "$(uname -s)" in
+	MINGW* | MSYS* | CYGWIN*)
+		echo "--- processes still running the binary ---" >&2
+		tasklist //fi "IMAGENAME eq clauge.exe" //v >&2 || true
+		echo "--- scheduled task ---" >&2
+		schtasks //query //tn "Clauge bridge" >&2 || true
+		echo "--- what is in the directory ---" >&2
+		ls -l "$HOME/.clauge/bin" >&2 || true
+		;;
+	esac
+	fail "uninstall left the binary behind (waited ${n}s)"
+fi
 [ "$(cat "$HOME/.clauge/ota_signing_key_p256.pem")" = "PRIVATE KEY" ] ||
 	fail "uninstall destroyed the OTA signing key"
 ok "uninstall restored everything and kept the signing key"

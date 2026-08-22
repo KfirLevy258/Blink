@@ -61,6 +61,10 @@ def log_path():
     return os.path.join(clauge_home(), "bridge.log")
 
 
+def pid_path():
+    return os.path.join(clauge_home(), "bridge.pid")
+
+
 def settings_path():
     return os.path.join(_home(), ".claude", "settings.json")
 
@@ -308,6 +312,7 @@ def _remove_service() -> str:
         subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True)
         subprocess.run(["schtasks", "/delete", "/f", "/tn", TASK_NAME],
                        capture_output=True)
+        _kill_recorded_daemon()
         return "removed"
     if sys.platform.startswith("linux"):
         if shutil.which("systemctl"):
@@ -325,6 +330,33 @@ def _rm(path):
         os.remove(path)
     except OSError:
         pass
+
+
+def _kill_recorded_daemon():
+    """Stop the bridge by the pid it wrote for itself, not by its name.
+
+    Ending the Scheduled Task ends the process the task launched. PyInstaller's
+    onefile bootloader re-executes the same .exe as a child, and that child
+    keeps running the bridge loop and keeps clauge.exe open, which is enough for
+    Windows to refuse every attempt to delete it -- including the detached
+    rmdir scheduled for after we exit.
+
+    By pid, with the image name only as a FILTER: `taskkill /im clauge.exe`
+    matches the uninstaller too, and killing ourselves mid-uninstall is exactly
+    what the previous attempt did. /t takes the bootloader's child with it.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        with open(pid_path()) as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return
+    if pid == os.getpid():
+        return                    # somehow ours; nothing to stop
+    subprocess.run(["taskkill", "/f", "/t", "/pid", str(pid),
+                    "/fi", "IMAGENAME eq " + os.path.basename(installed_bin())],
+                   capture_output=True)
 
 
 def _remove_bin_dir(attempts=6):
@@ -505,7 +537,7 @@ def cmd_uninstall(_args) -> int:
     # stop accepting updates.
     for p in (shim_path(), os.path.join(clauge_home(), "statusline.json"),
               os.path.join(clauge_home(), "statusline.json.tmp"),
-              os.path.join(clauge_home(), "pending_fw.json")):
+              os.path.join(clauge_home(), "pending_fw.json"), pid_path()):
         _rm(p)
     done, message = _remove_bin_dir()
     print(message)
