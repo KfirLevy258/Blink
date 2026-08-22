@@ -293,6 +293,33 @@ def _rm(path):
 # -------------------------------------------------------------------- install
 
 
+def _make_way_for_copy():
+    """Windows will not let us overwrite an executable that is running.
+
+    And by the second install it IS running: the first one registered a
+    Scheduled Task and started it, so ~/.clauge/bin/clauge.exe is locked and
+    shutil.copy2 raises PermissionError. That is not an edge case -- it is
+    what happens to every customer who re-runs the installer to upgrade.
+
+    Windows does allow a running executable to be RENAMED, so move it aside
+    and copy into the freed name. The leftover is deleted on the next run,
+    once nothing has it open any more; uninstall takes the whole directory.
+    """
+    if sys.platform != "win32":
+        return
+    target = installed_bin()
+    stale = target + ".old"
+    try:
+        os.remove(stale)
+    except OSError:
+        pass          # still locked from a previous upgrade; harmless
+    if os.path.exists(target):
+        try:
+            os.replace(target, stale)
+        except OSError:
+            pass      # nothing running holds it; the copy will just overwrite
+
+
 def _announce():
     """Say what is about to change, before changing it.
 
@@ -339,11 +366,12 @@ def cmd_install(_args) -> int:
     os.makedirs(bin_dir(), exist_ok=True)
     if _frozen():
         src = _self_path()
-        # Copying onto a running binary is fine on macOS and Linux (the inode
-        # stays alive for this process), but only when it is not literally the
-        # same path -- a re-run of the installed copy would otherwise truncate
-        # itself mid-execution.
+        # Copying onto a running binary is fine on macOS and Linux -- the old
+        # inode stays alive for whoever has it open -- but only when it is not
+        # literally the same path, or a re-run of the installed copy would
+        # truncate itself mid-execution.
         if os.path.abspath(src) != os.path.abspath(installed_bin()):
+            _make_way_for_copy()
             shutil.copy2(src, installed_bin())
             os.chmod(installed_bin(), 0o755)
         print(installed_bin())
