@@ -41,8 +41,10 @@ MANIFEST_URL = ota.RELEASE_BASE + "manifest.json"
 SIG_URL = ota.RELEASE_BASE + "manifest.json.sig"
 
 # The public half of ~/.clauge/release_signing_key_p256.pem. Signing happens in
-# tools/release.sh; losing the private half means no fielded daemon will ever
-# accept another update, so it is backed up the same way MCUboot's key is.
+# tools/release.sh. Losing the private half costs nothing today and everything
+# after launch: from the first customer onwards, no installed app would ever
+# accept another update, and there is no way to reach one that will not. Back
+# it up the way MCUboot's key is.
 RELEASE_PUBKEY_PEM = """-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEs++ur2jHlamykVsPeCvtT/VE5Awy
 JK1K9T7tpqx6hxXWLKxorhWH6Pkxs8Bd/jzv4Zsk2yTOhaUE+dZmSt24Yw==

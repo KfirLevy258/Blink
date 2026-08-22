@@ -71,9 +71,12 @@ know them (`msg_get_*` already ignores unknown keys). `v` only increments for a
 change that genuinely breaks an older peer. This keeps the compatibility check
 below to two rules instead of a matrix.
 
-**D3 — manifest changes are additive only.** Daemons already in the field
-require `version`, `size`, `sha256` at the top level and read them as
-*firmware*. Those three keys keep that exact meaning forever.
+**D3 — manifest changes are additive, from launch onwards.** `version`, `size`
+and `sha256` sit at the top level and mean *firmware*. Nothing is installed
+anywhere yet, so that shape is still a free choice — **the last moment it is
+one is the first release**. After that, an app on someone's machine is reading
+those keys and they cannot move without stranding it, since a stranded app is
+exactly the thing that cannot be reached to be fixed.
 
 **D4 — consent stays on the board.** The panel is where the customer already
 approves an update. A pair update is one tap there, not a separate thing to
@@ -313,20 +316,25 @@ Also in `release.sh`:
 
 ---
 
-## 7. Bootstrapping the units already in the field
+## 7. Launch
 
-Existing installs have no self-update, and nothing we publish can give them one
-— the daemon is the only thing that reaches out, and theirs will never look.
+Nothing is installed anywhere yet — this ships before the first customer — so
+there is no fleet to migrate and no half-updated install to reach. That makes
+the first release the moment several things stop being reversible:
 
-The path that does work: an old daemon can still flash new firmware, and new
-firmware can nag. §3.3 gives us that for free — a board running new firmware
-sees `welcome.v` (or a missing `app_ver`) from an old daemon and puts up "The
-Clauge app on your computer is out of date". README gains an "Updating" section:
-re-run the same curl one-liner. `cmd_install` is already idempotent over a live
-install (bootout → copy → bootstrap), so that is a supported path, not a
-workaround.
+- **The manifest shape freezes** (D3). Change it now or not at all.
+- **Both keys become load-bearing.** Losing `ota_signing_key_p256.pem` strands
+  every board; losing `release_signing_key_p256.pem` strands every app. Neither
+  is backed up. Neither can be regenerated.
+- **`daemon.auto` stays `false` for the first release** and is turned on only
+  after a real update has been watched end to end. The switch is remote so a
+  bad build can be stopped in minutes; that is worth nothing if it is never
+  exercised before it is needed.
 
----
+The one thing worth rehearsing before launch rather than after: publish a
+release to a scratch repo, install a binary from it on a clean machine, and let
+it update itself. Every part of that has been tested, but not in that order and
+not against a real GitHub release.
 
 ## 8. Tests
 

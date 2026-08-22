@@ -431,8 +431,14 @@ class TestPairUpdate(unittest.TestCase):
 
 
 class TestManifestCompatibility(unittest.TestCase):
-    """A manifest's first three keys mean the FIRMWARE, forever: daemons
-    already in the field read them that way."""
+    """A manifest missing the newer blocks must still install firmware.
+
+    Not about installs in the field -- there are none yet. It is about the
+    manifests that are written by hand: CLAUGE_OTA_DIR feeds during
+    development are typed out by whoever is testing, and a partially written
+    one should not take the update path down with it. It becomes a
+    compatibility guarantee the day the first customer's app reads a manifest.
+    """
 
     def test_a_v1_manifest_still_drives_a_firmware_update(self):
         v1 = {"version": "0.4.9", "size": 5, "sha256": HELLO_SHA}

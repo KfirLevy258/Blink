@@ -152,9 +152,11 @@ for key in os.environ["ARTIFACTS"].split():
                       "sha256": hashlib.sha256(blob).hexdigest()}
 
 proto = int(os.environ["PROTO"])
-# version/size/sha256 stay at the top level, meaning the FIRMWARE, forever:
-# every daemon already in the field reads them that way and would break on a
-# reshuffle. Everything new is additive, and older readers ignore it.
+# version/size/sha256 stay at the top level and mean the FIRMWARE. Nothing is
+# installed anywhere yet, so this shape is still a free choice today -- it
+# stops being one the moment the first customer's app starts reading it, and
+# from then on those three keys cannot move without stranding that install.
+# Everything else is additive so later readers can ignore what they predate.
 print(json.dumps({
     "version": os.environ["VER"],
     "size": int(os.environ["SIZE"]),
