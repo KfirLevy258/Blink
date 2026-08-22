@@ -39,6 +39,13 @@ west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
 
 Notes:
 
+- **This builds the shipped configuration: USB only.** `CONFIG_CLAUGE_WIFI_MODE`
+  defaults to `n`, so the captive-portal setup, the OAuth sign-in, the refresh-token
+  store and the on-device usage fetch are never handed to the compiler -- absent from
+  the image rather than unreachable within it, and about half its size. The source
+  stays in `src/`; add `-DEXTRA_CONF_FILE=wifi.conf` to build it back in. `tools/release.sh`
+  refuses to publish an image that contains it, checking the artifact and not only the
+  config.
 - **Sysbuild + MCUboot is required.** Flash encryption needs the MCUboot boot chain;
   a plain single-image build produces something the encrypted chip can't boot.
 - The board target is **`esp32_devkitc/esp32/procpu`** - there's no upstream CYD board,
