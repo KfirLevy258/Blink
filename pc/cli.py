@@ -227,10 +227,55 @@ def _service_command():
     return [sys.executable, "-m", "pc.cli", "run"]
 
 
-def _install_service() -> str:
-    if _skip_service():
-        return "skipped (CLAUGE_SKIP_SERVICE=1)"
-    if sys.platform == "darwin":
+class _Backend:
+    """One platform's answer to "start this at login, and keep it running".
+
+    There used to be five sys.platform ladders: one each for install,
+    restart, remove, the line the installer prints about what it creates,
+    and status. Nothing held them together, so a case could be handled in
+    four of them and forgotten in the fifth -- which is not hypothetical. A
+    Linux box with no systemd got a considered answer from remove ("no
+    systemd here; stop it yourself if you started it") and a shrug from
+    status ("unknown on linux"), for the same machine in the same state.
+
+    One object per platform now, chosen once by backend(). That also makes
+    this code reachable from a unit test for the first time: a backend can
+    be built on any machine and asked what it would run, where before the
+    argv handed to launchctl, schtasks and systemctl could only be observed
+    by installing for real on that platform. Three Windows defects in this
+    file were found by CI rather than by a test for exactly that reason.
+
+    The base class is not abstract -- it IS the behaviour for a platform
+    with no supervisor we know how to drive, and every subclass overrides
+    only the parts it can do better.
+    """
+
+    def creates(self):
+        """What installing will put on disk, for the disclosure block.
+
+        None when there is nothing to name.
+        """
+        return None
+
+    def install(self) -> str:
+        return (f"not supported on {sys.platform}; run it yourself: "
+                f"{installed_bin()} run")
+
+    def restart(self) -> str:
+        return "not running under a supervisor; restart it yourself"
+
+    def remove(self) -> str:
+        return "nothing to remove"
+
+    def status(self) -> str:
+        return f"unknown on {sys.platform}"
+
+
+class _LaunchdBackend(_Backend):
+    def creates(self):
+        return plist_path()
+
+    def install(self) -> str:
         os.makedirs(os.path.dirname(plist_path()), exist_ok=True)
         with open(plist_path(), "w") as f:
             args = "".join(f"    <string>{_xml_escape(a)}</string>\n"
@@ -255,7 +300,29 @@ def _install_service() -> str:
         if r.returncode == 0:
             return "running (launchd)"
         return f"installed, but could not be started: launchctl bootstrap gui/{uid} {plist_path()}"
-    if sys.platform == "win32":
+
+    def restart(self) -> str:
+        r = subprocess.run(["launchctl", "kickstart", "-k",
+                            f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+        return "restarted" if r.returncode == 0 else "could not restart it"
+
+    def remove(self) -> str:
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
+                       capture_output=True)
+        _rm(plist_path())
+        return "removed"
+
+    def status(self) -> str:
+        r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
+                           capture_output=True)
+        return "registered with launchd" if r.returncode == 0 else "not installed"
+
+
+class _SchtasksBackend(_Backend):
+    def creates(self):
+        return f'a Scheduled Task named "{TASK_NAME}"'
+
+    def install(self) -> str:
         # /f overwrites a task from an earlier install rather than failing.
         # /sc onlogon needs no admin rights; a Windows service would.
         r = subprocess.run(
@@ -267,12 +334,58 @@ def _install_service() -> str:
         # /sc onlogon does not start it now, only at the next logon.
         subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True)
         return "running (Scheduled Task)"
-    if sys.platform.startswith("linux"):
+
+    def restart(self) -> str:
+        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME],
+                       capture_output=True)
+        # /end only reaches the instance the TASK launched. A daemon that
+        # replaced itself started its successor detached (see
+        # update.restart_from_daemon), and that one is not the task's -- so
+        # without this, /run below would add a second daemon competing for the
+        # same serial port.
+        _kill_recorded_daemon()
+        r = subprocess.run(["schtasks", "/run", "/tn", TASK_NAME],
+                           capture_output=True)
+        return "restarted" if r.returncode == 0 else "could not restart it"
+
+    def remove(self) -> str:
+        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True)
+        subprocess.run(["schtasks", "/delete", "/f", "/tn", TASK_NAME],
+                       capture_output=True)
+        _kill_recorded_daemon()
+        _kill_by_path()
+        return "removed"
+
+    def status(self) -> str:
+        r = subprocess.run(["schtasks", "/query", "/tn", TASK_NAME],
+                           capture_output=True)
+        return ("registered as a Scheduled Task" if r.returncode == 0
+                else "not installed")
+
+
+class _SystemdBackend(_Backend):
+    """Linux, where the supervisor may simply not be there.
+
+    systemd is overwhelmingly the default but it is not guaranteed, and a
+    machine without it is not a broken machine -- so every method below has
+    a real answer for that case rather than an error.
+    """
+
+    @staticmethod
+    def _has_systemctl() -> bool:
+        return bool(shutil.which("systemctl"))
+
+    def creates(self):
+        return unit_path()
+
+    def install(self) -> str:
+        # The unit file is written either way. It costs nothing, and it means
+        # a machine that gains systemd later already has the right file.
         os.makedirs(os.path.dirname(unit_path()), exist_ok=True)
         with open(unit_path(), "w") as f:
             f.write(_UNIT_TEMPLATE.format(
                 command=" ".join(_service_command())))
-        if not shutil.which("systemctl"):
+        if not self._has_systemctl():
             return f"no systemd here; run it yourself: {installed_bin()} run"
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
         r = subprocess.run(["systemctl", "--user", "enable", "--now",
@@ -280,7 +393,60 @@ def _install_service() -> str:
         if r.returncode == 0:
             return "running (systemd)"
         return "installed, but could not be started: systemctl --user enable --now clauge-bridge"
-    return f"not supported on {sys.platform}; run it yourself: {installed_bin()} run"
+
+    def restart(self) -> str:
+        if not self._has_systemctl():
+            return super().restart()
+        r = subprocess.run(["systemctl", "--user", "restart",
+                            "clauge-bridge.service"], capture_output=True)
+        return "restarted" if r.returncode == 0 else "could not restart it"
+
+    def remove(self) -> str:
+        if not self._has_systemctl():
+            # Install said "no systemd here; run it yourself", so whatever is
+            # running was started by hand and nothing here can stop it. Saying
+            # "removed" would be followed a line later by "Nothing of Clauge's
+            # is left running", which would not be true.
+            _rm(unit_path())
+            return "no systemd here; stop it yourself if you started it"
+        subprocess.run(["systemctl", "--user", "disable", "--now",
+                        "clauge-bridge.service"], capture_output=True)
+        _rm(unit_path())
+        subprocess.run(["systemctl", "--user", "daemon-reload"],
+                       capture_output=True)
+        return "removed"
+
+    def status(self) -> str:
+        if not self._has_systemctl():
+            # Was "unknown on linux", which is the drift described on
+            # _Backend: remove() knew exactly what this machine's situation
+            # was and status() claimed not to.
+            return "no systemd here; not something this can check"
+        r = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
+                            "clauge-bridge.service"], capture_output=True)
+        return "running" if r.returncode == 0 else "not running"
+
+
+def backend() -> _Backend:
+    """The login-service backend for this machine.
+
+    Built fresh each call rather than cached at import: every path it uses is
+    resolved from HOME at call time (see the note above clauge_home), and the
+    tests move HOME between calls.
+    """
+    if sys.platform == "darwin":
+        return _LaunchdBackend()
+    if sys.platform == "win32":
+        return _SchtasksBackend()
+    if sys.platform.startswith("linux"):
+        return _SystemdBackend()
+    return _Backend()
+
+
+def _install_service() -> str:
+    if _skip_service():
+        return "skipped (CLAUGE_SKIP_SERVICE=1)"
+    return backend().install()
 
 
 def restart_service() -> str:
@@ -294,59 +460,13 @@ def restart_service() -> str:
     """
     if _skip_service():
         return "skipped (CLAUGE_SKIP_SERVICE=1)"
-    if sys.platform == "darwin":
-        r = subprocess.run(["launchctl", "kickstart", "-k",
-                            f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
-        return "restarted" if r.returncode == 0 else "could not restart it"
-    if sys.platform == "win32":
-        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME],
-                       capture_output=True)
-        # /end only reaches the instance the TASK launched. A daemon that
-        # replaced itself started its successor detached (see
-        # update.restart_from_daemon), and that one is not the task's -- so
-        # without this, /run below would add a second daemon competing for the
-        # same serial port.
-        _kill_recorded_daemon()
-        r = subprocess.run(["schtasks", "/run", "/tn", TASK_NAME],
-                           capture_output=True)
-        return "restarted" if r.returncode == 0 else "could not restart it"
-    if sys.platform.startswith("linux") and shutil.which("systemctl"):
-        r = subprocess.run(["systemctl", "--user", "restart",
-                            "clauge-bridge.service"], capture_output=True)
-        return "restarted" if r.returncode == 0 else "could not restart it"
-    return "not running under a supervisor; restart it yourself"
+    return backend().restart()
 
 
 def _remove_service() -> str:
     if _skip_service():
         return "skipped (CLAUGE_SKIP_SERVICE=1)"
-    if sys.platform == "darwin":
-        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
-                       capture_output=True)
-        _rm(plist_path())
-        return "removed"
-    if sys.platform == "win32":
-        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True)
-        subprocess.run(["schtasks", "/delete", "/f", "/tn", TASK_NAME],
-                       capture_output=True)
-        _kill_recorded_daemon()
-        _kill_by_path()
-        return "removed"
-    if sys.platform.startswith("linux"):
-        if not shutil.which("systemctl"):
-            # Install said "no systemd here; run it yourself", so whatever is
-            # running was started by hand and nothing here can stop it. Saying
-            # "removed" would be followed a line later by "Nothing of Clauge's
-            # is left running", which would not be true.
-            _rm(unit_path())
-            return "no systemd here; stop it yourself if you started it"
-        subprocess.run(["systemctl", "--user", "disable", "--now",
-                        "clauge-bridge.service"], capture_output=True)
-        _rm(unit_path())
-        subprocess.run(["systemctl", "--user", "daemon-reload"],
-                       capture_output=True)
-        return "removed"
-    return "nothing to remove"
+    return backend().remove()
 
 
 # One definition, in pc/update.py. This module already imports it.
@@ -509,13 +629,10 @@ def _announce():
     if prev_cmd:
         print(f"             Your current command is kept and still runs:")
         print(f"               {prev_cmd}")
-    if sys.platform == "darwin":
-        print(f"  Creates    {plist_path()}")
-    elif sys.platform.startswith("linux"):
-        print(f"  Creates    {unit_path()}")
-    elif sys.platform == "win32":
-        print(f"  Creates    a Scheduled Task named \"{TASK_NAME}\"")
-    print("             so the bridge starts when you log in.")
+    created = backend().creates()
+    if created:
+        print(f"  Creates    {created}")
+        print("             so the bridge starts when you log in.")
     print()
     print("  It reads or stores nothing else -- no credential, no token, no")
     print("  account data. The usage figures come from Claude Code, which has")
@@ -627,22 +744,8 @@ def cmd_status(_args) -> int:
         # the real user's agent -- which read as "installed" for an install
         # that never happened.
         print("Bridge      not checked (CLAUGE_SKIP_SERVICE=1)")
-    elif sys.platform == "darwin":
-        r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
-                           capture_output=True)
-        print("Bridge      " + ("registered with launchd" if r.returncode == 0
-                                else "not installed"))
-    elif sys.platform == "win32":
-        r = subprocess.run(["schtasks", "/query", "/tn", TASK_NAME],
-                           capture_output=True)
-        print("Bridge      " + ("registered as a Scheduled Task"
-                                if r.returncode == 0 else "not installed"))
-    elif sys.platform.startswith("linux") and shutil.which("systemctl"):
-        r = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
-                            "clauge-bridge.service"], capture_output=True)
-        print("Bridge      " + ("running" if r.returncode == 0 else "not running"))
     else:
-        print(f"Bridge      unknown on {sys.platform}")
+        print("Bridge      " + backend().status())
 
     print(f"App         {RELEASE_VERSION}")
 

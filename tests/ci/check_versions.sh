@@ -9,7 +9,9 @@
 # thing tools/release.sh does.
 set -eu
 
-ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+# shellcheck source=tests/ci/lib.sh
+. "$(dirname -- "$0")/lib.sh"
+
 VH="$ROOT/firmware/src/version.h"
 PV="$ROOT/pc/version.py"
 

@@ -21,17 +21,17 @@
 # it with one pointing into this scenario's throwaway HOME.
 set -eu
 
+# shellcheck source=tests/ci/lib.sh
+. "$(dirname -- "$0")/lib.sh"
+ci_binary
+
 SCENARIO="${1:?usage: check_install.sh <scenario> [work-dir]}"
-ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 WORK="${2:-${TMPDIR:-/tmp}/clauge-ci-$SCENARIO}"
-BIN="${CLAUGE_BIN:-$ROOT/dist/clauge}"
-[ -x "$BIN" ] || { echo "no binary at $BIN -- run tools/build_binary.sh" >&2; exit 1; }
+ci_label "$SCENARIO"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
-fail() { printf 'FAIL [%s] %s\n' "$SCENARIO" "$*" >&2; exit 1; }
-ok() { printf '  ok   %s\n' "$*"; }
 
 # ---------------------------------------------------------------- scenario --
 

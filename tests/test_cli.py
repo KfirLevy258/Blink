@@ -18,17 +18,13 @@ from pc import cli
 
 
 @pytest.fixture(autouse=True)
-def _sandbox(tmp_path, monkeypatch):
-    """Every test gets its own HOME, and never touches a real login service.
+def _sandbox(tmp_path):
+    """The one thing these tests need that the whole suite does not.
 
-    The launchd label and systemd unit name are global while everything else
-    is scoped to HOME -- without the skip, a test would boot out the agent of
-    whoever is logged in. That has happened once already, and the board on the
-    desk went to HOST LOST 35 seconds later.
+    The redirected HOME and the login-service guard both live in
+    tests/conftest.py now -- see the note there for what went wrong when they
+    were a per-file concern.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))   # what ~ means on Windows
-    monkeypatch.setenv("CLAUGE_SKIP_SERVICE", "1")
     (tmp_path / ".claude").mkdir()
 
 

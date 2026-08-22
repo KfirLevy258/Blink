@@ -17,13 +17,12 @@
 #      settings.json the CLI still starts with.
 set -eu
 
-ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-WORK="${TMPDIR:-/tmp}/clauge-claude-version"
-BIN="${CLAUGE_BIN:-$ROOT/dist/clauge}"
-[ -x "$BIN" ] || { echo "no binary at $BIN -- run tools/build_binary.sh" >&2; exit 1; }
+# shellcheck source=tests/ci/lib.sh
+. "$(dirname -- "$0")/lib.sh"
+ci_binary
 
-fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
-ok() { printf '  ok   %s\n' "$*"; }
+WORK="${TMPDIR:-/tmp}/clauge-claude-version"
+
 
 command -v claude >/dev/null 2>&1 || fail "no claude on PATH"
 VERSION=$(claude --version 2>/dev/null || echo "unknown")

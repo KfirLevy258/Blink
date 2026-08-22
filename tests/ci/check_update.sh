@@ -15,10 +15,12 @@
 # half (renaming a running executable out of the way) is unit-tested instead.
 set -eu
 
-ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+# shellcheck source=tests/ci/lib.sh
+. "$(dirname -- "$0")/lib.sh"
+ci_label update
+ci_binary
+
 WORK="${1:-${TMPDIR:-/tmp}/clauge-ci-update}"
-BIN="${CLAUGE_BIN:-$ROOT/dist/clauge}"
-[ -x "$BIN" ] || { echo "no binary at $BIN -- run tools/build_binary.sh" >&2; exit 1; }
 
 case "$(uname -s)" in
 MINGW* | MSYS* | CYGWIN*)
@@ -28,8 +30,6 @@ MINGW* | MSYS* | CYGWIN*)
 esac
 command -v openssl >/dev/null 2>&1 || { echo "need openssl" >&2; exit 1; }
 
-fail() { printf 'FAIL [update] %s\n' "$*" >&2; exit 1; }
-ok() { printf '  ok   %s\n' "$*"; }
 
 rm -rf "$WORK"
 HOME="$WORK/home"; export HOME

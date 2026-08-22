@@ -10,8 +10,11 @@
 # running", which is the failure this whole design is built to avoid.
 set -eu
 
+# shellcheck source=tests/ci/lib.sh
+. "$(dirname -- "$0")/lib.sh"
+
 WHICH="${1:-sh}"
-ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+ci_label "$WHICH"
 SHIM_SRC="$ROOT/tools/clauge-statusline.sh"
 WORK="${TMPDIR:-/tmp}/clauge-shim-$WHICH"
 
@@ -33,8 +36,6 @@ SHIM="$HOME/clauge-statusline.sh"
 cp "$SHIM_SRC" "$SHIM"
 PAYLOAD='{"rate_limits":{"five_hour":{"used_percentage":7,"resets_at":11}}}'
 
-fail() { printf 'FAIL [%s] %s\n' "$WHICH" "$*" >&2; exit 1; }
-ok() { printf '  ok   %s\n' "$*"; }
 
 printf '== shim under %s\n' "$SH"
 
