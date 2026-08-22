@@ -37,6 +37,7 @@ cd "$ROOT"
 	--add-data "$ROOT/tools/clauge-statusline.sh:." \
 	--collect-all esptool \
 	--hidden-import claude_usage_bridge \
+	--hidden-import ecdsa \
 	--hidden-import serial.tools.list_ports \
 	--noconfirm --clean \
 	clauge_main.py >"$BUILD/pyinstaller.log" 2>&1 || {

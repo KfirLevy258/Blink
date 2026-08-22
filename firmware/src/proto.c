@@ -17,7 +17,7 @@
 #include "version.h"
 #include "cfg_store.h"
 
-#define PROTO_VERSION 2
+#define PROTO_VERSION CLAUGE_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
 /*
  * The daemon answers every ping with a pong, so silence means it is genuinely
@@ -36,6 +36,8 @@ static size_t line_len;
 static int64_t last_ping_ms;
 static int64_t last_host_ms;
 static bool host_seen;
+static char host_ver[16];	/* the daemon's release version, from welcome */
+static int host_proto;		/* ...and the protocol it speaks */
 
 /*
  * RX is interrupt-driven, not polled. On a real UART at 115200 baud the 128-byte
@@ -137,12 +139,22 @@ static void send_ping(void)
  */
 static struct ota_manifest ota_m;
 static bool ota_staged;		/* ota_avail seen: ota_m is valid */
+/* The daemon version this release also carries, when it is newer than the one
+ * on the cable. Empty otherwise. The confirmation screen says so, because one
+ * tap is about to install both halves. */
+static char ota_app[16];
+
+const char *proto_ota_app_version(void)
+{
+	return ota_app;
+}
 
 void proto_ota_check(void)
 {
 	char buf[96];
 
 	ota_staged = false;
+	ota_app[0] = '\0';
 	ota_ui_set(OTA_UI_CHECKING, NULL, 0);
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"ota_query\",\"v\":%d,\"cur\":\"%s\"}",
@@ -254,7 +266,20 @@ static void dispatch(const char *json)
 	} else if (strcmp(type, "pong") == 0) {
 		/* Liveness only: last_host_ms was already stamped above. */
 	} else if (strcmp(type, "welcome") == 0) {
-		printk("[proto] host connected\n");
+		double hv = 0;
+
+		/*
+		 * Both of these used to be dropped on the floor. The board had
+		 * no way to tell a customer that the half of the product on
+		 * their computer was the half that needed updating -- and that
+		 * is the only half that cannot update itself from here.
+		 */
+		if (!msg_get_str(json, "app_ver", host_ver, sizeof(host_ver))) {
+			host_ver[0] = '\0';
+		}
+		host_proto = msg_get_double(json, "v", &hv) ? (int)hv : 0;
+		printk("[proto] host connected: app %s, protocol %d\n",
+		       host_ver[0] ? host_ver : "?", host_proto);
 	} else if (strcmp(type, "ota_avail") == 0) {
 		double sz = 0;
 
@@ -264,6 +289,13 @@ static void dispatch(const char *json)
 				sizeof(ota_m.sha256)) &&
 		    msg_get_double(json, "size", &sz) && sz > 0) {
 			ota_m.size = (uint32_t)sz;
+			/* Optional: absent on any release that predates pair
+			 * updates, and on any release where this computer's
+			 * app is already current. */
+			if (!msg_get_str(json, "app", ota_app,
+					 sizeof(ota_app))) {
+				ota_app[0] = '\0';
+			}
 			ota_staged = true;
 			ota_ui_set(OTA_UI_AVAILABLE, &ota_m, 0);
 			printk("[proto] daemon offers %s (%u bytes)\n",
@@ -271,12 +303,34 @@ static void dispatch(const char *json)
 		} else {
 			ota_ui_set(OTA_UI_FAILED, NULL, 0);
 		}
+	} else if (strcmp(type, "ota_resume") == 0) {
+		/*
+		 * The daemon replaced itself mid-update and is picking up an
+		 * install this board already approved. Without this the panel
+		 * would come back to an "Install?" prompt for something
+		 * already under way, and the user would answer it twice.
+		 */
+		if (msg_get_str(json, "version", ota_m.version,
+				sizeof(ota_m.version))) {
+			printk("[proto] daemon resuming install of %s\n",
+			       ota_m.version);
+			ota_ui_set_source(OTA_SRC_USB);
+			ota_ui_set(OTA_UI_DOWNLOADING, &ota_m, 0);
+		}
 	} else if (strcmp(type, "ota_none") == 0) {
 		ota_staged = false;
 		ota_ui_set(OTA_UI_UP_TO_DATE, NULL, 0);
 	} else if (strcmp(type, "ota_error") == 0) {
+		char why[48] = "";
+
 		ota_staged = false;
 		ota_ui_set(OTA_UI_FAILED, NULL, 0);
+		/* After the state, not before: ota_ui_set() clears the reason
+		 * on any state that is not FAILED, so the order matters. */
+		if (msg_get_str(json, "why", why, sizeof(why))) {
+			printk("[proto] ota failed: %s\n", why);
+			ota_ui_set_error(why);
+		}
 	} else if (strcmp(type, "status") == 0) {
 		char st[24] = "";
 
@@ -323,6 +377,21 @@ void proto_init(void)
 
 	send_hello();
 	last_ping_ms = k_uptime_get();
+}
+
+const char *proto_host_version(void)
+{
+	return host_ver;
+}
+
+bool proto_host_outdated(void)
+{
+	/* Only ever an advisory. The pair ships from one tag, so a daemon
+	 * older than this firmware means somebody's install is half-updated --
+	 * usually because the app on the computer has no way to update itself
+	 * that the customer has noticed. Usage keeps flowing either way. */
+	return host_seen && host_ver[0] &&
+	       ota_version_newer(CLAUGE_FW_VERSION, host_ver);
 }
 
 bool proto_host_seen(void)

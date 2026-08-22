@@ -1,12 +1,14 @@
 """Transport-agnostic bridge logic: react to board messages, poll usage, track
 liveness. I/O (serial) is injected so this is unit-testable without hardware."""
 import datetime
+import hashlib
 import sys
 import time
 import urllib.error
 
 from pc import ota as ota_mod
 from pc import protocol
+from pc.version import PROTO_VERSION, RELEASE_VERSION
 
 LIVENESS_WINDOW_S = 30.0
 
@@ -49,9 +51,10 @@ def _local_wall():
 
 
 class Bridge:
-    def __init__(self, write_msg, fetch_usage, now=time.monotonic, app_ver="0.3.0",
+    def __init__(self, write_msg, fetch_usage, now=time.monotonic,
+                 app_ver=RELEASE_VERSION,
                  wall=_local_wall, fetch_manifest=None, fetch_firmware=None,
-                 flash_image=None):
+                 flash_image=None, self_update=None, pending=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         self._now = now
@@ -65,13 +68,24 @@ class Bridge:
         self._fetch_firmware = fetch_firmware or ota_mod.fetch_firmware
         self._manifest = None            # release offered to the board
         self._flash = flash_image        # callable(blob, version); owns the port
+        # What the board says it is. Set from hello; None until it speaks.
+        self._board_proto = None
+        self._board_fw = None
+        self._announced_ahead = False
+        # Pair updates. self_update replaces this program and does not return
+        # when it works; pending remembers the consent across that restart.
+        self._self_update = self_update
+        self._pending = pending
+        self._app_update = None          # (version, artifact) from last query
 
     # --- inbound ---
     def on_message(self, msg: dict):
         t = msg.get("t")
         if t == "hello":
+            self._note_board(msg)
             self._write(protocol.welcome("clauge-bridge", self._app_ver))
             self.poll_once()             # push current data immediately
+            self._resume_pending()
         elif t == "ping":
             self._last_ping = self._now()
             # Free: never fetch here. The usage endpoint is aggressively
@@ -91,11 +105,57 @@ class Bridge:
     # against slot0 does the same job in about 75 s with no swap, and it is
     # the same command this project has always flashed with by hand.
 
+    def _note_board(self, hello):
+        """Record what the board is, and notice when it outranks us.
+
+        Both sides have always stamped "v" on every message and neither side
+        has ever read one. That is fine while the protocol only grows -- new
+        fields are ignored by whoever does not know them -- but it leaves no
+        way to refuse the one case that is genuinely unsafe: firmware that
+        speaks a protocol this daemon does not, being driven by this daemon
+        through a firmware update.
+        """
+        try:
+            self._board_proto = int(hello.get("v"))
+        except (TypeError, ValueError):
+            self._board_proto = None
+        self._board_fw = hello.get("fw")
+        if self._board_ahead() and not self._announced_ahead:
+            print(f"[bridge] the board speaks protocol {self._board_proto} and"
+                  f" this app speaks {PROTO_VERSION} -- update the app on this"
+                  " computer; firmware updates are held until you do",
+                  file=sys.stderr)
+            self._announced_ahead = True
+
+    def _board_ahead(self) -> bool:
+        return self._board_proto is not None and self._board_proto > PROTO_VERSION
+
     def _ota_reset(self):
         self._manifest = None
 
     def _on_ota_query(self, cur):
+        # Refuse to drive a board we may not understand. This daemon writes
+        # slot0 in place, with no test boot behind it, so "probably fine" is
+        # not a good enough basis for the one operation that can leave a
+        # customer holding a device that does not start.
+        if self._board_ahead():
+            print(f"[bridge] ota: board speaks protocol {self._board_proto},"
+                  f" this app speaks {PROTO_VERSION} -- not offering an update",
+                  file=sys.stderr)
+            self._ota_reset()
+            self._write(protocol.ota_none())
+            return
         m = self._fetch_manifest()
+        # A release may declare the protocol it needs to be installed over.
+        # Absent (every release so far) means no floor.
+        floor = ((m or {}).get("fw") or {}).get("proto_min")
+        if isinstance(floor, int) and floor > PROTO_VERSION:
+            print(f"[bridge] ota: {m.get('version')} needs protocol {floor} and"
+                  f" this app speaks {PROTO_VERSION} -- update the app first",
+                  file=sys.stderr)
+            self._ota_reset()
+            self._write(protocol.ota_none())
+            return
         if not m or not ota_mod.is_newer(m.get("version", ""), cur):
             have = m.get("version", "?") if m else "unreachable"
             print(f"[bridge] ota: board has {cur}, release has {have}"
@@ -104,12 +164,78 @@ class Bridge:
             self._write(protocol.ota_none())
             return
         self._manifest = m
-        print(f"[bridge] ota: offering {m['version']} ({m['size']} bytes)",
+        # Does this release also carry a newer version of THIS program? If so
+        # the board says so on the confirmation screen, because the customer is
+        # about to approve two installs with one tap and should know it.
+        self._app_update = self._app_available(m)
+        app = self._app_update[0] if self._app_update else None
+        print(f"[bridge] ota: offering {m['version']} ({m['size']} bytes)"
+              + (f", app {app}" if app else ""), file=sys.stderr)
+        self._write(protocol.ota_avail(m["version"], m["size"], m["sha256"],
+                                       app=app))
+
+    def _app_available(self, manifest):
+        """(version, artifact) if this release has a newer daemon for us."""
+        if self._self_update is None:
+            return None
+        try:
+            from pc import update
+            return update.available(manifest)
+        except Exception:
+            return None
+
+    def _resume_pending(self):
+        """Finish an install the user approved before we replaced ourselves.
+
+        Re-runs the ordinary query and flash path rather than trusting anything
+        recorded on disk: the version is a note about consent, not about what
+        is safe to install, so the protocol floor, the size and the hash are
+        all checked again from the live manifest.
+        """
+        if not self._pending:
+            return
+        version = self._pending.take()
+        if not version:
+            return
+        print(f"[bridge] ota: resuming the approved install of {version}",
               file=sys.stderr)
-        self._write(protocol.ota_avail(m["version"], m["size"], m["sha256"]))
+        self._on_ota_query(self._board_fw or "0.0.0")
+        if not self._manifest or self._manifest.get("version") != version:
+            print("[bridge] ota: the release moved on; not resuming",
+                  file=sys.stderr)
+            self._ota_reset()
+            return
+        # Put the board back on its progress screen. It has been sitting on an
+        # "Install?" prompt for something it already agreed to.
+        self._write(protocol.ota_resume(version))
+        self._on_ota_flash()
 
     def _on_ota_flash(self):
-        """The board approved. Fetch the image and hand it to the flasher."""
+        """The board approved. Fetch the image and hand it to the flasher.
+
+        When the release also carries a newer daemon, that goes FIRST and this
+        process is replaced -- the new daemon is the half that knows how to
+        drive the new firmware, and installing them the other way round would
+        leave the newest firmware being driven by the oldest app.
+        """
+        if self._manifest and self._app_update and self._self_update:
+            version, artifact = self._app_update
+            self._app_update = None
+            fw_version = self._manifest["version"]
+            print(f"[bridge] ota: updating this app to {version} first",
+                  file=sys.stderr)
+            if self._pending:
+                self._pending.set(fw_version)
+            if self._self_update(version, artifact):
+                return          # unreachable in practice: we exit into the new
+                                # binary, which picks the firmware back up
+            # It failed and we are still here. The old app can still install
+            # the firmware -- the protocol floor was already checked -- so do
+            # that rather than leaving the customer with nothing.
+            if self._pending:
+                self._pending.take()
+            print("[bridge] ota: app update failed; installing the firmware"
+                  " with the current app", file=sys.stderr)
         if not self._manifest:
             self._write(protocol.ota_error("nothing staged"))
             return
@@ -130,6 +256,25 @@ class Bridge:
                   f" {self._manifest['size']}", file=sys.stderr)
             self._ota_reset()
             self._write(protocol.ota_error("size mismatch"))
+            return
+        # And check the hash, which for a while nobody did.
+        #
+        # The manifest has always carried sha256 and the board has always been
+        # sent it, but over USB the board never sees the bytes -- the daemon
+        # runs esptool -- so the verification that pc/ota.py's docstring claimed
+        # was happening on the board could not have been. Length agreed with the
+        # manifest and that was the whole check.
+        #
+        # It matters more here than it would over the WiFi path: slot0 is
+        # written in place, so a bad image is not caught by a test boot and
+        # rolled back, it just does not boot.
+        digest = hashlib.sha256(blob).hexdigest()
+        want = str(self._manifest["sha256"]).strip().lower()
+        if digest != want:
+            print(f"[bridge] ota: sha256 {digest} != manifest {want}",
+                  file=sys.stderr)
+            self._ota_reset()
+            self._write(protocol.ota_error("sha256 mismatch"))
             return
         version = self._manifest["version"]
         self._ota_reset()

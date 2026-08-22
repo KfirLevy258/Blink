@@ -24,7 +24,8 @@ import subprocess
 import sys
 import time
 
-from pc import install_statusline
+from pc import install_statusline, update
+from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
 # meant every path was fixed by whatever HOME happened to be when the module
@@ -267,6 +268,34 @@ def _install_service() -> str:
     return f"not supported on {sys.platform}; run it yourself: {installed_bin()} run"
 
 
+def restart_service() -> str:
+    """Bounce the login service so it comes up on a freshly replaced binary.
+
+    Not the same as exiting and letting the supervisor notice: this is called
+    from `clauge update`, which is a separate process from the daemon. The
+    daemon's own path is simpler -- on macOS and Linux it exits and KeepAlive /
+    Restart=always bring it back. Windows has neither: a Scheduled Task with an
+    onlogon trigger does not restart anything, so it is told explicitly.
+    """
+    if _skip_service():
+        return "skipped (CLAUGE_SKIP_SERVICE=1)"
+    if sys.platform == "darwin":
+        r = subprocess.run(["launchctl", "kickstart", "-k",
+                            f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+        return "restarted" if r.returncode == 0 else "could not restart it"
+    if sys.platform == "win32":
+        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME],
+                       capture_output=True)
+        r = subprocess.run(["schtasks", "/run", "/tn", TASK_NAME],
+                           capture_output=True)
+        return "restarted" if r.returncode == 0 else "could not restart it"
+    if sys.platform.startswith("linux") and shutil.which("systemctl"):
+        r = subprocess.run(["systemctl", "--user", "restart",
+                            "clauge-bridge.service"], capture_output=True)
+        return "restarted" if r.returncode == 0 else "could not restart it"
+    return "not running under a supervisor; restart it yourself"
+
+
 def _remove_service() -> str:
     if _skip_service():
         return "skipped (CLAUGE_SKIP_SERVICE=1)"
@@ -458,6 +487,8 @@ def cmd_status(_args) -> int:
     else:
         print(f"Bridge      unknown on {sys.platform}")
 
+    print(f"App         {RELEASE_VERSION}")
+
     text, ver = claude_version()
     if ver is None:
         print("Claude Code not found on PATH")
@@ -484,6 +515,46 @@ def cmd_status(_args) -> int:
     return 0
 
 
+def cmd_update(_args) -> int:
+    """Fetch and install a newer daemon, then restart the service.
+
+    Manual by design for now. The machinery for doing it unattended is all
+    here, but it is gated on `daemon.auto` in the signed manifest so that the
+    first release to switch it on is a decision someone makes, not a side
+    effect of shipping this command.
+    """
+    print(f"Clauge update. This app is {RELEASE_VERSION}.")
+    print()
+    manifest = update.fetch_signed_manifest()
+    if manifest is None:
+        print("Could not read the release feed, or it is not properly signed.")
+        print("Nothing was changed.")
+        return 1
+    found = update.available(manifest)
+    if not found:
+        key = update.platform_key()
+        if key is None:
+            print(f"There is no published build for {sys.platform}"
+                  f" {os.uname().machine if hasattr(os, 'uname') else ''}.")
+            return 1
+        print("Already up to date.")
+        return 0
+    version, artifact = found
+    print(f"Downloading {version} ...")
+    try:
+        blob = update.download(update.platform_key(), artifact)
+    except Exception as e:
+        print(f"Download failed: {e}")
+        print("Nothing was changed.")
+        return 1
+    ok, message = update.apply(blob, installed_bin(), version)
+    print(message)
+    if not ok:
+        return 1
+    print("Background service ... " + restart_service())
+    return 0
+
+
 def cmd_run(args) -> int:
     """The daemon. This is what the login service starts.
 
@@ -505,10 +576,15 @@ def cmd_run(args) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="clauge", description="Clauge desk gauge: setup and bridge.")
+    # Also the self-test in pc/update.py: a replacement binary has to run and
+    # say what it is before it is allowed to become the login service's target.
+    parser.add_argument("--version", action="version",
+                        version=f"clauge {RELEASE_VERSION}")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("install", help="set everything up (default)")
     sub.add_parser("uninstall", help="put it all back")
     sub.add_parser("status", help="is the panel getting data?")
+    sub.add_parser("update", help="fetch a newer version of this app")
     run_p = sub.add_parser("run", help="run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
                        help="serial port (default: find the board)")
@@ -523,6 +599,7 @@ def main(argv=None) -> int:
         "install": cmd_install,
         "uninstall": cmd_uninstall,
         "status": cmd_status,
+        "update": cmd_update,
         "run": cmd_run,
     }[args.cmd](args)
 

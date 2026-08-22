@@ -24,6 +24,7 @@
 #include "version.h"
 #include "backlight.h"
 #include "ota.h"
+#include "proto.h"
 #include "usage_view.h"
 
 #define COL_BG		lv_color_hex(0x0E1116)
@@ -32,6 +33,7 @@
 #define COL_DIM		lv_color_hex(0x8A9199)
 #define COL_RED		lv_color_hex(0xE74C3C)
 #define COL_GREEN	lv_color_hex(0x2ECC71)
+#define COL_AMBER	lv_color_hex(0xF1C40F)
 #define COL_PANEL	lv_color_hex(0x161A20)	/* card fill, sits above COL_BG */
 #define COL_LINE	lv_color_hex(0x20252D)	/* the full-width section rules */
 #define COL_DANGER_BG	lv_color_hex(0x1E1412)	/* factory tile: red-tinted, not solid red */
@@ -84,6 +86,23 @@ static int64_t dl_eta_at_ms;
 static int dl_shown_left = -1;	/* last printed value, to stop 1 s jitter */
 static enum ota_ui_state upd_seen = OTA_UI_IDLE;
 static int64_t upd_revert_at;	/* "Up to date" shows briefly, then idles */
+
+/*
+ * Deadline for a USB install to take the board away from us.
+ *
+ * Over USB the daemon answers ota_flash by closing the port and running
+ * esptool, which resets this chip into the ROM loader within seconds -- so in
+ * the healthy case nothing here runs again at all. The unhealthy case is a
+ * daemon that dies between our consent and esptool's reset: the panel then
+ * held "Keep the cable connected" forever, because nothing on the board was
+ * watching for a hand-off that never came.
+ *
+ * Generous on purpose. A false expiry is only cosmetic -- if esptool starts
+ * late the flash still succeeds and the next boot reports the new version --
+ * whereas expiring early on a slow machine would call a working update failed.
+ */
+#define USB_DL_DEADLINE_MS 90000
+static int64_t usb_dl_deadline;
 
 static const char *const act_label[] = {
 	[ACT_WIFI] = "Reset WiFi",
@@ -338,7 +357,17 @@ static void upd_prompt_show(const struct ota_ui *snap)
 
 	lv_obj_t *l = lv_label_create(upd_prompt);
 
-	lv_label_set_text_fmt(l, "Version %s is available.", snap->version);
+	if (proto_ota_app_version()[0]) {
+		/* Both halves in one tap. Saying so is not a detail: the app on
+		 * the computer restarts as part of this, and someone watching
+		 * the gauge should not have to guess why. */
+		lv_label_set_text_fmt(l, "Version %s is available.\n"
+				      "This also updates the app on your "
+				      "computer.", snap->version);
+	} else {
+		lv_label_set_text_fmt(l, "Version %s is available.",
+				      snap->version);
+	}
 	lv_obj_set_width(l, 270);
 	lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
 	lv_obj_set_style_text_color(l, COL_TEXT, 0);
@@ -533,8 +562,15 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		 * into the ROM loader to write it, so the panel stops being
 		 * driven at all and simply goes dark for the duration -- with
 		 * no warning that reads as a crash, not an update. */
+		/* Four, not two: the daemon now reads the image back off the
+		 * chip after writing it, and the read is not compressed. 1 MB
+		 * measured at 96 s on this board's CH340, against ~75 s to
+		 * write the whole 1.3 MB image. Raising the baud to pay for it
+		 * was tried and does not work here -- see FLASH_BAUD in
+		 * pc/ota.py. Promising two and taking four would recreate the
+		 * "is it stuck?" problem this whole screen exists to prevent. */
 		lv_label_set_text(dl_sub,
-				  "The screen goes dark for about 2 minutes.\n"
+				  "The screen goes dark for about 4 minutes.\n"
 				  "Keep the cable connected.");
 		return;
 	}
@@ -642,6 +678,15 @@ static void upd_timer_cb(lv_timer_t *t)
 	switch (snap.st) {
 	case OTA_UI_DOWNLOADING:
 		dl_overlay_show(&snap, false);
+		if (ota_ui_source() == OTA_SRC_USB) {
+			if (upd_seen != OTA_UI_DOWNLOADING) {
+				usb_dl_deadline = k_uptime_get() +
+						  USB_DL_DEADLINE_MS;
+			} else if (k_uptime_get() > usb_dl_deadline) {
+				ota_ui_set(OTA_UI_FAILED, NULL, 0);
+				ota_ui_set_error("the computer stopped responding");
+			}
+		}
 		break;
 	case OTA_UI_REBOOTING:
 		dl_overlay_show(&snap, true);
@@ -660,9 +705,33 @@ static void upd_timer_cb(lv_timer_t *t)
 		break;
 	case OTA_UI_FAILED:
 		if (upd_seen != OTA_UI_FAILED) {
-			ui_settings_notice(upd_seen == OTA_UI_DOWNLOADING ?
+			const char *base = upd_seen == OTA_UI_DOWNLOADING ?
 				"Update failed. The current version keeps running." :
-				"Couldn't check for updates.");
+				"Couldn't check for updates.";
+
+			/* Say which failure it was when we know. "Update
+			 * failed" alone is true of a hash that did not match,
+			 * a release that never downloaded and a chip we
+			 * refuse to write, and the three want different
+			 * answers from whoever is standing there. */
+			if (snap.err[0]) {
+				static char msg[160];
+				/* The reasons arrive terse and lowercase --
+				 * "sha256 mismatch" -- because they are also
+				 * log lines. On screen they are a sentence. */
+				int n = snprintf(msg, sizeof(msg), "%s\n", base);
+
+				if (n > 0 && n < (int)sizeof(msg) - 1) {
+					snprintf(msg + n, sizeof(msg) - n, "%s",
+						 snap.err);
+					if (msg[n] >= 'a' && msg[n] <= 'z') {
+						msg[n] -= 'a' - 'A';
+					}
+				}
+				ui_settings_notice(msg);
+			} else {
+				ui_settings_notice(base);
+			}
 			ota_ui_set(OTA_UI_IDLE, NULL, 0);
 		}
 		break;
@@ -679,10 +748,23 @@ static void upd_timer_cb(lv_timer_t *t)
 	case OTA_UI_IDLE:
 		/* Left label + chevron already say "Software update"; the right
 		 * side is a STATUS, blank until there's something to report, so
-		 * it can't crowd the title. A pending badge is the exception. */
-		lv_label_set_text(upd_lbl, ota_badge() ? "Update ready" : "");
-		lv_obj_set_style_text_color(upd_lbl,
-					    ota_badge() ? COL_GREEN : COL_DIM, 0);
+		 * it can't crowd the title. A pending badge is the exception.
+		 *
+		 * So is an out-of-date app: the board can update itself from
+		 * here, but the half running on the customer's computer cannot
+		 * be reached from this screen at all, so this is the only place
+		 * it can be said. Amber, not green -- nothing is broken.
+		 * Budget is ~13 characters (see OTA_UI_AVAILABLE below). */
+		if (ota_badge()) {
+			lv_label_set_text(upd_lbl, "Update ready");
+			lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
+		} else if (proto_host_outdated()) {
+			lv_label_set_text(upd_lbl, "App is old");
+			lv_obj_set_style_text_color(upd_lbl, COL_AMBER, 0);
+		} else {
+			lv_label_set_text(upd_lbl, "");
+			lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
+		}
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	case OTA_UI_CHECKING:
@@ -1131,7 +1213,21 @@ static void build_panel(lv_obj_t *parent_scr)
 	} else
 #endif
 	{
-		snprintf(line, sizeof(line), "Clauge %s", CLAUGE_FW_VERSION);
+		/* Both halves when the daemon has introduced itself: they ship
+		 * from one tag, so the useful support question is which of the
+		 * two is behind -- and the version of the half running on the
+		 * customer's computer is otherwise invisible from here.
+		 *
+		 * Nested rather than chained onto the #if'd branch above: that
+		 * `else` only exists in a WiFi build, and an `else if` here
+		 * left the USB build with an else and no if. */
+		if (proto_host_version()[0]) {
+			snprintf(line, sizeof(line), "Clauge %s  |  App %s",
+				 CLAUGE_FW_VERSION, proto_host_version());
+		} else {
+			snprintf(line, sizeof(line), "Clauge %s",
+				 CLAUGE_FW_VERSION);
+		}
 	}
 
 	lv_obj_t *info = lv_label_create(panel);

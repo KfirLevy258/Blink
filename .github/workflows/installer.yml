@@ -122,6 +122,32 @@ jobs:
       # the whole reason this job cannot be a local test.
       - run: sh tests/ci/check_install.sh ${{ matrix.scenario }}
 
+  # The binary replacing itself, against a locally signed feed. Separate from
+  # the scenario matrix because it needs a keypair and a fake release, and
+  # because what it proves is different: not that the install is correct, but
+  # that the SHIPPED artifact can verify a signature and survive overwriting
+  # its own file. A missing signature library shows up here and nowhere else.
+  self-update:
+    name: self-update (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # POSIX only: the stand-in for "a newer release" is a script that
+        # prints a version, and Windows will not execute one named .exe. The
+        # Windows-specific half -- renaming a running executable out of the
+        # way -- is covered by tests/pc/test_update.py.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: clauge-${{ matrix.os }}
+          path: dist
+      - run: chmod +x dist/clauge*
+      - run: sh tests/ci/check_update.sh
+
   # The shim runs on every single status line render, under whatever /bin/sh
   # the customer's machine has. A bashism here is a broken bar for everyone.
   shim-posix:
@@ -198,6 +224,13 @@ jobs:
       # -s sh: these must be POSIX. Checking them as bash would let a bashism
       # through that breaks the /bin/sh they actually run under.
       - run: shellcheck -s sh tools/clauge-statusline.sh tools/build_binary.sh tests/ci/*.sh
+
+      # The firmware and the daemon ship from one tag. A disagreement here is
+      # invisible everywhere else -- it builds, it tests, it runs -- and only
+      # shows up as a customer whose two halves introduce themselves
+      # differently.
+      - name: firmware and daemon versions agree
+        run: sh tests/ci/check_versions.sh
       - name: reject CRLF line endings
         run: |
           if grep -rlU $'\r' tools/clauge-statusline.sh tools/build_binary.sh tests/ci/; then

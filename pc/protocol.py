@@ -6,7 +6,11 @@ ignored by callers. v2.
 """
 import json
 
-VERSION = 2
+from pc.version import PROTO_VERSION
+
+# Kept as a name because every message builder below already spells it this
+# way. It is the protocol's version, not the product's -- see pc/version.py.
+VERSION = PROTO_VERSION
 
 
 def encode(msg: dict) -> bytes:
@@ -126,9 +130,23 @@ def status(state: str, detail: str = "") -> dict:
 # --- OTA over the serial link (see pc/ota.py and the OTA block in proto.c) ---
 
 
-def ota_avail(version, size, sha256):
-    return {"t": "ota_avail", "v": VERSION, "version": version,
-            "size": int(size), "sha256": sha256}
+def ota_avail(version, size, sha256, app=None):
+    """`app` is the daemon version this release also carries, when it is newer
+    than the one running. Additive and optional: firmware that predates it
+    ignores the field, which is the whole reason the protocol version does not
+    have to move for this."""
+    msg = {"t": "ota_avail", "v": VERSION, "version": version,
+           "size": int(size), "sha256": sha256}
+    if app:
+        msg["app"] = app
+    return msg
+
+
+def ota_resume(version):
+    """Continuing an install the user already approved, after the daemon
+    replaced itself. The board reopens its progress screen rather than sitting
+    on an "Install?" prompt for something already under way."""
+    return {"t": "ota_resume", "v": VERSION, "version": version}
 
 
 def ota_none():

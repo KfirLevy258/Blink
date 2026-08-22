@@ -45,6 +45,11 @@ struct ota_ui {
 	char version[16];	/* candidate version when AVAILABLE+ */
 	uint32_t size;
 	uint8_t pct;		/* download progress 0..100 */
+	/* Why it failed, when anything knows. The daemon already sends this in
+	 * ota_error and it was being thrown away, so every cause -- a hash
+	 * that did not match, a download that never started, a chip we refuse
+	 * to write -- arrived on screen as the same four words. */
+	char err[48];
 };
 
 void ota_ui_get(struct ota_ui *out);
@@ -65,6 +70,8 @@ void ota_request_install(void);	/* UI: user confirmed install */
 bool ota_take_check_request(void);	/* worker side */
 bool ota_take_install_request(void);
 void ota_ui_set(enum ota_ui_state st, const struct ota_manifest *m, uint8_t pct);
+/* Attach a reason to the next OTA_UI_FAILED. Cleared by any other state. */
+void ota_ui_set_error(const char *why);
 bool ota_badge(void);	/* daily check found something (survives panel close) */
 
 #endif /* OTA_H */

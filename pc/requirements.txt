@@ -13,3 +13,8 @@
 # Raising a pin is a deliberate act: re-flash a board with it first.
 pyserial==3.5
 esptool==5.3.1
+# Verifies the release manifest's P-256 signature before this program will
+# replace itself. Pure Python and ~100 KB frozen, where `cryptography` would
+# add tens of megabytes to every platform's download to check one signature a
+# day. It never touches the usage path, only the update path.
+ecdsa==0.19.1

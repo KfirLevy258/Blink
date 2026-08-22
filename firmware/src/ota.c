@@ -514,6 +514,9 @@ void ota_ui_set(enum ota_ui_state st, const struct ota_manifest *m,
 		ui.size = m->size;
 	}
 	ui.pct = pct;
+	if (st != OTA_UI_FAILED) {
+		ui.err[0] = '\0';	/* a reason outlives only its failure */
+	}
 	k_spin_unlock(&ui_lock, key);
 
 	if (st == OTA_UI_AVAILABLE) {
@@ -521,6 +524,19 @@ void ota_ui_set(enum ota_ui_state st, const struct ota_manifest *m,
 	} else if (st == OTA_UI_UP_TO_DATE || st == OTA_UI_REBOOTING) {
 		atomic_set(&badge, 0);
 	}
+}
+
+void ota_ui_set_error(const char *why)
+{
+	k_spinlock_key_t key = k_spin_lock(&ui_lock);
+
+	if (why && why[0]) {
+		strncpy(ui.err, why, sizeof(ui.err) - 1);
+		ui.err[sizeof(ui.err) - 1] = '\0';
+	} else {
+		ui.err[0] = '\0';
+	}
+	k_spin_unlock(&ui_lock, key);
 }
 
 void ota_request_check(void)

@@ -3,11 +3,15 @@ name: release binaries
 # What a customer downloads. PyInstaller cannot cross-compile, so each
 # platform's binary is built on that platform and attached to the release.
 #
-# Runs when a release is published -- tools/release.sh creates it with the
-# firmware, and these arrive alongside a moment later.
+# Driven by tools/release.sh, which dispatches this against a DRAFT release and
+# waits for the four binaries to appear.
+#
+# Deliberately NOT triggered by `release: published` any more. That trigger
+# would fire again the moment release.sh undrafts, rebuild all four binaries,
+# and --clobber them -- and PyInstaller output is not reproducible, so the new
+# bytes would no longer match the sha256 in the manifest that was just signed
+# over them. Every daemon would then refuse its own release.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -39,6 +43,24 @@ jobs:
           python-version: '3.11'
       - run: sh tools/build_binary.sh
 
+      # The tag is the product's version, and the binary has to know it: the
+      # self-test in pc/update.py refuses to install a replacement that does
+      # not report the version it was fetched as, so a binary built from a
+      # source tree whose pc/version.py disagrees with the tag would fail on
+      # a customer's machine rather than here.
+      - name: it must report the version this tag is for
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          built=$(ls dist/clauge dist/clauge.exe 2>/dev/null | head -1)
+          got=$("$built" --version)
+          echo "$got"
+          case "$got" in
+            *"${TAG#v}"*) ;;
+            *) echo "FATAL: built $got, but this release is ${TAG#v}" >&2
+               exit 1 ;;
+          esac
+
       # Prove the artifact installs before it is published. A binary missing a
       # bundled data file fails on a customer's machine at the one moment they
       # are deciding whether this product works -- and PyInstaller missing a
@@ -58,3 +80,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: gh release upload "$TAG" "dist/clauge-${{ matrix.label }}" --clobber
+
+      # The manifest that names these files' hashes is written and signed on
+      # the maintainer's machine, not here -- the release key never leaves it.
+      # See the publish block in tools/release.sh.

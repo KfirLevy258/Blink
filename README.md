@@ -151,17 +151,30 @@ Full details - the signing key, the encrypted-flash setup, and the release flow 
 
 ## Updates
 
-Clauge checks for a new release as soon as it starts up, and if it finds one it asks you - **Update now** or **Later** - right on the gauge screen.
+Clauge is two halves that ship as one release: the firmware on the board, and the app on your computer. They always carry the same version number.
 
-The board has no network of its own, so the bridge does the work: it downloads the release and writes it over the same cable, in about a minute. The screen goes dark while that happens - it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
+Clauge checks for a new release as soon as it starts up, and if it finds one it asks you - **Update now** or **Later** - right on the gauge screen. One tap installs both halves. If the release also carries a newer app, the screen says so, and that half goes first: the new app is what knows how to drive the new firmware.
+
+The board has no network of its own, so the app does the work. It downloads the release, checks it against the hash the release publishes, and writes it over the same cable - then reads it back off the chip to confirm what landed there. The screen goes dark for about four minutes while that happens; it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
 
 You get a confirmation on screen once the new version is up.
 
-Every image is **signed with a private key only you hold**, and the board only accepts firmware carrying that signature. That means nobody else can push updates to your device - not by forking this repo, not by uploading a release - even though the repo itself is public.
+**Updating the app on your own.** You can also run it yourself:
+
+```sh
+~/.clauge/bin/clauge update     # fetch and install a newer app
+~/.clauge/bin/clauge status     # which versions are you on?
+```
+
+The settings screen shows both versions, and says **App is old** when the half on your computer is the one that is behind.
+
+Automatic app updates are off unless a release turns them on. To keep them off whatever a release says, `touch ~/.clauge/no-auto-update`.
+
+**Both halves are signed, by two separate keys.** Firmware images are signed with a key only you hold, and the bootloader rejects anything else - so nobody can push firmware to your device, not by forking this repo, not by uploading a release, even though the repo is public. The release manifest that drives app updates is signed with a second key, and the app refuses to read a manifest that does not verify. Two keys rather than one because they protect different things, and one compromise should not be two.
 
 ## Security &amp; privacy
 
-- **Only you can update your device.** Updates must be signed with your private key (kept off this repo, at `~/.clauge/…`); the bootloader rejects anything else. The public repo only lets people read and download the firmware, which holds no secrets.
+- **Only you can update your device.** Firmware must be signed with your private key (kept off this repo, at `~/.clauge/…`); the bootloader rejects anything else. App updates must be signed with a second key of yours, or the app will not install them. The public repo only lets people read and download the firmware, which holds no secrets.
 - **The device holds no credential.** It never signs in and never talks to Anthropic. The figures come from the Claude Code on your own machine, which has already worked them out, and reach the board over the cable. There is no token on the device to leak, and nothing to revoke if you sell or lend it.
 - **The setup touches one setting.** `statusLine.command` in `~/.claude/settings.json`, and nothing else - see "What the installer changes" above. It is reversible with one command.
 - The on-device Wi-Fi and sign-in path still exists in this repository, behind `CONFIG_CLAUGE_WIFI_MODE`, but is **not built into shipped firmware** - the release script refuses to publish an image containing it.

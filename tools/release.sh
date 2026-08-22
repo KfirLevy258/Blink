@@ -10,6 +10,12 @@ TAG="v$(sed -n 's/#define CLAUGE_FW_VERSION "\(.*\)"/\1/p' "$ROOT/firmware/src/v
 
 VER="${TAG#v}"
 [ -n "$VER" ] || { echo "FATAL: no version in version.h"; exit 1; }
+# The firmware and the daemon ship from this one tag, so they must already
+# agree about what it is. Cheaper to fail here than to publish a release whose
+# two halves introduce themselves differently.
+sh "$HERE/../tests/ci/check_versions.sh"
+PROTO=$(sed -n 's/^#define CLAUGE_PROTO_VERSION \([0-9][0-9]*\).*$/\1/p' \
+	"$ROOT/firmware/src/version.h")
 [ -z "$(git -C "$ROOT" status --porcelain)" ] || {
 	echo "FATAL: working tree dirty -- releases come from committed code only"; exit 1; }
 # The firmware feed lives on the same release as the source tag ($TAG). Refuse
@@ -75,22 +81,116 @@ SLOT=$((0x150000))
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 cp "$BIN" "$TMP/clauge-fw.bin"
 
-# The PC side is no longer packaged here. It is a single binary now, and
-# PyInstaller cannot cross-compile, so each platform's build happens on that
-# platform in .github/workflows/release-binaries.yml -- which fires when this
-# script publishes the release and attaches clauge-macos-arm64,
-# clauge-macos-x86_64 and clauge-linux-x86_64 alongside the firmware.
-printf '{"version":"%s","size":%s,"sha256":"%s"}\n' "$VER" "$SIZE" "$SHA" \
-	> "$TMP/manifest.json"
+# --- publish -----------------------------------------------------------
+#
+# As a DRAFT first, and only undrafted once everything is attached.
+#
+# The manifest names the sha256 of four binaries that do not exist yet when
+# this script starts: PyInstaller cannot cross-compile, so each platform's
+# build happens on that platform in .github/workflows/release-binaries.yml.
+# Publishing the firmware first and patching the manifest afterwards would
+# leave /latest/download/ serving a half-release -- and drafts are invisible
+# there, so this costs nothing but a wait.
+#
+# The signing also has to happen HERE rather than in the workflow: the release
+# key stays on this machine. Putting it in GitHub Secrets would sign the
+# artifacts with a key held by the same account that could publish forged ones,
+# which is most of the reason for signing gone.
+RELKEY="${CLAUGE_RELEASE_KEY:-$HOME/.clauge/release_signing_key_p256.pem}"
+[ -f "$RELKEY" ] || { echo "FATAL: release signing key missing at $RELKEY"; exit 1; }
 
-# Attach the firmware + manifest to the version's release, creating it if the
-# source tag hasn't been released yet. --clobber lets a manifest-only retry win.
+ARTIFACTS="macos-arm64 macos-x86_64 linux-x86_64 windows-x86_64.exe"
+
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-	gh release upload "$TAG" --repo "$REPO" --clobber \
-		"$TMP/clauge-fw.bin" "$TMP/manifest.json"
+	gh release upload "$TAG" --repo "$REPO" --clobber "$TMP/clauge-fw.bin"
 else
-	gh release create "$TAG" --repo "$REPO" --title "Clauge $VER" \
+	gh release create "$TAG" --repo "$REPO" --draft --title "Clauge $VER" \
 		--notes "Firmware $VER — size $SIZE bytes, sha256 $SHA" \
-		"$TMP/clauge-fw.bin" "$TMP/manifest.json"
+		"$TMP/clauge-fw.bin"
 fi
-echo "Released $TAG ($SIZE bytes). Boards pick it up on their next check."
+
+# workflow_dispatch, not the `release: published` trigger -- a draft never
+# publishes, which is the point. Needs release-binaries.yml to exist on the
+# default branch; that is a GitHub rule about dispatch, not about this tag.
+echo "Building the four binaries..."
+gh workflow run release-binaries.yml --repo "$REPO" -f tag="$TAG"
+
+# Poll the release rather than chasing a run id: the assets appearing IS the
+# condition we care about, and it cannot be confused by a concurrent run.
+deadline=$(( $(date +%s) + 2400 ))
+while :; do
+	have=$(gh release view "$TAG" --repo "$REPO" --json assets \
+		-q '.assets[].name' 2>/dev/null || true)
+	missing=""
+	for k in $ARTIFACTS; do
+		echo "$have" | grep -qx "clauge-$k" || missing="$missing $k"
+	done
+	[ -n "$missing" ] || break
+	[ "$(date +%s)" -lt "$deadline" ] || {
+		echo "FATAL: timed out waiting for:$missing" >&2
+		echo "       The release is still a draft; nothing is public." >&2
+		exit 1; }
+	sleep 20
+done
+
+# Hash what was actually published, not what CI said it built. This is the
+# whole value of signing locally: the signature covers bytes this machine has
+# seen, from the same URL a customer will fetch.
+for k in $ARTIFACTS; do
+	gh release download "$TAG" --repo "$REPO" -p "clauge-$k" -D "$TMP"
+done
+
+VER="$VER" PROTO="$PROTO" SIZE="$SIZE" SHA="$SHA" TMP="$TMP" \
+	ARTIFACTS="$ARTIFACTS" python3 - <<'PYEOF' > "$TMP/manifest.json"
+import hashlib, json, os
+
+tmp = os.environ["TMP"]
+artifacts = {}
+for key in os.environ["ARTIFACTS"].split():
+    blob = open(os.path.join(tmp, "clauge-" + key), "rb").read()
+    artifacts[key] = {"size": len(blob),
+                      "sha256": hashlib.sha256(blob).hexdigest()}
+
+proto = int(os.environ["PROTO"])
+# version/size/sha256 stay at the top level, meaning the FIRMWARE, forever:
+# every daemon already in the field reads them that way and would break on a
+# reshuffle. Everything new is additive, and older readers ignore it.
+print(json.dumps({
+    "version": os.environ["VER"],
+    "size": int(os.environ["SIZE"]),
+    "sha256": os.environ["SHA"],
+    "schema": 2,
+    "fw": {"proto_min": proto},
+    "daemon": {
+        "version": os.environ["VER"],
+        "proto": proto,
+        # The remote brake. Manual updates until a release deliberately turns
+        # this on, and turning it back off stops the fleet mid-rollout.
+        "auto": False,
+        "artifacts": artifacts,
+    },
+}, indent=1))
+PYEOF
+
+openssl dgst -sha256 -sign "$RELKEY" -out "$TMP/manifest.json.sig" \
+	"$TMP/manifest.json"
+# Prove the signature verifies with the public half that is compiled into the
+# binaries we just built, before anyone can download it.
+python3 - "$ROOT" "$TMP/manifest.json" "$TMP/manifest.json.sig" <<'PYEOF'
+import sys
+# Explicit root: the firmware build left us in a different directory, and
+# picking pc/ up from the cwd would work here and nowhere else.
+sys.path.insert(0, sys.argv[1])
+from pc import update
+raw = open(sys.argv[2], "rb").read()
+sig = open(sys.argv[3], "rb").read()
+if not update.verify_signature(raw, sig):
+    sys.exit("FATAL: the manifest does not verify against the shipped public key")
+print("manifest signature verifies")
+PYEOF
+
+gh release upload "$TAG" --repo "$REPO" --clobber \
+	"$TMP/manifest.json" "$TMP/manifest.json.sig"
+gh release edit "$TAG" --repo "$REPO" --draft=false
+echo "Released $TAG ($SIZE bytes) with binaries for:$( for k in $ARTIFACTS; do printf ' %s' "$k"; done)"
+echo "Boards pick it up on their next check."

@@ -13,11 +13,19 @@ import serial  # pyserial
 from serial.tools import list_ports
 
 from pc import ota as ota_mod
-from pc import protocol, statusline_source
+from pc import protocol, statusline_source, update
 from pc.bridge import Bridge
 
 POLL_INTERVAL_S = 60
 PING_GRACE_LOG_S = 30
+# How often to ask whether a newer version of THIS program exists.
+#
+# The first check waits for a board rather than firing at startup: a daemon
+# that crashes on launch would otherwise hammer the release feed once every ten
+# seconds forever, and a machine with no board attached has nothing to update
+# for anyway.
+UPDATE_FIRST_CHECK_S = 60
+UPDATE_INTERVAL_S = 24 * 3600
 
 
 # The USB-serial bridge chips these boards actually ship with, by VID:PID.
@@ -81,6 +89,40 @@ def wait_for_port(explicit=None, poll_s=3.0):
         time.sleep(poll_s)
 
 
+def _self_update_tick(target):
+    """Check the signed feed and, if the release says so, replace ourselves.
+
+    `auto` in the manifest is a switch we hold, not the customer: it ships
+    false, and turning it on is a decision made per release. Without a remote
+    off switch, a bad build would keep installing itself on every machine that
+    checked, and nothing here could stop it.
+    """
+    home = os.path.dirname(os.path.dirname(target))   # ~/.clauge
+    manifest = update.fetch_signed_manifest()
+    found = update.available(manifest)
+    if not found:
+        return
+    version, artifact = found
+    if not ((manifest.get("daemon") or {}).get("auto")):
+        print(f"[update] {version} is available; run `clauge update` to install"
+              " it", file=sys.stderr)
+        return
+    if not update.auto_update_allowed(home):
+        print(f"[update] {version} is available; automatic updates are turned"
+              " off on this machine", file=sys.stderr)
+        return
+    print(f"[update] installing {version}", file=sys.stderr)
+    try:
+        blob = update.download(update.platform_key(), artifact)
+    except Exception as e:
+        print(f"[update] download failed: {e}", file=sys.stderr)
+        return
+    ok, message = update.apply(blob, target, version)
+    print(f"[update] {message}", file=sys.stderr)
+    if ok:
+        update.restart_from_daemon(target)
+
+
 def main(argv=None):
     """argv is passed explicitly by the `clauge run` subcommand.
 
@@ -93,6 +135,16 @@ def main(argv=None):
     ap.add_argument("--port", default=None)
     ap.add_argument("--baud", type=int, default=115200)
     args = ap.parse_args(argv)
+
+    # Before anything else: if a previous update died between renaming the old
+    # binary aside and moving the new one in, the login service is pointing at
+    # a path that does not exist -- and would go on doing so at every boot,
+    # silently. This is the one moment that can notice.
+    from pc.cli import clauge_home as _clauge_home, installed_bin
+    self_bin = installed_bin()
+    clauge_home = _clauge_home()
+    update.recover(self_bin)
+
     port = wait_for_port(args.port)
 
     # Claude Code owns the credential and computes these numbers; we read the file
@@ -178,9 +230,40 @@ def main(argv=None):
                   file=sys.stderr)
             raise Reflashed()
 
+        def self_update(version, artifact):
+            """Replace this program, then hand the cable to the new one.
+
+            The port is closed first. On Windows the replacement is started
+            before this process exits, and two daemons racing for one serial
+            port is a failure that would look exactly like a broken board.
+            """
+            try:
+                blob = update.download(update.platform_key(), artifact)
+            except Exception as e:
+                print(f"[update] download failed: {e}", file=sys.stderr)
+                return False
+            ok, message = update.apply(blob, self_bin, version)
+            print(f"[update] {message}", file=sys.stderr)
+            if not ok:
+                return False
+            try:
+                ser.close()
+            except Exception:
+                pass
+            update.restart_from_daemon(self_bin)     # does not return
+            return True
+
         bridge = Bridge(write_msg=send, fetch_usage=fetch,
-                        flash_image=flash_image)
+                        flash_image=flash_image,
+                        self_update=self_update,
+                        pending=update.PendingFirmware(
+                            os.path.join(clauge_home, "pending_fw.json")))
         next_poll = time.monotonic()
+        next_update = time.monotonic() + UPDATE_FIRST_CHECK_S
+        # The rollback copy is kept until a board has actually talked to this
+        # build. Running at all is weak evidence; holding a conversation with
+        # the hardware is the thing the update was for.
+        proven = False
         try:
             while True:
                 # in_waiting first, then a blocking read(1) as the idle wait.
@@ -199,6 +282,9 @@ def main(argv=None):
                     for msg in reader.feed(data):
                         print(f"[bridge] <- {msg}", file=sys.stderr)
                         bridge.on_message(msg)
+                        if not proven:
+                            update.cleanup(self_bin)
+                            proven = True
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
                     # the liveness window): the usage endpoint is aggressively
@@ -208,6 +294,14 @@ def main(argv=None):
                     if bridge.board_alive():
                         bridge.poll_once()
                     next_poll = time.monotonic() + POLL_INTERVAL_S
+                if time.monotonic() >= next_update:
+                    next_update = time.monotonic() + UPDATE_INTERVAL_S
+                    try:
+                        _self_update_tick(self_bin)
+                    except Exception as e:
+                        # Never take the bridge down over an update check. The
+                        # gauge working is worth more than the gauge being new.
+                        print(f"[update] check failed: {e}", file=sys.stderr)
         except Reflashed:
             # Expected: the port is already closed and the board is rebooting
             # into what we just wrote. Give it a moment, then reconnect.
