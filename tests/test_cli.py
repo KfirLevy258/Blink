@@ -157,3 +157,37 @@ def test_too_old_claude_warns_rather_than_refusing(tmp_path, capsys, monkeypatch
     out = capsys.readouterr().out
     assert "needs 2.1.100 or newer" in out
     assert _read(tmp_path)["statusLine"]["command"]  # installed anyway
+
+
+def test_run_does_not_hand_the_subcommand_name_to_the_daemon(monkeypatch):
+    """`clauge run` must not leave "run" in the daemon's own argv.
+
+    It did: claude_usage_bridge.main() parsed sys.argv itself, saw the
+    subcommand name, rejected it and exited. The login service restarted it
+    every ten seconds and the board never received anything -- 866 KB of
+    identical errors before anyone looked at the log.
+    """
+    seen = {}
+
+    class FakeBridge:
+        @staticmethod
+        def main(argv=None):
+            seen["argv"] = argv
+
+    monkeypatch.setitem(__import__("sys").modules, "claude_usage_bridge", FakeBridge)
+    assert cli.main(["run"]) == 0
+    assert seen["argv"] is not None, "argv must be passed, not left to sys.argv"
+    assert "run" not in seen["argv"]
+
+
+def test_run_forwards_an_explicit_port(monkeypatch):
+    seen = {}
+
+    class FakeBridge:
+        @staticmethod
+        def main(argv=None):
+            seen["argv"] = argv
+
+    monkeypatch.setitem(__import__("sys").modules, "claude_usage_bridge", FakeBridge)
+    cli.main(["run", "--port", "/dev/cu.usbserial-1"])
+    assert "--port" in seen["argv"] and "/dev/cu.usbserial-1" in seen["argv"]

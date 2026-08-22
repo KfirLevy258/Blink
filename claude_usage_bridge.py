@@ -81,11 +81,18 @@ def wait_for_port(explicit=None, poll_s=3.0):
         time.sleep(poll_s)
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None):
+    """argv is passed explicitly by the `clauge run` subcommand.
+
+    Without it this parsed sys.argv[1:], which inside the packaged binary is
+    ["run"] -- the subcommand name itself. argparse rejected it, the process
+    exited immediately, and the login service restarted it every ten seconds
+    forever. It never ran once.
+    """
+    ap = argparse.ArgumentParser(prog="clauge run")
     ap.add_argument("--port", default=None)
     ap.add_argument("--baud", type=int, default=115200)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     port = wait_for_port(args.port)
 
     # Claude Code owns the credential and computes these numbers; we read the file

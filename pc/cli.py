@@ -226,8 +226,16 @@ def _install_service() -> str:
         # failing with "service already loaded".
         subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"],
                        capture_output=True)
-        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", plist_path()],
-                           capture_output=True)
+        # ...and then retry, because bootout is asynchronous. The bootstrap
+        # immediately after it can fail while launchd is still tearing the old
+        # job down, which left a reinstall with no service running at all --
+        # observed on the second install of the day, silently.
+        for attempt in range(4):
+            r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", plist_path()],
+                               capture_output=True)
+            if r.returncode == 0:
+                break
+            time.sleep(0.5 * (attempt + 1))
         if r.returncode == 0:
             return "running (launchd)"
         return f"installed, but could not be started: launchctl bootstrap gui/{uid} {plist_path()}"
@@ -476,10 +484,21 @@ def cmd_status(_args) -> int:
     return 0
 
 
-def cmd_run(_args) -> int:
-    """The daemon. This is what the login service starts."""
+def cmd_run(args) -> int:
+    """The daemon. This is what the login service starts.
+
+    Its arguments are handed over explicitly. Calling main() with none left it
+    parsing sys.argv itself, which in the packaged binary begins with the
+    subcommand name "run" -- rejected on the spot, restarted by the service ten
+    seconds later, forever.
+    """
     import claude_usage_bridge
-    claude_usage_bridge.main()
+    forwarded = []
+    if getattr(args, "port", None):
+        forwarded += ["--port", args.port]
+    if getattr(args, "baud", None):
+        forwarded += ["--baud", str(args.baud)]
+    claude_usage_bridge.main(forwarded)
     return 0
 
 
@@ -490,7 +509,10 @@ def main(argv=None) -> int:
     sub.add_parser("install", help="set everything up (default)")
     sub.add_parser("uninstall", help="put it all back")
     sub.add_parser("status", help="is the panel getting data?")
-    sub.add_parser("run", help="run the bridge in the foreground")
+    run_p = sub.add_parser("run", help="run the bridge in the foreground")
+    run_p.add_argument("--port", default=None,
+                       help="serial port (default: find the board)")
+    run_p.add_argument("--baud", type=int, default=115200)
     args = parser.parse_args(argv)
 
     # Bare `./clauge` installs. Someone who just downloaded a file and
