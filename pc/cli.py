@@ -62,7 +62,13 @@ def log_path():
 
 
 def pid_path():
-    return os.path.join(clauge_home(), "bridge.pid")
+    """Where the running daemon records its pid: beside its own binary.
+
+    Not in ~/.clauge. A login service runs in the user's environment rather
+    than the one that registered it, so the two can disagree about what ~ is --
+    and when they do, the pid lands where nothing will look for it.
+    """
+    return os.path.join(bin_dir(), "bridge.pid")
 
 
 def settings_path():
@@ -313,6 +319,7 @@ def _remove_service() -> str:
         subprocess.run(["schtasks", "/delete", "/f", "/tn", TASK_NAME],
                        capture_output=True)
         _kill_recorded_daemon()
+        _kill_by_path()
         return "removed"
     if sys.platform.startswith("linux"):
         if shutil.which("systemctl"):
@@ -357,6 +364,28 @@ def _kill_recorded_daemon():
     subprocess.run(["taskkill", "/f", "/t", "/pid", str(pid),
                     "/fi", "IMAGENAME eq " + os.path.basename(installed_bin())],
                    capture_output=True)
+
+
+def _kill_by_path():
+    """Last resort: anything running the exact binary we are deleting.
+
+    The pid file is the good path and this is what happens when it is missing
+    -- an install from before it existed, a daemon killed before it could write
+    one, a profile that moved. Matched on the full executable PATH and not on
+    the image name, so the uninstaller (same name, different file, or the very
+    same file) is never in scope, and our own pid is excluded outright.
+    """
+    if sys.platform != "win32":
+        return
+    target = installed_bin().replace("'", "''")     # PowerShell string escape
+    script = (
+        "Get-CimInstance Win32_Process | "
+        f"Where-Object {{ $_.ExecutablePath -eq '{target}' "
+        f"-and $_.ProcessId -ne {os.getpid()} }} | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                    "-Command", script], capture_output=True)
 
 
 def _remove_bin_dir(attempts=6):
@@ -537,7 +566,7 @@ def cmd_uninstall(_args) -> int:
     # stop accepting updates.
     for p in (shim_path(), os.path.join(clauge_home(), "statusline.json"),
               os.path.join(clauge_home(), "statusline.json.tmp"),
-              os.path.join(clauge_home(), "pending_fw.json"), pid_path()):
+              os.path.join(clauge_home(), "pending_fw.json")):
         _rm(p)
     done, message = _remove_bin_dir()
     print(message)

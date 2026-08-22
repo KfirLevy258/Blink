@@ -140,22 +140,26 @@ def main(argv=None):
     # binary aside and moving the new one in, the login service is pointing at
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
-    from pc.cli import clauge_home as _clauge_home, installed_bin
+    from pc.cli import _self_path, clauge_home as _clauge_home, installed_bin
     self_bin = installed_bin()
     clauge_home = _clauge_home()
     update.recover(self_bin)
 
-    # Record the pid so uninstall can stop US specifically.
+    # Record the pid so uninstall can stop US specifically. Ending the login
+    # service is not the same as ending this program, and killing by image name
+    # is how the uninstaller once killed itself; a pid is unambiguous.
     #
-    # Ending the Scheduled Task is not the same as ending this program:
-    # PyInstaller's onefile bootloader re-executes the same .exe as a child,
-    # and the child outlives the parent the task knows about -- still looping
-    # here, still holding clauge.exe open, so Windows will not let anything
-    # delete it. Killing by image name instead is how the uninstaller once
-    # killed itself; a pid is unambiguous.
+    # Written NEXT TO THE BINARY rather than under ~/.clauge, because those are
+    # not always the same place. A login service runs in the user's own
+    # environment, not in whatever environment registered it -- so under the CI
+    # harness, which redirects HOME to a temporary directory, the daemon
+    # resolved ~ to the real profile and left its pid somewhere uninstall was
+    # never going to look. Deriving it from sys.executable ties it to the
+    # directory that actually has to be deleted, which is the thing the pid is
+    # for.
+    pid_file = os.path.join(os.path.dirname(_self_path()), "bridge.pid")
     try:
-        os.makedirs(clauge_home, exist_ok=True)
-        with open(os.path.join(clauge_home, "bridge.pid"), "w") as f:
+        with open(pid_file, "w") as f:
             f.write(str(os.getpid()))
     except OSError as e:
         print(f"[bridge] could not record the pid: {e}", file=sys.stderr)
