@@ -107,8 +107,39 @@ static int64_t usb_dl_deadline;
 static const char *const act_label[] = {
 	[ACT_WIFI] = "Reset WiFi",
 	[ACT_SIGNIN] = "Re-sign-in",
+	/*
+	 * Not "Factory reset" in this build, because it is not one.
+	 *
+	 * cfg_reset() clears the whole config record, and in a WiFi build that
+	 * record holds the network credentials, the refresh token and the AP
+	 * password -- erasing it really does return the device to the state it
+	 * shipped in. None of those exist here: every write of them is behind
+	 * CONFIG_CLAUGE_WIFI_MODE and is not compiled. What is left in the
+	 * record is a brightness level, a gauge choice, and an OTA breadcrumb
+	 * that the next boot clears anyway.
+	 *
+	 * So the old name promised to erase personal data from a device that
+	 * holds none -- which is exactly backwards, since holding none is the
+	 * thing worth saying about it.
+	 */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	[ACT_FACTORY] = "Factory reset",
+#else
+	[ACT_FACTORY] = "Reset to defaults",
+#endif
 };
+
+/* Red is for an action that costs a full re-setup. In this build the reset
+ * costs two preferences, so it is an ordinary control. */
+static inline bool act_is_danger(enum action a)
+{
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+	return a == ACT_FACTORY;
+#else
+	ARG_UNUSED(a);
+	return false;
+#endif
+}
 
 static void do_pending(void)
 {
@@ -282,7 +313,7 @@ static void show_confirm(void)
 	/* Red is reserved for the one action that costs a full re-setup;
 	 * painting every confirm red made them all look equally scary. */
 	lv_obj_t *yes = mk_btn(confirm, "Yes, do it",
-			       pending == ACT_FACTORY ? COL_RED : COL_GREEN,
+			       act_is_danger(pending) ? COL_RED : COL_GREEN,
 			       confirm_yes_cb, NULL);
 
 	lv_obj_align(yes, LV_ALIGN_BOTTOM_MID, 0, -70);
@@ -1636,8 +1667,10 @@ static void build_panel(lv_obj_t *parent_scr)
 
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
 
-	mk_row(panel, 176, "Factory reset", "Erases everything and restarts",
-	       true, act_cb, (void *)(intptr_t)ACT_FACTORY, NULL);
+	/* Neutral, not danger. Nothing here is destructive: there is no
+	 * credential, no token and no network on this device to lose. */
+	mk_row(panel, 176, "Reset to defaults", "Brightness and gauge view",
+	       false, act_cb, (void *)(intptr_t)ACT_FACTORY, NULL);
 #endif
 
 }
