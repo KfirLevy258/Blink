@@ -1122,8 +1122,26 @@ static void build_panel(lv_obj_t *parent_scr)
 
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
 
-	/* --- Reset actions: divider, centred heading, three big tiles --- */
+	/* --- Reset actions --- */
 	mk_line(panel, 129);
+
+	static const char *const acticon[] = {
+		[ACT_WIFI] = LV_SYMBOL_WIFI,
+		[ACT_SIGNIN] = LV_SYMBOL_REFRESH,
+		[ACT_FACTORY] = LV_SYMBOL_TRASH,
+	};
+
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+	/* Three actions: a centred heading over a row of three tiles.
+	 *
+	 * The labels are one word each because three of them share 296 px; the
+	 * single-action layout below has the room to say "Factory reset" in
+	 * full, and does. */
+	static const char *const acttext[] = {
+		[ACT_WIFI] = "Wi-Fi",
+		[ACT_SIGNIN] = "Sign-in",
+		[ACT_FACTORY] = "Factory",
+	};
 
 	lv_obj_t *rlab = lv_label_create(panel);
 
@@ -1132,32 +1150,17 @@ static void build_panel(lv_obj_t *parent_scr)
 	lv_obj_set_style_text_letter_space(rlab, 2, 0);
 	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 134);
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
-#else
-	/* No radio and no sign-in in this build, so "Reset WiFi" and
-	 * "Re-sign-in" would be buttons that clear settings nothing reads --
-	 * the persistent dead state this project has been bitten by before.
-	 * One tile, centred. */
-	static const enum action acts[] = { ACT_FACTORY };
-#endif
-	static const char *const acticon[] = {
-		[ACT_WIFI] = LV_SYMBOL_WIFI,
-		[ACT_SIGNIN] = LV_SYMBOL_REFRESH,
-		[ACT_FACTORY] = LV_SYMBOL_TRASH,
-	};
-	static const char *const acttext[] = {
-		[ACT_WIFI] = "Wi-Fi",
-		[ACT_SIGNIN] = "Sign-in",
-		[ACT_FACTORY] = "Factory",
-	};
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	static const int tilex[] = { 12, 114, 216 };
-#else
-	static const int tilex[] = { 114 };
-#endif
 
-	for (int i = 0; i < 3; i++) {
+	/* ARRAY_SIZE, not a literal 3. It WAS a literal, and when this build
+	 * stopped shipping the radio the arrays shrank to one entry while the
+	 * loop kept running three times -- reading acts[1..2] and tilex[1..2]
+	 * off the end, using the garbage as an index into acticon/acttext, and
+	 * handing whatever pointer came back to lv_label_set_text. Two extra
+	 * tiles in junk positions with junk labels, which is what "the settings
+	 * page looks weird" turned out to be. */
+	for (unsigned int i = 0; i < ARRAY_SIZE(acts); i++) {
 		enum action a = acts[i];
 		bool danger = a == ACT_FACTORY;
 		lv_obj_t *tile = lv_btn_create(panel);
@@ -1193,6 +1196,63 @@ static void build_panel(lv_obj_t *parent_scr)
 		lv_obj_set_style_text_color(tx, fg, 0);
 		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -8);
 	}
+#else
+	/*
+	 * One action, so no grid and no heading.
+	 *
+	 * "Reset WiFi" and "Re-sign-in" would clear settings nothing in this
+	 * build reads -- the persistent dead state this project has been bitten
+	 * by before -- so only the factory reset survives. A single 92px tile
+	 * centred in a 296px row read as two thirds of a grid that failed to
+	 * draw, and the "RESET" heading above it was labelling a section with
+	 * one item in it.
+	 *
+	 * Full-width row instead, the same shape as "Software update"
+	 * immediately above: same x, same width, same height, same radius and
+	 * chevron. The panel then reads as three stacked sections separated by
+	 * rules, and the row names itself so the heading is not needed. Danger
+	 * colours keep it distinct from the update row it now resembles; the
+	 * confirmation step is unchanged.
+	 */
+	lv_obj_t *fact = lv_btn_create(panel);
+
+	lv_obj_set_size(fact, 296, 30);
+	/* 5 px below its rule, exactly like the update row is below its own
+	 * (line 89 -> row 94). The consistency is the point of this layout. */
+	lv_obj_align(fact, LV_ALIGN_TOP_LEFT, 12, 134);
+	lv_obj_set_style_bg_color(fact, COL_DANGER_BG, 0);
+	lv_obj_set_style_bg_opa(fact, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(fact, COL_DANGER_BD, 0);
+	lv_obj_set_style_border_width(fact, 1, 0);
+	lv_obj_set_style_radius(fact, 9, 0);
+	lv_obj_set_style_shadow_width(fact, 0, 0);
+	lv_obj_set_style_pad_all(fact, 0, 0);
+	/* Same two flags as every other control on this panel: a horizontal
+	 * drag on a SCROLLABLE button is eaten as a scroll and the tap never
+	 * fires, and a drifting press must not bubble into a panel close. */
+	lv_obj_clear_flag(fact, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(fact, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(fact, act_cb, LV_EVENT_CLICKED,
+			    (void *)(intptr_t)ACT_FACTORY);
+
+	lv_obj_t *fic = lv_label_create(fact);
+
+	lv_label_set_text(fic, acticon[ACT_FACTORY]);
+	lv_obj_set_style_text_color(fic, COL_RED, 0);
+	lv_obj_align(fic, LV_ALIGN_LEFT_MID, 12, 0);
+
+	lv_obj_t *fl = lv_label_create(fact);
+
+	lv_label_set_text(fl, "Factory reset");
+	lv_obj_set_style_text_color(fl, COL_RED, 0);
+	lv_obj_align(fl, LV_ALIGN_LEFT_MID, 34, 0);
+
+	lv_obj_t *fchev = lv_label_create(fact);
+
+	lv_label_set_text(fchev, LV_SYMBOL_RIGHT);
+	lv_obj_set_style_text_color(fchev, COL_RED, 0);
+	lv_obj_align(fchev, LV_ALIGN_RIGHT_MID, -10, 0);
+#endif
 
 	/* Debug-me line: build + network, answered without a serial cable
 	 * (which would reset the board). IP dropped at the user's request
