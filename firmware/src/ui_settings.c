@@ -39,15 +39,31 @@
 #define COL_DANGER_BG	lv_color_hex(0x1E1412)	/* factory tile: red-tinted, not solid red */
 #define COL_DANGER_BD	lv_color_hex(0x7A2B23)
 
+/*
+ * Destructive actions -- and the confirm-then-reboot machinery behind them --
+ * are standalone-WiFi-only.
+ *
+ * Every one of them forgets something the device is holding: a network, a
+ * token, or all of it. A USB unit holds none of that. The config record a
+ * reset would wipe contains a brightness level and an OTA breadcrumb the next
+ * boot clears anyway, so the whole ceremony -- a confirm dialog, a cold
+ * reboot -- bought a return to 100% brightness, which the Brightness row does
+ * on the spot. See the layout note in the USB panel builder.
+ */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 enum action {
 	ACT_WIFI,	/* forget network, keep token */
 	ACT_SIGNIN,	/* forget token, keep network */
 	ACT_FACTORY,	/* forget everything */
 };
+#endif
 
 static lv_obj_t *panel;		/* NULL when closed */
+/* Shared with the software-update install dialog, which is in both builds. */
 static lv_obj_t *confirm;	/* NULL when no dialog is up */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 static enum action pending;
+#endif
 
 /* Software-update widgets (all NULL when their owner is closed/absent). */
 static lv_obj_t *notice;	/* outcome popup on the top layer */
@@ -109,41 +125,21 @@ static int64_t upd_revert_at;	/* "Up to date" shows briefly, then idles */
 #define USB_DL_DEADLINE_MS 300000
 static int64_t usb_dl_deadline;
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+/* "Factory reset" is the honest name here and only here: this build's config
+ * record really does hold the network credentials, the refresh token and the
+ * AP password, so clearing it returns the device to the state it shipped in. */
 static const char *const act_label[] = {
 	[ACT_WIFI] = "Reset WiFi",
 	[ACT_SIGNIN] = "Re-sign-in",
-	/*
-	 * Not "Factory reset" in this build, because it is not one.
-	 *
-	 * cfg_reset() clears the whole config record, and in a WiFi build that
-	 * record holds the network credentials, the refresh token and the AP
-	 * password -- erasing it really does return the device to the state it
-	 * shipped in. None of those exist here: every write of them is behind
-	 * CONFIG_CLAUGE_WIFI_MODE and is not compiled. What is left in the
-	 * record is a brightness level, a gauge choice, and an OTA breadcrumb
-	 * that the next boot clears anyway.
-	 *
-	 * So the old name promised to erase personal data from a device that
-	 * holds none -- which is exactly backwards, since holding none is the
-	 * thing worth saying about it.
-	 */
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	[ACT_FACTORY] = "Factory reset",
-#else
-	[ACT_FACTORY] = "Reset to defaults",
-#endif
 };
 
-/* Red is for an action that costs a full re-setup. In this build the reset
- * costs two preferences, so it is an ordinary control. */
+/* Red is for the action that costs a full re-setup, and only that one;
+ * painting every confirm red made them all look equally scary. */
 static inline bool act_is_danger(enum action a)
 {
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	return a == ACT_FACTORY;
-#else
-	ARG_UNUSED(a);
-	return false;
-#endif
 }
 
 static void do_pending(void)
@@ -170,6 +166,7 @@ static void confirm_yes_cb(lv_event_t *e)
 	ARG_UNUSED(e);
 	do_pending();	/* never returns */
 }
+#endif /* CONFIG_CLAUGE_WIFI_MODE -- destructive actions */
 
 static void confirm_no_cb(lv_event_t *e)
 {
@@ -296,6 +293,7 @@ static void bright_step_cb(lv_event_t *e)
 }
 #endif /* CONFIG_CLAUGE_WIFI_MODE */
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 static void show_confirm(void)
 {
 	confirm = lv_obj_create(panel);
@@ -334,6 +332,7 @@ static void act_cb(lv_event_t *e)
 	pending = (enum action)(intptr_t)lv_event_get_user_data(e);
 	show_confirm();
 }
+#endif /* CONFIG_CLAUGE_WIFI_MODE */
 
 /* --- Software update: tile state machine, confirm, progress overlay --- */
 
@@ -970,14 +969,19 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
  * opening the updater, and what a factory reset does before you commit to
  * finding out.
  */
-static lv_obj_t *mk_row(lv_obj_t *parent, int y, const char *title,
+/* `h` is a parameter because the number of rows decides it: the panel's usable
+ * height is shared out among however many there are, so a row is as tall as it
+ * can afford to be rather than a fixed 56. See the layout note at the call
+ * site. Labels align to the row's middle, so they follow whatever height it
+ * is given. */
+static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
 			const char *sub, bool danger, lv_event_cb_t cb,
 			void *user, lv_obj_t **sub_out)
 {
 	lv_color_t fg = danger ? COL_RED : COL_TEXT;
 	lv_obj_t *row = lv_btn_create(parent);
 
-	lv_obj_set_size(row, 296, 56);
+	lv_obj_set_size(row, 296, h);
 	lv_obj_align(row, LV_ALIGN_TOP_LEFT, 12, y);
 	lv_obj_set_style_bg_color(row, danger ? COL_DANGER_BG : COL_PANEL, 0);
 	lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
@@ -1548,19 +1552,25 @@ static void build_panel(lv_obj_t *parent_scr)
 	lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -2);
 #else
 	/*
-	 * Three rows and nothing else.
+	 * Two rows and nothing else.
 	 *
 	 * The panel is 240 px tall and a fingertip covers about 9 mm, which is
-	 * 51 px at this panel's 5.62 px/mm. Take 40 for the title bar and 190
-	 * is left: three comfortable targets, or four that are not. So there
-	 * are three, at 56 px each, and everything that used to sit between
-	 * them -- a heading, a card, a footer -- is gone or has moved inside a
-	 * row.
+	 * 51 px at this panel's 5.62 px/mm. Take 40 for the title bar and 200
+	 * is left. There were three rows at 56 px (10.0 mm) while a "Reset to
+	 * defaults" row existed; it does not any more, because in this build
+	 * the only thing it reset was brightness -- and the row directly above
+	 * it sets brightness without a reboot.
+	 *
+	 * The freed height goes into the two that remain rather than being
+	 * left as a hole under them: 72 px each, 12.8 mm, with 24 px of margin
+	 * above and below the pair so it reads as centred instead of
+	 * top-aligned with something missing.
 	 *
 	 * What this replaces was measured and did not pass: 30 px rows are
 	 * 5.3 mm, sitting 5 px apart, so one press covered both and which one
 	 * fired came down to where the pressure centroid landed.
 	 */
+#define ROW_H 72
 	/* No green edge seam here. It existed as a left-edge cue back when the
 	 * back control was a bare chevron that was easy to miss; the control is
 	 * now a bordered 60 x 36 button that announces itself, so the seam was
@@ -1580,13 +1590,14 @@ static void build_panel(lv_obj_t *parent_scr)
 	char sub[56];
 
 	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
-	mk_row(panel, 48, "Brightness", sub, false, show_bright, NULL, &pct_lbl);
+	mk_row(panel, 64, ROW_H, "Brightness", sub, false, show_bright, NULL,
+	       &pct_lbl);
 
 	/*
 	 * Both versions live here, on the row that is already about versions.
 	 *
-	 * There is no footer left to put them in -- three rows and their gaps
-	 * use the height -- and a footer was the wrong home anyway: someone
+	 * There is no footer left to put them in -- the two rows and their
+	 * margins use the height -- and a footer was the wrong home anyway: someone
 	 * looking for a version number is already on their way to this row. It
 	 * is also the only place on the device that can say which HALF of the
 	 * pair is behind, since the app's version is otherwise invisible from
@@ -1598,8 +1609,8 @@ static void build_panel(lv_obj_t *parent_scr)
 	} else {
 		snprintf(sub, sizeof(sub), "Clauge %s", CLAUGE_FW_VERSION);
 	}
-	upd_btn = mk_row(panel, 112, "Software update", sub, false,
-			 upd_cb, NULL, NULL);
+	upd_btn = mk_row(panel, 64 + ROW_H + 8, ROW_H, "Software update", sub,
+			 false, upd_cb, NULL, NULL);
 
 	/* The state reads on the title line, where it belongs to the row's
 	 * name; the version line underneath stays unbroken. Right-aligned
@@ -1611,21 +1622,6 @@ static void build_panel(lv_obj_t *parent_scr)
 
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
 
-	/* Neutral, not danger. Nothing here is destructive: there is no
-	 * credential, no token and no network on this device to lose.
-	 *
-	 * The subtitle names everything the reset actually clears, so it has to
-	 * be kept honest as that list shrinks. It said "Brightness and gauge
-	 * view" until the per-model gauge selection was compiled out of this
-	 * build (see HAVE_PER_MODEL in usage_view.c) -- at which point there
-	 * was one preference left and the row was still promising two.
-	 *
-	 * Named by its effect rather than by the setting: "Brightness" alone
-	 * would sit two rows under a row called Brightness and read as a
-	 * heading for it. cfg_reset zeroes the record and cfg_get_bright_pct
-	 * returns 100 for a zero, so 100% is what this actually does. */
-	mk_row(panel, 176, "Reset to defaults", "Puts brightness back to 100%",
-	       false, act_cb, (void *)(intptr_t)ACT_FACTORY, NULL);
 #endif
 
 }
