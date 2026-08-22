@@ -13,12 +13,14 @@
 #      five_hour/seven_day -> used_percentage). This is the early warning for
 #      the risk that matters most: we depend on a field with no stability
 #      commitment, and shipped units go dark together the day it moves.
-#   2. the installer runs alongside that version and writes a settings.json
-#      the CLI still starts with.
+#   2. the shipped binary runs alongside that version and writes a
+#      settings.json the CLI still starts with.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 WORK="${TMPDIR:-/tmp}/clauge-claude-version"
+BIN="${CLAUGE_BIN:-$ROOT/dist/clauge}"
+[ -x "$BIN" ] || { echo "no binary at $BIN -- run tools/build_binary.sh" >&2; exit 1; }
 
 fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 ok() { printf '  ok   %s\n' "$*"; }
@@ -80,9 +82,9 @@ mkdir -p "$HOME/.claude"
 export HOME
 printf '%s\n' '{"model": "opus"}' >"$HOME/.claude/settings.json"
 
-"$ROOT/install.sh" >"$WORK/out.txt" 2>&1 || {
+"$BIN" >"$WORK/out.txt" 2>&1 || {
 	cat "$WORK/out.txt" >&2
-	fail "install.sh failed alongside $VERSION"
+	fail "the installer failed alongside $VERSION"
 }
 ok "installer runs alongside $VERSION"
 
@@ -99,7 +101,7 @@ ok "settings.json is valid JSON with our key and their keys intact"
 claude --version >/dev/null 2>&1 || fail "claude --version fails after install"
 ok "claude still starts with our settings.json in place"
 
-"$ROOT/install.sh" uninstall >"$WORK/undo.txt" 2>&1 || {
+"$BIN" uninstall >"$WORK/undo.txt" 2>&1 || {
 	cat "$WORK/undo.txt" >&2
 	fail "uninstall failed"
 }
