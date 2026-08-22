@@ -76,7 +76,15 @@ if [ -s "$CHAIN" ]; then
       self="'$escaped'"
       ;;
   esac
-  if [ "$chain_cmd" != "sh $self" ]; then
+  # Compare the PATH OPERAND, not the whole command line. The installer writes
+  # "sh <path>" on POSIX and "bash <path>" on Windows -- see
+  # statusline_command(), which has to start with "bash " there or Claude Code
+  # rewrites the line. Matching the literal string "sh $self" therefore could
+  # never match on Windows, so the guard was absent on exactly the platform it
+  # was written for, and the bounded one extra hop below became unbounded.
+  chain_arg=${chain_cmd#sh }
+  chain_arg=${chain_arg#bash }
+  if [ "$chain_arg" != "$self" ]; then
     # 2>/dev/null: the installer's ambiguous case above can point this at a
     # shim path that no longer exists (superseded by a later install at a
     # different path), which makes `sh -c` print "No such file or

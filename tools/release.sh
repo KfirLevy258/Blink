@@ -65,6 +65,14 @@ if grep -q "^CONFIG_CLAUGE_WIFI_MODE=y" "$CFG"; then
 	echo "       That ships the on-device sign-in and the token store." >&2
 	exit 1
 fi
+# `strings` runs inside a pipeline below, where a missing binary would leave
+# grep reading an empty stream and every pattern "absent" -- a guard against
+# shipping the OAuth path that silently passes because the tool that looks for
+# it is not installed.
+command -v strings >/dev/null 2>&1 || {
+	echo "FATAL: 'strings' not found; cannot check the artifact." >&2
+	echo "       Refusing to publish an image nothing has inspected." >&2
+	exit 1; }
 for pat in "/api/oauth/usage" "refresh_token" "claude-code/"; do
 	if strings "$BIN" | grep -qF -- "$pat"; then
 		echo "FATAL: release image contains '$pat' -- the network path is" >&2
@@ -102,6 +110,13 @@ RELKEY="${CLAUGE_RELEASE_KEY:-$HOME/.clauge/release_signing_key_p256.pem}"
 ARTIFACTS="macos-arm64 macos-x86_64 linux-x86_64 windows-x86_64.exe"
 
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+	# Draft it again before adding anything. This branch runs when the tag
+	# was already released -- a source-tag release with no firmware on it,
+	# or a retry -- and uploading straight onto a PUBLISHED release is the
+	# half-release the draft-first flow exists to prevent: the firmware
+	# would be live at /latest/download/ for the ~40 minutes before the
+	# manifest describing it exists.
+	gh release edit "$TAG" --repo "$REPO" --draft=true
 	gh release upload "$TAG" --repo "$REPO" --clobber "$TMP/clauge-fw.bin"
 else
 	gh release create "$TAG" --repo "$REPO" --draft --title "Clauge $VER" \

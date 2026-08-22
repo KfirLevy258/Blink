@@ -142,6 +142,20 @@ def ota_avail(version, size, sha256, app=None):
     return msg
 
 
+def ota_begin(version):
+    """The firmware write is starting now.
+
+    Distinct from consent. The board used to persist "I am installing X" the
+    moment it sent ota_flash, but in a pair update this program replaces
+    itself first -- and opening the serial port from the new process resets
+    the board, which then boots, sees a breadcrumb for a version it is not
+    running, and reports "Update failed, previous version restored." before
+    the firmware install has even begun. Then the real install finishes with
+    the breadcrumb already spent, so the success notice never appears either.
+    """
+    return {"t": "ota_begin", "v": VERSION, "version": version}
+
+
 def ota_resume(version):
     """Continuing an install the user already approved, after the daemon
     replaced itself. The board reopens its progress screen rather than sitting

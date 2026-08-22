@@ -302,6 +302,9 @@ class Bridge:
         self._ota_reset()
         print(f"[bridge] ota: flashing {version} ({len(blob)} bytes)",
               file=sys.stderr)
+        # Tell the board to remember what it is about to become, now that
+        # nothing else can come between this and esptool taking it away.
+        self._write(protocol.ota_begin(version))
         self._flash(blob, version)
 
     def board_alive(self) -> bool:

@@ -495,10 +495,22 @@ void usage_view_update(double session_pct, int32_t session_resets_in_s,
 
 	char buf[8];
 
-	snprintf(buf, sizeof(buf), "%d%%", (int)(session_pct + 0.5));
-	lv_label_set_text(session.pct, buf);
-	lv_arc_set_value(session.arc, (int32_t)(session_pct + 0.5));
-	lv_obj_set_style_arc_color(session.arc, severity(session_pct), LV_PART_INDICATOR);
+	/* A negative percentage means "the daemon does not have this number" --
+	 * pc/statusline_source.py sends -1.0 when the window is absent from
+	 * Claude Code's payload entirely. render_weekly() has always honoured
+	 * that; this side did not, so an absent five_hour window rendered as a
+	 * confident green 0%, which is the frozen-meter reading the sentinel
+	 * exists to prevent. */
+	if (session_pct < 0) {
+		lv_label_set_text(session.pct, "--%");
+		lv_arc_set_value(session.arc, 0);
+	} else {
+		snprintf(buf, sizeof(buf), "%d%%", (int)(session_pct + 0.5));
+		lv_label_set_text(session.pct, buf);
+		lv_arc_set_value(session.arc, (int32_t)(session_pct + 0.5));
+		lv_obj_set_style_arc_color(session.arc, severity(session_pct),
+					   LV_PART_INDICATOR);
+	}
 	session.resets_in_s = session_resets_in_s;
 	render_countdown(&session);
 

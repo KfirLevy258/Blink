@@ -150,6 +150,28 @@ class TestFlash(unittest.TestCase):
         b.on_message({"t": "ota_flash"})
         self.assertEqual(flashed, [(b"hello", "0.4.9")])
 
+    def test_the_board_is_told_when_the_write_starts(self):
+        """Not at consent, which is where the breadcrumb used to be written.
+
+        In a pair update the daemon replaces itself between the two, and the
+        new process opening the port resets the board -- which then reported a
+        failure for an install that had not started, spending the breadcrumb
+        so the real success went unreported.
+        """
+        b, sent, flashed = bridge(manifest=self.M, firmware=b"hello")
+        b.on_message({"t": "ota_query", "cur": "0.4.8"})
+        b.on_message({"t": "ota_flash"})
+        self.assertEqual(types(sent), ["ota_avail", "ota_begin"])
+        self.assertEqual(sent[-1]["version"], "0.4.9")
+        self.assertEqual(flashed, [(b"hello", "0.4.9")])
+
+    def test_nothing_is_begun_when_the_image_is_rejected(self):
+        m = dict(self.M, sha256="cd" * 32)
+        b, sent, flashed = bridge(manifest=m, firmware=b"hello")
+        b.on_message({"t": "ota_query", "cur": "0.4.8"})
+        b.on_message({"t": "ota_flash"})
+        self.assertNotIn("ota_begin", types(sent))
+
     def test_flash_without_an_offer_is_refused(self):
         b, sent, flashed = bridge(manifest=self.M, firmware=b"hello")
         b.on_message({"t": "ota_flash"})

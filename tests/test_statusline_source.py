@@ -67,26 +67,39 @@ def test_an_abandoned_payload_is_marked_stale():
     assert msg["stale"] is True
 
 
-def test_reset_countdown_never_goes_negative():
-    """A past resets_at clamps to 0, never a negative countdown.
-
-    Tested on _secs_until directly. It used to be reachable through
-    map_statusline with a fresh payload, but a fresh reading past its reset is
-    now carried over to 0% with an unknown reset time -- so the clamp is only
-    exercised on a stale payload, which the case below covers.
+def test_a_past_reset_reads_unknown_not_zero():
+    """0 is not a spare value: usage_view.c reads a countdown of exactly 0 as
+    "this window just rolled over" and zeroes the percentage with it. That is
+    right for the firmware's own countdown running out and wrong coming from
+    here, because the only payload that reaches _secs_until with a past reset
+    is a stale one -- the case _rolled_over() deliberately refuses to zero.
     """
-    assert ss._secs_until(1_787_100_000, 1_787_200_000) == 0
+    assert ss._secs_until(1_787_100_000, 1_787_200_000) == -1
     assert ss._secs_until(1_787_300_000, 1_787_200_000) == 100_000
     assert ss._secs_until(None, 1_787_200_000) == -1
 
 
-def test_a_stale_payload_still_clamps_its_countdown():
+def test_a_stale_payload_keeps_its_numbers(tmp_path=None):
+    """The whole point of not rolling a stale window over is that its last
+    known percentage is the best thing we have. Sending 0 for the countdown
+    let the board discard it anyway."""
     now = 1_787_200_000
     payload = {"rate_limits": {"five_hour": {"used_percentage": 99.0,
                                              "resets_at": now - 100_000}}}
     msg = ss.map_statusline(payload, now_epoch=now, mtime_epoch=now - 3 * 86400)
     assert msg["stale"] is True
-    assert msg["session_resets_in_s"] == 0
+    assert msg["session_pct"] == 99.0
+    assert msg["session_resets_in_s"] == -1
+
+
+def test_a_window_present_but_missing_its_percentage_is_unknown():
+    """The likeliest shape of a payload change: the object is still there, the
+    field is not. It used to read as a confident 0%."""
+    now = 1_787_200_000
+    for w in ({"resets_at": now + 60}, {"used_percentage": None, "resets_at": now + 60},
+              {"used_percentage": "n/a", "resets_at": now + 60}):
+        msg = ss.map_statusline({"rate_limits": {"five_hour": w}}, now, now)
+        assert msg["session_pct"] == -1.0, w
 
 
 def test_real_capture_maps_without_error():

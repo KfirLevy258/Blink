@@ -18,7 +18,12 @@ defaults:
     shell: bash
 
 concurrency:
-  group: installer-${{ github.ref }}
+  # Keyed on the PULL REQUEST where there is one, and only otherwise on the
+  # ref. Both `push` and `pull_request` fire for a push to a branch with an
+  # open PR, and github.ref differs between them (refs/heads/X against
+  # refs/pull/N/merge), so keying on the ref alone put them in separate groups
+  # and ran all 38 jobs twice for every push on this branch.
+  group: installer-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

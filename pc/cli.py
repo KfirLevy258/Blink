@@ -322,12 +322,18 @@ def _remove_service() -> str:
         _kill_by_path()
         return "removed"
     if sys.platform.startswith("linux"):
-        if shutil.which("systemctl"):
-            subprocess.run(["systemctl", "--user", "disable", "--now",
-                            "clauge-bridge.service"], capture_output=True)
+        if not shutil.which("systemctl"):
+            # Install said "no systemd here; run it yourself", so whatever is
+            # running was started by hand and nothing here can stop it. Saying
+            # "removed" would be followed a line later by "Nothing of Clauge's
+            # is left running", which would not be true.
+            _rm(unit_path())
+            return "no systemd here; stop it yourself if you started it"
+        subprocess.run(["systemctl", "--user", "disable", "--now",
+                        "clauge-bridge.service"], capture_output=True)
         _rm(unit_path())
-        if shutil.which("systemctl"):
-            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        subprocess.run(["systemctl", "--user", "daemon-reload"],
+                       capture_output=True)
         return "removed"
     return "nothing to remove"
 
@@ -441,19 +447,24 @@ def _schedule_windows_cleanup():
 
 
 def _make_way_for_copy():
-    """Windows will not let us overwrite an executable that is running.
+    """Move a running copy aside so the new one can be written.
 
     And by the second install it IS running: the first one registered a
     Scheduled Task and started it, so ~/.clauge/bin/clauge.exe is locked and
     shutil.copy2 raises PermissionError. That is not an edge case -- it is
     what happens to every customer who re-runs the installer to upgrade.
 
-    Windows does allow a running executable to be RENAMED, so move it aside
+    Every platform allows a running executable to be RENAMED, so move it aside
     and copy into the freed name. The leftover is deleted on the next run,
     once nothing has it open any more; uninstall takes the whole directory.
+
+    This was gated to Windows, on the reasoning that only Windows refuses to
+    overwrite a running executable. Linux and macOS refuse too -- opening one
+    for writing gives ETXTBSY -- so re-running the installer to upgrade, with
+    the daemon running from that exact path, crashed there as well. It went
+    unnoticed because every test of a reinstall on this desk happened to stop
+    the service first.
     """
-    if sys.platform != "win32":
-        return
     target = installed_bin()
     stale = target + ".old"
     try:
@@ -507,6 +518,19 @@ def _announce():
 
 
 def cmd_install(_args) -> int:
+    # Before anything is written, and before the disclosure: if the file we are
+    # about to edit does not parse, the honest move is to change nothing at all
+    # and say why. The alternative -- treating it as empty -- writes a fresh
+    # settings.json over whatever the customer was halfway through editing.
+    try:
+        install_statusline._load(settings_path())
+    except install_statusline.SettingsUnreadable as e:
+        print(f"Clauge setup stopped. {e}")
+        print()
+        print("Nothing was changed. Fix the file, or move it aside, and run")
+        print("this again.")
+        return 1
+
     _announce()
 
     print("[1/3] Program ... ", end="", flush=True)
@@ -557,7 +581,15 @@ def cmd_uninstall(_args) -> int:
     print(_remove_service())
 
     print("[2/3] Claude Code setting:")
-    print("      " + install_statusline.uninstall(settings_path(), shim_path()))
+    try:
+        print("      " + install_statusline.uninstall(settings_path(), shim_path()))
+    except install_statusline.SettingsUnreadable as e:
+        # Keep going. The login service is already gone by this point, so
+        # stopping here would leave the machine half-undone -- and the one
+        # thing we must not do is "repair" the file by writing a fresh one
+        # over whatever the customer was in the middle of editing.
+        print(f"      Left alone: {e}")
+        print("      Remove the statusLine.command line by hand once it parses.")
 
     print("[3/3] Files ... ", end="", flush=True)
     # Only what install created. NOT ~/.clauge itself: it also holds the two

@@ -178,15 +178,16 @@ bool proto_ota_install(void)
 	ota_ui_set_source(OTA_SRC_USB);
 
 	/*
-	 * Record the intent before handing over, so the next boot can report
-	 * the outcome. ota_report_outcome() in main.c already does exactly
-	 * this for the WiFi path: it compares the stored target against the
-	 * running version and shows "Updated to ..." or "Update failed,
-	 * previous version restored." Setting it here gets that for free, and
-	 * gets the failure case right too -- if esptool dies mid-write the
-	 * board comes back on the OLD version and the mismatch says so.
+	 * The breadcrumb is NOT written here, at consent. It is written when
+	 * the daemon says the write is starting (ota_begin below).
+	 *
+	 * It used to be written here, and that is wrong for a pair update: the
+	 * daemon replaces itself first, and the new process opening the serial
+	 * port resets this board. It would boot, find a breadcrumb naming a
+	 * version it is not running, and announce "Update failed, previous
+	 * version restored." before the firmware install had begun -- then
+	 * spend the breadcrumb doing it, so the real success went unreported.
 	 */
-	cfg_set_ota_state(1, ota_m.version);
 
 	/* Percent stays at 0 throughout: the board cannot see esptool's
 	 * progress, and a bar that does not move is worse than no bar. The UI
@@ -302,6 +303,16 @@ static void dispatch(const char *json)
 			       ota_m.version, ota_m.size);
 		} else {
 			ota_ui_set(OTA_UI_FAILED, NULL, 0);
+		}
+	} else if (strcmp(type, "ota_begin") == 0) {
+		/* The write is starting; nothing can now come between this and
+		 * esptool resetting us, so the next boot's report is honest
+		 * whichever way it goes. */
+		char v[16];
+
+		if (msg_get_str(json, "version", v, sizeof(v))) {
+			printk("[proto] ota: writing %s\n", v);
+			cfg_set_ota_state(1, v);
 		}
 	} else if (strcmp(type, "ota_resume") == 0) {
 		/*

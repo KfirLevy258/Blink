@@ -150,6 +150,12 @@ def main(argv=None):
     clauge_home = _clauge_home()
     update.recover(self_bin)
 
+    # Outside the reconnect loop, unlike next_poll. A board that comes and goes
+    # -- a nudged cable, a laptop waking -- would otherwise re-arm the 60 s
+    # first check on every reconnect, turning a daily update check into one per
+    # reconnection.
+    next_update = time.monotonic() + UPDATE_FIRST_CHECK_S
+
     # Record the pid so uninstall can stop US specifically. Ending the login
     # service is not the same as ending this program, and killing by image name
     # is how the uninstaller once killed itself; a pid is unambiguous.
@@ -283,7 +289,6 @@ def main(argv=None):
                         pending=update.PendingFirmware(
                             os.path.join(clauge_home, "pending_fw.json")))
         next_poll = time.monotonic()
-        next_update = time.monotonic() + UPDATE_FIRST_CHECK_S
         # The rollback copy is kept until a board has actually talked to this
         # build. Running at all is weak evidence; holding a conversation with
         # the hardware is the thing the update was for.

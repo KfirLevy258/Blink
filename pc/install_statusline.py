@@ -91,12 +91,26 @@ def _remove_marker() -> None:
         pass
 
 
+class SettingsUnreadable(Exception):
+    """settings.json is there but cannot be parsed.
+
+    Its own type because the only safe response is to stop. Treating an
+    unparseable file as {} would have us write a fresh one over whatever the
+    customer actually had -- and a file that fails to parse is usually a file
+    someone is halfway through editing, not a file they wanted replaced.
+    """
+
+
 def _load(settings_path: str) -> dict:
     try:
-        with open(settings_path) as f:
+        # utf-8 explicitly: Windows would otherwise decode with the ANSI code
+        # page and die on any non-ASCII character anywhere in the file.
+        with open(settings_path, encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
+    except (ValueError, UnicodeDecodeError) as e:
+        raise SettingsUnreadable(f"{settings_path} is not valid JSON ({e})")
 
 
 def _sniff_format(settings_path: str):
@@ -107,9 +121,9 @@ def _sniff_format(settings_path: str):
     single-line/minified document).
     """
     try:
-        with open(settings_path) as f:
+        with open(settings_path, encoding="utf-8") as f:
             text = f.read()
-    except FileNotFoundError:
+    except (FileNotFoundError, UnicodeDecodeError):
         return 2, True
 
     trailing_newline = text.endswith("\n")
@@ -134,7 +148,7 @@ def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> Non
     parent = os.path.dirname(settings_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=indent)
         if trailing_newline:
             f.write("\n")

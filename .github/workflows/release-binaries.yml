@@ -37,7 +37,15 @@ jobs:
       run:
         shell: bash
     steps:
+      # The TAG, not the default branch. release.sh builds the firmware from
+      # its own working tree at this tag and then dispatches this workflow; a
+      # bare checkout takes the default branch's HEAD instead, so the two
+      # halves of one release could be built from different source. The
+      # --version check below catches that only when the version happens to
+      # differ.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'

@@ -83,6 +83,25 @@ printf '%s' "$PAYLOAD" | $SH "$SHIM" >/dev/null 2>"$WORK/err4.txt"
 [ -s "$WORK/err4.txt" ] && fail "self-chain leaked: $(cat "$WORK/err4.txt")"
 ok "refuses to chain into itself"
 
+# 5b. ...including when the chain records the WINDOWS form. The installer
+#     writes "bash <path>" there, not "sh <path>", because Claude Code rewrites
+#     a status line command mentioning a .sh file otherwise. The guard compared
+#     the whole command line, so on Windows it could never match its own entry
+#     and the bounded one-extra-hop became unbounded.
+#
+#     Bounded here on purpose: a regression is an infinite fork, so the test
+#     has to be the thing that stops, not the shim.
+printf 'bash %s\n' "$SHIM" >"$HOME/.clauge/statusline-chain"
+printf '%s' "$PAYLOAD" | $SH "$SHIM" >/dev/null 2>&1 &
+shim_pid=$!
+sleep 3
+if kill -0 "$shim_pid" 2>/dev/null; then
+	kill -9 "$shim_pid" 2>/dev/null
+	fail "the bash-form self-reference recursed (alive after 3 s)"
+fi
+wait "$shim_pid" 2>/dev/null || true
+ok "refuses to chain into itself when the chain says bash, not sh"
+
 # 6. Same, with a path containing spaces -- the shim reconstructs shlex.quote's
 #    quoting in shell to recognise itself, and the two must agree byte for byte
 #    or the guard fails open exactly when the path is quoted.

@@ -51,22 +51,36 @@ def _window(rate_limits: dict, key: str):
     if not isinstance(w, dict):
         return -1.0, None
     try:
-        pct = float(w.get("used_percentage", 0.0))
-    except (TypeError, ValueError):
-        pct = 0.0
+        pct = float(w["used_percentage"])
+    except (KeyError, TypeError, ValueError):
+        # Absent, null, or not a number -- all three are "we don't have it",
+        # and all three used to land on 0.0 here, which is the confident zero
+        # the paragraph above says this function exists to avoid. A window
+        # object present but missing its percentage is the likeliest shape of
+        # a payload change, so it is the case worth getting right.
+        pct = -1.0
     resets = w.get("resets_at")
     return pct, resets if isinstance(resets, (int, float)) else None
 
 
 def _secs_until(resets_at, now_epoch: float) -> int:
-    """Seconds until `resets_at`. -1 when unknown.
+    """Seconds until `resets_at`. -1 when unknown or already past.
 
     -1 rather than 0 for missing input: 0 renders as "resets now", which is a
     confident lie. -1 lets the display say "--".
+
+    And -1 rather than 0 for a reset that has ALREADY passed, which is not a
+    presentation choice. usage_view.c treats a countdown of exactly 0 as "this
+    window just rolled over" and zeroes the percentage with it -- correct for
+    the firmware's own countdown reaching zero, and wrong for us, because the
+    only payload that reaches here with a past reset is a stale one, and
+    _rolled_over() deliberately refuses to zero those: usage may have happened
+    from claude.ai or the phone since. Sending 0 handed the board the very
+    decision this module declined to make, and it wiped the last-known numbers.
     """
-    if resets_at is None:
+    if resets_at is None or resets_at <= now_epoch:
         return -1
-    return max(0, int(resets_at - now_epoch))
+    return int(resets_at - now_epoch)
 
 
 def _window_has_reset(resets_at, now_epoch: float) -> bool:

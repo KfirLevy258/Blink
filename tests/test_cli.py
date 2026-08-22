@@ -223,3 +223,36 @@ def test_uninstall_reports_removed_when_it_worked(tmp_path, capsys):
     assert rc == 0
     assert "could not be removed" not in out
     assert not os.path.exists(cli.bin_dir())
+
+
+def test_install_refuses_to_touch_a_settings_file_that_will_not_parse(
+        tmp_path, capsys):
+    """Treating unparseable JSON as {} would write a fresh settings.json over
+    whatever the customer was halfway through editing."""
+    claude = tmp_path / ".claude"
+    claude.mkdir(exist_ok=True)
+    broken = '{"statusLine": {"command": "sh /their/bar.sh",}}'   # trailing comma
+    (claude / "settings.json").write_text(broken)
+
+    rc = cli.main(["install"])
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "not valid JSON" in out
+    assert "Nothing was changed" in out
+    assert (claude / "settings.json").read_text() == broken
+    assert not os.path.exists(cli.bin_dir()), "it installed anyway"
+
+
+def test_uninstall_finishes_even_when_settings_will_not_parse(tmp_path, capsys):
+    """The login service is removed before this step, so stopping here would
+    leave the machine half-undone."""
+    cli.main(["install"])
+    (tmp_path / ".claude" / "settings.json").write_text("{ not json")
+
+    rc = cli.main(["uninstall"])
+    out = capsys.readouterr().out
+
+    assert "Left alone" in out
+    assert not os.path.exists(cli.bin_dir()), "the binary survived"
+    assert rc == 0
