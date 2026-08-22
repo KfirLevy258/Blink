@@ -275,7 +275,18 @@ with-statusline | reinstall | spaced-home)
 		fail "uninstall left a statusLine behind" ;;
 esac
 [ ! -e "$SHIM" ] || fail "uninstall left the shim behind"
-[ ! -e "$HOME/.clauge/bin" ] || fail "uninstall left the binary behind"
+
+# Windows cannot delete a running executable, and the uninstaller usually IS
+# the executable -- the undo hint we print names the installed copy. So on
+# Windows the removal is handed to a detached cmd that waits for this process
+# to exit. Wait for it here rather than asserting instantly; on the other two
+# platforms the directory is already gone and this loop ends immediately.
+n=0
+while [ -e "$HOME/.clauge/bin" ] && [ "$n" -lt 30 ]; do
+	sleep 1
+	n=$((n + 1))
+done
+[ ! -e "$HOME/.clauge/bin" ] || fail "uninstall left the binary behind (waited ${n}s)"
 [ "$(cat "$HOME/.clauge/ota_signing_key_p256.pem")" = "PRIVATE KEY" ] ||
 	fail "uninstall destroyed the OTA signing key"
 ok "uninstall restored everything and kept the signing key"

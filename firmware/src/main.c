@@ -107,6 +107,14 @@ static void panel_fix_madctl(void)
 
 #endif /* CONFIG_CLAUGE_PANEL_PILOT */
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+/*
+ * Everything from here to the matching #endif belongs to the standalone WiFi
+ * flow -- provisioning, the setup AP, the sign-in exchange, the blind-radio
+ * retry. Every use of it is already inside the gate further down; only these
+ * declarations sat outside, which made a USB-only build emit six
+ * "defined but not used" warnings and hid anything genuine among them.
+ */
 /* Provisioning session state (one PKCE verifier per setup attempt). */
 static char verifier[OAUTH_VERIFIER_LEN];
 static char authorize_url[OAUTH_URL_LEN];
@@ -157,6 +165,7 @@ static __noinit uint32_t blind_magic;
  * flag only picks the honest reason to show on the setup form if that
  * join fails too. */
 static bool scan_said_absent;
+#endif /* CONFIG_CLAUGE_WIFI_MODE */
 
 /* ---- OTA boot-side: test-boot self-confirm, else MCUboot reverts ---- */
 

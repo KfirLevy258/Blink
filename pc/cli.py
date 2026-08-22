@@ -327,36 +327,53 @@ def _rm(path):
         pass
 
 
-def _remove_bin_dir(attempts=6) -> str:
-    """Delete ~/.clauge/bin, waiting for the daemon to let go of it first.
+def _remove_bin_dir(attempts=6):
+    """Delete ~/.clauge/bin. Returns (done, message).
 
-    This used to be one rmtree(ignore_errors=True) immediately after stopping
-    the service, and on Windows that is a race it loses: the daemon holds its
-    own .exe open, `schtasks /end` returns before the process has actually
-    exited, and the delete then fails -- silently, because ignore_errors swallows
-    it. Uninstall printed "removed" over a 12 MB binary that was still sitting
-    there, and the Scheduled Task was already gone, so nothing would ever clean
-    it up.
+    Straightforward everywhere but Windows, which will not delete a running
+    executable -- and here the executable is usually this one. The undo hint we
+    print says `~/.clauge/bin/clauge.exe uninstall`, so a customer following it
+    is asking a program to delete the file it is running from. The daemon can
+    be holding the same file too: `schtasks /end` returns before the process
+    has actually exited.
 
-    It stayed hidden until the daemon stopped crashing on startup (5eaa9e4): a
-    process that died instantly never held the file long enough to matter. Six
-    Windows scenarios went red in the same run that fixed it.
+    So: try, wait, try again, and if Windows still says no, hand the job to
+    something that will outlive us.
 
-    Reports failure rather than hiding it. An uninstall that cannot finish is
-    something the person running it needs to hear about.
+    This used to end with `taskkill /f /im clauge.exe`, which is worse than the
+    problem it was for -- the uninstaller has that image name, so it killed
+    itself, mid-uninstall, having already removed the Scheduled Task and the
+    status line. Every Windows scenario in CI exited non-zero with no output at
+    all, which is exactly what being terminated looks like.
     """
     for attempt in range(attempts):
         shutil.rmtree(bin_dir(), ignore_errors=True)
         if not os.path.exists(bin_dir()):
-            return "removed"
-        if attempt == attempts - 2 and sys.platform == "win32":
-            # Last resort before giving up. PyInstaller's onefile bootloader
-            # spawns a child that holds the same .exe, and ending the task
-            # does not always take it with it.
-            subprocess.run(["taskkill", "/f", "/im", os.path.basename(installed_bin())],
-                           capture_output=True)
+            return True, "removed"
         time.sleep(0.4 * (attempt + 1))
-    return "could not be removed -- something is still running from it"
+    if sys.platform == "win32":
+        return _schedule_windows_cleanup()
+    return False, "could not be removed -- something is still running from it"
+
+
+def _schedule_windows_cleanup():
+    """Let Windows delete the directory once nothing is running inside it.
+
+    A detached cmd that waits a few seconds and then removes the tree. By the
+    time it fires, this process has exited and released its own hold, and the
+    service stopped a moment ago has finished going away.
+
+    `ping -n 4 127.0.0.1` rather than `timeout /t`, which wants a console and
+    fails outright in a detached process that has no window.
+    """
+    script = 'ping -n 4 127.0.0.1 >nul & rmdir /s /q "{}"'.format(bin_dir())
+    DETACHED_NO_WINDOW = 0x00000008 | 0x08000000
+    try:
+        subprocess.Popen(["cmd", "/c", script],
+                         creationflags=DETACHED_NO_WINDOW, close_fds=True)
+    except Exception as e:
+        return False, f"could not be removed ({e})"
+    return True, "will be gone a moment after this window closes"
 
 
 # -------------------------------------------------------------------- install
@@ -490,10 +507,10 @@ def cmd_uninstall(_args) -> int:
               os.path.join(clauge_home(), "statusline.json.tmp"),
               os.path.join(clauge_home(), "pending_fw.json")):
         _rm(p)
-    removed = _remove_bin_dir()
-    print(removed)
+    done, message = _remove_bin_dir()
+    print(message)
     print()
-    if removed == "removed":
+    if done:
         print("Done. Nothing of Clauge's is left running.")
         return 0
     print("Everything else is undone, but that file is still there. Log out and")
