@@ -42,6 +42,32 @@ esac
 mkdir -p "$HOME"
 export HOME
 
+# Windows resolves ~ from USERPROFILE, not HOME, so setting HOME alone left
+# the binary installing into the runner's REAL profile while this script
+# asserted against a temporary one -- six scenarios failed for that and
+# foreign-uninstall PASSED for it, having checked a file nothing had touched.
+#
+# USERPROFILE also has to be in Windows form: the binary is native Windows
+# Python, and it echoes back paths in the shape it was given.
+NATIVE_HOME="$HOME"
+BINEXE="clauge"
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+	NATIVE_HOME=$(cygpath -w "$HOME")
+	USERPROFILE="$NATIVE_HOME"
+	export USERPROFILE
+	BINEXE="clauge.exe"
+	;;
+esac
+
+SEP="/"
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) SEP="\\" ;; esac
+
+# The path the binary will print and write, in its own form.
+native_settings() {
+	printf '%s%s.claude%ssettings.json' "$NATIVE_HOME" "$SEP" "$SEP"
+}
+
 # A stand-in for the customer's own status line: it writes a file when run, so
 # "their bar still renders" is checked by observing it actually run, not by
 # reading the chain file and assuming.
@@ -97,7 +123,10 @@ printf '== %s (HOME=%s)\n' "$SCENARIO" "$HOME"
 
 # ----------------------------------------------------------------- helpers --
 
-py() { python3 "$@"; }
+py() {
+	# The Windows runners ship `python`, not always `python3`.
+	if command -v python3 >/dev/null 2>&1; then python3 "$@"; else python "$@"; fi
+}
 
 json_get() {
 	py - "$(settings)" "$1" <<-'EOF'
@@ -147,7 +176,7 @@ fi
 # the file, the key and the way back, and do it before the first step runs.
 head -n "$(grep -n '^\[1/3\]' "$WORK/out.txt" | head -1 | cut -d: -f1)" \
 	"$WORK/out.txt" >"$WORK/disclosure.txt" 2>/dev/null || true
-grep -q "$(settings)" "$WORK/disclosure.txt" || fail "disclosure omits settings.json path"
+grep -qF "$(native_settings)" "$WORK/disclosure.txt" || fail "disclosure omits settings.json path"
 grep -q "statusLine.command" "$WORK/disclosure.txt" || fail "disclosure omits the key"
 grep -q "clauge uninstall" "$WORK/disclosure.txt" || fail "disclosure omits the undo"
 ok "disclosure precedes the first step and names file, key, undo"
@@ -170,8 +199,8 @@ ok "statusLine.command -> the installed copy"
 # The half no unit test reaches: the binary must copy ITSELF somewhere stable
 # and be runnable from there, because the login service names that path and
 # the customer is told they can delete the download.
-[ -x "$HOME/.clauge/bin/clauge" ] || fail "the binary did not install itself"
-"$HOME/.clauge/bin/clauge" status >/dev/null || fail "the installed copy does not run"
+[ -x "$HOME/.clauge/bin/$BINEXE" ] || fail "the binary did not install itself"
+"$HOME/.clauge/bin/$BINEXE" status >/dev/null || fail "the installed copy does not run"
 ok "binary installed itself and runs from ~/.clauge/bin"
 
 if [ "${CLAUGE_SKIP_SERVICE:-0}" != "1" ]; then
