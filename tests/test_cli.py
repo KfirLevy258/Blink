@@ -191,3 +191,35 @@ def test_run_forwards_an_explicit_port(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "claude_usage_bridge", FakeBridge)
     cli.main(["run", "--port", "/dev/cu.usbserial-1"])
     assert "--port" in seen["argv"] and "/dev/cu.usbserial-1" in seen["argv"]
+
+
+def test_uninstall_says_so_when_the_binary_will_not_go(tmp_path, monkeypatch,
+                                                       capsys):
+    """An uninstall that cannot finish must not report that it did.
+
+    On Windows the daemon holds its own .exe open and `schtasks /end` returns
+    before the process has exited, so the delete lost the race -- and
+    rmtree(ignore_errors=True) swallowed it, leaving a 12 MB binary behind
+    under a printed "removed". Six CI scenarios went red the moment the daemon
+    stopped crashing on startup and lived long enough to hold the file.
+    """
+    cli.main(["install"])
+    assert os.path.exists(cli.bin_dir())
+
+    monkeypatch.setattr(cli.shutil, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)   # no real waiting
+
+    rc = cli.main(["uninstall"])
+    out = capsys.readouterr().out
+    assert rc == 1, "a failed uninstall must not exit 0"
+    assert "could not be removed" in out
+    assert cli.bin_dir() in out, "it has to say which path to delete by hand"
+
+
+def test_uninstall_reports_removed_when_it_worked(tmp_path, capsys):
+    cli.main(["install"])
+    rc = cli.main(["uninstall"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "could not be removed" not in out
+    assert not os.path.exists(cli.bin_dir())

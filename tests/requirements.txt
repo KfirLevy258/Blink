@@ -7,3 +7,4 @@ pytest
 pyserial          # claude_usage_bridge imports serial at module scope
 numpy             # tests/bootanim/test_encoder.py -> tools/encode_bootanim.py
 pillow            # same module's other import, found the round after numpy
+ecdsa             # tests/pc/test_update.py signs a throwaway manifest with it

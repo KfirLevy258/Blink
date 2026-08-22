@@ -327,6 +327,38 @@ def _rm(path):
         pass
 
 
+def _remove_bin_dir(attempts=6) -> str:
+    """Delete ~/.clauge/bin, waiting for the daemon to let go of it first.
+
+    This used to be one rmtree(ignore_errors=True) immediately after stopping
+    the service, and on Windows that is a race it loses: the daemon holds its
+    own .exe open, `schtasks /end` returns before the process has actually
+    exited, and the delete then fails -- silently, because ignore_errors swallows
+    it. Uninstall printed "removed" over a 12 MB binary that was still sitting
+    there, and the Scheduled Task was already gone, so nothing would ever clean
+    it up.
+
+    It stayed hidden until the daemon stopped crashing on startup (5eaa9e4): a
+    process that died instantly never held the file long enough to matter. Six
+    Windows scenarios went red in the same run that fixed it.
+
+    Reports failure rather than hiding it. An uninstall that cannot finish is
+    something the person running it needs to hear about.
+    """
+    for attempt in range(attempts):
+        shutil.rmtree(bin_dir(), ignore_errors=True)
+        if not os.path.exists(bin_dir()):
+            return "removed"
+        if attempt == attempts - 2 and sys.platform == "win32":
+            # Last resort before giving up. PyInstaller's onefile bootloader
+            # spawns a child that holds the same .exe, and ending the task
+            # does not always take it with it.
+            subprocess.run(["taskkill", "/f", "/im", os.path.basename(installed_bin())],
+                           capture_output=True)
+        time.sleep(0.4 * (attempt + 1))
+    return "could not be removed -- something is still running from it"
+
+
 # -------------------------------------------------------------------- install
 
 
@@ -450,17 +482,24 @@ def cmd_uninstall(_args) -> int:
     print("      " + install_statusline.uninstall(settings_path(), shim_path()))
 
     print("[3/3] Files ... ", end="", flush=True)
-    # Only what install created. NOT ~/.clauge itself: it also holds the OTA
-    # signing key, which cannot be regenerated -- every board already flashed
-    # with its public half would stop accepting updates.
-    shutil.rmtree(bin_dir(), ignore_errors=True)
+    # Only what install created. NOT ~/.clauge itself: it also holds the two
+    # signing keys, which cannot be regenerated -- every board flashed with the
+    # first one's public half, and every app carrying the second one's, would
+    # stop accepting updates.
     for p in (shim_path(), os.path.join(clauge_home(), "statusline.json"),
-              os.path.join(clauge_home(), "statusline.json.tmp")):
+              os.path.join(clauge_home(), "statusline.json.tmp"),
+              os.path.join(clauge_home(), "pending_fw.json")):
         _rm(p)
-    print("removed")
+    removed = _remove_bin_dir()
+    print(removed)
     print()
-    print("Done. Nothing of Clauge's is left running.")
-    return 0
+    if removed == "removed":
+        print("Done. Nothing of Clauge's is left running.")
+        return 0
+    print("Everything else is undone, but that file is still there. Log out and")
+    print("back in, then delete it by hand:")
+    print(f"  {bin_dir()}")
+    return 1
 
 
 def cmd_status(_args) -> int:
