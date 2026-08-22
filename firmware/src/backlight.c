@@ -59,6 +59,27 @@ void backlight_step(int dir)
 	apply();
 }
 
+void backlight_set(uint8_t pct)
+{
+	/* Snap rather than trust the caller: the levels are a fixed set, and a
+	 * value off the scale would persist and come back at the next boot as
+	 * a brightness the UI has no way to represent. */
+	int v = ((int)pct + 10) / 20 * 20;
+
+	if (v < 20) {
+		v = 20;
+	}
+	if (v > 100) {
+		v = 100;
+	}
+	if ((uint8_t)v == level) {
+		return;
+	}
+	level = (uint8_t)v;
+	cfg_set_bright_pct(level);
+	apply();
+}
+
 uint8_t backlight_get(void)
 {
 	return level;
