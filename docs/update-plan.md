@@ -336,6 +336,44 @@ release to a scratch repo, install a binary from it on a clean machine, and let
 it update itself. Every part of that has been tested, but not in that order and
 not against a real GitHub release.
 
+## 7a. What Windows cost, and why
+
+Not part of the plan; found by CI while landing it, and worth writing down
+because all three rounds looked like the same failure and were not.
+
+**The install path was fine. The uninstall path had never actually run.** For
+as long as the packaged daemon crashed on startup (fixed in 5eaa9e4) no process
+held `clauge.exe` long enough to matter, so uninstall's
+`rmtree(ignore_errors=True)` always appeared to work. Fixing the daemon made it
+stay alive, and six Windows scenarios went red in the same run.
+
+Three distinct problems wearing one error message:
+
+1. **The delete failed silently.** `ignore_errors=True` swallowed it and
+   uninstall printed "removed" over a 12 MB binary that was still there, with
+   the Scheduled Task already deleted so nothing would ever come back for it.
+   Now it retries, reports, and exits non-zero.
+2. **The fix killed the uninstaller.** `taskkill /f /im clauge.exe` as a last
+   resort matches the uninstaller, which has that image name. It terminated
+   itself mid-uninstall, after removing the task and the status line. The
+   symptom was every scenario exiting non-zero with no output at all -- which
+   is what being killed looks like, and is not what failing looks like.
+3. **Ending the task does not end the program.** PyInstaller's onefile
+   bootloader re-executes the same `.exe` as a child. `schtasks /end` stops the
+   process the task launched; the child keeps running the bridge loop and keeps
+   the file open. The daemon now records its pid and uninstall kills that pid
+   with `/t`.
+
+And one thing that cannot be fixed, only worked around: **Windows will not
+delete a running executable**, and the undo hint we print names the installed
+copy -- so a customer following it is asking a program to delete the file it is
+running from. Uninstall hands that case to a detached `cmd` that waits for this
+process to exit and then removes the directory.
+
+The lesson worth keeping: a bare "left the binary behind" cost three CI rounds
+of inference. `check_install.sh` now prints the process list and the task state
+on failure, which would have answered it the first time.
+
 ## 8. Tests
 
 | Where | What |
