@@ -161,6 +161,33 @@ def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> Non
     os.replace(tmp, settings_path)
 
 
+def _is_ours(current: str, expected: str = None) -> bool:
+    """Is this statusLine.command one WE wrote?
+
+    Two ways to be ours, and both are needed:
+
+      - it matches the marker file, which records the exact string the last
+        install wrote. Survives a shim path that has since changed, which the
+        text comparison alone cannot.
+      - it matches what we WOULD write for this shim path. Survives a marker
+        file that was lost -- deleted ~/.clauge, a restore from backup.
+
+    A foreign command can equal neither, short of a customer literally choosing
+    our exact former command text, which is the irreducible edge in any
+    exact-match scheme.
+
+    One function because it was three, written out longhand at each call site
+    with different operand orders and one of them missing the marker check.
+    Whether a command is ours decides whether it gets preserved or overwritten,
+    so three nearly-identical spellings of it is three chances to lose someone's
+    status line.
+    """
+    if not current:
+        return False
+    return current == _read_marker() or (expected is not None
+                                         and current == expected)
+
+
 def install(settings_path: str, shim_path: str) -> str:
     indent, trailing_newline = _sniff_format(settings_path)
     data = _load(settings_path)
@@ -189,8 +216,7 @@ def install(settings_path: str, shim_path: str) -> str:
     # literally choosing our exact former command text, which is the same
     # irreducible edge every exact-match scheme has) and is always chained.
     marker = _read_marker()
-    is_ours = previous == new_command or previous == marker
-    if previous and not is_ours:
+    if previous and not _is_ours(previous, new_command):
         with open(_chain_path(), "w") as f:
             f.write(previous + "\n")
         chained = f"chained previous statusline: {previous}"
@@ -254,10 +280,8 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
     if not current:
         return "No Clauge statusline installed; nothing to do."
 
-    marker = _read_marker()
     expected = statusline_command(shim_path) if shim_path else None
-    is_ours = current == marker or (expected is not None and current == expected)
-    if not is_ours:
+    if not _is_ours(current, expected):
         # Do not touch settings.json, the chain file, or the marker: we
         # cannot tell what this command is, and guessing wrong here is the
         # unrecoverable failure mode this function exists to avoid.
@@ -287,50 +311,6 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
     return msg
 
 
-def _default_shim_path() -> str:
-    """This repo's tools/clauge-statusline.sh, from this file's location."""
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(repo_root, "tools", "clauge-statusline.sh")
-
-
-def main(argv=None) -> int:
-    """Minimal CLI so install()/uninstall() are actually reachable. Full
-    user-facing docs (README section, etc.) are a separate task -- this just
-    gives them a command to run."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Install or remove the Clauge statusline shim in Claude "
-                     "Code's settings.")
-    parser.add_argument(
-        "--settings", default="~/.claude/settings.json",
-        help="Path to Claude Code's settings.json (default: %(default)s)")
-    parser.add_argument(
-        "--undo-hint", default=None,
-        help="Command to print as the way back (default: this module's own "
-             "uninstall). install.sh passes its own command, because from a "
-             "customer's side that is the undo that puts everything back, "
-             "not just this one key.")
-    parser.add_argument(
-        "--shim", default=None,
-        help="Path to the Clauge statusline shim "
-             "(default: this repo's tools/clauge-statusline.sh)")
-    sub = parser.add_subparsers(dest="action", required=True)
-    sub.add_parser("install", help="Install the Clauge statusline shim.")
-    sub.add_parser("uninstall", help="Remove the Clauge statusline shim.")
-
-    args = parser.parse_args(argv)
-    settings_path = os.path.expanduser(args.settings)
-    shim_path = args.shim or _default_shim_path()
-
-    if args.action == "install":
-        _announce(settings_path, shim_path, args.undo_hint)
-        print(install(settings_path, shim_path))
-    else:
-        print(uninstall(settings_path, shim_path))
-    return 0
-
-
 def _announce(settings_path: str, shim_path: str, undo_hint: str = None) -> None:
     """Say what is about to change, before changing it.
 
@@ -351,7 +331,7 @@ def _announce(settings_path: str, shim_path: str, undo_hint: str = None) -> None
     # already in the chain file. A disclosure that guesses at the branch is
     # worse than no disclosure: it is the one thing here nobody can verify
     # afterwards.
-    is_ours = previous == new_command or previous == _read_marker()
+    is_ours = _is_ours(previous, new_command)
     print("Clauge is about to change one setting in Claude Code.")
     print()
     print(f"  File     {settings_path}")
@@ -388,3 +368,11 @@ def _announce(settings_path: str, shim_path: str, undo_hint: str = None) -> None
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# There is no main() here any more, nor a __main__ guard, nor
+# _default_shim_path(). This module was once runnable on its own; pc/cli.py now
+# calls _load, _announce, install and uninstall directly, no test invoked the
+# entry point, and a second way to edit someone's settings.json -- with its own
+# argument parsing and its own default shim path -- is a second thing to keep
+# correct for no one's benefit.

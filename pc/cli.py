@@ -138,9 +138,14 @@ def claude_version():
     except Exception:
         return None, None
     head = out.split()[0] if out else ""
-    parts = []
-    for piece in head.split(".")[:3]:
-        parts.append(int(piece) if piece.isdigit() else 0)
+    pieces = head.split(".")[:3]
+    # Every component has to be a number, or we did not parse a version.
+    # Mapping the odd ones to 0 meant "claude version unknown" came back as
+    # (0, 0, 0) -- below every floor, so a perfectly good install was reported
+    # as TOO OLD, and callers testing `ver is None` never saw it coming.
+    if not pieces or not all(x.isdigit() for x in pieces):
+        return (out or None), None
+    parts = [int(x) for x in pieces]
     while len(parts) < 3:
         parts.append(0)
     return (out or None), tuple(parts)
@@ -296,6 +301,12 @@ def restart_service() -> str:
     if sys.platform == "win32":
         subprocess.run(["schtasks", "/end", "/tn", TASK_NAME],
                        capture_output=True)
+        # /end only reaches the instance the TASK launched. A daemon that
+        # replaced itself started its successor detached (see
+        # update.restart_from_daemon), and that one is not the task's -- so
+        # without this, /run below would add a second daemon competing for the
+        # same serial port.
+        _kill_recorded_daemon()
         r = subprocess.run(["schtasks", "/run", "/tn", TASK_NAME],
                            capture_output=True)
         return "restarted" if r.returncode == 0 else "could not restart it"
@@ -338,11 +349,8 @@ def _remove_service() -> str:
     return "nothing to remove"
 
 
-def _rm(path):
-    try:
-        os.remove(path)
-    except OSError:
-        pass
+# One definition, in pc/update.py. This module already imports it.
+_rm = update._rm
 
 
 def _kill_recorded_daemon():
@@ -639,8 +647,12 @@ def cmd_status(_args) -> int:
     print(f"App         {RELEASE_VERSION}")
 
     text, ver = claude_version()
-    if ver is None:
+    if text is None:
         print("Claude Code not found on PATH")
+    elif ver is None:
+        # It ran and said something we could not read as a version. Saying
+        # "not found" would send someone to reinstall a working install.
+        print(f"Claude Code {text} -- could not read a version from that")
     elif ver < MIN_CLAUDE:
         m = ".".join(str(n) for n in MIN_CLAUDE)
         print(f"Claude Code {text} -- TOO OLD, needs {m}+ (panel will stay blank)")
@@ -730,13 +742,13 @@ def main(argv=None) -> int:
     parser.add_argument("--version", action="version",
                         version=f"clauge {RELEASE_VERSION}")
     sub = parser.add_subparsers(dest="cmd")
-    sub.add_parser("install", help="set everything up (default)")
-    sub.add_parser("uninstall", help="put it all back")
-    sub.add_parser("status", help="is the panel getting data?")
-    sub.add_parser("update", help="fetch a newer version of this app")
-    run_p = sub.add_parser("run", help="run the bridge in the foreground")
+    sub.add_parser("install", help="Set everything up (this is the default)")
+    sub.add_parser("uninstall", help="Put it all back")
+    sub.add_parser("status", help="Is the panel getting data?")
+    sub.add_parser("update", help="Fetch a newer version of this app")
+    run_p = sub.add_parser("run", help="Run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
-                       help="serial port (default: find the board)")
+                       help="Serial port (default: find the board)")
     run_p.add_argument("--baud", type=int, default=115200)
     args = parser.parse_args(argv)
 

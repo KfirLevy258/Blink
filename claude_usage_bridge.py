@@ -155,6 +155,7 @@ def main(argv=None):
     # first check on every reconnect, turning a daily update check into one per
     # reconnection.
     next_update = time.monotonic() + UPDATE_FIRST_CHECK_S
+    report_failure = None       # a flash failure waiting for the board to return
 
     # Record the pid so uninstall can stop US specifically. Ending the login
     # service is not the same as ending this program, and killing by image name
@@ -240,7 +241,17 @@ def main(argv=None):
         # close it, write slot0, and let the outer reconnect loop pick the
         # board back up -- esptool resets it into the new image on the way out.
         class Reflashed(Exception):
-            pass
+            """Carries the reason when the write failed.
+
+            The port is closed by the time flash() returns and the board has
+            just been reset, so it cannot be told on this connection. The
+            reason rides out to the reconnect below and is delivered once the
+            board is back -- the first moment it can be shown at all.
+            """
+
+            def __init__(self, why=None):
+                super().__init__(why or "")
+                self.why = why
 
         def flash_image(blob, version):
             # Let the board paint its warning first. esptool resets it into
@@ -258,7 +269,7 @@ def main(argv=None):
             ok, why = ota_mod.flash(port, blob)
             print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
                   file=sys.stderr)
-            raise Reflashed()
+            raise Reflashed(None if ok else why)
 
         def self_update(version, artifact):
             """Replace this program, then hand the cable to the new one.
@@ -285,9 +296,11 @@ def main(argv=None):
 
         bridge = Bridge(write_msg=send, fetch_usage=fetch,
                         flash_image=flash_image,
+                        report_failure=report_failure,
                         self_update=self_update,
                         pending=update.PendingFirmware(
                             os.path.join(clauge_home, "pending_fw.json")))
+        report_failure = None   # handed to the Bridge above; never repeated
         next_poll = time.monotonic()
         # The rollback copy is kept until a board has actually talked to this
         # build. Running at all is weak evidence; holding a conversation with
@@ -331,9 +344,16 @@ def main(argv=None):
                         # Never take the bridge down over an update check. The
                         # gauge working is worth more than the gauge being new.
                         print(f"[update] check failed: {e}", file=sys.stderr)
-        except Reflashed:
+        except Reflashed as r:
             # Expected: the port is already closed and the board is rebooting
             # into what we just wrote. Give it a moment, then reconnect.
+            #
+            # Any failure reason travels with it. Without this the board sat
+            # on "keep the cable connected" until its own deadline expired and
+            # then blamed the timeout, while the daemon had the real reason
+            # ("chip has flash encryption", "esptool not found") in its log and
+            # no way to say it.
+            report_failure = r.why
             time.sleep(2)
             continue
         except (serial.SerialException, OSError) as e:

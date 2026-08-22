@@ -14,7 +14,10 @@ input=$(cat)
 # file would parse as malformed and blank the panel. Failures here (disk full,
 # unwritable HOME, ...) degrade silently -- Clauge's own capture is allowed to
 # be broken, but that must never print to the terminal on every render.
-mkdir -p "$HOME/.clauge" 2>/dev/null
+# Guarded, because this runs on EVERY status line render -- many times a
+# minute -- and an unconditional mkdir forks a process each time to create a
+# directory that has existed since the first one.
+[ -d "$HOME/.clauge" ] || mkdir -p "$HOME/.clauge" 2>/dev/null
 # 2>/dev/null must come BEFORE the '>' target on this line, not after: if
 # opening the target itself fails (e.g. the mkdir above also failed), the
 # shell reports that failure using whatever stderr was in effect when the '>'
@@ -45,7 +48,11 @@ printf '%s' "$input" 2>/dev/null > "$HOME/.clauge/statusline.json.tmp" &&
 # the failure this ordering exists to prevent.
 CHAIN="$HOME/.clauge/statusline-chain"
 if [ -s "$CHAIN" ]; then
-  chain_cmd=$(cat "$CHAIN")
+  # `read`, not `cat`: a builtin instead of a fork, on the same every-render
+  # path. The chain file is one line by construction (install writes exactly
+  # one), and IFS= plus -r keeps it byte-for-byte -- leading or trailing
+  # whitespace and backslashes intact, which a command string may contain.
+  IFS= read -r chain_cmd < "$CHAIN" || chain_cmd=""
   # Refuse to chain into ourselves. The installer has one ambiguous case (its
   # own marker lost, shim path changed since the last install) where it
   # deliberately records our own old shim as "previous" rather than silently
