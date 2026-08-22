@@ -252,3 +252,26 @@ def test_uninstall_honours_the_service_skip_hook(tmp_path):
     _run("install", tmp_path)
     out = _run("uninstall", tmp_path).stdout
     assert "Background service ... skipped" in out
+
+
+def test_the_service_does_not_point_into_the_download(tmp_path):
+    """The customer must be able to delete what they unpacked.
+
+    The login service names an absolute path and runs it at every login, so
+    pointing it into the checkout made that folder permanent -- quietly
+    undoing the reason the shim is copied in the first place.
+    """
+    _write_settings(tmp_path, {})
+    env_home = tmp_path
+    _run("install", env_home)
+    app = env_home / ".clauge" / "app"
+    assert (app / "claude_usage_bridge.py").exists()
+    assert (app / "pc" / "statusline_source.py").exists()
+    assert (app / "pc" / "requirements.txt").exists()
+
+
+def test_uninstall_removes_the_installed_daemon(tmp_path):
+    _write_settings(tmp_path, {})
+    _run("install", tmp_path)
+    _run("uninstall", tmp_path)
+    assert not (tmp_path / ".clauge" / "app").exists()

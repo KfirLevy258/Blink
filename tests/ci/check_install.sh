@@ -169,6 +169,16 @@ ok "statusLine.command -> the installed copy"
 	fail "venv cannot import pyserial/esptool"
 ok "venv built and imports pyserial + esptool"
 
+# The daemon has to run from its own copy, or the customer can never delete
+# what they downloaded -- the login service names an absolute path.
+[ -f "$HOME/.clauge/app/claude_usage_bridge.py" ] || fail "daemon not installed"
+[ -f "$HOME/.clauge/app/pc/statusline_source.py" ] || fail "pc package not installed"
+"$HOME/.clauge/venv/bin/python" -c "
+import sys; sys.path.insert(0, '$HOME/.clauge/app')
+import claude_usage_bridge, pc.statusline_source
+" || fail "the installed copy does not import on its own"
+ok "daemon installed as a copy and imports standalone"
+
 if [ "${CLAUGE_SKIP_SERVICE:-0}" != "1" ]; then
 	case "$(uname -s)" in
 	Darwin)
@@ -237,6 +247,7 @@ with-statusline | reinstall | spaced-home)
 esac
 [ ! -e "$SHIM" ] || fail "uninstall left the shim behind"
 [ ! -e "$HOME/.clauge/venv" ] || fail "uninstall left the venv behind"
+[ ! -e "$HOME/.clauge/app" ] || fail "uninstall left the daemon behind"
 [ "$(cat "$HOME/.clauge/ota_signing_key_p256.pem")" = "PRIVATE KEY" ] ||
 	fail "uninstall destroyed the OTA signing key"
 ok "uninstall restored everything and kept the signing key"

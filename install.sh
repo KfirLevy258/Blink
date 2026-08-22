@@ -25,6 +25,11 @@ SHIM_SRC="$ROOT/tools/clauge-statusline.sh"
 # their status line into a "No such file or directory" on every prompt. The
 # shim only ever touches $HOME, so it is self-contained wherever it lives.
 SHIM="$CLAUGE_HOME/clauge-statusline.sh"
+# The daemon is copied here too, for the same reason as the shim: the login
+# service names an absolute path and runs it at every login, so pointing it
+# into the download would mean the customer can never move or delete what
+# they unpacked. They should be able to throw it away the moment it is done.
+APP="$CLAUGE_HOME/app"
 LOG="$CLAUGE_HOME/bridge.log"
 SETTINGS="$HOME/.claude/settings.json"
 LABEL="com.clauge.bridge"
@@ -126,8 +131,9 @@ announce() {
 	echo "             a private Python environment for the bridge (pyserial,"
 	echo "             esptool). Your system Python is not modified."
 	echo "  Creates    $SHIM"
-	echo "             a copy of the status line shim, so moving this folder"
-	echo "             later cannot break your status line."
+	echo "  Creates    $APP"
+	echo "             copies of the status line shim and the bridge, so this"
+	echo "             folder can be deleted once setup is done."
 	echo "  Changes    $SETTINGS"
 	echo "             the statusLine.command key, and nothing else in the file."
 	if [ -n "$previous" ]; then
@@ -180,12 +186,20 @@ install_deps() {
 }
 
 install_shim() {
-	printf '[2/4] Status line shim ... '
+	printf '[2/4] Status line shim and daemon ... '
 	[ -f "$SHIM_SRC" ] || die "Missing $SHIM_SRC -- run this from the Clauge folder."
 	mkdir -p "$CLAUGE_HOME"
 	cp "$SHIM_SRC" "$SHIM"
 	chmod 755 "$SHIM"
-	echo "$SHIM"
+
+	# Replaced wholesale rather than merged: a leftover .py from an older
+	# version sitting beside a newer one is an import that silently wins.
+	rm -rf "$APP"
+	mkdir -p "$APP/pc"
+	cp "$ROOT/claude_usage_bridge.py" "$APP/"
+	cp "$ROOT"/pc/*.py "$APP/pc/"
+	cp "$ROOT/pc/requirements.txt" "$APP/pc/"
+	echo "$CLAUGE_HOME"
 }
 
 install_statusline() {
@@ -220,7 +234,7 @@ install_service() {
 	*)
 		echo "not supported on $OS"
 		echo "      Start the bridge by hand when you want it:"
-		echo "        $VENV/bin/python $ROOT/claude_usage_bridge.py"
+		echo "        $VENV/bin/python $APP/claude_usage_bridge.py"
 		;;
 	esac
 }
@@ -241,9 +255,9 @@ install_launchd() {
   <array>
     <string>$(xml_escape "$VENV/bin/python")</string>
     <string>-u</string>
-    <string>$(xml_escape "$ROOT/claude_usage_bridge.py")</string>
+    <string>$(xml_escape "$APP/claude_usage_bridge.py")</string>
   </array>
-  <key>WorkingDirectory</key><string>$(xml_escape "$ROOT")</string>
+  <key>WorkingDirectory</key><string>$(xml_escape "$APP")</string>
   <key>RunAtLoad</key><true/>
   <!-- The bridge exits when no board is attached, so KeepAlive is what makes
        "plug it in and it works" true: launchd restarts it, throttled to one
@@ -273,7 +287,7 @@ install_systemd() {
 	if ! command -v systemctl >/dev/null 2>&1; then
 		echo "no systemd here"
 		echo "      Start the bridge by hand when you want it:"
-		echo "        $VENV/bin/python $ROOT/claude_usage_bridge.py"
+		echo "        $VENV/bin/python $APP/claude_usage_bridge.py"
 		return 0
 	fi
 	mkdir -p "$UNIT_DIR"
@@ -284,8 +298,8 @@ Description=Clauge USB bridge
 [Service]
 # Restart=always for the same reason as KeepAlive on macOS: the bridge exits
 # when no board is attached, and this is what makes plugging one in enough.
-ExecStart=$VENV/bin/python -u $ROOT/claude_usage_bridge.py
-WorkingDirectory=$ROOT
+ExecStart=$VENV/bin/python -u $APP/claude_usage_bridge.py
+WorkingDirectory=$APP
 Restart=always
 RestartSec=10
 
@@ -388,7 +402,7 @@ do_uninstall() {
 	# holds the OTA signing key (~/.clauge/ota_signing_key_p256.pem), which is
 	# not ours to delete and cannot be regenerated -- every board already flashed
 	# with its public half would stop accepting updates.
-	rm -rf "$VENV"
+	rm -rf "$VENV" "$APP"
 	rm -f "$SHIM" "$CLAUGE_HOME/statusline.json" "$CLAUGE_HOME/statusline.json.tmp"
 	echo "removed"
 	echo
