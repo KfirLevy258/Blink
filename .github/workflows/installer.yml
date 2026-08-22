@@ -24,12 +24,15 @@ defaults:
     shell: bash
 
 concurrency:
-  # Keyed on the PULL REQUEST where there is one, and only otherwise on the
-  # ref. Both `push` and `pull_request` fire for a push to a branch with an
-  # open PR, and github.ref differs between them (refs/heads/X against
-  # refs/pull/N/merge), so keying on the ref alone put them in separate groups
-  # and ran all 38 jobs twice for every push on this branch.
-  group: installer-${{ github.event.pull_request.number || github.ref }}
+  # Keyed on the BRANCH NAME, which is the one thing both events agree on.
+  #
+  # A push to a branch with an open PR fires `push` and `pull_request` both.
+  # github.ref differs between them (refs/heads/X against refs/pull/N/merge)
+  # and so does the PR number, which is null on a push -- so keying on either
+  # put the two events in different groups and ran all 38 jobs twice. Observed
+  # doing exactly that after the first attempt at this: two successful runs,
+  # same commit, same minute.
+  group: installer-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
