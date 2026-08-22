@@ -6,10 +6,24 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
 REPO="${OTA_REPO:-KfirLevy258/Clauge}"
+REPO_URL="${OTA_REPO_URL:-https://github.com/$REPO.git}"
 TAG="v$(sed -n 's/#define CLAUGE_FW_VERSION "\(.*\)"/\1/p' "$ROOT/firmware/src/version.h")"
 
 VER="${TAG#v}"
 [ -n "$VER" ] || { echo "FATAL: no version in version.h"; exit 1; }
+# The tag has to exist on the remote BEFORE the draft is created.
+#
+# A draft release does not create its git tag -- GitHub only writes the tag
+# when the release is published. So a draft for a tag nobody pushed leaves
+# release-binaries.yml checking out a ref that does not exist, four jobs deep
+# and forty minutes in, with an error that says nothing about tagging.
+git -C "$ROOT" ls-remote --exit-code --tags "$REPO_URL" "refs/tags/$TAG" \
+	>/dev/null 2>&1 || {
+	echo "FATAL: $TAG is not on the remote." >&2
+	echo "       The draft release would name a tag that does not exist, and" >&2
+	echo "       the binary build checks that tag out. Push it first:" >&2
+	echo "         git tag $TAG && git push origin $TAG" >&2
+	exit 1; }
 # The firmware and the daemon ship from this one tag, so they must already
 # agree about what it is. Cheaper to fail here than to publish a release whose
 # two halves introduce themselves differently.
