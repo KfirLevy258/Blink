@@ -1586,16 +1586,11 @@ static void build_panel(lv_obj_t *parent_scr)
 	 * 5.3 mm, sitting 5 px apart, so one press covered both and which one
 	 * fired came down to where the pressure centroid landed.
 	 */
-	lv_obj_t *seam = lv_obj_create(panel);
-
-	lv_obj_set_size(seam, 3, 40);
-	lv_obj_align(seam, LV_ALIGN_TOP_LEFT, 0, 0);
-	lv_obj_set_style_bg_color(seam, COL_GREEN, 0);
-	lv_obj_set_style_bg_opa(seam, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_width(seam, 0, 0);
-	lv_obj_set_style_radius(seam, 0, 0);
-	lv_obj_clear_flag(seam, LV_OBJ_FLAG_SCROLLABLE);
-
+	/* No green edge seam here. It existed as a left-edge cue back when the
+	 * back control was a bare chevron that was easy to miss; the control is
+	 * now a bordered 60 x 36 button that announces itself, so the seam was
+	 * a second hint for something that no longer needs one -- and green is
+	 * the gauge's "live" colour, which it was quietly spending. */
 	mk_back(panel, back_cb);
 
 	lv_obj_t *title = lv_label_create(panel);
