@@ -60,7 +60,13 @@ jobs:
         env:
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          built=$(ls dist/clauge dist/clauge.exe 2>/dev/null | head -1)
+          # Not `ls a b | head -1`: ls exits non-zero when one operand is
+          # missing, and this workflow runs with -e -o pipefail, so the job
+          # died here before doing anything. It passed on Windows only because
+          # MSYS resolves `dist/clauge` to `dist/clauge.exe`, which is why the
+          # one platform that cannot run the binary was the one that agreed.
+          built=dist/clauge
+          [ -f "$built" ] || built=dist/clauge.exe
           got=$("$built" --version)
           echo "$got"
           case "$got" in
@@ -80,7 +86,8 @@ jobs:
 
       - name: name it for the platform
         run: |
-          built=$(ls dist/clauge dist/clauge.exe 2>/dev/null | head -1)
+          built=dist/clauge
+          [ -f "$built" ] || built=dist/clauge.exe
           mv "$built" "dist/clauge-${{ matrix.label }}"
 
       - name: attach to the release

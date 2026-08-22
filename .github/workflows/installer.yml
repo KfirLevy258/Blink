@@ -9,7 +9,13 @@ on:
   # the installer breaks on Linux means finding out late, and the work that
   # produced this file was several commits deep on a branch before anything
   # could have run at all.
+  #
+  # Branches only, though. A bare `push:` includes TAG pushes, so cutting a
+  # release ran this entire 38-job suite against the same commit CI had
+  # already checked minutes earlier -- seen doing exactly that during the
+  # release rehearsal.
   push:
+    branches: ['**']
   workflow_dispatch:
 
 # Git Bash on the Windows runners, so one script works on all three.
