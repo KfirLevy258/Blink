@@ -30,7 +30,13 @@ jobs:
       matrix:
         include:
           - {os: macos-latest, label: macos-arm64}
-          - {os: macos-13, label: macos-x86_64}
+          # macos-15-intel, not macos-13. The macos-13 label no longer gets a
+          # runner assigned on this account -- it sat queued with an empty
+          # runner_name for the whole rehearsal, and the installer workflow hit
+          # the same thing months ago and worked around it by dropping the job
+          # rather than fixing the label. Intel Macs are still a supported
+          # target; the runner that builds for them just moved.
+          - {os: macos-15-intel, label: macos-x86_64}
           - {os: ubuntu-latest, label: linux-x86_64}
           - {os: windows-latest, label: windows-x86_64.exe}
     defaults:
