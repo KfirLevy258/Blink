@@ -46,6 +46,23 @@ static double last_s_pct = -1;	/* latest numbers, for the near-limit hint */
 static double last_w_pct = -1;
 static enum usage_status last_status = USAGE_STATUS_DISCONNECTED;
 
+/*
+ * Per-model weekly windows -- and the long-press card that picks between
+ * them -- exist only in standalone WiFi mode. That mode reads Claude's usage
+ * endpoint directly and gets a per-model breakdown with it. The USB path
+ * gets its numbers from Claude Code's status line, and that payload carries
+ * the two overall windows and nothing else; pc/statusline_source.py sends an
+ * empty models list because there is nothing to put in one.
+ *
+ * So on a USB unit the card offered a choice between a real number and a
+ * permanent "--%" -- and because the choice is kept in NVS, choosing the
+ * empty one stuck across reboots, leaving a gauge reading "--%" for good
+ * with no route back that anyone would find. Compiled out rather than
+ * disabled: a control that cannot do anything is worse than no control.
+ */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#define HAVE_PER_MODEL 1
+
 /* Long-press peek: a card of per-model weekly numbers that STAYS up -- tap
  * a row to point the weekly gauge at that model, tap anywhere else (or wait
  * out the timer) to dismiss. v1 hid it on finger-up, which on this jittery
@@ -59,13 +76,25 @@ static int weekly_sel;			/* 0 all models, 1 fable */
 static int peek_ttl;			/* auto-hide countdown, 0 = idle */
 static int64_t peek_shown_ms;
 static double model_fable = -1;
+#else
+#define HAVE_PER_MODEL 0
+#endif
 
 static void render_weekly(void);
 static void render_age(void);
+#if HAVE_PER_MODEL
 static void peek_fill(void);
+#endif
 
 void usage_view_set_models(double fable_pct)
 {
+#if !HAVE_PER_MODEL
+	/* Nothing on this build produces a per-model number: the daemon sends
+	 * no such key and proto.c passes its -1 default straight through.
+	 * Kept as a symbol so both data paths still share one header. */
+	ARG_UNUSED(fable_pct);
+}
+#else
 	/* Per-model windows reset with the overall weekly, so a zero weekly
 	 * means the fable number is stale too. Derive that from the weekly
 	 * state itself (last_w_pct) rather than a flag set by an earlier call,
@@ -92,6 +121,7 @@ void usage_view_set_models(double fable_pct)
 		}
 	}
 }
+#endif /* HAVE_PER_MODEL */
 
 /* One CONNECTING screen for every boot, USB and standalone alike: a segmented
  * bar that fills green as the worker gets through it, current step named
@@ -161,6 +191,7 @@ static void render_countdown(struct gauge *g)
 	lv_label_set_text(g->countdown, buf);
 }
 
+#if HAVE_PER_MODEL
 static const char *const sel_name[PEEK_ROWS] = {
 	"WEEKLY 7d", "WEEKLY FABLE",
 };
@@ -170,15 +201,25 @@ static double sel_pct(int sel)
 {
 	return sel == 1 ? model_fable : last_w_pct;
 }
+#endif
 
 /* The weekly arc shows whichever source the peek card selected. The
  * countdown stays the overall weekly reset -- the per-model windows reset
  * with it. */
 static void render_weekly(void)
 {
+#if HAVE_PER_MODEL
 	double pct = sel_pct(weekly_sel);
 
 	lv_label_set_text(weekly.name, sel_name[weekly_sel]);
+#else
+	/* One window, so the gauge never needs to say which one it is showing
+	 * -- but it still says it, because "WEEKLY 7d" is the honest name for
+	 * the number under it. */
+	double pct = last_w_pct;
+
+	lv_label_set_text(weekly.name, "WEEKLY 7d");
+#endif
 	if (pct < 0) {
 		lv_label_set_text(weekly.pct, "--%");
 		lv_arc_set_value(weekly.arc, 0);
@@ -193,6 +234,7 @@ static void render_weekly(void)
 	lv_obj_set_style_arc_color(weekly.arc, severity(pct), LV_PART_INDICATOR);
 }
 
+#if HAVE_PER_MODEL
 static void peek_fill(void)
 {
 	for (int i = 0; i < PEEK_ROWS; i++) {
@@ -247,6 +289,7 @@ static void peek_scrim_cb(lv_event_t *e)
 		peek_hide();
 	}
 }
+#endif /* HAVE_PER_MODEL */
 
 static lv_obj_t *gauge_scr;
 
@@ -257,8 +300,10 @@ void usage_view_deinit(void)
 	built = false;
 	boot_n = 0;
 	boot_active = -1;
+#if HAVE_PER_MODEL
 	peek = NULL;
 	peek_ttl = 0;
+#endif
 	if (gauge_scr) {
 		lv_obj_del(gauge_scr);
 		gauge_scr = NULL;
@@ -340,6 +385,7 @@ void usage_view_init(void)
 	lv_obj_set_style_text_color(chev, COL_GREY, 0);
 	lv_obj_align(chev, LV_ALIGN_LEFT_MID, 3, 0);
 
+#if HAVE_PER_MODEL
 	/* The peek card, hidden until a long press. Created before the
 	 * takeover overlay, which therefore keeps it unreachable while there
 	 * is no data to peek at. */
@@ -387,6 +433,7 @@ void usage_view_init(void)
 	if (weekly_sel >= PEEK_ROWS) {
 		weekly_sel = 0;		/* stale NVS from an older layout */
 	}
+#endif /* HAVE_PER_MODEL */
 	render_weekly();
 
 	/* With no host there is genuinely nothing to show, so take over the whole
@@ -559,13 +606,17 @@ static void expire_weekly(void)
 	weekly.resets_in_s = -1;
 	render_countdown(&weekly);
 	last_w_pct = 0;
+#if HAVE_PER_MODEL
 	if (model_fable >= 0) {
 		model_fable = 0;	/* per-model windows reset with the weekly */
 	}
+#endif
 	render_weekly();
+#if HAVE_PER_MODEL
 	if (peek && !lv_obj_has_flag(peek, LV_OBJ_FLAG_HIDDEN)) {
 		peek_fill();
 	}
+#endif
 }
 
 void usage_view_tick_1s(void)
@@ -595,9 +646,11 @@ void usage_view_tick_1s(void)
 		render_age();
 	}
 
+#if HAVE_PER_MODEL
 	if (peek_ttl > 0 && --peek_ttl == 0) {
 		peek_hide();
 	}
+#endif
 }
 
 void usage_view_set_status(enum usage_status status)
@@ -632,6 +685,7 @@ void usage_view_set_status(enum usage_status status)
 		} else if (last_w_pct >= 95.0) {
 			text = "Weekly almost used up";
 			tc = COL_RED;
+#if HAVE_PER_MODEL
 		} else if (model_fable >= 99.5) {
 			text = "Fable weekly used up";
 			tc = COL_RED;
@@ -640,6 +694,7 @@ void usage_view_set_status(enum usage_status status)
 			 * run dry while the overall weekly still looks calm. */
 			text = "Fable weekly almost used up";
 			tc = COL_RED;
+#endif
 		} else {
 			text = "";
 		}
