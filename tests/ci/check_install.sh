@@ -178,7 +178,8 @@ head -n "$(grep -n '^\[1/3\]' "$WORK/out.txt" | head -1 | cut -d: -f1)" \
 	"$WORK/out.txt" >"$WORK/disclosure.txt" 2>/dev/null || true
 grep -qF "$(native_settings)" "$WORK/disclosure.txt" || fail "disclosure omits settings.json path"
 grep -q "statusLine.command" "$WORK/disclosure.txt" || fail "disclosure omits the key"
-grep -q "clauge uninstall" "$WORK/disclosure.txt" || fail "disclosure omits the undo"
+grep -qF "$BINEXE uninstall" "$WORK/disclosure.txt" ||
+	fail "disclosure omits the undo"
 ok "disclosure precedes the first step and names file, key, undo"
 
 SHIM="$HOME/.clauge/clauge-statusline.sh"
