@@ -635,12 +635,18 @@ void usage_view_set_status(enum usage_status status)
 	case USAGE_STATUS_STALE:
 		c = COL_AMBER;
 		tc = COL_AMBER;
-		text = "rate-limited - showing last known";
+		/* Not "rate-limited": this state means the daemon has no fresh
+		 * reading, which is usually its owner being away from Claude Code.
+		 * The old wording is from when a 429 from the usage endpoint was
+		 * the only way to get here; that endpoint is gone, and telling
+		 * someone they are rate-limited when they are not is worse than
+		 * saying nothing. */
+		text = "Reading is old - showing last known";
 		break;
 	case USAGE_STATUS_ERROR:
 		c = COL_RED;
 		tc = COL_RED;
-		text = "error - showing last known";
+		text = "Error - showing last known";
 		break;
 	default:
 		/* Two very different situations wear the same status. */

@@ -68,10 +68,24 @@ def test_an_abandoned_payload_is_marked_stale():
 
 
 def test_reset_countdown_never_goes_negative():
+    """A past resets_at clamps to 0, never a negative countdown.
+
+    Tested on _secs_until directly. It used to be reachable through
+    map_statusline with a fresh payload, but a fresh reading past its reset is
+    now carried over to 0% with an unknown reset time -- so the clamp is only
+    exercised on a stale payload, which the case below covers.
+    """
+    assert ss._secs_until(1_787_100_000, 1_787_200_000) == 0
+    assert ss._secs_until(1_787_300_000, 1_787_200_000) == 100_000
+    assert ss._secs_until(None, 1_787_200_000) == -1
+
+
+def test_a_stale_payload_still_clamps_its_countdown():
+    now = 1_787_200_000
     payload = {"rate_limits": {"five_hour": {"used_percentage": 99.0,
-                                             "resets_at": 1_787_100_000}}}
-    msg = ss.map_statusline(payload, now_epoch=1_787_200_000,
-                            mtime_epoch=1_787_200_000)
+                                             "resets_at": now - 100_000}}}
+    msg = ss.map_statusline(payload, now_epoch=now, mtime_epoch=now - 3 * 86400)
+    assert msg["stale"] is True
     assert msg["session_resets_in_s"] == 0
 
 
@@ -122,14 +136,53 @@ def test_a_short_pause_is_not_stale():
     assert msg["stale"] is False
 
 
-def test_a_reading_whose_window_has_reset_is_stale_however_fresh():
-    """Age cannot catch this: a reading taken a minute before the reset is
-    wrong the moment the reset lands. It says 50% when usage is back at zero.
+def test_a_window_that_has_reset_reads_zero_rather_than_stale():
+    """A reading taken a minute before the reset says 50% when usage is back
+    at zero -- but "zero" is knowable, so report it instead of a warning.
+
+    The whole message used to be flagged stale here, which put the board in
+    its amber state until Claude Code next rendered. On a window that rolls
+    over overnight that is hours of a warning about nothing.
     """
     now = 1_000_000
     payload = {"rate_limits": {
         "five_hour": {"used_percentage": 50, "resets_at": now - 1},
         "seven_day": {"used_percentage": 20, "resets_at": now + 90000}}}
     msg = ss.map_statusline(payload, now, now - 5)     # five seconds old
+    assert msg["stale"] is False
+    assert msg["session_pct"] == 0.0
+    # Unknown, not guessed forward: the next window starts on the next
+    # message, so there is no honest time to show yet.
+    assert msg["session_resets_in_s"] == -1
+
+
+def test_a_reset_window_does_not_drag_down_the_other_one():
+    """The weekly figure was collateral damage: one window resetting marked
+    the entire message stale, including a seven-day reading that was fine.
+    """
+    now = 1_000_000
+    payload = {"rate_limits": {
+        "five_hour": {"used_percentage": 95, "resets_at": now - 1},
+        "seven_day": {"used_percentage": 70, "resets_at": now + 90000}}}
+    msg = ss.map_statusline(payload, now, now - 5)
+    assert msg["weekly_pct"] == 70
+    assert msg["weekly_resets_in_s"] == 90000
+    assert msg["stale"] is False
+
+
+def test_an_old_payload_past_its_reset_stays_stale_and_is_not_zeroed():
+    """The inverse case, and the reason _rolled_over() is gated on freshness.
+
+    A three-day-old file also has a long-past resets_at, but any amount of
+    usage may have happened since it was written -- from claude.ai, from the
+    phone -- so 0% would be the confident lie this module exists to avoid.
+    """
+    now = 1_000_000
+    payload = {"rate_limits": {
+        "five_hour": {"used_percentage": 50, "resets_at": now - 200_000},
+        "seven_day": {"used_percentage": 20, "resets_at": now - 100_000}}}
+    msg = ss.map_statusline(payload, now, now - 3 * 86400)
     assert msg["stale"] is True
+    assert msg["session_pct"] == 50      # left exactly as found
+    assert msg["weekly_pct"] == 20
 

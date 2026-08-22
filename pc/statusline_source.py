@@ -80,17 +80,49 @@ def _window_has_reset(resets_at, now_epoch: float) -> bool:
     return resets_at is not None and now_epoch >= resets_at
 
 
+def _rolled_over(pct: float, resets_at, now_epoch: float):
+    """Carry a window across its own reset instead of disowning the reading.
+
+    A window that has just reset is at 0%. That is not an estimate -- it is
+    what resetting means -- so there is a better answer available than "this
+    number may be wrong", which is what marking the message stale says.
+
+    It matters because the payload is only rewritten when Claude Code renders
+    its status line. Between a reset at 03:00 and its owner sitting down at
+    09:00, the old behaviour left the panel amber for six hours, announcing a
+    problem that did not exist. Observed 2026-08-22: a five-hour window rolled
+    over, the board flagged the whole message stale, and the weekly figure --
+    which was perfectly good -- was dragged down with it.
+
+    The reset time goes back to unknown rather than being guessed forward: the
+    next five-hour window does not start until the next message, so there is
+    no honest number to put there until Claude Code tells us one.
+
+    Only ever called on a payload that is otherwise fresh. On an old one the
+    same reasoning inverts -- a three-day-old file has a long-past resets_at
+    and any amount of usage may have happened since, so 0% would be the lie.
+    """
+    if pct < 0 or not _window_has_reset(resets_at, now_epoch):
+        return pct, resets_at
+    return 0.0, None
+
+
 def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
     """Convert a statusline payload into a 'usage' protocol message."""
     rate_limits = payload.get("rate_limits") or {}
     session_pct, session_resets = _window(rate_limits, "five_hour")
     weekly_pct, weekly_resets = _window(rate_limits, "seven_day")
 
-    stale = (
-        (now_epoch - mtime_epoch) > STALE_AFTER_S
-        or _window_has_reset(session_resets, now_epoch)
-        or _window_has_reset(weekly_resets, now_epoch)
-    )
+    # Staleness is age, and only age. A window resetting used to set this too,
+    # which conflated two different facts: "we cannot vouch for this reading"
+    # and "this reading has been superseded by a zero we can compute". The
+    # second has a real answer, so it gets one -- see _rolled_over().
+    stale = (now_epoch - mtime_epoch) > STALE_AFTER_S
+    if not stale:
+        session_pct, session_resets = _rolled_over(session_pct, session_resets,
+                                                   now_epoch)
+        weekly_pct, weekly_resets = _rolled_over(weekly_pct, weekly_resets,
+                                                 now_epoch)
 
     # No per-model rows: the statusline payload has no per-model breakdown.
     return protocol.usage(
