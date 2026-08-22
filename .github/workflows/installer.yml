@@ -99,7 +99,42 @@ jobs:
         with:
           python-version: '3.11'
       - run: sh tools/build_binary.sh
-      - run: ./dist/clauge* status || true     # smoke: it starts at all
+
+      # The old smoke test was `./dist/clauge* status || true`, which asserted
+      # nothing: it swallowed every failure, and on the Windows runner the
+      # default shell could not even expand that glob, so it had never run
+      # there at all.
+      #
+      # It matters more now that build_binary.sh passes --exclude-module. A
+      # wrong exclusion does not fail the build -- it produces a binary that
+      # dies on the first import of the thing that was dropped, which for the
+      # update path is a signature check and for the flash path is esptool.
+      # Neither is reached by `status`, so each is driven directly below.
+      - name: smoke test the binary
+        shell: bash
+        run: |
+          set -eu
+          bin=dist/clauge
+          [ -f "$bin" ] || bin=dist/clauge.exe
+          echo "size: $(du -h "$bin" | cut -f1)"
+
+          "$bin" --version
+          "$bin" status
+
+          # Drives fetch_signed_manifest() -> verify_signature(), the one
+          # code path that imports ecdsa, against the live release feed.
+          #
+          # Not a bare exit-0 check: an unreachable feed is a GitHub outage,
+          # not a defect in this binary, and failing CI for it would make
+          # this job flaky for a reason it cannot fix. A binary that cannot
+          # verify a signature does not print either of these lines -- it
+          # raises, and `set -e` catches that.
+          out=$("$bin" update 2>&1) || true
+          echo "$out"
+          case "$out" in
+            *"Already up to date"*|*"Could not read the release feed"*) ;;
+            *) echo "FATAL: update path did not complete" >&2; exit 1 ;;
+          esac
       - uses: actions/upload-artifact@v4
         with:
           name: clauge-${{ matrix.os }}

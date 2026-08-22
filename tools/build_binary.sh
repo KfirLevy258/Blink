@@ -27,6 +27,39 @@ VBIN="$BUILD/bin"
 # customer's install can no longer drift with whatever PyPI serves that day.
 "$VBIN/python" -m pip install --quiet pyinstaller -r "$ROOT/pc/requirements.txt"
 
+# Packaging and test machinery that PyInstaller collects on its own and this
+# program never imports. It only ever showed up on Linux -- 323 modules the
+# macOS build did not have, led by setuptools at 1.1 MB -- which is why the
+# Linux download was twice the size of the others for the same program.
+#
+# Nothing under pc/ imports any of these, and neither does esptool, pyserial
+# or ecdsa (checked against the pinned versions). asyncio and multiprocessing
+# are also collected and also unused, but they are left in: together they are
+# 0.4 MB, and unlike the list below they are plausible lazy imports for some
+# future dependency, where a wrong exclusion surfaces as a crash on a
+# customer's machine rather than at build time.
+set -- \
+	--exclude-module setuptools \
+	--exclude-module pkg_resources \
+	--exclude-module distutils \
+	--exclude-module packaging \
+	--exclude-module unittest \
+	--exclude-module doctest \
+	--exclude-module pydoc \
+	--exclude-module tkinter
+
+# The Linux libpython ships with its debug symbols: 23 MB unstripped, against
+# 7 MB for the macOS framework, which Apple strips before shipping. Stripping
+# it costs nothing a customer can observe -- there is no debugger on the other
+# end of this download -- and is most of the remaining difference.
+#
+# Linux only. PyInstaller warns that --strip can produce unusable binaries on
+# macOS, where it would also invalidate a code signature, and there is nothing
+# for it to do on Windows.
+if [ "$(uname -s)" = "Linux" ]; then
+	set -- "$@" --strip
+fi
+
 cd "$ROOT"
 "$VBIN/pyinstaller" \
 	--onefile \
@@ -39,6 +72,7 @@ cd "$ROOT"
 	--hidden-import claude_usage_bridge \
 	--hidden-import ecdsa \
 	--hidden-import serial.tools.list_ports \
+	"$@" \
 	--noconfirm --clean \
 	clauge_main.py >"$BUILD/pyinstaller.log" 2>&1 || {
 		tail -30 "$BUILD/pyinstaller.log" >&2
