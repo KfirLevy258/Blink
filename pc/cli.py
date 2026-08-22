@@ -46,7 +46,10 @@ def bin_dir():
 
 
 def installed_bin():
-    return os.path.join(bin_dir(), "clauge")
+    # .exe on Windows: without the extension the copy is not executable, and
+    # the Scheduled Task would register a path Windows refuses to launch.
+    name = "clauge.exe" if sys.platform == "win32" else "clauge"
+    return os.path.join(bin_dir(), name)
 
 
 def shim_path():
@@ -68,6 +71,11 @@ def plist_path():
 def unit_path():
     return os.path.join(_home(), ".config", "systemd", "user",
                         "clauge-bridge.service")
+
+
+# Windows has no launchd and no systemd. A Scheduled Task with an at-logon
+# trigger is the equivalent that needs no admin rights and no service wrapper.
+TASK_NAME = "Clauge bridge"
 
 # The oldest Claude Code that carries usage figures in its status line payload.
 # 2.1.0 does not carry rate_limits at all; 2.1.100 does. Below this every step
@@ -223,6 +231,18 @@ def _install_service() -> str:
         if r.returncode == 0:
             return "running (launchd)"
         return f"installed, but could not be started: launchctl bootstrap gui/{uid} {plist_path()}"
+    if sys.platform == "win32":
+        # /f overwrites a task from an earlier install rather than failing.
+        # /sc onlogon needs no admin rights; a Windows service would.
+        r = subprocess.run(
+            ["schtasks", "/create", "/f", "/tn", TASK_NAME, "/sc", "onlogon",
+             "/tr", f'"{installed_bin()}" run'],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            return f"could not register a Scheduled Task: {r.stderr.strip()[:120]}"
+        # /sc onlogon does not start it now, only at the next logon.
+        subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True)
+        return "running (Scheduled Task)"
     if sys.platform.startswith("linux"):
         os.makedirs(os.path.dirname(unit_path()), exist_ok=True)
         with open(unit_path(), "w") as f:
@@ -246,6 +266,11 @@ def _remove_service() -> str:
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
                        capture_output=True)
         _rm(plist_path())
+        return "removed"
+    if sys.platform == "win32":
+        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True)
+        subprocess.run(["schtasks", "/delete", "/f", "/tn", TASK_NAME],
+                       capture_output=True)
         return "removed"
     if sys.platform.startswith("linux"):
         if shutil.which("systemctl"):
@@ -295,6 +320,8 @@ def _announce():
         print(f"  Creates    {plist_path()}")
     elif sys.platform.startswith("linux"):
         print(f"  Creates    {unit_path()}")
+    elif sys.platform == "win32":
+        print(f"  Creates    a Scheduled Task named \"{TASK_NAME}\"")
     print("             so the bridge starts when you log in.")
     print()
     print("  It reads or stores nothing else -- no credential, no token, no")
@@ -383,6 +410,11 @@ def cmd_status(_args) -> int:
                            capture_output=True)
         print("Bridge      " + ("registered with launchd" if r.returncode == 0
                                 else "not installed"))
+    elif sys.platform == "win32":
+        r = subprocess.run(["schtasks", "/query", "/tn", TASK_NAME],
+                           capture_output=True)
+        print("Bridge      " + ("registered as a Scheduled Task"
+                                if r.returncode == 0 else "not installed"))
     elif sys.platform.startswith("linux") and shutil.which("systemctl"):
         r = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
                             "clauge-bridge.service"], capture_output=True)

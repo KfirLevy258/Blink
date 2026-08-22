@@ -18,13 +18,17 @@ BUILD="${TMPDIR:-/tmp}/clauge-build"
 command -v python3 >/dev/null 2>&1 || { echo "need python3 to build" >&2; exit 1; }
 
 python3 -m venv "$BUILD" >/dev/null
-"$BUILD/bin/python" -m pip install --quiet --upgrade pip
+# A Windows venv puts its executables in Scripts/, not bin/. This script runs
+# under Git Bash there, so the path style is the only difference that matters.
+VBIN="$BUILD/bin"
+[ -d "$VBIN" ] || VBIN="$BUILD/Scripts"
+"$VBIN/python" -m pip install --quiet --upgrade pip
 # The daemon's own pinned dependencies get frozen INTO the binary, so the
 # customer's install can no longer drift with whatever PyPI serves that day.
-"$BUILD/bin/python" -m pip install --quiet pyinstaller -r "$ROOT/pc/requirements.txt"
+"$VBIN/python" -m pip install --quiet pyinstaller -r "$ROOT/pc/requirements.txt"
 
 cd "$ROOT"
-"$BUILD/bin/pyinstaller" \
+"$VBIN/pyinstaller" \
 	--onefile \
 	--name clauge \
 	--distpath "$OUT" \
@@ -41,4 +45,6 @@ cd "$ROOT"
 		exit 1
 	}
 
-echo "built $OUT/clauge ($(du -h "$OUT/clauge" | cut -f1))"
+BUILT="$OUT/clauge"
+[ -f "$BUILT" ] || BUILT="$OUT/clauge.exe"
+echo "built $BUILT ($(du -h "$BUILT" | cut -f1))"

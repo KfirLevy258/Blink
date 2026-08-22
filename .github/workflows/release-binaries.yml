@@ -28,6 +28,10 @@ jobs:
           - {os: macos-latest, label: macos-arm64}
           - {os: macos-13, label: macos-x86_64}
           - {os: ubuntu-latest, label: linux-x86_64}
+          - {os: windows-latest, label: windows-x86_64.exe}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,7 +49,9 @@ jobs:
           CLAUGE_SKIP_SERVICE=1 sh tests/ci/check_install.sh no-claude
 
       - name: name it for the platform
-        run: mv dist/clauge "dist/clauge-${{ matrix.label }}"
+        run: |
+          built=$(ls dist/clauge dist/clauge.exe 2>/dev/null | head -1)
+          mv "$built" "dist/clauge-${{ matrix.label }}"
 
       - name: attach to the release
         env:

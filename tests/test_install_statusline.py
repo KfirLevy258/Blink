@@ -404,3 +404,24 @@ def test_install_with_marker_but_no_statusline_preserves_a_live_chain(tmp_path, 
     ins.uninstall(path)
     got = json.loads(open(path).read())
     assert got["statusLine"]["command"] == "sh ~/original.sh"
+
+
+def test_windows_writes_bash_not_sh(monkeypatch):
+    """Claude Code rewrites a Windows status line command naming a .sh file:
+
+        if (!v.trim().startsWith("bash ")) v = `bash ${v}`
+
+    so `sh C:/x/clauge-statusline.sh` becomes `bash sh C:/x/...`, and bash
+    then looks for a script literally named "sh". Starting with "bash " opts
+    out of the rewrite. Backslashes go too -- the command runs under bash,
+    where they are escapes.
+    """
+    monkeypatch.setattr(ins.sys, "platform", "win32")
+    got = ins.statusline_command(r"C:\Users\kfir\.clauge\clauge-statusline.sh")
+    assert got == "bash C:/Users/kfir/.clauge/clauge-statusline.sh"
+
+
+def test_posix_still_writes_sh(monkeypatch):
+    monkeypatch.setattr(ins.sys, "platform", "darwin")
+    assert ins.statusline_command("/opt/clauge/clauge-statusline.sh") == \
+        "sh /opt/clauge/clauge-statusline.sh"

@@ -12,6 +12,11 @@ on:
   push:
   workflow_dispatch:
 
+# Git Bash on the Windows runners, so one script works on all three.
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: installer-${{ github.ref }}
   cancel-in-progress: true
@@ -73,18 +78,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: sh tools/build_binary.sh
-      - run: ./dist/clauge status || true      # smoke: it starts at all
+      - run: ./dist/clauge* status || true     # smoke: it starts at all
       - uses: actions/upload-artifact@v4
         with:
           name: clauge-${{ matrix.os }}
-          path: dist/clauge
+          path: dist/clauge*
           retention-days: 7
 
   # The step no unit test reaches, because it touches the machine: registering
@@ -96,7 +101,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         scenario:
           - no-claude          # Claude Code never installed
           - no-settings        # ~/.claude exists, settings.json does not
@@ -111,7 +116,7 @@ jobs:
         with:
           name: clauge-${{ matrix.os }}
           path: dist
-      - run: chmod +x dist/clauge
+      - run: chmod +x dist/clauge*
       # HOME is redirected inside the script, but the launchd label and the
       # systemd unit name are constants -- fine on a throwaway runner, which is
       # the whole reason this job cannot be a local test.
@@ -198,55 +203,4 @@ jobs:
           if grep -rlU $'\r' tools/clauge-statusline.sh tools/build_binary.sh tests/ci/; then
             echo "CRLF found: a shim with CRLF fails with 'bad interpreter'" >&2
             exit 1
-          fi
-
-  # Windows is NOT a supported target: the installer is POSIX sh, the status
-  # line is invoked as `sh <path>`, and service registration is launchd and
-  # systemd only -- there is no Scheduled Task path. This job exists to report
-  # how far it actually gets under Git Bash, so the gap is measured rather than
-  # assumed. It must never block a merge on a claim the product does not make.
-  windows-exploratory:
-    name: windows (exploratory, non-blocking)
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: what does uname say
-        shell: bash
-        run: uname -s
-      # `|| true` keeps this non-blocking, so the result has to be REPORTED or
-      # the job is green for the wrong reason -- the exact shape that let a
-      # machine-dependent test pass for months. Both outcomes land in the job
-      # summary, so the gap is a number someone can read.
-      - name: pytest under Git Bash
-        shell: bash
-        run: |
-          python -m pip install --quiet -r tests/requirements.txt
-          python -m pytest tests/ -q > result.txt 2>&1 || true
-          tail -25 result.txt
-          # -25, not -3: the first version of this truncated the failure list
-          # to the totals line, so diagnosing the gap meant re-running an
-          # older workflow to get output this one had already thrown away.
-          {
-            echo "### Windows (unsupported target)"
-            echo '```'
-            tail -25 result.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: can the binary even be built here
-        shell: bash
-        run: |
-          if sh tools/build_binary.sh > build.txt 2>&1; then
-            echo "binary BUILDS on Windows" | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning::the binary does not build on Windows -- expected, unsupported"
-            {
-              echo "build failed on Windows:"
-              echo '```'
-              tail -8 build.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
           fi

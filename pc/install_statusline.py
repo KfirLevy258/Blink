@@ -9,6 +9,7 @@ import json
 import os
 import shlex
 import shutil
+import sys
 
 CHAIN_PATH = "~/.clauge/statusline-chain"
 
@@ -36,6 +37,29 @@ CHAIN_PATH = "~/.clauge/statusline-chain"
 # very call would itself write, so losing ~/.clauge does not resurrect the
 # bug for the common case (reinstalling at an unchanged shim_path).
 INSTALLED_MARKER_PATH = "~/.clauge/statusline-installed-command"
+
+
+def statusline_command(shim_path: str) -> str:
+    r"""The exact string to write into statusLine.command.
+
+    On Windows this is `bash <path>`, not `sh <path>`, and that is not a
+    stylistic choice. Claude Code rewrites a Windows status line command that
+    mentions a .sh file:
+
+        if (D && !f && v.trim().match(/\.sh(\s|$|")/))
+            if (!v.trim().startsWith("bash ")) v = `bash ${v}`
+
+    So `sh C:/.../clauge-statusline.sh` becomes `bash sh C:/.../...`, and bash
+    then looks for a script named literally "sh" and fails on every render.
+    Starting with "bash " opts out of that rewrite.
+
+    The path is also written with forward slashes: the command runs under
+    bash, where a backslash is an escape character, so C:\Users\... would be
+    mangled. Git Bash accepts C:/Users/... unchanged.
+    """
+    if sys.platform == "win32":
+        return f"bash {shlex.quote(shim_path.replace(chr(92), '/'))}"
+    return f"sh {shlex.quote(shim_path)}"
 
 
 def _chain_path():
@@ -134,7 +158,7 @@ def install(settings_path: str, shim_path: str) -> str:
     # has to keep agreeing with whatever quoting we do here -- see
     # tools/clauge-statusline.sh, which mirrors shlex.quote's exact rule in
     # shell so the two sides never drift apart.
-    new_command = f"sh {shlex.quote(shim_path)}"
+    new_command = statusline_command(shim_path)
 
     os.makedirs(os.path.dirname(_chain_path()), exist_ok=True)
     # Guard against chaining the shim to itself. `previous` counts as ours
@@ -217,7 +241,7 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
         return "No Clauge statusline installed; nothing to do."
 
     marker = _read_marker()
-    expected = f"sh {shlex.quote(shim_path)}" if shim_path else None
+    expected = statusline_command(shim_path) if shim_path else None
     is_ours = current == marker or (expected is not None and current == expected)
     if not is_ours:
         # Do not touch settings.json, the chain file, or the marker: we
@@ -303,7 +327,7 @@ def _announce(settings_path: str, shim_path: str, undo_hint: str = None) -> None
     stdout is redirected: a log that records what changed is the point.
     """
     previous = (_load(settings_path).get("statusLine") or {}).get("command", "")
-    new_command = f"sh {shlex.quote(shim_path)}"
+    new_command = statusline_command(shim_path)
     # The SAME is_ours test install() applies, for the same reason it applies
     # it: what happens to `previous` depends entirely on whether it is a
     # customer command or our own shim from an earlier install. Reading

@@ -101,7 +101,7 @@ Clauge has to change.
 |---|---|
 | Changes | `statusLine.command` in `~/.claude/settings.json` |
 | Creates | `~/.clauge/` - a copy of the program itself and the small status line script, so the file you downloaded can be deleted |
-| Creates | a login item, so the bridge starts with your session (`~/Library/LaunchAgents` on macOS, a user systemd unit on Linux) |
+| Creates | a login item, so the bridge starts with your session (a LaunchAgent on macOS, a user systemd unit on Linux, a Scheduled Task on Windows) |
 | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
 | Reads or stores | nothing else - no credential, no token, no account data |
 
