@@ -1,0 +1,107 @@
+name: release binaries
+
+# What a customer downloads. PyInstaller cannot cross-compile, so each
+# platform's binary is built on that platform and attached to the release.
+#
+# Driven by tools/release.sh, which dispatches this against a DRAFT release and
+# waits for the four binaries to appear.
+#
+# Deliberately NOT triggered by `release: published` any more. That trigger
+# would fire again the moment release.sh undrafts, rebuild all four binaries,
+# and --clobber them -- and PyInstaller output is not reproducible, so the new
+# bytes would no longer match the sha256 in the manifest that was just signed
+# over them. Every daemon would then refuse its own release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: release tag to attach binaries to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: macos-latest, label: macos-arm64}
+          # macos-15-intel, not macos-13. The macos-13 label no longer gets a
+          # runner assigned on this account -- it sat queued with an empty
+          # runner_name for the whole rehearsal, and the installer workflow hit
+          # the same thing months ago and worked around it by dropping the job
+          # rather than fixing the label. Intel Macs are still a supported
+          # target; the runner that builds for them just moved.
+          - {os: macos-15-intel, label: macos-x86_64}
+          - {os: ubuntu-latest, label: linux-x86_64}
+          - {os: windows-latest, label: windows-x86_64.exe}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The TAG, not the default branch. release.sh builds the firmware from
+      # its own working tree at this tag and then dispatches this workflow; a
+      # bare checkout takes the default branch's HEAD instead, so the two
+      # halves of one release could be built from different source. The
+      # --version check below catches that only when the version happens to
+      # differ.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: sh tools/build_binary.sh
+
+      # The tag is the product's version, and the binary has to know it: the
+      # self-test in pc/update.py refuses to install a replacement that does
+      # not report the version it was fetched as, so a binary built from a
+      # source tree whose pc/version.py disagrees with the tag would fail on
+      # a customer's machine rather than here.
+      - name: it must report the version this tag is for
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          # Not `ls a b | head -1`: ls exits non-zero when one operand is
+          # missing, and this workflow runs with -e -o pipefail, so the job
+          # died here before doing anything. It passed on Windows only because
+          # MSYS resolves `dist/clauge` to `dist/clauge.exe`, which is why the
+          # one platform that cannot run the binary was the one that agreed.
+          built=dist/clauge
+          [ -f "$built" ] || built=dist/clauge.exe
+          got=$("$built" --version)
+          echo "$got"
+          case "$got" in
+            *"${TAG#v}"*) ;;
+            *) echo "FATAL: built $got, but this release is ${TAG#v}" >&2
+               exit 1 ;;
+          esac
+
+      # Prove the artifact installs before it is published. A binary missing a
+      # bundled data file fails on a customer's machine at the one moment they
+      # are deciding whether this product works -- and PyInstaller missing a
+      # data file is exactly the failure that does not show up at build time.
+      - name: verify it installs and uninstalls
+        run: |
+          CLAUGE_SKIP_SERVICE=1 sh tests/ci/check_install.sh with-statusline
+          CLAUGE_SKIP_SERVICE=1 sh tests/ci/check_install.sh no-claude
+
+      - name: name it for the platform
+        run: |
+          built=dist/clauge
+          [ -f "$built" ] || built=dist/clauge.exe
+          mv "$built" "dist/clauge-${{ matrix.label }}"
+
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" "dist/clauge-${{ matrix.label }}" --clobber
+
+      # The manifest that names these files' hashes is written and signed on
+      # the maintainer's machine, not here -- the release key never leaves it.
+      # See the publish block in tools/release.sh.

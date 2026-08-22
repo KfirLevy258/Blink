@@ -1,0 +1,29 @@
+{
+  "_comment": "Real Claude Code 2.1.229 statusline capture (2026-08-21). Identifying fields (session_id, transcript_path, cwd, workspace paths, prompt_id, session_name, cost) are redacted; rate_limits is verbatim as captured.",
+  "model": {
+    "id": "claude-opus-5[1m]",
+    "display_name": "Opus 5 (1M context)"
+  },
+  "version": "2.1.229",
+  "workspace": {
+    "current_dir": "/redacted/project",
+    "project_dir": "/redacted/project"
+  },
+  "context_window": {
+    "used_percentage": 55,
+    "remaining_percentage": 45
+  },
+  "thinking": {
+    "enabled": true
+  },
+  "rate_limits": {
+    "five_hour": {
+      "used_percentage": 25,
+      "resets_at": 1787320800
+    },
+    "seven_day": {
+      "used_percentage": 42,
+      "resets_at": 1787724000
+    }
+  }
+}

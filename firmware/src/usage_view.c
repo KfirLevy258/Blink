@@ -495,10 +495,22 @@ void usage_view_update(double session_pct, int32_t session_resets_in_s,
 
 	char buf[8];
 
-	snprintf(buf, sizeof(buf), "%d%%", (int)(session_pct + 0.5));
-	lv_label_set_text(session.pct, buf);
-	lv_arc_set_value(session.arc, (int32_t)(session_pct + 0.5));
-	lv_obj_set_style_arc_color(session.arc, severity(session_pct), LV_PART_INDICATOR);
+	/* A negative percentage means "the daemon does not have this number" --
+	 * pc/statusline_source.py sends -1.0 when the window is absent from
+	 * Claude Code's payload entirely. render_weekly() has always honoured
+	 * that; this side did not, so an absent five_hour window rendered as a
+	 * confident green 0%, which is the frozen-meter reading the sentinel
+	 * exists to prevent. */
+	if (session_pct < 0) {
+		lv_label_set_text(session.pct, "--%");
+		lv_arc_set_value(session.arc, 0);
+	} else {
+		snprintf(buf, sizeof(buf), "%d%%", (int)(session_pct + 0.5));
+		lv_label_set_text(session.pct, buf);
+		lv_arc_set_value(session.arc, (int32_t)(session_pct + 0.5));
+		lv_obj_set_style_arc_color(session.arc, severity(session_pct),
+					   LV_PART_INDICATOR);
+	}
 	session.resets_in_s = session_resets_in_s;
 	render_countdown(&session);
 
@@ -635,12 +647,18 @@ void usage_view_set_status(enum usage_status status)
 	case USAGE_STATUS_STALE:
 		c = COL_AMBER;
 		tc = COL_AMBER;
-		text = "rate-limited - showing last known";
+		/* Not "rate-limited": this state means the daemon has no fresh
+		 * reading, which is usually its owner being away from Claude Code.
+		 * The old wording is from when a 429 from the usage endpoint was
+		 * the only way to get here; that endpoint is gone, and telling
+		 * someone they are rate-limited when they are not is worse than
+		 * saying nothing. */
+		text = "Reading is old - showing last known";
 		break;
 	case USAGE_STATUS_ERROR:
 		c = COL_RED;
 		tc = COL_RED;
-		text = "error - showing last known";
+		text = "Error - showing last known";
 		break;
 	default:
 		/* Two very different situations wear the same status. */

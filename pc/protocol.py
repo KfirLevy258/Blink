@@ -6,7 +6,11 @@ ignored by callers. v2.
 """
 import json
 
-VERSION = 2
+from pc.version import PROTO_VERSION
+
+# Kept as a name because every message builder below already spells it this
+# way. It is the protocol's version, not the product's -- see pc/version.py.
+VERSION = PROTO_VERSION
 
 
 def encode(msg: dict) -> bytes:
@@ -74,7 +78,7 @@ def time_msg(epoch: int, utc_offset_min: int) -> dict:
 
 
 def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
-          session_resets_in_s=-1, weekly_resets_in_s=-1) -> dict:
+          session_resets_in_s=-1, weekly_resets_in_s=-1, stale=False) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -86,6 +90,21 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
     Known models are ALSO flattened into sonnet_pct/opus_pct: the board's
     JSON scanner reads scalar keys only, and its per-model peek needs these
     without growing a full array parser.
+
+    `stale` is a declared field, not an afterthought bolted on by a caller:
+    this function is the one place the wire contract is defined.
+    pc/statusline_source.py, the only producer of usage messages, sets it
+    when the payload it read has outlived its own freshness window.
+
+The firmware reads this field: proto.c's "usage" handler calls
+    msg_get_bool(json, "stale", ...) and sets USAGE_STATUS_STALE when it is
+    true, after the update and models calls that set OK internally.
+
+    An absent key leaves it false on the board, so a daemon older than that
+    firmware reads as OK rather than as a permanent warning. Older firmware
+    given this field simply ignores it -- it degrades to a green dot on a
+    stale reading, which is the behaviour that existed before either side
+    knew about the field.
     """
     flat = {}
     for m in models or []:
@@ -99,6 +118,7 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
         "weekly_pct": weekly_pct, "weekly_resets_at": weekly_resets_at,
         "weekly_resets_in_s": weekly_resets_in_s,
         "models": models,
+        "stale": stale,
         **flat,
     }
 
@@ -110,9 +130,37 @@ def status(state: str, detail: str = "") -> dict:
 # --- OTA over the serial link (see pc/ota.py and the OTA block in proto.c) ---
 
 
-def ota_avail(version, size, sha256):
-    return {"t": "ota_avail", "v": VERSION, "version": version,
-            "size": int(size), "sha256": sha256}
+def ota_avail(version, size, sha256, app=None):
+    """`app` is the daemon version this release also carries, when it is newer
+    than the one running. Additive and optional: firmware that predates it
+    ignores the field, which is the whole reason the protocol version does not
+    have to move for this."""
+    msg = {"t": "ota_avail", "v": VERSION, "version": version,
+           "size": int(size), "sha256": sha256}
+    if app:
+        msg["app"] = app
+    return msg
+
+
+def ota_begin(version):
+    """The firmware write is starting now.
+
+    Distinct from consent. The board used to persist "I am installing X" the
+    moment it sent ota_flash, but in a pair update this program replaces
+    itself first -- and opening the serial port from the new process resets
+    the board, which then boots, sees a breadcrumb for a version it is not
+    running, and reports "Update failed, previous version restored." before
+    the firmware install has even begun. Then the real install finishes with
+    the breadcrumb already spent, so the success notice never appears either.
+    """
+    return {"t": "ota_begin", "v": VERSION, "version": version}
+
+
+def ota_resume(version):
+    """Continuing an install the user already approved, after the daemon
+    replaced itself. The board reopens its progress screen rather than sitting
+    on an "Install?" prompt for something already under way."""
+    return {"t": "ota_resume", "v": VERSION, "version": version}
 
 
 def ota_none():

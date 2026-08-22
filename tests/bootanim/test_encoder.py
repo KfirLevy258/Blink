@@ -4,6 +4,8 @@ Run: ~/zephyr-v4.4.0/.venv/bin/python3 tests/bootanim/test_encoder.py -v
 Uses synthetic frames so neither the mp4 nor ffmpeg is needed.
 """
 import sys
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,10 +75,17 @@ class TestEmitHeader(unittest.TestCase):
         frames = synth_frames()
         blob, _ = enc.encode(frames, 12, big_endian=True)
         last, _ = enc.encode([frames[-1]], 12, big_endian=True)
-        with tempfile.NamedTemporaryFile("r", suffix=".h") as f:
-            enc.emit_header(f.name, blob, last, 12, 3, 0xD14A24,
-                            "test-cmdline")
-            text = f.read()
+        # A NamedTemporaryFile handed to another writer while still open is a
+        # Windows error (the file cannot be opened twice), not a bug in
+        # emit_header. Write, close, then read.
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "bootanim.h")
+            enc.emit_header(path, blob, last, 12, 3, 0xD14A24, "test-cmdline")
+            with open(path) as f:
+                text = f.read()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
         self.assertIn(f"bootanim_blob[{len(blob)}]", text)
         self.assertIn(f"bootanim_last[{len(last)}]", text)
         self.assertIn("#define BOOTANIM_BG_RGB 0xd14a24", text)

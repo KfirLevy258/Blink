@@ -59,3 +59,28 @@ bool msg_get_double(const char *json, const char *key, double *out)
 	*out = v;
 	return true;
 }
+
+
+bool msg_get_bool(const char *json, const char *key, bool *out)
+{
+	const char *p = after_colon(json, key);
+
+	if (p == NULL) {
+		return false;
+	}
+	while (*p == ' ' || *p == '\t') {
+		p++;
+	}
+	if (*p == '"') {           /* a string value, not a boolean */
+		return false;
+	}
+	if (strncmp(p, "true", 4) == 0) {
+		*out = true;
+		return true;
+	}
+	if (strncmp(p, "false", 5) == 0) {
+		*out = false;
+		return true;
+	}
+	return false;
+}

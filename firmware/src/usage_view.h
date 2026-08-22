@@ -8,7 +8,7 @@
 enum usage_status {
 	USAGE_STATUS_DISCONNECTED = 0,	/* grey  */
 	USAGE_STATUS_OK,		/* green */
-	USAGE_STATUS_STALE,		/* amber: rate-limited, showing last good */
+	USAGE_STATUS_STALE,		/* amber: reading is old, showing last good */
 	USAGE_STATUS_ERROR,		/* red   */
 };
 

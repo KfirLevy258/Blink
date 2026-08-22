@@ -10,6 +10,11 @@ void backlight_init(void);
  * scale, persist, and apply. A no-op at the ends. */
 void backlight_step(int dir);
 
+/* Set an absolute level, snapped to the 20..100 scale, persisted and applied.
+ * A no-op if it is already there. The settings screen picks a level directly
+ * now rather than stepping toward one. */
+void backlight_set(uint8_t pct);
+
 /* Current backlight percent -- one of 20/40/60/80/100. */
 uint8_t backlight_get(void);
 

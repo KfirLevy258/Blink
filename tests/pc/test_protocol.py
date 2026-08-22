@@ -52,6 +52,12 @@ class TestProtocol(unittest.TestCase):
         self.assertNotIn("sonnet_pct", protocol.usage(1.0, "R", 2.0, "R", []))
         self.assertNotIn("sonnet_pct", protocol.usage(1.0, "R", 2.0, "R", None))
 
+    def test_usage_stale_defaults_false_and_is_settable(self):
+        """stale is a declared field of the message, not a key a caller bolts
+        on after the fact -- the firmware parses it like any other."""
+        self.assertFalse(protocol.usage(1.0, "R", 2.0, "R", [])["stale"])
+        self.assertTrue(protocol.usage(1.0, "R", 2.0, "R", [], stale=True)["stale"])
+
     def test_time_msg_fields(self):
         m = protocol.time_msg(1752444000, -300)
         self.assertEqual(m["t"], "time")

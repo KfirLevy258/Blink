@@ -7,9 +7,15 @@ serial link, so the split is: we fetch from the same GitHub release feed the
 WiFi path uses, and push the image down; the board writes and verifies it with
 exactly the same code either way.
 
-Nothing here trusts the transport. The board re-hashes what it received and
-compares against the manifest before marking slot1 pending, which matters more
-over serial than over HTTPS -- there is no TLS underneath this.
+Nothing here trusts the transport, but note WHERE that check now lives. Over
+WiFi the board hashed what it received. Over USB the board is not part of the
+transfer at all -- esptool writes slot0 directly -- so it has no bytes to hash,
+and the verification happens on this side instead: pc/bridge.py checks the
+download against the manifest's sha256 before calling flash(), and esptool's
+own write_flash reads the written region's MD5 back off the chip before it
+returns. Both matter more here than they would over HTTPS, because slot0 is
+written in place: there is no test boot and no automatic revert to catch a bad
+image.
 """
 import importlib.util
 import json
@@ -147,8 +153,38 @@ def flash_encrypted_chip(port, run=subprocess.run):
     return None
 
 
+# 115200, and no faster.
+#
+# Measured on the CYD's CH340 on 2026-08-22, and anything faster does not work: three consecutive attempts at 460800 died
+# with "Invalid head of packet ... possible serial noise or corruption", each
+# time immediately after the baud change. The same 1 MB transfer at 115200
+# completed cleanly in 96 s. tools/dev.sh already carried this warning for
+# 921600; it turns out to apply well below that.
+#
+# A failed READ is free. A failed WRITE is not: slot0 is written in place, so a
+# transfer that dies halfway leaves an image that will not boot, and the retry
+# would have to succeed before the board is usable again. There is nothing to
+# win here worth that.
+FLASH_BAUD = 115200
+
+
+def _esptool_run(exe, port, baud, args, run, timeout=900):
+    """(ok, last 200 chars of output) for one esptool invocation."""
+    try:
+        r = run(exe + ["--port", port, "--baud", str(baud)] + args,
+                capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return False, str(e)[:200]
+    if r.returncode == 0:
+        return True, ""
+    return False, ((r.stderr or r.stdout or "") or "").strip()[-200:]
+
+
 def flash(port, blob, run=subprocess.run):
-    """Write `blob` to the app slot. Returns (ok, message)."""
+    """Write `blob` to the app slot. Returns (ok, message).
+
+    esptool verifies the write itself, by MD5, before it returns.
+    """
     exe = _esptool()
     if not exe:
         return False, ("esptool not found -- pip install esptool"
@@ -166,12 +202,37 @@ def flash(port, blob, run=subprocess.run):
         f.write(blob)
         img = f.name
     try:
-        r = run(exe + ["--port", port, "--baud", "115200",
-                       "write_flash", APP_OFFSET, img],
-                capture_output=True, text=True, timeout=900)
-        if r.returncode != 0:
-            return False, (r.stderr or r.stdout or "").strip()[-200:]
-        return True, "written"
+        # write_flash only, because it already verifies.
+        #
+        # This ran a second full esptool pass (verify_flash) after the write,
+        # reasoning that slot0 has no auto-revert behind it so a bad image
+        # would only be caught at boot. The reasoning was right and the remedy
+        # was redundant: esptool's write_flash finishes by reading the written
+        # region's MD5 back off the chip and comparing it -- raising "MD5 of
+        # file does not match data in flash!" on a mismatch, and printing
+        # "Hash of data verified." otherwise. That line has been in the output
+        # of every flash this project has ever run, including the ones used to
+        # justify adding the second pass.
+        #
+        # The read-back is not compressed, so it cost about two minutes on a
+        # 1.3 MB image. It doubled how long a customer stares at a dark screen
+        # in order to repeat a check that had already passed.
+        #
+        # Underscore spelling rather than the hyphenated one esptool 5 prefers:
+        # both 4.x and 5.x accept it, and _tool() can resolve to whatever
+        # esptool a source checkout happens to have on PATH.
+        write = ["write_flash", APP_OFFSET, img]
+
+        ok, why = _esptool_run(exe, port, FLASH_BAUD, write, run)
+        if ok:
+            return True, "written and verified"
+        # One retry. A single failure is usually a bad block or a blip on the
+        # line, and a rewrite is far cheaper than a customer holding a board
+        # that will not boot.
+        ok, why = _esptool_run(exe, port, FLASH_BAUD, write, run)
+        if ok:
+            return True, "written and verified on the second try"
+        return False, why
     except Exception as e:
         return False, str(e)
     finally:

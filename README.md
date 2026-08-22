@@ -19,7 +19,7 @@ Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 <table>
   <tr>
     <td width="33%"><img src="docs/img/screen-usage.png" alt="Live usage screen"><br><sub><b>Live usage</b> - session &amp; weekly, per model</sub></td>
-    <td width="33%"><img src="docs/img/screen-settings.png" alt="Settings screen"><br><sub><b>Settings</b> - brightness, Wi-Fi, updates</sub></td>
+    <td width="33%"><img src="docs/img/screen-settings.png" alt="Settings screen"><br><sub><b>Settings</b> - brightness, updates, reset</sub></td>
     <td width="33%"><img src="docs/img/screen-update.png" alt="Software update screen"><br><sub><b>Updates</b> - over the air, and safe</sub></td>
   </tr>
 </table>
@@ -28,7 +28,7 @@ Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 Clauge is a small desk display that shows how much of your Claude Code usage you've spent - the same numbers as the `/usage` command, but always in view. It reads your **5-hour session** limit and your **7-day weekly** limit and draws each as a dial, green while you have room, amber as you get close, red when it's nearly gone. Glance over, know where you stand, keep working.
 
-It runs on a cheap (~$12) ESP32 touchscreen. Plug it in, give it your Wi-Fi, and it just sits on your desk and keeps itself up to date.
+It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the setup once, and it sits on your desk and keeps itself up to date.
 
 ## What's in here
 
@@ -36,7 +36,7 @@ It runs on a cheap (~$12) ESP32 touchscreen. Plug it in, give it your Wi-Fi, and
 |------|--------------|
 | `firmware/` | The device firmware (Zephyr, C) - this is the product |
 | `firmware/src/ota.c` | The update engine: signed install + automatic rollback |
-| `pc/`, `claude_usage_bridge.py` | Optional USB bridge - feeds the board over a cable instead of Wi-Fi |
+| `pc/`, `claude_usage_bridge.py` | The USB bridge and its setup, shipped as one binary - this is how a board gets its numbers |
 | `tools/` | Build, flash, and release helpers |
 | `docs/img/` | Logo, icons, and the screen renders above |
 
@@ -52,22 +52,77 @@ A 3D-printable case gives the bare board a home on your desk. **[Download the CA
 
 ## Connecting it
 
-Clauge needs to know your usage numbers. It figures out the best way to get them on its own - you don't choose a mode, it just works:
+Clauge reads your usage over the **USB cable**, from Claude Code itself. Plug the board into your computer and run the setup below; your usage streams over the cable, and the same connection handles updates.
 
-- **Wi-Fi - the default.** Give the board your Wi-Fi and it fetches your usage itself, over a secure connection. First power-on walks you through it right on the screen.
-- **USB cable - if Wi-Fi isn't an option.** On a network where you'd rather not put the board online, plug it into your computer instead and run the small bridge below. Your usage streams over the cable, and no Wi-Fi or login ever touches the device. The bridge also handles updates for you - see below.
+The device never joins your network, never signs in to anything, and never holds a credential - the numbers come from the Claude Code already running on your machine.
 
-  ```bash
-  python3 -m pip install pyserial esptool   # once; any Python 3.9+
-  tools/dev.sh up                            # start it (tools/dev.sh down stops it)
-  ```
+### Setting it up
 
-  It finds the board by itself. `pyserial` is how it talks to the board and
-  `esptool` is how it updates it, so install both.
+**One file. Download it, run it, done.** No Python, no package manager,
+nothing to keep installed.
+
+```bash
+# macOS (Apple silicon)
+curl -fsSL -o clauge https://github.com/KfirLevy258/Clauge/releases/latest/download/clauge-macos-arm64
+# macOS (Intel):  .../clauge-macos-x86_64
+# Linux:          .../clauge-linux-x86_64
+
+chmod +x clauge && ./clauge
+```
+
+That is the whole setup. It finds the board by itself and starts again every
+time you log in - plug the cable in and the panel comes up.
+
+**Then delete the file.** It copies itself to `~/.clauge/bin` on the way
+through, so nothing has to stay in your Downloads folder.
+
+```bash
+~/.clauge/bin/clauge status      # is the panel getting data?
+~/.clauge/bin/clauge uninstall   # put everything back
+```
+
+*Downloading with `curl` rather than a browser is deliberate: macOS marks
+browser downloads as quarantined and refuses to run them until the app is
+notarised. `curl` does not, so this works today.*
+
+**Needs Claude Code 2.1.100 or newer.** Clauge reads the usage figures from
+the status line, and older versions do not put them there - 2.1.0 has no
+usage figures in that payload at all, so the panel would stay blank. Update
+Claude Code first if yours is older.
+
+### What the installer changes
+
+Over USB, Clauge reads the usage figures Claude Code has already worked out,
+rather than asking Anthropic for them itself. Claude Code hands those figures
+to whatever command is set as its **status line**, so that is the one setting
+Clauge has to change.
+
+| | |
+|---|---|
+| Changes | `statusLine.command` in `~/.claude/settings.json` |
+| Creates | `~/.clauge/` - a copy of the program itself and the small status line script, so the file you downloaded can be deleted |
+| Creates | a login item, so the bridge starts with your session (a LaunchAgent on macOS, a user systemd unit on Linux, a Scheduled Task on Windows) |
+| Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
+| Reads or stores | nothing else - no credential, no token, no account data |
+
+**It does this without asking**, so that plugging the board in is the whole
+setup. It prints all of the above before it changes anything, and every part
+of it is reversible:
+
+```bash
+~/.clauge/bin/clauge uninstall
+```
+
+**If you already have your own status line, it keeps working.** Clauge records
+your existing command, and runs it after capturing the usage figures - your bar
+renders exactly as before. Uninstalling puts your command back unchanged, and
+will not touch a status line Clauge did not install.
 
 ## Build &amp; flash
 
 You only need this to put firmware on a board yourself (after that, it updates over the air). It uses the [Zephyr](https://zephyrproject.org/) toolchain.
+
+The default build is what ships: USB only, with no radio, no sign-in and no token store compiled in. The on-device Wi-Fi path is still here and still builds - add `-DEXTRA_CONF_FILE=wifi.conf` to the command below - it is simply not in anything released.
 
 ```bash
 source ~/zephyr-v4.4.0/.venv/bin/activate
@@ -96,21 +151,33 @@ Full details - the signing key, the encrypted-flash setup, and the release flow 
 
 ## Updates
 
-Clauge checks for a new release as soon as it starts up, and if it finds one it asks you - **Update now** or **Later** - right on the gauge screen. How the update arrives depends on how the board is connected, and you don't have to pick:
+Clauge is two halves that ship as one release: the firmware on the board, and the app on your computer. They always carry the same version number.
 
-- **Over Wi-Fi.** The board fetches the release itself over a secure connection, verifies it, and restarts into it. If a new build ever misbehaves it **automatically rolls back** to the version that was working, so a bad update can't brick it. Allow several minutes - most of it is the changeover at the end, during which the screen holds its last frame.
-- **Over the USB cable.** A tethered board has no network of its own, so the bridge does the work: it downloads the release and writes it over the same cable, in about a minute. The screen goes dark while that happens - it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
+Clauge checks for a new release as soon as it starts up, and if it finds one it asks you - **Update now** or **Later** - right on the gauge screen. One tap installs both halves. If the release also carries a newer app, the screen says so, and that half goes first: the new app is what knows how to drive the new firmware.
 
-Either way you get a confirmation on screen once the new version is up.
+The board has no network of its own, so the app does the work. It downloads the release, checks it against the hash the release publishes, and writes it over the same cable - then reads it back off the chip to confirm what landed there. The screen goes dark for about four minutes while that happens; it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
 
-Every image is **signed with a private key only you hold**, and the board only accepts firmware carrying that signature. That means nobody else can push updates to your device - not by forking this repo, not by uploading a release - even though the repo itself is public.
+You get a confirmation on screen once the new version is up.
+
+**Updating the app on your own.** You can also run it yourself:
+
+```sh
+~/.clauge/bin/clauge update     # fetch and install a newer app
+~/.clauge/bin/clauge status     # which versions are you on?
+```
+
+The settings screen shows both versions, and says **App is old** when the half on your computer is the one that is behind.
+
+Automatic app updates are off unless a release turns them on. To keep them off whatever a release says, `touch ~/.clauge/no-auto-update`.
+
+**Both halves are signed, by two separate keys.** Firmware images are signed with a key only you hold, and the bootloader rejects anything else - so nobody can push firmware to your device, not by forking this repo, not by uploading a release, even though the repo is public. The release manifest that drives app updates is signed with a second key, and the app refuses to read a manifest that does not verify. Two keys rather than one because they protect different things, and one compromise should not be two.
 
 ## Security &amp; privacy
 
-- **Only you can update your device.** Updates must be signed with your private key (kept off this repo, at `~/.clauge/…`); the bootloader rejects anything else. The public repo only lets people read and download the firmware, which holds no secrets.
-- Clauge uses an **undocumented** Anthropic usage endpoint and reuses Claude Code's public sign-in. Anthropic may change it at any time; if that happens the screen asks you to sign in again rather than breaking.
-- That endpoint is **rate-limited**, so the board polls gently (about once a minute).
-- This is a personal, single-account gadget. Treat the sign-in on it like a password.
+- **Only you can update your device.** Firmware must be signed with your private key (kept off this repo, at `~/.clauge/…`); the bootloader rejects anything else. App updates must be signed with a second key of yours, or the app will not install them. The public repo only lets people read and download the firmware, which holds no secrets.
+- **The device holds no credential.** It never signs in and never talks to Anthropic. The figures come from the Claude Code on your own machine, which has already worked them out, and reach the board over the cable. There is no token on the device to leak, and nothing to revoke if you sell or lend it.
+- **The setup touches one setting.** `statusLine.command` in `~/.claude/settings.json`, and nothing else - see "What the installer changes" above. It is reversible with one command.
+- The on-device Wi-Fi and sign-in path still exists in this repository, behind `CONFIG_CLAUGE_WIFI_MODE`, but is **not built into shipped firmware** - the release script refuses to publish an image containing it.
 
 ## The status dot
 
@@ -119,6 +186,6 @@ A small dot in the top-right corner tells you how fresh the numbers are:
 | Dot | Meaning |
 |-----|---------|
 | 🟢 green | Connected - live data |
-| 🟠 amber | Rate-limited or stale - showing the last good numbers |
+| 🟠 amber | Stale - showing the last good numbers, because Claude Code has not refreshed them recently or the window they describe has since reset |
 | 🔴 red | Error |
 | ⚪ grey | Signed out |

@@ -35,6 +35,29 @@ int main(void)
 	CHECK(msg_get_double(tm, "utc_offset_min", &d) && fabs(d + 300.0) < 0.01,
 	      "negative utc_offset_min");
 
+	/* msg_get_bool: the daemon marks a reading it cannot vouch for, and the
+	 * panel must be able to tell that from a real rate limit. */
+	{
+		const char *fresh = "{\"t\":\"usage\",\"session_pct\":50.0,\"stale\":false}";
+		const char *old = "{\"t\":\"usage\",\"session_pct\":50.0,\"stale\":true}";
+		const char *absent = "{\"t\":\"usage\",\"session_pct\":50.0}";
+		const char *quoted = "{\"t\":\"usage\",\"stale\":\"true\"}";
+		bool b;
+
+		b = true;
+		CHECK(msg_get_bool(fresh, "stale", &b) && b == false, "stale=false");
+		b = false;
+		CHECK(msg_get_bool(old, "stale", &b) && b == true, "stale=true");
+		b = false;
+		CHECK(!msg_get_bool(absent, "stale", &b) && b == false,
+		      "absent stale leaves the default (old daemon reads as OK)");
+		b = false;
+		CHECK(!msg_get_bool(quoted, "stale", &b),
+		      "a quoted \"true\" is not a boolean");
+		CHECK(!msg_get_bool(fresh, "session_pct", &b),
+		      "a number is not a boolean");
+	}
+
 	printf("\n%s (%d failures)\n", failures ? "TESTS FAILED" : "ALL TESTS PASSED", failures);
 	return failures ? 1 : 0;
 }

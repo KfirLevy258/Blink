@@ -1,6 +1,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/drivers/mipi_dbi.h>
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/random/random.h>
@@ -31,6 +32,89 @@
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
+/*
+ * MADCTL correction for the production batch.
+ *
+ * These panels differ from the pilot units in two independent ways, and both
+ * land in MADCTL (36h), so one write fixes both. Pilot boards must build with
+ * CONFIG_CLAUGE_PANEL_PILOT, which compiles this away entirely.
+ *
+ * The pilot units and the production panels are driven with byte-identical
+ * registers, yet production renders mirrored -- so the difference is in the
+ * module, not in anything we send. The usual cure for that, the SS bit in
+ * DISCTRL (B6h), was tried on hardware 2026-08-21: the built devicetree
+ * carried it (disctrl = [0a a2 27 04]) and the image did not budge, which
+ * rules the B6h route out on this controller. MADCTL is honoured, so the
+ * compensation lives there instead.
+ *
+ * It cannot be a devicetree `rotation`. The ili9xxx driver's CMD_SET_1 table
+ * reaches only MV (90 deg) and MV|MX|MY (270 deg) in landscape, and those two
+ * differ by a pure 180 deg turn -- neither un-mirrors. What this panel needs is
+ * MV|MY, which no rotation value can produce. So we re-issue MADCTL ourselves
+ * once, straight onto the DBI bus, after the driver has finished its init.
+ *
+ * Second, the colour order. The driver hardcodes the BGR bit for every
+ * orientation, but these panels are wired RGB, so red and blue arrived
+ * swapped. Measured 2026-08-21 with a six-bar test pattern of known values:
+ * the RED bar read blue and the BLUE bar read red, while GREEN stayed green
+ * and white/black were exact -- a clean channel exchange, with no inversion
+ * or gamma error. Clearing bit 3 restores it. (Green surviving a red/blue
+ * swap untouched is why eyeballing a green UI element misdiagnosed this.)
+ *
+ * Safe to overwrite: the driver writes MADCTL only from set_orientation(),
+ * which runs during init and is never called again (nothing in the LVGL glue
+ * touches orientation), so this value is the one that sticks. Partial updates
+ * stay correct because MY flips the row-address mapping wholesale -- LVGL's
+ * window coordinates and its pixels mirror together, and the panel's own
+ * reversed wiring cancels them back out.
+ */
+#ifdef CONFIG_CLAUGE_PANEL_PILOT
+
+/* Pilot panels need none of it: the stock rotation=90 MADCTL (BGR|MV) that the
+ * driver writes is already correct for them, mirror and colour order alike. */
+static void panel_fix_madctl(void)
+{
+}
+
+#else
+
+#define PANEL_MADCTL_MV   BIT(5)
+#define PANEL_MADCTL_MY   BIT(7)
+
+static const struct device *const panel_dbi =
+	DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(ili9341)));
+static const struct mipi_dbi_config panel_dbi_cfg =
+	MIPI_DBI_CONFIG_DT(DT_NODELABEL(ili9341),
+			   SPI_OP_MODE_MASTER | SPI_WORD_SET(8), 0);
+
+static void panel_fix_madctl(void)
+{
+	uint8_t madctl = PANEL_MADCTL_MV | PANEL_MADCTL_MY;	/* BGR bit clear = RGB */
+	int r;
+
+	if (!device_is_ready(panel_dbi)) {
+		printk("[usage] panel: DBI bus not ready, MADCTL uncorrected\n");
+		return;
+	}
+
+	r = mipi_dbi_command_write(panel_dbi, &panel_dbi_cfg, 0x36, &madctl, 1);
+	if (r < 0) {
+		printk("[usage] panel: MADCTL write failed (%d)\n", r);
+	} else {
+		printk("[usage] panel: MADCTL=0x%02x\n", madctl);
+	}
+}
+
+#endif /* CONFIG_CLAUGE_PANEL_PILOT */
+
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+/*
+ * Everything from here to the matching #endif belongs to the standalone WiFi
+ * flow -- provisioning, the setup AP, the sign-in exchange, the blind-radio
+ * retry. Every use of it is already inside the gate further down; only these
+ * declarations sat outside, which made a USB-only build emit six
+ * "defined but not used" warnings and hid anything genuine among them.
+ */
 /* Provisioning session state (one PKCE verifier per setup attempt). */
 static char verifier[OAUTH_VERIFIER_LEN];
 static char authorize_url[OAUTH_URL_LEN];
@@ -81,6 +165,7 @@ static __noinit uint32_t blind_magic;
  * flag only picks the honest reason to show on the setup form if that
  * join fails too. */
 static bool scan_said_absent;
+#endif /* CONFIG_CLAUGE_WIFI_MODE */
 
 /* ---- OTA boot-side: test-boot self-confirm, else MCUboot reverts ---- */
 
@@ -158,6 +243,10 @@ static void ota_report_outcome(void)
 	}
 }
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+/* Everything from here to usb_anim_pump() is the board's own network path:
+ * the captive portal, the sign-in, the scan. Whole functions, so this is a
+ * region rather than a sprinkle -- see firmware/Kconfig. */
 static void pump_ui(void)
 {
 	ui_setup_service();
@@ -592,10 +681,6 @@ static const char *const wifi_boot_steps[] = {
 	"Sign in to Anthropic",
 	"Fetch first usage",
 };
-static const char *const usb_boot_steps[] = {
-	"Link the PC daemon",
-	"Fetch first usage",
-};
 
 static void apply_net_evt(const struct net_evt *e)
 {
@@ -638,6 +723,15 @@ static void standalone_anim_pump(void)
 	ota_boot_pump();
 }
 
+#endif /* CONFIG_CLAUGE_WIFI_MODE */
+
+/* Outside the gate: this is the tethered path's own step list, and it was
+ * only sitting next to wifi_boot_steps out of habit. */
+static const char *const usb_boot_steps[] = {
+	"Link the PC daemon",
+	"Fetch first usage",
+};
+
 static void usb_anim_pump(void)
 {
 	proto_service();
@@ -647,6 +741,7 @@ static void usb_anim_pump(void)
 	ota_boot_pump();
 }
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 /* Lower priority than main (higher number): 1-2 s of ECDHE math must not
  * starve the render loop on this single-core build. */
 static char worker_refresh[CFG_TOKEN_MAX];
@@ -1266,6 +1361,8 @@ static void run_standalone(void)
 	}
 }
 
+#endif /* CONFIG_CLAUGE_WIFI_MODE */
+
 /* ---- USB bridge mode: PC daemon pushes usage over serial ---- */
 
 static void run_usb(void)
@@ -1276,9 +1373,15 @@ static void run_usb(void)
 
 	/* With stored WiFi + token the board can serve itself if the daemon
 	 * never delivers -- checked once; NVS doesn't change under us. */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
 	bool can_fall_back = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
 			     cfg_get_token(tok, sizeof(tok));
+#else
+	/* There is no standalone mode to reboot into. Waiting is the whole
+	 * behaviour, and run_usb()'s own waiting-for-host screen covers it. */
+	const bool can_fall_back = false;
+#endif
 	bool ota_boot_checked = false;
 
 	/* Same as run_standalone: drop anything latched before this loop
@@ -1397,6 +1500,7 @@ int main(void)
 		printk("[usage] display not ready\n");
 		return -1;
 	}
+	panel_fix_madctl();
 	display_blanking_off(display_dev);
 	ui_touchfx_init();	/* light touch-echo feedback on every press */
 
@@ -1406,9 +1510,25 @@ int main(void)
 	 * block for seconds against a 30 s window. */
 	ui_boot_set_pump(ota_boot_pump);
 	backlight_init();	/* drive the PWM to the persisted level */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	net_wifi_init();
 	net_wifi_set_idle_hook(wifi_idle);
 	ap_psk_setup();		/* before any QR or AP use */
+#else
+	/* Nothing in this build can use a refresh token -- the OAuth code is
+	 * not compiled in. But a unit flashed with a WiFi build still has one
+	 * in NVS, and unfused flash is readable over USB with esptool, so
+	 * compiling the writer out does not make the customer's token go
+	 * away. Erase it on the first boot that cannot use it. */
+	{
+		char tok[CFG_TOKEN_MAX];
+
+		if (cfg_get_token(tok, sizeof(tok))) {
+			cfg_clear_token();
+			printk("[usage] cleared a stored refresh token: no WiFi in this build\n");
+		}
+	}
+#endif
 
 #ifdef TEST_SCREEN
 	ui_setup_show();
@@ -1435,6 +1555,7 @@ int main(void)
 	 * as dead time on hardware (user feedback 2026-07-16). A PC daemon
 	 * never loses the board to this shortcut: the daemon opening the
 	 * port is a hard reset, which clears the intentional mark. */
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	if (ui_boot_intentional_pending()) {
 		char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
 
@@ -1444,6 +1565,7 @@ int main(void)
 			run_provisioning(NULL);	/* reboots when done */
 		}
 	}
+#endif
 
 	ui_boot_splash();
 
@@ -1468,6 +1590,7 @@ int main(void)
 		run_usb();
 	}
 
+#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	char tok[CFG_TOKEN_MAX], ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
 	bool have_wifi = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk));
 	bool have_tok = cfg_get_token(tok, sizeof(tok));
@@ -1510,5 +1633,24 @@ int main(void)
 
 	printk("[usage] mode: provisioning\n");
 	run_provisioning(NULL);	/* reboots when done */
+#else
+	/*
+	 * No radio in this build, so there is nothing to fall through TO. The
+	 * detection above had three destinations; this one has one, and
+	 * run_usb() already owns the case it lands in: it shows the
+	 * waiting-for-host step and times out on its own if no daemon ever
+	 * speaks. Deliberately no proto_resync() here -- that exists to make a
+	 * daemon that already said hello re-push, and by definition none has.
+	 */
+	printk("[usage] mode: USB bridge (no host yet)\n");
+	usage_view_init();
+	usage_view_boot_begin(usb_boot_steps, 2);
+	lv_timer_handler();
+	ui_boot_teardown();
+	ui_settings_attach(lv_scr_act());
+	ota_report_outcome();
+	usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+	run_usb();
+#endif
 	return 0;
 }

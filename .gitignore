@@ -10,9 +10,16 @@ tokens.json
 
 # Firmware secrets (never commit real creds/token) + build artifacts
 firmware/src/secrets.h
-firmware/build/
-firmware/build-sb/
-firmware/build-trace/
-firmware/build-ota/
-build/
-build-sb/
+# A glob, not a list. The list named five build directories by hand, and the
+# sixth and seventh (build-usb, build-wifi, added when the WiFi path became a
+# Kconfig option) went straight into a commit: 5,065 files and 1.58 million
+# lines of generated Zephyr output, in a public repository, permanently.
+firmware/build*/
+build*/
+
+# Local-only: implementation plans reference the concerns doc (public repo)
+docs/superpowers/
+.superpowers/
+
+# PyInstaller output; binaries are built per-platform in CI, never committed.
+/dist/

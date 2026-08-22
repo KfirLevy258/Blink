@@ -5,6 +5,7 @@ Run inside the Zephyr venv (has pyserial) or `pip install pyserial`:
     python3 claude_usage_bridge.py --port /dev/cu.usbmodemXXXX
 """
 import argparse
+import os
 import sys
 import time
 
@@ -12,35 +13,175 @@ import serial  # pyserial
 from serial.tools import list_ports
 
 from pc import ota as ota_mod
-from pc import protocol, usage_api
+from pc import protocol, statusline_source, update
 from pc.bridge import Bridge
 
 POLL_INTERVAL_S = 60
 PING_GRACE_LOG_S = 30
+# How often to ask whether a newer version of THIS program exists.
+#
+# The first check waits for a board rather than firing at startup: a daemon
+# that crashes on launch would otherwise hammer the release feed once every ten
+# seconds forever, and a machine with no board attached has nothing to update
+# for anyway.
+UPDATE_FIRST_CHECK_S = 60
+UPDATE_INTERVAL_S = 24 * 3600
+
+
+# The USB-serial bridge chips these boards actually ship with, by VID:PID.
+#
+# Identify by ID, not by name: on macOS the CYD's CH340 reports manufacturer
+# None and a device node of /dev/cu.usbserial-14140 -- neither "usbmodem" nor
+# "espressif", the two things the old heuristic looked for. So autodetect never
+# once matched the hardware this product runs on. It went unnoticed because
+# tools/dev.sh always passes --port explicitly; nothing but a customer plugging
+# in a board would have hit it.
+KNOWN_USB_SERIAL = {
+    (0x1A86, 0x7523),   # CH340/CH341 -- the common CYD
+    (0x1A86, 0x7522),
+    (0x1A86, 0x5523),
+    (0x10C4, 0xEA60),   # CP2102/CP2104 -- the other CYD variant
+    (0x0403, 0x6001),   # FT232R
+}
+ESPRESSIF_VID = 0x303A  # native USB-serial on -S2/-S3 parts
 
 
 def autodetect_port():
+    for p in list_ports.comports():
+        if (p.vid, p.pid) in KNOWN_USB_SERIAL or p.vid == ESPRESSIF_VID:
+            return p.device
+    # Name heuristics kept as a fallback for a variant carrying a chip that is
+    # not in the table yet. Bluetooth ports have no VID and no matching name,
+    # so they cannot be picked up by either pass.
     for p in list_ports.comports():
         if "usbmodem" in p.device or (p.manufacturer or "").lower().startswith("espressif"):
             return p.device
     return None
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def wait_for_port(explicit=None, poll_s=3.0):
+    """Block until there is a board to talk to, then return its device path.
+
+    Waiting rather than exiting is what keeps the installed service honest
+    about "plug it in and it works". install.sh registers this daemon with
+    launchd (KeepAlive) or systemd (Restart=always), which bring it back after
+    every exit -- so exiting when no board is attached turns "the cable is
+    unplugged" into a process launch and a log line every 10 seconds, all day,
+    growing bridge.log without bound. One sleeping process is the cheaper
+    answer, and the user never had to do anything for it.
+
+    Re-detecting on each call also survives the board returning on a different
+    device node, which a port resolved once at startup would not.
+    """
+    announced = False
+    while True:
+        port = explicit or autodetect_port()
+        # os.path.exists() only means anything on POSIX, where a serial port
+        # IS a filesystem node. Windows ports are DOS device names -- COM3 --
+        # and os.stat on one fails, so this test was false for every Windows
+        # machine with a board plugged in and the daemon there waited forever
+        # for hardware it had already found.
+        if port and (sys.platform == "win32" or os.path.exists(port)):
+            if announced:
+                print(f"[bridge] board found at {port}", file=sys.stderr)
+            return port
+        if not announced:
+            # Once, not per attempt: this is the steady state on a machine
+            # whose board is simply unplugged, and it is not an error.
+            print(f"[bridge] waiting for the board ({explicit or 'USB'})...",
+                  file=sys.stderr)
+            announced = True
+        time.sleep(poll_s)
+
+
+def _self_update_tick(target):
+    """Check the signed feed and, if the release says so, replace ourselves.
+
+    `auto` in the manifest is a switch we hold, not the customer: it ships
+    false, and turning it on is a decision made per release. Without a remote
+    off switch, a bad build would keep installing itself on every machine that
+    checked, and nothing here could stop it.
+    """
+    home = os.path.dirname(os.path.dirname(target))   # ~/.clauge
+    manifest = update.fetch_signed_manifest()
+    found = update.available(manifest)
+    if not found:
+        return
+    version, artifact = found
+    if not ((manifest.get("daemon") or {}).get("auto")):
+        print(f"[update] {version} is available; run `clauge update` to install"
+              " it", file=sys.stderr)
+        return
+    if not update.auto_update_allowed(home):
+        print(f"[update] {version} is available; automatic updates are turned"
+              " off on this machine", file=sys.stderr)
+        return
+    print(f"[update] installing {version}", file=sys.stderr)
+    try:
+        blob = update.download(update.platform_key(), artifact)
+    except Exception as e:
+        print(f"[update] download failed: {e}", file=sys.stderr)
+        return
+    ok, message = update.apply(blob, target, version)
+    print(f"[update] {message}", file=sys.stderr)
+    if ok:
+        update.restart_from_daemon(target)
+
+
+def main(argv=None):
+    """argv is passed explicitly by the `clauge run` subcommand.
+
+    Without it this parsed sys.argv[1:], which inside the packaged binary is
+    ["run"] -- the subcommand name itself. argparse rejected it, the process
+    exited immediately, and the login service restarted it every ten seconds
+    forever. It never ran once.
+    """
+    ap = argparse.ArgumentParser(prog="clauge run")
     ap.add_argument("--port", default=None)
     ap.add_argument("--baud", type=int, default=115200)
-    args = ap.parse_args()
-    port = args.port or autodetect_port()
-    if not port:
-        sys.exit("No serial port found; pass --port /dev/cu.usbmodemXXXX")
+    args = ap.parse_args(argv)
 
-    token = usage_api.read_token()
-    if not token:
-        sys.exit("No Claude OAuth token (Keychain/creds).")
+    # Before anything else: if a previous update died between renaming the old
+    # binary aside and moving the new one in, the login service is pointing at
+    # a path that does not exist -- and would go on doing so at every boot,
+    # silently. This is the one moment that can notice.
+    from pc.cli import _self_path, clauge_home as _clauge_home, installed_bin
+    self_bin = installed_bin()
+    clauge_home = _clauge_home()
+    update.recover(self_bin)
 
-    def fetch():
-        return usage_api.map_usage(usage_api.fetch_usage_raw(token))
+    # Outside the reconnect loop, unlike next_poll. A board that comes and goes
+    # -- a nudged cable, a laptop waking -- would otherwise re-arm the 60 s
+    # first check on every reconnect, turning a daily update check into one per
+    # reconnection.
+    next_update = time.monotonic() + UPDATE_FIRST_CHECK_S
+    report_failure = None       # a flash failure waiting for the board to return
+
+    # Record the pid so uninstall can stop US specifically. Ending the login
+    # service is not the same as ending this program, and killing by image name
+    # is how the uninstaller once killed itself; a pid is unambiguous.
+    #
+    # Written NEXT TO THE BINARY rather than under ~/.clauge, because those are
+    # not always the same place. A login service runs in the user's own
+    # environment, not in whatever environment registered it -- so under the CI
+    # harness, which redirects HOME to a temporary directory, the daemon
+    # resolved ~ to the real profile and left its pid somewhere uninstall was
+    # never going to look. Deriving it from sys.executable ties it to the
+    # directory that actually has to be deleted, which is the thing the pid is
+    # for.
+    pid_file = os.path.join(os.path.dirname(_self_path()), "bridge.pid")
+    try:
+        with open(pid_file, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError as e:
+        print(f"[bridge] could not record the pid: {e}", file=sys.stderr)
+
+    port = wait_for_port(args.port)
+
+    # Claude Code owns the credential and computes these numbers; we read the file
+    # its statusline shim writes. Nothing here authenticates to Anthropic.
+    fetch = statusline_source.make_fetch()
+    last_err = None
 
     while True:  # reconnect loop
         try:
@@ -72,9 +213,19 @@ def main():
             time.sleep(0.3)
             ser.reset_input_buffer()
         except Exception as e:
-            print(f"[bridge] open {port} failed: {e}; retrying in 3s", file=sys.stderr)
+            # Deduplicated: a board left unplugged, or a port the user lacks
+            # permission to open, would otherwise write this same line to
+            # bridge.log every three seconds for as long as the service runs.
+            err = f"open {port} failed: {e}"
+            if err != last_err:
+                print(f"[bridge] {err}; waiting for the board", file=sys.stderr)
+                last_err = err
             time.sleep(3)
+            port = wait_for_port(args.port)
             continue
+        # Cleared on success so a later, genuine failure is reported again
+        # rather than silenced by having happened once before.
+        last_err = None
         print(f"[bridge] connected on {port}", file=sys.stderr)
         reader = protocol.LineReader()
 
@@ -90,7 +241,17 @@ def main():
         # close it, write slot0, and let the outer reconnect loop pick the
         # board back up -- esptool resets it into the new image on the way out.
         class Reflashed(Exception):
-            pass
+            """Carries the reason when the write failed.
+
+            The port is closed by the time flash() returns and the board has
+            just been reset, so it cannot be told on this connection. The
+            reason rides out to the reconnect below and is delivered once the
+            board is back -- the first moment it can be shown at all.
+            """
+
+            def __init__(self, why=None):
+                super().__init__(why or "")
+                self.why = why
 
         def flash_image(blob, version):
             # Let the board paint its warning first. esptool resets it into
@@ -108,11 +269,43 @@ def main():
             ok, why = ota_mod.flash(port, blob)
             print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
                   file=sys.stderr)
-            raise Reflashed()
+            raise Reflashed(None if ok else why)
+
+        def self_update(version, artifact):
+            """Replace this program, then hand the cable to the new one.
+
+            The port is closed first. On Windows the replacement is started
+            before this process exits, and two daemons racing for one serial
+            port is a failure that would look exactly like a broken board.
+            """
+            try:
+                blob = update.download(update.platform_key(), artifact)
+            except Exception as e:
+                print(f"[update] download failed: {e}", file=sys.stderr)
+                return False
+            ok, message = update.apply(blob, self_bin, version)
+            print(f"[update] {message}", file=sys.stderr)
+            if not ok:
+                return False
+            try:
+                ser.close()
+            except Exception:
+                pass
+            update.restart_from_daemon(self_bin)     # does not return
+            return True
 
         bridge = Bridge(write_msg=send, fetch_usage=fetch,
-                        flash_image=flash_image)
+                        flash_image=flash_image,
+                        report_failure=report_failure,
+                        self_update=self_update,
+                        pending=update.PendingFirmware(
+                            os.path.join(clauge_home, "pending_fw.json")))
+        report_failure = None   # handed to the Bridge above; never repeated
         next_poll = time.monotonic()
+        # The rollback copy is kept until a board has actually talked to this
+        # build. Running at all is weak evidence; holding a conversation with
+        # the hardware is the thing the update was for.
+        proven = False
         try:
             while True:
                 # in_waiting first, then a blocking read(1) as the idle wait.
@@ -131,6 +324,9 @@ def main():
                     for msg in reader.feed(data):
                         print(f"[bridge] <- {msg}", file=sys.stderr)
                         bridge.on_message(msg)
+                        if not proven:
+                            update.cleanup(self_bin)
+                            proven = True
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
                     # the liveness window): the usage endpoint is aggressively
@@ -140,9 +336,24 @@ def main():
                     if bridge.board_alive():
                         bridge.poll_once()
                     next_poll = time.monotonic() + POLL_INTERVAL_S
-        except Reflashed:
+                if time.monotonic() >= next_update:
+                    next_update = time.monotonic() + UPDATE_INTERVAL_S
+                    try:
+                        _self_update_tick(self_bin)
+                    except Exception as e:
+                        # Never take the bridge down over an update check. The
+                        # gauge working is worth more than the gauge being new.
+                        print(f"[update] check failed: {e}", file=sys.stderr)
+        except Reflashed as r:
             # Expected: the port is already closed and the board is rebooting
             # into what we just wrote. Give it a moment, then reconnect.
+            #
+            # Any failure reason travels with it. Without this the board sat
+            # on "keep the cable connected" until its own deadline expired and
+            # then blamed the timeout, while the daemon had the real reason
+            # ("chip has flash encryption", "esptool not found") in its log and
+            # no way to say it.
+            report_failure = r.why
             time.sleep(2)
             continue
         except (serial.SerialException, OSError) as e:
