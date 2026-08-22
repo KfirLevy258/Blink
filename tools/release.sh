@@ -155,9 +155,16 @@ for k in $ARTIFACTS; do
 	gh release download "$TAG" --repo "$REPO" -p "clauge-$k" -D "$TMP"
 done
 
-VER="$VER" PROTO="$PROTO" SIZE="$SIZE" SHA="$SHA" TMP="$TMP" \
+# The document itself comes from pc/manifest.py, which is the only place its
+# shape is written down and the thing tests/pc/test_manifest_contract.py pins.
+# It used to be a second definition inline here, free to drift from the one the
+# daemon reads.
+ROOT="$ROOT" VER="$VER" PROTO="$PROTO" SIZE="$SIZE" SHA="$SHA" TMP="$TMP" \
 	ARTIFACTS="$ARTIFACTS" python3 - <<'PYEOF' > "$TMP/manifest.json"
-import hashlib, json, os
+import hashlib, json, os, sys
+
+sys.path.insert(0, os.environ["ROOT"])
+from pc import manifest
 
 tmp = os.environ["TMP"]
 artifacts = {}
@@ -166,27 +173,16 @@ for key in os.environ["ARTIFACTS"].split():
     artifacts[key] = {"size": len(blob),
                       "sha256": hashlib.sha256(blob).hexdigest()}
 
-proto = int(os.environ["PROTO"])
-# version/size/sha256 stay at the top level and mean the FIRMWARE. Nothing is
-# installed anywhere yet, so this shape is still a free choice today -- it
-# stops being one the moment the first customer's app starts reading it, and
-# from then on those three keys cannot move without stranding that install.
-# Everything else is additive so later readers can ignore what they predate.
-print(json.dumps({
-    "version": os.environ["VER"],
-    "size": int(os.environ["SIZE"]),
-    "sha256": os.environ["SHA"],
-    "schema": 2,
-    "fw": {"proto_min": proto},
-    "daemon": {
-        "version": os.environ["VER"],
-        "proto": proto,
-        # The remote brake. Manual updates until a release deliberately turns
-        # this on, and turning it back off stops the fleet mid-rollout.
-        "auto": False,
-        "artifacts": artifacts,
-    },
-}, indent=1))
+print(json.dumps(manifest.build(
+    version=os.environ["VER"],
+    fw_size=os.environ["SIZE"],
+    fw_sha256=os.environ["SHA"],
+    proto=os.environ["PROTO"],
+    artifacts=artifacts,
+    # The remote brake ships off. Turning it on is a decision made per
+    # release, after a real update has been watched end to end.
+    auto=False,
+), indent=1))
 PYEOF
 
 openssl dgst -sha256 -sign "$RELKEY" -out "$TMP/manifest.json.sig" \
