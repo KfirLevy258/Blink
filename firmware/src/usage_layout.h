@@ -53,10 +53,11 @@
  * readout beside it.
  */
 
-/* Execution-state pip, left column under the clock. */
-#define ACT_PIP_X		12
-#define ACT_PIP_Y		28
-#define ACT_PIP_SZ		8
+/*
+ * No execution-state pip. It sat top-left under the clock while the status dot
+ * sat top-right -- two unlabelled circles in the same colour vocabulary saying
+ * unrelated things. They are one indicator now, top-right; see refresh_dot().
+ */
 
 /* The two arcs. */
 #define GAUGE_CX		80

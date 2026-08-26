@@ -20,10 +20,26 @@
 #define COL_TRACK	lv_color_hex(0x272C34)
 #define COL_TEXT	lv_color_hex(0xE6E8EB)
 #define COL_DIM		lv_color_hex(0x8A9199)
-#define COL_GREEN	lv_color_hex(0x2ECC71)
+/*
+ * The severity ramp: green, amber, red -- and all three sit inside a 1.28x
+ * luminance band on purpose.
+ *
+ * They used to span 2.30x, INVERTED: amber at 11.39:1 was the brightest thing
+ * on the panel and red at 4.95:1 was the dimmest, so the merely-getting-close
+ * colour shouted over the critical one. Brightness is attention on a dark
+ * panel, so that was the hierarchy the eye actually applied, whatever the code
+ * intended.
+ *
+ * The fix is not a brighter red -- a red bright enough to outshine a yellow is
+ * a pale salmon and stops reading as red at all; that is the physics of
+ * luminance, not a palette choice. So luminance is held flat and URGENCY IS
+ * CARRIED BY SATURATION (0.58 -> 0.66 -> 0.72) and by the arc's own area. A
+ * 95% arc is a nearly-complete ring; it does not need to shout as well.
+ */
+#define COL_GREEN	lv_color_hex(0x4AB07D)
 #define COL_GREEN_INK	lv_color_hex(0x06210F)
-#define COL_AMBER	lv_color_hex(0xF1C40F)
-#define COL_RED		lv_color_hex(0xE74C3C)
+#define COL_AMBER	lv_color_hex(0xCA9E45)
+#define COL_RED		lv_color_hex(0xFF5447)
 /* 3.91:1 against the background. Was #555B63 at 2.76:1, which is under the
  * 3:1 minimum for a graphic element -- and these are the swipe chevrons, which
  * exist only because nobody discovered the gestures without them. An
@@ -40,13 +56,17 @@
  * rather than the ring. Worth knowing when reading this file: the ring tells
  * you whose, the number tells you how bad.
  */
-#define COL_CLAUDE	lv_color_hex(0xD97757)	/* the brand's warm orange */
-/* Brighter than it looks necessary, and that is the point: at #10A37F the two
- * provider colours measured 1.02:1 against EACH OTHER -- near-identical
- * luminance, separated by hue alone. Anyone who cannot resolve that hue got no
- * signal at all. At #2DD4BF the pair is 1.68:1 and the difference survives as
- * brightness as well as colour. */
-#define COL_CODEX	lv_color_hex(0x2DD4BF)
+#define COL_CLAUDE	lv_color_hex(0xC6653B)	/* the brand's warm orange */
+/*
+ * Identity colours, and they sit BELOW the severity ramp deliberately.
+ *
+ * The teal used to measure 10.16:1 -- brighter than every severity colour, so
+ * a codex ball at 5% pulled more attention than a Claude arc at 95%. Identity
+ * outranking urgency is exactly backwards. Both now sit inside the severity
+ * band, still 1.56:1 apart from each other so the pair survives for anyone who
+ * cannot resolve the hue difference.
+ */
+#define COL_CODEX	lv_color_hex(0x21B6A7)
 #define COL_OTHER	lv_color_hex(0x6E8BC4)	/* anything else: a cool blue */
 
 struct gauge {
@@ -62,11 +82,26 @@ struct gauge {
 };
 
 static struct gauge session, weekly;
+/*
+ * ONE attention indicator, not two.
+ *
+ * There used to be a status dot top-right (is the data trustworthy) and an
+ * activity pip top-left (what is Claude Code doing). Two unlabelled circles in
+ * the two most prominent corners, in the same green/amber/red vocabulary,
+ * saying unrelated things -- so a red dot could mean "you are rate limited", "a
+ * tool is wedged" or "the cable fell out", and the panel gave no way to tell.
+ *
+ * They were never two facts. Both answer "is something wrong, and how badly":
+ * OK -> stale -> error, and running/idle -> waiting -> stuck/failed are the
+ * same axis. So they collapse: one dot, coloured by the WORSE of the two, and
+ * the hint line -- already there, already empty when all is well -- says which
+ * one fired. Colour means one thing again.
+ */
 static lv_obj_t *dot;
+static enum usage_status data_health = USAGE_STATUS_DISCONNECTED;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
 static lv_obj_t *clock_lbl;
-static lv_obj_t *act_pip;	/* execution state, as a coloured pip */
 static lv_obj_t *sess_lbl;	/* "3s 7a" -- open sessions and live agents */
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
 static char provider2_tag[12];	/* "" when there is only one provider */
@@ -430,7 +465,6 @@ void usage_view_deinit(void)
 	 * because the setters below are called from the protocol thread and
 	 * would otherwise write through a freed pointer between the delete and
 	 * the next init. */
-	act_pip = NULL;
 	sess_lbl = NULL;
 	session.arc2 = NULL;
 	weekly.arc2 = NULL;
@@ -509,21 +543,6 @@ void usage_view_init(void)
 	/* Which model is in use, directly under the brand. Blank until the
 	 * daemon says -- an empty line reads as "nothing to report", where a
 	 * placeholder would read as a model actually named that. */
-	/* Execution state, in the left column under the clock. Hidden at
-	 * USAGE_ACTIVITY_NONE rather than shown grey: a dark corner says
-	 * nothing, and a grey pip says "idle", which is a different claim. */
-	act_pip = lv_obj_create(scr);
-	lv_obj_set_size(act_pip, ACT_PIP_SZ, ACT_PIP_SZ);
-	lv_obj_set_style_radius(act_pip, LV_RADIUS_CIRCLE, 0);
-	lv_obj_set_style_border_width(act_pip, 0, 0);
-	lv_obj_set_style_bg_color(act_pip, COL_GREEN, 0);
-	lv_obj_align(act_pip, LV_ALIGN_TOP_LEFT, ACT_PIP_X, ACT_PIP_Y);
-	lv_obj_add_flag(act_pip, LV_OBJ_FLAG_HIDDEN);
-	/* Same reason the status dot bubbles: a swipe starting here must still
-	 * reach the screen underneath, or the settings gesture goes dead on
-	 * whatever fraction of the panel this covers. */
-	lv_obj_add_flag(act_pip, LV_OBJ_FLAG_GESTURE_BUBBLE);
-
 	/* The bottom line: session and agent counts, and the second provider's
 	 * name when there is one. Shared with the hint, which outranks both --
 	 * the hint is empty when all is well, which is exactly when these are
@@ -833,62 +852,79 @@ static void act_pulse_cb(void *obj, int32_t v)
 	lv_obj_set_style_bg_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
 }
 
-void usage_view_set_activity(enum usage_activity a)
+/*
+ * Paint the one indicator from the worse of its two inputs.
+ *
+ * Data health outranks execution state when both have something to say: a
+ * reading we cannot vouch for makes the execution state moot, because the
+ * numbers beside it are the thing in doubt.
+ */
+static void refresh_dot(void)
 {
-	if (!act_pip) {
+	lv_color_t c = COL_GREY;
+	bool pulse = false;
+
+	if (!dot) {
 		return;
 	}
-
-	/* Always stop first. Leaving a previous pulse running would keep
-	 * writing opacity behind whatever the new state sets, so a
-	 * RUNNING -> STUCK transition would show a breathing red pip that
-	 * reads as "still working" at exactly the moment it is not. */
-	lv_anim_delete(act_pip, act_pulse_cb);
-	lv_obj_set_style_bg_opa(act_pip, LV_OPA_COVER, 0);
-	activity = a;
-
-	if (a == USAGE_ACTIVITY_NONE) {
-		lv_obj_add_flag(act_pip, LV_OBJ_FLAG_HIDDEN);
-		return;
-	}
-	lv_obj_clear_flag(act_pip, LV_OBJ_FLAG_HIDDEN);
-
-	switch (a) {
-	case USAGE_ACTIVITY_WAITING:
-		lv_obj_set_style_bg_color(act_pip, COL_AMBER, 0);
+	switch (data_health) {
+	case USAGE_STATUS_ERROR:
+		c = COL_RED;
 		break;
-	case USAGE_ACTIVITY_STUCK:
-	case USAGE_ACTIVITY_FAILED:
-		lv_obj_set_style_bg_color(act_pip, COL_RED, 0);
+	case USAGE_STATUS_STALE:
+		c = COL_AMBER;
 		break;
+	case USAGE_STATUS_DISCONNECTED:
+		c = COL_GREY;
+		break;
+	case USAGE_STATUS_OK:
 	default:
-		lv_obj_set_style_bg_color(act_pip, COL_GREEN, 0);
+		/* Data is sound, so the dot is free to report what the tool is
+		 * doing. Only here -- an amber "waiting" must never mask a red
+		 * "the host is gone". */
+		switch (activity) {
+		case USAGE_ACTIVITY_STUCK:
+		case USAGE_ACTIVITY_FAILED:
+			c = COL_RED;
+			break;
+		case USAGE_ACTIVITY_WAITING:
+			c = COL_AMBER;
+			break;
+		case USAGE_ACTIVITY_RUNNING:
+			c = COL_GREEN;
+			pulse = true;
+			break;
+		default:
+			c = COL_GREEN;
+			break;
+		}
 		break;
 	}
 
-	if (a == USAGE_ACTIVITY_RUNNING) {
+	lv_anim_delete(dot, act_pulse_cb);
+	lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+	lv_obj_set_style_bg_color(dot, c, 0);
+
+	if (pulse) {
 		lv_anim_t an;
 
 		lv_anim_init(&an);
-		lv_anim_set_var(&an, act_pip);
+		lv_anim_set_var(&an, dot);
 		lv_anim_set_exec_cb(&an, act_pulse_cb);
-		lv_anim_set_values(&an, LV_OPA_30, LV_OPA_COVER);
-		lv_anim_set_duration(&an, 600);
-		lv_anim_set_playback_duration(&an, 600);
+		lv_anim_set_values(&an, LV_OPA_40, LV_OPA_COVER);
+		lv_anim_set_duration(&an, 900);
+		lv_anim_set_playback_duration(&an, 900);
 		lv_anim_set_repeat_count(&an, LV_ANIM_REPEAT_INFINITE);
 		lv_anim_start(&an);
 	}
 }
 
+void usage_view_set_activity(enum usage_activity a)
+{
+	activity = a;
+	refresh_dot();
+}
 
-/*
- * The bottom line, which several things want and only one can have.
- *
- * It carries the second provider's name -- the inner rings are unlabelled, so
- * this is the only place that says whose they are -- and the session and agent
- * counts. The hint outranks both and is handled separately: it is empty when
- * all is well, which is exactly when these are worth reading.
- */
 static int sess_n, agent_n;
 
 static void refresh_bottom_line(void)
@@ -1012,14 +1048,13 @@ void usage_view_set_status(enum usage_status status)
 		return;
 	}
 	last_status = status;
+	data_health = status;
 
-	lv_color_t c;
 	lv_color_t tc = COL_DIM;
 	const char *text;
 
 	switch (status) {
 	case USAGE_STATUS_OK:
-		c = COL_GREEN;
 		/* Near-limit call-out: the whole point of a glanceable
 		 * display is knowing this before the API tells you no
 		 * (user request 2026-07-17). Session first -- it bites
@@ -1053,7 +1088,6 @@ void usage_view_set_status(enum usage_status status)
 		}
 		break;
 	case USAGE_STATUS_STALE:
-		c = COL_AMBER;
 		tc = COL_AMBER;
 		/* Not "rate-limited": this state means the daemon has no fresh
 		 * reading, which is usually its owner being away from Claude Code.
@@ -1064,7 +1098,6 @@ void usage_view_set_status(enum usage_status status)
 		text = "Reading is old - showing last known";
 		break;
 	case USAGE_STATUS_ERROR:
-		c = COL_RED;
 		tc = COL_RED;
 		text = "Error - showing last known";
 		break;
@@ -1077,19 +1110,19 @@ void usage_view_set_status(enum usage_status status)
 			 * themselves, so without this the board would look
 			 * perfectly healthy while showing a frozen snapshot.
 			 */
-			c = COL_RED;
 			tc = COL_RED;
 			text = "HOST LOST - numbers are frozen";
 		} else {
-			c = COL_GREY;
 			text = "";
 		}
 		break;
 	}
-	lv_obj_set_style_bg_color(dot, c, 0);
 	lv_obj_set_style_text_color(hint, tc, 0);
 	lv_label_set_text(hint, text);
 
+	/* One owner for the indicator's colour. The hint says WHICH condition
+	 * fired; the dot says only how bad it is. */
+	refresh_dot();
 	usage_view_sync_takeover();
 }
 

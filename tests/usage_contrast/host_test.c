@@ -36,12 +36,12 @@ static const struct swatch pal[] = {
 	{ "COL_BG",      0x0E1116 },
 	{ "COL_TEXT",    0xE6E8EB },
 	{ "COL_DIM",     0x8A9199 },
-	{ "COL_GREEN",   0x2ECC71 },
-	{ "COL_AMBER",   0xF1C40F },
-	{ "COL_RED",     0xE74C3C },
+	{ "COL_GREEN",  0x4AB07D },
+	{ "COL_AMBER",  0xCA9E45 },
+	{ "COL_RED",  0xFF5447 },
 	{ "COL_GREY",    0x6B7280 },
-	{ "COL_CLAUDE",  0xD97757 },
-	{ "COL_CODEX",   0x2DD4BF },
+	{ "COL_CLAUDE",  0xC6653B },
+	{ "COL_CODEX",  0x21B6A7 },
 	{ "COL_OTHER",   0x6E8BC4 },
 };
 #define N (int)(sizeof(pal) / sizeof(pal[0]))
@@ -159,16 +159,42 @@ int main(void)
 	CHECK(pp >= 1.5, msg);
 
 	/*
-	 * The severity ramp is NOT held to the same rule, deliberately. Its
-	 * redundant encoding is the arc itself: a 91% arc is nearly a full
-	 * circle whatever colour it is drawn in, so the ramp reinforces a shape
-	 * the eye has already read. Colour is the only cue for the provider
-	 * ball, which is why that one is checked and this one is not.
+	 * THE SEVERITY BAND MUST STAY FLAT.
+	 *
+	 * On a dark panel brightness is attention, so a ramp whose middle step
+	 * is the brightest inverts its own meaning. That is exactly what
+	 * shipped: amber at 11.39:1 against red at 4.95:1, a 2.30x spread with
+	 * the merely-getting-close colour shouting over the critical one.
+	 *
+	 * The fix was not a brighter red. A red luminous enough to outshine a
+	 * yellow is a pale salmon and stops reading as red, which is physics
+	 * rather than taste. So luminance is held flat and urgency is carried
+	 * by saturation and by the arc's own area instead -- and THIS is the
+	 * check that keeps someone from "improving" one step later.
 	 */
-	CHECK(contrast(by_name("COL_RED"), bg) >= 3.0 &&
-	      contrast(by_name("COL_AMBER"), bg) >= 3.0 &&
-	      contrast(by_name("COL_GREEN"), bg) >= 3.0,
-	      "every step of the severity ramp is visible against the panel");
+	double g = contrast(by_name("COL_GREEN"), bg);
+	double a = contrast(by_name("COL_AMBER"), bg);
+	double rd = contrast(by_name("COL_RED"), bg);
+	double hi = g > a ? (g > rd ? g : rd) : (a > rd ? a : rd);
+	double lo = g < a ? (g < rd ? g : rd) : (a < rd ? a : rd);
+
+	snprintf(msg, sizeof(msg),
+		 "the severity band is flat, not inverted (%.2fx spread <= 1.35)",
+		 hi / lo);
+	CHECK(hi / lo <= 1.35, msg);
+
+	/*
+	 * And nothing on the panel may outshine urgency. The teal used to sit
+	 * at 10.16:1, brighter than every severity colour, so a codex ball at
+	 * 5% pulled more attention than a Claude arc at 95%.
+	 */
+	double id = contrast(by_name("COL_CLAUDE"), bg);
+	double id2 = contrast(by_name("COL_CODEX"), bg);
+
+	snprintf(msg, sizeof(msg),
+		 "identity never outranks severity (%.2f <= %.2f)",
+		 id2 > id ? id2 : id, hi);
+	CHECK((id2 > id ? id2 : id) <= hi + 0.05, msg);
 
 	/* And the list above still matches the source it claims to mirror. */
 	int checked = 0, agreed = 0;

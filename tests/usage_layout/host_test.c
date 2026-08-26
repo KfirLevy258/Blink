@@ -39,12 +39,6 @@ static struct box top_mid(const char *name, int xoff, int y, int w, int h)
 	return b;
 }
 
-static struct box top_left(const char *name, int x, int y, int w, int h)
-{
-	struct box b = { name, x, y, x + w, y + h };
-	return b;
-}
-
 /* BOTTOM_MID with a positive `up` offset from the bottom edge. */
 static struct box bottom_mid(const char *name, int up, int w, int h)
 {
@@ -80,10 +74,6 @@ static int on_screen(struct box b)
 
 int main(void)
 {
-	/* Header. */
-	struct box pip = top_left("activity pip", ACT_PIP_X, ACT_PIP_Y,
-				  ACT_PIP_SZ, ACT_PIP_SZ);
-
 	/* The gauges. */
 	struct box arc_l = top_mid("arc L", -GAUGE_CX, GAUGE_ARC_Y,
 				   GAUGE_ARC_SZ, GAUGE_ARC_SZ);
@@ -119,7 +109,7 @@ int main(void)
 	struct box sess = bottom_mid("session readout", SESS_BOTTOM_OFF,
 				     SESS_MAX_W, FONT_LINE_H);
 
-	struct box all[] = { pip, arc_l, arc_r, pct_l, p2_l, name_l, name_r,
+	struct box all[] = { arc_l, arc_r, pct_l, p2_l, name_l, name_r,
 			     cd_l, cd_l2, cd_r, cd_r2, hint, sess };
 
 	for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
@@ -164,10 +154,6 @@ int main(void)
 	 * when it has something to say -- so they are expected to coincide,
 	 * and the code, not the geometry, keeps them apart. */
 	CHECK(sess.y0 == hint.y0, "counts and hint share one line, as intended");
-
-	/* --- the header --- */
-	CHECK(pip.y1 <= GAUGE_ARC_Y, "activity pip sits above the arcs");
-	CHECK(!overlaps(pip, arc_l), "activity pip clears the left ring");
 
 	/* --- the text budgets are real --- */
 	CHECK(BUDGET_FITS(GAUGE_P2_MAX_W, "100%"),

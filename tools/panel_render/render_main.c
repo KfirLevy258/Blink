@@ -80,7 +80,7 @@ int main(int argc, char **argv)
 	settle();
 
 	/* Clear the boot takeover so the gauges are what we photograph. */
-	usage_view_set_status(USAGE_STATUS_OK);
+	usage_view_set_status(USAGE_STATUS_OK);   /* data is sound, so the dot reports activity */
 
 	switch (scene) {
 	case 0:	/* the ordinary desk: one provider, one session */
