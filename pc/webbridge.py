@@ -48,7 +48,17 @@ DIAG_PATH = "/diag"
 
 # A crumb the daemon leaves for `clauge status`, which runs in a different
 # process and cannot see the daemon's memory.
-DIAG_FILE = os.path.expanduser("~/.clauge/webbridge.json")
+#
+# Resolved when it is USED, never at import. A module-level expanduser is
+# captured before a test can redirect HOME, so every default here would point
+# at the real profile whatever the sandbox said -- and it did: the webbridge
+# fixture ran against the developer's own ~/.clauge/webbridge.json and left a
+# test timestamp in it, which `clauge status` then reported as "extension last
+# seen 1397 min ago" on a machine where the extension had reported seconds
+# earlier. tests/conftest.py exists to make that impossible; a constant
+# evaluated at import time walks straight past it.
+def diag_file() -> str:
+    return os.path.expanduser("~/.clauge/webbridge.json")
 
 # Do not rewrite the crumb on every single POST. The extension throttles
 # itself, but a busy tab plus a future chattier version should not turn this
@@ -89,9 +99,9 @@ class _Diag:
     questions worth asking when the panel's weekly dial looks wrong.
     """
 
-    def __init__(self, path=DIAG_FILE, now=None):
+    def __init__(self, path=None, now=None):
         import time as _time
-        self._path = path
+        self._path = diag_file() if path is None else path
         self._now = now or _time.time
         self._lock = threading.Lock()
         self._state = {"t": 0.0, "responses": 0, "matched": 0,
@@ -129,8 +139,9 @@ class _Diag:
             pass
 
 
-def read_diag(path=DIAG_FILE):
+def read_diag(path=None):
     """What the extension last reported, or None. For `clauge status`."""
+    path = diag_file() if path is None else path
     try:
         with open(path, "r", encoding="utf-8") as f:
             d = json.load(f)
@@ -277,7 +288,7 @@ def _make_handler(slot, now, diag=None):
 class WebBridge:
     """The listener plus the provider that reads what it collected."""
 
-    def __init__(self, host=HOST, port=PORT, now=None, diag_path=DIAG_FILE):
+    def __init__(self, host=HOST, port=PORT, now=None, diag_path=None):
         import time as _time
         self._now = now or _time.time
         self.slot = _Slot()

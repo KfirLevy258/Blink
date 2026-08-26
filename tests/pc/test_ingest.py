@@ -133,6 +133,7 @@ def test_a_taken_port_costs_the_browser_source_and_nothing_else(capsys,
         def __init__(self, *a, **k):
             raise OSError("address already in use")
 
+    monkeypatch.delenv(ingest.WEB_BRIDGE_DISABLE_ENV, raising=False)
     monkeypatch.setattr("pc.webbridge.WebBridge", Taken)
     providers = [Fixed(frame())]
     assert ingest.start_web_bridge(providers) is None
@@ -140,11 +141,29 @@ def test_a_taken_port_costs_the_browser_source_and_nothing_else(capsys,
     assert "not started" in capsys.readouterr().err
 
 
-def test_a_started_bridge_adds_exactly_one_provider(monkeypatch):
+def test_a_started_bridge_adds_exactly_one_provider(monkeypatch, tmp_path):
+    """Port 0, not 9877.
+
+    This bound the real production port, so it failed on any machine where
+    the daemon happened to be running -- which is every machine the product
+    is being tested on. What it is pinning down is the WIRING (one bridge in,
+    one provider out), and that is true at any port.
+    """
+    from pc import webbridge
+    real = webbridge.WebBridge          # bound before the patch replaces it
+
+    def ephemeral(*a, **k):
+        k.setdefault("port", 0)
+        k.setdefault("diag_path", str(tmp_path / "webbridge.json"))
+        return real(*a, **k)
+
+    monkeypatch.delenv(ingest.WEB_BRIDGE_DISABLE_ENV, raising=False)
+    monkeypatch.setattr("pc.webbridge.WebBridge", ephemeral)
     providers = []
     bridge = ingest.start_web_bridge(providers)
     try:
         assert bridge is not None
+        assert bridge.port != 0          # actually bound to something
         assert len(providers) == 1
         assert providers[0].get_provider_id() == "claude"
     finally:

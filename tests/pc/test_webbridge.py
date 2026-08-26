@@ -14,8 +14,18 @@ EXT_ORIGIN = "chrome-extension://abcdefghijklmnop"
 
 
 @pytest.fixture
-def bridge():
-    b = webbridge.WebBridge(port=0, now=lambda: NOW)
+def bridge(tmp_path):
+    """Port 0 AND a diag file under tmp_path.
+
+    The port was already scoped; the diag file was not, and its default came
+    from a module-level expanduser evaluated at import -- before conftest can
+    redirect HOME. So every test through this fixture wrote a fixed test
+    timestamp into the developer's real ~/.clauge/webbridge.json, and
+    `clauge status` then reported the extension as last seen a day ago on a
+    machine where it had reported seconds earlier.
+    """
+    b = webbridge.WebBridge(port=0, now=lambda: NOW,
+                            diag_path=str(tmp_path / "webbridge.json"))
     b.start()
     yield b
     b.stop()
@@ -230,3 +240,15 @@ def test_the_crumb_is_not_rewritten_on_every_post(tmp_path):
     for _ in range(20):
         d.record(responses=1, matched=0)
     assert len(writes) == 1, "throttling did not hold"
+
+
+def test_the_diag_path_follows_a_redirected_home(tmp_path, monkeypatch):
+    """The regression that made this worth changing.
+
+    A constant built with expanduser at import time is fixed before any test
+    can move HOME, so the sandbox conftest.py installs does not apply to it.
+    Resolving on use is what makes the sandbox actually cover this file.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert webbridge.diag_file() == str(tmp_path / ".clauge/webbridge.json")
