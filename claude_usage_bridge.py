@@ -59,8 +59,15 @@ def autodetect_port():
     return None
 
 
-def wait_for_port(explicit=None, poll_s=3.0):
+def wait_for_port(explicit=None, poll_s=3.0, on_wait=None):
     """Block until there is a board to talk to, then return its device path.
+
+    `on_wait` runs once per poll while we wait. Host-side upkeep that has
+    nothing to do with the cable belongs here: a machine sitting with its
+    board unplugged is exactly where this function spends its time, and until
+    the callback existed the daemon did nothing at all in that state -- so a
+    statusLine hook wiped while the board was out stayed wiped until somebody
+    plugged it back in.
 
     Waiting rather than exiting is what keeps the installed service honest
     about "plug it in and it works". install.sh registers this daemon with
@@ -91,6 +98,15 @@ def wait_for_port(explicit=None, poll_s=3.0):
             print(f"[bridge] waiting for the board ({explicit or 'USB'})...",
                   file=sys.stderr)
             announced = True
+        if on_wait is not None:
+            try:
+                on_wait()
+            except Exception as e:
+                # Upkeep must never strand the wait. Failing here would leave
+                # a plugged-in board undetected, which is a far worse outcome
+                # than whatever the callback was trying to do.
+                print(f"[bridge] upkeep failed while waiting: {e}",
+                      file=sys.stderr)
         time.sleep(poll_s)
 
 
@@ -189,7 +205,13 @@ def main(argv=None):
     except OSError as e:
         print(f"[bridge] could not record the pid: {e}", file=sys.stderr)
 
-    port = wait_for_port(args.port)
+    # Host-side upkeep that runs whether or not a board is attached. Passed
+    # into wait_for_port below so an unplugged machine still repairs a wiped
+    # hook instead of sitting idle until the cable comes back.
+    def _upkeep():
+        drifted = watchdog.tick()
+        if drifted:
+            print(f"[watchdog] {drifted}", file=sys.stderr)
 
     # Every provider, every source, behind one callable.
     #
@@ -198,7 +220,15 @@ def main(argv=None):
     # authenticates to Anthropic, and the daemon deliberately does not know
     # which providers exist -- pc/ingest owns that, so onboarding a second
     # tool never reaches this loop.
+    #
+    # Built BEFORE the board is waited for, because it opens the listener the
+    # browser extension reports to. Built after, that socket only existed
+    # while a board happened to be plugged in -- so the extension got
+    # connection-refused on a machine where the daemon was plainly running,
+    # which is indistinguishable from Clauge not being installed.
     fetch = ingest.make_fetch(web_bridge=True)
+
+    port = wait_for_port(args.port, on_wait=_upkeep)
     last_err = None
 
     while True:  # reconnect loop
@@ -239,7 +269,7 @@ def main(argv=None):
                 print(f"[bridge] {err}; waiting for the board", file=sys.stderr)
                 last_err = err
             time.sleep(3)
-            port = wait_for_port(args.port)
+            port = wait_for_port(args.port, on_wait=_upkeep)
             continue
         # Cleared on success so a later, genuine failure is reported again
         # rather than silenced by having happened once before.
@@ -354,12 +384,12 @@ def main(argv=None):
                     if bridge.board_alive():
                         bridge.poll_once()
                     next_poll = time.monotonic() + POLL_INTERVAL_S
-                # Deliberately not gated on board_alive(): drift is a fact
-                # about this machine, so a hook wiped while the board was
-                # unplugged is already repaired by the time it is plugged in.
-                drifted = watchdog.tick()
-                if drifted:
-                    print(f"[watchdog] {drifted}", file=sys.stderr)
+                # Not gated on board_alive(): drift is a fact about this
+                # machine, not about the cable. The same _upkeep runs from
+                # inside wait_for_port, so an unplugged machine repairs a
+                # wiped hook too -- the watchdog's own interval keeps either
+                # path from checking more often than it should.
+                _upkeep()
                 if time.monotonic() >= next_update:
                     next_update = time.monotonic() + UPDATE_INTERVAL_S
                     try:
