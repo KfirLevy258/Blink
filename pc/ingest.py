@@ -17,6 +17,7 @@ import time
 from pc import normalizer, protocol
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
+from pc.providers.claude_state import ClaudeStateProvider
 
 
 def default_providers():
@@ -26,7 +27,8 @@ def default_providers():
     not by position -- but it does decide which source is polled first and so
     which one a tie resolves toward.
     """
-    return [ClaudeCliProvider(), ClaudeDesktopProvider()]
+    return [ClaudeCliProvider(), ClaudeDesktopProvider(),
+            ClaudeStateProvider()]
 
 
 class IngestionBus:

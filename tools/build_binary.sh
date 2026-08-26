@@ -68,6 +68,7 @@ cd "$ROOT"
 	--workpath "$BUILD/work" \
 	--specpath "$BUILD" \
 	--add-data "$ROOT/tools/clauge-statusline.sh:." \
+	--add-data "$ROOT/tools/clauge-hook.sh:." \
 	--collect-all esptool \
 	--hidden-import claude_usage_bridge \
 	--hidden-import ecdsa \

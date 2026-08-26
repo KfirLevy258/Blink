@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 
-from pc import install_statusline, update
+from pc import install_hooks, install_statusline, update
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -55,6 +55,10 @@ def installed_bin():
 
 def shim_path():
     return os.path.join(clauge_home(), "clauge-statusline.sh")
+
+
+def hook_shim_path():
+    return os.path.join(clauge_home(), "clauge-hook.sh")
 
 
 def log_path():
@@ -110,18 +114,26 @@ def _self_path() -> str:
     return sys.executable if _frozen() else os.path.abspath(sys.argv[0])
 
 
-def _shim_source() -> str:
-    """The shim's text, from the bundle when frozen, the tree when not.
+def _shim_source(name: str = "clauge-statusline.sh") -> str:
+    """A shim's text, from the bundle when frozen, the tree when not.
 
-    One source of truth either way -- tools/clauge-statusline.sh is what the
-    build embeds, so the shipped shim and the one in the repository cannot
-    drift apart.
+    One source of truth either way -- tools/ is what the build embeds, so the
+    shipped shim and the one in the repository cannot drift apart. Any new
+    shim added here must also be added to the --add-data list in
+    tools/build_binary.sh, or it will work from a checkout and be missing
+    from every shipped binary.
     """
     if _frozen():
         base = getattr(sys, "_MEIPASS", os.path.dirname(_self_path()))
-        return open(os.path.join(base, "clauge-statusline.sh")).read()
+        return open(os.path.join(base, name)).read()
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return open(os.path.join(here, "tools", "clauge-statusline.sh")).read()
+    return open(os.path.join(here, "tools", name)).read()
+
+
+def _write_shim(path: str, name: str) -> None:
+    with open(path, "w") as f:
+        f.write(_shim_source(name))
+    os.chmod(path, 0o755)
 
 
 # ---------------------------------------------------------------- Claude Code
@@ -658,7 +670,7 @@ def cmd_install(_args) -> int:
 
     _announce()
 
-    print("[1/3] Program ... ", end="", flush=True)
+    print("[1/4] Program ... ", end="", flush=True)
     os.makedirs(bin_dir(), exist_ok=True)
     if _frozen():
         src = _self_path()
@@ -676,16 +688,24 @@ def cmd_install(_args) -> int:
         # interpreter instead. Customers never take this path.
         print("running from a checkout, nothing to copy")
 
-    print("[2/3] Status line ... ", end="", flush=True)
+    print("[2/4] Status line ... ", end="", flush=True)
     os.makedirs(clauge_home(), exist_ok=True)
-    with open(shim_path(), "w") as f:
-        f.write(_shim_source())
-    os.chmod(shim_path(), 0o755)
+    _write_shim(shim_path(), "clauge-statusline.sh")
     install_statusline._announce(settings_path(), shim_path(),
                                  undo_hint=f"{installed_bin()} uninstall")
     print("      " + install_statusline.install(settings_path(), shim_path()))
 
-    print("[3/3] Background service ... ", end="", flush=True)
+    print("[3/4] Activity hooks ... ", end="", flush=True)
+    _write_shim(hook_shim_path(), "clauge-hook.sh")
+    try:
+        print(install_hooks.install(settings_path(), hook_shim_path()))
+    except install_statusline.SettingsUnreadable as e:
+        # The status line is the product; the activity light is a nicety. A
+        # hooks section we cannot safely edit costs the user a pulsing dot,
+        # and is not worth failing an install that has otherwise worked.
+        print(f"skipped ({e})")
+
+    print("[4/4] Background service ... ", end="", flush=True)
     print(_install_service())
 
     print()
@@ -702,10 +722,10 @@ def cmd_install(_args) -> int:
 def cmd_uninstall(_args) -> int:
     print("Clauge uninstall.")
     print()
-    print("[1/3] Background service ... ", end="", flush=True)
+    print("[1/4] Background service ... ", end="", flush=True)
     print(_remove_service())
 
-    print("[2/3] Claude Code setting:")
+    print("[2/4] Claude Code setting:")
     try:
         print("      " + install_statusline.uninstall(settings_path(), shim_path()))
     except install_statusline.SettingsUnreadable as e:
@@ -716,13 +736,25 @@ def cmd_uninstall(_args) -> int:
         print(f"      Left alone: {e}")
         print("      Remove the statusLine.command line by hand once it parses.")
 
-    print("[3/3] Files ... ", end="", flush=True)
+    print("[3/4] Activity hooks:")
+    try:
+        print("      " + install_hooks.uninstall(settings_path(),
+                                                 hook_shim_path()))
+    except install_statusline.SettingsUnreadable as e:
+        # Same reasoning as the step above: keep going, and never "repair" a
+        # file we cannot parse by writing a fresh one over it.
+        print(f"      Left alone: {e}")
+
+    print("[4/4] Files ... ", end="", flush=True)
     # Only what install created. NOT ~/.clauge itself: it also holds the two
     # signing keys, which cannot be regenerated -- every board flashed with the
     # first one's public half, and every app carrying the second one's, would
     # stop accepting updates.
-    for p in (shim_path(), os.path.join(clauge_home(), "statusline.json"),
+    for p in (shim_path(), hook_shim_path(),
+              os.path.join(clauge_home(), "statusline.json"),
               os.path.join(clauge_home(), "statusline.json.tmp"),
+              os.path.join(clauge_home(), "state.json"),
+              os.path.join(clauge_home(), "state.json.tmp"),
               os.path.join(clauge_home(), "pending_fw.json")):
         _rm(p)
     done, message = _remove_bin_dir()

@@ -75,7 +75,14 @@ def test_install_discloses_before_it_writes(tmp_path, capsys):
                                         "command": "sh ~/my-bar.sh"}})
     cli.main(["install"])
     out = capsys.readouterr().out
-    disclosure, _, rest = out.partition("[1/3]")
+    # Split on the step marker by pattern, not the literal "[1/3]": the step
+    # count changes whenever a step is added, and partition() on a separator
+    # that is no longer there returns the WHOLE output as the disclosure --
+    # so every assertion below passed vacuously while the real check was gone.
+    import re
+    m = re.search(r"^\[1/\d\]", out, re.M)
+    assert m, "install printed no step markers at all"
+    disclosure, rest = out[:m.start()], out[m.start():]
     assert str(_settings(tmp_path)) in disclosure
     assert "statusLine.command" in disclosure
     assert "sh ~/my-bar.sh" in disclosure

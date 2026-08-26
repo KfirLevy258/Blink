@@ -174,7 +174,9 @@ fi
 
 # Disclosure: it asks nothing, so this is the only safeguard. It has to name
 # the file, the key and the way back, and do it before the first step runs.
-head -n "$(grep -n '^\[1/3\]' "$WORK/out.txt" | head -1 | cut -d: -f1)" \
+# '[1/N]', not '[1/3]': the step count changes whenever a step is added, and
+# pinning it here made an unrelated feature look like a disclosure regression.
+head -n "$(grep -n '^\[1/[0-9]\]' "$WORK/out.txt" | head -1 | cut -d: -f1)" \
 	"$WORK/out.txt" >"$WORK/disclosure.txt" 2>/dev/null || true
 grep -qF "$(native_settings)" "$WORK/disclosure.txt" || fail "disclosure omits settings.json path"
 grep -q "statusLine.command" "$WORK/disclosure.txt" || fail "disclosure omits the key"
