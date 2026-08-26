@@ -187,7 +187,10 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 
 	g->countdown = lv_label_create(parent);
 	lv_label_set_text(g->countdown, "--");
-	lv_obj_set_style_text_color(g->countdown, COL_TEXT, 0);
+	/* Dim, and inside the ring under the percentage. The pair reads as one
+	 * fact -- how much is gone, how long until it comes back -- and the
+	 * percentage stays the thing the eye lands on. */
+	lv_obj_set_style_text_color(g->countdown, COL_DIM, 0);
 	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
 }
 
@@ -346,7 +349,7 @@ void usage_view_init(void)
 	 * shouted over the gauges; user feedback 2026-07-16). */
 	lv_obj_t *title = lv_label_create(scr);
 
-	lv_label_set_text(title, "CLAUGE");
+	lv_label_set_text(title, BRAND_TEXT);
 	lv_obj_set_style_text_color(title, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(title, 2, 0);
 	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
@@ -406,7 +409,7 @@ void usage_view_init(void)
 	sess_lbl = lv_label_create(scr);
 	lv_label_set_text(sess_lbl, "");
 	lv_obj_set_style_text_color(sess_lbl, COL_DIM, 0);
-	lv_obj_align(sess_lbl, LV_ALIGN_TOP_LEFT, SESS_X, SESS_Y);
+	lv_obj_align(sess_lbl, LV_ALIGN_BOTTOM_MID, 0, -SESS_BOTTOM_OFF);
 
 	/* Execution state, in the left column under the clock. Hidden at
 	 * USAGE_ACTIVITY_NONE rather than shown grey: a dark corner says
@@ -449,8 +452,9 @@ void usage_view_init(void)
 
 	ctx_val = lv_label_create(scr);
 	lv_label_set_text(ctx_val, "");
-	lv_obj_set_style_text_color(ctx_val, COL_DIM, 0);
+	lv_obj_set_style_text_color(ctx_val, COL_TEXT, 0);
 	lv_obj_align(ctx_val, LV_ALIGN_TOP_MID, CTX_VAL_X, CTX_VAL_Y);
+
 
 	/* All three hidden together until a number arrives. */
 	lv_obj_add_flag(ctx_cap, LV_OBJ_FLAG_HIDDEN);
@@ -800,9 +804,9 @@ void usage_view_set_activity(enum usage_activity a)
 	}
 }
 
-void usage_view_set_context(double ctx_pct)
+void usage_view_set_context(double ctx_pct, int of_n)
 {
-	char buf[8];
+	char buf[16];
 
 	if (!ctx_bar) {
 		return;
@@ -823,19 +827,28 @@ void usage_view_set_context(double ctx_pct)
 	lv_obj_clear_flag(ctx_bar, LV_OBJ_FLAG_HIDDEN);
 	lv_obj_clear_flag(ctx_val, LV_OBJ_FLAG_HIDDEN);
 
+
+
 	lv_bar_set_value(ctx_bar, (int32_t)(ctx_pct + 0.5), LV_ANIM_OFF);
 	/* Same green/amber/red ramp as the gauges. A full context window is a
 	 * real problem for the person reading it, so it earns the same
 	 * vocabulary rather than a private one. */
 	lv_obj_set_style_bg_color(ctx_bar, severity(ctx_pct), LV_PART_INDICATOR);
 
-	snprintf(buf, sizeof(buf), "%d%%", (int)(ctx_pct + 0.5));
+	/* The qualifier rides on the number. Only above one context, because
+	 * "of 1" is noise that makes the reader check whether they misread it. */
+	if (of_n > 1) {
+		snprintf(buf, sizeof(buf), "%d%% of %d", (int)(ctx_pct + 0.5),
+			 of_n > 9 ? 9 : of_n);
+	} else {
+		snprintf(buf, sizeof(buf), "%d%%", (int)(ctx_pct + 0.5));
+	}
 	lv_label_set_text(ctx_val, buf);
 }
 
 void usage_view_set_sessions(int n_sessions, int n_agents)
 {
-	char buf[16];
+	char buf[32];
 
 	if (!sess_lbl) {
 		return;
@@ -857,9 +870,10 @@ void usage_view_set_sessions(int n_sessions, int n_agents)
 		n_agents = 9;
 	}
 	if (n_agents > 0) {
-		snprintf(buf, sizeof(buf), "%ds %da", n_sessions, n_agents);
+		snprintf(buf, sizeof(buf), "%d sessions  %d agents", n_sessions,
+			 n_agents);
 	} else {
-		snprintf(buf, sizeof(buf), "%ds", n_sessions);
+		snprintf(buf, sizeof(buf), "%d sessions", n_sessions);
 	}
 	lv_label_set_text(sess_lbl, buf);
 }

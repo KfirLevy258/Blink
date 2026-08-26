@@ -263,7 +263,12 @@ static void dispatch(const char *json)
 		double cp = -1;
 
 		msg_get_double(json, "ctx_pct", &cp);
-		usage_view_set_context(cp);
+		/* n_ctx: how many live contexts cp is the worst of. Absent
+		 * means one, which is what every daemon before this sent. */
+		double nctx = 0;
+
+		msg_get_double(json, "n_ctx", &nctx);
+		usage_view_set_context(cp, (int)nctx);
 
 		/*
 		 * 32 bytes against a daemon that caps the name at 24 chars.

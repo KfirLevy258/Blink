@@ -32,6 +32,7 @@
 #define TITLE_Y			6
 #define HDR_ROW_Y		8
 #define DOT_SZ			12
+#define BRAND_TEXT		"BLINK"
 
 /*
  * Which model is in use, under the brand.
@@ -54,38 +55,60 @@
 #define GAUGE_CX		78
 #define GAUGE_ARC_Y		44
 #define GAUGE_ARC_SZ		116
-#define GAUGE_PCT_Y		92
+#define GAUGE_PCT_Y		86
+
+/*
+ * The countdown moved INSIDE the ring, under the percentage.
+ *
+ * An arc's hollow centre was carrying one number and about sixty percent
+ * nothing, while the row below the gauges was trying to fit a caption, a
+ * countdown, a context meter and a hint into the last thirty pixels of the
+ * panel. Putting the countdown where its own percentage already is costs no
+ * new space, pairs the two numbers that belong together -- how much is gone,
+ * how long until it comes back -- and frees a whole row underneath.
+ */
+#define GAUGE_CD_Y		112
 #define GAUGE_NAME_Y		166
-#define GAUGE_CD_Y		188
 
 /* Context row, in the band between the countdowns and the hint. */
-#define CTX_CAP_X		(-116)
-#define CTX_CAP_Y		202
-#define CTX_CAP_MAX_W		30	/* "CTX" */
-#define CTX_BAR_X		16
-#define CTX_BAR_Y		206
 /*
- * 190, not 200. At 200 the bar's right edge landed at x=276 and the readout,
- * centred at CTX_VAL_X with "100%" in it, started at exactly 276 -- flush,
- * with no gap at all. Legal by the overlap test and wrong to look at, and it
- * only shows up at 100%, which is precisely when someone is looking at the
- * context meter. Found by rendering the screen, not by reading the numbers.
+ * The freed row, laid out as ONE line rather than two.
+ *
+ * The first attempt put the context meter on one line and its captions on
+ * another, which collided with the hint -- the label that appears without
+ * warning when something goes wrong, and therefore the one nothing else may
+ * sit on top of. The layout test caught all five overlaps before any of it
+ * was rendered.
+ *
+ * So: context gets a line of its own, and the bottom line is SHARED between
+ * the hint and the session counts, with the hint winning. That mirrors what
+ * the hint already does -- it is empty when all is well, which is exactly
+ * when the counts are worth reading.
  */
-#define CTX_BAR_W		190
-#define CTX_BAR_H		6
-#define CTX_VAL_X		134
-#define CTX_VAL_Y		202
-#define CTX_VAL_MAX_W		36	/* "100%" */
+#define CTX_CAP_X		(-134)
+#define CTX_CAP_Y		194
+#define CTX_CAP_MAX_W		30	/* "CTX" */
+#define CTX_BAR_X		(-21)
+#define CTX_BAR_Y		199
+#define CTX_BAR_W		182
+#define CTX_BAR_H		8	/* thicker, now that there is room */
 
 /*
- * Session/agent readout, in the header's left column beneath the activity
- * pip. Left rather than centre because the centre is the brand and the model
- * name, and right is the age and the status dot -- the left column has the
- * clock and the pip and room under both.
+ * The value carries its own qualifier: "88%" alone, or "88% of 4" when
+ * several sessions have a context and this is the worst of them.
+ *
+ * One label rather than two. With several agents running there are several
+ * context windows and one number cannot be all of them; the bar shows the
+ * fullest, because that is the one about to end somebody's turn, and the
+ * suffix stops it reading as though it were the only one.
  */
-#define SESS_X			22
-#define SESS_Y			24
-#define SESS_MAX_W		44	/* "9s 9a" -- compact on purpose, see MODEL_W */
+#define CTX_VAL_X		114
+#define CTX_VAL_Y		194
+#define CTX_VAL_MAX_W		76	/* "100% of 9" */
+
+/* Session and agent counts, in the bottom line the hint also uses. */
+#define SESS_BOTTOM_OFF		6
+#define SESS_MAX_W		200	/* "9 sessions  9 agents" */
 
 /* Hint line, bottom-centred; carries the amber/red explanation. */
 #define HINT_BOTTOM_OFF		6
@@ -94,7 +117,6 @@
  * Clearances the layout must keep. Named so a failure says which rule broke
  * rather than printing two numbers.
  */
-#define CTX_BAR_CD_GAP_MIN	2	/* bar below the countdown text */
 #define CTX_VAL_HINT_GAP_MIN	0	/* readout above the hint line */
 #define CTX_BAR_VAL_GAP_MIN	4	/* bar's end to its own readout */
 #define SCR_RIGHT_MARGIN_MIN	4	/* nothing flush against the bezel */

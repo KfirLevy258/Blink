@@ -98,8 +98,14 @@ void usage_view_set_status(enum usage_status status);
  *
  * Hidden rather than drawn empty: a 0-length bar and an unknown one look
  * identical at this size, and only one of them is a fact.
+ *
+ * `of_n` is how many live contexts this figure is the worst of. With several
+ * agents running there are several context windows and one number cannot be
+ * all of them, so the bar shows the fullest -- the one about to end somebody's
+ * turn -- and the panel says so rather than letting it read as the only one.
+ * 1 or 0 means there is nothing to qualify.
  */
-void usage_view_set_context(double ctx_pct);
+void usage_view_set_context(double ctx_pct, int of_n);
 
 /*
  * The model in use, e.g. "Opus 5 (1M context)". NULL or "" blanks the label.

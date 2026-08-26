@@ -85,21 +85,26 @@ int main(void)
 
 	/* The two countdowns immediately above it. */
 	struct box cd_l = top_mid("countdown L", -GAUGE_CX, GAUGE_CD_Y,
-				  40, FONT_LINE_H);
+				  70, FONT_LINE_H);
 	struct box cd_r = top_mid("countdown R", GAUGE_CX, GAUGE_CD_Y,
-				  40, FONT_LINE_H);
+				  70, FONT_LINE_H);
+	struct box name_l = top_mid("SESSION caption", -GAUGE_CX, GAUGE_NAME_Y,
+				    110, FONT_LINE_H);
+	struct box name_r = top_mid("WEEKLY caption", GAUGE_CX, GAUGE_NAME_Y,
+				    110, FONT_LINE_H);
 
 	/* The hint line below. Width is the worst case: a hint long enough to
 	 * span the panel, which is what an error message actually is. */
 	struct box hint = bottom_mid("hint", HINT_BOTTOM_OFF, SCR_W,
 				     FONT_LINE_H);
+	struct box sess_b = bottom_mid("session readout", SESS_BOTTOM_OFF,
+				       SESS_MAX_W, FONT_LINE_H);
 
 	/* The header row. */
 	/* MODEL_W, not a guess: the label is width-bounded and ellipsizes, so
 	 * this IS its extent however long the model name gets. */
 	struct box model = top_mid("model", 0, MODEL_Y, MODEL_W, FONT_LINE_H);
-	struct box sess = top_left("session readout", SESS_X, SESS_Y,
-				   SESS_MAX_W, FONT_LINE_H);
+
 	struct box pip = top_left("activity pip", ACT_PIP_X, ACT_PIP_Y,
 				  ACT_PIP_SZ, ACT_PIP_SZ);
 	struct box arc_l = top_mid("arc L", -GAUGE_CX, GAUGE_ARC_Y,
@@ -107,7 +112,7 @@ int main(void)
 
 	/* --- everything is on the panel at all --- */
 	struct box all[] = { cap, bar, val, cd_l, cd_r, hint, model, pip, arc_l,
-			     sess };
+			     sess_b, name_l, name_r };
 	for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		char msg[64];
 		snprintf(msg, sizeof(msg), "%s fits on the panel", all[i].name);
@@ -116,12 +121,11 @@ int main(void)
 
 	/* --- the clearances that are not obvious by eye --- */
 
-	/* The bar spans nearly the full width, so it passes UNDER both
-	 * countdowns. This gap is the whole reason the band works. */
-	CHECK(bar.y0 - cd_l.y1 >= CTX_BAR_CD_GAP_MIN,
-	      "context bar clears the countdown text above it");
-	CHECK(!overlaps(bar, cd_l), "context bar does not touch countdown L");
-	CHECK(!overlaps(bar, cd_r), "context bar does not touch countdown R");
+	/* The countdowns moved inside the rings, so the old bar-versus-
+	 * countdown clearance describes nothing any more. What the bar now has
+	 * to clear is the gauge captions above it. */
+	CHECK(!overlaps(bar, name_l), "context bar clears the SESSION caption");
+	CHECK(!overlaps(bar, name_r), "context bar clears the WEEKLY caption");
 
 	/* The readout sits flush against the hint line -- 0 px, legal, and one
 	 * font size away from breaking. */
@@ -130,12 +134,7 @@ int main(void)
 	CHECK(!overlaps(val, hint), "context readout and hint do not overlap");
 	CHECK(!overlaps(bar, hint), "context bar and hint do not overlap");
 
-	/* The caption is left of the left countdown, not under it. */
-	CHECK(!overlaps(cap, cd_l), "CTX caption clears countdown L");
-	CHECK(cap.x1 <= cd_l.x0, "CTX caption sits left of countdown L");
-
-	/* The readout is right of the right countdown. */
-	CHECK(val.x0 >= cd_r.x1, "context readout sits right of countdown R");
+	CHECK(cap.x1 <= bar.x0, "CTX caption sits left of its bar");
 
 	/* ...and clear of the BAR's own right edge. This was flush at 0 px
 	 * until a render showed it: the overlap test passed, because touching
@@ -156,22 +155,31 @@ int main(void)
 	CHECK(!overlaps(pip, model), "activity pip clears the model label");
 	CHECK(pip.y1 <= GAUGE_ARC_Y, "activity pip sits above the arcs");
 
-	/* The session readout shares the header band with a CENTRED model
-	 * label. This is the collision the bounded MODEL_W exists to prevent:
-	 * an auto-sized label at the daemon's 24-character cap reaches about
-	 * x=65, and the readout starts at x=22. */
-	CHECK(!overlaps(sess, model), "session readout clears the model label");
-	CHECK(sess.x1 <= model.x0, "session readout sits left of the model label");
-	CHECK(!overlaps(sess, pip), "session readout clears the activity pip");
-	CHECK(sess.x0 >= ACT_PIP_X + ACT_PIP_SZ,
-	      "session readout starts right of the pip");
-	CHECK(sess.y1 <= GAUGE_ARC_Y, "session readout sits above the arcs");
+	/* The bottom row now carries three things on two lines: the context
+	 * meter, the caption saying it is a maximum, and the session counts.
+	 * All three share the band with the hint line, which is the one that
+	 * appears without warning when something goes wrong. */
+	CHECK(!overlaps(sess_b, bar), "session counts clear the context bar");
+	CHECK(!overlaps(sess_b, cap), "session counts clear the CTX caption");
+	CHECK(!overlaps(sess_b, val), "session counts clear the context readout");
+	/* The counts and the hint SHARE this line by design -- the hint wins
+	 * when it has something to say -- so they are expected to coincide,
+	 * and the code, not the geometry, keeps them apart. */
+	CHECK(sess_b.y0 == hint.y0, "counts and hint share one line, as intended");
+
+	/* The countdown lives inside the ring now, so it must actually be
+	 * inside it -- and clear of the percentage above it. */
+	CHECK(cd_l.y0 >= GAUGE_PCT_Y + FONT_LINE_H,
+	      "countdown sits below the percentage");
+	CHECK(cd_l.y1 <= GAUGE_ARC_Y + GAUGE_ARC_SZ,
+	      "countdown stays inside the ring");
 
 	/* --- the text budgets are real --- */
 	CHECK((int)strlen("CTX") * CHAR_W_MAX <= CTX_CAP_MAX_W + CHAR_W_MAX,
 	      "\"CTX\" fits its width budget");
-	CHECK((int)strlen("100%") * CHAR_W_MAX >= CTX_VAL_MAX_W,
-	      "CTX_VAL_MAX_W is a real budget for \"100%\", not a guess");
+	/* The widest thing this label ever holds is the qualified form. */
+	CHECK((int)strlen("100% of 9") * CHAR_W_MAX >= CTX_VAL_MAX_W,
+	      "CTX_VAL_MAX_W is a real budget for \"100% of 9\", not a guess");
 
 	/* --- the font assumption these clearances rest on --- */
 	CHECK(FONT_LINE_H == 16,
