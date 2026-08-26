@@ -210,6 +210,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq dash busybox
       - run: sh tests/ci/check_shim.sh ${{ matrix.shell }}
+      # The hook shim runs on every TOOL CALL, which is far more often than
+      # the status line renders, and Claude Code runs it inline -- so a stray
+      # byte on stdout or stderr lands in the user's session.
+      - run: sh tests/ci/check_hook_shim.sh ${{ matrix.shell }}
 
   # We read a field of Claude Code's status line payload that carries no
   # stability commitment. That is the risk you cannot design around, only
