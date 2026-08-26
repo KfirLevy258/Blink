@@ -13,7 +13,7 @@ import serial  # pyserial
 from serial.tools import list_ports
 
 from pc import ota as ota_mod
-from pc import ingest, protocol, statusline_source, update
+from pc import ingest, install_statusline, protocol, statusline_source, update
 from pc.bridge import Bridge
 
 POLL_INTERVAL_S = 60
@@ -145,7 +145,8 @@ def main(argv=None):
     # binary aside and moving the new one in, the login service is pointing at
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
-    from pc.cli import _self_path, clauge_home as _clauge_home, installed_bin
+    from pc.cli import (_self_path, clauge_home as _clauge_home,
+                        installed_bin, settings_path, shim_path)
     self_bin = installed_bin()
     clauge_home = _clauge_home()
     update.recover(self_bin)
@@ -156,6 +157,18 @@ def main(argv=None):
     # reconnection.
     next_update = time.monotonic() + UPDATE_FIRST_CHECK_S
     report_failure = None       # a flash failure waiting for the board to return
+
+    # Outside the reconnect loop for the same reason next_update is: its
+    # interval and its give-up counter describe this machine, not this cable.
+    #
+    # statusLine is a single slot in a file shared with the user and with
+    # Claude Code's own updates, and anything that rewrites settings.json can
+    # drop our command silently. The symptom is not an error -- it is a panel
+    # that stops updating while this program reports success, and the desktop
+    # cache hides it further by going on feeding numbers for hours. See
+    # install_statusline.drift_check for the one rule that matters: a missing
+    # marker means the user uninstalled, and that is never overridden.
+    watchdog = install_statusline.DriftWatchdog(settings_path(), shim_path())
 
     # Record the pid so uninstall can stop US specifically. Ending the login
     # service is not the same as ending this program, and killing by image name
@@ -341,6 +354,12 @@ def main(argv=None):
                     if bridge.board_alive():
                         bridge.poll_once()
                     next_poll = time.monotonic() + POLL_INTERVAL_S
+                # Deliberately not gated on board_alive(): drift is a fact
+                # about this machine, so a hook wiped while the board was
+                # unplugged is already repaired by the time it is plugged in.
+                drifted = watchdog.tick()
+                if drifted:
+                    print(f"[watchdog] {drifted}", file=sys.stderr)
                 if time.monotonic() >= next_update:
                     next_update = time.monotonic() + UPDATE_INTERVAL_S
                     try:

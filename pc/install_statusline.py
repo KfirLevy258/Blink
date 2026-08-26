@@ -376,3 +376,126 @@ if __name__ == "__main__":
 # entry point, and a second way to edit someone's settings.json -- with its own
 # argument parsing and its own default shim path -- is a second thing to keep
 # correct for no one's benefit.
+
+
+# --- anti-drift watchdog --------------------------------------------------
+#
+# statusLine is a single slot in a file we share with the user and with Claude
+# Code's own updates. Anything that rewrites settings.json can drop our command
+# without telling anyone, and the symptom is not an error -- it is a panel that
+# quietly stops updating while the daemon goes on reporting success. The
+# desktop cache makes that worse rather than better: it keeps feeding numbers,
+# so the board still looks alive for hours after the CLI hook has gone.
+#
+# The one thing this must NOT do is fight the user. The distinction it draws:
+#
+#   marker present, hook gone   -> something wiped it. Put it back.
+#   marker absent               -> uninstall() removed it, which is intent.
+#                                  Leave it alone forever.
+#
+# That is why uninstall() removing the marker is load-bearing here, and why
+# this checks the marker before it checks anything else.
+
+# Enough reinstalls to survive an update that rewrites settings.json a couple
+# of times, and few enough that a genuine disagreement with something else on
+# the machine ends in a log line rather than an endless write fight.
+MAX_REINSTATEMENTS = 3
+
+WATCHDOG_DISABLE_ENV = "CLAUGE_NO_WATCHDOG"
+
+
+def drift_check(settings_path: str, shim_path: str):
+    """Put our statusLine hook back if something removed it.
+
+    Returns a description of what it did, or None when there was nothing to
+    do. Never raises: this runs inside the daemon's poll loop, and a daemon
+    that dies because settings.json was briefly unreadable is a worse outcome
+    than a hook that stays missing for another sixty seconds.
+    """
+    if os.environ.get(WATCHDOG_DISABLE_ENV):
+        return None
+
+    # Never installed, or deliberately uninstalled. Both mean hands off.
+    if not _read_marker():
+        return None
+
+    try:
+        data = _load(settings_path)
+    except SettingsUnreadable:
+        # Usually a file someone is halfway through editing. install() would
+        # refuse to write over it too; refusing here keeps that promise
+        # rather than waiting to discover it one layer down.
+        return None
+    except Exception:
+        return None
+
+    current = (data.get("statusLine") or {}).get("command", "")
+    expected = statusline_command(shim_path)
+    if current == expected:
+        return None
+
+    # Classify BEFORE install(), not after. install() writes a fresh marker,
+    # and _is_ours() consults that marker -- so asking afterwards compares the
+    # old command against the new marker, never matches, and reports every
+    # moved shim as a foreign replacement. Caught by
+    # test_a_moved_shim_is_repointed, which is the case an update to this
+    # program creates every single time it moves the binary.
+    if not current:
+        what = "statusline hook had been removed; restored it"
+    elif _is_ours(current, expected):
+        # Ours by the marker but not the command we would write now -- the
+        # shim moved, which is what an update to this program does.
+        what = "statusline hook pointed at an old shim path; repointed it"
+    else:
+        what = ("statusline hook had been replaced; restored it and chained"
+                f" the replacement: {current}")
+
+    try:
+        install(settings_path, shim_path)
+    except Exception as e:
+        return f"statusline hook is missing and could not be restored: {e}"
+    return what
+
+
+class DriftWatchdog:
+    """drift_check on an interval, with a cap on how hard it insists.
+
+    Interval rather than a file watcher on purpose. A watcher would need a
+    dependency this daemon does not otherwise have, for a fault that is
+    measured in "since the last CLI update" rather than in milliseconds --
+    and the poll loop it rides on is already running.
+    """
+
+    def __init__(self, settings_path, shim_path, interval_s=300.0,
+                 now=None, check=drift_check):
+        import time as _time
+        self._settings = settings_path
+        self._shim = shim_path
+        self._interval = interval_s
+        self._now = now or _time.monotonic
+        self._check = check
+        self._next = self._now()
+        self._reinstatements = 0
+        self._gave_up = False
+
+    def tick(self):
+        """Returns a message worth logging, or None. Call it as often as you like."""
+        if self._gave_up:
+            return None
+        now = self._now()
+        if now < self._next:
+            return None
+        self._next = now + self._interval
+
+        msg = self._check(self._settings, self._shim)
+        if msg is None:
+            return None
+
+        self._reinstatements += 1
+        if self._reinstatements >= MAX_REINSTATEMENTS:
+            self._gave_up = True
+            return (f"{msg}. That is {self._reinstatements} times now --"
+                    " something on this machine keeps removing it, so Clauge"
+                    " will stop putting it back. Run `clauge install` once"
+                    " the conflict is resolved.")
+        return msg
