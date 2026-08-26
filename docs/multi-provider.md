@@ -133,16 +133,26 @@ averaging.
 
 Each gauge draws a second, inner ring when a second provider reports.
 
-**Provider is encoded by geometry, severity by colour**, and that split is the
-whole design. Colour is what the eye resolves from across a desk — green means
-room, red means stop — so it cannot also be spent on saying which tool a number
-belongs to. Ring position carries that instead, legible on a second look
-without costing anything on the first. The inner ring is thinner as well as
-smaller, so the primary provider stays the thing you read.
+**Provider is encoded by colour, severity by the numerals.** Claude wears the
+brand's warm orange, Codex a teal well clear of it, anything else a cool blue —
+and the percentage in the middle of each gauge runs green/amber/red as it
+always did. The ring tells you whose, the number tells you how bad.
 
-The inner ring is unlabelled; the bottom line names it once ("inner ring:
-codex"). Repeating the tag on both gauges would say the same thing twice, and
-the ring hollow is not wide enough for it anyway — see below.
+The earlier design had this the other way round (geometry for provider, colour
+for severity) on the grounds that colour is what the eye resolves from across a
+desk. That reasoning is why severity was *moved* rather than dropped: the
+warning still exists, in a different channel.
+
+Colour follows the provider's **name**, not its ring position. On a machine
+running only Codex the outer ring is Codex and must not wear Claude's colour —
+`select_pair()` makes whichever provider is present the primary, so ring
+position says nothing about identity.
+
+Each provider's own countdown sits under the gauge, in its own colour, so "how
+long has each of them got" is answerable at a glance. With one provider the
+single countdown re-centres; the alignment is recomputed on every render, not
+fixed at build time, because a second provider can arrive and leave while the
+board is running.
 
 Beyond two providers, `select_pair()` drops the third rather than rotating
 through them. A ring that silently changes whose number it is showing is worse
@@ -150,13 +160,16 @@ than one that never shows it.
 
 ### The ring hollow
 
-The countdown lives inside the ring, and the inner ring eats the space it lives
-in. The usable hollow is the inner ring's diameter minus two walls, so the fix
-for a countdown being sliced by its own gauge is counter-intuitive: make the
-inner ring **bigger and thinner**. 88 across with a 6 px wall gives 76 px of
-clear centre; 84 with an 8 px wall gave 68 px, for a ~70 px string. Pinned in
-`tests/usage_layout/host_test.c` rather than left as a number someone will
-helpfully shrink.
+The hollow holds both percentages — primary large, secondary small — and the
+inner ring eats the space they live in. The usable hollow is the inner ring's
+diameter minus two walls, so the fix when something is sliced by its own gauge
+is counter-intuitive: make the inner ring **bigger and thinner**. 88 across
+with a 6 px wall gives 76 px of clear centre; 84 with an 8 px wall gave 68 px.
+Pinned in `tests/usage_layout/host_test.c` rather than left as a number someone
+will helpfully shrink.
+
+This is also why the countdowns are no longer in there. One fitted; two did
+not.
 
 ## 5. The wire
 
@@ -249,7 +262,15 @@ in CI under sh, bash and dash.
 
 ### Counts, not a list
 
-`n_sess`, `n_run`, `n_wait`, `n_stuck`, `n_agents` — and zeros are omitted.
+`n_sess`, `n_run`, `n_wait`, `n_stuck`, `n_agents`, `n_ctx` — and zeros are
+omitted. The second provider adds `p2`, `p2_session_pct`, `p2_weekly_pct`,
+`p2_s_in_s`, `p2_w_in_s`, all absent until a second provider reports. Those
+last two are deliberately short: the fully-loaded line is close enough to the
+limit that spelling them out would cost more than they carry.
+
+The `models` array was dropped. `proto.c` reads the flattened scalar keys and
+never the array, and it has been empty since the status line became the only
+source — thirteen bytes of a budget the second provider made tight.
 A per-session array would blow the 512-byte budget at around four sessions,
 taking the panel dark with no error on exactly the busy machine most likely to
 have four. A busy machine measures 351 bytes; a typical one, 297.
