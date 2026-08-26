@@ -11,6 +11,7 @@ reach the reconnect loop. The daemon's job is to keep a board fed; a parser
 for an app we do not control is exactly the kind of code that should never be
 able to stop it.
 """
+import os
 import sys
 import time
 
@@ -18,6 +19,10 @@ from pc import normalizer, protocol
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_state import ClaudeStateProvider
+
+
+# Set to disable the localhost listener the browser extension reports to.
+WEB_BRIDGE_DISABLE_ENV = "CLAUGE_NO_WEB_BRIDGE"
 
 
 def default_providers():
@@ -31,11 +36,43 @@ def default_providers():
             ClaudeStateProvider()]
 
 
+def start_web_bridge(providers, disable_env=WEB_BRIDGE_DISABLE_ENV):
+    """Open the extension listener and add its provider. Returns it, or None.
+
+    Never raises, and never blocks startup. The port can be held by a second
+    daemon, by a previous instance that has not released it yet, or by
+    something else entirely -- and none of those is a reason for the gauge to
+    stop working. A failure here costs the browser source and nothing else.
+
+    On by default. The listener is bound to loopback, answers one path and one
+    method, caps the body before reading it and checks Origin against an
+    allow-list (see pc/webbridge), and requiring a manual step to turn it on
+    would undo the zero-configuration property that makes the extension worth
+    shipping at all.
+    """
+    if os.environ.get(disable_env):
+        return None
+    try:
+        from pc.webbridge import ClaudeWebProvider, WebBridge
+        bridge = WebBridge()
+        bridge.start()
+    except OSError as e:
+        print(f"[ingest] browser bridge not started ({e}); the CLI and"
+              " desktop sources are unaffected", file=sys.stderr)
+        return None
+    providers.append(ClaudeWebProvider(bridge.slot))
+    return bridge
+
+
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
-                 now=time.time):
+                 now=time.time, web_bridge=False):
         self._providers = (default_providers() if providers is None
                            else list(providers))
+        # Off unless asked for, so importing the bus in a test never opens a
+        # socket. The daemon asks for it; nothing else does.
+        self.web_bridge = (start_web_bridge(self._providers)
+                           if web_bridge else None)
         self._preferred = preferred_provider
         self._now = now
         self._broken = set()
@@ -73,11 +110,14 @@ class IngestionBus:
         return protocol.frame_to_usage(frame, self._now())
 
 
-def make_fetch(providers=None, preferred_provider="claude"):
+def make_fetch(providers=None, preferred_provider="claude",
+               web_bridge=False):
     """Zero-arg callable for Bridge(fetch_usage=...).
 
     Same shape as the single-source make_fetch it replaces, so the daemon's
     wiring did not have to learn that there is now more than one source.
     """
-    bus = IngestionBus(providers=providers, preferred_provider=preferred_provider)
+    bus = IngestionBus(providers=providers,
+                       preferred_provider=preferred_provider,
+                       web_bridge=web_bridge)
     return bus.poll

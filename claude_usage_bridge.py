@@ -198,7 +198,7 @@ def main(argv=None):
     # authenticates to Anthropic, and the daemon deliberately does not know
     # which providers exist -- pc/ingest owns that, so onboarding a second
     # tool never reaches this loop.
-    fetch = ingest.make_fetch()
+    fetch = ingest.make_fetch(web_bridge=True)
     last_err = None
 
     while True:  # reconnect loop

@@ -111,3 +111,46 @@ def test_the_two_real_providers_compose_end_to_end(tmp_path):
 def test_make_fetch_is_a_zero_arg_callable():
     fetch = ingest.make_fetch(providers=[Fixed(frame())])
     assert fetch()["session_pct"] == 50.0
+
+
+# --- the browser bridge is optional and never fatal -----------------------
+
+
+def test_the_bus_opens_no_socket_unless_asked():
+    """Importing or constructing the bus in a test must not start listening."""
+    bus = ingest.IngestionBus(providers=[Fixed(frame())], now=lambda: NOW)
+    assert bus.web_bridge is None
+
+
+def test_the_env_switch_turns_the_listener_off(monkeypatch):
+    monkeypatch.setenv(ingest.WEB_BRIDGE_DISABLE_ENV, "1")
+    providers = []
+    assert ingest.start_web_bridge(providers) is None
+    assert providers == []
+
+
+def test_a_taken_port_costs_the_browser_source_and_nothing_else(capsys,
+                                                                monkeypatch):
+    """A second daemon, or anything else holding 9877. The gauge keeps
+    working; only the browser source is lost."""
+    class Taken:
+        def __init__(self, *a, **k):
+            raise OSError("address already in use")
+
+    monkeypatch.setattr("pc.webbridge.WebBridge", Taken)
+    providers = [Fixed(frame())]
+    assert ingest.start_web_bridge(providers) is None
+    assert len(providers) == 1
+    assert "not started" in capsys.readouterr().err
+
+
+def test_a_started_bridge_adds_exactly_one_provider(monkeypatch):
+    providers = []
+    bridge = ingest.start_web_bridge(providers)
+    try:
+        assert bridge is not None
+        assert len(providers) == 1
+        assert providers[0].get_provider_id() == "claude"
+    finally:
+        if bridge:
+            bridge.stop()
