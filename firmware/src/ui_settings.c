@@ -928,6 +928,17 @@ static void upd_timer_cb(lv_timer_t *t)
  */
 static bool closing;
 static volatile bool want_open;
+/*
+ * A pending provider-page change, -1 or +1, 0 for none. Same reason want_open
+ * exists: the page change is a wipe transition now, and ui_slide_run() must
+ * not be entered from inside an LVGL event callback.
+ *
+ * Only the LAST direction is kept rather than a queue. Two swipes delivered
+ * during a transition (input is not dispatched for its length, so they arrive
+ * as a burst afterwards) should land the user one page further, not replay a
+ * second 650 ms transition for a page they have already left.
+ */
+static volatile int want_page;
 static volatile bool want_close;
 
 #if !IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
@@ -1183,6 +1194,34 @@ static void do_open(void (*pump)(void))
 	ui_anim_gesture_mute(250);	/* short tail past the input burst */
 }
 
+/*
+ * Thread context, and the shortest of the three transitions to set up: the
+ * page change edits the widgets that are already on screen rather than
+ * building or deleting a tree, so the "incoming screen" is the same objects
+ * carrying the other provider's numbers.
+ *
+ * Frozen for the edit, exactly like do_open: render_gauges() invalidates
+ * everything it retexts, and refreshing that would repaint the destination
+ * over the whole screen at once -- leaving the wipe nothing to reveal.
+ */
+static void do_page(int delta, void (*pump)(void))
+{
+	ui_slide_begin();
+	usage_view_page_step(delta);
+	lv_obj_update_layout(lv_screen_active());
+	ui_slide_freeze(false);
+
+	ui_anim_gesture_mute(UI_SLIDE_MS * 6);
+
+	/*
+	 * Content follows the finger. A swipe UP asks for the next page, so
+	 * the page you were on travels up and out and the new one arrives from
+	 * below -- which is UI_SLIDE_UP.
+	 */
+	ui_slide_run(delta > 0 ? UI_SLIDE_UP : UI_SLIDE_DOWN, pump);
+	ui_anim_gesture_mute(250);
+}
+
 static void do_close(void (*pump)(void))
 {
 	/*
@@ -1242,6 +1281,7 @@ void ui_settings_drop_pending(void)
 {
 	want_open = false;
 	want_close = false;
+	want_page = 0;
 	closing = false;
 }
 
@@ -1253,9 +1293,25 @@ void ui_settings_service(void (*pump)(void))
 	} else if (want_close && panel != NULL) {
 		want_close = false;
 		do_close(pump);
+	} else if (want_page != 0 && panel == NULL) {
+		/*
+		 * Last, and only with the panel closed. A page change is the
+		 * least important of the three, and re-checking can_page here
+		 * matters: the flag was set when the gesture landed, and a
+		 * usage message can have removed the second provider in the
+		 * gap -- which would run a transition to a page that no longer
+		 * exists.
+		 */
+		int step = want_page;
+
+		want_page = 0;
+		if (usage_view_can_page(step)) {
+			do_page(step, pump);
+		}
 	}
 	want_open = false;
 	want_close = false;
+	want_page = 0;
 }
 
 static void close_panel(void)
@@ -1707,18 +1763,24 @@ static void scr_gesture_cb(lv_event_t *e)
 		 * The provider stack. Content follows the finger, the way a
 		 * list does: swiping UP pulls the next page in from below.
 		 *
-		 * Unlike the two above, this one is done RIGHT HERE rather
-		 * than flagged for the mode loop. Those two hand off because
-		 * they drive ui_slide_run(), which owns lv_refr_now() and must
-		 * not be re-entered from inside lv_timer_handler(). A page
-		 * change drives nothing: it retexts labels and re-values arcs,
-		 * which is ordinary work for an event callback.
+		 * Flagged for the mode loop like the two above, and for the
+		 * same reason: this became a wipe transition when the cut was
+		 * judged not to read as a swipe, and ui_slide_run() owns
+		 * lv_refr_now() and cannot be re-entered from inside
+		 * lv_timer_handler(). It used to run right here, back when a
+		 * page change was one repaint.
 		 *
-		 * Not blocked during the CONNECTING takeover either -- with no
-		 * data there is only one page, so page_step is already a
-		 * no-op and there is nothing to guard against.
+		 * Asked BEFORE flagging, not after: arming a transition that
+		 * cannot move is 650 ms of frozen panel for nothing, and with
+		 * one provider reporting -- or during the CONNECTING takeover,
+		 * where there is no data and so only one page -- that is every
+		 * vertical swipe there is.
 		 */
-		usage_view_page_step(dir == LV_DIR_TOP ? 1 : -1);
+		int step = (dir == LV_DIR_TOP) ? 1 : -1;
+
+		if (usage_view_can_page(step)) {
+			want_page = step;
+		}
 	}
 }
 

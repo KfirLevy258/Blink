@@ -3,6 +3,8 @@
 
 #include <lvgl.h>
 
+#include "ui_slide_geom.h"
+
 /*
  * Full-screen slide transitions driven by the ILI9341's own scroll hardware.
  *
@@ -30,9 +32,21 @@
  * frames as it has steps, instead of one full render per frame.
  */
 
-/* Direction the existing image travels. */
-#define UI_SLIDE_LEFT	1	/* old screen exits left, new enters from right */
-#define UI_SLIDE_RIGHT	(-1)	/* old screen exits right, new enters from left */
+/*
+ * Direction the existing image travels: UI_SLIDE_LEFT / RIGHT / UP / DOWN,
+ * defined in ui_slide_geom.h alongside the strip arithmetic they select.
+ *
+ * VERTICAL IS WIPE-ONLY, and the reason is the paragraph above: the panel's
+ * scroll register moves the screen sideways and there is no hardware path for
+ * the other axis. A wipe does not use that register at all -- it paints each
+ * strip straight into the screen columns or rows where it will be seen -- so
+ * it is free of the constraint, and ui_slide_run() refuses a vertical
+ * direction if the build is ever switched back to the scrolled slide.
+ *
+ * The cost is identical either way and on either axis: one full render of the
+ * incoming screen, chopped into strips. A vertical transition is 60 steps
+ * where a horizontal one is 80, because the screen is 240 tall and 320 wide.
+ */
 
 /*
  * Run one transition, blocking until it completes.

@@ -788,27 +788,46 @@ static void refresh_rail(void)
 }
 
 /*
- * Move one page. Runs straight from the gesture callback, which is safe here
- * only because a page change is a CUT: it retexts labels and re-values arcs
- * and never loads a screen or drives a slide.
+ * Move one page, and say whether there is one to move to.
  *
- * A slide is not on offer. ui_slide.c does not animate -- it writes the
- * ILI9341's own scroll register, so a transition costs two bytes over SPI
- * instead of a repaint. But the panel runs at rotation 90, which sets
- * MADCTL_MV and maps the chip's native scroll axis onto the screen's
- * HORIZONTAL one. Sideways is free; vertical has no hardware path and would
- * be a full LVGL redraw per frame. A screen that changes in one redraw reads
- * as immediate; three or four stepping frames read as broken.
+ * This used to run straight from the gesture callback as a CUT -- retext the
+ * labels, re-value the arcs, done in one repaint -- on the reasoning that a
+ * vertical transition had no hardware path: the panel's scroll register moves
+ * the screen sideways only, so up/down would mean a full LVGL redraw per
+ * frame, and two or three stepping frames read as broken.
+ *
+ * That reasoning was about the SLIDE. The shipped transition is a WIPE
+ * (ui_slide.c, UI_SLIDE_WIPE), which never touches the scroll register: it
+ * paints the incoming screen one strip at a time, straight into the columns or
+ * rows where it will be seen. That costs one full render for the whole
+ * transition however finely it is chopped, and it does not care which axis it
+ * chops along -- so the vertical direction was available the entire time and
+ * the cut was paying a price the design had already stopped charging.
+ *
+ * The user's verdict on the cut, looking at the board: "the swipe up/down is
+ * not showing like a swipe".
+ *
+ * So the page change is a transition now, which moves it out of the gesture
+ * callback: ui_slide_run() drives lv_refr_now() itself and must not be
+ * re-entered from inside lv_timer_handler(). The gesture flags the direction
+ * and ui_settings_service() runs it from the mode loop, the same way opening
+ * settings and the boot clip already do. can_page() is what lets the gesture
+ * decline to arm a 650 ms blocking transition that would change nothing.
  */
-void usage_view_page_step(int delta)
+bool usage_view_can_page(int delta)
 {
 	int n = page_count();
 	int next = cur_page + delta;
 
-	if (!built || n < 2 || next < 0 || next >= n) {
+	return built && n >= 2 && next >= 0 && next < n;
+}
+
+void usage_view_page_step(int delta)
+{
+	if (!usage_view_can_page(delta)) {
 		return;
 	}
-	cur_page = next;
+	cur_page += delta;
 	render_gauges();
 	refresh_rail();
 }

@@ -132,6 +132,16 @@ void usage_view_set_sessions(int n_sessions, int n_agents);
  * A no-op when there is only one provider: the single-provider desk has no
  * second page to reach and no rail to explain one.
  */
+/*
+ * Whether a page change in this direction would do anything.
+ *
+ * Asked BEFORE a transition is armed: the page change is a full wipe now, and
+ * running one to arrive back where you started is 650 ms of frozen panel in
+ * exchange for nothing. With one provider reporting there is no second page
+ * and every vertical swipe is one of these.
+ */
+bool usage_view_can_page(int delta);
+
 void usage_view_page_step(int delta);
 
 void usage_view_set_provider1(const char *tag);

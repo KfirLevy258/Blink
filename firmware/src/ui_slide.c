@@ -97,7 +97,11 @@
  * and has nothing added. That is what the old unconditional k_sleep got wrong.
  */
 #define SLIDE_MIN_MS	650
-#define SLIDE_STEPS	(SCROLL_LINES / STEP_COLS)
+/* Steps depend on the axis, so this is derived per run rather than fixed: the
+ * screen is 320 wide and 240 tall, which is 80 steps one way and 60 the other.
+ * Both render the incoming screen exactly once -- the step count only decides
+ * how finely that one render is chopped. */
+#define SLIDE_STEPS_FOR(travel)	((travel) / STEP_COLS)
 
 
 static const struct device *const dbi =
@@ -229,7 +233,13 @@ void ui_slide_run(int dir, void (*pump)(void))
 	}
 
 	define_scroll_area();
-	if (!UI_SLIDE_WIPE && !area_defined) {
+	/*
+	 * The scrolled slide cannot go vertical -- the panel's scroll axis is
+	 * the screen's horizontal one and there is no second register. Rather
+	 * than silently scroll sideways for an up/down gesture, fall through to
+	 * the same honest single repaint used when VSCRDEF is refused.
+	 */
+	if (!UI_SLIDE_WIPE && (!area_defined || ui_slide_is_vertical(dir))) {
 		/* No scroll: fall back to simply painting the new screen once.
 		 * Ugly, but a transition that does not happen beats a screen
 		 * that never gets drawn. */
@@ -258,10 +268,12 @@ void ui_slide_run(int dir, void (*pump)(void))
 	 */
 	ui_slide_freeze(true);
 
+	const int travel = ui_slide_travel(dir, LV_HOR_RES, LV_VER_RES);
+	const int steps = SLIDE_STEPS_FOR(travel);
 	const int64_t t0 = k_uptime_get();
 	int step = 0;
 
-	for (int j = STEP_COLS; j <= SCROLL_LINES; j += STEP_COLS) {
+	for (int j = STEP_COLS; j <= travel; j += STEP_COLS) {
 		lv_area_t strip;
 		int off;
 
@@ -280,28 +292,40 @@ void ui_slide_run(int dir, void (*pump)(void))
 		 */
 		if (UI_SLIDE_WIPE) {
 			/*
-			 * Screen columns, not GRAM lines: with no scroll the two
-			 * are the same thing, so the strip is painted where it
-			 * will be seen. The incoming screen arrives from the side
-			 * it used to slide in from -- LEFT means it entered from
-			 * the right, so wipe right-to-left, and vice versa. Note
-			 * this is the OPPOSITE assignment to the scrolled branch,
-			 * where x1 is a GRAM line that the offset then maps to
-			 * the far edge.
+			 * Screen coordinates, not GRAM lines: with no scroll the
+			 * two are the same thing, so the strip is painted where
+			 * it will be seen. The incoming screen arrives from the
+			 * side it used to slide in from -- LEFT means it entered
+			 * from the right, so wipe right-to-left, and UP is to
+			 * DOWN exactly as LEFT is to RIGHT. Note this is the
+			 * OPPOSITE assignment to the scrolled branch, where x1 is
+			 * a GRAM line that the offset then maps to the far edge.
+			 *
+			 * The arithmetic lives in ui_slide_geom.h so a host test
+			 * can check it without a board; this is the only caller.
 			 */
-			strip.x1 = (dir == UI_SLIDE_LEFT) ? SCROLL_LINES - j
-							  : j - STEP_COLS;
+			const struct ui_slide_strip g =
+				ui_slide_strip_at(dir, j, STEP_COLS,
+						  LV_HOR_RES, LV_VER_RES);
+
+			strip.x1 = g.x1;
+			strip.x2 = g.x2;
+			strip.y1 = g.y1;
+			strip.y2 = g.y2;
 			off = 0;
-		} else if (dir == UI_SLIDE_LEFT) {
-			strip.x1 = j - STEP_COLS;
-			off = j;
 		} else {
-			strip.x1 = SCROLL_LINES - j;
-			off = SCROLL_LINES - j;
+			/* Horizontal only -- guarded above. */
+			if (dir == UI_SLIDE_LEFT) {
+				strip.x1 = j - STEP_COLS;
+				off = j;
+			} else {
+				strip.x1 = SCROLL_LINES - j;
+				off = SCROLL_LINES - j;
+			}
+			strip.x2 = strip.x1 + STEP_COLS - 1;
+			strip.y1 = 0;
+			strip.y2 = LV_VER_RES - 1;
 		}
-		strip.x2 = strip.x1 + STEP_COLS - 1;
-		strip.y1 = 0;
-		strip.y2 = LV_VER_RES - 1;
 
 		/*
 		 * Scroll FIRST, then paint. The other order paints the strip
@@ -336,7 +360,7 @@ void ui_slide_run(int dir, void (*pump)(void))
 
 		/* Hold this step until its share of SLIDE_MIN_MS has elapsed,
 		 * and only if it got there early. */
-		int64_t slack = t0 + (int64_t)SLIDE_MIN_MS * step / SLIDE_STEPS
+		int64_t slack = t0 + (int64_t)SLIDE_MIN_MS * step / steps
 				- k_uptime_get();
 
 		if (slack > 0) {
