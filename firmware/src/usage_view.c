@@ -24,7 +24,11 @@
 #define COL_GREEN_INK	lv_color_hex(0x06210F)
 #define COL_AMBER	lv_color_hex(0xF1C40F)
 #define COL_RED		lv_color_hex(0xE74C3C)
-#define COL_GREY	lv_color_hex(0x555B63)
+/* 3.91:1 against the background. Was #555B63 at 2.76:1, which is under the
+ * 3:1 minimum for a graphic element -- and these are the swipe chevrons, which
+ * exist only because nobody discovered the gestures without them. An
+ * affordance too dim to notice is not an affordance. */
+#define COL_GREY	lv_color_hex(0x6B7280)
 
 /*
  * Provider identity colours.
@@ -37,7 +41,12 @@
  * you whose, the number tells you how bad.
  */
 #define COL_CLAUDE	lv_color_hex(0xD97757)	/* the brand's warm orange */
-#define COL_CODEX	lv_color_hex(0x10A37F)	/* a teal, well clear of it */
+/* Brighter than it looks necessary, and that is the point: at #10A37F the two
+ * provider colours measured 1.02:1 against EACH OTHER -- near-identical
+ * luminance, separated by hue alone. Anyone who cannot resolve that hue got no
+ * signal at all. At #2DD4BF the pair is 1.68:1 and the difference survives as
+ * brightness as well as colour. */
+#define COL_CODEX	lv_color_hex(0x2DD4BF)
 #define COL_OTHER	lv_color_hex(0x6E8BC4)	/* anything else: a cool blue */
 
 struct gauge {
@@ -232,10 +241,22 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_obj_add_flag(g->arc2, LV_OBJ_FLAG_HIDDEN);
 	lv_obj_add_flag(g->arc2, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
+	/*
+	 * Fixed width, centred text.
+	 *
+	 * Montserrat's digits are PROPORTIONAL -- measured from the font data,
+	 * '1' is 5.19 px at size 14 against 9.38 px for '4', and 7.38 vs 13.38
+	 * at size 20. An auto-sized label therefore changes width as the digits
+	 * change, and a countdown ticking once a second re-lays-out its whole
+	 * row. Pinning the box stops that reaching anything else on the panel.
+	 * The text still re-centres inside it, which is what a clock does.
+	 */
 	g->pct = lv_label_create(parent);
 	lv_label_set_text(g->pct, "--%");
 	lv_obj_set_style_text_color(g->pct, COL_TEXT, 0);
 	lv_obj_set_style_text_font(g->pct, &lv_font_montserrat_20, 0);
+	lv_obj_set_width(g->pct, GAUGE_PCT_MAX_W);
+	lv_obj_set_style_text_align(g->pct, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(g->pct, LV_ALIGN_TOP_MID, cx, GAUGE_PCT_Y);
 
 	g->name = lv_label_create(parent);
@@ -258,11 +279,15 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	g->countdown = lv_label_create(parent);
 	lv_label_set_text(g->countdown, "--");
 	lv_obj_set_style_text_color(g->countdown, COL_CLAUDE, 0);
+	lv_obj_set_width(g->countdown, GAUGE_CD_MAX_W);
+	lv_obj_set_style_text_align(g->countdown, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
 
 	g->countdown2 = lv_label_create(parent);
 	lv_label_set_text(g->countdown2, "");
 	lv_obj_set_style_text_color(g->countdown2, COL_CODEX, 0);
+	lv_obj_set_width(g->countdown2, GAUGE_CD_MAX_W);
+	lv_obj_set_style_text_align(g->countdown2, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(g->countdown2, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
 	lv_obj_add_flag(g->countdown2, LV_OBJ_FLAG_HIDDEN);
 }

@@ -15,6 +15,15 @@
  * named anchor (TOP_MID unless stated), Y is an offset from the top edge.
  */
 
+/*
+ * Every Y below sits on a 4 px rhythm, and the gaps between rows are 4 or 8.
+ *
+ * They were arbitrary -- 34, 84, 112, 170, 190 -- chosen one at a time to make
+ * whatever had just been added fit. Individually reasonable, collectively the
+ * reason a screen reads as assembled rather than designed: nothing lines up
+ * with anything, and the eye notices even when it cannot say why.
+ */
+
 /* The CYD panel, landscape. */
 #define SCR_W			320
 #define SCR_H			240
@@ -46,14 +55,15 @@
 
 /* Execution-state pip, left column under the clock. */
 #define ACT_PIP_X		12
-#define ACT_PIP_Y		26
+#define ACT_PIP_Y		28
 #define ACT_PIP_SZ		8
 
 /* The two arcs. */
-#define GAUGE_CX		78
-#define GAUGE_ARC_Y		34
+#define GAUGE_CX		80
+#define GAUGE_ARC_Y		36
 #define GAUGE_ARC_SZ		128
-#define GAUGE_PCT_Y		84
+#define GAUGE_PCT_Y		88
+#define GAUGE_PCT_MAX_W		96	/* "100%" at montserrat_20 */
 
 /*
  * The countdown moved INSIDE the ring, under the percentage.
@@ -79,11 +89,11 @@
  * a lot of nothing.
  */
 #define GAUGE_P2PCT_Y		112
-#define GAUGE_NAME_Y		170
-#define GAUGE_CD_Y		190
+#define GAUGE_NAME_Y		168
+#define GAUGE_CD_Y		192
 #define GAUGE_CD_MAX_W		72	/* "6d 22h" per provider */
 /* Side by side when there are two, centred on the gauge when there is one. */
-#define GAUGE_CD_DX		38
+#define GAUGE_CD_DX		40
 
 /*
  * A second provider, as an inner ring inside the same gauge.
@@ -152,11 +162,11 @@
  */
 
 /* Session and agent counts, in the bottom line the hint also uses. */
-#define SESS_BOTTOM_OFF		6
+#define SESS_BOTTOM_OFF		8
 #define SESS_MAX_W		200	/* "9 sessions  9 agents" */
 
 /* Hint line, bottom-centred; carries the amber/red explanation. */
-#define HINT_BOTTOM_OFF		6
+#define HINT_BOTTOM_OFF		8
 
 /*
  * Clearances the layout must keep. Named so a failure says which rule broke
