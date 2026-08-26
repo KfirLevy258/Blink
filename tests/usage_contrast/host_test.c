@@ -40,8 +40,6 @@ static const struct swatch pal[] = {
 	{ "COL_AMBER",  0xCA9E45 },
 	{ "COL_RED",  0xFF5447 },
 	{ "COL_GREY",    0x6B7280 },
-	{ "COL_CLAUDE",  0xC6653B },
-	{ "COL_CODEX",  0x21B6A7 },
 	{ "COL_OTHER",   0x6E8BC4 },
 };
 #define N (int)(sizeof(pal) / sizeof(pal[0]))
@@ -127,8 +125,7 @@ int main(void)
 	/* Text has to clear 4.5:1; a graphic element 3:1 (WCAG 1.4.3, 1.4.11). */
 	static const char *text[] = { "COL_TEXT", "COL_DIM" };
 	static const char *graphic[] = { "COL_GREEN", "COL_AMBER", "COL_RED",
-					 "COL_GREY", "COL_CLAUDE", "COL_CODEX",
-					 "COL_OTHER" };
+					 "COL_GREY", "COL_OTHER" };
 
 	for (unsigned i = 0; i < sizeof(text) / sizeof(text[0]); i++) {
 		double r = contrast(by_name(text[i]), bg);
@@ -146,17 +143,15 @@ int main(void)
 	}
 
 	/*
-	 * The provider colours must differ from each other in BRIGHTNESS, not
-	 * only in hue. This is the check that would have caught #10A37F, which
-	 * cleared the background comfortably and was still invisible as a
-	 * distinction.
+	 * There are no provider colours to compare any more.
+	 *
+	 * They used to have to differ from each other in BRIGHTNESS rather than
+	 * hue alone -- the check that caught #10A37F, which cleared the
+	 * background comfortably and was still invisible as a distinction. One
+	 * provider per page retires the whole question: identity is carried by
+	 * a name under the brand and a position on the rail, and severity is
+	 * the only thing colour is spent on.
 	 */
-	double pp = contrast(by_name("COL_CLAUDE"), by_name("COL_CODEX"));
-
-	snprintf(msg, sizeof(msg),
-		 "the two provider colours differ in brightness (%.2f:1 >= 1.5)",
-		 pp);
-	CHECK(pp >= 1.5, msg);
 
 	/*
 	 * THE SEVERITY BAND MUST STAY FLAT.
@@ -183,18 +178,6 @@ int main(void)
 		 hi / lo);
 	CHECK(hi / lo <= 1.35, msg);
 
-	/*
-	 * And nothing on the panel may outshine urgency. The teal used to sit
-	 * at 10.16:1, brighter than every severity colour, so a codex ball at
-	 * 5% pulled more attention than a Claude arc at 95%.
-	 */
-	double id = contrast(by_name("COL_CLAUDE"), bg);
-	double id2 = contrast(by_name("COL_CODEX"), bg);
-
-	snprintf(msg, sizeof(msg),
-		 "identity never outranks severity (%.2f <= %.2f)",
-		 id2 > id ? id2 : id, hi);
-	CHECK((id2 > id ? id2 : id) <= hi + 0.05, msg);
 
 	/* And the list above still matches the source it claims to mirror. */
 	int checked = 0, agreed = 0;

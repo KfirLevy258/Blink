@@ -1702,6 +1702,23 @@ static void scr_gesture_cb(lv_event_t *e)
 		 * flagged here -- the mode loop runs the player from thread
 		 * context, never from inside an LVGL event. */
 		ui_anim_request();
+	} else if (dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM) {
+		/*
+		 * The provider stack. Content follows the finger, the way a
+		 * list does: swiping UP pulls the next page in from below.
+		 *
+		 * Unlike the two above, this one is done RIGHT HERE rather
+		 * than flagged for the mode loop. Those two hand off because
+		 * they drive ui_slide_run(), which owns lv_refr_now() and must
+		 * not be re-entered from inside lv_timer_handler(). A page
+		 * change drives nothing: it retexts labels and re-values arcs,
+		 * which is ordinary work for an event callback.
+		 *
+		 * Not blocked during the CONNECTING takeover either -- with no
+		 * data there is only one page, so page_step is already a
+		 * no-op and there is nothing to guard against.
+		 */
+		usage_view_page_step(dir == LV_DIR_TOP ? 1 : -1);
 	}
 }
 

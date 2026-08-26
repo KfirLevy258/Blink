@@ -56,7 +56,6 @@
  * rather than the ring. Worth knowing when reading this file: the ring tells
  * you whose, the number tells you how bad.
  */
-#define COL_CLAUDE	lv_color_hex(0xC6653B)	/* the brand's warm orange */
 /*
  * Identity colours, and they sit BELOW the severity ramp deliberately.
  *
@@ -66,17 +65,13 @@
  * band, still 1.56:1 apart from each other so the pair survives for anyone who
  * cannot resolve the hue difference.
  */
-#define COL_CODEX	lv_color_hex(0x21B6A7)
 #define COL_OTHER	lv_color_hex(0x6E8BC4)	/* anything else: a cool blue */
 
 struct gauge {
 	lv_obj_t *arc;
-	lv_obj_t *arc2;		/* second provider, inner ring; NULL-safe */
 	lv_obj_t *pct;
-	lv_obj_t *p2;		/* the inner ring's own small readout */
 	lv_obj_t *name;
 	lv_obj_t *countdown;	/* primary provider's time left */
-	lv_obj_t *countdown2;	/* the second provider's, when there is one */
 	int32_t resets_in_s;	/* -1 = unknown; ticked down locally */
 	int32_t resets2_in_s;	/* ...and the second provider's */
 };
@@ -104,10 +99,46 @@ static lv_obj_t *age_lbl;
 static lv_obj_t *clock_lbl;
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
 static char provider1_tag[12];	/* whichever provider the daemon made primary */
+static lv_obj_t *provider_lbl;	/* the tag, spelled out under the brand */
+static char provider2_tag[12];	/* "" when there is only one provider */
+
+/*
+ * PAGES. One provider per screen, reached by swiping vertically.
+ *
+ * There is only ONE set of gauge widgets. The pages are identical in shape --
+ * a session arc, a weekly arc, two countdowns -- so a second tree would be the
+ * same objects twice over on a board with 96 KB of DRAM to spare. What changes
+ * between pages is which provider's numbers are pushed into them, so the page
+ * is a data selection, not a screen.
+ *
+ * Both pages' countdowns tick regardless of which one is showing: a window
+ * does not stop closing because you are not looking at it, and a page that
+ * caught up only when you arrived would show a stale figure for the moment
+ * that matters most.
+ */
+struct page_data {
+	double s_pct, w_pct;
+	int32_t s_in_s, w_in_s;
+	bool have;
+};
+static struct page_data pg[RAIL_PAGES_MAX];
+static int cur_page;
+static lv_obj_t *rail_dot[RAIL_PAGES_MAX];
+
+static const char *page_tag(int i)
+{
+	return i == 0 ? provider1_tag : provider2_tag;
+}
+
+static int page_count(void)
+{
+	return provider2_tag[0] ? 2 : 1;
+}
 /* Defined below; set_provider2 has to call it, because whether a second
  * provider exists is what decides if the FIRST one is coloured at all. */
 static void refresh_provider1(void);
-static char provider2_tag[12];	/* "" when there is only one provider */
+static void refresh_rail(void);
+static void render_gauges(void);
 static lv_obj_t *overlay;	/* full-screen "no data" takeover */
 static lv_obj_t *wait_big;	/* the takeover's CONNECTING title */
 static bool built;
@@ -207,23 +238,6 @@ static int boot_active = -1;	/* segment currently pulsing, -1 = none */
 static const char *const *boot_txt;
 static int boot_n;
 
-/* Which colour a ring wears, by the name the daemon gave its provider. */
-static lv_color_t provider_color(const char *tag)
-{
-	if (!tag || !tag[0]) {
-		return COL_CLAUDE;
-	}
-	if (strcmp(tag, "claude") == 0) {
-		return COL_CLAUDE;
-	}
-	if (strcmp(tag, "codex") == 0) {
-		return COL_CODEX;
-	}
-	/* A provider this firmware has never heard of still gets a colour of
-	 * its own rather than borrowing one that means something else. */
-	return COL_OTHER;
-}
-
 static lv_color_t severity(double pct)
 {
 	if (pct >= 90.0) {
@@ -271,27 +285,6 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 
 	/* The second provider's ring, hidden until one exists. Created before
 	 * the labels so the text draws over it, not under. */
-	g->arc2 = lv_arc_create(parent);
-	lv_obj_set_size(g->arc2, GAUGE_ARC2_SZ, GAUGE_ARC2_SZ);
-	lv_obj_align(g->arc2, LV_ALIGN_TOP_MID, cx, GAUGE_ARC2_Y);
-	lv_arc_set_rotation(g->arc2, 135);
-	lv_arc_set_bg_angles(g->arc2, 0, 270);
-	lv_arc_set_range(g->arc2, 0, 100);
-	lv_arc_set_value(g->arc2, 0);
-	lv_obj_clear_flag(g->arc2, LV_OBJ_FLAG_CLICKABLE);
-	lv_obj_set_style_pad_all(g->arc2, GAUGE_BALL_PAD, LV_PART_KNOB);
-	lv_obj_set_style_bg_color(g->arc2, COL_CODEX, LV_PART_KNOB);
-	lv_obj_set_style_bg_opa(g->arc2, LV_OPA_COVER, LV_PART_KNOB);
-	lv_obj_set_style_border_color(g->arc2, COL_BG, LV_PART_KNOB);
-	lv_obj_set_style_border_width(g->arc2, GAUGE_BALL_RING, LV_PART_KNOB);
-	lv_obj_set_style_border_opa(g->arc2, LV_OPA_COVER, LV_PART_KNOB);
-	lv_obj_set_style_arc_width(g->arc2, GAUGE_ARC2_W, LV_PART_MAIN);
-	lv_obj_set_style_arc_width(g->arc2, GAUGE_ARC2_W, LV_PART_INDICATOR);
-	lv_obj_set_style_arc_color(g->arc2, COL_TRACK, LV_PART_MAIN);
-	lv_obj_set_style_arc_color(g->arc2, COL_GREEN, LV_PART_INDICATOR);
-	lv_obj_add_flag(g->arc2, LV_OBJ_FLAG_HIDDEN);
-	lv_obj_add_flag(g->arc2, LV_OBJ_FLAG_GESTURE_BUBBLE);
-
 	/*
 	 * Fixed width, centred text.
 	 *
@@ -318,10 +311,6 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	/* The inner ring's own figure, small and dim under the countdown. The
 	 * primary provider keeps the big number; this one is there to be
 	 * noticed, not read first. */
-	g->p2 = lv_label_create(parent);
-	lv_label_set_text(g->p2, "");
-	lv_obj_set_style_text_color(g->p2, COL_DIM, 0);
-	lv_obj_align(g->p2, LV_ALIGN_TOP_MID, cx, GAUGE_P2PCT_Y);
 
 	/* Both countdowns sit under the caption, stacked, each naming its own
 	 * provider. Centred on the gauge whether there is one or two -- the
@@ -329,47 +318,26 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	g->resets2_in_s = -1;
 	g->countdown = lv_label_create(parent);
 	lv_label_set_text(g->countdown, "--");
-	lv_obj_set_style_text_color(g->countdown, COL_CLAUDE, 0);
+	lv_obj_set_style_text_color(g->countdown, COL_DIM, 0);
 	lv_obj_set_width(g->countdown, GAUGE_CD_MAX_W);
 	lv_obj_set_style_text_align(g->countdown, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
 
-	g->countdown2 = lv_label_create(parent);
-	lv_label_set_text(g->countdown2, "");
-	lv_obj_set_style_text_color(g->countdown2, COL_CODEX, 0);
-	lv_obj_set_width(g->countdown2, GAUGE_CD_MAX_W);
-	lv_obj_set_style_text_align(g->countdown2, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(g->countdown2, LV_ALIGN_TOP_MID, cx,
-		     GAUGE_CD_Y + GAUGE_CD_STEP);
-	lv_obj_add_flag(g->countdown2, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void render_countdown(struct gauge *g)
 {
 	char buf[FMT_COUNTDOWN_MAX];
-	char line[48];
-	bool paired = g->countdown2 &&
-		      !lv_obj_has_flag(g->countdown2, LV_OBJ_FLAG_HIDDEN);
 
 	fmt_countdown(g->resets_in_s, buf, sizeof(buf));
 	/*
-	 * The provider's name rides with its own number. That is the whole
-	 * point of stacking these: a bare duration had to be matched to a
-	 * provider by colour, which is why the names ended up on a line at the
-	 * bottom of the panel describing rings instead of numbers.
+	 * A duration, and nothing else. The name used to ride with the number
+	 * because the panel showed two providers at once and a bare figure had
+	 * to be matched to one of them. One provider per page removes the
+	 * question, so the answer stops being worth a line under both gauges.
 	 */
-	if (provider1_tag[0]) {
-		snprintf(line, sizeof(line), "%s  %s", provider1_tag, buf);
-	} else {
-		snprintf(line, sizeof(line), "%s", buf);
-	}
-	lv_label_set_text(g->countdown, line);
+	lv_label_set_text(g->countdown, buf);
 
-	if (paired) {
-		fmt_countdown(g->resets2_in_s, buf, sizeof(buf));
-		snprintf(line, sizeof(line), "%s  %s", provider2_tag, buf);
-		lv_label_set_text(g->countdown2, line);
-	}
 }
 
 #if HAVE_PER_MODEL
@@ -486,12 +454,11 @@ void usage_view_deinit(void)
 	 * because the setters below are called from the protocol thread and
 	 * would otherwise write through a freed pointer between the delete and
 	 * the next init. */
-	session.arc2 = NULL;
-	weekly.arc2 = NULL;
-	session.countdown2 = NULL;
-	weekly.countdown2 = NULL;
-	session.p2 = NULL;
-	weekly.p2 = NULL;
+	provider_lbl = NULL;
+	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
+		rail_dot[i] = NULL;
+	}
+	cur_page = 0;
 	activity = USAGE_ACTIVITY_NONE;
 #if HAVE_PER_MODEL
 	peek = NULL;
@@ -560,9 +527,29 @@ void usage_view_init(void)
 	lv_obj_set_style_text_color(clock_lbl, COL_DIM, 0);
 	lv_obj_align(clock_lbl, LV_ALIGN_TOP_LEFT, 10, HDR_ROW_Y);
 
-	/* Which model is in use, directly under the brand. Blank until the
+	/* Whose numbers these are, directly under the brand. Blank until the
 	 * daemon says -- an empty line reads as "nothing to report", where a
-	 * placeholder would read as a model actually named that. */
+	 * placeholder would read as a provider actually named that. */
+	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
+		rail_dot[i] = lv_obj_create(scr);
+		lv_obj_set_size(rail_dot[i], RAIL_DOT_W, RAIL_H);
+		lv_obj_set_style_radius(rail_dot[i], LV_RADIUS_CIRCLE, 0);
+		lv_obj_set_style_border_width(rail_dot[i], 0, 0);
+		lv_obj_set_style_bg_color(rail_dot[i], COL_GREY, 0);
+		lv_obj_add_flag(rail_dot[i], LV_OBJ_FLAG_HIDDEN);
+		/* A swipe that starts on a mark must still reach the screen,
+		 * or the gesture dies exactly where its own affordance is. */
+		lv_obj_add_flag(rail_dot[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
+	}
+
+	provider_lbl = lv_label_create(scr);
+	lv_label_set_text(provider_lbl, "");
+	lv_obj_set_style_text_color(provider_lbl, COL_TEXT, 0);
+	lv_obj_set_width(provider_lbl, PROVIDER_MAX_W);
+	lv_label_set_long_mode(provider_lbl, LV_LABEL_LONG_DOT);
+	lv_obj_set_style_text_align(provider_lbl, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(provider_lbl, LV_ALIGN_TOP_MID, 0, PROVIDER_Y);
+
 	build_gauge(&session, scr, -GAUGE_CX, "SESSION 5h");
 	build_gauge(&weekly, scr, GAUGE_CX, "WEEKLY 7d");
 
@@ -713,6 +700,119 @@ bool usage_view_have_data(void)
 	return have_data;
 }
 
+/* Push the current page's numbers into the one set of gauge widgets. */
+static void render_gauges(void)
+{
+	struct page_data *p = &pg[cur_page];
+	char buf[8];
+
+	if (!built) {
+		return;
+	}
+
+	/* A negative percentage means "the daemon does not have this number" --
+	 * pc/statusline_source.py sends -1.0 when the window is absent from
+	 * Claude Code's payload entirely. render_weekly() has always honoured
+	 * that; this side did not, so an absent five_hour window rendered as a
+	 * confident green 0%, which is the frozen-meter reading the sentinel
+	 * exists to prevent. */
+	if (p->s_pct < 0) {
+		lv_label_set_text(session.pct, "--%");
+		lv_arc_set_value(session.arc, 0);
+	} else {
+		snprintf(buf, sizeof(buf), "%d%%", (int)(p->s_pct + 0.5));
+		lv_label_set_text(session.pct, buf);
+		lv_arc_set_value(session.arc, (int32_t)(p->s_pct + 0.5));
+		lv_obj_set_style_arc_color(session.arc, severity(p->s_pct),
+					   LV_PART_INDICATOR);
+	}
+	session.resets_in_s = p->s_in_s;
+	render_countdown(&session);
+
+	weekly.resets_in_s = p->w_in_s;
+	render_countdown(&weekly);
+
+	last_s_pct = p->s_pct;
+	last_w_pct = p->w_pct;
+	render_weekly();
+	refresh_provider1();	/* the name under the brand follows the page */
+}
+
+/*
+ * The worse of a page's two windows.
+ *
+ * A rail mark has one colour and two windows to speak for, so it speaks for
+ * whichever is closer to the wall. Averaging them would let a fresh weekly
+ * quota talk a spent session down into amber, which is the reading that
+ * matters getting hidden by the one that does not.
+ */
+static double page_worst(int i)
+{
+	double a = pg[i].s_pct, b = pg[i].w_pct;
+
+	return a > b ? a : b;
+}
+
+static void refresh_rail(void)
+{
+	int n = page_count();
+	int span = n * RAIL_PITCH - (RAIL_PITCH - RAIL_DOT_W);
+	int x = (SCR_W - span) / 2;
+
+	if (!rail_dot[0]) {
+		return;
+	}
+	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
+		bool on = i == cur_page;
+
+		/* One page: nowhere to go, so there is no indicator to decode
+		 * and no gesture to discover. The single-provider desk keeps
+		 * exactly the screen it had. */
+		if (i >= n || n < 2) {
+			lv_obj_add_flag(rail_dot[i], LV_OBJ_FLAG_HIDDEN);
+			continue;
+		}
+		lv_obj_clear_flag(rail_dot[i], LV_OBJ_FLAG_HIDDEN);
+		lv_obj_set_size(rail_dot[i], on ? RAIL_ACT_W : RAIL_DOT_W,
+				RAIL_H);
+		lv_obj_set_pos(rail_dot[i],
+			       x + i * RAIL_PITCH -
+				       (on ? (RAIL_ACT_W - RAIL_DOT_W) / 2 : 0),
+			       SCR_H - RAIL_BOTTOM_OFF - RAIL_H);
+		lv_obj_set_style_bg_color(rail_dot[i],
+					  pg[i].have ? severity(page_worst(i))
+						     : COL_GREY, 0);
+		lv_obj_set_style_bg_opa(rail_dot[i],
+					on ? LV_OPA_COVER : LV_OPA_50, 0);
+	}
+}
+
+/*
+ * Move one page. Runs straight from the gesture callback, which is safe here
+ * only because a page change is a CUT: it retexts labels and re-values arcs
+ * and never loads a screen or drives a slide.
+ *
+ * A slide is not on offer. ui_slide.c does not animate -- it writes the
+ * ILI9341's own scroll register, so a transition costs two bytes over SPI
+ * instead of a repaint. But the panel runs at rotation 90, which sets
+ * MADCTL_MV and maps the chip's native scroll axis onto the screen's
+ * HORIZONTAL one. Sideways is free; vertical has no hardware path and would
+ * be a full LVGL redraw per frame. A screen that changes in one redraw reads
+ * as immediate; three or four stepping frames read as broken.
+ */
+void usage_view_page_step(int delta)
+{
+	int n = page_count();
+	int next = cur_page + delta;
+
+	if (!built || n < 2 || next < 0 || next >= n) {
+		return;
+	}
+	cur_page = next;
+	render_gauges();
+	refresh_rail();
+}
+
 /*
  * A window whose reset moment has passed is over, whatever percentage came
  * with it: the usage API keeps reporting the ended window (old utilization,
@@ -737,35 +837,18 @@ void usage_view_update(double session_pct, int32_t session_resets_in_s,
 		weekly_resets_in_s = -1;
 	}
 
-	char buf[8];
-
-	/* A negative percentage means "the daemon does not have this number" --
-	 * pc/statusline_source.py sends -1.0 when the window is absent from
-	 * Claude Code's payload entirely. render_weekly() has always honoured
-	 * that; this side did not, so an absent five_hour window rendered as a
-	 * confident green 0%, which is the frozen-meter reading the sentinel
-	 * exists to prevent. */
-	if (session_pct < 0) {
-		lv_label_set_text(session.pct, "--%");
-		lv_arc_set_value(session.arc, 0);
-	} else {
-		snprintf(buf, sizeof(buf), "%d%%", (int)(session_pct + 0.5));
-		lv_label_set_text(session.pct, buf);
-		lv_arc_set_value(session.arc, (int32_t)(session_pct + 0.5));
-		lv_obj_set_style_arc_color(session.arc, severity(session_pct),
-					   LV_PART_INDICATOR);
-	}
-	session.resets_in_s = session_resets_in_s;
-	render_countdown(&session);
-
-	weekly.resets_in_s = weekly_resets_in_s;
-	render_countdown(&weekly);
+	pg[0].s_pct = session_pct;
+	pg[0].w_pct = weekly_pct;
+	pg[0].s_in_s = session_resets_in_s;
+	pg[0].w_in_s = weekly_resets_in_s;
+	pg[0].have = true;
 
 	have_data = true;
 	age_s = 0;
-	last_s_pct = session_pct;
-	last_w_pct = weekly_pct;
-	render_weekly();
+	refresh_rail();		/* page 0's mark, even while page 1 is showing */
+	if (cur_page == 0) {
+		render_gauges();
+	}
 	render_age();
 	usage_view_set_status(USAGE_STATUS_OK);
 }
@@ -790,6 +873,8 @@ static void render_age(void)
  * Flip the gauge to the new, empty window immediately. */
 static void expire_session(void)
 {
+	pg[cur_page].s_in_s = -1;
+	pg[cur_page].s_pct = 0;
 	session.resets_in_s = -1;
 	render_countdown(&session);
 	last_s_pct = 0;
@@ -800,6 +885,8 @@ static void expire_session(void)
 
 static void expire_weekly(void)
 {
+	pg[cur_page].w_in_s = -1;
+	pg[cur_page].w_pct = 0;
 	weekly.resets_in_s = -1;
 	render_countdown(&weekly);
 	last_w_pct = 0;
@@ -822,21 +909,38 @@ void usage_view_tick_1s(void)
 		return;
 	}
 
-	struct gauge *gs[] = { &session, &weekly };
-
-	for (int i = 0; i < 2; i++) {
-		if (gs[i]->resets_in_s > 0) {
-			if (--gs[i]->resets_in_s == 0) {
-				if (gs[i] == &session) {
-					expire_session();
-				} else {
-					expire_weekly();
-				}
-			} else {
-				render_countdown(gs[i]);
+	/*
+	 * EVERY page ticks, not just the one on screen. A window does not stop
+	 * closing because nobody is looking at it, and a page that caught up
+	 * only on arrival would show a stale figure at the moment it matters
+	 * most -- the glance you take precisely because the rail went red.
+	 */
+	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
+		if (!pg[i].have) {
+			continue;
+		}
+		if (pg[i].s_in_s > 0 && --pg[i].s_in_s == 0) {
+			pg[i].s_in_s = -1;
+			pg[i].s_pct = 0;
+			if (i == cur_page) {
+				expire_session();
+			}
+		}
+		if (pg[i].w_in_s > 0 && --pg[i].w_in_s == 0) {
+			pg[i].w_in_s = -1;
+			pg[i].w_pct = 0;
+			if (i == cur_page) {
+				expire_weekly();
 			}
 		}
 	}
+	if (pg[cur_page].have) {
+		session.resets_in_s = pg[cur_page].s_in_s;
+		weekly.resets_in_s = pg[cur_page].w_in_s;
+		render_countdown(&session);
+		render_countdown(&weekly);
+	}
+	refresh_rail();
 
 	if (age_s >= 0) {
 		age_s++;
@@ -947,29 +1051,6 @@ void usage_view_set_activity(enum usage_activity a)
  */
 static int sess_n, agent_n;
 
-static void set_ring2(struct gauge *g, const char *tag, double pct)
-{
-	char buf[24];
-
-	if (!g->arc2) {
-		return;
-	}
-	if (pct < 0.0 || pct > 100.0) {
-		lv_obj_add_flag(g->arc2, LV_OBJ_FLAG_HIDDEN);
-		lv_label_set_text(g->p2, "");
-		return;
-	}
-	lv_obj_clear_flag(g->arc2, LV_OBJ_FLAG_HIDDEN);
-	lv_arc_set_value(g->arc2, (int32_t)(pct + 0.5));
-	lv_obj_set_style_arc_color(g->arc2, severity(pct), LV_PART_INDICATOR);
-	/* The number alone. The hollow is GAUGE_HOLLOW_W wide and
-	 * "codex 100%" is not, and repeating the tag on both gauges would say
-	 * the same thing twice anyway -- it is named once on the bottom line. */
-	(void)tag;
-	snprintf(buf, sizeof(buf), "%d%%", (int)(pct + 0.5));
-	lv_label_set_text(g->p2, buf);
-}
-
 /*
  * Repaint the primary provider's ball and countdown.
  *
@@ -986,17 +1067,38 @@ static void set_ring2(struct gauge *g, const char *tag, double pct)
  */
 static void refresh_provider1(void)
 {
-	bool paired = provider2_tag[0] != '\0';
-	lv_color_t ball = paired ? provider_color(provider1_tag) : COL_TEXT;
-	lv_color_t text = paired ? provider_color(provider1_tag) : COL_DIM;
+	const char *tag = page_tag(cur_page);
 
 	if (!session.arc) {
 		return;
 	}
-	lv_obj_set_style_bg_color(session.arc, ball, LV_PART_KNOB);
-	lv_obj_set_style_bg_color(weekly.arc, ball, LV_PART_KNOB);
-	lv_obj_set_style_text_color(session.countdown, text, 0);
-	lv_obj_set_style_text_color(weekly.countdown, text, 0);
+	/*
+	 * The ball is NEUTRAL, on every page.
+	 *
+	 * It used to wear the provider's hue whenever a second provider
+	 * existed, because both sat on one gauge and something had to tell
+	 * them apart. One provider per page answers that question before it is
+	 * asked -- the name is under the brand and the rail says which page
+	 * you are on -- so an identity hue here would only put a third colour
+	 * next to the amber and red that mean something.
+	 */
+	lv_obj_set_style_bg_color(session.arc, COL_TEXT, LV_PART_KNOB);
+	lv_obj_set_style_bg_color(weekly.arc, COL_TEXT, LV_PART_KNOB);
+	/* The countdown is a bare duration now, so there is no name on that
+	 * line for an identity hue to mark. It stays quiet. */
+	lv_obj_set_style_text_color(session.countdown, COL_DIM, 0);
+	lv_obj_set_style_text_color(weekly.countdown, COL_DIM, 0);
+	if (provider_lbl) {
+		char t[sizeof(provider1_tag)];
+
+		/* Sentence case: it is a name, not a shout. BLINK above it is
+		 * the only all-caps thing in the header. */
+		snprintf(t, sizeof(t), "%s", tag);
+		if (t[0] >= 'a' && t[0] <= 'z') {
+			t[0] = (char)(t[0] - 'a' + 'A');
+		}
+		lv_label_set_text(provider_lbl, t);
+	}
 }
 
 void usage_view_set_provider1(const char *tag)
@@ -1012,41 +1114,45 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 			      double weekly_pct, int32_t session_resets_in_s,
 			      int32_t weekly_resets_in_s)
 {
-	if (!session.arc2 || !weekly.arc2) {
+	if (!built) {
 		return;
 	}
 	if (!tag || !tag[0]) {
-		/* No second provider. Both rings and both readouts go away
-		 * entirely rather than sitting at zero, which would read as a
-		 * provider that exists and has used nothing. */
+		/*
+		 * No second provider. The page goes away entirely rather than
+		 * sitting at zero, which would read as a provider that exists
+		 * and has used nothing -- and if we were standing on it, we
+		 * fall back to page 0 rather than showing an empty screen.
+		 */
 		provider2_tag[0] = '\0';
-		set_ring2(&session, "", -1.0);
-		set_ring2(&weekly, "", -1.0);
-		lv_obj_add_flag(session.countdown2, LV_OBJ_FLAG_HIDDEN);
-		lv_obj_add_flag(weekly.countdown2, LV_OBJ_FLAG_HIDDEN);
-		render_countdown(&session);
-		render_countdown(&weekly);
-		refresh_provider1();	/* back to neutral: nothing to tell apart */
+		pg[1].have = false;
+		if (cur_page != 0) {
+			cur_page = 0;
+			render_gauges();
+		}
+		refresh_rail();
 		return;
 	}
+
 	snprintf(provider2_tag, sizeof(provider2_tag), "%s", tag);
-	set_ring2(&session, tag, session_pct);
-	set_ring2(&weekly, tag, weekly_pct);
+	if (session_resets_in_s == 0) {
+		session_pct = 0;
+		session_resets_in_s = -1;
+	}
+	if (weekly_resets_in_s == 0) {
+		weekly_pct = 0;
+		weekly_resets_in_s = -1;
+	}
+	pg[1].s_pct = session_pct;
+	pg[1].w_pct = weekly_pct;
+	pg[1].s_in_s = session_resets_in_s;
+	pg[1].w_in_s = weekly_resets_in_s;
+	pg[1].have = true;
 
-	lv_obj_set_style_bg_color(session.arc2, provider_color(tag),
-				  LV_PART_KNOB);
-	lv_obj_set_style_bg_color(weekly.arc2, provider_color(tag),
-				  LV_PART_KNOB);
-	lv_obj_set_style_text_color(session.countdown2, provider_color(tag), 0);
-	lv_obj_set_style_text_color(weekly.countdown2, provider_color(tag), 0);
-
-	refresh_provider1();	/* a second provider exists, so identity now counts */
-	session.resets2_in_s = session_resets_in_s;
-	weekly.resets2_in_s = weekly_resets_in_s;
-	lv_obj_clear_flag(session.countdown2, LV_OBJ_FLAG_HIDDEN);
-	lv_obj_clear_flag(weekly.countdown2, LV_OBJ_FLAG_HIDDEN);
-	render_countdown(&session);
-	render_countdown(&weekly);
+	refresh_rail();
+	if (cur_page == 1) {
+		render_gauges();
+	}
 }
 
 void usage_view_set_sessions(int n_sessions, int n_agents)

@@ -44,14 +44,25 @@
 #define BRAND_TEXT		"BLINK"
 
 /*
- * Which model is in use, under the brand.
+ * Whose numbers these are, directly under the brand.
+ *
+ * ONE label for the whole screen, not a name beside each countdown. With one
+ * provider per page there is exactly one answer, and writing it twice under
+ * two gauges spent a line each time to repeat the same word -- which is also
+ * what pushed those countdowns to a width that had to carry "claude  6d 22h"
+ * instead of just a duration.
+ *
+ * It belongs under BLINK because that is the header's job: what you are
+ * looking at. The gauges then say only how much and how long.
  *
  * BOUNDED, not auto-sized. A label left to size itself grows with its text,
- * and the daemon's cap is 24 characters -- about 190 px centred, which reaches
- * from x=65 to x=255 and leaves no left column for anything else. Fixing the
- * width and letting a long name ellipsize is what makes room for the session
- * readout beside it.
+ * and the daemon's tag cap is 11 characters; fixing the width means an
+ * unexpected tag ellipsizes instead of reaching into the corners where the
+ * clock and the status dot live.
  */
+#define PROVIDER_Y		24
+#define PROVIDER_MAX_W		140
+
 
 /*
  * No execution-state pip. It sat top-left under the clock while the status dot
@@ -61,9 +72,9 @@
 
 /* The two arcs. */
 #define GAUGE_CX		80
-#define GAUGE_ARC_Y		32
+#define GAUGE_ARC_Y		44
 #define GAUGE_ARC_SZ		120
-#define GAUGE_PCT_Y		78
+#define GAUGE_PCT_Y		90
 #define GAUGE_PCT_MAX_W		96	/* "100%" at montserrat_20 */
 
 /*
@@ -89,8 +100,7 @@
  * so it is still carrying its weight rather than going back to one number and
  * a lot of nothing.
  */
-#define GAUGE_P2PCT_Y		102
-#define GAUGE_NAME_Y		158
+#define GAUGE_NAME_Y		168
 /*
  * The countdowns STACK, one per provider, rather than sitting side by side.
  *
@@ -103,63 +113,16 @@
  * the provider's name next to its own number. The label is the thing that was
  * missing; the stack is what made room for it.
  */
-#define GAUGE_CD_Y		180	/* first line: the primary provider */
-#define GAUGE_CD_STEP		18	/* to the second line, when there is one */
-#define GAUGE_CD_MAX_W		150	/* "claude  6d 22h" */
+#define GAUGE_CD_Y		186	/* first line: the primary provider */
+#define GAUGE_CD_MAX_W		96	/* "00m 00s" -- named once, up top */
 
-/*
- * A second provider, as an inner ring inside the same gauge.
- *
- * Provider is encoded by GEOMETRY, severity by COLOUR, and that split is the
- * whole design. Colour is what the eye resolves from across a desk -- green
- * means room, red means stop -- so it cannot also be spent on saying which
- * tool a number belongs to. Ring position carries that instead, and it is
- * legible on a second look without costing anything on the first.
- *
- * Thinner than the outer ring as well as smaller, so the primary provider
- * stays the thing you read and the second is peripheral awareness rather than
- * a competing headline.
- */
-/*
- * 88 across with a 6 px wall, and both numbers matter.
- *
- * The first attempt used 84/8, which put the inner ring's wall right where the
- * countdown text runs and left a 68 px hollow for a 70 px string -- the render
- * showed "30m 00s" sliced by its own gauge. Counter-intuitively the fix is to
- * make the inner ring BIGGER: the usable hollow is the ring's diameter minus
- * two walls, so moving it outwards and thinning it buys space rather than
- * spending it. 88 - 12 = 76 px of clear centre, against a ~70 px countdown.
- *
- * The outer ring's inner edge sits at 116 - 2*12 = 92, so 88 leaves 4 px of
- * dark between the two rings -- enough to read them as separate without a
- * divider.
- */
+/* The ring itself. */
 #define GAUGE_ARC_W		12
-#define GAUGE_ARC2_SZ		92
-#define GAUGE_ARC2_W		6
-#define GAUGE_ARC2_Y		(GAUGE_ARC_Y + (GAUGE_ARC_SZ - GAUGE_ARC2_SZ) / 2)
-#define GAUGE_HOLLOW_W		(GAUGE_ARC2_SZ - 2 * GAUGE_ARC2_W)
 
-/*
- * The provider ball: a small disc at the end of each arc, in that provider's
- * colour.
- *
- * This is what lets the ARC go back to green-amber-red. Severity is the thing
- * worth reading from across a desk and it belongs on the biggest element on
- * the panel; identity is a second-look question, and a dot the size of a
- * fingernail answers it without spending the ramp. It rides the end of the
- * filled arc, so it also marks the value.
- *
- * LVGL draws this as the arc's KNOB part, which the gauges used to delete
- * outright on the grounds that a readout is not a control. It still is not --
- * the arc stays unclickable -- but the knob is the only thing that tracks the
- * indicator's end, so it is styled rather than removed.
- */
 #define GAUGE_BALL_PAD		2
 /* A ring of panel ground around each ball, so it separates from the arc it
  * rides regardless of that arc's colour. */
 #define GAUGE_BALL_RING		2
-#define GAUGE_P2_MAX_W		44	/* "100%" -- the tag is named once, below */
 
 /* Context row, in the band between the countdowns and the hint. */
 /*
@@ -177,16 +140,38 @@
  */
 
 /* Session and agent counts, in the bottom line the hint also uses. */
-#define SESS_BOTTOM_OFF		8
+#define SESS_BOTTOM_OFF		20
 #define SESS_MAX_W		200	/* "9 sessions  9 agents" */
 
 /* Hint line, bottom-centred; carries the amber/red explanation. */
-#define HINT_BOTTOM_OFF		8
+#define HINT_BOTTOM_OFF		20
 
 /*
  * Clearances the layout must keep. Named so a failure says which rule broke
  * rather than printing two numbers.
  */
+/*
+ * The page rail: one mark per provider, along the bottom edge.
+ *
+ * BOTTOM rather than a side edge because both sides are already spoken for --
+ * the chevrons there mean settings and the boot clip, and a dot column beside
+ * them would be a third meaning on an edge that already carries one.
+ *
+ * Each mark is coloured by ITS OWN page's severity, which is what buys back
+ * the only thing splitting the providers costs: with both on one gauge you
+ * could see the second one going red without looking for it. Now the rail
+ * says that instead, and says it from whichever page you happen to be on.
+ *
+ * Position is carried by WIDTH, never by colour, so the two channels never
+ * compete for the same pixels.
+ */
+#define RAIL_PAGES_MAX		2
+#define RAIL_H			6
+#define RAIL_DOT_W		6
+#define RAIL_ACT_W		16
+#define RAIL_PITCH		14
+#define RAIL_BOTTOM_OFF		8
+
 #define SCR_RIGHT_MARGIN_MIN	4	/* nothing flush against the bezel */
 
 #endif /* USAGE_LAYOUT_H */

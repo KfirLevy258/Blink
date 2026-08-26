@@ -126,6 +126,14 @@ void usage_view_set_sessions(int n_sessions, int n_agents);
  * The name, not the ring position: on a machine running only Codex the outer
  * ring is Codex, and it should not be wearing Claude's colour.
  */
+/*
+ * Move one page up (-1) or down (+1) the provider stack.
+ *
+ * A no-op when there is only one provider: the single-provider desk has no
+ * second page to reach and no rail to explain one.
+ */
+void usage_view_page_step(int delta);
+
 void usage_view_set_provider1(const char *tag);
 
 void usage_view_set_provider2(const char *tag, double session_pct,
