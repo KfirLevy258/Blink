@@ -197,6 +197,17 @@ jobs:
       - run: chmod +x dist/clauge*
       - run: sh tests/ci/check_update.sh
 
+  # The firmware's pure logic, compiled and run on a plain runner. native_sim
+  # is Linux-only and most of this project is written on a Mac, so these are
+  # how the C gets exercised without a board -- and nothing ran them
+  # automatically until this job existed.
+  host-tests:
+    name: firmware host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh tests/ci/check_host_tests.sh
+
   # The shim runs on every single status line render, under whatever /bin/sh
   # the customer's machine has. A bashism here is a broken bar for everyone.
   shim-posix:

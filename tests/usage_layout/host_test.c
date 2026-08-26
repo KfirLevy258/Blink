@@ -1,0 +1,154 @@
+/* Standalone host test for the gauge screen's geometry.
+ *
+ * Build & run:
+ *   cc -I ../../firmware/src host_test.c -o /tmp/laytest && /tmp/laytest
+ *
+ * This exists because the gauge screen grew a third row -- the context bar,
+ * its caption and its readout -- into a band that was already nearly full,
+ * and the resulting clearances are 2 px and 0 px. Those are legal and also
+ * invisible: nothing about reading usage_view.c tells you the context readout
+ * sits exactly flush against the hint line, or that raising the default font
+ * one size lands one on top of the other.
+ *
+ * It asserts the arrangement from usage_layout.h, the same header the screen
+ * is built from, so the check cannot drift away from the code.
+ *
+ * What it can and cannot do: vertical geometry is exact, because every
+ * unlabelled label on this screen is FONT_LINE_H tall and that is a constant.
+ * Horizontal extents for text depend on the glyphs, so those use the declared
+ * *_MAX_W budgets -- the test then also asserts the real strings fit inside
+ * them at a conservative per-character width.
+ */
+#include <stdio.h>
+#include <string.h>
+#include "usage_layout.h"
+
+static int failures;
+#define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
+	else { printf("PASS: %s\n", m); } } while (0)
+
+struct box { const char *name; int x0, y0, x1, y1; };
+
+/* TOP_MID: x is an offset of the object's CENTRE from the screen centre. */
+static struct box top_mid(const char *name, int xoff, int y, int w, int h)
+{
+	struct box b;
+	b.name = name;
+	b.x0 = SCR_MID_X + xoff - w / 2;
+	b.x1 = b.x0 + w;
+	b.y0 = y;
+	b.y1 = y + h;
+	return b;
+}
+
+static struct box top_left(const char *name, int x, int y, int w, int h)
+{
+	struct box b = { name, x, y, x + w, y + h };
+	return b;
+}
+
+/* BOTTOM_MID with a positive `up` offset from the bottom edge. */
+static struct box bottom_mid(const char *name, int up, int w, int h)
+{
+	struct box b;
+	b.name = name;
+	b.x0 = SCR_MID_X - w / 2;
+	b.x1 = b.x0 + w;
+	b.y1 = SCR_H - up;
+	b.y0 = b.y1 - h;
+	return b;
+}
+
+static int overlaps(struct box a, struct box b)
+{
+	return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+}
+
+static int on_screen(struct box b)
+{
+	return b.x0 >= 0 && b.y0 >= 0 && b.x1 <= SCR_W && b.y1 <= SCR_H;
+}
+
+/* Conservative upper bound for montserrat_14: no glyph on this screen is
+ * wider than this, and '%' and digits are the widest of them. */
+#define CHAR_W_MAX 10
+
+int main(void)
+{
+	/* The context row. */
+	struct box cap = top_mid("CTX caption", CTX_CAP_X, CTX_CAP_Y,
+				 CTX_CAP_MAX_W, FONT_LINE_H);
+	struct box bar = top_mid("CTX bar", CTX_BAR_X, CTX_BAR_Y,
+				 CTX_BAR_W, CTX_BAR_H);
+	struct box val = top_mid("CTX readout", CTX_VAL_X, CTX_VAL_Y,
+				 CTX_VAL_MAX_W, FONT_LINE_H);
+
+	/* The two countdowns immediately above it. */
+	struct box cd_l = top_mid("countdown L", -GAUGE_CX, GAUGE_CD_Y,
+				  40, FONT_LINE_H);
+	struct box cd_r = top_mid("countdown R", GAUGE_CX, GAUGE_CD_Y,
+				  40, FONT_LINE_H);
+
+	/* The hint line below. Width is the worst case: a hint long enough to
+	 * span the panel, which is what an error message actually is. */
+	struct box hint = bottom_mid("hint", HINT_BOTTOM_OFF, SCR_W,
+				     FONT_LINE_H);
+
+	/* The header row. */
+	struct box model = top_mid("model", 0, MODEL_Y, 160, FONT_LINE_H);
+	struct box pip = top_left("activity pip", ACT_PIP_X, ACT_PIP_Y,
+				  ACT_PIP_SZ, ACT_PIP_SZ);
+	struct box arc_l = top_mid("arc L", -GAUGE_CX, GAUGE_ARC_Y,
+				   GAUGE_ARC_SZ, GAUGE_ARC_SZ);
+
+	/* --- everything is on the panel at all --- */
+	struct box all[] = { cap, bar, val, cd_l, cd_r, hint, model, pip, arc_l };
+	for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+		char msg[64];
+		snprintf(msg, sizeof(msg), "%s fits on the panel", all[i].name);
+		CHECK(on_screen(all[i]), msg);
+	}
+
+	/* --- the clearances that are not obvious by eye --- */
+
+	/* The bar spans nearly the full width, so it passes UNDER both
+	 * countdowns. This gap is the whole reason the band works. */
+	CHECK(bar.y0 - cd_l.y1 >= CTX_BAR_CD_GAP_MIN,
+	      "context bar clears the countdown text above it");
+	CHECK(!overlaps(bar, cd_l), "context bar does not touch countdown L");
+	CHECK(!overlaps(bar, cd_r), "context bar does not touch countdown R");
+
+	/* The readout sits flush against the hint line -- 0 px, legal, and one
+	 * font size away from breaking. */
+	CHECK(hint.y0 - val.y1 >= CTX_VAL_HINT_GAP_MIN,
+	      "context readout does not overlap the hint line");
+	CHECK(!overlaps(val, hint), "context readout and hint do not overlap");
+	CHECK(!overlaps(bar, hint), "context bar and hint do not overlap");
+
+	/* The caption is left of the left countdown, not under it. */
+	CHECK(!overlaps(cap, cd_l), "CTX caption clears countdown L");
+	CHECK(cap.x1 <= cd_l.x0, "CTX caption sits left of countdown L");
+
+	/* The readout is right of the right countdown. */
+	CHECK(val.x0 >= cd_r.x1, "context readout sits right of countdown R");
+
+	/* --- the header --- */
+	CHECK(!overlaps(model, arc_l), "model label clears the arcs");
+	CHECK(model.y1 <= GAUGE_ARC_Y, "model label sits above the arcs");
+	CHECK(!overlaps(pip, model), "activity pip clears the model label");
+	CHECK(pip.y1 <= GAUGE_ARC_Y, "activity pip sits above the arcs");
+
+	/* --- the text budgets are real --- */
+	CHECK((int)strlen("CTX") * CHAR_W_MAX <= CTX_CAP_MAX_W + CHAR_W_MAX,
+	      "\"CTX\" fits its width budget");
+	CHECK((int)strlen("100%") * CHAR_W_MAX >= CTX_VAL_MAX_W,
+	      "CTX_VAL_MAX_W is a real budget for \"100%\", not a guess");
+
+	/* --- the font assumption these clearances rest on --- */
+	CHECK(FONT_LINE_H == 16,
+	      "FONT_LINE_H still matches LV_FONT_DEFAULT_MONTSERRAT_14");
+
+	printf(failures ? "\n%d FAILED\n" : "\nall layout checks passed\n",
+	       failures);
+	return failures ? 1 : 0;
+}

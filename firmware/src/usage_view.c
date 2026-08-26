@@ -9,6 +9,7 @@
 #include <stdio.h>
 
 #include "usage_view.h"
+#include "usage_layout.h"
 #include "fmt.h"
 #include "cfg_store.h"
 
@@ -159,8 +160,8 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	g->resets_in_s = -1;
 
 	g->arc = lv_arc_create(parent);
-	lv_obj_set_size(g->arc, 116, 116);
-	lv_obj_align(g->arc, LV_ALIGN_TOP_MID, cx, 44);
+	lv_obj_set_size(g->arc, GAUGE_ARC_SZ, GAUGE_ARC_SZ);
+	lv_obj_align(g->arc, LV_ALIGN_TOP_MID, cx, GAUGE_ARC_Y);
 	lv_arc_set_rotation(g->arc, 135);
 	lv_arc_set_bg_angles(g->arc, 0, 270);
 	lv_arc_set_range(g->arc, 0, 100);
@@ -176,17 +177,17 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_label_set_text(g->pct, "--%");
 	lv_obj_set_style_text_color(g->pct, COL_TEXT, 0);
 	lv_obj_set_style_text_font(g->pct, &lv_font_montserrat_20, 0);
-	lv_obj_align(g->pct, LV_ALIGN_TOP_MID, cx, 92);
+	lv_obj_align(g->pct, LV_ALIGN_TOP_MID, cx, GAUGE_PCT_Y);
 
 	g->name = lv_label_create(parent);
 	lv_label_set_text(g->name, title);
 	lv_obj_set_style_text_color(g->name, COL_DIM, 0);
-	lv_obj_align(g->name, LV_ALIGN_TOP_MID, cx, 166);
+	lv_obj_align(g->name, LV_ALIGN_TOP_MID, cx, GAUGE_NAME_Y);
 
 	g->countdown = lv_label_create(parent);
 	lv_label_set_text(g->countdown, "--");
 	lv_obj_set_style_text_color(g->countdown, COL_TEXT, 0);
-	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, 188);
+	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
 }
 
 static void render_countdown(struct gauge *g)
@@ -346,14 +347,14 @@ void usage_view_init(void)
 	lv_label_set_text(title, "CLAUGE");
 	lv_obj_set_style_text_color(title, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(title, 2, 0);
-	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
 
 	dot = lv_obj_create(scr);
-	lv_obj_set_size(dot, 12, 12);
+	lv_obj_set_size(dot, DOT_SZ, DOT_SZ);
 	lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
 	lv_obj_set_style_border_width(dot, 0, 0);
 	lv_obj_set_style_bg_color(dot, COL_GREY, 0);
-	lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -12, 8);
+	lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -12, HDR_ROW_Y);
 	/* A swipe starting on this dot must still reach the screen below it,
 	 * or the settings gesture goes dead whenever the touch lands here. */
 	lv_obj_add_flag(dot, LV_OBJ_FLAG_GESTURE_BUBBLE);
@@ -365,7 +366,7 @@ void usage_view_init(void)
 	hint = lv_label_create(scr);
 	lv_label_set_text(hint, "");
 	lv_obj_set_style_text_color(hint, COL_DIM, 0);
-	lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+	lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF);
 
 	/* Data age. The countdowns tick locally and keep moving even when the
 	 * host is dead, so they look alive regardless; this is the only figure
@@ -374,14 +375,14 @@ void usage_view_init(void)
 	age_lbl = lv_label_create(scr);
 	lv_label_set_text(age_lbl, "");
 	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
-	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30, 8);
+	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30, HDR_ROW_Y);
 
 	/* Wall clock. Blank until a time source and timezone are known -- an
 	 * empty label beats a confidently wrong one. */
 	clock_lbl = lv_label_create(scr);
 	lv_label_set_text(clock_lbl, "");
 	lv_obj_set_style_text_color(clock_lbl, COL_DIM, 0);
-	lv_obj_align(clock_lbl, LV_ALIGN_TOP_LEFT, 10, 8);
+	lv_obj_align(clock_lbl, LV_ALIGN_TOP_LEFT, 10, HDR_ROW_Y);
 
 	/* Which model is in use, directly under the brand. Blank until the
 	 * daemon says -- an empty line reads as "nothing to report", where a
@@ -389,25 +390,25 @@ void usage_view_init(void)
 	model_lbl = lv_label_create(scr);
 	lv_label_set_text(model_lbl, "");
 	lv_obj_set_style_text_color(model_lbl, COL_DIM, 0);
-	lv_obj_align(model_lbl, LV_ALIGN_TOP_MID, 0, 23);
+	lv_obj_align(model_lbl, LV_ALIGN_TOP_MID, 0, MODEL_Y);
 
 	/* Execution state, in the left column under the clock. Hidden at
 	 * USAGE_ACTIVITY_NONE rather than shown grey: a dark corner says
 	 * nothing, and a grey pip says "idle", which is a different claim. */
 	act_pip = lv_obj_create(scr);
-	lv_obj_set_size(act_pip, 8, 8);
+	lv_obj_set_size(act_pip, ACT_PIP_SZ, ACT_PIP_SZ);
 	lv_obj_set_style_radius(act_pip, LV_RADIUS_CIRCLE, 0);
 	lv_obj_set_style_border_width(act_pip, 0, 0);
 	lv_obj_set_style_bg_color(act_pip, COL_GREEN, 0);
-	lv_obj_align(act_pip, LV_ALIGN_TOP_LEFT, 12, 26);
+	lv_obj_align(act_pip, LV_ALIGN_TOP_LEFT, ACT_PIP_X, ACT_PIP_Y);
 	lv_obj_add_flag(act_pip, LV_OBJ_FLAG_HIDDEN);
 	/* Same reason the status dot bubbles: a swipe starting here must still
 	 * reach the screen underneath, or the settings gesture goes dead on
 	 * whatever fraction of the panel this covers. */
 	lv_obj_add_flag(act_pip, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
-	build_gauge(&session, scr, -78, "SESSION 5h");
-	build_gauge(&weekly, scr, 78, "WEEKLY 7d");
+	build_gauge(&session, scr, -GAUGE_CX, "SESSION 5h");
+	build_gauge(&weekly, scr, GAUGE_CX, "WEEKLY 7d");
 
 	/* Context window, in the band between the countdowns and the hint
 	 * line. A bar rather than a third arc: it is a different KIND of
@@ -417,11 +418,11 @@ void usage_view_init(void)
 	ctx_cap = lv_label_create(scr);
 	lv_label_set_text(ctx_cap, "CTX");
 	lv_obj_set_style_text_color(ctx_cap, COL_DIM, 0);
-	lv_obj_align(ctx_cap, LV_ALIGN_TOP_MID, -116, 202);
+	lv_obj_align(ctx_cap, LV_ALIGN_TOP_MID, CTX_CAP_X, CTX_CAP_Y);
 
 	ctx_bar = lv_bar_create(scr);
-	lv_obj_set_size(ctx_bar, 200, 6);
-	lv_obj_align(ctx_bar, LV_ALIGN_TOP_MID, 16, 206);
+	lv_obj_set_size(ctx_bar, CTX_BAR_W, CTX_BAR_H);
+	lv_obj_align(ctx_bar, LV_ALIGN_TOP_MID, CTX_BAR_X, CTX_BAR_Y);
 	lv_bar_set_range(ctx_bar, 0, 100);
 	lv_bar_set_value(ctx_bar, 0, LV_ANIM_OFF);
 	lv_obj_set_style_radius(ctx_bar, 3, LV_PART_MAIN);
@@ -433,7 +434,7 @@ void usage_view_init(void)
 	ctx_val = lv_label_create(scr);
 	lv_label_set_text(ctx_val, "");
 	lv_obj_set_style_text_color(ctx_val, COL_DIM, 0);
-	lv_obj_align(ctx_val, LV_ALIGN_TOP_MID, 134, 202);
+	lv_obj_align(ctx_val, LV_ALIGN_TOP_MID, CTX_VAL_X, CTX_VAL_Y);
 
 	/* All three hidden together until a number arrives. */
 	lv_obj_add_flag(ctx_cap, LV_OBJ_FLAG_HIDDEN);

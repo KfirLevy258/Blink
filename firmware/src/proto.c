@@ -13,6 +13,7 @@
 #include "version.h"
 #include "cfg_store.h"
 #include "usage_view.h"
+#include "usage_state.h"
 #include "net_time.h"
 #include "version.h"
 #include "cfg_store.h"
@@ -283,19 +284,7 @@ static void dispatch(const char *json)
 		enum usage_activity act = USAGE_ACTIVITY_NONE;
 
 		if (msg_get_str(json, "state", state, sizeof(state))) {
-			if (strcmp(state, "running") == 0) {
-				act = USAGE_ACTIVITY_RUNNING;
-			} else if (strcmp(state, "idle") == 0) {
-				act = USAGE_ACTIVITY_IDLE;
-			} else if (strcmp(state, "waiting") == 0) {
-				act = USAGE_ACTIVITY_WAITING;
-			} else if (strcmp(state, "stuck") == 0) {
-				act = USAGE_ACTIVITY_STUCK;
-			}
-			/* An unrecognised state stays NONE -- a newer daemon
-			 * naming a state this firmware does not know must go
-			 * dark, not land on whichever branch happened to be
-			 * last. */
+			act = usage_activity_from_state(state);
 		}
 		usage_view_set_activity(act);
 
