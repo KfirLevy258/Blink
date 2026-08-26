@@ -199,3 +199,39 @@ def test_two_providers_still_fit_the_board_line_limit():
         protocol.frame_to_usage(primary, NOW, secondary))
     assert why is None, why
     assert len(raw) <= protocol.MAX_LINE_BYTES
+
+
+def test_the_secondary_countdowns_reach_the_wire():
+    """'Under the gauge should be the time left for each one' -- so each
+    provider's own countdown has to travel, not just its percentage."""
+    from pc import protocol
+    primary, secondary = normalizer.select_pair([
+        cli(NOW, session=10.0, s_reset=NOW + 1800),
+        cli(NOW, session=34.0, s_reset=NOW + 4320, w_reset=NOW + 259200,
+            provider="codex"),
+    ], preferred="claude")
+    msg = protocol.frame_to_usage(primary, NOW, secondary)
+    assert msg["session_resets_in_s"] == 1800     # claude's
+    assert msg["p2_s_in_s"] == 4320               # codex's
+    assert msg["p2_w_in_s"] == 259200
+
+
+def test_codex_alone_becomes_the_primary_not_the_second_ring():
+    """The default is one provider, whichever it is. A Codex-only machine
+    puts Codex on the outer ring -- which is why the firmware colours by the
+    provider's NAME rather than by ring position."""
+    primary, secondary = normalizer.select_pair(
+        [cli(NOW, session=52.0, weekly=18.0, provider="codex")],
+        preferred="claude")
+    assert primary.provider == "codex"
+    assert secondary is None
+
+
+def test_a_second_provider_costs_nothing_until_there_is_one():
+    from pc import protocol
+    primary, secondary = normalizer.select_pair([cli(NOW, session=10.0)],
+                                                preferred="claude")
+    msg = protocol.frame_to_usage(primary, NOW, secondary)
+    for k in ("p2", "p2_session_pct", "p2_weekly_pct", "p2_s_in_s",
+              "p2_w_in_s"):
+        assert k not in msg

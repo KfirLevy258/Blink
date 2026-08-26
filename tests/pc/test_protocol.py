@@ -30,13 +30,18 @@ class TestProtocol(unittest.TestCase):
         u = protocol.usage(61.0, "R1", 26.0, "R2", [{"name": "sonnet", "weekly_pct": 2.0}])
         self.assertEqual(u["t"], "usage")
         self.assertEqual(u["session_pct"], 61.0)
-        self.assertEqual(u["models"][0]["name"], "sonnet")
+        # The array itself no longer goes on the wire; the flattened scalar
+        # keys are what the board reads, and they are what is asserted here.
+        self.assertNotIn("models", u)
+        self.assertEqual(u["sonnet_pct"], 2.0)
         self.assertEqual(protocol.status("rate_limited", "x"),
                          {"t": "status", "v": 2, "state": "rate_limited", "detail": "x"})
 
     def test_usage_flattens_known_models(self):
         """The board's JSON scanner reads scalar keys only, so known models
-        are flattened next to the models list (which stays intact)."""
+        are flattened into scalars and the array is dropped -- it was thirteen
+        bytes of a budget the second provider's fields made tight, and nothing
+        ever read it."""
         u = protocol.usage(61.0, "R1", 26.0, "R2",
                            [{"name": "fable", "weekly_pct": 12.5},
                             {"name": "sonnet", "weekly_pct": 2.0},
@@ -45,8 +50,8 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(u["fable_pct"], 12.5)
         self.assertEqual(u["sonnet_pct"], 2.0)
         self.assertEqual(u["opus_pct"], 40.5)
-        self.assertNotIn("haiku_pct", u)  # unknown models stay list-only
-        self.assertEqual(len(u["models"]), 4)
+        self.assertNotIn("haiku_pct", u)  # unknown models are simply dropped
+        self.assertNotIn("models", u)
 
     def test_usage_flatten_handles_empty_and_none_models(self):
         self.assertNotIn("sonnet_pct", protocol.usage(1.0, "R", 2.0, "R", []))
@@ -86,9 +91,12 @@ class WireBudget(unittest.TestCase):
         self.assertLessEqual(len(raw), protocol.MAX_LINE_BYTES)
 
     def test_an_over_long_line_is_refused_with_a_reason(self):
-        fat = protocol.usage(1.0, "R", 2.0, "R",
-                             [{"name": "sonnet", "weekly_pct": 2.0,
-                               "pad": "x" * 600}])
+        # Built by hand rather than through usage(): every field usage() can
+        # emit is now either bounded or omitted when empty, which is the point
+        # of the budget. encode_checked still has to refuse anything that
+        # somehow gets past that.
+        fat = protocol.usage(1.0, "R", 2.0, "R", [])
+        fat["pad"] = "x" * 600
         raw, why = protocol.encode_checked(fat)
         self.assertIsNone(raw)
         self.assertIn("line limit", why)

@@ -141,7 +141,8 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           provider="claude", src="cli", ctx_pct=UNKNOWN, model="",
           state="", n_sess=0, n_run=0, n_wait=0, n_stuck=0,
           n_agents=0, n_ctx=0, p2="", p2_session_pct=UNKNOWN,
-          p2_weekly_pct=UNKNOWN) -> dict:
+          p2_weekly_pct=UNKNOWN, p2_session_resets_in_s=-1,
+          p2_weekly_resets_in_s=-1) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -169,6 +170,11 @@ The firmware reads this field: proto.c's "usage" handler calls
     stale reading, which is the behaviour that existed before either side
     knew about the field.
     """
+    # `models` itself never went on the wire usefully: the firmware reads the
+    # flattened scalar keys below and never the array, and since the status
+    # line became the only source it has always been empty. Dropping it buys
+    # back thirteen bytes of a budget that the second provider's fields just
+    # made tight.
     flat = {}
     for m in models or []:
         name = m.get("name")
@@ -218,6 +224,14 @@ The firmware reads this field: proto.c's "usage" handler calls
             extra["p2_session_pct"] = p2_session_pct
         if p2_weekly_pct is not None and p2_weekly_pct >= 0:
             extra["p2_weekly_pct"] = p2_weekly_pct
+        # Short names on purpose. These are the last two fields that fit: the
+        # fully-loaded line is close enough to MAX_LINE_BYTES that spelling
+        # them "p2_session_resets_in_s" would cost more than they carry, and
+        # nothing but proto.c ever reads them.
+        if p2_session_resets_in_s is not None and p2_session_resets_in_s >= 0:
+            extra["p2_s_in_s"] = int(p2_session_resets_in_s)
+        if p2_weekly_resets_in_s is not None and p2_weekly_resets_in_s >= 0:
+            extra["p2_w_in_s"] = int(p2_weekly_resets_in_s)
 
     return {
         "t": "usage", "v": VERSION,
@@ -225,7 +239,6 @@ The firmware reads this field: proto.c's "usage" handler calls
         "session_resets_in_s": session_resets_in_s,
         "weekly_pct": weekly_pct, "weekly_resets_at": weekly_resets_at,
         "weekly_resets_in_s": weekly_resets_in_s,
-        "models": models,
         "stale": stale,
         **flat,
         **extra,
@@ -255,6 +268,10 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         p2=(secondary.provider if secondary else ""),
         p2_session_pct=(secondary.session_pct if secondary else UNKNOWN),
         p2_weekly_pct=(secondary.weekly_pct if secondary else UNKNOWN),
+        p2_session_resets_in_s=(secs_until(secondary.session_resets_at,
+                                           now_epoch) if secondary else -1),
+        p2_weekly_resets_in_s=(secs_until(secondary.weekly_resets_at,
+                                          now_epoch) if secondary else -1),
     )
 
 

@@ -83,7 +83,8 @@ int main(int argc, char **argv)
 	usage_view_set_status(USAGE_STATUS_OK);
 
 	switch (scene) {
-	case 0:	/* the ordinary desk: one session, healthy numbers */
+	case 0:	/* the ordinary desk: one provider, one session */
+		usage_view_set_provider1("claude");
 		usage_view_update(27.0, 13231, 42.0, 598831);
 		usage_view_set_context(31.0, 1);
 		usage_view_set_model("Opus 5 (1M context)");
@@ -97,7 +98,8 @@ int main(int argc, char **argv)
 		usage_view_set_model("Sonnet 5");
 		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
 		usage_view_set_sessions(3, 7);
-		usage_view_set_provider2("codex", 34.0, 61.0);
+		usage_view_set_provider1("claude");
+		usage_view_set_provider2("codex", 34.0, 61.0, 4320, 259200);
 		usage_view_set_clock(23, 47);
 		break;
 	case 2:	/* the worst case for the layout: everything at once, wide.
@@ -110,10 +112,21 @@ int main(int argc, char **argv)
 		usage_view_set_model("Opus 5 (1M context)");
 		usage_view_set_activity(USAGE_ACTIVITY_FAILED);
 		usage_view_set_sessions(9, 9);
-		usage_view_set_provider2("codex", 100.0, 100.0);
+		usage_view_set_provider1("claude");
+		usage_view_set_provider2("codex", 100.0, 100.0, 60, 3600);
 		usage_view_set_clock(23, 59);
 		break;
-	case 3:	/* nothing known: every optional field absent */
+	case 3:	/* codex ALONE -- the outer ring is whoever the daemon made
+		 * primary, so this one must not be wearing Claude's colour */
+		usage_view_set_provider1("codex");
+		usage_view_update(52.0, 5400, 18.0, 400000);
+		usage_view_set_context(44.0, 1);
+		usage_view_set_model("gpt-5-codex");
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_clock(9, 12);
+		break;
+	case 4:	/* nothing known: every optional field absent */
 		usage_view_update(-1.0, -1, -1.0, -1);
 		usage_view_set_context(-1.0, 0);
 		usage_view_set_model("");

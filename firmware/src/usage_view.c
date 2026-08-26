@@ -7,6 +7,7 @@
 #include <zephyr/kernel.h>
 #include <lvgl.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "usage_view.h"
 #include "usage_layout.h"
@@ -25,14 +26,30 @@
 #define COL_RED		lv_color_hex(0xE74C3C)
 #define COL_GREY	lv_color_hex(0x555B63)
 
+/*
+ * Provider identity colours.
+ *
+ * Colour now says WHICH TOOL a ring belongs to, which means it is no longer
+ * saying how close that tool is to its limit. Severity moved to the numerals
+ * instead -- the percentage in the middle of each gauge still runs
+ * green/amber/red -- so the warning is still there, just carried by the text
+ * rather than the ring. Worth knowing when reading this file: the ring tells
+ * you whose, the number tells you how bad.
+ */
+#define COL_CLAUDE	lv_color_hex(0xD97757)	/* the brand's warm orange */
+#define COL_CODEX	lv_color_hex(0x10A37F)	/* a teal, well clear of it */
+#define COL_OTHER	lv_color_hex(0x6E8BC4)	/* anything else: a cool blue */
+
 struct gauge {
 	lv_obj_t *arc;
 	lv_obj_t *arc2;		/* second provider, inner ring; NULL-safe */
 	lv_obj_t *pct;
 	lv_obj_t *p2;		/* the inner ring's own small readout */
 	lv_obj_t *name;
-	lv_obj_t *countdown;
+	lv_obj_t *countdown;	/* primary provider's time left */
+	lv_obj_t *countdown2;	/* the second provider's, when there is one */
 	int32_t resets_in_s;	/* -1 = unknown; ticked down locally */
+	int32_t resets2_in_s;	/* ...and the second provider's */
 };
 
 static struct gauge session, weekly;
@@ -147,6 +164,23 @@ static int boot_active = -1;	/* segment currently pulsing, -1 = none */
 static const char *const *boot_txt;
 static int boot_n;
 
+/* Which colour a ring wears, by the name the daemon gave its provider. */
+static lv_color_t provider_color(const char *tag)
+{
+	if (!tag || !tag[0]) {
+		return COL_CLAUDE;
+	}
+	if (strcmp(tag, "claude") == 0) {
+		return COL_CLAUDE;
+	}
+	if (strcmp(tag, "codex") == 0) {
+		return COL_CODEX;
+	}
+	/* A provider this firmware has never heard of still gets a colour of
+	 * its own rather than borrowing one that means something else. */
+	return COL_OTHER;
+}
+
 static lv_color_t severity(double pct)
 {
 	if (pct >= 90.0) {
@@ -212,23 +246,47 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	g->p2 = lv_label_create(parent);
 	lv_label_set_text(g->p2, "");
 	lv_obj_set_style_text_color(g->p2, COL_DIM, 0);
-	lv_obj_align(g->p2, LV_ALIGN_TOP_MID, cx, GAUGE_P2_Y);
+	lv_obj_align(g->p2, LV_ALIGN_TOP_MID, cx, GAUGE_P2PCT_Y);
 
+	/* Both countdowns sit under the caption, each in its provider's
+	 * colour. Centred on the gauge while there is one; pushed apart into
+	 * a pair the moment a second provider appears. */
+	g->resets2_in_s = -1;
 	g->countdown = lv_label_create(parent);
 	lv_label_set_text(g->countdown, "--");
-	/* Dim, and inside the ring under the percentage. The pair reads as one
-	 * fact -- how much is gone, how long until it comes back -- and the
-	 * percentage stays the thing the eye lands on. */
-	lv_obj_set_style_text_color(g->countdown, COL_DIM, 0);
+	lv_obj_set_style_text_color(g->countdown, COL_CLAUDE, 0);
 	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
+
+	g->countdown2 = lv_label_create(parent);
+	lv_label_set_text(g->countdown2, "");
+	lv_obj_set_style_text_color(g->countdown2, COL_CODEX, 0);
+	lv_obj_align(g->countdown2, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
+	lv_obj_add_flag(g->countdown2, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void render_countdown(struct gauge *g)
 {
 	char buf[FMT_COUNTDOWN_MAX];
+	bool paired = g->countdown2 &&
+		      !lv_obj_has_flag(g->countdown2, LV_OBJ_FLAG_HIDDEN);
+	lv_coord_t cx = (g == &weekly) ? GAUGE_CX : -GAUGE_CX;
 
 	fmt_countdown(g->resets_in_s, buf, sizeof(buf));
 	lv_label_set_text(g->countdown, buf);
+
+	/* One provider: centred under its gauge. Two: pushed apart so each
+	 * countdown sits under nothing but its own colour. Re-aligned on every
+	 * render rather than once at build time, because the second provider
+	 * can arrive and leave while the board is running. */
+	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID,
+		     paired ? cx - GAUGE_CD_DX : cx, GAUGE_CD_Y);
+
+	if (paired) {
+		fmt_countdown(g->resets2_in_s, buf, sizeof(buf));
+		lv_label_set_text(g->countdown2, buf);
+		lv_obj_align(g->countdown2, LV_ALIGN_TOP_MID, cx + GAUGE_CD_DX,
+			     GAUGE_CD_Y);
+	}
 }
 
 #if HAVE_PER_MODEL
@@ -271,7 +329,9 @@ static void render_weekly(void)
 	snprintf(buf, sizeof(buf), "%d%%", (int)(pct + 0.5));
 	lv_label_set_text(weekly.pct, buf);
 	lv_arc_set_value(weekly.arc, (int32_t)(pct + 0.5));
-	lv_obj_set_style_arc_color(weekly.arc, severity(pct), LV_PART_INDICATOR);
+	/* The ring's colour belongs to the provider now, so the number carries
+	 * the warning. See provider_color(). */
+	lv_obj_set_style_text_color(weekly.pct, severity(pct), 0);
 }
 
 #if HAVE_PER_MODEL
@@ -352,6 +412,8 @@ void usage_view_deinit(void)
 	sess_lbl = NULL;
 	session.arc2 = NULL;
 	weekly.arc2 = NULL;
+	session.countdown2 = NULL;
+	weekly.countdown2 = NULL;
 	session.p2 = NULL;
 	weekly.p2 = NULL;
 	activity = USAGE_ACTIVITY_NONE;
@@ -679,8 +741,8 @@ void usage_view_update(double session_pct, int32_t session_resets_in_s,
 		snprintf(buf, sizeof(buf), "%d%%", (int)(session_pct + 0.5));
 		lv_label_set_text(session.pct, buf);
 		lv_arc_set_value(session.arc, (int32_t)(session_pct + 0.5));
-		lv_obj_set_style_arc_color(session.arc, severity(session_pct),
-					   LV_PART_INDICATOR);
+		lv_obj_set_style_text_color(session.pct, severity(session_pct),
+					    0);
 	}
 	session.resets_in_s = session_resets_in_s;
 	render_countdown(&session);
@@ -722,7 +784,7 @@ static void expire_session(void)
 	last_s_pct = 0;
 	lv_label_set_text(session.pct, "0%");
 	lv_arc_set_value(session.arc, 0);
-	lv_obj_set_style_arc_color(session.arc, severity(0), LV_PART_INDICATOR);
+	lv_obj_set_style_text_color(session.pct, severity(0), 0);
 }
 
 static void expire_weekly(void)
@@ -928,7 +990,9 @@ static void set_ring2(struct gauge *g, const char *tag, double pct)
 	}
 	lv_obj_clear_flag(g->arc2, LV_OBJ_FLAG_HIDDEN);
 	lv_arc_set_value(g->arc2, (int32_t)(pct + 0.5));
-	lv_obj_set_style_arc_color(g->arc2, severity(pct), LV_PART_INDICATOR);
+	/* Colour on this ring says WHOSE, not how bad -- so the readout under
+	 * it carries the severity instead. */
+	lv_obj_set_style_text_color(g->p2, severity(pct), 0);
 	/* The number alone. The hollow is GAUGE_HOLLOW_W wide and
 	 * "codex 100%" is not, and repeating the tag on both gauges would say
 	 * the same thing twice anyway -- it is named once on the bottom line. */
@@ -937,8 +1001,25 @@ static void set_ring2(struct gauge *g, const char *tag, double pct)
 	lv_label_set_text(g->p2, buf);
 }
 
+void usage_view_set_provider1(const char *tag)
+{
+	if (!session.arc) {
+		return;
+	}
+	/* The outer ring is whichever provider the daemon made primary, which
+	 * on a Codex-only machine is Codex -- so the colour follows the NAME,
+	 * not the ring position. */
+	lv_obj_set_style_arc_color(session.arc, provider_color(tag),
+				   LV_PART_INDICATOR);
+	lv_obj_set_style_arc_color(weekly.arc, provider_color(tag),
+				   LV_PART_INDICATOR);
+	lv_obj_set_style_text_color(session.countdown, provider_color(tag), 0);
+	lv_obj_set_style_text_color(weekly.countdown, provider_color(tag), 0);
+}
+
 void usage_view_set_provider2(const char *tag, double session_pct,
-			      double weekly_pct)
+			      double weekly_pct, int32_t session_resets_in_s,
+			      int32_t weekly_resets_in_s)
 {
 	if (!session.arc2 || !weekly.arc2) {
 		return;
@@ -950,12 +1031,30 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 		provider2_tag[0] = '\0';
 		set_ring2(&session, "", -1.0);
 		set_ring2(&weekly, "", -1.0);
+		lv_obj_add_flag(session.countdown2, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_add_flag(weekly.countdown2, LV_OBJ_FLAG_HIDDEN);
+		render_countdown(&session);
+		render_countdown(&weekly);
 		refresh_bottom_line();
 		return;
 	}
 	snprintf(provider2_tag, sizeof(provider2_tag), "%s", tag);
 	set_ring2(&session, tag, session_pct);
 	set_ring2(&weekly, tag, weekly_pct);
+
+	lv_obj_set_style_arc_color(session.arc2, provider_color(tag),
+				   LV_PART_INDICATOR);
+	lv_obj_set_style_arc_color(weekly.arc2, provider_color(tag),
+				   LV_PART_INDICATOR);
+	lv_obj_set_style_text_color(session.countdown2, provider_color(tag), 0);
+	lv_obj_set_style_text_color(weekly.countdown2, provider_color(tag), 0);
+
+	session.resets2_in_s = session_resets_in_s;
+	weekly.resets2_in_s = weekly_resets_in_s;
+	lv_obj_clear_flag(session.countdown2, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_clear_flag(weekly.countdown2, LV_OBJ_FLAG_HIDDEN);
+	render_countdown(&session);
+	render_countdown(&weekly);
 	refresh_bottom_line();
 }
 

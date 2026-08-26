@@ -18,7 +18,7 @@ def test_maps_both_windows():
     assert msg["weekly_pct"] == 12.9
     assert msg["session_resets_in_s"] == 3200
     assert msg["weekly_resets_in_s"] == 444800
-    assert msg["models"] == []
+    assert "models" not in msg   # the array never reaches the wire
     assert msg["stale"] is False
 
 
@@ -114,7 +114,7 @@ def test_real_capture_maps_without_error():
     assert msg["weekly_pct"] == 42.0
     assert msg["session_resets_in_s"] == 120_800
     assert msg["weekly_resets_in_s"] == 524_000
-    assert msg["models"] == []
+    assert "models" not in msg   # the array never reaches the wire
 
 
 def test_read_payload_missing_file_returns_none_none(tmp_path):

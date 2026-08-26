@@ -67,8 +67,25 @@
  * new space, pairs the two numbers that belong together -- how much is gone,
  * how long until it comes back -- and frees a whole row underneath.
  */
-#define GAUGE_CD_Y		112
-#define GAUGE_NAME_Y		166
+/*
+ * The countdowns are back OUT of the ring, under the caption.
+ *
+ * They lived in the hollow while there was one of them. With two providers
+ * there are two, the hollow is 76 px across, and stacking them there would put
+ * four numbers inside a ring 116 px wide. Under the gauge they get a line of
+ * their own and can sit side by side, each in its provider's colour, which is
+ * what makes "how long has each of them got" answerable at a glance.
+ *
+ * The hollow keeps both PERCENTAGES -- the primary large, the second small --
+ * so it is still carrying its weight rather than going back to one number and
+ * a lot of nothing.
+ */
+#define GAUGE_P2PCT_Y		112
+#define GAUGE_NAME_Y		164
+#define GAUGE_CD_Y		182
+#define GAUGE_CD_MAX_W		72	/* "6d 22h" per provider */
+/* Side by side when there are two, centred on the gauge when there is one. */
+#define GAUGE_CD_DX		38
 
 /*
  * A second provider, as an inner ring inside the same gauge.
@@ -102,7 +119,6 @@
 #define GAUGE_ARC2_W		6
 #define GAUGE_ARC2_Y		(GAUGE_ARC_Y + (GAUGE_ARC_SZ - GAUGE_ARC2_SZ) / 2)
 #define GAUGE_HOLLOW_W		(GAUGE_ARC2_SZ - 2 * GAUGE_ARC2_W)
-#define GAUGE_P2_Y		132
 #define GAUGE_P2_MAX_W		44	/* "100%" -- the tag is named once, below */
 
 /* Context row, in the band between the countdowns and the hint. */
@@ -121,10 +137,10 @@
  * when the counts are worth reading.
  */
 #define CTX_CAP_X		(-134)
-#define CTX_CAP_Y		194
+#define CTX_CAP_Y		200
 #define CTX_CAP_MAX_W		30	/* "CTX" */
 #define CTX_BAR_X		(-21)
-#define CTX_BAR_Y		199
+#define CTX_BAR_Y		205
 #define CTX_BAR_W		182
 #define CTX_BAR_H		8	/* thicker, now that there is room */
 
@@ -138,7 +154,7 @@
  * suffix stops it reading as though it were the only one.
  */
 #define CTX_VAL_X		114
-#define CTX_VAL_Y		194
+#define CTX_VAL_Y		200
 #define CTX_VAL_MAX_W		76	/* "100% of 9" */
 
 /* Session and agent counts, in the bottom line the hint also uses. */

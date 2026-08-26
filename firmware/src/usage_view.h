@@ -138,8 +138,22 @@ void usage_view_set_sessions(int n_sessions, int n_agents);
  *
  * Percentages outside 0-100 hide that ring on its own, so a provider that can
  * report a weekly figure but not a session one shows exactly what it knows.
+ *
+ * The countdowns are in remaining seconds, like usage_view_update's; -1 is
+ * unknown. Both appear under their gauge, side by side, each in its
+ * provider's colour.
  */
+/*
+ * Which provider the OUTER ring belongs to. Sets its colour, and its
+ * countdown's.
+ *
+ * The name, not the ring position: on a machine running only Codex the outer
+ * ring is Codex, and it should not be wearing Claude's colour.
+ */
+void usage_view_set_provider1(const char *tag);
+
 void usage_view_set_provider2(const char *tag, double session_pct,
-			      double weekly_pct);
+			      double weekly_pct, int32_t session_resets_in_s,
+			      int32_t weekly_resets_in_s);
 
 #endif /* USAGE_VIEW_H */

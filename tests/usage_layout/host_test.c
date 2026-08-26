@@ -84,10 +84,21 @@ int main(void)
 				 CTX_VAL_MAX_W, FONT_LINE_H);
 
 	/* The two countdowns immediately above it. */
-	struct box cd_l = top_mid("countdown L", -GAUGE_CX, GAUGE_CD_Y,
-				  70, FONT_LINE_H);
-	struct box cd_r = top_mid("countdown R", GAUGE_CX, GAUGE_CD_Y,
-				  70, FONT_LINE_H);
+	/* Two countdowns per gauge when a second provider reports, pushed
+	 * apart by GAUGE_CD_DX. The outermost of the four is the one that can
+	 * fall off the panel. */
+	struct box cd_l = top_mid("countdown L (primary)",
+				  -GAUGE_CX - GAUGE_CD_DX, GAUGE_CD_Y,
+				  GAUGE_CD_MAX_W, FONT_LINE_H);
+	struct box cd_l2 = top_mid("countdown L (second)",
+				   -GAUGE_CX + GAUGE_CD_DX, GAUGE_CD_Y,
+				   GAUGE_CD_MAX_W, FONT_LINE_H);
+	struct box cd_r = top_mid("countdown R (primary)",
+				  GAUGE_CX - GAUGE_CD_DX, GAUGE_CD_Y,
+				  GAUGE_CD_MAX_W, FONT_LINE_H);
+	struct box cd_r2 = top_mid("countdown R (second)",
+				   GAUGE_CX + GAUGE_CD_DX, GAUGE_CD_Y,
+				   GAUGE_CD_MAX_W, FONT_LINE_H);
 	struct box name_l = top_mid("SESSION caption", -GAUGE_CX, GAUGE_NAME_Y,
 				    110, FONT_LINE_H);
 	struct box name_r = top_mid("WEEKLY caption", GAUGE_CX, GAUGE_NAME_Y,
@@ -112,7 +123,7 @@ int main(void)
 
 	/* --- everything is on the panel at all --- */
 	struct box all[] = { cap, bar, val, cd_l, cd_r, hint, model, pip, arc_l,
-			     sess_b, name_l, name_r };
+			     sess_b, name_l, name_r, cd_l2, cd_r2 };
 	for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		char msg[64];
 		snprintf(msg, sizeof(msg), "%s fits on the panel", all[i].name);
@@ -167,25 +178,30 @@ int main(void)
 	 * and the code, not the geometry, keeps them apart. */
 	CHECK(sess_b.y0 == hint.y0, "counts and hint share one line, as intended");
 
-	/* The inner ring eats the hollow the countdown lives in. The first
+	/* Four countdowns on one line must not run into each other, and the
+	 * inner pair must not collide across the middle of the panel. */
+	CHECK(!overlaps(cd_l, cd_l2), "the left gauge's two countdowns clear");
+	CHECK(!overlaps(cd_r, cd_r2), "the right gauge's two countdowns clear");
+	CHECK(cd_l2.x1 <= cd_r.x0,
+	      "the two gauges' countdowns do not meet in the middle");
+	CHECK(!overlaps(cd_l, bar), "countdowns clear the context bar below");
+	CHECK(!overlaps(cd_r2, val), "countdowns clear the context readout");
+
+	/* The inner ring eats the hollow the second PERCENTAGE lives in. The first
 	 * inner ring was 84 across with an 8 px wall, leaving 68 px of centre
 	 * for a ~70 px string, and the render showed "30m 00s" sliced by its
 	 * own gauge. The fix was counter-intuitive -- a BIGGER, thinner inner
 	 * ring buys hollow rather than spending it -- so the rule is pinned
 	 * here rather than left as a number someone will helpfully shrink. */
-	CHECK(GAUGE_HOLLOW_W >= (int)strlen("00m 00s") * 9,
-	      "the ring hollow still fits a countdown");
 	CHECK(GAUGE_HOLLOW_W >= GAUGE_P2_MAX_W,
 	      "the ring hollow still fits the second provider's readout");
 	CHECK(GAUGE_ARC2_SZ <= GAUGE_ARC_SZ - 2 * GAUGE_ARC_W,
 	      "the inner ring stays inside the outer ring's wall");
 
-	/* The countdown lives inside the ring now, so it must actually be
-	 * inside it -- and clear of the percentage above it. */
-	CHECK(cd_l.y0 >= GAUGE_PCT_Y + FONT_LINE_H,
-	      "countdown sits below the percentage");
-	CHECK(cd_l.y1 <= GAUGE_ARC_Y + GAUGE_ARC_SZ,
-	      "countdown stays inside the ring");
+	/* The countdowns are under the gauge now, not in it. */
+	CHECK(cd_l.y0 >= GAUGE_ARC_Y + GAUGE_ARC_SZ,
+	      "countdowns sit below the rings, not inside them");
+	CHECK(cd_l.y0 >= name_l.y1, "countdowns sit below the caption");
 
 	/* --- the text budgets are real --- */
 	CHECK((int)strlen("CTX") * CHAR_W_MAX <= CTX_CAP_MAX_W + CHAR_W_MAX,
