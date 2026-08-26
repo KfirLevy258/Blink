@@ -81,12 +81,18 @@ possibility, the honest options are:
 
 Not worth store submission before Step 1 answers the question.
 
-### Step 3 — Firefox
+### Step 3 — Firefox (manifest done, UNTESTED)
 
-The manifest is MV3 and `moz-extension://` is already in the receiver's origin
-allow-list. Needs `browser_specific_settings.gecko.id` and a real test; Firefox
-MV3 keeps blocking `webRequest` differently from Chrome, so budget a day rather
-than an hour.
+`browser_specific_settings.gecko.id` and a dual `background` block are in the
+manifest now — Chrome reads `service_worker` and ignores `scripts`, Firefox does
+the reverse, so one manifest loads in both. `moz-extension://` was already in
+the receiver's origin allow-list.
+
+**Nothing about this has been run in Firefox.** Firefox's MV3 handles
+`webRequest` differently from Chrome's and `strict_min_version` is a guess at
+where `background.scripts` plus MV3 settled. Treat the manifest as a starting
+point, not as support; the diagnostic in Step 1 will say immediately whether it
+works.
 
 ### Step 4 — before it is on by default
 
@@ -191,9 +197,19 @@ a session list is far cheaper than inventing a new surface.
 Two increments:
 - **v1, cheap:** a small count beside the pip when more than one session is
   live. Fits the existing header row; a few hours.
-- **v2:** long-press opens a card listing sessions — state, and how long in it.
-  Reuses `PEEK_ROWS` scaffolding. Showing *which project* needs `cwd`, which is
-  the extra capture decision again.
+- **v2 is blocked by a decision already taken, and that is worth knowing before
+  anyone starts it.** A card *listing sessions* needs per-session data on the
+  wire, and Step 2 deliberately sends counts instead — a per-session array blows
+  the 512-byte line budget at around four sessions and takes the panel dark with
+  no error. So v2 as originally sketched cannot be built on the current
+  protocol.
+
+  Two honest options. Either build the card from the counts that *are* sent
+  ("2 running, 1 waiting, 2 agents"), which is a modest gain over the `2s 2a`
+  already in the corner — or add a second message type carrying one session per
+  line, which the NDJSON protocol handles natively and the 512-byte limit then
+  applies to per line rather than in total. The second is the real answer if
+  per-session detail is wanted, and it is additive, so it costs no version bump.
 
 Whatever the card shows, `usage_layout.h` and `tests/usage_layout/host_test.c`
 must grow with it. The band below the gauges has 2 px and 0 px of clearance in

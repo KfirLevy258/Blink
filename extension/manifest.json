@@ -3,12 +3,23 @@
   "name": "Clauge web bridge",
   "version": "0.6.0",
   "description": "Forwards claude.ai usage numbers to the Clauge desk gauge running on this machine. Numbers only, localhost only.",
-  "permissions": ["webRequest"],
+  "permissions": [
+    "webRequest"
+  ],
   "host_permissions": [
     "https://claude.ai/*",
     "http://127.0.0.1:9877/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "clauge-web-bridge@clauge.local",
+      "strict_min_version": "121.0"
+    }
   }
 }
