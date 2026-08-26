@@ -97,6 +97,7 @@ int main(int argc, char **argv)
 		usage_view_set_model("Sonnet 5");
 		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
 		usage_view_set_sessions(3, 7);
+		usage_view_set_provider2("codex", 34.0, 61.0);
 		usage_view_set_clock(23, 47);
 		break;
 	case 2:	/* the worst case for the layout: everything at once, wide.
@@ -109,6 +110,7 @@ int main(int argc, char **argv)
 		usage_view_set_model("Opus 5 (1M context)");
 		usage_view_set_activity(USAGE_ACTIVITY_FAILED);
 		usage_view_set_sessions(9, 9);
+		usage_view_set_provider2("codex", 100.0, 100.0);
 		usage_view_set_clock(23, 59);
 		break;
 	case 3:	/* nothing known: every optional field absent */

@@ -78,7 +78,9 @@ def test_a_provider_can_be_added_at_runtime():
 def test_the_two_real_providers_compose_end_to_end(tmp_path):
     """CLI supplies resets, context and model; desktop supplies a fresher
     session percentage. The merged message carries all four."""
-    statusline = tmp_path / "statusline.json"
+    sl_dir = tmp_path / "statusline"
+    sl_dir.mkdir()
+    statusline = sl_dir / "sess-a.json"
     statusline.write_text(json.dumps({
         "model": {"display_name": "Opus 5"},
         "context_window": {"used_percentage": 61},
@@ -95,7 +97,7 @@ def test_the_two_real_providers_compose_end_to_end(tmp_path):
         {"t": int(NOW * 1000), "org": "o", "u": {"fh": 77, "sd": 44}}]}))
 
     bus = ingest.IngestionBus(
-        providers=[ClaudeCliProvider(path=str(statusline)),
+        providers=[ClaudeCliProvider(path=str(sl_dir)),
                    ClaudeDesktopProvider(path=str(cache))],
         now=lambda: NOW)
     msg = bus.poll()

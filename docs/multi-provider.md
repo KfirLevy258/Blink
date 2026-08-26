@@ -94,6 +94,15 @@ from the specification:
 For each field independently: **among the sources that actually have this
 field, the freshest wins.**
 
+**Context is the one exception, and it is not on this bus at all.** Several
+agents mean several context windows and no single number is all of them, so
+`ClaudeCliProvider` combines the sessions itself and takes the **worst** — the
+fullest context is the one about to end somebody's turn. The count travels with
+it as `n_ctx`, so the panel says "88% of 4" rather than letting one number pass
+as the only one. That rule lives in the provider rather than the normalizer
+precisely because it is not recency, and putting it here would have made the
+normalizer's one rule into two.
+
 The rejected alternative, kept as a test in
 `tests/pc/test_normalizer.py::test_higher_does_not_beat_fresher_across_a_reset`:
 
@@ -119,6 +128,35 @@ two separate limits; `select()` chooses between them (preferred first, then
 freshest) rather than blending. What a genuinely two-provider panel should look
 like is a hardware design question, not one the normalizer may answer by
 averaging.
+
+## 4b. Two providers, one pair of gauges
+
+Each gauge draws a second, inner ring when a second provider reports.
+
+**Provider is encoded by geometry, severity by colour**, and that split is the
+whole design. Colour is what the eye resolves from across a desk — green means
+room, red means stop — so it cannot also be spent on saying which tool a number
+belongs to. Ring position carries that instead, legible on a second look
+without costing anything on the first. The inner ring is thinner as well as
+smaller, so the primary provider stays the thing you read.
+
+The inner ring is unlabelled; the bottom line names it once ("inner ring:
+codex"). Repeating the tag on both gauges would say the same thing twice, and
+the ring hollow is not wide enough for it anyway — see below.
+
+Beyond two providers, `select_pair()` drops the third rather than rotating
+through them. A ring that silently changes whose number it is showing is worse
+than one that never shows it.
+
+### The ring hollow
+
+The countdown lives inside the ring, and the inner ring eats the space it lives
+in. The usable hollow is the inner ring's diameter minus two walls, so the fix
+for a countdown being sliced by its own gauge is counter-intuitive: make the
+inner ring **bigger and thinner**. 88 across with a 6 px wall gives 76 px of
+clear centre; 84 with an 8 px wall gave 68 px, for a ~70 px string. Pinned in
+`tests/usage_layout/host_test.c` rather than left as a number someone will
+helpfully shrink.
 
 ## 5. The wire
 

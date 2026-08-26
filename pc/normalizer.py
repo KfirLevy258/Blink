@@ -119,6 +119,11 @@ def merge(frames):
         n_stuck=state_src.n_stuck if state_src else 0,
         n_idle=state_src.n_idle if state_src else 0,
         n_agents=state_src.n_agents if state_src else 0,
+        # n_ctx travels with the CONTEXT, not with the state: it qualifies
+        # ctx_pct, and pairing it with anything else would caption one
+        # source's number with another source's count.
+        n_ctx=max((f.n_ctx for f in frames if _known_pct(f.ctx_pct)),
+                  default=0),
     )
 
 
@@ -129,6 +134,23 @@ def group_by_provider(frames):
         if f is not None:
             out.setdefault(f.provider, []).append(f)
     return out
+
+
+def select_pair(frames, preferred=None):
+    """(primary, secondary) -- what the outer and inner rings should show.
+
+    The panel has two rings per gauge and no more, so beyond two providers
+    something has to be left off. The rule is the same one select() uses for
+    the primary, applied twice: preference first, then recency. A third
+    provider is dropped rather than rotated, because a ring that silently
+    changes whose number it is showing is worse than one that never shows it.
+    """
+    merged = [m for m in (merge(g) for g in group_by_provider(frames).values())
+              if m is not None]
+    if not merged:
+        return None, None
+    merged.sort(key=lambda m: (m.provider != preferred, -m.observed_at))
+    return merged[0], (merged[1] if len(merged) > 1 else None)
 
 
 def select(frames, preferred=None):

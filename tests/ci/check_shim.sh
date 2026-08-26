@@ -34,7 +34,10 @@ export HOME
 
 SHIM="$HOME/clauge-statusline.sh"
 cp "$SHIM_SRC" "$SHIM"
-PAYLOAD='{"rate_limits":{"five_hour":{"used_percentage":7,"resets_at":11}}}'
+PAYLOAD='{"session_id":"sess-a","rate_limits":{"five_hour":{"used_percentage":7,"resets_at":11}}}'
+# One file per session now: the payload's context window and model are per
+# conversation, and a single slot meant two terminals overwrote each other's.
+CAP="$HOME/.clauge/statusline/sess-a.json"
 
 
 printf '== shim under %s\n' "$SH"
@@ -43,13 +46,13 @@ printf '== shim under %s\n' "$SH"
 out=$(printf '%s' "$PAYLOAD" | $SH "$SHIM" 2>"$WORK/err.txt")
 [ -z "$out" ] || fail "printed something with no chain: [$out]"
 [ -s "$WORK/err.txt" ] && fail "wrote to stderr: $(cat "$WORK/err.txt")"
-[ "$(cat "$HOME/.clauge/statusline.json")" = "$PAYLOAD" ] ||
-	fail "payload not captured verbatim"
+[ "$(cat "$CAP")" = "$PAYLOAD" ] || fail "payload not captured verbatim"
 ok "captures the payload, prints nothing, says nothing"
 
 # 2. No temp file left behind -- the daemon globs nothing, but a stray
 #    statusline.json.tmp means the atomic rename did not happen.
-[ ! -e "$HOME/.clauge/statusline.json.tmp" ] || fail "left a .tmp file behind"
+[ ! -e "$HOME/.clauge/statusline/sess-a.json.tmp" ] ||
+	fail "left a .tmp file behind"
 ok "atomic write leaves no temp file"
 
 # 3. Chain: their command runs, gets the SAME input, and its output passes
@@ -124,5 +127,26 @@ HOME="$UNWRITABLE" $SH "$SHIM" </dev/null >/dev/null 2>"$WORK/err6.txt" || true
 chmod 700 "$UNWRITABLE"
 [ -s "$WORK/err6.txt" ] && fail "unwritable HOME leaked: $(cat "$WORK/err6.txt")"
 ok "an unwritable HOME breaks capture silently"
+
+
+# Two sessions keep separate files. This is the whole reason the single slot
+# was replaced: the context window and the model are per conversation, and two
+# terminals used to overwrite each other with no sign anything was wrong.
+printf '{"session_id":"sess-b","context_window":{"used_percentage":88}}' |
+	$SH "$SHIM" >/dev/null 2>&1
+[ -f "$CAP" ] || fail "a second session clobbered the first"
+grep -q '88' "$HOME/.clauge/statusline/sess-b.json" ||
+	fail "second session not captured"
+ok "two sessions keep separate payloads"
+
+# A session id that tries to escape becomes "unknown", same rule as the hook
+# shim: the character class in the pattern is the sanitiser.
+CANARY="$WORK/canary"
+printf '{"session_id":"../../../../%s/pwned"}' "${CANARY#/}" |
+	$SH "$SHIM" >/dev/null 2>&1
+[ ! -e "$CANARY/pwned.json" ] || fail "PATH TRAVERSAL out of the capture dir"
+[ -f "$HOME/.clauge/statusline/unknown.json" ] ||
+	fail "traversal attempt did not fall back to 'unknown'"
+ok "a traversing session id cannot escape the capture directory"
 
 printf 'PASS [%s]\n' "$WHICH"

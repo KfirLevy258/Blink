@@ -167,6 +167,19 @@ int main(void)
 	 * and the code, not the geometry, keeps them apart. */
 	CHECK(sess_b.y0 == hint.y0, "counts and hint share one line, as intended");
 
+	/* The inner ring eats the hollow the countdown lives in. The first
+	 * inner ring was 84 across with an 8 px wall, leaving 68 px of centre
+	 * for a ~70 px string, and the render showed "30m 00s" sliced by its
+	 * own gauge. The fix was counter-intuitive -- a BIGGER, thinner inner
+	 * ring buys hollow rather than spending it -- so the rule is pinned
+	 * here rather than left as a number someone will helpfully shrink. */
+	CHECK(GAUGE_HOLLOW_W >= (int)strlen("00m 00s") * 9,
+	      "the ring hollow still fits a countdown");
+	CHECK(GAUGE_HOLLOW_W >= GAUGE_P2_MAX_W,
+	      "the ring hollow still fits the second provider's readout");
+	CHECK(GAUGE_ARC2_SZ <= GAUGE_ARC_SZ - 2 * GAUGE_ARC_W,
+	      "the inner ring stays inside the outer ring's wall");
+
 	/* The countdown lives inside the ring now, so it must actually be
 	 * inside it -- and clear of the percentage above it. */
 	CHECK(cd_l.y0 >= GAUGE_PCT_Y + FONT_LINE_H,

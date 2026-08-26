@@ -303,6 +303,20 @@ static void dispatch(const char *json)
 		msg_get_double(json, "n_agents", &na);
 		usage_view_set_sessions((int)ns, (int)na);
 
+		/* A second provider, drawn as the inner ring on both gauges.
+		 * Absent on every single-provider board, which is the common
+		 * case and pays nothing for the capability. */
+		char p2[16];
+		double p2s = -1, p2w = -1;
+
+		if (msg_get_str(json, "p2", p2, sizeof(p2))) {
+			msg_get_double(json, "p2_session_pct", &p2s);
+			msg_get_double(json, "p2_weekly_pct", &p2w);
+			usage_view_set_provider2(p2, p2s, p2w);
+		} else {
+			usage_view_set_provider2("", -1, -1);
+		}
+
 		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)%s%s\n",
 		       sp, (int)ss, wp, (int)ws, stale ? "  STALE" : "",
 		       act == USAGE_ACTIVITY_NONE ? "" : " +state");

@@ -140,7 +140,8 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           session_resets_in_s=-1, weekly_resets_in_s=-1, stale=False,
           provider="claude", src="cli", ctx_pct=UNKNOWN, model="",
           state="", n_sess=0, n_run=0, n_wait=0, n_stuck=0,
-          n_agents=0) -> dict:
+          n_agents=0, n_ctx=0, p2="", p2_session_pct=UNKNOWN,
+          p2_weekly_pct=UNKNOWN) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -203,9 +204,20 @@ The firmware reads this field: proto.c's "usage" handler calls
     # (one session, no agents) that keeps this whole block down to about
     # twenty bytes instead of sixty.
     for key, val in (("n_sess", n_sess), ("n_run", n_run), ("n_wait", n_wait),
-                     ("n_stuck", n_stuck), ("n_agents", n_agents)):
+                     ("n_stuck", n_stuck), ("n_agents", n_agents),
+                     ("n_ctx", n_ctx)):
         if val:
             extra[key] = int(val)
+
+    # A second provider, drawn as the inner ring on both gauges. Sent only
+    # when there IS one, which on a single-provider machine is never -- so
+    # the common line pays nothing for the capability.
+    if p2:
+        extra["p2"] = p2[:MODEL_MAX_CHARS]
+        if p2_session_pct is not None and p2_session_pct >= 0:
+            extra["p2_session_pct"] = p2_session_pct
+        if p2_weekly_pct is not None and p2_weekly_pct >= 0:
+            extra["p2_weekly_pct"] = p2_weekly_pct
 
     return {
         "t": "usage", "v": VERSION,
@@ -220,7 +232,7 @@ The firmware reads this field: proto.c's "usage" handler calls
     }
 
 
-def frame_to_usage(frame, now_epoch: float) -> dict:
+def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     """Turn a NormalizedUsageFrame into the usage message for the board.
 
     The single crossing point from provider-space to wire-space. Providers
@@ -239,7 +251,10 @@ def frame_to_usage(frame, now_epoch: float) -> dict:
         provider=frame.provider, src=frame.src,
         ctx_pct=frame.ctx_pct, model=frame.model, state=frame.state,
         n_sess=frame.n_sessions(), n_run=frame.n_run, n_wait=frame.n_wait,
-        n_stuck=frame.n_stuck, n_agents=frame.n_agents,
+        n_stuck=frame.n_stuck, n_agents=frame.n_agents, n_ctx=frame.n_ctx,
+        p2=(secondary.provider if secondary else ""),
+        p2_session_pct=(secondary.session_pct if secondary else UNKNOWN),
+        p2_weekly_pct=(secondary.weekly_pct if secondary else UNKNOWN),
     )
 
 

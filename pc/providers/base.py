@@ -80,6 +80,10 @@ class NormalizedUsageFrame:
     n_stuck: int = 0
     n_idle: int = 0
     n_agents: int = 0
+    # How many live contexts ctx_pct is the worst of. Several agents mean
+    # several context windows and one number cannot be all of them, so the
+    # frame carries the count and the panel says "88% of 4".
+    n_ctx: int = 0
 
     def n_sessions(self) -> int:
         return self.n_run + self.n_wait + self.n_stuck + self.n_idle

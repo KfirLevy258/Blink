@@ -70,6 +70,41 @@
 #define GAUGE_CD_Y		112
 #define GAUGE_NAME_Y		166
 
+/*
+ * A second provider, as an inner ring inside the same gauge.
+ *
+ * Provider is encoded by GEOMETRY, severity by COLOUR, and that split is the
+ * whole design. Colour is what the eye resolves from across a desk -- green
+ * means room, red means stop -- so it cannot also be spent on saying which
+ * tool a number belongs to. Ring position carries that instead, and it is
+ * legible on a second look without costing anything on the first.
+ *
+ * Thinner than the outer ring as well as smaller, so the primary provider
+ * stays the thing you read and the second is peripheral awareness rather than
+ * a competing headline.
+ */
+/*
+ * 88 across with a 6 px wall, and both numbers matter.
+ *
+ * The first attempt used 84/8, which put the inner ring's wall right where the
+ * countdown text runs and left a 68 px hollow for a 70 px string -- the render
+ * showed "30m 00s" sliced by its own gauge. Counter-intuitively the fix is to
+ * make the inner ring BIGGER: the usable hollow is the ring's diameter minus
+ * two walls, so moving it outwards and thinning it buys space rather than
+ * spending it. 88 - 12 = 76 px of clear centre, against a ~70 px countdown.
+ *
+ * The outer ring's inner edge sits at 116 - 2*12 = 92, so 88 leaves 4 px of
+ * dark between the two rings -- enough to read them as separate without a
+ * divider.
+ */
+#define GAUGE_ARC_W		12
+#define GAUGE_ARC2_SZ		88
+#define GAUGE_ARC2_W		6
+#define GAUGE_ARC2_Y		(GAUGE_ARC_Y + (GAUGE_ARC_SZ - GAUGE_ARC2_SZ) / 2)
+#define GAUGE_HOLLOW_W		(GAUGE_ARC2_SZ - 2 * GAUGE_ARC2_W)
+#define GAUGE_P2_Y		132
+#define GAUGE_P2_MAX_W		44	/* "100%" -- the tag is named once, below */
+
 /* Context row, in the band between the countdowns and the hint. */
 /*
  * The freed row, laid out as ONE line rather than two.

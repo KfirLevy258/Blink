@@ -110,10 +110,11 @@ class IngestionBus:
 
     def poll(self):
         """The usage message for the board, or None when nothing is known."""
-        frame = normalizer.select(self.poll_frames(), preferred=self._preferred)
-        if frame is None:
+        primary, secondary = normalizer.select_pair(
+            self.poll_frames(), preferred=self._preferred)
+        if primary is None:
             return None
-        return protocol.frame_to_usage(frame, self._now())
+        return protocol.frame_to_usage(primary, self._now(), secondary)
 
 
 def make_fetch(providers=None, preferred_provider="claude",

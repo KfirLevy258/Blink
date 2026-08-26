@@ -129,4 +129,17 @@ void usage_view_set_activity(enum usage_activity a);
  */
 void usage_view_set_sessions(int n_sessions, int n_agents);
 
+/*
+ * A second provider on the same two gauges, drawn as an inner ring.
+ *
+ * `tag` is a short name for it -- "codex" -- and NULL or "" hides the inner
+ * rings and their readouts entirely, which is the state every single-provider
+ * board stays in forever.
+ *
+ * Percentages outside 0-100 hide that ring on its own, so a provider that can
+ * report a weekly figure but not a session one shows exactly what it knows.
+ */
+void usage_view_set_provider2(const char *tag, double session_pct,
+			      double weekly_pct);
+
 #endif /* USAGE_VIEW_H */

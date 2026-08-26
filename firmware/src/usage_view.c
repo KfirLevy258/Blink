@@ -27,7 +27,9 @@
 
 struct gauge {
 	lv_obj_t *arc;
+	lv_obj_t *arc2;		/* second provider, inner ring; NULL-safe */
 	lv_obj_t *pct;
+	lv_obj_t *p2;		/* the inner ring's own small readout */
 	lv_obj_t *name;
 	lv_obj_t *countdown;
 	int32_t resets_in_s;	/* -1 = unknown; ticked down locally */
@@ -45,6 +47,7 @@ static lv_obj_t *model_lbl;	/* which model is in use */
 static lv_obj_t *act_pip;	/* execution state, as a coloured pip */
 static lv_obj_t *sess_lbl;	/* "3s 7a" -- open sessions and live agents */
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
+static char provider2_tag[12];	/* "" when there is only one provider */
 static lv_obj_t *overlay;	/* full-screen "no data" takeover */
 static lv_obj_t *wait_big;	/* the takeover's CONNECTING title */
 static bool built;
@@ -169,10 +172,28 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_arc_set_value(g->arc, 0);
 	lv_obj_remove_style(g->arc, NULL, LV_PART_KNOB);	/* a readout, not a control */
 	lv_obj_clear_flag(g->arc, LV_OBJ_FLAG_CLICKABLE);
-	lv_obj_set_style_arc_width(g->arc, 12, LV_PART_MAIN);
-	lv_obj_set_style_arc_width(g->arc, 12, LV_PART_INDICATOR);
+	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_MAIN);
+	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_INDICATOR);
 	lv_obj_set_style_arc_color(g->arc, COL_TRACK, LV_PART_MAIN);
 	lv_obj_set_style_arc_color(g->arc, COL_GREEN, LV_PART_INDICATOR);
+
+	/* The second provider's ring, hidden until one exists. Created before
+	 * the labels so the text draws over it, not under. */
+	g->arc2 = lv_arc_create(parent);
+	lv_obj_set_size(g->arc2, GAUGE_ARC2_SZ, GAUGE_ARC2_SZ);
+	lv_obj_align(g->arc2, LV_ALIGN_TOP_MID, cx, GAUGE_ARC2_Y);
+	lv_arc_set_rotation(g->arc2, 135);
+	lv_arc_set_bg_angles(g->arc2, 0, 270);
+	lv_arc_set_range(g->arc2, 0, 100);
+	lv_arc_set_value(g->arc2, 0);
+	lv_obj_remove_style(g->arc2, NULL, LV_PART_KNOB);
+	lv_obj_clear_flag(g->arc2, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_set_style_arc_width(g->arc2, GAUGE_ARC2_W, LV_PART_MAIN);
+	lv_obj_set_style_arc_width(g->arc2, GAUGE_ARC2_W, LV_PART_INDICATOR);
+	lv_obj_set_style_arc_color(g->arc2, COL_TRACK, LV_PART_MAIN);
+	lv_obj_set_style_arc_color(g->arc2, COL_GREEN, LV_PART_INDICATOR);
+	lv_obj_add_flag(g->arc2, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_add_flag(g->arc2, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
 	g->pct = lv_label_create(parent);
 	lv_label_set_text(g->pct, "--%");
@@ -184,6 +205,14 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_label_set_text(g->name, title);
 	lv_obj_set_style_text_color(g->name, COL_DIM, 0);
 	lv_obj_align(g->name, LV_ALIGN_TOP_MID, cx, GAUGE_NAME_Y);
+
+	/* The inner ring's own figure, small and dim under the countdown. The
+	 * primary provider keeps the big number; this one is there to be
+	 * noticed, not read first. */
+	g->p2 = lv_label_create(parent);
+	lv_label_set_text(g->p2, "");
+	lv_obj_set_style_text_color(g->p2, COL_DIM, 0);
+	lv_obj_align(g->p2, LV_ALIGN_TOP_MID, cx, GAUGE_P2_Y);
 
 	g->countdown = lv_label_create(parent);
 	lv_label_set_text(g->countdown, "--");
@@ -321,6 +350,10 @@ void usage_view_deinit(void)
 	model_lbl = NULL;
 	act_pip = NULL;
 	sess_lbl = NULL;
+	session.arc2 = NULL;
+	weekly.arc2 = NULL;
+	session.p2 = NULL;
+	weekly.p2 = NULL;
 	activity = USAGE_ACTIVITY_NONE;
 #if HAVE_PER_MODEL
 	peek = NULL;
@@ -846,36 +879,93 @@ void usage_view_set_context(double ctx_pct, int of_n)
 	lv_label_set_text(ctx_val, buf);
 }
 
-void usage_view_set_sessions(int n_sessions, int n_agents)
+/*
+ * The bottom line, which several things want and only one can have.
+ *
+ * It carries the second provider's name -- the inner rings are unlabelled, so
+ * this is the only place that says whose they are -- and the session and agent
+ * counts. The hint outranks both and is handled separately: it is empty when
+ * all is well, which is exactly when these are worth reading.
+ */
+static int sess_n, agent_n;
+
+static void refresh_bottom_line(void)
 {
-	char buf[32];
+	char buf[48];
 
 	if (!sess_lbl) {
 		return;
 	}
-	/* One session and no agents is the ordinary case and says nothing
-	 * worth a pixel. Anything else is the reason this readout exists. */
-	if (n_sessions <= 1 && n_agents <= 0) {
-		lv_label_set_text(sess_lbl, "");
-		return;
-	}
-	/* Clamped at 9 rather than widened. The field is 44 px because that is
-	 * what is left beside a bounded model label, and "12s 34a" would run
-	 * under it. Nine is already far past the point where the exact number
-	 * changes what anyone does about it. */
-	if (n_sessions > 9) {
-		n_sessions = 9;
-	}
-	if (n_agents > 9) {
-		n_agents = 9;
-	}
-	if (n_agents > 0) {
-		snprintf(buf, sizeof(buf), "%d sessions  %d agents", n_sessions,
-			 n_agents);
+	if (provider2_tag[0] && sess_n > 1) {
+		snprintf(buf, sizeof(buf), "inner ring: %s   %d sessions",
+			 provider2_tag, sess_n);
+	} else if (provider2_tag[0]) {
+		snprintf(buf, sizeof(buf), "inner ring: %s", provider2_tag);
+	} else if (sess_n > 1 && agent_n > 0) {
+		snprintf(buf, sizeof(buf), "%d sessions  %d agents", sess_n,
+			 agent_n);
+	} else if (sess_n > 1) {
+		snprintf(buf, sizeof(buf), "%d sessions", sess_n);
+	} else if (agent_n > 0) {
+		snprintf(buf, sizeof(buf), "%d agents", agent_n);
 	} else {
-		snprintf(buf, sizeof(buf), "%d sessions", n_sessions);
+		buf[0] = '\0';
 	}
 	lv_label_set_text(sess_lbl, buf);
+}
+
+static void set_ring2(struct gauge *g, const char *tag, double pct)
+{
+	char buf[24];
+
+	if (!g->arc2) {
+		return;
+	}
+	if (pct < 0.0 || pct > 100.0) {
+		lv_obj_add_flag(g->arc2, LV_OBJ_FLAG_HIDDEN);
+		lv_label_set_text(g->p2, "");
+		return;
+	}
+	lv_obj_clear_flag(g->arc2, LV_OBJ_FLAG_HIDDEN);
+	lv_arc_set_value(g->arc2, (int32_t)(pct + 0.5));
+	lv_obj_set_style_arc_color(g->arc2, severity(pct), LV_PART_INDICATOR);
+	/* The number alone. The hollow is GAUGE_HOLLOW_W wide and
+	 * "codex 100%" is not, and repeating the tag on both gauges would say
+	 * the same thing twice anyway -- it is named once on the bottom line. */
+	(void)tag;
+	snprintf(buf, sizeof(buf), "%d%%", (int)(pct + 0.5));
+	lv_label_set_text(g->p2, buf);
+}
+
+void usage_view_set_provider2(const char *tag, double session_pct,
+			      double weekly_pct)
+{
+	if (!session.arc2 || !weekly.arc2) {
+		return;
+	}
+	if (!tag || !tag[0]) {
+		/* No second provider. Both rings and both readouts go away
+		 * entirely rather than sitting at zero, which would read as a
+		 * provider that exists and has used nothing. */
+		provider2_tag[0] = '\0';
+		set_ring2(&session, "", -1.0);
+		set_ring2(&weekly, "", -1.0);
+		refresh_bottom_line();
+		return;
+	}
+	snprintf(provider2_tag, sizeof(provider2_tag), "%s", tag);
+	set_ring2(&session, tag, session_pct);
+	set_ring2(&weekly, tag, weekly_pct);
+	refresh_bottom_line();
+}
+
+void usage_view_set_sessions(int n_sessions, int n_agents)
+{
+	/* Clamped at 9 rather than widened: past nine the exact number stops
+	 * changing what anyone does about it. */
+	sess_n = n_sessions > 9 ? 9 : n_sessions;
+	agent_n = n_agents > 9 ? 9 : n_agents;
+	refresh_bottom_line();
 }
 
 void usage_view_set_model(const char *name)

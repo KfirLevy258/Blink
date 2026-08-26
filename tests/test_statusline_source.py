@@ -285,3 +285,88 @@ def test_the_real_capture_fits_the_board_line_limit():
     raw, why = protocol.encode_checked(msg)
     assert why is None, why
     assert len(raw) <= protocol.MAX_LINE_BYTES
+
+
+# --- several sessions, several contexts -----------------------------------
+#
+# The status line payload is per session. Session and weekly percentages
+# describe an account and are identical in every terminal; the context window
+# and the model describe one conversation. With agents running there are
+# several contexts and no single number is all of them.
+
+
+def _session(d, sid, ctx=None, five_hour=27.0, at=None):
+    import os
+    payload = {"rate_limits": {"five_hour": {"used_percentage": five_hour,
+                                             "resets_at": 1_787_300_000}}}
+    if ctx is not None:
+        payload["context_window"] = {"used_percentage": ctx}
+    p = d / f"{sid}.json"
+    p.write_text(json.dumps(payload))
+    if at is not None:
+        os.utime(p, (at, at))
+    return p
+
+
+def test_the_worst_context_wins_not_the_freshest(tmp_path):
+    """The fullest context is the one about to end somebody's turn."""
+    from pc.providers.claude_cli import ClaudeCliProvider
+    now = 1_787_200_000.0
+    d = tmp_path / "statusline"
+    d.mkdir()
+    _session(d, "a", ctx=31.0, at=now)          # freshest
+    _session(d, "b", ctx=88.0, at=now - 60)     # older, but fuller
+    f = ClaudeCliProvider(path=str(d)).poll(now)[0]
+    assert f.ctx_pct == 88.0
+    assert f.n_ctx == 2
+
+
+def test_one_session_reports_one_context(tmp_path):
+    from pc.providers.claude_cli import ClaudeCliProvider
+    now = 1_787_200_000.0
+    d = tmp_path / "statusline"
+    d.mkdir()
+    _session(d, "a", ctx=31.0, at=now)
+    f = ClaudeCliProvider(path=str(d)).poll(now)[0]
+    assert (f.ctx_pct, f.n_ctx) == (31.0, 1)
+
+
+def test_sessions_without_a_context_are_not_counted(tmp_path):
+    """n_ctx qualifies ctx_pct, so it counts contexts, not sessions."""
+    from pc.providers.claude_cli import ClaudeCliProvider
+    now = 1_787_200_000.0
+    d = tmp_path / "statusline"
+    d.mkdir()
+    _session(d, "a", ctx=31.0, at=now)
+    _session(d, "b", ctx=None, at=now)
+    f = ClaudeCliProvider(path=str(d)).poll(now)[0]
+    assert f.n_ctx == 1
+
+
+def test_account_wide_numbers_come_from_the_freshest_session(tmp_path):
+    from pc.providers.claude_cli import ClaudeCliProvider
+    now = 1_787_200_000.0
+    d = tmp_path / "statusline"
+    d.mkdir()
+    _session(d, "a", ctx=10.0, five_hour=44.0, at=now)
+    _session(d, "b", ctx=10.0, five_hour=11.0, at=now - 300)
+    f = ClaudeCliProvider(path=str(d)).poll(now)[0]
+    assert f.session_pct == 44.0
+
+
+def test_a_closed_session_is_swept_not_counted_forever(tmp_path):
+    """Nothing else will ever collect it."""
+    from pc.providers.claude_cli import ClaudeCliProvider, ABANDONED_AFTER_S
+    now = 1_787_200_000.0
+    d = tmp_path / "statusline"
+    d.mkdir()
+    _session(d, "live", ctx=31.0, at=now)
+    dead = _session(d, "dead", ctx=99.0, at=now - ABANDONED_AFTER_S - 100)
+    f = ClaudeCliProvider(path=str(d)).poll(now)[0]
+    assert f.ctx_pct == 31.0, "a closed session still drove the context"
+    assert not dead.exists()
+
+
+def test_no_directory_at_all_is_silence(tmp_path):
+    from pc.providers.claude_cli import ClaudeCliProvider
+    assert ClaudeCliProvider(path=str(tmp_path / "nope")).poll(0.0) == []

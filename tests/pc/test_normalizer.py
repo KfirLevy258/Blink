@@ -127,3 +127,75 @@ def test_select_falls_back_to_the_freshest_provider():
 
 def test_select_with_nothing_returns_none():
     assert normalizer.select([], preferred="claude") is None
+
+
+# --- two providers on one pair of gauges ----------------------------------
+
+
+def test_select_pair_returns_preferred_first_then_the_other():
+    primary, secondary = normalizer.select_pair([
+        cli(NOW - 3600, session=10.0),
+        cli(NOW, session=90.0, provider="codex"),
+    ], preferred="claude")
+    assert primary.provider == "claude"
+    assert secondary.provider == "codex"
+
+
+def test_select_pair_with_one_provider_has_no_secondary():
+    primary, secondary = normalizer.select_pair([cli(NOW, session=10.0)],
+                                                preferred="claude")
+    assert primary.provider == "claude"
+    assert secondary is None
+
+
+def test_select_pair_with_nothing():
+    assert normalizer.select_pair([], preferred="claude") == (None, None)
+
+
+def test_a_third_provider_is_dropped_not_rotated():
+    """A ring that silently changes whose number it shows is worse than one
+    that never shows it."""
+    primary, secondary = normalizer.select_pair([
+        cli(NOW, session=10.0),
+        cli(NOW - 10, session=20.0, provider="codex"),
+        cli(NOW - 5, session=30.0, provider="gemini"),
+    ], preferred="claude")
+    assert primary.provider == "claude"
+    assert secondary.provider == "gemini"   # the fresher of the other two
+
+
+def test_the_secondary_reaches_the_wire():
+    from pc import protocol
+    primary, secondary = normalizer.select_pair([
+        cli(NOW, session=10.0, weekly=20.0),
+        cli(NOW, session=34.0, weekly=61.0, provider="codex"),
+    ], preferred="claude")
+    msg = protocol.frame_to_usage(primary, NOW, secondary)
+    assert msg["p2"] == "codex"
+    assert msg["p2_session_pct"] == 34.0
+    assert msg["p2_weekly_pct"] == 61.0
+
+
+def test_one_provider_costs_nothing_on_the_wire():
+    from pc import protocol
+    primary, secondary = normalizer.select_pair([cli(NOW, session=10.0)],
+                                                preferred="claude")
+    msg = protocol.frame_to_usage(primary, NOW, secondary)
+    for k in ("p2", "p2_session_pct", "p2_weekly_pct"):
+        assert k not in msg
+
+
+def test_two_providers_still_fit_the_board_line_limit():
+    from pc import protocol
+    primary, secondary = normalizer.select_pair([
+        cli(NOW, session=88.0, weekly=99.0, s_reset=NOW + 900,
+            w_reset=NOW + 90000, ctx=100.0, model="Opus 5 (1M context)",
+            state="stuck"),
+        cli(NOW, session=100.0, weekly=100.0, provider="codex"),
+    ], preferred="claude")
+    primary.n_run, primary.n_wait, primary.n_stuck = 3, 2, 4
+    primary.n_agents, primary.n_ctx = 9, 9
+    raw, why = protocol.encode_checked(
+        protocol.frame_to_usage(primary, NOW, secondary))
+    assert why is None, why
+    assert len(raw) <= protocol.MAX_LINE_BYTES

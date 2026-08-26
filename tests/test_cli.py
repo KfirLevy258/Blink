@@ -171,7 +171,9 @@ def test_status_runs_before_and_after_install(tmp_path, capsys):
     assert "none yet" in capsys.readouterr().out
     _settings(tmp_path, {})
     cli.main(["install"])
-    (tmp_path / ".clauge" / "statusline.json").write_text("{}")
+    sl = tmp_path / ".clauge" / "statusline"
+    sl.mkdir(exist_ok=True)
+    (sl / "sess-a.json").write_text("{}")
     assert cli.main(["status"]) == 0
     assert "fresh" in capsys.readouterr().out
 
