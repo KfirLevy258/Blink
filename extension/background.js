@@ -196,3 +196,18 @@ chrome.webRequest.onHeadersReceived.addListener(
   { urls: ["https://claude.ai/*"] },
   ["responseHeaders"]
 );
+
+// --- testability -----------------------------------------------------------
+//
+// The header matching is the part of this extension most likely to be wrong,
+// and the only way to find out in a browser is to have claude.ai actually send
+// something. That is not a reason to leave it unchecked: the parsing is pure
+// functions over a header array, and tests/extension/test_background.mjs runs
+// them under Node against fixtures.
+//
+// Guarded so Chrome never sees it -- a service worker has no `module`.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { windowOf, numeric, readHeaders, usedPct, resetEpoch,
+                     buildPayload, RE_LIMIT, RE_REMAINING, RE_RESET,
+                     RE_USED_PCT };
+}

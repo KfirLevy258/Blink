@@ -29,6 +29,20 @@ broken.
 
 ### Step 1 — find out what claude.ai actually sends (~2 min, gates everything)
 
+**A page-context probe cannot answer this, and it is worth knowing why before
+someone tries it again.** Wrapping `window.fetch` on claude.ai and reading
+`response.headers` was attempted (2026-08-26). It returned three header names —
+`cache-control`, `content-length`, `content-type` — which is *exactly* the
+CORS-safelisted set, so the result proved nothing. A control fetch of a
+same-origin static asset returned 22 headers, confirming page JS can see them
+same-origin; the three-header responses were cross-origin telemetry.
+
+More to the point: even a clean negative from page JS would not settle it.
+`chrome.webRequest.onHeadersReceived` sees response headers that `fetch()`
+hides, so the extension has strictly more visibility than any probe run inside
+the page. **The extension is the measuring instrument.** There is no shortcut
+around loading it.
+
 **This is now a one-command answer.** The extension reports what it observed
 every 30 seconds whether or not it found anything, and `clauge status` prints
 the verdict — no DevTools, no temporary logging.
