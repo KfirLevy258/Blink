@@ -1,5 +1,13 @@
 # Desk HUD handoff doc vs. the code — gap analysis
 
+> **Status, 2026-08-26: acted on.** Every gap below was implemented on branch
+> `desk-hud-universal`, with four deliberate departures (rows 9, 11, 13, 14 —
+> each argued in place). The as-built architecture is documented in
+> [multi-provider.md](multi-provider.md); this file is kept as the record of
+> what was found and why each decision went the way it did.
+>
+> See §5 at the end for the resolution table.
+
 Audit of the "Desk HUD — Universal Architecture, Multi-Provider Design & Technical
 Handoff" document against this repository.
 
@@ -385,3 +393,72 @@ been missing for N polls). Item 6's option (b)/(c) if the disk-capture nuance ma
 question the document assumes away: what the panel shows when there is more than one
 provider, or more than one source for the same number. That answer should precede the
 `ProviderParser` interface, not follow it.
+
+
+---
+
+## 5. Resolution
+
+What was built, and where the implementation deliberately differs from the
+document. Commits are on `desk-hud-universal`.
+
+| # | Item | Resolution |
+|---|---|---|
+| 1 | Zero-credential footprint | **Confirmed, doc amended.** Enforced at compile time (`CONFIG_CLAUGE_WIFI_MODE` default n); the standalone WiFi build is now named as a second mode the document omitted. |
+| 2 | Zero outbound AI polling | **Confirmed.** The extension observes responses the page already receives and issues no request of its own, so the property survives its installation. |
+| 3 | Pluggable multi-provider | **Built.** `pc/providers/base.py` (`ProviderParser`, `NormalizedUsageFrame`), `pc/ingest.py`, `pc/normalizer.py`. |
+| 4b | Anti-drift watchdog | **Built**, polled rather than watched, and it never overrides a deliberate uninstall. |
+| 5 | Schema resilience | **Built.** Versioned adapters dispatch on the cache's own `version`; an unknown version falls to a shape-driven reader. No `_parse_v1` — inventing a schema nobody has observed would mean testing against the invention. |
+| 6 | Zero content inspection | **Tightened.** The state hook keeps only an event name and a timestamp, asserted by `check_hook_shim.sh`. The statusline shim's whole-payload capture is unchanged and still local-only. |
+| 8 | `context_window`, `model.display_name` | **Built**, daemon through to pixels. Both were already in the payload and unread. |
+| 10 | Desktop app cache | **Built.** Two traps found against the real file: `t` is milliseconds, and there are no reset timestamps at all. |
+| 11 | Web extension bridge | **Built, transport changed** — see below. |
+| 12 | Codex / future providers | **Unblocked, not written.** The interface exists and is exercised by four sources; no second provider ships, because there is nothing to test it against. |
+| 13 | Live state machine | **Built, differently** — see below. |
+| 14 | Serial protocol | **Capabilities delivered additively** — see below. |
+| 15 | Local-first, no telemetry | **Confirmed.** The one new socket is loopback-bound and origin-checked. |
+| 16 | Naming | Untouched. Tracked elsewhere. |
+
+### The four departures
+
+**Row 9 — transport (UDP → file).** Kept as it was. The file survives a daemon
+restart and its mtime is the freshness signal the whole staleness design rests
+on; UDP would lose every render arriving during a restart or self-update.
+
+**Row 11 — WebSocket → HTTP POST.** Same host, same port, same locality, same
+push-on-completion timing. RFC 6455 would have meant a hand-rolled handshake and
+frame unmasker exposed to a socket inside a daemon that ships with one
+dependency, to move a payload that fits in one body.
+
+**Row 13 — state machine inputs.** The document specifies "waiting on stdin"
+and "0% CPU". Both mean finding a process among several and inferring intent
+from a number that is legitimately zero whenever a tool waits on the network.
+Claude Code's hooks announce every one of these transitions; `Notification` is
+authoritative for exactly the question "0% CPU" was guessing at. `stuck` fires
+at 180 s rather than 60 s.
+
+**Row 14 — protocol.** §6's frame was not adopted. Its capabilities were, as
+additive keys on v2: `provider`, `src`, `ctx_pct`, `model`, `state`. Bumping
+`PROTO_VERSION` would stop every deployed board being offered updates, over the
+link the update travels on — unfixable remotely. `-1` sentinels were kept over
+§6's `null`, and the 2 s heartbeat was not adopted for a source that only
+changes when Claude Code renders.
+
+### One thing the audit did not ask for
+
+`proto.c:367-371` drops an over-long line whole rather than truncating it — no
+error, no partial parse, the panel just stops updating. Adding five fields to a
+512-byte budget made that worth a guard, so `protocol.encode_checked()` now
+refuses to write a line the board could not receive, and the real payload is
+pinned against the limit. A realistic message is ~300 bytes.
+
+### Verification
+
+- 318 Python tests pass (was 204).
+- Both firmware configurations build with no new warnings; USB build DRAM 57.8% / 55.5%.
+- `check_versions.sh`, `check_shim.sh` (sh/bash/dash) and the new
+  `check_hook_shim.sh` (sh/bash/dash) pass.
+- End-to-end verified against this machine's real files plus a live extension
+  POST: the browser report takes the percentages, the CLI keeps supplying the
+  reset time, context and model, and `src` flips to `web`.
+- **Not flashed.** No board was attached; boot verification is outstanding.
