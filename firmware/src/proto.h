@@ -42,4 +42,14 @@ void proto_ota_check(void);			/* ask the daemon what it has */
 const char *proto_ota_app_version(void);
 bool proto_ota_install(void);			/* approve; the daemon flashes */
 
+/*
+ * Tell the host which provider the user picked as primary.
+ *
+ * Safe to call with no host attached -- it writes to the console either way,
+ * and a daemon that is not there simply never reads it. The value also rides
+ * out with every hello, so a host that connects later still learns it without
+ * the user having to touch the setting again.
+ */
+void proto_send_pref(void);
+
 #endif /* PROTO_H */

@@ -77,6 +77,17 @@ static void emit(const char *json)
 	printk("%s\n", json);
 }
 
+void proto_send_pref(void)
+{
+	char buf[64];
+
+	snprintf(buf, sizeof(buf),
+		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\"}",
+		 PROTO_VERSION,
+		 cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "codex" : "claude");
+	emit(buf);
+}
+
 static void send_hello(void)
 {
 	uint8_t id[16];
@@ -99,6 +110,9 @@ static void send_hello(void)
 		 "\"reset\":\"0x%x\"}",
 		 PROTO_VERSION, idhex, cause);
 	emit(buf);
+	/* Straight after hello: a daemon that starts later, or restarts, has
+	 * no other way to learn a preference the user set while it was gone. */
+	proto_send_pref();
 }
 
 static void send_ping(void)

@@ -226,7 +226,8 @@ def main(argv=None):
     # while a board happened to be plugged in -- so the extension got
     # connection-refused on a machine where the daemon was plainly running,
     # which is indistinguishable from Clauge not being installed.
-    fetch = ingest.make_fetch(web_bridge=True)
+    bus = ingest.IngestionBus(web_bridge=True)
+    fetch = bus.poll
 
     port = wait_for_port(args.port, on_wait=_upkeep)
     last_err = None
@@ -345,6 +346,7 @@ def main(argv=None):
         bridge = Bridge(write_msg=send, fetch_usage=fetch,
                         flash_image=flash_image,
                         report_failure=report_failure,
+                        set_preferred=bus.set_preferred,
                         self_update=self_update,
                         pending=update.PendingFirmware(
                             os.path.join(clauge_home, "pending_fw.json")))

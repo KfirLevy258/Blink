@@ -59,6 +59,23 @@ int cfg_set_ap_psk(const char *psk);
 uint8_t cfg_get_weekly_sel(void);
 int cfg_set_weekly_sel(uint8_t sel);
 
+/*
+ * Which provider the panel treats as primary -- the outer ring, the big
+ * number, the first countdown.
+ *
+ * Kept on the DEVICE rather than in the daemon because it is the device the
+ * user is looking at when they decide, and because a preference that resets
+ * every time the daemon restarts is not a preference. The board announces it
+ * to the host, which is what actually acts on it.
+ */
+enum cfg_main_src {
+	CFG_MAIN_SRC_CLAUDE = 0,	/* also the value an unset record reads as */
+	CFG_MAIN_SRC_CODEX = 1,
+};
+
+uint8_t cfg_get_main_src(void);
+int cfg_set_main_src(uint8_t src);
+
 /* Screen brightness percent, one of 20/40/60/80/100. Persisted so a reboot
  * keeps it. Returns 100 when never set (a fresh or pre-update device). */
 uint8_t cfg_get_bright_pct(void);

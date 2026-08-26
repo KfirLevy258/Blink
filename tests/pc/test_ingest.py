@@ -150,3 +150,37 @@ def test_a_started_bridge_adds_exactly_one_provider(monkeypatch):
     finally:
         if bridge:
             bridge.stop()
+
+
+# --- the board owns the primary-provider preference ------------------------
+
+
+def test_the_board_can_choose_the_primary_provider():
+    """The user picks it on the settings screen; the daemon follows. It does
+    not live here, because a preference that resets whenever the daemon
+    restarts is not a preference."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(frame(provider="claude", session=10.0)),
+                   Fixed(frame(provider="codex", session=90.0))],
+        preferred_provider="claude", now=lambda: NOW)
+    assert bus.poll()["provider"] == "claude"
+    assert bus.set_preferred("codex") is True
+    assert bus.poll()["provider"] == "codex"
+
+
+def test_an_unknown_provider_is_refused_not_applied(capsys):
+    """select_pair falls back to the freshest when its preference matches
+    nothing, so a typo would silently hand the outer ring to whichever source
+    wrote last -- which reads as a merge bug, not a bad setting."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(frame(provider="claude", session=10.0))],
+        preferred_provider="claude", now=lambda: NOW)
+    assert bus.set_preferred("gemini") is False
+    assert bus.poll()["provider"] == "claude"
+    assert "not reporting" in capsys.readouterr().err
+
+
+def test_an_empty_preference_changes_nothing():
+    bus = ingest.IngestionBus(providers=[Fixed(frame())], now=lambda: NOW)
+    assert bus.set_preferred("") is False
+    assert bus.set_preferred(None) is False

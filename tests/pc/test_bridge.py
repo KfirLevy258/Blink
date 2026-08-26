@@ -151,3 +151,34 @@ if __name__ == "__main__":
 # exception production could not produce, which is the shape of a test that
 # outlives its subject: green, specific, and describing something that stopped
 # being true when pc/usage_api.py was deleted.
+
+
+class PrefMessage(unittest.TestCase):
+    """The board announces which provider the user made primary."""
+
+    def _bridge(self, applied):
+        return Bridge(write_msg=lambda m: None, fetch_usage=lambda: None,
+                      set_preferred=lambda p: applied.append(p) or True)
+
+    def test_a_pref_message_reaches_the_bus(self):
+        applied = []
+        self._bridge(applied).on_message(
+            {"t": "pref", "v": 2, "provider": "codex"})
+        self.assertEqual(applied, ["codex"])
+
+    def test_a_pref_without_a_provider_is_ignored(self):
+        applied = []
+        self._bridge(applied).on_message({"t": "pref", "v": 2})
+        self.assertEqual(applied, [])
+
+    def test_a_non_string_provider_is_ignored(self):
+        applied = []
+        self._bridge(applied).on_message(
+            {"t": "pref", "v": 2, "provider": 7})
+        self.assertEqual(applied, [])
+
+    def test_a_daemon_without_a_bus_does_not_crash_on_pref(self):
+        """The tests wire a Bridge with no bus at all; a board that announces
+        its preference to one must not take it down."""
+        b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None)
+        b.on_message({"t": "pref", "v": 2, "provider": "codex"})

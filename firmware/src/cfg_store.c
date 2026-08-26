@@ -56,7 +56,35 @@ struct rec {
 	char ap_psk[CFG_AP_PSK_MAX];
 	uint8_t ota_state;		/* 0 idle, 1 install started (cleared on next boot) */
 	char ota_target[CFG_OTA_VER_MAX]; /* version the install aimed at */
+	uint8_t main_src;		/* 0 unset -> claude; else enum cfg_main_src */
 	uint32_t crc;		/* over everything above, always last */
+} __packed;
+
+/*
+ * The layout before main_src was added.
+ *
+ * Every field addition needs one of these, because the CRC spans everything
+ * ahead of it: a record sealed by the previous firmware has both a different
+ * length and a different CRC offset, so it fails validation outright. Without
+ * a reader for the old shape an update looks exactly like a corrupt record --
+ * and this record holds the WiFi credentials and the token. Losing it silently
+ * is the worst thing this file can do.
+ */
+struct rec_pre_src {
+	uint32_t magic;
+	uint32_t seq;
+	uint8_t mode;
+	uint8_t weekly_sel;
+	uint8_t tz_set;
+	uint8_t bright_pct;
+	int32_t tz_min;
+	char ssid[CFG_SSID_MAX];
+	char psk[CFG_PSK_MAX];
+	char token[CFG_TOKEN_MAX];
+	char ap_psk[CFG_AP_PSK_MAX];
+	uint8_t ota_state;
+	char ota_target[CFG_OTA_VER_MAX];
+	uint32_t crc;
 } __packed;
 
 /* Pre-OTA layout (shipped 0.3.0). A record sealed by that firmware fails the
@@ -100,7 +128,34 @@ static bool slot_load(int off, struct rec *out)
 		return true;
 	}
 
-	/* Not a current record -- try the pre-OTA layout. */
+	/* Not a current record -- try the layout from before main_src. */
+	struct rec_pre_src prev;
+
+	memcpy(&prev, buf, sizeof(prev));
+	if (prev.magic == REC_MAGIC &&
+	    prev.crc == crc32_ieee((const uint8_t *)&prev,
+				   offsetof(struct rec_pre_src, crc))) {
+		memset(out, 0, sizeof(*out));
+		out->magic = prev.magic;
+		out->seq = prev.seq;
+		out->mode = prev.mode;
+		out->weekly_sel = prev.weekly_sel;
+		out->tz_set = prev.tz_set;
+		out->bright_pct = prev.bright_pct;
+		out->tz_min = prev.tz_min;
+		memcpy(out->ssid, prev.ssid, sizeof(out->ssid));
+		memcpy(out->psk, prev.psk, sizeof(out->psk));
+		memcpy(out->token, prev.token, sizeof(out->token));
+		memcpy(out->ap_psk, prev.ap_psk, sizeof(out->ap_psk));
+		out->ota_state = prev.ota_state;
+		memcpy(out->ota_target, prev.ota_target, sizeof(out->ota_target));
+		out->main_src = 0;	/* unset -> the default, not garbage */
+		out->crc = rec_crc(out);
+		printk("[cfg] migrated pre-main_src record (seq %u)\n", prev.seq);
+		return true;
+	}
+
+	/* Older still -- the pre-OTA layout. */
 	struct rec_legacy old;
 
 	memcpy(&old, buf, sizeof(old));
@@ -289,6 +344,22 @@ int cfg_clear_wifi(void)
 uint8_t cfg_get_weekly_sel(void)
 {
 	return cfg.weekly_sel;
+}
+
+uint8_t cfg_get_main_src(void)
+{
+	return cfg.main_src;
+}
+
+int cfg_set_main_src(uint8_t src)
+{
+	int rc;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	cfg.main_src = src;
+	rc = persist();
+	k_mutex_unlock(&cfg_lock);
+	return rc;
 }
 
 int cfg_set_weekly_sel(uint8_t sel)

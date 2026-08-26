@@ -29,12 +29,16 @@ def _local_wall():
 
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
+                 set_preferred=None,
                  app_ver=RELEASE_VERSION,
                  wall=_local_wall, fetch_manifest=None, fetch_firmware=None,
                  flash_image=None, self_update=None, pending=None,
                  fetch_signed_manifest=None, report_failure=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
+        # The board owns the primary-provider preference; this applies it.
+        # None on a daemon wired without a bus (the tests do this).
+        self._set_preferred = set_preferred
         self._now = now
         self._wall = wall                # callable() -> (epoch_s, utc_offset_min)
         self._app_ver = app_ver
@@ -68,6 +72,16 @@ class Bridge:
     # --- inbound ---
     def on_message(self, msg: dict):
         t = msg.get("t")
+        if t == "pref":
+            # Which provider the user picked on the board's settings screen.
+            # It arrives with every hello as well as on change, so a daemon
+            # that restarts picks the choice back up without the user
+            # touching anything.
+            want = msg.get("provider")
+            if self._set_preferred and isinstance(want, str):
+                if self._set_preferred(want):
+                    print(f"[bridge] main source: {want}", file=sys.stderr)
+            return
         if t == "hello":
             self._note_board(msg)
             self._write(protocol.welcome("clauge-bridge", self._app_ver))

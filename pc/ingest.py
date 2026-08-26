@@ -87,6 +87,31 @@ class IngestionBus:
         """Onboard a provider at runtime. Nothing else has to change."""
         self._providers.append(provider)
 
+    def set_preferred(self, provider):
+        """Which provider gets the outer ring and the big number.
+
+        Set from the BOARD, not from here: the user picks it on the settings
+        screen, the board persists it and announces it, and this follows. A
+        preference that lived only in the daemon would reset every time the
+        daemon restarted, and the person choosing it is looking at the panel,
+        not at a config file.
+
+        An unknown name is ignored rather than applied. select_pair() falls
+        back to the freshest provider when its preference matches nothing, so
+        a typo would silently hand the outer ring to whichever source wrote
+        last -- which looks like a bug in the merge, not a bad setting.
+        """
+        if not provider:
+            return False
+        known = {p.get_provider_id() for p in self._providers}
+        if provider not in known:
+            print(f"[ingest] board asked for provider {provider!r}, which is"
+                  f" not reporting; keeping {self._preferred!r}",
+                  file=sys.stderr)
+            return False
+        self._preferred = provider
+        return True
+
     def poll_frames(self):
         """Every frame every provider can produce right now.
 

@@ -245,6 +245,29 @@ static lv_obj_t *mk_card(lv_obj_t *parent, int x, int y, int w, int h)
 #define BRIGHT_STOPS 5
 
 static lv_obj_t *pct_lbl;	/* the brightness row's subtitle: "60%" */
+static lv_obj_t *src_lbl;	/* the main-source row's subtitle: "Claude" */
+
+/*
+ * Toggle the primary provider, persist it, and tell the host.
+ *
+ * The board does not act on this itself -- which provider is primary is a
+ * decision the daemon makes when it merges sources, so the board's job is to
+ * hold the preference across reboots and announce it. proto_send_pref() is a
+ * no-op when no host is connected; the value goes out again on the next hello.
+ */
+static void toggle_main_src(lv_event_t *e)
+{
+	uint8_t next = cfg_get_main_src() == CFG_MAIN_SRC_CODEX
+			 ? CFG_MAIN_SRC_CLAUDE : CFG_MAIN_SRC_CODEX;
+
+	ARG_UNUSED(e);
+	cfg_set_main_src(next);
+	if (src_lbl) {
+		lv_label_set_text(src_lbl,
+				  next == CFG_MAIN_SRC_CODEX ? "Codex" : "Claude");
+	}
+	proto_send_pref();
+}
 static lv_obj_t *bright_big;	/* the big readout on the brightness screen */
 static lv_obj_t *bright_ov;	/* the brightness screen itself, or NULL */
 static lv_obj_t *seg[BRIGHT_STOPS];
@@ -1570,7 +1593,24 @@ static void build_panel(lv_obj_t *parent_scr)
 	 * 5.3 mm, sitting 5 px apart, so one press covered both and which one
 	 * fired came down to where the pressure centroid landed.
 	 */
-#define ROW_H 72
+/*
+ * 56, not 72. Three rows again -- brightness, main source, software update --
+ * so the height the reset row freed goes back where it came from. 56 px is
+ * 10.0 mm against a ~9 mm fingertip, which is what these were before and is
+ * still comfortably above the threshold.
+ */
+#define ROW_H 56
+#define ROW_TOP 56		/* first row, clear of the title rule at y=40 */
+#define ROW_GAP 8
+
+/*
+ * 56 + 3*56 + 2*8 = 240 exactly, which is the whole panel -- so the three rows
+ * end flush with the bottom edge rather than leaving a hole. Checked here
+ * rather than eyeballed, because the last time these moved a row went off the
+ * bottom of a 240 px screen and nobody noticed until it was flashed.
+ */
+BUILD_ASSERT(ROW_TOP + 3 * ROW_H + 2 * ROW_GAP <= 240,
+	     "the settings rows no longer fit on the panel");
 	/* No green edge seam here. It existed as a left-edge cue back when the
 	 * back control was a bare chevron that was easy to miss; the control is
 	 * now a bordered 60 x 36 button that announces itself, so the seam was
@@ -1590,8 +1630,20 @@ static void build_panel(lv_obj_t *parent_scr)
 	char sub[56];
 
 	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
-	mk_row(panel, 64, ROW_H, "Brightness", sub, false, show_bright, NULL,
+	mk_row(panel, ROW_TOP, ROW_H, "Brightness", sub, false, show_bright, NULL,
 	       &pct_lbl);
+
+	/*
+	 * Which provider owns the outer ring and the big number.
+	 *
+	 * A tap toggles rather than opening a chooser: there are exactly two
+	 * values, and a sub-screen to pick between two things is more taps and
+	 * more code for the same outcome. The row's subtitle IS the current
+	 * value, so the state and the control are the same object.
+	 */
+	mk_row(panel, ROW_TOP + (ROW_H + ROW_GAP), ROW_H, "Main source",
+	       cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "Codex" : "Claude",
+	       false, toggle_main_src, NULL, &src_lbl);
 
 	/*
 	 * Both versions live here, on the row that is already about versions.
@@ -1609,7 +1661,8 @@ static void build_panel(lv_obj_t *parent_scr)
 	} else {
 		snprintf(sub, sizeof(sub), "Clauge %s", CLAUGE_FW_VERSION);
 	}
-	upd_btn = mk_row(panel, 64 + ROW_H + 8, ROW_H, "Software update", sub,
+	upd_btn = mk_row(panel, ROW_TOP + 2 * (ROW_H + ROW_GAP), ROW_H,
+			 "Software update", sub,
 			 false, upd_cb, NULL, NULL);
 
 	/* The state reads on the title line, where it belongs to the row's
