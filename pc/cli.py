@@ -634,12 +634,25 @@ def _announce():
     print(f"  Creates    {shim_path()}")
     print("             the small script Claude Code runs to hand over the")
     print("             usage figures.")
+    print(f"  Creates    {hook_shim_path()}")
+    print("             a second small script, run when Claude Code starts and")
+    print("             finishes work, so the panel can show whether it is busy.")
+    print("             It records the name of the event and the time, and")
+    print("             nothing else -- no prompt, no tool arguments, no paths.")
     print(f"  Changes    {settings_path()}")
-    print("             the statusLine.command key, and nothing else in the file.")
+    # This list has to stay exactly true. Install asks nothing, so the
+    # disclosure is the only thing standing between us and silently editing a
+    # file the customer owns -- and it said "statusLine.command, and nothing
+    # else in the file" for one release after the hooks key started being
+    # written too. A disclosure that is merely mostly right is worse than none,
+    # because it is the thing people rely on instead of reading the diff.
+    print("             two keys: statusLine.command, and an entry under hooks")
+    print("             for each of six Claude Code events. Nothing else in the")
+    print("             file is touched, and your own hooks are left in place.")
     previous = install_statusline._load(settings_path()).get("statusLine") or {}
     prev_cmd = previous.get("command", "")
     if prev_cmd:
-        print(f"             Your current command is kept and still runs:")
+        print(f"             Your current status line is kept and still runs:")
         print(f"               {prev_cmd}")
     created = backend().creates()
     if created:

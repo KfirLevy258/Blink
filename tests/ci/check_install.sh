@@ -180,6 +180,12 @@ head -n "$(grep -n '^\[1/[0-9]\]' "$WORK/out.txt" | head -1 | cut -d: -f1)" \
 	"$WORK/out.txt" >"$WORK/disclosure.txt" 2>/dev/null || true
 grep -qF "$(native_settings)" "$WORK/disclosure.txt" || fail "disclosure omits settings.json path"
 grep -q "statusLine.command" "$WORK/disclosure.txt" || fail "disclosure omits the key"
+# Every key install writes has to be named. This said "statusLine.command, and
+# nothing else in the file" for a while after the hooks key started being
+# written too -- and install asks nothing, so the disclosure is the only thing
+# between us and silently editing a file the customer owns.
+grep -q "hooks" "$WORK/disclosure.txt" || fail "disclosure omits the hooks key"
+grep -qF "clauge-hook.sh" "$WORK/disclosure.txt" || fail "disclosure omits the hook shim"
 grep -qF "$BINEXE uninstall" "$WORK/disclosure.txt" ||
 	fail "disclosure omits the undo"
 ok "disclosure precedes the first step and names file, key, undo"

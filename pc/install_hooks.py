@@ -82,14 +82,17 @@ def _remove_marker() -> None:
         pass
 
 
-def _ours(command: str, expected: set) -> bool:
+def _ours(command: str, expected: set, marker: set) -> bool:
     """Ours if the marker recorded it, or if it is what we would write now.
 
     Both checks, for the reasons install_statusline._is_ours gives: the marker
     survives a shim path that has since changed, and the computed form
     survives a marker file that was lost with the rest of ~/.clauge.
+
+    The marker is passed in rather than read here: this is called once per
+    hook entry inside two nested loops, and reading the same small file a
+    couple of dozen times per install is a file read for no new information.
     """
-    marker = _read_marker()
     return command in marker or command in expected
 
 
@@ -117,6 +120,7 @@ def install(settings_path: str, shim_path: str) -> str:
     data = _load(settings_path)
 
     expected = {hook_command(shim_path, ev) for ev, _ in HOOK_EVENTS}
+    marker = _read_marker()
     added = 0
     for event, takes_matcher in HOOK_EVENTS:
         command = hook_command(shim_path, event)
@@ -124,7 +128,7 @@ def install(settings_path: str, shim_path: str) -> str:
 
         # Already present, in any group. A reinstall must not stack a second
         # copy that then fires twice per tool call forever.
-        if any(_ours(h.get("command", ""), expected)
+        if any(_ours(h.get("command", ""), expected, marker)
                for group in entries if isinstance(group, dict)
                for h in (group.get("hooks") or [])
                if isinstance(h, dict)):
@@ -159,6 +163,7 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
 
     expected = ({hook_command(shim_path, ev) for ev, _ in HOOK_EVENTS}
                 if shim_path else set())
+    marker = _read_marker()
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         _remove_marker()
@@ -180,7 +185,8 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
                 continue
             kept = [h for h in inner
                     if not (isinstance(h, dict)
-                            and _ours(h.get("command", ""), expected))]
+                            and _ours(h.get("command", ""), expected,
+                                      marker))]
             removed += len(inner) - len(kept)
             if kept:
                 group["hooks"] = kept

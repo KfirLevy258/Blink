@@ -56,7 +56,13 @@ def start_web_bridge(providers, disable_env=WEB_BRIDGE_DISABLE_ENV):
         from pc.webbridge import ClaudeWebProvider, WebBridge
         bridge = WebBridge()
         bridge.start()
-    except OSError as e:
+    except Exception as e:
+        # Exception, not OSError. A held port is the expected failure and is
+        # an OSError, but this runs once at startup before the reconnect loop
+        # exists -- so anything that escapes here kills the daemon outright
+        # rather than costing one optional source. The house rule elsewhere in
+        # this loop (see _self_update_tick) is the same: never take the gauge
+        # down for a subsystem the gauge does not need.
         print(f"[ingest] browser bridge not started ({e}); the CLI and"
               " desktop sources are unaffected", file=sys.stderr)
         return None

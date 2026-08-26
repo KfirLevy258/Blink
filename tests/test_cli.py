@@ -90,6 +90,33 @@ def test_install_discloses_before_it_writes(tmp_path, capsys):
     assert rest, "the disclosure must come before the work"
 
 
+def test_the_disclosure_names_every_file_install_writes(tmp_path, capsys):
+    """It asks nothing, so a disclosure that is merely MOSTLY right is worse
+    than none -- it is the thing people rely on instead of reading the diff.
+
+    This pins the failure that actually happened: the hooks key started being
+    written while the disclosure still said 'statusLine.command, and nothing
+    else in the file'.
+    """
+    _settings(tmp_path, {"statusLine": {"type": "command",
+                                        "command": "sh ~/my-bar.sh"}})
+    cli.main(["install"])
+    import re
+    out = capsys.readouterr().out
+    disclosure = out[:re.search(r"^\[1/\d\]", out, re.M).start()]
+
+    assert "hooks" in disclosure, "disclosure omits the hooks key it writes"
+    assert str(cli.hook_shim_path()) in disclosure, \
+        "disclosure omits the hook shim it creates"
+    assert str(cli.shim_path()) in disclosure
+    assert str(_settings(tmp_path)) in disclosure
+
+    # And everything it named is a thing that now exists or was changed.
+    settings = json.loads(_settings(tmp_path).read_text())
+    assert "hooks" in settings
+    assert os.path.exists(cli.hook_shim_path())
+
+
 def test_install_is_idempotent(tmp_path):
     _settings(tmp_path, {"statusLine": {"type": "command",
                                         "command": "sh ~/my-bar.sh"}})
