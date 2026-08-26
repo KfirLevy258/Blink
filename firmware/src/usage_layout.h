@@ -61,9 +61,9 @@
 
 /* The two arcs. */
 #define GAUGE_CX		80
-#define GAUGE_ARC_Y		36
-#define GAUGE_ARC_SZ		128
-#define GAUGE_PCT_Y		88
+#define GAUGE_ARC_Y		32
+#define GAUGE_ARC_SZ		120
+#define GAUGE_PCT_Y		78
 #define GAUGE_PCT_MAX_W		96	/* "100%" at montserrat_20 */
 
 /*
@@ -89,12 +89,23 @@
  * so it is still carrying its weight rather than going back to one number and
  * a lot of nothing.
  */
-#define GAUGE_P2PCT_Y		112
-#define GAUGE_NAME_Y		168
-#define GAUGE_CD_Y		192
-#define GAUGE_CD_MAX_W		72	/* "6d 22h" per provider */
-/* Side by side when there are two, centred on the gauge when there is one. */
-#define GAUGE_CD_DX		40
+#define GAUGE_P2PCT_Y		102
+#define GAUGE_NAME_Y		158
+/*
+ * The countdowns STACK, one per provider, rather than sitting side by side.
+ *
+ * Side by side, each got 72 px and could hold a duration and nothing else --
+ * so which provider a countdown belonged to had to be inferred from its
+ * colour, and the provider names ended up exiled to a line at the bottom of
+ * the panel that said "inner ring: codex" and helped nobody.
+ *
+ * Stacked, each line has the full width of its gauge, which is enough to write
+ * the provider's name next to its own number. The label is the thing that was
+ * missing; the stack is what made room for it.
+ */
+#define GAUGE_CD_Y		180	/* first line: the primary provider */
+#define GAUGE_CD_STEP		18	/* to the second line, when there is one */
+#define GAUGE_CD_MAX_W		150	/* "claude  6d 22h" */
 
 /*
  * A second provider, as an inner ring inside the same gauge.
@@ -124,7 +135,7 @@
  * divider.
  */
 #define GAUGE_ARC_W		12
-#define GAUGE_ARC2_SZ		100
+#define GAUGE_ARC2_SZ		92
 #define GAUGE_ARC2_W		6
 #define GAUGE_ARC2_Y		(GAUGE_ARC_Y + (GAUGE_ARC_SZ - GAUGE_ARC2_SZ) / 2)
 #define GAUGE_HOLLOW_W		(GAUGE_ARC2_SZ - 2 * GAUGE_ARC2_W)

@@ -119,6 +119,7 @@ int main(int argc, char **argv)
 		usage_view_set_clock(9, 12);
 		break;
 	case 4:	/* nothing known: every optional field absent */
+		usage_view_set_provider1("");
 		usage_view_update(-1.0, -1, -1.0, -1);
 		usage_view_set_activity(USAGE_ACTIVITY_NONE);
 		usage_view_set_sessions(1, 0);

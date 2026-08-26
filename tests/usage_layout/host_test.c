@@ -88,29 +88,27 @@ int main(void)
 	struct box name_r = top_mid("WEEKLY caption", GAUGE_CX, GAUGE_NAME_Y,
 				    110, FONT_LINE_H);
 
-	/* Four countdowns when a second provider reports: two per gauge,
-	 * pushed apart by GAUGE_CD_DX. */
-	struct box cd_l = top_mid("countdown L (primary)",
-				  -GAUGE_CX - GAUGE_CD_DX, GAUGE_CD_Y,
-				  GAUGE_CD_MAX_W, FONT_LINE_H);
-	struct box cd_l2 = top_mid("countdown L (second)",
-				   -GAUGE_CX + GAUGE_CD_DX, GAUGE_CD_Y,
+	/* Two countdowns per gauge when a second provider reports, STACKED --
+	 * each line has the gauge's full width so it can carry the provider's
+	 * name beside its own number. */
+	struct box cd_l = top_mid("countdown L (primary)", -GAUGE_CX,
+				  GAUGE_CD_Y, GAUGE_CD_MAX_W, FONT_LINE_H);
+	struct box cd_l2 = top_mid("countdown L (second)", -GAUGE_CX,
+				   GAUGE_CD_Y + GAUGE_CD_STEP,
 				   GAUGE_CD_MAX_W, FONT_LINE_H);
-	struct box cd_r = top_mid("countdown R (primary)",
-				  GAUGE_CX - GAUGE_CD_DX, GAUGE_CD_Y,
-				  GAUGE_CD_MAX_W, FONT_LINE_H);
-	struct box cd_r2 = top_mid("countdown R (second)",
-				   GAUGE_CX + GAUGE_CD_DX, GAUGE_CD_Y,
+	struct box cd_r = top_mid("countdown R (primary)", GAUGE_CX,
+				  GAUGE_CD_Y, GAUGE_CD_MAX_W, FONT_LINE_H);
+	struct box cd_r2 = top_mid("countdown R (second)", GAUGE_CX,
+				   GAUGE_CD_Y + GAUGE_CD_STEP,
 				   GAUGE_CD_MAX_W, FONT_LINE_H);
 
 	/* The bottom line, shared between the counts and the hint. */
 	struct box hint = bottom_mid("hint", HINT_BOTTOM_OFF, SCR_W,
 				     FONT_LINE_H);
-	struct box sess = bottom_mid("session readout", SESS_BOTTOM_OFF,
-				     SESS_MAX_W, FONT_LINE_H);
+
 
 	struct box all[] = { arc_l, arc_r, pct_l, p2_l, name_l, name_r,
-			     cd_l, cd_l2, cd_r, cd_r2, hint, sess };
+			     cd_l, cd_l2, cd_r, cd_r2, hint };
 
 	for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		char msg[64];
@@ -138,28 +136,30 @@ int main(void)
 	CHECK(!overlaps(pct_l, p2_l),
 	      "the two percentages in the hollow do not overlap");
 
-	/* --- four countdowns on one line --- */
-	CHECK(!overlaps(cd_l, cd_l2), "the left gauge's two countdowns clear");
-	CHECK(!overlaps(cd_r, cd_r2), "the right gauge's two countdowns clear");
-	CHECK(cd_l2.x1 <= cd_r.x0,
+	/* --- two stacked countdowns per gauge --- */
+	CHECK(!overlaps(cd_l, cd_l2), "the left gauge's countdowns stack clear");
+	CHECK(!overlaps(cd_r, cd_r2), "the right gauge's countdowns stack clear");
+	CHECK(cd_l.x1 <= cd_r.x0,
 	      "the two gauges' countdowns do not meet in the middle");
+	CHECK(cd_l2.x1 <= cd_r2.x0,
+	      "nor do their second lines");
+	CHECK(cd_l2.y0 >= cd_l.y1 - 2,
+	      "the second countdown sits below the first, not on it");
 	CHECK(cd_l.y0 >= GAUGE_ARC_Y + GAUGE_ARC_SZ,
 	      "countdowns sit below the rings, not inside them");
 	CHECK(cd_l.y0 >= name_l.y1, "countdowns sit below the caption");
 	CHECK(!overlaps(cd_l, hint), "countdowns clear the bottom line");
 	CHECK(!overlaps(cd_r2, hint), "countdowns clear the bottom line");
 
-	/* --- the bottom line --- */
-	/* The counts and the hint SHARE this line by design -- the hint wins
-	 * when it has something to say -- so they are expected to coincide,
-	 * and the code, not the geometry, keeps them apart. */
-	CHECK(sess.y0 == hint.y0, "counts and hint share one line, as intended");
+	/* --- the bottom line is the hint's alone now --- */
+	CHECK(!overlaps(cd_l2, hint),
+	      "the second countdown clears the hint line below it");
 
 	/* --- the text budgets are real --- */
 	CHECK(BUDGET_FITS(GAUGE_P2_MAX_W, "100%"),
 	      "GAUGE_P2_MAX_W is sized for \"100%\", not guessed");
-	CHECK(BUDGET_FITS(GAUGE_CD_MAX_W, "00m 00s"),
-	      "GAUGE_CD_MAX_W is sized for a countdown, not guessed");
+	CHECK(BUDGET_FITS(GAUGE_CD_MAX_W, "claude  00m 00s"),
+	      "GAUGE_CD_MAX_W is sized for a named countdown, not guessed");
 
 	/* --- the font assumption these clearances rest on --- */
 	CHECK(FONT_LINE_H == 16,

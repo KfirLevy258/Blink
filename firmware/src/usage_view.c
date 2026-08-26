@@ -102,7 +102,6 @@ static enum usage_status data_health = USAGE_STATUS_DISCONNECTED;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
 static lv_obj_t *clock_lbl;
-static lv_obj_t *sess_lbl;	/* "3s 7a" -- open sessions and live agents */
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
 static char provider1_tag[12];	/* whichever provider the daemon made primary */
 /* Defined below; set_provider2 has to call it, because whether a second
@@ -324,9 +323,9 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_obj_set_style_text_color(g->p2, COL_DIM, 0);
 	lv_obj_align(g->p2, LV_ALIGN_TOP_MID, cx, GAUGE_P2PCT_Y);
 
-	/* Both countdowns sit under the caption, each in its provider's
-	 * colour. Centred on the gauge while there is one; pushed apart into
-	 * a pair the moment a second provider appears. */
+	/* Both countdowns sit under the caption, stacked, each naming its own
+	 * provider. Centred on the gauge whether there is one or two -- the
+	 * second simply appears on the line below. */
 	g->resets2_in_s = -1;
 	g->countdown = lv_label_create(parent);
 	lv_label_set_text(g->countdown, "--");
@@ -340,32 +339,36 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_obj_set_style_text_color(g->countdown2, COL_CODEX, 0);
 	lv_obj_set_width(g->countdown2, GAUGE_CD_MAX_W);
 	lv_obj_set_style_text_align(g->countdown2, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(g->countdown2, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
+	lv_obj_align(g->countdown2, LV_ALIGN_TOP_MID, cx,
+		     GAUGE_CD_Y + GAUGE_CD_STEP);
 	lv_obj_add_flag(g->countdown2, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void render_countdown(struct gauge *g)
 {
 	char buf[FMT_COUNTDOWN_MAX];
+	char line[48];
 	bool paired = g->countdown2 &&
 		      !lv_obj_has_flag(g->countdown2, LV_OBJ_FLAG_HIDDEN);
-	lv_coord_t cx = (g == &weekly) ? GAUGE_CX : -GAUGE_CX;
 
 	fmt_countdown(g->resets_in_s, buf, sizeof(buf));
-	lv_label_set_text(g->countdown, buf);
-
-	/* One provider: centred under its gauge. Two: pushed apart so each
-	 * countdown sits under nothing but its own colour. Re-aligned on every
-	 * render rather than once at build time, because the second provider
-	 * can arrive and leave while the board is running. */
-	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID,
-		     paired ? cx - GAUGE_CD_DX : cx, GAUGE_CD_Y);
+	/*
+	 * The provider's name rides with its own number. That is the whole
+	 * point of stacking these: a bare duration had to be matched to a
+	 * provider by colour, which is why the names ended up on a line at the
+	 * bottom of the panel describing rings instead of numbers.
+	 */
+	if (provider1_tag[0]) {
+		snprintf(line, sizeof(line), "%s  %s", provider1_tag, buf);
+	} else {
+		snprintf(line, sizeof(line), "%s", buf);
+	}
+	lv_label_set_text(g->countdown, line);
 
 	if (paired) {
 		fmt_countdown(g->resets2_in_s, buf, sizeof(buf));
-		lv_label_set_text(g->countdown2, buf);
-		lv_obj_align(g->countdown2, LV_ALIGN_TOP_MID, cx + GAUGE_CD_DX,
-			     GAUGE_CD_Y);
+		snprintf(line, sizeof(line), "%s  %s", provider2_tag, buf);
+		lv_label_set_text(g->countdown2, line);
 	}
 }
 
@@ -469,6 +472,7 @@ static void peek_scrim_cb(lv_event_t *e)
 }
 #endif /* HAVE_PER_MODEL */
 
+
 static lv_obj_t *gauge_scr;
 
 void usage_view_deinit(void)
@@ -482,7 +486,6 @@ void usage_view_deinit(void)
 	 * because the setters below are called from the protocol thread and
 	 * would otherwise write through a freed pointer between the delete and
 	 * the next init. */
-	sess_lbl = NULL;
 	session.arc2 = NULL;
 	weekly.arc2 = NULL;
 	session.countdown2 = NULL;
@@ -560,15 +563,6 @@ void usage_view_init(void)
 	/* Which model is in use, directly under the brand. Blank until the
 	 * daemon says -- an empty line reads as "nothing to report", where a
 	 * placeholder would read as a model actually named that. */
-	/* The bottom line: session and agent counts, and the second provider's
-	 * name when there is one. Shared with the hint, which outranks both --
-	 * the hint is empty when all is well, which is exactly when these are
-	 * worth reading. */
-	sess_lbl = lv_label_create(scr);
-	lv_label_set_text(sess_lbl, "");
-	lv_obj_set_style_text_color(sess_lbl, COL_DIM, 0);
-	lv_obj_align(sess_lbl, LV_ALIGN_BOTTOM_MID, 0, -SESS_BOTTOM_OFF);
-
 	build_gauge(&session, scr, -GAUGE_CX, "SESSION 5h");
 	build_gauge(&weekly, scr, GAUGE_CX, "WEEKLY 7d");
 
@@ -942,32 +936,16 @@ void usage_view_set_activity(enum usage_activity a)
 	refresh_dot();
 }
 
+/*
+ * Session and agent counts are no longer drawn.
+ *
+ * They shared the bottom line with the second provider's name -- "inner ring:
+ * codex   3 sessions" -- which described the panel's own construction rather
+ * than anything about the work. The provider names have a better home now,
+ * beside the numbers they belong to. The counts still arrive on the wire
+ * (n_sess, n_agents), so nothing has to be re-plumbed to bring them back.
+ */
 static int sess_n, agent_n;
-
-static void refresh_bottom_line(void)
-{
-	char buf[48];
-
-	if (!sess_lbl) {
-		return;
-	}
-	if (provider2_tag[0] && sess_n > 1) {
-		snprintf(buf, sizeof(buf), "inner ring: %s   %d sessions",
-			 provider2_tag, sess_n);
-	} else if (provider2_tag[0]) {
-		snprintf(buf, sizeof(buf), "inner ring: %s", provider2_tag);
-	} else if (sess_n > 1 && agent_n > 0) {
-		snprintf(buf, sizeof(buf), "%d sessions  %d agents", sess_n,
-			 agent_n);
-	} else if (sess_n > 1) {
-		snprintf(buf, sizeof(buf), "%d sessions", sess_n);
-	} else if (agent_n > 0) {
-		snprintf(buf, sizeof(buf), "%d agents", agent_n);
-	} else {
-		buf[0] = '\0';
-	}
-	lv_label_set_text(sess_lbl, buf);
-}
 
 static void set_ring2(struct gauge *g, const char *tag, double pct)
 {
@@ -1049,7 +1027,6 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 		render_countdown(&session);
 		render_countdown(&weekly);
 		refresh_provider1();	/* back to neutral: nothing to tell apart */
-		refresh_bottom_line();
 		return;
 	}
 	snprintf(provider2_tag, sizeof(provider2_tag), "%s", tag);
@@ -1070,16 +1047,15 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 	lv_obj_clear_flag(weekly.countdown2, LV_OBJ_FLAG_HIDDEN);
 	render_countdown(&session);
 	render_countdown(&weekly);
-	refresh_bottom_line();
 }
 
 void usage_view_set_sessions(int n_sessions, int n_agents)
 {
-	/* Clamped at 9 rather than widened: past nine the exact number stops
-	 * changing what anyone does about it. */
-	sess_n = n_sessions > 9 ? 9 : n_sessions;
-	agent_n = n_agents > 9 ? 9 : n_agents;
-	refresh_bottom_line();
+	/* Recorded, not drawn -- see above. */
+	sess_n = n_sessions;
+	agent_n = n_agents;
+	(void)sess_n;
+	(void)agent_n;
 }
 
 
