@@ -145,6 +145,9 @@
  * indicator's end, so it is styled rather than removed.
  */
 #define GAUGE_BALL_PAD		2
+/* A ring of panel ground around each ball, so it separates from the arc it
+ * rides regardless of that arc's colour. */
+#define GAUGE_BALL_RING		2
 #define GAUGE_P2_MAX_W		44	/* "100%" -- the tag is named once, below */
 
 /* Context row, in the band between the countdowns and the hint. */

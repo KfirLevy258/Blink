@@ -104,6 +104,10 @@ static lv_obj_t *age_lbl;
 static lv_obj_t *clock_lbl;
 static lv_obj_t *sess_lbl;	/* "3s 7a" -- open sessions and live agents */
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
+static char provider1_tag[12];	/* whichever provider the daemon made primary */
+/* Defined below; set_provider2 has to call it, because whether a second
+ * provider exists is what decides if the FIRST one is coloured at all. */
+static void refresh_provider1(void);
 static char provider2_tag[12];	/* "" when there is only one provider */
 static lv_obj_t *overlay;	/* full-screen "no data" takeover */
 static lv_obj_t *wait_big;	/* the takeover's CONNECTING title */
@@ -249,8 +253,18 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	 * arc stays unclickable -- this is still a readout. */
 	lv_obj_clear_flag(g->arc, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_set_style_pad_all(g->arc, GAUGE_BALL_PAD, LV_PART_KNOB);
-	lv_obj_set_style_bg_color(g->arc, COL_CLAUDE, LV_PART_KNOB);
+	lv_obj_set_style_bg_color(g->arc, COL_TEXT, LV_PART_KNOB);
 	lv_obj_set_style_bg_opa(g->arc, LV_OPA_COVER, LV_PART_KNOB);
+	/*
+	 * A ring of the panel's own ground, so the ball separates from the arc
+	 * it sits on whatever colour that arc happens to be. Without it the
+	 * ball measured 1.24:1 against a red arc and 1.07:1 against a green one
+	 * -- it vanished into the track at exactly the moments the track was
+	 * saying something.
+	 */
+	lv_obj_set_style_border_color(g->arc, COL_BG, LV_PART_KNOB);
+	lv_obj_set_style_border_width(g->arc, GAUGE_BALL_RING, LV_PART_KNOB);
+	lv_obj_set_style_border_opa(g->arc, LV_OPA_COVER, LV_PART_KNOB);
 	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_MAIN);
 	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_INDICATOR);
 	lv_obj_set_style_arc_color(g->arc, COL_TRACK, LV_PART_MAIN);
@@ -269,6 +283,9 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_obj_set_style_pad_all(g->arc2, GAUGE_BALL_PAD, LV_PART_KNOB);
 	lv_obj_set_style_bg_color(g->arc2, COL_CODEX, LV_PART_KNOB);
 	lv_obj_set_style_bg_opa(g->arc2, LV_OPA_COVER, LV_PART_KNOB);
+	lv_obj_set_style_border_color(g->arc2, COL_BG, LV_PART_KNOB);
+	lv_obj_set_style_border_width(g->arc2, GAUGE_BALL_RING, LV_PART_KNOB);
+	lv_obj_set_style_border_opa(g->arc2, LV_OPA_COVER, LV_PART_KNOB);
 	lv_obj_set_style_arc_width(g->arc2, GAUGE_ARC2_W, LV_PART_MAIN);
 	lv_obj_set_style_arc_width(g->arc2, GAUGE_ARC2_W, LV_PART_INDICATOR);
 	lv_obj_set_style_arc_color(g->arc2, COL_TRACK, LV_PART_MAIN);
@@ -975,20 +992,42 @@ static void set_ring2(struct gauge *g, const char *tag, double pct)
 	lv_label_set_text(g->p2, buf);
 }
 
-void usage_view_set_provider1(const char *tag)
+/*
+ * Repaint the primary provider's ball and countdown.
+ *
+ * COLOUR APPEARS ONLY WHERE IT SEPARATES TWO THINGS THAT BOTH EXIST. On the
+ * default screen there is one provider, so "this is Claude" distinguishes it
+ * from nothing -- and spending a warm hue on it puts an element that means
+ * nothing directly beside the amber and red that mean a great deal. The eye
+ * reads it as part of the severity story, because on that screen there is no
+ * other story for it to belong to.
+ *
+ * So with one provider these go neutral, and severity is the only coloured
+ * thing on the panel. The identity hue appears the moment a second provider
+ * does -- which is the moment it starts carrying information.
+ */
+static void refresh_provider1(void)
 {
+	bool paired = provider2_tag[0] != '\0';
+	lv_color_t ball = paired ? provider_color(provider1_tag) : COL_TEXT;
+	lv_color_t text = paired ? provider_color(provider1_tag) : COL_DIM;
+
 	if (!session.arc) {
 		return;
 	}
+	lv_obj_set_style_bg_color(session.arc, ball, LV_PART_KNOB);
+	lv_obj_set_style_bg_color(weekly.arc, ball, LV_PART_KNOB);
+	lv_obj_set_style_text_color(session.countdown, text, 0);
+	lv_obj_set_style_text_color(weekly.countdown, text, 0);
+}
+
+void usage_view_set_provider1(const char *tag)
+{
 	/* The outer ring is whichever provider the daemon made primary, which
-	 * on a Codex-only machine is Codex -- so the colour follows the NAME,
+	 * on a codex-only machine is codex -- so the colour follows the NAME,
 	 * not the ring position. */
-	lv_obj_set_style_bg_color(session.arc, provider_color(tag),
-				  LV_PART_KNOB);
-	lv_obj_set_style_bg_color(weekly.arc, provider_color(tag),
-				  LV_PART_KNOB);
-	lv_obj_set_style_text_color(session.countdown, provider_color(tag), 0);
-	lv_obj_set_style_text_color(weekly.countdown, provider_color(tag), 0);
+	snprintf(provider1_tag, sizeof(provider1_tag), "%s", tag ? tag : "");
+	refresh_provider1();
 }
 
 void usage_view_set_provider2(const char *tag, double session_pct,
@@ -1009,6 +1048,7 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 		lv_obj_add_flag(weekly.countdown2, LV_OBJ_FLAG_HIDDEN);
 		render_countdown(&session);
 		render_countdown(&weekly);
+		refresh_provider1();	/* back to neutral: nothing to tell apart */
 		refresh_bottom_line();
 		return;
 	}
@@ -1023,6 +1063,7 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 	lv_obj_set_style_text_color(session.countdown2, provider_color(tag), 0);
 	lv_obj_set_style_text_color(weekly.countdown2, provider_color(tag), 0);
 
+	refresh_provider1();	/* a second provider exists, so identity now counts */
 	session.resets2_in_s = session_resets_in_s;
 	weekly.resets2_in_s = weekly_resets_in_s;
 	lv_obj_clear_flag(session.countdown2, LV_OBJ_FLAG_HIDDEN);
