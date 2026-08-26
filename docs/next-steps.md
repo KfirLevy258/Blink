@@ -27,17 +27,24 @@ nothing and the panel falls back to the CLI and desktop sources. That is the
 designed failure, and it is also indistinguishable from the extension being
 broken.
 
-### Step 1 — find out what claude.ai actually sends (~15 min, gates everything)
+### Step 1 — find out what claude.ai actually sends (~2 min, gates everything)
 
-Nothing below can be planned properly until this is done.
+**This is now a one-command answer.** The extension reports what it observed
+every 30 seconds whether or not it found anything, and `clauge status` prints
+the verdict — no DevTools, no temporary logging.
 
 1. `chrome://extensions` → Developer mode → Load unpacked → `extension/`.
-2. Click the extension's **service worker** link to open its DevTools.
-3. Temporarily add, at the top of the `onHeadersReceived` listener:
-   ```js
-   console.log(details.url, (details.responseHeaders || []).map(h => h.name).join(","));
-   ```
-4. Use claude.ai normally for a few turns. Read the logged header names.
+2. Use claude.ai for a turn or two.
+3. `clauge status`, and read the `Browser` line.
+
+It says one of: not seen; running but no responses carried rate-limit headers;
+headers seen but none usable; or working, with a count.
+
+(An earlier version of this plan asked for a DevTools session. That was
+replaced because the thing being diagnosed — a silent extension — is exactly
+the thing a user cannot tell apart from a broken one, and making them open a
+service-worker console to find out is a poor answer to a question the software
+can answer itself.)
 
 Three possible outcomes, and they lead to different work:
 

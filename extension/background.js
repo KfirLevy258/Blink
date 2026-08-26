@@ -22,6 +22,17 @@
 // back to the other sources -- rather than a guess.
 
 const ENDPOINT = "http://127.0.0.1:9877/usage";
+const DIAG_ENDPOINT = "http://127.0.0.1:9877/diag";
+
+// How often to tell the daemon what we can see, whether or not we found
+// anything. This is the whole answer to "is the extension working?", and it
+// has to be reportable WITHOUT finding usage numbers -- a silent extension
+// that matched nothing looks exactly like one that is not installed.
+const DIAG_INTERVAL_MS = 30000;
+
+let responsesSeen = 0;      // responses from claude.ai we looked at
+let headersMatched = 0;     // ...of which carried something rate-limit shaped
+let lastDiagAt = 0;
 
 // Never report more often than this. A busy tab fires many requests per turn
 // and the panel updates once a minute; posting per request would be pure noise.
@@ -123,6 +134,26 @@ function buildPayload(acc) {
   return payload;
 }
 
+// Report what we have observed, found or not. Deliberately carries no page
+// data of any kind: two counters, so the daemon can say "the extension is
+// running and claude.ai sends nothing that looks like a rate limit" instead
+// of the user having to open a service-worker console to find that out.
+async function reportDiagnostics() {
+  const now = Date.now();
+  if (now - lastDiagAt < DIAG_INTERVAL_MS) return;
+  lastDiagAt = now;
+  try {
+    await fetch(DIAG_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ responses: responsesSeen, matched: headersMatched }),
+    });
+  } catch (e) {
+    // The daemon is not running. Ordinary, and not worth a console error on
+    // every response.
+  }
+}
+
 async function report(payload) {
   // Deduplicate before throttling. Identical numbers are worth nothing to the
   // panel however much time has passed, and the daemon treats a repeat as a
@@ -152,10 +183,15 @@ async function report(payload) {
 
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
+    responsesSeen++;
     const acc = readHeaders(details.responseHeaders);
-    if (!acc) return;
-    const payload = buildPayload(acc);
-    if (payload) report(payload);
+    if (acc) {
+      headersMatched++;
+      const payload = buildPayload(acc);
+      if (payload) report(payload);
+    }
+    // Always, matched or not. The absence of a match is the finding.
+    reportDiagnostics();
   },
   { urls: ["https://claude.ai/*"] },
   ["responseHeaders"]

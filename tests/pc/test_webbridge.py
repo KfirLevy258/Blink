@@ -159,3 +159,74 @@ def test_the_web_source_merges_like_any_other():
     assert m.weekly_pct == 88.0            # web is fresher
     assert m.session_pct == 10.0           # only the CLI has it
     assert m.weekly_resets_at == NOW + 900  # only the CLI has it
+
+
+# --- diagnostics: the answer to "is the extension working?" ---------------
+#
+# The one thing nobody could verify without a browser is whether claude.ai
+# emits rate-limit headers at all. These pin the mechanism that lets the USER
+# answer it in one command instead of a DevTools session.
+
+
+@pytest.fixture
+def diag_bridge(tmp_path):
+    b = webbridge.WebBridge(port=0, now=lambda: NOW,
+                            diag_path=str(tmp_path / "webbridge.json"))
+    b.start()
+    yield b
+    b.stop()
+
+
+def test_a_diagnostic_is_accepted(diag_bridge):
+    assert post(diag_bridge, {"responses": 42, "matched": 0},
+                path="/diag") == 204
+
+
+def test_a_diagnostic_never_puts_a_number_on_the_panel(diag_bridge):
+    """It exists to report the ABSENCE of numbers. If it could reach the slot
+    it could show one, which would be exactly backwards."""
+    post(diag_bridge, {"responses": 42, "matched": 0, "session_pct": 99},
+         path="/diag")
+    assert diag_bridge.slot.get() is None
+
+
+def test_the_crumb_records_what_the_extension_saw(diag_bridge, tmp_path):
+    post(diag_bridge, {"responses": 42, "matched": 3}, path="/diag")
+    d = webbridge.read_diag(str(tmp_path / "webbridge.json"))
+    assert d["responses"] == 42
+    assert d["matched"] == 3
+
+
+def test_usage_reports_are_counted_separately_from_matches(diag_bridge,
+                                                           tmp_path):
+    """matched > 0 with usage_reports == 0 is a real and distinct situation:
+    headers exist but do not yield a usable percentage."""
+    post(diag_bridge, {"session_pct": 10})
+    d = webbridge.read_diag(str(tmp_path / "webbridge.json"))
+    assert d["usage_reports"] == 1
+    assert d["matched"] == 0
+
+
+def test_a_missing_crumb_reads_as_none(tmp_path):
+    assert webbridge.read_diag(str(tmp_path / "nope.json")) is None
+
+
+def test_a_corrupt_crumb_reads_as_none(tmp_path):
+    p = tmp_path / "webbridge.json"
+    p.write_text("{not json")
+    assert webbridge.read_diag(str(p)) is None
+
+
+def test_a_diagnostic_from_a_foreign_origin_is_refused(diag_bridge):
+    assert post(diag_bridge, {"responses": 1}, path="/diag",
+                origin="https://evil.example") == 403
+
+
+def test_the_crumb_is_not_rewritten_on_every_post(tmp_path):
+    """A busy tab must not turn this into a write per response."""
+    writes = []
+    d = webbridge._Diag(path=str(tmp_path / "w.json"), now=lambda: NOW)
+    d._write = lambda snap: writes.append(snap)
+    for _ in range(20):
+        d.record(responses=1, matched=0)
+    assert len(writes) == 1, "throttling did not hold"

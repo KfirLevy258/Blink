@@ -899,6 +899,30 @@ def cmd_status(_args) -> int:
     except install_statusline.SettingsUnreadable:
         print("Activity    unknown -- settings.json does not parse")
 
+    # Whether the browser extension is installed, and -- the question nobody
+    # could answer from a laptop -- whether claude.ai actually emits anything
+    # shaped like a rate limit. Three numbers, read in order, say which of the
+    # three possible situations this machine is in.
+    from pc import webbridge
+    diag = webbridge.read_diag()
+    if diag is None:
+        print("Browser     extension not seen (optional; see extension/)")
+    else:
+        age = int(time.time() - float(diag.get("t") or 0))
+        seen = int(diag.get("responses") or 0)
+        matched = int(diag.get("matched") or 0)
+        reports = int(diag.get("usage_reports") or 0)
+        if age > 3600:
+            print(f"Browser     extension last seen {age // 60} min ago")
+        elif reports:
+            print(f"Browser     extension working ({reports} usage reports)")
+        elif matched:
+            print(f"Browser     extension running, {matched} rate-limit headers"
+                  " seen but none usable -- please report this")
+        else:
+            print(f"Browser     extension running, but none of {seen} responses"
+                  " carried rate-limit headers")
+
     # The most useful support answer: is fresh data actually arriving?
     payload = os.path.join(clauge_home(), "statusline.json")
     if os.path.exists(payload):

@@ -150,28 +150,74 @@ to write a line the board could not receive, and
 the limit. A realistic message today is ~300 bytes. **Every field you add
 spends this budget.**
 
-## 6. Execution state
+## 6. Execution state, sessions and agents
 
 Derived from events Claude Code already announces, not from process
 inspection:
 
 | event | state |
 |---|---|
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStop`, `PreCompact` | `running` |
-| `Notification` | `waiting` |
+| `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStop`, `PreCompact` | `running` |
+| `Notification`, `PermissionRequest` | `waiting` |
 | `Stop`, `SessionEnd` | `idle` |
+| `StopFailure` | `failed` |
 | a `running` event, then silence past the threshold | `stuck` |
 | anything unrecognised, or an hour of silence | `""` (dark) |
 
-The hook shim records **an event name and a clock reading, and nothing else**.
-Not the prompt, not the tool arguments, not the transcript path, not the
-session id. The metadata-only promise is structural here rather than a matter
-of restraint: there is nothing captured to leak.
+`failed` earns its own state because `StopFailure` runs instead of `Stop` when
+a turn dies on an API error and carries `error: "rate_limit"` among its causes.
+On a usage gauge that is the headline, not a detail — which is also why
+`worst_of()` ranks it above `stuck`.
 
 `stuck` fires at 180 s, not the specified 60 s. A test suite, an npm install, a
 docker build and a slow model response all routinely pass a minute while
 healthy, and an alert that cries wolf on every build is one its owner learns to
 ignore before the day it is right.
+
+### On disk
+
+```
+~/.clauge/state/<session_id>.state      one JSON slot, newest event wins
+~/.clauge/state/<session_id>/<agent_id> one empty file per live agent
+```
+
+One file per **session** because a single global slot silently misreports the
+moment a second terminal exists — two sessions overwrite each other and the
+panel confidently shows the wrong one.
+
+One file per **agent** because that makes the count exact without a lock. Two
+agents starting at once cannot race on a shared counter, and `SubagentStop`
+carries `agent_id`, so a stop removes precisely the agent that stopped rather
+than decrementing and hoping. Both are swept by mtime after an hour, for the
+sessions that die without `SessionEnd` firing.
+
+### What the shim captures
+
+An event name, a timestamp, a session id and an agent id. **Nothing else** —
+no prompt, no tool arguments, no transcript path, no cwd, no message text.
+`check_hook_shim.sh` asserts the other payload fields never reach disk.
+
+The ids are a real widening. The first version captured an event name and a
+timestamp, which made the metadata-only promise *structural* — there was
+nothing there to leak. It is now a policy, and the reason for accepting that is
+that the single slot was wrong the moment a second session existed.
+
+The session id becomes a **filename**, which makes it the only attacker-shaped
+input on a path in this product. The character class in the shim's extraction
+pattern is the sanitiser rather than a separate validation step that can be
+forgotten or reordered: a value containing a slash or a quote simply fails to
+match and falls through to `unknown`. Traversal and injection are both pinned
+in CI under sh, bash and dash.
+
+### Counts, not a list
+
+`n_sess`, `n_run`, `n_wait`, `n_stuck`, `n_agents` — and zeros are omitted.
+A per-session array would blow the 512-byte budget at around four sessions,
+taking the panel dark with no error on exactly the busy machine most likely to
+have four. A busy machine measures 351 bytes; a typical one, 297.
+
+The scalar `state` stays, computed as worst-of, so firmware that predates the
+counts keeps working unchanged.
 
 ## 7. Self-healing
 
