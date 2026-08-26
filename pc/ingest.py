@@ -19,6 +19,7 @@ from pc import normalizer, protocol
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_state import ClaudeStateProvider
+from pc.providers.codex_cli import CodexCliProvider
 
 
 # Set to disable the localhost listener the browser extension reports to.
@@ -33,7 +34,7 @@ def default_providers():
     which one a tie resolves toward.
     """
     return [ClaudeCliProvider(), ClaudeDesktopProvider(),
-            ClaudeStateProvider()]
+            ClaudeStateProvider(), CodexCliProvider()]
 
 
 def start_web_bridge(providers, disable_env=WEB_BRIDGE_DISABLE_ENV):

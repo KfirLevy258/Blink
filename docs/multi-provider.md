@@ -72,7 +72,8 @@ decision below rests on this being honest.
 |---|---|---|---|---|---|---|
 | CLI status line | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | Desktop cache | ✓ | ✓ | **✗** | — | — | — |
-| Browser extension | ✓ | ✓ | ~ | — | — | — |
+| Codex rollout log | ✓ | ✓ | ✓ | — | — | — |
+| Browser extension | **✗** | **✗** | **✗** | — | — | — |
 | Hook state file | — | — | — | — | — | ✓ |
 
 No source is authoritative for everything. That table is the entire argument
@@ -88,6 +89,19 @@ from the specification:
   reading in history presents as current.
 - **The desktop cache carries no reset timestamps.** Not "sometimes missing" —
   never present.
+- **Codex's `resets_at` is SECONDS,** in the same daemon that has to read the
+  desktop cache's milliseconds. Both are range-checked at the parser, which is
+  the only place the unit is known.
+- **`primary` / `secondary` in Codex's `rate_limits` are positions, not
+  windows.** They are matched by their declared `window_minutes` (300 → the
+  five-hour dial, 10080 → the seven-day one) and only fall back to position
+  when that field is absent. Trusting the order would swap the two dials
+  silently, which is the failure this whole document is written against.
+- **The browser extension reports nothing, and that is a measurement, not a
+  bug.** Driven against the real site on 2026-08-27 it observed 178 responses
+  from `https://claude.ai/*` — a full message turn included — and none of them
+  carried a rate-limit header of any spelling. It says so through
+  `clauge status` rather than going quiet. See `docs/next-steps.md` section A.
 
 ## 4. The merge rule
 
@@ -334,7 +348,14 @@ update" rather than in milliseconds.
    not be able to stop a daemon whose job is keeping a board fed.
 4. Return `-1.0` / `None` / `""` for anything you do not know. Do not guess,
    and do not return `0.0`.
-5. Append it to `default_providers()`.
+5. Append it to `default_providers()`. **This step is not optional and it is
+   the one that gets forgotten.** `IngestionBus.set_preferred()` refuses a
+   provider that is not in that list, so a board whose settings screen offers
+   "Codex" will announce that choice at every boot and have it declined, and
+   `page_count()` on the firmware stays at 1 — a second page that exists in
+   the firmware, in the protocol and on the settings screen, and never once
+   appears. That was the state of Codex support until 2026-08-27, when
+   `pc/providers/codex_cli.py` gave it something to report.
 
 Nothing else changes — not the normalizer, not the protocol, not the firmware.
 That is the property the whole structure exists to have.

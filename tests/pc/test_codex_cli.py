@@ -1,0 +1,266 @@
+"""What the Codex rollout reader must get right about a file it does not own.
+
+The shape here was taken from a real rollout file (2026-08-27), and the tests
+that matter are not the happy path -- they are the ways this source can be
+confidently wrong rather than silent: the two windows swapped, a millisecond
+epoch read as seconds, a percentage that has stopped meaning a percentage.
+"""
+import json
+import os
+
+import pytest
+
+from pc.providers import base
+from pc.providers import codex_cli
+
+
+NOW = 1_787_800_000.0
+
+
+def rate_limits(s_pct=12.0, w_pct=34.0, s_reset=NOW + 3600,
+                w_reset=NOW + 86400, s_min=300, w_min=10080):
+    """A `rate_limits` object shaped like the one Codex actually writes."""
+    primary = {"used_percent": s_pct, "resets_at": s_reset}
+    secondary = {"used_percent": w_pct, "resets_at": w_reset}
+    if s_min is not None:
+        primary["window_minutes"] = s_min
+    if w_min is not None:
+        secondary["window_minutes"] = w_min
+    return {"limit_id": "codex", "primary": primary, "secondary": secondary}
+
+
+def token_count_line(limits, stamp="2026-08-27T03:00:00.000Z"):
+    return json.dumps({
+        "timestamp": stamp,
+        "type": "event_msg",
+        "payload": {"type": "token_count",
+                    "info": {"model_context_window": 258400},
+                    "rate_limits": limits},
+    })
+
+
+def write_rollout(root, day="2026/08/27", name="rollout-a.jsonl", lines=()):
+    path = os.path.join(root, *day.split("/"), name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        for line in lines:
+            f.write(line + "\n")
+    return path
+
+
+def poll(root, now=NOW):
+    return codex_cli.CodexCliProvider(root=str(root)).poll(now)
+
+
+# --- the happy path, once ---------------------------------------------------
+
+
+def test_a_real_shaped_rollout_yields_both_windows(tmp_path):
+    write_rollout(tmp_path, lines=[token_count_line(rate_limits())])
+    frame, = poll(tmp_path)
+    assert frame.provider == "codex"
+    assert frame.src == "cli"
+    assert frame.session_pct == 12.0
+    assert frame.weekly_pct == 34.0
+    assert frame.session_resets_at == int(NOW + 3600)
+    assert frame.weekly_resets_at == int(NOW + 86400)
+    assert frame.stale is False
+
+
+# --- which window is which --------------------------------------------------
+
+
+def test_windows_are_matched_by_declared_length_not_by_position(tmp_path):
+    """The two entries arriving the other way round must not swap the dials.
+
+    `primary` and `secondary` are positions in a file we do not control. The
+    five-hour figure belongs on the session dial because it says it covers
+    300 minutes, not because it came first.
+    """
+    limits = rate_limits()
+    limits["primary"], limits["secondary"] = (limits["secondary"],
+                                              limits["primary"])
+    write_rollout(tmp_path, lines=[token_count_line(limits)])
+    frame, = poll(tmp_path)
+    assert frame.session_pct == 12.0     # still the 300-minute one
+    assert frame.weekly_pct == 34.0
+
+
+def test_position_is_the_fallback_when_no_length_is_declared(tmp_path):
+    limits = rate_limits(s_min=None, w_min=None)
+    write_rollout(tmp_path, lines=[token_count_line(limits)])
+    frame, = poll(tmp_path)
+    assert frame.session_pct == 12.0
+    assert frame.weekly_pct == 34.0
+
+
+# --- refusing to be confidently wrong ---------------------------------------
+
+
+def test_a_millisecond_epoch_is_refused_rather_than_believed(tmp_path):
+    """The unit changing must cost the reset time, not produce the year 58000.
+
+    Claude Desktop's sample timestamps really are milliseconds, so this is
+    not a hypothetical difference between two files in this codebase.
+    """
+    limits = rate_limits(s_reset=int((NOW + 3600) * 1000))
+    write_rollout(tmp_path, lines=[token_count_line(limits)])
+    frame, = poll(tmp_path)
+    assert frame.session_pct == 12.0        # the percentage is still good
+    assert frame.session_resets_at is None  # the timestamp is not
+
+
+def test_a_percentage_outside_0_100_is_unknown_not_clamped(tmp_path):
+    write_rollout(tmp_path, lines=[token_count_line(rate_limits(s_pct=140.0))])
+    frame, = poll(tmp_path)
+    assert frame.session_pct == base.UNKNOWN
+    assert frame.weekly_pct == 34.0
+
+
+def test_a_non_numeric_percentage_is_unknown(tmp_path):
+    write_rollout(tmp_path, lines=[token_count_line(rate_limits(s_pct="12%"))])
+    frame, = poll(tmp_path)
+    assert frame.session_pct == base.UNKNOWN
+
+
+def test_a_frame_with_neither_window_is_not_produced(tmp_path):
+    """No numbers means no frame, so it cannot win a recency contest."""
+    limits = rate_limits(s_pct=None, w_pct=None)
+    write_rollout(tmp_path, lines=[token_count_line(limits)])
+    assert poll(tmp_path) == []
+
+
+# --- freshness --------------------------------------------------------------
+
+
+def test_observed_at_is_the_events_own_timestamp(tmp_path):
+    """Not the file's mtime, which moves when nothing was read or written."""
+    write_rollout(tmp_path, lines=[
+        token_count_line(rate_limits(), stamp="2026-08-27T03:00:00.000Z")])
+    frame, = poll(tmp_path)
+    assert frame.observed_at == pytest.approx(1_787_799_600.0)
+
+
+def test_mtime_is_the_fallback_when_the_timestamp_is_unusable(tmp_path):
+    line = json.loads(token_count_line(rate_limits()))
+    line["timestamp"] = "not a date"
+    path = write_rollout(tmp_path, lines=[json.dumps(line)])
+    os.utime(path, (NOW - 10, NOW - 10))
+    frame, = poll(tmp_path)
+    assert frame.observed_at == pytest.approx(NOW - 10)
+
+
+def test_an_old_reading_is_marked_stale_rather_than_dropped(tmp_path):
+    """Codex only writes this while it runs, so age measures when you last
+    used it -- worth showing as stale, not worth throwing away."""
+    old = "2026-08-26T03:00:00.000Z"
+    write_rollout(tmp_path, lines=[token_count_line(rate_limits(), stamp=old)])
+    frame, = poll(tmp_path)
+    assert frame.stale is True
+    assert frame.session_pct == 12.0
+
+
+# --- which file, out of several ---------------------------------------------
+
+
+def test_the_freshest_reading_wins_even_from_an_older_file(tmp_path):
+    """A terminal left open writes a rollout with no reading in it at all.
+
+    Its mtime still moves, so "newest file" is the wrong question; the newest
+    EVENT is the right one.
+    """
+    quiet = write_rollout(tmp_path, name="rollout-quiet.jsonl", lines=[
+        json.dumps({"type": "session_meta", "payload": {}})])
+    used = write_rollout(tmp_path, name="rollout-used.jsonl", lines=[
+        token_count_line(rate_limits(s_pct=77.0),
+                         stamp="2026-08-27T03:00:00.000Z")])
+    os.utime(quiet, (NOW, NOW))             # the quiet one is newer on disk
+    os.utime(used, (NOW - 600, NOW - 600))
+    frame, = poll(tmp_path)
+    assert frame.session_pct == 77.0
+
+
+def test_only_one_frame_is_produced_however_many_terminals_are_open(tmp_path):
+    """The percentages are account-wide: six copies is six ways to say one
+    thing, and the normalizer has no more information than we do here."""
+    for i in range(4):
+        write_rollout(tmp_path, name=f"rollout-{i}.jsonl",
+                      lines=[token_count_line(rate_limits())])
+    assert len(poll(tmp_path)) == 1
+
+
+def test_the_last_reading_in_a_file_is_the_one_used(tmp_path):
+    write_rollout(tmp_path, lines=[
+        token_count_line(rate_limits(s_pct=5.0)),
+        json.dumps({"type": "response_item", "payload": {"type": "message"}}),
+        token_count_line(rate_limits(s_pct=9.0)),
+    ])
+    frame, = poll(tmp_path)
+    assert frame.session_pct == 9.0
+
+
+# --- absence and damage are ordinary ----------------------------------------
+
+
+def test_no_codex_installed_is_silence_not_an_error(tmp_path):
+    assert poll(tmp_path / "nothing-here") == []
+
+
+def test_a_rollout_with_no_reading_yet_is_silence(tmp_path):
+    write_rollout(tmp_path, lines=[
+        json.dumps({"type": "session_meta", "payload": {"id": "x"}})])
+    assert poll(tmp_path) == []
+
+
+def test_a_truncated_line_is_skipped_rather_than_fatal(tmp_path):
+    """Only the tail of a long rollout is read, so the first line in hand is
+    routinely half a line. That must cost nothing."""
+    good = token_count_line(rate_limits(s_pct=42.0))
+    write_rollout(tmp_path, lines=['{"timestamp": "20', good])
+    frame, = poll(tmp_path)
+    assert frame.session_pct == 42.0
+
+
+def test_a_line_that_is_not_an_object_is_skipped(tmp_path):
+    write_rollout(tmp_path, lines=['["rate_limits"]',
+                                   token_count_line(rate_limits())])
+    frame, = poll(tmp_path)
+    assert frame.session_pct == 12.0
+
+
+def test_only_the_tail_of_a_huge_file_is_read(tmp_path):
+    """A megabyte of conversation must not become a megabyte of parsing."""
+    filler = json.dumps({"type": "response_item",
+                         "payload": {"type": "message", "pad": "x" * 400}})
+    lines = [token_count_line(rate_limits(s_pct=1.0))]
+    lines += [filler] * 2000
+    lines += [token_count_line(rate_limits(s_pct=99.0))]
+    write_rollout(tmp_path, lines=lines)
+    frame, = poll(tmp_path)
+    assert frame.session_pct == 99.0
+
+
+def test_the_provider_never_raises_on_a_damaged_tree(tmp_path, monkeypatch):
+    """Contract from base.ProviderParser: a parser for an app we do not
+    control must not be able to stop the daemon."""
+    def boom(*a, **k):
+        raise OSError("gone")
+    write_rollout(tmp_path, lines=[token_count_line(rate_limits())])
+    monkeypatch.setattr(codex_cli.os.path, "getsize", boom)
+    assert poll(tmp_path) == []
+
+
+# --- the seam into the rest of the daemon -----------------------------------
+
+
+def test_codex_ships_in_the_default_provider_list():
+    """Without this the board's own 'codex' preference can never be honoured:
+    set_preferred refuses a provider that is not reporting."""
+    from pc import ingest
+    ids = [p.get_provider_id() for p in ingest.default_providers()]
+    assert "codex" in ids
+
+
+def test_codex_home_is_honoured(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    assert codex_cli.sessions_root() == os.path.join(str(tmp_path), "sessions")

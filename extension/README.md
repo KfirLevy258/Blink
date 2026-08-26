@@ -50,6 +50,24 @@ The extension reports these counts every 30 seconds whether or not it found
 anything, because a silent extension that matched nothing looks exactly like
 one that was never installed. The report carries two integers and nothing else.
 
+## What it actually reports today
+
+**Nothing, and that is now measured rather than assumed.** Driven against the
+real site on 2026-08-27 — a page load, three reloads and a complete message
+turn — it observed **178 responses from claude.ai and matched zero of them**:
+
+```
+Browser  extension running, but none of 178 responses carried rate-limit headers
+```
+
+So claude.ai does not send its usage figures in response headers, and this
+extension has nothing to forward. Install it if you like; it will tell you the
+same thing, on your own traffic, in one line. The panel keeps its numbers from
+the status line and the desktop cache either way.
+
+`docs/next-steps.md` section A has the reasoning, including why a page-context
+probe cannot answer this and why `extraHeaders` would not change the result.
+
 ## If it reports nothing
 
 That is the designed failure, not a crash. The rate-limit header names are not

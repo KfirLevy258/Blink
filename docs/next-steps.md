@@ -9,79 +9,55 @@ Written against the code as it stands at `c1146a8`.
 
 ### Where it actually is
 
-Built and tested, **never run against the real site**. That distinction is the
-whole of this section.
+**Run against the real site, 2026-08-27. The question this section existed to
+ask has an answer, and it is the bad one.**
 
 | Piece | State |
 |---|---|
-| `extension/manifest.json`, `background.js` | written, loads unpacked |
-| `pc/webbridge.py` receiver | 19 tests, verified live with `curl` |
+| `extension/manifest.json`, `background.js` | loads unpacked in Chrome 152 |
+| `pc/webbridge.py` receiver | 20 tests, and verified live from the extension |
 | `ClaudeWebProvider` | merges like any other source, tested |
-| **Header matching against real traffic** | **unverified** |
+| Extension → daemon → `clauge status` | **works end to end** |
+| **Rate-limit headers on claude.ai** | **none. 178 responses, 0 matches** |
 
-The receiver half is done. The extension observes response headers on requests
-the page already makes and matches them **by shape** — `RE_LIMIT`,
-`RE_REMAINING`, `RE_RESET`, `RE_USED_PCT` in `background.js` — because the real
-header names are not a documented contract. If nothing matches, it reports
-nothing and the panel falls back to the CLI and desktop sources. That is the
-designed failure, and it is also indistinguishable from the extension being
-broken.
+### Step 1 — what claude.ai actually sends: ANSWERED (outcome c)
 
-### Step 1 — find out what claude.ai actually sends (~2 min, gates everything)
+The extension was loaded unpacked, the daemon run from this branch, and
+claude.ai driven through a page load, three reloads and one complete message
+turn — the completion request included. The extension's own diagnostic
+reported:
 
-**A page-context probe cannot answer this, and it is worth knowing why before
-someone tries it again.** Wrapping `window.fetch` on claude.ai and reading
-`response.headers` was attempted (2026-08-26). It returned three header names —
-`cache-control`, `content-length`, `content-type` — which is *exactly* the
-CORS-safelisted set, so the result proved nothing. A control fetch of a
-same-origin static asset returned 22 headers, confirming page JS can see them
-same-origin; the three-header responses were cross-origin telemetry.
+```
+{"t": ..., "responses": 178, "matched": 0, "usage_reports": 0}
+clauge status → Browser  extension running, but none of 178 responses
+                         carried rate-limit headers
+```
 
-More to the point: even a clean negative from page JS would not settle it.
-`chrome.webRequest.onHeadersReceived` sees response headers that `fetch()`
-hides, so the extension has strictly more visibility than any probe run inside
-the page. **The extension is the measuring instrument.** There is no shortcut
-around loading it.
+178 responses observed on `https://claude.ai/*`, **zero** carrying anything
+matching `RE_LIMIT`, `RE_REMAINING`, `RE_RESET` or `RE_USED_PCT`.
 
-**This is now a one-command answer.** The extension reports what it observed
-every 30 seconds whether or not it found anything, and `clauge status` prints
-the verdict — no DevTools, no temporary logging.
+Two things that measurement does establish, and they are worth separating from
+the negative result:
 
-1. `chrome://extensions` → Developer mode → Load unpacked → `extension/`.
-2. Use claude.ai for a turn or two.
-3. `clauge status`, and read the `Browser` line.
+  - **The plumbing works.** The extension woke on real traffic, reached
+    `127.0.0.1:9877`, and the daemon's crumb turned into an accurate line in
+    `clauge status` without anyone opening a service-worker console. That was
+    the other thing this step was for.
+  - **`extraHeaders` would not change it.** That flag exists for `Set-Cookie`
+    and the CORS-restricted set; `onHeadersReceived` already sees every
+    ordinary response header, which is why the extension was the measuring
+    instrument in the first place. There is no hidden header to go and find.
 
-It says one of: not seen; running but no responses carried rate-limit headers;
-headers seen but none usable; or working, with a count.
+So this is **outcome (c)** as written below: header observation is the wrong
+mechanism for claude.ai, and the two fallbacks are the content script and the
+response body. Both were already judged worse, and the second is on the
+project's concerns list. **Nothing further should be built here without
+deciding that deliberately.**
 
-(An earlier version of this plan asked for a DevTools session. That was
-replaced because the thing being diagnosed — a silent extension — is exactly
-the thing a user cannot tell apart from a broken one, and making them open a
-service-worker console to find out is a poor answer to a question the software
-can answer itself.)
-
-Three possible outcomes, and they lead to different work:
-
-**(a) Rate-limit headers are present.** Best case. Replace the shape regexes
-with the real names, keep the shape ones as a fallback, and add a fixture test
-built from the captured header set. Half a day, and the feature is done.
-
-**(b) Headers exist but express usage differently** — a reset epoch with no
-limit, a token count instead of a percentage, per-model rows. The parser in
-`buildPayload()` needs a real mapping, and `usedPct()`'s assumption that
-`(limit - remaining) / limit` is the answer stops holding. One to two days,
-mostly deciding what the numbers mean.
-
-**(c) Nothing numeric comes back on any response.** Then header observation is
-the wrong mechanism and there are two fallbacks, both worse:
-  - **A content script reading the rendered usage UI.** Honest — it reads what
-    the user is already being shown — but it breaks on any markup change and
-    only sees numbers while the usage panel is open.
-  - **Observing the response body of whatever endpoint the usage panel calls.**
-    More reliable and more invasive, and it moves this from "reads headers" to
-    "reads an undocumented API's payload", which is a live concern on this
-    project's list. **Do not take this route without deciding that
-    deliberately.**
+What the extension is worth as it stands: it is an honest, silent no-op that
+says so out loud. It costs the user nothing and it tells the truth when asked.
+That is a defensible thing to ship as an optional extra and a poor thing to
+put in front of anyone as a feature.
 
 ### Step 2 — decide whether it ships at all
 
@@ -232,13 +208,69 @@ without anyone having to plug a board in.
 
 ---
 
+## C. Codex, and the second page (DONE 2026-08-27)
+
+The firmware has had a second provider page since `bca447f` — one provider per
+screen, vertical swipe between them, a rail dot each — and the settings screen
+has let you pick Codex as the main source for longer than that. **Nothing ever
+reported Codex.** So `set_preferred("codex")` was refused every time the board
+announced it (`board asked for provider 'codex', which is not reporting`),
+`page_count()` stayed at 1, and both vertical swipes were no-ops. The feature
+existed at every layer except the one that produces numbers.
+
+`pc/providers/codex_cli.py` closes that. Codex CLI appends its own
+`rate_limits` to the rollout log it keeps per session:
+
+```
+~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<stamp>-<uuid>.jsonl
+  → event_msg / token_count → rate_limits
+      primary   {used_percent, window_minutes: 300,   resets_at}
+      secondary {used_percent, window_minutes: 10080, resets_at}
+```
+
+Same shape as every other source here: a figure another program has already
+worked out, read from a file it writes for its own reasons. No credential, no
+prompt text, no network.
+
+Three decisions in it worth not re-deriving:
+
+  - **Windows are matched by `window_minutes`, not by `primary`/`secondary`.**
+    Those are positions in a file we do not control, and getting them the
+    wrong way round swaps the two dials silently. Position is the fallback,
+    used only when the length is absent.
+  - **`resets_at` is seconds, and is range-checked.** Claude Desktop's sample
+    timestamps in the same daemon are milliseconds, so this is a live
+    difference between two files, not a hypothetical one. Out of range costs
+    the reset time and keeps the percentage.
+  - **The newest file is not the newest reading.** A terminal left open moves
+    its rollout's mtime without ever writing a `token_count`. The provider
+    reads the tail of the few most recently touched files and takes the
+    freshest *event*, then emits ONE frame — the percentages are account-wide,
+    so six terminals are six copies of one answer.
+
+Verified live, 2026-08-27: real rollout parsed, board flashed with this
+branch, `p2: 'codex'` on the wire, and the board's stored `codex` preference
+honoured for the first time (`[bridge] main source: codex`).
+
+---
+
 ## Rough order
 
-1. **Web plugin Step 1.** Fifteen minutes, and it decides whether A is a
-   half-day or a two-day job. Nothing else should start first.
-2. **Flash the current branch and boot-verify it.** Still outstanding, and it
-   is the only thing standing between this work and being real.
+1. ~~**Web plugin Step 1.**~~ Done — see A. The answer is (c); the remaining
+   question is a judgement call about the two fallbacks, not an
+   implementation task.
+2. ~~**Flash the current branch and boot-verify it.**~~ Done 2026-08-27:
+   built, flashed over USB, board came up clean, `hello` at 0.6.0.
 3. **The metadata decision** for B. It gates every part of B and is a judgement
    call, not an implementation task.
 4. B Steps 1–3 (daemon side, ~1.5 days), then B Step 4 v1 (a few hours).
 5. B Step 4 v2 and the web plugin's packaging, in whichever order matters more.
+
+Two things noticed while testing that are not in either section:
+
+- **`clauge status` says nothing about which providers are reporting.** With
+  two of them on the wire and a preference living on the board, "Usage data
+  fresh (1s old)" is now less than it could say.
+- **The wire carries float noise** — `session_pct: 14.000000000000002` was
+  observed. Harmless to the panel, but those are bytes inside a 512-byte line
+  limit that section B is already budgeting against.

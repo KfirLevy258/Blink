@@ -41,7 +41,8 @@ Clauge never sees a credential, and never reads your conversations. It reads fig
 | Claude Code's status line | both limits, reset times, context, model | nothing - set up by `clauge install` |
 | Claude Desktop's usage cache | both limits | nothing - read if the app is installed |
 | Claude Code's hooks | per-session busy / waiting / stuck / rate-limited, and live subagent count | nothing - set up by `clauge install` |
-| [Browser extension](extension/) | usage from claude.ai tabs | optional, load it yourself |
+| Codex CLI's own session log | both limits and reset times, for Codex | nothing - read if Codex is installed |
+| [Browser extension](extension/) | nothing today - claude.ai sends no rate-limit headers ([why](docs/next-steps.md)) | optional, load it yourself |
 
 When two of them disagree, the most recently observed number wins - field by field, so a source that knows your reset time still supplies it even when a fresher one takes over the percentage. `docs/multi-provider.md` has the details.
 
