@@ -1211,14 +1211,22 @@ static void do_page(int delta, void (*pump)(void))
 	lv_obj_update_layout(lv_screen_active());
 	ui_slide_freeze(false);
 
-	ui_anim_gesture_mute(UI_SLIDE_MS * 6);
+	/*
+	 * Sized to THIS transition, not to the default one. do_open mutes for
+	 * UI_SLIDE_MS * 6 because a 650 ms slide accumulates most of a second
+	 * of touch points; a page change is under 300 ms and a mute that long
+	 * would swallow a deliberate second swipe -- which is exactly what
+	 * someone paging past two providers does.
+	 */
+	ui_anim_gesture_mute(UI_SLIDE_MS * 2);
 
 	/*
 	 * Content follows the finger. A swipe UP asks for the next page, so
 	 * the page you were on travels up and out and the new one arrives from
 	 * below -- which is UI_SLIDE_UP.
 	 */
-	ui_slide_run(delta > 0 ? UI_SLIDE_UP : UI_SLIDE_DOWN, pump);
+	ui_slide_run_paced(delta > 0 ? UI_SLIDE_UP : UI_SLIDE_DOWN,
+			   UI_SLIDE_PAGE_STEP_PX, UI_SLIDE_PAGE_MIN_MS, pump);
 	ui_anim_gesture_mute(250);
 }
 

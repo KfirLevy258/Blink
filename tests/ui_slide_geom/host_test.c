@@ -19,7 +19,9 @@
 #define HOR	320
 #define VER	240
 #define STEP	4
+#define PAGE_STEP	8	/* what the page change uses */
 
+static int step_override = STEP;
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
 	else { printf("PASS: %s\n", m); } } while (0)
@@ -31,6 +33,7 @@ static int travel_of(int dir) { return ui_slide_travel(dir, HOR, VER); }
 static void covers_the_screen_once(int dir, const char *name)
 {
 	static char seen[HOR > VER ? HOR : VER];
+	const int st = step_override;
 	const int travel = travel_of(dir);
 	const int vertical = ui_slide_is_vertical(dir);
 	int i, j, bad_bounds = 0, bad_span = 0, twice = 0, missed = 0;
@@ -38,8 +41,8 @@ static void covers_the_screen_once(int dir, const char *name)
 	for (i = 0; i < travel; i++) {
 		seen[i] = 0;
 	}
-	for (j = STEP; j <= travel; j += STEP) {
-		struct ui_slide_strip s = ui_slide_strip_at(dir, j, STEP,
+	for (j = st; j <= travel; j += st) {
+		struct ui_slide_strip s = ui_slide_strip_at(dir, j, st,
 							    HOR, VER);
 		int lo = vertical ? s.y1 : s.x1;
 		int hi = vertical ? s.y2 : s.x2;
@@ -55,7 +58,7 @@ static void covers_the_screen_once(int dir, const char *name)
 		    other_hi != (vertical ? HOR : VER) - 1) {
 			bad_span++;
 		}
-		if (hi - lo + 1 != STEP) {
+		if (hi - lo + 1 != st) {
 			bad_span++;
 		}
 		for (i = lo; i <= hi && i < travel; i++) {
@@ -72,7 +75,8 @@ static void covers_the_screen_once(int dir, const char *name)
 			missed++;
 		}
 	}
-	printf("-- %s (travel %d, %d steps)\n", name, travel, travel / STEP);
+	printf("-- %s (travel %d, %d steps of %d px)\n", name, travel,
+	       travel / st, st);
 	CHECK(bad_bounds == 0, "every strip is inside the screen");
 	CHECK(bad_span == 0, "every strip spans the full width of its axis");
 	CHECK(twice == 0, "no pixel is painted twice");
@@ -125,6 +129,19 @@ int main(void)
 	covers_the_screen_once(UI_SLIDE_RIGHT, "RIGHT");
 	covers_the_screen_once(UI_SLIDE_UP, "UP");
 	covers_the_screen_once(UI_SLIDE_DOWN, "DOWN");
+
+	printf("\n== and at the wider step the page change uses ==\n");
+	/* The strip width became a parameter when 60 steps was judged too slow,
+	 * and a width that does not divide the travel leaves the last strip
+	 * short -- the new screen with a stripe of the old one still on it. The
+	 * code falls back rather than ship that; these are the widths it must
+	 * never have to. */
+	CHECK(HOR % PAGE_STEP == 0 && VER % PAGE_STEP == 0,
+	      "the page step divides both axes exactly");
+	step_override = PAGE_STEP;
+	covers_the_screen_once(UI_SLIDE_UP, "UP at 8 px");
+	covers_the_screen_once(UI_SLIDE_DOWN, "DOWN at 8 px");
+	step_override = STEP;
 
 	printf("\n== the incoming screen enters from the right edge ==\n");
 	/* LEFT means the OLD screen exits left, so the new one comes in from

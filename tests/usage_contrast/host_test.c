@@ -36,11 +36,11 @@ static const struct swatch pal[] = {
 	{ "COL_BG",      0x0E1116 },
 	{ "COL_TEXT",    0xE6E8EB },
 	{ "COL_DIM",     0x8A9199 },
-	{ "COL_GREEN",  0x4AB07D },
-	{ "COL_AMBER",  0xCA9E45 },
-	{ "COL_RED",  0xFF5447 },
+	{ "COL_GREEN",  0x0DA243 },
+	{ "COL_AMBER",  0xBA8107 },
+	{ "COL_RED",  0xFF1900 },
 	{ "COL_GREY",    0x6B7280 },
-	{ "COL_OTHER",   0x6E8BC4 },
+	{ "COL_OTHER",   0x4387DF },
 };
 #define N (int)(sizeof(pal) / sizeof(pal[0]))
 
@@ -64,6 +64,45 @@ static double contrast(unsigned a, unsigned b)
 	double hi = la > lb ? la : lb, lo = la > lb ? lb : la;
 
 	return (hi + 0.05) / (lo + 0.05);
+}
+
+/*
+ * HSV saturation, 0..1. Grey is 0.
+ *
+ * Added because contrast alone said the palette was fine while the panel said
+ * the green was grey, and both were telling the truth: #4AB07D cleared 7:1
+ * against the background at 0.58 saturation, and 0.58 on an ILI9341 is a
+ * grey-green. Luminance is what a colour WEIGHS; saturation is whether it is
+ * a colour at all, and this file only ever checked the first one.
+ */
+static double saturation(unsigned rgb)
+{
+	unsigned r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+	unsigned hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
+	unsigned lo = r < g ? (r < b ? r : b) : (g < b ? g : b);
+
+	return hi == 0 ? 0.0 : (double)(hi - lo) / (double)hi;
+}
+
+/*
+ * The colour as the PANEL will actually show it.
+ *
+ * The display is RGB565: five bits of red, six of green, five of blue. Every
+ * number in this file used to be checked at 24-bit precision, against a
+ * hardware that has never displayed a 24-bit colour in its life. The drift is
+ * small, but "small" is not a thing to assume when the whole point of the file
+ * is that eyeballing it was not good enough.
+ */
+static unsigned as_rgb565(unsigned rgb)
+{
+	unsigned r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+
+	/* Quantise, then expand back the way the panel does: the top bits are
+	 * replicated into the bottom ones. */
+	r = ((r >> 3) << 3) | (r >> 5);
+	g = ((g >> 2) << 2) | (g >> 6);
+	b = ((b >> 3) << 3) | (b >> 5);
+	return (r << 16) | (g << 8) | b;
 }
 
 static unsigned by_name(const char *name)
@@ -178,6 +217,68 @@ int main(void)
 		 hi / lo);
 	CHECK(hi / lo <= 1.35, msg);
 
+
+	/*
+	 * A SEVERITY COLOUR MUST ACTUALLY BE A COLOUR.
+	 *
+	 * This is the check that was missing when the user looked at the board
+	 * and said the green looked grey. The ramp had been built to carry
+	 * urgency in its saturation -- 0.58, 0.66, 0.72 -- which put its
+	 * safest, most-often-displayed step nearest to grey, on a panel whose
+	 * own gamma takes another bite out of it.
+	 *
+	 * 0.85 rather than something gentler because the failure was not
+	 * marginal: at 0.58 the green read as grey to the naked eye at 60 cm.
+	 * There is no reason for a green/amber/red ramp to sit anywhere but
+	 * near the top of the range -- flat LUMINANCE is what the band rule
+	 * below is protecting, and saturation costs it nothing.
+	 */
+	static const char *severity[] = { "COL_GREEN", "COL_AMBER", "COL_RED" };
+
+	for (unsigned i = 0; i < sizeof(severity) / sizeof(severity[0]); i++) {
+		double sv = saturation(by_name(severity[i]));
+
+		snprintf(msg, sizeof(msg), "%s is saturated enough to read as a"
+			 " colour (%.2f >= 0.85)", severity[i], sv);
+		CHECK(sv >= 0.85, msg);
+	}
+
+	/*
+	 * And the whole palette still holds up once the panel has quantised it.
+	 *
+	 * Cheap to check and it closes the gap this file had: every figure
+	 * above describes a colour in 24-bit sRGB, and the hardware displays
+	 * RGB565. A palette that passes at 24 bits and fails at 16 is a palette
+	 * that passes here and fails on the desk.
+	 */
+	for (int i = 0; i < N; i++) {
+		unsigned shown = as_rgb565(pal[i].rgb);
+		double r = contrast(shown, as_rgb565(bg));
+		double want = (strcmp(pal[i].name, "COL_BG") == 0) ? 0.0
+			    : (strcmp(pal[i].name, "COL_TEXT") == 0 ||
+			       strcmp(pal[i].name, "COL_DIM") == 0) ? 4.5 : 3.0;
+
+		if (want == 0.0) {
+			continue;
+		}
+		snprintf(msg, sizeof(msg), "%s survives RGB565 (%.2f:1 >= %.1f)",
+			 pal[i].name, r, want);
+		CHECK(r >= want, msg);
+	}
+	{
+		double qg = contrast(as_rgb565(by_name("COL_GREEN")),
+				     as_rgb565(bg));
+		double qa = contrast(as_rgb565(by_name("COL_AMBER")),
+				     as_rgb565(bg));
+		double qr = contrast(as_rgb565(by_name("COL_RED")),
+				     as_rgb565(bg));
+		double qhi = qg > qa ? (qg > qr ? qg : qr) : (qa > qr ? qa : qr);
+		double qlo = qg < qa ? (qg < qr ? qg : qr) : (qa < qr ? qa : qr);
+
+		snprintf(msg, sizeof(msg), "the band is still flat in RGB565"
+			 " (%.2fx spread <= 1.35)", qhi / qlo);
+		CHECK(qhi / qlo <= 1.35, msg);
+	}
 
 	/* And the list above still matches the source it claims to mirror. */
 	int checked = 0, agreed = 0;

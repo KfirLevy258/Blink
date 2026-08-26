@@ -76,6 +76,37 @@
 void ui_slide_run(int dir, void (*pump)(void));
 
 /*
+ * The same transition with the pacing named explicitly.
+ *
+ * `step_px` is the strip width, and in wipe mode it is a SPEED control rather
+ * than a quality one: the per-step refresh overhead dwarfs the pixels, so
+ * halving the step count nearly halves the duration. It must divide the
+ * travel exactly (320 and 240 both divide by 4 and 8) or it is ignored, since
+ * a short final strip would leave a stripe of the outgoing screen behind.
+ *
+ * `min_ms` is a floor, not a target: a transition that already cost more than
+ * this is not slowed further.
+ *
+ * ui_slide_run() is this with the defaults the settings panel and the boot
+ * clip were tuned to, and those two should keep using it -- they were judged
+ * by eye on hardware and there is nothing to gain by disturbing them.
+ */
+void ui_slide_run_paced(int dir, int step_px, int min_ms,
+			void (*pump)(void));
+
+/*
+ * Pacing for the provider-page change specifically.
+ *
+ * 8 px over the 240-pixel axis is 30 steps where the default 4 px would be 60,
+ * and the duration is made almost entirely of per-step overhead -- so this is
+ * about half the time for a reveal that is still finer than the eye tracks at
+ * 60 cm. The 650 ms default was reported as too slow for a page change, which
+ * is a smaller act than opening a panel and should not cost the same.
+ */
+#define UI_SLIDE_PAGE_STEP_PX	8
+#define UI_SLIDE_PAGE_MIN_MS	260
+
+/*
  * Open a transition: render what is already dirty, then freeze.
  *
  * The freeze only blocks NEW invalidations -- LVGL's existing invalid-area

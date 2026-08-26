@@ -53,6 +53,31 @@
 #define STEP_COLS	4
 
 /*
+ * The page change gets its own pacing, and the reason is that STEP_COLS is a
+ * SPEED knob in wipe mode and an ARTIFACT knob in the scrolled one.
+ *
+ * Everything above about 4 px -- the seam, the pale band, "8 was a visible
+ * band" -- is about the scrolled slide, where GRAM is one screen and a line is
+ * briefly visible between arriving at the incoming edge and being painted. The
+ * wipe has no scroll register and no such window: it paints each strip
+ * straight into the pixels where it will be seen, so a wider strip is simply a
+ * coarser reveal, not a new artifact.
+ *
+ * And the cost is not in the pixels. Measured 2026-08-20: the gauge screen
+ * takes 72-84 ms to render whole, but 566 ms when chopped into 80 strips --
+ * so roughly 5-6 ms of every 7 ms step is fixed per-refresh overhead, and the
+ * step count is what a transition's duration is actually made of. Halving the
+ * steps nearly halves the time.
+ *
+ * The user's verdict on the 60-step page change was "too slow", and lowering
+ * the floor could not have fixed it: at 60 steps the render alone costs more
+ * than the 650 ms floor it was being held to. 8 px over 240 is 30 steps.
+ *
+ * UI_SLIDE_PAGE_STEP_PX / UI_SLIDE_PAGE_MIN_MS live in ui_slide.h, next to
+ * the paced entry point, because the caller passes them.
+ */
+
+/*
  * Reveal style. 1 = wipe (no panel scroll), 0 = the hardware slide below.
  *
  * The slide moves both screens at once, which is the motion originally asked
@@ -97,11 +122,10 @@
  * and has nothing added. That is what the old unconditional k_sleep got wrong.
  */
 #define SLIDE_MIN_MS	650
-/* Steps depend on the axis, so this is derived per run rather than fixed: the
- * screen is 320 wide and 240 tall, which is 80 steps one way and 60 the other.
- * Both render the incoming screen exactly once -- the step count only decides
- * how finely that one render is chopped. */
-#define SLIDE_STEPS_FOR(travel)	((travel) / STEP_COLS)
+/* Steps are derived per run rather than fixed: the screen is 320 wide and 240
+ * tall, and the strip width is now a parameter, so 80/60/40/30 are all live
+ * step counts. Both axes render the incoming screen exactly once whatever the
+ * count -- see PAGE_STEP_PX above for where the time actually goes. */
 
 
 static const struct device *const dbi =
@@ -218,6 +242,11 @@ void ui_slide_begin(void)
 
 void ui_slide_run(int dir, void (*pump)(void))
 {
+	ui_slide_run_paced(dir, STEP_COLS, SLIDE_MIN_MS, pump);
+}
+
+void ui_slide_run_paced(int dir, int step_px, int min_ms, void (*pump)(void))
+{
 	lv_display_t *disp = lv_display_get_default();
 	lv_obj_t *scr = lv_screen_active();
 
@@ -269,11 +298,19 @@ void ui_slide_run(int dir, void (*pump)(void))
 	ui_slide_freeze(true);
 
 	const int travel = ui_slide_travel(dir, LV_HOR_RES, LV_VER_RES);
-	const int steps = SLIDE_STEPS_FOR(travel);
+	/*
+	 * A step size that does not divide the travel would leave the last
+	 * strip short and the final pixels unpainted -- the new screen with a
+	 * stripe of the old one still on it. Both axes divide by 4 and by 8;
+	 * anything else falls back rather than shipping that.
+	 */
+	const int step_size = (step_px > 0 && travel % step_px == 0)
+			      ? step_px : STEP_COLS;
+	const int steps = travel / step_size;
 	const int64_t t0 = k_uptime_get();
 	int step = 0;
 
-	for (int j = STEP_COLS; j <= travel; j += STEP_COLS) {
+	for (int j = step_size; j <= travel; j += step_size) {
 		lv_area_t strip;
 		int off;
 
@@ -305,7 +342,7 @@ void ui_slide_run(int dir, void (*pump)(void))
 			 * can check it without a board; this is the only caller.
 			 */
 			const struct ui_slide_strip g =
-				ui_slide_strip_at(dir, j, STEP_COLS,
+				ui_slide_strip_at(dir, j, step_size,
 						  LV_HOR_RES, LV_VER_RES);
 
 			strip.x1 = g.x1;
@@ -316,13 +353,13 @@ void ui_slide_run(int dir, void (*pump)(void))
 		} else {
 			/* Horizontal only -- guarded above. */
 			if (dir == UI_SLIDE_LEFT) {
-				strip.x1 = j - STEP_COLS;
+				strip.x1 = j - step_size;
 				off = j;
 			} else {
 				strip.x1 = SCROLL_LINES - j;
 				off = SCROLL_LINES - j;
 			}
-			strip.x2 = strip.x1 + STEP_COLS - 1;
+			strip.x2 = strip.x1 + step_size - 1;
 			strip.y1 = 0;
 			strip.y2 = LV_VER_RES - 1;
 		}
@@ -360,7 +397,7 @@ void ui_slide_run(int dir, void (*pump)(void))
 
 		/* Hold this step until its share of SLIDE_MIN_MS has elapsed,
 		 * and only if it got there early. */
-		int64_t slack = t0 + (int64_t)SLIDE_MIN_MS * step / steps
+		int64_t slack = t0 + (int64_t)min_ms * step / steps
 				- k_uptime_get();
 
 		if (slack > 0) {
@@ -385,4 +422,16 @@ void ui_slide_run(int dir, void (*pump)(void))
 	lv_obj_invalidate(scr);
 	lv_refr_now(disp);
 
+	/*
+	 * What it actually cost, on the actual board.
+	 *
+	 * Every duration in this file came from a stopwatch against 240 fps
+	 * video, once, in August. The pacing is dominated by per-step refresh
+	 * overhead, which changes whenever the screen does -- so the next
+	 * person to be told a transition is too slow should be able to read
+	 * the number off the log rather than film it again. One line per
+	 * transition, and transitions are user-initiated.
+	 */
+	printk("[slide] dir %d: %d steps of %d px in %lld ms\n", dir, steps,
+	       step_size, k_uptime_get() - t0);
 }

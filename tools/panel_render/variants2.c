@@ -21,9 +21,9 @@
 #define COL_TEXT    lv_color_hex(0xE6E8EB)
 #define COL_DIM     lv_color_hex(0x8A9199)
 #define COL_FAR     lv_color_hex(0x4A525C)
-#define COL_GREEN   lv_color_hex(0x4AB07D)
-#define COL_AMBER   lv_color_hex(0xCA9E45)
-#define COL_RED     lv_color_hex(0xFF5447)
+#define COL_GREEN   lv_color_hex(0x0DA243)
+#define COL_AMBER   lv_color_hex(0xBA8107)
+#define COL_RED     lv_color_hex(0xFF1900)
 #define COL_CODEX   lv_color_hex(0x21B6A7)
 
 static uint16_t fb[W * H];

@@ -21,7 +21,7 @@
 #define COL_TEXT	lv_color_hex(0xE6E8EB)
 #define COL_DIM		lv_color_hex(0x8A9199)
 /*
- * The severity ramp: green, amber, red -- and all three sit inside a 1.28x
+ * The severity ramp: green, amber, red -- and all three sit inside a 1.16x
  * luminance band on purpose.
  *
  * They used to span 2.30x, INVERTED: amber at 11.39:1 was the brightest thing
@@ -32,14 +32,35 @@
  *
  * The fix is not a brighter red -- a red bright enough to outshine a yellow is
  * a pale salmon and stops reading as red at all; that is the physics of
- * luminance, not a palette choice. So luminance is held flat and URGENCY IS
- * CARRIED BY SATURATION (0.58 -> 0.66 -> 0.72) and by the arc's own area. A
- * 95% arc is a nearly-complete ring; it does not need to shout as well.
+ * luminance, not a palette choice. So luminance is held flat and urgency is
+ * carried by hue and by the arc's own area. A 95% arc is a nearly-complete
+ * ring; it does not need to shout as well.
+ *
+ * WHAT CHANGED, 2026-08-27, and it is the part worth reading. Holding
+ * luminance flat was right; paying for it with SATURATION was not. The first
+ * version of this ramp ran 0.58 -> 0.66 -> 0.72 and called that gradient the
+ * urgency signal. On the actual panel the user's verdict was "the green looks
+ * like gray", and they were right twice over:
+ *
+ *   - 0.58 saturation is 42% of the way to grey before the panel touches it,
+ *     and the old green sat at hue 150 with MORE BLUE THAN RED (#4AB07D:
+ *     R=74, B=125). That is a sea green, and a sea green on a cheap ILI9341
+ *     is a grey.
+ *   - a saturation ramp of 0.58 -> 0.72 is not a signal anyone can read at
+ *     60 cm. Hue is what carries green/amber/red, instantly, for everyone who
+ *     can resolve it; the arc's area carries it for everyone else. The ramp
+ *     was spending real colour to encode something nothing else needed.
+ *
+ * So saturation is now near the top of the range at every step (0.92, 0.96,
+ * 1.00) and the flat band is unchanged. All three were re-derived against the
+ * background AND re-checked after quantisation to RGB565, which is what the
+ * panel actually shows -- see tests/usage_contrast, where computing contrast
+ * for a colour the hardware cannot display was the gap that let this ship.
  */
-#define COL_GREEN	lv_color_hex(0x4AB07D)
+#define COL_GREEN	lv_color_hex(0x0DA243)
 #define COL_GREEN_INK	lv_color_hex(0x06210F)
-#define COL_AMBER	lv_color_hex(0xCA9E45)
-#define COL_RED		lv_color_hex(0xFF5447)
+#define COL_AMBER	lv_color_hex(0xBA8107)
+#define COL_RED		lv_color_hex(0xFF1900)
 /* 3.91:1 against the background. Was #555B63 at 2.76:1, which is under the
  * 3:1 minimum for a graphic element -- and these are the swipe chevrons, which
  * exist only because nobody discovered the gestures without them. An
@@ -65,7 +86,7 @@
  * band, still 1.56:1 apart from each other so the pair survives for anyone who
  * cannot resolve the hue difference.
  */
-#define COL_OTHER	lv_color_hex(0x6E8BC4)	/* anything else: a cool blue */
+#define COL_OTHER	lv_color_hex(0x4387DF)	/* anything else: a cool blue */
 
 struct gauge {
 	lv_obj_t *arc;
