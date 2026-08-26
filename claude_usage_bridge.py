@@ -13,7 +13,7 @@ import serial  # pyserial
 from serial.tools import list_ports
 
 from pc import ota as ota_mod
-from pc import protocol, statusline_source, update
+from pc import ingest, protocol, statusline_source, update
 from pc.bridge import Bridge
 
 POLL_INTERVAL_S = 60
@@ -178,9 +178,14 @@ def main(argv=None):
 
     port = wait_for_port(args.port)
 
-    # Claude Code owns the credential and computes these numbers; we read the file
-    # its statusline shim writes. Nothing here authenticates to Anthropic.
-    fetch = statusline_source.make_fetch()
+    # Every provider, every source, behind one callable.
+    #
+    # Claude Code owns the credential and computes these numbers; we read
+    # files it and the desktop app have already written. Nothing here
+    # authenticates to Anthropic, and the daemon deliberately does not know
+    # which providers exist -- pc/ingest owns that, so onboarding a second
+    # tool never reaches this loop.
+    fetch = ingest.make_fetch()
     last_err = None
 
     while True:  # reconnect loop
