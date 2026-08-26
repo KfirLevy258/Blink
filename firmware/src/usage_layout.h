@@ -64,7 +64,14 @@
 #define CTX_CAP_MAX_W		30	/* "CTX" */
 #define CTX_BAR_X		16
 #define CTX_BAR_Y		206
-#define CTX_BAR_W		200
+/*
+ * 190, not 200. At 200 the bar's right edge landed at x=276 and the readout,
+ * centred at CTX_VAL_X with "100%" in it, started at exactly 276 -- flush,
+ * with no gap at all. Legal by the overlap test and wrong to look at, and it
+ * only shows up at 100%, which is precisely when someone is looking at the
+ * context meter. Found by rendering the screen, not by reading the numbers.
+ */
+#define CTX_BAR_W		190
 #define CTX_BAR_H		6
 #define CTX_VAL_X		134
 #define CTX_VAL_Y		202
@@ -89,5 +96,7 @@
  */
 #define CTX_BAR_CD_GAP_MIN	2	/* bar below the countdown text */
 #define CTX_VAL_HINT_GAP_MIN	0	/* readout above the hint line */
+#define CTX_BAR_VAL_GAP_MIN	4	/* bar's end to its own readout */
+#define SCR_RIGHT_MARGIN_MIN	4	/* nothing flush against the bezel */
 
 #endif /* USAGE_LAYOUT_H */

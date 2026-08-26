@@ -137,6 +137,19 @@ int main(void)
 	/* The readout is right of the right countdown. */
 	CHECK(val.x0 >= cd_r.x1, "context readout sits right of countdown R");
 
+	/* ...and clear of the BAR's own right edge. This was flush at 0 px
+	 * until a render showed it: the overlap test passed, because touching
+	 * is not overlapping, and it only looked wrong at "100%" -- the exact
+	 * reading someone is staring at when the context meter matters. */
+	CHECK(val.x0 - bar.x1 >= CTX_BAR_VAL_GAP_MIN,
+	      "context readout clears the end of its own bar");
+
+	/* Nothing flush against the right bezel either. */
+	CHECK(SCR_W - val.x1 >= SCR_RIGHT_MARGIN_MIN,
+	      "context readout keeps a margin from the screen edge");
+	CHECK(SCR_W - bar.x1 >= SCR_RIGHT_MARGIN_MIN,
+	      "context bar keeps a margin from the screen edge");
+
 	/* --- the header --- */
 	CHECK(!overlaps(model, arc_l), "model label clears the arcs");
 	CHECK(model.y1 <= GAUGE_ARC_Y, "model label sits above the arcs");
