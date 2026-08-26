@@ -33,10 +33,36 @@ BUILD="${TMPDIR:-/tmp}/clauge-panel-render"
 mkdir -p "$BUILD" "$OUT"
 find "$LVGL_DIR/src" -name '*.c' > "$BUILD/srcs.txt"
 
+# Derive lv_conf.h from whatever LVGL is checked out, rather than vendoring a
+# copy. The template's defaults already match this panel -- 16-bit colour, the
+# three Montserrat sizes, arc, bar, label -- so the only edit needed is to turn
+# the file on: it guards its entire body behind `#if 0` so an unconfigured
+# project fails loudly instead of silently building with defaults.
+#
+# A vendored copy would be 1400 lines of third-party config drifting quietly
+# out of step with the LVGL the firmware actually builds against, which is the
+# opposite of what this harness is for.
+#
+# Two edits, both mirroring what firmware/prj.conf sets. The fonts are the
+# ones that would otherwise fail to link: the template ships Montserrat 14 on
+# and 16 and 20 off, and the gauge screen uses 20 for the big percentages.
+sed -e 's|#if 0 /\* Set this to "1" to enable content \*/|#if 1|' \
+    -e 's|^ *#define LV_FONT_MONTSERRAT_16 .*|#define LV_FONT_MONTSERRAT_16 1|' \
+    -e 's|^ *#define LV_FONT_MONTSERRAT_20 .*|#define LV_FONT_MONTSERRAT_20 1|' \
+	"$LVGL_DIR/lv_conf_template.h" > "$BUILD/lv_conf.h"
+
+for f in 14 16 20; do
+	grep -qE "^ *#define LV_FONT_MONTSERRAT_$f +1" "$BUILD/lv_conf.h" || {
+		echo "lv_conf.h: MONTSERRAT_$f not enabled -- the template's" >&2
+		echo "  layout changed and the sed above needs updating" >&2
+		exit 1
+	}
+done
+
 # -w: LVGL's own sources are not warning-clean under a host compiler and that
 # is not this script's business. The firmware build is where warnings matter.
 $CC -O1 -w -DLV_CONF_INCLUDE_SIMPLE=1 \
-	-I"$HERE" -I"$LVGL_DIR" -I"$LVGL_DIR/src" -I"$ROOT/firmware/src" \
+	-I"$BUILD" -I"$HERE" -I"$LVGL_DIR" -I"$LVGL_DIR/src" -I"$ROOT/firmware/src" \
 	"$HERE/render_main.c" \
 	"$ROOT/firmware/src/usage_view.c" \
 	"$ROOT/firmware/src/fmt.c" \
