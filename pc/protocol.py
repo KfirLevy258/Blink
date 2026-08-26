@@ -12,10 +12,69 @@ from pc.version import PROTO_VERSION
 # way. It is the protocol's version, not the product's -- see pc/version.py.
 VERSION = PROTO_VERSION
 
+# The firmware's inbound line buffer, mirrored here on purpose.
+#
+# proto.c:367-371 does not truncate an over-long line, it DROPS it: on
+# overflow it resets line_len to 0 and the whole message is gone. There is no
+# error, no partial parse and nothing on the panel to show for it -- the board
+# simply stops updating while the daemon reports success. Every field added to
+# a message spends this budget, so encode_checked() below refuses to put a
+# line on the wire that the board could not receive.
+MAX_LINE_BYTES = 512
+
+# The one variable-length field on the usage message. "Opus 5 (1M context)" is
+# 19 characters; a future model name is not bounded by anything we control, so
+# it is bounded here instead rather than being allowed to push the line over
+# the limit above.
+MODEL_MAX_CHARS = 24
+
+# Percentages and context fullness we do not have. Same sentinel as
+# pc/providers/base.UNKNOWN and as the firmware's msg_get_double default, so a
+# value crosses every layer without being re-encoded.
+UNKNOWN = -1.0
+
 
 def encode(msg: dict) -> bytes:
     """Serialize a message dict to a single NDJSON line (bytes)."""
     return (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def encode_checked(msg: dict):
+    """encode(), but None when the result could not be received.
+
+    Returns (bytes, None) on success and (None, reason) when the line exceeds
+    what the firmware will accept. Callers are expected to log the reason and
+    skip the message rather than write it: a line the board drops is strictly
+    worse than one never sent, because only the second is visible from here.
+    """
+    raw = encode(msg)
+    if len(raw) > MAX_LINE_BYTES:
+        return None, (f"{msg.get('t', '?')} message is {len(raw)} bytes, over "
+                      f"the board's {MAX_LINE_BYTES} byte line limit")
+    return raw, None
+
+
+def secs_until(resets_at, now_epoch: float) -> int:
+    """Seconds until `resets_at`. -1 when unknown or already past.
+
+    -1 rather than 0 for missing input: 0 renders as "resets now", which is a
+    confident lie. -1 lets the display say "--".
+
+    And -1 rather than 0 for a reset that has ALREADY passed, which is not a
+    presentation choice. usage_view.c treats a countdown of exactly 0 as "this
+    window just rolled over" and zeroes the percentage with it -- correct for
+    the firmware's own countdown reaching zero, and wrong for a reading we are
+    merely relaying, because usage may have happened from claude.ai or the
+    phone since. Sending 0 hands the board a decision the parser declined to
+    make, and it wipes the last-known numbers.
+
+    Lives here rather than in a provider because it is a property of the wire
+    format -- the board has no clock over USB, so the countdown is computed on
+    this side for every provider, not just the first one.
+    """
+    if resets_at is None or resets_at <= now_epoch:
+        return -1
+    return int(resets_at - now_epoch)
 
 
 def decode(line: str):
@@ -78,7 +137,9 @@ def time_msg(epoch: int, utc_offset_min: int) -> dict:
 
 
 def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
-          session_resets_in_s=-1, weekly_resets_in_s=-1, stale=False) -> dict:
+          session_resets_in_s=-1, weekly_resets_in_s=-1, stale=False,
+          provider="claude", src="cli", ctx_pct=UNKNOWN, model="",
+          state="") -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -111,6 +172,31 @@ The firmware reads this field: proto.c's "usage" handler calls
         name = m.get("name")
         if name in ("fable", "sonnet", "opus") and "weekly_pct" in m:
             flat[f"{name}_pct"] = float(m["weekly_pct"])
+
+    # The multi-provider fields, added WITHOUT moving PROTO_VERSION.
+    #
+    # pc/version.py states the rule these follow: protocol changes are
+    # additive, and the version is a floor that refuses, not a format
+    # selector. A board running older firmware ignores every key below --
+    # msg_get_* simply never asks for them -- and goes on rendering the two
+    # dials it already knows about. Moving the version instead would have
+    # meant every deployed unit stops being offered updates, over the very
+    # link the update travels on, which is not a mistake that can be
+    # corrected remotely.
+    #
+    # Unknown fields are OMITTED rather than sent as sentinels. That is the
+    # MAX_LINE_BYTES budget talking: an over-long line is dropped whole by the
+    # board (proto.c:367-371), so every key that carries no information is
+    # spending a budget a future field will need. An absent key already means
+    # "unknown" on both sides.
+    extra = {"provider": provider, "src": src}
+    if ctx_pct is not None and ctx_pct >= 0:
+        extra["ctx_pct"] = ctx_pct
+    if model:
+        extra["model"] = model[:MODEL_MAX_CHARS]
+    if state:
+        extra["state"] = state
+
     return {
         "t": "usage", "v": VERSION,
         "session_pct": session_pct, "session_resets_at": session_resets_at,
@@ -120,7 +206,29 @@ The firmware reads this field: proto.c's "usage" handler calls
         "models": models,
         "stale": stale,
         **flat,
+        **extra,
     }
+
+
+def frame_to_usage(frame, now_epoch: float) -> dict:
+    """Turn a NormalizedUsageFrame into the usage message for the board.
+
+    The single crossing point from provider-space to wire-space. Providers
+    never build protocol messages themselves -- if they did, a second provider
+    would be free to invent its own field names and the firmware would need to
+    learn each one. Everything upstream produces frames; this function is the
+    only thing that decides what a frame looks like on the wire.
+    """
+    return usage(
+        frame.session_pct, frame.session_resets_at,
+        frame.weekly_pct, frame.weekly_resets_at,
+        [],
+        session_resets_in_s=secs_until(frame.session_resets_at, now_epoch),
+        weekly_resets_in_s=secs_until(frame.weekly_resets_at, now_epoch),
+        stale=frame.stale,
+        provider=frame.provider, src=frame.src,
+        ctx_pct=frame.ctx_pct, model=frame.model, state=frame.state,
+    )
 
 
 def status(state: str, detail: str = "") -> dict:

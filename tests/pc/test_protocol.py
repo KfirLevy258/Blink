@@ -72,3 +72,73 @@ class TestProtocol(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WireBudget(unittest.TestCase):
+    """The board drops an over-long line whole rather than truncating it
+    (proto.c:367-371), so the daemon must never write one."""
+
+    def test_a_normal_usage_message_fits(self):
+        raw, why = protocol.encode_checked(
+            protocol.usage(61.0, 1_787_203_200, 26.0, 1_787_644_800, [],
+                           ctx_pct=55.0, model="Opus 5 (1M context)"))
+        self.assertIsNone(why)
+        self.assertLessEqual(len(raw), protocol.MAX_LINE_BYTES)
+
+    def test_an_over_long_line_is_refused_with_a_reason(self):
+        fat = protocol.usage(1.0, "R", 2.0, "R",
+                             [{"name": "sonnet", "weekly_pct": 2.0,
+                               "pad": "x" * 600}])
+        raw, why = protocol.encode_checked(fat)
+        self.assertIsNone(raw)
+        self.assertIn("line limit", why)
+
+    def test_a_long_model_name_is_truncated_not_dropped(self):
+        u = protocol.usage(1.0, "R", 2.0, "R", [], model="M" * 200)
+        self.assertEqual(len(u["model"]), protocol.MODEL_MAX_CHARS)
+
+
+class AdditiveFields(unittest.TestCase):
+    """The multi-provider fields ride on v2 rather than forcing a v3.
+
+    A version bump would stop every deployed board being offered updates
+    (pc/version.py), over the same link the update travels on.
+    """
+
+    def test_the_protocol_version_did_not_move(self):
+        self.assertEqual(protocol.VERSION, 2)
+
+    def test_provider_and_src_are_always_present(self):
+        u = protocol.usage(1.0, "R", 2.0, "R", [])
+        self.assertEqual(u["provider"], "claude")
+        self.assertEqual(u["src"], "cli")
+
+    def test_unknown_optional_fields_are_omitted_not_sentinelled(self):
+        u = protocol.usage(1.0, "R", 2.0, "R", [])
+        for k in ("ctx_pct", "model", "state"):
+            self.assertNotIn(k, u)
+
+    def test_a_second_provider_names_itself(self):
+        u = protocol.usage(1.0, "R", 2.0, "R", [], provider="codex",
+                           src="desktop", state="running")
+        self.assertEqual(u["provider"], "codex")
+        self.assertEqual(u["src"], "desktop")
+        self.assertEqual(u["state"], "running")
+
+    def test_frame_to_usage_computes_both_countdowns(self):
+        from pc.providers import base
+        f = base.NormalizedUsageFrame(
+            provider="claude", src="cli", observed_at=1_787_200_000,
+            session_pct=10.0, session_resets_at=1_787_203_200,
+            weekly_pct=20.0, weekly_resets_at=1_787_644_800)
+        u = protocol.frame_to_usage(f, 1_787_200_000)
+        self.assertEqual(u["session_resets_in_s"], 3200)
+        self.assertEqual(u["weekly_resets_in_s"], 444800)
+
+    def test_a_past_reset_stays_unknown_through_the_frame(self):
+        from pc.providers import base
+        f = base.NormalizedUsageFrame(
+            provider="claude", src="cli", observed_at=1_787_200_000,
+            session_pct=10.0, session_resets_at=1_787_100_000)
+        u = protocol.frame_to_usage(f, 1_787_200_000)
+        self.assertEqual(u["session_resets_in_s"], -1)

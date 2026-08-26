@@ -199,3 +199,89 @@ def test_an_old_payload_past_its_reset_stays_stale_and_is_not_zeroed():
     assert msg["session_pct"] == 50      # left exactly as found
     assert msg["weekly_pct"] == 20
 
+
+
+# --- context window and model name (handoff doc S3A1) ---------------------
+
+
+def test_context_window_is_extracted():
+    payload = {"context_window": {"used_percentage": 55},
+               "rate_limits": {"five_hour": {"used_percentage": 3.0,
+                                             "resets_at": 1_787_203_200}}}
+    msg = ss.map_statusline(payload, now_epoch=1_787_200_000,
+                            mtime_epoch=1_787_200_000)
+    assert msg["ctx_pct"] == 55.0
+
+
+def test_model_display_name_is_extracted():
+    payload = {"model": {"id": "claude-opus-5", "display_name": "Opus 5"},
+               "rate_limits": {}}
+    msg = ss.map_statusline(payload, now_epoch=1_787_200_000,
+                            mtime_epoch=1_787_200_000)
+    assert msg["model"] == "Opus 5"
+
+
+def test_absent_context_window_omits_the_key_entirely():
+    """An absent key is how 'unknown' is spelled on the wire -- a sentinel
+    would spend line budget to say nothing. The firmware defaults to -1."""
+    msg = ss.map_statusline({"rate_limits": {}}, now_epoch=1_787_200_000,
+                            mtime_epoch=1_787_200_000)
+    assert "ctx_pct" not in msg
+    assert "model" not in msg
+
+
+def test_a_context_percentage_out_of_range_is_refused():
+    """340% means we misread the field, not that the context is 340% full."""
+    payload = {"context_window": {"used_percentage": 340}, "rate_limits": {}}
+    msg = ss.map_statusline(payload, now_epoch=1_787_200_000,
+                            mtime_epoch=1_787_200_000)
+    assert "ctx_pct" not in msg
+
+
+def test_a_non_numeric_context_percentage_is_refused():
+    payload = {"context_window": {"used_percentage": "lots"}, "rate_limits": {}}
+    msg = ss.map_statusline(payload, now_epoch=1_787_200_000,
+                            mtime_epoch=1_787_200_000)
+    assert "ctx_pct" not in msg
+
+
+def test_a_stale_payload_drops_context_and_model_but_keeps_the_windows():
+    """The windows survive going stale; these two must not.
+
+    A billing window is still running, so its last known figure is still worth
+    an amber dot. A context percentage describes one conversation that an
+    abandoned Claude Code has very likely left, and a model name from
+    yesterday names yesterday's model.
+    """
+    payload = {
+        "context_window": {"used_percentage": 55},
+        "model": {"display_name": "Opus 5"},
+        "rate_limits": {"five_hour": {"used_percentage": 37.0,
+                                      "resets_at": 1_787_300_000}},
+    }
+    msg = ss.map_statusline(payload, now_epoch=1_787_200_000,
+                            mtime_epoch=1_787_200_000 - ss.STALE_AFTER_S - 1)
+    assert msg["stale"] is True
+    assert msg["session_pct"] == 37.0     # kept
+    assert "ctx_pct" not in msg           # dropped
+    assert "model" not in msg             # dropped
+
+
+def test_every_message_names_its_provider_and_source():
+    msg = ss.map_statusline({"rate_limits": {}}, now_epoch=1_787_200_000,
+                            mtime_epoch=1_787_200_000)
+    assert msg["provider"] == "claude"
+    assert msg["src"] == "cli"
+
+
+def test_the_real_capture_fits_the_board_line_limit():
+    """The board DROPS an over-long line whole (proto.c:367-371) -- no
+    truncation, no error, the panel just stops updating. Every field added to
+    this message spends that budget, so the real capture is pinned here."""
+    from pc import protocol
+    payload = json.loads(FIXTURE.read_text())
+    msg = ss.map_statusline(payload, now_epoch=1_787_300_000,
+                            mtime_epoch=1_787_300_000)
+    raw, why = protocol.encode_checked(msg)
+    assert why is None, why
+    assert len(raw) <= protocol.MAX_LINE_BYTES

@@ -13,6 +13,12 @@ import os
 import time
 
 from pc import protocol
+from pc.providers import base
+
+# Who we are on the ingestion bus. The board and the normalizer both key off
+# these, so they are named once here rather than spelled at each call site.
+PROVIDER_ID = "claude"
+SRC_ID = "cli"
 
 PAYLOAD_PATH = os.path.expanduser("~/.clauge/statusline.json")
 # How old the payload may get before we stop vouching for it.
@@ -63,24 +69,10 @@ def _window(rate_limits: dict, key: str):
     return pct, resets if isinstance(resets, (int, float)) else None
 
 
-def _secs_until(resets_at, now_epoch: float) -> int:
-    """Seconds until `resets_at`. -1 when unknown or already past.
-
-    -1 rather than 0 for missing input: 0 renders as "resets now", which is a
-    confident lie. -1 lets the display say "--".
-
-    And -1 rather than 0 for a reset that has ALREADY passed, which is not a
-    presentation choice. usage_view.c treats a countdown of exactly 0 as "this
-    window just rolled over" and zeroes the percentage with it -- correct for
-    the firmware's own countdown reaching zero, and wrong for us, because the
-    only payload that reaches here with a past reset is a stale one, and
-    _rolled_over() deliberately refuses to zero those: usage may have happened
-    from claude.ai or the phone since. Sending 0 handed the board the very
-    decision this module declined to make, and it wiped the last-known numbers.
-    """
-    if resets_at is None or resets_at <= now_epoch:
-        return -1
-    return int(resets_at - now_epoch)
+# _secs_until moved to protocol.secs_until when a second provider needed the
+# same countdown. The reasoning that used to live here -- why -1 rather than 0,
+# both for missing input and for an already-past reset -- moved with it.
+_secs_until = protocol.secs_until
 
 
 def _window_has_reset(resets_at, now_epoch: float) -> bool:
@@ -121,8 +113,52 @@ def _rolled_over(pct: float, resets_at, now_epoch: float):
     return 0.0, None
 
 
-def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
-    """Convert a statusline payload into a 'usage' protocol message."""
+def _context_pct(payload: dict) -> float:
+    """Context window fullness, or UNKNOWN.
+
+    Claude Code reports this as `context_window.used_percentage`, and it is
+    the one number here that is about the CURRENT CONVERSATION rather than
+    about a billing window. That difference matters for staleness: a session
+    percentage from an hour ago is merely old, but a context percentage from
+    an hour ago may describe a conversation that has since been cleared. It is
+    carried on the same frame anyway and gated by the same freshness rule --
+    see map_statusline_frame, which drops it rather than showing a number for
+    a conversation that may not exist any more.
+    """
+    cw = payload.get("context_window")
+    if not isinstance(cw, dict):
+        return base.UNKNOWN
+    try:
+        pct = float(cw["used_percentage"])
+    except (KeyError, TypeError, ValueError):
+        return base.UNKNOWN
+    # Out-of-range means we misread the field, not that the context is 340%
+    # full. Refusing it is how a schema change surfaces as "--" rather than as
+    # a meter pinned to an absurd value.
+    return pct if 0 <= pct <= 100 else base.UNKNOWN
+
+
+def _model_name(payload: dict) -> str:
+    """The display name of the model in use, or "".
+
+    Trimmed to the wire budget by protocol.usage rather than here: this is the
+    provider's honest answer, and truncation is a property of the transport.
+    """
+    m = payload.get("model")
+    if not isinstance(m, dict):
+        return ""
+    name = m.get("display_name")
+    return name.strip() if isinstance(name, str) else ""
+
+
+def map_statusline_frame(payload: dict, now_epoch: float,
+                         mtime_epoch: float):
+    """Convert a statusline payload into a NormalizedUsageFrame.
+
+    The real body of this module. map_statusline() below is the same thing
+    rendered straight to a protocol message, kept because it is what the
+    existing tests pin and what a single-provider daemon needed.
+    """
     rate_limits = payload.get("rate_limits") or {}
     session_pct, session_resets = _window(rate_limits, "five_hour")
     weekly_pct, weekly_resets = _window(rate_limits, "seven_day")
@@ -138,13 +174,32 @@ def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
         weekly_pct, weekly_resets = _rolled_over(weekly_pct, weekly_resets,
                                                  now_epoch)
 
-    # No per-model rows: the statusline payload has no per-model breakdown.
-    return protocol.usage(
-        session_pct, "", weekly_pct, "", [],
-        session_resets_in_s=_secs_until(session_resets, now_epoch),
-        weekly_resets_in_s=_secs_until(weekly_resets, now_epoch),
-        stale=stale,
+    # Context and model are dropped from a stale payload rather than carried.
+    #
+    # The two usage windows survive going stale because they are still the
+    # last thing known to be true about a billing window that is still running
+    # -- an amber dot over real numbers. Neither of these is like that. A
+    # context percentage describes one conversation, and an abandoned Claude
+    # Code has very likely moved on to another or none; a model name from
+    # yesterday names what was in use yesterday. Showing either as though it
+    # were current is the frozen-meter failure this module exists to avoid,
+    # and unlike the windows there is no "last good" worth keeping.
+    ctx_pct = base.UNKNOWN if stale else _context_pct(payload)
+    model = "" if stale else _model_name(payload)
+
+    return base.NormalizedUsageFrame(
+        provider=PROVIDER_ID, src=SRC_ID, observed_at=mtime_epoch,
+        session_pct=session_pct, session_resets_at=session_resets,
+        weekly_pct=weekly_pct, weekly_resets_at=weekly_resets,
+        ctx_pct=ctx_pct, model=model, stale=stale,
     )
+
+
+def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
+    """Convert a statusline payload into a 'usage' protocol message."""
+    # No per-model rows: the statusline payload has no per-model breakdown.
+    return protocol.frame_to_usage(
+        map_statusline_frame(payload, now_epoch, mtime_epoch), now_epoch)
 
 
 def read_payload(path: str = PAYLOAD_PATH):
