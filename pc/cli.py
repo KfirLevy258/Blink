@@ -810,6 +810,37 @@ def cmd_status(_args) -> int:
     print("Status line " + (f"installed at {shim_path()}" if os.path.exists(shim_path())
                             else "not installed"))
 
+    # Install writes two things into settings.json, so status has to report
+    # two. Reporting only the status line is the same omission the setup
+    # disclosure had: someone whose activity pip never lights needs a way to
+    # see whether the hooks are actually there, and "Status line installed"
+    # answers a different question.
+    #
+    # Counted from settings.json rather than from the shim's presence on disk:
+    # the file existing proves an install ran once, not that Claude Code is
+    # still configured to call it, and drift is exactly what goes wrong here.
+    try:
+        hooks = (install_statusline._load(settings_path()).get("hooks") or {})
+        ours = sum(
+            1 for event, _ in install_hooks.HOOK_EVENTS
+            for group in (hooks.get(event) or [])
+            if isinstance(group, dict)
+            for h in (group.get("hooks") or [])
+            if isinstance(h, dict)
+            and h.get("command") == install_hooks.hook_command(
+                hook_shim_path(), event))
+        total = len(install_hooks.HOOK_EVENTS)
+        if ours == total:
+            print(f"Activity    hooks installed ({ours}/{total} events)")
+        elif ours:
+            print(f"Activity    PARTIAL -- {ours}/{total} hooks present;"
+                  f" run `{installed_bin()} install` to restore them")
+        else:
+            print("Activity    hooks not installed -- the busy/idle pip will"
+                  " stay dark")
+    except install_statusline.SettingsUnreadable:
+        print("Activity    unknown -- settings.json does not parse")
+
     # The most useful support answer: is fresh data actually arriving?
     payload = os.path.join(clauge_home(), "statusline.json")
     if os.path.exists(payload):

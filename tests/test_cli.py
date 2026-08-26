@@ -286,3 +286,38 @@ def test_uninstall_finishes_even_when_settings_will_not_parse(tmp_path, capsys):
     assert "Left alone" in out
     assert not os.path.exists(cli.bin_dir()), "the binary survived"
     assert rc == 0
+
+
+def test_status_reports_the_hooks_not_only_the_status_line(tmp_path, capsys):
+    """Install writes two things into settings.json, so status must report
+    two. Someone whose activity pip never lights needs a way to see whether
+    the hooks are there; 'Status line installed' answers a different
+    question."""
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    capsys.readouterr()
+    cli.main(["status"])
+    assert "hooks installed (6/6 events)" in capsys.readouterr().out
+
+
+def test_status_notices_hooks_that_went_missing(tmp_path, capsys):
+    """Counted from settings.json, not from the shim existing on disk: the
+    file being there proves an install ran once, not that Claude Code is
+    still configured to call it."""
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    data = json.loads(_settings(tmp_path).read_text())
+    del data["hooks"]["PreToolUse"]
+    del data["hooks"]["Stop"]
+    _settings(tmp_path).write_text(json.dumps(data))
+    capsys.readouterr()
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "PARTIAL -- 4/6" in out
+    assert "install` to restore them" in out
+
+
+def test_status_says_so_when_no_hooks_are_installed(tmp_path, capsys):
+    _settings(tmp_path, {"statusLine": {"type": "command", "command": "x"}})
+    cli.main(["status"])
+    assert "hooks not installed" in capsys.readouterr().out
