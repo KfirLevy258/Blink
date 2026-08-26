@@ -29,12 +29,23 @@ INSTALLED_MARKER_PATH = "~/.clauge/hooks-installed-commands"
 # event takes a tool matcher. Tool events fire per tool call; the rest fire
 # once per turn or per session.
 HOOK_EVENTS = (
+    ("SessionStart", False),
     ("UserPromptSubmit", False),
     ("PreToolUse", True),
     ("PostToolUse", True),
     ("Notification", False),
     ("Stop", False),
+    # Runs INSTEAD of Stop when a turn dies on an API error, and carries
+    # error: "rate_limit" among its causes. On a usage gauge that is the
+    # headline, so it is worth a hook of its own rather than being left to
+    # look like a turn that simply went quiet.
+    ("StopFailure", False),
     ("SessionEnd", False),
+    # Subagent lifetimes. Both carry agent_id, which is what lets the shim
+    # keep one file per agent and the daemon count them exactly without a
+    # lock -- see tools/clauge-hook.sh.
+    ("SubagentStart", True),
+    ("SubagentStop", True),
 )
 
 

@@ -43,6 +43,7 @@ static lv_obj_t *ctx_cap;	/* the "CTX" caption beside it */
 static lv_obj_t *ctx_val;	/* ...and the percentage after it */
 static lv_obj_t *model_lbl;	/* which model is in use */
 static lv_obj_t *act_pip;	/* execution state, as a coloured pip */
+static lv_obj_t *sess_lbl;	/* "3s 7a" -- open sessions and live agents */
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
 static lv_obj_t *overlay;	/* full-screen "no data" takeover */
 static lv_obj_t *wait_big;	/* the takeover's CONNECTING title */
@@ -316,6 +317,7 @@ void usage_view_deinit(void)
 	ctx_val = NULL;
 	model_lbl = NULL;
 	act_pip = NULL;
+	sess_lbl = NULL;
 	activity = USAGE_ACTIVITY_NONE;
 #if HAVE_PER_MODEL
 	peek = NULL;
@@ -390,7 +392,21 @@ void usage_view_init(void)
 	model_lbl = lv_label_create(scr);
 	lv_label_set_text(model_lbl, "");
 	lv_obj_set_style_text_color(model_lbl, COL_DIM, 0);
+	/* Bounded and centred, so a long name ellipsizes instead of sprawling
+	 * across the left column the session readout lives in. */
+	lv_obj_set_width(model_lbl, MODEL_W);
+	lv_label_set_long_mode(model_lbl, LV_LABEL_LONG_MODE_DOTS);
+	lv_obj_set_style_text_align(model_lbl, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(model_lbl, LV_ALIGN_TOP_MID, 0, MODEL_Y);
+
+	/* Open sessions and live agents, beside the pip. Blank at one session
+	 * with no agents: on the ordinary machine there is nothing here worth
+	 * saying, and a permanent "1s" is noise that trains the eye to skip
+	 * the corner where the interesting number will appear. */
+	sess_lbl = lv_label_create(scr);
+	lv_label_set_text(sess_lbl, "");
+	lv_obj_set_style_text_color(sess_lbl, COL_DIM, 0);
+	lv_obj_align(sess_lbl, LV_ALIGN_TOP_LEFT, SESS_X, SESS_Y);
 
 	/* Execution state, in the left column under the clock. Hidden at
 	 * USAGE_ACTIVITY_NONE rather than shown grey: a dark corner says
@@ -762,6 +778,7 @@ void usage_view_set_activity(enum usage_activity a)
 		lv_obj_set_style_bg_color(act_pip, COL_AMBER, 0);
 		break;
 	case USAGE_ACTIVITY_STUCK:
+	case USAGE_ACTIVITY_FAILED:
 		lv_obj_set_style_bg_color(act_pip, COL_RED, 0);
 		break;
 	default:
@@ -814,6 +831,37 @@ void usage_view_set_context(double ctx_pct)
 
 	snprintf(buf, sizeof(buf), "%d%%", (int)(ctx_pct + 0.5));
 	lv_label_set_text(ctx_val, buf);
+}
+
+void usage_view_set_sessions(int n_sessions, int n_agents)
+{
+	char buf[16];
+
+	if (!sess_lbl) {
+		return;
+	}
+	/* One session and no agents is the ordinary case and says nothing
+	 * worth a pixel. Anything else is the reason this readout exists. */
+	if (n_sessions <= 1 && n_agents <= 0) {
+		lv_label_set_text(sess_lbl, "");
+		return;
+	}
+	/* Clamped at 9 rather than widened. The field is 44 px because that is
+	 * what is left beside a bounded model label, and "12s 34a" would run
+	 * under it. Nine is already far past the point where the exact number
+	 * changes what anyone does about it. */
+	if (n_sessions > 9) {
+		n_sessions = 9;
+	}
+	if (n_agents > 9) {
+		n_agents = 9;
+	}
+	if (n_agents > 0) {
+		snprintf(buf, sizeof(buf), "%ds %da", n_sessions, n_agents);
+	} else {
+		snprintf(buf, sizeof(buf), "%ds", n_sessions);
+	}
+	lv_label_set_text(sess_lbl, buf);
 }
 
 void usage_view_set_model(const char *name)

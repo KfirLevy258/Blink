@@ -27,6 +27,8 @@ int main(void)
 	      "waiting -> WAITING");
 	CHECK(usage_activity_from_state("stuck") == USAGE_ACTIVITY_STUCK,
 	      "stuck -> STUCK");
+	CHECK(usage_activity_from_state("failed") == USAGE_ACTIVITY_FAILED,
+	      "failed -> FAILED");
 
 	/* The cases that cannot be seen on a desk. */
 	CHECK(usage_activity_from_state("compacting") == USAGE_ACTIVITY_NONE,
@@ -48,6 +50,13 @@ int main(void)
 	/* NONE must stay the zero value: proto.c initialises `act` to it
 	 * before the msg_get_str, and relies on that when the key is absent. */
 	CHECK(USAGE_ACTIVITY_NONE == 0, "NONE is the zero value");
+
+	/* FAILED and STUCK are distinct enum values even though both render
+	 * red today. They are different facts -- a wedged tool versus a turn
+	 * that died on an API error -- and collapsing them here would make
+	 * telling them apart later a protocol change rather than a UI one. */
+	CHECK(USAGE_ACTIVITY_FAILED != USAGE_ACTIVITY_STUCK,
+	      "FAILED is not merely an alias for STUCK");
 
 	printf(failures ? "\n%d FAILED\n" : "\nall state checks passed\n",
 	       failures);

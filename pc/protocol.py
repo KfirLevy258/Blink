@@ -139,7 +139,8 @@ def time_msg(epoch: int, utc_offset_min: int) -> dict:
 def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           session_resets_in_s=-1, weekly_resets_in_s=-1, stale=False,
           provider="claude", src="cli", ctx_pct=UNKNOWN, model="",
-          state="") -> dict:
+          state="", n_sess=0, n_run=0, n_wait=0, n_stuck=0,
+          n_agents=0) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -197,6 +198,15 @@ The firmware reads this field: proto.c's "usage" handler calls
     if state:
         extra["state"] = state
 
+    # Session and agent counts. Zeros are omitted like everything else here --
+    # an absent count reads as zero on both sides, and on the common machine
+    # (one session, no agents) that keeps this whole block down to about
+    # twenty bytes instead of sixty.
+    for key, val in (("n_sess", n_sess), ("n_run", n_run), ("n_wait", n_wait),
+                     ("n_stuck", n_stuck), ("n_agents", n_agents)):
+        if val:
+            extra[key] = int(val)
+
     return {
         "t": "usage", "v": VERSION,
         "session_pct": session_pct, "session_resets_at": session_resets_at,
@@ -228,6 +238,8 @@ def frame_to_usage(frame, now_epoch: float) -> dict:
         stale=frame.stale,
         provider=frame.provider, src=frame.src,
         ctx_pct=frame.ctx_pct, model=frame.model, state=frame.state,
+        n_sess=frame.n_sessions(), n_run=frame.n_run, n_wait=frame.n_wait,
+        n_stuck=frame.n_stuck, n_agents=frame.n_agents,
     )
 
 

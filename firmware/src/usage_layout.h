@@ -33,8 +33,17 @@
 #define HDR_ROW_Y		8
 #define DOT_SZ			12
 
-/* Which model is in use, under the brand. */
+/*
+ * Which model is in use, under the brand.
+ *
+ * BOUNDED, not auto-sized. A label left to size itself grows with its text,
+ * and the daemon's cap is 24 characters -- about 190 px centred, which reaches
+ * from x=65 to x=255 and leaves no left column for anything else. Fixing the
+ * width and letting a long name ellipsize is what makes room for the session
+ * readout beside it.
+ */
 #define MODEL_Y			23
+#define MODEL_W			170
 
 /* Execution-state pip, left column under the clock. */
 #define ACT_PIP_X		12
@@ -60,6 +69,16 @@
 #define CTX_VAL_X		134
 #define CTX_VAL_Y		202
 #define CTX_VAL_MAX_W		36	/* "100%" */
+
+/*
+ * Session/agent readout, in the header's left column beneath the activity
+ * pip. Left rather than centre because the centre is the brand and the model
+ * name, and right is the age and the status dot -- the left column has the
+ * clock and the pip and room under both.
+ */
+#define SESS_X			22
+#define SESS_Y			24
+#define SESS_MAX_W		44	/* "9s 9a" -- compact on purpose, see MODEL_W */
 
 /* Hint line, bottom-centred; carries the amber/red explanation. */
 #define HINT_BOTTOM_OFF		6

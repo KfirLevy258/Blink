@@ -19,6 +19,9 @@ enum usage_activity usage_activity_from_state(const char *state)
 	if (strcmp(state, "stuck") == 0) {
 		return USAGE_ACTIVITY_STUCK;
 	}
+	if (strcmp(state, "failed") == 0) {
+		return USAGE_ACTIVITY_FAILED;
+	}
 	/*
 	 * Anything else goes dark rather than landing on whichever branch
 	 * happened to be last. A newer daemon naming a state this firmware has

@@ -288,6 +288,16 @@ static void dispatch(const char *json)
 		}
 		usage_view_set_activity(act);
 
+		/* Session and agent counts. Absent means zero here rather than
+		 * unknown -- a daemon that sends no count is one with nothing
+		 * to report, and the readout hides itself at one session with
+		 * no agents anyway. */
+		double ns = 0, na = 0;
+
+		msg_get_double(json, "n_sess", &ns);
+		msg_get_double(json, "n_agents", &na);
+		usage_view_set_sessions((int)ns, (int)na);
+
 		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)%s%s\n",
 		       sp, (int)ss, wp, (int)ws, stale ? "  STALE" : "",
 		       act == USAGE_ACTIVITY_NONE ? "" : " +state");

@@ -108,6 +108,12 @@ def test_the_disclosure_names_every_file_install_writes(tmp_path, capsys):
     assert "hooks" in disclosure, "disclosure omits the hooks key it writes"
     assert str(cli.hook_shim_path()) in disclosure, \
         "disclosure omits the hook shim it creates"
+    # The capture widened from "event name and time" to include the session
+    # and agent ids. The disclosure is the only safeguard on an install that
+    # asks nothing, so it has to say so.
+    assert "session and" in disclosure and "agent ids" in disclosure, \
+        "disclosure does not mention the ids the hook shim now records"
+    assert "state" in disclosure, "disclosure omits the state directory"
     assert str(cli.shim_path()) in disclosure
     assert str(_settings(tmp_path)) in disclosure
 
@@ -297,7 +303,11 @@ def test_status_reports_the_hooks_not_only_the_status_line(tmp_path, capsys):
     cli.main(["install"])
     capsys.readouterr()
     cli.main(["status"])
-    assert "hooks installed (6/6 events)" in capsys.readouterr().out
+    # Derived, not hardcoded: the event list grows, and a pinned "6/6" turns
+    # every addition into a spurious failure in a test about something else.
+    from pc import install_hooks
+    n = len(install_hooks.HOOK_EVENTS)
+    assert f"hooks installed ({n}/{n} events" in capsys.readouterr().out
 
 
 def test_status_notices_hooks_that_went_missing(tmp_path, capsys):
@@ -306,6 +316,8 @@ def test_status_notices_hooks_that_went_missing(tmp_path, capsys):
     still configured to call it."""
     _settings(tmp_path, {})
     cli.main(["install"])
+    from pc import install_hooks
+    n = len(install_hooks.HOOK_EVENTS)
     data = json.loads(_settings(tmp_path).read_text())
     del data["hooks"]["PreToolUse"]
     del data["hooks"]["Stop"]
@@ -313,7 +325,7 @@ def test_status_notices_hooks_that_went_missing(tmp_path, capsys):
     capsys.readouterr()
     cli.main(["status"])
     out = capsys.readouterr().out
-    assert "PARTIAL -- 4/6" in out
+    assert f"PARTIAL -- {n - 2}/{n}" in out
     assert "install` to restore them" in out
 
 

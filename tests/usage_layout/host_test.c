@@ -95,14 +95,19 @@ int main(void)
 				     FONT_LINE_H);
 
 	/* The header row. */
-	struct box model = top_mid("model", 0, MODEL_Y, 160, FONT_LINE_H);
+	/* MODEL_W, not a guess: the label is width-bounded and ellipsizes, so
+	 * this IS its extent however long the model name gets. */
+	struct box model = top_mid("model", 0, MODEL_Y, MODEL_W, FONT_LINE_H);
+	struct box sess = top_left("session readout", SESS_X, SESS_Y,
+				   SESS_MAX_W, FONT_LINE_H);
 	struct box pip = top_left("activity pip", ACT_PIP_X, ACT_PIP_Y,
 				  ACT_PIP_SZ, ACT_PIP_SZ);
 	struct box arc_l = top_mid("arc L", -GAUGE_CX, GAUGE_ARC_Y,
 				   GAUGE_ARC_SZ, GAUGE_ARC_SZ);
 
 	/* --- everything is on the panel at all --- */
-	struct box all[] = { cap, bar, val, cd_l, cd_r, hint, model, pip, arc_l };
+	struct box all[] = { cap, bar, val, cd_l, cd_r, hint, model, pip, arc_l,
+			     sess };
 	for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		char msg[64];
 		snprintf(msg, sizeof(msg), "%s fits on the panel", all[i].name);
@@ -137,6 +142,17 @@ int main(void)
 	CHECK(model.y1 <= GAUGE_ARC_Y, "model label sits above the arcs");
 	CHECK(!overlaps(pip, model), "activity pip clears the model label");
 	CHECK(pip.y1 <= GAUGE_ARC_Y, "activity pip sits above the arcs");
+
+	/* The session readout shares the header band with a CENTRED model
+	 * label. This is the collision the bounded MODEL_W exists to prevent:
+	 * an auto-sized label at the daemon's 24-character cap reaches about
+	 * x=65, and the readout starts at x=22. */
+	CHECK(!overlaps(sess, model), "session readout clears the model label");
+	CHECK(sess.x1 <= model.x0, "session readout sits left of the model label");
+	CHECK(!overlaps(sess, pip), "session readout clears the activity pip");
+	CHECK(sess.x0 >= ACT_PIP_X + ACT_PIP_SZ,
+	      "session readout starts right of the pip");
+	CHECK(sess.y1 <= GAUGE_ARC_Y, "session readout sits above the arcs");
 
 	/* --- the text budgets are real --- */
 	CHECK((int)strlen("CTX") * CHAR_W_MAX <= CTX_CAP_MAX_W + CHAR_W_MAX,

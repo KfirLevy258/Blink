@@ -84,7 +84,7 @@ def merge(frames):
     ctx_pct, _ = _pick(
         frames, lambda f: _known_pct(f.ctx_pct), lambda f: f.ctx_pct)
     model, _ = _pick(frames, lambda f: bool(f.model), lambda f: f.model)
-    state, _ = _pick(
+    state, state_src = _pick(
         frames, lambda f: f.state != base.STATE_UNKNOWN, lambda f: f.state)
 
     # The primary dial decides two things that have to agree with each other.
@@ -110,6 +110,15 @@ def merge(frames):
         model=model or "",
         state=state or base.STATE_UNKNOWN,
         stale=primary.stale,
+        # The counts travel with the state they describe. Taking them
+        # field-by-field like everything else would let a session count from
+        # one source sit beside a state from another, which is a panel saying
+        # "3 sessions, one of them stuck" on evidence that never agreed.
+        n_run=state_src.n_run if state_src else 0,
+        n_wait=state_src.n_wait if state_src else 0,
+        n_stuck=state_src.n_stuck if state_src else 0,
+        n_idle=state_src.n_idle if state_src else 0,
+        n_agents=state_src.n_agents if state_src else 0,
     )
 
 

@@ -26,6 +26,7 @@ enum usage_activity {
 	USAGE_ACTIVITY_RUNNING,		/* green, pulsing: working */
 	USAGE_ACTIVITY_WAITING,		/* amber: wants a human */
 	USAGE_ACTIVITY_STUCK,		/* red: announced work, then went silent */
+	USAGE_ACTIVITY_FAILED,		/* red: the turn died on an API error */
 };
 
 /* Build the screen. Call once, before any update. */
@@ -111,5 +112,15 @@ void usage_view_set_context(double ctx_pct);
 void usage_view_set_model(const char *name);
 
 void usage_view_set_activity(enum usage_activity a);
+
+/*
+ * How many Claude Code sessions are open, and how many subagents are running
+ * across them. Both 0 hides the readout entirely.
+ *
+ * Counts, not a list. The board drops an over-long line whole, and a
+ * per-session array blows the 512-byte budget at around four sessions -- on
+ * exactly the busy machine most likely to have four.
+ */
+void usage_view_set_sessions(int n_sessions, int n_agents);
 
 #endif /* USAGE_VIEW_H */

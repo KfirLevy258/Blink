@@ -31,9 +31,13 @@ STATE_IDLE = "idle"
 STATE_RUNNING = "running"
 STATE_WAITING = "waiting"
 STATE_STUCK = "stuck"
+# A turn that ended on an API error rather than on an answer. Its own state
+# because StopFailure carries `error: "rate_limit"` among its causes, and on a
+# usage gauge being rate limited is the headline rather than a detail.
+STATE_FAILED = "failed"
 
 VALID_STATES = (STATE_UNKNOWN, STATE_IDLE, STATE_RUNNING, STATE_WAITING,
-                STATE_STUCK)
+                STATE_STUCK, STATE_FAILED)
 
 
 @dataclasses.dataclass
@@ -62,6 +66,23 @@ class NormalizedUsageFrame:
     model: str = ""
     state: str = STATE_UNKNOWN
     stale: bool = False
+    # How many live sessions are in each state, and how many subagents are
+    # running across all of them. `state` above is the worst of these, for a
+    # single indicator; these are what a list would be built from.
+    #
+    # Counts rather than a list of sessions, and that is a wire decision
+    # reaching back into the frame: the board drops an over-long line whole
+    # (proto.c) and a per-session array blows the 512-byte budget at around
+    # four sessions -- taking the panel dark with no error, on exactly the
+    # busy machine most likely to have four.
+    n_run: int = 0
+    n_wait: int = 0
+    n_stuck: int = 0
+    n_idle: int = 0
+    n_agents: int = 0
+
+    def n_sessions(self) -> int:
+        return self.n_run + self.n_wait + self.n_stuck + self.n_idle
 
     def has_usage(self) -> bool:
         """True when this frame carries at least one usage percentage.

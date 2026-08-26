@@ -637,8 +637,12 @@ def _announce():
     print(f"  Creates    {hook_shim_path()}")
     print("             a second small script, run when Claude Code starts and")
     print("             finishes work, so the panel can show whether it is busy.")
-    print("             It records the name of the event and the time, and")
-    print("             nothing else -- no prompt, no tool arguments, no paths.")
+    print("             It records the event name, the time, and the session and")
+    print("             agent ids Claude Code generates -- used to tell concurrent")
+    print("             sessions apart, and for nothing else. No prompt, no tool")
+    print("             arguments, no file paths, no message text.")
+    print(f"  Creates    {os.path.join(clauge_home(), 'state')}")
+    print("             one small file per open session, deleted when it ends.")
     print(f"  Changes    {settings_path()}")
     # This list has to stay exactly true. Install asks nothing, so the
     # disclosure is the only thing standing between us and silently editing a
@@ -770,6 +774,10 @@ def cmd_uninstall(_args) -> int:
               os.path.join(clauge_home(), "state.json.tmp"),
               os.path.join(clauge_home(), "pending_fw.json")):
         _rm(p)
+    # The per-session state directory, and everything under it. state.json
+    # above is the single-slot file this replaced; it is still on the list so
+    # an install that predates the directory leaves nothing behind.
+    _rm_state_dir()
     done, message = _remove_bin_dir()
     print(message)
     print()
@@ -780,6 +788,54 @@ def cmd_uninstall(_args) -> int:
     print("back in, then delete it by hand:")
     print(f"  {bin_dir()}")
     return 1
+
+
+def _live_sessions() -> int:
+    """How many sessions the hooks are currently tracking.
+
+    The most useful support answer after "are the hooks installed": whether
+    they are actually firing. A count of zero on a machine where Claude Code
+    is open says the hooks are configured and not running, which is a
+    different problem from not being configured at all.
+    """
+    from pc.providers import claude_state
+    try:
+        counts, _ = claude_state.ClaudeStateProvider(
+            path=os.path.join(clauge_home(), "state"), sweep=False
+        ).scan(time.time())
+    except Exception:
+        return 0
+    return sum(counts.values())
+
+
+def _rm_state_dir():
+    """Remove ~/.clauge/state and its per-session subdirectories.
+
+    Two levels deep and no deeper, by construction: the shim only ever creates
+    <session>.state files and <session>/<agent> files. Walking rather than
+    shutil.rmtree because this runs against a path under the customer's home
+    and a bounded loop cannot be talked into deleting more than it was told.
+    """
+    root = os.path.join(clauge_home(), "state")
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        p = os.path.join(root, name)
+        if os.path.isdir(p):
+            for inner in (os.listdir(p) if os.path.isdir(p) else []):
+                _rm(os.path.join(p, inner))
+            try:
+                os.rmdir(p)
+            except OSError:
+                pass
+        else:
+            _rm(p)
+    try:
+        os.rmdir(root)
+    except OSError:
+        pass
 
 
 def cmd_status(_args) -> int:
@@ -831,7 +887,9 @@ def cmd_status(_args) -> int:
                 hook_shim_path(), event))
         total = len(install_hooks.HOOK_EVENTS)
         if ours == total:
-            print(f"Activity    hooks installed ({ours}/{total} events)")
+            live = _live_sessions()
+            note = f", {live} live session{'s' if live != 1 else ''}" if live else ""
+            print(f"Activity    hooks installed ({ours}/{total} events{note})")
         elif ours:
             print(f"Activity    PARTIAL -- {ours}/{total} hooks present;"
                   f" run `{installed_bin()} install` to restore them")

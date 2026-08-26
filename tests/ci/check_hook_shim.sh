@@ -3,14 +3,15 @@
 #
 #   tests/ci/check_hook_shim.sh [dash|busybox|bash|sh]
 #
-# Same reasoning as check_shim.sh, and the same stakes. This runs on EVERY tool
+# Same reasoning as check_shim.sh, and higher stakes. This runs on EVERY tool
 # call -- many times a minute during real work -- under whatever /bin/sh the
-# customer's machine provides. A bashism here does not fail loudly: the hook
-# exits non-zero or prints to the terminal, and a hook that misbehaves is a
-# hook the user turns off.
+# customer's machine provides, and Claude Code runs it inline, so a stray byte
+# on stdout or stderr lands in the user's own session.
 #
-# The one thing this shim must never do is emit anything. Claude Code runs it
-# inline, so a stray byte on stdout or stderr lands in the user's session.
+# It also now takes a session id out of the payload and uses it as a FILENAME,
+# which makes this the only place in the product where attacker-shaped input
+# reaches a path. The traversal and injection cases below are the point of
+# this file, not extras.
 set -eu
 
 # shellcheck source=tests/ci/lib.sh
@@ -37,79 +38,114 @@ export HOME
 
 SHIM="$HOME/clauge-hook.sh"
 cp "$SHIM_SRC" "$SHIM"
-# A realistic hook payload, including a field we must be seen not to keep.
-PAYLOAD='{"session_id":"abc-123","transcript_path":"/x/y.jsonl","tool_name":"Bash","hook_event_name":"PreToolUse"}'
+DIR="$HOME/.clauge/state"
+
+# A realistic payload, carrying several fields we must be seen NOT to keep.
+PAYLOAD='{"session_id":"abc-123","transcript_path":"/x/secret.jsonl","cwd":"/home/secret/proj","tool_name":"Bash","hook_event_name":"PreToolUse","last_assistant_message":"the secret is swordfish"}'
 
 printf '== hook shim under %s\n' "$SH"
 
-# 1. Records the event, prints nothing, says nothing.
+# 1. Records the event under the session's own file, silently.
 out=$(printf '%s' "$PAYLOAD" | $SH "$SHIM" PreToolUse 2>"$WORK/err.txt")
 [ -z "$out" ] || fail "printed to stdout: [$out]"
 [ -s "$WORK/err.txt" ] && fail "wrote to stderr: $(cat "$WORK/err.txt")"
-grep -q '"event":"PreToolUse"' "$HOME/.clauge/state.json" ||
-	fail "event not recorded: $(cat "$HOME/.clauge/state.json" 2>/dev/null)"
-ok "records the event, prints nothing, says nothing"
+grep -q '"event":"PreToolUse"' "$DIR/abc-123.state" ||
+	fail "event not recorded: $(cat "$DIR/abc-123.state" 2>/dev/null)"
+ok "records the event under its own session file, silently"
 
-# 2. A timestamp that is actually a number. The state provider divides by
-#    nothing and compares against now(); a quoted or empty value would parse
-#    as malformed and the activity pip would never light.
-grep -qE '"t":[0-9]{10}' "$HOME/.clauge/state.json" ||
-	fail "timestamp is not a bare 10-digit epoch: $(cat "$HOME/.clauge/state.json")"
+# 2. A bare 10-digit epoch. The provider divides nothing and compares against
+#    now(); a quoted or empty value parses as malformed and the pip never lights.
+grep -qE '"t":[0-9]{10}' "$DIR/abc-123.state" ||
+	fail "timestamp is not a bare epoch: $(cat "$DIR/abc-123.state")"
 ok "timestamp is a bare epoch integer"
 
-# 3. NOTHING from the payload is kept. This is the metadata-only promise, and
-#    it is structural here: the shim never parses the payload at all.
-for secret in abc-123 transcript_path Bash; do
-	if grep -q "$secret" "$HOME/.clauge/state.json"; then
-		fail "payload content leaked into state.json: $secret"
+# 3. Nothing but the event, the session id and the clock. The shim reads
+#    session_id and agent_id and NOTHING else from the payload, so none of
+#    these can appear anywhere under the state directory.
+for secret in secret.jsonl "home/secret" Bash swordfish; do
+	if grep -rq "$secret" "$DIR" 2>/dev/null; then
+		fail "payload content leaked into the state dir: $secret"
 	fi
 done
-ok "keeps nothing from the payload"
+ok "keeps nothing from the payload but the ids"
 
-# 4. Atomic write: a stray .tmp means the rename did not happen, and the daemon
-#    can read a half-written file.
-[ ! -e "$HOME/.clauge/state.json.tmp" ] || fail "left a .tmp file behind"
+# 4. Atomic write.
+[ ! -e "$DIR/abc-123.state.tmp" ] || fail "left a .tmp file behind"
 ok "atomic write leaves no temp file"
 
-# 5. Exit status is always 0. A non-zero exit is a signal to Claude Code, and
-#    Clauge having a bad day must not become the user's bad day.
+# 5. Two sessions do not overwrite each other. This is the whole reason the
+#    single global slot was replaced.
+printf '{"session_id":"sess-two"}' | $SH "$SHIM" Stop >/dev/null 2>&1
+grep -q '"event":"PreToolUse"' "$DIR/abc-123.state" ||
+	fail "a second session clobbered the first"
+grep -q '"event":"Stop"' "$DIR/sess-two.state" || fail "second session not recorded"
+ok "two sessions keep separate files"
+
+# 6. Agents: one file each, and a stop removes exactly its own.
+printf '{"session_id":"abc-123","agent_id":"agent-one"}' | $SH "$SHIM" SubagentStart >/dev/null 2>&1
+printf '{"session_id":"abc-123","agent_id":"agent-two"}' | $SH "$SHIM" SubagentStart >/dev/null 2>&1
+[ -f "$DIR/abc-123/agent-one" ] && [ -f "$DIR/abc-123/agent-two" ] ||
+	fail "agent files not created"
+printf '{"session_id":"abc-123","agent_id":"agent-one"}' | $SH "$SHIM" SubagentStop >/dev/null 2>&1
+[ ! -f "$DIR/abc-123/agent-one" ] || fail "SubagentStop did not remove its agent"
+[ -f "$DIR/abc-123/agent-two" ] || fail "SubagentStop removed the WRONG agent"
+ok "one file per agent; a stop removes exactly its own"
+
+# 7. SessionEnd takes the whole session with it, agents included.
+printf '{"session_id":"abc-123"}' | $SH "$SHIM" SessionEnd >/dev/null 2>&1
+[ ! -e "$DIR/abc-123.state" ] || fail "SessionEnd left the state file"
+[ ! -e "$DIR/abc-123" ] || fail "SessionEnd left the agent directory"
+[ -f "$DIR/sess-two.state" ] || fail "SessionEnd removed an unrelated session"
+ok "SessionEnd removes its own session and only its own"
+
+# 8. PATH TRAVERSAL. The session id becomes a filename, so this is the one
+#    place attacker-shaped input reaches a path. The character class in the
+#    extraction pattern IS the sanitiser -- a value with a slash simply fails
+#    to match and falls through to "unknown".
+CANARY="$WORK/canary"
+printf '{"session_id":"../../../../%s/pwned"}' "${CANARY#/}" |
+	$SH "$SHIM" PreToolUse >/dev/null 2>&1
+[ ! -e "$CANARY/pwned.state" ] || fail "PATH TRAVERSAL: wrote outside the state dir"
+[ -f "$DIR/unknown.state" ] || fail "traversal attempt did not fall back to 'unknown'"
+ok "a traversing session id cannot escape the state directory"
+
+# 9. Quote and command injection in the id.
+rm -f "$DIR/unknown.state"
+printf '{"session_id":"a\\"; touch %s/owned; echo \\"b"}' "$WORK" |
+	$SH "$SHIM" PreToolUse >/dev/null 2>&1
+[ ! -e "$WORK/owned" ] || fail "COMMAND INJECTION via session_id"
+ok "a quoting session id cannot run a command"
+
+# 10. Exit status is always 0 -- a non-zero exit is a signal to Claude Code.
 printf '%s' "$PAYLOAD" | $SH "$SHIM" Stop >/dev/null 2>&1
 [ $? -eq 0 ] || fail "non-zero exit on a normal run"
 ok "exits 0"
 
-# 6. Later events overwrite earlier ones -- one slot, newest wins.
-printf '%s' "$PAYLOAD" | $SH "$SHIM" Stop >/dev/null 2>&1
-grep -q '"event":"Stop"' "$HOME/.clauge/state.json" || fail "did not overwrite"
-grep -q 'PreToolUse' "$HOME/.clauge/state.json" && fail "kept the old event"
-ok "newest event wins"
-
-# 7. No argument at all. Claude Code should always pass one, but a settings
-#    file edited by hand may not, and the shim must not blow up over it.
-out=$(printf '%s' "$PAYLOAD" | $SH "$SHIM" 2>"$WORK/err7.txt")
+# 11. No argument at all. Claude Code always passes one, but a hand-edited
+#     settings file may not.
+out=$(printf '%s' "$PAYLOAD" | $SH "$SHIM" 2>"$WORK/err11.txt")
 [ -z "$out" ] || fail "printed something with no argument: [$out]"
-[ -s "$WORK/err7.txt" ] && fail "no-argument run wrote to stderr"
-grep -q '"event":"unknown"' "$HOME/.clauge/state.json" ||
+[ -s "$WORK/err11.txt" ] && fail "no-argument run wrote to stderr"
+grep -q '"event":"unknown"' "$DIR/abc-123.state" ||
 	fail "no-argument run did not record 'unknown'"
 ok "a missing event name records 'unknown' rather than failing"
 
-# 8. An unwritable HOME breaks the capture silently. Same rule as the
-#    statusline shim: our own capture is allowed to be broken, but it must
-#    never print on a path that runs many times a minute.
+# 12. An unwritable HOME breaks capture silently. Our own capture is allowed
+#     to be broken; it must never print on a path that runs many times a minute.
 RO="$WORK/readonly"
 mkdir -p "$RO"
 chmod 500 "$RO"
-out=$(HOME="$RO" sh -c "printf '%s' '$PAYLOAD' | $SH '$SHIM' PreToolUse" 2>"$WORK/err8.txt" || true)
+out=$(HOME="$RO" sh -c "printf '%s' '$PAYLOAD' | $SH '$SHIM' PreToolUse" 2>"$WORK/err12.txt" || true)
 [ -z "$out" ] || fail "printed with an unwritable HOME: [$out]"
-[ -s "$WORK/err8.txt" ] && fail "unwritable HOME wrote to stderr: $(cat "$WORK/err8.txt")"
+[ -s "$WORK/err12.txt" ] && fail "unwritable HOME wrote to stderr: $(cat "$WORK/err12.txt")"
 chmod 700 "$RO"
 ok "an unwritable HOME breaks capture silently"
 
-# 9. Stdin is drained. A hook that exits without reading gives its writer a
-#    SIGPIPE; this checks a large payload is consumed without complaint.
-big=$(awk 'BEGIN{printf "{\"pad\":\""; for(i=0;i<20000;i++) printf "x"; printf "\"}"}')
-out=$(printf '%s' "$big" | $SH "$SHIM" PostToolUse 2>"$WORK/err9.txt")
+# 13. Stdin is drained -- a hook that exits without reading SIGPIPEs its writer.
+big=$(awk 'BEGIN{printf "{\"session_id\":\"big\",\"pad\":\""; for(i=0;i<20000;i++) printf "x"; printf "\"}"}')
+out=$(printf '%s' "$big" | $SH "$SHIM" PostToolUse 2>"$WORK/err13.txt")
 [ -z "$out" ] || fail "printed on a large payload"
-[ -s "$WORK/err9.txt" ] && fail "large payload wrote to stderr: $(cat "$WORK/err9.txt")"
+[ -s "$WORK/err13.txt" ] && fail "large payload wrote to stderr: $(cat "$WORK/err13.txt")"
 ok "drains a large payload without complaint"
 
 printf 'PASS [%s]\n' "$WHICH"
