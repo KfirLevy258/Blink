@@ -81,9 +81,6 @@ def merge(frames):
     weekly_resets_at, _ = _pick(
         frames, lambda f: f.weekly_resets_at is not None,
         lambda f: f.weekly_resets_at)
-    ctx_pct, _ = _pick(
-        frames, lambda f: _known_pct(f.ctx_pct), lambda f: f.ctx_pct)
-    model, _ = _pick(frames, lambda f: bool(f.model), lambda f: f.model)
     state, state_src = _pick(
         frames, lambda f: f.state != base.STATE_UNKNOWN, lambda f: f.state)
 
@@ -106,8 +103,6 @@ def merge(frames):
         session_resets_at=session_resets_at,
         weekly_pct=weekly_pct if weekly_pct is not None else base.UNKNOWN,
         weekly_resets_at=weekly_resets_at,
-        ctx_pct=ctx_pct if ctx_pct is not None else base.UNKNOWN,
-        model=model or "",
         state=state or base.STATE_UNKNOWN,
         stale=primary.stale,
         # The counts travel with the state they describe. Taking them
@@ -119,11 +114,6 @@ def merge(frames):
         n_stuck=state_src.n_stuck if state_src else 0,
         n_idle=state_src.n_idle if state_src else 0,
         n_agents=state_src.n_agents if state_src else 0,
-        # n_ctx travels with the CONTEXT, not with the state: it qualifies
-        # ctx_pct, and pairing it with anything else would caption one
-        # source's number with another source's count.
-        n_ctx=max((f.n_ctx for f in frames if _known_pct(f.ctx_pct)),
-                  default=0),
     )
 
 

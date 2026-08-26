@@ -254,37 +254,12 @@ static void dispatch(const char *json)
 		}
 
 		/*
-		 * The multi-provider fields. All three are OPTIONAL and all
-		 * three default to "say nothing": the daemon omits a key it has
-		 * no answer for rather than sending a sentinel, so an absent
-		 * key and an old daemon are the same case here and neither may
-		 * turn an indicator on. See pc/protocol.usage().
+		 * The multi-provider fields. All OPTIONAL, and all defaulting
+		 * to "say nothing": the daemon omits a key it has no answer
+		 * for rather than sending a sentinel, so an absent key and an
+		 * old daemon are the same case here and neither may turn an
+		 * indicator on. See pc/protocol.usage().
 		 */
-		double cp = -1;
-
-		msg_get_double(json, "ctx_pct", &cp);
-		/* n_ctx: how many live contexts cp is the worst of. Absent
-		 * means one, which is what every daemon before this sent. */
-		double nctx = 0;
-
-		msg_get_double(json, "n_ctx", &nctx);
-		usage_view_set_context(cp, (int)nctx);
-
-		/*
-		 * 32 bytes against a daemon that caps the name at 24 chars.
-		 * Sized here rather than trusted from there: the two sides ship
-		 * separately, and msg_get_str truncates to the buffer, so the
-		 * worst a longer name from a newer daemon can do is arrive
-		 * clipped.
-		 */
-		char model[32];
-
-		if (msg_get_str(json, "model", model, sizeof(model))) {
-			usage_view_set_model(model);
-		} else {
-			usage_view_set_model("");
-		}
-
 		char state[16];
 		enum usage_activity act = USAGE_ACTIVITY_NONE;
 
@@ -303,9 +278,6 @@ static void dispatch(const char *json)
 		msg_get_double(json, "n_agents", &na);
 		usage_view_set_sessions((int)ns, (int)na);
 
-		/* A second provider, drawn as the inner ring on both gauges.
-		 * Absent on every single-provider board, which is the common
-		 * case and pays nothing for the capability. */
 		char p1[16];
 
 		if (msg_get_str(json, "provider", p1, sizeof(p1))) {

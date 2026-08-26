@@ -113,44 +113,6 @@ def _rolled_over(pct: float, resets_at, now_epoch: float):
     return 0.0, None
 
 
-def _context_pct(payload: dict) -> float:
-    """Context window fullness, or UNKNOWN.
-
-    Claude Code reports this as `context_window.used_percentage`, and it is
-    the one number here that is about the CURRENT CONVERSATION rather than
-    about a billing window. That difference matters for staleness: a session
-    percentage from an hour ago is merely old, but a context percentage from
-    an hour ago may describe a conversation that has since been cleared. It is
-    carried on the same frame anyway and gated by the same freshness rule --
-    see map_statusline_frame, which drops it rather than showing a number for
-    a conversation that may not exist any more.
-    """
-    cw = payload.get("context_window")
-    if not isinstance(cw, dict):
-        return base.UNKNOWN
-    try:
-        pct = float(cw["used_percentage"])
-    except (KeyError, TypeError, ValueError):
-        return base.UNKNOWN
-    # Out-of-range means we misread the field, not that the context is 340%
-    # full. Refusing it is how a schema change surfaces as "--" rather than as
-    # a meter pinned to an absurd value.
-    return pct if 0 <= pct <= 100 else base.UNKNOWN
-
-
-def _model_name(payload: dict) -> str:
-    """The display name of the model in use, or "".
-
-    Trimmed to the wire budget by protocol.usage rather than here: this is the
-    provider's honest answer, and truncation is a property of the transport.
-    """
-    m = payload.get("model")
-    if not isinstance(m, dict):
-        return ""
-    name = m.get("display_name")
-    return name.strip() if isinstance(name, str) else ""
-
-
 def map_statusline_frame(payload: dict, now_epoch: float,
                          mtime_epoch: float):
     """Convert a statusline payload into a NormalizedUsageFrame.
@@ -174,24 +136,11 @@ def map_statusline_frame(payload: dict, now_epoch: float,
         weekly_pct, weekly_resets = _rolled_over(weekly_pct, weekly_resets,
                                                  now_epoch)
 
-    # Context and model are dropped from a stale payload rather than carried.
-    #
-    # The two usage windows survive going stale because they are still the
-    # last thing known to be true about a billing window that is still running
-    # -- an amber dot over real numbers. Neither of these is like that. A
-    # context percentage describes one conversation, and an abandoned Claude
-    # Code has very likely moved on to another or none; a model name from
-    # yesterday names what was in use yesterday. Showing either as though it
-    # were current is the frozen-meter failure this module exists to avoid,
-    # and unlike the windows there is no "last good" worth keeping.
-    ctx_pct = base.UNKNOWN if stale else _context_pct(payload)
-    model = "" if stale else _model_name(payload)
-
     return base.NormalizedUsageFrame(
         provider=PROVIDER_ID, src=SRC_ID, observed_at=mtime_epoch,
         session_pct=session_pct, session_resets_at=session_resets,
         weekly_pct=weekly_pct, weekly_resets_at=weekly_resets,
-        ctx_pct=ctx_pct, model=model, stale=stale,
+        stale=stale,
     )
 
 

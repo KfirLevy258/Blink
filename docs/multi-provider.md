@@ -133,15 +133,23 @@ averaging.
 
 Each gauge draws a second, inner ring when a second provider reports.
 
-**Provider is encoded by colour, severity by the numerals.** Claude wears the
-brand's warm orange, Codex a teal well clear of it, anything else a cool blue —
-and the percentage in the middle of each gauge runs green/amber/red as it
-always did. The ring tells you whose, the number tells you how bad.
+**The arc is severity. A small ball at the end of the arc is the provider.**
 
-The earlier design had this the other way round (geometry for provider, colour
-for severity) on the grounds that colour is what the eye resolves from across a
-desk. That reasoning is why severity was *moved* rather than dropped: the
-warning still exists, in a different channel.
+Green under 60%, amber to 90%, red beyond — on the biggest element on the
+panel, which is where the thing you read from across a desk belongs. Identity
+is a second-look question, so it gets a disc the size of a fingernail at the
+tip of the filled arc, in that provider's colour: Claude the brand's warm
+orange, Codex a teal well clear of it, anything else a cool blue. The ball
+also marks the value, since it rides the indicator's end.
+
+This went through two worse versions first. Provider-by-ring-position was
+unreadable; provider-by-arc-colour worked but spent the green/amber/red ramp,
+the single most useful thing on the screen, on something a dot can carry.
+
+LVGL draws the ball as the arc's KNOB part, which these gauges used to delete
+outright on the grounds that a readout is not a control. It still is not — the
+arc stays unclickable — but the knob is the only part that tracks the
+indicator's end.
 
 Colour follows the provider's **name**, not its ring position. On a machine
 running only Codex the outer ring is Codex and must not wear Claude's colour —
@@ -262,15 +270,33 @@ in CI under sh, bash and dash.
 
 ### Counts, not a list
 
-`n_sess`, `n_run`, `n_wait`, `n_stuck`, `n_agents`, `n_ctx` — and zeros are
-omitted. The second provider adds `p2`, `p2_session_pct`, `p2_weekly_pct`,
-`p2_s_in_s`, `p2_w_in_s`, all absent until a second provider reports. Those
-last two are deliberately short: the fully-loaded line is close enough to the
-limit that spelling them out would cost more than they carry.
+`n_sess`, `n_run`, `n_wait`, `n_stuck`, `n_agents` — and zeros are omitted. The
+second provider adds `p2`, `p2_session_pct`, `p2_weekly_pct`, `p2_s_in_s`,
+`p2_w_in_s`, all absent until a second provider reports. Those last two are
+deliberately short: the fully-loaded line is close enough to the limit that
+spelling them out would cost more than they carry.
 
-The `models` array was dropped. `proto.c` reads the flattened scalar keys and
-never the array, and it has been empty since the status line became the only
-source — thirteen bytes of a budget the second provider made tight.
+Three fields were removed rather than added. `models` never reached the
+firmware usefully. `ctx_pct` and `model` went with the widgets that showed
+them — see below.
+
+### What the panel deliberately does not show
+
+**Context window.** It showed one, and with several agents running there are
+several, at different levels, belonging to conversations the panel cannot name.
+`"88% of 4"` was an attempt to qualify one number into honesty and it did not
+earn its line: knowing the fullest of four contexts is at 88% does not tell you
+which one, and there is nothing to do about it from across the room.
+
+**The model in use.** It answered a question nobody glances at a desk gauge to
+ask.
+
+Both removals bought space for the gauges, which are what the panel is for. A
+useful consequence: the status line shim went back to capturing **no session
+id at all**, because the only reason it ever needed one was per-conversation
+context. The hook shim still records session and agent ids — multi-session
+*state* is real and worth having — but the status line path is back to
+capturing nothing but the payload Claude Code already computed.
 A per-session array would blow the 512-byte budget at around four sessions,
 taking the panel dark with no error on exactly the busy machine most likely to
 have four. A busy machine measures 351 bytes; a typical one, 297.

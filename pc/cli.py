@@ -633,9 +633,8 @@ def _announce():
     print("             can be deleted when this finishes.")
     print(f"  Creates    {shim_path()}")
     print("             the small script Claude Code runs to hand over the")
-    print("             usage figures. It records the session id alongside")
-    print("             them, so two open terminals do not overwrite each")
-    print("             other's context window.")
+    print("             usage figures. It records nothing else -- no session")
+    print("             id, no conversation, no file paths.")
     print(f"  Creates    {hook_shim_path()}")
     print("             a second small script, run when Claude Code starts and")
     print("             finishes work, so the panel can show whether it is busy.")
@@ -643,10 +642,8 @@ def _announce():
     print("             agent ids Claude Code generates -- used to tell concurrent")
     print("             sessions apart, and for nothing else. No prompt, no tool")
     print("             arguments, no file paths, no message text.")
-    print(f"  Creates    {os.path.join(clauge_home(), 'statusline')}")
-    print(f"         and {os.path.join(clauge_home(), 'state')}")
-    print("             one small file per open session in each, deleted when")
-    print("             the session ends.")
+    print(f"  Creates    {os.path.join(clauge_home(), 'state')}")
+    print("             one small file per open session, deleted when it ends.")
     print(f"  Changes    {settings_path()}")
     # This list has to stay exactly true. Install asks nothing, so the
     # disclosure is the only thing standing between us and silently editing a
@@ -782,7 +779,6 @@ def cmd_uninstall(_args) -> int:
     # above is the single-slot file this replaced; it is still on the list so
     # an install that predates the directory leaves nothing behind.
     _rm_state_dir()
-    _rm_tree(os.path.join(clauge_home(), "statusline"))
     done, message = _remove_bin_dir()
     print(message)
     print()
@@ -793,30 +789,6 @@ def cmd_uninstall(_args) -> int:
     print("back in, then delete it by hand:")
     print(f"  {bin_dir()}")
     return 1
-
-
-def _freshest_statusline():
-    """mtime of the most recently rendered session's payload, or None.
-
-    A directory now, not a file: the shim writes one payload per session so
-    concurrent terminals stop overwriting each other's context window. The
-    freshest is what answers "is data arriving at all".
-    """
-    d = os.path.join(clauge_home(), "statusline")
-    best = None
-    try:
-        for name in os.listdir(d):
-            if not name.endswith(".json"):
-                continue
-            try:
-                m = os.path.getmtime(os.path.join(d, name))
-            except OSError:
-                continue
-            if best is None or m > best:
-                best = m
-    except OSError:
-        return None
-    return best
 
 
 def _live_sessions() -> int:
@@ -963,9 +935,9 @@ def cmd_status(_args) -> int:
                   " carried rate-limit headers")
 
     # The most useful support answer: is fresh data actually arriving?
-    payload = _freshest_statusline()
-    if payload is not None:
-        age = int(time.time() - payload)
+    payload = os.path.join(clauge_home(), "statusline.json")
+    if os.path.exists(payload):
+        age = int(time.time() - os.path.getmtime(payload))
         if age < 120:
             print(f"Usage data  fresh ({age}s old)")
         else:

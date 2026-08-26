@@ -86,16 +86,12 @@ int main(int argc, char **argv)
 	case 0:	/* the ordinary desk: one provider, one session */
 		usage_view_set_provider1("claude");
 		usage_view_update(27.0, 13231, 42.0, 598831);
-		usage_view_set_context(31.0, 1);
-		usage_view_set_model("Opus 5 (1M context)");
 		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
 		usage_view_set_sessions(1, 0);
 		usage_view_set_clock(14, 05);
 		break;
 	case 1:	/* the busy one: several sessions, agents, context filling */
 		usage_view_update(78.0, 1800, 91.0, 90000);
-		usage_view_set_context(88.0, 4);
-		usage_view_set_model("Sonnet 5");
 		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
 		usage_view_set_sessions(3, 7);
 		usage_view_set_provider1("claude");
@@ -108,8 +104,6 @@ int main(int argc, char **argv)
 		 * which is correct behaviour and made the first version of
 		 * this scene render two empty dials. */
 		usage_view_update(100.0, 359999, 100.0, 604799);
-		usage_view_set_context(100.0, 9);
-		usage_view_set_model("Opus 5 (1M context)");
 		usage_view_set_activity(USAGE_ACTIVITY_FAILED);
 		usage_view_set_sessions(9, 9);
 		usage_view_set_provider1("claude");
@@ -120,16 +114,12 @@ int main(int argc, char **argv)
 		 * primary, so this one must not be wearing Claude's colour */
 		usage_view_set_provider1("codex");
 		usage_view_update(52.0, 5400, 18.0, 400000);
-		usage_view_set_context(44.0, 1);
-		usage_view_set_model("gpt-5-codex");
 		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
 		usage_view_set_sessions(1, 0);
 		usage_view_set_clock(9, 12);
 		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_update(-1.0, -1, -1.0, -1);
-		usage_view_set_context(-1.0, 0);
-		usage_view_set_model("");
 		usage_view_set_activity(USAGE_ACTIVITY_NONE);
 		usage_view_set_sessions(1, 0);
 		break;

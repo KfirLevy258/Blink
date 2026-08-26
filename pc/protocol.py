@@ -138,9 +138,8 @@ def time_msg(epoch: int, utc_offset_min: int) -> dict:
 
 def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           session_resets_in_s=-1, weekly_resets_in_s=-1, stale=False,
-          provider="claude", src="cli", ctx_pct=UNKNOWN, model="",
-          state="", n_sess=0, n_run=0, n_wait=0, n_stuck=0,
-          n_agents=0, n_ctx=0, p2="", p2_session_pct=UNKNOWN,
+          provider="claude", src="cli", state="", n_sess=0, n_run=0, n_wait=0, n_stuck=0,
+          n_agents=0, p2="", p2_session_pct=UNKNOWN,
           p2_weekly_pct=UNKNOWN, p2_session_resets_in_s=-1,
           p2_weekly_resets_in_s=-1) -> dict:
     """A usage message.
@@ -198,10 +197,6 @@ The firmware reads this field: proto.c's "usage" handler calls
     # spending a budget a future field will need. An absent key already means
     # "unknown" on both sides.
     extra = {"provider": provider, "src": src}
-    if ctx_pct is not None and ctx_pct >= 0:
-        extra["ctx_pct"] = ctx_pct
-    if model:
-        extra["model"] = model[:MODEL_MAX_CHARS]
     if state:
         extra["state"] = state
 
@@ -210,8 +205,7 @@ The firmware reads this field: proto.c's "usage" handler calls
     # (one session, no agents) that keeps this whole block down to about
     # twenty bytes instead of sixty.
     for key, val in (("n_sess", n_sess), ("n_run", n_run), ("n_wait", n_wait),
-                     ("n_stuck", n_stuck), ("n_agents", n_agents),
-                     ("n_ctx", n_ctx)):
+                     ("n_stuck", n_stuck), ("n_agents", n_agents)):
         if val:
             extra[key] = int(val)
 
@@ -262,9 +256,9 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         weekly_resets_in_s=secs_until(frame.weekly_resets_at, now_epoch),
         stale=frame.stale,
         provider=frame.provider, src=frame.src,
-        ctx_pct=frame.ctx_pct, model=frame.model, state=frame.state,
+        state=frame.state,
         n_sess=frame.n_sessions(), n_run=frame.n_run, n_wait=frame.n_wait,
-        n_stuck=frame.n_stuck, n_agents=frame.n_agents, n_ctx=frame.n_ctx,
+        n_stuck=frame.n_stuck, n_agents=frame.n_agents,
         p2=(secondary.provider if secondary else ""),
         p2_session_pct=(secondary.session_pct if secondary else UNKNOWN),
         p2_weekly_pct=(secondary.weekly_pct if secondary else UNKNOWN),

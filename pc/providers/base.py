@@ -62,8 +62,6 @@ class NormalizedUsageFrame:
     session_resets_at: object = None
     weekly_pct: float = UNKNOWN
     weekly_resets_at: object = None
-    ctx_pct: float = UNKNOWN
-    model: str = ""
     state: str = STATE_UNKNOWN
     stale: bool = False
     # How many live sessions are in each state, and how many subagents are
@@ -80,10 +78,6 @@ class NormalizedUsageFrame:
     n_stuck: int = 0
     n_idle: int = 0
     n_agents: int = 0
-    # How many live contexts ctx_pct is the worst of. Several agents mean
-    # several context windows and one number cannot be all of them, so the
-    # frame carries the count and the panel says "88% of 4".
-    n_ctx: int = 0
 
     def n_sessions(self) -> int:
         return self.n_run + self.n_wait + self.n_stuck + self.n_idle

@@ -86,7 +86,7 @@ class WireBudget(unittest.TestCase):
     def test_a_normal_usage_message_fits(self):
         raw, why = protocol.encode_checked(
             protocol.usage(61.0, 1_787_203_200, 26.0, 1_787_644_800, [],
-                           ctx_pct=55.0, model="Opus 5 (1M context)"))
+                           p2="codex", p2_session_pct=42.0))
         self.assertIsNone(why)
         self.assertLessEqual(len(raw), protocol.MAX_LINE_BYTES)
 
@@ -100,10 +100,6 @@ class WireBudget(unittest.TestCase):
         raw, why = protocol.encode_checked(fat)
         self.assertIsNone(raw)
         self.assertIn("line limit", why)
-
-    def test_a_long_model_name_is_truncated_not_dropped(self):
-        u = protocol.usage(1.0, "R", 2.0, "R", [], model="M" * 200)
-        self.assertEqual(len(u["model"]), protocol.MODEL_MAX_CHARS)
 
 
 class AdditiveFields(unittest.TestCase):
@@ -123,7 +119,7 @@ class AdditiveFields(unittest.TestCase):
 
     def test_unknown_optional_fields_are_omitted_not_sentinelled(self):
         u = protocol.usage(1.0, "R", 2.0, "R", [])
-        for k in ("ctx_pct", "model", "state"):
+        for k in ("state", "p2"):
             self.assertNotIn(k, u)
 
     def test_a_second_provider_names_itself(self):

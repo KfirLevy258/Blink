@@ -6,12 +6,11 @@ NOW = 1_787_700_000.0
 
 
 def cli(at, session=base.UNKNOWN, weekly=base.UNKNOWN, s_reset=None,
-        w_reset=None, ctx=base.UNKNOWN, model="", state="", stale=False,
-        provider="claude"):
+        w_reset=None, state="", stale=False, provider="claude"):
     return base.NormalizedUsageFrame(
         provider=provider, src="cli", observed_at=at, session_pct=session,
         weekly_pct=weekly, session_resets_at=s_reset, weekly_resets_at=w_reset,
-        ctx_pct=ctx, model=model, state=state, stale=stale)
+        state=state, stale=stale)
 
 
 def desktop(at, session=base.UNKNOWN, weekly=base.UNKNOWN, stale=False,
@@ -46,15 +45,6 @@ def test_a_source_without_the_field_never_wins_it():
     assert m.session_resets_at == NOW + 900   # and CLI still supplies this
 
 
-def test_context_and_model_survive_from_the_only_source_that_has_them():
-    m = normalizer.merge([
-        cli(NOW - 300, session=40.0, ctx=61.0, model="Opus 5"),
-        desktop(NOW - 60, session=55.0),
-    ])
-    assert m.ctx_pct == 61.0
-    assert m.model == "Opus 5"
-
-
 def test_higher_does_not_beat_fresher_across_a_reset():
     """The rejected rule, pinned as a test.
 
@@ -87,7 +77,7 @@ def test_a_stale_winner_keeps_its_amber():
 
 def test_frames_with_no_percentage_at_all_produce_nothing():
     """Two blank dials are worse than the board keeping what it has."""
-    assert normalizer.merge([cli(NOW, model="Opus 5")]) is None
+    assert normalizer.merge([cli(NOW, state="running")]) is None
 
 
 def test_each_window_resolves_independently():
@@ -189,12 +179,12 @@ def test_two_providers_still_fit_the_board_line_limit():
     from pc import protocol
     primary, secondary = normalizer.select_pair([
         cli(NOW, session=88.0, weekly=99.0, s_reset=NOW + 900,
-            w_reset=NOW + 90000, ctx=100.0, model="Opus 5 (1M context)",
+            w_reset=NOW + 90000,
             state="stuck"),
         cli(NOW, session=100.0, weekly=100.0, provider="codex"),
     ], preferred="claude")
     primary.n_run, primary.n_wait, primary.n_stuck = 3, 2, 4
-    primary.n_agents, primary.n_ctx = 9, 9
+    primary.n_agents = 9
     raw, why = protocol.encode_checked(
         protocol.frame_to_usage(primary, NOW, secondary))
     assert why is None, why

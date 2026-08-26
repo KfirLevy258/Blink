@@ -78,12 +78,8 @@ def test_a_provider_can_be_added_at_runtime():
 def test_the_two_real_providers_compose_end_to_end(tmp_path):
     """CLI supplies resets, context and model; desktop supplies a fresher
     session percentage. The merged message carries all four."""
-    sl_dir = tmp_path / "statusline"
-    sl_dir.mkdir()
-    statusline = sl_dir / "sess-a.json"
+    statusline = tmp_path / "statusline.json"
     statusline.write_text(json.dumps({
-        "model": {"display_name": "Opus 5"},
-        "context_window": {"used_percentage": 61},
         "rate_limits": {
             "five_hour": {"used_percentage": 10, "resets_at": NOW + 900},
             "seven_day": {"used_percentage": 20, "resets_at": NOW + 90_000},
@@ -97,7 +93,7 @@ def test_the_two_real_providers_compose_end_to_end(tmp_path):
         {"t": int(NOW * 1000), "org": "o", "u": {"fh": 77, "sd": 44}}]}))
 
     bus = ingest.IngestionBus(
-        providers=[ClaudeCliProvider(path=str(sl_dir)),
+        providers=[ClaudeCliProvider(path=str(statusline)),
                    ClaudeDesktopProvider(path=str(cache))],
         now=lambda: NOW)
     msg = bus.poll()
@@ -105,8 +101,6 @@ def test_the_two_real_providers_compose_end_to_end(tmp_path):
     assert msg["session_pct"] == 77.0          # desktop, fresher
     assert msg["weekly_pct"] == 44.0           # desktop, fresher
     assert msg["session_resets_in_s"] == 900   # CLI, the only source with it
-    assert msg["ctx_pct"] == 61.0              # CLI only
-    assert msg["model"] == "Opus 5"            # CLI only
     assert msg["src"] == "desktop"
 
 

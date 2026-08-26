@@ -57,10 +57,6 @@ static lv_obj_t *dot;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
 static lv_obj_t *clock_lbl;
-static lv_obj_t *ctx_bar;	/* context window fullness */
-static lv_obj_t *ctx_cap;	/* the "CTX" caption beside it */
-static lv_obj_t *ctx_val;	/* ...and the percentage after it */
-static lv_obj_t *model_lbl;	/* which model is in use */
 static lv_obj_t *act_pip;	/* execution state, as a coloured pip */
 static lv_obj_t *sess_lbl;	/* "3s 7a" -- open sessions and live agents */
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
@@ -204,8 +200,13 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_arc_set_bg_angles(g->arc, 0, 270);
 	lv_arc_set_range(g->arc, 0, 100);
 	lv_arc_set_value(g->arc, 0);
-	lv_obj_remove_style(g->arc, NULL, LV_PART_KNOB);	/* a readout, not a control */
+	/* The knob is kept, not deleted: it is the only part that tracks the
+	 * end of the indicator, and that is where the provider ball goes. The
+	 * arc stays unclickable -- this is still a readout. */
 	lv_obj_clear_flag(g->arc, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_set_style_pad_all(g->arc, GAUGE_BALL_PAD, LV_PART_KNOB);
+	lv_obj_set_style_bg_color(g->arc, COL_CLAUDE, LV_PART_KNOB);
+	lv_obj_set_style_bg_opa(g->arc, LV_OPA_COVER, LV_PART_KNOB);
 	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_MAIN);
 	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_INDICATOR);
 	lv_obj_set_style_arc_color(g->arc, COL_TRACK, LV_PART_MAIN);
@@ -220,8 +221,10 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_arc_set_bg_angles(g->arc2, 0, 270);
 	lv_arc_set_range(g->arc2, 0, 100);
 	lv_arc_set_value(g->arc2, 0);
-	lv_obj_remove_style(g->arc2, NULL, LV_PART_KNOB);
 	lv_obj_clear_flag(g->arc2, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_set_style_pad_all(g->arc2, GAUGE_BALL_PAD, LV_PART_KNOB);
+	lv_obj_set_style_bg_color(g->arc2, COL_CODEX, LV_PART_KNOB);
+	lv_obj_set_style_bg_opa(g->arc2, LV_OPA_COVER, LV_PART_KNOB);
 	lv_obj_set_style_arc_width(g->arc2, GAUGE_ARC2_W, LV_PART_MAIN);
 	lv_obj_set_style_arc_width(g->arc2, GAUGE_ARC2_W, LV_PART_INDICATOR);
 	lv_obj_set_style_arc_color(g->arc2, COL_TRACK, LV_PART_MAIN);
@@ -329,9 +332,7 @@ static void render_weekly(void)
 	snprintf(buf, sizeof(buf), "%d%%", (int)(pct + 0.5));
 	lv_label_set_text(weekly.pct, buf);
 	lv_arc_set_value(weekly.arc, (int32_t)(pct + 0.5));
-	/* The ring's colour belongs to the provider now, so the number carries
-	 * the warning. See provider_color(). */
-	lv_obj_set_style_text_color(weekly.pct, severity(pct), 0);
+	lv_obj_set_style_arc_color(weekly.arc, severity(pct), LV_PART_INDICATOR);
 }
 
 #if HAVE_PER_MODEL
@@ -404,10 +405,6 @@ void usage_view_deinit(void)
 	 * because the setters below are called from the protocol thread and
 	 * would otherwise write through a freed pointer between the delete and
 	 * the next init. */
-	ctx_bar = NULL;
-	ctx_cap = NULL;
-	ctx_val = NULL;
-	model_lbl = NULL;
 	act_pip = NULL;
 	sess_lbl = NULL;
 	session.arc2 = NULL;
@@ -487,25 +484,6 @@ void usage_view_init(void)
 	/* Which model is in use, directly under the brand. Blank until the
 	 * daemon says -- an empty line reads as "nothing to report", where a
 	 * placeholder would read as a model actually named that. */
-	model_lbl = lv_label_create(scr);
-	lv_label_set_text(model_lbl, "");
-	lv_obj_set_style_text_color(model_lbl, COL_DIM, 0);
-	/* Bounded and centred, so a long name ellipsizes instead of sprawling
-	 * across the left column the session readout lives in. */
-	lv_obj_set_width(model_lbl, MODEL_W);
-	lv_label_set_long_mode(model_lbl, LV_LABEL_LONG_MODE_DOTS);
-	lv_obj_set_style_text_align(model_lbl, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(model_lbl, LV_ALIGN_TOP_MID, 0, MODEL_Y);
-
-	/* Open sessions and live agents, beside the pip. Blank at one session
-	 * with no agents: on the ordinary machine there is nothing here worth
-	 * saying, and a permanent "1s" is noise that trains the eye to skip
-	 * the corner where the interesting number will appear. */
-	sess_lbl = lv_label_create(scr);
-	lv_label_set_text(sess_lbl, "");
-	lv_obj_set_style_text_color(sess_lbl, COL_DIM, 0);
-	lv_obj_align(sess_lbl, LV_ALIGN_BOTTOM_MID, 0, -SESS_BOTTOM_OFF);
-
 	/* Execution state, in the left column under the clock. Hidden at
 	 * USAGE_ACTIVITY_NONE rather than shown grey: a dark corner says
 	 * nothing, and a grey pip says "idle", which is a different claim. */
@@ -521,40 +499,18 @@ void usage_view_init(void)
 	 * whatever fraction of the panel this covers. */
 	lv_obj_add_flag(act_pip, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
+	/* The bottom line: session and agent counts, and the second provider's
+	 * name when there is one. Shared with the hint, which outranks both --
+	 * the hint is empty when all is well, which is exactly when these are
+	 * worth reading. */
+	sess_lbl = lv_label_create(scr);
+	lv_label_set_text(sess_lbl, "");
+	lv_obj_set_style_text_color(sess_lbl, COL_DIM, 0);
+	lv_obj_align(sess_lbl, LV_ALIGN_BOTTOM_MID, 0, -SESS_BOTTOM_OFF);
+
 	build_gauge(&session, scr, -GAUGE_CX, "SESSION 5h");
 	build_gauge(&weekly, scr, GAUGE_CX, "WEEKLY 7d");
 
-	/* Context window, in the band between the countdowns and the hint
-	 * line. A bar rather than a third arc: it is a different KIND of
-	 * number -- it describes one conversation, not a billing window -- and
-	 * giving it the gauges' shape would invite reading it as a third
-	 * quota. */
-	ctx_cap = lv_label_create(scr);
-	lv_label_set_text(ctx_cap, "CTX");
-	lv_obj_set_style_text_color(ctx_cap, COL_DIM, 0);
-	lv_obj_align(ctx_cap, LV_ALIGN_TOP_MID, CTX_CAP_X, CTX_CAP_Y);
-
-	ctx_bar = lv_bar_create(scr);
-	lv_obj_set_size(ctx_bar, CTX_BAR_W, CTX_BAR_H);
-	lv_obj_align(ctx_bar, LV_ALIGN_TOP_MID, CTX_BAR_X, CTX_BAR_Y);
-	lv_bar_set_range(ctx_bar, 0, 100);
-	lv_bar_set_value(ctx_bar, 0, LV_ANIM_OFF);
-	lv_obj_set_style_radius(ctx_bar, 3, LV_PART_MAIN);
-	lv_obj_set_style_radius(ctx_bar, 3, LV_PART_INDICATOR);
-	lv_obj_set_style_bg_color(ctx_bar, COL_TRACK, LV_PART_MAIN);
-	lv_obj_set_style_bg_color(ctx_bar, COL_GREEN, LV_PART_INDICATOR);
-	lv_obj_add_flag(ctx_bar, LV_OBJ_FLAG_GESTURE_BUBBLE);
-
-	ctx_val = lv_label_create(scr);
-	lv_label_set_text(ctx_val, "");
-	lv_obj_set_style_text_color(ctx_val, COL_TEXT, 0);
-	lv_obj_align(ctx_val, LV_ALIGN_TOP_MID, CTX_VAL_X, CTX_VAL_Y);
-
-
-	/* All three hidden together until a number arrives. */
-	lv_obj_add_flag(ctx_cap, LV_OBJ_FLAG_HIDDEN);
-	lv_obj_add_flag(ctx_bar, LV_OBJ_FLAG_HIDDEN);
-	lv_obj_add_flag(ctx_val, LV_OBJ_FLAG_HIDDEN);
 
 	/* Edge affordances: without them nobody discovers the swipes (user
 	 * feedback 2026-07-16). Right chevron pulls in settings, left one
@@ -741,8 +697,8 @@ void usage_view_update(double session_pct, int32_t session_resets_in_s,
 		snprintf(buf, sizeof(buf), "%d%%", (int)(session_pct + 0.5));
 		lv_label_set_text(session.pct, buf);
 		lv_arc_set_value(session.arc, (int32_t)(session_pct + 0.5));
-		lv_obj_set_style_text_color(session.pct, severity(session_pct),
-					    0);
+		lv_obj_set_style_arc_color(session.arc, severity(session_pct),
+					   LV_PART_INDICATOR);
 	}
 	session.resets_in_s = session_resets_in_s;
 	render_countdown(&session);
@@ -784,7 +740,7 @@ static void expire_session(void)
 	last_s_pct = 0;
 	lv_label_set_text(session.pct, "0%");
 	lv_arc_set_value(session.arc, 0);
-	lv_obj_set_style_text_color(session.pct, severity(0), 0);
+	lv_obj_set_style_arc_color(session.arc, severity(0), LV_PART_INDICATOR);
 }
 
 static void expire_weekly(void)
@@ -899,47 +855,6 @@ void usage_view_set_activity(enum usage_activity a)
 	}
 }
 
-void usage_view_set_context(double ctx_pct, int of_n)
-{
-	char buf[16];
-
-	if (!ctx_bar) {
-		return;
-	}
-
-	/* Out of range is treated as unknown, not clamped. The daemon already
-	 * refuses a percentage outside 0-100 (pc/statusline_source._context_pct)
-	 * so anything arriving here is a newer daemon meaning something else by
-	 * the field, and a bar pinned to 100% would be a confident misreading. */
-	if (ctx_pct < 0.0 || ctx_pct > 100.0) {
-		lv_obj_add_flag(ctx_cap, LV_OBJ_FLAG_HIDDEN);
-		lv_obj_add_flag(ctx_bar, LV_OBJ_FLAG_HIDDEN);
-		lv_obj_add_flag(ctx_val, LV_OBJ_FLAG_HIDDEN);
-		return;
-	}
-
-	lv_obj_clear_flag(ctx_cap, LV_OBJ_FLAG_HIDDEN);
-	lv_obj_clear_flag(ctx_bar, LV_OBJ_FLAG_HIDDEN);
-	lv_obj_clear_flag(ctx_val, LV_OBJ_FLAG_HIDDEN);
-
-
-
-	lv_bar_set_value(ctx_bar, (int32_t)(ctx_pct + 0.5), LV_ANIM_OFF);
-	/* Same green/amber/red ramp as the gauges. A full context window is a
-	 * real problem for the person reading it, so it earns the same
-	 * vocabulary rather than a private one. */
-	lv_obj_set_style_bg_color(ctx_bar, severity(ctx_pct), LV_PART_INDICATOR);
-
-	/* The qualifier rides on the number. Only above one context, because
-	 * "of 1" is noise that makes the reader check whether they misread it. */
-	if (of_n > 1) {
-		snprintf(buf, sizeof(buf), "%d%% of %d", (int)(ctx_pct + 0.5),
-			 of_n > 9 ? 9 : of_n);
-	} else {
-		snprintf(buf, sizeof(buf), "%d%%", (int)(ctx_pct + 0.5));
-	}
-	lv_label_set_text(ctx_val, buf);
-}
 
 /*
  * The bottom line, which several things want and only one can have.
@@ -990,9 +905,7 @@ static void set_ring2(struct gauge *g, const char *tag, double pct)
 	}
 	lv_obj_clear_flag(g->arc2, LV_OBJ_FLAG_HIDDEN);
 	lv_arc_set_value(g->arc2, (int32_t)(pct + 0.5));
-	/* Colour on this ring says WHOSE, not how bad -- so the readout under
-	 * it carries the severity instead. */
-	lv_obj_set_style_text_color(g->p2, severity(pct), 0);
+	lv_obj_set_style_arc_color(g->arc2, severity(pct), LV_PART_INDICATOR);
 	/* The number alone. The hollow is GAUGE_HOLLOW_W wide and
 	 * "codex 100%" is not, and repeating the tag on both gauges would say
 	 * the same thing twice anyway -- it is named once on the bottom line. */
@@ -1009,10 +922,10 @@ void usage_view_set_provider1(const char *tag)
 	/* The outer ring is whichever provider the daemon made primary, which
 	 * on a Codex-only machine is Codex -- so the colour follows the NAME,
 	 * not the ring position. */
-	lv_obj_set_style_arc_color(session.arc, provider_color(tag),
-				   LV_PART_INDICATOR);
-	lv_obj_set_style_arc_color(weekly.arc, provider_color(tag),
-				   LV_PART_INDICATOR);
+	lv_obj_set_style_bg_color(session.arc, provider_color(tag),
+				  LV_PART_KNOB);
+	lv_obj_set_style_bg_color(weekly.arc, provider_color(tag),
+				  LV_PART_KNOB);
 	lv_obj_set_style_text_color(session.countdown, provider_color(tag), 0);
 	lv_obj_set_style_text_color(weekly.countdown, provider_color(tag), 0);
 }
@@ -1042,10 +955,10 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 	set_ring2(&session, tag, session_pct);
 	set_ring2(&weekly, tag, weekly_pct);
 
-	lv_obj_set_style_arc_color(session.arc2, provider_color(tag),
-				   LV_PART_INDICATOR);
-	lv_obj_set_style_arc_color(weekly.arc2, provider_color(tag),
-				   LV_PART_INDICATOR);
+	lv_obj_set_style_bg_color(session.arc2, provider_color(tag),
+				  LV_PART_KNOB);
+	lv_obj_set_style_bg_color(weekly.arc2, provider_color(tag),
+				  LV_PART_KNOB);
 	lv_obj_set_style_text_color(session.countdown2, provider_color(tag), 0);
 	lv_obj_set_style_text_color(weekly.countdown2, provider_color(tag), 0);
 
@@ -1067,19 +980,6 @@ void usage_view_set_sessions(int n_sessions, int n_agents)
 	refresh_bottom_line();
 }
 
-void usage_view_set_model(const char *name)
-{
-	if (!model_lbl) {
-		return;
-	}
-	if (!name || !name[0]) {
-		lv_label_set_text(model_lbl, "");
-		return;
-	}
-	/* lv_label_set_text copies into the label's own buffer, so a pointer
-	 * into the protocol thread's line buffer is safe to hand over here. */
-	lv_label_set_text(model_lbl, name);
-}
 
 void usage_view_set_status(enum usage_status status)
 {

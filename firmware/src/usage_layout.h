@@ -43,8 +43,6 @@
  * width and letting a long name ellipsize is what makes room for the session
  * readout beside it.
  */
-#define MODEL_Y			23
-#define MODEL_W			170
 
 /* Execution-state pip, left column under the clock. */
 #define ACT_PIP_X		12
@@ -53,9 +51,9 @@
 
 /* The two arcs. */
 #define GAUGE_CX		78
-#define GAUGE_ARC_Y		44
-#define GAUGE_ARC_SZ		116
-#define GAUGE_PCT_Y		86
+#define GAUGE_ARC_Y		34
+#define GAUGE_ARC_SZ		128
+#define GAUGE_PCT_Y		84
 
 /*
  * The countdown moved INSIDE the ring, under the percentage.
@@ -81,8 +79,8 @@
  * a lot of nothing.
  */
 #define GAUGE_P2PCT_Y		112
-#define GAUGE_NAME_Y		164
-#define GAUGE_CD_Y		182
+#define GAUGE_NAME_Y		170
+#define GAUGE_CD_Y		190
 #define GAUGE_CD_MAX_W		72	/* "6d 22h" per provider */
 /* Side by side when there are two, centred on the gauge when there is one. */
 #define GAUGE_CD_DX		38
@@ -115,47 +113,43 @@
  * divider.
  */
 #define GAUGE_ARC_W		12
-#define GAUGE_ARC2_SZ		88
+#define GAUGE_ARC2_SZ		100
 #define GAUGE_ARC2_W		6
 #define GAUGE_ARC2_Y		(GAUGE_ARC_Y + (GAUGE_ARC_SZ - GAUGE_ARC2_SZ) / 2)
 #define GAUGE_HOLLOW_W		(GAUGE_ARC2_SZ - 2 * GAUGE_ARC2_W)
+
+/*
+ * The provider ball: a small disc at the end of each arc, in that provider's
+ * colour.
+ *
+ * This is what lets the ARC go back to green-amber-red. Severity is the thing
+ * worth reading from across a desk and it belongs on the biggest element on
+ * the panel; identity is a second-look question, and a dot the size of a
+ * fingernail answers it without spending the ramp. It rides the end of the
+ * filled arc, so it also marks the value.
+ *
+ * LVGL draws this as the arc's KNOB part, which the gauges used to delete
+ * outright on the grounds that a readout is not a control. It still is not --
+ * the arc stays unclickable -- but the knob is the only thing that tracks the
+ * indicator's end, so it is styled rather than removed.
+ */
+#define GAUGE_BALL_PAD		2
 #define GAUGE_P2_MAX_W		44	/* "100%" -- the tag is named once, below */
 
 /* Context row, in the band between the countdowns and the hint. */
 /*
- * The freed row, laid out as ONE line rather than two.
+ * No context row.
  *
- * The first attempt put the context meter on one line and its captions on
- * another, which collided with the hint -- the label that appears without
- * warning when something goes wrong, and therefore the one nothing else may
- * sit on top of. The layout test caught all five overlaps before any of it
- * was rendered.
+ * It showed one context window, and with several agents running there are
+ * several -- at different levels, refilling at different times, belonging to
+ * conversations the panel cannot name. "88% of 4" was an attempt to qualify
+ * one number into honesty and it did not earn its line: knowing that the
+ * fullest of four contexts is at 88% does not tell you which one, and there is
+ * nothing to do about it from across the room.
  *
- * So: context gets a line of its own, and the bottom line is SHARED between
- * the hint and the session counts, with the hint winning. That mirrors what
- * the hint already does -- it is empty when all is well, which is exactly
- * when the counts are worth reading.
+ * The two things a desk gauge can answer -- how much quota is left, and how
+ * long until it refills -- get the space instead.
  */
-#define CTX_CAP_X		(-134)
-#define CTX_CAP_Y		200
-#define CTX_CAP_MAX_W		30	/* "CTX" */
-#define CTX_BAR_X		(-21)
-#define CTX_BAR_Y		205
-#define CTX_BAR_W		182
-#define CTX_BAR_H		8	/* thicker, now that there is room */
-
-/*
- * The value carries its own qualifier: "88%" alone, or "88% of 4" when
- * several sessions have a context and this is the worst of them.
- *
- * One label rather than two. With several agents running there are several
- * context windows and one number cannot be all of them; the bar shows the
- * fullest, because that is the one about to end somebody's turn, and the
- * suffix stops it reading as though it were the only one.
- */
-#define CTX_VAL_X		114
-#define CTX_VAL_Y		200
-#define CTX_VAL_MAX_W		76	/* "100% of 9" */
 
 /* Session and agent counts, in the bottom line the hint also uses. */
 #define SESS_BOTTOM_OFF		6
@@ -168,8 +162,6 @@
  * Clearances the layout must keep. Named so a failure says which rule broke
  * rather than printing two numbers.
  */
-#define CTX_VAL_HINT_GAP_MIN	0	/* readout above the hint line */
-#define CTX_BAR_VAL_GAP_MIN	4	/* bar's end to its own readout */
 #define SCR_RIGHT_MARGIN_MIN	4	/* nothing flush against the bezel */
 
 #endif /* USAGE_LAYOUT_H */

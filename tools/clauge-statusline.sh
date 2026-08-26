@@ -8,25 +8,16 @@
 #
 # Nothing here reads a credential: the payload contains only the two usage
 # percentages Claude Code has already computed.
+#
+# One file, not one per session. This briefly wrote a file per session id, to
+# support a per-conversation context meter and a model label -- both of which
+# have since been taken off the panel, the context meter because with several
+# agents running there are several contexts at different levels and no single
+# number is any of them. With them gone the two remaining figures are
+# account-wide and identical in every terminal, so the last render is as good
+# as any, and the shim is back to capturing no identifier at all.
 input=$(cat)
 
-# Which session this render belongs to.
-#
-# Claude Code puts session_id in every statusline payload, and until now this
-# shim ignored it and wrote one file. That is correct for one terminal and
-# silently wrong for two: the session and weekly percentages are account-wide
-# and identical either way, but the CONTEXT WINDOW and the model are per
-# session, so two terminals overwrote each other and the panel showed whichever
-# rendered last -- flipping between contexts with no sign anything was wrong.
-#
-# The character class in the pattern IS the sanitiser, exactly as in
-# clauge-hook.sh: this value becomes a filename, and a value containing a slash
-# or a quote fails to match and falls through to "unknown" rather than being
-# validated by a separate step that can be forgotten or reordered.
-sid=$(printf '%s' "$input" |
-	sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([0-9A-Za-z._-]\{1,64\}\)".*/\1/p' |
-	head -1)
-[ -n "$sid" ] || sid=unknown
 
 # Atomic write: the daemon may read this file at any moment, and a half-written
 # file would parse as malformed and blank the panel. Failures here (disk full,
@@ -35,7 +26,7 @@ sid=$(printf '%s' "$input" |
 # Guarded, because this runs on EVERY status line render -- many times a
 # minute -- and an unconditional mkdir forks a process each time to create a
 # directory that has existed since the first one.
-[ -d "$HOME/.clauge/statusline" ] || mkdir -p "$HOME/.clauge/statusline" 2>/dev/null
+[ -d "$HOME/.clauge" ] || mkdir -p "$HOME/.clauge" 2>/dev/null
 # 2>/dev/null must come BEFORE the '>' target on this line, not after: if
 # opening the target itself fails (e.g. the mkdir above also failed), the
 # shell reports that failure using whatever stderr was in effect when the '>'
@@ -43,9 +34,8 @@ sid=$(printf '%s' "$input" |
 # point, so it looks like it suppresses the error but doesn't -- confirmed
 # leaking "Permission denied" on every render under both sh and dash before
 # this was reordered.
-printf '%s' "$input" 2>/dev/null > "$HOME/.clauge/statusline/$sid.json.tmp" &&
-  mv -f "$HOME/.clauge/statusline/$sid.json.tmp" \
-     "$HOME/.clauge/statusline/$sid.json" 2>/dev/null
+printf '%s' "$input" 2>/dev/null > "$HOME/.clauge/statusline.json.tmp" &&
+  mv -f "$HOME/.clauge/statusline.json.tmp" "$HOME/.clauge/statusline.json" 2>/dev/null
 
 # Delegate to the previously configured command, if any. Never fail the status
 # bar because Clauge had a problem.

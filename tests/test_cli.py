@@ -108,11 +108,10 @@ def test_the_disclosure_names_every_file_install_writes(tmp_path, capsys):
     assert "hooks" in disclosure, "disclosure omits the hooks key it writes"
     assert str(cli.hook_shim_path()) in disclosure, \
         "disclosure omits the hook shim it creates"
-    # The capture widened from "event name and time" to include the session
-    # and agent ids. The disclosure is the only safeguard on an install that
-    # asks nothing, so it has to say so.
+    # The hook shim records session and agent ids. The disclosure is the only
+    # safeguard on an install that asks nothing, so it has to say so.
     assert "session and" in disclosure and "agent ids" in disclosure, \
-        "disclosure does not mention the ids the hook shim now records"
+        "disclosure does not mention the ids the hook shim records"
     assert "state" in disclosure, "disclosure omits the state directory"
     assert str(cli.shim_path()) in disclosure
     assert str(_settings(tmp_path)) in disclosure
@@ -171,9 +170,7 @@ def test_status_runs_before_and_after_install(tmp_path, capsys):
     assert "none yet" in capsys.readouterr().out
     _settings(tmp_path, {})
     cli.main(["install"])
-    sl = tmp_path / ".clauge" / "statusline"
-    sl.mkdir(exist_ok=True)
-    (sl / "sess-a.json").write_text("{}")
+    (tmp_path / ".clauge" / "statusline.json").write_text("{}")
     assert cli.main(["status"]) == 0
     assert "fresh" in capsys.readouterr().out
 
