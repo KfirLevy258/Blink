@@ -18,8 +18,8 @@ Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 <table>
   <tr>
-    <td width="33%"><img src="docs/img/screen-usage.png" alt="Live usage screen"><br><sub><b>Live usage</b> - session &amp; weekly, per model</sub></td>
-    <td width="33%"><img src="docs/img/screen-settings.png" alt="Settings screen"><br><sub><b>Settings</b> - brightness, updates, reset</sub></td>
+    <td width="33%"><img src="docs/img/screen-usage.png" alt="Live usage screen"><br><sub><b>Live usage</b> - session &amp; weekly, context, and what Claude Code is doing</sub></td>
+    <td width="33%"><img src="docs/img/screen-settings.png" alt="Settings screen"><br><sub><b>Settings</b> - brightness and updates</sub></td>
     <td width="33%"><img src="docs/img/screen-update.png" alt="Software update screen"><br><sub><b>Updates</b> - over the air, and safe</sub></td>
   </tr>
 </table>
@@ -28,7 +28,22 @@ Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 Clauge is a small desk display that shows how much of your Claude Code usage you've spent - the same numbers as the `/usage` command, but always in view. It reads your **5-hour session** limit and your **7-day weekly** limit and draws each as a dial, green while you have room, amber as you get close, red when it's nearly gone. Glance over, know where you stand, keep working.
 
+Under the dials it also shows how full your **context window** is, which model you're on, and a small pip telling you whether Claude Code is working, waiting on you, or has gone quiet mid-task.
+
 It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the setup once, and it sits on your desk and keeps itself up to date.
+
+### Where the numbers come from
+
+Clauge never sees a credential. It reads figures other programs have already worked out, from as many of these as you have:
+
+| Source | Gives | Needs |
+|---|---|---|
+| Claude Code's status line | both limits, reset times, context, model | nothing - set up by `clauge install` |
+| Claude Desktop's usage cache | both limits | nothing - read if the app is installed |
+| Claude Code's hooks | whether it's busy, waiting, or stuck | nothing - set up by `clauge install` |
+| [Browser extension](extension/) | usage from claude.ai tabs | optional, load it yourself |
+
+When two of them disagree, the most recently observed number wins - field by field, so a source that knows your reset time still supplies it even when a fresher one takes over the percentage. `docs/multi-provider.md` has the details.
 
 ## What's in here
 
