@@ -37,6 +37,12 @@ static lv_obj_t *dot;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
 static lv_obj_t *clock_lbl;
+static lv_obj_t *ctx_bar;	/* context window fullness */
+static lv_obj_t *ctx_cap;	/* the "CTX" caption beside it */
+static lv_obj_t *ctx_val;	/* ...and the percentage after it */
+static lv_obj_t *model_lbl;	/* which model is in use */
+static lv_obj_t *act_pip;	/* execution state, as a coloured pip */
+static enum usage_activity activity = USAGE_ACTIVITY_NONE;
 static lv_obj_t *overlay;	/* full-screen "no data" takeover */
 static lv_obj_t *wait_big;	/* the takeover's CONNECTING title */
 static bool built;
@@ -300,6 +306,16 @@ void usage_view_deinit(void)
 	built = false;
 	boot_n = 0;
 	boot_active = -1;
+	/* These hang off gauge_scr and die with it. Nulling them matters
+	 * because the setters below are called from the protocol thread and
+	 * would otherwise write through a freed pointer between the delete and
+	 * the next init. */
+	ctx_bar = NULL;
+	ctx_cap = NULL;
+	ctx_val = NULL;
+	model_lbl = NULL;
+	act_pip = NULL;
+	activity = USAGE_ACTIVITY_NONE;
 #if HAVE_PER_MODEL
 	peek = NULL;
 	peek_ttl = 0;
@@ -367,8 +383,62 @@ void usage_view_init(void)
 	lv_obj_set_style_text_color(clock_lbl, COL_DIM, 0);
 	lv_obj_align(clock_lbl, LV_ALIGN_TOP_LEFT, 10, 8);
 
+	/* Which model is in use, directly under the brand. Blank until the
+	 * daemon says -- an empty line reads as "nothing to report", where a
+	 * placeholder would read as a model actually named that. */
+	model_lbl = lv_label_create(scr);
+	lv_label_set_text(model_lbl, "");
+	lv_obj_set_style_text_color(model_lbl, COL_DIM, 0);
+	lv_obj_align(model_lbl, LV_ALIGN_TOP_MID, 0, 23);
+
+	/* Execution state, in the left column under the clock. Hidden at
+	 * USAGE_ACTIVITY_NONE rather than shown grey: a dark corner says
+	 * nothing, and a grey pip says "idle", which is a different claim. */
+	act_pip = lv_obj_create(scr);
+	lv_obj_set_size(act_pip, 8, 8);
+	lv_obj_set_style_radius(act_pip, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_border_width(act_pip, 0, 0);
+	lv_obj_set_style_bg_color(act_pip, COL_GREEN, 0);
+	lv_obj_align(act_pip, LV_ALIGN_TOP_LEFT, 12, 26);
+	lv_obj_add_flag(act_pip, LV_OBJ_FLAG_HIDDEN);
+	/* Same reason the status dot bubbles: a swipe starting here must still
+	 * reach the screen underneath, or the settings gesture goes dead on
+	 * whatever fraction of the panel this covers. */
+	lv_obj_add_flag(act_pip, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
 	build_gauge(&session, scr, -78, "SESSION 5h");
 	build_gauge(&weekly, scr, 78, "WEEKLY 7d");
+
+	/* Context window, in the band between the countdowns and the hint
+	 * line. A bar rather than a third arc: it is a different KIND of
+	 * number -- it describes one conversation, not a billing window -- and
+	 * giving it the gauges' shape would invite reading it as a third
+	 * quota. */
+	ctx_cap = lv_label_create(scr);
+	lv_label_set_text(ctx_cap, "CTX");
+	lv_obj_set_style_text_color(ctx_cap, COL_DIM, 0);
+	lv_obj_align(ctx_cap, LV_ALIGN_TOP_MID, -116, 202);
+
+	ctx_bar = lv_bar_create(scr);
+	lv_obj_set_size(ctx_bar, 200, 6);
+	lv_obj_align(ctx_bar, LV_ALIGN_TOP_MID, 16, 206);
+	lv_bar_set_range(ctx_bar, 0, 100);
+	lv_bar_set_value(ctx_bar, 0, LV_ANIM_OFF);
+	lv_obj_set_style_radius(ctx_bar, 3, LV_PART_MAIN);
+	lv_obj_set_style_radius(ctx_bar, 3, LV_PART_INDICATOR);
+	lv_obj_set_style_bg_color(ctx_bar, COL_TRACK, LV_PART_MAIN);
+	lv_obj_set_style_bg_color(ctx_bar, COL_GREEN, LV_PART_INDICATOR);
+	lv_obj_add_flag(ctx_bar, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+	ctx_val = lv_label_create(scr);
+	lv_label_set_text(ctx_val, "");
+	lv_obj_set_style_text_color(ctx_val, COL_DIM, 0);
+	lv_obj_align(ctx_val, LV_ALIGN_TOP_MID, 134, 202);
+
+	/* All three hidden together until a number arrives. */
+	lv_obj_add_flag(ctx_cap, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_add_flag(ctx_bar, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_add_flag(ctx_val, LV_OBJ_FLAG_HIDDEN);
 
 	/* Edge affordances: without them nobody discovers the swipes (user
 	 * feedback 2026-07-16). Right chevron pulls in settings, left one
@@ -651,6 +721,112 @@ void usage_view_tick_1s(void)
 		peek_hide();
 	}
 #endif
+}
+
+/*
+ * Execution state -> pip colour, and whether it breathes.
+ *
+ * RUNNING is the only animated one, and it reuses the boot bar's pulse
+ * exactly (see boot_pulse_cb): a fade between LV_OPA_30 and full, 600 ms each
+ * way, repeating. A steady dot cannot distinguish "working" from "finished
+ * and left it that way", which is the whole distinction this indicator adds.
+ */
+static void act_pulse_cb(void *obj, int32_t v)
+{
+	lv_obj_set_style_bg_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
+}
+
+void usage_view_set_activity(enum usage_activity a)
+{
+	if (!act_pip) {
+		return;
+	}
+
+	/* Always stop first. Leaving a previous pulse running would keep
+	 * writing opacity behind whatever the new state sets, so a
+	 * RUNNING -> STUCK transition would show a breathing red pip that
+	 * reads as "still working" at exactly the moment it is not. */
+	lv_anim_delete(act_pip, act_pulse_cb);
+	lv_obj_set_style_bg_opa(act_pip, LV_OPA_COVER, 0);
+	activity = a;
+
+	if (a == USAGE_ACTIVITY_NONE) {
+		lv_obj_add_flag(act_pip, LV_OBJ_FLAG_HIDDEN);
+		return;
+	}
+	lv_obj_clear_flag(act_pip, LV_OBJ_FLAG_HIDDEN);
+
+	switch (a) {
+	case USAGE_ACTIVITY_WAITING:
+		lv_obj_set_style_bg_color(act_pip, COL_AMBER, 0);
+		break;
+	case USAGE_ACTIVITY_STUCK:
+		lv_obj_set_style_bg_color(act_pip, COL_RED, 0);
+		break;
+	default:
+		lv_obj_set_style_bg_color(act_pip, COL_GREEN, 0);
+		break;
+	}
+
+	if (a == USAGE_ACTIVITY_RUNNING) {
+		lv_anim_t an;
+
+		lv_anim_init(&an);
+		lv_anim_set_var(&an, act_pip);
+		lv_anim_set_exec_cb(&an, act_pulse_cb);
+		lv_anim_set_values(&an, LV_OPA_30, LV_OPA_COVER);
+		lv_anim_set_duration(&an, 600);
+		lv_anim_set_playback_duration(&an, 600);
+		lv_anim_set_repeat_count(&an, LV_ANIM_REPEAT_INFINITE);
+		lv_anim_start(&an);
+	}
+}
+
+void usage_view_set_context(double ctx_pct)
+{
+	char buf[8];
+
+	if (!ctx_bar) {
+		return;
+	}
+
+	/* Out of range is treated as unknown, not clamped. The daemon already
+	 * refuses a percentage outside 0-100 (pc/statusline_source._context_pct)
+	 * so anything arriving here is a newer daemon meaning something else by
+	 * the field, and a bar pinned to 100% would be a confident misreading. */
+	if (ctx_pct < 0.0 || ctx_pct > 100.0) {
+		lv_obj_add_flag(ctx_cap, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_add_flag(ctx_bar, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_add_flag(ctx_val, LV_OBJ_FLAG_HIDDEN);
+		return;
+	}
+
+	lv_obj_clear_flag(ctx_cap, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_clear_flag(ctx_bar, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_clear_flag(ctx_val, LV_OBJ_FLAG_HIDDEN);
+
+	lv_bar_set_value(ctx_bar, (int32_t)(ctx_pct + 0.5), LV_ANIM_OFF);
+	/* Same green/amber/red ramp as the gauges. A full context window is a
+	 * real problem for the person reading it, so it earns the same
+	 * vocabulary rather than a private one. */
+	lv_obj_set_style_bg_color(ctx_bar, severity(ctx_pct), LV_PART_INDICATOR);
+
+	snprintf(buf, sizeof(buf), "%d%%", (int)(ctx_pct + 0.5));
+	lv_label_set_text(ctx_val, buf);
+}
+
+void usage_view_set_model(const char *name)
+{
+	if (!model_lbl) {
+		return;
+	}
+	if (!name || !name[0]) {
+		lv_label_set_text(model_lbl, "");
+		return;
+	}
+	/* lv_label_set_text copies into the label's own buffer, so a pointer
+	 * into the protocol thread's line buffer is safe to hand over here. */
+	lv_label_set_text(model_lbl, name);
 }
 
 void usage_view_set_status(enum usage_status status)

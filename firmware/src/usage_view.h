@@ -12,6 +12,22 @@ enum usage_status {
 	USAGE_STATUS_ERROR,		/* red   */
 };
 
+/*
+ * What the tool feeding us is doing right now, from the daemon's `state`.
+ *
+ * NONE is not a fifth state, it is the absence of one: a daemon that said
+ * nothing, or one older than this firmware. The indicator stays dark for it
+ * rather than defaulting to IDLE, because "idle" is a claim about a live
+ * session and an absent field is not evidence of one.
+ */
+enum usage_activity {
+	USAGE_ACTIVITY_NONE = 0,	/* hidden */
+	USAGE_ACTIVITY_IDLE,		/* green: turn complete, waiting for you */
+	USAGE_ACTIVITY_RUNNING,		/* green, pulsing: working */
+	USAGE_ACTIVITY_WAITING,		/* amber: wants a human */
+	USAGE_ACTIVITY_STUCK,		/* red: announced work, then went silent */
+};
+
 /* Build the screen. Call once, before any update. */
 void usage_view_init(void);
 
@@ -75,5 +91,25 @@ void usage_view_sync_takeover(void);
 void usage_view_set_models(double fable_pct);
 
 void usage_view_set_status(enum usage_status status);
+
+/*
+ * Context window fullness, 0-100. Negative hides the bar entirely.
+ *
+ * Hidden rather than drawn empty: a 0-length bar and an unknown one look
+ * identical at this size, and only one of them is a fact.
+ */
+void usage_view_set_context(double ctx_pct);
+
+/*
+ * The model in use, e.g. "Opus 5 (1M context)". NULL or "" blanks the label.
+ *
+ * The daemon already caps the length (protocol.MODEL_MAX_CHARS); this copies
+ * into a fixed buffer and truncates again rather than trusting that, because
+ * the two sides ship separately and a longer name arriving from a newer
+ * daemon must not run off the screen or off the end of the buffer.
+ */
+void usage_view_set_model(const char *name);
+
+void usage_view_set_activity(enum usage_activity a);
 
 #endif /* USAGE_VIEW_H */

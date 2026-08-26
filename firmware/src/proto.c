@@ -251,8 +251,57 @@ static void dispatch(const char *json)
 		if (stale) {
 			usage_view_set_status(USAGE_STATUS_STALE);
 		}
-		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)%s\n",
-		       sp, (int)ss, wp, (int)ws, stale ? "  STALE" : "");
+
+		/*
+		 * The multi-provider fields. All three are OPTIONAL and all
+		 * three default to "say nothing": the daemon omits a key it has
+		 * no answer for rather than sending a sentinel, so an absent
+		 * key and an old daemon are the same case here and neither may
+		 * turn an indicator on. See pc/protocol.usage().
+		 */
+		double cp = -1;
+
+		msg_get_double(json, "ctx_pct", &cp);
+		usage_view_set_context(cp);
+
+		/*
+		 * 32 bytes against a daemon that caps the name at 24 chars.
+		 * Sized here rather than trusted from there: the two sides ship
+		 * separately, and msg_get_str truncates to the buffer, so the
+		 * worst a longer name from a newer daemon can do is arrive
+		 * clipped.
+		 */
+		char model[32];
+
+		if (msg_get_str(json, "model", model, sizeof(model))) {
+			usage_view_set_model(model);
+		} else {
+			usage_view_set_model("");
+		}
+
+		char state[16];
+		enum usage_activity act = USAGE_ACTIVITY_NONE;
+
+		if (msg_get_str(json, "state", state, sizeof(state))) {
+			if (strcmp(state, "running") == 0) {
+				act = USAGE_ACTIVITY_RUNNING;
+			} else if (strcmp(state, "idle") == 0) {
+				act = USAGE_ACTIVITY_IDLE;
+			} else if (strcmp(state, "waiting") == 0) {
+				act = USAGE_ACTIVITY_WAITING;
+			} else if (strcmp(state, "stuck") == 0) {
+				act = USAGE_ACTIVITY_STUCK;
+			}
+			/* An unrecognised state stays NONE -- a newer daemon
+			 * naming a state this firmware does not know must go
+			 * dark, not land on whichever branch happened to be
+			 * last. */
+		}
+		usage_view_set_activity(act);
+
+		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)%s%s\n",
+		       sp, (int)ss, wp, (int)ws, stale ? "  STALE" : "",
+		       act == USAGE_ACTIVITY_NONE ? "" : " +state");
 	} else if (strcmp(type, "time") == 0) {
 		double epoch = 0, off = 0;
 
