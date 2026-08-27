@@ -22,6 +22,7 @@
 #include "cfg_store.h"
 #include "ui_boot.h"
 #include "ui_anim.h"
+#include "ui_swipe.h"
 #include "ui_slide.h"
 #if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 #include "net_wifi.h"
@@ -1797,30 +1798,27 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 
 }
 
-static void scr_gesture_cb(lv_event_t *e)
+/*
+ * A completed stroke, from ui_swipe rather than from LVGL.
+ *
+ * LVGL's own gesture detector cannot survive this panel -- one physical swipe
+ * arrives as five or six short presses and it resets its accumulator on every
+ * one of them. The measurements and the reasoning are in ui_swipe.h. What
+ * reaches here is one event per stroke, already stitched across the dropouts
+ * and already refused if it was too diagonal to call.
+ *
+ * Runs on the LVGL thread from a timer, so the rules that governed the gesture
+ * callback still govern this: flag the request, never run a transition here.
+ */
+static void swipe_cb(enum ui_swipe_dir dir)
 {
-	lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
-
-	/*
-	 * One line per gesture, and gestures are user-initiated, so this is
-	 * quiet. It is here because which LVGL direction a physical swipe
-	 * arrives as is NOT obvious on this board -- the pointer node carries
-	 * invert-x, the panel is rotated 90, and the two comments in this tree
-	 * that explain the mapping do not agree with each other. Anyone
-	 * wondering which way is which should be able to read it off the cable
-	 * instead of reasoning about a transform.
-	 *
-	 * LV_DIR_LEFT 1, RIGHT 2, TOP 4, BOTTOM 8.
-	 */
-	printk("[gesture] dir %d\n", (int)dir);
-
 	if (panel != NULL) {
 		return;
 	}
 	if (ui_anim_gesture_muted()) {
 		return;	/* the swipe that just closed the clip, replayed */
 	}
-	if (dir == LV_DIR_LEFT) {
+	if (dir == UI_SWIPE_LEFT) {
 		/* Not off the CONNECTING screen. A swipe is the ACCIDENTAL
 		 * route -- see the edge zones below, which stay open on
 		 * purpose. */
@@ -1828,12 +1826,12 @@ static void scr_gesture_cb(lv_event_t *e)
 			return;
 		}
 		want_open = true;	/* run from the mode loop; see do_open */
-	} else if (dir == LV_DIR_RIGHT) {
+	} else if (dir == UI_SWIPE_RIGHT) {
 		/* The left chevron's promise: the boot clip on loop. Only
 		 * flagged here -- the mode loop runs the player from thread
 		 * context, never from inside an LVGL event. */
 		ui_anim_request();
-	} else if (dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM) {
+	} else if (dir == UI_SWIPE_UP || dir == UI_SWIPE_DOWN) {
 		/*
 		 * The provider stack. Content follows the finger, the way a
 		 * list does: swiping UP pulls the next page in from below.
@@ -1851,7 +1849,7 @@ static void scr_gesture_cb(lv_event_t *e)
 		 * where there is no data and so only one page -- that is every
 		 * vertical swipe there is.
 		 */
-		int step = (dir == LV_DIR_TOP) ? 1 : -1;
+		int step = (dir == UI_SWIPE_UP) ? 1 : -1;
 
 		if (usage_view_can_page(step)) {
 			want_page = step;
@@ -1895,10 +1893,32 @@ static void scr_gesture_cb(lv_event_t *e)
  * on the edge chevron is a deliberate act rather than an accidental one, so it
  * stays as the escape hatch.
  */
+/*
+ * A tap on an edge zone -- but only if it was a tap.
+ *
+ * LVGL sends CLICKED on release whenever an object was pressed and nothing
+ * scrolled. It does not suppress it because the touch turned out to be a
+ * swipe, so a swipe that begins or ends inside one of these 44x150 strips
+ * fires the strip's button as well as the swipe. On the gauge screen that
+ * means a vertical swipe near an edge opens the settings panel, which is half
+ * of what "some of them is detected as swipe to settings" was: not a misread
+ * direction, but a stray button press left behind by one.
+ *
+ * The mute does not cover this. It is set when a transition STARTS, and this
+ * arrives on release -- before ui_swipe has even decided whether the stroke
+ * was a swipe. ui_swipe_dragging() answers from the stroke still in progress,
+ * which is the only thing that knows in time.
+ */
+static bool zone_was_a_tap(void)
+{
+	return panel == NULL && !ui_anim_gesture_muted() &&
+	       !ui_swipe_dragging();
+}
+
 static void zone_settings_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (panel == NULL && !ui_anim_gesture_muted()) {
+	if (zone_was_a_tap()) {
 		want_open = true;
 	}
 }
@@ -1906,7 +1926,7 @@ static void zone_settings_cb(lv_event_t *e)
 static void zone_anim_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (panel == NULL && !ui_anim_gesture_muted()) {
+	if (zone_was_a_tap()) {
 		ui_anim_request();
 	}
 }
@@ -1924,32 +1944,30 @@ static void mk_edge_zone(lv_obj_t *scr, lv_align_t align, lv_event_cb_t cb)
 }
 
 /*
- * Make a swipe possible to perform on a resistive panel.
+ * Loosen LVGL's own gesture thresholds, for the two places still using them.
  *
- * LVGL ships two thresholds and both are wrong for this hardware
- * (lv_indev.c, hard-coded macros with no Kconfig and no setter, which is why
- * this reaches into the private header):
+ * The gauge screen does not any more -- see swipe_cb and ui_swipe.h. But the
+ * settings panel and the brightness overlay both close on a swipe, and those
+ * still go through LVGL, so its two hard-coded defaults still apply there
+ * (lv_indev.c, no Kconfig and no setter, which is why this reaches into the
+ * private header).
  *
  *   gesture_min_velocity  3   a sample that moved less than this in BOTH axes
  *                             ZEROES the accumulator. Not "ignore this
  *                             sample" -- it throws away everything counted so
- *                             far. The XPT2046 is polled at 30 Hz here, so a
- *                             deliberate, controlled drag is 2-4 px a sample
- *                             and keeps resetting itself back to nothing. The
- *                             only swipe that survives is a fast flick.
+ *                             far. LVGL samples faster than this panel
+ *                             reports, so a large share of ticks see no new
+ *                             point and each one discards the stroke.
  *   gesture_limit        50   and then it wants 50 px on top, which is 21% of
  *                             a 240 px screen -- 8.9 mm of travel.
  *
- * Together: you have to flick fast AND far, and if you do either gently
- * nothing happens at all. Reported as "the swipe itself is really hard"
- * (2026-08-27) about the vertical page change, but it was always true of the
- * horizontal ones too; those just get more attempts because there is a chevron
- * drawn at each edge and a tap zone behind it, so a failed swipe still lands
- * somewhere useful. The vertical gesture has no such fallback -- there is
- * nothing to tap -- so it is where the threshold finally showed.
- *
- * 1 and 24: any real movement counts, and 24 px is 4.3 mm, comfortably past a
- * fingertip's jitter on a tap and a third of what it was.
+ * 1 and 24 is as far as this can be pushed: the floor cannot go below 1 (at 0
+ * the comparison is never true, which would leave the accumulator running
+ * across the whole press), and at 1 a repeated identical point STILL trips it.
+ * That ceiling is precisely why the gauge screen stopped using this path
+ * rather than tuning it further. These two remaining callers are closing
+ * something that also has a back button, so a swipe that misses is an
+ * inconvenience rather than a dead end.
  */
 #define GESTURE_MIN_VELOCITY	1
 #define GESTURE_LIMIT_PX	24
@@ -1970,7 +1988,14 @@ static void tune_gestures(void)
 void ui_settings_attach(lv_obj_t *scr)
 {
 	tune_gestures();
-	lv_obj_add_event_cb(scr, scr_gesture_cb, LV_EVENT_GESTURE, NULL);
+	/*
+	 * The gauge screen's swipes come from ui_swipe, not from LVGL. There
+	 * is deliberately no LV_EVENT_GESTURE handler here any more: leaving
+	 * one would double-fire, and it would double-fire WRONGLY, since the
+	 * fragments LVGL classifies are the ones ui_swipe exists to stitch
+	 * back together.
+	 */
+	ui_swipe_init(swipe_cb);
 	mk_edge_zone(scr, LV_ALIGN_RIGHT_MID, zone_settings_cb);
 	mk_edge_zone(scr, LV_ALIGN_LEFT_MID, zone_anim_cb);
 
