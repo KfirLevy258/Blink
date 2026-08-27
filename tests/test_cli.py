@@ -332,3 +332,64 @@ def test_status_says_so_when_no_hooks_are_installed(tmp_path, capsys):
     _settings(tmp_path, {"statusLine": {"type": "command", "command": "x"}})
     cli.main(["status"])
     assert "hooks not installed" in capsys.readouterr().out
+
+
+# --- Claude Code absent ----------------------------------------------------
+#
+# Steps 2 and 3 write into ~/.claude/settings.json. With no Claude Code on the
+# machine nothing ever reads that file, so both steps reported success and
+# produced nothing -- a device that half works, and a customer with no way to
+# learn why. These tests are about saying so.
+
+
+def test_no_claude_code_but_a_desktop_cache_says_what_is_missing(
+        tmp_path, capsys, monkeypatch):
+    """The real desktop-only desk. It works, with less on it, and the install
+    now names which less."""
+    monkeypatch.setattr(cli, "claude_version", lambda: (None, None))
+    monkeypatch.setattr(cli, "desktop_app_present", lambda: True)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "Claude Desktop alone" in out
+    assert "reset countdowns" in out
+    assert "activity light" in out
+    # The reason, not just the fact -- otherwise it reads as unimplemented.
+    assert "does not record when either window resets" in out
+
+
+def test_no_claude_code_still_installs_everything(tmp_path, capsys, monkeypatch):
+    """A note, not a refusal, and not a failed step. The edits are correct and
+    start working by themselves the day Claude Code arrives -- exactly the
+    rule the too-old warning already follows."""
+    monkeypatch.setattr(cli, "claude_version", lambda: (None, None))
+    monkeypatch.setattr(cli, "desktop_app_present", lambda: True)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    settings = _read(tmp_path)
+    assert settings["statusLine"]["command"]
+    assert settings.get("hooks")
+
+
+def test_neither_source_is_stated_more_firmly(tmp_path, capsys, monkeypatch):
+    """No Claude Code and no desktop cache is not a reduced panel, it is an
+    empty one, and the copy must not soften that into 'works with less'."""
+    monkeypatch.setattr(cli, "claude_version", lambda: (None, None))
+    monkeypatch.setattr(cli, "desktop_app_present", lambda: False)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "Nothing on this machine reports usage yet" in out
+    assert "sit blank" in out
+    assert "Claude Desktop alone" not in out
+
+
+def test_a_working_claude_code_says_none_of_it(tmp_path, capsys, monkeypatch):
+    """The common machine pays nothing for this."""
+    monkeypatch.setattr(cli, "claude_version",
+                        lambda: ("2.1.245 (Claude Code)", (2, 1, 245)))
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "Claude Desktop alone" not in out
+    assert "Nothing on this machine reports usage" not in out

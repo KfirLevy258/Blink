@@ -163,6 +163,76 @@ def claude_version():
     return (out or None), tuple(parts)
 
 
+def desktop_app_present() -> bool:
+    """Has Claude Desktop ever written its usage cache on this machine?
+
+    The file, not the application bundle. An installed app that has never run
+    has nothing for us to read, and a machine where the app was removed but
+    the cache remains still has a (stale, and reported as stale) reading. The
+    file is the thing this product actually depends on, so the file is what
+    gets asked about.
+    """
+    from pc.providers import claude_desktop
+    try:
+        return os.path.exists(claude_desktop.cache_path())
+    except Exception:
+        return False
+
+
+def _note_if_no_claude_code():
+    """Say what this machine will and will not show, when Claude Code is absent.
+
+    Steps 2 and 3 of the install write a status line and a set of hooks into
+    ~/.claude/settings.json. With no Claude Code on the machine nothing ever
+    reads that file, so both steps report success and produce nothing -- and
+    the customer is left with a device that half works and no way to find out
+    why. That is the worst shape a first run can have, and it cost nothing to
+    keep quiet about, which is why it stayed quiet.
+
+    A note, not a refusal, and not a failed step. The edits are correct and
+    stay correct: install Claude Code tomorrow and it all starts working with
+    nothing to redo. Same reasoning as _warn_if_claude_too_old below.
+    """
+    text, _ = claude_version()
+    if text is not None:
+        return
+
+    print()
+    if not desktop_app_present():
+        # Neither source exists. This is not a reduced panel, it is an empty
+        # one, and saying anything softer would be misleading.
+        print("  !! Nothing on this machine reports usage yet.")
+        print("     Clauge reads figures that Claude Code or Claude Desktop")
+        print("     have already worked out. With neither installed the panel")
+        print("     will connect and then sit blank.")
+        print()
+        print("       npm install -g @anthropic-ai/claude-code@latest")
+        print()
+        print("     Nothing here needs redoing afterwards -- it starts on its own.")
+        return
+
+    print("  !  Claude Code is not installed, so the panel runs on")
+    print("     Claude Desktop alone. That works, with less on it:")
+    print()
+    print("       Shown    both usage percentages, and how fast the")
+    print("                five-hour window is filling")
+    print("       Missing  the reset countdowns, and the activity light")
+    print()
+    # Why, not just what. The countdowns are the part people ask about, and
+    # "it is not implemented yet" would be the wrong answer -- there is
+    # nothing to implement. Verified across every file, LevelDB store and
+    # cache the desktop app writes, 2026-08-28.
+    print("     Claude Desktop does not record when either window resets --")
+    print("     anywhere, in any file -- so there is no countdown to show and")
+    print("     the panel shows a rate instead. The activity light needs")
+    print("     Claude Code's hooks.")
+    print()
+    print("     The status line and hooks just installed are correct and will")
+    print("     start working by themselves if you add Claude Code later:")
+    print()
+    print("       npm install -g @anthropic-ai/claude-code@latest")
+
+
 def _warn_if_claude_too_old():
     text, ver = claude_version()
     if ver is None or ver >= MIN_CLAUDE:
@@ -733,6 +803,10 @@ def cmd_install(_args) -> int:
     print(f"  Undo:    {installed_bin()} uninstall")
     print()
     print("  You can delete the file you downloaded.")
+    # Absent first: it is a bigger fact than out-of-date, and the two are
+    # mutually exclusive (claude_version() gives no version for an absent
+    # install, which is exactly what _warn_if_claude_too_old returns on).
+    _note_if_no_claude_code()
     _warn_if_claude_too_old()
     return 0
 
@@ -863,7 +937,14 @@ def cmd_status(_args) -> int:
 
     text, ver = claude_version()
     if text is None:
-        print("Claude Code not found on PATH")
+        # The consequence, not just the fact. "Not found" alone left someone
+        # with missing countdowns and no way to connect the two.
+        if desktop_app_present():
+            print("Claude Code not found -- running on Claude Desktop alone"
+                  " (no countdowns, no activity light)")
+        else:
+            print("Claude Code not found -- and no Claude Desktop cache"
+                  " either, so nothing is reporting usage")
     elif ver is None:
         # It ran and said something we could not read as a version. Saying
         # "not found" would send someone to reinstall a working install.
