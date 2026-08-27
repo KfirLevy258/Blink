@@ -219,15 +219,24 @@ static void report(void)
 	samples++;
 	consider();
 	publish_live();
+	/* Read here, used after the unlock: which of the two waits applies
+	 * depends on whether consider() just acted on this stroke. */
+	bool acted = fired;
+
 	k_spin_unlock(&lock, k);
 
 	/*
 	 * Push the end of the stroke out on every report. A release on this
 	 * panel is usually contact bounce under a moving finger, and this is
-	 * what absorbs it: the stroke only ends once the reports actually stop
-	 * for UI_SWIPE_STITCH_MS.
+	 * what absorbs it: the stroke only ends once the reports actually stop.
+	 *
+	 * Patient while gathering, quick to re-arm afterwards -- see the two
+	 * windows in ui_swipe_geom.h. Waiting the full stitch window after a
+	 * swipe has already fired would swallow a deliberate second one.
 	 */
-	k_work_reschedule(&stitch_work, K_MSEC(UI_SWIPE_STITCH_MS));
+	k_work_reschedule(&stitch_work,
+			  K_MSEC(acted ? UI_SWIPE_REARM_MS
+				       : UI_SWIPE_STITCH_MS));
 }
 
 static void input_cb(struct input_event *evt, void *user_data)

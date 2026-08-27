@@ -570,15 +570,45 @@ void usage_view_init(void)
 	 * than a reminder of a gesture, and a gesture cue that survives into a
 	 * red state is the panel talking over itself.
 	 *
-	 * The chevron points where the page LIVES, not which way the finger
-	 * goes -- content follows the finger here, so the two are opposite and
-	 * only one of them is a thing you can see. Page 0 says the next one is
-	 * below; from page 1 the only move is back up.
+	 * No chevron at all now, because there is no longer a direction to
+	 * give.
+	 *
+	 * It first pointed where the page LIVES (down, since content follows
+	 * the finger), which reads as an instruction whatever it was meant as.
+	 * Then it pointed the way to swipe (up). Neither helped: across three
+	 * builds every vertical stroke went DOWN regardless of what the arrow
+	 * said. Either vertical swipe now reaches the other page -- see the
+	 * end-of-stack rule in ui_settings -- so an arrow would be picking one
+	 * of two equally correct answers and quietly discouraging the other.
+	 *
+	 * What is left is what the line was always for: there is another page
+	 * and it is called this. The bullet is a mark, not a direction.
 	 */
 	nextcue = lv_label_create(scr);
 	lv_label_set_text(nextcue, "");
 	lv_obj_set_style_text_color(nextcue, COL_DIM, 0);
-	lv_obj_align(nextcue, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF);
+	/*
+	 * A quiet pill, because this is a CONTROL and not a caption.
+	 *
+	 * Tapping the band it sits in changes page (see mk_page_zone) -- the
+	 * tap path that makes up/down as dependable as left/right. But a
+	 * control nobody recognises is not one, and a bare dim line above two
+	 * dots reads as a label. The panel already has a vocabulary for "you
+	 * can press this": a COL_PANEL fill with a radius, which is what every
+	 * settings row is.
+	 *
+	 * Borrowed rather than invented, and borrowed at its quietest -- fill
+	 * only, no border. The border came off the settings back control for
+	 * being a second answer to a solved problem, and the same logic
+	 * applies here: the fill is enough to separate this from the ground
+	 * and say it is a surface.
+	 */
+	lv_obj_set_style_bg_color(nextcue, COL_PANEL, 0);
+	lv_obj_set_style_bg_opa(nextcue, LV_OPA_COVER, 0);
+	lv_obj_set_style_radius(nextcue, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_pad_hor(nextcue, 10, 0);
+	lv_obj_set_style_pad_ver(nextcue, 3, 0);
+	lv_obj_align(nextcue, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF + 3);
 	lv_obj_add_flag(nextcue, LV_OBJ_FLAG_HIDDEN);
 
 
@@ -853,8 +883,11 @@ static void refresh_nextcue(void)
 		return;
 	}
 	tag_cased(name, sizeof(name), page_tag(other));
-	snprintf(buf, sizeof(buf), "%s  %s",
-		 cur_page == 0 ? LV_SYMBOL_DOWN : LV_SYMBOL_UP, name);
+	/* Just the name. The bullet was a placeholder for the chevron that got
+	 * removed when both swipe directions became correct, and a mark that
+	 * points nowhere is one more thing to decode on a line whose whole job
+	 * is to say a word. */
+	snprintf(buf, sizeof(buf), "%s", name);
 	lv_label_set_text(nextcue, buf);
 	lv_obj_clear_flag(nextcue, LV_OBJ_FLAG_HIDDEN);
 	lv_obj_align(nextcue, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF);
@@ -1092,9 +1125,6 @@ static void morph_arc(struct gauge *g, double pct)
 	lv_obj_set_style_arc_color(g->arc, severity(pct), LV_PART_INDICATOR);
 }
 
-static int morph_frames;
-static int64_t morph_t0;
-
 static void morph_exec(void *unused, int32_t t)
 {
 	ARG_UNUSED(unused);
@@ -1102,7 +1132,6 @@ static void morph_exec(void *unused, int32_t t)
 	if (!built) {
 		return;
 	}
-	morph_frames++;
 	if (t >= MORPH_MID && !morph.swapped) {
 		/*
 		 * Halfway, with the words invisible: everything that cannot be
@@ -1155,15 +1184,6 @@ static void morph_done(lv_anim_t *a)
 	lv_obj_set_style_text_opa(session.countdown, LV_OPA_COVER, 0);
 	lv_obj_set_style_text_opa(weekly.countdown, LV_OPA_COVER, 0);
 	render_gauges();
-
-	/*
-	 * What it actually cost, on the actual board -- the same reason
-	 * ui_slide prints its own line. This one has a second job: every LVGL
-	 * timer on the screen, the swipe poller included, only runs between
-	 * these frames, so the frame time here IS the poller's worst case.
-	 */
-	printk("[morph] %d frames in %lld ms\n", morph_frames,
-	       k_uptime_get() - morph_t0);
 }
 
 /*
@@ -1258,8 +1278,6 @@ void usage_view_page_step(int delta)
 	morph.jump = morph.s_from < 0 || morph.s_to < 0 ||
 		     morph.w_from < 0 || morph.w_to < 0;
 	morph.swapped = false;
-	morph_frames = 0;
-	morph_t0 = k_uptime_get();
 
 	/*
 	 * The rail leads, and it FINISHES the handover the finger started.

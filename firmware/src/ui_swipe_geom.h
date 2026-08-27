@@ -155,7 +155,33 @@ static inline enum ui_swipe_dir ui_swipe_classify(int dx, int dy)
  * This is NOT latency. The swipe fires the moment it is unambiguous, with the
  * finger still down; this only decides when the stroke has ended and a new one
  * may begin, which is what stops the tail of a long drag from firing twice.
+ *
+ * 120 was too short, and the log said so in a way that is obvious once seen:
+ * a single swipe arriving as TWO refused strokes of 21 px, back to back. The
+ * panel had stopped reporting for longer than the window, the stroke was
+ * closed at 21 px, and the rest of the same finger movement came back as a
+ * second stroke that was also short. Neither half reached the 36 px floor;
+ * together they would have passed it easily. The original touch trace had
+ * this in it all along -- inter-report gaps ran to 90 ms at the top decile
+ * and 779 ms at worst -- and 120 was chosen against the press durations
+ * rather than against the gaps between them.
+ *
+ * 250 is above the gaps that were actually measured while a stroke was in
+ * progress. The cost of being wrong in this direction is only that two
+ * deliberate swipes made within a quarter of a second read as one; the cost
+ * in the other direction is that ordinary swipes are torn in half and neither
+ * piece counts.
  */
-#define UI_SWIPE_STITCH_MS	120
+#define UI_SWIPE_STITCH_MS	250
+
+/*
+ * ...but only while the stroke is still being gathered.
+ *
+ * Once a swipe has FIRED there is nothing left to accumulate, and holding the
+ * stroke open for another quarter of a second would swallow a deliberate
+ * second swipe -- which is exactly what someone paging back and forth does.
+ * Be patient while collecting evidence, quick to reset once you have acted.
+ */
+#define UI_SWIPE_REARM_MS	80
 
 #endif /* UI_SWIPE_GEOM_H */
