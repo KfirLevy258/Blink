@@ -7,6 +7,11 @@
 > what was found and why each decision went the way it did.
 >
 > See §5 at the end for the resolution table.
+>
+> **Superseded in one place, 2026-08-28.** Row 11's web extension bridge was
+> built, measured against the real site, found to have nothing to forward, and
+> removed along with its localhost listener. This file is a dated audit and is
+> left as it was written; `next-steps.md` section A carries the finding.
 
 Audit of the "Desk HUD — Universal Architecture, Multi-Provider Design & Technical
 Handoff" document against this repository.
@@ -405,18 +410,18 @@ document. Commits are on `desk-hud-universal`.
 | # | Item | Resolution |
 |---|---|---|
 | 1 | Zero-credential footprint | **Confirmed, doc amended.** Enforced at compile time (`CONFIG_CLAUGE_WIFI_MODE` default n); the standalone WiFi build is now named as a second mode the document omitted. |
-| 2 | Zero outbound AI polling | **Confirmed.** The extension observes responses the page already receives and issues no request of its own, so the property survives its installation. |
+| 2 | Zero outbound AI polling | **Confirmed**, and now trivially so: the extension that observed page responses was removed 2026-08-28, so nothing reaches the network on Clauge's behalf at all. |
 | 3 | Pluggable multi-provider | **Built.** `pc/providers/base.py` (`ProviderParser`, `NormalizedUsageFrame`), `pc/ingest.py`, `pc/normalizer.py`. |
 | 4b | Anti-drift watchdog | **Built**, polled rather than watched, and it never overrides a deliberate uninstall. |
 | 5 | Schema resilience | **Built.** Versioned adapters dispatch on the cache's own `version`; an unknown version falls to a shape-driven reader. No `_parse_v1` — inventing a schema nobody has observed would mean testing against the invention. |
 | 6 | Zero content inspection | **Tightened.** The state hook keeps only an event name and a timestamp, asserted by `check_hook_shim.sh`. The statusline shim's whole-payload capture is unchanged and still local-only. |
 | 8 | `context_window`, `model.display_name` | **Built**, daemon through to pixels. Both were already in the payload and unread. |
 | 10 | Desktop app cache | **Built.** Two traps found against the real file: `t` is milliseconds, and there are no reset timestamps at all. |
-| 11 | Web extension bridge | **Built, transport changed** — see below. |
+| 11 | Web extension bridge | **Built, then removed 2026-08-28.** Measured against the real site: 178 responses, no rate-limit headers. See `next-steps.md` section A. |
 | 12 | Codex / future providers | **Unblocked, not written.** The interface exists and is exercised by four sources; no second provider ships, because there is nothing to test it against. |
 | 13 | Live state machine | **Built, differently** — see below. |
 | 14 | Serial protocol | **Capabilities delivered additively** — see below. |
-| 15 | Local-first, no telemetry | **Confirmed.** The one new socket is loopback-bound and origin-checked. |
+| 15 | Local-first, no telemetry | **Confirmed.** The one new socket was loopback-bound and origin-checked, and went with row 11 on 2026-08-28; the daemon now listens on nothing. |
 | 16 | Naming | Untouched. Tracked elsewhere. |
 
 ### The four departures

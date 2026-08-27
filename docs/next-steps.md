@@ -1,97 +1,42 @@
 # Next steps
 
-Two pieces of work, both extensions of what landed on `desk-hud-universal`.
-Written against the code as it stands at `c1146a8`.
+What is left, and what has been closed off. Written against the code as it
+stands on `desk-hud-universal`.
 
 ---
 
-## A. The claude.ai web plugin
+## A. Browser usage: measured, and not available (CLOSED 2026-08-28)
 
-### Where it actually is
+The one place usage happens that neither the CLI hook nor the desktop cache
+can see is a claude.ai tab. A browser extension and a matching localhost
+receiver were built to close that gap, and then run against the real site on
+2026-08-27: a page load, three reloads and one complete message turn, the
+completion request included.
 
-**Run against the real site, 2026-08-27. The question this section existed to
-ask has an answer, and it is the bad one.**
+**178 responses from `https://claude.ai/*`, zero carrying a rate-limit
+header.** Not a partial match, not an unrecognised name — nothing shaped like
+a limit, a remaining count, a reset time or a used percentage.
 
-| Piece | State |
-|---|---|
-| `extension/manifest.json`, `background.js` | loads unpacked in Chrome 152 |
-| `pc/webbridge.py` receiver | 20 tests, and verified live from the extension |
-| `ClaudeWebProvider` | merges like any other source, tested |
-| Extension → daemon → `clauge status` | **works end to end** |
-| **Rate-limit headers on claude.ai** | **none. 178 responses, 0 matches** |
+That is the whole finding, and it is recorded here so nobody rebuilds the
+apparatus to ask the question again. Two details it is worth keeping with it:
 
-### Step 1 — what claude.ai actually sends: ANSWERED (outcome c)
+  - **`extraHeaders` would not have changed the result.** That flag exists for
+    `Set-Cookie` and the CORS-restricted set; `onHeadersReceived` already sees
+    every ordinary response header. There is no hidden header to go and find.
+  - **The remaining mechanisms are worse, not merely untried.** Reading the
+    response body or injecting a content script both mean touching page
+    content rather than observing metadata, and the second is already on the
+    project's concerns list. Neither should be started without deciding that
+    deliberately.
 
-The extension was loaded unpacked, the daemon run from this branch, and
-claude.ai driven through a page load, three reloads and one complete message
-turn — the completion request included. The extension's own diagnostic
-reported:
-
-```
-{"t": ..., "responses": 178, "matched": 0, "usage_reports": 0}
-clauge status → Browser  extension running, but none of 178 responses
-                         carried rate-limit headers
-```
-
-178 responses observed on `https://claude.ai/*`, **zero** carrying anything
-matching `RE_LIMIT`, `RE_REMAINING`, `RE_RESET` or `RE_USED_PCT`.
-
-Two things that measurement does establish, and they are worth separating from
-the negative result:
-
-  - **The plumbing works.** The extension woke on real traffic, reached
-    `127.0.0.1:9877`, and the daemon's crumb turned into an accurate line in
-    `clauge status` without anyone opening a service-worker console. That was
-    the other thing this step was for.
-  - **`extraHeaders` would not change it.** That flag exists for `Set-Cookie`
-    and the CORS-restricted set; `onHeadersReceived` already sees every
-    ordinary response header, which is why the extension was the measuring
-    instrument in the first place. There is no hidden header to go and find.
-
-So this is **outcome (c)** as written below: header observation is the wrong
-mechanism for claude.ai, and the two fallbacks are the content script and the
-response body. Both were already judged worse, and the second is on the
-project's concerns list. **Nothing further should be built here without
-deciding that deliberately.**
-
-What the extension is worth as it stands: it is an honest, silent no-op that
-says so out loud. It costs the user nothing and it tells the truth when asked.
-That is a defensible thing to ship as an optional extra and a poor thing to
-put in front of anyone as a feature.
-
-### Step 2 — decide whether it ships at all
-
-Currently load-unpacked only. Shipping it properly means a Chrome Web Store
-developer account, review, and a privacy disclosure describing exactly what
-leaves the browser (nothing — it posts to loopback). Given (c) above is a live
-possibility, the honest options are:
-
-- ship it as an advanced, documented, load-unpacked extra; or
-- put it in the Web Store once (a) or (b) is confirmed working.
-
-Not worth store submission before Step 1 answers the question.
-
-### Step 3 — Firefox (manifest done, UNTESTED)
-
-`browser_specific_settings.gecko.id` and a dual `background` block are in the
-manifest now — Chrome reads `service_worker` and ignores `scripts`, Firefox does
-the reverse, so one manifest loads in both. `moz-extension://` was already in
-the receiver's origin allow-list.
-
-**Nothing about this has been run in Firefox.** Firefox's MV3 handles
-`webRequest` differently from Chrome's and `strict_min_version` is a guess at
-where `background.scripts` plus MV3 settled. Treat the manifest as a starting
-point, not as support; the diagnostic in Step 1 will say immediately whether it
-works.
-
-### Step 4 — before it is on by default
-
-The listener already binds loopback, allows one path and one method, caps the
-body before reading it and checks Origin against an allow-list. Before it ships
-enabled by default it deserves one pass from someone who did not write it —
-that is the first listening socket this product has ever had.
-
----
+The extension, the `pc/webbridge.py` receiver, `ClaudeWebProvider`, their
+tests and the `Browser` line in `clauge status` were all removed on
+2026-08-28. Three things paid for a source that returns nothing: a listening
+socket open on loopback for the daemon's whole life — the only one this
+product had — an install that asks a buyer to grant a browser extension read
+access to their Claude traffic, and about a thousand lines to keep working.
+The code is in git history if claude.ai ever grows the headers; reviving it is
+a revert, not a rewrite.
 
 ## B. Session and agent status
 
@@ -317,15 +262,13 @@ launch.
 
 ## Rough order
 
-1. ~~**Web plugin Step 1.**~~ Done — see A. The answer is (c); the remaining
-   question is a judgement call about the two fallbacks, not an
-   implementation task.
+1. ~~**Browser usage.**~~ Closed — see A. Measured, unavailable, removed.
 2. ~~**Flash the current branch and boot-verify it.**~~ Done 2026-08-27:
    built, flashed over USB, board came up clean, `hello` at 0.6.0.
 3. **The metadata decision** for B. It gates every part of B and is a judgement
    call, not an implementation task.
 4. B Steps 1–3 (daemon side, ~1.5 days), then B Step 4 v1 (a few hours).
-5. B Step 4 v2 and the web plugin's packaging, in whichever order matters more.
+5. B Step 4 v2.
 
 Two things noticed while testing that are not in either section:
 

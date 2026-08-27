@@ -220,13 +220,7 @@ def main(argv=None):
     # authenticates to Anthropic, and the daemon deliberately does not know
     # which providers exist -- pc/ingest owns that, so onboarding a second
     # tool never reaches this loop.
-    #
-    # Built BEFORE the board is waited for, because it opens the listener the
-    # browser extension reports to. Built after, that socket only existed
-    # while a board happened to be plugged in -- so the extension got
-    # connection-refused on a machine where the daemon was plainly running,
-    # which is indistinguishable from Clauge not being installed.
-    bus = ingest.IngestionBus(web_bridge=True)
+    bus = ingest.IngestionBus()
     fetch = bus.poll
 
     port = wait_for_port(args.port, on_wait=_upkeep)

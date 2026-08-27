@@ -62,9 +62,8 @@ STALE_AFTER_S = 1800
 # the long one.
 SESSION_WINDOW_MAX_MIN = 60 * 24
 
-# Plausible bounds for a reset timestamp: 2020-01-01 to 2100-01-01. The same
-# check pc/webbridge applies, and here it is what would notice the unit
-# changing to milliseconds.
+# Plausible bounds for a reset timestamp: 2020-01-01 to 2100-01-01. What this
+# would notice is the unit changing to milliseconds.
 RESET_EPOCH_MIN = 1_577_836_800
 RESET_EPOCH_MAX = 4_102_444_800
 

@@ -2,9 +2,9 @@
 
 A provider is one AI tool we can learn usage from -- Claude today, Codex or
 anything else later. A source is one *way* of learning it from that tool: the
-CLI hook, an app's own cache file, a browser extension. One provider owns
-several sources, and the sources disagree, so everything below is shaped by
-two facts:
+CLI hook, an app's own cache file, a rollout log. One provider owns several
+sources, and the sources disagree, so everything below is shaped by two
+facts:
 
   - Every source is optional and every source can be absent, old, or wrong in
     a way it cannot detect. Nothing here may assume a reading exists.

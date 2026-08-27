@@ -12,13 +12,13 @@ for and where this departs from it.
 ## 1. The shape
 
 ```
-  Claude Code            Claude Desktop         claude.ai tab
-  status line            plan-usage-history     (browser extension)
+  Claude Code            Claude Desktop         Codex
+  status line            plan-usage-history     rollout log
        |                        |                      |
-  ~/.clauge/              app's own cache        POST 127.0.0.1:9877
+  ~/.clauge/              app's own cache        ~/.codex/sessions/
   statusline.json               |                      |
        |                        |                      |
-  ClaudeCliProvider   ClaudeDesktopProvider    ClaudeWebProvider
+  ClaudeCliProvider   ClaudeDesktopProvider     CodexCliProvider
   ClaudeStateProvider           |                      |
        |                        |                      |
        +------------------------+----------------------+
@@ -48,7 +48,7 @@ The only type that crosses from provider code into the normalizer.
 | field | meaning | unknown is |
 |---|---|---|
 | `provider` | `"claude"`, `"codex"`, … | — (required) |
-| `src` | `"cli"`, `"desktop"`, `"web"` | — (required) |
+| `src` | `"cli"`, `"desktop"` | — (required) |
 | `observed_at` | when the DATA was written, not when we read it | — (required) |
 | `session_pct` / `weekly_pct` | rolling-window usage | `-1.0` |
 | `session_resets_at` / `weekly_resets_at` | absolute epoch | `None` |
@@ -73,7 +73,6 @@ decision below rests on this being honest.
 | CLI status line | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | Desktop cache | ✓ | ✓ | **✗** | — | — | — |
 | Codex rollout log | ✓ | ✓ | ✓ | — | — | — |
-| Browser extension | **✗** | **✗** | **✗** | — | — | — |
 | Hook state file | — | — | — | — | — | ✓ |
 
 No source is authoritative for everything. That table is the entire argument
@@ -97,11 +96,10 @@ from the specification:
   five-hour dial, 10080 → the seven-day one) and only fall back to position
   when that field is absent. Trusting the order would swap the two dials
   silently, which is the failure this whole document is written against.
-- **The browser extension reports nothing, and that is a measurement, not a
-  bug.** Driven against the real site on 2026-08-27 it observed 178 responses
-  from `https://claude.ai/*` — a full message turn included — and none of them
-  carried a rate-limit header of any spelling. It says so through
-  `clauge status` rather than going quiet. See `docs/next-steps.md` section A.
+- **A claude.ai tab is not a source, and that is settled.** A browser
+  extension was built to read usage from response headers and measured against
+  the real site: 178 responses, none carrying a rate-limit header of any
+  spelling. It was removed. `docs/next-steps.md` section A keeps the finding.
 
 ## 4. The merge rule
 

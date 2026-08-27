@@ -80,21 +80,6 @@ run_one usage_layout ""                ""
 run_one usage_parse  "usage_parse.c"   ""
 run_one usage_state  "usage_state.c"   ""
 
-# The browser extension's parsing, under Node. Not a firmware host test, but
-# the same idea and the same runner: pure functions, no browser, no board.
-if command -v node >/dev/null 2>&1; then
-	printf '  %-14s ' "extension"
-	if out=$(node "$ROOT/tests/extension/test_background.mjs" 2>&1); then
-		printf 'ok (%s checks)\n' "$(printf '%s' "$out" | grep -c '^PASS')"
-	else
-		printf 'FAILED\n'
-		printf '%s\n' "$out" | grep '^FAIL' | sed 's/^/      /'
-		failures=$((failures + 1))
-	fi
-else
-	echo "  extension      skipped (no node)"
-fi
-
 if [ "$failures" -ne 0 ]; then
 	printf '\n%d host test(s) failed\n' "$failures" >&2
 	exit 1

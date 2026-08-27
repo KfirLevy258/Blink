@@ -109,68 +109,6 @@ def test_make_fetch_is_a_zero_arg_callable():
     assert fetch()["session_pct"] == 50.0
 
 
-# --- the browser bridge is optional and never fatal -----------------------
-
-
-def test_the_bus_opens_no_socket_unless_asked():
-    """Importing or constructing the bus in a test must not start listening."""
-    bus = ingest.IngestionBus(providers=[Fixed(frame())], now=lambda: NOW)
-    assert bus.web_bridge is None
-
-
-def test_the_env_switch_turns_the_listener_off(monkeypatch):
-    monkeypatch.setenv(ingest.WEB_BRIDGE_DISABLE_ENV, "1")
-    providers = []
-    assert ingest.start_web_bridge(providers) is None
-    assert providers == []
-
-
-def test_a_taken_port_costs_the_browser_source_and_nothing_else(capsys,
-                                                                monkeypatch):
-    """A second daemon, or anything else holding 9877. The gauge keeps
-    working; only the browser source is lost."""
-    class Taken:
-        def __init__(self, *a, **k):
-            raise OSError("address already in use")
-
-    monkeypatch.delenv(ingest.WEB_BRIDGE_DISABLE_ENV, raising=False)
-    monkeypatch.setattr("pc.webbridge.WebBridge", Taken)
-    providers = [Fixed(frame())]
-    assert ingest.start_web_bridge(providers) is None
-    assert len(providers) == 1
-    assert "not started" in capsys.readouterr().err
-
-
-def test_a_started_bridge_adds_exactly_one_provider(monkeypatch, tmp_path):
-    """Port 0, not 9877.
-
-    This bound the real production port, so it failed on any machine where
-    the daemon happened to be running -- which is every machine the product
-    is being tested on. What it is pinning down is the WIRING (one bridge in,
-    one provider out), and that is true at any port.
-    """
-    from pc import webbridge
-    real = webbridge.WebBridge          # bound before the patch replaces it
-
-    def ephemeral(*a, **k):
-        k.setdefault("port", 0)
-        k.setdefault("diag_path", str(tmp_path / "webbridge.json"))
-        return real(*a, **k)
-
-    monkeypatch.delenv(ingest.WEB_BRIDGE_DISABLE_ENV, raising=False)
-    monkeypatch.setattr("pc.webbridge.WebBridge", ephemeral)
-    providers = []
-    bridge = ingest.start_web_bridge(providers)
-    try:
-        assert bridge is not None
-        assert bridge.port != 0          # actually bound to something
-        assert len(providers) == 1
-        assert providers[0].get_provider_id() == "claude"
-    finally:
-        if bridge:
-            bridge.stop()
-
-
 # --- the board owns the primary-provider preference ------------------------
 
 
