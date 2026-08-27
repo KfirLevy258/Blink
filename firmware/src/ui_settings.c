@@ -1807,6 +1807,33 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 }
 
 /*
+ * A stroke in progress, for the rail to draw.
+ *
+ * Guarded by the same three conditions the completed stroke is, and for the
+ * same reasons: with the panel open the gauge screen is not visible, and
+ * during the mute the page has just changed and the rail is already saying so.
+ * Showing a preview in either case would be the indicator contradicting the
+ * screen.
+ *
+ * Horizontal strokes report nothing. They mean settings and the boot clip,
+ * which are not page changes, and growing a rail mark for one would promise
+ * something that is not about to happen.
+ */
+static void swipe_progress_cb(enum ui_swipe_dir dir, int pct)
+{
+	int delta = 0;
+
+	if (panel == NULL && !ui_anim_gesture_muted()) {
+		if (dir == UI_SWIPE_UP) {
+			delta = 1;
+		} else if (dir == UI_SWIPE_DOWN) {
+			delta = -1;
+		}
+	}
+	usage_view_page_preview(delta, delta ? pct : 0);
+}
+
+/*
  * A completed stroke, from ui_swipe rather than from LVGL.
  *
  * LVGL's own gesture detector cannot survive this panel -- one physical swipe
@@ -2003,7 +2030,7 @@ void ui_settings_attach(lv_obj_t *scr)
 	 * fragments LVGL classifies are the ones ui_swipe exists to stitch
 	 * back together.
 	 */
-	ui_swipe_init(swipe_cb);
+	ui_swipe_init(swipe_cb, swipe_progress_cb);
 	mk_edge_zone(scr, LV_ALIGN_RIGHT_MID, zone_settings_cb);
 	mk_edge_zone(scr, LV_ALIGN_LEFT_MID, zone_anim_cb);
 

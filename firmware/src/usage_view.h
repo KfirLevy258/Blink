@@ -144,6 +144,21 @@ bool usage_view_can_page(int delta);
 
 void usage_view_page_step(int delta);
 
+/*
+ * Draw a page change part-way, while the swipe that would cause it is still
+ * being made.
+ *
+ * `delta` is the direction the stroke is heading (-1/+1, 0 for none) and `pct`
+ * is how far it has committed towards the distance a swipe needs, 0..100. The
+ * rail's marks trade places continuously: the one being left shrinks by
+ * exactly what the one being reached grows, arriving at full width at the same
+ * moment the swipe fires.
+ *
+ * Called on every tick of the swipe drain, repeats included, so it drops
+ * updates that would change nothing.
+ */
+void usage_view_page_preview(int delta, int pct);
+
 void usage_view_set_provider1(const char *tag);
 
 void usage_view_set_provider2(const char *tag, double session_pct,

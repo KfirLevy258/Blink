@@ -59,6 +59,57 @@ static inline int ui_swipe_abs(int v)
 	return v < 0 ? -v : v;
 }
 
+/*
+ * How far along the threshold a stroke has got, 0..100.
+ *
+ * The rail draws this while the finger is still moving, so the amount of
+ * travel a swipe wants stops being something to discover by failing. It is the
+ * SAME arithmetic the decision uses -- major against UI_SWIPE_MIN_PX -- so
+ * what is drawn cannot disagree with what happens: the rail arrives at full
+ * exactly when the swipe fires.
+ *
+ * Quantised to 5, which is 20 steps across the stroke. Finer would repaint the
+ * rail more often than the panel can show a difference in a 6 px dot.
+ */
+#define UI_SWIPE_PROGRESS_STEP	5
+
+static inline int ui_swipe_progress(int major)
+{
+	int pct = major * 100 / UI_SWIPE_MIN_PX;
+
+	if (pct > 100) {
+		pct = 100;
+	}
+	return pct - pct % UI_SWIPE_PROGRESS_STEP;
+}
+
+/*
+ * The direction a stroke is CURRENTLY heading, for the live indicator.
+ *
+ * Same axis and dominance rules as the decision, minus the distance floor --
+ * the whole point is to show a stroke that has not reached it yet. Below the
+ * drag line it reports nothing, so a tap's jitter does not make the rail
+ * twitch.
+ */
+static inline enum ui_swipe_dir ui_swipe_heading(int dx, int dy)
+{
+	const int ax = ui_swipe_abs(dx);
+	const int ay = ui_swipe_abs(dy);
+	const int major = ax > ay ? ax : ay;
+	const int minor = ax > ay ? ay : ax;
+
+	if (major < UI_SWIPE_DRAG_PX) {
+		return UI_SWIPE_NONE;
+	}
+	if (major * 8 < minor * UI_SWIPE_DOMINANCE_8) {
+		return UI_SWIPE_NONE;
+	}
+	if (ax > ay) {
+		return dx > 0 ? UI_SWIPE_RIGHT : UI_SWIPE_LEFT;
+	}
+	return dy > 0 ? UI_SWIPE_DOWN : UI_SWIPE_UP;
+}
+
 /* Whether a press that moved this far should still count as a tap. */
 static inline bool ui_swipe_is_drag(int dx, int dy)
 {

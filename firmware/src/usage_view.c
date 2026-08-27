@@ -860,17 +860,46 @@ static void refresh_nextcue(void)
 	lv_obj_align(nextcue, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF);
 }
 
+/*
+ * A page change part-way, drawn while the finger is still moving.
+ *
+ * `preview_to` is the page the stroke in progress is heading for, or -1 for
+ * none; `preview_pct` is how far it has committed. The rail is the right place
+ * for this and the only cheap one: it is already the answer to "which page am
+ * I on", it is six pixels tall so redrawing it costs nothing, and growing the
+ * mark you are travelling towards says which page AND how much further in the
+ * same gesture.
+ *
+ * It also makes the threshold visible. Before this, the amount of travel a
+ * swipe wants was discoverable only by failing to reach it -- which is exactly
+ * how "I should swipe the entire screen" got diagnosed, from a log rather than
+ * from the panel. Now the dot arrives at full width precisely when the swipe
+ * fires, so the rule and the picture are the same thing.
+ */
+static int preview_to = -1;
+static int preview_pct;
+
+/* Linear, in whole pixels: these are 6 and 16 px wide, so there is nothing an
+ * easing curve could express that the panel could show. */
+static int lerp_px(int a, int b, int pct)
+{
+	return a + (b - a) * pct / 100;
+}
+
 static void refresh_rail(void)
 {
 	int n = page_count();
 	int span = n * RAIL_PITCH - (RAIL_PITCH - RAIL_DOT_W);
 	int x = (SCR_W - span) / 2;
+	bool previewing = preview_to >= 0 && preview_to < n && preview_pct > 0;
 
 	if (!rail_dot[0]) {
 		return;
 	}
 	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
 		bool on = i == cur_page;
+		int w = on ? RAIL_ACT_W : RAIL_DOT_W;
+		lv_opa_t opa = on ? LV_OPA_COVER : LV_OPA_50;
 
 		/* One page: nowhere to go, so there is no indicator to decode
 		 * and no gesture to discover. The single-provider desk keeps
@@ -879,18 +908,32 @@ static void refresh_rail(void)
 			lv_obj_add_flag(rail_dot[i], LV_OBJ_FLAG_HIDDEN);
 			continue;
 		}
+		/*
+		 * The two marks trade places continuously: the one being left
+		 * shrinks by exactly what the one being reached grows. Half way
+		 * through a stroke they are the same size, which is the honest
+		 * picture of a page change that has not been decided yet.
+		 */
+		if (previewing && on) {
+			w = lerp_px(RAIL_ACT_W, RAIL_DOT_W, preview_pct);
+			opa = (lv_opa_t)lerp_px(LV_OPA_COVER, LV_OPA_50,
+						preview_pct);
+		} else if (previewing && i == preview_to) {
+			w = lerp_px(RAIL_DOT_W, RAIL_ACT_W, preview_pct);
+			opa = (lv_opa_t)lerp_px(LV_OPA_50, LV_OPA_COVER,
+						preview_pct);
+		}
 		lv_obj_clear_flag(rail_dot[i], LV_OBJ_FLAG_HIDDEN);
-		lv_obj_set_size(rail_dot[i], on ? RAIL_ACT_W : RAIL_DOT_W,
-				RAIL_H);
+		lv_obj_set_size(rail_dot[i], w, RAIL_H);
+		/* Centred on its own slot whatever width it currently has, so
+		 * it grows from the middle rather than off to one side. */
 		lv_obj_set_pos(rail_dot[i],
-			       x + i * RAIL_PITCH -
-				       (on ? (RAIL_ACT_W - RAIL_DOT_W) / 2 : 0),
+			       x + i * RAIL_PITCH - (w - RAIL_DOT_W) / 2,
 			       SCR_H - RAIL_BOTTOM_OFF - RAIL_H);
 		lv_obj_set_style_bg_color(rail_dot[i],
 					  pg[i].have ? severity(page_worst(i))
 						     : COL_GREY, 0);
-		lv_obj_set_style_bg_opa(rail_dot[i],
-					on ? LV_OPA_COVER : LV_OPA_50, 0);
+		lv_obj_set_style_bg_opa(rail_dot[i], opa, 0);
 	}
 	/* The rail and the cue answer the same question -- is there another
 	 * page, and which one am I on -- so they are refreshed by the same
@@ -1086,8 +1129,39 @@ static void morph_done(lv_anim_t *a)
 	       k_uptime_get() - morph_t0);
 }
 
+void usage_view_page_preview(int delta, int pct)
+{
+	int to = delta == 0 ? -1 : cur_page + delta;
+
+	if (!built) {
+		return;
+	}
+	if (to < 0 || to >= page_count() || pct <= 0) {
+		to = -1;
+		pct = 0;
+	}
+	/*
+	 * Dropped when nothing changed, because this arrives every drain tick
+	 * whether or not the finger moved -- ui_swipe publishes a state, not
+	 * an event. Without this the rail would be re-laid-out a hundred times
+	 * a second for a picture that is already correct.
+	 */
+	if (to == preview_to && pct == preview_pct) {
+		return;
+	}
+	preview_to = to;
+	preview_pct = pct;
+	refresh_rail();
+}
+
 void usage_view_page_step(int delta)
 {
+	/* The preview has done its job the moment the change is real: clear it
+	 * first so refresh_rail below draws the settled rail rather than a
+	 * stroke that is no longer in progress. */
+	preview_to = -1;
+	preview_pct = 0;
+
 	if (!usage_view_can_page(delta)) {
 		return;
 	}

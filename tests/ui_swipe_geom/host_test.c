@@ -118,6 +118,48 @@ int main(void)
 	eq("the drag line sits below the swipe floor",
 	   UI_SWIPE_DRAG_PX <= UI_SWIPE_MIN_PX, true);
 
+	/* --- the live indicator ----------------------------------------- */
+	/*
+	 * Progress and the decision must not be able to disagree: the rail
+	 * reaches full width at exactly the travel that fires the swipe. If
+	 * these two ever come apart, the panel shows a swipe completing and
+	 * then nothing happens, which is worse than no indicator at all.
+	 */
+	eq("full at the threshold", ui_swipe_progress(UI_SWIPE_MIN_PX), 100);
+	eq("still full past it", ui_swipe_progress(UI_SWIPE_MIN_PX * 3), 100);
+	eq("nothing at nothing", ui_swipe_progress(0), 0);
+	eq("half way", ui_swipe_progress(UI_SWIPE_MIN_PX / 2), 50);
+	checks++;
+	if (ui_swipe_progress(UI_SWIPE_MIN_PX - 1) >= 100) {
+		fails++;
+		printf("FAIL: the rail fills before the swipe fires\n");
+	} else {
+		printf("PASS: under the threshold is under full\n");
+	}
+	/* Quantised, so the rail is not re-laid-out for changes too small to
+	 * see in a 6 px dot. */
+	eq("quantised to the step",
+	   ui_swipe_progress(UI_SWIPE_MIN_PX / 2) % UI_SWIPE_PROGRESS_STEP, 0);
+
+	/* Heading is the decision's axis rules without its distance floor --
+	 * that is the whole point, it shows a stroke that has not arrived. */
+	eq("heading up before the floor",
+	   (int)ui_swipe_heading(0, -UI_SWIPE_DRAG_PX), UI_SWIPE_UP);
+	eq("heading down before the floor",
+	   (int)ui_swipe_heading(0, UI_SWIPE_DRAG_PX), UI_SWIPE_DOWN);
+	eq("no heading below the drag line",
+	   (int)ui_swipe_heading(0, UI_SWIPE_DRAG_PX - 1), UI_SWIPE_NONE);
+	eq("no heading for a tap", (int)ui_swipe_heading(3, -4), UI_SWIPE_NONE);
+	/* And a diagonal shows nothing rather than promising the wrong page. */
+	eq("no heading for a diagonal",
+	   (int)ui_swipe_heading(100, 100), UI_SWIPE_NONE);
+	/* Anything the decision accepts, the indicator was already showing --
+	 * or the rail would jump from blank to a completed page change. */
+	eq("a real swipe was headed somewhere first",
+	   (int)ui_swipe_heading(0, -UI_SWIPE_MIN_PX), UI_SWIPE_UP);
+	eq("and the same way it fires",
+	   (int)ui_swipe_classify(0, -UI_SWIPE_MIN_PX), UI_SWIPE_UP);
+
 	printf("ui_swipe_geom: %d checks, %d failed\n", checks, fails);
 	return fails != 0;
 }

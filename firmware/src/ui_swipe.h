@@ -34,8 +34,13 @@
  *
  * What this does instead:
  *
- *   - Polls the pointer's SCREEN coordinates, the same ones the touch marker
- *     was calibrated against, so there is no axis or sign to re-derive.
+ *   - Reads the PANEL'S OWN REPORTS, through an input callback, rather than
+ *     LVGL's replay of them. Zephyr's glue queues every report and LVGL pops
+ *     one per refresh, so a stroke arrives in slow motion and falls further
+ *     behind the finger the longer it runs; and an LVGL timer only runs
+ *     between frames. Polling through both saw two or three samples per
+ *     stroke and fired at 150 px against a 36 px threshold. See ui_swipe.c
+ *     for the channel-to-screen transform and where it was checked.
  *   - STITCHES across brief releases. A gap shorter than UI_SWIPE_STITCH_MS
  *     is contact bounce in the middle of a stroke, not the end of one.
  *   - Fires the moment the stroke is unambiguous, WHILE THE FINGER IS STILL
@@ -65,7 +70,20 @@ enum ui_swipe_dir {
  * the request and let the mode loop do it, exactly as the gesture handler it
  * replaces did.
  */
-void ui_swipe_init(void (*cb)(enum ui_swipe_dir dir));
+/*
+ * `on_progress` (may be NULL) is called every drain tick with how far the
+ * stroke in progress has committed, 0..100 of the distance a swipe needs, and
+ * the direction it is heading. UI_SWIPE_NONE with 0 means nothing is
+ * happening -- including the moment a stroke is let go without committing,
+ * which is how the indicator knows to go back.
+ *
+ * A STATE, pushed on repeat, not an event: the consumer is expected to drop
+ * updates that change nothing rather than this trying to send only the
+ * interesting ones. Progress is quantised (UI_SWIPE_PROGRESS_STEP) so that
+ * amounts to about twenty updates across a stroke.
+ */
+void ui_swipe_init(void (*on_swipe)(enum ui_swipe_dir dir),
+		   void (*on_progress)(enum ui_swipe_dir dir, int pct));
 
 /*
  * Whether the touch in progress (or the one that just ended) has travelled far
