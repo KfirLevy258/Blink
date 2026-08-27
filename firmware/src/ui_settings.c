@@ -9,6 +9,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/sys/printk.h>
+/*
+ * The gesture thresholds are per-indev fields with no public setter and no
+ * Kconfig -- LVGL 9.3 hard-codes the defaults in lv_indev.c. See
+ * tune_gestures() for why they cannot be left alone on this panel.
+ */
+#include <indev/lv_indev_private.h>
 #include <lvgl.h>
 #include <stdio.h>
 
@@ -1795,6 +1801,19 @@ static void scr_gesture_cb(lv_event_t *e)
 {
 	lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
 
+	/*
+	 * One line per gesture, and gestures are user-initiated, so this is
+	 * quiet. It is here because which LVGL direction a physical swipe
+	 * arrives as is NOT obvious on this board -- the pointer node carries
+	 * invert-x, the panel is rotated 90, and the two comments in this tree
+	 * that explain the mapping do not agree with each other. Anyone
+	 * wondering which way is which should be able to read it off the cable
+	 * instead of reasoning about a transform.
+	 *
+	 * LV_DIR_LEFT 1, RIGHT 2, TOP 4, BOTTOM 8.
+	 */
+	printk("[gesture] dir %d\n", (int)dir);
+
 	if (panel != NULL) {
 		return;
 	}
@@ -1904,8 +1923,53 @@ static void mk_edge_zone(lv_obj_t *scr, lv_align_t align, lv_event_cb_t cb)
 	lv_obj_add_event_cb(z, cb, LV_EVENT_CLICKED, NULL);
 }
 
+/*
+ * Make a swipe possible to perform on a resistive panel.
+ *
+ * LVGL ships two thresholds and both are wrong for this hardware
+ * (lv_indev.c, hard-coded macros with no Kconfig and no setter, which is why
+ * this reaches into the private header):
+ *
+ *   gesture_min_velocity  3   a sample that moved less than this in BOTH axes
+ *                             ZEROES the accumulator. Not "ignore this
+ *                             sample" -- it throws away everything counted so
+ *                             far. The XPT2046 is polled at 30 Hz here, so a
+ *                             deliberate, controlled drag is 2-4 px a sample
+ *                             and keeps resetting itself back to nothing. The
+ *                             only swipe that survives is a fast flick.
+ *   gesture_limit        50   and then it wants 50 px on top, which is 21% of
+ *                             a 240 px screen -- 8.9 mm of travel.
+ *
+ * Together: you have to flick fast AND far, and if you do either gently
+ * nothing happens at all. Reported as "the swipe itself is really hard"
+ * (2026-08-27) about the vertical page change, but it was always true of the
+ * horizontal ones too; those just get more attempts because there is a chevron
+ * drawn at each edge and a tap zone behind it, so a failed swipe still lands
+ * somewhere useful. The vertical gesture has no such fallback -- there is
+ * nothing to tap -- so it is where the threshold finally showed.
+ *
+ * 1 and 24: any real movement counts, and 24 px is 4.3 mm, comfortably past a
+ * fingertip's jitter on a tap and a third of what it was.
+ */
+#define GESTURE_MIN_VELOCITY	1
+#define GESTURE_LIMIT_PX	24
+
+static void tune_gestures(void)
+{
+	lv_indev_t *in = NULL;
+
+	while ((in = lv_indev_get_next(in)) != NULL) {
+		if (lv_indev_get_type(in) != LV_INDEV_TYPE_POINTER) {
+			continue;
+		}
+		in->gesture_min_velocity = GESTURE_MIN_VELOCITY;
+		in->gesture_limit = GESTURE_LIMIT_PX;
+	}
+}
+
 void ui_settings_attach(lv_obj_t *scr)
 {
+	tune_gestures();
 	lv_obj_add_event_cb(scr, scr_gesture_cb, LV_EVENT_GESTURE, NULL);
 	mk_edge_zone(scr, LV_ALIGN_RIGHT_MID, zone_settings_cb);
 	mk_edge_zone(scr, LV_ALIGN_LEFT_MID, zone_anim_cb);
