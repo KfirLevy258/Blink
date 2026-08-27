@@ -989,11 +989,16 @@ def cmd_update(_args) -> int:
 
 
 def cmd_provision(args) -> int:
-    """Stamp this unit's edition. A factory step, run once after programming.
+    """Stamp this unit's edition. A factory step, run ONCE after programming.
 
     Deliberately its own command rather than a flag on `install`: it is not
     part of setting a customer's machine up, it is part of building a board,
     and the two happen in different places by different people.
+
+    Once is enforced by the BOARD, not by this. The user installs this same
+    binary, so a check here would be a check on the honour system -- the
+    firmware latches the record on the first successful stamp and refuses
+    every later one. All this can do is report that clearly.
 
     The daemon owns the serial port whenever it is running, so this stops the
     login service, talks to the board, and starts it again. That is heavier
@@ -1098,8 +1103,20 @@ def cmd_provision(args) -> int:
 
     said = [h for h in heard if "[cfg] edition" in h]
     if said:
-        print(said[-1].split("[cfg] ", 1)[-1])
-        rc = 0
+        line = said[-1].split("[cfg] ", 1)[-1]
+        print(line)
+        # A refusal is not a success. The edition latches on the first stamp
+        # and the board declines every one after it (cfg_set_edition), so a
+        # unit that comes back down the line for a second pass has to fail
+        # here loudly rather than be boxed as whatever the label said.
+        if "refusing" in line:
+            print("This unit was stamped already. Clearing it means erasing"
+                  " the config partition\nover USB with the board in"
+                  " bootloader mode -- a factory operation, on purpose.",
+                  file=sys.stderr)
+            rc = 1
+        else:
+            rc = 0
     else:
         print(f"Sent edition={args.edition}, but the board did not confirm it."
               "\nA board running firmware older than this feature ignores the"

@@ -330,12 +330,19 @@ static void dispatch(const char *json)
 		/* Liveness only: last_host_ms was already stamped above. */
 	} else if (strcmp(type, "edition") == 0) {
 		/*
-		 * A factory fact arriving over the cable, once, after the
-		 * board is programmed -- see cfg_edition in cfg_store.h. It is
-		 * NOT reachable from the settings screen on purpose: the
+		 * A factory fact arriving over the cable, ONCE, after the
+		 * board is programmed -- see cfg_edition in cfg_store.h. The
 		 * enclosure decides which clip is right, and a user who could
 		 * flip it would only be putting the wrong animation in the
 		 * wrong box.
+		 *
+		 * "Not reachable from the settings screen" is not the whole
+		 * story and used to be treated as if it were. This message
+		 * arrives from whatever is on the other end of the cable, and
+		 * the tool that sends it is the same binary the user installs
+		 * -- so the enforcement has to be in the record, not in the
+		 * UI. cfg_set_edition latches on the first successful write
+		 * and refuses every one after it.
 		 *
 		 * Takes effect on the next boot, because what it selects is a
 		 * boot animation. Saying so in the log is the difference
@@ -354,13 +361,30 @@ static void dispatch(const char *json)
 				printk("[cfg] unknown edition '%s'; ignored\n", ed);
 				return;
 			}
-			if (cfg_get_edition() == v) {
-				printk("[cfg] edition already %s\n", ed);
-			} else if (cfg_set_edition(v) == 0) {
+			/*
+			 * The LATCH decides, not the value.
+			 *
+			 * An earlier version skipped the write whenever the
+			 * stored edition already matched, which looks like a
+			 * harmless optimisation and is a hole: 0 means both
+			 * "Claude" and "never stamped", so provisioning a
+			 * blank board as claude reported success, wrote
+			 * nothing, and left it stampable as codex afterwards
+			 * by anyone with the cable.
+			 */
+			int rc;
+
+			if (cfg_edition_locked()) {
+				printk("[cfg] edition already stamped as %s;"
+				       " refusing to change it\n",
+				       cfg_get_edition() == CFG_EDITION_CODEX
+					       ? "codex" : "claude");
+			} else if ((rc = cfg_set_edition(v)) == 0) {
 				printk("[cfg] edition set to %s"
 				       " (applies on next boot)\n", ed);
 			} else {
-				printk("[cfg] could not store the edition\n");
+				printk("[cfg] could not store the edition"
+				       " (%d)\n", rc);
 			}
 		}
 	} else if (strcmp(type, "welcome") == 0) {

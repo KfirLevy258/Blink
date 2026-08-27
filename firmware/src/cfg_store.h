@@ -118,6 +118,24 @@ int cfg_reset(void);
  *
  * 0 is Claude, so an unset record -- every unit built before this existed --
  * reads as the edition that was already shipping.
+ *
+ * WRITE ONCE. The first successful cfg_set_edition() latches the record, and
+ * every later one is refused with -EPERM. "No way to reach it from the
+ * settings screen" was not enough: the message that stamps it arrives over
+ * USB from whatever is on the other end of the cable, and the CLI that sends
+ * it is the same binary the user installs. Without the latch, anyone who owns
+ * a unit owns `clauge provision`, and the enclosure and the animation inside
+ * it stop agreeing.
+ *
+ * The latch also survives cfg_reset(). A factory reset wipes what the USER
+ * put on the device -- network, token, preferences -- and the edition is not
+ * that. It is a property of the box the board is screwed into, and a reset
+ * that cleared it would be a second route to the same change, reachable from
+ * the settings menu with no computer involved at all.
+ *
+ * What remains is erasing the config partition with esptool over USB, with
+ * the board held in bootloader mode. That is a factory operation by
+ * construction, which is the boundary that was wanted.
  */
 enum cfg_edition {
 	CFG_EDITION_CLAUDE = 0,
@@ -125,6 +143,15 @@ enum cfg_edition {
 };
 
 uint8_t cfg_get_edition(void);
+
+/* Whether this unit has already been stamped. Provisioning tools ask first so
+ * they can say "already a codex unit" instead of reporting a bare failure. */
+bool cfg_edition_locked(void);
+
+/*
+ * Stamp the edition. Returns -EPERM if this unit was already stamped, and
+ * -EINVAL for an edition this firmware does not know.
+ */
 int cfg_set_edition(uint8_t edition);
 
 #endif /* CFG_STORE_H */
