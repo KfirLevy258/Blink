@@ -95,7 +95,7 @@ int main(int argc, char **argv)
 		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
 		usage_view_set_sessions(3, 7);
 		usage_view_set_provider1("claude");
-		usage_view_set_provider2("codex", 34.0, 61.0, 4320, 259200);
+		usage_view_set_provider2("codex", 34.0, 61.0, 4320, 259200, false);
 		usage_view_set_clock(23, 47);
 		break;
 	case 2:	/* the worst case for the layout: everything at once, wide.
@@ -107,7 +107,7 @@ int main(int argc, char **argv)
 		usage_view_set_activity(USAGE_ACTIVITY_FAILED);
 		usage_view_set_sessions(9, 9);
 		usage_view_set_provider1("claude");
-		usage_view_set_provider2("codex", 100.0, 100.0, 60, 3600);
+		usage_view_set_provider2("codex", 100.0, 100.0, 60, 3600, false);
 		usage_view_set_clock(23, 59);
 		break;
 	case 3:	/* codex ALONE -- the outer ring is whoever the daemon made

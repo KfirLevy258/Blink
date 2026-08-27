@@ -60,8 +60,23 @@
  * unexpected tag ellipsizes instead of reaching into the corners where the
  * clock and the status dot live.
  */
-#define PROVIDER_Y		24
-#define PROVIDER_MAX_W		140
+/*
+ * The line under the brand carries the STATUS now, not the provider's name.
+ *
+ * The name moved to the bottom, where it became the control that changes it
+ * (see the pill in usage_view and mk_page_zone in ui_settings). Having it
+ * here as well was the same fact twice on one screen -- the header said
+ * "Codex" while the pill said "Claude", which is two names and one page and
+ * the reader has to work out which is which.
+ *
+ * The status took the freed line rather than the layout keeping a hole. It is
+ * the better home for it: a warning belongs where the eye lands first, and it
+ * had been sharing the bottom line with whatever else wanted it. Full width
+ * here, because "Reading is old - showing last known" is 35 characters and
+ * the corners above it are the clock and the dot on their own row.
+ */
+#define STATUS_Y		24
+#define STATUS_MAX_W		300
 
 
 /*
@@ -143,8 +158,30 @@
 #define SESS_BOTTOM_OFF		20
 #define SESS_MAX_W		200	/* "9 sessions  9 agents" */
 
-/* Hint line, bottom-centred; carries the amber/red explanation. */
-#define HINT_BOTTOM_OFF		20
+/*
+ * The provider pill, bottom-centred above the rail: whose numbers these are,
+ * and the control that changes it.
+ *
+ * State and control as one object, which is the idiom the settings panel's
+ * old "Main source" row used before one provider per page replaced it. It
+ * always shows, because it is the only thing on the screen that names the
+ * page -- unlike the hint it used to share this line with, which is why the
+ * hint moved up to STATUS_Y.
+ */
+/*
+ * 16 px up, and the height is 20: the line plus 2 px of padding each side.
+ *
+ * The band it has to live in is exactly 24 px -- the countdowns end at 202
+ * (GAUGE_CD_Y + FONT_LINE_H) and the rail begins at 226 -- so the padding is
+ * what it can afford rather than what would look most generous. It lands at
+ * 204..224, clear of both by 2. The first attempt used 3 px of padding and a
+ * 20 px offset, which put it through the countdowns; the layout test caught
+ * it before the board did.
+ */
+#define PILL_BOTTOM_OFF		16
+#define PILL_PAD_V		2
+#define PILL_H			(FONT_LINE_H + 2 * PILL_PAD_V)
+#define PILL_MAX_W		140
 
 /*
  * Clearances the layout must keep. Named so a failure says which rule broke

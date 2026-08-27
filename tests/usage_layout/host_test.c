@@ -93,14 +93,16 @@ int main(void)
 	struct box cd_r = top_mid("countdown R", GAUGE_CX,
 				  GAUGE_CD_Y, GAUGE_CD_MAX_W, FONT_LINE_H);
 
-	/* Whose numbers these are, under the brand. */
+	/* The brand, and the status line that took the space under it when the
+	 * provider's name moved to the bottom. */
 	struct box brand = top_mid("brand", 0, TITLE_Y, 90, FONT_LINE_H);
-	struct box who = top_mid("provider name", 0, PROVIDER_Y,
-				 PROVIDER_MAX_W, FONT_LINE_H);
+	struct box status = top_mid("status", 0, STATUS_Y,
+				    STATUS_MAX_W, FONT_LINE_H);
 
-	/* The bottom line, shared between the counts and the hint. */
-	struct box hint = bottom_mid("hint", HINT_BOTTOM_OFF, SCR_W,
-				     FONT_LINE_H);
+	/* The provider pill: whose numbers these are, and the button that
+	 * changes it. Padded, so it is taller than a bare line. */
+	struct box who = bottom_mid("provider pill", PILL_BOTTOM_OFF,
+				    PILL_MAX_W, PILL_H);
 
 	/* The page rail, below everything. */
 	struct box rail = bottom_mid("page rail", RAIL_BOTTOM_OFF,
@@ -109,7 +111,7 @@ int main(void)
 				     RAIL_H);
 
 	struct box all[] = { arc_l, arc_r, pct_l, name_l, name_r,
-			     cd_l, cd_r, brand, who, hint, rail };
+			     cd_l, cd_r, brand, status, who, rail };
 
 	for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		char msg[64];
@@ -129,18 +131,20 @@ int main(void)
 	CHECK(cd_l.y0 >= GAUGE_ARC_Y + GAUGE_ARC_SZ,
 	      "countdowns sit below the rings, not inside them");
 	CHECK(cd_l.y0 >= name_l.y1, "countdowns sit below the caption");
-	CHECK(!overlaps(cd_l, hint), "countdowns clear the bottom line");
-	CHECK(!overlaps(cd_r, hint), "countdowns clear the bottom line");
+	CHECK(!overlaps(cd_l, who), "countdowns clear the provider pill");
+	CHECK(!overlaps(cd_r, who), "countdowns clear the provider pill");
 
 	/* --- the header block stacks without touching --- */
-	CHECK(who.y0 >= brand.y1,
-	      "the provider name sits below the brand, not on it");
-	CHECK(arc_l.y0 >= who.y1,
-	      "the gauges start below the provider name");
+	CHECK(status.y0 >= brand.y1,
+	      "the status line sits below the brand, not on it");
+	CHECK(arc_l.y0 >= status.y1,
+	      "the gauges start below the status line");
 
-	/* --- the rail owns the bottom edge alone --- */
-	CHECK(!overlaps(rail, hint),
-	      "the page rail clears the hint line above it");
+	/* --- the bottom stacks: countdowns, pill, rail --- */
+	CHECK(who.y0 >= cd_l.y1,
+	      "the provider pill sits below the countdowns");
+	CHECK(!overlaps(rail, who),
+	      "the page rail clears the provider pill above it");
 	CHECK(!overlaps(rail, cd_l) && !overlaps(rail, cd_r),
 	      "the page rail clears both countdowns");
 	CHECK(rail.y1 <= SCR_H - 2,
@@ -157,8 +161,15 @@ int main(void)
 	/* Sized for the LONGEST tag the buffer can hold, not the one we happen
 	 * to ship: provider1_tag is char[12], so eleven characters is what has
 	 * to fit without reaching the clock and the status dot in the corners. */
-	CHECK(BUDGET_FITS(PROVIDER_MAX_W, "claude code"),
-	      "PROVIDER_MAX_W is sized for the longest tag, not guessed");
+	CHECK(BUDGET_FITS(PILL_MAX_W, "claude code"),
+	      "PILL_MAX_W is sized for the longest tag, not guessed");
+	/* The status line replaced a 140 px name with a whole sentence, so it
+	 * needs the width the name never did -- and it must still clear the
+	 * bezel. */
+	CHECK(BUDGET_FITS(STATUS_MAX_W, "Reading is old - showing last known"),
+	      "STATUS_MAX_W holds the longest thing the status says");
+	CHECK(STATUS_MAX_W + 2 * SCR_RIGHT_MARGIN_MIN <= SCR_W,
+	      "the status line still clears both bezels");
 
 	/* --- the font assumption these clearances rest on --- */
 	CHECK(FONT_LINE_H == 16,

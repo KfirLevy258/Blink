@@ -151,16 +151,6 @@ struct page_data {
 static struct page_data pg[RAIL_PAGES_MAX];
 static int cur_page;
 static lv_obj_t *rail_dot[RAIL_PAGES_MAX];
-/*
- * The line that says where the OTHER page is, and the bar that shows you
- * getting there.
- *
- * Standing furniture: a chevron and the other provider's name, so the gesture
- * is discoverable without performing it. The other half of the job -- the bar
- * that actually moves when you do perform it -- belongs to the transition and
- * lives in ui_slide.c.
- */
-static lv_obj_t *nextcue;
 
 static const char *page_tag(int i)
 {
@@ -563,59 +553,10 @@ void usage_view_init(void)
 	hint = lv_label_create(scr);
 	lv_label_set_text(hint, "");
 	lv_obj_set_style_text_color(hint, COL_DIM, 0);
-	lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF);
+	lv_obj_set_width(hint, STATUS_MAX_W);
+	lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, STATUS_Y);
 
-	/*
-	 * Where the next page is.
-	 *
-	 * It SHARES the hint's line rather than taking one of its own. There is
-	 * no line left to take -- the rail is 8 px off the bottom edge and the
-	 * gauges reach down to the countdowns -- and this line is empty
-	 * whenever nothing is wrong, which is nearly always. When the hint does
-	 * have something to say it wins: an amber explanation is worth more
-	 * than a reminder of a gesture, and a gesture cue that survives into a
-	 * red state is the panel talking over itself.
-	 *
-	 * No chevron at all now, because there is no longer a direction to
-	 * give.
-	 *
-	 * It first pointed where the page LIVES (down, since content follows
-	 * the finger), which reads as an instruction whatever it was meant as.
-	 * Then it pointed the way to swipe (up). Neither helped: across three
-	 * builds every vertical stroke went DOWN regardless of what the arrow
-	 * said. Either vertical swipe now reaches the other page -- see the
-	 * end-of-stack rule in ui_settings -- so an arrow would be picking one
-	 * of two equally correct answers and quietly discouraging the other.
-	 *
-	 * What is left is what the line was always for: there is another page
-	 * and it is called this. The bullet is a mark, not a direction.
-	 */
-	nextcue = lv_label_create(scr);
-	lv_label_set_text(nextcue, "");
-	lv_obj_set_style_text_color(nextcue, COL_DIM, 0);
-	/*
-	 * A quiet pill, because this is a CONTROL and not a caption.
-	 *
-	 * Tapping the band it sits in changes page (see mk_page_zone) -- the
-	 * tap path that makes up/down as dependable as left/right. But a
-	 * control nobody recognises is not one, and a bare dim line above two
-	 * dots reads as a label. The panel already has a vocabulary for "you
-	 * can press this": a COL_PANEL fill with a radius, which is what every
-	 * settings row is.
-	 *
-	 * Borrowed rather than invented, and borrowed at its quietest -- fill
-	 * only, no border. The border came off the settings back control for
-	 * being a second answer to a solved problem, and the same logic
-	 * applies here: the fill is enough to separate this from the ground
-	 * and say it is a surface.
-	 */
-	lv_obj_set_style_bg_color(nextcue, COL_PANEL, 0);
-	lv_obj_set_style_bg_opa(nextcue, LV_OPA_COVER, 0);
-	lv_obj_set_style_radius(nextcue, LV_RADIUS_CIRCLE, 0);
-	lv_obj_set_style_pad_hor(nextcue, 10, 0);
-	lv_obj_set_style_pad_ver(nextcue, 3, 0);
-	lv_obj_align(nextcue, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF + 3);
-	lv_obj_add_flag(nextcue, LV_OBJ_FLAG_HIDDEN);
 
 
 	/* Data age. The countdowns tick locally and keep moving even when the
@@ -649,13 +590,30 @@ void usage_view_init(void)
 		lv_obj_add_flag(rail_dot[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
 	}
 
+	/*
+	 * Whose numbers these are -- and, with two providers, the control that
+	 * changes it.
+	 *
+	 * It used to sit under the brand while the bottom of the screen
+	 * carried a second line naming the OTHER provider: two names on one
+	 * screen for one page, the header saying "Codex" while the pill said
+	 * "Claude", and the reader left to work out which was which. One name
+	 * is enough and the one worth keeping is the page you are on.
+	 *
+	 * Down here it is the same object as the control -- mk_page_zone puts
+	 * the hit area over this band -- which is the idiom the settings
+	 * panel's old "Main source" row used: the value IS the button.
+	 */
 	provider_lbl = lv_label_create(scr);
 	lv_label_set_text(provider_lbl, "");
 	lv_obj_set_style_text_color(provider_lbl, COL_TEXT, 0);
-	lv_obj_set_width(provider_lbl, PROVIDER_MAX_W);
+	lv_obj_set_style_bg_color(provider_lbl, COL_PANEL, 0);
+	lv_obj_set_style_radius(provider_lbl, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_pad_hor(provider_lbl, 10, 0);
+	lv_obj_set_style_pad_ver(provider_lbl, PILL_PAD_V, 0);
 	lv_label_set_long_mode(provider_lbl, LV_LABEL_LONG_DOT);
 	lv_obj_set_style_text_align(provider_lbl, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(provider_lbl, LV_ALIGN_TOP_MID, 0, PROVIDER_Y);
+	lv_obj_align(provider_lbl, LV_ALIGN_BOTTOM_MID, 0, -PILL_BOTTOM_OFF);
 
 	build_gauge(&session, scr, -GAUGE_CX, "SESSION 5h");
 	build_gauge(&weekly, scr, GAUGE_CX, "WEEKLY 7d");
@@ -885,45 +843,6 @@ static double page_worst(int i)
 }
 
 /*
- * "There is another page, it is that way, and it is called this."
- *
- * All three parts matter and the rail only carries the first: two dots say
- * there is somewhere to go and nothing about how to get there. A vertical
- * swipe is not a gesture anyone tries on a gauge -- the two swipes this panel
- * already had are horizontal -- so without a line naming the destination the
- * second provider is reachable and undiscoverable at once.
- */
-static void refresh_nextcue(void)
-{
-	int n = page_count();
-	int other = cur_page == 0 ? 1 : 0;
-	char name[sizeof(provider1_tag)];
-	char buf[sizeof(name) + 8];
-
-	if (nextcue == NULL) {
-		return;
-	}
-	/*
-	 * Silent unless there is somewhere to go AND the hint line is free.
-	 * lv_label_get_text is the live buffer, so this reads whatever
-	 * set_status last wrote rather than a copy that can go stale.
-	 */
-	if (n < 2 || lv_label_get_text(hint)[0] != '\0') {
-		lv_obj_add_flag(nextcue, LV_OBJ_FLAG_HIDDEN);
-		return;
-	}
-	tag_cased(name, sizeof(name), page_tag(other));
-	/* Just the name. The bullet was a placeholder for the chevron that got
-	 * removed when both swipe directions became correct, and a mark that
-	 * points nowhere is one more thing to decode on a line whose whole job
-	 * is to say a word. */
-	snprintf(buf, sizeof(buf), "%s", name);
-	lv_label_set_text(nextcue, buf);
-	lv_obj_clear_flag(nextcue, LV_OBJ_FLAG_HIDDEN);
-	lv_obj_align(nextcue, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF);
-}
-
-/*
  * A page change, at whatever point through it the rail currently is.
  *
  * ONE description covers the whole thing: `rail_a` is the mark being left,
@@ -1035,11 +954,10 @@ static void refresh_rail(void)
 						     : COL_GREY, 0);
 		lv_obj_set_style_bg_opa(rail_dot[i], opa, 0);
 	}
-	/* The rail and the cue answer the same question -- is there another
-	 * page, and which one am I on -- so they are refreshed by the same
-	 * call and cannot disagree. set_status is the one other caller, for
-	 * the line they share. */
-	refresh_nextcue();
+	/* The pill names the page, so it follows the rail: both answer "which
+	 * one am I on", and neither may be left behind by a change to the
+	 * other. */
+	refresh_provider1();
 }
 
 /*
@@ -1659,6 +1577,28 @@ static void refresh_provider1(void)
 
 		tag_cased(t, sizeof(t), tag);
 		lv_label_set_text(provider_lbl, t);
+		/*
+		 * The fill is what says "you can press this", so it is there
+		 * only when pressing does something. A single-provider desk
+		 * has nowhere to go, and a control that looks live and answers
+		 * nothing is worse than a plain label -- the same rule the
+		 * rail follows by hiding its dots below two pages.
+		 */
+		lv_obj_set_style_bg_opa(provider_lbl,
+					page_count() >= 2 ? LV_OPA_COVER
+							  : LV_OPA_TRANSP, 0);
+		/*
+		 * Hugs its text. A fixed width made a pill wide enough for
+		 * "claude code" around the word "Claude", which reads as a
+		 * bar with a word in it rather than a button.
+		 *
+		 * PILL_MAX_W stops being the width and becomes the CEILING --
+		 * the tag buffer holds eleven characters and the layout test
+		 * pins that against it, so content-sizing can never exceed
+		 * what the band was checked for.
+		 */
+		lv_obj_set_width(provider_lbl, LV_SIZE_CONTENT);
+		lv_obj_set_style_max_width(provider_lbl, PILL_MAX_W, 0);
 	}
 }
 
@@ -1815,9 +1755,6 @@ void usage_view_set_status(enum usage_status status)
 	}
 	lv_obj_set_style_text_color(hint, tc, 0);
 	lv_label_set_text(hint, text);
-	/* After the hint, never before: the cue yields this line to it and has
-	 * to be able to see what just landed there. */
-	refresh_nextcue();
 
 	/* One owner for the indicator's colour. The hint says WHICH condition
 	 * fired; the dot says only how bad it is. */

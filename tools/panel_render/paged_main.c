@@ -82,7 +82,7 @@ int main(int argc, char **argv)
 		usage_view_set_provider1("claude");
 		usage_view_update(27.0, 13231, 42.0, 598831);
 		if (sc[i].second) {
-			usage_view_set_provider2("codex", 97.0, 94.0, 372, 34200);
+			usage_view_set_provider2("codex", 97.0, 94.0, 372, 34200, false);
 		}
 		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
 		usage_view_set_sessions(1, 0);
