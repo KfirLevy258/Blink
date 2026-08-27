@@ -245,29 +245,22 @@ static lv_obj_t *mk_card(lv_obj_t *parent, int x, int y, int w, int h)
 #define BRIGHT_STOPS 5
 
 static lv_obj_t *pct_lbl;	/* the brightness row's subtitle: "60%" */
-static lv_obj_t *src_lbl;	/* the main-source row's subtitle: "Claude" */
 
 /*
- * Toggle the primary provider, persist it, and tell the host.
+ * No "Main source" row.
  *
- * The board does not act on this itself -- which provider is primary is a
- * decision the daemon makes when it merges sources, so the board's job is to
- * hold the preference across reboots and announce it. proto_send_pref() is a
- * no-op when no host is connected; the value goes out again on the next hello.
+ * It toggled which provider owned the outer ring and the big number -- back
+ * when both providers shared one gauge and one of them had to be chosen. They
+ * do not share it any more: each has a page of its own, reached with a swipe,
+ * and "which one is in front" is now answered by which page you are looking
+ * at. A stored preference that decides the same thing a second time is a
+ * second answer to a question that already has one.
+ *
+ * cfg_get/set_main_src stay: the value is still sent to the host on every
+ * hello (proto.c), where the daemon uses it to break ties when it merges
+ * sources. That is a HOST-side meaning, and it is not something to settle from
+ * across the room with a fingertip.
  */
-static void toggle_main_src(lv_event_t *e)
-{
-	uint8_t next = cfg_get_main_src() == CFG_MAIN_SRC_CODEX
-			 ? CFG_MAIN_SRC_CLAUDE : CFG_MAIN_SRC_CODEX;
-
-	ARG_UNUSED(e);
-	cfg_set_main_src(next);
-	if (src_lbl) {
-		lv_label_set_text(src_lbl,
-				  next == CFG_MAIN_SRC_CODEX ? "Codex" : "Claude");
-	}
-	proto_send_pref();
-}
 static lv_obj_t *bright_big;	/* the big readout on the brightness screen */
 static lv_obj_t *bright_ov;	/* the brightness screen itself, or NULL */
 static lv_obj_t *seg[BRIGHT_STOPS];
@@ -966,13 +959,20 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
 
 	lv_obj_set_size(b, 60, 36);
 	lv_obj_align(b, LV_ALIGN_TOP_LEFT, 6, 2);
-	/* Bordered rather than transparent: at this size an unmarked chevron
-	 * reads as a label, and the panel's other controls all announce
-	 * themselves with a track-coloured border. */
+	/*
+	 * Unbordered, and it keeps the 60 x 36 hit target anyway.
+	 *
+	 * The border was there to make the control announce itself at 40 x 26,
+	 * where an unmarked chevron read as a label. The SIZE is what fixed
+	 * that -- 72 x 48 reachable, 12.8 x 8.5 mm -- and once it was big
+	 * enough the box around it was a second answer to a solved problem,
+	 * sitting in the one corner of the panel that should be quietest
+	 * (user request 2026-08-27). The filled ground stays: it is what
+	 * separates the chevron from the title rule behind it.
+	 */
 	lv_obj_set_style_bg_color(b, COL_PANEL, 0);
 	lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(b, COL_TRACK, 0);
-	lv_obj_set_style_border_width(b, 1, 0);
+	lv_obj_set_style_border_width(b, 0, 0);
 	lv_obj_set_style_radius(b, 9, 0);
 	lv_obj_set_style_shadow_width(b, 0, 0);
 	lv_obj_set_style_pad_all(b, 0, 0);
@@ -1035,17 +1035,25 @@ static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
 
 	lv_label_set_text(t, title);
 	lv_obj_set_style_text_color(t, fg, 0);
-	lv_obj_align(t, LV_ALIGN_LEFT_MID, 14, -11);
+	/* A NULL subtitle is a one-line row, and the title then sits on the
+	 * row's own middle rather than 11 px above a line that is not there.
+	 * The update row is the only one: its version line moved out to the
+	 * footer, where it belongs to the panel and not to a button. */
+	lv_obj_align(t, LV_ALIGN_LEFT_MID, 14, sub ? -11 : 0);
 
-	lv_obj_t *sl = lv_label_create(row);
+	lv_obj_t *sl = NULL;
 
-	lv_label_set_text(sl, sub);
-	lv_obj_set_style_text_color(sl, COL_DIM, 0);
-	/* Width-bounded and dotted. A centred line escapes this 320 px panel
-	 * around 45 characters, and two overflow bugs have shipped that way. */
-	lv_obj_set_width(sl, 236);
-	lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
-	lv_obj_align(sl, LV_ALIGN_LEFT_MID, 14, 11);
+	if (sub != NULL) {
+		sl = lv_label_create(row);
+		lv_label_set_text(sl, sub);
+		lv_obj_set_style_text_color(sl, COL_DIM, 0);
+		/* Width-bounded and dotted. A centred line escapes this 320 px
+		 * panel around 45 characters, and two overflow bugs have
+		 * shipped that way. */
+		lv_obj_set_width(sl, 236);
+		lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
+		lv_obj_align(sl, LV_ALIGN_LEFT_MID, 14, 11);
+	}
 
 	lv_obj_t *chev = lv_label_create(row);
 
@@ -1229,7 +1237,7 @@ static void do_page(int delta, void (*pump)(void))
 	 * Everywhere else the two screens look nothing alike and the boundary
 	 * between them IS the motion; two provider pages are the same layout
 	 * with different numbers, so there was nothing to see moving and the
-	 * wipe read as a repaint. See ui_slide_run_swept.
+	 * wipe read as a repaint. See ui_slide_run_front.
 	 */
 	ui_slide_run_swept(delta > 0 ? UI_SLIDE_UP : UI_SLIDE_DOWN,
 			   UI_SLIDE_PAGE_STEP_PX, UI_SLIDE_PAGE_MIN_MS, pump);
@@ -1664,23 +1672,42 @@ static void build_panel(lv_obj_t *parent_scr)
 	 * fired came down to where the pressure centroid landed.
 	 */
 /*
- * 56, not 72. Three rows again -- brightness, main source, software update --
- * so the height the reset row freed goes back where it came from. 56 px is
- * 10.0 mm against a ~9 mm fingertip, which is what these were before and is
- * still comfortably above the threshold.
+ * 56 px is 10.0 mm against a ~9 mm fingertip -- the smallest a row can be and
+ * still be pressed on purpose rather than on average.
+ *
+ * TWO rows now, brightness and software update: the main-source row went when
+ * the providers got a page each. The height it freed is not redistributed. It
+ * goes to the footer, which is the version pair and the one instruction this
+ * device needs to give -- both of them things you read rather than press, and
+ * neither of which belongs inside a button.
  */
 #define ROW_H 56
 #define ROW_TOP 56		/* first row, clear of the title rule at y=40 */
 #define ROW_GAP 8
 
 /*
- * 56 + 3*56 + 2*8 = 240 exactly, which is the whole panel -- so the three rows
- * end flush with the bottom edge rather than leaving a hole. Checked here
- * rather than eyeballed, because the last time these moved a row went off the
- * bottom of a 240 px screen and nobody noticed until it was flashed.
+ * The footer: two centred lines under the last row, on the panel itself.
+ *
+ * The version pair used to be the update row's subtitle, which put a fact
+ * inside a control -- so reading the version meant looking at a button, and
+ * the button's own state ("Update ready") had to be squeezed in beside it,
+ * right-aligned and clear of a chevron. Separating them gives the button one
+ * job and the footer room for the second line, which is the thing an update
+ * actually needs someone to know.
  */
-BUILD_ASSERT(ROW_TOP + 3 * ROW_H + 2 * ROW_GAP <= 240,
-	     "the settings rows no longer fit on the panel");
+#define FOOT_Y1 192
+#define FOOT_Y2 212
+
+/*
+ * Two rows and a two-line footer, inside 240. Checked here rather than
+ * eyeballed, because the last time these moved a row went off the bottom of a
+ * 240 px screen and nobody noticed until it was flashed. FONT_LINE_H is 16 for
+ * the default montserrat_14, so the second line ends at 228.
+ */
+BUILD_ASSERT(ROW_TOP + 2 * ROW_H + ROW_GAP <= FOOT_Y1,
+	     "the settings rows now overlap the footer");
+BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
+	     "the settings footer no longer fits on the panel");
 	/* No green edge seam here. It existed as a left-edge cue back when the
 	 * back control was a bare chevron that was easy to miss; the control is
 	 * now a bordered 60 x 36 button that announces itself, so the seam was
@@ -1704,18 +1731,6 @@ BUILD_ASSERT(ROW_TOP + 3 * ROW_H + 2 * ROW_GAP <= 240,
 	       &pct_lbl);
 
 	/*
-	 * Which provider owns the outer ring and the big number.
-	 *
-	 * A tap toggles rather than opening a chooser: there are exactly two
-	 * values, and a sub-screen to pick between two things is more taps and
-	 * more code for the same outcome. The row's subtitle IS the current
-	 * value, so the state and the control are the same object.
-	 */
-	mk_row(panel, ROW_TOP + (ROW_H + ROW_GAP), ROW_H, "Main source",
-	       cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "Codex" : "Claude",
-	       false, toggle_main_src, NULL, &src_lbl);
-
-	/*
 	 * Both versions live here, on the row that is already about versions.
 	 *
 	 * There is no footer left to put them in -- the two rows and their
@@ -1725,23 +1740,50 @@ BUILD_ASSERT(ROW_TOP + 3 * ROW_H + 2 * ROW_GAP <= 240,
 	 * pair is behind, since the app's version is otherwise invisible from
 	 * the panel.
 	 */
-	if (proto_host_version()[0]) {
-		snprintf(sub, sizeof(sub), "Clauge %s  |  App %s",
-			 CLAUGE_FW_VERSION, proto_host_version());
-	} else {
-		snprintf(sub, sizeof(sub), "Clauge %s", CLAUGE_FW_VERSION);
-	}
-	upd_btn = mk_row(panel, ROW_TOP + 2 * (ROW_H + ROW_GAP), ROW_H,
-			 "Software update", sub,
+	upd_btn = mk_row(panel, ROW_TOP + (ROW_H + ROW_GAP), ROW_H,
+			 "Software update", NULL,
 			 false, upd_cb, NULL, NULL);
 
-	/* The state reads on the title line, where it belongs to the row's
-	 * name; the version line underneath stays unbroken. Right-aligned
-	 * clear of the chevron, so it can grow to "Install 0.6.1" without
-	 * colliding. */
+	/* The row's state, beside the row's name. Right-aligned clear of the
+	 * chevron so it can grow to "Install 0.6.1" without colliding, and on
+	 * the middle now that there is no second line to sit above. */
 	upd_lbl = lv_label_create(upd_btn);
 	lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
-	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -34, -11);
+	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -34, 0);
+
+	/*
+	 * Both versions, on the panel rather than in the button.
+	 *
+	 * This is the only place on the device that can say which HALF of the
+	 * pair is behind -- the app's version is otherwise invisible from the
+	 * panel -- so it says both, or says the board's alone when no host has
+	 * introduced itself.
+	 */
+	lv_obj_t *ver = lv_label_create(panel);
+
+	if (proto_host_version()[0]) {
+		snprintf(sub, sizeof(sub), "Blink %s  |  App %s",
+			 CLAUGE_FW_VERSION, proto_host_version());
+	} else {
+		snprintf(sub, sizeof(sub), "Blink %s", CLAUGE_FW_VERSION);
+	}
+	lv_label_set_text(ver, sub);
+	lv_obj_set_style_text_color(ver, COL_DIM, 0);
+	lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, FOOT_Y1);
+
+	/*
+	 * The one instruction this device gives, and it is here because this
+	 * is the screen where it matters: an update writes a new image over
+	 * USB and a board that loses power halfway is a board that has to be
+	 * recovered with a cable anyway. Stated as a standing condition rather
+	 * than fired as a warning mid-download -- by the time a progress bar
+	 * could say it, unplugging has already happened.
+	 */
+	lv_obj_t *keep = lv_label_create(panel);
+
+	lv_label_set_text(keep, "Keep the cable connected");
+	lv_obj_set_style_text_color(keep, COL_DIM, 0);
+	lv_obj_align(keep, LV_ALIGN_TOP_MID, 0, FOOT_Y2);
 
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
 
