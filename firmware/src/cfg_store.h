@@ -98,4 +98,33 @@ int cfg_set_ota_state(uint8_t st, const char *ver);
 /* Wipe everything (factory reset). */
 int cfg_reset(void);
 
+
+/*
+ * Which edition this unit is: which boot clip it plays.
+ *
+ * A FACTORY fact, not a preference. It is written once over USB after the
+ * board is programmed (`clauge provision --edition codex`) and there is
+ * deliberately no way to reach it from the settings screen -- the enclosure
+ * decides it, and a user who could flip it would only be putting the wrong
+ * animation in the wrong box.
+ *
+ * Living on the unit rather than in the binary is what keeps ONE firmware
+ * image for both editions. The alternative was a second build, which forks
+ * the OTA feed: the manifest names one firmware and `hello` carries no
+ * edition, so a Codex unit would be offered the Claude image and would take
+ * it -- its identity reverting silently, in the field, months later. Both
+ * clips are compiled in instead and this picks between them at boot. The
+ * second one costs 17 KB on an image using 663 KB of 4 MB.
+ *
+ * 0 is Claude, so an unset record -- every unit built before this existed --
+ * reads as the edition that was already shipping.
+ */
+enum cfg_edition {
+	CFG_EDITION_CLAUDE = 0,
+	CFG_EDITION_CODEX = 1,
+};
+
+uint8_t cfg_get_edition(void);
+int cfg_set_edition(uint8_t edition);
+
 #endif /* CFG_STORE_H */

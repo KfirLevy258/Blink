@@ -58,6 +58,41 @@ int main(void)
 		      "a number is not a boolean");
 	}
 
+	{
+		/*
+		 * A key is only a key when a colon follows it.
+		 *
+		 * The bug this pins: `{"t":"edition",...,"edition":"codex"}`
+		 * returned the literal "edition". after_colon() matched the
+		 * VALUE of "t" -- same spelling -- and then took the next
+		 * colon it could find, which belonged to "v". The board
+		 * reported `unknown edition 'edition'` and provisioning did
+		 * nothing, on hardware, silently.
+		 */
+		printf("\n-- a value that spells a key name --\n");
+		const char *collide =
+			"{\"t\":\"edition\",\"v\":2,\"edition\":\"codex\"}";
+		const char *spaced =
+			"{\"t\": \"edition\", \"v\": 2, \"edition\": \"codex\"}";
+		char v[16];
+
+		CHECK(msg_get_str(collide, "t", v, sizeof(v)) &&
+		      strcmp(v, "edition") == 0, "t is still read correctly");
+		CHECK(msg_get_str(collide, "edition", v, sizeof(v)) &&
+		      strcmp(v, "codex") == 0,
+		      "the KEY wins over an identically spelled value");
+		CHECK(msg_get_str(spaced, "edition", v, sizeof(v)) &&
+		      strcmp(v, "codex") == 0,
+		      "...and with spaces after the colons too");
+
+		double d = 0;
+
+		CHECK(msg_get_double(collide, "v", &d) && d == 2,
+		      "a number after a colliding value still parses");
+		CHECK(!msg_get_str(collide, "nope", v, sizeof(v)),
+		      "an absent key is still absent");
+	}
+
 	printf("\n%s (%d failures)\n", failures ? "TESTS FAILED" : "ALL TESTS PASSED", failures);
 	return failures ? 1 : 0;
 }

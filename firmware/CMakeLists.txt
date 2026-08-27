@@ -16,6 +16,7 @@ target_sources(app PRIVATE
 	src/net_time.c
 	src/ui_boot.c
 	src/bootanim_dec.c
+	src/bootclip.c
 	src/ui_settings.c
 	src/ui_anim.c
 	src/ui_slide.c

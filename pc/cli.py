@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 
-from pc import install_hooks, install_statusline, update
+from pc import install_hooks, install_statusline, protocol, update
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -988,6 +988,129 @@ def cmd_update(_args) -> int:
     return 0
 
 
+def cmd_provision(args) -> int:
+    """Stamp this unit's edition. A factory step, run once after programming.
+
+    Deliberately its own command rather than a flag on `install`: it is not
+    part of setting a customer's machine up, it is part of building a board,
+    and the two happen in different places by different people.
+
+    The daemon owns the serial port whenever it is running, so this stops the
+    login service, talks to the board, and starts it again. That is heavier
+    than it looks like it needs to be and it is the honest sequence: two
+    processes cannot hold one tty, and a provisioning step that silently did
+    nothing because the port was busy is exactly the failure this product
+    cannot afford at the point a board is being boxed.
+    """
+    import serial                      # only this path needs it installed
+
+    from claude_usage_bridge import autodetect_port
+
+    port = args.port or autodetect_port()
+    if not port:
+        print("No board found. Plug one in, or pass --port.", file=sys.stderr)
+        return 1
+
+    stopped = False
+    if not _skip_service():
+        # Stop by pid first: the login service may not be registered on a
+        # bench machine, and the pid file is the thing that is true either way.
+        _kill_recorded_daemon()
+        try:
+            backend().remove()
+            stopped = True
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+    try:
+        ser = serial.Serial()
+        ser.port = port
+        ser.baudrate = args.baud
+        ser.timeout = 0.2
+        # Same open dance as the daemon: leave DTR/RTS alone, then pulse RTS,
+        # so the board comes up in run mode rather than the ROM loader. See
+        # the long note in claude_usage_bridge.main.
+        ser.dtr = False
+        ser.rts = False
+        ser.open()
+        ser.dtr = False
+        ser.rts = True
+        time.sleep(0.15)
+        ser.rts = False
+        time.sleep(0.4)
+        ser.reset_input_buffer()
+    except Exception as e:
+        print(f"Could not open {port}: {e}", file=sys.stderr)
+        if stopped:
+            print("Background service ... " + _install_service())
+        return 1
+
+    try:
+        # Wait for the board to say hello before sending anything.
+        #
+        # Opening the port resets it (the RTS pulse above is deliberate --
+        # see the daemon), so for the first second or two the thing on the
+        # other end is a bootloader, not the firmware. The first attempt at
+        # this wrote immediately after a 0.4 s sleep and the message went
+        # into the void: no error, no confirmation, indistinguishable from a
+        # board too old to understand it. `hello` is the board saying it is
+        # listening, and it is the only honest thing to wait for.
+        heard = []
+        ready = False
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            chunk = ser.readline()
+            if not chunk:
+                continue
+            text = chunk.decode("utf-8", "replace").strip()
+            if text:
+                heard.append(text)
+            if '"t":"hello"' in text.replace(" ", ""):
+                ready = True
+                break
+        if not ready:
+            print(f"No hello from the board on {port} within 10 s.",
+                  file=sys.stderr)
+            ser.close()
+            if stopped:
+                print("Background service ... " + _install_service())
+            return 1
+
+        ser.write(protocol.encode(protocol.edition(args.edition)))
+        ser.flush()
+        # Read back what the board says about it. The firmware prints one
+        # line either way, and that line is the whole confirmation: a board
+        # too old to know the message answers nothing, which is a different
+        # outcome from a board that stored it.
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            chunk = ser.readline()
+            if not chunk:
+                continue
+            text = chunk.decode("utf-8", "replace").strip()
+            if text:
+                heard.append(text)
+            if "[cfg] edition" in text:
+                break
+    finally:
+        ser.close()
+
+    said = [h for h in heard if "[cfg] edition" in h]
+    if said:
+        print(said[-1].split("[cfg] ", 1)[-1])
+        rc = 0
+    else:
+        print(f"Sent edition={args.edition}, but the board did not confirm it."
+              "\nA board running firmware older than this feature ignores the"
+              " message.", file=sys.stderr)
+        rc = 1
+
+    if stopped:
+        print("Background service ... " + _install_service())
+    return rc
+
+
 def cmd_run(args) -> int:
     """The daemon. This is what the login service starts.
 
@@ -1018,6 +1141,15 @@ def main(argv=None) -> int:
     sub.add_parser("uninstall", help="Put it all back")
     sub.add_parser("status", help="Is the panel getting data?")
     sub.add_parser("update", help="Fetch a newer version of this app")
+    prov_p = sub.add_parser(
+        "provision",
+        help="Stamp this unit's edition (factory step, run once)")
+    prov_p.add_argument("--edition", required=True,
+                        choices=list(protocol.EDITIONS),
+                        help="Which boot clip this board plays")
+    prov_p.add_argument("--port", default=None,
+                        help="Serial port (default: find the board)")
+    prov_p.add_argument("--baud", type=int, default=115200)
     run_p = sub.add_parser("run", help="Run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
                        help="Serial port (default: find the board)")
@@ -1033,6 +1165,7 @@ def main(argv=None) -> int:
         "uninstall": cmd_uninstall,
         "status": cmd_status,
         "update": cmd_update,
+        "provision": cmd_provision,
         "run": cmd_run,
     }[args.cmd](args)
 

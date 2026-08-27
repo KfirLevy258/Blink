@@ -28,9 +28,24 @@ Typical use:
   tools/encode_bootanim.py --input ~/Downloads/claude_intro.mp4 \
       --start 2.4 --duration 4.0 --preview /tmp/anim.gif \
       --out firmware/src/bootanim.h
+
+A clip can also be AUTHORED rather than filmed:
+
+  tools/encode_bootanim.py --frames /tmp/codex-frames \
+      --preview /tmp/anim.gif --out firmware/src/bootanim_codex.h
+
+--frames reads <dir>/*.png in sorted order, each already the full 320x240
+canvas, and skips the entire film-handling stage -- no ffmpeg, no zoom, no
+letterbox, no split-gap, and no --bg remap, because none of those describe a
+picture somebody drew. Everything downstream is shared: the same noise gate,
+the same RGB565 quantisation, the same delta encoder, the same round-trip
+assertion. That matters more than it sounds: a second boot clip that took a
+different path to the blob would be a second format to trust.
 """
 
 import argparse
+import glob
+import os
 import struct
 import subprocess
 import sys
@@ -206,7 +221,7 @@ def decode(blob):
     return frames, fps
 
 
-def emit_header(path, blob, last, fps, nframes, bg_rgb, cmdline):
+def emit_header(path, blob, last, fps, nframes, bg_rgb, cmdline, prefix=""):
     def dump(name, data, lines):
         lines.append(f"static const uint8_t {name}[{len(data)}] = {{")
         for i in range(0, len(data), 16):
@@ -222,12 +237,12 @@ def emit_header(path, blob, last, fps, nframes, bg_rgb, cmdline):
         "#pragma once",
         "#include <stdint.h>",
         "",
-        f"#define BOOTANIM_BG_RGB 0x{bg_rgb:06x}",
+        f"#define {prefix.upper()}BOOTANIM_BG_RGB 0x{bg_rgb:06x}",
         "",
     ]
-    dump("bootanim_blob", blob, lines)
+    dump(prefix + "bootanim_blob", blob, lines)
     lines.append("")
-    dump("bootanim_last", last, lines)
+    dump(prefix + "bootanim_last", last, lines)
     lines.append("")
     with open(path, "w") as f:
         f.write("\n".join(lines))
@@ -235,7 +250,12 @@ def emit_header(path, blob, last, fps, nframes, bg_rgb, cmdline):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--input", required=True)
+    ap.add_argument("--input", help="source video (ffmpeg)")
+    ap.add_argument("--frames", metavar="DIR",
+                    help="author from PNGs instead: <DIR>/*.png in sorted "
+                         "order, each already the full 320x240 canvas. "
+                         "Mutually exclusive with --input; the film-handling "
+                         "options do not apply")
     ap.add_argument("--start", type=float, action="append", default=None,
                     help="segment start; repeatable (paired with --duration) "
                          "to splice segments together")
@@ -270,7 +290,20 @@ def main():
                          "toward the new color")
     ap.add_argument("--out", help="write C header here")
     ap.add_argument("--preview", help="write round-trip GIF here")
+    ap.add_argument("--symbol-prefix", default="",
+                    help="prepend this to the emitted symbol names, so a "
+                         "second clip can be compiled in alongside the first "
+                         "(e.g. --symbol-prefix codex_ gives "
+                         "codex_bootanim_blob and CODEX_BOOTANIM_BG_RGB)")
     args = ap.parse_args()
+
+    if bool(args.input) == bool(args.frames):
+        sys.exit("give exactly one of --input (a video) or --frames (a "
+                 "directory of PNGs)")
+
+    if args.frames:
+        canvases, fill = load_authored(args.frames)
+        return finish(args, canvases, fill)
 
     starts = args.start if args.start is not None else [0.0]
     durations = args.duration if args.duration is not None else [4.0]
@@ -312,7 +345,40 @@ def main():
     canvases = np.empty((len(src), CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
     canvases[:] = fill
     canvases[:, y0:y0 + vid_h] = src
+    return finish(args, canvases, fill)
 
+
+def load_authored(directory):
+    """A drawn clip: <dir>/*.png, sorted, each the full canvas.
+
+    The background fill is read from the top-left pixel rather than guessed
+    with a median the way the video path does. A drawn frame has no grain and
+    no letterbox, so there is nothing to estimate -- and the fill is what the
+    firmware paints the LVGL screen with before the first frame lands
+    (BOOTANIM_BG_RGB), so getting it exactly right is the difference between a
+    seamless start and a one-frame flash of the wrong colour.
+
+    Note this reports the fill the frames ACTUALLY carry, which for a clip
+    round-tripped through RGB565 is the quantised value (0xce795a) rather than
+    the artist's original (0xcb7b5e). That is the right answer, not a rounding
+    error to correct: BOOTANIM_BG_RGB and the first frame have to agree, and
+    the first frame is quantised whatever the header says.
+    """
+    paths = sorted(glob.glob(os.path.join(directory, "*.png")))
+    if not paths:
+        sys.exit(f"no PNGs in {directory}")
+    out = np.empty((len(paths), CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+    for i, p in enumerate(paths):
+        im = Image.open(p).convert("RGB")
+        if im.size != (CANVAS_W, CANVAS_H):
+            sys.exit(f"{p} is {im.size[0]}x{im.size[1]}, "
+                     f"need {CANVAS_W}x{CANVAS_H}")
+        out[i] = np.asarray(im)
+    return out, out[0, 0, 0].copy()   # (N, H, W, 3) -> the top-left pixel
+
+
+def finish(args, canvases, fill):
+    """Everything from the noise gate to the header, shared by both inputs."""
     # Noise-gate against the *displayed* state, then quantize.
     shown = [canvases[0]]
     for f in canvases[1:]:
@@ -348,7 +414,8 @@ def main():
     if args.out:
         bg = (int(fill[0]) << 16) | (int(fill[1]) << 8) | int(fill[2])
         emit_header(args.out, blob, last, args.fps, len(frames565), bg,
-                    "tools/encode_bootanim.py " + " ".join(sys.argv[1:]))
+                    "tools/encode_bootanim.py " + " ".join(sys.argv[1:]),
+                    prefix=args.symbol_prefix)
         print(f"header: {args.out}")
 
 

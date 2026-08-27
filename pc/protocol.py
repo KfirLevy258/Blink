@@ -269,6 +269,27 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     )
 
 
+EDITIONS = ("claude", "codex")
+
+
+def edition(name: str) -> dict:
+    """Tell the board which edition it is -- which boot clip to play.
+
+    A factory step, sent once after programming, not a user setting. The board
+    persists it and applies it on the next boot, because what it selects is a
+    boot animation.
+
+    Additive like everything else on this wire: firmware that predates it
+    ignores an unknown message type, so sending one to an older board is a
+    no-op rather than an error. `clauge provision` reports what the board
+    actually says, which is the only way to tell those two apart.
+    """
+    if name not in EDITIONS:
+        raise ValueError(f"unknown edition {name!r}; expected one of "
+                         + ", ".join(EDITIONS))
+    return {"t": "edition", "v": VERSION, "edition": name}
+
+
 def status(state: str, detail: str = "") -> dict:
     return {"t": "status", "v": VERSION, "state": state, "detail": detail}
 

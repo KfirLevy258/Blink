@@ -57,7 +57,28 @@ struct rec {
 	uint8_t ota_state;		/* 0 idle, 1 install started (cleared on next boot) */
 	char ota_target[CFG_OTA_VER_MAX]; /* version the install aimed at */
 	uint8_t main_src;		/* 0 unset -> claude; else enum cfg_main_src */
+	uint8_t edition;		/* 0 unset -> claude; else enum cfg_edition */
 	uint32_t crc;		/* over everything above, always last */
+} __packed;
+
+/* The layout before `edition` was added -- see the note on rec_pre_src for
+ * why every field addition needs one of these. */
+struct rec_pre_edition {
+	uint32_t magic;
+	uint32_t seq;
+	uint8_t mode;
+	uint8_t weekly_sel;
+	uint8_t tz_set;
+	uint8_t bright_pct;
+	int32_t tz_min;
+	char ssid[CFG_SSID_MAX];
+	char psk[CFG_PSK_MAX];
+	char token[CFG_TOKEN_MAX];
+	char ap_psk[CFG_AP_PSK_MAX];
+	uint8_t ota_state;
+	char ota_target[CFG_OTA_VER_MAX];
+	uint8_t main_src;
+	uint32_t crc;
 } __packed;
 
 /*
@@ -128,7 +149,35 @@ static bool slot_load(int off, struct rec *out)
 		return true;
 	}
 
-	/* Not a current record -- try the layout from before main_src. */
+	/* Not a current record -- try the layout from before `edition`. */
+	struct rec_pre_edition pe;
+
+	memcpy(&pe, buf, sizeof(pe));
+	if (pe.magic == REC_MAGIC &&
+	    pe.crc == crc32_ieee((const uint8_t *)&pe,
+				 offsetof(struct rec_pre_edition, crc))) {
+		memset(out, 0, sizeof(*out));
+		out->magic = pe.magic;
+		out->seq = pe.seq;
+		out->mode = pe.mode;
+		out->weekly_sel = pe.weekly_sel;
+		out->tz_set = pe.tz_set;
+		out->bright_pct = pe.bright_pct;
+		out->tz_min = pe.tz_min;
+		memcpy(out->ssid, pe.ssid, sizeof(out->ssid));
+		memcpy(out->psk, pe.psk, sizeof(out->psk));
+		memcpy(out->token, pe.token, sizeof(out->token));
+		memcpy(out->ap_psk, pe.ap_psk, sizeof(out->ap_psk));
+		out->ota_state = pe.ota_state;
+		memcpy(out->ota_target, pe.ota_target, sizeof(out->ota_target));
+		out->main_src = pe.main_src;
+		out->edition = 0;	/* unset -> Claude, what shipped */
+		out->crc = rec_crc(out);
+		printk("[cfg] migrated pre-edition record (seq %u)\n", pe.seq);
+		return true;
+	}
+
+	/* Older -- the layout from before main_src. */
 	struct rec_pre_src prev;
 
 	memcpy(&prev, buf, sizeof(prev));
@@ -357,6 +406,22 @@ int cfg_set_main_src(uint8_t src)
 
 	k_mutex_lock(&cfg_lock, K_FOREVER);
 	cfg.main_src = src;
+	rc = persist();
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
+uint8_t cfg_get_edition(void)
+{
+	return cfg.edition;
+}
+
+int cfg_set_edition(uint8_t edition)
+{
+	int rc;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	cfg.edition = edition;
 	rc = persist();
 	k_mutex_unlock(&cfg_lock);
 	return rc;

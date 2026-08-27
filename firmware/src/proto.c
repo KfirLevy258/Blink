@@ -328,6 +328,41 @@ static void dispatch(const char *json)
 		}
 	} else if (strcmp(type, "pong") == 0) {
 		/* Liveness only: last_host_ms was already stamped above. */
+	} else if (strcmp(type, "edition") == 0) {
+		/*
+		 * A factory fact arriving over the cable, once, after the
+		 * board is programmed -- see cfg_edition in cfg_store.h. It is
+		 * NOT reachable from the settings screen on purpose: the
+		 * enclosure decides which clip is right, and a user who could
+		 * flip it would only be putting the wrong animation in the
+		 * wrong box.
+		 *
+		 * Takes effect on the next boot, because what it selects is a
+		 * boot animation. Saying so in the log is the difference
+		 * between "it did nothing" and "it will do it in a moment".
+		 */
+		char ed[12];
+
+		if (msg_get_str(json, "edition", ed, sizeof(ed))) {
+			uint8_t v;
+
+			if (strcmp(ed, "claude") == 0) {
+				v = CFG_EDITION_CLAUDE;
+			} else if (strcmp(ed, "codex") == 0) {
+				v = CFG_EDITION_CODEX;
+			} else {
+				printk("[cfg] unknown edition '%s'; ignored\n", ed);
+				return;
+			}
+			if (cfg_get_edition() == v) {
+				printk("[cfg] edition already %s\n", ed);
+			} else if (cfg_set_edition(v) == 0) {
+				printk("[cfg] edition set to %s"
+				       " (applies on next boot)\n", ed);
+			} else {
+				printk("[cfg] could not store the edition\n");
+			}
+		}
 	} else if (strcmp(type, "welcome") == 0) {
 		double hv = 0;
 

@@ -3,17 +3,45 @@
 #include <stdio.h>
 #include "msg_parse.h"
 
-/* Find `"key"` then its ':' . Returns pointer just after the colon, or NULL. */
+/*
+ * Find `"key"` used AS A KEY, and return the pointer just after its colon.
+ *
+ * The "as a key" part is the whole of it. This used to take the first
+ * occurrence of `"key"` anywhere in the document and then scan forward for
+ * the next colon -- which reads a VALUE as a key whenever some earlier value
+ * happens to spell the same word, and then attaches a completely different
+ * field's colon to it.
+ *
+ * That is not hypothetical. `{"t":"edition","v":2,"edition":"codex"}` --
+ * a message whose type has the same name as one of its fields, which is the
+ * natural way to name such a message -- resolved to the literal string
+ * "edition", because the match landed on the value of "t" and the next colon
+ * belonged to "v". The board reported `unknown edition 'edition'` and the
+ * provisioning step silently did nothing.
+ *
+ * So: a match only counts when the very next non-space character is the
+ * colon. Anything else and the search continues past it. Every existing
+ * message happens to be safe today (no type shares a name with a key of the
+ * same message), which is exactly why this was never noticed.
+ */
 static const char *after_colon(const char *json, const char *key)
 {
 	char pat[48];
 	snprintf(pat, sizeof(pat), "\"%s\"", key);
-	const char *k = strstr(json, pat);
-	if (k == NULL) {
-		return NULL;
+	size_t plen = strlen(pat);
+
+	for (const char *k = strstr(json, pat); k != NULL;
+	     k = strstr(k + 1, pat)) {
+		const char *p = k + plen;
+
+		while (*p == ' ' || *p == '\t') {
+			p++;
+		}
+		if (*p == ':') {
+			return p + 1;
+		}
 	}
-	const char *colon = strchr(k + strlen(pat), ':');
-	return colon ? colon + 1 : NULL;
+	return NULL;
 }
 
 bool msg_get_str(const char *json, const char *key, char *buf, size_t buflen)

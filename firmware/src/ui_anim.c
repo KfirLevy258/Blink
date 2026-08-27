@@ -26,7 +26,7 @@
 
 #include "ui_anim.h"
 #include "usage_view.h"
-#include "bootanim.h"
+#include "bootclip.h"
 #include "bootanim_dec.h"
 #include "ui_slide.h"
 
@@ -202,6 +202,8 @@ static void idle_until(int64_t until, void (*pump)(void), int64_t *last_tick)
 
 void ui_anim_run(void (*pump)(void))
 {
+	const struct bootclip *clip = bootclip_active();
+
 	pending = false;
 	leave = false;
 
@@ -215,7 +217,7 @@ void ui_anim_run(void (*pump)(void))
 	lv_obj_t *ov = lv_obj_create(lv_scr_act());
 
 	lv_obj_set_size(ov, LV_PCT(100), LV_PCT(100));
-	lv_obj_set_style_bg_color(ov, lv_color_hex(BOOTANIM_BG_RGB), 0);
+	lv_obj_set_style_bg_color(ov, lv_color_hex(clip->bg_rgb), 0);
 	lv_obj_set_style_bg_opa(ov, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_width(ov, 0, 0);
 	lv_obj_set_style_radius(ov, 0, 0);
@@ -271,8 +273,7 @@ void ui_anim_run(void (*pump)(void))
 		size_t off;
 
 		if (!playable ||
-		    !ba_parse_header(bootanim_blob, sizeof(bootanim_blob),
-				     &hdr, &off)) {
+		    !ba_parse_header(clip->blob, clip->blob_len, &hdr, &off)) {
 			/* No RAM or corrupt blob: hold the flat clay; the
 			 * swipe out still works. */
 			idle_until(k_uptime_get() + 100, pump, &last_tick);
@@ -282,8 +283,7 @@ void ui_anim_run(void (*pump)(void))
 		int64_t next = k_uptime_get();
 
 		for (int i = 0; i < hdr.nframes && !leave; i++) {
-			if (ba_decode_frame(bootanim_blob,
-					    sizeof(bootanim_blob), &off,
+			if (ba_decode_frame(clip->blob, clip->blob_len, &off,
 					    strip, STRIP_BYTES,
 					    blit_cb, NULL) < 0) {
 				playable = false;

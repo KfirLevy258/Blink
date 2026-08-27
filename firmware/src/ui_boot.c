@@ -26,7 +26,7 @@
 
 #include "ui_boot.h"
 #include "proto.h"
-#include "bootanim.h"
+#include "bootclip.h"
 #include "bootanim_dec.h"
 
 static const struct device *const boot_disp =
@@ -132,6 +132,7 @@ static bool bootanim_play(const uint8_t *blob, size_t len)
 
 void ui_boot_splash(void)
 {
+	const struct bootclip *clip = bootclip_active();
 	bool skip = (skip_magic == SKIP_MAGIC);
 
 	skip_magic = 0;
@@ -143,7 +144,7 @@ void ui_boot_splash(void)
 	 * restart (user feedback 2026-07-16). Cold boots keep the clay so
 	 * the clip has its stage. */
 	lv_obj_set_style_bg_color(scr, skip ? lv_color_hex(0x0E1116)
-					    : lv_color_hex(BOOTANIM_BG_RGB), 0);
+					    : lv_color_hex(clip->bg_rgb), 0);
 	lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 	lv_scr_load(scr);
 	lv_refr_now(NULL);	/* the one and only LVGL paint of this screen */
@@ -163,7 +164,7 @@ void ui_boot_splash(void)
 
 	strip_buf = lv_malloc(STRIP_BYTES);
 	if (strip_buf) {
-		bool ok = bootanim_play(bootanim_blob, sizeof(bootanim_blob));
+		bool ok = bootanim_play(clip->blob, clip->blob_len);
 
 		lv_free(strip_buf);
 		strip_buf = NULL;
