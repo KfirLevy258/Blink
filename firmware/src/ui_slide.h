@@ -95,6 +95,42 @@ void ui_slide_run_paced(int dir, int step_px, int min_ms,
 			void (*pump)(void));
 
 /*
+ * The same transition with a leading edge that travels.
+ *
+ * A wipe does not move anything. It paints the incoming screen into the rows
+ * where it will finally sit, one strip at a time, while the outgoing screen
+ * stays exactly where it is -- so what the eye has to work with is a boundary
+ * between two pictures. Between the settings panel and the gauges that is
+ * plenty: the two look nothing alike and the boundary is obvious. Between two
+ * PROVIDER PAGES it is nothing at all. The pages are the same layout with
+ * different numbers in it (see the one-widget-set note in usage_view.c), so
+ * the boundary has almost no contrast to be made of and the whole thing reads
+ * as the numbers changing in place -- "it just overrides the current status"
+ * (user-reported 2026-08-27, on the wipe that had already replaced the cut).
+ *
+ * So this one parks a plain bar on the frontier at every step. That gives the
+ * transition the one thing it was missing: something with real contrast,
+ * travelling in the direction of the gesture, at a speed the eye can follow.
+ * The reveal trails one strip behind the bar, which is what makes the bar look
+ * like the thing doing the revealing.
+ *
+ * The bar is created on the active screen for the length of the run and
+ * deleted before the settle. It is NOT owned by a caller: usage_view.h is
+ * deliberately free of LVGL types (usage_state.h includes it, and the host
+ * tests compile that without a graphics library), so handing the object in
+ * would mean either leaking lv_obj_t into that header or passing it as a
+ * void *. A transition's furniture belongs to the transition anyway.
+ *
+ * It costs one extra strip of INVALIDATION per step, because the bar's
+ * previous position has to be repainted without it, and nothing else: the
+ * duration of a step is per-refresh overhead (~6 ms of 7), not pixels, so
+ * doubling a 320x8 area is inside the noise. Measured, both before and after,
+ * on the log line at the bottom of ui_slide_run_paced.
+ */
+void ui_slide_run_swept(int dir, int step_px, int min_ms,
+			void (*pump)(void));
+
+/*
  * Pacing for the provider-page change specifically.
  *
  * 8 px over the 240-pixel axis is 30 steps where the default 4 px would be 60,

@@ -1224,8 +1224,14 @@ static void do_page(int delta, void (*pump)(void))
 	 * Content follows the finger. A swipe UP asks for the next page, so
 	 * the page you were on travels up and out and the new one arrives from
 	 * below -- which is UI_SLIDE_UP.
+	 *
+	 * With the sweep bar, and this is the only transition that gets one.
+	 * Everywhere else the two screens look nothing alike and the boundary
+	 * between them IS the motion; two provider pages are the same layout
+	 * with different numbers, so there was nothing to see moving and the
+	 * wipe read as a repaint. See ui_slide_run_swept.
 	 */
-	ui_slide_run_paced(delta > 0 ? UI_SLIDE_UP : UI_SLIDE_DOWN,
+	ui_slide_run_swept(delta > 0 ? UI_SLIDE_UP : UI_SLIDE_DOWN,
 			   UI_SLIDE_PAGE_STEP_PX, UI_SLIDE_PAGE_MIN_MS, pump);
 	ui_anim_gesture_mute(250);
 }

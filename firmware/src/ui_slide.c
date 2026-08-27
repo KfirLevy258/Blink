@@ -245,8 +245,109 @@ void ui_slide_run(int dir, void (*pump)(void))
 	ui_slide_run_paced(dir, STEP_COLS, SLIDE_MIN_MS, pump);
 }
 
+static void run(int dir, int step_px, int min_ms, bool swept,
+		void (*pump)(void));
+
 void ui_slide_run_paced(int dir, int step_px, int min_ms, void (*pump)(void))
 {
+	run(dir, step_px, min_ms, false, pump);
+}
+
+void ui_slide_run_swept(int dir, int step_px, int min_ms, void (*pump)(void))
+{
+	run(dir, step_px, min_ms, true, pump);
+}
+
+/*
+ * The bar itself: full width, one strip tall, opaque, and meaning nothing.
+ *
+ * COL_TEXT-ish rather than anything from the gauge palette. The severity
+ * colours are spoken for -- a green or amber bar sweeping the screen would be
+ * read as a reading -- and the one thing this must not do is carry
+ * information. Hard-coded here instead of shared with usage_view because that
+ * palette belongs to the gauges; this belongs to the transition, and the two
+ * having the same value is a coincidence rather than a dependency.
+ *
+ * Created per run and deleted at the end of it. The alternative is a static
+ * that outlives the screen it was parented to, and screens on this device are
+ * not as permanent as they look -- ui_anim reparents and deletes around the
+ * clip. One lv_obj_create per page change is a few hundred bytes and a few
+ * microseconds against a 260 ms transition.
+ */
+static lv_obj_t *sweep_create(int dir, int step_size)
+{
+	lv_obj_t *b = lv_obj_create(lv_screen_active());
+
+	lv_obj_remove_style_all(b);
+	if (ui_slide_is_vertical(dir)) {
+		lv_obj_set_size(b, LV_HOR_RES, step_size);
+	} else {
+		lv_obj_set_size(b, step_size, LV_VER_RES);
+	}
+	lv_obj_set_style_bg_color(b, lv_color_hex(0xE6E8EB), 0);
+	lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+	/* Inert. A swipe that starts under it must still reach the screen, and
+	 * it is on top of everything for 260 ms. */
+	lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_add_flag(b, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_move_foreground(b);
+	return b;
+}
+
+/*
+ * Where the marker goes this step, and how much has to be repainted for it.
+ *
+ * The frontier is the edge of the strip facing the part of the screen that is
+ * still showing the OUTGOING image -- ahead of the reveal, not behind it.
+ * ui_slide_strip_at fills backwards along the axis for a positive direction
+ * and forwards for a negative one, so the frontier is the strip's low edge in
+ * the first case and its high edge in the second.
+ *
+ * The union adds the PREVIOUS strip, on the far side of the frontier, and that
+ * is not decoration: the marker was standing there a step ago and those pixels
+ * were never invalidated again. Without it the sweep leaves a copy of itself
+ * every 8 px and the screen ends up striped.
+ */
+static void front_step(lv_obj_t *front, const struct ui_slide_strip *g,
+		       int dir, int step, lv_area_t *inval)
+{
+	const bool positive = dir > 0;
+
+	if (ui_slide_is_vertical(dir)) {
+		lv_obj_set_pos(front, 0, g->y1);
+		inval->x1 = 0;
+		inval->x2 = LV_HOR_RES - 1;
+		inval->y1 = positive ? g->y1 : g->y1 - step;
+		inval->y2 = positive ? g->y2 + step : g->y2;
+	} else {
+		lv_obj_set_pos(front, g->x1, 0);
+		inval->y1 = 0;
+		inval->y2 = LV_VER_RES - 1;
+		inval->x1 = positive ? g->x1 : g->x1 - step;
+		inval->x2 = positive ? g->x2 + step : g->x2;
+	}
+	/* The trailing half of the union hangs off the screen on the first
+	 * step -- there is no previous strip yet. Clip rather than skip, so
+	 * the loop has no special case in it. */
+	if (inval->x1 < 0) {
+		inval->x1 = 0;
+	}
+	if (inval->y1 < 0) {
+		inval->y1 = 0;
+	}
+	if (inval->x2 > LV_HOR_RES - 1) {
+		inval->x2 = LV_HOR_RES - 1;
+	}
+	if (inval->y2 > LV_VER_RES - 1) {
+		inval->y2 = LV_VER_RES - 1;
+	}
+}
+
+static void run(int dir, int step_px, int min_ms, bool swept,
+		void (*pump)(void))
+{
+	lv_obj_t *front = NULL;
+
 	lv_display_t *disp = lv_display_get_default();
 	lv_obj_t *scr = lv_screen_active();
 
@@ -310,8 +411,20 @@ void ui_slide_run_paced(int dir, int step_px, int min_ms, void (*pump)(void))
 	const int64_t t0 = k_uptime_get();
 	int step = 0;
 
+	/*
+	 * The bar rides the frontier, and the frontier only exists in the wipe:
+	 * the scrolled slide moves the whole image at once and has a real edge
+	 * of its own. Sized from step_size rather than step_px so it always
+	 * matches the strip actually used -- step_px may have been rejected
+	 * just above for not dividing the travel.
+	 */
+	if (swept && UI_SLIDE_WIPE) {
+		front = sweep_create(dir, step_size);
+	}
+
 	for (int j = step_size; j <= travel; j += step_size) {
 		lv_area_t strip;
+		struct ui_slide_strip g_strip = { 0 };
 		int off;
 
 		/*
@@ -341,14 +454,13 @@ void ui_slide_run_paced(int dir, int step_px, int min_ms, void (*pump)(void))
 			 * The arithmetic lives in ui_slide_geom.h so a host test
 			 * can check it without a board; this is the only caller.
 			 */
-			const struct ui_slide_strip g =
-				ui_slide_strip_at(dir, j, step_size,
-						  LV_HOR_RES, LV_VER_RES);
+			g_strip = ui_slide_strip_at(dir, j, step_size,
+						    LV_HOR_RES, LV_VER_RES);
 
-			strip.x1 = g.x1;
-			strip.x2 = g.x2;
-			strip.y1 = g.y1;
-			strip.y2 = g.y2;
+			strip.x1 = g_strip.x1;
+			strip.x2 = g_strip.x2;
+			strip.y1 = g_strip.y1;
+			strip.y2 = g_strip.y2;
 			off = 0;
 		} else {
 			/* Horizontal only -- guarded above. */
@@ -375,6 +487,18 @@ void ui_slide_run_paced(int dir, int step_px, int min_ms, void (*pump)(void))
 		 */
 		if (!UI_SLIDE_WIPE) {
 			scroll_to(off % SCROLL_LINES);
+		}
+
+		if (front != NULL) {
+			lv_area_t wide;
+
+			front_step(front, &g_strip, dir, step_size, &wide);
+			/* set_pos only marks the layout dirty; coordinates are
+			 * not recomputed until this runs, and a marker drawn
+			 * from stale coordinates stands still while the reveal
+			 * moves past it. Frozen, so it repaints nothing. */
+			lv_obj_update_layout(scr);
+			strip = wide;
 		}
 
 		/* Unfrozen for exactly one call: this strip must be the ONLY
@@ -417,6 +541,9 @@ void ui_slide_run_paced(int dir, int step_px, int min_ms, void (*pump)(void))
 	 * visible -- unlike the same repaint in the middle of a transition,
 	 * which is the whole problem this file exists to avoid.
 	 */
+	if (front != NULL) {
+		lv_obj_del(front);
+	}
 	top_layer_hide(false);
 	ui_slide_freeze(false);
 	lv_obj_invalidate(scr);

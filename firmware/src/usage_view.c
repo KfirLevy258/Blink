@@ -145,10 +145,37 @@ struct page_data {
 static struct page_data pg[RAIL_PAGES_MAX];
 static int cur_page;
 static lv_obj_t *rail_dot[RAIL_PAGES_MAX];
+/*
+ * The line that says where the OTHER page is, and the bar that shows you
+ * getting there.
+ *
+ * Standing furniture: a chevron and the other provider's name, so the gesture
+ * is discoverable without performing it. The other half of the job -- the bar
+ * that actually moves when you do perform it -- belongs to the transition and
+ * lives in ui_slide.c.
+ */
+static lv_obj_t *nextcue;
 
 static const char *page_tag(int i)
 {
 	return i == 0 ? provider1_tag : provider2_tag;
+}
+
+/*
+ * A provider tag as a NAME: "codex" -> "Codex".
+ *
+ * The tags arrive lowercase from the daemon, which is right for a wire
+ * protocol and wrong for a panel -- BLINK is the only all-caps thing in the
+ * header, and everything beneath it is sentence case. Two places need this
+ * now, the name under the brand and the line that says where the other page
+ * is, and they were drifting apart the moment there were two of them.
+ */
+static void tag_cased(char *dst, size_t n, const char *tag)
+{
+	snprintf(dst, n, "%s", tag);
+	if (dst[0] >= 'a' && dst[0] <= 'z') {
+		dst[0] = (char)(dst[0] - 'a' + 'A');
+	}
 }
 
 static int page_count(void)
@@ -532,6 +559,29 @@ void usage_view_init(void)
 	lv_obj_set_style_text_color(hint, COL_DIM, 0);
 	lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF);
 
+	/*
+	 * Where the next page is.
+	 *
+	 * It SHARES the hint's line rather than taking one of its own. There is
+	 * no line left to take -- the rail is 8 px off the bottom edge and the
+	 * gauges reach down to the countdowns -- and this line is empty
+	 * whenever nothing is wrong, which is nearly always. When the hint does
+	 * have something to say it wins: an amber explanation is worth more
+	 * than a reminder of a gesture, and a gesture cue that survives into a
+	 * red state is the panel talking over itself.
+	 *
+	 * The chevron points where the page LIVES, not which way the finger
+	 * goes -- content follows the finger here, so the two are opposite and
+	 * only one of them is a thing you can see. Page 0 says the next one is
+	 * below; from page 1 the only move is back up.
+	 */
+	nextcue = lv_label_create(scr);
+	lv_label_set_text(nextcue, "");
+	lv_obj_set_style_text_color(nextcue, COL_DIM, 0);
+	lv_obj_align(nextcue, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF);
+	lv_obj_add_flag(nextcue, LV_OBJ_FLAG_HIDDEN);
+
+
 	/* Data age. The countdowns tick locally and keep moving even when the
 	 * host is dead, so they look alive regardless; this is the only figure
 	 * on screen that reveals whether the numbers are actually fresh.
@@ -774,6 +824,42 @@ static double page_worst(int i)
 	return a > b ? a : b;
 }
 
+/*
+ * "There is another page, it is that way, and it is called this."
+ *
+ * All three parts matter and the rail only carries the first: two dots say
+ * there is somewhere to go and nothing about how to get there. A vertical
+ * swipe is not a gesture anyone tries on a gauge -- the two swipes this panel
+ * already had are horizontal -- so without a line naming the destination the
+ * second provider is reachable and undiscoverable at once.
+ */
+static void refresh_nextcue(void)
+{
+	int n = page_count();
+	int other = cur_page == 0 ? 1 : 0;
+	char name[sizeof(provider1_tag)];
+	char buf[sizeof(name) + 8];
+
+	if (nextcue == NULL) {
+		return;
+	}
+	/*
+	 * Silent unless there is somewhere to go AND the hint line is free.
+	 * lv_label_get_text is the live buffer, so this reads whatever
+	 * set_status last wrote rather than a copy that can go stale.
+	 */
+	if (n < 2 || lv_label_get_text(hint)[0] != '\0') {
+		lv_obj_add_flag(nextcue, LV_OBJ_FLAG_HIDDEN);
+		return;
+	}
+	tag_cased(name, sizeof(name), page_tag(other));
+	snprintf(buf, sizeof(buf), "%s  %s",
+		 cur_page == 0 ? LV_SYMBOL_DOWN : LV_SYMBOL_UP, name);
+	lv_label_set_text(nextcue, buf);
+	lv_obj_clear_flag(nextcue, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_align(nextcue, LV_ALIGN_BOTTOM_MID, 0, -HINT_BOTTOM_OFF);
+}
+
 static void refresh_rail(void)
 {
 	int n = page_count();
@@ -806,6 +892,11 @@ static void refresh_rail(void)
 		lv_obj_set_style_bg_opa(rail_dot[i],
 					on ? LV_OPA_COVER : LV_OPA_50, 0);
 	}
+	/* The rail and the cue answer the same question -- is there another
+	 * page, and which one am I on -- so they are refreshed by the same
+	 * call and cannot disagree. set_status is the one other caller, for
+	 * the line they share. */
+	refresh_nextcue();
 }
 
 /*
@@ -852,6 +943,7 @@ void usage_view_page_step(int delta)
 	render_gauges();
 	refresh_rail();
 }
+
 
 /*
  * A window whose reset moment has passed is over, whatever percentage came
@@ -1131,12 +1223,7 @@ static void refresh_provider1(void)
 	if (provider_lbl) {
 		char t[sizeof(provider1_tag)];
 
-		/* Sentence case: it is a name, not a shout. BLINK above it is
-		 * the only all-caps thing in the header. */
-		snprintf(t, sizeof(t), "%s", tag);
-		if (t[0] >= 'a' && t[0] <= 'z') {
-			t[0] = (char)(t[0] - 'a' + 'A');
-		}
+		tag_cased(t, sizeof(t), tag);
 		lv_label_set_text(provider_lbl, t);
 	}
 }
@@ -1282,6 +1369,9 @@ void usage_view_set_status(enum usage_status status)
 	}
 	lv_obj_set_style_text_color(hint, tc, 0);
 	lv_label_set_text(hint, text);
+	/* After the hint, never before: the cue yields this line to it and has
+	 * to be able to see what just landed there. */
+	refresh_nextcue();
 
 	/* One owner for the indicator's colour. The hint says WHICH condition
 	 * fired; the dot says only how bad it is. */
