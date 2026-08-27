@@ -252,6 +252,67 @@ Verified live, 2026-08-27: real rollout parsed, board flashed with this
 branch, `p2: 'codex'` on the wire, and the board's stored `codex` preference
 honoured for the first time (`[bridge] main source: codex`).
 
+**The "main source" setting is gone (2026-08-27).** It chose which provider
+owned the outer ring back when both shared one gauge. They do not: each has a
+page, and "which one is in front" is answered by the page you are looking at.
+`cfg_get/set_main_src` stay, because the value still goes to the host on every
+`hello` where the daemon uses it to break ties when merging sources — that is
+a host-side meaning and not something to settle from across the room with a
+fingertip.
+
+---
+
+## D. The Codex edition (DONE 2026-08-27/28)
+
+A second SKU: same board, same firmware image, same wordmark, **different boot
+clip and nothing else**. Which one a unit plays lives on the UNIT — an
+`edition` byte in the sealed config record, written once over USB with
+`clauge provision --edition codex|claude`, read once at boot by
+`bootclip_active()`.
+
+A build-time flag was rejected because it forks OTA: the manifest names one
+firmware and `hello` carries no edition, so a Codex unit would be offered the
+Claude image and revert silently in the field, months later. Both clips are
+compiled in instead; the second costs 17 KB on an image using 601 KB of 4 MB.
+
+**It is WRITE ONCE, and that took two locks, not one (2026-08-28).**
+
+  - `cfg_set_edition()` latches: the first successful write sets
+    `edition_locked` and every later one returns `-EPERM`. "Not reachable from
+    the settings screen" was being treated as the whole enforcement and is not
+    — the message arrives over USB from whatever is on the other end of the
+    cable, and `clauge provision` is the same binary the customer installs.
+  - **The edition survives `cfg_reset()`.** Factory reset used to wipe the
+    whole record, which made the settings menu a second route to the same
+    change: reset, re-provision, and a Codex box plays the Claude clip. Two
+    taps and a cable, no CLI. A reset wipes what the USER put on the device;
+    the edition is a property of the enclosure the board is screwed into.
+
+What remains is erasing the config partition with esptool over USB with the
+board held in bootloader mode — a factory operation by construction, which is
+the boundary that was wanted. That applies to dev boards too.
+
+`proto.c` had a matching hole: it skipped the write whenever the stored
+edition already equalled the requested one. `0` means both "Claude" and "never
+stamped", so provisioning a blank board as claude reported success, wrote
+nothing, and left it stampable as codex by anyone with the cable. The latch
+decides now, not the value.
+
+**The clip is DRAWN, not filmed.** Four iterations built it out of the shipped
+Claude clip's own frames and the panel showed "glitters and jitters" around
+every shape. That clip is h264: its edges are antialiased and motion-blurred,
+and hard-thresholding them to two colours leaves 13-30 stray pixels per frame
+that MOVE every frame — invisible on the original's busy ground at speed,
+boiling on a flat held box. `tools/make_bootanim_codex.py` draws everything at
+4x and thresholds, so identical geometry gives identical pixels. Blob halved to
+7,571 B. **Generalise it: never threshold filmed material into a two-colour
+panel asset.**
+
+Open: white on the clip's `#76B1DB` ground measures **2.31:1**, under the 3:1
+graphic floor, and production panels are the bright ones. `#538EB8` is 3.54:1,
+`#4C82A8` is 4.15:1, black on the current blue is 9.08:1. Raise it once before
+launch.
+
 ---
 
 ## Rough order

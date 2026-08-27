@@ -133,7 +133,8 @@ Two consequences worth stating:
 - **`src` names the source of the session percentage**, because that is the
   number on the largest dial. Labelling the panel with anything else would put
   a caption on a figure it does not describe.
-- **`stale` follows that same source**, not the whole set. A fresh desktop
+- **`stale` follows that same source**, not the whole set (and describes that
+  PROVIDER, not the panel — see §4c). A fresh desktop
   percentage beside an hours-old CLI reset time is a live panel, not a stale
   one — and `secs_until()` already refuses a reset that has passed.
 
@@ -143,55 +144,162 @@ freshest) rather than blending. What a genuinely two-provider panel should look
 like is a hardware design question, not one the normalizer may answer by
 averaging.
 
-## 4b. Two providers, one pair of gauges
+## 4b. Two providers, two pages
 
-Each gauge draws a second, inner ring when a second provider reports.
+**One provider per page.** The gauges show one provider's numbers at a time,
+and a vertical swipe or a tap moves between them.
 
-**The arc is severity. A small ball at the end of the arc is the provider.**
+The first version put both on one pair of gauges: a second, inner ring per
+gauge, with a coloured ball at each arc's tip saying whose it was. It worked
+and it was still wrong. Two rings inside a 120 px circle leaves the hollow too
+small for the two percentages that belong in it, identity had to be carried by
+a fingernail-sized dot, and each countdown had to be labelled with a provider
+name -- so the panel spent a colour channel, a dot and two words answering
+"whose is this" on every element, continuously, for a question that has one
+answer at a time.
 
-Green under 60%, amber to 90%, red beyond — on the biggest element on the
-panel, which is where the thing you read from across a desk belongs. Identity
-is a second-look question, so it gets a disc the size of a fingernail at the
-tip of the filled arc, in that provider's colour: Claude the brand's warm
-orange, Codex a teal well clear of it, anything else a cool blue. The ball
-also marks the value, since it rides the indicator's end.
+A page answers it once. The provider's name sits at the bottom, the rings are
+free to be rings, and the severity ramp -- green under 60%, amber to 90%, red
+beyond -- is the only thing colour has to mean.
 
-This went through two worse versions first. Provider-by-ring-position was
-unreadable; provider-by-arc-colour worked but spent the green/amber/red ramp,
-the single most useful thing on the screen, on something a dot can carry.
+### Saying which page you are on, and getting to the other one
 
-LVGL draws the ball as the arc's KNOB part, which these gauges used to delete
-outright on the grounds that a readout is not a control. It still is not — the
-arc stays unclickable — but the knob is the only part that tracks the
-indicator's end.
+Three things, and each does one job:
 
-Colour follows the provider's **name**, not its ring position. On a machine
-running only Codex the outer ring is Codex and must not wear Claude's colour —
-`select_pair()` makes whichever provider is present the primary, so ring
-position says nothing about identity.
+- **The rail**, two marks along the bottom edge, position carried by WIDTH so
+  colour stays free. Each mark is coloured by ITS OWN page's severity, which
+  buys back the one thing splitting the providers cost: with both on one gauge
+  you could see the second one going red without looking for it.
+- **The pill**, naming the provider you are looking at. It is also the button
+  that changes it -- the value IS the control, which is the idiom the settings
+  panel's old "Main source" row used before pages replaced it. The fill only
+  appears when there is a second page, because a control that looks live and
+  answers nothing is worse than a label.
+- **The gesture**, up or down. At the end of the stack either direction goes
+  the only way it can, so with two pages both work. "Which direction is
+  forwards" is a question a two-item stack does not have, and the ask was for
+  a swipe that switches, not one that advances an ordered list.
 
-Each provider's own countdown sits under the gauge, in its own colour, so "how
-long has each of them got" is answerable at a glance. With one provider the
-single countdown re-centres; the alignment is recomputed on every render, not
-fixed at build time, because a second provider can arrive and leave while the
-board is running.
+The tap path is not a convenience. See §4d -- the panel is genuinely bad at
+swipes, and left/right only ever felt reliable because a chevron sat behind
+each one.
 
-Beyond two providers, `select_pair()` drops the third rather than rotating
-through them. A ring that silently changes whose number it is showing is worse
-than one that never shows it.
+### The page change is the needle moving
 
-### The ring hollow
+Not a transition between two pictures. Three of those were tried -- a cut, a
+wipe, and a wipe with a travelling edge -- and all three read wrong for the
+same reason: the two pages are one layout with different numbers in it, so the
+boundary between them has almost nothing to be made of.
 
-The hollow holds both percentages — primary large, secondary small — and the
-inner ring eats the space they live in. The usable hollow is the inner ring's
-diameter minus two walls, so the fix when something is sliced by its own gauge
-is counter-intuitive: make the inner ring **bigger and thinner**. 88 across
-with a 6 px wall gives 76 px of clear centre; 84 with an 8 px wall gave 68 px.
-Pinned in `tests/usage_layout/host_test.c` rather than left as a number someone
-will helpfully shrink.
+This is an instrument, so the rings travel from the reading they were showing
+to the other provider's, and the number under each counts along. Nothing is
+covered or revealed.
 
-This is also why the countdowns are no longer in there. One fitted; two did
-not.
+What travels and what does not is decided by whether a midpoint exists:
+
+| | |
+|---|---|
+| percentages | **travel** — a value between two values is a real value |
+| severity colour | follows the value, so it changes at the threshold — blending green to amber goes through olive, which means nothing |
+| provider name, countdowns | **cross the middle** — there is no midpoint between "Claude" and "Codex", and rolling `6d 22h` toward `4d 15h` invents a duration true of nothing |
+| a blank reading (`--%`) | jumps — there is no path between a number and the absence of one |
+| the rail | leads, then finishes under its own power (§4d) |
+
+It is also the only motion this hardware renders smoothly, which is not a
+coincidence: a full-screen transition costs one whole repaint however finely
+it is chopped, while the arcs and their labels are a fraction of the panel and
+LVGL invalidates only what moved.
+
+### Beyond two
+
+`select_pair()` drops the third rather than rotating through them, and
+`RAIL_PAGES_MAX` is 2. A ring that silently changes whose number it is showing
+is worse than one that never shows it.
+
+## 4c. Freshness is per page
+
+`stale` on the wire describes the FIRST provider. `p2_stale` describes the
+second. Each page carries its own age and the "Reading is old" warning appears
+only on a page it is true of.
+
+One flag for both was a real bug, reported 2026-08-28. A machine that runs
+Claude Code all day and touched Codex once that morning has a stale codex
+reading and a live claude one -- and the claude page announced that its numbers
+were old while they updated in front of the user. Exactly the frozen-meter
+misreading the flag exists to prevent, pointed at the wrong page.
+
+The mirror case was there too and is fixed with it: a fresh first provider
+beside a stale second one left the status unarmed entirely, so the second page
+claimed to be current. The board raises the status if EITHER page is old and
+decides per page where to show it, which means `proto.c` sets it after BOTH
+providers are parsed -- and still after `usage_view_update()` and
+`set_models()`, which set OK internally and would overwrite it.
+
+Both directions stay compatible. An older daemon sends no `p2_stale`, which
+reads as fresh: the reading it sent IS the latest one it has, and the
+alternative is a page permanently labelled old by a missing key. An older board
+ignores a key it does not know. `p2_stale` rides with the rest of `p2`, so a
+board is never given an age for a page it has not been told exists.
+
+## 4d. The panel is bad at swipes, and that is physics
+
+Worth reading before touching `firmware/src/ui_swipe.c`, because every
+plausible-sounding fix in this area has already been tried and measured.
+
+**A sliding finger loses contact.** Traced with `CONFIG_CLAUGE_TOUCH_TRACE`:
+five deliberate swipes produced **thirty separate press-release cycles**, press
+durations 17-140 ms, inter-report gaps running to 90 ms at the top decile and
+779 ms at worst. The xpt2046 driver reports a release the first time it reads
+PENIRQ deasserted, so one stroke arrives as five or six short presses. A
+pressing finger does not do this; a sliding one does.
+
+That defeats LVGL's own gesture detector outright, and not by a tunable margin:
+
+- It resets its accumulator at every press boundary, so most strokes never
+  reach a threshold.
+- `gesture_min_velocity` does not mean what it sounds like — a sample that
+  moved less than it in BOTH axes **zeroes the accumulated total**. LVGL
+  samples faster than this panel reports, so a large share of ticks discard the
+  stroke. The floor cannot go below 1, and at 1 a repeated identical point
+  still trips it.
+- Zephyr's `lvgl_pointer_input` queues every report and LVGL pops ONE per
+  refresh. The panel reports every ~13 ms and LVGL drains every ~33, so during
+  a stroke the queue fills and LVGL replays the touch in slow motion, falling
+  further behind the longer it runs. Measured effect: strokes firing at 125-181
+  px against a 36 px threshold — "I should swipe the entire screen".
+
+So `ui_swipe.c` reads the panel's own reports through an input callback and
+does four things LVGL cannot:
+
+1. **Stitches across brief releases.** A gap under 250 ms is contact bounce
+   mid-stroke, not the end of one. This is the single most important part; 120
+   ms was too short and tore ordinary swipes into two refused halves. It
+   re-arms in 80 ms once a swipe has fired, so a deliberate second swipe is not
+   swallowed — patient while gathering, quick to reset once it has acted.
+2. **Decides during the stroke**, with the finger still down, at 36 px of
+   travel. Waiting for the release cost the whole stitch window and read the
+   travel from the sample most likely to be short.
+3. **Requires one axis to beat the other by 1.5x**, so a near-diagonal does
+   nothing rather than picking the axis that won by a pixel.
+4. **Publishes live progress** for the rail to draw, at the panel's rate.
+
+The rules live in `ui_swipe_geom.h` as pure functions and
+`tests/ui_swipe_geom/host_test.c` pins them to displacements actually recorded
+on the board — a rule that stops admitting those has broken the panel it was
+written for, whatever it does to invented numbers.
+
+**Even so, it lands about half the time**, and the residue is strokes that were
+genuinely small (15-22 px) or genuinely diagonal. A floor low enough to catch
+those is low enough to turn a mis-aimed tap into a page change: the tap-like
+strokes sit at 11-15 px, directly underneath. That is why every navigation on
+this panel has a tap path, and why the vertical one finally got its own —
+horizontal swipes miss at the same rate and only ever felt dependable because
+a chevron sat behind them.
+
+The rail's indicator follows from the same measurement. The finger cannot
+supply enough samples to animate it — the window between the drag line and the
+threshold usually contains none at all — so the finger starts the handover and
+an animation finishes it.
 
 ## 5. The wire
 
@@ -286,9 +394,14 @@ in CI under sh, bash and dash.
 
 `n_sess`, `n_run`, `n_wait`, `n_stuck`, `n_agents` — and zeros are omitted. The
 second provider adds `p2`, `p2_session_pct`, `p2_weekly_pct`, `p2_s_in_s`,
-`p2_w_in_s`, all absent until a second provider reports. Those last two are
-deliberately short: the fully-loaded line is close enough to the limit that
-spelling them out would cost more than they carry.
+`p2_w_in_s` and `p2_stale`, all absent until a second provider reports.
+`p2_s_in_s` / `p2_w_in_s` are deliberately short: the fully-loaded line is
+close enough to the limit that spelling them out would cost more than they
+carry.
+
+`p2_stale` is the second provider's own age — see §4c. It rides with the rest
+of `p2` rather than standing alone, so a board is never handed an age for a
+page it has not been told exists.
 
 Three fields were removed rather than added. `models` never reached the
 firmware usefully. `ctx_pct` and `model` went with the widgets that showed

@@ -18,7 +18,7 @@ Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 <table>
   <tr>
-    <td width="33%"><img src="docs/img/screen-usage.png" alt="Live usage screen"><br><sub><b>Live usage</b> - session &amp; weekly, context, and what Claude Code is doing</sub></td>
+    <td width="33%"><img src="docs/img/screen-usage.png" alt="Live usage screen"><br><sub><b>Live usage</b> - session &amp; weekly, one page per provider</sub></td>
     <td width="33%"><img src="docs/img/screen-settings.png" alt="Settings screen"><br><sub><b>Settings</b> - brightness and updates</sub></td>
     <td width="33%"><img src="docs/img/screen-update.png" alt="Software update screen"><br><sub><b>Updates</b> - over the air, and safe</sub></td>
   </tr>
@@ -45,6 +45,8 @@ Clauge never sees a credential, and never reads your conversations. It reads fig
 | [Browser extension](extension/) | nothing today - claude.ai sends no rate-limit headers ([why](docs/next-steps.md)) | optional, load it yourself |
 
 When two of them disagree, the most recently observed number wins - field by field, so a source that knows your reset time still supplies it even when a fresher one takes over the percentage. `docs/multi-provider.md` has the details.
+
+**Two providers get a page each**, rather than sharing the dials. The name at the bottom of the screen says whose numbers you are looking at, and tapping it switches - as does a swipe up or down. Each page carries its own freshness, so a Codex reading that has gone quiet never puts "reading is old" over live Claude numbers. Changing page moves the needles from one reading to the other instead of redrawing the screen, because this is an instrument and that is what an instrument does.
 
 ## What's in here
 
