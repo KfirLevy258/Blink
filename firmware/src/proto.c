@@ -263,9 +263,16 @@ static void dispatch(const char *json)
 		bool stale = false;
 
 		msg_get_bool(json, "stale", &stale);
-		if (stale) {
-			usage_view_set_status(USAGE_STATUS_STALE);
-		}
+		usage_view_set_provider1_stale(stale);
+		/*
+		 * The status is armed if EITHER page is old; usage_view then
+		 * shows the warning only on a page it is actually true of.
+		 * Set below, after p2 has been parsed, because until then only
+		 * half the answer is known -- and arming on the first
+		 * provider alone was the mirror of the bug this fixes: a fresh
+		 * codex reading beside a stale claude one left the claude page
+		 * claiming to be current.
+		 */
 
 		/*
 		 * The multi-provider fields. All OPTIONAL, and all defaulting
@@ -302,14 +309,33 @@ static void dispatch(const char *json)
 		double p2s = -1, p2w = -1, p2si = -1, p2wi = -1;
 
 		if (msg_get_str(json, "p2", p2, sizeof(p2))) {
+			bool p2stale = false;
+
 			msg_get_double(json, "p2_session_pct", &p2s);
 			msg_get_double(json, "p2_weekly_pct", &p2w);
 			msg_get_double(json, "p2_s_in_s", &p2si);
 			msg_get_double(json, "p2_w_in_s", &p2wi);
+			/* Absent leaves this false, so a daemon older than
+			 * this firmware reports its second provider as fresh
+			 * rather than as old -- the reading it sent IS the
+			 * latest one it has, and the alternative is a page
+			 * permanently labelled stale by a missing key. */
+			msg_get_bool(json, "p2_stale", &p2stale);
 			usage_view_set_provider2(p2, p2s, p2w, (int32_t)p2si,
-						 (int32_t)p2wi);
+						 (int32_t)p2wi, p2stale);
+			stale = stale || p2stale;
 		} else {
-			usage_view_set_provider2("", -1, -1, -1, -1);
+			usage_view_set_provider2("", -1, -1, -1, -1, false);
+		}
+
+		/*
+		 * AFTER both providers, and after the calls above that set OK
+		 * internally -- usage_view_update() and set_models() both do,
+		 * so arming this earlier would have the amber immediately
+		 * overwritten by green. See the note where `stale` is read.
+		 */
+		if (stale) {
+			usage_view_set_status(USAGE_STATUS_STALE);
 		}
 
 		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)%s%s\n",

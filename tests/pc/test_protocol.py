@@ -146,3 +146,38 @@ class AdditiveFields(unittest.TestCase):
             session_pct=10.0, session_resets_at=1_787_100_000)
         u = protocol.frame_to_usage(f, 1_787_200_000)
         self.assertEqual(u["session_resets_in_s"], -1)
+
+
+def test_the_second_provider_carries_its_own_staleness():
+    """A live page must not be labelled old because the other one went quiet.
+
+    `stale` describes the FIRST provider. With two providers on two pages that
+    is a statement about one of them, and the board was showing it over
+    whichever page happened to be in front -- so a machine running Claude Code
+    all day with Codex touched once that morning announced "Reading is old"
+    over numbers that were updating (user-reported 2026-08-28).
+    """
+    m = protocol.usage(0.0, None, 0.0, None, [], stale=True,
+                       provider="codex", p2="claude", p2_session_pct=66.0,
+                       p2_stale=False)
+    assert m["stale"] is True
+    assert m["p2_stale"] is False
+
+
+def test_the_second_providers_staleness_is_independent():
+    """...and it travels in the other direction too."""
+    m = protocol.usage(0.0, None, 0.0, None, [], stale=False,
+                       provider="claude", p2="codex", p2_stale=True)
+    assert m["stale"] is False
+    assert m["p2_stale"] is True
+
+
+def test_no_second_provider_means_no_second_staleness():
+    """p2_stale rides with the rest of p2 rather than standing alone.
+
+    A board that receives p2_stale without p2 would have an age for a page it
+    is not being told exists.
+    """
+    m = protocol.usage(0.0, None, 0.0, None, [], stale=True)
+    assert "p2_stale" not in m
+    assert "p2" not in m

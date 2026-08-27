@@ -141,7 +141,7 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           provider="claude", src="cli", state="", n_sess=0, n_run=0, n_wait=0, n_stuck=0,
           n_agents=0, p2="", p2_session_pct=UNKNOWN,
           p2_weekly_pct=UNKNOWN, p2_session_resets_in_s=-1,
-          p2_weekly_resets_in_s=-1) -> dict:
+          p2_weekly_resets_in_s=-1, p2_stale=False) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -153,6 +153,12 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
     Known models are ALSO flattened into sonnet_pct/opus_pct: the board's
     JSON scanner reads scalar keys only, and its per-model peek needs these
     without growing a full array parser.
+
+    `stale` describes the FIRST provider only, and `p2_stale` the second.
+    Freshness belongs to a reading, not to the panel: the two providers are
+    read from different places at different times, and the board shows one
+    page at a time, so a single flag for both meant a live page could be
+    labelled old because the page you were not looking at had gone quiet.
 
     `stale` is a declared field, not an afterthought bolted on by a caller:
     this function is the one place the wire contract is defined.
@@ -226,6 +232,19 @@ The firmware reads this field: proto.c's "usage" handler calls
             extra["p2_s_in_s"] = int(p2_session_resets_in_s)
         if p2_weekly_resets_in_s is not None and p2_weekly_resets_in_s >= 0:
             extra["p2_w_in_s"] = int(p2_weekly_resets_in_s)
+        # The second provider's own age.
+        #
+        # `stale` above describes the FIRST provider and nothing else, and the
+        # board was showing it over whichever page happened to be on screen.
+        # With one provider that was the same statement; with two it is not.
+        # A machine that runs Claude Code all day and touched Codex once this
+        # morning has a stale codex reading and a live claude one, and the
+        # claude page was reporting "Reading is old" over numbers that were
+        # updating in front of you (user-reported 2026-08-28).
+        #
+        # Sent only alongside the rest of p2, so a board on older firmware
+        # ignores an unknown key and behaves exactly as it did.
+        extra["p2_stale"] = bool(p2_stale)
 
     return {
         "t": "usage", "v": VERSION,
@@ -266,6 +285,7 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
                                            now_epoch) if secondary else -1),
         p2_weekly_resets_in_s=(secs_until(secondary.weekly_resets_at,
                                           now_epoch) if secondary else -1),
+        p2_stale=(secondary.stale if secondary else False),
     )
 
 

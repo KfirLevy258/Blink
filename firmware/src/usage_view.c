@@ -138,6 +138,12 @@ static char provider2_tag[12];	/* "" when there is only one provider */
  * that matters most.
  */
 struct page_data {
+	/*
+	 * This page's own age. See usage_view_set_provider2 -- the panel used
+	 * to carry one flag for both providers, and showed it whichever page
+	 * was in front of you.
+	 */
+	bool stale;
 	double s_pct, w_pct;
 	int32_t s_in_s, w_in_s;
 	bool have;
@@ -840,6 +846,30 @@ static void render_gauges(void)
 }
 
 /*
+ * Whether "the reading is old" is true of the page being SHOWN.
+ *
+ * The status arrives as one flag describing the FIRST provider, and with two
+ * providers that is a statement about one of two pages. A machine running
+ * Claude Code all day with Codex touched once that morning has a stale codex
+ * reading and a live claude one -- and the claude page was announcing
+ * "Reading is old" over numbers that were updating in front of the user
+ * (reported 2026-08-28). Freshness belongs to a reading, not to the panel.
+ *
+ * With one provider there is nothing to distinguish and the flag is the whole
+ * truth, so it is taken as-is: pg[0].stale is only written by the daemon that
+ * also sets the status, and a board talking to an older daemon never receives
+ * p2_stale at all. Falling back to the status keeps that case behaving exactly
+ * as it did.
+ */
+static bool stale_here(void)
+{
+	if (page_count() < 2) {
+		return true;
+	}
+	return pg[cur_page].stale;
+}
+
+/*
  * The worse of a page's two windows.
  *
  * A rail mark has one colour and two windows to speak for, so it speaks for
@@ -1293,6 +1323,17 @@ void usage_view_page_step(int delta)
 	 * rail_a is where cur_page was a moment ago; cur_page has already
 	 * advanced above.
 	 */
+	/*
+	 * Re-ask the status question for the page now in front.
+	 *
+	 * "Reading is old" is per page (see stale_here), so changing page can
+	 * change the answer -- and nothing else would re-run it until the next
+	 * usage message, up to a poll interval later. Re-applying the status
+	 * already held recomputes the hint and the dot from the new page
+	 * without inventing a reading.
+	 */
+	usage_view_set_status(last_status);
+
 	rail_a = cur_page - delta;
 	rail_b = cur_page;
 
@@ -1512,7 +1553,7 @@ static void refresh_dot(void)
 		c = COL_RED;
 		break;
 	case USAGE_STATUS_STALE:
-		c = COL_AMBER;
+		c = stale_here() ? COL_AMBER : COL_GREEN;
 		break;
 	case USAGE_STATUS_DISCONNECTED:
 		c = COL_GREY;
@@ -1621,6 +1662,14 @@ static void refresh_provider1(void)
 	}
 }
 
+void usage_view_set_provider1_stale(bool stale)
+{
+	pg[0].stale = stale;
+	if (built) {
+		refresh_dot();
+	}
+}
+
 void usage_view_set_provider1(const char *tag)
 {
 	/* The outer ring is whichever provider the daemon made primary, which
@@ -1632,7 +1681,7 @@ void usage_view_set_provider1(const char *tag)
 
 void usage_view_set_provider2(const char *tag, double session_pct,
 			      double weekly_pct, int32_t session_resets_in_s,
-			      int32_t weekly_resets_in_s)
+			      int32_t weekly_resets_in_s, bool stale)
 {
 	if (!built) {
 		return;
@@ -1667,6 +1716,7 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 	pg[1].w_pct = weekly_pct;
 	pg[1].s_in_s = session_resets_in_s;
 	pg[1].w_in_s = weekly_resets_in_s;
+	pg[1].stale = stale;
 	pg[1].have = true;
 
 	refresh_rail();
@@ -1738,7 +1788,10 @@ void usage_view_set_status(enum usage_status status)
 		 * the only way to get here; that endpoint is gone, and telling
 		 * someone they are rate-limited when they are not is worse than
 		 * saying nothing. */
-		text = "Reading is old - showing last known";
+		/* Only when it is true of THIS page -- see stale_here(). The
+		 * other page's silence is not this page's problem, and saying
+		 * so over live numbers is the panel contradicting itself. */
+		text = stale_here() ? "Reading is old - showing last known" : "";
 		break;
 	case USAGE_STATUS_ERROR:
 		tc = COL_RED;

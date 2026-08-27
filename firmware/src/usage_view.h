@@ -161,8 +161,25 @@ void usage_view_page_preview(int delta, int pct);
 
 void usage_view_set_provider1(const char *tag);
 
+/*
+ * The FIRST provider's own age, which is what the `stale` flag on the wire has
+ * always meant. Recorded per page so the hint can ask about the page being
+ * shown -- see usage_view_set_provider2.
+ */
+void usage_view_set_provider1_stale(bool stale);
+
+/*
+ * `stale` is the SECOND provider's own age, not the panel's.
+ *
+ * Freshness belongs to a reading. The two providers are read from different
+ * places at different times, and only one page is on screen, so one flag for
+ * both meant a live page could be labelled "Reading is old" because the page
+ * you were not looking at had gone quiet -- which is exactly what a machine
+ * running Claude Code all day with Codex touched once that morning does
+ * (user-reported 2026-08-28).
+ */
 void usage_view_set_provider2(const char *tag, double session_pct,
 			      double weekly_pct, int32_t session_resets_in_s,
-			      int32_t weekly_resets_in_s);
+			      int32_t weekly_resets_in_s, bool stale);
 
 #endif /* USAGE_VIEW_H */
