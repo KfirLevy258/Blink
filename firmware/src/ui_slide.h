@@ -43,6 +43,16 @@
  * it is free of the constraint, and ui_slide_run() refuses a vertical
  * direction if the build is ever switched back to the scrolled slide.
  *
+ * NOTHING CURRENTLY ASKS FOR A VERTICAL ONE. The provider page change did, and
+ * it went through three of them -- cut, wipe, wipe with a travelling edge --
+ * before the conclusion that a transition between two pictures was the wrong
+ * idea for that screen entirely: the pages are one layout with different
+ * numbers in it, so the rings now travel between the two readings and nothing
+ * is covered or revealed at all (see usage_view_page_step). The vertical
+ * support stays because it is four lines of index arithmetic with a host test
+ * on it, and because the reason it exists -- a wipe does not care which axis
+ * it chops along -- is worth keeping written down.
+ *
  * The cost is identical either way and on either axis: one full render of the
  * incoming screen, chopped into strips. A vertical transition is 60 steps
  * where a horizontal one is 80, because the screen is 240 tall and 320 wide.
@@ -61,6 +71,13 @@
  * disabled (see ui_slide_freeze) so that setup does not itself repaint over
  * the pixels this is about to scroll.
  *
+ * The strip width and the duration floor are constants in ui_slide.c rather
+ * than parameters. They were parameters for one caller -- the provider page
+ * change, which wanted a faster pace than a panel opening -- and that caller
+ * does not exist any more: it is an animation now, not a transition. The two
+ * that remain (the settings panel, the boot clip) were tuned by eye on
+ * hardware and there is nothing to gain by letting them differ.
+ *
  * `pump` (may be NULL) runs each step so the caller's background duties, and
  * on a test boot the watchdog, stay alive.
  *
@@ -74,73 +91,6 @@
  * That is what the gesture mutes in ui_anim exist to absorb.
  */
 void ui_slide_run(int dir, void (*pump)(void));
-
-/*
- * The same transition with the pacing named explicitly.
- *
- * `step_px` is the strip width, and in wipe mode it is a SPEED control rather
- * than a quality one: the per-step refresh overhead dwarfs the pixels, so
- * halving the step count nearly halves the duration. It must divide the
- * travel exactly (320 and 240 both divide by 4 and 8) or it is ignored, since
- * a short final strip would leave a stripe of the outgoing screen behind.
- *
- * `min_ms` is a floor, not a target: a transition that already cost more than
- * this is not slowed further.
- *
- * ui_slide_run() is this with the defaults the settings panel and the boot
- * clip were tuned to, and those two should keep using it -- they were judged
- * by eye on hardware and there is nothing to gain by disturbing them.
- */
-void ui_slide_run_paced(int dir, int step_px, int min_ms,
-			void (*pump)(void));
-
-/*
- * The same transition with a leading edge that travels.
- *
- * A wipe does not move anything. It paints the incoming screen into the rows
- * where it will finally sit, one strip at a time, while the outgoing screen
- * stays exactly where it is -- so what the eye has to work with is a boundary
- * between two pictures. Between the settings panel and the gauges that is
- * plenty: the two look nothing alike and the boundary is obvious. Between two
- * PROVIDER PAGES it is nothing at all. The pages are the same layout with
- * different numbers in it (see the one-widget-set note in usage_view.c), so
- * the boundary has almost no contrast to be made of and the whole thing reads
- * as the numbers changing in place -- "it just overrides the current status"
- * (user-reported 2026-08-27, on the wipe that had already replaced the cut).
- *
- * So this one parks a plain bar on the frontier at every step. That gives the
- * transition the one thing it was missing: something with real contrast,
- * travelling in the direction of the gesture, at a speed the eye can follow.
- * The reveal trails one strip behind the bar, which is what makes the bar look
- * like the thing doing the revealing.
- *
- * The bar is created on the active screen for the length of the run and
- * deleted before the settle. It is NOT owned by a caller: usage_view.h is
- * deliberately free of LVGL types (usage_state.h includes it, and the host
- * tests compile that without a graphics library), so handing the object in
- * would mean either leaking lv_obj_t into that header or passing it as a
- * void *. A transition's furniture belongs to the transition anyway.
- *
- * It costs one extra strip of INVALIDATION per step, because the bar's
- * previous position has to be repainted without it, and nothing else: the
- * duration of a step is per-refresh overhead (~6 ms of 7), not pixels, so
- * doubling a 320x8 area is inside the noise. Measured, both before and after,
- * on the log line at the bottom of ui_slide_run_paced.
- */
-void ui_slide_run_swept(int dir, int step_px, int min_ms,
-			void (*pump)(void));
-
-/*
- * Pacing for the provider-page change specifically.
- *
- * 8 px over the 240-pixel axis is 30 steps where the default 4 px would be 60,
- * and the duration is made almost entirely of per-step overhead -- so this is
- * about half the time for a reveal that is still finer than the eye tracks at
- * 60 cm. The 650 ms default was reported as too slow for a page change, which
- * is a smaller act than opening a panel and should not cost the same.
- */
-#define UI_SLIDE_PAGE_STEP_PX	8
-#define UI_SLIDE_PAGE_MIN_MS	260
 
 /*
  * Open a transition: render what is already dirty, then freeze.

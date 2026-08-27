@@ -934,14 +934,195 @@ bool usage_view_can_page(int delta)
 	return built && n >= 2 && next >= 0 && next < n;
 }
 
+/*
+ * The page change, as the gauges re-reading rather than the screen changing.
+ *
+ * Three transitions were tried on this axis before this one. A CUT was
+ * reported as not looking like a swipe. A WIPE reads as a repaint, because
+ * the two pages are the same layout and the boundary between them has nothing
+ * to be made of. A wipe with a bright leading edge gave that boundary
+ * something to see, and it still "doesn't feel natural" -- which it is not: a
+ * bar sweeping the panel is an object that exists nowhere else on this device
+ * and means nothing when it arrives.
+ *
+ * What was wrong with all three is that they were transitions between two
+ * PICTURES. This is an instrument, and the honest motion for one is the needle
+ * moving: the ring travels from the percentage it was showing to the one the
+ * other provider is at, and the number under it counts along. Nothing is
+ * covered, nothing slides, nothing is revealed. The screen does not change --
+ * the reading does.
+ *
+ * It is also the only motion this hardware can render smoothly. A full-screen
+ * transition costs a whole repaint however it is chopped up; the arcs and
+ * their labels are a fraction of the panel, and LVGL invalidates only what
+ * actually moved.
+ */
+#define PAGE_MORPH_MS		380
+#define MORPH_STEPS		256
+#define MORPH_MID		(MORPH_STEPS / 2)
+
+static struct {
+	double s_from, w_from;	/* what the rings were showing */
+	double s_to, w_to;	/* what the page being moved to says */
+	bool jump;		/* one side has no number: cut, do not travel */
+	bool swapped;		/* the midpoint text swap has happened */
+} morph;
+
+/*
+ * The words do not interpolate, so they cross the middle instead.
+ *
+ * A provider's NAME has no midpoint between "Claude" and "Codex", and neither
+ * does a countdown -- rolling "6d 22h" towards "4d 15h" would be inventing a
+ * duration that is true of nothing. They fade out, change while they cannot be
+ * read, and fade back: the standard answer, and it costs only the label boxes.
+ *
+ * The numbers do NOT do this. They travel, because a percentage between two
+ * percentages is a real percentage and watching it cross is the whole point.
+ */
+static void morph_text_opa(int32_t t)
+{
+	int d = t < MORPH_MID ? MORPH_MID - t : t - MORPH_MID;
+	lv_opa_t o = (lv_opa_t)(d * LV_OPA_COVER / MORPH_MID);
+
+	lv_obj_set_style_text_opa(provider_lbl, o, 0);
+	lv_obj_set_style_text_opa(session.countdown, o, 0);
+	lv_obj_set_style_text_opa(weekly.countdown, o, 0);
+}
+
+/* One ring: where it is now, on the way from one reading to the other. */
+static void morph_arc(struct gauge *g, double pct)
+{
+	char buf[8];
+
+	if (pct < 0) {
+		lv_label_set_text(g->pct, "--%");
+		lv_arc_set_value(g->arc, 0);
+		return;
+	}
+	snprintf(buf, sizeof(buf), "%d%%", (int)(pct + 0.5));
+	lv_label_set_text(g->pct, buf);
+	lv_arc_set_value(g->arc, (int32_t)(pct + 0.5));
+	/*
+	 * Severity follows the value it is describing, so the ring changes
+	 * colour where it crosses the threshold rather than at either end.
+	 * Interpolating the colours themselves would put the ring through hues
+	 * that mean nothing -- olive between green and amber -- and this
+	 * palette's whole job is that a colour means one thing.
+	 */
+	lv_obj_set_style_arc_color(g->arc, severity(pct), LV_PART_INDICATOR);
+}
+
+static void morph_exec(void *unused, int32_t t)
+{
+	ARG_UNUSED(unused);
+
+	if (!built) {
+		return;
+	}
+	if (t >= MORPH_MID && !morph.swapped) {
+		/*
+		 * Halfway, with the words invisible: everything that cannot be
+		 * interpolated changes here, in one go, behind the fade.
+		 */
+		morph.swapped = true;
+		refresh_provider1();
+		session.resets_in_s = pg[cur_page].s_in_s;
+		weekly.resets_in_s = pg[cur_page].w_in_s;
+		render_countdown(&session);
+		render_countdown(&weekly);
+	}
+	morph_text_opa(t);
+
+	if (morph.jump) {
+		/*
+		 * "--%" is not a number and there is no path between it and
+		 * one. A ring travelling out of a blank reading would be
+		 * animating a value the device does not have, so this side
+		 * changes at the midpoint with the words.
+		 */
+		if (morph.swapped) {
+			morph_arc(&session, morph.s_to);
+			morph_arc(&weekly, morph.w_to);
+		}
+		return;
+	}
+
+	double k = (double)t / MORPH_STEPS;
+
+	morph_arc(&session, morph.s_from + (morph.s_to - morph.s_from) * k);
+	morph_arc(&weekly, morph.w_from + (morph.w_to - morph.w_from) * k);
+}
+
+static void morph_done(lv_anim_t *a)
+{
+	ARG_UNUSED(a);
+
+	/*
+	 * Land on the real values rather than on the last interpolated frame.
+	 *
+	 * The animation ends at t = MORPH_STEPS, so k is exactly 1 and the
+	 * arithmetic already agrees -- but only in exact arithmetic. Calling
+	 * the normal render path is what guarantees the screen is showing the
+	 * page's own numbers afterwards, and it also restores anything the
+	 * morph did not touch. The text opacity has to be put back by hand:
+	 * it is a style, not a value, and nothing else in this file sets it.
+	 */
+	lv_obj_set_style_text_opa(provider_lbl, LV_OPA_COVER, 0);
+	lv_obj_set_style_text_opa(session.countdown, LV_OPA_COVER, 0);
+	lv_obj_set_style_text_opa(weekly.countdown, LV_OPA_COVER, 0);
+	render_gauges();
+}
+
 void usage_view_page_step(int delta)
 {
 	if (!usage_view_can_page(delta)) {
 		return;
 	}
+
+	/*
+	 * Where the rings are NOW, not where the page being left says they
+	 * should be. Paging twice quickly is the case that separates the two:
+	 * the second swipe arrives mid-travel, and starting its animation from
+	 * the page's stored value would snap the ring backwards before setting
+	 * off again.
+	 */
+	morph.s_from = last_s_pct;
+	morph.w_from = last_w_pct;
+
 	cur_page += delta;
-	render_gauges();
+
+	morph.s_to = pg[cur_page].s_pct;
+	morph.w_to = pg[cur_page].w_pct;
+	morph.jump = morph.s_from < 0 || morph.s_to < 0 ||
+		     morph.w_from < 0 || morph.w_to < 0;
+	morph.swapped = false;
+
+	/*
+	 * The rail leads. It is the answer to "which page am I on", and that
+	 * became true the moment the swipe was accepted -- waiting for the
+	 * rings to finish travelling would leave it lying for 380 ms.
+	 */
 	refresh_rail();
+
+	lv_anim_t a;
+
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, NULL);
+	lv_anim_set_exec_cb(&a, morph_exec);
+	lv_anim_set_values(&a, 0, MORPH_STEPS);
+	lv_anim_set_time(&a, PAGE_MORPH_MS);
+	/*
+	 * Eased at both ends. A needle that starts and stops abruptly reads as
+	 * a jump with a delay in the middle; this is the one place on the panel
+	 * where something is meant to look like it has mass.
+	 */
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+	lv_anim_set_completed_cb(&a, morph_done);
+	/* Restarting replaces the running one rather than queueing a second
+	 * animation against the same callback, so a fast double swipe travels
+	 * once, to the page it ends on. */
+	lv_anim_delete(NULL, morph_exec);
+	lv_anim_start(&a);
 }
 
 

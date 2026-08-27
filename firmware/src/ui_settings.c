@@ -1219,37 +1219,45 @@ static void do_open(void (*pump)(void))
  * everything it retexts, and refreshing that would repaint the destination
  * over the whole screen at once -- leaving the wipe nothing to reveal.
  */
+/*
+ * The page change is not a transition any more.
+ *
+ * Three were tried on this axis. A cut did not read as a swipe. A wipe read as
+ * a repaint, because the two pages are the same layout and the boundary
+ * between them has nothing to be made of. A wipe with a bright leading edge
+ * gave that boundary something to see and still did not feel natural -- which
+ * it was not: a bar sweeping the panel is an object that exists nowhere else
+ * on this device and means nothing when it arrives.
+ *
+ * All three were transitions between two PICTURES. This is an instrument, and
+ * the motion that belongs to one is the needle moving. usage_view_page_step()
+ * now animates the rings from the reading they were showing to the other
+ * provider's, and nothing is covered or revealed at all. See the note above it.
+ *
+ * So this does not block, does not touch the display, does not need the strip
+ * machinery, and does not need `pump` -- an LVGL animation runs from
+ * lv_timer_handler like everything else on the screen. It stays a mode-loop
+ * request rather than moving back into the swipe callback because the
+ * can_page() re-check there still matters: a usage message can remove the
+ * second provider in the gap between the swipe and this.
+ */
 static void do_page(int delta, void (*pump)(void))
 {
-	ui_slide_begin();
+	ARG_UNUSED(pump);
+
 	usage_view_page_step(delta);
-	lv_obj_update_layout(lv_screen_active());
-	ui_slide_freeze(false);
 
 	/*
-	 * Sized to THIS transition, not to the default one. do_open mutes for
-	 * UI_SLIDE_MS * 6 because a 650 ms slide accumulates most of a second
-	 * of touch points; a page change is under 300 ms and a mute that long
-	 * would swallow a deliberate second swipe -- which is exactly what
-	 * someone paging past two providers does.
+	 * A short mute, and for a different reason than the transitions have.
+	 * Nothing blocks now, so no burst of touch points is accumulating --
+	 * this is only to stop the tail of the swipe that caused the change
+	 * from being read as a second one. Well under the animation's own
+	 * length, so a deliberate second swipe still lands mid-travel and
+	 * retargets it.
 	 */
-	ui_anim_gesture_mute(UI_SLIDE_MS * 2);
-
-	/*
-	 * Content follows the finger. A swipe UP asks for the next page, so
-	 * the page you were on travels up and out and the new one arrives from
-	 * below -- which is UI_SLIDE_UP.
-	 *
-	 * With the sweep bar, and this is the only transition that gets one.
-	 * Everywhere else the two screens look nothing alike and the boundary
-	 * between them IS the motion; two provider pages are the same layout
-	 * with different numbers, so there was nothing to see moving and the
-	 * wipe read as a repaint. See ui_slide_run_front.
-	 */
-	ui_slide_run_swept(delta > 0 ? UI_SLIDE_UP : UI_SLIDE_DOWN,
-			   UI_SLIDE_PAGE_STEP_PX, UI_SLIDE_PAGE_MIN_MS, pump);
-	ui_anim_gesture_mute(250);
+	ui_anim_gesture_mute(UI_SLIDE_MS);
 }
+
 
 static void do_close(void (*pump)(void))
 {
