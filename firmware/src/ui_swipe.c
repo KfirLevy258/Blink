@@ -12,20 +12,13 @@
 /*
  * Poll period.
  *
- * 10 ms, which is exactly how often main.c pumps lv_timer_handler() -- so this
- * runs as often as anything on this device can, and there is no point asking
- * for less.
- *
- * It does not need to catch every report: what is wanted is where the stroke
- * STARTED and where it ENDED, and both survive a missed sample in between. But
- * the endpoints are CLIPPED by the poll period at both ends, which costs
- * travel, and on a short flick that cost is a large share of the whole stroke.
- * At 20 ms a stroke could lose up to 40 ms of its motion; the log's two
- * refused short swipes measured 18 px and 35 px, and 35 px missed the distance
- * floor by ONE pixel. Halving the clipping is free and it is exactly the case
- * that needed it.
+ * 20 ms is faster than the panel's median report gap (13 ms is the median but
+ * the top fifth run 67-90 ms) and faster than LVGL's own refresh, so a stroke
+ * is sampled at least as well as anything downstream could sample it. It does
+ * not need to catch every report: what is wanted is where the stroke STARTED
+ * and where it ENDED, and both survive a missed sample in between.
  */
-#define POLL_MS		10
+#define POLL_MS		20
 
 static void (*emit)(enum ui_swipe_dir dir);
 
@@ -33,7 +26,6 @@ static bool active;		/* a stroke is being tracked */
 static bool down;		/* the pointer was pressed at the last poll */
 static int16_t x0, y0;		/* where it started */
 static int16_t x1, y1;		/* where it has reached */
-static int64_t start_ms;	/* when contact began */
 static int64_t last_down_ms;	/* when contact was last seen */
 
 static lv_indev_t *pointer(void)
@@ -57,33 +49,22 @@ static void finish(void)
 {
 	int dx = x1 - x0;
 	int dy = y1 - y0;
-	/*
-	 * CONTACT time, first sample to last -- the stitch window waited out
-	 * after it is deliberately not in here. Including it would add a fixed
-	 * 120 ms to every stroke's clock, which is most of a short one's
-	 * budget and would make the fast strokes the flick rule exists to
-	 * admit look slow.
-	 */
-	int ms = (int)(last_down_ms - start_ms);
-	enum ui_swipe_dir d = ui_swipe_classify(dx, dy, ms);
+	enum ui_swipe_dir d = ui_swipe_classify(dx, dy);
 
 	active = false;
 
 	/*
-	 * One line per stroke: the displacement, how long the finger was on
-	 * the glass, and what that came to.
+	 * One line per stroke, with the displacement that produced it.
 	 *
-	 * Every number in ui_swipe_geom.h came off this board -- the first set
-	 * through a diagnostic build that had to be flashed, captured and
-	 * flashed back, the flick rule straight off this line. A stroke that
-	 * is refused should be able to say why: "140 by 90" is a different
-	 * problem from "12 by 4 in 300 ms", and the second one is only
-	 * answerable with the duration in the line. Strokes are user-
-	 * initiated, so this is quiet.
+	 * Every number in ui_swipe.h came off this board through a diagnostic
+	 * build that had to be flashed, captured and flashed back. A stroke
+	 * that is refused should be able to say why -- "moved 140 by 90, too
+	 * diagonal" is a different problem from "moved 12 by 4, that was a
+	 * tap" -- without anyone rebuilding the firmware to find out. Strokes
+	 * are user-initiated, so this is quiet.
 	 */
 	if (dx != 0 || dy != 0) {
-		printk("[swipe] dx %d dy %d in %d ms -> %d\n", dx, dy, ms,
-		       (int)d);
+		printk("[swipe] dx %d dy %d -> %d\n", dx, dy, (int)d);
 	}
 
 	if (d != UI_SWIPE_NONE && emit != NULL) {
@@ -110,7 +91,6 @@ static void poll_cb(lv_timer_t *t)
 			active = true;
 			x0 = p.x;
 			y0 = p.y;
-			start_ms = now;
 		}
 		/*
 		 * A press arriving while a stroke is still open EXTENDS it --
