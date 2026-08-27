@@ -100,6 +100,10 @@ static inline enum ui_swipe_dir ui_swipe_classify(int dx, int dy)
  * and a deliberate second swipe is nowhere near that quick -- a finger has to
  * leave the panel, travel back and land again. 120 ms is comfortably above the
  * bounce and comfortably below anything a person does on purpose.
+ *
+ * This is NOT latency. The swipe fires the moment it is unambiguous, with the
+ * finger still down; this only decides when the stroke has ended and a new one
+ * may begin, which is what stops the tail of a long drag from firing twice.
  */
 #define UI_SWIPE_STITCH_MS	120
 

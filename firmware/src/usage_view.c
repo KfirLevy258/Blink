@@ -1012,6 +1012,9 @@ static void morph_arc(struct gauge *g, double pct)
 	lv_obj_set_style_arc_color(g->arc, severity(pct), LV_PART_INDICATOR);
 }
 
+static int morph_frames;
+static int64_t morph_t0;
+
 static void morph_exec(void *unused, int32_t t)
 {
 	ARG_UNUSED(unused);
@@ -1019,6 +1022,7 @@ static void morph_exec(void *unused, int32_t t)
 	if (!built) {
 		return;
 	}
+	morph_frames++;
 	if (t >= MORPH_MID && !morph.swapped) {
 		/*
 		 * Halfway, with the words invisible: everything that cannot be
@@ -1071,6 +1075,15 @@ static void morph_done(lv_anim_t *a)
 	lv_obj_set_style_text_opa(session.countdown, LV_OPA_COVER, 0);
 	lv_obj_set_style_text_opa(weekly.countdown, LV_OPA_COVER, 0);
 	render_gauges();
+
+	/*
+	 * What it actually cost, on the actual board -- the same reason
+	 * ui_slide prints its own line. This one has a second job: every LVGL
+	 * timer on the screen, the swipe poller included, only runs between
+	 * these frames, so the frame time here IS the poller's worst case.
+	 */
+	printk("[morph] %d frames in %lld ms\n", morph_frames,
+	       k_uptime_get() - morph_t0);
 }
 
 void usage_view_page_step(int delta)
@@ -1096,6 +1109,8 @@ void usage_view_page_step(int delta)
 	morph.jump = morph.s_from < 0 || morph.s_to < 0 ||
 		     morph.w_from < 0 || morph.w_to < 0;
 	morph.swapped = false;
+	morph_frames = 0;
+	morph_t0 = k_uptime_get();
 
 	/*
 	 * The rail leads. It is the answer to "which page am I on", and that

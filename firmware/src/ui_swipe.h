@@ -38,7 +38,12 @@
  *     was calibrated against, so there is no axis or sign to re-derive.
  *   - STITCHES across brief releases. A gap shorter than UI_SWIPE_STITCH_MS
  *     is contact bounce in the middle of a stroke, not the end of one.
- *   - Decides on the whole stroke, once, when it really ends.
+ *   - Fires the moment the stroke is unambiguous, WHILE THE FINGER IS STILL
+ *     DOWN, and at most once per stroke. Waiting for the release cost 120 ms
+ *     of stitch window that was answering a different question, plus whatever
+ *     travel the last poll before the release clipped off. Neither was doing
+ *     any work: a stroke that has already gone far enough in one direction is
+ *     not going to stop having done that.
  *   - Requires the movement to be decisively along ONE axis. An ambiguous
  *     diagonal does nothing, rather than picking the axis that happened to
  *     win by a pixel and taking you somewhere you did not ask to go.
