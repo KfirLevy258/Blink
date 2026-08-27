@@ -861,23 +861,45 @@ static void refresh_nextcue(void)
 }
 
 /*
- * A page change part-way, drawn while the finger is still moving.
+ * A page change, at whatever point through it the rail currently is.
  *
- * `preview_to` is the page the stroke in progress is heading for, or -1 for
- * none; `preview_pct` is how far it has committed. The rail is the right place
- * for this and the only cheap one: it is already the answer to "which page am
- * I on", it is six pixels tall so redrawing it costs nothing, and growing the
- * mark you are travelling towards says which page AND how much further in the
- * same gesture.
+ * ONE description covers the whole thing: `rail_a` is the mark being left,
+ * `rail_b` is the mark being reached, and `rail_pct` is how far the handover
+ * has got. Settled is simply rail_a = -1 and rail_pct = 100.
  *
- * It also makes the threshold visible. Before this, the amount of travel a
- * swipe wants was discoverable only by failing to reach it -- which is exactly
- * how "I should swipe the entire screen" got diagnosed, from a log rather than
- * from the panel. Now the dot arrives at full width precisely when the swipe
- * fires, so the rule and the picture are the same thing.
+ * That unification is the fix for "the tail of the swipe is not showing". The
+ * first version drove this only from the finger, and the finger does not
+ * supply enough of it: the panel emits 2 to 5 reports for a whole stroke,
+ * sometimes jumping 149 px between two of them, so the window between the drag
+ * line and the threshold usually contains NO sample at all. The rail went from
+ * idle to settled with nothing drawn in between -- correct, and invisible.
+ *
+ * So the finger starts the handover and an animation FINISHES it. Once the
+ * swipe fires, the rail keeps travelling to the new page under its own power
+ * over RAIL_SETTLE_MS instead of snapping. That part is drawn rather than
+ * sampled, so it does not care how few reports the panel gave -- and it is
+ * what is actually visible on a fast flick, where the whole stroke is over in
+ * 70 ms.
+ *
+ * The rail is the right place for this and the only cheap one: it is already
+ * the answer to "which page am I on", it is six pixels tall so redrawing it
+ * costs nothing, and moving the weight from one mark to the other says which
+ * page AND how far through in the same picture.
  */
-static int preview_to = -1;
-static int preview_pct;
+#define RAIL_SETTLE_MS		200
+
+/*
+ * Both marks are named explicitly rather than one of them being "cur_page".
+ *
+ * They are not the same page at the two ends of this. DURING a stroke cur_page
+ * is still the page being LEFT -- nothing has changed yet. After the swipe
+ * fires cur_page has already advanced, so it is the page being REACHED. Keying
+ * the drawing off it would mean the rail ran backwards across that instant,
+ * which is the one moment it most needs to be continuous.
+ */
+static int rail_a = -1;		/* the mark being left, -1 when settled */
+static int rail_b;		/* the mark being reached */
+static int rail_pct = 100;	/* how far the handover has got */
 
 /* Linear, in whole pixels: these are 6 and 16 px wide, so there is nothing an
  * easing curve could express that the panel could show. */
@@ -891,15 +913,26 @@ static void refresh_rail(void)
 	int n = page_count();
 	int span = n * RAIL_PITCH - (RAIL_PITCH - RAIL_DOT_W);
 	int x = (SCR_W - span) / 2;
-	bool previewing = preview_to >= 0 && preview_to < n && preview_pct > 0;
+	bool handing_over;
 
 	if (!rail_dot[0]) {
 		return;
 	}
+	/*
+	 * Settled means rail_b IS the current page, whatever moved cur_page.
+	 * Most of this file's callers change the page without going through a
+	 * swipe at all -- provider 2 arriving or disappearing falls back to
+	 * page 0 on its own -- and without this the rail would keep drawing
+	 * the page that was current when the last stroke ended.
+	 */
+	if (rail_a < 0) {
+		rail_b = cur_page;
+		rail_pct = 100;
+	}
+	handing_over = rail_a >= 0 && rail_a < n && rail_a != rail_b;
 	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
-		bool on = i == cur_page;
-		int w = on ? RAIL_ACT_W : RAIL_DOT_W;
-		lv_opa_t opa = on ? LV_OPA_COVER : LV_OPA_50;
+		int w = RAIL_DOT_W;
+		lv_opa_t opa = LV_OPA_50;
 
 		/* One page: nowhere to go, so there is no indicator to decode
 		 * and no gesture to discover. The single-provider desk keeps
@@ -910,18 +943,22 @@ static void refresh_rail(void)
 		}
 		/*
 		 * The two marks trade places continuously: the one being left
-		 * shrinks by exactly what the one being reached grows. Half way
-		 * through a stroke they are the same size, which is the honest
-		 * picture of a page change that has not been decided yet.
+		 * gives up exactly what the one being reached takes on. Half
+		 * way through they are the same size, which is the honest
+		 * picture of a page change that is under way and not finished
+		 * -- true both of a stroke still being made and of one that has
+		 * fired and is still landing.
 		 */
-		if (previewing && on) {
-			w = lerp_px(RAIL_ACT_W, RAIL_DOT_W, preview_pct);
+		if (i == rail_b) {
+			w = lerp_px(handing_over ? RAIL_DOT_W : RAIL_ACT_W,
+				    RAIL_ACT_W, rail_pct);
+			opa = (lv_opa_t)lerp_px(handing_over ? LV_OPA_50
+							     : LV_OPA_COVER,
+						LV_OPA_COVER, rail_pct);
+		} else if (handing_over && i == rail_a) {
+			w = lerp_px(RAIL_ACT_W, RAIL_DOT_W, rail_pct);
 			opa = (lv_opa_t)lerp_px(LV_OPA_COVER, LV_OPA_50,
-						preview_pct);
-		} else if (previewing && i == preview_to) {
-			w = lerp_px(RAIL_DOT_W, RAIL_ACT_W, preview_pct);
-			opa = (lv_opa_t)lerp_px(LV_OPA_50, LV_OPA_COVER,
-						preview_pct);
+						rail_pct);
 		}
 		lv_obj_clear_flag(rail_dot[i], LV_OBJ_FLAG_HIDDEN);
 		lv_obj_set_size(rail_dot[i], w, RAIL_H);
@@ -1129,6 +1166,28 @@ static void morph_done(lv_anim_t *a)
 	       k_uptime_get() - morph_t0);
 }
 
+/*
+ * Drive the handover from an animation, once the finger has stopped supplying
+ * it. See RAIL_SETTLE_MS.
+ */
+static void rail_settle_exec(void *unused, int32_t pct)
+{
+	ARG_UNUSED(unused);
+	rail_pct = pct;
+	refresh_rail();
+}
+
+static void rail_settled(lv_anim_t *a)
+{
+	ARG_UNUSED(a);
+	/* The mark being left stops being a thing, which is what makes the
+	 * next stroke's preview start from a settled rail rather than from the
+	 * tail of this one. */
+	rail_a = -1;
+	rail_pct = 100;
+	refresh_rail();
+}
+
 void usage_view_page_preview(int delta, int pct)
 {
 	int to = delta == 0 ? -1 : cur_page + delta;
@@ -1136,9 +1195,28 @@ void usage_view_page_preview(int delta, int pct)
 	if (!built) {
 		return;
 	}
+	/*
+	 * Never while the rail is landing under its own power. The stroke that
+	 * caused it has usually not been lifted yet, so its progress is still
+	 * being published -- and honouring it would drag the rail back towards
+	 * a handover that has already happened.
+	 */
+	if (lv_anim_get(NULL, rail_settle_exec) != NULL) {
+		return;
+	}
 	if (to < 0 || to >= page_count() || pct <= 0) {
-		to = -1;
-		pct = 0;
+		/* Let go without committing: back to settled, at once. There is
+		 * nothing to animate towards -- the page did not change -- and
+		 * an eased retreat would read as a page change being undone
+		 * rather than as one that never started. */
+		to = cur_page;
+		pct = 100;
+		if (rail_a == -1 && rail_b == to && rail_pct == 100) {
+			return;
+		}
+		rail_a = -1;
+	} else {
+		rail_a = cur_page;
 	}
 	/*
 	 * Dropped when nothing changed, because this arrives every drain tick
@@ -1146,23 +1224,20 @@ void usage_view_page_preview(int delta, int pct)
 	 * an event. Without this the rail would be re-laid-out a hundred times
 	 * a second for a picture that is already correct.
 	 */
-	if (to == preview_to && pct == preview_pct) {
+	if (to == rail_b && pct == rail_pct) {
 		return;
 	}
-	preview_to = to;
-	preview_pct = pct;
+	rail_b = to;
+	rail_pct = pct;
 	refresh_rail();
 }
 
 void usage_view_page_step(int delta)
 {
-	/* The preview has done its job the moment the change is real: clear it
-	 * first so refresh_rail below draws the settled rail rather than a
-	 * stroke that is no longer in progress. */
-	preview_to = -1;
-	preview_pct = 0;
-
 	if (!usage_view_can_page(delta)) {
+		/* A stroke that asked for a page that is not there still has to
+		 * put the rail back; its preview is on screen. */
+		usage_view_page_preview(0, 0);
 		return;
 	}
 
@@ -1187,10 +1262,40 @@ void usage_view_page_step(int delta)
 	morph_t0 = k_uptime_get();
 
 	/*
-	 * The rail leads. It is the answer to "which page am I on", and that
-	 * became true the moment the swipe was accepted -- waiting for the
-	 * rings to finish travelling would leave it lying for 380 ms.
+	 * The rail leads, and it FINISHES the handover the finger started.
+	 *
+	 * Carrying on from wherever the preview reached, rather than jumping,
+	 * is what makes the swipe visible at all. A stroke gives the panel 2
+	 * to 5 reports before it crosses the threshold and can jump 149 px
+	 * between two of them, so the preview often never gets a frame -- the
+	 * rail would go from idle to settled with nothing drawn in between.
+	 * This part is drawn rather than sampled, so it does not care how few
+	 * reports there were.
+	 *
+	 * rail_a is where cur_page was a moment ago; cur_page has already
+	 * advanced above.
 	 */
+	rail_a = cur_page - delta;
+	rail_b = cur_page;
+
+	lv_anim_t ra;
+
+	lv_anim_init(&ra);
+	lv_anim_set_var(&ra, NULL);
+	lv_anim_set_exec_cb(&ra, rail_settle_exec);
+	lv_anim_set_values(&ra, rail_pct, 100);
+	/* Time what is LEFT, so a stroke that had already dragged the rail
+	 * most of the way finishes quickly instead of crawling the last few
+	 * percent over a fifth of a second. */
+	/* Floored, not just scaled: a stroke that dragged the rail all the way
+	 * to 100 before firing would otherwise get a zero-length animation,
+	 * whose completion callback is what puts rail_a back to -1. */
+	lv_anim_set_time(&ra, MAX(30, RAIL_SETTLE_MS * (100 - rail_pct) / 100));
+	lv_anim_set_path_cb(&ra, lv_anim_path_ease_out);
+	lv_anim_set_completed_cb(&ra, rail_settled);
+	lv_anim_delete(NULL, rail_settle_exec);
+	lv_anim_start(&ra);
+
 	refresh_rail();
 
 	lv_anim_t a;
