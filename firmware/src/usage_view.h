@@ -159,6 +159,26 @@ void usage_view_page_step(int delta);
  */
 void usage_view_page_preview(int delta, int pct);
 
+/*
+ * How fast the session window is filling, in percent per hour; 0 or less
+ * means "no answer", which is the usual case.
+ *
+ * Drawn where the session countdown goes, and ONLY when there is no countdown
+ * to draw. That configuration is real and is not a bug: Claude Desktop keeps
+ * two percentages and no reset timestamps of any kind (verified across every
+ * file, LevelDB store and cache it writes, 2026-08-28), so a machine with the
+ * desktop app and no Claude Code has usable gauges and nothing to count down.
+ *
+ * A rate, not a countdown in disguise. Deriving a reset time from the same
+ * history was investigated and refused: it is computable for only 13% of
+ * windows on real data, and its failures are indistinguishable from its
+ * successes. This is arithmetic over readings that were actually observed.
+ *
+ * The daemon sends at most one of the two, so the board is never asked to
+ * choose (pc/normalizer).
+ */
+void usage_view_set_burn(double pph);
+
 void usage_view_set_provider1(const char *tag);
 
 /*

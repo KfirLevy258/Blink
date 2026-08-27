@@ -1,5 +1,8 @@
+import json
 import unittest
+
 from pc import protocol
+from pc.providers import base
 
 
 class TestProtocol(unittest.TestCase):
@@ -181,3 +184,52 @@ def test_no_second_provider_means_no_second_staleness():
     m = protocol.usage(0.0, None, 0.0, None, [], stale=True)
     assert "p2_stale" not in m
     assert "p2" not in m
+
+
+# --- burn_pph on the wire --------------------------------------------------
+
+
+def test_burn_is_omitted_when_absent():
+    """The MAX_LINE_BYTES rule: a key carrying no information spends budget a
+    future field will need, and an absent key already means unknown on both
+    sides. This is the common case -- every machine with Claude Code."""
+    msg = protocol.usage(40, None, 20, None, [])
+    assert "burn_pph" not in msg
+
+
+def test_burn_is_sent_when_present():
+    msg = protocol.usage(40, None, 20, None, [], burn_pph=14.23)
+    assert msg["burn_pph"] == 14.2          # one decimal, rounded
+
+
+def test_a_zero_or_negative_rate_is_not_sent():
+    for bad in (0, -1.0):
+        assert "burn_pph" not in protocol.usage(40, None, 20, None, [],
+                                                burn_pph=bad)
+
+
+def test_the_frame_carries_the_rate_onto_the_wire():
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="desktop", observed_at=1_787_700_000.0,
+        session_pct=40, weekly_pct=20, session_burn_pph=14.0)
+    msg = protocol.frame_to_usage(f, 1_787_700_000.0)
+    assert msg["burn_pph"] == 14.0
+    # And the invariant the firmware leans on, restated on the wire: no
+    # countdown alongside it.
+    assert msg["session_resets_in_s"] == -1
+
+
+def test_the_line_still_fits_with_everything_on_it():
+    """burn_pph is additive, and additive only counts if the fully loaded
+    line still fits -- the board drops an over-long line whole."""
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="desktop", observed_at=1_787_700_000.0,
+        session_pct=99.9, weekly_pct=99.9, state="running",
+        n_run=9, n_wait=9, n_stuck=9, n_idle=9, n_agents=99,
+        session_burn_pph=999.9)
+    g = base.NormalizedUsageFrame(
+        provider="codex", src="cli", observed_at=1_787_700_000.0,
+        session_pct=99.9, weekly_pct=99.9, stale=True,
+        session_resets_at=1_787_999_999.0, weekly_resets_at=1_788_999_999.0)
+    line = json.dumps(protocol.frame_to_usage(f, 1_787_700_000.0, secondary=g))
+    assert len(line.encode()) < protocol.MAX_LINE_BYTES

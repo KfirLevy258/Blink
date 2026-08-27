@@ -141,7 +141,7 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           provider="claude", src="cli", state="", n_sess=0, n_run=0, n_wait=0, n_stuck=0,
           n_agents=0, p2="", p2_session_pct=UNKNOWN,
           p2_weekly_pct=UNKNOWN, p2_session_resets_in_s=-1,
-          p2_weekly_resets_in_s=-1, p2_stale=False) -> dict:
+          p2_weekly_resets_in_s=-1, p2_stale=False, burn_pph=None) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -246,6 +246,17 @@ The firmware reads this field: proto.c's "usage" handler calls
         # ignores an unknown key and behaves exactly as it did.
         extra["p2_stale"] = bool(p2_stale)
 
+    # How fast the session window is filling, percent per hour.
+    #
+    # Sent ONLY when no reset time could be found for it -- the normalizer
+    # enforces that, and this is the second half of the same rule: a board
+    # never receives both, so it never has to decide between them. One
+    # decimal place, because the panel renders about six characters and the
+    # difference between 14.2 and 14.23 %/h is not a difference anybody acts
+    # on. Omitted when unknown, like every other optional key here.
+    if burn_pph is not None and burn_pph > 0:
+        extra["burn_pph"] = round(float(burn_pph), 1)
+
     return {
         "t": "usage", "v": VERSION,
         "session_pct": session_pct, "session_resets_at": session_resets_at,
@@ -286,6 +297,7 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         p2_weekly_resets_in_s=(secs_until(secondary.weekly_resets_at,
                                           now_epoch) if secondary else -1),
         p2_stale=(secondary.stale if secondary else False),
+        burn_pph=frame.session_burn_pph,
     )
 
 

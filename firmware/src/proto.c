@@ -305,6 +305,21 @@ static void dispatch(const char *json)
 			usage_view_set_provider1(p1);
 		}
 
+		/*
+		 * How fast the session window is filling, when nothing can say
+		 * WHEN it rolls. Absent is the normal case and means zero, so a
+		 * daemon older than this firmware simply never fills the
+		 * countdown slot -- which is what it does today.
+		 *
+		 * Sent only when there is no session reset time; the two are
+		 * mutually exclusive on the daemon's side, so this is set
+		 * unconditionally and the view prefers the countdown anyway.
+		 */
+		double burn = 0;
+
+		msg_get_double(json, "burn_pph", &burn);
+		usage_view_set_burn(burn);
+
 		char p2[16];
 		double p2s = -1, p2w = -1, p2si = -1, p2wi = -1;
 

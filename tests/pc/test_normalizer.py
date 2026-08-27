@@ -14,10 +14,10 @@ def cli(at, session=base.UNKNOWN, weekly=base.UNKNOWN, s_reset=None,
 
 
 def desktop(at, session=base.UNKNOWN, weekly=base.UNKNOWN, stale=False,
-            provider="claude"):
+            provider="claude", burn=None):
     return base.NormalizedUsageFrame(
         provider=provider, src="desktop", observed_at=at, session_pct=session,
-        weekly_pct=weekly, stale=stale)
+        weekly_pct=weekly, stale=stale, session_burn_pph=burn)
 
 
 def test_nothing_in_nothing_out():
@@ -225,3 +225,41 @@ def test_a_second_provider_costs_nothing_until_there_is_one():
     for k in ("p2", "p2_session_pct", "p2_weekly_pct", "p2_s_in_s",
               "p2_w_in_s"):
         assert k not in msg
+
+
+# --- the burn rate never competes with a real countdown --------------------
+#
+# The rate is a poor substitute for the server's own reset time and a good
+# substitute for nothing at all. These two tests are the whole rule: a merged
+# frame carries one or the other, never both, so nothing downstream -- the
+# protocol layer, the firmware, a future second panel -- ever has to decide
+# between them or invent a precedence.
+
+
+def test_the_rate_survives_when_no_source_has_a_reset_time():
+    """Claude Desktop with no Claude Code: percentages, no reset, a rate."""
+    out = normalizer.merge([desktop(NOW, session=40, weekly=20, burn=14.0)])
+    assert out.session_resets_at is None
+    assert out.session_burn_pph == 14.0
+
+
+def test_a_real_reset_time_drops_the_rate():
+    """The instant Claude Code reports, the rate stops being carried -- even
+    though the desktop frame is FRESHER, which under plain recency would have
+    let it through. This is not a recency question."""
+    out = normalizer.merge([
+        cli(NOW - 600, session=38, s_reset=NOW + 3600),
+        desktop(NOW, session=40, burn=14.0),
+    ])
+    assert out.session_resets_at == NOW + 3600
+    assert out.session_burn_pph is None
+
+
+def test_a_stale_cli_reset_still_beats_the_rate():
+    """Even an hours-old reset time is the server's answer, and the rate is
+    ours. Age does not promote a measurement into a fact."""
+    out = normalizer.merge([
+        cli(NOW - 7200, session=38, s_reset=NOW + 60),
+        desktop(NOW, session=40, burn=14.0),
+    ])
+    assert out.session_burn_pph is None

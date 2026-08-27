@@ -64,6 +64,19 @@ class NormalizedUsageFrame:
     weekly_resets_at: object = None
     state: str = STATE_UNKNOWN
     stale: bool = False
+    # How fast the session window is filling, in percent per hour, or None.
+    #
+    # Only a source with HISTORY can answer this, which today is the desktop
+    # cache alone. It exists for the one configuration that has percentages
+    # and no reset time -- Claude Desktop without Claude Code -- where the
+    # countdown has nothing to show. It is a measurement of the user's own
+    # consumption over samples we actually observed, not an inference about
+    # when a window rolls: this project already refused that (see
+    # pc/providers/claude_desktop.session_burn_pph for the numbers).
+    #
+    # None, not 0.0, for absent. A zero rate is a real answer ("you have
+    # stopped") and must not be spelled the same way as "we cannot tell".
+    session_burn_pph: object = None
     # How many live sessions are in each state, and how many subagents are
     # running across all of them. `state` above is the worst of these, for a
     # single indicator; these are what a list would be built from.

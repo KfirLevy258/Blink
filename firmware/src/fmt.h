@@ -20,6 +20,25 @@
 void fmt_countdown(int32_t secs, char *buf, size_t buflen);
 
 /*
+ * Render a burn rate: how fast the session window is filling, percent/hour.
+ *
+ *   pph <= 0   -> ""       (nothing to say; the caller shows its usual "--")
+ *   < 10       -> "+2.4%/h"
+ *   otherwise  -> "+14%/h"
+ *
+ * A decimal only below ten, where it is the difference between "barely
+ * moving" and "moving"; above it the tenth is noise on a 5-minute sample and
+ * the width is better spent staying inside GAUGE_CD_MAX_W.
+ *
+ * This appears ONLY where a countdown would have gone and only when there is
+ * no countdown to show -- Claude Desktop with no Claude Code, the one
+ * configuration with percentages and no reset time. It is deliberately not
+ * labelled: the '%' and the '/h' say what it is, and a countdown never
+ * contains a percent sign, so the two can never be read as each other.
+ */
+void fmt_burn(double pph, char *buf, size_t buflen);
+
+/*
  * How long ago the data arrived: "12s ago", "3m ago", "1h 20m ago".
  * This is the one number on screen that cannot lie -- the countdowns keep
  * ticking locally even when the host is dead, so age is what tells the user

@@ -95,6 +95,16 @@ struct gauge {
 	lv_obj_t *countdown;	/* primary provider's time left */
 	int32_t resets_in_s;	/* -1 = unknown; ticked down locally */
 	int32_t resets2_in_s;	/* ...and the second provider's */
+	/*
+	 * How fast this window is filling, %/hour, or 0 for "no answer".
+	 *
+	 * Drawn in the countdown's place, and ONLY when there is no countdown.
+	 * The daemon guarantees the two are mutually exclusive (pc/normalizer
+	 * drops the rate the moment any source supplies a reset time), so this
+	 * never has to arbitrate between them -- it just prefers the real
+	 * countdown and falls back.
+	 */
+	double burn;
 };
 
 static struct gauge session, weekly;
@@ -146,6 +156,10 @@ struct page_data {
 	bool stale;
 	double s_pct, w_pct;
 	int32_t s_in_s, w_in_s;
+	/* Per page, like everything else here: the rate describes THIS
+	 * provider's session window, and page 1 has its own reset times and so
+	 * never carries one. */
+	double burn;
 	bool have;
 };
 static struct page_data pg[RAIL_PAGES_MAX];
@@ -373,6 +387,20 @@ static void render_countdown(struct gauge *g)
 {
 	char buf[FMT_COUNTDOWN_MAX];
 
+	/*
+	 * The real countdown always wins. The rate is what goes here when the
+	 * source cannot say when the window rolls -- Claude Desktop with no
+	 * Claude Code -- and it is a different KIND of statement, so it is
+	 * never mixed with one: either a time or a rate, never both, never one
+	 * standing in for the other while the other exists.
+	 */
+	if (g->resets_in_s < 0 && g->burn > 0) {
+		fmt_burn(g->burn, buf, sizeof(buf));
+		if (buf[0] != '\0') {
+			lv_label_set_text(g->countdown, buf);
+			return;
+		}
+	}
 	fmt_countdown(g->resets_in_s, buf, sizeof(buf));
 	/*
 	 * A duration, and nothing else. The name used to ride with the number
@@ -792,8 +820,11 @@ static void render_gauges(void)
 					   LV_PART_INDICATOR);
 	}
 	session.resets_in_s = p->s_in_s;
+	session.burn = p->burn;
 	render_countdown(&session);
 
+	/* No rate on the weekly gauge. A seven-day slope measured over half an
+	 * hour is noise, and the daemon does not send one. */
 	weekly.resets_in_s = p->w_in_s;
 	render_countdown(&weekly);
 
@@ -1088,6 +1119,7 @@ static void morph_exec(void *unused, int32_t t)
 		morph.swapped = true;
 		refresh_provider1();
 		session.resets_in_s = pg[cur_page].s_in_s;
+		session.burn = pg[cur_page].burn;
 		weekly.resets_in_s = pg[cur_page].w_in_s;
 		render_countdown(&session);
 		render_countdown(&weekly);
@@ -1420,6 +1452,7 @@ void usage_view_tick_1s(void)
 	}
 	if (pg[cur_page].have) {
 		session.resets_in_s = pg[cur_page].s_in_s;
+		session.burn = pg[cur_page].burn;
 		weekly.resets_in_s = pg[cur_page].w_in_s;
 		render_countdown(&session);
 		render_countdown(&weekly);
@@ -1607,6 +1640,20 @@ void usage_view_set_provider1_stale(bool stale)
 	pg[0].stale = stale;
 	if (built) {
 		refresh_dot();
+	}
+}
+
+void usage_view_set_burn(double pph)
+{
+	/*
+	 * Page 0 only. The rate comes from provider 1's history and describes
+	 * provider 1's window; the second page has real reset times, which is
+	 * why it never needs one.
+	 */
+	pg[0].burn = pph;
+	if (built && cur_page == 0) {
+		session.burn = pph;
+		render_countdown(&session);
 	}
 }
 

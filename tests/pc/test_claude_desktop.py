@@ -7,6 +7,7 @@ visibly silent, a lying one is not.
 import json
 
 from pc.providers import base
+from pc.providers import claude_desktop
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 
 NOW = 1_787_700_000.0
@@ -132,3 +133,83 @@ def test_an_extra_unknown_key_in_u_is_harmless():
     s = {"t": int(NOW * 1000), "org": "o", "u": {"fh": 3, "sd": 4, "xu": 9}}
     f = p.parse_cache_file(_doc([s]), NOW)
     assert (f.session_pct, f.weekly_pct) == (3.0, 4.0)
+
+
+# --- burn rate -------------------------------------------------------------
+#
+# The rate exists for one configuration: Claude Desktop with no Claude Code,
+# where there are percentages and no reset time of any kind. Every test below
+# is about a refusal, because refusing is the common answer and the one that
+# has to be right -- a rate that reports confidently on data it did not
+# observe is the failure this whole feature was designed around.
+
+def _samples(*pairs):
+    """[(seconds_before_now, session_pct), ...] -> the file's sample shape."""
+    return [{"t": int((NOW - back) * 1000), "org": "o",
+             "u": {"fh": pct, "sd": 1}}
+            for back, pct in pairs]
+
+
+def test_a_steady_climb_is_reported():
+    # 10% over 30 minutes is 20%/hour.
+    s = _samples((1800, 10), (1200, 13.3), (600, 16.7), (0, 20))
+    got = claude_desktop.session_burn_pph(s, NOW)
+    assert round(got, 1) == 20.0
+
+
+def test_flat_usage_reports_nothing():
+    """Not 0.0 -- None. Zero would render as a rate of zero, which is a
+    claim; the absence of movement is not one worth putting on a panel."""
+    s = _samples((1800, 40), (1200, 40), (600, 40), (0, 40))
+    assert claude_desktop.session_burn_pph(s, NOW) is None
+
+
+def test_a_gap_refuses():
+    """The app was closed for twenty minutes. A slope drawn across that
+    averages over time nobody observed -- the same mistake as deriving a
+    reset time, which this feature exists instead of."""
+    s = _samples((1800, 10), (1500, 12), (300, 40), (0, 42))
+    assert claude_desktop.session_burn_pph(s, NOW) is None
+
+
+def test_a_reset_inside_the_window_refuses():
+    """The percentage fell because the window rolled, not because usage
+    went backwards -- it cannot. A slope spanning that is meaningless."""
+    s = _samples((1800, 90), (1200, 95), (600, 2), (0, 6))
+    assert claude_desktop.session_burn_pph(s, NOW) is None
+
+
+def test_a_stale_newest_sample_refuses():
+    """Perfectly computable, and it describes a session that ended half an
+    hour ago. Freshness is about the answer, not about the arithmetic."""
+    s = _samples((3600, 10), (3300, 20), (3000, 30))
+    assert claude_desktop.session_burn_pph(s, NOW) is None
+
+
+def test_too_few_samples_refuses():
+    s = _samples((900, 10), (0, 30))
+    assert claude_desktop.session_burn_pph(s, NOW) is None
+
+
+def test_too_short_a_span_refuses():
+    """Three samples five minutes apart: one 5-minute step would swing the
+    answer by the whole range."""
+    s = _samples((300, 10), (150, 11), (0, 12))
+    assert claude_desktop.session_burn_pph(s, NOW) is None
+
+
+def test_junk_never_raises():
+    for bad in (None, "samples", 42, [], [None, {}, {"u": 3}]):
+        assert claude_desktop.session_burn_pph(bad, NOW) is None
+
+
+def test_the_frame_carries_it():
+    doc = {"version": 2, "samples": _samples(
+        (1800, 10), (1200, 13.3), (600, 16.7), (0, 20))}
+    p = claude_desktop.ClaudeDesktopProvider()
+    f = p.parse_cache_file(json.dumps(doc), NOW)
+    assert f is not None
+    assert round(f.session_burn_pph, 1) == 20.0
+    # And the thing that has not changed: this source still has no reset
+    # times, which is the whole reason the rate is here.
+    assert None is (f.session_resets_at)

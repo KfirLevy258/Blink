@@ -118,6 +118,21 @@ int main(int argc, char **argv)
 		usage_view_set_sessions(1, 0);
 		usage_view_set_clock(9, 12);
 		break;
+	case 5:	/* Claude Desktop with no Claude Code.
+		 *
+		 * The configuration this whole feature exists for: percentages
+		 * are live, and NO source on the machine has a reset time, so
+		 * the countdown slot would otherwise read "--" on both dials.
+		 * The session gauge shows the rate instead; the weekly one
+		 * keeps its "--", because a seven-day slope over half an hour
+		 * is noise and the daemon never sends one. */
+		usage_view_set_provider1("claude");
+		usage_view_update(42.0, -1, 17.0, -1);
+		usage_view_set_burn(14.2);
+		usage_view_set_activity(USAGE_ACTIVITY_NONE);
+		usage_view_set_sessions(0, 0);
+		usage_view_set_clock(10, 30);
+		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_set_provider1("");
 		usage_view_update(-1.0, -1, -1.0, -1);

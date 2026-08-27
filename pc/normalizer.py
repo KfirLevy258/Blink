@@ -84,6 +84,22 @@ def merge(frames):
     state, state_src = _pick(
         frames, lambda f: f.state != base.STATE_UNKNOWN, lambda f: f.state)
 
+    # The burn rate, and the rule that keeps it from ever competing with a
+    # real countdown.
+    #
+    # It is carried ONLY when no source could supply a session reset time. A
+    # measured rate is a poor substitute for the server's own answer and a
+    # good substitute for nothing at all, so the moment Claude Code reports a
+    # reset the rate stops being sent -- no precedence contest, no state to
+    # unwind, and one invariant the panel can rely on: a frame never carries
+    # both.
+    if session_resets_at is None:
+        session_burn_pph, _ = _pick(
+            frames, lambda f: f.session_burn_pph is not None,
+            lambda f: f.session_burn_pph)
+    else:
+        session_burn_pph = None
+
     # The primary dial decides two things that have to agree with each other.
     #
     # `src` names where the session percentage came from, because that is the
@@ -105,6 +121,7 @@ def merge(frames):
         weekly_resets_at=weekly_resets_at,
         state=state or base.STATE_UNKNOWN,
         stale=primary.stale,
+        session_burn_pph=session_burn_pph,
         # The counts travel with the state they describe. Taking them
         # field-by-field like everything else would let a session count from
         # one source sit beside a state from another, which is a panel saying

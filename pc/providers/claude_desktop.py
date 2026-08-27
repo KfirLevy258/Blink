@@ -119,6 +119,101 @@ def _newest_sample(samples):
     return best, best_t
 
 
+# --- burn rate -----------------------------------------------------------
+#
+# How fast the five-hour window is filling, for the one configuration that has
+# percentages and no reset time: Claude Desktop with no Claude Code.
+#
+# This is NOT a reset time in disguise. Deriving the reset from this file was
+# investigated and rejected on 2026-08-28, with numbers taken from a real
+# month of samples on the author's machine:
+#
+#   - No reset timestamp is persisted anywhere on disk. Every JSON file, the
+#     LevelDB stores, Session Storage, IndexedDB and the preferences plist
+#     were searched. The only copies that exist are in Claude Code's status
+#     line payload and in evicting HTTP cache entries.
+#   - The five-hour window is ROLLING -- observed gaps between resets ran
+#     4.95, 5.5, 5.9, 16.0, 17.8 and 32.2 hours -- so a past reset does not
+#     predict the next one.
+#   - It could be computed from the sample series (a window measures 5.00 h
+#     from the first non-zero sample after a reset, and the server quantises
+#     reset times to a 10-minute grid). But the app records only while it is
+#     open: 18% of the month had samples at all, the longest gap was 409
+#     hours, and only 13% of windows had an observable start. A method that
+#     works one time in eight, whose failure looks exactly like its success,
+#     is not a method.
+#
+# A rate needs none of that. It needs only recent samples, which exist exactly
+# when the app is open -- which is exactly when someone is looking at the
+# panel. Everything below is arithmetic on readings we actually saw.
+
+# How far back to measure. Long enough to average out the 5-minute sampling
+# granularity, short enough that the answer describes now rather than the
+# last hour of a session that has since changed pace.
+BURN_WINDOW_S = 1800.0
+
+# The sampling cadence is 300 s (median; p90 330 s, measured over 1671
+# intervals). A gap beyond this means the app was CLOSED, and a rate averaged
+# across time we did not observe is the same mistake as deriving the reset.
+BURN_MAX_GAP_S = 600.0
+
+# Below this the two endpoints are too close together for the slope to mean
+# anything: a single 5-minute step would swing it by the whole window.
+BURN_MIN_SPAN_S = 600.0
+
+# Fewer points than this is a line drawn through noise.
+BURN_MIN_SAMPLES = 3
+
+
+def session_burn_pph(samples, now_epoch, window_s=BURN_WINDOW_S):
+    """Percent per hour the session window is filling, or None.
+
+    None is the common answer and the safe one. Every refusal below is a case
+    where a number could be produced and would not describe reality.
+    """
+    if not isinstance(samples, list):
+        return None
+
+    pts = []
+    for s in samples:
+        fields, at = _sample_to_frame(s)
+        if fields is None or fields["session_pct"] < 0:
+            continue
+        pts.append((at, fields["session_pct"]))
+    if len(pts) < BURN_MIN_SAMPLES:
+        return None
+    pts.sort()
+
+    # The newest reading has to be current. An app closed twenty minutes ago
+    # leaves a perfectly computable rate that describes a session which has
+    # already ended.
+    if now_epoch - pts[-1][0] > BURN_MAX_GAP_S:
+        return None
+
+    tail = [p for p in pts if p[0] >= pts[-1][0] - window_s]
+    if len(tail) < BURN_MIN_SAMPLES:
+        return None
+
+    span = tail[-1][0] - tail[0][0]
+    if span < BURN_MIN_SPAN_S:
+        return None
+
+    for (t0, p0), (t1, p1) in zip(tail, tail[1:]):
+        # A hole: the app was shut. Refuse rather than average across it.
+        if t1 - t0 > BURN_MAX_GAP_S:
+            return None
+        # A reset inside the window. The percentage fell because the window
+        # rolled, not because usage went backwards -- which it cannot do --
+        # so a slope spanning it is meaningless in both directions.
+        if p1 < p0:
+            return None
+
+    rate = (tail[-1][1] - tail[0][1]) / (span / 3600.0)
+    # Not negative by construction, given the check above; the guard is for
+    # the degenerate equal-endpoints case rather than for arithmetic.
+    return rate if rate > 0 else None
+
+
 def _parse_v2(doc):
     """The layout observed in the wild: {"version": 2, "samples": [...]}."""
     samples = doc.get("samples")
@@ -183,6 +278,15 @@ class ClaudeDesktopProvider(base.ProviderParser):
 
         version = doc.get("version") if isinstance(doc, dict) else None
         parser = _PARSERS.get(version, _parse_by_shape)
+        # The rate needs the whole series, not the newest point. Read off the
+        # same document the parser is about to reduce, and never let a failure
+        # here cost the reading itself -- the percentages are the product and
+        # the rate is a bonus for one configuration.
+        raw = doc.get("samples") if isinstance(doc, dict) else doc
+        try:
+            burn = session_burn_pph(raw, now_epoch)
+        except Exception:
+            burn = None
         try:
             fields, sample_at = parser(doc)
         except Exception:
@@ -205,6 +309,7 @@ class ClaudeDesktopProvider(base.ProviderParser):
             # docstring. None, not a guess.
             session_resets_at=None, weekly_resets_at=None,
             stale=stale,
+            session_burn_pph=burn,
         )
 
     def poll(self, now_epoch):
