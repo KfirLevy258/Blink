@@ -14,6 +14,7 @@ from serial.tools import list_ports
 
 from pc import ota as ota_mod
 from pc import ingest, install_statusline, protocol, statusline_source, update
+from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
 POLL_INTERVAL_S = 60
@@ -57,6 +58,112 @@ def autodetect_port():
         if "usbmodem" in p.device or (p.manufacturer or "").lower().startswith("espressif"):
             return p.device
     return None
+
+
+# How long to wait for a device to identify itself before resetting it.
+#
+# The board answers `welcome` immediately (with ota_query, and usually pref),
+# so this only has to cover the round trip and one poll interval.
+PROBE_S = 1.5
+
+
+def hold_single_instance(home, on_wait=None, poll_s=5.0):
+    """Block until this process is the only daemon, then keep the lock.
+
+    Two daemons on one board is not a hypothetical. On macOS a /dev/cu.* node
+    is NOT exclusive -- two processes open it happily, and both then write
+    usage messages and answer the board's pings on the same wire. Observed
+    doing exactly that on 2026-08-28: a second daemon connected to a board the
+    first was already driving, with no error from either. The board sees
+    interleaved traffic and the user sees a panel that flickers between two
+    sources with nothing in either log to explain it.
+
+    Linux and Windows do make the port exclusive, so there the second process
+    fails to open it and the message in the reconnect loop covers the case.
+    This is for the platform where the OS will not say no.
+
+    Waiting rather than exiting, for the same reason wait_for_port waits: the
+    service is registered with KeepAlive/Restart=always, so exiting turns a
+    duplicate launch into a process start and a log line every ten seconds for
+    as long as both exist.
+
+    Returns the open file object, which must stay referenced -- closing it
+    releases the lock. POSIX only; on Windows the exclusive port is the lock.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return None                      # Windows: the port itself is exclusive
+
+    path = os.path.join(home, "bridge.lock")
+    try:
+        os.makedirs(home, exist_ok=True)
+        fh = open(path, "w")
+    except OSError:
+        # An unwritable home is not a reason to refuse to run; it only means
+        # this protection is unavailable.
+        return None
+
+    said = False
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if said:
+                print("[bridge] the other daemon exited; taking over",
+                      file=sys.stderr)
+            return fh
+        except OSError:
+            if not said:
+                print("[bridge] another Clauge daemon is already running and"
+                      " has the board; waiting for it to exit. Two of them on"
+                      " one cable would interleave on the wire.",
+                      file=sys.stderr)
+                said = True
+            if on_wait:
+                on_wait()
+            time.sleep(poll_s)
+
+
+def probe_is_our_board(ser):
+    """Ask the thing on this port whether it is a Clauge board, without a reset.
+
+    Why this exists: the reset below is not free, and it is not aimed at a
+    board we have identified -- it is aimed at whatever matched a VID:PID.
+    1a86:7523 is the CH340, which is in Arduino clones, USB-serial adapters and
+    a great deal of other hobbyist hardware. On a desk with any of it plugged
+    in, the daemon could open a stranger's device and pulse its reset line.
+
+    A `welcome` is the safe question. It is 60 bytes of JSON that a device
+    which is not ours will ignore (it is text, and it toggles no control line),
+    and one that IS ours answers within milliseconds. Answer -> skip the reset
+    entirely; no answer -> fall through to the reset, which a mute or wedged
+    board genuinely needs.
+
+    A pleasant side effect: our own board stops being rebooted every time the
+    daemon restarts, which it was, on every login and every service restart.
+    """
+    try:
+        ser.reset_input_buffer()
+        ser.write(protocol.encode(protocol.welcome("clauge-bridge",
+                                                   RELEASE_VERSION)))
+        deadline = time.time() + PROBE_S
+        reader = protocol.LineReader()
+        while time.time() < deadline:
+            chunk = ser.read(256)
+            if not chunk:
+                continue
+            for msg in reader.feed(chunk):
+                # Any well-formed message of ours will do. The board sends
+                # ota_query on welcome and pings on its own schedule; which one
+                # arrives first is timing, and identity is the only question
+                # being asked here.
+                if isinstance(msg, dict) and msg.get("t"):
+                    return True
+    except Exception:
+        # A probe that fails is not evidence of anything; fall through to the
+        # reset and let the usual path decide.
+        return False
+    return False
 
 
 def wait_for_port(explicit=None, poll_s=3.0, on_wait=None):
@@ -186,6 +293,12 @@ def main(argv=None):
     # marker means the user uninstalled, and that is never overridden.
     watchdog = install_statusline.DriftWatchdog(settings_path(), shim_path())
 
+    # Before the port is touched. The lock lives for the life of the process --
+    # the file object is bound here so it is not garbage collected, which would
+    # release it.
+    _instance_lock = hold_single_instance(   # noqa: F841 -- held, not used
+        clauge_home, on_wait=lambda: watchdog.tick())
+
     # Record the pid so uninstall can stop US specifically. Ending the login
     # service is not the same as ending this program, and killing by image name
     # is how the uninstaller once killed itself; a pid is unambiguous.
@@ -249,19 +362,45 @@ def main(argv=None):
             ser.dtr = False
             ser.rts = False
             ser.open()
-            ser.dtr = False          # GPIO0 HIGH -> boot the app, not the ROM loader
-            ser.rts = True           # EN LOW  -> hold in reset
-            time.sleep(0.15)
-            ser.rts = False          # EN HIGH -> release; board boots
-            time.sleep(0.3)
-            ser.reset_input_buffer()
+            # Ask before pulling the reset line. See probe_is_our_board: the
+            # VID:PID that got us here belongs to a chip used by a great deal
+            # of hardware that is not ours, and a reset is not a question, it
+            # is an action taken on someone's device.
+            already_running = probe_is_our_board(ser)
+            if already_running:
+                print(f"[bridge] {port} answered; not resetting it",
+                      file=sys.stderr)
+            else:
+                ser.dtr = False      # GPIO0 HIGH -> boot the app, not the ROM loader
+                ser.rts = True       # EN LOW  -> hold in reset
+                time.sleep(0.15)
+                ser.rts = False      # EN HIGH -> release; board boots
+                time.sleep(0.3)
+                ser.reset_input_buffer()
         except Exception as e:
             # Deduplicated: a board left unplugged, or a port the user lacks
             # permission to open, would otherwise write this same line to
             # bridge.log every three seconds for as long as the service runs.
-            err = f"open {port} failed: {e}"
+            # Name the two failures a person can actually act on. Everything
+            # else stays a bare message, but "busy" and "permission" were both
+            # being reported as an unexplained open failure and then repeated
+            # forever, which is how "the panel does nothing" became a support
+            # question instead of a one-line fix.
+            text = str(e).lower()
+            if "busy" in text or "resource temporarily unavailable" in text:
+                err = (f"{port} is busy -- something else has the board open"
+                       " (a serial monitor, esptool, the Arduino IDE, or a"
+                       " second copy of this daemon). Close it and this"
+                       " reconnects on its own")
+            elif "permission" in text or "access is denied" in text:
+                err = (f"cannot open {port}: permission denied."
+                       " On Linux the port is usually group `dialout` --"
+                       " `sudo usermod -aG dialout $USER`, then log out and"
+                       " back in")
+            else:
+                err = f"open {port} failed: {e}"
             if err != last_err:
-                print(f"[bridge] {err}; waiting for the board", file=sys.stderr)
+                print(f"[bridge] {err}", file=sys.stderr)
                 last_err = err
             time.sleep(3)
             port = wait_for_port(args.port, on_wait=_upkeep)
@@ -345,6 +484,10 @@ def main(argv=None):
                         pending=update.PendingFirmware(
                             os.path.join(clauge_home, "pending_fw.json")))
         report_failure = None   # handed to the Bridge above; never repeated
+        # No reset means no boot `hello`, so nothing would trigger the
+        # greeting -- see Bridge.greet.
+        if already_running:
+            bridge.greet()
         next_poll = time.monotonic()
         # The rollback copy is kept until a board has actually talked to this
         # build. Running at all is weak evidence; holding a conversation with

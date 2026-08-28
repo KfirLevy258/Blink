@@ -69,6 +69,25 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
 
+    def greet(self):
+        """Introduce ourselves and push what we have, immediately.
+
+        Normally this answers the board's boot `hello`. It is also called
+        directly when the daemon found a board that was ALREADY running and
+        chose not to reset it (claude_usage_bridge.probe_is_our_board): there
+        is no hello in that case, and without this the first usage message
+        waits for the 60 s poll -- which is itself gated on board_alive(),
+        false until the first ping, so the real wait is a minute of blank
+        panel after every service restart. Measured doing exactly that before
+        this existed.
+        """
+        self._write(protocol.welcome("clauge-bridge", self._app_ver))
+        if self._report_failure:
+            self._write(protocol.ota_error(self._report_failure))
+            self._report_failure = None
+        self.poll_once()                 # push current data immediately
+        self._resume_pending()
+
     # --- inbound ---
     def on_message(self, msg: dict):
         t = msg.get("t")
@@ -84,12 +103,7 @@ class Bridge:
             return
         if t == "hello":
             self._note_board(msg)
-            self._write(protocol.welcome("clauge-bridge", self._app_ver))
-            if self._report_failure:
-                self._write(protocol.ota_error(self._report_failure))
-                self._report_failure = None
-            self.poll_once()             # push current data immediately
-            self._resume_pending()
+            self.greet()
         elif t == "ping":
             self._last_ping = self._now()
             # Free: never fetch here. The usage endpoint is aggressively
