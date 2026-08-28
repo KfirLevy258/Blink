@@ -1,0 +1,9 @@
+# The shims are written to the customer's machine byte-for-byte and run by
+# /bin/sh (Git Bash on Windows), which fails on CRLF. Check everything out LF
+# everywhere: Windows runners default to autocrlf, which turned every
+# text file into CRLF at checkout and made the installed shim -- written LF
+# on purpose -- differ from its own source.
+* text=auto eol=lf
+*.png binary
+*.bin binary
+*.pem binary
