@@ -20,9 +20,29 @@
 #   west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
 #     -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0
 #
-# Usage: tools/flash_encrypted.sh [port]   (port defaults to the first
-# /dev/cu.usbserial*; opening it resets the board -- stop any logger first)
+# Usage: tools/flash_encrypted.sh [--logo FILE.bin | --keep-logo] [port]
+#   (port defaults to the first /dev/cu.usbserial*; opening it resets the
+#   board -- stop any logger first)
+#
+# The company logo partition (firmware/src/logo_parse.h): --logo writes a
+# .bin built by tools/encode_logo.py, encrypted like the other two images;
+# with neither flag the partition is ERASED so the unit is an individual one,
+# same as tools/burn.sh. --keep-logo leaves it alone -- for a dev board that
+# is re-flashed many times a day and should keep the logo it has.
 set -euo pipefail
+
+LOGO=""
+KEEP_LOGO=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--logo) LOGO="$2"; shift 2 ;;
+	--keep-logo) KEEP_LOGO=1; shift ;;
+	*) break ;;
+	esac
+done
+# Must match logo_partition in firmware/boards/esp32_devkitc_esp32_procpu.overlay.
+LOGO_OFF=0x330000
+LOGO_SIZE=0x80000
 
 PORT="${1:-$(ls /dev/cu.usbserial* 2>/dev/null | head -1 || true)}"
 KEY="${BLINK_FLASH_KEY:-$HOME/.blink/flash_key.bin}"
@@ -36,6 +56,7 @@ ETOOLS="/Library/Frameworks/Python.framework/Versions/3.10/bin"
 [ -f "$KEY" ] || { echo "FATAL: flash key missing at $KEY -- no key, no flashing (see firmware/README security section)"; exit 1; }
 [ -n "${PORT}" ] || { echo "FATAL: no /dev/cu.usbserial* port found"; exit 1; }
 [ -f "$BUILD/mcuboot/zephyr/zephyr.bin" ] || { echo "FATAL: no sysbuild output in $BUILD -- build first (see header)"; exit 1; }
+[ -z "$LOGO" ] || [ -f "$LOGO" ] || { echo "FATAL: --logo $LOGO: no such file"; exit 1; }
 
 # Refuse a chip that cannot boot what we are about to write. Detection is
 # shared with tools/dev.sh, which needs the mirror check.
@@ -82,7 +103,21 @@ enc 0x1000  "$BUILD/mcuboot/zephyr/zephyr.bin"         "$TMP/mcuboot.enc"
 enc 0x20000 "$BUILD/firmware/zephyr/zephyr.signed.bin" "$TMP/app.enc"
 
 # 115200: 921600 fails on this CH340.
-"$ETOOLS/esptool.py" --port "$PORT" --baud 115200 write_flash \
-	0x1000 "$TMP/mcuboot.enc" 0x20000 "$TMP/app.enc"
-
-echo "Flashed encrypted. NVS at 0x3b0000 untouched (settings survive)."
+if [ -n "$LOGO" ]; then
+	enc "$LOGO_OFF" "$LOGO" "$TMP/logo.enc"
+	"$ETOOLS/esptool.py" --port "$PORT" --baud 115200 write_flash \
+		0x1000 "$TMP/mcuboot.enc" 0x20000 "$TMP/app.enc" \
+		"$LOGO_OFF" "$TMP/logo.enc"
+	echo "Flashed encrypted, with the company logo."
+elif [ "$KEEP_LOGO" = 1 ]; then
+	"$ETOOLS/esptool.py" --port "$PORT" --baud 115200 write_flash \
+		0x1000 "$TMP/mcuboot.enc" 0x20000 "$TMP/app.enc"
+	echo "Flashed encrypted; logo partition left as it was."
+else
+	"$ETOOLS/esptool.py" --port "$PORT" --baud 115200 erase_region \
+		"$LOGO_OFF" "$LOGO_SIZE"
+	"$ETOOLS/esptool.py" --port "$PORT" --baud 115200 write_flash \
+		0x1000 "$TMP/mcuboot.enc" 0x20000 "$TMP/app.enc"
+	echo "Flashed encrypted; logo partition erased (individual unit)."
+fi
+echo "NVS at 0x3b0000 untouched (settings survive)."

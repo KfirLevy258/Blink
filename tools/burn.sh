@@ -3,6 +3,14 @@
 #
 #   tools/burn-claude.sh            tools/burn-codex.sh
 #   tools/burn.sh --edition codex [--port /dev/cu.usbserial-XXXX]
+#   tools/burn.sh --edition claude --logo acme.png      (a company unit)
+#
+# --logo makes a COMPANY unit: the picture (or clip, or a .bin already built
+# by tools/encode_logo.py) is written to the logo partition in the same
+# esptool call as the firmware, and the boot check insists the board saw it.
+# Without --logo the logo partition is ERASED, so a re-burned board is an
+# individual unit again -- the default is individual, and it has to stay the
+# default on a board that was something else last week.
 #
 # This is the factory step. It is written to FAIL LOUDLY rather than half
 # succeed, because the two things it does are the two that cannot be undone in
@@ -21,13 +29,18 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 EDITION=""
 PORT="${BLINK_PORT:-}"
 SKIP_BUILD=0
+LOGO=""
+# Must match logo_partition in firmware/boards/esp32_devkitc_esp32_procpu.overlay.
+LOGO_OFF=0x330000
+LOGO_SIZE=0x80000
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--edition) EDITION="$2"; shift 2 ;;
 	--port)    PORT="$2"; shift 2 ;;
 	--no-build) SKIP_BUILD=1; shift ;;
-	*) echo "usage: $0 --edition claude|codex [--port DEV] [--no-build]" >&2
+	--logo)    LOGO="$2"; shift 2 ;;
+	*) echo "usage: $0 --edition claude|codex [--port DEV] [--no-build] [--logo FILE]" >&2
 	   exit 2 ;;
 	esac
 done
@@ -36,6 +49,7 @@ case "$EDITION" in
 claude|codex) ;;
 *) echo "FATAL: --edition must be claude or codex" >&2; exit 2 ;;
 esac
+[ -z "$LOGO" ] || [ -f "$LOGO" ] || [ -d "$LOGO" ] || { echo "FATAL: --logo $LOGO: no such file" >&2; exit 2; }
 
 say()  { printf '\n== %s\n' "$*"; }
 die()  { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
@@ -132,6 +146,35 @@ FW_VERSION=$(sed -n 's/^#define BLINK_FW_VERSION "\(.*\)"$/\1/p' \
 	"$ROOT/firmware/src/version.h")
 [ -n "$FW_VERSION" ] || die "cannot read BLINK_FW_VERSION from firmware/src/version.h"
 
+# ------------------------------------------------------------- 2b. logo
+# Built BEFORE anything is written to the board: a bad picture must fail the
+# burn while the unit is still whatever it was, not after the app is on it.
+LOGO_BIN=""
+if [ -n "$LOGO" ]; then
+	say "Encoding the company logo"
+	case "$LOGO" in
+	*.bin) LOGO_BIN="$LOGO" ;;
+	*)
+		LOGO_BIN="$BUILD/logo.bin"
+		mkdir -p "$BUILD"
+		if [ -d "$LOGO" ]; then
+			src="--frames"
+		else
+			case "$LOGO" in
+			*.mp4|*.mov|*.webm|*.mkv|*.gif) src="--video" ;;
+			*) src="--image" ;;
+			esac
+		fi
+		"$PY" "$ROOT/tools/encode_logo.py" "$src" "$LOGO" --out "$LOGO_BIN" \
+			|| die "could not encode $LOGO (see tools/encode_logo.py --help)"
+		;;
+	esac
+	"$PY" "$ROOT/tools/encode_logo.py" --info "$LOGO_BIN" \
+		|| die "$LOGO_BIN is not a logo image this firmware can read"
+	[ "$(wc -c <"$LOGO_BIN")" -le $((LOGO_SIZE)) ] \
+		|| die "$LOGO_BIN is larger than the logo partition ($LOGO_SIZE bytes)"
+fi
+
 # ------------------------------------------------------------- 3. flash
 say "Flashing"
 # BOTH images, explicitly. `west flash` writes only the app at 0x20000 and
@@ -146,14 +189,36 @@ say "Flashing"
 # goes to a file, the status is esptool's, and BOTH images must have been
 # hash-verified.
 FLASH_LOG="$BUILD/flash.log"
-if ! esptool.py --port "$PORT" --baud 115200 write_flash \
-	0x1000 "$MCUBOOT" 0x20000 "$APP" >"$FLASH_LOG" 2>&1; then
-	tail -5 "$FLASH_LOG" >&2
-	die "flash failed (esptool exited non-zero; full log at $FLASH_LOG)"
+if [ -n "$LOGO_BIN" ]; then
+	# The logo rides in the same call, so a unit is never left with new
+	# firmware and last week's logo (or none) because a second call failed.
+	WANT_VERIFIED=3
+	if ! esptool.py --port "$PORT" --baud 115200 write_flash \
+		0x1000 "$MCUBOOT" 0x20000 "$APP" "$LOGO_OFF" "$LOGO_BIN" \
+		>"$FLASH_LOG" 2>&1; then
+		tail -5 "$FLASH_LOG" >&2
+		die "flash failed (esptool exited non-zero; full log at $FLASH_LOG)"
+	fi
+else
+	# No logo means NO logo: erase the partition rather than leave whatever
+	# a previous burn put there. Erased first, so a failure here stops the
+	# burn before the firmware is touched.
+	WANT_VERIFIED=2
+	if ! esptool.py --port "$PORT" --baud 115200 erase_region \
+		"$LOGO_OFF" "$LOGO_SIZE" >"$FLASH_LOG" 2>&1; then
+		tail -5 "$FLASH_LOG" >&2
+		die "could not erase the logo partition (log at $FLASH_LOG)"
+	fi
+	echo "   logo partition erased (individual unit)"
+	if ! esptool.py --port "$PORT" --baud 115200 write_flash \
+		0x1000 "$MCUBOOT" 0x20000 "$APP" >>"$FLASH_LOG" 2>&1; then
+		tail -5 "$FLASH_LOG" >&2
+		die "flash failed (esptool exited non-zero; full log at $FLASH_LOG)"
+	fi
 fi
 grep -E "Wrote|Hash of data" "$FLASH_LOG" || true
-[ "$(grep -c "Hash of data verified" "$FLASH_LOG")" -eq 2 ] ||
-	die "expected both images to verify; see $FLASH_LOG"
+[ "$(grep -c "Hash of data verified" "$FLASH_LOG")" -eq "$WANT_VERIFIED" ] ||
+	die "expected $WANT_VERIFIED images to verify; see $FLASH_LOG"
 
 # ------------------------------------------------- 4. boot, stamp, confirm
 say "Boot-verifying and stamping as $EDITION"
@@ -233,17 +298,21 @@ EOF
 
 # --------------------------------------------- 5. it has to survive a reboot
 say "Confirming the stamp survives a power cycle"
-"$PY" - "$PORT" "$EDITION" <<'EOF' || die "the edition did not survive a reboot"
+"$PY" - "$PORT" "$EDITION" "$LOGO_BIN" <<'EOF' || die "the edition or the logo did not survive a reboot"
 import sys, time
 import serial
-port, edition = sys.argv[1], sys.argv[2]
+port, edition, logo = sys.argv[1], sys.argv[2], sys.argv[3]
 s = serial.Serial(port, 115200, timeout=0.2)
 s.dtr = False; s.rts = True; time.sleep(0.15); s.rts = False
-end, out = time.time() + 15, ""
-while time.time() < end and "[boot] edition" not in out:
+# The logo line is printed AFTER the boot clip has played (it is the next
+# thing the splash does), so this waits through the clip, not just to hello.
+end, out = time.time() + 30, ""
+while time.time() < end and "[boot] logo:" not in out:
     out += s.read(4096).decode("utf-8", "replace")
 s.close()
-line = next((l for l in out.splitlines() if "[boot] edition" in l), "")
+def find(marker):
+    return next((l for l in out.splitlines() if marker in l), "")
+line = find("[boot] edition")
 if not line:
     print("   the board did not report an edition on boot", file=sys.stderr)
     sys.exit(1)
@@ -252,9 +321,25 @@ if edition not in line:
     print("   WRONG EDITION after reboot -- expected %s" % edition,
           file=sys.stderr)
     sys.exit(1)
+line = find("[boot] logo:")
+if not line:
+    print("   the board did not report a logo state on boot (firmware older"
+          " than the logo partition?)", file=sys.stderr)
+    sys.exit(1)
+print("   " + line.strip())
+if logo and "company" not in line:
+    print("   the logo was flashed but the board does not see it", file=sys.stderr)
+    sys.exit(1)
+if not logo and "none" not in line:
+    print("   no logo was flashed but the board still shows one", file=sys.stderr)
+    sys.exit(1)
 EOF
 
 printf '\n================================\n'
-printf 'PASS -- this unit is a %s board\n' "$EDITION"
+if [ -n "$LOGO_BIN" ]; then
+	printf 'PASS -- this unit is a %s board with a company logo\n' "$EDITION"
+else
+	printf 'PASS -- this unit is a %s board (individual)\n' "$EDITION"
+fi
 printf '================================\n'
 printf 'Put it in a %s enclosure.\n' "$EDITION"

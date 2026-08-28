@@ -271,7 +271,16 @@
 	partitions {
 		scratch_partition: partition@2c0000 {
 			label = "image-scratch";
-			reg = <0x2C0000 0xF0000>;
+			reg = <0x2C0000 0x70000>;
+		};
+		/* The company boot logo (logo_parse.h). Written only by the
+		 * factory (tools/burn.sh --logo), read memory-mapped at boot.
+		 * Carved from the top of the scratch hole, which swap-move
+		 * MCUboot never touches; slots and storage do not move, so
+		 * an OTA cannot reach it and it cannot reach an OTA. */
+		logo_partition: partition@330000 {
+			label = "logo";
+			reg = <0x330000 0x80000>;
 		};
 	};
 };

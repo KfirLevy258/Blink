@@ -90,6 +90,15 @@ time. To watch the console without disturbing behavior, use
 Wi-Fi / token / setup password for a clean first-run test, erase the NVS region:
 `esptool.py --port <port> erase_region 0x3b0000 0x30000`.
 
+Flash map (4 MB): MCUboot `0x1000`, slot 0 `0x20000`, slot 1 `0x170000`,
+scratch `0x2C0000` (unused in swap-move mode), **company logo `0x330000`
+(512 KB, see `src/logo_parse.h`)**, settings `0x3B0000`. The logo partition is
+written only by `tools/burn.sh --logo` / `tools/flash_encrypted.sh --logo` and
+read memory-mapped at boot; erase it (`erase_region 0x330000 0x80000`) to turn
+a bench board back into an individual unit. `tools/flash_encrypted.sh` erases
+it by default -- pass `--keep-logo` when re-flashing a dev board that should
+keep its logo.
+
 ## Keys
 
 Two secrets live **outside the repo**, in `~/.blink/`:

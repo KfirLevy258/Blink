@@ -19,15 +19,24 @@
  * those made every reboot feel like a fresh power-on, so intentional reboots
  * mark themselves in noinit RAM and the next boot renders only the clip's
  * final frame, with just enough of a window for the daemon handshake.
+ *
+ * A company unit (see logo_parse.h) follows the clip with its logo: the
+ * screen cuts to the logo's background, the logo clip streams the same way,
+ * and the last frame holds for the header's hold time. Same player, same
+ * strip buffer, same protocol pump between frames -- a company boot is a
+ * longer boot, not a different one. Intentional reboots skip it with the
+ * clip, for the same reason.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/sys/printk.h>
 #include <lvgl.h>
 
 #include "ui_boot.h"
 #include "proto.h"
 #include "bootclip.h"
 #include "bootanim_dec.h"
+#include "logo.h"
 
 static const struct device *const boot_disp =
 	DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
@@ -130,6 +139,30 @@ static bool bootanim_play(const uint8_t *blob, size_t len)
 	return true;
 }
 
+/* The company logo, on units that have one. Runs with strip_buf held. */
+static void logo_show(void)
+{
+	const struct logo_info *lg = logo_active();
+
+	if (lg == NULL) {
+		return;
+	}
+
+	/* The second and last LVGL paint of this screen: the logo's stage.
+	 * The style change invalidates the screen, so this repaint is a full
+	 * one, and nothing invalidates it again until teardown. */
+	lv_obj_set_style_bg_color(scr, lv_color_hex(lg->bg_rgb), 0);
+	lv_refr_now(NULL);
+
+	if (!bootanim_play(lg->blob, lg->blob_len)) {
+		/* The CRC passed, so this is a bug in the tool or the decoder
+		 * rather than a bad flash; say so and move on. */
+		printk("[boot] logo: frame failed to decode\n");
+		return;
+	}
+	pump(lg->hold_ms);
+}
+
 void ui_boot_splash(void)
 {
 	const struct bootclip *clip = bootclip_active();
@@ -166,6 +199,9 @@ void ui_boot_splash(void)
 	if (strip_buf) {
 		bool ok = bootanim_play(clip->blob, clip->blob_len);
 
+		if (ok) {
+			logo_show();
+		}
 		lv_free(strip_buf);
 		strip_buf = NULL;
 		if (ok) {
