@@ -28,19 +28,19 @@ Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 Clauge is a small desk display that shows how much of your Claude Code usage you've spent - the same numbers as the `/usage` command, but always in view. It reads your **5-hour session** limit and your **7-day weekly** limit and draws each as a dial, green while you have room, amber as you get close, red when it's nearly gone. Glance over, know where you stand, keep working.
 
-Under the dials it also shows how full your **context window** is, which model you're on, and a small pip telling you whether Claude Code is working, waiting on you, or has gone quiet mid-task. With more than one session open it shows how many, and how many subagents are running across them.
+Beside the dials is a small pip telling you whether Claude Code is working, waiting on you, or has gone quiet mid-task -- across every session you have open, worst one wins. Under them, a countdown to each window's reset.
 
 It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the setup once, and it sits on your desk and keeps itself up to date.
 
 ### Where the numbers come from
 
-Clauge never sees a credential, and never reads your conversations. It reads figures other programs have already worked out.
+Clauge never sees a credential and never sends anything anywhere. It reads figures other programs have already worked out, from files they already write, and keeps only the figures: from Codex's session log it takes the one rate-limit line and nothing of the conversation; from Claude Code's status line it keeps the last payload (which also names your working directory and session), readable by you alone.
 
 ### What it supports, and how well
 
 | You use | What the panel shows | |
 |---|---|---|
-| **Claude Code in a terminal** | Everything: both limits, both countdowns, the activity light, session and subagent counts | **Full** |
+| **Claude Code in a terminal** | Everything: both limits, both countdowns, the activity light | **Full** |
 | **Claude Code in the VS Code / JetBrains extension** | The same. The extension runs the same CLI and reads the same `~/.claude/settings.json`, so the status line and hooks work identically | **Full** |
 | **Claude Desktop, without Claude Code** | Both percentages and how fast the five-hour window is filling. **No countdowns, no activity light** | **Partial** |
 | **Codex CLI** | Both limits and both countdowns, on its own page | **Full** |
@@ -50,12 +50,12 @@ Clauge never sees a credential, and never reads your conversations. It reads fig
 
 **Why claude.ai is not supported.** A browser extension was built to read usage from response headers and measured against the real site: 178 responses, none carrying a rate-limit header of any kind. There is nothing to read. It was removed rather than shipped as a feature that does nothing. `docs/next-steps.md` §A has the measurement.
 
-### Where the numbers come from
+### The sources
 
 | Source | Gives | Needs |
 |---|---|---|
 | Claude Code's status line | both limits, reset times | nothing - set up by `clauge install` |
-| Claude Code's hooks | per-session busy / waiting / stuck / rate-limited, and live subagent count | nothing - set up by `clauge install` |
+| Claude Code's hooks | per-session busy / waiting / stuck / rate-limited | nothing - set up by `clauge install` |
 | Claude Desktop's usage cache | both limits, and the burn rate derived from its history | nothing - read if the app is installed |
 | Codex CLI's own session log | both limits and reset times, for Codex | nothing - read if Codex is installed |
 
@@ -157,11 +157,12 @@ Clauge has to change.
 
 | | |
 |---|---|
-| Changes | `statusLine.command` in `~/.claude/settings.json` |
-| Creates | `~/.clauge/` - a copy of the program itself and the small status line script, so the file you downloaded can be deleted |
+| Changes | two keys in `~/.claude/settings.json`: `statusLine.command`, and one entry under `hooks` for each of ten Claude Code lifecycle events (`SessionStart`, `PreToolUse`, `Stop`, ... - the activity light is derived from them). Your own hooks are left in place |
+| Creates | `~/.clauge/` (readable by you alone) - a copy of the program, the status line script, the hook script, and a `state/` directory holding one small file per open session (event name, time, and the session and agent ids Claude Code generates - nothing else) |
 | Creates | a login item, so the bridge starts with your session (a LaunchAgent on macOS, a user systemd unit on Linux, a Scheduled Task on Windows) |
 | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
-| Reads or stores | nothing else - no credential, no token, no account data |
+| Keeps | the last status line payload Claude Code sent, in `~/.clauge/statusline.json`. Alongside the two usage figures it carries the session id, working directory and transcript path; only the figures are read, and nothing in it leaves the machine |
+| Reads | Claude Desktop's usage cache and the tail of Codex's session log, when present; from each only the usage figures are kept. No credential, no token |
 
 **It does this without asking**, so that plugging the board in is the whole
 setup. It prints all of the above before it changes anything, and every part
@@ -194,7 +195,11 @@ The edition is **write-once**. Stamp every unit, not just Codex ones — `0`
 means both "Claude" and "never stamped", so an unstamped Claude board can be
 turned into a Codex one by anyone with a cable. A re-burn of the same edition
 passes and says so; a burn of the *other* edition fails and tells you what the
-unit already is.
+unit already is. A unit programmed before the latch existed arrives **latched
+as Claude** the first time it boots this firmware -- every unit built before
+it was a Claude unit, and the alternative was delivering all of them
+re-stampable by their owners. A bench board meant to become Codex needs its
+config partition erased first (`esptool.py erase_region 0x3b0000 0x30000`).
 
 Pass `--port` to name a board when more than one is attached, and `--no-build`
 to reuse the last build.
@@ -257,7 +262,7 @@ Automatic app updates are off unless a release turns them on. To keep them off w
 
 - **Only you can update your device.** Firmware must be signed with your private key (kept off this repo, at `~/.clauge/…`); the bootloader rejects anything else. App updates must be signed with a second key of yours, or the app will not install them. The public repo only lets people read and download the firmware, which holds no secrets.
 - **The device holds no credential.** It never signs in and never talks to Anthropic. The figures come from the Claude Code on your own machine, which has already worked them out, and reach the board over the cable. There is no token on the device to leak, and nothing to revoke if you sell or lend it.
-- **The setup touches one setting.** `statusLine.command` in `~/.claude/settings.json`, and nothing else - see "What the installer changes" above. It is reversible with one command.
+- **The setup touches one file.** `~/.claude/settings.json`: its `statusLine.command`, and a hook entry per lifecycle event - see "What the installer changes" above for exactly what is written and what is kept. All of it is reversible with one command.
 - The on-device Wi-Fi and sign-in path still exists in this repository, behind `CONFIG_CLAUGE_WIFI_MODE`, but is **not built into shipped firmware** - the release script refuses to publish an image containing it.
 
 ## The status dot

@@ -442,8 +442,9 @@ panel confidently shows the wrong one.
 One file per **agent** because that makes the count exact without a lock. Two
 agents starting at once cannot race on a shared counter, and `SubagentStop`
 carries `agent_id`, so a stop removes precisely the agent that stopped rather
-than decrementing and hoping. Both are swept by mtime after an hour, for the
-sessions that die without `SessionEnd` firing.
+than decrementing and hoping. Session slots are swept by mtime after an hour,
+for the sessions that die without `SessionEnd` firing; agent files after four,
+because an agent file's mtime is its start and a long run is not a dead one.
 
 ### What the shim captures
 
@@ -492,11 +493,15 @@ which one, and there is nothing to do about it from across the room.
 ask.
 
 Both removals bought space for the gauges, which are what the panel is for. A
-useful consequence: the status line shim went back to capturing **no session
-id at all**, because the only reason it ever needed one was per-conversation
-context. The hook shim still records session and agent ids — multi-session
-*state* is real and worth having — but the status line path is back to
-capturing nothing but the payload Claude Code already computed.
+consequence worth stating precisely: the status line shim keeps one file, not
+one per session — but that file is the **whole payload** Claude Code sends,
+which carries the session id, working directory and transcript path alongside
+the two figures. The daemon reads only `rate_limits` out of it; the file is
+written readable by its owner alone; and the install disclosure and README say
+what is in it. (An earlier version of this paragraph claimed the shim captured
+no session id. It did not, and the claim has been corrected everywhere it was
+repeated.) The hook shim records session and agent ids by design —
+multi-session *state* is real and worth having.
 A per-session array would blow the 512-byte budget at around four sessions,
 taking the panel dark with no error on exactly the busy machine most likely to
 have four. A busy machine measures 351 bytes; a typical one, 297.

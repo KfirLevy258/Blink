@@ -201,9 +201,19 @@ implementation:
 
 1. **Decisions.** `daemon.auto` on or off; macOS notarisation; a board id on
    the settings screen (unblocked since that panel dropped to two rows); the
-   naming question; and the disclosure question on the five known concerns --
+   naming question -- now visible on the unit, which says BLINK on the gauge
+   header and "Blink x.y" in settings while the installer, README, binary and
+   wire all say Clauge; the disclosure question on the five known concerns --
    four of which are WiFi-build only and are not compiled into the shipping
-   image, but whose code is public.
+   image, but whose code is public -- and whether this paragraph, which points
+   at them, belongs in a public repository; and the Codex boot clip, which
+   deliberately mirrors the Claude clip and lands on a `>_` glyph on Codex
+   blue, which is a second company's mark.
+
+   Decided 2026-08-28, in the review before merge: a config record from
+   before the edition latch migrates **latched as Claude** rather than open.
+   Every fielded unit is a Claude unit, and the open reading would have
+   handed each of their owners `clauge provision --edition codex`.
 2. **The Codex boot clip's contrast.** White on `#76B1DB` is 2.31:1 against a
    3:1 floor, and production panels are the bright ones. `#4C82A8` gives 4.15.
    Raise it once, before launch.
