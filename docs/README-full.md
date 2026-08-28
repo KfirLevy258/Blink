@@ -30,7 +30,7 @@ Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 Blink is a small desk display that shows how much of your Claude Code usage you've spent - the same numbers as the `/usage` command, but always in view. It reads your **5-hour session** limit and your **7-day weekly** limit and draws each as a dial, green while you have room, amber as you get close, red when it's nearly gone. Glance over, know where you stand, keep working.
 
-Beside the dials is a small pip telling you whether Claude Code is working, waiting on you, or has gone quiet mid-task -- across every session you have open, worst one wins. Under them, a countdown to each window's reset.
+Beside the dials is a small pip telling you whether anything is waiting on you -- across every Claude Code and Codex session you have open, one light: amber the moment a session has finished or is asking permission, a green pulse while everything is still working, red when something is stuck or rate-limited. Under them, a countdown to each window's reset.
 
 It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the setup once, and it sits on your desk and keeps itself up to date.
 
@@ -313,11 +313,27 @@ The things that were open before the first release, and how each was settled.
 
 ## The status dot
 
-A small dot in the top-right corner tells you how fresh the numbers are:
+A small dot in the top-right corner is one light for the whole desk: what
+your sessions need from you, across Claude Code and Codex together, worst one
+wins.
 
 | Dot | Meaning |
 |-----|---------|
-| 🟢 green | Connected - live data |
-| 🟠 amber | Stale - showing the last good numbers, because Claude Code has not refreshed them recently or the window they describe has since reset |
-| 🔴 red | Error |
-| ⚪ grey | Signed out |
+| 🟢 green, pulsing | Everything is working; nothing needs you |
+| 🟠 amber | **Your turn** - a session has finished its answer (Claude or Codex), even if others are still working |
+| 🟠 amber, pulsing | A session is asking permission right now |
+| 🔴 red | Stuck (announced work, then went silent for three minutes), or the turn died on an API error - a rate limit shows here |
+| 🟢 green, steady | Connected, live data, no session has anything to say |
+| ⚪ grey | Not connected |
+
+Stale numbers also show amber, with "Reading is old" on the page: the last
+good reading is kept on screen because Claude Code has not refreshed it
+recently, or the window it describes has since reset.
+
+"Your turn" is deliberately ranked above "working": a finished answer is
+waiting on you, and the sessions still running are not, so one finished
+session shows through any number of busy ones. A terminal you opened and have
+not typed into claims nothing, and neither does one that has ended. Codex has
+no hook interface, so its state comes from its own session log: a turn that
+started, finished or was interrupted. Codex permission prompts are not in that
+log, so a prompt shows as "working" until you answer it.

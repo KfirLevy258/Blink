@@ -31,12 +31,13 @@ BLINK is a small touchscreen that shows the same numbers as Claude Code's `/usag
 ## Features
 
 - **Two dials, two countdowns.** Session and weekly limits, and the time until each one resets.
-- **An activity light.** Whether Claude Code is working, waiting on you, or has gone quiet mid-task, across every session you have open.
+- **An activity light.** Amber the moment any session -- Claude or Codex -- is waiting on you; a green pulse while everything is still working; red when something is stuck or rate-limited.
 - **A page per provider.** Claude and Codex each get their own screen. Tap the name or swipe to switch; the needles move from one reading to the other.
 - **Claude Desktop too.** With Desktop alone the dials show both percentages and how fast the window is filling.
 - **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, no network, nothing sent anywhere.
 - **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
 - **Cheap, open hardware.** An ESP32 "Cheap Yellow Display" (~$12) and a 3D-printed case.
+- **Company units.** A unit built for a company shows its logo -- a still or a short clip -- after the boot animation, written once at the factory.
 
 ## The screens
 

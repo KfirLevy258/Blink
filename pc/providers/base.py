@@ -39,6 +39,32 @@ STATE_FAILED = "failed"
 VALID_STATES = (STATE_UNKNOWN, STATE_IDLE, STATE_RUNNING, STATE_WAITING,
                 STATE_STUCK, STATE_FAILED)
 
+# Worst-first. This is the order the single scalar `state` collapses to when
+# several sessions -- of one provider or of both -- disagree, and the order is
+# a product decision rather than an implementation detail.
+#
+# `failed` outranks `stuck` because a rate limit is the one condition this
+# gauge exists to surface, and a wedged tool is a distant second.
+#
+# `idle` outranks `running`, which reads backwards until you ask what the
+# light is FOR. A session that finished its turn is a session waiting on the
+# person; a session still working needs nothing from them. So "one finished,
+# two still working" is a light that says "your turn", not one that says
+# "busy" -- the busy ones will still be busy when the person gets there. It
+# used to be the other way round, and a finished answer sat unnoticed behind
+# a green pulse for as long as anything else was running (user decision
+# 2026-08-29).
+SEVERITY = (STATE_FAILED, STATE_STUCK, STATE_WAITING, STATE_IDLE,
+            STATE_RUNNING)
+
+
+def worst_of(states):
+    """The state a single indicator should show for several sessions at once."""
+    for s in SEVERITY:
+        if s in states:
+            return s
+    return STATE_UNKNOWN
+
 
 @dataclasses.dataclass
 class NormalizedUsageFrame:

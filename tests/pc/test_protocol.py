@@ -235,3 +235,35 @@ def test_the_line_still_fits_with_everything_on_it():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneLightForBothProviders(unittest.TestCase):
+    """The board has one activity pip for both pages. It shows the worse of
+    the two providers' states and the sessions of both, because a Codex
+    session waiting on the person is their turn just as much as a Claude
+    one -- whichever page happens to be in front."""
+
+    def frame(self, provider, state, **counts):
+        from pc.providers import base
+        return base.NormalizedUsageFrame(provider=provider, src="cli",
+                                         observed_at=1.0, session_pct=10.0,
+                                         state=state, **counts)
+
+    def test_a_finished_codex_session_shows_on_a_claude_page(self):
+        u = protocol.frame_to_usage(self.frame("claude", "running", n_run=2),
+                                    100.0,
+                                    self.frame("codex", "idle", n_idle=1))
+        self.assertEqual(u["state"], "idle")
+        self.assertEqual((u["n_sess"], u["n_run"]), (3, 2))
+
+    def test_the_primary_alone_is_unchanged(self):
+        u = protocol.frame_to_usage(self.frame("claude", "running", n_run=1),
+                                    100.0)
+        self.assertEqual(u["state"], "running")
+        self.assertEqual(u["n_sess"], 1)
+
+    def test_a_secondary_with_no_claim_changes_nothing(self):
+        u = protocol.frame_to_usage(self.frame("claude", "waiting", n_wait=1),
+                                    100.0, self.frame("codex", ""))
+        self.assertEqual(u["state"], "waiting")
+        self.assertEqual(u["n_sess"], 1)

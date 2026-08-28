@@ -25,12 +25,14 @@ def test_a_started_turn_is_running():
         assert derive_state(e, 2.0) == base.STATE_RUNNING, e
 
 
-def test_an_opened_session_is_idle_and_never_becomes_stuck():
+def test_an_opened_session_claims_nothing_and_never_becomes_stuck():
     """`claude`, then nothing: the person is reading, or opened it for later.
     Filed as running, this went red after three minutes and stayed red for
-    an hour -- on the most ordinary thing a terminal does."""
-    assert derive_state("SessionStart", 2.0) == base.STATE_IDLE
-    assert derive_state("SessionStart", STUCK_AFTER_S * 5) == base.STATE_IDLE
+    an hour -- on the most ordinary thing a terminal does. Filed as idle,
+    it would now paint the "your turn" amber for a terminal nobody has asked
+    anything of. It says nothing."""
+    assert derive_state("SessionStart", 2.0) == base.STATE_UNKNOWN
+    assert derive_state("SessionStart", STUCK_AFTER_S * 5) == base.STATE_UNKNOWN
 
 
 def test_a_slot_with_a_nonsense_timestamp_is_ignored(tmp_path):
@@ -46,7 +48,12 @@ def test_a_slot_with_a_nonsense_timestamp_is_ignored(tmp_path):
 
 def test_a_completed_turn_is_idle():
     assert derive_state("Stop", 2.0) == base.STATE_IDLE
-    assert derive_state("SessionEnd", 2.0) == base.STATE_IDLE
+
+
+def test_an_ended_session_is_not_waiting_on_anyone():
+    """idle means "finished, read me". A session that is over has nothing to
+    read; it must not hold the amber light for the next hour."""
+    assert derive_state("SessionEnd", 2.0) == base.STATE_UNKNOWN
 
 
 def test_a_notification_is_waiting_not_stuck():
@@ -110,11 +117,21 @@ def test_worst_of_ranks_a_rate_limit_above_everything():
                      base.STATE_RUNNING}) == base.STATE_FAILED
 
 
-def test_worst_of_ranks_stuck_above_waiting_above_running_above_idle():
+def test_worst_of_ranks_stuck_above_waiting_above_idle_above_running():
     assert worst_of({base.STATE_STUCK, base.STATE_WAITING}) == base.STATE_STUCK
     assert worst_of({base.STATE_WAITING, base.STATE_RUNNING}) == base.STATE_WAITING
-    assert worst_of({base.STATE_RUNNING, base.STATE_IDLE}) == base.STATE_RUNNING
+    assert worst_of({base.STATE_WAITING, base.STATE_IDLE}) == base.STATE_WAITING
     assert worst_of({base.STATE_IDLE}) == base.STATE_IDLE
+
+
+def test_one_finished_session_shows_through_any_number_of_running_ones():
+    """The light is a claim on the person. A finished answer is waiting on
+    them; the sessions still working are not. Ranking running above idle
+    (the old order) hid the finished one behind a green pulse for as long as
+    anything else was busy (user decision 2026-08-29)."""
+    assert worst_of({base.STATE_RUNNING, base.STATE_IDLE}) == base.STATE_IDLE
+    assert worst_of({base.STATE_RUNNING, base.STATE_RUNNING,
+                     base.STATE_IDLE}) == base.STATE_IDLE
 
 
 def test_worst_of_nothing_is_nothing():

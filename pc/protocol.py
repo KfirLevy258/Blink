@@ -8,6 +8,7 @@ import json
 import math
 
 from pc.version import PROTO_VERSION
+from pc.providers.base import STATE_UNKNOWN, worst_of
 
 # Kept as a name because every message builder below already spells it this
 # way. It is the protocol's version, not the product's -- see pc/version.py.
@@ -294,9 +295,19 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         weekly_resets_in_s=secs_until(frame.weekly_resets_at, now_epoch),
         stale=frame.stale,
         provider=frame.provider, src=frame.src,
-        state=frame.state,
-        n_sess=frame.n_sessions(), n_run=frame.n_run, n_wait=frame.n_wait,
-        n_stuck=frame.n_stuck, n_agents=frame.n_agents,
+        # One light for the whole desk: the worse of the two providers'
+        # states, and the counts of both. The light is a claim on the person
+        # ("something needs you"), and a Codex session waiting on them is
+        # exactly as much their turn as a Claude one -- whichever page is
+        # in front.
+        state=worst_of((frame.state,
+                        secondary.state if secondary else STATE_UNKNOWN)),
+        n_sess=frame.n_sessions() + (secondary.n_sessions() if secondary
+                                     else 0),
+        n_run=frame.n_run + (secondary.n_run if secondary else 0),
+        n_wait=frame.n_wait + (secondary.n_wait if secondary else 0),
+        n_stuck=frame.n_stuck + (secondary.n_stuck if secondary else 0),
+        n_agents=frame.n_agents + (secondary.n_agents if secondary else 0),
         p2=(secondary.provider if secondary else ""),
         p2_session_pct=(secondary.session_pct if secondary else UNKNOWN),
         p2_weekly_pct=(secondary.weekly_pct if secondary else UNKNOWN),

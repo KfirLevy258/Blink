@@ -339,7 +339,12 @@ def test_the_real_rollout_tail_parses():
     seen_at = datetime.datetime(2026, 8, 28, 0, 3, 51, 383000,
                                 tzinfo=datetime.timezone.utc).timestamp()
     frames = codex_cli.CodexCliProvider(root=root).poll(seen_at + 60)
-    assert len(frames) == 1
+    # Two frames: the reading, and the execution state the same file implies.
+    assert [f.src for f in frames] == ["cli", "cli-state"]
+    st = frames[1]
+    # The tail ends task_started -> task_complete, 60 s before "now": a
+    # finished turn, i.e. the person's move.
+    assert (st.state, st.n_idle, st.n_run, st.has_usage()) == ("idle", 1, 0, False)
     f = frames[0]
     assert (f.provider, f.src) == ("codex", "cli")
     assert f.session_pct == 0.0
@@ -359,3 +364,94 @@ def test_the_real_rollout_tail_is_mostly_not_rate_limits():
     assert len(lines) >= 30
     assert len(with_limits) >= 3
     assert len(with_limits) < len(lines) / 2
+
+
+# --- execution state ---------------------------------------------------------
+
+def turn_line(kind, stamp):
+    return json.dumps({"timestamp": stamp, "type": "event_msg",
+                       "payload": {"type": kind}})
+
+
+def _stamp(epoch):
+    import datetime
+    return datetime.datetime.fromtimestamp(
+        epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def test_a_started_turn_is_running_and_a_finished_one_is_idle():
+    assert codex_cli.parse_rollout_state(
+        [turn_line("task_started", _stamp(NOW - 5))], NOW) == base.STATE_RUNNING
+    assert codex_cli.parse_rollout_state(
+        [turn_line("task_started", _stamp(NOW - 30)),
+         turn_line("task_complete", _stamp(NOW - 5))], NOW) == base.STATE_IDLE
+    assert codex_cli.parse_rollout_state(
+        [turn_line("task_started", _stamp(NOW - 30)),
+         turn_line("turn_aborted", _stamp(NOW - 5))], NOW) == base.STATE_IDLE
+
+
+def test_the_newest_turn_event_wins_whatever_follows_it():
+    lines = [turn_line("task_complete", _stamp(NOW - 40)),
+             turn_line("task_started", _stamp(NOW - 5)),
+             token_count_line(rate_limits(), stamp=_stamp(NOW - 1))]
+    assert codex_cli.parse_rollout_state(lines, NOW) == base.STATE_RUNNING
+
+
+def test_a_turn_silent_too_long_is_stuck_but_a_finished_one_never_is():
+    late = codex_cli.STUCK_AFTER_S + 1
+    assert codex_cli.parse_rollout_state(
+        [turn_line("task_started", _stamp(NOW - late))], NOW) == base.STATE_STUCK
+    assert codex_cli.parse_rollout_state(
+        [turn_line("task_complete", _stamp(NOW - late))], NOW) == base.STATE_IDLE
+
+
+def test_an_abandoned_rollout_claims_nothing():
+    gone = codex_cli.ABANDONED_AFTER_S + 1
+    for kind in ("task_started", "task_complete"):
+        assert codex_cli.parse_rollout_state(
+            [turn_line(kind, _stamp(NOW - gone))], NOW) == base.STATE_UNKNOWN
+
+
+def test_a_session_with_no_turn_yet_claims_nothing():
+    """Opened, not typed into: the same silence a Claude SessionStart keeps."""
+    lines = [json.dumps({"type": "session_meta", "payload": {}}),
+             token_count_line(rate_limits())]
+    assert codex_cli.parse_rollout_state(lines, NOW) == base.STATE_UNKNOWN
+    assert codex_cli.parse_rollout_state([], NOW) == base.STATE_UNKNOWN
+
+
+def test_a_turn_event_without_a_usable_timestamp_claims_nothing():
+    line = json.dumps({"type": "event_msg", "payload": {"type": "task_started"}})
+    assert codex_cli.parse_rollout_state([line], NOW) == base.STATE_UNKNOWN
+    line = json.dumps({"timestamp": "not a date", "type": "event_msg",
+                       "payload": {"type": "task_started"}})
+    assert codex_cli.parse_rollout_state([line], NOW) == base.STATE_UNKNOWN
+
+
+def test_every_rollout_votes_and_the_worst_state_is_reported(tmp_path):
+    """Percentages are account-wide (one frame), but each rollout is one
+    session and the light must show the worst of them: one finished session
+    shows through two that are still working."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[token_count_line(rate_limits()),
+                         turn_line("task_started", _stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[turn_line("task_started", _stamp(NOW - 9))])
+    write_rollout(root, name="rollout-c.jsonl",
+                  lines=[turn_line("task_complete", _stamp(NOW - 3))])
+    frames = codex_cli.CodexCliProvider(root=root).poll(NOW)
+    usage = [f for f in frames if f.src == "cli"]
+    state = [f for f in frames if f.src == "cli-state"]
+    assert len(usage) == 1 and len(state) == 1
+    st = state[0]
+    assert (st.state, st.n_run, st.n_idle, st.n_stuck) == ("idle", 2, 1, 0)
+    assert st.n_sessions() == 3
+    assert not st.has_usage()       # can never win a contest for numbers
+
+
+def test_no_state_frame_when_no_rollout_has_a_turn(tmp_path):
+    root = str(tmp_path / "sessions")
+    write_rollout(root, lines=[token_count_line(rate_limits())])
+    frames = codex_cli.CodexCliProvider(root=root).poll(NOW)
+    assert [f.src for f in frames] == ["cli"]

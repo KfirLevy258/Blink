@@ -13,10 +13,16 @@ interface, so this reads the announcements instead:
     PreToolUse        -> a tool started              -> running
     PostToolUse       -> a tool finished             -> running
     Notification      -> Claude Code wants the user  -> waiting
-    Stop              -> the turn completed          -> idle
+    Stop              -> the turn completed          -> idle (your turn)
     StopFailure       -> the turn died on an API error -> failed
-    SessionStart/End  -> the session's lifetime
+    SessionStart/End  -> the session's lifetime      -> no claim
     SubagentStart/Stop-> one agent's lifetime
+
+`idle` means "finished, and waiting on you" -- it is a claim on the person's
+attention, and on the panel it is amber, not green. That is why a session
+that merely OPENED is not idle: a terminal somebody opened and has not typed
+into yet needs nothing from anybody, and a session that ENDED needs nothing
+ever again. Both say nothing rather than call for attention.
 
 `waiting` is authoritative rather than inferred: Notification is the event
 Claude Code fires when it needs a human, which is what "is the process blocked
@@ -85,22 +91,23 @@ T_EPOCH_MAX = 4_102_444_800.0
 
 _RUNNING_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse",
                    "SubagentStop", "PreCompact", "PostCompact")
-# SessionStart is idle, not running. It fires when a terminal opens, and the
-# common thing to happen next is nothing for a while -- the person reads, or
-# opened it for later. Filed as running it turned red "stuck" three minutes
-# after every `claude`, and stayed so for an hour. A turn announces itself
-# with UserPromptSubmit; until then the session is simply open.
-_IDLE_EVENTS = ("Stop", "SessionEnd", "SessionStart")
+# Only Stop is idle: the turn completed and the answer is waiting to be read.
+#
+# SessionStart used to be idle too (and before that, running -- which turned
+# red "stuck" three minutes after every `claude`). Now that idle means "your
+# turn" and paints amber, an opened-but-untouched terminal must not claim it:
+# nothing has been asked, so nothing is waiting. SessionEnd likewise -- a
+# session that is over is not waiting on anyone. Both are filed as no claim,
+# and the file is left for the abandon sweep. A turn announces itself with
+# UserPromptSubmit; until then the session is simply open.
+_IDLE_EVENTS = ("Stop",)
+_OPEN_EVENTS = ("SessionStart", "SessionEnd")
 _WAITING_EVENTS = ("Notification", "PermissionRequest")
 _FAILED_EVENTS = ("StopFailure",)
 
-# Worst-first. This is the order the single scalar `state` field collapses to
-# when several sessions disagree, and the order is a product decision rather
-# than an implementation detail: `failed` outranks `stuck` because a rate
-# limit is the one condition this gauge exists to surface, and a wedged tool
-# is a distant second.
-_SEVERITY = (base.STATE_FAILED, base.STATE_STUCK, base.STATE_WAITING,
-             base.STATE_RUNNING, base.STATE_IDLE)
+# The severity order lives in base (SEVERITY): it is shared with Codex and
+# with the wire layer, which collapses both providers into one light.
+_SEVERITY = base.SEVERITY
 
 
 def derive_state(event: str, age_s: float, stuck_after_s=STUCK_AFTER_S) -> str:
@@ -119,6 +126,9 @@ def derive_state(event: str, age_s: float, stuck_after_s=STUCK_AFTER_S) -> str:
         # No age test. A completed turn stays completed; silence after it is
         # the expected condition, not a fault.
         return base.STATE_IDLE
+
+    if event in _OPEN_EVENTS:
+        return base.STATE_UNKNOWN
 
     if event in _FAILED_EVENTS:
         # Also no stuck test. A turn that died on an API error is not wedged,
@@ -139,12 +149,7 @@ def derive_state(event: str, age_s: float, stuck_after_s=STUCK_AFTER_S) -> str:
     return base.STATE_UNKNOWN
 
 
-def worst_of(states):
-    """The state a single indicator should show for several sessions at once."""
-    for s in _SEVERITY:
-        if s in states:
-            return s
-    return base.STATE_UNKNOWN
+worst_of = base.worst_of
 
 
 class ClaudeStateProvider(base.ProviderParser):
