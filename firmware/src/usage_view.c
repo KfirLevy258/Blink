@@ -1176,6 +1176,14 @@ static void morph_done(lv_anim_t *a)
 	lv_obj_set_style_text_opa(session.countdown, LV_OPA_COVER, 0);
 	lv_obj_set_style_text_opa(weekly.countdown, LV_OPA_COVER, 0);
 	render_gauges();
+	/*
+	 * And only NOW re-ask the status question. page_step() asks it too,
+	 * but at that moment last_s_pct/last_w_pct still describe the page
+	 * being left -- they move here, in render_gauges() -- so the "almost
+	 * used up" hint it produced belonged to the wrong page and stayed
+	 * wrong until the next usage message, up to a poll interval later.
+	 */
+	usage_view_set_status(last_status);
 }
 
 /*

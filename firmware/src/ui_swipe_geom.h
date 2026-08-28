@@ -182,6 +182,16 @@ static inline enum ui_swipe_dir ui_swipe_classify(int dx, int dy)
  * second swipe -- which is exactly what someone paging back and forth does.
  * Be patient while collecting evidence, quick to reset once you have acted.
  */
-#define UI_SWIPE_REARM_MS	80
+/*
+ * ...but not so quick that the release outruns it. The XPT2046 driver only
+ * reports the finger lifting after a 100 ms delayed re-check, and LVGL's
+ * CLICKED for the stroke arrives after that. At 80 ms `active` was already
+ * false by then, so ui_swipe_dragging() said no and a swipe that began inside
+ * a tap zone -- the page rail, the settings edge -- ALSO fired that zone's tap
+ * once it had paged: settings opened over the new page, or the page flipped
+ * straight back. 160 ms sits past the driver's release and still well inside
+ * what a deliberate second swipe takes.
+ */
+#define UI_SWIPE_REARM_MS	160
 
 #endif /* UI_SWIPE_GEOM_H */

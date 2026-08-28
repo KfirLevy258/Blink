@@ -87,8 +87,10 @@ def autodetect_port():
 
 # How long to wait for a device to identify itself before resetting it.
 #
-# The board answers `welcome` immediately (with ota_query, and usually pref),
-# so this only has to cover the round trip and one poll interval.
+# The board answers `welcome` with its `pref` (proto.c), immediately, so this
+# only has to cover the round trip. It did not always: the reply this relied
+# on was the once-per-boot ota_query, so from the second connection of a boot
+# onwards the board was silent here and got reset anyway.
 PROBE_S = 1.5
 
 # ...and how long to listen on the SECOND pass, when nothing answered quickly.

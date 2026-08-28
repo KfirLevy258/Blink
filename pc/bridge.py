@@ -86,7 +86,17 @@ class Bridge:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
         self.poll_once()                 # push current data immediately
-        self._resume_pending()
+        # Only once the board has been heard. On the no-reset connect path
+        # greet() runs before any message has reached on_message, so
+        # _board_proto is still None -- and _board_ahead() reads None as
+        # "not ahead", which let a resumed flash skip the one guard that
+        # keeps this daemon from writing slot0 on a board it does not
+        # understand, while _on_ota_query latched _board_fw to the fallback
+        # "0.0.0". The next message the board sends (its pref answers our
+        # welcome; a ping follows within 10 s) arms the guard, and
+        # on_message resumes then.
+        if self._board_proto is not None:
+            self._resume_pending()
 
     # --- inbound ---
     def on_message(self, msg: dict):
@@ -111,6 +121,12 @@ class Bridge:
                 pass
             else:
                 self._announce_if_ahead()
+                # The board has spoken, so the guard is armed: pick up an
+                # approved install that greet() had to leave waiting. Not on
+                # hello -- greet() below does it there, after the welcome,
+                # so the board is greeted before it is asked to resume.
+                if t != "hello":
+                    self._resume_pending()
         if t == "pref":
             # Which provider the user picked on the board's settings screen.
             # It arrives with every hello as well as on change, so a daemon

@@ -34,6 +34,33 @@ static const struct device *const console_dev =
 
 static char line[LINE_MAX];
 static size_t line_len;
+
+/*
+ * A number off the wire, or the default it arrived with, and never a value
+ * outside the range the field can mean.
+ *
+ * strtod happily returns nan, inf and 1e300, and every one of those was cast
+ * straight to an int -- undefined behaviour in C, and on this soft-float
+ * target a saturated or arbitrary integer on the panel. The `time` handler
+ * has always bounded its two fields; the usage fields did not. Anything that
+ * is not a real number in range leaves the default in place, which every
+ * field here defines as "unknown" or "none".
+ */
+#define SECS_MAX 2147483647.0
+
+static void num(const char *json, const char *key, double *out,
+		double lo, double hi)
+{
+	double v;
+
+	if (!msg_get_double(json, key, &v)) {
+		return;
+	}
+	if (v != v || v < lo || v > hi) { /* nan, or out of range */
+		return;
+	}
+	*out = v;
+}
 static int64_t last_ping_ms;
 static int64_t last_host_ms;
 static bool host_seen;
@@ -231,17 +258,17 @@ static void dispatch(const char *json)
 		 */
 		double ss = -1, ws = -1;
 
-		msg_get_double(json, "session_pct", &sp);
-		msg_get_double(json, "weekly_pct", &wp);
-		msg_get_double(json, "session_resets_in_s", &ss);
-		msg_get_double(json, "weekly_resets_in_s", &ws);
+		num(json, "session_pct", &sp, -1, 100);
+		num(json, "weekly_pct", &wp, -1, 100);
+		num(json, "session_resets_in_s", &ss, -1, SECS_MAX);
+		num(json, "weekly_resets_in_s", &ws, -1, SECS_MAX);
 		usage_view_update(sp, (int32_t)ss, wp, (int32_t)ws);
 
 		/* Flat model key (protocol.py flattens its models list for
 		 * us); an absent key leaves the -1 "unknown" default. */
 		double mf = -1;
 
-		msg_get_double(json, "fable_pct", &mf);
+		num(json, "fable_pct", &mf, -1, 100);
 		usage_view_set_models(mf);
 
 		/* Every usage message says whether its own numbers can be
@@ -295,8 +322,8 @@ static void dispatch(const char *json)
 		 * no agents anyway. */
 		double ns = 0, na = 0;
 
-		msg_get_double(json, "n_sess", &ns);
-		msg_get_double(json, "n_agents", &na);
+		num(json, "n_sess", &ns, 0, 9999);
+		num(json, "n_agents", &na, 0, 9999);
 		usage_view_set_sessions((int)ns, (int)na);
 
 		char p1[16];
@@ -317,7 +344,7 @@ static void dispatch(const char *json)
 		 */
 		double burn = 0;
 
-		msg_get_double(json, "burn_pph", &burn);
+		num(json, "burn_pph", &burn, 0, 9999);
 		usage_view_set_burn(burn);
 
 		char p2[16];
@@ -326,10 +353,10 @@ static void dispatch(const char *json)
 		if (msg_get_str(json, "p2", p2, sizeof(p2))) {
 			bool p2stale = false;
 
-			msg_get_double(json, "p2_session_pct", &p2s);
-			msg_get_double(json, "p2_weekly_pct", &p2w);
-			msg_get_double(json, "p2_s_in_s", &p2si);
-			msg_get_double(json, "p2_w_in_s", &p2wi);
+			num(json, "p2_session_pct", &p2s, -1, 100);
+			num(json, "p2_weekly_pct", &p2w, -1, 100);
+			num(json, "p2_s_in_s", &p2si, -1, SECS_MAX);
+			num(json, "p2_w_in_s", &p2wi, -1, SECS_MAX);
 			/* Absent leaves this false, so a daemon older than
 			 * this firmware reports its second provider as fresh
 			 * rather than as old -- the reading it sent IS the
@@ -443,6 +470,21 @@ static void dispatch(const char *json)
 		host_proto = msg_get_double(json, "v", &hv) ? (int)hv : 0;
 		printk("[proto] host connected: app %s, protocol %d\n",
 		       host_ver[0] ? host_ver : "?", host_proto);
+		/*
+		 * Answer. The daemon sends `welcome` as a question -- "is a
+		 * Clauge board on this port?" -- and decides whether to pull
+		 * the reset line on whether anything comes back within 1.5 s
+		 * (claude_usage_bridge.probe_is_our_board). This handler used
+		 * to reply with nothing: the ota_query it was credited with
+		 * is sent once per boot by main.c, so from the second host
+		 * connection of a boot onwards the probe heard silence unless
+		 * a 10 s ping happened to land, and the board was reset -- and
+		 * replayed its boot clip -- on most daemon restarts anyway.
+		 * The preference is the right answer: it is what a host that
+		 * has just connected needs to know, and it already rides with
+		 * hello for the same reason.
+		 */
+		proto_send_pref();
 	} else if (strcmp(type, "ota_avail") == 0) {
 		double sz = 0;
 
@@ -518,18 +560,33 @@ static void dispatch(const char *json)
 static void drain_rx(void)
 {
 	uint8_t c;
+	/*
+	 * Set on overflow and cleared at the next newline. Without it an
+	 * over-long line was not dropped whole, as the comment on LINE_MAX
+	 * (and pc/protocol.py, which mirrors it) claimed: line_len went back
+	 * to 0 and the REST of the same line went on accumulating, to be
+	 * dispatched as a message of its own. With a scanner that finds keys
+	 * anywhere in the text, a tail that happened to contain "t":"..."
+	 * parsed as a frame the host never sent.
+	 */
+	static bool discarding;
 
 	while (ring_buf_get(&rx_ring, &c, 1) == 1) {
 		if (c == '\n' || c == '\r') {
-			if (line_len > 0) {
+			if (discarding) {
+				discarding = false;
+			} else if (line_len > 0) {
 				line[line_len] = '\0';
 				dispatch(line);
-				line_len = 0;
 			}
+			line_len = 0;
+		} else if (discarding) {
+			/* the tail of a line already given up on */
 		} else if (line_len < LINE_MAX - 1) {
 			line[line_len++] = (char)c;
 		} else {
-			line_len = 0; /* overflow: drop the line */
+			line_len = 0;
+			discarding = true; /* overflow: drop the WHOLE line */
 		}
 	}
 

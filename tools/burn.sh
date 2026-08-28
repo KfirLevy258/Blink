@@ -62,7 +62,12 @@ restore_daemon() {
 	launchctl bootstrap "gui/$(id -u)" \
 		"$HOME/Library/LaunchAgents/com.clauge.bridge.plist" >/dev/null 2>&1 || true
 }
-trap restore_daemon EXIT INT TERM
+# EXIT restores; INT/TERM restore AND EXIT. A trap that only restored let a
+# Ctrl-C mid-flash carry straight on to the stamp step, with the daemon just
+# put back on the same port -- two processes on one wire, and a unit stamped
+# over a torn image.
+trap restore_daemon EXIT
+trap 'restore_daemon; trap - EXIT; exit 130' INT TERM
 
 if [ -z "$PORT" ]; then
 	PORT=$("$PY" - <<'EOF'
@@ -119,6 +124,13 @@ MCUBOOT="$BUILD/mcuboot/zephyr/zephyr.bin"
 APP="$BUILD/firmware/zephyr/zephyr.signed.bin"
 [ -f "$MCUBOOT" ] || die "no bootloader at $MCUBOOT"
 [ -f "$APP" ]     || die "no signed app at $APP"
+# The version this tree builds, so the boot check below can insist the unit
+# is running THIS image and not whatever was on it before. With --no-build
+# against a stale build directory the two can differ, and a stamp on the
+# wrong firmware is still a stamp.
+FW_VERSION=$(sed -n 's/^#define CLAUGE_FW_VERSION "\(.*\)"$/\1/p' \
+	"$ROOT/firmware/src/version.h")
+[ -n "$FW_VERSION" ] || die "cannot read CLAUGE_FW_VERSION from firmware/src/version.h"
 
 # ------------------------------------------------------------- 3. flash
 say "Flashing"
@@ -126,17 +138,30 @@ say "Flashing"
 # leaves whatever is at 0x1000 -- which on a fresh board is the factory
 # bootloader and on a re-burned one may be nothing. Either way the unit loses
 # its OTA chain, silently, and only finds out months later in someone's house.
-esptool.py --port "$PORT" --baud 115200 write_flash \
-	0x1000 "$MCUBOOT" 0x20000 "$APP" 2>&1 | grep -E "Wrote|Hash of data" \
-	|| die "flash failed"
+#
+# esptool's own exit status decides, not grep's. Piping into grep made the
+# pipeline's status grep's (POSIX sh has no pipefail), so esptool dying after
+# the first image's "Wrote" line still counted as success -- and the script
+# went on to stamp a unit with a bootloader and a torn app. Now the output
+# goes to a file, the status is esptool's, and BOTH images must have been
+# hash-verified.
+FLASH_LOG="$BUILD/flash.log"
+if ! esptool.py --port "$PORT" --baud 115200 write_flash \
+	0x1000 "$MCUBOOT" 0x20000 "$APP" >"$FLASH_LOG" 2>&1; then
+	tail -5 "$FLASH_LOG" >&2
+	die "flash failed (esptool exited non-zero; full log at $FLASH_LOG)"
+fi
+grep -E "Wrote|Hash of data" "$FLASH_LOG" || true
+[ "$(grep -c "Hash of data verified" "$FLASH_LOG")" -eq 2 ] ||
+	die "expected both images to verify; see $FLASH_LOG"
 
 # ------------------------------------------------- 4. boot, stamp, confirm
 say "Boot-verifying and stamping as $EDITION"
-"$PY" - "$PORT" "$EDITION" <<'EOF' || die "the board did not confirm the stamp"
+"$PY" - "$PORT" "$EDITION" "$FW_VERSION" <<'EOF' || die "the board did not confirm the stamp"
 import json, sys, time
 import serial
 
-port, edition = sys.argv[1], sys.argv[2]
+port, edition, want_fw = sys.argv[1], sys.argv[2], sys.argv[3]
 s = serial.Serial(port, 115200, timeout=0.2)
 s.dtr = False; s.rts = True; time.sleep(0.15); s.rts = False
 
@@ -159,6 +184,11 @@ if "MCUboot" not in seen and "chainload" not in seen:
           " could never take an OTA", file=sys.stderr)
     sys.exit(1)
 print("   booted: fw %s, board_id %s" % (hello.get("fw"), hello.get("board_id")))
+if hello.get("fw") != want_fw:
+    print("   the board runs %s but this tree builds %s -- the flash did not"
+          " take, or the build directory is stale" % (hello.get("fw"), want_fw),
+          file=sys.stderr)
+    sys.exit(1)
 
 s.write((json.dumps({"t": "edition", "v": 2, "edition": edition}) + "\n").encode())
 s.flush()

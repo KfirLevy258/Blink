@@ -197,19 +197,29 @@ static bool slot_load(int off, struct rec *out)
 		out->main_src = pl.main_src;
 		out->edition = pl.edition;
 		/*
-		 * A record carrying a NON-DEFAULT edition was stamped on
-		 * purpose by whoever built the unit, so it arrives already
-		 * latched. A record still at 0 is ambiguous -- 0 is both
-		 * "Claude" and "never written" -- and the safe reading is
-		 * unstamped: a unit that has never been provisioned should
-		 * still be provisionable, and its clip does not change either
-		 * way if it never is.
+		 * Latched, whatever it says.
+		 *
+		 * This used to read a 0 as "never written" and leave the
+		 * record open, on the argument that 0 is both "Claude" and
+		 * "blank" and an unprovisioned unit should stay provisionable.
+		 * That reading had a cost the argument left out: every unit
+		 * already in the field carries a pre-lock record, so the
+		 * update that introduced the latch would have delivered every
+		 * one of them UNLATCHED -- and its owner, holding the same
+		 * binary the factory uses, could have stamped it Codex. The
+		 * latch exists to stop exactly that.
+		 *
+		 * The trade is that a genuinely blank unit on old firmware
+		 * arrives latched as Claude. Only Claude units have ever
+		 * shipped, so that is the right answer for every fielded
+		 * record; a bench board that was meant to become Codex needs
+		 * its config partition erased first, which is the documented
+		 * factory operation for changing a stamp.
 		 */
-		out->edition_locked = pl.edition != CFG_EDITION_CLAUDE;
+		out->edition_locked = 1;
 		out->crc = rec_crc(out);
-		printk("[cfg] migrated pre-lock record (seq %u, edition %u%s)\n",
-		       pl.seq, pl.edition,
-		       out->edition_locked ? ", locked" : "");
+		printk("[cfg] migrated pre-lock record (seq %u, edition %u, locked)\n",
+		       pl.seq, pl.edition);
 		return true;
 	}
 
@@ -236,9 +246,13 @@ static bool slot_load(int off, struct rec *out)
 		memcpy(out->ota_target, pe.ota_target, sizeof(out->ota_target));
 		out->main_src = pe.main_src;
 		out->edition = 0;	/* unset -> Claude, what shipped */
-		out->edition_locked = 0;	/* never stamped, so stampable */
+		/* Latched as Claude, for the reason given in the pre-lock
+		 * branch above: this record layout is what every fielded unit
+		 * has, and all of them are Claude units. */
+		out->edition_locked = 1;
 		out->crc = rec_crc(out);
-		printk("[cfg] migrated pre-edition record (seq %u)\n", pe.seq);
+		printk("[cfg] migrated pre-edition record (seq %u, locked)\n",
+		       pe.seq);
 		return true;
 	}
 
