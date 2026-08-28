@@ -30,7 +30,7 @@ apparatus to ask the question again. Two details it is worth keeping with it:
     deliberately.
 
 The extension, the `pc/webbridge.py` receiver, `ClaudeWebProvider`, their
-tests and the `Browser` line in `clauge status` were all removed on
+tests and the `Browser` line in `blink status` were all removed on
 2026-08-28. Three things paid for a source that returns nothing: a listening
 socket open on loopback for the daemon's whole life — the only one this
 product had — an install that asks a buyer to grant a browser extension read
@@ -47,7 +47,7 @@ plan: it sends someone to build a thing twice.
 
 ### What was built
 
-`tools/clauge-hook.sh` writes one file per session (`~/.clauge/state/<id>.state`)
+`tools/blink-hook.sh` writes one file per session (`~/.blink/state/<id>.state`)
 and one per agent, so two terminals no longer overwrite each other.
 `pc/providers/claude_state.py` reads the directory, derives a state per session
 from the last event, sweeps what has died, and reports the worst of them plus
@@ -146,7 +146,7 @@ fingertip.
 A second SKU: same board, same firmware image, same wordmark, **different boot
 clip and nothing else**. Which one a unit plays lives on the UNIT — an
 `edition` byte in the sealed config record, written once over USB with
-`clauge provision --edition codex|claude`, read once at boot by
+`blink provision --edition codex|claude`, read once at boot by
 `bootclip_active()`.
 
 A build-time flag was rejected because it forks OTA: the manifest names one
@@ -160,7 +160,7 @@ compiled in instead; the second costs 17 KB on an image using 601 KB of 4 MB.
     `edition_locked` and every later one returns `-EPERM`. "Not reachable from
     the settings screen" was being treated as the whole enforcement and is not
     — the message arrives over USB from whatever is on the other end of the
-    cable, and `clauge provision` is the same binary the customer installs.
+    cable, and `blink provision` is the same binary the customer installs.
   - **The edition survives `cfg_reset()`.** Factory reset used to wipe the
     whole record, which made the settings menu a second route to the same
     change: reset, re-provision, and a Codex box plays the Claude clip. Two
@@ -187,10 +187,9 @@ boiling on a flat held box. `tools/make_bootanim_codex.py` draws everything at
 7,571 B. **Generalise it: never threshold filmed material into a two-colour
 panel asset.**
 
-Open: white on the clip's `#76B1DB` ground measures **2.31:1**, under the 3:1
-graphic floor, and production panels are the bright ones. `#538EB8` is 3.54:1,
-`#4C82A8` is 4.15:1, black on the current blue is 9.08:1. Raise it once before
-launch.
+Done 2026-08-28: the ground is now `#4C82A8` (4.15:1 against white; it was
+`#76B1DB` at 2.31:1, under the 3:1 floor). `tools/make_bootanim_codex.py`
+defaults to it.
 
 ---
 
@@ -199,33 +198,29 @@ launch.
 Everything with a section of its own is closed. What is left is not
 implementation:
 
-1. **Decisions.** `daemon.auto` on or off; macOS notarisation; a board id on
-   the settings screen (unblocked since that panel dropped to two rows); the
-   naming question -- now visible on the unit, which says BLINK on the gauge
-   header and "Blink x.y" in settings while the installer, README, binary and
-   wire all say Clauge; the disclosure question on the five known concerns --
-   four of which are WiFi-build only and are not compiled into the shipping
-   image, but whose code is public -- and whether this paragraph, which points
-   at them, belongs in a public repository; and the Codex boot clip, which
-   deliberately mirrors the Claude clip and lands on a `>_` glyph on Codex
-   blue, which is a second company's mark.
+1. **Decided, 2026-08-28** (the README's "Decisions" table is the public
+   record): the name is **BLINK**, everywhere, repository included; a config
+   record from before the edition latch migrates **latched as Claude**, since
+   every fielded unit is a Claude unit and the open reading would have handed
+   each owner `blink provision --edition codex`; `daemon.auto` ships **off**;
+   the Codex clip's ground is now `#4C82A8` (4.15:1 against white, up from
+   2.31:1).
 
-   Decided 2026-08-28, in the review before merge: a config record from
-   before the edition latch migrates **latched as Claude** rather than open.
-   Every fielded unit is a Claude unit, and the open reading would have
-   handed each of their owners `clauge provision --edition codex`.
-2. **The Codex boot clip's contrast.** White on `#76B1DB` is 2.31:1 against a
-   3:1 floor, and production panels are the bright ones. `#4C82A8` gives 4.15.
-   Raise it once, before launch.
-3. **Merge and cut a release.** The published v0.6.0 predates the second page,
+   Still open: macOS notarisation (needs an Apple developer account); a board
+   id on the settings screen; the disclosure question on the five known
+   concerns -- four of which are WiFi-build only and are not compiled into
+   the shipping image, but whose code is public; and whether the Codex clip,
+   which mirrors the Claude clip and lands on a `>_` glyph on Codex blue,
+   trades on a second company's mark.
+2. **Merge and cut a release.** The published v0.6.0 predates the second page,
    the swipe detector, Codex as a provider, the Codex edition, per-page
    freshness, the burn rate and every fix from the August review.
-4. **Two things nobody has watched run**: Windows, and an M-series Mac. CI
+3. **Two things nobody has watched run**: Windows, and an M-series Mac. CI
    exercises the installer on both; no human has seen the product work there.
 
 Smaller, still open:
 
-- **`clauge status` says nothing about which providers are reporting.** With
+- **`blink status` says nothing about which providers are reporting.** With
   two on the wire and a preference living on the board, "Usage data fresh
   (1s old)" is less than it could say.
 - **The wire carries float noise** — `session_pct: 14.000000000000002` was

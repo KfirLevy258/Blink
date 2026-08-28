@@ -23,4 +23,4 @@
 <line x1="35.96" y1="23.58" x2="43.48" y2="28.52" stroke="#8A8F98" stroke-opacity="0.30" stroke-width="3.2" stroke-linecap="round"/>
 <line x1="30.41" y1="30.41" x2="36.77" y2="36.77" stroke="#8A8F98" stroke-opacity="0.30" stroke-width="3.2" stroke-linecap="round"/>
 <line x1="0" y1="0" x2="33.57" y2="-19.85" stroke="#F2EEE6" stroke-width="3.2" stroke-linecap="round"/>
-<circle cx="0" cy="0" r="5.1" fill="#F2EEE6"/><circle cx="0" cy="0" r="2.2" fill="#0E1116"/></g><text x="196" y="104" fill="#F2EEE6" font-size="82" font-weight="800" letter-spacing="-3">clauge</text><text x="200" y="138" fill="#8A8F98" font-size="20" letter-spacing="1.5" font-weight="500">your Claude usage, on a gauge</text></svg>
+<circle cx="0" cy="0" r="5.1" fill="#F2EEE6"/><circle cx="0" cy="0" r="2.2" fill="#0E1116"/></g><text x="196" y="104" fill="#F2EEE6" font-size="82" font-weight="800" letter-spacing="-3">BLINK</text><text x="200" y="138" fill="#8A8F98" font-size="20" letter-spacing="1.5" font-weight="500">your Claude and Codex usage, on a gauge</text></svg>

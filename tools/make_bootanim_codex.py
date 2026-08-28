@@ -191,7 +191,7 @@ def build(bg, ink):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--bg", default="76b1db", help="ground colour, hex")
+    ap.add_argument("--bg", default="4c82a8", help="ground colour, hex")
     ap.add_argument("--ink", default="ffffff", help="shape colour, hex")
     ap.add_argument("--out", required=True, help="directory for the PNGs")
     a = ap.parse_args()
