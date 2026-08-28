@@ -17,13 +17,17 @@
 #      settings.json the CLI still starts with.
 set -eu
 
-ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-WORK="${TMPDIR:-/tmp}/clauge-claude-version"
-BIN="${CLAUGE_BIN:-$ROOT/dist/clauge}"
-[ -x "$BIN" ] || { echo "no binary at $BIN -- run tools/build_binary.sh" >&2; exit 1; }
+# shellcheck source=tests/ci/lib.sh
+. "$(dirname -- "$0")/lib.sh"
+ci_binary
 
-fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
-ok() { printf '  ok   %s\n' "$*"; }
+WORK="${TMPDIR:-/tmp}/blink-claude-version"
+
+py() {
+	# The Windows runners ship `python`, not always `python3`.
+	if command -v python3 >/dev/null 2>&1; then python3 "$@"; else python "$@"; fi
+}
+
 
 command -v claude >/dev/null 2>&1 || fail "no claude on PATH"
 VERSION=$(claude --version 2>/dev/null || echo "unknown")
@@ -80,6 +84,14 @@ rm -rf "$WORK"
 HOME="$WORK/home"
 mkdir -p "$HOME/.claude"
 export HOME
+# Windows resolves ~ from USERPROFILE -- for the binary AND for Claude Code,
+# which is the point of running this job there: the two must agree on where
+# settings.json is, or the installer edits a file the CLI never reads.
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+	USERPROFILE=$(cygpath -w "$HOME")
+	export USERPROFILE ;;
+esac
 printf '%s\n' '{"model": "opus"}' >"$HOME/.claude/settings.json"
 
 "$BIN" >"$WORK/out.txt" 2>&1 || {
@@ -88,11 +100,17 @@ printf '%s\n' '{"model": "opus"}' >"$HOME/.claude/settings.json"
 }
 ok "installer runs alongside $VERSION"
 
-python3 - "$HOME/.claude/settings.json" <<'EOF' || exit 1
+py - "$HOME/.claude/settings.json" <<'EOF' || exit 1
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["model"] == "opus", "unrelated key lost"
-assert d["statusLine"]["command"].endswith("clauge-statusline.sh"), d["statusLine"]
+cmd = d["statusLine"]["command"]
+# The product's own platform rule: `bash <path>` on Windows (Claude Code
+# rewrites a .sh command that does not start with it), `sh <path>` elsewhere;
+# the path is quoted when it needs to be (the runner's temp dir has a ~).
+import sys as _s
+assert cmd.startswith("bash " if _s.platform == "win32" else "sh "), cmd
+assert "blink-statusline.sh" in cmd, cmd
 EOF
 ok "settings.json is valid JSON with our key and their keys intact"
 

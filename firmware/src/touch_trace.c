@@ -3,7 +3,7 @@
  *
  * Records every report the XPT2046 driver emits into a small RAM ring and
  * dumps the ring as CSV once the finger lifts. Built only when
- * CONFIG_CLAUGE_TOUCH_TRACE=y (see trace.conf); absent from release builds.
+ * CONFIG_BLINK_TOUCH_TRACE=y (see trace.conf); absent from release builds.
  *
  * Why RAM-then-dump instead of the driver's own LOG_DBG: with reads=<1> the
  * driver free-runs at a few hundred reports per second, while a ~30-char log

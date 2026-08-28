@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the single-file `clauge` binary for THIS platform.
+# Build the single-file `blink` binary for THIS platform.
 #
 #   tools/build_binary.sh [outdir]
 #
@@ -13,7 +13,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OUT="${1:-$ROOT/dist}"
-BUILD="${TMPDIR:-/tmp}/clauge-build"
+BUILD="${TMPDIR:-/tmp}/blink-build"
 
 command -v python3 >/dev/null 2>&1 || { echo "need python3 to build" >&2; exit 1; }
 
@@ -27,25 +27,60 @@ VBIN="$BUILD/bin"
 # customer's install can no longer drift with whatever PyPI serves that day.
 "$VBIN/python" -m pip install --quiet pyinstaller -r "$ROOT/pc/requirements.txt"
 
+# Packaging and test machinery that PyInstaller collects on its own and this
+# program never imports. It only ever showed up on Linux -- 323 modules the
+# macOS build did not have, led by setuptools at 1.1 MB -- which is why the
+# Linux download was twice the size of the others for the same program.
+#
+# Nothing under pc/ imports any of these, and neither does esptool, pyserial
+# or ecdsa (checked against the pinned versions). asyncio and multiprocessing
+# are also collected and also unused, but they are left in: together they are
+# 0.4 MB, and unlike the list below they are plausible lazy imports for some
+# future dependency, where a wrong exclusion surfaces as a crash on a
+# customer's machine rather than at build time.
+set -- \
+	--exclude-module setuptools \
+	--exclude-module pkg_resources \
+	--exclude-module distutils \
+	--exclude-module packaging \
+	--exclude-module unittest \
+	--exclude-module doctest \
+	--exclude-module pydoc \
+	--exclude-module tkinter
+
+# The Linux libpython ships with its debug symbols: 23 MB unstripped, against
+# 7 MB for the macOS framework, which Apple strips before shipping. Stripping
+# it costs nothing a customer can observe -- there is no debugger on the other
+# end of this download -- and is most of the remaining difference.
+#
+# Linux only. PyInstaller warns that --strip can produce unusable binaries on
+# macOS, where it would also invalidate a code signature, and there is nothing
+# for it to do on Windows.
+if [ "$(uname -s)" = "Linux" ]; then
+	set -- "$@" --strip
+fi
+
 cd "$ROOT"
 "$VBIN/pyinstaller" \
 	--onefile \
-	--name clauge \
+	--name blink \
 	--distpath "$OUT" \
 	--workpath "$BUILD/work" \
 	--specpath "$BUILD" \
-	--add-data "$ROOT/tools/clauge-statusline.sh:." \
+	--add-data "$ROOT/tools/blink-statusline.sh:." \
+	--add-data "$ROOT/tools/blink-hook.sh:." \
 	--collect-all esptool \
 	--hidden-import claude_usage_bridge \
 	--hidden-import ecdsa \
 	--hidden-import serial.tools.list_ports \
+	"$@" \
 	--noconfirm --clean \
-	clauge_main.py >"$BUILD/pyinstaller.log" 2>&1 || {
+	blink_main.py >"$BUILD/pyinstaller.log" 2>&1 || {
 		tail -30 "$BUILD/pyinstaller.log" >&2
 		echo "FATAL: build failed; full log at $BUILD/pyinstaller.log" >&2
 		exit 1
 	}
 
-BUILT="$OUT/clauge"
-[ -f "$BUILT" ] || BUILT="$OUT/clauge.exe"
+BUILT="$OUT/blink"
+[ -f "$BUILT" ] || BUILT="$OUT/blink.exe"
 echo "built $BUILT ($(du -h "$BUILT" | cut -f1))"

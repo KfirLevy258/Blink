@@ -59,6 +59,23 @@ int cfg_set_ap_psk(const char *psk);
 uint8_t cfg_get_weekly_sel(void);
 int cfg_set_weekly_sel(uint8_t sel);
 
+/*
+ * Which provider the panel treats as primary -- the outer ring, the big
+ * number, the first countdown.
+ *
+ * Kept on the DEVICE rather than in the daemon because it is the device the
+ * user is looking at when they decide, and because a preference that resets
+ * every time the daemon restarts is not a preference. The board announces it
+ * to the host, which is what actually acts on it.
+ */
+enum cfg_main_src {
+	CFG_MAIN_SRC_CLAUDE = 0,	/* also the value an unset record reads as */
+	CFG_MAIN_SRC_CODEX = 1,
+};
+
+uint8_t cfg_get_main_src(void);
+int cfg_set_main_src(uint8_t src);
+
 /* Screen brightness percent, one of 20/40/60/80/100. Persisted so a reboot
  * keeps it. Returns 100 when never set (a fresh or pre-update device). */
 uint8_t cfg_get_bright_pct(void);
@@ -80,5 +97,61 @@ int cfg_set_ota_state(uint8_t st, const char *ver);
 
 /* Wipe everything (factory reset). */
 int cfg_reset(void);
+
+
+/*
+ * Which edition this unit is: which boot clip it plays.
+ *
+ * A FACTORY fact, not a preference. It is written once over USB after the
+ * board is programmed (`blink provision --edition codex`) and there is
+ * deliberately no way to reach it from the settings screen -- the enclosure
+ * decides it, and a user who could flip it would only be putting the wrong
+ * animation in the wrong box.
+ *
+ * Living on the unit rather than in the binary is what keeps ONE firmware
+ * image for both editions. The alternative was a second build, which forks
+ * the OTA feed: the manifest names one firmware and `hello` carries no
+ * edition, so a Codex unit would be offered the Claude image and would take
+ * it -- its identity reverting silently, in the field, months later. Both
+ * clips are compiled in instead and this picks between them at boot. The
+ * second one costs 17 KB on an image using 663 KB of 4 MB.
+ *
+ * 0 is Claude, so an unset record -- every unit built before this existed --
+ * reads as the edition that was already shipping.
+ *
+ * WRITE ONCE. The first successful cfg_set_edition() latches the record, and
+ * every later one is refused with -EPERM. "No way to reach it from the
+ * settings screen" was not enough: the message that stamps it arrives over
+ * USB from whatever is on the other end of the cable, and the CLI that sends
+ * it is the same binary the user installs. Without the latch, anyone who owns
+ * a unit owns `blink provision`, and the enclosure and the animation inside
+ * it stop agreeing.
+ *
+ * The latch also survives cfg_reset(). A factory reset wipes what the USER
+ * put on the device -- network, token, preferences -- and the edition is not
+ * that. It is a property of the box the board is screwed into, and a reset
+ * that cleared it would be a second route to the same change, reachable from
+ * the settings menu with no computer involved at all.
+ *
+ * What remains is erasing the config partition with esptool over USB, with
+ * the board held in bootloader mode. That is a factory operation by
+ * construction, which is the boundary that was wanted.
+ */
+enum cfg_edition {
+	CFG_EDITION_CLAUDE = 0,
+	CFG_EDITION_CODEX = 1,
+};
+
+uint8_t cfg_get_edition(void);
+
+/* Whether this unit has already been stamped. Provisioning tools ask first so
+ * they can say "already a codex unit" instead of reporting a bare failure. */
+bool cfg_edition_locked(void);
+
+/*
+ * Stamp the edition. Returns -EPERM if this unit was already stamped, and
+ * -EINVAL for an edition this firmware does not know.
+ */
+int cfg_set_edition(uint8_t edition);
 
 #endif /* CFG_STORE_H */

@@ -69,10 +69,10 @@ jobs:
           # Not `ls a b | head -1`: ls exits non-zero when one operand is
           # missing, and this workflow runs with -e -o pipefail, so the job
           # died here before doing anything. It passed on Windows only because
-          # MSYS resolves `dist/clauge` to `dist/clauge.exe`, which is why the
+          # MSYS resolves `dist/blink` to `dist/blink.exe`, which is why the
           # one platform that cannot run the binary was the one that agreed.
-          built=dist/clauge
-          [ -f "$built" ] || built=dist/clauge.exe
+          built=dist/blink
+          [ -f "$built" ] || built=dist/blink.exe
           got=$("$built" --version)
           echo "$got"
           case "$got" in
@@ -87,20 +87,20 @@ jobs:
       # data file is exactly the failure that does not show up at build time.
       - name: verify it installs and uninstalls
         run: |
-          CLAUGE_SKIP_SERVICE=1 sh tests/ci/check_install.sh with-statusline
-          CLAUGE_SKIP_SERVICE=1 sh tests/ci/check_install.sh no-claude
+          BLINK_SKIP_SERVICE=1 sh tests/ci/check_install.sh with-statusline
+          BLINK_SKIP_SERVICE=1 sh tests/ci/check_install.sh no-claude
 
       - name: name it for the platform
         run: |
-          built=dist/clauge
-          [ -f "$built" ] || built=dist/clauge.exe
-          mv "$built" "dist/clauge-${{ matrix.label }}"
+          built=dist/blink
+          [ -f "$built" ] || built=dist/blink.exe
+          mv "$built" "dist/blink-${{ matrix.label }}"
 
       - name: attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
-        run: gh release upload "$TAG" "dist/clauge-${{ matrix.label }}" --clobber
+        run: gh release upload "$TAG" "dist/blink-${{ matrix.label }}" --clobber
 
       # The manifest that names these files' hashes is written and signed on
       # the maintainer's machine, not here -- the release key never leaves it.

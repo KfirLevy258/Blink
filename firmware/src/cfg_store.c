@@ -23,6 +23,7 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/printk.h>
+#include <errno.h>
 #include <string.h>
 
 #include "cfg_store.h"
@@ -56,7 +57,79 @@ struct rec {
 	char ap_psk[CFG_AP_PSK_MAX];
 	uint8_t ota_state;		/* 0 idle, 1 install started (cleared on next boot) */
 	char ota_target[CFG_OTA_VER_MAX]; /* version the install aimed at */
+	uint8_t main_src;		/* 0 unset -> claude; else enum cfg_main_src */
+	uint8_t edition;		/* 0 unset -> claude; else enum cfg_edition */
+	uint8_t edition_locked;		/* 1 once stamped; see cfg_set_edition */
 	uint32_t crc;		/* over everything above, always last */
+} __packed;
+
+/* The layout before the edition latch. Everything else is identical, so the
+ * only question a migration has to answer is whether the record it found had
+ * already been stamped -- see slot_load. */
+struct rec_pre_lock {
+	uint32_t magic;
+	uint32_t seq;
+	uint8_t mode;
+	uint8_t weekly_sel;
+	uint8_t tz_set;
+	uint8_t bright_pct;
+	int32_t tz_min;
+	char ssid[CFG_SSID_MAX];
+	char psk[CFG_PSK_MAX];
+	char token[CFG_TOKEN_MAX];
+	char ap_psk[CFG_AP_PSK_MAX];
+	uint8_t ota_state;
+	char ota_target[CFG_OTA_VER_MAX];
+	uint8_t main_src;
+	uint8_t edition;
+	uint32_t crc;
+} __packed;
+
+/* The layout before `edition` was added -- see the note on rec_pre_src for
+ * why every field addition needs one of these. */
+struct rec_pre_edition {
+	uint32_t magic;
+	uint32_t seq;
+	uint8_t mode;
+	uint8_t weekly_sel;
+	uint8_t tz_set;
+	uint8_t bright_pct;
+	int32_t tz_min;
+	char ssid[CFG_SSID_MAX];
+	char psk[CFG_PSK_MAX];
+	char token[CFG_TOKEN_MAX];
+	char ap_psk[CFG_AP_PSK_MAX];
+	uint8_t ota_state;
+	char ota_target[CFG_OTA_VER_MAX];
+	uint8_t main_src;
+	uint32_t crc;
+} __packed;
+
+/*
+ * The layout before main_src was added.
+ *
+ * Every field addition needs one of these, because the CRC spans everything
+ * ahead of it: a record sealed by the previous firmware has both a different
+ * length and a different CRC offset, so it fails validation outright. Without
+ * a reader for the old shape an update looks exactly like a corrupt record --
+ * and this record holds the WiFi credentials and the token. Losing it silently
+ * is the worst thing this file can do.
+ */
+struct rec_pre_src {
+	uint32_t magic;
+	uint32_t seq;
+	uint8_t mode;
+	uint8_t weekly_sel;
+	uint8_t tz_set;
+	uint8_t bright_pct;
+	int32_t tz_min;
+	char ssid[CFG_SSID_MAX];
+	char psk[CFG_PSK_MAX];
+	char token[CFG_TOKEN_MAX];
+	char ap_psk[CFG_AP_PSK_MAX];
+	uint8_t ota_state;
+	char ota_target[CFG_OTA_VER_MAX];
+	uint32_t crc;
 } __packed;
 
 /* Pre-OTA layout (shipped 0.3.0). A record sealed by that firmware fails the
@@ -100,7 +173,117 @@ static bool slot_load(int off, struct rec *out)
 		return true;
 	}
 
-	/* Not a current record -- try the pre-OTA layout. */
+	/* Not a current record -- try the layout from before the edition latch. */
+	struct rec_pre_lock pl;
+
+	memcpy(&pl, buf, sizeof(pl));
+	if (pl.magic == REC_MAGIC &&
+	    pl.crc == crc32_ieee((const uint8_t *)&pl,
+				 offsetof(struct rec_pre_lock, crc))) {
+		memset(out, 0, sizeof(*out));
+		out->magic = pl.magic;
+		out->seq = pl.seq;
+		out->mode = pl.mode;
+		out->weekly_sel = pl.weekly_sel;
+		out->tz_set = pl.tz_set;
+		out->bright_pct = pl.bright_pct;
+		out->tz_min = pl.tz_min;
+		memcpy(out->ssid, pl.ssid, sizeof(out->ssid));
+		memcpy(out->psk, pl.psk, sizeof(out->psk));
+		memcpy(out->token, pl.token, sizeof(out->token));
+		memcpy(out->ap_psk, pl.ap_psk, sizeof(out->ap_psk));
+		out->ota_state = pl.ota_state;
+		memcpy(out->ota_target, pl.ota_target, sizeof(out->ota_target));
+		out->main_src = pl.main_src;
+		out->edition = pl.edition;
+		/*
+		 * Latched, whatever it says.
+		 *
+		 * This used to read a 0 as "never written" and leave the
+		 * record open, on the argument that 0 is both "Claude" and
+		 * "blank" and an unprovisioned unit should stay provisionable.
+		 * That reading had a cost the argument left out: every unit
+		 * already in the field carries a pre-lock record, so the
+		 * update that introduced the latch would have delivered every
+		 * one of them UNLATCHED -- and its owner, holding the same
+		 * binary the factory uses, could have stamped it Codex. The
+		 * latch exists to stop exactly that.
+		 *
+		 * The trade is that a genuinely blank unit on old firmware
+		 * arrives latched as Claude. Only Claude units have ever
+		 * shipped, so that is the right answer for every fielded
+		 * record; a bench board that was meant to become Codex needs
+		 * its config partition erased first, which is the documented
+		 * factory operation for changing a stamp.
+		 */
+		out->edition_locked = 1;
+		out->crc = rec_crc(out);
+		printk("[cfg] migrated pre-lock record (seq %u, edition %u, locked)\n",
+		       pl.seq, pl.edition);
+		return true;
+	}
+
+	/* Older -- the layout from before `edition` itself. */
+	struct rec_pre_edition pe;
+
+	memcpy(&pe, buf, sizeof(pe));
+	if (pe.magic == REC_MAGIC &&
+	    pe.crc == crc32_ieee((const uint8_t *)&pe,
+				 offsetof(struct rec_pre_edition, crc))) {
+		memset(out, 0, sizeof(*out));
+		out->magic = pe.magic;
+		out->seq = pe.seq;
+		out->mode = pe.mode;
+		out->weekly_sel = pe.weekly_sel;
+		out->tz_set = pe.tz_set;
+		out->bright_pct = pe.bright_pct;
+		out->tz_min = pe.tz_min;
+		memcpy(out->ssid, pe.ssid, sizeof(out->ssid));
+		memcpy(out->psk, pe.psk, sizeof(out->psk));
+		memcpy(out->token, pe.token, sizeof(out->token));
+		memcpy(out->ap_psk, pe.ap_psk, sizeof(out->ap_psk));
+		out->ota_state = pe.ota_state;
+		memcpy(out->ota_target, pe.ota_target, sizeof(out->ota_target));
+		out->main_src = pe.main_src;
+		out->edition = 0;	/* unset -> Claude, what shipped */
+		/* Latched as Claude, for the reason given in the pre-lock
+		 * branch above: this record layout is what every fielded unit
+		 * has, and all of them are Claude units. */
+		out->edition_locked = 1;
+		out->crc = rec_crc(out);
+		printk("[cfg] migrated pre-edition record (seq %u, locked)\n",
+		       pe.seq);
+		return true;
+	}
+
+	/* Older -- the layout from before main_src. */
+	struct rec_pre_src prev;
+
+	memcpy(&prev, buf, sizeof(prev));
+	if (prev.magic == REC_MAGIC &&
+	    prev.crc == crc32_ieee((const uint8_t *)&prev,
+				   offsetof(struct rec_pre_src, crc))) {
+		memset(out, 0, sizeof(*out));
+		out->magic = prev.magic;
+		out->seq = prev.seq;
+		out->mode = prev.mode;
+		out->weekly_sel = prev.weekly_sel;
+		out->tz_set = prev.tz_set;
+		out->bright_pct = prev.bright_pct;
+		out->tz_min = prev.tz_min;
+		memcpy(out->ssid, prev.ssid, sizeof(out->ssid));
+		memcpy(out->psk, prev.psk, sizeof(out->psk));
+		memcpy(out->token, prev.token, sizeof(out->token));
+		memcpy(out->ap_psk, prev.ap_psk, sizeof(out->ap_psk));
+		out->ota_state = prev.ota_state;
+		memcpy(out->ota_target, prev.ota_target, sizeof(out->ota_target));
+		out->main_src = 0;	/* unset -> the default, not garbage */
+		out->crc = rec_crc(out);
+		printk("[cfg] migrated pre-main_src record (seq %u)\n", prev.seq);
+		return true;
+	}
+
+	/* Older still -- the pre-OTA layout. */
 	struct rec_legacy old;
 
 	memcpy(&old, buf, sizeof(old));
@@ -291,6 +474,82 @@ uint8_t cfg_get_weekly_sel(void)
 	return cfg.weekly_sel;
 }
 
+uint8_t cfg_get_main_src(void)
+{
+	return cfg.main_src;
+}
+
+int cfg_set_main_src(uint8_t src)
+{
+	int rc;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	cfg.main_src = src;
+	rc = persist();
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
+uint8_t cfg_get_edition(void)
+{
+	return cfg.edition;
+}
+
+bool cfg_edition_locked(void)
+{
+	return cfg.edition_locked != 0;
+}
+
+/*
+ * Stamp the edition, once, for the life of the record. See cfg_store.h.
+ *
+ * The range check is here rather than only at the protocol edge because this
+ * write cannot be taken back: a value this firmware does not recognise would
+ * latch, and bootclip_active() would then fall back to Claude forever on a
+ * board that is physically a Codex unit.
+ */
+int cfg_set_edition(uint8_t edition)
+{
+	int rc;
+
+	if (edition != CFG_EDITION_CLAUDE && edition != CFG_EDITION_CODEX) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	if (cfg.edition_locked) {
+		k_mutex_unlock(&cfg_lock);
+		return -EPERM;
+	}
+	uint8_t was_edition = cfg.edition;
+
+	cfg.edition = edition;
+	cfg.edition_locked = 1;
+	rc = persist();
+	if (rc != 0) {
+		/*
+		 * The flash write failed, so nothing was latched on the device
+		 * -- and the RAM mirror must not claim otherwise, or a retry
+		 * on this same boot would be refused for a stamp that does not
+		 * exist.
+		 *
+		 * BOTH fields, not just the latch. persist() serialises the
+		 * whole struct, so leaving cfg.edition set meant the next
+		 * unrelated successful write -- a brightness change is one
+		 * line away, backlight.c -> cfg_set_bright_pct -> persist() --
+		 * sealed the new edition WITHOUT its lock. The unit would then
+		 * play the other clip while cfg_edition_locked() reported
+		 * false, so anyone with the cable could stamp it again: the
+		 * exact hole the latch exists to close, reached by a path
+		 * nobody would think to test.
+		 */
+		cfg.edition = was_edition;
+		cfg.edition_locked = 0;
+	}
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
 int cfg_set_weekly_sel(uint8_t sel)
 {
 	k_mutex_lock(&cfg_lock, K_FOREVER);
@@ -397,10 +656,39 @@ int cfg_set_ota_state(uint8_t st, const char *ver)
 int cfg_reset(void)
 {
 	k_mutex_lock(&cfg_lock, K_FOREVER);
+
+	/*
+	 * The edition survives a factory reset, and so does its latch.
+	 *
+	 * A reset wipes what the USER put on the device -- network, token,
+	 * brightness, timezone. The edition is not that. It is a property of
+	 * the enclosure the board is screwed into, decided once at the factory,
+	 * and wiping it here would have made the settings menu a second route
+	 * to changing it: reset, then re-provision, and a Codex unit is playing
+	 * the Claude clip inside a Codex box. No cable, no CLI, two taps.
+	 *
+	 * Carried through the memset rather than written back after, so there
+	 * is no window where the record on flash is unstamped.
+	 */
+	uint8_t ed = cfg.edition;
+	uint8_t locked = cfg.edition_locked;
+
 	memset(&cfg, 0, sizeof(cfg));
+	cfg.edition = ed;
+	cfg.edition_locked = locked;
+
 	flash_area_erase(fa, SLOT_A, SECTOR);
 	flash_area_erase(fa, SLOT_B, SECTOR);
 	cur_slot = -1;
+	/*
+	 * Both slots are blank now, so the stamp exists only in RAM until
+	 * something persists it. Write it back immediately: a reset is
+	 * followed by a reboot, and a power cut in that gap would take the
+	 * edition with it.
+	 */
+	if (locked) {
+		persist();
+	}
 	k_mutex_unlock(&cfg_lock);
 	return 0;
 }

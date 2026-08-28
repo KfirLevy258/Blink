@@ -13,11 +13,12 @@
 #include "version.h"
 #include "cfg_store.h"
 #include "usage_view.h"
+#include "usage_state.h"
 #include "net_time.h"
 #include "version.h"
 #include "cfg_store.h"
 
-#define PROTO_VERSION CLAUGE_PROTO_VERSION
+#define PROTO_VERSION BLINK_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
 /*
  * The daemon answers every ping with a pong, so silence means it is genuinely
@@ -33,6 +34,33 @@ static const struct device *const console_dev =
 
 static char line[LINE_MAX];
 static size_t line_len;
+
+/*
+ * A number off the wire, or the default it arrived with, and never a value
+ * outside the range the field can mean.
+ *
+ * strtod happily returns nan, inf and 1e300, and every one of those was cast
+ * straight to an int -- undefined behaviour in C, and on this soft-float
+ * target a saturated or arbitrary integer on the panel. The `time` handler
+ * has always bounded its two fields; the usage fields did not. Anything that
+ * is not a real number in range leaves the default in place, which every
+ * field here defines as "unknown" or "none".
+ */
+#define SECS_MAX 2147483647.0
+
+static void num(const char *json, const char *key, double *out,
+		double lo, double hi)
+{
+	double v;
+
+	if (!msg_get_double(json, key, &v)) {
+		return;
+	}
+	if (v != v || v < lo || v > hi) { /* nan, or out of range */
+		return;
+	}
+	*out = v;
+}
 static int64_t last_ping_ms;
 static int64_t last_host_ms;
 static bool host_seen;
@@ -76,6 +104,17 @@ static void emit(const char *json)
 	printk("%s\n", json);
 }
 
+void proto_send_pref(void)
+{
+	char buf[64];
+
+	snprintf(buf, sizeof(buf),
+		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\"}",
+		 PROTO_VERSION,
+		 cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "codex" : "claude");
+	emit(buf);
+}
+
 static void send_hello(void)
 {
 	uint8_t id[16];
@@ -94,10 +133,13 @@ static void send_hello(void)
 	char buf[160];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
-		 "\"board_id\":\"%s\",\"fw\":\"" CLAUGE_FW_VERSION "\","
+		 "\"board_id\":\"%s\",\"fw\":\"" BLINK_FW_VERSION "\","
 		 "\"reset\":\"0x%x\"}",
 		 PROTO_VERSION, idhex, cause);
 	emit(buf);
+	/* Straight after hello: a daemon that starts later, or restarts, has
+	 * no other way to learn a preference the user set while it was gone. */
+	proto_send_pref();
 }
 
 static void send_ping(void)
@@ -158,7 +200,7 @@ void proto_ota_check(void)
 	ota_ui_set(OTA_UI_CHECKING, NULL, 0);
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"ota_query\",\"v\":%d,\"cur\":\"%s\"}",
-		 PROTO_VERSION, CLAUGE_FW_VERSION);
+		 PROTO_VERSION, BLINK_FW_VERSION);
 	emit(buf);
 }
 
@@ -216,17 +258,17 @@ static void dispatch(const char *json)
 		 */
 		double ss = -1, ws = -1;
 
-		msg_get_double(json, "session_pct", &sp);
-		msg_get_double(json, "weekly_pct", &wp);
-		msg_get_double(json, "session_resets_in_s", &ss);
-		msg_get_double(json, "weekly_resets_in_s", &ws);
+		num(json, "session_pct", &sp, -1, 100);
+		num(json, "weekly_pct", &wp, -1, 100);
+		num(json, "session_resets_in_s", &ss, -1, SECS_MAX);
+		num(json, "weekly_resets_in_s", &ws, -1, SECS_MAX);
 		usage_view_update(sp, (int32_t)ss, wp, (int32_t)ws);
 
 		/* Flat model key (protocol.py flattens its models list for
 		 * us); an absent key leaves the -1 "unknown" default. */
 		double mf = -1;
 
-		msg_get_double(json, "fable_pct", &mf);
+		num(json, "fable_pct", &mf, -1, 100);
 		usage_view_set_models(mf);
 
 		/* Every usage message says whether its own numbers can be
@@ -248,11 +290,99 @@ static void dispatch(const char *json)
 		bool stale = false;
 
 		msg_get_bool(json, "stale", &stale);
+		usage_view_set_provider1_stale(stale);
+		/*
+		 * The status is armed if EITHER page is old; usage_view then
+		 * shows the warning only on a page it is actually true of.
+		 * Set below, after p2 has been parsed, because until then only
+		 * half the answer is known -- and arming on the first
+		 * provider alone was the mirror of the bug this fixes: a fresh
+		 * codex reading beside a stale claude one left the claude page
+		 * claiming to be current.
+		 */
+
+		/*
+		 * The multi-provider fields. All OPTIONAL, and all defaulting
+		 * to "say nothing": the daemon omits a key it has no answer
+		 * for rather than sending a sentinel, so an absent key and an
+		 * old daemon are the same case here and neither may turn an
+		 * indicator on. See pc/protocol.usage().
+		 */
+		char state[16];
+		enum usage_activity act = USAGE_ACTIVITY_NONE;
+
+		if (msg_get_str(json, "state", state, sizeof(state))) {
+			act = usage_activity_from_state(state);
+		}
+		usage_view_set_activity(act);
+
+		/* Session and agent counts. Absent means zero here rather than
+		 * unknown -- a daemon that sends no count is one with nothing
+		 * to report, and the readout hides itself at one session with
+		 * no agents anyway. */
+		double ns = 0, na = 0;
+
+		num(json, "n_sess", &ns, 0, 9999);
+		num(json, "n_agents", &na, 0, 9999);
+		usage_view_set_sessions((int)ns, (int)na);
+
+		char p1[16];
+
+		if (msg_get_str(json, "provider", p1, sizeof(p1))) {
+			usage_view_set_provider1(p1);
+		}
+
+		/*
+		 * How fast the session window is filling, when nothing can say
+		 * WHEN it rolls. Absent is the normal case and means zero, so a
+		 * daemon older than this firmware simply never fills the
+		 * countdown slot -- which is what it does today.
+		 *
+		 * Sent only when there is no session reset time; the two are
+		 * mutually exclusive on the daemon's side, so this is set
+		 * unconditionally and the view prefers the countdown anyway.
+		 */
+		double burn = 0;
+
+		num(json, "burn_pph", &burn, 0, 9999);
+		usage_view_set_burn(burn);
+
+		char p2[16];
+		double p2s = -1, p2w = -1, p2si = -1, p2wi = -1;
+
+		if (msg_get_str(json, "p2", p2, sizeof(p2))) {
+			bool p2stale = false;
+
+			num(json, "p2_session_pct", &p2s, -1, 100);
+			num(json, "p2_weekly_pct", &p2w, -1, 100);
+			num(json, "p2_s_in_s", &p2si, -1, SECS_MAX);
+			num(json, "p2_w_in_s", &p2wi, -1, SECS_MAX);
+			/* Absent leaves this false, so a daemon older than
+			 * this firmware reports its second provider as fresh
+			 * rather than as old -- the reading it sent IS the
+			 * latest one it has, and the alternative is a page
+			 * permanently labelled stale by a missing key. */
+			msg_get_bool(json, "p2_stale", &p2stale);
+			usage_view_set_provider2(p2, p2s, p2w, (int32_t)p2si,
+						 (int32_t)p2wi, p2stale);
+			stale = stale || p2stale;
+		} else {
+			usage_view_set_provider2("", -1, -1, -1, -1, false);
+		}
+
+		/*
+		 * AFTER both providers, and after the calls above that set OK
+		 * internally -- usage_view_update() and set_models() both do,
+		 * so arming this earlier would have the amber immediately
+		 * overwritten by green. See the note where `stale` is read.
+		 */
 		if (stale) {
 			usage_view_set_status(USAGE_STATUS_STALE);
 		}
-		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)%s\n",
-		       sp, (int)ss, wp, (int)ws, stale ? "  STALE" : "");
+
+		printk("[usage] session %.0f%% (%ds)  weekly %.0f%% (%ds)%s%s\n",
+		       sp, (int)ss, wp, (int)ws, stale ? "  STALE" : "",
+		       act == USAGE_ACTIVITY_NONE ? "" : " +state");
 	} else if (strcmp(type, "time") == 0) {
 		double epoch = 0, off = 0;
 
@@ -266,6 +396,65 @@ static void dispatch(const char *json)
 		}
 	} else if (strcmp(type, "pong") == 0) {
 		/* Liveness only: last_host_ms was already stamped above. */
+	} else if (strcmp(type, "edition") == 0) {
+		/*
+		 * A factory fact arriving over the cable, ONCE, after the
+		 * board is programmed -- see cfg_edition in cfg_store.h. The
+		 * enclosure decides which clip is right, and a user who could
+		 * flip it would only be putting the wrong animation in the
+		 * wrong box.
+		 *
+		 * "Not reachable from the settings screen" is not the whole
+		 * story and used to be treated as if it were. This message
+		 * arrives from whatever is on the other end of the cable, and
+		 * the tool that sends it is the same binary the user installs
+		 * -- so the enforcement has to be in the record, not in the
+		 * UI. cfg_set_edition latches on the first successful write
+		 * and refuses every one after it.
+		 *
+		 * Takes effect on the next boot, because what it selects is a
+		 * boot animation. Saying so in the log is the difference
+		 * between "it did nothing" and "it will do it in a moment".
+		 */
+		char ed[12];
+
+		if (msg_get_str(json, "edition", ed, sizeof(ed))) {
+			uint8_t v;
+
+			if (strcmp(ed, "claude") == 0) {
+				v = CFG_EDITION_CLAUDE;
+			} else if (strcmp(ed, "codex") == 0) {
+				v = CFG_EDITION_CODEX;
+			} else {
+				printk("[cfg] unknown edition '%s'; ignored\n", ed);
+				return;
+			}
+			/*
+			 * The LATCH decides, not the value.
+			 *
+			 * An earlier version skipped the write whenever the
+			 * stored edition already matched, which looks like a
+			 * harmless optimisation and is a hole: 0 means both
+			 * "Claude" and "never stamped", so provisioning a
+			 * blank board as claude reported success, wrote
+			 * nothing, and left it stampable as codex afterwards
+			 * by anyone with the cable.
+			 */
+			int rc;
+
+			if (cfg_edition_locked()) {
+				printk("[cfg] edition already stamped as %s;"
+				       " refusing to change it\n",
+				       cfg_get_edition() == CFG_EDITION_CODEX
+					       ? "codex" : "claude");
+			} else if ((rc = cfg_set_edition(v)) == 0) {
+				printk("[cfg] edition set to %s"
+				       " (applies on next boot)\n", ed);
+			} else {
+				printk("[cfg] could not store the edition"
+				       " (%d)\n", rc);
+			}
+		}
 	} else if (strcmp(type, "welcome") == 0) {
 		double hv = 0;
 
@@ -281,6 +470,21 @@ static void dispatch(const char *json)
 		host_proto = msg_get_double(json, "v", &hv) ? (int)hv : 0;
 		printk("[proto] host connected: app %s, protocol %d\n",
 		       host_ver[0] ? host_ver : "?", host_proto);
+		/*
+		 * Answer. The daemon sends `welcome` as a question -- "is a
+		 * Blink board on this port?" -- and decides whether to pull
+		 * the reset line on whether anything comes back within 1.5 s
+		 * (claude_usage_bridge.probe_is_our_board). This handler used
+		 * to reply with nothing: the ota_query it was credited with
+		 * is sent once per boot by main.c, so from the second host
+		 * connection of a boot onwards the probe heard silence unless
+		 * a 10 s ping happened to land, and the board was reset -- and
+		 * replayed its boot clip -- on most daemon restarts anyway.
+		 * The preference is the right answer: it is what a host that
+		 * has just connected needs to know, and it already rides with
+		 * hello for the same reason.
+		 */
+		proto_send_pref();
 	} else if (strcmp(type, "ota_avail") == 0) {
 		double sz = 0;
 
@@ -356,18 +560,33 @@ static void dispatch(const char *json)
 static void drain_rx(void)
 {
 	uint8_t c;
+	/*
+	 * Set on overflow and cleared at the next newline. Without it an
+	 * over-long line was not dropped whole, as the comment on LINE_MAX
+	 * (and pc/protocol.py, which mirrors it) claimed: line_len went back
+	 * to 0 and the REST of the same line went on accumulating, to be
+	 * dispatched as a message of its own. With a scanner that finds keys
+	 * anywhere in the text, a tail that happened to contain "t":"..."
+	 * parsed as a frame the host never sent.
+	 */
+	static bool discarding;
 
 	while (ring_buf_get(&rx_ring, &c, 1) == 1) {
 		if (c == '\n' || c == '\r') {
-			if (line_len > 0) {
+			if (discarding) {
+				discarding = false;
+			} else if (line_len > 0) {
 				line[line_len] = '\0';
 				dispatch(line);
-				line_len = 0;
 			}
+			line_len = 0;
+		} else if (discarding) {
+			/* the tail of a line already given up on */
 		} else if (line_len < LINE_MAX - 1) {
 			line[line_len++] = (char)c;
 		} else {
-			line_len = 0; /* overflow: drop the line */
+			line_len = 0;
+			discarding = true; /* overflow: drop the WHOLE line */
 		}
 	}
 
@@ -402,7 +621,7 @@ bool proto_host_outdated(void)
 	 * usually because the app on the computer has no way to update itself
 	 * that the customer has noticed. Usage keeps flowing either way. */
 	return host_seen && host_ver[0] &&
-	       ota_version_newer(CLAUGE_FW_VERSION, host_ver);
+	       ota_version_newer(BLINK_FW_VERSION, host_ver);
 }
 
 bool proto_host_seen(void)

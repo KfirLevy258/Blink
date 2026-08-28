@@ -10,7 +10,7 @@
 
 struct ota_manifest {
 	char version[16];	/* "0.4.0" */
-	uint32_t size;		/* bytes of clauge-fw.bin */
+	uint32_t size;		/* bytes of blink-fw.bin */
 	char sha256[65];	/* lowercase hex + NUL */
 };
 

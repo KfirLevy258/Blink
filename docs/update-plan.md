@@ -19,7 +19,7 @@ All four workstreams landed. Three things the hardware or the machine changed:
   the speed does not move, which makes an update take about four minutes rather
   than two -- and the board's on-screen promise was corrected to match.
 - **The self-test needs a generous timeout.** 60 s looked ample for
-  `clauge --version` (about 2 s of CPU). Measured at 97 s on a machine under
+  `blink --version` (about 2 s of CPU). Measured at 97 s on a machine under
   load average 89, which is exactly when someone might run an update. Timing
   out means refusing a good release, so it is 300 s.
 - **CI cannot sign.** §4.5 assumed the workflow could assemble the manifest.
@@ -41,7 +41,7 @@ Facts, with references, so the plan below is not arguing against a strawman.
 
 | | |
 |---|---|
-| One release carries both | `tools/release.sh` tags `v<version.h>` and attaches `clauge-fw.bin` + `manifest.json`; publishing fires `release-binaries.yml`, which builds the four PyInstaller binaries **from the same tag** and attaches them. |
+| One release carries both | `tools/release.sh` tags `v<version.h>` and attaches `blink-fw.bin` + `manifest.json`; publishing fires `release-binaries.yml`, which builds the four PyInstaller binaries **from the same tag** and attaches them. |
 | Firmware updates | Board emits `ota_query{cur}` (`proto.c:148`) → daemon compares against `releases/latest/download/manifest.json` (`bridge.py:97`) → `ota_avail` → user consents on the panel → `ota_flash` → daemon runs esptool against slot0 (`ota.py:148`). |
 | Daemon updates | **None.** No version constant, no check, no `update` subcommand. |
 | Protocol version | `PROTO_VERSION 2` (`proto.c:20`) and `VERSION = 2` (`protocol.py:9`). Both sides stamp `"v"` on every message. **Neither side ever reads it.** |
@@ -128,10 +128,10 @@ flashes; a manifest with an uppercase hash still matches.
 
 - New `pc/version.py`: `RELEASE_VERSION = "0.6.0"`, `PROTO_VERSION = 2`.
   `pc/protocol.py` imports `PROTO_VERSION` rather than defining its own `VERSION`.
-- `firmware/src/version.h` keeps `CLAUGE_FW_VERSION`; move `PROTO_VERSION` there
+- `firmware/src/version.h` keeps `BLINK_FW_VERSION`; move `PROTO_VERSION` there
   from `proto.c:20` so one header answers both questions.
 - New `tests/ci/check_versions.sh`: greps both files, fails if
-  `RELEASE_VERSION != CLAUGE_FW_VERSION` or the two `PROTO_VERSION`s differ.
+  `RELEASE_VERSION != BLINK_FW_VERSION` or the two `PROTO_VERSION`s differ.
   Runs in CI **and** as the first thing `tools/release.sh` does.
 
 ### 3.2 Put the real numbers on the wire
@@ -148,7 +148,7 @@ Read `v` on both sides and act on exactly two cases:
 
 | Case | Meaning | Behaviour |
 |---|---|---|
-| `welcome.v < board PROTO_VERSION` | The computer's app is older than the firmware | Board: persistent settings notice "The Clauge app on your computer is out of date", plus the update badge. Usage keeps flowing — that path is proto-stable. |
+| `welcome.v < board PROTO_VERSION` | The computer's app is older than the firmware | Board: persistent settings notice "The Blink app on your computer is out of date", plus the update badge. Usage keeps flowing — that path is proto-stable. |
 | `hello.v > daemon PROTO_VERSION` | Same thing, seen from the daemon | Daemon logs it once and **refuses to offer firmware updates**: it cannot safely drive a board it does not understand. `ota_query` gets `ota_none`. |
 
 The reverse (daemon newer than board) is the normal upgrade path and needs no
@@ -213,16 +213,16 @@ without it, auto-update is a mechanism with no brake.
   `ota.is_newer`.
 - `download_and_verify(url, size, sha256)` → bytes; raises on either mismatch.
 - `apply(blob) -> (ok, message)`:
-  1. write `~/.clauge/bin/clauge.new` (same directory, so the replace is atomic)
+  1. write `~/.blink/bin/blink.new` (same directory, so the replace is atomic)
   2. `chmod 0755`
-  3. **run `clauge.new --version` and require it to print the expected version.**
+  3. **run `blink.new --version` and require it to print the expected version.**
      Non-negotiable: this is a login agent. A corrupt binary that gets as far as
      being the service's target is a device that never comes back and a customer
      who has to start over. A 200 ms self-test buys that away.
   4. `os.replace(installed_bin(), installed_bin() + ".old")` — required on
      Windows, harmless elsewhere; `_make_way_for_copy()` in `cli.py` already
      does this dance and should be reused
-  5. `os.replace(clauge.new, installed_bin())`
+  5. `os.replace(blink.new, installed_bin())`
   6. restart (§4.3)
 - Rollback: a failure at 1–3 deletes `.new` and changes nothing. A failure
   between 4 and 5 leaves `.old` in place; `cmd_run` and `cmd_status` gain a
@@ -231,29 +231,29 @@ without it, auto-update is a mechanism with no brake.
 
 ### 4.3 Restarting, per platform
 
-| | From the CLI (`clauge update`) | From inside the daemon |
+| | From the CLI (`blink update`) | From inside the daemon |
 |---|---|---|
-| macOS | `launchctl kickstart -k gui/$UID/com.clauge.bridge` | `sys.exit(0)` — KeepAlive brings it back within `ThrottleInterval` (10 s) |
-| Linux | `systemctl --user restart clauge-bridge.service` | `sys.exit(0)` — `Restart=always`, `RestartSec=10` |
+| macOS | `launchctl kickstart -k gui/$UID/com.blink.bridge` | `sys.exit(0)` — KeepAlive brings it back within `ThrottleInterval` (10 s) |
+| Linux | `systemctl --user restart blink-bridge.service` | `sys.exit(0)` — `Restart=always`, `RestartSec=10` |
 | Windows | `schtasks /end` then `/run` | spawn `installed_bin() run` detached (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`), then exit. The onlogon task still points at the same path, so nothing is orphaned beyond this session. |
 
 ### 4.4 Entry points and cadence
 
-- `clauge update` — explicit, prints what it will do, applies, restarts.
-- `clauge --version` — needed by 4.2 step 3 anyway; also the first thing anyone
+- `blink update` — explicit, prints what it will do, applies, restarts.
+- `blink --version` — needed by 4.2 step 3 anyway; also the first thing anyone
   asks in support.
-- `clauge status` — gains an "App" line: current version, and "update available
+- `blink status` — gains an "App" line: current version, and "update available
   (X.Y.Z)" when there is one.
 - Daemon: checks 60 s after the first successful board connect (not at process
   start — a crash-looping daemon must not hammer GitHub), then every 24 h.
-  State in `~/.clauge/update.json`: `{"last_check", "available", "declined"}`.
-- Opt-out that we honour regardless of `daemon.auto`: `CLAUGE_NO_AUTO_UPDATE=1`
-  or a `~/.clauge/no-auto-update` file.
+  State in `~/.blink/update.json`: `{"last_check", "available", "declined"}`.
+- Opt-out that we honour regardless of `daemon.auto`: `BLINK_NO_AUTO_UPDATE=1`
+  or a `~/.blink/no-auto-update` file.
 
 ### 4.5 Signing (D6)
 
 Manifest v2 is signed with a **separate** P-256 release key — not
-`~/.clauge/ota_signing_key_p256.pem`, which is MCUboot's; mixing key purposes is
+`~/.blink/ota_signing_key_p256.pem`, which is MCUboot's; mixing key purposes is
 how one compromise becomes two. `release.sh` writes `manifest.json.sig`;
 `pc/update.py` embeds the public half and refuses any manifest that does not
 verify, before it reads a single field.
@@ -278,7 +278,7 @@ that knows how to drive the new firmware.
 3. Board copy when both are present: *"Update to 0.6.0 — this also updates the
    app on your computer."*
 4. On `ota_flash`, if the daemon is behind: write
-   `~/.clauge/pending_fw.json` = `{"version": "0.6.0"}`, self-update, restart.
+   `~/.blink/pending_fw.json` = `{"version": "0.6.0"}`, self-update, restart.
 5. The new daemon sees `pending_fw.json` on its next `hello`, re-fetches,
    re-verifies, flashes, deletes the file.
 6. The board is showing "keep it connected" across the whole sequence — which is
@@ -311,7 +311,7 @@ strictly better and not much more script.
 Also in `release.sh`:
 - run `tests/ci/check_versions.sh` first
 - keep the existing artifact greps (`/api/oauth/usage`, `refresh_token`,
-  `claude-code/`, `CONFIG_CLAUGE_WIFI_MODE=y`)
+  `claude-code/`, `CONFIG_BLINK_WIFI_MODE=y`)
 - assert each built binary's `--version` matches the tag
 
 ---
@@ -343,7 +343,7 @@ because all three rounds looked like the same failure and were not.
 
 **The install path was fine. The uninstall path had never actually run.** For
 as long as the packaged daemon crashed on startup (fixed in 5eaa9e4) no process
-held `clauge.exe` long enough to matter, so uninstall's
+held `blink.exe` long enough to matter, so uninstall's
 `rmtree(ignore_errors=True)` always appeared to work. Fixing the daemon made it
 stay alive, and six Windows scenarios went red in the same run.
 
@@ -353,7 +353,7 @@ Three distinct problems wearing one error message:
    uninstall printed "removed" over a 12 MB binary that was still there, with
    the Scheduled Task already deleted so nothing would ever come back for it.
    Now it retries, reports, and exits non-zero.
-2. **The fix killed the uninstaller.** `taskkill /f /im clauge.exe` as a last
+2. **The fix killed the uninstaller.** `taskkill /f /im blink.exe` as a last
    resort matches the uninstaller, which has that image name. It terminated
    itself mid-uninstall, after removing the task and the status line. The
    symptom was every scenario exiting non-zero with no output at all -- which
@@ -383,10 +383,10 @@ on failure, which would have answered it the first time.
 | `tests/pc/test_ota.py` | manifest v2 parses; a v1 manifest still works (D3 regression guard) |
 | `tests/ota_parse/host_test.c` | firmware-side manifest parse tolerates the new keys |
 | `tests/ci/check_versions.sh` (new) | the four version numbers agree |
-| `tests/ci/check_install.sh` | new `update` scenario: install an old build, point `CLAUGE_OTA_DIR` at a local feed, run `clauge update`, assert the binary was replaced, `--version` moved, and the service is still registered |
+| `tests/ci/check_install.sh` | new `update` scenario: install an old build, point `BLINK_OTA_DIR` at a local feed, run `blink update`, assert the binary was replaced, `--version` moved, and the service is still registered |
 | `release-binaries.yml` | each built binary's `--version` matches the tag |
 
-`CLAUGE_OTA_DIR` already exists for exactly this kind of local-feed testing and
+`BLINK_OTA_DIR` already exists for exactly this kind of local-feed testing and
 should carry the daemon artifacts too.
 
 ---

@@ -25,7 +25,7 @@ enum ota_result {
  * older-or-equal reports newer==false, never installs). */
 enum ota_result ota_check(struct ota_manifest *out, bool *newer);
 
-/* Blocking: stream clauge-fw.bin into slot1, verify sha256, mark pending.
+/* Blocking: stream blink-fw.bin into slot1, verify sha256, mark pending.
  * On OTA_OK the caller persists cfg_set_ota_state(1, m->version) and
  * reboots. Progress lands in the snapshot for the UI. */
 enum ota_result ota_install(const struct ota_manifest *m);

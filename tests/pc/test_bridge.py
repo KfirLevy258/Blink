@@ -151,3 +151,74 @@ if __name__ == "__main__":
 # exception production could not produce, which is the shape of a test that
 # outlives its subject: green, specific, and describing something that stopped
 # being true when pc/usage_api.py was deleted.
+
+
+class PrefMessage(unittest.TestCase):
+    """The board announces which provider the user made primary."""
+
+    def _bridge(self, applied):
+        return Bridge(write_msg=lambda m: None, fetch_usage=lambda: None,
+                      set_preferred=lambda p: applied.append(p) or True)
+
+    def test_a_pref_message_reaches_the_bus(self):
+        applied = []
+        self._bridge(applied).on_message(
+            {"t": "pref", "v": 2, "provider": "codex"})
+        self.assertEqual(applied, ["codex"])
+
+    def test_a_pref_without_a_provider_is_ignored(self):
+        applied = []
+        self._bridge(applied).on_message({"t": "pref", "v": 2})
+        self.assertEqual(applied, [])
+
+    def test_a_non_string_provider_is_ignored(self):
+        applied = []
+        self._bridge(applied).on_message(
+            {"t": "pref", "v": 2, "provider": 7})
+        self.assertEqual(applied, [])
+
+    def test_a_daemon_without_a_bus_does_not_crash_on_pref(self):
+        """The tests wire a Bridge with no bus at all; a board that announces
+        its preference to one must not take it down."""
+        b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None)
+        b.on_message({"t": "pref", "v": 2, "provider": "codex"})
+
+
+# --- the OTA guard must not depend on a reset --------------------------------
+#
+# hello is sent once, at boot. The daemon now connects to an already-running
+# board without resetting it, so there is no hello -- and _board_ahead() gated
+# the one operation that writes slot0 in place with no revert behind it.
+
+
+def test_the_protocol_version_is_learned_without_a_hello():
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: None)
+    assert b._board_proto is None
+    b.on_message({"t": "ping", "v": 99, "up_ms": 10})
+    assert b._board_proto == 99
+    assert b._board_ahead() is True
+
+
+def test_a_board_ahead_is_refused_an_update_on_a_no_reset_connection(capsys):
+    """The regression in full: connect with no hello, then a query."""
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: None)
+    b.on_message({"t": "ping", "v": 99, "up_ms": 10})      # no hello anywhere
+    b.on_message({"t": "ota_query", "v": 99, "cur": "9.9.9"})
+    assert any(m.get("t") == "ota_none" for m in sent)
+    assert not any(m.get("t") == "ota_avail" for m in sent)
+
+
+def test_the_firmware_version_is_learned_from_the_query():
+    b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None)
+    b.on_message({"t": "ota_query", "v": 2, "cur": "0.6.0"})
+    assert b._board_fw == "0.6.0"
+
+
+def test_hello_still_wins_and_does_not_double_announce(capsys):
+    b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None)
+    b.on_message({"t": "hello", "v": 2, "fw": "0.6.0", "board": "cyd"})
+    assert b._board_proto == 2
+    assert b._board_fw == "0.6.0"
+    assert b._board_ahead() is False

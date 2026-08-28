@@ -1,191 +1,95 @@
 <div align="center">
 
-<img src="docs/img/logo.png" alt="Clauge" width="560">
+<img src="docs/img/brand/logo-wide.png" alt="BLINK" width="420">
 
-**A little desk gauge for your Claude Code usage.**
-Your 5-hour session and 7-day week, as two live dials you can glance at all day.
+**Your Claude Code and Codex usage, as two live dials on your desk.**
 
 <p>
-  <img src="https://img.shields.io/badge/firmware-v0.5.0-D97757?style=flat-square&labelColor=171B22">
+  <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=flat-square&labelColor=171B22&color=D97757&label=release"></a>
   <img src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-8A8F98?style=flat-square&labelColor=171B22">
-  <img src="https://img.shields.io/badge/RTOS-Zephyr-6FBF8B?style=flat-square&labelColor=171B22">
+  <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-6FBF8B?style=flat-square&labelColor=171B22&label=runs%20on">
   <img src="https://img.shields.io/badge/updates-over--the--air-E8A05C?style=flat-square&labelColor=171B22">
 </p>
 
-<img src="docs/img/enclosure-placeholder.png" alt="Clauge on a desk" width="580">
-
-</div>
-
 <table>
   <tr>
-    <td width="33%"><img src="docs/img/screen-usage.png" alt="Live usage screen"><br><sub><b>Live usage</b> - session &amp; weekly, per model</sub></td>
-    <td width="33%"><img src="docs/img/screen-settings.png" alt="Settings screen"><br><sub><b>Settings</b> - brightness, updates, reset</sub></td>
-    <td width="33%"><img src="docs/img/screen-update.png" alt="Software update screen"><br><sub><b>Updates</b> - over the air, and safe</sub></td>
+    <td align="center"><img src="docs/img/photos/claude-case-wink.webp" alt="The Claude case, mid-blink" width="340"></td>
+    <td align="center"><img src="docs/img/photos/codex-case-gauges.webp" alt="The Codex case, dials live" width="300"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Claude edition</b></sub></td>
+    <td align="center"><sub><b>Codex edition</b></sub></td>
   </tr>
 </table>
 
-## What is Clauge?
+</div>
 
-Clauge is a small desk display that shows how much of your Claude Code usage you've spent - the same numbers as the `/usage` command, but always in view. It reads your **5-hour session** limit and your **7-day weekly** limit and draws each as a dial, green while you have room, amber as you get close, red when it's nearly gone. Glance over, know where you stand, keep working.
+## What it is
 
-It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the setup once, and it sits on your desk and keeps itself up to date.
+BLINK is a small touchscreen that shows the same numbers as Claude Code's `/usage` command, always in view: your **5-hour session** and your **7-day week**, each as a dial that turns from green to amber to red, with a countdown to its reset. It plugs into your computer over USB, sets itself up in one command, and keeps itself updated.
 
-## What's in here
+## Features
 
-| Path | What's there |
-|------|--------------|
-| `firmware/` | The device firmware (Zephyr, C) - this is the product |
-| `firmware/src/ota.c` | The update engine: signed install + automatic rollback |
-| `pc/`, `claude_usage_bridge.py` | The USB bridge and its setup, shipped as one binary - this is how a board gets its numbers |
-| `tools/` | Build, flash, and release helpers |
-| `docs/img/` | Logo, icons, and the screen renders above |
+- **Two dials, two countdowns.** Session and weekly limits, and the time until each one resets.
+- **An activity light.** Whether Claude Code is working, waiting on you, or has gone quiet mid-task, across every session you have open.
+- **A page per provider.** Claude and Codex each get their own screen. Tap the name or swipe to switch; the needles move from one reading to the other.
+- **Claude Desktop too.** With Desktop alone the dials show both percentages and how fast the window is filling.
+- **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, no network, nothing sent anywhere.
+- **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
+- **Cheap, open hardware.** An ESP32 "Cheap Yellow Display" (~$12) and a 3D-printed case.
 
-## Hardware
+## The screens
 
-Clauge runs on the **ESP32-2432S028 "Cheap Yellow Display" (CYD)** - a popular all-in-one board with a 2.8" 320×240 touchscreen, for around $12. The common variants all work.
+<table>
+  <tr>
+    <td width="33%"><img src="docs/img/screen-claude.png" alt="The Claude page"><br><sub><b>Claude</b> - session and weekly, with the countdown to each reset</sub></td>
+    <td width="33%"><img src="docs/img/screen-codex.png" alt="The Codex page"><br><sub><b>Codex</b> - its own page, swipe or tap the name to switch</sub></td>
+    <td width="33%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop only"><br><sub><b>Claude Desktop alone</b> - no reset times exist, so a rate instead</sub></td>
+  </tr>
+</table>
 
-**Get the board:** [search AliExpress for "ESP32-2432S028"](https://www.aliexpress.com/w/wholesale-esp32%2D2432s028.html)
+<sub>Rendered by the shipping firmware's own drawing code, not mocked up.</sub>
 
-### Enclosure
+## Setup
 
-A 3D-printable case gives the bare board a home on your desk. **[Download the CAD files](#)** *(coming soon)*
-
-## Connecting it
-
-Clauge reads your usage over the **USB cable**, from Claude Code itself. Plug the board into your computer and run the setup below; your usage streams over the cable, and the same connection handles updates.
-
-The device never joins your network, never signs in to anything, and never holds a credential - the numbers come from the Claude Code already running on your machine.
-
-### Setting it up
-
-**One file. Download it, run it, done.** No Python, no package manager,
-nothing to keep installed.
+One file. Download it, run it, delete it. It copies itself to `~/.blink/bin`, finds the board, and starts again every time you log in.
 
 ```bash
 # macOS (Apple silicon)
-curl -fsSL -o clauge https://github.com/KfirLevy258/Clauge/releases/latest/download/clauge-macos-arm64
-# macOS (Intel):  .../clauge-macos-x86_64
-# Linux:          .../clauge-linux-x86_64
+curl -fsSL -o blink https://github.com/KfirLevy258/Blink/releases/latest/download/blink-macos-arm64
+# macOS (Intel):  .../blink-macos-x86_64
+# Linux:          .../blink-linux-x86_64
 
-chmod +x clauge && ./clauge
+chmod +x blink && ./blink
 ```
 
-That is the whole setup. It finds the board by itself and starts again every
-time you log in - plug the cable in and the panel comes up.
-
-**Then delete the file.** It copies itself to `~/.clauge/bin` on the way
-through, so nothing has to stay in your Downloads folder.
+On Windows, download `blink-windows-x86_64.exe` from the [latest release](https://github.com/KfirLevy258/Blink/releases/latest) and run it.
 
 ```bash
-~/.clauge/bin/clauge status      # is the panel getting data?
-~/.clauge/bin/clauge uninstall   # put everything back
+~/.blink/bin/blink status      # is the panel getting data?
+~/.blink/bin/blink uninstall   # put everything back
 ```
 
-*Downloading with `curl` rather than a browser is deliberate: macOS marks
-browser downloads as quarantined and refuses to run them until the app is
-notarised. `curl` does not, so this works today.*
+Needs Claude Code 2.1.100 or newer. The installer changes one file, `~/.claude/settings.json` (the status line command and one hook per lifecycle event), says so before it does, and keeps your own status line running. Everything it does is reversible with `uninstall`.
 
-**Needs Claude Code 2.1.100 or newer.** Clauge reads the usage figures from
-the status line, and older versions do not put them there - 2.1.0 has no
-usage figures in that payload at all, so the panel would stay blank. Update
-Claude Code first if yours is older.
+## What it works with
 
-### What the installer changes
-
-Over USB, Clauge reads the usage figures Claude Code has already worked out,
-rather than asking Anthropic for them itself. Claude Code hands those figures
-to whatever command is set as its **status line**, so that is the one setting
-Clauge has to change.
-
-| | |
+| You use | You get |
 |---|---|
-| Changes | `statusLine.command` in `~/.claude/settings.json` |
-| Creates | `~/.clauge/` - a copy of the program itself and the small status line script, so the file you downloaded can be deleted |
-| Creates | a login item, so the bridge starts with your session (a LaunchAgent on macOS, a user systemd unit on Linux, a Scheduled Task on Windows) |
-| Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
-| Reads or stores | nothing else - no credential, no token, no account data |
+| Claude Code, in a terminal or an IDE | Everything |
+| Codex CLI | Everything, on its own page |
+| Claude Desktop, without Claude Code | Percentages and a rate; no countdowns, no activity light |
+| claude.ai in a browser | Nothing - there is no usage data to read |
 
-**It does this without asking**, so that plugging the board in is the whole
-setup. It prints all of the above before it changes anything, and every part
-of it is reversible:
+## Privacy
 
-```bash
-~/.clauge/bin/clauge uninstall
-```
+BLINK never sees a credential and never sends anything anywhere. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`. The device holds no token: nothing to leak, nothing to revoke if you lend it.
 
-**If you already have your own status line, it keeps working.** Clauge records
-your existing command, and runs it after capturing the usage figures - your bar
-renders exactly as before. Uninstalling puts your command back unchanged, and
-will not touch a status line Clauge did not install.
+## Read more
 
-## Build &amp; flash
+- **[The full README](docs/README-full.md)** - how the numbers are found, what the installer changes line by line, ports and multiple boards, updates and signing, the decisions behind the first release
+- **[firmware/README.md](firmware/README.md)** - building, flashing and signing the firmware yourself
+- **[docs/multi-provider.md](docs/multi-provider.md)** - how two sources are merged into one reading
+- **[docs/windows-check.md](docs/windows-check.md)** - the ten-minute check a Windows release needs a person for
 
-You only need this to put firmware on a board yourself (after that, it updates over the air). It uses the [Zephyr](https://zephyrproject.org/) toolchain.
-
-The default build is what ships: USB only, with no radio, no sign-in and no token store compiled in. The on-device Wi-Fi path is still here and still builds - add `-DEXTRA_CONF_FILE=wifi.conf` to the command below - it is simply not in anything released.
-
-```bash
-source ~/zephyr-v4.4.0/.venv/bin/activate
-source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
-
-cd firmware
-west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
-  -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
-  -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.clauge/ota_signing_key_p256.pem\""
-
-# Which flash path you need depends on the board -- stock CYDs are unfused,
-# and the two kinds cannot boot each other's images:
-espefuse.py --port <port> summary | grep FLASH_CRYPT_CNT   # odd bits set = encrypted
-
-# Unfused board -- two commands, because west flash writes only the app at
-# 0x20000 and leaves MCUboot at 0x1000 untouched:
-west flash -d build-sb --esp-device <port> --esp-baud-rate 115200
-esptool.py --port <port> --baud 115200 write_flash 0x1000 build-sb/mcuboot/zephyr/zephyr.bin
-
-# Fused board (flash-encryption eFuses burned) -- the script re-checks the
-# chip itself and refuses one it would leave dark:
-../tools/flash_encrypted.sh
-```
-
-Full details - the signing key, the encrypted-flash setup, and the release flow - are in **[firmware/README.md](firmware/README.md)**.
-
-## Updates
-
-Clauge is two halves that ship as one release: the firmware on the board, and the app on your computer. They always carry the same version number.
-
-Clauge checks for a new release as soon as it starts up, and if it finds one it asks you - **Update now** or **Later** - right on the gauge screen. One tap installs both halves. If the release also carries a newer app, the screen says so, and that half goes first: the new app is what knows how to drive the new firmware.
-
-The board has no network of its own, so the app does the work. It downloads the release, checks it against the hash the release publishes, and writes it over the same cable - then reads it back off the chip to confirm what landed there. The screen goes dark for about four minutes while that happens; it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
-
-You get a confirmation on screen once the new version is up.
-
-**Updating the app on your own.** You can also run it yourself:
-
-```sh
-~/.clauge/bin/clauge update     # fetch and install a newer app
-~/.clauge/bin/clauge status     # which versions are you on?
-```
-
-The settings screen shows both versions, and says **App is old** when the half on your computer is the one that is behind.
-
-Automatic app updates are off unless a release turns them on. To keep them off whatever a release says, `touch ~/.clauge/no-auto-update`.
-
-**Both halves are signed, by two separate keys.** Firmware images are signed with a key only you hold, and the bootloader rejects anything else - so nobody can push firmware to your device, not by forking this repo, not by uploading a release, even though the repo is public. The release manifest that drives app updates is signed with a second key, and the app refuses to read a manifest that does not verify. Two keys rather than one because they protect different things, and one compromise should not be two.
-
-## Security &amp; privacy
-
-- **Only you can update your device.** Firmware must be signed with your private key (kept off this repo, at `~/.clauge/…`); the bootloader rejects anything else. App updates must be signed with a second key of yours, or the app will not install them. The public repo only lets people read and download the firmware, which holds no secrets.
-- **The device holds no credential.** It never signs in and never talks to Anthropic. The figures come from the Claude Code on your own machine, which has already worked them out, and reach the board over the cable. There is no token on the device to leak, and nothing to revoke if you sell or lend it.
-- **The setup touches one setting.** `statusLine.command` in `~/.claude/settings.json`, and nothing else - see "What the installer changes" above. It is reversible with one command.
-- The on-device Wi-Fi and sign-in path still exists in this repository, behind `CONFIG_CLAUGE_WIFI_MODE`, but is **not built into shipped firmware** - the release script refuses to publish an image containing it.
-
-## The status dot
-
-A small dot in the top-right corner tells you how fresh the numbers are:
-
-| Dot | Meaning |
-|-----|---------|
-| 🟢 green | Connected - live data |
-| 🟠 amber | Stale - showing the last good numbers, because Claude Code has not refreshed them recently or the window they describe has since reset |
-| 🔴 red | Error |
-| ⚪ grey | Signed out |
+<div align="center"><sub>Firmware: Zephyr, C. App: Python, shipped as one binary. Board: ESP32-2432S028.</sub></div>

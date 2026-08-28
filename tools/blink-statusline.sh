@@ -1,23 +1,41 @@
 #!/bin/sh
-# Clauge statusline shim.
+# Blink statusline shim.
 #
 # Claude Code pipes its statusline JSON to this script on every render. We keep
-# a copy for the Clauge daemon, then hand the SAME input to whatever statusline
-# command was configured before Clauge was installed, so the user's status bar
+# a copy for the Blink daemon, then hand the SAME input to whatever statusline
+# command was configured before Blink was installed, so the user's status bar
 # is unchanged.
 #
-# Nothing here reads a credential: the payload contains only the two usage
-# percentages Claude Code has already computed.
+# Nothing here reads a credential. But be exact about what IS kept, because
+# the install disclosure repeats it: this stores Claude Code's whole status
+# line payload, which alongside the two usage percentages carries the session
+# id, the working directory, the transcript path, the workspace directories
+# and the session's cost. The daemon reads only `rate_limits` out of it and
+# nothing else leaves this file -- but the file exists, so it is written
+# readable by this user alone (the umask below), and the disclosure says what
+# is in it rather than claiming it holds two numbers. POSIX sh has no JSON
+# parser, and a sed that tried to cut the payload down would be a second
+# thing to get wrong on every render.
+#
+# One file, not one per session. This briefly wrote a file per session id, to
+# support a per-conversation context meter and a model label -- both of which
+# have since been taken off the panel, the context meter because with several
+# agents running there are several contexts at different levels and no single
+# number is any of them. With them gone the two remaining figures are
+# account-wide and identical in every terminal, so the last render is as good
+# as any.
 input=$(cat)
+umask 077
+
 
 # Atomic write: the daemon may read this file at any moment, and a half-written
 # file would parse as malformed and blank the panel. Failures here (disk full,
-# unwritable HOME, ...) degrade silently -- Clauge's own capture is allowed to
+# unwritable HOME, ...) degrade silently -- Blink's own capture is allowed to
 # be broken, but that must never print to the terminal on every render.
 # Guarded, because this runs on EVERY status line render -- many times a
 # minute -- and an unconditional mkdir forks a process each time to create a
 # directory that has existed since the first one.
-[ -d "$HOME/.clauge" ] || mkdir -p "$HOME/.clauge" 2>/dev/null
+[ -d "$HOME/.blink" ] || mkdir -p "$HOME/.blink" 2>/dev/null
 # 2>/dev/null must come BEFORE the '>' target on this line, not after: if
 # opening the target itself fails (e.g. the mkdir above also failed), the
 # shell reports that failure using whatever stderr was in effect when the '>'
@@ -25,15 +43,19 @@ input=$(cat)
 # point, so it looks like it suppresses the error but doesn't -- confirmed
 # leaking "Permission denied" on every render under both sh and dash before
 # this was reordered.
-printf '%s' "$input" 2>/dev/null > "$HOME/.clauge/statusline.json.tmp" &&
-  mv -f "$HOME/.clauge/statusline.json.tmp" "$HOME/.clauge/statusline.json" 2>/dev/null
+#
+# The temp name carries this process's pid: several terminals render at once,
+# and one shared temp name let a second render truncate the first's
+# half-written file before its rename.
+printf '%s' "$input" 2>/dev/null > "$HOME/.blink/statusline.json.$$.tmp" &&
+  mv -f "$HOME/.blink/statusline.json.$$.tmp" "$HOME/.blink/statusline.json" 2>/dev/null
 
 # Delegate to the previously configured command, if any. Never fail the status
-# bar because Clauge had a problem.
+# bar because Blink had a problem.
 #
 # Deliberately no timeout on the chain call below. A hang here is not a
 # regression: this same command ran directly as the user's statusline before
-# Clauge existed, so it hung identically then, and whatever timeout Claude
+# Blink existed, so it hung identically then, and whatever timeout Claude
 # Code applies to a statusline command still bounds this whole script from
 # the outside. POSIX sh has no portable timeout(1) (absent on stock macOS),
 # and a background-plus-kill substitute would fork two extra processes on
@@ -42,11 +64,11 @@ printf '%s' "$input" 2>/dev/null > "$HOME/.clauge/statusline.json.tmp" &&
 #
 # The payload write above MUST stay above this line. Capture happens before
 # delegation on purpose, so a wedged chain command cannot starve the panel of
-# fresh data: Clauge keeps getting current numbers even while the user's own
+# fresh data: Blink keeps getting current numbers even while the user's own
 # statusline is hung. Do not reorder this to "only record on success" -- that
-# would let a hanging chain block Clauge's own capture too, which is exactly
+# would let a hanging chain block Blink's own capture too, which is exactly
 # the failure this ordering exists to prevent.
-CHAIN="$HOME/.clauge/statusline-chain"
+CHAIN="$HOME/.blink/statusline-chain"
 if [ -s "$CHAIN" ]; then
   # `read`, not `cat`: a builtin instead of a fork, on the same every-render
   # path. The chain file is one line by construction (install writes exactly
@@ -57,7 +79,7 @@ if [ -s "$CHAIN" ]; then
   # own marker lost, shim path changed since the last install) where it
   # deliberately records our own old shim as "previous" rather than silently
   # discarding what might be a real customer command -- so the chain file can
-  # legitimately contain a Clauge shim invocation. In that specific case the
+  # legitimately contain a Blink shim invocation. In that specific case the
   # path HAS changed (that's why it's ambiguous), so this guard does not stop
   # things on the first hop: the shim now running (at the new path) sees
   # chain_cmd naming the OLD path, the two differ, and it calls through to
@@ -98,7 +120,7 @@ if [ -s "$CHAIN" ]; then
     # directory" to stderr on every single render -- exactly the terminal
     # leak an earlier commit removed from the write path. This line
     # deliberately drops ALL of the chained command's stderr, not just that
-    # one message: Clauge must never contribute terminal noise regardless of
+    # one message: Blink must never contribute terminal noise regardless of
     # source, and POSIX sh has no way to filter for one specific error text.
     printf '%s' "$input" | sh -c "$chain_cmd" 2>/dev/null
   fi

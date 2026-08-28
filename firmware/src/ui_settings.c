@@ -9,6 +9,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/sys/printk.h>
+/*
+ * The gesture thresholds are per-indev fields with no public setter and no
+ * Kconfig -- LVGL 9.3 hard-codes the defaults in lv_indev.c. See
+ * tune_gestures() for why they cannot be left alone on this panel.
+ */
+#include <indev/lv_indev_private.h>
 #include <lvgl.h>
 #include <stdio.h>
 
@@ -16,8 +22,9 @@
 #include "cfg_store.h"
 #include "ui_boot.h"
 #include "ui_anim.h"
+#include "ui_swipe.h"
 #include "ui_slide.h"
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 #include "net_wifi.h"
 #endif
 #include "fmt.h"
@@ -39,15 +46,31 @@
 #define COL_DANGER_BG	lv_color_hex(0x1E1412)	/* factory tile: red-tinted, not solid red */
 #define COL_DANGER_BD	lv_color_hex(0x7A2B23)
 
+/*
+ * Destructive actions -- and the confirm-then-reboot machinery behind them --
+ * are standalone-WiFi-only.
+ *
+ * Every one of them forgets something the device is holding: a network, a
+ * token, or all of it. A USB unit holds none of that. The config record a
+ * reset would wipe contains a brightness level and an OTA breadcrumb the next
+ * boot clears anyway, so the whole ceremony -- a confirm dialog, a cold
+ * reboot -- bought a return to 100% brightness, which the Brightness row does
+ * on the spot. See the layout note in the USB panel builder.
+ */
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 enum action {
 	ACT_WIFI,	/* forget network, keep token */
 	ACT_SIGNIN,	/* forget token, keep network */
 	ACT_FACTORY,	/* forget everything */
 };
+#endif
 
 static lv_obj_t *panel;		/* NULL when closed */
+/* Shared with the software-update install dialog, which is in both builds. */
 static lv_obj_t *confirm;	/* NULL when no dialog is up */
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 static enum action pending;
+#endif
 
 /* Software-update widgets (all NULL when their owner is closed/absent). */
 static lv_obj_t *notice;	/* outcome popup on the top layer */
@@ -109,41 +132,21 @@ static int64_t upd_revert_at;	/* "Up to date" shows briefly, then idles */
 #define USB_DL_DEADLINE_MS 300000
 static int64_t usb_dl_deadline;
 
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
+/* "Factory reset" is the honest name here and only here: this build's config
+ * record really does hold the network credentials, the refresh token and the
+ * AP password, so clearing it returns the device to the state it shipped in. */
 static const char *const act_label[] = {
 	[ACT_WIFI] = "Reset WiFi",
 	[ACT_SIGNIN] = "Re-sign-in",
-	/*
-	 * Not "Factory reset" in this build, because it is not one.
-	 *
-	 * cfg_reset() clears the whole config record, and in a WiFi build that
-	 * record holds the network credentials, the refresh token and the AP
-	 * password -- erasing it really does return the device to the state it
-	 * shipped in. None of those exist here: every write of them is behind
-	 * CONFIG_CLAUGE_WIFI_MODE and is not compiled. What is left in the
-	 * record is a brightness level, a gauge choice, and an OTA breadcrumb
-	 * that the next boot clears anyway.
-	 *
-	 * So the old name promised to erase personal data from a device that
-	 * holds none -- which is exactly backwards, since holding none is the
-	 * thing worth saying about it.
-	 */
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	[ACT_FACTORY] = "Factory reset",
-#else
-	[ACT_FACTORY] = "Reset to defaults",
-#endif
 };
 
-/* Red is for an action that costs a full re-setup. In this build the reset
- * costs two preferences, so it is an ordinary control. */
+/* Red is for the action that costs a full re-setup, and only that one;
+ * painting every confirm red made them all look equally scary. */
 static inline bool act_is_danger(enum action a)
 {
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
 	return a == ACT_FACTORY;
-#else
-	ARG_UNUSED(a);
-	return false;
-#endif
 }
 
 static void do_pending(void)
@@ -170,6 +173,7 @@ static void confirm_yes_cb(lv_event_t *e)
 	ARG_UNUSED(e);
 	do_pending();	/* never returns */
 }
+#endif /* CONFIG_BLINK_WIFI_MODE -- destructive actions */
 
 static void confirm_no_cb(lv_event_t *e)
 {
@@ -215,7 +219,7 @@ static void mk_line(lv_obj_t *parent, int y)
 	lv_obj_clear_flag(l, LV_OBJ_FLAG_SCROLLABLE);
 }
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 /* A raised panel-coloured card (decoration only -- not clickable, so the
  * controls sitting on top of it still get every touch). */
 static lv_obj_t *mk_card(lv_obj_t *parent, int x, int y, int w, int h)
@@ -237,7 +241,7 @@ static lv_obj_t *mk_card(lv_obj_t *parent, int x, int y, int w, int h)
 	lv_obj_clear_flag(c, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	return c;
 }
-#endif /* CONFIG_CLAUGE_WIFI_MODE */
+#endif /* CONFIG_BLINK_WIFI_MODE */
 
 /*
  * Brightness is five discrete levels -- 20/40/60/80/100, see backlight.h -- so
@@ -248,6 +252,22 @@ static lv_obj_t *mk_card(lv_obj_t *parent, int x, int y, int w, int h)
 #define BRIGHT_STOPS 5
 
 static lv_obj_t *pct_lbl;	/* the brightness row's subtitle: "60%" */
+
+/*
+ * No "Main source" row.
+ *
+ * It toggled which provider owned the outer ring and the big number -- back
+ * when both providers shared one gauge and one of them had to be chosen. They
+ * do not share it any more: each has a page of its own, reached with a swipe,
+ * and "which one is in front" is now answered by which page you are looking
+ * at. A stored preference that decides the same thing a second time is a
+ * second answer to a question that already has one.
+ *
+ * cfg_get/set_main_src stay: the value is still sent to the host on every
+ * hello (proto.c), where the daemon uses it to break ties when it merges
+ * sources. That is a HOST-side meaning, and it is not something to settle from
+ * across the room with a fingertip.
+ */
 static lv_obj_t *bright_big;	/* the big readout on the brightness screen */
 static lv_obj_t *bright_ov;	/* the brightness screen itself, or NULL */
 static lv_obj_t *seg[BRIGHT_STOPS];
@@ -285,7 +305,7 @@ static void bright_refresh(void)
 }
 
 /* user_data carries the step direction (+1 / -1). */
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 /* The +/- stepper, kept for the WiFi layout only. The shipped panel picks a
  * level directly -- see show_bright() -- because stepping needed four presses
  * to cross a range with five positions. */
@@ -294,8 +314,9 @@ static void bright_step_cb(lv_event_t *e)
 	backlight_step((int)(intptr_t)lv_event_get_user_data(e));
 	bright_refresh();
 }
-#endif /* CONFIG_CLAUGE_WIFI_MODE */
+#endif /* CONFIG_BLINK_WIFI_MODE */
 
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 static void show_confirm(void)
 {
 	confirm = lv_obj_create(panel);
@@ -334,6 +355,7 @@ static void act_cb(lv_event_t *e)
 	pending = (enum action)(intptr_t)lv_event_get_user_data(e);
 	show_confirm();
 }
+#endif /* CONFIG_BLINK_WIFI_MODE */
 
 /* --- Software update: tile state machine, confirm, progress overlay --- */
 
@@ -906,9 +928,20 @@ static void upd_timer_cb(lv_timer_t *t)
  */
 static bool closing;
 static volatile bool want_open;
+/*
+ * A pending provider-page change, -1 or +1, 0 for none. Same reason want_open
+ * exists: the page change is a wipe transition now, and ui_slide_run() must
+ * not be entered from inside an LVGL event callback.
+ *
+ * Only the LAST direction is kept rather than a queue. Two swipes delivered
+ * during a transition (input is not dispatched for its length, so they arrive
+ * as a burst afterwards) should land the user one page further, not replay a
+ * second 650 ms transition for a page they have already left.
+ */
+static volatile int want_page;
 static volatile bool want_close;
 
-#if !IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if !IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 /* The shipped panel's furniture: a back control, a list row, and the
  * brightness screen. The WiFi layout above predates all three and keeps
  * its own card-and-tiles arrangement, which is the only thing five
@@ -933,13 +966,20 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
 
 	lv_obj_set_size(b, 60, 36);
 	lv_obj_align(b, LV_ALIGN_TOP_LEFT, 6, 2);
-	/* Bordered rather than transparent: at this size an unmarked chevron
-	 * reads as a label, and the panel's other controls all announce
-	 * themselves with a track-coloured border. */
+	/*
+	 * Unbordered, and it keeps the 60 x 36 hit target anyway.
+	 *
+	 * The border was there to make the control announce itself at 40 x 26,
+	 * where an unmarked chevron read as a label. The SIZE is what fixed
+	 * that -- 72 x 48 reachable, 12.8 x 8.5 mm -- and once it was big
+	 * enough the box around it was a second answer to a solved problem,
+	 * sitting in the one corner of the panel that should be quietest
+	 * (user request 2026-08-27). The filled ground stays: it is what
+	 * separates the chevron from the title rule behind it.
+	 */
 	lv_obj_set_style_bg_color(b, COL_PANEL, 0);
 	lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(b, COL_TRACK, 0);
-	lv_obj_set_style_border_width(b, 1, 0);
+	lv_obj_set_style_border_width(b, 0, 0);
 	lv_obj_set_style_radius(b, 9, 0);
 	lv_obj_set_style_shadow_width(b, 0, 0);
 	lv_obj_set_style_pad_all(b, 0, 0);
@@ -970,14 +1010,19 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
  * opening the updater, and what a factory reset does before you commit to
  * finding out.
  */
-static lv_obj_t *mk_row(lv_obj_t *parent, int y, const char *title,
+/* `h` is a parameter because the number of rows decides it: the panel's usable
+ * height is shared out among however many there are, so a row is as tall as it
+ * can afford to be rather than a fixed 56. See the layout note at the call
+ * site. Labels align to the row's middle, so they follow whatever height it
+ * is given. */
+static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
 			const char *sub, bool danger, lv_event_cb_t cb,
 			void *user, lv_obj_t **sub_out)
 {
 	lv_color_t fg = danger ? COL_RED : COL_TEXT;
 	lv_obj_t *row = lv_btn_create(parent);
 
-	lv_obj_set_size(row, 296, 56);
+	lv_obj_set_size(row, 296, h);
 	lv_obj_align(row, LV_ALIGN_TOP_LEFT, 12, y);
 	lv_obj_set_style_bg_color(row, danger ? COL_DANGER_BG : COL_PANEL, 0);
 	lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
@@ -997,17 +1042,25 @@ static lv_obj_t *mk_row(lv_obj_t *parent, int y, const char *title,
 
 	lv_label_set_text(t, title);
 	lv_obj_set_style_text_color(t, fg, 0);
-	lv_obj_align(t, LV_ALIGN_LEFT_MID, 14, -11);
+	/* A NULL subtitle is a one-line row, and the title then sits on the
+	 * row's own middle rather than 11 px above a line that is not there.
+	 * The update row is the only one: its version line moved out to the
+	 * footer, where it belongs to the panel and not to a button. */
+	lv_obj_align(t, LV_ALIGN_LEFT_MID, 14, sub ? -11 : 0);
 
-	lv_obj_t *sl = lv_label_create(row);
+	lv_obj_t *sl = NULL;
 
-	lv_label_set_text(sl, sub);
-	lv_obj_set_style_text_color(sl, COL_DIM, 0);
-	/* Width-bounded and dotted. A centred line escapes this 320 px panel
-	 * around 45 characters, and two overflow bugs have shipped that way. */
-	lv_obj_set_width(sl, 236);
-	lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
-	lv_obj_align(sl, LV_ALIGN_LEFT_MID, 14, 11);
+	if (sub != NULL) {
+		sl = lv_label_create(row);
+		lv_label_set_text(sl, sub);
+		lv_obj_set_style_text_color(sl, COL_DIM, 0);
+		/* Width-bounded and dotted. A centred line escapes this 320 px
+		 * panel around 45 characters, and two overflow bugs have
+		 * shipped that way. */
+		lv_obj_set_width(sl, 236);
+		lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
+		lv_obj_align(sl, LV_ALIGN_LEFT_MID, 14, 11);
+	}
 
 	lv_obj_t *chev = lv_label_create(row);
 
@@ -1125,7 +1178,7 @@ static void show_bright(lv_event_t *e)
 
 	bright_refresh();	/* paints the stops and the readout */
 }
-#endif /* !CONFIG_CLAUGE_WIFI_MODE */
+#endif /* !CONFIG_BLINK_WIFI_MODE */
 
 static void build_panel(lv_obj_t *parent_scr);
 
@@ -1155,6 +1208,67 @@ static void do_open(void (*pump)(void))
 	ui_slide_run(UI_SLIDE_LEFT, pump);
 	ui_anim_gesture_mute(250);	/* short tail past the input burst */
 }
+
+/*
+ * Thread context, and the shortest of the three transitions to set up: the
+ * page change edits the widgets that are already on screen rather than
+ * building or deleting a tree, so the "incoming screen" is the same objects
+ * carrying the other provider's numbers.
+ *
+ * Frozen for the edit, exactly like do_open: render_gauges() invalidates
+ * everything it retexts, and refreshing that would repaint the destination
+ * over the whole screen at once -- leaving the wipe nothing to reveal.
+ */
+/*
+ * The page change is not a transition any more.
+ *
+ * Three were tried on this axis. A cut did not read as a swipe. A wipe read as
+ * a repaint, because the two pages are the same layout and the boundary
+ * between them has nothing to be made of. A wipe with a bright leading edge
+ * gave that boundary something to see and still did not feel natural -- which
+ * it was not: a bar sweeping the panel is an object that exists nowhere else
+ * on this device and means nothing when it arrives.
+ *
+ * All three were transitions between two PICTURES. This is an instrument, and
+ * the motion that belongs to one is the needle moving. usage_view_page_step()
+ * now animates the rings from the reading they were showing to the other
+ * provider's, and nothing is covered or revealed at all. See the note above it.
+ *
+ * So this does not block, does not touch the display, does not need the strip
+ * machinery, and does not need `pump` -- an LVGL animation runs from
+ * lv_timer_handler like everything else on the screen. It stays a mode-loop
+ * request rather than moving back into the swipe callback because the
+ * can_page() re-check there still matters: a usage message can remove the
+ * second provider in the gap between the swipe and this.
+ */
+static void do_page(int delta, void (*pump)(void))
+{
+	ARG_UNUSED(pump);
+
+	usage_view_page_step(delta);
+
+	/*
+	 * NO MUTE. This used to swallow the next swipe for 250 ms and that is
+	 * what "working sometimes but not sometimes" was: of five vertical
+	 * strokes logged on 2026-08-28, five fired and only FOUR changed the
+	 * page. The fifth landed inside the mute and was dropped in silence.
+	 *
+	 * The mute exists to absorb the tail of a swipe REPLAYED after a
+	 * blocking transition -- input is not dispatched while ui_slide_run
+	 * holds the display, so it arrives in a burst afterwards. Neither half
+	 * of that is true here any more. A page change is an animation and
+	 * blocks nothing, so no burst accumulates; and ui_swipe reads the
+	 * panel directly rather than LVGL's queue, so there is no replay to
+	 * absorb in the first place. It also fires at most once per stroke and
+	 * needs a genuinely new one -- reports stopping for a whole re-arm
+	 * window -- before it can fire again, which is the actual protection
+	 * against a stroke counting twice.
+	 *
+	 * So the mute was guarding against something that cannot happen, at
+	 * the cost of the thing people do most: page back and forth.
+	 */
+}
+
 
 static void do_close(void (*pump)(void))
 {
@@ -1215,6 +1329,7 @@ void ui_settings_drop_pending(void)
 {
 	want_open = false;
 	want_close = false;
+	want_page = 0;
 	closing = false;
 }
 
@@ -1226,9 +1341,25 @@ void ui_settings_service(void (*pump)(void))
 	} else if (want_close && panel != NULL) {
 		want_close = false;
 		do_close(pump);
+	} else if (want_page != 0 && panel == NULL) {
+		/*
+		 * Last, and only with the panel closed. A page change is the
+		 * least important of the three, and re-checking can_page here
+		 * matters: the flag was set when the gesture landed, and a
+		 * usage message can have removed the second provider in the
+		 * gap -- which would run a transition to a page that no longer
+		 * exists.
+		 */
+		int step = want_page;
+
+		want_page = 0;
+		if (usage_view_can_page(step)) {
+			do_page(step, pump);
+		}
 	}
 	want_open = false;
 	want_close = false;
+	want_page = 0;
 }
 
 static void close_panel(void)
@@ -1284,7 +1415,7 @@ static void build_panel(lv_obj_t *parent_scr)
 	 * screen moves under it, in ui_slide_run(). */
 	lv_obj_set_pos(panel, 0, 0);
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 	/* --- Header: green edge seam + back chevron + title + rule. The
 	 * chevron used to be a full-height LEFT_MID button that the reset tiles
 	 * kept covering; it now lives in the top bar (still a left-edge cue via
@@ -1515,8 +1646,8 @@ static void build_panel(lv_obj_t *parent_scr)
 		char ssid_a[CFG_SSID_MAX];
 
 		fmt_ascii(ssid, ssid_a, sizeof(ssid_a));
-		snprintf(line, sizeof(line), "Clauge %s  |  %.20s",
-			 CLAUGE_FW_VERSION, ssid_a);
+		snprintf(line, sizeof(line), "Blink %s  |  %.20s",
+			 BLINK_FW_VERSION, ssid_a);
 	} else
 	{
 		/* Both halves when the daemon has introduced itself: they ship
@@ -1528,11 +1659,11 @@ static void build_panel(lv_obj_t *parent_scr)
 		 * `else` only exists in a WiFi build, and an `else if` here
 		 * left the USB build with an else and no if. */
 		if (proto_host_version()[0]) {
-			snprintf(line, sizeof(line), "Clauge %s  |  App %s",
-				 CLAUGE_FW_VERSION, proto_host_version());
+			snprintf(line, sizeof(line), "Blink %s  |  App %s",
+				 BLINK_FW_VERSION, proto_host_version());
 		} else {
-			snprintf(line, sizeof(line), "Clauge %s",
-				 CLAUGE_FW_VERSION);
+			snprintf(line, sizeof(line), "Blink %s",
+				 BLINK_FW_VERSION);
 		}
 	}
 
@@ -1548,19 +1679,61 @@ static void build_panel(lv_obj_t *parent_scr)
 	lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -2);
 #else
 	/*
-	 * Three rows and nothing else.
+	 * Two rows and nothing else.
 	 *
 	 * The panel is 240 px tall and a fingertip covers about 9 mm, which is
-	 * 51 px at this panel's 5.62 px/mm. Take 40 for the title bar and 190
-	 * is left: three comfortable targets, or four that are not. So there
-	 * are three, at 56 px each, and everything that used to sit between
-	 * them -- a heading, a card, a footer -- is gone or has moved inside a
-	 * row.
+	 * 51 px at this panel's 5.62 px/mm. Take 40 for the title bar and 200
+	 * is left. There were three rows at 56 px (10.0 mm) while a "Reset to
+	 * defaults" row existed; it does not any more, because in this build
+	 * the only thing it reset was brightness -- and the row directly above
+	 * it sets brightness without a reboot.
+	 *
+	 * The freed height goes into the two that remain rather than being
+	 * left as a hole under them: 72 px each, 12.8 mm, with 24 px of margin
+	 * above and below the pair so it reads as centred instead of
+	 * top-aligned with something missing.
 	 *
 	 * What this replaces was measured and did not pass: 30 px rows are
 	 * 5.3 mm, sitting 5 px apart, so one press covered both and which one
 	 * fired came down to where the pressure centroid landed.
 	 */
+/*
+ * 56 px is 10.0 mm against a ~9 mm fingertip -- the smallest a row can be and
+ * still be pressed on purpose rather than on average.
+ *
+ * TWO rows now, brightness and software update: the main-source row went when
+ * the providers got a page each. The height it freed is not redistributed. It
+ * goes to the footer, which is the version pair and the one instruction this
+ * device needs to give -- both of them things you read rather than press, and
+ * neither of which belongs inside a button.
+ */
+#define ROW_H 56
+#define ROW_TOP 56		/* first row, clear of the title rule at y=40 */
+#define ROW_GAP 8
+
+/*
+ * The footer: two centred lines under the last row, on the panel itself.
+ *
+ * The version pair used to be the update row's subtitle, which put a fact
+ * inside a control -- so reading the version meant looking at a button, and
+ * the button's own state ("Update ready") had to be squeezed in beside it,
+ * right-aligned and clear of a chevron. Separating them gives the button one
+ * job and the footer room for the second line, which is the thing an update
+ * actually needs someone to know.
+ */
+#define FOOT_Y1 192
+#define FOOT_Y2 212
+
+/*
+ * Two rows and a two-line footer, inside 240. Checked here rather than
+ * eyeballed, because the last time these moved a row went off the bottom of a
+ * 240 px screen and nobody noticed until it was flashed. FONT_LINE_H is 16 for
+ * the default montserrat_14, so the second line ends at 228.
+ */
+BUILD_ASSERT(ROW_TOP + 2 * ROW_H + ROW_GAP <= FOOT_Y1,
+	     "the settings rows now overlap the footer");
+BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
+	     "the settings footer no longer fits on the panel");
 	/* No green edge seam here. It existed as a left-edge cue back when the
 	 * back control was a bare chevron that was easy to miss; the control is
 	 * now a bordered 60 x 36 button that announces itself, so the seam was
@@ -1580,56 +1753,118 @@ static void build_panel(lv_obj_t *parent_scr)
 	char sub[56];
 
 	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
-	mk_row(panel, 48, "Brightness", sub, false, show_bright, NULL, &pct_lbl);
+	mk_row(panel, ROW_TOP, ROW_H, "Brightness", sub, false, show_bright, NULL,
+	       &pct_lbl);
 
 	/*
 	 * Both versions live here, on the row that is already about versions.
 	 *
-	 * There is no footer left to put them in -- three rows and their gaps
-	 * use the height -- and a footer was the wrong home anyway: someone
+	 * There is no footer left to put them in -- the two rows and their
+	 * margins use the height -- and a footer was the wrong home anyway: someone
 	 * looking for a version number is already on their way to this row. It
 	 * is also the only place on the device that can say which HALF of the
 	 * pair is behind, since the app's version is otherwise invisible from
 	 * the panel.
 	 */
-	if (proto_host_version()[0]) {
-		snprintf(sub, sizeof(sub), "Clauge %s  |  App %s",
-			 CLAUGE_FW_VERSION, proto_host_version());
-	} else {
-		snprintf(sub, sizeof(sub), "Clauge %s", CLAUGE_FW_VERSION);
-	}
-	upd_btn = mk_row(panel, 112, "Software update", sub, false,
-			 upd_cb, NULL, NULL);
+	upd_btn = mk_row(panel, ROW_TOP + (ROW_H + ROW_GAP), ROW_H,
+			 "Software update", NULL,
+			 false, upd_cb, NULL, NULL);
 
-	/* The state reads on the title line, where it belongs to the row's
-	 * name; the version line underneath stays unbroken. Right-aligned
-	 * clear of the chevron, so it can grow to "Install 0.6.1" without
-	 * colliding. */
+	/* The row's state, beside the row's name. Right-aligned clear of the
+	 * chevron so it can grow to "Install 0.6.1" without colliding, and on
+	 * the middle now that there is no second line to sit above. */
 	upd_lbl = lv_label_create(upd_btn);
 	lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
-	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -34, -11);
+	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -34, 0);
+
+	/*
+	 * Both versions, on the panel rather than in the button.
+	 *
+	 * This is the only place on the device that can say which HALF of the
+	 * pair is behind -- the app's version is otherwise invisible from the
+	 * panel -- so it says both, or says the board's alone when no host has
+	 * introduced itself.
+	 */
+	lv_obj_t *ver = lv_label_create(panel);
+
+	if (proto_host_version()[0]) {
+		snprintf(sub, sizeof(sub), "Blink %s  |  App %s",
+			 BLINK_FW_VERSION, proto_host_version());
+	} else {
+		snprintf(sub, sizeof(sub), "Blink %s", BLINK_FW_VERSION);
+	}
+	lv_label_set_text(ver, sub);
+	lv_obj_set_style_text_color(ver, COL_DIM, 0);
+	lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, FOOT_Y1);
+
+	/*
+	 * The one instruction this device gives, and it is here because this
+	 * is the screen where it matters: an update writes a new image over
+	 * USB and a board that loses power halfway is a board that has to be
+	 * recovered with a cable anyway. Stated as a standing condition rather
+	 * than fired as a warning mid-download -- by the time a progress bar
+	 * could say it, unplugging has already happened.
+	 */
+	lv_obj_t *keep = lv_label_create(panel);
+
+	lv_label_set_text(keep, "Keep the cable connected");
+	lv_obj_set_style_text_color(keep, COL_DIM, 0);
+	lv_obj_align(keep, LV_ALIGN_TOP_MID, 0, FOOT_Y2);
 
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
 
-	/* Neutral, not danger. Nothing here is destructive: there is no
-	 * credential, no token and no network on this device to lose. */
-	mk_row(panel, 176, "Reset to defaults", "Brightness and gauge view",
-	       false, act_cb, (void *)(intptr_t)ACT_FACTORY, NULL);
 #endif
 
 }
 
-static void scr_gesture_cb(lv_event_t *e)
+/*
+ * A stroke in progress, for the rail to draw.
+ *
+ * Guarded by the same three conditions the completed stroke is, and for the
+ * same reasons: with the panel open the gauge screen is not visible, and
+ * during the mute the page has just changed and the rail is already saying so.
+ * Showing a preview in either case would be the indicator contradicting the
+ * screen.
+ *
+ * Horizontal strokes report nothing. They mean settings and the boot clip,
+ * which are not page changes, and growing a rail mark for one would promise
+ * something that is not about to happen.
+ */
+static void swipe_progress_cb(enum ui_swipe_dir dir, int pct)
 {
-	lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+	int delta = 0;
 
+	if (panel == NULL && !ui_anim_gesture_muted()) {
+		if (dir == UI_SWIPE_UP) {
+			delta = 1;
+		} else if (dir == UI_SWIPE_DOWN) {
+			delta = -1;
+		}
+	}
+	usage_view_page_preview(delta, delta ? pct : 0);
+}
+
+/*
+ * A completed stroke, from ui_swipe rather than from LVGL.
+ *
+ * LVGL's own gesture detector cannot survive this panel -- one physical swipe
+ * arrives as five or six short presses and it resets its accumulator on every
+ * one of them. The measurements and the reasoning are in ui_swipe.h. What
+ * reaches here is one event per stroke, already stitched across the dropouts
+ * and already refused if it was too diagonal to call.
+ *
+ * Runs on the LVGL thread from a timer, so the rules that governed the gesture
+ * callback still govern this: flag the request, never run a transition here.
+ */
+static void swipe_cb(enum ui_swipe_dir dir)
+{
 	if (panel != NULL) {
 		return;
 	}
 	if (ui_anim_gesture_muted()) {
 		return;	/* the swipe that just closed the clip, replayed */
 	}
-	if (dir == LV_DIR_LEFT) {
+	if (dir == UI_SWIPE_LEFT) {
 		/* Not off the CONNECTING screen. A swipe is the ACCIDENTAL
 		 * route -- see the edge zones below, which stay open on
 		 * purpose. */
@@ -1637,11 +1872,58 @@ static void scr_gesture_cb(lv_event_t *e)
 			return;
 		}
 		want_open = true;	/* run from the mode loop; see do_open */
-	} else if (dir == LV_DIR_RIGHT) {
+	} else if (dir == UI_SWIPE_RIGHT) {
 		/* The left chevron's promise: the boot clip on loop. Only
 		 * flagged here -- the mode loop runs the player from thread
 		 * context, never from inside an LVGL event. */
 		ui_anim_request();
+	} else if (dir == UI_SWIPE_UP || dir == UI_SWIPE_DOWN) {
+		/*
+		 * The provider stack. Content follows the finger, the way a
+		 * list does: swiping UP pulls the next page in from below.
+		 *
+		 * Flagged for the mode loop like the two above, and for the
+		 * same reason: this became a wipe transition when the cut was
+		 * judged not to read as a swipe, and ui_slide_run() owns
+		 * lv_refr_now() and cannot be re-entered from inside
+		 * lv_timer_handler(). It used to run right here, back when a
+		 * page change was one repaint.
+		 *
+		 * Asked BEFORE flagging, not after: arming a transition that
+		 * cannot move is 650 ms of frozen panel for nothing, and with
+		 * one provider reporting -- or during the CONNECTING takeover,
+		 * where there is no data and so only one page -- that is every
+		 * vertical swipe there is.
+		 */
+		int step = (dir == UI_SWIPE_UP) ? 1 : -1;
+
+		/*
+		 * At the end of the stack, a vertical swipe goes the only way
+		 * it can.
+		 *
+		 * Up is "next" because content follows the finger, and that is
+		 * a defensible model right up until someone uses it. Across
+		 * three builds on 2026-08-27 every vertical stroke the user
+		 * made went DOWN -- including after the cue was corrected to
+		 * point up -- and on page 0 down asks for a page that does not
+		 * exist, so nothing happened, six times.
+		 *
+		 * The device has TWO pages. "Which direction is forwards" is a
+		 * question a two-item stack does not really have, and the ask
+		 * was "a swipe down/up will switch the mode", not "a swipe up
+		 * advances an ordered list". So when the requested direction
+		 * has nowhere to go and the other one does, take the other one.
+		 *
+		 * This is not a wrap. In the middle of a longer stack both
+		 * directions are available and each still does its own thing;
+		 * only an end, where one of them is dead, hands over.
+		 */
+		if (!usage_view_can_page(step) && usage_view_can_page(-step)) {
+			step = -step;
+		}
+		if (usage_view_can_page(step)) {
+			want_page = step;
+		}
 	}
 }
 
@@ -1681,10 +1963,32 @@ static void scr_gesture_cb(lv_event_t *e)
  * on the edge chevron is a deliberate act rather than an accidental one, so it
  * stays as the escape hatch.
  */
+/*
+ * A tap on an edge zone -- but only if it was a tap.
+ *
+ * LVGL sends CLICKED on release whenever an object was pressed and nothing
+ * scrolled. It does not suppress it because the touch turned out to be a
+ * swipe, so a swipe that begins or ends inside one of these 44x150 strips
+ * fires the strip's button as well as the swipe. On the gauge screen that
+ * means a vertical swipe near an edge opens the settings panel, which is half
+ * of what "some of them is detected as swipe to settings" was: not a misread
+ * direction, but a stray button press left behind by one.
+ *
+ * The mute does not cover this. It is set when a transition STARTS, and this
+ * arrives on release -- before ui_swipe has even decided whether the stroke
+ * was a swipe. ui_swipe_dragging() answers from the stroke still in progress,
+ * which is the only thing that knows in time.
+ */
+static bool zone_was_a_tap(void)
+{
+	return panel == NULL && !ui_anim_gesture_muted() &&
+	       !ui_swipe_dragging();
+}
+
 static void zone_settings_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (panel == NULL && !ui_anim_gesture_muted()) {
+	if (zone_was_a_tap()) {
 		want_open = true;
 	}
 }
@@ -1692,9 +1996,77 @@ static void zone_settings_cb(lv_event_t *e)
 static void zone_anim_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (panel == NULL && !ui_anim_gesture_muted()) {
+	if (zone_was_a_tap()) {
 		ui_anim_request();
 	}
+}
+
+/*
+ * Tapping the rail changes page, which is what makes up/down as reliable as
+ * left/right finally are.
+ *
+ * The two horizontal gestures have had a tap path since the beginning: a
+ * chevron drawn at each edge with an invisible 44x150 zone behind it. That is
+ * the ONLY reason they feel dependable -- measured on 2026-08-28 they miss at
+ * about the same rate as the vertical one (a 32 px horizontal stroke was
+ * refused in the same session that refused 17, 19 and 22 px vertical ones).
+ * The difference is that a missed horizontal swipe leaves a chevron to press,
+ * and a missed vertical one left nothing at all, so every miss was a dead end.
+ *
+ * A resistive panel is good at presses and bad at slides, and that is not
+ * something thresholds can fix: every reliability problem in this file's
+ * history traced to contact pressure breaking under a MOVING finger. The swipe
+ * stays, because it works for a committed stroke and it is the faster way once
+ * you know it. It is just no longer the only way.
+ *
+ * No new furniture. The zone sits over the band the rail and the provider name
+ * already occupy, so what you press is what was already telling you there was
+ * somewhere to go -- exactly the arrangement the edge chevrons have, where the
+ * drawn thing is the affordance and the hit area is invisible and much larger
+ * than it.
+ *
+ * 200 x 44 is 35.6 x 7.8 mm. Wider than it looks like it needs to be because
+ * the thing being aimed at is 6 px tall, and the cost of overshooting is
+ * nothing: below the countdowns there is only this.
+ */
+#define PAGE_ZONE_W	200
+#define PAGE_ZONE_H	44
+
+static void zone_page_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+
+	if (!zone_was_a_tap()) {
+		return;
+	}
+	/*
+	 * Same end-of-stack rule as the swipe, so the two controls cannot
+	 * disagree about where a tap goes: try forwards, and take backwards if
+	 * forwards has nowhere to go. With two pages that is simply "the other
+	 * one".
+	 */
+	if (usage_view_can_page(1)) {
+		want_page = 1;
+	} else if (usage_view_can_page(-1)) {
+		want_page = -1;
+	}
+}
+
+static void mk_page_zone(lv_obj_t *scr)
+{
+	lv_obj_t *z = lv_btn_create(scr);
+
+	lv_obj_set_size(z, PAGE_ZONE_W, PAGE_ZONE_H);
+	lv_obj_set_style_bg_opa(z, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_shadow_width(z, 0, 0);
+	lv_obj_align(z, LV_ALIGN_BOTTOM_MID, 0, 0);
+	/* A swipe that starts here must still reach the screen, or putting a
+	 * target under the rail would kill the gesture it is meant to back up. */
+	lv_obj_add_flag(z, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(z, zone_page_cb, LV_EVENT_CLICKED, NULL);
+	/* Behind everything: it is a hit area, not a surface, and the rail and
+	 * the name have to keep drawing over it. */
+	lv_obj_move_background(z);
 }
 
 static void mk_edge_zone(lv_obj_t *scr, lv_align_t align, lv_event_cb_t cb)
@@ -1709,11 +2081,62 @@ static void mk_edge_zone(lv_obj_t *scr, lv_align_t align, lv_event_cb_t cb)
 	lv_obj_add_event_cb(z, cb, LV_EVENT_CLICKED, NULL);
 }
 
+/*
+ * Loosen LVGL's own gesture thresholds, for the two places still using them.
+ *
+ * The gauge screen does not any more -- see swipe_cb and ui_swipe.h. But the
+ * settings panel and the brightness overlay both close on a swipe, and those
+ * still go through LVGL, so its two hard-coded defaults still apply there
+ * (lv_indev.c, no Kconfig and no setter, which is why this reaches into the
+ * private header).
+ *
+ *   gesture_min_velocity  3   a sample that moved less than this in BOTH axes
+ *                             ZEROES the accumulator. Not "ignore this
+ *                             sample" -- it throws away everything counted so
+ *                             far. LVGL samples faster than this panel
+ *                             reports, so a large share of ticks see no new
+ *                             point and each one discards the stroke.
+ *   gesture_limit        50   and then it wants 50 px on top, which is 21% of
+ *                             a 240 px screen -- 8.9 mm of travel.
+ *
+ * 1 and 24 is as far as this can be pushed: the floor cannot go below 1 (at 0
+ * the comparison is never true, which would leave the accumulator running
+ * across the whole press), and at 1 a repeated identical point STILL trips it.
+ * That ceiling is precisely why the gauge screen stopped using this path
+ * rather than tuning it further. These two remaining callers are closing
+ * something that also has a back button, so a swipe that misses is an
+ * inconvenience rather than a dead end.
+ */
+#define GESTURE_MIN_VELOCITY	1
+#define GESTURE_LIMIT_PX	24
+
+static void tune_gestures(void)
+{
+	lv_indev_t *in = NULL;
+
+	while ((in = lv_indev_get_next(in)) != NULL) {
+		if (lv_indev_get_type(in) != LV_INDEV_TYPE_POINTER) {
+			continue;
+		}
+		in->gesture_min_velocity = GESTURE_MIN_VELOCITY;
+		in->gesture_limit = GESTURE_LIMIT_PX;
+	}
+}
+
 void ui_settings_attach(lv_obj_t *scr)
 {
-	lv_obj_add_event_cb(scr, scr_gesture_cb, LV_EVENT_GESTURE, NULL);
+	tune_gestures();
+	/*
+	 * The gauge screen's swipes come from ui_swipe, not from LVGL. There
+	 * is deliberately no LV_EVENT_GESTURE handler here any more: leaving
+	 * one would double-fire, and it would double-fire WRONGLY, since the
+	 * fragments LVGL classifies are the ones ui_swipe exists to stitch
+	 * back together.
+	 */
+	ui_swipe_init(swipe_cb, swipe_progress_cb);
 	mk_edge_zone(scr, LV_ALIGN_RIGHT_MID, zone_settings_cb);
 	mk_edge_zone(scr, LV_ALIGN_LEFT_MID, zone_anim_cb);
+	mk_page_zone(scr);
 
 	/* The OTA watcher runs from here on, not from the panel build: the boot
 	 * prompt, the download bar and the outcome popup are all screen-level

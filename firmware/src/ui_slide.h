@@ -3,6 +3,8 @@
 
 #include <lvgl.h>
 
+#include "ui_slide_geom.h"
+
 /*
  * Full-screen slide transitions driven by the ILI9341's own scroll hardware.
  *
@@ -30,9 +32,31 @@
  * frames as it has steps, instead of one full render per frame.
  */
 
-/* Direction the existing image travels. */
-#define UI_SLIDE_LEFT	1	/* old screen exits left, new enters from right */
-#define UI_SLIDE_RIGHT	(-1)	/* old screen exits right, new enters from left */
+/*
+ * Direction the existing image travels: UI_SLIDE_LEFT / RIGHT / UP / DOWN,
+ * defined in ui_slide_geom.h alongside the strip arithmetic they select.
+ *
+ * VERTICAL IS WIPE-ONLY, and the reason is the paragraph above: the panel's
+ * scroll register moves the screen sideways and there is no hardware path for
+ * the other axis. A wipe does not use that register at all -- it paints each
+ * strip straight into the screen columns or rows where it will be seen -- so
+ * it is free of the constraint, and ui_slide_run() refuses a vertical
+ * direction if the build is ever switched back to the scrolled slide.
+ *
+ * NOTHING CURRENTLY ASKS FOR A VERTICAL ONE. The provider page change did, and
+ * it went through three of them -- cut, wipe, wipe with a travelling edge --
+ * before the conclusion that a transition between two pictures was the wrong
+ * idea for that screen entirely: the pages are one layout with different
+ * numbers in it, so the rings now travel between the two readings and nothing
+ * is covered or revealed at all (see usage_view_page_step). The vertical
+ * support stays because it is four lines of index arithmetic with a host test
+ * on it, and because the reason it exists -- a wipe does not care which axis
+ * it chops along -- is worth keeping written down.
+ *
+ * The cost is identical either way and on either axis: one full render of the
+ * incoming screen, chopped into strips. A vertical transition is 60 steps
+ * where a horizontal one is 80, because the screen is 240 tall and 320 wide.
+ */
 
 /*
  * Run one transition, blocking until it completes.
@@ -46,6 +70,13 @@
  * is painted is what lands in that strip -- and does so with invalidation
  * disabled (see ui_slide_freeze) so that setup does not itself repaint over
  * the pixels this is about to scroll.
+ *
+ * The strip width and the duration floor are constants in ui_slide.c rather
+ * than parameters. They were parameters for one caller -- the provider page
+ * change, which wanted a faster pace than a panel opening -- and that caller
+ * does not exist any more: it is an animation now, not a transition. The two
+ * that remain (the settings panel, the boot clip) were tuned by eye on
+ * hardware and there is nothing to gain by letting them differ.
  *
  * `pump` (may be NULL) runs each step so the caller's background duties, and
  * on a test boot the watchdog, stay alive.

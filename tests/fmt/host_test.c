@@ -34,6 +34,30 @@ static void check_age(const char *what, int32_t secs, const char *want)
 	}
 }
 
+static void burn(double pph, const char *want)
+{
+	char got[FMT_COUNTDOWN_MAX];
+
+	fmt_burn(pph, got, sizeof(got));
+	if (strcmp(got, want) == 0) {
+		printf("PASS: %-28s %6.2f -> \"%s\"\n", "burn", pph, got);
+	} else {
+		printf("FAIL: %-28s %6.2f -> \"%s\" (want \"%s\")\n",
+		       "burn", pph, got, want);
+		failures++;
+	}
+}
+
+static void check_true(const char *what, int ok)
+{
+	if (ok) {
+		printf("PASS: %s\n", what);
+	} else {
+		printf("FAIL: %s\n", what);
+		failures++;
+	}
+}
+
 int main(void)
 {
 	check("unknown", -1, "--");
@@ -58,6 +82,50 @@ int main(void)
 	check_age("minutes", 5 * 60 + 30, "5m ago");
 	check_age("just under an hour", 3599, "59m ago");
 	check_age("hours", 3600 + 20 * 60, "1h 20m ago");
+
+	/* --- burn rate ------------------------------------------------ */
+	/*
+	 * Empty, not "--", when there is nothing to say. The caller draws its
+	 * own blank; a second spelling of nothing on one screen is a bug.
+	 */
+	burn(0.0, "");
+	burn(-1.0, "");
+	/* Below ten a tenth is the difference between "barely moving" and
+	 * "moving", so it is kept. */
+	burn(2.4, "+2.4%/h");
+	burn(0.5, "+0.5%/h");
+	burn(9.94, "+9.9%/h");
+	/* At and above ten it is noise on a five-minute sample, and the width
+	 * is worth more -- GAUGE_CD_MAX_W is sized for "00m 00s". */
+	burn(10.0, "+10%/h");
+	burn(14.2, "+14%/h");
+	burn(14.6, "+15%/h");		/* rounds, does not truncate */
+	burn(99.4, "+99%/h");
+	/* A rate this high says "about to be full" whatever the digits, and
+	 * four of them would run past the countdown's budget. */
+	burn(1000.0, "+999%/h");
+	burn(50000.0, "+999%/h");
+
+	/*
+	 * The rule the panel depends on: a burn rate can never be mistaken for
+	 * a countdown, because a countdown never contains a percent sign. If
+	 * this ever fails, the two readings have become confusable and the
+	 * unlabelled design is no longer safe.
+	 */
+	{
+		const int32_t secs[] = { -1, 0, 59, 60, 3599, 3600, 86399,
+					 86400, 999 * 86400 };
+		char b[FMT_COUNTDOWN_MAX];
+		int clash = 0;
+
+		for (unsigned i = 0; i < sizeof(secs) / sizeof(secs[0]); i++) {
+			fmt_countdown(secs[i], b, sizeof(b));
+			if (strchr(b, '%') != NULL) {
+				clash = 1;
+			}
+		}
+		check_true("no countdown contains a percent sign", clash == 0);
+	}
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");

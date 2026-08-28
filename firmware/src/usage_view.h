@@ -12,6 +12,23 @@ enum usage_status {
 	USAGE_STATUS_ERROR,		/* red   */
 };
 
+/*
+ * What the tool feeding us is doing right now, from the daemon's `state`.
+ *
+ * NONE is not a fifth state, it is the absence of one: a daemon that said
+ * nothing, or one older than this firmware. The indicator stays dark for it
+ * rather than defaulting to IDLE, because "idle" is a claim about a live
+ * session and an absent field is not evidence of one.
+ */
+enum usage_activity {
+	USAGE_ACTIVITY_NONE = 0,	/* hidden */
+	USAGE_ACTIVITY_IDLE,		/* green: turn complete, waiting for you */
+	USAGE_ACTIVITY_RUNNING,		/* green, pulsing: working */
+	USAGE_ACTIVITY_WAITING,		/* amber: wants a human */
+	USAGE_ACTIVITY_STUCK,		/* red: announced work, then went silent */
+	USAGE_ACTIVITY_FAILED,		/* red: the turn died on an API error */
+};
+
 /* Build the screen. Call once, before any update. */
 void usage_view_init(void);
 
@@ -75,5 +92,114 @@ void usage_view_sync_takeover(void);
 void usage_view_set_models(double fable_pct);
 
 void usage_view_set_status(enum usage_status status);
+
+void usage_view_set_activity(enum usage_activity a);
+
+/*
+ * How many Claude Code sessions are open, and how many subagents are running
+ * across them. Both 0 hides the readout entirely.
+ *
+ * Counts, not a list. The board drops an over-long line whole, and a
+ * per-session array blows the 512-byte budget at around four sessions -- on
+ * exactly the busy machine most likely to have four.
+ */
+void usage_view_set_sessions(int n_sessions, int n_agents);
+
+/*
+ * A second provider on the same two gauges, drawn as an inner ring.
+ *
+ * `tag` is a short name for it -- "codex" -- and NULL or "" hides the inner
+ * rings and their readouts entirely, which is the state every single-provider
+ * board stays in forever.
+ *
+ * Percentages outside 0-100 hide that ring on its own, so a provider that can
+ * report a weekly figure but not a session one shows exactly what it knows.
+ *
+ * The countdowns are in remaining seconds, like usage_view_update's; -1 is
+ * unknown. Both appear under their gauge, side by side, each in its
+ * provider's colour.
+ */
+/*
+ * Which provider the OUTER ring belongs to. Sets its colour, and its
+ * countdown's.
+ *
+ * The name, not the ring position: on a machine running only Codex the outer
+ * ring is Codex, and it should not be wearing Claude's colour.
+ */
+/*
+ * Move one page up (-1) or down (+1) the provider stack.
+ *
+ * A no-op when there is only one provider: the single-provider desk has no
+ * second page to reach and no rail to explain one.
+ */
+/*
+ * Whether a page change in this direction would do anything.
+ *
+ * Asked BEFORE a transition is armed: the page change is a full wipe now, and
+ * running one to arrive back where you started is 650 ms of frozen panel in
+ * exchange for nothing. With one provider reporting there is no second page
+ * and every vertical swipe is one of these.
+ */
+bool usage_view_can_page(int delta);
+
+void usage_view_page_step(int delta);
+
+/*
+ * Draw a page change part-way, while the swipe that would cause it is still
+ * being made.
+ *
+ * `delta` is the direction the stroke is heading (-1/+1, 0 for none) and `pct`
+ * is how far it has committed towards the distance a swipe needs, 0..100. The
+ * rail's marks trade places continuously: the one being left shrinks by
+ * exactly what the one being reached grows, arriving at full width at the same
+ * moment the swipe fires.
+ *
+ * Called on every tick of the swipe drain, repeats included, so it drops
+ * updates that would change nothing.
+ */
+void usage_view_page_preview(int delta, int pct);
+
+/*
+ * How fast the session window is filling, in percent per hour; 0 or less
+ * means "no answer", which is the usual case.
+ *
+ * Drawn where the session countdown goes, and ONLY when there is no countdown
+ * to draw. That configuration is real and is not a bug: Claude Desktop keeps
+ * two percentages and no reset timestamps of any kind (verified across every
+ * file, LevelDB store and cache it writes, 2026-08-28), so a machine with the
+ * desktop app and no Claude Code has usable gauges and nothing to count down.
+ *
+ * A rate, not a countdown in disguise. Deriving a reset time from the same
+ * history was investigated and refused: it is computable for only 13% of
+ * windows on real data, and its failures are indistinguishable from its
+ * successes. This is arithmetic over readings that were actually observed.
+ *
+ * The daemon sends at most one of the two, so the board is never asked to
+ * choose (pc/normalizer).
+ */
+void usage_view_set_burn(double pph);
+
+void usage_view_set_provider1(const char *tag);
+
+/*
+ * The FIRST provider's own age, which is what the `stale` flag on the wire has
+ * always meant. Recorded per page so the hint can ask about the page being
+ * shown -- see usage_view_set_provider2.
+ */
+void usage_view_set_provider1_stale(bool stale);
+
+/*
+ * `stale` is the SECOND provider's own age, not the panel's.
+ *
+ * Freshness belongs to a reading. The two providers are read from different
+ * places at different times, and only one page is on screen, so one flag for
+ * both meant a live page could be labelled "Reading is old" because the page
+ * you were not looking at had gone quiet -- which is exactly what a machine
+ * running Claude Code all day with Codex touched once that morning does
+ * (user-reported 2026-08-28).
+ */
+void usage_view_set_provider2(const char *tag, double session_pct,
+			      double weekly_pct, int32_t session_resets_in_s,
+			      int32_t weekly_resets_in_s, bool stale);
 
 #endif /* USAGE_VIEW_H */

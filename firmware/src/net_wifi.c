@@ -41,10 +41,10 @@ const char *net_wifi_ap_ssid(void)
 		ssize_t n = hwinfo_get_device_id(id, sizeof(id));
 
 		if (n >= 3) {
-			snprintf(ap_ssid, sizeof(ap_ssid), "clauge-%02x%02x%02x",
+			snprintf(ap_ssid, sizeof(ap_ssid), "blink-%02x%02x%02x",
 				 id[n - 3], id[n - 2], id[n - 1]);
 		} else {
-			snprintf(ap_ssid, sizeof(ap_ssid), "clauge-setup");
+			snprintf(ap_ssid, sizeof(ap_ssid), "blink-setup");
 		}
 	}
 	return ap_ssid;

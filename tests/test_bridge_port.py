@@ -113,3 +113,57 @@ def test_ignores_bluetooth_ports(monkeypatch):
 def test_name_heuristic_still_covers_an_unknown_chip(monkeypatch):
     _ports(monkeypatch, _Port("/dev/cu.usbmodem-XYZ", vid=0x1234, pid=0x5678))
     assert bridge.autodetect_port() == "/dev/cu.usbmodem-XYZ"
+
+
+# --- upkeep while there is no board ---------------------------------------
+
+
+def test_upkeep_runs_while_waiting_for_a_board(monkeypatch):
+    """A machine with its board unplugged is exactly where this function
+    spends its time. Until the callback existed the daemon did nothing at all
+    in that state, so a statusLine hook wiped while the board was out stayed
+    wiped until somebody plugged it back in."""
+    calls = []
+    seen = {"n": 0}
+
+    def fake_detect():
+        seen["n"] += 1
+        return "/dev/cu.usbserial-1" if seen["n"] > 3 else None
+
+    monkeypatch.setattr(bridge, "autodetect_port", fake_detect)
+    monkeypatch.setattr(bridge.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(bridge.time, "sleep", lambda s: None)
+
+    port = bridge.wait_for_port(on_wait=lambda: calls.append(1), poll_s=0)
+    assert port == "/dev/cu.usbserial-1"
+    assert len(calls) == 3, "upkeep did not run on every poll"
+
+
+def test_a_board_already_present_does_no_upkeep(monkeypatch):
+    """The callback is for waiting. Nothing waited, nothing to do."""
+    calls = []
+    monkeypatch.setattr(bridge, "autodetect_port",
+                        lambda: "/dev/cu.usbserial-1")
+    monkeypatch.setattr(bridge.os.path, "exists", lambda p: True)
+    bridge.wait_for_port(on_wait=lambda: calls.append(1))
+    assert calls == []
+
+
+def test_failing_upkeep_never_strands_the_wait(monkeypatch, capsys):
+    """Failing here would leave a plugged-in board undetected, which is far
+    worse than whatever the callback was trying to do."""
+    seen = {"n": 0}
+
+    def fake_detect():
+        seen["n"] += 1
+        return "/dev/cu.usbserial-1" if seen["n"] > 2 else None
+
+    def boom():
+        raise RuntimeError("settings.json vanished")
+
+    monkeypatch.setattr(bridge, "autodetect_port", fake_detect)
+    monkeypatch.setattr(bridge.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(bridge.time, "sleep", lambda s: None)
+
+    assert bridge.wait_for_port(on_wait=boom) == "/dev/cu.usbserial-1"
+    assert "upkeep failed" in capsys.readouterr().err

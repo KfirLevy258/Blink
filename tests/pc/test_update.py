@@ -128,7 +128,7 @@ def fake_run(ok=True, version="0.7.0"):
     def run(cmd, **kw):
         class R:
             returncode = 0 if ok else 1
-            stdout = f"clauge {version}\n" if ok else ""
+            stdout = f"blink {version}\n" if ok else ""
             stderr = ""
         return R()
     return run
@@ -137,8 +137,8 @@ def fake_run(ok=True, version="0.7.0"):
 class TestApply(unittest.TestCase):
     def setUp(self):
         import tempfile
-        self.d = tempfile.mkdtemp(prefix="clauge-apply-")
-        self.target = os.path.join(self.d, "bin", "clauge")
+        self.d = tempfile.mkdtemp(prefix="blink-apply-")
+        self.target = os.path.join(self.d, "bin", "blink")
         os.makedirs(os.path.dirname(self.target))
         with open(self.target, "wb") as f:
             f.write(b"old binary")
@@ -187,8 +187,8 @@ class TestApply(unittest.TestCase):
 class TestRecover(unittest.TestCase):
     def setUp(self):
         import tempfile
-        self.d = tempfile.mkdtemp(prefix="clauge-recover-")
-        self.target = os.path.join(self.d, "clauge")
+        self.d = tempfile.mkdtemp(prefix="blink-recover-")
+        self.target = os.path.join(self.d, "blink")
 
     def tearDown(self):
         import shutil
@@ -222,7 +222,7 @@ class TestRecover(unittest.TestCase):
 class TestOptOut(unittest.TestCase):
     def setUp(self):
         import tempfile
-        self.d = tempfile.mkdtemp(prefix="clauge-optout-")
+        self.d = tempfile.mkdtemp(prefix="blink-optout-")
         self._env = os.environ.pop(update.NO_AUTO_ENV, None)
 
     def tearDown(self):

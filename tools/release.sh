@@ -1,13 +1,13 @@
 #!/bin/bash
-# Build, sign, and publish a Clauge firmware release the board can install
+# Build, sign, and publish a Blink firmware release the board can install
 # over WiFi. The version comes from firmware/src/version.h -- bump it FIRST.
 # Requires: zephyr env NOT needed here (script sources it), `gh auth status` ok.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
-REPO="${OTA_REPO:-KfirLevy258/Clauge}"
+REPO="${OTA_REPO:-KfirLevy258/Blink}"
 REPO_URL="${OTA_REPO_URL:-https://github.com/$REPO.git}"
-TAG="v$(sed -n 's/#define CLAUGE_FW_VERSION "\(.*\)"/\1/p' "$ROOT/firmware/src/version.h")"
+TAG="v$(sed -n 's/#define BLINK_FW_VERSION "\(.*\)"/\1/p' "$ROOT/firmware/src/version.h")"
 
 VER="${TAG#v}"
 [ -n "$VER" ] || { echo "FATAL: no version in version.h"; exit 1; }
@@ -28,19 +28,19 @@ git -C "$ROOT" ls-remote --exit-code --tags "$REPO_URL" "refs/tags/$TAG" \
 # agree about what it is. Cheaper to fail here than to publish a release whose
 # two halves introduce themselves differently.
 sh "$HERE/../tests/ci/check_versions.sh"
-PROTO=$(sed -n 's/^#define CLAUGE_PROTO_VERSION \([0-9][0-9]*\).*$/\1/p' \
+PROTO=$(sed -n 's/^#define BLINK_PROTO_VERSION \([0-9][0-9]*\).*$/\1/p' \
 	"$ROOT/firmware/src/version.h")
 [ -z "$(git -C "$ROOT" status --porcelain)" ] || {
 	echo "FATAL: working tree dirty -- releases come from committed code only"; exit 1; }
 # The firmware feed lives on the same release as the source tag ($TAG). Refuse
 # to overwrite an existing firmware asset -- bump version.h for a new build.
 gh release view "$TAG" --repo "$REPO" --json assets \
-	-q '.assets[].name' 2>/dev/null | grep -qx clauge-fw.bin && {
-	echo "FATAL: $TAG already carries clauge-fw.bin -- bump version.h"; exit 1; }
+	-q '.assets[].name' 2>/dev/null | grep -qx blink-fw.bin && {
+	echo "FATAL: $TAG already carries blink-fw.bin -- bump version.h"; exit 1; }
 
 source ~/zephyr-v4.4.0/.venv/bin/activate
 source ~/zephyr-v4.4.0/zephyr/zephyr-env.sh
-KEY="${OTA_SIGNING_KEY:-$HOME/.clauge/ota_signing_key_p256.pem}"
+KEY="${OTA_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
 [ -f "$KEY" ] || { echo "FATAL: signing key missing at $KEY (set OTA_SIGNING_KEY)"; exit 1; }
 # Stamp the real version into the MCUboot image header. Zephyr's default for
 # CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION is "0.0.0+0" (it only auto-fills from an
@@ -66,7 +66,7 @@ KEY="${OTA_SIGNING_KEY:-$HOME/.clauge/ota_signing_key_p256.pem}"
 
 BIN="$ROOT/firmware/build-sb/firmware/zephyr/zephyr.signed.bin"
 
-# A release must not carry the on-device network path. CONFIG_CLAUGE_WIFI_MODE
+# A release must not carry the on-device network path. CONFIG_BLINK_WIFI_MODE
 # defaults to n, but a default is not a guarantee: a stray EXTRA_CONF_FILE or a
 # sticky build directory flips it silently, and nobody would find out until a
 # customer's board signed itself in to Anthropic as Claude Code.
@@ -74,8 +74,8 @@ BIN="$ROOT/firmware/build-sb/firmware/zephyr/zephyr.signed.bin"
 # Checks the ARTIFACT, not only the config, because the artifact is what ships.
 # If the OAuth path were ever linked in, these strings would be in the image.
 CFG="$ROOT/firmware/build-sb/firmware/zephyr/.config"
-if grep -q "^CONFIG_CLAUGE_WIFI_MODE=y" "$CFG"; then
-	echo "FATAL: CONFIG_CLAUGE_WIFI_MODE=y in a release build." >&2
+if grep -q "^CONFIG_BLINK_WIFI_MODE=y" "$CFG"; then
+	echo "FATAL: CONFIG_BLINK_WIFI_MODE=y in a release build." >&2
 	echo "       That ships the on-device sign-in and the token store." >&2
 	exit 1
 fi
@@ -101,7 +101,7 @@ SLOT=$((0x150000))
 [ "$SIZE" -le "$SLOT" ] || { echo "FATAL: image $SIZE > slot $SLOT"; exit 1; }
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-cp "$BIN" "$TMP/clauge-fw.bin"
+cp "$BIN" "$TMP/blink-fw.bin"
 
 # --- publish -----------------------------------------------------------
 #
@@ -118,7 +118,7 @@ cp "$BIN" "$TMP/clauge-fw.bin"
 # key stays on this machine. Putting it in GitHub Secrets would sign the
 # artifacts with a key held by the same account that could publish forged ones,
 # which is most of the reason for signing gone.
-RELKEY="${CLAUGE_RELEASE_KEY:-$HOME/.clauge/release_signing_key_p256.pem}"
+RELKEY="${BLINK_RELEASE_KEY:-$HOME/.blink/release_signing_key_p256.pem}"
 [ -f "$RELKEY" ] || { echo "FATAL: release signing key missing at $RELKEY"; exit 1; }
 
 ARTIFACTS="macos-arm64 macos-x86_64 linux-x86_64 windows-x86_64.exe"
@@ -131,11 +131,11 @@ if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
 	# would be live at /latest/download/ for the ~40 minutes before the
 	# manifest describing it exists.
 	gh release edit "$TAG" --repo "$REPO" --draft=true
-	gh release upload "$TAG" --repo "$REPO" --clobber "$TMP/clauge-fw.bin"
+	gh release upload "$TAG" --repo "$REPO" --clobber "$TMP/blink-fw.bin"
 else
-	gh release create "$TAG" --repo "$REPO" --draft --title "Clauge $VER" \
+	gh release create "$TAG" --repo "$REPO" --draft --title "Blink $VER" \
 		--notes "Firmware $VER — size $SIZE bytes, sha256 $SHA" \
-		"$TMP/clauge-fw.bin"
+		"$TMP/blink-fw.bin"
 fi
 
 # workflow_dispatch, not the `release: published` trigger -- a draft never
@@ -152,7 +152,7 @@ while :; do
 		-q '.assets[].name' 2>/dev/null || true)
 	missing=""
 	for k in $ARTIFACTS; do
-		echo "$have" | grep -qx "clauge-$k" || missing="$missing $k"
+		echo "$have" | grep -qx "blink-$k" || missing="$missing $k"
 	done
 	[ -n "$missing" ] || break
 	[ "$(date +%s)" -lt "$deadline" ] || {
@@ -166,7 +166,7 @@ done
 # whole value of signing locally: the signature covers bytes this machine has
 # seen, from the same URL a customer will fetch.
 for k in $ARTIFACTS; do
-	gh release download "$TAG" --repo "$REPO" -p "clauge-$k" -D "$TMP"
+	gh release download "$TAG" --repo "$REPO" -p "blink-$k" -D "$TMP"
 done
 
 # The document itself comes from pc/manifest.py, which is the only place its
@@ -183,7 +183,7 @@ from pc import manifest
 tmp = os.environ["TMP"]
 artifacts = {}
 for key in os.environ["ARTIFACTS"].split():
-    blob = open(os.path.join(tmp, "clauge-" + key), "rb").read()
+    blob = open(os.path.join(tmp, "blink-" + key), "rb").read()
     artifacts[key] = {"size": len(blob),
                       "sha256": hashlib.sha256(blob).hexdigest()}
 

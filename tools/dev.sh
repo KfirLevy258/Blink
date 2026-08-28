@@ -51,7 +51,7 @@ flash)
 	# dev.sh writes PLAINTEXT. A fused chip's ROM cannot read that, and the
 	# board goes dark until tools/flash_encrypted.sh restores it -- the exact
 	# mirror of the mistake that script refuses. Ask the chip, before the build.
-	if [ "${CLAUGE_SKIP_EFUSE_CHECK:-0}" != "1" ]; then
+	if [ "${BLINK_SKIP_EFUSE_CHECK:-0}" != "1" ]; then
 		# shellcheck source=lib_efuse.sh
 		. "$ROOT/tools/lib_efuse.sh"
 		efuse_probe "$PORT"
@@ -69,20 +69,20 @@ flash)
 				# and the nested quotes survive: sysbuild needs the value quoted, and
 				# a build that omits this silently signs with MCUboot's bundled dev
 				# key -- the board boots, but every later OTA is rejected and reverts.
-				echo '             -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.clauge/ota_signing_key_p256.pem\"" \'
+				echo '             -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.blink/ota_signing_key_p256.pem\"" \'
 				echo "           && $ROOT/tools/flash_encrypted.sh $PORT"
 				echo "       If this is one of the two PILOT boards, add to that build:"
 				echo "           -DEXTRA_CONF_FILE=pilot.conf"
 				echo "       (their display module differs; a stock build renders them"
 				echo "        mirrored, red/blue swapped and dim. Judge per board -- being"
 				echo "        fused is NOT the same thing as being a pilot.)"
-				echo "       CLAUGE_SKIP_EFUSE_CHECK=1 overrides."
+				echo "       BLINK_SKIP_EFUSE_CHECK=1 overrides."
 			} >&2
 			exit 1
 			;;
 		*)
 			echo "FATAL: cannot tell whether this chip is fused -- $EFUSE_REASON" >&2
-			echo "       Refusing to flash blind. CLAUGE_SKIP_EFUSE_CHECK=1 overrides." >&2
+			echo "       Refusing to flash blind. BLINK_SKIP_EFUSE_CHECK=1 overrides." >&2
 			exit 1
 			;;
 		esac

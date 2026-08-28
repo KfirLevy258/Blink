@@ -1,5 +1,8 @@
+import json
 import unittest
+
 from pc import protocol
+from pc.providers import base
 
 
 class TestProtocol(unittest.TestCase):
@@ -30,13 +33,18 @@ class TestProtocol(unittest.TestCase):
         u = protocol.usage(61.0, "R1", 26.0, "R2", [{"name": "sonnet", "weekly_pct": 2.0}])
         self.assertEqual(u["t"], "usage")
         self.assertEqual(u["session_pct"], 61.0)
-        self.assertEqual(u["models"][0]["name"], "sonnet")
+        # The array itself no longer goes on the wire; the flattened scalar
+        # keys are what the board reads, and they are what is asserted here.
+        self.assertNotIn("models", u)
+        self.assertEqual(u["sonnet_pct"], 2.0)
         self.assertEqual(protocol.status("rate_limited", "x"),
                          {"t": "status", "v": 2, "state": "rate_limited", "detail": "x"})
 
     def test_usage_flattens_known_models(self):
         """The board's JSON scanner reads scalar keys only, so known models
-        are flattened next to the models list (which stays intact)."""
+        are flattened into scalars and the array is dropped -- it was thirteen
+        bytes of a budget the second provider's fields made tight, and nothing
+        ever read it."""
         u = protocol.usage(61.0, "R1", 26.0, "R2",
                            [{"name": "fable", "weekly_pct": 12.5},
                             {"name": "sonnet", "weekly_pct": 2.0},
@@ -45,8 +53,8 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(u["fable_pct"], 12.5)
         self.assertEqual(u["sonnet_pct"], 2.0)
         self.assertEqual(u["opus_pct"], 40.5)
-        self.assertNotIn("haiku_pct", u)  # unknown models stay list-only
-        self.assertEqual(len(u["models"]), 4)
+        self.assertNotIn("haiku_pct", u)  # unknown models are simply dropped
+        self.assertNotIn("models", u)
 
     def test_usage_flatten_handles_empty_and_none_models(self):
         self.assertNotIn("sonnet_pct", protocol.usage(1.0, "R", 2.0, "R", []))
@@ -68,6 +76,161 @@ class TestProtocol(unittest.TestCase):
     def test_version_is_2(self):
         """time_msg is new in v2; both sides bump together."""
         self.assertEqual(protocol.VERSION, 2)
+
+
+
+
+class WireBudget(unittest.TestCase):
+    """The board drops an over-long line whole rather than truncating it
+    (proto.c:367-371), so the daemon must never write one."""
+
+    def test_a_normal_usage_message_fits(self):
+        raw, why = protocol.encode_checked(
+            protocol.usage(61.0, 1_787_203_200, 26.0, 1_787_644_800, [],
+                           p2="codex", p2_session_pct=42.0))
+        self.assertIsNone(why)
+        self.assertLessEqual(len(raw), protocol.MAX_LINE_BYTES)
+
+    def test_an_over_long_line_is_refused_with_a_reason(self):
+        # Built by hand rather than through usage(): every field usage() can
+        # emit is now either bounded or omitted when empty, which is the point
+        # of the budget. encode_checked still has to refuse anything that
+        # somehow gets past that.
+        fat = protocol.usage(1.0, "R", 2.0, "R", [])
+        fat["pad"] = "x" * 600
+        raw, why = protocol.encode_checked(fat)
+        self.assertIsNone(raw)
+        self.assertIn("line limit", why)
+
+
+class AdditiveFields(unittest.TestCase):
+    """The multi-provider fields ride on v2 rather than forcing a v3.
+
+    A version bump would stop every deployed board being offered updates
+    (pc/version.py), over the same link the update travels on.
+    """
+
+    def test_the_protocol_version_did_not_move(self):
+        self.assertEqual(protocol.VERSION, 2)
+
+    def test_provider_and_src_are_always_present(self):
+        u = protocol.usage(1.0, "R", 2.0, "R", [])
+        self.assertEqual(u["provider"], "claude")
+        self.assertEqual(u["src"], "cli")
+
+    def test_unknown_optional_fields_are_omitted_not_sentinelled(self):
+        u = protocol.usage(1.0, "R", 2.0, "R", [])
+        for k in ("state", "p2"):
+            self.assertNotIn(k, u)
+
+    def test_a_second_provider_names_itself(self):
+        u = protocol.usage(1.0, "R", 2.0, "R", [], provider="codex",
+                           src="desktop", state="running")
+        self.assertEqual(u["provider"], "codex")
+        self.assertEqual(u["src"], "desktop")
+        self.assertEqual(u["state"], "running")
+
+    def test_frame_to_usage_computes_both_countdowns(self):
+        from pc.providers import base
+        f = base.NormalizedUsageFrame(
+            provider="claude", src="cli", observed_at=1_787_200_000,
+            session_pct=10.0, session_resets_at=1_787_203_200,
+            weekly_pct=20.0, weekly_resets_at=1_787_644_800)
+        u = protocol.frame_to_usage(f, 1_787_200_000)
+        self.assertEqual(u["session_resets_in_s"], 3200)
+        self.assertEqual(u["weekly_resets_in_s"], 444800)
+
+    def test_a_past_reset_stays_unknown_through_the_frame(self):
+        from pc.providers import base
+        f = base.NormalizedUsageFrame(
+            provider="claude", src="cli", observed_at=1_787_200_000,
+            session_pct=10.0, session_resets_at=1_787_100_000)
+        u = protocol.frame_to_usage(f, 1_787_200_000)
+        self.assertEqual(u["session_resets_in_s"], -1)
+
+
+def test_the_second_provider_carries_its_own_staleness():
+    """A live page must not be labelled old because the other one went quiet.
+
+    `stale` describes the FIRST provider. With two providers on two pages that
+    is a statement about one of them, and the board was showing it over
+    whichever page happened to be in front -- so a machine running Claude Code
+    all day with Codex touched once that morning announced "Reading is old"
+    over numbers that were updating (user-reported 2026-08-28).
+    """
+    m = protocol.usage(0.0, None, 0.0, None, [], stale=True,
+                       provider="codex", p2="claude", p2_session_pct=66.0,
+                       p2_stale=False)
+    assert m["stale"] is True
+    assert m["p2_stale"] is False
+
+
+def test_the_second_providers_staleness_is_independent():
+    """...and it travels in the other direction too."""
+    m = protocol.usage(0.0, None, 0.0, None, [], stale=False,
+                       provider="claude", p2="codex", p2_stale=True)
+    assert m["stale"] is False
+    assert m["p2_stale"] is True
+
+
+def test_no_second_provider_means_no_second_staleness():
+    """p2_stale rides with the rest of p2 rather than standing alone.
+
+    A board that receives p2_stale without p2 would have an age for a page it
+    is not being told exists.
+    """
+    m = protocol.usage(0.0, None, 0.0, None, [], stale=True)
+    assert "p2_stale" not in m
+    assert "p2" not in m
+
+
+# --- burn_pph on the wire --------------------------------------------------
+
+
+def test_burn_is_omitted_when_absent():
+    """The MAX_LINE_BYTES rule: a key carrying no information spends budget a
+    future field will need, and an absent key already means unknown on both
+    sides. This is the common case -- every machine with Claude Code."""
+    msg = protocol.usage(40, None, 20, None, [])
+    assert "burn_pph" not in msg
+
+
+def test_burn_is_sent_when_present():
+    msg = protocol.usage(40, None, 20, None, [], burn_pph=14.23)
+    assert msg["burn_pph"] == 14.2          # one decimal, rounded
+
+
+def test_a_zero_or_negative_rate_is_not_sent():
+    for bad in (0, -1.0):
+        assert "burn_pph" not in protocol.usage(40, None, 20, None, [],
+                                                burn_pph=bad)
+
+
+def test_the_frame_carries_the_rate_onto_the_wire():
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="desktop", observed_at=1_787_700_000.0,
+        session_pct=40, weekly_pct=20, session_burn_pph=14.0)
+    msg = protocol.frame_to_usage(f, 1_787_700_000.0)
+    assert msg["burn_pph"] == 14.0
+    # And the invariant the firmware leans on, restated on the wire: no
+    # countdown alongside it.
+    assert msg["session_resets_in_s"] == -1
+
+
+def test_the_line_still_fits_with_everything_on_it():
+    """burn_pph is additive, and additive only counts if the fully loaded
+    line still fits -- the board drops an over-long line whole."""
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="desktop", observed_at=1_787_700_000.0,
+        session_pct=99.9, weekly_pct=99.9, state="running",
+        n_run=9, n_wait=9, n_stuck=9, n_idle=9, n_agents=99,
+        session_burn_pph=999.9)
+    g = base.NormalizedUsageFrame(
+        provider="codex", src="cli", observed_at=1_787_700_000.0,
+        session_pct=99.9, weekly_pct=99.9, stale=True,
+        session_resets_at=1_787_999_999.0, weekly_resets_at=1_788_999_999.0)
+    line = json.dumps(protocol.frame_to_usage(f, 1_787_700_000.0, secondary=g))
+    assert len(line.encode()) < protocol.MAX_LINE_BYTES
 
 
 if __name__ == "__main__":

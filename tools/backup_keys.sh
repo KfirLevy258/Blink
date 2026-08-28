@@ -3,7 +3,7 @@
 #
 #   tools/backup_keys.sh [destination-dir]
 #
-# There are two, they live only in ~/.clauge, and neither can be regenerated:
+# There are two, they live only in ~/.blink, and neither can be regenerated:
 #
 #   ota_signing_key_p256.pem      MCUboot's. Every board ever flashed accepts
 #                                 firmware signed with this and nothing else.
@@ -26,9 +26,9 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-SRC="${CLAUGE_HOME:-$HOME/.clauge}"
+SRC="${BLINK_HOME:-$HOME/.blink}"
 STAMP=$(date +%Y-%m-%d)
-DEST="${1:-$HOME/clauge-key-backup-$STAMP}"
+DEST="${1:-$HOME/blink-key-backup-$STAMP}"
 
 OTA="ota_signing_key_p256.pem"
 REL="release_signing_key_p256.pem"
@@ -55,7 +55,7 @@ ok "copied both keys and derived their public halves"
 # --- prove the copies work -------------------------------------------------
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-printf 'clauge backup round trip %s' "$STAMP" >"$TMP/probe"
+printf 'blink backup round trip %s' "$STAMP" >"$TMP/probe"
 
 for pair in "$OTA:ota_public.pem" "$REL:release_public.pem"; do
 	key=${pair%%:*}
@@ -90,18 +90,18 @@ ok "the release key matches the public half compiled into the app"
 ( cd "$DEST" && shasum -a 256 ./*.pem >SHA256SUMS )
 
 cat >"$DEST/README.txt" <<EOF
-Clauge signing keys, backed up $STAMP.
+Blink signing keys, backed up $STAMP.
 
   $OTA
       MCUboot's key. Firmware images are signed with it by tools/release.sh.
       Every board already flashed rejects anything else. Restore to:
-          ~/.clauge/$OTA
+          ~/.blink/$OTA
 
   $REL
       Signs manifest.json, which is what tells an installed app that an
       update is genuine. The matching public half is compiled into the app
       as RELEASE_PUBKEY_PEM in pc/update.py. Restore to:
-          ~/.clauge/$REL
+          ~/.blink/$REL
 
 Restore is a copy: put the file back at the path above with mode 600.
 Verify a restore by running tools/backup_keys.sh again -- it signs with the
@@ -110,14 +110,14 @@ copy and checks the result against the key the shipped software carries.
 Check integrity of this backup:   shasum -a 256 -c SHA256SUMS
 
 These are private keys. Anyone holding them can publish firmware and app
-updates that every Clauge device will accept as yours.
+updates that every Blink device will accept as yours.
 EOF
 
 printf '\nBacked up to %s\n' "$DEST"
 printf '\nThis is still one machine. To finish:\n'
 printf '  1. Encrypt it (choose your own passphrase):\n'
-printf '       tar -C "%s" -czf - . | openssl enc -aes-256-cbc -pbkdf2 -out ~/clauge-keys-%s.tar.gz.enc\n' "$DEST" "$STAMP"
+printf '       tar -C "%s" -czf - . | openssl enc -aes-256-cbc -pbkdf2 -out ~/blink-keys-%s.tar.gz.enc\n' "$DEST" "$STAMP"
 printf '  2. Put the encrypted file on TWO things that are not this laptop.\n'
 printf '  3. Store the passphrase somewhere the laptop is not needed to read.\n'
 printf '\nRestore later:\n'
-printf '     openssl enc -d -aes-256-cbc -pbkdf2 -in ~/clauge-keys-%s.tar.gz.enc | tar -xzf - -C <dir>\n' "$STAMP"
+printf '     openssl enc -d -aes-256-cbc -pbkdf2 -in ~/blink-keys-%s.tar.gz.enc | tar -xzf - -C <dir>\n' "$STAMP"

@@ -79,7 +79,7 @@ def main() -> None:
     sys.stderr.write(f"\n[trace] done: {traces} touch(es) -> {args.out}\n")
     if traces == 0:
         sys.stderr.write(
-            "[trace] nothing captured. Check CONFIG_CLAUGE_TOUCH_TRACE=y in\n"
+            "[trace] nothing captured. Check CONFIG_BLINK_TOUCH_TRACE=y in\n"
             "        firmware/build-sb/firmware/zephyr/.config -- the flash\n"
             "        script reuses whatever is already in build-sb/.\n")
 

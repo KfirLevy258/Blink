@@ -27,20 +27,20 @@ import sys
 import tempfile
 import urllib.request
 
-RELEASE_BASE = "https://github.com/KfirLevy258/Clauge/releases/latest/download/"
+RELEASE_BASE = "https://github.com/KfirLevy258/Blink/releases/latest/download/"
 MANIFEST_URL = RELEASE_BASE + "manifest.json"
-FIRMWARE_URL = RELEASE_BASE + "clauge-fw.bin"
+FIRMWARE_URL = RELEASE_BASE + "blink-fw.bin"
 
 
 
-# Serve a locally built release instead of GitHub's. Set CLAUGE_OTA_DIR to a
-# directory holding manifest.json + clauge-fw.bin.
+# Serve a locally built release instead of GitHub's. Set BLINK_OTA_DIR to a
+# directory holding manifest.json + blink-fw.bin.
 #
 # This exists because the published feed cannot exercise the update path during
 # development: the board usually runs something newer than the latest release,
 # so a check can only ever answer "up to date". Pointing this at a local build
 # is the only way to test a real transfer without publishing one.
-OTA_DIR_ENV = "CLAUGE_OTA_DIR"
+OTA_DIR_ENV = "BLINK_OTA_DIR"
 
 
 def _local_dir():

@@ -5,6 +5,7 @@ Run inside the Zephyr venv (has pyserial) or `pip install pyserial`:
     python3 claude_usage_bridge.py --port /dev/cu.usbmodemXXXX
 """
 import argparse
+import json
 import os
 import sys
 import time
@@ -13,7 +14,8 @@ import serial  # pyserial
 from serial.tools import list_ports
 
 from pc import ota as ota_mod
-from pc import protocol, statusline_source, update
+from pc import ingest, install_statusline, protocol, statusline_source, update
+from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
 POLL_INTERVAL_S = 60
@@ -46,21 +48,220 @@ KNOWN_USB_SERIAL = {
 ESPRESSIF_VID = 0x303A  # native USB-serial on -S2/-S3 parts
 
 
-def autodetect_port():
+def candidate_ports():
+    """Every port that might be a board, best guess first.
+
+    A LIST, not a single answer, and that is the point. This used to return
+    the first VID:PID match and the caller committed to it -- but 1a86:7523 is
+    the CH340, which is in Arduino clones, USB-serial adapters and a great deal
+    of other hobbyist hardware. On a desk with any of it attached, the daemon
+    could pick a stranger's device, fail to talk to it, and never look at the
+    real board sitting on the next port.
+
+    With more than one BLINK attached the first that answers wins and the rest
+    are ignored: one daemon drives one board. That is a real limitation rather
+    than an oversight -- the protocol, the preference and the OTA path are all
+    written around a single unit -- but it is at least now a defined one, and
+    `--port` picks a specific board deterministically.
+    """
+    out = []
     for p in list_ports.comports():
         if (p.vid, p.pid) in KNOWN_USB_SERIAL or p.vid == ESPRESSIF_VID:
-            return p.device
+            out.append(p.device)
     # Name heuristics kept as a fallback for a variant carrying a chip that is
     # not in the table yet. Bluetooth ports have no VID and no matching name,
     # so they cannot be picked up by either pass.
     for p in list_ports.comports():
+        if p.device in out:
+            continue
         if "usbmodem" in p.device or (p.manufacturer or "").lower().startswith("espressif"):
-            return p.device
-    return None
+            out.append(p.device)
+    return out
 
 
-def wait_for_port(explicit=None, poll_s=3.0):
+def autodetect_port():
+    """The first candidate, for callers that only want one."""
+    ports = candidate_ports()
+    return ports[0] if ports else None
+
+
+# How long to wait for a device to identify itself before resetting it.
+#
+# The board answers `welcome` with its `pref` (proto.c), immediately, so this
+# only has to cover the round trip. It did not always: the reply this relied
+# on was the once-per-boot ota_query, so from the second connection of a boot
+# onwards the board was silent here and got reset anyway.
+PROBE_S = 1.5
+
+# ...and how long to listen on the SECOND pass, when nothing answered quickly.
+#
+# Longer than the board's 10 s ping interval on purpose. The fast probe relies
+# on the board ANSWERING our welcome, and there is one window where it cannot:
+# a board plugged in a moment ago is booting, so our message arrives before
+# proto is listening and its own hello is flushed by the buffer reset. It says
+# nothing, looks like a stranger, and would be written off.
+#
+# A patient pass needs no answer at all -- it just waits for the next ping,
+# which a healthy board sends unprompted. Measured on hardware: 0.51 s from
+# reset to the first protocol message, and a ping every 10 s after that, so 11
+# seconds cannot miss a live board.
+PROBE_PATIENT_S = 11.0
+
+
+def hold_single_instance(home, on_wait=None, poll_s=5.0):
+    """Block until this process is the only daemon, then keep the lock.
+
+    Two daemons on one board is not a hypothetical. On macOS a /dev/cu.* node
+    is NOT exclusive -- two processes open it happily, and both then write
+    usage messages and answer the board's pings on the same wire. Observed
+    doing exactly that on 2026-08-28: a second daemon connected to a board the
+    first was already driving, with no error from either. The board sees
+    interleaved traffic and the user sees a panel that flickers between two
+    sources with nothing in either log to explain it.
+
+    Linux and Windows do make the port exclusive, so there the second process
+    fails to open it and the message in the reconnect loop covers the case.
+    This is for the platform where the OS will not say no.
+
+    Waiting rather than exiting, for the same reason wait_for_port waits: the
+    service is registered with KeepAlive/Restart=always, so exiting turns a
+    duplicate launch into a process start and a log line every ten seconds for
+    as long as both exist.
+
+    Returns the open file object, which must stay referenced -- closing it
+    releases the lock. POSIX only; on Windows the exclusive port is the lock.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return None                      # Windows: the port itself is exclusive
+
+    path = os.path.join(home, "bridge.lock")
+    try:
+        os.makedirs(home, exist_ok=True)
+        fh = open(path, "w")
+    except OSError:
+        # An unwritable home is not a reason to refuse to run; it only means
+        # this protection is unavailable.
+        return None
+
+    said = False
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if said:
+                print("[bridge] the other daemon exited; taking over",
+                      file=sys.stderr)
+            return fh
+        except OSError:
+            if not said:
+                print("[bridge] another Blink daemon is already running and"
+                      " has the board; waiting for it to exit. Two of them on"
+                      " one cable would interleave on the wire.",
+                      file=sys.stderr)
+                said = True
+            if on_wait:
+                on_wait()
+            time.sleep(poll_s)
+
+
+def usb_topology():
+    """A hashable snapshot of every serial device attached right now.
+
+    The point is to answer "has anything changed?" without opening anything.
+    Nothing plugged or unplugged means there is nothing new to find, so there
+    is no reason to reopen a port that already declined to answer -- which is
+    what turns "ask before resetting" from a good idea into a loop that pokes
+    somebody's Arduino every three seconds forever.
+    """
+    return tuple(sorted((p.device, p.vid, p.pid, p.serial_number or "")
+                        for p in list_ports.comports()))
+
+
+def _known_path(home):
+    return os.path.join(home, "board.json")
+
+
+def remembered_board(home):
+    """{"port": ..., "board_id": ...} from the last successful connection."""
+    try:
+        with open(_known_path(home)) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def remember_board(home, port, board_id):
+    """Write down which port worked, so the next start goes straight to it.
+
+    This is what makes the polite-probe cheap in the case that matters: a
+    machine that has connected before does not scan at all, it opens the port
+    it used last. It is also what licenses a RESET -- see the connect loop:
+    a device we have identified as ours before may be reset when it goes
+    quiet, and one we have never identified may not, ever.
+    """
+    try:
+        os.makedirs(home, exist_ok=True)
+        tmp = _known_path(home) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"port": port, "board_id": board_id}, f)
+        os.replace(tmp, _known_path(home))
+    except OSError:
+        pass                    # a convenience, never a requirement
+
+
+def probe_is_our_board(ser, timeout=PROBE_S):
+    """Ask the thing on this port whether it is a Blink board, without a reset.
+
+    Why this exists: the reset below is not free, and it is not aimed at a
+    board we have identified -- it is aimed at whatever matched a VID:PID.
+    1a86:7523 is the CH340, which is in Arduino clones, USB-serial adapters and
+    a great deal of other hobbyist hardware. On a desk with any of it plugged
+    in, the daemon could open a stranger's device and pulse its reset line.
+
+    A `welcome` is the safe question. It is 60 bytes of JSON that a device
+    which is not ours will ignore (it is text, and it toggles no control line),
+    and one that IS ours answers within milliseconds. Answer -> skip the reset
+    entirely; no answer -> fall through to the reset, which a mute or wedged
+    board genuinely needs.
+
+    A pleasant side effect: our own board stops being rebooted every time the
+    daemon restarts, which it was, on every login and every service restart.
+    """
+    try:
+        ser.reset_input_buffer()
+        ser.write(protocol.encode(protocol.welcome("blink-bridge",
+                                                   RELEASE_VERSION)))
+        deadline = time.time() + timeout
+        reader = protocol.LineReader()
+        while time.time() < deadline:
+            chunk = ser.read(256)
+            if not chunk:
+                continue
+            for msg in reader.feed(chunk):
+                # Any well-formed message of ours will do. The board sends
+                # ota_query on welcome and pings on its own schedule; which one
+                # arrives first is timing, and identity is the only question
+                # being asked here.
+                if isinstance(msg, dict) and msg.get("t"):
+                    return True
+    except Exception:
+        # A probe that fails is not evidence of anything; fall through and let
+        # the usual path decide.
+        return False
+    return False
+
+
+def wait_for_port(explicit=None, poll_s=3.0, on_wait=None):
     """Block until there is a board to talk to, then return its device path.
+
+    `on_wait` runs once per poll while we wait. Host-side upkeep that has
+    nothing to do with the cable belongs here: a machine sitting with its
+    board unplugged is exactly where this function spends its time, and until
+    the callback existed the daemon did nothing at all in that state -- so a
+    statusLine hook wiped while the board was out stayed wiped until somebody
+    plugged it back in.
 
     Waiting rather than exiting is what keeps the installed service honest
     about "plug it in and it works". install.sh registers this daemon with
@@ -91,6 +292,15 @@ def wait_for_port(explicit=None, poll_s=3.0):
             print(f"[bridge] waiting for the board ({explicit or 'USB'})...",
                   file=sys.stderr)
             announced = True
+        if on_wait is not None:
+            try:
+                on_wait()
+            except Exception as e:
+                # Upkeep must never strand the wait. Failing here would leave
+                # a plugged-in board undetected, which is a far worse outcome
+                # than whatever the callback was trying to do.
+                print(f"[bridge] upkeep failed while waiting: {e}",
+                      file=sys.stderr)
         time.sleep(poll_s)
 
 
@@ -102,14 +312,14 @@ def _self_update_tick(target):
     off switch, a bad build would keep installing itself on every machine that
     checked, and nothing here could stop it.
     """
-    home = os.path.dirname(os.path.dirname(target))   # ~/.clauge
+    home = os.path.dirname(os.path.dirname(target))   # ~/.blink
     manifest = update.fetch_signed_manifest()
     found = update.available(manifest)
     if not found:
         return
     version, artifact = found
     if not ((manifest.get("daemon") or {}).get("auto")):
-        print(f"[update] {version} is available; run `clauge update` to install"
+        print(f"[update] {version} is available; run `blink update` to install"
               " it", file=sys.stderr)
         return
     if not update.auto_update_allowed(home):
@@ -129,14 +339,14 @@ def _self_update_tick(target):
 
 
 def main(argv=None):
-    """argv is passed explicitly by the `clauge run` subcommand.
+    """argv is passed explicitly by the `blink run` subcommand.
 
     Without it this parsed sys.argv[1:], which inside the packaged binary is
     ["run"] -- the subcommand name itself. argparse rejected it, the process
     exited immediately, and the login service restarted it every ten seconds
     forever. It never ran once.
     """
-    ap = argparse.ArgumentParser(prog="clauge run")
+    ap = argparse.ArgumentParser(prog="blink run")
     ap.add_argument("--port", default=None)
     ap.add_argument("--baud", type=int, default=115200)
     args = ap.parse_args(argv)
@@ -145,9 +355,10 @@ def main(argv=None):
     # binary aside and moving the new one in, the login service is pointing at
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
-    from pc.cli import _self_path, clauge_home as _clauge_home, installed_bin
+    from pc.cli import (_self_path, blink_home as _blink_home,
+                        installed_bin, settings_path, shim_path)
     self_bin = installed_bin()
-    clauge_home = _clauge_home()
+    blink_home = _blink_home()
     update.recover(self_bin)
 
     # Outside the reconnect loop, unlike next_poll. A board that comes and goes
@@ -157,11 +368,29 @@ def main(argv=None):
     next_update = time.monotonic() + UPDATE_FIRST_CHECK_S
     report_failure = None       # a flash failure waiting for the board to return
 
+    # Outside the reconnect loop for the same reason next_update is: its
+    # interval and its give-up counter describe this machine, not this cable.
+    #
+    # statusLine is a single slot in a file shared with the user and with
+    # Claude Code's own updates, and anything that rewrites settings.json can
+    # drop our command silently. The symptom is not an error -- it is a panel
+    # that stops updating while this program reports success, and the desktop
+    # cache hides it further by going on feeding numbers for hours. See
+    # install_statusline.drift_check for the one rule that matters: a missing
+    # marker means the user uninstalled, and that is never overridden.
+    watchdog = install_statusline.DriftWatchdog(settings_path(), shim_path())
+
+    # Before the port is touched. The lock lives for the life of the process --
+    # the file object is bound here so it is not garbage collected, which would
+    # release it.
+    _instance_lock = hold_single_instance(   # noqa: F841 -- held, not used
+        blink_home, on_wait=lambda: watchdog.tick())
+
     # Record the pid so uninstall can stop US specifically. Ending the login
     # service is not the same as ending this program, and killing by image name
     # is how the uninstaller once killed itself; a pid is unambiguous.
     #
-    # Written NEXT TO THE BINARY rather than under ~/.clauge, because those are
+    # Written NEXT TO THE BINARY rather than under ~/.blink, because those are
     # not always the same place. A login service runs in the user's own
     # environment, not in whatever environment registered it -- so under the CI
     # harness, which redirects HOME to a temporary directory, the daemon
@@ -176,12 +405,69 @@ def main(argv=None):
     except OSError as e:
         print(f"[bridge] could not record the pid: {e}", file=sys.stderr)
 
-    port = wait_for_port(args.port)
+    # Host-side upkeep that runs whether or not a board is attached. Passed
+    # into wait_for_port below so an unplugged machine still repairs a wiped
+    # hook instead of sitting idle until the cable comes back.
+    def _upkeep():
+        drifted = watchdog.tick()
+        if drifted:
+            print(f"[watchdog] {drifted}", file=sys.stderr)
 
-    # Claude Code owns the credential and computes these numbers; we read the file
-    # its statusline shim writes. Nothing here authenticates to Anthropic.
-    fetch = statusline_source.make_fetch()
+    # Every provider, every source, behind one callable.
+    #
+    # Claude Code owns the credential and computes these numbers; we read
+    # files it and the desktop app have already written. Nothing here
+    # authenticates to Anthropic, and the daemon deliberately does not know
+    # which providers exist -- pc/ingest owns that, so onboarding a second
+    # tool never reaches this loop.
+    bus = ingest.IngestionBus()
+    fetch = bus.poll
+
     last_err = None
+    explicit_port = bool(args.port)
+
+    # What we learned last time. A machine that has connected before opens the
+    # port it used, with no scanning at all.
+    known = remembered_board(blink_home)
+    # The USB layout we have already searched without finding anything. While
+    # it is unchanged there is nothing new to look at, so we wait instead of
+    # reopening ports on a timer.
+    searched = None
+
+    def next_port():
+        """The port to try, or None if there is nothing new to try.
+
+        Order matters and is the whole design: the remembered board first
+        (usually the only candidate, and the only one we may reset), then
+        anything else attached, each asked once per USB layout.
+        """
+        nonlocal searched, patient
+        if explicit_port:
+            return args.port
+        cands = candidate_ports()
+        want = known.get("port")
+        if want in cands:
+            cands = [want] + [c for c in cands if c != want]
+        here = usb_topology()
+        if searched == here:
+            return None
+        if searched is not None:
+            # Something was plugged or unplugged. Start over from the quick
+            # question rather than inheriting the previous round's patience.
+            searched = None
+            patient = False
+        if not cands:
+            searched = here
+            return None
+        return cands[0]
+
+    port = wait_for_port(args.port, on_wait=_upkeep)
+    # Ports asked politely under the CURRENT layout. Not a permanent blacklist:
+    # it is discarded the moment anything is plugged or unplugged.
+    asked = set()
+    # False on the fast pass (answer my welcome), True on the patient one
+    # (just say anything). See PROBE_PATIENT_S.
+    patient = False
 
     while True:  # reconnect loop
         try:
@@ -206,22 +492,97 @@ def main(argv=None):
             ser.dtr = False
             ser.rts = False
             ser.open()
-            ser.dtr = False          # GPIO0 HIGH -> boot the app, not the ROM loader
-            ser.rts = True           # EN LOW  -> hold in reset
-            time.sleep(0.15)
-            ser.rts = False          # EN HIGH -> release; board boots
-            time.sleep(0.3)
-            ser.reset_input_buffer()
+            # Ask before pulling the reset line. See probe_is_our_board: the
+            # VID:PID that got us here belongs to a chip used by a great deal
+            # of hardware that is not ours, and a reset is not a question, it
+            # is an action taken on someone's device.
+            already_running = probe_is_our_board(
+                ser, PROBE_PATIENT_S if patient else PROBE_S)
+            asked.add(port)
+
+            # May this port be reset if it stays silent?
+            #
+            # Only if we have identified it as ours before, or the operator
+            # named it. A reset is an action taken on a device, and an
+            # unidentified CH340 is far more likely to be an Arduino than a
+            # wedged board -- 1a86:7523 is in a great deal of hardware that is
+            # not ours. A board that has connected here before is a different
+            # matter: it IS ours, silence means it is wedged, and a reset is
+            # exactly the recovery it needs.
+            may_reset = explicit_port or port == known.get("port")
+
+            if already_running:
+                print(f"[bridge] {port} answered; not resetting it",
+                      file=sys.stderr)
+            elif may_reset:
+                ser.dtr = False      # GPIO0 HIGH -> boot the app, not the ROM loader
+                ser.rts = True       # EN LOW  -> hold in reset
+                time.sleep(0.15)
+                ser.rts = False      # EN HIGH -> release; board boots
+                time.sleep(0.3)
+                ser.reset_input_buffer()
+            else:
+                # Silent, and not ours as far as we know. Leave it alone and
+                # look elsewhere -- and if there is nowhere else under this USB
+                # layout, stop looking until something is plugged or unplugged.
+                ser.close()
+                nxt = next((p for p in candidate_ports() if p not in asked), None)
+                if nxt is not None:
+                    print(f"[bridge] {port} did not answer; trying {nxt}",
+                          file=sys.stderr)
+                    port = nxt
+                    continue
+                if not patient:
+                    # Nothing answered quickly. Before writing this layout off,
+                    # go round once more listening long enough to hear an
+                    # unprompted ping -- which is the only thing a board that
+                    # was still booting during the fast pass will send.
+                    patient = True
+                    asked.clear()
+                    port = next_port() or port
+                    print("[bridge] nothing answered quickly; listening"
+                          " longer before giving up", file=sys.stderr)
+                    continue
+                searched = usb_topology()
+                asked.clear()
+                patient = False
+                print("[bridge] nothing here answers; waiting for a board to"
+                      " be plugged in", file=sys.stderr)
+                while True:
+                    _upkeep()
+                    time.sleep(3.0)
+                    nxt = next_port()
+                    if nxt is not None:
+                        break
+                port = nxt
+                continue
         except Exception as e:
             # Deduplicated: a board left unplugged, or a port the user lacks
             # permission to open, would otherwise write this same line to
             # bridge.log every three seconds for as long as the service runs.
-            err = f"open {port} failed: {e}"
+            # Name the two failures a person can actually act on. Everything
+            # else stays a bare message, but "busy" and "permission" were both
+            # being reported as an unexplained open failure and then repeated
+            # forever, which is how "the panel does nothing" became a support
+            # question instead of a one-line fix.
+            text = str(e).lower()
+            if "busy" in text or "resource temporarily unavailable" in text:
+                err = (f"{port} is busy -- something else has the board open"
+                       " (a serial monitor, esptool, the Arduino IDE, or a"
+                       " second copy of this daemon). Close it and this"
+                       " reconnects on its own")
+            elif "permission" in text or "access is denied" in text:
+                err = (f"cannot open {port}: permission denied."
+                       " On Linux the port is usually group `dialout` --"
+                       " `sudo usermod -aG dialout $USER`, then log out and"
+                       " back in")
+            else:
+                err = f"open {port} failed: {e}"
             if err != last_err:
-                print(f"[bridge] {err}; waiting for the board", file=sys.stderr)
+                print(f"[bridge] {err}", file=sys.stderr)
                 last_err = err
             time.sleep(3)
-            port = wait_for_port(args.port)
+            port = wait_for_port(args.port, on_wait=_upkeep)
             continue
         # Cleared on success so a later, genuine failure is reported again
         # rather than silenced by having happened once before.
@@ -235,7 +596,22 @@ def main(argv=None):
             # message in the log. Bridge prints its own progress every 200.
             if m.get("t") != "ota_data":
                 print(f"[bridge] -> {m}", file=sys.stderr)
-            ser.write(protocol.encode(m))
+            # encode_CHECKED. This is the only writer, and it used to call
+            # plain encode() -- so protocol.encode_checked, written precisely
+            # to guard the board's 512-byte cliff and documented as the thing
+            # callers use, had no production caller at all and only tests
+            # exercised it.
+            #
+            # It matters because the board does not truncate an over-long
+            # line, it DROPS it whole (proto.c) with no error on either side:
+            # the panel silently stops updating while this log keeps printing
+            # the message as sent. A fully loaded two-provider frame already
+            # measures 484 of the 512 bytes.
+            raw, why = protocol.encode_checked(m)
+            if raw is None:
+                print(f"[bridge] NOT SENT: {why}", file=sys.stderr)
+                return
+            ser.write(raw)
 
         # The board approved an update. esptool needs the port to itself, so
         # close it, write slot0, and let the outer reconnect loop pick the
@@ -297,10 +673,15 @@ def main(argv=None):
         bridge = Bridge(write_msg=send, fetch_usage=fetch,
                         flash_image=flash_image,
                         report_failure=report_failure,
+                        set_preferred=bus.set_preferred,
                         self_update=self_update,
                         pending=update.PendingFirmware(
-                            os.path.join(clauge_home, "pending_fw.json")))
+                            os.path.join(blink_home, "pending_fw.json")))
         report_failure = None   # handed to the Bridge above; never repeated
+        # No reset means no boot `hello`, so nothing would trigger the
+        # greeting -- see Bridge.greet.
+        if already_running:
+            bridge.greet()
         next_poll = time.monotonic()
         # The rollback copy is kept until a board has actually talked to this
         # build. Running at all is weak evidence; holding a conversation with
@@ -327,6 +708,16 @@ def main(argv=None):
                         if not proven:
                             update.cleanup(self_bin)
                             proven = True
+                            # A message of ours off this port is the only
+                            # positive identification there is. Write it down:
+                            # the next start opens this port directly instead
+                            # of scanning, and this is also what licenses a
+                            # reset if it ever goes quiet.
+                            known = {"port": port,
+                                     "board_id": msg.get("board_id")
+                                     or known.get("board_id")}
+                            remember_board(blink_home, known["port"],
+                                           known.get("board_id"))
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
                     # the liveness window): the usage endpoint is aggressively
@@ -336,6 +727,12 @@ def main(argv=None):
                     if bridge.board_alive():
                         bridge.poll_once()
                     next_poll = time.monotonic() + POLL_INTERVAL_S
+                # Not gated on board_alive(): drift is a fact about this
+                # machine, not about the cable. The same _upkeep runs from
+                # inside wait_for_port, so an unplugged machine repairs a
+                # wiped hook too -- the watchdog's own interval keeps either
+                # path from checking more often than it should.
+                _upkeep()
                 if time.monotonic() >= next_update:
                     next_update = time.monotonic() + UPDATE_INTERVAL_S
                     try:

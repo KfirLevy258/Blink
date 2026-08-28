@@ -30,6 +30,32 @@ void fmt_countdown(int32_t secs, char *buf, size_t buflen)
 	}
 }
 
+void fmt_burn(double pph, char *buf, size_t buflen)
+{
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	/*
+	 * Empty, not "--". The caller has its own idea of what "nothing to
+	 * show" looks like and already draws it; returning a second spelling
+	 * of nothing would put two different blanks on one screen.
+	 */
+	if (!(pph > 0)) {	/* also catches NaN */
+		buf[0] = '\0';
+		return;
+	}
+	if (pph < 10.0) {
+		snprintf(buf, buflen, "+%.1f%%/h", pph);
+	} else if (pph < 1000.0) {
+		snprintf(buf, buflen, "+%d%%/h", (int)(pph + 0.5));
+	} else {
+		/* A rate this high means the window is about to be full
+		 * regardless of the exact figure, and four digits would run
+		 * past the countdown's width budget. */
+		snprintf(buf, buflen, "+999%%/h");
+	}
+}
+
 void fmt_age(int32_t secs, char *buf, size_t buflen)
 {
 	if (buf == NULL || buflen == 0) {

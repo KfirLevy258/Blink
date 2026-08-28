@@ -13,8 +13,14 @@ import os
 import time
 
 from pc import protocol
+from pc.providers import base
 
-PAYLOAD_PATH = os.path.expanduser("~/.clauge/statusline.json")
+# Who we are on the ingestion bus. The board and the normalizer both key off
+# these, so they are named once here rather than spelled at each call site.
+PROVIDER_ID = "claude"
+SRC_ID = "cli"
+
+PAYLOAD_PATH = os.path.expanduser("~/.blink/statusline.json")
 # How old the payload may get before we stop vouching for it.
 #
 # This was 120 s, and 120 s was wrong in kind, not just in value. Claude Code
@@ -63,24 +69,10 @@ def _window(rate_limits: dict, key: str):
     return pct, resets if isinstance(resets, (int, float)) else None
 
 
-def _secs_until(resets_at, now_epoch: float) -> int:
-    """Seconds until `resets_at`. -1 when unknown or already past.
-
-    -1 rather than 0 for missing input: 0 renders as "resets now", which is a
-    confident lie. -1 lets the display say "--".
-
-    And -1 rather than 0 for a reset that has ALREADY passed, which is not a
-    presentation choice. usage_view.c treats a countdown of exactly 0 as "this
-    window just rolled over" and zeroes the percentage with it -- correct for
-    the firmware's own countdown reaching zero, and wrong for us, because the
-    only payload that reaches here with a past reset is a stale one, and
-    _rolled_over() deliberately refuses to zero those: usage may have happened
-    from claude.ai or the phone since. Sending 0 handed the board the very
-    decision this module declined to make, and it wiped the last-known numbers.
-    """
-    if resets_at is None or resets_at <= now_epoch:
-        return -1
-    return int(resets_at - now_epoch)
+# _secs_until moved to protocol.secs_until when a second provider needed the
+# same countdown. The reasoning that used to live here -- why -1 rather than 0,
+# both for missing input and for an already-past reset -- moved with it.
+_secs_until = protocol.secs_until
 
 
 def _window_has_reset(resets_at, now_epoch: float) -> bool:
@@ -117,13 +109,30 @@ def _rolled_over(pct: float, resets_at, now_epoch: float):
     and any amount of usage may have happened since, so 0% would be the lie.
     """
     if pct < 0 or not _window_has_reset(resets_at, now_epoch):
-        return pct, resets_at
-    return 0.0, None
+        return pct, resets_at, None
+    # The third value is the epoch the window EMPTIED, which is exactly the
+    # resets_at we are discarding. It used to be thrown away, and that was the
+    # hole: this frame's own observed_at is the payload's mtime, which can be
+    # long before the reset, so downstream had no way to tell that a NEWER
+    # reading from another source was nonetheless taken before the window
+    # rolled. pc/normalizer needs this to refuse that reading.
+    return 0.0, None, resets_at
 
 
-def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
-    """Convert a statusline payload into a 'usage' protocol message."""
-    rate_limits = payload.get("rate_limits") or {}
+def map_statusline_frame(payload: dict, now_epoch: float,
+                         mtime_epoch: float):
+    """Convert a statusline payload into a NormalizedUsageFrame.
+
+    The real body of this module. map_statusline() below is the same thing
+    rendered straight to a protocol message, kept because it is what the
+    existing tests pin and what a single-provider daemon needed.
+    """
+    rate_limits = payload.get("rate_limits")
+    # An object, or nothing. The file is written by a shell shim from
+    # whatever Claude Code sent; a string or a list here reached .get() and
+    # took this source off the bus for the rest of the process.
+    if not isinstance(rate_limits, dict):
+        rate_limits = {}
     session_pct, session_resets = _window(rate_limits, "five_hour")
     weekly_pct, weekly_resets = _window(rate_limits, "seven_day")
 
@@ -132,19 +141,27 @@ def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
     # and "this reading has been superseded by a zero we can compute". The
     # second has a real answer, so it gets one -- see _rolled_over().
     stale = (now_epoch - mtime_epoch) > STALE_AFTER_S
+    session_rolled = weekly_rolled = None
     if not stale:
-        session_pct, session_resets = _rolled_over(session_pct, session_resets,
-                                                   now_epoch)
-        weekly_pct, weekly_resets = _rolled_over(weekly_pct, weekly_resets,
-                                                 now_epoch)
+        session_pct, session_resets, session_rolled = _rolled_over(
+            session_pct, session_resets, now_epoch)
+        weekly_pct, weekly_resets, weekly_rolled = _rolled_over(
+            weekly_pct, weekly_resets, now_epoch)
 
-    # No per-model rows: the statusline payload has no per-model breakdown.
-    return protocol.usage(
-        session_pct, "", weekly_pct, "", [],
-        session_resets_in_s=_secs_until(session_resets, now_epoch),
-        weekly_resets_in_s=_secs_until(weekly_resets, now_epoch),
+    return base.NormalizedUsageFrame(
+        provider=PROVIDER_ID, src=SRC_ID, observed_at=mtime_epoch,
+        session_rolled_at=session_rolled, weekly_rolled_at=weekly_rolled,
+        session_pct=session_pct, session_resets_at=session_resets,
+        weekly_pct=weekly_pct, weekly_resets_at=weekly_resets,
         stale=stale,
     )
+
+
+def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
+    """Convert a statusline payload into a 'usage' protocol message."""
+    # No per-model rows: the statusline payload has no per-model breakdown.
+    return protocol.frame_to_usage(
+        map_statusline_frame(payload, now_epoch, mtime_epoch), now_epoch)
 
 
 def read_payload(path: str = PAYLOAD_PATH):

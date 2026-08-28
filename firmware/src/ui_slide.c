@@ -7,6 +7,7 @@
 #include <lvgl.h>
 
 #include "ui_slide.h"
+#include "ui_slide_geom.h"
 #include "ui_touchfx.h"
 
 /* The panel's scroll axis is its native vertical: 320 lines, which rotation=90
@@ -50,7 +51,8 @@
  * 150 KB this board has not got. The only remaining lever is duration, and
  * that is set by what feels right, not by what makes the band small.
  */
-#define STEP_COLS	4
+/* Defined in ui_slide_geom.h, where the host test can see it. */
+#define STEP_COLS	UI_SLIDE_STEP_COLS
 
 /*
  * Reveal style. 1 = wipe (no panel scroll), 0 = the hardware slide below.
@@ -97,7 +99,10 @@
  * and has nothing added. That is what the old unconditional k_sleep got wrong.
  */
 #define SLIDE_MIN_MS	650
-#define SLIDE_STEPS	(SCROLL_LINES / STEP_COLS)
+/* Steps are derived per run rather than fixed: the screen is 320 wide and 240
+ * tall, and the strip width is now a parameter, so 80/60/40/30 are all live
+ * step counts. Both axes render the incoming screen exactly once whatever the
+ * count -- see PAGE_STEP_PX above for where the time actually goes. */
 
 
 static const struct device *const dbi =
@@ -214,6 +219,8 @@ void ui_slide_begin(void)
 
 void ui_slide_run(int dir, void (*pump)(void))
 {
+
+
 	lv_display_t *disp = lv_display_get_default();
 	lv_obj_t *scr = lv_screen_active();
 
@@ -229,7 +236,13 @@ void ui_slide_run(int dir, void (*pump)(void))
 	}
 
 	define_scroll_area();
-	if (!UI_SLIDE_WIPE && !area_defined) {
+	/*
+	 * The scrolled slide cannot go vertical -- the panel's scroll axis is
+	 * the screen's horizontal one and there is no second register. Rather
+	 * than silently scroll sideways for an up/down gesture, fall through to
+	 * the same honest single repaint used when VSCRDEF is refused.
+	 */
+	if (!UI_SLIDE_WIPE && (!area_defined || ui_slide_is_vertical(dir))) {
 		/* No scroll: fall back to simply painting the new screen once.
 		 * Ugly, but a transition that does not happen beats a screen
 		 * that never gets drawn. */
@@ -258,10 +271,21 @@ void ui_slide_run(int dir, void (*pump)(void))
 	 */
 	ui_slide_freeze(true);
 
+	const int travel = ui_slide_travel(dir, LV_HOR_RES, LV_VER_RES);
+	/*
+	 * A step size that does not divide the travel would leave the last
+	 * strip short and the final pixels unpainted -- the new screen with a
+	 * stripe of the old one still on it. Both axes divide by 4 and by 8;
+	 * anything else falls back rather than shipping that.
+	 */
+	const int step_size = STEP_COLS;
+	const int steps = travel / step_size;
 	const int64_t t0 = k_uptime_get();
+	const int min_ms = SLIDE_MIN_MS;
 	int step = 0;
 
-	for (int j = STEP_COLS; j <= SCROLL_LINES; j += STEP_COLS) {
+
+	for (int j = step_size; j <= travel; j += step_size) {
 		lv_area_t strip;
 		int off;
 
@@ -280,28 +304,40 @@ void ui_slide_run(int dir, void (*pump)(void))
 		 */
 		if (UI_SLIDE_WIPE) {
 			/*
-			 * Screen columns, not GRAM lines: with no scroll the two
-			 * are the same thing, so the strip is painted where it
-			 * will be seen. The incoming screen arrives from the side
-			 * it used to slide in from -- LEFT means it entered from
-			 * the right, so wipe right-to-left, and vice versa. Note
-			 * this is the OPPOSITE assignment to the scrolled branch,
-			 * where x1 is a GRAM line that the offset then maps to
-			 * the far edge.
+			 * Screen coordinates, not GRAM lines: with no scroll the
+			 * two are the same thing, so the strip is painted where
+			 * it will be seen. The incoming screen arrives from the
+			 * side it used to slide in from -- LEFT means it entered
+			 * from the right, so wipe right-to-left, and UP is to
+			 * DOWN exactly as LEFT is to RIGHT. Note this is the
+			 * OPPOSITE assignment to the scrolled branch, where x1 is
+			 * a GRAM line that the offset then maps to the far edge.
+			 *
+			 * The arithmetic lives in ui_slide_geom.h so a host test
+			 * can check it without a board; this is the only caller.
 			 */
-			strip.x1 = (dir == UI_SLIDE_LEFT) ? SCROLL_LINES - j
-							  : j - STEP_COLS;
+			const struct ui_slide_strip g =
+				ui_slide_strip_at(dir, j, step_size,
+						  LV_HOR_RES, LV_VER_RES);
+
+			strip.x1 = g.x1;
+			strip.x2 = g.x2;
+			strip.y1 = g.y1;
+			strip.y2 = g.y2;
 			off = 0;
-		} else if (dir == UI_SLIDE_LEFT) {
-			strip.x1 = j - STEP_COLS;
-			off = j;
 		} else {
-			strip.x1 = SCROLL_LINES - j;
-			off = SCROLL_LINES - j;
+			/* Horizontal only -- guarded above. */
+			if (dir == UI_SLIDE_LEFT) {
+				strip.x1 = j - step_size;
+				off = j;
+			} else {
+				strip.x1 = SCROLL_LINES - j;
+				off = SCROLL_LINES - j;
+			}
+			strip.x2 = strip.x1 + step_size - 1;
+			strip.y1 = 0;
+			strip.y2 = LV_VER_RES - 1;
 		}
-		strip.x2 = strip.x1 + STEP_COLS - 1;
-		strip.y1 = 0;
-		strip.y2 = LV_VER_RES - 1;
 
 		/*
 		 * Scroll FIRST, then paint. The other order paints the strip
@@ -336,7 +372,7 @@ void ui_slide_run(int dir, void (*pump)(void))
 
 		/* Hold this step until its share of SLIDE_MIN_MS has elapsed,
 		 * and only if it got there early. */
-		int64_t slack = t0 + (int64_t)SLIDE_MIN_MS * step / SLIDE_STEPS
+		int64_t slack = t0 + (int64_t)min_ms * step / steps
 				- k_uptime_get();
 
 		if (slack > 0) {
@@ -361,4 +397,16 @@ void ui_slide_run(int dir, void (*pump)(void))
 	lv_obj_invalidate(scr);
 	lv_refr_now(disp);
 
+	/*
+	 * What it actually cost, on the actual board.
+	 *
+	 * Every duration in this file came from a stopwatch against 240 fps
+	 * video, once, in August. The pacing is dominated by per-step refresh
+	 * overhead, which changes whenever the screen does -- so the next
+	 * person to be told a transition is too slow should be able to read
+	 * the number off the log rather than film it again. One line per
+	 * transition, and transitions are user-initiated.
+	 */
+	printk("[slide] dir %d: %d steps of %d px in %lld ms\n", dir, steps,
+	       step_size, k_uptime_get() - t0);
 }

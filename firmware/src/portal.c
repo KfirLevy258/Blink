@@ -286,7 +286,7 @@ static void wifi_page(int sock, const char *err)
 	 * happened to render. */
 	int n = snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
-		"content='width=device-width,initial-scale=1'><title>Clauge setup</title>%s"
+		"content='width=device-width,initial-scale=1'><title>Blink setup</title>%s"
 		"</head><body>"
 		"<div class=spin id=sp><div class=ring></div><p>Connecting to your network\xE2\x80\xA6</p></div>"
 		"<h1>Connect to WiFi</h1>"
@@ -340,7 +340,7 @@ static void signin_page(int sock, const char *authorize_url, bool err)
 	 * forever, user-reported 2026-07-16). */
 	snprintf(page, sizeof(page),
 		"<!doctype html><html><head><meta name=viewport "
-		"content='width=device-width,initial-scale=1'><title>Clauge sign in</title>%s"
+		"content='width=device-width,initial-scale=1'><title>Blink sign in</title>%s"
 		"<script>setInterval(function(){fetch('/status')"
 		".then(function(r){return r.text()})"
 		".then(function(t){if(t.indexOf('done')==0)location.href='/done'})"

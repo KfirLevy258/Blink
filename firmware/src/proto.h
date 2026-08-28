@@ -18,7 +18,7 @@ bool proto_host_seen(void);
 
 /* The daemon's release version as it announced itself, or "" if it has not.
  * Firmware and daemon ship from one tag, so this should equal
- * CLAUGE_FW_VERSION on a fully updated machine. */
+ * BLINK_FW_VERSION on a fully updated machine. */
 const char *proto_host_version(void);
 
 /* True when that version is older than this firmware -- i.e. the app on the
@@ -41,5 +41,15 @@ void proto_ota_check(void);			/* ask the daemon what it has */
  * both halves, so the confirmation screen says so. */
 const char *proto_ota_app_version(void);
 bool proto_ota_install(void);			/* approve; the daemon flashes */
+
+/*
+ * Tell the host which provider the user picked as primary.
+ *
+ * Safe to call with no host attached -- it writes to the console either way,
+ * and a daemon that is not there simply never reads it. The value also rides
+ * out with every hello, so a host that connects later still learns it without
+ * the user having to touch the setting again.
+ */
+void proto_send_pref(void);
 
 #endif /* PROTO_H */

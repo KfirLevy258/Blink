@@ -30,11 +30,11 @@
 #define CA_TAG_GITHUB 3
 #define CA_TAG_GH_CDN 4
 #define OTA_HOST "github.com"
-#define OTA_BASE "/KfirLevy258/Clauge/releases/latest/download/"
+#define OTA_BASE "/KfirLevy258/Blink/releases/latest/download/"
 /* Fixed asset names; the manifest's sha256 pins the exact bytes, so a release
  * changing between check and install fails safe at the hash step. */
 #define OTA_MANIFEST_PATH OTA_BASE "manifest.json"
-#define OTA_IMAGE_PATH    OTA_BASE "clauge-fw.bin"
+#define OTA_IMAGE_PATH    OTA_BASE "blink-fw.bin"
 
 /* Must hold a whole 302 response head fragment INCLUDING the Location header:
  * capture_headers() scans one fragment at a time and cannot stitch a header
@@ -270,7 +270,7 @@ static int https_get(const char *host, const char *path, sec_tag_t tag,
 	}
 
 	const char *headers[] = {
-		"User-Agent: clauge/" CLAUGE_FW_VERSION "\r\n",
+		"User-Agent: blink/" BLINK_FW_VERSION "\r\n",
 		NULL,
 	};
 
@@ -370,9 +370,9 @@ enum ota_result ota_check(struct ota_manifest *out, bool *newer)
 		return OTA_ERR_SIZE;
 	}
 	last_m = *out;
-	*newer = ota_version_newer(out->version, CLAUGE_FW_VERSION);
+	*newer = ota_version_newer(out->version, BLINK_FW_VERSION);
 	printk("[ota] latest %s (running %s) -> %s\n", out->version,
-	       CLAUGE_FW_VERSION, *newer ? "update available" : "up to date");
+	       BLINK_FW_VERSION, *newer ? "update available" : "up to date");
 	return OTA_OK;
 }
 

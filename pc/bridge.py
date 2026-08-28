@@ -29,12 +29,16 @@ def _local_wall():
 
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
+                 set_preferred=None,
                  app_ver=RELEASE_VERSION,
                  wall=_local_wall, fetch_manifest=None, fetch_firmware=None,
                  flash_image=None, self_update=None, pending=None,
                  fetch_signed_manifest=None, report_failure=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
+        # The board owns the primary-provider preference; this applies it.
+        # None on a daemon wired without a bus (the tests do this).
+        self._set_preferred = set_preferred
         self._now = now
         self._wall = wall                # callable() -> (epoch_s, utc_offset_min)
         self._app_ver = app_ver
@@ -65,17 +69,77 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
 
+    def greet(self):
+        """Introduce ourselves and push what we have, immediately.
+
+        Normally this answers the board's boot `hello`. It is also called
+        directly when the daemon found a board that was ALREADY running and
+        chose not to reset it (claude_usage_bridge.probe_is_our_board): there
+        is no hello in that case, and without this the first usage message
+        waits for the 60 s poll -- which is itself gated on board_alive(),
+        false until the first ping, so the real wait is a minute of blank
+        panel after every service restart. Measured doing exactly that before
+        this existed.
+        """
+        self._write(protocol.welcome("blink-bridge", self._app_ver))
+        if self._report_failure:
+            self._write(protocol.ota_error(self._report_failure))
+            self._report_failure = None
+        self.poll_once()                 # push current data immediately
+        # Only once the board has been heard. On the no-reset connect path
+        # greet() runs before any message has reached on_message, so
+        # _board_proto is still None -- and _board_ahead() reads None as
+        # "not ahead", which let a resumed flash skip the one guard that
+        # keeps this daemon from writing slot0 on a board it does not
+        # understand, while _on_ota_query latched _board_fw to the fallback
+        # "0.0.0". The next message the board sends (its pref answers our
+        # welcome; a ping follows within 10 s) arms the guard, and
+        # on_message resumes then.
+        if self._board_proto is not None:
+            self._resume_pending()
+
     # --- inbound ---
     def on_message(self, msg: dict):
         t = msg.get("t")
+        # Learn the board's protocol version from ANY message, not just hello.
+        #
+        # _board_ahead() gates the one operation that can leave a customer
+        # holding a device that does not start, and it used to depend entirely
+        # on _note_board, reachable only from the hello branch. hello is sent
+        # once, at boot (proto.c send_hello) -- so as soon as the daemon
+        # learned to connect to an already-running board WITHOUT resetting it,
+        # there was no hello, _board_proto stayed None, and the guard degraded
+        # silently to "allow". Found by review the same night that path landed.
+        #
+        # Every message the board sends carries its own "v", so the guard no
+        # longer needs a reboot to arm. Firmware version comes from ota_query's
+        # "cur" below, which is the only other thing _note_board supplied.
+        if self._board_proto is None:
+            try:
+                self._board_proto = int(msg["v"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                self._announce_if_ahead()
+                # The board has spoken, so the guard is armed: pick up an
+                # approved install that greet() had to leave waiting. Not on
+                # hello -- greet() below does it there, after the welcome,
+                # so the board is greeted before it is asked to resume.
+                if t != "hello":
+                    self._resume_pending()
+        if t == "pref":
+            # Which provider the user picked on the board's settings screen.
+            # It arrives with every hello as well as on change, so a daemon
+            # that restarts picks the choice back up without the user
+            # touching anything.
+            want = msg.get("provider")
+            if self._set_preferred and isinstance(want, str):
+                if self._set_preferred(want):
+                    print(f"[bridge] main source: {want}", file=sys.stderr)
+            return
         if t == "hello":
             self._note_board(msg)
-            self._write(protocol.welcome("clauge-bridge", self._app_ver))
-            if self._report_failure:
-                self._write(protocol.ota_error(self._report_failure))
-                self._report_failure = None
-            self.poll_once()             # push current data immediately
-            self._resume_pending()
+            self.greet()
         elif t == "ping":
             self._last_ping = self._now()
             # Free: never fetch here. The usage endpoint is aggressively
@@ -110,6 +174,9 @@ class Bridge:
         except (TypeError, ValueError):
             self._board_proto = None
         self._board_fw = hello.get("fw")
+        self._announce_if_ahead()
+
+    def _announce_if_ahead(self):
         if self._board_ahead() and not self._announced_ahead:
             print(f"[bridge] the board speaks protocol {self._board_proto} and"
                   f" this app speaks {PROTO_VERSION} -- update the app on this"
@@ -124,6 +191,12 @@ class Bridge:
         self._manifest = None
 
     def _on_ota_query(self, cur):
+        # The board's firmware version, from the board, on every query. The
+        # other half of what _note_board used to be the only source of -- and
+        # _resume_pending falls back to "0.0.0" without it, which would compare
+        # a real release against a fabricated version.
+        if cur and not self._board_fw:
+            self._board_fw = cur
         # Refuse to drive a board we may not understand. This daemon writes
         # slot0 in place, with no test boot behind it, so "probably fine" is
         # not a good enough basis for the one operation that can leave a
