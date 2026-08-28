@@ -29,3 +29,7 @@ docs/superpowers/
 # whatever pid happened to be running on the author's machine -- which is not
 # a fact about the project. `blink` writes it next to itself at runtime.
 bridge.pid
+
+# Local agent tooling, never part of the product
+.claude/
+.claude-flow/
