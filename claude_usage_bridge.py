@@ -91,6 +91,20 @@ def autodetect_port():
 # so this only has to cover the round trip and one poll interval.
 PROBE_S = 1.5
 
+# ...and how long to listen on the SECOND pass, when nothing answered quickly.
+#
+# Longer than the board's 10 s ping interval on purpose. The fast probe relies
+# on the board ANSWERING our welcome, and there is one window where it cannot:
+# a board plugged in a moment ago is booting, so our message arrives before
+# proto is listening and its own hello is flushed by the buffer reset. It says
+# nothing, looks like a stranger, and would be written off.
+#
+# A patient pass needs no answer at all -- it just waits for the next ping,
+# which a healthy board sends unprompted. Measured on hardware: 0.51 s from
+# reset to the first protocol message, and a ping every 10 s after that, so 11
+# seconds cannot miss a live board.
+PROBE_PATIENT_S = 11.0
+
 
 def hold_single_instance(home, on_wait=None, poll_s=5.0):
     """Block until this process is the only daemon, then keep the lock.
@@ -195,7 +209,7 @@ def remember_board(home, port, board_id):
         pass                    # a convenience, never a requirement
 
 
-def probe_is_our_board(ser):
+def probe_is_our_board(ser, timeout=PROBE_S):
     """Ask the thing on this port whether it is a Clauge board, without a reset.
 
     Why this exists: the reset below is not free, and it is not aimed at a
@@ -217,7 +231,7 @@ def probe_is_our_board(ser):
         ser.reset_input_buffer()
         ser.write(protocol.encode(protocol.welcome("clauge-bridge",
                                                    RELEASE_VERSION)))
-        deadline = time.time() + PROBE_S
+        deadline = time.time() + timeout
         reader = protocol.LineReader()
         while time.time() < deadline:
             chunk = ser.read(256)
@@ -425,7 +439,7 @@ def main(argv=None):
         (usually the only candidate, and the only one we may reset), then
         anything else attached, each asked once per USB layout.
         """
-        nonlocal searched
+        nonlocal searched, patient
         if explicit_port:
             return args.port
         cands = candidate_ports()
@@ -435,6 +449,11 @@ def main(argv=None):
         here = usb_topology()
         if searched == here:
             return None
+        if searched is not None:
+            # Something was plugged or unplugged. Start over from the quick
+            # question rather than inheriting the previous round's patience.
+            searched = None
+            patient = False
         if not cands:
             searched = here
             return None
@@ -444,6 +463,9 @@ def main(argv=None):
     # Ports asked politely under the CURRENT layout. Not a permanent blacklist:
     # it is discarded the moment anything is plugged or unplugged.
     asked = set()
+    # False on the fast pass (answer my welcome), True on the patient one
+    # (just say anything). See PROBE_PATIENT_S.
+    patient = False
 
     while True:  # reconnect loop
         try:
@@ -472,7 +494,8 @@ def main(argv=None):
             # VID:PID that got us here belongs to a chip used by a great deal
             # of hardware that is not ours, and a reset is not a question, it
             # is an action taken on someone's device.
-            already_running = probe_is_our_board(ser)
+            already_running = probe_is_our_board(
+                ser, PROBE_PATIENT_S if patient else PROBE_S)
             asked.add(port)
 
             # May this port be reset if it stays silent?
@@ -507,8 +530,20 @@ def main(argv=None):
                           file=sys.stderr)
                     port = nxt
                     continue
+                if not patient:
+                    # Nothing answered quickly. Before writing this layout off,
+                    # go round once more listening long enough to hear an
+                    # unprompted ping -- which is the only thing a board that
+                    # was still booting during the fast pass will send.
+                    patient = True
+                    asked.clear()
+                    port = next_port() or port
+                    print("[bridge] nothing answered quickly; listening"
+                          " longer before giving up", file=sys.stderr)
+                    continue
                 searched = usb_topology()
                 asked.clear()
+                patient = False
                 print("[bridge] nothing here answers; waiting for a board to"
                       " be plugged in", file=sys.stderr)
                 while True:

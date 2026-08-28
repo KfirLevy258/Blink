@@ -93,9 +93,12 @@ The device never joins your network, never signs in to anything, and never holds
 writes down the board it connected to, so every later start opens that port
 directly.
 
-When it has no memory to go on, it asks each candidate politely — a short
-message the board answers and nothing else does — before touching any reset
-line. That matters because the CH340 in these boards is also in a great deal
+On a machine that has never seen a board — a new install — there is nothing to
+remember, so it identifies one by asking. It shortlists ports by USB-serial
+chip id, then asks each politely: a short message the board answers and
+nothing else does. If none answers quickly it goes round once more listening
+for longer, because a board plugged in seconds ago may still be booting and
+will send an unprompted ping shortly. Only then does it stop. That matters because the CH340 in these boards is also in a great deal
 of hardware that is not one. A device that stays silent is left alone
 **permanently**: the daemon then waits for something to be plugged or
 unplugged rather than reopening ports on a timer, so a stranger's Arduino is
