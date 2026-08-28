@@ -11,6 +11,7 @@ CI runs on a real macOS and Linux runner.
 """
 import json
 import os
+import sys
 
 import pytest
 
@@ -44,7 +45,8 @@ def test_install_points_the_statusline_at_the_shim(tmp_path, capsys):
     assert cli.main(["install"]) == 0
     shim = tmp_path / ".blink" / "blink-statusline.sh"
     assert shim.exists() and os.access(shim, os.X_OK)
-    assert _read(tmp_path)["statusLine"]["command"] == f"sh {shim}"
+    assert (_read(tmp_path)["statusLine"]["command"]
+            == cli.install_statusline.statusline_command(str(shim)))
 
 
 def test_bare_invocation_installs(tmp_path):
@@ -246,6 +248,13 @@ def test_uninstall_says_so_when_the_binary_will_not_go(tmp_path, monkeypatch,
 
     rc = cli.main(["uninstall"])
     out = capsys.readouterr().out
+    if sys.platform == "win32":
+        # Windows hands the delete to a detached cmd that outlives this
+        # process (_schedule_windows_cleanup), so the uninstall IS going to
+        # finish and says so; exiting 1 there would be the false report.
+        assert rc == 0
+        assert "will be gone" in out
+        return
     assert rc == 1, "a failed uninstall must not exit 0"
     assert "could not be removed" in out
     assert cli.bin_dir() in out, "it has to say which path to delete by hand"

@@ -181,6 +181,13 @@ jobs:
           - reinstall          # twice in a row, must not chain to itself
           - foreign-uninstall  # never installed; must not touch their bar
           - spaced-home        # a HOME path containing spaces
+          # The data paths, through the installed pieces: a status line
+          # render, hook events, a Desktop cache, a Codex log -- then what
+          # `status` says and what `status --wire` would send the board.
+          - all-sources        # everything present, both sessions counted
+          - desktop-only       # percentages and a burn rate, no reset time
+          - codex-only         # codex primary with both countdowns
+          - broken-data        # two unparseable files: named, and nothing sent
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

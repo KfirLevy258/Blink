@@ -17,7 +17,7 @@ def test_install_into_empty_settings(tmp_path, monkeypatch):
     path = _settings(tmp_path, {})
     ins.install(path, "/opt/blink/blink-statusline.sh")
     got = json.loads(open(path).read())
-    assert got["statusLine"]["command"] == "sh /opt/blink/blink-statusline.sh"
+    assert got["statusLine"]["command"] == ins.statusline_command("/opt/blink/blink-statusline.sh")
     assert got["statusLine"]["type"] == "command"
 
 
@@ -93,7 +93,7 @@ def test_reinstall_at_different_shim_path_preserves_original_chain(tmp_path, mon
     chain = (tmp_path / ".blink" / "statusline-chain").read_text().strip()
     assert chain == "sh ~/my-statusline.sh"
     got = json.loads(open(path).read())
-    assert got["statusLine"]["command"] == "sh /usr/local/bin/blink-statusline.sh"
+    assert got["statusLine"]["command"] == ins.statusline_command("/usr/local/bin/blink-statusline.sh")
     ins.uninstall(path)
     got = json.loads(open(path).read())
     assert got["statusLine"]["command"] == "sh ~/my-statusline.sh"
@@ -171,7 +171,7 @@ def test_marker_lost_reinstall_at_different_path_chains_rather_than_drops(tmp_pa
 
     ins.install(path, "/usr/local/bin/blink-statusline.sh")
     chain = (tmp_path / ".blink" / "statusline-chain").read_text().strip()
-    assert chain == "sh /opt/blink/blink-statusline.sh"
+    assert chain == ins.statusline_command("/opt/blink/blink-statusline.sh")
 
 
 def test_stale_marker_never_matches_a_customers_unrelated_command(tmp_path, monkeypatch):
@@ -183,7 +183,7 @@ def test_stale_marker_never_matches_a_customers_unrelated_command(tmp_path, monk
     path = _settings(tmp_path, {})
     ins.install(path, "/opt/blink/blink-statusline.sh")
     marker = (tmp_path / ".blink" / "statusline-installed-command").read_text().strip()
-    assert marker == "sh /opt/blink/blink-statusline.sh"
+    assert marker == ins.statusline_command("/opt/blink/blink-statusline.sh")
 
     # Customer overwrites statusLine by hand; the marker is left stale,
     # naming a command no longer present anywhere in settings.json.
@@ -247,7 +247,7 @@ def test_uninstall_after_blink_directory_wiped_leaves_statusline_alone(tmp_path,
 
     msg = ins.uninstall(path)
     got = json.loads(open(path).read())
-    assert got["statusLine"]["command"] == "sh /opt/blink/blink-statusline.sh"
+    assert got["statusLine"]["command"] == ins.statusline_command("/opt/blink/blink-statusline.sh")
     assert "leaving it alone" in msg.lower() or "isn't blink" in msg.lower()
 
 
@@ -300,7 +300,7 @@ def test_install_quotes_shim_path_containing_a_space(tmp_path, monkeypatch):
     spaced = "/Users/kfir/Application Support/blink/blink-statusline.sh"
     ins.install(path, spaced)
     got = json.loads(open(path).read())
-    assert got["statusLine"]["command"] == "sh '" + spaced + "'"
+    assert got["statusLine"]["command"] == ins.statusline_command(spaced)
 
 
 def test_install_twice_with_spaced_shim_path_does_not_self_chain(tmp_path, monkeypatch):

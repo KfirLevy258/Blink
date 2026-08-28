@@ -1039,7 +1039,7 @@ def _rm_state_dir():
         pass
 
 
-def cmd_status(_args) -> int:
+def cmd_status(args) -> int:
     if _skip_service():
         # The launchd label and systemd unit name are global while everything
         # else is scoped to $HOME, so querying them under a test HOME reports
@@ -1133,7 +1133,28 @@ def cmd_status(_args) -> int:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
     _source_lines()
+    if getattr(args, "wire", False):
+        _wire_line()
     return 0
+
+
+def _wire_line():
+    """The usage message the bridge would put on the cable right now.
+
+    The last thing that can be checked without a board: every source read,
+    merged and encoded exactly as the daemon does it (pc/ingest -> normalizer
+    -> protocol). CI feeds the installed binary the files a customer's machine
+    would have and asserts on this line; a person can paste it into a report.
+    """
+    import json as _json
+    from pc import ingest
+    msg = ingest.IngestionBus().poll()
+    print()
+    if msg is None:
+        print("Wire        nothing to send -- no source has a reading")
+        return
+    print("Wire        the next usage message, exactly as the board gets it:")
+    print(_json.dumps(msg, separators=(",", ":")))
 
 
 def _age(seconds: float) -> str:
@@ -1417,7 +1438,11 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("install", help="Set everything up (this is the default)")
     sub.add_parser("uninstall", help="Put it all back")
-    sub.add_parser("status", help="Is the panel getting data?")
+    status_p = sub.add_parser("status", help="Is the panel getting data?")
+    status_p.add_argument(
+        "--wire", action="store_true",
+        help="Also print the usage message the bridge would send the board"
+             " right now, as one JSON line")
     sub.add_parser("update", help="Fetch a newer version of this app")
     prov_p = sub.add_parser(
         "provision",
