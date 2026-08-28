@@ -291,6 +291,36 @@ jobs:
       - run: claude --version
       - run: sh tests/ci/check_claude_version.sh
 
+  # The Codex side of the same watch. Codex is open source, so instead of
+  # installing it (which could not produce a rollout without an account) this
+  # reads the struct that defines the rate_limits object at the ref that
+  # ships, and fails the day a field we read is renamed or dropped. The
+  # parser itself is pinned to a real captured log in tests/fixtures.
+  codex-contract:
+    name: codex contract (${{ matrix.ref }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The tip of the tree: an early warning, never a merge blocker.
+          - {ref: main, experimental: true}
+          # The latest release, resolved at run time below.
+          - {ref: release, experimental: false}
+    steps:
+      - uses: actions/checkout@v4
+      - name: resolve the ref
+        id: ref
+        run: |
+          if [ "${{ matrix.ref }}" = release ]; then
+            tag=$(curl -fsSL https://api.github.com/repos/openai/codex/releases/latest | jq -r .tag_name)
+            echo "ref=$tag" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+      - run: sh tests/ci/check_codex_contract.sh "${{ steps.ref.outputs.ref }}"
+
   lint:
     name: shellcheck
     runs-on: ubuntu-latest

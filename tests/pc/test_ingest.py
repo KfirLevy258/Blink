@@ -160,3 +160,32 @@ def test_a_broken_provider_is_actually_skipped_not_just_silenced():
     bus.poll()
     bus.poll()
     assert Counting.calls == 1
+
+
+def test_two_real_files_reach_the_wire_together(tmp_path):
+    """End to end: the real Desktop cache and the real Codex log, through the
+    bus, onto one usage message. This is the path a Desktop+Codex customer's
+    board is fed by, and until now nothing exercised it with real input."""
+    from pc.providers.claude_desktop import ClaudeDesktopProvider
+    from pc.providers.codex_cli import CodexCliProvider
+    from tests.pc.test_claude_desktop import DESKTOP_FIXTURE
+    from tests.pc.test_codex_cli import _fixture_root
+    # A minute after the Codex reading, which is the newer of the two files
+    # by six hours -- so the Desktop reading is carried as stale, which is
+    # exactly the mixed-freshness case the per-page flags exist for.
+    now = 1787875431.383 + 60
+    bus = ingest.IngestionBus(
+        providers=[ClaudeDesktopProvider(path=DESKTOP_FIXTURE),
+                   CodexCliProvider(root=_fixture_root(tmp_path))],
+        now=lambda: now)
+    msg = bus.poll()
+    assert msg["provider"] == "claude" and msg["src"] == "desktop"
+    assert msg["session_pct"] == 24.0 and msg["weekly_pct"] == 25.0
+    assert msg["session_resets_in_s"] == -1          # Desktop has none
+    assert msg["stale"] is True                       # six hours old
+    assert "burn_pph" not in msg                      # no rate off a stale file
+    assert msg["p2"] == "codex"
+    assert msg["p2_weekly_pct"] == 9.0
+    assert msg["p2_w_in_s"] > 0                       # Codex has its reset time
+    assert msg["p2_stale"] is False
+    assert len(protocol.encode(msg)) <= protocol.MAX_LINE_BYTES

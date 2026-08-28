@@ -223,3 +223,38 @@ def test_a_version_field_that_is_not_a_scalar_is_not_an_exception():
         f = p.parse_cache_file(_doc([_sample(int(NOW * 1000), 7, 8)],
                                     version=v), NOW)
         assert f is not None and f.session_pct == 7.0, v
+
+
+# --- a real file --------------------------------------------------------------
+
+
+import os as _os
+
+DESKTOP_FIXTURE = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)),
+                                "fixtures", "claude_desktop_plan_usage_history.json")
+
+
+def test_the_real_cache_file_parses():
+    """The newest 40 samples of a real plan-usage-history.json (2026-08-28),
+    org id redacted, values verbatim. The parser above is otherwise pinned to
+    hand-written documents."""
+    now = 1787854171.881 + 60                 # a minute after the last sample
+    frames = ClaudeDesktopProvider(path=DESKTOP_FIXTURE).poll(now)
+    assert len(frames) == 1
+    f = frames[0]
+    assert (f.provider, f.src) == ("claude", "desktop")
+    assert f.session_pct == 24.0
+    assert f.weekly_pct == 25.0
+    assert f.session_resets_at is None and f.weekly_resets_at is None
+    assert f.stale is False
+    assert abs(f.observed_at - 1787854171.881) < 0.01
+
+
+def test_the_real_cache_file_has_no_reset_time_anywhere():
+    """The claim the product's support matrix rests on, checked against the
+    file rather than asserted: no key in any sample names a reset."""
+    doc = json.load(open(DESKTOP_FIXTURE))
+    keys = set()
+    for s in doc["samples"]:
+        keys |= set(s) | set(s["u"])
+    assert keys == {"t", "org", "u", "fh", "sd", "xu"}

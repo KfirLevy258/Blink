@@ -309,3 +309,53 @@ def test_a_timestamp_from_a_wrong_clock_does_not_read_as_fresh(tmp_path):
         assert len(frames) == 1, stamp
         # The file's mtime (now), not the year 2099 and not 1900.
         assert codex_cli.RESET_EPOCH_MIN < frames[0].observed_at < 4.0e9, stamp
+
+
+# --- a real file --------------------------------------------------------------
+
+
+FIXTURE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fixtures",
+                       "codex_rollout_tail.jsonl")
+
+
+def _fixture_root(tmp_path):
+    """The fixture laid out the way Codex lays its logs out."""
+    d = tmp_path / "sessions" / "2026" / "08" / "28"
+    d.mkdir(parents=True)
+    with open(FIXTURE) as src, open(d / "rollout-2026-08-28T01-57-10-x.jsonl", "w") as dst:
+        for line in src:
+            if not line.startswith('{"_comment"'):
+                dst.write(line)
+    return str(tmp_path / "sessions")
+
+
+def test_the_real_rollout_tail_parses():
+    """tests/fixtures/codex_rollout_tail.jsonl is the tail of a real Codex CLI
+    log (2026-08-28), content redacted and every token_count event verbatim.
+    The synthesized lines above pin the parser to what we THINK the format
+    is; this pins it to what the format was."""
+    import datetime
+    root = _fixture_root(__import__("pathlib").Path(__import__("tempfile").mkdtemp()))
+    seen_at = datetime.datetime(2026, 8, 28, 0, 3, 51, 383000,
+                                tzinfo=datetime.timezone.utc).timestamp()
+    frames = codex_cli.CodexCliProvider(root=root).poll(seen_at + 60)
+    assert len(frames) == 1
+    f = frames[0]
+    assert (f.provider, f.src) == ("codex", "cli")
+    assert f.session_pct == 0.0
+    assert f.weekly_pct == 9.0
+    assert f.session_resets_at == 1787893426
+    assert f.weekly_resets_at == 1788460425
+    assert abs(f.observed_at - seen_at) < 1.0     # the event's own stamp
+    assert f.stale is False
+
+
+def test_the_real_rollout_tail_is_mostly_not_rate_limits():
+    """The fixture must stay representative: a log is mostly conversation
+    events, and the reader has to find the one line that matters among them.
+    A fixture of only token_count lines would pass while proving little."""
+    lines = [ln for ln in open(FIXTURE) if not ln.startswith('{"_comment"')]
+    with_limits = [ln for ln in lines if "rate_limits" in ln]
+    assert len(lines) >= 30
+    assert len(with_limits) >= 3
+    assert len(with_limits) < len(lines) / 2

@@ -1132,7 +1132,58 @@ def cmd_status(_args) -> int:
     else:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
+    _source_lines()
     return 0
+
+
+def _age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60} min"
+    if seconds < 172800:
+        return f"{seconds // 3600} h"
+    return f"{seconds // 86400} d"
+
+
+def _source_lines():
+    """One line each for the two sources CI cannot exercise.
+
+    Claude Desktop is a closed GUI app and Codex will not write a rollout
+    without an account, so neither format change can be caught on a runner.
+    It can only be caught here, on the machine where the file is -- and the
+    daemon already knows (it logs once and goes quiet). This is where a
+    person finds out, and what they paste into a bug report.
+    """
+    from pc.providers import claude_desktop, codex_cli
+    now = time.time()
+
+    desktop = claude_desktop.ClaudeDesktopProvider()
+    if os.path.exists(desktop.path()):
+        frames = desktop.poll(now)
+        if frames:
+            print(f"Desktop     usage cache parsed, reading"
+                  f" {_age(now - frames[0].observed_at)} old")
+        else:
+            print("Desktop     usage cache present but did not parse --"
+                  " the app's file format may have changed; please report it")
+    else:
+        print("Desktop     no usage cache (Claude Desktop not installed,"
+              " or never signed in)")
+
+    logs = codex_cli.recent_rollouts()
+    if logs:
+        frames = codex_cli.CodexCliProvider().poll(now)
+        if frames:
+            print(f"Codex       session log parsed, reading"
+                  f" {_age(now - frames[0].observed_at)} old")
+        else:
+            print(f"Codex       {len(logs)} recent session log(s), none with a"
+                  " rate-limit line -- finish one turn in Codex; if that does"
+                  " not help, its log format may have changed; please report it")
+    else:
+        print("Codex       no session logs (Codex not installed, or never run)")
 
 
 def cmd_update(_args) -> int:
