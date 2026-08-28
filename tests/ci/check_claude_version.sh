@@ -104,7 +104,13 @@ py - "$HOME/.claude/settings.json" <<'EOF' || exit 1
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["model"] == "opus", "unrelated key lost"
-assert d["statusLine"]["command"].endswith("blink-statusline.sh"), d["statusLine"]
+cmd = d["statusLine"]["command"]
+# The product's own platform rule: `bash <path>` on Windows (Claude Code
+# rewrites a .sh command that does not start with it), `sh <path>` elsewhere;
+# the path is quoted when it needs to be (the runner's temp dir has a ~).
+import sys as _s
+assert cmd.startswith("bash " if _s.platform == "win32" else "sh "), cmd
+assert "blink-statusline.sh" in cmd, cmd
 EOF
 ok "settings.json is valid JSON with our key and their keys intact"
 
