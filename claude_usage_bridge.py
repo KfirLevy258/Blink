@@ -471,27 +471,29 @@ def main(argv=None):
 
     while True:  # reconnect loop
         try:
-            # Open WITHOUT asserting DTR/RTS, then deliberately reset the board.
+            # A PLAIN open, with DTR and RTS left exactly as the OS sets them.
             #
             # On the CYD, DTR drives GPIO0 and RTS drives EN through the CH340's
-            # auto-reset circuit. Opening a tty on macOS momentarily toggles both,
-            # so an open landing at the wrong moment (e.g. right after esptool's
-            # own reset, while the board is still coming up) can latch GPIO0 low
-            # and boot it into ROM download mode -- where it sits mute forever and
-            # looks, very convincingly, like dead firmware.
+            # auto-reset circuit: EN is pulled low only while RTS is asserted
+            # AND DTR is not. The OS asserts both on open, which is harmless --
+            # both transistors are off. This code used to pre-set dtr=False and
+            # rts=False "so the open would not toggle anything", and that was
+            # the toggle: pyserial applies them after the open, DTR first, and
+            # for the instant between clearing DTR and clearing RTS the board
+            # is in the reset condition. Every open rebooted the board, and
+            # the probe below then heard the boot-time hello of the board it
+            # had just reset and reported "answered; not resetting it".
             #
-            # Configure-then-open keeps both lines de-asserted, and the explicit
-            # RTS pulse below then reboots the board with GPIO0 held HIGH, so it
-            # always comes up in run mode. It also means we reliably catch the
-            # board's boot-time `hello` and can push usage immediately, instead of
-            # waiting up to 60 s for the next poll.
-            ser = serial.Serial()
-            ser.port = port
-            ser.baudrate = args.baud
-            ser.timeout = 0.2
-            ser.dtr = False
-            ser.rts = False
-            ser.open()
+            # Measured on the desk board 2026-08-28: configure-then-open
+            # rebooted it 3 of 3 times; a plain open 0 of 5, and closing the
+            # port (which drops both lines) 0 of 4. The symptom it caused was
+            # the one the user kept reporting -- plug the board in, it starts
+            # to boot, resets a couple of seconds later, then boots for real.
+            #
+            # The explicit pulse further down still reboots a silent board on
+            # purpose, and clears DTR first so GPIO0 is high when EN releases
+            # (run mode, not the ROM loader).
+            ser = serial.Serial(port, args.baud, timeout=0.2)
             # Ask before pulling the reset line. See probe_is_our_board: the
             # VID:PID that got us here belongs to a chip used by a great deal
             # of hardware that is not ours, and a reset is not a question, it
