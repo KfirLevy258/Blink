@@ -188,4 +188,5 @@ def test_two_real_files_reach_the_wire_together(tmp_path):
     assert msg["p2_weekly_pct"] == 9.0
     assert msg["p2_w_in_s"] > 0                       # Codex has its reset time
     assert msg["p2_stale"] is False
+    from pc import protocol
     assert len(protocol.encode(msg)) <= protocol.MAX_LINE_BYTES
