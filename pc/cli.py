@@ -300,13 +300,24 @@ def _service_command():
     """What the login service should run.
 
     Frozen, that is the copy in ~/.clauge/bin. From a checkout it is this
-    interpreter and module -- there is no single-file binary to point at, and
-    a developer running from source should still get a working service rather
-    than one aimed at a path that does not exist.
+    interpreter and the repo's entry SCRIPT -- not `-m pc.cli`.
+
+    `-m` was wrong and silently so. A login service starts with no working
+    directory of ours (launchd uses /), so `python -m pc.cli` could not import
+    `pc` at all: the agent crash-looped on ModuleNotFoundError every
+    ThrottleInterval, forever, writing the same line to bridge.log -- while
+    `clauge status` reported "registered with launchd", because registration
+    is not health. Found on the author's own machine 2026-08-28, where it had
+    been failing unnoticed.
+
+    Running the script BY PATH fixes it without a WorkingDirectory or a
+    PYTHONPATH: Python puts a script's own directory on sys.path, and
+    clauge_main.py sits at the repo root next to `pc/`.
     """
     if _frozen():
         return [installed_bin(), "run"]
-    return [sys.executable, "-m", "pc.cli", "run"]
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return [sys.executable, os.path.join(repo, "clauge_main.py"), "run"]
 
 
 class _Backend:
@@ -395,9 +406,42 @@ class _LaunchdBackend(_Backend):
         return "removed"
 
     def status(self) -> str:
+        """Registered is not the same as working, and the difference is the
+        whole point of this line.
+
+        This used to answer "registered with launchd" for a job that had
+        crash-looped 59 times, which is how a dead daemon went unnoticed on
+        the author's own machine while every other line of `clauge status`
+        looked healthy. launchctl already knows -- it reports the run count
+        and the last exit code -- so ask it.
+
+        Parsed defensively: launchctl print is a human-readable dump and not a
+        contract, so anything unrecognised falls back to the old answer rather
+        than claiming a fault that may not exist.
+        """
         r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
-                           capture_output=True)
-        return "registered with launchd" if r.returncode == 0 else "not installed"
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return "not installed"
+
+        fields = {}
+        for line in (r.stdout or "").splitlines():
+            if "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip(), v.strip()
+            if k in ("pid", "last exit code", "runs") and k not in fields:
+                fields[k] = v
+
+        if fields.get("pid", "").isdigit():
+            return f"running (launchd, pid {fields['pid']})"
+
+        exit_code = fields.get("last exit code")
+        if exit_code and exit_code.isdigit() and int(exit_code) != 0:
+            runs = fields.get("runs", "?")
+            return (f"registered but FAILING -- exits with code {exit_code},"
+                    f" {runs} attempts so far. See {log_path()}")
+        return "registered with launchd"
 
 
 class _SchtasksBackend(_Backend):
