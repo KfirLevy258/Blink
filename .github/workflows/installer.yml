@@ -54,6 +54,11 @@ jobs:
           - {os: ubuntu-latest, python: '3.9'}
           - {os: ubuntu-latest, python: '3.13'}
           - {os: macos-latest, python: '3.13'}
+          # The suite itself on Windows, not only the installed binary: the
+          # Desktop cache path, the Scheduled Task backend and the CRLF-free
+          # shim writes all have Windows-only branches that only a Windows
+          # interpreter reaches.
+          - {os: windows-latest, python: '3.13'}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
