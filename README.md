@@ -89,12 +89,21 @@ Clauge reads your usage over the **USB cable**, from Claude Code itself. Plug th
 
 The device never joins your network, never signs in to anything, and never holds a credential - the numbers come from the Claude Code already running on your machine.
 
-**Which port, and what if you have two boards.** The daemon finds the board by
-its USB-serial chip id and then asks it politely — a short message the board
-answers and nothing else does — before touching its reset line. That matters
-because the CH340 in these boards is also in a great deal of hardware that is
-not one: without the question, the first one on the bus got reset whether or
-not it belonged to us. If a candidate does not answer, the next is tried.
+**Which port, and what if you have two boards.** It does not scan. The daemon
+writes down the board it connected to, so every later start opens that port
+directly.
+
+When it has no memory to go on, it asks each candidate politely — a short
+message the board answers and nothing else does — before touching any reset
+line. That matters because the CH340 in these boards is also in a great deal
+of hardware that is not one. A device that stays silent is left alone
+**permanently**: the daemon then waits for something to be plugged or
+unplugged rather than reopening ports on a timer, so a stranger's Arduino is
+opened once and never poked again.
+
+Only a board it has identified before may be reset. That is the recovery a
+genuinely wedged unit needs, and it is precisely the thing an unknown device
+must never be given.
 
 **One daemon drives one board.** With several attached, the first that answers
 wins and the others are ignored — the protocol, the board-side preference and

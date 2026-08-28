@@ -5,6 +5,7 @@ Run inside the Zephyr venv (has pyserial) or `pip install pyserial`:
     python3 claude_usage_bridge.py --port /dev/cu.usbmodemXXXX
 """
 import argparse
+import json
 import os
 import sys
 import time
@@ -148,6 +149,52 @@ def hold_single_instance(home, on_wait=None, poll_s=5.0):
             time.sleep(poll_s)
 
 
+def usb_topology():
+    """A hashable snapshot of every serial device attached right now.
+
+    The point is to answer "has anything changed?" without opening anything.
+    Nothing plugged or unplugged means there is nothing new to find, so there
+    is no reason to reopen a port that already declined to answer -- which is
+    what turns "ask before resetting" from a good idea into a loop that pokes
+    somebody's Arduino every three seconds forever.
+    """
+    return tuple(sorted((p.device, p.vid, p.pid, p.serial_number or "")
+                        for p in list_ports.comports()))
+
+
+def _known_path(home):
+    return os.path.join(home, "board.json")
+
+
+def remembered_board(home):
+    """{"port": ..., "board_id": ...} from the last successful connection."""
+    try:
+        with open(_known_path(home)) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def remember_board(home, port, board_id):
+    """Write down which port worked, so the next start goes straight to it.
+
+    This is what makes the polite-probe cheap in the case that matters: a
+    machine that has connected before does not scan at all, it opens the port
+    it used last. It is also what licenses a RESET -- see the connect loop:
+    a device we have identified as ours before may be reset when it goes
+    quiet, and one we have never identified may not, ever.
+    """
+    try:
+        os.makedirs(home, exist_ok=True)
+        tmp = _known_path(home) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"port": port, "board_id": board_id}, f)
+        os.replace(tmp, _known_path(home))
+    except OSError:
+        pass                    # a convenience, never a requirement
+
+
 def probe_is_our_board(ser):
     """Ask the thing on this port whether it is a Clauge board, without a reset.
 
@@ -184,8 +231,8 @@ def probe_is_our_board(ser):
                 if isinstance(msg, dict) and msg.get("t"):
                     return True
     except Exception:
-        # A probe that fails is not evidence of anything; fall through to the
-        # reset and let the usual path decide.
+        # A probe that fails is not evidence of anything; fall through and let
+        # the usual path decide.
         return False
     return False
 
@@ -360,12 +407,43 @@ def main(argv=None):
     bus = ingest.IngestionBus()
     fetch = bus.poll
 
-    port = wait_for_port(args.port, on_wait=_upkeep)
     last_err = None
     explicit_port = bool(args.port)
-    # Candidates already asked politely this round. Cleared once every one has
-    # been tried, so a board that is genuinely wedged still gets its reset.
-    tried_quietly = set()
+
+    # What we learned last time. A machine that has connected before opens the
+    # port it used, with no scanning at all.
+    known = remembered_board(clauge_home)
+    # The USB layout we have already searched without finding anything. While
+    # it is unchanged there is nothing new to look at, so we wait instead of
+    # reopening ports on a timer.
+    searched = None
+
+    def next_port():
+        """The port to try, or None if there is nothing new to try.
+
+        Order matters and is the whole design: the remembered board first
+        (usually the only candidate, and the only one we may reset), then
+        anything else attached, each asked once per USB layout.
+        """
+        nonlocal searched
+        if explicit_port:
+            return args.port
+        cands = candidate_ports()
+        want = known.get("port")
+        if want in cands:
+            cands = [want] + [c for c in cands if c != want]
+        here = usb_topology()
+        if searched == here:
+            return None
+        if not cands:
+            searched = here
+            return None
+        return cands[0]
+
+    port = wait_for_port(args.port, on_wait=_upkeep)
+    # Ports asked politely under the CURRENT layout. Not a permanent blacklist:
+    # it is discarded the moment anything is plugged or unplugged.
+    asked = set()
 
     while True:  # reconnect loop
         try:
@@ -395,45 +473,52 @@ def main(argv=None):
             # of hardware that is not ours, and a reset is not a question, it
             # is an action taken on someone's device.
             already_running = probe_is_our_board(ser)
+            asked.add(port)
+
+            # May this port be reset if it stays silent?
+            #
+            # Only if we have identified it as ours before, or the operator
+            # named it. A reset is an action taken on a device, and an
+            # unidentified CH340 is far more likely to be an Arduino than a
+            # wedged board -- 1a86:7523 is in a great deal of hardware that is
+            # not ours. A board that has connected here before is a different
+            # matter: it IS ours, silence means it is wedged, and a reset is
+            # exactly the recovery it needs.
+            may_reset = explicit_port or port == known.get("port")
+
             if already_running:
                 print(f"[bridge] {port} answered; not resetting it",
                       file=sys.stderr)
-            elif not explicit_port and len(candidate_ports()) > 1:
-                # It did not answer, and there is somewhere else to look.
-                #
-                # Resetting is how a mute or wedged BOARD is recovered, so it
-                # stays -- but only once every other candidate has been asked
-                # politely. Otherwise the first CH340 on the bus, whatever it
-                # belongs to, gets its reset line pulsed because it happened to
-                # enumerate first.
-                if port not in tried_quietly:
-                    tried_quietly.add(port)
-                    ser.close()
-                    others = [p for p in candidate_ports()
-                              if p not in tried_quietly]
-                    if others:
-                        print(f"[bridge] {port} did not answer; trying"
-                              f" {others[0]}", file=sys.stderr)
-                        port = others[0]
-                        continue
-                    print("[bridge] no port answered; resetting the best"
-                          " candidate", file=sys.stderr)
-                    tried_quietly.clear()
-                    port = wait_for_port(args.port, on_wait=_upkeep)
-                    continue
-                ser.dtr = False
-                ser.rts = True
-                time.sleep(0.15)
-                ser.rts = False
-                time.sleep(0.3)
-                ser.reset_input_buffer()
-            else:
+            elif may_reset:
                 ser.dtr = False      # GPIO0 HIGH -> boot the app, not the ROM loader
                 ser.rts = True       # EN LOW  -> hold in reset
                 time.sleep(0.15)
                 ser.rts = False      # EN HIGH -> release; board boots
                 time.sleep(0.3)
                 ser.reset_input_buffer()
+            else:
+                # Silent, and not ours as far as we know. Leave it alone and
+                # look elsewhere -- and if there is nowhere else under this USB
+                # layout, stop looking until something is plugged or unplugged.
+                ser.close()
+                nxt = next((p for p in candidate_ports() if p not in asked), None)
+                if nxt is not None:
+                    print(f"[bridge] {port} did not answer; trying {nxt}",
+                          file=sys.stderr)
+                    port = nxt
+                    continue
+                searched = usb_topology()
+                asked.clear()
+                print("[bridge] nothing here answers; waiting for a board to"
+                      " be plugged in", file=sys.stderr)
+                while True:
+                    _upkeep()
+                    time.sleep(3.0)
+                    nxt = next_port()
+                    if nxt is not None:
+                        break
+                port = nxt
+                continue
         except Exception as e:
             # Deduplicated: a board left unplugged, or a port the user lacks
             # permission to open, would otherwise write this same line to
@@ -586,6 +671,16 @@ def main(argv=None):
                         if not proven:
                             update.cleanup(self_bin)
                             proven = True
+                            # A message of ours off this port is the only
+                            # positive identification there is. Write it down:
+                            # the next start opens this port directly instead
+                            # of scanning, and this is also what licenses a
+                            # reset if it ever goes quiet.
+                            known = {"port": port,
+                                     "board_id": msg.get("board_id")
+                                     or known.get("board_id")}
+                            remember_board(clauge_home, known["port"],
+                                           known.get("board_id"))
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
                     # the liveness window): the usage endpoint is aggressively
