@@ -277,6 +277,18 @@ def main():
     ap.add_argument("--split-col", type=int, default=CANVAS_W // 2,
                     help="column the split happens at (must cross only "
                          "background in every frame)")
+    ap.add_argument("--flatten-ink", type=int, default=0, metavar="N",
+                    help="snap pixels whose every channel is <= N to exactly "
+                         "black, AFTER quantization. The mirror of --flatten, "
+                         "and needed for the same reason at the other end of "
+                         "the range: source grain leaves ink pixels one RGB565 "
+                         "step off zero -- (0,4,0), (8,0,0), (0,0,8) -- and an "
+                         "LCD's gamma is steepest near black, so a deviation "
+                         "that is invisible near white renders as visible "
+                         "mottling in a large dark shape. Keep N well below "
+                         "the darkest ANTI-ALIASED edge pixel (those run 70+ "
+                         "per channel against a light ground) so edges survive "
+                         "untouched (0 = off)")
     ap.add_argument("--flatten", type=int, default=0,
                     help="snap pixels within this per-channel distance of "
                          "the background fill to exactly the fill color; "
@@ -387,6 +399,26 @@ def finish(args, canvases, fill):
                  <= args.threshold).all(axis=-1, keepdims=True)
         shown.append(np.where(still, prev, f))
     frames565 = [to_rgb565(f) for f in shown]
+
+    # After quantization, deliberately: this is the only point where the
+    # guarantee "no near-black survives" can actually be made, because 565 is
+    # what reaches the panel and 0 is on its grid. Snapping earlier would let
+    # to_rgb565 round something back up.
+    if args.flatten_ink:
+        n = args.flatten_ink
+        for f in frames565:
+            # frames565 are PACKED uint16, not (..., 3) triples -- unpack to
+            # the 8-bit values the threshold is expressed in. Doing this with
+            # `.all(axis=-1)` on the packed array silently matches nothing
+            # (it collapses the width axis), which is exactly the no-op this
+            # comment exists to stop someone rediscovering.
+            r = (f >> 11) & 0x1F
+            g = (f >> 5) & 0x3F
+            b = f & 0x1F
+            r8 = (r << 3) | (r >> 2)
+            g8 = (g << 2) | (g >> 4)
+            b8 = (b << 3) | (b >> 2)
+            f[(r8 <= n) & (g8 <= n) & (b8 <= n)] = 0
 
     blob, per_frame = encode(frames565, args.fps, big_endian=True)
     last, _ = encode([frames565[-1]], args.fps, big_endian=True)
