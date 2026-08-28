@@ -274,7 +274,7 @@ The things that were open before the first release, and how each was settled.
 | **What is supported** | Claude Code in a terminal or IDE extension: everything. Codex CLI: everything, on its own page. Claude Desktop alone: percentages and a rate, no countdowns and no activity light, because the app records no reset times anywhere. claude.ai in a browser: nothing. |
 | **Automatic app updates** | **Off** for the first release. The signed manifest carries the switch (`daemon.auto`), so it can be turned on for a later release -- and off again within minutes -- without touching any installed machine. |
 | **What the app keeps on disk** | Exactly what the table under "What the installer changes" says, readable by the user alone, sent nowhere. |
-| **Not yet** | macOS notarisation (the binary is unsigned; Gatekeeper asks once). Windows and Apple Silicon have run the test suite in CI but have not yet been watched by a person. |
+| **Not yet** | macOS notarisation (the binary is unsigned; Gatekeeper asks once). Windows and Apple Silicon run the full suite and the real installer in CI, but have not yet been watched by a person. **Claude Desktop's cache location has only been seen on macOS**; on Windows (`%APPDATA%\Claude\`) and Linux (`~/.config/Claude/`) it is the Electron convention, and `blink status` prints the path it looked at so the first person beside a signed-in Desktop there can confirm it in one glance. |
 
 ## Security &amp; privacy
 

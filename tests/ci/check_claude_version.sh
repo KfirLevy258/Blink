@@ -23,6 +23,11 @@ ci_binary
 
 WORK="${TMPDIR:-/tmp}/blink-claude-version"
 
+py() {
+	# The Windows runners ship `python`, not always `python3`.
+	if command -v python3 >/dev/null 2>&1; then python3 "$@"; else python "$@"; fi
+}
+
 
 command -v claude >/dev/null 2>&1 || fail "no claude on PATH"
 VERSION=$(claude --version 2>/dev/null || echo "unknown")
@@ -79,6 +84,14 @@ rm -rf "$WORK"
 HOME="$WORK/home"
 mkdir -p "$HOME/.claude"
 export HOME
+# Windows resolves ~ from USERPROFILE -- for the binary AND for Claude Code,
+# which is the point of running this job there: the two must agree on where
+# settings.json is, or the installer edits a file the CLI never reads.
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+	USERPROFILE=$(cygpath -w "$HOME")
+	export USERPROFILE ;;
+esac
 printf '%s\n' '{"model": "opus"}' >"$HOME/.claude/settings.json"
 
 "$BIN" >"$WORK/out.txt" 2>&1 || {
@@ -87,7 +100,7 @@ printf '%s\n' '{"model": "opus"}' >"$HOME/.claude/settings.json"
 }
 ok "installer runs alongside $VERSION"
 
-python3 - "$HOME/.claude/settings.json" <<'EOF' || exit 1
+py - "$HOME/.claude/settings.json" <<'EOF' || exit 1
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["model"] == "opus", "unrelated key lost"

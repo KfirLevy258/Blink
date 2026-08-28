@@ -35,6 +35,13 @@ be confidently wrong rather than to fail:
     sample timestamps, which are milliseconds. Verified against a real file,
     2026-08-27; the sanity bound below is what would catch it changing.
 
+  - Codex compresses a rollout to `.jsonl.zst` once it is a week old
+    (codex-rs/rollout/src/compression.rs, MIN_ROLLOUT_AGE). The glob below
+    sees only plain `.jsonl`, which is right for as long as that floor is
+    days: the freshest reading is always in a live, plain file, and a file
+    old enough to be compressed is a week past being stale anyway.
+    tests/ci/check_codex_contract.sh fails the day the floor drops.
+
   - The newest file is not always the newest reading. A terminal left open
     with no turn in it produces a rollout file with no `token_count` at all,
     and its mtime still moves. So this reads the few most recently touched

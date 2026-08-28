@@ -1190,8 +1190,13 @@ def _source_lines():
             print("Desktop     usage cache present but did not parse --"
                   " the app's file format may have changed; please report it")
     else:
-        print("Desktop     no usage cache (Claude Desktop not installed,"
-              " or never signed in)")
+        # Name the path. Whether Claude Desktop keeps this file where we
+        # think it does has been seen on macOS and is a convention on the
+        # other two; the first person to run this beside a signed-in Desktop
+        # on Windows or Linux is the check, and this line is what they need.
+        print("Desktop     no usage cache (Claude Desktop not installed, or"
+              " never signed in)")
+        print(f"            looked at {desktop.path()}")
 
     logs = codex_cli.recent_rollouts()
     if logs:
@@ -1205,6 +1210,7 @@ def _source_lines():
                   " not help, its log format may have changed; please report it")
     else:
         print("Codex       no session logs (Codex not installed, or never run)")
+        print(f"            looked under {codex_cli.sessions_root()}")
 
 
 def cmd_update(_args) -> int:

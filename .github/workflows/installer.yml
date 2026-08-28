@@ -269,8 +269,8 @@ jobs:
   # not that a signed-in user's payload is populated. That distinction is
   # written into tests/ci/check_claude_version.sh.
   claude-versions:
-    name: claude ${{ matrix.label }} (${{ matrix.version }})
-    runs-on: ubuntu-latest
+    name: claude ${{ matrix.label }} (${{ matrix.version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     # The Linux binary is already built and uploaded by `build`. Compiling it
     # again in all four cells cost four PyInstaller runs to produce four
     # identical artifacts.
@@ -283,13 +283,20 @@ jobs:
           # 2.1.100 is not arbitrary: 2.1.0 does not carry rate_limits at all
           # and 2.1.100 does, so this is near the real floor. Anything older is
           # a version this product cannot work on, whatever the README says.
-          - {label: old, version: '2.1.100', experimental: false}
-          - {label: stable, version: 'stable', experimental: false}
-          - {label: latest, version: 'latest', experimental: false}
+          - {label: old, version: '2.1.100', experimental: false, os: ubuntu-latest}
+          - {label: stable, version: 'stable', experimental: false, os: ubuntu-latest}
+          - {label: latest, version: 'latest', experimental: false, os: ubuntu-latest}
           # The preview channel: an early warning, never a merge blocker. A
           # contract change landing in `next` is exactly the signal worth
           # having weeks before it reaches customers.
-          - {label: next, version: 'next', experimental: true}
+          - {label: next, version: 'next', experimental: true, os: ubuntu-latest}
+          # The same real CLI on the other two platforms. What this adds is
+          # not the contract (same package) but the LOCATION: the installer
+          # and Claude Code have to agree on where settings.json lives on a
+          # Windows profile and a macOS home, and only running both there
+          # proves they do.
+          - {label: stable, version: 'stable', experimental: false, os: macos-latest}
+          - {label: stable, version: 'stable', experimental: false, os: windows-latest}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -300,7 +307,7 @@ jobs:
           python-version: '3.11'
       - uses: actions/download-artifact@v4
         with:
-          name: blink-ubuntu-latest
+          name: blink-${{ matrix.os }}
           path: dist
       - run: chmod +x dist/blink*
       - run: npm install -g @anthropic-ai/claude-code@${{ matrix.version }}
