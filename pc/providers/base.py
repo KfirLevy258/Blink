@@ -77,6 +77,16 @@ class NormalizedUsageFrame:
     # None, not 0.0, for absent. A zero rate is a real answer ("you have
     # stopped") and must not be spelled the same way as "we cannot tell".
     session_burn_pph: object = None
+    # WHEN a window was observed to reset, if this source saw it happen.
+    #
+    # Not a duplicate of `*_resets_at`, which is when the window will roll
+    # NEXT. This is evidence about the past: at this epoch the window emptied,
+    # so any reading of it taken earlier describes a window that no longer
+    # exists. Only a source that can see reset timestamps can ever set it --
+    # the CLI status line -- and pc/normalizer uses it to stop an older
+    # reading from another source outliving the reset it never knew about.
+    session_rolled_at: object = None
+    weekly_rolled_at: object = None
     # How many live sessions are in each state, and how many subagents are
     # running across all of them. `state` above is the worst of these, for a
     # single indicator; these are what a list would be built from.

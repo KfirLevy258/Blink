@@ -21,8 +21,6 @@
 struct bootclip {
 	const uint8_t *blob;
 	size_t blob_len;
-	const uint8_t *last;	/* one-frame blob, for the skip path */
-	size_t last_len;
 	uint32_t bg_rgb;	/* what the LVGL screen is filled with first */
 	const char *name;	/* for the boot log, so a mis-provisioned unit
 				 * says so over the cable instead of only on

@@ -616,6 +616,18 @@ void usage_view_init(void)
 		/* A swipe that starts on a mark must still reach the screen,
 		 * or the gesture dies exactly where its own affordance is. */
 		lv_obj_add_flag(rail_dot[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
+		/*
+		 * ...and neither may a TAP die there. lv_obj_create() sets
+		 * CLICKABLE by default, and LVGL's hit test walks children
+		 * back to front, so a dot -- created here, after the page
+		 * zone was moved to the background -- won the hit and swallowed
+		 * the tap. The dots carry no click handler, so nothing
+		 * happened at all: a dead spot sitting exactly on the marks
+		 * that advertise the page change. The arc (:325) and the peek
+		 * card (:678) were cleared for the same reason; these were
+		 * missed.
+		 */
+		lv_obj_clear_flag(rail_dot[i], LV_OBJ_FLAG_CLICKABLE);
 	}
 
 	/*
@@ -1491,6 +1503,29 @@ static void act_pulse_cb(void *obj, int32_t v)
  * reading we cannot vouch for makes the execution state moot, because the
  * numbers beside it are the thing in doubt.
  */
+/*
+ * The colour the execution state asks for, and whether it pulses.
+ *
+ * Its own function because TWO status cases need it: data that is sound, and
+ * data flagged stale by the OTHER provider's age while this page is fine.
+ * Inlined in one of them, it was simply missing from the other.
+ */
+static lv_color_t activity_color(bool *pulse)
+{
+	switch (activity) {
+	case USAGE_ACTIVITY_STUCK:
+	case USAGE_ACTIVITY_FAILED:
+		return COL_RED;
+	case USAGE_ACTIVITY_WAITING:
+		return COL_AMBER;
+	case USAGE_ACTIVITY_RUNNING:
+		*pulse = true;
+		return COL_GREEN;
+	default:
+		return COL_GREEN;
+	}
+}
+
 static void refresh_dot(void)
 {
 	lv_color_t c = COL_GREY;
@@ -1504,7 +1539,20 @@ static void refresh_dot(void)
 		c = COL_RED;
 		break;
 	case USAGE_STATUS_STALE:
-		c = stale_here() ? COL_AMBER : COL_GREEN;
+		/*
+		 * Only the page in front of you can be stale-amber. If THIS
+		 * page is fresh, the dot reports what the tool is doing, the
+		 * same as USAGE_STATUS_OK.
+		 *
+		 * It used to paint plain green here, which quietly disabled
+		 * the activity indicator on any two-provider desk: proto.c
+		 * arms STALE when EITHER provider is old (`stale = stale ||
+		 * p2stale`), so a Codex reading last touched this morning made
+		 * a WEDGED Claude session show a healthy green pip. The red
+		 * stuck/failed warning is the entire reason the state hooks
+		 * exist.
+		 */
+		c = stale_here() ? COL_AMBER : activity_color(&pulse);
 		break;
 	case USAGE_STATUS_DISCONNECTED:
 		c = COL_GREY;
@@ -1512,24 +1560,9 @@ static void refresh_dot(void)
 	case USAGE_STATUS_OK:
 	default:
 		/* Data is sound, so the dot is free to report what the tool is
-		 * doing. Only here -- an amber "waiting" must never mask a red
-		 * "the host is gone". */
-		switch (activity) {
-		case USAGE_ACTIVITY_STUCK:
-		case USAGE_ACTIVITY_FAILED:
-			c = COL_RED;
-			break;
-		case USAGE_ACTIVITY_WAITING:
-			c = COL_AMBER;
-			break;
-		case USAGE_ACTIVITY_RUNNING:
-			c = COL_GREEN;
-			pulse = true;
-			break;
-		default:
-			c = COL_GREEN;
-			break;
-		}
+		 * doing. Never above ERROR -- an amber "waiting" must not mask
+		 * a red "the host is gone". */
+		c = activity_color(&pulse);
 		break;
 	}
 

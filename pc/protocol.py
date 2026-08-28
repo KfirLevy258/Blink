@@ -5,6 +5,7 @@ One JSON object per line, UTF-8, '\n'-terminated. Every message carries
 ignored by callers. v2.
 """
 import json
+import math
 
 from pc.version import PROTO_VERSION
 
@@ -74,7 +75,14 @@ def secs_until(resets_at, now_epoch: float) -> int:
     """
     if resets_at is None or resets_at <= now_epoch:
         return -1
-    return int(resets_at - now_epoch)
+    # Round UP, never down. int() truncates, so a window with 0.4 s left
+    # returned exactly 0 -- the single value this docstring says must never
+    # reach the board, reintroduced by the arithmetic two lines under the
+    # paragraph forbidding it. The guard above only excludes resets_at that
+    # have already passed. Ceiling keeps the value honest (the window really
+    # does have "about a second" left) and keeps 0 reserved for the firmware's
+    # own countdown reaching it.
+    return max(1, math.ceil(resets_at - now_epoch))
 
 
 def decode(line: str):

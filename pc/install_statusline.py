@@ -106,11 +106,26 @@ def _load(settings_path: str) -> dict:
         # utf-8 explicitly: Windows would otherwise decode with the ANSI code
         # page and die on any non-ASCII character anywhere in the file.
         with open(settings_path, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except FileNotFoundError:
         return {}
     except (ValueError, UnicodeDecodeError) as e:
         raise SettingsUnreadable(f"{settings_path} is not valid JSON ({e})")
+    if not isinstance(data, dict):
+        # Valid JSON, wrong shape: `[]`, `null`, a bare string. Everything
+        # downstream does data.get(...), so this used to surface as an
+        # AttributeError from five different call sites -- and in the daemon
+        # the drift watchdog's call is on a path that catches only
+        # SettingsUnreadable, so an unhandled one killed main() and left
+        # KeepAlive restarting it every ten seconds forever.
+        #
+        # Refusing is also the right answer on the merits: a settings.json
+        # that is not a JSON object is not a file we can safely edit, which is
+        # exactly what SettingsUnreadable already means to every caller.
+        raise SettingsUnreadable(
+            f"{settings_path} is valid JSON but not an object"
+            f" (it is {type(data).__name__})")
+    return data
 
 
 def _sniff_format(settings_path: str):
@@ -139,6 +154,20 @@ def _sniff_format(settings_path: str):
 
 def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> None:
     """Write via a temp file so a crash cannot truncate the user's settings."""
+    # Follow a symlink to its target before writing.
+    #
+    # os.replace() replaces the LINK, so a dotfiles-managed
+    # ~/.claude/settings.json -> ~/dotfiles/settings.json became a plain file
+    # holding our edit while the original sat orphaned in the repo, still
+    # tracked, still showing clean in git status. Every later Claude Code edit
+    # then went to the new file. shutil.copymode below follows the link for
+    # permissions, which made the loss even harder to notice.
+    #
+    # realpath, not readlink: a chain of links, or a link into a linked
+    # directory, both have to land on the real file.
+    if os.path.islink(settings_path):
+        settings_path = os.path.realpath(settings_path)
+
     tmp = settings_path + ".clauge-tmp"
     # The temp file is a sibling of the target (it has to be, for os.replace to
     # be atomic), so an absent parent directory fails the write rather than the
@@ -159,6 +188,21 @@ def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> Non
     if os.path.exists(settings_path):
         shutil.copymode(settings_path, tmp)
     os.replace(tmp, settings_path)
+
+
+def _current_command(data: dict) -> str:
+    """settings.json's statusLine.command, or "" -- never an exception.
+
+    `statusLine` is the customer's key as much as ours, and nothing stops it
+    holding a string, a list or null. `(data.get("statusLine") or {}).get(...)`
+    reads as safe and is not: only None and {} take the `or` branch, so
+    `{"statusLine": "my-bar"}` reached .get() on a str and raised.
+    """
+    sl = data.get("statusLine")
+    if not isinstance(sl, dict):
+        return ""
+    cmd = sl.get("command", "")
+    return cmd if isinstance(cmd, str) else ""
 
 
 def _is_ours(current: str, expected: str = None) -> bool:
@@ -191,7 +235,7 @@ def _is_ours(current: str, expected: str = None) -> bool:
 def install(settings_path: str, shim_path: str) -> str:
     indent, trailing_newline = _sniff_format(settings_path)
     data = _load(settings_path)
-    previous = (data.get("statusLine") or {}).get("command", "")
+    previous = _current_command(data)
     # shlex.quote: an unquoted path is one space away from a silent no-op on
     # macOS (a very live case -- "/Users/kfir/Application Support/..."). An
     # unquoted `sh /a b/c` splits into three argv words and does nothing.
@@ -275,7 +319,7 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
     """
     indent, trailing_newline = _sniff_format(settings_path)
     data = _load(settings_path)
-    current = (data.get("statusLine") or {}).get("command", "")
+    current = _current_command(data)
 
     if not current:
         return "No Clauge statusline installed; nothing to do."
@@ -320,7 +364,7 @@ def _announce(settings_path: str, shim_path: str, undo_hint: str = None) -> None
     optional and it runs before the first write, not after. Printed even when
     stdout is redirected: a log that records what changed is the point.
     """
-    previous = (_load(settings_path).get("statusLine") or {}).get("command", "")
+    previous = _current_command(_load(settings_path))
     new_command = statusline_command(shim_path)
     # The SAME is_ours test install() applies, for the same reason it applies
     # it: what happens to `previous` depends entirely on whether it is a
@@ -429,7 +473,7 @@ def drift_check(settings_path: str, shim_path: str):
     except Exception:
         return None
 
-    current = (data.get("statusLine") or {}).get("command", "")
+    current = _current_command(data)
     expected = statusline_command(shim_path)
     if current == expected:
         return None

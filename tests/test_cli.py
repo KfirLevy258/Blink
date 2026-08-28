@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-from pc import cli
+from pc import cli, install_statusline
 
 
 @pytest.fixture(autouse=True)
@@ -393,3 +393,40 @@ def test_a_working_claude_code_says_none_of_it(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "Claude Desktop alone" not in out
     assert "Nothing on this machine reports usage" not in out
+
+
+def test_the_disclosure_counts_the_hooks_it_actually_writes(tmp_path, capsys,
+                                                            monkeypatch):
+    """It said six while writing ten. The number drifted when three events were
+    added and nothing failed -- and this text is the only consent the customer
+    is asked for before we edit a file they own."""
+    monkeypatch.setattr(cli, "claude_version",
+                        lambda: ("2.1.245 (Claude Code)", (2, 1, 245)))
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    n = len(cli.install_hooks.HOOK_EVENTS)
+    assert f"for each of {n} Claude Code" in out
+    written = _read(tmp_path).get("hooks") or {}
+    assert len(written) == n, "disclosure and reality must agree"
+
+
+def test_a_settings_file_that_is_not_an_object_is_refused_not_crashed(tmp_path):
+    """Valid JSON, wrong shape. Five call sites did data.get(...) on it; in the
+    daemon that AttributeError killed main() and KeepAlive restarted it every
+    ten seconds forever."""
+    for doc in ("[]", "null", '"a string"', "42"):
+        (tmp_path / ".claude").mkdir(exist_ok=True)
+        (tmp_path / ".claude" / "settings.json").write_text(doc)
+        with pytest.raises(install_statusline.SettingsUnreadable):
+            install_statusline._load(str(tmp_path / ".claude" / "settings.json"))
+
+
+def test_a_statusline_that_is_not_a_dict_reads_as_absent():
+    """`{"statusLine": "my-bar"}` -- the `or {}` idiom looked safe and was not:
+    only None and {} take that branch."""
+    for bad in ("my-bar", [], 7, None):
+        assert install_statusline._current_command({"statusLine": bad}) == ""
+    assert install_statusline._current_command({"statusLine": {"command": 9}}) == ""
+    assert install_statusline._current_command(
+        {"statusLine": {"command": "x"}}) == "x"

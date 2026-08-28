@@ -41,6 +41,17 @@ STALE_AFTER_S = 1800
 # unit is stated at every use.
 MS_PER_S = 1000.0
 
+# Plausible bounds for a sample timestamp: 2020-01-01 to 2100-01-01.
+#
+# Without these one bad sample is permanent. `_pick` in the normalizer ranks
+# strictly by observed_at, and `stale` is `now - observed_at > 1800` -- so a
+# timestamp in the far future is never stale AND beats every real reading,
+# forever, pinning the panel to whatever that sample said. It costs nothing to
+# refuse: codex_cli has had exactly this guard on `resets_at` since it was
+# written, for exactly this reason.
+SAMPLE_EPOCH_MIN = 1_577_836_800
+SAMPLE_EPOCH_MAX = 4_102_444_800
+
 
 def cache_path():
     """Where the desktop app keeps its usage history on this platform.
@@ -87,6 +98,11 @@ def _sample_to_frame(sample: dict):
     try:
         observed_at = float(sample["t"]) / MS_PER_S
     except (KeyError, TypeError, ValueError):
+        return None, None
+    if not (SAMPLE_EPOCH_MIN <= observed_at <= SAMPLE_EPOCH_MAX):
+        # Out of range means the field was misread or changed units upstream
+        # (it is milliseconds today; microseconds would land in the year
+        # 56649). Dropping the sample is right either way -- see the constants.
         return None, None
     fh = _pct(u, "fh")
     sd = _pct(u, "sd")

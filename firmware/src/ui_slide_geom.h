@@ -35,6 +35,21 @@ struct ui_slide_strip {
 	int x1, y1, x2, y2;
 };
 
+/*
+ * How many pixel columns (or rows) each step of the wipe paints.
+ *
+ * Lives here rather than in ui_slide.c so the host test can pin it. It could
+ * not before, and the test compensated by inventing a PAGE_STEP of 8 with the
+ * comment "what the page change uses" -- which was never true: ui_slide_run
+ * has one step size and no per-direction branch. A test asserting a constant
+ * the firmware does not have proves nothing and reads as coverage.
+ *
+ * A width that does not divide the travel exactly leaves the last strip short
+ * -- the new screen with a stripe of the old one still on it -- so both axes
+ * must divide by it. The host test checks that against the real panel size.
+ */
+#define UI_SLIDE_STEP_COLS	4
+
 static inline int ui_slide_is_vertical(int dir)
 {
 	return dir == UI_SLIDE_UP || dir == UI_SLIDE_DOWN;

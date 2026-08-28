@@ -417,7 +417,22 @@ def main(argv=None):
             # message in the log. Bridge prints its own progress every 200.
             if m.get("t") != "ota_data":
                 print(f"[bridge] -> {m}", file=sys.stderr)
-            ser.write(protocol.encode(m))
+            # encode_CHECKED. This is the only writer, and it used to call
+            # plain encode() -- so protocol.encode_checked, written precisely
+            # to guard the board's 512-byte cliff and documented as the thing
+            # callers use, had no production caller at all and only tests
+            # exercised it.
+            #
+            # It matters because the board does not truncate an over-long
+            # line, it DROPS it whole (proto.c) with no error on either side:
+            # the panel silently stops updating while this log keeps printing
+            # the message as sent. A fully loaded two-provider frame already
+            # measures 484 of the 512 bytes.
+            raw, why = protocol.encode_checked(m)
+            if raw is None:
+                print(f"[bridge] NOT SENT: {why}", file=sys.stderr)
+                return
+            ser.write(raw)
 
         # The board approved an update. esptool needs the port to itself, so
         # close it, write slot0, and let the outer reconnect loop pick the

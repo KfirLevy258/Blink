@@ -214,16 +214,24 @@ def test_a_rollout_with_no_reading_yet_is_silence(tmp_path):
 
 def test_a_truncated_line_is_skipped_rather_than_fatal(tmp_path):
     """Only the tail of a long rollout is read, so the first line in hand is
-    routinely half a line. That must cost nothing."""
+    routinely half a line. That must cost nothing.
+
+    Order matters, and it used to be wrong: the parser scans REVERSED and
+    returns on the first match, so a malformed line placed before the good one
+    was never reached and this passed without exercising anything. The
+    malformed line has to be NEWER than the reading it must not break.
+    """
     good = token_count_line(rate_limits(s_pct=42.0))
-    write_rollout(tmp_path, lines=['{"timestamp": "20', good])
+    write_rollout(tmp_path, lines=[good, '{"timestamp": "20'])
     frame, = poll(tmp_path)
     assert frame.session_pct == 42.0
 
 
 def test_a_line_that_is_not_an_object_is_skipped(tmp_path):
-    write_rollout(tmp_path, lines=['["rate_limits"]',
-                                   token_count_line(rate_limits())])
+    # Newest-first again: a non-object AFTER the reading is the one the
+    # reversed scan actually has to survive.
+    write_rollout(tmp_path, lines=[token_count_line(rate_limits()),
+                                   '["rate_limits"]'])
     frame, = poll(tmp_path)
     assert frame.session_pct == 12.0
 
@@ -238,6 +246,18 @@ def test_only_the_tail_of_a_huge_file_is_read(tmp_path):
     write_rollout(tmp_path, lines=lines)
     frame, = poll(tmp_path)
     assert frame.session_pct == 99.0
+
+    # ...and the seek is what makes that true. The old reading sits in the
+    # first 1 KB of a ~800 KB file, well outside TAIL_BYTES: if the whole file
+    # were read, the assertion above would still pass (99 is newest either
+    # way), so it proved nothing about the tail. This does -- it is the
+    # reading the seek must have skipped past entirely.
+    assert os.path.getsize(next(iter(
+        (tmp_path).rglob("rollout-*.jsonl")))) > codex_cli.TAIL_BYTES
+    tail = codex_cli._tail_lines(str(next(iter(
+        (tmp_path).rglob("rollout-*.jsonl")))))
+    assert not any('"s_pct": 1.0' in ln or '"used_percent": 1.0' in ln
+                   for ln in tail), "the first reading must be outside the tail"
 
 
 def test_the_provider_never_raises_on_a_damaged_tree(tmp_path, monkeypatch):

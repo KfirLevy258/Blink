@@ -100,3 +100,33 @@ def test_a_window_present_but_missing_its_percentage_is_unknown():
               {"used_percentage": "n/a", "resets_at": now + 60}):
         msg = ss.map_statusline({"rate_limits": {"five_hour": w}}, now, now)
         assert msg["session_pct"] == -1.0, w
+
+NOW = 1_787_900_000.0
+
+
+# --- the rollover, and the epoch it now reports ------------------------------
+#
+# Six tests pinning _rolled_over were deleted from this file on this branch,
+# which is how the normalizer came to be able to discard the very mechanism
+# they covered. These re-pin it, including the field that fixes that.
+
+
+def test_a_reset_window_reads_zero_and_reports_when_it_emptied():
+    at = NOW - 60
+    pct, resets, rolled = ss._rolled_over(47.0, at, NOW)
+    assert pct == 0.0
+    assert resets is None
+    assert rolled == at, "the epoch is the evidence the normalizer needs"
+
+
+def test_a_window_that_has_not_reset_is_untouched():
+    at = NOW + 3600
+    assert ss._rolled_over(47.0, at, NOW) == (47.0, at, None)
+
+
+def test_an_unknown_percentage_is_never_zeroed():
+    assert ss._rolled_over(-1.0, NOW - 60, NOW) == (-1.0, NOW - 60, None)
+
+
+def test_no_reset_time_means_no_rollover_claim():
+    assert ss._rolled_over(47.0, None, NOW) == (47.0, None, None)

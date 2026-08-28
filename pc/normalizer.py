@@ -49,6 +49,34 @@ def _pick(frames, has, get):
     return get(best) if best is not None else None, best
 
 
+def _rolled_at(frames, attr):
+    """The latest observed rollover for this window, or None.
+
+    Evidence, not inference: some source watched the window empty at this
+    epoch. Only the CLI status line can see it (pc/statusline_source), and it
+    used to discard the fact after acting on it.
+    """
+    best = None
+    for f in frames:
+        at = getattr(f, attr, None)
+        if at is not None and (best is None or at > best):
+            best = at
+    return best
+
+
+def _survives_rollover(f, rolled_at, attr):
+    """May this frame's reading of that window still be believed?
+
+    Two ways to qualify. Either it was taken at or after the reset, or the
+    frame ACCOUNTED for the reset itself -- which the reporting frame does,
+    and it must, because its own observed_at is the payload's mtime and can
+    be long before the window rolled.
+    """
+    if rolled_at is None:
+        return True
+    return f.observed_at >= rolled_at or getattr(f, attr, None) is not None
+
+
 def merge(frames):
     """One frame per provider from many source frames, or None.
 
@@ -64,10 +92,31 @@ def merge(frames):
     assert all(f.provider == provider for f in frames), \
         "merge() takes frames from one provider; group them first"
 
+    # A reading taken before a window reset describes a window that no longer
+    # exists, however fresh it looks.
+    #
+    # Strict recency alone got this wrong, and badly, in the one direction the
+    # module docstring says the design exists to prevent. The status line is
+    # rewritten only when Claude Code renders, so its post-reset 0% can easily
+    # be OLDER than a desktop sample taken minutes before the same reset --
+    # and the desktop cache cannot see reset times at all, so it has no way to
+    # know its own reading has been superseded. Recency handed it the dial and
+    # the panel showed a confident, un-stale 78% for usage that had already
+    # been forgiven, with a burn rate attached. Reproduced by execution
+    # 2026-08-28; found by review.
+    s_rolled = _rolled_at(frames, "session_rolled_at")
+    w_rolled = _rolled_at(frames, "weekly_rolled_at")
+
     session_pct, session_src = _pick(
-        frames, lambda f: _known_pct(f.session_pct), lambda f: f.session_pct)
+        frames,
+        lambda f: (_known_pct(f.session_pct)
+                   and _survives_rollover(f, s_rolled, "session_rolled_at")),
+        lambda f: f.session_pct)
     weekly_pct, weekly_src = _pick(
-        frames, lambda f: _known_pct(f.weekly_pct), lambda f: f.weekly_pct)
+        frames,
+        lambda f: (_known_pct(f.weekly_pct)
+                   and _survives_rollover(f, w_rolled, "weekly_rolled_at")),
+        lambda f: f.weekly_pct)
 
     if session_src is None and weekly_src is None:
         # Nothing here carries a usage percentage. A frame with only a model
@@ -94,8 +143,14 @@ def merge(frames):
     # unwind, and one invariant the panel can rely on: a frame never carries
     # both.
     if session_resets_at is None:
+        # Same rule for the rate: a slope measured before the window emptied
+        # describes the old window. It is the strongest case for the rule --
+        # a reset leaves session_resets_at None, which is precisely the state
+        # that lets a rate through at all.
         session_burn_pph, _ = _pick(
-            frames, lambda f: f.session_burn_pph is not None,
+            frames,
+            lambda f: (f.session_burn_pph is not None
+                       and _survives_rollover(f, s_rolled, "session_rolled_at")),
             lambda f: f.session_burn_pph)
     else:
         session_burn_pph = None
@@ -122,6 +177,9 @@ def merge(frames):
         state=state or base.STATE_UNKNOWN,
         stale=primary.stale,
         session_burn_pph=session_burn_pph,
+        # Carried so a merged frame is still a valid input to another merge.
+        session_rolled_at=s_rolled,
+        weekly_rolled_at=w_rolled,
         # The counts travel with the state they describe. Taking them
         # field-by-field like everything else would let a session count from
         # one source sit beside a state from another, which is a panel saying

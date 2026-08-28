@@ -18,8 +18,10 @@
 
 #define HOR	320
 #define VER	240
-#define STEP	4
-#define PAGE_STEP	8	/* what the page change uses */
+/* The firmware's own value, from the header it now lives in -- not a number
+ * repeated here, which is how the old PAGE_STEP came to claim a step size
+ * ui_slide.c has never used. */
+#define STEP	UI_SLIDE_STEP_COLS
 
 static int step_override = STEP;
 static int failures;
@@ -130,15 +132,18 @@ int main(void)
 	covers_the_screen_once(UI_SLIDE_UP, "UP");
 	covers_the_screen_once(UI_SLIDE_DOWN, "DOWN");
 
-	printf("\n== and at the wider step the page change uses ==\n");
-	/* The strip width became a parameter when 60 steps was judged too slow,
-	 * and a width that does not divide the travel leaves the last strip
-	 * short -- the new screen with a stripe of the old one still on it. The
-	 * code falls back rather than ship that; these are the widths it must
-	 * never have to. */
-	CHECK(HOR % PAGE_STEP == 0 && VER % PAGE_STEP == 0,
-	      "the page step divides both axes exactly");
-	step_override = PAGE_STEP;
+	printf("\n== the step the firmware actually uses ==\n");
+	/* A width that does not divide the travel leaves the last strip short
+	 * -- the new screen with a stripe of the old one still on it. This is
+	 * the check that would fail if someone tuned the step for speed. */
+	CHECK(HOR % UI_SLIDE_STEP_COLS == 0 && VER % UI_SLIDE_STEP_COLS == 0,
+	      "the firmware's step divides both axes exactly");
+
+	printf("\n== and the geometry holds at other widths ==\n");
+	/* The width is a parameter, so the arithmetic must not depend on its
+	 * current value. 8 is an alternative, NOT a claim about the firmware:
+	 * ui_slide_run has one step size and no per-direction branch. */
+	step_override = 8;
 	covers_the_screen_once(UI_SLIDE_UP, "UP at 8 px");
 	covers_the_screen_once(UI_SLIDE_DOWN, "DOWN at 8 px");
 	step_override = STEP;

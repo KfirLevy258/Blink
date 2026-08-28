@@ -263,3 +263,63 @@ def test_a_stale_cli_reset_still_beats_the_rate():
         desktop(NOW, session=40, burn=14.0),
     ])
     assert out.session_burn_pph is None
+
+
+# --- a reading taken before a reset must not outlive it ---------------------
+#
+# The failure this prevents is the one the module docstring names: inventing
+# usage that has already been forgiven. Strict recency alone got it wrong,
+# because the status line is rewritten only when Claude Code renders, so its
+# post-reset 0% is routinely OLDER than a desktop sample from before the same
+# reset -- and the desktop cache cannot see reset times at all.
+
+
+def rolled(at, session=base.UNKNOWN, s_rolled=None, provider="claude"):
+    return base.NormalizedUsageFrame(
+        provider=provider, src="cli", observed_at=at, session_pct=session,
+        session_rolled_at=s_rolled)
+
+
+def test_a_pre_reset_reading_loses_even_though_it_is_fresher():
+    out = normalizer.merge([
+        rolled(NOW - 1200, session=0.0, s_rolled=NOW - 60),   # older, correct
+        desktop(NOW - 600, session=78.0),                     # fresher, stale truth
+    ])
+    assert out.session_pct == 0.0
+    assert out.src == "cli"
+
+
+def test_the_frame_that_saw_the_reset_is_not_excluded_by_its_own_evidence():
+    """Its observed_at is the payload's mtime, which predates the rollover it
+    is reporting. A naive `observed_at >= rolled_at` would discard it and
+    leave the panel with nothing."""
+    out = normalizer.merge([rolled(NOW - 1200, session=0.0, s_rolled=NOW - 60)])
+    assert out is not None and out.session_pct == 0.0
+
+
+def test_a_post_reset_reading_still_wins_normally():
+    """The rule must not freeze the dial at 0 -- once another source has
+    sampled after the reset, recency resumes."""
+    out = normalizer.merge([
+        rolled(NOW - 1200, session=0.0, s_rolled=NOW - 60),
+        desktop(NOW - 30, session=4.0),
+    ])
+    assert out.session_pct == 4.0
+    assert out.src == "desktop"
+
+
+def test_the_burn_rate_is_dropped_with_the_reading_it_describes():
+    """A slope measured before the window emptied describes the old window --
+    and a reset is exactly the state that lets a rate through at all, since it
+    leaves session_resets_at None."""
+    out = normalizer.merge([
+        rolled(NOW - 1200, session=0.0, s_rolled=NOW - 60),
+        desktop(NOW - 600, session=78.0, burn=12.0),
+    ])
+    assert out.session_burn_pph is None
+
+
+def test_no_rollover_reported_changes_nothing():
+    out = normalizer.merge([cli(NOW - 1200, session=10.0),
+                            desktop(NOW - 600, session=78.0)])
+    assert out.session_pct == 78.0

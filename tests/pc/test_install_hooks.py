@@ -113,3 +113,54 @@ def test_an_event_list_that_is_not_a_list_is_refused(settings):
 def test_unrelated_keys_are_never_rewritten(settings):
     ih.install(settings, SHIM)
     assert _read(settings)["model"] == "opus"
+
+
+# --- a changed shim path must repoint, not orphan ---------------------------
+#
+# The old behaviour: entries matched via the OLD marker, so every event was
+# skipped and nothing was added -- and then the marker was overwritten with the
+# NEW commands. All ten entries became invisible to uninstall, left invoking a
+# script that no longer exists, and a third install appended duplicates.
+
+
+def test_a_moved_shim_repoints_every_hook(tmp_path):
+    p = str(tmp_path / "settings.json")
+    old_shim = str(tmp_path / "old" / "clauge-hook.sh")
+    new_shim = str(tmp_path / "new" / "clauge-hook.sh")
+
+    ih.install(p, old_shim)
+    first = json.loads(open(p).read())["hooks"]
+    n = len(ih.HOOK_EVENTS)
+
+    msg = ih.install(p, new_shim)
+    data = json.loads(open(p).read())["hooks"]
+
+    cmds = [h["command"]
+            for groups in data.values() for g in groups
+            for h in g.get("hooks", [])]
+    assert len(cmds) == n, "no duplicates, no losses"
+    assert all(ih.hook_command(new_shim, "X").split()[0] in c
+               or new_shim.replace("\\", "/") in c for c in cmds)
+    assert not any(old_shim.replace("\\", "/") in c for c in cmds)
+    assert "repointed" in msg
+    assert len(first) == len(data)
+
+
+def test_uninstall_then_removes_all_of_them(tmp_path):
+    """The point of repointing: uninstall matches expected u marker, so an
+    entry left at the old path could never be removed again."""
+    p = str(tmp_path / "settings.json")
+    ih.install(p, str(tmp_path / "old" / "h.sh"))
+    ih.install(p, str(tmp_path / "new" / "h.sh"))
+    ih.uninstall(p, str(tmp_path / "new" / "h.sh"))
+    left = json.loads(open(p).read()).get("hooks") or {}
+    remaining = [h for groups in left.values() for g in groups
+                 for h in g.get("hooks", [])]
+    assert remaining == [], remaining
+
+
+def test_a_plain_reinstall_still_says_nothing_changed(tmp_path):
+    p = str(tmp_path / "settings.json")
+    shim = str(tmp_path / "h.sh")
+    ih.install(p, shim)
+    assert "already installed" in ih.install(p, shim)

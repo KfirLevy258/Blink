@@ -7,6 +7,7 @@
 #include <lvgl.h>
 
 #include "ui_slide.h"
+#include "ui_slide_geom.h"
 #include "ui_touchfx.h"
 
 /* The panel's scroll axis is its native vertical: 320 lines, which rotation=90
@@ -50,7 +51,8 @@
  * 150 KB this board has not got. The only remaining lever is duration, and
  * that is set by what feels right, not by what makes the band small.
  */
-#define STEP_COLS	4
+/* Defined in ui_slide_geom.h, where the host test can see it. */
+#define STEP_COLS	UI_SLIDE_STEP_COLS
 
 /*
  * Reveal style. 1 = wipe (no panel scroll), 0 = the hardware slide below.

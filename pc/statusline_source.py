@@ -109,8 +109,14 @@ def _rolled_over(pct: float, resets_at, now_epoch: float):
     and any amount of usage may have happened since, so 0% would be the lie.
     """
     if pct < 0 or not _window_has_reset(resets_at, now_epoch):
-        return pct, resets_at
-    return 0.0, None
+        return pct, resets_at, None
+    # The third value is the epoch the window EMPTIED, which is exactly the
+    # resets_at we are discarding. It used to be thrown away, and that was the
+    # hole: this frame's own observed_at is the payload's mtime, which can be
+    # long before the reset, so downstream had no way to tell that a NEWER
+    # reading from another source was nonetheless taken before the window
+    # rolled. pc/normalizer needs this to refuse that reading.
+    return 0.0, None, resets_at
 
 
 def map_statusline_frame(payload: dict, now_epoch: float,
@@ -130,14 +136,16 @@ def map_statusline_frame(payload: dict, now_epoch: float,
     # and "this reading has been superseded by a zero we can compute". The
     # second has a real answer, so it gets one -- see _rolled_over().
     stale = (now_epoch - mtime_epoch) > STALE_AFTER_S
+    session_rolled = weekly_rolled = None
     if not stale:
-        session_pct, session_resets = _rolled_over(session_pct, session_resets,
-                                                   now_epoch)
-        weekly_pct, weekly_resets = _rolled_over(weekly_pct, weekly_resets,
-                                                 now_epoch)
+        session_pct, session_resets, session_rolled = _rolled_over(
+            session_pct, session_resets, now_epoch)
+        weekly_pct, weekly_resets, weekly_rolled = _rolled_over(
+            weekly_pct, weekly_resets, now_epoch)
 
     return base.NormalizedUsageFrame(
         provider=PROVIDER_ID, src=SRC_ID, observed_at=mtime_epoch,
+        session_rolled_at=session_rolled, weekly_rolled_at=weekly_rolled,
         session_pct=session_pct, session_resets_at=session_resets,
         weekly_pct=weekly_pct, weekly_resets_at=weekly_resets,
         stale=stale,

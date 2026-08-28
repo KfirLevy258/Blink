@@ -278,6 +278,25 @@ _PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 """
 
+def _systemd_exec() -> str:
+    """ExecStart, with every argument quoted.
+
+    systemd splits ExecStart on whitespace, so a bare " ".join() broke on any
+    space in the interpreter path, the checkout path or $HOME: with a spaced
+    home the unit resolved the executable as the first fragment and failed
+    with "Failed to locate executable", while `clauge install` still printed
+    "running (systemd)". The launchd and schtasks backends already quote
+    per-argument; systemd was the only one that did not, and the CI scenario
+    that uses a spaced home asserts only that the unit FILE exists.
+
+    systemd's own quoting: double quotes, with \\ and \" escaped inside.
+    """
+    out = []
+    for a in _service_command():
+        out.append('"%s"' % a.replace("\\", "\\\\").replace('"', '\\"'))
+    return " ".join(out)
+
+
 _UNIT_TEMPLATE = """[Unit]
 Description=Clauge USB bridge
 
@@ -509,8 +528,7 @@ class _SystemdBackend(_Backend):
         # a machine that gains systemd later already has the right file.
         os.makedirs(os.path.dirname(unit_path()), exist_ok=True)
         with open(unit_path(), "w") as f:
-            f.write(_UNIT_TEMPLATE.format(
-                command=" ".join(_service_command())))
+            f.write(_UNIT_TEMPLATE.format(command=_systemd_exec()))
         if not self._has_systemctl():
             return f"no systemd here; run it yourself: {installed_bin()} run"
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
@@ -765,11 +783,18 @@ def _announce():
     # else in the file" for one release after the hooks key started being
     # written too. A disclosure that is merely mostly right is worse than none,
     # because it is the thing people rely on instead of reading the diff.
+    # Counted, not spelled. This said "six" while the code wrote ten: the
+    # number drifted when StopFailure, SubagentStart and SubagentStop were
+    # added, and nothing failed. The comment above says this list has to stay
+    # exactly true because it is the thing people rely on instead of reading
+    # the diff -- so it now reads itself off the list it describes, and a test
+    # pins the two together.
     print("             two keys: statusLine.command, and an entry under hooks")
-    print("             for each of six Claude Code events. Nothing else in the")
-    print("             file is touched, and your own hooks are left in place.")
-    previous = install_statusline._load(settings_path()).get("statusLine") or {}
-    prev_cmd = previous.get("command", "")
+    print(f"             for each of {len(install_hooks.HOOK_EVENTS)} Claude Code"
+          " events. Nothing else in")
+    print("             the file is touched, and your own hooks are left in place.")
+    prev_cmd = install_statusline._current_command(
+        install_statusline._load(settings_path()))
     if prev_cmd:
         print(f"             Your current status line is kept and still runs:")
         print(f"               {prev_cmd}")
@@ -1201,6 +1226,20 @@ def cmd_provision(args) -> int:
                 break
     finally:
         ser.close()
+        # The service goes back in the SAME finally that closes the port.
+        #
+        # It used to be restored only on the happy path and the two early
+        # returns, so a nudged cable, a CH340 re-enumerating, or Ctrl-C during
+        # the ten-second hello wait propagated straight past it: the launchd
+        # plist / systemd unit had already been deleted, nothing restarted the
+        # daemon at next login, and nothing said so. On an assembly line that
+        # is a unit boxed with a dead bridge.
+        #
+        # Idempotent by construction -- `stopped` is cleared here, so the tail
+        # of the function cannot install it twice.
+        if stopped:
+            print("Background service ... " + _install_service())
+            stopped = False
 
     said = [h for h in heard if "[cfg] edition" in h]
     if said:
@@ -1224,6 +1263,8 @@ def cmd_provision(args) -> int:
               " message.", file=sys.stderr)
         rc = 1
 
+    # Normally already done by the finally above; kept for the paths that
+    # never reached it.
     if stopped:
         print("Background service ... " + _install_service())
     return rc

@@ -129,10 +129,27 @@ jobs:
           # this job flaky for a reason it cannot fix. A binary that cannot
           # verify a signature does not print either of these lines -- it
           # raises, and `set -e` catches that.
-          out=$("$bin" update 2>&1) || true
+          # CLAUGE_SKIP_SERVICE, because cmd_update restarts the login
+          # service on success and this runner has none -- the same guard
+          # release-binaries.yml and check_install.sh already set.
+          out=$(CLAUGE_SKIP_SERVICE=1 "$bin" update 2>&1) || true
           echo "$out"
+          # All FOUR terminal outputs, not two.
+          #
+          # cmd_update can also say "Downloading <version> ..." (a newer
+          # release is published -- the normal state of any pre-release
+          # branch, which is every branch until the tag is cut) or "There is
+          # no published build for <platform>". Both used to fall through to
+          # exit 1 and fail the job for doing exactly what they should.
+          #
+          # The download branch is worse than a false failure: by the time it
+          # printed, update.apply() had already replaced ~/.clauge/bin/clauge
+          # on the runner. That is fine here -- the artifact is uploaded from
+          # dist/, not from ~ -- but it is why this step must not be treated
+          # as read-only.
           case "$out" in
             *"Already up to date"*|*"Could not read the release feed"*) ;;
+            *"Downloading"*|*"no published build for"*) ;;
             *) echo "FATAL: update path did not complete" >&2; exit 1 ;;
           esac
       - uses: actions/upload-artifact@v4

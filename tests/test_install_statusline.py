@@ -389,3 +389,22 @@ def test_posix_still_writes_sh(monkeypatch):
     monkeypatch.setattr(ins.sys, "platform", "darwin")
     assert ins.statusline_command("/opt/clauge/clauge-statusline.sh") == \
         "sh /opt/clauge/clauge-statusline.sh"
+
+
+def test_a_symlinked_settings_file_is_written_through(tmp_path):
+    """os.replace() replaces the LINK. A dotfiles-managed settings.json became
+    a plain file holding our edit, with the original orphaned in the repo and
+    git status showing clean."""
+    real = tmp_path / "dotfiles" / "settings.json"
+    real.parent.mkdir()
+    real.write_text('{"theme": "dark"}\n')
+    link = tmp_path / "settings.json"
+    link.symlink_to(real)
+
+    ins.install(str(link), str(tmp_path / "shim.sh"))
+
+    assert link.is_symlink(), "the link must survive"
+    assert os.path.realpath(str(link)) == os.path.realpath(str(real))
+    doc = json.loads(real.read_text())
+    assert doc["statusLine"]["command"]
+    assert doc["theme"] == "dark", "and the user's own keys survive"

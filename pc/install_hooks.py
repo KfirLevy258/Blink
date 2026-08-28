@@ -133,16 +133,40 @@ def install(settings_path: str, shim_path: str) -> str:
     expected = {hook_command(shim_path, ev) for ev, _ in HOOK_EVENTS}
     marker = _read_marker()
     added = 0
+    repointed = 0
     for event, takes_matcher in HOOK_EVENTS:
         command = hook_command(shim_path, event)
         entries = _entries_for(data, event)
 
         # Already present, in any group. A reinstall must not stack a second
         # copy that then fires twice per tool call forever.
-        if any(_ours(h.get("command", ""), expected, marker)
-               for group in entries if isinstance(group, dict)
-               for h in (group.get("hooks") or [])
-               if isinstance(h, dict)):
+        #
+        # But "present" is not the same as "correct". An entry that matches
+        # only via the MARKER names an older shim path -- which is what a
+        # migrated home, a run under sudo, or a Windows path-form change
+        # produces. This used to `continue`, add nothing, and then overwrite
+        # the marker with the new commands: all ten entries were orphaned
+        # instantly, invisible to uninstall (which matches expected u marker,
+        # both now naming the new path), left invoking a script that does not
+        # exist, and a third install appended a duplicate group so both fired.
+        # install_statusline has had a whole repoint path for this since it
+        # was written; the hooks had none.
+        ours = None
+        for group in entries:
+            if not isinstance(group, dict):
+                continue
+            for h in (group.get("hooks") or []):
+                if isinstance(h, dict) and _ours(h.get("command", ""),
+                                                 expected, marker):
+                    ours = h
+                    break
+            if ours is not None:
+                break
+
+        if ours is not None:
+            if ours.get("command") != command:
+                ours["command"] = command
+                repointed += 1
             continue
 
         group = {"hooks": [{"type": "command", "command": command}]}
@@ -153,8 +177,13 @@ def install(settings_path: str, shim_path: str) -> str:
 
     _save(settings_path, data, indent, trailing_newline)
     _write_marker(expected)
-    if added == 0:
+    if added == 0 and repointed == 0:
         return "Clauge state hooks already installed."
+    if added == 0:
+        return f"Clauge state hooks repointed at the new path ({repointed})."
+    if repointed:
+        return (f"Clauge state hooks installed ({added} events,"
+                f" {repointed} repointed).")
     return f"Clauge state hooks installed ({added} events)."
 
 

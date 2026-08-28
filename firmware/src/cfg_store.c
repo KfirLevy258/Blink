@@ -507,14 +507,29 @@ int cfg_set_edition(uint8_t edition)
 		k_mutex_unlock(&cfg_lock);
 		return -EPERM;
 	}
+	uint8_t was_edition = cfg.edition;
+
 	cfg.edition = edition;
 	cfg.edition_locked = 1;
 	rc = persist();
 	if (rc != 0) {
-		/* The flash write failed, so nothing was latched on the device
+		/*
+		 * The flash write failed, so nothing was latched on the device
 		 * -- and the RAM mirror must not claim otherwise, or a retry
 		 * on this same boot would be refused for a stamp that does not
-		 * exist. */
+		 * exist.
+		 *
+		 * BOTH fields, not just the latch. persist() serialises the
+		 * whole struct, so leaving cfg.edition set meant the next
+		 * unrelated successful write -- a brightness change is one
+		 * line away, backlight.c -> cfg_set_bright_pct -> persist() --
+		 * sealed the new edition WITHOUT its lock. The unit would then
+		 * play the other clip while cfg_edition_locked() reported
+		 * false, so anyone with the cable could stamp it again: the
+		 * exact hole the latch exists to close, reached by a path
+		 * nobody would think to test.
+		 */
+		cfg.edition = was_edition;
 		cfg.edition_locked = 0;
 	}
 	k_mutex_unlock(&cfg_lock);
