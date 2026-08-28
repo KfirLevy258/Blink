@@ -91,6 +91,26 @@ class Bridge:
     # --- inbound ---
     def on_message(self, msg: dict):
         t = msg.get("t")
+        # Learn the board's protocol version from ANY message, not just hello.
+        #
+        # _board_ahead() gates the one operation that can leave a customer
+        # holding a device that does not start, and it used to depend entirely
+        # on _note_board, reachable only from the hello branch. hello is sent
+        # once, at boot (proto.c send_hello) -- so as soon as the daemon
+        # learned to connect to an already-running board WITHOUT resetting it,
+        # there was no hello, _board_proto stayed None, and the guard degraded
+        # silently to "allow". Found by review the same night that path landed.
+        #
+        # Every message the board sends carries its own "v", so the guard no
+        # longer needs a reboot to arm. Firmware version comes from ota_query's
+        # "cur" below, which is the only other thing _note_board supplied.
+        if self._board_proto is None:
+            try:
+                self._board_proto = int(msg["v"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                self._announce_if_ahead()
         if t == "pref":
             # Which provider the user picked on the board's settings screen.
             # It arrives with every hello as well as on change, so a daemon
@@ -138,6 +158,9 @@ class Bridge:
         except (TypeError, ValueError):
             self._board_proto = None
         self._board_fw = hello.get("fw")
+        self._announce_if_ahead()
+
+    def _announce_if_ahead(self):
         if self._board_ahead() and not self._announced_ahead:
             print(f"[bridge] the board speaks protocol {self._board_proto} and"
                   f" this app speaks {PROTO_VERSION} -- update the app on this"
@@ -152,6 +175,12 @@ class Bridge:
         self._manifest = None
 
     def _on_ota_query(self, cur):
+        # The board's firmware version, from the board, on every query. The
+        # other half of what _note_board used to be the only source of -- and
+        # _resume_pending falls back to "0.0.0" without it, which would compare
+        # a real release against a fabricated version.
+        if cur and not self._board_fw:
+            self._board_fw = cur
         # Refuse to drive a board we may not understand. This daemon writes
         # slot0 in place, with no test boot behind it, so "probably fine" is
         # not a good enough basis for the one operation that can leave a
