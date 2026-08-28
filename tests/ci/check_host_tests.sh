@@ -48,7 +48,12 @@ run_one() {
 	# -Wall, so anything caught here would have been caught there anyway --
 	# but here it is caught before a nine-minute build.
 	# shellcheck disable=SC2086
-	if ! $CC -Wall -Werror -I "$SRC" $cflags "$src" $objs \
+	# $cflags AFTER the sources. It carries -lm, and GNU ld on Ubuntu runs
+	# with --as-needed: a library named before the objects that need it is
+	# dropped, and usage_contrast failed to link with an undefined pow().
+	# Apple's linker does not care about the order, which is why it passed
+	# on the machine it was written on.
+	if ! $CC -Wall -Werror -I "$SRC" "$src" $objs $cflags \
 		-o "$WORK/$name" 2>"$WORK/$name.cc"; then
 		printf '  %-14s BUILD FAILED\n' "$name"
 		sed 's/^/      /' "$WORK/$name.cc"

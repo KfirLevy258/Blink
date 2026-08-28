@@ -48,7 +48,10 @@ from pc.providers import base
 PROVIDER_ID = "claude"
 SRC_ID = "cli"
 
-STATE_DIR = os.path.expanduser("~/.clauge/state")
+# Expanded when a provider is built, not here: a module-level expanduser is
+# evaluated at import, before a test can move HOME, and this provider DELETES
+# files under it. See tests/conftest.py and the note that names this constant.
+STATE_DIR = "~/.clauge/state"
 
 # How long a turn may go silent before the panel calls it stuck.
 #
@@ -66,9 +69,28 @@ STUCK_AFTER_S = 180.0
 # will ever collect them.
 ABANDONED_AFTER_S = 3600.0
 
+# An AGENT file, though, is created once and never touched again -- its mtime
+# is the agent's start, not its last sign of life -- so the session threshold
+# swept a long-running subagent out of the count while it was still working.
+# Four hours is past what any single agent run takes and short enough that a
+# file whose SubagentStop never fired does not inflate the count for a day.
+AGENT_ABANDONED_AFTER_S = 4 * 3600.0
+
+# A slot timestamp outside this is not a reading: 2020-01-01 to 2100-01-01,
+# as the other file-backed sources bound theirs. What it excludes in practice
+# is NaN (every comparison false, so neither the stuck nor the abandoned test
+# ever fires) and a millisecond epoch from some future shim.
+T_EPOCH_MIN = 1_577_836_800.0
+T_EPOCH_MAX = 4_102_444_800.0
+
 _RUNNING_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse",
-                   "SubagentStop", "PreCompact", "PostCompact", "SessionStart")
-_IDLE_EVENTS = ("Stop", "SessionEnd")
+                   "SubagentStop", "PreCompact", "PostCompact")
+# SessionStart is idle, not running. It fires when a terminal opens, and the
+# common thing to happen next is nothing for a while -- the person reads, or
+# opened it for later. Filed as running it turned red "stuck" three minutes
+# after every `claude`, and stayed so for an hour. A turn announces itself
+# with UserPromptSubmit; until then the session is simply open.
+_IDLE_EVENTS = ("Stop", "SessionEnd", "SessionStart")
 _WAITING_EVENTS = ("Notification", "PermissionRequest")
 _FAILED_EVENTS = ("StopFailure",)
 
@@ -135,7 +157,8 @@ class ClaudeStateProvider(base.ProviderParser):
 
     def __init__(self, path=None, now=time.time, stuck_after_s=STUCK_AFTER_S,
                  sweep=True):
-        self._dir = path if path is not None else STATE_DIR
+        self._dir = (path if path is not None
+                     else os.path.expanduser(STATE_DIR))
         self._now = now
         self._stuck_after = stuck_after_s
         self._sweep = sweep
@@ -164,6 +187,8 @@ class ClaudeStateProvider(base.ProviderParser):
             t = float(payload["t"])
         except (KeyError, TypeError, ValueError):
             return None, None
+        if not (T_EPOCH_MIN <= t <= T_EPOCH_MAX):
+            return None, None
         age = now_epoch - t
         return derive_state(event, age, self._stuck_after), age
 
@@ -186,7 +211,7 @@ class ClaudeStateProvider(base.ProviderParser):
                 age = now_epoch - os.path.getmtime(p)
             except OSError:
                 continue
-            if age > ABANDONED_AFTER_S:
+            if age > AGENT_ABANDONED_AFTER_S:
                 if self._sweep:
                     _unlink(p)
                 continue

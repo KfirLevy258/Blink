@@ -141,3 +141,22 @@ def test_an_empty_preference_changes_nothing():
     bus = ingest.IngestionBus(providers=[Fixed(frame())], now=lambda: NOW)
     assert bus.set_preferred("") is False
     assert bus.set_preferred(None) is False
+
+
+def test_a_broken_provider_is_actually_skipped_not_just_silenced():
+    """The docstring said skipped; the loop went on polling it every cycle
+    with only the log line suppressed, so a second, different failure was
+    invisible."""
+    class Counting:
+        calls = 0
+        def get_provider_id(self):
+            return "x"
+        def poll(self, now):
+            Counting.calls += 1
+            raise RuntimeError("still broken")
+    bus = ingest.IngestionBus(providers=[Counting(), Fixed(frame())],
+                              now=lambda: NOW)
+    bus.poll()
+    bus.poll()
+    bus.poll()
+    assert Counting.calls == 1

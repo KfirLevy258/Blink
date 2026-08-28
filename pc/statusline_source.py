@@ -127,7 +127,12 @@ def map_statusline_frame(payload: dict, now_epoch: float,
     rendered straight to a protocol message, kept because it is what the
     existing tests pin and what a single-provider daemon needed.
     """
-    rate_limits = payload.get("rate_limits") or {}
+    rate_limits = payload.get("rate_limits")
+    # An object, or nothing. The file is written by a shell shim from
+    # whatever Claude Code sent; a string or a list here reached .get() and
+    # took this source off the bus for the rest of the process.
+    if not isinstance(rate_limits, dict):
+        rate_limits = {}
     session_pct, session_resets = _window(rate_limits, "five_hour")
     weekly_pct, weekly_resets = _window(rate_limits, "seven_day")
 

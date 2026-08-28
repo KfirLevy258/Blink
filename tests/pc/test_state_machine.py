@@ -9,7 +9,8 @@ import os
 import pytest
 
 from pc.providers import base
-from pc.providers.claude_state import (ABANDONED_AFTER_S, STUCK_AFTER_S,
+from pc.providers.claude_state import (ABANDONED_AFTER_S,
+                                       AGENT_ABANDONED_AFTER_S, STUCK_AFTER_S,
                                        ClaudeStateProvider, derive_state,
                                        worst_of)
 
@@ -20,8 +21,27 @@ NOW = 1_787_700_000.0
 
 
 def test_a_started_turn_is_running():
-    for e in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionStart"):
+    for e in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
         assert derive_state(e, 2.0) == base.STATE_RUNNING, e
+
+
+def test_an_opened_session_is_idle_and_never_becomes_stuck():
+    """`claude`, then nothing: the person is reading, or opened it for later.
+    Filed as running, this went red after three minutes and stayed red for
+    an hour -- on the most ordinary thing a terminal does."""
+    assert derive_state("SessionStart", 2.0) == base.STATE_IDLE
+    assert derive_state("SessionStart", STUCK_AFTER_S * 5) == base.STATE_IDLE
+
+
+def test_a_slot_with_a_nonsense_timestamp_is_ignored(tmp_path):
+    """NaN compares false with everything, so neither the stuck test nor the
+    abandoned sweep would ever fire: a permanent 'running' nothing collects."""
+    d = tmp_path / "state"
+    d.mkdir()
+    for bad in ("NaN", "Infinity", "1787700000000", "12"):
+        (d / "x.state").write_text('{"event":"PreToolUse","t":%s}' % bad)
+        counts, _ = ClaudeStateProvider(path=str(d)).scan(NOW)
+        assert counts == {}, bad
 
 
 def test_a_completed_turn_is_idle():
@@ -73,7 +93,10 @@ def test_an_unknown_event_says_nothing():
     assert derive_state("SomethingNew", 1.0) == base.STATE_UNKNOWN
 
 
-def test_a_clock_that_went_backwards_does_not_report_a_confident_state():
+def test_a_clock_that_went_backwards_reads_as_fresh():
+    """A negative age is clamped to zero rather than allowed to sail under
+    every threshold -- so it is the running state a fresh event earns, not a
+    confident 'stuck' or 'abandoned' from a broken measurement."""
     assert derive_state("PreToolUse", -5000.0) == base.STATE_RUNNING
 
 
@@ -188,10 +211,14 @@ def test_an_abandoned_agent_is_swept_not_counted_forever(state_dir):
     nothing."""
     write_session(state_dir, "s1", "PreToolUse", NOW - 5)
     add_agent(state_dir, "s1", "live")
-    add_agent(state_dir, "s1", "dead", t=NOW - ABANDONED_AFTER_S - 100)
+    # Older than the SESSION threshold but younger than the agent one: an
+    # agent file's mtime is its start, and a long run is not a dead one.
+    add_agent(state_dir, "s1", "long", t=NOW - ABANDONED_AFTER_S - 100)
+    add_agent(state_dir, "s1", "dead", t=NOW - AGENT_ABANDONED_AFTER_S - 100)
     f = provider(state_dir).poll(NOW)[0]
-    assert f.n_agents == 1
+    assert f.n_agents == 2
     assert not (state_dir / "s1" / "dead").exists()
+    assert (state_dir / "s1" / "long").exists()
     assert (state_dir / "s1" / "live").exists()
 
 

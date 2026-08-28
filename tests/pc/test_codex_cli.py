@@ -284,3 +284,28 @@ def test_codex_ships_in_the_default_provider_list():
 def test_codex_home_is_honoured(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     assert codex_cli.sessions_root() == os.path.join(str(tmp_path), "sessions")
+
+
+def test_a_rate_limits_object_of_the_wrong_shape_is_skipped_not_raised(tmp_path):
+    """Verified raising AttributeError before: a string under `primary` fell
+    through _classify's positional fallback to `.get("resets_at")`, and the
+    bus then skipped Codex for the rest of the process."""
+    for bad in ({"primary": "x"}, {"primary": [], "secondary": 3},
+                {"primary": None}, "not even an object"):
+        write_rollout(tmp_path, lines=[token_count_line(bad)])
+        assert poll(tmp_path) == [], bad
+
+
+def test_a_timestamp_from_a_wrong_clock_does_not_read_as_fresh(tmp_path):
+    """A far-future stamp would otherwise be fresh forever and win every
+    recency contest; a pre-1970 one makes .timestamp() raise OSError on
+    Windows. Both fall back to the file's mtime."""
+    line = token_count_line(rate_limits())
+    for stamp in ("2150-01-01T00:00:00Z", "1900-01-01T00:00:00Z", "junk"):
+        obj = json.loads(line)
+        obj["timestamp"] = stamp
+        write_rollout(tmp_path, lines=[json.dumps(obj)])
+        frames = poll(tmp_path)
+        assert len(frames) == 1, stamp
+        # The file's mtime (now), not the year 2099 and not 1900.
+        assert codex_cli.RESET_EPOCH_MIN < frames[0].observed_at < 4.0e9, stamp

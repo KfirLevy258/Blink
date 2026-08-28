@@ -213,3 +213,13 @@ def test_the_frame_carries_it():
     # And the thing that has not changed: this source still has no reset
     # times, which is the whole reason the rate is here.
     assert None is (f.session_resets_at)
+
+
+def test_a_version_field_that_is_not_a_scalar_is_not_an_exception():
+    """dict.get on a list raised TypeError -- outside every try here, so the
+    bus marked the whole source broken over one odd field."""
+    p = ClaudeDesktopProvider()
+    for v in ([2], {"v": 2}, None, True):
+        f = p.parse_cache_file(_doc([_sample(int(NOW * 1000), 7, 8)],
+                                    version=v), NOW)
+        assert f is not None and f.session_pct == 7.0, v

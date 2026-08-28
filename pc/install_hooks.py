@@ -25,27 +25,36 @@ from pc.install_statusline import (SettingsUnreadable, _load, _save,
 
 INSTALLED_MARKER_PATH = "~/.clauge/hooks-installed-commands"
 
-# The lifecycle events the state machine is derived from, and whether the
-# event takes a tool matcher. Tool events fire per tool call; the rest fire
-# once per turn or per session.
+# The lifecycle events the state machine is derived from, each with the
+# matcher its entry is written with (None for events that take none). Tool
+# events fire per tool call and match every tool; the rest fire once per turn
+# or per session.
+NOTIFICATION_MATCHER = "permission_prompt|elicitation_dialog"
+
 HOOK_EVENTS = (
-    ("SessionStart", False),
-    ("UserPromptSubmit", False),
-    ("PreToolUse", True),
-    ("PostToolUse", True),
-    ("Notification", False),
-    ("Stop", False),
+    ("SessionStart", None),
+    ("UserPromptSubmit", None),
+    ("PreToolUse", "*"),
+    ("PostToolUse", "*"),
+    # Only the notifications that mean "Claude Code is waiting on a person".
+    # Installed with no matcher, this fired for every notification type --
+    # including idle_prompt, which Claude Code sends sixty seconds after a
+    # reply when nobody has typed. Every finished turn therefore flipped
+    # from green to amber a minute later, and since waiting outranks running
+    # in worst_of(), one idle terminal masked another that was working.
+    ("Notification", NOTIFICATION_MATCHER),
+    ("Stop", None),
     # Runs INSTEAD of Stop when a turn dies on an API error, and carries
     # error: "rate_limit" among its causes. On a usage gauge that is the
     # headline, so it is worth a hook of its own rather than being left to
     # look like a turn that simply went quiet.
-    ("StopFailure", False),
-    ("SessionEnd", False),
+    ("StopFailure", None),
+    ("SessionEnd", None),
     # Subagent lifetimes. Both carry agent_id, which is what lets the shim
     # keep one file per agent and the daemon count them exactly without a
     # lock -- see tools/clauge-hook.sh.
-    ("SubagentStart", True),
-    ("SubagentStop", True),
+    ("SubagentStart", "*"),
+    ("SubagentStop", "*"),
 )
 
 
@@ -137,7 +146,7 @@ def install(settings_path: str, shim_path: str) -> str:
     marker = _read_marker()
     added = 0
     repointed = 0
-    for event, takes_matcher in HOOK_EVENTS:
+    for event, matcher in HOOK_EVENTS:
         command = hook_command(shim_path, event)
         entries = _entries_for(data, event)
 
@@ -154,14 +163,14 @@ def install(settings_path: str, shim_path: str) -> str:
         # exist, and a third install appended a duplicate group so both fired.
         # install_statusline has had a whole repoint path for this since it
         # was written; the hooks had none.
-        ours = None
+        ours = ours_group = None
         for group in entries:
             if not isinstance(group, dict):
                 continue
             for h in (group.get("hooks") or []):
                 if isinstance(h, dict) and _ours(h.get("command", ""),
                                                  expected, marker):
-                    ours = h
+                    ours, ours_group = h, group
                     break
             if ours is not None:
                 break
@@ -170,11 +179,21 @@ def install(settings_path: str, shim_path: str) -> str:
             if ours.get("command") != command:
                 ours["command"] = command
                 repointed += 1
+            # The matcher is ours to correct too, when the group holds only
+            # our hook: an install that predates NOTIFICATION_MATCHER left
+            # the Notification entry firing for every notification type.
+            if (len(ours_group.get("hooks") or []) == 1
+                    and ours_group.get("matcher") != matcher):
+                if matcher:
+                    ours_group["matcher"] = matcher
+                else:
+                    ours_group.pop("matcher", None)
+                repointed += 1
             continue
 
         group = {"hooks": [{"type": "command", "command": command}]}
-        if takes_matcher:
-            group["matcher"] = "*"
+        if matcher:
+            group["matcher"] = matcher
         entries.append(group)
         added += 1
 

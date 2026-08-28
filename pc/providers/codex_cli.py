@@ -174,9 +174,11 @@ def _classify(rate_limits: dict):
 
     # Nothing declared its length. Fall back to the positional meaning, which
     # is right for every file seen so far and is only reached when the field
-    # this prefers has gone away.
+    # this prefers has gone away. Objects only: a string here reached
+    # `.get("resets_at")` in the caller and took the source down.
     if session is None and weekly is None:
-        session, weekly = primary, secondary
+        session = primary if isinstance(primary, dict) else None
+        weekly = secondary if isinstance(secondary, dict) else None
     return session, weekly
 
 
@@ -195,9 +197,15 @@ def _observed_at(line: dict, mtime: float) -> float:
             t = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
             if t.tzinfo is None:
                 t = t.replace(tzinfo=timezone.utc)
-            return t.timestamp()
-        except ValueError:
-            pass
+            epoch = t.timestamp()
+        except (ValueError, OverflowError, OSError):
+            # OSError: Windows refuses to convert dates before 1970.
+            return mtime
+        # Bounded like resets_at below. A stamp from a wrong clock -- or a
+        # crafted one -- in the far future would otherwise read as fresh
+        # forever and win every recency contest.
+        if RESET_EPOCH_MIN <= epoch <= RESET_EPOCH_MAX:
+            return epoch
     return mtime
 
 

@@ -293,6 +293,11 @@ class ClaudeDesktopProvider(base.ProviderParser):
             return None
 
         version = doc.get("version") if isinstance(doc, dict) else None
+        # Only a scalar can be looked up. A list or object here raised
+        # TypeError from dict.get -- outside every try in this function, so
+        # the bus marked the whole source broken over one odd field.
+        if not isinstance(version, (int, str)) or isinstance(version, bool):
+            version = None
         parser = _PARSERS.get(version, _parse_by_shape)
         # The rate needs the whole series, not the newest point. Read off the
         # same document the parser is about to reduce, and never let a failure

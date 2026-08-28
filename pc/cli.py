@@ -25,7 +25,8 @@ import subprocess
 import sys
 import time
 
-from pc import install_hooks, install_statusline, protocol, update
+from pc import (install_hooks, install_statusline, protocol, statusline_source,
+                update)
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -184,6 +185,19 @@ def desktop_app_present() -> bool:
         return False
 
 
+def codex_present() -> bool:
+    """Has Codex CLI written a rollout log on this machine?
+
+    The logs, not the binary, for the reason desktop_app_present() gives: the
+    file the daemon reads is the thing that matters.
+    """
+    from pc.providers import codex_cli
+    try:
+        return bool(codex_cli.recent_rollouts(limit=1))
+    except Exception:
+        return False
+
+
 def _note_if_no_claude_code():
     """Say what this machine will and will not show, when Claude Code is absent.
 
@@ -203,13 +217,24 @@ def _note_if_no_claude_code():
         return
 
     print()
+    if codex_present() and not desktop_app_present():
+        # A Codex machine. The daemon has known about Codex for a while; this
+        # message did not, and told a Codex-edition customer that nothing on
+        # the machine reports usage and to install Claude Code.
+        print("  !  Claude Code is not installed, so the panel runs on Codex")
+        print("     alone: both Codex limits and their countdowns, from the")
+        print("     session log Codex already writes. The Claude page stays")
+        print("     empty, and there is no activity light -- that needs")
+        print("     Claude Code's hooks. The status line and hooks just")
+        print("     installed start working by themselves if you add it later.")
+        return
     if not desktop_app_present():
-        # Neither source exists. This is not a reduced panel, it is an empty
+        # No source exists. This is not a reduced panel, it is an empty
         # one, and saying anything softer would be misleading.
         print("  !! Nothing on this machine reports usage yet.")
-        print("     Clauge reads figures that Claude Code or Claude Desktop")
-        print("     have already worked out. With neither installed the panel")
-        print("     will connect and then sit blank.")
+        print("     Clauge reads figures that Claude Code, Claude Desktop or")
+        print("     Codex have already worked out. With none of them installed")
+        print("     the panel will connect and then sit blank.")
         print()
         print("       npm install -g @anthropic-ai/claude-code@latest")
         print()
@@ -1032,9 +1057,12 @@ def cmd_status(_args) -> int:
         if desktop_app_present():
             print("Claude Code not found -- running on Claude Desktop alone"
                   " (no countdowns, no activity light)")
+        elif codex_present():
+            print("Claude Code not found -- running on Codex alone"
+                  " (no Claude page, no activity light)")
         else:
-            print("Claude Code not found -- and no Claude Desktop cache"
-                  " either, so nothing is reporting usage")
+            print("Claude Code not found -- and no Claude Desktop cache or"
+                  " Codex log either, so nothing is reporting usage")
     elif ver is None:
         # It ran and said something we could not read as a version. Saying
         # "not found" would send someone to reinstall a working install.
@@ -1058,7 +1086,12 @@ def cmd_status(_args) -> int:
     # the file existing proves an install ran once, not that Claude Code is
     # still configured to call it, and drift is exactly what goes wrong here.
     try:
-        hooks = (install_statusline._load(settings_path()).get("hooks") or {})
+        hooks = install_statusline._load(settings_path()).get("hooks")
+        # isinstance, not `or {}`: only None and {} take the `or` branch, so a
+        # string or list under "hooks" reached .get() and crashed status --
+        # the same trap _current_command documents for statusLine.
+        if not isinstance(hooks, dict):
+            hooks = {}
         ours = sum(
             1 for event, _ in install_hooks.HOOK_EVENTS
             for group in (hooks.get(event) or [])
@@ -1085,10 +1118,16 @@ def cmd_status(_args) -> int:
     payload = os.path.join(clauge_home(), "statusline.json")
     if os.path.exists(payload):
         age = int(time.time() - os.path.getmtime(payload))
-        if age < 120:
+        # The same bound the panel uses (statusline_source.STALE_AFTER_S):
+        # this said "old" at two minutes for a reading the board was still
+        # showing as live.
+        if age < statusline_source.STALE_AFTER_S:
             print(f"Usage data  fresh ({age}s old)")
         else:
             print(f"Usage data  {age}s old -- open Claude Code to refresh it")
+    elif codex_present():
+        print("Usage data  from the Codex session log (no Claude Code status"
+              " line yet)")
     else:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
@@ -1170,7 +1209,14 @@ def cmd_provision(args) -> int:
         _kill_recorded_daemon()
         try:
             backend().remove()
-            stopped = True
+            # Put a service back afterwards only where one belongs: on a
+            # machine Clauge is INSTALLED on. remove() reports "removed"
+            # whether or not anything was registered, and treating that as
+            # proof of a service left a bench laptop -- running the
+            # downloaded binary, never installed -- with a login item
+            # pointing at ~/.clauge/bin/clauge, which does not exist there,
+            # respawning on every throttle interval forever.
+            stopped = os.path.exists(installed_bin())
         except Exception:
             pass
         time.sleep(1.0)

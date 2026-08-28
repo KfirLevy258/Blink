@@ -42,6 +42,31 @@ def test_tool_events_get_a_matcher_and_others_do_not(settings):
     assert "matcher" not in hooks["Stop"][0]
 
 
+def test_notification_matches_only_the_waiting_kinds(settings):
+    """Unmatched, Notification also fires for idle_prompt -- sixty seconds
+    after every reply -- and turned every finished turn amber a minute
+    later. Only the kinds that mean 'waiting on a person' are wanted."""
+    ih.install(settings, SHIM)
+    hooks = _read(settings)["hooks"]
+    assert hooks["Notification"][0]["matcher"] == ih.NOTIFICATION_MATCHER
+    assert "idle_prompt" not in ih.NOTIFICATION_MATCHER
+
+
+def test_reinstall_corrects_an_unmatched_notification_entry(settings):
+    """An install from before the matcher existed left the entry catching
+    every notification type; a reinstall must fix it, not stack a second."""
+    ih.install(settings, SHIM)
+    data = _read(settings)
+    data["hooks"]["Notification"][0].pop("matcher")
+    with open(settings, "w") as f:
+        json.dump(data, f)
+    out = ih.install(settings, SHIM)
+    hooks = _read(settings)["hooks"]
+    assert len(hooks["Notification"]) == 1
+    assert hooks["Notification"][0]["matcher"] == ih.NOTIFICATION_MATCHER
+    assert "repointed" in out
+
+
 def test_installing_twice_does_not_stack_a_second_copy(settings):
     """A duplicate would fire twice on every tool call, forever."""
     ih.install(settings, SHIM)
@@ -139,8 +164,11 @@ def test_a_moved_shim_repoints_every_hook(tmp_path):
             for groups in data.values() for g in groups
             for h in g.get("hooks", [])]
     assert len(cmds) == n, "no duplicates, no losses"
-    assert all(ih.hook_command(new_shim, "X").split()[0] in c
-               or new_shim.replace("\\", "/") in c for c in cmds)
+    # Exactly the commands a fresh install at the new path would write --
+    # every event once, at the new path, with its event argument. The check
+    # this replaces tested `"sh" in c`, which every command satisfied.
+    assert sorted(cmds) == sorted(ih.hook_command(new_shim, ev)
+                                  for ev, _ in ih.HOOK_EVENTS)
     assert not any(old_shim.replace("\\", "/") in c for c in cmds)
     assert "repointed" in msg
     assert len(first) == len(data)

@@ -78,8 +78,6 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(protocol.VERSION, 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class WireBudget(unittest.TestCase):
@@ -233,3 +231,7 @@ def test_the_line_still_fits_with_everything_on_it():
         session_resets_at=1_787_999_999.0, weekly_resets_at=1_788_999_999.0)
     line = json.dumps(protocol.frame_to_usage(f, 1_787_700_000.0, secondary=g))
     assert len(line.encode()) < protocol.MAX_LINE_BYTES
+
+
+if __name__ == "__main__":
+    unittest.main()

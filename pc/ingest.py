@@ -77,18 +77,24 @@ class IngestionBus:
         reported once and then skipped for the rest of the process: the
         alternative is a stack trace on the daemon's log every sixty seconds
         for as long as some other application's file stays malformed.
+
+        Skipped means skipped. This used to add the provider to _broken and
+        then go on polling it every cycle regardless -- only the log line was
+        suppressed, so a second, different failure was invisible and the
+        docstring above was describing a policy the loop did not have.
         """
         frames = []
         now = self._now()
         for p in self._providers:
             key = f"{p.__class__.__name__}"
+            if key in self._broken:
+                continue
             try:
                 frames.extend(p.poll(now) or [])
             except Exception as e:
-                if key not in self._broken:
-                    print(f"[ingest] {key} failed and will be skipped: {e}",
-                          file=sys.stderr)
-                    self._broken.add(key)
+                print(f"[ingest] {key} failed and will be skipped: {e}",
+                      file=sys.stderr)
+                self._broken.add(key)
         return frames
 
     def poll(self):
