@@ -887,10 +887,11 @@ def cmd_install(_args) -> int:
     # state files in here. Both shims create with umask 077, but a directory
     # from an earlier install was made at the default umask, so this
     # tightens it once rather than leaving it to the next mkdir.
-    try:
-        os.chmod(clauge_home(), 0o700)
-    except OSError:
-        pass
+    for d in (clauge_home(), os.path.join(clauge_home(), "state")):
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass          # absent (state/ appears on the first hook), or Windows
     _write_shim(shim_path(), "clauge-statusline.sh")
     install_statusline._announce(settings_path(), shim_path(),
                                  undo_hint=f"{installed_bin()} uninstall")
