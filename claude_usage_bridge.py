@@ -47,17 +47,41 @@ KNOWN_USB_SERIAL = {
 ESPRESSIF_VID = 0x303A  # native USB-serial on -S2/-S3 parts
 
 
-def autodetect_port():
+def candidate_ports():
+    """Every port that might be a board, best guess first.
+
+    A LIST, not a single answer, and that is the point. This used to return
+    the first VID:PID match and the caller committed to it -- but 1a86:7523 is
+    the CH340, which is in Arduino clones, USB-serial adapters and a great deal
+    of other hobbyist hardware. On a desk with any of it attached, the daemon
+    could pick a stranger's device, fail to talk to it, and never look at the
+    real board sitting on the next port.
+
+    With more than one BLINK attached the first that answers wins and the rest
+    are ignored: one daemon drives one board. That is a real limitation rather
+    than an oversight -- the protocol, the preference and the OTA path are all
+    written around a single unit -- but it is at least now a defined one, and
+    `--port` picks a specific board deterministically.
+    """
+    out = []
     for p in list_ports.comports():
         if (p.vid, p.pid) in KNOWN_USB_SERIAL or p.vid == ESPRESSIF_VID:
-            return p.device
+            out.append(p.device)
     # Name heuristics kept as a fallback for a variant carrying a chip that is
     # not in the table yet. Bluetooth ports have no VID and no matching name,
     # so they cannot be picked up by either pass.
     for p in list_ports.comports():
+        if p.device in out:
+            continue
         if "usbmodem" in p.device or (p.manufacturer or "").lower().startswith("espressif"):
-            return p.device
-    return None
+            out.append(p.device)
+    return out
+
+
+def autodetect_port():
+    """The first candidate, for callers that only want one."""
+    ports = candidate_ports()
+    return ports[0] if ports else None
 
 
 # How long to wait for a device to identify itself before resetting it.
@@ -338,6 +362,10 @@ def main(argv=None):
 
     port = wait_for_port(args.port, on_wait=_upkeep)
     last_err = None
+    explicit_port = bool(args.port)
+    # Candidates already asked politely this round. Cleared once every one has
+    # been tried, so a board that is genuinely wedged still gets its reset.
+    tried_quietly = set()
 
     while True:  # reconnect loop
         try:
@@ -370,6 +398,35 @@ def main(argv=None):
             if already_running:
                 print(f"[bridge] {port} answered; not resetting it",
                       file=sys.stderr)
+            elif not explicit_port and len(candidate_ports()) > 1:
+                # It did not answer, and there is somewhere else to look.
+                #
+                # Resetting is how a mute or wedged BOARD is recovered, so it
+                # stays -- but only once every other candidate has been asked
+                # politely. Otherwise the first CH340 on the bus, whatever it
+                # belongs to, gets its reset line pulsed because it happened to
+                # enumerate first.
+                if port not in tried_quietly:
+                    tried_quietly.add(port)
+                    ser.close()
+                    others = [p for p in candidate_ports()
+                              if p not in tried_quietly]
+                    if others:
+                        print(f"[bridge] {port} did not answer; trying"
+                              f" {others[0]}", file=sys.stderr)
+                        port = others[0]
+                        continue
+                    print("[bridge] no port answered; resetting the best"
+                          " candidate", file=sys.stderr)
+                    tried_quietly.clear()
+                    port = wait_for_port(args.port, on_wait=_upkeep)
+                    continue
+                ser.dtr = False
+                ser.rts = True
+                time.sleep(0.15)
+                ser.rts = False
+                time.sleep(0.3)
+                ser.reset_input_buffer()
             else:
                 ser.dtr = False      # GPIO0 HIGH -> boot the app, not the ROM loader
                 ser.rts = True       # EN LOW  -> hold in reset
