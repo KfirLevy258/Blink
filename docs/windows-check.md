@@ -29,3 +29,15 @@ the run -> Artifacts), or the release's `blink-windows-x86_64.exe`.
 Paste the outputs of steps 2, 4, 6 and 10 into the release notes. Anything
 unexpected: the `bridge.log` and the output of `status --wire` are what a bug
 report needs.
+
+## Why not a VM on the Mac
+
+Tried 2026-08-28 on an Intel Mac running macOS 26: QEMU's HVF accelerator
+hangs the emulator's main loop on this host (every CPU model, entitlement
+present), so Windows 11 only ran under pure software emulation -- the
+install took two hours, the desktop was too slow to use, and the evaluation
+build's licence read as expired, which shuts Windows down on a timer.
+VirtualBox/Parallels were not tried. A real Windows PC -- any laptop, ten
+minutes -- is the practical way to run this list. The unattended VM
+definition is kept under `~/vm` on that Mac in case a working hypervisor
+turns up.
