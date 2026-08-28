@@ -64,6 +64,12 @@ MINGW* | MSYS* | CYGWIN*)
 	NATIVE_HOME=$(cygpath -w "$HOME")
 	USERPROFILE="$NATIVE_HOME"
 	export USERPROFILE
+	# The Desktop cache lives under %APPDATA%, which the runner points at
+	# its real profile. Redirect it into this scenario's HOME -- here, in
+	# the main shell, not inside a helper called from a $(...) subshell,
+	# where an export dies with the subshell.
+	APPDATA="$NATIVE_HOME\\AppData\\Roaming"
+	export APPDATA
 	BINEXE="blink.exe"
 	;;
 esac
@@ -118,8 +124,6 @@ desktop_cache() {
 	case "$(uname -s)" in
 	Darwin) echo "$HOME/Library/Application Support/Claude/plan-usage-history.json" ;;
 	MINGW* | MSYS* | CYGWIN*)
-		APPDATA="$NATIVE_HOME\\AppData\\Roaming"
-		export APPDATA
 		echo "$HOME/AppData/Roaming/Claude/plan-usage-history.json" ;;
 	*) echo "$HOME/.config/Claude/plan-usage-history.json" ;;
 	esac
