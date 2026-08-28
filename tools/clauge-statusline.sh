@@ -6,8 +6,16 @@
 # command was configured before Clauge was installed, so the user's status bar
 # is unchanged.
 #
-# Nothing here reads a credential: the payload contains only the two usage
-# percentages Claude Code has already computed.
+# Nothing here reads a credential. But be exact about what IS kept, because
+# the install disclosure repeats it: this stores Claude Code's whole status
+# line payload, which alongside the two usage percentages carries the session
+# id, the working directory, the transcript path, the workspace directories
+# and the session's cost. The daemon reads only `rate_limits` out of it and
+# nothing else leaves this file -- but the file exists, so it is written
+# readable by this user alone (the umask below), and the disclosure says what
+# is in it rather than claiming it holds two numbers. POSIX sh has no JSON
+# parser, and a sed that tried to cut the payload down would be a second
+# thing to get wrong on every render.
 #
 # One file, not one per session. This briefly wrote a file per session id, to
 # support a per-conversation context meter and a model label -- both of which
@@ -15,8 +23,9 @@
 # agents running there are several contexts at different levels and no single
 # number is any of them. With them gone the two remaining figures are
 # account-wide and identical in every terminal, so the last render is as good
-# as any, and the shim is back to capturing no identifier at all.
+# as any.
 input=$(cat)
+umask 077
 
 
 # Atomic write: the daemon may read this file at any moment, and a half-written
@@ -34,8 +43,12 @@ input=$(cat)
 # point, so it looks like it suppresses the error but doesn't -- confirmed
 # leaking "Permission denied" on every render under both sh and dash before
 # this was reordered.
-printf '%s' "$input" 2>/dev/null > "$HOME/.clauge/statusline.json.tmp" &&
-  mv -f "$HOME/.clauge/statusline.json.tmp" "$HOME/.clauge/statusline.json" 2>/dev/null
+#
+# The temp name carries this process's pid: several terminals render at once,
+# and one shared temp name let a second render truncate the first's
+# half-written file before its rename.
+printf '%s' "$input" 2>/dev/null > "$HOME/.clauge/statusline.json.$$.tmp" &&
+  mv -f "$HOME/.clauge/statusline.json.$$.tmp" "$HOME/.clauge/statusline.json" 2>/dev/null
 
 # Delegate to the previously configured command, if any. Never fail the status
 # bar because Clauge had a problem.

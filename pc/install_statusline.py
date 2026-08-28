@@ -72,7 +72,7 @@ def _marker_path():
 
 def _read_marker() -> str:
     try:
-        with open(_marker_path()) as f:
+        with open(_marker_path(), encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return ""
@@ -80,7 +80,7 @@ def _read_marker() -> str:
 
 def _write_marker(command: str) -> None:
     os.makedirs(os.path.dirname(_marker_path()), exist_ok=True)
-    with open(_marker_path(), "w") as f:
+    with open(_marker_path(), "w", encoding="utf-8") as f:
         f.write(command + "\n")
 
 
@@ -177,14 +177,25 @@ def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> Non
     parent = os.path.dirname(settings_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(tmp, "w", encoding="utf-8") as f:
+    # Created 0600 and only widened afterwards, never the other way round.
+    #
+    # This file can legitimately hold env.ANTHROPIC_API_KEY or apiKeyHelper.
+    # open(tmp, "w") created it at the process umask -- typically 0644 -- and
+    # copymode narrowed it afterwards, which left the secrets world-readable
+    # for the length of the write, and permanently if the process died between
+    # the two (the daemon's drift watchdog runs this unattended). A stale temp
+    # from such a death is removed first, so O_EXCL cannot refuse forever.
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=indent)
         if trailing_newline:
             f.write("\n")
-    # open(tmp, "w") creates at the process umask (typically 0644), not the
-    # mode the original file had. This file can legitimately hold
-    # env.ANTHROPIC_API_KEY or apiKeyHelper, so a customer who chmod'd it
-    # 0600 must get 0600 back, not a silently widened copy.
+    # A customer who chmod'd it 0600 gets 0600 back; one who left it at the
+    # default gets the default back, not a silently narrowed copy either.
     if os.path.exists(settings_path):
         shutil.copymode(settings_path, tmp)
     os.replace(tmp, settings_path)
@@ -261,7 +272,7 @@ def install(settings_path: str, shim_path: str) -> str:
     # irreducible edge every exact-match scheme has) and is always chained.
     marker = _read_marker()
     if previous and not _is_ours(previous, new_command):
-        with open(_chain_path(), "w") as f:
+        with open(_chain_path(), "w", encoding="utf-8") as f:
             f.write(previous + "\n")
         chained = f"chained previous statusline: {previous}"
     elif not previous and not marker:
@@ -334,7 +345,7 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
 
     previous = ""
     try:
-        with open(_chain_path()) as f:
+        with open(_chain_path(), encoding="utf-8") as f:
             previous = f.read().strip()
     except OSError:
         pass
@@ -379,11 +390,12 @@ def _announce(settings_path: str, shim_path: str, undo_hint: str = None) -> None
     print("Clauge is about to change one setting in Claude Code.")
     print()
     print(f"  File     {settings_path}")
-    print("  Key      statusLine.command  (nothing else in the file is touched)")
+    print("  Key      statusLine.command  (plus the hooks entries listed above;")
+    print("           nothing else in the file is touched)")
     if previous and is_ours:
         chained = ""
         try:
-            with open(_chain_path()) as f:
+            with open(_chain_path(), encoding="utf-8") as f:
                 chained = f.read().strip()
         except OSError:
             pass

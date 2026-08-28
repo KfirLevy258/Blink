@@ -312,7 +312,7 @@ jobs:
           shellcheck --version
       # -s sh: these must be POSIX. Checking them as bash would let a bashism
       # through that breaks the /bin/sh they actually run under.
-      - run: shellcheck -s sh tools/clauge-statusline.sh tools/build_binary.sh tests/ci/*.sh
+      - run: shellcheck -s sh tools/clauge-statusline.sh tools/clauge-hook.sh tools/build_binary.sh tests/ci/*.sh
 
       # The firmware and the daemon ship from one tag. A disagreement here is
       # invisible everywhere else -- it builds, it tests, it runs -- and only
@@ -322,7 +322,7 @@ jobs:
         run: sh tests/ci/check_versions.sh
       - name: reject CRLF line endings
         run: |
-          if grep -rlU $'\r' tools/clauge-statusline.sh tools/build_binary.sh tests/ci/; then
+          if grep -rlU $'\r' tools/clauge-statusline.sh tools/clauge-hook.sh tools/build_binary.sh tests/ci/; then
             echo "CRLF found: a shim with CRLF fails with 'bad interpreter'" >&2
             exit 1
           fi

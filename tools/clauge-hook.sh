@@ -30,13 +30,33 @@ input=$(cat)
 # input on this path. The character class is the sanitiser: a value containing
 # a slash, a quote, a space or a NUL simply fails to match and falls through to
 # "unknown" -- there is no separate validation step that can be forgotten or
-# reordered. The {1,64} bound stops a pathological payload producing a filename
+# reordered. The {0,63} bound stops a pathological payload producing a filename
 # the filesystem rejects.
-sid=$(printf '%s' "$input" |
-	sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([0-9A-Za-z._-]\{1,64\}\)".*/\1/p' |
-	head -1)
+#
+# The FIRST character must be alphanumeric. The class used to admit any of
+# `._-` anywhere, which let the literal names `.` and `..` through -- and
+# `$DIR/..` is ~/.clauge itself, where the SubagentStart/Stop branches below
+# would then truncate or delete whichever file the agent id named. Reproduced
+# against the signing key before this was tightened.
+#
+# And the FIRST occurrence, not the last. The pattern's leading `.*` was
+# greedy, so on PreToolUse/PostToolUse it matched the last "session_id" on the
+# line -- which is inside tool_input whenever a tool's own arguments carry one
+# (MCP tools commonly do). A tool argument then became a filename here and the
+# real session's slot stopped updating. Claude Code puts the top-level id
+# first, so: break the line before every occurrence and take the second line,
+# which begins with the first one.
+_ident() {
+	sed 's/"'"$1"'"/\
+&/g' |
+		sed -n '2{s/^"'"$1"'"[[:space:]]*:[[:space:]]*"\([0-9A-Za-z][0-9A-Za-z._-]\{0,63\}\)".*/\1/p;}'
+}
+sid=$(printf '%s' "$input" | _ident session_id)
 [ -n "$sid" ] || sid=unknown
 
+# Private to the user. These files name the sessions someone has open, and
+# the default umask would leave them readable by every account on the machine.
+umask 077
 DIR="$HOME/.clauge/state"
 [ -d "$DIR" ] || mkdir -p "$DIR" 2>/dev/null
 
@@ -45,7 +65,7 @@ SessionEnd)
 	# The session is over: take its whole directory with it, agents and all.
 	# rm -rf on a path built from the sanitised id above; a traversal cannot
 	# reach here because the pattern would not have matched.
-	rm -rf "$DIR/$sid" 2>/dev/null
+	rm -rf "${DIR:?}/$sid" 2>/dev/null
 	rm -f "$DIR/$sid.state" 2>/dev/null
 	;;
 SubagentStart|SubagentStop)
@@ -54,9 +74,7 @@ SubagentStart|SubagentStop)
 	# two agents starting at once cannot race on a shared counter, and a
 	# stop removes precisely the agent that stopped rather than
 	# decrementing something and hoping.
-	aid=$(printf '%s' "$input" |
-		sed -n 's/.*"agent_id"[[:space:]]*:[[:space:]]*"\([0-9A-Za-z._-]\{1,64\}\)".*/\1/p' |
-		head -1)
+	aid=$(printf '%s' "$input" | _ident agent_id)
 	[ -n "$aid" ] || aid=unknown
 	[ -d "$DIR/$sid" ] || mkdir -p "$DIR/$sid" 2>/dev/null
 	if [ "$event" = "SubagentStart" ]; then
@@ -72,9 +90,15 @@ SubagentStart|SubagentStop)
 	# itself fails, the shell reports it using whatever stderr was in effect
 	# when the '>' was processed, so a trailing redirect looks like it
 	# suppresses the error and does not.
+	#
+	# The temp name carries this process's pid. Claude Code runs parallel
+	# tool calls, so two of these can be writing the same session's slot at
+	# once; with one shared temp name the second truncated the first's
+	# half-written file and one of them renamed a torn one into place --
+	# the exact malformed state the rename exists to prevent.
 	printf '{"event":"%s","t":%s}' "$event" "$(date +%s)" 2>/dev/null \
-		> "$DIR/$sid.state.tmp" &&
-		mv -f "$DIR/$sid.state.tmp" "$DIR/$sid.state" 2>/dev/null
+		> "$DIR/$sid.state.$$.tmp" &&
+		mv -f "$DIR/$sid.state.$$.tmp" "$DIR/$sid.state" 2>/dev/null
 	;;
 esac
 

@@ -102,12 +102,58 @@ ok "SessionEnd removes its own session and only its own"
 #    place attacker-shaped input reaches a path. The character class in the
 #    extraction pattern IS the sanitiser -- a value with a slash simply fails
 #    to match and falls through to "unknown".
-CANARY="$WORK/canary"
-printf '{"session_id":"../../../../%s/pwned"}' "${CANARY#/}" |
+#    Two levels up from $DIR is $HOME, so this is the file a successful
+#    traversal would create. The old canary appended an absolute path to
+#    four `../` and could never have matched anything.
+printf '{"session_id":"../../pwned"}' |
 	$SH "$SHIM" PreToolUse >/dev/null 2>&1
-[ ! -e "$CANARY/pwned.state" ] || fail "PATH TRAVERSAL: wrote outside the state dir"
+[ ! -e "$HOME/pwned.state" ] || fail "PATH TRAVERSAL: wrote outside the state dir"
 [ -f "$DIR/unknown.state" ] || fail "traversal attempt did not fall back to 'unknown'"
 ok "a traversing session id cannot escape the state directory"
+
+# 8b. The bare names `.` and `..` -- no slash, so the old class admitted them,
+#     and `$DIR/..` is ~/.clauge itself. With an agent id naming a file there,
+#     SubagentStart truncated it and SubagentStop deleted it. The signing keys
+#     live in that directory.
+printf 'keep me' > "$HOME/.clauge/precious"
+for bad in '.' '..'; do
+	printf '{"session_id":"%s","agent_id":"precious"}' "$bad" |
+		$SH "$SHIM" SubagentStart >/dev/null 2>&1
+	printf '{"session_id":"%s","agent_id":"precious"}' "$bad" |
+		$SH "$SHIM" SubagentStop >/dev/null 2>&1
+	printf '{"session_id":"%s"}' "$bad" | $SH "$SHIM" SessionEnd >/dev/null 2>&1
+done
+[ "$(cat "$HOME/.clauge/precious")" = "keep me" ] ||
+	fail "a dot session id reached a file outside the state dir"
+[ -d "$DIR" ] || fail "a dot session id removed the state directory"
+# ...and the same via the AGENT id, which reaches an rm -f of its own.
+printf '{"session_id":"abc-123","agent_id":".."}' |
+	$SH "$SHIM" SubagentStop >/dev/null 2>&1
+printf '{"session_id":"abc-123","agent_id":"../precious"}' |
+	$SH "$SHIM" SubagentStop >/dev/null 2>&1
+[ "$(cat "$HOME/.clauge/precious")" = "keep me" ] ||
+	fail "a traversing agent id reached a file outside the session dir"
+ok "dot and dot-dot ids cannot reach ~/.clauge"
+
+# 8c. The top-level session id wins over one inside a tool's arguments.
+#     PreToolUse payloads carry tool_input verbatim, and tools have their own
+#     session_id fields; the greedy match used to take the LAST one.
+printf '{"session_id":"outer-1","tool_input":{"session_id":"inner-9"}}' |
+	$SH "$SHIM" PreToolUse >/dev/null 2>&1
+[ -f "$DIR/outer-1.state" ] || fail "did not take the top-level session id"
+[ ! -e "$DIR/inner-9.state" ] || fail "took a session id out of tool_input"
+ok "the top-level session id is used, not one inside tool arguments"
+
+# 8d. Private to the user: the state files name the sessions someone has open.
+#     find's -perm with octal bits is portable across GNU and BSD; `ls -l`
+#     column parsing is not.
+printf '{"session_id":"priv-1"}' | $SH "$SHIM" PreToolUse >/dev/null 2>&1
+for p in "$DIR" "$DIR/priv-1.state"; do
+	[ -e "$p" ] || fail "expected $p to exist"
+	[ -z "$(find "$p" -prune \( -perm -040 -o -perm -004 \) -print)" ] ||
+		fail "readable by others: $(ls -ld "$p")"
+done
+ok "state files are readable by this user alone"
 
 # 9. Quote and command injection in the id.
 rm -f "$DIR/unknown.state"
@@ -117,8 +163,8 @@ printf '{"session_id":"a\\"; touch %s/owned; echo \\"b"}' "$WORK" |
 ok "a quoting session id cannot run a command"
 
 # 10. Exit status is always 0 -- a non-zero exit is a signal to Claude Code.
-printf '%s' "$PAYLOAD" | $SH "$SHIM" Stop >/dev/null 2>&1
-[ $? -eq 0 ] || fail "non-zero exit on a normal run"
+printf '%s' "$PAYLOAD" | $SH "$SHIM" Stop >/dev/null 2>&1 ||
+	fail "non-zero exit on a normal run"
 ok "exits 0"
 
 # 11. No argument at all. Claude Code always passes one, but a hand-edited

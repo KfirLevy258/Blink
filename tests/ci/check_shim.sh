@@ -49,7 +49,10 @@ ok "captures the payload, prints nothing, says nothing"
 
 # 2. No temp file left behind -- the daemon globs nothing, but a stray
 #    statusline.json.tmp means the atomic rename did not happen.
-[ ! -e "$HOME/.clauge/statusline.json.tmp" ] || fail "left a .tmp file behind"
+#    The name carries the writer's pid, so this is a glob, not one path.
+for t in "$HOME/.clauge"/statusline.json.*tmp; do
+	[ ! -e "$t" ] || fail "left a temp file behind: $t"
+done
 ok "atomic write leaves no temp file"
 
 # 3. Chain: their command runs, gets the SAME input, and its output passes

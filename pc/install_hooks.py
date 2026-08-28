@@ -73,7 +73,7 @@ def _marker_path():
 
 def _read_marker() -> set:
     try:
-        with open(_marker_path()) as f:
+        with open(_marker_path(), encoding="utf-8") as f:
             return {ln.strip() for ln in f if ln.strip()}
     except OSError:
         return set()
@@ -81,7 +81,10 @@ def _read_marker() -> set:
 
 def _write_marker(commands) -> None:
     os.makedirs(os.path.dirname(_marker_path()), exist_ok=True)
-    with open(_marker_path(), "w") as f:
+    # encoding= because the commands carry the shim's path, which carries the
+    # user's home directory -- and a Windows locale cannot encode every name a
+    # home directory can have. _load() in install_statusline says the same.
+    with open(_marker_path(), "w", encoding="utf-8") as f:
         for c in sorted(commands):
             f.write(c + "\n")
 

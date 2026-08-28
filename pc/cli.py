@@ -18,6 +18,7 @@ because it unpacks itself first -- that delay would land in the customer's
 prompt. A few lines of sh start in single-digit milliseconds.
 """
 import argparse
+import glob
 import os
 import shutil
 import subprocess
@@ -131,7 +132,11 @@ def _shim_source(name: str = "clauge-statusline.sh") -> str:
 
 
 def _write_shim(path: str, name: str) -> None:
-    with open(path, "w") as f:
+    # newline="\n", or Windows writes the shim with CRLF and Git Bash then
+    # fails on `case ... in\r` on every status line render and every tool
+    # call. The CI CRLF check only ever looked at the files in the repository,
+    # never at the copy this function installs.
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(_shim_source(name))
     os.chmod(path, 0o755)
 
@@ -765,8 +770,11 @@ def _announce():
     print("             can be deleted when this finishes.")
     print(f"  Creates    {shim_path()}")
     print("             the small script Claude Code runs to hand over the")
-    print("             usage figures. It records nothing else -- no session")
-    print("             id, no conversation, no file paths.")
+    print("             usage figures. It keeps the last status line payload")
+    print("             Claude Code sent, which also names the session, the")
+    print("             working directory and the transcript file. Only the")
+    print("             usage figures are read out of it, and nothing in it")
+    print("             leaves this machine. It is readable by you alone.")
     print(f"  Creates    {hook_shim_path()}")
     print("             a second small script, run when Claude Code starts and")
     print("             finishes work, so the panel can show whether it is busy.")
@@ -803,9 +811,11 @@ def _announce():
         print(f"  Creates    {created}")
         print("             so the bridge starts when you log in.")
     print()
-    print("  It reads or stores nothing else -- no credential, no token, no")
-    print("  account data. The usage figures come from Claude Code, which has")
-    print("  already worked them out.")
+    print("  It reads no credential and no token, and sends nothing anywhere.")
+    print("  The usage figures come from Claude Code, Claude Desktop's usage")
+    print("  cache, or the Codex session log -- each of which has already")
+    print("  worked them out. From the Codex log it keeps only the rate-limit")
+    print("  line, never the conversation.")
     print()
     print(f"  To undo all of it:  {installed_bin()} uninstall")
     print()
@@ -847,6 +857,15 @@ def cmd_install(_args) -> int:
 
     print("[2/4] Status line ... ", end="", flush=True)
     os.makedirs(clauge_home(), exist_ok=True)
+    # Private to the user. The shims write the status line payload -- which
+    # names the working directory and the session -- and the per-session
+    # state files in here. Both shims create with umask 077, but a directory
+    # from an earlier install was made at the default umask, so this
+    # tightens it once rather than leaving it to the next mkdir.
+    try:
+        os.chmod(clauge_home(), 0o700)
+    except OSError:
+        pass
     _write_shim(shim_path(), "clauge-statusline.sh")
     install_statusline._announce(settings_path(), shim_path(),
                                  undo_hint=f"{installed_bin()} uninstall")
@@ -914,6 +933,8 @@ def cmd_uninstall(_args) -> int:
     for p in (shim_path(), hook_shim_path(),
               os.path.join(clauge_home(), "statusline.json"),
               os.path.join(clauge_home(), "statusline.json.tmp"),
+              # Pid-scoped temp names, from a render interrupted mid-write.
+              *glob.glob(os.path.join(clauge_home(), "statusline.json.*.tmp")),
               os.path.join(clauge_home(), "state.json"),
               os.path.join(clauge_home(), "state.json.tmp"),
               os.path.join(clauge_home(), "pending_fw.json")):
