@@ -27,5 +27,5 @@ docs/superpowers/
 # The running daemon's pid file. It was TRACKED, so every session with the
 # service up left `git status` dirty and the number went into commits as
 # whatever pid happened to be running on the author's machine -- which is not
-# a fact about the project. `clauge` writes it next to itself at runtime.
+# a fact about the project. `blink` writes it next to itself at runtime.
 bridge.pid

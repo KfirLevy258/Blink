@@ -142,7 +142,7 @@ void ui_setup_show(void)
 
 	brand = lv_label_create(scr);
 
-	lv_label_set_text(brand, "CLAUGE");
+	lv_label_set_text(brand, "BLINK");
 	lv_obj_set_style_text_color(brand, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(brand, 2, 0);
 	lv_obj_align(brand, LV_ALIGN_TOP_LEFT, 16, 14);

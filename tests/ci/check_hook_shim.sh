@@ -1,5 +1,5 @@
 #!/bin/sh
-# Exercise tools/clauge-hook.sh under one specific shell.
+# Exercise tools/blink-hook.sh under one specific shell.
 #
 #   tests/ci/check_hook_shim.sh [dash|busybox|bash|sh]
 #
@@ -19,8 +19,8 @@ set -eu
 
 WHICH="${1:-sh}"
 ci_label "$WHICH"
-SHIM_SRC="$ROOT/tools/clauge-hook.sh"
-WORK="${TMPDIR:-/tmp}/clauge-hook-$WHICH"
+SHIM_SRC="$ROOT/tools/blink-hook.sh"
+WORK="${TMPDIR:-/tmp}/blink-hook-$WHICH"
 
 case "$WHICH" in
 dash) SH="dash" ;;
@@ -36,9 +36,9 @@ HOME="$WORK/home"
 mkdir -p "$HOME"
 export HOME
 
-SHIM="$HOME/clauge-hook.sh"
+SHIM="$HOME/blink-hook.sh"
 cp "$SHIM_SRC" "$SHIM"
-DIR="$HOME/.clauge/state"
+DIR="$HOME/.blink/state"
 
 # A realistic payload, carrying several fields we must be seen NOT to keep.
 PAYLOAD='{"session_id":"abc-123","transcript_path":"/x/secret.jsonl","cwd":"/home/secret/proj","tool_name":"Bash","hook_event_name":"PreToolUse","last_assistant_message":"the secret is swordfish"}'
@@ -112,10 +112,10 @@ printf '{"session_id":"../../pwned"}' |
 ok "a traversing session id cannot escape the state directory"
 
 # 8b. The bare names `.` and `..` -- no slash, so the old class admitted them,
-#     and `$DIR/..` is ~/.clauge itself. With an agent id naming a file there,
+#     and `$DIR/..` is ~/.blink itself. With an agent id naming a file there,
 #     SubagentStart truncated it and SubagentStop deleted it. The signing keys
 #     live in that directory.
-printf 'keep me' > "$HOME/.clauge/precious"
+printf 'keep me' > "$HOME/.blink/precious"
 for bad in '.' '..'; do
 	printf '{"session_id":"%s","agent_id":"precious"}' "$bad" |
 		$SH "$SHIM" SubagentStart >/dev/null 2>&1
@@ -123,7 +123,7 @@ for bad in '.' '..'; do
 		$SH "$SHIM" SubagentStop >/dev/null 2>&1
 	printf '{"session_id":"%s"}' "$bad" | $SH "$SHIM" SessionEnd >/dev/null 2>&1
 done
-[ "$(cat "$HOME/.clauge/precious")" = "keep me" ] ||
+[ "$(cat "$HOME/.blink/precious")" = "keep me" ] ||
 	fail "a dot session id reached a file outside the state dir"
 [ -d "$DIR" ] || fail "a dot session id removed the state directory"
 # ...and the same via the AGENT id, which reaches an rm -f of its own.
@@ -131,9 +131,9 @@ printf '{"session_id":"abc-123","agent_id":".."}' |
 	$SH "$SHIM" SubagentStop >/dev/null 2>&1
 printf '{"session_id":"abc-123","agent_id":"../precious"}' |
 	$SH "$SHIM" SubagentStop >/dev/null 2>&1
-[ "$(cat "$HOME/.clauge/precious")" = "keep me" ] ||
+[ "$(cat "$HOME/.blink/precious")" = "keep me" ] ||
 	fail "a traversing agent id reached a file outside the session dir"
-ok "dot and dot-dot ids cannot reach ~/.clauge"
+ok "dot and dot-dot ids cannot reach ~/.blink"
 
 # 8c. The top-level session id wins over one inside a tool's arguments.
 #     PreToolUse payloads carry tool_input verbatim, and tools have their own

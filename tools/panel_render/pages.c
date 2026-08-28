@@ -244,7 +244,7 @@ static void provider_page(lv_obj_t *s, const char *who, const char *clock,
 static void sessions_page(lv_obj_t *s, const char *clock)
 {
 	struct { const char *n; int ctx; } r[] = {
-		{ "LiveClaudeUi", 62 }, { "clauge-web", 31 }, { "notes", 8 },
+		{ "LiveClaudeUi", 62 }, { "blink-web", 31 }, { "notes", 8 },
 	};
 
 	header(s, "SESSIONS", clock);

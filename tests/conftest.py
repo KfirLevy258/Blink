@@ -35,4 +35,4 @@ def _sandboxed_home(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_real_login_service(monkeypatch):
     """Nothing in a unit test may register or remove a real login service."""
-    monkeypatch.setenv("CLAUGE_SKIP_SERVICE", "1")
+    monkeypatch.setenv("BLINK_SKIP_SERVICE", "1")

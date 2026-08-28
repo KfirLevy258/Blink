@@ -6,7 +6,7 @@ import pytest
 from pc import install_hooks as ih
 from pc.install_statusline import SettingsUnreadable
 
-SHIM = "/opt/clauge/clauge-hook.sh"
+SHIM = "/opt/blink/blink-hook.sh"
 
 
 @pytest.fixture
@@ -108,13 +108,13 @@ def test_uninstall_leaves_no_empty_scaffolding(settings):
 
 
 def test_uninstall_on_a_clean_file_is_a_no_op(settings):
-    assert "No Clauge state hooks" in ih.uninstall(settings, SHIM)
+    assert "No Blink state hooks" in ih.uninstall(settings, SHIM)
 
 
 def test_uninstall_works_from_the_marker_after_the_shim_moved(settings):
     """An update moves the binary; uninstall must still recognise its own."""
     ih.install(settings, SHIM)
-    assert "removed" in ih.uninstall(settings, "/somewhere/else/clauge-hook.sh")
+    assert "removed" in ih.uninstall(settings, "/somewhere/else/blink-hook.sh")
     assert _commands(settings, "PreToolUse") == []
 
 
@@ -150,8 +150,8 @@ def test_unrelated_keys_are_never_rewritten(settings):
 
 def test_a_moved_shim_repoints_every_hook(tmp_path):
     p = str(tmp_path / "settings.json")
-    old_shim = str(tmp_path / "old" / "clauge-hook.sh")
-    new_shim = str(tmp_path / "new" / "clauge-hook.sh")
+    old_shim = str(tmp_path / "old" / "blink-hook.sh")
+    new_shim = str(tmp_path / "new" / "blink-hook.sh")
 
     ih.install(p, old_shim)
     first = json.loads(open(p).read())["hooks"]

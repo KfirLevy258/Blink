@@ -8,7 +8,7 @@
  *
  * LVGL's own detector cannot work on this hardware, and the reason is not a
  * threshold that needs tuning. Measured on the board 2026-08-27 with the
- * touch tracer (CONFIG_CLAUGE_TOUCH_TRACE), five deliberate vertical swipes
+ * touch tracer (CONFIG_BLINK_TOUCH_TRACE), five deliberate vertical swipes
  * produced THIRTY separate press-release cycles:
  *
  *   press durations, ms: 17 26 29 38 62 64 91 98 100 104 105 128 138 139

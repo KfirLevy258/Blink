@@ -15,7 +15,7 @@ for and where this departs from it.
   Claude Code            Claude Desktop         Codex
   status line            plan-usage-history     rollout log
        |                        |                      |
-  ~/.clauge/              app's own cache        ~/.codex/sessions/
+  ~/.blink/              app's own cache        ~/.codex/sessions/
   statusline.json               |                      |
        |                        |                      |
   ClaudeCliProvider   ClaudeDesktopProvider     CodexCliProvider
@@ -302,7 +302,7 @@ board is never given an age for a page it has not been told exists.
 Worth reading before touching `firmware/src/ui_swipe.c`, because every
 plausible-sounding fix in this area has already been tried and measured.
 
-**A sliding finger loses contact.** Traced with `CONFIG_CLAUGE_TOUCH_TRACE`:
+**A sliding finger loses contact.** Traced with `CONFIG_BLINK_TOUCH_TRACE`:
 five deliberate swipes produced **thirty separate press-release cycles**, press
 durations 17-140 ms, inter-report gaps running to 90 ms at the top decile and
 779 ms at worst. The xpt2046 driver reports a release the first time it reads
@@ -431,8 +431,8 @@ ignore before the day it is right.
 ### On disk
 
 ```
-~/.clauge/state/<session_id>.state      one JSON slot, newest event wins
-~/.clauge/state/<session_id>/<agent_id> one empty file per live agent
+~/.blink/state/<session_id>.state      one JSON slot, newest event wins
+~/.blink/state/<session_id>/<agent_id> one empty file per live agent
 ```
 
 One file per **session** because a single global slot silently misreports the

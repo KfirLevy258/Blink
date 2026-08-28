@@ -30,8 +30,8 @@ definition the absence of one. It is inferred from silence.
 
 ON DISK
 -------
-    ~/.clauge/state/<session_id>.state   one JSON slot, newest event wins
-    ~/.clauge/state/<session_id>/<agent_id>   one empty file per live agent
+    ~/.blink/state/<session_id>.state   one JSON slot, newest event wins
+    ~/.blink/state/<session_id>/<agent_id>   one empty file per live agent
 
 One file per session because a single global slot silently misreports the
 moment a second terminal exists. One file per AGENT because that makes the
@@ -51,7 +51,7 @@ SRC_ID = "cli"
 # Expanded when a provider is built, not here: a module-level expanduser is
 # evaluated at import, before a test can move HOME, and this provider DELETES
 # files under it. See tests/conftest.py and the note that names this constant.
-STATE_DIR = "~/.clauge/state"
+STATE_DIR = "~/.blink/state"
 
 # How long a turn may go silent before the panel calls it stuck.
 #

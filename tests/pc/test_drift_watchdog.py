@@ -2,7 +2,7 @@
 
 That distinction is the whole feature. Anything can rewrite settings.json and
 drop our command silently -- the symptom is a panel that stops updating while
-the daemon reports success. But a user who ran `clauge uninstall` has said
+the daemon reports success. But a user who ran `blink uninstall` has said
 something, and a program that puts its hook back after being told to go away
 is not self-healing, it is malware-shaped.
 """
@@ -13,7 +13,7 @@ import pytest
 
 from pc import install_statusline as isl
 
-SHIM = "/opt/clauge/clauge-statusline.sh"
+SHIM = "/opt/blink/blink-statusline.sh"
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ def test_a_replacement_is_chained_not_clobbered(settings):
 
 def test_a_moved_shim_is_repointed(settings):
     isl.install(settings, SHIM)
-    moved = "/opt/clauge-v2/clauge-statusline.sh"
+    moved = "/opt/blink-v2/blink-statusline.sh"
     msg = isl.drift_check(settings, moved)
     assert "old shim path" in msg
     assert _current(settings) == isl.statusline_command(moved)

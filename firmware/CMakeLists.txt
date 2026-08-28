@@ -29,10 +29,10 @@ target_sources(app PRIVATE
 )
 
 # Standalone WiFi mode only. Not stubbed and not dead-stripped -- with
-# CONFIG_CLAUGE_WIFI_MODE off these are never handed to the compiler, so the
+# CONFIG_BLINK_WIFI_MODE off these are never handed to the compiler, so the
 # OAuth client id, the spoofed User-Agent and the token writer are absent from
 # the image rather than merely unreachable in it. See firmware/Kconfig.
-target_sources_ifdef(CONFIG_CLAUGE_WIFI_MODE app PRIVATE
+target_sources_ifdef(CONFIG_BLINK_WIFI_MODE app PRIVATE
 	src/net_wifi.c
 	src/portal.c
 	src/ui_setup.c
@@ -43,6 +43,6 @@ target_sources_ifdef(CONFIG_CLAUGE_WIFI_MODE app PRIVATE
 	src/tz_fetch.c
 )
 
-# Diagnostic only; CONFIG_CLAUGE_TOUCH_TRACE is off in release builds.
-target_sources_ifdef(CONFIG_CLAUGE_TOUCH_TRACE app PRIVATE src/touch_trace.c)
+# Diagnostic only; CONFIG_BLINK_TOUCH_TRACE is off in release builds.
+target_sources_ifdef(CONFIG_BLINK_TOUCH_TRACE app PRIVATE src/touch_trace.c)
 

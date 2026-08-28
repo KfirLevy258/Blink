@@ -18,7 +18,7 @@
 #include "version.h"
 #include "cfg_store.h"
 
-#define PROTO_VERSION CLAUGE_PROTO_VERSION
+#define PROTO_VERSION BLINK_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
 /*
  * The daemon answers every ping with a pong, so silence means it is genuinely
@@ -133,7 +133,7 @@ static void send_hello(void)
 	char buf[160];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
-		 "\"board_id\":\"%s\",\"fw\":\"" CLAUGE_FW_VERSION "\","
+		 "\"board_id\":\"%s\",\"fw\":\"" BLINK_FW_VERSION "\","
 		 "\"reset\":\"0x%x\"}",
 		 PROTO_VERSION, idhex, cause);
 	emit(buf);
@@ -200,7 +200,7 @@ void proto_ota_check(void)
 	ota_ui_set(OTA_UI_CHECKING, NULL, 0);
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"ota_query\",\"v\":%d,\"cur\":\"%s\"}",
-		 PROTO_VERSION, CLAUGE_FW_VERSION);
+		 PROTO_VERSION, BLINK_FW_VERSION);
 	emit(buf);
 }
 
@@ -472,7 +472,7 @@ static void dispatch(const char *json)
 		       host_ver[0] ? host_ver : "?", host_proto);
 		/*
 		 * Answer. The daemon sends `welcome` as a question -- "is a
-		 * Clauge board on this port?" -- and decides whether to pull
+		 * Blink board on this port?" -- and decides whether to pull
 		 * the reset line on whether anything comes back within 1.5 s
 		 * (claude_usage_bridge.probe_is_our_board). This handler used
 		 * to reply with nothing: the ota_query it was credited with
@@ -621,7 +621,7 @@ bool proto_host_outdated(void)
 	 * usually because the app on the computer has no way to update itself
 	 * that the customer has noticed. Usage keeps flowing either way. */
 	return host_seen && host_ver[0] &&
-	       ota_version_newer(CLAUGE_FW_VERSION, host_ver);
+	       ota_version_newer(BLINK_FW_VERSION, host_ver);
 }
 
 bool proto_host_seen(void)

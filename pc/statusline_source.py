@@ -20,7 +20,7 @@ from pc.providers import base
 PROVIDER_ID = "claude"
 SRC_ID = "cli"
 
-PAYLOAD_PATH = os.path.expanduser("~/.clauge/statusline.json")
+PAYLOAD_PATH = os.path.expanduser("~/.blink/statusline.json")
 # How old the payload may get before we stop vouching for it.
 #
 # This was 120 s, and 120 s was wrong in kind, not just in value. Claude Code

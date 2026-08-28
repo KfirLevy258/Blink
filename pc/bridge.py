@@ -81,7 +81,7 @@ class Bridge:
         panel after every service restart. Measured doing exactly that before
         this existed.
         """
-        self._write(protocol.welcome("clauge-bridge", self._app_ver))
+        self._write(protocol.welcome("blink-bridge", self._app_ver))
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None

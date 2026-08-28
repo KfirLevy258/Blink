@@ -29,7 +29,7 @@ CC="${CC:-cc}"
 	exit 1
 }
 
-BUILD="${TMPDIR:-/tmp}/clauge-panel-render"
+BUILD="${TMPDIR:-/tmp}/blink-panel-render"
 mkdir -p "$BUILD" "$OUT"
 find "$LVGL_DIR/src" -name '*.c' > "$BUILD/srcs.txt"
 

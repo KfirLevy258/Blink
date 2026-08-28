@@ -21,7 +21,7 @@ set -eu
 . "$(dirname -- "$0")/lib.sh"
 ci_binary
 
-WORK="${TMPDIR:-/tmp}/clauge-claude-version"
+WORK="${TMPDIR:-/tmp}/blink-claude-version"
 
 
 command -v claude >/dev/null 2>&1 || fail "no claude on PATH"
@@ -91,7 +91,7 @@ python3 - "$HOME/.claude/settings.json" <<'EOF' || exit 1
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["model"] == "opus", "unrelated key lost"
-assert d["statusLine"]["command"].endswith("clauge-statusline.sh"), d["statusLine"]
+assert d["statusLine"]["command"].endswith("blink-statusline.sh"), d["statusLine"]
 EOF
 ok "settings.json is valid JSON with our key and their keys intact"
 

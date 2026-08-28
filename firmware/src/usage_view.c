@@ -220,7 +220,7 @@ static enum usage_status last_status = USAGE_STATUS_DISCONNECTED;
  * with no route back that anyone would find. Compiled out rather than
  * disabled: a control that cannot do anything is worse than no control.
  */
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 #define HAVE_PER_MODEL 1
 
 /* Long-press peek: a card of per-model weekly numbers that STAYS up -- tap

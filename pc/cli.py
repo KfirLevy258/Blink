@@ -2,8 +2,8 @@
 
 A customer downloads a single file and runs it. There is no Python to install,
 no virtualenv to build, no repository to clone, and nothing left behind that
-they have to keep in place -- `clauge install` copies the binary into
-~/.clauge/bin and points the login service at that copy, so the download is
+they have to keep in place -- `blink install` copies the binary into
+~/.blink/bin and points the login service at that copy, so the download is
 disposable the moment it finishes.
 
 This replaces install.sh. The shell version needed Python 3.9+ on the machine,
@@ -33,44 +33,44 @@ from pc.version import RELEASE_VERSION
 # meant every path was fixed by whatever HOME happened to be when the module
 # loaded -- untestable without a subprocess, and quietly wrong for any caller
 # that changes HOME.
-LABEL = "com.clauge.bridge"
+LABEL = "com.blink.bridge"
 
 
 def _home():
     return os.path.expanduser("~")
 
 
-def clauge_home():
-    return os.path.join(_home(), ".clauge")
+def blink_home():
+    return os.path.join(_home(), ".blink")
 
 
 def bin_dir():
-    return os.path.join(clauge_home(), "bin")
+    return os.path.join(blink_home(), "bin")
 
 
 def installed_bin():
     # .exe on Windows: without the extension the copy is not executable, and
     # the Scheduled Task would register a path Windows refuses to launch.
-    name = "clauge.exe" if sys.platform == "win32" else "clauge"
+    name = "blink.exe" if sys.platform == "win32" else "blink"
     return os.path.join(bin_dir(), name)
 
 
 def shim_path():
-    return os.path.join(clauge_home(), "clauge-statusline.sh")
+    return os.path.join(blink_home(), "blink-statusline.sh")
 
 
 def hook_shim_path():
-    return os.path.join(clauge_home(), "clauge-hook.sh")
+    return os.path.join(blink_home(), "blink-hook.sh")
 
 
 def log_path():
-    return os.path.join(clauge_home(), "bridge.log")
+    return os.path.join(blink_home(), "bridge.log")
 
 
 def pid_path():
     """Where the running daemon records its pid: beside its own binary.
 
-    Not in ~/.clauge. A login service runs in the user's environment rather
+    Not in ~/.blink. A login service runs in the user's environment rather
     than the one that registered it, so the two can disagree about what ~ is --
     and when they do, the pid lands where nothing will look for it.
     """
@@ -87,12 +87,12 @@ def plist_path():
 
 def unit_path():
     return os.path.join(_home(), ".config", "systemd", "user",
-                        "clauge-bridge.service")
+                        "blink-bridge.service")
 
 
 # Windows has no launchd and no systemd. A Scheduled Task with an at-logon
 # trigger is the equivalent that needs no admin rights and no service wrapper.
-TASK_NAME = "Clauge bridge"
+TASK_NAME = "Blink bridge"
 
 # The oldest Claude Code that carries usage figures in its status line payload.
 # 2.1.0 does not carry rate_limits at all; 2.1.100 does. Below this every step
@@ -104,7 +104,7 @@ MIN_CLAUDE = (2, 1, 100)
 # $HOME, so without this a test under a temporary HOME still boots out the
 # real agent of whoever is logged in.
 def _skip_service():
-    return os.environ.get("CLAUGE_SKIP_SERVICE") == "1"
+    return os.environ.get("BLINK_SKIP_SERVICE") == "1"
 
 
 def _frozen() -> bool:
@@ -116,7 +116,7 @@ def _self_path() -> str:
     return sys.executable if _frozen() else os.path.abspath(sys.argv[0])
 
 
-def _shim_source(name: str = "clauge-statusline.sh") -> str:
+def _shim_source(name: str = "blink-statusline.sh") -> str:
     """A shim's text, from the bundle when frozen, the tree when not.
 
     One source of truth either way -- tools/ is what the build embeds, so the
@@ -232,7 +232,7 @@ def _note_if_no_claude_code():
         # No source exists. This is not a reduced panel, it is an empty
         # one, and saying anything softer would be misleading.
         print("  !! Nothing on this machine reports usage yet.")
-        print("     Clauge reads figures that Claude Code, Claude Desktop or")
+        print("     Blink reads figures that Claude Code, Claude Desktop or")
         print("     Codex have already worked out. With none of them installed")
         print("     the panel will connect and then sit blank.")
         print()
@@ -272,7 +272,7 @@ def _warn_if_claude_too_old():
     # redo; refusing would make them run this again for no reason.
     m = ".".join(str(n) for n in MIN_CLAUDE)
     print()
-    print(f"  !! Your Claude Code is {text}, and Clauge needs {m} or newer.")
+    print(f"  !! Your Claude Code is {text}, and Blink needs {m} or newer.")
     print("     Older versions do not put the usage figures in the status line")
     print("     at all, so the panel will sit blank until you update:")
     print()
@@ -314,7 +314,7 @@ def _systemd_exec() -> str:
     systemd splits ExecStart on whitespace, so a bare " ".join() broke on any
     space in the interpreter path, the checkout path or $HOME: with a spaced
     home the unit resolved the executable as the first fragment and failed
-    with "Failed to locate executable", while `clauge install` still printed
+    with "Failed to locate executable", while `blink install` still printed
     "running (systemd)". The launchd and schtasks backends already quote
     per-argument; systemd was the only one that did not, and the CI scenario
     that uses a spaced home asserts only that the unit FILE exists.
@@ -328,7 +328,7 @@ def _systemd_exec() -> str:
 
 
 _UNIT_TEMPLATE = """[Unit]
-Description=Clauge USB bridge
+Description=Blink USB bridge
 
 [Service]
 ExecStart={command}
@@ -348,25 +348,25 @@ def _xml_escape(s: str) -> str:
 def _service_command():
     """What the login service should run.
 
-    Frozen, that is the copy in ~/.clauge/bin. From a checkout it is this
+    Frozen, that is the copy in ~/.blink/bin. From a checkout it is this
     interpreter and the repo's entry SCRIPT -- not `-m pc.cli`.
 
     `-m` was wrong and silently so. A login service starts with no working
     directory of ours (launchd uses /), so `python -m pc.cli` could not import
     `pc` at all: the agent crash-looped on ModuleNotFoundError every
     ThrottleInterval, forever, writing the same line to bridge.log -- while
-    `clauge status` reported "registered with launchd", because registration
+    `blink status` reported "registered with launchd", because registration
     is not health. Found on the author's own machine 2026-08-28, where it had
     been failing unnoticed.
 
     Running the script BY PATH fixes it without a WorkingDirectory or a
     PYTHONPATH: Python puts a script's own directory on sys.path, and
-    clauge_main.py sits at the repo root next to `pc/`.
+    blink_main.py sits at the repo root next to `pc/`.
     """
     if _frozen():
         return [installed_bin(), "run"]
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return [sys.executable, os.path.join(repo, "clauge_main.py"), "run"]
+    return [sys.executable, os.path.join(repo, "blink_main.py"), "run"]
 
 
 class _Backend:
@@ -460,7 +460,7 @@ class _LaunchdBackend(_Backend):
 
         This used to answer "registered with launchd" for a job that had
         crash-looped 59 times, which is how a dead daemon went unnoticed on
-        the author's own machine while every other line of `clauge status`
+        the author's own machine while every other line of `blink status`
         looked healthy. launchctl already knows -- it reports the run count
         and the last exit code -- so ask it.
 
@@ -563,28 +563,28 @@ class _SystemdBackend(_Backend):
             return f"no systemd here; run it yourself: {installed_bin()} run"
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
         r = subprocess.run(["systemctl", "--user", "enable", "--now",
-                            "clauge-bridge.service"], capture_output=True)
+                            "blink-bridge.service"], capture_output=True)
         if r.returncode == 0:
             return "running (systemd)"
-        return "installed, but could not be started: systemctl --user enable --now clauge-bridge"
+        return "installed, but could not be started: systemctl --user enable --now blink-bridge"
 
     def restart(self) -> str:
         if not self._has_systemctl():
             return super().restart()
         r = subprocess.run(["systemctl", "--user", "restart",
-                            "clauge-bridge.service"], capture_output=True)
+                            "blink-bridge.service"], capture_output=True)
         return "restarted" if r.returncode == 0 else "could not restart it"
 
     def remove(self) -> str:
         if not self._has_systemctl():
             # Install said "no systemd here; run it yourself", so whatever is
             # running was started by hand and nothing here can stop it. Saying
-            # "removed" would be followed a line later by "Nothing of Clauge's
+            # "removed" would be followed a line later by "Nothing of Blink's
             # is left running", which would not be true.
             _rm(unit_path())
             return "no systemd here; stop it yourself if you started it"
         subprocess.run(["systemctl", "--user", "disable", "--now",
-                        "clauge-bridge.service"], capture_output=True)
+                        "blink-bridge.service"], capture_output=True)
         _rm(unit_path())
         subprocess.run(["systemctl", "--user", "daemon-reload"],
                        capture_output=True)
@@ -597,7 +597,7 @@ class _SystemdBackend(_Backend):
             # was and status() claimed not to.
             return "no systemd here; not something this can check"
         r = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
-                            "clauge-bridge.service"], capture_output=True)
+                            "blink-bridge.service"], capture_output=True)
         return "running" if r.returncode == 0 else "not running"
 
 
@@ -605,7 +605,7 @@ def backend() -> _Backend:
     """The login-service backend for this machine.
 
     Built fresh each call rather than cached at import: every path it uses is
-    resolved from HOME at call time (see the note above clauge_home), and the
+    resolved from HOME at call time (see the note above blink_home), and the
     tests move HOME between calls.
     """
     if sys.platform == "darwin":
@@ -619,7 +619,7 @@ def backend() -> _Backend:
 
 def _install_service() -> str:
     if _skip_service():
-        return "skipped (CLAUGE_SKIP_SERVICE=1)"
+        return "skipped (BLINK_SKIP_SERVICE=1)"
     return backend().install()
 
 
@@ -627,19 +627,19 @@ def restart_service() -> str:
     """Bounce the login service so it comes up on a freshly replaced binary.
 
     Not the same as exiting and letting the supervisor notice: this is called
-    from `clauge update`, which is a separate process from the daemon. The
+    from `blink update`, which is a separate process from the daemon. The
     daemon's own path is simpler -- on macOS and Linux it exits and KeepAlive /
     Restart=always bring it back. Windows has neither: a Scheduled Task with an
     onlogon trigger does not restart anything, so it is told explicitly.
     """
     if _skip_service():
-        return "skipped (CLAUGE_SKIP_SERVICE=1)"
+        return "skipped (BLINK_SKIP_SERVICE=1)"
     return backend().restart()
 
 
 def _remove_service() -> str:
     if _skip_service():
-        return "skipped (CLAUGE_SKIP_SERVICE=1)"
+        return "skipped (BLINK_SKIP_SERVICE=1)"
     return backend().remove()
 
 
@@ -652,11 +652,11 @@ def _kill_recorded_daemon():
 
     Ending the Scheduled Task ends the process the task launched. PyInstaller's
     onefile bootloader re-executes the same .exe as a child, and that child
-    keeps running the bridge loop and keeps clauge.exe open, which is enough for
+    keeps running the bridge loop and keeps blink.exe open, which is enough for
     Windows to refuse every attempt to delete it -- including the detached
     rmdir scheduled for after we exit.
 
-    By pid, with the image name only as a FILTER: `taskkill /im clauge.exe`
+    By pid, with the image name only as a FILTER: `taskkill /im blink.exe`
     matches the uninstaller too, and killing ourselves mid-uninstall is exactly
     what the previous attempt did. /t takes the bootloader's child with it.
     """
@@ -697,11 +697,11 @@ def _kill_by_path():
 
 
 def _remove_bin_dir(attempts=6):
-    """Delete ~/.clauge/bin. Returns (done, message).
+    """Delete ~/.blink/bin. Returns (done, message).
 
     Straightforward everywhere but Windows, which will not delete a running
     executable -- and here the executable is usually this one. The undo hint we
-    print says `~/.clauge/bin/clauge.exe uninstall`, so a customer following it
+    print says `~/.blink/bin/blink.exe uninstall`, so a customer following it
     is asking a program to delete the file it is running from. The daemon can
     be holding the same file too: `schtasks /end` returns before the process
     has actually exited.
@@ -709,7 +709,7 @@ def _remove_bin_dir(attempts=6):
     So: try, wait, try again, and if Windows still says no, hand the job to
     something that will outlive us.
 
-    This used to end with `taskkill /f /im clauge.exe`, which is worse than the
+    This used to end with `taskkill /f /im blink.exe`, which is worse than the
     problem it was for -- the uninstaller has that image name, so it killed
     itself, mid-uninstall, having already removed the Scheduled Task and the
     status line. Every Windows scenario in CI exited non-zero with no output at
@@ -752,7 +752,7 @@ def _make_way_for_copy():
     """Move a running copy aside so the new one can be written.
 
     And by the second install it IS running: the first one registered a
-    Scheduled Task and started it, so ~/.clauge/bin/clauge.exe is locked and
+    Scheduled Task and started it, so ~/.blink/bin/blink.exe is locked and
     shutil.copy2 raises PermissionError. That is not an edge case -- it is
     what happens to every customer who re-runs the installer to upgrade.
 
@@ -788,7 +788,7 @@ def _announce():
     thing standing between us and silently editing a file the customer owns,
     so it is not optional and it runs before the first write.
     """
-    print("Clauge setup. Here is everything it is about to do, before it does any of it.")
+    print("Blink setup. Here is everything it is about to do, before it does any of it.")
     print()
     print(f"  Creates    {installed_bin()}")
     print("             a copy of this program, so the file you downloaded")
@@ -807,7 +807,7 @@ def _announce():
     print("             agent ids Claude Code generates -- used to tell concurrent")
     print("             sessions apart, and for nothing else. No prompt, no tool")
     print("             arguments, no file paths, no message text.")
-    print(f"  Creates    {os.path.join(clauge_home(), 'state')}")
+    print(f"  Creates    {os.path.join(blink_home(), 'state')}")
     print("             one small file per open session, deleted when it ends.")
     print(f"  Changes    {settings_path()}")
     # This list has to stay exactly true. Install asks nothing, so the
@@ -854,7 +854,7 @@ def cmd_install(_args) -> int:
     try:
         install_statusline._load(settings_path())
     except install_statusline.SettingsUnreadable as e:
-        print(f"Clauge setup stopped. {e}")
+        print(f"Blink setup stopped. {e}")
         print()
         print("Nothing was changed. Fix the file, or move it aside, and run")
         print("this again.")
@@ -881,24 +881,24 @@ def cmd_install(_args) -> int:
         print("running from a checkout, nothing to copy")
 
     print("[2/4] Status line ... ", end="", flush=True)
-    os.makedirs(clauge_home(), exist_ok=True)
+    os.makedirs(blink_home(), exist_ok=True)
     # Private to the user. The shims write the status line payload -- which
     # names the working directory and the session -- and the per-session
     # state files in here. Both shims create with umask 077, but a directory
     # from an earlier install was made at the default umask, so this
     # tightens it once rather than leaving it to the next mkdir.
-    for d in (clauge_home(), os.path.join(clauge_home(), "state")):
+    for d in (blink_home(), os.path.join(blink_home(), "state")):
         try:
             os.chmod(d, 0o700)
         except OSError:
             pass          # absent (state/ appears on the first hook), or Windows
-    _write_shim(shim_path(), "clauge-statusline.sh")
+    _write_shim(shim_path(), "blink-statusline.sh")
     install_statusline._announce(settings_path(), shim_path(),
                                  undo_hint=f"{installed_bin()} uninstall")
     print("      " + install_statusline.install(settings_path(), shim_path()))
 
     print("[3/4] Activity hooks ... ", end="", flush=True)
-    _write_shim(hook_shim_path(), "clauge-hook.sh")
+    _write_shim(hook_shim_path(), "blink-hook.sh")
     try:
         print(install_hooks.install(settings_path(), hook_shim_path()))
     except install_statusline.SettingsUnreadable as e:
@@ -926,7 +926,7 @@ def cmd_install(_args) -> int:
 
 
 def cmd_uninstall(_args) -> int:
-    print("Clauge uninstall.")
+    print("Blink uninstall.")
     print()
     print("[1/4] Background service ... ", end="", flush=True)
     print(_remove_service())
@@ -952,18 +952,18 @@ def cmd_uninstall(_args) -> int:
         print(f"      Left alone: {e}")
 
     print("[4/4] Files ... ", end="", flush=True)
-    # Only what install created. NOT ~/.clauge itself: it also holds the two
+    # Only what install created. NOT ~/.blink itself: it also holds the two
     # signing keys, which cannot be regenerated -- every board flashed with the
     # first one's public half, and every app carrying the second one's, would
     # stop accepting updates.
     for p in (shim_path(), hook_shim_path(),
-              os.path.join(clauge_home(), "statusline.json"),
-              os.path.join(clauge_home(), "statusline.json.tmp"),
+              os.path.join(blink_home(), "statusline.json"),
+              os.path.join(blink_home(), "statusline.json.tmp"),
               # Pid-scoped temp names, from a render interrupted mid-write.
-              *glob.glob(os.path.join(clauge_home(), "statusline.json.*.tmp")),
-              os.path.join(clauge_home(), "state.json"),
-              os.path.join(clauge_home(), "state.json.tmp"),
-              os.path.join(clauge_home(), "pending_fw.json")):
+              *glob.glob(os.path.join(blink_home(), "statusline.json.*.tmp")),
+              os.path.join(blink_home(), "state.json"),
+              os.path.join(blink_home(), "state.json.tmp"),
+              os.path.join(blink_home(), "pending_fw.json")):
         _rm(p)
     # The per-session state directory, and everything under it. state.json
     # above is the single-slot file this replaced; it is still on the list so
@@ -973,7 +973,7 @@ def cmd_uninstall(_args) -> int:
     print(message)
     print()
     if done:
-        print("Done. Nothing of Clauge's is left running.")
+        print("Done. Nothing of Blink's is left running.")
         return 0
     print("Everything else is undone, but that file is still there. Log out and")
     print("back in, then delete it by hand:")
@@ -992,7 +992,7 @@ def _live_sessions() -> int:
     from pc.providers import claude_state
     try:
         counts, _ = claude_state.ClaudeStateProvider(
-            path=os.path.join(clauge_home(), "state"), sweep=False
+            path=os.path.join(blink_home(), "state"), sweep=False
         ).scan(time.time())
     except Exception:
         return 0
@@ -1010,14 +1010,14 @@ def _rm_tree(root):
 
 
 def _rm_state_dir():
-    """Remove ~/.clauge/state and its per-session subdirectories.
+    """Remove ~/.blink/state and its per-session subdirectories.
 
     Two levels deep and no deeper, by construction: the shim only ever creates
     <session>.state files and <session>/<agent> files. Walking rather than
     shutil.rmtree because this runs against a path under the customer's home
     and a bounded loop cannot be talked into deleting more than it was told.
     """
-    root = os.path.join(clauge_home(), "state")
+    root = os.path.join(blink_home(), "state")
     try:
         names = os.listdir(root)
     except OSError:
@@ -1045,7 +1045,7 @@ def cmd_status(_args) -> int:
         # else is scoped to $HOME, so querying them under a test HOME reports
         # the real user's agent -- which read as "installed" for an install
         # that never happened.
-        print("Bridge      not checked (CLAUGE_SKIP_SERVICE=1)")
+        print("Bridge      not checked (BLINK_SKIP_SERVICE=1)")
     else:
         print("Bridge      " + backend().status())
 
@@ -1116,7 +1116,7 @@ def cmd_status(_args) -> int:
         print("Activity    unknown -- settings.json does not parse")
 
     # The most useful support answer: is fresh data actually arriving?
-    payload = os.path.join(clauge_home(), "statusline.json")
+    payload = os.path.join(blink_home(), "statusline.json")
     if os.path.exists(payload):
         age = int(time.time() - os.path.getmtime(payload))
         # The same bound the panel uses (statusline_source.STALE_AFTER_S):
@@ -1143,7 +1143,7 @@ def cmd_update(_args) -> int:
     first release to switch it on is a decision someone makes, not a side
     effect of shipping this command.
     """
-    print(f"Clauge update. This app is {RELEASE_VERSION}.")
+    print(f"Blink update. This app is {RELEASE_VERSION}.")
     print()
     manifest = update.fetch_signed_manifest()
     if manifest is None:
@@ -1211,11 +1211,11 @@ def cmd_provision(args) -> int:
         try:
             backend().remove()
             # Put a service back afterwards only where one belongs: on a
-            # machine Clauge is INSTALLED on. remove() reports "removed"
+            # machine Blink is INSTALLED on. remove() reports "removed"
             # whether or not anything was registered, and treating that as
             # proof of a service left a bench laptop -- running the
             # downloaded binary, never installed -- with a login item
-            # pointing at ~/.clauge/bin/clauge, which does not exist there,
+            # pointing at ~/.blink/bin/blink, which does not exist there,
             # respawning on every throttle interval forever.
             stopped = os.path.exists(installed_bin())
         except Exception:
@@ -1358,11 +1358,11 @@ def cmd_run(args) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        prog="clauge", description="Clauge desk gauge: setup and bridge.")
+        prog="blink", description="Blink desk gauge: setup and bridge.")
     # Also the self-test in pc/update.py: a replacement binary has to run and
     # say what it is before it is allowed to become the login service's target.
     parser.add_argument("--version", action="version",
-                        version=f"clauge {RELEASE_VERSION}")
+                        version=f"blink {RELEASE_VERSION}")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("install", help="Set everything up (this is the default)")
     sub.add_parser("uninstall", help="Put it all back")
@@ -1383,7 +1383,7 @@ def main(argv=None) -> int:
     run_p.add_argument("--baud", type=int, default=115200)
     args = parser.parse_args(argv)
 
-    # Bare `./clauge` installs. Someone who just downloaded a file and
+    # Bare `./blink` installs. Someone who just downloaded a file and
     # double-clicked it meant "set this up", and making them discover a
     # subcommand first is the opposite of the point.
     return {

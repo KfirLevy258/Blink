@@ -42,7 +42,7 @@ def _read(tmp_path):
 def test_install_points_the_statusline_at_the_shim(tmp_path, capsys):
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
-    shim = tmp_path / ".clauge" / "clauge-statusline.sh"
+    shim = tmp_path / ".blink" / "blink-statusline.sh"
     assert shim.exists() and os.access(shim, os.X_OK)
     assert _read(tmp_path)["statusLine"]["command"] == f"sh {shim}"
 
@@ -51,14 +51,14 @@ def test_bare_invocation_installs(tmp_path):
     """Someone who downloads a file and runs it means "set this up"."""
     _settings(tmp_path, {})
     assert cli.main([]) == 0
-    assert (tmp_path / ".clauge" / "clauge-statusline.sh").exists()
+    assert (tmp_path / ".blink" / "blink-statusline.sh").exists()
 
 
 def test_an_existing_statusline_is_kept_and_still_runs(tmp_path):
     _settings(tmp_path, {"statusLine": {"type": "command",
                                         "command": "sh ~/my-bar.sh"}})
     cli.main(["install"])
-    chain = (tmp_path / ".clauge" / "statusline-chain").read_text().strip()
+    chain = (tmp_path / ".blink" / "statusline-chain").read_text().strip()
     assert chain == "sh ~/my-bar.sh"
 
 
@@ -127,7 +127,7 @@ def test_install_is_idempotent(tmp_path):
                                         "command": "sh ~/my-bar.sh"}})
     cli.main(["install"])
     cli.main(["install"])
-    chain = (tmp_path / ".clauge" / "statusline-chain").read_text().strip()
+    chain = (tmp_path / ".blink" / "statusline-chain").read_text().strip()
     assert chain == "sh ~/my-bar.sh", "second run chained the shim to itself"
 
 
@@ -137,12 +137,12 @@ def test_uninstall_restores_their_command(tmp_path):
     cli.main(["install"])
     cli.main(["uninstall"])
     assert _read(tmp_path)["statusLine"]["command"] == "sh ~/my-bar.sh"
-    assert not (tmp_path / ".clauge" / "clauge-statusline.sh").exists()
+    assert not (tmp_path / ".blink" / "blink-statusline.sh").exists()
 
 
 def test_uninstall_keeps_the_ota_signing_key(tmp_path):
-    """~/.clauge is shared with a key that cannot be regenerated."""
-    key = tmp_path / ".clauge" / "ota_signing_key_p256.pem"
+    """~/.blink is shared with a key that cannot be regenerated."""
+    key = tmp_path / ".blink" / "ota_signing_key_p256.pem"
     key.parent.mkdir(exist_ok=True)
     key.write_text("PRIVATE KEY")
     _settings(tmp_path, {})
@@ -162,7 +162,7 @@ def test_install_on_a_machine_where_claude_never_wrote_settings(tmp_path):
     """~/.claude/settings.json only exists once a setting has been changed."""
     _settings(tmp_path).unlink(missing_ok=True)
     assert cli.main(["install"]) == 0
-    assert _read(tmp_path)["statusLine"]["command"].endswith("clauge-statusline.sh")
+    assert _read(tmp_path)["statusLine"]["command"].endswith("blink-statusline.sh")
 
 
 def test_status_runs_before_and_after_install(tmp_path, capsys):
@@ -170,7 +170,7 @@ def test_status_runs_before_and_after_install(tmp_path, capsys):
     assert "none yet" in capsys.readouterr().out
     _settings(tmp_path, {})
     cli.main(["install"])
-    (tmp_path / ".clauge" / "statusline.json").write_text("{}")
+    (tmp_path / ".blink" / "statusline.json").write_text("{}")
     assert cli.main(["status"]) == 0
     assert "fresh" in capsys.readouterr().out
 
@@ -180,8 +180,8 @@ def test_the_shim_it_writes_is_the_one_in_the_tree(tmp_path):
     _settings(tmp_path, {})
     cli.main(["install"])
     here = os.path.dirname(os.path.dirname(os.path.abspath(cli.__file__)))
-    src = open(os.path.join(here, "tools", "clauge-statusline.sh")).read()
-    assert (tmp_path / ".clauge" / "clauge-statusline.sh").read_text() == src
+    src = open(os.path.join(here, "tools", "blink-statusline.sh")).read()
+    assert (tmp_path / ".blink" / "blink-statusline.sh").read_text() == src
 
 
 def test_too_old_claude_warns_rather_than_refusing(tmp_path, capsys, monkeypatch):
@@ -195,7 +195,7 @@ def test_too_old_claude_warns_rather_than_refusing(tmp_path, capsys, monkeypatch
 
 
 def test_run_does_not_hand_the_subcommand_name_to_the_daemon(monkeypatch):
-    """`clauge run` must not leave "run" in the daemon's own argv.
+    """`blink run` must not leave "run" in the daemon's own argv.
 
     It did: claude_usage_bridge.main() parsed sys.argv itself, saw the
     subcommand name, rejected it and exited. The login service restarted it

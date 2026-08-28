@@ -3,7 +3,7 @@
 Two numbers, deliberately separate, because they answer different questions.
 
 RELEASE_VERSION is the product's. Firmware and daemon ship as one release from
-one tag -- tools/release.sh builds clauge-fw.bin and .github/workflows/
+one tag -- tools/release.sh builds blink-fw.bin and .github/workflows/
 release-binaries.yml builds the four binaries from that same commit -- so they
 carry the same number and a mismatch means somebody's install is half-updated.
 That is the number a customer sees and the one support asks for.

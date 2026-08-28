@@ -1,5 +1,5 @@
 #!/bin/sh
-# Clauge execution-state hook.
+# Blink execution-state hook.
 #
 # Claude Code runs this on lifecycle events and pipes the event JSON to stdin.
 # We record which event fired, for which session, and when.
@@ -35,7 +35,7 @@ input=$(cat)
 #
 # The FIRST character must be alphanumeric. The class used to admit any of
 # `._-` anywhere, which let the literal names `.` and `..` through -- and
-# `$DIR/..` is ~/.clauge itself, where the SubagentStart/Stop branches below
+# `$DIR/..` is ~/.blink itself, where the SubagentStart/Stop branches below
 # would then truncate or delete whichever file the agent id named. Reproduced
 # against the signing key before this was tightened.
 #
@@ -57,7 +57,7 @@ sid=$(printf '%s' "$input" | _ident session_id)
 # Private to the user. These files name the sessions someone has open, and
 # the default umask would leave them readable by every account on the machine.
 umask 077
-DIR="$HOME/.clauge/state"
+DIR="$HOME/.blink/state"
 [ -d "$DIR" ] || mkdir -p "$DIR" 2>/dev/null
 
 case $event in
@@ -102,6 +102,6 @@ SubagentStart|SubagentStop)
 	;;
 esac
 
-# Never fail a hook. A non-zero exit is a signal to Claude Code, and Clauge
+# Never fail a hook. A non-zero exit is a signal to Claude Code, and Blink
 # having a bad day must not become the user's bad day.
 exit 0

@@ -17,7 +17,7 @@ Audit of the "Desk HUD — Universal Architecture, Multi-Provider Design & Techn
 Handoff" document against this repository.
 
 - Audited at: `42acc9e` on `post-release-cleanup`, 2026-08-26.
-- Method: read of `pc/`, `tools/clauge-statusline.sh`, `claude_usage_bridge.py`,
+- Method: read of `pc/`, `tools/blink-statusline.sh`, `claude_usage_bridge.py`,
   `firmware/src/`, `firmware/Kconfig`, `firmware/CMakeLists.txt`, `firmware/wifi.conf`,
   `tests/fixtures/statusline_payload.json`. Generated build trees (`firmware/build*`)
   excluded.
@@ -66,7 +66,7 @@ data source.
 The shipped build handles no Anthropic credential, and this is enforced at compile
 time rather than by convention.
 
-`CONFIG_CLAUGE_WIFI_MODE` is `default n` (`firmware/Kconfig:16`), and
+`CONFIG_BLINK_WIFI_MODE` is `default n` (`firmware/Kconfig:16`), and
 `firmware/CMakeLists.txt:32` gates the network sources behind it with
 `target_sources_ifdef`. With it off, `oauth.c`, `usage_client.c`, `portal.c`,
 `net_wifi.c` and friends are never handed to the compiler — the client id, the
@@ -88,7 +88,7 @@ questions attached to that mode are tracked separately and are not re-opened her
 ### 2. Zero outbound AI polling — Holds, but §7 overstates it
 
 No component polls an AI provider. The daemon does make outbound HTTPS calls, to
-exactly one host: `https://github.com/KfirLevy258/Clauge/releases/latest/download/`
+exactly one host: `https://github.com/KfirLevy258/Blink/releases/latest/download/`
 (`pc/ota.py:30-32`) for the firmware manifest, and `pc/update.py:155`
 `fetch_signed_manifest` for the daemon's own signed release manifest. First check is
 deferred until a board is attached, then every 24 h (`claude_usage_bridge.py`,
@@ -124,8 +124,8 @@ does not exist yet.
 ### 4. Zero-touch install — Holds. Self-healing watchdog — Absent
 
 Installation is genuinely one step and genuinely non-destructive. `pc/install_statusline.py`
-preserves an existing `statusLine.command` into `~/.clauge/statusline-chain`, and
-`tools/clauge-statusline.sh:49-104` delegates to it on every render. The
+preserves an existing `statusLine.command` into `~/.blink/statusline-chain`, and
+`tools/blink-statusline.sh:49-104` delegates to it on every render. The
 self-reference guard (lines 56–94) reconstructs `shlex.quote`'s escaping byte for byte
 so a shim path containing a space is not mistaken for a foreign command, and strips
 both the `sh ` and `bash ` prefixes so the guard works on Windows too. Service
@@ -135,7 +135,7 @@ What does not exist is §4A's **Active Configuration Watchdog**. `install()` run
 at install time. There is no file watcher on `~/.claude/settings.json`, and no
 periodic re-check — a grep for `watch`, `inotify`, `FSEvents`, `reinstate` across `pc/`
 and `claude_usage_bridge.py` returns nothing. If a Claude Code update or a manual edit
-drops the `statusLine` key, Clauge goes quiet until the user reinstalls. The daemon
+drops the `statusLine` key, Blink goes quiet until the user reinstalls. The daemon
 does notice the *symptom* — `poll_once` prints "no usage data yet" once
 (`pc/bridge.py:319`) — but it neither diagnoses nor repairs the cause.
 
@@ -181,8 +181,8 @@ the more valuable half and is currently undocumented.
 True of what is *transmitted*: `map_statusline` reads only `rate_limits`, and the
 `usage` message carries percentages, countdowns and a stale flag.
 
-Not true of what is *written to disk*. `tools/clauge-statusline.sh:11,28` captures the
-entire payload verbatim to `~/.clauge/statusline.json`. Per the redaction note in
+Not true of what is *written to disk*. `tools/blink-statusline.sh:11,28` captures the
+entire payload verbatim to `~/.blink/statusline.json`. Per the redaction note in
 `tests/fixtures/statusline_payload.json`, that payload includes `session_id`,
 `transcript_path`, `cwd`, workspace paths, `session_name` and `cost`. The file stays in
 the user's own home directory and none of it leaves the machine — but "the daemon
@@ -194,7 +194,7 @@ shim, and the shim is deliberately POSIX `sh` with no forks on the every-render 
 it uses `read` instead of `cat` specifically to avoid one (line 51-55). Options, cheapest
 first: (a) amend the doc to say the capture is whole-payload and local-only; (b) have the
 daemon rewrite the file down to `rate_limits` after each read; (c) `chmod 600` the
-`~/.clauge` directory at install time. (b) and (c) are compatible and neither touches
+`~/.blink` directory at install time. (b) and (c) are compatible and neither touches
 the render path.
 
 ### 7. CLI hook, `rate_limits` — Holds
@@ -223,8 +223,8 @@ already fresh, and `ctx_pct` is arguably the metric a developer glances at most.
 ### 9. Transport, loopback UDP `127.0.0.1:9876` — Conflicts
 
 §3A1 specifies the hook relaying telemetry over UDP to port 9876. The code does not
-bind a socket anywhere; the shim writes `~/.clauge/statusline.json.tmp` and `mv -f`s it
-into place (`tools/clauge-statusline.sh:28-29`), and the daemon polls that file every
+bind a socket anywhere; the shim writes `~/.blink/statusline.json.tmp` and `mv -f`s it
+into place (`tools/blink-statusline.sh:28-29`), and the daemon polls that file every
 60 s (`claude_usage_bridge.py`, `POLL_INTERVAL_S = 60`).
 
 The file approach is the better design and should not be changed to match the doc.
@@ -339,7 +339,7 @@ endpoints. No analytics host, no crash reporter.
 
 ### 16. Trademark-compliant naming — Open elsewhere
 
-§7 directs descriptive compatibility naming; `README.md:5` leads with "Clauge" as the
+§7 directs descriptive compatibility naming; `README.md:5` leads with "Blink" as the
 product title. This is an existing tracked concern with a decision attached to it
 elsewhere, and is neither re-derived nor re-argued here.
 
@@ -409,8 +409,8 @@ document. Commits are on `desk-hud-universal`.
 
 | # | Item | Resolution |
 |---|---|---|
-| 1 | Zero-credential footprint | **Confirmed, doc amended.** Enforced at compile time (`CONFIG_CLAUGE_WIFI_MODE` default n); the standalone WiFi build is now named as a second mode the document omitted. |
-| 2 | Zero outbound AI polling | **Confirmed**, and now trivially so: the extension that observed page responses was removed 2026-08-28, so nothing reaches the network on Clauge's behalf at all. |
+| 1 | Zero-credential footprint | **Confirmed, doc amended.** Enforced at compile time (`CONFIG_BLINK_WIFI_MODE` default n); the standalone WiFi build is now named as a second mode the document omitted. |
+| 2 | Zero outbound AI polling | **Confirmed**, and now trivially so: the extension that observed page responses was removed 2026-08-28, so nothing reaches the network on Blink's behalf at all. |
 | 3 | Pluggable multi-provider | **Built.** `pc/providers/base.py` (`ProviderParser`, `NormalizedUsageFrame`), `pc/ingest.py`, `pc/normalizer.py`. |
 | 4b | Anti-drift watchdog | **Built**, polled rather than watched, and it never overrides a deliberate uninstall. |
 | 5 | Schema resilience | **Built.** Versioned adapters dispatch on the cache's own `version`; an unknown version falls to a shape-driven reader. No `_parse_v1` — inventing a schema nobody has observed would mean testing against the invention. |

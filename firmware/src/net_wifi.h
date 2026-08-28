@@ -7,7 +7,7 @@
 #define AP_DHCP_POOL_START "192.168.4.10"
 
 /*
- * The SSID this board advertises while being set up, e.g. "clauge-5ead4c".
+ * The SSID this board advertises while being set up, e.g. "blink-5ead4c".
  * Derived from the chip's MAC so that several of these devices in one room stay
  * distinguishable -- a fixed name would be ambiguous the moment you build a
  * second one. Stable across reboots.

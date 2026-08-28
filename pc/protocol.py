@@ -321,7 +321,7 @@ def edition(name: str) -> dict:
 
     Additive like everything else on this wire: firmware that predates it
     ignores an unknown message type, so sending one to an older board is a
-    no-op rather than an error. `clauge provision` reports what the board
+    no-op rather than an error. `blink provision` reports what the board
     actually says, which is the only way to tell those two apart.
     """
     if name not in EDITIONS:

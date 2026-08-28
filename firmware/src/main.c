@@ -37,7 +37,7 @@ static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_d
  *
  * These panels differ from the pilot units in two independent ways, and both
  * land in MADCTL (36h), so one write fixes both. Pilot boards must build with
- * CONFIG_CLAUGE_PANEL_PILOT, which compiles this away entirely.
+ * CONFIG_BLINK_PANEL_PILOT, which compiles this away entirely.
  *
  * The pilot units and the production panels are driven with byte-identical
  * registers, yet production renders mirrored -- so the difference is in the
@@ -68,7 +68,7 @@ static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_d
  * window coordinates and its pixels mirror together, and the panel's own
  * reversed wiring cancels them back out.
  */
-#ifdef CONFIG_CLAUGE_PANEL_PILOT
+#ifdef CONFIG_BLINK_PANEL_PILOT
 
 /* Pilot panels need none of it: the stock rotation=90 MADCTL (BGR|MV) that the
  * driver writes is already correct for them, mirror and colour order alike. */
@@ -105,9 +105,9 @@ static void panel_fix_madctl(void)
 	}
 }
 
-#endif /* CONFIG_CLAUGE_PANEL_PILOT */
+#endif /* CONFIG_BLINK_PANEL_PILOT */
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 /*
  * Everything from here to the matching #endif belongs to the standalone WiFi
  * flow -- provisioning, the setup AP, the sign-in exchange, the blind-radio
@@ -165,7 +165,7 @@ static __noinit uint32_t blind_magic;
  * flag only picks the honest reason to show on the setup form if that
  * join fails too. */
 static bool scan_said_absent;
-#endif /* CONFIG_CLAUGE_WIFI_MODE */
+#endif /* CONFIG_BLINK_WIFI_MODE */
 
 /* ---- OTA boot-side: test-boot self-confirm, else MCUboot reverts ---- */
 
@@ -183,7 +183,7 @@ static void ota_boot_begin(void)
 	ota_test_boot = true;
 	ota_confirm_deadline = k_uptime_get() + 90 * 1000;
 	printk("[ota] test boot of %s -- must confirm within 90 s\n",
-	       CLAUGE_FW_VERSION);
+	       BLINK_FW_VERSION);
 
 	/* Hardware watchdog for hard hangs: a wedged main loop stops feeding,
 	 * the chip resets, and MCUboot reverts the unconfirmed image. */
@@ -236,14 +236,14 @@ static void ota_report_outcome(void)
 		return;
 	}
 	cfg_set_ota_state(0, "");
-	if (strcmp(tgt, CLAUGE_FW_VERSION) == 0) {
-		ui_settings_notice("Updated to version " CLAUGE_FW_VERSION ".");
+	if (strcmp(tgt, BLINK_FW_VERSION) == 0) {
+		ui_settings_notice("Updated to version " BLINK_FW_VERSION ".");
 	} else {
 		ui_settings_notice("Update failed, previous version restored.");
 	}
 }
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 /* Everything from here to usb_anim_pump() is the board's own network path:
  * the captive portal, the sign-in, the scan. Whole functions, so this is a
  * region rather than a sprinkle -- see firmware/Kconfig. */
@@ -723,7 +723,7 @@ static void standalone_anim_pump(void)
 	ota_boot_pump();
 }
 
-#endif /* CONFIG_CLAUGE_WIFI_MODE */
+#endif /* CONFIG_BLINK_WIFI_MODE */
 
 /* Outside the gate: this is the tethered path's own step list, and it was
  * only sitting next to wifi_boot_steps out of habit. */
@@ -741,7 +741,7 @@ static void usb_anim_pump(void)
 	ota_boot_pump();
 }
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 /* Lower priority than main (higher number): 1-2 s of ECDHE math must not
  * starve the render loop on this single-core build. */
 static char worker_refresh[CFG_TOKEN_MAX];
@@ -1361,7 +1361,7 @@ static void run_standalone(void)
 	}
 }
 
-#endif /* CONFIG_CLAUGE_WIFI_MODE */
+#endif /* CONFIG_BLINK_WIFI_MODE */
 
 /* ---- USB bridge mode: PC daemon pushes usage over serial ---- */
 
@@ -1373,7 +1373,7 @@ static void run_usb(void)
 
 	/* With stored WiFi + token the board can serve itself if the daemon
 	 * never delivers -- checked once; NVS doesn't change under us. */
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
 	bool can_fall_back = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
 			     cfg_get_token(tok, sizeof(tok));
@@ -1510,7 +1510,7 @@ int main(void)
 	 * block for seconds against a 30 s window. */
 	ui_boot_set_pump(ota_boot_pump);
 	backlight_init();	/* drive the PWM to the persisted level */
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 	net_wifi_init();
 	net_wifi_set_idle_hook(wifi_idle);
 	ap_psk_setup();		/* before any QR or AP use */
@@ -1555,7 +1555,7 @@ int main(void)
 	 * as dead time on hardware (user feedback 2026-07-16). A PC daemon
 	 * never loses the board to this shortcut: the daemon opening the
 	 * port is a hard reset, which clears the intentional mark. */
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 	if (ui_boot_intentional_pending()) {
 		char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
 
@@ -1590,7 +1590,7 @@ int main(void)
 		run_usb();
 	}
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 	char tok[CFG_TOKEN_MAX], ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
 	bool have_wifi = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk));
 	bool have_tok = cfg_get_token(tok, sizeof(tok));

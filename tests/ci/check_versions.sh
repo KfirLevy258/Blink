@@ -15,8 +15,8 @@ set -eu
 VH="$ROOT/firmware/src/version.h"
 PV="$ROOT/pc/version.py"
 
-fw=$(sed -n 's/^#define CLAUGE_FW_VERSION "\(.*\)"$/\1/p' "$VH")
-fw_proto=$(sed -n 's/^#define CLAUGE_PROTO_VERSION \([0-9][0-9]*\).*$/\1/p' "$VH")
+fw=$(sed -n 's/^#define BLINK_FW_VERSION "\(.*\)"$/\1/p' "$VH")
+fw_proto=$(sed -n 's/^#define BLINK_PROTO_VERSION \([0-9][0-9]*\).*$/\1/p' "$VH")
 pc=$(sed -n 's/^RELEASE_VERSION = "\(.*\)"$/\1/p' "$PV")
 pc_proto=$(sed -n 's/^PROTO_VERSION = \([0-9][0-9]*\)$/\1/p' "$PV")
 

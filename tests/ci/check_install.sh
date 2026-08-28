@@ -2,7 +2,7 @@
 # Run the packaged binary for real against one scenario, and check what it did.
 #
 # The pytest suite covers the same scenarios hermetically, but always with
-# CLAUGE_SKIP_DEPS=1 and CLAUGE_SKIP_SERVICE=1 -- so the two steps that touch
+# BLINK_SKIP_DEPS=1 and BLINK_SKIP_SERVICE=1 -- so the two steps that touch
 # the machine itself, building the virtualenv and registering a login service,
 # are exactly the two nothing exercises. That is what this is for, and why CI
 # runs it on a real runner of each OS rather than only running pytest.
@@ -12,10 +12,10 @@
 # Scenarios: no-claude, no-settings, no-statusline, with-statusline,
 #            reinstall, foreign-uninstall, spaced-home
 #
-# CLAUGE_BIN names the binary to test (default: dist/clauge, as built by
+# BLINK_BIN names the binary to test (default: dist/blink, as built by
 # tools/build_binary.sh). CI builds it once per platform and hands the path in.
 #
-# Set CLAUGE_SKIP_SERVICE=1 to skip the login-service assertions. Do that when
+# Set BLINK_SKIP_SERVICE=1 to skip the login-service assertions. Do that when
 # running this on a machine you care about: the launchd label is a constant, so
 # a real run here would bootout whatever agent is already installed and replace
 # it with one pointing into this scenario's throwaway HOME.
@@ -26,7 +26,7 @@ set -eu
 ci_binary
 
 SCENARIO="${1:?usage: check_install.sh <scenario> [work-dir]}"
-WORK="${2:-${TMPDIR:-/tmp}/clauge-ci-$SCENARIO}"
+WORK="${2:-${TMPDIR:-/tmp}/blink-ci-$SCENARIO}"
 ci_label "$SCENARIO"
 
 rm -rf "$WORK"
@@ -50,13 +50,13 @@ export HOME
 # USERPROFILE also has to be in Windows form: the binary is native Windows
 # Python, and it echoes back paths in the shape it was given.
 NATIVE_HOME="$HOME"
-BINEXE="clauge"
+BINEXE="blink"
 case "$(uname -s)" in
 MINGW* | MSYS* | CYGWIN*)
 	NATIVE_HOME=$(cygpath -w "$HOME")
 	USERPROFILE="$NATIVE_HOME"
 	export USERPROFILE
-	BINEXE="clauge.exe"
+	BINEXE="blink.exe"
 	;;
 esac
 
@@ -90,12 +90,12 @@ write_settings() {
 	printf '%s\n' "$1" >"$(settings)"
 }
 
-# A file in ~/.clauge that Clauge did not create. Uninstall must never take the
+# A file in ~/.blink that Blink did not create. Uninstall must never take the
 # directory, only its own three files -- the OTA signing key lives here and
 # cannot be regenerated.
 plant_signing_key() {
-	mkdir -p "$HOME/.clauge"
-	echo "PRIVATE KEY" >"$HOME/.clauge/ota_signing_key_p256.pem"
+	mkdir -p "$HOME/.blink"
+	echo "PRIVATE KEY" >"$HOME/.blink/ota_signing_key_p256.pem"
 }
 
 case "$SCENARIO" in
@@ -148,7 +148,7 @@ json_get() {
 if [ "$SCENARIO" = "foreign-uninstall" ]; then
 	# Never installed. Uninstall must be a no-op on someone else's setup --
 	# the case where a person runs it "just to be sure" and would otherwise
-	# lose a status line Clauge never touched.
+	# lose a status line Blink never touched.
 	"$BIN" uninstall >"$WORK/out.txt" 2>&1 ||
 		fail "uninstall exited non-zero: $(cat "$WORK/out.txt")"
 	[ "$(json_get statusLine.command)" = "sh $THEIR_BAR" ] ||
@@ -159,13 +159,13 @@ fi
 
 "$BIN" >"$WORK/out.txt" 2>&1 || {
 	cat "$WORK/out.txt" >&2
-	fail "clauge exited non-zero"
+	fail "blink exited non-zero"
 }
 
 if [ "$SCENARIO" = "reinstall" ]; then
 	"$BIN" >"$WORK/out2.txt" 2>&1 || {
 		cat "$WORK/out2.txt" >&2
-		fail "second clauge run exited non-zero"
+		fail "second blink run exited non-zero"
 	}
 	ok "second run succeeded"
 fi
@@ -185,19 +185,19 @@ grep -q "statusLine.command" "$WORK/disclosure.txt" || fail "disclosure omits th
 # written too -- and install asks nothing, so the disclosure is the only thing
 # between us and silently editing a file the customer owns.
 grep -q "hooks" "$WORK/disclosure.txt" || fail "disclosure omits the hooks key"
-grep -qF "clauge-hook.sh" "$WORK/disclosure.txt" || fail "disclosure omits the hook shim"
+grep -qF "blink-hook.sh" "$WORK/disclosure.txt" || fail "disclosure omits the hook shim"
 grep -qF "$BINEXE uninstall" "$WORK/disclosure.txt" ||
 	fail "disclosure omits the undo"
 ok "disclosure precedes the first step and names file, key, undo"
 
-SHIM="$HOME/.clauge/clauge-statusline.sh"
+SHIM="$HOME/.blink/blink-statusline.sh"
 [ -x "$SHIM" ] || fail "shim not installed at $SHIM"
-cmp -s "$SHIM" "$ROOT/tools/clauge-statusline.sh" || fail "installed shim differs from source"
+cmp -s "$SHIM" "$ROOT/tools/blink-statusline.sh" || fail "installed shim differs from source"
 ok "shim installed as a copy, not a pointer into the checkout"
 
 got=$(json_get statusLine.command)
 case "$got" in
-*"clauge-statusline.sh"*) ;;
+*"blink-statusline.sh"*) ;;
 *) fail "statusLine.command is '$got'" ;;
 esac
 case "$got" in
@@ -208,21 +208,21 @@ ok "statusLine.command -> the installed copy"
 # The half no unit test reaches: the binary must copy ITSELF somewhere stable
 # and be runnable from there, because the login service names that path and
 # the customer is told they can delete the download.
-[ -x "$HOME/.clauge/bin/$BINEXE" ] || fail "the binary did not install itself"
-"$HOME/.clauge/bin/$BINEXE" status >/dev/null || fail "the installed copy does not run"
-ok "binary installed itself and runs from ~/.clauge/bin"
+[ -x "$HOME/.blink/bin/$BINEXE" ] || fail "the binary did not install itself"
+"$HOME/.blink/bin/$BINEXE" status >/dev/null || fail "the installed copy does not run"
+ok "binary installed itself and runs from ~/.blink/bin"
 
-if [ "${CLAUGE_SKIP_SERVICE:-0}" != "1" ]; then
+if [ "${BLINK_SKIP_SERVICE:-0}" != "1" ]; then
 	case "$(uname -s)" in
 	Darwin)
-		[ -f "$HOME/Library/LaunchAgents/com.clauge.bridge.plist" ] ||
+		[ -f "$HOME/Library/LaunchAgents/com.blink.bridge.plist" ] ||
 			fail "no launchd plist written"
-		plutil -lint "$HOME/Library/LaunchAgents/com.clauge.bridge.plist" >/dev/null ||
+		plutil -lint "$HOME/Library/LaunchAgents/com.blink.bridge.plist" >/dev/null ||
 			fail "launchd plist is not valid"
 		ok "launchd plist written and valid"
 		;;
 	Linux)
-		[ -f "$HOME/.config/systemd/user/clauge-bridge.service" ] ||
+		[ -f "$HOME/.config/systemd/user/blink-bridge.service" ] ||
 			fail "no systemd unit written"
 		ok "systemd unit written"
 		# Deliberately NOT asserting the service is running: a CI runner has
@@ -235,7 +235,7 @@ fi
 
 case "$SCENARIO" in
 with-statusline | reinstall | spaced-home)
-	chain=$(cat "$HOME/.clauge/statusline-chain" 2>/dev/null || echo "")
+	chain=$(cat "$HOME/.blink/statusline-chain" 2>/dev/null || echo "")
 	[ "$chain" = "sh '$THEIR_BAR'" ] || fail "chain is [$chain], expected [sh '$THEIR_BAR']"
 	ok "their command preserved in the chain file"
 
@@ -247,12 +247,12 @@ with-statusline | reinstall | spaced-home)
 	[ "$out" = "my bar" ] || fail "shim did not pass through their output (got '$out')"
 	ok "their bar still renders through the shim"
 
-	[ -s "$HOME/.clauge/statusline.json" ] || fail "shim wrote no payload"
+	[ -s "$HOME/.blink/statusline.json" ] || fail "shim wrote no payload"
 	# The path goes in as an ARGUMENT, not inside the source. Under Git Bash a
 	# POSIX path handed to a native Windows program is auto-converted to
 	# Windows form; a path embedded in a string is not, so the identical check
 	# passed for json_get and failed here.
-	py - "$HOME/.clauge/statusline.json" <<-'EOF' || fail "payload is not what was piped in"
+	py - "$HOME/.blink/statusline.json" <<-'EOF' || fail "payload is not what was piped in"
 		import json, sys
 		d = json.load(open(sys.argv[1]))
 		assert d["rate_limits"]["five_hour"]["used_percentage"] == 11, d
@@ -290,27 +290,27 @@ esac
 # to exit. Wait for it here rather than asserting instantly; on the other two
 # platforms the directory is already gone and this loop ends immediately.
 n=0
-while [ -e "$HOME/.clauge/bin" ] && [ "$n" -lt 30 ]; do
+while [ -e "$HOME/.blink/bin" ] && [ "$n" -lt 30 ]; do
 	sleep 1
 	n=$((n + 1))
 done
-if [ -e "$HOME/.clauge/bin" ]; then
+if [ -e "$HOME/.blink/bin" ]; then
 	# Say WHO is holding it. Three rounds were spent guessing at this from a
 	# bare "left the binary behind", and the answer -- which process, and
 	# whether the task was still registered -- was never in the log.
 	case "$(uname -s)" in
 	MINGW* | MSYS* | CYGWIN*)
 		echo "--- processes still running the binary ---" >&2
-		tasklist //fi "IMAGENAME eq clauge.exe" //v >&2 || true
+		tasklist //fi "IMAGENAME eq blink.exe" //v >&2 || true
 		echo "--- scheduled task ---" >&2
-		schtasks //query //tn "Clauge bridge" >&2 || true
+		schtasks //query //tn "Blink bridge" >&2 || true
 		echo "--- what is in the directory ---" >&2
-		ls -l "$HOME/.clauge/bin" >&2 || true
+		ls -l "$HOME/.blink/bin" >&2 || true
 		;;
 	esac
 	fail "uninstall left the binary behind (waited ${n}s)"
 fi
-[ "$(cat "$HOME/.clauge/ota_signing_key_p256.pem")" = "PRIVATE KEY" ] ||
+[ "$(cat "$HOME/.blink/ota_signing_key_p256.pem")" = "PRIVATE KEY" ] ||
 	fail "uninstall destroyed the OTA signing key"
 ok "uninstall restored everything and kept the signing key"
 

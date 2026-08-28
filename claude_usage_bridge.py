@@ -155,7 +155,7 @@ def hold_single_instance(home, on_wait=None, poll_s=5.0):
             return fh
         except OSError:
             if not said:
-                print("[bridge] another Clauge daemon is already running and"
+                print("[bridge] another Blink daemon is already running and"
                       " has the board; waiting for it to exit. Two of them on"
                       " one cable would interleave on the wire.",
                       file=sys.stderr)
@@ -212,7 +212,7 @@ def remember_board(home, port, board_id):
 
 
 def probe_is_our_board(ser, timeout=PROBE_S):
-    """Ask the thing on this port whether it is a Clauge board, without a reset.
+    """Ask the thing on this port whether it is a Blink board, without a reset.
 
     Why this exists: the reset below is not free, and it is not aimed at a
     board we have identified -- it is aimed at whatever matched a VID:PID.
@@ -231,7 +231,7 @@ def probe_is_our_board(ser, timeout=PROBE_S):
     """
     try:
         ser.reset_input_buffer()
-        ser.write(protocol.encode(protocol.welcome("clauge-bridge",
+        ser.write(protocol.encode(protocol.welcome("blink-bridge",
                                                    RELEASE_VERSION)))
         deadline = time.time() + timeout
         reader = protocol.LineReader()
@@ -312,14 +312,14 @@ def _self_update_tick(target):
     off switch, a bad build would keep installing itself on every machine that
     checked, and nothing here could stop it.
     """
-    home = os.path.dirname(os.path.dirname(target))   # ~/.clauge
+    home = os.path.dirname(os.path.dirname(target))   # ~/.blink
     manifest = update.fetch_signed_manifest()
     found = update.available(manifest)
     if not found:
         return
     version, artifact = found
     if not ((manifest.get("daemon") or {}).get("auto")):
-        print(f"[update] {version} is available; run `clauge update` to install"
+        print(f"[update] {version} is available; run `blink update` to install"
               " it", file=sys.stderr)
         return
     if not update.auto_update_allowed(home):
@@ -339,14 +339,14 @@ def _self_update_tick(target):
 
 
 def main(argv=None):
-    """argv is passed explicitly by the `clauge run` subcommand.
+    """argv is passed explicitly by the `blink run` subcommand.
 
     Without it this parsed sys.argv[1:], which inside the packaged binary is
     ["run"] -- the subcommand name itself. argparse rejected it, the process
     exited immediately, and the login service restarted it every ten seconds
     forever. It never ran once.
     """
-    ap = argparse.ArgumentParser(prog="clauge run")
+    ap = argparse.ArgumentParser(prog="blink run")
     ap.add_argument("--port", default=None)
     ap.add_argument("--baud", type=int, default=115200)
     args = ap.parse_args(argv)
@@ -355,10 +355,10 @@ def main(argv=None):
     # binary aside and moving the new one in, the login service is pointing at
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
-    from pc.cli import (_self_path, clauge_home as _clauge_home,
+    from pc.cli import (_self_path, blink_home as _blink_home,
                         installed_bin, settings_path, shim_path)
     self_bin = installed_bin()
-    clauge_home = _clauge_home()
+    blink_home = _blink_home()
     update.recover(self_bin)
 
     # Outside the reconnect loop, unlike next_poll. A board that comes and goes
@@ -384,13 +384,13 @@ def main(argv=None):
     # the file object is bound here so it is not garbage collected, which would
     # release it.
     _instance_lock = hold_single_instance(   # noqa: F841 -- held, not used
-        clauge_home, on_wait=lambda: watchdog.tick())
+        blink_home, on_wait=lambda: watchdog.tick())
 
     # Record the pid so uninstall can stop US specifically. Ending the login
     # service is not the same as ending this program, and killing by image name
     # is how the uninstaller once killed itself; a pid is unambiguous.
     #
-    # Written NEXT TO THE BINARY rather than under ~/.clauge, because those are
+    # Written NEXT TO THE BINARY rather than under ~/.blink, because those are
     # not always the same place. A login service runs in the user's own
     # environment, not in whatever environment registered it -- so under the CI
     # harness, which redirects HOME to a temporary directory, the daemon
@@ -428,7 +428,7 @@ def main(argv=None):
 
     # What we learned last time. A machine that has connected before opens the
     # port it used, with no scanning at all.
-    known = remembered_board(clauge_home)
+    known = remembered_board(blink_home)
     # The USB layout we have already searched without finding anything. While
     # it is unchanged there is nothing new to look at, so we wait instead of
     # reopening ports on a timer.
@@ -676,7 +676,7 @@ def main(argv=None):
                         set_preferred=bus.set_preferred,
                         self_update=self_update,
                         pending=update.PendingFirmware(
-                            os.path.join(clauge_home, "pending_fw.json")))
+                            os.path.join(blink_home, "pending_fw.json")))
         report_failure = None   # handed to the Bridge above; never repeated
         # No reset means no boot `hello`, so nothing would trigger the
         # greeting -- see Bridge.greet.
@@ -716,7 +716,7 @@ def main(argv=None):
                             known = {"port": port,
                                      "board_id": msg.get("board_id")
                                      or known.get("board_id")}
-                            remember_board(clauge_home, known["port"],
+                            remember_board(blink_home, known["port"],
                                            known.get("board_id"))
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within

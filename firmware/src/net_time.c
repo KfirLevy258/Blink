@@ -7,7 +7,7 @@
  * does this instead).
  */
 #include <zephyr/kernel.h>
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 #include <zephyr/net/sntp.h>
 #endif
 #include <zephyr/sys/timeutil.h>
@@ -19,13 +19,13 @@
 #include "version.h"
 
 /* Sanity window for any accepted time source. The floor blocks the
- * clock-rollback certificate attack (see CLAUGE_TIME_FLOOR); the ceiling
+ * clock-rollback certificate attack (see BLINK_TIME_FLOOR); the ceiling
  * matches the protocol's "before 2100" bound and catches garbage. */
 #define TIME_CEILING 4102444800LL	/* 2100-01-01T00:00:00Z */
 
 static bool time_sane(int64_t unix_s)
 {
-	return unix_s >= CLAUGE_TIME_FLOOR && unix_s < TIME_CEILING;
+	return unix_s >= BLINK_TIME_FLOOR && unix_s < TIME_CEILING;
 }
 
 static bool have_time;
@@ -42,7 +42,7 @@ static int32_t offset_min;
  * so reads and writes go through a spinlock (held for nanoseconds). */
 static struct k_spinlock time_lock;
 
-#if IS_ENABLED(CONFIG_CLAUGE_WIFI_MODE)
+#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
 /* The only part of this file that needs a network. The rest -- set_manual,
  * set_offset, local, secs_until -- is arithmetic on a clock the daemon sets
  * over USB, and is what a tethered board actually uses. */
@@ -77,7 +77,7 @@ int net_time_sync(int timeout_s)
 	}
 	return -ETIMEDOUT;
 }
-#endif /* CONFIG_CLAUGE_WIFI_MODE */
+#endif /* CONFIG_BLINK_WIFI_MODE */
 
 bool net_time_valid(void)
 {

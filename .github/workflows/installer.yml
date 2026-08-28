@@ -100,7 +100,7 @@ jobs:
           python-version: '3.11'
       - run: sh tools/build_binary.sh
 
-      # The old smoke test was `./dist/clauge* status || true`, which asserted
+      # The old smoke test was `./dist/blink* status || true`, which asserted
       # nothing: it swallowed every failure, and on the Windows runner the
       # default shell could not even expand that glob, so it had never run
       # there at all.
@@ -114,8 +114,8 @@ jobs:
         shell: bash
         run: |
           set -eu
-          bin=dist/clauge
-          [ -f "$bin" ] || bin=dist/clauge.exe
+          bin=dist/blink
+          [ -f "$bin" ] || bin=dist/blink.exe
           echo "size: $(du -h "$bin" | cut -f1)"
 
           "$bin" --version
@@ -129,10 +129,10 @@ jobs:
           # this job flaky for a reason it cannot fix. A binary that cannot
           # verify a signature does not print either of these lines -- it
           # raises, and `set -e` catches that.
-          # CLAUGE_SKIP_SERVICE, because cmd_update restarts the login
+          # BLINK_SKIP_SERVICE, because cmd_update restarts the login
           # service on success and this runner has none -- the same guard
           # release-binaries.yml and check_install.sh already set.
-          out=$(CLAUGE_SKIP_SERVICE=1 "$bin" update 2>&1) || true
+          out=$(BLINK_SKIP_SERVICE=1 "$bin" update 2>&1) || true
           echo "$out"
           # All FOUR terminal outputs, not two.
           #
@@ -143,7 +143,7 @@ jobs:
           # exit 1 and fail the job for doing exactly what they should.
           #
           # The download branch is worse than a false failure: by the time it
-          # printed, update.apply() had already replaced ~/.clauge/bin/clauge
+          # printed, update.apply() had already replaced ~/.blink/bin/blink
           # on the runner. That is fine here -- the artifact is uploaded from
           # dist/, not from ~ -- but it is why this step must not be treated
           # as read-only.
@@ -154,8 +154,8 @@ jobs:
           esac
       - uses: actions/upload-artifact@v4
         with:
-          name: clauge-${{ matrix.os }}
-          path: dist/clauge*
+          name: blink-${{ matrix.os }}
+          path: dist/blink*
           retention-days: 7
 
   # The step no unit test reaches, because it touches the machine: registering
@@ -180,9 +180,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: clauge-${{ matrix.os }}
+          name: blink-${{ matrix.os }}
           path: dist
-      - run: chmod +x dist/clauge*
+      - run: chmod +x dist/blink*
       # HOME is redirected inside the script, but the launchd label and the
       # systemd unit name are constants -- fine on a throwaway runner, which is
       # the whole reason this job cannot be a local test.
@@ -209,9 +209,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: clauge-${{ matrix.os }}
+          name: blink-${{ matrix.os }}
           path: dist
-      - run: chmod +x dist/clauge*
+      - run: chmod +x dist/blink*
       - run: sh tests/ci/check_update.sh
 
   # The firmware's pure logic, compiled and run on a plain runner. native_sim
@@ -284,9 +284,9 @@ jobs:
           python-version: '3.11'
       - uses: actions/download-artifact@v4
         with:
-          name: clauge-ubuntu-latest
+          name: blink-ubuntu-latest
           path: dist
-      - run: chmod +x dist/clauge*
+      - run: chmod +x dist/blink*
       - run: npm install -g @anthropic-ai/claude-code@${{ matrix.version }}
       - run: claude --version
       - run: sh tests/ci/check_claude_version.sh
@@ -312,7 +312,7 @@ jobs:
           shellcheck --version
       # -s sh: these must be POSIX. Checking them as bash would let a bashism
       # through that breaks the /bin/sh they actually run under.
-      - run: shellcheck -s sh tools/clauge-statusline.sh tools/clauge-hook.sh tools/build_binary.sh tests/ci/*.sh
+      - run: shellcheck -s sh tools/blink-statusline.sh tools/blink-hook.sh tools/build_binary.sh tests/ci/*.sh
 
       # The firmware and the daemon ship from one tag. A disagreement here is
       # invisible everywhere else -- it builds, it tests, it runs -- and only
@@ -322,7 +322,7 @@ jobs:
         run: sh tests/ci/check_versions.sh
       - name: reject CRLF line endings
         run: |
-          if grep -rlU $'\r' tools/clauge-statusline.sh tools/clauge-hook.sh tools/build_binary.sh tests/ci/; then
+          if grep -rlU $'\r' tools/blink-statusline.sh tools/blink-hook.sh tools/build_binary.sh tests/ci/; then
             echo "CRLF found: a shim with CRLF fails with 'bad interpreter'" >&2
             exit 1
           fi

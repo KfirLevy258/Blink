@@ -2,9 +2,9 @@
 # trailing `source "Kconfig.zephyr"` is mandatory -- without it every upstream
 # symbol disappears.
 
-menu "Clauge"
+menu "Blink"
 
-config CLAUGE_TOUCH_TRACE
+config BLINK_TOUCH_TRACE
 	bool "Touch trace diagnostic"
 	depends on INPUT_XPT2046
 	help
@@ -13,7 +13,7 @@ config CLAUGE_TOUCH_TRACE
 	  trace.conf, never in a release build.
 
 
-config CLAUGE_WIFI_MODE
+config BLINK_WIFI_MODE
 	bool "Standalone WiFi mode (on-device sign-in and usage fetch)"
 	help
 	  Build the board's own network path: the captive-portal setup flow,
@@ -35,7 +35,7 @@ config CLAUGE_WIFI_MODE
 
 	  wifi.conf sets this symbol, so that one flag is the whole switch.
 
-config CLAUGE_PANEL_PILOT
+config BLINK_PANEL_PILOT
 	bool "Build for the two pilot (POC) display panels"
 	help
 	  The production batch and the two pilot boards carry different
@@ -57,10 +57,10 @@ config CLAUGE_PANEL_PILOT
 	  work right now and then quietly break: production units get fused
 	  before shipping, and the rule would build pilot firmware for them.
 
-config CLAUGE_BL_SCALE_PCT
+config BLINK_BL_SCALE_PCT
 	int "Backlight duty as a percent of the nominal level"
 	range 10 100
-	default 100 if CLAUGE_PANEL_PILOT
+	default 100 if BLINK_PANEL_PILOT
 	default 60
 	help
 	  Scales every brightness step, so that a given user-facing percent

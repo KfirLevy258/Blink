@@ -40,7 +40,7 @@ from pc.version import RELEASE_VERSION
 MANIFEST_URL = ota.RELEASE_BASE + "manifest.json"
 SIG_URL = ota.RELEASE_BASE + "manifest.json.sig"
 
-# The public half of ~/.clauge/release_signing_key_p256.pem. Signing happens in
+# The public half of ~/.blink/release_signing_key_p256.pem. Signing happens in
 # tools/release.sh. Losing the private half costs nothing today and everything
 # after launch: from the first customer onwards, no installed app would ever
 # accept another update, and there is no way to reach one that will not. Back
@@ -54,7 +54,7 @@ JK1K9T7tpqx6hxXWLKxorhWH6Pkxs8Bd/jzv4Zsk2yTOhaUE+dZmSt24Yw==
 # Opt out regardless of what the manifest says. A file rather than only an
 # environment variable because the daemon is started by launchd/systemd, where
 # nobody's shell exports anything.
-NO_AUTO_ENV = "CLAUGE_NO_AUTO_UPDATE"
+NO_AUTO_ENV = "BLINK_NO_AUTO_UPDATE"
 
 # Verify against a different public key. This exists so the update path can be
 # exercised end to end against a local feed -- tests/ci/check_update.sh signs a
@@ -66,7 +66,7 @@ NO_AUTO_ENV = "CLAUGE_NO_AUTO_UPDATE"
 # is writable. What it must never become is a way to skip verification, so an
 # unreadable file falls back to the embedded key rather than to trusting
 # whatever arrived.
-PUBKEY_ENV = "CLAUGE_RELEASE_PUBKEY_FILE"
+PUBKEY_ENV = "BLINK_RELEASE_PUBKEY_FILE"
 
 
 def _pubkey():
@@ -81,10 +81,10 @@ def _pubkey():
     return RELEASE_PUBKEY_PEM
 
 
-def auto_update_allowed(clauge_home) -> bool:
+def auto_update_allowed(blink_home) -> bool:
     if os.environ.get(NO_AUTO_ENV) == "1":
         return False
-    return not os.path.exists(os.path.join(clauge_home, "no-auto-update"))
+    return not os.path.exists(os.path.join(blink_home, "no-auto-update"))
 
 
 def platform_key():
@@ -132,7 +132,7 @@ def _verify_with_openssl(raw, sig, pubkey_pem):
     import tempfile
     if not shutil.which("openssl"):
         return False
-    d = tempfile.mkdtemp(prefix="clauge-verify-")
+    d = tempfile.mkdtemp(prefix="blink-verify-")
     try:
         paths = {}
         for name, data in (("pub.pem", pubkey_pem.encode()),
@@ -193,7 +193,7 @@ def download(key, artifact, get=ota._get):
     """The new binary's bytes, checked against the manifest. Raises on either
     mismatch -- there is nothing sensible to do with a download we cannot
     identify, and running it is certainly not it."""
-    blob = get(ota.RELEASE_BASE + "clauge-" + key, timeout=300)
+    blob = get(ota.RELEASE_BASE + "blink-" + key, timeout=300)
     if len(blob) != artifact["size"]:
         raise ValueError(f"size {len(blob)} != manifest {artifact['size']}")
     digest = hashlib.sha256(blob).hexdigest()

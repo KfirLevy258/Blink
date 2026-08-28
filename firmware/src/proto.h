@@ -18,7 +18,7 @@ bool proto_host_seen(void);
 
 /* The daemon's release version as it announced itself, or "" if it has not.
  * Firmware and daemon ship from one tag, so this should equal
- * CLAUGE_FW_VERSION on a fully updated machine. */
+ * BLINK_FW_VERSION on a fully updated machine. */
 const char *proto_host_version(void);
 
 /* True when that version is older than this firmware -- i.e. the app on the

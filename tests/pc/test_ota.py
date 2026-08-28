@@ -482,7 +482,7 @@ class TestManifestCompatibility(unittest.TestCase):
     """A manifest missing the newer blocks must still install firmware.
 
     Not about installs in the field -- there are none yet. It is about the
-    manifests that are written by hand: CLAUGE_OTA_DIR feeds during
+    manifests that are written by hand: BLINK_OTA_DIR feeds during
     development are typed out by whoever is testing, and a partially written
     one should not take the update path down with it. It becomes a
     compatibility guarantee the day the first customer's app reads a manifest.

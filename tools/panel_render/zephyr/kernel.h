@@ -10,7 +10,7 @@ static inline int64_t k_uptime_get(void)
 	gettimeofday(&tv, 0);
 	return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
-/* The board build defines CONFIG_CLAUGE_WIFI_MODE or does not; this render is
+/* The board build defines CONFIG_BLINK_WIFI_MODE or does not; this render is
  * the USB configuration, so it never does. */
 #define IS_ENABLED(x) 0
 

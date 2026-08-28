@@ -101,7 +101,7 @@ def test_launchd_install_writes_the_plist_and_bootstraps(home, monkeypatch):
     assert cli.backend().install() == "running (launchd)"
 
     plist = open(cli.plist_path()).read()
-    assert "<key>Label</key><string>com.clauge.bridge</string>" in plist
+    assert "<key>Label</key><string>com.blink.bridge</string>" in plist
     assert "<key>KeepAlive</key><true/>" in plist
     assert cli.log_path() in plist
     # bootout must come first, or bootstrap fails on "already loaded".
@@ -141,7 +141,7 @@ def test_launchd_remove_boots_out_and_deletes_the_plist(home, monkeypatch):
     r = _runs(monkeypatch)
 
     assert cli.backend().remove() == "removed"
-    assert r.ran("launchctl", "bootout", "gui/501/com.clauge.bridge")
+    assert r.ran("launchctl", "bootout", "gui/501/com.blink.bridge")
     assert not os.path.exists(cli.plist_path())
 
 
@@ -297,7 +297,7 @@ class TestLinuxWithoutSystemd:
 ])
 def test_creates_names_the_thing_install_will_make(home, monkeypatch,
                                                    platform, needle):
-    """`clauge install` prints this before it does anything."""
+    """`blink install` prints this before it does anything."""
     _platform(monkeypatch, platform)
     assert needle in cli.backend().creates()
 
@@ -310,8 +310,8 @@ def test_skip_service_short_circuits_every_entry_point(home, monkeypatch, fn):
     """The tests' own guard. If one of these forgot it, a unit test under a
     temporary HOME would boot out the agent of whoever is logged in."""
     _platform(monkeypatch, "darwin")
-    monkeypatch.setenv("CLAUGE_SKIP_SERVICE", "1")
+    monkeypatch.setenv("BLINK_SKIP_SERVICE", "1")
     r = _runs(monkeypatch)
 
-    assert getattr(cli, fn)() == "skipped (CLAUGE_SKIP_SERVICE=1)"
+    assert getattr(cli, fn)() == "skipped (BLINK_SKIP_SERVICE=1)"
     assert r.calls == []

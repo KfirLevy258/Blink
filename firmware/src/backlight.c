@@ -24,7 +24,7 @@ static uint8_t level = 100;	/* percent; real value loaded in backlight_init */
  *
  * Scaling the duty rather than lowering the default keeps a given percent
  * meaning the same amount of light on either batch, and leaves the user the
- * full 20..100 range instead of shrinking it. The factor is CLAUGE_BL_SCALE_PCT
+ * full 20..100 range instead of shrinking it. The factor is BLINK_BL_SCALE_PCT
  * (100 on pilot builds, so they are unaffected) -- tune it by eye.
  *
  * The multiply is 64-bit on purpose: period is in nanoseconds (1 ms at the
@@ -38,7 +38,7 @@ static void apply(void)
 	}
 	printk("[bl] %d%%\n", level);
 	pwm_set_pulse_dt(&bl, (uint32_t)((uint64_t)bl.period * level *
-					  CONFIG_CLAUGE_BL_SCALE_PCT / 10000U));
+					  CONFIG_BLINK_BL_SCALE_PCT / 10000U));
 }
 
 void backlight_init(void)

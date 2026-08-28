@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the single-file `clauge` binary for THIS platform.
+# Build the single-file `blink` binary for THIS platform.
 #
 #   tools/build_binary.sh [outdir]
 #
@@ -13,7 +13,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OUT="${1:-$ROOT/dist}"
-BUILD="${TMPDIR:-/tmp}/clauge-build"
+BUILD="${TMPDIR:-/tmp}/blink-build"
 
 command -v python3 >/dev/null 2>&1 || { echo "need python3 to build" >&2; exit 1; }
 
@@ -63,24 +63,24 @@ fi
 cd "$ROOT"
 "$VBIN/pyinstaller" \
 	--onefile \
-	--name clauge \
+	--name blink \
 	--distpath "$OUT" \
 	--workpath "$BUILD/work" \
 	--specpath "$BUILD" \
-	--add-data "$ROOT/tools/clauge-statusline.sh:." \
-	--add-data "$ROOT/tools/clauge-hook.sh:." \
+	--add-data "$ROOT/tools/blink-statusline.sh:." \
+	--add-data "$ROOT/tools/blink-hook.sh:." \
 	--collect-all esptool \
 	--hidden-import claude_usage_bridge \
 	--hidden-import ecdsa \
 	--hidden-import serial.tools.list_ports \
 	"$@" \
 	--noconfirm --clean \
-	clauge_main.py >"$BUILD/pyinstaller.log" 2>&1 || {
+	blink_main.py >"$BUILD/pyinstaller.log" 2>&1 || {
 		tail -30 "$BUILD/pyinstaller.log" >&2
 		echo "FATAL: build failed; full log at $BUILD/pyinstaller.log" >&2
 		exit 1
 	}
 
-BUILT="$OUT/clauge"
-[ -f "$BUILT" ] || BUILT="$OUT/clauge.exe"
+BUILT="$OUT/blink"
+[ -f "$BUILT" ] || BUILT="$OUT/blink.exe"
 echo "built $BUILT ($(du -h "$BUILT" | cut -f1))"

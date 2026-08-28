@@ -1,4 +1,4 @@
-"""Install the Clauge execution-state hooks into a user's Claude Code settings.
+"""Install the Blink execution-state hooks into a user's Claude Code settings.
 
 Same file, same owner, same two rules as pc/install_statusline: never lose
 anything the user put there, and never rewrite a key that is not ours.
@@ -23,7 +23,7 @@ import sys
 from pc.install_statusline import (SettingsUnreadable, _load, _save,
                                    _sniff_format)
 
-INSTALLED_MARKER_PATH = "~/.clauge/hooks-installed-commands"
+INSTALLED_MARKER_PATH = "~/.blink/hooks-installed-commands"
 
 # The lifecycle events the state machine is derived from, each with the
 # matcher its entry is written with (None for events that take none). Tool
@@ -52,7 +52,7 @@ HOOK_EVENTS = (
     ("SessionEnd", None),
     # Subagent lifetimes. Both carry agent_id, which is what lets the shim
     # keep one file per agent and the daemon count them exactly without a
-    # lock -- see tools/clauge-hook.sh.
+    # lock -- see tools/blink-hook.sh.
     ("SubagentStart", "*"),
     ("SubagentStop", "*"),
 )
@@ -110,7 +110,7 @@ def _ours(command: str, expected: set, marker: set) -> bool:
 
     Both checks, for the reasons install_statusline._is_ours gives: the marker
     survives a shim path that has since changed, and the computed form
-    survives a marker file that was lost with the rest of ~/.clauge.
+    survives a marker file that was lost with the rest of ~/.blink.
 
     The marker is passed in rather than read here: this is called once per
     hook entry inside two nested loops, and reading the same small file a
@@ -200,13 +200,13 @@ def install(settings_path: str, shim_path: str) -> str:
     _save(settings_path, data, indent, trailing_newline)
     _write_marker(expected)
     if added == 0 and repointed == 0:
-        return "Clauge state hooks already installed."
+        return "Blink state hooks already installed."
     if added == 0:
-        return f"Clauge state hooks repointed at the new path ({repointed})."
+        return f"Blink state hooks repointed at the new path ({repointed})."
     if repointed:
-        return (f"Clauge state hooks installed ({added} events,"
+        return (f"Blink state hooks installed ({added} events,"
                 f" {repointed} repointed).")
-    return f"Clauge state hooks installed ({added} events)."
+    return f"Blink state hooks installed ({added} events)."
 
 
 def uninstall(settings_path: str, shim_path: str = None) -> str:
@@ -229,7 +229,7 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         _remove_marker()
-        return "No Clauge state hooks to remove."
+        return "No Blink state hooks to remove."
 
     removed = 0
     for event, _ in HOOK_EVENTS:
@@ -267,5 +267,5 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
     _save(settings_path, data, indent, trailing_newline)
     _remove_marker()
     if removed == 0:
-        return "No Clauge state hooks to remove."
-    return f"Clauge state hooks removed ({removed})."
+        return "No Blink state hooks to remove."
+    return f"Blink state hooks removed ({removed})."

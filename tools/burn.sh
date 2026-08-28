@@ -19,7 +19,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 EDITION=""
-PORT="${CLAUGE_PORT:-}"
+PORT="${BLINK_PORT:-}"
 SKIP_BUILD=0
 
 while [ $# -gt 0 ]; do
@@ -40,18 +40,18 @@ esac
 say()  { printf '\n== %s\n' "$*"; }
 die()  { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
 
-PY="${CLAUGE_PYTHON:-$ROOT/.venv/bin/python}"
+PY="${BLINK_PYTHON:-$ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY=$(command -v python3) || die "no python3"
 
-BOARD="${CLAUGE_BOARD:-esp32_devkitc/esp32/procpu}"
-KEY="${CLAUGE_SIGNING_KEY:-$HOME/.clauge/ota_signing_key_p256.pem}"
+BOARD="${BLINK_BOARD:-esp32_devkitc/esp32/procpu}"
+KEY="${BLINK_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
 BUILD="$ROOT/firmware/build-sb"
 
 # ---------------------------------------------------------------- 0. the port
 say "Finding the board"
 # The installed daemon holds the port. Stop it for the duration and put it back
 # on the way out, whatever happens -- including a Ctrl-C mid-flash.
-AGENT="gui/$(id -u)/com.clauge.bridge"
+AGENT="gui/$(id -u)/com.blink.bridge"
 DAEMON_WAS_UP=0
 if launchctl print "$AGENT" >/dev/null 2>&1; then
 	DAEMON_WAS_UP=1
@@ -60,7 +60,7 @@ fi
 restore_daemon() {
 	[ "$DAEMON_WAS_UP" = 1 ] || return 0
 	launchctl bootstrap "gui/$(id -u)" \
-		"$HOME/Library/LaunchAgents/com.clauge.bridge.plist" >/dev/null 2>&1 || true
+		"$HOME/Library/LaunchAgents/com.blink.bridge.plist" >/dev/null 2>&1 || true
 }
 # EXIT restores; INT/TERM restore AND EXIT. A trap that only restored let a
 # Ctrl-C mid-flash carry straight on to the stamp step, with the daemon just
@@ -128,9 +128,9 @@ APP="$BUILD/firmware/zephyr/zephyr.signed.bin"
 # is running THIS image and not whatever was on it before. With --no-build
 # against a stale build directory the two can differ, and a stamp on the
 # wrong firmware is still a stamp.
-FW_VERSION=$(sed -n 's/^#define CLAUGE_FW_VERSION "\(.*\)"$/\1/p' \
+FW_VERSION=$(sed -n 's/^#define BLINK_FW_VERSION "\(.*\)"$/\1/p' \
 	"$ROOT/firmware/src/version.h")
-[ -n "$FW_VERSION" ] || die "cannot read CLAUGE_FW_VERSION from firmware/src/version.h"
+[ -n "$FW_VERSION" ] || die "cannot read BLINK_FW_VERSION from firmware/src/version.h"
 
 # ------------------------------------------------------------- 3. flash
 say "Flashing"

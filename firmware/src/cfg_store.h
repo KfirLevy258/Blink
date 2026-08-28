@@ -103,7 +103,7 @@ int cfg_reset(void);
  * Which edition this unit is: which boot clip it plays.
  *
  * A FACTORY fact, not a preference. It is written once over USB after the
- * board is programmed (`clauge provision --edition codex`) and there is
+ * board is programmed (`blink provision --edition codex`) and there is
  * deliberately no way to reach it from the settings screen -- the enclosure
  * decides it, and a user who could flip it would only be putting the wrong
  * animation in the wrong box.
@@ -124,7 +124,7 @@ int cfg_reset(void);
  * settings screen" was not enough: the message that stamps it arrives over
  * USB from whatever is on the other end of the cable, and the CLI that sends
  * it is the same binary the user installs. Without the latch, anyone who owns
- * a unit owns `clauge provision`, and the enclosure and the animation inside
+ * a unit owns `blink provision`, and the enclosure and the animation inside
  * it stop agreeing.
  *
  * The latch also survives cfg_reset(). A factory reset wipes what the USER
