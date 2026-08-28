@@ -12,6 +12,8 @@
 # Scenarios: no-claude, no-settings, no-statusline, with-statusline,
 #            reinstall, foreign-uninstall, spaced-home
 #            all-sources, desktop-only, codex-only, broken-data
+#            install-uninstall-install, home-wiped-uninstall,
+#            unreadable-settings
 #
 # The last four feed the INSTALLED binary the files the daemon reads on a
 # customer's machine -- a status line payload through the shim, hook events
@@ -175,7 +177,7 @@ no-settings)
 	mkdir -p "$HOME/.claude" ;;           # directory, no settings.json
 no-statusline)
 	write_settings '{"model": "opus", "env": {"FOO": "bar"}}' ;;
-with-statusline | reinstall | spaced-home)
+with-statusline | reinstall | spaced-home | install-uninstall-install)
 	write_their_bar
 	# Quoted, because a path with spaces has to be -- that is how a real
 	# customer's own command would be written, and the point of spaced-home
@@ -192,6 +194,10 @@ desktop-only)
 	write_desktop_cache ;;                # no ~/.claude, no Codex
 codex-only)
 	write_codex_log ;;                    # no ~/.claude, no Desktop
+home-wiped-uninstall)
+	write_settings '{"model": "opus"}' ;;
+unreadable-settings)
+	write_settings '{"model": "opus", "statusLine": {not json' ;;
 broken-data)
 	write_settings '{"model": "opus"}'
 	f=$(desktop_cache); mkdir -p "$(dirname "$f")"; printf '{not json' >"$f"
@@ -239,6 +245,40 @@ if [ "$SCENARIO" = "foreign-uninstall" ]; then
 		fail "uninstall clobbered a status line it never installed"
 	ok "foreign status line untouched"
 	exit 0
+fi
+
+if [ "$SCENARIO" = "unreadable-settings" ]; then
+	# The file we are about to edit does not parse. The honest move is to
+	# change nothing and say why -- treating it as empty would write a fresh
+	# settings.json over whatever the customer was halfway through editing.
+	cp "$(settings)" "$WORK/settings.before"
+	if "$BIN" >"$WORK/out.txt" 2>&1; then
+		fail "install exited 0 on a settings.json that does not parse"
+	fi
+	grep -q "setup stopped" "$WORK/out.txt" || fail "install did not say why it stopped: $(cat "$WORK/out.txt")"
+	cmp -s "$(settings)" "$WORK/settings.before" || fail "install changed a settings.json it could not parse"
+	[ ! -e "$HOME/.blink/bin" ] || fail "install copied the binary before refusing"
+	[ ! -e "$HOME/.blink/blink-statusline.sh" ] || fail "install wrote the shim before refusing"
+	ok "install refuses an unparseable settings.json, changes nothing, says why"
+	printf 'PASS [%s]\n' "$SCENARIO"
+	exit 0
+fi
+
+if [ "$SCENARIO" = "install-uninstall-install" ]; then
+	# The round trip a customer actually makes: install, decide against it,
+	# then come back. The second install must chain THEIR bar again, not the
+	# stale shim the first install left in the chain file.
+	"$BIN" >"$WORK/out0.txt" 2>&1 || { cat "$WORK/out0.txt" >&2; fail "first install failed"; }
+	"$BIN" uninstall >"$WORK/undo0.txt" 2>&1 || { cat "$WORK/undo0.txt" >&2; fail "first uninstall failed"; }
+	[ "$(json_get statusLine.command)" = "sh '$THEIR_BAR'" ] ||
+		fail "first uninstall did not restore their command: $(json_get statusLine.command)"
+	[ ! -e "$HOME/.blink/statusline-chain" ] || fail "first uninstall left the chain file"
+	[ "$(json_get hooks)" = "" ] || fail "first uninstall left hooks behind: $(json_get hooks)"
+	n=0; while [ -e "$HOME/.blink/bin" ] && [ "$n" -lt 30 ]; do sleep 1; n=$((n + 1)); done
+	[ ! -e "$HOME/.blink/bin" ] || fail "first uninstall left the binary behind"
+	ok "install, then uninstall: their bar back, nothing of ours left"
+	# ...and the main flow below now does the second install and uninstall,
+	# with every with-statusline assertion applied to the second round.
 fi
 
 "$BIN" >"$WORK/out.txt" 2>&1 || {
@@ -318,7 +358,7 @@ if [ "${BLINK_SKIP_SERVICE:-0}" != "1" ]; then
 fi
 
 case "$SCENARIO" in
-with-statusline | reinstall | spaced-home)
+with-statusline | reinstall | spaced-home | install-uninstall-install)
 	chain=$(cat "$HOME/.blink/statusline-chain" 2>/dev/null || echo "")
 	[ "$chain" = "sh '$THEIR_BAR'" ] || fail "chain is [$chain], expected [sh '$THEIR_BAR']"
 	ok "their command preserved in the chain file"
@@ -451,13 +491,37 @@ esac
 
 # ----------------------------------------------------------------- undo --
 
+if [ "$SCENARIO" = "home-wiped-uninstall" ]; then
+	# The customer deleted ~/.blink by hand -- the installed copy, the shims,
+	# the chain file and the marker all gone -- and then runs the download
+	# they still have to uninstall. settings.json still names our shim, and
+	# a status line pointing at a deleted script errors on every render, so
+	# it must go; the hooks too. With the chain file gone nothing can be
+	# restored, and the uninstall must still finish and say so.
+	rm -rf "$HOME/.blink"
+	"$BIN" uninstall >"$WORK/undo.txt" 2>&1 || { cat "$WORK/undo.txt" >&2; fail "uninstall failed after ~/.blink was wiped"; }
+	[ "$(json_get statusLine.command)" = "" ] ||
+		fail "uninstall left a status line pointing at a deleted shim: $(json_get statusLine.command)"
+	[ "$(json_get hooks)" = "" ] || fail "uninstall left hooks pointing at a deleted shim: $(json_get hooks)"
+	[ "$(json_get model)" = "opus" ] || fail "an unrelated key was lost"
+	if [ "${BLINK_SKIP_SERVICE:-0}" != "1" ]; then
+		case "$(uname -s)" in
+		Darwin) [ ! -e "$HOME/Library/LaunchAgents/com.blink.bridge.plist" ] || fail "launchd plist left behind" ;;
+		Linux) [ ! -e "$HOME/.config/systemd/user/blink-bridge.service" ] || fail "systemd unit left behind" ;;
+		esac
+	fi
+	ok "uninstall after a hand-deleted ~/.blink removes the dangling status line and hooks"
+	printf 'PASS [%s]\n' "$SCENARIO"
+	exit 0
+fi
+
 "$BIN" uninstall >"$WORK/undo.txt" 2>&1 || {
 	cat "$WORK/undo.txt" >&2
 	fail "uninstall exited non-zero"
 }
 
 case "$SCENARIO" in
-with-statusline | reinstall | spaced-home)
+with-statusline | reinstall | spaced-home | install-uninstall-install)
 	[ "$(json_get statusLine.command)" = "sh '$THEIR_BAR'" ] ||
 		fail "uninstall did not restore their command" ;;
 *)

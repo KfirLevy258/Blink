@@ -188,6 +188,10 @@ jobs:
           - desktop-only       # percentages and a burn rate, no reset time
           - codex-only         # codex primary with both countdowns
           - broken-data        # two unparseable files: named, and nothing sent
+          # The sequences a customer actually makes.
+          - install-uninstall-install  # came back: their bar chained again, not our stale shim
+          - home-wiped-uninstall       # deleted ~/.blink by hand, then uninstalled
+          - unreadable-settings        # settings.json does not parse: refuse, change nothing
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
