@@ -218,6 +218,16 @@ PYEOF
 
 gh release upload "$TAG" --repo "$REPO" --clobber \
 	"$TMP/manifest.json" "$TMP/manifest.json.sig"
+# BLINK_RELEASE_DRAFT=1 stops here, with everything attached and signed but
+# nothing public. That is how a release gets watched end to end on a real
+# board first: `gh release download $TAG -D some-dir` and run the daemon with
+# BLINK_OTA_DIR=some-dir. When it has been seen to work:
+#   gh release edit $TAG --draft=false
+if [ "${BLINK_RELEASE_DRAFT:-0}" = "1" ]; then
+	echo "Draft $TAG is complete and signed; left unpublished (BLINK_RELEASE_DRAFT=1)."
+	echo "Publish with: gh release edit $TAG --repo $REPO --draft=false"
+	exit 0
+fi
 gh release edit "$TAG" --repo "$REPO" --draft=false
 echo "Released $TAG ($SIZE bytes) with binaries for:$( for k in $ARTIFACTS; do printf ' %s' "$k"; done)"
 echo "Boards pick it up on their next check."

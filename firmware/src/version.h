@@ -3,7 +3,7 @@
 
 /* One source of truth: the serial hello and the settings panel must never
  * disagree about what is flashed. Bump on any user-visible change. */
-#define BLINK_FW_VERSION "0.6.0"
+#define BLINK_FW_VERSION "0.7.0"
 
 /* The wire protocol spoken over USB, and the daemon's own PROTO_VERSION in
  * pc/version.py. It is a floor, not a format selector: the protocol only ever
@@ -17,7 +17,7 @@
  * (2026-07-17T00:00:00Z). SNTP is unauthenticated UDP; without a floor, an
  * on-path attacker can shift the clock into the past and make once-valid
  * leaked certificates verify again. Nudge forward on version bumps.
- * 1784937600 = 2026-07-25T00:00:00Z. */
-#define BLINK_TIME_FLOOR 1784937600LL
+ * 1787875200 = 2026-08-28T00:00:00Z. */
+#define BLINK_TIME_FLOOR 1787875200LL
 
 #endif /* VERSION_H */
