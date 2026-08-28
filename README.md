@@ -34,13 +34,29 @@ It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the
 
 ### Where the numbers come from
 
-Clauge never sees a credential, and never reads your conversations. It reads figures other programs have already worked out, from as many of these as you have:
+Clauge never sees a credential, and never reads your conversations. It reads figures other programs have already worked out.
+
+### What it supports, and how well
+
+| You use | What the panel shows | |
+|---|---|---|
+| **Claude Code in a terminal** | Everything: both limits, both countdowns, the activity light, session and subagent counts | **Full** |
+| **Claude Code in the VS Code / JetBrains extension** | The same. The extension runs the same CLI and reads the same `~/.claude/settings.json`, so the status line and hooks work identically | **Full** |
+| **Claude Desktop, without Claude Code** | Both percentages and how fast the five-hour window is filling. **No countdowns, no activity light** | **Partial** |
+| **Codex CLI** | Both limits and both countdowns, on its own page | **Full** |
+| **claude.ai in a browser** | Nothing | **Not supported** |
+
+**Why Claude Desktop is only half.** The app records two percentages and no reset timestamps — anywhere, in any file. That was checked exhaustively in August 2026: every JSON file it writes, its LevelDB and Session Storage and IndexedDB stores, its caches and its preferences plist. So there is no countdown to show, and the panel shows a **rate** instead (`+14%/h`) — measured from readings actually taken, not a guessed reset time. The activity light needs Claude Code's hooks, which a machine without Claude Code does not have. `clauge install` says all of this on a machine in that state rather than reporting four successful steps.
+
+**Why claude.ai is not supported.** A browser extension was built to read usage from response headers and measured against the real site: 178 responses, none carrying a rate-limit header of any kind. There is nothing to read. It was removed rather than shipped as a feature that does nothing. `docs/next-steps.md` §A has the measurement.
+
+### Where the numbers come from
 
 | Source | Gives | Needs |
 |---|---|---|
-| Claude Code's status line | both limits, reset times, context, model | nothing - set up by `clauge install` |
-| Claude Desktop's usage cache | both limits | nothing - read if the app is installed |
+| Claude Code's status line | both limits, reset times | nothing - set up by `clauge install` |
 | Claude Code's hooks | per-session busy / waiting / stuck / rate-limited, and live subagent count | nothing - set up by `clauge install` |
+| Claude Desktop's usage cache | both limits, and the burn rate derived from its history | nothing - read if the app is installed |
 | Codex CLI's own session log | both limits and reset times, for Codex | nothing - read if Codex is installed |
 
 When two of them disagree, the most recently observed number wins - field by field, so a source that knows your reset time still supplies it even when a fresher one takes over the percentage. `docs/multi-provider.md` has the details.
@@ -72,6 +88,19 @@ A 3D-printable case gives the bare board a home on your desk. **[Download the CA
 Clauge reads your usage over the **USB cable**, from Claude Code itself. Plug the board into your computer and run the setup below; your usage streams over the cable, and the same connection handles updates.
 
 The device never joins your network, never signs in to anything, and never holds a credential - the numbers come from the Claude Code already running on your machine.
+
+**Which port, and what if you have two boards.** The daemon finds the board by
+its USB-serial chip id and then asks it politely — a short message the board
+answers and nothing else does — before touching its reset line. That matters
+because the CH340 in these boards is also in a great deal of hardware that is
+not one: without the question, the first one on the bus got reset whether or
+not it belonged to us. If a candidate does not answer, the next is tried.
+
+**One daemon drives one board.** With several attached, the first that answers
+wins and the others are ignored — the protocol, the board-side preference and
+the update path are all written around a single unit. Name a specific one with
+`clauge run --port /dev/cu.usbserial-XXXX`. A second daemon on the same machine
+waits rather than fighting for the port, and says so.
 
 ### Setting it up
 
@@ -135,7 +164,30 @@ your existing command, and runs it after capturing the usage figures - your bar
 renders exactly as before. Uninstalling puts your command back unchanged, and
 will not touch a status line Clauge did not install.
 
-## Build &amp; flash
+## Programming a unit
+
+If you are building a unit to ship, this is the whole job:
+
+```bash
+tools/burn-claude.sh          # or tools/burn-codex.sh
+```
+
+It finds the board, refuses a fused chip (this path writes plaintext, which a
+fused ROM cannot read), builds signed with MCUboot, flashes **both** images,
+boot-verifies, stamps the edition, then reboots and confirms the stamp
+survived. It stops the local daemon for the duration and puts it back
+afterwards, including on Ctrl-C.
+
+The edition is **write-once**. Stamp every unit, not just Codex ones — `0`
+means both "Claude" and "never stamped", so an unstamped Claude board can be
+turned into a Codex one by anyone with a cable. A re-burn of the same edition
+passes and says so; a burn of the *other* edition fails and tells you what the
+unit already is.
+
+Pass `--port` to name a board when more than one is attached, and `--no-build`
+to reuse the last build.
+
+## Build &amp; flash by hand
 
 You only need this to put firmware on a board yourself (after that, it updates over the air). It uses the [Zephyr](https://zephyrproject.org/) toolchain.
 

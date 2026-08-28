@@ -101,10 +101,68 @@ from the specification:
   the real site: 178 responses, none carrying a rate-limit header of any
   spelling. It was removed. `docs/next-steps.md` section A keeps the finding.
 
+## 3b. What Claude Desktop cannot tell you, and what we do instead
+
+The ✗ in the table above is the whole reason section 4 exists, and it is worth
+being precise about, because it looks like a gap someone should close.
+
+**`plan-usage-history.json` contains no reset timestamps.** Not "sometimes
+missing" — never present. Every one of its 1,672 samples (a real month of one
+account) is `{t, org, u:{fh, sd[, xu]}}`: a millisecond timestamp, an org id,
+a five-hour percentage, a seven-day percentage, and occasionally `xu`, extra
+usage in dollars. Nothing else.
+
+**Nor is a reset time stored anywhere else the app writes.** Searched
+2026-08-28: every `.json` file under its support directory, its Local Storage
+and Session Storage LevelDB stores, IndexedDB, WebStorage, `shared_proto_db`,
+its caches, and `com.anthropic.claudefordesktop.plist`. The only copies of a
+reset time on the machine are in Claude Code's status line payload and in
+evicting HTTP cache entries from an endpoint the desktop app does not use.
+
+**Deriving one from the sample series was investigated and refused.** It is
+possible in principle: the five-hour window measures 5.00 h from the first
+non-zero sample after a reset, and the server quantises reset times to a
+10-minute grid. It is not possible in practice. The app records only while it
+is open — 18% of that month had samples at all, the longest gap was 409 hours,
+and only 13% of windows had an observable start. A method that works one time
+in eight, whose failures are indistinguishable from its successes, is not a
+method; and `pc/providers/base.py` forbids handing the board a confident
+number that came from a guess.
+
+**So the panel shows a rate instead.** `pc/providers/claude_desktop.session_burn_pph`
+measures the slope of the five-hour percentage over the last 30 minutes and
+answers `None` on any of: a gap over 10 minutes (the app was closed, and
+averaging across unobserved time is the same mistake as deriving the reset), a
+stale newest sample, a reset inside the window, fewer than 3 samples, under a
+10-minute span, or a non-positive result. Refusing is the common answer.
+
+It reaches the board as `burn_pph` and is drawn where the countdown would be —
+**and only when there is no countdown to draw**. The normalizer carries it only
+when no source supplied a session reset time, so a frame never holds both and
+nothing downstream has to choose. The weekly gauge keeps `--`: a seven-day
+slope measured over half an hour is noise.
+
 ## 4. The merge rule
 
 For each field independently: **among the sources that actually have this
-field, the freshest wins.**
+field, the freshest wins** — and freshest is not enough on its own.
+
+**A reading taken before a window reset cannot win, however fresh it looks.**
+That was a real bug, reproduced by execution 2026-08-28. The status line is
+rewritten only when Claude Code renders, so its post-reset 0% is routinely
+OLDER than a desktop sample taken minutes before the same reset — and the
+desktop cache cannot see reset times at all, so it has no way to know its
+reading has been superseded. Strict recency handed it the dial, and the panel
+showed a confident, un-stale 78% with a burn rate attached for a window that
+had emptied a minute earlier: exactly the "inventing usage that has already
+been forgiven" this section's rejected alternative was written against.
+
+The fix is evidence, not a heuristic. `statusline_source` already knew the
+epoch the window emptied — it is the `resets_at` being discarded — and now
+carries it as `session_rolled_at`. `merge()` excludes any reading of that
+window taken earlier, with one exception that has to be there: the frame that
+REPORTED the rollover, whose own `observed_at` is the payload's mtime and is
+therefore necessarily older than the reset it is describing.
 
 **Context is the one exception, and it is not on this bus at all.** Several
 agents mean several context windows and no single number is all of them, so
@@ -307,10 +365,27 @@ bumping it stops every deployed board being offered updates — over the same
 link the update travels on. That is not a mistake that can be corrected
 remotely.
 
-New keys: `provider`, `src`, `ctx_pct`, `model`, `state`. Unknown values are
-**omitted, not sent as sentinels**, because of the budget below.
+New keys, in the order they were added: `provider`, `src`, `ctx_pct`, `model`,
+`state`, the session/agent counts (`n_sess`, `n_run`, `n_wait`, `n_stuck`,
+`n_agents`), the second provider (`p2`, `p2_session_pct`, `p2_weekly_pct`,
+`p2_s_in_s`, `p2_w_in_s`, `p2_stale`), `edition`, and `burn_pph`. Unknown
+values are **omitted, not sent as sentinels**, because of the budget below.
+
+Two of those are collected and never displayed: **`ctx_pct` and `model` are
+parsed by the daemon and read by nothing in the firmware.** The readouts were
+removed from the panel — with several agents running there are several context
+windows and no single number is any of them — but the fields stayed on the
+wire, where they cost about 40 bytes of a 512-byte line. Either give them a
+home or drop them; leaving them undocumented is how someone concludes the
+panel is broken.
 
 ### The 512-byte cliff
+
+The fully loaded two-provider frame measures **484 of the 512 bytes**, and
+`pc/protocol.encode_checked` is what stands between that and the cliff. Note
+that it was written, documented as the thing callers use, and then not used:
+the daemon's only writer called plain `encode()` until 2026-08-28, so the
+guard had no production caller at all and only tests exercised it.
 
 `proto.c:367-371` does not truncate an over-long line. It drops it:
 

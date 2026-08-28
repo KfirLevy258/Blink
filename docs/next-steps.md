@@ -38,120 +38,54 @@ access to their Claude traffic, and about a thousand lines to keep working.
 The code is in git history if claude.ai ever grows the headers; reviving it is
 a revert, not a rewrite.
 
-## B. Session and agent status
+## B. Session and agent status (DONE 2026-08-26)
 
-### Where it actually is
+**This section described unbuilt work for two days after it was built.** It is
+kept, rewritten, because the decision it turned on is worth having on record --
+and because a plan that describes shipped code as pending is worse than no
+plan: it sends someone to build a thing twice.
 
-`pc/providers/claude_state.py` answers **one** question: is Claude Code
-running, waiting, idle or stuck. It answers it for **one** session.
+### What was built
 
-The shipped design is a single slot: `tools/clauge-hook.sh` writes
-`~/.clauge/state.json` as `{"event": ..., "t": ...}`, newest write wins. That is
-correct for one terminal and **wrong for two** — two concurrent sessions
-overwrite each other, so the panel shows whichever fired most recently and
-silently misreports the other.
+`tools/clauge-hook.sh` writes one file per session (`~/.clauge/state/<id>.state`)
+and one per agent, so two terminals no longer overwrite each other.
+`pc/providers/claude_state.py` reads the directory, derives a state per session
+from the last event, sweeps what has died, and reports the worst of them plus
+an exact live agent count. Ten hook events are installed:
 
-Sub-agents are not tracked at all. `SubagentStop` currently maps to `running`,
-which is true but says nothing about how many agents are in flight or whether
-any finished.
+    SessionStart  UserPromptSubmit  PreToolUse  PostToolUse  Notification
+    Stop  StopFailure  SessionEnd  SubagentStart  SubagentStop
 
-### The decision that comes first
+Three of those came from reading the hooks reference rather than assuming:
+there is no `session_id` environment variable (only `CLAUDE_PROJECT_DIR`), so
+it is parsed from the payload; `SubagentStart`/`SubagentStop` carry `agent_id`,
+which is what makes an exact lock-free count possible (one file per agent); and
+`StopFailure` runs INSTEAD of `Stop` when a turn dies on an API error, carrying
+`error: "rate_limit"` — the headline on a usage gauge, so it earned its own
+state ranked above `stuck`.
 
-Every option below requires the hook shim to capture **more than an event name
-and a timestamp**. Today it captures nothing else, which is why the
-metadata-only promise is structural rather than a matter of restraint — there
-is literally nothing there to leak, and `check_hook_shim.sh` asserts it against
-a payload carrying a session id, a transcript path and a tool name.
+### The decision that came first, and how it went
 
-Tracking per-session status means capturing `session_id`. Showing *which
-project* means capturing `cwd`. Counting agents means capturing `tool_name`.
-All three are metadata, not content — but the promise stops being structural
-and becomes a policy that has to be maintained. **Decide that explicitly before
-writing any of it**, and if it goes ahead, update the install disclosure, the
-README and `check_hook_shim.sh` in the same change.
+Every option here needed the shim to capture **more than an event name and a
+timestamp**, which is what made the metadata-only promise structural rather
+than a matter of restraint. It was taken deliberately: the capture widened to
+`session_id` and `agent_id` and **nothing else** — no prompt, no tool
+arguments, no paths, no message text. The install disclosure, the README and
+`check_hook_shim.sh` were updated in the same change, and the shim is asserted
+under sh, bash and dash against a payload that deliberately contains all the
+things it must not keep.
 
-### Step 1 — one file per session (half a day)
+The session id becomes a FILENAME, which makes it the only attacker-shaped
+input on a path in this product. The character class in the shim's `sed`
+pattern is the sanitiser, and traversal is pinned by test.
 
-Shim writes `~/.clauge/state/<session_id>.json` instead of one `state.json`.
-Per-file rather than one JSON object because the shim is POSIX `sh` with no
-parser and no lock, and concurrent read-modify-write from several sessions is
-exactly the corruption the atomic single write currently avoids.
+### What is still open
 
-Cleanup, since these accumulate:
-- `SessionEnd` deletes its own file.
-- The provider sweeps anything older than `ABANDONED_AFTER_S` (1 h) on poll.
-- A crashed session leaves a file; the sweep is what collects it.
-
-`ClaudeStateProvider.poll()` reads the directory and derives per-session states
-with the existing `derive_state()`, unchanged.
-
-### Step 2 — aggregate, do not enumerate (half a day)
-
-The wire has **~210 bytes free** of the 512-byte line limit, and the board
-drops an over-long line whole. A per-session array would blow that budget at
-around four sessions and take the panel dark with no error.
-
-So send counts, not a list:
-
-```json
-"n_run": 2, "n_wait": 1, "n_stuck": 0
-```
-
-~40 bytes. And keep the existing scalar `state` field, computed as **worst-of**
-(`stuck` > `waiting` > `running` > `idle`), so firmware that predates this
-change keeps working exactly as it does now. Additive, no `PROTO_VERSION`
-move — the same rule the rest of this branch followed.
-
-### Step 3 — agents (half a day, after Step 1)
-
-Claude Code signals sub-agents through the hooks already installed:
-- `PreToolUse` with `tool_name == "Task"` → an agent started
-- `SubagentStop` → one finished
-
-Counting them needs `tool_name` captured (see the decision above). With it, a
-per-session file can carry `agents_running`, and the aggregate gains `n_agents`.
-
-Note "finished" is **not** a state a pip can hold. It is an event — an agent
-that finished five minutes ago is just `idle` now. If the goal is "tell me when
-my agent is done", that is a **notification**, not a status, and it is a
-different feature: a brief flash or colour change on transition, decaying after
-some seconds. Worth separating in the design, because the two get conflated and
-they need different mechanisms.
-
-### Step 4 — the panel (one to two days, the real cost)
-
-The pip already shows worst-of and needs no change.
-
-For more than that, **the long-press gesture is free in the shipped build.**
-The peek card (`#if HAVE_PER_MODEL`, `usage_view.c`) is compiled out whenever
-`CONFIG_CLAUGE_WIFI_MODE` is off, which is every USB unit — so the card, its
-rows and its dismiss logic exist, are known to work on hardware, and are
-currently dead weight in the WiFi build only. Repurposing that scaffolding for
-a session list is far cheaper than inventing a new surface.
-
-Two increments:
-- **v1, cheap:** a small count beside the pip when more than one session is
-  live. Fits the existing header row; a few hours.
-- **v2 is blocked by a decision already taken, and that is worth knowing before
-  anyone starts it.** A card *listing sessions* needs per-session data on the
-  wire, and Step 2 deliberately sends counts instead — a per-session array blows
-  the 512-byte line budget at around four sessions and takes the panel dark with
-  no error. So v2 as originally sketched cannot be built on the current
-  protocol.
-
-  Two honest options. Either build the card from the counts that *are* sent
-  ("2 running, 1 waiting, 2 agents"), which is a modest gain over the `2s 2a`
-  already in the corner — or add a second message type carrying one session per
-  line, which the NDJSON protocol handles natively and the 512-byte limit then
-  applies to per line rather than in total. The second is the real answer if
-  per-session detail is wanted, and it is additive, so it costs no version bump.
-
-Whatever the card shows, `usage_layout.h` and `tests/usage_layout/host_test.c`
-must grow with it. The band below the gauges has 2 px and 0 px of clearance in
-it, and that test is what will catch a new widget landing on the hint line
-without anyone having to plug a board in.
-
----
+`stuck` is inferred from silence at 180 s, which is a guess about how long a
+tool may legitimately take. Nothing has been measured against real long-running
+tools. And a subagent that outlives `ABANDONED_AFTER_S` (1 h) is swept from the
+count even though it is still running, because the shim never refreshes its
+file's mtime.
 
 ## C. Codex, and the second page (DONE 2026-08-27)
 
@@ -262,19 +196,39 @@ launch.
 
 ## Rough order
 
-1. ~~**Browser usage.**~~ Closed — see A. Measured, unavailable, removed.
-2. ~~**Flash the current branch and boot-verify it.**~~ Done 2026-08-27:
-   built, flashed over USB, board came up clean, `hello` at 0.6.0.
-3. **The metadata decision** for B. It gates every part of B and is a judgement
-   call, not an implementation task.
-4. B Steps 1–3 (daemon side, ~1.5 days), then B Step 4 v1 (a few hours).
-5. B Step 4 v2.
+Everything with a section of its own is closed. What is left is not
+implementation:
 
-Two things noticed while testing that are not in either section:
+1. **Decisions.** `daemon.auto` on or off; macOS notarisation; a board id on
+   the settings screen (unblocked since that panel dropped to two rows); the
+   naming question; and the disclosure question on the five known concerns --
+   four of which are WiFi-build only and are not compiled into the shipping
+   image, but whose code is public.
+2. **The Codex boot clip's contrast.** White on `#76B1DB` is 2.31:1 against a
+   3:1 floor, and production panels are the bright ones. `#4C82A8` gives 4.15.
+   Raise it once, before launch.
+3. **Merge and cut a release.** The published v0.6.0 predates the second page,
+   the swipe detector, Codex as a provider, the Codex edition, per-page
+   freshness, the burn rate and every fix from the August review.
+4. **Two things nobody has watched run**: Windows, and an M-series Mac. CI
+   exercises the installer on both; no human has seen the product work there.
+
+Smaller, still open:
 
 - **`clauge status` says nothing about which providers are reporting.** With
-  two of them on the wire and a preference living on the board, "Usage data
-  fresh (1s old)" is now less than it could say.
+  two on the wire and a preference living on the board, "Usage data fresh
+  (1s old)" is less than it could say.
 - **The wire carries float noise** — `session_pct: 14.000000000000002` was
-  observed. Harmless to the panel, but those are bytes inside a 512-byte line
-  limit that section B is already budgeting against.
+  observed. Harmless to the panel, but they are bytes inside a 512-byte line,
+  and the fully loaded frame already measures 484 of it.
+- **`cfg_set_main_src()` has no callers** since the "Main source" row was
+  removed from the settings screen. The board therefore always announces
+  `pref: claude`, so a user running both cannot make Codex the primary dial.
+  Three files still describe it as a live user choice. Either delete the field
+  and its migration, or give the choice a home -- the page pill is the obvious
+  candidate -- but it is a design decision, not a bug to patch.
+- **A state-only frame is dropped by the normalizer.** On a machine with the
+  hooks installed but no statusline payload and no desktop app, the activity
+  light has nothing to ride on: `merge()` returns None for a provider group
+  carrying no percentage, and sending one would blank the dials instead. The
+  real answer is a `state`-only wire message that does not touch them.
