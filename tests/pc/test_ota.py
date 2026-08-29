@@ -570,3 +570,33 @@ class TestOfferOnConnect(unittest.TestCase):
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
         b.offer_if_newer("0.4.8")
         self.assertEqual(types(sent).count("ota_avail"), 1)
+
+
+class TestNoWindow(unittest.TestCase):
+    """The hidden Windows daemon must not hand its children a console: a
+    black window sat on the desktop for the length of every firmware flash
+    (2026-08-30). Off Windows the flag set is empty and nothing changes."""
+
+    def test_esptool_and_espefuse_are_started_without_a_window(self):
+        seen = []
+        def run(cmd, **kw):
+            seen.append(kw)
+            class R:
+                returncode = 0
+                stdout = "FLASH_CRYPT_CNT = 0 R/W (0b0000000)\n"
+                stderr = ""
+            return R()
+        ota._esptool = lambda: ["python", "-m", "esptool"]
+        ota._espefuse = lambda: ["python", "-m", "espefuse"]
+        ota.flash("/dev/null", b"x" * 16, run=run)
+        self.assertGreaterEqual(len(seen), 2)
+        for kw in seen:
+            for k, v in ota.NO_WINDOW.items():
+                self.assertEqual(kw.get(k), v)
+
+    def test_the_flag_is_windows_only(self):
+        import sys
+        if sys.platform == "win32":
+            self.assertEqual(ota.NO_WINDOW, {"creationflags": 0x08000000})
+        else:
+            self.assertEqual(ota.NO_WINDOW, {})

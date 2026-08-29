@@ -171,7 +171,7 @@ def _verify_with_openssl(raw, sig, pubkey_pem):
         r = subprocess.run(["openssl", "dgst", "-sha256",
                             "-verify", paths["pub.pem"],
                             "-signature", paths["sig"], paths["data"]],
-                           capture_output=True)
+                           capture_output=True, **ota.NO_WINDOW)
         return r.returncode == 0
     except Exception:
         return False
@@ -247,7 +247,7 @@ SELF_TEST_TIMEOUT_S = 300
 def _self_test(path, expect_version, run=subprocess.run) -> bool:
     try:
         r = run([path, "--version"], capture_output=True, text=True,
-                timeout=SELF_TEST_TIMEOUT_S)
+                timeout=SELF_TEST_TIMEOUT_S, **ota.NO_WINDOW)
     except Exception:
         return False
     return r.returncode == 0 and expect_version in (r.stdout or "")
@@ -420,7 +420,8 @@ def restart_from_daemon(target):
     logging to bridge.log, or the log would go dark from the first update on.
     """
     if sys.platform == "win32":
-        DETACHED = 0x00000008 | 0x00000200   # DETACHED_PROCESS | NEW_GROUP
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        DETACHED = 0x00000008 | 0x00000200 | 0x08000000
         home = os.path.dirname(_dirs(target)[0])
         log = os.path.join(home, "bridge.log")
         try:

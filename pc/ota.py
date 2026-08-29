@@ -28,6 +28,14 @@ import sys
 import tempfile
 import urllib.request
 
+# Every process the daemon starts on Windows must be told not to open a
+# console window. The daemon itself runs hidden (started by wscript, see
+# cli.launcher_path), so a console-subsystem child -- esptool, espefuse, the
+# self-test of a downloaded app -- would otherwise be given a brand-new
+# console of its own, and a black window appeared on the desktop for the
+# 75 s of every firmware flash (user-reported 2026-08-30).
+NO_WINDOW = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+
 RELEASE_BASE = "https://github.com/KfirLevy258/Blink/releases/latest/download/"
 MANIFEST_URL = RELEASE_BASE + "manifest.json"
 FIRMWARE_URL = RELEASE_BASE + "blink-fw.bin"
@@ -175,7 +183,8 @@ def flash_encrypted_chip(port, run=subprocess.run):
         return None
     try:
         out = run(espefuse + ["--port", port, "summary"],
-                  capture_output=True, text=True, timeout=60).stdout
+                  capture_output=True, text=True, timeout=60,
+                  **NO_WINDOW).stdout
     except Exception:
         return None
     for line in out.splitlines():
@@ -205,7 +214,7 @@ def _esptool_run(exe, port, baud, args, run, timeout=900):
     """(ok, last 200 chars of output) for one esptool invocation."""
     try:
         r = run(exe + ["--port", port, "--baud", str(baud)] + args,
-                capture_output=True, text=True, timeout=timeout)
+                capture_output=True, text=True, timeout=timeout, **NO_WINDOW)
     except Exception as e:
         return False, str(e)[:200]
     if r.returncode == 0:

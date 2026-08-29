@@ -463,14 +463,14 @@ class _LaunchdBackend(_Backend):
         # bootout first so a rerun replaces the running agent rather than
         # failing with "service already loaded".
         subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"],
-                       capture_output=True)
+                       capture_output=True, **update.ota.NO_WINDOW)
         # ...and then retry, because bootout is asynchronous. The bootstrap
         # immediately after it can fail while launchd is still tearing the old
         # job down, which left a reinstall with no service running at all --
         # observed on the second install of the day, silently.
         for attempt in range(4):
             r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", plist_path()],
-                               capture_output=True)
+                               capture_output=True, **update.ota.NO_WINDOW)
             if r.returncode == 0:
                 break
             time.sleep(0.5 * (attempt + 1))
@@ -480,12 +480,12 @@ class _LaunchdBackend(_Backend):
 
     def restart(self) -> str:
         r = subprocess.run(["launchctl", "kickstart", "-k",
-                            f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+                            f"gui/{os.getuid()}/{LABEL}"], capture_output=True, **update.ota.NO_WINDOW)
         return "restarted" if r.returncode == 0 else "could not restart it"
 
     def remove(self) -> str:
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
-                       capture_output=True)
+                       capture_output=True, **update.ota.NO_WINDOW)
         _rm(plist_path())
         return "removed"
 
@@ -504,7 +504,7 @@ class _LaunchdBackend(_Backend):
         than claiming a fault that may not exist.
         """
         r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, **update.ota.NO_WINDOW)
         if r.returncode != 0:
             return "not installed"
 
@@ -549,7 +549,7 @@ class _SchtasksBackend(_Backend):
         r = subprocess.run(
             ["schtasks", "/create", "/f", "/tn", TASK_NAME, "/sc", "onlogon",
              "/tr", f'wscript.exe //B //Nologo "{launcher_path()}"'],
-            capture_output=True, text=True)
+            capture_output=True, text=True, **update.ota.NO_WINDOW)
         if r.returncode != 0:
             return f"could not register a Scheduled Task: {r.stderr.strip()[:120]}"
         # A daemon from an earlier install is still running, holding the
@@ -557,15 +557,15 @@ class _SchtasksBackend(_Backend):
         # to it: on the first reinstall over a live 1.0.2 the new task's
         # daemon started, found the lock held, and left -- the old one, with
         # its window, carried on (2026-08-29). Stop it the way restart() does.
-        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True)
+        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True, **update.ota.NO_WINDOW)
         _kill_recorded_daemon()
         # /sc onlogon does not start it now, only at the next logon.
-        subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True)
+        subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True, **update.ota.NO_WINDOW)
         return "running (Scheduled Task)"
 
     def restart(self) -> str:
         subprocess.run(["schtasks", "/end", "/tn", TASK_NAME],
-                       capture_output=True)
+                       capture_output=True, **update.ota.NO_WINDOW)
         # /end only reaches the instance the TASK launched. A daemon that
         # replaced itself started its successor detached (see
         # update.restart_from_daemon), and that one is not the task's -- so
@@ -573,20 +573,20 @@ class _SchtasksBackend(_Backend):
         # same serial port.
         _kill_recorded_daemon()
         r = subprocess.run(["schtasks", "/run", "/tn", TASK_NAME],
-                           capture_output=True)
+                           capture_output=True, **update.ota.NO_WINDOW)
         return "restarted" if r.returncode == 0 else "could not restart it"
 
     def remove(self) -> str:
-        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True)
+        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True, **update.ota.NO_WINDOW)
         subprocess.run(["schtasks", "/delete", "/f", "/tn", TASK_NAME],
-                       capture_output=True)
+                       capture_output=True, **update.ota.NO_WINDOW)
         _kill_recorded_daemon()
         _kill_by_path()
         return "removed"
 
     def status(self) -> str:
         r = subprocess.run(["schtasks", "/query", "/tn", TASK_NAME],
-                           capture_output=True)
+                           capture_output=True, **update.ota.NO_WINDOW)
         return ("registered as a Scheduled Task" if r.returncode == 0
                 else "not installed")
 
@@ -614,9 +614,9 @@ class _SystemdBackend(_Backend):
             f.write(_UNIT_TEMPLATE.format(command=_systemd_exec()))
         if not self._has_systemctl():
             return f"no systemd here; run it yourself: {installed_bin()} run"
-        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, **update.ota.NO_WINDOW)
         r = subprocess.run(["systemctl", "--user", "enable", "--now",
-                            "blink-bridge.service"], capture_output=True)
+                            "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
         if r.returncode == 0:
             return "running (systemd)"
         return "installed, but could not be started: systemctl --user enable --now blink-bridge"
@@ -625,7 +625,7 @@ class _SystemdBackend(_Backend):
         if not self._has_systemctl():
             return super().restart()
         r = subprocess.run(["systemctl", "--user", "restart",
-                            "blink-bridge.service"], capture_output=True)
+                            "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
         return "restarted" if r.returncode == 0 else "could not restart it"
 
     def remove(self) -> str:
@@ -637,10 +637,10 @@ class _SystemdBackend(_Backend):
             _rm(unit_path())
             return "no systemd here; stop it yourself if you started it"
         subprocess.run(["systemctl", "--user", "disable", "--now",
-                        "blink-bridge.service"], capture_output=True)
+                        "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
         _rm(unit_path())
         subprocess.run(["systemctl", "--user", "daemon-reload"],
-                       capture_output=True)
+                       capture_output=True, **update.ota.NO_WINDOW)
         return "removed"
 
     def status(self) -> str:
@@ -650,7 +650,7 @@ class _SystemdBackend(_Backend):
             # was and status() claimed not to.
             return "no systemd here; not something this can check"
         r = subprocess.run(["systemctl", "--user", "is-active", "--quiet",
-                            "blink-bridge.service"], capture_output=True)
+                            "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
         return "running" if r.returncode == 0 else "not running"
 
 
@@ -753,7 +753,7 @@ def _kill_recorded_daemon():
             continue              # somehow ours; nothing to stop
         subprocess.run(["taskkill", "/f", "/t", "/pid", str(pid),
                         "/fi", "IMAGENAME eq " + os.path.basename(installed_bin())],
-                       capture_output=True)
+                       capture_output=True, **update.ota.NO_WINDOW)
 
 
 def _kill_by_path():
@@ -775,7 +775,7 @@ def _kill_by_path():
         "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
     )
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
-                    "-Command", script], capture_output=True)
+                    "-Command", script], capture_output=True, **update.ota.NO_WINDOW)
 
 
 def _remove_bin_dir(attempts=6):
