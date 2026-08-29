@@ -471,6 +471,17 @@ static void dispatch(const char *json)
 		printk("[proto] host connected: app %s, protocol %d\n",
 		       host_ver[0] ? host_ver : "?", host_proto);
 		/*
+		 * Every host connection is a firmware check, not just the
+		 * first after boot. The daemon replaces itself for an app
+		 * update and comes back with a newer release on its feed;
+		 * a board that only asked once per boot sat on 1.0.0 with
+		 * 1.1.1 published (2026-08-29). The daemon now offers on
+		 * its own as well, for boards running this code's
+		 * predecessors; this side covers the case where it does not
+		 * know what we run.
+		 */
+		ota_request_check();
+		/*
 		 * Answer. The daemon sends `welcome` as a question -- "is a
 		 * Blink board on this port?" -- and decides whether to pull
 		 * the reset line on whether anything comes back within 1.5 s

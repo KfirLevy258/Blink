@@ -40,6 +40,7 @@ class Bridge:
         # None on a daemon wired without a bus (the tests do this).
         self._set_preferred = set_preferred
         self._now = now
+        self._last_query_at = None       # see offer_if_newer
         self._wall = wall                # callable() -> (epoch_s, utc_offset_min)
         self._app_ver = app_ver
         self._last_ping = None
@@ -140,6 +141,7 @@ class Bridge:
         if t == "hello":
             self._note_board(msg)
             self.greet()
+            self.offer_if_newer(msg.get("fw"))
         elif t == "ping":
             self._last_ping = self._now()
             # Free: never fetch here. The usage endpoint is aggressively
@@ -190,7 +192,30 @@ class Bridge:
     def _ota_reset(self):
         self._manifest = None
 
+    def offer_if_newer(self, fw):
+        """Check the feed for a board running `fw`, unasked.
+
+        A board asks for itself once per boot and when its update row is
+        tapped, and that is all it ever asked. So a board that stayed
+        plugged in through three app updates never heard about the firmware
+        that shipped with them (desk board on 1.0.0 with 1.1.1 published,
+        2026-08-29), and a tap that landed while the app was restarting for
+        one of those updates went unanswered forever. Now every connect --
+        the board's hello, or a reconnect to a board already running --
+        is a check, and the reply either shows "Install x.y.z" or "Up to
+        date", clearing a stale "Checking..." either way. Skipped when the
+        board itself asked within the last minute, so its boot-time query
+        is not answered twice.
+        """
+        if not fw or self._fetch_manifest is None:
+            return
+        if self._last_query_at is not None and \
+                self._now() - self._last_query_at < 60:
+            return
+        self._on_ota_query(fw)
+
     def _on_ota_query(self, cur):
+        self._last_query_at = self._now()
         # The board's firmware version, from the board, on every query. The
         # other half of what _note_board used to be the only source of -- and
         # _resume_pending falls back to "0.0.0" without it, which would compare

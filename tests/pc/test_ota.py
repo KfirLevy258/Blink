@@ -533,3 +533,40 @@ class TestTheFetchTrustsCertifi(unittest.TestCase):
                 else:
                     os.environ[k] = v
         self.assertGreaterEqual(have, want)
+
+
+class TestOfferOnConnect(unittest.TestCase):
+    """A board asked for itself once per boot and when tapped, and that was
+    all: a board that stayed plugged in through three app updates never
+    heard about their firmware, and a tap that landed while the app was
+    restarting went unanswered for good (2026-08-29). Every connect is now
+    a check from the daemon's side."""
+    M = {"version": "0.4.9", "size": 600, "sha256": "ab" * 32}
+
+    def test_a_hello_is_answered_with_an_offer_when_newer_exists(self):
+        b, sent, _ = bridge(manifest=self.M)
+        b.on_message({"t": "hello", "v": 2, "board_id": "ab", "fw": "0.4.8"})
+        self.assertIn("ota_avail", types(sent))
+        self.assertEqual([m for m in sent if m.get("t") == "ota_avail"][0]["version"], "0.4.9")
+
+    def test_a_hello_from_a_current_board_hears_up_to_date(self):
+        b, sent, _ = bridge(manifest=self.M)
+        b.on_message({"t": "hello", "v": 2, "board_id": "ab", "fw": "0.4.9"})
+        self.assertIn("ota_none", types(sent))
+
+    def test_a_hello_without_a_version_offers_nothing(self):
+        b, sent, _ = bridge(manifest=self.M)
+        b.on_message({"t": "hello", "v": 2, "board_id": "ab"})
+        self.assertNotIn("ota_avail", types(sent))
+        self.assertNotIn("ota_none", types(sent))
+
+    def test_a_reconnect_uses_the_remembered_version(self):
+        b, sent, _ = bridge(manifest=self.M)
+        b.offer_if_newer("0.4.8")
+        self.assertEqual(types(sent), ["ota_avail"])
+
+    def test_the_boards_own_query_is_not_answered_twice(self):
+        b, sent, _ = bridge(manifest=self.M)
+        b.on_message({"t": "ota_query", "cur": "0.4.8"})
+        b.offer_if_newer("0.4.8")
+        self.assertEqual(types(sent).count("ota_avail"), 1)

@@ -192,7 +192,7 @@ def remembered_board(home):
         return {}
 
 
-def remember_board(home, port, board_id):
+def remember_board(home, port, board_id, fw=None):
     """Write down which port worked, so the next start goes straight to it.
 
     This is what makes the polite-probe cheap in the case that matters: a
@@ -205,7 +205,7 @@ def remember_board(home, port, board_id):
         os.makedirs(home, exist_ok=True)
         tmp = _known_path(home) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"port": port, "board_id": board_id}, f)
+            json.dump({"port": port, "board_id": board_id, "fw": fw}, f)
         os.replace(tmp, _known_path(home))
     except OSError:
         pass                    # a convenience, never a requirement
@@ -691,6 +691,11 @@ def main(argv=None):
         # greeting -- see Bridge.greet.
         if already_running:
             bridge.greet()
+            # No hello means the board never said which firmware it runs;
+            # the last one it told us is in board.json. This is the path an
+            # app update takes -- the board keeps running through it -- and
+            # the one that left boards on old firmware (2026-08-29).
+            bridge.offer_if_newer(known.get("fw"))
         next_poll = time.monotonic()
         # The rollback copy is kept until a board has actually talked to this
         # build. Running at all is weak evidence; holding a conversation with
@@ -724,9 +729,11 @@ def main(argv=None):
                             # reset if it ever goes quiet.
                             known = {"port": port,
                                      "board_id": msg.get("board_id")
-                                     or known.get("board_id")}
+                                     or known.get("board_id"),
+                                     "fw": msg.get("fw") or known.get("fw")}
                             remember_board(blink_home, known["port"],
-                                           known.get("board_id"))
+                                           known.get("board_id"),
+                                           known.get("fw"))
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
                     # the liveness window): the usage endpoint is aggressively

@@ -1382,7 +1382,7 @@ static void run_usb(void)
 	 * behaviour, and run_usb()'s own waiting-for-host screen covers it. */
 	const bool can_fall_back = false;
 #endif
-	bool ota_boot_checked = false;
+	int64_t checking_since = 0;	/* OTA_UI_CHECKING entered at, ms */
 
 	/* Same as run_standalone: drop anything latched before this loop
 	 * existed to service it. See ui_settings.h. */
@@ -1412,12 +1412,37 @@ static void run_usb(void)
 		 * 2026-08-21. Unlike standalone, this mode needs no clock and
 		 * no token of its own: the daemon does the fetching.
 		 */
-		if (proto_host_seen() && !ota_boot_checked) {
-			ota_boot_checked = true;
-			proto_ota_check();
-		}
+		/* The boot-time check moved into proto.c's welcome handler,
+		 * which fires on every host connection rather than the first;
+		 * see there. */
 		if (ota_take_check_request()) {
 			proto_ota_check();
+		}
+		/*
+		 * A check nobody answers must not hang the row. The query goes
+		 * out over the cable; if the daemon was restarting at that
+		 * moment (an app update does exactly that) it was never read,
+		 * and "Checking..." with the row disabled stayed on screen
+		 * for good (user-reported 2026-08-29). Thirty seconds is far
+		 * past a feed fetch; after it the row says why and a tap
+		 * asks again.
+		 */
+		{
+			struct ota_ui snap;
+
+			ota_ui_get(&snap);
+			if (snap.st == OTA_UI_CHECKING) {
+				if (checking_since == 0) {
+					checking_since = k_uptime_get();
+				} else if (k_uptime_get() - checking_since
+					   > 30 * 1000) {
+					ota_ui_set(OTA_UI_FAILED, NULL, 0);
+					ota_ui_set_error("No answer from the app");
+					checking_since = 0;
+				}
+			} else {
+				checking_since = 0;
+			}
 		}
 		if (ota_take_install_request()) {
 			proto_ota_install();
