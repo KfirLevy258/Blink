@@ -436,17 +436,20 @@ file is that session's state, aged by the event's own timestamp with the same
 thresholds. Every rollout votes (one session each) and the provider emits one
 percentage-free state frame, exactly as `ClaudeStateProvider` does. No
 permission event has been observed in the log, so Codex never reports
-`waiting`; a prompt is `running` until answered, `stuck` after three minutes.
+`waiting`; a prompt is `running` until answered, `stuck` after ten minutes.
 
 `failed` earns its own state because `StopFailure` runs instead of `Stop` when
 a turn dies on an API error and carries `error: "rate_limit"` among its causes.
 On a usage gauge that is the headline, not a detail — which is also why
 `worst_of()` ranks it above `stuck`.
 
-`stuck` fires at 180 s, not the specified 60 s. A test suite, an npm install, a
+`stuck` fires at 600 s, not the specified 60 s. A test suite, an npm install, a
 docker build and a slow model response all routinely pass a minute while
 healthy, and an alert that cries wolf on every build is one its owner learns to
-ignore before the day it is right.
+ignore before the day it is right. It was 180 s until 2026-08-29, when a Bash
+polling loop went red on the desk while working: the hooks say nothing between
+`PreToolUse` and `PostToolUse`, and Claude Code allows a single tool call ten
+minutes. Ten minutes is therefore the line past which silence means wedged.
 
 ### On disk
 

@@ -336,7 +336,7 @@ wins.
 | 🟢 green, pulsing | Everything is working; nothing needs you |
 | 🟠 amber | **Your turn** - a session has finished its answer (Claude or Codex), even if others are still working |
 | 🟠 amber, pulsing | A session is asking permission right now |
-| 🔴 red | Stuck (announced work, then went silent for three minutes), or the turn died on an API error - a rate limit shows here |
+| 🔴 red | Stuck (announced work, then went silent for ten minutes - longer than any single tool call is allowed), or the turn died on an API error - a rate limit shows here |
 | 🟢 green, steady | Connected, live data, no session has anything to say |
 | ⚪ grey | Not connected |
 

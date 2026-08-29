@@ -64,10 +64,15 @@ STATE_DIR = "~/.blink/state"
 # The document says 60 seconds. That is too twitchy to ship: a test suite, an
 # npm install, a docker build or a slow model response all routinely exceed a
 # minute while being perfectly healthy, and a red alert that cries wolf on
-# every build teaches its owner to ignore the one time it is right. Three
-# minutes still catches a genuinely wedged tool well before a human would
-# notice, and almost never fires on work that is merely slow.
-STUCK_AFTER_S = 180.0
+# every build teaches its owner to ignore the one time it is right.
+#
+# Three minutes was the first answer, and it cried wolf too (2026-08-29): a
+# Bash tool call fires PreToolUse and then NOTHING until it returns, and
+# Claude Code lets one run for ten minutes. A polling loop that waited for a
+# log file went red on the desk while working exactly as asked. Ten minutes
+# is Claude Code's own ceiling on a single tool call, so a turn silent past
+# it is genuinely wedged rather than merely long.
+STUCK_AFTER_S = 600.0
 
 # Past this, assume the session is gone rather than that it has been idle
 # since. Also the sweep threshold: a session that ended without SessionEnd

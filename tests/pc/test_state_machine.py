@@ -92,6 +92,14 @@ def test_a_slow_build_is_not_stuck():
     assert derive_state("PreToolUse", 90.0) == base.STATE_RUNNING
 
 
+def test_a_long_tool_call_is_not_stuck():
+    """Claude Code says nothing between PreToolUse and PostToolUse, and lets
+    a single Bash call run for ten minutes. At 180 s a polling loop that was
+    doing exactly what it was told went red on the desk (2026-08-29)."""
+    assert derive_state("PreToolUse", 9 * 60.0) == base.STATE_RUNNING
+    assert derive_state("PreToolUse", 10 * 60.0 + 1) == base.STATE_STUCK
+
+
 def test_an_abandoned_session_says_nothing_rather_than_idle():
     assert derive_state("Stop", ABANDONED_AFTER_S + 1) == base.STATE_UNKNOWN
 
