@@ -192,3 +192,23 @@ def test_a_plain_reinstall_still_says_nothing_changed(tmp_path):
     shim = str(tmp_path / "h.sh")
     ih.install(p, shim)
     assert "already installed" in ih.install(p, shim)
+
+
+def test_windows_commands_are_ascii_even_under_a_non_ascii_profile(monkeypatch):
+    """Claude Code on Windows hands the command to Git Bash, and one with a
+    non-ASCII character in it arrived as a single argument -- a script name
+    -- so no hook ran and no status line rendered on a machine whose user
+    name is Hebrew (2026-08-29). Under the profile the path is spelled through
+    $USERPROFILE, which bash expands after the hand-over."""
+    import os
+    import sys
+    from pc import install_statusline as isl
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(os.path, "expanduser", lambda p: "C:\\Users\\\u05de\u05e9")
+    cmd = ih.hook_command("C:\\Users\\\u05de\u05e9\\.blink\\blink-hook.sh", "PreToolUse")
+    assert cmd == 'bash "$USERPROFILE/.blink/blink-hook.sh" PreToolUse'
+    assert cmd.isascii()
+    sl = isl.statusline_command("C:\\Users\\\u05de\u05e9\\.blink\\blink-statusline.sh")
+    assert sl == 'bash "$USERPROFILE/.blink/blink-statusline.sh"'
+    # A shim somewhere else keeps its own path, forward-slashed and quoted.
+    assert ih.hook_command("D:\\tools\\hook.sh", "Stop") == "bash D:/tools/hook.sh Stop"

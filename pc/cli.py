@@ -67,6 +67,35 @@ def log_path():
     return os.path.join(blink_home(), "bridge.log")
 
 
+def launcher_path():
+    """The script the Scheduled Task runs, so the bridge starts with no window.
+
+    A console program started by a Scheduled Task gets a console window, and
+    on the first Windows machine it was installed on that window sat on the
+    desktop for as long as the service ran (2026-08-29: "it should be some
+    service in the background, not a UI app"). wscript.exe can start a
+    program with its window hidden; this is the one-line script that asks
+    it to. Written in ASCII with the profile taken from the environment,
+    because a non-ASCII path inside a .vbs depends on the machine's code
+    page, and the machine in question had a Hebrew user name.
+    """
+    return os.path.join(blink_home(), "blink-bridge.vbs")
+
+
+LAUNCHER_VBS = "\n".join((
+    "' Starts the BLINK bridge with no window. Written by `blink install`;",
+    "' the Scheduled Task \"Blink bridge\" runs it at every logon.",
+    'Set sh = CreateObject("WScript.Shell")',
+    'home = sh.ExpandEnvironmentStrings("%USERPROFILE%")',
+    # VBScript doubles a quote to embed one: this runs
+    #   "<home>\.blink\bin\blink.exe" run --log "<home>\.blink\bridge.log"
+    # with window style 0 (hidden) and without waiting for it to finish.
+    'sh.Run """" & home & "\\.blink\\bin\\blink.exe"" run --log """'
+    ' & home & "\\.blink\\bridge.log""", 0, False',
+    "",
+))
+
+
 def pid_path():
     """Where the running daemon records its pid: beside its own binary.
 
@@ -495,14 +524,25 @@ class _LaunchdBackend(_Backend):
 
 class _SchtasksBackend(_Backend):
     def creates(self):
-        return f'a Scheduled Task named "{TASK_NAME}"'
+        return (f'a Scheduled Task named "{TASK_NAME}", and {launcher_path()}\n'
+                "             the one-line script it runs, so the bridge starts\n"
+                "             with no window")
 
     def install(self) -> str:
+        # The task runs the launcher, not the program: see launcher_path().
+        # The bridge's output goes to bridge.log by its own hand (--log),
+        # since a hidden window is nowhere for it to go.
+        try:
+            os.makedirs(blink_home(), exist_ok=True)
+            with open(launcher_path(), "w", encoding="ascii", newline="\r\n") as f:
+                f.write(LAUNCHER_VBS)
+        except OSError as e:
+            return f"could not write {launcher_path()}: {e}"
         # /f overwrites a task from an earlier install rather than failing.
         # /sc onlogon needs no admin rights; a Windows service would.
         r = subprocess.run(
             ["schtasks", "/create", "/f", "/tn", TASK_NAME, "/sc", "onlogon",
-             "/tr", f'"{installed_bin()}" run'],
+             "/tr", f'wscript.exe //B //Nologo "{launcher_path()}"'],
             capture_output=True, text=True)
         if r.returncode != 0:
             return f"could not register a Scheduled Task: {r.stderr.strip()[:120]}"
@@ -956,7 +996,7 @@ def cmd_uninstall(_args) -> int:
     # signing keys, which cannot be regenerated -- every board flashed with the
     # first one's public half, and every app carrying the second one's, would
     # stop accepting updates.
-    for p in (shim_path(), hook_shim_path(),
+    for p in (shim_path(), hook_shim_path(), launcher_path(),
               os.path.join(blink_home(), "statusline.json"),
               os.path.join(blink_home(), "statusline.json.tmp"),
               # Pid-scoped temp names, from a render interrupted mid-write.
@@ -1425,6 +1465,12 @@ def cmd_run(args) -> int:
     seconds later, forever.
     """
     import claude_usage_bridge
+    log = getattr(args, "log", None)
+    if log:
+        # The Windows service runs with no window: this is where its output
+        # goes instead. launchd and systemd redirect for us; wscript does not.
+        f = open(log, "a", buffering=1, encoding="utf-8", errors="replace")
+        sys.stdout = sys.stderr = f
     forwarded = []
     if getattr(args, "port", None):
         forwarded += ["--port", args.port]
@@ -1463,6 +1509,8 @@ def main(argv=None) -> int:
     run_p.add_argument("--port", default=None,
                        help="Serial port (default: find the board)")
     run_p.add_argument("--baud", type=int, default=115200)
+    run_p.add_argument("--log", default=None,
+                       help="Append output to this file (the Windows service)")
     args = parser.parse_args(argv)
 
     # Bare `./blink` installs. Someone who just downloaded a file and

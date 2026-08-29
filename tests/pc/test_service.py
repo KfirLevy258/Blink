@@ -165,9 +165,16 @@ def test_schtasks_install_registers_at_logon_then_starts_it(home, monkeypatch):
     # /sc onlogon needs no admin rights; a Windows service would.
     assert "onlogon" in create
     assert cli.TASK_NAME in create
+    # The task runs a hidden-window launcher, not the program: a console
+    # program started by a task gets a console window on the desktop.
     # The path is quoted inside /tr: Windows splits an unquoted one on the
     # space in "Program Files" and on any space in the user's name.
-    assert f'"{cli.installed_bin()}" run' in create
+    assert f'wscript.exe //B //Nologo "{cli.launcher_path()}"' in create
+    vbs = open(cli.launcher_path(), encoding="ascii").read()
+    assert vbs.isascii()                       # the code page never matters
+    assert "%USERPROFILE%" in vbs              # the profile, not a literal path
+    assert "run --log" in vbs                  # hidden means it logs itself
+    assert ", 0, False" in vbs                 # hidden window, do not wait
     # onlogon does not start it now, so it is started explicitly.
     assert r.calls[1][:2] == ["schtasks", "/run"]
 

@@ -21,6 +21,7 @@ import shlex
 import sys
 
 from pc.install_statusline import (SettingsUnreadable, _load, _save,
+                                   windows_bash_path,
                                    _sniff_format)
 
 INSTALLED_MARKER_PATH = "~/.blink/hooks-installed-commands"
@@ -71,8 +72,7 @@ def hook_command(shim_path: str, event: str) -> str:
     this runs on every tool call.
     """
     if sys.platform == "win32":
-        quoted = shlex.quote(shim_path.replace(chr(92), "/"))
-        return f"bash {quoted} {event}"
+        return f"bash {windows_bash_path(shim_path)} {event}"
     return f"sh {shlex.quote(shim_path)} {event}"
 
 

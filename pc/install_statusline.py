@@ -58,8 +58,33 @@ def statusline_command(shim_path: str) -> str:
     mangled. Git Bash accepts C:/Users/... unchanged.
     """
     if sys.platform == "win32":
-        return f"bash {shlex.quote(shim_path.replace(chr(92), '/'))}"
+        return f"bash {windows_bash_path(shim_path)}"
     return f"sh {shlex.quote(shim_path)}"
+
+
+def windows_bash_path(path: str) -> str:
+    r"""A path for a bash command line on Windows, spelled in ASCII.
+
+    Claude Code hands hook and status line commands to Git Bash. A command
+    with a character outside ASCII in it does not survive the hand-over: on
+    a Windows 10 machine whose user name is Hebrew (2026-08-29), bash was
+    given the whole of `bash 'C:/Users/משתמש/.blink/blink-hook.sh' SessionEnd`
+    as ONE argument -- a script name -- and reported no such file, on every
+    hook and every status line render. The identical command with an ASCII
+    path ran. So no hook fired and no usage figure was ever written, and a
+    board on that machine sat on "connecting 2/2" for good.
+
+    Anything under the profile is therefore written as "$USERPROFILE/...":
+    pure ASCII on the wire, expanded by bash itself after the hand-over,
+    and it was seen to run on that machine. Forward slashes throughout,
+    since a backslash is an escape under bash; bash on Windows takes the
+    mixed C:\Users\...\/.blink/x.sh that the expansion produces.
+    """
+    p = path.replace(chr(92), "/")
+    home = os.path.expanduser("~").replace(chr(92), "/").rstrip("/")
+    if home and p.lower().startswith(home.lower() + "/"):
+        return '"$USERPROFILE' + p[len(home):] + '"'
+    return shlex.quote(p)
 
 
 def _chain_path():
