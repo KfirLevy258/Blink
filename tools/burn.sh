@@ -54,24 +54,35 @@ esac
 say()  { printf '\n== %s\n' "$*"; }
 die()  { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
 
-# The Python that has pyserial, numpy, pillow and esptool: BLINK_PYTHON if
-# set, else a repo venv, else the Zephyr venv every firmware build already
-# uses -- no activation step to remember on the factory bench. Its bin/ is
-# added to PATH only when no esptool.py is there already: an esptool that
-# was put on PATH on purpose (or the stubs in tests/ci/check_factory.sh)
-# must not be shadowed by the venv's copy.
+# Two toolchains, found without an activation step to remember on the bench:
+#
+#  - the Python with pyserial, numpy and pillow (the boot check and the logo
+#    encoder): BLINK_PYTHON, else a repo venv, else the Zephyr venv every
+#    firmware build already uses;
+#  - esptool.py: whatever is on PATH, else the espressif tools directory
+#    lib_efuse.sh already uses (BLINK_ETOOLS or the Python 3.10 framework
+#    bin), else the Python above's own bin. Never prepended over an
+#    esptool.py that is already on PATH -- one chosen on purpose, or the
+#    stubs in tests/ci/check_factory.sh, must win.
 PY="${BLINK_PYTHON:-$ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY="$HOME/zephyr-v4.4.0/.venv/bin/python"
 [ -x "$PY" ] || PY=$(command -v python3) || die "no python3"
-if ! command -v esptool.py >/dev/null 2>&1; then
-	PATH="$(dirname -- "$PY"):$PATH"
-	export PATH
-fi
 for mod in serial numpy PIL; do
 	"$PY" -c "import $mod" 2>/dev/null ||
 		die "$PY lacks the '$mod' module. Run with BLINK_PYTHON=<python that has pyserial, numpy and pillow>"
 done
-command -v esptool.py >/dev/null 2>&1 || die "esptool.py is not on PATH (pip install esptool into $PY)"
+ETOOLS="${BLINK_ETOOLS:-/Library/Frameworks/Python.framework/Versions/3.10/bin}"
+if ! command -v esptool.py >/dev/null 2>&1; then
+	for d in "$ETOOLS" "$(dirname -- "$PY")"; do
+		if [ -x "$d/esptool.py" ]; then
+			PATH="$d:$PATH"
+			export PATH
+			break
+		fi
+	done
+fi
+command -v esptool.py >/dev/null 2>&1 ||
+	die "esptool.py not found on PATH, in $ETOOLS, or next to $PY (pip install esptool, or set BLINK_ETOOLS)"
 
 BOARD="${BLINK_BOARD:-esp32_devkitc/esp32/procpu}"
 KEY="${BLINK_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
