@@ -411,12 +411,32 @@ inspection:
 
 | event | state |
 |---|---|
-| `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStop`, `PreCompact` | `running` |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStop`, `PreCompact` | `running` |
 | `Notification`, `PermissionRequest` | `waiting` |
-| `Stop`, `SessionEnd` | `idle` |
+| `Stop` | `idle` - finished, the person's turn |
 | `StopFailure` | `failed` |
 | a `running` event, then silence past the threshold | `stuck` |
-| anything unrecognised, or an hour of silence | `""` (dark) |
+| `SessionStart`, `SessionEnd`, anything unrecognised, or an hour of silence | `""` (no claim) |
+
+`idle` is a claim on the person's attention (amber on the panel), which is why
+an opened-but-untouched terminal and an ended session both say nothing rather
+than "idle" (2026-08-29; before that both were `idle`, and before that
+`SessionStart` was `running` and went red three minutes after every `claude`).
+
+**Severity**, worst first, in `base.SEVERITY`: `failed`, `stuck`, `waiting`,
+`idle`, `running`. `idle` above `running` is the product decision that makes
+the light useful: "one finished, two working" is "your turn", not "busy". The
+wire layer (`protocol.frame_to_usage`) collapses BOTH providers with the same
+order and sums their session counts, so the single pip is the worst of
+everything on the desk, whichever page is in front.
+
+**Codex** has no hooks. `CodexCliProvider` reads the same rollout log it reads
+for usage: the newest `task_started` / `task_complete` / `turn_aborted` in each
+file is that session's state, aged by the event's own timestamp with the same
+thresholds. Every rollout votes (one session each) and the provider emits one
+percentage-free state frame, exactly as `ClaudeStateProvider` does. No
+permission event has been observed in the log, so Codex never reports
+`waiting`; a prompt is `running` until answered, `stuck` after three minutes.
 
 `failed` earns its own state because `StopFailure` runs instead of `Stop` when
 a turn dies on an API error and carries `error: "rate_limit"` among its causes.

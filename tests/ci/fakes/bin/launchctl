@@ -1,0 +1,4 @@
+#!/bin/sh
+# There is no login service on a CI runner, and on a developer's Mac the test
+# must not stop the real one: every query says "no such service".
+exit 1

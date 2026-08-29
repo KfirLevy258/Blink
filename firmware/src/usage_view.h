@@ -21,10 +21,10 @@ enum usage_status {
  * session and an absent field is not evidence of one.
  */
 enum usage_activity {
-	USAGE_ACTIVITY_NONE = 0,	/* hidden */
-	USAGE_ACTIVITY_IDLE,		/* green: turn complete, waiting for you */
-	USAGE_ACTIVITY_RUNNING,		/* green, pulsing: working */
-	USAGE_ACTIVITY_WAITING,		/* amber: wants a human */
+	USAGE_ACTIVITY_NONE = 0,	/* green: live data, no session says anything */
+	USAGE_ACTIVITY_IDLE,		/* amber: a turn finished -- your turn */
+	USAGE_ACTIVITY_RUNNING,		/* green, pulsing: everything is working */
+	USAGE_ACTIVITY_WAITING,		/* amber, pulsing: asking permission right now */
 	USAGE_ACTIVITY_STUCK,		/* red: announced work, then went silent */
 	USAGE_ACTIVITY_FAILED,		/* red: the turn died on an API error */
 };

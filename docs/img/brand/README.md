@@ -18,6 +18,5 @@ One ink, white on black. The mark has to print on a case in a single colour,
 so nothing in it depends on a second one. The wordmark is converted to
 outlines, so these files do not need IBM Plex installed to render correctly.
 
-`docs/img/logo.svg`, `logo.png`, `icon.svg` and `icon.png` are copies of the
-four above, replacing the gradient mark that was there before. The old ones
-are in git: `git show 5c48743:docs/img/logo.png > old-logo.png`.
+The older `docs/img/logo.*` and `icon.*` copies were removed on 2026-08-29; the
+pre-rebrand originals are in git: `git show 5c48743:docs/img/logo.png > old-logo.png`.

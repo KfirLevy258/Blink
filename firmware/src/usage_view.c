@@ -1525,11 +1525,26 @@ static lv_color_t activity_color(bool *pulse)
 	case USAGE_ACTIVITY_FAILED:
 		return COL_RED;
 	case USAGE_ACTIVITY_WAITING:
+		/* Asking right now: amber, and it breathes -- a permission
+		 * prompt is more urgent than an answer waiting to be read. */
+		*pulse = true;
+		return COL_AMBER;
+	case USAGE_ACTIVITY_IDLE:
+		/*
+		 * Amber, not green. A finished turn is a turn waiting on the
+		 * person, and the daemon ranks it above "running" so one
+		 * finished session shows through however many are still
+		 * working (user decision 2026-08-29). Green was the old
+		 * colour, and steady green vs pulsing green was the whole
+		 * difference between "read me" and "busy" -- not a difference
+		 * anyone caught from across a desk.
+		 */
 		return COL_AMBER;
 	case USAGE_ACTIVITY_RUNNING:
 		*pulse = true;
 		return COL_GREEN;
 	default:
+		/* NONE: live data and nothing to report. Steady green. */
 		return COL_GREEN;
 	}
 }

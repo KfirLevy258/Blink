@@ -33,7 +33,13 @@
 	partitions {
 		scratch_partition: partition@2c0000 {
 			label = "image-scratch";
-			reg = <0x2C0000 0xF0000>;
+			reg = <0x2C0000 0x70000>;
+		};
+		/* Mirrors the app overlay (see item 2 above); MCUboot itself
+		 * never reads the logo. */
+		logo_partition: partition@330000 {
+			label = "logo";
+			reg = <0x330000 0x80000>;
 		};
 	};
 };

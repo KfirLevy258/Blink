@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="img/logo.png" alt="Blink" width="560">
+<img src="img/brand/logo-wide.png" alt="BLINK" width="420">
 
 **A little desk gauge for your Claude Code and Codex usage.**
 Your 5-hour session and 7-day week, as two live dials you can glance at all day.
@@ -30,7 +30,7 @@ Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 Blink is a small desk display that shows how much of your Claude Code usage you've spent - the same numbers as the `/usage` command, but always in view. It reads your **5-hour session** limit and your **7-day weekly** limit and draws each as a dial, green while you have room, amber as you get close, red when it's nearly gone. Glance over, know where you stand, keep working.
 
-Beside the dials is a small pip telling you whether Claude Code is working, waiting on you, or has gone quiet mid-task -- across every session you have open, worst one wins. Under them, a countdown to each window's reset.
+Beside the dials is a small pip telling you whether anything is waiting on you -- across every Claude Code and Codex session you have open, one light: amber the moment a session has finished or is asking permission, a green pulse while everything is still working, red when something is stuck or rate-limited. Under them, a countdown to each window's reset.
 
 It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the setup once, and it sits on your desk and keeps itself up to date.
 
@@ -208,6 +208,47 @@ config partition erased first (`esptool.py erase_region 0x3b0000 0x30000`).
 Pass `--port` to name a board when more than one is attached, and `--no-build`
 to reuse the last build.
 
+### Company units
+
+A unit sold to a company shows the company's logo after the boot animation:
+
+```bash
+tools/burn.sh --edition claude --logo acme.png     # a still, held for 3 s
+tools/burn.sh --edition claude --logo acme.bin     # a clip built by tools/encode_logo.py
+```
+
+`--logo` takes a picture (scaled to fit the screen), a short video, a folder of
+320x240 frames, or a `.bin` already built with `tools/encode_logo.py` (which
+also previews one as a GIF: `--info acme.bin --preview acme.gif`). The logo is
+written to its own flash partition in the same call as the firmware, and the
+boot check insists the board saw it. It is a clip in the boot animation's own
+format, so a still costs a few KB and a 3-second animation a couple of hundred;
+the partition holds 512 KB.
+
+There is no flag to set: the partition **is** the flag. A unit that never had
+one written boots as an individual unit, and a burn *without* `--logo` erases
+the partition, so a re-burned board is an individual unit again. Nothing over
+USB can change it -- like the edition, it takes esptool with the board in
+bootloader mode -- but unlike the edition it is not write-once, because a logo
+is a fact about the customer, not the enclosure. OTA never touches it: the
+firmware slots and the settings partition are exactly where they were.
+Edition and logo are independent -- a company unit is still a Claude or a
+Codex one.
+
+### Tested without a board
+
+`tests/ci/check_factory.sh` runs both scripts, unmodified, on every push: it
+puts stub `esptool.py` / `espefuse.py` / `espsecure.py` on the PATH that
+record their calls, and a fake `serial` module that plays a board -- it
+replays a boot transcript on every reset and answers the edition message.
+Eleven scenarios cover what matters on a production line: the images and
+addresses of an individual burn and a company burn, that the logo partition
+is erased when no logo was asked for, that a fused chip is refused, that a
+board which cannot see the logo it was given (or shows one it should not
+have), a wrong edition, a stale build, or a flash that dies mid-way each end
+in `FAILED` rather than a boxed unit. Run it locally with
+`sh tests/ci/check_factory.sh` (needs numpy and pillow).
+
 ## Build &amp; flash by hand
 
 You only need this to put firmware on a board yourself (after that, it updates over the air). It uses the [Zephyr](https://zephyrproject.org/) toolchain.
@@ -270,6 +311,7 @@ The things that were open before the first release, and how each was settled.
 |---|---|
 | **Name** | **BLINK.** The panel, the app (`blink`), its directory (`~/.blink`), the login service and this repository all say it. Earlier names (Clauge, "Claude usage") are gone. |
 | **Editions** | Two -- Claude and Codex -- from **one firmware image**, chosen by a write-once stamp at the factory (`tools/burn-claude.sh` / `tools/burn-codex.sh`). Never user-changeable; a unit from before the stamp existed arrives latched as Claude. |
+| **Company units** | The same image plays a company logo (a still or a short clip) after the boot animation when the factory wrote one to the `logo` partition (`tools/burn.sh --logo`). No logo partition, no logo: individuals are the default, and a re-burn without `--logo` erases it. |
 | **One board per computer** | The app drives one BLINK. A second one attached is ignored; `--port` picks one deterministically. |
 | **What is supported** | Claude Code in a terminal or IDE extension: everything. Codex CLI: everything, on its own page. Claude Desktop alone: percentages and a rate, no countdowns and no activity light, because the app records no reset times anywhere. claude.ai in a browser: nothing. |
 | **Automatic app updates** | **Off** for the first release. The signed manifest carries the switch (`daemon.auto`), so it can be turned on for a later release -- and off again within minutes -- without touching any installed machine. |
@@ -285,11 +327,27 @@ The things that were open before the first release, and how each was settled.
 
 ## The status dot
 
-A small dot in the top-right corner tells you how fresh the numbers are:
+A small dot in the top-right corner is one light for the whole desk: what
+your sessions need from you, across Claude Code and Codex together, worst one
+wins.
 
 | Dot | Meaning |
 |-----|---------|
-| 🟢 green | Connected - live data |
-| 🟠 amber | Stale - showing the last good numbers, because Claude Code has not refreshed them recently or the window they describe has since reset |
-| 🔴 red | Error |
-| ⚪ grey | Signed out |
+| 🟢 green, pulsing | Everything is working; nothing needs you |
+| 🟠 amber | **Your turn** - a session has finished its answer (Claude or Codex), even if others are still working |
+| 🟠 amber, pulsing | A session is asking permission right now |
+| 🔴 red | Stuck (announced work, then went silent for three minutes), or the turn died on an API error - a rate limit shows here |
+| 🟢 green, steady | Connected, live data, no session has anything to say |
+| ⚪ grey | Not connected |
+
+Stale numbers also show amber, with "Reading is old" on the page: the last
+good reading is kept on screen because Claude Code has not refreshed it
+recently, or the window it describes has since reset.
+
+"Your turn" is deliberately ranked above "working": a finished answer is
+waiting on you, and the sessions still running are not, so one finished
+session shows through any number of busy ones. A terminal you opened and have
+not typed into claims nothing, and neither does one that has ended. Codex has
+no hook interface, so its state comes from its own session log: a turn that
+started, finished or was interrupted. Codex permission prompts are not in that
+log, so a prompt shows as "working" until you answer it.

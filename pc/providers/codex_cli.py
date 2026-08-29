@@ -240,9 +240,69 @@ def parse_rollout_tail(lines, mtime: float):
     return None, None
 
 
+# --- execution state ---------------------------------------------------------
+#
+# Codex has no hook interface, but its rollout log is a journal of the same
+# transitions: `task_started` when a turn begins, `task_complete` when the
+# answer is in, `turn_aborted` when the person interrupted it. The newest of
+# these in a file is that session's state, aged by its own timestamp, with
+# the same thresholds Claude's hooks use -- a turn silent past STUCK_AFTER_S
+# is stuck, anything past ABANDONED_AFTER_S is a session that is gone.
+#
+# Permission prompts are not in the journal as far as anyone has observed, so
+# there is no `waiting` for Codex; a prompt shows as `running` until it is
+# answered, and as `stuck` if it is left long enough. Honest, if less useful.
+from pc.providers.claude_state import (STUCK_AFTER_S, ABANDONED_AFTER_S,  # noqa: E402
+                                       T_EPOCH_MIN, T_EPOCH_MAX)
+
+STATE_SRC_ID = "cli-state"
+_TURN_EVENTS = {
+    "task_started": base.STATE_RUNNING,
+    "task_complete": base.STATE_IDLE,
+    "turn_aborted": base.STATE_IDLE,
+}
+
+
+def parse_rollout_state(lines, now_epoch, stuck_after_s=STUCK_AFTER_S):
+    """The execution state one rollout file implies, or STATE_UNKNOWN.
+
+    Scanned backwards like the rate limits: the newest turn event is the
+    answer. A file with no turn event yet -- a session opened and not typed
+    into -- makes no claim, for the same reason a Claude SessionStart does not.
+    """
+    for raw in reversed(lines):
+        if "task_" not in raw and "turn_aborted" not in raw:
+            continue        # cheap reject before the parse
+        try:
+            line = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(line, dict) or line.get("type") != "event_msg":
+            continue
+        payload = line.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        state = _TURN_EVENTS.get(payload.get("type"))
+        if state is None:
+            continue
+        t = _observed_at(line, float("nan"))
+        if not (T_EPOCH_MIN <= t <= T_EPOCH_MAX):
+            return base.STATE_UNKNOWN   # no usable timestamp: no age, no claim
+        age = now_epoch - t
+        if age < 0:
+            age = 0.0                   # a clock that stepped; treat as fresh
+        if age > ABANDONED_AFTER_S:
+            return base.STATE_UNKNOWN
+        if state == base.STATE_RUNNING and age > stuck_after_s:
+            return base.STATE_STUCK
+        return state
+    return base.STATE_UNKNOWN
+
+
 class CodexCliProvider(base.ProviderParser):
-    def __init__(self, root=None):
+    def __init__(self, root=None, stuck_after_s=STUCK_AFTER_S):
         self._root = root
+        self._stuck_after = stuck_after_s
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -281,12 +341,20 @@ class CodexCliProvider(base.ProviderParser):
         the freshest one win a contest it has already won here.
         """
         best = None
+        counts = {}
         for path in recent_rollouts(self._root):
             try:
                 mtime = os.path.getmtime(path)
             except OSError:
                 continue
-            limits, observed_at = parse_rollout_tail(_tail_lines(path), mtime)
+            lines = _tail_lines(path)
+            # Every rollout is one session, so every one of them votes on
+            # the execution state -- unlike the percentages, which are one
+            # account-wide pair however many terminals are open.
+            state = parse_rollout_state(lines, now_epoch, self._stuck_after)
+            if state != base.STATE_UNKNOWN:
+                counts[state] = counts.get(state, 0) + 1
+            limits, observed_at = parse_rollout_tail(lines, mtime)
             if limits is None:
                 continue
             frame = self.parse_cli_event(limits, now_epoch, observed_at)
@@ -294,4 +362,18 @@ class CodexCliProvider(base.ProviderParser):
                 continue
             if best is None or frame.observed_at > best.observed_at:
                 best = frame
-        return [best] if best is not None else []
+        frames = [best] if best is not None else []
+        if counts:
+            # A separate frame with no percentages, exactly as Claude's state
+            # provider does it: it can never win a recency contest for
+            # numbers, and the normalizer merges its state field by field.
+            frames.append(base.NormalizedUsageFrame(
+                provider=PROVIDER_ID,
+                src=STATE_SRC_ID,
+                observed_at=now_epoch,
+                state=base.worst_of(counts),
+                n_run=counts.get(base.STATE_RUNNING, 0),
+                n_idle=counts.get(base.STATE_IDLE, 0),
+                n_stuck=counts.get(base.STATE_STUCK, 0),
+            ))
+        return frames
