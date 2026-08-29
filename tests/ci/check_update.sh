@@ -148,7 +148,9 @@ ok "esptool and espefuse are bundled and answer to -m"
 # SSL_CERT_FILE/SSL_CERT_DIR over its compiled-in default. The real GitHub feed
 # is the target -- a self-signed local server would test the wrong thing.
 (
-	unset BLINK_OTA_DIR
+	# The real feed, the real key: the harness's throwaway key and local
+	# directory would both make this a test of something else.
+	unset BLINK_OTA_DIR BLINK_RELEASE_PUBKEY_FILE
 	SSL_CERT_FILE=/nonexistent/cert.pem SSL_CERT_DIR=/nonexistent/certs \
 		"$INSTALLED" update >"$WORK/nocerts.txt" 2>&1 || true
 )
