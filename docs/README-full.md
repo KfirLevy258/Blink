@@ -351,3 +351,11 @@ not typed into claims nothing, and neither does one that has ended. Codex has
 no hook interface, so its state comes from its own session log: a turn that
 started, finished or was interrupted. Codex permission prompts are not in that
 log, so a prompt shows as "working" until you answer it.
+
+## Support
+
+`~/.blink/bin/blink status` first: it names the service state, every source it
+reads and the age of each reading. Then a replug of the board. If neither
+helps, email the support address on your order confirmation with that output
+and the tail of `~/.blink/bridge.log` (neither contains a credential or any
+message text).
