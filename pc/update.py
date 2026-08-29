@@ -73,7 +73,7 @@ def _pubkey():
     path = os.environ.get(PUBKEY_ENV)
     if path:
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 return f.read()
         except OSError as e:
             print(f"[update] cannot read {path}: {e}; using the built-in key",
@@ -346,7 +346,7 @@ class PendingFirmware:
     def set(self, version):
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "w") as f:
+            with open(self.path, "w", encoding="utf-8") as f:
                 json.dump({"version": version}, f)
         except OSError as e:
             print(f"[update] could not record the pending update: {e}",
@@ -354,7 +354,7 @@ class PendingFirmware:
 
     def take(self):
         try:
-            with open(self.path) as f:
+            with open(self.path, encoding="utf-8") as f:
                 version = json.load(f).get("version")
         except (OSError, ValueError):
             return None

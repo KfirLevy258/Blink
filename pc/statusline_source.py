@@ -168,7 +168,13 @@ def read_payload(path: str = PAYLOAD_PATH):
     """(payload, mtime) or (None, None) when absent/unreadable/malformed."""
     try:
         mtime = os.path.getmtime(path)
-        with open(path) as f:
+        # UTF-8 by name. Without it Windows opens the file in the machine's
+        # ANSI code page, and on a Hebrew Windows 10 (cp1255) the transcript
+        # path Claude Code writes into this payload raised UnicodeDecodeError
+        # -- a ValueError, swallowed below as "no data" -- so a board on that
+        # machine never received a figure while the file sat there fresh and
+        # complete (2026-08-29).
+        with open(path, encoding="utf-8") as f:
             return json.load(f), mtime
     except (OSError, ValueError):
         return None, None

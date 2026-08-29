@@ -139,7 +139,7 @@ def hold_single_instance(home, on_wait=None, poll_s=5.0):
     path = os.path.join(home, "bridge.lock")
     try:
         os.makedirs(home, exist_ok=True)
-        fh = open(path, "w")
+        fh = open(path, "w", encoding="utf-8")
     except OSError:
         # An unwritable home is not a reason to refuse to run; it only means
         # this protection is unavailable.
@@ -185,7 +185,7 @@ def _known_path(home):
 def remembered_board(home):
     """{"port": ..., "board_id": ...} from the last successful connection."""
     try:
-        with open(_known_path(home)) as f:
+        with open(_known_path(home), encoding="utf-8") as f:
             d = json.load(f)
         return d if isinstance(d, dict) else {}
     except Exception:
@@ -204,7 +204,7 @@ def remember_board(home, port, board_id):
     try:
         os.makedirs(home, exist_ok=True)
         tmp = _known_path(home) + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"port": port, "board_id": board_id}, f)
         os.replace(tmp, _known_path(home))
     except OSError:
@@ -400,7 +400,7 @@ def main(argv=None):
     # for.
     pid_file = os.path.join(os.path.dirname(_self_path()), "bridge.pid")
     try:
-        with open(pid_file, "w") as f:
+        with open(pid_file, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))
     except OSError as e:
         print(f"[bridge] could not record the pid: {e}", file=sys.stderr)

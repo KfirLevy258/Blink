@@ -156,9 +156,9 @@ def _shim_source(name: str = "blink-statusline.sh") -> str:
     """
     if _frozen():
         base = getattr(sys, "_MEIPASS", os.path.dirname(_self_path()))
-        return open(os.path.join(base, name)).read()
+        return open(os.path.join(base, name), encoding="utf-8").read()
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return open(os.path.join(here, "tools", name)).read()
+    return open(os.path.join(here, "tools", name), encoding="utf-8").read()
 
 
 def _write_shim(path: str, name: str) -> None:
@@ -448,7 +448,7 @@ class _LaunchdBackend(_Backend):
 
     def install(self) -> str:
         os.makedirs(os.path.dirname(plist_path()), exist_ok=True)
-        with open(plist_path(), "w") as f:
+        with open(plist_path(), "w", encoding="utf-8") as f:
             args = "".join(f"    <string>{_xml_escape(a)}</string>\n"
                            for a in _service_command())
             f.write(_PLIST_TEMPLATE.format(label=LABEL, args=args,
@@ -604,7 +604,7 @@ class _SystemdBackend(_Backend):
         # The unit file is written either way. It costs nothing, and it means
         # a machine that gains systemd later already has the right file.
         os.makedirs(os.path.dirname(unit_path()), exist_ok=True)
-        with open(unit_path(), "w") as f:
+        with open(unit_path(), "w", encoding="utf-8") as f:
             f.write(_UNIT_TEMPLATE.format(command=_systemd_exec()))
         if not self._has_systemctl():
             return f"no systemd here; run it yourself: {installed_bin()} run"
@@ -710,7 +710,7 @@ def _kill_recorded_daemon():
     if sys.platform != "win32":
         return
     try:
-        with open(pid_path()) as f:
+        with open(pid_path(), encoding="utf-8") as f:
             pid = int(f.read().strip())
     except (OSError, ValueError):
         return
