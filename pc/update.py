@@ -162,7 +162,8 @@ def fetch_signed_manifest(get=ota._get):
     try:
         raw = get(MANIFEST_URL)
         sig = get(SIG_URL)
-    except Exception:
+    except Exception as e:
+        print(f"[update] could not read the release feed: {e}", file=sys.stderr)
         return None
     if not verify_signature(raw, sig, _pubkey()):
         print("[update] manifest signature did not verify -- ignoring the feed",

@@ -505,3 +505,31 @@ class TestManifestCompatibility(unittest.TestCase):
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
         b.on_message({"t": "ota_flash"})
         self.assertEqual(flashed, [(b"hello", "0.4.9")])
+
+
+class TestTheFetchTrustsCertifi(unittest.TestCase):
+    """The frozen macOS binary's OpenSSL looks for its CA bundle at a path
+    that exists only on a Mac with python.org's Python installed; without a
+    bundle of our own every fetch failed and no installed device could update
+    (2026-08-29). The context must carry certifi's roots even when the
+    system offers none."""
+
+    def test_the_context_carries_certifi_roots_without_a_system_bundle(self):
+        import os
+        import certifi
+        want = open(certifi.where(), "rb").read().count(b"BEGIN CERTIFICATE")
+        self.assertGreater(want, 100)
+        saved = {k: os.environ.get(k) for k in ("SSL_CERT_FILE", "SSL_CERT_DIR")}
+        try:
+            # OpenSSL honours these over its compiled-in default, so pointing
+            # them nowhere is a machine with no certificate store at all.
+            os.environ["SSL_CERT_FILE"] = "/nonexistent/cert.pem"
+            os.environ["SSL_CERT_DIR"] = "/nonexistent/certs"
+            have = ota._ssl_context().cert_store_stats()["x509_ca"]
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertGreaterEqual(have, want)

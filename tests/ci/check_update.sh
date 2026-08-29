@@ -139,4 +139,24 @@ grep -q "esptool" "$WORK/esptool.txt" || fail "-m esptool ran but printed no ver
 grep -qi "summary" "$WORK/espefuse.txt" || fail "-m espefuse ran but is not espefuse"
 ok "esptool and espefuse are bundled and answer to -m"
 
+# --- 6. the binary can read the real feed with no certificate store ----------
+# The macOS binary carries python.org's OpenSSL, whose default CA path exists
+# only on a Mac with that Python installed. On any other Mac every fetch failed
+# with CERTIFICATE_VERIFY_FAILED and no device could update (2026-08-29; 1.0.0
+# and 1.0.1 shipped that way). certifi's bundle now travels inside the binary,
+# and this proves it by hiding the system store entirely: OpenSSL honours
+# SSL_CERT_FILE/SSL_CERT_DIR over its compiled-in default. The real GitHub feed
+# is the target -- a self-signed local server would test the wrong thing.
+(
+	unset BLINK_OTA_DIR
+	SSL_CERT_FILE=/nonexistent/cert.pem SSL_CERT_DIR=/nonexistent/certs \
+		"$INSTALLED" update >"$WORK/nocerts.txt" 2>&1 || true
+)
+if grep -q "Could not read the release feed" "$WORK/nocerts.txt"; then
+	fail "the binary cannot read the feed without a system certificate store: $(cat "$WORK/nocerts.txt")"
+fi
+grep -Eq "Already up to date|Downloading|no published build" "$WORK/nocerts.txt" ||
+	fail "unexpected answer from the real feed: $(cat "$WORK/nocerts.txt")"
+ok "the real feed is readable with no certificate store on the machine"
+
 printf 'PASS [update]\n'

@@ -18,3 +18,8 @@ esptool==5.3.1
 # add tens of megabytes to every platform's download to check one signature a
 # day. It never touches the usage path, only the update path.
 ecdsa==0.19.1
+# The CA bundle the update fetch trusts. The frozen macOS binary carries
+# python.org's OpenSSL, whose default certificate path exists only on a Mac
+# with that same Python installed -- without this, every HTTPS fetch failed
+# and no installed device could update (2026-08-29). See pc/ota.py.
+certifi==2026.7.22

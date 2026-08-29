@@ -82,6 +82,7 @@ cd "$ROOT"
 	--collect-all bitarray \
 	--hidden-import claude_usage_bridge \
 	--hidden-import ecdsa \
+	--collect-all certifi \
 	--hidden-import serial.tools.list_ports \
 	"$@" \
 	--noconfirm --clean \

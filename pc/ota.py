@@ -22,6 +22,7 @@ import json
 import os
 import pathlib
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -48,11 +49,39 @@ def _local_dir():
     return pathlib.Path(d) if d else None
 
 
+def _ssl_context():
+    """The certificates a fetch will trust: the system's, plus certifi's.
+
+    The frozen macOS build carries python.org's OpenSSL, which looks for its
+    CA bundle at /Library/Frameworks/Python.framework/Versions/3.X/etc/openssl
+    -- a path that exists only on a Mac with that exact Python installed and
+    its "Install Certificates" step run. On every other Mac each HTTPS fetch
+    failed with CERTIFICATE_VERIFY_FAILED: `blink update` said the feed could
+    not be read and the daemon's daily check logged "unreachable", so no
+    installed device could ever have updated (2026-08-29, found on the desk
+    Mac an hour after 1.0.1 was published; 1.0.0 shipped the same way).
+
+    certifi carries the Mozilla bundle inside the binary, so the fetch no
+    longer depends on what the machine happens to have. The system store is
+    still loaded first, for a workplace proxy that re-signs traffic with its
+    own root. A source checkout without certifi gets the system store alone,
+    which is what it always had.
+    """
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(cafile=certifi.where())
+    except Exception:
+        pass
+    return ctx
+
+
 def _get(url, timeout=30):
     local = _local_dir()
     if local is not None:
         return (local / url.rsplit("/", 1)[-1]).read_bytes()
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+    with urllib.request.urlopen(url, timeout=timeout,
+                                context=_ssl_context()) as r:
         return r.read()
 
 
@@ -60,7 +89,10 @@ def fetch_manifest(get=_get):
     """{"version","size","sha256"} for the latest release, or None."""
     try:
         m = json.loads(get(MANIFEST_URL).decode("utf-8"))
-    except Exception:
+    except Exception as e:
+        # Say why. "Unreachable" hid a certificate failure on every macOS
+        # install for a day; the reason is the only thing support can act on.
+        print(f"[ota] could not read the release feed: {e}", file=sys.stderr)
         return None
     if not all(k in m for k in ("version", "size", "sha256")):
         return None
