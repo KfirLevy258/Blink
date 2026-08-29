@@ -119,9 +119,9 @@ jobs:
         shell: bash
         run: |
           set -eu
-          bin=dist/blink
-          [ -f "$bin" ] || bin=dist/blink.exe
-          echo "size: $(du -h "$bin" | cut -f1)"
+          bin=dist/blink/blink
+          [ -f "$bin" ] || bin=dist/blink/blink.exe
+          echo "size: $(du -sh dist/blink | cut -f1)"
 
           "$bin" --version
           "$bin" status
@@ -160,7 +160,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: blink-${{ matrix.os }}
-          path: dist/blink*
+          # The whole directory: since 1.1.0 the program is blink/blink plus
+          # blink/_internal/. Artifacts drop file modes, hence the chmod on
+          # the other side.
+          path: dist/blink
           retention-days: 7
 
   # The step no unit test reaches, because it touches the machine: registering
@@ -197,8 +200,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: blink-${{ matrix.os }}
-          path: dist
-      - run: chmod +x dist/blink*
+          path: dist/blink
+      - run: chmod +x dist/blink/blink*
       # HOME is redirected inside the script, but the launchd label and the
       # systemd unit name are constants -- fine on a throwaway runner, which is
       # the whole reason this job cannot be a local test.
@@ -226,8 +229,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: blink-${{ matrix.os }}
-          path: dist
-      - run: chmod +x dist/blink*
+          path: dist/blink
+      - run: chmod +x dist/blink/blink*
       - run: sh tests/ci/check_update.sh
 
   # The firmware's pure logic, compiled and run on a plain runner. native_sim
