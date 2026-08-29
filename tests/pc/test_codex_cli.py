@@ -397,10 +397,10 @@ def test_the_newest_turn_event_wins_whatever_follows_it():
     assert codex_cli.parse_rollout_state(lines, NOW) == base.STATE_RUNNING
 
 
-def test_a_turn_silent_too_long_is_stuck_but_a_finished_one_never_is():
-    late = codex_cli.STUCK_AFTER_S + 1
+def test_a_long_silent_turn_is_still_running_and_a_finished_one_is_idle():
+    late = 40 * 60.0
     assert codex_cli.parse_rollout_state(
-        [turn_line("task_started", _stamp(NOW - late))], NOW) == base.STATE_STUCK
+        [turn_line("task_started", _stamp(NOW - late))], NOW) == base.STATE_RUNNING
     assert codex_cli.parse_rollout_state(
         [turn_line("task_complete", _stamp(NOW - late))], NOW) == base.STATE_IDLE
 

@@ -436,20 +436,21 @@ file is that session's state, aged by the event's own timestamp with the same
 thresholds. Every rollout votes (one session each) and the provider emits one
 percentage-free state frame, exactly as `ClaudeStateProvider` does. No
 permission event has been observed in the log, so Codex never reports
-`waiting`; a prompt is `running` until answered, `stuck` after ten minutes.
+`waiting`; a prompt is `running` until answered, however long that takes.
 
 `failed` earns its own state because `StopFailure` runs instead of `Stop` when
 a turn dies on an API error and carries `error: "rate_limit"` among its causes.
 On a usage gauge that is the headline, not a detail — which is also why
 `worst_of()` ranks it above `stuck`.
 
-`stuck` fires at 600 s, not the specified 60 s. A test suite, an npm install, a
-docker build and a slow model response all routinely pass a minute while
-healthy, and an alert that cries wolf on every build is one its owner learns to
-ignore before the day it is right. It was 180 s until 2026-08-29, when a Bash
-polling loop went red on the desk while working: the hooks say nothing between
-`PreToolUse` and `PostToolUse`, and Claude Code allows a single tool call ten
-minutes. Ten minutes is therefore the line past which silence means wedged.
+`stuck` is no longer produced (2026-08-29; the protocol keeps the word). It was
+inferred from silence, and every threshold cried wolf on the desk within a day:
+60 s on a test suite, 180 s on a nine-minute Bash polling loop (the hooks say
+nothing between `PreToolUse` and `PostToolUse`), 600 s on a seventeen-minute
+think with the API connection open throughout. The hooks cannot distinguish a
+long turn from a wedged one, so the daemon does not guess: a turn is `running`
+until an event says otherwise, and a session that never says drops out after
+`ABANDONED_AFTER_S`. Red is `failed` alone -- an event, not an inference.
 
 ### On disk
 

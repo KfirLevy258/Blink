@@ -10,7 +10,7 @@ import pytest
 
 from pc.providers import base
 from pc.providers.claude_state import (ABANDONED_AFTER_S,
-                                       AGENT_ABANDONED_AFTER_S, STUCK_AFTER_S,
+                                       AGENT_ABANDONED_AFTER_S,
                                        ClaudeStateProvider, derive_state,
                                        worst_of)
 
@@ -32,7 +32,7 @@ def test_an_opened_session_claims_nothing_and_never_becomes_stuck():
     it would now paint the "your turn" amber for a terminal nobody has asked
     anything of. It says nothing."""
     assert derive_state("SessionStart", 2.0) == base.STATE_UNKNOWN
-    assert derive_state("SessionStart", STUCK_AFTER_S * 5) == base.STATE_UNKNOWN
+    assert derive_state("SessionStart", 3000.0) == base.STATE_UNKNOWN
 
 
 def test_a_slot_with_a_nonsense_timestamp_is_ignored(tmp_path):
@@ -71,33 +71,26 @@ def test_an_api_error_is_its_own_state():
 
 def test_a_failed_turn_does_not_decay_into_stuck():
     """It is not wedged. It is finished and unsuccessful."""
-    assert derive_state("StopFailure", STUCK_AFTER_S * 5) == base.STATE_FAILED
+    assert derive_state("StopFailure", 3000.0) == base.STATE_FAILED
 
 
 def test_a_person_taking_their_time_is_still_waiting():
-    assert derive_state("Notification", STUCK_AFTER_S * 5) == base.STATE_WAITING
+    assert derive_state("Notification", 3000.0) == base.STATE_WAITING
 
 
 def test_a_completed_turn_stays_idle_however_long_the_silence():
-    assert derive_state("Stop", STUCK_AFTER_S * 5) == base.STATE_IDLE
+    assert derive_state("Stop", 3000.0) == base.STATE_IDLE
 
 
-def test_a_silent_running_turn_becomes_stuck():
-    assert derive_state("PreToolUse", STUCK_AFTER_S + 1) == base.STATE_STUCK
-
-
-def test_a_slow_build_is_not_stuck():
-    """The document says 60 s. A test suite, an npm install and a slow model
-    response all routinely exceed that while being perfectly healthy."""
-    assert derive_state("PreToolUse", 90.0) == base.STATE_RUNNING
-
-
-def test_a_long_tool_call_is_not_stuck():
-    """Claude Code says nothing between PreToolUse and PostToolUse, and lets
-    a single Bash call run for ten minutes. At 180 s a polling loop that was
-    doing exactly what it was told went red on the desk (2026-08-29)."""
-    assert derive_state("PreToolUse", 9 * 60.0) == base.STATE_RUNNING
-    assert derive_state("PreToolUse", 10 * 60.0 + 1) == base.STATE_STUCK
+def test_a_running_turn_stays_running_however_long_it_is_silent():
+    """No `stuck` from silence. 60 s cried wolf on a test suite, 180 s on a
+    nine-minute polling loop, 600 s on a seventeen-minute think with the API
+    connection open the whole time (all 2026-08-29). The hooks cannot tell a
+    long turn from a wedged one, so the daemon does not guess; red is kept
+    for `failed`, which is an event."""
+    for age in (90.0, 9 * 60.0, 10 * 60.0 + 1, 50 * 60.0):
+        assert derive_state("PreToolUse", age) == base.STATE_RUNNING
+    assert derive_state("PostToolUse", 40 * 60.0) == base.STATE_RUNNING
 
 
 def test_an_abandoned_session_says_nothing_rather_than_idle():
@@ -298,9 +291,3 @@ def test_this_source_carries_no_usage_percentage(state_dir):
     assert f.has_usage() is False
 
 
-def test_the_stuck_threshold_is_configurable(state_dir):
-    write_session(state_dir, "s1", "PreToolUse", NOW - 90)
-    assert provider(state_dir, stuck_after_s=60.0
-                    ).poll(NOW)[0].state == base.STATE_STUCK
-    assert provider(state_dir, stuck_after_s=300.0
-                    ).poll(NOW)[0].state == base.STATE_RUNNING

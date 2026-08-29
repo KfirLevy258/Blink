@@ -246,13 +246,14 @@ def parse_rollout_tail(lines, mtime: float):
 # transitions: `task_started` when a turn begins, `task_complete` when the
 # answer is in, `turn_aborted` when the person interrupted it. The newest of
 # these in a file is that session's state, aged by its own timestamp, with
-# the same thresholds Claude's hooks use -- a turn silent past STUCK_AFTER_S
-# is stuck, anything past ABANDONED_AFTER_S is a session that is gone.
+# the same threshold Claude's hooks use -- anything past ABANDONED_AFTER_S is
+# a session that is gone. No `stuck` from silence, for the reason given in
+# claude_state's docstring: a long turn and a wedged one look the same.
 #
 # Permission prompts are not in the journal as far as anyone has observed, so
 # there is no `waiting` for Codex; a prompt shows as `running` until it is
-# answered, and as `stuck` if it is left long enough. Honest, if less useful.
-from pc.providers.claude_state import (STUCK_AFTER_S, ABANDONED_AFTER_S,  # noqa: E402
+# answered. Honest, if less useful.
+from pc.providers.claude_state import (ABANDONED_AFTER_S,  # noqa: E402
                                        T_EPOCH_MIN, T_EPOCH_MAX)
 
 STATE_SRC_ID = "cli-state"
@@ -263,7 +264,7 @@ _TURN_EVENTS = {
 }
 
 
-def parse_rollout_state(lines, now_epoch, stuck_after_s=STUCK_AFTER_S):
+def parse_rollout_state(lines, now_epoch):
     """The execution state one rollout file implies, or STATE_UNKNOWN.
 
     Scanned backwards like the rate limits: the newest turn event is the
@@ -293,16 +294,13 @@ def parse_rollout_state(lines, now_epoch, stuck_after_s=STUCK_AFTER_S):
             age = 0.0                   # a clock that stepped; treat as fresh
         if age > ABANDONED_AFTER_S:
             return base.STATE_UNKNOWN
-        if state == base.STATE_RUNNING and age > stuck_after_s:
-            return base.STATE_STUCK
         return state
     return base.STATE_UNKNOWN
 
 
 class CodexCliProvider(base.ProviderParser):
-    def __init__(self, root=None, stuck_after_s=STUCK_AFTER_S):
+    def __init__(self, root=None):
         self._root = root
-        self._stuck_after = stuck_after_s
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -351,7 +349,7 @@ class CodexCliProvider(base.ProviderParser):
             # Every rollout is one session, so every one of them votes on
             # the execution state -- unlike the percentages, which are one
             # account-wide pair however many terminals are open.
-            state = parse_rollout_state(lines, now_epoch, self._stuck_after)
+            state = parse_rollout_state(lines, now_epoch)
             if state != base.STATE_UNKNOWN:
                 counts[state] = counts.get(state, 0) + 1
             limits, observed_at = parse_rollout_tail(lines, mtime)

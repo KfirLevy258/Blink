@@ -35,7 +35,7 @@ BLINK is a small touchscreen that shows the same numbers as Claude Code's `/usag
 ## Features
 
 - **Two dials, two countdowns.** Session and weekly limits, and the time until each one resets.
-- **An activity light.** Amber the moment any session -- Claude or Codex -- is waiting on you; a green pulse while everything is still working; red when something is stuck or rate-limited.
+- **An activity light.** Amber the moment any session -- Claude or Codex -- is waiting on you; a green pulse while everything is still working; red when a turn dies on an error -- a rate limit, most often.
 - **A page per provider.** Claude and Codex each get their own screen. Tap the name or swipe to switch; the needles move from one reading to the other.
 - **Claude Desktop too.** With Desktop alone the dials show both percentages and how fast the window is filling.
 - **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, no network, nothing sent anywhere.

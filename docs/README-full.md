@@ -57,7 +57,7 @@ Blink never sees a credential and never sends anything anywhere. It reads figure
 | Source | Gives | Needs |
 |---|---|---|
 | Claude Code's status line | both limits, reset times | nothing - set up by `blink install` |
-| Claude Code's hooks | per-session busy / waiting / stuck / rate-limited | nothing - set up by `blink install` |
+| Claude Code's hooks | per-session busy / waiting / finished / rate-limited | nothing - set up by `blink install` |
 | Claude Desktop's usage cache | both limits, and the burn rate derived from its history | nothing - read if the app is installed |
 | Codex CLI's own session log | both limits and reset times, for Codex | nothing - read if Codex is installed |
 
@@ -335,7 +335,7 @@ wins.
 | 🟢 green, pulsing | Everything is working; nothing needs you |
 | 🟠 amber | **Your turn** - a session has finished its answer (Claude or Codex), even if others are still working |
 | 🟠 amber, pulsing | A session is asking permission right now |
-| 🔴 red | Stuck (announced work, then went silent for ten minutes - longer than any single tool call is allowed), or the turn died on an API error - a rate limit shows here |
+| 🔴 red | A turn died on an API error - a rate limit shows here |
 | 🟢 green, steady | Connected, live data, no session has anything to say |
 | ⚪ grey | Not connected |
 

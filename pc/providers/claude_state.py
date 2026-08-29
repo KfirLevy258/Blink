@@ -31,8 +31,15 @@ because on a usage gauge it is the headline -- StopFailure carries
 `error: "rate_limit"` among its causes, and being rate limited is the single
 thing this product exists to warn about.
 
-`stuck` is the one state with no event of its own, because being wedged is by
-definition the absence of one. It is inferred from silence.
+`stuck` is a state the protocol still names and no provider produces any
+more. It was inferred from silence -- a turn announced and then nothing for
+N seconds -- and every N cried wolf on the desk: 60 s on a test suite, 180 s
+on a nine-minute polling loop, 600 s on a seventeen-minute think with the
+API connection open the whole time (all 2026-08-29). The hooks cannot tell
+a long turn from a wedged one, so the daemon no longer guesses. A turn is
+`running` for as long as it takes; a session that ends without saying so
+drops out after ABANDONED_AFTER_S. Red is reserved for `failed`, which is
+an event, not an inference.
 
 ON DISK
 -------
@@ -59,21 +66,6 @@ SRC_ID = "cli"
 # files under it. See tests/conftest.py and the note that names this constant.
 STATE_DIR = "~/.blink/state"
 
-# How long a turn may go silent before the panel calls it stuck.
-#
-# The document says 60 seconds. That is too twitchy to ship: a test suite, an
-# npm install, a docker build or a slow model response all routinely exceed a
-# minute while being perfectly healthy, and a red alert that cries wolf on
-# every build teaches its owner to ignore the one time it is right.
-#
-# Three minutes was the first answer, and it cried wolf too (2026-08-29): a
-# Bash tool call fires PreToolUse and then NOTHING until it returns, and
-# Claude Code lets one run for ten minutes. A polling loop that waited for a
-# log file went red on the desk while working exactly as asked. Ten minutes
-# is Claude Code's own ceiling on a single tool call, so a turn silent past
-# it is genuinely wedged rather than merely long.
-STUCK_AFTER_S = 600.0
-
 # Past this, assume the session is gone rather than that it has been idle
 # since. Also the sweep threshold: a session that ended without SessionEnd
 # firing (a killed terminal, a crash) leaves files behind, and nothing else
@@ -89,7 +81,7 @@ AGENT_ABANDONED_AFTER_S = 4 * 3600.0
 
 # A slot timestamp outside this is not a reading: 2020-01-01 to 2100-01-01,
 # as the other file-backed sources bound theirs. What it excludes in practice
-# is NaN (every comparison false, so neither the stuck nor the abandoned test
+# is NaN (every comparison false, so the abandoned test
 # ever fires) and a millisecond epoch from some future shim.
 T_EPOCH_MIN = 1_577_836_800.0
 T_EPOCH_MAX = 4_102_444_800.0
@@ -115,7 +107,7 @@ _FAILED_EVENTS = ("StopFailure",)
 _SEVERITY = base.SEVERITY
 
 
-def derive_state(event: str, age_s: float, stuck_after_s=STUCK_AFTER_S) -> str:
+def derive_state(event: str, age_s: float) -> str:
     """The execution state implied by the last event and how long ago it was."""
     if age_s < 0:
         # A clock that went backwards -- a laptop waking, an NTP step. Treat
@@ -147,7 +139,8 @@ def derive_state(event: str, age_s: float, stuck_after_s=STUCK_AFTER_S) -> str:
         return base.STATE_WAITING
 
     if event in _RUNNING_EVENTS:
-        return base.STATE_STUCK if age_s > stuck_after_s else base.STATE_RUNNING
+        # However long ago. See the module docstring on `stuck`.
+        return base.STATE_RUNNING
 
     # An event this version does not know. Newer Claude Code, most likely.
     # Silence beats guessing.
@@ -165,12 +158,10 @@ class ClaudeStateProvider(base.ProviderParser):
     its numbers actually are. It contributes execution fields and nothing else.
     """
 
-    def __init__(self, path=None, now=time.time, stuck_after_s=STUCK_AFTER_S,
-                 sweep=True):
+    def __init__(self, path=None, now=time.time, sweep=True):
         self._dir = (path if path is not None
                      else os.path.expanduser(STATE_DIR))
         self._now = now
-        self._stuck_after = stuck_after_s
         self._sweep = sweep
 
     def get_provider_id(self) -> str:
@@ -200,7 +191,7 @@ class ClaudeStateProvider(base.ProviderParser):
         if not (T_EPOCH_MIN <= t <= T_EPOCH_MAX):
             return None, None
         age = now_epoch - t
-        return derive_state(event, age, self._stuck_after), age
+        return derive_state(event, age), age
 
     def _count_agents(self, session_dir, now_epoch):
         """Live agents for one session.
