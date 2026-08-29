@@ -30,7 +30,7 @@ import urllib.request
 
 # Every process the daemon starts on Windows must be told not to open a
 # console window. The daemon itself runs hidden (started by wscript, see
-# cli.launcher_path), so a console-subsystem child -- esptool, espefuse, the
+# cli.launcher_path), so a console-subsystem child -- esptool, the eFuse probe, the
 # self-test of a downloaded app -- would otherwise be given a brand-new
 # console of its own, and a black window appeared on the desktop for the
 # 75 s of every firmware flash (user-reported 2026-08-30).
@@ -165,8 +165,19 @@ def _esptool():
     return _tool("esptool", "esptool.py")
 
 
-def _espefuse():
-    return _tool("espefuse", "espefuse.py")
+def _efuse_probe():
+    """How to run pc/efuse_probe.py on THIS machine.
+
+    Frozen, the interpreter is this program and the module is bundled, so it
+    is `blink -m pc.efuse_probe`. From source the daemon's cwd is wherever
+    launchd or schtasks put it, where `-m pc.efuse_probe` would not resolve,
+    so the file is run by path instead.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "-m", "pc.efuse_probe"]
+    return [sys.executable,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "efuse_probe.py")]
 
 
 def flash_encrypted_chip(port, run=subprocess.run):
@@ -177,21 +188,16 @@ def flash_encrypted_chip(port, run=subprocess.run):
     to do to someone's device by accident. Two of these boards exist here and
     only one is fused, so this asks the chip rather than assuming.
     """
-    espefuse = _espefuse()
-    if not espefuse:
-        print("[ota] espefuse is not available to this daemon", file=sys.stderr)
-        return None
     try:
-        out = run(espefuse + ["--port", port, "summary"],
+        out = run(_efuse_probe() + ["--port", port],
                   capture_output=True, text=True, timeout=60,
                   **NO_WINDOW).stdout
     except Exception:
         return None
     for line in out.splitlines():
-        if "FLASH_CRYPT_CNT" in line:
-            digits = [t for t in line.replace("=", " ").split() if t.isdigit()]
-            if digits:
-                return digits[-1] != "0"
+        words = line.split()
+        if len(words) == 2 and words[0] == "flash_encryption":
+            return words[1] == "enabled"
     return None
 
 

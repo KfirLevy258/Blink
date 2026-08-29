@@ -211,6 +211,20 @@ def remember_board(home, port, board_id, fw=None):
         pass                    # a convenience, never a requirement
 
 
+def learn_board(known, port, msg):
+    """What board.json should say after `msg` arrived on `port`.
+
+    Only a `hello` carries the board's id and firmware, and after an app
+    restart the first thing off the wire is a `pref` or an `ota_query`, so
+    a record taken from the first message alone stayed at null for both --
+    every machine checked on 2026-08-30 had nulls there. Take what each
+    message offers and keep what it does not.
+    """
+    return {"port": port,
+            "board_id": msg.get("board_id") or known.get("board_id"),
+            "fw": msg.get("fw") or known.get("fw")}
+
+
 def probe_is_our_board(ser, timeout=PROBE_S):
     """Ask the thing on this port whether it is a Blink board, without a reset.
 
@@ -719,21 +733,22 @@ def main(argv=None):
                     for msg in reader.feed(data):
                         print(f"[bridge] <- {msg}", file=sys.stderr)
                         bridge.on_message(msg)
-                        if not proven:
-                            update.cleanup(self_bin)
-                            proven = True
-                            # A message of ours off this port is the only
-                            # positive identification there is. Write it down:
-                            # the next start opens this port directly instead
-                            # of scanning, and this is also what licenses a
-                            # reset if it ever goes quiet.
-                            known = {"port": port,
-                                     "board_id": msg.get("board_id")
-                                     or known.get("board_id"),
-                                     "fw": msg.get("fw") or known.get("fw")}
+                        # A message of ours off this port is the only
+                        # positive identification there is. Write it down:
+                        # the next start opens this port directly instead
+                        # of scanning, and this is also what licenses a
+                        # reset if it ever goes quiet. Written again whenever
+                        # a message adds something -- a hello after a `pref`,
+                        # a new firmware after a flash.
+                        learned = learn_board(known, port, msg)
+                        if not proven or learned != known:
+                            known = learned
                             remember_board(blink_home, known["port"],
                                            known.get("board_id"),
                                            known.get("fw"))
+                        if not proven:
+                            update.cleanup(self_bin)
+                            proven = True
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
                     # the liveness window): the usage endpoint is aggressively

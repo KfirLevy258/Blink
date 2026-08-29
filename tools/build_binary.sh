@@ -39,12 +39,18 @@ VBIN="$BUILD/bin"
 # macOS build did not have, led by setuptools at 1.1 MB -- which is why the
 # Linux download was twice the size of the others for the same program.
 #
-# espefuse is its own top-level package inside the esptool wheel, with its
-# eFuse tables as data files; --collect-all esptool does not bring it, and
-# without it the daemon cannot check a chip before flashing it (the first
-# customer-path OTA test failed on exactly this, 2026-08-29). It imports
-# bitstring, which picks its bitarray backend by importlib at runtime --
-# invisible to PyInstaller's analysis, so both are collected whole too.
+# esptool imports bitstring, which picks its backend by importlib at runtime
+# -- invisible to PyInstaller's analysis, so bitstring and bitarray are
+# collected whole. Its other backend, tibs, is only chosen behind an
+# environment variable nobody sets, so it stays out (0.9 MB).
+#
+# espefuse and espsecure ship in the same wheel and are deliberately NOT
+# here. The daemon used espefuse to read one eFuse bit before a flash, and
+# espefuse imports espsecure, which imports `cryptography`: 12 MB of native
+# code, a third of the whole download, for that one bit (2026-08-30).
+# pc/efuse_probe.py reads it through esptool's own chip class instead.
+# Excluded by name so a future esptool that happens to import one of them
+# fails here, at build time, not by quietly doubling the download.
 #
 # Nothing under pc/ imports any of these, and neither does esptool, pyserial
 # or ecdsa (checked against the pinned versions). asyncio and multiprocessing
@@ -60,7 +66,11 @@ set -- \
 	--exclude-module unittest \
 	--exclude-module doctest \
 	--exclude-module pydoc \
-	--exclude-module tkinter
+	--exclude-module tkinter \
+	--exclude-module espefuse \
+	--exclude-module espsecure \
+	--exclude-module cryptography \
+	--exclude-module tibs
 
 # The Linux libpython ships with its debug symbols: 23 MB unstripped, against
 # 7 MB for the macOS framework, which Apple strips before shipping. Stripping
@@ -85,10 +95,10 @@ cd "$ROOT"
 	--add-data "$ROOT/tools/blink-statusline.sh:." \
 	--add-data "$ROOT/tools/blink-hook.sh:." \
 	--collect-all esptool \
-	--collect-all espefuse \
 	--collect-all bitstring \
 	--collect-all bitarray \
 	--hidden-import claude_usage_bridge \
+	--hidden-import pc.efuse_probe \
 	--hidden-import ecdsa \
 	--collect-all certifi \
 	--hidden-import serial.tools.list_ports \
@@ -103,4 +113,19 @@ cd "$ROOT"
 BUILT="$OUT/blink/blink"
 [ -f "$BUILT" ] || BUILT="$OUT/blink/blink.exe"
 [ -f "$BUILT" ] || { echo "FATAL: no executable under $OUT/blink" >&2; exit 1; }
+
+# --collect-all bitarray brings its own test suite and a C header along with
+# the backend. 0.4 MB that no customer will ever run or compile.
+rm -f "$OUT"/blink/_internal/bitarray/test_*.py \
+	"$OUT"/blink/_internal/bitarray/*.h
+
+# Nothing the daemon runs may pull these back in: a customer's download
+# would double, and the first sign would be the release's size, if anyone
+# looked. See the exclusions above.
+for gone in cryptography espefuse espsecure tibs; do
+	if [ -e "$OUT/blink/_internal/$gone" ]; then
+		echo "FATAL: $gone ended up in the bundle; see the exclusions in $0" >&2
+		exit 1
+	fi
+done
 echo "built $BUILT ($(du -sh "$OUT/blink" | cut -f1))"

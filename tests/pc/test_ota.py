@@ -235,17 +235,17 @@ class TestFlashGuards(unittest.TestCase):
 
     def setUp(self):
         # These tests inject `run`, so the only thing still reaching outside is
-        # tool DISCOVERY: _esptool()/_espefuse() look for esptool in whatever
-        # interpreter runs the tests. That made the outcome depend on the
-        # machine -- green in a venv that happens to carry esptool, three
-        # failures on a clean CI runner -- and in neither case was it testing
-        # the guards it names. Pin the discovery; the guards are the subject.
-        self._tools = (ota._esptool, ota._espefuse)
+        # tool DISCOVERY: _esptool() looks for esptool in whatever interpreter
+        # runs the tests. That made the outcome depend on the machine --
+        # green in a venv that happens to carry esptool, three failures on a
+        # clean CI runner -- and in neither case was it testing the guards it
+        # names. Pin the discovery; the guards are the subject.
+        self._tools = (ota._esptool, ota._efuse_probe)
         ota._esptool = lambda: ["python", "-m", "esptool"]
-        ota._espefuse = lambda: ["python", "-m", "espefuse"]
+        ota._efuse_probe = lambda: ["python", "-m", "pc.efuse_probe"]
 
     def tearDown(self):
-        ota._esptool, ota._espefuse = self._tools
+        ota._esptool, ota._efuse_probe = self._tools
 
     def _run(self, efuse_out=None, rc=0, fail_probe=False):
         calls = []
@@ -254,15 +254,15 @@ class TestFlashGuards(unittest.TestCase):
             calls.append(cmd)
             class R:
                 returncode = rc
-                stdout = efuse_out if "espefuse" in " ".join(cmd) else "ok"
+                stdout = efuse_out if "efuse_probe" in " ".join(cmd) else "ok"
                 stderr = ""
-            if fail_probe and "espefuse" in " ".join(cmd):
+            if fail_probe and "efuse_probe" in " ".join(cmd):
                 raise OSError("probe failed")
             return R()
         return run, calls
 
     def test_refuses_an_encrypted_chip(self):
-        run, calls = self._run(efuse_out="FLASH_CRYPT_CNT (BLOCK0) = 1 R/W")
+        run, calls = self._run(efuse_out="flash_encryption enabled\n")
         ok, why = ota.flash("/dev/null", b"x", run=run)
         self.assertFalse(ok)
         self.assertIn("Encrypted chip", why)
@@ -279,7 +279,7 @@ class TestFlashGuards(unittest.TestCase):
         self.assertFalse(any("write_flash" in " ".join(c) for c in calls))
 
     def test_writes_a_plaintext_chip(self):
-        run, calls = self._run(efuse_out="FLASH_CRYPT_CNT (BLOCK0) = 0 R/W")
+        run, calls = self._run(efuse_out="flash_encryption disabled\n")
         ok, why = ota.flash("/dev/null", b"x", run=run)
         self.assertTrue(ok, why)
         self.assertTrue(any("write_flash" in " ".join(c) for c in calls))
@@ -289,7 +289,7 @@ class TestFlashGuards(unittest.TestCase):
         -- "Hash of data verified." is in the output of every flash this
         project has run. A second verify_flash pass repeated that check at the
         cost of about two minutes of dark screen on a 1.3 MB image."""
-        run, calls = self._run(efuse_out="FLASH_CRYPT_CNT (BLOCK0) = 0 R/W")
+        run, calls = self._run(efuse_out="flash_encryption disabled\n")
         ota.flash("/dev/null", b"x", run=run)
         self.assertFalse(any("verify_flash" in " ".join(c) for c in calls))
 
@@ -299,10 +299,10 @@ class TestFlashGuards(unittest.TestCase):
         while 115200 moved 1 MB cleanly. A failed read is free; a failed write
         leaves a slot0 that will not boot, and there is no revert behind it.
         """
-        run, calls = self._run(efuse_out="FLASH_CRYPT_CNT (BLOCK0) = 0 R/W")
+        run, calls = self._run(efuse_out="flash_encryption disabled\n")
         ota.flash("/dev/null", b"x", run=run)
         bauds = {c[c.index("--baud") + 1] for c in calls if "--baud" in c
-                 and "espefuse" not in " ".join(c)}
+                 and "efuse_probe" not in " ".join(c)}
         self.assertEqual(bauds, {"115200"})
 
     def test_a_failed_write_is_retried_once(self):
@@ -317,8 +317,8 @@ class TestFlashGuards(unittest.TestCase):
 
             class R:
                 returncode = rc
-                stdout = ("FLASH_CRYPT_CNT (BLOCK0) = 0 R/W"
-                          if "espefuse" in joined else "ok")
+                stdout = ("flash_encryption disabled\n"
+                          if "efuse_probe" in joined else "ok")
                 stderr = "content mismatch"
             return R()
 
@@ -333,8 +333,8 @@ class TestFlashGuards(unittest.TestCase):
 
             class R:
                 returncode = 1 if "write_flash" in joined else 0
-                stdout = ("FLASH_CRYPT_CNT (BLOCK0) = 0 R/W"
-                          if "espefuse" in joined else "ok")
+                stdout = ("flash_encryption disabled\n"
+                          if "efuse_probe" in joined else "ok")
                 stderr = "content mismatch at 0x20000"
             return R()
 
@@ -577,17 +577,23 @@ class TestNoWindow(unittest.TestCase):
     black window sat on the desktop for the length of every firmware flash
     (2026-08-30). Off Windows the flag set is empty and nothing changes."""
 
-    def test_esptool_and_espefuse_are_started_without_a_window(self):
+    def setUp(self):
+        self._tools = (ota._esptool, ota._efuse_probe)
+
+    def tearDown(self):
+        ota._esptool, ota._efuse_probe = self._tools
+
+    def test_esptool_and_the_efuse_probe_are_started_without_a_window(self):
         seen = []
         def run(cmd, **kw):
             seen.append(kw)
             class R:
                 returncode = 0
-                stdout = "FLASH_CRYPT_CNT = 0 R/W (0b0000000)\n"
+                stdout = "flash_encryption disabled\n"
                 stderr = ""
             return R()
         ota._esptool = lambda: ["python", "-m", "esptool"]
-        ota._espefuse = lambda: ["python", "-m", "espefuse"]
+        ota._efuse_probe = lambda: ["python", "-m", "pc.efuse_probe"]
         ota.flash("/dev/null", b"x" * 16, run=run)
         self.assertGreaterEqual(len(seen), 2)
         for kw in seen:
@@ -600,3 +606,38 @@ class TestNoWindow(unittest.TestCase):
             self.assertEqual(ota.NO_WINDOW, {"creationflags": 0x08000000})
         else:
             self.assertEqual(ota.NO_WINDOW, {})
+
+
+class TestTheEfuseProbeAnswer(unittest.TestCase):
+    """flash_encrypted_chip reads exactly what pc/efuse_probe.py prints."""
+
+    def _run_saying(self, text):
+        def run(cmd, **kw):
+            class R:
+                returncode = 0
+                stdout = text
+                stderr = ""
+            return R()
+        return run
+
+    def test_enabled_disabled_and_nonsense(self):
+        self.assertIs(ota.flash_encrypted_chip(
+            "p", run=self._run_saying("flash_encryption enabled\n")), True)
+        self.assertIs(ota.flash_encrypted_chip(
+            "p", run=self._run_saying("Connecting...\nflash_encryption disabled\n")),
+            False)
+        self.assertIsNone(ota.flash_encrypted_chip(
+            "p", run=self._run_saying("Traceback (most recent call last)\n")))
+
+    def test_the_probe_is_the_bundled_module_when_frozen(self):
+        import sys
+        had = getattr(sys, "frozen", None)
+        sys.frozen = True
+        try:
+            self.assertEqual(ota._efuse_probe()[1:], ["-m", "pc.efuse_probe"])
+        finally:
+            if had is None:
+                del sys.frozen
+            else:
+                sys.frozen = had
+        self.assertTrue(ota._efuse_probe()[-1].endswith("efuse_probe.py"))
