@@ -297,6 +297,20 @@ def unpack(blob, into):
             if m.isdir():
                 os.makedirs(dest, exist_ok=True)
                 continue
+            if m.issym():
+                # Relative, and resolving to somewhere inside `into`. The
+                # macOS bundle needs these (Python.framework is built on
+                # them); nothing needs one pointing anywhere else.
+                link = m.linkname.replace("\\", "/")
+                where = os.path.normpath(os.path.join(os.path.dirname(dest), link))
+                if os.path.isabs(link) or not (where + os.sep).startswith(
+                        os.path.abspath(into) + os.sep):
+                    raise ValueError(f"refusing archive symlink {m.name!r} -> {link!r}")
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if os.path.lexists(dest):
+                    os.remove(dest)
+                os.symlink(link, dest)
+                continue
             if not m.isfile():
                 raise ValueError(f"refusing archive member {m.name!r} (not a file)")
             os.makedirs(os.path.dirname(dest), exist_ok=True)

@@ -23,14 +23,26 @@ from pc.update import archive_name  # noqa: E402
 def package(key, build_dir, out_dir):
     name = archive_name(key)
     out = os.path.join(out_dir, name)
+    # Symlinks travel as symlinks -- a macOS bundle is full of them
+    # (Python.framework/Versions/Current -> 3.11, Python -> Versions/Current/
+    # Python), and the first packager, which only listed regular files, left
+    # every one of them dangling after extraction (2026-08-29). A symlinked
+    # directory is added as the link and not walked into.
     files = []
     for dp, dn, fn in os.walk(build_dir):
         dn.sort()
+        for d in list(dn):
+            path = os.path.join(dp, d)
+            if os.path.islink(path):
+                files.append(path)
+                dn.remove(d)
         for f in sorted(fn):
             files.append(os.path.join(dp, f))
     if name.endswith(".zip"):
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             for path in files:
+                if os.path.islink(path):
+                    raise SystemExit(f"a zip cannot carry the symlink {path}")
                 arc = "blink/" + os.path.relpath(path, build_dir).replace(os.sep, "/")
                 info = zipfile.ZipInfo.from_file(path, arc)
                 info.compress_type = zipfile.ZIP_DEFLATED

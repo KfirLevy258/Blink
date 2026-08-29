@@ -902,7 +902,7 @@ def cmd_install(_args) -> int:
         if os.path.abspath(src) != os.path.abspath(bin_dir()):
             staged = bin_dir() + ".new"
             shutil.rmtree(staged, ignore_errors=True)
-            shutil.copytree(src, staged)
+            shutil.copytree(src, staged, symlinks=True)
             ok, message = update.swap_in(staged, installed_bin(),
                                          RELEASE_VERSION)
             if not ok:
