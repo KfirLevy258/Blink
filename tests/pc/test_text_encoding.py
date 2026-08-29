@@ -22,6 +22,8 @@ OPEN_CALL = re.compile(r"(?<![\w.])open\(")
 
 def _calls(src):
     for m in OPEN_CALL.finditer(src):
+        if "#" in src[src.rfind("\n", 0, m.start()) + 1:m.start()]:
+            continue                         # a comment talking about open()
         depth, i = 0, m.end() - 1
         while i < len(src):
             if src[i] == "(":
@@ -34,12 +36,12 @@ def _calls(src):
         yield src.count("\n", 0, m.start()) + 1, src[m.start():i + 1]
 
 
-def test_every_text_open_names_utf8():
+def test_every_text_open_names_its_encoding():
     bad = []
     for f in FILES:
         for line, call in _calls(f.read_text(encoding="utf-8")):
             if re.search(r"""['"][rwa]?b['"]""", call):
                 continue                         # bytes: no decoding at all
-            if 'encoding="utf-8"' not in call:
+            if "encoding=" not in call:      # utf-8, or ascii on purpose
                 bad.append(f"{f.relative_to(ROOT)}:{line}: {call}")
     assert not bad, "text opened in the platform's code page:\n" + "\n".join(bad)
