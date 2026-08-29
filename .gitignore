@@ -33,3 +33,8 @@ bridge.pid
 # Local agent tooling, never part of the product
 .claude/
 .claude-flow/
+
+# pip leftovers. Sixteen wheels and an esptool tarball (11 MB) went into a
+# commit on 2026-08-22 from a `pip download` run in the repo root.
+/*.whl
+/*.tar.gz

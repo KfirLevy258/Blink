@@ -5,10 +5,15 @@
 **Your Claude Code and Codex usage, as two live dials on your desk.**
 
 <p>
-  <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=flat-square&labelColor=171B22&color=D97757&label=release"></a>
-  <img src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-8A8F98?style=flat-square&labelColor=171B22">
-  <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-6FBF8B?style=flat-square&labelColor=171B22&label=runs%20on">
-  <img src="https://img.shields.io/badge/updates-over--the--air-E8A05C?style=flat-square&labelColor=171B22">
+  <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=flat-square&labelColor=171B22&color=E8E8E8&label=release&logo=github&logoColor=white"></a>
+  <a href="https://github.com/KfirLevy258/Blink/actions/workflows/installer.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/KfirLevy258/Blink/installer.yml?branch=main&style=flat-square&labelColor=171B22&label=CI"></a>
+  <a href="https://docs.anthropic.com/en/docs/claude-code"><img alt="Works with Claude Code" src="https://img.shields.io/badge/works%20with-Claude%20Code-D97757?style=flat-square&labelColor=171B22&logo=claude&logoColor=white"></a>
+  <a href="https://github.com/openai/codex"><img alt="Works with Codex" src="https://img.shields.io/badge/works%20with-Codex-10A37F?style=flat-square&labelColor=171B22&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgZD0iTTQgNWw3IDctNyA3Ii8%2BPHBhdGggc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgZD0iTTEyIDIwaDgiLz48L3N2Zz4%3D"></a>
+</p>
+<p>
+  <img alt="Board: ESP32 CYD" src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-8A8F98?style=flat-square&labelColor=171B22&logo=espressif&logoColor=white">
+  <img alt="Runs on macOS, Linux and Windows" src="https://img.shields.io/badge/runs%20on-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-6FBF8B?style=flat-square&labelColor=171B22">
+  <img alt="Updates over the air" src="https://img.shields.io/badge/updates-over%20the%20air-E8A05C?style=flat-square&labelColor=171B22">
 </p>
 
 <table>

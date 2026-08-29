@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="img/logo.png" alt="Blink" width="560">
+<img src="img/brand/logo-wide.png" alt="BLINK" width="420">
 
 **A little desk gauge for your Claude Code and Codex usage.**
 Your 5-hour session and 7-day week, as two live dials you can glance at all day.
