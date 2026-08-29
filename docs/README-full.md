@@ -44,9 +44,11 @@ Blink never sees a credential and never sends anything anywhere. It reads figure
 |---|---|---|
 | **Claude Code in a terminal** | Everything: both limits, both countdowns, the activity light | **Full** |
 | **Claude Code in the VS Code / JetBrains extension** | The same. The extension runs the same CLI and reads the same `~/.claude/settings.json`, so the status line and hooks work identically | **Full** |
-| **Claude Desktop, without Claude Code** | Both percentages and how fast the five-hour window is filling. **No countdowns, no activity light** | **Partial** |
+| **Claude Desktop, without Claude Code** | Both percentages and how fast the five-hour window is filling, on Desktop's own refresh: about every 5 minutes while it is in use, every 15 (occasionally 30) when it sits idle, and at once when its usage panel is opened. **No countdowns, no activity light** | **Partial** |
 | **Codex CLI** | Both limits and both countdowns, on its own page | **Full** |
 | **claude.ai in a browser** | Nothing | **Not supported** |
+
+**How current the Desktop figure is.** BLINK never asks the server; it reads the sample Desktop last wrote. Measured over 1,672 samples on one Mac (July-August 2026): Desktop writes one every 5 minutes while it is being used, every 15 minutes in the background (occasionally 30), and immediately when its usage panel is opened. The daemon reads the file every minute, so the board is at most a minute behind Desktop, and Desktop is at most 5-15 minutes behind the server. A person watching the board while the app sits idle sees the figure move in 15-minute steps -- reported 2026-08-30 as "stuck on 16 %, then 21 %" -- which is the app's clock, not a fault.
 
 **Why Claude Desktop is only half.** The app records two percentages and no reset timestamps — anywhere, in any file. That was checked exhaustively in August 2026: every JSON file it writes, its LevelDB and Session Storage and IndexedDB stores, its caches and its preferences plist. So there is no countdown to show, and the panel shows a **rate** instead (`+14%/h`) — measured from readings actually taken, not a guessed reset time. The activity light needs Claude Code's hooks, which a machine without Claude Code does not have. `blink install` says all of this on a machine in that state rather than reporting four successful steps.
 
