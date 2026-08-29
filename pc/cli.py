@@ -690,6 +690,27 @@ def restart_service() -> str:
     return backend().restart()
 
 
+def _say_bye():
+    """Tell the board the app is leaving for good, so it shows \"connecting\"
+    rather than dozing off (firmware 1.2.0 and later). Best effort: the port
+    the daemon last used, opened plainly (no DTR/RTS preset -- that would
+    reset the board), one line, gone. Any failure is silent; the board falls
+    back to what it always did."""
+    try:
+        import json
+        import serial
+        from pc import protocol
+        with open(os.path.join(blink_home(), "board.json"), encoding="utf-8") as f:
+            port = json.load(f).get("port")
+        if not port:
+            return
+        with serial.Serial(port, 115200, timeout=0.2, write_timeout=1) as s:
+            s.write((json.dumps(protocol.bye(), separators=(",", ":")) + "\n").encode())
+            s.flush()
+    except Exception:
+        pass
+
+
 def _remove_service() -> str:
     if _skip_service():
         return "skipped (BLINK_SKIP_SERVICE=1)"
@@ -974,6 +995,7 @@ def cmd_uninstall(_args) -> int:
     print()
     print("[1/4] Background service ... ", end="", flush=True)
     print(_remove_service())
+    _say_bye()
 
     print("[2/4] Claude Code setting:")
     try:

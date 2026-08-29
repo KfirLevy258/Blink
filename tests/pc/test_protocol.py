@@ -267,3 +267,10 @@ class TestOneLightForBothProviders(unittest.TestCase):
                                     100.0, self.frame("codex", ""))
         self.assertEqual(u["state"], "waiting")
         self.assertEqual(u["n_sess"], 1)
+
+
+def test_bye_is_a_plain_versioned_message():
+    """Sent once by uninstall so a board does not doze over a computer that
+    has no app any more (docs/sleep-mode-design.md)."""
+    m = protocol.bye()
+    assert m == {"t": "bye", "v": protocol.VERSION}

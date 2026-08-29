@@ -23,6 +23,8 @@
 #include "oauth.h"
 #include "usage_client.h"
 #include "ui_boot.h"
+#include "ui_sleep.h"
+#include "sleep_gate.h"
 #include "ui_settings.h"
 #include "ui_anim.h"
 #include "tz_fetch.h"
@@ -1395,6 +1397,23 @@ static void run_usb(void)
 			ota_health = true;	/* daemon delivered usage */
 		}
 		ota_boot_pump();
+
+		/* The computer went to sleep (docs/sleep-mode-design.md):
+		 * silence past the host timeout, on a board that has shown
+		 * figures this boot, with no firmware update in flight. This
+		 * blocks until the app speaks again. */
+		{
+			struct ota_ui snap;
+
+			ota_ui_get(&snap);
+			if (sleep_should_start(proto_host_lost(),
+					       usage_view_have_data(),
+					       snap.st == OTA_UI_DOWNLOADING ||
+					       snap.st == OTA_UI_REBOOTING)) {
+				ui_sleep_run();
+				continue;
+			}
+		}
 
 		/*
 		 * OTA, via the daemon. This mode has no network of its own --

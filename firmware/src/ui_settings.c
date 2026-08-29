@@ -366,6 +366,14 @@ static void notice_ok_cb(lv_event_t *e)
 	notice = NULL;
 }
 
+void ui_settings_notice_dismiss(void)
+{
+	if (notice) {
+		lv_obj_del(notice);
+		notice = NULL;
+	}
+}
+
 void ui_settings_notice(const char *txt)
 {
 	if (notice) {

@@ -122,6 +122,13 @@ def welcome(app: str, app_ver: str) -> dict:
     return {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver}
 
 
+def bye() -> dict:
+    """The app is going on purpose (uninstall). Without it a computer with
+    no app any more looks exactly like a sleeping one, and the board would
+    doze instead of saying \"connecting\" (docs/sleep-mode-design.md)."""
+    return {"t": "bye", "v": VERSION}
+
+
 def pong() -> dict:
     """Answer to the board's ping.
 

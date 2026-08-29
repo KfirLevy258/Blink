@@ -114,7 +114,8 @@ static void blit_cb(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
  * between frames keep servicing the daemon protocol. Returns false if the
  * blob is corrupt (bad header or a frame fails to decode), true once every
  * frame has played. */
-static bool bootanim_play(const uint8_t *blob, size_t len)
+static bool bootanim_play_ex(const uint8_t *blob, size_t len,
+			     bool (*stop)(void))
 {
 	struct ba_header hdr;
 	size_t off;
@@ -135,8 +136,38 @@ static bool bootanim_play(const uint8_t *blob, size_t len)
 			host_pump_run();
 			k_sleep(K_MSEC(5));
 		}
+		/* Between frames, never mid-frame: a clip cut here leaves a
+		 * whole picture on the panel. The sleep loop is cut this way
+		 * the moment the host speaks again. */
+		if (stop != NULL && stop()) {
+			return true;
+		}
 	}
 	return true;
+}
+
+static bool bootanim_play(const uint8_t *blob, size_t len)
+{
+	return bootanim_play_ex(blob, len, NULL);
+}
+
+bool ui_boot_play_clip(const uint8_t *blob, size_t len, bool (*stop)(void))
+{
+	bool own = (strip_buf == NULL);
+
+	if (own) {
+		strip_buf = lv_malloc(STRIP_BYTES);
+		if (strip_buf == NULL) {
+			return false;
+		}
+	}
+	bool ok = bootanim_play_ex(blob, len, stop);
+
+	if (own) {
+		lv_free(strip_buf);
+		strip_buf = NULL;
+	}
+	return ok;
 }
 
 /* The company logo, on units that have one. Runs with strip_buf held. */

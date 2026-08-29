@@ -13,6 +13,8 @@ void ui_settings_attach(lv_obj_t *scr);
 /* One-line notice popup on the gauge screen (update outcome etc.). Safe to
  * call once the screen exists; replaces any previous notice. */
 void ui_settings_notice(const char *txt);
+/* Take a notice down without the tap; the sleep peek does this on timeout. */
+void ui_settings_notice_dismiss(void);
 
 /* Run any pending open/close transition. MUST be called from a mode loop in
  * thread context, not from an LVGL callback: the transition drives

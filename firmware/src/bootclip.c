@@ -8,6 +8,12 @@
 #include "bootclip.h"
 #include "bootanim.h"
 #include "bootanim_codex.h"
+#include "sleepanim_claude_close.h"
+#include "sleepanim_claude_loop.h"
+#include "sleepanim_claude_open.h"
+#include "sleepanim_codex_close.h"
+#include "sleepanim_codex_loop.h"
+#include "sleepanim_codex_open.h"
 #include "cfg_store.h"
 
 /*
@@ -61,4 +67,38 @@ const struct bootclip *bootclip_active(void)
 	chosen = &clips[e];
 	printk("[boot] edition: %s\n", chosen->name);
 	return chosen;
+}
+
+/* Sleep clips (docs/sleep-mode-design.md), one set per edition. Drawn by
+ * tools/make_sleepanim.py, encoded by tools/encode_bootanim.py --frames;
+ * identical shapes in each edition's own ground and ink. */
+#define SLEEP_SET(ed, ED)							\
+	{								\
+		[SLEEP_CLOSE] = { ed##_sleep_close_bootanim_blob,	\
+				  sizeof(ed##_sleep_close_bootanim_blob), \
+				  ED##_SLEEP_CLOSE_BOOTANIM_BG_RGB, #ed },	\
+		[SLEEP_LOOP] = { ed##_sleep_loop_bootanim_blob,		\
+				 sizeof(ed##_sleep_loop_bootanim_blob),	\
+				 ED##_SLEEP_LOOP_BOOTANIM_BG_RGB, #ed },	\
+		[SLEEP_OPEN] = { ed##_sleep_open_bootanim_blob,		\
+				 sizeof(ed##_sleep_open_bootanim_blob),	\
+				 ED##_SLEEP_OPEN_BOOTANIM_BG_RGB, #ed },	\
+	}
+
+static const struct bootclip sleep_clips[][3] = {
+	[CFG_EDITION_CLAUDE] = SLEEP_SET(claude, CLAUDE),
+	[CFG_EDITION_CODEX] = SLEEP_SET(codex, CODEX),
+};
+
+const struct bootclip *sleepclip_active(enum sleep_part part)
+{
+	uint8_t e = cfg_get_edition();
+
+	if (e >= ARRAY_SIZE(sleep_clips)) {
+		e = CFG_EDITION_CLAUDE;	/* same fallback as the boot clip */
+	}
+	if (part > SLEEP_OPEN) {
+		part = SLEEP_LOOP;
+	}
+	return &sleep_clips[e][part];
 }

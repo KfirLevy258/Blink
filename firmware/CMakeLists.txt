@@ -17,6 +17,8 @@ target_sources(app PRIVATE
 	src/ui_boot.c
 	src/bootanim_dec.c
 	src/bootclip.c
+	src/ui_sleep.c
+	src/sleep_gate.c
 	src/logo_parse.c
 	src/logo.c
 	src/ui_settings.c

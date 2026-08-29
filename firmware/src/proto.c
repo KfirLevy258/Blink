@@ -25,7 +25,9 @@
  * gone -- not merely between its 60 s usage polls. Three missed pings (10 s
  * apart) is enough to be sure without being twitchy about one dropped line.
  */
-#define HOST_TIMEOUT_MS 35000
+/* Three missed pongs (the board pings every 10 s). Past this a host that
+ * has not said goodbye is taken to be asleep -- see proto_host_lost(). */
+#define HOST_TIMEOUT_MS 30000
 #define LINE_MAX 512
 #define RX_RING_SIZE 1024
 
@@ -64,6 +66,8 @@ static void num(const char *json, const char *key, double *out,
 static int64_t last_ping_ms;
 static int64_t last_host_ms;
 static bool host_seen;
+static bool host_bye;		/* the app said it is going, on purpose */
+static bool host_lost;		/* silence past the timeout, without a bye */
 static char host_ver[16];	/* the daemon's release version, from welcome */
 static int host_proto;		/* ...and the protocol it speaks */
 
@@ -250,6 +254,18 @@ static void dispatch(const char *json)
 
 	last_host_ms = k_uptime_get();
 	host_seen = true;
+	host_lost = false;
+	if (strcmp(type, "bye") == 0) {
+		/*
+		 * A clean exit -- uninstall. Without this a computer with no
+		 * app any more looks exactly like a sleeping one, and the
+		 * face would doze instead of saying "connecting".
+		 */
+		printk("[proto] host says bye\n");
+		host_bye = true;
+		return;
+	}
+	host_bye = false;
 	if (strcmp(type, "usage") == 0) {
 		double sp = 0, wp = 0;
 		/* Remaining seconds, not the absolute resets_at timestamps: the
@@ -655,13 +671,21 @@ void proto_service(void)
 	 * daemon polls every 60 s, so the window must be comfortably longer.
 	 */
 	if (host_seen && (now - last_host_ms) > HOST_TIMEOUT_MS) {
-		printk("[proto] host went away\n");
+		printk("[proto] host went away%s\n",
+		       host_bye ? " (said bye)" : "");
 		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
 		host_seen = false;
+		host_lost = !host_bye;
+		host_bye = false;
 	}
 }
 
 void proto_resync(void)
 {
 	send_hello();
+}
+
+bool proto_host_lost(void)
+{
+	return host_lost;
 }

@@ -16,6 +16,11 @@ void proto_service(void);
  * to choose USB mode over WiFi. */
 bool proto_host_seen(void);
 
+/* True from the moment the host has been silent past the timeout without
+ * having said bye, until it speaks again. The USB loop reads this as "the
+ * computer is asleep" once it has had usage (docs/sleep-mode-design.md). */
+bool proto_host_lost(void);
+
 /* The daemon's release version as it announced itself, or "" if it has not.
  * Firmware and daemon ship from one tag, so this should equal
  * BLINK_FW_VERSION on a fully updated machine. */

@@ -29,4 +29,9 @@ struct bootclip {
 
 const struct bootclip *bootclip_active(void);
 
+/* The sleep clips: closing plays once, loop repeats while the computer
+ * sleeps, opening plays once on wake. Same edition rule as the boot clip. */
+enum sleep_part { SLEEP_CLOSE, SLEEP_LOOP, SLEEP_OPEN };
+const struct bootclip *sleepclip_active(enum sleep_part part);
+
 #endif /* BOOTCLIP_H */

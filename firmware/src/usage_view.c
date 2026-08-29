@@ -293,6 +293,9 @@ static lv_obj_t *boot_seg[BOOT_STEPS_MAX];
 static lv_obj_t *boot_cnt;	/* "1 / 3" over the bar */
 static lv_obj_t *boot_step;	/* current step name under the bar */
 static int boot_active = -1;	/* segment currently pulsing, -1 = none */
+static lv_obj_t *boot_hint;	/* the cable hint, after a while on step 1 */
+static int boot_hint_s;		/* seconds spent on the current step */
+#define BOOT_HINT_AFTER_S 20
 static const char *const *boot_txt;
 static int boot_n;
 
@@ -774,6 +777,18 @@ void usage_view_init(void)
 	lv_label_set_text(boot_step, "");
 	lv_obj_set_style_text_color(boot_step, COL_DIM, 0);
 	lv_obj_align(boot_step, LV_ALIGN_TOP_MID, 0, 146);
+
+	/* Twenty seconds on the first step and the likeliest cause is the
+	 * cable: a charge-only lead powers the board and carries no data --
+	 * seen on the first Apple Silicon install (2026-08-30), where the
+	 * Mac never enumerated the board at all. Blank until then. */
+	boot_hint = lv_label_create(overlay);
+	lv_label_set_text(boot_hint, "");
+	lv_obj_set_width(boot_hint, 296);
+	lv_label_set_long_mode(boot_hint, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_align(boot_hint, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_set_style_text_color(boot_hint, COL_DIM, 0);
+	lv_obj_align(boot_hint, LV_ALIGN_TOP_MID, 0, 178);
 
 	built = true;
 }
@@ -1445,6 +1460,15 @@ void usage_view_tick_1s(void)
 		return;
 	}
 
+	if (boot_hint && overlay && !lv_obj_has_flag(overlay, LV_OBJ_FLAG_HIDDEN)
+	    && boot_active == 0 && boot_n > 0) {
+		if (++boot_hint_s == BOOT_HINT_AFTER_S) {
+			lv_label_set_text(boot_hint,
+					  "Plugged in and the app is running?\n"
+					  "Try another USB cable.");
+		}
+	}
+
 	/*
 	 * EVERY page ticks, not just the one on screen. A window does not stop
 	 * closing because nobody is looking at it, and a page that caught up
@@ -1915,6 +1939,12 @@ void usage_view_boot_stage(int stage)
 
 	if (boot_active >= 0 && boot_active != stage) {
 		lv_anim_delete(boot_seg[boot_active], boot_pulse_cb);
+	}
+	if (boot_active != stage) {
+		boot_hint_s = 0;
+		if (boot_hint) {
+			lv_label_set_text(boot_hint, "");
+		}
 	}
 
 	for (int i = 0; i < boot_n; i++) {

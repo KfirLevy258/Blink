@@ -22,6 +22,12 @@ void ui_boot_set_pump(void (*fn)(void));
 
 void ui_boot_splash(void);
 
+/* Play any BAN1 clip on the panel, outside the boot: the sleep clips use
+ * this. The frame gaps keep servicing the daemon protocol. `stop`, if
+ * given, is asked between frames and ends the clip early when true.
+ * Returns false only for a blob that does not decode. */
+bool ui_boot_play_clip(const uint8_t *blob, size_t len, bool (*stop)(void));
+
 /* Call right before an on-purpose sys_reboot: the next boot skips the splash
  * animation. Power-on and crash resets still get the full animation (the
  * flag lives in noinit RAM behind a magic). */
