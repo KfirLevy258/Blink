@@ -101,4 +101,4 @@ BLINK never sees a credential and never sends anything anywhere. It keeps the la
 - **[docs/multi-provider.md](docs/multi-provider.md)** - how two sources are merged into one reading
 - **[docs/windows-check.md](docs/windows-check.md)** - the ten-minute check a Windows release needs a person for
 
-<div align="center"><sub>Firmware: Zephyr, C. App: Python, shipped as one binary. Board: ESP32-2432S028.</sub></div>
+<div align="center"><sub>Firmware: Zephyr, C. App: Python, shipped as one binary. Board: ESP32-2432S028. <a href="LICENSE">MIT licensed</a>.</sub></div>
