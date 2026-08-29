@@ -427,7 +427,10 @@ all-sources)
 	[ "$(wire_get "$w" src)" = "cli" ] || fail "primary source is not the status line: $w"
 	[ "$(wire_get "$w" session_pct)" = "37.0" ] || fail "session_pct wrong: $w"
 	[ "$(wire_get "$w" weekly_pct)" = "12.0" ] || fail "weekly_pct wrong: $w"
-	[ "$(wire_get "$w" state)" = "running" ] || fail "state should be running (worst of running+idle): $w"
+	# ci-1 is mid-turn, ci-2 has finished: the light says "your turn". A
+	# finished answer is waiting on the person and the working session is
+	# not, so idle outranks running (base.SEVERITY, 2026-08-29).
+	[ "$(wire_get "$w" state)" = "idle" ] || fail "state should be idle (one finished session shows through a running one): $w"
 	[ "$(wire_get "$w" n_sess)" = "2" ] || fail "n_sess wrong: $w"
 	[ "$(wire_get "$w" n_agents)" = "1" ] || fail "n_agents wrong: $w"
 	[ "$(wire_get "$w" p2)" = "codex" ] || fail "second provider is not codex: $w"
