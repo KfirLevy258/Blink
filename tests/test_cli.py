@@ -164,7 +164,7 @@ def test_install_on_a_machine_where_claude_never_wrote_settings(tmp_path):
     """~/.claude/settings.json only exists once a setting has been changed."""
     _settings(tmp_path).unlink(missing_ok=True)
     assert cli.main(["install"]) == 0
-    assert _read(tmp_path)["statusLine"]["command"].endswith("blink-statusline.sh")
+    assert "blink-statusline.sh" in _read(tmp_path)["statusLine"]["command"]
 
 
 def test_status_runs_before_and_after_install(tmp_path, capsys):

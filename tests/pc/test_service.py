@@ -175,8 +175,10 @@ def test_schtasks_install_registers_at_logon_then_starts_it(home, monkeypatch):
     assert "%USERPROFILE%" in vbs              # the profile, not a literal path
     assert "run --log" in vbs                  # hidden means it logs itself
     assert ", 0, False" in vbs                 # hidden window, do not wait
-    # onlogon does not start it now, so it is started explicitly.
-    assert r.calls[1][:2] == ["schtasks", "/run"]
+    # onlogon does not start it now, so it is started explicitly -- after
+    # the previous install's daemon is ended, or it keeps the port.
+    assert r.ran("schtasks", "/end")
+    assert r.calls[-1][:2] == ["schtasks", "/run"]
 
 
 def test_schtasks_install_surfaces_why_it_failed(home, monkeypatch):

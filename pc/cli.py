@@ -546,6 +546,13 @@ class _SchtasksBackend(_Backend):
             capture_output=True, text=True)
         if r.returncode != 0:
             return f"could not register a Scheduled Task: {r.stderr.strip()[:120]}"
+        # A daemon from an earlier install is still running, holding the
+        # serial port and the single-instance lock, and /create does nothing
+        # to it: on the first reinstall over a live 1.0.2 the new task's
+        # daemon started, found the lock held, and left -- the old one, with
+        # its window, carried on (2026-08-29). Stop it the way restart() does.
+        subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True)
+        _kill_recorded_daemon()
         # /sc onlogon does not start it now, only at the next logon.
         subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True)
         return "running (Scheduled Task)"
