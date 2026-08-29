@@ -133,9 +133,17 @@ if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
 	gh release edit "$TAG" --repo "$REPO" --draft=true
 	gh release upload "$TAG" --repo "$REPO" --clobber "$TMP/blink-fw.bin"
 else
-	gh release create "$TAG" --repo "$REPO" --draft --title "Blink $VER" \
-		--notes "Firmware $VER — size $SIZE bytes, sha256 $SHA" \
-		"$TMP/blink-fw.bin"
+	# Notes written for the people who buy the device, when there are any
+	# (docs/releases/<version>.md); the firmware digest otherwise.
+	NOTES="$ROOT/docs/releases/$VER.md"
+	if [ -f "$NOTES" ]; then
+		gh release create "$TAG" --repo "$REPO" --draft --title "BLINK $VER" \
+			--notes-file "$NOTES" "$TMP/blink-fw.bin"
+	else
+		gh release create "$TAG" --repo "$REPO" --draft --title "BLINK $VER" \
+			--notes "Firmware $VER — size $SIZE bytes, sha256 $SHA" \
+			"$TMP/blink-fw.bin"
+	fi
 fi
 
 # workflow_dispatch, not the `release: published` trigger -- a draft never

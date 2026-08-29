@@ -77,6 +77,14 @@ On Windows, download `blink-windows-x86_64.exe` from the [latest release](https:
 
 Needs Claude Code 2.1.100 or newer. The installer changes one file, `~/.claude/settings.json` (the status line command and one hook per lifecycle event), says so before it does, and keeps your own status line running. Everything it does is reversible with `uninstall`.
 
+## Something's wrong?
+
+```bash
+~/.blink/bin/blink status
+```
+
+That one command says whether the service is running, whether Claude Code and Codex are being read, and how old the numbers are. If the panel is dark or wrong, unplug the board and plug it back in first -- the app finds it again on its own. If that does not fix it, email the support address on your order confirmation with the output of `blink status` and the last lines of `~/.blink/bridge.log`; nothing in either is a secret.
+
 ## What it works with
 
 | You use | You get |
