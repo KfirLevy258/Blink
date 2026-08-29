@@ -56,17 +56,22 @@ die()  { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
 
 # The Python that has pyserial, numpy, pillow and esptool: BLINK_PYTHON if
 # set, else a repo venv, else the Zephyr venv every firmware build already
-# uses. Its bin/ goes first on PATH so esptool.py is the matching one -- no
-# activation step to remember on the factory bench.
+# uses -- no activation step to remember on the factory bench. Its bin/ is
+# added to PATH only when no esptool.py is there already: an esptool that
+# was put on PATH on purpose (or the stubs in tests/ci/check_factory.sh)
+# must not be shadowed by the venv's copy.
 PY="${BLINK_PYTHON:-$ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY="$HOME/zephyr-v4.4.0/.venv/bin/python"
 [ -x "$PY" ] || PY=$(command -v python3) || die "no python3"
-PATH="$(dirname -- "$PY"):$PATH"
-export PATH
-for mod in serial numpy PIL esptool; do
+if ! command -v esptool.py >/dev/null 2>&1; then
+	PATH="$(dirname -- "$PY"):$PATH"
+	export PATH
+fi
+for mod in serial numpy PIL; do
 	"$PY" -c "import $mod" 2>/dev/null ||
-		die "$PY lacks the '$mod' module. Run with BLINK_PYTHON=<python that has pyserial, numpy, pillow and esptool>"
+		die "$PY lacks the '$mod' module. Run with BLINK_PYTHON=<python that has pyserial, numpy and pillow>"
 done
+command -v esptool.py >/dev/null 2>&1 || die "esptool.py is not on PATH (pip install esptool into $PY)"
 
 BOARD="${BLINK_BOARD:-esp32_devkitc/esp32/procpu}"
 KEY="${BLINK_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
