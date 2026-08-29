@@ -398,7 +398,14 @@ def main(argv=None):
     # never going to look. Deriving it from sys.executable ties it to the
     # directory that actually has to be deleted, which is the thing the pid is
     # for.
-    pid_file = os.path.join(os.path.dirname(_self_path()), "bridge.pid")
+    # ~/.blink/bridge.pid, beside the program's directory rather than in it:
+    # an update rotates that directory to bin.old with this daemon still
+    # inside, and the pid has to stay where cli.restart_service() looks.
+    # Frozen: the executable is ~/.blink/bin/blink, two levels down. From a
+    # checkout: the ordinary ~/.blink (a developer, not a login service).
+    pid_file = (os.path.join(os.path.dirname(os.path.dirname(_self_path())),
+                             "bridge.pid") if getattr(sys, "frozen", False)
+                else os.path.join(blink_home, "bridge.pid"))
     try:
         with open(pid_file, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))

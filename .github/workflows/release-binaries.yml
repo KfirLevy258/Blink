@@ -38,7 +38,7 @@ jobs:
           # target; the runner that builds for them just moved.
           - {os: macos-15-intel, label: macos-x86_64}
           - {os: ubuntu-latest, label: linux-x86_64}
-          - {os: windows-latest, label: windows-x86_64.exe}
+          - {os: windows-latest, label: windows-x86_64}
     defaults:
       run:
         shell: bash
@@ -71,8 +71,8 @@ jobs:
           # died here before doing anything. It passed on Windows only because
           # MSYS resolves `dist/blink` to `dist/blink.exe`, which is why the
           # one platform that cannot run the binary was the one that agreed.
-          built=dist/blink
-          [ -f "$built" ] || built=dist/blink.exe
+          built=dist/blink/blink
+          [ -f "$built" ] || built=dist/blink/blink.exe
           got=$("$built" --version)
           echo "$got"
           case "$got" in
@@ -90,17 +90,21 @@ jobs:
           BLINK_SKIP_SERVICE=1 sh tests/ci/check_install.sh with-statusline
           BLINK_SKIP_SERVICE=1 sh tests/ci/check_install.sh no-claude
 
-      - name: name it for the platform
+      # One archive per platform: tar.gz with the executable bit kept, zip on
+      # Windows. The name and shape come from pc/update.py, which is also what
+      # the daemon expects to unpack on the other end.
+      - name: package it for the platform
+        id: pack
         run: |
-          built=dist/blink
-          [ -f "$built" ] || built=dist/blink.exe
-          mv "$built" "dist/blink-${{ matrix.label }}"
+          out=$(python tools/package_binary.py "${{ matrix.label }}" dist/blink dist)
+          echo "file=$out" >> "$GITHUB_OUTPUT"
+          ls -l "$out"
 
       - name: attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
-        run: gh release upload "$TAG" "dist/blink-${{ matrix.label }}" --clobber
+        run: gh release upload "$TAG" "${{ steps.pack.outputs.file }}" --clobber
 
       # The manifest that names these files' hashes is written and signed on
       # the maintainer's machine, not here -- the release key never leaves it.

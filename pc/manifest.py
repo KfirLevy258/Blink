@@ -46,7 +46,7 @@ SCHEMA = 2
 
 # The platform names the daemon asks for. Ordered for a stable document.
 ARTIFACT_KEYS = ("macos-arm64", "macos-x86_64", "linux-x86_64",
-                 "windows-x86_64.exe")
+                 "windows-x86_64")
 
 
 def build(version, fw_size, fw_sha256, proto, artifacts, auto=False):

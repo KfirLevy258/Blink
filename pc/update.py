@@ -27,12 +27,16 @@ a release goes wrong. Auto-update without a remote off switch is a mechanism
 with no brakes.
 """
 import hashlib
+import io
 import json
 import os
 import platform
+import shutil
 import stat
 import subprocess
 import sys
+import tarfile
+import zipfile
 
 from pc import ota
 from pc.version import RELEASE_VERSION
@@ -100,8 +104,32 @@ def platform_key():
     if system == "Linux":
         return "linux-x86_64" if machine in ("x86_64", "amd64") else None
     if system == "Windows":
-        return "windows-x86_64.exe"
+        return "windows-x86_64"
     return None
+
+
+def archive_name(key):
+    """The file on the release feed for a platform key.
+
+    An archive, not a bare executable, since 1.1.0: the program ships as a
+    directory (the executable and its _internal/ support files) so that it
+    starts in a fraction of a second instead of unpacking 50 MB into a temp
+    directory on every run -- 5 to 11 s on an Intel Mac before the first
+    line of Python, on `blink status` and every other command. Zip on
+    Windows, where `tar` reads it but nothing native writes one; tar.gz
+    elsewhere, where it keeps the executable bit and one `curl | tar xz`
+    installs it.
+    """
+    return "blink-" + key + (".zip" if key.startswith("windows") else ".tar.gz")
+
+
+# The directory that holds the executable, its rollback and its staging copy:
+#   <bin>          what runs            ~/.blink/bin/blink[.exe] + _internal/
+#   <bin>.old      the previous one, kept until the new one has proven itself
+#   <bin>.new      the download, unpacked and self-tested before it moves in
+def _dirs(target):
+    d = os.path.dirname(os.path.abspath(target))
+    return d, d + ".old", d + ".new"
 
 
 # --- the signed manifest ------------------------------------------------
@@ -191,10 +219,10 @@ def available(manifest, current=RELEASE_VERSION, key=None):
 
 
 def download(key, artifact, get=ota._get):
-    """The new binary's bytes, checked against the manifest. Raises on either
-    mismatch -- there is nothing sensible to do with a download we cannot
-    identify, and running it is certainly not it."""
-    blob = get(ota.RELEASE_BASE + "blink-" + key, timeout=300)
+    """The new release's archive, checked against the manifest. Raises on
+    either mismatch -- there is nothing sensible to do with a download we
+    cannot identify, and running it is certainly not it."""
+    blob = get(ota.RELEASE_BASE + archive_name(key), timeout=300)
     if len(blob) != artifact["size"]:
         raise ValueError(f"size {len(blob)} != manifest {artifact['size']}")
     digest = hashlib.sha256(blob).hexdigest()
@@ -225,72 +253,141 @@ def _self_test(path, expect_version, run=subprocess.run) -> bool:
     return r.returncode == 0 and expect_version in (r.stdout or "")
 
 
+def unpack(blob, into):
+    """Unpack a release archive so that `into` holds the executable directly.
+
+    The archive carries one top-level directory, `blink/`, so that a person
+    who runs `tar xz` gets a folder rather than a spill of files. Here that
+    level is stripped. Every member is checked to land inside `into`: the
+    bytes were hash-checked against a signed manifest, so this is belt and
+    braces, but a path check costs nothing and a traversal would cost a lot.
+    """
+    def _dest(name):
+        parts = [p for p in name.replace("\\", "/").split("/") if p not in ("", ".")]
+        if not parts or ".." in parts:
+            raise ValueError(f"refusing archive member {name!r}")
+        if parts[0] == "blink":
+            parts = parts[1:]
+        if not parts:
+            return None
+        return os.path.join(into, *parts)
+
+    os.makedirs(into, exist_ok=True)
+    if blob[:2] == b"PK":
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            for m in z.infolist():
+                dest = _dest(m.filename)
+                if dest is None:
+                    continue
+                if m.is_dir():
+                    os.makedirs(dest, exist_ok=True)
+                    continue
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with z.open(m) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                mode = (m.external_attr >> 16) & 0o777
+                if mode:
+                    os.chmod(dest, mode)
+        return
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as t:
+        for m in t:
+            dest = _dest(m.name)
+            if dest is None:
+                continue
+            if m.isdir():
+                os.makedirs(dest, exist_ok=True)
+                continue
+            if not m.isfile():
+                raise ValueError(f"refusing archive member {m.name!r} (not a file)")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with t.extractfile(m) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+            os.chmod(dest, m.mode & 0o777 or 0o644)
+
+
+def swap_in(new_dir, target, version, run=subprocess.run):
+    """Make the program at `new_dir` the one at `target`'s directory.
+
+    Self-tests it first, then rotates: <bin> -> <bin>.old, <bin>.new -> <bin>.
+    Renaming a directory is allowed on every platform while programs are
+    running from inside it (a running executable can be renamed but not
+    overwritten; its directory likewise), which is what makes an in-place
+    update possible without a second program to do the swapping.
+    """
+    cur, old, new = _dirs(target)
+    exe = os.path.join(new_dir, os.path.basename(target))
+    try:
+        os.chmod(exe, os.stat(exe).st_mode | stat.S_IXUSR | stat.S_IXGRP
+                 | stat.S_IXOTH)
+    except OSError:
+        pass
+    if not _self_test(exe, version, run=run):
+        _rmtree(new_dir)
+        return False, ("the downloaded program did not run -- keeping the"
+                       " current one")
+    if os.path.abspath(new_dir) != os.path.abspath(new):
+        _rmtree(new)
+        os.replace(new_dir, new)
+    try:
+        _rmtree(old)
+        if os.path.exists(cur):
+            os.replace(cur, old)
+        os.replace(new, cur)
+    except OSError as e:
+        # Put back whatever we moved, so a half-applied update is not left
+        # pointing the login service at nothing.
+        if not os.path.exists(cur) and os.path.exists(old):
+            try:
+                os.replace(old, cur)
+            except OSError:
+                pass
+        _rmtree(new)
+        return False, f"could not replace {cur}: {e}"
+    return True, f"updated to {version}"
+
+
 def apply(blob, target, version, run=subprocess.run):
-    """Replace the binary at `target`. Returns (ok, message).
+    """Replace the program at `target` with the archive `blob`. (ok, message).
 
     Does NOT restart anything: which supervisor owns this process, and whether
     it is this process, is the caller's business (see cli.restart_service).
     """
-    d = os.path.dirname(target)
+    cur, old, new = _dirs(target)
     try:
-        os.makedirs(d, exist_ok=True)
+        os.makedirs(os.path.dirname(cur), exist_ok=True)
     except OSError as e:
-        return False, f"cannot write to {d}: {e}"
-
-    new, old = target + ".new", target + ".old"
+        return False, f"cannot write to {os.path.dirname(cur)}: {e}"
+    _rmtree(new)
     try:
-        with open(new, "wb") as f:
-            f.write(blob)
-        os.chmod(new, os.stat(new).st_mode | stat.S_IXUSR | stat.S_IXGRP
-                 | stat.S_IXOTH)
-    except OSError as e:
-        _rm(new)
+        unpack(blob, new)
+    except (OSError, ValueError, tarfile.TarError, zipfile.BadZipFile) as e:
+        _rmtree(new)
         return False, f"could not stage the download: {e}"
-
-    if not _self_test(new, version, run=run):
-        _rm(new)
-        return False, ("the downloaded binary did not run -- keeping the"
-                       " current one")
-
-    try:
-        _rm(old)
-        if os.path.exists(target):
-            # Windows will not overwrite a running executable, but it will
-            # rename one out of the way. Everywhere else this is just the
-            # rollback copy.
-            os.replace(target, old)
-        os.replace(new, target)
-    except OSError as e:
-        # Put back whatever we moved, so a half-applied update is not left
-        # pointing the login service at nothing.
-        if not os.path.exists(target) and os.path.exists(old):
-            try:
-                os.replace(old, target)
-            except OSError:
-                pass
-        _rm(new)
-        return False, f"could not replace {target}: {e}"
-    return True, f"updated to {version}"
+    if not os.path.exists(os.path.join(new, os.path.basename(target))):
+        _rmtree(new)
+        return False, "the download does not contain the program"
+    return swap_in(new, target, version, run=run)
 
 
 def recover(target) -> bool:
-    """Restore the previous binary if the current one is missing or empty.
+    """Restore the previous program if the current one is missing or empty.
 
     Called on every start. The window it covers is small -- between the two
-    renames in apply() -- but what it prevents is not: a login service whose
+    renames in swap_in() -- but what it prevents is not: a login service whose
     program does not exist never runs again, and nothing on the board or the
     computer would explain why.
     """
-    old = target + ".old"
+    cur, old, _ = _dirs(target)
     try:
         healthy = os.path.exists(target) and os.path.getsize(target) > 0
     except OSError:
         healthy = False
-    if healthy or not os.path.exists(old):
+    if healthy or not os.path.exists(os.path.join(old, os.path.basename(target))):
         return False
     try:
-        os.replace(old, target)
-        print(f"[update] restored the previous binary at {target}",
+        _rmtree(cur)
+        os.replace(old, cur)
+        print(f"[update] restored the previous program at {cur}",
               file=sys.stderr)
         return True
     except OSError:
@@ -298,22 +395,25 @@ def recover(target) -> bool:
 
 
 def restart_from_daemon(target):
-    """Hand over to the freshly written binary, from inside the daemon itself.
+    """Hand over to the freshly written program, from inside the daemon itself.
 
     On macOS and Linux this just exits: launchd's KeepAlive and systemd's
     Restart=always exist for crashes, and an update is the one time we want
     them. Windows has neither -- `schtasks /sc onlogon` fires at logon and
     never again -- so the replacement is started explicitly before this one
     goes away. The task still points at the same path, so nothing is orphaned
-    beyond the current session.
+    beyond the current session. It is started the way the task starts it,
+    logging to bridge.log, or the log would go dark from the first update on.
     """
     if sys.platform == "win32":
         DETACHED = 0x00000008 | 0x00000200   # DETACHED_PROCESS | NEW_GROUP
+        home = os.path.dirname(_dirs(target)[0])
+        log = os.path.join(home, "bridge.log")
         try:
-            subprocess.Popen([target, "run"], creationflags=DETACHED,
-                             close_fds=True)
+            subprocess.Popen([target, "run", "--log", log],
+                             creationflags=DETACHED, close_fds=True)
         except Exception as e:
-            print(f"[update] could not start the new binary: {e}",
+            print(f"[update] could not start the new program: {e}",
                   file=sys.stderr)
             return                            # stay up rather than vanish
     print("[update] restarting into the new version", file=sys.stderr)
@@ -323,8 +423,12 @@ def restart_from_daemon(target):
 
 
 def cleanup(target):
-    """Drop the rollback copy once we are running and healthy."""
-    _rm(target + ".old")
+    """Drop the rollback copy once we are running and healthy.
+
+    Best effort: on Windows the daemon this one replaced may still be closing
+    down inside <bin>.old, in which case the next start gets it.
+    """
+    _rmtree(_dirs(target)[1])
 
 
 class PendingFirmware:
@@ -367,3 +471,7 @@ def _rm(path):
         os.remove(path)
     except OSError:
         pass
+
+
+def _rmtree(path):
+    shutil.rmtree(path, ignore_errors=True)

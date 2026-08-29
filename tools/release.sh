@@ -121,7 +121,10 @@ cp "$BIN" "$TMP/blink-fw.bin"
 RELKEY="${BLINK_RELEASE_KEY:-$HOME/.blink/release_signing_key_p256.pem}"
 [ -f "$RELKEY" ] || { echo "FATAL: release signing key missing at $RELKEY"; exit 1; }
 
-ARTIFACTS="macos-arm64 macos-x86_64 linux-x86_64 windows-x86_64.exe"
+ARTIFACTS="macos-arm64 macos-x86_64 linux-x86_64 windows-x86_64"
+# The file each key is served as (pc/update.archive_name): tar.gz, zip on
+# Windows. Since 1.1.0 the program is a directory, so an archive.
+artifact_file() { case "$1" in windows*) echo "blink-$1.zip" ;; *) echo "blink-$1.tar.gz" ;; esac; }
 
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
 	# Draft it again before adding anything. This branch runs when the tag
@@ -160,7 +163,7 @@ while :; do
 		-q '.assets[].name' 2>/dev/null || true)
 	missing=""
 	for k in $ARTIFACTS; do
-		echo "$have" | grep -qx "blink-$k" || missing="$missing $k"
+		echo "$have" | grep -qx "$(artifact_file "$k")" || missing="$missing $k"
 	done
 	[ -n "$missing" ] || break
 	[ "$(date +%s)" -lt "$deadline" ] || {
@@ -174,7 +177,7 @@ done
 # whole value of signing locally: the signature covers bytes this machine has
 # seen, from the same URL a customer will fetch.
 for k in $ARTIFACTS; do
-	gh release download "$TAG" --repo "$REPO" -p "blink-$k" -D "$TMP"
+	gh release download "$TAG" --repo "$REPO" -p "$(artifact_file "$k")" -D "$TMP"
 done
 
 # The document itself comes from pc/manifest.py, which is the only place its
@@ -186,12 +189,12 @@ ROOT="$ROOT" VER="$VER" PROTO="$PROTO" SIZE="$SIZE" SHA="$SHA" TMP="$TMP" \
 import hashlib, json, os, sys
 
 sys.path.insert(0, os.environ["ROOT"])
-from pc import manifest
+from pc import manifest, update
 
 tmp = os.environ["TMP"]
 artifacts = {}
 for key in os.environ["ARTIFACTS"].split():
-    blob = open(os.path.join(tmp, "blink-" + key), "rb").read()
+    blob = open(os.path.join(tmp, update.archive_name(key)), "rb").read()
     artifacts[key] = {"size": len(blob),
                       "sha256": hashlib.sha256(blob).hexdigest()}
 

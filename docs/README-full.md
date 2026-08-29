@@ -125,11 +125,10 @@ nothing to keep installed.
 
 ```bash
 # macOS (Apple silicon)
-curl -fsSL -o blink https://github.com/KfirLevy258/Blink/releases/latest/download/blink-macos-arm64
-# macOS (Intel):  .../blink-macos-x86_64
-# Linux:          .../blink-linux-x86_64
+curl -fsSL https://github.com/KfirLevy258/Blink/releases/latest/download/blink-macos-arm64.tar.gz | tar xz && ./blink/blink
+# macOS (Intel):  .../blink-macos-x86_64.tar.gz
+# Linux:          .../blink-linux-x86_64.tar.gz
 
-chmod +x blink && ./blink
 ```
 
 That is the whole setup. It finds the board by itself and starts again every

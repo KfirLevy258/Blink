@@ -38,7 +38,14 @@ class TestPlatformKey(unittest.TestCase):
         self.assertEqual(self._key("Darwin", "arm64"), "macos-arm64")
         self.assertEqual(self._key("Darwin", "x86_64"), "macos-x86_64")
         self.assertEqual(self._key("Linux", "x86_64"), "linux-x86_64")
-        self.assertEqual(self._key("Windows", "AMD64"), "windows-x86_64.exe")
+        self.assertEqual(self._key("Windows", "AMD64"), "windows-x86_64")
+
+    def test_the_feed_serves_an_archive_per_key(self):
+        """A directory since 1.1.0 -- a one-file build unpacked 50 MB on every
+        run, 5-11 s on an Intel Mac before `blink status` printed a line."""
+        self.assertEqual(update.archive_name("macos-arm64"), "blink-macos-arm64.tar.gz")
+        self.assertEqual(update.archive_name("linux-x86_64"), "blink-linux-x86_64.tar.gz")
+        self.assertEqual(update.archive_name("windows-x86_64"), "blink-windows-x86_64.zip")
 
     def test_an_intel_process_under_rosetta_stays_intel(self):
         """Keyed off the running process, not the silicon. Replacing an x86_64
@@ -134,86 +141,159 @@ def fake_run(ok=True, version="0.7.0"):
     return run
 
 
+def archive(files, kind="tar"):
+    """A release archive in memory: {relative path: bytes} under blink/."""
+    import io
+    import tarfile
+    import zipfile
+    buf = io.BytesIO()
+    if kind == "zip":
+        with zipfile.ZipFile(buf, "w") as z:
+            for name, data in files.items():
+                info = zipfile.ZipInfo("blink/" + name)
+                info.external_attr = (0o755 | 0o100000) << 16
+                z.writestr(info, data)
+    else:
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, data in files.items():
+                info = tarfile.TarInfo("blink/" + name)
+                info.size = len(data)
+                info.mode = 0o755
+                tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+NEW = {"blink": b"#!/bin/sh\necho new\n", "_internal/lib.so": b"support"}
+
+
 class TestApply(unittest.TestCase):
+    """The program is a directory: <bin>/blink plus <bin>/_internal. An
+    update unpacks the archive to <bin>.new, self-tests it, and rotates
+    <bin> -> <bin>.old, <bin>.new -> <bin>."""
+
     def setUp(self):
         import tempfile
         self.d = tempfile.mkdtemp(prefix="blink-apply-")
-        self.target = os.path.join(self.d, "bin", "blink")
-        os.makedirs(os.path.dirname(self.target))
+        self.bin = os.path.join(self.d, "bin")
+        self.target = os.path.join(self.bin, "blink")
+        os.makedirs(os.path.join(self.bin, "_internal"))
         with open(self.target, "wb") as f:
             f.write(b"old binary")
+        with open(os.path.join(self.bin, "_internal", "lib.so"), "wb") as f:
+            f.write(b"old support")
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.d, ignore_errors=True)
 
-    def test_it_replaces_the_binary_and_keeps_a_rollback(self):
-        ok, msg = update.apply(b"new binary", self.target, "0.7.0",
+    def _read(self, *parts):
+        return open(os.path.join(self.d, *parts), "rb").read()
+
+    def test_it_replaces_the_program_and_keeps_a_rollback(self):
+        ok, msg = update.apply(archive(NEW), self.target, "0.7.0",
                                run=fake_run())
         self.assertTrue(ok, msg)
-        self.assertEqual(open(self.target, "rb").read(), b"new binary")
-        self.assertEqual(open(self.target + ".old", "rb").read(), b"old binary")
-        self.assertFalse(os.path.exists(self.target + ".new"))
+        self.assertEqual(self._read("bin", "blink"), NEW["blink"])
+        self.assertEqual(self._read("bin", "_internal", "lib.so"), b"support")
+        self.assertEqual(self._read("bin.old", "blink"), b"old binary")
+        self.assertEqual(self._read("bin.old", "_internal", "lib.so"), b"old support")
+        self.assertFalse(os.path.exists(self.bin + ".new"))
+
+    def test_a_zip_unpacks_the_same_way(self):
+        ok, msg = update.apply(archive(NEW, "zip"), self.target, "0.7.0",
+                               run=fake_run())
+        self.assertTrue(ok, msg)
+        self.assertEqual(self._read("bin", "_internal", "lib.so"), b"support")
 
     def test_the_replacement_is_executable(self):
-        update.apply(b"new binary", self.target, "0.7.0", run=fake_run())
+        update.apply(archive(NEW), self.target, "0.7.0", run=fake_run())
         self.assertTrue(os.access(self.target, os.X_OK))
 
-    def test_a_binary_that_will_not_run_never_becomes_the_target(self):
+    def test_a_program_that_will_not_run_never_becomes_the_target(self):
         """The failure this exists for: a login service pointed at a broken
-        binary is a device that never comes back, with nothing on screen to
-        explain it. The old binary has to survive."""
-        ok, msg = update.apply(b"corrupt", self.target, "0.7.0",
+        program is a device that never comes back, with nothing on screen to
+        explain it. The old program has to survive."""
+        ok, msg = update.apply(archive(NEW), self.target, "0.7.0",
                                run=fake_run(ok=False))
         self.assertFalse(ok)
         self.assertIn("did not run", msg)
-        self.assertEqual(open(self.target, "rb").read(), b"old binary")
-        self.assertFalse(os.path.exists(self.target + ".new"))
+        self.assertEqual(self._read("bin", "blink"), b"old binary")
+        self.assertFalse(os.path.exists(self.bin + ".new"))
 
-    def test_a_binary_reporting_the_wrong_version_is_refused(self):
-        ok, _ = update.apply(b"someone else's build", self.target, "0.7.0",
+    def test_a_program_reporting_the_wrong_version_is_refused(self):
+        ok, _ = update.apply(archive(NEW), self.target, "0.7.0",
                              run=fake_run(version="0.5.0"))
         self.assertFalse(ok)
-        self.assertEqual(open(self.target, "rb").read(), b"old binary")
+        self.assertEqual(self._read("bin", "blink"), b"old binary")
 
-    def test_a_first_install_needs_no_previous_binary(self):
-        os.remove(self.target)
-        ok, _ = update.apply(b"new binary", self.target, "0.7.0",
+    def test_a_download_that_is_not_an_archive_is_refused(self):
+        ok, msg = update.apply(b"not an archive", self.target, "0.7.0",
+                               run=fake_run())
+        self.assertFalse(ok)
+        self.assertIn("stage", msg)
+        self.assertEqual(self._read("bin", "blink"), b"old binary")
+        self.assertFalse(os.path.exists(self.bin + ".new"))
+
+    def test_an_archive_without_the_program_is_refused(self):
+        ok, msg = update.apply(archive({"README": b"hi"}), self.target,
+                               "0.7.0", run=fake_run())
+        self.assertFalse(ok)
+        self.assertIn("does not contain", msg)
+        self.assertEqual(self._read("bin", "blink"), b"old binary")
+
+    def test_a_member_that_escapes_the_directory_is_refused(self):
+        ok, _ = update.apply(archive({"../escape": b"x"}), self.target,
+                             "0.7.0", run=fake_run())
+        self.assertFalse(ok)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "escape")))
+
+    def test_a_first_install_needs_no_previous_program(self):
+        import shutil
+        shutil.rmtree(self.bin)
+        ok, _ = update.apply(archive(NEW), self.target, "0.7.0",
                              run=fake_run())
         self.assertTrue(ok)
-        self.assertEqual(open(self.target, "rb").read(), b"new binary")
+        self.assertEqual(self._read("bin", "blink"), NEW["blink"])
+        self.assertFalse(os.path.exists(self.bin + ".old"))
 
 
 class TestRecover(unittest.TestCase):
     def setUp(self):
         import tempfile
         self.d = tempfile.mkdtemp(prefix="blink-recover-")
-        self.target = os.path.join(self.d, "blink")
+        self.bin = os.path.join(self.d, "bin")
+        self.target = os.path.join(self.bin, "blink")
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.d, ignore_errors=True)
 
-    def test_a_missing_binary_is_restored_from_the_rollback(self):
-        with open(self.target + ".old", "wb") as f:
-            f.write(b"previous")
+    def _old(self, data=b"previous"):
+        os.makedirs(self.bin + ".old", exist_ok=True)
+        with open(os.path.join(self.bin + ".old", "blink"), "wb") as f:
+            f.write(data)
+
+    def test_a_missing_program_is_restored_from_the_rollback(self):
+        self._old()
         self.assertTrue(update.recover(self.target))
         self.assertEqual(open(self.target, "rb").read(), b"previous")
+        self.assertFalse(os.path.exists(self.bin + ".old"))
 
-    def test_an_empty_binary_is_treated_as_missing(self):
+    def test_an_empty_program_is_treated_as_missing(self):
+        os.makedirs(self.bin)
         open(self.target, "wb").close()
-        with open(self.target + ".old", "wb") as f:
-            f.write(b"previous")
+        self._old()
         self.assertTrue(update.recover(self.target))
         self.assertEqual(open(self.target, "rb").read(), b"previous")
 
-    def test_a_healthy_binary_is_left_alone(self):
+    def test_a_healthy_program_is_left_alone(self):
+        os.makedirs(self.bin)
         with open(self.target, "wb") as f:
             f.write(b"current")
-        with open(self.target + ".old", "wb") as f:
-            f.write(b"previous")
+        self._old()
         self.assertFalse(update.recover(self.target))
         self.assertEqual(open(self.target, "rb").read(), b"current")
+        self.assertTrue(os.path.exists(self.bin + ".old"))
 
     def test_nothing_to_recover_from_is_not_an_error(self):
         self.assertFalse(update.recover(self.target))

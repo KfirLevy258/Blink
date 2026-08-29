@@ -61,14 +61,17 @@ One file. Download it, run it, delete it. It copies itself to `~/.blink/bin`, fi
 
 ```bash
 # macOS (Apple silicon)
-curl -fsSL -o blink https://github.com/KfirLevy258/Blink/releases/latest/download/blink-macos-arm64
-# macOS (Intel):  .../blink-macos-x86_64
-# Linux:          .../blink-linux-x86_64
+curl -fsSL https://github.com/KfirLevy258/Blink/releases/latest/download/blink-macos-arm64.tar.gz | tar xz && ./blink/blink
+# macOS (Intel):  .../blink-macos-x86_64.tar.gz
+# Linux:          .../blink-linux-x86_64.tar.gz
 
-chmod +x blink && ./blink
 ```
 
-On Windows, download `blink-windows-x86_64.exe` from the [latest release](https://github.com/KfirLevy258/Blink/releases/latest) and run it.
+On Windows, in PowerShell or Command Prompt:
+
+```
+curl.exe -fsSL -o blink.zip https://github.com/KfirLevy258/Blink/releases/latest/download/blink-windows-x86_64.zip && tar -xf blink.zip && .\blink\blink.exe
+```
 
 ```bash
 ~/.blink/bin/blink status      # is the panel getting data?

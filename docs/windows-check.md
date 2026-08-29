@@ -10,7 +10,7 @@ installed and signed in; Claude Code installed (`npm install -g
 @anthropic-ai/claude-code`); a BLINK on a USB cable.
 
 Download `blink-windows-latest` from the latest CI run's artifacts (Actions ->
-the run -> Artifacts), or the release's `blink-windows-x86_64.exe`.
+the run -> Artifacts), or the release's `blink-windows-x86_64.zip` (unzip it; run `blink\blink.exe`).
 
 | # | Do | Expect |
 |---|---|---|

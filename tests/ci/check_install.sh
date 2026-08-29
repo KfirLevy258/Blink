@@ -22,7 +22,7 @@
 # `blink status --wire` would put on the cable. No board is attached on a
 # runner; the wire message is the last thing that can be checked without one.
 #
-# BLINK_BIN names the binary to test (default: dist/blink, as built by
+# BLINK_BIN names the binary to test (default: dist/blink/blink, as built by
 # tools/build_binary.sh). CI builds it once per platform and hands the path in.
 #
 # Set BLINK_SKIP_SERVICE=1 to skip the login-service assertions. Do that when

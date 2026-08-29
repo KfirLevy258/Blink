@@ -51,13 +51,18 @@ BLINK_SKIP_SERVICE=1 "$BIN" >"$WORK/install.txt" 2>&1 ||
 INSTALLED="$HOME/.blink/bin/blink"
 [ -x "$INSTALLED" ] || fail "the binary did not install itself"
 
-# The stand-in for a newer release. It only has to satisfy the self-test --
-# run, and say it is the version the manifest promised.
-cat >"$FEED/blink-$KEY" <<'EOF'
+# The stand-in for a newer release: a directory with an executable that only
+# has to satisfy the self-test -- run, and say it is the version the manifest
+# promised -- packaged the way the feed serves it (tools/package_binary.py).
+ARCHIVE="$FEED/blink-$KEY.tar.gz"
+mkdir -p "$WORK/fake/blink"
+cat >"$WORK/fake/blink/blink" <<'EOF'
 #!/bin/sh
 echo "blink 99.0.0"
 EOF
-chmod 755 "$FEED/blink-$KEY"
+chmod 755 "$WORK/fake/blink/blink"
+echo "support file" >"$WORK/fake/blink/_internal.txt"
+python3 "$ROOT/tools/package_binary.py" "$KEY" "$WORK/fake/blink" "$FEED" >/dev/null
 
 openssl ecparam -name prime256v1 -genkey -noout -out "$WORK/test-key.pem" 2>/dev/null
 openssl ec -in "$WORK/test-key.pem" -pubout -out "$WORK/test-pub.pem" 2>/dev/null
@@ -66,7 +71,7 @@ write_manifest() {
 	FEED="$FEED" KEY="$KEY" python3 - >"$FEED/manifest.json" <<'EOF'
 import hashlib, json, os
 feed, key = os.environ["FEED"], os.environ["KEY"]
-blob = open(os.path.join(feed, "blink-" + key), "rb").read()
+blob = open(os.path.join(feed, "blink-" + key + ".tar.gz"), "rb").read()
 print(json.dumps({
     "version": "0.0.1", "size": 1, "sha256": "00" * 32,   # firmware: unused here
     "schema": 2,
@@ -99,12 +104,14 @@ BLINK_SKIP_SERVICE=1 "$INSTALLED" update >"$WORK/update.txt" 2>&1 ||
 "$INSTALLED" --version | grep -q "99.0.0" ||
 	fail "the binary was not replaced: $("$INSTALLED" --version)"
 ok "a signed release replaces the running binary"
-[ -f "$INSTALLED.old" ] || fail "no rollback copy kept"
-ok "the previous binary is kept for rollback"
-[ ! -e "$INSTALLED.new" ] || fail "a staging file was left behind"
+BINDIR="$HOME/.blink/bin"
+[ -x "$BINDIR.old/blink" ] || fail "no rollback copy kept"
+ok "the previous program is kept for rollback"
+[ ! -e "$BINDIR.new" ] || fail "a staging directory was left behind"
+[ -f "$BINDIR/_internal.txt" ] || fail "the archive's support files were not unpacked beside the executable"
 
 # --- 3. a tampered manifest must be refused ----------------------------------
-cp "$INSTALLED.old" "$INSTALLED"          # back to the real binary
+rm -rf "$BINDIR" && cp -R "$BINDIR.old" "$BINDIR"      # back to the real program
 sed 's/99\.0\.0/99.0.1/' "$FEED/manifest.json" >"$FEED/manifest.tmp"
 mv "$FEED/manifest.tmp" "$FEED/manifest.json"   # signature no longer covers it
 BLINK_SKIP_SERVICE=1 "$INSTALLED" update >"$WORK/tampered.txt" 2>&1 && rc=0 || rc=$?
@@ -115,10 +122,14 @@ ok "an edited manifest is refused"
 # --- 4. a binary that does not match its hash --------------------------------
 write_manifest
 # Same length, different bytes: appending would trip the size check first and
-# never reach the hash comparison this step exists to prove.
-sed 's/blink 99/blinK 99/' "$FEED/blink-$KEY" >"$FEED/tmp-bin"
-mv "$FEED/tmp-bin" "$FEED/blink-$KEY"
-chmod 755 "$FEED/blink-$KEY"
+# never reach the hash comparison this step exists to prove. The last byte of
+# a gzip stream is part of its trailer, so flipping it changes the hash and
+# nothing else.
+python3 - "$ARCHIVE" <<'EOF'
+import sys
+p = sys.argv[1]; b = bytearray(open(p, "rb").read()); b[-1] ^= 0xFF
+open(p, "wb").write(bytes(b))
+EOF
 BLINK_SKIP_SERVICE=1 "$INSTALLED" update >"$WORK/badhash.txt" 2>&1 && rc=0 || rc=$?
 [ "$rc" -ne 0 ] || fail "update accepted a download whose hash did not match"
 grep -qi "sha256" "$WORK/badhash.txt" ||

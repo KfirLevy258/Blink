@@ -35,10 +35,10 @@ ok() { printf '  ok   %s\n' "$*"; }
 
 # The binary under test. CI builds it once per platform and passes the path in.
 ci_binary() {
-	BIN="${BLINK_BIN:-$ROOT/dist/blink}"
+	BIN="${BLINK_BIN:-$ROOT/dist/blink/blink}"
 	[ -x "$BIN" ] || BIN="$BIN.exe"
 	[ -x "$BIN" ] || {
-		echo "no binary at ${BLINK_BIN:-$ROOT/dist/blink} -- run tools/build_binary.sh" >&2
+		echo "no binary at ${BLINK_BIN:-$ROOT/dist/blink/blink} -- run tools/build_binary.sh" >&2
 		exit 1
 	}
 }

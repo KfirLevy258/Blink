@@ -1,5 +1,12 @@
 #!/bin/sh
-# Build the single-file `blink` binary for THIS platform.
+# Build the `blink` program for THIS platform, as a directory: dist/blink/blink
+# (blink.exe on Windows) plus dist/blink/_internal/.
+#
+# One directory, not one file. A one-file build unpacks 50 MB into a temp
+# directory on every run, and macOS scans every file it writes: 5 to 11 s
+# before the first line of Python, on `blink status` and everything else
+# (2026-08-29). tools/package_binary.py turns the directory into the archive
+# the feed serves.
 #
 #   tools/build_binary.sh [outdir]
 #
@@ -69,7 +76,8 @@ fi
 
 cd "$ROOT"
 "$VBIN/pyinstaller" \
-	--onefile \
+	--onedir \
+	--contents-directory _internal \
 	--name blink \
 	--distpath "$OUT" \
 	--workpath "$BUILD/work" \
@@ -92,6 +100,7 @@ cd "$ROOT"
 		exit 1
 	}
 
-BUILT="$OUT/blink"
-[ -f "$BUILT" ] || BUILT="$OUT/blink.exe"
-echo "built $BUILT ($(du -h "$BUILT" | cut -f1))"
+BUILT="$OUT/blink/blink"
+[ -f "$BUILT" ] || BUILT="$OUT/blink/blink.exe"
+[ -f "$BUILT" ] || { echo "FATAL: no executable under $OUT/blink" >&2; exit 1; }
+echo "built $BUILT ($(du -sh "$OUT/blink" | cut -f1))"

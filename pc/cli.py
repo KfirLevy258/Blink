@@ -97,13 +97,19 @@ LAUNCHER_VBS = "\n".join((
 
 
 def pid_path():
-    """Where the running daemon records its pid: beside its own binary.
+    """Where the running daemon records its pid: ~/.blink/bridge.pid.
 
-    Not in ~/.blink. A login service runs in the user's environment rather
-    than the one that registered it, so the two can disagree about what ~ is --
-    and when they do, the pid lands where nothing will look for it.
+    Derived from the program's own location (its directory's parent), not
+    from ~. A login service runs in the user's environment rather than the
+    one that registered it, so the two can disagree about what ~ is -- and
+    when they do, the pid lands where nothing will look for it.
+
+    Beside the program, not inside its directory: an update rotates
+    ~/.blink/bin to bin.old with the old daemon still running from it, and a
+    pid file that moved with the directory is one restart() can no longer
+    find -- leaving the old daemon holding the serial port against the new.
     """
-    return os.path.join(bin_dir(), "bridge.pid")
+    return os.path.join(blink_home(), "bridge.pid")
 
 
 def settings_path():
@@ -763,8 +769,10 @@ def _remove_bin_dir(attempts=6):
     all, which is exactly what being terminated looks like.
     """
     for attempt in range(attempts):
-        shutil.rmtree(bin_dir(), ignore_errors=True)
-        if not os.path.exists(bin_dir()):
+        for d in (bin_dir(), bin_dir() + ".old", bin_dir() + ".new"):
+            shutil.rmtree(d, ignore_errors=True)
+        if not any(os.path.exists(d) for d in
+                   (bin_dir(), bin_dir() + ".old", bin_dir() + ".new")):
             return True, "removed"
         time.sleep(0.4 * (attempt + 1))
     if sys.platform == "win32":
@@ -782,7 +790,9 @@ def _schedule_windows_cleanup():
     `ping -n 4 127.0.0.1` rather than `timeout /t`, which wants a console and
     fails outright in a detached process that has no window.
     """
-    script = 'ping -n 4 127.0.0.1 >nul & rmdir /s /q "{}"'.format(bin_dir())
+    script = "ping -n 4 127.0.0.1 >nul" + "".join(
+        f' & rmdir /s /q "{d}"' for d in (bin_dir(), bin_dir() + ".old",
+                                          bin_dir() + ".new"))
     DETACHED_NO_WINDOW = 0x00000008 | 0x08000000
     try:
         subprocess.Popen(["cmd", "/c", script],
@@ -793,38 +803,6 @@ def _schedule_windows_cleanup():
 
 
 # -------------------------------------------------------------------- install
-
-
-def _make_way_for_copy():
-    """Move a running copy aside so the new one can be written.
-
-    And by the second install it IS running: the first one registered a
-    Scheduled Task and started it, so ~/.blink/bin/blink.exe is locked and
-    shutil.copy2 raises PermissionError. That is not an edge case -- it is
-    what happens to every customer who re-runs the installer to upgrade.
-
-    Every platform allows a running executable to be RENAMED, so move it aside
-    and copy into the freed name. The leftover is deleted on the next run,
-    once nothing has it open any more; uninstall takes the whole directory.
-
-    This was gated to Windows, on the reasoning that only Windows refuses to
-    overwrite a running executable. Linux and macOS refuse too -- opening one
-    for writing gives ETXTBSY -- so re-running the installer to upgrade, with
-    the daemon running from that exact path, crashed there as well. It went
-    unnoticed because every test of a reinstall on this desk happened to stop
-    the service first.
-    """
-    target = installed_bin()
-    stale = target + ".old"
-    try:
-        os.remove(stale)
-    except OSError:
-        pass          # still locked from a previous upgrade; harmless
-    if os.path.exists(target):
-        try:
-            os.replace(target, stale)
-        except OSError:
-            pass      # nothing running holds it; the copy will just overwrite
 
 
 def _announce():
@@ -838,8 +816,8 @@ def _announce():
     print("Blink setup. Here is everything it is about to do, before it does any of it.")
     print()
     print(f"  Creates    {installed_bin()}")
-    print("             a copy of this program, so the file you downloaded")
-    print("             can be deleted when this finishes.")
+    print("             a copy of this program and its support files, so the")
+    print("             folder you downloaded can be deleted when this finishes.")
     print(f"  Creates    {shim_path()}")
     print("             the small script Claude Code runs to hand over the")
     print("             usage figures. It keeps the last status line payload")
@@ -912,15 +890,26 @@ def cmd_install(_args) -> int:
     print("[1/4] Program ... ", end="", flush=True)
     os.makedirs(bin_dir(), exist_ok=True)
     if _frozen():
-        src = _self_path()
-        # Copying onto a running binary is fine on macOS and Linux -- the old
-        # inode stays alive for whoever has it open -- but only when it is not
-        # literally the same path, or a re-run of the installed copy would
-        # truncate itself mid-execution.
-        if os.path.abspath(src) != os.path.abspath(installed_bin()):
-            _make_way_for_copy()
-            shutil.copy2(src, installed_bin())
-            os.chmod(installed_bin(), 0o755)
+        # The program is a directory -- the executable and its _internal/
+        # support files -- so it is staged whole and rotated in with the
+        # same swap the updater uses: <bin>.new is copied, self-tested, and
+        # then renamed over <bin> while the previous one goes to <bin>.old.
+        # That is what makes re-running the installer over a live install
+        # work on every platform: a running program can be renamed but not
+        # overwritten, and its directory likewise. Not when it IS the
+        # installed copy: a re-run from ~/.blink/bin has nothing to copy.
+        src = os.path.dirname(_self_path())
+        if os.path.abspath(src) != os.path.abspath(bin_dir()):
+            staged = bin_dir() + ".new"
+            shutil.rmtree(staged, ignore_errors=True)
+            shutil.copytree(src, staged)
+            ok, message = update.swap_in(staged, installed_bin(),
+                                         RELEASE_VERSION)
+            if not ok:
+                print(message)
+                print()
+                print("Nothing else was changed.")
+                return 1
         print(installed_bin())
     else:
         # From a checkout there is nothing to copy; the service points at this
@@ -963,7 +952,7 @@ def cmd_install(_args) -> int:
     print(f"  Check:   {installed_bin()} status")
     print(f"  Undo:    {installed_bin()} uninstall")
     print()
-    print("  You can delete the file you downloaded.")
+    print("  You can delete the folder you downloaded.")
     # Absent first: it is a bigger fact than out-of-date, and the two are
     # mutually exclusive (claude_version() gives no version for an absent
     # install, which is exactly what _warn_if_claude_too_old returns on).
