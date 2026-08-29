@@ -715,16 +715,24 @@ def _kill_recorded_daemon():
     """
     if sys.platform != "win32":
         return
-    try:
-        with open(pid_path(), encoding="utf-8") as f:
-            pid = int(f.read().strip())
-    except (OSError, ValueError):
-        return
-    if pid == os.getpid():
-        return                    # somehow ours; nothing to stop
-    subprocess.run(["taskkill", "/f", "/t", "/pid", str(pid),
-                    "/fi", "IMAGENAME eq " + os.path.basename(installed_bin())],
-                   capture_output=True)
+    # Every place a daemon may have left its pid: ~/.blink since 1.1.0, and
+    # beside the program before that -- which, after 1.1.0's install has
+    # rotated the directory, means bin.old. The first 1.0.4 -> 1.1.0
+    # install on a real PC left the old daemon running with the serial port
+    # because only the new location was read (2026-08-29).
+    for path in (pid_path(),
+                 os.path.join(bin_dir(), "bridge.pid"),
+                 os.path.join(bin_dir() + ".old", "bridge.pid")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                pid = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        if pid == os.getpid():
+            continue              # somehow ours; nothing to stop
+        subprocess.run(["taskkill", "/f", "/t", "/pid", str(pid),
+                        "/fi", "IMAGENAME eq " + os.path.basename(installed_bin())],
+                       capture_output=True)
 
 
 def _kill_by_path():

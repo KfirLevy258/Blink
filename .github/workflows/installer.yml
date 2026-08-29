@@ -327,8 +327,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: blink-${{ matrix.os }}
-          path: dist
-      - run: chmod +x dist/blink*
+          path: dist/blink
+      - run: chmod +x dist/blink/blink*
       - run: npm install -g @anthropic-ai/claude-code@${{ matrix.version }}
       - run: claude --version
       - run: sh tests/ci/check_claude_version.sh

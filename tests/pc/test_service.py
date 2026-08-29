@@ -324,3 +324,17 @@ def test_skip_service_short_circuits_every_entry_point(home, monkeypatch, fn):
 
     assert getattr(cli, fn)() == "skipped (BLINK_SKIP_SERVICE=1)"
     assert r.calls == []
+
+
+def test_kill_recorded_daemon_reads_the_legacy_pid_beside_the_old_program(home, monkeypatch):
+    """Before 1.1.0 the daemon kept its pid beside its executable, and the
+    1.1.0 install rotates that directory to bin.old. The first upgrade on a
+    real PC left the 1.0.4 daemon alive on the serial port because only the
+    new location, ~/.blink/bridge.pid, was read (2026-08-29)."""
+    _platform(monkeypatch, "win32")
+    r = _runs(monkeypatch)
+    os.makedirs(cli.bin_dir() + ".old")
+    with open(os.path.join(cli.bin_dir() + ".old", "bridge.pid"), "w") as f:
+        f.write("4242")
+    cli._kill_recorded_daemon()
+    assert r.ran("taskkill", "/f", "/t", "/pid", "4242")
