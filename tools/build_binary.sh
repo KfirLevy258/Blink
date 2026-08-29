@@ -32,6 +32,13 @@ VBIN="$BUILD/bin"
 # macOS build did not have, led by setuptools at 1.1 MB -- which is why the
 # Linux download was twice the size of the others for the same program.
 #
+# espefuse is its own top-level package inside the esptool wheel, with its
+# eFuse tables as data files; --collect-all esptool does not bring it, and
+# without it the daemon cannot check a chip before flashing it (the first
+# customer-path OTA test failed on exactly this, 2026-08-29). It imports
+# bitstring, which picks its bitarray backend by importlib at runtime --
+# invisible to PyInstaller's analysis, so both are collected whole too.
+#
 # Nothing under pc/ imports any of these, and neither does esptool, pyserial
 # or ecdsa (checked against the pinned versions). asyncio and multiprocessing
 # are also collected and also unused, but they are left in: together they are
@@ -70,6 +77,9 @@ cd "$ROOT"
 	--add-data "$ROOT/tools/blink-statusline.sh:." \
 	--add-data "$ROOT/tools/blink-hook.sh:." \
 	--collect-all esptool \
+	--collect-all espefuse \
+	--collect-all bitstring \
+	--collect-all bitarray \
 	--hidden-import claude_usage_bridge \
 	--hidden-import ecdsa \
 	--hidden-import serial.tools.list_ports \

@@ -139,6 +139,7 @@ def flash_encrypted_chip(port, run=subprocess.run):
     """
     espefuse = _espefuse()
     if not espefuse:
+        print("[ota] espefuse is not available to this daemon", file=sys.stderr)
         return None
     try:
         out = run(espefuse + ["--port", port, "summary"],
@@ -190,13 +191,15 @@ def flash(port, blob, run=subprocess.run):
         return False, ("esptool not found -- pip install esptool"
                        " into the interpreter running this daemon")
 
+    # These messages end up on the board's screen, where proto.c keeps 47
+    # characters of them: say the thing that fits.
     enc = flash_encrypted_chip(port, run=run)
     if enc is None:
-        return False, "could not read the chip's eFuses; refusing to flash"
+        return False, "Could not check the chip; not flashing"
     if enc:
         # tools/flash_encrypted.sh exists for this and needs the key file;
         # doing it from here would mean handling that key, so decline loudly.
-        return False, "chip has flash encryption; use tools/flash_encrypted.sh"
+        return False, "Encrypted chip; needs the factory tool"
 
     with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
         f.write(blob)

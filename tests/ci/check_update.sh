@@ -125,4 +125,18 @@ grep -qi "sha256" "$WORK/badhash.txt" ||
 	fail "no explanation given: $(cat "$WORK/badhash.txt")"
 ok "a download that does not match its hash is refused"
 
+# --- 5. the flashing tools are inside the binary and answer to -m ------------
+# The daemon flashes firmware by running `sys.executable -m esptool` and reads
+# eFuses with `-m espefuse`; frozen, sys.executable is this binary. Both must
+# be bundled AND the launcher must honour -m, or every over-the-air firmware
+# update from an installed daemon fails at the eFuse check (2026-08-29, the
+# first real customer-path test).
+"$INSTALLED" -m esptool version >"$WORK/esptool.txt" 2>&1 ||
+	fail "the binary cannot run its bundled esptool: $(cat "$WORK/esptool.txt")"
+grep -q "esptool" "$WORK/esptool.txt" || fail "-m esptool ran but printed no version"
+"$INSTALLED" -m espefuse --help >"$WORK/espefuse.txt" 2>&1 ||
+	fail "the binary cannot run its bundled espefuse: $(cat "$WORK/espefuse.txt")"
+grep -qi "summary" "$WORK/espefuse.txt" || fail "-m espefuse ran but is not espefuse"
+ok "esptool and espefuse are bundled and answer to -m"
+
 printf 'PASS [update]\n'

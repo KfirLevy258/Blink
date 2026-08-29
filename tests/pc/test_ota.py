@@ -265,14 +265,17 @@ class TestFlashGuards(unittest.TestCase):
         run, calls = self._run(efuse_out="FLASH_CRYPT_CNT (BLOCK0) = 1 R/W")
         ok, why = ota.flash("/dev/null", b"x", run=run)
         self.assertFalse(ok)
-        self.assertIn("encryption", why)
+        self.assertIn("Encrypted chip", why)
+        # It ends up on the board, which keeps 47 characters of it.
+        self.assertLessEqual(len(why), 47)
         self.assertFalse(any("write_flash" in " ".join(c) for c in calls))
 
     def test_refuses_when_the_efuses_cannot_be_read(self):
         run, calls = self._run(fail_probe=True)
         ok, why = ota.flash("/dev/null", b"x", run=run)
         self.assertFalse(ok)
-        self.assertIn("eFuses", why)
+        self.assertIn("Could not check the chip", why)
+        self.assertLessEqual(len(why), 47)
         self.assertFalse(any("write_flash" in " ".join(c) for c in calls))
 
     def test_writes_a_plaintext_chip(self):

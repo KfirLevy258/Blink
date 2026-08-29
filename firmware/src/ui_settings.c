@@ -371,14 +371,28 @@ void ui_settings_notice(const char *txt)
 	if (notice) {
 		lv_obj_del(notice);
 	}
+	/*
+	 * Sized by its text, not fixed. A 130 px box held three lines; the
+	 * fourth ran under the OK button (an OTA error message did exactly
+	 * that on the desk, 2026-08-29). A flex column puts the button below
+	 * whatever the label needs, and the height follows -- clamped to the
+	 * screen, with the label scrolling inside in the absurd case.
+	 */
 	notice = lv_obj_create(lv_layer_top());
-	lv_obj_set_size(notice, 300, 130);
+	lv_obj_set_width(notice, 300);
+	lv_obj_set_height(notice, LV_SIZE_CONTENT);
+	lv_obj_set_style_min_height(notice, 110, 0);
+	lv_obj_set_style_max_height(notice, 230, 0);
+	lv_obj_set_style_pad_all(notice, 12, 0);
+	lv_obj_set_style_pad_row(notice, 12, 0);
 	lv_obj_set_style_bg_color(notice, COL_BG, 0);
 	lv_obj_set_style_bg_opa(notice, LV_OPA_COVER, 0);
 	lv_obj_set_style_border_color(notice, COL_TRACK, 0);
 	lv_obj_set_style_border_width(notice, 1, 0);
 	lv_obj_clear_flag(notice, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_center(notice);
+	lv_obj_set_flex_flow(notice, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(notice, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+			      LV_FLEX_ALIGN_CENTER);
 
 	lv_obj_t *l = lv_label_create(notice);
 
@@ -387,12 +401,13 @@ void ui_settings_notice(const char *txt)
 	lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
 	lv_obj_set_style_text_color(l, COL_TEXT, 0);
 	lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 8);
 
 	lv_obj_t *ok = mk_btn(notice, "OK", COL_TRACK, notice_ok_cb, NULL);
 
 	lv_obj_set_size(ok, 120, 36);
-	lv_obj_align(ok, LV_ALIGN_BOTTOM_MID, 0, -4);
+	/* Centre once the content has a size; before layout it is 0 x 0. */
+	lv_obj_update_layout(notice);
+	lv_obj_center(notice);
 }
 
 /*
