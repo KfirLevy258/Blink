@@ -86,6 +86,10 @@ Needs Claude Code 2.1.100 or newer. The installer changes one file, `~/.claude/s
 
 BLINK never sees a credential and never sends anything anywhere. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`. The device holds no token: nothing to leak, nothing to revoke if you lend it.
 
+## Building units
+
+`tools/burn.sh` programs a unit end to end: it builds signed firmware with the bootloader, flashes it, stamps the edition (Claude or Codex, write-once), and confirms the stamp survives a power cycle. Add `--logo` and the unit shows a company logo after the boot animation. The script fails loudly rather than half-succeeds, and CI runs it on every push against a scripted board so a change to it cannot quietly ship a unit that boots wrong. Details in [docs/README-full.md](docs/README-full.md#programming-a-unit).
+
 ## Read more
 
 - **[The full README](docs/README-full.md)** - how the numbers are found, what the installer changes line by line, ports and multiple boards, updates and signing, the decisions behind the first release

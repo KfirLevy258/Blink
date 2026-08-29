@@ -13,7 +13,9 @@
 # Written defensively for `set -euo pipefail` callers: a grep that matches
 # nothing must not abort the script before it can explain itself.
 
-EFUSE_DEFAULT_ETOOLS="/Library/Frameworks/Python.framework/Versions/3.10/bin"
+# BLINK_ETOOLS overrides the directory; tests/ci/check_factory.sh points it at
+# stubs so the scripts that source this can run against no chip at all.
+EFUSE_DEFAULT_ETOOLS="${BLINK_ETOOLS:-/Library/Frameworks/Python.framework/Versions/3.10/bin}"
 
 # espefuse leaves the chip sitting in the ROM download bootloader: it has
 # --before but no --after (checked against 5.1.0), and its teardown is a bare

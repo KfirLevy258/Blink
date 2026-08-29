@@ -235,6 +235,20 @@ firmware slots and the settings partition are exactly where they were.
 Edition and logo are independent -- a company unit is still a Claude or a
 Codex one.
 
+### Tested without a board
+
+`tests/ci/check_factory.sh` runs both scripts, unmodified, on every push: it
+puts stub `esptool.py` / `espefuse.py` / `espsecure.py` on the PATH that
+record their calls, and a fake `serial` module that plays a board -- it
+replays a boot transcript on every reset and answers the edition message.
+Eleven scenarios cover what matters on a production line: the images and
+addresses of an individual burn and a company burn, that the logo partition
+is erased when no logo was asked for, that a fused chip is refused, that a
+board which cannot see the logo it was given (or shows one it should not
+have), a wrong edition, a stale build, or a flash that dies mid-way each end
+in `FAILED` rather than a boxed unit. Run it locally with
+`sh tests/ci/check_factory.sh` (needs numpy and pillow).
+
 ## Build &amp; flash by hand
 
 You only need this to put firmware on a board yourself (after that, it updates over the air). It uses the [Zephyr](https://zephyrproject.org/) toolchain.

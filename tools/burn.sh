@@ -59,7 +59,10 @@ PY="${BLINK_PYTHON:-$ROOT/.venv/bin/python}"
 
 BOARD="${BLINK_BOARD:-esp32_devkitc/esp32/procpu}"
 KEY="${BLINK_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
-BUILD="$ROOT/firmware/build-sb"
+# Overridable so tests/ci/check_factory.sh can point this at a fake build
+# (and BLINK_ETOOLS, read by lib_efuse.sh, at fake tools) and run the whole
+# script against a scripted board. Unset behaves exactly as before.
+BUILD="${BLINK_BUILD_DIR:-$ROOT/firmware/build-sb}"
 
 # ---------------------------------------------------------------- 0. the port
 say "Finding the board"

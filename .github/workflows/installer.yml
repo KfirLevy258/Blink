@@ -241,6 +241,22 @@ jobs:
       - uses: actions/checkout@v4
       - run: sh tests/ci/check_host_tests.sh
 
+  # The factory scripts -- tools/burn.sh and tools/flash_encrypted.sh -- run
+  # for real against a scripted board and stub esptool/espefuse/espsecure
+  # (tests/ci/fakes). These two scripts decide what a unit IS: its edition,
+  # whether it carries a company logo, whether it can ever take an update.
+  # Nothing else exercises them without a board on somebody's desk.
+  factory-scripts:
+    name: factory scripts (fake board)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet -r tests/requirements.txt
+      - run: sh tests/ci/check_factory.sh
+
   # The shim runs on every single status line render, under whatever /bin/sh
   # the customer's machine has. A bashism here is a broken bar for everyone.
   shim-posix:

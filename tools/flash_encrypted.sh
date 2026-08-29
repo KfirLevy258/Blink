@@ -51,7 +51,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # overwriting the release artifacts in build-sb -- which are what a restore
 # flashes back. Unset behaves exactly as before.
 BUILD="${BLINK_BUILD_DIR:-$(cd "$HERE/.." && pwd)/firmware/build-sb}"
-ETOOLS="/Library/Frameworks/Python.framework/Versions/3.10/bin"
+ETOOLS="${BLINK_ETOOLS:-/Library/Frameworks/Python.framework/Versions/3.10/bin}"
 
 [ -f "$KEY" ] || { echo "FATAL: flash key missing at $KEY -- no key, no flashing (see firmware/README security section)"; exit 1; }
 [ -n "${PORT}" ] || { echo "FATAL: no /dev/cu.usbserial* port found"; exit 1; }
