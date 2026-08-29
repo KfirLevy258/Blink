@@ -83,7 +83,7 @@ Needs Claude Code 2.1.100 or newer. The installer changes one file, `~/.claude/s
 ~/.blink/bin/blink status
 ```
 
-That one command says whether the service is running, whether Claude Code and Codex are being read, and how old the numbers are. If the panel is dark or wrong, unplug the board and plug it back in first -- the app finds it again on its own. If that does not fix it, email the support address on your order confirmation with the output of `blink status` and the last lines of `~/.blink/bridge.log`; nothing in either is a secret.
+That one command says whether the service is running, whether Claude Code and Codex are being read, and how old the numbers are. If the panel is dark or wrong, unplug the board and plug it back in first -- the app finds it again on its own. If that does not fix it, email **support@blink-buddy.com** with the output of `blink status` and the last lines of `~/.blink/bridge.log`; nothing in either is a secret.
 
 ## What it works with
 

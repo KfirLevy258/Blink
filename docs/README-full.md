@@ -356,6 +356,6 @@ log, so a prompt shows as "working" until you answer it.
 
 `~/.blink/bin/blink status` first: it names the service state, every source it
 reads and the age of each reading. Then a replug of the board. If neither
-helps, email the support address on your order confirmation with that output
+helps, email **support@blink-buddy.com** with that output
 and the tail of `~/.blink/bridge.log` (neither contains a credential or any
 message text).
