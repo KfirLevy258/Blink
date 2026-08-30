@@ -387,6 +387,23 @@ static void dispatch(const char *json)
 		}
 
 		/*
+		 * How old each READING is, as opposed to how long ago the
+		 * daemon last spoke. Both defaults stay -1 when the keys are
+		 * absent, which is how a daemon older than this firmware
+		 * leaves the panel counting from the message exactly as it
+		 * always did.
+		 *
+		 * After the p2 block: set_provider2() with an empty tag drops
+		 * that page, and an age written before it would be an age for
+		 * a page that no longer exists.
+		 */
+		double age = -1, p2age = -1;
+
+		num(json, "age_s", &age, -1, SECS_MAX);
+		num(json, "p2_age_s", &p2age, -1, SECS_MAX);
+		usage_view_set_ages((int32_t)age, (int32_t)p2age);
+
+		/*
 		 * AFTER both providers, and after the calls above that set OK
 		 * internally -- usage_view_update() and set_models() both do,
 		 * so arming this earlier would have the amber immediately

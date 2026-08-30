@@ -179,6 +179,22 @@ void usage_view_page_preview(int delta, int pct);
  */
 void usage_view_set_burn(double pph);
 
+/*
+ * How old each provider's READING is, in seconds, as measured by the daemon
+ * (pc/protocol.py, `age_s`/`p2_age_s`); -1 where it did not say.
+ *
+ * Not the same clock as the message. The board sees a usage message every
+ * 60 s whether or not the figure in it changed, so counting from arrival --
+ * which is what this panel did, and the only reason its age caption never
+ * appeared -- measures how well the CABLE is working, not how current the
+ * number is. A Claude Desktop percentage can be hours old and still arrive
+ * every minute, looking exactly as live as one taken a moment ago.
+ *
+ * Pass -1 for a provider that is absent or unknown; the board then falls
+ * back to the message clock, which is what an older daemon leaves it with.
+ */
+void usage_view_set_ages(int32_t p1_age_s, int32_t p2_age_s);
+
 void usage_view_set_provider1(const char *tag);
 
 /*

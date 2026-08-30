@@ -184,6 +184,83 @@ def test_no_second_provider_means_no_second_staleness():
     assert "p2" not in m
 
 
+# --- the reading's age on the wire -----------------------------------------
+#
+# The distinction every test here is about: how old the FIGURE is, not how
+# long ago the daemon spoke. The board cannot work the first one out -- it
+# receives a message every 60 s whether or not the number in it moved -- so
+# the daemon has to say, and a Claude Desktop percentage that stopped being
+# refreshed four hours ago was arriving every minute looking perfectly live.
+
+
+def test_the_age_is_the_readings_not_the_messages():
+    from pc.providers import base
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="desktop", observed_at=1_787_200_000,
+        session_pct=10.0, weekly_pct=20.0)
+    # Four hours after the reading was taken, and this message is new.
+    msg = protocol.frame_to_usage(f, 1_787_200_000 + 14400)
+    assert msg["age_s"] == 14400
+
+
+def test_each_provider_carries_its_own_age():
+    """Per page, like `stale`, and for the same reason: two files, read at
+    different times, one page in front of you."""
+    from pc.providers import base
+    now = 1_787_200_000
+    f = base.NormalizedUsageFrame(provider="claude", src="desktop",
+                                  observed_at=now - 3600, session_pct=1.0)
+    s = base.NormalizedUsageFrame(provider="codex", src="cli",
+                                  observed_at=now - 30, session_pct=2.0)
+    msg = protocol.frame_to_usage(f, now, secondary=s)
+    assert msg["age_s"] == 3600
+    assert msg["p2_age_s"] == 30
+
+
+def test_no_second_provider_means_no_second_age():
+    """p2_age_s rides with the rest of p2, exactly as p2_stale does: an age
+    for a page the board is not being told exists is worse than no age."""
+    from pc.providers import base
+    f = base.NormalizedUsageFrame(provider="claude", src="cli",
+                                  observed_at=1_787_200_000, session_pct=1.0)
+    msg = protocol.frame_to_usage(f, 1_787_200_000 + 60)
+    assert "p2_age_s" not in msg
+
+
+def test_a_future_mtime_reads_as_zero_not_as_negative():
+    """observed_at is a file mtime from a clock we do not own, and a stamp a
+    few seconds ahead is a real thing. A negative would reach fmt_age() on the
+    board and print "never" over a reading we are holding in our hand."""
+    from pc.providers import base
+    f = base.NormalizedUsageFrame(provider="claude", src="desktop",
+                                  observed_at=1_787_200_005, session_pct=1.0)
+    msg = protocol.frame_to_usage(f, 1_787_200_000)
+    assert msg["age_s"] == 0
+
+
+def test_an_unknown_age_is_omitted_rather_than_sent_as_minus_one():
+    """-1 is already the firmware's default, so the key would spend
+    MAX_LINE_BYTES to say what silence says."""
+    msg = protocol.usage(40, None, 20, None, [], age_s=-1)
+    assert "age_s" not in msg
+
+
+def test_the_age_fields_fit_the_line_budget():
+    """The check that matters: proto.c DROPS an over-long line rather than
+    truncating it, so a field that overflows stops the panel updating while
+    the daemon reports success."""
+    msg = protocol.usage(
+        44.0, 1788049800, 41.0, 1788328800, [],
+        session_resets_in_s=3600, weekly_resets_in_s=90000,
+        provider="claude", src="cli", state="running",
+        p2="codex", p2_session_pct=12.0, p2_weekly_pct=9.0,
+        p2_session_resets_in_s=1200, p2_weekly_resets_in_s=50000,
+        burn_pph=3.2, age_s=999999, p2_age_s=999999)
+    raw, err = protocol.encode_checked(msg)
+    assert err is None
+    assert len(raw) <= protocol.MAX_LINE_BYTES
+
+
 # --- burn_pph on the wire --------------------------------------------------
 
 

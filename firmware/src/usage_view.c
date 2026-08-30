@@ -160,6 +160,13 @@ struct page_data {
 	 * provider's session window, and page 1 has its own reset times and so
 	 * never carries one. */
 	double burn;
+	/*
+	 * How old THIS page's reading is, in seconds, or -1 when the daemon
+	 * did not say. Per page for the same reason `stale` is: the two
+	 * readings come from different files, refreshed at different times,
+	 * and only one page is in front of you.
+	 */
+	int32_t age;
 	bool have;
 };
 static struct page_data pg[RAIL_PAGES_MAX];
@@ -1316,8 +1323,15 @@ void usage_view_page_step(int delta)
 	 * usage message, up to a poll interval later. Re-applying the status
 	 * already held recomputes the hint and the dot from the new page
 	 * without inventing a reading.
+	 *
+	 * The age caption is per page for the same reason and needs the same
+	 * re-ask: it is drawn from pg[cur_page].age, so without this the page
+	 * you just arrived at wears the age of the one you left until the next
+	 * one-second tick -- briefly captioning a live reading as hours old, or
+	 * worse, an hours-old one as fresh.
 	 */
 	usage_view_set_status(last_status);
+	render_age();
 
 	rail_a = cur_page - delta;
 	rail_b = cur_page;
@@ -1404,18 +1418,48 @@ void usage_view_update(double session_pct, int32_t session_resets_in_s,
 	usage_view_set_status(USAGE_STATUS_OK);
 }
 
+/*
+ * How old a reading has to be before its age is worth the caption.
+ *
+ * This was 120 s, and it was 120 s against the wrong clock: `age_s` counts
+ * from the last MESSAGE, and the daemon sends one every 60 s whether or not
+ * the figure changed (POLL_INTERVAL_S in claude_usage_bridge.py), so the
+ * counter was zeroed twice as often as 120 could be reached. The caption has
+ * therefore never once appeared on any board. What now feeds this is the
+ * READING's own age, which the daemon measures and sends (pc/protocol.py,
+ * `age_s`), and against that clock 120 s would be the opposite mistake:
+ * Claude Desktop refreshes at best every 300 s, so a two-minute rule would
+ * leave a permanent caption on a perfectly healthy panel.
+ *
+ * 600 s sits in the gap between Claude Desktop's two schedules -- 300 s
+ * while its owner is at the machine, 900 s once they are not -- so ordinary
+ * use stays uncaptioned and a reading that has stopped being refreshed says
+ * so. Claude Code's status line rewrites on every render and is far below
+ * this either way.
+ */
+#define AGE_CAPTION_MIN_S 600
+
 static void render_age(void)
 {
 	char buf[FMT_COUNTDOWN_MAX];
+	/*
+	 * The daemon's figure when it sent one, our own count when it did not.
+	 * An older daemon sends no age at all, and falling back to the message
+	 * clock leaves it behaving exactly as it did rather than printing
+	 * "never" over a reading we are holding.
+	 */
+	int32_t age = (pg[cur_page].have && pg[cur_page].age >= 0)
+			      ? pg[cur_page].age
+			      : age_s;
 
 	/* Fresh data needs no caption: the varying-width "12s" next to the
 	 * dot unbalanced the centered title (user feedback 2026-07-17). The
 	 * age appears only once it is old enough to be worth knowing. */
-	if (age_s >= 0 && age_s < 120) {
+	if (age >= 0 && age < AGE_CAPTION_MIN_S) {
 		lv_label_set_text(age_lbl, "");
 		return;
 	}
-	fmt_age(age_s, buf, sizeof(buf));
+	fmt_age(age, buf, sizeof(buf));
 	lv_label_set_text(age_lbl, buf);
 }
 
@@ -1478,6 +1522,16 @@ void usage_view_tick_1s(void)
 	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
 		if (!pg[i].have) {
 			continue;
+		}
+		/*
+		 * The reading keeps ageing between messages. Without this the
+		 * caption would freeze at whatever the last message said and
+		 * only move once a minute, which on the source this exists for
+		 * -- one that can go quiet for hours -- is the same lie in a
+		 * smaller size.
+		 */
+		if (pg[i].age >= 0) {
+			pg[i].age++;
 		}
 		if (pg[i].s_in_s > 0 && --pg[i].s_in_s == 0) {
 			pg[i].s_in_s = -1;
@@ -1720,6 +1774,23 @@ void usage_view_set_provider1_stale(bool stale)
 	pg[0].stale = stale;
 	if (built) {
 		refresh_dot();
+	}
+}
+
+void usage_view_set_ages(int32_t p1_age_s, int32_t p2_age_s)
+{
+	/*
+	 * Both pages every time, including the -1 that means "this daemon
+	 * does not send ages". Writing only the values we like would let a
+	 * figure from one message survive under the numbers of the next,
+	 * which is the exact failure this whole field exists to end.
+	 */
+	pg[0].age = p1_age_s;
+	if (RAIL_PAGES_MAX > 1) {
+		pg[1].age = p2_age_s;
+	}
+	if (built) {
+		render_age();
 	}
 }
 

@@ -220,6 +220,45 @@ def desktop_app_present() -> bool:
         return False
 
 
+def desktop_staleness_note(age_s):
+    """Why a Claude Desktop reading is old -- or nothing, when it is not.
+
+    Claude Desktop does not write its usage cache on a clock. It writes after
+    a usage fetch, and it only fetches while somebody is actually at the
+    machine: step away, lock the screen or let the machine sleep and the file
+    simply stops growing. The app is still running and still right, it is
+    just not asking. A reading hours old is therefore the ordinary shape of
+    "nobody was here", not a fault, and a panel showing one is not stuck.
+
+    Measured from Claude.app 1.40609.0 on 2026-08-31, by reading its own
+    bundle and then watching it run: the poll is 15 minutes by default and
+    5 only for the half hour after the menubar panel has been opened, it
+    skips the fetch entirely once the system has been idle ten minutes or
+    the screen is locked, and it fetches at launch and again every time the
+    menubar icon is opened. Opening that icon is the one action that
+    refreshes on demand: focusing the app window fetches nothing, because
+    the chat runs in a web view that never touches this file.
+
+    None of those intervals is quoted below on purpose. They belong to an
+    application we do not control, they have already changed twice (a flat
+    5 minutes when pc/providers/claude_desktop.py was written, then the
+    tray-gated 5/15 split around 2026-08-21 -- arriving without an app
+    update, so the cadence is server-controlled and can move again), and a
+    number that goes quietly wrong is worse here than no
+    number: the reader needs the shape, which does not change, and the one
+    action that works.
+    """
+    from pc.providers import claude_desktop
+    if age_s is None or age_s < claude_desktop.STALE_AFTER_S:
+        return []
+    return [
+        "Claude Desktop refreshes this only while you are at the machine,",
+        "and stops once it has been idle a while -- so a reading this old",
+        "usually means nobody was here, not that anything is broken.",
+        "Click the Claude icon in your menu bar to refresh it now.",
+    ]
+
+
 def codex_present() -> bool:
     """Has Codex CLI written a rollout log on this machine?
 
@@ -1298,8 +1337,11 @@ def _source_lines():
     if os.path.exists(desktop.path()):
         frames = desktop.poll(now)
         if frames:
+            age = now - frames[0].observed_at
             print(f"Desktop     usage cache parsed, reading"
-                  f" {_age(now - frames[0].observed_at)} old")
+                  f" {_age(age)} old")
+            for line in desktop_staleness_note(age):
+                print(f"            {line}")
         else:
             print("Desktop     usage cache present but did not parse --"
                   " the app's file format may have changed; please report it")

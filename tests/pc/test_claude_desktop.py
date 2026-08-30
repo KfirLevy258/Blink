@@ -172,6 +172,33 @@ def test_a_gap_refuses():
     assert claude_desktop.session_burn_pph(s, NOW) is None
 
 
+def test_the_idle_cadence_is_reported():
+    """Claude Desktop's OTHER schedule.
+
+    It fetches every 300 s while the machine is in use and every 900 s
+    otherwise -- present at the desk, reading rather than typing, which is
+    the ordinary way to sit in front of this panel. The old 600 s gap limit
+    sat below that interval and refused every one of these readings, so the
+    single line under a Desktop-only gauge showed "--" for as long as its
+    owner was not typing. Nothing here is a hole: three real samples, evenly
+    spaced, 10% of the window in half an hour.
+    """
+    s = _samples((1800, 10), (900, 15), (0, 20))
+    assert round(claude_desktop.session_burn_pph(s, NOW), 1) == 20.0
+
+
+def test_a_newest_sample_one_idle_interval_old_is_accepted():
+    """The same cadence seen from the other end.
+
+    On a 900 s schedule the freshest sample there IS can be 900 s old, so a
+    freshness bound below that refused the series for being exactly as
+    current as the source can ever be. Still bounded -- see the test above
+    this one's neighbour, where a genuinely stale newest sample refuses.
+    """
+    s = _samples((2700, 10), (1800, 15), (900, 20))
+    assert round(claude_desktop.session_burn_pph(s, NOW), 1) == 20.0
+
+
 def test_a_reset_inside_the_window_refuses():
     """The percentage fell because the window rolled, not because usage
     went backwards -- it cannot. A slope spanning that is meaningless."""

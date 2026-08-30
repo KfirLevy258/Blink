@@ -157,7 +157,8 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           provider="claude", src="cli", state="", n_sess=0, n_run=0, n_wait=0, n_stuck=0,
           n_agents=0, p2="", p2_session_pct=UNKNOWN,
           p2_weekly_pct=UNKNOWN, p2_session_resets_in_s=-1,
-          p2_weekly_resets_in_s=-1, p2_stale=False, burn_pph=None) -> dict:
+          p2_weekly_resets_in_s=-1, p2_stale=False, burn_pph=None,
+          age_s=-1, p2_age_s=-1) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -190,6 +191,35 @@ The firmware reads this field: proto.c's "usage" handler calls
     given this field simply ignores it -- it degrades to a green dot on a
     stale reading, which is the behaviour that existed before either side
     knew about the field.
+
+    `age_s` and `p2_age_s` are how old each READING is -- seconds between the
+    moment the source observed it and the moment this message was built --
+    and -1 where that is unknown.
+
+    They exist because the board could not work this out for itself, and had
+    been getting it wrong in a way that could not show. usage_view.c keeps an
+    `age_s` counter, zeroes it on every arriving usage message and ticks it
+    once a second, and render_age() prints the caption only once it reaches
+    120. But the daemon pushes every POLL_INTERVAL_S = 60 s whether or not
+    the reading changed, so that counter was reset twice as often as the
+    caption needed to appear: it measured the age of the MESSAGE, never of
+    the figure, and 120 was unreachable. The label, its formatter and its
+    place on the panel were all built and none of them had ever appeared.
+
+    The distinction is the whole point on a source that goes quiet. Claude
+    Desktop only refreshes its cache while somebody is at the machine, so a
+    four-hour-old percentage was being re-sent every minute and drawn with
+    the same confidence as a live one -- observed on a real desk, 2026-08-30,
+    and reported as the panel being "stuck".
+
+    Per provider, for the same reason `stale` is: the board shows one page at
+    a time and the two readings are taken from different files at different
+    times.
+
+    -1 means the daemon did not say. Firmware that understands these falls
+    back to counting from the message in that case, which is exactly the old
+    behaviour, so an older daemon loses nothing it used to have. Older
+    firmware ignores both keys.
     """
     # `models` itself never went on the wire usefully: the firmware reads the
     # flattened scalar keys below and never the array, and since the status
@@ -273,6 +303,15 @@ The firmware reads this field: proto.c's "usage" handler calls
     if burn_pph is not None and burn_pph > 0:
         extra["burn_pph"] = round(float(burn_pph), 1)
 
+    # Omitted when unknown rather than sent as -1, like every other optional
+    # key here: -1 is what the firmware already defaults to, so an absent key
+    # and an explicit -1 mean the same thing on arrival and the shorter one
+    # leaves the byte budget alone.
+    if age_s is not None and age_s >= 0:
+        extra["age_s"] = int(age_s)
+    if p2 and p2_age_s is not None and p2_age_s >= 0:
+        extra["p2_age_s"] = int(p2_age_s)
+
     return {
         "t": "usage", "v": VERSION,
         "session_pct": session_pct, "session_resets_at": session_resets_at,
@@ -324,7 +363,25 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
                                           now_epoch) if secondary else -1),
         p2_stale=(secondary.stale if secondary else False),
         burn_pph=frame.session_burn_pph,
+        # The reading's own age, which only this side knows: observed_at is
+        # the source file's mtime and never leaves provider-space otherwise.
+        age_s=_age_of(frame, now_epoch),
+        p2_age_s=_age_of(secondary, now_epoch),
     )
+
+
+def _age_of(frame, now_epoch: float) -> int:
+    """Seconds since `frame` was observed, or -1 when that is unknowable.
+
+    Clamped at zero rather than allowed to go negative. observed_at is a file
+    mtime from a machine whose clock we do not own, and a file stamped a few
+    seconds into the future is a real thing that happens; "-3 s ago" would
+    reach fmt_age() as a negative and print "never", which is the one answer
+    that is certainly wrong for a reading we are holding in our hand.
+    """
+    if frame is None or getattr(frame, "observed_at", None) is None:
+        return -1
+    return max(0, int(now_epoch - frame.observed_at))
 
 
 EDITIONS = ("claude", "codex")

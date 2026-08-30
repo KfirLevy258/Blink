@@ -168,10 +168,27 @@ def _newest_sample(samples):
 # last hour of a session that has since changed pace.
 BURN_WINDOW_S = 1800.0
 
-# The sampling cadence is 300 s (median; p90 330 s, measured over 1671
-# intervals). A gap beyond this means the app was CLOSED, and a rate averaged
-# across time we did not observe is the same mistake as deriving the reset.
-BURN_MAX_GAP_S = 600.0
+# A gap beyond this means the app was CLOSED, and a rate averaged across time
+# we did not observe is the same mistake as deriving the reset.
+#
+# This was 600 s, chosen when the cadence was a flat 300 s (median; p90 330 s,
+# measured over 1671 intervals). That is no longer the whole cadence. Claude
+# Desktop fetches on TWO schedules -- every 300 s while the machine is in use,
+# every 900 s otherwise -- so 600 s sat BELOW the app's own idle interval and
+# refused every ordinary reading taken while its owner was present but not
+# typing. The rate did not go wrong, it went ABSENT, which on a Desktop-only
+# panel is the one line under the gauge (there is no countdown to fall back
+# to) and so showed a permanent "--".
+#
+# 1000 s clears the 900 s interval with enough margin for jitter and still
+# refuses the case the guard exists for: an app closed and reopened leaves a
+# gap of hours, not of sixteen minutes.
+#
+# Read out of Claude.app 1.37937.3's own bundle and then confirmed against it
+# running, 2026-08-30. Both intervals belong to an application we do not
+# control -- if the rate disappears again, measure the gaps in
+# plan-usage-history.json before touching anything else.
+BURN_MAX_GAP_S = 1000.0
 
 # Below this the two endpoints are too close together for the slope to mean
 # anything: a single 5-minute step would swing it by the whole window.
