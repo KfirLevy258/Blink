@@ -1116,6 +1116,8 @@ def cmd_status(args) -> int:
         print("Bridge      " + backend().status())
 
     print(f"App         {RELEASE_VERSION}")
+    for line in _board_lines():
+        print(line)
 
     text, ver = claude_version()
     if text is None:
@@ -1232,6 +1234,52 @@ def _age(seconds: float) -> str:
     if seconds < 172800:
         return f"{seconds // 3600} h"
     return f"{seconds // 86400} d"
+
+
+def board_lines(known, ports):
+    """The Board lines of `blink status`, from what the app remembers and
+    what is plugged in right now.
+
+    `known` is board.json ({port, board_id, fw}); `ports` is [(device,
+    chip)] for every port that could be a board. A developer with other
+    CH340 hardware on the desk needs to see that the app knows the
+    difference: the board it talks to, named; everything else listed as
+    looked at once and left alone.
+    """
+    port = known.get("port")
+    here = [d for d, _ in ports]
+    chip = dict(ports)
+    out = []
+    if port and port in here:
+        ident = []
+        if known.get("board_id"):
+            ident.append(f"id {known['board_id']}")
+        if known.get("fw"):
+            ident.append(f"firmware {known['fw']}")
+        tail = f" -- {', '.join(ident)}" if ident else ""
+        out.append(f"Board       {port} ({chip[port]}){tail}")
+    elif here:
+        seen = ", ".join(f"{d} ({c})" for d, c in ports)
+        out.append(f"Board       none identified yet -- looking at {seen}")
+        if port:
+            out.append(f"            last seen on {port}")
+    else:
+        out.append("Board       not plugged in"
+                   + (f" (last seen on {port})" if port else ""))
+    others = [(d, c) for d, c in ports if d != port]
+    if port and port in here and others:
+        names = ", ".join(f"{d} ({c})" for d, c in others)
+        out.append(f"            other serial devices: {names}"
+                   " -- asked once, not BLINK, left alone")
+    return out
+
+
+def _board_lines():
+    try:
+        from claude_usage_bridge import describe_ports, remembered_board
+        return board_lines(remembered_board(blink_home()), describe_ports())
+    except Exception as e:
+        return [f"Board       could not list serial ports: {e}"]
 
 
 def _source_lines():

@@ -48,6 +48,44 @@ KNOWN_USB_SERIAL = {
 ESPRESSIF_VID = 0x303A  # native USB-serial on -S2/-S3 parts
 
 
+CHIP_NAMES = {
+    0x1A86: "CH340",
+    0x10C4: "CP210x",
+    0x0403: "FTDI",
+    ESPRESSIF_VID: "Espressif USB",
+}
+
+
+def describe_ports():
+    """[(device, chip)] for every candidate port, in candidate_ports() order.
+
+    For `blink status`: a person with three CH340 boards on the desk needs to
+    see what the app sees, and which of them it is talking to.
+    """
+    chips = {}
+    for p in list_ports.comports():
+        chips[p.device] = CHIP_NAMES.get(p.vid, "USB serial")
+    return [(d, chips.get(d, "USB serial")) for d in candidate_ports()]
+
+
+def may_reset_port(explicit, port, known_port, patient):
+    """May this silent port be reset? A reset is an action taken on a device.
+
+    An explicit --port is the operator's choice, so yes. Otherwise only the
+    port the board was last found on, and only after the PATIENT probe has
+    also heard nothing. It used to be enough that the name matched, and a
+    port name on a Mac is a socket, not a board: the board plugged back into
+    the same socket -- or a fresh one, just burned -- was still booting when
+    the 1.5 s probe ran, got no answer, and was reset for it (the "boots
+    twice on plug-in" the user kept seeing; last on 2026-08-30). Eleven
+    seconds of listening hears any live board; a board silent that long is
+    wedged, and a reset is the recovery it needs.
+    """
+    if explicit:
+        return True
+    return port == known_port and patient
+
+
 def candidate_ports():
     """Every port that might be a board, best guess first.
 
@@ -532,7 +570,8 @@ def main(argv=None):
             # not ours. A board that has connected here before is a different
             # matter: it IS ours, silence means it is wedged, and a reset is
             # exactly the recovery it needs.
-            may_reset = explicit_port or port == known.get("port")
+            may_reset = may_reset_port(explicit_port, port, known.get("port"),
+                                       patient)
 
             if already_running:
                 print(f"[bridge] {port} answered; not resetting it",
@@ -785,12 +824,22 @@ def main(argv=None):
             time.sleep(2)
             continue
         except (serial.SerialException, OSError) as e:
-            print(f"[bridge] serial lost: {e}; reconnecting", file=sys.stderr)
+            print(f"[bridge] serial lost: {e}; looking for the board on"
+                  " every port", file=sys.stderr)
             try:
                 ser.close()
             except Exception:
                 pass
+            # The board is gone from THIS port. It may come back on the same
+            # one, on another socket, or as a different unit -- so nothing
+            # learned about the old layout still holds. Start the search
+            # over: the remembered port is tried first, every other candidate
+            # after it, and whichever answers is the board from then on.
+            asked.clear()
+            searched = None
+            patient = False
             time.sleep(1)
+            port = wait_for_port(args.port, on_wait=_upkeep)
 
 
 if __name__ == "__main__":
