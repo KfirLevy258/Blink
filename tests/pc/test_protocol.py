@@ -351,3 +351,121 @@ def test_bye_is_a_plain_versioned_message():
     has no app any more (docs/sleep-mode-design.md)."""
     m = protocol.bye()
     assert m == {"t": "bye", "v": protocol.VERSION}
+
+
+class OverageCapTest(unittest.TestCase):
+    """A percentage above 100 must never reach a board that renders it as 0.
+
+    proto.c parses these with num(..., -1, 100) and num() does not clamp: it
+    returns without writing, leaving the caller's `double wp = 0`. So 102 shows
+    as 0% -- empty ring at the exact moment the user went over. Seen on a
+    customer's board 2026-08-31, flipping 100 -> 0 every minute as two sources
+    took turns being newest (Desktop caps at 100, Claude Code reports 102).
+    """
+
+    def msg(self, **kw):
+        m = {"t": "usage", "v": protocol.VERSION, "session_pct": 22.0,
+             "weekly_pct": 102.0}
+        m.update(kw)
+        return m
+
+    def test_old_firmware_is_held_at_100(self):
+        out = protocol.cap_overage_for_fw(self.msg(), "1.2.3")
+        self.assertEqual(out["weekly_pct"], 100.0)
+        self.assertEqual(out["session_pct"], 22.0)
+
+    def test_new_firmware_gets_the_true_number(self):
+        out = protocol.cap_overage_for_fw(self.msg(), "1.2.5")
+        self.assertEqual(out["weekly_pct"], 102.0)
+
+    def test_the_release_that_only_bumped_the_version_still_caps(self):
+        """1.2.4 bumped the version; 1.2.5 shipped PCT_MAX. A board built from
+        the former renders 102 as 0, so the gate must not trust it."""
+        out = protocol.cap_overage_for_fw(self.msg(), "1.2.4")
+        self.assertEqual(out["weekly_pct"], 100.0)
+
+    def test_a_non_finite_percentage_becomes_unknown(self):
+        """nan compares false against everything, so it would slip past the
+        cap and json.dumps would emit a bare NaN -- not valid JSON."""
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            out = protocol.cap_overage_for_fw(self.msg(weekly_pct=bad), "1.2.3")
+            self.assertEqual(out["weekly_pct"], -1.0, bad)
+
+    def test_exactly_one_hundred_is_untouched(self):
+        for fw in ("1.2.3", "1.2.5"):
+            out = protocol.cap_overage_for_fw(self.msg(weekly_pct=100.0), fw)
+            self.assertEqual(out["weekly_pct"], 100.0, fw)
+
+    def test_a_later_firmware_also_gets_it(self):
+        self.assertEqual(
+            protocol.cap_overage_for_fw(self.msg(), "1.3.0")["weekly_pct"],
+            102.0)
+
+    def test_an_unknown_board_version_caps(self):
+        """greet() can push before any hello, so None means "not yet told".
+        Guessing modern is the one guess that puts a zero on a panel."""
+        for fw in (None, "", "1.2", "nightly", 124):
+            self.assertEqual(
+                protocol.cap_overage_for_fw(self.msg(), fw)["weekly_pct"],
+                100.0, fw)
+
+    def test_the_unknown_sentinel_and_zero_travel_untouched(self):
+        out = protocol.cap_overage_for_fw(
+            self.msg(session_pct=-1.0, weekly_pct=0.0), "1.2.3")
+        self.assertEqual(out["session_pct"], -1.0)
+        self.assertEqual(out["weekly_pct"], 0.0)
+
+    def test_every_capped_field_is_covered(self):
+        m = self.msg(fable_pct=115.0, p2_session_pct=101.0,
+                     p2_weekly_pct=140.0, session_pct=103.0)
+        out = protocol.cap_overage_for_fw(m, "1.2.3")
+        for k in ("session_pct", "weekly_pct", "fable_pct",
+                  "p2_session_pct", "p2_weekly_pct"):
+            self.assertEqual(out[k], 100.0, k)
+
+    def test_the_caller_s_message_is_not_mutated(self):
+        m = self.msg()
+        protocol.cap_overage_for_fw(m, "1.2.3")
+        self.assertEqual(m["weekly_pct"], 102.0)
+
+    def test_the_worst_real_message_fits_the_line_budget(self):
+        """The one that matters: a two-provider message built through the real
+        pipeline, carrying age_s/p2_age_s and unrounded overage percentages.
+
+        proto.c DROPS an over-long line rather than truncating it, so going
+        past MAX_LINE_BYTES freezes the panel with one stderr line nobody
+        reads. Measured at 506 of 512 before percentages were rounded on the
+        wire -- six bytes, with float("102.33333333333333") the normal case
+        rather than a contrived one. An earlier version of this test built a
+        60-byte dict by hand and proved nothing.
+        """
+        from pc.providers.base import NormalizedUsageFrame as F
+        now = 1788178465.0
+
+        def frame(provider, s_pct, w_pct):
+            return F(provider=provider, src="cli", observed_at=now - 3,
+                     session_pct=s_pct, session_resets_at=now + 15335,
+                     weekly_pct=w_pct, weekly_resets_at=now + 6335,
+                     state="waiting", stale=False,
+                     session_burn_pph=9.33333333, n_run=1, n_wait=1)
+
+        msg = protocol.frame_to_usage(
+            frame("claude", 102.33333333333333, 102.66666666666667), now,
+            frame("codex", 88.12345678901234, 91.98765432109876))
+        for board_fw in ("1.2.3", "1.2.5"):
+            line = json.dumps(
+                protocol.cap_overage_for_fw(msg, board_fw)) + "\n"
+            self.assertLessEqual(len(line.encode()),
+                                 protocol.MAX_LINE_BYTES, board_fw)
+
+    def test_percentages_are_rounded_on_the_wire(self):
+        """One decimal. The firmware label is (int)(pct + 0.5) and the arc is
+        an int32, so nothing downstream can tell -- but 18-byte floats are
+        what spent the line budget."""
+        from pc.providers.base import NormalizedUsageFrame as F
+        now = 1788178465.0
+        f = F(provider="claude", src="cli", observed_at=now, state="",
+              session_pct=102.33333333333333, weekly_pct=88.98765432109876)
+        msg = protocol.frame_to_usage(f, now)
+        self.assertEqual(msg["session_pct"], 102.3)
+        self.assertEqual(msg["weekly_pct"], 89.0)

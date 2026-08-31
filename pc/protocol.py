@@ -152,6 +152,18 @@ def time_msg(epoch: int, utc_offset_min: int) -> dict:
             "utc_offset_min": int(utc_offset_min)}
 
 
+def _round_pct(v):
+    """A percentage as it goes on the wire: one decimal, or left alone.
+
+    Non-numbers and the -1 sentinel pass through untouched.
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return v
+    if not math.isfinite(v) or v < 0:
+        return v
+    return round(float(v), 1)
+
+
 def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           session_resets_in_s=-1, weekly_resets_in_s=-1, stale=False,
           provider="claude", src="cli", state="", n_sess=0, n_run=0, n_wait=0, n_stuck=0,
@@ -312,6 +324,22 @@ The firmware reads this field: proto.c's "usage" handler calls
     if p2 and p2_age_s is not None and p2_age_s >= 0:
         extra["p2_age_s"] = int(p2_age_s)
 
+    # One decimal on every percentage. Nothing downstream can see the
+    # difference -- the firmware label is (int)(pct + 0.5), the arc is an
+    # int32, and the 99.5 severity threshold survives a tenth -- but an
+    # unrounded float("102.33333333333333") is 18 bytes, and this message was
+    # measured at 506 of MAX_LINE_BYTES=512 once age_s and p2_age_s joined it.
+    # proto.c DROPS an over-long line, so those six bytes were the difference
+    # between a panel that updates and one that silently freezes.
+    session_pct = _round_pct(session_pct)
+    weekly_pct = _round_pct(weekly_pct)
+    for _k in ("fable_pct", "sonnet_pct", "opus_pct"):
+        if _k in flat:
+            flat[_k] = _round_pct(flat[_k])
+    for _k in ("p2_session_pct", "p2_weekly_pct"):
+        if _k in extra:
+            extra[_k] = _round_pct(extra[_k])
+
     return {
         "t": "usage", "v": VERSION,
         "session_pct": session_pct, "session_resets_at": session_resets_at,
@@ -453,3 +481,87 @@ def ota_none():
 
 def ota_error(why=""):
     return {"t": "ota_error", "v": VERSION, "why": why}
+
+# --------------------------------------------------------------- overage cap
+
+# The first firmware that will accept a percentage above 100.
+#
+# Every earlier build parses the usage percentages with
+# num(json, "weekly_pct", &wp, -1, 100), and proto.c's num() does not clamp an
+# out-of-range value -- it returns without writing, leaving the caller's own
+# `double sp = 0, wp = 0` initialiser in place. So a reading of 102 does not
+# arrive as 100, it arrives as ZERO: at the exact moment somebody crosses their
+# weekly limit into extra usage, the panel drops from full to empty.
+#
+# Observed on a customer's board 2026-08-31. He was running two sources, and
+# they disagreed in a way that made it unmistakable: Claude Desktop's cache
+# caps its own figure at 100 and drew a full ring, Claude Code reported the
+# true 102 and drew nothing. The normalizer merges field-by-field by recency,
+# so the two took turns being newest and the ring flipped 100 -> 0 -> 100 -> 0
+# every minute.
+#
+# Holding the number at 100 for those boards is a loss -- "at the limit" and
+# "2% past it" become the same picture -- but it is the honest half of the
+# truth instead of the opposite of it, and it needs no reflash, which is what
+# matters for boards already on desks. Newer firmware is sent the real number
+# and draws a full ring under it.
+#
+# This is 1.2.5 and not 1.2.4 on purpose. The PCT_MAX change and the version
+# bump are separate hunks, so a 1.2.4 build without PCT_MAX is constructible --
+# one was flashed to a bench board while this was being written. Gating on the
+# version that shipped the two together is the only claim the daemon can make
+# honestly from a version string alone. The principled fix is for hello to
+# advertise the capability rather than have the daemon infer it; that is worth
+# doing the next time hello changes for another reason.
+FW_ACCEPTS_OVERAGE = (1, 2, 5)
+
+# Every field proto.c reads with a 0..100 range. sonnet_pct and opus_pct are
+# flattened by usage() but no firmware parses them yet, so they are not here;
+# add them the day one does.
+_PCT_KEYS = ("session_pct", "weekly_pct", "fable_pct",
+             "p2_session_pct", "p2_weekly_pct")
+
+
+def _fw_tuple(fw):
+    """("1.2.4") -> (1, 2, 4). None for anything unparseable."""
+    if not isinstance(fw, str):
+        return None
+    parts = fw.strip().split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        return tuple(int(x) for x in parts)
+    except ValueError:
+        return None
+
+
+def cap_overage_for_fw(msg, board_fw):
+    """Hold percentages at 100 for a board that would otherwise show zero.
+
+    Returns a new message; the input is not mutated. Only values ABOVE 100 are
+    touched -- -1 is the "unknown" sentinel and 0 is a real reading, and both
+    have to travel untouched.
+
+    An unknown board version caps. The daemon greets a board before it has
+    heard a hello (bridge.greet), so `None` here means "not yet told", not
+    "modern", and guessing modern is the one guess that puts a zero on a panel.
+    """
+    if not isinstance(msg, dict):
+        return msg
+    out = dict(msg)
+    fw = _fw_tuple(board_fw)
+    if fw is not None and fw >= FW_ACCEPTS_OVERAGE:
+        return out
+    for k in _PCT_KEYS:
+        v = out.get(k)
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        if not math.isfinite(v):
+            # nan fails every comparison, so it would pass the cap below
+            # untouched, and json.dumps writes a bare NaN -- not valid JSON.
+            # msg_get_double then leaves proto.c's `double wp = 0` in place:
+            # the original bug, by another road.
+            out[k] = -1.0
+        elif v > 100:
+            out[k] = 100.0
+    return out

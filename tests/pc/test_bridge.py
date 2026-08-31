@@ -222,3 +222,47 @@ def test_hello_still_wins_and_does_not_double_announce(capsys):
     assert b._board_proto == 2
     assert b._board_fw == "0.6.0"
     assert b._board_ahead() is False
+
+
+class OverageCapIsWiredTest(unittest.TestCase):
+    """poll_once must actually apply the cap.
+
+    protocol.cap_overage_for_fw was well covered on its own, but nothing
+    exercised the one line in poll_once that calls it -- deleting that line
+    left the whole suite green while every board in the field went back to
+    drawing 0% the moment its owner crossed into extra usage.
+    """
+
+    def _bridge(self, sent):
+        return Bridge(write_msg=sent.append,
+                      fetch_usage=lambda: {"t": "usage", "v": protocol.VERSION,
+                                           "session_pct": 22.0,
+                                           "weekly_pct": 102.0})
+
+    def _weekly(self, sent):
+        return [m for m in sent if m.get("t") == "usage"][0]["weekly_pct"]
+
+    def test_an_old_board_is_capped_on_the_way_out(self):
+        sent = []
+        b = self._bridge(sent)
+        b.on_message({"t": "hello", "v": 2, "fw": "1.2.3",
+                      "board_id": "abc"})
+        sent.clear()
+        b.poll_once()
+        self.assertEqual(self._weekly(sent), 100.0)
+
+    def test_a_new_board_receives_the_true_number(self):
+        sent = []
+        b = self._bridge(sent)
+        b.on_message({"t": "hello", "v": 2, "board_id": "abc",
+                      "fw": ".".join(str(x)
+                                     for x in protocol.FW_ACCEPTS_OVERAGE)})
+        sent.clear()
+        b.poll_once()
+        self.assertEqual(self._weekly(sent), 102.0)
+
+    def test_before_any_hello_the_push_is_capped(self):
+        """greet() can push before a board has said hello."""
+        sent = []
+        self._bridge(sent).poll_once()
+        self.assertEqual(self._weekly(sent), 100.0)

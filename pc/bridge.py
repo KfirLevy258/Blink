@@ -420,6 +420,11 @@ class Bridge:
             return
         self._said_no_source = False
 
+        # Percentages above 100 are real -- extra usage puts them there -- but
+        # firmware older than protocol.FW_ACCEPTS_OVERAGE turns them into 0 on
+        # the panel rather than clamping. Hold them at 100 for those boards.
+        usage = protocol.cap_overage_for_fw(usage, self._board_fw)
+
         self._write(usage)
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the

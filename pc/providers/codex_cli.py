@@ -152,7 +152,9 @@ def _pct(window):
     v = window.get("used_percent")
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return base.UNKNOWN
-    if not (0 <= v <= 100):
+    # 1000, not 100 -- see claude_desktop._pct. A percentage above 100 is what
+    # extra usage looks like, not a field that changed meaning.
+    if not (0 <= v <= 1000):
         return base.UNKNOWN
     return float(v)
 

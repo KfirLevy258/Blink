@@ -68,10 +68,20 @@ def test_the_newest_sample_wins_even_when_the_list_is_not_sorted():
 
 
 def test_a_percentage_out_of_range_is_refused():
+    """Still refused -- but the line is 1000, not 100. See the next test."""
     p = ClaudeDesktopProvider()
-    f = p.parse_cache_file(_doc([_sample(int(NOW * 1000), 340, 20)]), NOW)
+    f = p.parse_cache_file(_doc([_sample(int(NOW * 1000), 4000, 20)]), NOW)
     assert f.session_pct == base.UNKNOWN
     assert f.weekly_pct == 20.0      # the sound field is unaffected
+
+
+def test_an_overage_percentage_survives():
+    """Extra usage carries a window past its limit, and 102 is a reading, not
+    a corrupt field. Refusing it here drew an empty ring at the exact moment
+    the customer went over -- observed on a real board 2026-08-31."""
+    p = ClaudeDesktopProvider()
+    f = p.parse_cache_file(_doc([_sample(int(NOW * 1000), 20, 102)]), NOW)
+    assert f.weekly_pct == 102.0
 
 
 def test_a_sample_with_neither_percentage_is_skipped():

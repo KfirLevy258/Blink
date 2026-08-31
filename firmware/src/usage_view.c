@@ -306,6 +306,40 @@ static int boot_hint_s;		/* seconds spent on the current step */
 static const char *const *boot_txt;
 static int boot_n;
 
+/*
+ * Bound before the cast, never after. usage_view_update has a second caller
+ * besides the serial path: main.c's on-device OAuth client, whose figures come
+ * from a bare strtod in usage_parse.c with no range check at all, so nan, inf
+ * and 1e300 all arrive here. Converting an out-of-range double to int32_t is
+ * undefined behaviour -- the very defect proto.c's num() exists to avoid --
+ * and `pct < 0` does not catch nan, because nothing compares true to nan.
+ */
+#define PCT_DISPLAY_MAX 1000
+
+/*
+ * Extra usage puts a real reading above 100, and the ring has nowhere left to
+ * go -- so it saturates while the label keeps the true figure. Letting LVGL
+ * clamp it internally would look the same today and is not a promise it
+ * makes, and "at the limit" and "past it" must not draw identically.
+ */
+static int32_t pct_int(double pct)
+{
+	if (!(pct > 0.0)) {	/* nan fails this too, and lands on 0 */
+		return 0;
+	}
+	if (pct > (double)PCT_DISPLAY_MAX) {
+		return PCT_DISPLAY_MAX;
+	}
+	return (int32_t)(pct + 0.5);
+}
+
+static int32_t arc_value(double pct)
+{
+	int32_t v = pct_int(pct);
+
+	return v > 100 ? 100 : v;
+}
+
 static lv_color_t severity(double pct)
 {
 	if (pct >= 90.0) {
@@ -459,9 +493,9 @@ static void render_weekly(void)
 
 	char buf[8];
 
-	snprintf(buf, sizeof(buf), "%d%%", (int)(pct + 0.5));
+	snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(pct));
 	lv_label_set_text(weekly.pct, buf);
-	lv_arc_set_value(weekly.arc, (int32_t)(pct + 0.5));
+	lv_arc_set_value(weekly.arc, arc_value(pct));
 	lv_obj_set_style_arc_color(weekly.arc, severity(pct), LV_PART_INDICATOR);
 }
 
@@ -474,7 +508,7 @@ static void peek_fill(void)
 		char buf[24];
 
 		if (pct >= 0) {
-			snprintf(val, sizeof(val), "%d%%", (int)(pct + 0.5));
+			snprintf(val, sizeof(val), "%d%%", (int)pct_int(pct));
 		}
 		snprintf(buf, sizeof(buf), "%s  %s", sel_label[i], val);
 		lv_label_set_text(peek_row_lbl[i], buf);
@@ -847,9 +881,9 @@ static void render_gauges(void)
 		lv_label_set_text(session.pct, "--%");
 		lv_arc_set_value(session.arc, 0);
 	} else {
-		snprintf(buf, sizeof(buf), "%d%%", (int)(p->s_pct + 0.5));
+		snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(p->s_pct));
 		lv_label_set_text(session.pct, buf);
-		lv_arc_set_value(session.arc, (int32_t)(p->s_pct + 0.5));
+		lv_arc_set_value(session.arc, arc_value(p->s_pct));
 		lv_obj_set_style_arc_color(session.arc, severity(p->s_pct),
 					   LV_PART_INDICATOR);
 	}
@@ -1125,9 +1159,9 @@ static void morph_arc(struct gauge *g, double pct)
 		lv_arc_set_value(g->arc, 0);
 		return;
 	}
-	snprintf(buf, sizeof(buf), "%d%%", (int)(pct + 0.5));
+	snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(pct));
 	lv_label_set_text(g->pct, buf);
-	lv_arc_set_value(g->arc, (int32_t)(pct + 0.5));
+	lv_arc_set_value(g->arc, arc_value(pct));
 	/*
 	 * Severity follows the value it is describing, so the ring changes
 	 * colour where it crosses the threshold rather than at either end.

@@ -85,7 +85,10 @@ def _pct(u: dict, key: str) -> float:
         v = float(u[key])
     except (KeyError, TypeError, ValueError):
         return base.UNKNOWN
-    return v if 0 <= v <= 100 else base.UNKNOWN
+    # Upper bound is 1000, not 100: extra usage carries a window past its
+    # limit and 102 is a real reading, not a changed field. Clamping it to
+    # UNKNOWN here drew an empty ring at the moment the user went over.
+    return v if 0 <= v <= 1000 else base.UNKNOWN
 
 
 def _sample_to_frame(sample: dict):
@@ -166,7 +169,13 @@ def _newest_sample(samples):
 # How far back to measure. Long enough to average out the 5-minute sampling
 # granularity, short enough that the answer describes now rather than the
 # last hour of a session that has since changed pace.
-BURN_WINDOW_S = 1800.0
+# 3600, not 1800. BURN_MAX_GAP_S was raised to 1000 s to admit Claude
+# Desktop's 15-minute idle cadence, but a 1800 s window sampled every 900 s
+# holds exactly BURN_MIN_SAMPLES points -- so one dropped sample and the rate
+# vanishes, which is the symptom raising the gap was meant to cure. An hour
+# holds four or five at that cadence and still only spans readings the gap
+# guard has already accepted as consecutive.
+BURN_WINDOW_S = 3600.0
 
 # A gap beyond this means the app was CLOSED, and a rate averaged across time
 # we did not observe is the same mistake as deriving the reset.
@@ -185,6 +194,8 @@ BURN_WINDOW_S = 1800.0
 # gap of hours, not of sixteen minutes.
 #
 # Read out of Claude.app 1.37937.3's own bundle and then confirmed against it
+# (re-read in 1.40609.0 on 2026-08-31: the cadence had already changed once,
+# see BURN_WINDOW_S below -- which is why no interval here is load-bearing)
 # running, 2026-08-30. Both intervals belong to an application we do not
 # control -- if the rate disappears again, measure the gaps in
 # plan-usage-history.json before touching anything else.

@@ -49,6 +49,14 @@ static size_t line_len;
  * field here defines as "unknown" or "none".
  */
 #define SECS_MAX 2147483647.0
+/*
+ * Percentages can legitimately exceed 100: extra usage carries a weekly window
+ * past its limit. The ceiling used to be 100, and num() does not clamp -- it
+ * refuses -- so 102 left the caller's `double wp = 0` untouched and the panel
+ * drew an empty ring at the moment the user went over. Accept the real number
+ * and let usage_view saturate the ring.
+ */
+#define PCT_MAX 1000.0
 
 static void num(const char *json, const char *key, double *out,
 		double lo, double hi)
@@ -274,8 +282,8 @@ static void dispatch(const char *json)
 		 */
 		double ss = -1, ws = -1;
 
-		num(json, "session_pct", &sp, -1, 100);
-		num(json, "weekly_pct", &wp, -1, 100);
+		num(json, "session_pct", &sp, -1, PCT_MAX);
+		num(json, "weekly_pct", &wp, -1, PCT_MAX);
 		num(json, "session_resets_in_s", &ss, -1, SECS_MAX);
 		num(json, "weekly_resets_in_s", &ws, -1, SECS_MAX);
 		usage_view_update(sp, (int32_t)ss, wp, (int32_t)ws);
@@ -284,7 +292,7 @@ static void dispatch(const char *json)
 		 * us); an absent key leaves the -1 "unknown" default. */
 		double mf = -1;
 
-		num(json, "fable_pct", &mf, -1, 100);
+		num(json, "fable_pct", &mf, -1, PCT_MAX);
 		usage_view_set_models(mf);
 
 		/* Every usage message says whether its own numbers can be
@@ -369,8 +377,8 @@ static void dispatch(const char *json)
 		if (msg_get_str(json, "p2", p2, sizeof(p2))) {
 			bool p2stale = false;
 
-			num(json, "p2_session_pct", &p2s, -1, 100);
-			num(json, "p2_weekly_pct", &p2w, -1, 100);
+			num(json, "p2_session_pct", &p2s, -1, PCT_MAX);
+			num(json, "p2_weekly_pct", &p2w, -1, PCT_MAX);
 			num(json, "p2_s_in_s", &p2si, -1, SECS_MAX);
 			num(json, "p2_w_in_s", &p2wi, -1, SECS_MAX);
 			/* Absent leaves this false, so a daemon older than

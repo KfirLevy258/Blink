@@ -110,11 +110,19 @@ def test_a_millisecond_epoch_is_refused_rather_than_believed(tmp_path):
     assert frame.session_resets_at is None  # the timestamp is not
 
 
-def test_a_percentage_outside_0_100_is_unknown_not_clamped(tmp_path):
-    write_rollout(tmp_path, lines=[token_count_line(rate_limits(s_pct=140.0))])
+def test_a_percentage_far_outside_the_range_is_unknown_not_clamped(tmp_path):
+    """The bound is 1000 now; 140 is a plausible overage, 4000 is not."""
+    write_rollout(tmp_path, lines=[token_count_line(rate_limits(s_pct=4000.0))])
     frame, = poll(tmp_path)
     assert frame.session_pct == base.UNKNOWN
     assert frame.weekly_pct == 34.0
+
+
+def test_an_overage_percentage_survives(tmp_path):
+    """A Codex user in extra usage must not get an empty ring either."""
+    write_rollout(tmp_path, lines=[token_count_line(rate_limits(s_pct=102.0))])
+    frame, = poll(tmp_path)
+    assert frame.session_pct == 102.0
 
 
 def test_a_non_numeric_percentage_is_unknown(tmp_path):
