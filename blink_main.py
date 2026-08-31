@@ -6,8 +6,8 @@ anything.
 
 One thing the launcher does itself: `blink -m <module> ...` runs a bundled
 Python module the way `python -m` would. The daemon flashes firmware with
-esptool and reads eFuses with espefuse, both bundled into this binary, and
-invokes them as `sys.executable -m esptool ...` -- which in a frozen build is
+esptool and reads the flash-encryption eFuse with pc.efuse_probe, both bundled
+into this binary, and invokes them as `sys.executable -m esptool ...` -- which in a frozen build is
 THIS program. Without this branch that command was an argparse error, and
 every over-the-air firmware update from an installed daemon failed with
 "could not read the chip's eFuses" (found on the first real customer-path

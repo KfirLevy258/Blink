@@ -138,17 +138,33 @@ ok "a download that does not match its hash is refused"
 
 # --- 5. the flashing tools are inside the binary and answer to -m ------------
 # The daemon flashes firmware by running `sys.executable -m esptool` and reads
-# eFuses with `-m espefuse`; frozen, sys.executable is this binary. Both must
-# be bundled AND the launcher must honour -m, or every over-the-air firmware
-# update from an installed daemon fails at the eFuse check (2026-08-29, the
-# first real customer-path test).
+# the flash-encryption eFuse with `-m pc.efuse_probe`; frozen, sys.executable
+# is this binary. Both must be bundled AND the launcher must honour -m, or
+# every over-the-air firmware update from an installed daemon fails at the
+# eFuse check (2026-08-29, the first real customer-path test).
+#
+# This used to demand a bundled espefuse. That stopped being true on
+# 2026-08-30: espefuse pulls in espsecure and cryptography, 12 MB of native
+# code for one bit, so tools/build_binary.sh now excludes all three and
+# verifies they are gone, and pc/efuse_probe.py reads the bit through
+# esptool's own chip class instead. The check outlived the thing it checked
+# and failed every run on both platforms for a day -- asserting the opposite
+# of what the build script asserts.
 "$INSTALLED" -m esptool version >"$WORK/esptool.txt" 2>&1 ||
 	fail "the binary cannot run its bundled esptool: $(cat "$WORK/esptool.txt")"
 grep -q "esptool" "$WORK/esptool.txt" || fail "-m esptool ran but printed no version"
-"$INSTALLED" -m espefuse --help >"$WORK/espefuse.txt" 2>&1 ||
-	fail "the binary cannot run its bundled espefuse: $(cat "$WORK/espefuse.txt")"
-grep -qi "summary" "$WORK/espefuse.txt" || fail "-m espefuse ran but is not espefuse"
-ok "esptool and espefuse are bundled and answer to -m"
+# --help exits 0 and needs no board; --port is required, so this proves the
+# module is bundled and reachable without asking for hardware in CI.
+"$INSTALLED" -m pc.efuse_probe --help >"$WORK/efuse.txt" 2>&1 ||
+	fail "the binary cannot run its bundled efuse probe: $(cat "$WORK/efuse.txt")"
+grep -qi "port" "$WORK/efuse.txt" ||
+	fail "-m pc.efuse_probe ran but is not the efuse probe"
+# And the 12 MB stays out: if espefuse ever creeps back into the bundle the
+# download quietly grows by half again.
+if "$INSTALLED" -m espefuse --help >"$WORK/espefuse.txt" 2>&1; then
+	fail "espefuse is bundled again -- build_binary.sh excludes it on purpose"
+fi
+ok "esptool and the efuse probe answer to -m, and espefuse stays out"
 
 # --- 6. the binary can read the real feed with no certificate store ----------
 # The macOS binary carries python.org's OpenSSL, whose default CA path exists
