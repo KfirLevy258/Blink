@@ -26,3 +26,27 @@ def test_a_new_firmware_replaces_the_old_one():
 def test_the_port_is_always_the_one_in_use():
     known = {"port": "COM3", "board_id": "abc", "fw": "1.2.0"}
     assert learn_board(known, "COM9", {"t": "ping"})["port"] == "COM9"
+
+
+def test_an_ota_query_teaches_the_firmware():
+    """ota_query spells it `cur`. A board only says hello when it boots, so
+    after a USB flash every message the daemon sees is an ota_query and the
+    old version used to persist -- `blink status` reported 1.2.4 for a board
+    answering `cur: 1.2.5` in the same log (2026-08-31)."""
+    known = {"port": "COM3", "board_id": "abc", "fw": "1.2.4"}
+    assert learn_board(known, "COM3",
+                       {"t": "ota_query", "v": 2, "cur": "1.2.5"})["fw"] == "1.2.5"
+
+
+def test_an_ota_query_without_a_version_keeps_what_was_known():
+    known = {"port": "COM3", "board_id": "abc", "fw": "1.2.5"}
+    for msg in ({"t": "ota_query", "v": 2}, {"t": "ota_query", "v": 2, "cur": ""}):
+        assert learn_board(known, "COM3", msg)["fw"] == "1.2.5", msg
+
+
+def test_a_hello_still_wins_over_cur():
+    """Both present is not a real message, but hello is the authoritative
+    one, so it must not be quietly outranked by field order."""
+    known = {"port": "COM3", "board_id": "abc", "fw": "1.2.0"}
+    msg = {"t": "hello", "board_id": "abc", "fw": "1.2.5", "cur": "1.2.4"}
+    assert learn_board(known, "COM3", msg)["fw"] == "1.2.5"

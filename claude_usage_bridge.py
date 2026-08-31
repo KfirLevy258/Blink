@@ -257,10 +257,24 @@ def learn_board(known, port, msg):
     a record taken from the first message alone stayed at null for both --
     every machine checked on 2026-08-30 had nulls there. Take what each
     message offers and keep what it does not.
+
+    `ota_query` spells the firmware `cur`, not `fw`, and that is the whole
+    reason this record went stale rather than merely empty. A board only says
+    `hello` when it boots, so after a USB flash -- where the board is already
+    running by the time the daemon reconnects -- the first and every
+    subsequent message is an `ota_query`, and `msg.get("fw")` was None every
+    time. The old version stayed in board.json and `blink status` reported it
+    for as long as the daemon ran: on 2026-08-31 it insisted a board was on
+    1.2.4 while that board was answering `cur: 1.2.5` in the same log. Worse,
+    it lied in exactly the moment someone reads it -- checking whether an
+    update landed.
+
+    bridge.py has always read `cur` for its in-memory _board_fw, which is why
+    the overage cap gates correctly; only the persisted record missed it.
     """
     return {"port": port,
             "board_id": msg.get("board_id") or known.get("board_id"),
-            "fw": msg.get("fw") or known.get("fw")}
+            "fw": msg.get("fw") or msg.get("cur") or known.get("fw")}
 
 
 def probe_is_our_board(ser, timeout=PROBE_S):
