@@ -253,3 +253,92 @@ living in two places.
 - **Naming the most recent of several.** See the assumption above.
 - **Anything about the dot itself.** Colour and pulse are unchanged. This
   design only fills the line under it.
+
+---
+
+# Addendum, 2026-09-02: the header regroups and the corner speaks
+
+Requested after the design above was approved and Task 1 was already in
+flight. It does not invalidate anything above — the hint line's behaviour is
+unchanged — but it moves where that line sits and adds a second indicator.
+
+## What changes
+
+1. The clock moves out of the top-left and sits **under the brand**, centred.
+2. Both gauges move **down**.
+3. The freed top-left corner takes a **session status indicator**, in addition
+   to the hint text, not instead of it.
+
+## Why the corner is available now, when it was not
+
+`6540287` removed the top-left execution pip and gave two reasons: two
+unlabelled circles in one colour vocabulary, and a corner already occupied.
+The second reason dissolves here. The clock vacates the corner, and the
+first reason is answered by the hint line this design already builds — the
+circles are no longer unlabelled, because the words underneath name the
+condition.
+
+So this is not a revert of `6540287`. It is the arrangement that commit could
+not have, because the hint line did not yet speak for execution state.
+
+## The vertical budget, and why the ring pays for it
+
+Measured before designing. Below the arcs, nothing can move:
+
+| Element | Now | After | Note |
+|---|---|---|---|
+| Rail | 226–232 | 226–232 | fixed by `RAIL_BOTTOM_OFF` |
+| Pill | 204–224 | 204–224 | must clear the rail by 2 |
+| Countdown | 186–202 | 186–202 | must clear the pill by 2 |
+| Caption | 168–184 | 168–184 | must clear the countdown by 2 |
+
+That stack is already at its stated minimum — the header records an earlier
+pill attempt at 3 px of padding that "put it through the countdowns". So the
+caption's top at 168 is a hard ceiling for everything above it, and the entire
+cost of the new header row comes out of the arc.
+
+**New arrangement, every seam on the 4 px rhythm the header mandates:**
+
+| Element | Y | Height |
+|---|---|---|
+| Session indicator (top-left), age + dot (top-right) | 8 | 12 |
+| Brand | 4 | 16 |
+| Clock, centred under the brand | 24 | 16 |
+| Hint line | 44 | 16 |
+| **Arcs** | **64** | **100** |
+| Caption | 168 | unchanged |
+
+`GAUGE_ARC_SZ` goes **120 → 100**, and `GAUGE_ARC_Y` **44 → 64**.
+
+> **Ruling: 100, not the 104 that was approved.** 104 lands the arcs at
+> 64–168, leaving a 0 px seam against the caption, or forces a 2 px seam
+> somewhere else in the header. 100 keeps every gap at 4 px and preserves the
+> rhythm doctrine stated at the top of `usage_layout.h`. The difference is
+> 4 px of ring diameter. Cost if wrong: a marginally smaller gauge than
+> intended — reversible by taking 4 px back from the hint-to-arc gap.
+
+`GAUGE_PCT_Y` moves with the ring, keeping its offset from the arc's top
+(90 − 44 = 46, so 64 + 46 = **110**).
+
+## The two indicators, and what each one means
+
+| | Position | Says |
+|---|---|---|
+| Session indicator | top-left, `x=10, y=8` | **execution state** — running, waiting, finished, failed |
+| Status dot | top-right, `x=−12, y=8` | **data health** — ok, stale, error, host lost |
+
+`refresh_dot()` stops taking the worse of the two and each indicator reports
+its own axis. The hint line's precedence is **unchanged**: data health still
+speaks first and execution state only fills its silence, because a reading we
+cannot vouch for still makes the execution state moot.
+
+The colour vocabulary is shared, which was `6540287`'s objection. What answers
+it is that the words are now there: a red top-left with "Session failed"
+underneath cannot be read as a lost cable, and a red top-right with "HOST LOST
+— numbers are frozen" cannot be read as a wedged session.
+
+## Not in scope
+
+- The rail, pill, countdown and caption. All four are pinned by the budget
+  above and none of them moves.
+- The dot's colours and pulse rules. Unchanged from `activity_color()`.
