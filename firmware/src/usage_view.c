@@ -2012,6 +2012,29 @@ static const char *activity_text(void)
 	}
 }
 
+/*
+ * The composed execution-state line: what the tool is doing, and to what.
+ *
+ * Its own function for the same reason activity_color() is one, and it is the
+ * words half of that same pair: TWO status cases need it, data that is sound
+ * and data flagged stale by the OTHER provider while this page is fine.
+ * activity_color() was split after being inlined in one case and simply
+ * missing from the other; the text was inlined in USAGE_STATUS_OK and left the
+ * !stale_here() case of USAGE_STATUS_STALE saying nothing at all -- the second
+ * silence, the very defect the hint line exists to remove. Composing it here
+ * means neither call site can drift from the other.
+ *
+ * The buffer is static because the caller hands the result straight to
+ * lv_label_set_text(), which copies it; nothing holds the pointer past that.
+ */
+static const char *activity_hint(void)
+{
+	static char hbuf[FMT_HINT_MAX];
+
+	fmt_hint(activity_text(), session_label, session_n, hbuf, sizeof(hbuf));
+	return hbuf;
+}
+
 void usage_view_set_status(enum usage_status status)
 {
 	if (!built) {
@@ -2062,26 +2085,46 @@ void usage_view_set_status(enum usage_status status)
 			 * which left a red "a session failed" looking exactly
 			 * like a red "the host is gone".
 			 */
-			static char hbuf[FMT_HINT_MAX];
-
-			fmt_hint(activity_text(), session_label, session_n,
-				 hbuf, sizeof(hbuf));
-			text = hbuf;
+			text = activity_hint();
 			tc = COL_DIM;
 		}
 		break;
 	case USAGE_STATUS_STALE:
-		tc = COL_AMBER;
-		/* Not "rate-limited": this state means the daemon has no fresh
-		 * reading, which is usually its owner being away from Claude Code.
-		 * The old wording is from when a 429 from the usage endpoint was
-		 * the only way to get here; that endpoint is gone, and telling
-		 * someone they are rate-limited when they are not is worse than
-		 * saying nothing. */
 		/* Only when it is true of THIS page -- see stale_here(). The
 		 * other page's silence is not this page's problem, and saying
 		 * so over live numbers is the panel contradicting itself. */
-		text = stale_here() ? "Reading is old - showing last known" : "";
+		if (stale_here()) {
+			tc = COL_AMBER;
+			/* Not "rate-limited": this state means the daemon has
+			 * no fresh reading, which is usually its owner being
+			 * away from Claude Code. The old wording is from when
+			 * a 429 from the usage endpoint was the only way to
+			 * get here; that endpoint is gone, and telling someone
+			 * they are rate-limited when they are not is worse
+			 * than saying nothing. */
+			text = "Reading is old - showing last known";
+		} else {
+			/*
+			 * The second silence. This branch used to write "",
+			 * so a two-provider desk whose Codex reading was last
+			 * touched this morning arms STALE, the health dot goes
+			 * green because THIS page is fine, the activity dot
+			 * goes red for a failed Claude session -- and the line
+			 * under them said nothing, which is exactly the defect
+			 * the hint line was built to remove, surviving in the
+			 * one case nobody wrote down.
+			 *
+			 * The colour path already had this right: see
+			 * activity_color(), split into a function precisely
+			 * because these same two status cases need it. The two
+			 * paths are deliberately parallel -- when this page's
+			 * numbers are sound, whatever the other provider's age
+			 * is doing, the line speaks for execution state and
+			 * wears COL_DIM, exactly as in USAGE_STATUS_OK.
+			 */
+			tc = COL_DIM;
+			text = activity_hint();
+		}
 		break;
 	case USAGE_STATUS_ERROR:
 		tc = COL_RED;
