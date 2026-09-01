@@ -109,21 +109,25 @@ struct gauge {
 
 static struct gauge session, weekly;
 /*
- * ONE attention indicator, not two.
+ * Two attention indicators -- but not the two 6540287 removed.
  *
- * There used to be a status dot top-right (is the data trustworthy) and an
- * activity pip top-left (what is Claude Code doing). Two unlabelled circles in
- * the two most prominent corners, in the same green/amber/red vocabulary,
- * saying unrelated things -- so a red dot could mean "you are rate limited", "a
- * tool is wedged" or "the cable fell out", and the panel gave no way to tell.
+ * There was a status dot top-right (is the data trustworthy) and an activity
+ * pip top-left (what is Claude Code doing). 6540287 collapsed them into one
+ * dot coloured by the WORSE of the two, and gave two reasons: two unlabelled
+ * circles in the two most prominent corners, in the same green/amber/red
+ * vocabulary, saying unrelated things -- a red dot could mean "you are rate
+ * limited", "a tool is wedged" or "the cable fell out", and the panel gave no
+ * way to tell -- and the top-left corner belonged to the clock anyway.
  *
- * They were never two facts. Both answer "is something wrong, and how badly":
- * OK -> stale -> error, and running/idle -> waiting -> stuck/failed are the
- * same axis. So they collapse: one dot, coloured by the WORSE of the two, and
- * the hint line -- already there, already empty when all is well -- says which
- * one fired. Colour means one thing again.
+ * Both reasons are answered now. The clock sits under the brand, so that
+ * corner is free, and the hint line below NAMES whichever condition fired, so
+ * neither circle is unlabelled any more. What "worse wins" cost was real: a
+ * stale reading painted over a failed session and the panel showed only the
+ * milder of the two facts. So each axis gets its own corner -- data health
+ * right, execution state left -- and neither hides the other.
  */
-static lv_obj_t *dot;
+static lv_obj_t *dot;		/* data health, top-right */
+static lv_obj_t *act_dot;	/* execution state, top-left */
 static enum usage_status data_health = USAGE_STATUS_DISCONNECTED;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
@@ -621,6 +625,28 @@ void usage_view_init(void)
 	/* A swipe starting on this dot must still reach the screen below it,
 	 * or the settings gesture goes dead whenever the touch lands here. */
 	lv_obj_add_flag(dot, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+	/*
+	 * The execution-state indicator, in the corner the clock vacated.
+	 *
+	 * 6540287 removed a pip from exactly here and gave two reasons. One was
+	 * that the corner was occupied, which is no longer true. The other was
+	 * two unlabelled circles in one colour vocabulary -- and the hint line
+	 * below now names whichever condition fired, so they are not unlabelled
+	 * any more. This is not that pip coming back; it is the arrangement
+	 * that commit could not have.
+	 *
+	 * Built exactly like the health dot above, down to the gesture flag:
+	 * two circles that mean different things must still LOOK like one
+	 * family, and a swipe starting on either must reach the screen below.
+	 */
+	act_dot = lv_obj_create(scr);
+	lv_obj_set_size(act_dot, DOT_SZ, DOT_SZ);
+	lv_obj_set_style_radius(act_dot, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_border_width(act_dot, 0, 0);
+	lv_obj_set_style_bg_color(act_dot, COL_GREY, 0);
+	lv_obj_align(act_dot, LV_ALIGN_TOP_LEFT, 10, HDR_ROW_Y);
+	lv_obj_add_flag(act_dot, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
 	/* Carries the amber/red explanation. Empty when all is well: the gauges
 	 * still hold real (if stale) numbers in those states, so they stay visible
@@ -1642,13 +1668,6 @@ static void act_pulse_cb(void *obj, int32_t v)
 }
 
 /*
- * Paint the one indicator from the worse of its two inputs.
- *
- * Data health outranks execution state when both have something to say: a
- * reading we cannot vouch for makes the execution state moot, because the
- * numbers beside it are the thing in doubt.
- */
-/*
  * The colour the execution state asks for, and whether it pulses.
  *
  * Its own function because TWO status cases need it: data that is sound, and
@@ -1686,55 +1705,67 @@ static lv_color_t activity_color(bool *pulse)
 	}
 }
 
-static void refresh_dot(void)
+/*
+ * Two indicators, two axes, no ranking between them.
+ *
+ * This used to paint ONE dot from the worse of the pair, because a single
+ * indicator cannot show two facts and the hint line was silent. The line
+ * speaks now, and there are two corners, so each axis gets its own circle and
+ * neither hides the other. A stale reading no longer conceals a failed
+ * session, which is what "worse wins" cost.
+ *
+ * The hint line's precedence is NOT split with it: data health still speaks
+ * first there and execution state only fills its silence, because a reading
+ * we cannot vouch for still makes the execution state moot.
+ */
+static void refresh_dots(void)
 {
-	lv_color_t c = COL_GREY;
 	bool pulse = false;
+	lv_color_t hc = COL_GREY;
 
-	if (!dot) {
+	if (dot) {
+		switch (data_health) {
+		case USAGE_STATUS_ERROR:
+			hc = COL_RED;
+			break;
+		case USAGE_STATUS_STALE:
+			/*
+			 * Only the page in front of you can be stale-amber.
+			 * proto.c arms STALE when EITHER provider is old
+			 * (`stale = stale || p2stale`), so on a two-provider
+			 * desk a Codex reading last touched this morning must
+			 * not put amber over a Claude page that is fresh --
+			 * this page's numbers really are sound. What the tool
+			 * is doing is the other dot's business now.
+			 */
+			hc = stale_here() ? COL_AMBER : COL_GREEN;
+			break;
+		case USAGE_STATUS_DISCONNECTED:
+			hc = COL_GREY;
+			break;
+		case USAGE_STATUS_OK:
+		default:
+			hc = COL_GREEN;
+			break;
+		}
+		lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+		lv_obj_set_style_bg_color(dot, hc, 0);
+	}
+
+	if (!act_dot) {
 		return;
 	}
-	switch (data_health) {
-	case USAGE_STATUS_ERROR:
-		c = COL_RED;
-		break;
-	case USAGE_STATUS_STALE:
-		/*
-		 * Only the page in front of you can be stale-amber. If THIS
-		 * page is fresh, the dot reports what the tool is doing, the
-		 * same as USAGE_STATUS_OK.
-		 *
-		 * It used to paint plain green here, which quietly disabled
-		 * the activity indicator on any two-provider desk: proto.c
-		 * arms STALE when EITHER provider is old (`stale = stale ||
-		 * p2stale`), so a Codex reading last touched this morning made
-		 * a WEDGED Claude session show a healthy green pip. The red
-		 * stuck/failed warning is the entire reason the state hooks
-		 * exist.
-		 */
-		c = stale_here() ? COL_AMBER : activity_color(&pulse);
-		break;
-	case USAGE_STATUS_DISCONNECTED:
-		c = COL_GREY;
-		break;
-	case USAGE_STATUS_OK:
-	default:
-		/* Data is sound, so the dot is free to report what the tool is
-		 * doing. Never above ERROR -- an amber "waiting" must not mask
-		 * a red "the host is gone". */
-		c = activity_color(&pulse);
-		break;
-	}
+	lv_color_t ac = activity_color(&pulse);
 
-	lv_anim_delete(dot, act_pulse_cb);
-	lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-	lv_obj_set_style_bg_color(dot, c, 0);
+	lv_anim_delete(act_dot, act_pulse_cb);
+	lv_obj_set_style_bg_opa(act_dot, LV_OPA_COVER, 0);
+	lv_obj_set_style_bg_color(act_dot, ac, 0);
 
 	if (pulse) {
 		lv_anim_t an;
 
 		lv_anim_init(&an);
-		lv_anim_set_var(&an, dot);
+		lv_anim_set_var(&an, act_dot);
 		lv_anim_set_exec_cb(&an, act_pulse_cb);
 		lv_anim_set_values(&an, LV_OPA_40, LV_OPA_COVER);
 		lv_anim_set_duration(&an, 900);
@@ -1748,12 +1779,12 @@ void usage_view_set_activity(enum usage_activity a)
 {
 	activity = a;
 	/*
-	 * The STATUS too, not only the dot. This used to call refresh_dot()
+	 * The STATUS too, not only the dots. This used to call refresh_dots()
 	 * alone, so once the hint learned to speak for execution state the
 	 * label could not track a change to it: a session going from running
 	 * to failed repainted the dot red and left the previous words under
-	 * it. set_status re-runs the whole switch and calls refresh_dot at
-	 * the end, so the dot is still repainted exactly once.
+	 * it. set_status re-runs the whole switch and calls refresh_dots at
+	 * the end, so the dots are still repainted exactly once.
 	 */
 	usage_view_set_status(last_status);
 }
@@ -1768,7 +1799,7 @@ void usage_view_set_session(const char *label, int n)
 	}
 	session_n = n;
 	/* Re-run the status switch so the line picks the new subject up. The
-	 * dot is unaffected -- neither input to refresh_dot changed -- but
+	 * dots are unaffected -- neither input to refresh_dots changed -- but
 	 * set_status owns the composition and calling it is how the label is
 	 * rebuilt. */
 	usage_view_set_status(last_status);
@@ -1856,7 +1887,7 @@ void usage_view_set_provider1_stale(bool stale)
 {
 	pg[0].stale = stale;
 	if (built) {
-		refresh_dot();
+		refresh_dots();
 	}
 }
 
@@ -2069,9 +2100,11 @@ void usage_view_set_status(enum usage_status status)
 	lv_obj_set_style_text_color(hint, tc, 0);
 	lv_label_set_text(hint, text);
 
-	/* One owner for the indicator's colour. The hint says WHICH condition
-	 * fired; the dot says only how bad it is. */
-	refresh_dot();
+	/* One owner for both indicators' colour. The hint says WHICH condition
+	 * fired; the dots say only how bad each axis is. Still one call site
+	 * even though the dots no longer rank against each other, because the
+	 * hint line still does -- see refresh_dots(). */
+	refresh_dots();
 	usage_view_sync_takeover();
 }
 
