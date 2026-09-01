@@ -4,12 +4,22 @@
 # Claude Code runs this on lifecycle events and pipes the event JSON to stdin.
 # We record which event fired, for which session, and when.
 #
-# WHAT IS CAPTURED, exactly: an event name, a session id, an agent id, and a
-# clock reading. Nothing else is read from the payload -- not the prompt, not
-# the tool arguments, not the transcript path, not the cwd, not the assistant's
-# message. The two ids are opaque identifiers Claude Code generates; they are
-# used as filenames so that concurrent sessions can be told apart, and for
-# nothing else.
+# WHAT IS CAPTURED, exactly: an event name, a session id, an agent id, the
+# PROJECT DIRECTORY NAME, and a clock reading. Nothing else is read from the
+# payload -- not the prompt, not the tool arguments, not the transcript path,
+# not the assistant's message, and not the path above the project directory.
+#
+# The project name is the second widening of this file, and a larger one than
+# the first. The ids are opaque identifiers Claude Code generates; a directory
+# name is content, chosen by the user, and it is rendered on a display other
+# people can see. It is captured because a status with no subject cannot say
+# WHICH of three open sessions is the one waiting on you. The final segment
+# only: the pattern below matches the path above it and discards it, so what
+# is written is "LiveClaudeUi" and never "/Users/kfir/Projects/LiveClaudeUi".
+#
+# This remains a policy rather than a structural guarantee, as the first
+# widening already made it. Nothing here enforces the list above except the
+# code below it.
 #
 # This is a real widening from the first version, which captured an event name
 # and a timestamp and nothing else. That made the metadata-only promise
@@ -54,6 +64,32 @@ _ident() {
 sid=$(printf '%s' "$input" | _ident session_id)
 [ -n "$sid" ] || sid=unknown
 
+# The project's DIRECTORY NAME, and only that: the path above it is matched
+# and thrown away inside the pattern, so the full path is never held in a
+# variable, never written, and never sent.
+#
+# Sanitised in the pattern for the same reason _ident is -- there is no
+# separate validation step that can be forgotten or reordered. This value goes
+# into a JSON string rather than a filename, so the class must also exclude the
+# two characters that could end it early: `"` and `\`. A name that does not
+# match produces nothing and the key is omitted, which already means unknown
+# on the other side.
+#
+# `[^"]*[/\]` is greedy up to the LAST separator before the closing quote, so
+# what the class captures is the final segment. Both separators, because on
+# Windows the payload carries an escaped backslash and there is no `/` at all.
+#
+# The first character must be alphanumeric, for the reason spelled out above
+# _ident: it is what keeps the bare names `.` and `..` from becoming a label.
+#
+# 24 bytes, matching the daemon's cap: a first character plus 23.
+_projname() {
+	sed 's/"cwd"/\
+&/g' |
+		sed -n '2{s|^"cwd"[[:space:]]*:[[:space:]]*"[^"]*[/\]\([0-9A-Za-z][0-9A-Za-z._-]\{0,23\}\)".*|\1|p;}'
+}
+name=$(printf '%s' "$input" | _projname)
+
 # Private to the user. These files name the sessions someone has open, and
 # the default umask would leave them readable by every account on the machine.
 umask 077
@@ -96,7 +132,18 @@ SubagentStart|SubagentStop)
 	# once; with one shared temp name the second truncated the first's
 	# half-written file and one of them renamed a torn one into place --
 	# the exact malformed state the rename exists to prevent.
-	printf '{"event":"%s","t":%s}' "$event" "$(date +%s)" 2>/dev/null \
+	#
+	# The name is optional, so the fragment is built FIRST and the write
+	# below stays a single path. Branching around two near-identical atomic
+	# writes would leave the reasoning above attached to only one of them,
+	# and the next person to fix the write would fix one copy.
+	#
+	# Omitted rather than written empty when nothing matched: an absent key
+	# already reads as unknown on the other side, and an empty string would
+	# be a second spelling of the same thing.
+	nameval=''
+	[ -n "$name" ] && nameval=$(printf ',"name":"%s"' "$name")
+	printf '{"event":"%s","t":%s%s}' "$event" "$(date +%s)" "$nameval" 2>/dev/null \
 		> "$DIR/$sid.state.$$.tmp" &&
 		mv -f "$DIR/$sid.state.$$.tmp" "$DIR/$sid.state" 2>/dev/null
 	;;

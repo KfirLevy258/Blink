@@ -155,6 +155,63 @@ for p in "$DIR" "$DIR/priv-1.state"; do
 done
 ok "state files are readable by this user alone"
 
+# 8e. The project directory name. It comes out of the same payload by the same
+#     means as the session id, so every shape the id extractor had to survive
+#     is repeated here -- a tool argument carrying its own copy of the key, the
+#     traversal names, and the characters that would end the value early. This
+#     one lands inside a JSON string rather than a filename, so the quote that
+#     would close that string early is a refusal too.
+check_name() {
+	rm -f "$DIR/abc.state"
+	printf '%s' "$1" | $SH "$SHIM" PreToolUse >/dev/null 2>&1
+	got=$(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' "$DIR/abc.state" 2>/dev/null)
+	[ "$got" = "$2" ] || fail "name from [$1] was [$got], wanted [$2]"
+}
+check_no_name() {
+	rm -f "$DIR/abc.state"
+	printf '%s' "$1" | $SH "$SHIM" PreToolUse >/dev/null 2>&1
+	if grep -q '"name"' "$DIR/abc.state" 2>/dev/null; then
+		fail "wrote a name key for [$1]: $(cat "$DIR/abc.state")"
+	fi
+}
+
+# The ordinary case: the last segment only, never the path above it.
+check_name '{"session_id":"abc","cwd":"/Users/kfir/Projects/LiveClaudeUi"}' \
+	'LiveClaudeUi'
+
+# Windows, where the separator is an escaped backslash in the JSON.
+check_name '{"session_id":"abc","cwd":"C:\\\\Users\\\\kfir\\\\Blink"}' 'Blink'
+
+# A tool argument carrying its own cwd must not win. The top-level key is
+# first, which is the same rule _ident relies on for session_id.
+check_name '{"session_id":"abc","cwd":"/home/k/Real","tool_input":{"cwd":"/tmp/Fake"}}' \
+	'Real'
+
+# Characters that would break out of the JSON string are refused whole.
+check_name '{"session_id":"abc","cwd":"/tmp/bad\"name"}' ''
+check_name '{"session_id":"abc","cwd":"/tmp/has space"}' ''
+
+# A backslash INSIDE the name is the one that cannot be refused, because on
+# the wire it is byte-for-byte the Windows separator two cases up: both are
+# `X\\Y` and nothing short of a JSON decoder can tell a separator from an
+# escaped literal. So it is treated as a separator and the tail is taken. That
+# mislabels a unix directory genuinely called `bad\name` -- a wrong label, not
+# an unsafe one, because the backslash is consumed by the pattern and what
+# gets written still carries neither `\` nor `"`. Refusing it instead would
+# refuse every Windows path there is.
+check_name '{"session_id":"abc","cwd":"/tmp/bad\\\\name"}' 'name'
+grep -q '\\' "$DIR/abc.state" && fail "a backslash reached the state file"
+
+# Relative traversal names never become a label.
+check_name '{"session_id":"abc","cwd":"/tmp/.."}' ''
+
+# Over-long is refused rather than truncated mid-name.
+check_name "{\"session_id\":\"abc\",\"cwd\":\"/tmp/$(printf 'a%.0s' $(seq 1 40))\"}" ''
+
+# No cwd at all is normal: the key is omitted, not written empty.
+check_no_name '{"session_id":"abc"}'
+ok "captures the project directory name, and only the final segment"
+
 # 9. Quote and command injection in the id.
 rm -f "$DIR/unknown.state"
 printf '{"session_id":"a\\"; touch %s/owned; echo \\"b"}' "$WORK" |
