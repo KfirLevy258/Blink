@@ -300,6 +300,18 @@ def test_no_name_when_two_sessions_share_the_state(tmp_path):
     assert frame.label == ""
 
 
+def test_no_name_when_two_hold_the_state_but_only_one_is_named(tmp_path):
+    # Only one of the two waiting sessions named itself. The guard is
+    # `counts.get(state, 0) == 1`, not `len(held) == 1` -- a simplification
+    # to the latter alone would leak this one name onto a two-holder frame.
+    write_session(tmp_path, "s1", "Notification", NOW, name="Named")
+    write_session(tmp_path, "s2", "Notification", NOW)
+    prov = ClaudeStateProvider(path=str(tmp_path))
+    frame = prov.poll(NOW)[0]
+    assert frame.n_wait == 2
+    assert frame.label == ""
+
+
 def test_name_comes_from_the_winning_state_not_another(tmp_path):
     # One waiting, two running. `waiting` wins, and the name must be the
     # waiting session's -- not a running one's, and not absent because the

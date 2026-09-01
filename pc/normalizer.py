@@ -189,6 +189,7 @@ def merge(frames):
         n_stuck=state_src.n_stuck if state_src else 0,
         n_idle=state_src.n_idle if state_src else 0,
         n_agents=state_src.n_agents if state_src else 0,
+        label=state_src.label if state_src else "",
     )
 
 

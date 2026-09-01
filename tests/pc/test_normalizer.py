@@ -175,6 +175,17 @@ def test_one_provider_costs_nothing_on_the_wire():
         assert k not in msg
 
 
+def test_the_name_travels_with_the_state_it_names():
+    """label lives on the same source frame as n_run/n_wait/etc. and rides
+    along by the same field-by-field rule -- see the block comment above
+    n_run in merge(). Dropped here, the project name never reaches the
+    board on any machine running more than one source."""
+    f = cli(NOW, session=40.0, state=base.STATE_WAITING)
+    f.label = "LiveClaudeUi"
+    m = normalizer.merge([f])
+    assert m.label == "LiveClaudeUi"
+
+
 def test_two_providers_still_fit_the_board_line_limit():
     from pc import protocol
     primary, secondary = normalizer.select_pair([
