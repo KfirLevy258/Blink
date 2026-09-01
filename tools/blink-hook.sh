@@ -17,16 +17,16 @@
 # only: the pattern below matches the path above it and discards it, so what
 # is written is "LiveClaudeUi" and never "/Users/kfir/Projects/LiveClaudeUi".
 #
-# This remains a policy rather than a structural guarantee, as the first
-# widening already made it. Nothing here enforces the list above except the
-# code below it.
-#
 # This is a real widening from the first version, which captured an event name
 # and a timestamp and nothing else. That made the metadata-only promise
 # structural -- there was nothing there to leak. It is now a policy instead,
 # which is weaker, and the reason for accepting that is that a single global
 # slot silently misreports the moment a second session exists: two terminals
 # overwrite each other and the panel confidently shows the wrong one.
+#
+# This remains a policy rather than a structural guarantee, as the first
+# widening already made it. Nothing here enforces the list above except the
+# code below it.
 #
 # The event name arrives as $1, from the settings entry we wrote, rather than
 # being parsed out of the payload. POSIX sh has no JSON parser and this runs on
@@ -82,13 +82,29 @@ sid=$(printf '%s' "$input" | _ident session_id)
 # The first character must be alphanumeric, for the reason spelled out above
 # _ident: it is what keeps the bare names `.` and `..` from becoming a label.
 #
+# The `1{...q}` line is the TOP-LEVEL guard, and it is not decoration. Taking
+# the first "cwd" is only the right key while a top-level one exists; with none
+# in the payload the first occurrence is whatever nested one comes first, so
+# `{"tool_input":{"cwd":"/tmp/Fake"}}` promoted a tool's own argument to the
+# name on the display. That is worse than the session_id bug it rhymes with:
+# _ident falls back to the harmless literal "unknown", while this fell back to
+# attacker-chosen content that other people can see.
+#
+# So: line 1 is everything before the first "cwd", and if a second `{` opened
+# in it we are already inside a nested object and refuse. This COUNTS braces
+# rather than tracking depth, which can only ever over-count -- a `{` inside a
+# string value costs us the name on that payload. It can never under-count,
+# because a nested "cwd" is a key in an object and an object cannot be entered
+# without a literal `{`. Conservative in the safe direction, which is the only
+# direction a sanitiser is allowed to be wrong in.
+#
 # 24 bytes, matching the daemon's cap: a first character plus 23.
 _projname() {
 	sed 's/"cwd"/\
 &/g' |
-		sed -n '2{s|^"cwd"[[:space:]]*:[[:space:]]*"[^"]*[/\]\([0-9A-Za-z][0-9A-Za-z._-]\{0,23\}\)".*|\1|p;}'
+		sed -n -e '1{/[{].*[{]/q;}' \
+			-e '2{s|^"cwd"[[:space:]]*:[[:space:]]*"[^"]*[/\]\([0-9A-Za-z][0-9A-Za-z._-]\{0,23\}\)".*|\1|p;}'
 }
-name=$(printf '%s' "$input" | _projname)
 
 # Private to the user. These files name the sessions someone has open, and
 # the default umask would leave them readable by every account on the machine.
@@ -120,6 +136,12 @@ SubagentStart|SubagentStop)
 	fi
 	;;
 *)
+	# The name is read HERE and not beside the session id, because this is
+	# the only branch that writes it. SessionEnd and the Subagent events were
+	# paying two sed processes each to compute a value they then discarded,
+	# on a path that runs many times a minute.
+	name=$(printf '%s' "$input" | _projname)
+
 	# Atomic write, same reason as the statusline shim: the daemon may read
 	# at any moment and a half-written file parses as malformed. The
 	# 2>/dev/null must come BEFORE the '>' target -- if opening the target
@@ -141,8 +163,13 @@ SubagentStart|SubagentStop)
 	# Omitted rather than written empty when nothing matched: an absent key
 	# already reads as unknown on the other side, and an empty string would
 	# be a second spelling of the same thing.
+	#
+	# Substituted rather than built with printf in a $(...): this runs on
+	# every tool call and that was a fork per call for a two-field string.
+	# Safe without quoting help because the class above already refused
+	# every `"` and `\` that could end the JSON string early.
 	nameval=''
-	[ -n "$name" ] && nameval=$(printf ',"name":"%s"' "$name")
+	[ -n "$name" ] && nameval=",\"name\":\"$name\""
 	printf '{"event":"%s","t":%s%s}' "$event" "$(date +%s)" "$nameval" 2>/dev/null \
 		> "$DIR/$sid.state.$$.tmp" &&
 		mv -f "$DIR/$sid.state.$$.tmp" "$DIR/$sid.state" 2>/dev/null

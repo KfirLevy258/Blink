@@ -164,13 +164,20 @@ ok "state files are readable by this user alone"
 check_name() {
 	rm -f "$DIR/abc.state"
 	printf '%s' "$1" | $SH "$SHIM" PreToolUse >/dev/null 2>&1
-	got=$(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' "$DIR/abc.state" 2>/dev/null)
+	[ -f "$DIR/abc.state" ] || fail "wrote no state file at all for [$1]"
+	got=$(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' "$DIR/abc.state")
 	[ "$got" = "$2" ] || fail "name from [$1] was [$got], wanted [$2]"
 }
+#     check_no_name insists the state file EXISTS before checking that the key
+#     is absent. Reading it with `sed ... 2>/dev/null` cannot tell "no name
+#     key" from "no file at all", so a refusal case asserted that way would go
+#     on passing if the shim crashed and wrote nothing -- the sanitiser's own
+#     tests are the last place that can afford to pass vacuously.
 check_no_name() {
 	rm -f "$DIR/abc.state"
 	printf '%s' "$1" | $SH "$SHIM" PreToolUse >/dev/null 2>&1
-	if grep -q '"name"' "$DIR/abc.state" 2>/dev/null; then
+	[ -f "$DIR/abc.state" ] || fail "wrote no state file at all for [$1]"
+	if grep -q '"name"' "$DIR/abc.state"; then
 		fail "wrote a name key for [$1]: $(cat "$DIR/abc.state")"
 	fi
 }
@@ -187,9 +194,22 @@ check_name '{"session_id":"abc","cwd":"C:\\\\Users\\\\kfir\\\\Blink"}' 'Blink'
 check_name '{"session_id":"abc","cwd":"/home/k/Real","tool_input":{"cwd":"/tmp/Fake"}}' \
 	'Real'
 
+# ...and with NO top-level cwd, "first occurrence" is no longer the same thing
+# as "top-level", so first-occurrence alone promoted the tool's own argument to
+# the name on the display. Nothing is the only right answer here: the header
+# promises the tool arguments are not read, and unknown is already what an
+# absent key means. Nested one deep, two deep, and through an array.
+check_no_name '{"session_id":"abc","tool_input":{"cwd":"/tmp/Fake"}}'
+check_no_name '{"session_id":"abc","tool_input":{"deep":{"cwd":"/tmp/Fake"}}}'
+check_no_name '{"session_id":"abc","tool_input":[{"cwd":"/tmp/Fake"}]}'
+
+# A top-level cwd standing after a top-level array still reads: the guard
+# counts the `{` that entering an object requires, not brackets.
+check_name '{"session_id":"abc","edits":["x"],"cwd":"/home/k/Real"}' 'Real'
+
 # Characters that would break out of the JSON string are refused whole.
-check_name '{"session_id":"abc","cwd":"/tmp/bad\"name"}' ''
-check_name '{"session_id":"abc","cwd":"/tmp/has space"}' ''
+check_no_name '{"session_id":"abc","cwd":"/tmp/bad\"name"}'
+check_no_name '{"session_id":"abc","cwd":"/tmp/has space"}'
 
 # A backslash INSIDE the name is the one that cannot be refused, because on
 # the wire it is byte-for-byte the Windows separator two cases up: both are
@@ -203,10 +223,10 @@ check_name '{"session_id":"abc","cwd":"/tmp/bad\\\\name"}' 'name'
 grep -q '\\' "$DIR/abc.state" && fail "a backslash reached the state file"
 
 # Relative traversal names never become a label.
-check_name '{"session_id":"abc","cwd":"/tmp/.."}' ''
+check_no_name '{"session_id":"abc","cwd":"/tmp/.."}'
 
 # Over-long is refused rather than truncated mid-name.
-check_name "{\"session_id\":\"abc\",\"cwd\":\"/tmp/$(printf 'a%.0s' $(seq 1 40))\"}" ''
+check_no_name "{\"session_id\":\"abc\",\"cwd\":\"/tmp/$(printf 'a%.0s' $(seq 1 40))\"}"
 
 # No cwd at all is normal: the key is omitted, not written empty.
 check_no_name '{"session_id":"abc"}'
