@@ -92,8 +92,10 @@ int main(void)
 				   GAUGE_ARC_SZ, GAUGE_ARC_SZ);
 	struct box arc_r = top_mid("arc R", GAUGE_CX, GAUGE_ARC_Y,
 				   GAUGE_ARC_SZ, GAUGE_ARC_SZ);
+	/* Height is GAUGE_PCT_FONT_H, not FONT_LINE_H: this label is drawn at
+	 * montserrat_20, not the screen's default 14. */
 	struct box pct_l = top_mid("percentage L", -GAUGE_CX, GAUGE_PCT_Y,
-				   80, FONT_LINE_H);
+				   80, GAUGE_PCT_FONT_H);
 	struct box name_l = top_mid("SESSION caption", -GAUGE_CX,
 				    GAUGE_NAME_Y, 110, FONT_LINE_H);
 	struct box name_r = top_mid("WEEKLY caption", GAUGE_CX, GAUGE_NAME_Y,
@@ -138,6 +140,17 @@ int main(void)
 	CHECK(arc_l.y1 <= name_l.y0, "the caption sits below its ring");
 
 	/* --- the ring hollow --- */
+	/*
+	 * The percentage must clear the arc's own stroke, not merely fit
+	 * inside the ring's outer bounding box -- text drawn as wide as the
+	 * ring would paint over the coloured track. "1000%" is the longest
+	 * string this label is ever asked to hold: pct_int() in usage_view.c
+	 * clamps at PCT_DISPLAY_MAX (1000). Measured straight from
+	 * lv_font_montserrat_20.c's own glyph_dsc table, not guessed: '1' is
+	 * 7 px, '0' is 13 px, '%' is 17 px, so "1000%" is 7+13*3+17 = 63 px.
+	 */
+	CHECK(63 <= GAUGE_ARC_SZ - 2 * GAUGE_ARC_W,
+	      "the widest percentage this label ever shows clears the arc's stroke");
 	/* --- one countdown per gauge --- */
 	CHECK(cd_l.x1 <= cd_r.x0,
 	      "the two gauges' countdowns do not meet in the middle");
@@ -169,12 +182,35 @@ int main(void)
 	 */
 	EXPECT_EQ(GAUGE_ARC_Y + GAUGE_ARC_SZ + 4, GAUGE_NAME_Y);
 
-	/* The percentage keeps its offset inside the ring. */
-	EXPECT_EQ(GAUGE_PCT_Y - GAUGE_ARC_Y, 46);
+	/*
+	 * The percentage is CENTRED on the ring, not offset from its (now
+	 * moving) top. The ring shrank from the top while its bottom stayed
+	 * pinned at GAUGE_NAME_Y - 4, so "46 px below the arc's top" used to
+	 * mean the ring's centre and stopped meaning that the moment the ring
+	 * got shorter -- it silently dragged the number about 20 px below
+	 * centre instead. Comparing centres is the invariant a reader
+	 * actually sees, and it survives the ring changing size again.
+	 */
+	EXPECT_EQ(GAUGE_PCT_Y + GAUGE_PCT_FONT_H / 2,
+		  GAUGE_ARC_Y + GAUGE_ARC_SZ / 2);
 
-	/* The corner the clock vacated is clear for Task 8's indicator. */
-	CHECK(HDR_ROW_Y + DOT_SZ <= TITLE_Y + FONT_LINE_H,
-	      "the corner the clock vacated is clear for the indicator");
+	/*
+	 * The corner the clock vacated (top-left, at HDR_ROW_Y -- the same Y
+	 * the status dot uses top-right) is clear of the clock's new row
+	 * below it, room for Task 8's indicator.
+	 */
+	CHECK(HDR_ROW_Y + DOT_SZ <= CLOCK_Y,
+	      "the vacated top-left corner clears the clock stacked below it");
+
+	/*
+	 * The age label (top-right, HDR_ROW_Y) and the clock (CLOCK_Y, its
+	 * own row now) meet with a 0 px seam -- but it is a VERTICAL seam:
+	 * the age's row ends exactly where the clock's row begins, so the two
+	 * never share a Y band and a wider clock string cannot walk into the
+	 * age label no matter how wide it gets.
+	 */
+	CHECK(HDR_ROW_Y + FONT_LINE_H <= CLOCK_Y,
+	      "the age label's row ends before the clock's row begins");
 
 	/* --- the bottom stacks: countdowns, pill, rail --- */
 	CHECK(who.y0 >= cd_l.y1,

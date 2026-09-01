@@ -37,6 +37,15 @@
  */
 #define FONT_LINE_H		16
 
+/*
+ * Line height of lv_font_montserrat_20, the percentage label's own font --
+ * NOT FONT_LINE_H, which is the DEFAULT font's height and belongs to every
+ * other label on this screen. lv_font_montserrat_20.c declares
+ * .line_height = 22. Needed to centre GAUGE_PCT_Y inside the ring rather than
+ * offsetting it from a moving edge.
+ */
+#define GAUGE_PCT_FONT_H	22
+
 /* Header: brand centred, clock stacked under it, age + dot right. */
 #define TITLE_Y			4
 #define HDR_ROW_Y		8
@@ -90,9 +99,25 @@
 
 
 /*
- * No execution-state pip. It sat top-left under the clock while the status dot
- * sat top-right -- two unlabelled circles in the same colour vocabulary saying
- * unrelated things. They are one indicator now, top-right; see refresh_dot().
+ * An execution-state pip is BACK in the top-left corner, and this is not a
+ * revert of the decision that removed it.
+ *
+ * Commit 6540287 ("colour meant three different things, and two dots said
+ * the same one") pulled a top-left activity pip and a top-right status dot
+ * into one indicator, for two reasons: the top-left corner was occupied by
+ * the clock, and two unlabelled circles in the same green/amber/red
+ * vocabulary said unrelated things with no way to tell which.
+ *
+ * Both reasons are answered now, not ignored. The clock moved to CLOCK_Y,
+ * centred under the brand -- that is what freed the corner, and freeing it
+ * was the whole point of this task. And the hint line at STATUS_Y now names
+ * whichever condition fired, so a circle up there is no longer unlabelled:
+ * colour gets you "something is wrong", the sentence under it gets you
+ * which. That is the arrangement commit 6540287 could not have had, because
+ * the corner and the label did not exist yet.
+ *
+ * See refresh_dots() in usage_view.c -- with the s, one call refreshing both
+ * circles.
  */
 
 /* The two arcs. */
@@ -112,8 +137,25 @@
  * ring exactly on the caption with no gap at all.
  */
 #define GAUGE_ARC_SZ		100
-#define GAUGE_PCT_Y		110	/* same 46 px inside the ring as before */
-#define GAUGE_PCT_MAX_W		96	/* "100%" at montserrat_20 */
+/*
+ * Centred on the ring, not offset from its top.
+ *
+ * The ring shrank from the top -- its bottom stayed pinned at GAUGE_NAME_Y -
+ * 4 -- so an earlier version of this that preserved "46 px from the arc's
+ * top" preserved an offset from an edge that had moved, not where the number
+ * actually sits inside the ring. The reader saw a percentage sitting low in
+ * its ring by about 20 px. Centring on the ring is the invariant a reader
+ * can actually see, and writing it as this expression means the label
+ * follows automatically if the ring's size or position ever changes again.
+ */
+#define GAUGE_PCT_Y		(GAUGE_ARC_Y + (GAUGE_ARC_SZ - GAUGE_PCT_FONT_H) / 2)
+/*
+ * The ring's own hollow (GAUGE_ARC_SZ minus the stroke on both sides), not a
+ * guess -- this used to just equal that by coincidence (96 = 120 - 2*12
+ * before the ring shrank) until the ring did and the width didn't follow. A
+ * label wider than the hollow paints over the coloured track it sits on.
+ */
+#define GAUGE_PCT_MAX_W		(GAUGE_ARC_SZ - 2 * GAUGE_ARC_W)
 
 /*
  * The countdown moved INSIDE the ring, under the percentage.
