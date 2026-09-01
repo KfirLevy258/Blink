@@ -173,25 +173,31 @@ class ClaudeStateProvider(base.ProviderParser):
     # --- one session ------------------------------------------------------
 
     def _read_state(self, path, now_epoch):
-        """(state, age) for one session's slot file, or (None, None)."""
+        """(state, age, name) for one session's slot, or (None, None, "")."""
         try:
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
         except (OSError, ValueError):
-            return None, None
+            return None, None, ""
         if not isinstance(payload, dict):
-            return None, None
+            return None, None, ""
         event = payload.get("event")
         if not isinstance(event, str) or not event:
-            return None, None
+            return None, None, ""
         try:
             t = float(payload["t"])
         except (KeyError, TypeError, ValueError):
-            return None, None
+            return None, None, ""
         if not (T_EPOCH_MIN <= t <= T_EPOCH_MAX):
-            return None, None
+            return None, None, ""
+        # A name is optional and its absence is ordinary: a state file written
+        # by a shim older than this feature has no key, and the shim omits it
+        # whenever the payload's cwd did not survive sanitising.
+        name = payload.get("name")
+        if not isinstance(name, str):
+            name = ""
         age = now_epoch - t
-        return derive_state(event, age), age
+        return derive_state(event, age), age, name
 
     def _count_agents(self, session_dir, now_epoch):
         """Live agents for one session.
@@ -222,21 +228,24 @@ class ClaudeStateProvider(base.ProviderParser):
     # --- the whole directory ----------------------------------------------
 
     def scan(self, now_epoch):
-        """{state: n_sessions}, total live agents. Sweeps what it finds dead."""
+        """{state: n_sessions}, {state: [names]}, total live agents.
+
+        Sweeps what it finds dead."""
         try:
             entries = os.listdir(self._dir)
         except OSError:
             # No hooks installed, or nothing has happened yet. Both normal.
-            return {}, 0
+            return {}, {}, 0
 
         counts = {}
+        names = {}
         agents = 0
         for name in entries:
             if not name.endswith(".state"):
                 continue
             sid = name[: -len(".state")]
             state_path = os.path.join(self._dir, name)
-            state, age = self._read_state(state_path, now_epoch)
+            state, age, sess_name = self._read_state(state_path, now_epoch)
 
             if state is None or state == base.STATE_UNKNOWN:
                 # Unreadable, or so old the session is certainly gone. Collect
@@ -248,20 +257,34 @@ class ClaudeStateProvider(base.ProviderParser):
                 continue
 
             counts[state] = counts.get(state, 0) + 1
+            if sess_name:
+                names.setdefault(state, []).append(sess_name)
             agents += self._count_agents(os.path.join(self._dir, sid),
                                          now_epoch)
-        return counts, agents
+        return counts, names, agents
 
     def poll(self, now_epoch):
-        counts, agents = self.scan(now_epoch)
+        counts, names, agents = self.scan(now_epoch)
         if not counts:
             return []
         state = worst_of(counts)
         if state == base.STATE_UNKNOWN:
             return []
+        # Named only when the winning state is held by exactly ONE session.
+        #
+        # Naming one of several is the mistake the context row was cut for:
+        # "88% of 4" qualified one number into honesty and still did not say
+        # WHICH. A count says something true about all of them; a name picked
+        # from three says something true about one and implies it about the
+        # rest.
+        label = ""
+        held = names.get(state, [])
+        if counts.get(state, 0) == 1 and len(held) == 1:
+            label = held[0]
         frame = base.NormalizedUsageFrame(
             provider=PROVIDER_ID, src=SRC_ID, observed_at=now_epoch,
             state=state,
+            label=label,
             n_run=counts.get(base.STATE_RUNNING, 0),
             n_wait=counts.get(base.STATE_WAITING, 0),
             n_stuck=(counts.get(base.STATE_STUCK, 0)

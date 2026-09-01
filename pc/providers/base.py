@@ -127,6 +127,12 @@ class NormalizedUsageFrame:
     n_stuck: int = 0
     n_idle: int = 0
     n_agents: int = 0
+    # Which project the ONE session in `state` belongs to, when there is
+    # exactly one. Empty when several share the state -- see
+    # claude_state.poll for why naming one of several is refused rather than
+    # guessed. Only the hook-backed provider can ever set it; every other
+    # source leaves it empty and the board falls back to the count.
+    label: str = ""
 
     def n_sessions(self) -> int:
         return self.n_run + self.n_wait + self.n_stuck + self.n_idle

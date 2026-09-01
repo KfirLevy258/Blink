@@ -42,7 +42,7 @@ def test_a_slot_with_a_nonsense_timestamp_is_ignored(tmp_path):
     d.mkdir()
     for bad in ("NaN", "Infinity", "1787700000000", "12"):
         (d / "x.state").write_text('{"event":"PreToolUse","t":%s}' % bad)
-        counts, _ = ClaudeStateProvider(path=str(d)).scan(NOW)
+        counts, _, _ = ClaudeStateProvider(path=str(d)).scan(NOW)
         assert counts == {}, bad
 
 
@@ -142,8 +142,11 @@ def test_worst_of_nothing_is_nothing():
 # --- the directory --------------------------------------------------------
 
 
-def write_session(d, sid, event, t):
-    (d / f"{sid}.state").write_text(json.dumps({"event": event, "t": t}))
+def write_session(d, sid, event, t, name=None):
+    payload = {"event": event, "t": t}
+    if name is not None:
+        payload["name"] = name
+    (d / f"{sid}.state").write_text(json.dumps(payload))
 
 
 def add_agent(d, sid, aid, t=None):
@@ -278,6 +281,54 @@ def test_stray_files_in_the_directory_are_ignored(state_dir):
     (state_dir / "s1.state").write_text(json.dumps(
         {"event": "PreToolUse", "t": NOW - 5}))
     assert provider(state_dir).poll(NOW)[0].n_sessions() == 1
+
+
+def test_name_is_carried_when_one_session_holds_the_state(tmp_path):
+    write_session(tmp_path, "s1", "Notification", NOW, name="LiveClaudeUi")
+    prov = ClaudeStateProvider(path=str(tmp_path))
+    frame = prov.poll(NOW)[0]
+    assert frame.state == base.STATE_WAITING
+    assert frame.label == "LiveClaudeUi"
+
+
+def test_no_name_when_two_sessions_share_the_state(tmp_path):
+    write_session(tmp_path, "s1", "Notification", NOW, name="Blink")
+    write_session(tmp_path, "s2", "Notification", NOW, name="Other")
+    prov = ClaudeStateProvider(path=str(tmp_path))
+    frame = prov.poll(NOW)[0]
+    assert frame.n_wait == 2
+    assert frame.label == ""
+
+
+def test_name_comes_from_the_winning_state_not_another(tmp_path):
+    # One waiting, two running. `waiting` wins, and the name must be the
+    # waiting session's -- not a running one's, and not absent because the
+    # runners are plural.
+    write_session(tmp_path, "s1", "Notification", NOW, name="Waiter")
+    write_session(tmp_path, "s2", "PreToolUse", NOW, name="RunnerA")
+    write_session(tmp_path, "s3", "PreToolUse", NOW, name="RunnerB")
+    prov = ClaudeStateProvider(path=str(tmp_path))
+    frame = prov.poll(NOW)[0]
+    assert frame.state == base.STATE_WAITING
+    assert frame.label == "Waiter"
+
+
+def test_state_file_without_a_name_is_normal(tmp_path):
+    # Written by a shim older than this feature. Absent is not malformed.
+    write_session(tmp_path, "s1", "Notification", NOW)
+    prov = ClaudeStateProvider(path=str(tmp_path))
+    frame = prov.poll(NOW)[0]
+    assert frame.state == base.STATE_WAITING
+    assert frame.label == ""
+
+
+def test_a_non_string_name_is_ignored_not_fatal(tmp_path):
+    path = tmp_path / "s1.state"
+    path.write_text(json.dumps({"event": "Notification", "t": NOW,
+                                "name": {"not": "a string"}}))
+    prov = ClaudeStateProvider(path=str(tmp_path))
+    frame = prov.poll(NOW)[0]
+    assert frame.label == ""
 
 
 def test_this_source_carries_no_usage_percentage(state_dir):
