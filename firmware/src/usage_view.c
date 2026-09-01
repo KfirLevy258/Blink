@@ -601,9 +601,10 @@ void usage_view_init(void)
 	lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 	lv_scr_load(scr);
 
-	/* Header: brand dead-center, quiet data in the corners -- clock left,
-	 * age + dot right, everything at the same small size (the 20 px clock
-	 * shouted over the gauges; user feedback 2026-07-16). */
+	/* Header: brand dead-center with the clock stacked under it, age + dot
+	 * still in the top-right corner, everything at the same small size
+	 * (the 20 px clock shouted over the gauges; user feedback
+	 * 2026-07-16). */
 	lv_obj_t *title = lv_label_create(scr);
 
 	lv_label_set_text(title, BRAND_TEXT);
@@ -630,9 +631,9 @@ void usage_view_init(void)
 	/*
 	 * Ellipsize rather than wrap. Every string this label held used to be
 	 * a fixed literal that fit, so wrapping was unreachable; a project
-	 * name removes that guarantee, and STATUS_Y (24) plus FONT_LINE_H
-	 * (16) puts a second line at y=40 -- on top of the arcs at
-	 * GAUGE_ARC_Y (44). Same call as provider_lbl.
+	 * name removes that guarantee, and STATUS_Y (44) plus FONT_LINE_H
+	 * (16) puts a second line at y=60 -- on top of the arcs at
+	 * GAUGE_ARC_Y (64). Same call as provider_lbl.
 	 */
 	lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
 	/*
@@ -669,7 +670,7 @@ void usage_view_init(void)
 	clock_lbl = lv_label_create(scr);
 	lv_label_set_text(clock_lbl, "");
 	lv_obj_set_style_text_color(clock_lbl, COL_DIM, 0);
-	lv_obj_align(clock_lbl, LV_ALIGN_TOP_LEFT, 10, HDR_ROW_Y);
+	lv_obj_align(clock_lbl, LV_ALIGN_TOP_MID, 0, CLOCK_Y);
 
 	/* Whose numbers these are, directly under the brand. Blank until the
 	 * daemon says -- an empty line reads as "nothing to report", where a

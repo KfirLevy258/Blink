@@ -25,6 +25,19 @@ static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
 	else { printf("PASS: %s\n", m); } } while (0)
 
+/* Same PASS/FAIL-plus-failures-counter shape as CHECK above, spelled for a
+ * pair of numbers so a mismatch prints both sides instead of just the
+ * condition that failed. */
+#define EXPECT_EQ(got, want) do { \
+	long g_ = (long)(got), w_ = (long)(want); \
+	if (g_ == w_) { \
+		printf("PASS: %-28s -> %ld\n", #got, g_); \
+	} else { \
+		printf("FAIL: %-28s -> %ld (want %ld)\n", #got, g_, w_); \
+		failures++; \
+	} \
+} while (0)
+
 struct box { const char *name; int x0, y0, x1, y1; };
 
 /* TOP_MID: x is an offset of the object's CENTRE from the screen centre. */
@@ -139,6 +152,29 @@ int main(void)
 	      "the status line sits below the brand, not on it");
 	CHECK(arc_l.y0 >= status.y1,
 	      "the gauges start below the status line");
+
+	/*
+	 * The header is now three stacked rows, not two corners and a line.
+	 * Every seam is 4 px, which is the rhythm the top of usage_layout.h
+	 * mandates -- these assert it rather than trusting it.
+	 */
+	EXPECT_EQ(CLOCK_Y, TITLE_Y + FONT_LINE_H + 4);
+	EXPECT_EQ(STATUS_Y, CLOCK_Y + FONT_LINE_H + 4);
+	EXPECT_EQ(GAUGE_ARC_Y, STATUS_Y + FONT_LINE_H + 4);
+
+	/*
+	 * The bottom stack is immovable, so the arc's BOTTOM is what had to
+	 * give. Caption top at 168 is the ceiling everything above is fitted
+	 * to; this is the assertion that catches a ring grown back to 120.
+	 */
+	EXPECT_EQ(GAUGE_ARC_Y + GAUGE_ARC_SZ + 4, GAUGE_NAME_Y);
+
+	/* The percentage keeps its offset inside the ring. */
+	EXPECT_EQ(GAUGE_PCT_Y - GAUGE_ARC_Y, 46);
+
+	/* The corner the clock vacated is clear for Task 8's indicator. */
+	CHECK(HDR_ROW_Y + DOT_SZ <= TITLE_Y + FONT_LINE_H,
+	      "the corner the clock vacated is clear for the indicator");
 
 	/* --- the bottom stacks: countdowns, pill, rail --- */
 	CHECK(who.y0 >= cd_l.y1,

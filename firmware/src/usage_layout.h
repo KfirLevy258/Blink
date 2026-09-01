@@ -37,11 +37,21 @@
  */
 #define FONT_LINE_H		16
 
-/* Header: brand centred, clock left, age + dot right. */
-#define TITLE_Y			6
+/* Header: brand centred, clock stacked under it, age + dot right. */
+#define TITLE_Y			4
 #define HDR_ROW_Y		8
 #define DOT_SZ			12
 #define BRAND_TEXT		"BLINK"
+
+/*
+ * The clock, centred UNDER the brand rather than in the top-left corner.
+ *
+ * It moved for the corner, not for itself: an execution-state indicator needs
+ * a place the eye already goes, and the top-left is the only one left once the
+ * age and the status dot have the right. Stacking brand over time also reads
+ * as one header block instead of three things sharing a strip.
+ */
+#define CLOCK_Y			24
 
 /*
  * Whose numbers these are, directly under the brand.
@@ -75,7 +85,7 @@
  * here, because "Reading is old - showing last known" is 35 characters and
  * the corners above it are the clock and the dot on their own row.
  */
-#define STATUS_Y		24
+#define STATUS_Y		44
 #define STATUS_MAX_W		300
 
 
@@ -87,9 +97,22 @@
 
 /* The two arcs. */
 #define GAUGE_CX		80
-#define GAUGE_ARC_Y		44
-#define GAUGE_ARC_SZ		120
-#define GAUGE_PCT_Y		90
+#define GAUGE_ARC_Y		64
+/*
+ * 100, down from 120.
+ *
+ * The header grew a row and every pixel of it came from here, because nothing
+ * below the arcs can move: the rail is pinned by RAIL_BOTTOM_OFF, the pill
+ * must clear it by 2, the countdowns must clear the pill by 2, and the caption
+ * must clear the countdowns by 2. GAUGE_NAME_Y at 168 is therefore a ceiling,
+ * not a preference -- see the pill's own comment about an earlier 3 px padding
+ * that went straight through the countdowns.
+ *
+ * 100 rather than 104 so every seam stays on the 4 px rhythm; 104 lands the
+ * ring exactly on the caption with no gap at all.
+ */
+#define GAUGE_ARC_SZ		100
+#define GAUGE_PCT_Y		110	/* same 46 px inside the ring as before */
 #define GAUGE_PCT_MAX_W		96	/* "100%" at montserrat_20 */
 
 /*
