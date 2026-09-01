@@ -1758,6 +1758,22 @@ void usage_view_set_activity(enum usage_activity a)
 	usage_view_set_status(last_status);
 }
 
+void usage_view_set_session(const char *label, int n)
+{
+	if (label) {
+		strncpy(session_label, label, sizeof(session_label) - 1);
+		session_label[sizeof(session_label) - 1] = '\0';
+	} else {
+		session_label[0] = '\0';
+	}
+	session_n = n;
+	/* Re-run the status switch so the line picks the new subject up. The
+	 * dot is unaffected -- neither input to refresh_dot changed -- but
+	 * set_status owns the composition and calling it is how the label is
+	 * rebuilt. */
+	usage_view_set_status(last_status);
+}
+
 /*
  * Session and agent counts are no longer drawn.
  *

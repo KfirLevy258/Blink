@@ -96,6 +96,15 @@ void usage_view_set_status(enum usage_status status);
 void usage_view_set_activity(enum usage_activity a);
 
 /*
+ * Which project the panel should name, and how many sessions hold the state.
+ *
+ * `label` may be empty, which is the ordinary case whenever several sessions
+ * share the state -- the daemon refuses to pick one, so the line falls back
+ * to the count. See pc/providers/claude_state.py.
+ */
+void usage_view_set_session(const char *label, int n);
+
+/*
  * How many Claude Code sessions are open, and how many subagents are running
  * across them. Both 0 hides the readout entirely.
  *

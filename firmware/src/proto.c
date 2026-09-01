@@ -605,6 +605,24 @@ static void dispatch(const char *json)
 		printk("[proto] host status: %s\n", st);
 		usage_view_set_status(strcmp(st, "rate_limited") == 0 ?
 				      USAGE_STATUS_STALE : USAGE_STATUS_ERROR);
+	} else if (strcmp(type, "session") == 0) {
+		/*
+		 * Which project is doing the thing the dot is already
+		 * colouring. Its own message rather than a field on `usage`
+		 * because that line is at 506 of the 512 this parser accepts
+		 * and an over-long one is dropped whole -- see
+		 * pc/protocol.py:331.
+		 *
+		 * An absent label is the normal several-sessions case, not a
+		 * parse failure: the daemon refuses to name one of several,
+		 * and `n` carries the meaning instead.
+		 */
+		char lbl[28] = "";
+		double n = 0;
+
+		msg_get_str(json, "label", lbl, sizeof(lbl));
+		num(json, "n", &n, 0, 9999);
+		usage_view_set_session(lbl, (int)n);
 	}
 	/* unknown types ignored */
 }

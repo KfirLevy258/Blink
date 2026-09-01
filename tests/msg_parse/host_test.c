@@ -93,6 +93,36 @@ int main(void)
 		      "an absent key is still absent");
 	}
 
+	/* The session message: an optional label and a count. */
+	{
+		char lbl[28] = "";
+		double n = 0;
+		const char *j =
+			"{\"t\":\"session\",\"v\":1,"
+			"\"label\":\"LiveClaudeUi\",\"n\":1}";
+
+		CHECK(msg_get_str(j, "label", lbl, sizeof(lbl)) &&
+		      strcmp(lbl, "LiveClaudeUi") == 0, "session label");
+		CHECK(msg_get_double(j, "n", &n) && (int)n == 1, "session n=1");
+	}
+	{
+		/* Absent label is the normal several-sessions case. */
+		char lbl[28] = "x";
+		const char *j = "{\"t\":\"session\",\"v\":1,\"n\":3}";
+
+		CHECK(!msg_get_str(j, "label", lbl, sizeof(lbl)),
+		      "absent label is not a parse failure");
+	}
+	{
+		/* A label longer than the buffer must truncate, not overrun. */
+		char lbl[8] = "";
+		const char *j =
+			"{\"t\":\"session\",\"label\":\"abcdefghijklmno\"}";
+
+		msg_get_str(j, "label", lbl, sizeof(lbl));
+		CHECK(strlen(lbl) == 7, "an over-long label truncates to buflen-1");
+	}
+
 	printf("\n%s (%d failures)\n", failures ? "TESTS FAILED" : "ALL TESTS PASSED", failures);
 	return failures ? 1 : 0;
 }
