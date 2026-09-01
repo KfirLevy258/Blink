@@ -433,6 +433,38 @@ def edition(name: str) -> dict:
     return {"t": "edition", "v": VERSION, "edition": name}
 
 
+# 24 bytes. STATUS_MAX_W is 300 px and usage_layout.h records
+# "Reading is old - showing last known" (35 characters) as the string that
+# sized it, so "Waiting for you - " leaves roughly 17 characters of room.
+# This is a BYTE bound and the panel's is a PIXEL one; they are different
+# questions and only this one can be answered here, which is why the firmware
+# also sets LV_LABEL_LONG_DOT.
+SESSION_LABEL_MAX_BYTES = 24
+
+
+def session(label: str, n: int) -> dict:
+    """Which project the board should name, and how many share the state.
+
+    Its own message type rather than a field on the usage frame, and that is
+    a measurement rather than a preference: the usage line was measured at
+    506 of MAX_LINE_BYTES=512 fully loaded, proto.c drops an over-long line
+    whole, and a label is more than six bytes. Additive like `edition` --
+    firmware that predates it ignores an unknown type, so an older board
+    keeps the behaviour it has today.
+
+    Sent on change and on every connect, not every poll: the numbers move
+    constantly and the project name does not.
+    """
+    msg = {"t": "session", "v": VERSION, "n": int(n)}
+    if label:
+        # Truncate on a CHARACTER boundary that survives the byte bound --
+        # slicing bytes can halve a multibyte sequence and produce a field
+        # that cannot be decoded at the other end.
+        trimmed = label.encode("utf-8")[:SESSION_LABEL_MAX_BYTES]
+        msg["label"] = trimmed.decode("utf-8", "ignore")
+    return msg
+
+
 def status(state: str, detail: str = "") -> dict:
     return {"t": "status", "v": VERSION, "state": state, "detail": detail}
 

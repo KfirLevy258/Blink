@@ -109,6 +109,75 @@ def test_make_fetch_is_a_zero_arg_callable():
     assert fetch()["session_pct"] == 50.0
 
 
+# --- the project name, which rides beside the usage message ----------------
+
+
+def named(provider="claude", src="hook", at=NOW, session=50.0, weekly=20.0,
+          state=base.STATE_WAITING, label="LiveClaudeUi", **counts):
+    f = frame(provider=provider, src=src, at=at, session=session,
+              weekly=weekly)
+    f.state = state
+    f.label = label
+    for k, v in counts.items():
+        setattr(f, k, v)
+    return f
+
+
+def test_the_label_survives_the_whole_bus_path():
+    """The one that matters. session_pair() reads the frame select_pair
+    returned, and select_pair runs EVERY frame through normalizer.merge()
+    even when a provider produced only one -- so a merge that rebuilds the
+    frame field by field and forgets `label` would leave the board unnamed
+    with every unit test on this page still green.
+    """
+    bus = ingest.IngestionBus(providers=[Fixed(named(n_wait=1))],
+                              now=lambda: NOW)
+    bus.poll()
+    assert bus.session_pair() == ("LiveClaudeUi", 1)
+
+
+def test_the_label_survives_a_merge_of_two_sources():
+    """Two sources for one provider is the case that actually merges: the
+    hook knows the project and the CLI status line knows the percentages,
+    and the frame that reaches the board is neither of them.
+    """
+    hook = named(src="hook", at=NOW, session=base.UNKNOWN,
+                 weekly=base.UNKNOWN, n_wait=1)
+    cli = named(src="cli", at=NOW - 60, state=base.STATE_UNKNOWN, label="")
+    bus = ingest.IngestionBus(providers=[Fixed(hook), Fixed(cli)],
+                              now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["session_pct"] == 50.0            # from the CLI frame
+    assert bus.session_pair() == ("LiveClaudeUi", 1)   # from the hook frame
+
+
+def test_the_count_belongs_to_the_state_on_the_panel():
+    """The count that goes out is the one for the frame's own state -- the
+    same rule the normalizer applies to the counts themselves. A running
+    count beside a `waiting` state would be a panel naming a number that
+    describes some other session."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(label="", n_run=2, n_wait=3, n_idle=9))],
+        now=lambda: NOW)
+    bus.poll()
+    assert bus.session_pair() == ("", 3)
+
+
+def test_session_pair_before_any_poll_is_empty():
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    assert bus.session_pair() == ("", 0)
+
+
+def test_make_fetch_carries_the_accessor():
+    """Hung off the callable rather than returned from it: the Bridge is
+    handed a zero-arg callable returning a finished usage dict, and every
+    fake in tests/pc/test_bridge.py is a bare lambda that must keep
+    working."""
+    fetch = ingest.make_fetch(providers=[Fixed(named(n_wait=1))])
+    fetch()
+    assert fetch.session_pair() == ("LiveClaudeUi", 1)
+
+
 # --- the board owns the primary-provider preference ------------------------
 
 

@@ -69,6 +69,7 @@ class Bridge:
             fetch_signed_manifest = _u.fetch_signed_manifest
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
+        self._last_session = None        # (label, n) last sent; see poll_once
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -86,6 +87,12 @@ class Bridge:
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
+        # A board that just booted holds no session message, and poll_once
+        # only sends on change -- so on a reconnect the tracker is what makes
+        # it silent. Clear it BEFORE the poll, so the push happens inside it,
+        # the same shape as offer_if_newer on every connect rather than once
+        # per daemon lifetime.
+        self._last_session = None
         self.poll_once()                 # push current data immediately
         # Only once the board has been heard. On the no-reset connect path
         # greet() runs before any message has reached on_message, so
@@ -426,6 +433,22 @@ class Bridge:
         usage = protocol.cap_overage_for_fw(usage, self._board_fw)
 
         self._write(usage)
+
+        # The project name, on change only. It rides its own message because
+        # the usage line above has six bytes of headroom.
+        #
+        # Read off the fetch callable rather than passed through it: the
+        # Bridge is handed a zero-arg callable returning a finished usage
+        # dict and never sees the frame the name lives on. A fetch without
+        # the accessor -- every test fake, and the single-source fetch --
+        # simply sends nothing, which is what an older daemon did anyway.
+        session_pair = getattr(self._fetch, "session_pair", None)
+        if session_pair is not None:
+            pair = tuple(session_pair())
+            if pair != self._last_session:
+                self._write(protocol.session(*pair))
+                self._last_session = pair
+
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
         # board colours its own dot from the reading it was just given.

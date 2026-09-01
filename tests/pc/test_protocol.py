@@ -469,3 +469,86 @@ class OverageCapTest(unittest.TestCase):
         msg = protocol.frame_to_usage(f, now)
         self.assertEqual(msg["session_pct"], 102.3)
         self.assertEqual(msg["weekly_pct"], 89.0)
+
+
+class SessionMessage(unittest.TestCase):
+    """The project name travels as its own message type rather than as a
+    field on the usage line -- see the byte budget test at the bottom."""
+
+    def test_session_message_shape(self):
+        m = protocol.session("LiveClaudeUi", 1)
+        self.assertEqual(m["t"], "session")
+        self.assertEqual(m["label"], "LiveClaudeUi")
+        self.assertEqual(m["n"], 1)
+
+    def test_session_omits_an_empty_label(self):
+        # Absent already means unknown on both sides, and every optional key
+        # on this wire is omitted rather than sent as a sentinel.
+        self.assertNotIn("label", protocol.session("", 3))
+
+    def test_session_caps_the_label(self):
+        m = protocol.session("x" * 100, 1)
+        self.assertEqual(len(m["label"].encode()),
+                         protocol.SESSION_LABEL_MAX_BYTES)
+
+    def test_session_label_survives_multibyte_truncation(self):
+        # Cutting a UTF-8 sequence in half must not produce an undecodable
+        # field.
+        m = protocol.session("א" * 40, 1)
+        m["label"].encode()          # must not raise
+        self.assertLessEqual(len(m["label"].encode()),
+                             protocol.SESSION_LABEL_MAX_BYTES)
+        self.assertTrue(m["label"].startswith("א"))
+
+    def test_session_label_survives_a_three_byte_truncation(self):
+        """Three bytes per character does not divide 24, so this is the case
+        a raw byte slice actually halves."""
+        m = protocol.session("中" * 40, 2)
+        self.assertEqual(m["label"].encode().decode("utf-8"), m["label"])
+        self.assertLessEqual(len(m["label"].encode()),
+                             protocol.SESSION_LABEL_MAX_BYTES)
+
+    @staticmethod
+    def fully_loaded_usage_kwargs():
+        """Every optional key populated at its widest: two providers, all
+        three per-model percentages, both reset stamps, both countdowns,
+        both ages, every count, the burn rate, and unrounded overage
+        percentages on all four dials.
+
+        Wider than the pipeline can actually produce -- the normalizer never
+        sends a burn rate beside a reset time, and frame_to_usage, the only
+        caller of usage(), passes models=[] -- deliberately, because the
+        number this defends is a ceiling and a half-populated fixture would
+        clear the bar without measuring anything. It comes out at 510 of
+        512, which is the whole point: this line has two bytes of slack and
+        the project name is a great deal more than two bytes.
+        """
+        return dict(
+            session_pct=102.33333333333333,
+            session_resets_at=1788193800.0,
+            weekly_pct=102.66666666666667,
+            weekly_resets_at=1788584800.0,
+            models=[{"name": "fable", "weekly_pct": 91.11111111111111},
+                    {"name": "sonnet", "weekly_pct": 72.22222222222223},
+                    {"name": "opus", "weekly_pct": 63.33333333333333}],
+            session_resets_in_s=15335, weekly_resets_in_s=406335,
+            stale=True, provider="claude", src="desktop", state="waiting",
+            n_sess=4, n_run=1, n_wait=2, n_stuck=1, n_agents=3,
+            p2="codex", p2_session_pct=88.12345678901234,
+            p2_weekly_pct=91.98765432109876,
+            p2_session_resets_in_s=15335, p2_weekly_resets_in_s=406335,
+            p2_stale=True, burn_pph=9.33333333,
+            age_s=14400, p2_age_s=86399,
+        )
+
+    def test_usage_frame_did_not_grow(self):
+        # The frame was measured at 506 of 512 and proto.c drops an over-long
+        # line whole. This is the regression that would freeze panels: the
+        # project name became its own message BECAUSE this line has no room
+        # for it, so a label arriving here is the exact failure the new
+        # message type exists to prevent.
+        raw = protocol.encode(
+            protocol.usage(**self.fully_loaded_usage_kwargs())).decode()
+        self.assertLessEqual(len(raw.encode()), protocol.MAX_LINE_BYTES, raw)
+        self.assertNotIn("label", raw)
+        self.assertNotIn('"proj"', raw)

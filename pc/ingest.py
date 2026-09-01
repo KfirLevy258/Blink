@@ -15,6 +15,7 @@ import sys
 import time
 
 from pc import normalizer, protocol
+from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_state import ClaudeStateProvider
@@ -40,6 +41,12 @@ class IngestionBus:
         self._preferred = preferred_provider
         self._now = now
         self._broken = set()
+        # (label, n) for the frame the last poll() chose. Recorded there
+        # rather than recomputed here, so session_pair() answers for the same
+        # poll the board's usage message came from -- polling the providers a
+        # second time could pick a different winner and name a project that
+        # does not belong to the state on the panel.
+        self._session_pair = ("", 0)
 
     def add_provider(self, provider):
         """Onboard a provider at runtime. Nothing else has to change."""
@@ -103,7 +110,33 @@ class IngestionBus:
             self.poll_frames(), preferred=self._preferred)
         if primary is None:
             return None
+        self._session_pair = _pair_from(primary)
         return protocol.frame_to_usage(primary, self._now(), secondary)
+
+    def session_pair(self):
+        """(label, n) for the state the last poll() put on the panel.
+
+        Deliberately NOT part of the usage message: that line was measured at
+        506 of protocol.MAX_LINE_BYTES=512 fully loaded and proto.c drops an
+        over-long line whole, so the project name travels as its own message
+        (protocol.session) and this is where the daemon reads it.
+        """
+        return self._session_pair
+
+
+def _pair_from(frame):
+    """The label and the count that belong TOGETHER on the panel.
+
+    The count is the one for the frame's own state -- the same rule the
+    normalizer applies to the counts themselves, that a figure must describe
+    the state next to it. A state with no count of its own (failed, unknown)
+    reads as zero rather than borrowing another one.
+    """
+    n = {base.STATE_RUNNING: frame.n_run,
+         base.STATE_WAITING: frame.n_wait,
+         base.STATE_STUCK: frame.n_stuck,
+         base.STATE_IDLE: frame.n_idle}.get(frame.state, 0)
+    return (getattr(frame, "label", "") or "", int(n))
 
 
 def make_fetch(providers=None, preferred_provider="claude"):
@@ -114,4 +147,16 @@ def make_fetch(providers=None, preferred_provider="claude"):
     """
     bus = IngestionBus(providers=providers,
                        preferred_provider=preferred_provider)
-    return bus.poll
+
+    # A plain wrapper rather than bus.poll itself, so the project name can be
+    # hung off it as an attribute. The Bridge is handed a zero-arg callable
+    # returning a finished usage dict and never sees a frame; widening that
+    # contract (a tuple, or the label smuggled inside the usage dict) would
+    # either break every injected fake or put the label one slip away from
+    # the byte-capped usage line. Bridge reads it with getattr and sends
+    # nothing when it is absent, so a fetch without it still works.
+    def fetch():
+        return bus.poll()
+
+    fetch.session_pair = bus.session_pair
+    return fetch

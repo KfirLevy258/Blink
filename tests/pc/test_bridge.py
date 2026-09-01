@@ -266,3 +266,69 @@ class OverageCapIsWiredTest(unittest.TestCase):
         sent = []
         self._bridge(sent).poll_once()
         self.assertEqual(self._weekly(sent), 100.0)
+
+
+class SessionMessageIsSent(unittest.TestCase):
+    """The project name, in its own message beside the usage line.
+
+    The fetch callable carries it as an attribute: the Bridge is handed a
+    zero-arg callable returning a finished usage dict and never sees the
+    frame the name lives on (pc/ingest.make_fetch hangs session_pair on it).
+    """
+
+    def setUp(self):
+        self.sent = []
+        self.pair = ("LiveClaudeUi", 1)
+
+        def fetch():
+            return protocol.usage(61.0, "R1", 26.0, "R2", [])
+
+        fetch.session_pair = lambda: self.pair
+        self.bridge = Bridge(write_msg=self.sent.append, fetch_usage=fetch,
+                             now=FakeClock().now, app_ver="0.2.0",
+                             wall=lambda: (1752444000, 180))
+
+    def _sessions(self):
+        return [m for m in self.sent if m.get("t") == "session"]
+
+    def test_session_message_is_sent_when_the_label_changes(self):
+        self.bridge.poll_once()
+        self.assertEqual(self._sessions()[-1]["label"], "LiveClaudeUi")
+
+        self.bridge.poll_once()          # nothing changed
+        self.assertEqual(len(self._sessions()), 1)
+
+        self.pair = ("Blink", 2)
+        self.bridge.poll_once()
+        self.assertEqual(self._sessions()[-1]["label"], "Blink")
+        self.assertEqual(self._sessions()[-1]["n"], 2)
+
+    def test_session_message_is_resent_on_greet(self):
+        # A board that just booted holds nothing. Without this a replugged
+        # board shows a bare status until the next time the project happens
+        # to change -- the same reason firmware currency is re-offered on
+        # every connect rather than once per daemon lifetime.
+        self.bridge.poll_once()
+        self.sent.clear()
+        self.bridge.greet()
+        self.assertTrue(self._sessions())
+
+    def test_the_count_travels_even_when_the_label_is_empty(self):
+        """Several sessions share the state, so none of them can be named --
+        the board falls back to the count, which still has to arrive."""
+        self.pair = ("", 3)
+        self.bridge.poll_once()
+        m = self._sessions()[-1]
+        self.assertNotIn("label", m)
+        self.assertEqual(m["n"], 3)
+
+    def test_a_fetch_without_the_accessor_sends_nothing(self):
+        """Every other fetch in this file is a bare lambda, and the
+        single-source fetch has no session to report. Sending nothing is
+        exactly what an older daemon did."""
+        sent = []
+        b = Bridge(write_msg=sent.append,
+                   fetch_usage=lambda: protocol.usage(1.0, "R", 2.0, "R", []),
+                   now=FakeClock().now, wall=lambda: (1752444000, 180))
+        b.poll_once()
+        self.assertEqual([m["t"] for m in sent], ["time", "usage"])
