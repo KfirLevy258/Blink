@@ -986,3 +986,265 @@ git commit -m "docs: hint line verified on hardware"
 **Type consistency:** `fmt_hint(status, label, n_sessions, buf, buflen)` is defined in Task 1 and called in Task 1 Step 8 and through `usage_view_set_session` in Task 5. `session_label` / `session_n` are declared in Task 1 Step 8 and written in Task 5 Step 4. `NormalizedUsageFrame.label` is added in Task 3 and read in Task 4. `protocol.session(label, n)` is defined in Task 4 Step 3 and parsed in Task 5 Step 5 with matching key names `label` and `n`.
 
 **Known soft spots, called out rather than hidden:** Task 4 Step 4 says to derive the count "matching `frame.state`" without giving the mapping code, because the exact accessor depends on how the bridge holds the normalized frame at that point — the implementer should read `poll_once` and write it explicitly. Task 5 Step 1 leaves the numeric accessor to match `msg_parse.h`. Task 2's `check_name` helper is described rather than written, because it must follow harness conventions in `check_hook_shim.sh` that are better read than guessed.
+
+---
+
+### Task 7: The header regroups and the rings make room
+
+Implements the spec addendum's layout table. Pure geometry — no behaviour
+changes, no new wire fields, no new strings.
+
+**Files:**
+- Modify: `firmware/src/usage_layout.h`, `firmware/src/usage_view.c`
+- Test: `tests/usage_layout/host_test.c`
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks. `STATUS_Y` moves, which the hint label
+  from Task 1 follows automatically because it aligns to that constant.
+- Produces: `CLOCK_Y`, and the moved `GAUGE_ARC_Y` / `GAUGE_ARC_SZ` /
+  `GAUGE_PCT_Y` / `STATUS_Y` / `TITLE_Y` that Task 8 positions against.
+
+- [ ] **Step 1: Write the failing clearance assertions**
+
+Add to `tests/usage_layout/host_test.c`. These encode the budget the addendum
+measured, so a future edit cannot quietly reintroduce an overlap:
+
+```c
+	/*
+	 * The header is now three stacked rows, not two corners and a line.
+	 * Every seam is 4 px, which is the rhythm the top of usage_layout.h
+	 * mandates -- these assert it rather than trusting it.
+	 */
+	EXPECT_EQ(CLOCK_Y, TITLE_Y + FONT_LINE_H + 4);
+	EXPECT_EQ(STATUS_Y, CLOCK_Y + FONT_LINE_H + 4);
+	EXPECT_EQ(GAUGE_ARC_Y, STATUS_Y + FONT_LINE_H + 4);
+
+	/*
+	 * The bottom stack is immovable, so the arc's BOTTOM is what had to
+	 * give. Caption top at 168 is the ceiling everything above is fitted
+	 * to; this is the assertion that catches a ring grown back to 120.
+	 */
+	EXPECT_EQ(GAUGE_ARC_Y + GAUGE_ARC_SZ + 4, GAUGE_NAME_Y);
+
+	/* The percentage keeps its offset inside the ring. */
+	EXPECT_EQ(GAUGE_PCT_Y - GAUGE_ARC_Y, 46);
+
+	/* The corner the clock vacated is clear for Task 8's indicator. */
+	EXPECT(HDR_ROW_Y + DOT_SZ <= TITLE_Y + FONT_LINE_H);
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `sh tests/ci/check_host_tests.sh`
+Expected: `usage_layout BUILD FAILED` — `CLOCK_Y` undeclared.
+
+- [ ] **Step 3: Move the constants**
+
+In `firmware/src/usage_layout.h`, change these five values and add one:
+
+```c
+#define TITLE_Y			4
+```
+
+```c
+/*
+ * The clock, centred UNDER the brand rather than in the top-left corner.
+ *
+ * It moved for the corner, not for itself: an execution-state indicator needs
+ * a place the eye already goes, and the top-left is the only one left once the
+ * age and the status dot have the right. Stacking brand over time also reads
+ * as one header block instead of three things sharing a strip.
+ */
+#define CLOCK_Y			24
+```
+
+```c
+#define STATUS_Y		44
+```
+
+```c
+#define GAUGE_ARC_Y		64
+/*
+ * 100, down from 120.
+ *
+ * The header grew a row and every pixel of it came from here, because nothing
+ * below the arcs can move: the rail is pinned by RAIL_BOTTOM_OFF, the pill
+ * must clear it by 2, the countdowns must clear the pill by 2, and the caption
+ * must clear the countdowns by 2. GAUGE_NAME_Y at 168 is therefore a ceiling,
+ * not a preference -- see the pill's own comment about an earlier 3 px padding
+ * that went straight through the countdowns.
+ *
+ * 100 rather than 104 so every seam stays on the 4 px rhythm; 104 lands the
+ * ring exactly on the caption with no gap at all.
+ */
+#define GAUGE_ARC_SZ		100
+#define GAUGE_PCT_Y		110	/* same 46 px inside the ring as before */
+```
+
+- [ ] **Step 4: Centre the clock in `usage_view.c`**
+
+Find the clock's alignment (it currently reads `lv_obj_align(clock_lbl,
+LV_ALIGN_TOP_LEFT, 10, HDR_ROW_Y)`) and replace it:
+
+```c
+	lv_obj_align(clock_lbl, LV_ALIGN_TOP_MID, 0, CLOCK_Y);
+```
+
+Change nothing else about the label — not its font, not its colour.
+
+- [ ] **Step 5: Run to verify they pass**
+
+Run: `sh tests/ci/check_host_tests.sh`
+Expected: `usage_layout` passes, and every other host test still passes.
+
+- [ ] **Step 6: Run the Python suite**
+
+Run: `/private/tmp/claude-502/-Users-KfirLevy-Projects-LiveClaudeUi/aeb3001d-3255-41ed-b053-ecf8e0cdec4c/scratchpad/venv/bin/python -m pytest tests -q`
+Expected: all pass — nothing here is daemon-visible, so any failure is a real surprise.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add firmware/src/usage_layout.h firmware/src/usage_view.c tests/usage_layout/host_test.c
+git commit -m "feat: the clock sits under the brand and the rings make room for it"
+```
+
+---
+
+### Task 8: Two indicators, each on its own axis
+
+**Files:**
+- Modify: `firmware/src/usage_view.c`
+- Test: none automatable — `usage_view.c` cannot be host-tested against LVGL.
+  The gate is Task 6's hardware pass.
+
+**Interfaces:**
+- Consumes: `activity_color()` and `activity_text()` from Task 1; the corner
+  freed by Task 7.
+- Produces: nothing later tasks depend on.
+
+- [ ] **Step 1: Create the second indicator beside the first**
+
+In the builder, next to where `dot` is created and aligned, add:
+
+```c
+	/*
+	 * The execution-state indicator, in the corner the clock vacated.
+	 *
+	 * 6540287 removed a pip from exactly here and gave two reasons. One was
+	 * that the corner was occupied, which is no longer true. The other was
+	 * two unlabelled circles in one colour vocabulary -- and the hint line
+	 * below now names whichever condition fired, so they are not unlabelled
+	 * any more. This is not that pip coming back; it is the arrangement
+	 * that commit could not have.
+	 */
+	act_dot = lv_obj_create(scr);
+	lv_obj_remove_style_all(act_dot);
+	lv_obj_set_size(act_dot, DOT_SZ, DOT_SZ);
+	lv_obj_set_style_radius(act_dot, LV_RADIUS_CIRCLE, 0);
+	lv_obj_align(act_dot, LV_ALIGN_TOP_LEFT, 10, HDR_ROW_Y);
+```
+
+Match the exact style calls the existing `dot` uses — read them first and
+mirror them, including any border or background-opacity settings. Declare
+`static lv_obj_t *act_dot;` beside `static lv_obj_t *dot;`.
+
+- [ ] **Step 2: Split `refresh_dot` into two**
+
+`refresh_dot()` currently takes the worse of data health and execution state.
+Each indicator now reports its own axis. Replace it with:
+
+```c
+/*
+ * Two indicators, two axes, no ranking between them.
+ *
+ * This used to paint ONE dot from the worse of the pair, because a single
+ * indicator cannot show two facts and the hint line was silent. The line
+ * speaks now, and there are two corners, so each axis gets its own circle and
+ * neither hides the other. A stale reading no longer conceals a failed
+ * session, which is what "worse wins" cost.
+ *
+ * The hint line's precedence is NOT split with it: data health still speaks
+ * first there and execution state only fills its silence, because a reading
+ * we cannot vouch for still makes the execution state moot.
+ */
+static void refresh_dots(void)
+{
+	bool pulse = false;
+	lv_color_t hc = COL_GREY;
+
+	if (dot) {
+		switch (data_health) {
+		case USAGE_STATUS_ERROR:
+			hc = COL_RED;
+			break;
+		case USAGE_STATUS_STALE:
+			hc = stale_here() ? COL_AMBER : COL_GREEN;
+			break;
+		case USAGE_STATUS_DISCONNECTED:
+			hc = COL_GREY;
+			break;
+		case USAGE_STATUS_OK:
+		default:
+			hc = COL_GREEN;
+			break;
+		}
+		lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+		lv_obj_set_style_bg_color(dot, hc, 0);
+	}
+
+	if (!act_dot) {
+		return;
+	}
+	lv_color_t ac = activity_color(&pulse);
+
+	lv_anim_delete(act_dot, act_pulse_cb);
+	lv_obj_set_style_bg_opa(act_dot, LV_OPA_COVER, 0);
+	lv_obj_set_style_bg_color(act_dot, ac, 0);
+
+	if (pulse) {
+		lv_anim_t an;
+
+		lv_anim_init(&an);
+		lv_anim_set_var(&an, act_dot);
+		lv_anim_set_exec_cb(&an, act_pulse_cb);
+		lv_anim_set_values(&an, LV_OPA_40, LV_OPA_COVER);
+		lv_anim_set_duration(&an, 900);
+		lv_anim_set_playback_duration(&an, 900);
+		lv_anim_set_repeat_count(&an, LV_ANIM_REPEAT_INFINITE);
+		lv_anim_start(&an);
+	}
+}
+```
+
+Rename every call site from `refresh_dot()` to `refresh_dots()`. There are
+four: three in `usage_view.c` and the one at the end of
+`usage_view_set_status`. The pulse animation now belongs to `act_dot` only —
+the health dot never pulses, because none of its four states is a "working"
+state.
+
+- [ ] **Step 2a: Delete `stale_here()`'s dead branch if it has one**
+
+`stale_here()` was written for the merged dot. It stays as-is — the health dot
+still uses it to decide whether THIS page's reading is the stale one. Do not
+change it.
+
+- [ ] **Step 3: Build**
+
+Run: `sh tools/dev.sh`. If the Zephyr environment is unavailable, say so in
+the report and rely on the review — but do try once, because this task has no
+automated test and the compiler is the only mechanical check it gets.
+
+- [ ] **Step 4: Run every automated suite**
+
+Run: `sh tests/ci/check_host_tests.sh`
+Run: `/private/tmp/claude-502/-Users-KfirLevy-Projects-LiveClaudeUi/aeb3001d-3255-41ed-b053-ecf8e0cdec4c/scratchpad/venv/bin/python -m pytest tests -q`
+Expected: all pass. Neither suite covers this file; they are here to prove
+nothing else broke.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add firmware/src/usage_view.c
+git commit -m "feat: execution state and data health each get their own corner"
+```
