@@ -645,7 +645,7 @@ void usage_view_init(void)
 	lv_obj_set_style_radius(act_dot, LV_RADIUS_CIRCLE, 0);
 	lv_obj_set_style_border_width(act_dot, 0, 0);
 	lv_obj_set_style_bg_color(act_dot, COL_GREY, 0);
-	lv_obj_align(act_dot, LV_ALIGN_TOP_LEFT, 10, HDR_ROW_Y);
+	lv_obj_align(act_dot, LV_ALIGN_TOP_LEFT, 12, HDR_ROW_Y);
 	lv_obj_add_flag(act_dot, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
 	/* Carries the amber/red explanation. Empty when all is well: the gauges
@@ -1657,10 +1657,16 @@ void usage_view_tick_1s(void)
 /*
  * Execution state -> pip colour, and whether it breathes.
  *
- * RUNNING is the only animated one, and it reuses the boot bar's pulse
- * exactly (see boot_pulse_cb): a fade between LV_OPA_30 and full, 600 ms each
- * way, repeating. A steady dot cannot distinguish "working" from "finished
- * and left it that way", which is the whole distinction this indicator adds.
+ * TWO states animate, not one: RUNNING and WAITING (see activity_color).
+ * RUNNING breathes because a steady dot cannot distinguish "working" from
+ * "finished and left it that way", which is the whole distinction this
+ * indicator adds; WAITING breathes because a permission prompt is asking for
+ * the person RIGHT NOW and must not sit as quietly as an answer waiting to be
+ * read. Both use the boot bar's pulse shape (see boot_pulse_cb) -- an opacity
+ * fade to full and back, repeating -- but slower and shallower than it:
+ * LV_OPA_40 over 900 ms each way, against the bar's LV_OPA_30 over 600 ms. A
+ * header dot that breathes for as long as a session runs must not draw the eye
+ * the way a boot bar does for two seconds.
  */
 static void act_pulse_cb(void *obj, int32_t v)
 {
