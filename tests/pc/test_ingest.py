@@ -157,6 +157,36 @@ def test_the_daemon_wires_the_fetch_that_carries_the_name():
         assert fetch.session_pair() == ("LiveClaudeUi", 1), ast.dump(node)
 
 
+def test_the_daemon_hands_that_very_fetch_to_the_bridge():
+    """The other half of the guard above, and the half it cannot do.
+
+    Evaluating `fetch = ...` only proves the daemon BUILDS the right object.
+    It says nothing about the object reaching the Bridge, so an inline
+    `Bridge(..., fetch_usage=bus.poll, ...)` one line further down would
+    leave the assignment correct, this file green, and every real desk
+    unnamed -- the identical failure to the one above, moved by a line.
+
+    So insist the keyword is the bare name `fetch`: the local the guard
+    above just ran and vouched for, not a fresh expression nobody checked.
+    An attribute, a call, a lambda -- anything but the name -- is a second
+    construction path, and a second path is exactly what went wrong once.
+    """
+    src = pathlib.Path(ingest.__file__).resolve().parents[1] / \
+        "claude_usage_bridge.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "Bridge"]
+    assert calls, "the daemon builds no Bridge any more; move this guard"
+    for call in calls:
+        kw = [k for k in call.keywords if k.arg == "fetch_usage"]
+        assert kw, "Bridge built without fetch_usage: " + ast.dump(call)
+        for k in kw:
+            assert isinstance(k.value, ast.Name) and k.value.id == "fetch", (
+                "fetch_usage must pass the verified `fetch` local, not "
+                + ast.dump(k.value))
+
+
 def test_the_label_survives_the_whole_bus_path():
     """The one that matters. session_pair() reads the frame select_pair
     returned, and select_pair runs EVERY frame through normalizer.merge()
