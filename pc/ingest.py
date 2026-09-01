@@ -110,8 +110,12 @@ class IngestionBus:
             self.poll_frames(), preferred=self._preferred)
         if primary is None:
             return None
-        self._session_pair = _pair_from(primary)
-        return protocol.frame_to_usage(primary, self._now(), secondary)
+        msg = protocol.frame_to_usage(primary, self._now(), secondary)
+        # Against the state the message actually carries, which is not always
+        # the primary frame's own -- see _pair_from.
+        self._session_pair = _pair_from(
+            primary, secondary, msg.get("state", base.STATE_UNKNOWN))
+        return msg
 
     def session_pair(self):
         """(label, n) for the state the last poll() put on the panel.
@@ -123,20 +127,79 @@ class IngestionBus:
         """
         return self._session_pair
 
+    def fetch(self):
+        """The callable to hand Bridge(fetch_usage=...).
 
-def _pair_from(frame):
-    """The label and the count that belong TOGETHER on the panel.
+        The ONE way to obtain a fetch, and that is the whole point of it
+        existing. The daemon used to write `fetch = bus.poll` while the tests
+        built theirs through make_fetch, and a bound method proxies attribute
+        reads to the plain function underneath -- so the Bridge's
+        getattr(fetch, "session_pair", None) came back None on every real
+        desk and the board was never named, with the entire suite green.
+        Two ways to build the same object is what allowed that, so there is
+        now one.
+        """
+        return _BusFetch(self)
 
-    The count is the one for the frame's own state -- the same rule the
-    normalizer applies to the counts themselves, that a figure must describe
-    the state next to it. A state with no count of its own (failed, unknown)
-    reads as zero rather than borrowing another one.
+
+class _BusFetch:
+    """A zero-arg callable that also knows the project name.
+
+    An object rather than a function with an attribute bolted on: the Bridge
+    is handed a zero-arg callable returning a finished usage dict and never
+    sees the frame the name lives on. Widening that contract instead (a
+    tuple, or the label smuggled inside the usage dict) would either break
+    every injected fake or put the label one slip away from the byte-capped
+    usage line -- which is the one thing this whole message type exists to
+    avoid.
     """
-    n = {base.STATE_RUNNING: frame.n_run,
-         base.STATE_WAITING: frame.n_wait,
-         base.STATE_STUCK: frame.n_stuck,
-         base.STATE_IDLE: frame.n_idle}.get(frame.state, 0)
-    return (getattr(frame, "label", "") or "", int(n))
+
+    def __init__(self, bus):
+        self._bus = bus
+
+    def __call__(self):
+        return self._bus.poll()
+
+    def session_pair(self):
+        return self._bus.session_pair()
+
+
+# Which count describes which state. STATE_FAILED reads n_stuck because that
+# is where the provider put it: claude_state.poll folds a failed session into
+# the stuck count, so mapping it to nothing would leave two failed sessions
+# reporting zero -- "Session failed" where the panel should say "Session
+# failed - 2 sessions".
+_COUNT_FOR_STATE = {
+    base.STATE_RUNNING: "n_run",
+    base.STATE_WAITING: "n_wait",
+    base.STATE_STUCK: "n_stuck",
+    base.STATE_FAILED: "n_stuck",
+    base.STATE_IDLE: "n_idle",
+}
+
+
+def _pair_from(primary, secondary, wire_state):
+    """(label, n) for the state the usage message actually carries.
+
+    Against the WIRE state rather than the primary frame's own, because
+    frame_to_usage sends worst_of(primary, secondary) and the summed counts:
+    one light for the whole desk. A Claude session sitting idle-but-named
+    beside a waiting Codex one would otherwise put "Waiting for you -
+    MyProject" over a project that is not waiting -- a wrong statement, not
+    a vague one, and a line nobody can trust is worse than no line.
+
+    So the label survives only when the frame carrying it is in the state on
+    the panel, and only when nothing else shares that state. Naming one of
+    several is refused rather than guessed, which is the same rule
+    claude_state.poll applies when it decides whether to set `label` at all.
+    """
+    frames = [f for f in (primary, secondary) if f is not None]
+    field = _COUNT_FOR_STATE.get(wire_state)
+    n = sum(getattr(f, field, 0) for f in frames) if field else 0
+    named = [f for f in frames
+             if f.state == wire_state and getattr(f, "label", "")]
+    label = named[0].label if len(named) == 1 and n <= 1 else ""
+    return (label, int(n))
 
 
 def make_fetch(providers=None, preferred_provider="claude"):
@@ -145,18 +208,5 @@ def make_fetch(providers=None, preferred_provider="claude"):
     Same shape as the single-source make_fetch it replaces, so the daemon's
     wiring did not have to learn that there is now more than one source.
     """
-    bus = IngestionBus(providers=providers,
-                       preferred_provider=preferred_provider)
-
-    # A plain wrapper rather than bus.poll itself, so the project name can be
-    # hung off it as an attribute. The Bridge is handed a zero-arg callable
-    # returning a finished usage dict and never sees a frame; widening that
-    # contract (a tuple, or the label smuggled inside the usage dict) would
-    # either break every injected fake or put the label one slip away from
-    # the byte-capped usage line. Bridge reads it with getattr and sends
-    # nothing when it is absent, so a fetch without it still works.
-    def fetch():
-        return bus.poll()
-
-    fetch.session_pair = bus.session_pair
-    return fetch
+    return IngestionBus(providers=providers,
+                        preferred_provider=preferred_provider).fetch()

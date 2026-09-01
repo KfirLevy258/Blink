@@ -1,5 +1,7 @@
 """The bus: many providers polled, one message out, nothing allowed to escape."""
+import ast
 import json
+import pathlib
 
 from pc import ingest
 from pc.providers import base
@@ -123,6 +125,38 @@ def named(provider="claude", src="hook", at=NOW, session=50.0, weekly=20.0,
     return f
 
 
+def test_the_daemon_wires_the_fetch_that_carries_the_name():
+    """The regression this exists for, and the reason it reads the daemon's
+    own source instead of building a fetch of its own.
+
+    claude_usage_bridge said `fetch = bus.poll` while every test built its
+    fetch through make_fetch. A bound method proxies attribute reads to the
+    plain function underneath, so the Bridge's
+    getattr(fetch, "session_pair", None) was None on every real desk and the
+    board was never named -- with the whole suite green, because no test
+    ever touched the object the daemon actually constructs.
+
+    So take the daemon's expression verbatim and run it. A test that builds
+    its own fetch cannot see the two ways diverge; this one cannot miss it.
+    """
+    src = pathlib.Path(ingest.__file__).resolve().parents[1] / \
+        "claude_usage_bridge.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    assigns = [n for n in ast.walk(tree)
+               if isinstance(n, ast.Assign)
+               and any(isinstance(t, ast.Name) and t.id == "fetch"
+                       for t in n.targets)]
+    assert assigns, "the daemon has no `fetch` any more; move this guard"
+    for node in assigns:
+        scope = {"ingest": ingest,
+                 "bus": ingest.IngestionBus(providers=[Fixed(named(n_wait=1))],
+                                            now=lambda: NOW)}
+        fetch = eval(compile(ast.Expression(node.value), "<daemon>", "eval"),
+                     scope)
+        fetch()
+        assert fetch.session_pair() == ("LiveClaudeUi", 1), ast.dump(node)
+
+
 def test_the_label_survives_the_whole_bus_path():
     """The one that matters. session_pair() reads the frame select_pair
     returned, and select_pair runs EVERY frame through normalizer.merge()
@@ -151,6 +185,65 @@ def test_the_label_survives_a_merge_of_two_sources():
     assert bus.session_pair() == ("LiveClaudeUi", 1)   # from the hook frame
 
 
+def test_a_second_provider_in_a_worse_state_takes_the_name_away():
+    """The panel shows ONE light for the whole desk -- worst_of(claude,
+    codex) -- so a named Claude session sitting idle beside a waiting Codex
+    one must not put its name under "Waiting for you". That is a wrong
+    sentence rather than a vague one.
+    """
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", state=base.STATE_IDLE,
+                               label="MyProject", n_idle=1)),
+                   Fixed(named(provider="codex", at=NOW - 30, label="",
+                               state=base.STATE_WAITING, n_wait=1))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["provider"] == "claude"          # still the primary ring
+    assert msg["state"] == "waiting"            # but the desk is waiting
+    assert bus.session_pair() == ("", 1)
+
+
+def test_two_providers_agreeing_on_the_state_keep_the_name():
+    """The other half: the name survives a second provider that is merely
+    busy, because the state on the panel is still the named one's."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", n_wait=1)),
+                   Fixed(named(provider="codex", at=NOW - 30, label="",
+                               state=base.STATE_RUNNING, n_run=1))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "waiting"
+    assert bus.session_pair() == ("LiveClaudeUi", 1)
+
+
+def test_sessions_on_both_providers_sharing_a_state_are_not_named():
+    """Naming one of several is refused rather than guessed -- the same rule
+    claude_state.poll applies before it ever sets `label`. It has to hold
+    across providers too, or two waiting Codex sessions would silently
+    rename themselves after the one Claude project."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", n_wait=1)),
+                   Fixed(named(provider="codex", at=NOW - 30, label="",
+                               state=base.STATE_WAITING, n_wait=2))],
+        now=lambda: NOW)
+    bus.poll()
+    assert bus.session_pair() == ("", 3)
+
+
+def test_a_failed_session_reports_the_stuck_count():
+    """claude_state.poll folds a failed session into n_stuck, so `failed`
+    has to read that count and not zero -- otherwise two failed sessions say
+    "Session failed" where the panel should say "Session failed - 2
+    sessions"."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(state=base.STATE_FAILED, label="",
+                               n_stuck=2))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "failed"
+    assert bus.session_pair() == ("", 2)
+
+
 def test_the_count_belongs_to_the_state_on_the_panel():
     """The count that goes out is the one for the frame's own state -- the
     same rule the normalizer applies to the counts themselves. A running
@@ -169,10 +262,8 @@ def test_session_pair_before_any_poll_is_empty():
 
 
 def test_make_fetch_carries_the_accessor():
-    """Hung off the callable rather than returned from it: the Bridge is
-    handed a zero-arg callable returning a finished usage dict, and every
-    fake in tests/pc/test_bridge.py is a bare lambda that must keep
-    working."""
+    """make_fetch and the daemon now obtain a fetch the same way -- through
+    bus.fetch() -- so this and the daemon guard above cannot disagree."""
     fetch = ingest.make_fetch(providers=[Fixed(named(n_wait=1))])
     fetch()
     assert fetch.session_pair() == ("LiveClaudeUi", 1)

@@ -494,7 +494,12 @@ def main(argv=None):
     # which providers exist -- pc/ingest owns that, so onboarding a second
     # tool never reaches this loop.
     bus = ingest.IngestionBus()
-    fetch = bus.poll
+    # bus.fetch(), never bus.poll: the fetch has to carry the project name
+    # beside the numbers (Bridge.poll_once reads session_pair off it), and a
+    # bound method proxies attribute reads to the plain function underneath,
+    # so `fetch = bus.poll` left every real desk unnamed while the tests --
+    # which built their own fetch -- stayed green.
+    fetch = bus.fetch()
 
     last_err = None
     explicit_port = bool(args.port)

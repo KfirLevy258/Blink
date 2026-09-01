@@ -492,21 +492,38 @@ class SessionMessage(unittest.TestCase):
                          protocol.SESSION_LABEL_MAX_BYTES)
 
     def test_session_label_survives_multibyte_truncation(self):
-        # Cutting a UTF-8 sequence in half must not produce an undecodable
-        # field.
-        m = protocol.session("א" * 40, 1)
-        m["label"].encode()          # must not raise
-        self.assertLessEqual(len(m["label"].encode()),
-                             protocol.SESSION_LABEL_MAX_BYTES)
-        self.assertTrue(m["label"].startswith("א"))
+        """Cutting a UTF-8 sequence in half must not produce an undecodable
+        field.
 
-    def test_session_label_survives_a_three_byte_truncation(self):
-        """Three bytes per character does not divide 24, so this is the case
-        a raw byte slice actually halves."""
-        m = protocol.session("中" * 40, 2)
+        The label is MIXED-WIDTH on purpose. 24 divides by 2, 3 and 4, so a
+        label of one repeated character always lands on a boundary however
+        it is cut -- a naive `label.encode()[:24].decode()` passes such a
+        test and this guard would be measuring nothing. Five ASCII bytes in
+        front push the cut off the boundary: 19 bytes of aleph is nine
+        characters and a dangling half.
+        """
+        label = "proj-" + "א" * 20
+        with self.assertRaises(UnicodeDecodeError):
+            label.encode()[:protocol.SESSION_LABEL_MAX_BYTES].decode()
+
+        m = protocol.session(label, 1)
         self.assertEqual(m["label"].encode().decode("utf-8"), m["label"])
         self.assertLessEqual(len(m["label"].encode()),
                              protocol.SESSION_LABEL_MAX_BYTES)
+        self.assertTrue(label.startswith(m["label"]))
+
+    def test_session_label_survives_a_three_byte_truncation(self):
+        """The same again at three bytes a character, where the dangling
+        remainder is two bytes rather than one."""
+        label = "x" + "中" * 20
+        with self.assertRaises(UnicodeDecodeError):
+            label.encode()[:protocol.SESSION_LABEL_MAX_BYTES].decode()
+
+        m = protocol.session(label, 2)
+        self.assertEqual(m["label"].encode().decode("utf-8"), m["label"])
+        self.assertLessEqual(len(m["label"].encode()),
+                             protocol.SESSION_LABEL_MAX_BYTES)
+        self.assertTrue(label.startswith(m["label"]))
 
     @staticmethod
     def fully_loaded_usage_kwargs():
@@ -552,3 +569,28 @@ class SessionMessage(unittest.TestCase):
         self.assertLessEqual(len(raw.encode()), protocol.MAX_LINE_BYTES, raw)
         self.assertNotIn("label", raw)
         self.assertNotIn('"proj"', raw)
+
+    def test_a_named_frame_does_not_put_its_name_on_the_usage_line(self):
+        """The same bound one level up, on the function the daemon actually
+        calls. The fixture above builds the message through usage() directly,
+        so a label threaded through frame_to_usage -- the only caller, and
+        the one that now has a named frame in front of it -- would slip past
+        it entirely."""
+        from pc.providers.base import NormalizedUsageFrame as F
+        now = 1788178465.0
+
+        def frame(provider, s_pct, w_pct):
+            return F(provider=provider, src="desktop", observed_at=now - 14400,
+                     session_pct=s_pct, session_resets_at=now + 15335,
+                     weekly_pct=w_pct, weekly_resets_at=now + 406335,
+                     state="waiting", stale=True,
+                     session_burn_pph=9.33333333, n_run=1, n_wait=2,
+                     n_stuck=1, n_idle=1, n_agents=3,
+                     label="a-project-with-a-long-name")
+
+        raw = protocol.encode(protocol.frame_to_usage(
+            frame("claude", 102.33333333333333, 102.66666666666667), now,
+            frame("codex", 88.12345678901234, 91.98765432109876))).decode()
+        self.assertLessEqual(len(raw.encode()), protocol.MAX_LINE_BYTES, raw)
+        self.assertNotIn("label", raw)
+        self.assertNotIn("a-project", raw)
