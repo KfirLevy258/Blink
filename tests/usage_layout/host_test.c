@@ -175,6 +175,15 @@ int main(void)
 	CHECK(FONT_LINE_H == 16,
 	      "FONT_LINE_H still matches LV_FONT_DEFAULT_MONTSERRAT_14");
 
+	/*
+	 * A two-line hint lands on the gauges. The label must ellipsize; this
+	 * asserts the clearance that makes that non-negotiable.
+	 */
+	CHECK(STATUS_Y + FONT_LINE_H < GAUGE_ARC_Y + 4,
+	      "a one-line hint clears the gauges");
+	CHECK(STATUS_Y + 2 * FONT_LINE_H > GAUGE_ARC_Y,
+	      "a two-line hint would land on the gauges, so it must ellipsize");
+
 	printf(failures ? "\n%d FAILED\n" : "\nall layout checks passed\n",
 	       failures);
 	return failures ? 1 : 0;

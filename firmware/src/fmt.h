@@ -54,4 +54,26 @@ void fmt_age(int32_t secs, char *buf, size_t buflen);
  */
 void fmt_ascii(const char *src, char *dst, size_t dstlen);
 
+/* Longest is a 15-char status, " - ", and a 24-byte label, plus NUL. */
+#define FMT_HINT_MAX 64
+
+/*
+ * The line under the status dot: what is happening, and to what.
+ *
+ *   status  ""      -> ""                      (nothing to say)
+ *   label   set     -> "Working - Blink"
+ *   n > 1           -> "Waiting for you - 3 sessions"
+ *   otherwise       -> "Working"
+ *
+ * A label BEATS a count, because the daemon only sends one when exactly one
+ * session holds the state -- see pc/providers/claude_state.py. `n == 1` adds
+ * nothing a reader does not already assume, so it is not written.
+ *
+ * The label is user-controlled text from a directory name, so it goes through
+ * fmt_ascii on the way in: the built-in fonts draw non-ASCII as empty boxes,
+ * and a project living under a non-ASCII profile is an ordinary setup.
+ */
+void fmt_hint(const char *status, const char *label, int n_sessions,
+	      char *buf, size_t buflen);
+
 #endif /* FMT_H */

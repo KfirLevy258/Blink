@@ -58,6 +58,71 @@ static void check_true(const char *what, int ok)
 	}
 }
 
+/* EXPECT_STR/EXPECT_EQ: same PASS/FAIL-plus-failures-counter shape as
+ * check()/check_true() above, just spelled as a one-line macro so
+ * test_fmt_hint's table of cases reads as a table, not a wall of calls. */
+#define EXPECT_STR(got, want) do { \
+	const char *g_ = (got), *w_ = (want); \
+	if (strcmp(g_, w_) == 0) { \
+		printf("PASS: %-28s -> \"%s\"\n", #got, g_); \
+	} else { \
+		printf("FAIL: %-28s -> \"%s\" (want \"%s\")\n", #got, g_, w_); \
+		failures++; \
+	} \
+} while (0)
+
+#define EXPECT_EQ(got, want) do { \
+	long g_ = (long)(got), w_ = (long)(want); \
+	if (g_ == w_) { \
+		printf("PASS: %-28s -> %ld\n", #got, g_); \
+	} else { \
+		printf("FAIL: %-28s -> %ld (want %ld)\n", #got, g_, w_); \
+		failures++; \
+	} \
+} while (0)
+
+static void test_fmt_hint(void)
+{
+	char b[FMT_HINT_MAX];
+
+	/* Nothing to say stays empty -- the caller draws no line. */
+	fmt_hint("", NULL, 0, b, sizeof(b));
+	EXPECT_STR(b, "");
+
+	/* A status alone, when there is no name and one session. */
+	fmt_hint("Working", NULL, 1, b, sizeof(b));
+	EXPECT_STR(b, "Working");
+
+	/* A name when exactly one session is named. */
+	fmt_hint("Waiting for you", "LiveClaudeUi", 1, b, sizeof(b));
+	EXPECT_STR(b, "Waiting for you - LiveClaudeUi");
+
+	/* A count when several share the state and no name was sent. */
+	fmt_hint("Waiting for you", NULL, 3, b, sizeof(b));
+	EXPECT_STR(b, "Waiting for you - 3 sessions");
+
+	/* One session is never "1 sessions"; it is just the status. */
+	fmt_hint("Finished", NULL, 1, b, sizeof(b));
+	EXPECT_STR(b, "Finished");
+
+	/* A label wins over a count if both arrive. */
+	fmt_hint("Working", "Blink", 2, b, sizeof(b));
+	EXPECT_STR(b, "Working - Blink");
+
+	/* Non-ASCII is transliterated, never drawn as boxes. */
+	fmt_hint("Working", "caf\xc3\xa9", 1, b, sizeof(b));
+	EXPECT_STR(b, "Working - caf?");
+
+	/* An empty label is the same as no label. */
+	fmt_hint("Working", "", 1, b, sizeof(b));
+	EXPECT_STR(b, "Working");
+
+	/* Truncation never overruns and always NUL-terminates. */
+	char small[12];
+	fmt_hint("Waiting for you", "LiveClaudeUi", 1, small, sizeof(small));
+	EXPECT_EQ((int)strlen(small), 11);
+}
+
 int main(void)
 {
 	check("unknown", -1, "--");
@@ -126,6 +191,8 @@ int main(void)
 		}
 		check_true("no countdown contains a percent sign", clash == 0);
 	}
+
+	test_fmt_hint();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");

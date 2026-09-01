@@ -119,3 +119,30 @@ void fmt_ascii(const char *src, char *dst, size_t dstlen)
 	}
 	dst[o] = '\0';
 }
+
+void fmt_hint(const char *status, const char *label, int n_sessions,
+	      char *buf, size_t buflen)
+{
+	if (!buf || buflen == 0) {
+		return;
+	}
+	buf[0] = '\0';
+	if (!status || !status[0]) {
+		return;
+	}
+
+	if (label && label[0]) {
+		char ascii[FMT_HINT_MAX];
+
+		fmt_ascii(label, ascii, sizeof(ascii));
+		if (ascii[0]) {
+			snprintf(buf, buflen, "%s - %s", status, ascii);
+			return;
+		}
+	}
+	if (n_sessions > 1) {
+		snprintf(buf, buflen, "%s - %d sessions", status, n_sessions);
+		return;
+	}
+	snprintf(buf, buflen, "%s", status);
+}

@@ -129,6 +129,9 @@ static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
 static lv_obj_t *clock_lbl;
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
+/* Filled by usage_view_set_session() from the daemon; see proto.c. */
+static char session_label[28] = "";
+static int session_n;
 static char provider1_tag[12];	/* whichever provider the daemon made primary */
 static lv_obj_t *provider_lbl;	/* the tag, spelled out under the brand */
 static char provider2_tag[12];	/* "" when there is only one provider */
@@ -624,6 +627,14 @@ void usage_view_init(void)
 	 */
 	hint = lv_label_create(scr);
 	lv_label_set_text(hint, "");
+	/*
+	 * Ellipsize rather than wrap. Every string this label held used to be
+	 * a fixed literal that fit, so wrapping was unreachable; a project
+	 * name removes that guarantee, and STATUS_Y (24) plus FONT_LINE_H
+	 * (16) puts a second line at y=40 -- on top of the arcs at
+	 * GAUGE_ARC_Y (44). Same reason and same call as provider_lbl.
+	 */
+	lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
 	lv_obj_set_style_text_color(hint, COL_DIM, 0);
 	lv_obj_set_width(hint, STATUS_MAX_W);
 	lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
@@ -1722,7 +1733,15 @@ static void refresh_dot(void)
 void usage_view_set_activity(enum usage_activity a)
 {
 	activity = a;
-	refresh_dot();
+	/*
+	 * The STATUS too, not only the dot. This used to call refresh_dot()
+	 * alone, so once the hint learned to speak for execution state the
+	 * label could not track a change to it: a session going from running
+	 * to failed repainted the dot red and left the previous words under
+	 * it. set_status re-runs the whole switch and calls refresh_dot at
+	 * the end, so the dot is still repainted exactly once.
+	 */
+	usage_view_set_status(last_status);
 }
 
 /*
@@ -1907,6 +1926,25 @@ void usage_view_set_sessions(int n_sessions, int n_agents)
 }
 
 
+/*
+ * What the execution state would say, for the line that data health left
+ * empty. Separate from activity_color() because colour and words answer
+ * different questions: colour says how bad, this says what.
+ *
+ * No dash in any of these -- fmt_hint uses " - " as its separator.
+ */
+static const char *activity_text(void)
+{
+	switch (activity) {
+	case USAGE_ACTIVITY_STUCK:	return "Session is wedged";
+	case USAGE_ACTIVITY_FAILED:	return "Session failed";
+	case USAGE_ACTIVITY_WAITING:	return "Waiting for you";
+	case USAGE_ACTIVITY_IDLE:	return "Finished";
+	case USAGE_ACTIVITY_RUNNING:	return "Working";
+	default:			return "";
+	}
+}
+
 void usage_view_set_status(enum usage_status status)
 {
 	if (!built) {
@@ -1949,7 +1987,20 @@ void usage_view_set_status(enum usage_status status)
 			tc = COL_RED;
 #endif
 		} else {
-			text = "";
+			/*
+			 * Data health has nothing to say, so the line reports
+			 * what the tool is doing. This is the half of 6540287
+			 * that was never built: the dot was already painted
+			 * from execution state here and the line stayed blank,
+			 * which left a red "a session failed" looking exactly
+			 * like a red "the host is gone".
+			 */
+			static char hbuf[FMT_HINT_MAX];
+
+			fmt_hint(activity_text(), session_label, session_n,
+				 hbuf, sizeof(hbuf));
+			text = hbuf;
+			tc = COL_DIM;
 		}
 		break;
 	case USAGE_STATUS_STALE:
