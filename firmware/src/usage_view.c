@@ -1763,6 +1763,35 @@ static void refresh_dots(void)
 	}
 	lv_color_t ac = activity_color(&pulse);
 
+	/*
+	 * A dead daemon takes the execution state with it.
+	 *
+	 * `activity` only ever changes when the daemon says so, so once the
+	 * host is gone the last value it sent freezes on screen -- and the dot
+	 * goes on asserting it. USAGE_ACTIVITY_NONE keeps a steady green
+	 * "nothing to report" and RUNNING keeps a PULSING green "a session is
+	 * working right now", both sitting beside a red "HOST LOST - numbers
+	 * are frozen". The panel would be claiming a live session it has no
+	 * way to see. The old worse-wins dot hid this by never showing the
+	 * execution axis at all; un-ranking the two dots brought it back.
+	 *
+	 * So grey, and never breathing. This is not the health dot ranking
+	 * over the activity dot -- the two axes still do not rank -- it is the
+	 * activity axis reporting what it actually knows. The state is not
+	 * known to be idle, it is unknown, and grey already means "nothing to
+	 * report" on the health dot, so the vocabulary carries over. An honest
+	 * grey is worth more than a green claim that stopped being checked.
+	 *
+	 * USAGE_STATUS_ERROR deliberately does NOT get this: an error is a bad
+	 * reading, not a lost daemon. The daemon that reports it is still
+	 * connected and still updating `activity`, so the execution state is
+	 * live and greying it would throw away a fact we hold.
+	 */
+	if (data_health == USAGE_STATUS_DISCONNECTED) {
+		ac = COL_GREY;
+		pulse = false;
+	}
+
 	lv_anim_delete(act_dot, act_pulse_cb);
 	lv_obj_set_style_bg_opa(act_dot, LV_OPA_COVER, 0);
 	lv_obj_set_style_bg_color(act_dot, ac, 0);
