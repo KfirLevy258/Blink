@@ -632,9 +632,22 @@ void usage_view_init(void)
 	 * a fixed literal that fit, so wrapping was unreachable; a project
 	 * name removes that guarantee, and STATUS_Y (24) plus FONT_LINE_H
 	 * (16) puts a second line at y=40 -- on top of the arcs at
-	 * GAUGE_ARC_Y (44). Same reason and same call as provider_lbl.
+	 * GAUGE_ARC_Y (44). Same call as provider_lbl.
 	 */
 	lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
+	/*
+	 * The height is load-bearing, not redundant with the long mode above.
+	 * LVGL only inserts the dots when the NEW text is taller than the
+	 * label's CURRENT height (lv_label.c), and a LV_SIZE_CONTENT label
+	 * (the class default, and what this was without this call) grows to
+	 * fit the first over-long string it draws. The very next two-line
+	 * string then measures against that already-grown height, the
+	 * inequality flips, and it wraps onto the arcs at GAUGE_ARC_Y instead
+	 * of ellipsizing -- the exact failure this label exists to prevent.
+	 * Pinning the height keeps the comparison honest on every redraw, not
+	 * just the first one.
+	 */
+	lv_obj_set_height(hint, FONT_LINE_H);
 	lv_obj_set_style_text_color(hint, COL_DIM, 0);
 	lv_obj_set_width(hint, STATUS_MAX_W);
 	lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
