@@ -12,6 +12,7 @@ CI runs on a real macOS and Linux runner.
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -335,6 +336,23 @@ def test_status_notices_hooks_that_went_missing(tmp_path, capsys):
     out = capsys.readouterr().out
     assert f"PARTIAL -- {n - 2}/{n}" in out
     assert "install` to restore them" in out
+
+
+def test_live_sessions_counts_real_sessions_not_zero(tmp_path):
+    """_live_sessions() unpacks ClaudeStateProvider.scan()'s return tuple by
+    hand. scan() gained a third value (names, for the session-name hint) and
+    the bare `except Exception: return 0` around this call means a stale
+    2-value unpack does not crash -- it just silently reports zero live
+    sessions forever, on every machine, whether or not hooks are installed.
+    Nothing else in this suite calls _live_sessions(), so this is the only
+    test that would have caught that regression."""
+    state_dir = tmp_path / ".blink" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "s1.state").write_text(
+        json.dumps({"event": "PreToolUse", "t": time.time()}))
+    (state_dir / "s2.state").write_text(
+        json.dumps({"event": "Notification", "t": time.time()}))
+    assert cli._live_sessions() == 2
 
 
 def test_status_says_so_when_no_hooks_are_installed(tmp_path, capsys):

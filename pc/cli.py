@@ -1096,7 +1096,7 @@ def _live_sessions() -> int:
     """
     from pc.providers import claude_state
     try:
-        counts, _ = claude_state.ClaudeStateProvider(
+        counts, _, _ = claude_state.ClaudeStateProvider(
             path=os.path.join(blink_home(), "state"), sweep=False
         ).scan(time.time())
     except Exception:
