@@ -214,13 +214,19 @@ int main(void)
 	      "the tally's line box clears the hint line");
 	/*
 	 * One centre line for the whole header: the tally's box, the pip and
-	 * the health dot, at three different heights. The first of these bites
-	 * -- FONT_LINE_H is nowhere in PIP_NUM_Y's chain of definitions, so a
-	 * font whose line height changes fails here. The second is close to
-	 * PIP_Y's own definition and can only fail if DOT_SZ - PIP_SZ goes
-	 * odd; it is written down anyway because the centre line is the rule
-	 * this row is built on, and a rule with no assertion is how the Y
-	 * above went unchecked in the first place.
+	 * the health dot, at three different heights.
+	 *
+	 * Neither of these bites the way the clearance above does, and saying
+	 * so is the point. PIP_NUM_Y subtracts FONT_LINE_H / 2 and the first
+	 * check adds it straight back, so the two cancel exactly -- no font
+	 * change can fail it, and it reduces to the second. What it does still
+	 * catch is PIP_NUM_Y being rewritten with the wrong sign or the wrong
+	 * operand, which is the mistake this row has already made once. The
+	 * second fails only on an even DOT_SZ against an odd PIP_SZ.
+	 *
+	 * Both are written down anyway, because the shared centre line is the
+	 * rule this row is built on, and a rule with no assertion is exactly
+	 * how the Y above went unchecked until a tally landed on the hint line.
 	 */
 	EXPECT_EQ(PIP_NUM_Y + FONT_LINE_H / 2, HDR_ROW_Y + DOT_SZ / 2);
 	EXPECT_EQ(PIP_Y + PIP_SZ / 2, HDR_ROW_Y + DOT_SZ / 2);
