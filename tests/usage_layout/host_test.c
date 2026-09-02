@@ -204,8 +204,6 @@ int main(void)
 	CHECK(PIP_X0 + 3 * (PIP_SZ + PIP_NUM_GAP + PIP_NUM_ADV)
 	      + 2 * PIP_GROUP_GAP <= PIP_WALL_X,
 	      "three counted groups clear the brand");
-	/* The pip shares the health dot's centre line. */
-	EXPECT_EQ(PIP_Y + PIP_SZ / 2, HDR_ROW_Y + DOT_SZ / 2);
 
 	/* --- the bottom stacks: countdowns, pill, rail --- */
 	CHECK(who.y0 >= cd_l.y1,

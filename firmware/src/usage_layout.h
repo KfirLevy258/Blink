@@ -104,8 +104,13 @@
  * The pixel comes back out of PIP_GROUP_GAP, so a single-digit group is still
  * 26 px wide and the three groups counts mode can hold still start at
  * x = 56 / 82 / 108 -- the last numeral ending at 128, inside PIP_WALL_X.
- * Wider tallies are not laid out from these alone; see refresh_dots(), which
- * measures each group and stops at the wall.
+ *
+ * PIP_NUM_ADV is a BUDGET, not what the drawing uses. refresh_dots() measures
+ * the string it actually wrote (lv_text_get_size) and stops at the wall,
+ * because billing every digit the widest one's advance drops groups that had
+ * room -- '1' advances 5.2 px, not 10. What this constant is for is choosing
+ * the constants around it, and asserting in the layout test that the
+ * single-digit case those constants promise still fits.
  */
 #define PIP_NUM_GAP		2
 #define PIP_NUM_ADV		10

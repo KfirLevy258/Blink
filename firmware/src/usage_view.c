@@ -597,9 +597,20 @@ void usage_view_deinit(void)
 	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
 		rail_dot[i] = NULL;
 	}
-	/* The pip row the same way, and for the same reason: usage_view_set_counts()
-	 * arrives on the protocol thread and calls refresh_dots(), which would
-	 * otherwise paint through PIP_MAX freed pointers. */
+	/*
+	 * Both header indicators the same way, and for the same reason:
+	 * usage_view_set_counts() and usage_view_set_status() both arrive on
+	 * the protocol thread and both call refresh_dots(), whose `if (dot)`
+	 * and `if (!pip[0])` guards are only guards if the pointers they test
+	 * are nulled here. `dot` was missed when this list was written -- it
+	 * hangs off gauge_scr like everything else above and dies with it.
+	 *
+	 * The counts themselves survive: they are the last thing the daemon
+	 * said, not a widget. Nothing repaints the row at init -- it comes
+	 * back on the next refresh_dots(), which is the next set_counts or
+	 * set_status, the same way the health dot does.
+	 */
+	dot = NULL;
 	for (int i = 0; i < PIP_MAX; i++) {
 		pip[i] = NULL;
 		pip_num[i] = NULL;
@@ -1755,7 +1766,12 @@ static lv_color_t pip_colour(enum fmt_pip_kind k)
  */
 static void refresh_dots(void)
 {
+	struct fmt_pip want[PIP_MAX];
 	lv_color_t hc = COL_GREY;
+	bool lost;
+	int fin;
+	int n;
+	int x;
 
 	if (dot) {
 		switch (data_health) {
@@ -1800,16 +1816,14 @@ static void refresh_dots(void)
 	 * zero so a frame whose parts disagree -- they are counted at slightly
 	 * different moments on the host -- cannot produce a negative.
 	 */
-	int fin = pip_n_sess - pip_n_run - pip_n_wait - pip_n_stuck;
+	fin = pip_n_sess - pip_n_run - pip_n_wait - pip_n_stuck;
 
 	if (fin < 0) {
 		fin = 0;
 	}
 
-	struct fmt_pip want[PIP_MAX];
-	int n = fmt_pips(pip_n_run, pip_n_wait, pip_n_stuck, fin,
-			 want, PIP_MAX);
-	int x = PIP_X0;
+	n = fmt_pips(pip_n_run, pip_n_wait, pip_n_stuck, fin, want, PIP_MAX);
+	x = PIP_X0;
 
 	/*
 	 * A dead daemon takes the row with it.
@@ -1833,38 +1847,69 @@ static void refresh_dots(void)
 	 * connected and still sending counts, so the row is live and greying it
 	 * would throw away a fact we hold.
 	 */
-	bool lost = data_health == USAGE_STATUS_DISCONNECTED;
+	lost = data_health == USAGE_STATUS_DISCONNECTED;
 
 	for (int i = 0; i < PIP_MAX; i++) {
-		/* 12 bytes because that is what "%d" can need for an int
+		/*
+		 * 12 bytes because that is what "%d" can need for an int
 		 * (-2147483648 plus the NUL), not because a tally is ever
-		 * that big. Sized from what the FORMAT can produce means no
-		 * truncation is reachable however wrong the wire gets. */
+		 * that big. The bound comes from the FORMAT and this buffer,
+		 * never from the wire: proto.c's num() REFUSES a count outside
+		 * 0..9999 and leaves the default, so an over-range field
+		 * arrives as 0 rather than clamped -- which is a fine
+		 * behaviour to rely on for the number's meaning and no reason
+		 * at all to size a buffer by. Sized this way, no truncation is
+		 * reachable however wrong the wire gets.
+		 */
 		char b[12];
-		int len = 0;
+		lv_point_t sz;
+		lv_color_t c;
+		bool tally = false;
 		int w = PIP_SZ;
 
 		if (i < n && want[i].count > 0) {
 			/*
-			 * The width comes from what was actually WRITTEN,
-			 * never from the count: the daemon's tally is clamped
-			 * to 9999 on the way in (proto.c), but trusting that
-			 * here would put the daemon in charge of where this
-			 * row ends. Counting the digits after the write makes
-			 * the drawn string its own bound.
+			 * MEASURED, not billed. Charging every digit the
+			 * widest digit's advance (PIP_NUM_ADV, which is what
+			 * the layout constants are budgeted against) costs a
+			 * real reading: '1' advances 5.2 px, so "11" measures
+			 * 20 px against a true 11, and a third group at x=108
+			 * was being dropped for want of room it actually had
+			 * -- at 1 failed, 1 waiting, 11 running, squarely
+			 * inside the band counts mode exists to serve.
+			 *
+			 * lv_text_get_size rather than lv_obj_update_layout:
+			 * it answers the same question -- the label is
+			 * LV_SIZE_CONTENT, so its width IS its text's width --
+			 * by arithmetic over the font, touching no object and
+			 * firing no event. This runs from the protocol thread.
+			 *
+			 * It sums ADVANCES, which LVGL rounds per glyph
+			 * ((adv_w + 8) >> 4), and one digit's ink is wider
+			 * than its advance: '4' is a 10 px box on a 9 px
+			 * advance, so a tally ending in 4 paints one pixel
+			 * past what is measured here. PIP_WALL_X sits 6 px
+			 * left of the brand's left edge, which is the margin
+			 * that kind of rounding is for.
 			 */
 			snprintf(b, sizeof(b), "%d", want[i].count);
-			len = (int)strlen(b);
-			w = PIP_SZ + PIP_NUM_GAP + PIP_NUM_ADV * len;
+			lv_text_get_size(&sz, b,
+					 lv_obj_get_style_text_font(pip_num[i],
+								    LV_PART_MAIN),
+					 lv_obj_get_style_text_letter_space(pip_num[i],
+									    LV_PART_MAIN),
+					 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+			tally = true;
+			w = PIP_SZ + PIP_NUM_GAP + (int)sz.x;
 		}
 
 		/*
 		 * Stop at the wall.
 		 *
 		 * Three single-digit groups end at 128 and fit by 2 px, which
-		 * is what PIP_NUM_ADV is measured for -- but a tally is not
-		 * always one digit, and three two-digit groups would run to
-		 * 137 and paint over BLINK. Hiding this group and every group
+		 * is the budget the layout constants were chosen against --
+		 * but a tally is not always one digit, and three wide ones
+		 * would reach past BLINK. Hiding this group and every group
 		 * after it (n = i does that on the next pass) drops the least
 		 * urgent first, which is the order fmt_pips already put them
 		 * in, so the marks that survive are the ones that need a
@@ -1881,13 +1926,13 @@ static void refresh_dots(void)
 			continue;
 		}
 
-		lv_color_t c = lost ? COL_GREY : pip_colour(want[i].kind);
+		c = lost ? COL_GREY : pip_colour(want[i].kind);
 
 		lv_obj_align(pip[i], LV_ALIGN_TOP_LEFT, x, PIP_Y);
 		lv_obj_set_style_bg_color(pip[i], c, 0);
 		lv_obj_clear_flag(pip[i], LV_OBJ_FLAG_HIDDEN);
 
-		if (len > 0) {
+		if (tally) {
 			lv_label_set_text(pip_num[i], b);
 			lv_obj_set_style_text_color(pip_num[i], c, 0);
 			lv_obj_align(pip_num[i], LV_ALIGN_TOP_LEFT,
