@@ -220,7 +220,12 @@ check_no_name '{"session_id":"abc","cwd":"/tmp/has space"}'
 # gets written still carries neither `\` nor `"`. Refusing it instead would
 # refuse every Windows path there is.
 check_name '{"session_id":"abc","cwd":"/tmp/bad\\\\name"}' 'name'
-grep -q '\\' "$DIR/abc.state" && fail "a backslash reached the state file"
+# A bracket expression, not '\\' or '\': POSIX strips the backslash of any
+# special meaning inside brackets, so this matches one literal backslash -- and
+# it does so without putting a backslash next to a closing quote, which is what
+# SC1003 flags as a mis-quoted apostrophe, whatever grep would do with it.
+# (Do not open that line with the tool's own name -- it parses as a directive.)
+grep -q '[\]' "$DIR/abc.state" && fail "a backslash reached the state file"
 
 # Relative traversal names never become a label.
 check_no_name '{"session_id":"abc","cwd":"/tmp/.."}'
