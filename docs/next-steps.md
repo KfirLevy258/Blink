@@ -270,3 +270,17 @@ the threshold the whole design turns on — is still unanswered, as is whether
 the row visibly clears the clock and the wordmark. One session below 3 was
 never driven, because reaching it would have meant deleting the owner's real
 state files.
+
+**Re-flashed 2026-09-02, and why the table above was briefly wrong.** The
+frames in that table were driven at `199df2d`. Two commits later the tally
+numeral moved from y=8 to y=6 — its line box had been ending exactly on
+`STATUS_Y`, with no clearance to the hint line at all — and
+`usage_view_set_counts()` gained the `if (!built)` guard its siblings have.
+So the evidence described firmware the branch no longer had, and the one fix
+whose whole purpose was a visible 2 px had never run on the board.
+
+Re-flashed at `2ad00ec` and re-driven: 8 sessions (`n_run 4, n_wait 1,
+n_stuck 1` — the overflow rule) and 16 (`n_run 12, n_wait 1, n_stuck 1` — the
+two-digit tally, which is the case the numeral's Y actually matters in).
+`up_ms` 10,263 → 120,346 ms, no reset. The five rows above still hold; only
+the image they were taken from changed.
