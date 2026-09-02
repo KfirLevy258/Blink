@@ -110,7 +110,7 @@ int main(void)
 
 	/* The brand, and the status line that took the space under it when the
 	 * provider's name moved to the bottom. */
-	struct box brand = top_mid("brand", 0, TITLE_Y, 90, FONT_LINE_H);
+	struct box brand = top_mid("brand", 0, TITLE_Y, BRAND_W, FONT_LINE_H);
 	struct box status = top_mid("status", 0, STATUS_Y,
 				    STATUS_MAX_W, FONT_LINE_H);
 
@@ -187,11 +187,28 @@ int main(void)
 	 * the wall from "BLINK" centred with .09em tracking. A font bump
 	 * must fail here rather than slide pips under the logo.
 	 */
-	CHECK(PIP_X0 > 47, "pip row starts clear of the clock");
+	/*
+	 * The clock has left this corner for the row under the brand, so the
+	 * row's left edge is now the bezel, not a time string. Its right edge
+	 * is still the wordmark, and that IS a measurement -- so it is derived
+	 * here rather than typed in, because the number that was typed in was
+	 * wrong by 2 px in the direction that matters.
+	 *
+	 * "BLINK" at lv_font_montserrat_14, whose advances LVGL rounds to
+	 * whole pixels as (adv_w + 8) >> 4: B 11 + L 8 + I 4 + N 11 + K 10 =
+	 * 44, plus the letter_space of 2 that usage_view.c sets, in each of
+	 * the four gaps = 52. Centred on SCR_MID_X, so it begins at 134 -- not
+	 * the 136 an earlier comment claimed from a tracking value the code
+	 * does not use.
+	 */
+	CHECK(PIP_X0 >= SCR_RIGHT_MARGIN_MIN,
+	      "the pip row is not flush against the left bezel");
 	CHECK(PIP_X0 + PIP_MAX * PIP_PITCH - (PIP_PITCH - PIP_SZ) <= PIP_WALL_X,
-	      "a full pip row clears the brand");
-	CHECK(PIP_WALL_X < 136, "the wall is left of the brand's left edge");
-	EXPECT_EQ(PIP_MAX, 7);
+	      "a full pip row clears the wall");
+	CHECK(PIP_WALL_X <= brand.x0,
+	      "the wall is left of the brand's real left edge");
+	EXPECT_EQ(brand.x0, 134);
+	EXPECT_EQ(PIP_MAX, 11);
 	/*
 	 * Counts mode: three groups of pip + gap + one digit, with a gap
 	 * between them. Asserted for the SINGLE-digit case only, which is the
@@ -201,9 +218,9 @@ int main(void)
 	 * measured advance of the widest digit; if a font bump breaks that,
 	 * this fails rather than the numerals creeping onto the brand.
 	 */
-	CHECK(PIP_X0 + 3 * (PIP_SZ + PIP_NUM_GAP + PIP_NUM_ADV)
-	      + 2 * PIP_GROUP_GAP <= PIP_WALL_X,
-	      "three counted groups clear the brand");
+	CHECK(PIP_X0 + 4 * (PIP_SZ + PIP_NUM_GAP + PIP_NUM_ADV)
+	      + 3 * PIP_GROUP_GAP <= PIP_WALL_X,
+	      "four counted groups clear the brand");
 	/*
 	 * And the row's Y, which had no assertion at all -- which is why a
 	 * tally whose line box ended exactly on STATUS_Y got as far as a

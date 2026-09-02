@@ -152,6 +152,9 @@ int main(int argc, char **argv)
 		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
 		usage_view_set_sessions(6, 2);
 		usage_view_set_counts(6, 3, 1, 1);
+		/* RUNNING is the activity, so the CLOCK keeps the row even
+		 * though a red pip is showing -- the pips carry state, the
+		 * sentence only interrupts for the state that wants a person. */
 		usage_view_set_clock(14, 05);
 		break;
 	case 8:	/* SEVEN -- one more than six, and the row must change mode
@@ -162,6 +165,7 @@ int main(int argc, char **argv)
 		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
 		usage_view_set_sessions(7, 2);
 		usage_view_set_counts(7, 4, 2, 0);
+		/* WAITING takes the row: a prompt is open. */
 		usage_view_set_clock(14, 05);
 		break;
 	case 9:	/* EIGHT, all four states live. The overflow rule fires here:

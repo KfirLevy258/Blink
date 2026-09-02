@@ -66,6 +66,7 @@ $CC -O1 -w -DLV_CONF_INCLUDE_SIMPLE=1 \
 	"$HERE/render_main.c" \
 	"$ROOT/firmware/src/usage_view.c" \
 	"$ROOT/firmware/src/fmt.c" \
+	"$ROOT/firmware/src/usage_state.c" \
 	@"$BUILD/srcs.txt" \
 	-o "$BUILD/render"
 

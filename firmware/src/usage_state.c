@@ -32,3 +32,23 @@ enum usage_activity usage_activity_from_state(const char *state)
 	 */
 	return USAGE_ACTIVITY_NONE;
 }
+
+bool usage_activity_needs_row(enum usage_activity a)
+{
+	switch (a) {
+	case USAGE_ACTIVITY_FAILED:
+	case USAGE_ACTIVITY_STUCK:
+	case USAGE_ACTIVITY_WAITING:
+		return true;
+	default:
+		/*
+		 * RUNNING, IDLE and NONE all leave the clock alone. Written as
+		 * a default rather than three more cases because a state from
+		 * a NEWER daemon lands here too, and the safe answer for a
+		 * state this firmware cannot name is to say nothing rather
+		 * than to take the row and print an empty line where the time
+		 * used to be.
+		 */
+		return false;
+	}
+}

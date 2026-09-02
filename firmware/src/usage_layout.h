@@ -46,48 +46,70 @@
  */
 #define GAUGE_PCT_FONT_H	22
 
-/* Header: brand centred, clock left, age + dot right. */
+/* Header: brand centred with the clock under it, pips left, dot right. */
 #define TITLE_Y			6
 #define HDR_ROW_Y		8
 #define DOT_SZ			12
 #define BRAND_TEXT		"BLINK"
+/*
+ * How wide BRAND_TEXT actually draws, because the pip row to its left is
+ * positioned against it and a guess is not good enough.
+ *
+ * lv_font_montserrat_14 stores each advance in 1/16 px and LVGL rounds it to
+ * whole pixels as (adv_w + 8) >> 4. B 11 + L 8 + I 4 + N 11 + K 10 = 44, plus
+ * the letter_space of 2 that usage_view.c sets on the label, in each of the
+ * four gaps between five letters: 52. Centred on SCR_MID_X, so the wordmark
+ * begins at 134.
+ *
+ * An earlier comment here said 136, worked out from ".09em tracking" -- a
+ * value the code has never used. Two pixels, in the direction that eats the
+ * pip row's clearance, which is why this is now a constant the layout test
+ * asserts rather than prose nobody re-derives.
+ */
+#define BRAND_W			52
 
 /*
- * The clock is back in the top-left corner, and the rings are back to 120.
+ * The clock sits under the brand, and it does NOT own a row of its own.
  *
- * It moved to a row of its own to free that corner for an execution-state
- * indicator, and the whole cost of the extra row came out of the ring --
- * 120 down to 100 -- because everything below the arcs is pinned. The
- * indicator is now a row of pips in the gap between the clock and the brand,
- * which was empty the entire time, so the row was never needed and the ring
- * gets its 20 px back.
+ * It shares STATUS_Y with the hint line, and one of them is visible at a
+ * time: the clock by default, a sentence only while something wants a person
+ * -- see usage_activity_needs_row(). That is what pays for the arrangement.
+ * An earlier version gave the clock its own row, and the whole cost came out
+ * of the rings (120 down to 100) because everything below the arcs is pinned;
+ * sharing costs nothing, because "Working" was only ever repeating what a
+ * green pip already said.
  */
 
 /*
- * The pip row: one mark per live session, in the gap between the clock and
- * the brand.
+ * The pip row: one mark per live session, from the left bezel to the brand.
  *
- * Both bounds are MEASUREMENTS, which is why the layout test asserts them
- * rather than trusting them. "12:04" at montserrat_14 ends near x=47, and
- * "BLINK" is centred at 160 with .09em tracking and about 47 px wide, so it
- * begins near x=136. An 8 px gap either side leaves 75 px.
+ * The clock used to sit in this corner and the row had to start clear of it,
+ * at x=56, with 75 px to work in. The clock moved under the brand, so the row
+ * begins at the bezel inset instead and has 120 px -- which is what lets
+ * counts mode hold FOUR groups, and is why `finished` is no longer dropped on
+ * an ordinary desk.
  *
- * PIP_MAX is geometry, not policy: seven fit. The display switches to counts
- * at SIX, which is where a row stops being read and starts being counted --
- * see fmt_pips(). The extra slot is headroom, not a target.
+ * Only the right bound is still a measurement, and BRAND_W above carries it
+ * with its derivation. The left bound is just the bezel.
+ *
+ * PIP_MAX is geometry, not policy: eleven fit. The display switches to counts
+ * at SIX, which is a claim about reading and not about width -- six pips were
+ * checked against a rendered panel and read as six; nobody has checked eight.
+ * The extra room went to making counts mode roomier rather than to cramming
+ * more pips into a row nobody can count.
  *
  * Headroom that is really allocated, and that is the point. fmt_pips() never
- * returns seven, so usage_view.c builds a pip and a numeral that can never be
- * shown -- two LVGL objects, kept deliberately, because every bound in that
- * file derives from THIS constant and an array sized to the six that are
+ * returns more than six, so usage_view.c builds five pips and numerals that
+ * can never be shown -- LVGL objects kept deliberately, because every bound in
+ * that file derives from THIS constant and an array sized to the six that are
  * reachable would be a second number free to drift away from the geometry it
- * is supposed to match. The unused pair is the cheaper of the two prices.
+ * is supposed to match. The unused pairs are the cheaper of the two prices.
  */
 #define PIP_SZ			8
 #define PIP_PITCH		11
-#define PIP_X0			56
+#define PIP_X0			10
 #define PIP_WALL_X		130
-#define PIP_MAX			7
+#define PIP_MAX			11
 
 /*
  * An 8 px pip on the 12 px health dot's centre line, written as the
@@ -118,7 +140,7 @@
  * Counts mode's metrics: pip, gap, numeral, then the gap to the next group.
  *
  * PIP_NUM_ADV is a MEASUREMENT of the widest digit, like the two bounds above
- * are measurements of the clock and the brand. lv_font_montserrat_14 -- the
+ * is a measurement of the brand. lv_font_montserrat_14 -- the
  * font this build links, pinned by CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14 --
  * gives '4' an adv_w of 150 in 1/16 px, which is 9.375 px, in a 10 px ink box.
  * 9 truncates both, and a two-digit tally drawn 9 px per digit creeps right
@@ -126,11 +148,11 @@
  * ink box to spare.
  *
  * The pixel comes back out of PIP_GROUP_GAP, so the BUDGET for one group is
- * 26 px: three of them from PIP_X0 would start at x = 56 / 82 / 108 and end at
- * 128, inside PIP_WALL_X. That is how the wall was sized, and it is what the
- * layout test asserts. It is not where the pips land -- a row of "1"-shaped
- * tallies really starts nearer 56 / 77 / 98, because '1' is not as wide as the
- * budget assumes.
+ * 26 px: FOUR of them from PIP_X0 would start at x = 10 / 36 / 62 / 88 and end
+ * at 108, well inside PIP_WALL_X. That is how the wall was checked, and it is
+ * what the layout test asserts. It is not where the pips land -- a row of
+ * "1"-shaped tallies really starts nearer 10 / 31 / 52, because '1' is not as
+ * wide as the budget assumes.
  *
  * PIP_NUM_ADV is that budget, not what the drawing uses. refresh_dots() measures
  * the string it actually wrote (lv_text_get_size) and stops at the wall,
@@ -190,14 +212,22 @@
  * the clock, and two unlabelled circles in the same green/amber/red
  * vocabulary said unrelated things with no way to tell which.
  *
- * Both reasons are answered now, not ignored -- and the corner is not part of
- * the answer. What came back is a ROW, at PIP_X0 above, in the gap between
- * the clock and the brand that was empty either way; the clock keeps the
- * corner it has always had. And the hint line at STATUS_Y now names whichever
- * condition fired, so the marks up there are no longer unlabelled: colour
- * gets you "something is wrong", the sentence under it gets you which. That
- * is the arrangement commit 6540287 could not have had, because the label did
- * not exist yet.
+ * Both reasons are answered now, not ignored. What came back is a ROW, at
+ * PIP_X0 above, and the corner IS part of the answer this time -- the clock
+ * left it for the row under the brand, which it shares with the hint. And that
+ * hint names whichever condition fired, so the marks up there are no longer
+ * unlabelled: colour gets you "something is wrong", the sentence gets you
+ * which. That is the arrangement commit 6540287 could not have had, because
+ * the label did not exist yet.
+ *
+ * The sentence is not always there, and that is the trade. It appears only
+ * while something wants a person -- see usage_activity_needs_row() -- because
+ * a line reading "Working" over a row of working pips was the panel spending
+ * its only sentence to repeat itself. The rest of the time the clock has it,
+ * and the colour is on its own again. That is acceptable HERE and was not in
+ * 6540287: back then colour was the only channel and there were two circles
+ * competing in it; now there is one row, and a sentence that arrives exactly
+ * when colour alone would not be enough.
  *
  * The row also answers something that commit did not raise and the single pip
  * it removed could not have fixed: one mark cannot speak for several

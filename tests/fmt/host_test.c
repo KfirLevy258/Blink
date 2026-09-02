@@ -154,11 +154,27 @@ static void test_fmt_pips(void)
 	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_FINISHED);
 	EXPECT_EQ(p[2].count, 1);
 
-	/* Four groups do not fit 75 px, so finished is dropped first. */
+	/*
+	 * All four states live. The clock left the top-left corner, so the row
+	 * has the whole 120 px from the bezel to the wordmark instead of the
+	 * 75 px it had between the clock and the wordmark -- and four groups
+	 * fit, which is what stops FINISHED being dropped in the ordinary case.
+	 */
 	n = fmt_pips(4, 2, 1, 1, p, 8);
-	EXPECT_EQ(n, 3);
+	EXPECT_EQ(n, 4);
 	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_FAILED);
 	EXPECT_EQ((int)p[1].kind, (int)FMT_PIP_WAITING);
+	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_RUNNING);
+	EXPECT_EQ((int)p[3].kind, (int)FMT_PIP_FINISHED);
+
+	/*
+	 * The cap still exists, and still drops FINISHED first -- it just
+	 * cannot be reached by four states any more. A fifth would be needed,
+	 * and there are only four, so this asserts the mechanism rather than a
+	 * reachable frame: max = 3 stands in for the cap.
+	 */
+	n = fmt_pips(4, 2, 1, 1, p, 3);
+	EXPECT_EQ(n, 3);
 	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_RUNNING);
 
 	/* A tiny `max` truncates rather than overruns. */
@@ -170,9 +186,9 @@ static void test_fmt_pips(void)
 	n = fmt_pips(-3, 0, 0, 0, p, 8);
 	EXPECT_EQ(n, 0);
 
-	/* Counts mode never grows: twenty sessions still fit three groups. */
+	/* Counts mode never grows: twenty sessions still fit four groups. */
 	n = fmt_pips(12, 5, 2, 1, p, 8);
-	EXPECT_EQ(n, 3);
+	EXPECT_EQ(n, 4);
 }
 
 int main(void)

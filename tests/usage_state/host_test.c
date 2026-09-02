@@ -58,6 +58,31 @@ int main(void)
 	CHECK(USAGE_ACTIVITY_FAILED != USAGE_ACTIVITY_STUCK,
 	      "FAILED is not merely an alias for STUCK");
 
+
+	/*
+	 * Which states earn the row under the brand. The clock owns it by
+	 * default; only a state that wants a person takes it away.
+	 */
+	CHECK(usage_activity_needs_row(USAGE_ACTIVITY_FAILED),
+	      "a failed turn takes the row from the clock");
+	CHECK(usage_activity_needs_row(USAGE_ACTIVITY_STUCK),
+	      "a wedged session takes the row");
+	CHECK(usage_activity_needs_row(USAGE_ACTIVITY_WAITING),
+	      "an open prompt takes the row");
+	/*
+	 * The two that do NOT, and the reasons are different. RUNNING would
+	 * spend the panel's only sentence saying what a row of green pips
+	 * already says. IDLE is the owner's call: "Finished" is not an error,
+	 * an amber pip carries it, and a desk that finishes a session every
+	 * few minutes would never see the clock.
+	 */
+	CHECK(!usage_activity_needs_row(USAGE_ACTIVITY_RUNNING),
+	      "working does not displace the clock -- the green pip says it");
+	CHECK(!usage_activity_needs_row(USAGE_ACTIVITY_IDLE),
+	      "finished does not displace the clock");
+	CHECK(!usage_activity_needs_row(USAGE_ACTIVITY_NONE),
+	      "nothing known does not displace the clock");
+
 	printf(failures ? "\n%d FAILED\n" : "\nall state checks passed\n",
 	       failures);
 	return failures ? 1 : 0;

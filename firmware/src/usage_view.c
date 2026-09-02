@@ -12,6 +12,7 @@
 #include "usage_view.h"
 #include "usage_layout.h"
 #include "fmt.h"
+#include "usage_state.h"
 #include "cfg_store.h"
 
 /* Severity colours: green under 60%, amber approaching, red near the limit. */
@@ -761,7 +762,12 @@ void usage_view_init(void)
 	clock_lbl = lv_label_create(scr);
 	lv_label_set_text(clock_lbl, "");
 	lv_obj_set_style_text_color(clock_lbl, COL_DIM, 0);
-	lv_obj_align(clock_lbl, LV_ALIGN_TOP_LEFT, 10, HDR_ROW_Y);
+	/*
+	 * Under the brand, on the same row as the hint -- they share it and only
+	 * one is ever visible. The clock holds it by default; a sentence takes it
+	 * only while something wants a person. See usage_activity_needs_row().
+	 */
+	lv_obj_align(clock_lbl, LV_ALIGN_TOP_MID, 0, STATUS_Y);
 
 	/* Whose numbers these are, directly under the brand. Blank until the
 	 * daemon says -- an empty line reads as "nothing to report", where a
@@ -2247,6 +2253,17 @@ void usage_view_set_status(enum usage_status status)
 
 	lv_color_t tc = COL_DIM;
 	const char *text;
+	/*
+	 * Does this line deserve the row, or does the clock keep it?
+	 *
+	 * Every branch that speaks for DATA health takes the row: those say
+	 * something is wrong with the numbers on screen, and a clock beside
+	 * stale numbers is the panel looking calm about its own failure. The
+	 * two branches that speak for EXECUTION state defer to
+	 * usage_activity_needs_row(), which is where the judgement lives so a
+	 * host test can reach it.
+	 */
+	bool urgent = true;
 
 	switch (status) {
 	case USAGE_STATUS_OK:
@@ -2289,6 +2306,7 @@ void usage_view_set_status(enum usage_status status)
 			 */
 			text = activity_hint();
 			tc = COL_DIM;
+			urgent = usage_activity_needs_row(activity);
 		}
 		break;
 	case USAGE_STATUS_STALE:
@@ -2326,6 +2344,7 @@ void usage_view_set_status(enum usage_status status)
 			 */
 			tc = COL_DIM;
 			text = activity_hint();
+			urgent = usage_activity_needs_row(activity);
 		}
 		break;
 	case USAGE_STATUS_ERROR:
@@ -2345,11 +2364,25 @@ void usage_view_set_status(enum usage_status status)
 			text = "HOST LOST - numbers are frozen";
 		} else {
 			text = "";
+			urgent = false;
 		}
 		break;
 	}
 	lv_obj_set_style_text_color(hint, tc, 0);
 	lv_label_set_text(hint, text);
+
+	/*
+	 * One row, two tenants. An empty sentence never takes it -- a blank
+	 * line where the time used to be is strictly worse than the time, and
+	 * `text` is "" on more paths than the one that means it.
+	 */
+	if (urgent && text[0]) {
+		lv_obj_clear_flag(hint, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_add_flag(clock_lbl, LV_OBJ_FLAG_HIDDEN);
+	} else {
+		lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_clear_flag(clock_lbl, LV_OBJ_FLAG_HIDDEN);
+	}
 
 	/* One owner for both indicators' colour. The hint says WHICH condition
 	 * fired; the dots say only how bad each axis is. Still one call site

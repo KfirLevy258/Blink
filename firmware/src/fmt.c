@@ -142,8 +142,18 @@ void fmt_hint(const char *status, const char *label, char *buf, size_t buflen)
 	snprintf(buf, buflen, "%s", status);
 }
 
-/* Three groups fit the 75 px between the clock and the brand; four do not. */
-#define PIP_GROUPS_MAX	3
+/*
+ * Four groups fit the 120 px from the bezel to the wordmark.
+ *
+ * It was three, when the row lived in the 75 px between the clock and the
+ * wordmark and the overflow rule below ran on an ordinary desk. The clock
+ * moved to the row under the brand -- which is the clock's row now, and only
+ * yields to a sentence when something wants a person -- and the corner it left
+ * is the row's. There are only four states, so the cap is no longer reachable
+ * by a real frame; it stays because `max` can still be smaller than four, and
+ * because a fifth state would otherwise silently take a slot from RUNNING.
+ */
+#define PIP_GROUPS_MAX	4
 /* Above this many sessions a row of pips is counted rather than read. */
 #define PIP_SESSIONS_MAX 6
 
