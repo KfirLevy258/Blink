@@ -240,3 +240,33 @@ Smaller, still open:
   light has nothing to ride on: `merge()` returns None for a provider group
   carrying no percentage, and sending one would blank the dials instead. The
   real answer is a `state`-only wire message that does not touch them.
+
+**The pip row (2026-09-02).** The header's single execution-state dot became a
+row of pips, one per live session, in the gap between the clock and the brand
+— which was empty the whole time. The clock is back in its corner and the
+rings are back to 120 as a result, and the hint line no longer counts
+sessions, because the row does. `fmt_pips()` owns every decision (mode, order,
+overflow); `usage_view.c` only positions and colours.
+
+Verified live on the board, 2026-09-02, five frames driven through the real
+daemon with `up_ms` climbing 10,263 → 241,128 ms across all of them and no
+reset:
+
+| sessions | on the wire | what the row must show |
+|---|---|---|
+| 3 | `n_run 1` | pip mode, 3 pips: 1 green, 2 amber |
+| 6 | `n_run 4` | pip mode, 6 pips — the threshold |
+| 7 | `n_run 4, n_stuck 1` | counts mode, an empty state skipped |
+| 8 | `n_run 4, n_wait 1, n_stuck 1` | counts mode, `finished` dropped by the overflow rule |
+| 16 | `n_run 12, n_wait 1, n_stuck 1` | counts mode, a two-digit tally through the measured-width path |
+
+The daemon omits a zero, so `n_wait`/`n_stuck` are simply absent below —
+absent means zero on both sides.
+
+**Not verified: the panel itself.** Every row above is the wire and the board's
+liveness, not a photograph. `usage_view.c` needs LVGL and has no automated
+coverage of any kind, so whether six pips read as *six* rather than a smear —
+the threshold the whole design turns on — is still unanswered, as is whether
+the row visibly clears the clock and the wordmark. One session below 3 was
+never driven, because reaching it would have meant deleting the owner's real
+state files.
