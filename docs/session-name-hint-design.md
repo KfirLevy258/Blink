@@ -342,3 +342,86 @@ underneath cannot be read as a lost cable, and a red top-right with "HOST LOST
 - The rail, pill, countdown and caption. All four are pinned by the budget
   above and none of them moves.
 - The dot's colours and pulse rules. Unchanged from `activity_color()`.
+
+---
+
+# Addendum 2, 2026-09-02: the pip row, and the header goes back
+
+Requested after the branch was flashed and wire-verified. It reverses part of
+Addendum 1 and replaces the single execution-state dot with one mark per
+session.
+
+## What changes
+
+1. **The rings go back to 120**, and with them the whole header regroup:
+   the clock returns to the top-left corner and the hint line to `STATUS_Y 24`.
+2. **The execution-state dot becomes a pip row** — one mark per live session,
+   sitting in the gap between the clock and the brand.
+3. **The hint line stops carrying a session count.** `Working - 3 sessions`
+   goes away; the pips say that now. The project name stays.
+
+## Why the pips fit without a new row
+
+Reverting the ring to 120 puts the arcs back at 44–164, which leaves room for
+exactly two header rows — the old arrangement, where the clock owns the
+top-left corner. That is where Addendum 1 put the execution dot, so the two
+requests collide.
+
+They stop colliding once the row is measured rather than assumed. On the old
+row: the clock `12:04` at montserrat_14 runs from x=10 to about x=47, and the
+brand `BLINK` is centred at 160 and about 47 px wide, so it starts near x=136.
+**The 89 px between them is empty and always has been.** The pips go there.
+
+    10        47              56 ────── 130      136        184    270  296
+    |─clock──-|               |── pip row ──|    |── BLINK ──|     age  dot
+
+With an 8 px gap either side the row has **75 px**, which at an 8 px pip on an
+11 px pitch holds **7 pips** — one more than the threshold below needs.
+
+## The rule
+
+| Sessions | Shows |
+|---|---|
+| 0 | nothing. An empty corner is true; there is no session to describe. |
+| 1–6 | one pip per session, grouped by state |
+| 7+ | one pip per non-empty state, with its count |
+
+Six is not a geometric limit — seven fit. It is where a row stops being read
+and starts being counted, which is the opposite of glanceable.
+
+**Order is fixed: failed, waiting, running, finished.** The eye lands
+top-left first, so the leftmost mark is always the most likely to need you,
+and colours never reshuffle as sessions change state.
+
+**Counts mode holds three groups, not four.** A group is a pip, a 2 px gap and
+its digits, with 7 px between groups — about 94 px for four, against a 75 px
+budget. So the overflow rule is load-bearing rather than a safety net: **drop
+`finished` first, then `running`**, so the worst case still shows the two
+states that actually need you.
+
+## Colours: three, and no new meanings
+
+Red is `failed`, amber is `needs you`, green is `working`. Each pip reads
+exactly like the old execution dot, because it *is* that dot, once per
+session.
+
+Waiting and finished share amber deliberately. The panel has already
+established it cannot separate them at this size — `activity_color()` records
+that steady-versus-pulsing "was not a difference anyone caught from across a
+desk" — and a fill or shape distinction on an 8 px pip is a finer channel than
+the one that already failed. If those two need telling apart, that is what a
+sessions page would be for.
+
+> **Ruling: `GAUGE_PCT_Y` stays an expression.** Addendum 1 made it
+> centre-derived after the original offset-from-the-top proved wrong. Reverting
+> the ring to 120 must reuse that expression rather than restoring the literal
+> 90 — the expression yields 90 at `GAUGE_ARC_SZ 120` on its own, and keeps
+> following any future ring change.
+
+## Not in scope
+
+- A sessions page. It remains the right answer for the full breakdown with
+  words, and this is not it.
+- Any wire change. `n_run`, `n_wait` and `n_stuck` already reach the board and
+  are discarded; finished is `n_sess` minus the other three.
+- Separating `waiting` from `finished` visually. See above.
