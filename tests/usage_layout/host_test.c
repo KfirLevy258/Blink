@@ -192,6 +192,20 @@ int main(void)
 	      "a full pip row clears the brand");
 	CHECK(PIP_WALL_X < 136, "the wall is left of the brand's left edge");
 	EXPECT_EQ(PIP_MAX, 7);
+	/*
+	 * Counts mode: three groups of pip + gap + one digit, with a gap
+	 * between them. Asserted for the SINGLE-digit case only, which is the
+	 * one the metrics are sized for -- a wider tally is measured at draw
+	 * time and stopped at the wall (refresh_dots), because no constant
+	 * here can know how many digits a tally has. PIP_NUM_ADV is the
+	 * measured advance of the widest digit; if a font bump breaks that,
+	 * this fails rather than the numerals creeping onto the brand.
+	 */
+	CHECK(PIP_X0 + 3 * (PIP_SZ + PIP_NUM_GAP + PIP_NUM_ADV)
+	      + 2 * PIP_GROUP_GAP <= PIP_WALL_X,
+	      "three counted groups clear the brand");
+	/* The pip shares the health dot's centre line. */
+	EXPECT_EQ(PIP_Y + PIP_SZ / 2, HDR_ROW_Y + DOT_SZ / 2);
 
 	/* --- the bottom stacks: countdowns, pill, rail --- */
 	CHECK(who.y0 >= cd_l.y1,

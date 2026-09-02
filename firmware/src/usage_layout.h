@@ -83,6 +83,35 @@
 #define PIP_MAX			7
 
 /*
+ * An 8 px pip on the 12 px health dot's centre line, written as the
+ * difference rather than as the 2 it evaluates to: the header carries marks of
+ * two sizes, and what makes it read as ONE row is that their centres agree.
+ * Spelling it this way means it still agrees if either size changes.
+ */
+#define PIP_Y			(HDR_ROW_Y + (DOT_SZ - PIP_SZ) / 2)
+
+/*
+ * Counts mode's metrics: pip, gap, numeral, then the gap to the next group.
+ *
+ * PIP_NUM_ADV is a MEASUREMENT of the widest digit, like the two bounds above
+ * are measurements of the clock and the brand. lv_font_montserrat_14 -- the
+ * font this build links, pinned by CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14 --
+ * gives '4' an adv_w of 150 in 1/16 px, which is 9.375 px, in a 10 px ink box.
+ * 9 truncates both, and a two-digit tally drawn 9 px per digit creeps right
+ * with every digit until it reaches the brand. 10 covers every digit with the
+ * ink box to spare.
+ *
+ * The pixel comes back out of PIP_GROUP_GAP, so a single-digit group is still
+ * 26 px wide and the three groups counts mode can hold still start at
+ * x = 56 / 82 / 108 -- the last numeral ending at 128, inside PIP_WALL_X.
+ * Wider tallies are not laid out from these alone; see refresh_dots(), which
+ * measures each group and stops at the wall.
+ */
+#define PIP_NUM_GAP		2
+#define PIP_NUM_ADV		10
+#define PIP_GROUP_GAP		6
+
+/*
  * Whose numbers these are, directly under the brand.
  *
  * ONE label for the whole screen, not a name beside each countdown. With one
@@ -120,8 +149,8 @@
 
 
 /*
- * An execution-state pip is BACK in the top-left corner, and this is not a
- * revert of the decision that removed it.
+ * An execution-state indicator is BACK, and this is not a revert of the
+ * decision that removed it.
  *
  * Commit 6540287 ("colour meant three different things, and two dots said
  * the same one") pulled a top-left activity pip and a top-right status dot
@@ -129,16 +158,21 @@
  * the clock, and two unlabelled circles in the same green/amber/red
  * vocabulary said unrelated things with no way to tell which.
  *
- * Both reasons are answered now, not ignored. The clock moved to CLOCK_Y,
- * centred under the brand -- that is what freed the corner, and freeing it
- * was the whole point of this task. And the hint line at STATUS_Y now names
- * whichever condition fired, so a circle up there is no longer unlabelled:
- * colour gets you "something is wrong", the sentence under it gets you
- * which. That is the arrangement commit 6540287 could not have had, because
- * the corner and the label did not exist yet.
+ * Both reasons are answered now, not ignored -- and the corner is not part of
+ * the answer. What came back is a ROW, at PIP_X0 above, in the gap between
+ * the clock and the brand that was empty either way; the clock keeps the
+ * corner it has always had. And the hint line at STATUS_Y now names whichever
+ * condition fired, so the marks up there are no longer unlabelled: colour
+ * gets you "something is wrong", the sentence under it gets you which. That
+ * is the arrangement commit 6540287 could not have had, because the label did
+ * not exist yet.
+ *
+ * The row also answers something that commit did not raise and the single pip
+ * it removed could not have fixed: one mark cannot speak for several
+ * sessions. One per session can.
  *
  * See refresh_dots() in usage_view.c -- with the s, one call refreshing both
- * circles.
+ * the health dot and the row.
  */
 
 /* The two arcs. */

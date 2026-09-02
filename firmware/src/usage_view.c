@@ -119,15 +119,32 @@ static struct gauge session, weekly;
  * limited", "a tool is wedged" or "the cable fell out", and the panel gave no
  * way to tell -- and the top-left corner belonged to the clock anyway.
  *
- * Both reasons are answered now. The clock sits under the brand, so that
- * corner is free, and the hint line below NAMES whichever condition fired, so
- * neither circle is unlabelled any more. What "worse wins" cost was real: a
- * stale reading painted over a failed session and the panel showed only the
- * milder of the two facts. So each axis gets its own corner -- data health
- * right, execution state left -- and neither hides the other.
+ * Both reasons are answered now, and neither by taking the corner back. The
+ * execution axis is not a circle in a corner at all: it is a ROW across the
+ * empty gap between the clock and the brand, so the clock keeps the corner it
+ * always had. And the hint line below NAMES whichever condition fired, so
+ * neither indicator is unlabelled any more. What "worse wins" cost was real:
+ * a stale reading painted over a failed session and the panel showed only the
+ * milder of the two facts. So each axis gets its own place -- data health in
+ * the right corner, execution state across the header -- and neither hides
+ * the other.
+ *
+ * ONE MARK PER SESSION, which is the fact a single dot could never carry. Four
+ * sessions with one of them holding a permission prompt drew exactly the same
+ * amber circle as one session doing the same thing, so the indicator answered
+ * "something wants you" and never "how much of this is waiting". fmt_pips()
+ * owns what the row says -- mode, order, overflow -- and everything here only
+ * positions and colours its answer.
  */
 static lv_obj_t *dot;		/* data health, top-right */
-static lv_obj_t *act_dot;	/* execution state, top-left */
+static lv_obj_t *pip[PIP_MAX];		/* execution state, one per session */
+static lv_obj_t *pip_num[PIP_MAX];	/* its tally, in counts mode only */
+/*
+ * The last counts the daemon sent, kept because refresh_dots() is reached from
+ * several causes that carry no counts of their own -- a status change, a page
+ * change -- and each of those must redraw the same row rather than blank it.
+ */
+static int pip_n_sess, pip_n_run, pip_n_wait, pip_n_stuck;
 static enum usage_status data_health = USAGE_STATUS_DISCONNECTED;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
@@ -580,6 +597,13 @@ void usage_view_deinit(void)
 	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
 		rail_dot[i] = NULL;
 	}
+	/* The pip row the same way, and for the same reason: usage_view_set_counts()
+	 * arrives on the protocol thread and calls refresh_dots(), which would
+	 * otherwise paint through PIP_MAX freed pointers. */
+	for (int i = 0; i < PIP_MAX; i++) {
+		pip[i] = NULL;
+		pip_num[i] = NULL;
+	}
 	cur_page = 0;
 	activity = USAGE_ACTIVITY_NONE;
 #if HAVE_PER_MODEL
@@ -625,26 +649,58 @@ void usage_view_init(void)
 	lv_obj_add_flag(dot, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
 	/*
-	 * The execution-state indicator, in the corner the clock vacated.
+	 * The execution-state row, in the gap between the clock and the brand.
 	 *
-	 * 6540287 removed a pip from exactly here and gave two reasons. One was
-	 * that the corner was occupied, which is no longer true. The other was
-	 * two unlabelled circles in one colour vocabulary -- and the hint line
-	 * below now names whichever condition fired, so they are not unlabelled
-	 * any more. This is not that pip coming back; it is the arrangement
-	 * that commit could not have.
+	 * 6540287 removed a pip from the top-left corner and gave two reasons.
+	 * One was that the corner was occupied by the clock -- it still is, and
+	 * this row never asks for it: the 75 px between the clock and BLINK was
+	 * empty the whole time. The other was two unlabelled circles in one
+	 * colour vocabulary, and the hint line below now names whichever
+	 * condition fired. This is not that pip coming back, and it is not one
+	 * pip: it is one per session.
 	 *
-	 * Built exactly like the health dot above, down to the gesture flag:
-	 * two circles that mean different things must still LOOK like one
-	 * family, and a swipe starting on either must reach the screen below.
+	 * All PIP_MAX pairs are built once, here, and hidden. Showing and
+	 * hiding is cheaper and steadier than creating and deleting objects on
+	 * every poll, and it means every pointer below stays valid for the life
+	 * of the screen -- refresh_dots() runs from the protocol thread and
+	 * must never race a widget being built.
+	 *
+	 * Built like the health dot above, down to the gesture flag: marks that
+	 * mean different things must still LOOK like one family, and a swipe
+	 * starting on any of them must reach the screen below. They give up
+	 * CLICKABLE, which the lone health dot never had to: lv_obj_create()
+	 * sets it by default and LVGL's hit test walks children back to front,
+	 * so a 74 px strip of clickable header would swallow the long-press
+	 * that opens the card and the tap that dismisses it -- a dead band
+	 * across the top of the screen. See rail_dot below, which learned this
+	 * as a bug.
+	 *
+	 * Y is PIP_Y so an 8 px pip shares the 12 px health dot's centre line:
+	 * the header's marks sit on one line even though they are two sizes.
 	 */
-	act_dot = lv_obj_create(scr);
-	lv_obj_set_size(act_dot, DOT_SZ, DOT_SZ);
-	lv_obj_set_style_radius(act_dot, LV_RADIUS_CIRCLE, 0);
-	lv_obj_set_style_border_width(act_dot, 0, 0);
-	lv_obj_set_style_bg_color(act_dot, COL_GREY, 0);
-	lv_obj_align(act_dot, LV_ALIGN_TOP_LEFT, 12, HDR_ROW_Y);
-	lv_obj_add_flag(act_dot, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	for (int i = 0; i < PIP_MAX; i++) {
+		pip[i] = lv_obj_create(scr);
+		lv_obj_set_size(pip[i], PIP_SZ, PIP_SZ);
+		lv_obj_set_style_radius(pip[i], LV_RADIUS_CIRCLE, 0);
+		lv_obj_set_style_border_width(pip[i], 0, 0);
+		lv_obj_set_style_bg_color(pip[i], COL_GREY, 0);
+		lv_obj_set_style_bg_opa(pip[i], LV_OPA_COVER, 0);
+		lv_obj_align(pip[i], LV_ALIGN_TOP_LEFT,
+			     PIP_X0 + i * PIP_PITCH, PIP_Y);
+		lv_obj_add_flag(pip[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
+		lv_obj_clear_flag(pip[i], LV_OBJ_FLAG_CLICKABLE);
+		lv_obj_add_flag(pip[i], LV_OBJ_FLAG_HIDDEN);
+
+		/* Its tally, drawn only in counts mode. A label is not
+		 * clickable in LVGL, so it needs no flag of its own. */
+		pip_num[i] = lv_label_create(scr);
+		lv_label_set_text(pip_num[i], "");
+		lv_obj_set_style_text_color(pip_num[i], COL_GREY, 0);
+		lv_obj_align(pip_num[i], LV_ALIGN_TOP_LEFT,
+			     PIP_X0 + i * PIP_PITCH + PIP_SZ + PIP_NUM_GAP,
+			     HDR_ROW_Y);
+		lv_obj_add_flag(pip_num[i], LV_OBJ_FLAG_HIDDEN);
+	}
 
 	/* Carries the amber/red explanation. Empty when all is well: the gauges
 	 * still hold real (if stale) numbers in those states, so they stay visible
@@ -1653,58 +1709,33 @@ void usage_view_tick_1s(void)
 }
 
 /*
- * Execution state -> pip colour, and whether it breathes.
+ * Pip kind -> colour. THREE colours, and no new meanings: each pip reads
+ * exactly like the single execution dot it replaces.
  *
- * TWO states animate, not one: RUNNING and WAITING (see activity_color).
- * RUNNING breathes because a steady dot cannot distinguish "working" from
- * "finished and left it that way", which is the whole distinction this
- * indicator adds; WAITING breathes because a permission prompt is asking for
- * the person RIGHT NOW and must not sit as quietly as an answer waiting to be
- * read. Both use the boot bar's pulse shape (see boot_pulse_cb) -- an opacity
- * fade to full and back, repeating -- but slower and shallower than it:
- * LV_OPA_40 over 900 ms each way, against the bar's LV_OPA_30 over 600 ms. A
- * header dot that breathes for as long as a session runs must not draw the eye
- * the way a boot bar does for two seconds.
- */
-static void act_pulse_cb(void *obj, int32_t v)
-{
-	lv_obj_set_style_bg_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
-}
-
-/*
- * The colour the execution state asks for, and whether it pulses.
+ * WAITING and FINISHED share amber deliberately. The panel already tried to
+ * separate them and could not: green-steady for finished against green-pulsing
+ * for running was the whole difference between "read me" and "busy", and
+ * nobody caught it from across a desk (user decision 2026-08-29). An 8 px pip
+ * is a finer channel than the pulse that already failed, so it is not the
+ * place to retry the distinction. Both mean the same thing to the person
+ * anyway: a session that wants you.
  *
- * Its own function because TWO status cases need it: data that is sound, and
- * data flagged stale by the OTHER provider's age while this page is fine.
- * Inlined in one of them, it was simply missing from the other.
+ * Nothing here breathes. A pulse was how ONE dot said "and this one is live";
+ * a row says it by how many marks there are, and seven breathing pips in the
+ * header would be motion for its own sake right where the eye lands first.
+ * That is why the pulse callback went with the dot it animated.
  */
-static lv_color_t activity_color(bool *pulse)
+static lv_color_t pip_colour(enum fmt_pip_kind k)
 {
-	switch (activity) {
-	case USAGE_ACTIVITY_STUCK:
-	case USAGE_ACTIVITY_FAILED:
+	switch (k) {
+	case FMT_PIP_FAILED:
 		return COL_RED;
-	case USAGE_ACTIVITY_WAITING:
-		/* Asking right now: amber, and it breathes -- a permission
-		 * prompt is more urgent than an answer waiting to be read. */
-		*pulse = true;
+	case FMT_PIP_WAITING:
 		return COL_AMBER;
-	case USAGE_ACTIVITY_IDLE:
-		/*
-		 * Amber, not green. A finished turn is a turn waiting on the
-		 * person, and the daemon ranks it above "running" so one
-		 * finished session shows through however many are still
-		 * working (user decision 2026-08-29). Green was the old
-		 * colour, and steady green vs pulsing green was the whole
-		 * difference between "read me" and "busy" -- not a difference
-		 * anyone caught from across a desk.
-		 */
+	case FMT_PIP_FINISHED:
 		return COL_AMBER;
-	case USAGE_ACTIVITY_RUNNING:
-		*pulse = true;
-		return COL_GREEN;
 	default:
-		/* NONE: live data and nothing to report. Steady green. */
+		/* RUNNING: working, and nothing is asked of you. */
 		return COL_GREEN;
 	}
 }
@@ -1724,7 +1755,6 @@ static lv_color_t activity_color(bool *pulse)
  */
 static void refresh_dots(void)
 {
-	bool pulse = false;
 	lv_color_t hc = COL_GREY;
 
 	if (dot) {
@@ -1756,55 +1786,118 @@ static void refresh_dots(void)
 		lv_obj_set_style_bg_color(dot, hc, 0);
 	}
 
-	if (!act_dot) {
+	if (!pip[0]) {
 		return;
 	}
-	lv_color_t ac = activity_color(&pulse);
 
 	/*
-	 * A dead daemon takes the execution state with it.
+	 * The execution axis is a row now, not a dot. fmt_pips owns every
+	 * decision -- mode, order, overflow -- so this loop only positions and
+	 * colours. See fmt.h for why six is the threshold.
 	 *
-	 * `activity` only ever changes when the daemon says so, so once the
-	 * host is gone the last value it sent freezes on screen -- and the dot
-	 * goes on asserting it. USAGE_ACTIVITY_NONE keeps a steady green
-	 * "nothing to report" and RUNNING keeps a PULSING green "a session is
-	 * working right now", both sitting beside a red "HOST LOST - numbers
-	 * are frozen". The panel would be claiming a live session it has no
-	 * way to see. The old worse-wins dot hid this by never showing the
-	 * execution axis at all; un-ranking the two dots brought it back.
+	 * FINISHED is derived rather than sent: it is whatever is left of
+	 * n_sess once the three states on the wire are taken out, clamped at
+	 * zero so a frame whose parts disagree -- they are counted at slightly
+	 * different moments on the host -- cannot produce a negative.
+	 */
+	int fin = pip_n_sess - pip_n_run - pip_n_wait - pip_n_stuck;
+
+	if (fin < 0) {
+		fin = 0;
+	}
+
+	struct fmt_pip want[PIP_MAX];
+	int n = fmt_pips(pip_n_run, pip_n_wait, pip_n_stuck, fin,
+			 want, PIP_MAX);
+	int x = PIP_X0;
+
+	/*
+	 * A dead daemon takes the row with it.
 	 *
-	 * So grey, and never breathing. This is not the health dot ranking
-	 * over the activity dot -- the two axes still do not rank -- it is the
-	 * activity axis reporting what it actually knows. The state is not
-	 * known to be idle, it is unknown, and grey already means "nothing to
-	 * report" on the health dot, so the vocabulary carries over. An honest
-	 * grey is worth more than a green claim that stopped being checked.
+	 * The counts only ever change when the daemon says so, so once the host
+	 * is gone the last set it sent freezes on screen -- and the row goes on
+	 * asserting it: three green pips claiming three sessions are working
+	 * right now, sitting beside a red "HOST LOST - numbers are frozen". The
+	 * panel would be claiming live sessions it has no way to see. The old
+	 * worse-wins dot hid this by never showing the execution axis at all;
+	 * un-ranking the two axes brought it back.
+	 *
+	 * So grey, and the shape stays. Grey is not a fourth session state --
+	 * on this panel it means the HOST is gone, which is exactly what it
+	 * means here, and it is already the health dot's word for "nothing to
+	 * report". A grey row says "this is what was true when the cable was
+	 * last alive" without asserting any of it still is.
 	 *
 	 * USAGE_STATUS_ERROR deliberately does NOT get this: an error is a bad
 	 * reading, not a lost daemon. The daemon that reports it is still
-	 * connected and still updating `activity`, so the execution state is
-	 * live and greying it would throw away a fact we hold.
+	 * connected and still sending counts, so the row is live and greying it
+	 * would throw away a fact we hold.
 	 */
-	if (data_health == USAGE_STATUS_DISCONNECTED) {
-		ac = COL_GREY;
-		pulse = false;
-	}
+	bool lost = data_health == USAGE_STATUS_DISCONNECTED;
 
-	lv_anim_delete(act_dot, act_pulse_cb);
-	lv_obj_set_style_bg_opa(act_dot, LV_OPA_COVER, 0);
-	lv_obj_set_style_bg_color(act_dot, ac, 0);
+	for (int i = 0; i < PIP_MAX; i++) {
+		/* 12 bytes because that is what "%d" can need for an int
+		 * (-2147483648 plus the NUL), not because a tally is ever
+		 * that big. Sized from what the FORMAT can produce means no
+		 * truncation is reachable however wrong the wire gets. */
+		char b[12];
+		int len = 0;
+		int w = PIP_SZ;
 
-	if (pulse) {
-		lv_anim_t an;
+		if (i < n && want[i].count > 0) {
+			/*
+			 * The width comes from what was actually WRITTEN,
+			 * never from the count: the daemon's tally is clamped
+			 * to 9999 on the way in (proto.c), but trusting that
+			 * here would put the daemon in charge of where this
+			 * row ends. Counting the digits after the write makes
+			 * the drawn string its own bound.
+			 */
+			snprintf(b, sizeof(b), "%d", want[i].count);
+			len = (int)strlen(b);
+			w = PIP_SZ + PIP_NUM_GAP + PIP_NUM_ADV * len;
+		}
 
-		lv_anim_init(&an);
-		lv_anim_set_var(&an, act_dot);
-		lv_anim_set_exec_cb(&an, act_pulse_cb);
-		lv_anim_set_values(&an, LV_OPA_40, LV_OPA_COVER);
-		lv_anim_set_duration(&an, 900);
-		lv_anim_set_playback_duration(&an, 900);
-		lv_anim_set_repeat_count(&an, LV_ANIM_REPEAT_INFINITE);
-		lv_anim_start(&an);
+		/*
+		 * Stop at the wall.
+		 *
+		 * Three single-digit groups end at 128 and fit by 2 px, which
+		 * is what PIP_NUM_ADV is measured for -- but a tally is not
+		 * always one digit, and three two-digit groups would run to
+		 * 137 and paint over BLINK. Hiding this group and every group
+		 * after it (n = i does that on the next pass) drops the least
+		 * urgent first, which is the order fmt_pips already put them
+		 * in, so the marks that survive are the ones that need a
+		 * person. Losing a tally is a smaller lie than writing one
+		 * across the brand.
+		 */
+		if (i < n && x + w > PIP_WALL_X) {
+			n = i;
+		}
+
+		if (i >= n) {
+			lv_obj_add_flag(pip[i], LV_OBJ_FLAG_HIDDEN);
+			lv_obj_add_flag(pip_num[i], LV_OBJ_FLAG_HIDDEN);
+			continue;
+		}
+
+		lv_color_t c = lost ? COL_GREY : pip_colour(want[i].kind);
+
+		lv_obj_align(pip[i], LV_ALIGN_TOP_LEFT, x, PIP_Y);
+		lv_obj_set_style_bg_color(pip[i], c, 0);
+		lv_obj_clear_flag(pip[i], LV_OBJ_FLAG_HIDDEN);
+
+		if (len > 0) {
+			lv_label_set_text(pip_num[i], b);
+			lv_obj_set_style_text_color(pip_num[i], c, 0);
+			lv_obj_align(pip_num[i], LV_ALIGN_TOP_LEFT,
+				     x + PIP_SZ + PIP_NUM_GAP, HDR_ROW_Y);
+			lv_obj_clear_flag(pip_num[i], LV_OBJ_FLAG_HIDDEN);
+			x += w + PIP_GROUP_GAP;
+		} else {
+			lv_obj_add_flag(pip_num[i], LV_OBJ_FLAG_HIDDEN);
+			x += PIP_PITCH;
+		}
 	}
 }
 
@@ -1837,6 +1930,17 @@ void usage_view_set_session(const char *label, int n)
 	 * set_status owns the composition and calling it is how the label is
 	 * rebuilt. */
 	usage_view_set_status(last_status);
+}
+
+void usage_view_set_counts(int n_sess, int n_run, int n_wait, int n_stuck)
+{
+	pip_n_sess = n_sess;
+	pip_n_run = n_run;
+	pip_n_wait = n_wait;
+	pip_n_stuck = n_stuck;
+	/* Straight to the row: this is the only input it has, and the daemon
+	 * sends it on every poll whether or not it changed. */
+	refresh_dots();
 }
 
 /*
@@ -2023,8 +2127,9 @@ void usage_view_set_sessions(int n_sessions, int n_agents)
 
 /*
  * What the execution state would say, for the line that data health left
- * empty. Separate from activity_color() because colour and words answer
- * different questions: colour says how bad, this says what.
+ * empty. Separate from the colour path -- pip_colour() now, activity_color()
+ * before the row replaced the dot -- because colour and words answer different
+ * questions: colour says how bad, this says what.
  *
  * No dash in any of these -- fmt_hint uses " - " as its separator.
  */
@@ -2043,10 +2148,11 @@ static const char *activity_text(void)
 /*
  * The composed execution-state line: what the tool is doing, and to what.
  *
- * Its own function for the same reason activity_color() is one, and it is the
+ * Its own function for the same reason activity_color() was one -- that helper
+ * is gone with the dot it coloured, but the lesson is not -- and it is the
  * words half of that same pair: TWO status cases need it, data that is sound
- * and data flagged stale by the OTHER provider while this page is fine.
- * activity_color() was split after being inlined in one case and simply
+ * and data flagged stale by the OTHER provider while this page is fine. The
+ * colour was split into a function after being inlined in one case and simply
  * missing from the other; the text was inlined in USAGE_STATUS_OK and left the
  * !stale_here() case of USAGE_STATUS_STALE saying nothing at all -- the second
  * silence, the very defect the hint line exists to remove. Composing it here
@@ -2136,15 +2242,15 @@ void usage_view_set_status(enum usage_status status)
 			 * The second silence. This branch used to write "",
 			 * so a two-provider desk whose Codex reading was last
 			 * touched this morning arms STALE, the health dot goes
-			 * green because THIS page is fine, the activity dot
+			 * green because THIS page is fine, a pip in the row
 			 * goes red for a failed Claude session -- and the line
 			 * under them said nothing, which is exactly the defect
 			 * the hint line was built to remove, surviving in the
 			 * one case nobody wrote down.
 			 *
-			 * The colour path already had this right: see
-			 * activity_color(), split into a function precisely
-			 * because these same two status cases need it. The two
+			 * The colour path already had this right: its helper
+			 * was split into a function precisely because these
+			 * same two status cases need it. The two
 			 * paths are deliberately parallel -- when this page's
 			 * numbers are sound, whatever the other provider's age
 			 * is doing, the line speaks for execution state and
