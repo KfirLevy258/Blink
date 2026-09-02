@@ -133,6 +133,71 @@ int main(int argc, char **argv)
 		usage_view_set_sessions(0, 0);
 		usage_view_set_clock(10, 30);
 		break;
+	case 6:	/* ONE session running. The floor of the pip row: a single
+		 * mark has to read as a mark and not as dirt on the glass. */
+		usage_view_set_provider1("claude");
+		usage_view_update(27.0, 13231, 42.0, 598831);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_counts(1, 1, 0, 0);
+		usage_view_set_clock(14, 05);
+		break;
+	case 7:	/* SIX sessions, a mixed row. This is the scene the whole
+		 * design turns on: six is the last count drawn one-per-session,
+		 * and the question no arithmetic can answer is whether six pips
+		 * read as SIX or as a smear. 1 failed, 1 waiting, 3 running,
+		 * 1 finished -- so it also shows all three colours at once. */
+		usage_view_set_provider1("claude");
+		usage_view_update(63.0, 4200, 51.0, 300000);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(6, 2);
+		usage_view_set_counts(6, 3, 1, 1);
+		usage_view_set_clock(14, 05);
+		break;
+	case 8:	/* SEVEN -- one more than six, and the row must change mode
+		 * rather than grow. 4 running, 2 waiting, 1 finished: no
+		 * failures, so a state is skipped and three groups still fit. */
+		usage_view_set_provider1("claude");
+		usage_view_update(63.0, 4200, 51.0, 300000);
+		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
+		usage_view_set_sessions(7, 2);
+		usage_view_set_counts(7, 4, 2, 0);
+		usage_view_set_clock(14, 05);
+		break;
+	case 9:	/* EIGHT, all four states live. The overflow rule fires here:
+		 * only three groups fit, so FINISHED is dropped and the row
+		 * shows the two states that actually need a person plus what
+		 * is working. */
+		usage_view_set_provider1("claude");
+		usage_view_update(63.0, 4200, 51.0, 300000);
+		usage_view_set_activity(USAGE_ACTIVITY_FAILED);
+		usage_view_set_sessions(8, 2);
+		usage_view_set_counts(8, 4, 1, 1);
+		usage_view_set_clock(14, 05);
+		break;
+	case 10: /* SIXTEEN with a two-digit tally -- the case the measured
+		  * width path exists for, and the one where a numeral could
+		  * reach the wordmark. Worst clock too: 20:48 is four of the
+		  * widest digits, so the row is squeezed from both sides. */
+		usage_view_set_provider1("claude");
+		usage_view_update(88.0, 900, 74.0, 120000);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(16, 4);
+		usage_view_set_counts(16, 12, 1, 1);
+		usage_view_set_clock(20, 48);
+		break;
+	case 11: /* The daemon's clamp is 0..9999 and the firmware trusts its
+		  * own destination rather than that number, so this is what
+		  * four digits per group actually looks like. Nothing here is
+		  * reachable on a desk; it is here because the wall guard is
+		  * the only thing standing between it and the wordmark. */
+		usage_view_set_provider1("claude");
+		usage_view_update(88.0, 900, 74.0, 120000);
+		usage_view_set_activity(USAGE_ACTIVITY_FAILED);
+		usage_view_set_sessions(9999, 0);
+		usage_view_set_counts(29997, 9999, 9999, 9999);
+		usage_view_set_clock(20, 48);
+		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_set_provider1("");
 		usage_view_update(-1.0, -1, -1.0, -1);
