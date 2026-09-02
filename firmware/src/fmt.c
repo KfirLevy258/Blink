@@ -120,8 +120,7 @@ void fmt_ascii(const char *src, char *dst, size_t dstlen)
 	dst[o] = '\0';
 }
 
-void fmt_hint(const char *status, const char *label, int n_sessions,
-	      char *buf, size_t buflen)
+void fmt_hint(const char *status, const char *label, char *buf, size_t buflen)
 {
 	if (!buf || buflen == 0) {
 		return;
@@ -140,9 +139,61 @@ void fmt_hint(const char *status, const char *label, int n_sessions,
 			return;
 		}
 	}
-	if (n_sessions > 1) {
-		snprintf(buf, buflen, "%s - %d sessions", status, n_sessions);
-		return;
-	}
 	snprintf(buf, buflen, "%s", status);
+}
+
+/* Three groups fit the 75 px between the clock and the brand; four do not. */
+#define PIP_GROUPS_MAX	3
+/* Above this many sessions a row of pips is counted rather than read. */
+#define PIP_SESSIONS_MAX 6
+
+int fmt_pips(int n_run, int n_wait, int n_fail, int n_fin,
+	     struct fmt_pip *out, int max)
+{
+	if (!out || max <= 0) {
+		return 0;
+	}
+	if (n_run < 0) { n_run = 0; }
+	if (n_wait < 0) { n_wait = 0; }
+	if (n_fail < 0) { n_fail = 0; }
+	if (n_fin < 0) { n_fin = 0; }
+
+	/* Most urgent first: the eye lands on the left of this row. */
+	const enum fmt_pip_kind kinds[4] = {
+		FMT_PIP_FAILED, FMT_PIP_WAITING, FMT_PIP_RUNNING, FMT_PIP_FINISHED
+	};
+	const int counts[4] = { n_fail, n_wait, n_run, n_fin };
+	int total = n_fail + n_wait + n_run + n_fin;
+	int w = 0;
+
+	if (total == 0) {
+		return 0;
+	}
+
+	if (total <= PIP_SESSIONS_MAX) {
+		for (int k = 0; k < 4 && w < max; k++) {
+			for (int j = 0; j < counts[k] && w < max; j++) {
+				out[w].kind = kinds[k];
+				out[w].count = 0;
+				w++;
+			}
+		}
+		return w;
+	}
+
+	/*
+	 * Counts mode. Walking the array in urgency order and stopping at
+	 * PIP_GROUPS_MAX drops FINISHED first and then RUNNING for free --
+	 * they are simply last in line, so the rule needs no separate branch
+	 * that could disagree with the ordering above.
+	 */
+	for (int k = 0; k < 4 && w < max && w < PIP_GROUPS_MAX; k++) {
+		if (counts[k] == 0) {
+			continue;
+		}
+		out[w].kind = kinds[k];
+		out[w].count = counts[k];
+		w++;
+	}
+	return w;
 }

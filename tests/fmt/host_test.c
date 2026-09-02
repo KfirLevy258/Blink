@@ -86,41 +86,93 @@ static void test_fmt_hint(void)
 	char b[FMT_HINT_MAX];
 
 	/* Nothing to say stays empty -- the caller draws no line. */
-	fmt_hint("", NULL, 0, b, sizeof(b));
+	fmt_hint("", NULL, b, sizeof(b));
 	EXPECT_STR(b, "");
 
-	/* A status alone, when there is no name and one session. */
-	fmt_hint("Working", NULL, 1, b, sizeof(b));
+	/* A status alone, when there is no name. */
+	fmt_hint("Working", NULL, b, sizeof(b));
 	EXPECT_STR(b, "Working");
 
-	/* A name when exactly one session is named. */
-	fmt_hint("Waiting for you", "LiveClaudeUi", 1, b, sizeof(b));
+	/* A name when one is sent. */
+	fmt_hint("Waiting for you", "LiveClaudeUi", b, sizeof(b));
 	EXPECT_STR(b, "Waiting for you - LiveClaudeUi");
 
-	/* A count when several share the state and no name was sent. */
-	fmt_hint("Waiting for you", NULL, 3, b, sizeof(b));
-	EXPECT_STR(b, "Waiting for you - 3 sessions");
-
-	/* One session is never "1 sessions"; it is just the status. */
-	fmt_hint("Finished", NULL, 1, b, sizeof(b));
-	EXPECT_STR(b, "Finished");
-
-	/* A label wins over a count if both arrive. */
-	fmt_hint("Working", "Blink", 2, b, sizeof(b));
+	/* A label always composes with the status. */
+	fmt_hint("Working", "Blink", b, sizeof(b));
 	EXPECT_STR(b, "Working - Blink");
 
 	/* Non-ASCII is transliterated, never drawn as boxes. */
-	fmt_hint("Working", "caf\xc3\xa9", 1, b, sizeof(b));
+	fmt_hint("Working", "caf\xc3\xa9", b, sizeof(b));
 	EXPECT_STR(b, "Working - caf?");
 
 	/* An empty label is the same as no label. */
-	fmt_hint("Working", "", 1, b, sizeof(b));
+	fmt_hint("Working", "", b, sizeof(b));
 	EXPECT_STR(b, "Working");
 
 	/* Truncation never overruns and always NUL-terminates. */
 	char small[12];
-	fmt_hint("Waiting for you", "LiveClaudeUi", 1, small, sizeof(small));
+	fmt_hint("Waiting for you", "LiveClaudeUi", small, sizeof(small));
 	EXPECT_EQ((int)strlen(small), 11);
+}
+
+static void test_fmt_pips(void)
+{
+	struct fmt_pip p[8];
+	int n;
+
+	/* Nothing running: an empty corner is true. */
+	n = fmt_pips(0, 0, 0, 0, p, 8);
+	EXPECT_EQ(n, 0);
+
+	/* One session, one pip, count unused. */
+	n = fmt_pips(1, 0, 0, 0, p, 8);
+	EXPECT_EQ(n, 1);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_RUNNING);
+	EXPECT_EQ(p[0].count, 0);
+
+	/* Fixed order, most urgent first, regardless of argument order. */
+	n = fmt_pips(1, 1, 1, 1, p, 8);
+	EXPECT_EQ(n, 4);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_FAILED);
+	EXPECT_EQ((int)p[1].kind, (int)FMT_PIP_WAITING);
+	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_RUNNING);
+	EXPECT_EQ((int)p[3].kind, (int)FMT_PIP_FINISHED);
+
+	/* Six is the last pip-mode count: six entries, every count still 0. */
+	n = fmt_pips(4, 1, 0, 1, p, 8);
+	EXPECT_EQ(n, 6);
+	EXPECT_EQ(p[5].count, 0);
+
+	/* Seven flips to counts mode: one entry per NON-EMPTY state, each
+	 * carrying its tally. 4 running + 2 waiting + 1 finished = 3 groups. */
+	n = fmt_pips(4, 2, 0, 1, p, 8);
+	EXPECT_EQ(n, 3);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_WAITING);
+	EXPECT_EQ(p[0].count, 2);
+	EXPECT_EQ((int)p[1].kind, (int)FMT_PIP_RUNNING);
+	EXPECT_EQ(p[1].count, 4);
+	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_FINISHED);
+	EXPECT_EQ(p[2].count, 1);
+
+	/* Four groups do not fit 75 px, so finished is dropped first. */
+	n = fmt_pips(4, 2, 1, 1, p, 8);
+	EXPECT_EQ(n, 3);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_FAILED);
+	EXPECT_EQ((int)p[1].kind, (int)FMT_PIP_WAITING);
+	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_RUNNING);
+
+	/* A tiny `max` truncates rather than overruns. */
+	n = fmt_pips(1, 1, 1, 1, p, 2);
+	EXPECT_EQ(n, 2);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_FAILED);
+
+	/* Negative counts are treated as zero, not as a state. */
+	n = fmt_pips(-3, 0, 0, 0, p, 8);
+	EXPECT_EQ(n, 0);
+
+	/* Counts mode never grows: twenty sessions still fit three groups. */
+	n = fmt_pips(12, 5, 2, 1, p, 8);
+	EXPECT_EQ(n, 3);
 }
 
 int main(void)
@@ -193,6 +245,7 @@ int main(void)
 	}
 
 	test_fmt_hint();
+	test_fmt_pips();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");

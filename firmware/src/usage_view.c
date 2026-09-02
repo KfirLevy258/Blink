@@ -135,7 +135,6 @@ static lv_obj_t *clock_lbl;
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
 /* Filled by usage_view_set_session() from the daemon; see proto.c. */
 static char session_label[28] = "";
-static int session_n;
 static char provider1_tag[12];	/* whichever provider the daemon made primary */
 static lv_obj_t *provider_lbl;	/* the tag, spelled out under the brand */
 static char provider2_tag[12];	/* "" when there is only one provider */
@@ -1825,13 +1824,14 @@ void usage_view_set_activity(enum usage_activity a)
 
 void usage_view_set_session(const char *label, int n)
 {
+	/* The count is no longer kept here -- the pip row carries it now. */
+	(void)n;
 	if (label) {
 		strncpy(session_label, label, sizeof(session_label) - 1);
 		session_label[sizeof(session_label) - 1] = '\0';
 	} else {
 		session_label[0] = '\0';
 	}
-	session_n = n;
 	/* Re-run the status switch so the line picks the new subject up. The
 	 * dots are unaffected -- neither input to refresh_dots changed -- but
 	 * set_status owns the composition and calling it is how the label is
@@ -2059,7 +2059,7 @@ static const char *activity_hint(void)
 {
 	static char hbuf[FMT_HINT_MAX];
 
-	fmt_hint(activity_text(), session_label, session_n, hbuf, sizeof(hbuf));
+	fmt_hint(activity_text(), session_label, hbuf, sizeof(hbuf));
 	return hbuf;
 }
 

@@ -62,18 +62,50 @@ void fmt_ascii(const char *src, char *dst, size_t dstlen);
  *
  *   status  ""      -> ""                      (nothing to say)
  *   label   set     -> "Working - Blink"
- *   n > 1           -> "Waiting for you - 3 sessions"
  *   otherwise       -> "Working"
  *
- * A label BEATS a count, because the daemon only sends one when exactly one
- * session holds the state -- see pc/providers/claude_state.py. `n == 1` adds
- * nothing a reader does not already assume, so it is not written.
+ * The session count no longer appears here -- it moved to the pip row, see
+ * fmt_pips() below.
  *
  * The label is user-controlled text from a directory name, so it goes through
  * fmt_ascii on the way in: the built-in fonts draw non-ASCII as empty boxes,
  * and a project living under a non-ASCII profile is an ordinary setup.
  */
-void fmt_hint(const char *status, const char *label, int n_sessions,
-	      char *buf, size_t buflen);
+void fmt_hint(const char *status, const char *label, char *buf, size_t buflen);
+
+/*
+ * What the pip row should draw, decided here so usage_view.c only positions
+ * and colours. Pure, so it is the one part of this feature a host test can
+ * reach at all -- usage_view.c needs LVGL and cannot be compiled on a laptop.
+ */
+enum fmt_pip_kind {
+	FMT_PIP_FAILED,		/* a turn died -- an event, never inferred */
+	FMT_PIP_WAITING,	/* a prompt is open */
+	FMT_PIP_RUNNING,	/* working */
+	FMT_PIP_FINISHED,	/* done, unread -- amber like WAITING, see below */
+};
+
+struct fmt_pip {
+	enum fmt_pip_kind kind;
+	int count;		/* 0 in pip mode; the state's tally in counts mode */
+};
+
+/*
+ * Fill `out` with what to draw, most urgent first, and return how many.
+ *
+ *   0 sessions        -> 0 entries. An empty corner is true.
+ *   1-6 sessions      -> one entry per SESSION, count 0.
+ *   7+                -> one entry per NON-EMPTY state, carrying its tally.
+ *
+ * Six is not the geometric limit -- seven pips fit in the 75 px between the
+ * clock and the brand. It is where a row stops being read and starts being
+ * counted, which is the opposite of what a desk display is for.
+ *
+ * Counts mode holds THREE groups in that space, not four, so an overflow
+ * drops FINISHED first and then RUNNING -- the worst case still shows the two
+ * states that actually need a person.
+ */
+int fmt_pips(int n_run, int n_wait, int n_fail, int n_fin,
+	     struct fmt_pip *out, int max);
 
 #endif /* FMT_H */
