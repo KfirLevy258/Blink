@@ -284,3 +284,31 @@ n_stuck 1` — the overflow rule) and 16 (`n_run 12, n_wait 1, n_stuck 1` — th
 two-digit tally, which is the case the numeral's Y actually matters in).
 `up_ms` 10,263 → 120,346 ms, no reset. The five rows above still hold; only
 the image they were taken from changed.
+
+**The hour took the row (2026-09-02, later the same day).** The line under
+BLINK read "Working" over a row of green pips — the panel spending its one
+sentence to repeat what colour already said. It shows the time instead, and
+yields to a sentence only while something wants a person: a failed turn, a
+wedged session, an open prompt. "Finished" stays a pip on the owner's call —
+not an error, and a desk that finishes a session every few minutes would
+never see the clock.
+
+The clock leaving the corner gave the pip row the whole 120 px from the bezel
+to the wordmark, up from 75. Counts mode holds **four** groups now, so
+`finished` is no longer dropped on an ordinary desk and the overflow rule is
+the edge case it was always described as.
+
+Verified on the board at `cecd489`: `state: idle` (clock holds the row),
+`waiting` and `failed` (each takes it), then back to `idle` when the probes
+cleared. `up_ms` 10,265 → 120,350, no reset.
+
+Verified by rendering, which is the part the board cannot show: the six
+scenes in `tools/panel_render/render_main.c` compile `usage_view.c` unchanged
+against real LVGL. Six pips read as six. Four count groups fit. Two 9999
+groups fit and the rest are dropped by the wall guard rather than crossing it.
+
+Two numbers were wrong and are now derived rather than typed:
+`BRAND_W` — "BLINK" measures 52 px at montserrat_14 with the letter_space of
+2 the code sets, so the wordmark starts at 134, not the 136 a comment claimed
+from a tracking value this code has never used. The clock's worst case was 49,
+not 47. Both errors ran in the direction that eats the row's clearance.
