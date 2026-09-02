@@ -75,6 +75,13 @@
  * PIP_MAX is geometry, not policy: seven fit. The display switches to counts
  * at SIX, which is where a row stops being read and starts being counted --
  * see fmt_pips(). The extra slot is headroom, not a target.
+ *
+ * Headroom that is really allocated, and that is the point. fmt_pips() never
+ * returns seven, so usage_view.c builds a pip and a numeral that can never be
+ * shown -- two LVGL objects, kept deliberately, because every bound in that
+ * file derives from THIS constant and an array sized to the six that are
+ * reachable would be a second number free to drift away from the geometry it
+ * is supposed to match. The unused pair is the cheaper of the two prices.
  */
 #define PIP_SZ			8
 #define PIP_PITCH		11
@@ -91,6 +98,23 @@
 #define PIP_Y			(HDR_ROW_Y + (DOT_SZ - PIP_SZ) / 2)
 
 /*
+ * The tally's LINE BOX, centred on that same line -- not pinned to the row's
+ * top like every other header label.
+ *
+ * A label is FONT_LINE_H tall whatever is written in it, so pinning it to
+ * HDR_ROW_Y ran it 8..24 and put its bottom edge exactly on STATUS_Y, with
+ * nothing between the numeral and the hint line. Aligning it to PIP_Y instead
+ * -- to match its own pip -- is worse, not better: 10..26 overlaps the hint by
+ * 2 px. What the numeral has to agree with is the pip's CENTRE, not its top,
+ * so it is the box that gets centred: 14 - 16/2 = 6, running 6..22 and
+ * clearing STATUS_Y by 2.
+ *
+ * That it lands on TITLE_Y is not a coincidence worth relying on, but it is
+ * worth knowing: the numerals and the wordmark share a cap-line.
+ */
+#define PIP_NUM_Y		(PIP_Y + PIP_SZ / 2 - FONT_LINE_H / 2)
+
+/*
  * Counts mode's metrics: pip, gap, numeral, then the gap to the next group.
  *
  * PIP_NUM_ADV is a MEASUREMENT of the widest digit, like the two bounds above
@@ -101,11 +125,14 @@
  * with every digit until it reaches the brand. 10 covers every digit with the
  * ink box to spare.
  *
- * The pixel comes back out of PIP_GROUP_GAP, so a single-digit group is still
- * 26 px wide and the three groups counts mode can hold still start at
- * x = 56 / 82 / 108 -- the last numeral ending at 128, inside PIP_WALL_X.
+ * The pixel comes back out of PIP_GROUP_GAP, so the BUDGET for one group is
+ * 26 px: three of them from PIP_X0 would start at x = 56 / 82 / 108 and end at
+ * 128, inside PIP_WALL_X. That is how the wall was sized, and it is what the
+ * layout test asserts. It is not where the pips land -- a row of "1"-shaped
+ * tallies really starts nearer 56 / 77 / 98, because '1' is not as wide as the
+ * budget assumes.
  *
- * PIP_NUM_ADV is a BUDGET, not what the drawing uses. refresh_dots() measures
+ * PIP_NUM_ADV is that budget, not what the drawing uses. refresh_dots() measures
  * the string it actually wrote (lv_text_get_size) and stops at the wall,
  * because billing every digit the widest one's advance drops groups that had
  * room -- '1' advances 5.2 px, not 10. What this constant is for is choosing

@@ -709,7 +709,7 @@ void usage_view_init(void)
 		lv_obj_set_style_text_color(pip_num[i], COL_GREY, 0);
 		lv_obj_align(pip_num[i], LV_ALIGN_TOP_LEFT,
 			     PIP_X0 + i * PIP_PITCH + PIP_SZ + PIP_NUM_GAP,
-			     HDR_ROW_Y);
+			     PIP_NUM_Y);
 		lv_obj_add_flag(pip_num[i], LV_OBJ_FLAG_HIDDEN);
 	}
 
@@ -1836,11 +1836,14 @@ static void refresh_dots(void)
 	 * worse-wins dot hid this by never showing the execution axis at all;
 	 * un-ranking the two axes brought it back.
 	 *
-	 * So grey, and the shape stays. Grey is not a fourth session state --
-	 * on this panel it means the HOST is gone, which is exactly what it
-	 * means here, and it is already the health dot's word for "nothing to
-	 * report". A grey row says "this is what was true when the cable was
-	 * last alive" without asserting any of it still is.
+	 * So grey, and the shape stays. Grey is not a fourth session state: in
+	 * THIS ROW, and in the health dot beside it, grey is what the header
+	 * says when the host is gone -- which is exactly what it means here.
+	 * (Elsewhere on the panel grey is only neutral chrome: the rail's
+	 * inactive mark, the chevrons at rest. It carries no session meaning
+	 * anywhere, which is what makes it safe to borrow here.) A grey row
+	 * says "this is what was true when the cable was last alive" without
+	 * asserting any of it still is.
 	 *
 	 * USAGE_STATUS_ERROR deliberately does NOT get this: an error is a bad
 	 * reading, not a lost daemon. The daemon that reports it is still
@@ -1936,7 +1939,7 @@ static void refresh_dots(void)
 			lv_label_set_text(pip_num[i], b);
 			lv_obj_set_style_text_color(pip_num[i], c, 0);
 			lv_obj_align(pip_num[i], LV_ALIGN_TOP_LEFT,
-				     x + PIP_SZ + PIP_NUM_GAP, HDR_ROW_Y);
+				     x + PIP_SZ + PIP_NUM_GAP, PIP_NUM_Y);
 			lv_obj_clear_flag(pip_num[i], LV_OBJ_FLAG_HIDDEN);
 			x += w + PIP_GROUP_GAP;
 		} else {
@@ -1979,12 +1982,32 @@ void usage_view_set_session(const char *label, int n)
 
 void usage_view_set_counts(int n_sess, int n_run, int n_wait, int n_stuck)
 {
+	/*
+	 * Recorded before the guard, deliberately, and this is the one place
+	 * on this file's setters where that order matters: these four numbers
+	 * are DATA, not a widget, and they are the row's only input. Dropping
+	 * a message that arrives mid-init would leave the row blank until the
+	 * daemon's next poll a minute later; keeping it means the first
+	 * refresh_dots() after the screen exists draws the truth.
+	 */
 	pip_n_sess = n_sess;
 	pip_n_run = n_run;
 	pip_n_wait = n_wait;
 	pip_n_stuck = n_stuck;
-	/* Straight to the row: this is the only input it has, and the daemon
-	 * sends it on every poll whether or not it changed. */
+	/*
+	 * The same guard every other usage_view_set_* has, and this one was
+	 * missing it. The NULL checks in refresh_dots() are honest at steady
+	 * state and after deinit, but `built` is only set at the END of
+	 * usage_view_init() while the pips become non-NULL partway through it,
+	 * and this runs on the protocol thread: without this, a message
+	 * landing inside that window paints into a screen that is still being
+	 * assembled.
+	 */
+	if (!built) {
+		return;
+	}
+	/* Straight to the row: the daemon sends these on every poll whether or
+	 * not they changed. */
 	refresh_dots();
 }
 

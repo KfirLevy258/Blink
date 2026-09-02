@@ -204,6 +204,26 @@ int main(void)
 	CHECK(PIP_X0 + 3 * (PIP_SZ + PIP_NUM_GAP + PIP_NUM_ADV)
 	      + 2 * PIP_GROUP_GAP <= PIP_WALL_X,
 	      "three counted groups clear the brand");
+	/*
+	 * And the row's Y, which had no assertion at all -- which is why a
+	 * tally whose line box ended exactly on STATUS_Y got as far as a
+	 * review. The label is FONT_LINE_H tall whatever is written in it, so
+	 * this is the check the numeral needs and the pip does not.
+	 */
+	CHECK(PIP_NUM_Y + FONT_LINE_H <= STATUS_Y,
+	      "the tally's line box clears the hint line");
+	/*
+	 * One centre line for the whole header: the tally's box, the pip and
+	 * the health dot, at three different heights. The first of these bites
+	 * -- FONT_LINE_H is nowhere in PIP_NUM_Y's chain of definitions, so a
+	 * font whose line height changes fails here. The second is close to
+	 * PIP_Y's own definition and can only fail if DOT_SZ - PIP_SZ goes
+	 * odd; it is written down anyway because the centre line is the rule
+	 * this row is built on, and a rule with no assertion is how the Y
+	 * above went unchecked in the first place.
+	 */
+	EXPECT_EQ(PIP_NUM_Y + FONT_LINE_H / 2, HDR_ROW_Y + DOT_SZ / 2);
+	EXPECT_EQ(PIP_Y + PIP_SZ / 2, HDR_ROW_Y + DOT_SZ / 2);
 
 	/* --- the bottom stacks: countdowns, pill, rail --- */
 	CHECK(who.y0 >= cd_l.y1,
