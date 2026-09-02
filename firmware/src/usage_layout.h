@@ -46,21 +46,41 @@
  */
 #define GAUGE_PCT_FONT_H	22
 
-/* Header: brand centred, clock stacked under it, age + dot right. */
-#define TITLE_Y			4
+/* Header: brand centred, clock left, age + dot right. */
+#define TITLE_Y			6
 #define HDR_ROW_Y		8
 #define DOT_SZ			12
 #define BRAND_TEXT		"BLINK"
 
 /*
- * The clock, centred UNDER the brand rather than in the top-left corner.
+ * The clock is back in the top-left corner, and the rings are back to 120.
  *
- * It moved for the corner, not for itself: an execution-state indicator needs
- * a place the eye already goes, and the top-left is the only one left once the
- * age and the status dot have the right. Stacking brand over time also reads
- * as one header block instead of three things sharing a strip.
+ * It moved to a row of its own to free that corner for an execution-state
+ * indicator, and the whole cost of the extra row came out of the ring --
+ * 120 down to 100 -- because everything below the arcs is pinned. The
+ * indicator is now a row of pips in the gap between the clock and the brand,
+ * which was empty the entire time, so the row was never needed and the ring
+ * gets its 20 px back.
  */
-#define CLOCK_Y			24
+
+/*
+ * The pip row: one mark per live session, in the gap between the clock and
+ * the brand.
+ *
+ * Both bounds are MEASUREMENTS, which is why the layout test asserts them
+ * rather than trusting them. "12:04" at montserrat_14 ends near x=47, and
+ * "BLINK" is centred at 160 with .09em tracking and about 47 px wide, so it
+ * begins near x=136. An 8 px gap either side leaves 75 px.
+ *
+ * PIP_MAX is geometry, not policy: seven fit. The display switches to counts
+ * at SIX, which is where a row stops being read and starts being counted --
+ * see fmt_pips(). The extra slot is headroom, not a target.
+ */
+#define PIP_SZ			8
+#define PIP_PITCH		11
+#define PIP_X0			56
+#define PIP_WALL_X		130
+#define PIP_MAX			7
 
 /*
  * Whose numbers these are, directly under the brand.
@@ -91,10 +111,11 @@
  * The status took the freed line rather than the layout keeping a hole. It is
  * the better home for it: a warning belongs where the eye lands first, and it
  * had been sharing the bottom line with whatever else wanted it. Full width
- * here, because "Reading is old - showing last known" is 35 characters and
- * the corners above it are the clock and the dot on their own row.
+ * here, because "Reading is old - showing last known" is 35 characters, and
+ * full width is safe because the row above carries only the clock and the
+ * dot, each confined to its own corner.
  */
-#define STATUS_Y		44
+#define STATUS_Y		24
 #define STATUS_MAX_W		300
 
 
@@ -122,21 +143,8 @@
 
 /* The two arcs. */
 #define GAUGE_CX		80
-#define GAUGE_ARC_Y		64
-/*
- * 100, down from 120.
- *
- * The header grew a row and every pixel of it came from here, because nothing
- * below the arcs can move: the rail is pinned by RAIL_BOTTOM_OFF, the pill
- * must clear it by 2, the countdowns must clear the pill by 2, and the caption
- * must clear the countdowns by 2. GAUGE_NAME_Y at 168 is therefore a ceiling,
- * not a preference -- see the pill's own comment about an earlier 3 px padding
- * that went straight through the countdowns.
- *
- * 100 rather than 104 so every seam stays on the 4 px rhythm; 104 lands the
- * ring exactly on the caption with no gap at all.
- */
-#define GAUGE_ARC_SZ		100
+#define GAUGE_ARC_Y		44
+#define GAUGE_ARC_SZ		120
 /*
  * Centred on the ring, not offset from its top.
  *

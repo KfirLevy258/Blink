@@ -167,50 +167,31 @@ int main(void)
 	      "the gauges start below the status line");
 
 	/*
-	 * The header is now three stacked rows, not two corners and a line.
-	 * Every seam is 4 px, which is the rhythm the top of usage_layout.h
-	 * mandates -- these assert it rather than trusting it.
+	 * Two header rows again, not three. The clock is back in the corner
+	 * it briefly vacated, so the arcs get their 20 px back.
 	 */
-	EXPECT_EQ(CLOCK_Y, TITLE_Y + FONT_LINE_H + 4);
-	EXPECT_EQ(STATUS_Y, CLOCK_Y + FONT_LINE_H + 4);
+	EXPECT_EQ(STATUS_Y, TITLE_Y + FONT_LINE_H + 2);
 	EXPECT_EQ(GAUGE_ARC_Y, STATUS_Y + FONT_LINE_H + 4);
-
-	/*
-	 * The bottom stack is immovable, so the arc's BOTTOM is what had to
-	 * give. Caption top at 168 is the ceiling everything above is fitted
-	 * to; this is the assertion that catches a ring grown back to 120.
-	 */
 	EXPECT_EQ(GAUGE_ARC_Y + GAUGE_ARC_SZ + 4, GAUGE_NAME_Y);
 
-	/*
-	 * The percentage is CENTRED on the ring, not offset from its (now
-	 * moving) top. The ring shrank from the top while its bottom stayed
-	 * pinned at GAUGE_NAME_Y - 4, so "46 px below the arc's top" used to
-	 * mean the ring's centre and stopped meaning that the moment the ring
-	 * got shorter -- it silently dragged the number about 20 px below
-	 * centre instead. Comparing centres is the invariant a reader
-	 * actually sees, and it survives the ring changing size again.
-	 */
-	EXPECT_EQ(GAUGE_PCT_Y + GAUGE_PCT_FONT_H / 2,
-		  GAUGE_ARC_Y + GAUGE_ARC_SZ / 2);
+	/* The percentage stays centre-derived rather than a literal: its
+	 * middle sits on the ring's middle, whatever the ring's size or the
+	 * font's line height. The old literal 90 was 3 px high, which is what
+	 * e7df2f2 fixed and this must not un-fix. */
+	EXPECT_EQ(GAUGE_PCT_Y + GAUGE_PCT_FONT_H / 2, GAUGE_ARC_Y + GAUGE_ARC_SZ / 2);
 
 	/*
-	 * The corner the clock vacated (top-left, at HDR_ROW_Y -- the same Y
-	 * the status dot uses top-right) is clear of the clock's new row
-	 * below it, room for Task 8's indicator.
+	 * The pip row lives between the clock and the brand. Both edges are
+	 * asserted because both are measurements, not constants the code
+	 * knows: the clock's width comes from "12:04" at montserrat_14, and
+	 * the wall from "BLINK" centred with .09em tracking. A font bump
+	 * must fail here rather than slide pips under the logo.
 	 */
-	CHECK(HDR_ROW_Y + DOT_SZ <= CLOCK_Y,
-	      "the vacated top-left corner clears the clock stacked below it");
-
-	/*
-	 * The age label (top-right, HDR_ROW_Y) and the clock (CLOCK_Y, its
-	 * own row now) meet with a 0 px seam -- but it is a VERTICAL seam:
-	 * the age's row ends exactly where the clock's row begins, so the two
-	 * never share a Y band and a wider clock string cannot walk into the
-	 * age label no matter how wide it gets.
-	 */
-	CHECK(HDR_ROW_Y + FONT_LINE_H <= CLOCK_Y,
-	      "the age label's row ends before the clock's row begins");
+	CHECK(PIP_X0 > 47, "pip row starts clear of the clock");
+	CHECK(PIP_X0 + PIP_MAX * PIP_PITCH - (PIP_PITCH - PIP_SZ) <= PIP_WALL_X,
+	      "a full pip row clears the brand");
+	CHECK(PIP_WALL_X < 136, "the wall is left of the brand's left edge");
+	EXPECT_EQ(PIP_MAX, 7);
 
 	/* --- the bottom stacks: countdowns, pill, rail --- */
 	CHECK(who.y0 >= cd_l.y1,
