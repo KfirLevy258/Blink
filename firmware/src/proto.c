@@ -350,6 +350,16 @@ static void dispatch(const char *json)
 		num(json, "n_agents", &na, 0, 9999);
 		usage_view_set_sessions((int)ns, (int)na);
 
+		double nr = 0, nw = 0, nst = 0;
+
+		/* Sent since the counts existed, dropped on the floor until
+		 * the pip row had a use for them. Absent means zero on both
+		 * sides, which is why the daemon omits them. */
+		num(json, "n_run", &nr, 0, 9999);
+		num(json, "n_wait", &nw, 0, 9999);
+		num(json, "n_stuck", &nst, 0, 9999);
+		usage_view_set_counts((int)ns, (int)nr, (int)nw, (int)nst);
+
 		char p1[16];
 
 		if (msg_get_str(json, "provider", p1, sizeof(p1))) {

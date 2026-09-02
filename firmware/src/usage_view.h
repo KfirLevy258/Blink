@@ -101,8 +101,21 @@ void usage_view_set_activity(enum usage_activity a);
  * `label` may be empty, which is the ordinary case whenever several sessions
  * share the state -- the daemon refuses to pick one, so the line falls back
  * to the count. See pc/providers/claude_state.py.
+ *
+ * `n` is kept for wire compatibility only -- the count itself now lives on
+ * the pip row, fed by usage_view_set_counts(), and this function discards it.
  */
 void usage_view_set_session(const char *label, int n);
+
+/*
+ * How many sessions are in each state, for the pip row.
+ *
+ * `n_stuck` is the wire's name and it carries FAILED -- claude_state folds
+ * the two together and no provider produces `stuck` any more. Finished is not
+ * sent: it is n_sess minus the other three, derived here rather than spending
+ * bytes on a line that has two to spare.
+ */
+void usage_view_set_counts(int n_sess, int n_run, int n_wait, int n_stuck);
 
 /*
  * How many Claude Code sessions are open, and how many subagents are running
