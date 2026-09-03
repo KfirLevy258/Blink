@@ -131,6 +131,44 @@ def _tail_lines(path: str):
     return text.splitlines()
 
 
+# The other end of the same file. `session_meta` -- the record that carries
+# the project's cwd, and so the only name a Codex session can ever have -- is
+# line 1, and the tail read above will never see it: the biggest rollout on
+# the machine this was written against is 51 MB, so TAIL_BYTES would have to
+# grow to the size of the file to reach the front of it. The name therefore
+# gets its own small read, of the head, and the two never meet.
+#
+# 128 KB rather than the "a few KB" a line of JSON sounds like. `session_meta`
+# embeds `base_instructions`, and the four real rollouts here have first lines
+# of 18-19 KB. That length belongs to Codex -- it grows whenever upstream adds
+# a paragraph to its system prompt -- so the bound is set at several times the
+# observation rather than just over it, half of TAIL_BYTES, because the way
+# this fails is silent: a first line that outgrows the bound costs the name on
+# every session at once and looks exactly like a session that has none.
+# Read once per file and then cached, so the size is paid once, not per poll.
+HEAD_BYTES = 128 * 1024
+
+
+def _head_line(path: str) -> str:
+    """The first COMPLETE line of a file, or "".
+
+    Complete is the whole point. A line with no newline inside HEAD_BYTES is
+    refused rather than returned in part: a JSON object cut in half decodes
+    as nothing, and handing the fragment back would only move the failure
+    into json.loads. A rollout being written at this instant is the ordinary
+    case for that, and it will have its newline by the next poll.
+    """
+    try:
+        with open(path, "rb") as f:
+            blob = f.read(HEAD_BYTES)
+    except OSError:
+        return ""
+    nl = blob.find(b"\n")
+    if nl < 0:
+        return ""
+    return blob[:nl].decode("utf-8", "replace")
+
+
 def _epoch(value):
     """A reset timestamp, or None when it is not one."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):

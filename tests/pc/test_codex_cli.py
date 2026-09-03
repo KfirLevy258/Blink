@@ -268,6 +268,53 @@ def test_only_the_tail_of_a_huge_file_is_read(tmp_path):
                    for ln in tail), "the first reading must be outside the tail"
 
 
+# --- the head of the file: where the project name lives ----------------------
+
+
+def test_the_first_line_is_read_whatever_follows_it(tmp_path):
+    """The name is on line 1 and the tail read cannot reach it: the biggest
+    rollout on the machine this was written against is 51 MB. So the head
+    gets its own read, and it must not care how much comes after."""
+    path = str(tmp_path / "rollout-a.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"type":"session_meta","payload":{"cwd":"/a/b"}}\n')
+        f.write("x" * (codex_cli.HEAD_BYTES * 3) + "\n")
+    assert codex_cli._head_line(path) == \
+        '{"type":"session_meta","payload":{"cwd":"/a/b"}}'
+
+
+def test_a_first_line_longer_than_the_head_bound_is_refused_not_halved(tmp_path):
+    """A JSON object cut in half parses as nothing anyway, and returning the
+    fragment would only move the failure into json.loads. The cost of a first
+    line that does not fit is the name, not the read."""
+    path = str(tmp_path / "rollout-b.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"type":"session_meta","payload":{"pad":"'
+                + "p" * (codex_cli.HEAD_BYTES + 10) + '"}}\n')
+    assert codex_cli._head_line(path) == ""
+
+
+def test_the_head_bound_clears_a_real_session_meta_line():
+    """18-19 KB is what the four real rollouts on this machine measure, and
+    that length is upstream's to change -- base_instructions is embedded in
+    the record. The bound has to have room over the observation, not equal
+    it."""
+    assert codex_cli.HEAD_BYTES >= 4 * 19 * 1024
+
+
+def test_a_missing_file_is_silence_not_an_error(tmp_path):
+    assert codex_cli._head_line(str(tmp_path / "nope.jsonl")) == ""
+
+
+def test_a_file_with_no_newline_at_all_is_refused(tmp_path):
+    """A rollout being written right now can have a partial first line. It
+    is not a name yet, and it will be on the next poll."""
+    path = str(tmp_path / "rollout-c.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"type":"session_meta","payload":{"cwd":"/a')
+    assert codex_cli._head_line(path) == ""
+
+
 def test_the_provider_never_raises_on_a_damaged_tree(tmp_path, monkeypatch):
     """Contract from base.ProviderParser: a parser for an app we do not
     control must not be able to stop the daemon."""
