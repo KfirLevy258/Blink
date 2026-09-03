@@ -538,6 +538,48 @@ def drift_check(settings_path: str, shim_path: str):
     return what
 
 
+def shim_content_check(shims):
+    """Rewrite any installed shim whose CONTENTS have fallen behind.
+
+    A different fault from drift_check above, and the one that shipped.
+    drift_check asks whether settings.json still points at us; this asks
+    whether the file it points at is still the file we would write. `blink
+    update` swaps the program directory and restarts the service -- it has
+    never rewritten a shim -- so every install that arrived by the documented
+    upgrade path ran a new daemon against whatever shim its original install
+    left behind. The symptom is not an error: the hook runs, the path exists,
+    `blink status` reports ten of ten events, and the only thing missing is
+    the field the new daemon came to read.
+
+    `shims` is a sequence of (path, name) pairs. Returns a description of what
+    it rewrote, or None when there was nothing to do -- which is the normal
+    case on every tick after the first.
+    """
+    if os.environ.get(WATCHDOG_DISABLE_ENV):
+        return None
+
+    # Same rule as drift_check: a missing marker means the user uninstalled,
+    # and that is never overridden. Without it a daemon still winding down
+    # would put back the shims `blink uninstall` had just removed.
+    if not _read_marker():
+        return None
+
+    from . import cli
+
+    repaired = []
+    for path, name in shims:
+        if cli.shim_is_current(path, name):
+            continue
+        try:
+            cli._write_shim(path, name)
+        except Exception as e:
+            repaired.append(f"{name} is out of date and could not be replaced: {e}")
+            continue
+        repaired.append(f"{name} was out of date; replaced it")
+
+    return "; ".join(repaired) if repaired else None
+
+
 class DriftWatchdog:
     """drift_check on an interval, with a cap on how hard it insists.
 
