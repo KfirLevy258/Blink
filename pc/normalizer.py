@@ -166,10 +166,26 @@ def merge(frames):
     # stopped being updated (and secs_until already refuses a past one).
     primary = session_src or weekly_src
 
+    # And the fact `primary` cannot carry: when this provider last said
+    # anything at all.
+    #
+    # Every frame in the group counts here, including the ones that won
+    # nothing -- a status line rewritten five seconds ago without a five-hour
+    # percentage lost the dial to a remembered reading from this morning, and
+    # it is still proof that Claude Code is running and somebody is at the
+    # desk. `observed_at` above answers "how old is the number"; this answers
+    # "how long since we heard a voice", and the board sleeps on the second
+    # question (see pc/providers/base and protocol.usage's `active_age_s`).
+    #
+    # Taken from active_at rather than observed_at so merging a merged frame
+    # keeps the freshest contact instead of narrowing it to the winner's.
+    active_at = max(f.active_at for f in frames)
+
     return base.NormalizedUsageFrame(
         provider=provider,
         src=primary.src,
         observed_at=primary.observed_at,
+        active_at=active_at,
         session_pct=session_pct if session_pct is not None else base.UNKNOWN,
         session_resets_at=session_resets_at,
         weekly_pct=weekly_pct if weekly_pct is not None else base.UNKNOWN,

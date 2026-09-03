@@ -170,7 +170,7 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           n_agents=0, p2="", p2_session_pct=UNKNOWN,
           p2_weekly_pct=UNKNOWN, p2_session_resets_in_s=-1,
           p2_weekly_resets_in_s=-1, p2_stale=False, burn_pph=None,
-          age_s=-1, p2_age_s=-1) -> dict:
+          age_s=-1, p2_age_s=-1, active_age_s=-1) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -232,6 +232,37 @@ The firmware reads this field: proto.c's "usage" handler calls
     back to counting from the message in that case, which is exactly the old
     behaviour, so an older daemon loses nothing it used to have. Older
     firmware ignores both keys.
+
+    `active_age_s` is the other freshness question, and it is one field for
+    the whole desk rather than one per provider: how long since ANY tool on
+    this machine last wrote anything at all, whether or not what it wrote
+    carried a percentage. The board dozes on this one and captions on
+    `age_s`, which is the same split it already makes between
+    SLEEP_ABSENT_AFTER_S ("is anybody here", four hours) and
+    SLEEP_READING_STALE_AFTER_S ("is this number old", half an hour) --
+    two questions, two numbers, and answering one with the other is the
+    whole class of bug this exists to close.
+
+    They diverge for exactly one reason. pc/providers/claude_cli remembers
+    the last payload that had a five-hour window and re-offers it carrying
+    its ORIGINAL mtime, because the rewrite that drops an expired window
+    does not make the last real reading untrue. When that remembered
+    reading wins the session dial it also becomes the frame whose age is
+    reported -- so a status line written five seconds ago can arrive here
+    stamped twelve hours old, and a board that dozes at four hours closes
+    its eyes on somebody who is sitting in front of it (measured, field
+    review 2026-09-02).
+
+    Per-desk and not per-provider because dozing is a whole-board decision:
+    the panel does not sleep one page at a time, and there is no version of
+    "Claude is quiet but Codex is not" in which the screen should go dark.
+    It is the age of the freshest reading on the bus, across both providers.
+
+    -1 when unknown, like `age_s`. An absent key sends the firmware back to
+    `age_s`, and that fallback is EXACT rather than approximate: the two
+    numbers can only differ because of the memory described above, and a
+    daemon old enough not to send this field has no such memory, so its
+    freshest source IS the dial's source. Older firmware ignores the key.
     """
     # `models` itself never went on the wire usefully: the firmware reads the
     # flattened scalar keys below and never the array, and since the status
@@ -323,6 +354,14 @@ The firmware reads this field: proto.c's "usage" handler calls
         extra["age_s"] = int(age_s)
     if p2 and p2_age_s is not None and p2_age_s >= 0:
         extra["p2_age_s"] = int(p2_age_s)
+    # Sent whenever it is known, including when it happens to equal `age_s`.
+    # Suppressing the duplicate would buy back twenty bytes on the common
+    # line and cost the reader the ability to tell "the desk is as quiet as
+    # the dial" from "this daemon is too old to know the difference" -- and
+    # it buys nothing at all where the budget is actually decided, since the
+    # worst case is the line where the two numbers disagree.
+    if active_age_s is not None and active_age_s >= 0:
+        extra["active_age_s"] = int(active_age_s)
 
     # One decimal on every percentage. Nothing downstream can see the
     # difference -- the firmware label is (int)(pct + 0.5), the arc is an
@@ -395,10 +434,28 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         # the source file's mtime and never leaves provider-space otherwise.
         age_s=_age_of(frame, now_epoch),
         p2_age_s=_age_of(secondary, now_epoch),
+        # And the other question: how long since anything on this desk said
+        # anything at all. The freshest of the two pages, because the panel
+        # sleeps as one screen -- see usage() for why the two ages come
+        # apart and what the board does with each.
+        active_age_s=_active_age(frame, secondary, now_epoch),
     )
 
 
-def _age_of(frame, now_epoch: float) -> int:
+def _active_age(frame, secondary, now_epoch: float) -> int:
+    """The age of the freshest contact on the bus, or -1 when nothing says.
+
+    The MINIMUM of the two providers' active ages, not of their reading
+    ages: a Codex rollout written a minute ago is evidence that somebody is
+    at this machine even on a day when the Claude page holds the dial.
+    """
+    ages = [a for a in (_age_of(frame, now_epoch, "active_at"),
+                        _age_of(secondary, now_epoch, "active_at"))
+            if a >= 0]
+    return min(ages) if ages else -1
+
+
+def _age_of(frame, now_epoch: float, attr: str = "observed_at") -> int:
     """Seconds since `frame` was observed, or -1 when that is unknowable.
 
     Clamped at zero rather than allowed to go negative. observed_at is a file
@@ -406,10 +463,15 @@ def _age_of(frame, now_epoch: float) -> int:
     seconds into the future is a real thing that happens; "-3 s ago" would
     reach fmt_age() as a negative and print "never", which is the one answer
     that is certainly wrong for a reading we are holding in our hand.
+
+    `attr` picks WHICH epoch is being aged -- the reading's own
+    (`observed_at`) or the freshest contact behind it (`active_at`) -- so
+    both wire ages are computed by one clamp and one unknown rule rather
+    than by two that could drift apart.
     """
-    if frame is None or getattr(frame, "observed_at", None) is None:
+    if frame is None or getattr(frame, attr, None) is None:
         return -1
-    return max(0, int(now_epoch - frame.observed_at))
+    return max(0, int(now_epoch - getattr(frame, attr)))
 
 
 EDITIONS = ("claude", "codex")
