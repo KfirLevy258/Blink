@@ -9,6 +9,7 @@ path existed and still ran, and nothing anywhere said why.
 """
 import ast
 import os
+import sys
 
 from pc import cli
 
@@ -70,7 +71,7 @@ def test_line_endings_alone_make_a_shim_stale(tmp_path):
     assert cli.shim_is_current(p, "blink-hook.sh") is False
 
 
-from pc import install_statusline
+from pc import install_hooks, install_statusline
 
 
 def test_a_stale_shim_is_rewritten(tmp_path, monkeypatch):
@@ -214,3 +215,204 @@ def test_status_is_quiet_when_the_shim_is_current(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "hook_shim_path", lambda: str(p))
 
     assert cli.hook_shim_status_note() is None
+
+
+# --- `blink status` only promises repair where repair will happen ---------
+#
+# hook_shim_status_note() said the shim was stale from the very first commit
+# of this feature; `cmd_status` printed "the daemon replaces it within five
+# minutes of starting" underneath it unconditionally, in all three Activity
+# branches -- including "hooks not installed", where nothing points at the
+# shim at all. That promise is false whenever BLINK_NO_WATCHDOG is set, the
+# install marker is absent (shim_content_check no-ops), or the bridge is not
+# running (no daemon, no tick) -- three reachable cases the fix in finding 1
+# has to make the copy honest about. Every test below drives cmd_status
+# itself, per finding 2: the two tests above call hook_shim_status_note()
+# directly and would not have caught a bug in the call site.
+
+
+class _FakeBackend:
+    def __init__(self, status_text):
+        self._status_text = status_text
+
+    def status(self):
+        return self._status_text
+
+
+def _rig_status(tmp_path, monkeypatch, *, bridge_running, marker,
+                 hook_shim_stale=True, statusline_shim_stale=False,
+                 watchdog_disabled=False):
+    """A HOME with hooks installed and (optionally) a stale hook shim.
+
+    Everything cmd_status reads is scoped to $HOME, so pointing that at
+    tmp_path is enough isolation to run the real function end to end rather
+    than stubbing its internals -- which is the point, per finding 2.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("BLINK_SKIP_SERVICE", raising=False)
+    monkeypatch.delenv(install_statusline.WATCHDOG_DISABLE_ENV, raising=False)
+    if watchdog_disabled:
+        monkeypatch.setenv(install_statusline.WATCHDOG_DISABLE_ENV, "1")
+    monkeypatch.setattr(
+        cli, "backend",
+        lambda: _FakeBackend("running (launchd)" if bridge_running
+                              else "not running"))
+
+    hook_shim = cli.hook_shim_path()
+    os.makedirs(os.path.dirname(hook_shim), exist_ok=True)
+    _write(hook_shim, "#!/bin/sh\n# old\n" if hook_shim_stale
+           else cli._shim_source("blink-hook.sh"))
+
+    statusline_shim = cli.shim_path()
+    _write(statusline_shim, "#!/bin/sh\n# old\n" if statusline_shim_stale
+           else cli._shim_source("blink-statusline.sh"))
+
+    settings = cli.settings_path()
+    os.makedirs(os.path.dirname(settings), exist_ok=True)
+    install_hooks.install(settings, hook_shim)
+
+    if marker:
+        install_statusline._write_marker(
+            install_statusline.statusline_command(statusline_shim))
+    else:
+        install_statusline._remove_marker()
+
+
+class _Args:
+    wire = False
+
+
+def test_status_promises_repair_when_the_daemon_will_tick(tmp_path, monkeypatch):
+    _rig_status(tmp_path, monkeypatch, bridge_running=True, marker=True)
+
+    out = _capture_status()
+
+    assert ("the activity hook shim is out of date -- the daemon replaces it"
+            " within five minutes of starting") in out
+
+
+def test_status_does_not_promise_repair_when_the_bridge_is_not_running(
+        tmp_path, monkeypatch):
+    """The bridge row two lines up already said there is no daemon."""
+    _rig_status(tmp_path, monkeypatch, bridge_running=False, marker=True)
+
+    out = _capture_status()
+
+    assert "the activity hook shim is out of date" in out
+    assert "the daemon replaces it" not in out
+    assert f"run `{cli.installed_bin()} install` to fix it" in out
+
+
+def test_status_does_not_promise_repair_when_never_installed(
+        tmp_path, monkeypatch):
+    """No marker means shim_content_check hands off -- drift_check's rule."""
+    _rig_status(tmp_path, monkeypatch, bridge_running=True, marker=False)
+
+    out = _capture_status()
+
+    assert "the activity hook shim is out of date" in out
+    assert "the daemon replaces it" not in out
+
+
+def test_status_does_not_promise_repair_when_the_watchdog_is_disabled(
+        tmp_path, monkeypatch):
+    _rig_status(tmp_path, monkeypatch, bridge_running=True, marker=True,
+                watchdog_disabled=True)
+
+    out = _capture_status()
+
+    assert "the activity hook shim is out of date" in out
+    assert "the daemon replaces it" not in out
+
+
+def test_status_says_nothing_about_the_shim_when_hooks_are_not_installed(
+        tmp_path, monkeypatch):
+    """Reachable case #4 from the review: nothing points at the shim at all."""
+    _rig_status(tmp_path, monkeypatch, bridge_running=True, marker=True)
+    # Wipe the hooks settings.json wrote, so `ours` is 0 and the branch is
+    # "hooks not installed" rather than "installed".
+    os.remove(cli.settings_path())
+
+    out = _capture_status()
+
+    assert "hooks not installed" in out
+    assert "out of date" not in out
+
+
+def test_status_flags_a_stale_statusline_shim(tmp_path, monkeypatch):
+    """Finding 3: the statusline shim gets the same disclosure the hook did."""
+    _rig_status(tmp_path, monkeypatch, bridge_running=True, marker=True,
+                hook_shim_stale=False, statusline_shim_stale=True)
+
+    out = _capture_status()
+
+    assert ("the status line shim is out of date -- the daemon replaces it"
+            " within five minutes of starting") in out
+
+
+def test_status_is_quiet_about_a_current_statusline_shim(tmp_path, monkeypatch):
+    _rig_status(tmp_path, monkeypatch, bridge_running=True, marker=True,
+                hook_shim_stale=False, statusline_shim_stale=False)
+
+    out = _capture_status()
+
+    assert "status line shim" not in out
+
+
+def _capture_status():
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cli.cmd_status(_Args())
+    return buf.getvalue()
+
+
+# --- a bundle or a marker that is not valid UTF-8 must not raise -----------
+#
+# Both _shim_source and _read_marker open with encoding="utf-8". A file that
+# is not valid UTF-8 makes that raise UnicodeDecodeError, which is a
+# ValueError -- not an OSError -- so the surrounding `except OSError` in
+# shim_is_current, and the one in _read_marker itself, both let it straight
+# through. shim_content_check calls cli.shim_is_current() with no try/except
+# of its own, and DriftWatchdog.tick() calls shim_content_check() the same
+# way, and hold_single_instance() calls on_wait() (which is watchdog.tick)
+# with no guard either -- so an escape here reaches all the way to the
+# daemon's wait loop and kills it, over a file it was only ever supposed to
+# report as "not current".
+
+
+def test_shim_is_current_survives_a_non_utf8_bundle_file(tmp_path, monkeypatch):
+    """The bundle file itself, not the installed one, is the bad UTF-8 here.
+
+    _shim_source reads the template shim_is_current compares against -- the
+    one the frozen binary carries. A byte-corrupted bundle is exactly the
+    "cannot tell" case shim_is_current already documents a policy for (say
+    current, let the louder failure surface elsewhere); it must reach that
+    policy rather than raising past it.
+    """
+    installed = tmp_path / "installed-hook.sh"
+    _write(str(installed), "#!/bin/sh\n# whatever was installed\n")
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "blink-hook.sh").write_bytes(b"\xff\xfe not valid utf-8 \x80")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle_dir), raising=False)
+
+    assert cli.shim_is_current(str(installed), "blink-hook.sh") is True
+
+
+def test_read_marker_survives_a_non_utf8_marker_file(tmp_path, monkeypatch):
+    """A corrupted marker file must read as "no marker", not raise.
+
+    drift_check's whole "never installed, or deliberately uninstalled" rule
+    reads _read_marker() and treats an empty string as "hands off" -- a
+    UnicodeDecodeError escaping instead would take the daemon down over a
+    file that is supposed to be advisory.
+    """
+    marker = tmp_path / "marker"
+    marker.write_bytes(b"\xff\xfe not valid utf-8 \x80")
+    monkeypatch.setattr(install_statusline, "_marker_path", lambda: str(marker))
+
+    assert install_statusline._read_marker() == ""

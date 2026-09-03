@@ -188,8 +188,16 @@ int main(void)
 	 * owning a row, so its own box is checked against the same neighbours:
 	 * it sits under the brand, clears the arcs below, and -- since it left
 	 * the pip row's corner for this shared row -- no longer collides with
-	 * the pips it used to sit beside. */
-	EXPECT_EQ(clock.y0, STATUS_Y);
+	 * the pips it used to sit beside.
+	 *
+	 * Against status.y0, not the STATUS_Y macro: clock is built two lines
+	 * above from that same macro, so comparing it to the macro can never
+	 * fail -- it would still pass with the clock's own top_mid() call
+	 * edited to some other row. Comparing to status.y0 instead asserts the
+	 * actual invariant this block is about: clock and status occupy the
+	 * same row as each other, and a future edit that moves either one off
+	 * that row fails here. */
+	EXPECT_EQ(clock.y0, status.y0);
 	CHECK(clock.y1 <= GAUGE_ARC_Y,
 	      "the clock's line box clears the arcs below it");
 	CHECK(clock.y0 >= brand.y1,

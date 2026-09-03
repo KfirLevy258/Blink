@@ -197,11 +197,15 @@ def shim_is_current(path: str, name: str) -> bool:
 
     try:
         expected = _shim_source(name).encode("utf-8")
-    except OSError:
-        # The bundle itself is unreadable. Claiming the installed shim is
-        # stale would start a rewrite that cannot succeed and would log the
-        # failure every tick; claiming it is current changes nothing. Say
-        # current and let the louder failure surface elsewhere.
+    except (OSError, UnicodeDecodeError):
+        # The bundle itself is unreadable -- or, since _shim_source opens
+        # with encoding="utf-8", readable but not valid UTF-8, which raises
+        # UnicodeDecodeError (a ValueError, not an OSError, so it needs its
+        # own arm here). Either way there is nothing to compare against.
+        # Claiming the installed shim is stale would start a rewrite that
+        # cannot succeed and would log the failure every tick; claiming it
+        # is current changes nothing. Say current and let the louder failure
+        # surface elsewhere.
         return True
 
     return installed == expected
@@ -1181,24 +1185,82 @@ def hook_shim_status_note():
     command strings against the shim path. That check passed throughout the
     period when the feature was dead: the path existed, the hook ran, and the
     file it ran was simply older than the daemon reading its output. The
-    daemon repairs this within five minutes of starting -- this line is for
-    the person looking at the gap before it closes, or at a machine where the
-    watchdog is disabled.
+    daemon can repair this within five minutes of starting -- whether it
+    actually will is a separate question the caller answers with
+    `_shim_repair_is_live`, because this function only knows the file is
+    stale, not whether anything is left to fix it.
     """
     if shim_is_current(hook_shim_path(), "blink-hook.sh"):
         return None
     return "the activity hook shim is out of date"
 
 
+def statusline_shim_status_note():
+    """The same check as `hook_shim_status_note`, for the other shim.
+
+    `blink status` has reported "Status line installed at ..." from the
+    file's mere presence since before DriftWatchdog existed -- the identical
+    blind spot the Activity row had until shim_content_check was added to
+    repair this shim too. Silent when the shim was never installed: a
+    missing file already prints "not installed" two lines up, and asking
+    whether a nonexistent file's contents are current is not a question
+    worth another line.
+    """
+    if not os.path.exists(shim_path()):
+        return None
+    if shim_is_current(shim_path(), "blink-statusline.sh"):
+        return None
+    return "the status line shim is out of date"
+
+
+def _shim_repair_is_live(bridge_running: bool) -> bool:
+    """Will DriftWatchdog's next tick actually rewrite a stale shim?
+
+    Three ways "the daemon replaces it within five minutes" can be false even
+    though the shim really is stale: BLINK_NO_WATCHDOG turns self-healing off
+    entirely (install_statusline.drift_check and shim_content_check both
+    check it first); shim_content_check no-ops with no install marker, the
+    same "never installed, or deliberately uninstalled" rule drift_check
+    documents; and with no bridge running there is no poll loop to tick at
+    all -- `cmd_status` already knows that from the Bridge row two lines
+    above and passes it in here rather than this function re-deriving it.
+    Printing the promise when none of these hold is the same species of
+    confidently-wrong copy this whole fix exists to end.
+    """
+    if os.environ.get(install_statusline.WATCHDOG_DISABLE_ENV):
+        return False
+    if not install_statusline._read_marker():
+        return False
+    return bridge_running
+
+
+def _shim_repair_line(note: str, bridge_running: bool) -> str:
+    """Format a stale-shim note, promising repair only when it will happen."""
+    if _shim_repair_is_live(bridge_running):
+        return f"{note} -- the daemon replaces it within five minutes of starting"
+    return f"{note} -- run `{installed_bin()} install` to fix it"
+
+
 def cmd_status(args) -> int:
+    # Whether a daemon is actually ticking, for the stale-shim notes below:
+    # neither drift_check nor shim_content_check runs on its own, so a shim
+    # note that promises "the daemon replaces it" is a lie with no bridge
+    # behind it. Every status() string that means "up" starts with "running"
+    # (see backend().status()'s docstring); under BLINK_SKIP_SERVICE the
+    # question was never asked, and "cannot confirm" gets the same false as
+    # "confirmed not running" -- the honest default when the promise cannot
+    # be checked.
     if _skip_service():
         # The launchd label and systemd unit name are global while everything
         # else is scoped to $HOME, so querying them under a test HOME reports
         # the real user's agent -- which read as "installed" for an install
         # that never happened.
         print("Bridge      not checked (BLINK_SKIP_SERVICE=1)")
+        bridge_running = False
     else:
-        print("Bridge      " + backend().status())
+        bridge_status = backend().status()
+        print("Bridge      " + bridge_status)
+        bridge_running = bridge_status.startswith("running")
 
     print(f"App         {RELEASE_VERSION}")
     for line in _board_lines():
@@ -1229,6 +1291,13 @@ def cmd_status(args) -> int:
 
     print("Status line " + (f"installed at {shim_path()}" if os.path.exists(shim_path())
                             else "not installed"))
+    # Same blind spot the Activity row had: the path existing does not mean
+    # its contents are current, and this shim gets the identical repair from
+    # DriftWatchdog (see claude_usage_bridge.py's shims= list), so it earns
+    # the identical disclosure.
+    stale_statusline = statusline_shim_status_note()
+    if stale_statusline:
+        print(f"            {_shim_repair_line(stale_statusline, bridge_running)}")
 
     # Install writes two things into settings.json, so status has to report
     # two. Reporting only the status line is the same omission the setup
@@ -1268,10 +1337,16 @@ def cmd_status(args) -> int:
         # Under the row rather than instead of it: every count above can be
         # right while the file those hooks run is older than the daemon
         # reading its output, which is the whole of this fault.
-        stale = hook_shim_status_note()
-        if stale:
-            print(f"            {stale} -- the daemon replaces it within"
-                  " five minutes of starting")
+        #
+        # Only when `ours` is nonzero: with zero hooks wired into
+        # settings.json at all, whether the shim they would have called is
+        # stale is not the actionable fact -- "hooks not installed" above
+        # already covers it, and a note about a file nothing points at is
+        # noise, not disclosure.
+        if ours:
+            stale = hook_shim_status_note()
+            if stale:
+                print(f"            {_shim_repair_line(stale, bridge_running)}")
     except install_statusline.SettingsUnreadable:
         print("Activity    unknown -- settings.json does not parse")
 

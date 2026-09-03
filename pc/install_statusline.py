@@ -99,7 +99,15 @@ def _read_marker() -> str:
     try:
         with open(_marker_path(), encoding="utf-8") as f:
             return f.read().strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError, so a marker
+        # file that is not valid UTF-8 (truncated write, disk corruption)
+        # needs its own arm here or it slips past this except -- straight
+        # into drift_check and shim_content_check, neither of which guards
+        # this call, and from there into DriftWatchdog.tick(), which the
+        # daemon's wait loop calls unguarded. Every caller already treats ""
+        # as "no marker" -- the same answer a missing file gets -- so that is
+        # the right answer for an unreadable one too.
         return ""
 
 
