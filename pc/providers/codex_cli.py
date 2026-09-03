@@ -415,12 +415,45 @@ def parse_rollout_state(lines, now_epoch):
 class CodexCliProvider(base.ProviderParser):
     def __init__(self, root=None):
         self._root = root
+        # path -> project name, for the one record in a rollout that cannot
+        # change. `session_meta` is line 1 of an append-only file whose name
+        # carries a UUID, so a path is never reused and the answer for a path
+        # is fixed for the life of the file.
+        #
+        # The saving is not CPU. The daemon polls about once a minute and
+        # 19 KB of json.loads is under a millisecond. It is that the SIZE of
+        # that line belongs to Codex: base_instructions is embedded in it,
+        # and re-deriving an immutable value from a blob upstream is free to
+        # grow is waste that grows with it. Pruned to the current file set on
+        # every poll, so this is bounded by RECENT_FILES rather than by how
+        # long the daemon has been up.
+        #
+        # Per instance, not per class: a mutable default here would make the
+        # cache shared by every provider in the process.
+        self._names = {}
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
 
     def root(self):
         return self._root if self._root is not None else sessions_root()
+
+    def _name_for(self, path):
+        """The project name for one rollout, read once per file.
+
+        The negative answer is cached too, and deliberately: a rollout with
+        no readable session_meta yet is a file being written at this instant,
+        which is precisely the file that would otherwise be re-read on every
+        poll for as long as it stayed in the recent set.
+        """
+        if path not in self._names:
+            self._names[path] = _project_name(
+                session_meta_cwd(_head_line(path)))
+        return self._names[path]
+
+    def _prune_names(self, known):
+        """Forget every cached name whose file is no longer being read."""
+        self._names = {p: n for p, n in self._names.items() if p in known}
 
     def parse_cli_event(self, raw_payload, now_epoch, observed_at):
         """One `rate_limits` object, already read, as a frame.

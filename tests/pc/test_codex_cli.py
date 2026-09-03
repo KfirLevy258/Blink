@@ -39,6 +39,22 @@ def token_count_line(limits, stamp="2026-08-27T03:00:00.000Z"):
     })
 
 
+def meta_line(cwd, originator="codex-tui"):
+    """Line 1 of a real rollout: the record that carries the project's cwd.
+
+    The padding is not decoration. A real session_meta embeds
+    base_instructions and measures 18-19 KB, and a fixture of 80 bytes would
+    let a head bound far too small to work on a desk pass every test here.
+    """
+    return json.dumps({
+        "timestamp": "2026-08-27T03:00:00.000Z",
+        "type": "session_meta",
+        "payload": {"cwd": cwd, "originator": originator,
+                    "cli_version": "0.150.0",
+                    "base_instructions": "i" * 18_000},
+    })
+
+
 def write_rollout(root, day="2026/08/27", name="rollout-a.jsonl", lines=()):
     path = os.path.join(root, *day.split("/"), name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -407,6 +423,64 @@ def test_the_name_is_not_capped_here():
     a second thing to keep in step with the firmware."""
     long = "n" * 200
     assert codex_cli._project_name("/a/" + long) == long
+
+
+def test_the_name_is_read_once_per_file(tmp_path):
+    """`session_meta` is line 1 of an append-only file whose name carries a
+    UUID: the path is never reused and the answer never changes. Re-deriving
+    it from 19 KB of embedded system prompt on every tick is waste that grows
+    with whatever upstream puts in that record next."""
+    root = str(tmp_path / "sessions")
+    path = write_rollout(root, lines=[meta_line("/Users/K/Blink"),
+                                      token_count_line(rate_limits())])
+    p = codex_cli.CodexCliProvider(root=root)
+    reads = []
+    real = codex_cli._head_line
+    codex_cli._head_line = lambda q: (reads.append(q), real(q))[1]
+    try:
+        assert p._name_for(path) == "Blink"
+        assert p._name_for(path) == "Blink"
+        assert p._name_for(path) == "Blink"
+    finally:
+        codex_cli._head_line = real
+    assert reads == [path], reads
+
+
+def test_a_file_with_no_usable_name_is_not_re_read_either(tmp_path):
+    """The negative answer is as fixed as the positive one, and a rollout
+    with no session_meta is the common case for a file being written right
+    now -- exactly the file this would otherwise re-read every minute."""
+    root = str(tmp_path / "sessions")
+    path = write_rollout(root, lines=[token_count_line(rate_limits())])
+    p = codex_cli.CodexCliProvider(root=root)
+    reads = []
+    real = codex_cli._head_line
+    codex_cli._head_line = lambda q: (reads.append(q), real(q))[1]
+    try:
+        assert p._name_for(path) == ""
+        assert p._name_for(path) == ""
+    finally:
+        codex_cli._head_line = real
+    assert reads == [path], reads
+
+
+def test_names_are_pruned_to_the_files_still_being_read(tmp_path):
+    """Bounded by RECENT_FILES rather than by how long the daemon has been
+    up. A path that has fallen out of the recent set will never be read
+    again, so holding its name is holding a string for nothing."""
+    p = codex_cli.CodexCliProvider(root=str(tmp_path))
+    p._names = {"/a": "A", "/b": "B", "/c": "C"}
+    p._prune_names({"/b", "/c", "/d"})
+    assert p._names == {"/b": "B", "/c": "C"}
+
+
+def test_two_providers_do_not_share_a_name_cache(tmp_path):
+    """A mutable default on __init__ would make the cache class-wide, which
+    is a bug that only shows up on a desk running two of these."""
+    a = codex_cli.CodexCliProvider(root=str(tmp_path))
+    b = codex_cli.CodexCliProvider(root=str(tmp_path))
+    a._names["/a"] = "A"
+    assert b._names == {}
 
 
 def test_the_provider_never_raises_on_a_damaged_tree(tmp_path, monkeypatch):
