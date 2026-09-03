@@ -106,11 +106,6 @@ def test_the_two_real_providers_compose_end_to_end(tmp_path):
     assert msg["src"] == "desktop"
 
 
-def test_make_fetch_is_a_zero_arg_callable():
-    fetch = ingest.make_fetch(providers=[Fixed(frame())])
-    assert fetch()["session_pct"] == 50.0
-
-
 # --- the project name, which rides beside the usage message ----------------
 
 
@@ -289,14 +284,6 @@ def test_the_count_belongs_to_the_state_on_the_panel():
 def test_session_pair_before_any_poll_is_empty():
     bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
     assert bus.session_pair() == ("", 0)
-
-
-def test_make_fetch_carries_the_accessor():
-    """make_fetch and the daemon now obtain a fetch the same way -- through
-    bus.fetch() -- so this and the daemon guard above cannot disagree."""
-    fetch = ingest.make_fetch(providers=[Fixed(named(n_wait=1))])
-    fetch()
-    assert fetch.session_pair() == ("LiveClaudeUi", 1)
 
 
 # --- the board owns the primary-provider preference ------------------------

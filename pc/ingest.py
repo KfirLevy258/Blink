@@ -200,13 +200,3 @@ def _pair_from(primary, secondary, wire_state):
              if f.state == wire_state and getattr(f, "label", "")]
     label = named[0].label if len(named) == 1 and n <= 1 else ""
     return (label, int(n))
-
-
-def make_fetch(providers=None, preferred_provider="claude"):
-    """Zero-arg callable for Bridge(fetch_usage=...).
-
-    Same shape as the single-source make_fetch it replaces, so the daemon's
-    wiring did not have to learn that there is now more than one source.
-    """
-    return IngestionBus(providers=providers,
-                        preferred_provider=preferred_provider).fetch()
