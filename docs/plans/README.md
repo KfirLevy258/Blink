@@ -5,13 +5,24 @@ that is why they are three documents and not one. Read this page before any of
 them; it carries the reasons the order is what it is, which none of them can
 state from the inside.
 
+**Start at [`STATE.md`](STATE.md)** — it says what has actually landed. This
+page says only why the order is what it is.
+
 | # | Plan | Tasks | What it is for |
 |---|---|---|---|
 | 1 | [`shim-self-repair.md`](shim-self-repair.md) | 6 | Make the session-name feature actually reach the people who already own a board |
+| 0 | [`field-bugs.md`](field-bugs.md) | — | The three faults the owner is living with: a 56-hour reading, a panel awake all night, a board that reboots when the PC is off |
 | 2 | [`codex-naming-and-failure.md`](codex-naming-and-failure.md) | 10 | Give Codex sessions a project name, and let a failed Codex turn show as failed |
 | 3 | [`codex-hook-shim.md`](codex-hook-shim.md) | 14 | Let a Codex session say it is waiting on a person |
 
 ## Why this order
+
+**Plan 0 was added after the others and runs second, not first.** Plan 1 was
+already most of the way through execution when these three bugs arrived, and
+its Task 3 repaired the owner's own install in the process — stopping it
+mid-flight would have thrown that away. Everything after Plan 1 goes to the
+field bugs, because those are the ones being lived with daily. The Codex work
+waits.
 
 **Plan 1 first, because everything already built is invisible without it.**
 Nothing rewrites `~/.blink/blink-hook.sh` after the first install. `blink update`
