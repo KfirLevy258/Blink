@@ -1174,6 +1174,22 @@ def _rm_state_dir():
         pass
 
 
+def hook_shim_status_note():
+    """A one-line warning when the installed hook shim is out of date.
+
+    `blink status` reports the activity hooks by comparing settings.json's
+    command strings against the shim path. That check passed throughout the
+    period when the feature was dead: the path existed, the hook ran, and the
+    file it ran was simply older than the daemon reading its output. The
+    daemon repairs this within five minutes of starting -- this line is for
+    the person looking at the gap before it closes, or at a machine where the
+    watchdog is disabled.
+    """
+    if shim_is_current(hook_shim_path(), "blink-hook.sh"):
+        return None
+    return "the activity hook shim is out of date"
+
+
 def cmd_status(args) -> int:
     if _skip_service():
         # The launchd label and systemd unit name are global while everything
@@ -1249,6 +1265,13 @@ def cmd_status(args) -> int:
         else:
             print("Activity    hooks not installed -- the busy/idle pip will"
                   " stay dark")
+        # Under the row rather than instead of it: every count above can be
+        # right while the file those hooks run is older than the daemon
+        # reading its output, which is the whole of this fault.
+        stale = hook_shim_status_note()
+        if stale:
+            print(f"            {stale} -- the daemon replaces it within"
+                  " five minutes of starting")
     except install_statusline.SettingsUnreadable:
         print("Activity    unknown -- settings.json does not parse")
 

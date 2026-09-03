@@ -422,7 +422,8 @@ def main(argv=None):
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
     from pc.cli import (_self_path, blink_home as _blink_home,
-                        installed_bin, settings_path, shim_path)
+                        hook_shim_path, installed_bin, settings_path,
+                        shim_path)
     self_bin = installed_bin()
     blink_home = _blink_home()
     update.recover(self_bin)
@@ -444,7 +445,16 @@ def main(argv=None):
     # cache hides it further by going on feeding numbers for hours. See
     # install_statusline.drift_check for the one rule that matters: a missing
     # marker means the user uninstalled, and that is never overridden.
-    watchdog = install_statusline.DriftWatchdog(settings_path(), shim_path())
+    #
+    # The hook shim fails the other way round: its entry in settings.json
+    # stays perfect while its contents fall behind, because `blink update`
+    # swaps the program directory and has never rewritten a shim. Both shims
+    # are listed rather than just the hook, so the statusline shim gets the
+    # same protection it turned out never to have had either.
+    watchdog = install_statusline.DriftWatchdog(
+        settings_path(), shim_path(),
+        shims=((shim_path(), "blink-statusline.sh"),
+               (hook_shim_path(), "blink-hook.sh")))
 
     # Before the port is touched. The lock lives for the life of the process --
     # the file object is bound here so it is not garbage collected, which would

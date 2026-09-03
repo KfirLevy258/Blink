@@ -7,6 +7,7 @@ of the state files against an old shim that never writes one. The board was
 never named, `blink status` said "hooks installed (10/10 events)" because the
 path existed and still ran, and nothing anywhere said why.
 """
+import ast
 import os
 
 from pc import cli
@@ -163,3 +164,53 @@ def test_a_second_stale_shim_is_also_repaired(tmp_path, monkeypatch):
     assert what is not None
     assert a.read_text(encoding="utf-8") == cli._shim_source("blink-hook.sh")
     assert b.read_text(encoding="utf-8") == cli._shim_source("blink-statusline.sh")
+
+
+# --- the wiring, and what `blink status` says before it heals -------------
+
+
+def test_the_daemon_hands_the_watchdog_both_shims():
+    """A guard against the exact regression this plan exists to fix.
+
+    The feature was dead because one call site was missing, and every test
+    passed anyway. Read the daemon's source and assert the wiring, because
+    the alternative is a test that constructs its own watchdog and proves
+    only that the constructor works -- which is what let the original gap
+    through.
+    """
+    src = open("claude_usage_bridge.py", encoding="utf-8").read()
+    tree = ast.parse(src)
+
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "DriftWatchdog"]
+    assert len(calls) == 1, "expected exactly one watchdog"
+
+    kwargs = {k.arg for k in calls[0].keywords}
+    assert "shims" in kwargs, (
+        "the daemon builds a DriftWatchdog without shims=, so the hook shim "
+        "is never checked and the naming feature is dead on every install "
+        "that arrived by `blink update`")
+
+
+def test_status_reports_a_stale_shim(tmp_path, monkeypatch):
+    """`blink status` said "hooks installed (10/10 events)" throughout.
+
+    It compares the command strings in settings.json against the shim path.
+    The path existed and still ran; only its contents were stale, so the one
+    place a user would look reported health.
+    """
+    p = tmp_path / "blink-hook.sh"
+    _write(str(p), "#!/bin/sh\n# old\n")
+    monkeypatch.setattr(cli, "hook_shim_path", lambda: str(p))
+
+    assert cli.hook_shim_status_note() == "the activity hook shim is out of date"
+
+
+def test_status_is_quiet_when_the_shim_is_current(tmp_path, monkeypatch):
+    p = tmp_path / "blink-hook.sh"
+    _write(str(p), cli._shim_source("blink-hook.sh"))
+    monkeypatch.setattr(cli, "hook_shim_path", lambda: str(p))
+
+    assert cli.hook_shim_status_note() is None

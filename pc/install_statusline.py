@@ -590,35 +590,56 @@ class DriftWatchdog:
     """
 
     def __init__(self, settings_path, shim_path, interval_s=300.0,
-                 now=None, check=drift_check):
+                 now=None, check=drift_check, *, shims=()):
         import time as _time
         self._settings = settings_path
         self._shim = shim_path
         self._interval = interval_s
         self._now = now or _time.monotonic
         self._check = check
+        # Keyword-only and defaulted to nothing, so a caller that only cares
+        # about settings.json drift -- which is every caller this class had
+        # until the hook shim turned out to go stale -- keeps working and
+        # keeps its ticks free of any filesystem read it did not ask for.
+        self._shims = tuple(shims)
         self._next = self._now()
         self._reinstatements = 0
         self._gave_up = False
 
     def tick(self):
         """Returns a message worth logging, or None. Call it as often as you like."""
-        if self._gave_up:
-            return None
         now = self._now()
         if now < self._next:
             return None
         self._next = now + self._interval
 
-        msg = self._check(self._settings, self._shim)
-        if msg is None:
-            return None
+        # Two faults, two answers, one interval. Neither check is free -- one
+        # parses settings.json, the other reads every installed shim off disk
+        # -- so both sit behind the not-yet-due return above rather than
+        # running on every turn of the poll loop.
+        found = []
 
-        self._reinstatements += 1
-        if self._reinstatements >= MAX_REINSTATEMENTS:
-            self._gave_up = True
-            return (f"{msg}. That is {self._reinstatements} times now --"
-                    " something on this machine keeps removing it, so Blink"
-                    " will stop putting it back. Run `blink install` once"
-                    " the conflict is resolved.")
-        return msg
+        # The give-up cap belongs to settings.json alone. It exists because
+        # something else on the machine was rewriting a file we share with it,
+        # and losing that argument quietly is better than writing forever.
+        # Nothing else on the machine writes our shims, so a stale shim is not
+        # that argument: it does not count towards the cap, and giving up on
+        # the statusLine hook must not leave the shims rotting.
+        if not self._gave_up:
+            msg = self._check(self._settings, self._shim)
+            if msg is not None:
+                self._reinstatements += 1
+                if self._reinstatements >= MAX_REINSTATEMENTS:
+                    self._gave_up = True
+                    msg = (f"{msg}. That is {self._reinstatements} times now --"
+                           " something on this machine keeps removing it, so Blink"
+                           " will stop putting it back. Run `blink install` once"
+                           " the conflict is resolved.")
+                found.append(msg)
+
+        if self._shims:
+            stale = shim_content_check(self._shims)
+            if stale:
+                found.append(stale)
+
+        return "; ".join(found) if found else None
