@@ -678,3 +678,96 @@ def test_no_state_frame_when_no_rollout_has_a_turn(tmp_path):
     write_rollout(root, lines=[token_count_line(rate_limits())])
     frames = codex_cli.CodexCliProvider(root=root).poll(NOW)
     assert [f.src for f in frames] == ["cli"]
+
+
+# --- naming the session, when there is exactly one to name -------------------
+
+
+def _state_frame(root, now=NOW):
+    frames = codex_cli.CodexCliProvider(root=root).poll(now)
+    held = [f for f in frames if f.src == codex_cli.STATE_SRC_ID]
+    return held[0] if held else None
+
+
+def test_the_one_session_in_the_winning_state_is_named(tmp_path):
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Projects/LiveClaudeUi"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_complete", _stamp(NOW - 5))])
+    st = _state_frame(root)
+    assert (st.state, st.label) == ("idle", "LiveClaudeUi")
+
+
+def test_two_sessions_in_the_winning_state_are_not_named(tmp_path):
+    """The rule claude_state.poll applies, applied here for the same reason:
+    a name picked from two says something true about one and implies it about
+    the other. The count is what is true of both."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_complete", _stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[meta_line("/Users/K/Other"),
+                         turn_line("task_complete", _stamp(NOW - 9))])
+    st = _state_frame(root)
+    assert (st.state, st.n_idle, st.label) == ("idle", 2, "")
+
+
+def test_a_session_in_a_lesser_state_does_not_lend_its_name(tmp_path):
+    """Two sessions, two states. The frame's `state` is the worse of them, so
+    only the session actually holding that state may be named -- the other's
+    name under the other's status would be a wrong sentence."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Finished"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_complete", _stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[meta_line("/Users/K/Working"),
+                         turn_line("task_started", _stamp(NOW - 9))])
+    st = _state_frame(root)
+    assert (st.state, st.label) == ("idle", "Finished")
+
+
+def test_an_unnamed_session_leaves_a_named_one_alone(tmp_path):
+    """A rollout whose session_meta could not be read is still a session and
+    still votes on the state -- it just has nothing to add to the name. Two
+    holders of the state is still two, named or not."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_complete", _stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[turn_line("task_complete", _stamp(NOW - 9))])
+    st = _state_frame(root)
+    assert (st.state, st.n_idle, st.label) == ("idle", 2, "")
+
+
+def test_a_rollout_with_no_turn_yet_lends_no_name(tmp_path):
+    """It makes no claim on the state, so it must make none on the name --
+    otherwise an opened-and-untyped-into terminal would rename the panel."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_started", _stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[meta_line("/Users/K/JustOpened")])
+    st = _state_frame(root)
+    assert (st.state, st.n_run, st.label) == ("running", 1, "Blink")
+
+
+def test_a_poll_prunes_the_names_of_files_it_no_longer_reads(tmp_path):
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_started", _stamp(NOW - 5))])
+    p = codex_cli.CodexCliProvider(root=root)
+    p._names["/gone/rollout-z.jsonl"] = "Ghost"
+    p.poll(NOW)
+    assert "/gone/rollout-z.jsonl" not in p._names
+    assert list(p._names.values()) == ["Blink"]

@@ -487,7 +487,10 @@ class CodexCliProvider(base.ProviderParser):
         """
         best = None
         counts = {}
-        for path in recent_rollouts(self._root):
+        names = {}
+        paths = recent_rollouts(self._root)
+        self._prune_names(set(paths))
+        for path in paths:
             try:
                 mtime = os.path.getmtime(path)
             except OSError:
@@ -499,6 +502,13 @@ class CodexCliProvider(base.ProviderParser):
             state = parse_rollout_state(lines, now_epoch)
             if state != base.STATE_UNKNOWN:
                 counts[state] = counts.get(state, 0) + 1
+                # A name is only collected from a session that made a claim.
+                # A terminal opened and not typed into has a cwd and no turn,
+                # and letting it lend its name would rename the panel after
+                # the session that is actually doing something.
+                name = self._name_for(path)
+                if name:
+                    names.setdefault(state, []).append(name)
             limits, observed_at = parse_rollout_tail(lines, mtime)
             if limits is None:
                 continue
@@ -512,11 +522,26 @@ class CodexCliProvider(base.ProviderParser):
             # A separate frame with no percentages, exactly as Claude's state
             # provider does it: it can never win a recency contest for
             # numbers, and the normalizer merges its state field by field.
+            state = base.worst_of(counts)
+            held = names.get(state, [])
             frames.append(base.NormalizedUsageFrame(
                 provider=PROVIDER_ID,
                 src=STATE_SRC_ID,
                 observed_at=now_epoch,
-                state=base.worst_of(counts),
+                state=state,
+                # Named only when exactly ONE session holds the state the
+                # frame is reporting, which is the rule claude_state.poll
+                # applies and for the same reason: a count says something
+                # true about all of them, and a name picked from three says
+                # something true about one and implies it about the rest.
+                #
+                # Both halves are needed. counts == 1 is what makes the name
+                # unambiguous; len(held) == 1 is not implied by it, because a
+                # session whose session_meta could not be read still votes on
+                # the state and still has no name to lend -- two holders, one
+                # of them nameless, must stay a count.
+                label=(held[0] if counts.get(state, 0) == 1 and len(held) == 1
+                       else ""),
                 n_run=counts.get(base.STATE_RUNNING, 0),
                 n_idle=counts.get(base.STATE_IDLE, 0),
                 n_stuck=counts.get(base.STATE_STUCK, 0),
