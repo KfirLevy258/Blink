@@ -25,6 +25,7 @@
 #include "ui_boot.h"
 #include "ui_sleep.h"
 #include "sleep_gate.h"
+#include "usage_freshness.h"
 #include "ui_settings.h"
 #include "ui_anim.h"
 #include "tz_fetch.h"
@@ -1375,6 +1376,27 @@ static bool host_is_back(void)
 	return proto_host_seen();
 }
 
+/*
+ * The other reason to wake: something new to show.
+ *
+ * The mirror of sleep_stale_should_start's non-had_usage terms, and it has
+ * to be exactly that -- tests/sleep_gate pins the two as complements over a
+ * grid, because a wake condition a second away from the sleep condition
+ * would have this board closing and opening its eyes forever on a real desk.
+ * ota_busy is read fresh: an update that starts while dozing should put the
+ * progress screen back up.
+ */
+static bool reading_moved_again(void)
+{
+	struct ota_ui snap;
+
+	ota_ui_get(&snap);
+	return sleep_stale_should_wake(usage_freshness_age_s(k_uptime_get()),
+				       snap.st == OTA_UI_DOWNLOADING ||
+				       snap.st == OTA_UI_REBOOTING,
+				       usage_freshness_activity());
+}
+
 static void run_usb(void)
 {
 	int64_t last_tick = k_uptime_get();
@@ -1406,20 +1428,33 @@ static void run_usb(void)
 		}
 		ota_boot_pump();
 
-		/* The computer went to sleep (docs/sleep-mode-design.md):
-		 * silence past the host timeout, on a board that has shown
-		 * figures this boot, with no firmware update in flight. This
-		 * blocks until the app speaks again. */
+		/* Two reasons to doze (docs/sleep-mode-design.md). The first
+		 * is silence past the host timeout. The second is an app that
+		 * never stopped talking and has had nothing new to say for
+		 * hours -- which is what a sleeping computer with a running
+		 * daemon actually looks like from here, and why the first
+		 * rule alone left a panel awake all night (field report
+		 * 2026-09-02). Both block until there is a reason to wake. */
 		{
 			struct ota_ui snap;
+			bool ota_busy;
 
 			ota_ui_get(&snap);
+			ota_busy = snap.st == OTA_UI_DOWNLOADING ||
+				   snap.st == OTA_UI_REBOOTING;
 			if (sleep_should_start(proto_host_lost(),
 					       usage_view_have_data(),
-					       snap.st == OTA_UI_DOWNLOADING ||
-					       snap.st == OTA_UI_REBOOTING)) {
+					       ota_busy)) {
 				ui_sleep_run(host_is_back,
 					     "Your computer may be asleep.");
+				continue;
+			}
+			if (sleep_stale_should_start(
+				    usage_freshness_age_s(k_uptime_get()),
+				    usage_view_have_data(), ota_busy,
+				    usage_freshness_activity())) {
+				ui_sleep_run(reading_moved_again,
+					     "No new readings for a while.");
 				continue;
 			}
 		}
