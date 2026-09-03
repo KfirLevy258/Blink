@@ -4,7 +4,8 @@ Written to disk deliberately: this is the handoff, and it must be readable by
 someone — or some session — with no memory of how it got here. Update it as
 things land.
 
-Last updated: 2026-09-03, after plan 0's tasks 1-8 landed.
+Last updated: 2026-09-03, after plan 0 was flashed and Bug C verified on
+hardware. NEXT UP: plans 2 and 3 (Codex).
 
 ## Branch
 
@@ -20,8 +21,8 @@ without starting.
 | # | Plan | Tasks | State |
 |---|---|---|---|
 | 1 | [`shim-self-repair.md`](shim-self-repair.md) | 6 | **done**, reviewed |
-| 0 | [`field-bugs.md`](field-bugs.md) | 9 | **tasks 1-8 done and reviewed; task 9 (flash + desk) NOT started** |
-| 2 | [`codex-naming-and-failure.md`](codex-naming-and-failure.md) | 10 | written, not started |
+| 0 | [`field-bugs.md`](field-bugs.md) | 9 | **done and FLASHED.** Bug C verified on hardware; Bug A and B await a morning check |
+| 2 | [`codex-naming-and-failure.md`](codex-naming-and-failure.md) | 10 | **START HERE.** Written, not started. Daemon-only Python -- nothing to flash |
 | 3 | [`codex-hook-shim.md`](codex-hook-shim.md) | 14 | written, not started |
 
 Plan 1 ran first and is effectively done. Plan 0 was added later but runs
@@ -142,3 +143,77 @@ Two environmental facts found on the way, neither caused by this branch:
   `ok (0 checks)` while running real assertions. Harmless for those two;
   unhealthy as a convention, since a suite running zero assertions looks
   identical.
+
+
+---
+
+# Plan 0 is finished. Read this before starting plan 2.
+
+## What the hardware proved, and what it did not
+
+Flashed 2026-09-03 onto the plaintext board (MAC `20:50:0d:2c:f7:58`).
+
+- **Bug C: VERIFIED.** Confirmed image, no daemon: one boot, zero resets, dozed
+  at 60 s, still dozing at 220 s, woke when the daemon returned.
+- **The owner has now LOOKED at the panel** and confirmed the pip row at two
+  sessions (one waiting, one running), the wordmark with the clock under it, and
+  the activity dot on the right. First eyes-on confirmation of the hint-line UI.
+- **Bug A and Bug B: NOT verified on hardware.** Both pinned by host tests only.
+  Bug A needs an overnight sleep or a temporary `SLEEP_ABSENT_AFTER_S=120`
+  rebuild-flash-restore; Bug B needs a real five-hour window expiry. The owner
+  is checking both the morning of 2026-09-04.
+- **Six-pip legibility is still unjudged by any human.** Only two pips were ever
+  live in front of the owner, and "do six read as six" is the question the whole
+  pip design turns on.
+
+## The defect hardware found that nothing else could
+
+Dozing during an **unconfirmed test boot** starved the 30 s watchdog that
+`ota_boot_pump()` feeds from `run_usb()`'s loop, because `ui_sleep_run()` blocks
+that loop. Boot, doze at 60 s, `SW_CPU_RESET` at 90 s, forever -- it reproduced
+the very reset this plan removes, as a loop. Task 8 made it reachable: the old
+doze required `had_usage`, which implies a daemon talked, which is what disarms
+the watchdog. Fixed in `53801cc` by folding `ota_test_boot` into `ota_busy`.
+
+**Do not repeat my two wrong conclusions.** A directly-flashed image is
+UNCONFIRMED: it reverts at 90 s by design, its explanatory printk is lost to an
+unflushed UART (so you see a bare `SW_CPU_RESET` that reads like a crash), and
+`boot_write_img_confirmed()` does not stick, so every boot re-arms a test boot.
+Bench-test from an image re-signed with `imgtool sign --pad --confirm`. Take the
+exact parameters from `firmware/build-sb/firmware/build.ninja`.
+
+Also: `imgtool.py` runs under `/usr/local/bin/python`, needs `cbor` (installed
+2026-09-03; `cbor2` wants Rust and fails). Without it **no signed image builds on
+this machine at all**.
+
+## Carried into plan 2, deliberately unfixed
+
+- **The wire is effectively full: 509 of 512 bytes worst case.** Measured through
+  `frame_to_usage`, the only caller that can put a line on the wire, with codex's
+  `cli-state` src, `stale=False`, fractional reset stamps and a far-out reset.
+  `tests/pc/test_protocol.py::test_the_widest_line_the_daemon_can_build_still_fits`
+  is the guard. **Plan 2 must not add a usage field without re-measuring.**
+  Per-model percentages (`sonnet_pct` etc.) can no longer coexist with
+  `active_age_s`; they are unreachable today because `protocol.py` passes a
+  literal `[]` for models.
+- **A daemon that pings but never pushes usage dozes the panel with the owner
+  present** (reinstalled, tokenless, 429-backed-off). Escapable by a tap. The
+  real fix is daemon-side and belongs near plan 2: a daemon that cannot read
+  usage should PUSH A FRAME SAYING SO rather than falling silent.
+- **State-only frames stamp `observed_at = now_epoch`** (`claude_state.py:285`,
+  `codex_cli.py:373`), so `active_age_s` can read ~0 for up to an hour after the
+  last real write, delaying a doze. Errs toward staying awake. Untested.
+- `select_pair` still sorts by `-observed_at`, so a fresher Codex reading can
+  take the primary dial. Relevant to plan 2, which gives Codex a name.
+- `tests/ci/check_host_tests.sh` is **not concurrency-safe** (fixed shared temp
+  dir, `rm -rf` on entry). Never run two at once; a concurrent run's output is
+  worthless. Pass/fail is still sound.
+
+## The count that matters
+
+**Nine assertions on this branch could not fail**, found across plan 0. Several
+were written by the session that then reviewed them, and three were mandated by
+my own plan text. Two plan steps told an implementer to prove a test with a
+mutation that was algebraically an identity. The habit that catches it every
+time: **build the broken variant and watch the test reject it** -- and check the
+mutation can actually change behaviour before trusting a red.
