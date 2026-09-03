@@ -764,11 +764,18 @@ class SessionMessage(unittest.TestCase):
             protocol.MAX_LINE_BYTES)
 
     def test_usage_frame_did_not_grow(self):
-        # The frame was measured at 506 of 512 and proto.c drops an over-long
-        # line whole. This is the regression that would freeze panels: the
-        # project name became its own message BECAUSE this line has no room
-        # for it, so a label arriving here is the exact failure the new
-        # message type exists to prevent.
+        # This is NOT the byte guard any more, and saying so matters: this
+        # fixture measures 480 of 512, so 32 bytes could be added without it
+        # noticing. test_the_widest_line_the_daemon_can_build_still_fits is
+        # the guard, at 509, because it builds through frame_to_usage -- the
+        # only caller that can actually put a line on the wire -- rather than
+        # calling usage() with a hand-written set of kwargs.
+        #
+        # What this test still does, and still should: the project name became
+        # its own message BECAUSE the usage line has no room for it, so a
+        # label or a "proj" key appearing here is the exact regression the
+        # separate message type exists to prevent. The size assertion below is
+        # kept as a floor, not as the ceiling it used to be.
         raw = protocol.encode(
             protocol.usage(**self.fully_loaded_usage_kwargs())).decode()
         self.assertLessEqual(len(raw.encode()), protocol.MAX_LINE_BYTES, raw)

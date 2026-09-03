@@ -112,7 +112,17 @@ int main(void)
 	usage_freshness_note(INT32_MAX - 5, INT32_MAX - 5,
 			     USAGE_ACTIVITY_IDLE, 900000);
 	CHECK(usage_freshness_active_age_s(960000) == INT32_MAX);
-	CHECK(usage_freshness_active_age_s(960000) > 0);
+	/* Not `> 0` beside the line above -- that cannot fail while the
+	 * equality holds, and an assertion that cannot fail reads as coverage
+	 * without being any. What is worth pinning is the direction the clamp
+	 * saves us from: the addition must not wrap into a negative, because a
+	 * negative age is indistinguishable from the -1 that means "no reading
+	 * yet", and the quietest desk the board has ever seen would then be
+	 * the one thing that keeps it awake. Ask it of the unclamped sum. */
+	usage_freshness_note(INT32_MAX - 5, INT32_MAX - 5,
+			     USAGE_ACTIVITY_IDLE, 900000);
+	CHECK(usage_freshness_active_age_s(1200000) >= 0);
+	CHECK(usage_freshness_age_s(1200000) >= 0);
 
 	printf("%s\n", fails ? "FAIL" : "ok   usage_freshness");
 	return fails ? 1 : 0;
