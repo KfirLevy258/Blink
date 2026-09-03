@@ -19,6 +19,23 @@ from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
 POLL_INTERVAL_S = 60
+# How often to LOOK at the local state files. Whether anything is SENT is a
+# separate decision, made in Bridge.poll_if_changed.
+#
+# Two seconds, and the reason it is affordable is that nothing here leaves the
+# machine: every provider reads a handful of small JSON files off the local
+# disk, there is no usage endpoint any more and therefore no rate limit to
+# respect. The 60 s above was inherited from the board's standalone WIFI mode,
+# where the fetch really does go over the air and really is throttled -- in USB
+# bridge mode that reason simply does not apply, and it cost the panel up to a
+# minute of lag on the one thing it is looked at for: whether a session is
+# waiting on somebody.
+#
+# Not 0.2 s. Nobody glancing at a desk display can tell 200 ms from 2 s, and
+# the difference is a stat() storm five times a second for as long as the
+# machine is on. Two seconds is the scale of the signal: it matches how fast
+# Claude Code's hook writes its state file in the first place.
+FAST_POLL_INTERVAL_S = 2
 PING_GRACE_LOG_S = 30
 # How often to ask whether a newer version of THIS program exists.
 #
@@ -779,6 +796,7 @@ def main(argv=None):
             # the one that left boards on old firmware (2026-08-29).
             bridge.offer_if_newer(known.get("fw"))
         next_poll = time.monotonic()
+        next_fast_poll = time.monotonic()
         # The rollback copy is kept until a board has actually talked to this
         # build. Running at all is weak evidence; holding a conversation with
         # the hardware is the thing the update was for.
@@ -819,13 +837,31 @@ def main(argv=None):
                             proven = True
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
-                    # the liveness window): the usage endpoint is aggressively
-                    # rate-limited, and a boardless daemon fetching all day
-                    # would burn that budget for nothing. The hello handler
-                    # still pushes immediately on (re)connect.
+                    # the liveness window): there is no point talking to a
+                    # panel that is not answering, and a daemon that pushes
+                    # into a dead port learns nothing from the writes going
+                    # through. The hello handler still pushes immediately on
+                    # (re)connect.
+                    #
+                    # (What used to be written here was about the usage
+                    # endpoint's rate limit. There is no endpoint: fetch_usage
+                    # reads local files, which is exactly why the fast tick
+                    # below is free.)
                     if bridge.board_alive():
                         bridge.poll_once()
                     next_poll = time.monotonic() + POLL_INTERVAL_S
+                if time.monotonic() >= next_fast_poll:
+                    # The fast tick, after the heartbeat on purpose: when both
+                    # come due in the same pass the heartbeat has already sent
+                    # everything, so this one finds nothing changed and stays
+                    # quiet instead of sending the same line twice.
+                    #
+                    # Gated on board_alive() for the same reason as above --
+                    # the cheap read is not the expensive part, the write into
+                    # a port nobody is listening on is.
+                    next_fast_poll = time.monotonic() + FAST_POLL_INTERVAL_S
+                    if bridge.board_alive():
+                        bridge.poll_if_changed()
                 # Not gated on board_alive(): drift is a fact about this
                 # machine, not about the cable. The same _upkeep runs from
                 # inside wait_for_port, so an unplugged machine repairs a

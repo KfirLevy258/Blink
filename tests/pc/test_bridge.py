@@ -1,4 +1,8 @@
+import ast
+import pathlib
 import unittest
+
+import claude_usage_bridge
 from pc import protocol
 from pc.bridge import Bridge
 from pc.providers import base
@@ -481,3 +485,56 @@ class FastTickStaysQuietAboutTrouble(unittest.TestCase):
                    now=FakeClock().now, wall=lambda: (1752444000, 180))
         b.poll_if_changed()
         self.assertEqual(sent, [])
+
+
+def _daemon_tree():
+    src = (pathlib.Path(claude_usage_bridge.__file__).resolve()
+           .with_name("claude_usage_bridge.py"))
+    return ast.parse(src.read_text(encoding="utf-8"))
+
+
+def _calls(node, attr):
+    return [n for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == attr]
+
+
+def test_the_daemon_actually_runs_the_fast_tick():
+    """Everything above tests a method nothing has to call.
+
+    The Bridge can be perfect and the panel still a minute behind if the loop
+    only ever reaches poll_once -- and no unit test of the Bridge can see
+    that, because the loop it lives in has a serial port in it. So read the
+    daemon's own source, which is the same guard pc/ingest's tests use for the
+    same class of mistake (a correct object nobody wired up).
+    """
+    assert _calls(_daemon_tree(), "poll_if_changed"), \
+        "the daemon never calls poll_if_changed: the fast tick is dead code"
+
+
+def test_the_fast_tick_is_gated_on_a_board_that_answers():
+    """Same gate as the heartbeat. Reading local files costs nothing, but
+    writing into a port that stopped answering pings is how a daemon spends
+    all afternoon talking to a panel that is not there -- and now it would do
+    it thirty times a minute."""
+    tree = _daemon_tree()
+    ticks = _calls(tree, "poll_if_changed")
+    assert ticks
+
+    guarded = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and _calls(node.test, "board_alive"):
+            for call in _calls(node, "poll_if_changed"):
+                guarded.add(id(call))
+    ungated = [ast.dump(c) for c in ticks if id(c) not in guarded]
+    assert not ungated, ungated
+
+
+def test_the_two_cadences_are_far_apart_and_the_heartbeat_stayed():
+    """The exact 2 s is a judgment call -- what must not drift is the shape:
+    the look is human-scale and the unconditional push is still a minute.
+    A fast tick anywhere near the heartbeat has stopped being a fast tick."""
+    fast = claude_usage_bridge.FAST_POLL_INTERVAL_S
+    assert 1 <= fast <= 5, fast
+    assert claude_usage_bridge.POLL_INTERVAL_S == 60
+    assert fast * 5 < claude_usage_bridge.POLL_INTERVAL_S
