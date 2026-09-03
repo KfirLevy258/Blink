@@ -70,6 +70,11 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
         self._last_session = None        # (label, n) last sent; see poll_once
+        # The last usage message actually PUT ON THE WIRE, minus the fields
+        # that move on their own (protocol.VOLATILE_USAGE_KEYS). This is what
+        # poll_if_changed decides against: "sent", not "read", because the
+        # capping on the way out is part of what the board received.
+        self._last_pushed = None
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -400,14 +405,33 @@ class Bridge:
                 and self._now() - self._last_ping <= LIVENESS_WINDOW_S)
 
     # --- outbound ---
+    #
+    # Two cadences, answering two different questions.
+    #
+    # poll_once is the heartbeat: everything, unconditionally, once every
+    # POLL_INTERVAL_S. It is also the only thing that sends `time`, which is
+    # what the board re-anchors its clock from and has no reason to happen
+    # more often than that.
+    #
+    # poll_if_changed is the fast tick, and it exists because session state --
+    # RUNNING, WAITING, the per-session pips -- is a *now* signal. Claude
+    # Code's hook rewrites its state file within a second or two of an event
+    # (1.8 s on the live install, measured), and the panel was up to a minute
+    # behind it: by the time "a session is waiting on you" reached the glass,
+    # the owner had already looked at the screen and turned away.
+    #
+    # What this does NOT do is make the dials fast, and nothing here should be
+    # read as claiming it does. The percentages come from Claude Desktop's own
+    # cache, which that app refreshes every 5-15 minutes, so the arcs move no
+    # sooner than they ever did. This is about state, not numbers.
     def poll_once(self):
-        # Time rides along with every push so the board's clock re-anchors
+        # Time rides along with every heartbeat so the board's clock re-anchors
         # at the same cadence as the data.
         epoch, off = self._wall()
         self._write(protocol.time_msg(epoch, off))
 
         try:
-            usage = self._fetch()
+            usage = self._read_usage()
         except Exception as e:
             # Not expected: statusline_source swallows its own read errors and
             # returns None. Anything that reaches here is a bug worth putting
@@ -427,12 +451,58 @@ class Bridge:
             return
         self._said_no_source = False
 
+        # Unconditional. The heartbeat is what re-states everything to a board
+        # that may have missed a message, and what keeps a panel that has been
+        # sitting on the same numbers all afternoon provably connected.
+        self._send_usage(usage)
+
+    def poll_if_changed(self):
+        """Send only when something a reader could act on has moved.
+
+        Called every FAST_POLL_INTERVAL_S. Looking is nearly free -- a handful
+        of small local JSON files, no endpoint, no rate limit -- but writing is
+        not: the fully-loaded usage line runs to 509 of the 512 bytes the
+        firmware will accept, and putting one on the wire every two seconds
+        when nothing changed is thirty times the traffic carrying no news.
+
+        Deliberately quieter than the heartbeat about failure. A fetch that
+        raises, or a source that has not appeared yet, will be in the same
+        state two seconds from now, so complaining here would turn one message
+        a minute into thirty; poll_once already reports both at a cadence a
+        person can actually read.
+        """
+        try:
+            usage = self._read_usage()
+        except Exception:
+            return
+        if usage is None:
+            return
+        if protocol.meaningful_usage(usage) == self._last_pushed:
+            return
+        self._send_usage(usage)
+
+    def _read_usage(self):
+        """The usage message as it would go out right now, or None if there is
+        nothing to report yet.
+
+        Raises whatever the fetch raises: the two callers disagree about how
+        loud to be, so neither the logging nor the status message belongs here.
+        """
+        usage = self._fetch()
+        if usage is None:
+            return None
         # Percentages above 100 are real -- extra usage puts them there -- but
         # firmware older than protocol.FW_ACCEPTS_OVERAGE turns them into 0 on
         # the panel rather than clamping. Hold them at 100 for those boards.
-        usage = protocol.cap_overage_for_fw(usage, self._board_fw)
+        return protocol.cap_overage_for_fw(usage, self._board_fw)
 
+    def _send_usage(self, usage):
+        """Put a usage message on the wire and remember what was in it."""
         self._write(usage)
+        # Recorded here, once, so that no path can push without moving the
+        # baseline -- a push that forgot to would leave the fast tick
+        # re-sending the same message every two seconds forever.
+        self._last_pushed = protocol.meaningful_usage(usage)
 
         # The project name, on change only. It rides its own message because
         # the usage line above has six bytes of headroom.

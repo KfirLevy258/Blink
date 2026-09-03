@@ -1,6 +1,7 @@
 import unittest
 from pc import protocol
 from pc.bridge import Bridge
+from pc.providers import base
 
 
 def raising(exc):
@@ -332,3 +333,151 @@ class SessionMessageIsSent(unittest.TestCase):
                    now=FakeClock().now, wall=lambda: (1752444000, 180))
         b.poll_once()
         self.assertEqual([m["t"] for m in sent], ["time", "usage"])
+
+
+class FastTickSendsOnlyRealNews(unittest.TestCase):
+    """The change-driven push, in both directions.
+
+    Session state is a *now* signal and the panel was up to a minute behind it.
+    The fast tick closes that -- but several fields on a usage message move on
+    every poll by their nature (the ages, the two countdowns), so a comparison
+    of whole messages is always "changed" and would be a 2 s UNCONDITIONAL
+    push wearing the costume of a conditional one. Both halves are asserted
+    here, and the silent direction first proves the message really did change
+    so that it cannot pass by testing a static fixture.
+    """
+
+    def setUp(self):
+        self.sent = []
+        self.now = 1_787_700_000.0
+        self.state = "running"
+        self.n_run = 1
+        self.n_wait = 0
+        # Absolute and fixed, which is what makes the ages and the countdowns
+        # move: the files were written once, and every second of self.now that
+        # passes makes the reading older and the reset nearer. Tying them to
+        # self.now instead would hold every volatile field still and the test
+        # below would prove nothing.
+        self.observed_at = self.now - 30
+        self.active_at = self.now - 5
+        self.session_resets_at = self.now + 3600
+        self.weekly_resets_at = self.now + 86400
+
+        def fetch():
+            # Through frame_to_usage, because that is the only thing that puts
+            # a usage line on the wire -- and the only thing that fills in the
+            # ages and countdowns from the clock.
+            f = base.NormalizedUsageFrame(
+                provider="claude", src="cli",
+                observed_at=self.observed_at, active_at=self.active_at,
+                session_pct=61.0,
+                session_resets_at=self.session_resets_at,
+                weekly_pct=26.0, weekly_resets_at=self.weekly_resets_at,
+                state=self.state, n_run=self.n_run, n_wait=self.n_wait)
+            return protocol.frame_to_usage(f, self.now)
+
+        self.fetch = fetch
+        self.bridge = Bridge(write_msg=self.sent.append, fetch_usage=fetch,
+                             now=FakeClock().now, app_ver="0.2.0",
+                             wall=lambda: (int(self.now), 180))
+        self.bridge.poll_once()      # the heartbeat sets the baseline
+        self.sent.clear()
+
+    def _usage(self):
+        return [m for m in self.sent if m.get("t") == "usage"]
+
+    def test_a_tick_where_only_the_clock_moved_sends_nothing(self):
+        """Compare whole messages instead of protocol.meaningful_usage() and
+        this fails: every field asserted below moved, none of them is news."""
+        before = self.fetch()
+        self.now += 12
+        after = self.fetch()
+
+        # The fixture is genuinely different from one tick to the next. Without
+        # this the silence proved below could just be a constant payload.
+        self.assertNotEqual(after, before)
+        self.assertNotEqual(after["age_s"], before["age_s"])
+        self.assertNotEqual(after["active_age_s"], before["active_age_s"])
+        self.assertNotEqual(after["session_resets_in_s"],
+                            before["session_resets_in_s"])
+
+        self.bridge.poll_if_changed()
+        self.assertEqual(self.sent, [])
+
+    def test_a_state_change_reaches_the_wire_on_the_very_next_tick(self):
+        """Keep the 60 s gate and this fails: two seconds in, the panel has
+        the new state."""
+        self.now += 2
+        self.state = "waiting"
+        self.n_wait = 1
+        self.bridge.poll_if_changed()
+
+        self.assertEqual(len(self._usage()), 1)
+        self.assertEqual(self._usage()[-1]["state"], "waiting")
+        self.assertEqual(self._usage()[-1]["n_wait"], 1)
+
+    def test_a_count_alone_is_enough(self):
+        """`state` is the loud one, but the pips are drawn from the counts and
+        a second session appearing is the same kind of news."""
+        self.now += 2
+        self.n_run = 2
+        self.bridge.poll_if_changed()
+        self.assertEqual(self._usage()[-1]["n_run"], 2)
+
+    def test_the_fast_tick_does_not_re_anchor_the_clock(self):
+        """`time` belongs to the heartbeat alone. The board re-anchors from it
+        once a minute and has no reason to do so fifteen hundred times an
+        hour."""
+        self.now += 2
+        self.state = "waiting"
+        self.bridge.poll_if_changed()
+        self.assertEqual([m["t"] for m in self.sent], ["usage"])
+
+    def test_a_change_is_sent_once_and_not_again(self):
+        """The baseline is what was sent, so the tick after a push is quiet
+        again -- otherwise one state change turns into a push every two
+        seconds for as long as it lasts."""
+        self.now += 2
+        self.state = "waiting"
+        self.bridge.poll_if_changed()
+        self.assertEqual(len(self._usage()), 1)
+
+        self.now += 2
+        self.bridge.poll_if_changed()
+        self.assertEqual(len(self._usage()), 1)
+
+    def test_the_heartbeat_still_pushes_when_nothing_changed(self):
+        """The 60 s push is unchanged and unconditional: it is what re-states
+        everything to a board that may have missed a message, and the only
+        thing that proves a panel sitting on the same numbers all afternoon is
+        still connected."""
+        self.now += 12
+        self.bridge.poll_once()
+        self.assertEqual([m["t"] for m in self.sent], ["time", "usage"])
+
+
+class FastTickStaysQuietAboutTrouble(unittest.TestCase):
+    """The fast tick reports neither a failing fetch nor a missing source.
+
+    Both conditions persist -- they will be just as true two seconds from now
+    -- so saying so at 0.5 Hz turns one message a minute into thirty. poll_once
+    already reports both at a cadence a person can read, and it still does.
+    """
+
+    def test_a_raising_fetch_is_silent_on_the_fast_tick(self):
+        sent = []
+        b = Bridge(write_msg=sent.append,
+                   fetch_usage=raising(RuntimeError("boom")),
+                   now=FakeClock().now, wall=lambda: (1752444000, 180))
+        b.poll_if_changed()
+        self.assertEqual(sent, [])
+        # ...and the heartbeat still says it.
+        b.poll_once()
+        self.assertEqual([m["t"] for m in sent], ["time", "status"])
+
+    def test_no_payload_yet_is_silent_on_the_fast_tick(self):
+        sent = []
+        b = Bridge(write_msg=sent.append, fetch_usage=lambda: None,
+                   now=FakeClock().now, wall=lambda: (1752444000, 180))
+        b.poll_if_changed()
+        self.assertEqual(sent, [])
