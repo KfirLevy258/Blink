@@ -1439,8 +1439,29 @@ static void run_usb(void)
 			bool ota_busy;
 
 			ota_ui_get(&snap);
+			/*
+			 * ota_test_boot belongs in this term, and finding out
+			 * cost a board on the bench (2026-09-03).
+			 *
+			 * An unconfirmed image arms a 30 s hardware watchdog
+			 * that ota_boot_pump() feeds from THIS loop. Dozing
+			 * blocks the loop, so the feeding stops, the SoC
+			 * resets, and MCUboot re-runs the same unconfirmed
+			 * image -- which dozes again. Measured: boot, doze at
+			 * 60 s, SW_CPU_RESET at 90 s, forever. It reproduced
+			 * the reset this plan exists to remove, as a loop.
+			 *
+			 * "An update is still in flight" honestly includes
+			 * "the new image has not proved itself yet", so it
+			 * rides the term that already means don't doze rather
+			 * than a fourth condition at each call site. Staying
+			 * awake also lets the deliberate revert at the 90 s
+			 * deadline happen, logged, instead of a bare watchdog
+			 * reset nobody can read.
+			 */
 			ota_busy = snap.st == OTA_UI_DOWNLOADING ||
-				   snap.st == OTA_UI_REBOOTING;
+				   snap.st == OTA_UI_REBOOTING ||
+				   ota_test_boot;
 			if (sleep_should_start(proto_host_lost(),
 					       usage_view_have_data(),
 					       ota_busy)) {
@@ -1573,8 +1594,18 @@ static void run_usb(void)
 			 */
 			if (proto_host_seen()) {
 				host_quiet_since = k_uptime_get();
-			} else if (k_uptime_get() - host_quiet_since
+			} else if (!ota_test_boot &&
+				   k_uptime_get() - host_quiet_since
 				   > 60 * 1000) {
+				/* !ota_test_boot for the reason spelled out
+				 * at the other doze above: this loop feeds
+				 * the unconfirmed image's watchdog, and this
+				 * is the branch that was found looping on it.
+				 * A board with no daemon is exactly the board
+				 * whose image cannot prove itself, so the two
+				 * conditions coincide precisely here. The
+				 * timer keeps running, so the doze happens
+				 * the moment the test boot resolves. */
 				printk("[usage] no app after 60 s; dozing until one speaks\n");
 				ui_sleep_run(host_is_back,
 					     "Waiting for the app on your computer.");
