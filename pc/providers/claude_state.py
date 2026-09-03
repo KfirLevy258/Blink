@@ -41,6 +41,16 @@ a long turn from a wedged one, so the daemon no longer guesses. A turn is
 drops out after ABANDONED_AFTER_S. Red is reserved for `failed`, which is
 an event, not an inference.
 
+What silence cannot say, a pid can. A session whose terminal was closed, or
+that was killed, fires no SessionEnd and its slot simply stops changing --
+indistinguishable from a seventeen-minute think, which is why the hour-long
+ABANDONED_AFTER_S was the only thing that ever collected it. The hook now
+records the process it ran from, so the daemon can ask the kernel a question
+with a true answer instead of inferring one from a clock: a process that no
+longer exists is not thinking. See LIVENESS below, and the latch that guards
+it, because what $PPID means in Claude Code's hook runner has not been
+measured yet.
+
 ON DISK
 -------
     ~/.blink/state/<session_id>.state   one JSON slot, newest event wins
@@ -54,6 +64,7 @@ than decrementing and hoping.
 """
 import json
 import os
+import sys
 import time
 
 from pc.providers import base
@@ -85,6 +96,160 @@ AGENT_ABANDONED_AFTER_S = 4 * 3600.0
 # ever fires) and a millisecond epoch from some future shim.
 T_EPOCH_MIN = 1_577_836_800.0
 T_EPOCH_MAX = 4_102_444_800.0
+
+# LIVENESS
+# --------
+# The hook writes the pid of the process it ran from. A slot whose pid names
+# no living process belongs to a session that is over, whatever its clock
+# says, and it is dropped at once rather than held for ABANDONED_AFTER_S.
+#
+# A pid only means something on the machine that issued it, and this is that
+# machine: the hook writes into the same ~/.blink/state the daemon reads, both
+# under one HOME on one host. There is no remote case to defend against --
+# there is no code path that copies these files between machines, and if one
+# is ever added, this check is the first thing it breaks.
+#
+# PID REUSE is the one wrong answer available: the kernel eventually hands a
+# dead session's number to some unrelated new process, and the slot then looks
+# alive. That is a miss, not a false alarm -- the session simply keeps being
+# reported until ABANDONED_AFTER_S collects it, which is exactly today's
+# behaviour and the reason no process start time is recorded alongside. Every
+# way this check can be wrong has to point in that direction; a false DEATH
+# would blank a working session off the panel, which is worse than the bug
+# being fixed here.
+_PID_MAX = 2 ** 31 - 1
+
+# POSIX ONLY, and this is not a portability nicety. On POSIX, os.kill(pid, 0)
+# asks a question. On Windows, CPython implements os.kill as
+# TerminateProcess(handle, sig) for every signal but the two console events --
+# so "is Claude Code still alive?" would KILL Claude Code, with exit code 0.
+# There is a right answer on Windows (OpenProcess + GetExitCodeProcess through
+# ctypes) and it is not written yet, so Windows keeps today's rules: the pid is
+# read, bounds-checked and ignored. A missing feature there beats a daemon that
+# shoots the sessions it is reporting on.
+_PID_LIVENESS_AVAILABLE = os.name == "posix"
+
+# A slot no older than this was written by a process that was alive when it
+# wrote. That is the whole self-test below.
+FRESH_SLOT_S = 10.0
+
+# THE LATCH, and why it is not optional.
+#
+# Nobody has measured whether $PPID in the hook is Claude Code's own process
+# or a short-lived shell Claude Code spawned to run the hook. If it is the
+# latter, the pid is dead within milliseconds of being written and the naive
+# reading of this feature would drop EVERY live session -- a blank panel, far
+# worse than an hour-stale one.
+#
+# So the feature tests its own premise on real data: a slot written seconds
+# ago whose pid is already gone cannot have been written by that pid's
+# process. That is proof the number does not mean what this code hopes, and
+# the response is to stop believing it -- for the rest of this process, not
+# just this poll -- fall back to ABANDONED_AFTER_S exactly as before, and say
+# so once on stderr. Failing back to the old behaviour is the only fail-safe
+# direction available.
+#
+# Process-wide rather than per-provider because what $PPID means is a fact
+# about the Claude Code on this machine, not about a directory: `blink status`
+# and the daemon should each learn it at most once. Once latched it never
+# unlatches -- a build of Claude Code does not change its hook runner while
+# the daemon is up, and flapping would print on a two-second poll.
+#
+# TO RETIRE THIS: measure it. Run a real session, read a fresh slot's pid, and
+# check it against the `claude` process (ps -p <pid> -o comm=). If the pid is
+# the CLI itself on every supported platform, this latch and FRESH_SLOT_S can
+# both be deleted and the pid trusted outright. Until somebody has done that
+# on macOS, Linux and Windows, it stays.
+#
+# One known false positive, accepted deliberately: a session killed within
+# FRESH_SLOT_S of its last hook event looks exactly like an untrustworthy pid,
+# because both are "fresh slot, dead process". The cost of getting that wrong
+# is one log line and today's behaviour until the daemon restarts. The cost of
+# omitting the latch is a blank panel on every desk where $PPID is a wrapper.
+_pid_trusted = True
+
+
+def pid_liveness_trusted():
+    """Whether the pid in a state slot is still believed to mean anything."""
+    return _pid_trusted
+
+
+def reset_pid_liveness():
+    """Restore trust. For tests only -- the latch is process-lifetime by
+    design, and a test that latched it would otherwise silently disarm the
+    liveness checks in every test that ran after it."""
+    global _pid_trusted
+    _pid_trusted = True
+
+
+def _slot_pid(payload):
+    """The pid recorded in a slot, or None when there is nothing usable.
+
+    Strict on purpose: anything that is not a plain in-range integer falls
+    back to today's rules rather than being coerced. A shim old enough to omit
+    the key entirely is the ordinary case, not an error -- customers run stale
+    shims for months -- and a shim NEWER than this code, writing a shape this
+    version does not understand, deserves the same treatment.
+    """
+    pid = payload.get("pid")
+    # bool is an int in Python, and `True` is not a process.
+    if isinstance(pid, bool) or not isinstance(pid, int):
+        return None
+    # 1 and up only. Zero and negatives are not processes to os.kill: they
+    # name process groups and, for -1, every process the user can signal.
+    # Signal 0 delivers nothing, so nothing would come of it, but a number
+    # like that in a slot is a malformed reading and gets treated as one.
+    if not (1 <= pid <= _PID_MAX):
+        return None
+    return pid
+
+
+def _process_is_gone(pid):
+    """True only when the kernel says that pid names no process.
+
+    os.kill(pid, 0) delivers no signal; it asks the question and costs a
+    syscall, not a fork. That matters because this now runs for every slot on
+    a two-second poll.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        # The process exists and belongs to somebody else. ALIVE. Saying
+        # otherwise here would drop a session for running under another
+        # account -- the false-death direction this must never take.
+        return False
+    except OSError:
+        # An errno this code did not anticipate. Silence beats a guess, and
+        # the guess would be the dangerous one.
+        return False
+    return False
+
+
+def _pid_says_ended(pid, age_s, slot_path=""):
+    """Whether the pid proves this session is over. Latches on the absurd.
+
+    Returns False for every uncertain case, so the caller keeps whatever
+    today's rules already decided.
+    """
+    global _pid_trusted
+    if pid is None or not _PID_LIVENESS_AVAILABLE or not _pid_trusted:
+        return False
+    if not _process_is_gone(pid):
+        return False
+    if age_s <= FRESH_SLOT_S:
+        # Written seconds ago BY A PROCESS THAT DOES NOT EXIST. The pid is
+        # not the session's process. Stop believing it, and say so once.
+        _pid_trusted = False
+        print(f"[claude] {slot_path or 'a state slot'} was written"
+              f" {age_s:.0f}s ago but its pid {pid} is already gone:"
+              " the hook's pid is not the session's own process, so pid"
+              " liveness is DISABLED for this run -- sessions that end"
+              " without SessionEnd will drop out after"
+              f" {ABANDONED_AFTER_S:.0f}s as before", file=sys.stderr)
+        return False
+    return True
 
 _RUNNING_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse",
                    "SubagentStop", "PreCompact", "PostCompact")
@@ -197,7 +362,14 @@ class ClaudeStateProvider(base.ProviderParser):
         if not isinstance(name, str):
             name = ""
         age = now_epoch - t
-        return derive_state(event, age), age, name
+        state = derive_state(event, age)
+        # The pid overrules the clock in one direction only: it can end a
+        # session early, never keep one alive past ABANDONED_AFTER_S. A pid
+        # that has been reused is the case that would otherwise argue for
+        # "alive", and it is not allowed a vote.
+        if _pid_says_ended(_slot_pid(payload), age, path):
+            return base.STATE_UNKNOWN, age, name
+        return state, age, name
 
     def _count_agents(self, session_dir, now_epoch):
         """Live agents for one session.
@@ -251,6 +423,17 @@ class ClaudeStateProvider(base.ProviderParser):
                 # Unreadable, or so old the session is certainly gone. Collect
                 # the whole session rather than leaving a directory that will
                 # never be looked at again.
+                #
+                # A session dropped for a DEAD PID is deliberately not swept
+                # here: it stops being reported at once -- which is the whole
+                # user-visible point -- and its files are collected by the
+                # same hour-long rule as before. Deleting them the instant the
+                # pid check fires would destroy the only evidence of why a
+                # session disappeared (its last event, its clock, its pid) at
+                # exactly the moment somebody would want to look, and this
+                # check is new enough that somebody will. Nothing is bought by
+                # sweeping sooner: an unreported slot costs a few hundred
+                # bytes and one stat per poll, and the hour still ends.
                 if age is not None and age > ABANDONED_AFTER_S and self._sweep:
                     _unlink(state_path)
                     _rmtree(os.path.join(self._dir, sid))
