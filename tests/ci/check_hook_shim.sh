@@ -244,6 +244,24 @@ check_no_name "{\"session_id\":\"abc\",\"cwd\":\"/tmp/$(printf 'a%.0s' $(seq 1 4
 check_no_name '{"session_id":"abc"}'
 ok "captures the project directory name, and only the final segment"
 
+# 8f. The PARENT pid. This is what lets the daemon tell a session that died
+#     without firing SessionEnd from one that is merely quiet, and the whole
+#     feature rests on the recorded number outliving the hook -- so that is
+#     what is asserted, rather than a value.
+#
+#     $$ instead of $PPID would look perfectly reasonable in the source and
+#     record the hook's OWN pid, which is dead by the time anything reads the
+#     file. `kill -0` on it here is the cheapest way to catch that: the process
+#     that ran this hook is this script's shell, and it is still alive.
+rm -f "$DIR/pidcheck.state"
+printf '{"session_id":"pidcheck"}' | $SH "$SHIM" PreToolUse >/dev/null 2>&1
+grep -qE '"pid":[1-9][0-9]*[,}]' "$DIR/pidcheck.state" ||
+	fail "pid is not a bare positive integer: $(cat "$DIR/pidcheck.state")"
+got_pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$DIR/pidcheck.state")
+kill -0 "$got_pid" 2>/dev/null ||
+	fail "recorded pid $got_pid is already gone -- it is not the parent"
+ok "records the parent pid, and it outlives the hook"
+
 # 9. Quote and command injection in the id.
 rm -f "$DIR/unknown.state"
 printf '{"session_id":"a\\"; touch %s/owned; echo \\"b"}' "$WORK" |

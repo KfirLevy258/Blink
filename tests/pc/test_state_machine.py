@@ -5,10 +5,12 @@ sessions and their agents into the handful of numbers the wire can carry.
 """
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 
-from pc.providers import base
+from pc.providers import base, claude_state
 from pc.providers.claude_state import (ABANDONED_AFTER_S,
                                        AGENT_ABANDONED_AFTER_S,
                                        ClaudeStateProvider, derive_state,
@@ -142,10 +144,12 @@ def test_worst_of_nothing_is_nothing():
 # --- the directory --------------------------------------------------------
 
 
-def write_session(d, sid, event, t, name=None):
+def write_session(d, sid, event, t, name=None, pid=None):
     payload = {"event": event, "t": t}
     if name is not None:
         payload["name"] = name
+    if pid is not None:
+        payload["pid"] = pid
     (d / f"{sid}.state").write_text(json.dumps(payload))
 
 
@@ -352,5 +356,236 @@ def test_this_source_carries_no_usage_percentage(state_dir):
     assert f.session_pct == base.UNKNOWN
     assert f.weekly_pct == base.UNKNOWN
     assert f.has_usage() is False
+
+
+# --- process liveness -----------------------------------------------------
+#
+# The bug: a session that dies without firing SessionEnd -- a closed terminal,
+# a crash, kill -9 -- showed as live for the full ABANDONED_AFTER_S hour. The
+# fix is not a shorter silence threshold (every value cried wolf; see the
+# module docstring) but a fact -- the hook records the pid it ran from, and a
+# pid that names no process is not thinking.
+
+
+@pytest.fixture(autouse=True)
+def _pid_trust():
+    """The latch is process-lifetime by design, so it MUST be reset around
+    every test here. Without this, the first test that trips it silently
+    disarms the liveness checks in every test that runs after it, and this
+    branch has already shipped nine tests that could not fail."""
+    claude_state.reset_pid_liveness()
+    yield
+    claude_state.reset_pid_liveness()
+
+
+@pytest.fixture
+def dead():
+    """A factory for pids that are reliably gone, not hoped to be free.
+
+    Spawn the shortest possible child, wait for it, and the wait REAPS it: a
+    reaped child is not a zombie, so the kernel no longer holds the number and
+    os.kill raises ProcessLookupError. That is a measured fact about this
+    machine at this instant, where a hardcoded 999999 is a guess about
+    somebody else's machine, and where spawn-then-kill races the child's own
+    exit and its reaping.
+
+    The one hole is pid reuse in the microseconds between the wait and the
+    check below, so the factory VERIFIES deadness rather than trusting the
+    reasoning: if the number ever comes back alive, the tests that depend on
+    it say so loudly instead of passing vacuously.
+    """
+    def _dead():
+        proc = subprocess.Popen([sys.executable, "-c", ""])
+        proc.wait()
+        if claude_state._PID_LIVENESS_AVAILABLE:
+            assert claude_state._process_is_gone(proc.pid), (
+                f"pid {proc.pid} was reused between reaping and this check;"
+                " the liveness tests using it would have been meaningless")
+        return proc.pid
+    return _dead
+
+
+# Not skipped for tidiness: on Windows CPython's os.kill(pid, 0) is
+# TerminateProcess(handle, 0), so the probe is switched off there and there is
+# nothing to assert. The other half --  that switching it off leaves today's
+# behaviour intact -- is asserted by a test that runs everywhere.
+posix_only = pytest.mark.skipif(
+    not claude_state._PID_LIVENESS_AVAILABLE,
+    reason="pid liveness is POSIX-only; os.kill(pid, 0) kills on Windows")
+
+
+@posix_only
+def test_a_fresh_slot_whose_process_is_alive_is_live(state_dir):
+    """The pid of this very test run: alive, by construction."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 5, pid=os.getpid())
+    f = provider(state_dir).poll(NOW)[0]
+    assert f.state == base.STATE_RUNNING
+    assert f.n_run == 1
+    assert claude_state.pid_liveness_trusted() is True
+
+
+@posix_only
+def test_a_session_whose_process_is_gone_drops_out_at_once(state_dir, dead):
+    """The bug, in one test. Five minutes after a kill -9 the panel still
+    showed this session as running, and would have for another fifty-five."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 300, pid=dead())
+    assert provider(state_dir).poll(NOW) == []
+
+
+@posix_only
+def test_a_dead_process_need_not_be_the_only_session(state_dir, dead):
+    """It has to leave the counts, not just the headline: a session that no
+    longer exists cannot contribute to "2 running"."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 300, pid=os.getpid())
+    write_session(state_dir, "s2", "PreToolUse", NOW - 300, pid=dead())
+    f = provider(state_dir).poll(NOW)[0]
+    assert (f.n_run, f.n_sessions()) == (1, 1)
+
+
+@posix_only
+def test_the_agents_of_a_dead_session_are_not_counted_either(state_dir, dead):
+    """Their SubagentStop never fired for the same reason its SessionEnd did
+    not. Counting them moves the bug from the light to the number."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 300, pid=dead())
+    add_agent(state_dir, "s1", "a1")
+    assert provider(state_dir).poll(NOW) == []
+
+
+def test_a_slot_with_no_pid_at_all_behaves_exactly_as_today(state_dir):
+    """The ordinary case for months: a customer runs the shim from whichever
+    version they installed. An absent key is not malformed, and it is not a
+    reason to drop anything -- or to keep it past the hour."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 300)
+    assert provider(state_dir).poll(NOW)[0].n_run == 1
+    write_session(state_dir, "s2", "PreToolUse", NOW - ABANDONED_AFTER_S - 1)
+    assert provider(state_dir).poll(NOW)[0].n_sessions() == 1
+
+
+@posix_only
+def test_a_malformed_or_out_of_range_pid_falls_back_to_todays_rules(state_dir):
+    """A pid this code cannot make sense of is evidence of nothing. Note 0 and
+    -1 especially: os.kill reads those as "this whole process group" and
+    "every process I am allowed to signal", so they are refused before the
+    syscall rather than passed to it."""
+    for bad in ('"1234"', "0", "-1", "-99", "1e9", "12.5", "true", "false",
+                "null", "99999999999999999999", '{"pid":1}', "[1]", '""'):
+        (state_dir / "s1.state").write_text(
+            '{"event":"PreToolUse","t":%r,"pid":%s}' % (NOW - 300, bad))
+        counts, _, _ = provider(state_dir).scan(NOW)
+        assert counts == {base.STATE_RUNNING: 1}, bad
+        assert claude_state.pid_liveness_trusted() is True, bad
+
+
+@posix_only
+def test_a_process_owned_by_somebody_else_is_alive_not_gone(monkeypatch,
+                                                            state_dir):
+    """os.kill raises PermissionError for a process this user may not signal,
+    and that is proof it EXISTS. Reading it as death would drop a session for
+    running under another account -- the false-death direction this feature is
+    not allowed to fail in."""
+    def denied(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(claude_state.os, "kill", denied)
+    write_session(state_dir, "s1", "PreToolUse", NOW - 300, pid=4242)
+    assert provider(state_dir).poll(NOW)[0].n_run == 1
+    assert claude_state.pid_liveness_trusted() is True
+
+
+def test_a_platform_without_a_safe_probe_keeps_todays_rules(monkeypatch,
+                                                            state_dir, dead):
+    """Windows: CPython's os.kill(pid, 0) is TerminateProcess(handle, 0), so
+    asking whether Claude Code is alive would kill it. The probe is switched
+    off there, the hour is the only rule, and no latch fires either -- there
+    was never a reading to distrust."""
+    monkeypatch.setattr(claude_state, "_PID_LIVENESS_AVAILABLE", False)
+    write_session(state_dir, "s1", "PreToolUse", NOW - 300, pid=dead())
+    assert provider(state_dir).poll(NOW)[0].n_run == 1
+    write_session(state_dir, "s1", "PreToolUse", NOW - 3, pid=dead())
+    assert provider(state_dir).poll(NOW)[0].n_run == 1
+    assert claude_state.pid_liveness_trusted() is True
+
+
+# --- the latch: the feature testing its own premise -----------------------
+
+
+@posix_only
+def test_a_fresh_slot_with_a_dead_pid_latches_the_feature_off(state_dir, dead,
+                                                              capsys):
+    """THE CENTREPIECE. Nobody has measured whether $PPID in the hook is
+    Claude Code's own process or a shell it spawned to run the hook. If it is
+    the shell, every LIVE session has a dead pid and the naive feature blanks
+    the panel -- worse than the bug it fixes.
+
+    A slot written three seconds ago cannot have come from a process that no
+    longer exists. That combination is proof the number does not mean what
+    this code hopes, so: keep the session, stop believing pids, and say so."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 3, pid=dead())
+    f = provider(state_dir).poll(NOW)[0]
+    assert f.n_run == 1                        # kept, not dropped
+    assert claude_state.pid_liveness_trusted() is False
+    err = capsys.readouterr().err
+    assert "pid liveness is DISABLED" in err
+    assert "3600s as before" in err
+
+
+@posix_only
+def test_once_latched_a_genuinely_dead_session_is_not_dropped_early(state_dir,
+                                                                    dead):
+    """The fail-safe half. After the latch, BLINK behaves exactly as it does
+    today -- an hour, plus a log line saying why -- rather than acting on a
+    number it has just proved it cannot read."""
+    write_session(state_dir, "fresh", "PreToolUse", NOW - 3, pid=dead())
+    write_session(state_dir, "gone", "PreToolUse", NOW - 300, pid=dead())
+    f = provider(state_dir).poll(NOW)[0]
+    assert f.n_sessions() == 2
+    # ...and the hour still collects it, which is the whole of today's rules.
+    assert provider(state_dir).poll(NOW + ABANDONED_AFTER_S) == []
+
+
+@posix_only
+def test_the_latch_message_is_printed_once_not_every_poll(state_dir, dead,
+                                                          capsys):
+    """The scan runs every two seconds. A per-poll complaint is 43,200 lines a
+    day in the daemon's log, which is how a real message gets ignored."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 3, pid=dead())
+    prov = provider(state_dir)
+    for _ in range(5):
+        prov.poll(NOW)
+    assert capsys.readouterr().err.count("pid liveness is DISABLED") == 1
+
+
+@posix_only
+def test_a_second_provider_inherits_the_latch(state_dir, dead, capsys):
+    """What $PPID means is a fact about this machine's Claude Code, not about
+    a directory: `blink status` builds its own short-lived provider, and it
+    must not re-learn -- or re-print -- what the daemon already established."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 3, pid=dead())
+    provider(state_dir).poll(NOW)
+    capsys.readouterr()
+    provider(state_dir).poll(NOW)
+    assert claude_state.pid_liveness_trusted() is False
+    assert capsys.readouterr().err == ""
+
+
+# --- what a dropped session leaves behind ---------------------------------
+
+
+@posix_only
+def test_a_pid_dead_session_is_not_swept_the_instant_it_is_dropped(state_dir,
+                                                                   dead):
+    """Deliberate. The slot stops being REPORTED at once, which is the whole
+    user-visible fix, but the file survives to be looked at: it is the only
+    evidence of why a session vanished (last event, clock, pid), and this
+    check is new enough that somebody will want it. The hour still collects
+    the file, so nothing accumulates for longer than it used to."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 300, pid=dead())
+    add_agent(state_dir, "s1", "a1")
+    assert provider(state_dir).poll(NOW) == []
+    assert (state_dir / "s1.state").exists()
+    assert (state_dir / "s1" / "a1").exists()
+    # An hour on, the ordinary sweep takes it -- pid or no pid.
+    assert provider(state_dir).poll(NOW + ABANDONED_AFTER_S + 1) == []
+    assert not (state_dir / "s1.state").exists()
+    assert not (state_dir / "s1").exists()
 
 
