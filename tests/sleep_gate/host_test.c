@@ -101,11 +101,35 @@ int main(void)
 		}
 	}
 
-	/* --- the age predicate the wake-time status stamp shares --- */
+	/* --- the age predicate both dozing rules share --- */
 	CHECK(!sleep_reading_is_old(-1));
 	CHECK(!sleep_reading_is_old(0));
 	CHECK(!sleep_reading_is_old(SLEEP_STALE_AFTER_S - 1));
 	CHECK(sleep_reading_is_old(SLEEP_STALE_AFTER_S));
+
+	/* --- and the one the wake-time status stamp asks instead --- */
+
+	/* Half an hour, because this one is about the number on the screen
+	 * rather than about the person in front of it. */
+	CHECK(!sleep_reading_is_stale(-1));
+	CHECK(!sleep_reading_is_stale(0));
+	CHECK(!sleep_reading_is_stale(SLEEP_READING_STALE_AFTER_S - 1));
+	CHECK(sleep_reading_is_stale(SLEEP_READING_STALE_AFTER_S));
+	CHECK(sleep_reading_is_stale(SLEEP_READING_STALE_AFTER_S + 1));
+
+	/* The gap between the two questions, which is the bug this predicate
+	 * exists for: a board that dozed for an hour used to wake with a green
+	 * dot over an hour-old reading, because an hour is not four hours. It
+	 * IS half an hour. */
+	CHECK(sleep_reading_is_stale(3600) && !sleep_reading_is_old(3600));
+	CHECK(sleep_reading_is_stale(SLEEP_STALE_AFTER_S));
+
+	/* Both numbers, not just their symbols -- see the note below. 1800 s
+	 * is not a free choice: it is pc/statusline_source's STALE_AFTER_S,
+	 * the bound the daemon computes the wire's `stale` flag by, and the
+	 * board answering the same question differently is the disagreement
+	 * this whole predicate exists to prevent. */
+	CHECK(SLEEP_READING_STALE_AFTER_S == 30 * 60);
 
 	/* The number, not just the symbol. Everything above is written in
 	 * terms of SLEEP_STALE_AFTER_S and would keep passing if somebody

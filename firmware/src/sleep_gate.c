@@ -20,6 +20,11 @@ bool sleep_reading_is_old(int32_t age_s)
 	return age_s >= 0 && age_s >= SLEEP_STALE_AFTER_S;
 }
 
+bool sleep_reading_is_stale(int32_t age_s)
+{
+	return age_s >= 0 && age_s >= SLEEP_READING_STALE_AFTER_S;
+}
+
 bool sleep_stale_should_start(int32_t age_s, bool had_usage, bool ota_busy,
 			      enum usage_activity act)
 {

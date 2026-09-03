@@ -1,7 +1,8 @@
 /*
  * Sleep mode (docs/sleep-mode-design.md).
  *
- * Three clips: closing once, the loop for as long as the host is silent,
+ * Three clips: closing once, the loop for as long as whatever put the board
+ * to sleep still holds -- the host silent, or the reading no longer moving --
  * opening once. The clips are drawn straight to the panel by the BAN1 player,
  * over a plain LVGL screen in the clip's own ground colour; that screen is
  * also what takes the tap. Every frame gap services the protocol, so the
@@ -114,11 +115,19 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 	 * which has already set the dot green; stamping amber over it labels
 	 * the very frame that woke us as old. And a board dozing before it
 	 * ever met a daemon has no reading at all to call old.
+	 *
+	 * The test is the display's own bound, not the dozing one. Whether to
+	 * doze is a question about the person and is answered in hours;
+	 * whether the dot is amber is a question about the number and is
+	 * answered in half an hour, the same 1800 s the daemon uses to set the
+	 * `stale` flag it normally tells us. Asking the four-hour question
+	 * here left a board waking from an hour's doze green over an hour-old
+	 * reading until the next usage message landed, up to a minute later.
 	 */
 	lv_scr_load(prev);
 	lv_obj_del(scr);
 	if (usage_view_have_data() &&
-	    sleep_reading_is_old(usage_freshness_age_s(k_uptime_get()))) {
+	    sleep_reading_is_stale(usage_freshness_age_s(k_uptime_get()))) {
 		usage_view_set_status(USAGE_STATUS_STALE);
 	}
 	lv_refr_now(NULL);
