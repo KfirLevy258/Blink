@@ -1400,20 +1400,12 @@ static bool reading_moved_again(void)
 static void run_usb(void)
 {
 	int64_t last_tick = k_uptime_get();
-	int64_t start = last_tick;
 	int stage_shown = 1;
 
-	/* With stored WiFi + token the board can serve itself if the daemon
-	 * never delivers -- checked once; NVS doesn't change under us. */
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
-	bool can_fall_back = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
-			     cfg_get_token(tok, sizeof(tok));
-#else
-	/* There is no standalone mode to reboot into. Waiting is the whole
-	 * behaviour, and run_usb()'s own waiting-for-host screen covers it. */
-	const bool can_fall_back = false;
-#endif
+	/* When the app was last heard from, for the waiting-for-host doze
+	 * below. Starts at the top of the loop rather than at boot: this is
+	 * about how long THIS screen has been unanswered. */
+	int64_t host_quiet_since = last_tick;
 	int64_t checking_since = 0;	/* OTA_UI_CHECKING entered at, ms */
 
 	/* Same as run_standalone: drop anything latched before this loop
@@ -1532,19 +1524,39 @@ static void run_usb(void)
 				stage_shown = want;
 			}
 
-			/* Waiting-for-host timeout (user request 2026-07-16):
-			 * a daemon that answered hello once but has since
-			 * gone silent, before ever pushing usage, is not
-			 * coming back on its own. Reboot into self-service --
-			 * a dead daemon won't answer the next boot's hello,
-			 * so the board comes up standalone. Requires the
-			 * host to be *gone*, not merely slow, so a live
-			 * daemon can never reboot-loop us. */
-			if (can_fall_back && !proto_host_seen() &&
-			    k_uptime_get() - start > 60 * 1000) {
-				printk("[usage] daemon gone before first push; standalone can serve -- rebooting\n");
-				ui_boot_mark_intentional_reboot();
-				sys_reboot(SYS_REBOOT_COLD);
+			/*
+			 * Waiting-for-host timeout.
+			 *
+			 * This used to cold-reboot into standalone
+			 * (user request 2026-07-16), on the theory that a
+			 * daemon which has not spoken is not coming back and
+			 * a board with WiFi and a token can serve itself. On
+			 * a desk it read as an unexplained reset, and it made
+			 * the two never-heard-from-a-daemon cases behave
+			 * differently for no reason a user could see: a board
+			 * that once talked to the app dozes, a board that
+			 * never did rebooted. Now both doze (owner's call,
+			 * 2026-09-02). The cost is real and accepted: a board
+			 * that could have fetched its own usage over WiFi
+			 * sleeps instead. Standalone is still chosen at boot
+			 * in main() when no daemon answers the splash.
+			 *
+			 * Still gated on the host being GONE rather than
+			 * slow, which is what stops a live-but-busy daemon
+			 * from dozing us mid-conversation -- and note that
+			 * proto_host_seen() goes false again after
+			 * HOST_TIMEOUT_MS, so the timer restarts on every
+			 * silence rather than only the first.
+			 */
+			if (proto_host_seen()) {
+				host_quiet_since = k_uptime_get();
+			} else if (k_uptime_get() - host_quiet_since
+				   > 60 * 1000) {
+				printk("[usage] no app after 60 s; dozing until one speaks\n");
+				ui_sleep_run(host_is_back,
+					     "Waiting for the app on your computer.");
+				host_quiet_since = k_uptime_get();
+				continue;
 			}
 		}
 
