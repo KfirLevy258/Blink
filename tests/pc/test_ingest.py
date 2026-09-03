@@ -2,6 +2,7 @@
 import ast
 import json
 import pathlib
+import re
 
 from pc import ingest
 from pc.providers import base
@@ -412,3 +413,74 @@ def test_the_panel_reports_the_age_of_the_last_claude_code_reading(tmp_path):
 
     now[0] = NOW + 60
     assert bus.poll()["age_s"] == 6 * 3600 + 60
+
+
+def _sleep_absent_after_s():
+    """SLEEP_ABSENT_AFTER_S, read out of the firmware header it lives in.
+
+    Hard-coding 14400 here would let the two sides drift apart silently, and
+    that number is the whole point of the test below: it is the gate the
+    daemon must not hand a reason to fire. Reading it means a rename or a
+    move raises here rather than quietly stopping the test from testing
+    anything.
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    text = (root / "firmware" / "src" / "sleep_gate.h").read_text()
+    m = re.search(r"^#define\s+SLEEP_ABSENT_AFTER_S\s+(\d+)", text,
+                  re.MULTILINE)
+    assert m, "SLEEP_ABSENT_AFTER_S is not in firmware/src/sleep_gate.h"
+    return int(m.group(1))
+
+
+def test_a_live_status_line_keeps_the_board_awake_behind_an_old_dial(tmp_path):
+    """The regression this whole field exists for (final review, F-A).
+
+    Claude Code is open and rewriting its status line every minute. Its
+    five-hour window expired overnight, so the rewrite carries only the
+    seven-day figure -- the shape pc/providers/claude_cli's own docstring
+    describes, and the shape the field report describes. The remembered
+    five-hour reading from twelve hours ago wins the session dial and brings
+    its own mtime with it.
+
+    So the dial IS twelve hours old, and the wire says so, honestly. What
+    must not follow is the board deciding that nobody is at the desk: the
+    file under all of this was written five seconds ago. With only one age
+    on the wire it was 43200, the four-hour gate fired, and the panel closed
+    its eyes on an owner who was watching it.
+    """
+    import os
+
+    p = tmp_path / "statusline.json"
+
+    def write(doc, mtime):
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        os.utime(p, (mtime, mtime))
+
+    cli = ClaudeCliProvider(path=str(p))
+    now = [NOW - 12 * 3600 + 1]
+    bus = ingest.IngestionBus(providers=[cli], now=lambda: now[0])
+
+    # Overnight: a real five-hour reading, which the provider remembers.
+    write({"rate_limits": {"five_hour": {"used_percentage": 27.0,
+                                         "resets_at": NOW - 12 * 3600 + 7200},
+                           "seven_day": {"used_percentage": 26.0}}},
+          NOW - 12 * 3600)
+    assert bus.poll()["session_pct"] == 27.0
+
+    # This morning: the five-hour window is gone from the rewrite, the
+    # seven-day figure is not, and the file is five seconds old.
+    write({"rate_limits": {"seven_day": {"used_percentage": 41.0}}}, NOW - 5)
+    now[0] = NOW
+    msg = bus.poll()
+
+    assert msg["src"] == "cli"
+    assert msg["session_pct"] == 27.0        # the remembered dial
+    assert msg["weekly_pct"] == 41.0         # from the live rewrite
+    assert msg["age_s"] == 12 * 3600         # and it really is that old
+    assert msg["active_age_s"] == 5          # but the desk is not
+
+    # The question the firmware asks, with the numbers this message carries.
+    # The first line is the bug; the second is why the board stays awake.
+    absent_after = _sleep_absent_after_s()
+    assert msg["age_s"] >= absent_after
+    assert msg["active_age_s"] < absent_after

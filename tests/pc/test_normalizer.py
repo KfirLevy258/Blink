@@ -354,3 +354,59 @@ def test_a_stale_reading_that_has_a_number_beats_a_fresher_one_that_does_not():
     assert m.src == "cli"
     assert m.observed_at == NOW - 6 * 3600
     assert m.stale is True
+
+
+# --- how long since we heard a voice, as opposed to how old the dial is ----
+#
+# Two questions the merge used to answer with one number. `observed_at` is
+# the age of the number on the dial and belongs to whichever source won it;
+# `active_at` is the age of the freshest CONTACT and belongs to the whole
+# group, losers included. They only come apart because
+# pc/providers/claude_cli re-offers a remembered payload at its original
+# mtime -- and when they do, a board that dozes on the first one closes its
+# eyes on somebody who is sitting at the desk (field review 2026-09-02).
+
+
+def test_a_frame_that_won_nothing_still_proves_somebody_is_here():
+    """The exact field shape: Claude Code rewrote its status line five
+    seconds ago, the five-hour window expired overnight so the rewrite
+    carries no session percentage, and the remembered reading from this
+    morning wins the dial. The dial is six hours old. The desk is not."""
+    m = normalizer.merge([
+        cli(NOW - 5, weekly=26.0),                      # live, no session pct
+        cli(NOW - 6 * 3600, session=27.0, stale=True),  # remembered
+    ])
+    assert m.session_pct == 27.0                        # dial unchanged
+    assert m.observed_at == NOW - 6 * 3600              # and honestly old
+    assert m.active_at == NOW - 5                       # somebody is here
+
+
+def test_a_frame_with_no_numbers_at_all_still_counts_as_contact():
+    """A source that lost EVERY field, not just the session dial. It is not
+    a candidate for anything the panel draws, and it is still proof that a
+    tool on this machine wrote a file a minute ago."""
+    m = normalizer.merge([
+        cli(NOW - 3600, session=40.0, weekly=20.0),
+        desktop(NOW - 60),                              # no percentages
+    ])
+    assert m.session_pct == 40.0
+    assert m.observed_at == NOW - 3600
+    assert m.active_at == NOW - 60
+
+
+def test_a_single_reading_dates_itself_by_its_own_clock():
+    """Nothing to be fresher than: the two questions have the same answer,
+    which is what makes an absent active age exactly recoverable from the
+    reading age on the wire."""
+    m = normalizer.merge([cli(NOW - 900, session=40.0)])
+    assert m.active_at == m.observed_at == NOW - 900
+
+
+def test_the_freshest_contact_survives_a_second_merge():
+    """A merged frame is a valid input to another merge (the same property
+    session_rolled_at is carried for). Re-merging must not narrow the
+    freshest contact back down to the winning reading's own age."""
+    once = normalizer.merge([cli(NOW - 5, weekly=26.0),
+                             cli(NOW - 6 * 3600, session=27.0)])
+    twice = normalizer.merge([once])
+    assert twice.active_at == NOW - 5

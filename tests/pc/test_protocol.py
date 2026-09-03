@@ -261,6 +261,121 @@ def test_the_age_fields_fit_the_line_budget():
     assert len(raw) <= protocol.MAX_LINE_BYTES
 
 
+# --- active_age_s: how long since we heard a voice -------------------------
+#
+# `age_s` is how old the number on the dial is. `active_age_s` is how long
+# since ANY tool on this desk wrote anything at all. The board dozes on the
+# second and captions on the first, because a remembered reading can be
+# twelve hours old at the same instant the file it came from was rewritten
+# five seconds ago -- and dozing on that age puts the panel to sleep in
+# front of its owner (field review 2026-09-02).
+
+
+def test_an_unknown_active_age_is_omitted_like_every_other_unknown():
+    assert "active_age_s" not in protocol.usage(40, None, 20, None, [],
+                                                active_age_s=-1)
+
+
+def test_a_known_active_age_is_sent_even_when_it_equals_the_reading_age():
+    """Twenty bytes to keep "the desk is as quiet as the dial" distinct from
+    "this daemon predates the field", which is the one thing the firmware's
+    fallback cannot recover for itself."""
+    msg = protocol.usage(40, None, 20, None, [], age_s=900, active_age_s=900)
+    assert msg["active_age_s"] == 900
+
+
+def test_the_active_age_is_the_freshest_page_not_the_shown_one():
+    """One field for the whole board, because dozing is a whole-board
+    decision: a Codex rollout written a minute ago is evidence somebody is
+    at this machine even on a day when the Claude page holds the dial."""
+    now = 1_787_700_000.0
+    claude = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=now - 12 * 3600,
+        active_at=now - 12 * 3600, session_pct=27.0)
+    codex = base.NormalizedUsageFrame(
+        provider="codex", src="cli", observed_at=now - 60,
+        active_at=now - 60, session_pct=8.0)
+    msg = protocol.frame_to_usage(claude, now, secondary=codex)
+    assert msg["age_s"] == 12 * 3600
+    assert msg["active_age_s"] == 60
+
+
+def test_the_shown_page_can_be_the_fresh_one_too():
+    """The mirror, so the test above is measuring a minimum and not just
+    reading the second argument."""
+    now = 1_787_700_000.0
+    claude = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=now - 60,
+        active_at=now - 60, session_pct=27.0)
+    codex = base.NormalizedUsageFrame(
+        provider="codex", src="cli", observed_at=now - 12 * 3600,
+        active_at=now - 12 * 3600, session_pct=8.0)
+    msg = protocol.frame_to_usage(claude, now, secondary=codex)
+    assert msg["active_age_s"] == 60
+
+
+def test_a_remembered_reading_does_not_age_the_desk():
+    """The whole point of the field, at the seam that produces it: an old
+    dial and a live machine in one frame."""
+    now = 1_787_700_000.0
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=now - 12 * 3600,
+        active_at=now - 5, session_pct=27.0, weekly_pct=26.0)
+    msg = protocol.frame_to_usage(f, now)
+    assert msg["age_s"] == 12 * 3600
+    assert msg["active_age_s"] == 5
+
+
+def test_a_frame_with_no_epoch_at_all_says_so():
+    """-1, the same "we cannot say" age_s already uses, so the firmware's
+    one unknown rule covers both."""
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=None, session_pct=27.0)
+    msg = protocol.frame_to_usage(f, 1_787_700_000.0)
+    assert "active_age_s" not in msg
+    assert "age_s" not in msg
+
+
+def test_the_widest_line_the_daemon_can_build_still_fits():
+    """The measurement that decides whether this field was affordable.
+
+    Built through frame_to_usage, which is the only caller of usage() and
+    therefore the only thing that can put a line on the wire: both providers
+    populated, every count at 99, both reset stamps and both countdowns at
+    the far end of their own windows (five hours and seven days), a burn
+    rate beside them although the normalizer never sends both, overage on
+    all four dials, the longest source id that reaches this field, and all
+    three ages at INT32_MAX -- the bound proto.c's SECS_MAX permits, and
+    reachable from a file stamped at the epoch.
+
+    509 of 512 bytes, measured. THREE bytes. The board drops an over-long
+    line whole with no error, so this test is the guard: the next field,
+    a longer provider or source id, or a fourth age fails here rather than
+    on a desk. For scale, padding the two countdowns out to six digits each
+    -- which no real window can be -- already writes 513.
+    """
+    now = 1_787_700_000.0
+
+    def widest(provider):
+        return base.NormalizedUsageFrame(
+            provider=provider, src="desktop",
+            observed_at=now - 2147483647, active_at=now - 2147483647,
+            session_pct=102.33333333333333,
+            session_resets_at=now + 18000,          # a full five-hour window
+            weekly_pct=102.66666666666667,
+            weekly_resets_at=now + 604800,          # a full seven-day window
+            state="running", stale=True, session_burn_pph=999.93333,
+            n_run=99, n_wait=99, n_stuck=99, n_idle=99, n_agents=99,
+            label="a-project-with-a-long-name")
+
+    msg = protocol.frame_to_usage(widest("claude"), now,
+                                  secondary=widest("codex"))
+    raw, why = protocol.encode_checked(msg)
+    assert why is None
+    assert msg["active_age_s"] == 2147483647
+    assert len(raw) <= protocol.MAX_LINE_BYTES, len(raw)
+
+
 # --- burn_pph on the wire --------------------------------------------------
 
 
@@ -525,29 +640,39 @@ class SessionMessage(unittest.TestCase):
                              protocol.SESSION_LABEL_MAX_BYTES)
         self.assertTrue(label.startswith(m["label"]))
 
+    # The three flattened per-model percentages, kept out of the fixture
+    # below and measured on their own in
+    # test_the_model_percentages_no_longer_fit_beside_the_active_age.
+    MODEL_ROWS = [{"name": "fable", "weekly_pct": 91.11111111111111},
+                  {"name": "sonnet", "weekly_pct": 72.22222222222223},
+                  {"name": "opus", "weekly_pct": 63.33333333333333}]
+
     @staticmethod
     def fully_loaded_usage_kwargs():
-        """Every optional key populated at its widest: two providers, all
-        three per-model percentages, both reset stamps, both countdowns,
-        both ages, every count, the burn rate, and unrounded overage
-        percentages on all four dials.
+        """Every optional key the pipeline can populate, at its widest: two
+        providers, both reset stamps, both countdowns, all three ages, every
+        count, the burn rate, and unrounded overage percentages on all four
+        dials.
 
-        Wider than the pipeline can actually produce -- the normalizer never
-        sends a burn rate beside a reset time, and frame_to_usage, the only
-        caller of usage(), passes models=[] -- deliberately, because the
-        number this defends is a ceiling and a half-populated fixture would
-        clear the bar without measuring anything. It comes out at 510 of
-        512, which is the whole point: this line has two bytes of slack and
-        the project name is a great deal more than two bytes.
+        Still wider than the pipeline can actually produce -- the normalizer
+        never sends a burn rate beside a reset time -- deliberately, because
+        the number this defends is a ceiling and a half-populated fixture
+        would clear the bar without measuring anything. 480 of 512.
+
+        `models` is the one thing left out, and it is left out because it
+        can no longer be in: frame_to_usage, the only caller of usage(),
+        passes models=[] and has since the status line became the sole
+        source, and the three keys it would flatten cost 51 bytes the line
+        does not have now that active_age_s is on it (531 of 512, measured
+        in the test named above). That is a real narrowing of the wire, not
+        a fixture convenience, so it is asserted rather than assumed.
         """
         return dict(
             session_pct=102.33333333333333,
             session_resets_at=1788193800.0,
             weekly_pct=102.66666666666667,
             weekly_resets_at=1788584800.0,
-            models=[{"name": "fable", "weekly_pct": 91.11111111111111},
-                    {"name": "sonnet", "weekly_pct": 72.22222222222223},
-                    {"name": "opus", "weekly_pct": 63.33333333333333}],
+            models=[],
             session_resets_in_s=15335, weekly_resets_in_s=406335,
             stale=True, provider="claude", src="desktop", state="waiting",
             n_sess=4, n_run=1, n_wait=2, n_stuck=1, n_agents=3,
@@ -555,8 +680,34 @@ class SessionMessage(unittest.TestCase):
             p2_weekly_pct=91.98765432109876,
             p2_session_resets_in_s=15335, p2_weekly_resets_in_s=406335,
             p2_stale=True, burn_pph=9.33333333,
-            age_s=14400, p2_age_s=86399,
+            age_s=14400, p2_age_s=86399, active_age_s=86400,
         )
+
+    def test_the_model_percentages_no_longer_fit_beside_the_active_age(self):
+        """What the new field cost, pinned rather than left to be discovered
+        on a desk.
+
+        usage() can still flatten fable/sonnet/opus into three scalar keys
+        and proto.c still reads them, but nothing has produced them since
+        frame_to_usage became the only caller and started passing models=[].
+        Putting them back now writes a 531-byte line, and the board DROPS an
+        over-long line whole with no error on either side.
+
+        The daemon does not: claude_usage_bridge's only writer is
+        encode_checked, which refuses and logs. So the failure mode of
+        re-enabling the model keys is a panel that stops updating with a
+        stderr line naming the reason -- which is why this asserts the
+        refusal, and why a future task that wants them back will land here
+        and read the arithmetic before it ships.
+        """
+        kw = self.fully_loaded_usage_kwargs()
+        kw["models"] = self.MODEL_ROWS
+        raw, why = protocol.encode_checked(protocol.usage(**kw))
+        self.assertIsNone(raw)
+        self.assertIn("line limit", why)
+        self.assertGreater(
+            len(protocol.encode(protocol.usage(**kw))),
+            protocol.MAX_LINE_BYTES)
 
     def test_usage_frame_did_not_grow(self):
         # The frame was measured at 506 of 512 and proto.c drops an over-long
