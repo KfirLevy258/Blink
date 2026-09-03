@@ -707,11 +707,22 @@ class SessionMessage(unittest.TestCase):
 
     def test_a_non_ascii_label_still_fits_the_line_limit(self):
         """The worst case for the label field: 24 bytes of four-byte
-        codepoints, which ensure_ascii would have turned into 12 escapes."""
+        codepoints, which ensure_ascii would have turned into 12 escapes.
+
+        The last assertion is not decoration. Measured: with only the two
+        above, this test passes with ensure_ascii=True restored AND with
+        session()'s truncation deleted -- 512 bytes is far enough away that
+        neither regression can push a six-character label past it, so the
+        fit is not what this case can actually detect. What it can detect is
+        the wire form: escaping turns each of these codepoints into a
+        surrogate PAIR, \\ud835\\udd05, and the panel would draw twelve
+        literal characters where one glyph belongs.
+        """
         msg = protocol.session("𝔅" * 12, 9999)
         raw, reason = protocol.encode_checked(msg)
         self.assertIsNone(reason)
         self.assertLessEqual(len(raw), protocol.MAX_LINE_BYTES)
+        self.assertIn(msg["label"].encode("utf-8"), raw)
 
     def test_session_label_survives_a_three_byte_truncation(self):
         """The same again at three bytes a character, where the dangling
