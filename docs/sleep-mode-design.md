@@ -37,12 +37,22 @@ reading that has stopped moving**. The first rule waits for silence, and a
 computer that goes to sleep does not necessarily produce any — the daemon on
 it kept answering pings all night while the figures it pushed were 57 hours
 old, so `host_lost` never armed and the panel sat awake showing "Reading is
-old" until morning. So a reading older than **4 h** (`SLEEP_ABSENT_AFTER_S`),
-on a board that has shown figures this boot, with no update in flight and
-with nothing on screen asking for a person (no waiting, stuck, failed or
-running session), also enters SLEEP. It leaves on the first reading younger
-than that — which is the next `usage` message after somebody uses Claude Code
-again — or on any of those conditions changing. A tap peeks as it always did.
+old" until morning. So a machine that has said nothing for **4 h**
+(`SLEEP_ABSENT_AFTER_S`), on a board that has shown figures this boot, with
+no update in flight and with nothing on screen asking for a person (no
+waiting, stuck, failed or running session), also enters SLEEP. It leaves as
+soon as that machine speaks again — the next `usage` message after somebody
+uses Claude Code — or on any of those conditions changing. A tap peeks as it
+always did.
+
+"Said nothing" is the wire's `active_age_s`, and it is deliberately not the
+same number as `age_s`, which is how old the figure on the dial is. The two
+come apart because the daemon re-offers the last five-hour reading it saw at
+that reading's own time, so the dial can be twelve hours old five seconds
+after Claude Code rewrote the file it came from. Dozing on the dial's age
+closed the panel's eyes on an owner sitting in front of it. The wake-time
+stale stamp still asks about the dial, because that dot describes the
+figure; only the doze asks about the person.
 
 The threshold is argued for in `firmware/src/sleep_gate.h`: above the
 daemon's own 1800 s staleness bound and Claude Desktop's 900 s away-schedule
@@ -66,9 +76,12 @@ Edges:
   the tap-to-peek (dashboard + hint, 10 s). Uses the existing BAN1 player
   (`ui_boot.c`'s `bootanim_play`, factored to a shared helper) and the same
   `pump()`.
-- `usage_freshness.c/.h`: keeps the `age_s` and `state` that `proto.c`
-  already parses somewhere `main.c` can read them and a laptop can test them,
-  and grows the age with uptime between messages.
+- `usage_freshness.c/.h`: keeps the `age_s`, `active_age_s` and `state` that
+  `proto.c` parses somewhere `main.c` can read them and a laptop can test
+  them, and grows both ages with uptime between messages. A message with no
+  `active_age_s` — a daemon older than the field — gets `age_s` back for it,
+  which is exact rather than approximate: the two only differ because of a
+  memory that daemon does not have.
 - `sleep_gate.c`: `sleep_stale_should_start()` / `sleep_stale_should_wake()`
   are exact complements, pinned by a grid in `tests/sleep_gate`, because one
   lives outside `ui_sleep_run` and the other inside it.
