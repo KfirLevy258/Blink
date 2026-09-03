@@ -806,3 +806,66 @@ class SessionMessage(unittest.TestCase):
         self.assertLessEqual(len(raw.encode()), protocol.MAX_LINE_BYTES, raw)
         self.assertNotIn("label", raw)
         self.assertNotIn("a-project", raw)
+
+
+class VolatileUsageKeys(unittest.TestCase):
+    """The exclusion list the change-driven push compares around.
+
+    Bridge.poll_if_changed sends when a usage message differs from the last one
+    sent, ignoring protocol.VOLATILE_USAGE_KEYS. Both halves of that can rot
+    silently and in opposite directions: a timer key missing from the list
+    makes every 2 s tick a push, and a real field wrongly in it makes the panel
+    wait for the 60 s heartbeat again.
+    """
+
+    def _loaded(self):
+        """A message with every optional key on it, both providers included.
+
+        The volatile names are only checkable against a message that carries
+        them, and the common single-provider line carries neither p2 countdown.
+        """
+        now = 1_787_700_000.0
+
+        def frame(provider):
+            return base.NormalizedUsageFrame(
+                provider=provider, src="cli", observed_at=now - 30,
+                active_at=now - 5, session_pct=61.0,
+                session_resets_at=now + 3600, weekly_pct=26.0,
+                weekly_resets_at=now + 86400, state="running", stale=False,
+                n_run=1, n_wait=2, n_stuck=0, n_idle=0, n_agents=3)
+
+        return protocol.frame_to_usage(frame("claude"), now,
+                                       secondary=frame("codex"))
+
+    def test_every_named_volatile_key_is_one_the_daemon_really_sends(self):
+        """A typo here would be invisible: an unknown name excludes nothing,
+        so the real timer field stays in the comparison and moves on every
+        poll -- which is the 2 s unconditional push this design exists to
+        avoid, arriving quietly and passing every other test."""
+        msg = self._loaded()
+        missing = sorted(protocol.VOLATILE_USAGE_KEYS - set(msg))
+        self.assertEqual(missing, [])
+
+    def test_the_timers_are_dropped_and_the_state_is_kept(self):
+        msg = self._loaded()
+        kept = protocol.meaningful_usage(msg)
+        for k in protocol.VOLATILE_USAGE_KEYS:
+            self.assertNotIn(k, kept)
+        for k in ("state", "n_run", "n_wait", "n_agents", "session_pct",
+                  "weekly_pct", "stale", "src", "provider", "p2",
+                  "p2_session_pct", "p2_stale"):
+            self.assertIn(k, kept, k)
+
+    def test_the_absolute_reset_stamps_stay_in_the_comparison(self):
+        """They move only when a window rolls over -- exactly the event worth
+        a push -- unlike the *_in_s countdowns derived from them."""
+        kept = protocol.meaningful_usage(self._loaded())
+        self.assertIn("session_resets_at", kept)
+        self.assertIn("weekly_resets_at", kept)
+
+    def test_a_field_this_list_has_never_heard_of_is_meaningful(self):
+        """The point of an exclusion list. A future key that matters must make
+        the panel fast without anybody remembering to come back here."""
+        msg = dict(self._loaded(), some_field_from_2027=7)
+        self.assertEqual(
+            protocol.meaningful_usage(msg)["some_field_from_2027"], 7)

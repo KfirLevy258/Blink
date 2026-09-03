@@ -245,6 +245,10 @@ The firmware reads this field: proto.c's "usage" handler calls
     the figure, and 120 was unreachable. The label, its formatter and its
     place on the panel were all built and none of them had ever appeared.
 
+    The change-driven push (Bridge.poll_if_changed) only sharpens that point:
+    a message can now also arrive the moment session state moves, so the gap
+    between messages says even less about the age of the figure than it did.
+
     The distinction is the whole point on a source that goes quiet. Claude
     Desktop only refreshes its cache while somebody is at the machine, so a
     four-hour-old percentage was being re-sent every minute and drawn with
@@ -428,6 +432,41 @@ The firmware reads this field: proto.c's "usage" handler calls
         **flat,
         **extra,
     }
+
+
+# The keys on a usage message that move by themselves as the clock runs.
+#
+# The daemon looks at the local state files every FAST_POLL_INTERVAL_S and only
+# writes the wire when something a reader could act on has changed -- "this
+# message differs from the last one sent, ignoring the keys below". The list is
+# deliberately an EXCLUSION and not an inclusion: a comparison that enumerates
+# the fields it cares about goes quietly deaf the day a new one is added, and
+# the failure is invisible, because the panel still updates every 60 s from the
+# heartbeat and merely lags. Everything is meaningful by default; the only kind
+# of field that ever belongs here is a timer. Put anything else in and every
+# tick becomes a push -- thirty times the serial traffic carrying no news.
+#
+# Each of these is an age or a countdown: rebuilt from the wall clock on every
+# poll, so different on every poll by construction, and already ticked locally
+# by the firmware between pushes (usage_freshness.c grows the daemon's figure
+# by the elapsed time; see the age_s note in usage() above). Re-sending them
+# sooner tells the board nothing it was not already counting on its own.
+VOLATILE_USAGE_KEYS = frozenset({
+    "age_s", "p2_age_s", "active_age_s",
+    "session_resets_in_s", "weekly_resets_in_s",
+    "p2_s_in_s", "p2_w_in_s",
+})
+
+
+def meaningful_usage(msg: dict) -> dict:
+    """The part of a usage message that says something.
+
+    Compare two of these to answer "would a person notice the difference?".
+    The absolute *_resets_at stamps stay in on purpose: those move only when
+    the window itself rolls over, which is precisely an event worth a push,
+    while the *_in_s countdowns derived from them move every single second.
+    """
+    return {k: v for k, v in msg.items() if k not in VOLATILE_USAGE_KEYS}
 
 
 def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
