@@ -60,6 +60,20 @@ int main(void)
 	 * it, so a threshold or an activity that drifted between them would
 	 * make the board close its eyes and open them again in a loop,
 	 * forever, on a real desk. Pinned as a grid rather than as prose.
+	 *
+	 * had_usage is fixed at true, and the grid is only a complement proof
+	 * under that. It has to be: with had_usage false and a genuinely old
+	 * reading, start is false because it demands had_usage and wake is
+	 * false because the age is old -- a doze with no way out of it. Two
+	 * separate things keep that off a desk. sleep_stale_should_wake is
+	 * only ever asked from inside ui_sleep_run, which is only entered
+	 * after a start that already required had_usage; and had_usage is
+	 * usage_view_have_data(), a latch (usage_view.c:1567) that never goes
+	 * back to false once set, while every non-negative age reaches the
+	 * board from proto.c:427 -- the same handler that has just called
+	 * usage_view_update() and thrown that latch. Break either of those
+	 * and the empty corner of this grid becomes a board that hangs
+	 * asleep.
 	 */
 	{
 		static const enum usage_activity acts[] = {
