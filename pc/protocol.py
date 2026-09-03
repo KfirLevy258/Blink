@@ -37,8 +37,24 @@ UNKNOWN = -1.0
 
 
 def encode(msg: dict) -> bytes:
-    """Serialize a message dict to a single NDJSON line (bytes)."""
-    return (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
+    """Serialize a message dict to a single NDJSON line (bytes).
+
+    ensure_ascii=False, and that is a firmware decision rather than a taste
+    one. json.dumps escapes non-ASCII by default, msg_parse.c copies the
+    bytes between two quotes and unescapes nothing, and fmt.c then draws
+    whatever it was given -- so a project called "café" reached the panel as
+    the literal characters \\u00e9 and was drawn that way. The firmware has
+    had a UTF-8 decoder for this since fmt_ascii() was written
+    (tests/fmt/host_test.c pins "caf\\xc3\\xa9" -> "caf?"); the escaping here
+    was the only thing keeping it out of reach.
+
+    It cannot cost line budget either, which matters because proto.c drops an
+    over-long line whole: a UTF-8 sequence is at most four bytes and the
+    escape it replaces is at least six, so every line this touches gets
+    shorter or stays the same.
+    """
+    return (json.dumps(msg, separators=(",", ":"),
+                       ensure_ascii=False) + "\n").encode("utf-8")
 
 
 # The longest countdown worth sending, and the ceiling is doing two jobs.

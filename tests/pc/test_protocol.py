@@ -681,6 +681,38 @@ class SessionMessage(unittest.TestCase):
                              protocol.SESSION_LABEL_MAX_BYTES)
         self.assertTrue(label.startswith(m["label"]))
 
+    def test_encode_puts_utf8_on_the_wire_not_escapes(self):
+        """The firmware does no unescaping, so an escape is drawn literally.
+
+        msg_parse.c copies the bytes between two quotes and hands them to
+        fmt_ascii(), which decodes UTF-8 and transliterates what it cannot
+        draw. json.dumps' default ensure_ascii=True defeated that entirely:
+        "café" arrived as the six characters \\u00e9 and the panel drew them.
+        """
+        raw = protocol.encode(protocol.session("café", 1))
+        self.assertIn("café".encode("utf-8"), raw)
+        self.assertNotIn(b"\\u00e9", raw)
+
+    def test_encode_of_non_ascii_is_never_longer_than_the_escaped_form(self):
+        """The byte budget can only improve. proto.c drops an over-long line
+        whole, so a change to the encoder has to be shown not to lengthen
+        anything before it can be believed."""
+        import json as _json
+        msg = protocol.session("café-project-name-abcdef", 9999)
+        escaped = (_json.dumps(msg, separators=(",", ":"),
+                               ensure_ascii=True) + "\n").encode("utf-8")
+        self.assertLessEqual(len(protocol.encode(msg)), len(escaped))
+        self.assertLessEqual(len(protocol.encode(msg)),
+                             protocol.MAX_LINE_BYTES)
+
+    def test_a_non_ascii_label_still_fits_the_line_limit(self):
+        """The worst case for the label field: 24 bytes of four-byte
+        codepoints, which ensure_ascii would have turned into 12 escapes."""
+        msg = protocol.session("𝔅" * 12, 9999)
+        raw, reason = protocol.encode_checked(msg)
+        self.assertIsNone(reason)
+        self.assertLessEqual(len(raw), protocol.MAX_LINE_BYTES)
+
     def test_session_label_survives_a_three_byte_truncation(self):
         """The same again at three bytes a character, where the dangling
         remainder is two bytes rather than one."""
