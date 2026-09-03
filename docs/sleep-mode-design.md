@@ -32,6 +32,23 @@ first message from the app (a pong, or a `welcome` from a restarted app)
 ends it. No OS-specific code; works for sleep, lid close and hibernate on all
 three platforms.
 
+There is a second way in, added after a field report (2026-09-02): **from a
+reading that has stopped moving**. The first rule waits for silence, and a
+computer that goes to sleep does not necessarily produce any — the daemon on
+it kept answering pings all night while the figures it pushed were 57 hours
+old, so `host_lost` never armed and the panel sat awake showing "Reading is
+old" until morning. So a reading older than **4 h** (`SLEEP_STALE_AFTER_S`),
+on a board that has shown figures this boot, with no update in flight and
+with nothing on screen asking for a person (no waiting, stuck, failed or
+running session), also enters SLEEP. It leaves on the first reading younger
+than that — which is the next `usage` message after somebody uses Claude Code
+again — or on any of those conditions changing. A tap peeks as it always did.
+
+The threshold is argued for in `firmware/src/sleep_gate.h`: above the
+daemon's own 1800 s staleness bound and Claude Desktop's 900 s away-schedule
+by a wide margin, so a person at the desk is never dozed on; short enough
+that a machine sleeping at 23:00 has a dark panel by 03:00.
+
 Edges:
 - **Uninstall** sends a `bye` (new protocol message, additive) before stopping
   the service; the board shows "connecting" for that instead of sleeping.
@@ -49,6 +66,12 @@ Edges:
   the tap-to-peek (dashboard + hint, 10 s). Uses the existing BAN1 player
   (`ui_boot.c`'s `bootanim_play`, factored to a shared helper) and the same
   `pump()`.
+- `usage_freshness.c/.h`: keeps the `age_s` and `state` that `proto.c`
+  already parses somewhere `main.c` can read them and a laptop can test them,
+  and grows the age with uptime between messages.
+- `sleep_gate.c`: `sleep_stale_should_start()` / `sleep_stale_should_wake()`
+  are exact complements, pinned by a grid in `tests/sleep_gate`, because one
+  lives outside `ui_sleep_run` and the other inside it.
 - Clips compiled in as `sleepanim_<edition>_{close,loop,open}.h`, encoded with
   `tools/encode_bootanim.py --frames` from `make_sleepanim.py` output;
   `bootclip.c` picks the edition's set the way it picks the boot clip.
