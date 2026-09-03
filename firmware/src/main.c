@@ -1367,6 +1367,14 @@ static void run_standalone(void)
 
 /* ---- USB bridge mode: PC daemon pushes usage over serial ---- */
 
+/* The original reason to wake: the app said something. proto.c clears
+ * host_seen on the timeout that armed the sleep in the first place, so this
+ * is false throughout the doze and true on the first line back. */
+static bool host_is_back(void)
+{
+	return proto_host_seen();
+}
+
 static void run_usb(void)
 {
 	int64_t last_tick = k_uptime_get();
@@ -1410,7 +1418,8 @@ static void run_usb(void)
 					       usage_view_have_data(),
 					       snap.st == OTA_UI_DOWNLOADING ||
 					       snap.st == OTA_UI_REBOOTING)) {
-				ui_sleep_run();
+				ui_sleep_run(host_is_back,
+					     "Your computer may be asleep.");
 				continue;
 			}
 		}

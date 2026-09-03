@@ -13,9 +13,11 @@
 
 #include "bootclip.h"
 #include "proto.h"
+#include "sleep_gate.h"
 #include "ui_boot.h"
 #include "ui_settings.h"
 #include "ui_sleep.h"
+#include "usage_freshness.h"
 #include "usage_view.h"
 
 #define PEEK_MS 10000
@@ -28,14 +30,16 @@ static void tap_cb(lv_event_t *e)
 	tapped = true;
 }
 
-static bool host_back(void)
+static bool (*wake_when)(void);
+
+static bool awake_now(void)
 {
-	return proto_host_seen();
+	return wake_when();
 }
 
-static bool host_back_or_tap(void)
+static bool awake_or_tap(void)
 {
-	return proto_host_seen() || tapped;
+	return wake_when() || tapped;
 }
 
 static void service(void)
@@ -46,25 +50,25 @@ static void service(void)
 }
 
 /* A tap: the dashboard as it was, with a word about why nothing moves. Ten
- * seconds, or until the host speaks, then back to dozing. */
-static void peek(lv_obj_t *prev, lv_obj_t *sleep_scr)
+ * seconds, or until there is something new to show, then back to dozing. */
+static void peek(lv_obj_t *prev, lv_obj_t *sleep_scr, const char *note)
 {
 	int64_t until = k_uptime_get() + PEEK_MS;
 
 	lv_scr_load(prev);
-	ui_settings_notice("Your computer may be asleep.");
+	ui_settings_notice(note);
 	lv_refr_now(NULL);
-	while (k_uptime_get() < until && !proto_host_seen()) {
+	while (k_uptime_get() < until && !wake_when()) {
 		service();
 	}
 	ui_settings_notice_dismiss();
-	if (!proto_host_seen()) {
+	if (!wake_when()) {
 		lv_scr_load(sleep_scr);
 		lv_refr_now(NULL);
 	}
 }
 
-void ui_sleep_run(void)
+void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 {
 	const struct bootclip *close = sleepclip_active(SLEEP_CLOSE);
 	const struct bootclip *loop = sleepclip_active(SLEEP_LOOP);
@@ -72,6 +76,7 @@ void ui_sleep_run(void)
 	lv_obj_t *prev = lv_scr_act();
 	lv_obj_t *scr = lv_obj_create(NULL);
 
+	wake_when = awake;
 	lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_set_style_bg_color(scr, lv_color_hex(close->bg_rgb), 0);
@@ -79,13 +84,13 @@ void ui_sleep_run(void)
 	lv_obj_add_event_cb(scr, tap_cb, LV_EVENT_CLICKED, NULL);
 	lv_scr_load(scr);
 	lv_refr_now(NULL);
-	printk("[sleep] host silent; closing eyes (%s)\n", close->name);
+	printk("[sleep] dozing (%s)\n", close->name);
 
-	ui_boot_play_clip(close->blob, close->blob_len, host_back);
-	while (!proto_host_seen()) {
+	ui_boot_play_clip(close->blob, close->blob_len, awake_now);
+	while (!wake_when()) {
 		tapped = false;
 		if (!ui_boot_play_clip(loop->blob, loop->blob_len,
-				       host_back_or_tap)) {
+				       awake_or_tap)) {
 			/* A loop that will not decode must not spin. */
 			int64_t until = k_uptime_get() + 1000;
 
@@ -93,17 +98,28 @@ void ui_sleep_run(void)
 				service();
 			}
 		}
-		if (tapped && !proto_host_seen()) {
-			peek(prev, scr);
+		if (tapped && !wake_when()) {
+			peek(prev, scr, peek_note);
 		}
 	}
-	printk("[sleep] host back; opening eyes\n");
+	printk("[sleep] waking\n");
 	ui_boot_play_clip(open->blob, open->blob_len, NULL);
 
-	/* Back to the dashboard as it was, figures flagged old until the app
-	 * sends fresh ones (its first poll after waking, within a minute). */
+	/*
+	 * Back to the dashboard as it was -- flagged old only if it still IS.
+	 *
+	 * This used to stamp STALE unconditionally, which was right for the
+	 * one caller that existed and wrong for both of the others. A board
+	 * dozing because its reading stopped moving wakes on a FRESH reading,
+	 * which has already set the dot green; stamping amber over it labels
+	 * the very frame that woke us as old. And a board dozing before it
+	 * ever met a daemon has no reading at all to call old.
+	 */
 	lv_scr_load(prev);
 	lv_obj_del(scr);
-	usage_view_set_status(USAGE_STATUS_STALE);
+	if (usage_view_have_data() &&
+	    sleep_reading_is_old(usage_freshness_age_s(k_uptime_get()))) {
+		usage_view_set_status(USAGE_STATUS_STALE);
+	}
 	lv_refr_now(NULL);
 }
