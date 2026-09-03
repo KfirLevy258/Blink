@@ -4,7 +4,7 @@ Written to disk deliberately: this is the handoff, and it must be readable by
 someone — or some session — with no memory of how it got here. Update it as
 things land.
 
-Last updated: 2026-09-03, immediately before a context compaction.
+Last updated: 2026-09-03, after plan 0's tasks 1-8 landed.
 
 ## Branch
 
@@ -19,8 +19,8 @@ without starting.
 
 | # | Plan | Tasks | State |
 |---|---|---|---|
-| 1 | [`shim-self-repair.md`](shim-self-repair.md) | 6 | **all 6 committed**; one fix round in flight |
-| 0 | [`field-bugs.md`](field-bugs.md) | 9 | written, not started |
+| 1 | [`shim-self-repair.md`](shim-self-repair.md) | 6 | **done**, reviewed |
+| 0 | [`field-bugs.md`](field-bugs.md) | 9 | **tasks 1-8 done and reviewed; task 9 (flash + desk) NOT started** |
 | 2 | [`codex-naming-and-failure.md`](codex-naming-and-failure.md) | 10 | written, not started |
 | 3 | [`codex-hook-shim.md`](codex-hook-shim.md) | 14 | written, not started |
 
@@ -101,3 +101,44 @@ that instruction; keep it.
   `My Project` silently gets no label. Still the owner's decision.
 - Nobody has ever executed a Codex hook — the single largest unknown in the
   programme, and all of it sits in Plan 3.
+
+## Plan 0: what is done, and the one thing that is not
+
+Tasks 1-8 are committed and reviewed. All three field bugs are fixed **in
+code**. Task 9 — flash the board and watch the three behaviours on the desk —
+has not been started, and nothing on this branch has ever run on hardware.
+
+Evidence as it stands: `pytest tests -q` 549 passed; `sh tests/ci/check_host_tests.sh`
+PASS across 15 suites, from a clean serial run; the default Zephyr build clean
+with a valid image; and the `wifi.conf` build compiling and linking clean.
+
+**Why the build mattered more than usual here.** `ui_sleep.c` and `main.c` need
+LVGL and Zephyr, have no host tests, and cannot be compiled by any agent on this
+laptop — so tasks 6, 7 and 8 were reviewed by reading alone until the build ran.
+The default build has `CONFIG_BLINK_WIFI_MODE` unset and compiles the `#else`
+arm; task 8's actual edit lives in the `#if` arm, so a second build with
+`-DEXTRA_CONF_FILE=wifi.conf` was needed to compile it at all.
+
+Two environmental facts found on the way, neither caused by this branch:
+- The WiFi variant **cannot produce a signed image on this machine**: MCUboot's
+  `imgtool.py` needs the `cbor2` Python module and `/usr/local/bin/python` has
+  no such module. The default build, which is what ships, signs fine.
+- That configuration sits at 98.8% of dram0 and 99.6% of dram1.
+
+## Open, carried out of plan 0
+
+- **A daemon that pings but never pushes usage will doze the panel with the
+  owner present** (reinstalled, tokenless, or backed off after a 429). Escapable
+  by a tap or the first real reading. Accepted deliberately: the alternative is
+  Bug A verbatim. The honest fix is daemon-side and outside this plan — a daemon
+  that cannot read usage should push a frame saying so rather than falling
+  silent, which would keep the panel awake AND say why.
+- `tests/ci/check_host_tests.sh` is **not concurrency-safe**: it builds into a
+  fixed shared temp dir and `rm -rf`s it on entry, so two runs delete each
+  other's files. Observed directly. Pass/fail is still sound (it comes from exit
+  status) but any overlapping run's output is worthless.
+- The `ok (N checks)` count greps for `^PASS`, and the `sleep_gate` and
+  `usage_freshness` CHECK macros print only on failure, so both display
+  `ok (0 checks)` while running real assertions. Harmless for those two;
+  unhealthy as a convention, since a suite running zero assertions looks
+  identical.
