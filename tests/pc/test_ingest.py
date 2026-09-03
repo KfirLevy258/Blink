@@ -367,3 +367,48 @@ def test_two_real_files_reach_the_wire_together(tmp_path):
     assert msg["p2_stale"] is False
     from pc import protocol
     assert len(protocol.encode(msg)) <= protocol.MAX_LINE_BYTES
+
+
+def test_the_panel_reports_the_age_of_the_last_claude_code_reading(tmp_path):
+    """The field bug, end to end (2026-09-02).
+
+    Claude Code was used six hours ago and its five-hour window has since
+    expired, so the status line no longer carries a percentage. Claude
+    Desktop was last open 57 hours ago. The message must carry the CLI
+    reading and ITS age -- the desktop sample's 57 hours is an honest answer
+    to a question nobody asked.
+    """
+    import json
+    import os
+
+    from pc.providers.claude_cli import ClaudeCliProvider
+
+    p = tmp_path / "statusline.json"
+
+    def write(doc, mtime):
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        os.utime(p, (mtime, mtime))
+
+    cli = ClaudeCliProvider(path=str(p))
+    desktop = Fixed(frame(src="desktop", at=NOW - 57 * 3600, session=0.0,
+                          weekly=0.0))
+
+    write({"rate_limits": {"five_hour": {"used_percentage": 27.0,
+                                         "resets_at": NOW - 7200}}},
+          NOW - 6 * 3600)
+    now = [NOW - 6 * 3600 + 1]
+    bus = ingest.IngestionBus(providers=[cli, desktop],
+                              now=lambda: now[0])
+    bus.poll()
+
+    write({"rate_limits": {}}, NOW - 60)
+    now[0] = NOW
+    msg = bus.poll()
+
+    assert msg["src"] == "cli"
+    assert msg["session_pct"] == 27.0
+    assert msg["age_s"] == 6 * 3600
+    assert msg["stale"] is True
+
+    now[0] = NOW + 60
+    assert bus.poll()["age_s"] == 6 * 3600 + 60
