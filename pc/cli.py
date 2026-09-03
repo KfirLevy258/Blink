@@ -177,6 +177,36 @@ def _write_shim(path: str, name: str) -> None:
     os.chmod(path, 0o755)
 
 
+def shim_is_current(path: str, name: str) -> bool:
+    """Is the shim at `path` byte-identical to the one we would install?
+
+    Byte-identical, not "close enough": the one difference that has actually
+    bitten was line endings, and a comparison that normalised them would have
+    called the broken file healthy. Read in binary and compare exactly.
+
+    False on any failure to read. The caller's response to "stale" and to "I
+    cannot tell" is the same -- write it again -- and this runs inside the
+    daemon's poll loop, where raising is the one outcome worse than a shim
+    that stays stale for another five minutes.
+    """
+    try:
+        with open(path, "rb") as f:
+            installed = f.read()
+    except OSError:
+        return False
+
+    try:
+        expected = _shim_source(name).encode("utf-8")
+    except OSError:
+        # The bundle itself is unreadable. Claiming the installed shim is
+        # stale would start a rewrite that cannot succeed and would log the
+        # failure every tick; claiming it is current changes nothing. Say
+        # current and let the louder failure surface elsewhere.
+        return True
+
+    return installed == expected
+
+
 # ---------------------------------------------------------------- Claude Code
 
 
