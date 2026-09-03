@@ -20,11 +20,7 @@ without starting.
 | # | Plan | Tasks | State |
 |---|---|---|---|
 | 1 | [`shim-self-repair.md`](shim-self-repair.md) | 6 | **all 6 committed**; one fix round in flight |
-<<<<<<< Updated upstream
 | 0 | [`field-bugs.md`](field-bugs.md) | 9 | written, not started |
-=======
-| 0 | [`field-bugs.md`](field-bugs.md) | — | being written |
->>>>>>> Stashed changes
 | 2 | [`codex-naming-and-failure.md`](codex-naming-and-failure.md) | 10 | written, not started |
 | 3 | [`codex-hook-shim.md`](codex-hook-shim.md) | 14 | written, not started |
 
@@ -59,7 +55,6 @@ Commits: `4dd5fca` detection, `1dbe4fd` repair, `1972601` wiring, `c9f567b`,
   not just on host silence. `proto.c:262` clears `host_lost` on every line,
   pings included, which is why the gate never armed.
 - Bug C (reboots with no daemon): **replace the reboot with sleep**, matching
-<<<<<<< Updated upstream
   the connected-then-gone case. Accepted cost: a board that could self-serve
   over WiFi will sleep instead.
   - **Amended during planning: the `can_fall_back` gate is removed too.**
@@ -73,11 +68,6 @@ Commits: `4dd5fca` detection, `1dbe4fd` repair, `1972601` wiring, `c9f567b`,
     the host to be *gone*, not merely slow" — and the reboot is scoped to
     the window before the first usage push, so it is narrower than the
     paraphrase implied. Trust `main.c:1490`, not the paraphrase.
-=======
-  the connected-then-gone case. Keep the `!proto_host_seen()` guard — it is
-  what prevents reboot loops against a live-but-slow daemon. Accepted cost: a
-  board that could self-serve over WiFi will sleep instead.
->>>>>>> Stashed changes
 
 **Plans 2 and 3 (Codex):**
 - `codex exec` batch runs count as sessions and get named.

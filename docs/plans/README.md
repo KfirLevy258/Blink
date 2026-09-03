@@ -11,7 +11,7 @@ page says only why the order is what it is.
 | # | Plan | Tasks | What it is for |
 |---|---|---|---|
 | 1 | [`shim-self-repair.md`](shim-self-repair.md) | 6 | Make the session-name feature actually reach the people who already own a board |
-| 0 | [`field-bugs.md`](field-bugs.md) | — | The three faults the owner is living with: a 56-hour reading, a panel awake all night, a board that reboots when the PC is off |
+| 0 | [`field-bugs.md`](field-bugs.md) | 9 | The three faults the owner is living with: a 56-hour reading, a panel awake all night, a board that reboots when the PC is off |
 | 2 | [`codex-naming-and-failure.md`](codex-naming-and-failure.md) | 10 | Give Codex sessions a project name, and let a failed Codex turn show as failed |
 | 3 | [`codex-hook-shim.md`](codex-hook-shim.md) | 14 | Let a Codex session say it is waiting on a person |
 
