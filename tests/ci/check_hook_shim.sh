@@ -70,7 +70,14 @@ done
 ok "keeps nothing from the payload but the ids"
 
 # 4. Atomic write.
-[ ! -e "$DIR/abc-123.state.tmp" ] || fail "left a .tmp file behind"
+# The shim writes "$sid.state.$$.tmp", so a test for "$sid.state.tmp" could
+# never match and never fail. Match the pid form instead. A leftover temp is
+# not cosmetic: nothing sweeps these -- ClaudeStateProvider.scan() ignores
+# anything not ending in .state, and SessionEnd removes only $sid.state and
+# $sid/ -- so one per killed hook accumulates for the life of the install.
+if ls "$DIR"/abc-123.state.*.tmp >/dev/null 2>&1; then
+	fail "atomic write left a temp file behind"
+fi
 ok "atomic write leaves no temp file"
 
 # 5. Two sessions do not overwrite each other. This is the whole reason the
