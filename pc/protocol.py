@@ -41,6 +41,33 @@ def encode(msg: dict) -> bytes:
     return (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+# The longest countdown worth sending, and the ceiling is doing two jobs.
+#
+# Honesty first: the longest window this panel shows is the weekly one, seven
+# days. A resets_at further out than that is a misparse -- a stamp in
+# milliseconds, a field that changed meaning -- and rendering it as a confident
+# "resets in 412 days" is exactly the sort of wrong-but-certain number the rest
+# of this module works to avoid. Clamping says "a long time" instead.
+#
+# Then bytes: four countdown fields ride every usage line, and an unclamped one
+# is eight digits where this is six. Those eight digits took the widest line
+# the daemon can build to 517 of 512 -- over the cap, refused by
+# encode_checked, and a panel that quietly stops updating. 999999 is a shade
+# under twelve days: comfortably clear of the seven-day window, and six digits.
+COUNTDOWN_MAX_S = 999999
+
+
+def _whole_epoch(v):
+    """An absolute epoch stamp as whole seconds, or unchanged when it is not one.
+
+    None and the -1 sentinel pass through untouched: they are not times, and
+    rounding them would say something different from what they mean.
+    """
+    if isinstance(v, float):
+        return int(v)
+    return v
+
+
 def encode_checked(msg: dict):
     """encode(), but None when the result could not be received.
 
@@ -83,7 +110,7 @@ def secs_until(resets_at, now_epoch: float) -> int:
     # have already passed. Ceiling keeps the value honest (the window really
     # does have "about a second" left) and keeps 0 reserved for the firmware's
     # own countdown reaching it.
-    return max(1, math.ceil(resets_at - now_epoch))
+    return min(COUNTDOWN_MAX_S, max(1, math.ceil(resets_at - now_epoch)))
 
 
 def decode(line: str):
@@ -379,11 +406,23 @@ The firmware reads this field: proto.c's "usage" handler calls
         if _k in extra:
             extra[_k] = _round_pct(extra[_k])
 
+    # Whole seconds on the two absolute stamps, and it is the byte budget that
+    # insists. They arrive straight from the provider's JSON, where a
+    # "resets_at" is free to carry a fractional epoch, and json.dumps writes
+    # every digit of it: 1787718000.1234567 is 18 bytes where 1787718000 is 10.
+    # Two of those took the widest line this daemon can build to 521 of 512 --
+    # over the cap, refused by encode_checked, and a panel that quietly stops
+    # updating. Nothing reads the fraction: these exist "for readability and
+    # for any consumer that does know the time" (see the docstring above),
+    # while the board counts down from the *_resets_in_s fields, which are
+    # already whole seconds.
     return {
         "t": "usage", "v": VERSION,
-        "session_pct": session_pct, "session_resets_at": session_resets_at,
+        "session_pct": session_pct,
+        "session_resets_at": _whole_epoch(session_resets_at),
         "session_resets_in_s": session_resets_in_s,
-        "weekly_pct": weekly_pct, "weekly_resets_at": weekly_resets_at,
+        "weekly_pct": weekly_pct,
+        "weekly_resets_at": _whole_epoch(weekly_resets_at),
         "weekly_resets_in_s": weekly_resets_in_s,
         "stale": stale,
         **flat,

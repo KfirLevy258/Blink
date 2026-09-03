@@ -348,23 +348,37 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     three ages at INT32_MAX -- the bound proto.c's SECS_MAX permits, and
     reachable from a file stamped at the epoch.
 
-    509 of 512 bytes, measured. THREE bytes. The board drops an over-long
-    line whole with no error, so this test is the guard: the next field,
-    a longer provider or source id, or a fourth age fails here rather than
-    on a desk. For scale, padding the two countdowns out to six digits each
-    -- which no real window can be -- already writes 513.
+    509 of 512 bytes, measured. The board drops an over-long line whole with
+    no error, so this test is the guard: the next field, a longer provider or
+    source id, or a fourth age fails here rather than on a desk.
+
+    Three things here were NOT in the first version of this test, and each of
+    them on its own put the line over the cap once active_age_s arrived:
+
+      - `src="cli-state"`, which is codex_cli.STATE_SRC_ID and two characters
+        wider than "desktop". It is a real source, not a hypothetical one.
+      - `stale=False`, because `false` is a byte wider than `true`, twice.
+      - fractional reset stamps and a reset a year out. A resets_at arrives
+        from provider JSON and is free to carry a fraction, and secs_until had
+        no upper bound, so these wrote 521 and 517 of 512 respectively --
+        refused by encode_checked, and a panel that quietly stops updating.
+        protocol._whole_epoch and protocol.COUNTDOWN_MAX_S are what bring them
+        back, and this test is what would notice if either were removed.
     """
     now = 1_787_700_000.0
 
     def widest(provider):
         return base.NormalizedUsageFrame(
-            provider=provider, src="desktop",
+            provider=provider, src="cli-state",   # codex_cli.STATE_SRC_ID
             observed_at=now - 2147483647, active_at=now - 2147483647,
             session_pct=102.33333333333333,
-            session_resets_at=now + 18000,          # a full five-hour window
+            # Fractional, and far past any real window: both are shapes a
+            # provider's JSON can hand us, and both used to reach the wire
+            # at full width.
+            session_resets_at=now + 31536000.1234567,
             weekly_pct=102.66666666666667,
-            weekly_resets_at=now + 604800,          # a full seven-day window
-            state="running", stale=True, session_burn_pph=999.93333,
+            weekly_resets_at=now + 31536000.1234567,
+            state="running", stale=False, session_burn_pph=999.93333,
             n_run=99, n_wait=99, n_stuck=99, n_idle=99, n_agents=99,
             label="a-project-with-a-long-name")
 
@@ -374,6 +388,46 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     assert why is None
     assert msg["active_age_s"] == 2147483647
     assert len(raw) <= protocol.MAX_LINE_BYTES, len(raw)
+
+
+def test_an_absolute_reset_stamp_goes_out_as_whole_seconds():
+    """A fraction on resets_at costs eight bytes and buys nothing.
+
+    Providers hand us whatever their JSON held, and json.dumps writes every
+    digit: 1787718000.1234567 is 18 bytes where 1787718000 is 10. Two of them
+    took the widest line to 521 of 512. Nothing reads the fraction -- the
+    board counts down from *_resets_in_s, and these stamps exist for
+    readability -- so they are rounded at the one place the wire is defined.
+    """
+    msg = protocol.usage(50.0, 1787718000.1234567, 50.0, 1788300000.9,
+                         [], session_resets_in_s=18000)
+    assert msg["session_resets_at"] == 1787718000
+    assert msg["weekly_resets_at"] == 1788300000
+    assert isinstance(msg["session_resets_at"], int)
+
+
+def test_a_reset_stamp_that_is_not_a_time_is_left_alone():
+    """None and -1 are not times, and rounding would change what they say."""
+    msg = protocol.usage(50.0, None, 50.0, -1, [])
+    assert msg["session_resets_at"] is None
+    assert msg["weekly_resets_at"] == -1
+
+
+def test_a_countdown_beyond_any_real_window_is_clamped():
+    """A year-long countdown is a misparse, and it is eight digits wide.
+
+    The longest window the panel shows is the weekly one. Anything further
+    out is a stamp that changed meaning -- milliseconds, say -- and rendering
+    it as a confident "resets in 412 days" is the wrong-but-certain number
+    this module exists to avoid. Four countdown fields ride every usage line,
+    and unclamped they wrote 517 of 512.
+    """
+    now = 1_787_700_000.0
+    assert protocol.secs_until(now + 31536000, now) == protocol.COUNTDOWN_MAX_S
+    assert len(str(protocol.COUNTDOWN_MAX_S)) == 6
+    # Well clear of the seven-day window it must never truncate.
+    assert protocol.COUNTDOWN_MAX_S > 7 * 24 * 3600
+    assert protocol.secs_until(now + 604800, now) == 604800
 
 
 # --- burn_pph on the wire --------------------------------------------------
