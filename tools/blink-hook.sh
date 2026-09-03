@@ -5,9 +5,15 @@
 # We record which event fired, for which session, and when.
 #
 # WHAT IS CAPTURED, exactly: an event name, a session id, an agent id, the
-# PROJECT DIRECTORY NAME, and a clock reading. Nothing else is read from the
-# payload -- not the prompt, not the tool arguments, not the transcript path,
-# not the assistant's message, and not the path above the project directory.
+# PROJECT DIRECTORY NAME, a clock reading, and this hook's PARENT PROCESS ID.
+# Nothing else is read from the payload -- not the prompt, not the tool
+# arguments, not the transcript path, not the assistant's message, and not the
+# path above the project directory.
+#
+# The pid is the only item on that list that does not come from the payload at
+# all: it is a number about the machine, not about the work, and it stays on
+# disk -- the daemon reads it to ask the kernel whether the session's process
+# is still there, and it is never put on the wire or shown on the panel.
 #
 # The project name is the second widening of this file, and a larger one than
 # the first. The ids are opaque identifiers Claude Code generates; a directory
@@ -170,7 +176,36 @@ SubagentStart|SubagentStop)
 	# every `"` and `\` that could end the JSON string early.
 	nameval=''
 	[ -n "$name" ] && nameval=",\"name\":\"$name\""
-	printf '{"event":"%s","t":%s%s}' "$event" "$(date +%s)" "$nameval" 2>/dev/null \
+
+	# The PARENT pid -- the process Claude Code ran this hook from. It is here
+	# because a session that dies without firing SessionEnd (a closed
+	# terminal, a crash, kill -9) is invisible to the daemon otherwise: the
+	# slot simply stops changing, and silence is the one thing a quiet session
+	# and a dead one have in common. Whether that process still exists is a
+	# fact the daemon can check instead of guessing from silence, which is the
+	# guess this product removed on 2026-08-29 for crying wolf every way it
+	# was tuned.
+	#
+	# $PPID and not `ps`, and not any other $(...): POSIX has the shell set
+	# PPID at startup, so reading it is free, and this branch runs on every
+	# tool call. The one fork already here (date) is one too many as it is.
+	#
+	# Omitted rather than written empty when it is not a plain positive
+	# integer -- the same rule as the name, for a sharper reason. `"pid":`
+	# with nothing after it is not JSON, so the daemon would fail to parse
+	# the whole slot and the session would VANISH from the panel rather than
+	# merely lose its liveness check. A shell that left PPID unset, or set it
+	# to something surprising, must cost us this key and nothing else. 0 is
+	# excluded because a pid of 0 names a process group rather than a
+	# process, and it is not this hook's job to hand the reader that trap.
+	pidval=''
+	case "${PPID:-}" in
+	'' | *[!0-9]*) ;;
+	0*) ;;
+	*) pidval=",\"pid\":$PPID" ;;
+	esac
+	printf '{"event":"%s","t":%s%s%s}' "$event" "$(date +%s)" "$pidval" \
+		"$nameval" 2>/dev/null \
 		> "$DIR/$sid.state.$$.tmp" &&
 		mv -f "$DIR/$sid.state.$$.tmp" "$DIR/$sid.state" 2>/dev/null
 	;;
