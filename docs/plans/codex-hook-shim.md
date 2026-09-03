@@ -2474,3 +2474,57 @@ So when this plan lands, add the Codex shim to the `shims=` tuple that plan pass
 **Type consistency.** `session_states` returns `({sid: (state, name)}, agents)` in Task 4 and is destructured that way in Task 5. `codex_state.scan(now_epoch, path=None, sweep=True)` returns `({sid: state}, agents)` in Task 5 and is called with exactly those keywords in Task 7 and Task 13. `rollout_session_id(path) -> str` in Task 6 is called as a plain string in Task 7's `rollout_states[rollout_session_id(path) or path]`. `hook_command(shim_path, event)` has the same signature in Task 8 as `install_hooks.hook_command`, and both `install` and `uninstall` in Tasks 8 and 9 take `(hooks_path, shim_path)` — matching `install_hooks`, so `pc/cli.py` calls them the same way it calls the Claude pair. `STATE_SRC_ID` is used unchanged from `codex_cli`; the state frame's `src` does not change, so nothing downstream of `pc/normalizer` has to learn a new source name.
 
 **Fixed inline during review:** Task 7's frame originally carried no `n_wait` (copied from the existing code, which had no waiting state to report) — an amber pip beside "0 sessions" on the panel. Task 3 was added after tracing `Interrupt` through `derive_state` and finding it returns `STATE_UNKNOWN`, which drops the session from the census entirely rather than merely mislabelling it.
+
+---
+
+# DISCOVERY GATE — RUN 2026-09-04. Read this before any task below.
+
+**Verdict: the premise HOLDS.** Codex 0.150.0 has a real, stable, on-by-default
+hooks system. Verified, not inferred: `codex features list` reports
+`hooks stable true`, `--help` documents `--dangerously-bypass-hook-trust`, and
+upstream tag `rust-v0.150.0` carries the whole `codex-rs/hooks/` crate plus an
+official docs page. Twelve events exist, including **`PermissionRequest`** —
+"runs when Codex is about to ask for approval", which is exactly the WAITING
+signal this plan was written for.
+
+**Still true: no hook has ever been executed on this machine.** The first task
+must be the smoke test, before anything is built on top.
+
+## Four findings that change tasks below — do not implement around them
+
+**1. The trust hash covers the declared COMMAND STRING, not the script.**
+This inverts the risk the plan assumed. Editing the shim's *contents* does NOT
+re-prompt; changing the *path* does. So `blink update`, which swaps the program
+directory, would **silently disable the hook** if the command embeds a versioned
+path. Register a STABLE entry-point path that survives updates, and give the
+user a one-time `/hooks` trust instruction. The plan's warning about rewriting
+`~/.codex` on a timer was aimed at the wrong hazard.
+
+**2. De-duplicate on `transcript_path`, NOT on `session_id`.** Hook input
+carries `transcript_path` — the rollout file itself — so the filename is the
+join key, and it is the same value the rollout reader already has. This
+sidesteps a real trap: the official docs show a session id shaped `thr_123`,
+NOT the UUID the rollout filename uses. The plan's assumption that the two ids
+are spelled the same was never safe, and this makes it moot.
+
+**3. Approve and deny have no events of their own.** Esc fires `Interrupt`
+(with a hard 1-3 s timeout). Approve is followed by `PostToolUse` once the tool
+finishes; deny fires nothing. So a WAITING state is always clearable — at the
+next `PreToolUse` or at `Stop` — but on a deny it clears LATE. Decide
+deliberately how long a stale WAITING may linger, and say so in the copy.
+
+**4. `permission_mode` is on the hook input.** BLINK can suppress WAITING
+entirely in never-ask modes, where an approval prompt cannot occur.
+
+## The question that would have made this plan unnecessary, and its answer
+
+Could the waiting signal come from the rollout files BLINK already reads, with
+no hook at all? **No — verified impossible at the shipped tag.**
+`ExecApprovalRequest`, `ApplyPatchApprovalRequest`, `RequestPermissions` and
+`RequestUserInput` all sit in the "transient, never persisted" arm of
+`codex-rs/rollout/src/policy.rs`, and a census of all four real rollout files on
+this machine found no approval-shaped event. The hook path is necessary, not
+merely convenient.
+
+Full labelled findings (VERIFIED / LIKELY / UNKNOWN per claim):
+`scratchpad/codex-hooks-gate.md` from the 2026-09-04 session.
