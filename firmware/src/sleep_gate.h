@@ -33,11 +33,12 @@ bool sleep_should_start(bool host_lost, bool had_usage, bool ota_busy);
  *     dawn. Eight hours would have left the board that produced this bug
  *     lit until morning, which was the complaint.
  */
-#define SLEEP_STALE_AFTER_S 14400
+#define SLEEP_ABSENT_AFTER_S 14400
 
-/* Has the shown reading stopped moving? -1 (we cannot say) is NOT old: a
- * daemon too old to send an age must not doze the panel. */
-bool sleep_reading_is_old(int32_t age_s);
+/* Has the reading stopped moving for long enough that nobody can be here?
+ * -1 (we cannot say) is NOT absence: a daemon too old to send an age must
+ * not doze the panel. */
+bool sleep_nobody_is_here(int32_t age_s);
 
 /*
  * How old a reading has to be before it is DRAWN as old. A different

@@ -15,9 +15,9 @@ static bool nothing_wants_a_person(enum usage_activity act)
 	return act == USAGE_ACTIVITY_NONE || act == USAGE_ACTIVITY_IDLE;
 }
 
-bool sleep_reading_is_old(int32_t age_s)
+bool sleep_nobody_is_here(int32_t age_s)
 {
-	return age_s >= 0 && age_s >= SLEEP_STALE_AFTER_S;
+	return age_s >= 0 && age_s >= SLEEP_ABSENT_AFTER_S;
 }
 
 bool sleep_reading_is_stale(int32_t age_s)
@@ -29,12 +29,12 @@ bool sleep_stale_should_start(int32_t age_s, bool had_usage, bool ota_busy,
 			      enum usage_activity act)
 {
 	return had_usage && !ota_busy && nothing_wants_a_person(act) &&
-	       sleep_reading_is_old(age_s);
+	       sleep_nobody_is_here(age_s);
 }
 
 bool sleep_stale_should_wake(int32_t age_s, bool ota_busy,
 			     enum usage_activity act)
 {
 	return ota_busy || !nothing_wants_a_person(act) ||
-	       !sleep_reading_is_old(age_s);
+	       !sleep_nobody_is_here(age_s);
 }

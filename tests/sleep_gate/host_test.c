@@ -23,33 +23,33 @@ int main(void)
 	/* The field case (2026-09-02): the computer slept, the daemon kept
 	 * pinging all night, and the panel sat awake on a reading that had
 	 * stopped moving. Silence never came, so the rule above never fired. */
-	CHECK(sleep_stale_should_start(SLEEP_STALE_AFTER_S, true, false,
+	CHECK(sleep_stale_should_start(SLEEP_ABSENT_AFTER_S, true, false,
 				       USAGE_ACTIVITY_NONE));
 	/* One second under the line is not old enough. */
-	CHECK(!sleep_stale_should_start(SLEEP_STALE_AFTER_S - 1, true, false,
+	CHECK(!sleep_stale_should_start(SLEEP_ABSENT_AFTER_S - 1, true, false,
 					USAGE_ACTIVITY_NONE));
 	/* An unknown age is not a very old one. A daemon too old to send an
 	 * age must not put the panel to sleep. */
 	CHECK(!sleep_stale_should_start(-1, true, false, USAGE_ACTIVITY_NONE));
 	/* Same three refusals the first rule has. */
-	CHECK(!sleep_stale_should_start(SLEEP_STALE_AFTER_S, false, false,
+	CHECK(!sleep_stale_should_start(SLEEP_ABSENT_AFTER_S, false, false,
 					USAGE_ACTIVITY_NONE));
-	CHECK(!sleep_stale_should_start(SLEEP_STALE_AFTER_S, true, true,
+	CHECK(!sleep_stale_should_start(SLEEP_ABSENT_AFTER_S, true, true,
 					USAGE_ACTIVITY_NONE));
 	/* Something wants a person. A wedged session or an open prompt is a
 	 * claim on them, and closing the eyes over it hides the one thing
 	 * this panel exists to show. */
-	CHECK(!sleep_stale_should_start(SLEEP_STALE_AFTER_S, true, false,
+	CHECK(!sleep_stale_should_start(SLEEP_ABSENT_AFTER_S, true, false,
 					USAGE_ACTIVITY_WAITING));
-	CHECK(!sleep_stale_should_start(SLEEP_STALE_AFTER_S, true, false,
+	CHECK(!sleep_stale_should_start(SLEEP_ABSENT_AFTER_S, true, false,
 					USAGE_ACTIVITY_STUCK));
-	CHECK(!sleep_stale_should_start(SLEEP_STALE_AFTER_S, true, false,
+	CHECK(!sleep_stale_should_start(SLEEP_ABSENT_AFTER_S, true, false,
 					USAGE_ACTIVITY_FAILED));
-	CHECK(!sleep_stale_should_start(SLEEP_STALE_AFTER_S, true, false,
+	CHECK(!sleep_stale_should_start(SLEEP_ABSENT_AFTER_S, true, false,
 					USAGE_ACTIVITY_RUNNING));
 	/* A finished turn is amber, not a summons: the pip already carries
 	 * it and it does not keep the panel lit for four hours. */
-	CHECK(sleep_stale_should_start(SLEEP_STALE_AFTER_S, true, false,
+	CHECK(sleep_stale_should_start(SLEEP_ABSENT_AFTER_S, true, false,
 				       USAGE_ACTIVITY_IDLE));
 
 	/* --- start and wake are exact complements --- */
@@ -82,8 +82,8 @@ int main(void)
 			USAGE_ACTIVITY_STUCK, USAGE_ACTIVITY_FAILED,
 		};
 		static const int32_t ages[] = {
-			-1, 0, 600, 1800, SLEEP_STALE_AFTER_S - 1,
-			SLEEP_STALE_AFTER_S, SLEEP_STALE_AFTER_S + 1, 205200,
+			-1, 0, 600, 1800, SLEEP_ABSENT_AFTER_S - 1,
+			SLEEP_ABSENT_AFTER_S, SLEEP_ABSENT_AFTER_S + 1, 205200,
 		};
 		unsigned int a, g, o;
 
@@ -102,10 +102,10 @@ int main(void)
 	}
 
 	/* --- the age predicate both dozing rules share --- */
-	CHECK(!sleep_reading_is_old(-1));
-	CHECK(!sleep_reading_is_old(0));
-	CHECK(!sleep_reading_is_old(SLEEP_STALE_AFTER_S - 1));
-	CHECK(sleep_reading_is_old(SLEEP_STALE_AFTER_S));
+	CHECK(!sleep_nobody_is_here(-1));
+	CHECK(!sleep_nobody_is_here(0));
+	CHECK(!sleep_nobody_is_here(SLEEP_ABSENT_AFTER_S - 1));
+	CHECK(sleep_nobody_is_here(SLEEP_ABSENT_AFTER_S));
 
 	/* --- and the one the wake-time status stamp asks instead --- */
 
@@ -121,8 +121,8 @@ int main(void)
 	 * exists for: a board that dozed for an hour used to wake with a green
 	 * dot over an hour-old reading, because an hour is not four hours. It
 	 * IS half an hour. */
-	CHECK(sleep_reading_is_stale(3600) && !sleep_reading_is_old(3600));
-	CHECK(sleep_reading_is_stale(SLEEP_STALE_AFTER_S));
+	CHECK(sleep_reading_is_stale(3600) && !sleep_nobody_is_here(3600));
+	CHECK(sleep_reading_is_stale(SLEEP_ABSENT_AFTER_S));
 
 	/* Both numbers, not just their symbols -- see the note below. 1800 s
 	 * is not a free choice: it is pc/statusline_source's STALE_AFTER_S,
@@ -132,11 +132,11 @@ int main(void)
 	CHECK(SLEEP_READING_STALE_AFTER_S == 30 * 60);
 
 	/* The number, not just the symbol. Everything above is written in
-	 * terms of SLEEP_STALE_AFTER_S and would keep passing if somebody
+	 * terms of SLEEP_ABSENT_AFTER_S and would keep passing if somebody
 	 * changed it to 30 minutes -- which would doze on a person sitting
 	 * at the desk between renders. Four hours is argued for in
 	 * sleep_gate.h; changing it means changing that argument too. */
-	CHECK(SLEEP_STALE_AFTER_S == 4 * 60 * 60);
+	CHECK(SLEEP_ABSENT_AFTER_S == 4 * 60 * 60);
 
 	printf("%s\n", fails ? "FAIL" : "ok   sleep_gate");
 	return fails ? 1 : 0;

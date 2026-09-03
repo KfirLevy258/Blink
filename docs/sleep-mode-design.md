@@ -37,7 +37,7 @@ reading that has stopped moving**. The first rule waits for silence, and a
 computer that goes to sleep does not necessarily produce any — the daemon on
 it kept answering pings all night while the figures it pushed were 57 hours
 old, so `host_lost` never armed and the panel sat awake showing "Reading is
-old" until morning. So a reading older than **4 h** (`SLEEP_STALE_AFTER_S`),
+old" until morning. So a reading older than **4 h** (`SLEEP_ABSENT_AFTER_S`),
 on a board that has shown figures this boot, with no update in flight and
 with nothing on screen asking for a person (no waiting, stuck, failed or
 running session), also enters SLEEP. It leaves on the first reading younger
