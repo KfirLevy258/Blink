@@ -153,8 +153,15 @@ class NormalizedUsageFrame:
     # Which project the ONE session in `state` belongs to, when there is
     # exactly one. Empty when several share the state -- see
     # claude_state.poll for why naming one of several is refused rather than
-    # guessed. Only the hook-backed provider can ever set it; every other
-    # source leaves it empty and the board falls back to the count.
+    # guessed.
+    #
+    # TWO providers set this now, by different routes, and the difference
+    # matters to anyone debugging a missing name. claude_state gets it from
+    # the hook, which is told the project directly. codex_cli derives it from
+    # the `cwd` on the first line of a rollout file, so a Codex name can be
+    # absent for reasons the Claude path never has -- an unreadable head, a
+    # cwd that sanitises to nothing. Every other source leaves it empty and
+    # the board falls back to the count.
     label: str = ""
 
     def __post_init__(self):
