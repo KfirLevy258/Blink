@@ -1,6 +1,16 @@
-/* The dozing rules, pinned: docs/sleep-mode-design.md. */
+/* The dozing rules, pinned: docs/sleep-mode-design.md.
+ *
+ *   cc -Wall -Werror -I firmware/src tests/sleep_gate/host_test.c \
+ *      firmware/src/sleep_gate.c firmware/src/usage_freshness.c \
+ *      -o /tmp/sleep_gate
+ *
+ * usage_freshness is linked because the last block asks the question the
+ * way main.c asks it -- with the numbers a message actually carried --
+ * rather than with two constants typed in beside each other.
+ */
 #include <stdio.h>
 #include "sleep_gate.h"
+#include "usage_freshness.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -137,6 +147,55 @@ int main(void)
 	 * at the desk between renders. Four hours is argued for in
 	 * sleep_gate.h; changing it means changing that argument too. */
 	CHECK(SLEEP_ABSENT_AFTER_S == 4 * 60 * 60);
+
+	/*
+	 * --- and the desk this gate closed its eyes on ---
+	 *
+	 * The two fixes on this branch, fighting. The daemon remembers the
+	 * last status line that carried a five-hour percentage and re-offers
+	 * it at its ORIGINAL time, because an expired window does not make
+	 * the last real reading untrue. Claude Code is open and rewriting
+	 * that file every minute; only the seven-day figure survives the
+	 * rewrite. So one message carries a dial twelve hours old and a
+	 * machine that spoke five seconds ago -- and the gate used to be
+	 * given the first number.
+	 *
+	 * Driven through usage_freshness rather than by passing 43200 and 5
+	 * to the predicates directly, because the fix is which of the two
+	 * numbers the board keeps and hands over, not what the predicate
+	 * does with the number it gets.
+	 */
+	usage_freshness_note(43200, 5, USAGE_ACTIVITY_NONE, 1000000);
+
+	/* What the panel used to do, and it is not a near miss: the dial's
+	 * age is three times the threshold. */
+	CHECK(sleep_stale_should_start(usage_freshness_age_s(1000000), true,
+				       false, USAGE_ACTIVITY_NONE));
+
+	/* What it does now. Somebody is at this desk. */
+	CHECK(!sleep_stale_should_start(usage_freshness_active_age_s(1000000),
+					true, false, USAGE_ACTIVITY_NONE));
+
+	/* An hour of dozing later it is still awake, because the active age
+	 * grows from five seconds and not from twelve hours. */
+	CHECK(!sleep_stale_should_start(usage_freshness_active_age_s(4600000),
+					true, false, USAGE_ACTIVITY_NONE));
+
+	/* The desk really does go quiet eventually, and then it dozes -- the
+	 * fix must not have replaced the gate with an open door. Four hours
+	 * and five seconds after that message, with nothing since. */
+	CHECK(sleep_stale_should_start(
+		      usage_freshness_active_age_s(1000000 +
+						   SLEEP_ABSENT_AFTER_S *
+						   1000LL),
+		      true, false, USAGE_ACTIVITY_NONE));
+
+	/* And a daemon too old to send the second number still dozes on the
+	 * first, exactly as it did before the field existed. */
+	usage_freshness_note(SLEEP_ABSENT_AFTER_S, -1, USAGE_ACTIVITY_NONE,
+			     2000000);
+	CHECK(sleep_stale_should_start(usage_freshness_active_age_s(2000000),
+				       true, false, USAGE_ACTIVITY_NONE));
 
 	printf("%s\n", fails ? "FAIL" : "ok   sleep_gate");
 	return fails ? 1 : 0;
