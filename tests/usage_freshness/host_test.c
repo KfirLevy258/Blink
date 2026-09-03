@@ -39,6 +39,20 @@ int main(void)
 	 * figure the daemon actually gave us. */
 	CHECK(usage_freshness_age_s(199000) == 1);
 
+	/* The far end of the range the wire actually permits. proto.c bounds
+	 * age_s at SECS_MAX, which is INT32_MAX itself, so a daemon may send a
+	 * figure with no room left above it -- and this age keeps growing
+	 * between messages. Unclamped, the sum runs past INT32_MAX and the
+	 * narrowing cast hands back a large negative, which every caller reads
+	 * as "cannot say": the oldest reading the board has ever held would
+	 * become an undatable one, and the sleep gate, which refuses to doze on
+	 * an unknown age, would hold the panel lit on it forever. Saturating
+	 * keeps it merely old. */
+	usage_freshness_note(INT32_MAX - 5, USAGE_ACTIVITY_IDLE, 300000);
+	CHECK(usage_freshness_age_s(300000) == INT32_MAX - 5);
+	CHECK(usage_freshness_age_s(360000) == INT32_MAX);
+	CHECK(usage_freshness_age_s(360000) > 0);
+
 	printf("%s\n", fails ? "FAIL" : "ok   usage_freshness");
 	return fails ? 1 : 0;
 }
