@@ -12,6 +12,18 @@
 
 ## Global Constraints
 
+> **Renamed after execution — applies to every code block below.** What tasks 5
+> to 8 call `SLEEP_STALE_AFTER_S` and `sleep_reading_is_old()` are now
+> `SLEEP_ABSENT_AFTER_S` and `sleep_nobody_is_here()`. A later fix added a
+> SECOND threshold, `SLEEP_READING_STALE_AFTER_S` (1800 s) with
+> `sleep_reading_is_stale()`, and the two were one word apart — in a change
+> whose entire subject is that "is anybody here" and "is this number old" are
+> different questions. The four-hour one was renamed to say absence. Read the
+> old names below as the new ones, and note that `grep SLEEP_STALE_AFTER_S`
+> now substring-matches the 1800 s constant, so it is not a safe way to find
+> the four-hour one.
+
+
 - **No wire change without proving the budget.** The `usage` message measures ~510 of `protocol.MAX_LINE_BYTES = 512`, and `proto.c` drops an over-long line WHOLE — a silent panel freeze with no error. No task in this plan adds a wire field; if one is proposed, it must measure the worst case first.
 - Firmware is C99, kernel style: tabs, `/* */` comments, braces on every `if` body. Every Y in `usage_layout.h` sits on a 4 px rhythm.
 - **`usage_view.c` cannot be compiled on a laptop** (needs LVGL, no automated coverage). `tools/panel_render/render.sh` compiles it unchanged against real LVGL and writes a framebuffer; scenes live in `tools/panel_render/render_main.c`. Pure logic belongs in `fmt.c`, `usage_state.c`, `sleep_gate.c` or a new sibling — those are host-tested.
@@ -1418,9 +1430,9 @@ Expected: while Claude Code has an active five-hour window, `src: 'cli'` with a 
 
 - [ ] **Step 7: Verify Bug A without waiting four hours**
 
-Temporarily rebuild with `SLEEP_STALE_AFTER_S` set to `120` (in `firmware/src/sleep_gate.h`), flash, and let the daemon run normally against a machine where Claude Code has not rendered for two minutes.
+Temporarily rebuild with `SLEEP_ABSENT_AFTER_S` set to `120` (in `firmware/src/sleep_gate.h`) — the FOUR-HOUR constant, not `SLEEP_READING_STALE_AFTER_S`, which is 1800 s and answers a different question, flash, and let the daemon run normally against a machine where Claude Code has not rendered for two minutes.
 Expected: the daemon keeps pinging (visible in the log), the eyes close anyway at ~120 s of reading age, and using Claude Code — which rewrites the status line and makes the next frame's `age_s` small — opens them again within a minute. Tap while dozing: the dashboard returns for ten seconds with "No new readings for a while."
-Then **restore `SLEEP_STALE_AFTER_S` to 14400, rebuild, reflash, and re-verify the board boots and shows figures.** Confirm with `grep -n "SLEEP_STALE_AFTER_S 14400" firmware/src/sleep_gate.h` and `sh tests/ci/check_host_tests.sh` (the Task 5 Step 6 assertion fails if the temporary value is still in the tree).
+Then **restore `SLEEP_ABSENT_AFTER_S` to 14400, rebuild, reflash, and re-verify the board boots and shows figures.** Confirm with `grep -n "SLEEP_ABSENT_AFTER_S 14400" firmware/src/sleep_gate.h` and `sh tests/ci/check_host_tests.sh` (the Task 5 Step 6 assertion fails if the temporary value is still in the tree).
 
 - [ ] **Step 8: Leave the desk as it was**
 
@@ -1443,4 +1455,4 @@ Nothing to commit if Step 7's restore was clean. Confirm with `git status` — e
 
 **3. Type consistency.** `usage_freshness_note(int32_t, enum usage_activity, int64_t)` / `usage_freshness_age_s(int64_t)` / `usage_freshness_activity(void)` are declared in Task 4 and called with those exact signatures in Tasks 5's test, 6, and 7. `sleep_reading_is_old(int32_t)`, `sleep_stale_should_start(int32_t, bool, bool, enum usage_activity)` and `sleep_stale_should_wake(int32_t, bool, enum usage_activity)` are declared in Task 5 and called with the same argument order in Tasks 6 and 7 — note `should_wake` takes three arguments and drops `had_usage`, which is deliberate and stated in the header. `ui_sleep_run(bool (*)(void), const char *)` is defined in Task 6 and called with `host_is_back` (Task 6) and `reading_moved_again` (Task 7) and `host_is_back` again (Task 8); `host_is_back` is defined once, in Task 6, and Task 8 does not redefine it. On the Python side `ClaudeCliProvider.poll` keeps its `(now_epoch) -> list` shape, and Task 3's test consumes only the message keys `src`, `session_pct`, `age_s`, `stale`, all of which `protocol.usage()` already emits.
 
-**Fixed during review:** Task 8 originally left `start` as the timer base, which would have dozed instantly on every silence after the first; it now carries `host_quiet_since`. Task 6 originally kept `ui_sleep_run`'s unconditional `usage_view_set_status(USAGE_STATUS_STALE)`, which would have labelled the fresh frame that woke a stale-sleeper as old, and would have stamped "reading is old" on a board with no reading at all in Task 8's case; it is now conditional on `usage_view_have_data() && sleep_reading_is_old(...)`.
+**Fixed during review:** Task 8 originally left `start` as the timer base, which would have dozed instantly on every silence after the first; it now carries `host_quiet_since`. Task 6 originally kept `ui_sleep_run`'s unconditional `usage_view_set_status(USAGE_STATUS_STALE)`, which would have labelled the fresh frame that woke a stale-sleeper as old, and would have stamped "reading is old" on a board with no reading at all in Task 8's case; it is now conditional on `usage_view_have_data() && sleep_reading_is_stale(...)` — the 1800 s display bound, not the four-hour absence one, which was a later fix in its own right.
