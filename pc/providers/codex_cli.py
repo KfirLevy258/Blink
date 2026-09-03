@@ -230,6 +230,11 @@ def _project_name(cwd) -> str:
     for sep in _NAME_SEPARATORS:
         name = name.rsplit(sep, 1)[-1]
     name = "".join(c for c in name if c >= " " and c != "\x7f")
+    # Deliberately redundant with the drawable-ASCII rule below, which
+    # refuses "." and ".." as well: neither carries a letter or a digit. The
+    # two answer different questions, and the ASCII one is much the likelier
+    # to be relaxed -- the day the firmware grows a font for it, a directory
+    # entry must still not become a project name.
     if name in ("", ".", ".."):
         return ""
     if not any(("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9")

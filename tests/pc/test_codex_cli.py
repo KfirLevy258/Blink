@@ -336,6 +336,13 @@ def test_a_line_that_is_not_session_meta_yields_no_cwd():
         json.dumps({"type": "session_meta", "payload": {}})) is None
     assert codex_cli.session_meta_cwd(
         json.dumps({"type": "session_meta", "payload": {"cwd": 7}})) is None
+    # ...and on its own `type`, not merely on the substring pre-filter. Every
+    # case above is refused before the parse because the words are not in the
+    # line at all; this one carries them and must still be turned away, or a
+    # rollout that quotes the phrase would name the panel after itself.
+    assert codex_cli.session_meta_cwd(json.dumps(
+        {"type": "event_msg",
+         "payload": {"cwd": "/a/b", "text": "session_meta"}})) is None
 
 
 def test_the_name_is_the_last_path_component():
