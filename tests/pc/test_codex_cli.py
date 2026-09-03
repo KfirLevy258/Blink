@@ -315,6 +315,93 @@ def test_a_file_with_no_newline_at_all_is_refused(tmp_path):
     assert codex_cli._head_line(path) == ""
 
 
+def test_the_cwd_comes_out_of_a_session_meta_line():
+    line = json.dumps({"type": "session_meta", "timestamp": "2026-08-27",
+                       "payload": {"cwd": "/Users/K/Projects/LiveClaudeUi",
+                                   "originator": "codex-tui"}})
+    assert codex_cli.session_meta_cwd(line) == "/Users/K/Projects/LiveClaudeUi"
+
+
+def test_a_line_that_is_not_session_meta_yields_no_cwd():
+    """None rather than "" so the caller can tell a head it could not read
+    from a directory it read and then refused."""
+    assert codex_cli.session_meta_cwd(
+        json.dumps({"type": "event_msg", "payload": {"cwd": "/a/b"}})) is None
+    assert codex_cli.session_meta_cwd("") is None
+    assert codex_cli.session_meta_cwd("session_meta but not json") is None
+    assert codex_cli.session_meta_cwd(json.dumps(["session_meta"])) is None
+    assert codex_cli.session_meta_cwd(
+        json.dumps({"type": "session_meta", "payload": "session_meta"})) is None
+    assert codex_cli.session_meta_cwd(
+        json.dumps({"type": "session_meta", "payload": {}})) is None
+    assert codex_cli.session_meta_cwd(
+        json.dumps({"type": "session_meta", "payload": {"cwd": 7}})) is None
+
+
+def test_the_name_is_the_last_path_component():
+    assert codex_cli._project_name("/Users/K/Projects/LiveClaudeUi") == \
+        "LiveClaudeUi"
+    assert codex_cli._project_name("/private/tmp") == "tmp"
+
+
+def test_a_trailing_separator_is_not_a_component():
+    assert codex_cli._project_name("/Users/K/Blink/") == "Blink"
+    assert codex_cli._project_name("/Users/K/Blink///") == "Blink"
+
+
+def test_a_windows_path_splits_on_the_windows_separator():
+    """Both separators, not os.sep: a home directory can be synced between
+    machines, and Codex on Windows writes C:\\Users\\...."""
+    assert codex_cli._project_name("C:\\Users\\Kfir\\Projects\\Blink") == "Blink"
+    assert codex_cli._project_name("C:\\Users\\Kfir\\Projects\\Blink\\") == "Blink"
+
+
+def test_a_directory_entry_is_not_a_name():
+    for cwd in ("/", "", ".", "..", "/a/b/.", "/a/b/.."):
+        assert codex_cli._project_name(cwd) == "", cwd
+
+
+def test_a_control_character_never_reaches_the_wire():
+    """This string is JSON-encoded into a line the firmware scans for quotes.
+    A newline in a directory name is legal on every platform this runs on."""
+    assert codex_cli._project_name("/a/b/pro\nject") == "project"
+    assert codex_cli._project_name("/a/b/pro\x7fject") == "project"
+    assert codex_cli._project_name("/a/b/\n\n") == ""
+
+
+def test_a_name_with_no_drawable_ascii_is_refused():
+    """firmware/src/fmt.c draws a label through fmt_ascii(), which replaces
+    every codepoint it has no ASCII spelling for with "?" -- pinned by
+    tests/fmt/host_test.c. A wholly non-Latin name therefore arrives as a row
+    of question marks, which is worse than the count the panel falls back to.
+    A name with a Latin stem keeps it and loses the rest.
+    """
+    assert codex_cli._project_name("/Users/K/פרויקט") == ""
+    assert codex_cli._project_name("/Users/K/项目") == ""
+    assert codex_cli._project_name("/Users/K/café") == "café"
+    assert codex_cli._project_name("/Users/K/proj-项目") == "proj-项目"
+
+
+def test_a_name_with_spaces_is_kept():
+    """Unlike the Claude hook shim, which is one sed and refuses them. There
+    is no filename being built here and no shell quoting to get wrong, so the
+    reason that rule exists there does not exist here."""
+    assert codex_cli._project_name("/Users/K/My Project") == "My Project"
+
+
+def test_a_cwd_that_is_not_a_string_is_refused_not_raised():
+    for cwd in (None, 7, [], {}, True):
+        assert codex_cli._project_name(cwd) == ""
+
+
+def test_the_name_is_not_capped_here():
+    """protocol.session is the one place that knows the byte bound and the
+    one place that truncates on a UTF-8 boundary. A second cap here would be
+    a second thing to keep in step with the firmware."""
+    long = "n" * 200
+    assert codex_cli._project_name("/a/" + long) == long
+
+
 def test_the_provider_never_raises_on_a_damaged_tree(tmp_path, monkeypatch):
     """Contract from base.ProviderParser: a parser for an app we do not
     control must not be able to stop the daemon."""

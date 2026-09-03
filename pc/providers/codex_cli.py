@@ -169,6 +169,75 @@ def _head_line(path: str) -> str:
     return blob[:nl].decode("utf-8", "replace")
 
 
+def session_meta_cwd(head_line: str):
+    """The `cwd` out of a rollout's first line, or None.
+
+    None rather than "": the caller has two different failures to tell apart
+    -- a head it could not read, and a directory it read and then refused --
+    and only one of them is worth ever looking at again.
+    """
+    if "session_meta" not in head_line:
+        return None         # cheap reject before parsing 19 KB of JSON
+    try:
+        line = json.loads(head_line)
+    except ValueError:
+        return None
+    if not isinstance(line, dict) or line.get("type") != "session_meta":
+        return None
+    payload = line.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    cwd = payload.get("cwd")
+    return cwd if isinstance(cwd, str) else None
+
+
+# Both, not os.sep. This file may be read on one platform and written on
+# another -- a synced home directory is ordinary -- and Codex on Windows
+# writes C:\Users\....
+_NAME_SEPARATORS = "/\\"
+
+
+def _project_name(cwd) -> str:
+    """The project name a Codex `cwd` implies, or "".
+
+    The last path component, with three refusals. The first two are the ones
+    the Claude hook shim already applies to its own cwd: `.` and `..` are
+    directory entries rather than names, and control characters are stripped
+    because this string is JSON-encoded into a line the firmware scans for
+    quotes.
+
+    The third is about the panel rather than about safety, and it is the one
+    the shim has no need of. firmware/src/fmt.c draws a label through
+    fmt_ascii(), which replaces every codepoint it has no ASCII spelling for
+    with "?" -- tests/fmt/host_test.c pins the UTF-8 bytes of an e-acute
+    (\\xc3\\xa9) arriving as "?".
+    A wholly non-Latin name therefore reaches the desk as a row of question
+    marks, which says less than the count the panel falls back to when there
+    is no name at all. So a name has to carry at least one ASCII letter or
+    digit to be worth sending: a name with a Latin stem keeps it and loses
+    the rest, and one with no Latin at all is refused so the count speaks
+    instead.
+
+    Not capped here. protocol.session is the one place that knows the byte
+    bound and the one place that truncates on a UTF-8 boundary; a second cap
+    would be a second thing to keep in step with the firmware.
+    """
+    if not isinstance(cwd, str):
+        return ""
+    name = cwd
+    while name and name[-1] in _NAME_SEPARATORS:
+        name = name[:-1]
+    for sep in _NAME_SEPARATORS:
+        name = name.rsplit(sep, 1)[-1]
+    name = "".join(c for c in name if c >= " " and c != "\x7f")
+    if name in ("", ".", ".."):
+        return ""
+    if not any(("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9")
+               for c in name):
+        return ""
+    return name
+
+
 def _epoch(value):
     """A reset timestamp, or None when it is not one."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
