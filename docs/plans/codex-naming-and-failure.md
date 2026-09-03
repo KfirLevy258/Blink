@@ -12,14 +12,14 @@
 
 ## Global Constraints
 
-- **No wire change.** No new message type, no new field on `usage`, no new value in `base.VALID_STATES`. The `usage` message was measured at 506 of `protocol.MAX_LINE_BYTES = 512` fully loaded and `firmware/src/proto.c` drops an over-long line **whole** — a silent panel freeze. The `session` message is the one that carries the label, and it measures **66 bytes** fully loaded (`{"t":"session","v":2,"n":9999,"label":"<24 bytes>"}` + newline), so there is room there and nowhere else.
+- **No wire change.** No new message type, no new field on `usage`, no new value in `base.VALID_STATES`. The `usage` message measures **511** of `protocol.MAX_LINE_BYTES = 512` fully loaded, and `firmware/src/proto.c` drops an over-long line **whole** — a silent panel freeze. That 511 was re-measured in Task 0 through `test_the_widest_line_the_daemon_can_build_still_fits`, the only measurement that counts because it is the one built through `frame_to_usage`; the 506 this plan was written against predates the widest case that guard now covers, so the real headroom is **one byte**, not six. The `session` message is the one that carries the label, and it measures **66 bytes** fully loaded (`{"t":"session","v":2,"n":9999,"label":"<24 bytes>"}` + newline), so there is room there and nowhere else.
 - **`protocol.SESSION_LABEL_MAX_BYTES = 24`**, truncated on a UTF-8 boundary by `protocol.session()`. That truncation is already correct and already tested (`tests/pc/test_protocol.py::test_session_label_survives_multibyte_truncation`). Do not re-implement it in the provider.
 - **`turn_aborted` stays `idle`.** All four `TurnAbortReason` values (`interrupted`, `replaced`, `review_ended`, `budget_limited`) are things the person did. The owner has frozen this mapping; do not touch it.
 - **`codex exec` batch runs count as sessions and get named.** No originator filter. Decided by the owner.
 - **Python 3.10+**, matching the existing style in `pc/providers/`.
 - **Comments explain WHY, in prose, at the density of the surrounding file.** `codex_cli.py` and `claude_state.py` both carry long explanatory blocks above the constants they justify. Match that; a bare constant with no reason is a review failure here.
 - **Parsers must not raise.** `base.ProviderParser`: "A provider whose source has changed shape upstream is expected to return None and let the bus fall back to another source." Every new code path degrades to "no name" or "idle", never to an exception.
-- **`pytest tests -q` passes at every commit.** Baseline is **515** with `ecdsa` installed; **483** with `--ignore=tests/pc/test_update.py` if it is not. Establish your own baseline in Task 0 and hold it plus the tests you add.
+- **`pytest tests -q` passes at every commit.** Baseline is **593** with `ecdsa` installed; **561** with `--ignore=tests/pc/test_update.py` if it is not. (Both measured in Task 0 on 2026-09-04; the 515/483 this plan was written against are from before the liveness and pid work landed on this branch, which is why Task 0 re-measures rather than trusting a written-down number.) Establish your own baseline in Task 0 and hold it plus the tests you add.
 - **`sh tests/ci/check_codex_contract.sh` passes** at every commit from Task 8 onward. It needs network (it fetches from `raw.githubusercontent.com`) or `CODEX_SRC_DIR`.
 
 ## File Structure
@@ -64,7 +64,7 @@ Three reasons. (a) There is nowhere to put it: `base.VALID_STATES` is fixed and 
 
 Run: `pytest tests -q`
 
-If it stops with `ModuleNotFoundError: No module named 'ecdsa'`, either `pip install ecdsa` or run `pytest tests -q --ignore=tests/pc/test_update.py` and use that number instead. Expected: `515 passed` (or `483 passed` with `test_update.py` ignored). Write the number down; every later task adds to it and none subtracts.
+If it stops with `ModuleNotFoundError: No module named 'ecdsa'`, either `pip install ecdsa` or run `pytest tests -q --ignore=tests/pc/test_update.py` and use that number instead. Expected: `593 passed` (or `561 passed` with `test_update.py` ignored). Write the number down; every later task adds to it and none subtracts.
 
 - [ ] **Step 2: Run the contract script**
 
@@ -1342,7 +1342,7 @@ git commit -m "test: watch the rollout fields the name and the failure state now
 - [ ] **Step 1: Run the full Python suite**
 
 Run: `pytest tests -q`
-Expected: `<baseline + 42> passed`, no failures, no errors. (3 + 5 + 11 + 4 + 6 + 10 + 3 = 42 new tests. With the 515 baseline that is 557; with the 483 baseline, 525.)
+Expected: `<baseline + 42> passed`, no failures, no errors. (3 + 5 + 11 + 4 + 6 + 10 + 3 = 42 new tests. With the 593 baseline that is 635; with the 561 baseline, 603.)
 
 - [ ] **Step 2: Run the contract script**
 
