@@ -114,6 +114,23 @@ int main(void)
 	struct box status = top_mid("status", 0, STATUS_Y,
 				    STATUS_MAX_W, FONT_LINE_H);
 
+	/* The clock shares STATUS_Y with the hint -- one of them is visible at
+	 * a time, so they may overlap each other and must not overlap anything
+	 * else. Width is the worst case the format can produce, not "12:04":
+	 * 0, 4, 6, 8 and 9 all round to 9 px, so four digits and a 3 px colon. */
+	struct box clock = top_mid("clock", 0, STATUS_Y, 4 * 9 + 3, FONT_LINE_H);
+
+	/* The pip row's own bounding box, built from the same constants the
+	 * checks below already asserted individually -- so the clock/pip
+	 * overlap check and the row's own left/right clearance share one
+	 * definition instead of two copies of the same arithmetic. */
+	struct box pips;
+	pips.name = "pip row";
+	pips.x0 = PIP_X0;
+	pips.y0 = PIP_Y;
+	pips.x1 = PIP_X0 + PIP_MAX * PIP_PITCH - (PIP_PITCH - PIP_SZ);
+	pips.y1 = PIP_Y + PIP_SZ;
+
 	/* The provider pill: whose numbers these are, and the button that
 	 * changes it. Padded, so it is taller than a bare line. */
 	struct box who = bottom_mid("provider pill", PILL_BOTTOM_OFF,
@@ -126,7 +143,8 @@ int main(void)
 				     RAIL_H);
 
 	struct box all[] = { arc_l, arc_r, pct_l, name_l, name_r,
-			     cd_l, cd_r, brand, status, who, rail };
+			     cd_l, cd_r, brand, status, clock, pips,
+			     who, rail };
 
 	for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		char msg[64];
@@ -166,9 +184,23 @@ int main(void)
 	CHECK(arc_l.y0 >= status.y1,
 	      "the gauges start below the status line");
 
+	/* The clock shares STATUS_Y with the status/hint line rather than
+	 * owning a row, so its own box is checked against the same neighbours:
+	 * it sits under the brand, clears the arcs below, and -- since it left
+	 * the pip row's corner for this shared row -- no longer collides with
+	 * the pips it used to sit beside. */
+	EXPECT_EQ(clock.y0, STATUS_Y);
+	CHECK(clock.y1 <= GAUGE_ARC_Y,
+	      "the clock's line box clears the arcs below it");
+	CHECK(clock.y0 >= brand.y1,
+	      "the clock sits under the brand, not on it");
+	CHECK(!overlaps(clock, pips),
+	      "the clock no longer collides with the pip row it vacated");
+
 	/*
-	 * Two header rows again, not three. The clock is back in the corner
-	 * it briefly vacated, so the arcs get their 20 px back.
+	 * Two header rows again, not three. The clock shares STATUS_Y with the
+	 * status/hint line instead of owning a corner, so the arcs get their
+	 * 20 px back.
 	 */
 	EXPECT_EQ(STATUS_Y, TITLE_Y + FONT_LINE_H + 2);
 	EXPECT_EQ(GAUGE_ARC_Y, STATUS_Y + FONT_LINE_H + 4);
@@ -181,11 +213,12 @@ int main(void)
 	EXPECT_EQ(GAUGE_PCT_Y + GAUGE_PCT_FONT_H / 2, GAUGE_ARC_Y + GAUGE_ARC_SZ / 2);
 
 	/*
-	 * The pip row lives between the clock and the brand. Both edges are
-	 * asserted because both are measurements, not constants the code
-	 * knows: the clock's width comes from "12:04" at montserrat_14, and
-	 * the wall from "BLINK" centred with .09em tracking. A font bump
-	 * must fail here rather than slide pips under the logo.
+	 * The pip row runs from the bezel to the brand, not from the clock to
+	 * the brand: the clock shares STATUS_Y with the status/hint line now
+	 * and is asserted against this row separately, above. Only the right
+	 * edge here is still a measurement -- the wall derived from "BLINK"
+	 * below -- and a font bump must fail here rather than slide pips under
+	 * the logo.
 	 */
 	/*
 	 * The clock has left this corner for the row under the brand, so the
@@ -201,9 +234,9 @@ int main(void)
 	 * the 136 an earlier comment claimed from a tracking value the code
 	 * does not use.
 	 */
-	CHECK(PIP_X0 >= SCR_RIGHT_MARGIN_MIN,
+	CHECK(pips.x0 >= SCR_RIGHT_MARGIN_MIN,
 	      "the pip row is not flush against the left bezel");
-	CHECK(PIP_X0 + PIP_MAX * PIP_PITCH - (PIP_PITCH - PIP_SZ) <= PIP_WALL_X,
+	CHECK(pips.x1 <= PIP_WALL_X,
 	      "a full pip row clears the wall");
 	CHECK(PIP_WALL_X <= brand.x0,
 	      "the wall is left of the brand's real left edge");
