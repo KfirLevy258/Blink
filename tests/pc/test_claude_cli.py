@@ -126,6 +126,7 @@ def test_nothing_is_invented_before_the_first_good_reading(tmp_path):
     prov = ClaudeCliProvider(path=str(p))
 
     frames = prov.poll(NOW)
+    assert len(frames) == 1  # the all() below is vacuously true over an empty list
     assert all(f.session_pct < 0 for f in frames)
 
 
@@ -138,4 +139,5 @@ def test_the_memory_does_not_survive_a_new_daemon(tmp_path):
 
     write(p, {"rate_limits": {}}, NOW - 60)
     frames = ClaudeCliProvider(path=str(p)).poll(NOW)
+    assert len(frames) == 1  # the all() below is vacuously true over an empty list
     assert all(f.session_pct < 0 for f in frames)
