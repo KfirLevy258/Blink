@@ -73,17 +73,6 @@ def encode(msg: dict) -> bytes:
 COUNTDOWN_MAX_S = 999999
 
 
-def _whole_epoch(v):
-    """An absolute epoch stamp as whole seconds, or unchanged when it is not one.
-
-    None and the -1 sentinel pass through untouched: they are not times, and
-    rounding them would say something different from what they mean.
-    """
-    if isinstance(v, float):
-        return int(v)
-    return v
-
-
 def encode_checked(msg: dict):
     """encode(), but None when the result could not be received.
 
@@ -436,13 +425,27 @@ The firmware reads this field: proto.c's "usage" handler calls
     # for any consumer that does know the time" (see the docstring above),
     # while the board counts down from the *_resets_in_s fields, which are
     # already whole seconds.
+    # The two absolute resets_at stamps are NOT on the wire, and their absence
+    # is what bought the room for everything after them.
+    #
+    # Nothing has ever read them. proto.c's usage handler takes
+    # session_resets_in_s and weekly_resets_in_s and says why in its own
+    # comment: "the board has no wall clock when tethered over USB, so the
+    # daemon does the subtraction". usage_parse.c does read a "resets_at", but
+    # that is the standalone WiFi path parsing the API's own JSON body, not
+    # this message. A repo-wide search for a reader finds one hit, and it is a
+    # host test using the name as a sample key for the generic string parser.
+    #
+    # They cost about 59 bytes together, on a line that measured 511 of 512.
+    # A field no consumer reads is not "kept for readability" -- the docstring's
+    # old claim -- when it is the reason the next real field will not fit.
+    # The countdowns remain, and a reader that genuinely wants an absolute time
+    # can add the countdown to the message's own arrival.
     return {
         "t": "usage", "v": VERSION,
         "session_pct": session_pct,
-        "session_resets_at": _whole_epoch(session_resets_at),
         "session_resets_in_s": session_resets_in_s,
         "weekly_pct": weekly_pct,
-        "weekly_resets_at": _whole_epoch(weekly_resets_at),
         "weekly_resets_in_s": weekly_resets_in_s,
         "stale": stale,
         **flat,

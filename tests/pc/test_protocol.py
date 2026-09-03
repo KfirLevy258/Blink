@@ -390,29 +390,6 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     assert len(raw) <= protocol.MAX_LINE_BYTES, len(raw)
 
 
-def test_an_absolute_reset_stamp_goes_out_as_whole_seconds():
-    """A fraction on resets_at costs eight bytes and buys nothing.
-
-    Providers hand us whatever their JSON held, and json.dumps writes every
-    digit: 1787718000.1234567 is 18 bytes where 1787718000 is 10. Two of them
-    took the widest line to 521 of 512. Nothing reads the fraction -- the
-    board counts down from *_resets_in_s, and these stamps exist for
-    readability -- so they are rounded at the one place the wire is defined.
-    """
-    msg = protocol.usage(50.0, 1787718000.1234567, 50.0, 1788300000.9,
-                         [], session_resets_in_s=18000)
-    assert msg["session_resets_at"] == 1787718000
-    assert msg["weekly_resets_at"] == 1788300000
-    assert isinstance(msg["session_resets_at"], int)
-
-
-def test_a_reset_stamp_that_is_not_a_time_is_left_alone():
-    """None and -1 are not times, and rounding would change what they say."""
-    msg = protocol.usage(50.0, None, 50.0, -1, [])
-    assert msg["session_resets_at"] is None
-    assert msg["weekly_resets_at"] == -1
-
-
 def test_a_countdown_beyond_any_real_window_is_clamped():
     """A year-long countdown is a misparse, and it is eight digits wide.
 
@@ -780,37 +757,35 @@ class SessionMessage(unittest.TestCase):
             age_s=14400, p2_age_s=86399, active_age_s=86400,
         )
 
-    def test_the_model_percentages_no_longer_fit_beside_the_active_age(self):
-        """What the new field cost, pinned rather than left to be discovered
-        on a desk.
+    def test_the_model_percentages_fit_again(self):
+        """The reserve came back, and this is what it cost to get it.
 
-        usage() can still flatten fable/sonnet/opus into three scalar keys
-        and proto.c still reads them, but nothing has produced them since
-        frame_to_usage became the only caller and started passing models=[].
-        Putting them back now writes a 531-byte line, and the board DROPS an
-        over-long line whole with no error on either side.
+        For a while these three keys could not coexist with active_age_s: the
+        fully loaded line was 531 bytes against a 512 cap, and the board DROPS
+        an over-long line whole with no error on either side. That was the
+        stated price of the new field.
 
-        The daemon does not: claude_usage_bridge's only writer is
-        encode_checked, which refuses and logs. So the failure mode of
-        re-enabling the model keys is a panel that stops updating with a
-        stderr line naming the reason -- which is why this asserts the
-        refusal, and why a future task that wants them back will land here
-        and read the arithmetic before it ships.
+        Dropping session_resets_at and weekly_resets_at from the wire returned
+        about 59 bytes, because nothing had ever read them -- proto.c takes the
+        *_in_s countdowns and says why in its own comment, the board having no
+        wall clock over USB. So the price is refunded and the models fit.
+
+        Asserted rather than assumed, because "it fits now" is exactly the
+        claim that rots. A future field large enough to push these back over
+        the cap fails here, where the arithmetic is written down.
         """
         kw = self.fully_loaded_usage_kwargs()
         kw["models"] = self.MODEL_ROWS
         raw, why = protocol.encode_checked(protocol.usage(**kw))
-        self.assertIsNone(raw)
-        self.assertIn("line limit", why)
-        self.assertGreater(
-            len(protocol.encode(protocol.usage(**kw))),
-            protocol.MAX_LINE_BYTES)
+        self.assertIsNone(why)
+        self.assertIsNotNone(raw)
+        self.assertLessEqual(len(raw), protocol.MAX_LINE_BYTES, len(raw))
 
     def test_usage_frame_did_not_grow(self):
         # This is NOT the byte guard any more, and saying so matters: this
-        # fixture measures 480 of 512, so 32 bytes could be added without it
+        # fixture is far under the cap, so bytes could be added without it
         # noticing. test_the_widest_line_the_daemon_can_build_still_fits is
-        # the guard, at 509, because it builds through frame_to_usage -- the
+        # the guard, because it builds through frame_to_usage -- the
         # only caller that can actually put a line on the wire -- rather than
         # calling usage() with a hand-written set of kwargs.
         #
@@ -899,12 +874,23 @@ class VolatileUsageKeys(unittest.TestCase):
                   "p2_session_pct", "p2_stale"):
             self.assertIn(k, kept, k)
 
-    def test_the_absolute_reset_stamps_stay_in_the_comparison(self):
-        """They move only when a window rolls over -- exactly the event worth
-        a push -- unlike the *_in_s countdowns derived from them."""
-        kept = protocol.meaningful_usage(self._loaded())
-        self.assertIn("session_resets_at", kept)
-        self.assertIn("weekly_resets_at", kept)
+    def test_a_window_rollover_still_earns_an_immediate_push(self):
+        """The signal that survived the stamps being dropped.
+
+        session_resets_at used to carry this: it moved only when a window
+        rolled over, which is exactly the event worth pushing early for. It is
+        no longer on the wire, so the rollover has to be visible some other
+        way or the panel would wait out the 60 s heartbeat to show it.
+
+        It is: the percentage itself changes across a rollover, and
+        session_pct is meaningful, not volatile. The one case this does not
+        catch is a rollover from a figure to the identical figure, where
+        nothing observable changed and the heartbeat covers it anyway.
+        """
+        before = self._loaded()
+        after = dict(before, session_pct=0.0)
+        self.assertNotEqual(protocol.meaningful_usage(before),
+                            protocol.meaningful_usage(after))
 
     def test_a_field_this_list_has_never_heard_of_is_meaningful(self):
         """The point of an exclusion list. A future key that matters must make
