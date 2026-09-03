@@ -334,3 +334,23 @@ def test_no_rollover_reported_changes_nothing():
     out = normalizer.merge([cli(NOW - 1200, session=10.0),
                             desktop(NOW - 600, session=78.0)])
     assert out.session_pct == 78.0
+
+
+def test_a_stale_reading_that_has_a_number_beats_a_fresher_one_that_does_not():
+    """The invariant pc/providers/claude_cli's memory is built on.
+
+    A CLI reading six hours old still carries a five-hour percentage; a
+    desktop sample two days older carries one too. Staleness does not remove
+    a frame from the contest -- recency ranks it -- so the CLI figure wins
+    and `src` follows it. If this ever inverts, the panel goes back to
+    reporting the age of a desktop sample nobody asked about (field report,
+    2026-09-02).
+    """
+    m = normalizer.merge([
+        cli(NOW - 6 * 3600, session=27.0, stale=True),
+        desktop(NOW - 57 * 3600, session=0.0, stale=True),
+    ])
+    assert m.session_pct == 27.0
+    assert m.src == "cli"
+    assert m.observed_at == NOW - 6 * 3600
+    assert m.stale is True
