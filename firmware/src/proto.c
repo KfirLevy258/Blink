@@ -14,6 +14,7 @@
 #include "cfg_store.h"
 #include "usage_view.h"
 #include "usage_state.h"
+#include "usage_freshness.h"
 #include "net_time.h"
 #include "version.h"
 #include "cfg_store.h"
@@ -420,6 +421,10 @@ static void dispatch(const char *json)
 		num(json, "age_s", &age, -1, SECS_MAX);
 		num(json, "p2_age_s", &p2age, -1, SECS_MAX);
 		usage_view_set_ages((int32_t)age, (int32_t)p2age);
+
+		/* The same two facts, kept where main.c can ask and a laptop
+		 * can test the reasoning about them. See usage_freshness.h. */
+		usage_freshness_note((int32_t)age, act, k_uptime_get());
 
 		/*
 		 * AFTER both providers, and after the calls above that set OK
