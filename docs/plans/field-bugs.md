@@ -929,7 +929,9 @@ Expected: `ok   sleep_gate`, no FAIL lines.
 
 - [ ] **Step 5: Prove the test bites**
 
-Change `sleep_stale_should_wake`'s `!sleep_reading_is_old(age_s)` to `age_s < SLEEP_STALE_AFTER_S` — the same thing except for `age_s == -1`, which is the drift the grid exists to catch. Re-run. Expected: 12 `FAIL ... start != wake` lines at the `-1` ages. Restore.
+Change `sleep_reading_is_old`'s `age_s >= SLEEP_STALE_AFTER_S` to `age_s > SLEEP_STALE_AFTER_S`. Re-run. Expected: 2 `FAIL ... start != wake` lines at exactly `age_s == SLEEP_STALE_AFTER_S`, for the NONE and IDLE activities — the boundary is the only place an off-by-one can hide, and start-and-wake-both-true there is the animation looping forever. Restore.
+
+> **Corrected after execution.** This step originally said to rewrite `!sleep_reading_is_old(age_s)` as `age_s < SLEEP_STALE_AFTER_S` and predicted 12 failures. That rewrite is an *identity*: `sleep_reading_is_old` is `age_s >= 0 && age_s >= SLEEP_STALE_AFTER_S`, and for any positive threshold the first conjunct is implied by the second, so the two spellings agree at every age including `-1`. It produced 0 failures, correctly. Task 5's implementer caught this and substituted the off-by-one above; the reviewer confirmed it independently. A mutation that cannot change behaviour proves nothing about a test — which is the whole point of this step.
 
 Then change `#define SLEEP_STALE_AFTER_S 14400` to `1800` and re-run. Expected: PASS — the grid is written in terms of the constant, so it deliberately does not pin the number. That is what Step 6 is for. Restore.
 
