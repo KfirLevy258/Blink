@@ -123,6 +123,14 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 	 * `stale` flag it normally tells us. Asking the four-hour question
 	 * here left a board waking from an hour's doze green over an hour-old
 	 * reading until the next usage message landed, up to a minute later.
+	 *
+	 * It is also the reading's own AGE, not the desk's. main.c dozes on
+	 * usage_freshness_active_age_s, because that decision is about the
+	 * person; this dot describes the figure beside it, so it keeps asking
+	 * how old the figure is even when the two answers differ by hours --
+	 * which they do exactly when the daemon is re-offering a remembered
+	 * five-hour reading. A board woken by a live status line whose dial is
+	 * still this morning's SHOULD say the reading is old, because it is.
 	 */
 	lv_scr_load(prev);
 	lv_obj_del(scr);

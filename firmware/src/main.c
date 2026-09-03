@@ -1389,9 +1389,16 @@ static bool host_is_back(void)
 static bool reading_moved_again(void)
 {
 	struct ota_ui snap;
+	int32_t active_age;
 
 	ota_ui_get(&snap);
-	return sleep_stale_should_wake(usage_freshness_age_s(k_uptime_get()),
+	/* The ACTIVE age, matching the branch that started this doze. Waking
+	 * on the reading age instead would break the complementarity the grid
+	 * in tests/sleep_gate pins, on exactly the desk this field exists
+	 * for: a remembered reading never gets younger, so the board would
+	 * doze on one number and refuse to wake on the other. */
+	active_age = usage_freshness_active_age_s(k_uptime_get());
+	return sleep_stale_should_wake(active_age,
 				       snap.st == OTA_UI_DOWNLOADING ||
 				       snap.st == OTA_UI_REBOOTING,
 				       usage_freshness_activity());
@@ -1441,8 +1448,24 @@ static void run_usb(void)
 					     "Your computer may be asleep.");
 				continue;
 			}
+			/*
+			 * On the ACTIVE age, never the reading's own.
+			 *
+			 * "Has this number stopped moving?" and "has this
+			 * desk gone quiet?" are two questions, and the
+			 * daemon answers both because they can differ: it
+			 * re-offers the last five-hour reading it saw at its
+			 * original time, so the dial can be twelve hours old
+			 * five seconds after Claude Code rewrote the file it
+			 * came from. Dozing on the first question closed the
+			 * board's eyes on an owner who was sitting in front
+			 * of it (field review 2026-09-02). ui_sleep.c's
+			 * closing stamp keeps asking the first question,
+			 * because that one really is about the number.
+			 */
 			if (sleep_stale_should_start(
-				    usage_freshness_age_s(k_uptime_get()),
+				    usage_freshness_active_age_s(
+					    k_uptime_get()),
 				    usage_view_have_data(), ota_busy,
 				    usage_freshness_activity())) {
 				ui_sleep_run(reading_moved_again,

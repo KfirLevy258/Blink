@@ -416,15 +416,29 @@ static void dispatch(const char *json)
 		 * that page, and an age written before it would be an age for
 		 * a page that no longer exists.
 		 */
-		double age = -1, p2age = -1;
+		double age = -1, p2age = -1, active_age = -1;
 
 		num(json, "age_s", &age, -1, SECS_MAX);
 		num(json, "p2_age_s", &p2age, -1, SECS_MAX);
 		usage_view_set_ages((int32_t)age, (int32_t)p2age);
 
-		/* The same two facts, kept where main.c can ask and a laptop
-		 * can test the reasoning about them. See usage_freshness.h. */
-		usage_freshness_note((int32_t)age, act, k_uptime_get());
+		/*
+		 * And the other freshness question, which is not drawn
+		 * anywhere: how long since ANY tool on that machine wrote
+		 * anything at all. One figure for the whole desk rather than
+		 * one per page, because it decides whether the board dozes
+		 * and the board dozes as one screen.
+		 *
+		 * Absent leaves it -1, and usage_freshness_note then reads
+		 * the reading's own age instead -- which is exactly right for
+		 * a daemon that predates the field. See usage_freshness.h.
+		 */
+		num(json, "active_age_s", &active_age, -1, SECS_MAX);
+
+		/* The same facts, kept where main.c can ask and a laptop can
+		 * test the reasoning about them. See usage_freshness.h. */
+		usage_freshness_note((int32_t)age, (int32_t)active_age, act,
+				     k_uptime_get());
 
 		/*
 		 * AFTER both providers, and after the calls above that set OK
