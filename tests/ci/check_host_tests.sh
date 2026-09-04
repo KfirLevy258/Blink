@@ -63,6 +63,20 @@ run_one() {
 
 	if "$WORK/$name" >"$WORK/$name.out" 2>&1; then
 		n=$(grep -c '^PASS' "$WORK/$name.out" || true)
+		# A suite that ran nothing is not a suite that is fine, and
+		# until now this runner could not tell the two apart. Two of
+		# them printed only on failure, so they reported "ok (0
+		# checks)" and their whole main() could be deleted without
+		# changing a byte of this output -- which is how "the sleep
+		# logic is covered" stayed true on paper while nothing
+		# enforced it. Exiting zero is the easiest thing in the world
+		# for broken code to do; asserting something is not. Every
+		# suite here has checks, so zero means they stopped running.
+		if [ "$n" -eq 0 ]; then
+			printf '  %-14s NO CHECKS RAN\n' "$name"
+			failures=$((failures + 1))
+			return
+		fi
 		printf '  %-14s ok (%s checks)\n' "$name" "$n"
 	else
 		printf '  %-14s FAILED\n' "$name"

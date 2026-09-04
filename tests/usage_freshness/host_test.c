@@ -8,7 +8,21 @@
 #include "usage_freshness.h"
 
 static int fails;
-#define CHECK(c) do { if (!(c)) { fails++; printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); } } while (0)
+/*
+ * Prints on BOTH arms, and the passing one is not decoration -- see the same
+ * macro in tests/sleep_gate/host_test.c for the whole argument. In short:
+ * tests/ci/check_host_tests.sh counts PASS lines, so a macro silent on success
+ * makes a full suite look exactly like an empty one, and this file reported
+ * "ok (0 checks)" whether it asserted forty things or nothing at all.
+ */
+#define CHECK(c) do { \
+	if (!(c)) { \
+		fails++; \
+		printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); \
+	} else { \
+		printf("PASS %s:%d %s\n", __FILE__, __LINE__, #c); \
+	} \
+} while (0)
 
 int main(void)
 {

@@ -13,7 +13,26 @@
 #include "usage_freshness.h"
 
 static int fails;
-#define CHECK(c) do { if (!(c)) { fails++; printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); } } while (0)
+/*
+ * Prints on BOTH arms, and the passing one is not decoration.
+ *
+ * tests/ci/check_host_tests.sh counts the PASS lines a suite emits and reports
+ * that as the number of checks that ran. A macro that says nothing when a
+ * check holds makes a full suite indistinguishable from an empty one: this
+ * file reported "ok (0 checks)", and deleting the entire body of main() left
+ * the runner's output byte-identical. A failing check did still fail CI
+ * through the exit status -- what was missing was any evidence the checks
+ * existed, so a bad merge, a stray #if 0 or an early return could have taken
+ * away the only automated coverage the dozing rules have and said nothing.
+ */
+#define CHECK(c) do { \
+	if (!(c)) { \
+		fails++; \
+		printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); \
+	} else { \
+		printf("PASS %s:%d %s\n", __FILE__, __LINE__, #c); \
+	} \
+} while (0)
 
 int main(void)
 {
