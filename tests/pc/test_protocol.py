@@ -387,8 +387,12 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
         from provider JSON and is free to carry a fraction, and secs_until had
         no upper bound, so these wrote 521 and 517 of 512 respectively --
         refused by encode_checked, and a panel that quietly stops updating.
-        protocol._whole_epoch and protocol.COUNTDOWN_MAX_S are what bring them
-        back, and this test is what would notice if either were removed.
+        The fraction cannot reach the wire at all any more -- the absolute
+        *_resets_at stamps were taken off the message entirely rather than
+        rounded, which is where the room for the ages came from -- and
+        protocol.COUNTDOWN_MAX_S is what still bounds a reset a year out.
+        This test is what would notice if that cap were removed. (It used to
+        credit protocol._whole_epoch, which went with the stamps it rounded.)
     """
     now = 1_787_700_000.0
 
