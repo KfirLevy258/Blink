@@ -473,3 +473,36 @@ Also new: `task_complete` carries `completed_at`, `duration_ms`, `started_at`
 and `last_agent_message`, none of which the plan knew about. Nothing reads them
 today and nothing should start to without a reason — noted so the next person
 does not rediscover them.
+
+---
+
+# RULING: uninstall leaves the trust record alone — 2026-09-04
+
+Task 9 asked whether `blink uninstall` should also remove BLINK's
+`[hooks.state."…"]` row from `~/.codex/config.toml`, and argued it both ways
+without deciding. **Decided: leave it, and say so in one line.**
+
+**For removing it:** the trust row is the one authorisation artefact our install
+caused, and a stale `trusted_hash` pre-approves anything later written at that
+command string.
+
+**For keeping it, which wins:** the user granted that trust through Codex's own
+TUI, and re-prompting is **not symmetric across machines**. Under `codex exec` a
+distrusted hook is skipped **silently, with zero output** — so a reinstall on a
+headless box would produce a hook that is installed, correct, registered, and
+permanently invisible, with `blink status` reporting nothing wrong. That is the
+worst failure shape this product has: working software that cannot be seen to be
+broken.
+
+The security argument is real but narrow. The command string names BLINK's own
+shim path; anyone who can write there already owns the machine. The usability
+failure is neither narrow nor visible.
+
+**So:** `uninstall` does not touch `config.toml`, and `blink uninstall` prints
+one line saying the Codex trust record was left in place and what that means for
+a future reinstall. Silence here would be the same defect one level up — a
+decision the user cannot see.
+
+`blink status` (task 13) carries the other half: **a registered hook that has
+never written a slot is exactly what declining the trust prompt looks like**, and
+that is the one Codex-specific support question nobody else has.
