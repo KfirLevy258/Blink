@@ -1108,7 +1108,7 @@ git commit -m "feat: Codex hook slots and rollouts describe one census"
 - Produces: `codex_home()`, `hooks_file()`, `HOOK_EVENTS`, `hook_command(shim_path, event)`, `install(hooks_path, shim_path) -> str`. `uninstall` arrives in Task 9.
 
 **Before writing code, apply Task 1's findings:**
-- `_HOOKS_PATH_PARTS` below is `("hooks", "hooks.json")`. If **F1** recorded a different location under `$CODEX_HOME`, change the tuple.
+- `_HOOKS_PATH_PARTS` below is **`("hooks.json",)`** — CORRECTED 2026-09-04. The plan was written against `("hooks", "hooks.json")` and **that path does not work**: F1 verified by execution that `$CODEX_HOME/hooks.json` fires and `$CODEX_HOME/hooks/hooks.json` is silently ignored, with a no-file control proving the negative is real. The `hooks/hooks.json` string in the binary belongs to the PLUGIN loader, not the user layer. Do not change it back.
 - `_EVENTS_KEY` below is `"hooks"`, for a file shaped `{"hooks": {"PreToolUse": [...]}}`. If **F2** recorded the events at the top level instead, set `_EVENTS_KEY = None`. Both branches are implemented and both are tested; this is a one-constant switch, not a rewrite.
 - The matcher group is written as `{"matcher": "*", "hooks": [{"type": "command", "command": "..."}]}`. If **F4** recorded different key names, change `_entries_for` and `install` together and update the test's expected JSON.
 
@@ -1295,7 +1295,7 @@ from pc.install_statusline import (SettingsUnreadable, _load, _save,
 INSTALLED_MARKER_PATH = "~/.blink/codex-hooks-installed-commands"
 
 # F1: where Codex reads its hooks file from, under CODEX_HOME.
-_HOOKS_PATH_PARTS = ("hooks", "hooks.json")
+_HOOKS_PATH_PARTS = ("hooks.json",)
 
 # F2: the key the event map hangs off, or None when the events are the
 # top-level object. One constant because it is the single thing about this
@@ -1680,7 +1680,9 @@ git commit -m "feat: uninstall the Codex hooks as cleanly as the Claude ones"
 
 ### Task 10: The `config.toml` pointer — only if Task 1 finding F3 says it is needed
 
-**Run this task only if F3 recorded that `~/.codex/config.toml` needs a key pointing at the hooks file.** If F3 recorded that Codex reads the default path with no key, skip it, note the skip in your report, and go to Task 11.
+**SKIP THIS TASK. F3 answered it: no pointer key is needed.** Verified by execution on 2026-09-04 — a sandbox `config.toml` with no hooks-related key at all still fired the hook, because `hooks.json` is discovered purely by location. `config.toml` IS still written by `blink install`, but for the **trust record** (F5, `[hooks.state."<key>"]`), which belongs to Task 8, not to this task's `install_pointer`/`remove_pointer`. Note the skip in the report and go to Task 11.
+
+~~Run this task only if F3 recorded that `~/.codex/config.toml` needs a key pointing at the hooks file.~~ If F3 recorded that Codex reads the default path with no key, skip it, note the skip in your report, and go to Task 11.
 
 There is no TOML library in this project and adding one is a dependency decision nobody has made, so this does not parse TOML. It appends a marker-bounded block at end of file, which is valid TOML by construction (a `[table]` header starts a new table and cannot be captured by anything above it) and is removable exactly. It refuses whenever a `hooks` table already exists, because a duplicate table header is a TOML parse error and would break Codex outright.
 
@@ -1774,7 +1776,7 @@ Append to `pc/install_codex_hooks.py`, and set `_POINTER_BODY` to the exact key 
 _POINTER_BEGIN = "# >>> blink hooks pointer >>>"
 _POINTER_END = "# <<< blink hooks pointer <<<"
 # F3 from docs/research/codex-hook-contract.md.
-_POINTER_BODY = '[hooks]\nhooks = "hooks/hooks.json"'
+_POINTER_BODY = '[hooks]\nhooks = "hooks.json"'   # DEAD: F3 says no pointer is needed
 
 
 def config_file() -> str:
@@ -2345,7 +2347,7 @@ Expected: step `[4/5] Codex hooks` prints the disclosure paragraph BEFORE the in
 Confirm on disk:
 
 ```bash
-cat "${CODEX_HOME:-$HOME/.codex}/hooks/hooks.json"
+cat "${CODEX_HOME:-$HOME/.codex}/hooks.json"
 cat "${CODEX_HOME:-$HOME/.codex}/config.toml"
 cat ~/.blink/codex-hooks-installed-commands
 ```
@@ -2430,7 +2432,7 @@ Expected: a batch run leaves a slot too. A `codex exec` run is a session for the
 
 ```bash
 python3 -m pc.cli uninstall
-cat "${CODEX_HOME:-$HOME/.codex}/hooks/hooks.json"
+cat "${CODEX_HOME:-$HOME/.codex}/hooks.json"
 cat "${CODEX_HOME:-$HOME/.codex}/config.toml"
 ls ~/.blink/state-codex 2>&1
 diff /tmp/codex-config.backup.toml "${CODEX_HOME:-$HOME/.codex}/config.toml"
