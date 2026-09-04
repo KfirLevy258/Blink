@@ -269,3 +269,240 @@ def test_the_hooks_file_sits_directly_in_codex_home(monkeypatch, tmp_path):
     this got written down wrong the first time."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     assert ich.hooks_file() == str(tmp_path / "hooks.json")
+
+
+def test_uninstall_returns_the_file_to_the_shape_it_had(tmp_path):
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    msg = ich.uninstall(str(p), SHIM)
+
+    assert json.loads(p.read_text(encoding="utf-8")) == {}
+    assert "removed" in msg
+    assert ich._read_marker() == set()
+
+
+def test_uninstall_keeps_someone_elses_hook(tmp_path):
+    """Their handler sits in a group WE created. Dropping the group to tidy
+    up our own entry would take their automation with it."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    _events(data)["PreToolUse"][0]["hooks"].append(
+        {"type": "command", "command": "/usr/local/bin/audit.sh"})
+    p.write_text(json.dumps(data), encoding="utf-8")
+
+    ich.uninstall(str(p), SHIM)
+
+    events = _read(p)
+    assert [h["command"] for g in events["PreToolUse"] for h in g["hooks"]] \
+        == ["/usr/local/bin/audit.sh"]
+
+
+def test_uninstall_keeps_a_sibling_group_of_theirs(tmp_path):
+    """Their own matcher group for the same event, alongside ours."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    _events(data)["PreToolUse"].append(
+        {"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "/usr/local/bin/audit.sh"}]})
+    p.write_text(json.dumps(data), encoding="utf-8")
+
+    ich.uninstall(str(p), SHIM)
+
+    events = _read(p)
+    assert len(events["PreToolUse"]) == 1
+    assert events["PreToolUse"][0]["matcher"] == "Bash"
+
+
+def test_uninstall_removes_a_moved_shim_by_its_marker(tmp_path):
+    """The entries `blink update` left behind name an old path. The marker is
+    the only thing that still proves they are ours."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), "/old/blink-hook.sh")
+    ich.uninstall(str(p), "/new/blink-hook.sh")
+    assert json.loads(p.read_text(encoding="utf-8")) == {}
+
+
+def test_uninstall_needs_no_shim_path(tmp_path):
+    """`blink uninstall` may run after the shim file is already gone, so the
+    path is optional and the marker carries the whole identification."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    ich.uninstall(str(p))
+    assert json.loads(p.read_text(encoding="utf-8")) == {}
+
+
+def test_uninstall_without_a_marker_still_removes_by_the_command(tmp_path):
+    """~/.blink wiped before `blink uninstall` ran. What we would write now is
+    the fallback proof that the entries are ours."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    os.remove(ich._marker_path())
+
+    ich.uninstall(str(p), SHIM)
+    assert json.loads(p.read_text(encoding="utf-8")) == {}
+
+
+def test_uninstall_never_deletes_a_hook_that_merely_mentions_us(tmp_path):
+    """Substring matching on the command text would delete this. It is the
+    customer's wrapper around our shim, not our entry."""
+    p = tmp_path / "hooks.json"
+    theirs = "sh /home/k/.blink/blink-hook.sh PreToolUse codex >> /var/log/x"
+    _write(p, {"PreToolUse": [
+        {"matcher": "*", "hooks": [{"type": "command", "command": theirs}]}]})
+
+    msg = ich.uninstall(str(p), SHIM)
+
+    assert _read(p)["PreToolUse"][0]["hooks"][0]["command"] == theirs
+    assert "No Codex state hooks" in msg
+
+
+def test_uninstall_keeps_the_rest_of_the_file(tmp_path):
+    """Codex allows a top-level `description`. Emptying the event map is not
+    licence to empty the document."""
+    p = tmp_path / "hooks.json"
+    p.write_text(json.dumps({"description": "mine"}), encoding="utf-8")
+    ich.install(str(p), SHIM)
+
+    ich.uninstall(str(p), SHIM)
+
+    assert json.loads(p.read_text(encoding="utf-8")) == {"description": "mine"}
+
+
+def test_uninstall_leaves_an_event_of_theirs_alone(tmp_path):
+    """An event we register, holding only their hook: the key stays, with
+    their group in it, and is not tidied into nothing."""
+    p = tmp_path / "hooks.json"
+    _write(p, {"Stop": [{"hooks": [
+        {"type": "command", "command": "/usr/local/bin/audit.sh"}]}]})
+
+    ich.uninstall(str(p), SHIM)
+
+    events = _read(p)
+    assert events["Stop"][0]["hooks"][0]["command"] \
+        == "/usr/local/bin/audit.sh"
+
+
+def test_uninstall_with_nothing_of_ours_rewrites_nothing(tmp_path):
+    """Byte-identical, not merely equal: a file we take nothing out of must
+    not come back reindented, reordered or renewline'd."""
+    p = tmp_path / "hooks.json"
+    before = '{\n    "hooks": {"Stop": []},\n        "description": "mine"}'
+    p.write_text(before, encoding="utf-8")
+
+    msg = ich.uninstall(str(p), SHIM)
+
+    assert p.read_text(encoding="utf-8") == before
+    assert "No Codex state hooks" in msg
+
+
+def test_uninstall_steps_over_a_group_it_cannot_read(tmp_path):
+    """A stray string where a matcher group belongs is one person's typo.
+    install() steps over it, so uninstall copies it through untouched --
+    stepping over is never licence to delete."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    _events(data)["PreToolUse"].insert(0, "not a group")
+    p.write_text(json.dumps(data), encoding="utf-8")
+
+    ich.uninstall(str(p), SHIM)
+
+    assert _read(p)["PreToolUse"] == ["not a group"]
+
+
+def test_uninstall_leaves_an_unparseable_file_alone(tmp_path):
+    """A destructive operation is the last place to start guessing at a file
+    that is probably mid-edit."""
+    p = tmp_path / "hooks.json"
+    before = "{oops"
+    p.write_text(before, encoding="utf-8")
+    msg = ich.uninstall(str(p), SHIM)
+    assert p.read_text(encoding="utf-8") == before
+    assert "left it alone" in msg
+
+
+def test_uninstall_refuses_a_hooks_key_that_is_not_an_object(tmp_path):
+    """The shape install() refuses. Uninstall has to refuse the same one, or
+    the pair is not symmetric."""
+    p = tmp_path / "hooks.json"
+    before = json.dumps({"hooks": []} if ich._EVENTS_KEY
+                        else {"PreToolUse": "nope"})
+    p.write_text(before, encoding="utf-8")
+
+    msg = ich.uninstall(str(p), SHIM)
+
+    assert p.read_text(encoding="utf-8") == before
+    assert "left it alone" in msg
+
+
+def test_uninstall_refuses_an_event_that_is_not_a_list(tmp_path):
+    """And refuses it before removing anything: a bad tenth event must not
+    leave the first nine stripped."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    _events(data)["SubagentStop"] = {"not": "a list"}
+    p.write_text(json.dumps(data), encoding="utf-8")
+    before = p.read_text(encoding="utf-8")
+
+    msg = ich.uninstall(str(p), SHIM)
+
+    assert p.read_text(encoding="utf-8") == before
+    assert "left it alone" in msg
+
+
+def test_a_refusal_keeps_the_marker(tmp_path):
+    """The marker is the only surviving proof that the entries still sitting
+    in that file are ours. Dropping it on a refusal strands them forever."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    p.write_text("{oops", encoding="utf-8")
+
+    ich.uninstall(str(p), SHIM)
+
+    assert "sh /home/k/.blink/blink-hook.sh Stop codex" in ich._read_marker()
+
+
+def test_uninstall_refuses_a_file_it_cannot_open(tmp_path):
+    """A hooks.json that is a directory. Unconverted, the IsADirectoryError
+    escapes `blink uninstall` as a traceback about someone else's file."""
+    p = tmp_path / "hooks.json"
+    p.mkdir()
+
+    msg = ich.uninstall(str(p), SHIM)
+
+    assert "left it alone" in msg
+
+
+def test_uninstall_with_no_hooks_file_is_not_an_error(tmp_path):
+    """`blink uninstall` runs this on every machine, including the many that
+    never installed the Codex hook."""
+    p = tmp_path / "nope.json"
+    msg = ich.uninstall(str(p), SHIM)
+    assert "No Codex state hooks" in msg
+    assert not p.exists(), "uninstall must not create the file it removes from"
+
+
+def test_uninstall_leaves_no_temp_file_behind(tmp_path):
+    """Every write goes through the sibling-temp-and-rename path, and a
+    machine that dies mid-uninstall must leave Codex a whole hooks file."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    ich.uninstall(str(p), SHIM)
+
+    assert sorted(f.name for f in tmp_path.iterdir() if f.is_file()) \
+        == ["hooks.json"]
+
+
+def test_install_after_uninstall_is_a_clean_install(tmp_path):
+    """Whatever uninstall leaves behind has to be something install can read
+    -- the reinstall path is the one every `blink update` takes."""
+    p = tmp_path / "hooks.json"
+    ich.install(str(p), SHIM)
+    ich.uninstall(str(p), SHIM)
+    msg = ich.install(str(p), SHIM)
+
+    assert "installed (10 events)" in msg
+    assert len(_read(p)["PreToolUse"]) == 1

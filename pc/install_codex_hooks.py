@@ -313,3 +313,144 @@ def install(hooks_path: str, shim_path: str) -> str:
         return (f"Codex state hooks installed ({added} events,"
                 f" {repointed} repointed).")
     return f"Codex state hooks installed ({added} events)."
+
+
+def _events_to_edit(data):
+    """The event map as it is on disk, without creating one.
+
+    _event_map() is install's helper and it setdefault()s the key into being,
+    which is right when the next step is to add something and wrong here: a
+    file with no hooks key at all must come out of uninstall with no hooks key
+    at all, not with an empty one we invented and then had to remember to take
+    back out.
+
+    Returns {} for "there is nothing of ours in here", and raises
+    SettingsUnreadable for a shape install would have refused.
+    """
+    if _EVENTS_KEY is None:
+        return data
+    events = data.get(_EVENTS_KEY)
+    if events is None:
+        return {}
+    if not isinstance(events, dict):
+        raise SettingsUnreadable(f"'{_EVENTS_KEY}' is not an object")
+    return events
+
+
+def uninstall(hooks_path: str, shim_path: str = None) -> str:
+    """Remove only our entries, and only the ones we can prove are ours.
+
+    Symmetric with install by construction: it drops exactly the commands the
+    marker recorded plus the ones this call would itself write, and leaves
+    every other entry in place. An empty group left behind by that removal is
+    dropped too, and an event whose list ends up empty loses its key -- so a
+    machine that has uninstalled has a hooks file shaped the way it was before
+    Blink ever ran, rather than a skeleton of empty lists.
+
+    Never raises. `blink uninstall` runs this on every machine, including the
+    many that never had a Codex hook, and a removal step that can abort the
+    uninstall over someone else's config is worse than one that reports what
+    it could not do. Every failure comes back as a sentence and an unchanged
+    file: the four cases are a file we cannot read, a file we cannot parse, a
+    file whose shape install itself would refuse, and a file with nothing of
+    ours in it.
+
+    shim_path is optional because the caller does not always still know it --
+    `blink uninstall` may run after the shim has been deleted. The marker
+    alone is enough to identify what we wrote; the computed commands are the
+    belt to its braces, for a ~/.blink that was removed first.
+    """
+    try:
+        indent, trailing_newline, data = _read_hooks_file(hooks_path)
+    except SettingsUnreadable as e:
+        # Never "repair" a file we cannot parse by writing a fresh one over
+        # it. It is someone's config, probably mid-edit -- and this is a
+        # destructive operation, which is the last place to start guessing.
+        return f"Codex hooks file could not be read ({e}); left it alone."
+
+    expected = ({hook_command(shim_path, ev) for ev, _ in HOOK_EVENTS}
+                if shim_path else set())
+    marker = _read_marker()
+
+    try:
+        events = _events_to_edit(data)
+        for event, _ in HOOK_EVENTS:
+            if event in events and not isinstance(events[event], list):
+                raise SettingsUnreadable(f"{event} is not a list")
+    except SettingsUnreadable as e:
+        # install() refuses these shapes rather than rewriting them, and
+        # uninstall has to refuse the same ones or the pair is not symmetric:
+        # a file it declined to add to is a file it does not understand well
+        # enough to delete from either. Checked for every event BEFORE
+        # anything is removed, so the refusal is all-or-nothing exactly as
+        # install's is -- a bad tenth event cannot leave the first nine
+        # stripped. The marker survives, because it is the only remaining
+        # proof that the entries still in that file are ours.
+        return (f"Codex hooks file is not one we understand ({e});"
+                f" left it alone.")
+
+    removed = 0
+    for event, _ in HOOK_EVENTS:
+        entries = events.get(event)
+        if not isinstance(entries, list):
+            continue
+        kept_groups = []
+        dropped_here = 0
+        for group in entries:
+            # A group that is not an object, or whose hooks are not a list, is
+            # one person's typo. install() steps over those rather than
+            # refusing, so this steps over them too -- and stepping over means
+            # copying them through untouched, never dropping them.
+            if not isinstance(group, dict):
+                kept_groups.append(group)
+                continue
+            inner = group.get("hooks")
+            if not isinstance(inner, list):
+                kept_groups.append(group)
+                continue
+            kept = [h for h in inner
+                    if not (isinstance(h, dict)
+                            and _ours(h.get("command", ""), expected, marker))]
+            dropped_here += len(inner) - len(kept)
+            if kept:
+                # Someone else's hook in a group we created keeps the group
+                # alive. Dropping the group to tidy up our own entry would
+                # silently take their automation with it.
+                group["hooks"] = kept
+                kept_groups.append(group)
+            # A group whose only hook was ours is dropped entirely rather than
+            # left as an empty shell with a dangling matcher.
+        if not dropped_here:
+            # Nothing of ours here: leave the list object exactly as we found
+            # it rather than writing back an equal copy. It costs nothing and
+            # it keeps "we changed only what was ours" true of the data as
+            # well as of the bytes.
+            continue
+        removed += dropped_here
+        if kept_groups:
+            events[event] = kept_groups
+        else:
+            events.pop(event, None)
+
+    if removed == 0:
+        # Not a failure: `blink uninstall` calls this on machines that never
+        # installed the Codex hook, and on machines where someone already took
+        # the entries out by hand. The file is not rewritten at all -- not even
+        # re-serialised -- so a hooks file we have nothing in comes out of an
+        # uninstall byte-identical, and one that never existed is not created.
+        _remove_marker()
+        return "No Codex state hooks to remove."
+
+    if _EVENTS_KEY is not None and not events:
+        # The last event went, so the wrapper goes with it. The FILE stays,
+        # holding {}: we cannot prove we were the ones who created it, Codex
+        # is free to write it again, and deleting another vendor's file is
+        # more than removing our entries from it authorises.
+        data.pop(_EVENTS_KEY, None)
+
+    # _save writes a sibling temp file and os.replace()s it, so an uninstall
+    # that dies mid-write leaves Codex a whole hooks file rather than half of
+    # one. A truncated hooks.json breaks Codex itself, not merely Blink.
+    _save(hooks_path, data, indent, trailing_newline)
+    _remove_marker()
+    return f"Codex state hooks removed ({removed})."
