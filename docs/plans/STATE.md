@@ -704,3 +704,87 @@ not argued from a contract.
 - `20500d33ff1c` carries unreleased firmware and needs `tools/burn.sh
   --edition claude` before it ships.
 - **The merge.** `main` still has none of this.
+
+---
+
+# MUTATION SURVEY — 2026-09-05, 777 mutations across the whole branch
+
+Run before the merge, at the owner's insistence, and it earned that. Four
+surveys over the branch's production files: break one line, run the tests, and
+record every breakage the tests fail to notice.
+
+**777 applied · 588 killed · 183 survived (76%).**
+
+| Area | Applied | Killed | Survived |
+|---|---|---|---|
+| providers | 191 | 149 | 42 |
+| firmware + shim | 232 | 186 | 40 (6 more equivalent) |
+| cli + installers | 193 | 138 | 55 |
+| protocol/normalizer/ingest/bridge | 161 | 115 | 46 |
+
+## The method mattered as much as the result
+
+**Parallel surveys contaminate each other**, and it is the dangerous direction.
+The split was disjoint by production file but NOT by test file: a sibling
+mutating `statusline_source.py` reddens `test_claude_cli.py`, and the mutation
+under test then looks KILLED when somebody else's breakage did the killing. A
+false survivor gets investigated; a false kill silently certifies untested code
+as tested — the exact failure the survey exists to find.
+
+Two surveys hit it independently. One measured **14% of its unguarded kills
+flipping to survivors** on re-measurement. **The guard: re-run the suite after
+every revert and require green before trusting the next result.** Anything
+measured without it is unreliable in both directions.
+
+Together with the `.pyc` staleness rule (`PYTHONDONTWRITEBYTECODE=1`, recorded
+above), that is now two ways a mutation harness can lie, both found here, both
+by producing numbers that looked fine.
+
+## THE ONE LIVE DEFECT, and it was aimed at tomorrow
+
+**`blink install` claimed a running service from an exit code on Linux AND
+Windows** — the identical bug fixed for macOS hours earlier, unfixed on the two
+platforms the owner is about to test. Also: schtasks status had registered and
+not-installed **inverted**, and launchd's crash-loop branch was untested.
+
+Fixed in `4ba9c7d` with one shared `_confirm_running(probe, tries=4)`: ask the
+platform, retry briefly, lean to "not running" on anything unrecognised. All
+five survivors pinned, 12 mutations, 12 killed.
+
+The test stub's key property is worth keeping: **every health question answers
+exit 0 in both directions**, which is true on all three real platforms, so a
+backend that goes back to reading a return code goes red.
+
+Windows deliberately does not read `schtasks /query`: the task's action is
+wscript, which launches the bridge and exits, so a healthy install reports
+*Ready* — and that word is **translated on a localised Windows**, which the
+owner's PC is. It asks `tasklist` for the recorded pid instead.
+
+## The best of the rest — none of it a live bug, all of it worth having
+
+- **`protocol.py:85`** — the 512-byte wire guard cannot fail at its own
+  boundary. `>` to `>=` survives because **nothing encodes a line of exactly
+  512 bytes.** The one-byte margin that causes a silent panel freeze is
+  defended by a comparison untested at the only value that matters.
+- **`bridge.py:369`** — the OTA size-mismatch guard is unfalsifiable: delete it
+  and everything stays green, because the one test reaching it uses a blob that
+  ALSO fails its checksum and asserts only the message type. **Slot 0 has no
+  auto-revert.**
+- **`fmt.c`** — four buffer-bound guards, all correct, none tested; loosening
+  any by one byte writes past the caller's buffer unnoticed.
+- **`usage_state.c`** — three of four arms of the state aggregation are
+  unfalsifiable.
+- **`tools/blink-hook.sh:93`** — the session-id sanitiser is a security
+  boundary and nothing pins it against `/`. The code is correct today; a later
+  widening would pass unnoticed.
+- **`codex_cli.py:114`** — "newest first" survives being reversed; past six
+  rollouts the reader would take the six OLDEST forever.
+- **Dead code**, including two **mutually-masking pairs** where neither half is
+  killable alone because each covers for the other.
+- **~35 threshold boundaries** where no test sits on the exact value.
+
+## What was NOT surveyed
+
+`usage_view.c`, `ui_sleep.c` and `main.c` — they need LVGL and Zephyr and have
+no host coverage by construction. That is unchanged and remains the branch's
+largest untested surface.
