@@ -7,8 +7,8 @@ limits are in `tools/encode_logo.py`; the clip is drawn by
 
 | File | What it is | Size |
 |---|---|---|
-| `pipl.bin` | `pipl` in brand blue on white | 97 KB (18% of the partition) |
-| `pipl-dark.bin` | the same mark in white on near-black | 109 KB (21%) |
+| `pipl.bin` | **the shipping clip**: `pipl` in white on near-black | 109 KB (21% of the partition) |
+| `pipl-light.bin` | the same mark in brand blue on white | 97 KB (18%) |
 
 Flash a unit with one:
 
@@ -26,14 +26,14 @@ tools/encode_logo.py --info logos/pipl.bin --preview /tmp/pipl.gif
 
 ```sh
 tools/make_logo_scan.py --art tools/assets/pipl-wordmark.png \
-    --bg FFFFFF --ink 3AA1FF --accent 005AAC --out /tmp/pipl
+    --bg 0E1621 --ink FFFFFF --accent 3AA1FF --out /tmp/pipl
 tools/encode_logo.py --frames /tmp/pipl --fps 15 --hold 1.8 --threshold 0 \
     --out logos/pipl.bin
 
 tools/make_logo_scan.py --art tools/assets/pipl-wordmark.png \
-    --bg 0E1621 --ink FFFFFF --accent 3AA1FF --out /tmp/pipl-dark
-tools/encode_logo.py --frames /tmp/pipl-dark --fps 15 --hold 1.8 --threshold 0 \
-    --out logos/pipl-dark.bin
+    --bg FFFFFF --ink 3AA1FF --accent 005AAC --out /tmp/pipl-light
+tools/encode_logo.py --frames /tmp/pipl-light --fps 15 --hold 1.8 --threshold 0 \
+    --out logos/pipl-light.bin
 ```
 
 `--threshold 0` matters: see the note in `tools/make_logo_scan.py`. With the
@@ -55,8 +55,10 @@ say the mask is the artwork and not a resemblance of it.
 
 - `#3AA1FF` is the mark's own fill, read straight out of that file.
 - `#005AAC` is the same hue and saturation at 55% of the lightness. It is the
-  scanning rule and the trail it leaves cooling. It is *derived*, not a second
-  brand colour -- swap it if Pipl publishes one.
+  scanning rule on the light clip only. It is *derived*, not a second brand
+  colour -- swap it if Pipl publishes one. The shipping clip does not use it:
+  on near-black the rule is the brand blue itself, so the whole clip is one
+  brand colour, white, and a ground.
 
 The registered mark is not on this artwork; on a 320x240 panel it would be
 about three pixels across.
