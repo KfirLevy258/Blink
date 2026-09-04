@@ -217,3 +217,116 @@ my own plan text. Two plan steps told an implementer to prove a test with a
 mutation that was algebraically an identity. The habit that catches it every
 time: **build the broken variant and watch the test reject it** -- and check the
 mutation can actually change behaviour before trusting a red.
+
+---
+
+# CHECKPOINT — 2026-09-04, written for a session with no memory of this one
+
+**Read this section first.** Everything above it is older than this.
+
+## Where things stand in one paragraph
+
+Plan 0 (the three field bugs) is done, flashed, and partly verified on hardware.
+Plan 1 (shim self-repair) is done and proved itself in the field today. Plan 2
+(Codex naming) is 6 of 10 tasks. Plan 3 (Codex hook shim) is not started, but its
+discovery gate HAS run and the premise holds. A whole-branch review of 42 commits
+ran today, found three real defects, and all of them are fixed. **The branch is
+89+ commits ahead of `main` and still unmerged.**
+
+Verification at this checkpoint: **636 pytest**, **15/15 host suites**, clean
+tree, both firmware configurations building.
+
+## What is LIVE on the owner's machine right now
+
+- **Firmware**: flashed 2026-09-03 with all of plan 0. Board MAC
+  `20:50:0d:2c:f7:58`, plaintext (FLASH_CRYPT_CNT=0). **The firmware review's
+  fixes are NOT flashed** — settings-from-doze, the `ota_busy` helper and the
+  test fixes are committed but the board still runs the pre-review image.
+- **Daemon**: built from this worktree with `tools/build_binary.sh` and installed
+  by hand at `~/.blink/bin` — TWICE today, most recently WITH the review fixes.
+  It is not a release; no release was cut and none should be from a branch this
+  unfinished. Rollbacks kept: `~/.blink/bin.prev-20260904` (the original 1.2.5)
+  and `~/.blink/bin.prev-reviewfix` (pre-review-fix build).
+- Confirmed live after install: `src: cli`, `active_age_s: 0`, the repaired hook
+  in `~/.blink/blink-hook.sh`, and state slots carrying a real `"pid"` whose
+  process is `claude`.
+
+**A visible change the owner has NOT yet eyeballed:** the session dial can now
+read blank where it used to show a pre-reset number. That is the intended
+correction — blank and honest beats confident and wrong — but it is the most
+visible consequence of today's fixes and nobody has looked at the panel since.
+
+## What is verified on hardware, and what is only argued
+
+VERIFIED on the desk: Bug C (dozes instead of rebooting; one boot, zero resets,
+still dozing at 220 s, woke when the daemon returned); the doze/wake transition
+driven deliberately through a fake daemon (`[sleep] dozing` then
+`[sleep] waking`, zero resets); the PID premise (`$PPID` is `comm=claude`, the
+safety latch never fired); the pip row at two sessions, by the owner's own eyes.
+
+NOT verified on hardware: **Bug A and Bug B**. Both are pinned by tests only.
+The overnight test on 2026-09-03 did NOT prove Bug A, because the installed
+daemon still had Bug B and was reporting an 80-hour age; the panel dozed for a
+correct reason on a wrong number. That test is worth repeating now that the
+daemon is fixed.
+
+Also unverified and load-bearing: whether an edge tap reaches through the
+CONNECTING overlay. If it does not, the settings-from-doze fix removes the stale
+latch without making settings reachable. Needs a board.
+
+## The three defects the review found, all fixed
+
+1. **A forgiven number came back, confident and green.** At exactly
+   `STALE_AFTER_S` the dial flipped from a correct `0.0%` to
+   `78% / desktop / stale=False` and never recovered. Reproduced before it was
+   believed. Fixed by making `_rolled_over` run unconditionally and splitting the
+   decision: the rollover epoch and a passed reset stamp are facts that do not
+   rot, only the percentage depends on freshness.
+2. **Settings were unreachable from a doze** — worst in the no-daemon case, where
+   settings is exactly where the owner would go. Fixed by waking on the latch.
+3. **Two host suites proved nothing at CI level** — their bodies could be deleted
+   with output byte-identical and CI green. Now 124 and 28 checks, and the runner
+   fails a zero-check suite.
+
+## Next steps, in order
+
+1. **Repeat the overnight test** now the daemon is fixed — this is what finally
+   settles Bug A and Bug B.
+2. **Finish plan 2**: tasks 6-9 (`task_complete.error` -> failed, two-provider
+   precedence, the contract script, everything-green).
+3. **Plan 3**: its gate has run and is written into `docs/plans/codex-hook-shim.md`
+   under "DISCOVERY GATE". Its first task must still be the smoke test — **no
+   Codex hook has ever been executed by anyone.**
+4. **Flash the firmware review fixes** when the owner is present.
+5. **Merge.** `main` has none of this.
+
+## Rules learned the hard way today — keep them
+
+- **`git commit -- <paths>`, never a bare `git commit`.** In a shared worktree a
+  bare commit takes the WHOLE index, including a sibling's staged work. That is
+  what put six `pc/**` files inside firmware commit `cdf52a2`. Explicit
+  `git add` is not enough. (My first reading blamed `git add -A` and was wrong.)
+- **Never `git commit --amend` while a sibling is active.** It crossed a
+  concurrent commit twice today.
+- **Commit a fix BEFORE mutating anything to test it.** `git checkout --` reverts
+  uncommitted work; it destroyed a fix twice.
+- **Never run a test suite while another agent is mid-mutation** — the result is
+  noise. I briefly reported two failures that were exactly that.
+- `tests/ci/check_host_tests.sh` uses a FIXED shared temp dir and `rm -rf`s it on
+  entry; concurrent runs corrupt each other.
+- **Thirteen-plus assertions that could not fail have been found on this branch.**
+  A dedicated mutation survey (468 assertions, 11 survivors) was worth more than
+  either general review. Run one before merging.
+
+## Known-open, deliberately not fixed
+
+- **Windows has no PID liveness.** `os.kill(pid, 0)` there is `TerminateProcess`
+  and would KILL the session; it is gated to POSIX and the `ctypes`
+  `OpenProcess` probe is unwritten. The owner has a Windows install.
+- A mixed host+container desk can still drop a live session; closing it needs a
+  boot-id in the slot, which every installed shim would omit. Owner decision.
+- A daemon that pings but pushes no usage still dozes the panel with the owner
+  present. Accepted; the real fix is a daemon that pushes a frame saying it
+  cannot read rather than falling silent.
+- No host-return wake term. Argued no, reasoning in `sleep_gate.h`.
+- Six-pip legibility has never been judged by a human; only two were ever live.
