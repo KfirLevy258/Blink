@@ -436,4 +436,15 @@ chmod 700 "$RO"
 [ -s "$WORK/err15.txt" ] && fail "unwritable marker wrote to stderr: $(cat "$WORK/err15.txt")"
 ok "an unwritable marker path still exits 0, silently"
 
+# 15h. The SAME defect, in the SubagentStart branch, which is SHIPPED code and
+#      predates the marker entirely. An agent slot that cannot be written must
+#      cost the count and nothing else -- never the exit status, because a
+#      failing hook is a failing tool call for the person using it.
+chmod 500 "$RO"
+out=$(HOME="$RO" sh -c "printf '%s' '$W' | $SH '$SHIM' SubagentStart; printf 'status=%s' \$?" 2>"$WORK/err15h.txt")
+chmod 700 "$RO"
+[ "$out" = "status=0" ] || fail "SubagentStart into an unwritable HOME: [$out]"
+[ -s "$WORK/err15h.txt" ] && fail "unwritable agent slot wrote to stderr: $(cat "$WORK/err15h.txt")"
+ok "an unwritable agent slot still exits 0, silently"
+
 printf 'PASS [%s]\n' "$WHICH"

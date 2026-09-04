@@ -161,7 +161,17 @@ SubagentStart|SubagentStop)
 	[ -n "$aid" ] || aid=unknown
 	[ -d "$DIR/$sid" ] || mkdir -p "$DIR/$sid" 2>/dev/null
 	if [ "$event" = "SubagentStart" ]; then
-		: > "$DIR/$sid/$aid" 2>/dev/null
+		# `true`, not `:`. A redirection error on `:` -- a POSIX SPECIAL
+		# built-in -- makes the shell EXIT, skipping the `exit 0` at the
+		# bottom of this file and handing the tool a FAILING hook, for the
+		# sake of a subagent count. Measured: status 1 under sh, 2 under
+		# dash. `true` is a regular built-in and merely returns non-zero.
+		#
+		# And 2>/dev/null comes BEFORE the > redirect on purpose: the
+		# message about a failed redirection is printed by the SHELL, not
+		# by the command, so stderr has to be pointed away already by the
+		# time the failing redirect is attempted.
+		true 2>/dev/null > "$DIR/$sid/$aid"
 	else
 		rm -f "$DIR/$sid/$aid" 2>/dev/null
 	fi
