@@ -114,6 +114,18 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 	lv_obj_t *scr = lv_obj_create(NULL);
 
 	wake_when = awake;
+	/*
+	 * Tell the dashboard it is asleep, before anything else.
+	 *
+	 * service() below keeps the protocol running for the whole sleep, so
+	 * every usage_view setter goes on being called with nobody looking --
+	 * and the status-change popup is the one that would ACT on that, by
+	 * putting a card on a screen that is not loaded and leaving it there:
+	 * the 1 s tick that expires it is driven from the mode loop this
+	 * function has taken over. A tap's peek would then show a sentence
+	 * from hours ago as though it were news.
+	 */
+	usage_view_set_sleeping(true);
 	lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_set_style_bg_color(scr, lv_color_hex(close->bg_rgb), 0);
@@ -170,6 +182,12 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 	 */
 	lv_scr_load(prev);
 	lv_obj_del(scr);
+	/*
+	 * Eyes open: the popup may speak again, from the NEXT change. The
+	 * counts that arrived during the sleep were recorded as they came, so
+	 * this does not release a backlog -- waking shows what is true now.
+	 */
+	usage_view_set_sleeping(false);
 	if (usage_view_have_data() &&
 	    sleep_reading_is_stale(usage_freshness_age_s(k_uptime_get()))) {
 		usage_view_set_status(USAGE_STATUS_STALE);

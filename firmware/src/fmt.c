@@ -228,3 +228,74 @@ enum fmt_pip_tone fmt_pip_tone(enum fmt_pip_kind k)
 		return FMT_TONE_GREEN;
 	}
 }
+
+void fmt_toast(enum fmt_pip_kind kind, const char *label, int count,
+	       char *buf, size_t buflen)
+{
+	const char *clause;
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	/*
+	 * Empty on every path that has nothing to say, and the caller draws
+	 * nothing for an empty string -- the same contract fmt_burn and
+	 * fmt_hint already have, so a caller cannot be surprised by which of
+	 * the three it is holding.
+	 */
+	buf[0] = '\0';
+	if (count <= 0) {
+		return;
+	}
+
+	if (count > 1) {
+		switch (kind) {
+		case FMT_PIP_FAILED:	clause = "sessions failed"; break;
+		case FMT_PIP_WAITING:	clause = "sessions are waiting"; break;
+		case FMT_PIP_FINISHED:	clause = "sessions finished"; break;
+		case FMT_PIP_RUNNING:	clause = "sessions are running"; break;
+		default:		return;
+		}
+		snprintf(buf, buflen, "%d %s", count, clause);
+		return;
+	}
+
+	switch (kind) {
+	case FMT_PIP_FAILED:	clause = "failed"; break;
+	case FMT_PIP_WAITING:	clause = "is waiting for you"; break;
+	case FMT_PIP_FINISHED:	clause = "is finished"; break;
+	case FMT_PIP_RUNNING:	clause = "is running"; break;
+	default:		return;
+	}
+
+	if (label != NULL && label[0] != '\0') {
+		char ascii[FMT_TOAST_MAX];
+		size_t i = 0;
+
+		fmt_ascii(label, ascii, sizeof(ascii));
+		/*
+		 * Past any leading blank, because the sentence STARTS with
+		 * this and a sentence that starts with a space starts with
+		 * nothing. It is reachable rather than defensive: fmt_ascii
+		 * turns U+00A0 into an ordinary space, so a label that is only
+		 * a no-break space -- which is what an empty project name
+		 * copied out of a web page looks like -- arrives here as " ".
+		 */
+		while (ascii[i] == ' ') {
+			i++;
+		}
+		/*
+		 * Nothing left to lead with, so fall through to "A session"
+		 * rather than writing " is waiting for you" with a hole at the
+		 * front of it.
+		 */
+		if (ascii[i] != '\0') {
+			if (ascii[i] >= 'a' && ascii[i] <= 'z') {
+				ascii[i] = (char)(ascii[i] - 'a' + 'A');
+			}
+			snprintf(buf, buflen, "%s %s", &ascii[i], clause);
+			return;
+		}
+	}
+	snprintf(buf, buflen, "A session %s", clause);
+}

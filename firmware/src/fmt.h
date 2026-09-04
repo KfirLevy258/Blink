@@ -146,4 +146,44 @@ enum fmt_pip_tone fmt_pip_tone(enum fmt_pip_kind k);
 int fmt_pips(int n_run, int n_wait, int n_fail, int n_fin,
 	     struct fmt_pip *out, int max);
 
+/* The longest sentence below is a 27-byte label and " is waiting for you". */
+#define FMT_TOAST_MAX 64
+
+/*
+ * The one sentence a status-change popup says.
+ *
+ *   count <= 0             -> ""                            (nothing happened)
+ *   count == 1, label set  -> "Blink is waiting for you"
+ *   count == 1, no label   -> "A session is waiting for you"
+ *   count >  1             -> "3 sessions are waiting"
+ *
+ * ONE RULE FOR ALL FOUR STATES, so a reader can predict the next sentence
+ * from the last one: `2 sessions finished`, `2 sessions failed`, `3 sessions
+ * are running`. Only the clause changes.
+ *
+ * THE COUNT RATHER THAN A NAME when several sessions share the state, on the
+ * owner's call: "if there is multi sessions waiting, you can just say x
+ * session are waiting". The number is already on the wire (n_wait, n_stuck,
+ * n_sess) and it is the more useful sentence -- naming one of three says
+ * something true about one and implies it about the other two, which is the
+ * mistake pc/providers/claude_state.py refuses to make when it picks `label`.
+ *
+ * The singular and the plural are separate strings rather than one string
+ * with an "s" bolted on, because "1 sessions are waiting" is exactly the kind
+ * of thing that ships. Count 1 never reaches the plural branch at all.
+ *
+ * `label` is user-controlled text from a directory name, so it goes through
+ * fmt_ascii like fmt_hint's does, and its first letter is capitalised: it
+ * LEADS the sentence here rather than trailing a status, and every sentence on
+ * this panel starts with a capital (standing owner request). A count-led
+ * sentence starts with a digit, which is the one case a capital cannot apply
+ * to.
+ *
+ * RUNNING has a wording even though nothing announces it today -- see
+ * usage_toast_change(), which is where that policy lives. Giving the formatter
+ * one complete rule and the decider the policy keeps the two from arguing.
+ */
+void fmt_toast(enum fmt_pip_kind kind, const char *label, int count,
+	       char *buf, size_t buflen);
+
 #endif /* FMT_H */

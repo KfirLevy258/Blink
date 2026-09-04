@@ -237,6 +237,130 @@ static void test_fmt_tone(void)
 	}
 }
 
+/*
+ * The status-change popup's one sentence.
+ *
+ * The wire cannot name sessions individually -- it carries counts and ONE
+ * label, and the loaded usage line already measures 511 of the 512 bytes
+ * proto.c will accept -- so every sentence here is built from a count, or
+ * from the single label the daemon is willing to vouch for.
+ */
+static void test_fmt_toast(void)
+{
+	char b[FMT_TOAST_MAX];
+
+	/* Nothing happened: empty, and the caller draws no card. */
+	fmt_toast(FMT_PIP_WAITING, "hint-line", 0, b, sizeof(b));
+	EXPECT_STR(b, "");
+	fmt_toast(FMT_PIP_WAITING, "hint-line", -1, b, sizeof(b));
+	EXPECT_STR(b, "");
+
+	/* One session, named. The label LEADS, so it is capitalised: every
+	 * sentence on this panel starts with a capital (standing request). */
+	fmt_toast(FMT_PIP_WAITING, "hint-line", 1, b, sizeof(b));
+	EXPECT_STR(b, "Hint-line is waiting for you");
+	fmt_toast(FMT_PIP_FINISHED, "hint-line", 1, b, sizeof(b));
+	EXPECT_STR(b, "Hint-line is finished");
+	fmt_toast(FMT_PIP_FAILED, "hint-line", 1, b, sizeof(b));
+	EXPECT_STR(b, "Hint-line failed");
+
+	/* A label that is already capitalised is left exactly alone -- these
+	 * are directory names and "LiveClaudeUi" is not "Liveclaudeui". */
+	fmt_toast(FMT_PIP_WAITING, "LiveClaudeUi", 1, b, sizeof(b));
+	EXPECT_STR(b, "LiveClaudeUi is waiting for you");
+
+	/* One session with no label: the daemon refuses to name one whenever
+	 * it cannot vouch for the choice, and that is the ordinary case. */
+	fmt_toast(FMT_PIP_WAITING, "", 1, b, sizeof(b));
+	EXPECT_STR(b, "A session is waiting for you");
+	fmt_toast(FMT_PIP_FINISHED, NULL, 1, b, sizeof(b));
+	EXPECT_STR(b, "A session is finished");
+	fmt_toast(FMT_PIP_FAILED, NULL, 1, b, sizeof(b));
+	EXPECT_STR(b, "A session failed");
+
+	/*
+	 * SEVERAL: say how many (owner, 2026-09-04 -- "if there is multi
+	 * sessions waiting, you can just say x session are waiting"). The
+	 * count is already on the wire and is the more useful sentence.
+	 */
+	fmt_toast(FMT_PIP_WAITING, "hint-line", 3, b, sizeof(b));
+	EXPECT_STR(b, "3 sessions are waiting");
+	fmt_toast(FMT_PIP_FINISHED, NULL, 2, b, sizeof(b));
+	EXPECT_STR(b, "2 sessions finished");
+	fmt_toast(FMT_PIP_FAILED, NULL, 2, b, sizeof(b));
+	EXPECT_STR(b, "2 sessions failed");
+
+	/*
+	 * ONE RULE, all four states, so a reader can predict the next
+	 * sentence from the last. RUNNING is worded even though
+	 * usage_toast_change() never announces it -- the formatter is
+	 * complete and the decider holds the policy, so the two cannot drift
+	 * into disagreeing about which states exist.
+	 */
+	fmt_toast(FMT_PIP_RUNNING, NULL, 1, b, sizeof(b));
+	EXPECT_STR(b, "A session is running");
+	fmt_toast(FMT_PIP_RUNNING, NULL, 3, b, sizeof(b));
+	EXPECT_STR(b, "3 sessions are running");
+
+	/*
+	 * SINGULAR AND PLURAL ARE SEPARATE STRINGS, never one with an "s"
+	 * bolted on. "1 sessions are waiting" is exactly the kind of thing
+	 * that ships, so the boundary is pinned from both sides: no sentence
+	 * for a count of one may contain "sessions", and every sentence for a
+	 * count above one must.
+	 */
+	{
+		const enum fmt_pip_kind all[] = {
+			FMT_PIP_FAILED, FMT_PIP_WAITING,
+			FMT_PIP_RUNNING, FMT_PIP_FINISHED
+		};
+		int bad_singular = 0, bad_plural = 0;
+
+		for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+			fmt_toast(all[i], NULL, 1, b, sizeof(b));
+			if (strstr(b, "sessions") != NULL) {
+				bad_singular++;
+			}
+			fmt_toast(all[i], NULL, 2, b, sizeof(b));
+			if (strstr(b, "sessions") == NULL) {
+				bad_plural++;
+			}
+		}
+		check_true("one session is never \"1 sessions\"",
+			   bad_singular == 0);
+		check_true("two or more always says \"sessions\"",
+			   bad_plural == 0);
+	}
+
+	/* Non-ASCII is transliterated, never drawn as boxes -- a project under
+	 * a non-ASCII profile is an ordinary setup. */
+	fmt_toast(FMT_PIP_WAITING, "caf\xc3\xa9", 1, b, sizeof(b));
+	EXPECT_STR(b, "Caf? is waiting for you");
+
+	/*
+	 * A label with nothing to lead with cannot start the sentence, so it
+	 * falls back rather than writing " is finished" with a hole in front.
+	 * Reachable, not defensive: fmt_ascii turns U+00A0 into an ordinary
+	 * space, which is what an empty name copied off a web page becomes.
+	 */
+	fmt_toast(FMT_PIP_FINISHED, "\xc2\xa0", 1, b, sizeof(b));
+	EXPECT_STR(b, "A session is finished");
+
+	/* And a label that merely BEGINS with a blank keeps its name, with the
+	 * blank dropped -- the capital has to land on the first real letter. */
+	fmt_toast(FMT_PIP_WAITING, " blink", 1, b, sizeof(b));
+	EXPECT_STR(b, "Blink is waiting for you");
+
+	/* Truncation never overruns and always NUL-terminates. */
+	{
+		char small[12];
+
+		fmt_toast(FMT_PIP_WAITING, "LiveClaudeUi", 1, small,
+			  sizeof(small));
+		EXPECT_EQ((int)strlen(small), 11);
+	}
+}
+
 int main(void)
 {
 	check("unknown", -1, "--");
@@ -309,6 +433,7 @@ int main(void)
 	test_fmt_hint();
 	test_fmt_pips();
 	test_fmt_tone();
+	test_fmt_toast();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");

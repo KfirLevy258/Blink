@@ -151,6 +151,28 @@ static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
 static lv_obj_t *clock_lbl;
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
+/*
+ * The status-change popup: a card over the bottom band, five seconds, gone.
+ *
+ * WHAT IS HERE IS ONLY POSITION AND TIMING. Whether a change is worth
+ * announcing is usage_toast_change(); what the sentence says is fmt_toast().
+ * Both of those are decisions and this file has no automated coverage -- it
+ * needs LVGL and Zephyr and cannot be compiled on a laptop -- so a decision
+ * left in here is a decision nothing checks. That is why usage_state.c and
+ * fmt.c exist at all.
+ *
+ * `toast_prev` is the counts the next message will be compared against, and
+ * it is updated on EVERY message, including the ones whose popup is
+ * suppressed. A suppressed change is consumed, not queued: a board waking
+ * from a night's sleep should show what is true now, not replay eight hours
+ * of transitions at somebody standing over it.
+ */
+static lv_obj_t *toast;
+static lv_obj_t *toast_lbl;
+static int toast_ttl;			/* seconds left; 0 = not showing */
+static struct usage_counts toast_prev;
+static bool toast_have_prev;
+static bool sleeping;
 /* Filled by usage_view_set_session() from the daemon; see proto.c. */
 static char session_label[28] = "";
 static char provider1_tag[12];	/* whichever provider the daemon made primary */
@@ -273,6 +295,9 @@ static double model_fable = -1;
 
 static void render_weekly(void);
 static void render_age(void);
+/* Defined beside pip_colour(), which it borrows; called from the 1 s tick,
+ * which runs earlier in this file. */
+static void toast_hide(void);
 #if HAVE_PER_MODEL
 static void peek_fill(void);
 #endif
@@ -618,6 +643,16 @@ void usage_view_deinit(void)
 	}
 	cur_page = 0;
 	activity = USAGE_ACTIVITY_NONE;
+	toast = NULL;
+	toast_lbl = NULL;
+	toast_ttl = 0;
+	/*
+	 * The comparison baseline goes too. The screen being torn down means
+	 * the setup screen is coming up, and whatever the counts are when the
+	 * gauges return, they are a first reading again -- not a change from
+	 * whatever was true before the user went into settings.
+	 */
+	toast_have_prev = false;
 #if HAVE_PER_MODEL
 	peek = NULL;
 	peek_ttl = 0;
@@ -890,6 +925,44 @@ void usage_view_init(void)
 	}
 #endif /* HAVE_PER_MODEL */
 	render_weekly();
+
+	/*
+	 * The status-change popup, built once and hidden, like every other
+	 * transient on this screen. Created BEFORE the takeover below, which
+	 * means the takeover covers it: a board that has never had data has
+	 * nothing to announce, and a card floating over "CONNECTING" would be
+	 * the panel talking about sessions it cannot see.
+	 *
+	 * No CLICKABLE and no event handler. It cannot be dismissed by hand
+	 * and does not want to be -- five seconds is shorter than the reach --
+	 * and a 288 px clickable strip across the bottom would swallow the tap
+	 * that dismisses the peek card and the swipe that opens settings, the
+	 * same way the pip row would have. It keeps its gestures bubbling for
+	 * exactly that reason.
+	 */
+	toast = lv_obj_create(scr);
+	lv_obj_set_size(toast, TOAST_MAX_W, TOAST_H);
+	lv_obj_set_style_radius(toast, 10, 0);
+	lv_obj_set_style_bg_color(toast, COL_PANEL, 0);
+	lv_obj_set_style_bg_opa(toast, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(toast, COL_TRACK, 0);
+	lv_obj_set_style_border_width(toast, 1, 0);
+	lv_obj_set_style_pad_all(toast, TOAST_PAD_V, 0);
+	lv_obj_clear_flag(toast, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(toast, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_add_flag(toast, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_align(toast, LV_ALIGN_BOTTOM_MID, 0, -TOAST_BOTTOM_OFF);
+	lv_obj_add_flag(toast, LV_OBJ_FLAG_HIDDEN);
+
+	toast_lbl = lv_label_create(toast);
+	lv_label_set_text(toast_lbl, "");
+	/* One line, ellipsized. TOAST_H has room for exactly one, and a label
+	 * left to wrap would push its second line out through the card. */
+	lv_label_set_long_mode(toast_lbl, LV_LABEL_LONG_DOT);
+	lv_obj_set_width(toast_lbl, TOAST_MAX_W - 2 * TOAST_PAD_V);
+	lv_obj_set_height(toast_lbl, FONT_LINE_H);
+	lv_obj_set_style_text_align(toast_lbl, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_center(toast_lbl);
 
 	/* With no host there is genuinely nothing to show, so take over the whole
 	 * screen. A board sitting quietly at "--%" reads as broken; this says what
@@ -1718,6 +1791,19 @@ void usage_view_tick_1s(void)
 		render_age();
 	}
 
+	/*
+	 * The popup's five seconds, on the same one-second clock as
+	 * everything else here that expires. It stops on its own; nothing
+	 * else in this file has to remember to take it down.
+	 *
+	 * This tick is driven from the mode loop, which is exactly the loop
+	 * ui_sleep_run() blocks -- so a card can never tick down while the
+	 * board is asleep. That is why one is never raised then.
+	 */
+	if (toast_ttl > 0 && --toast_ttl == 0) {
+		toast_hide();
+	}
+
 #if HAVE_PER_MODEL
 	if (peek_ttl > 0 && --peek_ttl == 0) {
 		peek_hide();
@@ -1772,6 +1858,83 @@ static lv_color_t pip_colour(enum fmt_pip_kind k)
 	default:
 		return COL_GREEN;
 	}
+}
+
+static void toast_hide(void)
+{
+	toast_ttl = 0;
+	if (toast) {
+		lv_obj_add_flag(toast, LV_OBJ_FLAG_HIDDEN);
+	}
+}
+
+/*
+ * Put one sentence up for TOAST_TTL_S seconds.
+ *
+ * The words wear THE SAME COLOUR AS THE PIP that changed, through the same
+ * pip_colour(). Two marks about one event in two different colours is the
+ * reader having to work out whether they are about the same thing, and this
+ * card appears at exactly the moment a pip in the header changed -- so the
+ * colour is the link between them, and it costs nothing to keep.
+ *
+ * A second change inside the five seconds REPLACES the first rather than
+ * queueing behind it: the sentence on screen is then the newest true thing,
+ * and the timer restarts from it. The alternative is a card that keeps
+ * talking after the news is stale, which is how a popup earns being ignored.
+ */
+static void toast_show(enum fmt_pip_kind kind, const char *text)
+{
+	if (!toast || !toast_lbl) {
+		return;
+	}
+	lv_label_set_text(toast_lbl, text);
+	lv_obj_set_style_text_color(toast_lbl, pip_colour(kind), 0);
+	lv_obj_clear_flag(toast, LV_OBJ_FLAG_HIDDEN);
+	toast_ttl = TOAST_TTL_S;
+}
+
+/*
+ * New counts: is there anything to announce, and may it be shown?
+ *
+ * The two questions are deliberately separate. usage_toast_change() answers
+ * the first and knows nothing about screens; everything below is the second,
+ * and every one of its answers is "the panel is not being looked at" rather
+ * than a judgement about the news:
+ *
+ *   sleeping   -- the board has closed its eyes precisely so that it stops
+ *                 asking for attention. See usage_view_set_sleeping().
+ *   takeover   -- the CONNECTING screen is over the whole panel, and a card
+ *                 underneath it would spend its five seconds unseen and then
+ *                 be gone.
+ *
+ * In both, the change is CONSUMED: toast_prev advances either way, at the
+ * bottom, so nothing is queued for later. A popup is news, and news does not
+ * keep.
+ */
+static void toast_consider(int n_sess, int n_run, int n_wait, int n_stuck)
+{
+	struct usage_counts now = { n_sess, n_run, n_wait, n_stuck };
+	struct usage_toast t;
+	char text[FMT_TOAST_MAX];
+
+	if (usage_toast_change(toast_have_prev ? &toast_prev : NULL, &now,
+			       activity, &t) &&
+	    !sleeping && !usage_view_takeover_active()) {
+		/*
+		 * The label only when usage_toast_change() says it belongs to
+		 * the state that changed -- the daemon picks it for the WORST
+		 * state, so on a desk where one session is waiting and
+		 * another just finished it names the waiting one, and putting
+		 * it on the finished card would invent a fact.
+		 */
+		fmt_toast(t.kind, t.nameable ? session_label : "", t.count,
+			  text, sizeof(text));
+		if (text[0]) {
+			toast_show(t.kind, text);
+		}
+	}
+	toast_prev = now;
+	toast_have_prev = true;
 }
 
 /*
@@ -2029,9 +2192,34 @@ void usage_view_set_counts(int n_sess, int n_run, int n_wait, int n_stuck)
 	if (!built) {
 		return;
 	}
+	/*
+	 * The popup BEFORE the row, and only because it reads `activity` and
+	 * the label as they were when these counts were decided. Nothing here
+	 * changes either, so the order is not load-bearing today -- it is
+	 * written this way so that a future refresh_dots() that did touch them
+	 * cannot silently start feeding a sentence a state it does not
+	 * describe.
+	 */
+	toast_consider(n_sess, n_run, n_wait, n_stuck);
 	/* Straight to the row: the daemon sends these on every poll whether or
 	 * not they changed. */
 	refresh_dots();
+}
+
+void usage_view_set_sleeping(bool s)
+{
+	sleeping = s;
+	if (s) {
+		/*
+		 * Any card still up goes down with the eyes. It would
+		 * otherwise be frozen on the dashboard for the whole sleep --
+		 * nothing ticks it down, because the loop that ticks is the
+		 * one ui_sleep_run() has taken over -- and a tap's ten-second
+		 * peek would show a sentence from hours ago as though it had
+		 * just happened.
+		 */
+		toast_hide();
+	}
 }
 
 /*
@@ -2369,6 +2557,22 @@ void usage_view_set_status(enum usage_status status)
 		text = "Error - showing last known";
 		break;
 	default:
+		/*
+		 * DISCONNECTED, and the popup's baseline goes with it.
+		 *
+		 * Whatever counts arrive when the daemon comes back are a
+		 * first reading, not a change: the sessions may have been
+		 * started, finished and closed while the port was shut, and
+		 * every one of those differences would fire as though it had
+		 * just happened. Without this the owner gets a popup every
+		 * time the daemon restarts, which is the surest way to teach
+		 * someone that this panel's popups are noise.
+		 *
+		 * Any card currently up goes too. It describes a session on a
+		 * host that is no longer talking to us.
+		 */
+		toast_have_prev = false;
+		toast_hide();
 		/* Two very different situations wear the same status. */
 		if (have_data) {
 			/* The host died but we still hold real numbers. Keep them

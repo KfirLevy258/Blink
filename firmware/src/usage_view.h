@@ -96,6 +96,24 @@ void usage_view_set_status(enum usage_status status);
 void usage_view_set_activity(enum usage_activity a);
 
 /*
+ * The board has closed its eyes, or opened them again.
+ *
+ * The status-change popup is the only thing that needs to know. Sleep exists
+ * so the panel STOPS asking for attention, and a popup that fired over a
+ * sleeping board -- or worse, sat there through the whole sleep because
+ * nothing was ticking it down and greeted the owner on waking -- would undo
+ * the feature it is drawn on top of. So while this is true the popup is
+ * skipped silently: the change is still recorded, so waking does not produce
+ * a burst of everything that happened in the night.
+ *
+ * ui_sleep.c calls it, because ui_sleep_run() blocks the mode loop for the
+ * whole sleep and keeps servicing the protocol between frames -- so the
+ * setters on this file go on being called the entire time, with nobody
+ * looking.
+ */
+void usage_view_set_sleeping(bool sleeping);
+
+/*
  * Which project the panel should name, and how many sessions hold the state.
  *
  * `label` may be empty, which is the ordinary case whenever several sessions

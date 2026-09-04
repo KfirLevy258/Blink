@@ -380,4 +380,53 @@
 
 #define SCR_RIGHT_MARGIN_MIN	4	/* nothing flush against the bezel */
 
+/*
+ * The status-change popup: one sentence, five seconds, over the bottom band.
+ *
+ * The owner asked for it as a popup -- "session x is finished, session y is
+ * waiting for you" -- and the panel has no free space, so a popup here is
+ * always a card ON TOP of something. What it may cover is therefore the whole
+ * design question, and the answer is: not the two things a glance is for.
+ *
+ * NOT THE PIP ROW and NOT THE PERCENTAGE. Those are what someone crossing the
+ * room reads without stopping, and a card over either of them makes the panel
+ * worse for five seconds in exchange for a sentence they did not ask to read
+ * right then. The band below the arcs is the opposite kind of information --
+ * a countdown, a caption, the provider's name -- none of it changing in five
+ * seconds and none of it what the eye goes to first.
+ *
+ * So the card takes the strip from just above the countdowns to just above
+ * the page rail: 184..224 on a 240 px panel, clearing the arcs (which end at
+ * 164) by twenty pixels and the rail by two. The rail stays visible on
+ * purpose -- it is the only thing that says which page you are on, and a
+ * popup that hid it would leave the reader unsure whose session the sentence
+ * is even about.
+ *
+ * Written as expressions against the constants it has to clear, so it follows
+ * if the rail moves or the countdowns do; tests/usage_layout asserts every one
+ * of those clearances.
+ */
+#define TOAST_TOP_Y		(GAUGE_CD_Y - 2)
+#define TOAST_BOTTOM_OFF	(RAIL_BOTTOM_OFF + RAIL_H + 2)
+#define TOAST_H			(SCR_H - TOAST_BOTTOM_OFF - TOAST_TOP_Y)
+#define TOAST_PAD_V		((TOAST_H - FONT_LINE_H) / 2)
+/*
+ * 288 px: "A session is waiting for you" whole, with both bezels clear.
+ *
+ * It is a budget for the sentences that carry no project name, because those
+ * are the ones that MUST fit -- there is no shorter thing for them to fall
+ * back to. A named one ("LiveClaudeUi is waiting for you") also fits, and a
+ * pathological 27-character label does not and ellipsizes, which is the same
+ * bargain the hint line already makes.
+ */
+#define TOAST_MAX_W		288
+
+/*
+ * Five seconds, from the owner, and counted in whole seconds off the same
+ * usage_view_tick_1s() the countdowns use rather than an LVGL timer -- one
+ * clock for everything on this screen that expires, and the peek card's
+ * auto-hide already works this way.
+ */
+#define TOAST_TTL_S		5
+
 #endif /* USAGE_LAYOUT_H */

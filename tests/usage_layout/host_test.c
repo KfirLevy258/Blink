@@ -333,6 +333,58 @@ int main(void)
 	CHECK(STATUS_Y + 2 * FONT_LINE_H > GAUGE_ARC_Y,
 	      "a two-line hint would land on the gauges, so it must ellipsize");
 
+	/* --- the status-change popup --- */
+	/*
+	 * A popup on a full 320x240 panel is always a card ON TOP of
+	 * something, so WHAT IT MAY COVER is the design, and these are it:
+	 * not the percentage, and not the pip row above it. Those two are
+	 * what someone crossing the room reads without stopping, and covering
+	 * either of them for five seconds makes the panel worse in exchange
+	 * for a sentence nobody asked to read right then.
+	 *
+	 * Clearing the whole arc is the strictly stronger claim and is what
+	 * is asserted -- the percentage sits inside the ring, and the ring's
+	 * bottom is the last thing above the band the card takes.
+	 */
+	CHECK(TOAST_TOP_Y >= GAUGE_ARC_Y + GAUGE_ARC_SZ,
+	      "the popup clears the gauges, and so the percentages inside them");
+	/*
+	 * The page rail stays visible. It is the only thing on the screen
+	 * that says WHICH PROVIDER you are looking at, and a card that hid it
+	 * would leave the reader unable to tell whose session the sentence is
+	 * about -- which is most of the sentence's value on a two-page desk.
+	 */
+	CHECK(SCR_H - TOAST_BOTTOM_OFF <= SCR_H - RAIL_BOTTOM_OFF - RAIL_H,
+	      "the popup clears the page rail, which names the provider");
+	CHECK(TOAST_MAX_W + 2 * SCR_RIGHT_MARGIN_MIN <= SCR_W,
+	      "the popup clears both bezels");
+	/*
+	 * One line, with its padding, and the padding is real. TOAST_H is
+	 * derived from the band the card is allowed, so a rail or countdown
+	 * that moved could squeeze it below a line's height without anybody
+	 * noticing until the text was clipped on a desk.
+	 */
+	CHECK(TOAST_H >= FONT_LINE_H && TOAST_PAD_V > 0,
+	      "the popup is tall enough for its line, and pads it");
+	/*
+	 * The sentences that carry NO project name must fit whole: there is
+	 * nothing shorter for them to fall back to. The longest is the
+	 * waiting one.
+	 */
+	CHECK(BUDGET_FITS(TOAST_MAX_W, "A session is waiting for you"),
+	      "TOAST_MAX_W is sized for the longest unnamed sentence");
+	/* A real project name still fits beside it. */
+	CHECK(BUDGET_FITS(TOAST_MAX_W, "LiveClaudeUi is waiting for you"),
+	      "an ordinary project name fits too");
+	/*
+	 * And the longest label the buffer can hold does NOT, which is why
+	 * the label ellipsizes rather than wraps -- the same bargain the hint
+	 * line makes, asserted here so LV_LABEL_LONG_DOT is not optional.
+	 */
+	CHECK(!BUDGET_FITS(TOAST_MAX_W,
+			   "123456789012345678901234567 is waiting for you"),
+	      "a pathological label overruns the card, so it must ellipsize");
+
 	printf(failures ? "\n%d FAILED\n" : "\nall layout checks passed\n",
 	       failures);
 	return failures ? 1 : 0;
