@@ -1145,11 +1145,11 @@ def cmd_install(_args) -> int:
 def cmd_uninstall(_args) -> int:
     print("Blink uninstall.")
     print()
-    print("[1/4] Background service ... ", end="", flush=True)
+    print("[1/5] Background service ... ", end="", flush=True)
     print(_remove_service())
     _say_bye()
 
-    print("[2/4] Claude Code setting:")
+    print("[2/5] Claude Code setting:")
     try:
         print("      " + install_statusline.uninstall(settings_path(), shim_path()))
     except install_statusline.SettingsUnreadable as e:
@@ -1160,7 +1160,7 @@ def cmd_uninstall(_args) -> int:
         print(f"      Left alone: {e}")
         print("      Remove the statusLine.command line by hand once it parses.")
 
-    print("[3/4] Activity hooks:")
+    print("[3/5] Activity hooks:")
     try:
         print("      " + install_hooks.uninstall(settings_path(),
                                                  hook_shim_path()))
@@ -1169,7 +1169,10 @@ def cmd_uninstall(_args) -> int:
         # file we cannot parse by writing a fresh one over it.
         print(f"      Left alone: {e}")
 
-    print("[4/4] Files ... ", end="", flush=True)
+    print("[4/5] Codex hooks:")
+    _uninstall_codex_hooks()
+
+    print("[5/5] Files ... ", end="", flush=True)
     # Only what install created. NOT ~/.blink itself: it also holds the two
     # signing keys, which cannot be regenerated -- every board flashed with the
     # first one's public half, and every app carrying the second one's, would
@@ -1197,6 +1200,46 @@ def cmd_uninstall(_args) -> int:
     print("back in, then delete it by hand:")
     print(f"  {bin_dir()}")
     return 1
+
+
+def _uninstall_codex_hooks() -> None:
+    """Take the Codex registration back out, and say what is deliberately kept.
+
+    Prints rather than returning, because it has two things to say, and never
+    stops on a bad file: the caller has already removed the login service by
+    the time this runs, so stopping here would leave the machine half-undone.
+    The one thing we must not do is "repair" a file we cannot parse by writing
+    a fresh one over it.
+
+    The trust record in Codex's own config.toml is left alone, and the second
+    half of this function exists to say so out loud. Removing it is the
+    tidier-looking choice and it is the wrong one: under `codex exec` a
+    distrusted hook is skipped silently, with no prompt and no output, so a
+    reinstall on a headless machine would produce a hook that is installed,
+    correct, registered and permanently invisible. Working software that
+    cannot be seen to be broken is the worst failure shape this product has.
+    The full argument is in docs/research/codex-hook-contract.md under "RULING:
+    uninstall leaves the trust record alone"; silence about it here would be
+    the same defect one level up -- a decision the user cannot see.
+    """
+    try:
+        print("      " + install_codex_hooks.uninstall(
+            install_codex_hooks.hooks_file(), hook_shim_path()))
+    except install_statusline.SettingsUnreadable as e:
+        # Deliberately worded like the two steps above it, so a reader of the
+        # transcript sees one kind of event and not three.
+        print(f"      Left alone: {e}")
+
+    config = os.path.join(install_codex_hooks.codex_home(), "config.toml")
+    # Only when the file is really there. On the many machines with no Codex
+    # at all, a paragraph about a config file that does not exist is noise
+    # about a record that was never written.
+    if os.path.exists(config):
+        print(f"      Left in place: your Codex trust records in {config}.")
+        print("      If you approved this hook in Codex, that approval stays")
+        print("      on file, so installing Blink again works without asking")
+        print("      you a second time. Remove its [hooks.state] entry by hand")
+        print("      if you would rather Codex asked you afresh.")
 
 
 def _live_sessions() -> int:
@@ -1228,33 +1271,44 @@ def _rm_tree(root):
 
 
 def _rm_state_dir():
-    """Remove ~/.blink/state and its per-session subdirectories.
+    """Remove ~/.blink/state and ~/.blink/state-codex, and their subdirectories.
+
+    Both directories, because the Codex slots deliberately live apart from the
+    Claude ones (pc/providers/codex_state explains why) -- and a slot
+    directory left behind by an uninstall is not litter, it is a lie: the
+    daemon would go on counting sessions of a tool it no longer hooks.
 
     Two levels deep and no deeper, by construction: the shim only ever creates
-    <session>.state files and <session>/<agent> files. Walking rather than
-    shutil.rmtree because this runs against a path under the customer's home
-    and a bounded loop cannot be talked into deleting more than it was told.
+    <session>.state files and <session>/<agent> files, in whichever of the two
+    directories its second argument chose. Walking rather than shutil.rmtree
+    because this runs against a path under the customer's home and a bounded
+    loop cannot be talked into deleting more than it was told.
     """
-    root = os.path.join(blink_home(), "state")
-    try:
-        names = os.listdir(root)
-    except OSError:
-        return
-    for name in names:
-        p = os.path.join(root, name)
-        if os.path.isdir(p):
-            for inner in (os.listdir(p) if os.path.isdir(p) else []):
-                _rm(os.path.join(p, inner))
-            try:
-                os.rmdir(p)
-            except OSError:
-                pass
-        else:
-            _rm(p)
-    try:
-        os.rmdir(root)
-    except OSError:
-        pass
+    for sub in ("state", "state-codex"):
+        root = os.path.join(blink_home(), sub)
+        try:
+            names = os.listdir(root)
+        except OSError:
+            # Absent, which is the normal case for state-codex on a machine
+            # that never ran Codex. `continue`, not `return`: the old single
+            # directory could give up here, but giving up on the first of two
+            # would leave the second untouched on exactly those machines.
+            continue
+        for name in names:
+            p = os.path.join(root, name)
+            if os.path.isdir(p):
+                for inner in (os.listdir(p) if os.path.isdir(p) else []):
+                    _rm(os.path.join(p, inner))
+                try:
+                    os.rmdir(p)
+                except OSError:
+                    pass
+            else:
+                _rm(p)
+        try:
+            os.rmdir(root)
+        except OSError:
+            pass
 
 
 def hook_shim_status_note():

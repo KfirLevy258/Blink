@@ -540,3 +540,70 @@ def test_install_creates_the_codex_state_directory_private(monkeypatch):
     assert os.path.isdir(d)
     if os.name != "nt":
         assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+
+
+def test_uninstall_removes_the_codex_slots_too(tmp_path):
+    """A left-behind slot directory is not litter, it is a lie: the daemon
+    would go on counting sessions from a tool it no longer hooks."""
+    for sub in ("state", "state-codex"):
+        d = os.path.join(cli.blink_home(), sub)
+        os.makedirs(os.path.join(d, "sess-1"), exist_ok=True)
+        with open(os.path.join(d, "sess-1.state"), "w") as f:
+            f.write("{}")
+        with open(os.path.join(d, "sess-1", "agent-1"), "w") as f:
+            f.write("")
+
+    cli._rm_state_dir()
+
+    for sub in ("state", "state-codex"):
+        d = os.path.join(cli.blink_home(), sub)
+        assert not os.path.exists(os.path.join(d, "sess-1.state"))
+        assert not os.path.exists(os.path.join(d, "sess-1"))
+
+
+def test_uninstall_keeps_going_when_the_codex_file_is_unreadable(monkeypatch,
+                                                                 capsys):
+    """The login service is already gone by this point in cmd_uninstall, so
+    stopping here would leave the machine half-undone."""
+    def boom(_p, _s=None):
+        raise cli.install_statusline.SettingsUnreadable("not valid JSON")
+
+    monkeypatch.setattr(cli.install_codex_hooks, "uninstall", boom)
+    cli._uninstall_codex_hooks()
+    out = capsys.readouterr().out
+    assert "Left alone" in out
+
+
+def test_uninstall_says_it_left_the_codex_trust_record_alone(tmp_path, capsys,
+                                                             monkeypatch):
+    """The ruling this carries is only half a decision if the user cannot see
+    it. Removing the trust record would make a headless reinstall silently
+    dead -- Codex skips a distrusted hook with no output at all -- so it stays,
+    and uninstall says so, names the file, and says how to undo it."""
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    config = codex / "config.toml"
+    config.write_text('[hooks.state."k"]\ntrusted_hash = "sha256:0"\n')
+    monkeypatch.setattr(cli.install_codex_hooks, "uninstall",
+                        lambda p, s=None: "Codex state hooks removed (10).")
+
+    cli._uninstall_codex_hooks()
+
+    out = capsys.readouterr().out
+    assert "trust" in out.lower(), "uninstall says nothing about the trust record"
+    assert str(config) in out, "it does not name the file it left behind"
+    assert "hooks.state" in out, "it does not say how to undo it"
+    # And the record really is still there. This is the assertion the ruling
+    # turns on: a single added os.remove() in _uninstall_codex_hooks would be
+    # invisible to every other check in this file.
+    assert "trusted_hash" in config.read_text()
+
+
+def test_uninstall_says_nothing_about_a_codex_config_that_is_not_there(
+        monkeypatch, capsys):
+    """The majority of machines have no Codex. A paragraph about a config file
+    that does not exist is noise about a record that was never written."""
+    monkeypatch.setattr(cli.install_codex_hooks, "uninstall",
+                        lambda p, s=None: "No Codex state hooks to remove.")
+    cli._uninstall_codex_hooks()
+    assert "trust" not in capsys.readouterr().out.lower()
