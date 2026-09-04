@@ -54,6 +54,7 @@ measured yet.
 ON DISK
 -------
     ~/.blink/state/<session_id>.state   one JSON slot, newest event wins
+    ~/.blink/state/<session_id>.waiting  present while a human is being asked
     ~/.blink/state/<session_id>/<agent_id>   one empty file per live agent
 
 One file per session because a single global slot silently misreports the
@@ -61,6 +62,25 @@ moment a second terminal exists. One file per AGENT because that makes the
 count exact without a lock: two agents starting at once cannot race on a
 shared counter, and a stop removes precisely the agent that stopped rather
 than decrementing and hoping.
+
+And a separate file for WAITING, for the same reason one step further in.
+"Newest event wins" is only true if the newest event is the last one WRITTEN,
+and on Codex it is not: the first interactive session anyone captured fired
+PreToolUse and PermissionRequest in the same second, twice
+(docs/research/codex-hook-contract.md). Those are two shim processes racing
+for one slot, and the shim ends with mv -f, so whichever finishes second wins
+regardless of which event happened first. Lose that race and the slot says
+`running` over a session that is blocked on a person -- for exactly as long as
+the person takes to answer, which is the whole interval this feature exists to
+show. The next event does correct it, but the next event IS the answer, so the
+correction lands the moment it stops mattering.
+
+A marker cannot lose that race because it does not share a file with anything:
+PermissionRequest creates it, the events that mean the person answered
+(PostToolUse, Interrupt, Stop, UserPromptSubmit) remove it, and create and
+unlink are each atomic on their own path. PreToolUse deliberately does NOT
+remove it -- that is the one event known to arrive in the same second, so
+letting it clear the marker would reintroduce the race it exists to escape.
 """
 import json
 import os
@@ -82,6 +102,11 @@ STATE_DIR = "~/.blink/state"
 # firing (a killed terminal, a crash) leaves files behind, and nothing else
 # will ever collect them.
 ABANDONED_AFTER_S = 3600.0
+
+# The sibling of <sid>.state that says a person is being asked something. Not
+# a suffix on the slot itself: the point of it is to be a different file from
+# the one two hook processes race for. See the ON DISK note above.
+WAITING_MARKER_SUFFIX = ".waiting"
 
 # An AGENT file, though, is created once and never touched again -- its mtime
 # is the agent's start, not its last sign of life -- so the session threshold
@@ -490,26 +515,54 @@ class ClaudeStateProvider(base.ProviderParser):
             live += 1
         return live
 
+    def _waiting_marked(self, path, now_epoch):
+        """Is the waiting marker present, and recent enough to mean it?
+
+        Existence is nearly the whole answer -- the shim creates the file when
+        a person is asked something and removes it when they answer -- but a
+        marker whose removal never ran (a crash between the two, a directory
+        that turned unwritable) would otherwise pin a session on "Waiting for
+        you" for as long as the session lasts. Bounding it by the same hour
+        that bounds every other file here means the marker can never outlive
+        the census entry it modifies.
+        """
+        try:
+            age = now_epoch - os.path.getmtime(path)
+        except OSError:
+            return False
+        # A clock that stepped backwards, exactly as derive_state treats it:
+        # a negative age is a broken measurement, not a fresh file, and the
+        # marker is present either way.
+        return age <= ABANDONED_AFTER_S
+
     # --- the whole directory ----------------------------------------------
 
-    def scan(self, now_epoch):
-        """{state: n_sessions}, {state: [names]}, total live agents.
+    def session_states(self, now_epoch):
+        """({session_id: (state, name)}, live agents) for this directory.
 
-        Sweeps what it finds dead."""
+        The per-session view, split out of scan() because the Codex union
+        needs the ids: a session that both the hook slots and the rollout
+        reader can see has to be counted once, and the session id is the only
+        thing those two sources have in common. Counts alone cannot be
+        de-duplicated.
+
+        Sessions in STATE_UNKNOWN are absent from the mapping and are swept
+        exactly as scan() always swept them.
+        """
         try:
             entries = os.listdir(self._dir)
         except OSError:
             # No hooks installed, or nothing has happened yet. Both normal.
-            return {}, {}, 0
+            return {}, 0
 
-        counts = {}
-        names = {}
+        states = {}
         agents = 0
         for name in entries:
             if not name.endswith(".state"):
                 continue
             sid = name[: -len(".state")]
             state_path = os.path.join(self._dir, name)
+            marker_path = os.path.join(self._dir, sid + WAITING_MARKER_SUFFIX)
             state, age, sess_name = self._read_state(state_path, now_epoch)
 
             if state is None or state == base.STATE_UNKNOWN:
@@ -529,14 +582,38 @@ class ClaudeStateProvider(base.ProviderParser):
                 # bytes and one stat per poll, and the hour still ends.
                 if age is not None and age > ABANDONED_AFTER_S and self._sweep:
                     _unlink(state_path)
+                    _unlink(marker_path)
                     _rmtree(os.path.join(self._dir, sid))
                 continue
 
+            # The marker overrules the slot, and only ever in this direction.
+            # The slot cannot be trusted to say `waiting`, because the write
+            # that would have said so is the one that loses the race described
+            # in ON DISK; the marker is the only witness that cannot be
+            # overwritten by a same-second PreToolUse. Nothing goes the other
+            # way: no slot event clears a marker, because deciding a person
+            # has answered is the shim's job, where the event order is known.
+            if self._waiting_marked(marker_path, now_epoch):
+                state = base.STATE_WAITING
+
+            states[sid] = (state, sess_name)
+            agents += self._count_agents(os.path.join(self._dir, sid),
+                                         now_epoch)
+        return states, agents
+
+    def scan(self, now_epoch):
+        """{state: n_sessions}, {state: [names]}, total live agents.
+
+        Counts derived from session_states() rather than gathered beside it,
+        so the two views cannot drift apart. Sweeps what it finds dead.
+        """
+        states, agents = self.session_states(now_epoch)
+        counts = {}
+        names = {}
+        for state, sess_name in states.values():
             counts[state] = counts.get(state, 0) + 1
             if sess_name:
                 names.setdefault(state, []).append(sess_name)
-            agents += self._count_agents(os.path.join(self._dir, sid),
-                                         now_epoch)
         return counts, names, agents
 
     def poll(self, now_epoch):

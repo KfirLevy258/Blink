@@ -362,4 +362,78 @@ done
 	fail "codex state directory readable by others: $(ls -ld "$CODEXDIR")"
 ok "the codex directory is as sanitised and as private as the Claude one"
 
+# 15. THE WAITING MARKER, and the race it exists to escape.
+#
+#     Codex fires PreToolUse and PermissionRequest in the SAME SECOND -- twice,
+#     in the one interactive session anyone has captured. Those are two copies
+#     of this script running at once, and the slot below them is written with
+#     mv -f, so whichever renames last wins regardless of which event happened
+#     first. Lose that race and the panel says a session is working while it is
+#     blocked on a person, for as long as the person takes to answer.
+#
+#     The marker is a different file, so there is no race left to lose. That is
+#     what the two orders below check: not "did the race happen to go our way
+#     this time" but "both orders give the same answer", which is exhaustive
+#     rather than sampled.
+W='{"session_id":"wait-1","cwd":"/home/secret/proj"}'
+printf '%s' "$W" | $SH "$SHIM" PermissionRequest >/dev/null 2>&1
+[ -f "$DIR/wait-1.waiting" ] || fail "PermissionRequest left no waiting marker"
+[ ! -s "$DIR/wait-1.waiting" ] ||
+	fail "the marker has contents: $(cat "$DIR/wait-1.waiting")"
+ok "PermissionRequest raises a waiting marker, and it is empty"
+
+# 15b. The LOSING order, written down: PreToolUse arrives second and clobbers
+#      the slot. The marker must survive it, which is why PreToolUse is not in
+#      the removal list -- it is the one event known to land in the same second.
+printf '%s' "$W" | $SH "$SHIM" PreToolUse >/dev/null 2>&1
+grep -q '"event":"PreToolUse"' "$DIR/wait-1.state" ||
+	fail "the second event did not reach the slot at all"
+[ -f "$DIR/wait-1.waiting" ] ||
+	fail "PreToolUse cleared the marker: the race is back"
+ok "a same-second PreToolUse takes the slot but not the marker"
+
+# 15c. The other order, for completeness: the marker is raised after the slot
+#      already says running, and the answer is the same.
+printf '{"session_id":"wait-2"}' | $SH "$SHIM" PreToolUse >/dev/null 2>&1
+printf '{"session_id":"wait-2"}' | $SH "$SHIM" PermissionRequest >/dev/null 2>&1
+[ -f "$DIR/wait-2.waiting" ] || fail "no marker when PermissionRequest is second"
+ok "both same-second orders end with the marker present"
+
+# 15d. Every way a person can answer clears it. A waiting state with no way out
+#      is worse than no waiting state at all: the panel would call for someone's
+#      attention until the abandon sweep an hour later.
+for clear in UserPromptSubmit PostToolUse Interrupt Stop; do
+	printf '%s' "$W" | $SH "$SHIM" PermissionRequest >/dev/null 2>&1
+	[ -f "$DIR/wait-1.waiting" ] || fail "marker not re-raised before $clear"
+	printf '%s' "$W" | $SH "$SHIM" "$clear" >/dev/null 2>&1
+	[ ! -e "$DIR/wait-1.waiting" ] || fail "$clear did not clear the marker"
+done
+ok "every event that means a person answered clears the marker"
+
+# 15e. SessionEnd takes it too. Nothing else ever removes a marker whose
+#      session is gone except the daemon's hour-long sweep.
+printf '%s' "$W" | $SH "$SHIM" PermissionRequest >/dev/null 2>&1
+printf '{"session_id":"wait-1"}' | $SH "$SHIM" SessionEnd >/dev/null 2>&1
+[ ! -e "$DIR/wait-1.waiting" ] || fail "SessionEnd left the waiting marker"
+[ -f "$DIR/wait-2.waiting" ] || fail "SessionEnd removed another session's marker"
+ok "SessionEnd removes its own marker and only its own"
+
+# 15f. Private, like the slot beside it: the marker's mere existence says
+#      somebody has an approval prompt open on this machine.
+[ -z "$(find "$DIR/wait-2.waiting" \( -perm -040 -o -perm -004 \) -print)" ] ||
+	fail "the marker is readable by others: $(ls -l "$DIR/wait-2.waiting")"
+ok "the waiting marker is readable by this user alone"
+
+# 15g. And an unwritable directory costs the marker and NOTHING else. This
+#      line wants to be `:`, which is a POSIX SPECIAL built-in -- and a
+#      redirection error on a special built-in makes the shell EXIT, skipping
+#      the `exit 0` at the bottom of the shim and handing Claude Code a failing
+#      hook. Measured: status 1 under sh, 2 under dash.
+chmod 500 "$RO"
+out=$(HOME="$RO" sh -c "printf '%s' '$W' | $SH '$SHIM' PermissionRequest; printf 'status=%s' \$?" 2>"$WORK/err15.txt")
+chmod 700 "$RO"
+[ "$out" = "status=0" ] || fail "PermissionRequest into an unwritable HOME: [$out]"
+[ -s "$WORK/err15.txt" ] && fail "unwritable marker wrote to stderr: $(cat "$WORK/err15.txt")"
+ok "an unwritable marker path still exits 0, silently"
+
 printf 'PASS [%s]\n' "$WHICH"

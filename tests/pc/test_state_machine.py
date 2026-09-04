@@ -706,3 +706,102 @@ def test_a_pid_dead_session_is_not_swept_the_instant_it_is_dropped(state_dir,
     assert not (state_dir / "s1").exists()
 
 
+# --- the per-session view, and the marker that beats the slot -------------
+#
+# scan() collapses sessions into counts before anyone sees them, and the Codex
+# union needs the ids: a session both the hook slots and the rollout reader can
+# see must be counted once, and an id is the only thing those two sources
+# share. session_states() is that view; scan() is now derived from it.
+#
+# The marker is the other half. `waiting` cannot be read off the slot on Codex,
+# because PreToolUse and PermissionRequest fire in the same second from two
+# separate shim processes and the slot's mv -f is last-writer-wins. See ON DISK
+# in pc/providers/claude_state.py.
+
+
+def mark_waiting(d, sid, t=None):
+    p = d / f"{sid}{claude_state.WAITING_MARKER_SUFFIX}"
+    p.write_text("")
+    if t is not None:
+        os.utime(p, (t, t))
+    return p
+
+
+def test_session_states_reports_each_session_by_id(state_dir):
+    """Who is in which state, not just how many, and under which name."""
+    write_session(state_dir, "sess-a", "PermissionRequest", NOW - 5,
+                  name="Alpha")
+    write_session(state_dir, "sess-b", "PreToolUse", NOW - 5)
+    states, agents = provider(state_dir, sweep=False).session_states(NOW)
+    assert states == {"sess-a": (base.STATE_WAITING, "Alpha"),
+                      "sess-b": (base.STATE_RUNNING, "")}
+    assert agents == 0
+
+
+def test_scan_still_agrees_with_session_states(state_dir):
+    """The counts and the names are derived from the mapping, so they cannot
+    drift from it -- which is the only reason splitting the pass out is safe."""
+    write_session(state_dir, "sess-a", "PermissionRequest", NOW - 5,
+                  name="Alpha")
+    write_session(state_dir, "sess-b", "PreToolUse", NOW - 5)
+    counts, names, agents = provider(state_dir, sweep=False).scan(NOW)
+    assert counts == {base.STATE_WAITING: 1, base.STATE_RUNNING: 1}
+    assert names == {base.STATE_WAITING: ["Alpha"]}
+    assert agents == 0
+
+
+def test_a_marker_beats_a_slot_that_still_says_running(state_dir):
+    """THE RACE, and the whole reason the marker exists.
+
+    This is the losing order written down: PermissionRequest fired, and then
+    PreToolUse's rename landed on top of it in the same second, so the slot
+    reads `running` over a session that is blocked on a person. Nothing in the
+    slot can distinguish that from a session that really is working -- the
+    marker is the only witness left, and it wins."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 5)
+    mark_waiting(state_dir, "s1", NOW - 5)
+    states, _ = provider(state_dir).session_states(NOW)
+    assert states == {"s1": (base.STATE_WAITING, "")}
+
+
+def test_a_session_with_no_marker_is_whatever_its_slot_says(state_dir):
+    """The control the test above needs. Without it, a scanner that simply
+    reported `waiting` for every session would pass that one."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 5)
+    states, _ = provider(state_dir).session_states(NOW)
+    assert states == {"s1": (base.STATE_RUNNING, "")}
+
+
+def test_a_marker_older_than_the_hour_is_not_believed(state_dir):
+    """A marker whose removal never ran -- a crash between the answer and the
+    unlink -- would otherwise pin a session on "Waiting for you" for the rest
+    of its life. It is bounded by the same hour every other file here is."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 5)
+    mark_waiting(state_dir, "s1", NOW - ABANDONED_AFTER_S - 1)
+    counts, _, _ = provider(state_dir).scan(NOW)
+    assert counts == {base.STATE_RUNNING: 1}
+
+
+def test_a_marker_from_a_clock_that_runs_fast_is_still_a_marker(state_dir):
+    """A file stamped in the future was written by a clock that runs fast, not
+    by a session that has not started yet. Refusing it would drop a real
+    `waiting` -- the one direction this feature is not allowed to fail in."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 5)
+    mark_waiting(state_dir, "s1", NOW + 30)
+    counts, _, _ = provider(state_dir).scan(NOW)
+    assert counts == {base.STATE_WAITING: 1}
+
+
+def test_a_swept_session_takes_its_marker_with_it(state_dir):
+    """An abandoned slot is not a session, it is litter, and it is collected --
+    the marker beside it too. Nothing else ever looks at these files again, and
+    the shim only removes a marker on an event that will never come."""
+    dead_t = NOW - ABANDONED_AFTER_S - 60
+    write_session(state_dir, "gone", "PreToolUse", dead_t)
+    marker = mark_waiting(state_dir, "gone", dead_t)
+    states, agents = provider(state_dir).session_states(NOW)
+    assert (states, agents) == ({}, 0)
+    assert not (state_dir / "gone.state").exists()
+    assert not marker.exists()
+
+

@@ -149,7 +149,7 @@ SessionEnd)
 	# rm -rf on a path built from the sanitised id above; a traversal cannot
 	# reach here because the pattern would not have matched.
 	rm -rf "${DIR:?}/$sid" 2>/dev/null
-	rm -f "$DIR/$sid.state" 2>/dev/null
+	rm -f "$DIR/$sid.state" "$DIR/$sid.waiting" 2>/dev/null
 	;;
 SubagentStart|SubagentStop)
 	# One file per agent, named by the id Claude Code assigns. This is why
@@ -167,6 +167,58 @@ SubagentStart|SubagentStop)
 	fi
 	;;
 *)
+	# WAITING LIVES IN ITS OWN FILE, not in the slot below.
+	#
+	# The slot is written with mv -f, so the last writer wins -- and on Codex
+	# the write order is not the event order. The first interactive session
+	# anyone captured fired PreToolUse and PermissionRequest in the SAME
+	# SECOND, twice (docs/research/codex-hook-contract.md). Those are two
+	# copies of this script running at once, and the comment further down
+	# already warns that two of them can be writing one session's slot. If
+	# PreToolUse renames last, the slot says the session is working while it
+	# is in fact blocked on a person -- and it says so for exactly as long as
+	# the person takes to answer, which is the one interval this whole
+	# feature exists to display. The next event corrects it, but the next
+	# event IS the answer, so the correction arrives once it is worthless.
+	#
+	# A marker file cannot lose that race because it shares no file with
+	# anything: creating it and removing it are each atomic on their own
+	# path, and neither is a read-modify-write. Nothing here has to know
+	# which of two same-second processes went first.
+	#
+	# PreToolUse is deliberately NOT in the removal list. It is the one event
+	# known to arrive in the same second as PermissionRequest, so clearing
+	# the marker on it would put the race straight back. It stays registered
+	# regardless -- not for the state, which UserPromptSubmit has already
+	# set, but for the timestamp: it is what keeps a long tool call's slot
+	# fresh, and without it a slow turn ages out of the census entirely.
+	#
+	# The removers are the events that mean a human has answered, or that the
+	# turn has moved on past the question: PostToolUse (approved), Interrupt
+	# (refused, and terminal for its turn), Stop, and UserPromptSubmit, which
+	# starts a new turn and so cannot still be waiting on the last one's.
+	case $event in
+	PermissionRequest)
+		# `true` and not `:`, which is what this line obviously wants
+		# to be. `:` is a POSIX SPECIAL built-in, and a redirection
+		# error on a special built-in makes the shell EXIT -- measured
+		# here, status 1 under sh and 2 under dash, with the rest of
+		# the script never reached. That would skip the `exit 0` at
+		# the bottom and hand Claude Code a failing hook the first
+		# time the state directory is not writable. `true` is an
+		# ordinary built-in, so the same failure costs the marker and
+		# nothing else.
+		#
+		# 2>/dev/null FIRST, for the reason spelled out at the slot
+		# write below: redirections are applied left to right, so a
+		# trailing one does not cover a failure to open the target.
+		true 2>/dev/null > "$DIR/$sid.waiting"
+		;;
+	UserPromptSubmit | PostToolUse | Interrupt | Stop)
+		rm -f "$DIR/$sid.waiting" 2>/dev/null
+		;;
+	esac
+
 	# The name is read HERE and not beside the session id, because this is
 	# the only branch that writes it. SessionEnd and the Subagent events were
 	# paying two sed processes each to compute a value they then discarded,
