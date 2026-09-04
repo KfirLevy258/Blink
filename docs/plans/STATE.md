@@ -383,3 +383,64 @@ answering "No such process", last log line mid-stream with no traceback.
 `KeepAlive` is true, so it did not crash into a restart loop; something booted
 it out. Restarted by hand and healthy since. Cause unknown; worth watching for
 a second occurrence before treating it as a defect.
+
+---
+
+# PLAN 2 IS DONE — 2026-09-04
+
+All ten tasks. The Codex reader now names sessions and reports a dead turn as
+`failed` instead of `idle`. Commits: `c3e03d3`, `b1b6ab4`, `b3bc6f2`,
+`94ddadb`, `146d104`, `dccada7`, `4f569cd`, `17f099b`, `0de4041`, `0bbd198`,
+`7f3f728`, `33ddcb6`, `697ac5e`, `431b8ff`, `b4aeb9e`.
+
+Gate, all four green: **647 pytest**, `PASS [codex contract at main]` (14
+checks, up from 8), `PASS [host tests]` (15 suites), `PASS [sh]` (hook shim).
+
+## What tasks 6-9 actually changed
+
+- A Codex `task_complete` carrying an `error` now reports `failed`. It costs no
+  wire change: `base.STATE_FAILED` already existed and `usage_state.c` already
+  maps it. **Never observed in a real file** — every rollout on this machine is
+  a success — so the branch rests on a reading of upstream's Rust schema and is
+  written to degrade toward `idle` on any shape it does not recognise.
+- `turn_aborted` still means `idle`, all four reasons, and there is now a test
+  and a contract check holding it there.
+- The both-providers-named case is pinned for the first time. It was
+  unreachable until this plan, because only Claude could set a `label`.
+- The contract script grew from 8 checks to 14. This is the part that matters:
+  two of the five names the reader now depends on carry upstream's own rename
+  warning (`alias = "turn_started"`, `alias = "turn_complete"`). The day an
+  alias becomes the primary name, the state machine goes silent and **every
+  Python test stays green**, because they all feed the reader strings this repo
+  wrote. The script is the only thing that can notice.
+
+## The count of tests that could not fail reached FOURTEEN
+
+Two more found in tasks 6 and 7, and the second is the worst kind yet: a test
+written specifically to pin a guard, in a scenario where two conditions each
+independently forced the expected answer, so no single-line break of the guard
+could redden it. The guard was live — calling `ingest._pair_from` directly with
+two named frames claiming no counts proved it — and NOTHING in 647 tests could
+falsify it.
+
+Both fixes were verified by mutation run by the coordinator, not accepted on an
+implementer's report. **One implementer's mutation table was simply wrong**: its
+headline mutation raised `IndexError` rather than changing behaviour, reddening
+13 baseline tests and none of the three it claimed to vouch for.
+
+**Run a mutation survey before merging.** It has now been worth more than either
+general review, three times.
+
+## Reported, not acted on
+
+The Claude hook shim's `_projname` rule is `[0-9A-Za-z][0-9A-Za-z._-]{0,23}` —
+no spaces, no non-ASCII. Now that `encode` no longer escapes, the wire and the
+firmware can both carry a non-ASCII name, so **that shim is the only thing left
+stopping a project called `café` from being named.** Open owner decision.
+
+## Next
+
+Plan 3 (`codex-hook-shim.md`), 14 tasks. Its discovery gate has run and the
+premise holds. **Its first task must be the smoke test — no Codex hook has ever
+been executed by anyone.** Then: flash nothing (plan 3 is daemon-and-shim only),
+and merge, because `main` still has none of this.
