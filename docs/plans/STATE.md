@@ -535,3 +535,36 @@ wall-clock run, not the mechanism.
 **Note for whoever ships this board:** `20500d33ff1c` is an individual claude
 unit burned to ship and now carries unreleased firmware. It needs
 `tools/burn.sh --edition claude` (no `--logo`) before it goes in a box.
+
+## Decision: the pip row stays whole-desk — 2026-09-04
+
+The owner noticed that switching the panel between Codex and Claude changes the
+ring but not the pips, and asked whether sessions should be separated per
+provider. Read the code rather than guessing: `ingest._pair_from` sums both
+frames' counts for `worst_of(primary, secondary)`, and that sum is symmetric, so
+the preference genuinely **cannot** move the pip row. The observation is exact.
+
+**Decided: do not separate.** Three reasons, the first close to decisive:
+
+1. **The attention light cannot be per-provider.** `state` is deliberately
+   `worst_of(claude, codex)` because the point of the device is that a glance
+   tells you something needs you. Per-provider pips under a whole-desk light
+   would put **"Waiting for you" above zero pips** whenever the waiting session
+   belonged to the other provider — a worse inconsistency than the one being
+   fixed, and one that reads as a bug.
+2. **The ring is per-provider out of necessity, not scope.** Percentages from
+   two accounts with different limits and reset clocks cannot be added. That
+   constraint applies to percentages only; the pips should not inherit it.
+3. **Counting is the one thing that genuinely aggregates.** "Three things are
+   running on my desk" is true and useful; "two, unless you toggle" is neither.
+
+**But the owner found something real, and it is not the count.** Nothing on
+screen says which element has which scope — the ring means Claude, the pips mean
+everything, and the only way to learn that is to switch and notice nothing moved.
+
+**The fix, when it is worth doing, is the opposite of separating:** make the
+whole-desk scope visible, so two Claude pips and one Codex pip can be told apart
+at a glance. The count stays honest, switching still changes nothing, and it
+stops being a surprise because the reason is on the screen. That is firmware
+work and it is not free, so it goes behind plan 3, not in front of it. **Nothing
+is broken today** — this is a legibility improvement, not a defect.
