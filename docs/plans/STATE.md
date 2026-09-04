@@ -642,3 +642,65 @@ correct and silent; it is the half-present case -- an app that connects and then
 does not answer -- that nags. Nobody has hit that in the field, and it is not
 worth chasing on its own, but it is the shape a slow or wedged daemon would
 present to a customer.
+
+---
+
+# PLAN 3 IS DONE, AND VERIFIED END TO END — 2026-09-04, late
+
+The owner ran the full end-to-end check on their own desk and reported it
+working. Everything below was verified on hardware or against real Codex files,
+not argued from a contract.
+
+## What works, and how it was shown
+
+| Piece | Evidence |
+|---|---|
+| The hooks file path | `$CODEX_HOME/hooks.json` fires in 1 s; the plan's `hooks/hooks.json` never fires in 45 s; no-file control confirms the negative |
+| `PermissionRequest` | Observed for the first time by anyone, in the owner's interactive session |
+| Installer -> Codex -> shim -> slot | Real installer, real turn, real slots with the right id, event, pid and name |
+| `blink install` disclosure | Printed before touching Codex, naming the file and warning about the trust prompt |
+| The trust prompt | Seen by the owner: "10 hooks are new or changed" -- exactly BLINK's ten |
+| A distrusted hook is SILENT | Real turn, no bypass: zero hook lines, zero slots, zero mention of trust |
+| `blink status` | Says "registered, but it has never written anything" -- the only way to find the above |
+| A Codex session on the panel | The owner saw the pip appear |
+| `SessionEnd` on an interactive quit | Slot gone immediately; closes an item this file had listed as open |
+| The tombstone | A real session end took the slot to zero and left `<sid>.ended`; the reader agrees |
+
+## Two defects the owner found by using it, both fixed tonight
+
+1. **`blink install` said "running (launchd)" over a service it never started.**
+   Not a race: the old sequence was run five times and left the service not
+   running **5/5**, with `bootstrap` returning 0 every time. RunAtLoad is
+   honoured at LOGIN, so anyone who rebooted between installing and looking saw
+   a working service and nobody caught it. Fixed by kickstarting and then ASKING
+   launchd instead of assuming. `tools/burn.sh` still has the same defect in its
+   restore path.
+2. **A closed Codex session held its pip for another hour.** The rollout reader
+   cannot see an end; the hook can, and the union was overruling it. Fixed with a
+   tombstone -- and the implementer caught the case I had missed, that
+   `claude --resume` reopens under the same id, so any event other than
+   `SessionEnd` now clears the tombstone. Without that the fix would have
+   inverted the bug and hidden a session someone was sitting in front of.
+
+## Two changes the owner asked for while looking at it
+
+- **`waiting` is RED now**, not amber. Red = wants you now (waiting or failed),
+  amber = finished, green = working. This supersedes the 2026-08-29 decision to
+  share amber, and tonight supplied the evidence: shown six pips the owner read
+  "3 running and 3 waiting" -- the one finished pip was invisible as anything
+  distinct. That old argument was about a PULSE, and hue is a stronger channel
+  than steady-versus-pulsing.
+- **A status-change popup**, 5 s, both providers, worded from counts the wire
+  already carries: `Hint-line is waiting for you` / `A session is waiting for
+  you` / `3 sessions are waiting`, and the same shape for finished. No wire
+  change -- the usage line has one byte spare.
+
+## Still open
+
+- The transitional count: sessions closed BEFORE the tombstone existed can only
+  age out on `ABANDONED_AFTER_S`. Clean by 23:46 tonight; not a recurring cost.
+- **Whether capitalising a project name reads wrong** (`hint-line` ->
+  `Hint-line`). Flagged by the implementer, left for the owner's eye.
+- `20500d33ff1c` carries unreleased firmware and needs `tools/burn.sh
+  --edition claude` before it ships.
+- **The merge.** `main` still has none of this.
