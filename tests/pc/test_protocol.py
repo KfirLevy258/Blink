@@ -326,6 +326,31 @@ def test_a_remembered_reading_does_not_age_the_desk():
     assert msg["active_age_s"] == 5
 
 
+def test_a_desk_that_just_spoke_says_zero_rather_than_nothing():
+    """Zero is a reading, and the boundary that decides it is not an identity.
+
+    A source written this very second gives active_age_s = 0. Sent, the board
+    knows the desk is awake. Omitted -- which is what happens if either the
+    filter in _active_age or the guard in usage() asks for a POSITIVE age --
+    the firmware falls back to age_s, and age_s is exactly the number this
+    field exists because the board must not doze on: a remembered reading can
+    be twelve hours old at the instant its file was rewritten. So the most
+    awake desk there is would read as the most abandoned.
+
+    Both sites are exercised here, because a survey mutated each of them from
+    >= 0 to > 0 and all 620 tests stayed green.
+    """
+    now = 1_787_700_000.0
+    assert protocol.usage(40, None, 20, None, [], age_s=0,
+                          active_age_s=0)["active_age_s"] == 0
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=now - 12 * 3600,
+        active_at=now, session_pct=27.0)
+    msg = protocol.frame_to_usage(f, now)
+    assert msg["active_age_s"] == 0
+    assert msg["age_s"] == 12 * 3600
+
+
 def test_a_frame_with_no_epoch_at_all_says_so():
     """-1, the same "we cannot say" age_s already uses, so the firmware's
     one unknown rule covers both."""
