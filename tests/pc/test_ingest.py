@@ -402,6 +402,138 @@ def test_a_broken_provider_is_actually_skipped_not_just_silenced():
     assert Counting.calls == 1
 
 
+class _Clock:
+    """A wall clock the test moves by hand, since the cooldown is in seconds."""
+
+    def __init__(self, t=NOW):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+class Flaky(base.ProviderParser):
+    """Raises while `broken` is set, otherwise yields one frame. Counts polls."""
+
+    def __init__(self, broken=True, provider="claude"):
+        self.broken = broken
+        self.calls = 0
+        self._provider = provider
+
+    def get_provider_id(self):
+        return self._provider
+
+    def poll(self, now_epoch):
+        self.calls += 1
+        if self.broken:
+            raise RuntimeError("file was being rewritten as it was read")
+        return [frame(provider=self._provider, at=now_epoch)]
+
+
+def test_a_transient_failure_costs_a_cooldown_not_the_whole_session():
+    """The failure that motivated this is a file caught mid-rewrite.
+
+    The daemon polls every two seconds now, so a provider gets thirty chances
+    a minute to lose that race -- and under the old rule the first one it lost
+    retired it until the user restarted the daemon.
+    """
+    clock = _Clock()
+    flaky = Flaky()
+    bus = ingest.IngestionBus(providers=[flaky], now=clock)
+    assert bus.poll() is None
+
+    # The file finished being written a moment later. Nothing tells the bus.
+    flaky.broken = False
+    clock.advance(ingest.FIRST_RETRY_AFTER_S - 1)
+    assert bus.poll() is None, "retried before the cooldown was up"
+
+    clock.advance(1)
+    assert bus.poll() is not None
+
+
+def test_one_broken_instance_does_not_silence_its_twin():
+    """Two instances of one provider class are two sources, not one.
+
+    The quarantine was keyed by class name, so a second Codex home -- or the
+    same parser pointed at another directory -- went dark because its twin
+    raised. On the panel that reads as the source simply having no data.
+    """
+    clock = _Clock()
+    broken, healthy = Flaky(broken=True), Flaky(broken=False)
+    bus = ingest.IngestionBus(providers=[broken, healthy], now=clock)
+
+    for _ in range(3):
+        assert bus.poll() is not None
+        clock.advance(2)
+    assert healthy.calls == 3
+    assert broken.calls == 1
+
+
+def test_the_backoff_is_capped_so_a_fixed_provider_comes_back(capsys):
+    """Doubling without a ceiling is a permanent skip with extra steps.
+
+    A user who signs in, or upgrades the other application, gets the panel
+    back within the ceiling and without being told to restart anything.
+    """
+    clock = _Clock()
+    flaky = Flaky()
+    bus = ingest.IngestionBus(providers=[flaky], now=clock)
+
+    for _ in range(20):
+        bus.poll()
+        clock.advance(ingest.MAX_RETRY_AFTER_S)
+    # Every single tick, because the wait stops growing at the ceiling.
+    # Uncapped, the twentieth retry would be years out.
+    assert flaky.calls == 20
+    # And twenty failures still cost exactly one log line. Retrying is only
+    # affordable because it is quiet.
+    assert capsys.readouterr().err.count("will be skipped") == 1
+
+
+def test_a_provider_that_recovers_says_so_and_can_be_reported_again(capsys):
+    """One line per transition -- that is what "reported once" has to mean.
+
+    Silence while it keeps failing, because a traceback thirty times a minute
+    is its own defect. But a provider that came back and then broke again is
+    a new fault, and the log would otherwise carry only its first death.
+    """
+    clock = _Clock()
+    flaky = Flaky()
+    bus = ingest.IngestionBus(providers=[flaky], now=clock)
+    bus.poll()
+    assert "will be skipped" in capsys.readouterr().err
+
+    flaky.broken = False
+    clock.advance(ingest.FIRST_RETRY_AFTER_S)
+    bus.poll()
+    assert "working again" in capsys.readouterr().err
+
+    flaky.broken = True
+    clock.advance(2)
+    bus.poll()
+    assert "will be skipped" in capsys.readouterr().err
+
+
+def test_a_clock_that_went_backwards_does_not_strand_a_provider():
+    """self._now is wall time, and wall time is not monotonic.
+
+    A sleeping laptop or an NTP step can put `now` before the moment the
+    provider was quarantined, which arithmetic alone would turn back into the
+    permanent skip this cooldown exists to end.
+    """
+    clock = _Clock()
+    flaky = Flaky()
+    bus = ingest.IngestionBus(providers=[flaky], now=clock)
+    bus.poll()
+
+    flaky.broken = False
+    clock.advance(-3600)
+    assert bus.poll() is not None
+
+
 def test_two_real_files_reach_the_wire_together(tmp_path):
     """End to end: the real Desktop cache and the real Codex log, through the
     bus, onto one usage message. This is the path a Desktop+Codex customer's

@@ -22,6 +22,27 @@ from pc.providers.claude_state import ClaudeStateProvider
 from pc.providers.codex_cli import CodexCliProvider
 
 
+# How long a provider that raised sits out before it is tried again, and how
+# far that grows while it keeps failing.
+#
+# Not forever, which is what it used to be. The daemon's poll dropped from 60 s
+# to 2 s (claude_usage_bridge.FAST_POLL_INTERVAL_S), so a provider now gets 30
+# chances a minute to catch a file mid-rewrite, an EBUSY, a half-flushed JSON
+# line -- and under the old rule the first one it lost retired it until the user
+# restarted the daemon. Every one of those failures is transient by
+# construction: the file that could not be parsed this second is written by
+# another application that is still running and will finish its write.
+#
+# One minute first, because a transient should cost about a minute and not a
+# workday. Doubling, because a provider whose upstream really has changed shape
+# should not be re-parsed thirty times an hour for the life of the process.
+# Fifteen minutes at the ceiling, which is short enough that a user who fixes
+# the cause -- signs in, upgrades the other app -- sees the panel come back
+# without being told to restart anything.
+FIRST_RETRY_AFTER_S = 60.0
+MAX_RETRY_AFTER_S = 900.0
+
+
 def default_providers():
     """Every provider shipped today, in preference order.
 
@@ -40,7 +61,15 @@ class IngestionBus:
                            else list(providers))
         self._preferred = preferred_provider
         self._now = now
-        self._broken = set()
+        # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
+        # out after a failure. Keyed by IDENTITY, not by class: two instances
+        # of the same provider class are two sources -- two Codex homes, the
+        # same parser pointed at a second directory -- and under the old class
+        # key one of them raising silenced its healthy twin, which reads on the
+        # panel as the second source simply having no data. Identity is safe as
+        # a key here because self._providers holds every provider for the life
+        # of the bus, so no id can be recycled underneath us.
+        self._broken = {}
         # (label, n) for the frame the last poll() chose. Recorded there
         # rather than recomputed here, so session_pair() answers for the same
         # poll the board's usage message came from -- polling the providers a
@@ -81,28 +110,71 @@ class IngestionBus:
         """Every frame every provider can produce right now.
 
         Each provider is polled inside its own try. A provider that raises is
-        reported once and then skipped for the rest of the process: the
-        alternative is a stack trace on the daemon's log every sixty seconds
-        for as long as some other application's file stays malformed.
+        reported once and then sits out a cooldown: the alternative is a stack
+        trace on the daemon's log thirty times a minute for as long as some
+        other application's file stays malformed.
 
         Skipped means skipped. This used to add the provider to _broken and
         then go on polling it every cycle regardless -- only the log line was
         suppressed, so a second, different failure was invisible and the
         docstring above was describing a policy the loop did not have.
+
+        But skipped no longer means retired. A cooldown, not a tombstone: see
+        FIRST_RETRY_AFTER_S for why a two-second poll makes the difference
+        between the two enormous.
+
+        Reported ONCE all the same, and that is deliberate. The log line marks
+        the transition from working to broken, not each failure -- a provider
+        that keeps failing keeps quiet, and only says anything again when it
+        recovers, or when it breaks again after having recovered. A daemon
+        that logs the same traceback on a timer is its own defect, and it is
+        the reason the retry could not simply be "try it every poll".
         """
         frames = []
         now = self._now()
         for p in self._providers:
-            key = f"{p.__class__.__name__}"
-            if key in self._broken:
+            key = id(p)
+            name = p.__class__.__name__
+            sitting_out = self._broken.get(key)
+            if (sitting_out is not None
+                    and not self._cooldown_over(sitting_out, now)):
                 continue
             try:
                 frames.extend(p.poll(now) or [])
             except Exception as e:
-                print(f"[ingest] {key} failed and will be skipped: {e}",
-                      file=sys.stderr)
-                self._broken.add(key)
+                # Doubled from whatever the last wait was, so a provider whose
+                # upstream genuinely changed shape backs off to the ceiling on
+                # its own without anyone deciding it is hopeless.
+                wait = (min(sitting_out["wait"] * 2, MAX_RETRY_AFTER_S)
+                        if sitting_out is not None else FIRST_RETRY_AFTER_S)
+                if sitting_out is None:
+                    print(f"[ingest] {name} failed and will be skipped: {e}",
+                          file=sys.stderr)
+                self._broken[key] = {"since": now, "retry_at": now + wait,
+                                     "wait": wait}
+            else:
+                if sitting_out is not None:
+                    # Worth a line precisely because the failure only got one:
+                    # without this, a provider that came back left no trace of
+                    # having done so, and the log said only that it had died.
+                    del self._broken[key]
+                    print(f"[ingest] {name} is working again",
+                          file=sys.stderr)
         return frames
+
+    @staticmethod
+    def _cooldown_over(sitting_out, now) -> bool:
+        """Has a skipped provider's cooldown elapsed?
+
+        The second arm is for a clock that went backwards. self._now is wall
+        time -- the whole bus reasons in it, because every frame's age is a
+        wall-clock reading from another application's file -- and a sleeping
+        laptop, an NTP step or a timezone-clumsy VM can put `now` before the
+        moment the provider was quarantined. Left to arithmetic alone that
+        would hold a healthy provider out for however far the clock moved,
+        which is exactly the permanent skip this cooldown exists to end.
+        """
+        return now >= sitting_out["retry_at"] or now < sitting_out["since"]
 
     def poll(self):
         """The usage message for the board, or None when nothing is known."""
