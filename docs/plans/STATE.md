@@ -485,3 +485,53 @@ restores the daemon with `bootstrap` and no `kickstart`, so a burn leaves the
 service registered but not running — which looks exactly like success. Already
 fixed on `feat/fleet-tests` as `36c733e`; this worktree is off `main` and does
 not carry it.
+
+---
+
+# F2 VERIFIED ON HARDWARE — 2026-09-04 evening
+
+**Settings from a doze works, and so does everything around it.** Confirmed by
+the owner's own hand on board `20:50:0d:33:ff:1c`, flashed with the branch image
+(two-offset write, `imgtool --pad --confirm`, one boot, zero resets).
+
+The sequence, in the owner's words and in the order it happened:
+
+1. Daemon stopped, board dozing, no app running — the worst case, and the exact
+   situation in which a person goes looking for settings.
+2. **A right-to-left swipe woke the board and opened the settings panel.**
+3. **It stayed awake while the panel was open** — the second half of the fix: an
+   open panel is a present person, so the doze must not fire on them.
+4. **Closing the panel let it doze again**, so nothing is left holding the board
+   awake afterwards.
+
+On the shipped firmware step 2 does nothing: the request latches, no one answers,
+and the panel opens by itself hours later in front of nobody. That was the whole
+defect, and all three parts of the repair are now shown rather than argued.
+
+**Every firmware fix on this branch has now been confirmed on hardware.**
+
+## The CONNECTING question is closed, by being the wrong question
+
+The fix's design note leaned on an edge tap surviving the CONNECTING takeover,
+and this handoff carried "does an edge tap reach through the CONNECTING overlay"
+as load-bearing and unverified. Asked to test it, the owner reported:
+
+> "it says connecting for less then a second so i can[not] really tell"
+
+So the state barely exists on a disconnect. The swipe is deliberately refused
+while it shows, which the owner also confirmed ("the swipe works when the board
+is up, not while the loading") — and that refusal costs nothing if the window is
+sub-second. **Dropped as a concern.** It was a real question about an unreal
+situation.
+
+## Still not verified on hardware
+
+Only Bug A and Bug B end-to-end, which need a real four-hour quiet spell and a
+real five-hour window expiry with the fixed daemon running. Both are pinned by
+host tests, and Bug A's gate itself was proved on hardware this morning
+(dozed at `age_s=20000`, woke at `age_s=0`). What is missing is only the long
+wall-clock run, not the mechanism.
+
+**Note for whoever ships this board:** `20500d33ff1c` is an individual claude
+unit burned to ship and now carries unreleased firmware. It needs
+`tools/burn.sh --edition claude` (no `--logo`) before it goes in a box.
