@@ -286,3 +286,88 @@ This does not sink the plan. `PreToolUse`, `Stop` and `SessionEnd` are all
 verified and all useful, and a session that is running versus finished is
 already worth showing. But **WAITING specifically is unproven**, and the plan
 should not claim otherwise until a human has sat in front of one.
+
+---
+
+# PermissionRequest, observed at last — interactive session, 2026-09-04 17:39
+
+The owner ran one interactive Codex session in the sandbox and did two things:
+asked for a file and **approved** the write, then asked for a second file and
+**refused** it. Twelve events fired. This is the first time anyone has seen a
+`PermissionRequest`, and it settles the question plan 3 is built on.
+
+Shapes and enum values only below; `tool_input`, `prompt` and
+`last_assistant_message` carry the owner's own words and are not reproduced.
+
+## The two sequences, with the human in them
+
+**Approved:**
+
+    17:39:51  SessionStart
+    17:39:51  UserPromptSubmit
+    17:39:55  PreToolUse           tool_name=apply_patch
+    17:39:55  PermissionRequest    tool_name=apply_patch     <- the panel should say WAITING here
+    17:39:58  PostToolUse          tool_name=apply_patch     <- 3 s later, the human said yes
+    17:40:04  PreToolUse / PostToolUse   tool_name=Bash
+    17:40:08  Stop
+
+**Refused:**
+
+    17:40:12  UserPromptSubmit
+    17:40:17  PreToolUse           tool_name=apply_patch
+    17:40:17  PermissionRequest    tool_name=apply_patch     <- WAITING
+    17:40:20  Interrupt                                      <- 3 s later, the human said no
+
+## What this corrects
+
+**The gate said a refusal fires nothing, so WAITING would clear LATE. That is
+wrong** — at least for how the owner refused. `Interrupt` arrived three seconds
+after the request, the same latency as the approval's `PostToolUse`. WAITING is
+promptly clearable on **both** paths, which removes the "how long may a stale
+WAITING linger" design question the gate said had to be answered deliberately.
+
+**One honest caveat on that.** `Interrupt` is also what Esc fires. If the owner
+refused by pressing Esc rather than choosing a "no" option, then what was
+observed is Esc's `Interrupt` and a menu refusal might still fire nothing. This
+needs one word from the owner before the correction is relied on. Recorded as
+observed, not as settled.
+
+**`PreToolUse` fires BEFORE `PermissionRequest`, in the same second.** The plan
+never says which comes first. A shim that writes `running` on `PreToolUse` and
+`waiting` on `PermissionRequest` is in the right order; one that assumed the
+reverse would show `running` over a session that is actually blocked on a human.
+
+**`PermissionRequest` carries NO `tool_use_id`** — `PreToolUse` and
+`PostToolUse` both do. So a request cannot be correlated to its completion by
+that id. The pair that is present on all three is `turn_id` + `tool_name`.
+
+## Gate finding 2 — the session id — SETTLED, and the gate is wrong
+
+`session_id` in the interactive session is a **bare UUID**, it does **not** start
+with `thr_`, and it **appears verbatim in the rollout filename**. Same as exec.
+The gate's warning that the two ids are spelled differently, and its conclusion
+that `transcript_path` is therefore a necessary join key, do not hold at 0.150.0.
+
+`transcript_path` is still the better key — absolute, present on every event,
+and verified to exist on disk — but it is now a convenience, not a rescue.
+
+## Gate finding 4 — CONFIRMED useful
+
+`permission_mode` is `default` in the interactive session and
+`bypassPermissions` under `codex exec`. So BLINK really can suppress WAITING in
+modes where an approval prompt cannot occur, as finding 4 suggested.
+
+## `turn_id` is per turn, `session_id` per session
+
+Two distinct `turn_id` values across the two prompts, one `session_id`
+throughout. Both are UUIDs. `turn_id` is absent from `SessionStart` and
+`SessionEnd`.
+
+## Still open
+
+- **`SessionEnd` never fired** in this interactive session, though it does under
+  `codex exec`. The session was quit by hand, so this may be how the owner
+  closed the terminal rather than a real difference. Do not rely on `SessionEnd`
+  for cleanup in an interactive session until it has been seen.
+- Whether a menu refusal (as opposed to Esc) fires `Interrupt`. See the caveat
+  above.
