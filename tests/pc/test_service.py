@@ -189,6 +189,47 @@ def test_launchd_status(home, monkeypatch):
     assert cli.backend().status() == "not installed"
 
 
+def test_launchd_restart_asks_launchd_rather_than_trusting_kickstart(home, monkeypatch):
+    """A kickstart that exits zero is a request accepted, not a live process.
+
+    The same defect install() was measured making on 2026-09-04, in the same
+    file: every launchctl command returned zero and nothing was running. So
+    "restarted" has to come from launchd's own answer.
+    """
+    _platform(monkeypatch, "darwin")
+    r = _runs(monkeypatch)
+
+    assert cli.backend().restart() == "restarted"
+    assert r.calls[0][:2] == ["launchctl", "kickstart"]
+    assert r.ran("launchctl", "print", "gui/501/com.blink.bridge")
+
+
+def test_launchd_restart_will_not_claim_restarted_when_it_is_not(home, monkeypatch):
+    """kickstart exits 0, launchd says not running: say so, and where to look.
+
+    This is the `blink update` path -- the binary was just replaced. If the
+    new one cannot start, launchd respawns it and it dies again, and the log
+    is the only thing that explains why.
+    """
+    _platform(monkeypatch, "darwin")
+    _runs(monkeypatch, running=False)
+
+    msg = cli.backend().restart()
+    assert msg != "restarted"
+    assert "not running" in msg
+    assert cli.log_path() in msg
+
+
+def test_launchd_restart_reports_a_kickstart_that_failed(home, monkeypatch):
+    _platform(monkeypatch, "darwin")
+    r = _runs(monkeypatch, codes=[1])
+
+    assert cli.backend().restart() == "could not restart it"
+    # And it did not go on to ask launchd: there is nothing to confirm when
+    # the request itself was refused.
+    assert not r.ran("launchctl", "print")
+
+
 # ---------------------------------------------------------------- schtasks --
 
 def test_schtasks_install_registers_at_logon_then_starts_it(home, monkeypatch):

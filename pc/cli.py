@@ -683,20 +683,66 @@ class _LaunchdBackend(_Backend):
         # returned zero; none of it is evidence that a process exists. launchd
         # is the only thing that knows, so the claim we print is its answer and
         # not our hope.
+        if self._confirm_running(uid):
+            return "running (launchd)"
+        return ("registered with launchd, but it is not running -- "
+                f"start it with: launchctl kickstart -k gui/{uid}/{LABEL}")
+
+    def _confirm_running(self, uid) -> bool:
+        """Does launchd say a process actually exists? Its answer, not ours.
+
+        Shared by install() and restart() because they were making the same
+        claim from different evidence, and only one of them had learned. An
+        exit code says a command was accepted; `launchctl print` is the only
+        thing that says a process is running, so both ask it.
+
+        Retried briefly rather than asked once: a kickstart hands the job to
+        launchd and returns, so the exec can still be in flight when the first
+        print lands. Four tries over five seconds is long enough for a start
+        that is merely slow and short enough that nobody watching `blink
+        update` thinks it has hung.
+
+        Parsed the same defensive way status() is -- launchctl print is a
+        human-readable dump, not a contract -- but the failure here leans the
+        other way: an unrecognised dump reads as "not running", because the
+        one thing this must never do again is print a claim it cannot see.
+        """
         for attempt in range(4):
             pr = subprocess.run(["launchctl", "print", f"gui/{uid}/{LABEL}"],
                                 capture_output=True, text=True,
                                 **update.ota.NO_WINDOW)
             if pr.returncode == 0 and "state = running" in (pr.stdout or ""):
-                return "running (launchd)"
+                return True
             time.sleep(0.5 * (attempt + 1))
-        return ("registered with launchd, but it is not running -- "
-                f"start it with: launchctl kickstart -k gui/{uid}/{LABEL}")
+        return False
 
     def restart(self) -> str:
+        """Bounce the agent, then check that it came back.
+
+        The old body returned "restarted" whenever kickstart exited zero,
+        which is the exact defect install() was measured making on 2026-09-04:
+        five bootstraps out of five returned zero with nothing running. A
+        kickstart is a request to launchd, and a request that was accepted is
+        not a process that exists.
+
+        It matters most on the path that calls this. `blink update` swaps the
+        binary underneath the agent and then bounces it; if the new binary
+        cannot start -- a bad download, a missing dylib -- kickstart still
+        succeeds and launchd's respawns still fail. Saying "restarted" there
+        would send the user away from the one file that explains it.
+        """
+        uid = os.getuid()
         r = subprocess.run(["launchctl", "kickstart", "-k",
-                            f"gui/{os.getuid()}/{LABEL}"], capture_output=True, **update.ota.NO_WINDOW)
-        return "restarted" if r.returncode == 0 else "could not restart it"
+                            f"gui/{uid}/{LABEL}"], capture_output=True, **update.ota.NO_WINDOW)
+        if r.returncode != 0:
+            return "could not restart it"
+        if self._confirm_running(uid):
+            return "restarted"
+        # Not a command to paste this time: the command that would have been
+        # printed is the one that just ran and left nothing running. What is
+        # left to do is read why it died.
+        return ("restarted, but launchd reports it is not running -- "
+                f"see {log_path()}")
 
     def remove(self) -> str:
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
