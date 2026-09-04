@@ -229,6 +229,39 @@ static void ota_boot_pump(void)
 	}
 }
 
+/*
+ * "Do not close this board's eyes right now", in one place.
+ *
+ * There were two hand-written copies of this condition and they had already
+ * drifted: the doze in run_usb() carried ota_test_boot, and
+ * reading_moved_again() -- whose own comment calls it the mirror of that
+ * doze -- did not. The drift is unreachable today, because ota_test_boot is
+ * raised once in ota_boot_begin() before any mode loop exists and from then
+ * on only ever falls. But it is exactly the term whose absence cost a board
+ * on the bench (2026-09-03): dozing blocks the loop that feeds the 30 s
+ * watchdog an unconfirmed image arms, the SoC resets, MCUboot re-runs the
+ * same unconfirmed image, and it dozes again at 60 s -- forever. A condition
+ * that has to be right in two files to keep a board out of a reset loop
+ * should exist once.
+ *
+ * "An update is in flight" honestly covers "the new image has not proved
+ * itself yet", which is why the test boot rides this term instead of
+ * becoming a fourth condition at each call site; staying awake is also what
+ * lets the deliberate revert at the 90 s deadline happen, logged, rather
+ * than as a bare watchdog reset nobody can read afterwards.
+ *
+ * Read fresh on every call, never cached: an update that starts while the
+ * board is already dozing has to put the progress screen back up.
+ */
+static bool ota_blocks_sleep(void)
+{
+	struct ota_ui snap;
+
+	ota_ui_get(&snap);
+	return snap.st == OTA_UI_DOWNLOADING || snap.st == OTA_UI_REBOOTING ||
+	       ota_test_boot;
+}
+
 /* Did the previous boot's install land? Runs once the gauge screen exists so
  * the notice popup has somewhere to live. */
 static void ota_report_outcome(void)
@@ -1383,24 +1416,21 @@ static bool host_is_back(void)
  * to be exactly that -- tests/sleep_gate pins the two as complements over a
  * grid, because a wake condition a second away from the sleep condition
  * would have this board closing and opening its eyes forever on a real desk.
- * ota_busy is read fresh: an update that starts while dozing should put the
- * progress screen back up.
+ *
+ * It says mirror and now it is one: the OTA term comes from
+ * ota_blocks_sleep(), the same call the doze arms on. It used to be spelled
+ * out here a second time, and the second spelling was missing ota_test_boot.
  */
 static bool reading_moved_again(void)
 {
-	struct ota_ui snap;
-	int32_t active_age;
-
-	ota_ui_get(&snap);
 	/* The ACTIVE age, matching the branch that started this doze. Waking
 	 * on the reading age instead would break the complementarity the grid
 	 * in tests/sleep_gate pins, on exactly the desk this field exists
 	 * for: a remembered reading never gets younger, so the board would
 	 * doze on one number and refuse to wake on the other. */
-	active_age = usage_freshness_active_age_s(k_uptime_get());
-	return sleep_stale_should_wake(active_age,
-				       snap.st == OTA_UI_DOWNLOADING ||
-				       snap.st == OTA_UI_REBOOTING,
+	int32_t active_age = usage_freshness_active_age_s(k_uptime_get());
+
+	return sleep_stale_should_wake(active_age, ota_blocks_sleep(),
 				       usage_freshness_activity());
 }
 
@@ -1435,33 +1465,14 @@ static void run_usb(void)
 		 * rule alone left a panel awake all night (field report
 		 * 2026-09-02). Both block until there is a reason to wake. */
 		{
-			struct ota_ui snap;
-			bool ota_busy;
+			/* Whether an update forbids dozing is one question
+			 * with one answer, and it lives at
+			 * ota_blocks_sleep() -- including the test-boot term,
+			 * whose absence from the copy that used to sit here
+			 * cost a board on the bench (2026-09-03). Taken once
+			 * so both rules below judge the same instant. */
+			bool ota_busy = ota_blocks_sleep();
 
-			ota_ui_get(&snap);
-			/*
-			 * ota_test_boot belongs in this term, and finding out
-			 * cost a board on the bench (2026-09-03).
-			 *
-			 * An unconfirmed image arms a 30 s hardware watchdog
-			 * that ota_boot_pump() feeds from THIS loop. Dozing
-			 * blocks the loop, so the feeding stops, the SoC
-			 * resets, and MCUboot re-runs the same unconfirmed
-			 * image -- which dozes again. Measured: boot, doze at
-			 * 60 s, SW_CPU_RESET at 90 s, forever. It reproduced
-			 * the reset this plan exists to remove, as a loop.
-			 *
-			 * "An update is still in flight" honestly includes
-			 * "the new image has not proved itself yet", so it
-			 * rides the term that already means don't doze rather
-			 * than a fourth condition at each call site. Staying
-			 * awake also lets the deliberate revert at the 90 s
-			 * deadline happen, logged, instead of a bare watchdog
-			 * reset nobody can read.
-			 */
-			ota_busy = snap.st == OTA_UI_DOWNLOADING ||
-				   snap.st == OTA_UI_REBOOTING ||
-				   ota_test_boot;
 			if (sleep_should_start(proto_host_lost(),
 					       usage_view_have_data(),
 					       ota_busy)) {
@@ -1594,15 +1605,15 @@ static void run_usb(void)
 			 */
 			if (proto_host_seen()) {
 				host_quiet_since = k_uptime_get();
-			} else if (!ota_test_boot &&
+			} else if (!ota_blocks_sleep() &&
 				   k_uptime_get() - host_quiet_since
 				   > 60 * 1000) {
-				/* !ota_test_boot for the reason spelled out
-				 * at the other doze above: this loop feeds
-				 * the unconfirmed image's watchdog, and this
-				 * is the branch that was found looping on it.
-				 * A board with no daemon is exactly the board
-				 * whose image cannot prove itself, so the two
+				/* The same one answer the two dozes above
+				 * ask for, and this is the branch that was
+				 * found looping on it: this loop feeds the
+				 * unconfirmed image's watchdog, and a board
+				 * with no daemon is exactly the board whose
+				 * image cannot prove itself, so the two
 				 * conditions coincide precisely here. The
 				 * timer keeps running, so the doze happens
 				 * the moment the test boot resolves. */
