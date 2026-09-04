@@ -27,6 +27,30 @@ def test_a_started_turn_is_running():
         assert derive_state(e, 2.0) == base.STATE_RUNNING, e
 
 
+def test_interrupt_is_a_finished_approval_not_an_unknown_event():
+    """Codex fires Interrupt where Claude Code has no equivalent event.
+
+    Running rather than unknown: the owner ruled that no state cares what
+    kind of input was pending, so Interrupt lands next to PostToolUse --
+    an approval prompt ending, answered or aborted, does not by itself mean
+    the turn is over. Landing on unknown would have been worse than wrong,
+    because unknown drops the session out of the census: interrupting a
+    Codex turn would make its pip disappear instead of staying lit.
+    """
+    assert derive_state("Interrupt", 1.0) == base.STATE_RUNNING
+
+
+def test_interrupt_does_not_decay_to_stuck_from_silence():
+    """A second, independent fact from the test above: Interrupt shares
+    PostToolUse's *lack* of an age test, not just its target state. A
+    plausible bug this catches on its own: a version that recognises
+    Interrupt only for a few seconds (say, to model "just aborted") and
+    falls through to unknown once the silence stretches. The rule here is
+    the same as for every other running event -- however long ago, it is
+    still running; `failed` is reserved for an event, not a timeout."""
+    assert derive_state("Interrupt", 40 * 60.0) == base.STATE_RUNNING
+
+
 def test_an_opened_session_claims_nothing_and_never_becomes_stuck():
     """`claude`, then nothing: the person is reading, or opened it for later.
     Filed as running, this went red after three minutes and stayed red for

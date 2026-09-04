@@ -328,8 +328,17 @@ def _pid_says_ended(pid, age_s, slot_path=""):
         return False
     return True
 
+# Interrupt is Codex's event for "the person pressed Esc". The owner ruled
+# that no state branches on what kind of input was pending, so an aborted
+# approval prompt has to land wherever an answered one does. PostToolUse is
+# already here rather than in idle -- one tool call resolving does not mean
+# the turn is over -- so Interrupt joins it rather than Stop: only Stop means
+# the turn actually finished. What matters most is that it lands somewhere
+# other than unknown, because unknown drops a session out of the census
+# entirely -- today, pressing Esc on a Codex approval makes its pip vanish
+# instead of just staying lit.
 _RUNNING_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse",
-                   "SubagentStop", "PreCompact", "PostCompact")
+                   "SubagentStop", "PreCompact", "PostCompact", "Interrupt")
 # Only Stop is idle: the turn completed and the answer is waiting to be read.
 #
 # SessionStart used to be idle too (and before that, running -- which turned
