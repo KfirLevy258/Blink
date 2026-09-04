@@ -433,3 +433,43 @@ The plan had this right in the first place (`_IDLE_EVENTS`); the compressed tabl
 I wrote when recording the owner's ruling lost it, and task 3's implementer
 correctly followed the newer document over the older plan. The error was mine and
 the fix is `_IDLE_EVENTS = ("Stop", "Interrupt")`.
+
+---
+
+# The `failed` state, against a real rollout — 2026-09-04
+
+Plan 2's failure path shipped with a comment saying it was **NEVER OBSERVED**:
+every rollout on this machine is a success, so the branch rested entirely on a
+reading of upstream's Rust types. That is no longer true.
+
+**A real turn was made to fail** — a real model call with a model name the
+account cannot use, so the API returned 400 and the turn died. Codex wrote the
+rollout itself; nothing here was hand-authored, which is the point. A fixture
+would only have proved the reader can parse a string this repo wrote.
+
+What Codex recorded, keys only:
+
+    task_started -> item_completed -> task_complete
+
+    task_complete keys: completed_at, duration_ms, error, last_agent_message,
+                        started_at, turn_id, type
+    error keys:         codex_error_info, message
+    codex_error_info:   the bare string "other"
+
+**`pc.providers.codex_cli.parse_rollout_state` returned `'failed'`.** VERIFIED.
+
+Three predictions confirmed by a file we did not write:
+1. A failed `task_complete` carries `error`, and a successful one does not
+   (`skip_serializing_if = "Option::is_none"`).
+2. `ErrorEvent` serialises as `{message, codex_error_info}`.
+3. `CodexErrorInfo` unit variants serialise as **bare snake_case strings** —
+   here, `"other"`. The whole deny-list in `_NOT_A_TURN_FAILURE` depends on
+   that shape, and it is now seen rather than read.
+
+`"other"` is correctly NOT in the deny list, so the turn reports failed. The two
+denied variants remain unobserved; they are pinned by `check_codex_contract.sh`.
+
+Also new: `task_complete` carries `completed_at`, `duration_ms`, `started_at`
+and `last_agent_message`, none of which the plan knew about. Nothing reads them
+today and nothing should start to without a reason — noted so the next person
+does not rediscover them.
