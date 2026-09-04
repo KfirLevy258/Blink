@@ -527,9 +527,9 @@ class CodexCliProvider(base.ProviderParser):
         # carries a UUID, so a path is never reused and the answer for a path
         # is fixed for the life of the file.
         #
-        # The saving is not CPU. The daemon polls about once a minute and
-        # 19 KB of json.loads is under a millisecond. It is that the SIZE of
-        # that line belongs to Codex: base_instructions is embedded in it,
+        # The saving is not CPU. Even at the two-second fast poll, 19 KB of
+        # json.loads is under a millisecond. It is that the SIZE of that
+        # line belongs to Codex: base_instructions is embedded in it,
         # and re-deriving an immutable value from a blob upstream is free to
         # grow is waste that grows with it. Pruned to the current file set on
         # every poll, so this is bounded by RECENT_FILES rather than by how
@@ -548,15 +548,48 @@ class CodexCliProvider(base.ProviderParser):
     def _name_for(self, path):
         """The project name for one rollout, read once per file.
 
-        The negative answer is cached too, and deliberately: a rollout with
-        no readable session_meta yet is a file being written at this instant,
-        which is precisely the file that would otherwise be re-read on every
-        poll for as long as it stayed in the recent set.
+        An answer is cached once the first line has been READ, and only then.
+        That is the whole of the rule, and the distinction it turns on is the
+        one `session_meta_cwd` was written to hand back: a head this could
+        not read at all, and a head it read and then found nothing usable in.
+
+        The second is permanent and is cached, empty answer included. A
+        rollout is append-only and its line 1 never changes, so a first line
+        that is complete and carries no `cwd` -- or a `cwd` `_project_name`
+        refuses -- will still carry none on the ten thousandth poll, and
+        re-deriving that from 19 KB of embedded system prompt every two
+        seconds is waste that grows with whatever upstream puts in that
+        record next.
+
+        The first is not permanent, and caching it was a bug. Codex creates a
+        rollout and then writes its ~19 KB `session_meta` into it, and this
+        daemon now looks every two seconds on the fast poll -- not the
+        minute this cache was written under -- so globbing that file between
+        the two is ordinary rather than rare. `_head_line` correctly refuses
+        the unterminated line, "" came back, and "" was then remembered
+        FOREVER: `_prune_names` only forgets paths that have left the recent
+        set, and the session being written to is the one that stays in it for
+        hours. The panel then said "A session is waiting for you" with no
+        subject, permanently, for the session the owner is most likely
+        looking at. So an unread head is left uncached and simply asked again
+        next poll, which is a 128 KB read of a file that was written
+        milliseconds ago and is still in the page cache.
+
+        A first line longer than HEAD_BYTES is the one case that pays that
+        re-read forever rather than for one poll. It is not worth a third
+        branch: that session has already lost its name on every poll anyway,
+        which is the failure HEAD_BYTES is set several times over the
+        observed length to avoid in the first place.
         """
-        if path not in self._names:
-            self._names[path] = _project_name(
-                session_meta_cwd(_head_line(path)))
-        return self._names[path]
+        cached = self._names.get(path)
+        if cached is not None:
+            return cached           # "" is a real answer here, not a miss
+        head = _head_line(path)
+        if not head:
+            return ""               # unread, not unnamed: ask again next poll
+        name = _project_name(session_meta_cwd(head))
+        self._names[path] = name
+        return name
 
     def _prune_names(self, known):
         """Forget every cached name whose file is no longer being read."""

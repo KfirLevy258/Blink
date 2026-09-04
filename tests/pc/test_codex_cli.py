@@ -447,9 +447,11 @@ def test_the_name_is_read_once_per_file(tmp_path):
 
 
 def test_a_file_with_no_usable_name_is_not_re_read_either(tmp_path):
-    """The negative answer is as fixed as the positive one, and a rollout
-    with no session_meta is the common case for a file being written right
-    now -- exactly the file this would otherwise re-read every minute."""
+    """A COMPLETE first line that names no project is as fixed as one that
+    does. A rollout is append-only: line 1 was written whole and will not
+    become a session_meta later, so asking again on every two-second poll
+    buys nothing. This is the half of the cache that must survive the fix
+    below -- the unread head is the only answer that may not be remembered."""
     root = str(tmp_path / "sessions")
     path = write_rollout(root, lines=[token_count_line(rate_limits())])
     p = codex_cli.CodexCliProvider(root=root)
@@ -462,6 +464,63 @@ def test_a_file_with_no_usable_name_is_not_re_read_either(tmp_path):
     finally:
         codex_cli._head_line = real
     assert reads == [path], reads
+
+
+def test_a_head_still_being_written_is_asked_again_next_poll(tmp_path):
+    """The one the owner would recognise. Codex creates a rollout and then
+    writes its 19 KB session_meta into it, and the daemon globs every two
+    seconds, so landing between the two is ordinary. _head_line refuses the
+    unterminated line and returns "" -- and remembering that "" was the bug:
+    the file being written to is the ACTIVE session, which stays in the
+    recent set for hours, so the panel named it "" for the rest of the day.
+    """
+    root = str(tmp_path / "sessions")
+    path = write_rollout(root, lines=[])
+    half = meta_line("/Users/K/Blink")
+    with open(path, "w") as f:
+        f.write(half)               # no newline yet: Codex is mid-write
+    p = codex_cli.CodexCliProvider(root=root)
+    assert p._name_for(path) == ""
+    assert p._names == {}, "an unread head must not be remembered as an answer"
+    with open(path, "a") as f:      # Codex finishes the line
+        f.write("\n" + token_count_line(rate_limits()) + "\n")
+    assert p._name_for(path) == "Blink"
+
+
+def test_a_head_unreadable_on_one_poll_is_named_on_the_next(tmp_path,
+                                                            monkeypatch):
+    """The same recovery through the whole provider, on ONE instance across
+    two polls -- which is what a running daemon is.
+
+    The head read is the one that fails here while the tail read succeeds,
+    because that is the only shape in which the cache could ever be poisoned:
+    a rollout whose line 1 is still being written has no turn event either,
+    so poll never asks it for a name. It takes a head read that fails on its
+    own -- the open hitting EMFILE, a permission that flickers, a home
+    directory a sync client is rewriting under us -- against a tail that
+    parsed. That is rare per poll and it used to be permanent: the "" was
+    remembered, `_prune_names` keeps the ACTIVE session's path for hours, and
+    the panel named the session the owner is looking at nothing until the
+    daemon was restarted.
+    """
+    root = str(tmp_path / "sessions")
+    slots = str(tmp_path / "slots")
+    write_rollout(root, lines=[meta_line("/Users/K/Blink"),
+                               token_count_line(rate_limits()),
+                               turn_line("task_complete", _stamp(NOW - 5))])
+    real = codex_cli._head_line
+    failing = [True]
+
+    def flaky(q):
+        return "" if failing[0] else real(q)
+
+    monkeypatch.setattr(codex_cli, "_head_line", flaky)
+    p = codex_cli.CodexCliProvider(root=root, state_dir=slots, sweep=False)
+    first = [f for f in p.poll(NOW) if f.src == codex_cli.STATE_SRC_ID][0]
+    assert (first.state, first.label) == ("idle", ""), "nothing to read yet"
+    failing[0] = False
+    second = [f for f in p.poll(NOW) if f.src == codex_cli.STATE_SRC_ID][0]
+    assert (second.state, second.label) == ("idle", "Blink")
 
 
 def test_names_are_pruned_to_the_files_still_being_read(tmp_path):
