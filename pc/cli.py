@@ -625,10 +625,19 @@ class _LaunchdBackend(_Backend):
                     f"launchctl bootstrap gui/{uid} {plist_path()}")
 
         # BOOTSTRAP REGISTERS; IT DOES NOT START. A successful bootstrap means
-        # launchd has accepted the job, not that anything is running -- and on
-        # a bootout/bootstrap cycle it routinely does not run it, RunAtLoad or
-        # no RunAtLoad. Measured on the owner's machine 2026-09-04, straight
-        # after an install that had just printed "running (launchd)":
+        # launchd has accepted the job, not that anything is running.
+        #
+        # And this is not a race that sometimes loses. Measured 2026-09-04 by
+        # running the old sequence -- bootout, bootstrap, no kickstart -- five
+        # times in a row against this very plist: `bootstrap` returned 0 every
+        # time and launchd reported "not running" every time. FIVE OUT OF FIVE.
+        # RunAtLoad is honoured at LOGIN, not on a bootstrap, so an install left
+        # the daemon dead until the user next logged in -- while the installer
+        # said it was running. That is why it stayed hidden: anyone who rebooted
+        # between installing and looking saw a working service.
+        #
+        # The observation that started it, straight after an install that had
+        # just printed "running (launchd)":
         #
         #     active count = 0
         #     state = not running
