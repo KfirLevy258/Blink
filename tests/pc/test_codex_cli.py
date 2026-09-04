@@ -771,3 +771,130 @@ def test_a_poll_prunes_the_names_of_files_it_no_longer_reads(tmp_path):
     p.poll(NOW)
     assert "/gone/rollout-z.jsonl" not in p._names
     assert list(p._names.values()) == ["Blink"]
+
+
+# --- a turn that died -------------------------------------------------------
+
+
+def failed_line(stamp, info="usage_limit_exceeded", message="You have hit"):
+    """A `task_complete` that carries an error, shaped as upstream writes it.
+
+    ErrorEvent is {message, codex_error_info}; codex_error_info is a
+    CodexErrorInfo, whose unit variants are bare snake_case strings.
+    """
+    error = {"message": message}
+    if info is not None:
+        error["codex_error_info"] = info
+    return json.dumps({"timestamp": stamp, "type": "event_msg",
+                       "payload": {"type": "task_complete",
+                                   "turn_id": "t1", "error": error}})
+
+
+def test_a_turn_that_died_on_a_usage_limit_is_failed():
+    """The single case this product exists to warn about."""
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5))], NOW) == base.STATE_FAILED
+
+
+def test_every_terminal_error_is_failed_not_just_the_limit_one():
+    """No branch on which error. There is nowhere on the wire to put the
+    distinction -- base.VALID_STATES is fixed -- and the panel already draws
+    "Session used up" off the percentage dial this same file feeds."""
+    for info in ("context_window_exceeded", "unauthorized",
+                 "internal_server_error", "sandbox_error", "other"):
+        assert codex_cli.parse_rollout_state(
+            [failed_line(_stamp(NOW - 5), info=info)], NOW) \
+            == base.STATE_FAILED, info
+
+
+def test_a_struct_shaped_error_is_failed():
+    """CodexErrorInfo::HttpConnectionFailed carries a field, so it
+    serialises as a single-key object rather than a bare string."""
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5),
+                     info={"http_connection_failed": {"http_status_code": 503}})],
+        NOW) == base.STATE_FAILED
+
+
+def test_an_error_upstream_does_not_call_a_turn_failure_is_still_idle():
+    """CodexErrorInfo::affects_turn_status returns false for exactly two
+    variants, both of them failures of a client operation rather than of the
+    turn. Painting the panel red for a failed thread rollback would cry wolf
+    with the one colour that must not."""
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5), info="thread_rollback_failed")],
+        NOW) == base.STATE_IDLE
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5),
+                     info={"active_turn_not_steerable": {"turn_kind": "review"}})],
+        NOW) == base.STATE_IDLE
+
+
+def test_an_error_with_no_info_is_failed():
+    """ErrorEvent::affects_turn_status is is_none_or(...) -- upstream's own
+    answer for a missing CodexErrorInfo is that the turn failed. An error
+    object with nothing legible in it is still an error object."""
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5), info=None)], NOW) == base.STATE_FAILED
+    for info in (None, 7, [], ["thread_rollback_failed"],
+                 {"a": 1, "b": 2}, {}):
+        line = json.dumps({"timestamp": _stamp(NOW - 5), "type": "event_msg",
+                           "payload": {"type": "task_complete",
+                                       "error": {"message": "boom",
+                                                 "codex_error_info": info}}})
+        assert codex_cli.parse_rollout_state([line], NOW) \
+            == base.STATE_FAILED, info
+
+
+def test_an_error_of_an_unexpected_shape_degrades_to_idle_not_to_red():
+    """Never observed in a real file, so the shape is upstream's to change.
+    Red is the loudest thing this panel does and must not be reachable by a
+    field that merely stopped being an object."""
+    for bad in ("boom", 7, [], None, True):
+        line = json.dumps({"timestamp": _stamp(NOW - 5), "type": "event_msg",
+                           "payload": {"type": "task_complete", "error": bad}})
+        assert codex_cli.parse_rollout_state([line], NOW) == base.STATE_IDLE, bad
+
+
+def test_a_task_complete_without_an_error_is_still_idle():
+    """The ordinary case, and every rollout ever captured on this machine."""
+    assert codex_cli.parse_rollout_state(
+        [turn_line("task_complete", _stamp(NOW - 5))], NOW) == base.STATE_IDLE
+
+
+def test_an_aborted_turn_is_still_idle_whatever_its_reason():
+    """All four TurnAbortReason values are things the person did: Esc, a new
+    message typed over the turn, a review closing, a budget stopping it.
+    Idle is the right colour for all four, and this mapping is frozen."""
+    for reason in ("interrupted", "replaced", "review_ended", "budget_limited"):
+        line = json.dumps({"timestamp": _stamp(NOW - 5), "type": "event_msg",
+                           "payload": {"type": "turn_aborted",
+                                       "reason": reason}})
+        assert codex_cli.parse_rollout_state([line], NOW) == base.STATE_IDLE, \
+            reason
+
+
+def test_an_abandoned_failed_turn_claims_nothing():
+    """A failure an hour ago is a session that is gone, not a red light that
+    stays on until the daemon restarts."""
+    gone = codex_cli.ABANDONED_AFTER_S + 1
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - gone))], NOW) == base.STATE_UNKNOWN
+
+
+def test_a_failed_session_is_the_worst_state_and_counted_with_the_stuck(tmp_path):
+    """The wire has one count for "not working and not finished", and
+    claude_state.poll folds failed into it for the same reason: `state`
+    already carries which of the two it is."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         failed_line(_stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[meta_line("/Users/K/Other"),
+                         turn_line("task_started", _stamp(NOW - 9))])
+    st = _state_frame(root)
+    assert (st.state, st.n_stuck, st.n_run, st.n_idle) == ("failed", 1, 1, 0)
+    assert st.n_sessions() == 2
+    assert st.label == "Blink"      # the only session holding the state

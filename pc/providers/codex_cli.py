@@ -358,7 +358,8 @@ def parse_rollout_tail(lines, mtime: float):
 #
 # Codex has no hook interface, but its rollout log is a journal of the same
 # transitions: `task_started` when a turn begins, `task_complete` when the
-# answer is in, `turn_aborted` when the person interrupted it. The newest of
+# answer is in -- or, when that record carries an `error`, when the turn died
+# instead -- and `turn_aborted` when the person stopped it. The newest of
 # these in a file is that session's state, aged by its own timestamp, with
 # the same threshold Claude's hooks use -- anything past ABANDONED_AFTER_S is
 # a session that is gone. No `stuck` from silence, for the reason given in
@@ -376,6 +377,54 @@ _TURN_EVENTS = {
     "task_complete": base.STATE_IDLE,
     "turn_aborted": base.STATE_IDLE,
 }
+
+# `turn_aborted` is NOT a failure, and the temptation to make it one is why
+# this paragraph exists. Its `reason` is one of `interrupted`, `replaced`,
+# `review_ended` or `budget_limited` (protocol.rs TurnAbortReason): Esc, a
+# new message typed over the running turn, a review closing, a budget
+# stopping it. Every one of those is something the PERSON did, and idle --
+# "finished, your turn" -- is the right colour for all four. Red is reserved
+# for what the model or the API did.
+#
+# That is `task_complete` carrying an `error`. TurnCompleteEvent.error is
+# documented upstream as "Terminal error details when the turn completed
+# unsuccessfully", is skipped entirely on success, and its CodexErrorInfo
+# includes UsageLimitExceeded -- which is the single event this product
+# exists to warn about, and the mirror of Claude's StopFailure error:
+# "rate_limit".
+#
+# NEVER OBSERVED. Every rollout captured on the machine this was written
+# against is a success, so this branch is pinned to the upstream schema and
+# to tests/ci/check_codex_contract.sh rather than to a real file. It is
+# therefore written to degrade toward idle: an `error` that is not an object
+# leaves the mapping above exactly as it was.
+
+# The two errors upstream itself says do not fail a turn
+# (CodexErrorInfo::affects_turn_status). Both are failures of a client
+# OPERATION rather than of the turn, and painting the panel red because a
+# thread rollback failed would cry wolf with the one colour that must not.
+#
+# A deny-list rather than an allow-list, and that direction is deliberate: a
+# variant added upstream tomorrow lands on the failing side, which is where
+# `Other` already is. A unit variant serialises as a bare snake_case string
+# and a struct variant as a single-key object, so both shapes are checked.
+_NOT_A_TURN_FAILURE = ("thread_rollback_failed", "active_turn_not_steerable")
+
+
+def _is_turn_failure(error) -> bool:
+    """Does this `task_complete` error mean the turn itself failed?"""
+    if not isinstance(error, dict):
+        return False
+    info = error.get("codex_error_info")
+    if isinstance(info, str):
+        return info not in _NOT_A_TURN_FAILURE
+    if isinstance(info, dict) and len(info) == 1:
+        return next(iter(info)) not in _NOT_A_TURN_FAILURE
+    # Absent, null, or a shape this version has never seen. Upstream's rule
+    # for a missing CodexErrorInfo is that the turn failed
+    # (ErrorEvent::affects_turn_status is is_none_or), and so is this: an
+    # error object with nothing legible in it is still an error object.
+    return True
 
 
 def parse_rollout_state(lines, now_epoch):
@@ -397,9 +446,12 @@ def parse_rollout_state(lines, now_epoch):
         payload = line.get("payload")
         if not isinstance(payload, dict):
             continue
-        state = _TURN_EVENTS.get(payload.get("type"))
+        kind = payload.get("type")
+        state = _TURN_EVENTS.get(kind)
         if state is None:
             continue
+        if kind == "task_complete" and _is_turn_failure(payload.get("error")):
+            state = base.STATE_FAILED
         t = _observed_at(line, float("nan"))
         if not (T_EPOCH_MIN <= t <= T_EPOCH_MAX):
             return base.STATE_UNKNOWN   # no usable timestamp: no age, no claim
@@ -544,6 +596,13 @@ class CodexCliProvider(base.ProviderParser):
                        else ""),
                 n_run=counts.get(base.STATE_RUNNING, 0),
                 n_idle=counts.get(base.STATE_IDLE, 0),
-                n_stuck=counts.get(base.STATE_STUCK, 0),
+                # Folded together, exactly as claude_state.poll folds them:
+                # the wire has one count for "not working and not finished",
+                # and `state` above already says which of the two it is.
+                # Mapping failed to nothing would leave a failed session
+                # reporting zero -- "Session failed" where the panel should
+                # say "Session failed - 2 sessions".
+                n_stuck=(counts.get(base.STATE_STUCK, 0)
+                         + counts.get(base.STATE_FAILED, 0)),
             ))
         return frames
