@@ -559,3 +559,42 @@ wrapper that recorded argv, HOME and stdin byte counts is what settled it.
   needs an interactive session with the shim registered. The event itself is
   verified (see above) and so is the marker mechanism, but not the two together.
 - **That `n_wait` reaches the panel.** Needs a board on the bus.
+
+---
+
+# The silent-skip hazard, confirmed on the live machine — 2026-09-04
+
+`blink install` registered the hook into the owner's real `~/.codex/hooks.json`
+and wrote **no trust row** — `grep -c hooks.state ~/.codex/config.toml` returns
+0. So the hook is registered and untrusted, which is the state every customer
+is in immediately after installing.
+
+A real `codex exec` turn in that state, with **no** bypass flag — the customer
+path:
+
+    slots before: 0
+    hook lines Codex logged: 0
+    any mention of trust in its output: none
+    slots after: 0
+
+**Zero output. Codex does not mention the hook, does not warn, does not fail.**
+A registered, correct, completely inert hook is indistinguishable from no hook
+at all — from inside Codex, from the shell, and from the filesystem.
+
+This is why `blink status` says:
+
+    Codex hook  registered, but it has never written anything
+                Codex asks once whether to trust a hook. If that
+                prompt was declined the hook stays in the file and
+                never runs -- open Codex and accept it.
+
+Without that line the symptom is a Codex column that never appears, with nothing
+anywhere to explain it — the worst shape this product has, working software that
+cannot be seen to be broken. The warning is now confirmed to describe something
+real rather than something feared.
+
+**Known limitation, recorded honestly:** a hook whose sessions have all aged past
+`ABANDONED_AFTER_S` reads identically to one that never fired, so this line can
+misfire for a user who simply has not used Codex in an hour. That is the right
+trade — a false nudge costs a moment, a missing one costs the feature — but it
+is a real imprecision and should be said out loud rather than discovered.
