@@ -328,17 +328,8 @@ def _pid_says_ended(pid, age_s, slot_path=""):
         return False
     return True
 
-# Interrupt is Codex's event for "the person pressed Esc". The owner ruled
-# that no state branches on what kind of input was pending, so an aborted
-# approval prompt has to land wherever an answered one does. PostToolUse is
-# already here rather than in idle -- one tool call resolving does not mean
-# the turn is over -- so Interrupt joins it rather than Stop: only Stop means
-# the turn actually finished. What matters most is that it lands somewhere
-# other than unknown, because unknown drops a session out of the census
-# entirely -- today, pressing Esc on a Codex approval makes its pip vanish
-# instead of just staying lit.
 _RUNNING_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse",
-                   "SubagentStop", "PreCompact", "PostCompact", "Interrupt")
+                   "SubagentStop", "PreCompact", "PostCompact")
 # Only Stop is idle: the turn completed and the answer is waiting to be read.
 #
 # SessionStart used to be idle too (and before that, running -- which turned
@@ -348,7 +339,23 @@ _RUNNING_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse",
 # session that is over is not waiting on anyone. Both are filed as no claim,
 # and the file is left for the abandon sweep. A turn announces itself with
 # UserPromptSubmit; until then the session is simply open.
-_IDLE_EVENTS = ("Stop",)
+# Interrupt is Codex's event for "the person pressed Esc", and it belongs with
+# Stop rather than with PostToolUse, on evidence rather than on taste. In the
+# one real interactive session anyone has captured (docs/research/
+# codex-hook-contract.md), a refused approval produced
+# UserPromptSubmit -> PreToolUse -> PermissionRequest -> Interrupt and then
+# NOTHING: no Stop ever followed. So Interrupt is terminal for its turn, and
+# filing it under running would leave the panel saying "Working" for a session
+# that has actually stopped -- for a full hour, until ABANDONED_AFTER_S finally
+# times it out.
+#
+# Which is also what the owner's three-state ruling asks for: an aborted turn is
+# "finished, and it is your turn again", and that is what idle means here.
+#
+# What matters most is that it lands somewhere other than unknown: unknown drops
+# a session out of the census entirely, so today pressing Esc on a Codex
+# approval makes its pip vanish rather than merely mislabelling it.
+_IDLE_EVENTS = ("Stop", "Interrupt")
 _OPEN_EVENTS = ("SessionStart", "SessionEnd")
 _WAITING_EVENTS = ("Notification", "PermissionRequest")
 _FAILED_EVENTS = ("StopFailure",)

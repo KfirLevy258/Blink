@@ -27,28 +27,33 @@ def test_a_started_turn_is_running():
         assert derive_state(e, 2.0) == base.STATE_RUNNING, e
 
 
-def test_interrupt_is_a_finished_approval_not_an_unknown_event():
+def test_interrupt_is_a_finished_turn_not_an_unknown_event():
     """Codex fires Interrupt where Claude Code has no equivalent event.
 
-    Running rather than unknown: the owner ruled that no state cares what
-    kind of input was pending, so Interrupt lands next to PostToolUse --
-    an approval prompt ending, answered or aborted, does not by itself mean
-    the turn is over. Landing on unknown would have been worse than wrong,
-    because unknown drops the session out of the census: interrupting a
-    Codex turn would make its pip disappear instead of staying lit.
+    Idle rather than running, on evidence: in the only real interactive
+    session anyone has captured, a refused approval produced Interrupt and
+    then nothing at all -- no Stop ever followed. So the turn is over and it
+    is the person's turn again, which is what idle means here. Calling it
+    running would leave the panel saying "Working" for an hour over a session
+    that has stopped.
+
+    And landing on unknown, which is what happens today, is worse than either:
+    unknown drops the session out of the census, so interrupting a Codex turn
+    makes its pip disappear rather than merely mislabelling it.
     """
-    assert derive_state("Interrupt", 1.0) == base.STATE_RUNNING
+    assert derive_state("Interrupt", 1.0) == base.STATE_IDLE
 
 
 def test_interrupt_does_not_decay_to_stuck_from_silence():
     """A second, independent fact from the test above: Interrupt shares
-    PostToolUse's *lack* of an age test, not just its target state. A
+    Stop's *lack* of an age test, not just its target state. A
     plausible bug this catches on its own: a version that recognises
     Interrupt only for a few seconds (say, to model "just aborted") and
     falls through to unknown once the silence stretches. The rule here is
-    the same as for every other running event -- however long ago, it is
-    still running; `failed` is reserved for an event, not a timeout."""
-    assert derive_state("Interrupt", 40 * 60.0) == base.STATE_RUNNING
+    the same as for every other finished turn -- however long ago it ended,
+    it is still ended; silence after a turn is the expected condition, not a
+    fault to escalate."""
+    assert derive_state("Interrupt", 40 * 60.0) == base.STATE_IDLE
 
 
 def test_an_opened_session_claims_nothing_and_never_becomes_stuck():

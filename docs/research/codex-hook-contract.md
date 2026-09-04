@@ -397,7 +397,8 @@ The whole hook-to-state mapping, with no branch on what kind of input is wanted:
 |---|---|
 | `UserPromptSubmit`, `PreToolUse` | `running` |
 | `PermissionRequest` | **`waiting`** |
-| `PostToolUse`, `Interrupt` | `running` |
+| `PostToolUse` | `running` |
+| `Interrupt` | `idle` — see the correction below |
 | `Stop` | `idle` |
 
 **The Esc-versus-menu question is dropped, and it was never worth asking.** It
@@ -415,3 +416,20 @@ Consequences for the tasks below:
   correlation problem, stops being one — there is nothing to correlate.
 - `permission_mode` stays useful for one thing only: suppressing `waiting`
   in modes where an approval prompt cannot happen.
+
+## Correction to the table above, 2026-09-04
+
+The mapping row originally read `PostToolUse, Interrupt -> running`. **That was
+wrong, and my own probe data says so.** In the captured refusal the sequence was
+`UserPromptSubmit -> PreToolUse -> PermissionRequest -> Interrupt`, and then
+nothing: **no `Stop` ever followed.** `Interrupt` is terminal for its turn.
+
+Filed under `running`, that leaves the panel saying "Working" over a session that
+has stopped, until `ABANDONED_AFTER_S` times it out an hour later. Filed under
+`idle` it says "Finished", which is both true and exactly the owner's second
+state -- "finished and waiting for user".
+
+The plan had this right in the first place (`_IDLE_EVENTS`); the compressed table
+I wrote when recording the owner's ruling lost it, and task 3's implementer
+correctly followed the newer document over the older plan. The error was mine and
+the fix is `_IDLE_EVENTS = ("Stop", "Interrupt")`.
