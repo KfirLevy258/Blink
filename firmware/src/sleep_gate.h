@@ -84,6 +84,37 @@ bool sleep_stale_should_start(int32_t age_s, bool had_usage, bool ota_busy,
  * complement rather than "a fresh reading arrived" because the wake
  * condition drifting from the sleep condition by so much as a second would
  * have a board on a real desk closing and opening its eyes forever.
+ *
+ * There is deliberately NO "the computer came back" term here, and it was
+ * asked for (field review 2026-09-03: the owner's panel would not wake on a
+ * morning reconnect and they reported the board as broken). Four reasons it
+ * stays out, in the order they bind:
+ *
+ *   - As a level -- "the host is talking" -- it is the original bug, typed
+ *     back in. proto.c clears host_lost on every line including the 10 s
+ *     pings, so a daemon answering all night through a sleeping computer
+ *     would satisfy it continuously and hold the panel lit on a 57-hour-old
+ *     reading. That is the exact desk this second rule was written for.
+ *   - As an edge -- "the host just came back" -- it is defensible, but it
+ *     needs remembered state, and this file's purity is the only reason any
+ *     of these rules can be tested on a laptop at all. It would have to live
+ *     in main.c's reading_moved_again(), which has no automated coverage.
+ *   - And an edge alone makes the symptom worse. The wake fires, run_usb
+ *     re-asks sleep_stale_should_start on an active age that is still four
+ *     hours old, and the board plays the closing clip again immediately: a
+ *     deliberate blink-open-blink-shut on every reconnect. To be of any use
+ *     it would need a grace window suppressing the next doze for a minute or
+ *     two -- new state, in the sleep path, unreachable by any host test.
+ *   - The wait it is meant to shorten is not this file's to shorten. The
+ *     board cannot ask for a reading: on `welcome` it answers with its
+ *     preference and an OTA check (proto.c) and then waits for whatever the
+ *     daemon's poll decides -- 60 s normally, 120-600 s while backing off a
+ *     429. A daemon that pushes one usage frame the moment it connects ends
+ *     the complaint at its source and leaves this rule alone.
+ *
+ * Meanwhile the panel is not stuck: a tap peeks, and an edge tap reaches
+ * settings (ui_sleep.c). Revisit this only with a daemon that pushes on
+ * connect already shipped, and with a way to run the sleep path on hardware.
  */
 bool sleep_stale_should_wake(int32_t age_s, bool ota_busy,
 			     enum usage_activity act);
