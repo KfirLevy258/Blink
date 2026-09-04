@@ -791,17 +791,18 @@ def failed_line(stamp, info="usage_limit_exceeded", message="You have hit"):
 
 
 def test_a_turn_that_died_on_a_usage_limit_is_failed():
-    """The single case this product exists to warn about."""
-    assert codex_cli.parse_rollout_state(
-        [failed_line(_stamp(NOW - 5))], NOW) == base.STATE_FAILED
-
-
-def test_every_terminal_error_is_failed_not_just_the_limit_one():
-    """No branch on which error. There is nowhere on the wire to put the
-    distinction -- base.VALID_STATES is fixed -- and the panel already draws
-    "Session used up" off the percentage dial this same file feeds."""
-    for info in ("context_window_exceeded", "unauthorized",
-                 "internal_server_error", "sandbox_error", "other"):
+    """The single case this product exists to warn about, and -- folded in
+    here rather than kept as a parallel test -- every other terminal-error
+    string upstream can send. No branch on which error: there is nowhere on
+    the wire to put the distinction -- base.VALID_STATES is fixed -- and the
+    panel already draws "Session used up" off the percentage dial this same
+    file feeds. All six exercise the identical str-branch of
+    _is_turn_failure, so a mutation that reddens one reddens them all; a
+    second test making the same claim over more strings would not be a
+    second data point."""
+    for info in ("usage_limit_exceeded", "context_window_exceeded",
+                 "unauthorized", "internal_server_error", "sandbox_error",
+                 "other"):
         assert codex_cli.parse_rollout_state(
             [failed_line(_stamp(NOW - 5), info=info)], NOW) \
             == base.STATE_FAILED, info
@@ -809,11 +810,20 @@ def test_every_terminal_error_is_failed_not_just_the_limit_one():
 
 def test_a_struct_shaped_error_is_failed():
     """CodexErrorInfo::HttpConnectionFailed carries a field, so it
-    serialises as a single-key object rather than a bare string."""
+    serialises as a single-key object rather than a bare string -- and the
+    struct branch has to actually read that key, not merely agree with the
+    fallback. A non-deny-listed struct proves nothing on its own: the
+    fallback alone would also call it failed. Pairing it with a deny-listed
+    struct is what forces the branch to exist -- only a real inspection of
+    the key can turn one of these idle while the other stays failed."""
     assert codex_cli.parse_rollout_state(
         [failed_line(_stamp(NOW - 5),
                      info={"http_connection_failed": {"http_status_code": 503}})],
         NOW) == base.STATE_FAILED
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5),
+                     info={"active_turn_not_steerable": {"turn_kind": "review"}})],
+        NOW) == base.STATE_IDLE
 
 
 def test_an_error_upstream_does_not_call_a_turn_failure_is_still_idle():
@@ -874,12 +884,13 @@ def test_an_aborted_turn_is_still_idle_whatever_its_reason():
             reason
 
 
-def test_an_abandoned_failed_turn_claims_nothing():
-    """A failure an hour ago is a session that is gone, not a red light that
-    stays on until the daemon restarts."""
-    gone = codex_cli.ABANDONED_AFTER_S + 1
-    assert codex_cli.parse_rollout_state(
-        [failed_line(_stamp(NOW - gone))], NOW) == base.STATE_UNKNOWN
+# A failure an hour ago is a session that is gone, not a red light that
+# stays on until the daemon restarts -- but that guarantee comes from the
+# age gate in parse_rollout_state, which runs unconditionally AFTER the
+# state (of any kind) is decided and does not read what the state is. That
+# is already exercised by test_an_abandoned_rollout_claims_nothing above;
+# a `failed`-flavoured copy of it cannot fail independently of that one, so
+# it was removed rather than kept as coverage that cannot be lost.
 
 
 def test_a_failed_session_is_the_worst_state_and_counted_with_the_stuck(tmp_path):

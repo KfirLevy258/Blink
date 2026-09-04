@@ -394,10 +394,13 @@ _TURN_EVENTS = {
 # "rate_limit".
 #
 # NEVER OBSERVED. Every rollout captured on the machine this was written
-# against is a success, so this branch is pinned to the upstream schema and
-# to tests/ci/check_codex_contract.sh rather than to a real file. It is
-# therefore written to degrade toward idle: an `error` that is not an object
-# leaves the mapping above exactly as it was.
+# against is a success, so this branch rests entirely on a reading of
+# upstream's Rust schema -- TurnCompleteEvent.error, CodexErrorInfo, and the
+# two deny-listed variants -- rather than on a real file. The contract
+# script's checks for that schema (tests/ci/check_codex_contract.sh) arrive
+# with Task 8 of this plan, not this one. It is therefore written to degrade
+# toward idle: an `error` that is not an object leaves the mapping above
+# exactly as it was.
 
 # The two errors upstream itself says do not fail a turn
 # (CodexErrorInfo::affects_turn_status). Both are failures of a client
@@ -596,12 +599,16 @@ class CodexCliProvider(base.ProviderParser):
                        else ""),
                 n_run=counts.get(base.STATE_RUNNING, 0),
                 n_idle=counts.get(base.STATE_IDLE, 0),
-                # Folded together, exactly as claude_state.poll folds them:
-                # the wire has one count for "not working and not finished",
-                # and `state` above already says which of the two it is.
-                # Mapping failed to nothing would leave a failed session
-                # reporting zero -- "Session failed" where the panel should
-                # say "Session failed - 2 sessions".
+                # Codex has no `stuck` -- no silence-based state, per the
+                # module docstring above -- so counts.get(base.STATE_STUCK, 0)
+                # is always 0 here and this fold is really just the failed
+                # count. Written as a sum anyway, for symmetry with
+                # claude_state.poll's identically-named field: the wire has
+                # one count for "not working and not finished" shared by both
+                # providers, and `state` above already says which of the two
+                # it is. Mapping failed to nothing would leave a failed
+                # session reporting zero -- "Session failed" where the panel
+                # should say "Session failed - 2 sessions".
                 n_stuck=(counts.get(base.STATE_STUCK, 0)
                          + counts.get(base.STATE_FAILED, 0)),
             ))
