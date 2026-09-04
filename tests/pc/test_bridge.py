@@ -327,6 +327,44 @@ class SessionMessageIsSent(unittest.TestCase):
         self.assertNotIn("label", m)
         self.assertEqual(m["n"], 3)
 
+    def test_the_fast_tick_sees_a_project_change_the_usage_line_cannot(self):
+        """A session in project A ends and one in project B starts running.
+        `state` is still "running", every count is where it was, and the
+        usage dict is byte-identical -- so the tick that exists to push
+        session moves within two seconds found nothing to send, and the panel
+        named the wrong project until the next heartbeat, up to a minute
+        later."""
+        self.bridge.poll_once()
+        self.sent.clear()
+
+        self.pair = ("Blink", 1)
+        self.bridge.poll_if_changed()
+
+        self.assertEqual(self._sessions()[-1]["label"], "Blink")
+
+    def test_a_name_alone_does_not_re_send_the_usage_line(self):
+        """The tick's whole reason for comparing: the fully-loaded usage line
+        is 509 of the 512 bytes the firmware accepts, and the name has its
+        own message precisely so it need not ride one."""
+        self.bridge.poll_once()
+        self.sent.clear()
+
+        self.pair = ("Blink", 1)
+        self.bridge.poll_if_changed()
+
+        self.assertEqual([m["t"] for m in self.sent], ["session"])
+
+    def test_an_unchanged_desk_still_sends_nothing(self):
+        """The property the comparison protects, which the new branch must
+        not spend: thirty ticks a minute, all silent, when nothing moved."""
+        self.bridge.poll_once()
+        self.sent.clear()
+
+        for _ in range(5):
+            self.bridge.poll_if_changed()
+
+        self.assertEqual(self.sent, [])
+
     def test_a_fetch_without_the_accessor_sends_nothing(self):
         """Every other fetch in this file is a bare lambda, and the
         single-source fetch has no session to report. Sending nothing is

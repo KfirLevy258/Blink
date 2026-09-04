@@ -477,9 +477,25 @@ class Bridge:
             return
         if usage is None:
             return
-        if protocol.meaningful_usage(usage) == self._last_pushed:
+        if protocol.meaningful_usage(usage) != self._last_pushed:
+            self._send_usage(usage)
             return
-        self._send_usage(usage)
+        # The usage line is not the whole message the panel draws from, and
+        # the project name is the part it cannot see. `label` rides its own
+        # `session` message -- deliberately, because the usage line has six
+        # bytes of headroom and a name is not six bytes -- so when a session
+        # in project A ends and one in project B starts running, `state`
+        # stays "running", every count stays where it was, and the usage dict
+        # is byte-identical. The fast tick found nothing to send and the panel
+        # went on naming project A until the next heartbeat, up to a minute
+        # later. Naming the wrong project is a wrong statement, not a vague
+        # one, and this tick exists precisely so that session moves reach the
+        # board in two seconds rather than sixty.
+        #
+        # Only the name goes out in that case. Re-sending an identical usage
+        # line to carry it would spend the budget this comparison exists to
+        # protect.
+        self._send_session_if_changed()
 
     def _read_usage(self):
         """The usage message as it would go out right now, or None if there is
@@ -504,20 +520,7 @@ class Bridge:
         # re-sending the same message every two seconds forever.
         self._last_pushed = protocol.meaningful_usage(usage)
 
-        # The project name, on change only. It rides its own message because
-        # the usage line above has six bytes of headroom.
-        #
-        # Read off the fetch callable rather than passed through it: the
-        # Bridge is handed a zero-arg callable returning a finished usage
-        # dict and never sees the frame the name lives on. A fetch without
-        # the accessor -- every test fake, and the single-source fetch --
-        # simply sends nothing, which is what an older daemon did anyway.
-        session_pair = getattr(self._fetch, "session_pair", None)
-        if session_pair is not None:
-            pair = tuple(session_pair())
-            if pair != self._last_session:
-                self._write(protocol.session(*pair))
-                self._last_session = pair
+        self._send_session_if_changed()
 
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
@@ -527,3 +530,25 @@ class Bridge:
         # stale, purely because that string already mapped to amber -- which
         # left a stale reading and a real rate limit indistinguishable on the
         # panel, and put the wrong words in the log.
+
+    def _send_session_if_changed(self):
+        """Put the project name on the wire, on change only.
+
+        Its own message because the usage line has six bytes of headroom and
+        a project name is not six bytes. Split out of _send_usage so the fast
+        tick can send a name WITHOUT re-sending an unchanged usage line --
+        see poll_if_changed, where a project change is otherwise invisible.
+
+        Read off the fetch callable rather than passed through it: the Bridge
+        is handed a zero-arg callable returning a finished usage dict and
+        never sees the frame the name lives on. A fetch without the accessor
+        -- every test fake, and the single-source fetch -- simply sends
+        nothing, which is what an older daemon did anyway.
+        """
+        session_pair = getattr(self._fetch, "session_pair", None)
+        if session_pair is None:
+            return
+        pair = tuple(session_pair())
+        if pair != self._last_session:
+            self._write(protocol.session(*pair))
+            self._last_session = pair
