@@ -605,3 +605,40 @@ stale-bytecode artefact. That covers task 6's four, task 7's `len(named) == 1`,
 the two sleep-gate suites, and task 8's nineteen. **The earlier 468-assertion
 survey has unknown timing and should be re-run under the rule above before its
 numbers are quoted again.**
+
+## Six pips, judged by a human at last — 2026-09-04
+
+The pip row was built for up to six sessions and only ever had two on it. This
+handoff has carried "six-pip legibility has never been judged by a human" as an
+open item since the pip-row branch. **Judged now, and it passes.**
+
+Driven synthetically at 2, then 4, then 6 sessions (3 running, 2 waiting, so 1
+finished by derivation), 20 s each. The owner, unprompted and without being told
+what was sent, reported:
+
+> "i did saw 3 session running and 3 sessions waiting"
+
+Which is **exactly what the design intends**. Three green pips read as running.
+The remaining three -- two waiting plus one finished -- read as one group,
+because `pip_colour()` gives `WAITING` and `FINISHED` the same amber ON PURPOSE
+(user decision 2026-08-29, argued at `usage_view.c:1728`): the panel already
+tried to separate those two with green-steady against green-pulsing and nobody
+caught it across a desk, and an 8 px pip is a finer channel than the pulse that
+already failed. Both mean "a session that wants you".
+
+So the owner counted six, and split them on the one axis the panel is trying to
+convey. **Closed. Six pips are legible.**
+
+### Incidental, and worth remembering
+
+During the test the board repeatedly popped "couldn't check for updates, no
+answer from the app". That was the test driver's doing, not a defect: it sends a
+`welcome`, so the board believes an app is present, but it never answers
+`ota_query`. The real daemon answers immediately.
+
+The behaviour underneath is still worth a note: **the board re-asks and
+re-complains rather than asking once and settling.** Absent an app it is
+correct and silent; it is the half-present case -- an app that connects and then
+does not answer -- that nags. Nobody has hit that in the field, and it is not
+worth chasing on its own, but it is the shape a slow or wedged daemon would
+present to a customer.
