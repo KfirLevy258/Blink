@@ -301,4 +301,65 @@ out=$(printf '%s' "$big" | $SH "$SHIM" PostToolUse 2>"$WORK/err13.txt")
 [ -s "$WORK/err13.txt" ] && fail "large payload wrote to stderr: $(cat "$WORK/err13.txt")"
 ok "drains a large payload without complaint"
 
+# 14. The Codex state directory. The same shim serves Codex's hooks, which use
+#     the same event names and the same stdin fields; the second argument is
+#     the only thing that differs, and it must move every write.
+CODEXDIR="$HOME/.blink/state-codex"
+out=$(printf '%s' "$PAYLOAD" | $SH "$SHIM" PreToolUse codex 2>"$WORK/err14.txt")
+[ -z "$out" ] || fail "codex run printed to stdout: [$out]"
+[ -s "$WORK/err14.txt" ] && fail "codex run wrote to stderr: $(cat "$WORK/err14.txt")"
+grep -q '"event":"PreToolUse"' "$CODEXDIR/abc-123.state" ||
+	fail "codex event not recorded under state-codex"
+ok "the codex argument writes under ~/.blink/state-codex"
+
+# 14b. ...and never into the Claude directory. A Codex session counted as a
+#      Claude one is the entire reason the second directory exists: the pip
+#      row would attribute it to the wrong tool and the wrong account.
+printf '{"session_id":"codex-only"}' | $SH "$SHIM" Stop codex >/dev/null 2>&1
+[ -f "$CODEXDIR/codex-only.state" ] || fail "codex session not recorded"
+[ ! -e "$DIR/codex-only.state" ] ||
+	fail "a codex session leaked into the Claude directory"
+printf '{"session_id":"claude-only"}' | $SH "$SHIM" Stop >/dev/null 2>&1
+[ ! -e "$CODEXDIR/claude-only.state" ] ||
+	fail "a Claude session leaked into the codex directory"
+ok "the two state directories never cross"
+
+# 14c. An unrecognised second argument falls back to the Claude directory
+#      rather than becoming a path fragment. This value is written by our own
+#      installer, but it lands in a config file a person can hand-edit, and
+#      nothing hand-edited gets to choose a directory under $HOME.
+printf '{"session_id":"weird"}' | $SH "$SHIM" Stop '../../../etc' >/dev/null 2>&1
+[ -f "$DIR/weird.state" ] ||
+	fail "an unknown tool argument did not fall back to state/"
+extra=$(ls -1 "$HOME/.blink" | grep -vxE 'state|state-codex|precious' || true)
+[ -z "$extra" ] ||
+	fail "an unknown tool argument created something in ~/.blink: $extra"
+ok "an unknown tool argument cannot choose a directory"
+
+# 14d. Every sanitiser case the Claude directory has, repeated for the codex
+#      one. The sanitisers are shared code, but the directory they write into
+#      is not, and this is the file that has to prove the second one is as
+#      safe as the first.
+printf 'keep me' > "$HOME/.blink/precious"
+printf '{"session_id":"../../pwned"}' |
+	$SH "$SHIM" PreToolUse codex >/dev/null 2>&1
+[ ! -e "$HOME/pwned.state" ] ||
+	fail "codex PATH TRAVERSAL: wrote outside the state dir"
+[ -f "$CODEXDIR/unknown.state" ] ||
+	fail "codex traversal did not fall back to 'unknown'"
+for bad in '.' '..'; do
+	printf '{"session_id":"%s","agent_id":"precious"}' "$bad" |
+		$SH "$SHIM" SubagentStart codex >/dev/null 2>&1
+	printf '{"session_id":"%s","agent_id":"precious"}' "$bad" |
+		$SH "$SHIM" SubagentStop codex >/dev/null 2>&1
+	printf '{"session_id":"%s"}' "$bad" |
+		$SH "$SHIM" SessionEnd codex >/dev/null 2>&1
+done
+[ "$(cat "$HOME/.blink/precious")" = "keep me" ] ||
+	fail "a dot session id reached ~/.blink through the codex argument"
+[ -d "$CODEXDIR" ] || fail "a dot session id removed the codex state directory"
+[ -z "$(find "$CODEXDIR" -prune \( -perm -040 -o -perm -004 \) -print)" ] ||
+	fail "codex state directory readable by others: $(ls -ld "$CODEXDIR")"
+ok "the codex directory is as sanitised and as private as the Claude one"
+
 printf 'PASS [%s]\n' "$WHICH"

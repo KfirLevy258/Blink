@@ -38,6 +38,31 @@
 # being parsed out of the payload. POSIX sh has no JSON parser and this runs on
 # every tool call, so what parsing there is stays to one sed per invocation.
 event=${1:-unknown}
+
+# WHICH TOOL'S SESSIONS these are, from $2, also written by the installer.
+#
+# Codex grew a hooks interface whose event names are deliberately the same
+# words Claude Code uses -- PreToolUse, PostToolUse, PermissionRequest, Stop,
+# SessionEnd, SubagentStart/Stop -- and whose command hooks are handed the
+# same session_id and cwd on stdin. Everything below therefore already works
+# for it unchanged, and the only thing that has to differ is WHERE the slots
+# are written: a Codex session counted out of ~/.blink/state would be reported
+# to the board as a Claude one, on a Claude pip, against a Claude account.
+#
+# One shim rather than a second copy of this file, because what is valuable
+# here is not the case statement below -- it is the two sanitisers, each of
+# which is the fix for a bug that reached a real machine. A second copy is a
+# second place for the next such fix to be forgotten, and the cost of avoiding
+# it is one parameter expansion on a path that already forks sed twice.
+#
+# A `case` over a fixed list rather than using $2 as a path fragment: it
+# arrives from a configuration file a person can hand-edit, and an
+# unrecognised value has to fall back rather than name a directory.
+case ${2:-} in
+codex) sub=state-codex ;;
+*) sub=state ;;
+esac
+
 input=$(cat)
 
 # Extract the session id, and SANITISE IT IN THE PATTERN rather than after.
@@ -115,7 +140,7 @@ _projname() {
 # Private to the user. These files name the sessions someone has open, and
 # the default umask would leave them readable by every account on the machine.
 umask 077
-DIR="$HOME/.blink/state"
+DIR="$HOME/.blink/$sub"
 [ -d "$DIR" ] || mkdir -p "$DIR" 2>/dev/null
 
 case $event in
