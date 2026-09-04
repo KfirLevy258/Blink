@@ -598,3 +598,40 @@ real rather than something feared.
 misfire for a user who simply has not used Codex in an hour. That is the right
 trade — a false nudge costs a moment, a missing one costs the feature — but it
 is a real imprecision and should be said out loud rather than discovered.
+
+---
+
+# LIVE, on the owner's desk — 2026-09-04, ~22:39
+
+The owner accepted Codex's trust prompt, typed into a real interactive session,
+and **a Codex session appeared on the panel as a pip.** First time the whole
+path has worked: Codex fires a hook -> the shim writes a slot -> the daemon
+reads it -> the board draws it.
+
+The trust prompt they saw, which is what every customer will see:
+
+    Hooks need review
+      10 hooks are new or changed.
+      Hooks can run outside the sandbox after you trust them.
+    > 1. Review hooks   2. Trust all and continue   3. Continue without trusting
+
+Ten, which is exactly BLINK's ten events and nothing else — this machine had no
+Codex hooks before. The wording matches what `blink install` promises in advance.
+
+## `SessionEnd` DOES fire on an interactive quit — VERIFIED
+
+This was recorded above as open: `SessionEnd` fires under `codex exec`, but the
+earlier interactive capture ended without one, and the note said not to rely on
+it for cleanup until it had been seen. **It has now been seen.** The owner quit
+the session and `~/.blink/state-codex/` was empty immediately afterwards, with
+the daemon's next frame carrying no Codex session.
+
+So the cleanup path is real in both modes and the slot does not have to wait for
+`ABANDONED_AFTER_S` to age out.
+
+## What is STILL not proven, and it is now the only thing
+
+`waiting` on the panel. Everything around it works — the marker mechanism, the
+scanner that honours it, the union, the pip row — but no `PermissionRequest` has
+yet been fired with the shim registered. It needs an interactive session that
+asks for an approval, which is a different action from the one just taken.
