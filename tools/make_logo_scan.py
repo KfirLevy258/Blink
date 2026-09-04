@@ -17,10 +17,18 @@ that is merely close is worse than obviously borrowed, because it invites
 nobody to check.
 
   tools/make_logo_scan.py --art tools/assets/pipl-wordmark.png \
-      --bg FFFFFF --ink 4D93E9 --accent 1C4A7D --out /tmp/pipl-frames
+      --bg FFFFFF --ink 3AA1FF --accent 005AAC --out /tmp/pipl-frames
   tools/encode_logo.py --frames /tmp/pipl-frames --fps 15 --hold 1.8 \
-      --out logos/pipl.bin --preview /tmp/pipl.gif
+      --threshold 0 --out logos/pipl.bin --preview /tmp/pipl.gif
   tools/burn.sh --edition claude --logo logos/pipl.bin
+
+Encode with `--threshold 0`. encode_logo's noise gate holds a pixel at its
+displayed value until it moves more than the threshold, which is right for a
+filmed clip -- h264 shimmer would otherwise light up the whole flat ground
+every frame -- and wrong for this one. The trail cools by a couple of levels
+per frame, under the default gate of 10, so columns freeze part-cooled and the
+finished mark keeps a set of faint vertical bands. These frames carry no noise
+to gate: nothing here is filmed.
 
 Why one moving vertical edge and nothing else: the BAN1 delta encoder stores,
 per frame, the contiguous bands of rows that changed, cropped to the changed
@@ -147,8 +155,8 @@ def main():
     ap.add_argument("--cy", type=int, default=ART_CY,
                     help="the vertical centre of the mark's ink")
     ap.add_argument("--bg", default="FFFFFF", help="ground colour, hex")
-    ap.add_argument("--ink", default="4D93E9", help="the settled mark")
-    ap.add_argument("--accent", default="1C4A7D",
+    ap.add_argument("--ink", default="3AA1FF", help="the settled mark")
+    ap.add_argument("--accent", default="005AAC",
                     help="the rule and the trail it leaves cooling")
     ap.add_argument("--out", required=True, help="directory for the PNGs")
     a = ap.parse_args()
