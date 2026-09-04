@@ -567,6 +567,94 @@ def test_a_second_provider_inherits_the_latch(state_dir, dead, capsys):
     assert capsys.readouterr().err == ""
 
 
+# --- and how it comes back --------------------------------------------------
+#
+# The suspension used to be one-way. It fires on an ordinary event -- a
+# terminal closed within FRESH_SLOT_S of its last hook event gets no
+# SessionEnd, because SIGHUP fires none, so the slot survives fresh with a
+# dead pid -- and the daemon it disabled is a launchd service that runs for
+# weeks. The premise it claimed to have disproved has since been MEASURED on
+# this machine: $PPID in the hook is `claude` itself on every live slot.
+
+
+@posix_only
+def test_a_living_pid_takes_the_suspension_back(state_dir, dead):
+    """The evidence that outranks the suspension, because it is the same
+    question answered the strong way: a pid out of this very directory
+    resolving in this very process table. One closed terminal must not
+    disable the feature until the next reboot."""
+    write_session(state_dir, "closed", "PreToolUse", NOW - 3, pid=dead())
+    assert provider(state_dir).poll(NOW)[0].n_run == 1
+    assert claude_state.pid_liveness_trusted() is False
+
+    # Somebody opens a terminal. Its slot carries a pid that is alive.
+    write_session(state_dir, "open", "PreToolUse", NOW - 300, pid=os.getpid())
+    prov = provider(state_dir)
+    prov.poll(NOW)
+    assert claude_state.pid_liveness_trusted() is True
+
+    # ...and the feature works again on the next pass: the closed session,
+    # now well past FRESH_SLOT_S, is dropped rather than held for the hour.
+    f = prov.poll(NOW + 60)
+    assert (f[0].n_run, f[0].n_sessions()) == (1, 1)
+
+
+@posix_only
+def test_the_explanation_is_printed_once_even_across_a_recovery(state_dir,
+                                                                dead, capsys):
+    """A suspension that can come back can also happen again, and the poll is
+    every two seconds. The trust flag stops being the thing that remembers
+    whether the log line was written, so it needs its own."""
+    write_session(state_dir, "closed", "PreToolUse", NOW - 3, pid=dead())
+    provider(state_dir).poll(NOW)
+    write_session(state_dir, "open", "PreToolUse", NOW - 300, pid=os.getpid())
+    provider(state_dir).poll(NOW)
+    assert claude_state.pid_liveness_trusted() is True
+    write_session(state_dir, "closed2", "PreToolUse", NOW - 3, pid=dead())
+    provider(state_dir).poll(NOW)
+    assert claude_state.pid_liveness_trusted() is False
+    assert capsys.readouterr().err.count("pid liveness is DISABLED") == 1
+
+
+@posix_only
+def test_the_message_no_longer_diagnoses_what_it_cannot_know(state_dir, dead,
+                                                             capsys):
+    """It used to state as fact that "the hook's pid is not the session's own
+    process", which is measurably false on this machine. Three causes produce
+    this observation and the log must not name one of them."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 3, pid=dead())
+    provider(state_dir).poll(NOW)
+    err = capsys.readouterr().err
+    assert "is not the session's own process" not in err
+    assert "until one proves live" in err
+
+
+@posix_only
+def test_a_clock_that_is_wildly_ahead_decides_nothing(state_dir, dead):
+    """A slot stamped an hour into the future gives a negative age, and a
+    negative number is less than ten -- so it read as FRESH and one NTP step
+    could suspend pid liveness for the life of the daemon.
+
+    An age that broken is not a measurement, so nothing is taken from it:
+    the session is kept, exactly as today's rules would keep it, and trust is
+    left where it was."""
+    write_session(state_dir, "s1", "PreToolUse", NOW + 3600, pid=dead())
+    assert provider(state_dir).poll(NOW)[0].n_run == 1
+    assert claude_state.pid_liveness_trusted() is True
+
+
+@posix_only
+def test_an_ordinary_clock_skew_still_counts_as_a_fresh_slot(state_dir, dead):
+    """The other side of that boundary, and the reason it is not simply
+    `0 <= age_s`. A slot stamped three seconds ahead was written three
+    seconds ago by a clock that runs fast; calling it stale would drop a live
+    session off the panel, which is the one direction this feature is not
+    allowed to fail in."""
+    write_session(state_dir, "s1", "PreToolUse", NOW + 3, pid=dead())
+    assert provider(state_dir).poll(NOW)[0].n_run == 1
+    assert claude_state.pid_liveness_trusted() is False
+
+
 # --- what a dropped session leaves behind ---------------------------------
 
 

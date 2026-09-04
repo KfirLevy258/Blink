@@ -103,11 +103,30 @@ T_EPOCH_MAX = 4_102_444_800.0
 # no living process belongs to a session that is over, whatever its clock
 # says, and it is dropped at once rather than held for ABANDONED_AFTER_S.
 #
-# A pid only means something on the machine that issued it, and this is that
-# machine: the hook writes into the same ~/.blink/state the daemon reads, both
-# under one HOME on one host. There is no remote case to defend against --
-# there is no code path that copies these files between machines, and if one
-# is ever added, this check is the first thing it breaks.
+# A pid only means something in the namespace that issued it, and the hook
+# writes into the same ~/.blink/state the daemon reads. That was read as "both
+# under one HOME on one host, so there is no remote case to defend against",
+# and one shared HOME is not one pid namespace: Claude Code running in a
+# devcontainer with ~/.blink bind-mounted writes a CONTAINER pid, which the
+# daemon on the host resolves against the host's table. Nothing was copied
+# between machines -- the file never moved -- and the number in it still does
+# not name the process that wrote it.
+#
+# That is the one direction this check is not allowed to fail in: an absent
+# host pid reads as ProcessLookupError, so a session that is alive and working
+# is dropped from the panel at once. Every other way of being wrong keeps a
+# session too long.
+#
+# It is the suspension below that defends against it, and it is why the
+# suspension is deliberately eager and no longer permanent: the first slot the
+# daemon sees written seconds ago by a pid the host does not have suspends the
+# feature for as long as no pid proves otherwise, which on a container desk is
+# forever. What that leaves open is a MIXED desk -- host sessions and
+# container sessions at once -- where a live host pid keeps re-arming the check
+# that the container sessions then fail. Closing that needs a marker in the
+# slot itself (the hook writing a boot id or nodename, and the daemon ignoring
+# a pid from another one), which is a change to tools/blink-hook.sh and to
+# every shim already installed; noted, not done.
 #
 # PID REUSE is the one wrong answer available: the kernel eventually hands a
 # dead session's number to some unrelated new process, and the slot then looks
@@ -133,40 +152,58 @@ _PID_LIVENESS_AVAILABLE = os.name == "posix"
 # wrote. That is the whole self-test below.
 FRESH_SLOT_S = 10.0
 
-# THE LATCH, and why it is not optional.
+# THE SUSPENSION, and why it is not optional -- and why it is no longer a
+# one-way latch.
 #
 # Nobody has measured whether $PPID in the hook is Claude Code's own process
 # or a short-lived shell Claude Code spawned to run the hook. If it is the
 # latter, the pid is dead within milliseconds of being written and the naive
 # reading of this feature would drop EVERY live session -- a blank panel, far
-# worse than an hour-stale one.
+# worse than an hour-stale one. A bind-mounted ~/.blink (see LIVENESS above)
+# produces the same symptom for a different reason and needs the same answer.
 #
-# So the feature tests its own premise on real data: a slot written seconds
-# ago whose pid is already gone cannot have been written by that pid's
-# process. That is proof the number does not mean what this code hopes, and
-# the response is to stop believing it -- for the rest of this process, not
-# just this poll -- fall back to ABANDONED_AFTER_S exactly as before, and say
-# so once on stderr. Failing back to the old behaviour is the only fail-safe
-# direction available.
+# So the feature tests its own premise on real data, in both directions:
 #
-# Process-wide rather than per-provider because what $PPID means is a fact
-# about the Claude Code on this machine, not about a directory: `blink status`
-# and the daemon should each learn it at most once. Once latched it never
-# unlatches -- a build of Claude Code does not change its hook runner while
-# the daemon is up, and flapping would print on a two-second poll.
+#   - A slot written seconds ago whose pid is already gone cannot have been
+#     written by that pid's process. Stop believing pids, fall back to
+#     ABANDONED_AFTER_S exactly as before, and say so once on stderr.
+#   - A slot whose pid DOES name a living process is the same kind of
+#     evidence pointing the other way, and it is the stronger of the two:
+#     it is a pid out of this very directory resolving in this very process
+#     table. It restores belief.
 #
-# TO RETIRE THIS: measure it. Run a real session, read a fresh slot's pid, and
-# check it against the `claude` process (ps -p <pid> -o comm=). If the pid is
-# the CLI itself on every supported platform, this latch and FRESH_SLOT_S can
-# both be deleted and the pid trusted outright. Until somebody has done that
-# on macOS, Linux and Windows, it stays.
+# It used to latch off permanently, and that was wrong on an ordinary event.
+# A terminal closed within FRESH_SLOT_S of its last hook event fires no
+# SessionEnd (SIGHUP does not), leaving a fresh slot with a dead pid -- which
+# is indistinguishable from the wrapper case at the instant it is seen. On a
+# launchd daemon that runs for weeks, one closed terminal disabled the feature
+# until the next reboot, and printed a diagnosis that has since been MEASURED
+# FALSE on this machine ($PPID is `claude` on every live slot, checked with
+# ps -o comm= on three of them, 2026-09-02). Making it recoverable is what
+# makes the eagerness affordable: the check may now suspend itself on weak
+# evidence, because the next living pid takes it back.
 #
-# One known false positive, accepted deliberately: a session killed within
-# FRESH_SLOT_S of its last hook event looks exactly like an untrustworthy pid,
-# because both are "fresh slot, dead process". The cost of getting that wrong
-# is one log line and today's behaviour until the daemon restarts. The cost of
-# omitting the latch is a blank panel on every desk where $PPID is a wrapper.
+# What does not change: the fail-safe direction. Suspended means "behave
+# exactly as the daemon did before this feature existed", never "guess".
+#
+# Process-wide rather than per-provider because what a slot's pid means is a
+# fact about this machine, not about a directory: `blink status` builds its
+# own short-lived provider and should inherit the conclusion rather than
+# re-derive it. The message is printed at most once per process for the same
+# reason it always was -- a two-second poll would otherwise turn a real
+# warning into 43,200 log lines a day.
+#
+# TO RETIRE THIS: measure it on Linux and Windows too. Run a real session,
+# read a fresh slot's pid, and check it against the `claude` process
+# (ps -p <pid> -o comm=). macOS is done. If the pid is the CLI itself
+# everywhere, this and FRESH_SLOT_S can both be deleted and the pid trusted
+# outright -- though the container case above would still want the marker it
+# asks for.
 _pid_trusted = True
+# Whether stderr has already carried the explanation. Separate from the trust
+# flag itself now that trust can come back: without it, a desk that suspends
+# and re-arms would print on every cycle.
+_pid_suspension_announced = False
 
 
 def pid_liveness_trusted():
@@ -175,11 +212,14 @@ def pid_liveness_trusted():
 
 
 def reset_pid_liveness():
-    """Restore trust. For tests only -- the latch is process-lifetime by
-    design, and a test that latched it would otherwise silently disarm the
-    liveness checks in every test that ran after it."""
-    global _pid_trusted
+    """Restore trust and the right to explain a suspension again.
+
+    For tests only. Trust is process-wide and outlives any one provider, so a
+    test that suspended it would otherwise silently disarm the liveness checks
+    in every test that ran after it."""
+    global _pid_trusted, _pid_suspension_announced
     _pid_trusted = True
+    _pid_suspension_announced = False
 
 
 def _slot_pid(payload):
@@ -228,26 +268,63 @@ def _process_is_gone(pid):
 
 
 def _pid_says_ended(pid, age_s, slot_path=""):
-    """Whether the pid proves this session is over. Latches on the absurd.
+    """Whether the pid proves this session is over. Suspends on the absurd.
 
     Returns False for every uncertain case, so the caller keeps whatever
     today's rules already decided.
     """
-    global _pid_trusted
-    if pid is None or not _PID_LIVENESS_AVAILABLE or not _pid_trusted:
+    global _pid_trusted, _pid_suspension_announced
+    if pid is None or not _PID_LIVENESS_AVAILABLE:
         return False
     if not _process_is_gone(pid):
+        # A pid from this directory that resolves in this process table. That
+        # is the premise holding, demonstrated, so it also ends any earlier
+        # suspension -- the check is asked BEFORE the trust flag rather than
+        # after it precisely so this evidence can still be collected while
+        # suspended. One extra syscall per slot per poll, which is the same
+        # cost the trusted path already pays.
+        _pid_trusted = True
+        return False
+    if not _pid_trusted:
+        return False
+    if age_s < -FRESH_SLOT_S:
+        # A stamp further into the future than any ordinary skew. derive_state
+        # meets the same number and clamps it, because "how long since the
+        # last event" has a sane answer for a session that is on screen; here
+        # it does not, and the two decisions below both need one. So neither
+        # is taken from it: no drop, because the session may well be alive,
+        # and no suspension, because a clock this wrong is not evidence about
+        # what a pid means. A slot with a broken clock takes today's rules,
+        # which is where every uncertain case in this function goes.
+        #
+        # It used to sail straight into the test below -- a negative number is
+        # less than ten -- and one NTP step could disable pid liveness for the
+        # life of a daemon that runs for weeks.
         return False
     if age_s <= FRESH_SLOT_S:
-        # Written seconds ago BY A PROCESS THAT DOES NOT EXIST. The pid is
-        # not the session's process. Stop believing it, and say so once.
+        # Written seconds ago BY A PROCESS THAT DOES NOT EXIST -- and
+        # ordinary skew lands here on purpose, because a slot stamped three
+        # seconds ahead was still written three seconds ago, by a clock that
+        # is ahead. Refusing to call that fresh would send it to the drop
+        # below, which is the one thing this feature must never do to a live
+        # session.
+        #
+        # Three things look like this and only one of them is ordinary, so
+        # the message no longer picks one: the hook's pid may be a wrapper
+        # the session outlives, the pid may belong to another namespace (a
+        # bind-mounted ~/.blink), or the session may simply have been closed
+        # inside FRESH_SLOT_S of its last event, which fires no SessionEnd.
+        # Suspend, keep the session, and let a living pid settle it later.
         _pid_trusted = False
-        print(f"[claude] {slot_path or 'a state slot'} was written"
-              f" {age_s:.0f}s ago but its pid {pid} is already gone:"
-              " the hook's pid is not the session's own process, so pid"
-              " liveness is DISABLED for this run -- sessions that end"
-              " without SessionEnd will drop out after"
-              f" {ABANDONED_AFTER_S:.0f}s as before", file=sys.stderr)
+        if not _pid_suspension_announced:
+            _pid_suspension_announced = True
+            print(f"[claude] {slot_path or 'a state slot'} was written"
+                  f" {age_s:.0f}s ago but its pid {pid} is already gone:"
+                  " that pid may not name the session's own process on this"
+                  " machine, so pid liveness is DISABLED until one proves"
+                  " live -- until then, sessions that end without SessionEnd"
+                  f" drop out after {ABANDONED_AFTER_S:.0f}s as before",
+                  file=sys.stderr)
         return False
     return True
 
