@@ -27,6 +27,13 @@ import time
 
 from pc import (install_codex_hooks, install_hooks, install_statusline,
                 protocol, statusline_source, update)
+# Eagerly, unlike the other providers, which are imported inside the functions
+# that use them to keep the frozen binary's start-up cheap. This one costs
+# nothing to import (os, and claude_state, which is json/os/sys/time) and it
+# has to be a module attribute rather than a local: `blink status` reads it,
+# and a test has to be able to replace it without a real slot directory in
+# reach -- the scan behind it deletes files.
+from pc.providers import codex_state
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -1582,6 +1589,53 @@ def _board_lines():
         return [f"Board       could not list serial ports: {e}"]
 
 
+def _codex_hook_status():
+    """The Codex hook lines of `blink status`.
+
+    Three states worth telling apart, because the repairs are different:
+    registered and firing, registered and silent, not registered at all.
+
+    The middle one is the reason this function exists. Under `codex exec` a
+    hook the user has not trusted is skipped silently -- no prompt, no
+    warning, no output whatsoever (docs/research/codex-hook-contract.md, F5) --
+    so from out here, a hook that is registered and has never written a slot
+    is exactly what declining Codex's trust prompt looks like. It is the one
+    support question this feature has that no other part of the product does,
+    and without this line the symptom is a panel that simply never mentions a
+    Codex session waiting on its human, with nothing anywhere saying why.
+
+    Read off our own marker rather than off Codex's hooks.json, unlike the
+    Activity row's count: that file belongs to another vendor, and parsing it
+    a second time here would be a second copy of install_codex_hooks' reader,
+    free to drift from the first.
+    """
+    if not install_codex_hooks._read_marker():
+        return [f"Codex hook  not installed -- run `{installed_bin()} install`"
+                " on a machine with Codex"]
+    try:
+        # sweep=False, for the reason codex_state.scan gives at length: a
+        # diagnostic that deletes what it is diagnosing destroys the evidence
+        # somebody ran it to see. Here that is not an abstraction -- the
+        # never-written case above IS the diagnosis, and a sweep is what would
+        # manufacture it.
+        states, _agents = codex_state.scan(time.time(), sweep=False)
+    except Exception as e:
+        # Not folded into the empty case below. "It has never written
+        # anything" would send someone to Codex's trust prompt over a
+        # directory we merely failed to read, which is the wrong repair for a
+        # different fault.
+        return [f"Codex hook  registered, but its slots could not be read ({e})"]
+    if not states:
+        return [
+            "Codex hook  registered, but it has never written anything",
+            "            Codex asks once whether to trust a hook. If that",
+            "            prompt was declined the hook stays in the file and",
+            "            never runs -- open Codex and accept it.",
+        ]
+    n = len(states)
+    return [f"Codex hook  firing, {n} live session{'s' if n != 1 else ''}"]
+
+
 def _source_lines():
     """One line each for the two sources CI cannot exercise.
 
@@ -1617,7 +1671,13 @@ def _source_lines():
 
     logs = codex_cli.recent_rollouts()
     if logs:
-        frames = codex_cli.CodexCliProvider().poll(now)
+        # sweep=False, matching _live_sessions above and for the same reason:
+        # the provider's poll() scans the Codex hook slots, and the scan
+        # DELETES abandoned ones. `blink status` must not mutate what it
+        # reports -- asking "is the Codex hook working?" would otherwise
+        # delete the evidence that it is, and leave the next run reading
+        # differently because of this one.
+        frames = codex_cli.CodexCliProvider(sweep=False).poll(now)
         if frames:
             print(f"Codex       session log parsed, reading"
                   f" {_age(now - frames[0].observed_at)} old")
@@ -1628,6 +1688,15 @@ def _source_lines():
     else:
         print("Codex       no session logs (Codex not installed, or never run)")
         print(f"            looked under {codex_cli.sessions_root()}")
+
+    # Under the Codex rows, and only where there is something to answer. These
+    # lines answer "why is my Codex session not showing as waiting"; on a
+    # machine with neither a Codex log nor a registration of ours, that is a
+    # question nobody asked, and telling them to install a hook for a tool
+    # they do not have is worse than saying nothing.
+    if logs or install_codex_hooks._read_marker():
+        for line in _codex_hook_status():
+            print(line)
 
 
 def cmd_update(_args) -> int:

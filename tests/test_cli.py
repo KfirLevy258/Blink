@@ -607,3 +607,76 @@ def test_uninstall_says_nothing_about_a_codex_config_that_is_not_there(
                         lambda p, s=None: "No Codex state hooks to remove.")
     cli._uninstall_codex_hooks()
     assert "trust" not in capsys.readouterr().out.lower()
+
+
+def test_status_reports_codex_hooks_not_installed(monkeypatch):
+    monkeypatch.setattr(cli.install_codex_hooks, "_read_marker", lambda: set())
+    lines = cli._codex_hook_status()
+    assert any("not installed" in ln for ln in lines)
+
+
+def test_status_reports_a_registered_hook_that_has_never_fired(monkeypatch):
+    """Which is exactly what declining the trust prompt looks like, and the
+    single most likely support call this feature will generate: under
+    `codex exec` a distrusted hook is skipped with no prompt and no output at
+    all, so there is nothing else anywhere to see."""
+    monkeypatch.setattr(cli.install_codex_hooks, "_read_marker",
+                        lambda: {"sh /x/blink-hook.sh Stop codex"})
+    monkeypatch.setattr(cli.codex_state, "scan",
+                        lambda now, path=None, sweep=True: ({}, 0))
+    lines = cli._codex_hook_status()
+    assert any("trust" in ln.lower() for ln in lines)
+
+
+def test_status_reports_live_codex_sessions(monkeypatch):
+    monkeypatch.setattr(cli.install_codex_hooks, "_read_marker",
+                        lambda: {"sh /x/blink-hook.sh Stop codex"})
+    monkeypatch.setattr(cli.codex_state, "scan",
+                        lambda now, path=None, sweep=True: (
+                            {"a": "running", "b": "waiting"}, 0))
+    lines = cli._codex_hook_status()
+    assert any("2" in ln for ln in lines)
+
+
+def test_status_does_not_blame_the_trust_prompt_for_slots_it_cannot_read(
+        monkeypatch):
+    """Two different faults with two different repairs. Reporting an
+    unreadable directory as 'never written anything' sends someone to Codex's
+    trust prompt to fix a permissions problem, and it will not be there."""
+    monkeypatch.setattr(cli.install_codex_hooks, "_read_marker",
+                        lambda: {"sh /x/blink-hook.sh Stop codex"})
+
+    def boom(now, path=None, sweep=True):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(cli.codex_state, "scan", boom)
+    lines = cli._codex_hook_status()
+    assert any("permission denied" in ln for ln in lines)
+    assert not any("trust" in ln.lower() for ln in lines)
+
+
+def test_status_says_nothing_about_codex_hooks_without_codex(tmp_path, capsys):
+    """No Codex log and no registration of ours: telling someone to install a
+    hook for a tool they do not have is worse than saying nothing."""
+    assert cli.main(["status"]) == 0
+    assert "Codex hook" not in capsys.readouterr().out
+
+
+def test_status_does_not_sweep_the_codex_slots(tmp_path):
+    """A diagnostic that deletes what it is diagnosing destroys the evidence
+    somebody ran it to see -- and here that is not an abstraction: the Codex
+    hook status is read off exactly the slots the sweep collects, so a status
+    run could manufacture the 'never written anything' finding that the next
+    status run then reports."""
+    sessions = tmp_path / ".codex" / "sessions" / "2026" / "09" / "04"
+    sessions.mkdir(parents=True)
+    (sessions / "rollout-2026-09-04T00-00-00-abc.jsonl").write_text("")
+    slots = tmp_path / ".blink" / "state-codex"
+    slots.mkdir(parents=True)
+    # Older than claude_state.ABANDONED_AFTER_S, so a sweep would collect it.
+    slot = slots / "sess-old.state"
+    slot.write_text(json.dumps({"event": "Stop", "t": time.time() - 7200}))
+
+    assert cli.main(["status"]) == 0
+
+    assert slot.exists(), "`blink status` swept the slots it was reporting on"
