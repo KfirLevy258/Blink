@@ -620,9 +620,40 @@ class _LaunchdBackend(_Backend):
             if r.returncode == 0:
                 break
             time.sleep(0.5 * (attempt + 1))
-        if r.returncode == 0:
-            return "running (launchd)"
-        return f"installed, but could not be started: launchctl bootstrap gui/{uid} {plist_path()}"
+        if r.returncode != 0:
+            return ("installed, but could not be started: "
+                    f"launchctl bootstrap gui/{uid} {plist_path()}")
+
+        # BOOTSTRAP REGISTERS; IT DOES NOT START. A successful bootstrap means
+        # launchd has accepted the job, not that anything is running -- and on
+        # a bootout/bootstrap cycle it routinely does not run it, RunAtLoad or
+        # no RunAtLoad. Measured on the owner's machine 2026-09-04, straight
+        # after an install that had just printed "running (launchd)":
+        #
+        #     active count = 0
+        #     state = not running
+        #     last exit code = (never exited)
+        #
+        # The board went quiet and dozed while the installer said it was fine.
+        # This is the same defect tools/burn.sh has in its restore path, and
+        # the same lesson _service_command() already records one screen up:
+        # registration is not health.
+        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{LABEL}"],
+                       capture_output=True, **update.ota.NO_WINDOW)
+
+        # And then ASK, rather than assume. Everything above is a command that
+        # returned zero; none of it is evidence that a process exists. launchd
+        # is the only thing that knows, so the claim we print is its answer and
+        # not our hope.
+        for attempt in range(4):
+            pr = subprocess.run(["launchctl", "print", f"gui/{uid}/{LABEL}"],
+                                capture_output=True, text=True,
+                                **update.ota.NO_WINDOW)
+            if pr.returncode == 0 and "state = running" in (pr.stdout or ""):
+                return "running (launchd)"
+            time.sleep(0.5 * (attempt + 1))
+        return ("registered with launchd, but it is not running -- "
+                f"start it with: launchctl kickstart -k gui/{uid}/{LABEL}")
 
     def restart(self) -> str:
         r = subprocess.run(["launchctl", "kickstart", "-k",

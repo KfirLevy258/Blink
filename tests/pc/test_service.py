@@ -21,15 +21,23 @@ from pc import cli
 class _Runs:
     """Stands in for subprocess.run, recording argv and replaying exit codes."""
 
-    def __init__(self, codes=None, stderr=""):
+    def __init__(self, codes=None, stderr="", running=True):
         self.calls = []
         self._codes = list(codes or [])
         self._stderr = stderr
+        # What `launchctl print` reports. install() now believes launchd
+        # rather than its own bootstrap exit code, so this is the switch
+        # between a service that started and one that only registered.
+        self._running = running
 
     def __call__(self, argv, **kw):
         self.calls.append(list(argv))
         code = self._codes.pop(0) if self._codes else 0
-        return subprocess.CompletedProcess(argv, code, stdout="",
+        out = ""
+        if len(argv) > 1 and argv[1] == "print":
+            out = ("state = running\n" if self._running
+                   else "active count = 0\n\tstate = not running\n")
+        return subprocess.CompletedProcess(argv, code, stdout=out,
                                            stderr=self._stderr)
 
     def ran(self, *words):
@@ -57,8 +65,8 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _runs(monkeypatch, codes=None, stderr=""):
-    r = _Runs(codes, stderr)
+def _runs(monkeypatch, codes=None, stderr="", running=True):
+    r = _Runs(codes, stderr, running)
     monkeypatch.setattr(cli.subprocess, "run", r)
     return r
 
@@ -108,6 +116,9 @@ def test_launchd_install_writes_the_plist_and_bootstraps(home, monkeypatch):
     assert r.calls[0][:2] == ["launchctl", "bootout"]
     assert r.calls[1][:2] == ["launchctl", "bootstrap"]
     assert r.calls[1][2] == "gui/501"
+    # And STARTED, not merely registered. bootstrap accepts the job; it does
+    # not run it, and on a bootout/bootstrap cycle it routinely does not.
+    assert r.ran("launchctl", "kickstart", "gui/501/com.blink.bridge")
 
 
 def test_launchd_install_retries_bootstrap(home, monkeypatch):
@@ -132,6 +143,31 @@ def test_launchd_install_gives_up_with_the_command_to_run(home, monkeypatch):
     # The message has to be a command someone can paste.
     assert "launchctl bootstrap gui/501" in msg
     assert cli.plist_path() in msg
+
+
+def test_launchd_install_will_not_claim_running_when_it_is_not(home, monkeypatch):
+    """The defect this exists for, measured on the owner's machine 2026-09-04.
+
+    Every launchctl command returned zero, the installer printed
+    "running (launchd)" as its last word, and the service was not running:
+
+        active count = 0
+        state = not running
+        last exit code = (never exited)
+
+    The board went quiet and dozed while the install said it was fine. So the
+    claim must come from launchd's own answer, not from a bootstrap that
+    merely succeeded -- registration is not health, which the comment above
+    _service_command() already had to learn once.
+    """
+    _platform(monkeypatch, "darwin")
+    _runs(monkeypatch, running=False)
+
+    msg = cli.backend().install()
+    assert "running (launchd)" != msg
+    assert "not running" in msg
+    # And it has to be a command someone can paste, like its sibling above.
+    assert "launchctl kickstart -k gui/501/com.blink.bridge" in msg
 
 
 def test_launchd_remove_boots_out_and_deletes_the_plist(home, monkeypatch):
