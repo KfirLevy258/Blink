@@ -82,13 +82,51 @@ enum fmt_pip_kind {
 	FMT_PIP_FAILED,		/* a turn died -- an event, never inferred */
 	FMT_PIP_WAITING,	/* a prompt is open */
 	FMT_PIP_RUNNING,	/* working */
-	FMT_PIP_FINISHED,	/* done, unread -- amber like WAITING, see below */
+	FMT_PIP_FINISHED,	/* done, unread -- the one amber, see fmt_pip_tone */
 };
 
 struct fmt_pip {
 	enum fmt_pip_kind kind;
 	int count;		/* 0 in pip mode; the state's tally in counts mode */
 };
+
+/*
+ * The three inks the pip row is allowed to use.
+ *
+ * A TONE rather than a colour, because a colour is an lv_color_t and that
+ * would put this decision back inside usage_view.c, which needs LVGL and has
+ * no host coverage. usage_view.c turns a tone into COL_RED/COL_AMBER/
+ * COL_GREEN and does nothing else with it, so the mapping below is the whole
+ * of the decision and a laptop can check it.
+ */
+enum fmt_pip_tone {
+	FMT_TONE_GREEN,
+	FMT_TONE_AMBER,
+	FMT_TONE_RED,
+};
+
+/*
+ * RED = WANTS YOU NOW, AMBER = FINISHED, GREEN = WORKING.
+ *
+ * Red covers WAITING as well as FAILED, and merging those two is the point of
+ * the scheme rather than a shortcut in it: both demand that a person do
+ * something, the hint line under the row already NAMES which condition fired,
+ * so the colour is free to say "act" while the words say "why".
+ *
+ * This supersedes the 2026-08-29 decision that gave WAITING and FINISHED the
+ * same amber. That decision reasoned from a failure: the panel had already
+ * tried to separate two states with green-steady against green-PULSING, that
+ * failed across a desk, and an 8 px pip looked like a finer channel still. But
+ * the channel that failed was motion, not hue -- a pulse asks the reader to
+ * watch a mark over time, a colour is legible in the glance the panel exists
+ * for. And the merge was measured costing real information: shown six pips (3
+ * running, 2 waiting, 1 finished) the owner read "3 running and 3 waiting",
+ * because the finished one was not distinct from the waiting ones at all.
+ *
+ * So the amber is spent on the state that does NOT want anything -- a turn
+ * that ended, sitting there unread -- and the two that do share the red.
+ */
+enum fmt_pip_tone fmt_pip_tone(enum fmt_pip_kind k);
 
 /*
  * Fill `out` with what to draw, most urgent first, and return how many.

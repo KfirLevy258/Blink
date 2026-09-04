@@ -207,3 +207,24 @@ int fmt_pips(int n_run, int n_wait, int n_fail, int n_fin,
 	}
 	return w;
 }
+
+enum fmt_pip_tone fmt_pip_tone(enum fmt_pip_kind k)
+{
+	switch (k) {
+	case FMT_PIP_FAILED:
+	case FMT_PIP_WAITING:
+		return FMT_TONE_RED;
+	case FMT_PIP_FINISHED:
+		return FMT_TONE_AMBER;
+	default:
+		/*
+		 * RUNNING, and anything a later version adds. Green is the
+		 * only tone that asks nothing of the reader, which makes it
+		 * the safe answer for a kind this build cannot name -- the
+		 * opposite of the usage_state rule, where the safe answer is
+		 * to stay dark, because there the unknown value came off the
+		 * wire and here it can only come from this file.
+		 */
+		return FMT_TONE_GREEN;
+	}
+}

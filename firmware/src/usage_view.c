@@ -1726,16 +1726,36 @@ void usage_view_tick_1s(void)
 }
 
 /*
- * Pip kind -> colour. THREE colours, and no new meanings: each pip reads
- * exactly like the single execution dot it replaces.
+ * Pip kind -> colour. THREE colours: RED = WANTS YOU NOW (waiting or failed),
+ * AMBER = FINISHED, GREEN = WORKING.
  *
- * WAITING and FINISHED share amber deliberately. The panel already tried to
- * separate them and could not: green-steady for finished against green-pulsing
- * for running was the whole difference between "read me" and "busy", and
- * nobody caught it from across a desk (user decision 2026-08-29). An 8 px pip
- * is a finer channel than the pulse that already failed, so it is not the
- * place to retry the distinction. Both mean the same thing to the person
- * anyway: a session that wants you.
+ * WAITING IS RED. It used to be amber, sharing that ink with FINISHED, on the
+ * argument that the panel had already failed to separate two states once --
+ * green-steady for finished against green-PULSING for running -- and that an
+ * 8 px pip was a finer channel than the pulse that failed (user decision
+ * 2026-08-29). That argument was about MOTION. A pulse asks the reader to
+ * watch a mark over time; this panel is read in a glance, which is the one
+ * thing a pulse cannot survive. Hue is legible in that glance, so the earlier
+ * failure says nothing about this distinction.
+ *
+ * And the merge was costing information, measured rather than supposed: shown
+ * six pips -- 3 running, 2 waiting, 1 finished -- the owner read them as "3
+ * running and 3 waiting". The finished session was not merely hard to pick
+ * out, it was invisible AS finished. Splitting the two by colour is exactly
+ * the repair for that reading.
+ *
+ * Red then carries two kinds, waiting and failed, and that merge is
+ * deliberate where the old one was not. Both demand a person; the hint line
+ * directly below NAMES whichever condition fired, so the colour is free to
+ * mean "act" and the sentence carries "why". Amber is left to the one state
+ * that wants nothing: a turn that ended and has not been read.
+ *
+ * The decision itself is fmt_pip_tone(), not this function. Everything
+ * decidable in this file is untested by construction -- usage_view.c needs
+ * LVGL and cannot be built on a laptop -- and the owner's complaint tonight
+ * was about precisely this mapping, so it belongs where tests/fmt can reach
+ * it. What is left here is the one thing that genuinely needs LVGL: a tone to
+ * an lv_color_t.
  *
  * Nothing here breathes. A pulse was how ONE dot said "and this one is live";
  * a row says it by how many marks there are, and seven breathing pips in the
@@ -1744,15 +1764,12 @@ void usage_view_tick_1s(void)
  */
 static lv_color_t pip_colour(enum fmt_pip_kind k)
 {
-	switch (k) {
-	case FMT_PIP_FAILED:
+	switch (fmt_pip_tone(k)) {
+	case FMT_TONE_RED:
 		return COL_RED;
-	case FMT_PIP_WAITING:
-		return COL_AMBER;
-	case FMT_PIP_FINISHED:
+	case FMT_TONE_AMBER:
 		return COL_AMBER;
 	default:
-		/* RUNNING: working, and nothing is asked of you. */
 		return COL_GREEN;
 	}
 }

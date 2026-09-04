@@ -191,6 +191,52 @@ static void test_fmt_pips(void)
 	EXPECT_EQ(n, 4);
 }
 
+/*
+ * The pip row's ink. This is the mapping the owner complained about by
+ * looking at the panel -- "the color of the blink is still amber, not red as
+ * it should be" -- and until fmt_pip_tone() existed it lived in usage_view.c,
+ * where no test on this machine could reach it.
+ */
+static void test_fmt_tone(void)
+{
+	/* Red means WANTS YOU NOW, and it covers both of the states that do. */
+	check_true("a failed turn is red",
+		   fmt_pip_tone(FMT_PIP_FAILED) == FMT_TONE_RED);
+	check_true("an open prompt is RED, not amber (owner, 2026-09-04)",
+		   fmt_pip_tone(FMT_PIP_WAITING) == FMT_TONE_RED);
+	/*
+	 * Amber is what waiting gave up, and it now means the opposite: a turn
+	 * that ended and wants nothing. Six pips read as "3 running and 3
+	 * waiting" while this shared waiting's colour.
+	 */
+	check_true("a finished turn is amber",
+		   fmt_pip_tone(FMT_PIP_FINISHED) == FMT_TONE_AMBER);
+	check_true("a running turn is green",
+		   fmt_pip_tone(FMT_PIP_RUNNING) == FMT_TONE_GREEN);
+
+	/*
+	 * ONE state wears amber, counted rather than asserted state by state.
+	 * The scheme's whole content is that "finished" is the only thing on
+	 * this row that asks for nothing, so a second amber -- from either
+	 * direction, waiting coming back to it or running leaving green --
+	 * breaks the reading even if every individual check above still holds.
+	 */
+	{
+		const enum fmt_pip_kind all[] = {
+			FMT_PIP_FAILED, FMT_PIP_WAITING,
+			FMT_PIP_RUNNING, FMT_PIP_FINISHED
+		};
+		int amber = 0;
+
+		for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+			if (fmt_pip_tone(all[i]) == FMT_TONE_AMBER) {
+				amber++;
+			}
+		}
+		check_true("exactly one pip state is amber", amber == 1);
+	}
+}
+
 int main(void)
 {
 	check("unknown", -1, "--");
@@ -262,6 +308,7 @@ int main(void)
 
 	test_fmt_hint();
 	test_fmt_pips();
+	test_fmt_tone();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");
