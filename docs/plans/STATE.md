@@ -444,3 +444,44 @@ Plan 3 (`codex-hook-shim.md`), 14 tasks. Its discovery gate has run and the
 premise holds. **Its first task must be the smoke test — no Codex hook has ever
 been executed by anyone.** Then: flash nothing (plan 3 is daemon-and-shim only),
 and merge, because `main` still has none of this.
+
+---
+
+# CORRECTION — no board carries the branch firmware, 2026-09-04 evening
+
+The "HARDWARE VALIDATION" section above says the review fixes are flashed. **They
+are not, any more.** A sibling session spent the afternoon burning customer units
+with `tools/burn.sh` on the owner's instruction, and every one of them went back
+to the release build:
+
+| Unit | What happened |
+|---|---|
+| `20500d2cf988` (pipl) | my hand-flashed branch image, then burned ~12:20 and again ~12:30 after a full `erase_flash` |
+| `20500d2cf758` | burned ~14:50 as an individual claude unit, then erased and burned again |
+| `20500d33ff1c` | burned in the evening, individual claude, no logo |
+
+**The measurements in that section remain true** — zero resets in 135 s, the
+stale doze firing and releasing, the logo surviving a two-offset write. They were
+made, they were real, and they are recorded honestly. What is no longer true is
+the present tense: **no board on this desk runs `worktree-hint-line` firmware.**
+Anything that needs the branch image on hardware — the settings-from-doze fix
+above all — starts by flashing a board again.
+
+**The daemon is DOWN, deliberately.** The owner's instruction, given while
+customer units were on the desk: their usage must not be pushed to a board that
+ships. It stays down until the owner says otherwise, and the restore is BOTH
+`launchctl bootstrap gui/502 ~/Library/LaunchAgents/com.blink.bridge.plist` AND
+`launchctl kickstart -k gui/502/com.blink.bridge` — bootstrap alone registers the
+job without starting it.
+
+I restarted that daemon twice today before learning any of this, the second time
+after the owner had already asked for it to be stopped. Roughly ten minutes of
+the owner's usage went to a customer board because I treated a shared service as
+mine to fix. **Check who else is on the machine before touching a shared
+service.**
+
+Related and worth carrying into whichever branch merges first: `tools/burn.sh`
+restores the daemon with `bootstrap` and no `kickstart`, so a burn leaves the
+service registered but not running — which looks exactly like success. Already
+fixed on `feat/fleet-tests` as `36c733e`; this worktree is off `main` and does
+not carry it.
