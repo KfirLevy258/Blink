@@ -93,6 +93,30 @@ int main(void)
 	CHECK(usage_freshness_age_s(460000) == 43260);
 	CHECK(usage_freshness_active_age_s(460000) == 65);
 
+	/*
+	 * Zero is a figure, not the absence of one, and this is the boundary
+	 * the whole field turns on.
+	 *
+	 * The daemon sends active_age_s = 0 for a machine that wrote
+	 * something in the second the message was built -- somebody typing.
+	 * The fallback that covers old daemons tests `>= 0`, and an author
+	 * who wrote `> 0` there would be making the most ordinary mistake in
+	 * C on the one input where it costs the most: zero would be read as
+	 * "this daemon sends no active age", the reading's own age would be
+	 * substituted, and on this desk that is twelve hours. The gate would
+	 * then doze on a person mid-keystroke -- which is not a new bug, it
+	 * is the field bug this file was added to fix, coming back through a
+	 * comparison rather than through the wire.
+	 */
+	usage_freshness_note(43200, 0, USAGE_ACTIVITY_RUNNING, 470000);
+	CHECK(usage_freshness_active_age_s(470000) == 0);
+	/* And the reading is still as old as it was: the two must not have
+	 * collapsed into one the other way either. */
+	CHECK(usage_freshness_age_s(470000) == 43200);
+	/* A zero that grows like any other number, rather than a flag that
+	 * stays put. */
+	CHECK(usage_freshness_active_age_s(530000) == 60);
+
 	/* A daemon older than the field sends no active age. The reading's
 	 * own age is then not an approximation of it, it IS it: the two can
 	 * only differ because of a memory that daemon does not have. Getting
