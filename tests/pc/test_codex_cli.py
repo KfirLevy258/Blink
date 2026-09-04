@@ -1014,7 +1014,12 @@ def test_a_waiting_hook_slot_beats_a_running_rollout(tmp_path):
     sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
     slots.mkdir()
     write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  # A token_count line too, so this poll yields BOTH frames.
+                  # That is what makes union_frame's "one census" guard bite:
+                  # with only a state frame in the list, nothing could ever
+                  # put a second entry beside it for the guard to catch.
                   lines=[sid_meta_line("cx-1"),
+                         token_count_line(rate_limits()),
                          turn_line("task_started", _stamp(NOW - 30))])
     slot(slots, "cx-1", "PermissionRequest", NOW - 5)
 
