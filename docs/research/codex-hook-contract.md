@@ -506,3 +506,56 @@ decision the user cannot see.
 `blink status` (task 13) carries the other half: **a registered hook that has
 never written a slot is exactly what declining the trust prompt looks like**, and
 that is the one Codex-specific support question nobody else has.
+
+---
+
+# END TO END, against real Codex — 2026-09-04
+
+The chain has never run before: installer -> Codex -> shim -> slot. It runs now.
+
+Done in a **sandbox `CODEX_HOME`**, with the owner's real `~/.codex` and
+`~/.blink` untouched. Task 14 as written begins `python3 -m pc.cli install`,
+which replaces a live install and edits another vendor's configuration; that
+needs asking first, and it needs a board on the bus for the half that ends on the
+panel. Everything else can be proved without either, and was.
+
+    1. the REAL installer, into the sandbox   -> "Codex state hooks installed (10 events)."
+    2. a REAL codex exec turn                 -> hooks fired
+    3. slots, watched WHILE the session ran:
+
+       t+6s   UserPromptSubmit   pid 19826, name "work"
+       t+10s  PostToolUse        pid 19826, name "work"
+
+    4. after SessionEnd                       -> directory empty
+
+Session id, event, pid and project name all correct, and the state advanced with
+the turn. `SessionEnd` removing the slot at the end is the design, not a fault: a
+finished session must not leave a pip on the panel for ever.
+
+## The harness was wrong twice before it was right, and it is worth saying how
+
+The first run reported **10 hooks fired, 0 slots** and looked like a
+stop-the-line defect. It was not. The check ran AFTER the session exited —
+exactly when `SessionEnd` removes the slot by design. An earlier probe had
+"worked" only because it registered two events and neither was `SessionEnd`.
+
+Four things were eliminated before the real cause was found, and each is now
+independently known-good rather than merely assumed: the command string the
+installer writes (`sh <shim> <Event> codex`, correct); the environment Codex
+gives a hook (`HOME` honoured, argv two arguments, stdin ~600 bytes of real
+payload, shim exit 0); the matcher shape (absent, not null — a `.get()` returning
+`None` for a missing key sent me after the wrong thing); and the shim itself
+(writes correctly when handed the same input by hand).
+
+This is the same shape as the flash test on 2026-09-03, which was also wrong
+twice before it was right. **A negative result against a system nobody has run
+before is more likely to be a broken harness than a broken product**, and the
+way to tell is to instrument the boundary rather than reason about it — the
+wrapper that recorded argv, HOME and stdin byte counts is what settled it.
+
+## Still not proved here
+
+- **`PermissionRequest` in this chain.** `codex exec` cannot produce one; it
+  needs an interactive session with the shim registered. The event itself is
+  verified (see above) and so is the marker mechanism, but not the two together.
+- **That `n_wait` reaches the panel.** Needs a board on the bus.
