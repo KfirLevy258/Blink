@@ -150,6 +150,33 @@ SessionEnd)
 	# reach here because the pattern would not have matched.
 	rm -rf "${DIR:?}/$sid" 2>/dev/null
 	rm -f "$DIR/$sid.state" "$DIR/$sid.waiting" 2>/dev/null
+	# And leave a TOMBSTONE where the slot was.
+	#
+	# Removing the slot is enough for a source that only counts slots, and it
+	# was the whole story until Codex's rollout reader joined the census. That
+	# reader cannot see a session end: a closed Codex session leaves a file
+	# that simply stops growing, indistinguishable from a long quiet turn, so
+	# it kept counting for the full hour until the file aged out -- and the
+	# union in pc/providers/codex_cli.py, which exists so a session with no
+	# slot still counts, faithfully resurrected every session this branch had
+	# just buried. The owner saw six sessions on the panel with two Claude
+	# sessions and one live Codex one.
+	#
+	# Absence cannot carry that news, because absence is also what a session
+	# that never had a hook looks like -- and those two must be told apart, or
+	# the fix breaks the case the union was written for. A file can. This one
+	# says "the hook watched this session end", the union drops any rollout
+	# whose id has one, and a session with no tombstone counts exactly as
+	# before.
+	#
+	# Same shape as the waiting marker above and for the same reason: its own
+	# path, created and removed atomically, never read-modify-written by two
+	# shim processes at once. `true` rather than `:` -- a redirection failure
+	# on a POSIX special built-in EXITS the shell, skipping the exit 0 below
+	# and handing the tool a failing hook -- and 2>/dev/null BEFORE the
+	# redirect, because the complaint about a failed redirect comes from the
+	# shell rather than from the command.
+	true 2>/dev/null > "$DIR/$sid.ended"
 	;;
 SubagentStart|SubagentStop)
 	# One file per agent, named by the id Claude Code assigns. This is why
@@ -228,6 +255,14 @@ SubagentStart|SubagentStop)
 		rm -f "$DIR/$sid.waiting" 2>/dev/null
 		;;
 	esac
+
+	# A session that speaks again is not dead. `claude --resume` and `codex
+	# resume` reopen a session under the SAME id, so without this line an
+	# hour-old tombstone would go on suppressing a session somebody is sitting
+	# in front of -- the resurrection bug inverted, and just as visible. Any
+	# event that reaches this branch is the session announcing itself, which
+	# is exactly the evidence that outranks the tombstone.
+	rm -f "$DIR/$sid.ended" 2>/dev/null
 
 	# The name is read HERE and not beside the session id, because this is
 	# the only branch that writes it. SessionEnd and the Subagent events were

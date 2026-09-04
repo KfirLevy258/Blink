@@ -1217,3 +1217,144 @@ def test_live_agents_reach_the_frame(tmp_path):
     f = union_frame(sessions, slots)
 
     assert f.n_agents == 2
+
+
+# --- the tombstone -----------------------------------------------------------
+#
+# The union above counts a rollout nothing else can see, because a Codex
+# session open before the hooks were installed will never get a slot. What it
+# could not tell was that "no slot" ALSO describes a session whose SessionEnd
+# has fired -- the shim removes the slot -- so every ended session came back
+# and stayed for the hour its rollout took to age out. Measured on the owner's
+# desk: one live slot, two Claude sessions, four recent rollouts, a panel
+# saying six.
+#
+# The pair below is the whole fix. Same rollout, same age, same everything
+# except the tombstone.
+
+
+def tombstone(slots, sid, t):
+    """The file SessionEnd leaves where the slot was, aged by its mtime."""
+    p = slots / (sid + ".ended")
+    p.write_text("")
+    os.utime(p, (t, t))
+    return p
+
+
+def test_a_recent_rollout_the_hook_buried_does_not_count(tmp_path):
+    """The bug, in the arithmetic the owner read off the panel.
+
+    The rollout is fresh and running -- it would count, and did -- but the
+    hook watched this session end. A session nobody has open must not hold a
+    pip for an hour because the file it left behind is younger than one.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-1", NOW - 20)
+
+    assert union_frame(sessions, slots) is None
+
+
+def test_the_same_rollout_with_no_tombstone_still_counts(tmp_path):
+    """The other half, and the reason the first half means anything.
+
+    Identical to the test above but for the one file. Without this the fix
+    could be "drop every rollout-only session", which breaks exactly the case
+    the union was written for: a Codex session that was already open when the
+    hooks were installed has no slot and never will get one, because the
+    hooks only fire from its next turn on.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (1, 1)
+
+
+def test_a_tombstone_buries_its_own_session_and_only_its_own(tmp_path):
+    """One closed terminal must not take the open one beside it off the panel.
+
+    The same failure the per-session slot files were introduced to prevent,
+    one file further along: a marker that matched on anything but the exact
+    session id would silence a whole desk on one SessionEnd.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    for sid in ("cx-dead", "cx-live"):
+        write_rollout(str(sessions), name="rollout-%s.jsonl" % sid,
+                      lines=[sid_meta_line(sid),
+                             turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-dead", NOW - 20)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (1, 1)
+    assert f.label == "Blink", "the surviving session is the one that is named"
+
+
+def test_a_resumed_session_counts_again_from_its_slot(tmp_path):
+    """`codex resume` reopens a session under the SAME id.
+
+    Its rollout is the same file appended to and its tombstone may still be
+    inside the hour, so a filter applied after the hook slots -- or to the
+    merged census rather than to the rollouts -- would keep a session somebody
+    is sitting in front of off the panel. The slot is the newer witness and it
+    wins, which is why the filter runs before the update and not after it.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-1", NOW - 900)
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.state, f.n_wait, f.n_sessions()) == (base.STATE_WAITING, 1, 1)
+
+
+def test_a_tombstone_that_has_aged_out_buries_nothing(tmp_path):
+    """The marker is bounded by the same hour as everything else here.
+
+    Past it the tombstone is not evidence, it is litter -- and it must not
+    outlive the census entry it suppresses, or a session id that came back
+    from a shim older than this file would stay invisible.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-1", NOW - codex_cli.ABANDONED_AFTER_S - 60)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (1, 1)
+
+
+def test_a_buried_session_takes_its_name_off_the_panel_too(tmp_path):
+    """A dropped session must not go on lending the label.
+
+    The names are looked up out of the MERGED census, so this follows -- but
+    it follows only as long as the filter is applied to the same dict the
+    label is read from, and the label is the half a person actually reads.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1", cwd="/Users/K/Dead"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    write_rollout(str(sessions), name="rollout-cx-2.jsonl",
+                  lines=[sid_meta_line("cx-2", cwd="/Users/K/Alive"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-1", NOW - 20)
+
+    assert union_frame(sessions, slots).label == "Alive"

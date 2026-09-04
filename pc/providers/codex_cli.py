@@ -652,9 +652,30 @@ class CodexCliProvider(base.ProviderParser):
         # will get one, because the hooks only fire from the next turn on.
         # Dropping it would make a running terminal vanish from the panel,
         # which is a worse error than not knowing that it is waiting.
+        # Unioned, but not over a session the hook has BURIED.
+        #
+        # That is the correction the paragraph above needed. "No slot" was
+        # read as "the hooks never saw this session", and it is also what a
+        # session whose SessionEnd has already fired looks like -- the shim
+        # removes the slot -- so the union put back every Codex session the
+        # hook had just ended, and it kept putting them back until the rollout
+        # aged out an hour later. Measured on the owner's desk: one live slot,
+        # two Claude sessions, four recent rollouts, and a panel saying six.
+        #
+        # The tombstone is what tells the two absences apart. A rollout whose
+        # id has one is a session somebody closed; a rollout with no tombstone
+        # is a session nothing ever watched end, which is exactly the
+        # pre-hooks case this union exists for, and it counts as it always did.
+        #
+        # Filtered before the update, never after: a hook slot is the newest
+        # word on its own session, so a session that ended and was resumed
+        # under the same id counts again the moment its slot reappears.
         hook_states, agents = codex_state.scan(
             now_epoch, path=self._state_dir, sweep=self._sweep)
-        merged = dict(rollout_states)
+        buried = codex_state.ended(
+            now_epoch, path=self._state_dir, sweep=self._sweep)
+        merged = {key: state for key, state in rollout_states.items()
+                  if key not in buried}
         merged.update(hook_states)
 
         counts = {}

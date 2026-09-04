@@ -447,4 +447,70 @@ chmod 700 "$RO"
 [ -s "$WORK/err15h.txt" ] && fail "unwritable agent slot wrote to stderr: $(cat "$WORK/err15h.txt")"
 ok "an unwritable agent slot still exits 0, silently"
 
+
+# 16. THE TOMBSTONE, and the census it exists to correct.
+#
+#     Removing the slot is all a slot-counting source ever needed. Codex's
+#     rollout reader is not one: a closed session leaves a file that simply
+#     stops growing, which is also what a long quiet turn looks like, so it
+#     kept counting the session for the full hour the file took to age out --
+#     and the union that lets a session with no slot count at all put back
+#     every session this branch had just removed. Measured on the owner's
+#     desk: one live slot, two Claude sessions, four recent rollouts, and a
+#     panel reading six.
+#
+#     Absence cannot carry the news, because absence is also what a session
+#     that never had a hook looks like, and the union exists for that one. So
+#     SessionEnd leaves a file that says so.
+printf '{"session_id":"tomb-1","cwd":"/home/secret/proj"}' | $SH "$SHIM" PreToolUse >/dev/null 2>&1
+printf '{"session_id":"tomb-2"}' | $SH "$SHIM" PreToolUse >/dev/null 2>&1
+printf '{"session_id":"tomb-1"}' | $SH "$SHIM" SessionEnd >/dev/null 2>&1
+[ -f "$DIR/tomb-1.ended" ] || fail "SessionEnd left no tombstone"
+[ ! -s "$DIR/tomb-1.ended" ] ||
+	fail "the tombstone has contents: $(cat "$DIR/tomb-1.ended")"
+[ ! -e "$DIR/tomb-2.ended" ] || fail "SessionEnd buried a second session"
+[ -f "$DIR/tomb-2.state" ] || fail "SessionEnd removed an unrelated slot"
+ok "SessionEnd leaves an empty tombstone, for its own session alone"
+
+# 16b. And any later event takes it away again. `claude --resume` and `codex
+#      resume` reopen a session under the SAME id, so a tombstone that outlived
+#      the ending would suppress a session somebody is sitting in front of --
+#      the resurrection bug inverted, and just as visible on the panel.
+printf '{"session_id":"tomb-1"}' | $SH "$SHIM" SessionStart >/dev/null 2>&1
+[ ! -e "$DIR/tomb-1.ended" ] || fail "a resumed session kept its tombstone"
+[ -f "$DIR/tomb-1.state" ] || fail "the resumed session wrote no slot"
+ok "a session that speaks again loses its tombstone"
+
+# 16c. Private, like the slot and the marker: the names of the sessions
+#      somebody has been running are nobody else's business.
+printf '{"session_id":"tomb-2"}' | $SH "$SHIM" SessionEnd >/dev/null 2>&1
+[ -z "$(find "$DIR/tomb-2.ended" \( -perm -040 -o -perm -004 \) -print)" ] ||
+	fail "the tombstone is readable by others: $(ls -l "$DIR/tomb-2.ended")"
+ok "the tombstone is readable by this user alone"
+
+# 16d. The codex argument gets its own, in its own directory. The daemon reads
+#      the two directories as two different accounts, so a tombstone landing in
+#      the wrong one would silence a Claude session on a Codex SessionEnd.
+printf '{"session_id":"cx-tomb"}' | $SH "$SHIM" PreToolUse codex >/dev/null 2>&1
+printf '{"session_id":"cx-tomb"}' | $SH "$SHIM" SessionEnd codex >/dev/null 2>&1
+[ -f "$CODEXDIR/cx-tomb.ended" ] || fail "no tombstone in the codex directory"
+[ ! -e "$DIR/cx-tomb.ended" ] ||
+	fail "the codex tombstone landed in the Claude directory"
+ok "the codex directory gets its own tombstone and only its own"
+
+# 16e. And an unwritable directory costs the tombstone and NOTHING else. Same
+#      defect as 15g, in a branch that had no redirection in it until today:
+#      `:` is a POSIX SPECIAL built-in, so a redirection error on it EXITS the
+#      shell, skipping the exit 0 at the bottom of the shim and handing Claude
+#      Code a failing hook -- on the event that fires as a person closes their
+#      terminal. And 2>/dev/null must come BEFORE the '>' target, because the
+#      complaint about a failed redirect is printed by the shell rather than by
+#      the command.
+chmod 500 "$RO"
+out=$(HOME="$RO" sh -c "printf '{\"session_id\":\"tomb-9\"}' | $SH '$SHIM' SessionEnd; printf 'status=%s' \$?" 2>"$WORK/err16.txt")
+chmod 700 "$RO"
+[ "$out" = "status=0" ] || fail "SessionEnd into an unwritable HOME: [$out]"
+[ -s "$WORK/err16.txt" ] && fail "unwritable tombstone wrote to stderr: $(cat "$WORK/err16.txt")"
+ok "an unwritable tombstone path still exits 0, silently"
+
 printf 'PASS [%s]\n' "$WHICH"

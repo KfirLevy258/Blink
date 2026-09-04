@@ -55,6 +55,7 @@ ON DISK
 -------
     ~/.blink/state/<session_id>.state   one JSON slot, newest event wins
     ~/.blink/state/<session_id>.waiting  present while a human is being asked
+    ~/.blink/state/<session_id>.ended    left by SessionEnd where the slot was
     ~/.blink/state/<session_id>/<agent_id>   one empty file per live agent
 
 One file per session because a single global slot silently misreports the
@@ -107,6 +108,18 @@ ABANDONED_AFTER_S = 3600.0
 # a suffix on the slot itself: the point of it is to be a different file from
 # the one two hook processes race for. See the ON DISK note above.
 WAITING_MARKER_SUFFIX = ".waiting"
+
+# The sibling that says a session is OVER, left by SessionEnd where the slot
+# used to be. Nothing in this module's own census needs it -- a slot that is
+# gone is already uncounted here -- but Codex's rollout reader cannot see an
+# ending at all, and a file that stopped growing looks exactly like a long
+# quiet turn. Its union therefore has to tell "this session never had a hook"
+# (count it, the hooks fire only from the next turn on) from "the hook watched
+# this session end" (do not), and absence cannot say which. This file can.
+#
+# Read from here rather than from codex_state so that the shim writes one
+# shape into both directories and one sweep collects it out of both.
+ENDED_MARKER_SUFFIX = ".ended"
 
 # An AGENT file, though, is created once and never touched again -- its mtime
 # is the agent's start, not its last sign of life -- so the session threshold
@@ -535,6 +548,42 @@ class ClaudeStateProvider(base.ProviderParser):
         # marker is present either way.
         return age <= ABANDONED_AFTER_S
 
+    def ended_sessions(self, now_epoch):
+        """The session ids the hook has buried, and swept once they age out.
+
+        Bounded by the same hour as everything else here, and that bound is
+        what keeps the tombstone honest in both directions. Too short and a
+        closed Codex session comes back on the panel before its rollout ages
+        out; unbounded and the directory grows one empty file per session
+        forever, since nothing else would ever look at these names.
+
+        Sweeping is the caller's decision for the same reason the slot sweep
+        is: `blink status` must be able to look at this directory without
+        deleting what somebody ran it to see.
+        """
+        try:
+            entries = os.listdir(self._dir)
+        except OSError:
+            return set()
+        ended = set()
+        for name in entries:
+            if not name.endswith(ENDED_MARKER_SUFFIX):
+                continue
+            path = os.path.join(self._dir, name)
+            try:
+                age = now_epoch - os.path.getmtime(path)
+            except OSError:
+                continue
+            if age > ABANDONED_AFTER_S:
+                if self._sweep:
+                    _unlink(path)
+                continue
+            # A negative age is a clock that stepped backwards, not a file
+            # from the future, and derive_state treats one the same way: the
+            # tombstone is present either way and presence is the claim.
+            ended.add(name[: -len(ENDED_MARKER_SUFFIX)])
+        return ended
+
     # --- the whole directory ----------------------------------------------
 
     def session_states(self, now_epoch):
@@ -554,6 +603,19 @@ class ClaudeStateProvider(base.ProviderParser):
         except OSError:
             # No hooks installed, or nothing has happened yet. Both normal.
             return {}, 0
+
+        # Called for what it COLLECTS rather than for what it returns. The
+        # shim leaves a tombstone in this directory as well as in the Codex
+        # one, and nothing else here would ever look at the name again: the
+        # slot it replaced is gone, so the session is already uncounted. Only
+        # the Codex union needs the ids, and it asks for them itself.
+        #
+        # Deliberately NOT used to drop a slot that still exists. A tombstone
+        # beside a live slot means the session was resumed under its own id,
+        # and the slot is the newer witness; the shim removes the tombstone on
+        # any event for exactly that case, so this pairing should not outlive
+        # one hook firing anyway.
+        self.ended_sessions(now_epoch)
 
         states = {}
         agents = 0

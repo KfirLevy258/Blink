@@ -805,3 +805,60 @@ def test_a_swept_session_takes_its_marker_with_it(state_dir):
     assert not marker.exists()
 
 
+
+
+# --- the tombstone ------------------------------------------------------------
+#
+# SessionEnd leaves a `<sid>.ended` file where the slot was. This provider's own
+# census has no use for it -- the slot is gone, so the session is already
+# uncounted here -- and it exists entirely for the Codex union, which cannot see
+# a session end any other way. What this directory still owes it is COLLECTION:
+# the shim writes one here as well, and if the ordinary poll does not sweep them
+# nothing ever will, and ~/.blink/state grows one empty file per session for the
+# life of the install.
+
+
+def mark_ended(d, sid, t):
+    """The tombstone SessionEnd leaves, aged by its mtime."""
+    p = d / f"{sid}.ended"
+    p.write_text("")
+    os.utime(p, (t, t))
+    return p
+
+
+def test_an_ordinary_poll_collects_a_tombstone_that_has_aged_out(state_dir):
+    """The leak this sweep prevents. Nothing else in the Claude directory ever
+    reads these names again, so the poll that walks the directory anyway is the
+    only thing that can collect them."""
+    old = mark_ended(state_dir, "gone", NOW - ABANDONED_AFTER_S - 60)
+    fresh = mark_ended(state_dir, "recent", NOW - 60)
+
+    provider(state_dir).poll(NOW)
+
+    assert not old.exists()
+    assert fresh.exists(), "a tombstone inside the hour is still evidence"
+
+
+def test_a_look_that_does_not_sweep_leaves_the_tombstone_alone(state_dir):
+    """`blink status` must be able to look without collecting, exactly as it
+    can for the slots: a diagnostic that deletes what it is diagnosing destroys
+    the evidence somebody ran it to see."""
+    old = mark_ended(state_dir, "gone", NOW - ABANDONED_AFTER_S - 60)
+
+    provider(state_dir, sweep=False).poll(NOW)
+
+    assert old.exists()
+
+
+def test_a_tombstone_does_not_silence_the_session_that_resumed(state_dir):
+    """A live slot beside a tombstone means the session came back under its own
+    id -- `claude --resume` reuses it -- and the slot is the newer witness. The
+    shim removes the tombstone on any event for exactly this case, so the pair
+    should not outlive one hook firing; if it does, the panel must still show
+    the session somebody is sitting in front of."""
+    write_session(state_dir, "s1", "PreToolUse", NOW - 5)
+    mark_ended(state_dir, "s1", NOW - 900)
+
+    counts, _, _ = provider(state_dir).scan(NOW)
+
+    assert counts == {base.STATE_RUNNING: 1}

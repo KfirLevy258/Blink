@@ -166,3 +166,91 @@ def test_a_missing_directory_is_an_ordinary_state(tmp_path):
     """Codex not installed, or the hook never registered. Both are normal."""
     assert codex_state.scan(NOW, path=str(tmp_path / "nope"),
                             sweep=False) == ({}, 0)
+
+
+# --- the tombstone -----------------------------------------------------------
+#
+# scan() answers "which sessions are alive". ended() answers the question the
+# rollout reader cannot: "did anything ever watch this one die". Both are
+# claude_state's machinery; what is pinned here is the same three things the
+# rest of this file pins about the second directory -- which one is read, that
+# the caller's arguments are honoured rather than a default reaching the real
+# home, and that the answer arrives in the shape this module promises.
+
+
+def _tomb(d, sid, t):
+    """The file SessionEnd leaves where the slot was, aged by its mtime."""
+    p = d / (sid + ".ended")
+    p.write_text("")
+    _stamp(p, t)
+    return p
+
+
+def test_a_tombstone_names_the_session_the_hook_buried(d):
+    """A set of plain session ids -- the same keys the rollout reader uses,
+    since matching them is the only thing this answer is for."""
+    _tomb(d, "cx-1", NOW - 30)
+    _tomb(d, "cx-2", NOW - 30)
+    _slot(d, "cx-3", "PreToolUse", NOW - 30)
+
+    assert codex_state.ended(NOW, path=str(d), sweep=False) == {"cx-1", "cx-2"}
+
+
+def test_a_tombstone_past_the_hour_is_no_longer_evidence(d):
+    """Bounded by the same clock as the slots and the waiting marker. An
+    unbounded tombstone would suppress a session id forever, and this
+    directory is the one place a session id can come back: `codex resume`
+    reopens one under its own id."""
+    _tomb(d, "cx-old", NOW - claude_state.ABANDONED_AFTER_S - 60)
+
+    assert codex_state.ended(NOW, path=str(d), sweep=False) == set()
+
+
+def test_collecting_tombstones_is_the_callers_decision(tmp_path):
+    """Both directions, for the reason the slot sweep pins both: never
+    collecting leaks one empty file per session forever, since nothing else
+    ever looks at these names again, and always collecting means `blink
+    status` deletes the evidence somebody ran it to see."""
+    swept = tmp_path / "swept"
+    swept.mkdir()
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    for p in (swept, kept):
+        _tomb(p, "cx-old", NOW - claude_state.ABANDONED_AFTER_S - 60)
+        _tomb(p, "cx-new", NOW - 30)
+
+    assert codex_state.ended(NOW, path=str(swept), sweep=True) == {"cx-new"}
+    assert codex_state.ended(NOW, path=str(kept), sweep=False) == {"cx-new"}
+
+    assert not (swept / "cx-old.ended").exists()
+    assert (kept / "cx-old.ended").exists()
+    assert (swept / "cx-new.ended").exists(), "a live tombstone is not litter"
+
+
+def test_reading_tombstones_never_falls_back_to_the_real_home(monkeypatch, d):
+    """The same rule the scan above is held to, and for a sharper reason: this
+    call DELETES files under the path it is given, so a default quietly
+    resolving to the real state-codex directory would reach the slots driving
+    the board on the owner's desk."""
+    seen = []
+
+    class Spy:
+        def __init__(self, path=None, sweep=True):
+            seen.append((path, sweep))
+
+        def ended_sessions(self, now_epoch):
+            return set()
+
+    monkeypatch.setattr(claude_state, "ClaudeStateProvider", Spy)
+    codex_state.ended(NOW, path=str(d), sweep=False)
+    codex_state.ended(NOW)
+
+    assert seen[0] == (str(d), False)
+    assert seen[1] == (os.path.expanduser(codex_state.STATE_DIR), True)
+
+
+def test_a_missing_directory_has_buried_nothing(tmp_path):
+    """Codex not installed, or no session has ever ended. Both are ordinary,
+    and neither may raise on the poll path."""
+    assert codex_state.ended(NOW, path=str(tmp_path / "nope"),
+                             sweep=False) == set()

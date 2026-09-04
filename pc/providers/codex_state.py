@@ -62,3 +62,26 @@ def scan(now_epoch, path=None, sweep=True):
     states, agents = claude_state.ClaudeStateProvider(
         path=root, sweep=sweep).session_states(now_epoch)
     return {sid: state for sid, (state, _name) in states.items()}, agents
+
+
+def ended(now_epoch, path=None, sweep=True):
+    """The session ids the hook watched END, as a set.
+
+    Separate from scan() because it answers a different question, and only
+    Codex has to ask it. scan() reports the sessions that are ALIVE, which is
+    all the panel ever needed while every source could see a session end.
+    The rollout reader cannot: a closed Codex session leaves a file that stops
+    growing, which is what a long quiet turn also looks like, so it went on
+    counting for the full hour that ABANDONED_AFTER_S allows -- and the union
+    in codex_cli, whose whole purpose is that a session with no slot still
+    counts, dutifully put back every session SessionEnd had removed.
+
+    So the missing fact is not "is this session alive" but "did anything ever
+    watch it die", and only a file can carry that: a session that never had a
+    hook and a session whose hook has fired both leave no slot behind. The
+    tombstone tells them apart, and everything else about it -- the hour, the
+    sweep, the one-file-per-session shape -- is claude_state's, unchanged.
+    """
+    root = path if path is not None else os.path.expanduser(STATE_DIR)
+    return claude_state.ClaudeStateProvider(
+        path=root, sweep=sweep).ended_sessions(now_epoch)
