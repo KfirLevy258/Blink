@@ -571,8 +571,16 @@ def test_the_fast_tick_is_gated_on_a_board_that_answers():
 def test_the_two_cadences_are_far_apart_and_the_heartbeat_stayed():
     """The exact 2 s is a judgment call -- what must not drift is the shape:
     the look is human-scale and the unconditional push is still a minute.
-    A fast tick anywhere near the heartbeat has stopped being a fast tick."""
+    A fast tick anywhere near the heartbeat has stopped being a fast tick.
+
+    The upper bound used to be spelled twice. `fast <= 5` made the ratio below
+    arithmetic rather than a claim -- it could not fail while the bound held,
+    which a mutation survey confirmed by moving the ratio and watching all 620
+    tests stay green. The ratio is the real statement, so it is now the only
+    one: how far apart the two cadences must be, rather than a number the fast
+    one may not exceed.
+    """
     fast = claude_usage_bridge.FAST_POLL_INTERVAL_S
-    assert 1 <= fast <= 5, fast
+    assert fast >= 1, fast
     assert claude_usage_bridge.POLL_INTERVAL_S == 60
     assert fast * 5 < claude_usage_bridge.POLL_INTERVAL_S
