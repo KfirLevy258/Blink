@@ -25,8 +25,8 @@ import subprocess
 import sys
 import time
 
-from pc import (install_hooks, install_statusline, protocol, statusline_source,
-                update)
+from pc import (install_codex_hooks, install_hooks, install_statusline,
+                protocol, statusline_source, update)
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -304,6 +304,72 @@ def codex_present() -> bool:
         return bool(codex_cli.recent_rollouts(limit=1))
     except Exception:
         return False
+
+
+def _announce_codex_hooks() -> None:
+    """Say what is about to happen in Codex, before it happens.
+
+    Install is deliberately unattended, so disclosure is the only thing
+    standing between us and configuring a SECOND vendor's tool without saying
+    so -- and this one is not the tool the customer came here for. The trust
+    prompt is the part that has to be said out loud: Codex asks once, in its
+    own interface, minutes or days later, and an unexplained dialog from a
+    tool the person did not think they were configuring is a support incident
+    rather than a feature.
+
+    Wrapped continuation lines start lower case on purpose. The house rule is
+    that every sentence starts with a capital; a line that continues one is
+    not a new sentence, and capitalising it would read as a stutter.
+    """
+    print("Blink is about to add a hook to Codex as well.")
+    print()
+    print(f"  File     {install_codex_hooks.hooks_file()}")
+    print("  Why      Codex does not record permission prompts in its session")
+    print("           log, so without this a Codex session waiting on you")
+    print("           looks idle on the panel.")
+    print("  Note     The first time the hook runs, Codex asks you once")
+    print("           whether to trust it. That prompt is expected, and Blink")
+    print("           cannot answer it for you. Say yes and the panel can show")
+    print("           a Codex session waiting on you; say no and everything")
+    print("           else still works.")
+    print()
+
+
+def _install_codex_hooks() -> str:
+    """Register the shim with Codex, if there is a Codex here to register with.
+
+    Detected rather than asked about, the same way the Claude Code steps are:
+    the product is meant to be plug-and-play. Absent Codex, nothing is written
+    at all -- creating a hooks file for a tool that is not installed would
+    leave a stranger's configuration on the machine.
+
+    No pointer is written into Codex's config.toml, and none is needed:
+    hooks.json is discovered by location alone, verified by firing a real hook
+    against a config that mentioned hooks nowhere
+    (docs/research/codex-hook-contract.md, F3).
+    """
+    if not codex_present():
+        return "no Codex on this machine, nothing to do"
+    # Private to the user, for the same reason ~/.blink/state is: these files
+    # name the projects someone has open, and the default umask would leave
+    # them readable by every account on the machine. Created here rather than
+    # left to the shim so the mode is right from the first hook onward.
+    state_dir = os.path.join(blink_home(), "state-codex")
+    os.makedirs(state_dir, exist_ok=True)
+    try:
+        os.chmod(state_dir, 0o700)
+    except OSError:
+        pass                 # Windows, where the mode does not apply
+    try:
+        return install_codex_hooks.install(install_codex_hooks.hooks_file(),
+                                           hook_shim_path())
+    except install_statusline.SettingsUnreadable as e:
+        # Same judgement as the Claude hooks step: the status line is the
+        # product and the activity light is a nicety. A hooks file we cannot
+        # safely edit costs the user a pip, and is not worth failing an
+        # install that has otherwise worked -- still less worth "repairing"
+        # another vendor's config by writing our idea of it over theirs.
+        return f"skipped ({e})"
 
 
 def _note_if_no_claude_code():
@@ -989,7 +1055,7 @@ def cmd_install(_args) -> int:
 
     _announce()
 
-    print("[1/4] Program ... ", end="", flush=True)
+    print("[1/5] Program ... ", end="", flush=True)
     os.makedirs(bin_dir(), exist_ok=True)
     if _frozen():
         # The program is a directory -- the executable and its _internal/
@@ -1018,7 +1084,7 @@ def cmd_install(_args) -> int:
         # interpreter instead. Customers never take this path.
         print("running from a checkout, nothing to copy")
 
-    print("[2/4] Status line ... ", end="", flush=True)
+    print("[2/5] Status line ... ", end="", flush=True)
     os.makedirs(blink_home(), exist_ok=True)
     # Private to the user. The shims write the status line payload -- which
     # names the working directory and the session -- and the per-session
@@ -1035,7 +1101,7 @@ def cmd_install(_args) -> int:
                                  undo_hint=f"{installed_bin()} uninstall")
     print("      " + install_statusline.install(settings_path(), shim_path()))
 
-    print("[3/4] Activity hooks ... ", end="", flush=True)
+    print("[3/5] Activity hooks ... ", end="", flush=True)
     _write_shim(hook_shim_path(), "blink-hook.sh")
     try:
         print(install_hooks.install(settings_path(), hook_shim_path()))
@@ -1045,7 +1111,20 @@ def cmd_install(_args) -> int:
         # and is not worth failing an install that has otherwise worked.
         print(f"skipped ({e})")
 
-    print("[4/4] Background service ... ", end="", flush=True)
+    # The disclosure for this step is here rather than up in _announce(),
+    # because it is the only step that is conditional on what is already on
+    # the machine: on a Codex-free machine there is nothing to disclose, and a
+    # paragraph about another vendor's config file would be noise at best and
+    # alarming at worst.
+    print("[4/5] Codex hooks ... ", end="", flush=True)
+    if codex_present():
+        print()
+        _announce_codex_hooks()
+        print("      " + _install_codex_hooks())
+    else:
+        print(_install_codex_hooks())
+
+    print("[5/5] Background service ... ", end="", flush=True)
     print(_install_service())
 
     print()

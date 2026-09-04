@@ -20,13 +20,20 @@ from pc import cli, install_statusline
 
 
 @pytest.fixture(autouse=True)
-def _sandbox(tmp_path):
+def _sandbox(tmp_path, monkeypatch):
     """The one thing these tests need that the whole suite does not.
 
     The redirected HOME and the login-service guard both live in
     tests/conftest.py now -- see the note there for what went wrong when they
     were a per-file concern.
+
+    CODEX_HOME is cleared here for the same class of reason: install now edits
+    a file under it, and Codex honours the variable, so a developer who has it
+    set in their shell would have had these tests write a hooks.json into
+    their real Codex install. HOME alone does not sandbox a path that an
+    environment variable can override.
     """
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     (tmp_path / ".claude").mkdir()
 
 
@@ -457,3 +464,79 @@ def test_a_statusline_that_is_not_a_dict_reads_as_absent():
     assert install_statusline._current_command({"statusLine": {"command": 9}}) == ""
     assert install_statusline._current_command(
         {"statusLine": {"command": "x"}}) == "x"
+
+
+# --- Codex hooks -----------------------------------------------------------
+#
+# Install now edits a second vendor's configuration. These tests never let it
+# reach a real one: codex_present and install_codex_hooks.install are both
+# replaced, HOME is tmp_path (conftest) and CODEX_HOME is cleared (_sandbox).
+
+# The column the labelled block in _announce_codex_hooks wraps into. A line
+# indented this far continues the sentence above it and is not a new one, so
+# the sentence-case rule below does not apply to it.
+_CODEX_WRAP = " " * 11
+
+
+def test_install_says_codex_will_ask_before_it_writes(monkeypatch, capsys):
+    """Disclosure before the write, not after -- and specifically the trust
+    prompt, because an unexplained dialog from a tool the user did not think
+    they were configuring is a support incident, not a feature."""
+    monkeypatch.setattr(cli, "codex_present", lambda: True)
+    written = []
+    monkeypatch.setattr(
+        cli.install_codex_hooks, "install",
+        lambda p, s: written.append(p) or "installed (10 events).")
+
+    cli._announce_codex_hooks()
+    out_before = capsys.readouterr().out
+    cli._install_codex_hooks()
+
+    assert written, "the test must actually reach the installer"
+    assert "trust" in out_before.lower(), \
+        "the disclosure does not mention the prompt Codex will show"
+    assert "Codex" in out_before
+    for line in out_before.splitlines():
+        if not line.strip() or line.startswith(_CODEX_WRAP):
+            continue
+        assert line.strip()[0].isupper(), f"copy is sentence case: {line!r}"
+
+
+def test_install_skips_the_codex_step_when_codex_is_absent(monkeypatch):
+    """Writing a hooks file for a tool that is not installed would leave a
+    stranger's configuration on the machine."""
+    monkeypatch.setattr(cli, "codex_present", lambda: False)
+    called = []
+    monkeypatch.setattr(cli.install_codex_hooks, "install",
+                        lambda p, s: called.append(p))
+    msg = cli._install_codex_hooks()
+    assert called == []
+    assert "no Codex" in msg
+
+
+def test_install_does_not_fail_when_the_codex_config_is_unreadable(monkeypatch):
+    """The status line is the product; the activity light is a nicety. A hooks
+    file we cannot safely edit costs a pip, not an install."""
+    monkeypatch.setattr(cli, "codex_present", lambda: True)
+
+    def boom(_p, _s):
+        raise cli.install_statusline.SettingsUnreadable("not valid JSON")
+
+    monkeypatch.setattr(cli.install_codex_hooks, "install", boom)
+    msg = cli._install_codex_hooks()
+    assert msg.startswith("skipped")
+    assert "not valid JSON" in msg
+
+
+def test_install_creates_the_codex_state_directory_private(monkeypatch):
+    """The slots name the projects someone has open. The default umask would
+    leave them readable by every account on the machine."""
+    import stat
+    monkeypatch.setattr(cli, "codex_present", lambda: True)
+    monkeypatch.setattr(cli.install_codex_hooks, "install",
+                        lambda p, s: "installed (10 events).")
+    cli._install_codex_hooks()
+    d = os.path.join(cli.blink_home(), "state-codex")
+    assert os.path.isdir(d)
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
