@@ -217,3 +217,72 @@ rollout file (rollout line 1 carries `payload.session_id` == `payload.id` ==
 the hook's `session_id`, observed in the synthetic transcript). The join to the
 transcript needs no id gymnastics anyway: `transcript_path` on the hook input
 is the rollout file's absolute path.
+
+---
+
+# Live-event probe, 2026-09-04 — real model calls, real events
+
+Task 1's smoke test used a fake provider on a dead port, so only `SessionStart`
+could ever fire. This section is a second pass with the owner's real
+credentials — copied read-only into a sandbox `CODEX_HOME`, so the live
+`~/.codex` was never written — asking deliberately small questions, because each
+run spends real Codex usage.
+
+**Keys and shapes only below.** `UserPromptSubmit.prompt` and
+`Stop.last_assistant_message` carry text from the machine they ran on; no value
+from either is reproduced here.
+
+## The six events `codex exec` actually fires — VERIFIED
+
+One run, one shell tool call, all twelve events registered:
+
+| Event | Input keys |
+|---|---|
+| `SessionStart` | `cwd`, `hook_event_name`, `model`, `permission_mode`, `session_id`, `source`, `transcript_path` |
+| `UserPromptSubmit` | + `prompt`, `turn_id` |
+| `PreToolUse` | + `tool_input`, `tool_name`, `tool_use_id`, `turn_id` |
+| `PostToolUse` | + `tool_input`, `tool_name`, `tool_response`, `tool_use_id`, `turn_id` |
+| `Stop` | + `last_assistant_message`, `stop_hook_active`, `turn_id` |
+| `SessionEnd` | `cwd`, `hook_event_name`, `reason`, `session_id`, `transcript_path` |
+
+Three things worth having in front of you before writing the shim:
+
+- **`transcript_path` is on every one of the six.** The join key is universal,
+  not something to reconstruct per event.
+- **`SessionEnd` is the odd one out** — the only event carrying neither `model`
+  nor `permission_mode`, and the only one with `reason`. A shim that reads
+  `permission_mode` unconditionally will get a `KeyError` exactly at teardown.
+- **`turn_id` is absent on `SessionStart` and `SessionEnd`** and present on the
+  other four.
+
+## `PostToolUse` does NOT fire for a rejected tool — VERIFIED
+
+Second run, read-only sandbox, a prompt demanding a disk write: `PreToolUse`
+fired once, `PostToolUse` **not at all**. So the two are not a matched pair, and
+any state machine that clears a `PreToolUse`-set flag on `PostToolUse` will
+leave that flag set forever the first time a tool is refused.
+
+## `PermissionRequest` CANNOT be observed from `codex exec` — VERIFIED
+
+This is the finding that matters most, because `PermissionRequest` is the
+WAITING signal the whole plan is built on, and **it has still never been seen.**
+
+- With `-s read-only -c approval_policy="on-request"` and a prompt that forces a
+  write, the write was refused outright and no `PermissionRequest` fired.
+  Non-interactive runs do not escalate to a human; there is no human to escalate
+  to.
+- `approval_policy = "untrusted"`, the strictest setting the plan's research
+  named, is **rejected by 0.150.0**: `Error: approval_policy = "untrusted" is no
+  longer supported; remove this setting`. Any part of the plan reasoning from
+  that value is reasoning about a version that has shipped past it.
+
+**Consequence: the premise of plan 3 cannot be verified by automation.** It
+needs a person at an interactive Codex session, doing something that prompts for
+approval, with the shim registered. Until that happens, every task below task 1
+is built on an event nobody has observed — which is precisely the position the
+discovery gate warned about, one level deeper than it knew.
+
+This does not sink the plan. `PreToolUse`, `Stop` and `SessionEnd` are all
+verified and all useful, and a session that is running versus finished is
+already worth showing. But **WAITING specifically is unproven**, and the plan
+should not claim otherwise until a human has sat in front of one.
