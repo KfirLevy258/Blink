@@ -233,20 +233,27 @@ def test_two_named_sessions_in_the_same_state_leave_the_board_unnamed():
     """Codex can name a session now, so both providers can arrive holding a
     name for the same state. There is one line and no honest rule for
     choosing between two projects that are equally true of it, so neither is
-    shown -- the same refusal each provider already applies within itself,
-    applied once more across them. The count carries the meaning.
+    shown.
+
+    Both frames here claim n_wait=0 while sitting in STATE_WAITING -- a
+    provider that reports a named session in a state while claiming no
+    sessions in it is inconsistent, and that inconsistency is exactly what
+    must not slip a name onto the panel. It is also the one scenario where
+    the summed-count guard (n <= 1) is satisfied by both frames on its own
+    and cannot be the thing doing the refusing: only the exclusivity guard
+    (exactly one frame holding the state) can be responsible for the ""
+    below, which is the guard this test exists to pin.
     """
     bus = ingest.IngestionBus(
         providers=[Fixed(named(provider="claude", state=base.STATE_WAITING,
-                               label="LiveClaudeUi", n_wait=1)),
+                               label="LiveClaudeUi", n_wait=0)),
                    Fixed(named(provider="codex", at=NOW - 30,
                                state=base.STATE_WAITING,
-                               label="Blink", n_wait=1))],
+                               label="Blink", n_wait=0))],
         now=lambda: NOW)
     msg = bus.poll()
     assert msg["state"] == "waiting"
-    assert msg["n_wait"] == 2
-    assert bus.session_pair() == ("", 2)
+    assert bus.session_pair() == ("", 0)
 
 
 def test_a_codex_name_shows_when_it_is_the_only_holder_of_the_state():
