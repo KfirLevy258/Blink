@@ -579,6 +579,38 @@ def _service_command():
     return [sys.executable, os.path.join(repo, "blink_main.py"), "run"]
 
 
+def _confirm_running(probe, tries=4) -> bool:
+    """Keep asking a service manager whether something is REALLY running.
+
+    All three backends had the same hole and only one of them had learned:
+    they read the exit code of the command that started the service and
+    called that health. An exit code says a request was accepted. Whether a
+    process exists is a different question, and only the supervisor can
+    answer it -- which is the lesson recorded above _service_command() and
+    measured again on 2026-09-04, when five bootstraps out of five returned
+    zero with nothing running.
+
+    So this is the part that is the same everywhere -- ask, and if the answer
+    is no, ask again for a few seconds -- and `probe` is the part that is not.
+    It is a callable rather than an argv because the QUESTION differs per
+    platform and, on Windows, so does its subject: the pid file has to be
+    re-read on every attempt, because a daemon that has not started yet has
+    not written one.
+
+    Four tries over five seconds: long enough for a start that is merely
+    slow, short enough that nobody watching `blink update` thinks it hung.
+
+    Returns False on anything it cannot recognise. That lean is deliberate
+    and it is the whole point -- the one thing this must never do again is
+    print a claim it cannot see.
+    """
+    for attempt in range(tries):
+        if probe():
+            return True
+        time.sleep(0.5 * (attempt + 1))
+    return False
+
+
 class _Backend:
     """One platform's answer to "start this at login, and keep it running".
 
@@ -683,38 +715,31 @@ class _LaunchdBackend(_Backend):
         # returned zero; none of it is evidence that a process exists. launchd
         # is the only thing that knows, so the claim we print is its answer and
         # not our hope.
-        if self._confirm_running(uid):
+        if _confirm_running(lambda: self._is_running(uid)):
             return "running (launchd)"
         return ("registered with launchd, but it is not running -- "
                 f"start it with: launchctl kickstart -k gui/{uid}/{LABEL}")
 
-    def _confirm_running(self, uid) -> bool:
+    def _is_running(self, uid) -> bool:
         """Does launchd say a process actually exists? Its answer, not ours.
 
-        Shared by install() and restart() because they were making the same
+        Asked by install() and restart() because they were making the same
         claim from different evidence, and only one of them had learned. An
         exit code says a command was accepted; `launchctl print` is the only
         thing that says a process is running, so both ask it.
 
-        Retried briefly rather than asked once: a kickstart hands the job to
+        One ask. The retrying belongs to _confirm_running(), which the other
+        two backends need for the same reason: a kickstart hands the job to
         launchd and returns, so the exec can still be in flight when the first
-        print lands. Four tries over five seconds is long enough for a start
-        that is merely slow and short enough that nobody watching `blink
-        update` thinks it has hung.
+        print lands.
 
         Parsed the same defensive way status() is -- launchctl print is a
-        human-readable dump, not a contract -- but the failure here leans the
-        other way: an unrecognised dump reads as "not running", because the
-        one thing this must never do again is print a claim it cannot see.
+        human-readable dump, not a contract.
         """
-        for attempt in range(4):
-            pr = subprocess.run(["launchctl", "print", f"gui/{uid}/{LABEL}"],
-                                capture_output=True, text=True,
-                                **update.ota.NO_WINDOW)
-            if pr.returncode == 0 and "state = running" in (pr.stdout or ""):
-                return True
-            time.sleep(0.5 * (attempt + 1))
-        return False
+        pr = subprocess.run(["launchctl", "print", f"gui/{uid}/{LABEL}"],
+                            capture_output=True, text=True,
+                            **update.ota.NO_WINDOW)
+        return pr.returncode == 0 and "state = running" in (pr.stdout or "")
 
     def restart(self) -> str:
         """Bounce the agent, then check that it came back.
@@ -736,7 +761,7 @@ class _LaunchdBackend(_Backend):
                             f"gui/{uid}/{LABEL}"], capture_output=True, **update.ota.NO_WINDOW)
         if r.returncode != 0:
             return "could not restart it"
-        if self._confirm_running(uid):
+        if _confirm_running(lambda: self._is_running(uid)):
             return "restarted"
         # Not a command to paste this time: the command that would have been
         # printed is the one that just ran and left nothing running. What is
@@ -822,7 +847,55 @@ class _SchtasksBackend(_Backend):
         _kill_recorded_daemon()
         # /sc onlogon does not start it now, only at the next logon.
         subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True, **update.ota.NO_WINDOW)
-        return "running (Scheduled Task)"
+        # And then ASK Windows, rather than assume. /run returning zero means
+        # the task was triggered, not that a daemon exists -- the same claim
+        # from the same kind of evidence that left a Mac with no bridge and
+        # an installer saying "running (launchd)" on 2026-09-04.
+        #
+        # Six tries, not four: this is the first run of a freshly copied .exe,
+        # and Windows may hold it while a virus scanner reads all of it.
+        if _confirm_running(self._is_running, tries=6):
+            return "running (Scheduled Task)"
+        return ("registered as a Scheduled Task, but it is not running -- "
+                f'start it with: schtasks /run /tn "{TASK_NAME}"')
+
+    def _is_running(self) -> bool:
+        """Is the bridge daemon alive? Asked of Windows, by pid.
+
+        NOT `schtasks /query`. The task's status answers a different question:
+        its action is wscript running LAUNCHER_VBS, which starts the bridge
+        with `, 0, False` -- do not wait -- and exits at once. A perfectly
+        healthy Blink therefore shows the task as Ready within a second of
+        /run, so a check on the task's state would have called every working
+        install dead. Registration is not health, and neither is the
+        launcher's own exit.
+
+        Nor could it be read from the word schtasks prints: that word is
+        translated on a localised Windows, and the owner's PC is one.
+
+        So the question is the one _kill_recorded_daemon already asks -- the
+        pid the daemon wrote for itself -- with the image name as a filter so
+        a recycled pid belonging to something else cannot answer for it. Only
+        ~/.blink/bridge.pid is read, not the pre-1.1.0 copies that function
+        also sweeps: a daemon still running out of bin.old is the thing an
+        install was trying to replace, and counting it as health would report
+        exactly the failure of 2026-08-29 as a success.
+        """
+        try:
+            with open(pid_path(), encoding="utf-8") as f:
+                pid = int(f.read().strip())
+        except (OSError, ValueError):
+            return False
+        r = subprocess.run(
+            ["tasklist", "/fi", f"PID eq {pid}",
+             "/fi", "IMAGENAME eq " + os.path.basename(installed_bin()),
+             "/nh", "/fo", "csv"],
+            capture_output=True, text=True, **update.ota.NO_WINDOW)
+        # tasklist exits ZERO whether or not anything matched; with no match
+        # it prints "INFO: No tasks are running which match ...". The pid
+        # appearing in a row it printed is the only answer that means
+        # anything -- and that row is digits either way, in any language.
+        return str(pid) in (r.stdout or "")
 
     def restart(self) -> str:
         subprocess.run(["schtasks", "/end", "/tn", TASK_NAME],
@@ -835,7 +908,17 @@ class _SchtasksBackend(_Backend):
         _kill_recorded_daemon()
         r = subprocess.run(["schtasks", "/run", "/tn", TASK_NAME],
                            capture_output=True, **update.ota.NO_WINDOW)
-        return "restarted" if r.returncode == 0 else "could not restart it"
+        if r.returncode != 0:
+            return "could not restart it"
+        if _confirm_running(self._is_running, tries=6):
+            return "restarted"
+        # This is the `blink update` path: the .exe under the task was just
+        # replaced. If the new one cannot start, /run still succeeds and the
+        # log is the only thing that says why -- and unlike install() there is
+        # no command worth pasting, because the command that would be printed
+        # is the one that just ran and left nothing running.
+        return ("restarted, but it is not running -- "
+                f"see {log_path()}")
 
     def remove(self) -> str:
         subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True, **update.ota.NO_WINDOW)
@@ -878,16 +961,54 @@ class _SystemdBackend(_Backend):
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, **update.ota.NO_WINDOW)
         r = subprocess.run(["systemctl", "--user", "enable", "--now",
                             "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
-        if r.returncode == 0:
+        if r.returncode != 0:
+            return "installed, but could not be started: systemctl --user enable --now blink-bridge"
+        # `enable --now` RETURNED ZERO. That is systemctl accepting the
+        # request; it is not a running unit, and this line has already been
+        # wrong once in a way nobody caught: see _systemd_exec(), where an
+        # unquoted ExecStart with a space in it failed to locate the
+        # executable "while `blink install` still printed running (systemd)".
+        # Ask systemd instead.
+        if _confirm_running(self._is_running):
             return "running (systemd)"
-        return "installed, but could not be started: systemctl --user enable --now blink-bridge"
+        return ("enabled with systemd, but it is not running -- "
+                "see: systemctl --user status blink-bridge.service")
+
+    def _is_running(self) -> bool:
+        """Does systemd say the unit is active? Its word, not an exit code.
+
+        `is-active` WITHOUT --quiet prints the state -- active, activating,
+        inactive, failed -- and that word is the answer. status() may use the
+        exit code because there the command asked and the fact reported are
+        the same thing; here the temptation is to reuse the exit code of
+        `enable --now`, which is a different command reporting a different
+        fact, and that is precisely the defect.
+
+        Anything unrecognised reads as not running: an empty dump means we
+        could not see it, and not-seen must never print as healthy.
+
+        Worth the retry even though Restart=always makes systemd patient: a
+        unit that has been asked to start reads "activating" until its exec
+        is up, and answering the first ask would call that dead.
+        """
+        r = subprocess.run(["systemctl", "--user", "is-active",
+                            "blink-bridge.service"],
+                           capture_output=True, text=True,
+                           **update.ota.NO_WINDOW)
+        lines = (r.stdout or "").split()
+        return bool(lines) and lines[0] == "active"
 
     def restart(self) -> str:
         if not self._has_systemctl():
             return super().restart()
         r = subprocess.run(["systemctl", "--user", "restart",
                             "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
-        return "restarted" if r.returncode == 0 else "could not restart it"
+        if r.returncode != 0:
+            return "could not restart it"
+        if _confirm_running(self._is_running):
+            return "restarted"
+        return ("restarted, but systemd reports it is not running -- "
+                "see: systemctl --user status blink-bridge.service")
 
     def remove(self) -> str:
         if not self._has_systemctl():
