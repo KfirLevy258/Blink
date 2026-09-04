@@ -25,6 +25,7 @@
 #include "ui_boot.h"
 #include "ui_sleep.h"
 #include "sleep_gate.h"
+#include "usage_freshness.h"
 #include "ui_settings.h"
 #include "ui_anim.h"
 #include "tz_fetch.h"
@@ -226,6 +227,39 @@ static void ota_boot_pump(void)
 		ui_boot_mark_intentional_reboot();
 		sys_reboot(SYS_REBOOT_COLD);
 	}
+}
+
+/*
+ * "Do not close this board's eyes right now", in one place.
+ *
+ * There were two hand-written copies of this condition and they had already
+ * drifted: the doze in run_usb() carried ota_test_boot, and
+ * reading_moved_again() -- whose own comment calls it the mirror of that
+ * doze -- did not. The drift is unreachable today, because ota_test_boot is
+ * raised once in ota_boot_begin() before any mode loop exists and from then
+ * on only ever falls. But it is exactly the term whose absence cost a board
+ * on the bench (2026-09-03): dozing blocks the loop that feeds the 30 s
+ * watchdog an unconfirmed image arms, the SoC resets, MCUboot re-runs the
+ * same unconfirmed image, and it dozes again at 60 s -- forever. A condition
+ * that has to be right in two files to keep a board out of a reset loop
+ * should exist once.
+ *
+ * "An update is in flight" honestly covers "the new image has not proved
+ * itself yet", which is why the test boot rides this term instead of
+ * becoming a fourth condition at each call site; staying awake is also what
+ * lets the deliberate revert at the 90 s deadline happen, logged, rather
+ * than as a bare watchdog reset nobody can read afterwards.
+ *
+ * Read fresh on every call, never cached: an update that starts while the
+ * board is already dozing has to put the progress screen back up.
+ */
+static bool ota_blocks_sleep(void)
+{
+	struct ota_ui snap;
+
+	ota_ui_get(&snap);
+	return snap.st == OTA_UI_DOWNLOADING || snap.st == OTA_UI_REBOOTING ||
+	       ota_test_boot;
 }
 
 /* Did the previous boot's install land? Runs once the gauge screen exists so
@@ -1367,23 +1401,48 @@ static void run_standalone(void)
 
 /* ---- USB bridge mode: PC daemon pushes usage over serial ---- */
 
+/* The original reason to wake: the app said something. proto.c clears
+ * host_seen on the timeout that armed the sleep in the first place, so this
+ * is false throughout the doze and true on the first line back. */
+static bool host_is_back(void)
+{
+	return proto_host_seen();
+}
+
+/*
+ * The other reason to wake: something new to show.
+ *
+ * The mirror of sleep_stale_should_start's non-had_usage terms, and it has
+ * to be exactly that -- tests/sleep_gate pins the two as complements over a
+ * grid, because a wake condition a second away from the sleep condition
+ * would have this board closing and opening its eyes forever on a real desk.
+ *
+ * It says mirror and now it is one: the OTA term comes from
+ * ota_blocks_sleep(), the same call the doze arms on. It used to be spelled
+ * out here a second time, and the second spelling was missing ota_test_boot.
+ */
+static bool reading_moved_again(void)
+{
+	/* The ACTIVE age, matching the branch that started this doze. Waking
+	 * on the reading age instead would break the complementarity the grid
+	 * in tests/sleep_gate pins, on exactly the desk this field exists
+	 * for: a remembered reading never gets younger, so the board would
+	 * doze on one number and refuse to wake on the other. */
+	int32_t active_age = usage_freshness_active_age_s(k_uptime_get());
+
+	return sleep_stale_should_wake(active_age, ota_blocks_sleep(),
+				       usage_freshness_activity());
+}
+
 static void run_usb(void)
 {
 	int64_t last_tick = k_uptime_get();
-	int64_t start = last_tick;
 	int stage_shown = 1;
 
-	/* With stored WiFi + token the board can serve itself if the daemon
-	 * never delivers -- checked once; NVS doesn't change under us. */
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX], tok[CFG_TOKEN_MAX];
-	bool can_fall_back = cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
-			     cfg_get_token(tok, sizeof(tok));
-#else
-	/* There is no standalone mode to reboot into. Waiting is the whole
-	 * behaviour, and run_usb()'s own waiting-for-host screen covers it. */
-	const bool can_fall_back = false;
-#endif
+	/* When the app was last heard from, for the waiting-for-host doze
+	 * below. Starts at the top of the loop rather than at boot: this is
+	 * about how long THIS screen has been unanswered. */
+	int64_t host_quiet_since = last_tick;
 	int64_t checking_since = 0;	/* OTA_UI_CHECKING entered at, ms */
 
 	/* Same as run_standalone: drop anything latched before this loop
@@ -1398,19 +1457,67 @@ static void run_usb(void)
 		}
 		ota_boot_pump();
 
-		/* The computer went to sleep (docs/sleep-mode-design.md):
-		 * silence past the host timeout, on a board that has shown
-		 * figures this boot, with no firmware update in flight. This
-		 * blocks until the app speaks again. */
-		{
-			struct ota_ui snap;
+		/* Two reasons to doze (docs/sleep-mode-design.md). The first
+		 * is silence past the host timeout. The second is an app that
+		 * never stopped talking and has had nothing new to say for
+		 * hours -- which is what a sleeping computer with a running
+		 * daemon actually looks like from here, and why the first
+		 * rule alone left a panel awake all night (field report
+		 * 2026-09-02). Both block until there is a reason to wake.
+		 *
+		 * And neither of them while the owner is in the settings
+		 * panel.
+		 *
+		 * Both rules below are about an absent person, and an open
+		 * panel is a present one -- the same argument sleep_gate.c
+		 * makes for refusing to doze over anything on screen that is
+		 * asking for somebody. It also closes the loop ui_sleep.c
+		 * opens at the other end: a swipe during a peek ends the
+		 * doze, this loop opens the panel on its next pass, and
+		 * without this the board would fall asleep again over the
+		 * open panel sixty seconds later -- with the owner reading
+		 * it. The cost is that a panel left open holds the board
+		 * awake indefinitely; that is a deliberate act by a person
+		 * standing at the desk, and it ends when they close it.
+		 */
+		if (!ui_settings_busy()) {
+			/* Whether an update forbids dozing is one question
+			 * with one answer, and it lives at
+			 * ota_blocks_sleep() -- including the test-boot term,
+			 * whose absence from the copy that used to sit here
+			 * cost a board on the bench (2026-09-03). Taken once
+			 * so both rules below judge the same instant. */
+			bool ota_busy = ota_blocks_sleep();
 
-			ota_ui_get(&snap);
 			if (sleep_should_start(proto_host_lost(),
 					       usage_view_have_data(),
-					       snap.st == OTA_UI_DOWNLOADING ||
-					       snap.st == OTA_UI_REBOOTING)) {
-				ui_sleep_run();
+					       ota_busy)) {
+				ui_sleep_run(host_is_back,
+					     "Your computer may be asleep.");
+				continue;
+			}
+			/*
+			 * On the ACTIVE age, never the reading's own.
+			 *
+			 * "Has this number stopped moving?" and "has this
+			 * desk gone quiet?" are two questions, and the
+			 * daemon answers both because they can differ: it
+			 * re-offers the last five-hour reading it saw at its
+			 * original time, so the dial can be twelve hours old
+			 * five seconds after Claude Code rewrote the file it
+			 * came from. Dozing on the first question closed the
+			 * board's eyes on an owner who was sitting in front
+			 * of it (field review 2026-09-02). ui_sleep.c's
+			 * closing stamp keeps asking the first question,
+			 * because that one really is about the number.
+			 */
+			if (sleep_stale_should_start(
+				    usage_freshness_active_age_s(
+					    k_uptime_get()),
+				    usage_view_have_data(), ota_busy,
+				    usage_freshness_activity())) {
+				ui_sleep_run(reading_moved_again,
+					     "No new readings for a while.");
 				continue;
 			}
 		}
@@ -1488,19 +1595,56 @@ static void run_usb(void)
 				stage_shown = want;
 			}
 
-			/* Waiting-for-host timeout (user request 2026-07-16):
-			 * a daemon that answered hello once but has since
-			 * gone silent, before ever pushing usage, is not
-			 * coming back on its own. Reboot into self-service --
-			 * a dead daemon won't answer the next boot's hello,
-			 * so the board comes up standalone. Requires the
-			 * host to be *gone*, not merely slow, so a live
-			 * daemon can never reboot-loop us. */
-			if (can_fall_back && !proto_host_seen() &&
-			    k_uptime_get() - start > 60 * 1000) {
-				printk("[usage] daemon gone before first push; standalone can serve -- rebooting\n");
-				ui_boot_mark_intentional_reboot();
-				sys_reboot(SYS_REBOOT_COLD);
+			/*
+			 * Waiting-for-host timeout.
+			 *
+			 * This used to cold-reboot into standalone
+			 * (user request 2026-07-16), on the theory that a
+			 * daemon which has not spoken is not coming back and
+			 * a board with WiFi and a token can serve itself. On
+			 * a desk it read as an unexplained reset, and it made
+			 * the two never-heard-from-a-daemon cases behave
+			 * differently for no reason a user could see: a board
+			 * that once talked to the app dozes, a board that
+			 * never did rebooted. Now both doze (owner's call,
+			 * 2026-09-02). The cost is real and accepted: a board
+			 * that could have fetched its own usage over WiFi
+			 * sleeps instead. Standalone is still chosen at boot
+			 * in main() when no daemon answers the splash.
+			 *
+			 * Still gated on the host being GONE rather than
+			 * slow, which is what stops a live-but-busy daemon
+			 * from dozing us mid-conversation -- and note that
+			 * proto_host_seen() goes false again after
+			 * HOST_TIMEOUT_MS, so the timer restarts on every
+			 * silence rather than only the first.
+			 */
+			if (proto_host_seen()) {
+				host_quiet_since = k_uptime_get();
+			} else if (!ota_blocks_sleep() &&
+				   !ui_settings_busy() &&
+				   k_uptime_get() - host_quiet_since
+				   > 60 * 1000) {
+				/* Both refusals are the ones argued at the
+				 * doze block above, and this is the branch
+				 * they matter most in. It is the one that
+				 * was found looping on the watchdog -- this
+				 * loop feeds the unconfirmed image's, and a
+				 * board with no daemon is exactly the board
+				 * whose image cannot prove itself, so the
+				 * two conditions coincide precisely here.
+				 * And it is the one an owner meets when the
+				 * app is not installed: this is the doze
+				 * they swipe out of to reach settings, so
+				 * dozing again while they are in there would
+				 * shut the door behind them. The timer keeps
+				 * running, so the doze happens the moment
+				 * either reason clears. */
+				printk("[usage] no app after 60 s; dozing until one speaks\n");
+				ui_sleep_run(host_is_back,
+					     "Waiting for the app on your computer.");
+				host_quiet_since = k_uptime_get();
+				continue;
 			}
 		}
 

@@ -54,6 +54,7 @@ import os
 from datetime import datetime, timezone
 
 from pc.providers import base
+from pc.providers import codex_state
 
 PROVIDER_ID = "codex"
 SRC_ID = "cli"
@@ -129,6 +130,187 @@ def _tail_lines(path: str):
     except Exception:
         return []
     return text.splitlines()
+
+
+# The other end of the same file. `session_meta` -- the record that carries
+# the project's cwd, and so the only name a Codex session can ever have -- is
+# line 1, and the tail read above will never see it: the biggest rollout on
+# the machine this was written against is 51 MB, so TAIL_BYTES would have to
+# grow to the size of the file to reach the front of it. The name therefore
+# gets its own small read, of the head, and the two never meet.
+#
+# 128 KB rather than the "a few KB" a line of JSON sounds like. `session_meta`
+# embeds `base_instructions`, and the four real rollouts here have first lines
+# of 18-19 KB. That length belongs to Codex -- it grows whenever upstream adds
+# a paragraph to its system prompt -- so the bound is set at several times the
+# observation rather than just over it, half of TAIL_BYTES, because the way
+# this fails is silent: a first line that outgrows the bound costs the name on
+# every session at once and looks exactly like a session that has none.
+# Read once per file and then cached, so the size is paid once, not per poll.
+HEAD_BYTES = 128 * 1024
+
+
+def _head_line(path: str) -> str:
+    """The first COMPLETE line of a file, or "".
+
+    Complete is the whole point. A line with no newline inside HEAD_BYTES is
+    refused rather than returned in part: a JSON object cut in half decodes
+    as nothing, and handing the fragment back would only move the failure
+    into json.loads. A rollout being written at this instant is the ordinary
+    case for that, and it will have its newline by the next poll.
+    """
+    try:
+        with open(path, "rb") as f:
+            blob = f.read(HEAD_BYTES)
+    except OSError:
+        return ""
+    nl = blob.find(b"\n")
+    if nl < 0:
+        return ""
+    return blob[:nl].decode("utf-8", "replace")
+
+
+def session_meta_cwd(head_line: str):
+    """The `cwd` out of a rollout's first line, or None.
+
+    None rather than "": the caller has two different failures to tell apart
+    -- a head it could not read, and a directory it read and then refused --
+    and only one of them is worth ever looking at again.
+    """
+    if "session_meta" not in head_line:
+        return None         # cheap reject before parsing 19 KB of JSON
+    try:
+        line = json.loads(head_line)
+    except ValueError:
+        return None
+    if not isinstance(line, dict) or line.get("type") != "session_meta":
+        return None
+    payload = line.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    cwd = payload.get("cwd")
+    return cwd if isinstance(cwd, str) else None
+
+
+def rollout_session_id(path: str) -> str:
+    """The session id out of a rollout's first line, or "".
+
+    Same record as `session_meta_cwd` reads -- line 1 of every rollout, in
+    both `codex exec` and interactive sessions -- and the id in it is a bare
+    UUID that appears verbatim in the rollout's own filename. The plan this
+    was built from expected the hook to report a differently-shaped id
+    (`thr_...`) that would need reconciling with this one; a real capture
+    taken 2026-09-02 showed both spellings are the same UUID, so there is
+    nothing here to reconcile. This id is still the only field the hook's
+    report and this file share, and it is what lets Task 7 fold one session
+    into one row instead of two.
+
+    Deliberately built on `_head_line`/`HEAD_BYTES` rather than a second
+    bounded read: the two already answer "can I trust the first line of this
+    file at all", and a session id one field over from `cwd` in the same
+    record does not earn a second implementation of that answer.
+
+    Every failure here -- an unreadable file, an unterminated first line, a
+    first line that is not JSON, a record that is not a `session_meta`, a
+    payload that is not an object, an id that is not a string -- returns ""
+    rather than a guess. The caller treats "" as "cannot be matched to a
+    hook slot": the session still counts once, from the rollout, and a wrong
+    id merged into the wrong slot -- which would be worse than a session
+    left unmatched -- never happens.
+    """
+    head_line = _head_line(path)
+    if "session_meta" not in head_line:
+        return ""           # cheap reject before parsing JSON, as above
+    try:
+        rec = json.loads(head_line)
+    except ValueError:
+        return ""
+    if not isinstance(rec, dict) or rec.get("type") != "session_meta":
+        return ""
+    payload = rec.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    sid = payload.get("session_id")
+    return sid if isinstance(sid, str) else ""
+
+
+# Both, not os.sep. This file may be read on one platform and written on
+# another -- a synced home directory is ordinary -- and Codex on Windows
+# writes C:\Users\....
+_NAME_SEPARATORS = "/\\"
+
+
+def _project_name(cwd) -> str:
+    """The project name a Codex `cwd` implies, or "".
+
+    The last path component, with three refusals. The first two are the ones
+    the Claude hook shim already applies to its own cwd: `.` and `..` are
+    directory entries rather than names, and control characters are stripped
+    because this string is JSON-encoded into a line the firmware scans for
+    quotes.
+
+    The double quote goes with them, on that same sentence's reason rather
+    than a new one, and it was the half the sentence promised and did not
+    do. firmware/src/msg_parse.c reads a string value by copying the bytes
+    between the first `"` after the key's colon and the NEXT `"`, and
+    unescapes nothing. So a project called mid\"way -- json.dumps writes it
+    onto the wire correctly, as a backslash and a quote -- arrives at the
+    panel as `mid` and a trailing backslash, because msg_get_str stops at the
+    escaped quote and hands back the escape character with it. A double quote
+    is a legal character in a directory name on every platform this reads
+    rollouts from.
+
+    Stripped, not refused, which is how the control characters beside it are
+    handled and for the same reason: mid\"way is still recognisably the
+    owner's project as `midway`, while a name that was ONLY quotes falls
+    through to the drawable-ASCII rule below and lets the count speak.
+
+    The backslash needs no rule of its own: it is the other path separator,
+    so the rsplit above has already thrown away everything up to the last
+    one. Quote and backslash are the only two characters json.dumps escapes
+    once the control characters are gone, so with those two accounted for
+    nothing reaches msg_get_str that it will misread.
+
+    The third is about the panel rather than about safety, and it is the one
+    the shim has no need of. firmware/src/fmt.c draws a label through
+    fmt_ascii(), which replaces every codepoint it has no ASCII spelling for
+    with "?" -- tests/fmt/host_test.c pins the UTF-8 bytes of an e-acute
+    (\\xc3\\xa9) arriving as "?".
+    A wholly non-Latin name therefore reaches the desk as a row of question
+    marks, which says less than the count the panel falls back to when there
+    is no name at all. So a name has to carry at least one ASCII letter or
+    digit to be worth sending: a name with a Latin stem keeps it and loses
+    the rest, and one with no Latin at all is refused so the count speaks
+    instead.
+
+    Not capped here, and the quote rule above is the same division read from
+    the other side. protocol.session owns the WIRE: the byte bound, and the
+    truncation on a UTF-8 boundary that the bound needs. This function owns
+    what may be a NAME, which is what a character class is -- and putting the
+    quote rule in protocol.session would apply one provider's bug to every
+    provider's label, while a second byte cap here would be a second thing to
+    keep in step with the firmware.
+    """
+    if not isinstance(cwd, str):
+        return ""
+    name = cwd
+    while name and name[-1] in _NAME_SEPARATORS:
+        name = name[:-1]
+    for sep in _NAME_SEPARATORS:
+        name = name.rsplit(sep, 1)[-1]
+    name = "".join(c for c in name
+                   if c >= " " and c != "\x7f" and c != '"')
+    # Deliberately redundant with the drawable-ASCII rule below, which
+    # refuses "." and ".." as well: neither carries a letter or a digit. The
+    # two answer different questions, and the ASCII one is much the likelier
+    # to be relaxed -- the day the firmware grows a font for it, a directory
+    # entry must still not become a project name.
+    if name in ("", ".", ".."):
+        return ""
+    if not any(("a" <= c <= "z") or ("A" <= c <= "Z") or ("0" <= c <= "9")
+               for c in name):
+        return ""
+    return name
 
 
 def _epoch(value):
@@ -246,7 +428,8 @@ def parse_rollout_tail(lines, mtime: float):
 #
 # Codex has no hook interface, but its rollout log is a journal of the same
 # transitions: `task_started` when a turn begins, `task_complete` when the
-# answer is in, `turn_aborted` when the person interrupted it. The newest of
+# answer is in -- or, when that record carries an `error`, when the turn died
+# instead -- and `turn_aborted` when the person stopped it. The newest of
 # these in a file is that session's state, aged by its own timestamp, with
 # the same threshold Claude's hooks use -- anything past ABANDONED_AFTER_S is
 # a session that is gone. No `stuck` from silence, for the reason given in
@@ -264,6 +447,57 @@ _TURN_EVENTS = {
     "task_complete": base.STATE_IDLE,
     "turn_aborted": base.STATE_IDLE,
 }
+
+# `turn_aborted` is NOT a failure, and the temptation to make it one is why
+# this paragraph exists. Its `reason` is one of `interrupted`, `replaced`,
+# `review_ended` or `budget_limited` (protocol.rs TurnAbortReason): Esc, a
+# new message typed over the running turn, a review closing, a budget
+# stopping it. Every one of those is something the PERSON did, and idle --
+# "finished, your turn" -- is the right colour for all four. Red is reserved
+# for what the model or the API did.
+#
+# That is `task_complete` carrying an `error`. TurnCompleteEvent.error is
+# documented upstream as "Terminal error details when the turn completed
+# unsuccessfully", is skipped entirely on success, and its CodexErrorInfo
+# includes UsageLimitExceeded -- which is the single event this product
+# exists to warn about, and the mirror of Claude's StopFailure error:
+# "rate_limit".
+#
+# NEVER OBSERVED. Every rollout captured on the machine this was written
+# against is a success, so this branch rests entirely on a reading of
+# upstream's Rust schema -- TurnCompleteEvent.error, CodexErrorInfo, and the
+# two deny-listed variants -- rather than on a real file. The contract
+# script's checks for that schema (tests/ci/check_codex_contract.sh) arrive
+# with Task 8 of this plan, not this one. It is therefore written to degrade
+# toward idle: an `error` that is not an object leaves the mapping above
+# exactly as it was.
+
+# The two errors upstream itself says do not fail a turn
+# (CodexErrorInfo::affects_turn_status). Both are failures of a client
+# OPERATION rather than of the turn, and painting the panel red because a
+# thread rollback failed would cry wolf with the one colour that must not.
+#
+# A deny-list rather than an allow-list, and that direction is deliberate: a
+# variant added upstream tomorrow lands on the failing side, which is where
+# `Other` already is. A unit variant serialises as a bare snake_case string
+# and a struct variant as a single-key object, so both shapes are checked.
+_NOT_A_TURN_FAILURE = ("thread_rollback_failed", "active_turn_not_steerable")
+
+
+def _is_turn_failure(error) -> bool:
+    """Does this `task_complete` error mean the turn itself failed?"""
+    if not isinstance(error, dict):
+        return False
+    info = error.get("codex_error_info")
+    if isinstance(info, str):
+        return info not in _NOT_A_TURN_FAILURE
+    if isinstance(info, dict) and len(info) == 1:
+        return next(iter(info)) not in _NOT_A_TURN_FAILURE
+    # Absent, null, or a shape this version has never seen. Upstream's rule
+    # for a missing CodexErrorInfo is that the turn failed
+    # (ErrorEvent::affects_turn_status is is_none_or), and so is this: an
+    # error object with nothing legible in it is still an error object.
+    return True
 
 
 def parse_rollout_state(lines, now_epoch):
@@ -285,9 +519,12 @@ def parse_rollout_state(lines, now_epoch):
         payload = line.get("payload")
         if not isinstance(payload, dict):
             continue
-        state = _TURN_EVENTS.get(payload.get("type"))
+        kind = payload.get("type")
+        state = _TURN_EVENTS.get(kind)
         if state is None:
             continue
+        if kind == "task_complete" and _is_turn_failure(payload.get("error")):
+            state = base.STATE_FAILED
         t = _observed_at(line, float("nan"))
         if not (T_EPOCH_MIN <= t <= T_EPOCH_MAX):
             return base.STATE_UNKNOWN   # no usable timestamp: no age, no claim
@@ -301,14 +538,89 @@ def parse_rollout_state(lines, now_epoch):
 
 
 class CodexCliProvider(base.ProviderParser):
-    def __init__(self, root=None):
+    def __init__(self, root=None, state_dir=None, sweep=True):
         self._root = root
+        # The hook slot directory, injectable for exactly the reason `root`
+        # is: a test must never be able to reach the real one, because the
+        # scan behind it DELETES abandoned files. `sweep` is injectable for
+        # the other half of that -- a caller that only wants to look, such as
+        # `blink status`, must be able to look without collecting, since a
+        # diagnostic that deletes what it is diagnosing destroys the evidence
+        # somebody ran it to see.
+        self._state_dir = state_dir
+        self._sweep = sweep
+        # path -> project name, for the one record in a rollout that cannot
+        # change. `session_meta` is line 1 of an append-only file whose name
+        # carries a UUID, so a path is never reused and the answer for a path
+        # is fixed for the life of the file.
+        #
+        # The saving is not CPU. Even at the two-second fast poll, 19 KB of
+        # json.loads is under a millisecond. It is that the SIZE of that
+        # line belongs to Codex: base_instructions is embedded in it,
+        # and re-deriving an immutable value from a blob upstream is free to
+        # grow is waste that grows with it. Pruned to the current file set on
+        # every poll, so this is bounded by RECENT_FILES rather than by how
+        # long the daemon has been up.
+        #
+        # Per instance, not per class: a mutable default here would make the
+        # cache shared by every provider in the process.
+        self._names = {}
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
 
     def root(self):
         return self._root if self._root is not None else sessions_root()
+
+    def _name_for(self, path):
+        """The project name for one rollout, read once per file.
+
+        An answer is cached once the first line has been READ, and only then.
+        That is the whole of the rule, and the distinction it turns on is the
+        one `session_meta_cwd` was written to hand back: a head this could
+        not read at all, and a head it read and then found nothing usable in.
+
+        The second is permanent and is cached, empty answer included. A
+        rollout is append-only and its line 1 never changes, so a first line
+        that is complete and carries no `cwd` -- or a `cwd` `_project_name`
+        refuses -- will still carry none on the ten thousandth poll, and
+        re-deriving that from 19 KB of embedded system prompt every two
+        seconds is waste that grows with whatever upstream puts in that
+        record next.
+
+        The first is not permanent, and caching it was a bug. Codex creates a
+        rollout and then writes its ~19 KB `session_meta` into it, and this
+        daemon now looks every two seconds on the fast poll -- not the
+        minute this cache was written under -- so globbing that file between
+        the two is ordinary rather than rare. `_head_line` correctly refuses
+        the unterminated line, "" came back, and "" was then remembered
+        FOREVER: `_prune_names` only forgets paths that have left the recent
+        set, and the session being written to is the one that stays in it for
+        hours. The panel then said "A session is waiting for you" with no
+        subject, permanently, for the session the owner is most likely
+        looking at. So an unread head is left uncached and simply asked again
+        next poll, which is a 128 KB read of a file that was written
+        milliseconds ago and is still in the page cache.
+
+        A first line longer than HEAD_BYTES is the one case that pays that
+        re-read forever rather than for one poll. It is not worth a third
+        branch: that session has already lost its name on every poll anyway,
+        which is the failure HEAD_BYTES is set several times over the
+        observed length to avoid in the first place.
+        """
+        cached = self._names.get(path)
+        if cached is not None:
+            return cached           # "" is a real answer here, not a miss
+        head = _head_line(path)
+        if not head:
+            return ""               # unread, not unnamed: ask again next poll
+        name = _project_name(session_meta_cwd(head))
+        self._names[path] = name
+        return name
+
+    def _prune_names(self, known):
+        """Forget every cached name whose file is no longer being read."""
+        self._names = {p: n for p, n in self._names.items() if p in known}
 
     def parse_cli_event(self, raw_payload, now_epoch, observed_at):
         """One `rate_limits` object, already read, as a frame.
@@ -341,8 +653,16 @@ class CodexCliProvider(base.ProviderParser):
         the freshest one win a contest it has already won here.
         """
         best = None
-        counts = {}
-        for path in recent_rollouts(self._root):
+        # Keyed by session, not counted, because a hook slot below may be
+        # describing one of these same sessions and has to REPLACE its entry
+        # rather than land beside it. Counting first would make that
+        # impossible: two counts cannot be de-duplicated after the fact, and
+        # the session id is the only thing the two sources share.
+        rollout_states = {}
+        rollout_names = {}
+        paths = recent_rollouts(self._root)
+        self._prune_names(set(paths))
+        for path in paths:
             try:
                 mtime = os.path.getmtime(path)
             except OSError:
@@ -353,7 +673,19 @@ class CodexCliProvider(base.ProviderParser):
             # account-wide pair however many terminals are open.
             state = parse_rollout_state(lines, now_epoch)
             if state != base.STATE_UNKNOWN:
-                counts[state] = counts.get(state, 0) + 1
+                # A rollout whose meta line could not be read falls back to
+                # its own path as the key. It still counts exactly once, it
+                # simply cannot be matched to a slot -- and a filesystem path
+                # can never collide with a session id, so the fallback can
+                # never merge a session into the wrong one, which is the
+                # worse of the two errors.
+                key = rollout_session_id(path) or path
+                rollout_states[key] = state
+                # A name is only collected from a session that made a claim.
+                # A terminal opened and not typed into has a cwd and no turn,
+                # and letting it lend its name would rename the panel after
+                # the session that is actually doing something.
+                rollout_names[key] = self._name_for(path)
             limits, observed_at = parse_rollout_tail(lines, mtime)
             if limits is None:
                 continue
@@ -363,17 +695,106 @@ class CodexCliProvider(base.ProviderParser):
             if best is None or frame.observed_at > best.observed_at:
                 best = frame
         frames = [best] if best is not None else []
+
+        # The hooks' answer, and where it wins.
+        #
+        # The rollout cannot see a permission prompt at all: Codex files its
+        # approval events in the never-persisted arm of its own persistence
+        # policy, and the real rollouts on this desk contain none of them. So
+        # `running` from the rollout for a session whose hook said `waiting`
+        # is not a disagreement to be settled on recency -- it is the older
+        # and blinder of two answers, and the newer one simply replaces it.
+        # That is the whole reason this is a dict update in one direction
+        # rather than a merge that compares timestamps.
+        #
+        # Unioned rather than substituted, though: a Codex session that was
+        # already open when the hooks were installed has no slot and never
+        # will get one, because the hooks only fire from the next turn on.
+        # Dropping it would make a running terminal vanish from the panel,
+        # which is a worse error than not knowing that it is waiting.
+        # Unioned, but not over a session the hook has BURIED.
+        #
+        # That is the correction the paragraph above needed. "No slot" was
+        # read as "the hooks never saw this session", and it is also what a
+        # session whose SessionEnd has already fired looks like -- the shim
+        # removes the slot -- so the union put back every Codex session the
+        # hook had just ended, and it kept putting them back until the rollout
+        # aged out an hour later. Measured on the owner's desk: one live slot,
+        # two Claude sessions, four recent rollouts, and a panel saying six.
+        #
+        # The tombstone is what tells the two absences apart. A rollout whose
+        # id has one is a session somebody closed; a rollout with no tombstone
+        # is a session nothing ever watched end, which is exactly the
+        # pre-hooks case this union exists for, and it counts as it always did.
+        #
+        # Filtered before the update, never after: a hook slot is the newest
+        # word on its own session, so a session that ended and was resumed
+        # under the same id counts again the moment its slot reappears.
+        hook_states, agents = codex_state.scan(
+            now_epoch, path=self._state_dir, sweep=self._sweep)
+        buried = codex_state.ended(
+            now_epoch, path=self._state_dir, sweep=self._sweep)
+        merged = {key: state for key, state in rollout_states.items()
+                  if key not in buried}
+        merged.update(hook_states)
+
+        counts = {}
+        for merged_state in merged.values():
+            counts[merged_state] = counts.get(merged_state, 0) + 1
+
         if counts:
             # A separate frame with no percentages, exactly as Claude's state
             # provider does it: it can never win a recency contest for
             # numbers, and the normalizer merges its state field by field.
+            state = base.worst_of(counts)
+            # The names of the sessions holding the winning state, out of the
+            # MERGED census rather than the rollout tally -- otherwise a
+            # session the hook moved from `running` to `waiting` would be
+            # looked up under the state it no longer holds. Only rollouts
+            # carry a name at all: codex_state.scan drops the ones its slots
+            # hold on purpose, so a hook-only session is a nameless holder
+            # and silences the label exactly as an unreadable rollout does.
+            held = [rollout_names.get(key, "")
+                    for key, held_state in merged.items()
+                    if held_state == state and rollout_names.get(key)]
             frames.append(base.NormalizedUsageFrame(
                 provider=PROVIDER_ID,
                 src=STATE_SRC_ID,
                 observed_at=now_epoch,
-                state=base.worst_of(counts),
+                state=state,
+                # Named only when exactly ONE session holds the state the
+                # frame is reporting, which is the rule claude_state.poll
+                # applies and for the same reason: a count says something
+                # true about all of them, and a name picked from three says
+                # something true about one and implies it about the rest.
+                #
+                # Both halves are needed. counts == 1 is what makes the name
+                # unambiguous; len(held) == 1 is not implied by it, because a
+                # session whose session_meta could not be read still votes on
+                # the state and still has no name to lend -- two holders, one
+                # of them nameless, must stay a count.
+                label=(held[0] if counts.get(state, 0) == 1 and len(held) == 1
+                       else ""),
                 n_run=counts.get(base.STATE_RUNNING, 0),
+                # n_wait was absent for as long as nothing could produce a
+                # waiting Codex session. The hooks can, and protocol._pair_from
+                # reads this field to decide what the panel's line says -- so
+                # leaving it out would light an amber pip beside the words
+                # "0 sessions".
+                n_wait=counts.get(base.STATE_WAITING, 0),
                 n_idle=counts.get(base.STATE_IDLE, 0),
-                n_stuck=counts.get(base.STATE_STUCK, 0),
+                # Codex has no `stuck` -- no silence-based state, per the
+                # module docstring above -- so counts.get(base.STATE_STUCK, 0)
+                # is always 0 here and this fold is really just the failed
+                # count. Written as a sum anyway, for symmetry with
+                # claude_state.poll's identically-named field: the wire has
+                # one count for "not working and not finished" shared by both
+                # providers, and `state` above already says which of the two
+                # it is. Mapping failed to nothing would leave a failed
+                # session reporting zero -- "Session failed" where the panel
+                # should say "Session failed - 2 sessions".
+                n_stuck=(counts.get(base.STATE_STUCK, 0)
+                         + counts.get(base.STATE_FAILED, 0)),
+                n_agents=agents,
             ))
         return frames

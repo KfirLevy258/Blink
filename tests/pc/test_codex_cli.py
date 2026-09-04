@@ -10,6 +10,7 @@ import os
 
 import pytest
 
+from pc import protocol
 from pc.providers import base
 from pc.providers import codex_cli
 
@@ -36,6 +37,22 @@ def token_count_line(limits, stamp="2026-08-27T03:00:00.000Z"):
         "payload": {"type": "token_count",
                     "info": {"model_context_window": 258400},
                     "rate_limits": limits},
+    })
+
+
+def meta_line(cwd, originator="codex-tui"):
+    """Line 1 of a real rollout: the record that carries the project's cwd.
+
+    The padding is not decoration. A real session_meta embeds
+    base_instructions and measures 18-19 KB, and a fixture of 80 bytes would
+    let a head bound far too small to work on a desk pass every test here.
+    """
+    return json.dumps({
+        "timestamp": "2026-08-27T03:00:00.000Z",
+        "type": "session_meta",
+        "payload": {"cwd": cwd, "originator": originator,
+                    "cli_version": "0.150.0",
+                    "base_instructions": "i" * 18_000},
     })
 
 
@@ -268,6 +285,296 @@ def test_only_the_tail_of_a_huge_file_is_read(tmp_path):
                    for ln in tail), "the first reading must be outside the tail"
 
 
+# --- the head of the file: where the project name lives ----------------------
+
+
+def test_the_first_line_is_read_whatever_follows_it(tmp_path):
+    """The name is on line 1 and the tail read cannot reach it: the biggest
+    rollout on the machine this was written against is 51 MB. So the head
+    gets its own read, and it must not care how much comes after."""
+    path = str(tmp_path / "rollout-a.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"type":"session_meta","payload":{"cwd":"/a/b"}}\n')
+        f.write("x" * (codex_cli.HEAD_BYTES * 3) + "\n")
+    assert codex_cli._head_line(path) == \
+        '{"type":"session_meta","payload":{"cwd":"/a/b"}}'
+
+
+def test_a_first_line_longer_than_the_head_bound_is_refused_not_halved(tmp_path):
+    """A JSON object cut in half parses as nothing anyway, and returning the
+    fragment would only move the failure into json.loads. The cost of a first
+    line that does not fit is the name, not the read."""
+    path = str(tmp_path / "rollout-b.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"type":"session_meta","payload":{"pad":"'
+                + "p" * (codex_cli.HEAD_BYTES + 10) + '"}}\n')
+    assert codex_cli._head_line(path) == ""
+
+
+def test_the_head_bound_clears_a_real_session_meta_line():
+    """18-19 KB is what the four real rollouts on this machine measure, and
+    that length is upstream's to change -- base_instructions is embedded in
+    the record. The bound has to have room over the observation, not equal
+    it."""
+    assert codex_cli.HEAD_BYTES >= 4 * 19 * 1024
+
+
+def test_a_missing_file_is_silence_not_an_error(tmp_path):
+    assert codex_cli._head_line(str(tmp_path / "nope.jsonl")) == ""
+
+
+def test_a_file_with_no_newline_at_all_is_refused(tmp_path):
+    """A rollout being written right now can have a partial first line. It
+    is not a name yet, and it will be on the next poll."""
+    path = str(tmp_path / "rollout-c.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"type":"session_meta","payload":{"cwd":"/a')
+    assert codex_cli._head_line(path) == ""
+
+
+def test_the_cwd_comes_out_of_a_session_meta_line():
+    line = json.dumps({"type": "session_meta", "timestamp": "2026-08-27",
+                       "payload": {"cwd": "/Users/K/Projects/LiveClaudeUi",
+                                   "originator": "codex-tui"}})
+    assert codex_cli.session_meta_cwd(line) == "/Users/K/Projects/LiveClaudeUi"
+
+
+def test_a_line_that_is_not_session_meta_yields_no_cwd():
+    """None rather than "" so the caller can tell a head it could not read
+    from a directory it read and then refused."""
+    assert codex_cli.session_meta_cwd(
+        json.dumps({"type": "event_msg", "payload": {"cwd": "/a/b"}})) is None
+    assert codex_cli.session_meta_cwd("") is None
+    assert codex_cli.session_meta_cwd("session_meta but not json") is None
+    assert codex_cli.session_meta_cwd(json.dumps(["session_meta"])) is None
+    assert codex_cli.session_meta_cwd(
+        json.dumps({"type": "session_meta", "payload": "session_meta"})) is None
+    assert codex_cli.session_meta_cwd(
+        json.dumps({"type": "session_meta", "payload": {}})) is None
+    assert codex_cli.session_meta_cwd(
+        json.dumps({"type": "session_meta", "payload": {"cwd": 7}})) is None
+    # ...and on its own `type`, not merely on the substring pre-filter. Every
+    # case above is refused before the parse because the words are not in the
+    # line at all; this one carries them and must still be turned away, or a
+    # rollout that quotes the phrase would name the panel after itself.
+    assert codex_cli.session_meta_cwd(json.dumps(
+        {"type": "event_msg",
+         "payload": {"cwd": "/a/b", "text": "session_meta"}})) is None
+
+
+def test_the_name_is_the_last_path_component():
+    assert codex_cli._project_name("/Users/K/Projects/LiveClaudeUi") == \
+        "LiveClaudeUi"
+    assert codex_cli._project_name("/private/tmp") == "tmp"
+
+
+def test_a_trailing_separator_is_not_a_component():
+    assert codex_cli._project_name("/Users/K/Blink/") == "Blink"
+    assert codex_cli._project_name("/Users/K/Blink///") == "Blink"
+
+
+def test_a_windows_path_splits_on_the_windows_separator():
+    """Both separators, not os.sep: a home directory can be synced between
+    machines, and Codex on Windows writes C:\\Users\\...."""
+    assert codex_cli._project_name("C:\\Users\\Kfir\\Projects\\Blink") == "Blink"
+    assert codex_cli._project_name("C:\\Users\\Kfir\\Projects\\Blink\\") == "Blink"
+
+
+def test_a_directory_entry_is_not_a_name():
+    for cwd in ("/", "", ".", "..", "/a/b/.", "/a/b/.."):
+        assert codex_cli._project_name(cwd) == "", cwd
+
+
+def test_a_control_character_never_reaches_the_wire():
+    """This string is JSON-encoded into a line the firmware scans for quotes.
+    A newline in a directory name is legal on every platform this runs on."""
+    assert codex_cli._project_name("/a/b/pro\nject") == "project"
+    assert codex_cli._project_name("/a/b/pro\x7fject") == "project"
+    assert codex_cli._project_name("/a/b/\n\n") == ""
+
+
+def test_a_double_quote_never_reaches_the_wire():
+    """firmware/src/msg_parse.c copies the bytes between the first `"` after
+    the key's colon and the NEXT `"`, and unescapes nothing -- so a quote
+    inside the name ends the label early and leaves the escape character
+    dangling on the panel. A quote is a legal character in a directory name
+    on every platform this reads rollouts from.
+
+    Stripped rather than refused, exactly as the control characters beside it
+    are: the owner's project is still recognisable without it. A name that
+    was only quotes has nothing left and the count speaks instead.
+    """
+    assert codex_cli._project_name('/a/b/mid"way') == "midway"
+    assert codex_cli._project_name('/a/b/"') == ""
+    assert codex_cli._project_name('/a/b/"Blink"') == "Blink"
+
+
+def test_the_label_the_firmware_reads_back_is_the_whole_label():
+    """The same rule stated as the firmware states it, over the real encoder.
+
+    msg_get_str is three lines: find the key's colon, take the next `"`, stop
+    at the one after it. Reading the line that way must give back exactly the
+    name that went in -- which is the same as saying the encoder never had to
+    escape anything, since an escape is what msg_get_str would stop on.
+    """
+    name = codex_cli._project_name('/Users/K/mid"way')
+    line = protocol.encode(protocol.session(name, 1)).decode("utf-8")
+    body = line.split('"label":', 1)[1]
+    read_back = body.split('"')[1]      # msg_get_str, in the same three steps
+    assert read_back == name
+    assert "\\" not in line, "an escape is a byte the firmware cannot undo"
+
+
+def test_a_name_with_no_drawable_ascii_is_refused():
+    """firmware/src/fmt.c draws a label through fmt_ascii(), which replaces
+    every codepoint it has no ASCII spelling for with "?" -- pinned by
+    tests/fmt/host_test.c. A wholly non-Latin name therefore arrives as a row
+    of question marks, which is worse than the count the panel falls back to.
+    A name with a Latin stem keeps it and loses the rest.
+    """
+    assert codex_cli._project_name("/Users/K/פרויקט") == ""
+    assert codex_cli._project_name("/Users/K/项目") == ""
+    assert codex_cli._project_name("/Users/K/café") == "café"
+    assert codex_cli._project_name("/Users/K/proj-项目") == "proj-项目"
+
+
+def test_a_name_with_spaces_is_kept():
+    """Unlike the Claude hook shim, which is one sed and refuses them. There
+    is no filename being built here and no shell quoting to get wrong, so the
+    reason that rule exists there does not exist here."""
+    assert codex_cli._project_name("/Users/K/My Project") == "My Project"
+
+
+def test_a_cwd_that_is_not_a_string_is_refused_not_raised():
+    for cwd in (None, 7, [], {}, True):
+        assert codex_cli._project_name(cwd) == ""
+
+
+def test_the_name_is_not_capped_here():
+    """protocol.session is the one place that knows the byte bound and the
+    one place that truncates on a UTF-8 boundary. A second cap here would be
+    a second thing to keep in step with the firmware."""
+    long = "n" * 200
+    assert codex_cli._project_name("/a/" + long) == long
+
+
+def test_the_name_is_read_once_per_file(tmp_path):
+    """`session_meta` is line 1 of an append-only file whose name carries a
+    UUID: the path is never reused and the answer never changes. Re-deriving
+    it from 19 KB of embedded system prompt on every tick is waste that grows
+    with whatever upstream puts in that record next."""
+    root = str(tmp_path / "sessions")
+    path = write_rollout(root, lines=[meta_line("/Users/K/Blink"),
+                                      token_count_line(rate_limits())])
+    p = codex_cli.CodexCliProvider(root=root)
+    reads = []
+    real = codex_cli._head_line
+    codex_cli._head_line = lambda q: (reads.append(q), real(q))[1]
+    try:
+        assert p._name_for(path) == "Blink"
+        assert p._name_for(path) == "Blink"
+        assert p._name_for(path) == "Blink"
+    finally:
+        codex_cli._head_line = real
+    assert reads == [path], reads
+
+
+def test_a_file_with_no_usable_name_is_not_re_read_either(tmp_path):
+    """A COMPLETE first line that names no project is as fixed as one that
+    does. A rollout is append-only: line 1 was written whole and will not
+    become a session_meta later, so asking again on every two-second poll
+    buys nothing. This is the half of the cache that must survive the fix
+    below -- the unread head is the only answer that may not be remembered."""
+    root = str(tmp_path / "sessions")
+    path = write_rollout(root, lines=[token_count_line(rate_limits())])
+    p = codex_cli.CodexCliProvider(root=root)
+    reads = []
+    real = codex_cli._head_line
+    codex_cli._head_line = lambda q: (reads.append(q), real(q))[1]
+    try:
+        assert p._name_for(path) == ""
+        assert p._name_for(path) == ""
+    finally:
+        codex_cli._head_line = real
+    assert reads == [path], reads
+
+
+def test_a_head_still_being_written_is_asked_again_next_poll(tmp_path):
+    """The one the owner would recognise. Codex creates a rollout and then
+    writes its 19 KB session_meta into it, and the daemon globs every two
+    seconds, so landing between the two is ordinary. _head_line refuses the
+    unterminated line and returns "" -- and remembering that "" was the bug:
+    the file being written to is the ACTIVE session, which stays in the
+    recent set for hours, so the panel named it "" for the rest of the day.
+    """
+    root = str(tmp_path / "sessions")
+    path = write_rollout(root, lines=[])
+    half = meta_line("/Users/K/Blink")
+    with open(path, "w") as f:
+        f.write(half)               # no newline yet: Codex is mid-write
+    p = codex_cli.CodexCliProvider(root=root)
+    assert p._name_for(path) == ""
+    assert p._names == {}, "an unread head must not be remembered as an answer"
+    with open(path, "a") as f:      # Codex finishes the line
+        f.write("\n" + token_count_line(rate_limits()) + "\n")
+    assert p._name_for(path) == "Blink"
+
+
+def test_a_head_unreadable_on_one_poll_is_named_on_the_next(tmp_path,
+                                                            monkeypatch):
+    """The same recovery through the whole provider, on ONE instance across
+    two polls -- which is what a running daemon is.
+
+    The head read is the one that fails here while the tail read succeeds,
+    because that is the only shape in which the cache could ever be poisoned:
+    a rollout whose line 1 is still being written has no turn event either,
+    so poll never asks it for a name. It takes a head read that fails on its
+    own -- the open hitting EMFILE, a permission that flickers, a home
+    directory a sync client is rewriting under us -- against a tail that
+    parsed. That is rare per poll and it used to be permanent: the "" was
+    remembered, `_prune_names` keeps the ACTIVE session's path for hours, and
+    the panel named the session the owner is looking at nothing until the
+    daemon was restarted.
+    """
+    root = str(tmp_path / "sessions")
+    slots = str(tmp_path / "slots")
+    write_rollout(root, lines=[meta_line("/Users/K/Blink"),
+                               token_count_line(rate_limits()),
+                               turn_line("task_complete", _stamp(NOW - 5))])
+    real = codex_cli._head_line
+    failing = [True]
+
+    def flaky(q):
+        return "" if failing[0] else real(q)
+
+    monkeypatch.setattr(codex_cli, "_head_line", flaky)
+    p = codex_cli.CodexCliProvider(root=root, state_dir=slots, sweep=False)
+    first = [f for f in p.poll(NOW) if f.src == codex_cli.STATE_SRC_ID][0]
+    assert (first.state, first.label) == ("idle", ""), "nothing to read yet"
+    failing[0] = False
+    second = [f for f in p.poll(NOW) if f.src == codex_cli.STATE_SRC_ID][0]
+    assert (second.state, second.label) == ("idle", "Blink")
+
+
+def test_names_are_pruned_to_the_files_still_being_read(tmp_path):
+    """Bounded by RECENT_FILES rather than by how long the daemon has been
+    up. A path that has fallen out of the recent set will never be read
+    again, so holding its name is holding a string for nothing."""
+    p = codex_cli.CodexCliProvider(root=str(tmp_path))
+    p._names = {"/a": "A", "/b": "B", "/c": "C"}
+    p._prune_names({"/b", "/c", "/d"})
+    assert p._names == {"/b": "B", "/c": "C"}
+
+
+def test_two_providers_do_not_share_a_name_cache(tmp_path):
+    """A mutable default on __init__ would make the cache class-wide, which
+    is a bug that only shows up on a desk running two of these."""
+    a = codex_cli.CodexCliProvider(root=str(tmp_path))
+    b = codex_cli.CodexCliProvider(root=str(tmp_path))
+    a._names["/a"] = "A"
+    assert b._names == {}
+
+
 def test_the_provider_never_raises_on_a_damaged_tree(tmp_path, monkeypatch):
     """Contract from base.ProviderParser: a parser for an app we do not
     control must not be able to stop the daemon."""
@@ -463,3 +770,683 @@ def test_no_state_frame_when_no_rollout_has_a_turn(tmp_path):
     write_rollout(root, lines=[token_count_line(rate_limits())])
     frames = codex_cli.CodexCliProvider(root=root).poll(NOW)
     assert [f.src for f in frames] == ["cli"]
+
+
+# --- naming the session, when there is exactly one to name -------------------
+
+
+def _state_frame(root, now=NOW):
+    frames = codex_cli.CodexCliProvider(root=root).poll(now)
+    held = [f for f in frames if f.src == codex_cli.STATE_SRC_ID]
+    return held[0] if held else None
+
+
+def test_the_one_session_in_the_winning_state_is_named(tmp_path):
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Projects/LiveClaudeUi"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_complete", _stamp(NOW - 5))])
+    st = _state_frame(root)
+    assert (st.state, st.label) == ("idle", "LiveClaudeUi")
+
+
+def test_two_sessions_in_the_winning_state_are_not_named(tmp_path):
+    """The rule claude_state.poll applies, applied here for the same reason:
+    a name picked from two says something true about one and implies it about
+    the other. The count is what is true of both."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_complete", _stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[meta_line("/Users/K/Other"),
+                         turn_line("task_complete", _stamp(NOW - 9))])
+    st = _state_frame(root)
+    assert (st.state, st.n_idle, st.label) == ("idle", 2, "")
+
+
+def test_a_session_in_a_lesser_state_does_not_lend_its_name(tmp_path):
+    """Two sessions, two states. The frame's `state` is the worse of them, so
+    only the session actually holding that state may be named -- the other's
+    name under the other's status would be a wrong sentence."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Finished"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_complete", _stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[meta_line("/Users/K/Working"),
+                         turn_line("task_started", _stamp(NOW - 9))])
+    st = _state_frame(root)
+    assert (st.state, st.label) == ("idle", "Finished")
+
+
+def test_an_unnamed_session_leaves_a_named_one_alone(tmp_path):
+    """A rollout whose session_meta could not be read is still a session and
+    still votes on the state -- it just has nothing to add to the name. Two
+    holders of the state is still two, named or not."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_complete", _stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[turn_line("task_complete", _stamp(NOW - 9))])
+    st = _state_frame(root)
+    assert (st.state, st.n_idle, st.label) == ("idle", 2, "")
+
+
+def test_a_rollout_with_no_turn_yet_lends_no_name(tmp_path):
+    """It makes no claim on the state, so it must make none on the name --
+    otherwise an opened-and-untyped-into terminal would rename the panel."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_started", _stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[meta_line("/Users/K/JustOpened")])
+    st = _state_frame(root)
+    assert (st.state, st.n_run, st.label) == ("running", 1, "Blink")
+
+
+def test_a_poll_prunes_the_names_of_files_it_no_longer_reads(tmp_path):
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_started", _stamp(NOW - 5))])
+    p = codex_cli.CodexCliProvider(root=root)
+    p._names["/gone/rollout-z.jsonl"] = "Ghost"
+    p.poll(NOW)
+    assert "/gone/rollout-z.jsonl" not in p._names
+    assert list(p._names.values()) == ["Blink"]
+
+
+# --- a turn that died -------------------------------------------------------
+
+
+def failed_line(stamp, info="usage_limit_exceeded", message="You have hit"):
+    """A `task_complete` that carries an error, shaped as upstream writes it.
+
+    ErrorEvent is {message, codex_error_info}; codex_error_info is a
+    CodexErrorInfo, whose unit variants are bare snake_case strings.
+    """
+    error = {"message": message}
+    if info is not None:
+        error["codex_error_info"] = info
+    return json.dumps({"timestamp": stamp, "type": "event_msg",
+                       "payload": {"type": "task_complete",
+                                   "turn_id": "t1", "error": error}})
+
+
+def test_a_turn_that_died_on_a_usage_limit_is_failed():
+    """The single case this product exists to warn about, and -- folded in
+    here rather than kept as a parallel test -- every other terminal-error
+    string upstream can send. No branch on which error: there is nowhere on
+    the wire to put the distinction -- base.VALID_STATES is fixed -- and the
+    panel already draws "Session used up" off the percentage dial this same
+    file feeds. All six exercise the identical str-branch of
+    _is_turn_failure, so a mutation that reddens one reddens them all; a
+    second test making the same claim over more strings would not be a
+    second data point."""
+    for info in ("usage_limit_exceeded", "context_window_exceeded",
+                 "unauthorized", "internal_server_error", "sandbox_error",
+                 "other"):
+        assert codex_cli.parse_rollout_state(
+            [failed_line(_stamp(NOW - 5), info=info)], NOW) \
+            == base.STATE_FAILED, info
+
+
+def test_a_struct_shaped_error_is_failed():
+    """CodexErrorInfo::HttpConnectionFailed carries a field, so it
+    serialises as a single-key object rather than a bare string -- and the
+    struct branch has to actually read that key, not merely agree with the
+    fallback. A non-deny-listed struct proves nothing on its own: the
+    fallback alone would also call it failed. Pairing it with a deny-listed
+    struct is what forces the branch to exist -- only a real inspection of
+    the key can turn one of these idle while the other stays failed."""
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5),
+                     info={"http_connection_failed": {"http_status_code": 503}})],
+        NOW) == base.STATE_FAILED
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5),
+                     info={"active_turn_not_steerable": {"turn_kind": "review"}})],
+        NOW) == base.STATE_IDLE
+
+
+def test_an_error_upstream_does_not_call_a_turn_failure_is_still_idle():
+    """CodexErrorInfo::affects_turn_status returns false for exactly two
+    variants, both of them failures of a client operation rather than of the
+    turn. Painting the panel red for a failed thread rollback would cry wolf
+    with the one colour that must not."""
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5), info="thread_rollback_failed")],
+        NOW) == base.STATE_IDLE
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5),
+                     info={"active_turn_not_steerable": {"turn_kind": "review"}})],
+        NOW) == base.STATE_IDLE
+
+
+def test_an_error_with_no_info_is_failed():
+    """ErrorEvent::affects_turn_status is is_none_or(...) -- upstream's own
+    answer for a missing CodexErrorInfo is that the turn failed. An error
+    object with nothing legible in it is still an error object."""
+    assert codex_cli.parse_rollout_state(
+        [failed_line(_stamp(NOW - 5), info=None)], NOW) == base.STATE_FAILED
+    for info in (None, 7, [], ["thread_rollback_failed"],
+                 {"a": 1, "b": 2}, {}):
+        line = json.dumps({"timestamp": _stamp(NOW - 5), "type": "event_msg",
+                           "payload": {"type": "task_complete",
+                                       "error": {"message": "boom",
+                                                 "codex_error_info": info}}})
+        assert codex_cli.parse_rollout_state([line], NOW) \
+            == base.STATE_FAILED, info
+
+
+def test_an_error_of_an_unexpected_shape_degrades_to_idle_not_to_red():
+    """Never observed in a real file, so the shape is upstream's to change.
+    Red is the loudest thing this panel does and must not be reachable by a
+    field that merely stopped being an object."""
+    for bad in ("boom", 7, [], None, True):
+        line = json.dumps({"timestamp": _stamp(NOW - 5), "type": "event_msg",
+                           "payload": {"type": "task_complete", "error": bad}})
+        assert codex_cli.parse_rollout_state([line], NOW) == base.STATE_IDLE, bad
+
+
+def test_a_task_complete_without_an_error_is_still_idle():
+    """The ordinary case, and every rollout ever captured on this machine."""
+    assert codex_cli.parse_rollout_state(
+        [turn_line("task_complete", _stamp(NOW - 5))], NOW) == base.STATE_IDLE
+
+
+def test_an_aborted_turn_is_still_idle_whatever_its_reason():
+    """All four TurnAbortReason values are things the person did: Esc, a new
+    message typed over the turn, a review closing, a budget stopping it.
+    Idle is the right colour for all four, and this mapping is frozen."""
+    for reason in ("interrupted", "replaced", "review_ended", "budget_limited"):
+        line = json.dumps({"timestamp": _stamp(NOW - 5), "type": "event_msg",
+                           "payload": {"type": "turn_aborted",
+                                       "reason": reason}})
+        assert codex_cli.parse_rollout_state([line], NOW) == base.STATE_IDLE, \
+            reason
+
+
+# A failure an hour ago is a session that is gone, not a red light that
+# stays on until the daemon restarts -- but that guarantee comes from the
+# age gate in parse_rollout_state, which runs unconditionally AFTER the
+# state (of any kind) is decided and does not read what the state is. That
+# is already exercised by test_an_abandoned_rollout_claims_nothing above;
+# a `failed`-flavoured copy of it cannot fail independently of that one, so
+# it was removed rather than kept as coverage that cannot be lost.
+
+
+def test_a_failed_session_is_the_worst_state_and_counted_with_the_stuck(tmp_path):
+    """The wire has one count for "not working and not finished", and
+    claude_state.poll folds failed into it for the same reason: `state`
+    already carries which of the two it is."""
+    root = str(tmp_path / "sessions")
+    write_rollout(root, name="rollout-a.jsonl",
+                  lines=[meta_line("/Users/K/Blink"),
+                         token_count_line(rate_limits()),
+                         failed_line(_stamp(NOW - 5))])
+    write_rollout(root, name="rollout-b.jsonl",
+                  lines=[meta_line("/Users/K/Other"),
+                         turn_line("task_started", _stamp(NOW - 9))])
+    st = _state_frame(root)
+    assert (st.state, st.n_stuck, st.n_run, st.n_idle) == ("failed", 1, 1, 0)
+    assert st.n_sessions() == 2
+    assert st.label == "Blink"      # the only session holding the state
+
+
+def test_rollout_session_id_comes_from_the_meta_line(tmp_path):
+    """Line 1 of every rollout is its session_meta record, and it carries the
+    id the hooks also report. That id is the only thing the two state sources
+    share, so it is what lets them describe one session instead of two."""
+    p = tmp_path / "rollout-x.jsonl"
+    p.write_text(
+        '{"type":"session_meta","payload":{"session_id":"cx-1",'
+        '"cwd":"/Users/k/Projects/Blink","cli_version":"0.150.0"}}\n'
+        '{"type":"event_msg","payload":{"type":"task_started"}}\n')
+    assert codex_cli.rollout_session_id(str(p)) == "cx-1"
+
+
+def test_rollout_session_id_reads_only_the_head(tmp_path):
+    """A real rollout on this desk is 51 MB, and the tail reader would not
+    reach line 1 at all. This asserts the head read does not depend on the
+    rest of the file being small -- or even parseable."""
+    p = tmp_path / "rollout-big.jsonl"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write('{"type":"session_meta","payload":{"session_id":"cx-2"}}\n')
+        f.write("x" * (codex_cli.HEAD_BYTES * 4) + "\n")
+    assert codex_cli.rollout_session_id(str(p)) == "cx-2"
+
+
+@pytest.mark.parametrize("first_line", [
+    '{"type":"event_msg","payload":{"type":"task_started"}}',   # not meta
+    '{"type":"session_meta","payload":{}}',                     # meta, no id
+    '{"type":"session_meta","payload":{"session_id":7}}',       # id not a string
+    '{"type":"session_meta","payload":[]}',                     # payload not an object
+    'not json at all',
+])
+def test_rollout_session_id_refuses_rather_than_guesses(tmp_path, first_line):
+    """An empty string, never a guess. The caller treats "" as "this session
+    cannot be matched to a hook slot", which is the safe answer -- it counts
+    once from the rollout and is never merged with the wrong slot."""
+    p = tmp_path / "rollout-odd.jsonl"
+    p.write_text(first_line + "\n")
+    assert codex_cli.rollout_session_id(str(p)) == ""
+
+
+def test_rollout_session_id_refuses_an_unterminated_first_line(tmp_path):
+    """A first line longer than the bound is not a rollout we understand."""
+    p = tmp_path / "rollout-long.jsonl"
+    p.write_text("{" + "a" * (codex_cli.HEAD_BYTES + 10))
+    assert codex_cli.rollout_session_id(str(p)) == ""
+
+
+def test_rollout_session_id_on_a_missing_file_is_empty(tmp_path):
+    assert codex_cli.rollout_session_id(str(tmp_path / "nope.jsonl")) == ""
+
+
+# --- the union: two sources, one census --------------------------------------
+#
+# From here down every test is about the join between the rollout reader above
+# and the Codex hook slots (codex_state). The failure being guarded is not a
+# wrong state, it is a DOUBLE COUNT: a session both sources can see appearing
+# twice in the pip row, which is the arithmetic the panel shows a human.
+
+
+def sid_meta_line(sid, cwd="/Users/K/Blink"):
+    """A `session_meta` carrying a session_id, padded like a real one.
+
+    Same padding argument as `meta_line`: an 80-byte fixture would let a head
+    bound far too small to survive a real 18 KB session_meta pass every test.
+    """
+    return json.dumps({
+        "timestamp": "2026-08-27T03:00:00.000Z",
+        "type": "session_meta",
+        "payload": {"session_id": sid, "cwd": cwd,
+                    "originator": "codex-tui",
+                    "cli_version": "0.150.0",
+                    "base_instructions": "i" * 18_000},
+    })
+
+
+def slot(slots, sid, event, t):
+    """One hook slot, in the shape tools/blink-hook.sh writes."""
+    p = slots / (sid + ".state")
+    p.write_text(json.dumps({"event": event, "t": float(t)}))
+    return p
+
+
+def union_frame(sessions, slots, now=NOW):
+    """The single state frame a poll over both sources produces, or None.
+
+    `state_dir` is passed on every call and `sweep` is off here for the reason
+    codex_state spells out: the scan behind that directory DELETES files, so a
+    test that let it fall back to the real default would be one HOME fixture
+    away from collecting the slots driving the board on the desk.
+    """
+    frames = codex_cli.CodexCliProvider(
+        root=str(sessions), state_dir=str(slots), sweep=False).poll(now)
+    held = [f for f in frames if f.src == codex_cli.STATE_SRC_ID]
+    assert len(held) <= 1, "one census, or the pip row double-counts"
+    return held[0] if held else None
+
+
+def test_a_waiting_hook_slot_beats_a_running_rollout(tmp_path):
+    """The rollout cannot see a permission prompt -- Codex never persists the
+    approval events -- so `running` from it is the older, blinder answer for a
+    session whose hook has since said `waiting`. One session, one row."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  # A token_count line too, so this poll yields BOTH frames.
+                  # That is what makes union_frame's "one census" guard bite:
+                  # with only a state frame in the list, nothing could ever
+                  # put a second entry beside it for the guard to catch.
+                  lines=[sid_meta_line("cx-1"),
+                         token_count_line(rate_limits()),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert f.provider == "codex"
+    assert f.state == base.STATE_WAITING
+    assert (f.n_run, f.n_wait, f.n_idle) == (0, 1, 0)
+    assert f.n_sessions() == 1
+
+
+def test_one_session_seen_by_both_sources_is_counted_once(tmp_path):
+    """The failure this whole union exists to prevent. Both sources agree the
+    session is running; the census must still say one."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-1", "PreToolUse", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_wait, f.n_idle) == (1, 0, 0)
+
+
+def test_the_rollout_alone_would_have_counted_that_session_too(tmp_path):
+    """The control for the test above, and the whole reason it means anything:
+    with the slot removed the rollout still reports one running session. So
+    the `1` there is a session both sources saw and one of them dropped, not a
+    rollout that was never counted in the first place."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_wait, f.n_idle) == (1, 0, 0)
+
+
+def test_a_session_only_the_rollout_can_see_still_counts(tmp_path):
+    """A Codex session already open when the hooks were installed has no slot
+    and never will -- the hooks only fire from its next turn on. Dropping it
+    would make a running terminal vanish from the panel, which is worse than
+    not knowing it is waiting. So the two sources are unioned, not swapped."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-old-1.jsonl",
+                  lines=[sid_meta_line("old-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-2", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_wait) == (1, 1)
+    assert f.n_sessions() == 2
+    assert f.state == base.STATE_WAITING, "waiting outranks running"
+
+
+def test_a_rollout_with_no_readable_id_still_counts_once(tmp_path):
+    """The degradation path for rollout_session_id's refusals: an
+    unidentifiable rollout is keyed by its own path, so it can never collide
+    with a hook slot and can never be merged into the wrong one. It counts,
+    beside the slot rather than instead of it."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-anon.jsonl",
+                  lines=["not json at all",
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-9", "PreToolUse", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (2, 2)
+
+
+def test_two_unidentifiable_rollouts_do_not_collapse_into_one(tmp_path):
+    """The path fallback has to be per FILE. Keying both anonymous rollouts on
+    a single shared sentinel -- "" among them -- would silently merge two
+    terminals into one row, an under-count as wrong as the double count."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    for name in ("rollout-anon-a.jsonl", "rollout-anon-b.jsonl"):
+        write_rollout(str(sessions), name=name,
+                      lines=["not json at all",
+                             turn_line("task_started", _stamp(NOW - 30))])
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (2, 2)
+
+
+def test_hook_slots_alone_produce_a_frame(tmp_path):
+    """Codex hooks installed, no rollout recent enough to be read. The census
+    still has to reach the board."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    sessions.mkdir()
+    slots.mkdir()
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+
+    frames = codex_cli.CodexCliProvider(
+        root=str(sessions), state_dir=str(slots), sweep=False).poll(NOW)
+
+    assert [f.state for f in frames] == [base.STATE_WAITING]
+    assert frames[0].session_pct == base.UNKNOWN, \
+        "a state frame carries no percentage and must never win the dial"
+
+
+def test_the_state_dir_argument_is_what_is_read(tmp_path):
+    """Not "the default happened to work". The slot lives in a directory the
+    default would never name, and a decoy sits in the one it would -- so a
+    provider that ignored the argument would report the decoy's `idle`."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "elsewhere"
+    sessions.mkdir()
+    slots.mkdir()
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+    decoy = tmp_path / ".blink" / "state-codex"      # HOME is tmp_path here
+    decoy.mkdir(parents=True)
+    slot(decoy, "cx-decoy", "Stop", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.state, f.n_wait, f.n_idle) == (base.STATE_WAITING, 1, 0)
+
+
+def test_sweep_false_leaves_an_abandoned_slot_on_disk(tmp_path):
+    """`blink status` and every test must be able to LOOK without collecting:
+    the sweep deletes slots, and a diagnostic that deletes what it is
+    diagnosing destroys the evidence somebody ran it to see."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    sessions.mkdir()
+    slots.mkdir()
+    dead = slot(slots, "cx-old", "PreToolUse", NOW - 7200)   # past the hour
+
+    codex_cli.CodexCliProvider(
+        root=str(sessions), state_dir=str(slots), sweep=False).poll(NOW)
+    assert dead.exists()
+
+    codex_cli.CodexCliProvider(
+        root=str(sessions), state_dir=str(slots), sweep=True).poll(NOW)
+    assert not dead.exists(), "the daemon's poll is still the collector"
+
+
+def test_a_session_the_hook_moved_keeps_the_name_the_rollout_gave_it(tmp_path):
+    """The name belongs to the session, not to the state it was in when the
+    rollout was read. Looking the holders up in the rollout's own tally would
+    lose the label of every session the hook overruled -- the panel would go
+    from "Blink - waiting" to a bare "waiting" at the exact moment it has
+    something worth saying."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1", cwd="/Users/K/Blink"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.state, f.label) == (base.STATE_WAITING, "Blink")
+
+
+def test_a_hook_only_session_is_a_nameless_holder(tmp_path):
+    """codex_state drops the names its slots carry on purpose -- naming a
+    session on the panel has its own rule and the Codex frame has no label
+    story for the hooks yet. So a hook-only holder silences the label exactly
+    as a rollout with an unreadable session_meta does, rather than borrowing
+    the name of the other session in the census."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1", cwd="/Users/K/Blink"),
+                         turn_line("task_complete", _stamp(NOW - 30))])
+    slot(slots, "cx-2", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.state, f.n_wait, f.label) == (base.STATE_WAITING, 1, "")
+
+
+def test_live_agents_reach_the_frame(tmp_path):
+    """n_agents is already on the wire and already drawn. Codex could never
+    fill it before because nothing counted subagents for it; the hook slots
+    do, and a count left at zero would quietly report "no agents"."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    sessions.mkdir()
+    slots.mkdir()
+    slot(slots, "cx-1", "PreToolUse", NOW - 5)
+    agents = slots / "cx-1"
+    agents.mkdir()
+    (agents / "a1").write_text("")
+    (agents / "a2").write_text("")
+
+    f = union_frame(sessions, slots)
+
+    assert f.n_agents == 2
+
+
+# --- the tombstone -----------------------------------------------------------
+#
+# The union above counts a rollout nothing else can see, because a Codex
+# session open before the hooks were installed will never get a slot. What it
+# could not tell was that "no slot" ALSO describes a session whose SessionEnd
+# has fired -- the shim removes the slot -- so every ended session came back
+# and stayed for the hour its rollout took to age out. Measured on the owner's
+# desk: one live slot, two Claude sessions, four recent rollouts, a panel
+# saying six.
+#
+# The pair below is the whole fix. Same rollout, same age, same everything
+# except the tombstone.
+
+
+def tombstone(slots, sid, t):
+    """The file SessionEnd leaves where the slot was, aged by its mtime."""
+    p = slots / (sid + ".ended")
+    p.write_text("")
+    os.utime(p, (t, t))
+    return p
+
+
+def test_a_recent_rollout_the_hook_buried_does_not_count(tmp_path):
+    """The bug, in the arithmetic the owner read off the panel.
+
+    The rollout is fresh and running -- it would count, and did -- but the
+    hook watched this session end. A session nobody has open must not hold a
+    pip for an hour because the file it left behind is younger than one.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-1", NOW - 20)
+
+    assert union_frame(sessions, slots) is None
+
+
+def test_the_same_rollout_with_no_tombstone_still_counts(tmp_path):
+    """The other half, and the reason the first half means anything.
+
+    Identical to the test above but for the one file. Without this the fix
+    could be "drop every rollout-only session", which breaks exactly the case
+    the union was written for: a Codex session that was already open when the
+    hooks were installed has no slot and never will get one, because the
+    hooks only fire from its next turn on.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (1, 1)
+
+
+def test_a_tombstone_buries_its_own_session_and_only_its_own(tmp_path):
+    """One closed terminal must not take the open one beside it off the panel.
+
+    The same failure the per-session slot files were introduced to prevent,
+    one file further along: a marker that matched on anything but the exact
+    session id would silence a whole desk on one SessionEnd.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    for sid in ("cx-dead", "cx-live"):
+        write_rollout(str(sessions), name="rollout-%s.jsonl" % sid,
+                      lines=[sid_meta_line(sid),
+                             turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-dead", NOW - 20)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (1, 1)
+    assert f.label == "Blink", "the surviving session is the one that is named"
+
+
+def test_a_resumed_session_counts_again_from_its_slot(tmp_path):
+    """`codex resume` reopens a session under the SAME id.
+
+    Its rollout is the same file appended to and its tombstone may still be
+    inside the hour, so a filter applied after the hook slots -- or to the
+    merged census rather than to the rollouts -- would keep a session somebody
+    is sitting in front of off the panel. The slot is the newer witness and it
+    wins, which is why the filter runs before the update and not after it.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-1", NOW - 900)
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.state, f.n_wait, f.n_sessions()) == (base.STATE_WAITING, 1, 1)
+
+
+def test_a_tombstone_that_has_aged_out_buries_nothing(tmp_path):
+    """The marker is bounded by the same hour as everything else here.
+
+    Past it the tombstone is not evidence, it is litter -- and it must not
+    outlive the census entry it suppresses, or a session id that came back
+    from a shim older than this file would stay invisible.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-1", NOW - codex_cli.ABANDONED_AFTER_S - 60)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (1, 1)
+
+
+def test_a_buried_session_takes_its_name_off_the_panel_too(tmp_path):
+    """A dropped session must not go on lending the label.
+
+    The names are looked up out of the MERGED census, so this follows -- but
+    it follows only as long as the filter is applied to the same dict the
+    label is read from, and the label is the half a person actually reads.
+    """
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1", cwd="/Users/K/Dead"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    write_rollout(str(sessions), name="rollout-cx-2.jsonl",
+                  lines=[sid_meta_line("cx-2", cwd="/Users/K/Alive"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    tombstone(slots, "cx-1", NOW - 20)
+
+    assert union_frame(sessions, slots).label == "Alive"

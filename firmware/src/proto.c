@@ -14,6 +14,7 @@
 #include "cfg_store.h"
 #include "usage_view.h"
 #include "usage_state.h"
+#include "usage_freshness.h"
 #include "net_time.h"
 #include "version.h"
 #include "cfg_store.h"
@@ -350,6 +351,16 @@ static void dispatch(const char *json)
 		num(json, "n_agents", &na, 0, 9999);
 		usage_view_set_sessions((int)ns, (int)na);
 
+		double nr = 0, nw = 0, nst = 0;
+
+		/* Sent since the counts existed, dropped on the floor until
+		 * the pip row had a use for them. Absent means zero on both
+		 * sides, which is why the daemon omits them. */
+		num(json, "n_run", &nr, 0, 9999);
+		num(json, "n_wait", &nw, 0, 9999);
+		num(json, "n_stuck", &nst, 0, 9999);
+		usage_view_set_counts((int)ns, (int)nr, (int)nw, (int)nst);
+
 		char p1[16];
 
 		if (msg_get_str(json, "provider", p1, sizeof(p1))) {
@@ -405,11 +416,29 @@ static void dispatch(const char *json)
 		 * that page, and an age written before it would be an age for
 		 * a page that no longer exists.
 		 */
-		double age = -1, p2age = -1;
+		double age = -1, p2age = -1, active_age = -1;
 
 		num(json, "age_s", &age, -1, SECS_MAX);
 		num(json, "p2_age_s", &p2age, -1, SECS_MAX);
 		usage_view_set_ages((int32_t)age, (int32_t)p2age);
+
+		/*
+		 * And the other freshness question, which is not drawn
+		 * anywhere: how long since ANY tool on that machine wrote
+		 * anything at all. One figure for the whole desk rather than
+		 * one per page, because it decides whether the board dozes
+		 * and the board dozes as one screen.
+		 *
+		 * Absent leaves it -1, and usage_freshness_note then reads
+		 * the reading's own age instead -- which is exactly right for
+		 * a daemon that predates the field. See usage_freshness.h.
+		 */
+		num(json, "active_age_s", &active_age, -1, SECS_MAX);
+
+		/* The same facts, kept where main.c can ask and a laptop can
+		 * test the reasoning about them. See usage_freshness.h. */
+		usage_freshness_note((int32_t)age, (int32_t)active_age, act,
+				     k_uptime_get());
 
 		/*
 		 * AFTER both providers, and after the calls above that set OK
@@ -605,6 +634,24 @@ static void dispatch(const char *json)
 		printk("[proto] host status: %s\n", st);
 		usage_view_set_status(strcmp(st, "rate_limited") == 0 ?
 				      USAGE_STATUS_STALE : USAGE_STATUS_ERROR);
+	} else if (strcmp(type, "session") == 0) {
+		/*
+		 * Which project is doing the thing the dot is already
+		 * colouring. Its own message rather than a field on `usage`
+		 * because that line is at 506 of the 512 this parser accepts
+		 * and an over-long one is dropped whole -- see
+		 * pc/protocol.py:331.
+		 *
+		 * An absent label is the normal several-sessions case, not a
+		 * parse failure: the daemon refuses to name one of several,
+		 * and `n` carries the meaning instead.
+		 */
+		char lbl[28] = "";
+		double n = 0;
+
+		msg_get_str(json, "label", lbl, sizeof(lbl));
+		num(json, "n", &n, 0, 9999);
+		usage_view_set_session(lbl, (int)n);
 	}
 	/* unknown types ignored */
 }

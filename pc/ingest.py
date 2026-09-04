@@ -15,10 +15,32 @@ import sys
 import time
 
 from pc import normalizer, protocol
+from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_state import ClaudeStateProvider
 from pc.providers.codex_cli import CodexCliProvider
+
+
+# How long a provider that raised sits out before it is tried again, and how
+# far that grows while it keeps failing.
+#
+# Not forever, which is what it used to be. The daemon's poll dropped from 60 s
+# to 2 s (claude_usage_bridge.FAST_POLL_INTERVAL_S), so a provider now gets 30
+# chances a minute to catch a file mid-rewrite, an EBUSY, a half-flushed JSON
+# line -- and under the old rule the first one it lost retired it until the user
+# restarted the daemon. Every one of those failures is transient by
+# construction: the file that could not be parsed this second is written by
+# another application that is still running and will finish its write.
+#
+# One minute first, because a transient should cost about a minute and not a
+# workday. Doubling, because a provider whose upstream really has changed shape
+# should not be re-parsed thirty times an hour for the life of the process.
+# Fifteen minutes at the ceiling, which is short enough that a user who fixes
+# the cause -- signs in, upgrades the other app -- sees the panel come back
+# without being told to restart anything.
+FIRST_RETRY_AFTER_S = 60.0
+MAX_RETRY_AFTER_S = 900.0
 
 
 def default_providers():
@@ -39,7 +61,21 @@ class IngestionBus:
                            else list(providers))
         self._preferred = preferred_provider
         self._now = now
-        self._broken = set()
+        # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
+        # out after a failure. Keyed by IDENTITY, not by class: two instances
+        # of the same provider class are two sources -- two Codex homes, the
+        # same parser pointed at a second directory -- and under the old class
+        # key one of them raising silenced its healthy twin, which reads on the
+        # panel as the second source simply having no data. Identity is safe as
+        # a key here because self._providers holds every provider for the life
+        # of the bus, so no id can be recycled underneath us.
+        self._broken = {}
+        # (label, n) for the frame the last poll() chose. Recorded there
+        # rather than recomputed here, so session_pair() answers for the same
+        # poll the board's usage message came from -- polling the providers a
+        # second time could pick a different winner and name a project that
+        # does not belong to the state on the panel.
+        self._session_pair = ("", 0)
 
     def add_provider(self, provider):
         """Onboard a provider at runtime. Nothing else has to change."""
@@ -74,28 +110,71 @@ class IngestionBus:
         """Every frame every provider can produce right now.
 
         Each provider is polled inside its own try. A provider that raises is
-        reported once and then skipped for the rest of the process: the
-        alternative is a stack trace on the daemon's log every sixty seconds
-        for as long as some other application's file stays malformed.
+        reported once and then sits out a cooldown: the alternative is a stack
+        trace on the daemon's log thirty times a minute for as long as some
+        other application's file stays malformed.
 
         Skipped means skipped. This used to add the provider to _broken and
         then go on polling it every cycle regardless -- only the log line was
         suppressed, so a second, different failure was invisible and the
         docstring above was describing a policy the loop did not have.
+
+        But skipped no longer means retired. A cooldown, not a tombstone: see
+        FIRST_RETRY_AFTER_S for why a two-second poll makes the difference
+        between the two enormous.
+
+        Reported ONCE all the same, and that is deliberate. The log line marks
+        the transition from working to broken, not each failure -- a provider
+        that keeps failing keeps quiet, and only says anything again when it
+        recovers, or when it breaks again after having recovered. A daemon
+        that logs the same traceback on a timer is its own defect, and it is
+        the reason the retry could not simply be "try it every poll".
         """
         frames = []
         now = self._now()
         for p in self._providers:
-            key = f"{p.__class__.__name__}"
-            if key in self._broken:
+            key = id(p)
+            name = p.__class__.__name__
+            sitting_out = self._broken.get(key)
+            if (sitting_out is not None
+                    and not self._cooldown_over(sitting_out, now)):
                 continue
             try:
                 frames.extend(p.poll(now) or [])
             except Exception as e:
-                print(f"[ingest] {key} failed and will be skipped: {e}",
-                      file=sys.stderr)
-                self._broken.add(key)
+                # Doubled from whatever the last wait was, so a provider whose
+                # upstream genuinely changed shape backs off to the ceiling on
+                # its own without anyone deciding it is hopeless.
+                wait = (min(sitting_out["wait"] * 2, MAX_RETRY_AFTER_S)
+                        if sitting_out is not None else FIRST_RETRY_AFTER_S)
+                if sitting_out is None:
+                    print(f"[ingest] {name} failed and will be skipped: {e}",
+                          file=sys.stderr)
+                self._broken[key] = {"since": now, "retry_at": now + wait,
+                                     "wait": wait}
+            else:
+                if sitting_out is not None:
+                    # Worth a line precisely because the failure only got one:
+                    # without this, a provider that came back left no trace of
+                    # having done so, and the log said only that it had died.
+                    del self._broken[key]
+                    print(f"[ingest] {name} is working again",
+                          file=sys.stderr)
         return frames
+
+    @staticmethod
+    def _cooldown_over(sitting_out, now) -> bool:
+        """Has a skipped provider's cooldown elapsed?
+
+        The second arm is for a clock that went backwards. self._now is wall
+        time -- the whole bus reasons in it, because every frame's age is a
+        wall-clock reading from another application's file -- and a sleeping
+        laptop, an NTP step or a timezone-clumsy VM can put `now` before the
+        moment the provider was quarantined. Left to arithmetic alone that
+        would hold a healthy provider out for however far the clock moved,
+        which is exactly the permanent skip this cooldown exists to end.
+        """
+        return now >= sitting_out["retry_at"] or now < sitting_out["since"]
 
     def poll(self):
         """The usage message for the board, or None when nothing is known."""
@@ -103,15 +182,93 @@ class IngestionBus:
             self.poll_frames(), preferred=self._preferred)
         if primary is None:
             return None
-        return protocol.frame_to_usage(primary, self._now(), secondary)
+        msg = protocol.frame_to_usage(primary, self._now(), secondary)
+        # Against the state the message actually carries, which is not always
+        # the primary frame's own -- see _pair_from.
+        self._session_pair = _pair_from(
+            primary, secondary, msg.get("state", base.STATE_UNKNOWN))
+        return msg
+
+    def session_pair(self):
+        """(label, n) for the state the last poll() put on the panel.
+
+        Deliberately NOT part of the usage message: that line was measured at
+        506 of protocol.MAX_LINE_BYTES=512 fully loaded and proto.c drops an
+        over-long line whole, so the project name travels as its own message
+        (protocol.session) and this is where the daemon reads it.
+        """
+        return self._session_pair
+
+    def fetch(self):
+        """The callable to hand Bridge(fetch_usage=...).
+
+        The ONE way to obtain a fetch, and that is the whole point of it
+        existing. The daemon used to write `fetch = bus.poll` while the tests
+        built theirs through make_fetch, and a bound method proxies attribute
+        reads to the plain function underneath -- so the Bridge's
+        getattr(fetch, "session_pair", None) came back None on every real
+        desk and the board was never named, with the entire suite green.
+        Two ways to build the same object is what allowed that, so there is
+        now one.
+        """
+        return _BusFetch(self)
 
 
-def make_fetch(providers=None, preferred_provider="claude"):
-    """Zero-arg callable for Bridge(fetch_usage=...).
+class _BusFetch:
+    """A zero-arg callable that also knows the project name.
 
-    Same shape as the single-source make_fetch it replaces, so the daemon's
-    wiring did not have to learn that there is now more than one source.
+    An object rather than a function with an attribute bolted on: the Bridge
+    is handed a zero-arg callable returning a finished usage dict and never
+    sees the frame the name lives on. Widening that contract instead (a
+    tuple, or the label smuggled inside the usage dict) would either break
+    every injected fake or put the label one slip away from the byte-capped
+    usage line -- which is the one thing this whole message type exists to
+    avoid.
     """
-    bus = IngestionBus(providers=providers,
-                       preferred_provider=preferred_provider)
-    return bus.poll
+
+    def __init__(self, bus):
+        self._bus = bus
+
+    def __call__(self):
+        return self._bus.poll()
+
+    def session_pair(self):
+        return self._bus.session_pair()
+
+
+# Which count describes which state. STATE_FAILED reads n_stuck because that
+# is where the provider put it: claude_state.poll folds a failed session into
+# the stuck count, so mapping it to nothing would leave two failed sessions
+# reporting zero -- "Session failed" where the panel should say "Session
+# failed - 2 sessions".
+_COUNT_FOR_STATE = {
+    base.STATE_RUNNING: "n_run",
+    base.STATE_WAITING: "n_wait",
+    base.STATE_STUCK: "n_stuck",
+    base.STATE_FAILED: "n_stuck",
+    base.STATE_IDLE: "n_idle",
+}
+
+
+def _pair_from(primary, secondary, wire_state):
+    """(label, n) for the state the usage message actually carries.
+
+    Against the WIRE state rather than the primary frame's own, because
+    frame_to_usage sends worst_of(primary, secondary) and the summed counts:
+    one light for the whole desk. A Claude session sitting idle-but-named
+    beside a waiting Codex one would otherwise put "Waiting for you -
+    MyProject" over a project that is not waiting -- a wrong statement, not
+    a vague one, and a line nobody can trust is worse than no line.
+
+    So the label survives only when the frame carrying it is in the state on
+    the panel, and only when nothing else shares that state. Naming one of
+    several is refused rather than guessed, which is the same rule
+    claude_state.poll applies when it decides whether to set `label` at all.
+    """
+    frames = [f for f in (primary, secondary) if f is not None]
+    field = _COUNT_FOR_STATE.get(wire_state)
+    n = sum(getattr(f, field, 0) for f in frames) if field else 0
+    named = [f for f in frames
+             if f.state == wire_state and getattr(f, "label", "")]
+    label = named[0].label if len(named) == 1 and n <= 1 else ""
+    return (label, int(n))

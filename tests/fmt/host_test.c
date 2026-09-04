@@ -58,6 +58,309 @@ static void check_true(const char *what, int ok)
 	}
 }
 
+/* EXPECT_STR/EXPECT_EQ: same PASS/FAIL-plus-failures-counter shape as
+ * check()/check_true() above, just spelled as a one-line macro so
+ * test_fmt_hint's table of cases reads as a table, not a wall of calls. */
+#define EXPECT_STR(got, want) do { \
+	const char *g_ = (got), *w_ = (want); \
+	if (strcmp(g_, w_) == 0) { \
+		printf("PASS: %-28s -> \"%s\"\n", #got, g_); \
+	} else { \
+		printf("FAIL: %-28s -> \"%s\" (want \"%s\")\n", #got, g_, w_); \
+		failures++; \
+	} \
+} while (0)
+
+#define EXPECT_EQ(got, want) do { \
+	long g_ = (long)(got), w_ = (long)(want); \
+	if (g_ == w_) { \
+		printf("PASS: %-28s -> %ld\n", #got, g_); \
+	} else { \
+		printf("FAIL: %-28s -> %ld (want %ld)\n", #got, g_, w_); \
+		failures++; \
+	} \
+} while (0)
+
+static void test_fmt_hint(void)
+{
+	char b[FMT_HINT_MAX];
+
+	/* Nothing to say stays empty -- the caller draws no line. */
+	fmt_hint("", NULL, b, sizeof(b));
+	EXPECT_STR(b, "");
+
+	/* A status alone, when there is no name. */
+	fmt_hint("Working", NULL, b, sizeof(b));
+	EXPECT_STR(b, "Working");
+
+	/* A name when one is sent. */
+	fmt_hint("Waiting for you", "LiveClaudeUi", b, sizeof(b));
+	EXPECT_STR(b, "Waiting for you - LiveClaudeUi");
+
+	/* A label always composes with the status. */
+	fmt_hint("Working", "Blink", b, sizeof(b));
+	EXPECT_STR(b, "Working - Blink");
+
+	/* Non-ASCII is transliterated, never drawn as boxes. */
+	fmt_hint("Working", "caf\xc3\xa9", b, sizeof(b));
+	EXPECT_STR(b, "Working - caf?");
+
+	/* An empty label is the same as no label. */
+	fmt_hint("Working", "", b, sizeof(b));
+	EXPECT_STR(b, "Working");
+
+	/* Truncation never overruns and always NUL-terminates. */
+	char small[12];
+	fmt_hint("Waiting for you", "LiveClaudeUi", small, sizeof(small));
+	EXPECT_EQ((int)strlen(small), 11);
+}
+
+static void test_fmt_pips(void)
+{
+	struct fmt_pip p[8];
+	int n;
+
+	/* Nothing running: an empty corner is true. */
+	n = fmt_pips(0, 0, 0, 0, p, 8);
+	EXPECT_EQ(n, 0);
+
+	/* One session, one pip, count unused. */
+	n = fmt_pips(1, 0, 0, 0, p, 8);
+	EXPECT_EQ(n, 1);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_RUNNING);
+	EXPECT_EQ(p[0].count, 0);
+
+	/* Fixed order, most urgent first, regardless of argument order. */
+	n = fmt_pips(1, 1, 1, 1, p, 8);
+	EXPECT_EQ(n, 4);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_FAILED);
+	EXPECT_EQ((int)p[1].kind, (int)FMT_PIP_WAITING);
+	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_RUNNING);
+	EXPECT_EQ((int)p[3].kind, (int)FMT_PIP_FINISHED);
+
+	/* Six is the last pip-mode count: six entries, every count still 0. */
+	n = fmt_pips(4, 1, 0, 1, p, 8);
+	EXPECT_EQ(n, 6);
+	EXPECT_EQ(p[5].count, 0);
+
+	/* Seven flips to counts mode: one entry per NON-EMPTY state, each
+	 * carrying its tally. 4 running + 2 waiting + 1 finished = 3 groups. */
+	n = fmt_pips(4, 2, 0, 1, p, 8);
+	EXPECT_EQ(n, 3);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_WAITING);
+	EXPECT_EQ(p[0].count, 2);
+	EXPECT_EQ((int)p[1].kind, (int)FMT_PIP_RUNNING);
+	EXPECT_EQ(p[1].count, 4);
+	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_FINISHED);
+	EXPECT_EQ(p[2].count, 1);
+
+	/*
+	 * All four states live. The clock left the top-left corner, so the row
+	 * has the whole 120 px from the bezel to the wordmark instead of the
+	 * 75 px it had between the clock and the wordmark -- and four groups
+	 * fit, which is what stops FINISHED being dropped in the ordinary case.
+	 */
+	n = fmt_pips(4, 2, 1, 1, p, 8);
+	EXPECT_EQ(n, 4);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_FAILED);
+	EXPECT_EQ((int)p[1].kind, (int)FMT_PIP_WAITING);
+	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_RUNNING);
+	EXPECT_EQ((int)p[3].kind, (int)FMT_PIP_FINISHED);
+
+	/*
+	 * The cap still exists, and still drops FINISHED first -- it just
+	 * cannot be reached by four states any more. A fifth would be needed,
+	 * and there are only four, so this asserts the mechanism rather than a
+	 * reachable frame: max = 3 stands in for the cap.
+	 */
+	n = fmt_pips(4, 2, 1, 1, p, 3);
+	EXPECT_EQ(n, 3);
+	EXPECT_EQ((int)p[2].kind, (int)FMT_PIP_RUNNING);
+
+	/* A tiny `max` truncates rather than overruns. */
+	n = fmt_pips(1, 1, 1, 1, p, 2);
+	EXPECT_EQ(n, 2);
+	EXPECT_EQ((int)p[0].kind, (int)FMT_PIP_FAILED);
+
+	/* Negative counts are treated as zero, not as a state. */
+	n = fmt_pips(-3, 0, 0, 0, p, 8);
+	EXPECT_EQ(n, 0);
+
+	/* Counts mode never grows: twenty sessions still fit four groups. */
+	n = fmt_pips(12, 5, 2, 1, p, 8);
+	EXPECT_EQ(n, 4);
+}
+
+/*
+ * The pip row's ink. This is the mapping the owner complained about by
+ * looking at the panel -- "the color of the blink is still amber, not red as
+ * it should be" -- and until fmt_pip_tone() existed it lived in usage_view.c,
+ * where no test on this machine could reach it.
+ */
+static void test_fmt_tone(void)
+{
+	/* Red means WANTS YOU NOW, and it covers both of the states that do. */
+	check_true("a failed turn is red",
+		   fmt_pip_tone(FMT_PIP_FAILED) == FMT_TONE_RED);
+	check_true("an open prompt is RED, not amber (owner, 2026-09-04)",
+		   fmt_pip_tone(FMT_PIP_WAITING) == FMT_TONE_RED);
+	/*
+	 * Amber is what waiting gave up, and it now means the opposite: a turn
+	 * that ended and wants nothing. Six pips read as "3 running and 3
+	 * waiting" while this shared waiting's colour.
+	 */
+	check_true("a finished turn is amber",
+		   fmt_pip_tone(FMT_PIP_FINISHED) == FMT_TONE_AMBER);
+	check_true("a running turn is green",
+		   fmt_pip_tone(FMT_PIP_RUNNING) == FMT_TONE_GREEN);
+
+	/*
+	 * ONE state wears amber, counted rather than asserted state by state.
+	 * The scheme's whole content is that "finished" is the only thing on
+	 * this row that asks for nothing, so a second amber -- from either
+	 * direction, waiting coming back to it or running leaving green --
+	 * breaks the reading even if every individual check above still holds.
+	 */
+	{
+		const enum fmt_pip_kind all[] = {
+			FMT_PIP_FAILED, FMT_PIP_WAITING,
+			FMT_PIP_RUNNING, FMT_PIP_FINISHED
+		};
+		int amber = 0;
+
+		for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+			if (fmt_pip_tone(all[i]) == FMT_TONE_AMBER) {
+				amber++;
+			}
+		}
+		check_true("exactly one pip state is amber", amber == 1);
+	}
+}
+
+/*
+ * The status-change popup's one sentence.
+ *
+ * The wire cannot name sessions individually -- it carries counts and ONE
+ * label, and the loaded usage line already measures 511 of the 512 bytes
+ * proto.c will accept -- so every sentence here is built from a count, or
+ * from the single label the daemon is willing to vouch for.
+ */
+static void test_fmt_toast(void)
+{
+	char b[FMT_TOAST_MAX];
+
+	/* Nothing happened: empty, and the caller draws no card. */
+	fmt_toast(FMT_PIP_WAITING, "hint-line", 0, b, sizeof(b));
+	EXPECT_STR(b, "");
+	fmt_toast(FMT_PIP_WAITING, "hint-line", -1, b, sizeof(b));
+	EXPECT_STR(b, "");
+
+	/* One session, named. The label LEADS, so it is capitalised: every
+	 * sentence on this panel starts with a capital (standing request). */
+	fmt_toast(FMT_PIP_WAITING, "hint-line", 1, b, sizeof(b));
+	EXPECT_STR(b, "Hint-line is waiting for you");
+	fmt_toast(FMT_PIP_FINISHED, "hint-line", 1, b, sizeof(b));
+	EXPECT_STR(b, "Hint-line is finished");
+	fmt_toast(FMT_PIP_FAILED, "hint-line", 1, b, sizeof(b));
+	EXPECT_STR(b, "Hint-line failed");
+
+	/* A label that is already capitalised is left exactly alone -- these
+	 * are directory names and "LiveClaudeUi" is not "Liveclaudeui". */
+	fmt_toast(FMT_PIP_WAITING, "LiveClaudeUi", 1, b, sizeof(b));
+	EXPECT_STR(b, "LiveClaudeUi is waiting for you");
+
+	/* One session with no label: the daemon refuses to name one whenever
+	 * it cannot vouch for the choice, and that is the ordinary case. */
+	fmt_toast(FMT_PIP_WAITING, "", 1, b, sizeof(b));
+	EXPECT_STR(b, "A session is waiting for you");
+	fmt_toast(FMT_PIP_FINISHED, NULL, 1, b, sizeof(b));
+	EXPECT_STR(b, "A session is finished");
+	fmt_toast(FMT_PIP_FAILED, NULL, 1, b, sizeof(b));
+	EXPECT_STR(b, "A session failed");
+
+	/*
+	 * SEVERAL: say how many (owner, 2026-09-04 -- "if there is multi
+	 * sessions waiting, you can just say x session are waiting"). The
+	 * count is already on the wire and is the more useful sentence.
+	 */
+	fmt_toast(FMT_PIP_WAITING, "hint-line", 3, b, sizeof(b));
+	EXPECT_STR(b, "3 sessions are waiting");
+	fmt_toast(FMT_PIP_FINISHED, NULL, 2, b, sizeof(b));
+	EXPECT_STR(b, "2 sessions finished");
+	fmt_toast(FMT_PIP_FAILED, NULL, 2, b, sizeof(b));
+	EXPECT_STR(b, "2 sessions failed");
+
+	/*
+	 * ONE RULE, all four states, so a reader can predict the next
+	 * sentence from the last. RUNNING is worded even though
+	 * usage_toast_change() never announces it -- the formatter is
+	 * complete and the decider holds the policy, so the two cannot drift
+	 * into disagreeing about which states exist.
+	 */
+	fmt_toast(FMT_PIP_RUNNING, NULL, 1, b, sizeof(b));
+	EXPECT_STR(b, "A session is running");
+	fmt_toast(FMT_PIP_RUNNING, NULL, 3, b, sizeof(b));
+	EXPECT_STR(b, "3 sessions are running");
+
+	/*
+	 * SINGULAR AND PLURAL ARE SEPARATE STRINGS, never one with an "s"
+	 * bolted on. "1 sessions are waiting" is exactly the kind of thing
+	 * that ships, so the boundary is pinned from both sides: no sentence
+	 * for a count of one may contain "sessions", and every sentence for a
+	 * count above one must.
+	 */
+	{
+		const enum fmt_pip_kind all[] = {
+			FMT_PIP_FAILED, FMT_PIP_WAITING,
+			FMT_PIP_RUNNING, FMT_PIP_FINISHED
+		};
+		int bad_singular = 0, bad_plural = 0;
+
+		for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+			fmt_toast(all[i], NULL, 1, b, sizeof(b));
+			if (strstr(b, "sessions") != NULL) {
+				bad_singular++;
+			}
+			fmt_toast(all[i], NULL, 2, b, sizeof(b));
+			if (strstr(b, "sessions") == NULL) {
+				bad_plural++;
+			}
+		}
+		check_true("one session is never \"1 sessions\"",
+			   bad_singular == 0);
+		check_true("two or more always says \"sessions\"",
+			   bad_plural == 0);
+	}
+
+	/* Non-ASCII is transliterated, never drawn as boxes -- a project under
+	 * a non-ASCII profile is an ordinary setup. */
+	fmt_toast(FMT_PIP_WAITING, "caf\xc3\xa9", 1, b, sizeof(b));
+	EXPECT_STR(b, "Caf? is waiting for you");
+
+	/*
+	 * A label with nothing to lead with cannot start the sentence, so it
+	 * falls back rather than writing " is finished" with a hole in front.
+	 * Reachable, not defensive: fmt_ascii turns U+00A0 into an ordinary
+	 * space, which is what an empty name copied off a web page becomes.
+	 */
+	fmt_toast(FMT_PIP_FINISHED, "\xc2\xa0", 1, b, sizeof(b));
+	EXPECT_STR(b, "A session is finished");
+
+	/* And a label that merely BEGINS with a blank keeps its name, with the
+	 * blank dropped -- the capital has to land on the first real letter. */
+	fmt_toast(FMT_PIP_WAITING, " blink", 1, b, sizeof(b));
+	EXPECT_STR(b, "Blink is waiting for you");
+
+	/* Truncation never overruns and always NUL-terminates. */
+	{
+		char small[12];
+
+		fmt_toast(FMT_PIP_WAITING, "LiveClaudeUi", 1, small,
+			  sizeof(small));
+		EXPECT_EQ((int)strlen(small), 11);
+	}
+}
+
 int main(void)
 {
 	check("unknown", -1, "--");
@@ -126,6 +429,11 @@ int main(void)
 		}
 		check_true("no countdown contains a percent sign", clash == 0);
 	}
+
+	test_fmt_hint();
+	test_fmt_pips();
+	test_fmt_tone();
+	test_fmt_toast();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");

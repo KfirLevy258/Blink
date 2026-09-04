@@ -12,6 +12,7 @@ CI runs on a real macOS and Linux runner.
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -19,13 +20,20 @@ from pc import cli, install_statusline
 
 
 @pytest.fixture(autouse=True)
-def _sandbox(tmp_path):
+def _sandbox(tmp_path, monkeypatch):
     """The one thing these tests need that the whole suite does not.
 
     The redirected HOME and the login-service guard both live in
     tests/conftest.py now -- see the note there for what went wrong when they
     were a per-file concern.
+
+    CODEX_HOME is cleared here for the same class of reason: install now edits
+    a file under it, and Codex honours the variable, so a developer who has it
+    set in their shell would have had these tests write a hooks.json into
+    their real Codex install. HOME alone does not sandbox a path that an
+    environment variable can override.
     """
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     (tmp_path / ".claude").mkdir()
 
 
@@ -337,6 +345,60 @@ def test_status_notices_hooks_that_went_missing(tmp_path, capsys):
     assert "install` to restore them" in out
 
 
+def test_status_does_not_call_a_missing_hook_shim_out_of_date(tmp_path, capsys):
+    """Absent and stale are different faults and want different sentences.
+
+    The hooks in settings.json still point at the shim path, so Claude Code
+    runs a file that is not there on every event and the pip never lights at
+    all. "Out of date" sends the reader hunting for a version mismatch in a
+    file they will not find.
+    """
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    os.remove(cli.hook_shim_path())
+    capsys.readouterr()
+    cli.main(["status"])
+
+    out = capsys.readouterr().out
+    assert "the activity hook shim is missing" in out
+    assert "out of date" not in out
+    # What went wrong AND what to do about it: the daemon rewrites a missing
+    # shim exactly as it rewrites a stale one, so the promise still holds.
+    assert "the hooks run nothing --" in out
+
+
+def test_status_still_says_out_of_date_for_a_shim_that_is_merely_stale(
+        tmp_path, capsys):
+    """The other half of the same branch: a file that exists and is wrong."""
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    with open(cli.hook_shim_path(), "w") as f:
+        f.write("#!/bin/sh\n# an older install left this here\n")
+    capsys.readouterr()
+    cli.main(["status"])
+
+    out = capsys.readouterr().out
+    assert "the activity hook shim is out of date" in out
+    assert "missing" not in out
+
+
+def test_live_sessions_counts_real_sessions_not_zero(tmp_path):
+    """_live_sessions() unpacks ClaudeStateProvider.scan()'s return tuple by
+    hand. scan() gained a third value (names, for the session-name hint) and
+    the bare `except Exception: return 0` around this call means a stale
+    2-value unpack does not crash -- it just silently reports zero live
+    sessions forever, on every machine, whether or not hooks are installed.
+    Nothing else in this suite calls _live_sessions(), so this is the only
+    test that would have caught that regression."""
+    state_dir = tmp_path / ".blink" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "s1.state").write_text(
+        json.dumps({"event": "PreToolUse", "t": time.time()}))
+    (state_dir / "s2.state").write_text(
+        json.dumps({"event": "Notification", "t": time.time()}))
+    assert cli._live_sessions() == 2
+
+
 def test_status_says_so_when_no_hooks_are_installed(tmp_path, capsys):
     _settings(tmp_path, {"statusLine": {"type": "command", "command": "x"}})
     cli.main(["status"])
@@ -439,3 +501,230 @@ def test_a_statusline_that_is_not_a_dict_reads_as_absent():
     assert install_statusline._current_command({"statusLine": {"command": 9}}) == ""
     assert install_statusline._current_command(
         {"statusLine": {"command": "x"}}) == "x"
+
+
+# --- Codex hooks -----------------------------------------------------------
+#
+# Install now edits a second vendor's configuration. These tests never let it
+# reach a real one: codex_present and install_codex_hooks.install are both
+# replaced, HOME is tmp_path (conftest) and CODEX_HOME is cleared (_sandbox).
+
+# The column the labelled block in _announce_codex_hooks wraps into. A line
+# indented this far continues the sentence above it and is not a new one, so
+# the sentence-case rule below does not apply to it.
+_CODEX_WRAP = " " * 11
+
+
+def test_install_says_codex_will_ask_before_it_writes(monkeypatch, capsys):
+    """Disclosure before the write, not after -- and specifically the trust
+    prompt, because an unexplained dialog from a tool the user did not think
+    they were configuring is a support incident, not a feature."""
+    monkeypatch.setattr(cli, "codex_present", lambda: True)
+    written = []
+    monkeypatch.setattr(
+        cli.install_codex_hooks, "install",
+        lambda p, s: written.append(p) or "installed (10 events).")
+
+    cli._announce_codex_hooks()
+    out_before = capsys.readouterr().out
+    cli._install_codex_hooks()
+
+    assert written, "the test must actually reach the installer"
+    assert "trust" in out_before.lower(), \
+        "the disclosure does not mention the prompt Codex will show"
+    assert "Codex" in out_before
+    for line in out_before.splitlines():
+        if not line.strip() or line.startswith(_CODEX_WRAP):
+            continue
+        assert line.strip()[0].isupper(), f"copy is sentence case: {line!r}"
+
+
+def test_install_skips_the_codex_step_when_codex_is_absent(monkeypatch):
+    """Writing a hooks file for a tool that is not installed would leave a
+    stranger's configuration on the machine."""
+    monkeypatch.setattr(cli, "codex_present", lambda: False)
+    called = []
+    monkeypatch.setattr(cli.install_codex_hooks, "install",
+                        lambda p, s: called.append(p))
+    msg = cli._install_codex_hooks()
+    assert called == []
+    assert "no Codex" in msg
+
+
+def test_install_does_not_fail_when_the_codex_config_is_unreadable(monkeypatch):
+    """The status line is the product; the activity light is a nicety. A hooks
+    file we cannot safely edit costs a pip, not an install."""
+    monkeypatch.setattr(cli, "codex_present", lambda: True)
+
+    def boom(_p, _s):
+        raise cli.install_statusline.SettingsUnreadable("not valid JSON")
+
+    monkeypatch.setattr(cli.install_codex_hooks, "install", boom)
+    msg = cli._install_codex_hooks()
+    assert msg.startswith("skipped")
+    assert "not valid JSON" in msg
+
+
+def test_install_creates_the_codex_state_directory_private(monkeypatch):
+    """The slots name the projects someone has open. The default umask would
+    leave them readable by every account on the machine."""
+    import stat
+    monkeypatch.setattr(cli, "codex_present", lambda: True)
+    monkeypatch.setattr(cli.install_codex_hooks, "install",
+                        lambda p, s: "installed (10 events).")
+    cli._install_codex_hooks()
+    d = os.path.join(cli.blink_home(), "state-codex")
+    assert os.path.isdir(d)
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+
+
+def test_uninstall_removes_the_codex_slots_too(tmp_path):
+    """A left-behind slot directory is not litter, it is a lie: the daemon
+    would go on counting sessions from a tool it no longer hooks."""
+    for sub in ("state", "state-codex"):
+        d = os.path.join(cli.blink_home(), sub)
+        os.makedirs(os.path.join(d, "sess-1"), exist_ok=True)
+        with open(os.path.join(d, "sess-1.state"), "w") as f:
+            f.write("{}")
+        with open(os.path.join(d, "sess-1", "agent-1"), "w") as f:
+            f.write("")
+
+    cli._rm_state_dir()
+
+    for sub in ("state", "state-codex"):
+        d = os.path.join(cli.blink_home(), sub)
+        assert not os.path.exists(os.path.join(d, "sess-1.state"))
+        assert not os.path.exists(os.path.join(d, "sess-1"))
+
+
+def test_uninstall_keeps_going_when_the_codex_file_is_unreadable(capsys):
+    """The login service is already gone by this point in cmd_uninstall, so
+    stopping here would leave the machine half-undone.
+
+    Against a real unparseable file, not a stub that raises. This used to
+    monkeypatch install_codex_hooks.uninstall into raising SettingsUnreadable
+    so that cmd_uninstall's handler had something to catch -- but uninstall()
+    catches its own at every point that can raise one and returns a sentence
+    instead, so the exception being caught could not occur and the handler has
+    gone. What is left to prove is the property that actually matters: the
+    step reports and returns, and the file it could not parse is untouched.
+    """
+    hooks = cli.install_codex_hooks.hooks_file()
+    os.makedirs(os.path.dirname(hooks), exist_ok=True)
+    with open(hooks, "w") as f:
+        f.write("{ not json")
+
+    cli._uninstall_codex_hooks()
+
+    assert "left it alone" in capsys.readouterr().out
+    with open(hooks) as f:
+        assert f.read() == "{ not json", "it rewrote a file it cannot parse"
+
+
+def test_uninstall_says_it_left_the_codex_trust_record_alone(tmp_path, capsys,
+                                                             monkeypatch):
+    """The ruling this carries is only half a decision if the user cannot see
+    it. Removing the trust record would make a headless reinstall silently
+    dead -- Codex skips a distrusted hook with no output at all -- so it stays,
+    and uninstall says so, names the file, and says how to undo it."""
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    config = codex / "config.toml"
+    config.write_text('[hooks.state."k"]\ntrusted_hash = "sha256:0"\n')
+    monkeypatch.setattr(cli.install_codex_hooks, "uninstall",
+                        lambda p, s=None: "Codex state hooks removed (10).")
+
+    cli._uninstall_codex_hooks()
+
+    out = capsys.readouterr().out
+    assert "trust" in out.lower(), "uninstall says nothing about the trust record"
+    assert str(config) in out, "it does not name the file it left behind"
+    assert "hooks.state" in out, "it does not say how to undo it"
+    # And the record really is still there. This is the assertion the ruling
+    # turns on: a single added os.remove() in _uninstall_codex_hooks would be
+    # invisible to every other check in this file.
+    assert "trusted_hash" in config.read_text()
+
+
+def test_uninstall_says_nothing_about_a_codex_config_that_is_not_there(
+        monkeypatch, capsys):
+    """The majority of machines have no Codex. A paragraph about a config file
+    that does not exist is noise about a record that was never written."""
+    monkeypatch.setattr(cli.install_codex_hooks, "uninstall",
+                        lambda p, s=None: "No Codex state hooks to remove.")
+    cli._uninstall_codex_hooks()
+    assert "trust" not in capsys.readouterr().out.lower()
+
+
+def test_status_reports_codex_hooks_not_installed(monkeypatch):
+    monkeypatch.setattr(cli.install_codex_hooks, "_read_marker", lambda: set())
+    lines = cli._codex_hook_status()
+    assert any("not installed" in ln for ln in lines)
+
+
+def test_status_reports_a_registered_hook_that_has_never_fired(monkeypatch):
+    """Which is exactly what declining the trust prompt looks like, and the
+    single most likely support call this feature will generate: under
+    `codex exec` a distrusted hook is skipped with no prompt and no output at
+    all, so there is nothing else anywhere to see."""
+    monkeypatch.setattr(cli.install_codex_hooks, "_read_marker",
+                        lambda: {"sh /x/blink-hook.sh Stop codex"})
+    monkeypatch.setattr(cli.codex_state, "scan",
+                        lambda now, path=None, sweep=True: ({}, 0))
+    lines = cli._codex_hook_status()
+    assert any("trust" in ln.lower() for ln in lines)
+
+
+def test_status_reports_live_codex_sessions(monkeypatch):
+    monkeypatch.setattr(cli.install_codex_hooks, "_read_marker",
+                        lambda: {"sh /x/blink-hook.sh Stop codex"})
+    monkeypatch.setattr(cli.codex_state, "scan",
+                        lambda now, path=None, sweep=True: (
+                            {"a": "running", "b": "waiting"}, 0))
+    lines = cli._codex_hook_status()
+    assert any("2" in ln for ln in lines)
+
+
+def test_status_does_not_blame_the_trust_prompt_for_slots_it_cannot_read(
+        monkeypatch):
+    """Two different faults with two different repairs. Reporting an
+    unreadable directory as 'never written anything' sends someone to Codex's
+    trust prompt to fix a permissions problem, and it will not be there."""
+    monkeypatch.setattr(cli.install_codex_hooks, "_read_marker",
+                        lambda: {"sh /x/blink-hook.sh Stop codex"})
+
+    def boom(now, path=None, sweep=True):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(cli.codex_state, "scan", boom)
+    lines = cli._codex_hook_status()
+    assert any("permission denied" in ln for ln in lines)
+    assert not any("trust" in ln.lower() for ln in lines)
+
+
+def test_status_says_nothing_about_codex_hooks_without_codex(tmp_path, capsys):
+    """No Codex log and no registration of ours: telling someone to install a
+    hook for a tool they do not have is worse than saying nothing."""
+    assert cli.main(["status"]) == 0
+    assert "Codex hook" not in capsys.readouterr().out
+
+
+def test_status_does_not_sweep_the_codex_slots(tmp_path):
+    """A diagnostic that deletes what it is diagnosing destroys the evidence
+    somebody ran it to see -- and here that is not an abstraction: the Codex
+    hook status is read off exactly the slots the sweep collects, so a status
+    run could manufacture the 'never written anything' finding that the next
+    status run then reports."""
+    sessions = tmp_path / ".codex" / "sessions" / "2026" / "09" / "04"
+    sessions.mkdir(parents=True)
+    (sessions / "rollout-2026-09-04T00-00-00-abc.jsonl").write_text("")
+    slots = tmp_path / ".blink" / "state-codex"
+    slots.mkdir(parents=True)
+    # Older than claude_state.ABANDONED_AFTER_S, so a sweep would collect it.
+    slot = slots / "sess-old.state"
+    slot.write_text(json.dumps({"event": "Stop", "t": time.time() - 7200}))
+
+    assert cli.main(["status"]) == 0
+
+    assert slot.exists(), "`blink status` swept the slots it was reporting on"

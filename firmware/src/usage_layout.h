@@ -37,11 +37,133 @@
  */
 #define FONT_LINE_H		16
 
-/* Header: brand centred, clock left, age + dot right. */
+/*
+ * Line height of lv_font_montserrat_20, the percentage label's own font --
+ * NOT FONT_LINE_H, which is the DEFAULT font's height and belongs to every
+ * other label on this screen. lv_font_montserrat_20.c declares
+ * .line_height = 22. Needed to centre GAUGE_PCT_Y inside the ring rather than
+ * offsetting it from a moving edge.
+ */
+#define GAUGE_PCT_FONT_H	22
+
+/* Header: brand centred with the clock under it, pips left, dot right. */
 #define TITLE_Y			6
 #define HDR_ROW_Y		8
 #define DOT_SZ			12
 #define BRAND_TEXT		"BLINK"
+/*
+ * How wide BRAND_TEXT actually draws, because the pip row to its left is
+ * positioned against it and a guess is not good enough.
+ *
+ * lv_font_montserrat_14 stores each advance in 1/16 px and LVGL rounds it to
+ * whole pixels as (adv_w + 8) >> 4. B 11 + L 8 + I 4 + N 11 + K 10 = 44, plus
+ * the letter_space of 2 that usage_view.c sets on the label, in each of the
+ * four gaps between five letters: 52. Centred on SCR_MID_X, so the wordmark
+ * begins at 134.
+ *
+ * An earlier comment here said 136, worked out from ".09em tracking" -- a
+ * value the code has never used. Two pixels, in the direction that eats the
+ * pip row's clearance, which is why this is now a constant the layout test
+ * asserts rather than prose nobody re-derives.
+ */
+#define BRAND_W			52
+
+/*
+ * The clock sits under the brand, and it does NOT own a row of its own.
+ *
+ * It shares STATUS_Y with the hint line, and one of them is visible at a
+ * time: the clock by default, a sentence only while something wants a person
+ * -- see usage_activity_needs_row(). That is what pays for the arrangement.
+ * An earlier version gave the clock its own row, and the whole cost came out
+ * of the rings (120 down to 100) because everything below the arcs is pinned;
+ * sharing costs nothing, because "Working" was only ever repeating what a
+ * green pip already said.
+ */
+
+/*
+ * The pip row: one mark per live session, from the left bezel to the brand.
+ *
+ * The clock used to sit in this corner and the row had to start clear of it,
+ * at x=56, with 75 px to work in. The clock moved under the brand, so the row
+ * begins at the bezel inset instead and has 120 px -- which is what lets
+ * counts mode hold FOUR groups, and is why `finished` is no longer dropped on
+ * an ordinary desk.
+ *
+ * Only the right bound is still a measurement, and BRAND_W above carries it
+ * with its derivation. The left bound is just the bezel.
+ *
+ * PIP_MAX is geometry, not policy: eleven fit. The display switches to counts
+ * at SIX, which is a claim about reading and not about width -- six pips were
+ * checked against a rendered panel and read as six; nobody has checked eight.
+ * The extra room went to making counts mode roomier rather than to cramming
+ * more pips into a row nobody can count.
+ *
+ * Headroom that is really allocated, and that is the point. fmt_pips() never
+ * returns more than six, so usage_view.c builds five pips and numerals that
+ * can never be shown -- LVGL objects kept deliberately, because every bound in
+ * that file derives from THIS constant and an array sized to the six that are
+ * reachable would be a second number free to drift away from the geometry it
+ * is supposed to match. The unused pairs are the cheaper of the two prices.
+ */
+#define PIP_SZ			8
+#define PIP_PITCH		11
+#define PIP_X0			10
+#define PIP_WALL_X		130
+#define PIP_MAX			11
+
+/*
+ * An 8 px pip on the 12 px health dot's centre line, written as the
+ * difference rather than as the 2 it evaluates to: the header carries marks of
+ * two sizes, and what makes it read as ONE row is that their centres agree.
+ * Spelling it this way means it still agrees if either size changes.
+ */
+#define PIP_Y			(HDR_ROW_Y + (DOT_SZ - PIP_SZ) / 2)
+
+/*
+ * The tally's LINE BOX, centred on that same line -- not pinned to the row's
+ * top like every other header label.
+ *
+ * A label is FONT_LINE_H tall whatever is written in it, so pinning it to
+ * HDR_ROW_Y ran it 8..24 and put its bottom edge exactly on STATUS_Y, with
+ * nothing between the numeral and the hint line. Aligning it to PIP_Y instead
+ * -- to match its own pip -- is worse, not better: 10..26 overlaps the hint by
+ * 2 px. What the numeral has to agree with is the pip's CENTRE, not its top,
+ * so it is the box that gets centred: 14 - 16/2 = 6, running 6..22 and
+ * clearing STATUS_Y by 2.
+ *
+ * That it lands on TITLE_Y is not a coincidence worth relying on, but it is
+ * worth knowing: the numerals and the wordmark share a cap-line.
+ */
+#define PIP_NUM_Y		(PIP_Y + PIP_SZ / 2 - FONT_LINE_H / 2)
+
+/*
+ * Counts mode's metrics: pip, gap, numeral, then the gap to the next group.
+ *
+ * PIP_NUM_ADV is a MEASUREMENT of the widest digit, like the two bounds above
+ * is a measurement of the brand. lv_font_montserrat_14 -- the
+ * font this build links, pinned by CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14 --
+ * gives '4' an adv_w of 150 in 1/16 px, which is 9.375 px, in a 10 px ink box.
+ * 9 truncates both, and a two-digit tally drawn 9 px per digit creeps right
+ * with every digit until it reaches the brand. 10 covers every digit with the
+ * ink box to spare.
+ *
+ * The pixel comes back out of PIP_GROUP_GAP, so the BUDGET for one group is
+ * 26 px: FOUR of them from PIP_X0 would start at x = 10 / 36 / 62 / 88 and end
+ * at 108, well inside PIP_WALL_X. That is how the wall was checked, and it is
+ * what the layout test asserts. It is not where the pips land -- a row of
+ * "1"-shaped tallies really starts nearer 10 / 31 / 52, because '1' is not as
+ * wide as the budget assumes.
+ *
+ * PIP_NUM_ADV is that budget, not what the drawing uses. refresh_dots() measures
+ * the string it actually wrote (lv_text_get_size) and stops at the wall,
+ * because billing every digit the widest one's advance drops groups that had
+ * room -- '1' advances 5.2 px, not 10. What this constant is for is choosing
+ * the constants around it, and asserting in the layout test that the
+ * single-digit case those constants promise still fits.
+ */
+#define PIP_NUM_GAP		2
+#define PIP_NUM_ADV		10
+#define PIP_GROUP_GAP		6
 
 /*
  * Whose numbers these are, directly under the brand.
@@ -72,25 +194,72 @@
  * The status took the freed line rather than the layout keeping a hole. It is
  * the better home for it: a warning belongs where the eye lands first, and it
  * had been sharing the bottom line with whatever else wanted it. Full width
- * here, because "Reading is old - showing last known" is 35 characters and
- * the corners above it are the clock and the dot on their own row.
+ * here, because "Reading is old - showing last known" is 35 characters, and
+ * full width is safe because the row above carries only the clock and the
+ * dot, each confined to its own corner.
  */
 #define STATUS_Y		24
 #define STATUS_MAX_W		300
 
 
 /*
- * No execution-state pip. It sat top-left under the clock while the status dot
- * sat top-right -- two unlabelled circles in the same colour vocabulary saying
- * unrelated things. They are one indicator now, top-right; see refresh_dot().
+ * An execution-state indicator is BACK, and this is not a revert of the
+ * decision that removed it.
+ *
+ * Commit 6540287 ("colour meant three different things, and two dots said
+ * the same one") pulled a top-left activity pip and a top-right status dot
+ * into one indicator, for two reasons: the top-left corner was occupied by
+ * the clock, and two unlabelled circles in the same green/amber/red
+ * vocabulary said unrelated things with no way to tell which.
+ *
+ * Both reasons are answered now, not ignored. What came back is a ROW, at
+ * PIP_X0 above, and the corner IS part of the answer this time -- the clock
+ * left it for the row under the brand, which it shares with the hint. And that
+ * hint names whichever condition fired, so the marks up there are no longer
+ * unlabelled: colour gets you "something is wrong", the sentence gets you
+ * which. That is the arrangement commit 6540287 could not have had, because
+ * the label did not exist yet.
+ *
+ * The sentence is not always there, and that is the trade. It appears only
+ * while something wants a person -- see usage_activity_needs_row() -- because
+ * a line reading "Working" over a row of working pips was the panel spending
+ * its only sentence to repeat itself. The rest of the time the clock has it,
+ * and the colour is on its own again. That is acceptable HERE and was not in
+ * 6540287: back then colour was the only channel and there were two circles
+ * competing in it; now there is one row, and a sentence that arrives exactly
+ * when colour alone would not be enough.
+ *
+ * The row also answers something that commit did not raise and the single pip
+ * it removed could not have fixed: one mark cannot speak for several
+ * sessions. One per session can.
+ *
+ * See refresh_dots() in usage_view.c -- with the s, one call refreshing both
+ * the health dot and the row.
  */
 
 /* The two arcs. */
 #define GAUGE_CX		80
 #define GAUGE_ARC_Y		44
 #define GAUGE_ARC_SZ		120
-#define GAUGE_PCT_Y		90
-#define GAUGE_PCT_MAX_W		96	/* "100%" at montserrat_20 */
+/*
+ * Centred on the ring, not offset from its top.
+ *
+ * The ring shrank from the top -- its bottom stayed pinned at GAUGE_NAME_Y -
+ * 4 -- so an earlier version of this that preserved "46 px from the arc's
+ * top" preserved an offset from an edge that had moved, not where the number
+ * actually sits inside the ring. The reader saw a percentage sitting low in
+ * its ring by about 20 px. Centring on the ring is the invariant a reader
+ * can actually see, and writing it as this expression means the label
+ * follows automatically if the ring's size or position ever changes again.
+ */
+#define GAUGE_PCT_Y		(GAUGE_ARC_Y + (GAUGE_ARC_SZ - GAUGE_PCT_FONT_H) / 2)
+/*
+ * The ring's own hollow (GAUGE_ARC_SZ minus the stroke on both sides), not a
+ * guess -- this used to just equal that by coincidence (96 = 120 - 2*12
+ * before the ring shrank) until the ring did and the width didn't follow. A
+ * label wider than the hollow paints over the coloured track it sits on.
+ */
+#define GAUGE_PCT_MAX_W		(GAUGE_ARC_SZ - 2 * GAUGE_ARC_W)
 
 /*
  * The countdown moved INSIDE the ring, under the percentage.
@@ -210,5 +379,54 @@
 #define RAIL_BOTTOM_OFF		8
 
 #define SCR_RIGHT_MARGIN_MIN	4	/* nothing flush against the bezel */
+
+/*
+ * The status-change popup: one sentence, five seconds, over the bottom band.
+ *
+ * The owner asked for it as a popup -- "session x is finished, session y is
+ * waiting for you" -- and the panel has no free space, so a popup here is
+ * always a card ON TOP of something. What it may cover is therefore the whole
+ * design question, and the answer is: not the two things a glance is for.
+ *
+ * NOT THE PIP ROW and NOT THE PERCENTAGE. Those are what someone crossing the
+ * room reads without stopping, and a card over either of them makes the panel
+ * worse for five seconds in exchange for a sentence they did not ask to read
+ * right then. The band below the arcs is the opposite kind of information --
+ * a countdown, a caption, the provider's name -- none of it changing in five
+ * seconds and none of it what the eye goes to first.
+ *
+ * So the card takes the strip from just above the countdowns to just above
+ * the page rail: 184..224 on a 240 px panel, clearing the arcs (which end at
+ * 164) by twenty pixels and the rail by two. The rail stays visible on
+ * purpose -- it is the only thing that says which page you are on, and a
+ * popup that hid it would leave the reader unsure whose session the sentence
+ * is even about.
+ *
+ * Written as expressions against the constants it has to clear, so it follows
+ * if the rail moves or the countdowns do; tests/usage_layout asserts every one
+ * of those clearances.
+ */
+#define TOAST_TOP_Y		(GAUGE_CD_Y - 2)
+#define TOAST_BOTTOM_OFF	(RAIL_BOTTOM_OFF + RAIL_H + 2)
+#define TOAST_H			(SCR_H - TOAST_BOTTOM_OFF - TOAST_TOP_Y)
+#define TOAST_PAD_V		((TOAST_H - FONT_LINE_H) / 2)
+/*
+ * 288 px: "A session is waiting for you" whole, with both bezels clear.
+ *
+ * It is a budget for the sentences that carry no project name, because those
+ * are the ones that MUST fit -- there is no shorter thing for them to fall
+ * back to. A named one ("LiveClaudeUi is waiting for you") also fits, and a
+ * pathological 27-character label does not and ellipsizes, which is the same
+ * bargain the hint line already makes.
+ */
+#define TOAST_MAX_W		288
+
+/*
+ * Five seconds, from the owner, and counted in whole seconds off the same
+ * usage_view_tick_1s() the countdowns use rather than an LVGL timer -- one
+ * clock for everything on this screen that expires, and the peek card's
+ * auto-hide already works this way.
+ */
+#define TOAST_TTL_S		5
 
 #endif /* USAGE_LAYOUT_H */

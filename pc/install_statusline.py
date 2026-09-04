@@ -99,7 +99,15 @@ def _read_marker() -> str:
     try:
         with open(_marker_path(), encoding="utf-8") as f:
             return f.read().strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError, so a marker
+        # file that is not valid UTF-8 (truncated write, disk corruption)
+        # needs its own arm here or it slips past this except -- straight
+        # into drift_check and shim_content_check, neither of which guards
+        # this call, and from there into DriftWatchdog.tick(), which the
+        # daemon's wait loop calls unguarded. Every caller already treats ""
+        # as "no marker" -- the same answer a missing file gets -- so that is
+        # the right answer for an unreadable one too.
         return ""
 
 
@@ -538,6 +546,48 @@ def drift_check(settings_path: str, shim_path: str):
     return what
 
 
+def shim_content_check(shims):
+    """Rewrite any installed shim whose CONTENTS have fallen behind.
+
+    A different fault from drift_check above, and the one that shipped.
+    drift_check asks whether settings.json still points at us; this asks
+    whether the file it points at is still the file we would write. `blink
+    update` swaps the program directory and restarts the service -- it has
+    never rewritten a shim -- so every install that arrived by the documented
+    upgrade path ran a new daemon against whatever shim its original install
+    left behind. The symptom is not an error: the hook runs, the path exists,
+    `blink status` reports ten of ten events, and the only thing missing is
+    the field the new daemon came to read.
+
+    `shims` is a sequence of (path, name) pairs. Returns a description of what
+    it rewrote, or None when there was nothing to do -- which is the normal
+    case on every tick after the first.
+    """
+    if os.environ.get(WATCHDOG_DISABLE_ENV):
+        return None
+
+    # Same rule as drift_check: a missing marker means the user uninstalled,
+    # and that is never overridden. Without it a daemon still winding down
+    # would put back the shims `blink uninstall` had just removed.
+    if not _read_marker():
+        return None
+
+    from . import cli
+
+    repaired = []
+    for path, name in shims:
+        if cli.shim_is_current(path, name):
+            continue
+        try:
+            cli._write_shim(path, name)
+        except Exception as e:
+            repaired.append(f"{name} is out of date and could not be replaced: {e}")
+            continue
+        repaired.append(f"{name} was out of date; replaced it")
+
+    return "; ".join(repaired) if repaired else None
+
+
 class DriftWatchdog:
     """drift_check on an interval, with a cap on how hard it insists.
 
@@ -548,35 +598,56 @@ class DriftWatchdog:
     """
 
     def __init__(self, settings_path, shim_path, interval_s=300.0,
-                 now=None, check=drift_check):
+                 now=None, check=drift_check, *, shims=()):
         import time as _time
         self._settings = settings_path
         self._shim = shim_path
         self._interval = interval_s
         self._now = now or _time.monotonic
         self._check = check
+        # Keyword-only and defaulted to nothing, so a caller that only cares
+        # about settings.json drift -- which is every caller this class had
+        # until the hook shim turned out to go stale -- keeps working and
+        # keeps its ticks free of any filesystem read it did not ask for.
+        self._shims = tuple(shims)
         self._next = self._now()
         self._reinstatements = 0
         self._gave_up = False
 
     def tick(self):
         """Returns a message worth logging, or None. Call it as often as you like."""
-        if self._gave_up:
-            return None
         now = self._now()
         if now < self._next:
             return None
         self._next = now + self._interval
 
-        msg = self._check(self._settings, self._shim)
-        if msg is None:
-            return None
+        # Two faults, two answers, one interval. Neither check is free -- one
+        # parses settings.json, the other reads every installed shim off disk
+        # -- so both sit behind the not-yet-due return above rather than
+        # running on every turn of the poll loop.
+        found = []
 
-        self._reinstatements += 1
-        if self._reinstatements >= MAX_REINSTATEMENTS:
-            self._gave_up = True
-            return (f"{msg}. That is {self._reinstatements} times now --"
-                    " something on this machine keeps removing it, so Blink"
-                    " will stop putting it back. Run `blink install` once"
-                    " the conflict is resolved.")
-        return msg
+        # The give-up cap belongs to settings.json alone. It exists because
+        # something else on the machine was rewriting a file we share with it,
+        # and losing that argument quietly is better than writing forever.
+        # Nothing else on the machine writes our shims, so a stale shim is not
+        # that argument: it does not count towards the cap, and giving up on
+        # the statusLine hook must not leave the shims rotting.
+        if not self._gave_up:
+            msg = self._check(self._settings, self._shim)
+            if msg is not None:
+                self._reinstatements += 1
+                if self._reinstatements >= MAX_REINSTATEMENTS:
+                    self._gave_up = True
+                    msg = (f"{msg}. That is {self._reinstatements} times now --"
+                           " something on this machine keeps removing it, so Blink"
+                           " will stop putting it back. Run `blink install` once"
+                           " the conflict is resolved.")
+                found.append(msg)
+
+        if self._shims:
+            stale = shim_content_check(self._shims)
+            if stale:
+                found.append(stale)
+
+        return "; ".join(found) if found else None

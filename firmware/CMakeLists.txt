@@ -30,6 +30,7 @@ target_sources(app PRIVATE
 	src/ota.c
 	src/ui_touchfx.c
 	src/usage_state.c
+	src/usage_freshness.c
 )
 
 # Standalone WiFi mode only. Not stubbed and not dead-stripped -- with

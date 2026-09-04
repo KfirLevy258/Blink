@@ -25,6 +25,19 @@ static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
 	else { printf("PASS: %s\n", m); } } while (0)
 
+/* Same PASS/FAIL-plus-failures-counter shape as CHECK above, spelled for a
+ * pair of numbers so a mismatch prints both sides instead of just the
+ * condition that failed. */
+#define EXPECT_EQ(got, want) do { \
+	long g_ = (long)(got), w_ = (long)(want); \
+	if (g_ == w_) { \
+		printf("PASS: %-28s -> %ld\n", #got, g_); \
+	} else { \
+		printf("FAIL: %-28s -> %ld (want %ld)\n", #got, g_, w_); \
+		failures++; \
+	} \
+} while (0)
+
 struct box { const char *name; int x0, y0, x1, y1; };
 
 /* TOP_MID: x is an offset of the object's CENTRE from the screen centre. */
@@ -79,8 +92,10 @@ int main(void)
 				   GAUGE_ARC_SZ, GAUGE_ARC_SZ);
 	struct box arc_r = top_mid("arc R", GAUGE_CX, GAUGE_ARC_Y,
 				   GAUGE_ARC_SZ, GAUGE_ARC_SZ);
+	/* Height is GAUGE_PCT_FONT_H, not FONT_LINE_H: this label is drawn at
+	 * montserrat_20, not the screen's default 14. */
 	struct box pct_l = top_mid("percentage L", -GAUGE_CX, GAUGE_PCT_Y,
-				   80, FONT_LINE_H);
+				   80, GAUGE_PCT_FONT_H);
 	struct box name_l = top_mid("SESSION caption", -GAUGE_CX,
 				    GAUGE_NAME_Y, 110, FONT_LINE_H);
 	struct box name_r = top_mid("WEEKLY caption", GAUGE_CX, GAUGE_NAME_Y,
@@ -95,9 +110,26 @@ int main(void)
 
 	/* The brand, and the status line that took the space under it when the
 	 * provider's name moved to the bottom. */
-	struct box brand = top_mid("brand", 0, TITLE_Y, 90, FONT_LINE_H);
+	struct box brand = top_mid("brand", 0, TITLE_Y, BRAND_W, FONT_LINE_H);
 	struct box status = top_mid("status", 0, STATUS_Y,
 				    STATUS_MAX_W, FONT_LINE_H);
+
+	/* The clock shares STATUS_Y with the hint -- one of them is visible at
+	 * a time, so they may overlap each other and must not overlap anything
+	 * else. Width is the worst case the format can produce, not "12:04":
+	 * 0, 4, 6, 8 and 9 all round to 9 px, so four digits and a 3 px colon. */
+	struct box clock = top_mid("clock", 0, STATUS_Y, 4 * 9 + 3, FONT_LINE_H);
+
+	/* The pip row's own bounding box, built from the same constants the
+	 * checks below already asserted individually -- so the clock/pip
+	 * overlap check and the row's own left/right clearance share one
+	 * definition instead of two copies of the same arithmetic. */
+	struct box pips;
+	pips.name = "pip row";
+	pips.x0 = PIP_X0;
+	pips.y0 = PIP_Y;
+	pips.x1 = PIP_X0 + PIP_MAX * PIP_PITCH - (PIP_PITCH - PIP_SZ);
+	pips.y1 = PIP_Y + PIP_SZ;
 
 	/* The provider pill: whose numbers these are, and the button that
 	 * changes it. Padded, so it is taller than a bare line. */
@@ -111,7 +143,8 @@ int main(void)
 				     RAIL_H);
 
 	struct box all[] = { arc_l, arc_r, pct_l, name_l, name_r,
-			     cd_l, cd_r, brand, status, who, rail };
+			     cd_l, cd_r, brand, status, clock, pips,
+			     who, rail };
 
 	for (unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
 		char msg[64];
@@ -125,6 +158,17 @@ int main(void)
 	CHECK(arc_l.y1 <= name_l.y0, "the caption sits below its ring");
 
 	/* --- the ring hollow --- */
+	/*
+	 * The percentage must clear the arc's own stroke, not merely fit
+	 * inside the ring's outer bounding box -- text drawn as wide as the
+	 * ring would paint over the coloured track. "1000%" is the longest
+	 * string this label is ever asked to hold: pct_int() in usage_view.c
+	 * clamps at PCT_DISPLAY_MAX (1000). Measured straight from
+	 * lv_font_montserrat_20.c's own glyph_dsc table, not guessed: '1' is
+	 * 7 px, '0' is 13 px, '%' is 17 px, so "1000%" is 7+13*3+17 = 63 px.
+	 */
+	CHECK(63 <= GAUGE_ARC_SZ - 2 * GAUGE_ARC_W,
+	      "the widest percentage this label ever shows clears the arc's stroke");
 	/* --- one countdown per gauge --- */
 	CHECK(cd_l.x1 <= cd_r.x0,
 	      "the two gauges' countdowns do not meet in the middle");
@@ -139,6 +183,111 @@ int main(void)
 	      "the status line sits below the brand, not on it");
 	CHECK(arc_l.y0 >= status.y1,
 	      "the gauges start below the status line");
+
+	/* The clock shares STATUS_Y with the status/hint line rather than
+	 * owning a row, so its own box is checked against the same neighbours:
+	 * it sits under the brand, clears the arcs below, and -- since it left
+	 * the pip row's corner for this shared row -- no longer collides with
+	 * the pips it used to sit beside.
+	 *
+	 * Against status.y0, not the STATUS_Y macro: clock is built two lines
+	 * above from that same macro, so comparing it to the macro can never
+	 * fail -- it would still pass with the clock's own top_mid() call
+	 * edited to some other row. Comparing to status.y0 instead asserts the
+	 * actual invariant this block is about: clock and status occupy the
+	 * same row as each other, and a future edit that moves either one off
+	 * that row fails here. */
+	EXPECT_EQ(clock.y0, status.y0);
+	CHECK(clock.y1 <= GAUGE_ARC_Y,
+	      "the clock's line box clears the arcs below it");
+	CHECK(clock.y0 >= brand.y1,
+	      "the clock sits under the brand, not on it");
+	CHECK(!overlaps(clock, pips),
+	      "the clock no longer collides with the pip row it vacated");
+
+	/*
+	 * Two header rows again, not three. The clock shares STATUS_Y with the
+	 * status/hint line instead of owning a corner, so the arcs get their
+	 * 20 px back.
+	 */
+	EXPECT_EQ(STATUS_Y, TITLE_Y + FONT_LINE_H + 2);
+	EXPECT_EQ(GAUGE_ARC_Y, STATUS_Y + FONT_LINE_H + 4);
+	EXPECT_EQ(GAUGE_ARC_Y + GAUGE_ARC_SZ + 4, GAUGE_NAME_Y);
+
+	/* The percentage stays centre-derived rather than a literal: its
+	 * middle sits on the ring's middle, whatever the ring's size or the
+	 * font's line height. The old literal 90 was 3 px high, which is what
+	 * e7df2f2 fixed and this must not un-fix. */
+	EXPECT_EQ(GAUGE_PCT_Y + GAUGE_PCT_FONT_H / 2, GAUGE_ARC_Y + GAUGE_ARC_SZ / 2);
+
+	/*
+	 * The pip row runs from the bezel to the brand, not from the clock to
+	 * the brand: the clock shares STATUS_Y with the status/hint line now
+	 * and is asserted against this row separately, above. Only the right
+	 * edge here is still a measurement -- the wall derived from "BLINK"
+	 * below -- and a font bump must fail here rather than slide pips under
+	 * the logo.
+	 */
+	/*
+	 * The clock has left this corner for the row under the brand, so the
+	 * row's left edge is now the bezel, not a time string. Its right edge
+	 * is still the wordmark, and that IS a measurement -- so it is derived
+	 * here rather than typed in, because the number that was typed in was
+	 * wrong by 2 px in the direction that matters.
+	 *
+	 * "BLINK" at lv_font_montserrat_14, whose advances LVGL rounds to
+	 * whole pixels as (adv_w + 8) >> 4: B 11 + L 8 + I 4 + N 11 + K 10 =
+	 * 44, plus the letter_space of 2 that usage_view.c sets, in each of
+	 * the four gaps = 52. Centred on SCR_MID_X, so it begins at 134 -- not
+	 * the 136 an earlier comment claimed from a tracking value the code
+	 * does not use.
+	 */
+	CHECK(pips.x0 >= SCR_RIGHT_MARGIN_MIN,
+	      "the pip row is not flush against the left bezel");
+	CHECK(pips.x1 <= PIP_WALL_X,
+	      "a full pip row clears the wall");
+	CHECK(PIP_WALL_X <= brand.x0,
+	      "the wall is left of the brand's real left edge");
+	EXPECT_EQ(brand.x0, 134);
+	EXPECT_EQ(PIP_MAX, 11);
+	/*
+	 * Counts mode: three groups of pip + gap + one digit, with a gap
+	 * between them. Asserted for the SINGLE-digit case only, which is the
+	 * one the metrics are sized for -- a wider tally is measured at draw
+	 * time and stopped at the wall (refresh_dots), because no constant
+	 * here can know how many digits a tally has. PIP_NUM_ADV is the
+	 * measured advance of the widest digit; if a font bump breaks that,
+	 * this fails rather than the numerals creeping onto the brand.
+	 */
+	CHECK(PIP_X0 + 4 * (PIP_SZ + PIP_NUM_GAP + PIP_NUM_ADV)
+	      + 3 * PIP_GROUP_GAP <= PIP_WALL_X,
+	      "four counted groups clear the brand");
+	/*
+	 * And the row's Y, which had no assertion at all -- which is why a
+	 * tally whose line box ended exactly on STATUS_Y got as far as a
+	 * review. The label is FONT_LINE_H tall whatever is written in it, so
+	 * this is the check the numeral needs and the pip does not.
+	 */
+	CHECK(PIP_NUM_Y + FONT_LINE_H <= STATUS_Y,
+	      "the tally's line box clears the hint line");
+	/*
+	 * One centre line for the whole header: the tally's box, the pip and
+	 * the health dot, at three different heights.
+	 *
+	 * Neither of these bites the way the clearance above does, and saying
+	 * so is the point. PIP_NUM_Y subtracts FONT_LINE_H / 2 and the first
+	 * check adds it straight back, so the two cancel exactly -- no font
+	 * change can fail it, and it reduces to the second. What it does still
+	 * catch is PIP_NUM_Y being rewritten with the wrong sign or the wrong
+	 * operand, which is the mistake this row has already made once. The
+	 * second fails only on an even DOT_SZ against an odd PIP_SZ.
+	 *
+	 * Both are written down anyway, because the shared centre line is the
+	 * rule this row is built on, and a rule with no assertion is exactly
+	 * how the Y above went unchecked until a tally landed on the hint line.
+	 */
+	EXPECT_EQ(PIP_NUM_Y + FONT_LINE_H / 2, HDR_ROW_Y + DOT_SZ / 2);
+	EXPECT_EQ(PIP_Y + PIP_SZ / 2, HDR_ROW_Y + DOT_SZ / 2);
 
 	/* --- the bottom stacks: countdowns, pill, rail --- */
 	CHECK(who.y0 >= cd_l.y1,
@@ -174,6 +323,67 @@ int main(void)
 	/* --- the font assumption these clearances rest on --- */
 	CHECK(FONT_LINE_H == 16,
 	      "FONT_LINE_H still matches LV_FONT_DEFAULT_MONTSERRAT_14");
+
+	/*
+	 * A two-line hint lands on the gauges. The label must ellipsize; this
+	 * asserts the clearance that makes that non-negotiable.
+	 */
+	CHECK(STATUS_Y + FONT_LINE_H < GAUGE_ARC_Y + 4,
+	      "a one-line hint clears the gauges");
+	CHECK(STATUS_Y + 2 * FONT_LINE_H > GAUGE_ARC_Y,
+	      "a two-line hint would land on the gauges, so it must ellipsize");
+
+	/* --- the status-change popup --- */
+	/*
+	 * A popup on a full 320x240 panel is always a card ON TOP of
+	 * something, so WHAT IT MAY COVER is the design, and these are it:
+	 * not the percentage, and not the pip row above it. Those two are
+	 * what someone crossing the room reads without stopping, and covering
+	 * either of them for five seconds makes the panel worse in exchange
+	 * for a sentence nobody asked to read right then.
+	 *
+	 * Clearing the whole arc is the strictly stronger claim and is what
+	 * is asserted -- the percentage sits inside the ring, and the ring's
+	 * bottom is the last thing above the band the card takes.
+	 */
+	CHECK(TOAST_TOP_Y >= GAUGE_ARC_Y + GAUGE_ARC_SZ,
+	      "the popup clears the gauges, and so the percentages inside them");
+	/*
+	 * The page rail stays visible. It is the only thing on the screen
+	 * that says WHICH PROVIDER you are looking at, and a card that hid it
+	 * would leave the reader unable to tell whose session the sentence is
+	 * about -- which is most of the sentence's value on a two-page desk.
+	 */
+	CHECK(SCR_H - TOAST_BOTTOM_OFF <= SCR_H - RAIL_BOTTOM_OFF - RAIL_H,
+	      "the popup clears the page rail, which names the provider");
+	CHECK(TOAST_MAX_W + 2 * SCR_RIGHT_MARGIN_MIN <= SCR_W,
+	      "the popup clears both bezels");
+	/*
+	 * One line, with its padding, and the padding is real. TOAST_H is
+	 * derived from the band the card is allowed, so a rail or countdown
+	 * that moved could squeeze it below a line's height without anybody
+	 * noticing until the text was clipped on a desk.
+	 */
+	CHECK(TOAST_H >= FONT_LINE_H && TOAST_PAD_V > 0,
+	      "the popup is tall enough for its line, and pads it");
+	/*
+	 * The sentences that carry NO project name must fit whole: there is
+	 * nothing shorter for them to fall back to. The longest is the
+	 * waiting one.
+	 */
+	CHECK(BUDGET_FITS(TOAST_MAX_W, "A session is waiting for you"),
+	      "TOAST_MAX_W is sized for the longest unnamed sentence");
+	/* A real project name still fits beside it. */
+	CHECK(BUDGET_FITS(TOAST_MAX_W, "LiveClaudeUi is waiting for you"),
+	      "an ordinary project name fits too");
+	/*
+	 * And the longest label the buffer can hold does NOT, which is why
+	 * the label ellipsizes rather than wraps -- the same bargain the hint
+	 * line makes, asserted here so LV_LABEL_LONG_DOT is not optional.
+	 */
+	CHECK(!BUDGET_FITS(TOAST_MAX_W,
+			   "123456789012345678901234567 is waiting for you"),
+	      "a pathological label overruns the card, so it must ellipsize");
 
 	printf(failures ? "\n%d FAILED\n" : "\nall layout checks passed\n",
 	       failures);

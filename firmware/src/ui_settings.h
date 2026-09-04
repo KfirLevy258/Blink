@@ -35,4 +35,16 @@ void ui_settings_drop_pending(void);
 
 void ui_settings_service(void (*pump)(void));
 
+/*
+ * Is the panel open, or is a gesture still waiting to be serviced?
+ *
+ * Both answers mean the same thing to a caller that is about to stop running
+ * the mode loop: a person is in the middle of using this panel, and the only
+ * code that can act on them is the loop that is about to go away. The doze in
+ * ui_sleep.c asks it as a reason to wake, and main.c as a reason not to fall
+ * asleep in the first place -- because settings is where an owner goes when
+ * the board is behaving badly, which is precisely when it is dozing.
+ */
+bool ui_settings_busy(void);
+
 #endif /* UI_SETTINGS_H */

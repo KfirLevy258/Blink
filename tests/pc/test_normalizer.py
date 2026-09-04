@@ -1,5 +1,6 @@
 """Conflict and recency resolution across sources that each see a slice."""
 from pc import normalizer
+from pc import statusline_source as ss
 from pc.providers import base
 
 NOW = 1_787_700_000.0
@@ -175,6 +176,17 @@ def test_one_provider_costs_nothing_on_the_wire():
         assert k not in msg
 
 
+def test_the_name_travels_with_the_state_it_names():
+    """label lives on the same source frame as n_run/n_wait/etc. and rides
+    along by the same field-by-field rule -- see the block comment above
+    n_run in merge(). Dropped here, the project name never reaches the
+    board on any machine running more than one source."""
+    f = cli(NOW, session=40.0, state=base.STATE_WAITING)
+    f.label = "LiveClaudeUi"
+    m = normalizer.merge([f])
+    assert m.label == "LiveClaudeUi"
+
+
 def test_two_providers_still_fit_the_board_line_limit():
     from pc import protocol
     primary, secondary = normalizer.select_pair([
@@ -323,3 +335,144 @@ def test_no_rollover_reported_changes_nothing():
     out = normalizer.merge([cli(NOW - 1200, session=10.0),
                             desktop(NOW - 600, session=78.0)])
     assert out.session_pct == 78.0
+
+
+def test_a_stale_reading_that_has_a_number_beats_a_fresher_one_that_does_not():
+    """The invariant pc/providers/claude_cli's memory is built on.
+
+    A CLI reading six hours old still carries a five-hour percentage; a
+    desktop sample two days older carries one too. Staleness does not remove
+    a frame from the contest -- recency ranks it -- so the CLI figure wins
+    and `src` follows it. If this ever inverts, the panel goes back to
+    reporting the age of a desktop sample nobody asked about (field report,
+    2026-09-02).
+    """
+    m = normalizer.merge([
+        cli(NOW - 6 * 3600, session=27.0, stale=True),
+        desktop(NOW - 57 * 3600, session=0.0, stale=True),
+    ])
+    assert m.session_pct == 27.0
+    assert m.src == "cli"
+    assert m.observed_at == NOW - 6 * 3600
+    assert m.stale is True
+
+
+# --- how long since we heard a voice, as opposed to how old the dial is ----
+#
+# Two questions the merge used to answer with one number. `observed_at` is
+# the age of the number on the dial and belongs to whichever source won it;
+# `active_at` is the age of the freshest CONTACT and belongs to the whole
+# group, losers included. They only come apart because
+# pc/providers/claude_cli re-offers a remembered payload at its original
+# mtime -- and when they do, a board that dozes on the first one closes its
+# eyes on somebody who is sitting at the desk (field review 2026-09-02).
+
+
+def test_a_frame_that_won_nothing_still_proves_somebody_is_here():
+    """The exact field shape: Claude Code rewrote its status line five
+    seconds ago, the five-hour window expired overnight so the rewrite
+    carries no session percentage, and the remembered reading from this
+    morning wins the dial. The dial is six hours old. The desk is not."""
+    m = normalizer.merge([
+        cli(NOW - 5, weekly=26.0),                      # live, no session pct
+        cli(NOW - 6 * 3600, session=27.0, stale=True),  # remembered
+    ])
+    assert m.session_pct == 27.0                        # dial unchanged
+    assert m.observed_at == NOW - 6 * 3600              # and honestly old
+    assert m.active_at == NOW - 5                       # somebody is here
+
+
+def test_a_frame_with_no_numbers_at_all_still_counts_as_contact():
+    """A source that lost EVERY field, not just the session dial. It is not
+    a candidate for anything the panel draws, and it is still proof that a
+    tool on this machine wrote a file a minute ago."""
+    m = normalizer.merge([
+        cli(NOW - 3600, session=40.0, weekly=20.0),
+        desktop(NOW - 60),                              # no percentages
+    ])
+    assert m.session_pct == 40.0
+    assert m.observed_at == NOW - 3600
+    assert m.active_at == NOW - 60
+
+
+def test_a_single_reading_dates_itself_by_its_own_clock():
+    """Nothing to be fresher than: the two questions have the same answer,
+    which is what makes an absent active age exactly recoverable from the
+    reading age on the wire."""
+    m = normalizer.merge([cli(NOW - 900, session=40.0)])
+    assert m.active_at == m.observed_at == NOW - 900
+
+
+def test_the_freshest_contact_survives_a_second_merge():
+    """A merged frame is a valid input to another merge (the same property
+    session_rolled_at is carried for). Re-merging must not narrow the
+    freshest contact back down to the winning reading's own age."""
+    once = normalizer.merge([cli(NOW - 5, weekly=26.0),
+                             cli(NOW - 6 * 3600, session=27.0)])
+    twice = normalizer.merge([once])
+    assert twice.active_at == NOW - 5
+
+
+# --- the staleness cliff, and the reading it used to resurrect ---------------
+#
+# The failure this module was written against, reached by a route the design
+# did not cover: rollover EVIDENCE used to expire along with the payload that
+# carried it. Half an hour after the status line went quiet, the CLI frame
+# stopped reporting that it had watched the window empty -- and a Claude
+# Desktop sample taken BEFORE that reset became a legal candidate again. It
+# was the freshest one, so it took the dial, wearing its own stale=False.
+#
+# Built through map_statusline_frame rather than the cli() helper on purpose.
+# The helper cannot express the bug: it takes session_rolled_at as a given,
+# and the defect was in what the real producer decides to set.
+
+T0 = NOW
+
+
+def _statusline(now, five_hour=80.0, resets_at=T0 + 60, mtime=T0):
+    return ss.map_statusline_frame(
+        {"rate_limits": {"five_hour": {"used_percentage": five_hour,
+                                       "resets_at": resets_at}}},
+        now, mtime)
+
+
+def test_a_forgiven_percentage_cannot_return_when_the_status_line_ages_out():
+    """The reproduction, at four clocks either side of the bound.
+
+    A five-hour window at 80% resets sixty seconds after the status line was
+    written; Claude Desktop sampled 78% thirty seconds before that reset, and
+    cannot see reset times at all, so it has no way to know its reading has
+    been superseded. Two seconds apart the panel used to flip from a correct
+    0% to a confident green 78% for usage already forgiven, and it stayed
+    there for the life of the daemon.
+    """
+    before = normalizer.merge([_statusline(T0 + 1799),
+                               desktop(T0 + 30, session=78.0, weekly=40.0)])
+    assert (before.session_pct, before.src, before.stale) == (0.0, "cli", False)
+
+    for elapsed in (1801, 7200, 86400):
+        m = normalizer.merge([_statusline(T0 + elapsed),
+                              desktop(T0 + 30, session=78.0, weekly=40.0)])
+        assert m.session_pct == base.UNKNOWN, elapsed
+        assert m.weekly_pct == 40.0, elapsed     # the weekly window is intact
+
+
+def test_the_rollover_is_still_evidence_after_the_reading_stops_being_one():
+    """Why the frames above can refuse the desktop sample at all. A window
+    emptied at an epoch; that fact does not rot with the file's mtime, and it
+    is the only thing on the bus that can tell a source with no reset times
+    that its reading describes a window which no longer exists."""
+    assert _statusline(T0 + 86400).session_rolled_at == T0 + 60
+
+
+def test_a_window_that_has_ended_stops_suppressing_the_burn_rate():
+    """merge() sends a measured rate only when NO source could supply a reset
+    time, so a long-past stamp out of a remembered payload silenced the rate
+    -- while protocol.secs_until refused that same stamp as a countdown. The
+    panel got neither. A stamp the window has already passed is not a reset
+    time this daemon has; it is one it used to have."""
+    m = normalizer.merge([_statusline(T0 + 7200),
+                          desktop(T0 + 7080, session=55.0, burn=12.4)])
+    assert m.session_resets_at is None
+    assert m.session_burn_pph == 12.4
+    assert m.session_pct == 55.0

@@ -119,3 +119,183 @@ void fmt_ascii(const char *src, char *dst, size_t dstlen)
 	}
 	dst[o] = '\0';
 }
+
+void fmt_hint(const char *status, const char *label, char *buf, size_t buflen)
+{
+	if (!buf || buflen == 0) {
+		return;
+	}
+	buf[0] = '\0';
+	if (!status || !status[0]) {
+		return;
+	}
+
+	if (label && label[0]) {
+		char ascii[FMT_HINT_MAX];
+
+		fmt_ascii(label, ascii, sizeof(ascii));
+		if (ascii[0]) {
+			snprintf(buf, buflen, "%s - %s", status, ascii);
+			return;
+		}
+	}
+	snprintf(buf, buflen, "%s", status);
+}
+
+/*
+ * Four groups fit the 120 px from the bezel to the wordmark.
+ *
+ * It was three, when the row lived in the 75 px between the clock and the
+ * wordmark and the overflow rule below ran on an ordinary desk. The clock
+ * moved to the row under the brand -- which is the clock's row now, and only
+ * yields to a sentence when something wants a person -- and the corner it left
+ * is the row's. There are only four states, so the cap is no longer reachable
+ * by a real frame; it stays because `max` can still be smaller than four, and
+ * because a fifth state would otherwise silently take a slot from RUNNING.
+ */
+#define PIP_GROUPS_MAX	4
+/* Above this many sessions a row of pips is counted rather than read. */
+#define PIP_SESSIONS_MAX 6
+
+int fmt_pips(int n_run, int n_wait, int n_fail, int n_fin,
+	     struct fmt_pip *out, int max)
+{
+	if (!out || max <= 0) {
+		return 0;
+	}
+	if (n_run < 0) { n_run = 0; }
+	if (n_wait < 0) { n_wait = 0; }
+	if (n_fail < 0) { n_fail = 0; }
+	if (n_fin < 0) { n_fin = 0; }
+
+	/* Most urgent first: the eye lands on the left of this row. */
+	const enum fmt_pip_kind kinds[4] = {
+		FMT_PIP_FAILED, FMT_PIP_WAITING, FMT_PIP_RUNNING, FMT_PIP_FINISHED
+	};
+	const int counts[4] = { n_fail, n_wait, n_run, n_fin };
+	int total = n_fail + n_wait + n_run + n_fin;
+	int w = 0;
+
+	if (total == 0) {
+		return 0;
+	}
+
+	if (total <= PIP_SESSIONS_MAX) {
+		for (int k = 0; k < 4 && w < max; k++) {
+			for (int j = 0; j < counts[k] && w < max; j++) {
+				out[w].kind = kinds[k];
+				out[w].count = 0;
+				w++;
+			}
+		}
+		return w;
+	}
+
+	/*
+	 * Counts mode. Walking the array in urgency order and stopping at
+	 * PIP_GROUPS_MAX drops FINISHED first and then RUNNING for free --
+	 * they are simply last in line, so the rule needs no separate branch
+	 * that could disagree with the ordering above.
+	 */
+	for (int k = 0; k < 4 && w < max && w < PIP_GROUPS_MAX; k++) {
+		if (counts[k] == 0) {
+			continue;
+		}
+		out[w].kind = kinds[k];
+		out[w].count = counts[k];
+		w++;
+	}
+	return w;
+}
+
+enum fmt_pip_tone fmt_pip_tone(enum fmt_pip_kind k)
+{
+	switch (k) {
+	case FMT_PIP_FAILED:
+	case FMT_PIP_WAITING:
+		return FMT_TONE_RED;
+	case FMT_PIP_FINISHED:
+		return FMT_TONE_AMBER;
+	default:
+		/*
+		 * RUNNING, and anything a later version adds. Green is the
+		 * only tone that asks nothing of the reader, which makes it
+		 * the safe answer for a kind this build cannot name -- the
+		 * opposite of the usage_state rule, where the safe answer is
+		 * to stay dark, because there the unknown value came off the
+		 * wire and here it can only come from this file.
+		 */
+		return FMT_TONE_GREEN;
+	}
+}
+
+void fmt_toast(enum fmt_pip_kind kind, const char *label, int count,
+	       char *buf, size_t buflen)
+{
+	const char *clause;
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	/*
+	 * Empty on every path that has nothing to say, and the caller draws
+	 * nothing for an empty string -- the same contract fmt_burn and
+	 * fmt_hint already have, so a caller cannot be surprised by which of
+	 * the three it is holding.
+	 */
+	buf[0] = '\0';
+	if (count <= 0) {
+		return;
+	}
+
+	if (count > 1) {
+		switch (kind) {
+		case FMT_PIP_FAILED:	clause = "sessions failed"; break;
+		case FMT_PIP_WAITING:	clause = "sessions are waiting"; break;
+		case FMT_PIP_FINISHED:	clause = "sessions finished"; break;
+		case FMT_PIP_RUNNING:	clause = "sessions are running"; break;
+		default:		return;
+		}
+		snprintf(buf, buflen, "%d %s", count, clause);
+		return;
+	}
+
+	switch (kind) {
+	case FMT_PIP_FAILED:	clause = "failed"; break;
+	case FMT_PIP_WAITING:	clause = "is waiting for you"; break;
+	case FMT_PIP_FINISHED:	clause = "is finished"; break;
+	case FMT_PIP_RUNNING:	clause = "is running"; break;
+	default:		return;
+	}
+
+	if (label != NULL && label[0] != '\0') {
+		char ascii[FMT_TOAST_MAX];
+		size_t i = 0;
+
+		fmt_ascii(label, ascii, sizeof(ascii));
+		/*
+		 * Past any leading blank, because the sentence STARTS with
+		 * this and a sentence that starts with a space starts with
+		 * nothing. It is reachable rather than defensive: fmt_ascii
+		 * turns U+00A0 into an ordinary space, so a label that is only
+		 * a no-break space -- which is what an empty project name
+		 * copied out of a web page looks like -- arrives here as " ".
+		 */
+		while (ascii[i] == ' ') {
+			i++;
+		}
+		/*
+		 * Nothing left to lead with, so fall through to "A session"
+		 * rather than writing " is waiting for you" with a hole at the
+		 * front of it.
+		 */
+		if (ascii[i] != '\0') {
+			if (ascii[i] >= 'a' && ascii[i] <= 'z') {
+				ascii[i] = (char)(ascii[i] - 'a' + 'A');
+			}
+			snprintf(buf, buflen, "%s %s", &ascii[i], clause);
+			return;
+		}
+	}
+	snprintf(buf, buflen, "A session %s", clause);
+}

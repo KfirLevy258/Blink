@@ -1,5 +1,8 @@
 """The bus: many providers polled, one message out, nothing allowed to escape."""
+import ast
 import json
+import pathlib
+import re
 
 from pc import ingest
 from pc.providers import base
@@ -104,9 +107,246 @@ def test_the_two_real_providers_compose_end_to_end(tmp_path):
     assert msg["src"] == "desktop"
 
 
-def test_make_fetch_is_a_zero_arg_callable():
-    fetch = ingest.make_fetch(providers=[Fixed(frame())])
-    assert fetch()["session_pct"] == 50.0
+# --- the project name, which rides beside the usage message ----------------
+
+
+def named(provider="claude", src="hook", at=NOW, session=50.0, weekly=20.0,
+          state=base.STATE_WAITING, label="LiveClaudeUi", **counts):
+    f = frame(provider=provider, src=src, at=at, session=session,
+              weekly=weekly)
+    f.state = state
+    f.label = label
+    for k, v in counts.items():
+        setattr(f, k, v)
+    return f
+
+
+def test_the_daemon_wires_the_fetch_that_carries_the_name():
+    """The regression this exists for, and the reason it reads the daemon's
+    own source instead of building a fetch of its own.
+
+    claude_usage_bridge said `fetch = bus.poll` while every test built its
+    fetch through make_fetch. A bound method proxies attribute reads to the
+    plain function underneath, so the Bridge's
+    getattr(fetch, "session_pair", None) was None on every real desk and the
+    board was never named -- with the whole suite green, because no test
+    ever touched the object the daemon actually constructs.
+
+    So take the daemon's expression verbatim and run it. A test that builds
+    its own fetch cannot see the two ways diverge; this one cannot miss it.
+    """
+    src = pathlib.Path(ingest.__file__).resolve().parents[1] / \
+        "claude_usage_bridge.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    assigns = [n for n in ast.walk(tree)
+               if isinstance(n, ast.Assign)
+               and any(isinstance(t, ast.Name) and t.id == "fetch"
+                       for t in n.targets)]
+    assert assigns, "the daemon has no `fetch` any more; move this guard"
+    for node in assigns:
+        scope = {"ingest": ingest,
+                 "bus": ingest.IngestionBus(providers=[Fixed(named(n_wait=1))],
+                                            now=lambda: NOW)}
+        fetch = eval(compile(ast.Expression(node.value), "<daemon>", "eval"),
+                     scope)
+        fetch()
+        assert fetch.session_pair() == ("LiveClaudeUi", 1), ast.dump(node)
+
+
+def test_the_daemon_hands_that_very_fetch_to_the_bridge():
+    """The other half of the guard above, and the half it cannot do.
+
+    Evaluating `fetch = ...` only proves the daemon BUILDS the right object.
+    It says nothing about the object reaching the Bridge, so an inline
+    `Bridge(..., fetch_usage=bus.poll, ...)` one line further down would
+    leave the assignment correct, this file green, and every real desk
+    unnamed -- the identical failure to the one above, moved by a line.
+
+    So insist the keyword is the bare name `fetch`: the local the guard
+    above just ran and vouched for, not a fresh expression nobody checked.
+    An attribute, a call, a lambda -- anything but the name -- is a second
+    construction path, and a second path is exactly what went wrong once.
+    """
+    src = pathlib.Path(ingest.__file__).resolve().parents[1] / \
+        "claude_usage_bridge.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "Bridge"]
+    assert calls, "the daemon builds no Bridge any more; move this guard"
+    for call in calls:
+        kw = [k for k in call.keywords if k.arg == "fetch_usage"]
+        assert kw, "Bridge built without fetch_usage: " + ast.dump(call)
+        for k in kw:
+            assert isinstance(k.value, ast.Name) and k.value.id == "fetch", (
+                "fetch_usage must pass the verified `fetch` local, not "
+                + ast.dump(k.value))
+
+
+def test_the_label_survives_the_whole_bus_path():
+    """The one that matters. session_pair() reads the frame select_pair
+    returned, and select_pair runs EVERY frame through normalizer.merge()
+    even when a provider produced only one -- so a merge that rebuilds the
+    frame field by field and forgets `label` would leave the board unnamed
+    with every unit test on this page still green.
+    """
+    bus = ingest.IngestionBus(providers=[Fixed(named(n_wait=1))],
+                              now=lambda: NOW)
+    bus.poll()
+    assert bus.session_pair() == ("LiveClaudeUi", 1)
+
+
+def test_the_label_survives_a_merge_of_two_sources():
+    """Two sources for one provider is the case that actually merges: the
+    hook knows the project and the CLI status line knows the percentages,
+    and the frame that reaches the board is neither of them.
+    """
+    hook = named(src="hook", at=NOW, session=base.UNKNOWN,
+                 weekly=base.UNKNOWN, n_wait=1)
+    cli = named(src="cli", at=NOW - 60, state=base.STATE_UNKNOWN, label="")
+    bus = ingest.IngestionBus(providers=[Fixed(hook), Fixed(cli)],
+                              now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["session_pct"] == 50.0            # from the CLI frame
+    assert bus.session_pair() == ("LiveClaudeUi", 1)   # from the hook frame
+
+
+def test_a_second_provider_in_a_worse_state_takes_the_name_away():
+    """The panel shows ONE light for the whole desk -- worst_of(claude,
+    codex) -- so a named Claude session sitting idle beside a waiting Codex
+    one must not put its name under "Waiting for you". That is a wrong
+    sentence rather than a vague one.
+    """
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", state=base.STATE_IDLE,
+                               label="MyProject", n_idle=1)),
+                   Fixed(named(provider="codex", at=NOW - 30, label="",
+                               state=base.STATE_WAITING, n_wait=1))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["provider"] == "claude"          # still the primary ring
+    assert msg["state"] == "waiting"            # but the desk is waiting
+    assert bus.session_pair() == ("", 1)
+
+
+def test_two_named_sessions_in_the_same_state_leave_the_board_unnamed():
+    """Codex can name a session now, so both providers can arrive holding a
+    name for the same state. There is one line and no honest rule for
+    choosing between two projects that are equally true of it, so neither is
+    shown.
+
+    Both frames here claim n_wait=0 while sitting in STATE_WAITING -- a
+    provider that reports a named session in a state while claiming no
+    sessions in it is inconsistent, and that inconsistency is exactly what
+    must not slip a name onto the panel. It is also the one scenario where
+    the summed-count guard (n <= 1) is satisfied by both frames on its own
+    and cannot be the thing doing the refusing: only the exclusivity guard
+    (exactly one frame holding the state) can be responsible for the ""
+    below, which is the guard this test exists to pin.
+    """
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", state=base.STATE_WAITING,
+                               label="LiveClaudeUi", n_wait=0)),
+                   Fixed(named(provider="codex", at=NOW - 30,
+                               state=base.STATE_WAITING,
+                               label="Blink", n_wait=0))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "waiting"
+    assert bus.session_pair() == ("", 0)
+
+
+def test_a_codex_name_shows_when_it_is_the_only_holder_of_the_state():
+    """The other half of the same rule, and the one that would be lost by a
+    lazy "Claude wins" precedence: a Claude session merely working beside a
+    waiting Codex session leaves exactly one holder of the state the panel is
+    showing, and that one is named whichever provider it came from.
+    """
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", state=base.STATE_RUNNING,
+                               label="LiveClaudeUi", n_run=1)),
+                   Fixed(named(provider="codex", at=NOW - 30,
+                               state=base.STATE_WAITING,
+                               label="Blink", n_wait=1))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "waiting"
+    assert bus.session_pair() == ("Blink", 1)
+
+
+def test_a_failed_codex_session_outranks_a_waiting_claude_one():
+    """base.SEVERITY puts failed first, and protocol.frame_to_usage sends
+    worst_of(primary, secondary). A Codex turn that died on a usage limit is
+    the loudest thing on the desk and takes the line, name and all.
+    """
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", state=base.STATE_WAITING,
+                               label="LiveClaudeUi", n_wait=1)),
+                   Fixed(named(provider="codex", at=NOW - 30,
+                               state=base.STATE_FAILED,
+                               label="Blink", n_stuck=1))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "failed"
+    assert bus.session_pair() == ("Blink", 1)
+
+
+def test_two_providers_agreeing_on_the_state_keep_the_name():
+    """The other half: the name survives a second provider that is merely
+    busy, because the state on the panel is still the named one's."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", n_wait=1)),
+                   Fixed(named(provider="codex", at=NOW - 30, label="",
+                               state=base.STATE_RUNNING, n_run=1))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "waiting"
+    assert bus.session_pair() == ("LiveClaudeUi", 1)
+
+
+def test_sessions_on_both_providers_sharing_a_state_are_not_named():
+    """Naming one of several is refused rather than guessed -- the same rule
+    claude_state.poll applies before it ever sets `label`. It has to hold
+    across providers too, or two waiting Codex sessions would silently
+    rename themselves after the one Claude project."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", n_wait=1)),
+                   Fixed(named(provider="codex", at=NOW - 30, label="",
+                               state=base.STATE_WAITING, n_wait=2))],
+        now=lambda: NOW)
+    bus.poll()
+    assert bus.session_pair() == ("", 3)
+
+
+def test_a_failed_session_reports_the_stuck_count():
+    """claude_state.poll folds a failed session into n_stuck, so `failed`
+    has to read that count and not zero -- otherwise two failed sessions say
+    "Session failed" where the panel should say "Session failed - 2
+    sessions"."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(state=base.STATE_FAILED, label="",
+                               n_stuck=2))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "failed"
+    assert bus.session_pair() == ("", 2)
+
+
+def test_the_count_belongs_to_the_state_on_the_panel():
+    """The count that goes out is the one for the frame's own state -- the
+    same rule the normalizer applies to the counts themselves. A running
+    count beside a `waiting` state would be a panel naming a number that
+    describes some other session."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(label="", n_run=2, n_wait=3, n_idle=9))],
+        now=lambda: NOW)
+    bus.poll()
+    assert bus.session_pair() == ("", 3)
+
+
+def test_session_pair_before_any_poll_is_empty():
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    assert bus.session_pair() == ("", 0)
 
 
 # --- the board owns the primary-provider preference ------------------------
@@ -162,6 +402,138 @@ def test_a_broken_provider_is_actually_skipped_not_just_silenced():
     assert Counting.calls == 1
 
 
+class _Clock:
+    """A wall clock the test moves by hand, since the cooldown is in seconds."""
+
+    def __init__(self, t=NOW):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+class Flaky(base.ProviderParser):
+    """Raises while `broken` is set, otherwise yields one frame. Counts polls."""
+
+    def __init__(self, broken=True, provider="claude"):
+        self.broken = broken
+        self.calls = 0
+        self._provider = provider
+
+    def get_provider_id(self):
+        return self._provider
+
+    def poll(self, now_epoch):
+        self.calls += 1
+        if self.broken:
+            raise RuntimeError("file was being rewritten as it was read")
+        return [frame(provider=self._provider, at=now_epoch)]
+
+
+def test_a_transient_failure_costs_a_cooldown_not_the_whole_session():
+    """The failure that motivated this is a file caught mid-rewrite.
+
+    The daemon polls every two seconds now, so a provider gets thirty chances
+    a minute to lose that race -- and under the old rule the first one it lost
+    retired it until the user restarted the daemon.
+    """
+    clock = _Clock()
+    flaky = Flaky()
+    bus = ingest.IngestionBus(providers=[flaky], now=clock)
+    assert bus.poll() is None
+
+    # The file finished being written a moment later. Nothing tells the bus.
+    flaky.broken = False
+    clock.advance(ingest.FIRST_RETRY_AFTER_S - 1)
+    assert bus.poll() is None, "retried before the cooldown was up"
+
+    clock.advance(1)
+    assert bus.poll() is not None
+
+
+def test_one_broken_instance_does_not_silence_its_twin():
+    """Two instances of one provider class are two sources, not one.
+
+    The quarantine was keyed by class name, so a second Codex home -- or the
+    same parser pointed at another directory -- went dark because its twin
+    raised. On the panel that reads as the source simply having no data.
+    """
+    clock = _Clock()
+    broken, healthy = Flaky(broken=True), Flaky(broken=False)
+    bus = ingest.IngestionBus(providers=[broken, healthy], now=clock)
+
+    for _ in range(3):
+        assert bus.poll() is not None
+        clock.advance(2)
+    assert healthy.calls == 3
+    assert broken.calls == 1
+
+
+def test_the_backoff_is_capped_so_a_fixed_provider_comes_back(capsys):
+    """Doubling without a ceiling is a permanent skip with extra steps.
+
+    A user who signs in, or upgrades the other application, gets the panel
+    back within the ceiling and without being told to restart anything.
+    """
+    clock = _Clock()
+    flaky = Flaky()
+    bus = ingest.IngestionBus(providers=[flaky], now=clock)
+
+    for _ in range(20):
+        bus.poll()
+        clock.advance(ingest.MAX_RETRY_AFTER_S)
+    # Every single tick, because the wait stops growing at the ceiling.
+    # Uncapped, the twentieth retry would be years out.
+    assert flaky.calls == 20
+    # And twenty failures still cost exactly one log line. Retrying is only
+    # affordable because it is quiet.
+    assert capsys.readouterr().err.count("will be skipped") == 1
+
+
+def test_a_provider_that_recovers_says_so_and_can_be_reported_again(capsys):
+    """One line per transition -- that is what "reported once" has to mean.
+
+    Silence while it keeps failing, because a traceback thirty times a minute
+    is its own defect. But a provider that came back and then broke again is
+    a new fault, and the log would otherwise carry only its first death.
+    """
+    clock = _Clock()
+    flaky = Flaky()
+    bus = ingest.IngestionBus(providers=[flaky], now=clock)
+    bus.poll()
+    assert "will be skipped" in capsys.readouterr().err
+
+    flaky.broken = False
+    clock.advance(ingest.FIRST_RETRY_AFTER_S)
+    bus.poll()
+    assert "working again" in capsys.readouterr().err
+
+    flaky.broken = True
+    clock.advance(2)
+    bus.poll()
+    assert "will be skipped" in capsys.readouterr().err
+
+
+def test_a_clock_that_went_backwards_does_not_strand_a_provider():
+    """self._now is wall time, and wall time is not monotonic.
+
+    A sleeping laptop or an NTP step can put `now` before the moment the
+    provider was quarantined, which arithmetic alone would turn back into the
+    permanent skip this cooldown exists to end.
+    """
+    clock = _Clock()
+    flaky = Flaky()
+    bus = ingest.IngestionBus(providers=[flaky], now=clock)
+    bus.poll()
+
+    flaky.broken = False
+    clock.advance(-3600)
+    assert bus.poll() is not None
+
+
 def test_two_real_files_reach_the_wire_together(tmp_path):
     """End to end: the real Desktop cache and the real Codex log, through the
     bus, onto one usage message. This is the path a Desktop+Codex customer's
@@ -190,3 +562,171 @@ def test_two_real_files_reach_the_wire_together(tmp_path):
     assert msg["p2_stale"] is False
     from pc import protocol
     assert len(protocol.encode(msg)) <= protocol.MAX_LINE_BYTES
+
+
+def test_the_panel_reports_the_age_of_the_last_claude_code_reading(tmp_path):
+    """The field bug, end to end (2026-09-02).
+
+    Claude Code was used six hours ago and its five-hour window has since
+    expired, so the status line no longer carries a percentage. Claude
+    Desktop was last open 57 hours ago. The message must carry the CLI
+    reading and ITS age -- the desktop sample's 57 hours is an honest answer
+    to a question nobody asked.
+    """
+    import json
+    import os
+
+    from pc.providers.claude_cli import ClaudeCliProvider
+
+    p = tmp_path / "statusline.json"
+
+    def write(doc, mtime):
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        os.utime(p, (mtime, mtime))
+
+    cli = ClaudeCliProvider(path=str(p))
+    desktop = Fixed(frame(src="desktop", at=NOW - 57 * 3600, session=0.0,
+                          weekly=0.0))
+
+    write({"rate_limits": {"five_hour": {"used_percentage": 27.0}}},
+          NOW - 6 * 3600)
+    now = [NOW - 6 * 3600 + 1]
+    bus = ingest.IngestionBus(providers=[cli, desktop],
+                              now=lambda: now[0])
+    bus.poll()
+
+    write({"rate_limits": {}}, NOW - 60)
+    now[0] = NOW
+    msg = bus.poll()
+
+    assert msg["src"] == "cli"
+    assert msg["session_pct"] == 27.0
+    assert msg["age_s"] == 6 * 3600
+    assert msg["stale"] is True
+
+    now[0] = NOW + 60
+    assert bus.poll()["age_s"] == 6 * 3600 + 60
+
+
+def _sleep_absent_after_s():
+    """SLEEP_ABSENT_AFTER_S, read out of the firmware header it lives in.
+
+    Hard-coding 14400 here would let the two sides drift apart silently, and
+    that number is the whole point of the test below: it is the gate the
+    daemon must not hand a reason to fire. Reading it means a rename or a
+    move raises here rather than quietly stopping the test from testing
+    anything.
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    text = (root / "firmware" / "src" / "sleep_gate.h").read_text()
+    m = re.search(r"^#define\s+SLEEP_ABSENT_AFTER_S\s+(\d+)", text,
+                  re.MULTILINE)
+    assert m, "SLEEP_ABSENT_AFTER_S is not in firmware/src/sleep_gate.h"
+    return int(m.group(1))
+
+
+def test_a_live_status_line_keeps_the_board_awake_behind_an_old_dial(tmp_path):
+    """The regression this whole field exists for (final review, F-A).
+
+    Claude Code is open and rewriting its status line every minute. Its
+    five-hour window expired overnight, so the rewrite carries only the
+    seven-day figure -- the shape pc/providers/claude_cli's own docstring
+    describes, and the shape the field report describes. The remembered
+    five-hour reading from twelve hours ago wins the session dial and brings
+    its own mtime with it.
+
+    So the dial IS twelve hours old, and the wire says so, honestly. What
+    must not follow is the board deciding that nobody is at the desk: the
+    file under all of this was written five seconds ago. With only one age
+    on the wire it was 43200, the four-hour gate fired, and the panel closed
+    its eyes on an owner who was watching it.
+    """
+    import os
+
+    p = tmp_path / "statusline.json"
+
+    def write(doc, mtime):
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        os.utime(p, (mtime, mtime))
+
+    cli = ClaudeCliProvider(path=str(p))
+    now = [NOW - 12 * 3600 + 1]
+    bus = ingest.IngestionBus(providers=[cli], now=lambda: now[0])
+
+    # Overnight: a real five-hour reading, which the provider remembers.
+    # No reset stamp on it, and that is load-bearing rather than lazy: a
+    # stamp the clock has since passed is proof the window ended, and a
+    # reading of a window that has ended is refused outright rather than
+    # aged (pc/statusline_source._rolled_over). This is the other case --
+    # nothing here says the twelve-hour-old reading has been superseded, so
+    # it is offered, and offered with its own honest age.
+    write({"rate_limits": {"five_hour": {"used_percentage": 27.0},
+                           "seven_day": {"used_percentage": 26.0}}},
+          NOW - 12 * 3600)
+    assert bus.poll()["session_pct"] == 27.0
+
+    # This morning: the five-hour window is gone from the rewrite, the
+    # seven-day figure is not, and the file is five seconds old.
+    write({"rate_limits": {"seven_day": {"used_percentage": 41.0}}}, NOW - 5)
+    now[0] = NOW
+    msg = bus.poll()
+
+    assert msg["src"] == "cli"
+    assert msg["session_pct"] == 27.0        # the remembered dial
+    assert msg["weekly_pct"] == 41.0         # from the live rewrite
+    assert msg["age_s"] == 12 * 3600         # and it really is that old
+    assert msg["active_age_s"] == 5          # but the desk is not
+
+    # The question the firmware asks, with the numbers this message carries.
+    # The first line is the bug; the second is why the board stays awake.
+    #
+    # The threshold is pinned as well as read. Twelve hours and five seconds
+    # straddle every plausible value, so the two comparisons below pass
+    # whatever the header says -- confirmed by a survey that changed
+    # SLEEP_ABSENT_AFTER_S from four hours to thirty minutes and watched all
+    # 620 tests stay green. Reading it out of the firmware header keeps the
+    # daemon and the board describing one number; this line is what notices
+    # if the number itself moves under a test that was written for it.
+    absent_after = _sleep_absent_after_s()
+    assert absent_after == 4 * 3600
+    assert msg["age_s"] >= absent_after
+    assert msg["active_age_s"] < absent_after
+
+
+def test_a_five_hour_window_that_ended_leaves_the_dial_empty_not_wrong(tmp_path):
+    """The same morning, with the one difference that decides it: the
+    overnight payload said WHEN its five-hour window would roll, and the
+    clock has passed it.
+
+    That reading is not old, it is about a window that no longer exists, so
+    the dial goes to unknown rather than showing usage the account has
+    already been forgiven. Everything else on the message survives: the
+    seven-day figure from the live rewrite, and an active age that keeps the
+    board awake for the person sitting in front of it.
+    """
+    import os
+
+    p = tmp_path / "statusline.json"
+
+    def write(doc, mtime):
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        os.utime(p, (mtime, mtime))
+
+    cli = ClaudeCliProvider(path=str(p))
+    now = [NOW - 12 * 3600 + 1]
+    bus = ingest.IngestionBus(providers=[cli], now=lambda: now[0])
+
+    write({"rate_limits": {"five_hour": {"used_percentage": 27.0,
+                                         "resets_at": NOW - 10 * 3600},
+                           "seven_day": {"used_percentage": 26.0}}},
+          NOW - 12 * 3600)
+    assert bus.poll()["session_pct"] == 27.0     # still inside its window
+
+    write({"rate_limits": {"seven_day": {"used_percentage": 41.0}}}, NOW - 5)
+    now[0] = NOW
+    msg = bus.poll()
+
+    assert msg["session_pct"] == -1.0
+    assert msg["session_resets_in_s"] == -1
+    assert msg["weekly_pct"] == 41.0
+    assert msg["active_age_s"] == 5

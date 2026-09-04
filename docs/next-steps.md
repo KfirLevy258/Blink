@@ -240,3 +240,75 @@ Smaller, still open:
   light has nothing to ride on: `merge()` returns None for a provider group
   carrying no percentage, and sending one would blank the dials instead. The
   real answer is a `state`-only wire message that does not touch them.
+
+**The pip row (2026-09-02).** The header's single execution-state dot became a
+row of pips, one per live session, in the gap between the clock and the brand
+— which was empty the whole time. The clock is back in its corner and the
+rings are back to 120 as a result, and the hint line no longer counts
+sessions, because the row does. `fmt_pips()` owns every decision (mode, order,
+overflow); `usage_view.c` only positions and colours.
+
+Verified live on the board, 2026-09-02, five frames driven through the real
+daemon with `up_ms` climbing 10,263 → 241,128 ms across all of them and no
+reset:
+
+| sessions | on the wire | what the row must show |
+|---|---|---|
+| 3 | `n_run 1` | pip mode, 3 pips: 1 green, 2 amber |
+| 6 | `n_run 4` | pip mode, 6 pips — the threshold |
+| 7 | `n_run 4, n_stuck 1` | counts mode, an empty state skipped |
+| 8 | `n_run 4, n_wait 1, n_stuck 1` | counts mode, `finished` dropped by the overflow rule |
+| 16 | `n_run 12, n_wait 1, n_stuck 1` | counts mode, a two-digit tally through the measured-width path |
+
+The daemon omits a zero, so `n_wait`/`n_stuck` are simply absent below —
+absent means zero on both sides.
+
+**Not verified: the panel itself.** Every row above is the wire and the board's
+liveness, not a photograph. `usage_view.c` needs LVGL and has no automated
+coverage of any kind, so whether six pips read as *six* rather than a smear —
+the threshold the whole design turns on — is still unanswered, as is whether
+the row visibly clears the clock and the wordmark. One session below 3 was
+never driven, because reaching it would have meant deleting the owner's real
+state files.
+
+**Re-flashed 2026-09-02, and why the table above was briefly wrong.** The
+frames in that table were driven at `199df2d`. Two commits later the tally
+numeral moved from y=8 to y=6 — its line box had been ending exactly on
+`STATUS_Y`, with no clearance to the hint line at all — and
+`usage_view_set_counts()` gained the `if (!built)` guard its siblings have.
+So the evidence described firmware the branch no longer had, and the one fix
+whose whole purpose was a visible 2 px had never run on the board.
+
+Re-flashed at `2ad00ec` and re-driven: 8 sessions (`n_run 4, n_wait 1,
+n_stuck 1` — the overflow rule) and 16 (`n_run 12, n_wait 1, n_stuck 1` — the
+two-digit tally, which is the case the numeral's Y actually matters in).
+`up_ms` 10,263 → 120,346 ms, no reset. The five rows above still hold; only
+the image they were taken from changed.
+
+**The hour took the row (2026-09-02, later the same day).** The line under
+BLINK read "Working" over a row of green pips — the panel spending its one
+sentence to repeat what colour already said. It shows the time instead, and
+yields to a sentence only while something wants a person: a failed turn, a
+wedged session, an open prompt. "Finished" stays a pip on the owner's call —
+not an error, and a desk that finishes a session every few minutes would
+never see the clock.
+
+The clock leaving the corner gave the pip row the whole 120 px from the bezel
+to the wordmark, up from 75. Counts mode holds **four** groups now, so
+`finished` is no longer dropped on an ordinary desk and the overflow rule is
+the edge case it was always described as.
+
+Verified on the board at `cecd489`: `state: idle` (clock holds the row),
+`waiting` and `failed` (each takes it), then back to `idle` when the probes
+cleared. `up_ms` 10,265 → 120,350, no reset.
+
+Verified by rendering, which is the part the board cannot show: the six
+scenes in `tools/panel_render/render_main.c` compile `usage_view.c` unchanged
+against real LVGL. Six pips read as six. Four count groups fit. Two 9999
+groups fit and the rest are dropped by the wall guard rather than crossing it.
+
+Two numbers were wrong and are now derived rather than typed:
+`BRAND_W` — "BLINK" measures 52 px at montserrat_14 with the letter_space of
+2 the code sets, so the wordmark starts at 134, not the 136 a comment claimed
+from a tracking value this code has never used. The clock's worst case was 49,
+not 47. Both errors ran in the direction that eats the row's clearance.

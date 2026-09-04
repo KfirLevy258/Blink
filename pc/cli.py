@@ -25,8 +25,15 @@ import subprocess
 import sys
 import time
 
-from pc import (install_hooks, install_statusline, protocol, statusline_source,
-                update)
+from pc import (install_codex_hooks, install_hooks, install_statusline,
+                protocol, statusline_source, update)
+# Eagerly, unlike the other providers, which are imported inside the functions
+# that use them to keep the frozen binary's start-up cheap. This one costs
+# nothing to import (os, and claude_state, which is json/os/sys/time) and it
+# has to be a module attribute rather than a local: `blink status` reads it,
+# and a test has to be able to replace it without a real slot directory in
+# reach -- the scan behind it deletes files.
+from pc.providers import codex_state
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -172,9 +179,72 @@ def _write_shim(path: str, name: str) -> None:
     # fails on `case ... in\r` on every status line render and every tool
     # call. The CI CRLF check only ever looked at the files in the repository,
     # never at the copy this function installs.
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(_shim_source(name))
-    os.chmod(path, 0o755)
+    # Temp file plus os.replace, NOT open(path, "w").
+    #
+    # Truncate-in-place has a window in which this file is empty or half
+    # written, and Claude Code runs this exact script on EVERY tool call. A
+    # hook that starts inside that window hands `sh` an empty file, or a
+    # truncated trailing line -- which exits non-zero and gives the tool a
+    # FAILING hook. The shim's own closing `exit 0` exists precisely so that
+    # Blink having a bad day never becomes the user's bad day, and truncating
+    # the script defeats it from outside.
+    #
+    # The window used to be one write during an explicit install, which is bad
+    # but rare and observed. This branch made DriftWatchdog call it from the
+    # daemon's poll loop, so the same window now opens on a timer, in the
+    # background, on a machine whose owner is working. install_statusline._save
+    # already writes this way for the user's settings, and the shim's own slot
+    # write already uses a pid-named temp plus mv -f; this was the one write
+    # that skipped the idiom, and it is the one that became recurring.
+    #
+    # The temp file is a sibling so os.replace is atomic, and the mode is set
+    # BEFORE the rename so the file is never briefly present and non-executable.
+    tmp = "%s.blink-tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(_shim_source(name))
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def shim_is_current(path: str, name: str) -> bool:
+    """Is the shim at `path` byte-identical to the one we would install?
+
+    Byte-identical, not "close enough": the one difference that has actually
+    bitten was line endings, and a comparison that normalised them would have
+    called the broken file healthy. Read in binary and compare exactly.
+
+    False on any failure to read. The caller's response to "stale" and to "I
+    cannot tell" is the same -- write it again -- and this runs inside the
+    daemon's poll loop, where raising is the one outcome worse than a shim
+    that stays stale for another five minutes.
+    """
+    try:
+        with open(path, "rb") as f:
+            installed = f.read()
+    except OSError:
+        return False
+
+    try:
+        expected = _shim_source(name).encode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        # The bundle itself is unreadable -- or, since _shim_source opens
+        # with encoding="utf-8", readable but not valid UTF-8, which raises
+        # UnicodeDecodeError (a ValueError, not an OSError, so it needs its
+        # own arm here). Either way there is nothing to compare against.
+        # Claiming the installed shim is stale would start a rewrite that
+        # cannot succeed and would log the failure every tick; claiming it
+        # is current changes nothing. Say current and let the louder failure
+        # surface elsewhere.
+        return True
+
+    return installed == expected
 
 
 # ---------------------------------------------------------------- Claude Code
@@ -270,6 +340,72 @@ def codex_present() -> bool:
         return bool(codex_cli.recent_rollouts(limit=1))
     except Exception:
         return False
+
+
+def _announce_codex_hooks() -> None:
+    """Say what is about to happen in Codex, before it happens.
+
+    Install is deliberately unattended, so disclosure is the only thing
+    standing between us and configuring a SECOND vendor's tool without saying
+    so -- and this one is not the tool the customer came here for. The trust
+    prompt is the part that has to be said out loud: Codex asks once, in its
+    own interface, minutes or days later, and an unexplained dialog from a
+    tool the person did not think they were configuring is a support incident
+    rather than a feature.
+
+    Wrapped continuation lines start lower case on purpose. The house rule is
+    that every sentence starts with a capital; a line that continues one is
+    not a new sentence, and capitalising it would read as a stutter.
+    """
+    print("Blink is about to add a hook to Codex as well.")
+    print()
+    print(f"  File     {install_codex_hooks.hooks_file()}")
+    print("  Why      Codex does not record permission prompts in its session")
+    print("           log, so without this a Codex session waiting on you")
+    print("           looks idle on the panel.")
+    print("  Note     The first time the hook runs, Codex asks you once")
+    print("           whether to trust it. That prompt is expected, and Blink")
+    print("           cannot answer it for you. Say yes and the panel can show")
+    print("           a Codex session waiting on you; say no and everything")
+    print("           else still works.")
+    print()
+
+
+def _install_codex_hooks() -> str:
+    """Register the shim with Codex, if there is a Codex here to register with.
+
+    Detected rather than asked about, the same way the Claude Code steps are:
+    the product is meant to be plug-and-play. Absent Codex, nothing is written
+    at all -- creating a hooks file for a tool that is not installed would
+    leave a stranger's configuration on the machine.
+
+    No pointer is written into Codex's config.toml, and none is needed:
+    hooks.json is discovered by location alone, verified by firing a real hook
+    against a config that mentioned hooks nowhere
+    (docs/research/codex-hook-contract.md, F3).
+    """
+    if not codex_present():
+        return "no Codex on this machine, nothing to do"
+    # Private to the user, for the same reason ~/.blink/state is: these files
+    # name the projects someone has open, and the default umask would leave
+    # them readable by every account on the machine. Created here rather than
+    # left to the shim so the mode is right from the first hook onward.
+    state_dir = os.path.join(blink_home(), "state-codex")
+    os.makedirs(state_dir, exist_ok=True)
+    try:
+        os.chmod(state_dir, 0o700)
+    except OSError:
+        pass                 # Windows, where the mode does not apply
+    try:
+        return install_codex_hooks.install(install_codex_hooks.hooks_file(),
+                                           hook_shim_path())
+    except install_statusline.SettingsUnreadable as e:
+        # Same judgement as the Claude hooks step: the status line is the
+        # product and the activity light is a nicety. A hooks file we cannot
+        # safely edit costs the user a pip, and is not worth failing an
+        # install that has otherwise worked -- still less worth "repairing"
+        # another vendor's config by writing our idea of it over theirs.
+        return f"skipped ({e})"
 
 
 def _note_if_no_claude_code():
@@ -443,6 +579,38 @@ def _service_command():
     return [sys.executable, os.path.join(repo, "blink_main.py"), "run"]
 
 
+def _confirm_running(probe, tries=4) -> bool:
+    """Keep asking a service manager whether something is REALLY running.
+
+    All three backends had the same hole and only one of them had learned:
+    they read the exit code of the command that started the service and
+    called that health. An exit code says a request was accepted. Whether a
+    process exists is a different question, and only the supervisor can
+    answer it -- which is the lesson recorded above _service_command() and
+    measured again on 2026-09-04, when five bootstraps out of five returned
+    zero with nothing running.
+
+    So this is the part that is the same everywhere -- ask, and if the answer
+    is no, ask again for a few seconds -- and `probe` is the part that is not.
+    It is a callable rather than an argv because the QUESTION differs per
+    platform and, on Windows, so does its subject: the pid file has to be
+    re-read on every attempt, because a daemon that has not started yet has
+    not written one.
+
+    Four tries over five seconds: long enough for a start that is merely
+    slow, short enough that nobody watching `blink update` thinks it hung.
+
+    Returns False on anything it cannot recognise. That lean is deliberate
+    and it is the whole point -- the one thing this must never do again is
+    print a claim it cannot see.
+    """
+    for attempt in range(tries):
+        if probe():
+            return True
+        time.sleep(0.5 * (attempt + 1))
+    return False
+
+
 class _Backend:
     """One platform's answer to "start this at login, and keep it running".
 
@@ -513,14 +681,93 @@ class _LaunchdBackend(_Backend):
             if r.returncode == 0:
                 break
             time.sleep(0.5 * (attempt + 1))
-        if r.returncode == 0:
+        if r.returncode != 0:
+            return ("installed, but could not be started: "
+                    f"launchctl bootstrap gui/{uid} {plist_path()}")
+
+        # BOOTSTRAP REGISTERS; IT DOES NOT START. A successful bootstrap means
+        # launchd has accepted the job, not that anything is running.
+        #
+        # And this is not a race that sometimes loses. Measured 2026-09-04 by
+        # running the old sequence -- bootout, bootstrap, no kickstart -- five
+        # times in a row against this very plist: `bootstrap` returned 0 every
+        # time and launchd reported "not running" every time. FIVE OUT OF FIVE.
+        # RunAtLoad is honoured at LOGIN, not on a bootstrap, so an install left
+        # the daemon dead until the user next logged in -- while the installer
+        # said it was running. That is why it stayed hidden: anyone who rebooted
+        # between installing and looking saw a working service.
+        #
+        # The observation that started it, straight after an install that had
+        # just printed "running (launchd)":
+        #
+        #     active count = 0
+        #     state = not running
+        #     last exit code = (never exited)
+        #
+        # The board went quiet and dozed while the installer said it was fine.
+        # This is the same defect tools/burn.sh has in its restore path, and
+        # the same lesson _service_command() already records one screen up:
+        # registration is not health.
+        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{LABEL}"],
+                       capture_output=True, **update.ota.NO_WINDOW)
+
+        # And then ASK, rather than assume. Everything above is a command that
+        # returned zero; none of it is evidence that a process exists. launchd
+        # is the only thing that knows, so the claim we print is its answer and
+        # not our hope.
+        if _confirm_running(lambda: self._is_running(uid)):
             return "running (launchd)"
-        return f"installed, but could not be started: launchctl bootstrap gui/{uid} {plist_path()}"
+        return ("registered with launchd, but it is not running -- "
+                f"start it with: launchctl kickstart -k gui/{uid}/{LABEL}")
+
+    def _is_running(self, uid) -> bool:
+        """Does launchd say a process actually exists? Its answer, not ours.
+
+        Asked by install() and restart() because they were making the same
+        claim from different evidence, and only one of them had learned. An
+        exit code says a command was accepted; `launchctl print` is the only
+        thing that says a process is running, so both ask it.
+
+        One ask. The retrying belongs to _confirm_running(), which the other
+        two backends need for the same reason: a kickstart hands the job to
+        launchd and returns, so the exec can still be in flight when the first
+        print lands.
+
+        Parsed the same defensive way status() is -- launchctl print is a
+        human-readable dump, not a contract.
+        """
+        pr = subprocess.run(["launchctl", "print", f"gui/{uid}/{LABEL}"],
+                            capture_output=True, text=True,
+                            **update.ota.NO_WINDOW)
+        return pr.returncode == 0 and "state = running" in (pr.stdout or "")
 
     def restart(self) -> str:
+        """Bounce the agent, then check that it came back.
+
+        The old body returned "restarted" whenever kickstart exited zero,
+        which is the exact defect install() was measured making on 2026-09-04:
+        five bootstraps out of five returned zero with nothing running. A
+        kickstart is a request to launchd, and a request that was accepted is
+        not a process that exists.
+
+        It matters most on the path that calls this. `blink update` swaps the
+        binary underneath the agent and then bounces it; if the new binary
+        cannot start -- a bad download, a missing dylib -- kickstart still
+        succeeds and launchd's respawns still fail. Saying "restarted" there
+        would send the user away from the one file that explains it.
+        """
+        uid = os.getuid()
         r = subprocess.run(["launchctl", "kickstart", "-k",
-                            f"gui/{os.getuid()}/{LABEL}"], capture_output=True, **update.ota.NO_WINDOW)
-        return "restarted" if r.returncode == 0 else "could not restart it"
+                            f"gui/{uid}/{LABEL}"], capture_output=True, **update.ota.NO_WINDOW)
+        if r.returncode != 0:
+            return "could not restart it"
+        if _confirm_running(lambda: self._is_running(uid)):
+            return "restarted"
+        # Not a command to paste this time: the command that would have been
+        # printed is the one that just ran and left nothing running. What is
+        # left to do is read why it died.
+        return ("restarted, but launchd reports it is not running -- "
+                f"see {log_path()}")
 
     def remove(self) -> str:
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
@@ -600,7 +847,55 @@ class _SchtasksBackend(_Backend):
         _kill_recorded_daemon()
         # /sc onlogon does not start it now, only at the next logon.
         subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True, **update.ota.NO_WINDOW)
-        return "running (Scheduled Task)"
+        # And then ASK Windows, rather than assume. /run returning zero means
+        # the task was triggered, not that a daemon exists -- the same claim
+        # from the same kind of evidence that left a Mac with no bridge and
+        # an installer saying "running (launchd)" on 2026-09-04.
+        #
+        # Six tries, not four: this is the first run of a freshly copied .exe,
+        # and Windows may hold it while a virus scanner reads all of it.
+        if _confirm_running(self._is_running, tries=6):
+            return "running (Scheduled Task)"
+        return ("registered as a Scheduled Task, but it is not running -- "
+                f'start it with: schtasks /run /tn "{TASK_NAME}"')
+
+    def _is_running(self) -> bool:
+        """Is the bridge daemon alive? Asked of Windows, by pid.
+
+        NOT `schtasks /query`. The task's status answers a different question:
+        its action is wscript running LAUNCHER_VBS, which starts the bridge
+        with `, 0, False` -- do not wait -- and exits at once. A perfectly
+        healthy Blink therefore shows the task as Ready within a second of
+        /run, so a check on the task's state would have called every working
+        install dead. Registration is not health, and neither is the
+        launcher's own exit.
+
+        Nor could it be read from the word schtasks prints: that word is
+        translated on a localised Windows, and the owner's PC is one.
+
+        So the question is the one _kill_recorded_daemon already asks -- the
+        pid the daemon wrote for itself -- with the image name as a filter so
+        a recycled pid belonging to something else cannot answer for it. Only
+        ~/.blink/bridge.pid is read, not the pre-1.1.0 copies that function
+        also sweeps: a daemon still running out of bin.old is the thing an
+        install was trying to replace, and counting it as health would report
+        exactly the failure of 2026-08-29 as a success.
+        """
+        try:
+            with open(pid_path(), encoding="utf-8") as f:
+                pid = int(f.read().strip())
+        except (OSError, ValueError):
+            return False
+        r = subprocess.run(
+            ["tasklist", "/fi", f"PID eq {pid}",
+             "/fi", "IMAGENAME eq " + os.path.basename(installed_bin()),
+             "/nh", "/fo", "csv"],
+            capture_output=True, text=True, **update.ota.NO_WINDOW)
+        # tasklist exits ZERO whether or not anything matched; with no match
+        # it prints "INFO: No tasks are running which match ...". The pid
+        # appearing in a row it printed is the only answer that means
+        # anything -- and that row is digits either way, in any language.
+        return str(pid) in (r.stdout or "")
 
     def restart(self) -> str:
         subprocess.run(["schtasks", "/end", "/tn", TASK_NAME],
@@ -613,7 +908,17 @@ class _SchtasksBackend(_Backend):
         _kill_recorded_daemon()
         r = subprocess.run(["schtasks", "/run", "/tn", TASK_NAME],
                            capture_output=True, **update.ota.NO_WINDOW)
-        return "restarted" if r.returncode == 0 else "could not restart it"
+        if r.returncode != 0:
+            return "could not restart it"
+        if _confirm_running(self._is_running, tries=6):
+            return "restarted"
+        # This is the `blink update` path: the .exe under the task was just
+        # replaced. If the new one cannot start, /run still succeeds and the
+        # log is the only thing that says why -- and unlike install() there is
+        # no command worth pasting, because the command that would be printed
+        # is the one that just ran and left nothing running.
+        return ("restarted, but it is not running -- "
+                f"see {log_path()}")
 
     def remove(self) -> str:
         subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True, **update.ota.NO_WINDOW)
@@ -656,16 +961,54 @@ class _SystemdBackend(_Backend):
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, **update.ota.NO_WINDOW)
         r = subprocess.run(["systemctl", "--user", "enable", "--now",
                             "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
-        if r.returncode == 0:
+        if r.returncode != 0:
+            return "installed, but could not be started: systemctl --user enable --now blink-bridge"
+        # `enable --now` RETURNED ZERO. That is systemctl accepting the
+        # request; it is not a running unit, and this line has already been
+        # wrong once in a way nobody caught: see _systemd_exec(), where an
+        # unquoted ExecStart with a space in it failed to locate the
+        # executable "while `blink install` still printed running (systemd)".
+        # Ask systemd instead.
+        if _confirm_running(self._is_running):
             return "running (systemd)"
-        return "installed, but could not be started: systemctl --user enable --now blink-bridge"
+        return ("enabled with systemd, but it is not running -- "
+                "see: systemctl --user status blink-bridge.service")
+
+    def _is_running(self) -> bool:
+        """Does systemd say the unit is active? Its word, not an exit code.
+
+        `is-active` WITHOUT --quiet prints the state -- active, activating,
+        inactive, failed -- and that word is the answer. status() may use the
+        exit code because there the command asked and the fact reported are
+        the same thing; here the temptation is to reuse the exit code of
+        `enable --now`, which is a different command reporting a different
+        fact, and that is precisely the defect.
+
+        Anything unrecognised reads as not running: an empty dump means we
+        could not see it, and not-seen must never print as healthy.
+
+        Worth the retry even though Restart=always makes systemd patient: a
+        unit that has been asked to start reads "activating" until its exec
+        is up, and answering the first ask would call that dead.
+        """
+        r = subprocess.run(["systemctl", "--user", "is-active",
+                            "blink-bridge.service"],
+                           capture_output=True, text=True,
+                           **update.ota.NO_WINDOW)
+        lines = (r.stdout or "").split()
+        return bool(lines) and lines[0] == "active"
 
     def restart(self) -> str:
         if not self._has_systemctl():
             return super().restart()
         r = subprocess.run(["systemctl", "--user", "restart",
                             "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
-        return "restarted" if r.returncode == 0 else "could not restart it"
+        if r.returncode != 0:
+            return "could not restart it"
+        if _confirm_running(self._is_running):
+            return "restarted"
+        return ("restarted, but systemd reports it is not running -- "
+                "see: systemctl --user status blink-bridge.service")
 
     def remove(self) -> str:
         if not self._has_systemctl():
@@ -955,7 +1298,7 @@ def cmd_install(_args) -> int:
 
     _announce()
 
-    print("[1/4] Program ... ", end="", flush=True)
+    print("[1/5] Program ... ", end="", flush=True)
     os.makedirs(bin_dir(), exist_ok=True)
     if _frozen():
         # The program is a directory -- the executable and its _internal/
@@ -984,7 +1327,7 @@ def cmd_install(_args) -> int:
         # interpreter instead. Customers never take this path.
         print("running from a checkout, nothing to copy")
 
-    print("[2/4] Status line ... ", end="", flush=True)
+    print("[2/5] Status line ... ", end="", flush=True)
     os.makedirs(blink_home(), exist_ok=True)
     # Private to the user. The shims write the status line payload -- which
     # names the working directory and the session -- and the per-session
@@ -1001,7 +1344,7 @@ def cmd_install(_args) -> int:
                                  undo_hint=f"{installed_bin()} uninstall")
     print("      " + install_statusline.install(settings_path(), shim_path()))
 
-    print("[3/4] Activity hooks ... ", end="", flush=True)
+    print("[3/5] Activity hooks ... ", end="", flush=True)
     _write_shim(hook_shim_path(), "blink-hook.sh")
     try:
         print(install_hooks.install(settings_path(), hook_shim_path()))
@@ -1011,7 +1354,20 @@ def cmd_install(_args) -> int:
         # and is not worth failing an install that has otherwise worked.
         print(f"skipped ({e})")
 
-    print("[4/4] Background service ... ", end="", flush=True)
+    # The disclosure for this step is here rather than up in _announce(),
+    # because it is the only step that is conditional on what is already on
+    # the machine: on a Codex-free machine there is nothing to disclose, and a
+    # paragraph about another vendor's config file would be noise at best and
+    # alarming at worst.
+    print("[4/5] Codex hooks ... ", end="", flush=True)
+    if codex_present():
+        print()
+        _announce_codex_hooks()
+        print("      " + _install_codex_hooks())
+    else:
+        print(_install_codex_hooks())
+
+    print("[5/5] Background service ... ", end="", flush=True)
     print(_install_service())
 
     print()
@@ -1032,11 +1388,11 @@ def cmd_install(_args) -> int:
 def cmd_uninstall(_args) -> int:
     print("Blink uninstall.")
     print()
-    print("[1/4] Background service ... ", end="", flush=True)
+    print("[1/5] Background service ... ", end="", flush=True)
     print(_remove_service())
     _say_bye()
 
-    print("[2/4] Claude Code setting:")
+    print("[2/5] Claude Code setting:")
     try:
         print("      " + install_statusline.uninstall(settings_path(), shim_path()))
     except install_statusline.SettingsUnreadable as e:
@@ -1047,7 +1403,7 @@ def cmd_uninstall(_args) -> int:
         print(f"      Left alone: {e}")
         print("      Remove the statusLine.command line by hand once it parses.")
 
-    print("[3/4] Activity hooks:")
+    print("[3/5] Activity hooks:")
     try:
         print("      " + install_hooks.uninstall(settings_path(),
                                                  hook_shim_path()))
@@ -1056,7 +1412,10 @@ def cmd_uninstall(_args) -> int:
         # file we cannot parse by writing a fresh one over it.
         print(f"      Left alone: {e}")
 
-    print("[4/4] Files ... ", end="", flush=True)
+    print("[4/5] Codex hooks:")
+    _uninstall_codex_hooks()
+
+    print("[5/5] Files ... ", end="", flush=True)
     # Only what install created. NOT ~/.blink itself: it also holds the two
     # signing keys, which cannot be regenerated -- every board flashed with the
     # first one's public half, and every app carrying the second one's, would
@@ -1086,6 +1445,48 @@ def cmd_uninstall(_args) -> int:
     return 1
 
 
+def _uninstall_codex_hooks() -> None:
+    """Take the Codex registration back out, and say what is deliberately kept.
+
+    Prints rather than returning, because it has two things to say, and never
+    stops on a bad file: the caller has already removed the login service by
+    the time this runs, so stopping here would leave the machine half-undone.
+    The one thing we must not do is "repair" a file we cannot parse by writing
+    a fresh one over it.
+
+    The trust record in Codex's own config.toml is left alone, and the second
+    half of this function exists to say so out loud. Removing it is the
+    tidier-looking choice and it is the wrong one: under `codex exec` a
+    distrusted hook is skipped silently, with no prompt and no output, so a
+    reinstall on a headless machine would produce a hook that is installed,
+    correct, registered and permanently invisible. Working software that
+    cannot be seen to be broken is the worst failure shape this product has.
+    The full argument is in docs/research/codex-hook-contract.md under "RULING:
+    uninstall leaves the trust record alone"; silence about it here would be
+    the same defect one level up -- a decision the user cannot see.
+    """
+    # No try around this, unlike steps [2/5] and [3/5]. install_codex_hooks
+    # .uninstall() catches its own SettingsUnreadable at all three points that
+    # can raise one -- the read, the shape check, and now the write -- and
+    # returns a "left it alone" sentence with the marker kept, so every failure
+    # already arrives here as a line of report rather than an exception. A
+    # handler for an exception that cannot arrive is a guard nobody can
+    # falsify, and this file has been carrying several.
+    print("      " + install_codex_hooks.uninstall(
+        install_codex_hooks.hooks_file(), hook_shim_path()))
+
+    config = os.path.join(install_codex_hooks.codex_home(), "config.toml")
+    # Only when the file is really there. On the many machines with no Codex
+    # at all, a paragraph about a config file that does not exist is noise
+    # about a record that was never written.
+    if os.path.exists(config):
+        print(f"      Left in place: your Codex trust records in {config}.")
+        print("      If you approved this hook in Codex, that approval stays")
+        print("      on file, so installing Blink again works without asking")
+        print("      you a second time. Remove its [hooks.state] entry by hand")
+        print("      if you would rather Codex asked you afresh.")
+
+
 def _live_sessions() -> int:
     """How many sessions the hooks are currently tracking.
 
@@ -1096,7 +1497,7 @@ def _live_sessions() -> int:
     """
     from pc.providers import claude_state
     try:
-        counts, _ = claude_state.ClaudeStateProvider(
+        counts, _, _ = claude_state.ClaudeStateProvider(
             path=os.path.join(blink_home(), "state"), sweep=False
         ).scan(time.time())
     except Exception:
@@ -1115,44 +1516,144 @@ def _rm_tree(root):
 
 
 def _rm_state_dir():
-    """Remove ~/.blink/state and its per-session subdirectories.
+    """Remove ~/.blink/state and ~/.blink/state-codex, and their subdirectories.
+
+    Both directories, because the Codex slots deliberately live apart from the
+    Claude ones (pc/providers/codex_state explains why) -- and a slot
+    directory left behind by an uninstall is not litter, it is a lie: the
+    daemon would go on counting sessions of a tool it no longer hooks.
 
     Two levels deep and no deeper, by construction: the shim only ever creates
-    <session>.state files and <session>/<agent> files. Walking rather than
-    shutil.rmtree because this runs against a path under the customer's home
-    and a bounded loop cannot be talked into deleting more than it was told.
+    <session>.state files and <session>/<agent> files, in whichever of the two
+    directories its second argument chose. Walking rather than shutil.rmtree
+    because this runs against a path under the customer's home and a bounded
+    loop cannot be talked into deleting more than it was told.
     """
-    root = os.path.join(blink_home(), "state")
-    try:
-        names = os.listdir(root)
-    except OSError:
-        return
-    for name in names:
-        p = os.path.join(root, name)
-        if os.path.isdir(p):
-            for inner in (os.listdir(p) if os.path.isdir(p) else []):
-                _rm(os.path.join(p, inner))
-            try:
-                os.rmdir(p)
-            except OSError:
-                pass
-        else:
-            _rm(p)
-    try:
-        os.rmdir(root)
-    except OSError:
-        pass
+    for sub in ("state", "state-codex"):
+        root = os.path.join(blink_home(), sub)
+        try:
+            names = os.listdir(root)
+        except OSError:
+            # Absent, which is the normal case for state-codex on a machine
+            # that never ran Codex. `continue`, not `return`: the old single
+            # directory could give up here, but giving up on the first of two
+            # would leave the second untouched on exactly those machines.
+            continue
+        for name in names:
+            p = os.path.join(root, name)
+            if os.path.isdir(p):
+                for inner in (os.listdir(p) if os.path.isdir(p) else []):
+                    _rm(os.path.join(p, inner))
+                try:
+                    os.rmdir(p)
+                except OSError:
+                    pass
+            else:
+                _rm(p)
+        try:
+            os.rmdir(root)
+        except OSError:
+            pass
+
+
+def hook_shim_status_note():
+    """A one-line warning when the installed hook shim cannot do its job.
+
+    `blink status` reports the activity hooks by comparing settings.json's
+    command strings against the shim path. That check passed throughout the
+    period when the feature was dead: the path existed, the hook ran, and the
+    file it ran was simply older than the daemon reading its output. The
+    daemon can repair this within five minutes of starting -- whether it
+    actually will is a separate question the caller answers with
+    `_shim_repair_is_live`, because this function only knows the file is
+    wrong, not whether anything is left to fix it.
+
+    Two faults, two sentences, because a reader does two different things
+    about them. A shim that is ABSENT is not a shim that is stale: the hooks
+    in settings.json are still wired to that path, so Claude Code runs a file
+    that is not there, silently, on every event -- the pip never lights at
+    all, where a stale shim lights it with the wrong field. Saying "out of
+    date" about a missing file sends someone looking for a version mismatch
+    in a file they will not find.
+
+    This asks about existence FIRST because shim_is_current answers False for
+    a file it cannot open, which is how the two faults came to share a
+    sentence: absent and stale are the same value to it, and only one of them
+    is what it means.
+    """
+    if not os.path.exists(hook_shim_path()):
+        return "the activity hook shim is missing, so the hooks run nothing"
+    if shim_is_current(hook_shim_path(), "blink-hook.sh"):
+        return None
+    return "the activity hook shim is out of date"
+
+
+def statusline_shim_status_note():
+    """The same check as `hook_shim_status_note`, for the other shim.
+
+    `blink status` has reported "Status line installed at ..." from the
+    file's mere presence since before DriftWatchdog existed -- the identical
+    blind spot the Activity row had until shim_content_check was added to
+    repair this shim too. Silent when the shim was never installed: a
+    missing file already prints "not installed" two lines up, and asking
+    whether a nonexistent file's contents are current is not a question
+    worth another line.
+    """
+    if not os.path.exists(shim_path()):
+        return None
+    if shim_is_current(shim_path(), "blink-statusline.sh"):
+        return None
+    return "the status line shim is out of date"
+
+
+def _shim_repair_is_live(bridge_running: bool) -> bool:
+    """Will DriftWatchdog's next tick actually rewrite a stale shim?
+
+    Three ways "the daemon replaces it within five minutes" can be false even
+    though the shim really is stale: BLINK_NO_WATCHDOG turns self-healing off
+    entirely (install_statusline.drift_check and shim_content_check both
+    check it first); shim_content_check no-ops with no install marker, the
+    same "never installed, or deliberately uninstalled" rule drift_check
+    documents; and with no bridge running there is no poll loop to tick at
+    all -- `cmd_status` already knows that from the Bridge row two lines
+    above and passes it in here rather than this function re-deriving it.
+    Printing the promise when none of these hold is the same species of
+    confidently-wrong copy this whole fix exists to end.
+    """
+    if os.environ.get(install_statusline.WATCHDOG_DISABLE_ENV):
+        return False
+    if not install_statusline._read_marker():
+        return False
+    return bridge_running
+
+
+def _shim_repair_line(note: str, bridge_running: bool) -> str:
+    """Format a stale-shim note, promising repair only when it will happen."""
+    if _shim_repair_is_live(bridge_running):
+        return f"{note} -- the daemon replaces it within five minutes of starting"
+    return f"{note} -- run `{installed_bin()} install` to fix it"
 
 
 def cmd_status(args) -> int:
+    # Whether a daemon is actually ticking, for the stale-shim notes below:
+    # neither drift_check nor shim_content_check runs on its own, so a shim
+    # note that promises "the daemon replaces it" is a lie with no bridge
+    # behind it. Every status() string that means "up" starts with "running"
+    # (see backend().status()'s docstring); under BLINK_SKIP_SERVICE the
+    # question was never asked, and "cannot confirm" gets the same false as
+    # "confirmed not running" -- the honest default when the promise cannot
+    # be checked.
     if _skip_service():
         # The launchd label and systemd unit name are global while everything
         # else is scoped to $HOME, so querying them under a test HOME reports
         # the real user's agent -- which read as "installed" for an install
         # that never happened.
         print("Bridge      not checked (BLINK_SKIP_SERVICE=1)")
+        bridge_running = False
     else:
-        print("Bridge      " + backend().status())
+        bridge_status = backend().status()
+        print("Bridge      " + bridge_status)
+        bridge_running = bridge_status.startswith("running")
 
     print(f"App         {RELEASE_VERSION}")
     for line in _board_lines():
@@ -1183,6 +1684,13 @@ def cmd_status(args) -> int:
 
     print("Status line " + (f"installed at {shim_path()}" if os.path.exists(shim_path())
                             else "not installed"))
+    # Same blind spot the Activity row had: the path existing does not mean
+    # its contents are current, and this shim gets the identical repair from
+    # DriftWatchdog (see claude_usage_bridge.py's shims= list), so it earns
+    # the identical disclosure.
+    stale_statusline = statusline_shim_status_note()
+    if stale_statusline:
+        print(f"            {_shim_repair_line(stale_statusline, bridge_running)}")
 
     # Install writes two things into settings.json, so status has to report
     # two. Reporting only the status line is the same omission the setup
@@ -1219,6 +1727,19 @@ def cmd_status(args) -> int:
         else:
             print("Activity    hooks not installed -- the busy/idle pip will"
                   " stay dark")
+        # Under the row rather than instead of it: every count above can be
+        # right while the file those hooks run is older than the daemon
+        # reading its output, which is the whole of this fault.
+        #
+        # Only when `ours` is nonzero: with zero hooks wired into
+        # settings.json at all, whether the shim they would have called is
+        # stale is not the actionable fact -- "hooks not installed" above
+        # already covers it, and a note about a file nothing points at is
+        # noise, not disclosure.
+        if ours:
+            stale = hook_shim_status_note()
+            if stale:
+                print(f"            {_shim_repair_line(stale, bridge_running)}")
     except install_statusline.SettingsUnreadable:
         print("Activity    unknown -- settings.json does not parse")
 
@@ -1321,6 +1842,53 @@ def _board_lines():
         return [f"Board       could not list serial ports: {e}"]
 
 
+def _codex_hook_status():
+    """The Codex hook lines of `blink status`.
+
+    Three states worth telling apart, because the repairs are different:
+    registered and firing, registered and silent, not registered at all.
+
+    The middle one is the reason this function exists. Under `codex exec` a
+    hook the user has not trusted is skipped silently -- no prompt, no
+    warning, no output whatsoever (docs/research/codex-hook-contract.md, F5) --
+    so from out here, a hook that is registered and has never written a slot
+    is exactly what declining Codex's trust prompt looks like. It is the one
+    support question this feature has that no other part of the product does,
+    and without this line the symptom is a panel that simply never mentions a
+    Codex session waiting on its human, with nothing anywhere saying why.
+
+    Read off our own marker rather than off Codex's hooks.json, unlike the
+    Activity row's count: that file belongs to another vendor, and parsing it
+    a second time here would be a second copy of install_codex_hooks' reader,
+    free to drift from the first.
+    """
+    if not install_codex_hooks._read_marker():
+        return [f"Codex hook  not installed -- run `{installed_bin()} install`"
+                " on a machine with Codex"]
+    try:
+        # sweep=False, for the reason codex_state.scan gives at length: a
+        # diagnostic that deletes what it is diagnosing destroys the evidence
+        # somebody ran it to see. Here that is not an abstraction -- the
+        # never-written case above IS the diagnosis, and a sweep is what would
+        # manufacture it.
+        states, _agents = codex_state.scan(time.time(), sweep=False)
+    except Exception as e:
+        # Not folded into the empty case below. "It has never written
+        # anything" would send someone to Codex's trust prompt over a
+        # directory we merely failed to read, which is the wrong repair for a
+        # different fault.
+        return [f"Codex hook  registered, but its slots could not be read ({e})"]
+    if not states:
+        return [
+            "Codex hook  registered, but it has never written anything",
+            "            Codex asks once whether to trust a hook. If that",
+            "            prompt was declined the hook stays in the file and",
+            "            never runs -- open Codex and accept it.",
+        ]
+    n = len(states)
+    return [f"Codex hook  firing, {n} live session{'s' if n != 1 else ''}"]
+
+
 def _source_lines():
     """One line each for the two sources CI cannot exercise.
 
@@ -1356,7 +1924,13 @@ def _source_lines():
 
     logs = codex_cli.recent_rollouts()
     if logs:
-        frames = codex_cli.CodexCliProvider().poll(now)
+        # sweep=False, matching _live_sessions above and for the same reason:
+        # the provider's poll() scans the Codex hook slots, and the scan
+        # DELETES abandoned ones. `blink status` must not mutate what it
+        # reports -- asking "is the Codex hook working?" would otherwise
+        # delete the evidence that it is, and leave the next run reading
+        # differently because of this one.
+        frames = codex_cli.CodexCliProvider(sweep=False).poll(now)
         if frames:
             print(f"Codex       session log parsed, reading"
                   f" {_age(now - frames[0].observed_at)} old")
@@ -1367,6 +1941,15 @@ def _source_lines():
     else:
         print("Codex       no session logs (Codex not installed, or never run)")
         print(f"            looked under {codex_cli.sessions_root()}")
+
+    # Under the Codex rows, and only where there is something to answer. These
+    # lines answer "why is my Codex session not showing as waiting"; on a
+    # machine with neither a Codex log nor a registration of ours, that is a
+    # question nobody asked, and telling them to install a hook for a tool
+    # they do not have is worse than saying nothing.
+    if logs or install_codex_hooks._read_marker():
+        for line in _codex_hook_status():
+            print(line)
 
 
 def cmd_update(_args) -> int:

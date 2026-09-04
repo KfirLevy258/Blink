@@ -2,6 +2,8 @@
 #define SLEEP_GATE_H
 
 #include <stdbool.h>
+#include <stdint.h>
+#include "usage_view.h"
 
 /* The one rule for dozing (docs/sleep-mode-design.md): the host has gone
  * silent without saying goodbye, this boot has shown real figures at least
@@ -10,5 +12,111 @@
  * writes -- silence that means the opposite of sleep). Pure, so the host
  * test in tests/sleep_gate can pin it. */
 bool sleep_should_start(bool host_lost, bool had_usage, bool ota_busy);
+
+/*
+ * How old a reading has to be before the board stops waiting up for it.
+ *
+ * Four hours, and the number is load-bearing. It has to sit above every gap
+ * a person sitting at the desk can produce and below a night:
+ *
+ *   - The daemon's own staleness bound is 1800 s (pc/statusline_source
+ *     STALE_AFTER_S). That marks "this reading is old", not "nobody is
+ *     here" -- a Claude Code user reading code between renders crosses it
+ *     routinely, and dozing on them would be the opposite bug.
+ *   - The age caption appears at 600 s (AGE_CAPTION_MIN_S in usage_view.c),
+ *     chosen against Claude Desktop's 300 s at-the-machine and 900 s
+ *     away refresh schedules -- so a desktop-only user who is present sits
+ *     under 900 s.
+ *   - Four hours is 8x the first and 16x the second. It outlasts a lunch, a
+ *     meeting, and any single stretch of work without a render, and still
+ *     has a machine that sleeps at 23:00 dozing by 03:00 rather than at
+ *     dawn. Eight hours would have left the board that produced this bug
+ *     lit until morning, which was the complaint.
+ */
+#define SLEEP_ABSENT_AFTER_S 14400
+
+/* Has the reading stopped moving for long enough that nobody can be here?
+ * -1 (we cannot say) is NOT absence: a daemon too old to send an age must
+ * not doze the panel. */
+bool sleep_nobody_is_here(int32_t age_s);
+
+/*
+ * How old a reading has to be before it is DRAWN as old. A different
+ * question from the one above, which is why it gets a different number.
+ *
+ * "Is anybody at this desk?" is answered in hours, because a person who
+ * stepped out is still coming back and a panel that dozed on them would be
+ * the worse bug. "Is this number old?" is answered in half an hour, because
+ * that is the bound the rest of the system already uses: the daemon's
+ * pc/statusline_source STALE_AFTER_S is 1800 s, and the `stale` flag it puts
+ * on the wire is computed by it. The board almost never has to ask this
+ * itself -- it is told -- except at one moment, opening its eyes, when the
+ * next usage message may still be up to a minute away. Answering it there
+ * with the four-hour number had a board waking from an hour's doze showing a
+ * green dot over an hour-old reading until that message landed.
+ */
+#define SLEEP_READING_STALE_AFTER_S 1800
+
+/* Should that reading be drawn as old? -1 keeps the same meaning it has
+ * above: a board that has never had a reading has nothing to call stale. */
+bool sleep_reading_is_stale(int32_t age_s);
+
+/*
+ * The second way in (field report 2026-09-02).
+ *
+ * The rule above waits for silence, and silence never came: proto.c clears
+ * host_lost on every protocol line including the 10 s pings, so a computer
+ * that slept while its daemon kept answering left the panel awake all night
+ * on a reading 57 hours old. This asks the other question -- the app is
+ * talking, but is it saying anything new? -- and refuses for the same two
+ * reasons the first rule does, plus one of its own: nothing on screen may be
+ * asking for a person.
+ */
+bool sleep_stale_should_start(int32_t age_s, bool had_usage, bool ota_busy,
+			      enum usage_activity act);
+
+/*
+ * And back out again. The exact complement of the rule above minus
+ * had_usage, which cannot become false once true.
+ *
+ * It has to be a separate function because it is asked from inside
+ * ui_sleep_run, where the loop is waiting on something to change, and
+ * complement rather than "a fresh reading arrived" because the wake
+ * condition drifting from the sleep condition by so much as a second would
+ * have a board on a real desk closing and opening its eyes forever.
+ *
+ * There is deliberately NO "the computer came back" term here, and it was
+ * asked for (field review 2026-09-03: the owner's panel would not wake on a
+ * morning reconnect and they reported the board as broken). Four reasons it
+ * stays out, in the order they bind:
+ *
+ *   - As a level -- "the host is talking" -- it is the original bug, typed
+ *     back in. proto.c clears host_lost on every line including the 10 s
+ *     pings, so a daemon answering all night through a sleeping computer
+ *     would satisfy it continuously and hold the panel lit on a 57-hour-old
+ *     reading. That is the exact desk this second rule was written for.
+ *   - As an edge -- "the host just came back" -- it is defensible, but it
+ *     needs remembered state, and this file's purity is the only reason any
+ *     of these rules can be tested on a laptop at all. It would have to live
+ *     in main.c's reading_moved_again(), which has no automated coverage.
+ *   - And an edge alone makes the symptom worse. The wake fires, run_usb
+ *     re-asks sleep_stale_should_start on an active age that is still four
+ *     hours old, and the board plays the closing clip again immediately: a
+ *     deliberate blink-open-blink-shut on every reconnect. To be of any use
+ *     it would need a grace window suppressing the next doze for a minute or
+ *     two -- new state, in the sleep path, unreachable by any host test.
+ *   - The wait it is meant to shorten is not this file's to shorten. The
+ *     board cannot ask for a reading: on `welcome` it answers with its
+ *     preference and an OTA check (proto.c) and then waits for whatever the
+ *     daemon's poll decides -- 60 s normally, 120-600 s while backing off a
+ *     429. A daemon that pushes one usage frame the moment it connects ends
+ *     the complaint at its source and leaves this rule alone.
+ *
+ * Meanwhile the panel is not stuck: a tap peeks, and an edge tap reaches
+ * settings (ui_sleep.c). Revisit this only with a daemon that pushes on
+ * connect already shipped, and with a way to run the sleep path on hardware.
+ */
+bool sleep_stale_should_wake(int32_t age_s, bool ota_busy,
+			     enum usage_activity act);
 
 #endif /* SLEEP_GATE_H */

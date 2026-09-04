@@ -116,4 +116,59 @@ age=$(sed -n 's/^[[:space:]]*const MIN_ROLLOUT_AGE: Duration = Duration::from_se
 [ "$age" -ge 1 ] || fail "rollouts are compressed after $age days -- the reader must learn .zst"
 ok "rollouts are only compressed after $age days, so the freshest is always plain .jsonl"
 
+# 7. The turn events pc/providers/codex_cli.parse_rollout_state keys on.
+#    The aliases are upstream telling us a rename is coming: the v2 wire
+#    spells these turn_started/turn_complete. The day the alias becomes the
+#    primary name the state machine goes silent and every Python test stays
+#    green, because they all feed the reader strings this repo wrote.
+grep -q '#\[serde(rename = "task_started", alias = "turn_started")\]' "$FILE" ||
+	fail "task_started is no longer the serialised name -- see the turn_started alias"
+grep -q '#\[serde(rename = "task_complete", alias = "turn_complete")\]' "$FILE" ||
+	fail "task_complete is no longer the serialised name -- see the turn_complete alias"
+ok "task_started and task_complete are still the wire names"
+
+# 8. Failure. The reader calls a turn failed when its task_complete carries
+#    an `error` object, and UsageLimitExceeded is the case it exists for.
+grep -q 'pub struct TurnCompleteEvent' "$FILE" || fail "TurnCompleteEvent is gone"
+grep -q 'pub error: Option<ErrorEvent>' "$FILE" ||
+	fail "TurnCompleteEvent no longer carries error: Option<ErrorEvent>"
+grep -q 'pub codex_error_info: Option<CodexErrorInfo>' "$FILE" ||
+	fail "ErrorEvent no longer carries codex_error_info"
+grep -q 'UsageLimitExceeded,' "$FILE" ||
+	fail "CodexErrorInfo lost UsageLimitExceeded -- the case this reader exists for"
+ok "task_complete still reports failure through error/codex_error_info"
+
+# 9. The two errors that do NOT fail a turn. codex_cli._NOT_A_TURN_FAILURE
+#    mirrors this exact arm; a variant leaving it would have the panel go red
+#    for something upstream does not call a failure, and a variant joining it
+#    would have us keep painting red for something that stopped being one.
+grep -A2 'pub fn affects_turn_status' "$FILE" |
+	grep -q 'Self::ThreadRollbackFailed | Self::ActiveTurnNotSteerable { \.\. } => false,' ||
+	fail "affects_turn_status' not-a-failure arm changed -- see codex_cli._NOT_A_TURN_FAILURE"
+ok "thread_rollback_failed and active_turn_not_steerable are still not turn failures"
+
+# 10. turn_aborted stays a user action. All four reasons are things the
+#     person did, which is why the reader maps every one of them to idle
+#     rather than to red.
+grep -q 'pub enum TurnAbortReason' "$FILE" || fail "TurnAbortReason is gone"
+for reason in Interrupted Replaced ReviewEnded BudgetLimited; do
+	grep -A5 'pub enum TurnAbortReason' "$FILE" |
+		grep -q "^[[:space:]]*$reason,$" ||
+		fail "TurnAbortReason lost $reason -- re-read whether turn_aborted still means idle"
+done
+ok "turn_aborted still means the person stopped the turn"
+
+# 11. The project name. Line 1 of a rollout is a session_meta record, and its
+#     cwd is the only place a Codex session's name can come from -- the
+#     filename carries a timestamp and a UUID and nothing else.
+grep -q 'pub struct SessionMeta' "$FILE" || fail "SessionMeta is gone"
+grep -A20 'pub struct SessionMeta' "$FILE" | grep -q 'pub cwd: PathBuf' ||
+	fail "SessionMeta no longer carries cwd -- Codex sessions cannot be named"
+ok "session_meta still carries cwd"
+
+POLICY=$(fetch codex-rs/rollout/src/policy.rs)
+grep -q 'RolloutItem::SessionMeta(_) => true' "$POLICY" ||
+	fail "session_meta is no longer persisted unconditionally"
+ok "session_meta is still written to every rollout"
+
 printf 'PASS [codex contract at %s]\n' "$REF"

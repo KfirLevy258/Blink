@@ -84,6 +84,29 @@ class NormalizedUsageFrame:
     provider: str
     src: str
     observed_at: float
+    # The freshest thing this frame stands on, which is a different question
+    # from `observed_at` above and only looks like the same one.
+    #
+    # `observed_at` is the age of the NUMBER: which reading the dial is
+    # showing. This is the age of the CONTACT: when the tool behind it last
+    # said anything at all, whether or not what it said carried a percentage.
+    # For a single reading the two are one value. For a merged frame this is
+    # the newest observed_at of everything the merge saw, INCLUDING the
+    # sources that lost every field -- they lost the contest for the dial,
+    # not the argument that somebody is at this machine.
+    #
+    # They came apart when ClaudeCliProvider learned to re-offer the last
+    # payload that had a five-hour window. Claude Code rewrites its status
+    # line every minute, the expired five-hour figure is simply absent from
+    # the rewrite, and the remembered payload -- carrying its own original
+    # mtime -- wins the session dial and hands the merged frame its age. The
+    # dial is honestly six hours old and the desk is honestly occupied. Both
+    # facts are true and only one of them is about the person, so the board
+    # needs to be told both (see protocol.usage's `active_age_s`).
+    #
+    # None means "the same as observed_at", filled in below, so no provider
+    # has to know this field exists and any frame is a valid input to merge().
+    active_at: object = None
     session_pct: float = UNKNOWN
     session_resets_at: object = None
     weekly_pct: float = UNKNOWN
@@ -127,6 +150,23 @@ class NormalizedUsageFrame:
     n_stuck: int = 0
     n_idle: int = 0
     n_agents: int = 0
+    # Which project the ONE session in `state` belongs to, when there is
+    # exactly one. Empty when several share the state -- see
+    # claude_state.poll for why naming one of several is refused rather than
+    # guessed.
+    #
+    # TWO providers set this now, by different routes, and the difference
+    # matters to anyone debugging a missing name. claude_state gets it from
+    # the hook, which is told the project directly. codex_cli derives it from
+    # the `cwd` on the first line of a rollout file, so a Codex name can be
+    # absent for reasons the Claude path never has -- an unreadable head, a
+    # cwd that sanitises to nothing. Every other source leaves it empty and
+    # the board falls back to the count.
+    label: str = ""
+
+    def __post_init__(self):
+        if self.active_at is None:
+            self.active_at = self.observed_at
 
     def n_sessions(self) -> int:
         return self.n_run + self.n_wait + self.n_stuck + self.n_idle

@@ -21,15 +21,47 @@ from pc import cli
 class _Runs:
     """Stands in for subprocess.run, recording argv and replaying exit codes."""
 
-    def __init__(self, codes=None, stderr=""):
+    def __init__(self, codes=None, stderr="", running=True, dump=None):
         self.calls = []
         self._codes = list(codes or [])
         self._stderr = stderr
+        # Whether a process actually exists, as each platform's own health
+        # question would answer it. Every backend now believes that answer
+        # rather than the exit code of the command that started the service,
+        # so this is the switch between a service that started and one that
+        # was only accepted.
+        #
+        # NOTE THE EXIT CODES BELOW: every health question answers ZERO in
+        # both directions, which is true of all three of them on the real
+        # platforms. That is deliberate here. A backend that went back to
+        # reading a return code would see success while this stub is saying
+        # "nothing is running", and the tests that pin it would go red --
+        # which is the only reason they are worth having.
+        self._running = running
+        self._dump = dump
 
     def __call__(self, argv, **kw):
         self.calls.append(list(argv))
         code = self._codes.pop(0) if self._codes else 0
-        return subprocess.CompletedProcess(argv, code, stdout="",
+        out = ""
+        if len(argv) > 1 and argv[1] == "print":
+            # launchctl print: a human-readable dump, exit 0 once the job is
+            # registered whatever state it is in.
+            out = self._dump if self._dump is not None else (
+                "state = running\n" if self._running
+                else "active count = 0\n\tstate = not running\n")
+        elif "is-active" in argv:
+            # systemctl is-active prints the state word; --quiet would not.
+            out = "active\n" if self._running else "inactive\n"
+        elif argv[0] == "tasklist":
+            # tasklist exits 0 whether or not the filters matched. A match is
+            # a CSV row naming the pid; a miss is a sentence with no digits
+            # in it -- and on a localised Windows, not an English one.
+            pid = argv[argv.index("/fi") + 1].split()[-1]
+            out = (f'"blink.exe","{pid}","Console","1","41,904 K"\n'
+                   if self._running else
+                   "INFO: No tasks are running which match the specified criteria.\n")
+        return subprocess.CompletedProcess(argv, code, stdout=out,
                                            stderr=self._stderr)
 
     def ran(self, *words):
@@ -57,10 +89,23 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _runs(monkeypatch, codes=None, stderr=""):
-    r = _Runs(codes, stderr)
+def _runs(monkeypatch, codes=None, stderr="", running=True, dump=None):
+    r = _Runs(codes, stderr, running, dump)
     monkeypatch.setattr(cli.subprocess, "run", r)
     return r
+
+
+def _recorded_pid(pid=4242):
+    """The pid the daemon writes for itself at startup, ~/.blink/bridge.pid.
+
+    Windows health is read from this file (see _SchtasksBackend._is_running),
+    so a test that wants a live daemon has to leave one the way a live daemon
+    would -- and a test that wants a dead one simply does not.
+    """
+    os.makedirs(cli.blink_home(), exist_ok=True)
+    with open(cli.pid_path(), "w", encoding="utf-8") as f:
+        f.write(str(pid))
+    return pid
 
 
 def _platform(monkeypatch, name):
@@ -108,6 +153,9 @@ def test_launchd_install_writes_the_plist_and_bootstraps(home, monkeypatch):
     assert r.calls[0][:2] == ["launchctl", "bootout"]
     assert r.calls[1][:2] == ["launchctl", "bootstrap"]
     assert r.calls[1][2] == "gui/501"
+    # And STARTED, not merely registered. bootstrap accepts the job; it does
+    # not run it, and on a bootout/bootstrap cycle it routinely does not.
+    assert r.ran("launchctl", "kickstart", "gui/501/com.blink.bridge")
 
 
 def test_launchd_install_retries_bootstrap(home, monkeypatch):
@@ -134,6 +182,31 @@ def test_launchd_install_gives_up_with_the_command_to_run(home, monkeypatch):
     assert cli.plist_path() in msg
 
 
+def test_launchd_install_will_not_claim_running_when_it_is_not(home, monkeypatch):
+    """The defect this exists for, measured on the owner's machine 2026-09-04.
+
+    Every launchctl command returned zero, the installer printed
+    "running (launchd)" as its last word, and the service was not running:
+
+        active count = 0
+        state = not running
+        last exit code = (never exited)
+
+    The board went quiet and dozed while the install said it was fine. So the
+    claim must come from launchd's own answer, not from a bootstrap that
+    merely succeeded -- registration is not health, which the comment above
+    _service_command() already had to learn once.
+    """
+    _platform(monkeypatch, "darwin")
+    _runs(monkeypatch, running=False)
+
+    msg = cli.backend().install()
+    assert "running (launchd)" != msg
+    assert "not running" in msg
+    # And it has to be a command someone can paste, like its sibling above.
+    assert "launchctl kickstart -k gui/501/com.blink.bridge" in msg
+
+
 def test_launchd_remove_boots_out_and_deletes_the_plist(home, monkeypatch):
     _platform(monkeypatch, "darwin")
     os.makedirs(os.path.dirname(cli.plist_path()), exist_ok=True)
@@ -153,11 +226,93 @@ def test_launchd_status(home, monkeypatch):
     assert cli.backend().status() == "not installed"
 
 
+def test_launchd_status_names_a_running_pid(home, monkeypatch):
+    _platform(monkeypatch, "darwin")
+    _runs(monkeypatch, dump="\tpid = 8123\n\tstate = running\n")
+    assert cli.backend().status() == "running (launchd, pid 8123)"
+
+
+def test_launchd_status_calls_a_crash_loop_a_crash_loop(home, monkeypatch):
+    """The row exists because a job that had crash-looped 59 times read as
+    healthy on the author's own machine, while every other line of `blink
+    status` looked fine. launchctl knew all along -- it reports the run count
+    and the last exit code -- so the only thing that was missing was asking.
+
+    No pid, a nonzero last exit code: registered, and failing. Anything that
+    reads the exit code the other way round, or ignores it, says "registered
+    with launchd" here and the dead daemon goes unnoticed for another month.
+    """
+    _platform(monkeypatch, "darwin")
+    _runs(monkeypatch, dump=("\tstate = not running\n"
+                             "\tlast exit code = 1\n"
+                             "\truns = 59\n"))
+
+    msg = cli.backend().status()
+    assert msg != "registered with launchd"
+    assert "FAILING" in msg
+    assert "code 1" in msg and "59 attempts" in msg
+    assert cli.log_path() in msg          # where the reason is written
+
+
+def test_launchd_status_does_not_cry_fault_over_a_clean_exit(home, monkeypatch):
+    """A job that exited zero and is between runs is not a crash loop.
+
+    The dump is parsed defensively for exactly this reason: launchctl print
+    is a human-readable dump and not a contract, so an unrecognised or
+    innocent one has to fall back rather than invent a fault.
+    """
+    _platform(monkeypatch, "darwin")
+    _runs(monkeypatch, dump="\tlast exit code = 0\n\truns = 3\n")
+    assert cli.backend().status() == "registered with launchd"
+
+
+def test_launchd_restart_asks_launchd_rather_than_trusting_kickstart(home, monkeypatch):
+    """A kickstart that exits zero is a request accepted, not a live process.
+
+    The same defect install() was measured making on 2026-09-04, in the same
+    file: every launchctl command returned zero and nothing was running. So
+    "restarted" has to come from launchd's own answer.
+    """
+    _platform(monkeypatch, "darwin")
+    r = _runs(monkeypatch)
+
+    assert cli.backend().restart() == "restarted"
+    assert r.calls[0][:2] == ["launchctl", "kickstart"]
+    assert r.ran("launchctl", "print", "gui/501/com.blink.bridge")
+
+
+def test_launchd_restart_will_not_claim_restarted_when_it_is_not(home, monkeypatch):
+    """kickstart exits 0, launchd says not running: say so, and where to look.
+
+    This is the `blink update` path -- the binary was just replaced. If the
+    new one cannot start, launchd respawns it and it dies again, and the log
+    is the only thing that explains why.
+    """
+    _platform(monkeypatch, "darwin")
+    _runs(monkeypatch, running=False)
+
+    msg = cli.backend().restart()
+    assert msg != "restarted"
+    assert "not running" in msg
+    assert cli.log_path() in msg
+
+
+def test_launchd_restart_reports_a_kickstart_that_failed(home, monkeypatch):
+    _platform(monkeypatch, "darwin")
+    r = _runs(monkeypatch, codes=[1])
+
+    assert cli.backend().restart() == "could not restart it"
+    # And it did not go on to ask launchd: there is nothing to confirm when
+    # the request itself was refused.
+    assert not r.ran("launchctl", "print")
+
+
 # ---------------------------------------------------------------- schtasks --
 
 def test_schtasks_install_registers_at_logon_then_starts_it(home, monkeypatch):
     _platform(monkeypatch, "win32")
     r = _runs(monkeypatch)
+    pid = _recorded_pid()
 
     assert cli.backend().install() == "running (Scheduled Task)"
     create = r.calls[0]
@@ -178,7 +333,53 @@ def test_schtasks_install_registers_at_logon_then_starts_it(home, monkeypatch):
     # onlogon does not start it now, so it is started explicitly -- after
     # the previous install's daemon is ended, or it keeps the port.
     assert r.ran("schtasks", "/end")
-    assert r.calls[-1][:2] == ["schtasks", "/run"]
+    assert r.ran("schtasks", "/run")
+    # ...and then it ASKED Windows, by the pid the daemon records for itself,
+    # with the image name as a filter so a recycled pid cannot answer for it.
+    ask = [c for c in r.calls if c[0] == "tasklist"]
+    assert ask and f"PID eq {pid}" in ask[0]
+    assert "IMAGENAME eq blink.exe" in ask[0]
+    # NOT the task's own state. Its action is wscript, which starts the
+    # bridge without waiting and exits, so a healthy install reads "Ready"
+    # within a second of /run -- and its status word is translated on a
+    # localised Windows, which the owner's PC is.
+    assert not r.ran("schtasks", "/query")
+
+
+def test_schtasks_install_will_not_claim_running_when_it_is_not(home, monkeypatch):
+    """The 2026-09-04 defect, on Windows, where it is still unfixed.
+
+    Every schtasks command exits zero -- /create, /end and /run all did here
+    -- and nothing is running. `/run` triggers a task; a triggered task is
+    not a live daemon, exactly as a successful `launchctl bootstrap` was not.
+
+    Nothing writes ~/.blink/bridge.pid in this test, which is what a daemon
+    that never started looks like from the outside.
+    """
+    _platform(monkeypatch, "win32")
+    r = _runs(monkeypatch, running=False)
+
+    msg = cli.backend().install()
+    assert msg != "running (Scheduled Task)"
+    assert "not running" in msg
+    # And a command someone can paste, like its launchd sibling.
+    assert f'schtasks /run /tn "{cli.TASK_NAME}"' in msg
+    assert r.ran("schtasks", "/run")
+
+
+def test_schtasks_install_does_not_believe_a_dead_recorded_pid(home, monkeypatch):
+    """A pid file outlives the daemon that wrote it.
+
+    Install kills the previous daemon and never deletes its pid file, so the
+    file is there at exactly the moment install is deciding what to claim. If
+    the file alone counted as health, every failed install would report the
+    corpse of the one before it as a success.
+    """
+    _platform(monkeypatch, "win32")
+    _recorded_pid(4242)
+    _runs(monkeypatch, running=False)      # tasklist finds no such process
+
+    assert "not running" in cli.backend().install()
 
 
 def test_schtasks_install_surfaces_why_it_failed(home, monkeypatch):
@@ -214,9 +415,60 @@ def test_schtasks_restart_kills_the_detached_successor(home, monkeypatch):
     killed = []
     monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda: killed.append("pid"))
 
+    _recorded_pid()
+
     assert cli.backend().restart() == "restarted"
     assert killed == ["pid"]
-    assert r.calls[-1][:2] == ["schtasks", "/run"]
+    assert r.ran("schtasks", "/run")
+    assert r.ran("tasklist")               # and then asked, rather than assumed
+
+
+def test_schtasks_restart_will_not_claim_restarted_when_it_is_not(home, monkeypatch):
+    """The `blink update` path: the .exe under the task was just replaced.
+
+    `schtasks /run` exits zero over a binary that cannot start -- a bad
+    download, a missing DLL, a scanner holding the file -- and unlike an
+    onlogon task on a Mac's KeepAlive, nothing will try again. Saying
+    "restarted" would send the user away from the one file that explains it.
+    """
+    _platform(monkeypatch, "win32")
+    monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda: None)
+    _runs(monkeypatch, running=False)
+
+    msg = cli.backend().restart()
+    assert msg != "restarted"
+    assert "not running" in msg
+    assert cli.log_path() in msg
+
+
+def test_schtasks_restart_reports_a_run_that_failed(home, monkeypatch):
+    _platform(monkeypatch, "win32")
+    monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda: None)
+    r = _runs(monkeypatch, codes=[0, 1])   # /end fine, /run refused
+
+    assert cli.backend().restart() == "could not restart it"
+    # Nothing to confirm when the request itself was refused.
+    assert not r.ran("tasklist")
+
+
+def test_schtasks_status_tells_registered_from_not_installed(home, monkeypatch):
+    """`schtasks /query /tn` exits 0 when the task exists and nonzero when it
+    does not, and the two answers had never been told apart by a test -- so
+    swapping them changed nothing that anybody checked. `blink status` prints
+    this line straight to the user.
+
+    It reports REGISTRATION, deliberately and not health: the task is Ready,
+    not Running, whenever the bridge is alive (see _is_running), so there is
+    no health to read here. Health belongs on the Bridge line.
+    """
+    _platform(monkeypatch, "win32")
+    r = _runs(monkeypatch, codes=[0])
+    assert cli.backend().status() == "registered as a Scheduled Task"
+    assert r.calls[0][:2] == ["schtasks", "/query"]
+    assert cli.TASK_NAME in r.calls[0]
+
+    _runs(monkeypatch, codes=[1])
+    assert cli.backend().status() == "not installed"
 
 
 # ----------------------------------------------------------------- systemd --
@@ -232,6 +484,101 @@ def test_systemd_install_writes_the_unit_and_enables_it(home, monkeypatch):
     assert "WantedBy=default.target" in unit
     assert r.ran("systemctl", "--user", "daemon-reload")
     assert r.ran("systemctl", "--user", "enable", "--now")
+    # ...and then asked systemd, which is the only thing that knows. Without
+    # --quiet, so there is a word to read rather than a code to trust.
+    assert r.ran("systemctl", "--user", "is-active", "blink-bridge.service")
+    assert not r.ran("is-active", "--quiet")
+
+
+def test_systemd_install_will_not_claim_running_when_it_is_not(home, monkeypatch):
+    """The 2026-09-04 defect, on Linux, where it is still unfixed.
+
+    `enable --now` exits zero here and systemd says "inactive". That pairing
+    is not contrived: it is what a unit whose ExecStart cannot be resolved
+    does, and this file has seen it -- _systemd_exec() records an unquoted
+    ExecStart failing with "Failed to locate executable" while `blink
+    install` still printed "running (systemd)". Nothing caught it then
+    because the only evidence anybody read was an exit code.
+    """
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
+    r = _runs(monkeypatch, running=False)
+
+    msg = cli.backend().install()
+    assert msg != "running (systemd)"
+    assert "not running" in msg
+    # Somewhere to look, and it is a command that can be pasted.
+    assert "systemctl --user status blink-bridge.service" in msg
+    assert r.ran("systemctl", "--user", "is-active")
+
+
+def test_systemd_install_reports_an_enable_that_failed(home, monkeypatch):
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
+    r = _runs(monkeypatch, codes=[0, 1])   # daemon-reload fine, enable refused
+
+    assert cli.backend().install().startswith("installed, but could not be started:")
+    # Nothing to confirm when the request itself was refused.
+    assert not r.ran("systemctl", "--user", "is-active")
+
+
+def test_systemd_restart_asks_systemd_rather_than_trusting_the_exit_code(home, monkeypatch):
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
+    r = _runs(monkeypatch)
+
+    assert cli.backend().restart() == "restarted"
+    assert r.calls[0][:4] == ["systemctl", "--user", "restart",
+                              "blink-bridge.service"]
+    assert r.ran("systemctl", "--user", "is-active")
+
+
+def test_systemd_restart_will_not_claim_restarted_when_it_is_not(home, monkeypatch):
+    """`blink update` swapped the binary underneath the unit. `restart` exits
+    zero over a binary that cannot start; Restart=always then respawns it and
+    it dies again, forever, and the journal is the only thing that says why.
+    """
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
+    _runs(monkeypatch, running=False)
+
+    msg = cli.backend().restart()
+    assert msg != "restarted"
+    assert "not running" in msg
+    assert "systemctl --user status blink-bridge.service" in msg
+
+
+def test_systemd_restart_reports_a_restart_that_failed(home, monkeypatch):
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
+    r = _runs(monkeypatch, codes=[1])
+
+    assert cli.backend().restart() == "could not restart it"
+    assert not r.ran("systemctl", "--user", "is-active")
+
+
+def test_systemd_activating_is_not_yet_running(home, monkeypatch):
+    """A unit that has been asked to start reads "activating" until its exec
+    is up. That is neither health nor failure, so it is retried -- and only
+    the word "active" is allowed to end the wait.
+    """
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
+
+    class _Activating(_Runs):
+        def __call__(self, argv, **kw):
+            r = super().__call__(argv, **kw)
+            if "is-active" in argv:
+                return subprocess.CompletedProcess(argv, 0, stdout="activating\n")
+            return r
+
+    r = _Activating()
+    monkeypatch.setattr(cli.subprocess, "run", r)
+
+    msg = cli.backend().install()
+    assert "not running" in msg
+    # Asked more than once before giving up: a slow start is not a failure.
+    assert len([c for c in r.calls if "is-active" in c]) > 1
 
 
 def test_systemd_remove_disables_and_reloads(home, monkeypatch):

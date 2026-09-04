@@ -37,8 +37,40 @@ UNKNOWN = -1.0
 
 
 def encode(msg: dict) -> bytes:
-    """Serialize a message dict to a single NDJSON line (bytes)."""
-    return (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
+    """Serialize a message dict to a single NDJSON line (bytes).
+
+    ensure_ascii=False, and that is a firmware decision rather than a taste
+    one. json.dumps escapes non-ASCII by default, msg_parse.c copies the
+    bytes between two quotes and unescapes nothing, and fmt.c then draws
+    whatever it was given -- so a project called "café" reached the panel as
+    the literal characters \\u00e9 and was drawn that way. The firmware has
+    had a UTF-8 decoder for this since fmt_ascii() was written
+    (tests/fmt/host_test.c pins "caf\\xc3\\xa9" -> "caf?"); the escaping here
+    was the only thing keeping it out of reach.
+
+    It cannot cost line budget either, which matters because proto.c drops an
+    over-long line whole: a UTF-8 sequence is at most four bytes and the
+    escape it replaces is at least six, so every line this touches gets
+    shorter or stays the same.
+    """
+    return (json.dumps(msg, separators=(",", ":"),
+                       ensure_ascii=False) + "\n").encode("utf-8")
+
+
+# The longest countdown worth sending, and the ceiling is doing two jobs.
+#
+# Honesty first: the longest window this panel shows is the weekly one, seven
+# days. A resets_at further out than that is a misparse -- a stamp in
+# milliseconds, a field that changed meaning -- and rendering it as a confident
+# "resets in 412 days" is exactly the sort of wrong-but-certain number the rest
+# of this module works to avoid. Clamping says "a long time" instead.
+#
+# Then bytes: four countdown fields ride every usage line, and an unclamped one
+# is eight digits where this is six. Those eight digits took the widest line
+# the daemon can build to 517 of 512 -- over the cap, refused by
+# encode_checked, and a panel that quietly stops updating. 999999 is a shade
+# under twelve days: comfortably clear of the seven-day window, and six digits.
+COUNTDOWN_MAX_S = 999999
 
 
 def encode_checked(msg: dict):
@@ -83,7 +115,7 @@ def secs_until(resets_at, now_epoch: float) -> int:
     # have already passed. Ceiling keeps the value honest (the window really
     # does have "about a second" left) and keeps 0 reserved for the firmware's
     # own countdown reaching it.
-    return max(1, math.ceil(resets_at - now_epoch))
+    return min(COUNTDOWN_MAX_S, max(1, math.ceil(resets_at - now_epoch)))
 
 
 def decode(line: str):
@@ -170,7 +202,7 @@ def usage(session_pct, session_resets_at, weekly_pct, weekly_resets_at, models,
           n_agents=0, p2="", p2_session_pct=UNKNOWN,
           p2_weekly_pct=UNKNOWN, p2_session_resets_in_s=-1,
           p2_weekly_resets_in_s=-1, p2_stale=False, burn_pph=None,
-          age_s=-1, p2_age_s=-1) -> dict:
+          age_s=-1, p2_age_s=-1, active_age_s=-1) -> dict:
     """A usage message.
 
     The *_resets_in_s fields carry the remaining seconds. The board has no
@@ -218,6 +250,10 @@ The firmware reads this field: proto.c's "usage" handler calls
     the figure, and 120 was unreachable. The label, its formatter and its
     place on the panel were all built and none of them had ever appeared.
 
+    The change-driven push (Bridge.poll_if_changed) only sharpens that point:
+    a message can now also arrive the moment session state moves, so the gap
+    between messages says even less about the age of the figure than it did.
+
     The distinction is the whole point on a source that goes quiet. Claude
     Desktop only refreshes its cache while somebody is at the machine, so a
     four-hour-old percentage was being re-sent every minute and drawn with
@@ -232,6 +268,37 @@ The firmware reads this field: proto.c's "usage" handler calls
     back to counting from the message in that case, which is exactly the old
     behaviour, so an older daemon loses nothing it used to have. Older
     firmware ignores both keys.
+
+    `active_age_s` is the other freshness question, and it is one field for
+    the whole desk rather than one per provider: how long since ANY tool on
+    this machine last wrote anything at all, whether or not what it wrote
+    carried a percentage. The board dozes on this one and captions on
+    `age_s`, which is the same split it already makes between
+    SLEEP_ABSENT_AFTER_S ("is anybody here", four hours) and
+    SLEEP_READING_STALE_AFTER_S ("is this number old", half an hour) --
+    two questions, two numbers, and answering one with the other is the
+    whole class of bug this exists to close.
+
+    They diverge for exactly one reason. pc/providers/claude_cli remembers
+    the last payload that had a five-hour window and re-offers it carrying
+    its ORIGINAL mtime, because the rewrite that drops an expired window
+    does not make the last real reading untrue. When that remembered
+    reading wins the session dial it also becomes the frame whose age is
+    reported -- so a status line written five seconds ago can arrive here
+    stamped twelve hours old, and a board that dozes at four hours closes
+    its eyes on somebody who is sitting in front of it (measured, field
+    review 2026-09-02).
+
+    Per-desk and not per-provider because dozing is a whole-board decision:
+    the panel does not sleep one page at a time, and there is no version of
+    "Claude is quiet but Codex is not" in which the screen should go dark.
+    It is the age of the freshest reading on the bus, across both providers.
+
+    -1 when unknown, like `age_s`. An absent key sends the firmware back to
+    `age_s`, and that fallback is EXACT rather than approximate: the two
+    numbers can only differ because of the memory described above, and a
+    daemon old enough not to send this field has no such memory, so its
+    freshest source IS the dial's source. Older firmware ignores the key.
     """
     # `models` itself never went on the wire usefully: the firmware reads the
     # flattened scalar keys below and never the array, and since the status
@@ -323,6 +390,14 @@ The firmware reads this field: proto.c's "usage" handler calls
         extra["age_s"] = int(age_s)
     if p2 and p2_age_s is not None and p2_age_s >= 0:
         extra["p2_age_s"] = int(p2_age_s)
+    # Sent whenever it is known, including when it happens to equal `age_s`.
+    # Suppressing the duplicate would buy back twenty bytes on the common
+    # line and cost the reader the ability to tell "the desk is as quiet as
+    # the dial" from "this daemon is too old to know the difference" -- and
+    # it buys nothing at all where the budget is actually decided, since the
+    # worst case is the line where the two numbers disagree.
+    if active_age_s is not None and active_age_s >= 0:
+        extra["active_age_s"] = int(active_age_s)
 
     # One decimal on every percentage. Nothing downstream can see the
     # difference -- the firmware label is (int)(pct + 0.5), the arc is an
@@ -340,16 +415,77 @@ The firmware reads this field: proto.c's "usage" handler calls
         if _k in extra:
             extra[_k] = _round_pct(extra[_k])
 
+    # Whole seconds on the two absolute stamps, and it is the byte budget that
+    # insists. They arrive straight from the provider's JSON, where a
+    # "resets_at" is free to carry a fractional epoch, and json.dumps writes
+    # every digit of it: 1787718000.1234567 is 18 bytes where 1787718000 is 10.
+    # Two of those took the widest line this daemon can build to 521 of 512 --
+    # over the cap, refused by encode_checked, and a panel that quietly stops
+    # updating. Nothing reads the fraction: these exist "for readability and
+    # for any consumer that does know the time" (see the docstring above),
+    # while the board counts down from the *_resets_in_s fields, which are
+    # already whole seconds.
+    # The two absolute resets_at stamps are NOT on the wire, and their absence
+    # is what bought the room for everything after them.
+    #
+    # Nothing has ever read them. proto.c's usage handler takes
+    # session_resets_in_s and weekly_resets_in_s and says why in its own
+    # comment: "the board has no wall clock when tethered over USB, so the
+    # daemon does the subtraction". usage_parse.c does read a "resets_at", but
+    # that is the standalone WiFi path parsing the API's own JSON body, not
+    # this message. A repo-wide search for a reader finds one hit, and it is a
+    # host test using the name as a sample key for the generic string parser.
+    #
+    # They cost about 59 bytes together, on a line that measured 511 of 512.
+    # A field no consumer reads is not "kept for readability" -- the docstring's
+    # old claim -- when it is the reason the next real field will not fit.
+    # The countdowns remain, and a reader that genuinely wants an absolute time
+    # can add the countdown to the message's own arrival.
     return {
         "t": "usage", "v": VERSION,
-        "session_pct": session_pct, "session_resets_at": session_resets_at,
+        "session_pct": session_pct,
         "session_resets_in_s": session_resets_in_s,
-        "weekly_pct": weekly_pct, "weekly_resets_at": weekly_resets_at,
+        "weekly_pct": weekly_pct,
         "weekly_resets_in_s": weekly_resets_in_s,
         "stale": stale,
         **flat,
         **extra,
     }
+
+
+# The keys on a usage message that move by themselves as the clock runs.
+#
+# The daemon looks at the local state files every FAST_POLL_INTERVAL_S and only
+# writes the wire when something a reader could act on has changed -- "this
+# message differs from the last one sent, ignoring the keys below". The list is
+# deliberately an EXCLUSION and not an inclusion: a comparison that enumerates
+# the fields it cares about goes quietly deaf the day a new one is added, and
+# the failure is invisible, because the panel still updates every 60 s from the
+# heartbeat and merely lags. Everything is meaningful by default; the only kind
+# of field that ever belongs here is a timer. Put anything else in and every
+# tick becomes a push -- thirty times the serial traffic carrying no news.
+#
+# Each of these is an age or a countdown: rebuilt from the wall clock on every
+# poll, so different on every poll by construction, and already ticked locally
+# by the firmware between pushes (usage_freshness.c grows the daemon's figure
+# by the elapsed time; see the age_s note in usage() above). Re-sending them
+# sooner tells the board nothing it was not already counting on its own.
+VOLATILE_USAGE_KEYS = frozenset({
+    "age_s", "p2_age_s", "active_age_s",
+    "session_resets_in_s", "weekly_resets_in_s",
+    "p2_s_in_s", "p2_w_in_s",
+})
+
+
+def meaningful_usage(msg: dict) -> dict:
+    """The part of a usage message that says something.
+
+    Compare two of these to answer "would a person notice the difference?".
+    The absolute *_resets_at stamps stay in on purpose: those move only when
+    the window itself rolls over, which is precisely an event worth a push,
+    while the *_in_s countdowns derived from them move every single second.
+    """
+    return {k: v for k, v in msg.items() if k not in VOLATILE_USAGE_KEYS}
 
 
 def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
@@ -395,10 +531,28 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         # the source file's mtime and never leaves provider-space otherwise.
         age_s=_age_of(frame, now_epoch),
         p2_age_s=_age_of(secondary, now_epoch),
+        # And the other question: how long since anything on this desk said
+        # anything at all. The freshest of the two pages, because the panel
+        # sleeps as one screen -- see usage() for why the two ages come
+        # apart and what the board does with each.
+        active_age_s=_active_age(frame, secondary, now_epoch),
     )
 
 
-def _age_of(frame, now_epoch: float) -> int:
+def _active_age(frame, secondary, now_epoch: float) -> int:
+    """The age of the freshest contact on the bus, or -1 when nothing says.
+
+    The MINIMUM of the two providers' active ages, not of their reading
+    ages: a Codex rollout written a minute ago is evidence that somebody is
+    at this machine even on a day when the Claude page holds the dial.
+    """
+    ages = [a for a in (_age_of(frame, now_epoch, "active_at"),
+                        _age_of(secondary, now_epoch, "active_at"))
+            if a >= 0]
+    return min(ages) if ages else -1
+
+
+def _age_of(frame, now_epoch: float, attr: str = "observed_at") -> int:
     """Seconds since `frame` was observed, or -1 when that is unknowable.
 
     Clamped at zero rather than allowed to go negative. observed_at is a file
@@ -406,10 +560,15 @@ def _age_of(frame, now_epoch: float) -> int:
     seconds into the future is a real thing that happens; "-3 s ago" would
     reach fmt_age() as a negative and print "never", which is the one answer
     that is certainly wrong for a reading we are holding in our hand.
+
+    `attr` picks WHICH epoch is being aged -- the reading's own
+    (`observed_at`) or the freshest contact behind it (`active_at`) -- so
+    both wire ages are computed by one clamp and one unknown rule rather
+    than by two that could drift apart.
     """
-    if frame is None or getattr(frame, "observed_at", None) is None:
+    if frame is None or getattr(frame, attr, None) is None:
         return -1
-    return max(0, int(now_epoch - frame.observed_at))
+    return max(0, int(now_epoch - getattr(frame, attr)))
 
 
 EDITIONS = ("claude", "codex")
@@ -431,6 +590,38 @@ def edition(name: str) -> dict:
         raise ValueError(f"unknown edition {name!r}; expected one of "
                          + ", ".join(EDITIONS))
     return {"t": "edition", "v": VERSION, "edition": name}
+
+
+# 24 bytes. STATUS_MAX_W is 300 px and usage_layout.h records
+# "Reading is old - showing last known" (35 characters) as the string that
+# sized it, so "Waiting for you - " leaves roughly 17 characters of room.
+# This is a BYTE bound and the panel's is a PIXEL one; they are different
+# questions and only this one can be answered here, which is why the firmware
+# also sets LV_LABEL_LONG_DOT.
+SESSION_LABEL_MAX_BYTES = 24
+
+
+def session(label: str, n: int) -> dict:
+    """Which project the board should name, and how many share the state.
+
+    Its own message type rather than a field on the usage frame, and that is
+    a measurement rather than a preference: the usage line was measured at
+    506 of MAX_LINE_BYTES=512 fully loaded, proto.c drops an over-long line
+    whole, and a label is more than six bytes. Additive like `edition` --
+    firmware that predates it ignores an unknown type, so an older board
+    keeps the behaviour it has today.
+
+    Sent on change and on every connect, not every poll: the numbers move
+    constantly and the project name does not.
+    """
+    msg = {"t": "session", "v": VERSION, "n": int(n)}
+    if label:
+        # Truncate on a CHARACTER boundary that survives the byte bound --
+        # slicing bytes can halve a multibyte sequence and produce a field
+        # that cannot be decoded at the other end.
+        trimmed = label.encode("utf-8")[:SESSION_LABEL_MAX_BYTES]
+        msg["label"] = trimmed.decode("utf-8", "ignore")
+    return msg
 
 
 def status(state: str, detail: str = "") -> dict:

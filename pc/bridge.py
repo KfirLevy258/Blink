@@ -69,6 +69,12 @@ class Bridge:
             fetch_signed_manifest = _u.fetch_signed_manifest
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
+        self._last_session = None        # (label, n) last sent; see poll_once
+        # The last usage message actually PUT ON THE WIRE, minus the fields
+        # that move on their own (protocol.VOLATILE_USAGE_KEYS). This is what
+        # poll_if_changed decides against: "sent", not "read", because the
+        # capping on the way out is part of what the board received.
+        self._last_pushed = None
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -86,6 +92,12 @@ class Bridge:
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
+        # A board that just booted holds no session message, and poll_once
+        # only sends on change -- so on a reconnect the tracker is what makes
+        # it silent. Clear it BEFORE the poll, so the push happens inside it,
+        # the same shape as offer_if_newer on every connect rather than once
+        # per daemon lifetime.
+        self._last_session = None
         self.poll_once()                 # push current data immediately
         # Only once the board has been heard. On the no-reset connect path
         # greet() runs before any message has reached on_message, so
@@ -393,14 +405,33 @@ class Bridge:
                 and self._now() - self._last_ping <= LIVENESS_WINDOW_S)
 
     # --- outbound ---
+    #
+    # Two cadences, answering two different questions.
+    #
+    # poll_once is the heartbeat: everything, unconditionally, once every
+    # POLL_INTERVAL_S. It is also the only thing that sends `time`, which is
+    # what the board re-anchors its clock from and has no reason to happen
+    # more often than that.
+    #
+    # poll_if_changed is the fast tick, and it exists because session state --
+    # RUNNING, WAITING, the per-session pips -- is a *now* signal. Claude
+    # Code's hook rewrites its state file within a second or two of an event
+    # (1.8 s on the live install, measured), and the panel was up to a minute
+    # behind it: by the time "a session is waiting on you" reached the glass,
+    # the owner had already looked at the screen and turned away.
+    #
+    # What this does NOT do is make the dials fast, and nothing here should be
+    # read as claiming it does. The percentages come from Claude Desktop's own
+    # cache, which that app refreshes every 5-15 minutes, so the arcs move no
+    # sooner than they ever did. This is about state, not numbers.
     def poll_once(self):
-        # Time rides along with every push so the board's clock re-anchors
+        # Time rides along with every heartbeat so the board's clock re-anchors
         # at the same cadence as the data.
         epoch, off = self._wall()
         self._write(protocol.time_msg(epoch, off))
 
         try:
-            usage = self._fetch()
+            usage = self._read_usage()
         except Exception as e:
             # Not expected: statusline_source swallows its own read errors and
             # returns None. Anything that reaches here is a bug worth putting
@@ -420,12 +451,77 @@ class Bridge:
             return
         self._said_no_source = False
 
+        # Unconditional. The heartbeat is what re-states everything to a board
+        # that may have missed a message, and what keeps a panel that has been
+        # sitting on the same numbers all afternoon provably connected.
+        self._send_usage(usage)
+
+    def poll_if_changed(self):
+        """Send only when something a reader could act on has moved.
+
+        Called every FAST_POLL_INTERVAL_S. Looking is nearly free -- a handful
+        of small local JSON files, no endpoint, no rate limit -- but writing is
+        not: the fully-loaded usage line runs to 509 of the 512 bytes the
+        firmware will accept, and putting one on the wire every two seconds
+        when nothing changed is thirty times the traffic carrying no news.
+
+        Deliberately quieter than the heartbeat about failure. A fetch that
+        raises, or a source that has not appeared yet, will be in the same
+        state two seconds from now, so complaining here would turn one message
+        a minute into thirty; poll_once already reports both at a cadence a
+        person can actually read.
+        """
+        try:
+            usage = self._read_usage()
+        except Exception:
+            return
+        if usage is None:
+            return
+        if protocol.meaningful_usage(usage) != self._last_pushed:
+            self._send_usage(usage)
+            return
+        # The usage line is not the whole message the panel draws from, and
+        # the project name is the part it cannot see. `label` rides its own
+        # `session` message -- deliberately, because the usage line has six
+        # bytes of headroom and a name is not six bytes -- so when a session
+        # in project A ends and one in project B starts running, `state`
+        # stays "running", every count stays where it was, and the usage dict
+        # is byte-identical. The fast tick found nothing to send and the panel
+        # went on naming project A until the next heartbeat, up to a minute
+        # later. Naming the wrong project is a wrong statement, not a vague
+        # one, and this tick exists precisely so that session moves reach the
+        # board in two seconds rather than sixty.
+        #
+        # Only the name goes out in that case. Re-sending an identical usage
+        # line to carry it would spend the budget this comparison exists to
+        # protect.
+        self._send_session_if_changed()
+
+    def _read_usage(self):
+        """The usage message as it would go out right now, or None if there is
+        nothing to report yet.
+
+        Raises whatever the fetch raises: the two callers disagree about how
+        loud to be, so neither the logging nor the status message belongs here.
+        """
+        usage = self._fetch()
+        if usage is None:
+            return None
         # Percentages above 100 are real -- extra usage puts them there -- but
         # firmware older than protocol.FW_ACCEPTS_OVERAGE turns them into 0 on
         # the panel rather than clamping. Hold them at 100 for those boards.
-        usage = protocol.cap_overage_for_fw(usage, self._board_fw)
+        return protocol.cap_overage_for_fw(usage, self._board_fw)
 
+    def _send_usage(self, usage):
+        """Put a usage message on the wire and remember what was in it."""
         self._write(usage)
+        # Recorded here, once, so that no path can push without moving the
+        # baseline -- a push that forgot to would leave the fast tick
+        # re-sending the same message every two seconds forever.
+        self._last_pushed = protocol.meaningful_usage(usage)
+
+        self._send_session_if_changed()
+
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
         # board colours its own dot from the reading it was just given.
@@ -434,3 +530,25 @@ class Bridge:
         # stale, purely because that string already mapped to amber -- which
         # left a stale reading and a real rate limit indistinguishable on the
         # panel, and put the wrong words in the log.
+
+    def _send_session_if_changed(self):
+        """Put the project name on the wire, on change only.
+
+        Its own message because the usage line has six bytes of headroom and
+        a project name is not six bytes. Split out of _send_usage so the fast
+        tick can send a name WITHOUT re-sending an unchanged usage line --
+        see poll_if_changed, where a project change is otherwise invisible.
+
+        Read off the fetch callable rather than passed through it: the Bridge
+        is handed a zero-arg callable returning a finished usage dict and
+        never sees the frame the name lives on. A fetch without the accessor
+        -- every test fake, and the single-source fetch -- simply sends
+        nothing, which is what an older daemon did anyway.
+        """
+        session_pair = getattr(self._fetch, "session_pair", None)
+        if session_pair is None:
+            return
+        pair = tuple(session_pair())
+        if pair != self._last_session:
+            self._write(protocol.session(*pair))
+            self._last_session = pair
