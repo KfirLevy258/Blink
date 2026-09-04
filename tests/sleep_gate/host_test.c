@@ -130,28 +130,39 @@ int main(void)
 		}
 	}
 
-	/* --- the age predicate both dozing rules share --- */
+	/*
+	 * --- the age predicate both dozing rules share ---
+	 *
+	 * Three ages, not five. Both predicates are a single threshold
+	 * comparison and so are monotone in the age, which makes an assertion
+	 * anywhere inside a run implied by the one at that run's edge: a
+	 * passing !nobody_is_here(0) said nothing that
+	 * !nobody_is_here(SLEEP_ABSENT_AFTER_S - 1) did not already say, and
+	 * survived every one of a ten-mutation battery that the boundary pair
+	 * caught. What is left is the two sides of the line, plus the
+	 * sentinel -- and the sentinel is here because "unknown" is the one
+	 * input a plausible mistake would fold onto the wrong side, not
+	 * because it is far from the threshold.
+	 */
 	CHECK(!sleep_nobody_is_here(-1));
-	CHECK(!sleep_nobody_is_here(0));
 	CHECK(!sleep_nobody_is_here(SLEEP_ABSENT_AFTER_S - 1));
 	CHECK(sleep_nobody_is_here(SLEEP_ABSENT_AFTER_S));
 
 	/* --- and the one the wake-time status stamp asks instead --- */
 
 	/* Half an hour, because this one is about the number on the screen
-	 * rather than about the person in front of it. */
+	 * rather than about the person in front of it. Same three ages, for
+	 * the reason argued above. */
 	CHECK(!sleep_reading_is_stale(-1));
-	CHECK(!sleep_reading_is_stale(0));
 	CHECK(!sleep_reading_is_stale(SLEEP_READING_STALE_AFTER_S - 1));
 	CHECK(sleep_reading_is_stale(SLEEP_READING_STALE_AFTER_S));
-	CHECK(sleep_reading_is_stale(SLEEP_READING_STALE_AFTER_S + 1));
 
 	/* The gap between the two questions, which is the bug this predicate
 	 * exists for: a board that dozed for an hour used to wake with a green
 	 * dot over an hour-old reading, because an hour is not four hours. It
-	 * IS half an hour. */
+	 * IS half an hour. One age is enough to show the gap; asserting
+	 * stale(14400) underneath it only re-asks the monotone question. */
 	CHECK(sleep_reading_is_stale(3600) && !sleep_nobody_is_here(3600));
-	CHECK(sleep_reading_is_stale(SLEEP_ABSENT_AFTER_S));
 
 	/* Both numbers, not just their symbols -- see the note below. 1800 s
 	 * is not a free choice: it is pc/statusline_source's STALE_AFTER_S,

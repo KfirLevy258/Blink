@@ -67,7 +67,11 @@ int main(void)
 			     300000);
 	CHECK(usage_freshness_age_s(300000) == INT32_MAX - 5);
 	CHECK(usage_freshness_age_s(360000) == INT32_MAX);
-	CHECK(usage_freshness_age_s(360000) > 0);
+	/* No `> 0` line under that equality. It could not fail while the
+	 * equality holds, and the block at the bottom of this file already
+	 * writes down why that shape is worse than nothing -- the lesson was
+	 * applied to the copy and not to the original. The sign is asked there
+	 * instead, of a sum far enough past the clamp to have wrapped. */
 
 	/*
 	 * The second age, and the desk it is about.
