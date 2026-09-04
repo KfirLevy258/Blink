@@ -41,14 +41,22 @@ def test_a_live_reading_is_returned_alone(tmp_path):
     assert frames[0].session_pct == 27.0
 
 
+# The remembered payloads below carry NO five-hour reset stamp, which is what
+# `payload()` writes by default and is the shape this memory is for. A stamp
+# the clock has passed is proof the window ended, and a reading of a window
+# that has ended is not a reading anyone should be offered -- see
+# test_a_remembered_window_that_has_since_ended_is_not_re_offered below, and
+# pc/statusline_source._rolled_over for the argument.
+
+
 def test_the_last_reading_with_a_percentage_is_offered_when_the_file_loses_one(tmp_path):
-    """The field case: the window expired and the file was rewritten without
-    it, so the only session figure left in the world is the one we read an
-    hour ago."""
+    """The field case: the file was rewritten without the five-hour window,
+    so the only session figure left in the world is the one we read six hours
+    ago, and nothing says the window it describes has rolled."""
     p = tmp_path / "statusline.json"
     prov = ClaudeCliProvider(path=str(p))
 
-    write(p, payload(five_hour=27.0, resets_at=NOW - 7200), NOW - 6 * 3600)
+    write(p, payload(five_hour=27.0), NOW - 6 * 3600)
     prov.poll(NOW - 6 * 3600 + 1)
 
     write(p, {"rate_limits": {"seven_day": {"used_percentage": 12.0}}}, NOW - 60)
@@ -61,6 +69,29 @@ def test_the_last_reading_with_a_percentage_is_offered_when_the_file_loses_one(t
     assert remembered[0].src == "cli"
 
 
+def test_a_remembered_window_that_has_since_ended_is_not_re_offered(tmp_path):
+    """The same memory, with the one fact that disqualifies it.
+
+    The payload's five-hour window rolled two hours ago, and re-offering its
+    27% would put usage that has already been forgiven on the dial -- the
+    failure pc/normalizer's docstring says the whole design exists to
+    prevent. What the memory still carries is the evidence: the epoch that
+    window emptied, which is what stops a Claude Desktop sample taken before
+    the same reset from inheriting the dial (pc/normalizer._survives_rollover).
+    """
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+
+    write(p, payload(five_hour=27.0, resets_at=NOW - 7200), NOW - 6 * 3600)
+    prov.poll(NOW - 6 * 3600 + 1)
+
+    write(p, {"rate_limits": {"seven_day": {"used_percentage": 12.0}}}, NOW - 60)
+    frames = prov.poll(NOW)
+
+    assert [f.session_pct for f in frames if f.session_pct >= 0] == []
+    assert any(f.session_rolled_at == NOW - 7200 for f in frames)
+
+
 def test_the_remembered_reading_is_marked_stale_by_its_own_age(tmp_path):
     """Not frozen at the staleness it had when captured. A six-hour-old
     number under a green dot is the confident-wrong-number failure
@@ -68,7 +99,7 @@ def test_the_remembered_reading_is_marked_stale_by_its_own_age(tmp_path):
     p = tmp_path / "statusline.json"
     prov = ClaudeCliProvider(path=str(p))
 
-    write(p, payload(five_hour=27.0, resets_at=NOW - 7200), NOW - 6 * 3600)
+    write(p, payload(five_hour=27.0), NOW - 6 * 3600)
     prov.poll(NOW - 6 * 3600 + 1)
     assert prov.poll(NOW - 6 * 3600 + 1)[0].stale is False
 
@@ -83,7 +114,7 @@ def test_the_remembered_reading_ages(tmp_path):
     p = tmp_path / "statusline.json"
     prov = ClaudeCliProvider(path=str(p))
 
-    write(p, payload(five_hour=27.0, resets_at=NOW - 7200), NOW - 3600)
+    write(p, payload(five_hour=27.0), NOW - 3600)
     prov.poll(NOW - 3600 + 1)
     write(p, {"rate_limits": {}}, NOW - 60)
 

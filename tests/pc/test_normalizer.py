@@ -1,5 +1,6 @@
 """Conflict and recency resolution across sources that each see a slice."""
 from pc import normalizer
+from pc import statusline_source as ss
 from pc.providers import base
 
 NOW = 1_787_700_000.0
@@ -410,3 +411,68 @@ def test_the_freshest_contact_survives_a_second_merge():
                              cli(NOW - 6 * 3600, session=27.0)])
     twice = normalizer.merge([once])
     assert twice.active_at == NOW - 5
+
+
+# --- the staleness cliff, and the reading it used to resurrect ---------------
+#
+# The failure this module was written against, reached by a route the design
+# did not cover: rollover EVIDENCE used to expire along with the payload that
+# carried it. Half an hour after the status line went quiet, the CLI frame
+# stopped reporting that it had watched the window empty -- and a Claude
+# Desktop sample taken BEFORE that reset became a legal candidate again. It
+# was the freshest one, so it took the dial, wearing its own stale=False.
+#
+# Built through map_statusline_frame rather than the cli() helper on purpose.
+# The helper cannot express the bug: it takes session_rolled_at as a given,
+# and the defect was in what the real producer decides to set.
+
+T0 = NOW
+
+
+def _statusline(now, five_hour=80.0, resets_at=T0 + 60, mtime=T0):
+    return ss.map_statusline_frame(
+        {"rate_limits": {"five_hour": {"used_percentage": five_hour,
+                                       "resets_at": resets_at}}},
+        now, mtime)
+
+
+def test_a_forgiven_percentage_cannot_return_when_the_status_line_ages_out():
+    """The reproduction, at four clocks either side of the bound.
+
+    A five-hour window at 80% resets sixty seconds after the status line was
+    written; Claude Desktop sampled 78% thirty seconds before that reset, and
+    cannot see reset times at all, so it has no way to know its reading has
+    been superseded. Two seconds apart the panel used to flip from a correct
+    0% to a confident green 78% for usage already forgiven, and it stayed
+    there for the life of the daemon.
+    """
+    before = normalizer.merge([_statusline(T0 + 1799),
+                               desktop(T0 + 30, session=78.0, weekly=40.0)])
+    assert (before.session_pct, before.src, before.stale) == (0.0, "cli", False)
+
+    for elapsed in (1801, 7200, 86400):
+        m = normalizer.merge([_statusline(T0 + elapsed),
+                              desktop(T0 + 30, session=78.0, weekly=40.0)])
+        assert m.session_pct == base.UNKNOWN, elapsed
+        assert m.weekly_pct == 40.0, elapsed     # the weekly window is intact
+
+
+def test_the_rollover_is_still_evidence_after_the_reading_stops_being_one():
+    """Why the frames above can refuse the desktop sample at all. A window
+    emptied at an epoch; that fact does not rot with the file's mtime, and it
+    is the only thing on the bus that can tell a source with no reset times
+    that its reading describes a window which no longer exists."""
+    assert _statusline(T0 + 86400).session_rolled_at == T0 + 60
+
+
+def test_a_window_that_has_ended_stops_suppressing_the_burn_rate():
+    """merge() sends a measured rate only when NO source could supply a reset
+    time, so a long-past stamp out of a remembered payload silenced the rate
+    -- while protocol.secs_until refused that same stamp as a countdown. The
+    panel got neither. A stamp the window has already passed is not a reset
+    time this daemon has; it is one it used to have."""
+    m = normalizer.merge([_statusline(T0 + 7200),
+                          desktop(T0 + 7080, session=55.0, burn=12.4)])
+    assert m.session_resets_at is None
+    assert m.session_burn_pph == 12.4
+    assert m.session_pct == 55.0

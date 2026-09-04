@@ -394,8 +394,7 @@ def test_the_panel_reports_the_age_of_the_last_claude_code_reading(tmp_path):
     desktop = Fixed(frame(src="desktop", at=NOW - 57 * 3600, session=0.0,
                           weekly=0.0))
 
-    write({"rate_limits": {"five_hour": {"used_percentage": 27.0,
-                                         "resets_at": NOW - 7200}}},
+    write({"rate_limits": {"five_hour": {"used_percentage": 27.0}}},
           NOW - 6 * 3600)
     now = [NOW - 6 * 3600 + 1]
     bus = ingest.IngestionBus(providers=[cli, desktop],
@@ -461,8 +460,13 @@ def test_a_live_status_line_keeps_the_board_awake_behind_an_old_dial(tmp_path):
     bus = ingest.IngestionBus(providers=[cli], now=lambda: now[0])
 
     # Overnight: a real five-hour reading, which the provider remembers.
-    write({"rate_limits": {"five_hour": {"used_percentage": 27.0,
-                                         "resets_at": NOW - 12 * 3600 + 7200},
+    # No reset stamp on it, and that is load-bearing rather than lazy: a
+    # stamp the clock has since passed is proof the window ended, and a
+    # reading of a window that has ended is refused outright rather than
+    # aged (pc/statusline_source._rolled_over). This is the other case --
+    # nothing here says the twelve-hour-old reading has been superseded, so
+    # it is offered, and offered with its own honest age.
+    write({"rate_limits": {"five_hour": {"used_percentage": 27.0},
                            "seven_day": {"used_percentage": 26.0}}},
           NOW - 12 * 3600)
     assert bus.poll()["session_pct"] == 27.0
@@ -484,3 +488,42 @@ def test_a_live_status_line_keeps_the_board_awake_behind_an_old_dial(tmp_path):
     absent_after = _sleep_absent_after_s()
     assert msg["age_s"] >= absent_after
     assert msg["active_age_s"] < absent_after
+
+
+def test_a_five_hour_window_that_ended_leaves_the_dial_empty_not_wrong(tmp_path):
+    """The same morning, with the one difference that decides it: the
+    overnight payload said WHEN its five-hour window would roll, and the
+    clock has passed it.
+
+    That reading is not old, it is about a window that no longer exists, so
+    the dial goes to unknown rather than showing usage the account has
+    already been forgiven. Everything else on the message survives: the
+    seven-day figure from the live rewrite, and an active age that keeps the
+    board awake for the person sitting in front of it.
+    """
+    import os
+
+    p = tmp_path / "statusline.json"
+
+    def write(doc, mtime):
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        os.utime(p, (mtime, mtime))
+
+    cli = ClaudeCliProvider(path=str(p))
+    now = [NOW - 12 * 3600 + 1]
+    bus = ingest.IngestionBus(providers=[cli], now=lambda: now[0])
+
+    write({"rate_limits": {"five_hour": {"used_percentage": 27.0,
+                                         "resets_at": NOW - 10 * 3600},
+                           "seven_day": {"used_percentage": 26.0}}},
+          NOW - 12 * 3600)
+    assert bus.poll()["session_pct"] == 27.0     # still inside its window
+
+    write({"rate_limits": {"seven_day": {"used_percentage": 41.0}}}, NOW - 5)
+    now[0] = NOW
+    msg = bus.poll()
+
+    assert msg["session_pct"] == -1.0
+    assert msg["session_resets_in_s"] == -1
+    assert msg["weekly_pct"] == 41.0
+    assert msg["active_age_s"] == 5

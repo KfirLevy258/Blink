@@ -1356,6 +1356,25 @@ void ui_settings_drop_pending(void)
 	closing = false;
 }
 
+/*
+ * Somebody is working this panel -- it is open, or a gesture has asked for
+ * something and no mode loop has run it yet.
+ *
+ * The latch half is the part that is easy to get wrong. A gesture never opens
+ * anything itself; it raises one of these flags and ui_settings_service(),
+ * which only a mode loop calls, runs the transition from thread context. So
+ * a latch is not a record of a past intention, it is a request still waiting
+ * to be answered, and any code that takes the mode loop away from it -- the
+ * doze in ui_sleep.c does exactly that -- has to know the request is there.
+ * Otherwise the swipe does nothing, and then does something worse: the flag
+ * sits until the board next wakes on its own and the panel slides open by
+ * itself, hours later, in front of nobody.
+ */
+bool ui_settings_busy(void)
+{
+	return panel != NULL || want_open || want_close || want_page != 0;
+}
+
 void ui_settings_service(void (*pump)(void))
 {
 	if (want_open && panel == NULL) {

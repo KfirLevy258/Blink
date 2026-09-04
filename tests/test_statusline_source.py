@@ -80,16 +80,41 @@ def test_a_past_reset_reads_unknown_not_zero():
 
 
 def test_a_stale_payload_keeps_its_numbers(tmp_path=None):
-    """The whole point of not rolling a stale window over is that its last
-    known percentage is the best thing we have. Sending 0 for the countdown
-    let the board discard it anyway."""
+    """An old reading is not a wrong one. With no reset stamp there is no
+    evidence the window it describes has ended, so its last known percentage
+    is still the best thing we have -- age is reported as age and the number
+    stands. (A stamp the clock HAS passed is different in kind and is the
+    test below.)"""
     now = 1_787_200_000
-    payload = {"rate_limits": {"five_hour": {"used_percentage": 99.0,
-                                             "resets_at": now - 100_000}}}
+    payload = {"rate_limits": {"five_hour": {"used_percentage": 99.0}}}
     msg = ss.map_statusline(payload, now_epoch=now, mtime_epoch=now - 3 * 86400)
     assert msg["stale"] is True
     assert msg["session_pct"] == 99.0
     assert msg["session_resets_in_s"] == -1
+
+
+def test_a_stale_reading_of_a_window_that_has_ended_is_not_offered_at_all():
+    """The other half, and the one that was wrong (field defect 2026-09-02).
+
+    A three-day-old file whose five-hour window rolled two days ago is not
+    holding "the best number we have" -- it is holding a number about a
+    window that no longer exists, and re-offering it is exactly the invented,
+    already-forgiven usage pc/normalizer's docstring says the design exists
+    to prevent. It goes to UNKNOWN rather than to 0: any amount of usage may
+    have happened in the days since, so zero would be a confident lie in the
+    other direction.
+    """
+    now = 1_787_200_000
+    payload = {"rate_limits": {"five_hour": {"used_percentage": 99.0,
+                                             "resets_at": now - 100_000}}}
+    f = ss.map_statusline_frame(payload, now, now - 3 * 86400)
+    assert f.stale is True
+    assert f.session_pct == -1.0
+    assert f.session_resets_at is None
+    # And the fact that outlives the reading: some source watched this window
+    # empty, which is what stops another source's pre-reset sample from
+    # taking the dial (pc/normalizer._survives_rollover).
+    assert f.session_rolled_at == now - 100_000
 
 
 def test_a_window_present_but_missing_its_percentage_is_unknown():
@@ -113,23 +138,40 @@ NOW = 1_787_900_000.0
 
 def test_a_reset_window_reads_zero_and_reports_when_it_emptied():
     at = NOW - 60
-    pct, resets, rolled = ss._rolled_over(47.0, at, NOW)
+    pct, resets, rolled = ss._rolled_over(47.0, at, NOW, stale=False)
     assert pct == 0.0
     assert resets is None
     assert rolled == at, "the epoch is the evidence the normalizer needs"
 
 
+def test_a_stale_reading_reports_the_rollover_it_watched_but_claims_no_zero():
+    """The same window, the same evidence, a different answer. Zero is what
+    a reset MEANS and it is knowable only while the reading is fresh; the
+    epoch is a fact about the past and is reported either way. Skipping the
+    whole check on an old payload kept neither -- it kept the pre-reset 47%,
+    which is the one answer that is definitely wrong."""
+    at = NOW - 60
+    assert ss._rolled_over(47.0, at, NOW, stale=True) == (-1.0, None, at)
+
+
 def test_a_window_that_has_not_reset_is_untouched():
     at = NOW + 3600
-    assert ss._rolled_over(47.0, at, NOW) == (47.0, at, None)
+    assert ss._rolled_over(47.0, at, NOW, stale=False) == (47.0, at, None)
+    assert ss._rolled_over(47.0, at, NOW, stale=True) == (47.0, at, None)
 
 
 def test_an_unknown_percentage_is_never_zeroed():
-    assert ss._rolled_over(-1.0, NOW - 60, NOW) == (-1.0, NOW - 60, None)
+    """A percentage we never read does not become 0 because the window it
+    would have described has ended. The stamp still goes -- it is past, so it
+    is neither a countdown nor a reset time anyone has -- and the rollover is
+    still reported, because that much IS known."""
+    assert ss._rolled_over(-1.0, NOW - 60, NOW, stale=False) == (
+        -1.0, None, NOW - 60)
 
 
 def test_no_reset_time_means_no_rollover_claim():
-    assert ss._rolled_over(47.0, None, NOW) == (47.0, None, None)
+    assert ss._rolled_over(47.0, None, NOW, stale=False) == (47.0, None, None)
+    assert ss._rolled_over(47.0, None, NOW, stale=True) == (47.0, None, None)
 
 
 # --- restored ---------------------------------------------------------------
@@ -209,18 +251,27 @@ def test_a_reset_window_does_not_drag_down_the_other_one():
     assert msg["stale"] is False
 
 
-def test_an_old_payload_past_its_reset_stays_stale_and_is_not_zeroed():
+def test_an_old_payload_past_its_reset_is_neither_zeroed_nor_believed():
     """A three-day-old file also has a long-past resets_at, but any amount of
     usage may have happened since -- so 0% would be the confident lie this
-    module exists to avoid."""
+    module exists to avoid.
+
+    It does not follow that the pre-reset number may stand, which is what the
+    code did for a year and what put an already-forgiven 78% on a real panel
+    under a green dot. Both windows here ended before `now`; both go to
+    unknown, and both report when they ended.
+    """
     now = 1_000_000
     payload = {"rate_limits": {
         "five_hour": {"used_percentage": 50, "resets_at": now - 200_000},
         "seven_day": {"used_percentage": 20, "resets_at": now - 100_000}}}
     msg = ss.map_statusline(payload, now, now - 3 * 86400)
     assert msg["stale"] is True
-    assert msg["session_pct"] == 50
-    assert msg["weekly_pct"] == 20
+    assert msg["session_pct"] == -1.0
+    assert msg["weekly_pct"] == -1.0
+    f = ss.map_statusline_frame(payload, now, now - 3 * 86400)
+    assert (f.session_rolled_at, f.weekly_rolled_at) == (now - 200_000,
+                                                         now - 100_000)
 
 
 def test_a_payload_of_the_wrong_shape_is_silence_not_an_exception():

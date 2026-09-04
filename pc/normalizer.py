@@ -55,6 +55,14 @@ def _rolled_at(frames, attr):
     Evidence, not inference: some source watched the window empty at this
     epoch. Only the CLI status line can see it (pc/statusline_source), and it
     used to discard the fact after acting on it.
+
+    Then it discarded it a second way, which cost the same bug twice: the
+    fact was reported only while the payload carrying it was fresh, so half
+    an hour after Claude Code went quiet this returned None again and a
+    desktop sample taken before the reset walked back onto the dial. The
+    producer now reports the epoch whatever age the reading has reached --
+    a window ended when it ended -- so everything below can assume that a
+    rollover, once seen, stays seen for as long as the source is on the bus.
     """
     best = None
     for f in frames:

@@ -86,7 +86,7 @@ def _window_has_reset(resets_at, now_epoch: float) -> bool:
     return resets_at is not None and now_epoch >= resets_at
 
 
-def _rolled_over(pct: float, resets_at, now_epoch: float):
+def _rolled_over(pct: float, resets_at, now_epoch: float, stale: bool):
     """Carry a window across its own reset instead of disowning the reading.
 
     A window that has just reset is at 0%. That is not an estimate -- it is
@@ -104,19 +104,44 @@ def _rolled_over(pct: float, resets_at, now_epoch: float):
     next five-hour window does not start until the next message, so there is
     no honest number to put there until Claude Code tells us one.
 
-    Only ever called on a payload that is otherwise fresh. On an old one the
-    same reasoning inverts -- a three-day-old file has a long-past resets_at
-    and any amount of usage may have happened since, so 0% would be the lie.
+    STALENESS CHANGES THE ANSWER BUT NOT THE QUESTION, and getting that
+    backwards was a field defect (reproduced 2026-09-02). This used to be
+    skipped entirely on an old payload, on the reasoning that a three-day-old
+    file has a long-past resets_at and any amount of usage may have happened
+    since, so 0% would be the lie. The first half of that is right and the
+    fallback it took was not: skipping the check did not fall back to
+    "unknown", it fell back to the PRE-RESET percentage, which is not merely
+    unvouched-for but definitely wrong -- and it threw away the rollover
+    evidence with it, so a Claude Desktop sample taken before the same reset
+    came back to the dial wearing its own stale=False. Two seconds either side
+    of STALE_AFTER_S the panel went from a correct 0% to a confident green 78%
+    for usage that had already been forgiven.
+
+    So all three outputs are decided separately now:
+
+      - The EPOCH the window emptied is reported either way. It is evidence
+        about the past, and evidence does not rot with the file's mtime: the
+        window ended when it ended, whatever age the reading has since
+        reached. pc/normalizer needs it to refuse a newer reading from a
+        source that cannot see reset times (this frame's own observed_at is
+        the payload's mtime and can be long before the reset, so nothing else
+        in the frame can carry that fact).
+      - The RESET TIME is discarded either way. A stamp the clock has already
+        passed is not a countdown -- protocol.secs_until refuses it -- and
+        merge() reads its mere presence as "a source supplied a reset time",
+        which silences the desktop burn rate. Neither is worth keeping for a
+        window that has ended.
+      - The PERCENTAGE is 0.0 only while the reading is fresh. On a stale one
+        it goes to UNKNOWN, which is the third option the old comment was
+        missing: it does not zero an old payload, and it does not re-offer a
+        number for a window that no longer exists. It is also the convention
+        _window() already sets two functions up -- an absent percentage reads
+        as -1 and not as a confident zero -- applied to a percentage we have
+        positive evidence against rather than merely none for.
     """
-    if pct < 0 or not _window_has_reset(resets_at, now_epoch):
+    if not _window_has_reset(resets_at, now_epoch):
         return pct, resets_at, None
-    # The third value is the epoch the window EMPTIED, which is exactly the
-    # resets_at we are discarding. It used to be thrown away, and that was the
-    # hole: this frame's own observed_at is the payload's mtime, which can be
-    # long before the reset, so downstream had no way to tell that a NEWER
-    # reading from another source was nonetheless taken before the window
-    # rolled. pc/normalizer needs this to refuse that reading.
-    return 0.0, None, resets_at
+    return (base.UNKNOWN if (stale or pct < 0) else 0.0), None, resets_at
 
 
 def map_statusline_frame(payload: dict, now_epoch: float,
@@ -141,12 +166,14 @@ def map_statusline_frame(payload: dict, now_epoch: float,
     # and "this reading has been superseded by a zero we can compute". The
     # second has a real answer, so it gets one -- see _rolled_over().
     stale = (now_epoch - mtime_epoch) > STALE_AFTER_S
-    session_rolled = weekly_rolled = None
-    if not stale:
-        session_pct, session_resets, session_rolled = _rolled_over(
-            session_pct, session_resets, now_epoch)
-        weekly_pct, weekly_resets, weekly_rolled = _rolled_over(
-            weekly_pct, weekly_resets, now_epoch)
+    # Unconditional, and `stale` is an INPUT to it rather than a gate on it:
+    # whether a window has ended is a question about the clock, not about the
+    # file's age, and only the answer's third value depends on how old the
+    # reading is. See _rolled_over().
+    session_pct, session_resets, session_rolled = _rolled_over(
+        session_pct, session_resets, now_epoch, stale)
+    weekly_pct, weekly_resets, weekly_rolled = _rolled_over(
+        weekly_pct, weekly_resets, now_epoch, stale)
 
     return base.NormalizedUsageFrame(
         provider=PROVIDER_ID, src=SRC_ID, observed_at=mtime_epoch,

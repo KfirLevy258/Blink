@@ -1463,8 +1463,24 @@ static void run_usb(void)
 		 * hours -- which is what a sleeping computer with a running
 		 * daemon actually looks like from here, and why the first
 		 * rule alone left a panel awake all night (field report
-		 * 2026-09-02). Both block until there is a reason to wake. */
-		{
+		 * 2026-09-02). Both block until there is a reason to wake.
+		 *
+		 * And neither of them while the owner is in the settings
+		 * panel.
+		 *
+		 * Both rules below are about an absent person, and an open
+		 * panel is a present one -- the same argument sleep_gate.c
+		 * makes for refusing to doze over anything on screen that is
+		 * asking for somebody. It also closes the loop ui_sleep.c
+		 * opens at the other end: a swipe during a peek ends the
+		 * doze, this loop opens the panel on its next pass, and
+		 * without this the board would fall asleep again over the
+		 * open panel sixty seconds later -- with the owner reading
+		 * it. The cost is that a panel left open holds the board
+		 * awake indefinitely; that is a deliberate act by a person
+		 * standing at the desk, and it ends when they close it.
+		 */
+		if (!ui_settings_busy()) {
 			/* Whether an update forbids dozing is one question
 			 * with one answer, and it lives at
 			 * ota_blocks_sleep() -- including the test-boot term,
@@ -1606,17 +1622,24 @@ static void run_usb(void)
 			if (proto_host_seen()) {
 				host_quiet_since = k_uptime_get();
 			} else if (!ota_blocks_sleep() &&
+				   !ui_settings_busy() &&
 				   k_uptime_get() - host_quiet_since
 				   > 60 * 1000) {
-				/* The same one answer the two dozes above
-				 * ask for, and this is the branch that was
-				 * found looping on it: this loop feeds the
-				 * unconfirmed image's watchdog, and a board
-				 * with no daemon is exactly the board whose
-				 * image cannot prove itself, so the two
-				 * conditions coincide precisely here. The
-				 * timer keeps running, so the doze happens
-				 * the moment the test boot resolves. */
+				/* Both refusals are the ones argued at the
+				 * doze block above, and this is the branch
+				 * they matter most in. It is the one that
+				 * was found looping on the watchdog -- this
+				 * loop feeds the unconfirmed image's, and a
+				 * board with no daemon is exactly the board
+				 * whose image cannot prove itself, so the
+				 * two conditions coincide precisely here.
+				 * And it is the one an owner meets when the
+				 * app is not installed: this is the doze
+				 * they swipe out of to reach settings, so
+				 * dozing again while they are in there would
+				 * shut the door behind them. The timer keeps
+				 * running, so the doze happens the moment
+				 * either reason clears. */
 				printk("[usage] no app after 60 s; dozing until one speaks\n");
 				ui_sleep_run(host_is_back,
 					     "Waiting for the app on your computer.");

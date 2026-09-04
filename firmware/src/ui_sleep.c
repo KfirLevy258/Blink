@@ -33,14 +33,50 @@ static void tap_cb(lv_event_t *e)
 
 static bool (*wake_when)(void);
 
+/*
+ * Every reason to stop dozing, asked in one place.
+ *
+ * wake_when() is the caller's reason -- the app spoke again, or the reading
+ * started moving. ui_settings_busy() is this file's own, and it is here
+ * because of what dozing takes away rather than because of anything the
+ * sleep design says.
+ *
+ * Settings are asked for by a left swipe on the gauge screen, or by a tap on
+ * the right edge zone -- which is the route that still works over the
+ * CONNECTING takeover, where the swipe is deliberately refused. Neither
+ * gesture opens anything: both raise a flag that ui_settings_service() acts
+ * on, and the only call to that lives in the mode loop this function has
+ * taken over. So on the shipped build -- USB-only, one loop -- a request made
+ * during a peek latched and nothing ever answered it. The panel then opened
+ * by itself whenever the board next woke, which is the same bug wearing the
+ * other face.
+ *
+ * That bites hardest in the state that causes it. A board plugged into a
+ * computer with no daemon installed, or one that cannot open the port, dozes
+ * after 60 s over the CONNECTING screen -- and settings is exactly where the
+ * owner goes to fix that. A tap gave them ten seconds of dashboard; it did
+ * not give them control.
+ *
+ * Waking rather than servicing the latch here is deliberate. ui_slide_run()
+ * must be driven from a mode loop in thread context, never from under a clip
+ * player or an LVGL callback (ui_slide.h), and a peek that opened the panel
+ * would then have to decide what to do when its ten seconds ran out with the
+ * user halfway through the list. Ending the doze hands the request back to
+ * the loop that owns it, and the panel slides in on that loop's first pass.
+ */
+static bool woken(void)
+{
+	return wake_when() || ui_settings_busy();
+}
+
 static bool awake_now(void)
 {
-	return wake_when();
+	return woken();
 }
 
 static bool awake_or_tap(void)
 {
-	return wake_when() || tapped;
+	return woken() || tapped;
 }
 
 static void service(void)
@@ -59,11 +95,11 @@ static void peek(lv_obj_t *prev, lv_obj_t *sleep_scr, const char *note)
 	lv_scr_load(prev);
 	ui_settings_notice(note);
 	lv_refr_now(NULL);
-	while (k_uptime_get() < until && !wake_when()) {
+	while (k_uptime_get() < until && !woken()) {
 		service();
 	}
 	ui_settings_notice_dismiss();
-	if (!wake_when()) {
+	if (!woken()) {
 		lv_scr_load(sleep_scr);
 		lv_refr_now(NULL);
 	}
@@ -88,7 +124,7 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 	printk("[sleep] dozing (%s)\n", close->name);
 
 	ui_boot_play_clip(close->blob, close->blob_len, awake_now);
-	while (!wake_when()) {
+	while (!woken()) {
 		tapped = false;
 		if (!ui_boot_play_clip(loop->blob, loop->blob_len,
 				       awake_or_tap)) {
@@ -99,7 +135,7 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 				service();
 			}
 		}
-		if (tapped && !wake_when()) {
+		if (tapped && !woken()) {
 			peek(prev, scr, peek_note);
 		}
 	}
