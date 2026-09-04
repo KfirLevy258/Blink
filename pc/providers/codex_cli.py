@@ -249,6 +249,28 @@ def _project_name(cwd) -> str:
     because this string is JSON-encoded into a line the firmware scans for
     quotes.
 
+    The double quote goes with them, on that same sentence's reason rather
+    than a new one, and it was the half the sentence promised and did not
+    do. firmware/src/msg_parse.c reads a string value by copying the bytes
+    between the first `"` after the key's colon and the NEXT `"`, and
+    unescapes nothing. So a project called mid\"way -- json.dumps writes it
+    onto the wire correctly, as a backslash and a quote -- arrives at the
+    panel as `mid` and a trailing backslash, because msg_get_str stops at the
+    escaped quote and hands back the escape character with it. A double quote
+    is a legal character in a directory name on every platform this reads
+    rollouts from.
+
+    Stripped, not refused, which is how the control characters beside it are
+    handled and for the same reason: mid\"way is still recognisably the
+    owner's project as `midway`, while a name that was ONLY quotes falls
+    through to the drawable-ASCII rule below and lets the count speak.
+
+    The backslash needs no rule of its own: it is the other path separator,
+    so the rsplit above has already thrown away everything up to the last
+    one. Quote and backslash are the only two characters json.dumps escapes
+    once the control characters are gone, so with those two accounted for
+    nothing reaches msg_get_str that it will misread.
+
     The third is about the panel rather than about safety, and it is the one
     the shim has no need of. firmware/src/fmt.c draws a label through
     fmt_ascii(), which replaces every codepoint it has no ASCII spelling for
@@ -261,9 +283,13 @@ def _project_name(cwd) -> str:
     the rest, and one with no Latin at all is refused so the count speaks
     instead.
 
-    Not capped here. protocol.session is the one place that knows the byte
-    bound and the one place that truncates on a UTF-8 boundary; a second cap
-    would be a second thing to keep in step with the firmware.
+    Not capped here, and the quote rule above is the same division read from
+    the other side. protocol.session owns the WIRE: the byte bound, and the
+    truncation on a UTF-8 boundary that the bound needs. This function owns
+    what may be a NAME, which is what a character class is -- and putting the
+    quote rule in protocol.session would apply one provider's bug to every
+    provider's label, while a second byte cap here would be a second thing to
+    keep in step with the firmware.
     """
     if not isinstance(cwd, str):
         return ""
@@ -272,7 +298,8 @@ def _project_name(cwd) -> str:
         name = name[:-1]
     for sep in _NAME_SEPARATORS:
         name = name.rsplit(sep, 1)[-1]
-    name = "".join(c for c in name if c >= " " and c != "\x7f")
+    name = "".join(c for c in name
+                   if c >= " " and c != "\x7f" and c != '"')
     # Deliberately redundant with the drawable-ASCII rule below, which
     # refuses "." and ".." as well: neither carries a letter or a digit. The
     # two answer different questions, and the ASCII one is much the likelier

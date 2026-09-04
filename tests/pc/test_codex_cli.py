@@ -10,6 +10,7 @@ import os
 
 import pytest
 
+from pc import protocol
 from pc.providers import base
 from pc.providers import codex_cli
 
@@ -390,6 +391,38 @@ def test_a_control_character_never_reaches_the_wire():
     assert codex_cli._project_name("/a/b/pro\nject") == "project"
     assert codex_cli._project_name("/a/b/pro\x7fject") == "project"
     assert codex_cli._project_name("/a/b/\n\n") == ""
+
+
+def test_a_double_quote_never_reaches_the_wire():
+    """firmware/src/msg_parse.c copies the bytes between the first `"` after
+    the key's colon and the NEXT `"`, and unescapes nothing -- so a quote
+    inside the name ends the label early and leaves the escape character
+    dangling on the panel. A quote is a legal character in a directory name
+    on every platform this reads rollouts from.
+
+    Stripped rather than refused, exactly as the control characters beside it
+    are: the owner's project is still recognisable without it. A name that
+    was only quotes has nothing left and the count speaks instead.
+    """
+    assert codex_cli._project_name('/a/b/mid"way') == "midway"
+    assert codex_cli._project_name('/a/b/"') == ""
+    assert codex_cli._project_name('/a/b/"Blink"') == "Blink"
+
+
+def test_the_label_the_firmware_reads_back_is_the_whole_label():
+    """The same rule stated as the firmware states it, over the real encoder.
+
+    msg_get_str is three lines: find the key's colon, take the next `"`, stop
+    at the one after it. Reading the line that way must give back exactly the
+    name that went in -- which is the same as saying the encoder never had to
+    escape anything, since an escape is what msg_get_str would stop on.
+    """
+    name = codex_cli._project_name('/Users/K/mid"way')
+    line = protocol.encode(protocol.session(name, 1)).decode("utf-8")
+    body = line.split('"label":', 1)[1]
+    read_back = body.split('"')[1]      # msg_get_str, in the same three steps
+    assert read_back == name
+    assert "\\" not in line, "an escape is a byte the firmware cannot undo"
 
 
 def test_a_name_with_no_drawable_ascii_is_refused():
