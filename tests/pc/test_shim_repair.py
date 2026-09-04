@@ -11,6 +11,8 @@ import ast
 import os
 import sys
 
+import pytest
+
 from pc import cli
 
 
@@ -416,3 +418,37 @@ def test_read_marker_survives_a_non_utf8_marker_file(tmp_path, monkeypatch):
     monkeypatch.setattr(install_statusline, "_marker_path", lambda: str(marker))
 
     assert install_statusline._read_marker() == ""
+
+
+def test_a_failed_shim_write_leaves_the_old_shim_intact(tmp_path, monkeypatch):
+    """The shim must never be truncated in place, and this branch is why.
+
+    Claude Code runs this exact script on EVERY tool call. A truncate-in-place
+    write has a window where the file is empty or half written, and a hook that
+    starts inside it hands `sh` a truncated trailing line -- which exits
+    non-zero and gives the tool a FAILING hook. The shim's closing `exit 0`
+    exists so Blink having a bad day never becomes the user's bad day; opening
+    the file with mode "w" defeats that from outside.
+
+    It mattered less when the only writer was an explicit install. This branch
+    made DriftWatchdog call it from the daemon's poll loop, so the window now
+    opens on a timer while the owner is working.
+
+    So: interrupt the rename and insist the file on disk is still the OLD one.
+    Under a direct write there is no rename to interrupt and the target has
+    already been replaced by then, which is what makes this test able to fail.
+    """
+    p = str(tmp_path / "blink-hook.sh")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\n# the shim that was already working\nexit 0\n")
+
+    def boom(_src, _dst):
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(cli.os, "replace", boom)
+    with pytest.raises(OSError):
+        cli._write_shim(p, "blink-hook.sh")
+
+    assert "already working" in open(p, encoding="utf-8").read()
+    leftovers = [n for n in os.listdir(str(tmp_path)) if "blink-tmp" in n]
+    assert leftovers == [], "a failed write left its temp file behind: %s" % leftovers

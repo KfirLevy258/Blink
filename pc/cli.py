@@ -179,9 +179,38 @@ def _write_shim(path: str, name: str) -> None:
     # fails on `case ... in\r` on every status line render and every tool
     # call. The CI CRLF check only ever looked at the files in the repository,
     # never at the copy this function installs.
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(_shim_source(name))
-    os.chmod(path, 0o755)
+    # Temp file plus os.replace, NOT open(path, "w").
+    #
+    # Truncate-in-place has a window in which this file is empty or half
+    # written, and Claude Code runs this exact script on EVERY tool call. A
+    # hook that starts inside that window hands `sh` an empty file, or a
+    # truncated trailing line -- which exits non-zero and gives the tool a
+    # FAILING hook. The shim's own closing `exit 0` exists precisely so that
+    # Blink having a bad day never becomes the user's bad day, and truncating
+    # the script defeats it from outside.
+    #
+    # The window used to be one write during an explicit install, which is bad
+    # but rare and observed. This branch made DriftWatchdog call it from the
+    # daemon's poll loop, so the same window now opens on a timer, in the
+    # background, on a machine whose owner is working. install_statusline._save
+    # already writes this way for the user's settings, and the shim's own slot
+    # write already uses a pid-named temp plus mv -f; this was the one write
+    # that skipped the idiom, and it is the one that became recurring.
+    #
+    # The temp file is a sibling so os.replace is atomic, and the mode is set
+    # BEFORE the rename so the file is never briefly present and non-executable.
+    tmp = "%s.blink-tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(_shim_source(name))
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def shim_is_current(path: str, name: str) -> bool:
