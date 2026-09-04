@@ -1434,7 +1434,7 @@ def _rm_state_dir():
 
 
 def hook_shim_status_note():
-    """A one-line warning when the installed hook shim is out of date.
+    """A one-line warning when the installed hook shim cannot do its job.
 
     `blink status` reports the activity hooks by comparing settings.json's
     command strings against the shim path. That check passed throughout the
@@ -1443,8 +1443,23 @@ def hook_shim_status_note():
     daemon can repair this within five minutes of starting -- whether it
     actually will is a separate question the caller answers with
     `_shim_repair_is_live`, because this function only knows the file is
-    stale, not whether anything is left to fix it.
+    wrong, not whether anything is left to fix it.
+
+    Two faults, two sentences, because a reader does two different things
+    about them. A shim that is ABSENT is not a shim that is stale: the hooks
+    in settings.json are still wired to that path, so Claude Code runs a file
+    that is not there, silently, on every event -- the pip never lights at
+    all, where a stale shim lights it with the wrong field. Saying "out of
+    date" about a missing file sends someone looking for a version mismatch
+    in a file they will not find.
+
+    This asks about existence FIRST because shim_is_current answers False for
+    a file it cannot open, which is how the two faults came to share a
+    sentence: absent and stale are the same value to it, and only one of them
+    is what it means.
     """
+    if not os.path.exists(hook_shim_path()):
+        return "the activity hook shim is missing, so the hooks run nothing"
     if shim_is_current(hook_shim_path(), "blink-hook.sh"):
         return None
     return "the activity hook shim is out of date"

@@ -345,6 +345,43 @@ def test_status_notices_hooks_that_went_missing(tmp_path, capsys):
     assert "install` to restore them" in out
 
 
+def test_status_does_not_call_a_missing_hook_shim_out_of_date(tmp_path, capsys):
+    """Absent and stale are different faults and want different sentences.
+
+    The hooks in settings.json still point at the shim path, so Claude Code
+    runs a file that is not there on every event and the pip never lights at
+    all. "Out of date" sends the reader hunting for a version mismatch in a
+    file they will not find.
+    """
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    os.remove(cli.hook_shim_path())
+    capsys.readouterr()
+    cli.main(["status"])
+
+    out = capsys.readouterr().out
+    assert "the activity hook shim is missing" in out
+    assert "out of date" not in out
+    # What went wrong AND what to do about it: the daemon rewrites a missing
+    # shim exactly as it rewrites a stale one, so the promise still holds.
+    assert "the hooks run nothing --" in out
+
+
+def test_status_still_says_out_of_date_for_a_shim_that_is_merely_stale(
+        tmp_path, capsys):
+    """The other half of the same branch: a file that exists and is wrong."""
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    with open(cli.hook_shim_path(), "w") as f:
+        f.write("#!/bin/sh\n# an older install left this here\n")
+    capsys.readouterr()
+    cli.main(["status"])
+
+    out = capsys.readouterr().out
+    assert "the activity hook shim is out of date" in out
+    assert "missing" not in out
+
+
 def test_live_sessions_counts_real_sessions_not_zero(tmp_path):
     """_live_sessions() unpacks ClaudeStateProvider.scan()'s return tuple by
     hand. scan() gained a third value (names, for the session-name hint) and
