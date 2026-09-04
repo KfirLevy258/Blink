@@ -330,3 +330,56 @@ latch without making settings reachable. Needs a board.
   cannot read rather than falling silent.
 - No host-return wake term. Argued no, reasoning in `sleep_gate.h`.
 - Six-pip legibility has never been judged by a human; only two were ever live.
+
+---
+
+# HARDWARE VALIDATION — 2026-09-04, the firmware review fixes are FLASHED
+
+**The board on the desk changed.** Yesterday's plan-0 flash went to
+`20:50:0d:2c:f7:58`. The unit attached today is `20:50:0d:2c:f9:88` — the
+**pipl company unit**, burned this morning with the shipped 1.2.5. So between
+yesterday evening and this morning the desk board was swapped, and for a few
+hours the owner's daemon (branch build) was driving release firmware with no
+pip row and none of plan 0. Owner chose to flash the pipl unit rather than swap
+back.
+
+Flashed with the explicit two-offset esptool write — `0x1000` MCUboot,
+`0x20000` the app re-signed `imgtool sign --pad --confirm`. Both images
+hash-verified. **Nothing was written at `0x330000`, so the pipl logo survived**,
+and the board proved it on the next boot: `[boot] logo: company, 111676 bytes,
+30 frames, hold 1800 ms`. `tools/burn.sh` would have erased it; that is why the
+manual write was used.
+
+FLASH_CRYPT_CNT = 0b0000000 on this unit — plaintext, checked before writing,
+per the two-units hazard.
+
+## What the board proved, this image, this session
+
+| | Result |
+|---|---|
+| Boot with **no daemon**, 135 s | **zero resets.** One boot, dozes at 60 s (`[usage] no app after 60 s`, `[sleep] dozing (claude)`), still alive at the end |
+| Bug C | re-verified on this unit |
+| The unconfirmed-image reboot loop | did not happen — `--pad --confirm` held, and the `ota_busy` refactor (`46fd958`) did not reintroduce it |
+| **Stale-reading doze** (Bug A's gate) | **dozed** on `age_s=20000, idle`, then **woke** on `age_s=0, running`. `[sleep] dozing` then `[sleep] waking`, **0 resets** |
+| Live daemon reconnect | `welcome`, then usage carrying `n_sess`, `n_run`, `n_agents` and `active_age_s: 0`. No `NOT SENT` — nothing crossed the 512-byte cap in real traffic |
+
+**Bug A's mechanism is now hardware-proven**, not only host-tested: the gate
+fires on a stale reading and releases on a fresh one. What is still untested on
+hardware is the same thing end-to-end over four real hours with the real daemon
+— that is what the overnight repeat buys, and it is now worth running, because
+the daemon no longer has Bug B to poison the number.
+
+## Still needs a finger
+
+**F2, settings-from-doze, cannot be validated remotely.** It needs a left swipe
+or a right-edge tap on a dozing board. Two questions ride on it: does the panel
+open, and does an edge tap reach through the CONNECTING overlay at all. Until
+someone touches it, the fix is argued, not shown.
+
+## An unexplained daemon death
+
+At 09:44 the daemon was gone — no launchd job registered at all, `bootout`
+answering "No such process", last log line mid-stream with no traceback.
+`KeepAlive` is true, so it did not crash into a restart loop; something booted
+it out. Restarted by hand and healthy since. Cause unknown; worth watching for
+a second occurrence before treating it as a defect.
