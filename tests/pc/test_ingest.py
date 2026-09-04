@@ -229,6 +229,61 @@ def test_a_second_provider_in_a_worse_state_takes_the_name_away():
     assert bus.session_pair() == ("", 1)
 
 
+def test_two_named_sessions_in_the_same_state_leave_the_board_unnamed():
+    """Codex can name a session now, so both providers can arrive holding a
+    name for the same state. There is one line and no honest rule for
+    choosing between two projects that are equally true of it, so neither is
+    shown -- the same refusal each provider already applies within itself,
+    applied once more across them. The count carries the meaning.
+    """
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", state=base.STATE_WAITING,
+                               label="LiveClaudeUi", n_wait=1)),
+                   Fixed(named(provider="codex", at=NOW - 30,
+                               state=base.STATE_WAITING,
+                               label="Blink", n_wait=1))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "waiting"
+    assert msg["n_wait"] == 2
+    assert bus.session_pair() == ("", 2)
+
+
+def test_a_codex_name_shows_when_it_is_the_only_holder_of_the_state():
+    """The other half of the same rule, and the one that would be lost by a
+    lazy "Claude wins" precedence: a Claude session merely working beside a
+    waiting Codex session leaves exactly one holder of the state the panel is
+    showing, and that one is named whichever provider it came from.
+    """
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", state=base.STATE_RUNNING,
+                               label="LiveClaudeUi", n_run=1)),
+                   Fixed(named(provider="codex", at=NOW - 30,
+                               state=base.STATE_WAITING,
+                               label="Blink", n_wait=1))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "waiting"
+    assert bus.session_pair() == ("Blink", 1)
+
+
+def test_a_failed_codex_session_outranks_a_waiting_claude_one():
+    """base.SEVERITY puts failed first, and protocol.frame_to_usage sends
+    worst_of(primary, secondary). A Codex turn that died on a usage limit is
+    the loudest thing on the desk and takes the line, name and all.
+    """
+    bus = ingest.IngestionBus(
+        providers=[Fixed(named(provider="claude", state=base.STATE_WAITING,
+                               label="LiveClaudeUi", n_wait=1)),
+                   Fixed(named(provider="codex", at=NOW - 30,
+                               state=base.STATE_FAILED,
+                               label="Blink", n_stuck=1))],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == "failed"
+    assert bus.session_pair() == ("Blink", 1)
+
+
 def test_two_providers_agreeing_on_the_state_keep_the_name():
     """The other half: the name survives a second provider that is merely
     busy, because the state on the panel is still the named one's."""
