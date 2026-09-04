@@ -54,6 +54,7 @@ import os
 from datetime import datetime, timezone
 
 from pc.providers import base
+from pc.providers import codex_state
 
 PROVIDER_ID = "codex"
 SRC_ID = "cli"
@@ -510,8 +511,17 @@ def parse_rollout_state(lines, now_epoch):
 
 
 class CodexCliProvider(base.ProviderParser):
-    def __init__(self, root=None):
+    def __init__(self, root=None, state_dir=None, sweep=True):
         self._root = root
+        # The hook slot directory, injectable for exactly the reason `root`
+        # is: a test must never be able to reach the real one, because the
+        # scan behind it DELETES abandoned files. `sweep` is injectable for
+        # the other half of that -- a caller that only wants to look, such as
+        # `blink status`, must be able to look without collecting, since a
+        # diagnostic that deletes what it is diagnosing destroys the evidence
+        # somebody ran it to see.
+        self._state_dir = state_dir
+        self._sweep = sweep
         # path -> project name, for the one record in a rollout that cannot
         # change. `session_meta` is line 1 of an append-only file whose name
         # carries a UUID, so a path is never reused and the answer for a path
@@ -583,8 +593,13 @@ class CodexCliProvider(base.ProviderParser):
         the freshest one win a contest it has already won here.
         """
         best = None
-        counts = {}
-        names = {}
+        # Keyed by session, not counted, because a hook slot below may be
+        # describing one of these same sessions and has to REPLACE its entry
+        # rather than land beside it. Counting first would make that
+        # impossible: two counts cannot be de-duplicated after the fact, and
+        # the session id is the only thing the two sources share.
+        rollout_states = {}
+        rollout_names = {}
         paths = recent_rollouts(self._root)
         self._prune_names(set(paths))
         for path in paths:
@@ -598,14 +613,19 @@ class CodexCliProvider(base.ProviderParser):
             # account-wide pair however many terminals are open.
             state = parse_rollout_state(lines, now_epoch)
             if state != base.STATE_UNKNOWN:
-                counts[state] = counts.get(state, 0) + 1
+                # A rollout whose meta line could not be read falls back to
+                # its own path as the key. It still counts exactly once, it
+                # simply cannot be matched to a slot -- and a filesystem path
+                # can never collide with a session id, so the fallback can
+                # never merge a session into the wrong one, which is the
+                # worse of the two errors.
+                key = rollout_session_id(path) or path
+                rollout_states[key] = state
                 # A name is only collected from a session that made a claim.
                 # A terminal opened and not typed into has a cwd and no turn,
                 # and letting it lend its name would rename the panel after
                 # the session that is actually doing something.
-                name = self._name_for(path)
-                if name:
-                    names.setdefault(state, []).append(name)
+                rollout_names[key] = self._name_for(path)
             limits, observed_at = parse_rollout_tail(lines, mtime)
             if limits is None:
                 continue
@@ -615,12 +635,47 @@ class CodexCliProvider(base.ProviderParser):
             if best is None or frame.observed_at > best.observed_at:
                 best = frame
         frames = [best] if best is not None else []
+
+        # The hooks' answer, and where it wins.
+        #
+        # The rollout cannot see a permission prompt at all: Codex files its
+        # approval events in the never-persisted arm of its own persistence
+        # policy, and the real rollouts on this desk contain none of them. So
+        # `running` from the rollout for a session whose hook said `waiting`
+        # is not a disagreement to be settled on recency -- it is the older
+        # and blinder of two answers, and the newer one simply replaces it.
+        # That is the whole reason this is a dict update in one direction
+        # rather than a merge that compares timestamps.
+        #
+        # Unioned rather than substituted, though: a Codex session that was
+        # already open when the hooks were installed has no slot and never
+        # will get one, because the hooks only fire from the next turn on.
+        # Dropping it would make a running terminal vanish from the panel,
+        # which is a worse error than not knowing that it is waiting.
+        hook_states, agents = codex_state.scan(
+            now_epoch, path=self._state_dir, sweep=self._sweep)
+        merged = dict(rollout_states)
+        merged.update(hook_states)
+
+        counts = {}
+        for merged_state in merged.values():
+            counts[merged_state] = counts.get(merged_state, 0) + 1
+
         if counts:
             # A separate frame with no percentages, exactly as Claude's state
             # provider does it: it can never win a recency contest for
             # numbers, and the normalizer merges its state field by field.
             state = base.worst_of(counts)
-            held = names.get(state, [])
+            # The names of the sessions holding the winning state, out of the
+            # MERGED census rather than the rollout tally -- otherwise a
+            # session the hook moved from `running` to `waiting` would be
+            # looked up under the state it no longer holds. Only rollouts
+            # carry a name at all: codex_state.scan drops the ones its slots
+            # hold on purpose, so a hook-only session is a nameless holder
+            # and silences the label exactly as an unreadable rollout does.
+            held = [rollout_names.get(key, "")
+                    for key, held_state in merged.items()
+                    if held_state == state and rollout_names.get(key)]
             frames.append(base.NormalizedUsageFrame(
                 provider=PROVIDER_ID,
                 src=STATE_SRC_ID,
@@ -640,6 +695,12 @@ class CodexCliProvider(base.ProviderParser):
                 label=(held[0] if counts.get(state, 0) == 1 and len(held) == 1
                        else ""),
                 n_run=counts.get(base.STATE_RUNNING, 0),
+                # n_wait was absent for as long as nothing could produce a
+                # waiting Codex session. The hooks can, and protocol._pair_from
+                # reads this field to decide what the panel's line says -- so
+                # leaving it out would light an amber pip beside the words
+                # "0 sessions".
+                n_wait=counts.get(base.STATE_WAITING, 0),
                 n_idle=counts.get(base.STATE_IDLE, 0),
                 # Codex has no `stuck` -- no silence-based state, per the
                 # module docstring above -- so counts.get(base.STATE_STUCK, 0)
@@ -653,5 +714,6 @@ class CodexCliProvider(base.ProviderParser):
                 # should say "Session failed - 2 sessions".
                 n_stuck=(counts.get(base.STATE_STUCK, 0)
                          + counts.get(base.STATE_FAILED, 0)),
+                n_agents=agents,
             ))
         return frames

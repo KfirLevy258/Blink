@@ -959,3 +959,256 @@ def test_rollout_session_id_refuses_an_unterminated_first_line(tmp_path):
 
 def test_rollout_session_id_on_a_missing_file_is_empty(tmp_path):
     assert codex_cli.rollout_session_id(str(tmp_path / "nope.jsonl")) == ""
+
+
+# --- the union: two sources, one census --------------------------------------
+#
+# From here down every test is about the join between the rollout reader above
+# and the Codex hook slots (codex_state). The failure being guarded is not a
+# wrong state, it is a DOUBLE COUNT: a session both sources can see appearing
+# twice in the pip row, which is the arithmetic the panel shows a human.
+
+
+def sid_meta_line(sid, cwd="/Users/K/Blink"):
+    """A `session_meta` carrying a session_id, padded like a real one.
+
+    Same padding argument as `meta_line`: an 80-byte fixture would let a head
+    bound far too small to survive a real 18 KB session_meta pass every test.
+    """
+    return json.dumps({
+        "timestamp": "2026-08-27T03:00:00.000Z",
+        "type": "session_meta",
+        "payload": {"session_id": sid, "cwd": cwd,
+                    "originator": "codex-tui",
+                    "cli_version": "0.150.0",
+                    "base_instructions": "i" * 18_000},
+    })
+
+
+def slot(slots, sid, event, t):
+    """One hook slot, in the shape tools/blink-hook.sh writes."""
+    p = slots / (sid + ".state")
+    p.write_text(json.dumps({"event": event, "t": float(t)}))
+    return p
+
+
+def union_frame(sessions, slots, now=NOW):
+    """The single state frame a poll over both sources produces, or None.
+
+    `state_dir` is passed on every call and `sweep` is off here for the reason
+    codex_state spells out: the scan behind that directory DELETES files, so a
+    test that let it fall back to the real default would be one HOME fixture
+    away from collecting the slots driving the board on the desk.
+    """
+    frames = codex_cli.CodexCliProvider(
+        root=str(sessions), state_dir=str(slots), sweep=False).poll(now)
+    held = [f for f in frames if f.src == codex_cli.STATE_SRC_ID]
+    assert len(held) <= 1, "one census, or the pip row double-counts"
+    return held[0] if held else None
+
+
+def test_a_waiting_hook_slot_beats_a_running_rollout(tmp_path):
+    """The rollout cannot see a permission prompt -- Codex never persists the
+    approval events -- so `running` from it is the older, blinder answer for a
+    session whose hook has since said `waiting`. One session, one row."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert f.provider == "codex"
+    assert f.state == base.STATE_WAITING
+    assert (f.n_run, f.n_wait, f.n_idle) == (0, 1, 0)
+    assert f.n_sessions() == 1
+
+
+def test_one_session_seen_by_both_sources_is_counted_once(tmp_path):
+    """The failure this whole union exists to prevent. Both sources agree the
+    session is running; the census must still say one."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-1", "PreToolUse", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_wait, f.n_idle) == (1, 0, 0)
+
+
+def test_the_rollout_alone_would_have_counted_that_session_too(tmp_path):
+    """The control for the test above, and the whole reason it means anything:
+    with the slot removed the rollout still reports one running session. So
+    the `1` there is a session both sources saw and one of them dropped, not a
+    rollout that was never counted in the first place."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_wait, f.n_idle) == (1, 0, 0)
+
+
+def test_a_session_only_the_rollout_can_see_still_counts(tmp_path):
+    """A Codex session already open when the hooks were installed has no slot
+    and never will -- the hooks only fire from its next turn on. Dropping it
+    would make a running terminal vanish from the panel, which is worse than
+    not knowing it is waiting. So the two sources are unioned, not swapped."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-old-1.jsonl",
+                  lines=[sid_meta_line("old-1"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-2", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_wait) == (1, 1)
+    assert f.n_sessions() == 2
+    assert f.state == base.STATE_WAITING, "waiting outranks running"
+
+
+def test_a_rollout_with_no_readable_id_still_counts_once(tmp_path):
+    """The degradation path for rollout_session_id's refusals: an
+    unidentifiable rollout is keyed by its own path, so it can never collide
+    with a hook slot and can never be merged into the wrong one. It counts,
+    beside the slot rather than instead of it."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-anon.jsonl",
+                  lines=["not json at all",
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-9", "PreToolUse", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (2, 2)
+
+
+def test_two_unidentifiable_rollouts_do_not_collapse_into_one(tmp_path):
+    """The path fallback has to be per FILE. Keying both anonymous rollouts on
+    a single shared sentinel -- "" among them -- would silently merge two
+    terminals into one row, an under-count as wrong as the double count."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    for name in ("rollout-anon-a.jsonl", "rollout-anon-b.jsonl"):
+        write_rollout(str(sessions), name=name,
+                      lines=["not json at all",
+                             turn_line("task_started", _stamp(NOW - 30))])
+
+    f = union_frame(sessions, slots)
+
+    assert (f.n_run, f.n_sessions()) == (2, 2)
+
+
+def test_hook_slots_alone_produce_a_frame(tmp_path):
+    """Codex hooks installed, no rollout recent enough to be read. The census
+    still has to reach the board."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    sessions.mkdir()
+    slots.mkdir()
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+
+    frames = codex_cli.CodexCliProvider(
+        root=str(sessions), state_dir=str(slots), sweep=False).poll(NOW)
+
+    assert [f.state for f in frames] == [base.STATE_WAITING]
+    assert frames[0].session_pct == base.UNKNOWN, \
+        "a state frame carries no percentage and must never win the dial"
+
+
+def test_the_state_dir_argument_is_what_is_read(tmp_path):
+    """Not "the default happened to work". The slot lives in a directory the
+    default would never name, and a decoy sits in the one it would -- so a
+    provider that ignored the argument would report the decoy's `idle`."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "elsewhere"
+    sessions.mkdir()
+    slots.mkdir()
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+    decoy = tmp_path / ".blink" / "state-codex"      # HOME is tmp_path here
+    decoy.mkdir(parents=True)
+    slot(decoy, "cx-decoy", "Stop", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.state, f.n_wait, f.n_idle) == (base.STATE_WAITING, 1, 0)
+
+
+def test_sweep_false_leaves_an_abandoned_slot_on_disk(tmp_path):
+    """`blink status` and every test must be able to LOOK without collecting:
+    the sweep deletes slots, and a diagnostic that deletes what it is
+    diagnosing destroys the evidence somebody ran it to see."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    sessions.mkdir()
+    slots.mkdir()
+    dead = slot(slots, "cx-old", "PreToolUse", NOW - 7200)   # past the hour
+
+    codex_cli.CodexCliProvider(
+        root=str(sessions), state_dir=str(slots), sweep=False).poll(NOW)
+    assert dead.exists()
+
+    codex_cli.CodexCliProvider(
+        root=str(sessions), state_dir=str(slots), sweep=True).poll(NOW)
+    assert not dead.exists(), "the daemon's poll is still the collector"
+
+
+def test_a_session_the_hook_moved_keeps_the_name_the_rollout_gave_it(tmp_path):
+    """The name belongs to the session, not to the state it was in when the
+    rollout was read. Looking the holders up in the rollout's own tally would
+    lose the label of every session the hook overruled -- the panel would go
+    from "Blink - waiting" to a bare "waiting" at the exact moment it has
+    something worth saying."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1", cwd="/Users/K/Blink"),
+                         turn_line("task_started", _stamp(NOW - 30))])
+    slot(slots, "cx-1", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.state, f.label) == (base.STATE_WAITING, "Blink")
+
+
+def test_a_hook_only_session_is_a_nameless_holder(tmp_path):
+    """codex_state drops the names its slots carry on purpose -- naming a
+    session on the panel has its own rule and the Codex frame has no label
+    story for the hooks yet. So a hook-only holder silences the label exactly
+    as a rollout with an unreadable session_meta does, rather than borrowing
+    the name of the other session in the census."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    slots.mkdir()
+    write_rollout(str(sessions), name="rollout-cx-1.jsonl",
+                  lines=[sid_meta_line("cx-1", cwd="/Users/K/Blink"),
+                         turn_line("task_complete", _stamp(NOW - 30))])
+    slot(slots, "cx-2", "PermissionRequest", NOW - 5)
+
+    f = union_frame(sessions, slots)
+
+    assert (f.state, f.n_wait, f.label) == (base.STATE_WAITING, 1, "")
+
+
+def test_live_agents_reach_the_frame(tmp_path):
+    """n_agents is already on the wire and already drawn. Codex could never
+    fill it before because nothing counted subagents for it; the hook slots
+    do, and a count left at zero would quietly report "no agents"."""
+    sessions, slots = tmp_path / "sessions", tmp_path / "state-codex"
+    sessions.mkdir()
+    slots.mkdir()
+    slot(slots, "cx-1", "PreToolUse", NOW - 5)
+    agents = slots / "cx-1"
+    agents.mkdir()
+    (agents / "a1").write_text("")
+    (agents / "a2").write_text("")
+
+    f = union_frame(sessions, slots)
+
+    assert f.n_agents == 2
