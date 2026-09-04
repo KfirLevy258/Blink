@@ -371,3 +371,47 @@ throughout. Both are UUIDs. `turn_id` is absent from `SessionStart` and
   for cleanup in an interactive session until it has been seen.
 - Whether a menu refusal (as opposed to Esc) fires `Interrupt`. See the caveat
   above.
+
+---
+
+# OWNER'S RULING, 2026-09-04: three states, and the input type is irrelevant
+
+> "we should have 3 states - running, which just running, finish - finished and
+> waiting for user, and stuck - waiting for user input, its not relevant what
+> type of input it is"
+
+This settles the open caveat above and shrinks the plan. **All three already
+exist on the wire and on the panel** — no new state, no wire change, no firmware
+change, which matters because the usage line has one byte of headroom and
+`proto.c` drops an over-long line whole.
+
+| Owner's state | Wire | `usage_view.c` draws |
+|---|---|---|
+| running | `running` | "Working" |
+| finished, user's turn | `idle` | "Finished" |
+| needs the user's input | `waiting` | "Waiting for you" |
+
+The whole hook-to-state mapping, with no branch on what kind of input is wanted:
+
+| Event | State |
+|---|---|
+| `UserPromptSubmit`, `PreToolUse` | `running` |
+| `PermissionRequest` | **`waiting`** |
+| `PostToolUse`, `Interrupt` | `running` |
+| `Stop` | `idle` |
+
+**The Esc-versus-menu question is dropped, and it was never worth asking.** It
+existed only to decide how long a stale `waiting` may linger. Under this model
+there is nothing to decide: if a menu refusal fires no event, the session sits on
+"Waiting for you" until the next event arrives — and that is still TRUE, because
+a turn whose tool was refused is a turn waiting for its human. The worst case of
+the thing being probed is the correct answer.
+
+Consequences for the tasks below:
+- Nothing needs `tool_name`, `tool_input`, `tool_use_id` or `tool_response`. The
+  shim can ignore every one of them, which also means it never touches the
+  fields carrying the owner's own text.
+- The missing `tool_use_id` on `PermissionRequest`, noted above as a
+  correlation problem, stops being one — there is nothing to correlate.
+- `permission_mode` stays useful for one thing only: suppressing `waiting`
+  in modes where an approval prompt cannot happen.
