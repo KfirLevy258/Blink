@@ -909,3 +909,53 @@ def test_a_failed_session_is_the_worst_state_and_counted_with_the_stuck(tmp_path
     assert (st.state, st.n_stuck, st.n_run, st.n_idle) == ("failed", 1, 1, 0)
     assert st.n_sessions() == 2
     assert st.label == "Blink"      # the only session holding the state
+
+
+def test_rollout_session_id_comes_from_the_meta_line(tmp_path):
+    """Line 1 of every rollout is its session_meta record, and it carries the
+    id the hooks also report. That id is the only thing the two state sources
+    share, so it is what lets them describe one session instead of two."""
+    p = tmp_path / "rollout-x.jsonl"
+    p.write_text(
+        '{"type":"session_meta","payload":{"session_id":"cx-1",'
+        '"cwd":"/Users/k/Projects/Blink","cli_version":"0.150.0"}}\n'
+        '{"type":"event_msg","payload":{"type":"task_started"}}\n')
+    assert codex_cli.rollout_session_id(str(p)) == "cx-1"
+
+
+def test_rollout_session_id_reads_only_the_head(tmp_path):
+    """A real rollout on this desk is 51 MB, and the tail reader would not
+    reach line 1 at all. This asserts the head read does not depend on the
+    rest of the file being small -- or even parseable."""
+    p = tmp_path / "rollout-big.jsonl"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write('{"type":"session_meta","payload":{"session_id":"cx-2"}}\n')
+        f.write("x" * (codex_cli.HEAD_BYTES * 4) + "\n")
+    assert codex_cli.rollout_session_id(str(p)) == "cx-2"
+
+
+@pytest.mark.parametrize("first_line", [
+    '{"type":"event_msg","payload":{"type":"task_started"}}',   # not meta
+    '{"type":"session_meta","payload":{}}',                     # meta, no id
+    '{"type":"session_meta","payload":{"session_id":7}}',       # id not a string
+    '{"type":"session_meta","payload":[]}',                     # payload not an object
+    'not json at all',
+])
+def test_rollout_session_id_refuses_rather_than_guesses(tmp_path, first_line):
+    """An empty string, never a guess. The caller treats "" as "this session
+    cannot be matched to a hook slot", which is the safe answer -- it counts
+    once from the rollout and is never merged with the wrong slot."""
+    p = tmp_path / "rollout-odd.jsonl"
+    p.write_text(first_line + "\n")
+    assert codex_cli.rollout_session_id(str(p)) == ""
+
+
+def test_rollout_session_id_refuses_an_unterminated_first_line(tmp_path):
+    """A first line longer than the bound is not a rollout we understand."""
+    p = tmp_path / "rollout-long.jsonl"
+    p.write_text("{" + "a" * (codex_cli.HEAD_BYTES + 10))
+    assert codex_cli.rollout_session_id(str(p)) == ""
+
+
+def test_rollout_session_id_on_a_missing_file_is_empty(tmp_path):
+    assert codex_cli.rollout_session_id(str(tmp_path / "nope.jsonl")) == ""

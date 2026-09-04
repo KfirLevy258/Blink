@@ -191,6 +191,48 @@ def session_meta_cwd(head_line: str):
     return cwd if isinstance(cwd, str) else None
 
 
+def rollout_session_id(path: str) -> str:
+    """The session id out of a rollout's first line, or "".
+
+    Same record as `session_meta_cwd` reads -- line 1 of every rollout, in
+    both `codex exec` and interactive sessions -- and the id in it is a bare
+    UUID that appears verbatim in the rollout's own filename. The plan this
+    was built from expected the hook to report a differently-shaped id
+    (`thr_...`) that would need reconciling with this one; a real capture
+    taken 2026-09-02 showed both spellings are the same UUID, so there is
+    nothing here to reconcile. This id is still the only field the hook's
+    report and this file share, and it is what lets Task 7 fold one session
+    into one row instead of two.
+
+    Deliberately built on `_head_line`/`HEAD_BYTES` rather than a second
+    bounded read: the two already answer "can I trust the first line of this
+    file at all", and a session id one field over from `cwd` in the same
+    record does not earn a second implementation of that answer.
+
+    Every failure here -- an unreadable file, an unterminated first line, a
+    first line that is not JSON, a record that is not a `session_meta`, a
+    payload that is not an object, an id that is not a string -- returns ""
+    rather than a guess. The caller treats "" as "cannot be matched to a
+    hook slot": the session still counts once, from the rollout, and a wrong
+    id merged into the wrong slot -- which would be worse than a session
+    left unmatched -- never happens.
+    """
+    head_line = _head_line(path)
+    if "session_meta" not in head_line:
+        return ""           # cheap reject before parsing JSON, as above
+    try:
+        rec = json.loads(head_line)
+    except ValueError:
+        return ""
+    if not isinstance(rec, dict) or rec.get("type") != "session_meta":
+        return ""
+    payload = rec.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    sid = payload.get("session_id")
+    return sid if isinstance(sid, str) else ""
+
+
 # Both, not os.sep. This file may be read on one platform and written on
 # another -- a synced home directory is ordinary -- and Codex on Windows
 # writes C:\Users\....
