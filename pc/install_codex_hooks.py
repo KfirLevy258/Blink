@@ -200,6 +200,40 @@ def _read_hooks_file(hooks_path: str):
         raise SettingsUnreadable(f"{hooks_path} cannot be read ({e})")
 
 
+def _write_hooks_file(hooks_path, data, indent, trailing_newline) -> None:
+    """Write the file back, with a failed write reported the same way a failed
+    read is.
+
+    _save's only `except OSError` wraps the removal of a stale temp file; the
+    os.open / os.fdopen / os.replace that do the actual work are bare. So a
+    CODEX_HOME that is readable but not WRITABLE -- a hooks.json laid down
+    under sudo, a read-only dotfiles mount, a full volume -- came back out of
+    here as a raw PermissionError naming hooks.json.blink-tmp, a temp file the
+    user has never heard of, from the middle of two functions that promise
+    otherwise: install says it raises SettingsUnreadable, and uninstall says it
+    never raises at all.
+
+    SettingsUnreadable rather than a new exception type of its own, even though
+    nothing here failed to READ. It is this codebase's single "stop, and know
+    that nothing changed" signal, and both callers in pc/cli already catch it
+    and only it; a second type would be caught nowhere until someone edited
+    that file too, which is a traceback in the meantime and dead code
+    afterwards. "Nothing changed" is honest for every failure it covers,
+    because the write is temp-file-then-rename: the target keeps its old bytes
+    whether we died opening the temp, filling it, or renaming it over.
+
+    The temp file itself may survive a mid-write failure. It is deliberately
+    not cleaned up here -- its name is _save's business, not ours, and _save
+    already removes a stale one before each write, so it cannot block the
+    retry. A stray sibling is a far smaller sin than reaching into another
+    module's naming scheme to delete a file in someone else's directory.
+    """
+    try:
+        _save(hooks_path, data, indent, trailing_newline)
+    except OSError as e:
+        raise SettingsUnreadable(f"{hooks_path} cannot be written ({e})")
+
+
 def _event_map(data):
     """The object holding the per-event lists, created if absent.
 
@@ -230,9 +264,10 @@ def install(hooks_path: str, shim_path: str) -> str:
     """Add our hook to each lifecycle event. Idempotent.
 
     Raises SettingsUnreadable, and changes nothing, when the file is there and
-    cannot be read, cannot be parsed, or is not shaped the way we understand.
-    Nothing is written until every event has been merged successfully, so a
-    refusal that surfaces on the tenth event leaves the file byte-identical.
+    cannot be read, cannot be parsed, is not shaped the way we understand, or
+    cannot be written back. Nothing is written until every event has been
+    merged successfully, so a refusal that surfaces on the tenth event leaves
+    the file byte-identical.
     The caller reports that and carries on: the activity light is a nicety,
     and someone else's config is not ours to repair.
     """
@@ -293,7 +328,7 @@ def install(hooks_path: str, shim_path: str) -> str:
         entries.append(group)
         added += 1
 
-    _save(hooks_path, data, indent, trailing_newline)
+    _write_hooks_file(hooks_path, data, indent, trailing_newline)
     try:
         _write_marker(expected)
     except OSError:
@@ -351,9 +386,17 @@ def uninstall(hooks_path: str, shim_path: str = None) -> str:
     many that never had a Codex hook, and a removal step that can abort the
     uninstall over someone else's config is worse than one that reports what
     it could not do. Every failure comes back as a sentence and an unchanged
-    file: the four cases are a file we cannot read, a file we cannot parse, a
-    file whose shape install itself would refuse, and a file with nothing of
-    ours in it.
+    file: the five cases are a file we cannot read, a file we cannot parse, a
+    file whose shape install itself would refuse, a file we can read but
+    cannot write back, and a file with nothing of ours in it.
+
+    That fourth case is the one that made this docstring a lie for a while.
+    `blink uninstall` removes the login service at step [1/5] and calls this at
+    [4/5]; a raw PermissionError escaping here took step [5/5] with it and left
+    a machine with no service and every file still installed -- the half-undone
+    state this whole design exists to avoid. The person asked to be
+    uninstalled, so a Codex hook we cannot remove is a line in the report, not
+    a reason to stop.
 
     shim_path is optional because the caller does not always still know it --
     `blink uninstall` may run after the shim has been deleted. The marker
@@ -451,6 +494,15 @@ def uninstall(hooks_path: str, shim_path: str = None) -> str:
     # _save writes a sibling temp file and os.replace()s it, so an uninstall
     # that dies mid-write leaves Codex a whole hooks file rather than half of
     # one. A truncated hooks.json breaks Codex itself, not merely Blink.
-    _save(hooks_path, data, indent, trailing_newline)
+    try:
+        _write_hooks_file(hooks_path, data, indent, trailing_newline)
+    except SettingsUnreadable as e:
+        # The marker stays, for the same reason the parse refusal above keeps
+        # it: our entries are still in that file, and once the shim path moves
+        # the marker is the only thing that can still prove they are ours. A
+        # later uninstall, run when the directory is writable again, is then
+        # able to finish the job -- and this call changed nothing, so there is
+        # nothing for it to reconcile.
+        return f"Codex hooks file could not be written ({e}); left it alone."
     _remove_marker()
     return f"Codex state hooks removed ({removed})."

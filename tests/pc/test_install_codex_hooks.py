@@ -506,3 +506,76 @@ def test_install_after_uninstall_is_a_clean_install(tmp_path):
 
     assert "installed (10 events)" in msg
     assert len(_read(p)["PreToolUse"]) == 1
+
+
+# A CODEX_HOME whose directory is readable but not writable is the shape a
+# real machine takes when hooks.json was laid down under sudo, when ~/.codex
+# lives on a read-only dotfiles mount, or when the volume is full. The
+# permission bits are the honest reproduction; a monkeypatched _save would
+# prove only that the arm exists, not that it covers the write that actually
+# fails (which is os.open on the SIBLING TEMP file, not on hooks.json).
+_needs_unprivileged_posix = pytest.mark.skipif(
+    os.name == "nt" or os.geteuid() == 0,
+    reason="directory permission bits do not deny root, and do not deny"
+           " writes at all on Windows")
+
+
+@_needs_unprivileged_posix
+def test_uninstall_reports_a_codex_home_it_cannot_write(tmp_path):
+    """uninstall promises never to raise, and `blink uninstall` leans on that
+    promise: step [1/5] has already removed the login service by the time this
+    runs at [4/5], and step [5/5] never happens if this throws. A machine with
+    no service and all its files still in place is exactly the half-undone
+    state the promise exists to prevent -- so a Codex hook we cannot remove
+    has to come back as a sentence and let the rest of the uninstall run."""
+    home = tmp_path / "codex"
+    home.mkdir()
+    p = home / "hooks.json"
+    ich.install(str(p), SHIM)
+    before = p.read_text(encoding="utf-8")
+
+    home.chmod(0o500)
+    try:
+        msg = ich.uninstall(str(p), SHIM)
+    finally:
+        # Restored even on failure, or pytest cannot clear its own tmp_path.
+        home.chmod(0o700)
+
+    assert "left it alone" in msg
+    assert p.read_text(encoding="utf-8") == before, \
+        "a write that could not happen must not have half-happened"
+
+
+@_needs_unprivileged_posix
+def test_a_write_that_failed_keeps_the_marker(tmp_path):
+    """Our entries are still sitting in that file, and the marker is the only
+    proof they are ours once the shim path moves. Dropping it because the
+    removal was attempted would strand them: the next uninstall would walk
+    past its own hooks. Same reasoning as the parse-refusal path."""
+    home = tmp_path / "codex"
+    home.mkdir()
+    p = home / "hooks.json"
+    ich.install(str(p), SHIM)
+
+    home.chmod(0o500)
+    try:
+        ich.uninstall(str(p), SHIM)
+    finally:
+        home.chmod(0o700)
+
+    assert "sh /home/k/.blink/blink-hook.sh Stop codex" in ich._read_marker()
+
+
+@_needs_unprivileged_posix
+def test_install_refuses_a_codex_home_it_cannot_write(tmp_path):
+    """The mirror case. cli._install_codex_hooks catches SettingsUnreadable
+    and nothing else, so a raw PermissionError from the write aborts `blink
+    install` at [4/5] -- before the background service is ever registered."""
+    home = tmp_path / "codex"
+    home.mkdir()
+    home.chmod(0o500)
+    try:
+        with pytest.raises(SettingsUnreadable):
+            ich.install(str(home / "hooks.json"), SHIM)
+    finally:
+        home.chmod(0o700)
