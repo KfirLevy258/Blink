@@ -568,3 +568,40 @@ at a glance. The count stays honest, switching still changes nothing, and it
 stops being a surprise because the reason is on the screen. That is firmware
 work and it is not free, so it goes behind plan 3, not in front of it. **Nothing
 is broken today** — this is a legibility improvement, not a defect.
+
+## METHODOLOGY BUG: a fast mutation harness tests the wrong code — 2026-09-04
+
+Task 8's implementer reported that its first two mutation runs were wrong, and
+caught it only by hand-checking one result. **I reproduced the mechanism
+directly**, because it undermines the technique this branch trusts most:
+
+    first import                       : AAAA
+    after same-second rewrite, reloaded: AAAA    <- the edit was INVISIBLE
+    after wiping __pycache__           : BBBB
+
+CPython's default `.pyc` invalidation compares the source's mtime **truncated to
+whole seconds** plus its size. Two rewrites inside one second that happen to
+produce the same byte count are indistinguishable, so the cached bytecode is
+reused. **This survives across processes** — spawning a fresh `pytest` per
+mutation does not help, because the stale `.pyc` is on disk.
+
+**Both failure directions are bad, and one of them is quietly worse:**
+- The mutation never loads, the test passes, and the harness reports the
+  mutation as SURVIVING — which reads as "this assertion cannot fail". That
+  manufactures **false vacuous-test findings**, and this branch has been
+  hunting vacuous tests all week.
+- Or the previous mutation is still loaded and results shift by one, so a real
+  finding is attributed to the wrong assertion.
+
+**Standing rule for every mutation run from here:** set
+`PYTHONDONTWRITEBYTECODE=1`, or wipe `__pycache__` between mutations, or leave
+more than a second between rewrites. Cheapest is the environment variable.
+
+**What this means for the count of fourteen.** Any survey that rewrote quickly
+is suspect in both directions. The findings verified by hand today are NOT
+affected — each was a single mutation followed by a full suite run of seven
+seconds or more, with an observed red-then-green transition, which cannot be a
+stale-bytecode artefact. That covers task 6's four, task 7's `len(named) == 1`,
+the two sleep-gate suites, and task 8's nineteen. **The earlier 468-assertion
+survey has unknown timing and should be re-run under the rule above before its
+numbers are quoted again.**
