@@ -485,7 +485,16 @@ def test_a_live_status_line_keeps_the_board_awake_behind_an_old_dial(tmp_path):
 
     # The question the firmware asks, with the numbers this message carries.
     # The first line is the bug; the second is why the board stays awake.
+    #
+    # The threshold is pinned as well as read. Twelve hours and five seconds
+    # straddle every plausible value, so the two comparisons below pass
+    # whatever the header says -- confirmed by a survey that changed
+    # SLEEP_ABSENT_AFTER_S from four hours to thirty minutes and watched all
+    # 620 tests stay green. Reading it out of the firmware header keeps the
+    # daemon and the board describing one number; this line is what notices
+    # if the number itself moves under a test that was written for it.
     absent_after = _sleep_absent_after_s()
+    assert absent_after == 4 * 3600
     assert msg["age_s"] >= absent_after
     assert msg["active_age_s"] < absent_after
 
