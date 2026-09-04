@@ -1344,13 +1344,15 @@ def _uninstall_codex_hooks() -> None:
     uninstall leaves the trust record alone"; silence about it here would be
     the same defect one level up -- a decision the user cannot see.
     """
-    try:
-        print("      " + install_codex_hooks.uninstall(
-            install_codex_hooks.hooks_file(), hook_shim_path()))
-    except install_statusline.SettingsUnreadable as e:
-        # Deliberately worded like the two steps above it, so a reader of the
-        # transcript sees one kind of event and not three.
-        print(f"      Left alone: {e}")
+    # No try around this, unlike steps [2/5] and [3/5]. install_codex_hooks
+    # .uninstall() catches its own SettingsUnreadable at all three points that
+    # can raise one -- the read, the shape check, and now the write -- and
+    # returns a "left it alone" sentence with the marker kept, so every failure
+    # already arrives here as a line of report rather than an exception. A
+    # handler for an exception that cannot arrive is a guard nobody can
+    # falsify, and this file has been carrying several.
+    print("      " + install_codex_hooks.uninstall(
+        install_codex_hooks.hooks_file(), hook_shim_path()))
 
     config = os.path.join(install_codex_hooks.codex_home(), "config.toml")
     # Only when the file is really there. On the many machines with no Codex

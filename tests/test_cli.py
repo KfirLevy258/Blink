@@ -598,17 +598,28 @@ def test_uninstall_removes_the_codex_slots_too(tmp_path):
         assert not os.path.exists(os.path.join(d, "sess-1"))
 
 
-def test_uninstall_keeps_going_when_the_codex_file_is_unreadable(monkeypatch,
-                                                                 capsys):
+def test_uninstall_keeps_going_when_the_codex_file_is_unreadable(capsys):
     """The login service is already gone by this point in cmd_uninstall, so
-    stopping here would leave the machine half-undone."""
-    def boom(_p, _s=None):
-        raise cli.install_statusline.SettingsUnreadable("not valid JSON")
+    stopping here would leave the machine half-undone.
 
-    monkeypatch.setattr(cli.install_codex_hooks, "uninstall", boom)
+    Against a real unparseable file, not a stub that raises. This used to
+    monkeypatch install_codex_hooks.uninstall into raising SettingsUnreadable
+    so that cmd_uninstall's handler had something to catch -- but uninstall()
+    catches its own at every point that can raise one and returns a sentence
+    instead, so the exception being caught could not occur and the handler has
+    gone. What is left to prove is the property that actually matters: the
+    step reports and returns, and the file it could not parse is untouched.
+    """
+    hooks = cli.install_codex_hooks.hooks_file()
+    os.makedirs(os.path.dirname(hooks), exist_ok=True)
+    with open(hooks, "w") as f:
+        f.write("{ not json")
+
     cli._uninstall_codex_hooks()
-    out = capsys.readouterr().out
-    assert "Left alone" in out
+
+    assert "left it alone" in capsys.readouterr().out
+    with open(hooks) as f:
+        assert f.read() == "{ not json", "it rewrote a file it cannot parse"
 
 
 def test_uninstall_says_it_left_the_codex_trust_record_alone(tmp_path, capsys,
