@@ -75,7 +75,13 @@ def _valid(rec) -> bool:
         return False
     if not (SAMPLE_EPOCH_MIN <= at <= SAMPLE_EPOCH_MAX):
         return False
-    return isinstance(rec.get("utilization"), (int, float))
+    util = rec.get("utilization")
+    # Guarded against bool for the same reason observedAt is, and with more at
+    # stake. bool is an int in Python, so {"utilization": true} would sail
+    # through the isinstance check, become float(True) * 100.0 downstream, and
+    # render as a confident 100% -- the one place on this path where a bad
+    # input becomes a WRONG NUMBER rather than an absence.
+    return isinstance(util, (int, float)) and not isinstance(util, bool)
 
 
 def usage_records(dir_path: str) -> list:

@@ -71,3 +71,28 @@ def test_unparseable_json_is_not_an_exception(tmp_path):
     (tmp_path / "000001.log").write_bytes(
         fx.build_log([[("put", KEY, _value("{not json"))]]))
     assert ls.newest_record(str(tmp_path)) is None
+
+
+def test_a_boolean_utilization_is_not_a_record(tmp_path):
+    """bool is an int in Python. Left unguarded, {"utilization": true} would
+    pass the isinstance check, become float(True) * 100.0 in the provider,
+    and reach the panel as a confident 100% -- the one input on this path
+    that produces a WRONG NUMBER rather than an absence."""
+    doc = json.dumps({"resetsAt": 1788628200, "utilization": True,
+                      "observedAt": 1788613507.7})
+    (tmp_path / "000001.log").write_bytes(
+        fx.build_log([[("put", KEY, _value(doc))]]))
+    assert ls.newest_record(str(tmp_path)) is None
+
+
+def test_a_boolean_utilization_does_not_hide_a_real_record(tmp_path):
+    """Rejecting the bad copy must not reject the store. A real reading in
+    the same file is still returned."""
+    bad = json.dumps({"resetsAt": 1788628200, "utilization": False,
+                      "observedAt": 1788613600.0})
+    (tmp_path / "000001.log").write_bytes(fx.build_log([
+        [("put", KEY, _value(_record(utilization=0.42)))],
+        [("put", KEY + b".2", _value(bad))]]))
+    rec = ls.newest_record(str(tmp_path))
+    assert rec is not None
+    assert rec["utilization"] == 0.42
