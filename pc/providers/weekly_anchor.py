@@ -13,6 +13,7 @@ refuted anchor keeps appearing on the panel for up to eight weeks after
 something proved it wrong.
 """
 import json
+import math
 
 from pc import weekly_anchor
 from pc.providers import base
@@ -57,7 +58,46 @@ class DesktopHistoryProvider:
             doc = json.loads(content)
         except (TypeError, ValueError):
             return None
-        return claude_desktop.raw_samples(doc)
+        return _in_time_order(claude_desktop.raw_samples(doc))
+
+
+def _sample_time(sample):
+    """A sample's own timestamp as a sort key, or +inf when it has none.
+
+    A sample with no usable `t` sorts last, where `weekly_anchor.refuted_by`
+    already skips it, so one malformed entry cannot displace a real reading.
+    NaN is refused with the rest: it would make the comparison meaningless
+    rather than merely late.
+    """
+    if isinstance(sample, dict):
+        t = sample.get("t")
+        if (isinstance(t, (int, float)) and not isinstance(t, bool)
+                and math.isfinite(t)):
+            return float(t)
+    return math.inf
+
+
+def _in_time_order(samples):
+    """`samples`, sorted oldest first.
+
+    `weekly_anchor.refuted_by` walks the list in order and reads a fall in
+    `sd` between neighbours as the weekly window having emptied. That is only
+    a drop if the list is chronological, and this file belongs to an
+    application we do not control -- pc/providers/claude_desktop's
+    `_newest_sample` refuses the same assumption about the same file, in
+    writing, and picks its newest by max() rather than by position.
+
+    Two modules cannot hold opposite beliefs about one file. Sorting here
+    settles it in favour of the cautious one: refuted_by keeps its simple
+    neighbour walk, and gets a list where "next" really does mean "later".
+    Fails closed either way -- an inverted pair refutes a good anchor and the
+    weekly countdown disappears rather than showing a wrong number -- but a
+    countdown that vanishes because a file was written out of order is still
+    a defect.
+    """
+    if not isinstance(samples, list):
+        return samples
+    return sorted(samples, key=_sample_time)
 
 
 class WeeklyAnchorProvider(base.ProviderParser):

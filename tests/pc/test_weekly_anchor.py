@@ -4,13 +4,15 @@ Every test here is about when to STOP publishing it. A rolled-forward
 timestamp is the only value this project ships that was not directly
 observed, so the rules for withdrawing it are the product.
 """
+import json
 import os
 import time
 
 from pc import normalizer
 from pc import weekly_anchor as wa
 from pc.providers import base
-from pc.providers.weekly_anchor import WeeklyAnchorProvider
+from pc.providers.weekly_anchor import (DesktopHistoryProvider,
+                                        WeeklyAnchorProvider)
 
 WED_0600Z = 1788933600.0          # 2026-09-09T06:00:00Z
 WEEK = 604800.0
@@ -389,3 +391,72 @@ def test_refutation_never_writes_to_the_anchor_file(tmp_path):
     WeeklyAnchorProvider(
         path=p, history_provider=_FakeHistory(samples)).poll(WED_0600Z)
     assert wa.load(p) == before
+
+
+# --- final review fix 4: the sample series is sorted before it is walked
+#
+# weekly_anchor.refuted_by walks `samples` in array order and reads a fall in
+# `sd` between neighbours as the window having emptied. pc/providers/
+# claude_desktop's _newest_sample explicitly refuses to assume that same file
+# is chronological. DesktopHistoryProvider now sorts, so the two modules hold
+# the same belief about one file.
+
+
+def _history_file(tmp_path, samples):
+    p = tmp_path / "plan-usage-history.json"
+    p.write_text(json.dumps({"version": 2, "samples": samples}),
+                 encoding="utf-8")
+    return str(p)
+
+
+def test_history_samples_come_back_oldest_first(tmp_path):
+    older = {"t": 1_000_000_000_000, "u": {"fh": 1, "sd": 4}}
+    newer = {"t": 2_000_000_000_000, "u": {"fh": 1, "sd": 80}}
+    hp = DesktopHistoryProvider(_history_file(tmp_path, [newer, older]))
+    assert [s["t"] for s in hp.samples(WED_0600Z)] == [older["t"], newer["t"]]
+
+
+def test_a_sample_with_no_usable_timestamp_sorts_last(tmp_path):
+    """It cannot be placed in time, and refuted_by skips it anyway. Last is
+    where it does no harm; anywhere else it splits a real neighbour pair."""
+    good = {"t": 1_000_000_000_000, "u": {"fh": 1, "sd": 4}}
+    hp = DesktopHistoryProvider(_history_file(
+        tmp_path, [{"u": {"sd": 9}}, good, "not a mapping"]))
+    assert hp.samples(WED_0600Z)[0] == good
+
+
+def test_out_of_order_samples_do_not_refute_a_correct_anchor(tmp_path):
+    """The defect this closes. Chronologically these two are a RISE -- 4%
+    then 80% -- which contradicts nothing. Stored newest-first, the neighbour
+    walk saw 80 then 4, called it a drop, placed it nowhere near the anchor's
+    boundary, and took a correct weekly countdown off the panel.
+    """
+    anchor_path = str(tmp_path / "weekly-anchor.json")
+    wa.save(anchor_path, WED_0600Z, WED_0600Z - WEEK)
+    rise_first = {"t": int((WED_0600Z - 3 * 86400) * 1000),
+                  "u": {"fh": 5, "sd": 4}}
+    rise_then = {"t": int((WED_0600Z - 2 * 86400) * 1000),
+                 "u": {"fh": 5, "sd": 80}}
+
+    hp = DesktopHistoryProvider(
+        _history_file(tmp_path, [rise_then, rise_first]))
+    p = WeeklyAnchorProvider(path=anchor_path, history_provider=hp)
+    frames = p.poll(WED_0600Z - 3600)
+    assert len(frames) == 1
+    assert frames[0].weekly_resets_at == WED_0600Z
+
+
+def test_a_genuine_drop_still_refutes_after_sorting(tmp_path):
+    """Sorting must not disarm the check. A real fall in weekly usage, in
+    real chronological order, landing far from the anchor's boundary, still
+    takes the anchor off the panel."""
+    anchor_path = str(tmp_path / "weekly-anchor.json")
+    wa.save(anchor_path, WED_0600Z, WED_0600Z - WEEK)
+    high = {"t": int((WED_0600Z - 4 * 86400) * 1000),
+            "u": {"fh": 5, "sd": 80}}
+    low = {"t": int((WED_0600Z - 3 * 86400) * 1000),
+           "u": {"fh": 5, "sd": 4}}
+
+    hp = DesktopHistoryProvider(_history_file(tmp_path, [low, high]))
+    p = WeeklyAnchorProvider(path=anchor_path, history_provider=hp)
+    assert p.poll(WED_0600Z - 3600) == []
