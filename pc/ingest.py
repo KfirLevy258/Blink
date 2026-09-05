@@ -14,13 +14,14 @@ able to stop it.
 import sys
 import time
 
-from pc import normalizer, protocol
+from pc import normalizer, protocol, weekly_anchor
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
 from pc.providers.claude_state import ClaudeStateProvider
 from pc.providers.codex_cli import CodexCliProvider
+from pc.providers.weekly_anchor import WeeklyAnchorProvider
 
 
 # How long a provider that raised sits out before it is tried again, and how
@@ -53,7 +54,11 @@ def default_providers():
     """
     return [ClaudeCliProvider(), ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
-            ClaudeStateProvider(), CodexCliProvider()]
+            ClaudeStateProvider(), CodexCliProvider(),
+            # LAST: it only ever offers a remembered projection, and every
+            # source above it is polled first so any of them carrying a real
+            # weekly reset is what observe() below learns from this cycle.
+            WeeklyAnchorProvider()]
 
 
 class IngestionBus:
@@ -162,6 +167,14 @@ class IngestionBus:
                     del self._broken[key]
                     print(f"[ingest] {name} is working again",
                           file=sys.stderr)
+        try:
+            # Bonus learning, never a poll cost: whatever just carried a real
+            # weekly reset becomes tomorrow's WeeklyAnchorProvider projection.
+            # Anything this raises -- a bad path, a permissions error, a race
+            # on the file -- must never take today's poll down with it.
+            weekly_anchor.observe(frames, weekly_anchor.anchor_path(), now)
+        except Exception:
+            pass
         return frames
 
     @staticmethod

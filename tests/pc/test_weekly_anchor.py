@@ -262,3 +262,39 @@ def test_a_drop_one_second_past_the_refute_tolerance_refutes():
         {"t": int(hi * 1000), "u": {"fh": 5, "sd": 4}},
     ]
     assert wa.refuted_by(a, samples, WED_0600Z) is True
+
+
+# --- Task 10: the provider that publishes the anchor, and its ranking rule ---
+
+
+from pc.providers.weekly_anchor import WeeklyAnchorProvider
+from pc import normalizer
+
+
+def test_the_provider_publishes_only_the_reset(tmp_path):
+    p = str(tmp_path / "a.json")
+    wa.save(p, WED_0600Z, WED_0600Z - WEEK)
+    frames = WeeklyAnchorProvider(path=p).poll(WED_0600Z - 3600)
+    assert len(frames) == 1
+    assert frames[0].weekly_resets_at == WED_0600Z
+    assert frames[0].weekly_pct == base.UNKNOWN
+    assert frames[0].session_pct == base.UNKNOWN
+
+
+def test_the_projection_never_outranks_a_live_reading(tmp_path):
+    """A source that actually saw the boundary must win, and does so purely
+    through observed_at -- no special case in the normalizer."""
+    p = str(tmp_path / "a.json")
+    wa.save(p, WED_0600Z, WED_0600Z - 4 * WEEK)
+    now = WED_0600Z - 3600
+    anchor_frame = WeeklyAnchorProvider(path=p).poll(now)[0]
+    live = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=now - 30,
+        weekly_pct=17.0, weekly_resets_at=WED_0600Z + 1234)
+    merged = normalizer.merge([anchor_frame, live])
+    assert merged.weekly_resets_at == WED_0600Z + 1234
+
+
+def test_no_anchor_means_no_frame(tmp_path):
+    assert WeeklyAnchorProvider(path=str(tmp_path / "absent.json")).poll(
+        WED_0600Z) == []
