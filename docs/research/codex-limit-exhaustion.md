@@ -50,6 +50,38 @@ exhaustion rather than by the older reading.
   omission tell someone they are blocked when they are not, which is worse
   than understating. The trigger is `limit_id` *changing*.
 
+## An early refill is possible, and we cannot see it coming
+
+The same session refilled at 11:44:44, nearly four hours before the
+`resets_at` of 15:29:57 that its last real reading advertised:
+
+```
+11:05:52   98%, limit_id=codex,   resets_at 15:29:57
+11:07:09   window-less, limit_id=premium      (a refused retry)
+11:44:44    0%, limit_id=codex,   resets_at 16:44:31
+```
+
+**The owner redeemed a usage-reset voucher.** `resets_at` was not wrong --
+the window really would have rolled at 15:29 -- and a fresh five-hour window
+was granted at the moment of redemption, which is what 16:44:31 is. So the
+spent reading's `resets_at` stays on the wire: it is the correct answer to
+"when am I unblocked" in every case except one the account holder causes and
+already knows about.
+
+Worth stating because the opposite conclusion is very easy to reach from the
+timestamps alone, and was: dropping the countdown on this evidence deletes a
+true and useful number from the panel at the one moment it matters.
+
+What is real here is the blind spot behind it. A voucher, a plan change, or
+any other out-of-band refill is invisible to us: Codex writes a usage number
+only when a turn SUCCEEDS, so between the refill and the next successful turn
+the panel keeps showing the spent window. Nothing in the rollout announces it.
+
+There is also no field to ask. `rate_limit_reached_type` and
+`spend_control_reached` are carried in every one of these envelopes and look
+exactly like the signal you would want; both were **null in all 342 envelopes
+on this machine, the two exhausted ones included**. Do not reach for them.
+
 ## Confidence
 
 One exhaustion event, on a `plus` plan, `limit_id` `codex` → `premium`. What
