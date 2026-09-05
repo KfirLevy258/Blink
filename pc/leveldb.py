@@ -9,7 +9,9 @@ Read-only is not a style choice. These files belong to a running application
 that compacts and deletes them underneath us, so nothing here opens a
 database, takes a lock, or holds a handle open longer than one read.
 """
+import collections
 import os
+import time
 
 CRC32C_POLY_REVERSED = 0x82f63b78
 CRC_MASK_DELTA = 0xa282ead8
@@ -340,6 +342,109 @@ def _safe_want(want, key: bytes) -> bool:
         return False
 
 
+# --- the parsed-file cache ----------------------------------------------
+#
+# Without it, every poll re-read and fully re-parsed every file in the store.
+# On the reference machine that meant Snappy-decompressing a 615 KB immutable
+# table -- last written in May, never to change again -- in pure Python every
+# two seconds, forever, on the same thread that reads the board's serial
+# messages. Measured 0.395 s per poll against 0.0009 s for the JSON provider
+# next to it; 0.341 s of that was the one table.
+#
+# The cache is keyed per file, so a store where only the .log moved re-parses
+# only the .log. It is bounded two ways -- a file count and a total-source-
+# bytes budget, both evicted least-recently-used -- because Chromium compacts
+# files in and out of existence and an unbounded dict keyed on file number
+# would accumulate one dead entry per compaction for the life of the daemon.
+_CACHE_MAX_FILES = 16
+_CACHE_MAX_BYTES = 4 * 1024 * 1024
+
+# A file is only cached once it has been still for this long. Size plus
+# nanosecond mtime is a strong key on a modern filesystem, but mtime
+# granularity is a filesystem property we do not control (HFS+ stores whole
+# seconds), and a same-size rewrite inside one granule would otherwise be
+# served from cache -- a stale usage percentage, which is worse than a slow
+# poll. Anything written within this window is parsed fresh and not cached,
+# so a file has to survive unchanged across a settling period before any
+# later poll is allowed to trust its (size, mtime).
+CACHE_SETTLE_S = 2.0
+
+# key -> (source_size, entries). OrderedDict for LRU: hits move to the end,
+# eviction pops the front.
+_parse_cache = collections.OrderedDict()
+_parse_cache_bytes = 0
+
+
+def clear_cache():
+    """Forget every parsed file. For tests, and for a caller that wants the
+    memory back; correctness never depends on calling it."""
+    global _parse_cache_bytes
+    _parse_cache.clear()
+    _parse_cache_bytes = 0
+
+
+def _cache_store(key, size, entries):
+    global _parse_cache_bytes
+    _parse_cache[key] = (size, entries)
+    _parse_cache.move_to_end(key)
+    _parse_cache_bytes += size
+    while _parse_cache and (len(_parse_cache) > _CACHE_MAX_FILES
+                            or _parse_cache_bytes > _CACHE_MAX_BYTES):
+        _, (evicted_size, _entries) = _parse_cache.popitem(last=False)
+        _parse_cache_bytes -= evicted_size
+
+
+def _parsed_file(path: str, st, reader, now: float):
+    """This file's entries, from cache when the file has not moved.
+
+    Returns None for a file that cannot be read or parsed, exactly as the
+    uncached walk did. The returned list is shared with the cache, so callers
+    read it and never mutate it -- every caller here only iterates.
+    """
+    global _parse_cache_bytes
+    key = (path, st.st_size, st.st_mtime_ns)
+    hit = _parse_cache.get(key)
+    if hit is not None:
+        _parse_cache.move_to_end(key)
+        return hit[1]
+
+    data = _read_whole(path)
+    if data is None:
+        return None
+    try:
+        entries = reader(data)
+    except Exception:
+        # An application we do not control is allowed to change its format.
+        # One unreadable file must not silence the store. Not cached either:
+        # nothing was produced, and the next poll costs no more than this one.
+        return None
+
+    # Ages are read from the same stat as the key, so a file that is rewritten
+    # while we are reading it fails the settle test on this poll and is keyed
+    # afresh on the next one.
+    if now - st.st_mtime >= CACHE_SETTLE_S:
+        _cache_store(key, st.st_size, entries)
+    return entries
+
+
+def _stat_files(dir_path: str, suffix: str):
+    """(name, stat_result) for every '*<suffix>' in the directory, in numeric
+    file-number order. A file that vanishes between the listing and the stat
+    is simply not in the answer -- Chromium deletes these underneath us."""
+    try:
+        names = os.listdir(dir_path)
+    except OSError:
+        return []
+    out = []
+    for name in sorted((n for n in names if n.endswith(suffix)),
+                       key=_file_number_key):
+        try:
+            out.append((name, os.stat(os.path.join(dir_path, name))))
+        except OSError:
+            continue
+    return out
+
+
 def _iter_entries(dir_path: str, want):
     """(op, key, value) triples in application order, matching keys only.
 
@@ -351,24 +456,18 @@ def _iter_entries(dir_path: str, want):
 
     A missing directory or an unreadable/malformed file yields nothing for
     that source and moves on; this is a parser and parsers never raise.
-    """
-    try:
-        names = os.listdir(dir_path)
-    except OSError:
-        return
 
+    Parsing goes through `_parsed_file`, so an unchanged file is neither
+    re-read nor re-parsed. Ordering, deletion handling and the `want` filter
+    are unaffected: the cache holds one file's entries in that file's own
+    order, and the walk over files is the same walk it always was.
+    """
+    now = time.time()
     for suffix, reader in ((".ldb", sst_entries), (".log", wal_entries)):
-        matching = sorted(
-            (n for n in names if n.endswith(suffix)), key=_file_number_key)
-        for name in matching:
-            data = _read_whole(os.path.join(dir_path, name))
-            if data is None:
-                continue
-            try:
-                entries = reader(data)
-            except Exception:
-                # An application we do not control is allowed to change its
-                # format. One unreadable file must not silence the store.
+        for name, st in _stat_files(dir_path, suffix):
+            entries = _parsed_file(
+                os.path.join(dir_path, name), st, reader, now)
+            if entries is None:
                 continue
             for op, key, value in entries:
                 if _safe_want(want, key):

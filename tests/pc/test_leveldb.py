@@ -4,6 +4,7 @@ Every test here is about refusing to hand back a value we are not certain we
 decoded, because a wrong number reaches the panel looking exactly like a right
 one.
 """
+import os
 import struct
 import time
 
@@ -271,3 +272,128 @@ def test_scan_all_lets_puts_after_a_tombstone_accumulate_again(tmp_path):
 
 def test_scan_all_is_silent_about_a_missing_directory():
     assert leveldb.scan_all("/nonexistent/leveldb", lambda k: True) == []
+
+
+# --- the parsed-file cache -------------------------------------------------
+#
+# Before it existed, every poll re-read and fully re-parsed every file in the
+# store. On the reference machine that was 0.47 s of pure-Python Snappy every
+# two seconds on the thread that also reads the board's serial messages, and
+# 0.0004 s once the files stopped moving.
+
+
+# A fixed instant, well past leveldb.CACHE_SETTLE_S ago. Fixed rather than
+# "now minus ten seconds" so that settling a file twice leaves its mtime
+# exactly where it was: an unchanged file must look unchanged.
+_SETTLED = 1_600_000_000.0
+
+
+def _settle(tmp_path, at=_SETTLED):
+    """Backdate every file past leveldb.CACHE_SETTLE_S.
+
+    The cache deliberately refuses to trust a file written this instant --
+    see CACHE_SETTLE_S -- so a test that wants a cache hit has to let the
+    files sit, and a test does that by moving the clock rather than by
+    sleeping through it.
+    """
+    for p in tmp_path.iterdir():
+        os.utime(str(p), (at, at))
+
+
+def _counting_reads(monkeypatch):
+    """Names of the files actually opened, in order."""
+    read = []
+    real = leveldb._read_whole
+
+    def spy(path):
+        read.append(os.path.basename(path))
+        return real(path)
+
+    monkeypatch.setattr(leveldb, "_read_whole", spy)
+    return read
+
+
+def test_an_unchanged_file_is_not_reparsed_on_a_second_scan(
+        tmp_path, monkeypatch):
+    leveldb.clear_cache()
+    d = _store(tmp_path,
+               tables=[("000005.ldb", [("put", b"k", b"table")])],
+               logs=[("000006.log", [[("put", b"j", b"log")]])])
+    _settle(tmp_path)
+    read = _counting_reads(monkeypatch)
+
+    first = leveldb.scan_all(d, lambda k: True)
+    assert sorted(read) == ["000005.ldb", "000006.log"]
+    read.clear()
+
+    second = leveldb.scan_all(d, lambda k: True)
+    assert read == []                    # neither re-read nor re-parsed
+    assert second == first               # and the answer is unchanged
+
+
+def test_a_changed_file_is_reparsed_and_only_that_file(tmp_path, monkeypatch):
+    """Invalidation is per file. A store where only the .log moved must
+    re-parse the .log and keep the table -- that table is the expensive one."""
+    leveldb.clear_cache()
+    d = _store(tmp_path,
+               tables=[("000005.ldb", [("put", b"k", b"table")])],
+               logs=[("000006.log", [[("put", b"j", b"one")]])])
+    _settle(tmp_path)
+    leveldb.scan_all(d, lambda k: True)
+
+    (tmp_path / "000006.log").write_bytes(
+        fx.build_log([[("put", b"j", b"two")], [("put", b"extra", b"x")]]))
+    later = _SETTLED + 100
+    os.utime(str(tmp_path / "000006.log"), (later, later))
+    read = _counting_reads(monkeypatch)
+
+    after = leveldb.scan(d, lambda k: True)
+    assert read == ["000006.log"]
+    assert after == [(b"k", b"table"), (b"j", b"two"), (b"extra", b"x")]
+
+
+def test_a_file_still_being_written_is_never_cached(tmp_path, monkeypatch):
+    """The correctness trap. mtime granularity is a filesystem property we do
+    not control, so a file whose timestamp is younger than CACHE_SETTLE_S is
+    parsed fresh every time -- a same-size rewrite inside one granule would
+    otherwise be served stale, and a stale usage percentage on the panel is
+    far worse than a slow poll."""
+    leveldb.clear_cache()
+    d = _store(tmp_path, logs=[("000006.log", [[("put", b"k", b"one")]])])
+    read = _counting_reads(monkeypatch)
+
+    leveldb.scan(d, lambda k: True)
+    leveldb.scan(d, lambda k: True)
+    assert read == ["000006.log", "000006.log"]
+
+    # Same length, same instant, different bytes: still seen.
+    (tmp_path / "000006.log").write_bytes(
+        fx.build_log([[("put", b"k", b"two")]]))
+    assert leveldb.scan(d, lambda k: True) == [(b"k", b"two")]
+
+
+def test_the_cache_cannot_grow_without_limit(tmp_path):
+    """Chromium compacts files in and out of existence, so a cache keyed on
+    file number accumulates one dead entry per compaction unless it is
+    bounded."""
+    leveldb.clear_cache()
+    for i in range(leveldb._CACHE_MAX_FILES * 3):
+        (tmp_path / ("%06d.log" % i)).write_bytes(
+            fx.build_log([[("put", b"k%d" % i, b"v")]]))
+    _settle(tmp_path)
+    leveldb.scan_all(tmp_path and str(tmp_path), lambda k: True)
+    assert len(leveldb._parse_cache) <= leveldb._CACHE_MAX_FILES
+    leveldb.clear_cache()
+
+
+def test_a_cached_store_still_honours_deletions_and_file_order(tmp_path):
+    """The cache holds one file's entries in that file's own order; the walk
+    over files is the walk it always was. Both survive a second call."""
+    leveldb.clear_cache()
+    d = _store(tmp_path,
+               tables=[("000005.ldb", [("put", b"k", b"stale")])],
+               logs=[("000006.log", [[("del", b"k", b"")]]),
+                     ("000010.log", [[("put", b"n", b"newer")]])])
+    _settle(tmp_path)
+    for _ in range(2):
+        assert leveldb.scan_all(d, lambda k: True) == [(b"n", b"newer")]
