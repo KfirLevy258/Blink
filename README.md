@@ -91,6 +91,8 @@ That one command says whether the service is running, whether Claude Code and Co
 
 ## What it works with
 
+For Claude Desktop, the app learns usage by reading Claude Desktop's own local files on your machine, never anything else -- it only ever reads them, and nothing about your usage or your conversations ever leaves the machine.
+
 | You use | You get |
 |---|---|
 | Claude Code, in a terminal or an IDE | Everything |
