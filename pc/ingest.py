@@ -146,6 +146,16 @@ class IngestionBus:
         the customer's conversations, so it is tried last, only when the
         cheaper source has produced nothing, and only within the same single
         attempt this process gets.
+
+        Called at the END of poll_frames, after every provider has been polled
+        and after weekly_anchor.observe has seen their frames. The cheapest
+        and most authoritative source of a weekly boundary is a live frame
+        that already carries one -- ordinarily the Claude Code status line --
+        and it costs this function nothing to let that land first: the guard
+        above then finds an anchor and neither seeder runs at all. Running
+        before the loop, as this used to, spent an os.walk of the session tree
+        and a V8 decode of the conversation store on the first poll of every
+        process to learn something the next few lines were about to be told.
         """
         if self._seeded:
             return
@@ -190,7 +200,6 @@ class IngestionBus:
         """
         frames = []
         now = self._now()
-        self._seed_anchor_once()
         for p in self._providers:
             key = id(p)
             name = p.__class__.__name__
@@ -239,6 +248,16 @@ class IngestionBus:
                 claude_frames, weekly_anchor.anchor_path(), now)
         except Exception:
             pass
+
+        # LAST, and that ordering is the whole point. observe() has just had
+        # its chance at every live frame, so on any machine running Claude
+        # Code the anchor file is already written and _seed_anchor_once's own
+        # `load(path) is not None` guard turns this into a no-op that costs a
+        # single small read. Called before the loop -- as it was -- it walked
+        # the session tree and V8-decoded the customer's conversation store on
+        # the first poll of every process, to learn a boundary the status line
+        # was about to hand over for free.
+        self._seed_anchor_once()
         return frames
 
     @staticmethod

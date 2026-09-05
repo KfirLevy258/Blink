@@ -193,9 +193,14 @@ and both landed on the same weekday and second, which is what makes rolling
 forward valid. The anchor exists because the boundary needs one real
 observation, ever, not because it can be read on demand.
 
-Three seeders feed it, cheapest first, and `pc/ingest.py`'s
-`_seed_anchor_once` tries only the cheap two on its own schedule -- the third
-runs at most once per process:
+Three seeders feed it, cheapest first, and that order is enforced by where
+each one runs inside `IngestionBus.poll_frames()`. The first is the live-frame
+learner, which runs every cycle. The other two are `pc/ingest.py`'s
+`_seed_anchor_once`, which runs at the END of the same poll -- after the live
+learner has had its chance -- and gets one attempt per process, taken only
+while the anchor file is still empty. So on a machine running Claude Code the
+status line writes the anchor first and neither of the other two is ever
+opened; the pair below exists for the machine that has no such source:
 
 1. **Any source that already publishes an exact weekly reset** -- ordinarily
    the Claude Code status line. `IngestionBus.poll_frames()` learns from

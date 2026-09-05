@@ -989,3 +989,74 @@ def test_the_idb_seeder_is_not_reached_when_an_anchor_already_exists(
                         lambda *a, **k: calls.append(1))
     ingest.IngestionBus(providers=[], now=lambda: NOW).poll_frames()
     assert calls == []
+
+
+# --- final review fix 2: the seeders run LAST, after the free answer
+#
+# Both tests below monkeypatch both seeders, so nothing here opens a real
+# store. The point is the ORDER of two things inside one poll_frames().
+
+
+def test_a_live_weekly_reset_means_the_idb_seeder_is_never_called(monkeypatch):
+    """The blocking one. A machine running Claude Code already has the real
+    seven-day boundary in the status line, and poll_frames learns it through
+    weekly_anchor.observe. Seeding ran first, so that machine still walked
+    its whole session tree and V8-decoded Claude Desktop's IndexedDB -- the
+    one store in this project holding the customer's conversations -- on the
+    first poll of every process, to discover something it was about to be
+    told for free.
+    """
+    idb_calls, audit_calls = [], []
+    monkeypatch.setattr(cowork_audit, "seven_day_reset",
+                        lambda *a, **k: audit_calls.append(1))
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: idb_calls.append(1))
+
+    live = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=NOW,
+        session_pct=50.0, weekly_pct=20.0, weekly_resets_at=NOW + 3 * 86400)
+    bus = ingest.IngestionBus(providers=[Fixed(live)], now=lambda: NOW)
+    bus.poll_frames()
+
+    assert idb_calls == []
+    assert audit_calls == []
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == NOW + 3 * 86400
+
+
+def test_the_seeders_still_run_when_no_live_frame_carries_a_reset(monkeypatch):
+    """The other half of the ordering: moving the seed call to the end must
+    not turn it off for the configuration it exists for -- Claude Desktop
+    with no Claude Code, where nothing live carries a weekly boundary."""
+    resets_at, observed_at = NOW + 4 * 86400, NOW - 3600
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: (resets_at, observed_at))
+
+    bus = ingest.IngestionBus(providers=[Fixed(frame())], now=lambda: NOW)
+    bus.poll_frames()
+
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == resets_at
+
+
+def test_the_once_per_process_flag_survives_the_move(monkeypatch):
+    """self._seeded is set before any work, wherever in poll_frames the call
+    sits. A seeder that raises still spends the one try this process gets,
+    and a later poll must not walk the session tree again."""
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise RuntimeError("cowork_audit blew up")
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", boom)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset", lambda *a, **k: None)
+    bus = ingest.IngestionBus(providers=[Boom(), Fixed(frame())],
+                              now=lambda: NOW)
+    bus.poll_frames()
+    bus.poll_frames()
+    assert len(calls) == 1
+    assert bus._seeded is True
