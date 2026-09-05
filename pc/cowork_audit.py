@@ -40,17 +40,72 @@ def sessions_dir() -> str:
     return os.path.expanduser("~/.config/Claude/local-agent-mode-sessions")
 
 
+def _zone_seconds(zone):
+    """The offset an explicit ISO-8601 zone suffix denotes, in seconds."""
+    sign = -1 if zone[0] == "-" else 1
+    body = zone[1:].replace(":", "")
+    if len(body) == 2:
+        hh, mm = body, "00"
+    elif len(body) == 4:
+        hh, mm = body[:2], body[2:]
+    else:
+        return None
+    # isdigit() alone is true for non-ASCII digits that int() then refuses.
+    if not (hh.isascii() and hh.isdigit() and mm.isascii() and mm.isdigit()):
+        return None
+    h, m = int(hh), int(mm)
+    if h > 23 or m > 59:
+        return None
+    return sign * (h * 3600 + m * 60)
+
+
+def _split_zone(ts):
+    """(body, offset_seconds) for a timestamp that names its zone, else None.
+
+    A trailing Z, or an explicit offset in any of the forms this family of
+    producers emits: +00:00, -0730, +03. datetime.isoformat() writes the
+    first of those, so a record whose timestamp came from Python rather than
+    from a JS Date carries an offset and no Z.
+
+    A timestamp with NO zone at all stays unreadable on purpose. Guessing one
+    turns an honest absence into a silent multi-hour error, and the callers
+    here would rather have None.
+    """
+    if ts.endswith("Z"):
+        return ts[:-1], 0
+    # A zone suffix is at most six characters, and nothing before it may be
+    # mistaken for one -- the '-' in the date must never match.
+    for i in range(len(ts) - 1, max(len(ts) - 7, 0), -1):
+        c = ts[i]
+        if c in "+-":
+            secs = _zone_seconds(ts[i:])
+            if secs is None:
+                return None
+            return ts[:i], secs
+        if not (c.isdigit() or c == ":"):
+            return None
+    return None
+
+
 def iso_to_epoch(ts):
-    """An ISO-8601 Z timestamp as epoch seconds, or None.
+    """An ISO-8601 timestamp as epoch seconds, or None.
 
     Public and meant to stay stable: pc/desktop_idb needs the same parse for
     its own timestamps, and two copies of a date parser is two places to get
     fractional seconds wrong. Never raises -- a malformed timestamp is a
     normal state here, not an error.
+
+    Accepts a trailing Z and an explicit numeric offset alike. The offset
+    form matters to pc/desktop_idb: it has no second timestamp to fall back
+    to, so a shape this refused would silently cost a machine its only
+    reading of the seven-day boundary.
     """
-    if not isinstance(ts, str) or not ts.endswith("Z"):
+    if not isinstance(ts, str):
         return None
-    body = ts[:-1]
+    split = _split_zone(ts)
+    if split is None:
+        return None
+    body, offset = split
     if "." in body:
         head, frac = body.split(".", 1)
         body = head + "." + (frac + "000000")[:6]
@@ -61,7 +116,9 @@ def iso_to_epoch(ts):
         dt = datetime.datetime.strptime(body, fmt)
     except ValueError:
         return None
-    return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
+    # `body` is a wall-clock reading in the zone the suffix named, so the
+    # offset comes OFF: 15:58+03:00 is 12:58 UTC, not 18:58.
+    return dt.replace(tzinfo=datetime.timezone.utc).timestamp() - offset
 
 
 def _finite_num(v) -> bool:

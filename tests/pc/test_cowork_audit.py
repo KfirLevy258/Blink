@@ -171,3 +171,77 @@ def test_the_last_seen_event_wins_the_mtime_fallback_tie(tmp_path):
     got = cowork_audit.seven_day_reset(root=str(tmp_path))
     assert got is not None
     assert got[0] == WED_0600Z
+
+
+# --- The shared timestamp parser
+#
+# Public because pc/desktop_idb reuses it rather than shipping a second date
+# parser. It accepted a trailing Z only; desktop_idb has no second timestamp
+# to fall back to, so an offset-form created_at would have cost that machine
+# its only reading of the seven-day boundary.
+
+
+def test_a_trailing_z_is_read():
+    assert cowork_audit.iso_to_epoch(
+        "2026-09-05T12:58:59.702809Z") == 1788613139.702809
+
+
+def test_a_trailing_z_without_fractional_seconds_is_read():
+    assert cowork_audit.iso_to_epoch("2026-09-05T12:58:59Z") == 1788613139.0
+
+
+def test_a_zero_offset_is_the_same_instant_as_z():
+    assert (cowork_audit.iso_to_epoch("2026-09-05T12:58:59.702809+00:00")
+            == cowork_audit.iso_to_epoch("2026-09-05T12:58:59.702809Z"))
+
+
+def test_a_positive_offset_is_subtracted_not_added():
+    """+03:00 is a wall clock three hours AHEAD of UTC, so the instant is
+    three hours EARLIER. Getting this backwards is a silent six-hour error."""
+    assert cowork_audit.iso_to_epoch(
+        "2026-09-05T15:58:59.702809+03:00") == 1788613139.702809
+
+
+def test_a_negative_offset_is_added():
+    assert cowork_audit.iso_to_epoch(
+        "2026-09-05T05:58:59.702809-07:00") == 1788613139.702809
+
+
+def test_a_compact_offset_is_read():
+    assert cowork_audit.iso_to_epoch(
+        "2026-09-05T15:58:59.702809+0300") == 1788613139.702809
+
+
+def test_an_hour_only_offset_is_read():
+    assert cowork_audit.iso_to_epoch(
+        "2026-09-05T15:58:59.702809+03") == 1788613139.702809
+
+
+def test_a_timestamp_with_no_zone_stays_unreadable():
+    """Guessing a zone turns an honest absence into a multi-hour error."""
+    assert cowork_audit.iso_to_epoch("2026-09-05T12:58:59.702809") is None
+    assert cowork_audit.iso_to_epoch("2026-09-05T12:58:59") is None
+
+
+def test_the_date_separator_is_never_mistaken_for_an_offset():
+    assert cowork_audit.iso_to_epoch("2026-09-05") is None
+
+
+def test_a_malformed_zone_is_refused_rather_than_raised():
+    for ts in ("2026-09-05T12:58:59+9:99", "2026-09-05T12:58:59+xx:00",
+               "2026-09-05T12:58:59+99:00", "2026-09-05T12:58:59+00:99",
+               "2026-09-05T12:58:59+", "2026-09-05T12:58:59+000",
+               "2026-09-05T12:58:59+\u0663\u0663:00", "", "Z", 17, None):
+        assert cowork_audit.iso_to_epoch(ts) is None
+
+
+def test_an_event_timestamped_with_an_offset_is_used(tmp_path):
+    """End to end through the audit reader, not just the parser."""
+    ev = {"type": "rate_limit_event", "timestamp": "2026-09-05T12:58:59+00:00",
+          "rate_limit_info": {"unifiedWindows": {
+              "seven_day": {"resetsAt": 1788933600.0}}}}
+    d = tmp_path / "sess"
+    d.mkdir()
+    (d / "audit.jsonl").write_text(json.dumps(ev) + "\n", encoding="utf-8")
+    got = cowork_audit.seven_day_reset(str(tmp_path))
+    assert got == (1788933600.0, 1788613139.0)
