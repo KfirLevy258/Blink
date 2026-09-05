@@ -1450,3 +1450,110 @@ def test_a_buried_session_takes_its_name_off_the_panel_too(tmp_path):
     tombstone(slots, "cx-1", NOW - 20)
 
     assert union_frame(sessions, slots).label == "Alive"
+
+
+# --- running out ------------------------------------------------------------
+#
+# Every fixture above this line was written by us, which is why none of them
+# caught the shape below. Codex does not report a spent limit as 100: it keeps
+# the `rate_limits` envelope, nulls both windows, and moves `limit_id` off
+# "codex". Measured on the owner's desk 2026-09-05, the two lines half a
+# second apart, after the panel showed a stale 29 from another session at the
+# moment they were actually blocked.
+
+
+def exhausted_limits(limit_id="premium"):
+    """The envelope Codex writes once the window is spent. Both windows null."""
+    return {"limit_id": limit_id, "limit_name": None,
+            "primary": None, "secondary": None,
+            "credits": {"has_credits": False, "unlimited": False,
+                        "balance": "0"},
+            "individual_limit": None, "spend_control_reached": None,
+            "plan_type": "plus", "rate_limit_reached_type": None}
+
+
+def test_a_spent_limit_reports_full_not_the_last_number_before_it(tmp_path):
+    """The field failure, as a test.
+
+    98 then null-windows. The reader must reach past the null envelope to the
+    98 and report the session window as spent -- not discard the file.
+    """
+    write_rollout(tmp_path, lines=[
+        token_count_line(rate_limits(s_pct=98.0, w_pct=16.0),
+                         stamp="2026-08-27T03:00:00.000Z"),
+        token_count_line(exhausted_limits(),
+                         stamp="2026-08-27T03:00:01.000Z"),
+    ])
+    frame, = poll(tmp_path)
+
+    assert frame.session_pct == 100.0
+    assert frame.weekly_pct == 16.0     # genuinely not spent; must not saturate
+
+
+def test_a_spent_limit_does_not_lose_to_a_staler_reading_elsewhere(tmp_path):
+    """The actual symptom: another session's older, lower number winning.
+
+    Two files. The spent one is newer. Before the fix the spent file was
+    dropped whole and the 29 from the other file was published, aged, as if
+    it were the current state of the account.
+    """
+    write_rollout(tmp_path, name="rollout-other.jsonl", lines=[
+        token_count_line(rate_limits(s_pct=29.0, w_pct=5.0),
+                         stamp="2026-08-27T02:40:00.000Z"),
+    ])
+    write_rollout(tmp_path, name="rollout-spent.jsonl", lines=[
+        token_count_line(rate_limits(s_pct=98.0, w_pct=16.0),
+                         stamp="2026-08-27T03:00:00.000Z"),
+        token_count_line(exhausted_limits(),
+                         stamp="2026-08-27T03:00:01.000Z"),
+    ])
+    frame, = poll(tmp_path)
+
+    assert frame.session_pct == 100.0
+
+
+def test_a_spent_limit_is_dated_when_it_ran_out_not_when_the_number_was_read(
+        tmp_path):
+    """Otherwise the panel calls the truth stale and hides it.
+
+    The 98 is old; the fact that the account is spent is current. Dating the
+    frame by the older line is what would let STALE_AFTER_S bury it.
+    """
+    old = codex_cli.STALE_AFTER_S + 600
+    write_rollout(tmp_path, lines=[
+        token_count_line(rate_limits(s_pct=98.0), stamp=_stamp(NOW - old)),
+        token_count_line(exhausted_limits(), stamp=_stamp(NOW - 30)),
+    ])
+    frame, = poll(tmp_path)
+
+    assert frame.session_pct == 100.0
+    assert frame.stale is False
+
+
+def test_null_windows_alone_do_not_claim_the_limit_is_spent(tmp_path):
+    """A transient null must not tell someone they are blocked.
+
+    Same `limit_id`, so nothing says the account moved buckets. The honest
+    answer is the last real reading, at its own age -- not a saturated dial.
+    """
+    write_rollout(tmp_path, lines=[
+        token_count_line(rate_limits(s_pct=41.0), stamp=_stamp(NOW - 60)),
+        token_count_line(exhausted_limits(limit_id="codex"),
+                         stamp=_stamp(NOW - 30)),
+    ])
+    frame, = poll(tmp_path)
+
+    assert frame.session_pct == 41.0
+
+
+def test_a_file_with_only_null_windows_yields_no_frame(tmp_path):
+    """No numbers anywhere is still no frame; it must not win on recency."""
+    write_rollout(tmp_path, name="rollout-spent.jsonl", lines=[
+        token_count_line(exhausted_limits(), stamp=_stamp(NOW - 10)),
+    ])
+    write_rollout(tmp_path, name="rollout-real.jsonl", lines=[
+        token_count_line(rate_limits(s_pct=7.0), stamp=_stamp(NOW - 600)),
+    ])
+    frame, = poll(tmp_path)
+
+    assert frame.session_pct == 7.0

@@ -400,12 +400,45 @@ def _observed_at(line: dict, mtime: float) -> float:
     return mtime
 
 
+def _has_window(limits) -> bool:
+    """Does this `rate_limits` object yield a percentage for either window?"""
+    session, weekly = _classify(limits)
+    return _pct(session) >= 0 or _pct(weekly) >= 0
+
+
 def parse_rollout_tail(lines, mtime: float):
-    """The newest (rate_limits, observed_at) in these lines, or (None, None).
+    """The newest USABLE (rate_limits, observed_at, limit_reached), or Nones.
 
     Scanned backwards: the answer is at the end of the file, and a long
     session has thousands of lines that are not it.
+
+    "Usable" is the whole point of this function, and it was learned the hard
+    way. When the five-hour limit runs out, Codex does not write 100 -- it
+    writes the SAME `rate_limits` envelope with `primary` and `secondary` both
+    null, and flips `limit_id` from "codex" to "premium". Measured on this
+    desk 2026-09-05, half a second apart:
+
+        08:05:52.357Z  limit_id=codex    5h=98    wk=16
+        08:05:52.914Z  limit_id=premium  5h=null  wk=null
+
+    An earlier version stopped at the newest line merely CONTAINING
+    "rate_limits". That is the null one, `parse_cli_event` rightly refuses a
+    frame with no numbers in it, and the caller then dropped the entire file
+    -- including the 98 sitting two lines above. The freshest reading left
+    anywhere was a twenty-minute-old 29 from a Codex desktop thread, and the
+    panel showed THAT, aged, at the exact moment the person was blocked and
+    most needed the dial to be right. Reported from the field by the owner.
+
+    So: keep scanning past window-less envelopes to the newest one that
+    actually carries a number, and tell the caller whether the account walked
+    off the end. `limit_reached` is deliberately keyed on `limit_id` CHANGING
+    rather than on the nulls alone -- a transient null from an upstream that
+    momentarily omits the block would otherwise saturate the dial to 100 and
+    tell someone they are blocked when they are not, which is the worse of
+    the two wrong answers.
     """
+    top = None                  # newest envelope, usable or not
+    top_observed = None
     for raw in reversed(lines):
         if "rate_limits" not in raw:
             continue        # cheap reject before the parse
@@ -419,9 +452,34 @@ def parse_rollout_tail(lines, mtime: float):
         if not isinstance(payload, dict):
             continue
         limits = payload.get("rate_limits")
-        if isinstance(limits, dict):
-            return limits, _observed_at(line, mtime)
-    return None, None
+        if not isinstance(limits, dict):
+            continue
+        observed = _observed_at(line, mtime)
+        if top is None:
+            top, top_observed = limits, observed
+        if _has_window(limits):
+            if limits is top:
+                return limits, observed, False
+            # An older reading, reached only because everything newer was
+            # window-less. Report it as observed WHEN THE ACCOUNT RAN OUT,
+            # not when this older line was written: the fact being reported
+            # is current even though the number carrying it is not, and
+            # dating it backwards would make the panel call it stale and
+            # hide it.
+            reached = _limit_id(top) != _limit_id(limits)
+            return limits, (top_observed if reached else observed), reached
+    # Either no envelope at all, or every one of them window-less. Hand the
+    # newest back regardless: `parse_cli_event` refuses it, which keeps a
+    # file with nothing to say from winning a contest about numbers.
+    return top, top_observed, False
+
+
+def _limit_id(limits):
+    """`limit_id`, or None. The bucket the account is being charged against."""
+    if not isinstance(limits, dict):
+        return None
+    value = limits.get("limit_id")
+    return value if isinstance(value, str) else None
 
 
 # --- execution state ---------------------------------------------------------
@@ -622,17 +680,27 @@ class CodexCliProvider(base.ProviderParser):
         """Forget every cached name whose file is no longer being read."""
         self._names = {p: n for p, n in self._names.items() if p in known}
 
-    def parse_cli_event(self, raw_payload, now_epoch, observed_at):
+    def parse_cli_event(self, raw_payload, now_epoch, observed_at,
+                        limit_reached=False):
         """One `rate_limits` object, already read, as a frame.
 
         Returns None when neither window yields a percentage: a frame with no
         numbers must not be allowed to win a recency contest for numbers it
         does not have.
+
+        `limit_reached` says the account has run out and this reading is the
+        last one taken before it did -- see parse_rollout_tail. The session
+        window is then reported as full, because 98 and "you cannot send
+        anything" are the same fact to the person looking at the panel, and
+        the second one is what they need to know. Only the session window:
+        the weekly one was at 16 when this fired and is genuinely not spent.
         """
         session, weekly = _classify(raw_payload)
         s_pct, w_pct = _pct(session), _pct(weekly)
         if s_pct < 0 and w_pct < 0:
             return None
+        if limit_reached and s_pct >= 0:
+            s_pct = 100.0
         return base.NormalizedUsageFrame(
             provider=PROVIDER_ID,
             src=SRC_ID,
@@ -686,10 +754,12 @@ class CodexCliProvider(base.ProviderParser):
                 # and letting it lend its name would rename the panel after
                 # the session that is actually doing something.
                 rollout_names[key] = self._name_for(path)
-            limits, observed_at = parse_rollout_tail(lines, mtime)
+            limits, observed_at, limit_reached = parse_rollout_tail(lines,
+                                                                    mtime)
             if limits is None:
                 continue
-            frame = self.parse_cli_event(limits, now_epoch, observed_at)
+            frame = self.parse_cli_event(limits, now_epoch, observed_at,
+                                         limit_reached)
             if frame is None:
                 continue
             if best is None or frame.observed_at > best.observed_at:
