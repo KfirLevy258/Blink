@@ -89,6 +89,61 @@ def test_a_nonsense_reset_timestamp_is_dropped_not_published():
     assert f.session_pct == 6.0
 
 
+def test_at_the_exact_reset_instant_the_window_has_already_rolled():
+    """now_epoch == resetsAt is the whole rule in one instant: `>=`, not `>`.
+    Getting this backwards leaves all the other tests green and reopens the
+    2026-08-28 bug -- a stale percentage published as current."""
+    p = ClaudeDesktopLocalStorageProvider()
+    f = p.record_to_frame(_rec(NOW, 0.19, NOW - 100), NOW)
+    assert f.session_pct == base.UNKNOWN
+    assert f.session_resets_at is None
+    assert f.session_rolled_at == NOW
+
+
+def test_one_tick_before_the_reset_the_percentage_still_publishes():
+    """The other side of the same boundary: not yet expired."""
+    p = ClaudeDesktopLocalStorageProvider()
+    f = p.record_to_frame(_rec(NOW + 1, 0.19, NOW - 100), NOW)
+    assert f.session_pct == 19.0
+    assert f.session_resets_at == NOW + 1
+    assert f.session_rolled_at is None
+
+
+def test_zero_utilization_publishes_as_zero_not_unknown():
+    """0.0 is a real reading -- the window just refilled -- and must never be
+    spelled the same way as 'we don't know'."""
+    p = ClaudeDesktopLocalStorageProvider()
+    f = p.record_to_frame(_rec(NOW + 3600, 0.0, NOW), NOW)
+    assert f.session_pct == 0.0
+    assert f.session_pct != base.UNKNOWN
+
+
+def test_a_non_dict_record_is_refused_not_raised():
+    p = ClaudeDesktopLocalStorageProvider()
+    assert p.record_to_frame("not a record", NOW) is None
+
+
+def test_a_record_missing_utilization_is_refused_not_raised():
+    p = ClaudeDesktopLocalStorageProvider()
+    rec = _rec(NOW + 3600, 0.06, NOW)
+    del rec["utilization"]
+    assert p.record_to_frame(rec, NOW) is None
+
+
+def test_a_non_numeric_utilization_is_refused_not_raised():
+    p = ClaudeDesktopLocalStorageProvider()
+    f = p.record_to_frame(_rec(NOW + 3600, "abc", NOW), NOW)
+    assert f is None
+
+
+def test_this_source_never_invents_a_weekly_reading():
+    """No seven-day data exists in this record at all."""
+    p = ClaudeDesktopLocalStorageProvider()
+    f = p.record_to_frame(_rec(NOW + 3600, 0.06, NOW), NOW)
+    assert f.weekly_pct == base.UNKNOWN
+    assert f.weekly_resets_at is None
+
+
 def test_polling_an_absent_store_is_silent():
     p = ClaudeDesktopLocalStorageProvider(dir_path="/nonexistent/leveldb")
     assert p.poll(NOW) == []
