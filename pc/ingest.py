@@ -14,7 +14,7 @@ able to stop it.
 import sys
 import time
 
-from pc import cowork_audit, normalizer, protocol, weekly_anchor
+from pc import cowork_audit, desktop_idb, normalizer, protocol, weekly_anchor
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
@@ -127,7 +127,8 @@ class IngestionBus:
 
     def _seed_anchor_once(self):
         """One-shot fallback: seed the weekly anchor from a legacy Cowork
-        audit file when nothing has ever populated it.
+        audit file, or failing that from Claude Desktop's IndexedDB, when
+        nothing has ever populated it.
 
         Runs at most once per process, guarded by self._seeded -- set before
         any work is attempted, so a raise on the first try still counts as
@@ -138,8 +139,13 @@ class IngestionBus:
         Tried only while the anchor file itself is empty, and wrapped whole
         in try/except: this walks a directory tree and parses files owned
         by another application, and none of that may be allowed to take a
-        poll down. Task 13's IndexedDB seeder is meant to slot in right
-        after this one, tried only when this one finds nothing.
+        poll down.
+
+        The order is deliberate and is a cost order. The audit file is plain
+        JSON in a directory holding no chat store; the IndexedDB store holds
+        the customer's conversations, so it is tried last, only when the
+        cheaper source has produced nothing, and only within the same single
+        attempt this process gets.
         """
         if self._seeded:
             return
@@ -149,6 +155,8 @@ class IngestionBus:
             if weekly_anchor.load(path) is not None:
                 return
             found = cowork_audit.seven_day_reset()
+            if found is None:
+                found = desktop_idb.seven_day_reset()
             if found is None:
                 return
             resets_at, observed_at = found

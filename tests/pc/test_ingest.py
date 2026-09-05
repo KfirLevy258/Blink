@@ -4,7 +4,7 @@ import json
 import pathlib
 import re
 
-from pc import cowork_audit, ingest, weekly_anchor
+from pc import cowork_audit, desktop_idb, ingest, weekly_anchor
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
@@ -914,3 +914,78 @@ def test_a_pair_the_seeder_finds_reaches_weekly_anchor_save(monkeypatch):
     assert anchor is not None
     assert anchor["resets_at"] == resets_at
     assert anchor["observed_at"] == observed_at
+
+
+# --- Task 13: the IndexedDB seeder, tried last and only when it must be
+#
+# Every test below monkeypatches both seeders, so nothing here reads a real
+# Claude Desktop store. desktop_idb.seven_day_reset is never given a real
+# path in this suite at all.
+
+
+def test_the_idb_seeder_is_not_reached_when_the_audit_file_answers(
+        monkeypatch):
+    """Cost order, pinned. The audit file is plain JSON beside no chat
+    store; the IndexedDB store holds the customer's conversations. Once the
+    cheap source has answered, the expensive one must not be opened."""
+    calls = []
+    monkeypatch.setattr(cowork_audit, "seven_day_reset",
+                        lambda *a, **k: (NOW + 3 * 86400, NOW - 86400))
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: calls.append(1))
+    ingest.IngestionBus(providers=[], now=lambda: NOW).poll_frames()
+    assert calls == []
+
+
+def test_the_idb_seeder_runs_when_the_audit_file_finds_nothing(monkeypatch):
+    resets_at, observed_at = NOW + 4 * 86400, NOW - 3600
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: (resets_at, observed_at))
+    assert weekly_anchor.load(weekly_anchor.anchor_path()) is None
+    ingest.IngestionBus(providers=[], now=lambda: NOW).poll_frames()
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == resets_at
+    assert anchor["observed_at"] == observed_at
+
+
+def test_the_idb_seeder_is_tried_at_most_once_per_process(monkeypatch):
+    """A store this one holds no business reopening every poll."""
+    calls = []
+
+    def counted(*a, **k):
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset", counted)
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()
+    bus.poll_frames()
+    bus.poll_frames()
+    assert len(calls) == 1
+
+
+def test_an_idb_seeder_that_raises_does_not_take_the_poll_down(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("desktop_idb blew up")
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset", boom)
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()
+    bus.poll_frames()
+    assert bus._seeded is True
+    assert weekly_anchor.load(weekly_anchor.anchor_path()) is None
+
+
+def test_the_idb_seeder_is_not_reached_when_an_anchor_already_exists(
+        monkeypatch):
+    calls = []
+    weekly_anchor.save(weekly_anchor.anchor_path(), NOW + 86400, NOW - 60)
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: calls.append(1))
+    ingest.IngestionBus(providers=[], now=lambda: NOW).poll_frames()
+    assert calls == []
