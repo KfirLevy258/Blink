@@ -1,0 +1,38 @@
+#!/bin/sh
+# Strip agent trailers from every commit message, automatically.
+#
+# This repository is published at github.com/KfirLevy258/Blink. Two trailers
+# must never reach it: `Co-Authored-By: Claude` and `Claude-Session:`, the
+# second of which carries a session URL. Both are added by tooling rather
+# than typed, so remembering to leave them out has failed repeatedly -- six
+# commits on one branch in September 2026, caught only at push time, after
+# the same thing had already required a history rewrite at the previous
+# release.
+#
+# A commit-msg hook is the right place for this because it runs for every
+# commit regardless of who or what made it: a person, an agent, a script.
+# Nothing has to remember.
+#
+# Install (once per clone):
+#     git config core.hooksPath .githooks
+#
+# The hook is deliberately narrow. It removes whole trailer lines and
+# nothing else, leaves the subject and body untouched, and never fails a
+# commit -- a hook that blocks work is a hook that gets disabled.
+set -eu
+
+MSG="$1"
+[ -f "$MSG" ] || exit 0
+
+# Any line that IS one of these trailers, with optional leading whitespace.
+# Anchored so a commit that discusses the trailers in prose keeps its text.
+if grep -qiE '^[[:space:]]*(Co-Authored-By:[[:space:]]*Claude|Claude-Session:)' "$MSG" 2>/dev/null; then
+	TMP="$MSG.stripped"
+	grep -viE '^[[:space:]]*(Co-Authored-By:[[:space:]]*Claude|Claude-Session:)' "$MSG" >"$TMP" || :
+	# Collapse the trailing blank lines the removal leaves behind.
+	awk 'BEGIN{n=0} {lines[NR]=$0} END{last=NR; while (last>0 && lines[last]~/^[[:space:]]*$/) last--; for(i=1;i<=last;i++) print lines[i]}' \
+		"$TMP" >"$MSG" 2>/dev/null || cp "$TMP" "$MSG"
+	rm -f "$TMP"
+fi
+
+exit 0
