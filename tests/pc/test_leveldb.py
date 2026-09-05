@@ -29,3 +29,22 @@ def test_unmask_inverts_leveldb_crc_masking():
     raw = leveldb.crc32c(b"hello")
     masked = (((raw >> 15) | (raw << 17)) + 0xa282ead8) & 0xffffffff
     assert leveldb.unmask_crc(masked) == raw
+
+
+def test_snappy_expands_a_literal_then_an_overlapping_copy():
+    """Preamble 8, a one-byte literal 'a', then a 7-byte copy at offset 1.
+
+    The copy overlaps its own output, which is the case a naive slice-based
+    implementation gets wrong: it must be produced a byte at a time.
+    """
+    blob = bytes([0x08, 0x00, 0x61, 0x0d, 0x01])
+    assert leveldb.snappy_decompress(blob) == b"aaaaaaaa"
+
+
+def test_snappy_handles_a_plain_literal_run():
+    blob = bytes([0x03, 0x08]) + b"xyz"
+    assert leveldb.snappy_decompress(blob) == b"xyz"
+
+
+def test_snappy_refuses_a_truncated_stream():
+    assert leveldb.snappy_decompress(bytes([0x10, 0x00])) is None

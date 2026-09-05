@@ -52,3 +52,60 @@ def read_varint(buf: bytes, pos: int) -> tuple:
         if b < 0x80:
             return value, pos
         shift += 7
+
+
+def snappy_decompress(buf: bytes):
+    """The raw Snappy format LevelDB uses for block bodies, or None.
+
+    None rather than an exception: a block that will not decompress is a
+    block we skip, and every caller here is already in the business of
+    tolerating an unreadable region.
+    """
+    try:
+        expected, pos = read_varint(buf, 0)
+    except IndexError:
+        return None
+    out = bytearray()
+    try:
+        while pos < len(buf) and len(out) < expected:
+            tag = buf[pos]
+            pos += 1
+            kind = tag & 3
+            if kind == 0:
+                n = tag >> 2
+                if n < 60:
+                    n += 1
+                else:
+                    width = n - 59
+                    n = int.from_bytes(buf[pos:pos + width], "little") + 1
+                    pos += width
+                chunk = buf[pos:pos + n]
+                if len(chunk) < n:
+                    return None
+                out += chunk
+                pos += n
+                continue
+            if kind == 1:
+                n = 4 + ((tag >> 2) & 7)
+                offset = ((tag >> 5) << 8) | buf[pos]
+                pos += 1
+            elif kind == 2:
+                n = (tag >> 2) + 1
+                offset = int.from_bytes(buf[pos:pos + 2], "little")
+                pos += 2
+            else:
+                n = (tag >> 2) + 1
+                offset = int.from_bytes(buf[pos:pos + 4], "little")
+                pos += 4
+            if offset == 0 or offset > len(out):
+                return None
+            # A byte at a time: a copy may overlap the output it is still
+            # producing, which is how Snappy encodes a repeated run.
+            start = len(out) - offset
+            for i in range(n):
+                out.append(out[start + i])
+    except IndexError:
+        return None
+    if len(out) != expected:
+        return None
+    return bytes(out)
