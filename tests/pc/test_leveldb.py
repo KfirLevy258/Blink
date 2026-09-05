@@ -5,6 +5,7 @@ decoded, because a wrong number reaches the panel looking exactly like a right
 one.
 """
 import struct
+import time
 
 from pc import leveldb
 from tests.support import leveldb_fixture as fx
@@ -20,6 +21,28 @@ def test_varint_reads_single_and_multi_byte():
 def test_varint_reports_the_position_after_the_value():
     _, pos = leveldb.read_varint(b"\x80\x01\xaa", 0)
     assert pos == 2
+
+
+def test_varint_refuses_a_run_of_continuation_bytes_promptly():
+    """Ten bytes hold any 64-bit value; an eleventh is not a length these
+    formats can express.
+
+    Without the cap the accumulator widens by seven bits per byte, so the
+    cost is quadratic in the run: a megabyte of 0xff inside one untrusted
+    value is minutes of a blocked poll instead of a skipped record. Callers
+    already treat IndexError as "skip this region", so that is what a
+    too-long varint raises.
+    """
+    assert leveldb.read_varint(b"\xff" * 9 + b"\x00", 0)[1] == 10
+    for run in (11, 64, 1_000_000):
+        start = time.monotonic()
+        try:
+            leveldb.read_varint(b"\xff" * run, 0)
+        except IndexError:
+            pass
+        else:
+            raise AssertionError("a %d-byte varint was accepted" % run)
+        assert time.monotonic() - start < 1.0
 
 
 def test_crc32c_matches_the_castagnoli_reference_vectors():

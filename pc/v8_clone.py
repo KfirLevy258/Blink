@@ -30,7 +30,12 @@ _TRUE, _FALSE = ord("T"), ord("F")
 _DOUBLE, _INT = ord("N"), ord("I")
 _STR1, _STR2, _STR8 = ord('"'), ord("c"), ord("S")
 _OBJ, _OBJ_END = ord("o"), ord("{")
+# Two array forms, and they are shaped differently. Dense (`A`) writes its
+# elements BARE, one after another; sparse (`a`) writes index/value pairs.
+# Reading pairs under `A` costs an element every other slot and turns an
+# odd-length array into a refused record, so the distinction is not cosmetic.
 _ARR, _ARR_END = ord("A"), ord("$")
+_SPARSE_ARR, _SPARSE_ARR_END = ord("a"), ord("@")
 _BACKREF = ord("^")
 
 
@@ -42,7 +47,9 @@ def _slice(buf, pos, n):
 
 
 def _read(buf, pos, depth):
-    if depth > MAX_DEPTH:
+    # The outermost value is depth 0, so MAX_DEPTH levels are readable and
+    # the next one is refused. `>` here would have allowed 65.
+    if depth >= MAX_DEPTH:
         raise ValueError("too deep")
     tag = buf[pos]
     pos += 1
@@ -91,21 +98,52 @@ def _read(buf, pos, depth):
         _count, pos = read_varint(buf, pos)
         return obj, pos
     if tag == _ARR:
-        _n, pos = read_varint(buf, pos)
-        items = {}
+        # Dense: a length, then that many bare elements, then any named
+        # properties as key/value pairs, then the end tag with a property
+        # count and the length again.
+        n, pos = read_varint(buf, pos)
+        # Every element costs at least its tag byte, so a length longer than
+        # what is left cannot be honest. Checking here is also what stops a
+        # nonsense length from being walked one imaginary element at a time.
+        if n > len(buf) - pos:
+            raise ValueError("array longer than its buffer")
+        items = []
+        for _ in range(n):
+            val, pos = _read(buf, pos, depth + 1)
+            items.append(val)
         while True:
             if pos >= len(buf):
                 raise ValueError("unterminated array")
             if buf[pos] == _ARR_END:
                 pos += 1
                 break
+            # A named property on an array. Read structurally so the walk
+            # stays aligned, then drop it: a Python list cannot hold it, and
+            # nothing this project reads lives there.
+            _key, pos = _read(buf, pos, depth + 1)
+            _val, pos = _read(buf, pos, depth + 1)
+        _props, pos = read_varint(buf, pos)
+        _length, pos = read_varint(buf, pos)
+        return items, pos
+    if tag == _SPARSE_ARR:
+        # Sparse: index/value pairs, the form V8 uses for an array with
+        # holes. Indices are kept only to order the elements; the holes
+        # themselves collapse, because a Python list has no hole.
+        _n, pos = read_varint(buf, pos)
+        keyed = {}
+        while True:
+            if pos >= len(buf):
+                raise ValueError("unterminated array")
+            if buf[pos] == _SPARSE_ARR_END:
+                pos += 1
+                break
             key, pos = _read(buf, pos, depth + 1)
             val, pos = _read(buf, pos, depth + 1)
             if isinstance(key, int) and not isinstance(key, bool):
-                items[key] = val
+                keyed[key] = val
         _props, pos = read_varint(buf, pos)
         _length, pos = read_varint(buf, pos)
-        return [items[i] for i in sorted(items)], pos
+        return [keyed[i] for i in sorted(keyed)], pos
     if tag == _BACKREF:
         # An object we have already seen. We do not keep the table: every
         # field this project reads is spelled out (V8 back-references

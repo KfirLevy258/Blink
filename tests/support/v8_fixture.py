@@ -72,9 +72,12 @@ def _write(value, out: bytearray) -> None:
             _write(v, out)
         out += b"{" + _varint(len(value))
     elif isinstance(value, list):
+        # A dense array: the length, then the elements BARE -- no index
+        # before each one. The index/value form is the separate sparse tag
+        # `a`, and writing pairs here made the fixture agree with a parser
+        # that had the same misreading, which is how it went unnoticed.
         out += b"A" + _varint(len(value))
-        for i, v in enumerate(value):
-            _write(Smi(i), out)
+        for v in value:
             _write(v, out)
         out += b"$" + _varint(0) + _varint(len(value))
     else:

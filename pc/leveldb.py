@@ -14,6 +14,13 @@ import os
 CRC32C_POLY_REVERSED = 0x82f63b78
 CRC_MASK_DELTA = 0xa282ead8
 
+# A 64-bit varint is ten bytes at most, and every length, offset and count in
+# these formats is 64-bit or narrower. Without this cap a run of continuation
+# bytes builds an ever-widening integer: the cost is quadratic in the length
+# of the run, so a megabyte of 0xff inside one untrusted value is minutes of
+# a blocked poll rather than a rejected record.
+MAX_VARINT_BYTES = 10
+
 # Built once. The table is 1 KiB and the alternative is a bit-at-a-time loop
 # over every byte of a 600 KiB log on every poll.
 _CRC_TABLE = []
@@ -42,17 +49,21 @@ def read_varint(buf: bytes, pos: int) -> tuple:
     """(value, position after it). Raises IndexError on a truncated buffer.
 
     The caller catches: a truncated varint means a torn record, and the right
-    response is to skip that record, not to invent a length for it.
+    response is to skip that record, not to invent a length for it. A varint
+    longer than MAX_VARINT_BYTES is refused the same way and for the same
+    reason -- it is not a length any of these formats can express, and every
+    caller here already treats IndexError as "skip this region".
     """
     value = 0
     shift = 0
-    while True:
+    for _ in range(MAX_VARINT_BYTES):
         b = buf[pos]
         pos += 1
         value |= (b & 0x7f) << shift
         if b < 0x80:
             return value, pos
         shift += 7
+    raise IndexError("varint too long")
 
 
 def snappy_decompress(buf: bytes):

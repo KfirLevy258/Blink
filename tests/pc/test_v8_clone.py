@@ -6,6 +6,8 @@ supply that field name, and the panel then shows a number out of somebody's
 chat.
 """
 import logging
+import struct
+import time
 
 from pc import v8_clone
 from tests.support import v8_fixture as vfx
@@ -27,6 +29,31 @@ def _varint(n: int) -> bytes:
 def _s(text: str) -> bytes:
     """A one-byte-per-character string, varint length."""
     return b'"' + _varint(len(text)) + text.encode("latin-1")
+
+
+def _d(value: float) -> bytes:
+    """A double: the N tag and eight little-endian bytes."""
+    return b"N" + struct.pack("<d", value)
+
+
+def _smi(value: int) -> bytes:
+    """An integer: the I tag and a zigzag varint."""
+    z = (value << 1) if value >= 0 else ((-value << 1) - 1)
+    return b"I" + _varint(z)
+
+
+def _dense(elements: bytes, count: int, props: bytes = b"",
+           n_props: int = 0) -> bytes:
+    """A dense array, spelled out from the format description.
+
+    `A <len>`, then that many elements BARE -- no index in front of any of
+    them -- then any named properties as key/value pairs, then
+    `$ <props> <len>`. Written here rather than taken from the fixture
+    because the fixture had the same misreading the parser did, so a test
+    built on it agreed with the bug.
+    """
+    return (b"A" + _varint(count) + elements + props
+            + b"$" + _varint(n_props) + _varint(count))
 
 
 def test_parses_a_flat_object():
@@ -69,7 +96,8 @@ def test_returns_none_for_a_buffer_it_does_not_understand():
 def test_never_raises_on_a_truncated_buffer():
     full = vfx.dumps({"a": 1.0})
     for cut in range(1, len(full)):
-        v8_clone.parse(full[:cut])
+        # Knowable: a cut buffer is never a complete value, so it is None.
+        assert v8_clone.parse(full[:cut]) is None
 
 
 # --- The cases where a plausible implementation is silently wrong ---
@@ -103,24 +131,34 @@ def test_reads_negative_integers():
     assert got == {"a": -1, "b": 1, "c": -7, "d": -300, "e": 0}
 
 
-def test_a_nested_buffer_truncated_anywhere_returns_a_value_or_none():
+def test_every_truncation_of_a_nested_buffer_returns_none():
+    """No proper prefix of a complete value is itself a complete value, so
+    the answer is knowable: None at every cut, and never an exception."""
     full = vfx.dumps({"rate_limit_info": {"unifiedWindows": {
         "seven_day": {"resetsAt": 1788933600.0, "utilization": 0.17}}}})
     for cut in range(1, len(full)):
-        got = v8_clone.parse(full[:cut])
-        assert got is None or isinstance(got, dict)
+        assert v8_clone.parse(full[:cut]) is None
 
 
-def test_nesting_past_max_depth_returns_none_instead_of_recursing():
-    deep = inner = {}
-    for _ in range(v8_clone.MAX_DEPTH + 10):
+def _chain(levels: int) -> dict:
+    """`levels` nested objects, the innermost empty."""
+    top = inner = {}
+    for _ in range(levels - 1):
         nxt = {}
         inner["n"] = nxt
         inner = nxt
-    assert v8_clone.parse(vfx.dumps(deep)) is None
+    return top
 
 
-def test_nesting_within_max_depth_still_parses():
+def test_max_depth_levels_parse_and_the_next_one_does_not():
+    """MAX_DEPTH is 64 levels, not 65. The guard runs on entry to _read with
+    the outermost value at depth 0, so `>` would have allowed one too many."""
+    assert v8_clone.parse(vfx.dumps(_chain(v8_clone.MAX_DEPTH))) is not None
+    assert v8_clone.parse(vfx.dumps(_chain(v8_clone.MAX_DEPTH + 1))) is None
+    assert v8_clone.parse(vfx.dumps(_chain(v8_clone.MAX_DEPTH * 8))) is None
+
+
+def test_nesting_well_within_max_depth_still_carries_its_leaf():
     """So the depth guard cannot pass by rejecting everything."""
     shallow = inner = {}
     for _ in range(8):
@@ -132,6 +170,68 @@ def test_nesting_within_max_depth_still_parses():
     for _ in range(8):
         got = got["n"]
     assert got["leaf"] == 1.0
+
+
+# --- Arrays: dense elements are bare, sparse ones are index/value pairs ---
+
+
+def test_a_dense_array_holds_bare_elements():
+    """`A <len>` is followed by the elements themselves. A reader that
+    expects index/value pairs consumes two elements per slot: an even-length
+    array decodes to the wrong thing and an odd-length one runs off the end
+    and refuses the whole record."""
+    for values in ([], [1.0], [1.0, 2.0], [1.0, 2.0, 3.0], [4.0] * 7):
+        payload = _dense(b"".join(_d(v) for v in values), len(values))
+        assert v8_clone.parse(vfx.wrap(payload)) == values
+
+
+def test_an_odd_length_array_no_longer_swallows_the_record():
+    """The reviewer's finding, kept as a test: an array of three beside the
+    field we actually read, in one object."""
+    payload = (b"o"
+               + _s("ids") + _dense(_d(1.0) + _d(2.0) + _d(3.0), 3)
+               + _s("resetsAt") + _d(1788933600.0)
+               + b"{" + _varint(2))
+    assert v8_clone.parse(vfx.wrap(payload)) == {
+        "ids": [1.0, 2.0, 3.0], "resetsAt": 1788933600.0}
+
+
+def test_the_fixture_writes_the_dense_shape_the_format_describes():
+    """Pins the fixture to the description rather than to the parser -- the
+    two agreeing with each other is what hid the bug."""
+    assert vfx.dumps([1.0, 2.0, 3.0]) == vfx.wrap(
+        _dense(_d(1.0) + _d(2.0) + _d(3.0), 3))
+
+
+def test_a_named_property_after_dense_elements_does_not_derail_the_walk():
+    payload = (b"o"
+               + _s("a") + _dense(_d(1.0), 1,
+                                  props=_s("note") + _d(2.0), n_props=1)
+               + _s("b") + _d(3.0)
+               + b"{" + _varint(2))
+    assert v8_clone.parse(vfx.wrap(payload)) == {"a": [1.0], "b": 3.0}
+
+
+def test_a_sparse_array_is_read_as_index_value_pairs():
+    """The other array form, tag `a`: indices are written in front of the
+    values and holes simply have no pair. The holes collapse -- a Python
+    list has no hole -- so this is order-preserving, not index-preserving."""
+    payload = (b"a" + _varint(5)
+               + _smi(0) + _d(1.0)
+               + _smi(4) + _d(2.0)
+               + b"@" + _varint(0) + _varint(5))
+    assert v8_clone.parse(vfx.wrap(payload)) == [1.0, 2.0]
+
+
+def test_nested_arrays_and_objects_keep_their_shape():
+    inner = _dense(_d(1.0) + _d(2.0), 2)
+    payload = _dense(inner + b"o" + _s("k") + _d(3.0) + b"{" + _varint(1), 2)
+    assert v8_clone.parse(vfx.wrap(payload)) == [[1.0, 2.0], {"k": 3.0}]
+
+
+def test_an_array_longer_than_its_buffer_is_refused():
+    payload = _dense(_d(1.0), 1)[:1] + _varint(10 ** 6) + _d(1.0)
+    assert v8_clone.parse(vfx.wrap(payload)) is None
 
 
 def test_a_back_reference_to_an_object_that_does_not_exist():
@@ -161,14 +261,31 @@ def test_rejects_non_buffers_and_empty_input():
         assert v8_clone.parse(bad) is None
 
 
-def test_hostile_buffers_neither_raise_nor_hang():
+def test_hostile_buffers_are_refused_outright():
+    """Every one of these is unreadable, so None is the knowable answer --
+    a runaway varint, an unterminated object, a length past the end, an
+    endless header, a truncated back-reference."""
     for bad in (b"\xff\x0fo" + b"\x80" * 40,
                 b"\xff\x0f" + b'"' + b"\xff" * 9 + b"\x7f",
                 b"\xff\x0fA" + b"\xff" * 10,
                 b"\xff" * 200,
-                b"\xff\x0fo" + _s("a") + b"^" + b"\x80" * 5):
-        got = v8_clone.parse(bad)
-        assert got is None or isinstance(got, (dict, list, str, int, float))
+                b"\xff\x0fo" + _s("a") + b"^" + b"\x80" * 5,
+                b"\xff\x0fo" + _s("a") + _d(1.0)):
+        assert v8_clone.parse(bad) is None
+
+
+def test_a_long_run_of_continuation_bytes_is_refused_promptly():
+    """A varint with no width cap widens its accumulator seven bits per
+    byte, so a run of 0xff costs O(n^2): half a megabyte of it inside one
+    conversation record was tens of seconds of a blocked poll. It always
+    terminated -- "never raises" held and "never hangs" did not."""
+    for bad in (b"\xff\x0f" + b'"' + b"\xff" * 500_000,
+                b"\xff\x0fo" + b"\xff" * 500_000,
+                b"\xff" * 500_000,
+                b"\xff\x0fA" + b"\xff" * 500_000):
+        start = time.monotonic()
+        assert v8_clone.parse(bad) is None
+        assert time.monotonic() - start < 2.0
 
 
 def test_the_module_logs_nothing_at_any_level(caplog):
