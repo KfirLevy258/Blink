@@ -14,6 +14,7 @@ This is the only value this project ships that was not directly observed, so
 the interesting code is the withdrawal rules rather than the arithmetic.
 """
 import json
+import math
 import os
 
 WEEK_S = 604800.0
@@ -29,6 +30,36 @@ ANCHOR_REFUTE_TOLERANCE_S = 86400.0
 # a subscription that may have changed underneath it.
 ANCHOR_MAX_UNCORROBORATED_S = 8 * WEEK_S
 
+# The same plausibility window pc/desktop_local_storage.py and
+# pc/providers/claude_desktop.py already use for an epoch read off disk: any
+# real observation lands between 2020-01-01 and 2100-01-01. A resets_at
+# outside this window is corrupt, not merely old, and -- unlike a stale
+# reading -- a bad timestamp in the far future never ages out on its own, so
+# it must be rejected on the way in rather than trusted to expire.
+SAMPLE_EPOCH_MIN = 1_577_836_800
+SAMPLE_EPOCH_MAX = 4_102_444_800
+
+
+def _finite_num(v) -> bool:
+    """True for a real, finite timestamp -- never a bool, never NaN/Infinity.
+
+    json.load happily parses the bare literals NaN/Infinity/-Infinity by
+    default, and json.dump writes them back out, so a plain isinstance check
+    is not enough: it lets a NaN through, and every comparison this module
+    makes against a NaN silently does nothing (NaN is smaller than nothing,
+    including itself). This anchor is a permanent one-shot memory -- a NaN
+    written once would sit there forever -- so every number that enters or
+    leaves this module is checked here instead.
+    """
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v))
+
+
+def _reject_constant(_token):
+    """Passed to json.load so NaN/Infinity/-Infinity are refused at parse
+    time, rather than admitted as floats and caught later by _finite_num."""
+    raise ValueError("weekly anchor: refusing a non-finite JSON constant")
+
 
 def anchor_path() -> str:
     return os.path.expanduser("~/.blink/weekly-anchor.json")
@@ -38,20 +69,24 @@ def load(path: str):
     """The stored anchor, or None. Absence and corruption are both normal."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            doc = json.load(fh)
+            doc = json.load(fh, parse_constant=_reject_constant)
     except (OSError, ValueError):
         return None
     if not isinstance(doc, dict):
         return None
     r, o = doc.get("resets_at"), doc.get("observed_at")
-    for v in (r, o):
-        if not isinstance(v, (int, float)) or isinstance(v, bool):
-            return None
-    return {"resets_at": float(r), "observed_at": float(o)}
+    if not (_finite_num(r) and _finite_num(o)):
+        return None
+    r = float(r)
+    if not (SAMPLE_EPOCH_MIN <= r <= SAMPLE_EPOCH_MAX):
+        return None
+    return {"resets_at": r, "observed_at": float(o)}
 
 
-def save(path: str, resets_at: float, observed_at: float) -> None:
+def save(path: str, resets_at, observed_at) -> None:
     """Persist an anchor. A write failure is not worth an exception."""
+    if not (_finite_num(resets_at) and _finite_num(observed_at)):
+        return
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -73,11 +108,17 @@ def observe(frames, path: str, now_epoch: float) -> None:
     best = None
     for f in frames or []:
         r = getattr(f, "weekly_resets_at", None)
-        if not isinstance(r, (int, float)) or isinstance(r, bool):
+        if not _finite_num(r):
+            continue
+        r = float(r)
+        if not (SAMPLE_EPOCH_MIN <= r <= SAMPLE_EPOCH_MAX):
             continue
         at = getattr(f, "observed_at", now_epoch)
+        if not _finite_num(at):
+            continue
+        at = float(at)
         if best is None or at > best[1]:
-            best = (float(r), float(at))
+            best = (r, at)
     if best is None:
         return
     current = load(path)
@@ -90,9 +131,13 @@ def project(anchor, now_epoch: float):
     """The next boundary this anchor predicts, or None if it is withdrawn."""
     if not anchor:
         return None
-    if now_epoch - anchor["observed_at"] > ANCHOR_MAX_UNCORROBORATED_S:
+    resets_at = anchor.get("resets_at")
+    observed_at = anchor.get("observed_at")
+    if not (_finite_num(resets_at) and _finite_num(observed_at)):
         return None
-    r = anchor["resets_at"]
+    if now_epoch - observed_at > ANCHOR_MAX_UNCORROBORATED_S:
+        return None
+    r = float(resets_at)
     if r <= now_epoch:
         steps = int((now_epoch - r) // WEEK_S) + 1
         r = r + steps * WEEK_S
@@ -108,27 +153,32 @@ def refuted_by(anchor, samples, now_epoch: float) -> bool:
     """
     if not anchor or not isinstance(samples, list):
         return False
+    resets_at = anchor.get("resets_at")
+    if not _finite_num(resets_at):
+        return False
+    resets_at = float(resets_at)
     prev = None
     for s in samples:
         if not isinstance(s, dict):
             continue
         u = s.get("u")
         t = s.get("t")
-        if not isinstance(u, dict) or not isinstance(t, (int, float)):
+        if not isinstance(u, dict) or not _finite_num(t):
             continue
         sd = u.get("sd")
-        if not isinstance(sd, (int, float)) or isinstance(sd, bool):
+        if not _finite_num(sd):
             continue
         at = float(t) / 1000.0
         if prev is not None and sd < prev[1]:
-            # The window emptied somewhere between the two samples.
+            # The window emptied somewhere between the two samples. Fold the
+            # anchor's boundary to the one occurrence of it closest to (at
+            # or before) `hi`, in one bounded step -- direct arithmetic via
+            # Python's float modulo, not a loop that walks a week at a time.
+            # A corrupt anchor (a 1970 epoch, a -1e18) previously cost
+            # thousands of iterations, or hung outright; this is O(1)
+            # regardless of how far `resets_at` is from `hi`.
             lo, hi = prev[0], at
-            r = anchor["resets_at"]
-            if r > hi:
-                steps = int((r - hi) // WEEK_S) + 1
-                r -= steps * WEEK_S
-            while r + WEEK_S <= hi:
-                r += WEEK_S
+            r = hi - ((hi - resets_at) % WEEK_S)
             if not (lo - ANCHOR_REFUTE_TOLERANCE_S <= r
                     <= hi + ANCHOR_REFUTE_TOLERANCE_S):
                 return True
