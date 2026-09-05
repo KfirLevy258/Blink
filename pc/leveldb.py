@@ -296,6 +296,39 @@ def _read_whole(path: str):
         return None
 
 
+def _file_number_key(name: str):
+    """Sort key that orders '<digits>.<ext>' by the numeric file number.
+
+    Chromium formats LevelDB file numbers with %06llu, so names stay
+    equal-width and a plain lexicographic sort happens to match numeric order
+    only while the counter is under 1,000,000. Past that the width changes
+    and lexicographic order inverts -- "1000000.ldb" would sort before
+    "999999.ldb" under str sort. Extracting the digits and comparing them as
+    an int avoids that.
+
+    A name that is not '<digits>.<ext>' cannot be a real LevelDB file number;
+    it is sorted last (deliberately, not skipped) so one odd file name does
+    not disturb the relative order of the real ones.
+    """
+    stem = name.split(".", 1)[0]
+    if stem.isdigit():
+        return (0, int(stem))
+    return (1, name)
+
+
+def _safe_want(want, key: bytes) -> bool:
+    """`want(key)`, or False if the caller's predicate raises.
+
+    `scan` is the public entry point Tasks 6 and 13 call with arbitrary
+    predicates; a predicate that raises must not be able to kill the poll,
+    so treat "raised" the same as "did not match" rather than propagating.
+    """
+    try:
+        return bool(want(key))
+    except Exception:
+        return False
+
+
 def scan(dir_path: str, want) -> list:
     """Surviving (key, value) pairs whose key satisfies `want`.
 
@@ -310,14 +343,16 @@ def scan(dir_path: str, want) -> list:
     this order. pc/desktop_local_storage does exactly that.
     """
     try:
-        names = sorted(os.listdir(dir_path))
+        names = os.listdir(dir_path)
     except OSError:
         return []
 
     surviving = {}
     order = []
     for suffix, reader in ((".ldb", sst_entries), (".log", wal_entries)):
-        for name in [n for n in names if n.endswith(suffix)]:
+        matching = sorted(
+            (n for n in names if n.endswith(suffix)), key=_file_number_key)
+        for name in matching:
             data = _read_whole(os.path.join(dir_path, name))
             if data is None:
                 continue
@@ -328,7 +363,7 @@ def scan(dir_path: str, want) -> list:
                 # format. One unreadable file must not silence the store.
                 continue
             for op, key, value in entries:
-                if not want(key):
+                if not _safe_want(want, key):
                     continue
                 if op == "del":
                     surviving.pop(key, None)

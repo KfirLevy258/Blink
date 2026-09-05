@@ -181,3 +181,29 @@ def test_scan_survives_one_unreadable_file(tmp_path):
     (tmp_path / "000009.ldb").write_bytes(b"garbage, not a table")
     d = _store(tmp_path, logs=[("000010.log", [[("put", b"k", b"v")]])])
     assert leveldb.scan(d, lambda k: k == b"k") == [(b"k", b"v")]
+
+
+def test_scan_orders_tables_numerically_not_lexicographically(tmp_path):
+    """Chromium formats file numbers with %06llu, so names stay equal-width
+    only below 1,000,000. Past that, a plain string sort puts "1000000.ldb"
+    before "999999.ldb" (because "1" precedes "9"), applying the newer table
+    first and letting the older table silently overwrite it with stale data.
+    This is the one case that distinguishes numeric order from lexicographic
+    order, so it is the only case worth testing."""
+    d = _store(tmp_path, tables=[
+        ("999999.ldb", [("put", b"k", b"old")]),
+        ("1000000.ldb", [("put", b"k", b"new")]),
+    ])
+    assert leveldb.scan(d, lambda k: k == b"k") == [(b"k", b"new")]
+
+
+def test_scan_treats_a_raising_predicate_as_no_match(tmp_path):
+    """`want` is a caller-supplied predicate reaching `scan` from arbitrary
+    code (Tasks 6 and 13). A predicate that raises must not be able to take
+    the whole poll down with it -- scan is a parser and parsers never raise."""
+    d = _store(tmp_path, logs=[("000001.log", [[("put", b"k", b"v")]])])
+
+    def boom(key):
+        raise ValueError("predicate blew up")
+
+    assert leveldb.scan(d, boom) == []
