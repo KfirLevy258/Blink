@@ -4,10 +4,11 @@ import json
 import pathlib
 import re
 
-from pc import ingest
+from pc import ingest, weekly_anchor
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
+from pc.providers.weekly_anchor import WeeklyAnchorProvider
 
 NOW = 1_787_700_000.0
 
@@ -730,3 +731,61 @@ def test_a_five_hour_window_that_ended_leaves_the_dial_empty_not_wrong(tmp_path)
     assert msg["session_resets_in_s"] == -1
     assert msg["weekly_pct"] == 41.0
     assert msg["active_age_s"] == 5
+
+
+# --- Task 10 fix round 1: the learning wiring, and the account boundary ----
+#
+# _sandboxed_home (tests/conftest.py, autouse) points HOME/USERPROFILE at
+# tmp_path for every test in this file, and weekly_anchor.anchor_path() calls
+# expanduser at call time -- so weekly_anchor.anchor_path() below is already
+# scoped under this test's own tmp_path. No path is injected here; that is
+# the point being pinned.
+
+
+def test_a_codex_weekly_reset_is_not_learned_as_the_claude_anchor():
+    """observe() must never cross accounts. codex_cli.py emits its own
+    weekly_resets_at, and on a machine running both tools that boundary must
+    not become the anchor WeeklyAnchorProvider later republishes with
+    provider="claude" -- a different account's reset, presented as this
+    one's."""
+    codex_frame = base.NormalizedUsageFrame(
+        provider="codex", src="cli", observed_at=NOW,
+        weekly_pct=9.0, weekly_resets_at=NOW + 3 * 86400)
+    bus = ingest.IngestionBus(providers=[Fixed(codex_frame)],
+                              now=lambda: NOW)
+    bus.poll_frames()
+    assert weekly_anchor.load(weekly_anchor.anchor_path()) is None
+
+
+def test_poll_frames_learns_a_live_claude_weekly_reset():
+    """The other half of the same wiring: a claude frame's weekly reset IS
+    learned, which is the entire point of calling observe() from here."""
+    claude_frame = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=NOW,
+        weekly_pct=17.0, weekly_resets_at=NOW + 3 * 86400)
+    bus = ingest.IngestionBus(providers=[Fixed(claude_frame)],
+                              now=lambda: NOW)
+    bus.poll_frames()
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == NOW + 3 * 86400
+    assert anchor["observed_at"] == NOW
+
+
+def test_the_anchor_does_not_relearn_its_own_republished_frame():
+    """The loop-closing case. WeeklyAnchorProvider stamps its frame with the
+    anchor's ORIGINAL observed_at rather than `now`, and observe() only
+    overwrites on a STRICTLY newer observation -- so feeding the anchor's own
+    frame back through the bus must leave the stored file untouched, not
+    bump its observed_at forward to the moment it was merely re-read."""
+    resets_at = NOW - 2 * 86400          # already past; project() rolls it
+    observed_at = NOW - 10 * 86400       # well inside the 8-week corroboration window
+    weekly_anchor.save(weekly_anchor.anchor_path(), resets_at, observed_at)
+    before = weekly_anchor.load(weekly_anchor.anchor_path())
+
+    bus = ingest.IngestionBus(providers=[WeeklyAnchorProvider()],
+                              now=lambda: NOW)
+    bus.poll_frames()
+
+    after = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert after == before

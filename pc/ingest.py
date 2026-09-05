@@ -172,7 +172,19 @@ class IngestionBus:
             # weekly reset becomes tomorrow's WeeklyAnchorProvider projection.
             # Anything this raises -- a bad path, a permissions error, a race
             # on the file -- must never take today's poll down with it.
-            weekly_anchor.observe(frames, weekly_anchor.anchor_path(), now)
+            #
+            # Filtered to the claude provider ONLY. weekly_anchor.observe is
+            # deliberately source-agnostic about WHICH store a reset came
+            # from -- the status line, a legacy Cowork audit, the IndexedDB
+            # seeder -- but it is never agnostic about WHOSE account it
+            # describes. Codex has its own weekly_resets_at (codex_cli.py),
+            # and handing that to observe() unfiltered would let a Codex
+            # boundary become the anchor that WeeklyAnchorProvider then
+            # republishes with provider="claude" -- a different account's
+            # reset, presented as this one's.
+            claude_frames = [f for f in frames if f.provider == "claude"]
+            weekly_anchor.observe(
+                claude_frames, weekly_anchor.anchor_path(), now)
         except Exception:
             pass
         return frames

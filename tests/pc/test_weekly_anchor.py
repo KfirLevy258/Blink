@@ -7,8 +7,10 @@ observed, so the rules for withdrawing it are the product.
 import os
 import time
 
+from pc import normalizer
 from pc import weekly_anchor as wa
 from pc.providers import base
+from pc.providers.weekly_anchor import WeeklyAnchorProvider
 
 WED_0600Z = 1788933600.0          # 2026-09-09T06:00:00Z
 WEEK = 604800.0
@@ -267,10 +269,6 @@ def test_a_drop_one_second_past_the_refute_tolerance_refutes():
 # --- Task 10: the provider that publishes the anchor, and its ranking rule ---
 
 
-from pc.providers.weekly_anchor import WeeklyAnchorProvider
-from pc import normalizer
-
-
 def test_the_provider_publishes_only_the_reset(tmp_path):
     p = str(tmp_path / "a.json")
     wa.save(p, WED_0600Z, WED_0600Z - WEEK)
@@ -298,3 +296,96 @@ def test_the_projection_never_outranks_a_live_reading(tmp_path):
 def test_no_anchor_means_no_frame(tmp_path):
     assert WeeklyAnchorProvider(path=str(tmp_path / "absent.json")).poll(
         WED_0600Z) == []
+
+
+# --- Task 10 fix round 1: wiring refuted_by through history_provider -------
+
+
+class _FakeHistory:
+    """A stub history_provider: samples(now_epoch) -> a fixed list, in the
+    same shape plan-usage-history.json's own "samples" array uses."""
+
+    def __init__(self, samples):
+        self._samples = samples
+
+    def samples(self, now_epoch):
+        return self._samples
+
+
+def test_a_refuted_anchor_publishes_nothing(tmp_path):
+    """refuted_by is wired into poll(): a percentage drop far from the
+    anchor's predicted boundary must stop the projection from reaching the
+    panel, rather than sitting unused for up to eight weeks while only the
+    uncorroborated-timeout withdrawal can act."""
+    p = str(tmp_path / "a.json")
+    wa.save(p, WED_0600Z, WED_0600Z - WEEK)
+    samples = [
+        {"t": int((WED_0600Z - 4 * 86400) * 1000), "u": {"fh": 5, "sd": 80}},
+        {"t": int((WED_0600Z - 3 * 86400) * 1000), "u": {"fh": 5, "sd": 4}},
+    ]
+    provider = WeeklyAnchorProvider(
+        path=p, history_provider=_FakeHistory(samples))
+    assert provider.poll(WED_0600Z) == []
+
+
+def test_an_unrefuted_anchor_still_publishes(tmp_path):
+    """The same wiring must not withdraw an anchor nothing contradicts --
+    refuted_by only ever refutes, never confirms, so a drop that lands near
+    the predicted boundary leaves the projection exactly as it would be with
+    no history_provider at all."""
+    p = str(tmp_path / "a.json")
+    wa.save(p, WED_0600Z, WED_0600Z - WEEK)
+    prev = WED_0600Z - WEEK
+    samples = [
+        {"t": int((prev - 1800) * 1000), "u": {"fh": 5, "sd": 80}},
+        {"t": int((prev + 1800) * 1000), "u": {"fh": 5, "sd": 4}},
+    ]
+    provider = WeeklyAnchorProvider(
+        path=p, history_provider=_FakeHistory(samples))
+    frames = provider.poll(WED_0600Z - 3600)
+    assert len(frames) == 1
+    assert frames[0].weekly_resets_at == WED_0600Z
+
+
+def test_with_no_history_provider_refutation_cannot_fire(tmp_path):
+    """Default behaviour, unchanged. With no sample source at all the anchor
+    still publishes -- refutation is a bonus check layered on top of
+    project(), never a requirement for publishing."""
+    p = str(tmp_path / "a.json")
+    wa.save(p, WED_0600Z, WED_0600Z - WEEK)
+    frames = WeeklyAnchorProvider(path=p).poll(WED_0600Z - 3600)
+    assert len(frames) == 1
+    assert frames[0].weekly_resets_at == WED_0600Z
+
+
+def test_a_broken_history_provider_does_not_cost_the_projection(tmp_path):
+    """Same rule every other source in this project already carries: a
+    provider must not raise. A history_provider that does costs only the
+    refutation check, never the projection itself."""
+    p = str(tmp_path / "a.json")
+    wa.save(p, WED_0600Z, WED_0600Z - WEEK)
+
+    class _Boom:
+        def samples(self, now_epoch):
+            raise RuntimeError("upstream changed shape")
+
+    frames = WeeklyAnchorProvider(path=p, history_provider=_Boom()).poll(
+        WED_0600Z - 3600)
+    assert len(frames) == 1
+    assert frames[0].weekly_resets_at == WED_0600Z
+
+
+def test_refutation_never_writes_to_the_anchor_file(tmp_path):
+    """refuted_by only ever answers yes/no. Pin that checking it -- refuted
+    or not -- leaves the stored anchor untouched; this wiring must never be
+    the thing that saves to ~/.blink/weekly-anchor.json."""
+    p = str(tmp_path / "a.json")
+    wa.save(p, WED_0600Z, WED_0600Z - WEEK)
+    before = wa.load(p)
+    samples = [
+        {"t": int((WED_0600Z - 4 * 86400) * 1000), "u": {"fh": 5, "sd": 80}},
+        {"t": int((WED_0600Z - 3 * 86400) * 1000), "u": {"fh": 5, "sd": 4}},
+    ]
+    WeeklyAnchorProvider(
+        path=p, history_provider=_FakeHistory(samples)).poll(WED_0600Z)
+    assert wa.load(p) == before
