@@ -476,3 +476,21 @@ def test_a_window_that_has_ended_stops_suppressing_the_burn_rate():
     assert m.session_resets_at is None
     assert m.session_burn_pph == 12.4
     assert m.session_pct == 55.0
+
+
+def test_desktop_local_storage_supplies_a_reset_the_history_file_cannot():
+    """The two desktop sources are complementary, not competing: the history
+    file has both percentages and no reset, this one has the five-hour reset.
+    The normalizer merges per field, so the panel gets both."""
+    from pc.providers import base as b
+    now = 1788613600.0
+    history = b.NormalizedUsageFrame(
+        provider="claude", src="desktop", observed_at=now - 200,
+        session_pct=6.0, weekly_pct=17.0,
+        session_resets_at=None, weekly_resets_at=None)
+    local_storage = b.NormalizedUsageFrame(
+        provider="claude", src="desktop_ls", observed_at=now - 60,
+        session_pct=6.0, session_resets_at=now + 3600)
+    merged = normalizer.merge([history, local_storage])
+    assert merged.session_resets_at == now + 3600
+    assert merged.weekly_pct == 17.0

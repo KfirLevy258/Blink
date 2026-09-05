@@ -459,11 +459,23 @@ class Bridge:
     def poll_if_changed(self):
         """Send only when something a reader could act on has moved.
 
-        Called every FAST_POLL_INTERVAL_S. Looking is nearly free -- a handful
-        of small local JSON files, no endpoint, no rate limit -- but writing is
-        not: the fully-loaded usage line runs to 509 of the 512 bytes the
-        firmware will accept, and putting one on the wire every two seconds
-        when nothing changed is thirty times the traffic carrying no news.
+        Called every FAST_POLL_INTERVAL_S, on the same thread that reads the
+        board's serial messages -- so whatever looking costs is latency this
+        loop pays, not background work.
+
+        Looking is no longer only JSON. The bus also walks Claude Desktop's
+        LevelDB stores, and re-parsing those on every poll measured 0.47 s
+        against a 769 KB store on the reference machine: a fifth of a core
+        continuously, and a serial read loop stalled for a quarter of every
+        interval, growing with the store. pc/leveldb now caches each parsed
+        file against its (size, mtime), which puts an unchanged store back to
+        0.0004 s; a poll costs a stat per file plus a fresh parse of whatever
+        Chromium actually rewrote -- ordinarily just the small .log.
+
+        Writing was never free either: the fully-loaded usage line runs to 509
+        of the 512 bytes the firmware will accept, and putting one on the wire
+        every two seconds when nothing changed is thirty times the traffic
+        carrying no news.
 
         Deliberately quieter than the heartbeat about failure. A fetch that
         raises, or a source that has not appeared yet, will be in the same

@@ -14,12 +14,14 @@ able to stop it.
 import sys
 import time
 
-from pc import normalizer, protocol
+from pc import cowork_audit, desktop_idb, normalizer, protocol, weekly_anchor
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
+from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
 from pc.providers.claude_state import ClaudeStateProvider
 from pc.providers.codex_cli import CodexCliProvider
+from pc.providers.weekly_anchor import DesktopHistoryProvider, WeeklyAnchorProvider
 
 
 # How long a provider that raised sits out before it is tried again, and how
@@ -51,7 +53,20 @@ def default_providers():
     which one a tie resolves toward.
     """
     return [ClaudeCliProvider(), ClaudeDesktopProvider(),
-            ClaudeStateProvider(), CodexCliProvider()]
+            ClaudeDesktopLocalStorageProvider(),
+            ClaudeStateProvider(), CodexCliProvider(),
+            # LAST: it only ever offers a remembered projection, and every
+            # source above it is polled first so any of them carrying a real
+            # weekly reset is what observe() below learns from this cycle.
+            #
+            # history_provider gives it something to be refuted BY: Claude
+            # Desktop's own usage cache, the one file on this machine with a
+            # weekly-percentage series to check the projection against. With
+            # no Claude Desktop installed the file is simply absent and
+            # DesktopHistoryProvider.samples() returns None -- refutation
+            # cannot fire, and this is unchanged from having no
+            # history_provider at all.
+            WeeklyAnchorProvider(history_provider=DesktopHistoryProvider())]
 
 
 class IngestionBus:
@@ -76,6 +91,10 @@ class IngestionBus:
         # second time could pick a different winner and name a project that
         # does not belong to the state on the panel.
         self._session_pair = ("", 0)
+        # Guards the one-shot anchor seeding below: see
+        # _seed_anchor_once. False until the first poll_frames() call,
+        # regardless of whether that call finds anything to seed.
+        self._seeded = False
 
     def add_provider(self, provider):
         """Onboard a provider at runtime. Nothing else has to change."""
@@ -105,6 +124,55 @@ class IngestionBus:
             return False
         self._preferred = provider
         return True
+
+    def _seed_anchor_once(self):
+        """One-shot fallback: seed the weekly anchor from a legacy Cowork
+        audit file, or failing that from Claude Desktop's IndexedDB, when
+        nothing has ever populated it.
+
+        Runs at most once per process, guarded by self._seeded -- set before
+        any work is attempted, so a raise on the first try still counts as
+        the one try this process gets. Without that, a machine with no
+        audit file (the common case: see pc/cowork_audit's own docstring)
+        would walk its whole session tree on every single poll, forever.
+
+        Tried only while the anchor file itself is empty, and wrapped whole
+        in try/except: this walks a directory tree and parses files owned
+        by another application, and none of that may be allowed to take a
+        poll down.
+
+        The order is deliberate and is a cost order. The audit file is plain
+        JSON in a directory holding no chat store; the IndexedDB store holds
+        the customer's conversations, so it is tried last, only when the
+        cheaper source has produced nothing, and only within the same single
+        attempt this process gets.
+
+        Called at the END of poll_frames, after every provider has been polled
+        and after weekly_anchor.observe has seen their frames. The cheapest
+        and most authoritative source of a weekly boundary is a live frame
+        that already carries one -- ordinarily the Claude Code status line --
+        and it costs this function nothing to let that land first: the guard
+        above then finds an anchor and neither seeder runs at all. Running
+        before the loop, as this used to, spent an os.walk of the session tree
+        and a V8 decode of the conversation store on the first poll of every
+        process to learn something the next few lines were about to be told.
+        """
+        if self._seeded:
+            return
+        self._seeded = True
+        try:
+            path = weekly_anchor.anchor_path()
+            if weekly_anchor.load(path) is not None:
+                return
+            found = cowork_audit.seven_day_reset()
+            if found is None:
+                found = desktop_idb.seven_day_reset()
+            if found is None:
+                return
+            resets_at, observed_at = found
+            weekly_anchor.save(path, resets_at, observed_at)
+        except Exception:
+            pass
 
     def poll_frames(self):
         """Every frame every provider can produce right now.
@@ -160,6 +228,36 @@ class IngestionBus:
                     del self._broken[key]
                     print(f"[ingest] {name} is working again",
                           file=sys.stderr)
+        try:
+            # Bonus learning, never a poll cost: whatever just carried a real
+            # weekly reset becomes tomorrow's WeeklyAnchorProvider projection.
+            # Anything this raises -- a bad path, a permissions error, a race
+            # on the file -- must never take today's poll down with it.
+            #
+            # Filtered to the claude provider ONLY. weekly_anchor.observe is
+            # deliberately source-agnostic about WHICH store a reset came
+            # from -- the status line, a legacy Cowork audit, the IndexedDB
+            # seeder -- but it is never agnostic about WHOSE account it
+            # describes. Codex has its own weekly_resets_at (codex_cli.py),
+            # and handing that to observe() unfiltered would let a Codex
+            # boundary become the anchor that WeeklyAnchorProvider then
+            # republishes with provider="claude" -- a different account's
+            # reset, presented as this one's.
+            claude_frames = [f for f in frames if f.provider == "claude"]
+            weekly_anchor.observe(
+                claude_frames, weekly_anchor.anchor_path(), now)
+        except Exception:
+            pass
+
+        # LAST, and that ordering is the whole point. observe() has just had
+        # its chance at every live frame, so on any machine running Claude
+        # Code the anchor file is already written and _seed_anchor_once's own
+        # `load(path) is not None` guard turns this into a no-op that costs a
+        # single small read. Called before the loop -- as it was -- it walked
+        # the session tree and V8-decoded the customer's conversation store on
+        # the first poll of every process, to learn a boundary the status line
+        # was about to hand over for free.
+        self._seed_anchor_once()
         return frames
 
     @staticmethod

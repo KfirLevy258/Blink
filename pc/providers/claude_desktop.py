@@ -147,10 +147,14 @@ def _newest_sample(samples):
 # investigated and rejected on 2026-08-28, with numbers taken from a real
 # month of samples on the author's machine:
 #
-#   - No reset timestamp is persisted anywhere on disk. Every JSON file, the
-#     LevelDB stores, Session Storage, IndexedDB and the preferences plist
-#     were searched. The only copies that exist are in Claude Code's status
-#     line payload and in evicting HTTP cache entries.
+#   - This file carries no reset timestamp, and for a long time nothing on
+#     disk did -- the survey behind this comment searched every JSON file,
+#     the LevelDB stores, Session Storage, IndexedDB and the preferences
+#     plist on 2026-08-28 and found none. That changed: Claude Desktop's
+#     Local Storage now carries a five-hour `resetsAt`, which
+#     pc/providers/claude_desktop_ls reads. The seven-day reset is still
+#     absent for a chat-only user. See
+#     docs/research/claude-desktop-window-sources.md.
 #   - The five-hour window is ROLLING -- observed gaps between resets ran
 #     4.95, 5.5, 5.9, 16.0, 17.8 and 32.2 hours -- so a past reset does not
 #     predict the next one.
@@ -258,6 +262,28 @@ def session_burn_pph(samples, now_epoch, window_s=BURN_WINDOW_S):
     return rate if rate > 0 else None
 
 
+def _samples_array_by_shape(doc):
+    """The raw samples array by shape alone, for a version we have never
+    seen -- the search _parse_by_shape performs below, pulled out so a
+    second consumer (raw_samples, for a caller that wants the series rather
+    than the newest reading) can reuse it instead of growing its own copy.
+
+    Deliberately shape-driven rather than a guess at a specific past or future
+    layout. Writing a `_parse_v1` for a file nobody here has ever observed
+    would be inventing a schema and then testing against the invention; this
+    instead asks the only question that matters -- is there a list of samples
+    anywhere obvious -- and gives up cleanly when the answer is no.
+    """
+    if isinstance(doc, list):
+        return doc if doc else None
+    if isinstance(doc, dict):
+        for key in ("samples", "history", "usage"):
+            v = doc.get(key)
+            if isinstance(v, list) and v:
+                return v
+    return None
+
+
 def _parse_v2(doc):
     """The layout observed in the wild: {"version": 2, "samples": [...]}."""
     samples = doc.get("samples")
@@ -267,28 +293,38 @@ def _parse_v2(doc):
 
 
 def _parse_by_shape(doc):
-    """Last resort for a version we have never seen.
-
-    Deliberately shape-driven rather than a guess at a specific past or future
-    layout. Writing a `_parse_v1` for a file nobody here has ever observed
-    would be inventing a schema and then testing against the invention; this
-    instead asks the only question that matters -- is there a list of samples
-    anywhere obvious -- and gives up cleanly when the answer is no.
-    """
-    if isinstance(doc, list):
-        return _newest_sample(doc)
-    if isinstance(doc, dict):
-        for key in ("samples", "history", "usage"):
-            v = doc.get(key)
-            if isinstance(v, list) and v:
-                return _newest_sample(v)
-    return None, None
+    """Last resort for a version we have never seen."""
+    samples = _samples_array_by_shape(doc)
+    if samples is None:
+        return None, None
+    return _newest_sample(samples)
 
 
 # Versioned adapters, dispatched on the file's own `version` field. The file
 # self-versions, which is the whole reason this can be a table rather than a
 # pile of hasattr checks.
 _PARSERS = {2: _parse_v2}
+
+
+def raw_samples(doc):
+    """The file's own samples array, undoctored, or None.
+
+    Dispatched the same way parse_cache_file dispatches a single reading --
+    by the file's own `version` field, falling back to shape -- but this
+    returns the whole series rather than reducing it to the newest point.
+
+    Built for pc.providers.weekly_anchor's refutation check, which needs a
+    sequence of readings to notice a drop, not the latest percentage. There
+    is exactly one parser for plan-usage-history.json in this codebase; this
+    is that parser's other exit, not a second one.
+    """
+    version = doc.get("version") if isinstance(doc, dict) else None
+    if not isinstance(version, (int, str)) or isinstance(version, bool):
+        version = None
+    if version == 2:
+        samples = doc.get("samples")
+        return samples if isinstance(samples, list) and samples else None
+    return _samples_array_by_shape(doc)
 
 
 class ClaudeDesktopProvider(base.ProviderParser):

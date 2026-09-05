@@ -71,9 +71,16 @@ decision below rests on this being honest.
 |  | session % | weekly % | resets | context | model | state |
 |---|---|---|---|---|---|---|
 | CLI status line | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| Desktop cache | ✓ | ✓ | **✗** | — | — | — |
+| Desktop cache (`plan-usage-history.json`) | ✓ | ✓ | **✗** | — | — | — |
+| Desktop Local Storage | ✓ | — | **session only** | — | — | — |
+| Weekly anchor (rolled forward, §3c) | — | — | **weekly only** | — | — | — |
 | Codex rollout log | ✓ | ✓ | ✓ | — | — | — |
 | Hook state file | — | — | — | — | — | ✓ |
+
+Two rows did not exist when this table was first written. Desktop Local
+Storage and the weekly anchor are the two sources §3c describes; between
+them they give a Claude-Desktop-only customer the countdowns the row above
+still correctly says the desktop cache alone cannot.
 
 No source is authoritative for everything. That table is the entire argument
 for merging field by field rather than picking a winning source per poll — the
@@ -119,6 +126,16 @@ its caches, and `com.anthropic.claudefordesktop.plist`. The only copies of a
 reset time on the machine are in Claude Code's status line payload and in
 evicting HTTP cache entries from an endpoint the desktop app does not use.
 
+**Corrected 2026-09-05: that survey missed the field it should have found.**
+A closer read of the same Local Storage store turned up `resetsAt` beside the
+`ochre_heron_tide` key -- the five-hour window's own reset, in plain JSON,
+in a store with no conversation content. Cowork's IndexedDB records carry a
+reset for both windows too, though only for Cowork. Neither changes what is
+true of `plan-usage-history.json` itself, which still contains no reset
+timestamp anywhere in it -- it changes what is true of Claude Desktop as a
+whole. See §3c and `docs/research/claude-desktop-window-sources.md` for the
+evidence.
+
 **Deriving one from the sample series was investigated and refused.** It is
 possible in principle: the five-hour window measures 5.00 h from the first
 non-zero sample after a reset, and the server quantises reset times to a
@@ -141,6 +158,121 @@ It reaches the board as `burn_pph` and is drawn where the countdown would be —
 when no source supplied a session reset time, so a frame never holds both and
 nothing downstream has to choose. The weekly gauge keeps `--`: a seven-day
 slope measured over half an hour is noise.
+
+## 3c. Closing the gap: Local Storage, the weekly anchor, and what stays closed
+
+`docs/research/claude-desktop-window-sources.md` has the evidence -- the
+exact stores, the exact byte formats, and the Cowork discriminator that was
+first got wrong. This section is the summary a future provider author needs
+before touching any of it, and the honest limits that go with it.
+
+**Local Storage supplies the five-hour countdown.** `pc/desktop_local_storage.py`
+reads the same store Local Storage always is: a Chromium LevelDB, keyed by
+`ochre_heron_tide.<organization-uuid>`. The record carries `utilization` (a
+fraction, not a percentage), `resetsAt` (Unix seconds, often already in the
+past) and its own `observedAt`. It holds no conversation content -- its other
+keys are onboarding flags, experiment toggles, activation checklists and an
+analytics queue -- which is why this is the store it reads. Nothing about
+`session_burn_pph` on the older desktop provider changes: it answers a
+different question and keeps working when this source is absent or the
+window has just rolled.
+
+**The seven-day reset is genuinely unavailable on disk for a chat-only
+customer.** Three independent investigations established that, not one:
+every LevelDB store on the machine byte-scanned for the field names and the
+known epochs, every legacy Cowork audit file, and deriving the boundary from
+the weekly-percentage series (which brackets it to 45-108 hour windows,
+because the sample file only records while the app is open, and cannot
+produce a countdown). The research doc has the numbers. This is not a gap
+the code closes by reading harder.
+
+**So the seven-day boundary is an anchor, not a feed** (`pc/weekly_anchor.py`).
+One instant, learned once and rolled forward in multiples of 604800 seconds --
+two observed boundaries on the reference machine were exactly a week apart
+and both landed on the same weekday and second, which is what makes rolling
+forward valid. The anchor exists because the boundary needs one real
+observation, ever, not because it can be read on demand.
+
+Three seeders feed it, cheapest first, and that order is enforced by where
+each one runs inside `IngestionBus.poll_frames()`. The first is the live-frame
+learner, which runs every cycle. The other two are `pc/ingest.py`'s
+`_seed_anchor_once`, which runs at the END of the same poll -- after the live
+learner has had its chance -- and gets one attempt per process, taken only
+while the anchor file is still empty. So on a machine running Claude Code the
+status line writes the anchor first and neither of the other two is ever
+opened; the pair below exists for the machine that has no such source:
+
+1. **Any source that already publishes an exact weekly reset** -- ordinarily
+   the Claude Code status line. `IngestionBus.poll_frames()` learns from
+   every `claude`-provider frame each cycle, and only from `claude` frames:
+   a Codex weekly reset must never become this anchor.
+2. **A legacy Cowork audit file** (`pc/cowork_audit.py`). Plain JSON in a
+   directory holding no chat store, but rare in practice -- 3 of 218
+   `rate_limit_event`s on the reference machine carried the windows at all,
+   and current managed Cowork sessions write no audit file whatsoever.
+3. **Claude Desktop's IndexedDB** (`pc/desktop_idb.py`), tried last and only
+   when the cheaper two have produced nothing. This is the only source in
+   the project that reads a store holding the customer's conversations.
+
+**The IndexedDB seeder is Cowork-only, in practice, and the discriminator is
+the key, never the value.** `rate_limit_event` records carrying
+`unifiedWindows` sat under IndexedDB keys prefixed `cowork:cse_...` on the
+reference machine; plain chat conversations in the same store carried none.
+Two values in the entire store had a usage record, and both were Cowork. An
+earlier investigation concluded these came from plain Chat and was **wrong**
+-- the discriminator it used (no local session folder, no `audit.jsonl`)
+proves nothing, because these managed sessions write neither. Provenance is
+decided in `desktop_idb._wanted_key` by the IndexedDB key alone, never by
+the value and never by anything else on the filesystem.
+
+**A rolled-forward weekly reset rides the ordinary `weekly_resets_at` field
+and is never marked "inferred" on the panel.** Doing that honestly would need
+a new wire field and a reflash of every shipped board, which is out of scope
+here. The withdrawal rules are the honest alternative: `weekly_anchor.py`
+publishes a projection only while nothing contradicts it, refutes it outright
+when a weekly-percentage drop lands more than 24 hours from the predicted
+boundary (that drop's own resolution is measured in days, so it can refute an
+anchor but is never trusted to confirm one), and withdraws it outright after
+eight weeks with no fresh corroboration.
+
+**Refusing beats guessing, at every layer of this path:**
+
+- `pc/v8_clone.parse` returns `None` for a buffer it cannot parse, for a
+  genuine `null`/`undefined`, and for an object back-reference alike -- V8
+  never back-references a string, so nothing this project reads is lost by
+  not resolving one, but the three cases are indistinguishable on purpose.
+  `None` means absence, and it is never treated as `0.0`.
+- **The parser refuses rather than guesses.** It implements only the tags
+  Claude Desktop's own records use -- not the dense-array hole tag, and not
+  BigInt, Date, Map, Set, typed arrays or any host object. A record using one
+  of those is refused whole. That is deliberate: the one bug ever found in
+  this parser came from assuming a tag's shape instead of verifying it, so an
+  unknown tag ends the parse rather than guessing past it. The cost is
+  availability, never a wrong number.
+- `pc.leveldb.scan` deliberately does not implement MANIFEST or per-entry
+  sequence-number ordering. It applies immutable tables and then logs, each
+  in ascending file-number order -- correct while the log holds writes the
+  tables have not yet compacted, the normal running state. A caller that
+  must be certain which surviving copy is truly the newest reaches for
+  `scan_all` instead and breaks the tie on the record's own timestamp, the
+  way `pc/desktop_local_storage.py` does.
+- **The blob-wrap rule fails closed.** A value beginning `\xff\x11\x01`
+  externalises to a sibling `.blob` file this project never reads, and
+  finding one abandons the WHOLE IndexedDB seeding attempt rather than
+  falling back to an older, readable record. The externalised value is
+  disproportionately the long-running session -- the one most likely to be
+  current -- so serving an older sibling instead would be exactly the
+  failure this plan exists to prevent: a stale weekly boundary presented as
+  today's. No answer beats a stale answer.
+
+**Nothing leaks.** `pc/desktop_idb.py` and `pc/cowork_audit.py` are the only
+modules in this project that read a store containing conversation content,
+and both carry the rule README.md:90 depends on: no buffer, byte range, or
+decode failure's surrounding bytes is ever logged, printed, or placed in an
+exception message. `tests/pc/test_no_conversation_leak.py` pins it against
+both a well-formed record and a corrupt buffer -- the failure path is where
+bytes escape, not the happy one -- and separately asserts that no fixture
+under `tests/fixtures/` was ever captured from a real machine.
 
 ## 4. The merge rule
 

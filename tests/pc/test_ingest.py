@@ -4,10 +4,11 @@ import json
 import pathlib
 import re
 
-from pc import ingest
+from pc import cowork_audit, desktop_idb, ingest, weekly_anchor
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
+from pc.providers.weekly_anchor import WeeklyAnchorProvider
 
 NOW = 1_787_700_000.0
 
@@ -730,3 +731,332 @@ def test_a_five_hour_window_that_ended_leaves_the_dial_empty_not_wrong(tmp_path)
     assert msg["session_resets_in_s"] == -1
     assert msg["weekly_pct"] == 41.0
     assert msg["active_age_s"] == 5
+
+
+# --- Task 10 fix round 1: the learning wiring, and the account boundary ----
+#
+# _sandboxed_home (tests/conftest.py, autouse) points HOME/USERPROFILE at
+# tmp_path for every test in this file, and weekly_anchor.anchor_path() calls
+# expanduser at call time -- so weekly_anchor.anchor_path() below is already
+# scoped under this test's own tmp_path. No path is injected here; that is
+# the point being pinned.
+
+
+def test_a_codex_weekly_reset_is_not_learned_as_the_claude_anchor():
+    """observe() must never cross accounts. codex_cli.py emits its own
+    weekly_resets_at, and on a machine running both tools that boundary must
+    not become the anchor WeeklyAnchorProvider later republishes with
+    provider="claude" -- a different account's reset, presented as this
+    one's."""
+    codex_frame = base.NormalizedUsageFrame(
+        provider="codex", src="cli", observed_at=NOW,
+        weekly_pct=9.0, weekly_resets_at=NOW + 3 * 86400)
+    bus = ingest.IngestionBus(providers=[Fixed(codex_frame)],
+                              now=lambda: NOW)
+    bus.poll_frames()
+    assert weekly_anchor.load(weekly_anchor.anchor_path()) is None
+
+
+def test_poll_frames_learns_a_live_claude_weekly_reset():
+    """The other half of the same wiring: a claude frame's weekly reset IS
+    learned, which is the entire point of calling observe() from here."""
+    claude_frame = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=NOW,
+        weekly_pct=17.0, weekly_resets_at=NOW + 3 * 86400)
+    bus = ingest.IngestionBus(providers=[Fixed(claude_frame)],
+                              now=lambda: NOW)
+    bus.poll_frames()
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == NOW + 3 * 86400
+    assert anchor["observed_at"] == NOW
+
+
+def test_the_anchor_does_not_relearn_its_own_republished_frame():
+    """The loop-closing case. WeeklyAnchorProvider stamps its frame with the
+    anchor's ORIGINAL observed_at rather than `now`, and observe() only
+    overwrites on a STRICTLY newer observation -- so feeding the anchor's own
+    frame back through the bus must leave the stored file untouched, not
+    bump its observed_at forward to the moment it was merely re-read."""
+    resets_at = NOW - 2 * 86400          # already past; project() rolls it
+    observed_at = NOW - 10 * 86400       # well inside the 8-week corroboration window
+    weekly_anchor.save(weekly_anchor.anchor_path(), resets_at, observed_at)
+    before = weekly_anchor.load(weekly_anchor.anchor_path())
+
+    bus = ingest.IngestionBus(providers=[WeeklyAnchorProvider()],
+                              now=lambda: NOW)
+    bus.poll_frames()
+
+    after = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert after == before
+
+
+# --- Task 10 fix round 2: refutation wired through the shipped provider list
+
+
+def test_the_default_history_provider_lets_a_contradicted_anchor_be_refuted():
+    """End to end from ingest.default_providers(): an anchor on disk plus a
+    Claude Desktop history file whose weekly percentage drops far from the
+    anchor's predicted boundary must stop WeeklyAnchorProvider from
+    publishing. This is the wiring the round-1 fix built but never
+    connected -- proving DesktopHistoryProvider actually reaches refuted_by
+    inside the shipped provider list, not only in an isolated unit test."""
+    import os
+    from pc.providers.claude_desktop import cache_path
+
+    week = 604800.0
+    weekly_anchor.save(weekly_anchor.anchor_path(), NOW, NOW - week)
+
+    cp = cache_path()
+    os.makedirs(os.path.dirname(cp), exist_ok=True)
+    doc = {"version": 2, "samples": [
+        {"t": int((NOW - 4 * 86400) * 1000), "u": {"fh": 5, "sd": 80}},
+        {"t": int((NOW - 3 * 86400) * 1000), "u": {"fh": 5, "sd": 4}},
+    ]}
+    with open(cp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+
+    anchors = [p for p in ingest.default_providers()
+               if isinstance(p, WeeklyAnchorProvider)]
+    assert len(anchors) == 1
+    assert anchors[0].poll(NOW - 3600) == []
+
+
+def test_the_default_history_provider_leaves_an_unrefuted_anchor_published():
+    """The opposite case, same wiring: a history file with no contradicting
+    drop must leave the anchor published, exactly as it was before this
+    round's fix -- refuted_by only ever refutes, never confirms, and an
+    anchor nothing contradicts is not withdrawn."""
+    import os
+    from pc.providers.claude_desktop import cache_path
+
+    week = 604800.0
+    weekly_anchor.save(weekly_anchor.anchor_path(), NOW, NOW - week)
+
+    cp = cache_path()
+    os.makedirs(os.path.dirname(cp), exist_ok=True)
+    prev = NOW - week
+    doc = {"version": 2, "samples": [
+        {"t": int((prev - 1800) * 1000), "u": {"fh": 5, "sd": 80}},
+        {"t": int((prev + 1800) * 1000), "u": {"fh": 5, "sd": 4}},
+    ]}
+    with open(cp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+
+    anchors = [p for p in ingest.default_providers()
+               if isinstance(p, WeeklyAnchorProvider)]
+    assert len(anchors) == 1
+    frames = anchors[0].poll(NOW - 3600)
+    assert len(frames) == 1
+    assert frames[0].weekly_resets_at == NOW
+
+
+# --- Task 11 fix round 1: the one-shot seeder, pinned rather than inspected
+#
+# All three tests below monkeypatch cowork_audit.seven_day_reset itself --
+# never the real session directory -- so nothing here reads or writes
+# outside tmp_path. weekly_anchor.anchor_path() is already scoped there by
+# the autouse _sandboxed_home fixture, same as every other test in this
+# file.
+
+
+def test_a_second_poll_frames_does_not_rescan_for_the_seed(monkeypatch):
+    """The whole point of self._seeded: a machine with no audit file must
+    not walk the session tree on every poll, forever. Proven by counting
+    calls to the seeder across two poll_frames(), not by reading the code."""
+    calls = []
+
+    def fake_seven_day_reset(*a, **k):
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", fake_seven_day_reset)
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()
+    bus.poll_frames()
+    assert len(calls) == 1
+
+
+def test_the_seed_flag_is_still_set_when_the_seeder_raises(monkeypatch):
+    """self._seeded is set BEFORE the seeder is tried, precisely so a raise
+    on the one try this process gets still counts as the try -- otherwise a
+    permissions error on the first poll would leave the door open to retry
+    the walk every single poll after that, which is the exact failure mode
+    the flag exists to close."""
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise RuntimeError("cowork_audit blew up")
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", boom)
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()   # must not raise: caught inside _seed_anchor_once
+    bus.poll_frames()
+    assert len(calls) == 1
+    assert bus._seeded is True
+
+
+def test_a_pair_the_seeder_finds_reaches_weekly_anchor_save(monkeypatch):
+    """The success path, end to end: a pair seven_day_reset returns must
+    actually become the on-disk anchor, not just be swallowed by the
+    try/except that protects the poll."""
+    resets_at, observed_at = NOW + 3 * 86400, NOW - 86400
+
+    def fake_seven_day_reset(*a, **k):
+        return (resets_at, observed_at)
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", fake_seven_day_reset)
+    assert weekly_anchor.load(weekly_anchor.anchor_path()) is None
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == resets_at
+    assert anchor["observed_at"] == observed_at
+
+
+# --- Task 13: the IndexedDB seeder, tried last and only when it must be
+#
+# Every test below monkeypatches both seeders, so nothing here reads a real
+# Claude Desktop store. desktop_idb.seven_day_reset is never given a real
+# path in this suite at all.
+
+
+def test_the_idb_seeder_is_not_reached_when_the_audit_file_answers(
+        monkeypatch):
+    """Cost order, pinned. The audit file is plain JSON beside no chat
+    store; the IndexedDB store holds the customer's conversations. Once the
+    cheap source has answered, the expensive one must not be opened."""
+    calls = []
+    monkeypatch.setattr(cowork_audit, "seven_day_reset",
+                        lambda *a, **k: (NOW + 3 * 86400, NOW - 86400))
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: calls.append(1))
+    ingest.IngestionBus(providers=[], now=lambda: NOW).poll_frames()
+    assert calls == []
+
+
+def test_the_idb_seeder_runs_when_the_audit_file_finds_nothing(monkeypatch):
+    resets_at, observed_at = NOW + 4 * 86400, NOW - 3600
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: (resets_at, observed_at))
+    assert weekly_anchor.load(weekly_anchor.anchor_path()) is None
+    ingest.IngestionBus(providers=[], now=lambda: NOW).poll_frames()
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == resets_at
+    assert anchor["observed_at"] == observed_at
+
+
+def test_the_idb_seeder_is_tried_at_most_once_per_process(monkeypatch):
+    """A store this one holds no business reopening every poll."""
+    calls = []
+
+    def counted(*a, **k):
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset", counted)
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()
+    bus.poll_frames()
+    bus.poll_frames()
+    assert len(calls) == 1
+
+
+def test_an_idb_seeder_that_raises_does_not_take_the_poll_down(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("desktop_idb blew up")
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset", boom)
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()
+    bus.poll_frames()
+    assert bus._seeded is True
+    assert weekly_anchor.load(weekly_anchor.anchor_path()) is None
+
+
+def test_the_idb_seeder_is_not_reached_when_an_anchor_already_exists(
+        monkeypatch):
+    calls = []
+    weekly_anchor.save(weekly_anchor.anchor_path(), NOW + 86400, NOW - 60)
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: calls.append(1))
+    ingest.IngestionBus(providers=[], now=lambda: NOW).poll_frames()
+    assert calls == []
+
+
+# --- final review fix 2: the seeders run LAST, after the free answer
+#
+# Both tests below monkeypatch both seeders, so nothing here opens a real
+# store. The point is the ORDER of two things inside one poll_frames().
+
+
+def test_a_live_weekly_reset_means_the_idb_seeder_is_never_called(monkeypatch):
+    """The blocking one. A machine running Claude Code already has the real
+    seven-day boundary in the status line, and poll_frames learns it through
+    weekly_anchor.observe. Seeding ran first, so that machine still walked
+    its whole session tree and V8-decoded Claude Desktop's IndexedDB -- the
+    one store in this project holding the customer's conversations -- on the
+    first poll of every process, to discover something it was about to be
+    told for free.
+    """
+    idb_calls, audit_calls = [], []
+    monkeypatch.setattr(cowork_audit, "seven_day_reset",
+                        lambda *a, **k: audit_calls.append(1))
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: idb_calls.append(1))
+
+    live = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=NOW,
+        session_pct=50.0, weekly_pct=20.0, weekly_resets_at=NOW + 3 * 86400)
+    bus = ingest.IngestionBus(providers=[Fixed(live)], now=lambda: NOW)
+    bus.poll_frames()
+
+    assert idb_calls == []
+    assert audit_calls == []
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == NOW + 3 * 86400
+
+
+def test_the_seeders_still_run_when_no_live_frame_carries_a_reset(monkeypatch):
+    """The other half of the ordering: moving the seed call to the end must
+    not turn it off for the configuration it exists for -- Claude Desktop
+    with no Claude Code, where nothing live carries a weekly boundary."""
+    resets_at, observed_at = NOW + 4 * 86400, NOW - 3600
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda *a, **k: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda *a, **k: (resets_at, observed_at))
+
+    bus = ingest.IngestionBus(providers=[Fixed(frame())], now=lambda: NOW)
+    bus.poll_frames()
+
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == resets_at
+
+
+def test_the_once_per_process_flag_survives_the_move(monkeypatch):
+    """self._seeded is set before any work, wherever in poll_frames the call
+    sits. A seeder that raises still spends the one try this process gets,
+    and a later poll must not walk the session tree again."""
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise RuntimeError("cowork_audit blew up")
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", boom)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset", lambda *a, **k: None)
+    bus = ingest.IngestionBus(providers=[Boom(), Fixed(frame())],
+                              now=lambda: NOW)
+    bus.poll_frames()
+    bus.poll_frames()
+    assert len(calls) == 1
+    assert bus._seeded is True
