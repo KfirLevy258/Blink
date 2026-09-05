@@ -33,11 +33,11 @@ from pc import cowork_audit, leveldb, v8_clone
 SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
 
-# Blink externalises any IndexedDB value over this many bytes to a sibling
-# .blob file, leaving the prefix below and a reference behind. The live
-# records run around 45 KB, so a longer-than-usual session crosses it. We do
-# not read blob files.
-IDB_BLOB_WRAP_THRESHOLD = 65536
+# Blink externalises any IndexedDB value over 64 KB to a sibling .blob file,
+# leaving this prefix and a reference behind. The live records run around
+# 45 KB, so a longer-than-usual session crosses that line. We do not read blob
+# files: a value carrying this prefix is skipped, and the threshold itself is
+# Blink's business, not ours -- nothing here compares a length against it.
 BLOB_WRAPPED_PREFIX = b"\xff\x11\x01"
 
 # Deeper than any shape these records take, and shallow enough that a

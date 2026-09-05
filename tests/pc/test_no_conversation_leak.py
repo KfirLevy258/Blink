@@ -43,6 +43,11 @@ SENSITIVE_MODULES = [
     "pc/desktop_local_storage.py",
     "pc/v8_clone.py",
     "pc/leveldb.py",
+    # Decoded values rather than raw buffers, so the risk is lower -- but
+    # these are the two modules a future debugger reaches for first, which is
+    # exactly when a print of "the record" gets added.
+    "pc/providers/claude_desktop_ls.py",
+    "pc/providers/weekly_anchor.py",
 ]
 
 _PRIVACY_PROMISE = (
