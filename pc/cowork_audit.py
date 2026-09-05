@@ -168,6 +168,11 @@ def seven_day_reset(root=None, max_files=MAX_FILES, tail_bytes=TAIL_BYTES):
                     continue
                 if not _plausible(at):
                     continue
-            if best is None or at > best[1]:
+            # >= , not >: several events in one file can share a
+            # timestamp (the mtime fallback gives every event in a file the
+            # SAME `at`), and the intent is the newest -- i.e. the LAST one
+            # seen for a given `at` -- not whichever happened to be read
+            # first.
+            if best is None or at >= best[1]:
                 best = (resets_at, float(at))
     return best

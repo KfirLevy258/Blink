@@ -4,7 +4,7 @@ import json
 import pathlib
 import re
 
-from pc import ingest, weekly_anchor
+from pc import cowork_audit, ingest, weekly_anchor
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
@@ -849,3 +849,68 @@ def test_the_default_history_provider_leaves_an_unrefuted_anchor_published():
     frames = anchors[0].poll(NOW - 3600)
     assert len(frames) == 1
     assert frames[0].weekly_resets_at == NOW
+
+
+# --- Task 11 fix round 1: the one-shot seeder, pinned rather than inspected
+#
+# All three tests below monkeypatch cowork_audit.seven_day_reset itself --
+# never the real session directory -- so nothing here reads or writes
+# outside tmp_path. weekly_anchor.anchor_path() is already scoped there by
+# the autouse _sandboxed_home fixture, same as every other test in this
+# file.
+
+
+def test_a_second_poll_frames_does_not_rescan_for_the_seed(monkeypatch):
+    """The whole point of self._seeded: a machine with no audit file must
+    not walk the session tree on every poll, forever. Proven by counting
+    calls to the seeder across two poll_frames(), not by reading the code."""
+    calls = []
+
+    def fake_seven_day_reset(*a, **k):
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", fake_seven_day_reset)
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()
+    bus.poll_frames()
+    assert len(calls) == 1
+
+
+def test_the_seed_flag_is_still_set_when_the_seeder_raises(monkeypatch):
+    """self._seeded is set BEFORE the seeder is tried, precisely so a raise
+    on the one try this process gets still counts as the try -- otherwise a
+    permissions error on the first poll would leave the door open to retry
+    the walk every single poll after that, which is the exact failure mode
+    the flag exists to close."""
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise RuntimeError("cowork_audit blew up")
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", boom)
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()   # must not raise: caught inside _seed_anchor_once
+    bus.poll_frames()
+    assert len(calls) == 1
+    assert bus._seeded is True
+
+
+def test_a_pair_the_seeder_finds_reaches_weekly_anchor_save(monkeypatch):
+    """The success path, end to end: a pair seven_day_reset returns must
+    actually become the on-disk anchor, not just be swallowed by the
+    try/except that protects the poll."""
+    resets_at, observed_at = NOW + 3 * 86400, NOW - 86400
+
+    def fake_seven_day_reset(*a, **k):
+        return (resets_at, observed_at)
+
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", fake_seven_day_reset)
+    assert weekly_anchor.load(weekly_anchor.anchor_path()) is None
+    bus = ingest.IngestionBus(providers=[], now=lambda: NOW)
+    bus.poll_frames()
+    anchor = weekly_anchor.load(weekly_anchor.anchor_path())
+    assert anchor is not None
+    assert anchor["resets_at"] == resets_at
+    assert anchor["observed_at"] == observed_at

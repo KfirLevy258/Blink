@@ -125,7 +125,7 @@ class IngestionBus:
         self._preferred = provider
         return True
 
-    def _seed_anchor_once(self, now):
+    def _seed_anchor_once(self):
         """One-shot fallback: seed the weekly anchor from a legacy Cowork
         audit file when nothing has ever populated it.
 
@@ -182,7 +182,7 @@ class IngestionBus:
         """
         frames = []
         now = self._now()
-        self._seed_anchor_once(now)
+        self._seed_anchor_once()
         for p in self._providers:
             key = id(p)
             name = p.__class__.__name__
