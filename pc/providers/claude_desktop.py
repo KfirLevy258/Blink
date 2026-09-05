@@ -147,10 +147,14 @@ def _newest_sample(samples):
 # investigated and rejected on 2026-08-28, with numbers taken from a real
 # month of samples on the author's machine:
 #
-#   - No reset timestamp is persisted anywhere on disk. Every JSON file, the
-#     LevelDB stores, Session Storage, IndexedDB and the preferences plist
-#     were searched. The only copies that exist are in Claude Code's status
-#     line payload and in evicting HTTP cache entries.
+#   - This file carries no reset timestamp, and for a long time nothing on
+#     disk did -- the survey behind this comment searched every JSON file,
+#     the LevelDB stores, Session Storage, IndexedDB and the preferences
+#     plist on 2026-08-28 and found none. That changed: Claude Desktop's
+#     Local Storage now carries a five-hour `resetsAt`, which
+#     pc/providers/claude_desktop_ls reads. The seven-day reset is still
+#     absent for a chat-only user. See
+#     docs/research/claude-desktop-window-sources.md.
 #   - The five-hour window is ROLLING -- observed gaps between resets ran
 #     4.95, 5.5, 5.9, 16.0, 17.8 and 32.2 hours -- so a past reset does not
 #     predict the next one.

@@ -18,6 +18,7 @@ from pc import normalizer, protocol
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
+from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
 from pc.providers.claude_state import ClaudeStateProvider
 from pc.providers.codex_cli import CodexCliProvider
 
@@ -51,6 +52,7 @@ def default_providers():
     which one a tie resolves toward.
     """
     return [ClaudeCliProvider(), ClaudeDesktopProvider(),
+            ClaudeDesktopLocalStorageProvider(),
             ClaudeStateProvider(), CodexCliProvider()]
 
 
