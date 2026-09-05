@@ -80,3 +80,25 @@ def test_wal_skips_a_record_whose_checksum_fails():
 def test_wal_tolerates_a_truncated_tail():
     data = fx.build_log([[("put", b"k", b"v")]])
     assert leveldb.wal_entries(data + b"\x01\x02\x03") == [("put", b"k", b"v")]
+
+
+def test_table_reads_entries_and_strips_the_internal_key_trailer():
+    data = fx.build_table([("put", b"alpha", b"1"), ("put", b"beta", b"2")])
+    assert leveldb.sst_entries(data) == [
+        ("put", b"alpha", b"1"), ("put", b"beta", b"2")]
+
+
+def test_table_reports_a_deletion_as_a_deletion():
+    data = fx.build_table([("del", b"gone", b"")])
+    assert leveldb.sst_entries(data) == [("del", b"gone", b"")]
+
+
+def test_table_shares_key_prefixes_between_entries():
+    """Prefix compression is the format's normal state, not an edge case."""
+    data = fx.build_table([("put", b"kkkk1", b"a"), ("put", b"kkkk2", b"b")])
+    assert leveldb.sst_entries(data) == [
+        ("put", b"kkkk1", b"a"), ("put", b"kkkk2", b"b")]
+
+
+def test_table_returns_nothing_for_a_file_with_no_magic():
+    assert leveldb.sst_entries(b"not a table at all") == []

@@ -79,3 +79,59 @@ def frame(payload: bytes, block_size: int = BLOCK,
 def build_log(batches, block_size: int = BLOCK) -> bytes:
     """A whole .log file from a list of entry-lists."""
     return b"".join(frame(batch(e), block_size) for e in batches)
+
+
+def _block(entries) -> bytes:
+    """One uncompressed data block with a single restart point."""
+    body = bytearray()
+    prev = b""
+    for key, value in entries:
+        shared = 0
+        while (shared < len(prev) and shared < len(key)
+               and prev[shared] == key[shared]):
+            shared += 1
+        body += _varint(shared) + _varint(len(key) - shared)
+        body += _varint(len(value)) + key[shared:] + value
+        prev = key
+    body += struct.pack("<II", 0, 1)   # one restart at offset 0, count 1
+    return bytes(body)
+
+
+def _wrap(body: bytes) -> bytes:
+    """Block trailer: compression type 0 (none) plus a masked CRC."""
+    trailer = bytes([0])
+    return body + trailer + struct.pack(
+        "<I", _mask(leveldb.crc32c(body + trailer)))
+
+
+def internal_key(user_key: bytes, seq: int = 1, is_value: bool = True) -> bytes:
+    return user_key + struct.pack("<Q", (seq << 8) | (1 if is_value else 0))
+
+
+def build_table(entries) -> bytes:
+    """A minimal .ldb: one data block, one index block, a footer.
+
+    `entries` is a list of (op, user_key, value), sorted by the caller.
+    """
+    data = [(internal_key(k, i + 1, op == "put"), v)
+            for i, (op, k, v) in enumerate(entries)]
+    data_block = _wrap(_block(data))
+    out = bytearray(data_block)
+
+    last_key = data[-1][0] if data else b"\xff"
+    index_body = _block([(last_key, _varint(0) + _varint(len(data_block) - 5))])
+    index_off = len(out)
+    index_block = _wrap(index_body)
+    out += index_block
+
+    meta_off = len(out)
+    meta_block = _wrap(_block([]))
+    out += meta_block
+
+    footer = bytearray()
+    footer += _varint(meta_off) + _varint(len(meta_block) - 5)
+    footer += _varint(index_off) + _varint(len(index_block) - 5)
+    footer += b"\x00" * (40 - len(footer))
+    footer += struct.pack("<Q", 0xdb4775248b80fb57)
+    out += footer
+    return bytes(out)

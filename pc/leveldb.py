@@ -190,3 +190,92 @@ def wal_entries(data: bytes) -> list:
     for payload in _wal_payloads(data):
         out.extend(_batch_entries(payload))
     return out
+
+
+SST_FOOTER_SIZE = 48
+SST_MAGIC = 0xdb4775248b80fb57
+
+
+def _block_body(data: bytes, offset: int, size: int):
+    """One block's uncompressed body, or None."""
+    raw = data[offset:offset + size]
+    if len(raw) < size:
+        return None
+    kind = data[offset + size:offset + size + 1]
+    if kind == b"\x00":
+        return raw
+    if kind == b"\x01":
+        return snappy_decompress(raw)
+    return None
+
+
+def _block_pairs(body: bytes):
+    """(key, value) from a block body, ignoring the restart array."""
+    if len(body) < 4:
+        return
+    n_restarts = int.from_bytes(body[-4:], "little")
+    end = len(body) - 4 - n_restarts * 4
+    if end < 0:
+        return
+    pos = 0
+    prev = b""
+    while pos < end:
+        try:
+            shared, pos = read_varint(body, pos)
+            unshared, pos = read_varint(body, pos)
+            vlen, pos = read_varint(body, pos)
+        except IndexError:
+            return
+        if shared > len(prev):
+            return
+        key = prev[:shared] + body[pos:pos + unshared]
+        pos += unshared
+        value = body[pos:pos + vlen]
+        pos += vlen
+        if len(key) < shared + unshared or len(value) < vlen:
+            return
+        prev = key
+        yield key, value
+
+
+def sst_entries(data: bytes) -> list:
+    """Every entry in an immutable table, in key order.
+
+    Walks the index block to find data blocks rather than guessing at
+    offsets, and returns [] for anything that does not look like a table --
+    an application we do not control is allowed to change its format, and the
+    correct response is silence.
+    """
+    if len(data) < SST_FOOTER_SIZE:
+        return []
+    footer = data[-SST_FOOTER_SIZE:]
+    if int.from_bytes(footer[-8:], "little") != SST_MAGIC:
+        return []
+    try:
+        _, pos = read_varint(footer, 0)          # metaindex offset
+        _, pos = read_varint(footer, pos)        # metaindex size
+        index_off, pos = read_varint(footer, pos)
+        index_size, pos = read_varint(footer, pos)
+    except IndexError:
+        return []
+
+    index_body = _block_body(data, index_off, index_size)
+    if index_body is None:
+        return []
+
+    out = []
+    for _, handle in _block_pairs(index_body):
+        try:
+            off, hpos = read_varint(handle, 0)
+            size, _ = read_varint(handle, hpos)
+        except IndexError:
+            continue
+        body = _block_body(data, off, size)
+        if body is None:
+            continue
+        for key, value in _block_pairs(body):
+            if len(key) < 8:
+                continue
+            op = "put" if key[-8] == 1 else "del"
+            out.append((op, key[:-8], value if op == "put" else b""))
+    return out
