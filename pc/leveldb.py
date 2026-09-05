@@ -109,3 +109,84 @@ def snappy_decompress(buf: bytes):
     if len(out) != expected:
         return None
     return bytes(out)
+
+
+LEVELDB_BLOCK_SIZE = 32768
+LEVELDB_HEADER_SIZE = 7
+
+_REC_FULL, _REC_FIRST, _REC_MIDDLE, _REC_LAST = 1, 2, 3, 4
+
+
+def _wal_payloads(data: bytes):
+    """Assembled WriteBatch payloads, skipping anything that fails its CRC."""
+    pos = 0
+    pending = bytearray()
+    have_pending = False
+    while pos + LEVELDB_HEADER_SIZE <= len(data):
+        in_block = pos % LEVELDB_BLOCK_SIZE
+        if LEVELDB_BLOCK_SIZE - in_block < LEVELDB_HEADER_SIZE:
+            pos += LEVELDB_BLOCK_SIZE - in_block
+            continue
+        stored = int.from_bytes(data[pos:pos + 4], "little")
+        length = int.from_bytes(data[pos + 4:pos + 6], "little")
+        kind = data[pos + 6]
+        body = data[pos + LEVELDB_HEADER_SIZE:pos + LEVELDB_HEADER_SIZE + length]
+        if len(body) < length:
+            return
+        pos += LEVELDB_HEADER_SIZE + length
+        if kind == 0:
+            continue
+        if crc32c(bytes([kind]) + body) != unmask_crc(stored):
+            # Torn or concurrent write. Drop it and anything it was part of.
+            pending = bytearray()
+            have_pending = False
+            continue
+        if kind == _REC_FULL:
+            yield bytes(body)
+        elif kind == _REC_FIRST:
+            pending = bytearray(body)
+            have_pending = True
+        elif kind == _REC_MIDDLE and have_pending:
+            pending += body
+        elif kind == _REC_LAST and have_pending:
+            pending += body
+            yield bytes(pending)
+            pending = bytearray()
+            have_pending = False
+
+
+def _batch_entries(payload: bytes):
+    """(op, key, value) from one WriteBatch, stopping at the first oddity."""
+    if len(payload) < 12:
+        return
+    pos = 12
+    while pos < len(payload):
+        tag = payload[pos]
+        pos += 1
+        try:
+            klen, pos = read_varint(payload, pos)
+            key = payload[pos:pos + klen]
+            pos += klen
+            if len(key) < klen:
+                return
+            if tag == 1:
+                vlen, pos = read_varint(payload, pos)
+                value = payload[pos:pos + vlen]
+                pos += vlen
+                if len(value) < vlen:
+                    return
+                yield "put", key, value
+            elif tag == 0:
+                yield "del", key, b""
+            else:
+                return
+        except IndexError:
+            return
+
+
+def wal_entries(data: bytes) -> list:
+    """Every entry in a write-ahead log, in file order."""
+    out = []
+    for payload in _wal_payloads(data):
+        out.extend(_batch_entries(payload))
+    return out

@@ -5,6 +5,7 @@ decoded, because a wrong number reaches the panel looking exactly like a right
 one.
 """
 from pc import leveldb
+from tests.support import leveldb_fixture as fx
 
 
 def test_varint_reads_single_and_multi_byte():
@@ -48,3 +49,34 @@ def test_snappy_handles_a_plain_literal_run():
 
 def test_snappy_refuses_a_truncated_stream():
     assert leveldb.snappy_decompress(bytes([0x10, 0x00])) is None
+
+
+def test_wal_reads_puts_and_deletes_in_order():
+    data = fx.build_log([
+        [("put", b"a", b"1"), ("put", b"b", b"2")],
+        [("del", b"a", b"")],
+    ])
+    assert leveldb.wal_entries(data) == [
+        ("put", b"a", b"1"), ("put", b"b", b"2"), ("del", b"a", b"")]
+
+
+def test_wal_reassembles_a_record_split_across_blocks():
+    """A payload longer than a block is written as FIRST/MIDDLE/LAST, which
+    injects a 7-byte header into the middle of it. Scanning raw file bytes
+    corrupts exactly these records -- the reason this reader exists."""
+    big = b"v" * 80_000
+    data = fx.build_log([[("put", b"k", big)]])
+    assert leveldb.wal_entries(data) == [("put", b"k", big)]
+
+
+def test_wal_skips_a_record_whose_checksum_fails():
+    """A torn concurrent write must be dropped, not assembled into a value
+    that decodes to a plausible wrong number."""
+    good = fx.frame(fx.batch([("put", b"ok", b"1")]))
+    bad = fx.frame(fx.batch([("put", b"no", b"2")]), corrupt_crc=True)
+    assert leveldb.wal_entries(good + bad) == [("put", b"ok", b"1")]
+
+
+def test_wal_tolerates_a_truncated_tail():
+    data = fx.build_log([[("put", b"k", b"v")]])
+    assert leveldb.wal_entries(data + b"\x01\x02\x03") == [("put", b"k", b"v")]
