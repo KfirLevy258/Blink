@@ -14,7 +14,7 @@ able to stop it.
 import sys
 import time
 
-from pc import normalizer, protocol, weekly_anchor
+from pc import cowork_audit, normalizer, protocol, weekly_anchor
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
@@ -91,6 +91,10 @@ class IngestionBus:
         # second time could pick a different winner and name a project that
         # does not belong to the state on the panel.
         self._session_pair = ("", 0)
+        # Guards the one-shot anchor seeding below: see
+        # _seed_anchor_once. False until the first poll_frames() call,
+        # regardless of whether that call finds anything to seed.
+        self._seeded = False
 
     def add_provider(self, provider):
         """Onboard a provider at runtime. Nothing else has to change."""
@@ -121,6 +125,37 @@ class IngestionBus:
         self._preferred = provider
         return True
 
+    def _seed_anchor_once(self, now):
+        """One-shot fallback: seed the weekly anchor from a legacy Cowork
+        audit file when nothing has ever populated it.
+
+        Runs at most once per process, guarded by self._seeded -- set before
+        any work is attempted, so a raise on the first try still counts as
+        the one try this process gets. Without that, a machine with no
+        audit file (the common case: see pc/cowork_audit's own docstring)
+        would walk its whole session tree on every single poll, forever.
+
+        Tried only while the anchor file itself is empty, and wrapped whole
+        in try/except: this walks a directory tree and parses files owned
+        by another application, and none of that may be allowed to take a
+        poll down. Task 13's IndexedDB seeder is meant to slot in right
+        after this one, tried only when this one finds nothing.
+        """
+        if self._seeded:
+            return
+        self._seeded = True
+        try:
+            path = weekly_anchor.anchor_path()
+            if weekly_anchor.load(path) is not None:
+                return
+            found = cowork_audit.seven_day_reset()
+            if found is None:
+                return
+            resets_at, observed_at = found
+            weekly_anchor.save(path, resets_at, observed_at)
+        except Exception:
+            pass
+
     def poll_frames(self):
         """Every frame every provider can produce right now.
 
@@ -147,6 +182,7 @@ class IngestionBus:
         """
         frames = []
         now = self._now()
+        self._seed_anchor_once(now)
         for p in self._providers:
             key = id(p)
             name = p.__class__.__name__
