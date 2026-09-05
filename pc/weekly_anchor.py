@@ -32,10 +32,12 @@ ANCHOR_MAX_UNCORROBORATED_S = 8 * WEEK_S
 
 # The same plausibility window pc/desktop_local_storage.py and
 # pc/providers/claude_desktop.py already use for an epoch read off disk: any
-# real observation lands between 2020-01-01 and 2100-01-01. A resets_at
-# outside this window is corrupt, not merely old, and -- unlike a stale
-# reading -- a bad timestamp in the far future never ages out on its own, so
-# it must be rejected on the way in rather than trusted to expire.
+# real observation lands between 2020-01-01 and 2100-01-01. resets_at AND
+# observed_at both get checked against it -- observed_at is the more
+# dangerous of the two to skip, because it is the field the uncorroborated
+# withdrawal (ANCHOR_MAX_UNCORROBORATED_S) runs on. A bad timestamp in the
+# far future is never stale and beats every real reading, forever, so it
+# must be rejected on the way in rather than trusted to expire.
 SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
 
@@ -77,10 +79,12 @@ def load(path: str):
     r, o = doc.get("resets_at"), doc.get("observed_at")
     if not (_finite_num(r) and _finite_num(o)):
         return None
-    r = float(r)
+    r, o = float(r), float(o)
     if not (SAMPLE_EPOCH_MIN <= r <= SAMPLE_EPOCH_MAX):
         return None
-    return {"resets_at": r, "observed_at": float(o)}
+    if not (SAMPLE_EPOCH_MIN <= o <= SAMPLE_EPOCH_MAX):
+        return None
+    return {"resets_at": r, "observed_at": o}
 
 
 def save(path: str, resets_at, observed_at) -> None:
@@ -117,6 +121,8 @@ def observe(frames, path: str, now_epoch: float) -> None:
         if not _finite_num(at):
             continue
         at = float(at)
+        if not (SAMPLE_EPOCH_MIN <= at <= SAMPLE_EPOCH_MAX):
+            continue
         if best is None or at > best[1]:
             best = (r, at)
     if best is None:

@@ -94,15 +94,19 @@ def test_a_stored_nan_is_rejected_rather_than_remembered_forever(tmp_path):
 
 
 def test_save_ignores_a_nan_resets_at(tmp_path):
+    """The write guard is what stops the module poisoning its own file, and
+    it must be pinned directly -- asserting only wa.load(p) is None would
+    pass just as well if save() wrote the NaN and load() caught it on the
+    way back out, which is the read guard's job, not this one's."""
     p = str(tmp_path / "weekly-anchor.json")
     wa.save(p, float("nan"), WED_0600Z)
-    assert wa.load(p) is None
+    assert not os.path.exists(p)
 
 
 def test_save_ignores_an_infinite_observed_at(tmp_path):
     p = str(tmp_path / "weekly-anchor.json")
     wa.save(p, WED_0600Z, float("inf"))
-    assert wa.load(p) is None
+    assert not os.path.exists(p)
 
 
 def test_save_does_not_raise_on_a_non_numeric_value(tmp_path):
@@ -110,7 +114,7 @@ def test_save_does_not_raise_on_a_non_numeric_value(tmp_path):
     float(None) raising TypeError straight out of it was the old bug."""
     p = str(tmp_path / "weekly-anchor.json")
     wa.save(p, None, WED_0600Z)
-    assert wa.load(p) is None
+    assert not os.path.exists(p)
 
 
 def test_observe_ignores_a_frame_with_a_nan_reset(tmp_path):
@@ -136,6 +140,29 @@ def test_observe_ignores_a_frame_with_an_implausible_reset(tmp_path):
     f = base.NormalizedUsageFrame(
         provider="claude", src="cli", observed_at=WED_0600Z,
         weekly_pct=17.0, weekly_resets_at=-1e18)
+    wa.observe([f], p, WED_0600Z)
+    assert wa.load(p) is None
+
+
+def test_load_rejects_a_far_future_observed_at(tmp_path):
+    """observed_at is the field the uncorroborated withdrawal runs on -- a
+    corrupt far-future value would make `now - observed_at` hugely negative,
+    so the anchor would never age out. Guarding resets_at alone is not
+    enough; this pins the field that actually matters for that rule."""
+    p = str(tmp_path / "weekly-anchor.json")
+    wa.save(p, WED_0600Z, 1e17)
+    assert wa.load(p) is None
+
+
+def test_observe_ignores_a_frame_with_a_far_future_observed_at(tmp_path):
+    """A frame claiming to have been observed in the far future must not
+    become the anchor -- it would win every future recency contest in
+    observe()'s own current["observed_at"] >= best[1] check, permanently
+    poisoning the one-shot memory with no path back."""
+    p = str(tmp_path / "weekly-anchor.json")
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=1e17,
+        weekly_pct=17.0, weekly_resets_at=WED_0600Z)
     wa.observe([f], p, WED_0600Z)
     assert wa.load(p) is None
 
