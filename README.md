@@ -38,7 +38,7 @@ BLINK is a small touchscreen that shows the same numbers as Claude Code's `/usag
 - **An activity light.** Amber the moment any session -- Claude or Codex -- is waiting on you; a green pulse while everything is still working; red when a turn dies on an error -- a rate limit, most often.
 - **A page per provider.** Claude and Codex each get their own screen. Tap the name or swipe to switch; the needles move from one reading to the other.
 - **It sleeps when your computer does.** About thirty seconds after the computer stops answering, the screen closes its eyes and dozes; it opens them the moment the computer is back. A tap while it sleeps shows the last figures.
-- **Claude Desktop too.** With Desktop alone the dials show both percentages and how fast the window is filling. They follow Desktop's own refresh -- about every 5 minutes while you are using it, up to 15 when it sits idle -- where Claude Code updates them live.
+- **Claude Desktop too.** With Desktop alone the dials show percentages, a five-hour countdown from Desktop's own record (a rate instead, if that record is not yet known), and a weekly countdown once one has been learned. They follow Desktop's own refresh -- about every 5 minutes while you are using it, up to 15 when it sits idle -- where Claude Code updates them live.
 - **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, no network, nothing sent anywhere.
 - **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
 - **Cheap, open hardware.** An ESP32 "Cheap Yellow Display" (~$12) and a 3D-printed case.
@@ -50,7 +50,7 @@ BLINK is a small touchscreen that shows the same numbers as Claude Code's `/usag
   <tr>
     <td width="33%"><img src="docs/img/screen-claude.png" alt="The Claude page"><br><sub><b>Claude</b> - session and weekly, with the countdown to each reset</sub></td>
     <td width="33%"><img src="docs/img/screen-codex.png" alt="The Codex page"><br><sub><b>Codex</b> - its own page, swipe or tap the name to switch</sub></td>
-    <td width="33%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop only"><br><sub><b>Claude Desktop alone</b> - no reset times exist, so a rate instead</sub></td>
+    <td width="33%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop only"><br><sub><b>Claude Desktop alone</b> - a countdown when Desktop has a reset time, a rate when it does not</sub></td>
   </tr>
 </table>
 
