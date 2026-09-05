@@ -329,26 +329,23 @@ def _safe_want(want, key: bytes) -> bool:
         return False
 
 
-def scan(dir_path: str, want) -> list:
-    """Surviving (key, value) pairs whose key satisfies `want`.
+def _iter_entries(dir_path: str, want):
+    """(op, key, value) triples in application order, matching keys only.
 
-    ORDERING IS DELIBERATELY SIMPLIFIED. Real LevelDB decides which copy of a
-    key wins from the MANIFEST and from per-entry sequence numbers; this
-    applies immutable tables first and then write-ahead logs, both in file
-    order, which is correct whenever the log holds writes not yet compacted
-    -- the normal state of a running application.
+    Shared by `scan` and `scan_all`: the file discovery, the numeric
+    `_file_number_key` sort, the `_safe_want` containment, and the
+    open-read-close discipline all live here exactly once. Both callers
+    differ only in what they do with the sequence this yields -- `scan`
+    reduces it to one final value per key, `scan_all` does not.
 
-    A caller that must be certain which of several surviving copies is newest
-    should break the tie on the record's own timestamp rather than trusting
-    this order. pc/desktop_local_storage does exactly that.
+    A missing directory or an unreadable/malformed file yields nothing for
+    that source and moves on; this is a parser and parsers never raise.
     """
     try:
         names = os.listdir(dir_path)
     except OSError:
-        return []
+        return
 
-    surviving = {}
-    order = []
     for suffix, reader in ((".ldb", sst_entries), (".log", wal_entries)):
         matching = sorted(
             (n for n in names if n.endswith(suffix)), key=_file_number_key)
@@ -363,12 +360,61 @@ def scan(dir_path: str, want) -> list:
                 # format. One unreadable file must not silence the store.
                 continue
             for op, key, value in entries:
-                if not _safe_want(want, key):
-                    continue
-                if op == "del":
-                    surviving.pop(key, None)
-                    continue
-                if key not in surviving:
-                    order.append(key)
-                surviving[key] = value
+                if _safe_want(want, key):
+                    yield op, key, value
+
+
+def scan(dir_path: str, want) -> list:
+    """Surviving (key, value) pairs whose key satisfies `want`, one per key.
+
+    ORDERING IS DELIBERATELY SIMPLIFIED. Real LevelDB decides which copy of a
+    key wins from the MANIFEST and from per-entry sequence numbers; this
+    applies immutable tables first and then write-ahead logs, both in file
+    order, which is correct whenever the log holds writes not yet compacted
+    -- the normal state of a running application.
+
+    A caller that must be certain which of several surviving copies is
+    newest, or that must not let a false "final" value hide a real deletion
+    ordering mistake, should reach for `scan_all` instead and break the tie
+    itself -- pc/desktop_local_storage does exactly that.
+    """
+    surviving = {}
+    order = []
+    for op, key, value in _iter_entries(dir_path, want):
+        if op == "del":
+            surviving.pop(key, None)
+            continue
+        if key not in surviving:
+            order.append(key)
+        surviving[key] = value
     return [(k, surviving[k]) for k in order if k in surviving]
+
+
+def scan_all(dir_path: str, want) -> list:
+    """Every surviving (key, value) pair whose key satisfies `want`.
+
+    Unlike `scan`, this does not collapse repeated keys to one final value:
+    if two files each hold a put for the same key, both come back, in the
+    same application order `scan` uses (.ldb tables by ascending file
+    number, then .log files by ascending file number). That is the only way
+    a caller can pick the true newest copy by the record's own timestamp
+    instead of by which file the walk happened to reach last -- exactly the
+    situation `scan`'s docstring warns about.
+
+    A deletion is still honoured: a "del" for a key discards every copy of
+    that key accumulated so far (not the file, not other keys -- just that
+    key's copies up to that point), and a put after the deletion accumulates
+    again from there. A key that is deleted and never re-put comes back as
+    nothing, the same as `scan`.
+    """
+    result = []
+    positions = {}
+    for op, key, value in _iter_entries(dir_path, want):
+        if op == "del":
+            for idx in positions.pop(key, []):
+                result[idx] = None
+            continue
+        idx = len(result)
+        result.append((key, value))
+        positions.setdefault(key, []).append(idx)
+    return [kv for kv in result if kv is not None]

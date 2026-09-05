@@ -207,3 +207,44 @@ def test_scan_treats_a_raising_predicate_as_no_match(tmp_path):
         raise ValueError("predicate blew up")
 
     assert leveldb.scan(d, boom) == []
+
+
+def test_scan_all_keeps_every_surviving_copy_of_a_key(tmp_path):
+    """The gap scan() has and scan_all() exists to close: scan() would let
+    the log's put silently replace the table's, discarding one copy before
+    the caller ever gets a look at it."""
+    d = _store(tmp_path,
+               tables=[("000005.ldb", [("put", b"k", b"old")])],
+               logs=[("000006.log", [[("put", b"k", b"new")]])])
+    assert leveldb.scan_all(d, lambda k: k == b"k") == [
+        (b"k", b"old"), (b"k", b"new")]
+
+
+def test_scan_all_returns_copies_in_application_order(tmp_path):
+    d = _store(tmp_path, logs=[("000001.log", [
+        [("put", b"a", b"1"), ("put", b"b", b"2"), ("put", b"a", b"3")]])])
+    assert leveldb.scan_all(d, lambda k: True) == [
+        (b"a", b"1"), (b"b", b"2"), (b"a", b"3")]
+
+
+def test_scan_all_lets_a_tombstone_remove_copies_before_it(tmp_path):
+    """The guarantee scan() cannot give: once a key is genuinely deleted,
+    every copy seen before that deletion -- including one sitting in an
+    older table -- must not be resurrected."""
+    d = _store(tmp_path,
+               tables=[("000005.ldb", [("put", b"k", b"stale")])],
+               logs=[("000006.log", [[("del", b"k", b"")]])])
+    assert leveldb.scan_all(d, lambda k: k == b"k") == []
+
+
+def test_scan_all_lets_puts_after_a_tombstone_accumulate_again(tmp_path):
+    d = _store(tmp_path, logs=[("000001.log", [
+        [("put", b"k", b"old")],
+        [("del", b"k", b"")],
+        [("put", b"k", b"new")],
+    ])])
+    assert leveldb.scan_all(d, lambda k: k == b"k") == [(b"k", b"new")]
+
+
+def test_scan_all_is_silent_about_a_missing_directory():
+    assert leveldb.scan_all("/nonexistent/leveldb", lambda k: True) == []

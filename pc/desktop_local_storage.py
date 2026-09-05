@@ -81,60 +81,41 @@ def _valid(rec) -> bool:
 def usage_records(dir_path: str) -> list:
     """Every decodable usage record surviving in the store.
 
-    Deliberately does not go through `leveldb.scan`: scan() collapses to one
-    final value per key -- it applies every .ldb file and then lets every
-    .log file overwrite on top, unconditionally, regardless of which file
-    actually holds the newer write. That is the right default for reading
-    general store state, but it means the copy this module needs to compare
-    against might already be gone by the time scan() returns.
+    Goes through `leveldb.scan_all`, not `leveldb.scan`: scan() collapses to
+    one final value per key, so when the same key exists in both an old
+    .ldb table and a newer .log (or the other way around), one of the two
+    copies is already gone before this module ever sees it. scan_all keeps
+    every surviving copy -- including more than one put for the same key
+    across different files -- so the observedAt tie-break in `newest_record`
+    below always has every copy to compare, not whichever one a file-order
+    heuristic happened to keep.
 
-    So this walks the same two file groups scan() does, with the same public
-    per-file readers, but keeps every matching "put" it finds instead of
-    reducing them to one -- the tie-break in `newest_record` needs to see
-    every surviving copy to pick correctly by observedAt.
+    scan_all still honours a real deletion of the key: a tombstone discards
+    the copies that came before it, so a sign-out, an org switch, or a
+    cleared store does not resurrect a stale reading left behind in an old
+    table.
     """
     out = []
-    try:
-        names = os.listdir(dir_path)
-    except OSError:
-        return out
-
-    for suffix, reader in ((".ldb", leveldb.sst_entries),
-                           (".log", leveldb.wal_entries)):
-        for name in names:
-            if not name.endswith(suffix):
-                continue
-            try:
-                with open(os.path.join(dir_path, name), "rb") as fh:
-                    data = fh.read()
-            except OSError:
-                continue
-            try:
-                entries = reader(data)
-            except Exception:
-                # An application we do not control is allowed to change its
-                # format. One unreadable file must not silence the store.
-                continue
-            for op, key, value in entries:
-                if op != "put" or USAGE_KEY_MARKER not in key:
-                    continue
-                text = decode_value(value)
-                if text is None:
-                    continue
-                try:
-                    rec = json.loads(text)
-                except (TypeError, ValueError):
-                    continue
-                if _valid(rec):
-                    out.append(rec)
+    for _key, raw in leveldb.scan_all(
+            dir_path, lambda k: USAGE_KEY_MARKER in k):
+        text = decode_value(raw)
+        if text is None:
+            continue
+        try:
+            rec = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if _valid(rec):
+            out.append(rec)
     return out
 
 
 def newest_record(dir_path: str):
     """The record with the greatest observedAt, or None.
 
-    By its own timestamp rather than by file order: pc.leveldb.scan documents
-    that its ordering is simplified, and this is the tie-break it names.
+    By its own timestamp rather than by file order: pc.leveldb.scan_all
+    hands back every surviving copy precisely so a caller can do this, and
+    pc.leveldb.scan's docstring points here as the reason that one exists.
     """
     best = None
     for rec in usage_records(dir_path):
