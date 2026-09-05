@@ -789,3 +789,63 @@ def test_the_anchor_does_not_relearn_its_own_republished_frame():
 
     after = weekly_anchor.load(weekly_anchor.anchor_path())
     assert after == before
+
+
+# --- Task 10 fix round 2: refutation wired through the shipped provider list
+
+
+def test_the_default_history_provider_lets_a_contradicted_anchor_be_refuted():
+    """End to end from ingest.default_providers(): an anchor on disk plus a
+    Claude Desktop history file whose weekly percentage drops far from the
+    anchor's predicted boundary must stop WeeklyAnchorProvider from
+    publishing. This is the wiring the round-1 fix built but never
+    connected -- proving DesktopHistoryProvider actually reaches refuted_by
+    inside the shipped provider list, not only in an isolated unit test."""
+    import os
+    from pc.providers.claude_desktop import cache_path
+
+    week = 604800.0
+    weekly_anchor.save(weekly_anchor.anchor_path(), NOW, NOW - week)
+
+    cp = cache_path()
+    os.makedirs(os.path.dirname(cp), exist_ok=True)
+    doc = {"version": 2, "samples": [
+        {"t": int((NOW - 4 * 86400) * 1000), "u": {"fh": 5, "sd": 80}},
+        {"t": int((NOW - 3 * 86400) * 1000), "u": {"fh": 5, "sd": 4}},
+    ]}
+    with open(cp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+
+    anchors = [p for p in ingest.default_providers()
+               if isinstance(p, WeeklyAnchorProvider)]
+    assert len(anchors) == 1
+    assert anchors[0].poll(NOW - 3600) == []
+
+
+def test_the_default_history_provider_leaves_an_unrefuted_anchor_published():
+    """The opposite case, same wiring: a history file with no contradicting
+    drop must leave the anchor published, exactly as it was before this
+    round's fix -- refuted_by only ever refutes, never confirms, and an
+    anchor nothing contradicts is not withdrawn."""
+    import os
+    from pc.providers.claude_desktop import cache_path
+
+    week = 604800.0
+    weekly_anchor.save(weekly_anchor.anchor_path(), NOW, NOW - week)
+
+    cp = cache_path()
+    os.makedirs(os.path.dirname(cp), exist_ok=True)
+    prev = NOW - week
+    doc = {"version": 2, "samples": [
+        {"t": int((prev - 1800) * 1000), "u": {"fh": 5, "sd": 80}},
+        {"t": int((prev + 1800) * 1000), "u": {"fh": 5, "sd": 4}},
+    ]}
+    with open(cp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+
+    anchors = [p for p in ingest.default_providers()
+               if isinstance(p, WeeklyAnchorProvider)]
+    assert len(anchors) == 1
+    frames = anchors[0].poll(NOW - 3600)
+    assert len(frames) == 1
+    assert frames[0].weekly_resets_at == NOW

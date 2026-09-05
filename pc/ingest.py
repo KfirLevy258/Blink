@@ -21,7 +21,7 @@ from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
 from pc.providers.claude_state import ClaudeStateProvider
 from pc.providers.codex_cli import CodexCliProvider
-from pc.providers.weekly_anchor import WeeklyAnchorProvider
+from pc.providers.weekly_anchor import DesktopHistoryProvider, WeeklyAnchorProvider
 
 
 # How long a provider that raised sits out before it is tried again, and how
@@ -58,7 +58,15 @@ def default_providers():
             # LAST: it only ever offers a remembered projection, and every
             # source above it is polled first so any of them carrying a real
             # weekly reset is what observe() below learns from this cycle.
-            WeeklyAnchorProvider()]
+            #
+            # history_provider gives it something to be refuted BY: Claude
+            # Desktop's own usage cache, the one file on this machine with a
+            # weekly-percentage series to check the projection against. With
+            # no Claude Desktop installed the file is simply absent and
+            # DesktopHistoryProvider.samples() returns None -- refutation
+            # cannot fire, and this is unchanged from having no
+            # history_provider at all.
+            WeeklyAnchorProvider(history_provider=DesktopHistoryProvider())]
 
 
 class IngestionBus:
