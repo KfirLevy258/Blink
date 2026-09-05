@@ -1557,3 +1557,41 @@ def test_a_file_with_only_null_windows_yields_no_frame(tmp_path):
     frame, = poll(tmp_path)
 
     assert frame.session_pct == 7.0
+
+
+SPENT_FIXTURE = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                             "fixtures", "codex_rollout_limit_reached.jsonl")
+
+
+def test_the_real_exhaustion_rollout_reports_a_spent_window(tmp_path):
+    """Pinned to bytes Codex wrote, not bytes we wrote.
+
+    tests/fixtures/codex_rollout_limit_reached.jsonl is the meta line and the
+    last four token_count events of a real session that ran the five-hour
+    window out on 2026-09-05, with everything that could carry conversation
+    stripped. The synthesized tests above pin the reader to what we THINK
+    exhaustion looks like; this pins it to what it was.
+    """
+    import datetime
+    d = tmp_path / "sessions" / "2026" / "09" / "05"
+    d.mkdir(parents=True)
+    with open(SPENT_FIXTURE) as src, \
+            open(d / "rollout-2026-09-05T10-31-51-x.jsonl", "w") as dst:
+        dst.write(src.read())
+
+    # One minute after the last line in the file.
+    seen_at = datetime.datetime(2026, 9, 5, 8, 8, 9, 419000,
+                                tzinfo=datetime.timezone.utc).timestamp()
+    frames = codex_cli.CodexCliProvider(root=str(tmp_path / "sessions")).poll(
+        seen_at)
+    usage = [f for f in frames if f.src == "cli"]
+    assert len(usage) == 1
+    f = usage[0]
+
+    # 98 was the last number Codex published; the account was spent one line
+    # later. The person needs the second fact, not the first.
+    assert f.session_pct == 100.0
+    assert f.weekly_pct == 16.0
+    assert f.session_resets_at == 1788611397
+    # Dated by the exhaustion, so it is not buried as stale.
+    assert f.stale is False
