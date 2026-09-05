@@ -4,6 +4,8 @@ Every test here is about refusing to hand back a value we are not certain we
 decoded, because a wrong number reaches the panel looking exactly like a right
 one.
 """
+import struct
+
 from pc import leveldb
 from tests.support import leveldb_fixture as fx
 
@@ -102,3 +104,37 @@ def test_table_shares_key_prefixes_between_entries():
 
 def test_table_returns_nothing_for_a_file_with_no_magic():
     assert leveldb.sst_entries(b"not a table at all") == []
+
+
+
+def test_table_reads_entries_from_a_snappy_compressed_block():
+    """Every data block in a real Claude Desktop table is Snappy-compressed --
+    this is the branch that always runs in production, so it needs its own
+    round trip through sst_entries, not just the uncompressed path."""
+    data = fx.build_table(
+        [("put", b"alpha", b"1"), ("put", b"beta", b"2")], compress=True)
+    assert leveldb.sst_entries(data) == [
+        ("put", b"alpha", b"1"), ("put", b"beta", b"2")]
+
+
+def test_table_returns_nothing_when_truncated_to_just_the_footer():
+    """The magic is intact but the index and data blocks it points to are
+    gone -- the correct response is silence, not a guess."""
+    data = fx.build_table([("put", b"alpha", b"1")])
+    truncated = data[-leveldb.SST_FOOTER_SIZE:]
+    assert leveldb.sst_entries(truncated) == []
+
+
+def test_table_returns_nothing_when_a_block_handle_points_past_the_buffer():
+    """The footer's index handle names an offset past the end of the file --
+    the index behind it is unreachable, and the correct response is
+    silence, not whatever bytes happen to lie at some other offset."""
+    data = fx.build_table([("put", b"alpha", b"1")])
+    body = data[:-leveldb.SST_FOOTER_SIZE]
+    forged_footer = bytearray()
+    forged_footer += fx._varint(0) + fx._varint(0)
+    forged_footer += fx._varint(len(body) + 10_000) + fx._varint(16)
+    forged_footer += b"\x00" * (40 - len(forged_footer))
+    forged_footer += struct.pack("<Q", leveldb.SST_MAGIC)
+    forged = body + bytes(forged_footer)
+    assert leveldb.sst_entries(forged) == []

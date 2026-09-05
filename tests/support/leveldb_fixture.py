@@ -97,25 +97,51 @@ def _block(entries) -> bytes:
     return bytes(body)
 
 
-def _wrap(body: bytes) -> bytes:
-    """Block trailer: compression type 0 (none) plus a masked CRC."""
-    trailer = bytes([0])
-    return body + trailer + struct.pack(
-        "<I", _mask(leveldb.crc32c(body + trailer)))
+def _snappy_literal(data: bytes) -> bytes:
+    """A raw Snappy stream: preamble length, then all-literal chunks.
+
+    No back-references -- a run of literal chunks is a genuinely valid
+    Snappy stream on its own, and it exercises the exact branch
+    `sst_entries` takes in production, where every data block is
+    Snappy-compressed (see Task 2, which exists because of that branch).
+    """
+    out = bytearray(_varint(len(data)))
+    pos = 0
+    while pos < len(data):
+        chunk = data[pos:pos + 60]
+        out.append((len(chunk) - 1) << 2)   # tag: kind 0 (literal), n <= 60
+        out += chunk
+        pos += len(chunk)
+    return bytes(out)
+
+
+def _wrap(body: bytes, compress: bool = False) -> bytes:
+    """Block trailer: compression type (0 none, 1 Snappy) plus a masked CRC."""
+    if compress:
+        payload = _snappy_literal(body)
+        kind = 1
+    else:
+        payload = body
+        kind = 0
+    trailer = bytes([kind])
+    return payload + trailer + struct.pack(
+        "<I", _mask(leveldb.crc32c(payload + trailer)))
 
 
 def internal_key(user_key: bytes, seq: int = 1, is_value: bool = True) -> bytes:
     return user_key + struct.pack("<Q", (seq << 8) | (1 if is_value else 0))
 
 
-def build_table(entries) -> bytes:
+def build_table(entries, compress: bool = False) -> bytes:
     """A minimal .ldb: one data block, one index block, a footer.
 
     `entries` is a list of (op, user_key, value), sorted by the caller.
+    `compress` Snappy-compresses the data block -- the normal state of a
+    real Claude Desktop table, where every data block is compressed.
     """
     data = [(internal_key(k, i + 1, op == "put"), v)
             for i, (op, k, v) in enumerate(entries)]
-    data_block = _wrap(_block(data))
+    data_block = _wrap(_block(data), compress=compress)
     out = bytearray(data_block)
 
     last_key = data[-1][0] if data else b"\xff"
