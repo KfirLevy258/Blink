@@ -138,3 +138,46 @@ def test_table_returns_nothing_when_a_block_handle_points_past_the_buffer():
     forged_footer += struct.pack("<Q", leveldb.SST_MAGIC)
     forged = body + bytes(forged_footer)
     assert leveldb.sst_entries(forged) == []
+
+
+import os
+
+
+def _store(tmp_path, tables=(), logs=()):
+    for name, entries in tables:
+        (tmp_path / name).write_bytes(fx.build_table(entries))
+    for name, batches in logs:
+        (tmp_path / name).write_bytes(fx.build_log(batches))
+    return str(tmp_path)
+
+
+def test_scan_returns_only_matching_keys(tmp_path):
+    d = _store(tmp_path, logs=[("000001.log", [
+        [("put", b"want-me", b"1"), ("put", b"skip-me", b"2")]])])
+    assert leveldb.scan(d, lambda k: b"want" in k) == [(b"want-me", b"1")]
+
+
+def test_scan_lets_the_log_win_over_a_table(tmp_path):
+    """The fresh value lives in the log. A table-only reader serves hours-old
+    data that looks current -- measured on a real machine, 3.5 hours stale."""
+    d = _store(tmp_path,
+               tables=[("000005.ldb", [("put", b"k", b"old")])],
+               logs=[("000006.log", [[("put", b"k", b"new")]])])
+    assert leveldb.scan(d, lambda k: k == b"k") == [(b"k", b"new")]
+
+
+def test_scan_honours_a_deletion(tmp_path):
+    d = _store(tmp_path,
+               tables=[("000005.ldb", [("put", b"k", b"v")])],
+               logs=[("000006.log", [[("del", b"k", b"")]])])
+    assert leveldb.scan(d, lambda k: k == b"k") == []
+
+
+def test_scan_is_silent_about_a_missing_directory():
+    assert leveldb.scan("/nonexistent/leveldb", lambda k: True) == []
+
+
+def test_scan_survives_one_unreadable_file(tmp_path):
+    (tmp_path / "000009.ldb").write_bytes(b"garbage, not a table")
+    d = _store(tmp_path, logs=[("000010.log", [[("put", b"k", b"v")]])])
+    assert leveldb.scan(d, lambda k: k == b"k") == [(b"k", b"v")]

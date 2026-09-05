@@ -9,6 +9,7 @@ Read-only is not a style choice. These files belong to a running application
 that compacts and deletes them underneath us, so nothing here opens a
 database, takes a lock, or holds a handle open longer than one read.
 """
+import os
 
 CRC32C_POLY_REVERSED = 0x82f63b78
 CRC_MASK_DELTA = 0xa282ead8
@@ -279,3 +280,60 @@ def sst_entries(data: bytes) -> list:
             op = "put" if key[-8] == 1 else "del"
             out.append((op, key[:-8], value if op == "put" else b""))
     return out
+
+
+def _read_whole(path: str):
+    """The file's bytes, or None. Opened and closed immediately.
+
+    Chromium compacts and deletes these files underneath us. Holding a handle
+    open risks blocking the application's own housekeeping -- on Windows, an
+    open handle without FILE_SHARE_DELETE can fail its delete outright.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def scan(dir_path: str, want) -> list:
+    """Surviving (key, value) pairs whose key satisfies `want`.
+
+    ORDERING IS DELIBERATELY SIMPLIFIED. Real LevelDB decides which copy of a
+    key wins from the MANIFEST and from per-entry sequence numbers; this
+    applies immutable tables first and then write-ahead logs, both in file
+    order, which is correct whenever the log holds writes not yet compacted
+    -- the normal state of a running application.
+
+    A caller that must be certain which of several surviving copies is newest
+    should break the tie on the record's own timestamp rather than trusting
+    this order. pc/desktop_local_storage does exactly that.
+    """
+    try:
+        names = sorted(os.listdir(dir_path))
+    except OSError:
+        return []
+
+    surviving = {}
+    order = []
+    for suffix, reader in ((".ldb", sst_entries), (".log", wal_entries)):
+        for name in [n for n in names if n.endswith(suffix)]:
+            data = _read_whole(os.path.join(dir_path, name))
+            if data is None:
+                continue
+            try:
+                entries = reader(data)
+            except Exception:
+                # An application we do not control is allowed to change its
+                # format. One unreadable file must not silence the store.
+                continue
+            for op, key, value in entries:
+                if not want(key):
+                    continue
+                if op == "del":
+                    surviving.pop(key, None)
+                    continue
+                if key not in surviving:
+                    order.append(key)
+                surviving[key] = value
+    return [(k, surviving[k]) for k in order if k in surviving]
