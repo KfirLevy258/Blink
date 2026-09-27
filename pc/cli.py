@@ -451,24 +451,37 @@ def _note_if_no_claude_code():
         print("     Nothing here needs redoing afterwards -- it starts on its own.")
         return
 
-    print("  !  Claude Code is not installed, so the panel runs on")
-    print("     Claude Desktop alone. That works, with less on it:")
+    # "Not installed" here means not on PATH. Desktop's Code tab runs a
+    # Claude Code of its own from inside the app bundle, which `which` never
+    # finds, and it reads ~/.claude/settings.json like any other: measured
+    # 2026-09-26 on Desktop 2.9939.2 (bundled 2.1.281), started with
+    # --setting-sources=user,project,local, and the hooks step 3 just wrote
+    # fired on a real session. What it does not run is the status line --
+    # Desktop drives it headless, over stream-json, with nothing to draw on.
+    # This note used to list the five-hour countdown and the activity light
+    # as missing; the first arrived with the Local Storage source and the
+    # second was there all along, so a Desktop customer was told their board
+    # could not do what it was already doing.
+    print("  !  Claude Code is not installed on the command line, so the")
+    print("     panel runs on Claude Desktop alone. That works, with less")
+    print("     on it:")
     print()
-    print("       Shown    both usage percentages, and how fast the")
-    print("                five-hour window is filling")
-    print("       Missing  the reset countdowns, and the activity light")
+    print("       Shown    both usage percentages, the five-hour countdown,")
+    print("                and the activity light while you work in")
+    print("                Desktop's Code tab")
+    print("       Later    the weekly countdown, once it has been learned")
     print()
-    # Why, not just what. The countdowns are the part people ask about, and
-    # "it is not implemented yet" would be the wrong answer -- there is
-    # nothing to implement. Verified across every file, LevelDB store and
-    # cache the desktop app writes, 2026-08-28.
-    print("     Claude Desktop does not record when either window resets --")
-    print("     anywhere, in any file -- so there is no countdown to show and")
-    print("     the panel shows a rate instead. The activity light needs")
-    print("     Claude Code's hooks.")
+    # Why, not just what. The weekly countdown is the part people ask
+    # about, and "it is not implemented yet" would be the wrong answer.
+    # Verified across every file, LevelDB store and cache the desktop app
+    # writes, 2026-08-28: no seven-day reset time anywhere.
+    print("     Claude Desktop does not record when the week resets, so")
+    print("     Blink learns it the first time any source reports one. The")
+    print("     figures follow Desktop's own refresh, every 5 to 15 minutes.")
     print()
-    print("     The status line and hooks just installed are correct and will")
-    print("     start working by themselves if you add Claude Code later:")
+    print("     The status line just installed starts working by itself if")
+    print("     you add Claude Code on the command line later, and brings")
+    print("     live figures and both countdowns with it:")
     print()
     print("       npm install -g @anthropic-ai/claude-code@latest")
 
@@ -2253,8 +2266,11 @@ def cmd_status(args) -> int:
         # The consequence, not just the fact. "Not found" alone left someone
         # with missing countdowns and no way to connect the two.
         if desktop_app_present():
+            # Same correction as _note_if_no_claude_code: Desktop supplies
+            # the five-hour countdown, and its Code tab runs the hooks.
             print("Claude Code not found -- running on Claude Desktop alone"
-                  " (no countdowns, no activity light)")
+                  " (weekly countdown once learned; activity light from"
+                  " the Code tab)")
         elif codex_present():
             print("Claude Code not found -- running on Codex alone"
                   " (no Claude page, no activity light)")

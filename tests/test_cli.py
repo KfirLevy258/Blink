@@ -423,10 +423,44 @@ def test_no_claude_code_but_a_desktop_cache_says_what_is_missing(
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
     assert "Claude Desktop alone" in out
-    assert "reset countdowns" in out
-    assert "activity light" in out
+    assert "five-hour countdown" in out
+    assert "weekly countdown" in out
     # The reason, not just the fact -- otherwise it reads as unimplemented.
-    assert "does not record when either window resets" in out
+    assert "does not record when the week resets" in out
+
+
+def test_desktop_note_credits_the_code_tab_with_the_activity_light(
+        tmp_path, capsys, monkeypatch):
+    """Measured 2026-09-26 on Claude Desktop 2.9939.2: the Code tab runs its
+    own bundled Claude Code (2.1.281), which is not on PATH -- so this machine
+    looks like 'no Claude Code' -- but starts it with
+    --setting-sources=user,project,local, and the hooks written by step 3
+    fired on a real session. The note used to say the light needs Claude Code
+    installed, telling a Code-tab user their board could not do what it was
+    already doing."""
+    monkeypatch.setattr(cli, "claude_version", lambda: (None, None))
+    monkeypatch.setattr(cli, "desktop_app_present", lambda: True)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "Code tab" in out
+    assert "activity light" in out
+    assert "no countdowns" not in out
+    assert "the reset countdowns, and the activity light" not in out
+
+
+def test_status_on_desktop_alone_does_not_claim_no_countdowns(
+        tmp_path, capsys, monkeypatch):
+    """`blink status` had the same stale line as the install note: '(no
+    countdowns, no activity light)', both of which Desktop now provides."""
+    monkeypatch.setattr(cli, "claude_version", lambda: (None, None))
+    monkeypatch.setattr(cli, "desktop_app_present", lambda: True)
+    _settings(tmp_path, {})
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "Claude Desktop alone" in out
+    assert "no countdowns" not in out
+    assert "Code tab" in out
 
 
 def test_no_claude_code_still_installs_everything(tmp_path, capsys, monkeypatch):

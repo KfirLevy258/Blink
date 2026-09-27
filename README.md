@@ -151,6 +151,7 @@ For Claude Desktop, the app learns usage by reading Claude Desktop's own local f
 |---|---|
 | Claude Code, in a terminal or an IDE | Everything |
 | Codex CLI | Everything, on its own page |
+| Claude Code in Claude Desktop's Code tab | The same as Desktop below, plus the activity light: the Code tab runs Claude Code's hooks, though not its status line, so the figures are Desktop's rather than live |
 | Claude Desktop, without Claude Code | Five-hour percentage and countdown, refreshed within seconds of a turn; weekly percentage on Desktop's own schedule (about 5 min in use, up to 15 idle); a weekly countdown too, once one has been learned, published only while nothing contradicts it; no activity light |
 | claude.ai in a browser | Nothing - there is no usage data to read |
 

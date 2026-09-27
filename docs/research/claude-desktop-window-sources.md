@@ -194,6 +194,39 @@ Format versions on disk today: Blink v21, V8 v15. Chromium is migrating
 IndexedDB to a SQLite backing store. Check versions and go quiet when they
 change.
 
+## Claude Code inside Desktop's Code tab
+
+Measured 2026-09-26 on one Mac: Claude Desktop 2.9939.2, a Max plan, BLINK's
+hooks and status line already in `~/.claude/settings.json`. A throwaway probe
+polled `ps` every 2 s for processes under
+`~/Library/Application Support/Claude/claude-code`, recording flag names
+only, and the mtimes of `~/.blink/statusline.json` and `~/.blink/state/*`.
+One new Code-tab session, one one-line prompt the owner sent as part of
+testing.
+
+- **It is not the CLI on `PATH`.** Desktop runs its own bundled Claude Code,
+  `claude-code/2.1.281/claude.app`, so `shutil.which("claude")` never finds it
+  and a Desktop-only machine still reads as "no Claude Code".
+- **It reads the user's settings.** Started with
+  `--setting-sources=user,project,local`. The `--settings` object Desktop
+  passes carries only `deniedMcpServers`; nothing about hooks or the status
+  line, and no `disableAllHooks`.
+- **The hooks fire.** A new `<session_id>.state` appeared 2 s after the
+  process started (SessionStart, before the prompt), changed on the prompt
+  and again on the reply, and ended on `Stop`. The `pid` it recorded was the
+  live bundled process, so the liveness check in `claude_state.py` holds.
+  Upstream issue #96496 reports hooks not firing in the Code tab; on this
+  build they did.
+- **The status line does not run.** Desktop drives Claude Code headless
+  (`--input-format stream-json --output-format stream-json`), and
+  `statusline.json` did not change for the session. So the Code tab adds the
+  activity light and nothing to the figures, which stay on Desktop's own
+  refresh. Consistent with upstream issue #60097.
+
+Not measured: Windows, and whether a later Desktop build changes the
+`--setting-sources` it passes. Either would be read the same way, from the
+process's own arguments, without sending a message.
+
 ## Privacy
 
 `README.md:90` tells customers to email support the tail of
