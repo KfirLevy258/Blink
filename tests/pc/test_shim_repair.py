@@ -42,6 +42,9 @@ def test_a_missing_shim_is_not_current(tmp_path):
     assert cli.shim_is_current(p, "blink-hook.sh") is False
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="chmod 0o000 leaves a file readable on Windows, so "
+                           "there is no unreadable shim to test")
 def test_an_unreadable_shim_is_not_current(tmp_path):
     """Answer the question rather than raising it.
 

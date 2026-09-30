@@ -2419,7 +2419,13 @@ def _uninstall_codex_hooks() -> None:
     # at all, a paragraph about a config file that does not exist is noise
     # about a record that was never written.
     if os.path.exists(config):
-        print(f"      Left in place: your Codex trust records in {config}.")
+        # normpath for the reader only. codex_home() is expanduser("~/.codex"),
+        # which on Windows keeps the forward slash: measured on a Windows 11
+        # VM, 2026-09-30, the customer was shown
+        # C:\Users\tester/.codex\config.toml. The file operations do not care;
+        # a person copying the path into Explorer does.
+        print("      Left in place: your Codex trust records in "
+              f"{os.path.normpath(config)}.")
         print("      If you approved this hook in Codex, that approval stays")
         print("      on file, so installing Blink again works without asking")
         print("      you a second time. Remove its [hooks.state] entry by hand")

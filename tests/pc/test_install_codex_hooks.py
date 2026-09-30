@@ -15,6 +15,10 @@ from pc import install_codex_hooks as ich
 from pc.install_statusline import SettingsUnreadable
 
 SHIM = "/home/k/.blink/blink-hook.sh"
+# Expected commands come from ich.hook_command(), never a spelled-out
+# "sh ...": on Windows it writes "bash <path>" (the reason is in
+# hook_command). Seven tests here spelled out the POSIX form and failed on
+# every Windows CI run from 2026-09-11 until a Windows VM reproduced it.
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +56,7 @@ def test_install_writes_one_group_per_event(tmp_path):
     assert group["matcher"] == "*"
     assert group["hooks"] == [{
         "type": "command",
-        "command": "sh /home/k/.blink/blink-hook.sh PreToolUse codex"}]
+        "command": ich.hook_command(SHIM, "PreToolUse")}]
     assert "matcher" not in events["Stop"][0], \
         "events that take no matcher must not be given one"
 
@@ -104,7 +108,7 @@ def test_install_repoints_a_moved_shim(tmp_path):
     events = _read(p)
     assert len(events["PreToolUse"]) == 1
     assert events["PreToolUse"][0]["hooks"][0]["command"] == \
-        "sh /new/blink-hook.sh PreToolUse codex"
+        ich.hook_command("/new/blink-hook.sh", "PreToolUse")
     assert "repointed" in msg
 
 
@@ -119,7 +123,7 @@ def test_install_never_touches_someone_elses_hook(tmp_path):
     events = _read(p)
     commands = [h["command"] for g in events["PreToolUse"] for h in g["hooks"]]
     assert "/usr/local/bin/audit.sh" in commands
-    assert "sh /home/k/.blink/blink-hook.sh PreToolUse codex" in commands
+    assert ich.hook_command(SHIM, "PreToolUse") in commands
 
 
 def test_install_keeps_the_rest_of_the_file(tmp_path):
@@ -143,7 +147,7 @@ def test_install_leaves_a_shared_groups_matcher_alone(tmp_path):
     shared = {"matcher": "Bash", "hooks": [
         {"type": "command", "command": "/usr/local/bin/audit.sh"},
         {"type": "command",
-         "command": "sh /home/k/.blink/blink-hook.sh PreToolUse codex"}]}
+         "command": ich.hook_command(SHIM, "PreToolUse")}]}
     _write(p, {"PreToolUse": [shared]})
 
     ich.install(str(p), SHIM)
@@ -165,7 +169,7 @@ def test_install_steps_over_a_group_it_cannot_read(tmp_path):
     assert "not a group" in events["PreToolUse"]
     commands = [h["command"] for g in events["PreToolUse"]
                 if isinstance(g, dict) for h in g["hooks"]]
-    assert commands == ["sh /home/k/.blink/blink-hook.sh PreToolUse codex"]
+    assert commands == [ich.hook_command(SHIM, "PreToolUse")]
 
 
 def test_install_refuses_a_file_it_cannot_parse(tmp_path):
@@ -223,7 +227,7 @@ def test_the_marker_records_what_was_written(tmp_path):
     p = tmp_path / "hooks.json"
     ich.install(str(p), SHIM)
     recorded = ich._read_marker()
-    assert "sh /home/k/.blink/blink-hook.sh Stop codex" in recorded
+    assert ich.hook_command(SHIM, "Stop") in recorded
 
 
 def test_a_marker_that_is_not_utf8_is_no_marker(tmp_path):
@@ -462,7 +466,7 @@ def test_a_refusal_keeps_the_marker(tmp_path):
 
     ich.uninstall(str(p), SHIM)
 
-    assert "sh /home/k/.blink/blink-hook.sh Stop codex" in ich._read_marker()
+    assert ich.hook_command(SHIM, "Stop") in ich._read_marker()
 
 
 def test_uninstall_refuses_a_file_it_cannot_open(tmp_path):
@@ -563,7 +567,7 @@ def test_a_write_that_failed_keeps_the_marker(tmp_path):
     finally:
         home.chmod(0o700)
 
-    assert "sh /home/k/.blink/blink-hook.sh Stop codex" in ich._read_marker()
+    assert ich.hook_command(SHIM, "Stop") in ich._read_marker()
 
 
 @_needs_unprivileged_posix
