@@ -290,6 +290,24 @@ def desktop_app_present() -> bool:
         return False
 
 
+def desktop_app_installed() -> bool:
+    """Has Claude Desktop ever run here, even if it has recorded no usage yet?
+
+    desktop_app_present() asks for the usage cache, which Desktop writes only
+    after sign-in and its first usage check. Its data folder appears on first
+    launch, before either. Measured on a Windows 11 VM, 2026-09-30: installed
+    and not yet signed in, the folder held Local Storage and config.json and
+    no plan-usage-history.json, so install said "With none of them installed
+    the panel will connect and then sit blank" on a machine with Claude
+    Desktop on it. Signing in wrote the cache within a minute.
+    """
+    from pc.providers import claude_desktop
+    try:
+        return os.path.isdir(os.path.dirname(claude_desktop.cache_path()))
+    except Exception:
+        return False
+
+
 def desktop_staleness_note(age_s):
     """Why a Claude Desktop reading is old -- or nothing, when it is not.
 
@@ -542,6 +560,14 @@ def _note_if_no_claude_code():
         print("     once Codex has approved Blink's hooks. The Claude page")
         print("     stays empty until you add Claude Code; the status line")
         print("     just installed starts working by itself when you do.")
+        return
+    if not desktop and desktop_app_installed():
+        # Installed, not yet used: the one empty panel that fixes itself
+        # without installing anything. See desktop_app_installed.
+        print("  !  Claude Desktop is installed but has not recorded any usage")
+        print("     yet. Open it and sign in: Desktop writes its first figures")
+        print("     within a minute, and the panel picks them up on its own,")
+        print("     with nothing here to redo.")
         return
     if not desktop:
         # No source exists. This is not a reduced panel, it is an empty
@@ -2411,6 +2437,9 @@ def cmd_status(args) -> int:
             # Codex sessions light the pip through their own hooks.
             print("Claude Code not found -- running on Codex alone"
                   " (no Claude page)")
+        elif desktop_app_installed():
+            print("Claude Code not found -- Claude Desktop is installed but"
+                  " has recorded no usage yet; open it and sign in")
         else:
             print("Claude Code not found -- and no Claude Desktop cache or"
                   " Codex log either, so nothing is reporting usage")
@@ -2493,6 +2522,9 @@ def cmd_status(args) -> int:
     elif codex_present():
         print("Usage data  from the Codex session log (no Claude Code status"
               " line yet)")
+    elif desktop_app_installed() and not claude_on_path():
+        print("Usage data  none yet -- Claude Desktop is installed; open it"
+              " and sign in")
     else:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")

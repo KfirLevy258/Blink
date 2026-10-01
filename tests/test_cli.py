@@ -416,7 +416,7 @@ def test_status_says_so_when_no_hooks_are_installed(tmp_path, capsys):
 # 2026-09-30).
 
 
-def _no_cli(monkeypatch, desktop=True, codex=False):
+def _no_cli(monkeypatch, desktop=True, codex=False, desktop_installed=None):
     """A machine with no command-line Claude Code. claude_on_path is patched
     too: claude_version fails the same way for a broken install that IS on
     PATH, and a developer's own `claude` would otherwise leak in."""
@@ -424,6 +424,8 @@ def _no_cli(monkeypatch, desktop=True, codex=False):
     monkeypatch.setattr(cli, "claude_on_path", lambda: False)
     monkeypatch.setattr(cli, "desktop_app_present", lambda: desktop)
     monkeypatch.setattr(cli, "codex_present", lambda: codex)
+    installed = desktop if desktop_installed is None else desktop_installed
+    monkeypatch.setattr(cli, "desktop_app_installed", lambda: installed)
 
 
 def _listed(out, label):
@@ -585,6 +587,27 @@ def test_status_after_install_credits_the_code_tab(tmp_path, capsys,
     assert "activity light from the Code tab" in out
     assert "hooks installed" in out
     assert "no weekly countdown yet" in out
+
+
+def test_desktop_installed_but_never_used_is_not_called_absent(
+        tmp_path, capsys, monkeypatch):
+    """Measured on a Windows 11 VM, 2026-09-30: Claude Desktop installed and
+    not yet signed in has its data folder but no plan-usage-history.json, so
+    install said "With none of them installed the panel will connect and
+    then sit blank" about a machine with Claude Desktop on it. Signing in
+    wrote the file within a minute and the panel needed nothing redone."""
+    _no_cli(monkeypatch, desktop=False, desktop_installed=True)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "none of them installed" not in out
+    assert "Claude Desktop is installed" in out
+    assert "sign in" in out
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "no Claude Desktop cache" not in st
+    assert "Claude Desktop is installed" in st
+    assert "open Claude Code once" not in st
 
 
 def test_no_claude_code_still_installs_everything(tmp_path, capsys, monkeypatch):
