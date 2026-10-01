@@ -206,9 +206,11 @@ implementation:
    the Codex clip's ground is now `#4C82A8` (4.15:1 against white, up from
    2.31:1).
 
-   Still open: the Claude Desktop cache path on Windows and Linux -- an
-   Electron convention, never observed; `blink status` names the path it
-   looked at, and one run beside a signed-in Desktop settles it; macOS
+   Still open: the Claude Desktop cache path on Linux -- an Electron
+   convention, never observed, and there is no Linux Desktop to observe it
+   with (Windows was settled 2026-09-30: `%APPDATA%\Claude`, written there
+   despite the MSIX package -- docs/research/claude-desktop-window-sources.md);
+   macOS
    notarisation (needs an Apple developer account); a board
    id on the settings screen; the disclosure question on the five known
    concerns -- four of which are WiFi-build only and are not compiled into
