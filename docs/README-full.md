@@ -53,7 +53,7 @@ Blink never sees a credential and never sends anything anywhere. It reads figure
 |---|---|---|
 | **Claude Code in a terminal** | Everything: both limits, both countdowns, the activity light | **Full** |
 | **Claude Code in the VS Code / JetBrains extension** | The same. The extension runs the same CLI and reads the same `~/.claude/settings.json`, so the status line and hooks work identically | **Full** |
-| **Claude Code in Claude Desktop's Code tab** | What Desktop chat gets (below), plus the activity light: the Code tab runs its own copy of Claude Code, which reads `~/.claude/settings.json`, so the hooks fire. It runs headless, so the status line never does, and the figures come from Desktop's files rather than from Claude Code. Measured on one Mac (2026-09-26); not yet on Windows | **Partial** |
+| **Claude Code in Claude Desktop's Code tab** | What Desktop chat gets (below), plus the activity light: the Code tab runs its own copy of Claude Code, which reads `~/.claude/settings.json`, so the hooks fire. It runs headless, so the status line never does, and the figures come from Desktop's files rather than from Claude Code. Measured on macOS (2026-09-26) and Windows 11 ARM64 (2026-09-30) | **Partial** |
 | **Claude Desktop chat, without Claude Code** | Both percentages and the five-hour countdown whenever Desktop holds a reset time (the fill rate covers the gaps), on Desktop's own refresh: about every 5 minutes while it is in use, every 15 (occasionally 30) when it sits idle, and at once when its usage panel is opened. The weekly countdown once learned. **No activity light** | **Partial** |
 | **Codex CLI** | Both limits and both countdowns, on its own page | **Full** |
 | **claude.ai in a browser** | Nothing | **Not supported** |

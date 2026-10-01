@@ -222,8 +222,12 @@ testing.
   passes carries only `deniedMcpServers`; nothing about hooks or the status
   line, and no `disableAllHooks`.
 - **The hooks fire.** A new `<session_id>.state` appeared 2 s after the
-  process started (SessionStart, before the prompt), changed on the prompt
-  and again on the reply, and ended on `Stop`. The `pid` it recorded was the
+  session process started, changed twice more, and ended on `Stop`. That
+  process started when the prompt was sent: the session does not exist until
+  then, so seeing a hook fire costs one message. The processes that start
+  earlier, when the tab opens or a folder is chosen, are short-lived helpers.
+  On Windows (below) one carried `disableAllHooks`. This read "SessionStart,
+  before the prompt" until 2026-09-30; the timestamps never supported it. The `pid` it recorded was the
   live bundled process, so the liveness check in `claude_state.py` holds.
   Upstream issue #96496 reports hooks not firing in the Code tab; on this
   build they did.
@@ -233,8 +237,47 @@ testing.
   activity light and nothing to the figures, which stay on Desktop's own
   refresh. Consistent with upstream issue #60097.
 
-Not measured: Windows, and whether a later Desktop build changes the
-`--setting-sources` it passes. Either would be read the same way, from the
+### The same on Windows
+
+Measured 2026-09-30 in a Windows 11 ARM64 VM (UTM): Claude Desktop
+2.16120.0.0 arm64, installed as an MSIX package, signed in to a Max plan.
+BLINK was installed for real. Git for Windows was present but, as by default,
+only `Git\cmd` was on `PATH`: no `bash`. A PowerShell probe polled
+`Win32_Process` every 2 s. For each new process under `claude-code` it
+recorded the executable path, the `--setting-sources` value, the
+`disableAllHooks` value, the key names in the `--settings` object and flag
+names, and the mtimes of `~/.blink/state/*`.
+
+- **The files are where BLINK looks.** Despite MSIX, Desktop writes to the
+  real `%APPDATA%\Claude`: `plan-usage-history.json`, `Local Storage`,
+  `claude-code`, `claude-code-sessions`. The first write came within a minute
+  of signing in, and `blink status` read it ("usage cache parsed, reading
+  15s old").
+- **Bundled Claude Code 2.1.284**, at
+  `%APPDATA%\Claude\claude-code\2.1.284\claude.exe`, not on `PATH`.
+- **Desktop pre-starts helper processes** when a folder is chosen or a new
+  session is opened. Each is started with `--settings {"disableAllHooks":
+  true}`, one of them with `--setting-sources=user` only. None of them
+  became the session.
+- **The session starts on the first message**, with
+  `--setting-sources=user,project,local` and `--settings` keys
+  `deniedMcpServers, serverName`: no `disableAllHooks`.
+- **The hooks fire without `bash` on PATH.** A state file appeared 4 s after
+  the session process started, updated on the reply and ended on `Stop`.
+  `blink status`: "hooks installed (10/10 events, 1 live session)". Claude
+  Code runs hook commands through the Git Bash it locates itself, so the
+  `bash ...` command BLINK writes resolves there.
+- **The recorded pid is 1.** `$PPID` under Git Bash does not name the
+  Windows parent. `claude_state.py` applies the liveness check on POSIX
+  only, so nothing reads it yet. Anything that ever does on Windows must not
+  trust it.
+
+Cost: one message ("hi"), sent with the owner's agreement to start the
+session.
+
+Not measured: Windows x64 (customers' usual machine; this was ARM64 under
+UTM), Windows without Git for Windows (Claude Code on Windows expects it),
+and whether a later Desktop build changes the `--setting-sources` it passes. Either would be read the same way, from the
 process's own arguments, without sending a message.
 
 ## Privacy

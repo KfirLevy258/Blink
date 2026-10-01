@@ -562,8 +562,9 @@ def _note_if_no_claude_code():
     # (bundled 2.1.281), started with --setting-sources=user,project,local,
     # and the hooks step 3 had written fired on a real session. It does not
     # run the status line -- Desktop drives it headless, over stream-json.
-    # Not measured on Windows or Linux; docs/research/claude-desktop-window-
-    # sources.md has the method.
+    # The same held on Windows 11 ARM64, Desktop 2.16120 (bundled 2.1.284),
+    # 2026-09-30, with no `bash` on PATH. There is no Desktop for Linux.
+    # docs/research/claude-desktop-window-sources.md has both methods.
     hooks_ok = _claude_hooks_complete()
     weekly = weekly_countdown_known()
     shown = ["both usage percentages",
