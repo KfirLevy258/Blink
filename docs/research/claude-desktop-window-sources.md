@@ -197,11 +197,21 @@ change.
 ## Claude Code inside Desktop's Code tab
 
 Measured 2026-09-26 on one Mac: Claude Desktop 2.9939.2, a Max plan, BLINK's
-hooks and status line already in `~/.claude/settings.json`. A throwaway probe
-polled `ps` every 2 s for processes under
-`~/Library/Application Support/Claude/claude-code`, recording flag names
-only, and the mtimes of `~/.blink/statusline.json` and `~/.blink/state/*`.
-One new Code-tab session, one one-line prompt the owner sent as part of
+hooks and status line already in `~/.claude/settings.json`. Two reads, no
+message sent to produce either:
+
+1. A throwaway probe polled `ps` every 2 s for processes under
+   `~/Library/Application Support/Claude/claude-code`. It recorded every
+   flag's name, the values of four allow-listed flags (`--permission-mode`,
+   `--output-format`, `--input-format`, and `--setting-sources` when given as
+   a separate argument), and `<v>` for every other value. It also recorded
+   the mtimes of `~/.blink/statusline.json` and `~/.blink/state/*`.
+2. The probe missed `--setting-sources=...`, written with `=`, so the
+   running process's arguments were read once more by hand: the value of
+   `--setting-sources`, and the top-level key names of the JSON object passed
+   to `--settings`. Its values were not printed.
+
+One new Code-tab session, and one one-line prompt the owner sent as part of
 testing.
 
 - **It is not the CLI on `PATH`.** Desktop runs its own bundled Claude Code,
@@ -229,7 +239,7 @@ process's own arguments, without sending a message.
 
 ## Privacy
 
-`README.md:90` tells customers to email support the tail of
+`README.md` ("Something's wrong?") tells customers to email support the tail of
 `~/.blink/bridge.log` and promises "nothing in either is a secret". That
 promise is true today and every source here must keep it true.
 

@@ -23,8 +23,8 @@ It means "no daemon has spoken to me", not "the update is halfway".
 
 The app half of the pair update landed and the firmware half did not. It came
 back only after a hand-run `blink install`, which is the only command that both
-rewrites the shims and re-registers the service (`cli.py:1933` is the sole
-caller of `install_hooks.install`, and `cmd_install` ends with
+rewrites the shims and re-registers the service (`cmd_install` in `pc/cli.py` is the
+sole caller of `install_hooks.install`, and `cmd_install` ends with
 `_install_service()`); the update path does neither.
 
 ## What the log showed, and where it stopped
@@ -42,8 +42,8 @@ it (`pc/logbook.py` postdates that release). Unexplained, and still is.
 
 - **Plist path drift.** No: `swap_in()` rotates `<bin>` -> `<bin>.old` in
   place; the target path never moves.
-- **KeepAlive not firing on a clean exit.** No: `cli.py:513` is
-  `<key>KeepAlive</key><true/>`, unconditional, so `os._exit(0)` is restarted.
+- **KeepAlive not firing on a clean exit.** No: `_PLIST_TEMPLATE` in
+  `pc/cli.py` has `<key>KeepAlive</key><true/>`, unconditional, so `os._exit(0)` is restarted.
 - **The bin rotation carrying the shim away.** No: the shims live at
   `~/.blink/blink-hook.sh`, outside `bin/`.
 - **A new daemon choking on old-format state slots.** No: the shim gained

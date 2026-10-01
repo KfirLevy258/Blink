@@ -30,6 +30,14 @@ def _sandboxed_home(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    # Claude Desktop's files on Windows live under %APPDATA%, which is its
+    # own variable and was never redirected: on a Windows 11 VM, 2026-09-30,
+    # `blink status` inside the suite read a real plan-usage-history.json
+    # from the profile and a test expecting "no usage data" failed. The same
+    # layout as a real profile, so code joining paths under it sees nothing
+    # unusual.
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
 
 
 @pytest.fixture(autouse=True)
