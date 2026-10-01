@@ -2010,6 +2010,11 @@ def cmd_driver(_args) -> int:
     if status in ("installed", "ok"):
         print("  Unplug the board, plug it back in, and run this again.")
         print("  If it stays, the machine may need a restart.")
+    elif status == "no-arm64":
+        # Not "install it by hand from the WCH page": that page has no
+        # Arm64 build either, and sending someone there is a dead end.
+        print("  There is no driver to install on Windows on Arm. The board")
+        print("  works from any x64 Windows PC, a Mac, or Linux.")
     else:
         print(f"  Install the driver by hand from {win_driver.DRIVER_PAGE}")
     return 1

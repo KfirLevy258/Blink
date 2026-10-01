@@ -364,3 +364,43 @@ class TestInstallSteps:
         out = capsys.readouterr().out
         assert "[1/6] Program ... " in out
         assert "[2/6] Status line ... " in out
+
+
+class TestWindowsOnArm:
+    """WCH ships the CH340 driver for x86 and x64 only, and Windows on Arm
+    cannot emulate a kernel driver. On a Windows 11 ARM64 VM, 2026-09-30,
+    install printed "USB driver ... failed (pnputil exited 2)" -- true, and
+    useless: nothing the customer could do would change it."""
+
+    def _arm(self, monkeypatch, in_store=False):
+        monkeypatch.setattr(win_driver.sys, "platform", "win32")
+        monkeypatch.setattr(win_driver, "native_machine", lambda: "arm64")
+        monkeypatch.setattr(win_driver, "driver_in_store", lambda: in_store)
+
+        def never(*_a, **_k):
+            raise AssertionError("pnputil must not run for a driver that "
+                                 "cannot load here")
+        monkeypatch.setattr(win_driver, "install_driver", never)
+
+    def test_install_says_no_driver_exists_instead_of_running_pnputil(
+            self, monkeypatch):
+        self._arm(monkeypatch)
+        status, line = win_driver.ensure_driver()
+        assert status == "no-arm64"
+        assert "Windows on Arm" in line
+        assert "pnputil" not in line
+
+    def test_forcing_it_changes_nothing(self, monkeypatch):
+        self._arm(monkeypatch)
+        assert win_driver.ensure_driver(force=True)[0] == "no-arm64"
+
+    def test_a_driver_already_in_the_store_is_left_to_work(self, monkeypatch):
+        """Someone who installed an Arm64 driver themselves is not told it
+        cannot exist."""
+        self._arm(monkeypatch, in_store=True)
+        assert win_driver.ensure_driver()[0] == "ok"
+
+    def test_native_machine_is_none_off_windows(self):
+        if sys.platform == "win32":
+            return
+        assert win_driver.native_machine() is None

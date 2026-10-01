@@ -240,6 +240,10 @@ def install_message(status, note=""):
         return "installed" + (f" -- {note}" if note else "")
     if status == "not-windows":
         return "not needed on this system"
+    if status == "no-arm64":
+        return ("none exists for Windows on Arm -- WCH makes the driver for"
+                " this board's USB chip for x86 and x64 PCs only, so this"
+                " machine cannot reach the board over USB")
     if status == "absent":
         return ("this build carries no driver -- install it by hand from "
                 + DRIVER_PAGE)
@@ -636,6 +640,35 @@ def install_driver(inf_path=None):
     return "failed", f"pnputil exited {rc}"
 
 
+def native_machine():
+    """The CPU Windows itself runs on: "arm64", "amd64", "x86", or None.
+
+    Not platform.machine(): the shipped blink.exe is x64, and on a Windows on
+    Arm machine it runs under emulation, where Python reports AMD64. Only
+    IsWow64Process2 (Windows 10 1709+) answers for the machine rather than
+    for the process. None off Windows, or if the call is unavailable.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        fn = k32.IsWow64Process2
+        fn.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_ushort),
+                       ctypes.POINTER(ctypes.c_ushort)]
+        fn.restype = wintypes.BOOL
+        process, native = ctypes.c_ushort(), ctypes.c_ushort()
+        if not fn(k32.GetCurrentProcess(), ctypes.byref(process),
+                  ctypes.byref(native)):
+            return None
+    except Exception:
+        return None
+    # IMAGE_FILE_MACHINE_* constants.
+    return {0xAA64: "arm64", 0x8664: "amd64", 0x014C: "x86"}.get(native.value)
+
+
 def ensure_driver(force=False):
     """The whole job, for `blink install` and `blink driver`. (status, line).
 
@@ -649,5 +682,16 @@ def ensure_driver(force=False):
         return "not-windows", install_message("not-windows")
     if not force and driver_in_store():
         return "ok", install_message("ok")
+    # After the store check, so a customer who found an Arm64 driver
+    # themselves is left alone. Before pnputil, which on a Windows 11 ARM64
+    # VM (2026-09-30) failed with exit 2: the bundled package is amd64 only
+    # (vendor/ch341ser), WCH publishes no Arm64 build, and Windows on Arm
+    # cannot emulate a kernel driver. The one Arm64 driver around is a
+    # community build that needs test-signing mode -- not something to ask
+    # of a customer.
+    if native_machine() == "arm64":
+        if force and driver_in_store():
+            return "ok", install_message("ok")
+        return "no-arm64", install_message("no-arm64")
     status, note = install_driver()
     return status, install_message(status, note)
