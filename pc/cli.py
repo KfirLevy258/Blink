@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import time
+from typing import NamedTuple
 
 from pc import (install_codex_hooks, install_hooks, install_statusline, ota,
                 protocol, statusline_source, update, win_driver)
@@ -300,10 +301,19 @@ def desktop_app_installed() -> bool:
     no plan-usage-history.json, so install said "With none of them installed
     the panel will connect and then sit blank" on a machine with Claude
     Desktop on it. Signing in wrote the cache within a minute.
+
+    Local Storage, not the data folder itself. The folder is also where
+    claude_desktop_config.json lives, which MCP setup tools create on
+    machines that never ran Desktop, and it survives an uninstall -- on
+    Linux, where there is no Desktop, it can only be such a leftover. Local
+    Storage is written by the app's own browser engine and nothing else
+    (review, 2026-10-19).
     """
-    from pc.providers import claude_desktop
+    from pc import desktop_local_storage
     try:
-        return os.path.isdir(os.path.dirname(claude_desktop.cache_path()))
+        # The "Local Storage" folder, one above the leveldb store: the
+        # Windows measurement saw the folder, not what was inside it.
+        return os.path.isdir(os.path.dirname(desktop_local_storage.store_path()))
     except Exception:
         return False
 
@@ -378,10 +388,36 @@ def claude_on_path() -> bool:
     return shutil.which("claude") is not None
 
 
-def claude_hooks_present():
-    """How many of Blink's Claude Code hooks settings.json wires up.
+class ClaudeHooks(NamedTuple):
+    """What settings.json says about Blink's Claude Code hooks.
 
-    Returns (present, total), or None when settings.json does not parse.
+    `wired` counts EVENTS with at least one Blink hook, not entries: a
+    duplicated Stop group from a hand edit or a settings-sync tool counted
+    11 of 10 and made install say "run install again" on every run, with all
+    ten events wired (review, 2026-10-19). `readable` is False when
+    settings.json does not parse, and then nothing else here is known --
+    which is "unknown", not "missing".
+    """
+    wired: int
+    total: int
+    readable: bool
+    disabled: bool      # "disableAllHooks": true -- Claude Code runs none
+    shim: bool          # the file the hooks run exists
+
+    @property
+    def light(self) -> bool:
+        """Will Claude Code sessions -- the Code tab's included -- light the
+        pip? Every condition here is one the Activity row in `blink status`
+        reports on, so the install note and status cannot disagree with it.
+        A shim that is merely out of date still counts: the daemon repairs it
+        (DriftWatchdog), and the pip lights meanwhile."""
+        return (self.readable and not self.disabled and self.shim
+                and self.wired == self.total)
+
+
+def claude_hooks():
+    """Read Blink's Claude Code hooks out of settings.json, once.
+
     Counted from settings.json rather than from the shim's presence on disk:
     the file existing proves an install ran once, not that Claude Code is
     still configured to call it. One function, because the install note and
@@ -390,29 +426,37 @@ def claude_hooks_present():
     Code tab" three lines above "hooks not installed -- the busy/idle pip
     will stay dark" (review, 2026-09-30).
     """
+    total = len(install_hooks.HOOK_EVENTS)
+    shim = os.path.exists(hook_shim_path())
     try:
-        hooks = install_statusline._load(settings_path()).get("hooks")
+        data = install_statusline._load(settings_path())
     except install_statusline.SettingsUnreadable:
-        return None
-    # isinstance, not `or {}`: only None and {} take the `or` branch, so a
-    # string or list under "hooks" reached .get() and crashed status -- the
-    # same trap _current_command documents for statusLine.
+        return ClaudeHooks(0, total, False, False, shim)
+    hooks = data.get("hooks")
+    # isinstance at every level, not `or {}` / `or []`: only None and empty
+    # containers take the `or` branch, so a string under "hooks" crashed
+    # status, and so did {"PreToolUse": true} one level down -- after a
+    # `blink install` that had otherwise printed "Done." (review,
+    # 2026-10-19). Same trap _current_command documents for statusLine.
     if not isinstance(hooks, dict):
         hooks = {}
-    present = sum(
-        1 for event, _ in install_hooks.HOOK_EVENTS
-        for group in (hooks.get(event) or [])
-        if isinstance(group, dict)
-        for h in (group.get("hooks") or [])
-        if isinstance(h, dict)
-        and h.get("command") == install_hooks.hook_command(
-            hook_shim_path(), event))
-    return present, len(install_hooks.HOOK_EVENTS)
 
+    def wired(event):
+        command = install_hooks.hook_command(hook_shim_path(), event)
+        groups = hooks.get(event)
+        for group in groups if isinstance(groups, list) else []:
+            inner = group.get("hooks") if isinstance(group, dict) else None
+            for h in inner if isinstance(inner, list) else []:
+                if isinstance(h, dict) and h.get("command") == command:
+                    return True
+        return False
 
-def _claude_hooks_complete() -> bool:
-    counted = claude_hooks_present()
-    return counted is not None and counted[0] == counted[1]
+    # Claude Code's own off switch, and it covers the Code tab's bundled copy
+    # too: with it set, every hook above is present and none of them runs.
+    disabled = data.get("disableAllHooks") is True
+    return ClaudeHooks(sum(1 for event, _ in install_hooks.HOOK_EVENTS
+                           if wired(event)),
+                       total, True, disabled, shim)
 
 
 def weekly_countdown_known() -> bool:
@@ -424,13 +468,87 @@ def weekly_countdown_known() -> bool:
     learn it -- Desktop chat without Cowork has no source for it at all -- and
     on desks that already had it, where the panel was counting down a weekly
     reset while install said it was coming later.
+
+    Asked the way the daemon asks, not by reading the file. Its provider
+    also withdraws an anchor that Desktop's own weekly-percentage history
+    contradicts (weekly_anchor.refuted_by), and a refuted anchor stays
+    loadable for up to eight weeks -- so a load-and-project check called the
+    countdown known while the wire carried weekly_resets_in_s -1 (review,
+    2026-10-19).
+
+    With no anchor at all, the daemon seeds one on its first poll from a
+    Cowork session (IngestionBus._seed_anchor_once), and install starts the
+    daemon seconds before it prints its note. The same seeders, read-only,
+    so a Cowork desk is not told "Missing" about a countdown it is about to
+    show.
     """
-    from pc import weekly_anchor
+    from pc import cowork_audit, desktop_idb, weekly_anchor
+    from pc.providers.weekly_anchor import (DesktopHistoryProvider,
+                                            WeeklyAnchorProvider)
     try:
-        anchor = weekly_anchor.load(weekly_anchor.anchor_path())
-        return weekly_anchor.project(anchor, time.time()) is not None
+        provider = WeeklyAnchorProvider(
+            history_provider=DesktopHistoryProvider())
+        if provider.poll(time.time()):
+            return True
+        if weekly_anchor.load(weekly_anchor.anchor_path()) is not None:
+            return False        # known once, and now projected out or refuted
+        return (cowork_audit.seven_day_reset() is not None
+                or desktop_idb.seven_day_reset() is not None)
     except Exception:
         return False
+
+
+class Desk(NamedTuple):
+    """Everything the install note and `blink status` say about which
+    sources this machine has, read once.
+
+    One reader, because the two used to read the machine separately and
+    disagreed in ways only a review found: status told a Claude Code plus
+    Desktop desk it had "no Claude Code status line", a Codex desk with an
+    unsigned Desktop never heard "sign in", and the install note's light
+    did not match the Activity row (review, 2026-10-19). Both callers now
+    branch on these fields and nothing else.
+    """
+    claude_text: object         # `claude --version` output, or None
+    claude_ver: object          # parsed version tuple, or None
+    on_path: bool               # a `claude` on PATH, answering or not
+    desktop: bool               # Desktop has written usage (signed in)
+    desktop_installed: bool     # Desktop has run here, signed in or not
+    codex: bool
+    hooks: ClaudeHooks
+    weekly: bool
+
+    @property
+    def cli_answers(self) -> bool:
+        return self.claude_text is not None
+
+    @property
+    def cli_silent(self) -> bool:
+        """On PATH, but --version said nothing. Not "absent": telling that
+        person Claude Code is not installed sends them to reinstall the
+        wrong thing."""
+        return self.claude_text is None and self.on_path
+
+    @property
+    def unsigned_desktop(self) -> bool:
+        return self.desktop_installed and not self.desktop
+
+
+def read_desk(version=None) -> Desk:
+    """Read the machine once. `version` is a claude_version() result the
+    caller already has: `blink install` used to ask twice, and a `claude`
+    that hangs costs its 30 s timeout per ask (measured 60.0 s, review
+    2026-10-19). The weekly question is only asked where a desk can need it
+    -- it may read Desktop's IndexedDB, and a CLI desk has no use for it."""
+    text, ver = claude_version() if version is None else version
+    desktop = desktop_app_present()
+    return Desk(claude_text=text, claude_ver=ver,
+                on_path=text is not None or claude_on_path(),
+                desktop=desktop,
+                desktop_installed=desktop or desktop_app_installed(),
+                codex=codex_present(),
+                hooks=claude_hooks(),
+                weekly=text is None and desktop and weekly_countdown_known())
 
 
 def _announce_codex_hooks() -> None:
@@ -516,7 +634,56 @@ def _note_rows(label, items):
             print(" " * 18 + more)
 
 
-def _note_if_no_claude_code():
+def _light_rows(desk):
+    """The activity light's (shown, missing) items for a desk with no
+    command-line Claude Code.
+
+    Two sources, decided separately. Codex sessions light the pip from
+    Codex's own session log (codex_cli.parse_rollout_state); its hooks only
+    add "waiting" on top. Claude sessions -- here, Desktop's Code tab -- need
+    Blink's Claude hooks. A Desktop-plus-Codex desk with broken Claude hooks
+    was told "no activity light" while its wire line said "state":"running"
+    from a Codex session (review, 2026-10-19).
+    """
+    shown, missing = [], []
+    claude = desk.desktop and desk.hooks.light
+    if claude and desk.codex:
+        shown.append("the activity light, for Codex sessions and Desktop's"
+                     " Code tab")
+    elif claude:
+        shown.append("the activity light, while you work in Desktop's"
+                     " Code tab")
+    elif desk.codex:
+        shown.append("the activity light, for Codex sessions")
+    if desk.desktop and not desk.hooks.light:
+        missing.append("the activity light for Desktop's Code tab -- "
+                       + _hooks_gap(desk.hooks))
+    return shown, missing
+
+
+def _hooks_gap(hooks):
+    """Why Blink's Claude hooks will not run, in the words that fix it.
+
+    Never "run install again" on its own: this prints at the end of the
+    install that just tried, and when step 3 refused the hooks section the
+    re-run refuses it again, so that advice looped forever (review,
+    2026-10-19).
+    """
+    if not hooks.readable:
+        return "settings.json does not parse; fix it, then run install again"
+    if hooks.disabled:
+        return ("settings.json sets disableAllHooks, so Claude Code runs"
+                " none of them")
+    if not hooks.shim:
+        return "the hook shim is missing; run install again"
+    if hooks.wired == 0:
+        return ("Blink could not add its hooks to settings.json (see the"
+                " Activity hooks step above)")
+    return (f"only {hooks.wired} of {hooks.total} hooks are in settings.json"
+            " (see the Activity hooks step above)")
+
+
+def _note_if_no_claude_code(desk):
     """Say what this machine will and will not show, when Claude Code is absent.
 
     "Absent" means no `claude` on PATH. Steps 2 and 3 of the install write a
@@ -530,38 +697,50 @@ def _note_if_no_claude_code():
     stay correct: install Claude Code tomorrow and it all starts working with
     nothing to redo. Same reasoning as _warn_if_claude_too_old below.
 
-    Every line below is read off the machine rather than written in advance.
-    The fixed version promised the activity light on desks where step 3 had
-    just failed, a weekly countdown on desks that can never learn one, and
-    "every 5 to 15 minutes" for a five-hour figure that moves within seconds
-    of a turn -- all found by review, 2026-09-30.
+    Every line below is read off the machine (read_desk) rather than written
+    in advance. The fixed version promised the activity light on desks where
+    step 3 had just failed, a weekly countdown on desks that can never learn
+    one, and "every 5 to 15 minutes" for a five-hour figure that moves within
+    seconds of a turn -- all found by review, 2026-09-30.
     """
-    text, _ = claude_version()
-    if text is not None:
+    if desk.cli_answers:
         return
     print()
-    if claude_on_path():
+    if desk.cli_silent:
         # Present but not answering. "Not installed" would send them to
-        # reinstall something that is there; cmd_status says the same.
-        print("  !  `claude` is on your PATH but `claude --version` did not")
-        print("     answer, so Blink cannot tell which version it is. Run it")
-        print("     yourself to see why; the panel needs it to answer.")
+        # reinstall something that is there; cmd_status says the same. Not
+        # "the panel needs it to answer" either: the daemon never runs
+        # `claude --version`, and if `claude` itself works its status line
+        # feeds the panel regardless (review, 2026-10-19).
+        print("  !  There is a `claude` on your PATH, but `claude --version`")
+        print("     did not answer, so Blink cannot tell which version it is")
+        print("     or whether it works. Run it yourself to see why.")
+        if desk.desktop or desk.codex:
+            source = " and ".join(
+                n for n, on in (("Claude Desktop", desk.desktop),
+                                ("Codex", desk.codex)) if on)
+            print(f"     Meanwhile the panel also reads {source}.")
         return
 
-    codex = codex_present()
-    desktop = desktop_app_present()
-    if codex and not desktop:
-        # A Codex machine. Codex sessions drive the activity light through
-        # their own hooks (step 4) since a88d7d6; this note said "there is no
-        # activity light -- that needs Claude Code's hooks" until 2026-09-30.
+    if not desk.desktop and desk.codex:
+        # A Codex machine. Its light comes from the same session log as its
+        # limits; Codex's hooks only add "waiting" on top, so this does not
+        # hang on step 4 having been approved.
         print("  !  Claude Code is not installed, so the panel runs on Codex")
-        print("     alone: both Codex limits and their countdowns, from the")
-        print("     session log Codex already writes, and the activity light")
-        print("     once Codex has approved Blink's hooks. The Claude page")
-        print("     stays empty until you add Claude Code; the status line")
-        print("     just installed starts working by itself when you do.")
+        print("     alone: both Codex limits and their countdowns, and the")
+        print("     activity light, from the session log Codex already")
+        if desk.unsigned_desktop:
+            # Ahead of "add Claude Code": the Desktop already on the machine
+            # fills the Claude page with nothing to install (review,
+            # 2026-10-19).
+            print("     writes. Claude Desktop is installed but not signed in;")
+            print("     sign in to it and the Claude page fills by itself.")
+        else:
+            print("     writes. The Claude page stays empty until you add")
+            print("     Claude Code; the status line just installed starts")
+            print("     working by itself when you do.")
         return
-    if not desktop and desktop_app_installed():
+    if desk.unsigned_desktop:
         # Installed, not yet used: the one empty panel that fixes itself
         # without installing anything. See desktop_app_installed.
         print("  !  Claude Desktop is installed but has not recorded any usage")
@@ -569,7 +748,7 @@ def _note_if_no_claude_code():
         print("     within a minute, and the panel picks them up on its own,")
         print("     with nothing here to redo.")
         return
-    if not desktop:
+    if not desk.desktop:
         # No source exists. This is not a reduced panel, it is an empty
         # one, and saying anything softer would be misleading.
         print("  !! Nothing on this machine reports usage yet.")
@@ -591,51 +770,57 @@ def _note_if_no_claude_code():
     # The same held on Windows 11 ARM64, Desktop 2.16120 (bundled 2.1.284),
     # 2026-09-30, with no `bash` on PATH. There is no Desktop for Linux.
     # docs/research/claude-desktop-window-sources.md has both methods.
-    hooks_ok = _claude_hooks_complete()
-    weekly = weekly_countdown_known()
+    #
+    # The five-hour figure comes from Desktop's Local Storage, written
+    # within seconds of a turn; only the weekly percentage waits on the
+    # usage cache Desktop rewrites on its own schedule. "Live figures" under
+    # Missing contradicted the README's own measurement (review, 2026-10-19).
     shown = ["both usage percentages",
              "the five-hour countdown while a window is running, and how "
              "fast it is filling in between"]
     missing = []
-    if weekly:
+    if desk.weekly:
         shown.append("the weekly countdown")
     else:
         missing.append("the weekly countdown (below)")
-    if hooks_ok:
-        shown.append("the activity light, while you work in Desktop's "
-                     "Code tab")
-    else:
-        missing.append("the activity light -- Blink's hooks are not all "
-                       "in place; run install again")
-    if codex:
+    light_shown, light_missing = _light_rows(desk)
+    shown += light_shown
+    if desk.codex:
         shown.append("Codex, on its own page")
-    missing.append("live figures: they follow Desktop's own refresh")
+    missing += light_missing
+    missing.append("an up-to-the-minute weekly percentage: it follows"
+                   " Desktop's own refresh")
 
-    who = "Claude Desktop and Codex" if codex else "Claude Desktop alone"
+    who = "Claude Desktop and Codex" if desk.codex else "Claude Desktop alone"
     print("  !  Claude Code is not installed on the command line, so the")
     print(f"     panel runs on {who}. That works, with less on it:")
     print()
     _note_rows("Shown", shown)
     _note_rows("Missing", missing)
     print()
-    if not weekly:
+    if not desk.weekly:
         # Why, not just what. Searched across every file, LevelDB store and
         # cache the desktop app writes, 2026-08-28: no seven-day reset time
         # for a chat-only desk. Cowork records one, which is why this is not
-        # "never".
+        # "never". The weekly dial shows "--" meanwhile, not a rate: the
+        # daemon sends only the five-hour burn and the firmware draws no
+        # rate on the weekly gauge (usage_view.c) -- "shows a rate" was
+        # printed here until review, 2026-10-19.
         print("     Claude Desktop chat does not record when the week resets.")
         print("     Blink learns it from Claude Code's status line or a Cowork")
-        print("     session; until one reports it, the weekly dial shows a rate.")
+        print("     session; until one reports it, the weekly dial has no")
+        print("     countdown.")
         print()
     print("     The status line just installed starts working by itself if")
     print("     you add Claude Code on the command line later, and brings")
-    print("     live figures and both countdowns with it:")
+    print("     an up-to-the-minute weekly figure"
+          + ("" if desk.weekly else " and its countdown") + " with it:")
     print()
     print("       npm install -g @anthropic-ai/claude-code@latest")
 
 
-def _warn_if_claude_too_old():
-    text, ver = claude_version()
+def _warn_if_claude_too_old(desk):
+    ver = desk.claude_ver
     if ver is None or ver >= MIN_CLAUDE:
         return
     # A warning, not a refusal. Everything installed is correct and stays
@@ -643,7 +828,7 @@ def _warn_if_claude_too_old():
     # redo; refusing would make them run this again for no reason.
     m = ".".join(str(n) for n in MIN_CLAUDE)
     print()
-    print(f"  !! Your Claude Code is {text}, and Blink needs {m} or newer.")
+    print(f"  !! Your Claude Code is {desk.claude_text}, and Blink needs {m} or newer.")
     print("     Older versions do not put the usage figures in the status line")
     print("     at all, so the panel will sit blank until you update:")
     print()
@@ -2128,8 +2313,12 @@ def cmd_install(_args) -> int:
     # Absent first: it is a bigger fact than out-of-date, and the two are
     # mutually exclusive (claude_version() gives no version for an absent
     # install, which is exactly what _warn_if_claude_too_old returns on).
-    _note_if_no_claude_code()
-    _warn_if_claude_too_old()
+    # One read for both: each used to run `claude --version` itself, and a
+    # hanging `claude` cost its 30 s timeout twice after "Done." (review,
+    # 2026-10-19).
+    desk = read_desk()
+    _note_if_no_claude_code(desk)
+    _warn_if_claude_too_old(desk)
     return 0
 
 
@@ -2409,35 +2598,46 @@ def cmd_status(args) -> int:
     for line in _board_lines():
         print(line)
 
-    text, ver = claude_version()
-    if text is None and claude_on_path():
+    desk = read_desk()
+    text, ver = desk.claude_text, desk.claude_ver
+    if desk.cli_silent:
         # claude_version() fails the same way for "absent" and "present but
         # not answering"; only the second is on PATH. The `elif ver is None`
         # branch below was unreachable for it.
-        print("Claude Code on PATH, but `claude --version` did not answer")
+        also = [n for n, on in (("Claude Desktop", desk.desktop),
+                                ("Codex", desk.codex)) if on]
+        print("Claude Code on PATH, but `claude --version` did not answer"
+              + (f" (the panel also reads {' and '.join(also)})"
+                 if also else ""))
     elif text is None:
         # The consequence, not just the fact. "Not found" alone left someone
         # with missing countdowns and no way to connect the two. Built from
-        # the same helpers as _note_if_no_claude_code, so the two cannot
-        # disagree -- and neither can disagree with the Activity row below.
-        desktop = desktop_app_present()
-        codex = codex_present()
-        if desktop:
+        # the same Desk as _note_if_no_claude_code, so the two cannot
+        # disagree -- and the light from the same ClaudeHooks as the
+        # Activity row below.
+        if desk.desktop:
             gaps = []
-            if not weekly_countdown_known():
-                gaps.append("no weekly countdown yet")
-            gaps.append("activity light from the Code tab"
-                        if _claude_hooks_complete()
-                        else "no activity light: hooks missing")
-            who = ("Claude Desktop and Codex" if codex
+            if not desk.weekly:
+                # Not "yet": a chat-only desk may never learn one.
+                gaps.append("no weekly countdown")
+            if desk.hooks.light:
+                gaps.append("activity light from the Code tab"
+                            + (" and Codex" if desk.codex else ""))
+            elif desk.codex:
+                gaps.append("activity light from Codex only: Claude hooks"
+                            " not working")
+            else:
+                gaps.append("no activity light: Claude hooks not working")
+            who = ("Claude Desktop and Codex" if desk.codex
                    else "Claude Desktop alone")
             print(f"Claude Code not found -- running on {who}"
                   f" ({'; '.join(gaps)})")
-        elif codex:
-            # Codex sessions light the pip through their own hooks.
+        elif desk.codex:
+            # Codex sessions light the pip from their own session log.
             print("Claude Code not found -- running on Codex alone"
-                  " (no Claude page)")
-        elif desktop_app_installed():
+                  + (" (sign in to Claude Desktop for the Claude page)"
+                     if desk.unsigned_desktop else " (no Claude page)"))
+        elif desk.unsigned_desktop:
             print("Claude Code not found -- Claude Desktop is installed but"
                   " has recorded no usage yet; open it and sign in")
         else:
@@ -2468,16 +2668,16 @@ def cmd_status(args) -> int:
     # disclosure had: someone whose activity pip never lights needs a way to
     # see whether the hooks are actually there, and "Status line installed"
     # answers a different question.
-    #
-    # Counted from settings.json rather than from the shim's presence on disk:
-    # the file existing proves an install ran once, not that Claude Code is
-    # still configured to call it, and drift is exactly what goes wrong here.
-    counted = claude_hooks_present()
-    if counted is None:
+    hooks = desk.hooks
+    if not hooks.readable:
         print("Activity    unknown -- settings.json does not parse")
     else:
-        ours, total = counted
-        if ours == total:
+        ours, total = hooks.wired, hooks.total
+        if hooks.disabled and ours:
+            print(f"Activity    hooks installed ({ours}/{total} events), but"
+                  " settings.json sets disableAllHooks -- Claude Code runs"
+                  " none of them")
+        elif ours == total:
             live = _live_sessions()
             note = f", {live} live session{'s' if live != 1 else ''}" if live else ""
             print(f"Activity    hooks installed ({ours}/{total} events{note})")
@@ -2502,8 +2702,23 @@ def cmd_status(args) -> int:
                 print(f"            {_shim_repair_line(stale, bridge_running)}")
 
     # The most useful support answer: is fresh data actually arriving?
+    #
+    # A desk with no `claude` on PATH is fed from Desktop's files even when
+    # a statusline.json is left over from an earlier Claude Code: "open
+    # Claude Code to refresh it" under "running on Claude Desktop alone"
+    # sent people to a program they do not have. And with a `claude` that
+    # does exist, Desktop does not make the status line moot -- that desk
+    # still needs "open Claude Code once" (review, 2026-10-19).
     payload = os.path.join(blink_home(), "statusline.json")
-    if os.path.exists(payload):
+    desktop_fed = desk.desktop and not desk.on_path
+    if desktop_fed:
+        # "Open Claude Code once so it renders its status line" can never
+        # clear on this desk: Desktop's Code tab runs Claude Code headless and
+        # never renders one (measured 2026-09-26), and the board is already
+        # being fed from Desktop's files.
+        print("Usage data  from Claude Desktop's own files (no Claude Code"
+              " status line on this machine)")
+    elif os.path.exists(payload):
         age = int(time.time() - os.path.getmtime(payload))
         # The same bound the panel uses (statusline_source.STALE_AFTER_S):
         # this said "old" at two minutes for a reading the board was still
@@ -2512,17 +2727,10 @@ def cmd_status(args) -> int:
             print(f"Usage data  fresh ({age}s old)")
         else:
             print(f"Usage data  {age}s old -- open Claude Code to refresh it")
-    elif desktop_app_present():
-        # "Open Claude Code once so it renders its status line" can never
-        # clear on this desk: Desktop's Code tab runs Claude Code headless and
-        # never renders one (measured 2026-09-26), and the board is already
-        # being fed from Desktop's files.
-        print("Usage data  from Claude Desktop's own files (no Claude Code"
-              " status line on this machine)")
-    elif codex_present():
+    elif desk.codex:
         print("Usage data  from the Codex session log (no Claude Code status"
               " line yet)")
-    elif desktop_app_installed() and not claude_on_path():
+    elif desk.unsigned_desktop and not desk.on_path:
         print("Usage data  none yet -- Claude Desktop is installed; open it"
               " and sign in")
     else:

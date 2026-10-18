@@ -480,7 +480,8 @@ def test_desktop_only_note_sorts_what_it_shows_from_what_it_lacks(
     assert not _has(missing, "activity light")
     assert _has(missing, "weekly countdown")
     assert not _has(shown, "weekly countdown")
-    assert _has(missing, "live figures")
+    assert _has(missing, "up-to-the-minute weekly percentage")
+    assert not _has(missing, "live figures")
     # The reason, not just the fact -- otherwise it reads as unimplemented.
     assert "does not record when the week resets" in out
     # Server-controlled intervals are never quoted (desktop_staleness_note).
@@ -533,9 +534,14 @@ def test_codex_only_note_does_not_deny_the_activity_light(
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
-    assert "Codex" in out and "alone" in out
+    # "runs on Codex", not `"alone" in out`: the install disclosure says
+    # "readable by you alone", so that check could never fail (review,
+    # 2026-10-19).
+    assert "runs on Codex" in out
     assert "no activity light" not in out
     assert "activity light" in out
+    # Its light comes from the session log; it does not wait on step 4.
+    assert "approved" not in out
 
 
 def test_a_claude_on_path_that_does_not_answer_is_not_called_absent(
@@ -568,7 +574,7 @@ def test_status_on_desktop_alone_agrees_with_its_own_activity_row(
     assert "Claude Desktop alone" in out
     assert "hooks not installed" in out
     assert "activity light from the Code tab" not in out
-    assert "no activity light: hooks missing" in out
+    assert "no activity light: Claude hooks not working" in out
     assert "no countdowns" not in out
     # Not "open Claude Code once so it renders its status line": the Code
     # tab never renders one, so that advice could never clear.
@@ -586,7 +592,7 @@ def test_status_after_install_credits_the_code_tab(tmp_path, capsys,
     out = capsys.readouterr().out
     assert "activity light from the Code tab" in out
     assert "hooks installed" in out
-    assert "no weekly countdown yet" in out
+    assert "no weekly countdown" in out
 
 
 def test_desktop_installed_but_never_used_is_not_called_absent(
@@ -632,6 +638,269 @@ def test_neither_source_is_stated_more_firmly(tmp_path, capsys, monkeypatch):
     assert "Nothing on this machine reports usage yet" in out
     assert "sit blank" in out
     assert "Claude Desktop alone" not in out
+
+
+# --- found by review, 2026-10-19 ---------------------------------------------
+
+
+def test_a_scalar_hook_event_does_not_crash_install_or_status(
+        tmp_path, capsys, monkeypatch):
+    """{"PreToolUse": true}: step 3 skips it, install printed "Done.", and then
+    a TypeError escaped main() from the note. Status crashed on its Claude
+    Code row. One level further down, a scalar "hooks" inside a group."""
+    _no_cli(monkeypatch)
+    for hooks in ({"PreToolUse": True},
+                  {"Stop": [{"hooks": 5}], "PreToolUse": [7]}):
+        _settings(tmp_path, {"hooks": hooks})
+        assert cli.main(["install"]) == 0
+        assert cli.main(["status"]) == 0
+        capsys.readouterr()
+
+
+def test_a_skipped_hooks_step_is_not_answered_with_run_install_again(
+        tmp_path, capsys, monkeypatch):
+    """Step 3 refuses a hooks section that is not an object, and refuses it
+    again on every re-run -- so "run install again" at the end of that very
+    install was a loop."""
+    _no_cli(monkeypatch)
+    _settings(tmp_path, {"hooks": []})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    light = [i for i in _listed(out, "Missing") if "activity light" in i]
+    assert light and "run install again" not in light[0]
+    assert "Activity hooks step" in light[0]
+
+
+def test_duplicated_hooks_count_once_per_event(tmp_path, capsys, monkeypatch):
+    """A second Blink Stop group, from a hand edit or a sync tool, counted 11
+    of 10: not equal, so install said "run install again" on every run with
+    every event wired."""
+    _no_cli(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    data = _read(tmp_path)
+    data["hooks"]["Stop"].append(data["hooks"]["Stop"][0])
+    _settings(tmp_path, data)
+    capsys.readouterr()
+    hooks = cli.claude_hooks()
+    assert hooks.wired == hooks.total and hooks.light
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert f"hooks installed ({hooks.total}/{hooks.total} events" in out
+    assert "activity light from the Code tab" in out
+
+
+def test_disable_all_hooks_means_no_light(tmp_path, capsys, monkeypatch):
+    """Claude Code's own off switch, honoured by the Code tab's bundled copy
+    too. With every Blink hook present, install promised the light and
+    status said "activity light from the Code tab"; the pip never lit."""
+    _no_cli(monkeypatch)
+    _settings(tmp_path, {"disableAllHooks": True})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert not _has(_listed(out, "Shown"), "activity light")
+    assert _has(_listed(out, "Missing"), "disableAllHooks")
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "activity light from the Code tab" not in st
+    assert "disableAllHooks" in st
+
+
+def test_an_unreadable_settings_file_is_unknown_not_missing(
+        tmp_path, capsys, monkeypatch):
+    """Status printed "no activity light: hooks missing" three rows above
+    "Activity unknown -- settings.json does not parse"."""
+    _no_cli(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    (tmp_path / ".claude" / "settings.json").write_text('{"hooks": {},}')
+    capsys.readouterr()
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "Activity    unknown -- settings.json does not parse" in out
+    assert "hooks missing" not in out
+    assert "activity light from the Code tab" not in out
+
+
+def test_a_missing_hook_shim_is_not_credited_with_the_light(
+        tmp_path, capsys, monkeypatch):
+    _no_cli(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    os.remove(cli.hook_shim_path())
+    capsys.readouterr()
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "activity light from the Code tab" not in out
+    assert "shim is missing" in out
+
+
+def test_desktop_and_codex_keep_the_codex_light_without_claude_hooks(
+        tmp_path, capsys, monkeypatch):
+    """Codex sessions light the pip from their own session log. A desk with
+    both, and Claude hooks that could not be written, was told it had no
+    light while its wire line said "state":"running"."""
+    _no_cli(monkeypatch, desktop=True, codex=True)
+    _settings(tmp_path, {"hooks": []})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert _has(_listed(out, "Shown"), "activity light, for Codex sessions")
+    assert _has(_listed(out, "Missing"),
+                "activity light for Desktop's Code tab")
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "activity light from Codex only" in st
+    assert "no activity light" not in st
+
+
+def test_codex_with_an_unsigned_desktop_is_told_to_sign_in(
+        tmp_path, capsys, monkeypatch):
+    """The Codex branch ran first, so this desk heard "the Claude page stays
+    empty until you add Claude Code" with Claude Desktop already on it."""
+    _no_cli(monkeypatch, desktop=False, codex=True, desktop_installed=True)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "sign in" in out
+    assert "until you add Claude Code" not in out
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "sign in to Claude Desktop" in st
+
+
+def test_the_weekly_dial_is_not_promised_a_rate(tmp_path, capsys,
+                                                monkeypatch):
+    """The daemon sends only the five-hour burn, and the firmware draws no
+    rate on the weekly gauge (usage_view.c): the slot shows "--"."""
+    _no_cli(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "shows a rate" not in out
+    assert "no\n     countdown." in out or "has no countdown" in out
+    # And the closing line offers the countdown it lacks.
+    assert "and its countdown" in out
+
+
+def test_a_learned_weekly_countdown_is_not_offered_again(
+        tmp_path, capsys, monkeypatch):
+    _no_cli(monkeypatch)
+    _settings(tmp_path, {})
+    _learned_weekly_anchor(tmp_path)
+    assert cli.main(["install"]) == 0
+    assert "and its countdown" not in capsys.readouterr().out
+
+
+def test_weekly_countdown_known_asks_what_the_daemon_publishes(
+        tmp_path, monkeypatch):
+    """A refuted anchor stays loadable for weeks while the provider -- and so
+    the wire -- withholds it. Asking the file said "known"."""
+    from pc.providers import weekly_anchor as provider
+    _learned_weekly_anchor(tmp_path)
+    assert cli.weekly_countdown_known()
+    monkeypatch.setattr(provider.WeeklyAnchorProvider, "poll",
+                        lambda self, now: [])
+    assert not cli.weekly_countdown_known()
+
+
+def test_weekly_countdown_known_counts_what_the_daemon_will_seed(
+        tmp_path, monkeypatch):
+    """No anchor yet, but a Cowork session records the reset: the daemon
+    install just started seeds it on its first poll. "Missing" was printed
+    seconds before the panel showed it."""
+    from pc import cowork_audit, desktop_idb
+    assert not cli.weekly_countdown_known()
+    monkeypatch.setattr(cowork_audit, "seven_day_reset",
+                        lambda: (time.time() + 86400, time.time()))
+    assert cli.weekly_countdown_known()
+    monkeypatch.setattr(cowork_audit, "seven_day_reset", lambda: None)
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda: (time.time() + 86400, time.time()))
+    assert cli.weekly_countdown_known()
+
+
+def test_status_on_a_cli_and_desktop_desk_still_asks_for_the_status_line(
+        tmp_path, capsys, monkeypatch):
+    """The commonest desk: a working Claude Code and Claude Desktop, before
+    the first status line. It was told "no Claude Code status line on this
+    machine" right under "Claude Code 2.1.300"."""
+    monkeypatch.setattr(cli, "claude_version",
+                        lambda: ("2.1.300 (Claude Code)", (2, 1, 300)))
+    monkeypatch.setattr(cli, "claude_on_path", lambda: True)
+    monkeypatch.setattr(cli, "desktop_app_present", lambda: True)
+    monkeypatch.setattr(cli, "codex_present", lambda: False)
+    _settings(tmp_path, {})
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "open Claude Code once" in out
+    assert "no Claude Code status line on this machine" not in out
+
+
+def test_status_on_desktop_alone_ignores_a_leftover_status_line(
+        tmp_path, capsys, monkeypatch):
+    """A statusline.json from a Claude Code since removed: "open Claude Code
+    to refresh it" directly under "running on Claude Desktop alone"."""
+    _no_cli(monkeypatch)
+    _settings(tmp_path, {})
+    blink = tmp_path / ".blink"
+    blink.mkdir(exist_ok=True)
+    payload = blink / "statusline.json"
+    payload.write_text("{}")
+    old = time.time() - 86400
+    os.utime(payload, (old, old))
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "open Claude Code to refresh it" not in out
+    assert "from Claude Desktop's own files" in out
+
+
+def test_a_silent_claude_is_asked_once_and_desktop_still_described(
+        tmp_path, capsys, monkeypatch):
+    """A `claude` that hangs cost two 30 s timeouts after "Done." (measured
+    60.0 s), and the note dropped the Desktop explanation for a sentence
+    claiming the panel needs --version to answer. Nothing runs it but this
+    note."""
+    calls = []
+    _no_cli(monkeypatch)
+    monkeypatch.setattr(cli, "claude_version",
+                        lambda: calls.append(1) or (None, None))
+    monkeypatch.setattr(cli, "claude_on_path", lambda: True)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert len(calls) == 1
+    assert "panel needs it" not in out
+    assert "Claude Desktop" in out.split("Done.")[-1]
+    # Sentence case: it opened with a lower-case `claude`.
+    note = [l.strip() for l in out.splitlines() if "`claude --version`" in l]
+    assert note and note[0].startswith("!  There is")
+
+
+def test_desktop_app_installed_wants_desktops_own_files(tmp_path):
+    """Not the data folder alone: MCP setup tools create it to write
+    claude_desktop_config.json on machines that never ran Desktop. Local
+    Storage only the app's own browser engine writes."""
+    from pc import desktop_local_storage
+    from pc.providers import claude_desktop
+    folder = os.path.dirname(claude_desktop.cache_path())
+    os.makedirs(folder)
+    with open(os.path.join(folder, "claude_desktop_config.json"), "w") as f:
+        f.write("{}")
+    assert not cli.desktop_app_installed()
+    os.makedirs(desktop_local_storage.store_path())
+    assert cli.desktop_app_installed()
+
+
+def test_claude_on_path_finds_one_that_is_there(tmp_path, monkeypatch):
+    """Unstubbed: every install/status test patches it."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    assert not cli.claude_on_path()
+    exe = bindir / ("claude.exe" if sys.platform == "win32" else "claude")
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    assert cli.claude_on_path()
 
 
 def test_a_working_claude_code_says_none_of_it(tmp_path, capsys, monkeypatch):

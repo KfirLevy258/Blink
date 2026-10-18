@@ -165,9 +165,15 @@ def install(settings_path: str, shim_path: str) -> str:
         # was written; the hooks had none.
         ours = ours_group = None
         for group in entries:
-            if not isinstance(group, dict):
+            # A group whose "hooks" is not a list is someone else's mistake,
+            # and not ours to read or repair: {"Stop": [{"hooks": 5}]}
+            # crashed this step with a TypeError, taking the rest of the
+            # install with it (found 2026-10-19, on a review of the code that
+            # reads these counts back).
+            inner = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(inner, list):
                 continue
-            for h in (group.get("hooks") or []):
+            for h in inner:
                 if isinstance(h, dict) and _ours(h.get("command", ""),
                                                  expected, marker):
                     ours, ours_group = h, group

@@ -74,15 +74,15 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**1479 passing** as of 2026-10-01, on macOS and Ubuntu. The first four packages are pinned in
+**1502 passing** as of 2026-10-19, on macOS and Ubuntu. The first four packages are pinned in
 `pc/requirements.txt` and are pinned on purpose; `numpy` and `Pillow` are only
 needed by the logo and boot-animation encoder tests. CI runs the same
 `pytest tests/ -q`.
 
-`tests/conftest.py` redirects both `HOME` and `USERPROFILE` to `tmp_path` and
-sets `BLINK_SKIP_SERVICE=1`, autouse, for every test. Read its docstring before
-working around it — both fixtures exist because a test once booted out the
-launchd agent of the person logged in.
+`tests/conftest.py` redirects `HOME`, `USERPROFILE`, `APPDATA` and
+`LOCALAPPDATA` into `tmp_path` and sets `BLINK_SKIP_SERVICE=1`, autouse, for
+every test. Read its docstring before working around it — both fixtures exist
+because a test once booted out the launchd agent of the person logged in.
 
 **The sandbox has one hole:** a module-level constant computed with
 `os.path.expanduser("~")` is evaluated at import, before any fixture runs, so
