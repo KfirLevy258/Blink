@@ -33,6 +33,25 @@ Paste the outputs of steps 2, 4, 6 and 10 into the release notes. Anything
 unexpected: the `bridge.log` and the output of `status --wire` are what a bug
 report needs.
 
+## Windows on Arm
+
+Windows on Arm gets its own driver package (`vendor/ch341ser-arm64`,
+WCH 4.0.2026.02), picked by `pc/win_driver.py` from the machine Windows
+runs on. The steps above on an x64 PC never touch it. The Apple-silicon
+Mac's UTM VM, Windows 11 ARM64 (`~/Projects/Blink/test-machines`), is the
+place to check it. Passing the board through to the VM takes it from the
+Mac's own daemon, so the panel says HOST LOST until it is handed back.
+
+| # | Do | Expect |
+|---|---|---|
+| A1 | Steps 3 and 7 above, in the VM, with the board passed through. | `[5/6] USB driver ... installed`. `pnputil /enum-drivers` shows `ch341ser.inf` at `4.0.2026.2`, signer Microsoft Windows Hardware Compatibility Publisher. Device Manager -> Ports: `USB-SERIAL CH340 (COMn)`. |
+| A2 | Step 7a, in the VM. | The same as on x64. |
+
+Measured 2026-10-19: elevated `pnputil /add-driver` of this package exits 0
+on the VM, where the x64 package exits 2 ("The system cannot find the file
+specified" -- its `CH341M64.SYS` was never in it). A1 and A2, with a board,
+not yet.
+
 ## Why not a VM on the Mac
 
 Tried 2026-08-28 on an Intel Mac running macOS 26: QEMU's HVF accelerator
@@ -44,3 +63,9 @@ VirtualBox/Parallels were not tried. A real Windows PC -- any laptop, ten
 minutes -- is the practical way to run this list. The unattended VM
 definition is kept under `~/vm` on that Mac in case a working hypervisor
 turns up.
+
+An Apple-silicon Mac runs Windows 11 under UTM at a usable speed (set up
+2026-09-26), but that Windows is ARM64, running the x64 `blink.exe` under
+emulation. It covers the Windows on Arm section above and the installer;
+it is not the x64 machine most customers have, so this list still wants a
+real one.

@@ -170,6 +170,18 @@ MINGW* | MSYS* | CYGWIN*)
 		DRIVER_WIN=$(cygpath -w "$ROOT/vendor/ch341ser")
 		set -- "$@" --add-data "${DRIVER_WIN};drivers/ch341ser"
 		echo "bundling the CH340 driver from $DRIVER_WIN"
+		# The Windows on Arm package, beside it: the build is x64 either
+		# way, and pc/win_driver.py picks a package by the machine it lands
+		# on. Fatal when missing for the same reason as above -- an Arm
+		# customer would be back to "pnputil exited 2".
+		if [ ! -f "$ROOT/vendor/ch341ser-arm64/CH341SER.INF" ]; then
+			echo "FATAL: no Arm64 CH340 driver at $ROOT/vendor/ch341ser-arm64" >&2
+			echo "  See vendor/ch341ser-arm64/README.md." >&2
+			exit 1
+		fi
+		DRIVER_ARM_WIN=$(cygpath -w "$ROOT/vendor/ch341ser-arm64")
+		set -- "$@" --add-data "${DRIVER_ARM_WIN};drivers/ch341ser-arm64"
+		echo "bundling the Arm64 CH340 driver from $DRIVER_ARM_WIN"
 	elif [ -n "${BLINK_ALLOW_NO_DRIVER:-}" ]; then
 		echo "no CH340 driver, and BLINK_ALLOW_NO_DRIVER is set: this build"
 		echo "  will tell customers to install it by hand"

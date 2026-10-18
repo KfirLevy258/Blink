@@ -14,6 +14,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from pc import win_driver                                       # noqa: E402
 from pc.cli import board_lines                                  # noqa: E402
@@ -311,6 +313,14 @@ class TestDetectionNeverThrows:
 
 
 class TestTheBundledPackage:
+    @pytest.fixture(autouse=True)
+    def _x64(self, monkeypatch):
+        """The x64 package. Pinned, because driver_package() asks the real
+        machine: on the Windows 11 ARM64 VM all four of these picked the
+        Arm64 package and failed (2026-10-19). TestWindowsOnArm has that
+        side."""
+        monkeypatch.setattr(win_driver, "native_machine", lambda: "amd64")
+
     def test_a_build_with_no_driver_staged_finds_none(self, monkeypatch,
                                                       tmp_path):
         # The default state of every checkout: vendor/ is git-ignored and
@@ -367,40 +377,134 @@ class TestInstallSteps:
 
 
 class TestWindowsOnArm:
-    """WCH ships the CH340 driver for x86 and x64 only, and Windows on Arm
-    cannot emulate a kernel driver. On a Windows 11 ARM64 VM, 2026-09-30,
-    install printed "USB driver ... failed (pnputil exited 2)" -- true, and
-    useless: nothing the customer could do would change it."""
+    """Windows on Arm gets WCH's Arm64 package, chosen by the machine.
 
-    def _arm(self, monkeypatch, in_store=False):
+    A release refused to run pnputil on Arm at all, telling the customer no
+    driver existed: the bundled x64 package had failed there with exit 2,
+    and WCH was believed to publish no Arm64 build. Its own .INF declares an
+    NTARM64 install; only CH341M64.SYS was missing from the store copy. WCH's
+    current package installed on a Windows 11 ARM64 VM with exit 0
+    (2026-10-19, vendor/ch341ser-arm64/README.md)."""
+
+    REPO = os.path.join(os.path.dirname(__file__), "..", "..")
+
+    def test_arm64_picks_the_arm64_package(self, monkeypatch):
+        monkeypatch.setattr(win_driver, "_bundle_roots", lambda: iter(()))
+        inf = win_driver.driver_package(machine="arm64")
+        assert inf is not None
+        assert os.path.basename(os.path.dirname(inf)) == "ch341ser-arm64"
+
+    def test_x64_keeps_the_package_the_release_desk_proved(self, monkeypatch):
+        monkeypatch.setattr(win_driver, "_bundle_roots", lambda: iter(()))
+        for machine in ("amd64", "x86", None):
+            monkeypatch.setattr(win_driver, "native_machine", lambda: machine)
+            inf = win_driver.driver_package()
+            assert os.path.basename(os.path.dirname(inf)) == "ch341ser"
+
+    def test_the_frozen_build_looks_in_its_own_arm64_folder(self, tmp_path,
+                                                           monkeypatch):
+        staged = tmp_path.joinpath(*win_driver.ARM64_BUNDLE_SUBDIR)
+        staged.mkdir(parents=True)
+        (staged / "CH341SER.INF").write_text("x")
+        monkeypatch.setattr(win_driver, "_bundle_roots",
+                            lambda: iter([str(tmp_path)]))
+        assert (win_driver.driver_package(machine="arm64")
+                == str(staged / "CH341SER.INF"))
+
+    def test_the_arm64_package_carries_the_file_the_old_one_lacked(self):
+        """What pnputil's exit 2 was: the .INF names CH341M64.SYS for
+        NTARM64, so the package is only whole if that file is in it, and
+        is an Arm64 image. The machine field of a PE header is at the
+        offset e_lfanew + 4."""
+        d = os.path.join(self.REPO, *win_driver.ARM64_VENDOR_SUBDIR)
+        names = {n.lower(): n for n in os.listdir(d)}
+        inf = open(os.path.join(d, names["ch341ser.inf"]), "rb").read()
+        assert b"NTARM64" in inf and b"CH341M64.SYS" in inf
+        sys_ = open(os.path.join(d, names["ch341m64.sys"]), "rb").read()
+        pe = int.from_bytes(sys_[0x3C:0x40], "little")
+        assert sys_[pe:pe + 4] == b"PE\0\0"
+        machine = int.from_bytes(sys_[pe + 4:pe + 6], "little")
+        assert win_driver.MACHINES[machine] == "arm64"
+
+    def test_the_arm64_inf_keeps_its_windows_line_endings(self):
+        """The .CAT signs the .INF's bytes; .gitattributes keeps git's LF
+        rule off them. An LF-only .INF here means a checkout rewrote it and
+        Windows will refuse the package."""
+        d = os.path.join(self.REPO, *win_driver.ARM64_VENDOR_SUBDIR)
+        inf = [n for n in os.listdir(d) if n.lower() == "ch341ser.inf"][0]
+        assert b"\r\n" in open(os.path.join(d, inf), "rb").read()
+
+    def test_arm64_runs_pnputil_like_any_other_machine(self, monkeypatch):
         monkeypatch.setattr(win_driver.sys, "platform", "win32")
         monkeypatch.setattr(win_driver, "native_machine", lambda: "arm64")
-        monkeypatch.setattr(win_driver, "driver_in_store", lambda: in_store)
+        monkeypatch.setattr(win_driver, "driver_in_store", lambda: False)
+        seen = []
+        monkeypatch.setattr(win_driver, "install_driver",
+                            lambda: seen.append(1) or ("installed", ""))
+        assert win_driver.ensure_driver() == ("installed", "installed")
+        assert seen
 
-        def never(*_a, **_k):
-            raise AssertionError("pnputil must not run for a driver that "
-                                 "cannot load here")
-        monkeypatch.setattr(win_driver, "install_driver", never)
 
-    def test_install_says_no_driver_exists_instead_of_running_pnputil(
-            self, monkeypatch):
-        self._arm(monkeypatch)
-        status, line = win_driver.ensure_driver()
-        assert status == "no-arm64"
-        assert "Windows on Arm" in line
-        assert "pnputil" not in line
+class TestNativeMachine:
+    """native_machine() through a stand-in kernel32, so the call itself is
+    exercised off Windows. Every other test stubs it; a misspelt
+    IsWow64Process2, or a function that always answered None, left the whole
+    suite green while an Arm customer got the x64 package again (review,
+    2026-10-19)."""
 
-    def test_forcing_it_changes_nothing(self, monkeypatch):
-        self._arm(monkeypatch)
-        assert win_driver.ensure_driver(force=True)[0] == "no-arm64"
+    class _Fn:
+        """A ctypes function stand-in: takes argtypes/restype like one."""
+        def __init__(self, impl):
+            self._impl = impl
 
-    def test_a_driver_already_in_the_store_is_left_to_work(self, monkeypatch):
-        """Someone who installed an Arm64 driver themselves is not told it
-        cannot exist."""
-        self._arm(monkeypatch, in_store=True)
-        assert win_driver.ensure_driver()[0] == "ok"
+        def __call__(self, *args):
+            return self._impl(*args)
 
-    def test_native_machine_is_none_off_windows(self):
-        if sys.platform == "win32":
-            return
+    def _kernel32(self, native, ok=True):
+        def is_wow64_process2(handle, process, machine):
+            self.handle = handle
+            process._obj.value = 0          # byref(x)._obj is x
+            machine._obj.value = native
+            return ok
+        k32 = type("Kernel32", (), {})()
+        k32.GetCurrentProcess = self._Fn(lambda: 42)
+        k32.IsWow64Process2 = self._Fn(is_wow64_process2)
+        return k32
+
+    def _on_windows(self, monkeypatch, k32):
+        import ctypes
+        monkeypatch.setattr(win_driver.sys, "platform", "win32")
+        names = []
+
+        def windll(name, **_):
+            names.append(name)
+            return k32
+        monkeypatch.setattr(ctypes, "WinDLL", windll, raising=False)
+        return names
+
+    def test_reads_the_machine_from_iswow64process2(self, monkeypatch):
+        for value, name in ((0xAA64, "arm64"), (0x8664, "amd64"),
+                            (0x014C, "x86")):
+            names = self._on_windows(monkeypatch, self._kernel32(value))
+            assert win_driver.native_machine() == name
+            assert names == ["kernel32"]
+            assert self.handle == 42
+
+    def test_an_unknown_machine_or_a_failed_call_is_none(self, monkeypatch):
+        self._on_windows(monkeypatch, self._kernel32(0x1234))
+        assert win_driver.native_machine() is None
+        self._on_windows(monkeypatch, self._kernel32(0xAA64, ok=False))
+        assert win_driver.native_machine() is None
+
+    def test_a_windows_without_the_call_is_none(self, monkeypatch):
+        """Before Windows 10 1709 kernel32 has no IsWow64Process2, and the
+        attribute lookup raises."""
+        class Old:
+            def __getattr__(self, name):
+                raise AttributeError(name)
+        self._on_windows(monkeypatch, Old())
+        assert win_driver.native_machine() is None
+
+    def test_none_off_windows(self, monkeypatch):
+        monkeypatch.setattr(win_driver.sys, "platform", "darwin")
         assert win_driver.native_machine() is None

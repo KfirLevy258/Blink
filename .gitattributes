@@ -16,3 +16,8 @@ vendor/ch341ser/*.INF -text
 vendor/ch341ser/*.CAT binary
 vendor/ch341ser/*.SYS binary
 vendor/ch341ser/*.DLL binary
+# The Arm64 package, the same rule. WCH ships its .sys files in lower case
+# (CH341M64.sys) and the patterns above are case-sensitive, so this one
+# covers the whole directory rather than guessing at each extension.
+vendor/ch341ser-arm64/* binary
+vendor/ch341ser-arm64/README.md text eol=lf

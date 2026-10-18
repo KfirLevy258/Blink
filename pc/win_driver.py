@@ -73,6 +73,14 @@ INF_NAME = "ch341ser.inf"
 BUNDLE_SUBDIR = ("drivers", "ch341ser")
 VENDOR_SUBDIR = ("vendor", "ch341ser")
 
+# The package for Windows on Arm. A second one rather than a replacement:
+# the x64 package above is the one the release desk proved, and this one is
+# a newer WCH version, accepted by pnputil on an ARM64 VM but not yet on a
+# real x64 desk. vendor/ch341ser-arm64/README.md has why the first could not
+# simply gain the missing file.
+ARM64_BUNDLE_SUBDIR = ("drivers", "ch341ser-arm64")
+ARM64_VENDOR_SUBDIR = ("vendor", "ch341ser-arm64")
+
 # Where a person goes when this build carries no driver.
 DRIVER_PAGE = "https://www.wch-ic.com/downloads/CH341SER_EXE.html"
 
@@ -240,10 +248,6 @@ def install_message(status, note=""):
         return "installed" + (f" -- {note}" if note else "")
     if status == "not-windows":
         return "not needed on this system"
-    if status == "no-arm64":
-        return ("none exists for Windows on Arm -- WCH makes the driver for"
-                " this board's USB chip for x86 and x64 PCs only, so this"
-                " machine cannot reach the board over USB")
     if status == "absent":
         return ("this build carries no driver -- install it by hand from "
                 + DRIVER_PAGE)
@@ -491,19 +495,27 @@ def driver_in_store():
     return store_has_driver(proc.stdout)
 
 
-def driver_package():
+def driver_package(machine=None):
     """The bundled .inf to install, or None when this build carries none.
 
     A build with no driver is a supported state, not a broken one: detection
-    and the manual instructions work without it, and it is what every build
-    produces until tools/fetch_ch340_driver.sh has been run.
+    and the manual instructions work without it, and it is what a build made
+    with BLINK_ALLOW_NO_DRIVER produces.
+
+    Chosen by the machine Windows runs on, not by this process: blink.exe is
+    x64 and runs emulated on Arm. The x64 package on Arm64 is not a fallback
+    worth trying -- it is the package that failed there with exit 2.
     """
+    machine = native_machine() if machine is None else machine
+    bundle, vendor = ((ARM64_BUNDLE_SUBDIR, ARM64_VENDOR_SUBDIR)
+                      if machine == "arm64"
+                      else (BUNDLE_SUBDIR, VENDOR_SUBDIR))
     for base in _bundle_roots():
-        inf = _inf_in(os.path.join(base, *BUNDLE_SUBDIR))
+        inf = _inf_in(os.path.join(base, *bundle))
         if inf:
             return inf
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return _inf_in(os.path.join(repo, *VENDOR_SUBDIR))
+    return _inf_in(os.path.join(repo, *vendor))
 
 
 def _inf_in(directory):
@@ -640,6 +652,10 @@ def install_driver(inf_path=None):
     return "failed", f"pnputil exited {rc}"
 
 
+# IMAGE_FILE_MACHINE_* from winnt.h, as IsWow64Process2 reports them.
+MACHINES = {0xAA64: "arm64", 0x8664: "amd64", 0x014C: "x86"}
+
+
 def native_machine():
     """The CPU Windows itself runs on: "arm64", "amd64", "x86", or None.
 
@@ -665,8 +681,7 @@ def native_machine():
             return None
     except Exception:
         return None
-    # IMAGE_FILE_MACHINE_* constants.
-    return {0xAA64: "arm64", 0x8664: "amd64", 0x014C: "x86"}.get(native.value)
+    return MACHINES.get(native.value)
 
 
 def ensure_driver(force=False):
@@ -682,16 +697,9 @@ def ensure_driver(force=False):
         return "not-windows", install_message("not-windows")
     if not force and driver_in_store():
         return "ok", install_message("ok")
-    # After the store check, so a customer who found an Arm64 driver
-    # themselves is left alone. Before pnputil, which on a Windows 11 ARM64
-    # VM (2026-09-30) failed with exit 2: the bundled package is amd64 only
-    # (vendor/ch341ser), WCH publishes no Arm64 build, and Windows on Arm
-    # cannot emulate a kernel driver. The one Arm64 driver around is a
-    # community build that needs test-signing mode -- not something to ask
-    # of a customer.
-    if native_machine() == "arm64":
-        if force and driver_in_store():
-            return "ok", install_message("ok")
-        return "no-arm64", install_message("no-arm64")
+    # No Arm64 special case: driver_package() picks the Arm64 package. One
+    # shipped for a release, refusing to run pnputil on Arm at all, on the
+    # belief that WCH published no Arm64 driver -- its own .INF declares one
+    # (review, 2026-10-19; vendor/ch341ser-arm64/README.md).
     status, note = install_driver()
     return status, install_message(status, note)
