@@ -36,6 +36,8 @@ as good an answer as we have. Persisting it would put a second copy of a
 file that already exists on disk into ~/.blink, with its own invalidation
 and corruption paths, for a case the field report does not contain.
 """
+import os
+
 from pc import statusline_source as ss
 from pc.providers import base
 
@@ -45,7 +47,14 @@ SRC_ID = ss.SRC_ID
 
 class ClaudeCliProvider(base.ProviderParser):
     def __init__(self, path=None):
-        self._path = path if path is not None else ss.PAYLOAD_PATH
+        # Resolved here, not taken from ss.PAYLOAD_PATH: that constant is
+        # expanduser'd at import, before tests/conftest.py redirects HOME, so
+        # every test that built the default bus read the developer's REAL
+        # ~/.blink/statusline.json -- found when `status --wire` under the
+        # sandbox put a live Claude reading on the wire (2026-10-19). Same
+        # file at run time; CLAUDE.md names this hole.
+        self._path = (path if path is not None
+                      else os.path.expanduser("~/.blink/statusline.json"))
         # (payload, mtime) for the last reading that had a five-hour
         # percentage, or None before the first one. See the module docstring.
         self._remembered = None
