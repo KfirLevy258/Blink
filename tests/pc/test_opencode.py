@@ -335,6 +335,279 @@ def test_an_absurdly_large_auth_file_is_not_read(dirs):
     assert opencode.quota_source(data) is None
 
 
+# --- the plan key under OpenCode 2.0: the credential table --------------------
+#
+# OpenCode's dev branch imports auth.json into a `credential` table in
+# opencode.db (import_legacy_credentials) and stops writing the file. A desk
+# set up on 2.0 has no auth.json at all; these are that desk.
+
+OTHER_KEY = "blinktestkey.fedcba9876543210OTHER"
+
+
+def test_opencode_2_keeps_the_key_in_the_credential_table(dirs):
+    data, _ = dirs
+    fx.make_credential_db(data, [fx.credential("zai-coding-plan")])
+    assert opencode.quota_source(data) == ("zai-coding-plan",
+                                           "https://api.z.ai")
+    assert opencode._read_key("zai-coding-plan", data) == KEY
+    assert KEY not in repr(opencode.quota_source(data))
+
+
+def test_a_mainland_key_in_the_table_routes_to_bigmodel(dirs):
+    data, _ = dirs
+    fx.make_credential_db(data, [fx.credential("zhipuai-coding-plan")])
+    assert opencode.quota_source(data) == ("zhipuai-coding-plan",
+                                           "https://open.bigmodel.cn")
+
+
+def test_the_table_wins_over_a_stale_auth_json(dirs):
+    """A desk upgraded from 1.x has both, and 2.0 never rewrites auth.json
+    after importing it: the file holds the key from upgrade day, the table
+    the one OpenCode uses now. Reading the file first sent a rotated-away
+    key for good."""
+    data, _ = dirs
+    fx.write_auth(data, fx.plan_key(key=OTHER_KEY))
+    fx.make_credential_db(data, [fx.credential()])
+    assert opencode._read_key("zai-coding-plan", data) == KEY
+
+
+def test_no_key_is_mixed_from_the_table_and_auth_json(dirs):
+    """The table's mainland key, a leftover auth.json's global one: the
+    table answers alone, so the global key -- the one tried first -- is
+    not borrowed from the stale file."""
+    data, _ = dirs
+    fx.write_auth(data, fx.plan_key("zai-coding-plan", key=OTHER_KEY))
+    fx.make_credential_db(data, [fx.credential("zhipuai-coding-plan")])
+    assert opencode.quota_source(data)[0] == "zhipuai-coding-plan"
+    assert opencode._read_key("zai-coding-plan", data) is None
+
+
+def test_a_1x_database_with_no_credential_table_falls_back_to_auth_json(dirs):
+    """OpenCode 1.x: opencode.db is opened, has no credential table, and
+    auth.json -- still the truth there -- answers."""
+    data, _ = dirs
+    fx.make_credential_db(data, table=False)
+    fx.write_auth(data, fx.plan_key())
+    assert opencode.quota_source(data) == ("zai-coding-plan",
+                                           "https://api.z.ai")
+    assert opencode._read_key("zai-coding-plan", data) == KEY
+
+
+def test_a_table_with_no_plan_key_falls_back_to_auth_json(dirs):
+    data, _ = dirs
+    fx.make_credential_db(data, [fx.credential(
+        "anthropic", fx.credential_key(OTHER_KEY))])
+    fx.write_auth(data, fx.plan_key())
+    assert opencode._read_key("zai-coding-plan", data) == KEY
+
+
+def test_the_row_opencode_selects_is_the_one_read(dirs):
+    """Several rows for one integration: the active one, else the newest --
+    resolveConnections' order. A newer inactive row is not the key in use."""
+    data, _ = dirs
+    fx.make_credential_db(data, [
+        fx.credential(active=1, created=1_000, cid="cred_a"),
+        fx.credential(value=fx.credential_key(OTHER_KEY), active=0,
+                      created=2_000, cid="cred_b"),
+    ])
+    assert opencode._read_key("zai-coding-plan", data) == KEY
+
+
+def test_imported_rows_with_no_flag_go_by_age(dirs):
+    data, _ = dirs
+    fx.make_credential_db(data, [
+        fx.credential(value=fx.credential_key(OTHER_KEY), created=1_000,
+                      cid="cred_a"),
+        fx.credential(created=2_000, cid="cred_b"),
+    ])
+    assert opencode._read_key("zai-coding-plan", data) == KEY
+
+
+def test_an_active_row_that_is_not_a_key_is_not_skipped_past(dirs):
+    """OpenCode would use the active OAuth row; an older key row beneath it
+    is not one it sends, so it is not one to send either."""
+    data, _ = dirs
+    fx.make_credential_db(data, [
+        fx.credential(value={"type": "oauth", "methodID": "oauth",
+                             "refresh": "r", "access": "a", "expires": 0},
+                      active=1, created=2_000, cid="cred_a"),
+        fx.credential(active=0, created=1_000, cid="cred_b"),
+    ])
+    assert opencode.quota_source(data) is None
+
+
+def test_reading_the_table_does_not_look_like_opencode_in_use(dirs):
+    """Measured, SQLite 3.53: a plain mode=ro open of a WAL-mode file with
+    no -wal beside it creates one, stamped now -- the very file
+    last_activity reads as activity. The reader must leave none behind."""
+    data, state = dirs
+    path = fx.make_credential_db(data, [fx.credential()])
+    for extra in ("-wal", "-shm"):
+        try:
+            os.remove(path + extra)
+        except OSError:
+            pass
+    fx.stamp(path, NOW - 3 * 86400)
+    with open(path, "rb") as f:
+        before = f.read()
+    assert opencode._read_key("zai-coding-plan", data) == KEY
+    assert not os.path.exists(path + "-wal")
+    assert opencode.last_activity(data, state) == NOW - 3 * 86400
+    with open(path, "rb") as f:
+        assert f.read() == before, "the reader wrote to OpenCode's database"
+
+
+def test_a_key_still_in_the_wal_is_found(dirs):
+    """OpenCode open, its newest key not yet checkpointed into the main
+    file. An immutable read would miss it; mode=ro must not."""
+    import sqlite3
+    data, _ = dirs
+    path = fx.make_credential_db(data, [])
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        row = fx.credential()
+        writer.execute(
+            "INSERT INTO credential (id, integration_id, label, value,"
+            " active, time_created, time_updated) VALUES (?,?,?,?,?,?,?)",
+            (row["id"], row["integration_id"], row["label"], row["value"],
+             row["active"], row["time_created"], row["time_updated"]))
+        writer.commit()
+        assert os.path.getsize(path + "-wal") > 0
+        assert opencode._read_key("zai-coding-plan", data) == KEY
+    finally:
+        writer.close()
+
+
+def _guarded(capsys, caplog):
+    """Everything the provider could have said, for a search for the key."""
+    out, err = capsys.readouterr()
+    return out + err + caplog.text
+
+
+@pytest.mark.parametrize("value", [
+    "{not json",
+    "[1, 2]",
+    "null",
+    {"type": "api", "key": KEY},          # auth.json's shape, not the table's
+    {"type": "oauth", "key": KEY},
+    {"type": "key"},
+    {"type": "key", "key": ""},
+    {"type": "key", "key": 12345},
+    {"type": "key", "key": [KEY]},
+    {"type": "key", "key": KEY + "\r\nX-Evil: 1"},
+    # A row whose bytes are not UTF-8: the stdlib's own decode error quotes
+    # the column, key and all, which is why the reader decodes it itself.
+    b'{"type": "key", "key": "' + KEY.encode() + b'\xff"}',
+    {"type": "key", "key": KEY, "pad": "x" * (64 * 1024)},
+])
+def test_a_garbage_row_is_no_key_and_says_nothing(dirs, value, capsys,
+                                                  caplog):
+    caplog.set_level(logging.DEBUG)
+    data, _ = dirs
+    fx.make_credential_db(data, [fx.credential(value=value)])
+    assert opencode.quota_source(data) is None
+    assert opencode._read_key("zai-coding-plan", data) is None
+    assert KEY not in _guarded(capsys, caplog)
+
+
+def test_a_row_with_no_integration_is_ignored(dirs):
+    data, _ = dirs
+    fx.make_credential_db(data, [fx.credential(integration=None)])
+    assert opencode.quota_source(data) is None
+
+
+def test_a_1x_database_with_no_credential_table_is_no_key(dirs, capsys,
+                                                          caplog):
+    data, _ = dirs
+    fx.make_credential_db(data, table=False)
+    assert opencode.quota_source(data) is None
+    assert _guarded(capsys, caplog) == ""
+
+
+def test_a_file_that_is_not_a_database_is_no_key(dirs):
+    data, _ = dirs
+    with open(os.path.join(data, "opencode.db"), "wb") as f:
+        f.write(b"not sqlite " + KEY.encode() * 100)
+    assert opencode.quota_source(data) is None
+
+
+def test_a_locked_database_is_no_key_and_does_not_hang(dirs, monkeypatch,
+                                                      capsys, caplog):
+    """OpenCode mid-write with an exclusive lock: give up after the timeout,
+    find no key this time, say nothing, raise nothing."""
+    import sqlite3
+    import time as _time
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(opencode, "CREDENTIAL_DB_TIMEOUT_S", 0.05)
+    data, _ = dirs
+    path = fx.make_credential_db(data, [fx.credential()])
+    writer = sqlite3.connect(path, isolation_level=None)
+    try:
+        writer.execute("PRAGMA locking_mode=EXCLUSIVE")
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("INSERT INTO session VALUES ('x')")
+        t0 = _time.monotonic()
+        assert opencode.quota_source(data) is None
+        assert _time.monotonic() - t0 < 2.0
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    assert KEY not in _guarded(capsys, caplog)
+    # ...and once the lock is gone, the key is there again.
+    assert opencode._read_key("zai-coding-plan", data) == KEY
+
+
+def test_the_channel_database_answers_when_opencode_db_has_no_key(dirs):
+    data, _ = dirs
+    fx.make_credential_db(data, [], name="opencode.db")
+    fx.make_credential_db(data, [fx.credential()], name="opencode-beta.db")
+    assert opencode._read_key("zai-coding-plan", data) == KEY
+
+
+def test_a_fetch_sends_the_key_from_the_table(dirs):
+    """End to end: no auth.json, the key in the table, one request with it
+    to the host it was issued for."""
+    data, state = dirs
+    path = fx.make_credential_db(data, [fx.credential()])
+    with open(path + "-wal", "wb"):
+        pass
+    fx.stamp(path, NOW - 100)
+    fx.stamp(path + "-wal", NOW - 30)
+    rec = Recorder(fx.encode(fx.credit_plan(NOW)))
+    p = provider(dirs, rec)
+    assert p.tick(NOW) is True
+    assert rec.calls == [("https://api.z.ai" + opencode.QUOTA_PATH, KEY,
+                          opencode.FETCH_TIMEOUT_S)]
+    assert p.last_reading()[0].session_pct > 0
+
+
+def test_the_database_is_read_only_when_a_fetch_is_due(dirs, monkeypatch):
+    """The same rule as auth.json's (test_auth_json_is_read_only_when_a_
+    fetch_is_due): the table holds every provider's credential, and is
+    looked in only on the ticks that fetch."""
+    data, _ = dirs
+    path = fx.make_credential_db(data, [fx.credential()])
+    with open(path + "-wal", "wb"):
+        pass
+    fx.stamp(path + "-wal", NOW)
+    p = provider(dirs, Recorder(fx.encode(fx.credit_plan(NOW))))
+    n = [0]
+    real = opencode._load_credentials
+
+    def counted(*a, **k):
+        n[0] += 1
+        return real(*a, **k)
+    monkeypatch.setattr(opencode, "_load_credentials", counted)
+    assert p.tick(NOW) is True
+    per_fetch = n[0]
+    assert per_fetch >= 1
+    for t in range(5, 60, int(opencode.TICK_S)):
+        assert p.tick(NOW + t) is False
+    assert n[0] == per_fetch, "the database was read on a tick that did not fetch"
+
+
 # --- the quota reply ---------------------------------------------------------
 
 

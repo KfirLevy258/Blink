@@ -163,7 +163,7 @@ For Claude Desktop, the app learns usage by reading Claude Desktop's own local f
 
 For Claude and Codex, BLINK never sees a credential and never sends anything anywhere. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`. The device holds no token: nothing to leak, nothing to revoke if you lend it.
 
-**OpenCode is different, and here is exactly how.** OpenCode keeps token counts but never your plan's limit, so there is no percentage on your disk to read. Your GLM Coding Plan has one, behind its own usage endpoint. To show it, BLINK reads the Coding Plan key OpenCode already saved (in `~/.local/share/opencode/auth.json`) and asks that one endpoint for your quota:
+**OpenCode is different, and here is exactly how.** OpenCode keeps token counts but never your plan's limit, so there is no percentage on your disk to read. Your GLM Coding Plan has one, behind its own usage endpoint. To show it, BLINK reads the Coding Plan key OpenCode already saved (from OpenCode 2.0 on in its database, `~/.local/share/opencode/opencode.db`, opened read-only; before 2.0 in `auth.json` beside it) and asks that one endpoint for your quota:
 
 - The key goes **only** to the plan's own quota endpoint - `api.z.ai` for a Z.ai key, `open.bigmodel.cn` for a BigModel one - and nowhere else. It is never written down, never logged, and never sent to the board.
 - It asks about once a minute while you are using OpenCode, every ten minutes otherwise, and not at all after a week without it.

@@ -1408,7 +1408,7 @@ def test_opencode_without_a_plan_key_is_promised_a_light_and_no_numbers(
     assert "GLM Coding Plan quota, read" not in out
     cli.main(["status"])
     st = capsys.readouterr().out
-    assert "no GLM Coding Plan key in OpenCode's auth.json" in st
+    assert "no GLM Coding Plan key saved in OpenCode" in st
     assert calls == [], "status fetched with no key to fetch with"
 
 
@@ -1547,7 +1547,7 @@ def test_opencode_alone_without_a_key_says_the_board_waits(
     assert "running on OpenCode alone" in st
     assert "its light works" not in st
     assert "open Claude Code" not in st
-    assert ("OpenCode    no GLM Coding Plan key in OpenCode's auth.json --"
+    assert ("OpenCode    no GLM Coding Plan key saved in OpenCode --"
             " nothing on this desk reports a usage figure, so the board"
             " stays on its waiting screen") in st
     assert ("            Add the key with `opencode auth login`, provider"
@@ -1669,8 +1669,8 @@ def test_no_plan_key_says_the_light_works_only_with_our_plugin(
     cli.main(["status"])
     st = capsys.readouterr().out
     line = [ln for ln in st.splitlines() if "no GLM Coding Plan key" in ln]
-    assert line == ["OpenCode    no GLM Coding Plan key in OpenCode's"
-                    " auth.json -- there are no usage figures to show"]
+    assert line == ["OpenCode    no GLM Coding Plan key saved in"
+                    " OpenCode -- there are no usage figures to show"]
 
     plugin = _oc_plugin(tmp_path)
     plugin.parent.mkdir(parents=True)
@@ -1682,7 +1682,7 @@ def test_no_plan_key_says_the_light_works_only_with_our_plugin(
 
     _put_plugin(plugin)
     cli.main(["status"])
-    assert ("no GLM Coding Plan key in OpenCode's auth.json -- its light"
+    assert ("no GLM Coding Plan key saved in OpenCode -- its light"
             " works") in capsys.readouterr().out
     assert calls == []
 

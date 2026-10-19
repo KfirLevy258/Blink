@@ -10,8 +10,9 @@
 #     permission.asked, question.replied, ...) into the hook slot files
 #     claude_state already reads;
 #   * pc/providers/opencode.py, which finds the GLM Coding Plan key in
-#     <data>/opencode/auth.json and the activity clock in opencode.db and its
-#     WAL, and asks z.ai's quota endpoint for the two windows.
+#     <data>/opencode/auth.json (or, from 2.0, the credential table in
+#     opencode.db) and the activity clock in opencode.db and its WAL, and
+#     asks z.ai's quota endpoint for the two windows.
 #
 # Every one of those names is a string literal in OpenCode's TypeScript, and
 # OpenCode is open source, so the contract can be checked at the ref that
@@ -265,31 +266,96 @@ if need "$F" $P; then
 	pass "question.asked/replied/rejected are unchanged"
 fi
 
-# 8. The credential. The reader takes the Coding Plan key from
+# 8. The credential. OpenCode 1.x keeps the Coding Plan key in
 #    <data>/opencode/auth.json, {"zai-coding-plan": {"type": "api", "key": ...}}.
 #    OpenCode dev (the 2.0 line) carries a migration,
-#    20260805200742_import_legacy_credentials, that copies auth.json into a
-#    `credential` table in opencode.db. The day a RELEASE carries it, auth.json
-#    is a leftover nobody updates: a key rotated in OpenCode would never reach
-#    us, and a fresh install would have no auth.json at all. The fix is to read
-#    the credential table (integration_id = provider id, value = JSON
-#    {"type":"key","key":...}) -- a read of the SQLite file, stdlib only.
+#    20260805200742_import_legacy_credentials, that copies auth.json ONCE into
+#    a `credential` table in opencode.db and never writes the file again.
+#    pc/providers/opencode.py reads that table (_db_credentials) and, when it
+#    holds no plan key, auth.json -- so at a ref with the migration, what is
+#    checked is the table's shape, and at a ref without it, auth.json's.
 P=packages/core/src/database/migration.gen.ts
 F=$(fetch $P)
+MOVED=no
 if need "$F" $P; then
 	if has "$F" 'import_legacy_credentials'; then
-		miss "this ref moves auth.json into the SQLite credential table (import_legacy_credentials) -- pc/providers/opencode.py must read the credential table before this ships"
+		MOVED=yes
+		ok "credentials live in the SQLite credential table at this ref -- checking the table"
 	else
 		ok "credentials have not moved into the credential table"
 	fi
 fi
-P=packages/opencode/src/auth/index.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	has "$F" 'const file = path.join(Global.Path.data, "auth.json")' || miss "auth.json is no longer <data>/opencode/auth.json"
-	grep -A1 'type: Schema.Literal("api"),' "$F" | grep -qF 'key: Schema.String,' ||
-		miss "an api credential is no longer {type: \"api\", key}"
-	pass "the key is still in auth.json as {type: \"api\", key}"
+# SC2016: the backticks and the $type below are OpenCode's TypeScript, matched
+# literally by grep -F. Single quotes are the point.
+# shellcheck disable=SC2016
+if [ "$MOVED" = yes ]; then
+	# 8a. The table as a fresh install creates it (schema.gen.ts is the
+	#     current schema in one piece, every migration applied). The reader
+	#     selects integration_id and value and orders by active, then
+	#     time_created, then id.
+	P=packages/core/src/database/schema.gen.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'CREATE TABLE \`credential\` (' || miss "there is no credential table in the schema -- find where 2.0 keeps keys now"
+		for col in '\`id\` text PRIMARY KEY,' '\`integration_id\` text,' '\`value\` text NOT NULL,' '\`active\` integer,' '\`time_created\` integer NOT NULL,'; do
+			has "$F" "$col" || miss "the credential table no longer has $col -- CREDENTIAL_QUERY reads it"
+		done
+		pass "the credential table still has id, integration_id, value, active, time_created"
+	fi
+	# 8b. The value is plain JSON, {"type": "key", "key": ...}. Plain is
+	#     the whole premise: a value encrypted with a machine secret is one
+	#     BLINK must not try to read at all.
+	P=packages/core/src/credential/sql.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'sqliteTable("credential", {' || miss "the credential table is renamed"
+		has "$F" 'value: text({ mode: "json" }).$type<Credential.Value>().notNull(),' ||
+			miss "credential.value is no longer plain JSON text -- check for encryption before reading it"
+		pass "credential.value is still plain JSON text"
+	fi
+	P=packages/schema/src/credential.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		grep -A1 'type: Schema.Literal("key"),' "$F" | grep -qF 'key: Schema.String,' ||
+			miss "a key credential is no longer {type: \"key\", key}"
+		pass "a key credential is still {type: \"key\", key}"
+	fi
+	P=packages/core/src/database/migration/20260805200742_import_legacy_credentials.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'Credential.Key.make({ type: "key", key: value.key' ||
+			miss "an auth.json api key is no longer imported as {type: \"key\", key}"
+		has "$F" 'const integrationID = id.replace(' ||
+			miss "the import no longer uses the auth.json key as integration_id"
+		pass "auth.json's api keys are imported as {type: \"key\"} under their provider id"
+	fi
+	# 8c. Which row is THE key, when an integration has several: Credential.list
+	#     orders by active, time_created, id ascending; resolveConnections
+	#     reverses it and the active connection is the first.
+	P=packages/core/src/credential.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" '.orderBy(asc(CredentialTable.active), asc(CredentialTable.time_created), asc(CredentialTable.id))' ||
+			miss "credentials are no longer ordered by active, time_created, id -- CREDENTIAL_QUERY may read a key OpenCode does not use"
+		pass "credentials are still ordered by active, time_created, id"
+	fi
+	P=packages/core/src/integration.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" '.toReversed()' || miss "resolveConnections no longer reverses the credential list"
+		has "$F" 'return resolveConnections(entry, yield* credentials.list(id))[0]' ||
+			miss "the active connection is no longer the first of resolveConnections"
+		pass "the active credential is still the last of Credential.list"
+	fi
+else
+	P=packages/opencode/src/auth/index.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'const file = path.join(Global.Path.data, "auth.json")' || miss "auth.json is no longer <data>/opencode/auth.json"
+		grep -A1 'type: Schema.Literal("api"),' "$F" | grep -qF 'key: Schema.String,' ||
+			miss "an api credential is no longer {type: \"api\", key}"
+		pass "the key is still in auth.json as {type: \"api\", key}"
+	fi
 fi
 
 # 9. Third parties: the provider ids and the quota endpoint's shape.

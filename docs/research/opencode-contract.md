@@ -153,10 +153,39 @@ into a `credential` table in `opencode.db` (`integration_id` = provider id,
 exists in 1.19.3's schema, but in 1.19.3 both ways a key gets saved --
 `opencode auth login` (`cli/cmd/providers.ts`) and the provider auth flow
 (`provider/auth.ts`) -- write through `Auth.set`, which is auth.json (READ).
-The day a release
-tag registers that migration in `migration.gen.ts`, the contract check fails
-with an explanation, and the reader has to learn the table -- a read-only
-SQLite query, so still standard library.
+
+**Read since 2026-10-19** (`pc/providers/opencode.py`, `_db_credentials`).
+READ at `dev` 31dc762:
+
+- The table, as `schema.gen.ts` and migration `20260611192811_lush_chimera`
+  create it: `id text PRIMARY KEY, integration_id text, label text NOT NULL,
+  value text NOT NULL, connector_id text, method_id text, active integer,
+  time_created integer NOT NULL, time_updated integer NOT NULL`.
+  `credential/sql.ts` declares `value` as `text({ mode: "json" })`: plain
+  JSON, no encryption and no machine secret (`Credential.Key` in
+  `packages/schema/src/credential.ts`).
+- The import runs once, as a migration. It reads auth.json, writes a row per
+  entry that has none yet, and neither deletes nor rewrites the file; nothing
+  else in 2.0 refers to auth.json. A desk upgraded from 1.x keeps a frozen
+  copy of the key it had that day.
+- Several rows per integration are allowed. The one in use is the first of
+  `Credential.list` (ordered `active, time_created, id` ascending) after
+  `resolveConnections` reverses it: `active = 1`, else the newest -- an
+  imported row has `active` NULL.
+- The file is `<data>/opencode/opencode.db` for the release channels
+  (`packages/cli/src/database-path.ts` now; check 2 still looks in
+  `database.ts`).
+
+The reader asks the table first and auth.json only when the table holds no
+plan key: on an upgraded desk auth.json is the frozen copy the import read,
+and a key rotated in 2.0 afterwards would never have reached us. So every
+fetch opens opencode.db read-only, a 1.x desk's included. MEASURED, SQLite
+3.53: a `mode=ro` open of a WAL-mode file with no `-wal` beside it creates
+`-wal` and `-shm`, stamped now, and leaves them -- which `last_activity`
+would read as OpenCode in use. So the reader opens `mode=ro` when a `-wal`
+exists (it then leaves the WAL's mtime alone, also measured) and
+`mode=ro&immutable=1` when none does, where there is no WAL for immutable to
+skip.
 
 ## 5. The quota endpoint
 
@@ -243,8 +272,9 @@ literals and `next`, the session events with `parentID`,
   the plugin is ported.
 - `v1/question.ts` moved to `packages/schema/src/question.ts`.
 - auth.json moves into the `credential` table (section 4), and
-  `auth/index.ts` is gone. Without a reader for the table, the gauges go
-  blank (`--%`) on a 2.0 desk.
+  `auth/index.ts` is gone. The reader handles this since 2026-10-19, and at
+  a ref with the import the contract check asserts the table's shape
+  instead of auth.json's.
 
 ## Sources
 

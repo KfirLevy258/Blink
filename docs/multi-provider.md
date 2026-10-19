@@ -131,8 +131,10 @@ from the specification:
   dropped rather than shown. `docs/research/opencode-contract.md` §5.
 - **Failures from that endpoint are HTTP 200.** `{"success": false, "code":
   1001}` is "no key", `401` a bad one. The body is checked, never the status.
-- **The key goes to one host and nowhere else.** It is read from OpenCode's
-  `auth.json` at each fetch and held only in the request header: never
+- **The key goes to one host and nowhere else.** It is read at each fetch
+  from OpenCode 2.0's `credential` table in `opencode.db`, opened read-only,
+  or, where that holds no plan key, from `auth.json` -- and held only in the
+  request header: never
   logged, never in an exception message, never written anywhere. A
   `zai-coding-plan` key goes only to `api.z.ai`, a `zhipuai-coding-plan` key
   only to `open.bigmodel.cn`, and a redirect is refused rather than followed,

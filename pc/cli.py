@@ -401,7 +401,8 @@ def opencode_plan_key() -> bool:
 
     A yes/no and nothing more: quota_source() returns which plan and which
     host, never the key, so nothing that asks this is handed a secret it
-    could print. Reads auth.json; makes no request.
+    could print. Reads OpenCode 2.0's credential table in opencode.db,
+    read-only, and auth.json; makes no request.
     """
     try:
         return opencode.quota_source() is not None
@@ -772,9 +773,9 @@ def _announce_opencode_quota() -> None:
     the key was issued for and no other, read-only, the cadence, nothing
     logged. Change one there, change it here.
 
-    Said whether or not a key is there today. The daemon reads auth.json at
-    every fetch, so a key added next week starts the requests with no
-    install in between; disclosing it only when one is present now would
+    Said whether or not a key is there today. The daemon looks for the key
+    at every fetch (OpenCode 2.0's credential table, else auth.json), so a
+    key added next week starts the requests with no install in between; disclosing it only when one is present now would
     make this the only notice that person never gets. The last line says
     which of the two this desk is, so nobody has to guess whether anything
     is being sent yet.
@@ -782,9 +783,10 @@ def _announce_opencode_quota() -> None:
     Wrapped continuation lines start lower case, as in
     _announce_codex_hooks: a line that continues a sentence is not a new one.
     """
-    print("  Quota    If OpenCode holds a GLM Coding Plan key in its")
-    print("           auth.json, Blink reads that key and sends it to the")
-    print("           quota endpoint of whichever service issued it -- Z.ai,")
+    print("  Quota    If OpenCode holds a GLM Coding Plan key -- in its")
+    print("           auth.json, or in its database from OpenCode 2.0 on --")
+    print("           Blink reads that key and sends it to the quota")
+    print("           endpoint of whichever service issued it -- Z.ai,")
     print("           or BigModel for a mainland plan -- and nowhere else.")
     print("           The request only reads your plan's usage. It is made")
     print("           about once a minute while OpenCode is in use, every 10")
@@ -3644,13 +3646,13 @@ def _opencode_lines(bridge_running=False, now=None, others_report=True):
     # "Z.AI Coding Plan" ("Zhipu AI Coding Plan" on the mainland host), read
     # from OpenCode 1.19.3's provider list.
     if not others_report:
-        no_key = ["OpenCode    no GLM Coding Plan key in OpenCode's auth.json"
+        no_key = ["OpenCode    no GLM Coding Plan key saved in OpenCode"
                   " -- nothing on this desk reports a usage figure, so the"
                   " board stays on its waiting screen",
                   "            Add the key with `opencode auth login`,"
                   " provider Z.AI Coding Plan, and OpenCode gets gauges."]
     else:
-        no_key = ["OpenCode    no GLM Coding Plan key in OpenCode's auth.json"
+        no_key = ["OpenCode    no GLM Coding Plan key saved in OpenCode"
                   " -- "
                   + ("its light works, there are no usage figures to show"
                      if mine else "there are no usage figures to show")]

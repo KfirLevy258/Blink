@@ -121,7 +121,8 @@ def make_db(data_dir, name="opencode.db", wal=True, sqlite=True):
     """An OpenCode database, and its WAL when asked.
 
     A real SQLite file when `sqlite`, made here with sqlite3 and holding no
-    rows at all -- nothing in pc/ reads the contents, only the mtime -- or an
+    rows at all -- the activity clock reads only the mtime, and the
+    credential table has its own builder (make_credential_db) -- or an
     empty file otherwise, which is what the presence test needs.
     """
     os.makedirs(data_dir, exist_ok=True)
@@ -150,6 +151,78 @@ def make_db(data_dir, name="opencode.db", wal=True, sqlite=True):
                 os.remove(path + extra)
             except OSError:
                 pass
+    return path
+
+
+# OpenCode 2.0's credential table, as dev's migration
+# 20260611192811_lush_chimera.ts creates it. Copied out as text, not imported
+# from pc/: a fixture that borrowed the reader's idea of the schema would
+# agree with it about a wrong column.
+CREDENTIAL_TABLE = """
+CREATE TABLE `credential` (
+  `id` text PRIMARY KEY,
+  `integration_id` text,
+  `label` text NOT NULL,
+  `value` text NOT NULL,
+  `connector_id` text,
+  `method_id` text,
+  `active` integer,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL
+);
+"""
+
+
+def credential_key(key=FAKE_KEY):
+    """A key credential's value, as 2.0 stores it: Credential.Key, which
+    import_legacy_credentials makes from an auth.json {type: "api"} entry."""
+    return {"type": "key", "key": key}
+
+
+def credential(integration="zai-coding-plan", value=None, *, active=None,
+               created=1_787_000_000_000, cid=None, label="API key"):
+    """One credential row. `value` a dict is stored as its JSON, as drizzle's
+    text({mode: "json"}) writes it; str or bytes are stored as given, for
+    rows that are not JSON or not text. `active` None is an imported row,
+    which has no flag."""
+    if value is None:
+        value = credential_key()
+    return {"id": cid or "cred_%d_%s" % (created, integration),
+            "integration_id": integration, "label": label,
+            "value": json.dumps(value) if isinstance(value, dict) else value,
+            "active": active, "time_created": created,
+            "time_updated": created}
+
+
+def make_credential_db(data_dir, rows=(), name="opencode.db", table=True,
+                       journal="WAL"):
+    """An OpenCode 2.0 database with these credential rows.
+
+    `table` False leaves the credential table out -- a 1.x database.
+    `journal` is WAL by default, as OpenCode runs it; "DELETE" is for the
+    lock test, where a writer's exclusive lock shuts readers out entirely.
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    path = os.path.join(data_dir, name)
+    con = sqlite3.connect(path)
+    try:
+        con.execute("PRAGMA journal_mode=%s" % journal)
+        con.execute("CREATE TABLE IF NOT EXISTS session (id TEXT)")
+        if table:
+            con.execute(CREDENTIAL_TABLE)
+            for r in rows:
+                con.execute(
+                    "INSERT INTO credential (id, integration_id, label, value,"
+                    " active, time_created, time_updated)"
+                    # CAST, so bytes given as a value land as TEXT that is
+                    # not UTF-8 -- the row the stdlib's decoder chokes on --
+                    # rather than as a BLOB, which it would hand back whole.
+                    " VALUES (?, ?, ?, CAST(? AS TEXT), ?, ?, ?)",
+                    (r["id"], r["integration_id"], r["label"], r["value"],
+                     r["active"], r["time_created"], r["time_updated"]))
+        con.commit()
+    finally:
+        con.close()
     return path
 
 

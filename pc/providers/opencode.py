@@ -24,10 +24,12 @@ query-usage.mjs). This is the first time the daemon makes a request with a
 customer's credential, so the rules are strict and each one is enforced in
 one place below:
 
-  - The key is read from OpenCode's auth.json at each fetch (_read_key) and
-    held only in the request header. auth.json is opened only once a fetch
-    is due, never on the ticks in between (tick). quota_source() -- the
-    thing `blink status` and the cadence look at -- never returns it.
+  - The key is read at each fetch (_read_key) and held only in the request
+    header: from OpenCode 2.0's `credential` table in opencode.db, opened
+    read-only (_db_credentials), else from auth.json, where 1.x keeps it.
+    Both are opened only once a fetch is due, never on the ticks in between
+    (tick). quota_source() -- the thing `blink status` and the cadence look
+    at -- never returns it.
   - It goes only to the host it was issued for: z.ai for zai-coding-plan,
     BigModel for zhipuai-coding-plan. Redirects are refused outright, because
     urllib copies every header but the content ones onto a redirect -- a 302
@@ -81,7 +83,7 @@ poll -- never waits on the network:
 
 A failure keeps the last good reading, which then ages into `stale` like any
 other -- except a failure that is about the key: the plan refusing it, or
-the key gone from auth.json. Those drop the reading, because the number
+the key gone from OpenCode. Those drop the reading, because the number
 then describes an account this desk can no longer see. So does reaching the
 seven-day give-up: nothing would ever replace that reading. The thread starts
 on the first poll(), not in the constructor, so building a provider --
@@ -94,8 +96,6 @@ NOT HANDLED, deliberately
     the shell OpenCode runs in, and the daemon runs as a login service with
     an environment of its own: honouring them here would read some other
     variable's value, or none, and look like it worked.
-  - OpenCode 2.0's `credential` table. Its dev branch moves auth.json into
-    SQLite; tests/ci/check_opencode_contract.sh is what fails that day.
   - Pay-as-you-go keys (provider `zai`): they have no plan quota to show.
 """
 import collections
@@ -103,6 +103,7 @@ import glob
 import json
 import math
 import os
+import pathlib
 import ssl
 import sys
 import threading
@@ -509,16 +510,8 @@ def _load_auth(root=None):
     return doc if isinstance(doc, dict) else None
 
 
-def _entry_key(doc, provider_key):
-    """The key one auth.json entry holds, or None when it is not a plan key.
-
-    `type: "api"` only. OpenCode also writes `oauth` and `wellknown` entries,
-    and neither is a Coding Plan API key the quota endpoint would accept.
-    """
-    entry = doc.get(provider_key)
-    if not isinstance(entry, dict) or entry.get("type") != "api":
-        return None
-    key = entry.get("key")
+def _clean_key(key):
+    """A key fit for a request header, or None."""
     if not isinstance(key, str):
         return None
     key = key.strip()
@@ -530,6 +523,202 @@ def _entry_key(doc, provider_key):
     return key
 
 
+def _entry_key(doc, provider_key):
+    """The key one auth.json entry holds, or None when it is not a plan key.
+
+    `type: "api"` only. OpenCode also writes `oauth` and `wellknown` entries,
+    and neither is a Coding Plan API key the quota endpoint would accept.
+    """
+    entry = doc.get(provider_key)
+    if not isinstance(entry, dict) or entry.get("type") != "api":
+        return None
+    return _clean_key(entry.get("key"))
+
+
+# --- the key under OpenCode 2.0 ----------------------------------------------
+#
+# OpenCode's dev branch (the 2.0 line, October 2026) keeps credentials in a
+# `credential` table in opencode.db instead of auth.json. Read at dev
+# 31dc762, packages/core/src/database/migration/:
+#
+#   20260611192811_lush_chimera.ts -- the table:
+#       id text PRIMARY KEY, integration_id text, label text NOT NULL,
+#       value text NOT NULL, connector_id text, method_id text,
+#       active integer, time_created integer NOT NULL,
+#       time_updated integer NOT NULL
+#   20260805200742_import_legacy_credentials.ts -- copies each auth.json
+#       entry in ONCE, as integration_id = the auth.json key and value =
+#       JSON {"type": "key", "key": ...} for an `api` entry. It never
+#       deletes auth.json, and nothing in 2.0 writes auth.json again.
+#
+# The value is plain JSON: no encryption, no machine secret (the shape is
+# Credential.Key in packages/schema/src/credential.ts). An integration may
+# hold several rows; the one OpenCode uses is the first by `active` (1, then
+# 0, then NULL for an imported row), then newest time_created, then id --
+# Credential.list orders them ascending and resolveConnections in
+# packages/core/src/integration.ts reverses that. CREDENTIAL_QUERY orders
+# the same way, and only that first row counts: a key OpenCode is not using
+# is not one to send.
+#
+# Read BEFORE auth.json (_plan_keys says why), so every fetch opens
+# opencode.db read-only -- on a 1.x desk too, where it finds no table and
+# auth.json answers.
+
+# A locked database is a busy OpenCode, not a reason to hold up a fetch --
+# or `blink status`, which asks the same question in front of a person.
+# One second; a read that would have to wait longer finds no key this time.
+CREDENTIAL_DB_TIMEOUT_S = 1.0
+
+# A {"type": "key", "key": ...} value is a few hundred bytes. A row much
+# larger is not one, and is not parsed.
+MAX_CREDENTIAL_BYTES = 64 * 1024
+
+CREDENTIAL_QUERY = (
+    "SELECT integration_id, value FROM credential"
+    " WHERE integration_id IN ({})"
+    " ORDER BY active DESC, time_created DESC, id DESC").format(
+        ", ".join("?" for _ in QUOTA_HOSTS))
+
+
+def _credential_value_key(raw):
+    """The key in one credential row's value, or None. Never raises."""
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_CREDENTIAL_BYTES:
+        return None
+    try:
+        doc = json.loads(bytes(raw).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(doc, dict) or doc.get("type") != "key":
+        return None
+    return _clean_key(doc.get("key"))
+
+
+def _db_credentials(path):
+    """{provider_key: key} from one database's credential table. Never
+    raises, and nothing it could have raised carries a value.
+
+    Read-only by URI, and how depends on whether a WAL file is there.
+
+    With one -- OpenCode is open, or left it behind -- mode=ro. Never
+    `immutable` then: an immutable reader ignores the WAL, where a key
+    saved a minute ago sits until the next checkpoint, and takes no lock, so
+    it could read a page halfway through a checkpoint. mode=ro takes the
+    ordinary shared lock and sees what OpenCode itself would; it leaves the
+    WAL's mtime alone (measured, SQLite 3.53).
+
+    Without one, mode=ro&immutable=1. Measured on the same build: a plain
+    mode=ro open of a WAL-mode file with no -wal beside it CREATES
+    opencode.db-wal and -shm, stamped now, and leaves them there -- and a
+    fresh -wal is exactly what last_activity() reads as somebody using
+    OpenCode. Every look for a key would have made OpenCode look active:
+    the minute cadence for good, and the second ring taken from Codex by a
+    desk where OpenCode had not been opened all week. With no WAL there is
+    nothing for immutable to skip -- every committed row is in the main
+    file, and nothing writes that file in WAL mode without a WAL existing
+    first -- so it is safe exactly where mode=ro is not. The one gap is
+    OpenCode starting during the few milliseconds of the read; the worst
+    that does is a read error, which is no key until the next fetch.
+
+    query_only on top, so even a mistake in this function could not write.
+
+    text_factory=bytes because the stdlib's own decode error QUOTES the
+    value it failed on ("Could not decode to UTF-8 column 'value' with text
+    ..."): a row with one bad byte would raise an exception with a
+    credential inside it. The bytes are decoded here instead, where a
+    failure says nothing.
+    """
+    # Imported here, not at the top: the daemon and every `blink` command
+    # import this module, and only a fetch that is due gets this far.
+    import sqlite3
+    try:
+        uri = pathlib.Path(os.path.abspath(path)).as_uri() + (
+            "?mode=ro" if os.path.exists(path + "-wal")
+            else "?mode=ro&immutable=1")
+    except (ValueError, OSError):
+        return {}
+    con = None
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=CREDENTIAL_DB_TIMEOUT_S,
+                              isolation_level=None)
+        con.text_factory = bytes
+        con.execute("PRAGMA query_only = 1")
+        rows = con.execute(CREDENTIAL_QUERY,
+                           [p for p, _host in QUOTA_HOSTS]).fetchall()
+    except Exception:
+        # No credential table (OpenCode 1.x), a lock held past the timeout,
+        # not a database at all: no key from here, and nothing said.
+        return {}
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+    found = {}
+    seen = set()
+    for integration, raw in rows:
+        if isinstance(integration, (bytes, bytearray)):
+            try:
+                integration = bytes(integration).decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        if integration in seen:
+            continue        # a row OpenCode does not select for it
+        seen.add(integration)
+        key = _credential_value_key(raw)
+        if key is not None:
+            found[integration] = key
+    return found
+
+
+def _load_credentials(root=None):
+    """{provider_key: key} from OpenCode 2.0's credential table, or {}.
+
+    The databases in db_paths() order, opencode.db first, and the first one
+    that holds a plan key answers alone: two release channels' databases
+    are two OpenCodes, and a key is not mixed in from the other one.
+    """
+    root = root if root is not None else data_dir()
+    for path in db_paths(root):
+        try:
+            found = _db_credentials(path)
+        except Exception:
+            found = {}
+        if found:
+            return found
+    return {}
+
+
+def _plan_keys(root=None):
+    """{provider_key: key} for the plan keys OpenCode holds, or {}.
+
+    The credential table first, auth.json only when the table holds no plan
+    key -- because 2.0 reads auth.json exactly once, in the migration that
+    imports it, and never writes it again. On a desk upgraded from 1.x the
+    file is a frozen copy of the key it held that day. Read first, it won:
+    a key rotated in OpenCode afterwards never reached us, the plan refused
+    the old one, and the gauges blanked on "rejected the key" for as long
+    as the leftover file lived -- which, since nothing deletes it, was for
+    good. Where the table has a plan key it is the one OpenCode is using;
+    where it has none (1.x, with no table at all) auth.json is still the
+    truth.
+
+    Never one key from each: the two are one OpenCode's present and past,
+    and a pair drawn from both describes neither.
+    """
+    keys = _load_credentials(root)
+    if keys:
+        return keys
+    doc = _load_auth(root)
+    if doc is None:
+        return {}
+    for provider_key, _host in QUOTA_HOSTS:
+        key = _entry_key(doc, provider_key)
+        if key is not None:
+            keys[provider_key] = key
+    return keys
+
+
 def quota_source(root=None):
     """(provider_key, host) for the plan key OpenCode holds, or None.
 
@@ -537,21 +726,16 @@ def quota_source(root=None):
     look at, and neither has any use for the secret -- so neither is handed
     one it could print.
     """
-    doc = _load_auth(root)
-    if doc is None:
-        return None
+    keys = _plan_keys(root)
     for provider_key, host in QUOTA_HOSTS:
-        if _entry_key(doc, provider_key) is not None:
+        if provider_key in keys:
             return provider_key, host
     return None
 
 
 def _read_key(provider_key, root=None):
     """The key itself, for the one request that needs it, or None."""
-    doc = _load_auth(root)
-    if doc is None:
-        return None
-    return _entry_key(doc, provider_key)
+    return _plan_keys(root).get(provider_key)
 
 
 # --- the reply ---------------------------------------------------------------
@@ -941,7 +1125,7 @@ class OpenCodeProvider(base.ProviderParser):
 
         The whole answer, key included, for `blink status` and the tests.
         tick() does NOT call this: it asks _cadence() first and reads
-        auth.json only once a fetch is actually due -- see tick().
+        the key only once a fetch is actually due -- see tick().
         """
         if quota_source(self._root()) is None:
             return None
@@ -949,7 +1133,7 @@ class OpenCodeProvider(base.ProviderParser):
 
     def _cadence(self, now_epoch):
         """The interval from OpenCode's activity alone, or None for "do not
-        fetch". A few stat calls; it never opens auth.json."""
+        fetch". A few stat calls; it never opens auth.json or the database."""
         la = last_activity(self._root(), self._state_dir)
         if la is None:
             return None
@@ -995,9 +1179,9 @@ class OpenCodeProvider(base.ProviderParser):
         if last is not None and 0 <= now_epoch - last < interval:
             return False
         # Stamped before the key is looked for, so a desk with no plan key
-        # reads auth.json once per interval, not on every tick until one
-        # appears. A key added now waits at most one interval for its first
-        # fetch.
+        # opens the credential table and auth.json once per interval, not on
+        # every tick until one appears. A key added now waits at most one
+        # interval for its first fetch.
         self._last_attempt = now_epoch
         source = quota_source(self._root())
         if source is None:
