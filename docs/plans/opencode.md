@@ -277,6 +277,58 @@ The panel has two rings and one light.
   The board's `active_age_s` folds the same set, so an OpenCode turn a
   minute ago keeps the panel awake beside two quiet rings.
 
+### A token budget, for a model with no plan
+
+The desk this provider was written for runs OpenCode against a self-hosted
+model. There is no plan, so no quota, and the rings were blank. OpenCode
+does record every reply's token counts, so the person sets a budget and the
+rings show use against it:
+
+    blink opencode-budget 5h=2M 7d=20M    # set (K, M, G); one window alone works
+    blink opencode-budget                 # show the budget and current use
+    blink opencode-budget 5h=off | off    # drop one window, or the budget
+
+- **The file** is `~/.blink/opencode-budget.json`, written atomically with
+  mode 0600. The daemon re-reads it when its inode, mtime or size changes,
+  so no restart is needed.
+- **What counts.** Assistant messages whose provider is not
+  `zai-coding-plan` or `zhipuai-coding-plan`, because those have a real
+  quota. Each counts input + output + reasoning + cache read + cache write,
+  the same total `opencode stats` reports. Two rolling windows end now:
+  5 hours and 7 days. They never reset, so `resets_in_s` is -1 and the
+  board draws `--`. A percentage over 100 is real, and is held at the
+  board's PCT_MAX (1000), which is the most it will accept.
+- **Both schemas, both tables.** 1.x keeps messages in `message`, with the
+  JSON in `data`. 2.0 keeps them in `session_message`, with the role in
+  `type` and the provider at `$.model.providerID`, and leaves out what a
+  fork copied from its parent, as 2.0's own stats query does. Measured with
+  real 1.19.3: that release already creates an empty `session_message`. A
+  reader that preferred it read zero on every 1.x desk, while every
+  fixture test passed. Both tables are read and summed, and an id that
+  appears in both counts once.
+- **What is read.** Token counts, the provider id, `time_created` and the
+  message id. Nothing else is read, through `json_extract` (or a Python
+  parse that discards the rest). The database is opened through
+  `opencode.connect_readonly`, the same helper the 2.0 key lookup uses
+  (read-only URI, `immutable=1` only with no `-wal`, `query_only`, bytes
+  out). This keeps a read from creating the `-wal` that `last_activity()`
+  would take for OpenCode activity. It is opened only while a budget is
+  set.
+- **Cost.** The rows are cached against the db's and `-wal`'s mtime and
+  size. They are re-read only after a change, and at most every 10 s,
+  because the WAL moves continuously while a reply streams. Between reads
+  the cached rows are re-summed, so a message still ages out of the
+  window on time. Measured: a 200,000-row, 90 MB `message` table scans in
+  about 70 ms.
+- **A server that omits `usage`.** OpenCode then writes 0 to every field
+  (measured, 1.19.3). If the week has replies and none of them has a
+  count, the rings stay blank rather than show 0%. `blink status` says
+  "OpenCode recorded no token counts -- your model server may not return
+  usage".
+- **The plan wins.** When a GLM plan reading is held it takes the rings.
+  The budget fills them only when no plan reading is held, for example
+  before the first fetch or after the key is refused.
+
 ### Not in this change
 
 - **Firmware.** The provider name is a free string on the wire and the

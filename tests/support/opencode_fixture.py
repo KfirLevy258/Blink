@@ -267,3 +267,162 @@ def agent(state_dir, sid, aid, t):
     open(path, "wb").close()
     stamp(path, t)
     return path
+
+
+# --- messages with token counts: the token budget's input ------------------
+#
+# Both schemas as their own DDL, copied out as text for the reason
+# CREDENTIAL_TABLE gives. 1.x as OpenCode 1.19.3 creates it (read off a
+# database 1.19.3 made in an isolated lab, 2026-10-19 -- the DDL only; no
+# row of it is here). 2.0 as dev's packages/core/src/database/schema.gen.ts
+# creates session_message and session_v2, trimmed of the session columns
+# nothing here reads (every NOT NULL one kept that an insert below fills,
+# so the reader meets the columns it joins on with their real names).
+
+MESSAGE_TABLE_V1 = """
+CREATE TABLE `message` (
+  `id` text PRIMARY KEY,
+  `session_id` text NOT NULL,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL,
+  `data` text NOT NULL
+);
+CREATE INDEX `message_session_time_created_id_idx`
+  ON `message` (`session_id`,`time_created`,`id`);
+"""
+
+SESSION_TABLES_V2 = """
+CREATE TABLE `session_v2` (
+  `id` text PRIMARY KEY,
+  `project_id` text NOT NULL,
+  `parent_id` text,
+  `fork_session_id` text,
+  `slug` text NOT NULL,
+  `directory` text NOT NULL,
+  `version` text NOT NULL,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL
+);
+CREATE TABLE `session_message` (
+  `id` text PRIMARY KEY,
+  `session_id` text NOT NULL,
+  `type` text NOT NULL,
+  `seq` integer NOT NULL,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL,
+  `data` text NOT NULL
+);
+CREATE INDEX `session_message_time_created_idx`
+  ON `session_message` (`time_created`);
+"""
+
+# Words that must never leave the reader: a test searches stderr, stdout and
+# every frame for them. A stand-in for a conversation, not one.
+SECRET_TEXT = "blinktest-conversation-SECRET-do-not-log"
+
+
+def tokens(input=0, output=0, reasoning=0, read=0, write=0, total=True):
+    """A tokens object as 1.19.3 writes it, `total` included (the sum of
+    the other five, as measured); total=False leaves it out."""
+    t = {"input": input, "output": output, "reasoning": reasoning,
+         "cache": {"read": read, "write": write}}
+    if total:
+        t["total"] = input + output + reasoning + read + write
+    return t
+
+
+def v1_message(t_ms, role="assistant", provider="glm-local", tok=None,
+               mid=None, session="ses_fixture"):
+    """One 1.x `message` row: (id, session_id, time_created, data JSON).
+    A text field rides along, so a leak of anything but counts shows."""
+    data = {"role": role, "time": {"created": t_ms},
+            "summary": {"title": SECRET_TEXT}}
+    if role == "assistant":
+        data.update({"providerID": provider, "modelID": "glm-5.1",
+                     "mode": "build", "cost": 0,
+                     "tokens": tok if tok is not None else tokens()})
+    return (mid or "msg_%d_%s" % (t_ms, role), session, t_ms,
+            json.dumps(data))
+
+
+def v2_message(t_ms, kind="assistant", provider="glm-local", tok=None,
+               mid=None, session="ses_fixture", seq=None):
+    """One 2.0 `session_message` row: the role in `type`, the provider at
+    $.model.providerID (packages/schema/src/session-message.ts)."""
+    data = {"type": kind, "time": {"created": t_ms},
+            "content": [{"type": "text", "text": SECRET_TEXT}]}
+    if kind == "assistant":
+        data.update({"agent": "build",
+                     "model": {"providerID": provider, "id": "glm-5.1"},
+                     "cost": 0,
+                     "tokens": tok if tok is not None else tokens()})
+    return {"id": mid or "msg_%d_%s" % (t_ms, kind), "session_id": session,
+            "type": kind, "seq": seq, "time_created": t_ms, "data": data}
+
+
+def make_message_db(data_dir, v1=(), v2=None, sessions=(), name="opencode.db",
+                    wal=False):
+    """An OpenCode database with these messages.
+
+    `v1` rows go in a 1.x `message` table (always created); `v2` rows, when
+    not None, in 2.0's session_message, with `sessions` as session_v2 rows
+    (id, fork_session_id, time_created_ms). `wal` False leaves no -wal or
+    -shm behind -- a closed OpenCode -- so a test can prove the reader does
+    not create them.
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    path = os.path.join(data_dir, name)
+    con = sqlite3.connect(path)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.executescript(MESSAGE_TABLE_V1)
+        con.executemany(
+            "INSERT INTO message (id, session_id, time_created, time_updated,"
+            " data) VALUES (?, ?, ?, ?, ?)",
+            [(m, s, t, t, d) for m, s, t, d in v1])
+        if v2 is not None:
+            con.executescript(SESSION_TABLES_V2)
+            for sid, fork, t in sessions:
+                con.execute(
+                    "INSERT INTO session_v2 (id, project_id, fork_session_id,"
+                    " slug, directory, version, time_created, time_updated)"
+                    " VALUES (?, 'prj', ?, 'slug', '/proj', '2', ?, ?)",
+                    (sid, fork, t, t))
+            for i, r in enumerate(v2):
+                con.execute(
+                    "INSERT INTO session_message (id, session_id, type, seq,"
+                    " time_created, time_updated, data)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (r["id"], r["session_id"], r["type"],
+                     r["seq"] if r["seq"] is not None else i,
+                     r["time_created"], r["time_created"],
+                     json.dumps(r["data"])))
+        con.commit()
+    finally:
+        con.close()
+    if not wal:
+        # See make_db: macOS's own python3 leaves these behind.
+        for extra in ("-wal", "-shm"):
+            try:
+                os.remove(path + extra)
+            except OSError:
+                pass
+    return path
+
+
+def write_budget(home, session=None, weekly=None, raw=None):
+    """~/.blink/opencode-budget.json under `home`, as the CLI writes it, or
+    `raw` bytes/str exactly as given, for the garbage tests."""
+    d = os.path.join(home, ".blink")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "opencode-budget.json")
+    if raw is None:
+        doc = {}
+        if session is not None:
+            doc["session_tokens"] = session
+        if weekly is not None:
+            doc["weekly_tokens"] = weekly
+        raw = json.dumps(doc)
+    with open(path, "wb") as f:
+        f.write(raw if isinstance(raw, bytes) else raw.encode("utf-8"))
+    return path

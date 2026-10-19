@@ -154,7 +154,7 @@ For Claude Desktop, the app learns usage by reading Claude Desktop's own local f
 | Claude Code, in a terminal or an IDE | Everything |
 | Codex CLI | Everything, on its own page |
 | OpenCode on the GLM Coding Plan (Z.ai or BigModel) | The plan's 5-hour and weekly quota with both countdowns, on its own page, and the activity light |
-| OpenCode with any other model | The activity light; the dials stay blank (`--%`) rather than show a number from somewhere else |
+| OpenCode with any other model | The activity light. Set a token budget (`blink opencode-budget 5h=2M 7d=20M`) and the dials show OpenCode's own token use against it; without one they stay blank (`--%`) rather than show a number from somewhere else |
 | Claude Code in Claude Desktop's Code tab | The same as Desktop below, plus the activity light: the Code tab runs Claude Code's hooks, though not its status line, so the figures are Desktop's rather than Claude Code's |
 | Claude Desktop, without Claude Code | Five-hour percentage and countdown, refreshed within seconds of a turn; weekly percentage on Desktop's own schedule (about 5 min in use, up to 15 idle); a weekly countdown too, once one has been learned, published only while nothing contradicts it; no activity light |
 | claude.ai in a browser | Nothing - there is no usage data to read |
@@ -167,6 +167,7 @@ For Claude and Codex, BLINK never sees a credential and never sends anything any
 
 - The key goes **only** to the plan's own quota endpoint - `api.z.ai` for a Z.ai key, `open.bigmodel.cn` for a BigModel one - and nowhere else. It is never written down, never logged, and never sent to the board.
 - It asks about once a minute while you are using OpenCode, every ten minutes otherwise, and not at all after a week without it.
+- With a token budget set, BLINK also reads OpenCode's token counts from that database, read-only: when each reply was made, which provider answered, and how many tokens it took. Never the text. Nothing is sent anywhere.
 - The activity light comes from a small plugin BLINK puts in OpenCode's plugin folder. It writes the same tiny files the Claude Code hooks do: what happened and when, the session ids, and the last part of the project folder's name. Never a prompt, a path or a command.
 
 `blink install` says all of this before it does anything, and `blink uninstall` removes the plugin.

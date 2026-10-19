@@ -3,7 +3,9 @@
 Two frames, under provider "opencode" (docs/plans/opencode.md is the design
 and the measurements behind it):
 
-  - a usage frame, src "zai", from the plan's own quota endpoint;
+  - a usage frame, src "zai", from the plan's own quota endpoint -- or,
+    on a desk with no plan reading and a token budget set, src "tokens",
+    OpenCode's own token counts against that budget (opencode_budget.py);
   - a state frame, src "state", from the hook slots tools/blink-opencode.js
     writes into ~/.blink/state-opencode in exactly blink-hook.sh's format,
     read by claude_state -- its state machine, waiting marker, tombstone and
@@ -113,10 +115,16 @@ import urllib.request
 
 from pc.providers import base
 from pc.providers import claude_state
+from pc.providers import opencode_budget
 
 PROVIDER_ID = "opencode"
 SRC_ID = "zai"
 STATE_SRC_ID = "state"
+# The usage frame built from OpenCode's own token counts against the budget
+# the person set (opencode_budget.py), on a desk with no plan reading. The
+# firmware reads no `src`; this is for `blink status --wire` and whoever
+# reads it.
+TOKENS_SRC_ID = "tokens"
 
 # Expanded when a provider is built, never here: a module-level expanduser is
 # evaluated at import, before tests/conftest.py can move HOME, and the scan
@@ -593,9 +601,13 @@ def _credential_value_key(raw):
     return _clean_key(doc.get("key"))
 
 
-def _db_credentials(path):
-    """{provider_key: key} from one database's credential table. Never
-    raises, and nothing it could have raised carries a value.
+def connect_readonly(path, timeout=CREDENTIAL_DB_TIMEOUT_S):
+    """A read-only sqlite3 connection to one OpenCode database. Raises.
+
+    The one way this daemon opens opencode.db: the plan key below and the
+    token budget (pc/providers/opencode_budget.py) both come through here,
+    so the rules that keep a look from looking like OpenCode activity live
+    in one place.
 
     Read-only by URI, and how depends on whether a WAL file is there.
 
@@ -619,29 +631,38 @@ def _db_credentials(path):
     OpenCode starting during the few milliseconds of the read; the worst
     that does is a read error, which is no key until the next fetch.
 
-    query_only on top, so even a mistake in this function could not write.
+    query_only on top, so even a mistake in a caller could not write.
 
     text_factory=bytes because the stdlib's own decode error QUOTES the
     value it failed on ("Could not decode to UTF-8 column 'value' with text
     ..."): a row with one bad byte would raise an exception with a
-    credential inside it. The bytes are decoded here instead, where a
-    failure says nothing.
+    credential -- or a line of somebody's conversation -- inside it. The
+    caller decodes the bytes itself, where a failure says nothing.
     """
     # Imported here, not at the top: the daemon and every `blink` command
-    # import this module, and only a fetch that is due gets this far.
+    # import this module, and only a read that is due gets this far.
     import sqlite3
+    uri = pathlib.Path(os.path.abspath(path)).as_uri() + (
+        "?mode=ro" if os.path.exists(path + "-wal")
+        else "?mode=ro&immutable=1")
+    con = sqlite3.connect(uri, uri=True, timeout=timeout,
+                          isolation_level=None)
     try:
-        uri = pathlib.Path(os.path.abspath(path)).as_uri() + (
-            "?mode=ro" if os.path.exists(path + "-wal")
-            else "?mode=ro&immutable=1")
-    except (ValueError, OSError):
-        return {}
-    con = None
-    try:
-        con = sqlite3.connect(uri, uri=True, timeout=CREDENTIAL_DB_TIMEOUT_S,
-                              isolation_level=None)
         con.text_factory = bytes
         con.execute("PRAGMA query_only = 1")
+    except Exception:
+        con.close()
+        raise
+    return con
+
+
+def _db_credentials(path):
+    """{provider_key: key} from one database's credential table. Never
+    raises, and nothing it could have raised carries a value. Opened by
+    connect_readonly, whose docstring is the reason for every flag."""
+    con = None
+    try:
+        con = connect_readonly(path)
         rows = con.execute(CREDENTIAL_QUERY,
                            [p for p, _host in QUOTA_HOSTS]).fetchall()
     except Exception:
@@ -1058,11 +1079,13 @@ class OpenCodeProvider(base.ProviderParser):
     `state_dir` replace OpenCode's data directory and the slot directory;
     `sweep` is forwarded to claude_state, so a caller that only wants to
     look can look without collecting. `liveness` replaces SEEN_ALIVE in
-    tests.
+    tests. `budget_path` replaces ~/.blink/opencode-budget.json and
+    `tokens` the cached token reader (opencode_budget.TokenCounter).
     """
 
     def __init__(self, state_dir=None, data_path=None, sweep=True,
-                 fetch=True, fetcher=None, clock=time.time, liveness=None):
+                 fetch=True, fetcher=None, clock=time.time, liveness=None,
+                 budget_path=None, tokens=None):
         self._state_dir = (state_dir if state_dir is not None
                            # Not state_dir(): the parameter shadows it.
                            else _home_path(STATE_DIR))
@@ -1080,6 +1103,9 @@ class OpenCodeProvider(base.ProviderParser):
         self._last_attempt = None
         self._thread = None
         self._stop = threading.Event()
+        self._budget = opencode_budget.BudgetFile(budget_path)
+        self._tokens = (tokens if tokens is not None
+                        else opencode_budget.TokenCounter())
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -1260,6 +1286,65 @@ class OpenCodeProvider(base.ProviderParser):
     # --- the frames ---------------------------------------------------------
 
     def _usage_frame(self, now_epoch):
+        """The plan's quota when there is a reading, else the token budget.
+
+        The plan wins whenever it has a reading: it is the account's own
+        ledger with a real limit and real resets, where a budget is the
+        person's estimate. A desk that has a plan key AND a self-hosted
+        model gets the budget only while no plan reading is held -- before
+        the first fetch, or after the key is refused or gone -- because a
+        page of the budget is better than a blank one, and the plan's own
+        figure takes the rings back the moment it is read.
+        """
+        frame = self._plan_frame(now_epoch)
+        if frame is not None:
+            return frame
+        return self._token_frame(now_epoch)
+
+    def token_use(self, now_epoch):
+        """(Budget or None, TokenUse or None) for the token budget. The
+        database is opened only when a budget is set. Never raises."""
+        try:
+            budget = self._budget.read()
+            if budget is None:
+                return None, None
+            return budget, self._tokens.use(db_paths(self._root()), now_epoch)
+        except Exception:
+            return None, None
+
+    def _token_frame(self, now_epoch):
+        budget, use = self.token_use(now_epoch)
+        if budget is None or use is None:
+            return None
+        if opencode_budget.no_counts(use):
+            # Messages in the week and not one token among them: the server
+            # is not returning usage, and OpenCode records 0 for every field
+            # (measured, 1.19.3). "0%" there would be a number this desk
+            # does not have -- blank rings, as before a budget existed, and
+            # `blink status` says why.
+            return None
+        s_pct = opencode_budget.percent(use.session_tokens,
+                                        budget.session_tokens)
+        w_pct = opencode_budget.percent(use.weekly_tokens,
+                                        budget.weekly_tokens)
+        la = last_activity(self._root(), self._state_dir)
+        return base.NormalizedUsageFrame(
+            provider=PROVIDER_ID, src=TOKENS_SRC_ID,
+            # The sums are of the windows ending now, re-summed each poll:
+            # the number is as fresh as this call even when the rows behind
+            # it were read a few seconds ago (opencode_budget, WHEN IT IS
+            # READ). active_at is OpenCode's own activity, for the reason
+            # the plan frame gives (OBSERVED_AT, ACTIVE_AT above): a frame
+            # rebuilt every poll is not somebody at the desk.
+            observed_at=now_epoch,
+            active_at=min(la, now_epoch) if la is not None else now_epoch,
+            session_pct=base.UNKNOWN if s_pct is None else s_pct,
+            weekly_pct=base.UNKNOWN if w_pct is None else w_pct,
+            # Rolling windows have no reset: the board draws `--`.
+            session_resets_at=None, weekly_resets_at=None,
+        )
+
+    def _plan_frame(self, now_epoch):
         reading = self.last_reading()
         if reading is None:
             return None

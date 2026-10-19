@@ -43,6 +43,7 @@ from pc.providers import codex_state
 # a real auth.json or a real Z.ai anywhere in reach. Importing it costs ssl
 # and urllib, which pc/ota already pulls in for every command.
 from pc.providers import opencode
+from pc.providers import opencode_budget
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -1141,7 +1142,12 @@ def _note_tools_alone(desk):
     # OpenCode on the real board (2026-10-19) -- this note promised "only its
     # light" to exactly that desk. Asked of the providers, not of which
     # tools are installed (numbered_sources, third review 2026-10-19).
-    numbered = desk.others_report or desk.opencode_plan
+    #
+    # A token budget is a number too (pc/providers/opencode_budget.py): the
+    # daemon then sends OpenCode's own page, light and all.
+    budgeted = (not desk.opencode_plan
+                and opencode_budget.read_budget() is not None)
+    numbered = desk.others_report or desk.opencode_plan or budgeted
     if desk.tool_lights and numbered:
         shown.append(f"the activity light for {_and(desk.tool_lights)}"
                      " sessions")
@@ -1157,7 +1163,10 @@ def _note_tools_alone(desk):
     if not desk.opencode_plan:
         # Not a fault to fix, so not phrased as one: OpenCode on any other
         # model has no plan quota anywhere to read (docs/plans/opencode.md).
-        if numbered:
+        if budgeted:
+            text += (" OpenCode holds no GLM Coding Plan key, so its rings"
+                     " show its token use against the budget you set.")
+        elif numbered:
             text += (" OpenCode holds no GLM Coding Plan key, so it has no"
                      " usage figures to show"
                      + (", only its light." if desk.opencode_plugin
@@ -3185,6 +3194,9 @@ def cmd_status(args) -> int:
     elif desk.opencode and desk.opencode_plan:
         print("Usage data  from OpenCode's GLM plan quota (no Claude Code"
               " status line yet)")
+    elif desk.opencode and opencode_budget.read_budget() is not None:
+        print("Usage data  from OpenCode's token counts, against the budget"
+              " you set (no Claude Code status line yet)")
     elif desk.opencode and not desk.on_path and not desk.unsigned_desktop:
         # OpenCode is the only tool here and has no plan key. Found end to
         # end with real OpenCode 1.19.3, 2026-10-19: this desk fell through
@@ -3669,19 +3681,160 @@ def _opencode_lines(bridge_running=False, now=None, others_report=True):
                   " -- "
                   + ("its light works, there are no usage figures to show"
                      if mine else "there are no usage figures to show")]
+    # A token budget turns a keyless desk into one with numbers, so where
+    # one is set the no-key lines lose their "nothing to show" half and the
+    # budget's own lines say what the rings carry instead.
+    #
+    # On a desk WITH a plan key the budget is only mentioned when one is
+    # set: the plan's quota is that desk's number, and a hint to set up a
+    # second one beside it is noise.
+    budget_lines = _opencode_budget_lines(now)
+    budgeted = opencode_budget.read_budget() is not None
+    plan_budget = (budget_lines + [
+        "OpenCode    the GLM plan quota is on the rings whenever it can be"
+        " read, the budget only when it cannot"] if budgeted else [])
+    if budgeted:
+        no_key = ["OpenCode    no GLM Coding Plan key saved in OpenCode --"
+                  " the rings show its token use against your budget"]
     if opencode.quota_source() is None:
         out.extend(no_key)
+        out.extend(budget_lines)
         return out, None
     quota, err = _status_fetch(now)
     if quota is not None:
         out.append(f"OpenCode    {opencode.describe(quota)}")
+        out.extend(plan_budget)
         return out, (quota, now)
     if err is None:
         # The key went between the two reads. Not an error to report.
         out.extend(no_key)
+        out.extend(budget_lines)
         return out, None
     out.append(f"OpenCode    GLM plan quota could not be read: {err}")
+    out.extend(plan_budget)
     return out, None
+
+
+def _budget_text(budget):
+    """"2M per 5 hours, 20M per 7 days" -- the windows that have one."""
+    parts = []
+    if budget.session_tokens:
+        parts.append(f"{opencode_budget.format_tokens(budget.session_tokens)}"
+                     " per 5 hours")
+    if budget.weekly_tokens:
+        parts.append(f"{opencode_budget.format_tokens(budget.weekly_tokens)}"
+                     " per 7 days")
+    return ", ".join(parts)
+
+
+def _use_text(used, budget):
+    if not budget:
+        return f"{opencode_budget.format_tokens(used)} (no budget)"
+    pct = opencode_budget.percent(used, budget)
+    return (f"{opencode_budget.format_tokens(used)} of"
+            f" {opencode_budget.format_tokens(budget)} ({pct:.0f}%)")
+
+
+def _opencode_budget_lines(now=None):
+    """The token budget's lines for `blink status` and `blink
+    opencode-budget`: what is set, what OpenCode has used against it, and
+    -- the one case a person cannot see for themselves -- a server that
+    never reports usage, so OpenCode writes 0 for every reply and the
+    rings stay blank. Measured with real OpenCode 1.19.3 against a server
+    whose replies leave `usage` out: every token field of every assistant
+    message was 0.
+
+    The database is opened only when a budget is set, and the lines say
+    counts and percentages, never anything from a message.
+    """
+    now = time.time() if now is None else now
+    budget = opencode_budget.read_budget()
+    if budget is None:
+        return ["OpenCode    no token budget set -- `blink opencode-budget"
+                " 5h=2M 7d=20M` shows its token use on the rings"]
+    out = [f"OpenCode    token budget {_budget_text(budget)}"]
+    try:
+        _b, use = opencode.OpenCodeProvider(
+            fetch=False, sweep=False,
+            tokens=opencode_budget.TokenCounter(report=False)
+        ).token_use(now)
+    except Exception:
+        use = None
+    if use is None:
+        out.append("OpenCode    token use could not be read from its"
+                   " database")
+        return out
+    session = _use_text(use.session_tokens, budget.session_tokens)
+    weekly = _use_text(use.weekly_tokens, budget.weekly_tokens)
+    out.append(f"OpenCode    used {session} in the last 5 hours,"
+               f" {weekly} in the last 7 days")
+    if opencode_budget.no_counts(use):
+        out.append("OpenCode    OpenCode recorded no token counts -- your model"
+                   " server may not return usage, so the rings stay blank")
+    return out
+
+
+def cmd_opencode_budget(args) -> int:
+    """`blink opencode-budget [5h=N] [7d=N] | off`: the budget the rings
+    measure OpenCode's own token use against, on a desk whose model has no
+    plan quota (pc/providers/opencode_budget.py).
+
+    Each window given is set and the other is kept, so `5h=3M` alone
+    changes one ring; `5h=off` drops one window and `off` the whole budget.
+    Written atomically 0600 to ~/.blink/opencode-budget.json, which the
+    running daemon re-reads when it changes -- no restart.
+    """
+    settings = list(getattr(args, "settings", None) or [])
+    path = opencode_budget.budget_path()
+    if settings == ["off"]:
+        removed = opencode_budget.clear_budget(path)
+        print("OpenCode token budget cleared." if removed
+              else "No OpenCode token budget was set.")
+        return 0
+    if settings:
+        current = opencode_budget.read_budget(path) or opencode_budget.Budget(
+            None, None)
+        fields = current._asdict()
+        names = {"5h": "session_tokens", "7d": "weekly_tokens",
+                 "week": "weekly_tokens"}
+        for item in settings:
+            key, sep, value = item.partition("=")
+            field = names.get(key.strip().lower())
+            if not sep or field is None:
+                print(f"blink: {item!r} is not a setting -- use 5h=2M, 7d=20M"
+                      " or off", file=sys.stderr)
+                return 2
+            if value.strip().lower() == "off":
+                fields[field] = None
+                continue
+            try:
+                fields[field] = opencode_budget.parse_amount(value)
+            except ValueError as e:
+                print(f"blink: {e}", file=sys.stderr)
+                return 2
+        budget = opencode_budget.Budget(**fields)
+        try:
+            opencode_budget.write_budget(budget, path)
+        except OSError as e:
+            print(f"blink: could not write {path} ({e.strerror or e})",
+                  file=sys.stderr)
+            return 1
+        if not (budget.session_tokens or budget.weekly_tokens):
+            print("OpenCode token budget cleared.")
+            return 0
+        print(f"OpenCode token budget set: {_budget_text(budget)}."
+              " The panel picks it up within a few seconds.")
+    else:
+        budget = opencode_budget.read_budget(path)
+        if budget is None:
+            print("No OpenCode token budget set. Set one with"
+                  " `blink opencode-budget 5h=2M 7d=20M`.")
+            return 0
+        print(f"OpenCode token budget: {_budget_text(budget)}.")
+    if opencode_present():
+        for line in _opencode_budget_lines()[1:]:
+            print(line)
+    return 0
 
 
 def cmd_update(_args) -> int:
@@ -3955,6 +4108,13 @@ def main(argv=None) -> int:
     prov_p.add_argument("--port", default=None,
                         help="Serial port (default: find the board)")
     prov_p.add_argument("--baud", type=int, default=115200)
+    budget_p = sub.add_parser(
+        "opencode-budget",
+        help="Show OpenCode's token use against a budget you set")
+    budget_p.add_argument(
+        "settings", nargs="*", metavar="SETTING",
+        help="5h=2M and/or 7d=20M (K and M allowed), 5h=off, or off;"
+             " none to show the budget")
     run_p = sub.add_parser("run", help="Run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
                        help="Serial port (default: find the board)")
@@ -3974,6 +4134,7 @@ def main(argv=None) -> int:
         "update": cmd_update,
         "driver": cmd_driver,
         "provision": cmd_provision,
+        "opencode-budget": cmd_opencode_budget,
         "run": cmd_run,
     }[args.cmd](args)
 
