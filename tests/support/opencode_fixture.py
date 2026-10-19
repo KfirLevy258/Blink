@@ -139,6 +139,17 @@ def make_db(data_dir, name="opencode.db", wal=True, sqlite=True):
     if wal:
         with open(path + "-wal", "wb") as f:
             f.write(b"")
+    else:
+        # The SQLite inside macOS's own python3 (3.9) leaves the -wal and
+        # -shm files behind after the last close, stamped now, where newer
+        # builds remove them -- and a -wal is activity to last_activity, so
+        # a test that asked for none read the wall clock instead
+        # (CI, 2026-10-19). Asked for no WAL means none on disk.
+        for extra in ("-wal", "-shm"):
+            try:
+                os.remove(path + extra)
+            except OSError:
+                pass
     return path
 
 
