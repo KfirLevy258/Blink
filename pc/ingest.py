@@ -116,6 +116,9 @@ class IngestionBus:
         # second time could pick a different winner and name a project that
         # does not belong to the state on the panel.
         self._session_pair = ("", 0)
+        # (usage, page3) for a board with a third page, from the same poll;
+        # None when there is no third provider. See poll() and paged().
+        self._paged = None
         # Guards the one-shot anchor seeding below: see
         # _seed_anchor_once. False until the first poll_frames() call,
         # regardless of whether that call finds anything to seed.
@@ -313,6 +316,7 @@ class IngestionBus:
         frames = self.poll_frames()
         ranked = normalizer.rank(frames, preferred=self._preferred)
         if not ranked:
+            self._paged = None
             return self._blank_poll(frames)
         primary = ranked[0]
         secondary = ranked[1] if len(ranked) > 1 else None
@@ -327,15 +331,48 @@ class IngestionBus:
         # And the providers with no number at all, for the same reason: an
         # OpenCode desk without a GLM plan key still has sessions that can
         # wait on the person (normalizer.light_only).
-        others = ranked[2:] + normalizer.light_only(frames)
-        msg = protocol.frame_to_usage(primary, self._now(), secondary,
-                                      others=others)
+        lit = normalizer.light_only(frames)
+        others = ranked[2:] + lit
+        now = self._now()
+        msg = protocol.frame_to_usage(primary, now, secondary, others=others)
         # Against the state the message actually carries, which is not always
         # the primary frame's own -- see _pair_from.
         self._session_pair = _pair_from(
             primary, secondary, msg.get("state", base.STATE_UNKNOWN),
             others)
+        # And the same poll laid out for a board with a THIRD page, which
+        # the bridge sends instead of `msg` when the board's firmware can
+        # draw one (protocol.FW_SHOWS_PAGE3). Built here rather than in the
+        # bridge because only the bus holds the frames; recorded rather than
+        # returned so the fetch contract -- a zero-arg callable returning one
+        # usage dict, which every injected fake implements -- does not move.
+        #
+        # Pages 2 and 3 in a FIXED order, not by recency: see
+        # normalizer.PAGE_ORDER. The third page's provider leaves the
+        # usage line's p2 slot (if recency had put it there) and joins
+        # `others` instead, so the light, the counts and active_age_s fold
+        # the very same set of providers as `msg` -- every one once, none
+        # twice -- and the two messages can only differ in which provider
+        # sits in p2. _session_pair is computed over that same set, so it
+        # answers for both.
+        self._paged = None
+        paged = normalizer.fixed_pages(ranked)
+        if paged is not None:
+            second, third, rest = paged
+            self._paged = (
+                protocol.frame_to_usage(primary, now, second,
+                                        others=[third] + rest + lit),
+                protocol.frame_to_page3(third, now))
         return msg
+
+    def paged(self):
+        """(usage, page3) for a three-page board, from the last poll().
+
+        None when that poll had fewer than three providers with a number:
+        then there is no third page, and the plain usage message is already
+        right for every board. The bridge sends page3's clear in that case.
+        """
+        return self._paged
 
     def _blank_poll(self, frames):
         """The message for a desk where no provider has a number, or None.
@@ -439,6 +476,9 @@ class _BusFetch:
 
     def session_pair(self):
         return self._bus.session_pair()
+
+    def paged(self):
+        return self._bus.paged()
 
 
 # Which count describes which state. STATE_FAILED reads n_stuck because that

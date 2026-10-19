@@ -370,8 +370,17 @@
  *
  * Position is carried by WIDTH, never by colour, so the two channels never
  * compete for the same pixels.
+ *
+ * Three, since OpenCode joined Claude and Codex as a provider with numbers of
+ * its own. At two, a desk running all three had its third provider on the
+ * light and nowhere else -- its quota could run out with nothing on the panel
+ * ever drawing it. Three marks at this pitch span 34 px, centred, and the
+ * 16 px active mark still clears its neighbour by 3 px on either side; the
+ * layout test computes the span from this constant, so it moves with it.
+ * The cost is one more 6x6 object on the screen and one more page_data
+ * (about 48 bytes) in DRAM.
  */
-#define RAIL_PAGES_MAX		2
+#define RAIL_PAGES_MAX		3
 #define RAIL_H			6
 #define RAIL_DOT_W		6
 #define RAIL_ACT_W		16

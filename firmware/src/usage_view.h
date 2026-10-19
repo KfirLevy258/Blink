@@ -167,7 +167,8 @@ void usage_view_set_sessions(int n_sessions, int n_agents);
  * ring is Codex, and it should not be wearing Claude's colour.
  */
 /*
- * Move one page up (-1) or down (+1) the provider stack.
+ * Move one page up (-1) or down (+1) the provider stack, wrapping at both
+ * ends: with three pages, "next" from the last is the first.
  *
  * A no-op when there is only one provider: the single-provider desk has no
  * second page to reach and no rail to explain one.
@@ -257,5 +258,28 @@ void usage_view_set_provider1_stale(bool stale);
 void usage_view_set_provider2(const char *tag, double session_pct,
 			      double weekly_pct, int32_t session_resets_in_s,
 			      int32_t weekly_resets_in_s, bool stale);
+
+/*
+ * The THIRD page, fed from its own `page3` message (proto.c), mirroring
+ * set_provider2 field for field plus the page's own age, which for pages 1
+ * and 2 rides the usage line instead.
+ *
+ * NULL or "" drops the page; a reader standing on it goes back to page 1.
+ * Shown only while a second page exists too -- the daemon never sends one
+ * without the other, and the board does not draw a page 3 behind a page 2
+ * that has gone.
+ */
+void usage_view_set_provider3(const char *tag, double session_pct,
+			      double weekly_pct, int32_t session_resets_in_s,
+			      int32_t weekly_resets_in_s, bool stale,
+			      int32_t age_s);
+
+/*
+ * Whether page 3 exists and its reading is old. Asked by proto.c's usage
+ * handler, which arms the stale status when ANY page is old: page 3 is not on
+ * that line, so without this every usage message would disarm a warning that
+ * page 3's own message had armed a heartbeat earlier.
+ */
+bool usage_view_page3_stale(void);
 
 #endif /* USAGE_VIEW_H */

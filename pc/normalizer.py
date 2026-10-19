@@ -287,6 +287,45 @@ def rank(frames, preferred=None):
     return merged
 
 
+# The order pages 2 and 3 take on a board that has three, after the primary.
+#
+# FIXED, and not the recency order rank() returns, which is the right rule
+# for a scarce second ring and the wrong one for pages. With two ringed
+# providers and three on the desk, recency decides who is shown at all, and
+# that contest is real. With three pages there is nothing left to compete
+# for -- everybody is on the board -- and recency would only decide WHERE,
+# moving Codex from page 2 to page 3 the moment OpenCode was touched. Pages
+# are reached by tapping a pill: the same tap would land on a different
+# provider from one minute to the next, and a page that reshuffles under the
+# reader's finger is a bug, not a ranking.
+#
+# The order the providers joined the product in. Anything not named here
+# (the scripted fleet provider, a future one) goes after them, in rank order.
+PAGE_ORDER = ("claude", "codex", "opencode")
+
+
+def fixed_pages(ranked):
+    """(page 2, page 3, rest) for a board with three pages, or None.
+
+    `ranked` is rank()'s output: ranked[0] is the primary and stays page 1 --
+    that is the user's own choice of main source, made on the board. The
+    others are reordered by PAGE_ORDER, and anything past the third page is
+    `rest`, which the light still folds exactly as it folds rank()[2:].
+
+    None below three ringed providers. With two, page 2 is the only other
+    provider whatever the rule, so the board is sent exactly what it was
+    before pages existed past two.
+    """
+    if len(ranked) < 3:
+        return None
+    position = {p: i for i, p in enumerate(PAGE_ORDER)}
+    # sorted() is stable, so providers PAGE_ORDER does not name keep the
+    # order rank() gave them, behind the ones it does.
+    others = sorted(ranked[1:],
+                    key=lambda m: position.get(m.provider, len(PAGE_ORDER)))
+    return others[0], others[1], others[2:]
+
+
 def light_only(frames):
     """State frames of the providers that have nothing for a ring.
 

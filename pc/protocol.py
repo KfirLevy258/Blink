@@ -556,6 +556,76 @@ def frame_to_usage(frame, now_epoch: float, secondary=None,
     )
 
 
+# The third page's own message type. Short because proto.c reads `t` into a
+# 16-byte buffer, and named for what it is on the board rather than for the
+# provider that happens to hold it today.
+PAGE3_TYPE = "page3"
+
+
+def page3(provider, session_pct=UNKNOWN, session_resets_in_s=-1,
+          weekly_pct=UNKNOWN, weekly_resets_in_s=-1, stale=False,
+          age_s=-1) -> dict:
+    """The THIRD provider's page, on a line of its own.
+
+    Not more p2-style fields on `usage`, and that is a measurement rather
+    than a taste. The usage line's loaded two-provider worst case measures 484
+    of MAX_LINE_BYTES=512 and proto.c drops an over-long line whole, silently;
+    a third provider's six fields with p3_ prefixes are another ~120 bytes.
+    So the line every board already depends on stays byte for byte what it
+    was, and the third page rides a message that has the whole budget to
+    itself -- its worst case measures 188 bytes, and
+    tests/pc/test_protocol.py measures it through encode_checked.
+
+    The usage line's own key names, unprefixed: this message describes one
+    page and nothing else, so there is no second provider on it to tell
+    apart, and the firmware reads it with the same num() ranges as the p2
+    block (proto.c).
+
+    `provider` "" CLEARS the page -- the desk is down to two providers -- and
+    then nothing else is sent, because there is nothing left to describe.
+
+    Additive, like `session` and `edition`: firmware that predates it ignores
+    an unknown type. It is still sent only to firmware at or past
+    FW_SHOWS_PAGE3 (bridge._read_usage), because the usage line that travels
+    with it orders its second provider differently for such a board -- see
+    ingest.IngestionBus.poll.
+    """
+    if not provider:
+        return {"t": PAGE3_TYPE, "v": VERSION, "provider": ""}
+    msg = {"t": PAGE3_TYPE, "v": VERSION,
+           "provider": provider[:MODEL_MAX_CHARS],
+           "session_pct": _round_pct(session_pct),
+           "session_resets_in_s": int(session_resets_in_s),
+           "weekly_pct": _round_pct(weekly_pct),
+           "weekly_resets_in_s": int(weekly_resets_in_s),
+           "stale": bool(stale)}
+    # Omitted when unknown, as on the usage line: absent and -1 mean the same
+    # to the firmware, and the board then counts from the message instead.
+    if age_s is not None and age_s >= 0:
+        msg["age_s"] = int(age_s)
+    return msg
+
+
+def frame_to_page3(frame, now_epoch: float) -> dict:
+    """The page3 message for one merged frame, or the clear for None.
+
+    The same crossing rule as frame_to_usage: providers never build wire
+    messages, and the countdowns and the age are computed here, on the side
+    that has a clock.
+    """
+    if frame is None:
+        return page3("")
+    return page3(frame.provider,
+                 session_pct=frame.session_pct,
+                 session_resets_in_s=secs_until(frame.session_resets_at,
+                                                now_epoch),
+                 weekly_pct=frame.weekly_pct,
+                 weekly_resets_in_s=secs_until(frame.weekly_resets_at,
+                                               now_epoch),
+                 stale=frame.stale,
+                 age_s=_age_of(frame, now_epoch))
+
+
 def _active_age(frames, now_epoch: float) -> int:
     """The age of the freshest contact on the bus, or -1 when nothing says.
 
@@ -761,6 +831,31 @@ BLANK_SRC = "none"
 # goes only to a board at or past this, because on an older one every
 # number on it would be a confident zero.
 FW_DRAWS_BLANK = (0, 7, 0)
+
+
+# The first firmware with a third page: RAIL_PAGES_MAX 3 and a `page3`
+# handler in proto.c, shipped as BLINK_FW_VERSION 1.4.0. Below it the daemon
+# sends exactly what it always did -- the usage line with its second provider
+# chosen by recency, and a third provider on the light only -- because an
+# older board ignores page3, and handing it a usage line whose second
+# provider was picked to make room for a page 3 would cost it the ring
+# recency would have given it, for a page it cannot show.
+#
+# The same version-string inference as FW_ACCEPTS_OVERAGE, with the same
+# caveat: the bump and the feature landed in one commit, so this is the
+# first version that can honestly be said to carry it.
+FW_SHOWS_PAGE3 = (1, 4, 0)
+
+
+def shows_page3(board_fw) -> bool:
+    """Whether a board running `board_fw` draws a third page.
+
+    Unknown is False, by draws_blank's rule: None means the board has not
+    said yet, and guessing modern hands an old board a layout it cannot
+    draw. The board says its version in hello, a second after it opens.
+    """
+    fw = _fw_tuple(board_fw)
+    return fw is not None and fw >= FW_SHOWS_PAGE3
 
 
 def draws_blank(board_fw) -> bool:

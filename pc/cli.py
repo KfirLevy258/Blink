@@ -3247,13 +3247,26 @@ def _wire_line(oc_quota=None):
         for p in providers:
             if isinstance(p, opencode.OpenCodeProvider):
                 p.remember(quota, fetched_at)
-    msg = ingest.IngestionBus(providers=providers).poll()
+    bus = ingest.IngestionBus(providers=providers)
+    msg = bus.poll()
     print()
     if msg is None:
         print("Wire        nothing to send -- no source has a reading")
         return
     print("Wire        the next usage message, exactly as the board gets it:")
     print(_json.dumps(msg, separators=(",", ":")))
+    # Only on a desk with three providers, so every line above is what it
+    # always was and anything that asserts on it is undisturbed. A board on
+    # firmware with a third page is sent these two instead of the line above
+    # (bridge._read_usage), and a report that showed only the line above
+    # would hide the page the person is asking about.
+    three = bus.paged()
+    if three is not None:
+        fw = ".".join(str(n) for n in protocol.FW_SHOWS_PAGE3)
+        print(f"            and on a board with a third page (firmware {fw}"
+              " or later):")
+        for m in three:
+            print(_json.dumps(m, separators=(",", ":")))
 
 
 def _age(seconds: float) -> str:

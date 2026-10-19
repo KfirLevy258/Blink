@@ -141,6 +141,47 @@ int main(void)
 		CHECK(!msg_get_double(j, "n_run", &v), "absent n_run -> false");
 	}
 
+	/*
+	 * The third page's own line, as pc/protocol.page3() writes it. It
+	 * reuses the usage line's key names on purpose -- it is its own
+	 * message, so there is no p2_-style prefix to tell it apart -- and
+	 * what has to hold is that the type fits proto.c's 16-byte `t`
+	 * buffer and every field reads back exactly.
+	 */
+	{
+		char t[16] = "", p3[16] = "x";
+		double v = 0;
+		bool st = false;
+		const char *j = "{\"t\":\"page3\",\"v\":2,\"provider\":\"opencode\","
+			"\"session_pct\":41.5,\"session_resets_in_s\":7200,"
+			"\"weekly_pct\":12.0,\"weekly_resets_in_s\":400000,"
+			"\"stale\":true,\"age_s\":30}";
+
+		CHECK(msg_get_str(j, "t", t, sizeof(t)) &&
+		      strcmp(t, "page3") == 0, "page3: type fits proto.c's buffer");
+		CHECK(msg_get_str(j, "provider", p3, sizeof(p3)) &&
+		      strcmp(p3, "opencode") == 0, "page3: provider");
+		CHECK(msg_get_double(j, "session_pct", &v) && v == 41.5,
+		      "page3: session_pct");
+		CHECK(msg_get_double(j, "session_resets_in_s", &v) && v == 7200,
+		      "page3: session countdown");
+		CHECK(msg_get_double(j, "weekly_pct", &v) && v == 12.0,
+		      "page3: weekly_pct");
+		CHECK(msg_get_double(j, "weekly_resets_in_s", &v) && v == 400000,
+		      "page3: weekly countdown");
+		CHECK(msg_get_bool(j, "stale", &st) && st, "page3: stale");
+		CHECK(msg_get_double(j, "age_s", &v) && v == 30, "page3: age_s");
+	}
+	{
+		/* The clear: an empty provider is PRESENT and empty, which is
+		 * what proto.c hands set_provider3 to drop the page. */
+		char p3[16] = "x";
+		const char *j = "{\"t\":\"page3\",\"v\":2,\"provider\":\"\"}";
+
+		CHECK(msg_get_str(j, "provider", p3, sizeof(p3)) && p3[0] == '\0',
+		      "page3 clear: empty provider reads as empty");
+	}
+
 	printf("\n%s (%d failures)\n", failures ? "TESTS FAILED" : "ALL TESTS PASSED", failures);
 	return failures ? 1 : 0;
 }

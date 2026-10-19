@@ -9,7 +9,7 @@
  * firmware/src, so a bump made early and then followed by more firmware work
  * fails the gate at the worst moment -- and the only honest way out is another
  * edit here. Bumping early feels tidy and buys nothing. */
-#define BLINK_FW_VERSION "1.3.3"
+#define BLINK_FW_VERSION "1.4.0"
 
 /* The wire protocol spoken over USB, and the daemon's own PROTO_VERSION in
  * pc/version.py. It is a floor, not a format selector: the protocol only ever
@@ -23,7 +23,7 @@
  * (2026-07-17T00:00:00Z). SNTP is unauthenticated UDP; without a floor, an
  * on-path attacker can shift the clock into the past and make once-valid
  * leaked certificates verify again. Nudge forward on version bumps.
- * 1789084800 = 2026-09-11T00:00:00Z. */
-#define BLINK_TIME_FLOOR 1789084800LL
+ * 1790812800 = 2026-10-01T00:00:00Z. */
+#define BLINK_TIME_FLOOR 1790812800LL
 
 #endif /* VERSION_H */

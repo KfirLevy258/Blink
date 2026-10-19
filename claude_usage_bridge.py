@@ -749,7 +749,15 @@ def main(argv=None):
     # offset -- a customer travelling, or the twice-yearly DST step. Those
     # are worth a line each; the other 1439 a day are not.
     time_frames = logbook.Repeats(("utc_offset_min",), "clock syncs")
-    _REPEATED = {"usage": usage_frames, "time": time_frames}
+    # The third page re-states itself on every heartbeat too (bridge
+    # _send_page3), so without this a three-provider desk would put its full
+    # repr in the log once a minute, every minute -- the exact volume the
+    # usage line was trimmed for. Same rule: the countdowns and the age are
+    # left out because they differ on every frame.
+    page3_frames = logbook.Repeats(("provider", "session_pct", "weekly_pct",
+                                    "stale"), "page 3 frames")
+    _REPEATED = {"usage": usage_frames, "time": time_frames,
+                 protocol.PAGE3_TYPE: page3_frames}
     #
     # The OpenCode plugin ships inside the program the same way and falls
     # behind the same way, so it rides the same interval -- but only ever
@@ -808,7 +816,8 @@ def main(argv=None):
         drifted = watchdog.tick()
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
-        for line in (heartbeat.due(), usage_frames.due(), time_frames.due()):
+        for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
+                     page3_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):

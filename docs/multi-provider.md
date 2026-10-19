@@ -391,7 +391,7 @@ freshest) rather than blending. What a genuinely two-provider panel should look
 like is a hardware design question, not one the normalizer may answer by
 averaging.
 
-## 4b. Two providers, two pages
+## 4b. One provider per page, up to three
 
 **One provider per page.** The gauges show one provider's numbers at a time,
 and a vertical swipe or a tap moves between them.
@@ -413,7 +413,8 @@ beyond -- is the only thing colour has to mean.
 
 Three things, and each does one job:
 
-- **The rail**, two marks along the bottom edge, position carried by WIDTH so
+- **The rail**, a mark per page along the bottom edge (up to three,
+  `RAIL_PAGES_MAX`), position carried by WIDTH so
   colour stays free. Each mark is coloured by ITS OWN page's severity, which
   buys back the one thing splitting the providers cost: with both on one gauge
   you could see the second one going red without looking for it.
@@ -422,10 +423,14 @@ Three things, and each does one job:
   panel's old "Main source" row used before pages replaced it. The fill only
   appears when there is a second page, because a control that looks live and
   answers nothing is worse than a label.
-- **The gesture**, up or down. At the end of the stack either direction goes
-  the only way it can, so with two pages both work. "Which direction is
-  forwards" is a question a two-item stack does not have, and the ask was for
-  a swipe that switches, not one that advances an ordered list.
+- **The gesture**, up or down, and the stack WRAPS at both ends: a tap on
+  the pill is always "the next one", Claude -> Codex -> OpenCode -> Claude.
+  The first version did not wrap: at an end, the stroke took the only
+  direction it could, which with two pages was "the other one" either way.
+  With three that stops being a cycle -- from the last page a tap would go
+  back one and the next forward again, ping-ponging between pages 2 and 3 and
+  never reaching page 1 -- so `page_wrap()` in `usage_view.c` replaced it. On
+  a two-page desk the wrap lands where the hand-over did.
 
 The tap path is not a convenience. See §4d -- the panel is genuinely bad at
 swipes, and left/right only ever felt reliable because a chevron sat behind
@@ -457,17 +462,52 @@ coincidence: a full-screen transition costs one whole repaint however finely
 it is chopped, while the arcs and their labels are a fraction of the panel and
 LVGL invalidates only what moved.
 
-### Beyond two
+### Three pages, from firmware 1.4.0
 
-Three providers exist now -- Claude, Codex and OpenCode -- and the panel still
-has two pages. `select_pair()` keeps the preferred provider (Claude unless the
-settings screen says otherwise) on the first page, and gives the second to
-whichever of the other two was **used** most recently, by `active_at`. The
-third is dropped rather than rotated through, and `RAIL_PAGES_MAX` stays 2. A
-ring that silently changes whose number it is showing is worse than one that
-never shows it.
+Three providers exist -- Claude, Codex and OpenCode -- and a board on firmware
+1.4.0 or later has a page for each. The preferred provider (Claude unless the
+settings screen says otherwise) keeps page 1. Pages 2 and 3 are the other two
+in a FIXED order, `normalizer.PAGE_ORDER` (claude, codex, opencode, minus the
+primary), not by recency. With every provider on the board there is nothing
+left for recency to decide except WHERE each one sits, and a page whose
+provider moved between two taps -- Codex on page 2 a minute ago, on page 3
+now because OpenCode was touched -- is a bug, not a ranking.
 
-So on a desk running all three, the second page follows the tool you reached
+**Page 3 is its own message**, `page3`, not more `p2_`-style keys on the
+usage line. That line's loaded two-provider worst case is 484 of the 512
+bytes `proto.c` accepts, and an over-long line is dropped whole and silently;
+a third provider's fields with prefixes would be another ~120 bytes. `page3`
+carries the usage line's own key names, unprefixed, for one page:
+
+    {"t":"page3","v":2,"provider":"opencode","session_pct":41.5,"session_resets_in_s":7200,"weekly_pct":12.0,"weekly_resets_in_s":400000,"stale":false,"age_s":30}
+
+Its worst case -- provider at the 24-character cap, percentages at
+`PCT_MAX`, countdowns at `COUNTDOWN_MAX_S`, an age at `SECS_MAX` -- measures
+188 bytes (`tests/pc/test_three_pages.py`). `{"t":"page3","v":2,"provider":""}`
+clears the page. The bridge sends it right AFTER the usage line, because a
+usage line without `p2` drops page 2 and the board drops page 3 with it; on a
+change of its own, which the fast tick watches for since none of page 3's
+numbers are on the usage line; on every heartbeat while page 3 exists; and a
+clear once per connection, not once a minute.
+
+**Only to firmware at or past `protocol.FW_SHOWS_PAGE3`** (1.4.0). The bus
+lays every poll out twice (`ingest.IngestionBus.poll` and `.paged()`): once
+as it always was, and once for a three-page board, where the usage line's
+`p2` is the fixed-order second provider and the third leaves the rings for
+`page3`. Both fold the same providers into the light and the counts, each
+once; only `p2` can differ. A board that has not said its version yet, or
+says one below 1.4.0, gets the first layout and no `page3` at all --
+byte for byte what it got before this existed.
+
+### Older firmware: two pages
+
+On a board before 1.4.0 the panel has two pages. `select_pair()` keeps the
+preferred provider on the first page, and gives the second to whichever of the
+other two was **used** most recently, by `active_at`. The third is dropped
+rather than rotated through. A ring that silently changes whose number it is
+showing is worse than one that never shows it.
+
+So on such a desk running all three, the second page follows the tool you reached
 for last: an afternoon in Codex shows Codex, and the first OpenCode prompt
 after it hands the page to OpenCode. That is a page changing provider, which
 is the thing the sentence above warns against -- but it changes because the
@@ -476,8 +516,8 @@ changes with it. Recency of a FETCH would have been the timer: OpenCode's
 figures are fetched every ten minutes whether or not anybody has opened it,
 which is exactly why the sort is on `active_at` and not on `observed_at`.
 
-**Two rings, one light that covers all three.** The pages are limited to
-two; the activity light is not. The state on the wire and the `n_*` counts
+**Two rings, one light that covers all three.** On those boards the pages
+are limited to two; the activity light never was. The state on the wire and the `n_*` counts
 fold every provider's merged frame, worst state first, while the rings still
 show only the selected pair. Selecting the light by page would have been
 wrong, and nearly was. On a desk with live Claude, Codex and OpenCode
@@ -486,15 +526,16 @@ poll order: two live session slots both stamp `active_at` = now, and the tie
 goes to Codex. An OpenCode session waiting on a permission prompt would then
 have left the light green. The light is a claim on the person ("something
 needs you"), and a session waiting on them is just as much their turn when
-its provider has no page in front. A third page, like an OpenCode edition of
-the board, is a separate decision (`docs/plans/opencode.md`, "Not in this
-change").
+its provider has no page in front. That still holds on a three-page board,
+where page 3's provider is folded into the light as one of `others`. An
+OpenCode edition of the board remains a separate decision
+(`docs/plans/opencode.md`, "Not in this change").
 
 ## 4c. Freshness is per page
 
 `stale` on the wire describes the FIRST provider. `p2_stale` describes the
-second. Each page carries its own age and the "Reading is old" warning appears
-only on a page it is true of.
+second, and `page3`'s own `stale` the third. Each page carries its own age and
+the "Reading is old" warning appears only on a page it is true of.
 
 One flag for both was a real bug, reported 2026-08-28. A machine that runs
 Claude Code all day and touched Codex once that morning has a stale codex
@@ -508,6 +549,13 @@ claimed to be current. The board raises the status if EITHER page is old and
 decides per page where to show it, which means `proto.c` sets it after BOTH
 providers are parsed -- and still after `usage_view_update()` and
 `set_models()`, which set OK internally and would overwrite it.
+
+Page 3 is not on that line, so two more places carry the rule. The usage
+handler arms the status if the last `page3` said stale
+(`usage_view_page3_stale()`), or every usage message would disarm a warning
+page 3 had armed; and `usage_view_set_provider3()` arms or disarms it itself
+when page 3's own message arrives, since that lands after the usage line has
+already set the status from the other two.
 
 Both directions stay compatible. An older daemon sends no `p2_stale`, which
 reads as fresh: the reading it sent IS the latest one it has, and the

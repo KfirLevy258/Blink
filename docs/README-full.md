@@ -89,7 +89,9 @@ When two of them disagree, the most recently observed number wins - field by fie
 
 **Each provider gets a page**, rather than sharing the dials. The name at the bottom of the screen says whose numbers you are looking at, and tapping it switches - as does a swipe up or down. Each page carries its own freshness, so a Codex reading that has gone quiet never puts "reading is old" over live Claude numbers. Changing page moves the needles from one reading to the other instead of redrawing the screen, because this is an instrument and that is what an instrument does.
 
-**There are two pages and three providers.** The first page is Claude (or whichever provider the settings screen prefers). The second goes to whichever of the other two you used most recently, so an afternoon in Codex shows Codex and your first OpenCode prompt after it hands the page to OpenCode. Being asked for its quota does not count as use, so OpenCode cannot take the page just by being polled. The activity light is not split this way: it covers all three, so an OpenCode session waiting on you turns it amber even when OpenCode has no page in front.
+**Three providers, three pages** - on firmware 1.4.0 or later. The first page is Claude (or whichever provider the settings screen prefers), and the other two follow in a fixed order - Claude, Codex, OpenCode, minus the first - so the same tap always reaches the same page. Tapping the name steps through them and wraps back to the first; so does a swipe up or down. A page appears only for a provider with a usage figure: OpenCode needs a GLM Coding Plan key for one.
+
+A board on older firmware keeps two pages. The second goes to whichever of the other two you used most recently, so an afternoon in Codex shows Codex and your first OpenCode prompt after it hands the page to OpenCode. Being asked for its quota does not count as use, so OpenCode cannot take the page just by being polled. Either way the activity light is not split by page: it covers all three, so an OpenCode session waiting on you turns it amber whichever page is in front.
 
 ## What's in here
 

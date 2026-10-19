@@ -298,6 +298,21 @@ int main(void)
 	      "the page rail clears both countdowns");
 	CHECK(rail.y1 <= SCR_H - 2,
 	      "the page rail is not flush against the bottom bezel");
+	/*
+	 * Three providers, three marks. The box above is the SETTLED rail of
+	 * dots; the active mark is wider and grows from its slot's centre
+	 * (usage_view.c refresh_rail), so what has to hold for three is that
+	 * it never reaches a neighbour -- and that the whole rail, active mark
+	 * included at either end, stays inside the hit area under it.
+	 */
+	CHECK(RAIL_PAGES_MAX >= 3,
+	      "the rail has a mark for each of Claude, Codex and OpenCode");
+	CHECK(RAIL_PITCH - (RAIL_ACT_W - RAIL_DOT_W) / 2 - RAIL_DOT_W > 0,
+	      "the active mark clears the dot beside it");
+	CHECK(rail.x0 - (RAIL_ACT_W - RAIL_DOT_W) / 2 >= SCR_MID_X - PILL_MAX_W / 2
+	      && rail.x1 + (RAIL_ACT_W - RAIL_DOT_W) / 2
+		 <= SCR_MID_X + PILL_MAX_W / 2,
+	      "the widest rail stays under the pill's band");
 
 	/* --- the text budgets are real --- */
 	/* A bare duration. The provider's name moved under the brand, which is

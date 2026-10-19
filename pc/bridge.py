@@ -72,6 +72,13 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
         self._last_session = None        # (label, n) last sent; see poll_once
+        # The page3 message to go out with the usage line just read, or None
+        # when this board gets none (older firmware, or a fetch that cannot
+        # say). Set by _read_usage, which is what decides it.
+        self._page3 = None
+        # The page3 last put on the wire, minus its timers -- None until one
+        # has been sent on this connection. See _send_page3.
+        self._last_page3 = None
         # The last usage message actually PUT ON THE WIRE, minus the fields
         # that move on their own (protocol.VOLATILE_USAGE_KEYS). This is what
         # poll_if_changed decides against: "sent", not "read", because the
@@ -100,6 +107,11 @@ class Bridge:
         # the same shape as offer_if_newer on every connect rather than once
         # per daemon lifetime.
         self._last_session = None
+        # And the third page, for the same reason: a board that just booted
+        # holds none, and one the daemon reconnected to without resetting
+        # may hold a page from before this process existed -- which only a
+        # message sent now, clear or not, can correct.
+        self._last_page3 = None
         self.poll_once()                 # push current data immediately
         # Only once the board has been heard. On the no-reset connect path
         # greet() runs before any message has reached on_message, so
@@ -583,7 +595,7 @@ class Bridge:
         # Unconditional. The heartbeat is what re-states everything to a board
         # that may have missed a message, and what keeps a panel that has been
         # sitting on the same numbers all afternoon provably connected.
-        self._send_usage(usage)
+        self._send_usage(usage, heartbeat=True)
 
     def poll_if_changed(self):
         """Send only when something a reader could act on has moved.
@@ -636,6 +648,11 @@ class Bridge:
         # Only the name goes out in that case. Re-sending an identical usage
         # line to carry it would spend the budget this comparison exists to
         # protect.
+        #
+        # The third page is in the same position: its numbers are not on
+        # the usage line at all, so OpenCode's quota moving -- or OpenCode
+        # leaving -- changes nothing this comparison can see.
+        self._send_page3()
         self._send_session_if_changed()
 
     def _read_usage(self):
@@ -647,6 +664,7 @@ class Bridge:
         """
         usage = self._fetch()
         self._held_blank = False
+        self._page3 = None
         if usage is None:
             return None
         if (usage.get("src") == protocol.BLANK_SRC
@@ -655,12 +673,29 @@ class Bridge:
             # two green zeros. Nothing is the honest page there.
             self._held_blank = True
             return None
+        # A board with a third page gets this poll laid out for three: the
+        # usage line with pages 2 and 3 in their fixed order, and page 3 on
+        # its own message (ingest.IngestionBus.poll). With fewer than three
+        # providers that is the plain line and a clear. Every other board --
+        # older firmware, or one that has not said its version yet -- gets
+        # exactly what it got before page 3 existed, and no page3 at all.
+        #
+        # Read off the fetch like session_pair, and for the same reason: a
+        # fetch without the accessor (every test fake, the single-source
+        # fetch) is one that has no third provider to offer.
+        paged = getattr(self._fetch, "paged", None)
+        if paged is not None and protocol.shows_page3(self._board_fw):
+            three = paged()
+            if three is not None:
+                usage, self._page3 = three
+            else:
+                self._page3 = protocol.page3("")
         # Percentages above 100 are real -- extra usage puts them there -- but
         # firmware older than protocol.FW_ACCEPTS_OVERAGE turns them into 0 on
         # the panel rather than clamping. Hold them at 100 for those boards.
         return protocol.cap_overage_for_fw(usage, self._board_fw)
 
-    def _send_usage(self, usage):
+    def _send_usage(self, usage, heartbeat=False):
         """Put a usage message on the wire and remember what was in it."""
         self._write(usage)
         # Recorded here, once, so that no path can push without moving the
@@ -668,6 +703,10 @@ class Bridge:
         # re-sending the same message every two seconds forever.
         self._last_pushed = protocol.meaningful_usage(usage)
 
+        # AFTER the usage line, never before. That line can drop page 2
+        # (p2 absent), and the board drops page 3 along with it -- a page 3
+        # sent first would be wiped by the line that follows it.
+        self._send_page3(heartbeat)
         self._send_session_if_changed()
 
         # No second message for staleness any more. The usage message carries
@@ -678,6 +717,30 @@ class Bridge:
         # stale, purely because that string already mapped to amber -- which
         # left a stale reading and a real rate limit indistinguishable on the
         # panel, and put the wrong words in the log.
+
+    def _send_page3(self, heartbeat=False):
+        """Put the third page on the wire, when it says something new.
+
+        On change, like the project name, and compared on the same terms as
+        the usage line: protocol.meaningful_usage drops the countdowns and
+        the age, which move every second and which the board ticks itself.
+        Its key names are the usage line's own, so VOLATILE_USAGE_KEYS
+        already names them.
+
+        And on every heartbeat while there IS a third page, for what the
+        heartbeat is for: re-stating everything to a board that may have
+        missed a line, and re-anchoring the countdowns it has been ticking.
+        A CLEAR is not repeated -- once a connection has sent one, a desk
+        with two providers would otherwise spend a line a minute, forever,
+        telling the board about a page it already does not have.
+        """
+        msg = self._page3
+        if msg is None:
+            return
+        key = protocol.meaningful_usage(msg)
+        if key != self._last_page3 or (heartbeat and msg.get("provider")):
+            self._write(msg)
+            self._last_page3 = key
 
     def _send_session_if_changed(self):
         """Put the project name on the wire, on change only.

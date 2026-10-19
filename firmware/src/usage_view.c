@@ -178,6 +178,13 @@ static char session_label[28] = "";
 static char provider1_tag[12];	/* whichever provider the daemon made primary */
 static lv_obj_t *provider_lbl;	/* the tag, spelled out under the brand */
 static char provider2_tag[12];	/* "" when there is only one provider */
+/*
+ * "" unless the daemon sent a `page3` message naming one. Its own message,
+ * not more p2-style fields on `usage`, because that line already measures
+ * 484 of the 512 bytes proto.c accepts and an over-long one is dropped whole
+ * -- see pc/protocol.page3().
+ */
+static char provider3_tag[12];
 
 /*
  * PAGES. One provider per screen, reached by swiping vertically.
@@ -188,10 +195,16 @@ static char provider2_tag[12];	/* "" when there is only one provider */
  * between pages is which provider's numbers are pushed into them, so the page
  * is a data selection, not a screen.
  *
- * Both pages' countdowns tick regardless of which one is showing: a window
+ * Every page's countdowns tick regardless of which one is showing: a window
  * does not stop closing because you are not looking at it, and a page that
  * caught up only when you arrived would show a stale figure for the moment
  * that matters most.
+ *
+ * Up to three pages: the primary, then the other two in a FIXED order that
+ * the daemon decides (pc/ingest.IngestionBus.poll). Fixed rather than by
+ * recency because with all three on the board there is nothing left to
+ * compete for, and a page whose provider swapped under the reader's finger
+ * between two taps would be a bug, not a ranking.
  */
 struct page_data {
 	/*
@@ -221,7 +234,7 @@ static lv_obj_t *rail_dot[RAIL_PAGES_MAX];
 
 static const char *page_tag(int i)
 {
-	return i == 0 ? provider1_tag : provider2_tag;
+	return i == 0 ? provider1_tag : i == 1 ? provider2_tag : provider3_tag;
 }
 
 /*
@@ -232,18 +245,74 @@ static const char *page_tag(int i)
  * header, and everything beneath it is sentence case. Two places need this
  * now, the name under the brand and the line that says where the other page
  * is, and they were drifting apart the moment there were two of them.
+ *
+ * A table first, because sentence case is a rule for SENTENCES and these are
+ * proper names. Capitalising the first letter was right for "claude" and
+ * "codex" and wrong for the third provider the moment it got a page of its
+ * own: the product is spelled "OpenCode", and "Opencode" on the pill is a
+ * misspelt name, not a style choice. The rule stays as the fallback, so a tag
+ * this firmware has never heard of still reads as a name rather than as a
+ * lowercase wire token.
  */
+static const struct {
+	const char *tag;
+	const char *name;
+} PROVIDER_NAMES[] = {
+	{ "claude", "Claude" },
+	{ "codex", "Codex" },
+	{ "opencode", "OpenCode" },
+};
+
 static void tag_cased(char *dst, size_t n, const char *tag)
 {
+	/* sizeof rather than ARRAY_SIZE: tools/panel_render compiles this file
+	 * against a two-macro stand-in for Zephyr's kernel.h. */
+	for (size_t i = 0; i < sizeof(PROVIDER_NAMES) / sizeof(PROVIDER_NAMES[0]);
+	     i++) {
+		if (strcmp(tag, PROVIDER_NAMES[i].tag) == 0) {
+			snprintf(dst, n, "%s", PROVIDER_NAMES[i].name);
+			return;
+		}
+	}
 	snprintf(dst, n, "%s", tag);
 	if (dst[0] >= 'a' && dst[0] <= 'z') {
 		dst[0] = (char)(dst[0] - 'a' + 'A');
 	}
 }
 
+/*
+ * Page 3 counts only behind a page 2. The daemon never sends one without the
+ * other, but the two arrive on different lines, and a third page reachable
+ * past a second that has just been dropped would be a page whose neighbour
+ * no longer exists -- the rail would show two marks with a gap meaning
+ * nothing.
+ */
 static int page_count(void)
 {
-	return provider2_tag[0] ? 2 : 1;
+	if (!provider2_tag[0]) {
+		return 1;
+	}
+	return provider3_tag[0] ? 3 : 2;
+}
+
+/*
+ * One page on from `from`, in direction `delta`, WRAPPING at both ends.
+ *
+ * It used not to wrap: a stack of two has no "which way is forwards" worth
+ * asking, so the end of the stack simply handed the stroke to the other
+ * direction (ui_settings.c swipe_cb). With three pages that rule stops being
+ * a cycle -- tapping the pill from the last page would go BACK one, and the
+ * next tap forwards again, so the reader would ping-pong between pages 2 and
+ * 3 and never reach page 1 by tapping. Wrapping is the only rule under which
+ * the same tap always means "the next one" and reaches every page. With two
+ * pages it lands on the same page the old hand-over did, so a two-provider
+ * desk behaves exactly as it did.
+ */
+static int page_wrap(int from, int delta)
+{
+	int n = page_count();
+
+	return ((from + delta) % n + n) % n;
 }
 /* Defined below; set_provider2 has to call it, because whether a second
  * provider exists is what decides if the FIRST one is coloured at all. */
@@ -1283,10 +1352,11 @@ static void refresh_rail(void)
  */
 bool usage_view_can_page(int delta)
 {
-	int n = page_count();
-	int next = cur_page + delta;
-
-	return built && n >= 2 && next >= 0 && next < n;
+	/* Any direction, from any page, once there are two: the stack wraps
+	 * (see page_wrap). Still worth asking, because one page -- and the
+	 * CONNECTING takeover, which has no data and so one page -- is every
+	 * stroke on a single-provider desk. */
+	return built && page_count() >= 2 && delta != 0;
 }
 
 /*
@@ -1461,7 +1531,10 @@ static void rail_settled(lv_anim_t *a)
 
 void usage_view_page_preview(int delta, int pct)
 {
-	int to = delta == 0 ? -1 : cur_page + delta;
+	/* Wrapped exactly as page_step will wrap it, so the mark the preview
+	 * grows is the page the stroke will actually land on. */
+	int to = (delta == 0 || page_count() < 2) ? -1
+						   : page_wrap(cur_page, delta);
 
 	if (!built) {
 		return;
@@ -1522,7 +1595,9 @@ void usage_view_page_step(int delta)
 	morph.s_from = last_s_pct;
 	morph.w_from = last_w_pct;
 
-	cur_page += delta;
+	int from = cur_page;
+
+	cur_page = page_wrap(cur_page, delta);
 
 	morph.s_to = pg[cur_page].s_pct;
 	morph.w_to = pg[cur_page].w_pct;
@@ -1542,7 +1617,9 @@ void usage_view_page_step(int delta)
 	 * reports there were.
 	 *
 	 * rail_a is where cur_page was a moment ago; cur_page has already
-	 * advanced above.
+	 * advanced above. Remembered as `from` rather than recomputed as
+	 * cur_page - delta, which stopped being true the moment the stack
+	 * started to wrap.
 	 */
 	/*
 	 * Re-ask the status question for the page now in front.
@@ -1562,7 +1639,7 @@ void usage_view_page_step(int delta)
 	usage_view_set_status(last_status);
 	render_age();
 
-	rail_a = cur_page - delta;
+	rail_a = from;
 	rail_b = cur_page;
 
 	lv_anim_t ra;
@@ -2364,6 +2441,15 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 		 */
 		provider2_tag[0] = '\0';
 		pg[1].have = false;
+		/*
+		 * And the third page with it. See page_count(): a page 3
+		 * past a page 2 that is gone is not a page anybody can be
+		 * told about. The daemon clears it on its own line right
+		 * after this one; doing it here as well means the gap between
+		 * the two lines cannot draw a two-mark rail with a hole in it.
+		 */
+		provider3_tag[0] = '\0';
+		pg[2].have = false;
 		if (cur_page != 0) {
 			cur_page = 0;
 			render_gauges();
@@ -2392,6 +2478,93 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 	if (cur_page == 1) {
 		render_gauges();
 	}
+}
+
+/*
+ * The status is armed when ANY page is old, and stale_here() then shows it
+ * only on a page it is true of -- the rule proto.c applies to pages 1 and 2
+ * inside one usage message. Page 3 arrives on its own line, after that
+ * message has already set the status from the other two, so the arming for
+ * it has to happen here: otherwise a stale OpenCode page would read as
+ * current until something else went old. And the disarming, for the same
+ * reason in reverse, or a page 3 that came back to life -- or left -- would
+ * keep the status armed over live pages until the next usage message.
+ *
+ * Only OK and STALE are touched. DISCONNECTED and ERROR are statements about
+ * the link, and a page's freshness has no business overriding them.
+ */
+static void rearm_stale_for_page3(bool stale)
+{
+	if (stale && last_status == USAGE_STATUS_OK) {
+		usage_view_set_status(USAGE_STATUS_STALE);
+	} else if (!stale && last_status == USAGE_STATUS_STALE &&
+		   !pg[0].stale && !(pg[1].have && pg[1].stale)) {
+		usage_view_set_status(USAGE_STATUS_OK);
+	} else {
+		/* Re-asked anyway: the page being shown may be the one whose
+		 * flag just moved, and the hint and dot read it per page. */
+		usage_view_set_status(last_status);
+	}
+}
+
+void usage_view_set_provider3(const char *tag, double session_pct,
+			      double weekly_pct, int32_t session_resets_in_s,
+			      int32_t weekly_resets_in_s, bool stale,
+			      int32_t age_s)
+{
+	if (!built) {
+		return;
+	}
+	if (!tag || !tag[0]) {
+		/* Same rule as the second page: gone means gone, not zero, and
+		 * a reader standing on it goes home to page 1 rather than to
+		 * a page that is not there. */
+		provider3_tag[0] = '\0';
+		pg[2].have = false;
+		pg[2].stale = false;
+		if (cur_page == 2) {
+			cur_page = 0;
+			render_gauges();
+		}
+		refresh_rail();
+		/* A stale page 3 that has just left may have been the only
+		 * reason the status said old; re-ask now rather than at the
+		 * next usage message. */
+		rearm_stale_for_page3(false);
+		return;
+	}
+
+	snprintf(provider3_tag, sizeof(provider3_tag), "%s", tag);
+	if (session_resets_in_s == 0) {
+		session_pct = 0;
+		session_resets_in_s = -1;
+	}
+	if (weekly_resets_in_s == 0) {
+		weekly_pct = 0;
+		weekly_resets_in_s = -1;
+	}
+	pg[2].s_pct = session_pct;
+	pg[2].w_pct = weekly_pct;
+	pg[2].s_in_s = session_resets_in_s;
+	pg[2].w_in_s = weekly_resets_in_s;
+	pg[2].stale = stale;
+	/* Its age travels on its own line, unlike pages 1 and 2 whose ages
+	 * ride the usage message (usage_view_set_ages). */
+	pg[2].age = age_s;
+	pg[2].burn = 0;
+	pg[2].have = true;
+
+	refresh_rail();
+	if (cur_page == 2) {
+		render_gauges();
+		render_age();
+	}
+	rearm_stale_for_page3(stale);
+}
+
+bool usage_view_page3_stale(void)
+{
+	return page_count() == 3 && pg[2].stale;
 }
 
 void usage_view_set_sessions(int n_sessions, int n_agents)

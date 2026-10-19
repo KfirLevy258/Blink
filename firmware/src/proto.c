@@ -451,7 +451,13 @@ static void dispatch(const char *json)
 		 * internally -- usage_view_update() and set_models() both do,
 		 * so arming this earlier would have the amber immediately
 		 * overwritten by green. See the note where `stale` is read.
+		 *
+		 * And a third page's, which is not on this line: it arrives
+		 * on its own `page3` message, so what is known of it here is
+		 * the last one received. Leaving it out would let every usage
+		 * message disarm a warning page 3 had armed.
 		 */
+		stale = stale || usage_view_page3_stale();
 		if (stale) {
 			usage_view_set_status(USAGE_STATUS_STALE);
 		}
@@ -682,6 +688,39 @@ static void dispatch(const char *json)
 		msg_get_str(json, "label", lbl, sizeof(lbl));
 		num(json, "n", &n, 0, 9999);
 		usage_view_set_session(lbl, (int)n);
+	} else if (strcmp(type, "page3") == 0) {
+		/*
+		 * The third provider's page, on its own line. Not more p2-style
+		 * keys on `usage`: that line already measures 484 of the 512
+		 * this parser accepts, an over-long one is dropped whole, and
+		 * a third provider's fields are another ~120 bytes. See
+		 * pc/protocol.page3().
+		 *
+		 * The same defaults as the p2 block above, and for the same
+		 * reason: an absent key is "unknown", never zero. An empty or
+		 * absent provider is the daemon clearing the page.
+		 *
+		 * Firmware before this one falls through to the comment below
+		 * and ignores the line, having still counted it as the host
+		 * speaking -- which it is. The daemon sends it only to boards
+		 * that report a firmware version at or past
+		 * pc/protocol.FW_SHOWS_PAGE3 all the same, so an older board's
+		 * line budget and log stay exactly as they were.
+		 */
+		char p3[16] = "";
+		double p3s = -1, p3w = -1, p3si = -1, p3wi = -1, p3age = -1;
+		bool p3stale = false;
+
+		msg_get_str(json, "provider", p3, sizeof(p3));
+		num(json, "session_pct", &p3s, -1, PCT_MAX);
+		num(json, "weekly_pct", &p3w, -1, PCT_MAX);
+		num(json, "session_resets_in_s", &p3si, -1, SECS_MAX);
+		num(json, "weekly_resets_in_s", &p3wi, -1, SECS_MAX);
+		num(json, "age_s", &p3age, -1, SECS_MAX);
+		msg_get_bool(json, "stale", &p3stale);
+		usage_view_set_provider3(p3, p3s, p3w, (int32_t)p3si,
+					 (int32_t)p3wi, p3stale,
+					 (int32_t)p3age);
 	}
 	/* unknown types ignored */
 }

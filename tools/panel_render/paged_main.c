@@ -62,10 +62,21 @@ int main(int argc, char **argv)
 	const char *dir = argc > 1 ? argv[1] : ".";
 	/* One desk, one moment: claude is quiet, codex is nearly out. That is
 	 * the case the merged panel handled worst and the rail handles best. */
-	struct { const char *n; bool second; int page; } sc[] = {
-		{ "solo", false, 0 },
-		{ "p1",   true,  0 },
-		{ "p2",   true,  1 },
+	/* And the three-provider desk: OpenCode on page 3, fed the way proto.c
+	 * feeds it, from its own page3 message. "t3wrap" taps once more from
+	 * page 3 and must land back on page 1 -- the stack wraps. "s1" and
+	 * "s3" have page 3's reading gone old: the warning belongs on page 3
+	 * and nowhere else, though it arrived on a line of its own. */
+	struct { const char *n; int providers; int page; bool stale3; } sc[] = {
+		{ "solo",   1, 0, false },
+		{ "p1",     2, 0, false },
+		{ "p2",     2, 1, false },
+		{ "t1",     3, 0, false },
+		{ "t2",     3, 1, false },
+		{ "t3",     3, 2, false },
+		{ "t3wrap", 3, 3, false },
+		{ "s1",     3, 0, true },
+		{ "s3",     3, 2, true },
 	};
 
 	lv_init();
@@ -81,14 +92,20 @@ int main(int argc, char **argv)
 		usage_view_set_status(USAGE_STATUS_OK);
 		usage_view_set_provider1("claude");
 		usage_view_update(27.0, 13231, 42.0, 598831);
-		if (sc[i].second) {
+		if (sc[i].providers >= 2) {
 			usage_view_set_provider2("codex", 97.0, 94.0, 372, 34200, false);
+		}
+		if (sc[i].providers >= 3) {
+			usage_view_set_provider3("opencode", 61.0, 18.0, 9000,
+						 401000, sc[i].stale3,
+						 sc[i].stale3 ? 7200 : 30);
 		}
 		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
 		usage_view_set_sessions(1, 0);
 		usage_view_set_clock(14, 5);
-		if (sc[i].page) {
+		for (int k = 0; k < sc[i].page; k++) {
 			usage_view_page_step(1);
+			settle();
 		}
 		settle();
 

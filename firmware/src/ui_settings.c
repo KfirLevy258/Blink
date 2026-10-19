@@ -1892,8 +1892,8 @@ void ui_settings_service(void (*pump)(void))
 		 * least important of the three, and re-checking can_page here
 		 * matters: the flag was set when the gesture landed, and a
 		 * usage message can have removed the second provider in the
-		 * gap -- which would run a transition to a page that no longer
-		 * exists.
+		 * gap -- which would run a transition on a desk that no longer
+		 * has a page to go to.
 		 */
 		int step = want_page;
 
@@ -2485,29 +2485,25 @@ static void swipe_cb(enum ui_swipe_dir dir)
 		int step = (dir == UI_SWIPE_UP) ? 1 : -1;
 
 		/*
-		 * At the end of the stack, a vertical swipe goes the only way
-		 * it can.
+		 * At the end of the stack, a vertical swipe WRAPS.
 		 *
 		 * Up is "next" because content follows the finger, and that is
 		 * a defensible model right up until someone uses it. Across
 		 * three builds on 2026-08-27 every vertical stroke the user
 		 * made went DOWN -- including after the cue was corrected to
-		 * point up -- and on page 0 down asks for a page that does not
+		 * point up -- and on page 0 down asked for a page that did not
 		 * exist, so nothing happened, six times.
 		 *
-		 * The device has TWO pages. "Which direction is forwards" is a
-		 * question a two-item stack does not really have, and the ask
-		 * was "a swipe down/up will switch the mode", not "a swipe up
-		 * advances an ordered list". So when the requested direction
-		 * has nowhere to go and the other one does, take the other one.
-		 *
-		 * This is not a wrap. In the middle of a longer stack both
-		 * directions are available and each still does its own thing;
-		 * only an end, where one of them is dead, hands over.
+		 * The first answer was a hand-over: at an end, take the other
+		 * direction. With two pages that was "the other one" either
+		 * way. With three it is not a cycle -- from the last page a
+		 * stroke would go back one and the next stroke forward again,
+		 * ping-ponging between pages 2 and 3 -- so the stack now wraps
+		 * (usage_view.c page_wrap), and on a two-page desk the wrap
+		 * lands on exactly the page the hand-over did. can_page() is
+		 * therefore "is there more than one page", which is still the
+		 * question worth asking before arming anything.
 		 */
-		if (!usage_view_can_page(step) && usage_view_can_page(-step)) {
-			step = -step;
-		}
 		if (usage_view_can_page(step)) {
 			want_page = step;
 		}
@@ -2647,15 +2643,13 @@ static void zone_page_cb(lv_event_t *e)
 		return;
 	}
 	/*
-	 * Same end-of-stack rule as the swipe, so the two controls cannot
-	 * disagree about where a tap goes: try forwards, and take backwards if
-	 * forwards has nowhere to go. With two pages that is simply "the other
-	 * one".
+	 * Always forwards, and the stack wraps (usage_view.c page_wrap): each
+	 * tap is "the next one", Claude -> Codex -> OpenCode -> Claude, so the
+	 * pill cycles every page there is. With two pages that is simply "the
+	 * other one", as it always was.
 	 */
 	if (usage_view_can_page(1)) {
 		want_page = 1;
-	} else if (usage_view_can_page(-1)) {
-		want_page = -1;
 	}
 }
 
