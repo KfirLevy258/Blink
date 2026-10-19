@@ -167,7 +167,13 @@ grep -A20 'pub struct SessionMeta' "$FILE" | grep -q 'pub cwd: PathBuf' ||
 ok "session_meta still carries cwd"
 
 POLICY=$(fetch codex-rs/rollout/src/policy.rs)
-grep -q 'RolloutItem::SessionMeta(_) => true' "$POLICY" ||
+# Two spellings of "always". Up to some release the policy was a bool,
+# `=> true`; by rust-v0.163.0 it returns the item to persist, and an
+# unconditional arm reads `=> Some(Cow::Borrowed(item))`. The bool form
+# alone failed this check against a Codex that still wrote session_meta to
+# every rollout (CI, 2026-10-19). A conditional arm would read
+# `.then_some(...)` or `matches!(...)`, and matches neither.
+grep -q -E 'RolloutItem::SessionMeta\(_\) => (true|Some\(Cow::Borrowed\(item\)\))' "$POLICY" ||
 	fail "session_meta is no longer persisted unconditionally"
 ok "session_meta is still written to every rollout"
 
