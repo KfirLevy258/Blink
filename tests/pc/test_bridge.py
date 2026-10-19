@@ -686,3 +686,70 @@ def test_the_two_cadences_are_far_apart_and_the_heartbeat_stayed():
     assert fast >= 1, fast
     assert claude_usage_bridge.POLL_INTERVAL_S == 60
     assert fast * 5 < claude_usage_bridge.POLL_INTERVAL_S
+
+
+# --- a page with blank rings ------------------------------------------------
+#
+# A desk whose only tool has no usage figure gets a page with UNKNOWN rings
+# (ingest.IngestionBus._blank_poll). Firmware before protocol.FW_DRAWS_BLANK
+# draws -1 on the session ring as a green 0%, so the page is held back from
+# it -- and from a board that has not said its version yet.
+
+
+def _blank():
+    return protocol.usage(-1.0, None, -1.0, None, [], provider="opencode",
+                          src=protocol.BLANK_SRC, state="waiting", n_sess=1,
+                          n_wait=1)
+
+
+def test_a_blank_page_reaches_a_board_that_draws_it():
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=_blank,
+               wall=lambda: (1752444000, 180))
+    b.on_message({"t": "hello", "v": 2, "fw": "1.3.3", "board": "cyd"})
+    sent.clear()
+    b.poll_once()
+    usage = [m for m in sent if m["t"] == "usage"]
+    assert usage and usage[0]["state"] == "waiting"
+    assert usage[0]["session_pct"] == -1.0
+
+
+def test_a_blank_page_is_held_from_a_board_too_old_to_draw_it(capsys):
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=_blank,
+               wall=lambda: (1752444000, 180))
+    b.on_message({"t": "hello", "v": 2, "fw": "0.6.9", "board": "cyd"})
+    sent.clear()
+    b.poll_once()
+    b.poll_if_changed()
+    assert not [m for m in sent if m["t"] == "usage"]
+    assert "too old" in capsys.readouterr().err
+
+
+def test_a_blank_page_waits_for_the_board_to_say_its_version():
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=_blank,
+               wall=lambda: (1752444000, 180))
+    b.poll_once()
+    assert not [m for m in sent if m["t"] == "usage"]
+
+
+def test_numbers_are_not_held_from_an_old_board():
+    """Only the blank page is gated: a reading goes to every board, as it
+    always did."""
+    sent = []
+    b = Bridge(write_msg=sent.append,
+               fetch_usage=lambda: protocol.usage(10.0, None, 20.0, None, []),
+               wall=lambda: (1752444000, 180))
+    b.on_message({"t": "hello", "v": 2, "fw": "0.6.9", "board": "cyd"})
+    sent.clear()
+    b.poll_once()
+    assert [m for m in sent if m["t"] == "usage"]
+
+
+def test_draws_blank_versions():
+    assert protocol.draws_blank("0.7.0")
+    assert protocol.draws_blank("1.3.3")
+    assert not protocol.draws_blank("0.6.9")
+    assert not protocol.draws_blank(None)
+    assert not protocol.draws_blank("garbage")

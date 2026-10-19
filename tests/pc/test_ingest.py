@@ -4,7 +4,7 @@ import json
 import pathlib
 import re
 
-from pc import cowork_audit, desktop_idb, ingest, weekly_anchor
+from pc import cowork_audit, desktop_idb, ingest, protocol, weekly_anchor
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
@@ -1220,11 +1220,92 @@ def test_a_provider_with_state_and_no_number_still_lights_the_light():
     assert "opencode" not in json.dumps(msg)
 
 
-def test_state_alone_with_no_number_anywhere_is_still_nothing_known():
-    """No percentage from any provider is still no message: the light alone
-    is not a reading, and the board's waiting screen is the honest one."""
+class Installed(base.ProviderParser):
+    """A provider with no frames that says it is installed: OpenCode on a
+    self-hosted model with no session open."""
+
+    def __init__(self, provider, since):
+        self._provider, self._since = provider, since
+
+    def get_provider_id(self):
+        return self._provider
+
+    def blank_since(self, now_epoch):
+        return self._since
+
+
+def test_state_with_no_number_anywhere_gets_a_page_with_blank_rings():
+    """OpenCode alone on a self-hosted model: a live session and no number.
+
+    This returned None, the daemon sent nothing, and the board sat on its
+    CONNECTING screen through a whole permission prompt (real OpenCode on
+    the real board, 2026-10-19). Now the page is OpenCode's, its rings are
+    unknown, and the light is the session's.
+    """
     waiting = base.NormalizedUsageFrame(
         provider="opencode", src="state", observed_at=NOW,
-        state=base.STATE_WAITING, n_wait=1)
+        active_at=NOW - 30, state=base.STATE_WAITING, n_wait=1,
+        label="proj")
     bus = ingest.IngestionBus(providers=[Fixed(waiting)], now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["provider"] == "opencode"
+    assert msg["src"] == protocol.BLANK_SRC
+    assert msg["session_pct"] == -1.0 and msg["weekly_pct"] == -1.0
+    assert msg["session_resets_in_s"] == -1
+    assert msg["weekly_resets_in_s"] == -1
+    assert msg["state"] == base.STATE_WAITING and msg["n_wait"] == 1
+    # The session's last contact, not the poll: the panel must still sleep.
+    assert msg["active_age_s"] == 30
+    assert bus.session_pair() == ("proj", 1)
+    assert protocol.encode_checked(msg)
+
+
+def test_an_installed_tool_with_no_session_still_gets_its_page():
+    """No session open, so no state frame -- but OpenCode has run here.
+    Without this the page vanished with the last session and the board kept
+    whatever light that session last had."""
+    bus = ingest.IngestionBus(providers=[Installed("opencode", NOW - 600)],
+                              now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["provider"] == "opencode"
+    assert msg["session_pct"] == -1.0 and msg["weekly_pct"] == -1.0
+    # No state and no counts on the wire, which proto.c reads as "light
+    # off, no sessions": the light the last session left is cleared.
+    assert "state" not in msg and "n_sess" not in msg
+    assert msg["active_age_s"] == 600
+
+
+def test_a_live_session_takes_the_page_over_an_installed_tool():
+    waiting = base.NormalizedUsageFrame(
+        provider="codex", src="state", observed_at=NOW,
+        state=base.STATE_RUNNING, n_run=1)
+    bus = ingest.IngestionBus(
+        providers=[Installed("opencode", NOW - 600), Fixed(waiting)],
+        now=lambda: NOW)
+    assert bus.poll()["provider"] == "codex"
+
+
+def test_nothing_installed_and_no_number_is_still_nothing_known():
+    """No tool on the desk has run: still no message, and the bridge says
+    so in its log."""
+    bus = ingest.IngestionBus(providers=[Installed("opencode", None)],
+                              now=lambda: NOW)
     assert bus.poll() is None
+
+
+def test_a_raising_blank_since_is_contained():
+    class Broken(Installed):
+        def blank_since(self, now_epoch):
+            raise OSError("gone")
+    bus = ingest.IngestionBus(providers=[Broken("opencode", NOW)],
+                              now=lambda: NOW)
+    assert bus.poll() is None
+
+
+def test_a_number_anywhere_keeps_the_rings_and_ignores_blank_since():
+    bus = ingest.IngestionBus(
+        providers=[Installed("opencode", NOW), Fixed(frame())],
+        now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["provider"] == "claude" and msg["session_pct"] == 50.0
+    assert msg["src"] != protocol.BLANK_SRC

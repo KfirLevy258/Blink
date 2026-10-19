@@ -1326,3 +1326,50 @@ def test_a_running_session_is_in_use_now_however_old_its_slot(dirs):
 def test_a_slot_stamped_in_the_future_is_clamped_to_now(dirs):
     fx.slot(dirs[1], "ses_1", "Stop", NOW + 120)
     assert _state(dirs).active_at == NOW
+
+
+# --- a desk with no plan key: blank rings, and the light -------------------
+
+
+def test_blank_since_is_the_last_activity_when_opencode_has_run(dirs):
+    data, state = dirs
+    db = fx.make_db(data, wal=False)
+    fx.stamp(db, NOW - 900)
+    p = opencode.OpenCodeProvider(state_dir=state, data_path=data,
+                                  fetch=False, sweep=False)
+    assert p.blank_since(NOW) == NOW - 900
+
+
+def test_blank_since_is_none_where_opencode_never_ran(dirs):
+    data, state = dirs
+    p = opencode.OpenCodeProvider(state_dir=state, data_path=data,
+                                  fetch=False, sweep=False)
+    assert p.blank_since(NOW) is None
+
+
+def test_blank_since_is_never_in_the_future(dirs):
+    data, state = dirs
+    db = fx.make_db(data, wal=False)
+    fx.stamp(db, NOW + 3600)
+    p = opencode.OpenCodeProvider(state_dir=state, data_path=data,
+                                  fetch=False, sweep=False)
+    assert p.blank_since(NOW) == NOW
+
+
+def test_a_keyless_opencode_desk_puts_its_light_on_the_wire(dirs):
+    """End to end through the real provider and bus: OpenCode alone, no plan
+    key, one session waiting on a permission prompt. This was no message at
+    all, and the board stayed on CONNECTING (2026-10-19)."""
+    data, state = dirs
+    fx.make_db(data, wal=False)
+    fx.slot(state, "s1", "Notification", NOW - 5, name="api")
+    fx.waiting(state, "s1", NOW - 5)
+    p = opencode.OpenCodeProvider(state_dir=state, data_path=data,
+                                  fetch=False, sweep=False)
+    bus = ingest.IngestionBus(providers=[p], now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["provider"] == "opencode"
+    assert msg["src"] == protocol.BLANK_SRC
+    assert msg["session_pct"] == -1.0 and msg["weekly_pct"] == -1.0
+    assert msg["state"] == base.STATE_WAITING
+    assert bus.session_pair() == ("api", 1)

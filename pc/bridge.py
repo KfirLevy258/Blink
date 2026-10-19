@@ -64,6 +64,8 @@ class Bridge:
         # for esptool and the board is mid-reset.
         self._report_failure = report_failure
         self._said_no_source = False
+        # Whether the last read held back a blank page (see _read_usage).
+        self._held_blank = False
         if fetch_signed_manifest is None:
             from pc import update as _u
             fetch_signed_manifest = _u.fetch_signed_manifest
@@ -548,9 +550,21 @@ class Bridge:
             # its own dot, which is right -- but the daemon used to say nothing
             # at all, so a machine where Claude Code has simply never rendered
             # looked identical in the log to one where everything works.
+            #
+            # Not "open Claude Code once" any more, which was the whole of
+            # this line until OpenCode: a desk with OpenCode installed now
+            # gets a page with blank rings instead of None
+            # (ingest.IngestionBus._blank_poll), so None here means no tool
+            # this daemon reads has run on the machine yet -- or that page
+            # is being held from a board too old to draw it (_read_usage).
             if not self._said_no_source:
-                print("[bridge] no usage data yet -- open Claude Code once so"
-                      " it renders its status line", file=sys.stderr)
+                if self._held_blank:
+                    print("[bridge] no tool here reports a usage figure, and"
+                          " this board's firmware is too old to show a page"
+                          " without one -- update the board", file=sys.stderr)
+                else:
+                    print("[bridge] no usage data yet -- open Claude Code,"
+                          " Codex or OpenCode once", file=sys.stderr)
                 self._said_no_source = True
             return
         self._said_no_source = False
@@ -621,7 +635,14 @@ class Bridge:
         loud to be, so neither the logging nor the status message belongs here.
         """
         usage = self._fetch()
+        self._held_blank = False
         if usage is None:
+            return None
+        if (usage.get("src") == protocol.BLANK_SRC
+                and not protocol.draws_blank(self._board_fw)):
+            # Blank rings on a board older than protocol.FW_DRAWS_BLANK are
+            # two green zeros. Nothing is the honest page there.
+            self._held_blank = True
             return None
         # Percentages above 100 are real -- extra usage puts them there -- but
         # firmware older than protocol.FW_ACCEPTS_OVERAGE turns them into 0 on

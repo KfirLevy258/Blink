@@ -243,8 +243,14 @@ credential. The rules:
 A desk where OpenCode runs a model that is not on the GLM plan has no
 OpenCode gauges, rather than a number from somewhere else. Its sessions
 still drive the light beside Claude's or Codex's numbers. On a desk where
-OpenCode is the only tool, nothing has a number, so the board keeps its
-waiting screen.
+OpenCode is the only tool, nothing has a number, and the board gets a page
+with blank rings (`--%`, `src` `none`) so the light and the project name
+still have a message to ride on (`ingest.IngestionBus._blank_poll`). This
+sentence used to say the board kept its waiting screen, which is what the
+code did until 2026-10-19 -- and on that screen there is no light at all,
+and a USB update waiting for usage data reverts at 90 seconds. Firmware
+older than v0.7.0 draws a blank ring as 0%, so the daemon holds the page
+back from it and says in the log that the board needs updating.
 
 ### Three providers
 

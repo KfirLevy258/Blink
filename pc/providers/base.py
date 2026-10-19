@@ -216,3 +216,15 @@ class ProviderParser:
         winner with less information than the normalizer has.
         """
         return []
+
+    def blank_since(self, now_epoch):
+        """When this tool was last used, if it should be on the panel with no
+        number; None when it has nothing to say.
+
+        For a tool that is installed and has no usage figure anywhere: the
+        bus puts it on the panel with blank rings so its light still has a
+        message to ride on (IngestionBus.poll). The default is None, which
+        is every provider whose figures are its whole reason to be on the
+        panel -- they appear when they have one, as they always did.
+        """
+        return None

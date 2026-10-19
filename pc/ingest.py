@@ -313,7 +313,7 @@ class IngestionBus:
         frames = self.poll_frames()
         ranked = normalizer.rank(frames, preferred=self._preferred)
         if not ranked:
-            return None
+            return self._blank_poll(frames)
         primary = ranked[0]
         secondary = ranked[1] if len(ranked) > 1 else None
         # The providers the two rings have no room for. They lose the rings
@@ -335,6 +335,63 @@ class IngestionBus:
         self._session_pair = _pair_from(
             primary, secondary, msg.get("state", base.STATE_UNKNOWN),
             others)
+        return msg
+
+    def _blank_poll(self, frames):
+        """The message for a desk where no provider has a number, or None.
+
+        Found with real OpenCode on the real board, 2026-10-19: on a desk
+        running OpenCode alone against a self-hosted model -- the setup the
+        team this provider was written for actually has -- no source has a
+        percentage, rank() is empty, and this returned None. The daemon then
+        sent no usage message at all, so the board sat on its CONNECTING
+        screen for good: no light through a whole permission prompt, no
+        project name (it rides on a usage message, bridge._send_usage), and
+        a USB update that test-boots and waits for usage data before
+        confirming itself (firmware/src/main.c) reverted at 90 seconds.
+
+        So such a desk gets a message with BLANK rings: UNKNOWN percentages,
+        no resets, which firmware since v0.7.0 draws as `--%` and `--`
+        (usage_view.c render_gauges; bridge.py holds it back from older
+        boards, which draw -1 as 0%). The page belongs to the provider most
+        recently active -- a light-only provider with a live session first,
+        else one that is installed and says so (blank_since) -- and the
+        light folds every light-only frame, exactly as it does beside rings.
+
+        merge()'s rule that blank dials are "worse than the last reading"
+        does not reach here. It is about a provider whose number has gone
+        and whose last one the board still holds; this desk has never had
+        one to hold.
+        """
+        lit = normalizer.light_only(frames)
+        if lit:
+            newest = max(lit, key=lambda f: f.active_at)
+            provider, active_at = newest.provider, newest.active_at
+        else:
+            provider = active_at = None
+            now = self._now()
+            for p in self._providers:
+                if id(p) in self._broken:
+                    continue
+                try:
+                    since = p.blank_since(now)
+                except Exception:
+                    since = None
+                if since is not None:
+                    provider, active_at = p.get_provider_id(), since
+                    break
+            if provider is None:
+                return None
+        now = self._now()
+        blank = base.NormalizedUsageFrame(
+            provider=provider, src=protocol.BLANK_SRC, observed_at=now,
+            # The person's last contact, not `now`: active_age_s is what
+            # lets the panel sleep (protocol._active_age), and a blank page
+            # re-sent every poll is not somebody at the desk.
+            active_at=min(active_at, now))
+        msg = protocol.frame_to_usage(blank, now, None, others=lit)
+        self._session_pair = _pair_from(
+            blank, None, msg.get("state", base.STATE_UNKNOWN), lit)
         return msg
 
     def session_pair(self):

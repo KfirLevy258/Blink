@@ -748,6 +748,32 @@ def ota_error(why=""):
 # doing the next time hello changes for another reason.
 FW_ACCEPTS_OVERAGE = (1, 2, 5)
 
+# The `src` of a page with blank rings (ingest.IngestionBus._blank_poll).
+# The firmware reads no `src` at all; this one is for the daemon, which holds
+# a blank page back from a board too old to draw it (bridge._read_usage), and
+# for whoever reads the wire line in `blink status --wire`.
+BLANK_SRC = "none"
+
+# The first firmware that draws a negative percentage as `--%` rather than a
+# green 0% on BOTH rings: render_gauges learned the session side in v0.7.0
+# (bca447f); render_weekly always had it. A page with blank rings -- a desk
+# whose only tool has no usage figure (ingest.IngestionBus._blank_poll) --
+# goes only to a board at or past this, because on an older one every
+# number on it would be a confident zero.
+FW_DRAWS_BLANK = (0, 7, 0)
+
+
+def draws_blank(board_fw) -> bool:
+    """Whether a board running `board_fw` draws -1 as "no number".
+
+    An unknown version is False, by cap_overage_for_fw's rule: None means
+    "not yet told", and guessing modern is the guess that puts a zero on a
+    panel. The board says its version in hello, a second after it opens.
+    """
+    fw = _fw_tuple(board_fw)
+    return fw is not None and fw >= FW_DRAWS_BLANK
+
+
 # Every field proto.c reads with a 0..100 range. sonnet_pct and opus_pct are
 # flattened by usage() but no firmware parses them yet, so they are not here;
 # add them the day one does.

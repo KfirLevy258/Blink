@@ -1120,6 +1120,19 @@ class OpenCodeProvider(base.ProviderParser):
             stale=(now_epoch - fetched_at) > STALE_AFTER_S,
         )
 
+    def blank_since(self, now_epoch):
+        """OpenCode's last activity when it has run here, else None.
+
+        So that a desk running OpenCode alone, against a model with no plan
+        quota, has a page at all: with no session open there is no state
+        frame, and without this the bus had nothing to send and the board
+        stayed on CONNECTING (ingest.IngestionBus._blank_poll).
+        """
+        if not present(self._root()):
+            return None
+        la = last_activity(self._root(), self._state_dir)
+        return None if la is None else min(la, now_epoch)
+
     def poll(self, now_epoch):
         """The usage frame when there is a reading, and the state frame.
 
