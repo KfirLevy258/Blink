@@ -224,8 +224,23 @@ PATHS_RECORD = "~/.blink/opencode-paths.json"
 MAX_RECORD_BYTES = 64 * 1024
 
 
+def _home_path(spec):
+    """expanduser, then normpath, so a path reads one way on every platform.
+
+    expanduser("~/.blink/x") on Windows is C:\\Users\\me/.blink/x -- the
+    profile with backslashes, the rest with the forward slashes written here.
+    Windows opens either, but install prints this path to the customer
+    ("Creates  ..."), the plugin computes the same directory with node's
+    path.join, which says C:\\Users\\me\\.blink\\state-opencode, and the
+    tests compare against os.path.join; the half-and-half form matched none
+    of them, and the Windows job failed two tests on it (CI, 2026-10-19).
+    normpath is the identity for these paths on macOS and Linux.
+    """
+    return os.path.normpath(os.path.expanduser(spec))
+
+
 def paths_record_path():
-    return os.path.expanduser(PATHS_RECORD)
+    return _home_path(PATHS_RECORD)
 
 
 def _default_dir(*parts):
@@ -346,7 +361,7 @@ def forget_dirs():
 
 def state_dir():
     """Where the plugin writes its slots, expanded now rather than at import."""
-    return os.path.expanduser(STATE_DIR)
+    return _home_path(STATE_DIR)
 
 
 def db_paths(root=None):
@@ -789,7 +804,8 @@ class OpenCodeProvider(base.ProviderParser):
     def __init__(self, state_dir=None, data_path=None, sweep=True,
                  fetch=True, fetcher=None, clock=time.time):
         self._state_dir = (state_dir if state_dir is not None
-                           else os.path.expanduser(STATE_DIR))
+                           # Not state_dir(): the parameter shadows it.
+                           else _home_path(STATE_DIR))
         self._data_path = data_path
         self._state = claude_state.ClaudeStateProvider(path=self._state_dir,
                                                        sweep=sweep)

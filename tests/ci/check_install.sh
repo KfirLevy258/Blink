@@ -521,7 +521,13 @@ opencode-only)
 		ok "status reports OpenCode (claude is on PATH here, so the 'alone' wording is asserted on runners only)"
 	else
 		echo "$st" | grep -q "running on OpenCode alone" || fail "status does not say it runs on OpenCode alone: $st"
-		tr -s ' \n' '  ' <"$WORK/out.txt" | grep -q "runs on OpenCode alone" || fail "install did not tell an OpenCode-only user what the panel shows"
+		# The note is textwrap-filled, so the phrase can straddle a line
+		# break and is matched with the breaks folded to spaces. The \r goes
+		# first: the binary is native Windows Python, which writes CRLF into
+		# out.txt, and folding only \n left "runs on OpenCode\r alone" -- the
+		# note was there, word for word, and the Windows job failed on it
+		# (CI, 2026-10-19) while macOS and Linux passed.
+		tr -d '\r' <"$WORK/out.txt" | tr -s ' \n' '  ' | grep -q "runs on OpenCode alone" || fail "install did not tell an OpenCode-only user what the panel shows"
 		ok "status and install both explain the OpenCode-only panel"
 	fi
 	"$HOME/.blink/bin/$BINEXE" status --wire >/dev/null 2>&1 || fail "status --wire exited non-zero"

@@ -1266,6 +1266,20 @@ def _plugin_source():
         return f.read()
 
 
+def _put_plugin(plugin):
+    """Lay down an installed copy of ours exactly as install writes it.
+
+    Bytes with LF endings, never Path.write_text: on Windows that writes
+    CRLF, is_current() compares byte for byte on purpose, and `blink status`
+    then called the fixture's own plugin "out of date" instead of counting
+    its sessions -- a failure only the Windows job saw (CI, 2026-10-19).
+    Path.write_text(newline=) would say the same thing but arrived in 3.10,
+    and the 3.9 jobs run this file too.
+    """
+    plugin.parent.mkdir(parents=True, exist_ok=True)
+    plugin.write_bytes(_plugin_source().encode("utf-8"))
+
+
 def _no_fetch(monkeypatch, answer=(None, None)):
     """Replace the one network call; returns the list of calls it saw."""
     calls = []
@@ -1579,7 +1593,7 @@ def test_no_plan_key_says_the_light_works_only_with_our_plugin(
     assert "is not Blink's" in st
     assert "its light works" not in st
 
-    plugin.write_text(_plugin_source(), encoding="utf-8")
+    _put_plugin(plugin)
     cli.main(["status"])
     assert ("no GLM Coding Plan key in OpenCode's auth.json -- its light"
             " works") in capsys.readouterr().out
@@ -1650,8 +1664,7 @@ def test_status_counts_live_opencode_sessions_without_sweeping_them(
     _with_opencode(tmp_path)
     _no_fetch(monkeypatch)
     plugin = _oc_plugin(tmp_path)
-    plugin.parent.mkdir(parents=True)
-    plugin.write_text(_plugin_source(), encoding="utf-8")
+    _put_plugin(plugin)
     slots = str(tmp_path / ".blink" / "state-opencode")
     now = time.time()
     ocfx.slot(slots, "ses_a", "UserPromptSubmit", now)

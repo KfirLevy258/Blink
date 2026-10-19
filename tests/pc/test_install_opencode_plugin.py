@@ -206,10 +206,13 @@ def test_refresh_only_touches_an_existing_copy_of_ours(cfg, tmp_path):
     # Nothing there: an update is not the command that installs.
     assert iop.refresh(cfg, _source_text()) is None
     assert not os.path.exists(iop.plugin_path(cfg))
-    # Somebody else's: never.
+    # Somebody else's: never. newline="\n" because the comparison below is
+    # of bytes: a text-mode write on Windows turned this \n into \r\n, and
+    # the test failed there (CI, 2026-10-19) on its own fixture, not on
+    # anything refresh() did.
     path = iop.plugin_path(cfg)
     os.makedirs(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write("export const Mine = 1\n")
     assert iop.refresh(cfg, _source_text()) is None
     assert _read(path) == b"export const Mine = 1\n"

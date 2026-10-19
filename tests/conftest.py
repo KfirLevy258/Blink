@@ -20,6 +20,27 @@ dangerous one has to be asked for.
 import pytest
 
 
+# Longest test id allowed. Windows caps an environment variable at 32,767
+# characters and pytest puts each test's id into PYTEST_CURRENT_TEST, so a
+# longer one errors in setup and teardown -- there and only there. Two
+# parametrized cases whose ids were their own 100 KB values did exactly that
+# on the Windows job (CI, 2026-10-19), and printed lines long enough that
+# `gh run view --log-failed` stopped at the first of them, which made the
+# report look cut off right after its ERRORS header. The limit is far below
+# Windows' so that a macOS or Linux run fails first, and loudly.
+_MAX_TEST_ID = 1000
+
+
+def pytest_collection_modifyitems(config, items):
+    long_ids = [item.nodeid[:120] + "..." for item in items
+                if len(item.nodeid) > _MAX_TEST_ID]
+    if long_ids:
+        raise pytest.UsageError(
+            "test ids longer than %d characters (give the case an id= with"
+            " pytest.param; see tests/conftest.py):\n  %s"
+            % (_MAX_TEST_ID, "\n  ".join(long_ids)))
+
+
 @pytest.fixture(autouse=True)
 def _sandboxed_home(tmp_path, monkeypatch):
     """tmp_path is ~, on every platform.

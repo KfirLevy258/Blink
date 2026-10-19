@@ -177,9 +177,15 @@ def test_an_install_at_the_defaults_removes_an_old_record(tmp_path,
     assert not os.path.exists(opencode.paths_record_path())
 
 
+# The oversized body carries an id of its own. Left to pytest, a case's id is
+# its value, and 100,000 braces made a test name pytest then copies into the
+# PYTEST_CURRENT_TEST environment variable -- which Windows caps at 32,767
+# characters, so the case errored in setup and teardown there and passed
+# everywhere else (CI, 2026-10-19). tests/conftest.py now refuses such a name
+# at collection, on every platform.
 @pytest.mark.parametrize("body", [
     b"not json", b"[]", b'{"data_dir": 7}', b'{"data_dir": "relative/x"}',
-    b"\xff\xfe", b"{" * 100_000,
+    b"\xff\xfe", pytest.param(b"{" * 100_000, id="100k-braces"),
 ])
 def test_a_bad_record_is_no_record(tmp_path, body):
     path = opencode.paths_record_path()
@@ -536,7 +542,9 @@ def _http_error(code):
     (b"<html>captive portal " + KEY.encode() + b"</html>", "unexpected reply"),
     (b"[]", "unexpected reply"),
     (fx.encode(fx.reply([])), "unexpected reply"),
-    (b" " * (opencode.MAX_REPLY_BYTES + 1), "unexpected reply"),
+    # An id for the same reason as test_a_bad_record_is_no_record's.
+    pytest.param(b" " * (opencode.MAX_REPLY_BYTES + 1), "unexpected reply",
+                 id="reply-over-MAX_REPLY_BYTES"),
     (12345, "unexpected reply"),
 ])
 def test_every_failure_is_a_category_and_never_the_key(dirs, capsys, caplog,

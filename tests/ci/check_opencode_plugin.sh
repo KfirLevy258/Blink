@@ -62,9 +62,16 @@ ok "writes nothing outside ~/.blink/state-opencode"
 #    subagent's directory goes with its session.
 #    The state directory is made first, 0700, as `blink install` makes it:
 #    the plugin writes only into a directory that already exists.
+#    mkdir then chmod, never `mkdir -m 700`: Git Bash's mkdir creates the
+#    directory and then fails its own chmod with "cannot change permissions
+#    ... Permission denied", exit 1, which killed this script on the Windows
+#    job (CI, 2026-10-19) -- while a plain chmod there is a quiet no-op that
+#    exits 0. Windows has no mode bits for either to set, which is also why
+#    the driver checks modes only off win32.
 rm -rf "${WORK:?}/home"
 mkdir -p "$WORK/home/.blink"
-mkdir -m 700 "$DIR"
+mkdir "$DIR"
+chmod 700 "$DIR"
 HOME="$WORK/home" USERPROFILE="$WORK/home" \
 	node "$DRIVER" exit >"$WORK/out.txt" 2>"$WORK/err.txt" ||
 	fail "exit scenario failed: $(cat "$WORK/err.txt")"
