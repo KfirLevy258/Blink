@@ -1964,3 +1964,34 @@ def test_numbered_sources_sweeps_nothing(tmp_path, monkeypatch):
     cli.numbered_sources()
     assert (tmp_path / ".blink" / "state" / "s1.state").exists()
     assert (tmp_path / ".blink" / "state-codex" / "s1.state").exists()
+
+
+@pytest.mark.parametrize("used_recently,tombstone", [
+    (True, False), (False, False), (True, True)])
+def test_status_says_when_opencode_2_ran_and_the_plugin_reported_nothing(
+        tmp_path, capsys, monkeypatch, used_recently, tombstone):
+    # OpenCode 2.0 skips a plugin it cannot load with a log warning only. For
+    # five weeks a desk in daily 2.0 use had a dark light and a status line
+    # reading "no live sessions", which sounded like nothing was wrong.
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    age_ms = 60_000 if used_recently else 3 * 3600 * 1000
+    ocfx.make_message_db(_oc_data(tmp_path), v2=[], sessions=[
+        ("ses_used", None, int(time.time() * 1000) - age_ms)])
+    _no_fetch(monkeypatch)
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    capsys.readouterr()
+    if tombstone:
+        # The session was deleted, or the service exited: the plugin did
+        # report it, and only the tombstone is left. No hint.
+        with open(os.path.join(cli.opencode.state_dir(), "ses_used.ended"),
+                  "w"):
+            pass
+
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "OpenCode    plugin installed, no live sessions" in st
+    hint = "OpenCode was used in the last hour and the plugin reported nothing"
+    assert (hint in st) == (used_recently and not tombstone)
+    if used_recently and not tombstone:
+        assert "`opencode service restart`" in st

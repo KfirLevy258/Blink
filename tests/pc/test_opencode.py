@@ -1646,3 +1646,64 @@ def test_a_keyless_opencode_desk_puts_its_light_on_the_wire(dirs):
     assert msg["session_pct"] == -1.0 and msg["weekly_pct"] == -1.0
     assert msg["state"] == base.STATE_WAITING
     assert bus.session_pair() == ("api", 1)
+
+
+# --- recent_v2_sessions: the witness for a plugin OpenCode never loaded ------
+#
+# OpenCode 2.0 skips a plugin it cannot load with a log warning only, and for
+# five weeks `blink status` said "no live sessions" over a desk where 2.0 was
+# in daily use. The count below is what lets status say otherwise.
+
+
+def test_recent_v2_sessions_counts_top_level_sessions_in_the_window(tmp_path):
+    data = str(tmp_path / "data")
+    now_ms = int(NOW * 1000)
+    fx.make_message_db(data, v2=[], sessions=[
+        ("ses_recent", None, now_ms - 60_000),
+        ("ses_old", None, now_ms - 2 * 3600 * 1000),
+        ("ses_kid", None, now_ms - 60_000, "ses_recent"),
+    ])
+    assert opencode.recent_v2_sessions(NOW, root=data) == 1
+    assert opencode.recent_v2_sessions(NOW, within_s=3 * 3600, root=data) == 2
+
+
+def test_recent_v2_sessions_creates_no_wal(tmp_path):
+    # A look that left opencode.db-wal behind would read as OpenCode
+    # activity to last_activity(); connect_readonly is what prevents it.
+    data = str(tmp_path / "data")
+    path = fx.make_message_db(data, v2=[], sessions=[
+        ("ses_recent", None, int(NOW * 1000))])
+    assert opencode.recent_v2_sessions(NOW, root=data) == 1
+    assert not os.path.exists(path + "-wal")
+    assert not os.path.exists(path + "-shm")
+
+
+@pytest.mark.parametrize("kind", ["absent", "v1", "garbage"])
+def test_recent_v2_sessions_is_zero_without_a_2_0_table(tmp_path, kind):
+    data = str(tmp_path / "data")
+    if kind == "v1":
+        fx.make_message_db(data)                # 1.x: no session_v2
+    elif kind == "garbage":
+        os.makedirs(data)
+        with open(os.path.join(data, "opencode.db"), "wb") as f:
+            f.write(b"not a database at all")
+    assert opencode.recent_v2_sessions(NOW, root=data) == 0
+
+
+def test_plugin_wrote_since_counts_slots_and_tombstones_by_mtime(tmp_path):
+    state = tmp_path / "state-opencode"
+    state.mkdir()
+    assert opencode.plugin_wrote_since(NOW - 3600, state=str(state)) is False
+    for name, age in (("ses_a.state", 7200), ("ses_b.waiting", 10),
+                      ("notes.txt", 10)):
+        p = state / name
+        p.write_text("")
+        os.utime(p, (NOW - age, NOW - age))
+    # An old slot, a marker and a stranger: none is the plugin reporting.
+    assert opencode.plugin_wrote_since(NOW - 3600, state=str(state)) is False
+    p = state / "ses_c.ended"
+    p.write_text("")
+    os.utime(p, (NOW - 60, NOW - 60))
+    assert opencode.plugin_wrote_since(NOW - 3600, state=str(state)) is True
+    assert opencode.plugin_wrote_since(NOW - 3600,
+                                       state=str(tmp_path / "nope")) is False

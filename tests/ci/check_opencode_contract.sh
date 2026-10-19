@@ -2,6 +2,14 @@
 # Watch the OpenCode contract where it is defined.
 #
 #   tests/ci/check_opencode_contract.sh [git-ref]      default: dev
+#   OPENCODE_LINE=1|2 tests/ci/check_opencode_contract.sh v2.0.32
+#
+# OpenCode ships two lines at once: 1.x as `opencode-ai` on npm and 2.x, the
+# rewrite, as `@opencode/cli`. tools/blink-opencode.js loads on both, but the
+# two keep the contract in different files with different names, so the
+# script checks one line per run. OPENCODE_LINE picks it; without it, a v2.*
+# tag or `dev` is line 2 and anything else line 1. The workflow always sets
+# it, from the npm package it resolved the version from.
 #
 # OpenCode support rests on two things OpenCode never promised us:
 #
@@ -23,10 +31,10 @@
 #
 # Unlike the Codex check, this one does NOT stop at the first failure. It
 # reports every broken assumption and then fails. The reason is the `dev`
-# branch: in October 2026 it is the OpenCode 2.0 rewrite, which moves most of
-# the files below, and the point of running it is to learn the whole list of
-# what 2.0 breaks in one run -- not one line per push, rediscovered over a
-# week. On a release tag the list should be empty.
+# branch: it was where the OpenCode 2.0 rewrite moved most of the 1.x files,
+# it still moves 2.x files ahead of any release, and the point of running it
+# is to learn the whole list of what breaks in one run -- not one line per
+# push, rediscovered over a week. On a release tag the list should be empty.
 #
 # WHAT THIS CANNOT DO:
 #   * Prove the plugin loads and the events fire. That is
@@ -70,6 +78,20 @@ WORK="${TMPDIR:-/tmp}/blink-opencode-contract"
 THIRD_PARTY="${OPENCODE_THIRD_PARTY:-warn}"
 [ -n "${OPENCODE_SRC_DIR:-}" ] && THIRD_PARTY=skip
 mkdir -p "$WORK"
+
+# The line, inferred from the ref only as a convenience for running this by
+# hand: the workflow passes it explicitly, because a ref name is a guess and
+# the package a version came from is not.
+case "${OPENCODE_LINE:-}" in
+1 | 2) LINE=$OPENCODE_LINE ;;
+'')
+	case "$REF" in
+	v2.* | dev) LINE=2 ;;
+	*) LINE=1 ;;
+	esac
+	;;
+*) fail "OPENCODE_LINE must be 1 or 2, not '$OPENCODE_LINE'" ;;
+esac
 
 MISSES=0
 WARNS=0
@@ -115,155 +137,367 @@ need() {
 	return 1
 }
 
-printf '== OpenCode at %s\n' "$REF"
+printf '== OpenCode at %s (the %s.x line)\n' "$REF" "$LINE"
 
-# 1. Where everything lives. pc/providers/opencode.py and the installer both
-#    compute <data>/opencode and <config>/opencode the way xdg-basedir does:
-#    $XDG_DATA_HOME else ~/.local/share, $XDG_CONFIG_HOME else ~/.config --
-#    on macOS too (not ~/Library) and on Windows too (not %APPDATA%), because
-#    xdg-basedir has no platform branch. The v1.2.0 release note says
-#    "%APPDATA% on windows"; the code says otherwise, and the code wins.
-P=packages/core/src/global.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	has "$F" 'from "xdg-basedir"' || miss "global.ts no longer takes its roots from xdg-basedir -- re-derive every path"
-	has "$F" 'const app = "opencode"' || miss "the app directory is no longer 'opencode'"
-	has "$F" 'const data = path.join(xdgData!, app)' || miss "the data dir is no longer xdgData/opencode -- opencode.db and auth.json moved"
-	has "$F" 'const config = path.join(xdgConfig!, app)' || miss "the config dir is no longer xdgConfig/opencode -- the plugin is installed in the wrong place"
-	pass "data and config dirs are still xdg-basedir's, under 'opencode'"
-fi
+# ---- OpenCode 1.x, from v1.3.4 (the first with default-export detection,
+# see 4b). Paths read at v1.19.3.
+if [ "$LINE" = 1 ]; then
+	# 1. Where everything lives. pc/providers/opencode.py and the installer both
+	#    compute <data>/opencode and <config>/opencode the way xdg-basedir does:
+	#    $XDG_DATA_HOME else ~/.local/share, $XDG_CONFIG_HOME else ~/.config --
+	#    on macOS too (not ~/Library) and on Windows too (not %APPDATA%), because
+	#    xdg-basedir has no platform branch. The v1.2.0 release note says
+	#    "%APPDATA% on windows"; the code says otherwise, and the code wins.
+	P=packages/core/src/global.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'from "xdg-basedir"' || miss "global.ts no longer takes its roots from xdg-basedir -- re-derive every path"
+		has "$F" 'const app = "opencode"' || miss "the app directory is no longer 'opencode'"
+		has "$F" 'const data = path.join(xdgData!, app)' || miss "the data dir is no longer xdgData/opencode -- opencode.db and auth.json moved"
+		has "$F" 'const config = path.join(xdgConfig!, app)' || miss "the config dir is no longer xdgConfig/opencode -- the plugin is installed in the wrong place"
+		pass "data and config dirs are still xdg-basedir's, under 'opencode'"
+	fi
 
-# 1b. ...and xdg-basedir itself still has no Windows case. The claim is about
-#     one version of somebody else's package, so read that version. A major
-#     bump, or a platform branch appearing, means Windows paths need
-#     measuring again on a Windows box.
-P=packages/core/package.json
-F=$(fetch $P)
-if need "$F" $P; then
-	xdg=$(sed -n 's/^[[:space:]]*"xdg-basedir": "[^0-9]*\([0-9][0-9.]*\)".*/\1/p' "$F" | head -n 1)
-	if [ -z "$xdg" ]; then
-		miss "core no longer depends on xdg-basedir -- see check 1"
-	elif [ -n "${OPENCODE_SRC_DIR:-}" ]; then
-		ok "xdg-basedir $xdg (its source is not checked offline)"
-	else
-		XDG="$WORK/xdg-basedir-$xdg.js"
-		if ! curl -fsSL "https://unpkg.com/xdg-basedir@$xdg/index.js" -o "$XDG" 2>/dev/null; then
-			miss "could not fetch xdg-basedir@$xdg to check it for a Windows case"
-		elif grep -q 'win32\|process\.platform\|APPDATA' "$XDG"; then
-			miss "xdg-basedir@$xdg has a platform branch -- Windows paths are no longer ~/.local/share"
-		elif ! grep -qF "path.join(homeDirectory, '.local', 'share')" "$XDG"; then
-			miss "xdg-basedir@$xdg no longer defaults data to ~/.local/share"
+	# 1b. ...and xdg-basedir itself still has no Windows case. The claim is about
+	#     one version of somebody else's package, so read that version. A major
+	#     bump, or a platform branch appearing, means Windows paths need
+	#     measuring again on a Windows box.
+	P=packages/core/package.json
+	F=$(fetch $P)
+	if need "$F" $P; then
+		xdg=$(sed -n 's/^[[:space:]]*"xdg-basedir": "[^0-9]*\([0-9][0-9.]*\)".*/\1/p' "$F" | head -n 1)
+		if [ -z "$xdg" ]; then
+			miss "core no longer depends on xdg-basedir -- see check 1"
+		elif [ -n "${OPENCODE_SRC_DIR:-}" ]; then
+			ok "xdg-basedir $xdg (its source is not checked offline)"
 		else
-			ok "xdg-basedir $xdg still has no Windows case"
+			XDG="$WORK/xdg-basedir-$xdg.js"
+			if ! curl -fsSL "https://unpkg.com/xdg-basedir@$xdg/index.js" -o "$XDG" 2>/dev/null; then
+				miss "could not fetch xdg-basedir@$xdg to check it for a Windows case"
+			elif grep -q 'win32\|process\.platform\|APPDATA' "$XDG"; then
+				miss "xdg-basedir@$xdg has a platform branch -- Windows paths are no longer ~/.local/share"
+			elif ! grep -qF "path.join(homeDirectory, '.local', 'share')" "$XDG"; then
+				miss "xdg-basedir@$xdg no longer defaults data to ~/.local/share"
+			else
+				ok "xdg-basedir $xdg still has no Windows case"
+			fi
 		fi
 	fi
-fi
 
-# 2. The database. The reader uses opencode.db only for an activity clock --
-#    the mtime of the file and of its WAL -- so what matters is the name and
-#    that it is WAL: in the lab almost all of 836 KB of writes sat in
-#    opencode.db-wal while opencode.db stayed at 4 KB, so an mtime check on
-#    the .db alone saw nothing happen. Release channels (latest/beta/prod)
-#    write opencode.db; anything else writes opencode-<channel>.db.
-P=packages/core/src/database/database.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	has "$F" 'PRAGMA journal_mode = WAL' || miss "the DB is no longer WAL -- the -wal mtime is no longer where activity shows"
-	has "$F" 'return join(Global.Path.data, "opencode.db")' || miss "released builds no longer write <data>/opencode.db"
-	grep -q '\["latest",' "$F" || miss "the release channel list changed -- re-read which builds write opencode.db"
-	pass "the DB is <data>/opencode.db, in WAL mode"
-fi
+	# 2. The database. The reader uses opencode.db only for an activity clock --
+	#    the mtime of the file and of its WAL -- so what matters is the name and
+	#    that it is WAL: in the lab almost all of 836 KB of writes sat in
+	#    opencode.db-wal while opencode.db stayed at 4 KB, so an mtime check on
+	#    the .db alone saw nothing happen. Release channels (latest/beta/prod)
+	#    write opencode.db; anything else writes opencode-<channel>.db.
+	P=packages/core/src/database/database.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'PRAGMA journal_mode = WAL' || miss "the DB is no longer WAL -- the -wal mtime is no longer where activity shows"
+		has "$F" 'return join(Global.Path.data, "opencode.db")' || miss "released builds no longer write <data>/opencode.db"
+		grep -q '\["latest",' "$F" || miss "the release channel list changed -- re-read which builds write opencode.db"
+		pass "the DB is <data>/opencode.db, in WAL mode"
+	fi
 
-# 3. Plugin discovery. Install writes <config>/opencode/plugin/blink.js; that
-#    works because every config dir is scanned for {plugin,plugins}/*.{ts,js}
-#    and the global config dir is the first of them. A plain .js file with
-#    only node: imports loads with no npm install (measured, 1.19.3).
-P=packages/opencode/src/config/plugin.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	has "$F" 'Glob.scan("{plugin,plugins}/*.{ts,js}"' || miss "plugins are no longer discovered as {plugin,plugins}/*.{ts,js} -- blink.js will not load"
-	pass "plugin/*.js is still auto-discovered"
-fi
-P=packages/opencode/src/config/paths.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	has "$F" 'Global.Path.config,' || miss "the global config dir is no longer a plugin directory"
-	pass "the global config dir is still scanned"
-fi
-P=packages/opencode/src/config/config.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	has "$F" 'ConfigPlugin.load(dir)' || miss "config dirs are no longer scanned for plugins"
-	pass "every config dir is still scanned for plugins"
-fi
+	# 3. Plugin discovery. Install writes <config>/opencode/plugin/blink.js; that
+	#    works because every config dir is scanned for {plugin,plugins}/*.{ts,js}
+	#    and the global config dir is the first of them. A plain .js file with
+	#    only node: imports loads with no npm install (measured, 1.19.3).
+	P=packages/opencode/src/config/plugin.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'Glob.scan("{plugin,plugins}/*.{ts,js}"' || miss "plugins are no longer discovered as {plugin,plugins}/*.{ts,js} -- blink.js will not load"
+		pass "plugin/*.js is still auto-discovered"
+	fi
+	P=packages/opencode/src/config/paths.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'Global.Path.config,' || miss "the global config dir is no longer a plugin directory"
+		pass "the global config dir is still scanned"
+	fi
+	P=packages/opencode/src/config/config.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'ConfigPlugin.load(dir)' || miss "config dirs are no longer scanned for plugins"
+		pass "every config dir is still scanned for plugins"
+	fi
 
-# 4. The plugin API. blink.js exports one async function returning hooks, and
-#    uses three of them: `event` for the bus, and tool.execute.before/after to
-#    keep a long tool call's clock fresh. permission.ask is declared but never
-#    called in 1.19.3, which is why the plugin listens for the
-#    permission.asked EVENT and does not use that hook.
-P=packages/plugin/src/index.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	has "$F" 'export type Plugin = (input: PluginInput' || miss "a plugin is no longer a function of PluginInput"
-	has "$F" 'event?: (input: { event: Event }) => Promise<void>' || miss "the event hook's signature changed"
-	has "$F" '"tool.execute.before"?:' || miss "the tool.execute.before hook is gone"
-	has "$F" '"tool.execute.after"?:' || miss "the tool.execute.after hook is gone"
-	pass "event, tool.execute.before and tool.execute.after are still hooks"
-fi
+	# 4. The plugin API. blink.js exports one async function returning hooks, and
+	#    uses three of them: `event` for the bus, and tool.execute.before/after to
+	#    keep a long tool call's clock fresh. permission.ask is declared but never
+	#    called in 1.19.3, which is why the plugin listens for the
+	#    permission.asked EVENT and does not use that hook.
+	P=packages/plugin/src/index.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'export type Plugin = (input: PluginInput' || miss "a plugin is no longer a function of PluginInput"
+		has "$F" 'event?: (input: { event: Event }) => Promise<void>' || miss "the event hook's signature changed"
+		has "$F" '"tool.execute.before"?:' || miss "the tool.execute.before hook is gone"
+		has "$F" '"tool.execute.after"?:' || miss "the tool.execute.after hook is gone"
+		pass "event, tool.execute.before and tool.execute.after are still hooks"
+	fi
 
-# 5. Session status: the light. busy -> running, idle -> your turn, retry ->
-#    running or failed depending on how far away `next` is (epoch ms). It is
-#    in memory only -- nothing about a retry reaches the DB -- which is the
-#    reason there is a plugin at all.
-P=packages/schema/src/session-status-event.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	has "$F" 'type: "session.status",' || miss "the session.status event is renamed"
-	for lit in idle retry busy; do
-		has "$F" "type: Schema.Literal(\"$lit\")," || miss "session.status lost '$lit'"
-	done
-	has "$F" 'next: NonNegativeInt,' || miss "a retry no longer carries next -- a quota wait cannot be told from a blip"
-	has "$F" 'status: Info,' || miss "session.status no longer carries status"
-	pass "session.status is still busy/idle/retry, with retry.next"
-fi
+	# 4b. How 1.x finds that function. blink.js's default export is an OBJECT,
+	#     {id, server, setup}, so the same file loads on both lines (see the end
+	#     of tools/blink-opencode.js). 1.x reads `server` off a default object
+	#     and calls it in preference to any named export; that detection first
+	#     shipped in v1.3.4, which is why 1.3.3 and older are unsupported. If
+	#     either line goes, 1.x calls the object as a function and the plugin
+	#     fails to load -- the light goes dark on every 1.x desk.
+	P=packages/opencode/src/plugin/shared.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'const server = "server" in value ? value.server : undefined' ||
+			miss "1.x no longer reads 'server' off a default-export object -- blink.js's {id, server, setup} will not load"
+		pass "1.x still takes 'server' from a default-export object"
+	fi
+	P=packages/opencode/src/plugin/index.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'hooks.push(await (plugin as PluginModule).server(input, load.options))' ||
+			miss "1.x no longer calls a module's server() for its hooks"
+		pass "1.x still calls server() for the hooks"
+	fi
 
-# 6. Sessions: created/updated carry info.parentID, which is how a subagent's
-#    session is folded into its parent instead of lighting up as a second
-#    session; deleted ends the slot; session.error carries error.name, and
-#    MessageAbortedError (the person pressed Esc) is idle, not red.
-P=packages/schema/src/v1/session.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	for ev in session.created session.updated session.deleted session.error; do
-		has "$F" "type: \"$ev\"," || miss "the $ev event is renamed or gone"
-	done
-	has "$F" 'parentID: optional(SessionID),' || miss "a session no longer carries parentID -- subagents will show as sessions"
-	has "$F" 'info: SessionInfo,' || miss "session events no longer carry info"
-	has "$F" 'namedError("MessageAbortedError"' || miss "MessageAbortedError is renamed -- an Esc will paint the light red"
-	pass "session events, parentID and MessageAbortedError are unchanged"
-fi
+	# 5. Session status: the light. busy -> running, idle -> your turn, retry ->
+	#    running or failed depending on how far away `next` is (epoch ms). It is
+	#    in memory only -- nothing about a retry reaches the DB -- which is the
+	#    reason there is a plugin at all.
+	P=packages/schema/src/session-status-event.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'type: "session.status",' || miss "the session.status event is renamed"
+		for lit in idle retry busy; do
+			has "$F" "type: Schema.Literal(\"$lit\")," || miss "session.status lost '$lit'"
+		done
+		has "$F" 'next: NonNegativeInt,' || miss "a retry no longer carries next -- a quota wait cannot be told from a blip"
+		has "$F" 'status: Info,' || miss "session.status no longer carries status"
+		pass "session.status is still busy/idle/retry, with retry.next"
+	fi
 
-# 7. Waiting on you. permission.asked / question.asked carry the request id
-#    as `id`; the replies carry it as `requestID`. The plugin keeps the set of
-#    open ids per session and clears the waiting marker when it empties.
-P=packages/schema/src/v1/permission.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	has "$F" 'type: "permission.asked"' || miss "the permission.asked event is renamed"
-	has "$F" 'type: "permission.replied",' || miss "the permission.replied event is renamed"
-	has "$F" 'schema: { sessionID: SessionID, requestID: ID, reply: Reply },' || miss "permission.replied no longer carries sessionID/requestID"
-	pass "permission.asked/replied are unchanged"
-fi
-P=packages/schema/src/v1/question.ts
-F=$(fetch $P)
-if need "$F" $P; then
-	for ev in question.asked question.replied question.rejected; do
-		has "$F" "type: \"$ev\"" || miss "the $ev event is renamed or gone"
-	done
-	has "$F" 'export const Rejected = Schema.Struct({ sessionID: SessionID, requestID: ID })' ||
-		miss "question.rejected no longer carries sessionID/requestID"
-	pass "question.asked/replied/rejected are unchanged"
+	# 6. Sessions: created/updated carry info.parentID, which is how a subagent's
+	#    session is folded into its parent instead of lighting up as a second
+	#    session; deleted ends the slot; session.error carries error.name, and
+	#    MessageAbortedError (the person pressed Esc) is idle, not red.
+	P=packages/schema/src/v1/session.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		for ev in session.created session.updated session.deleted session.error; do
+			has "$F" "type: \"$ev\"," || miss "the $ev event is renamed or gone"
+		done
+		has "$F" 'parentID: optional(SessionID),' || miss "a session no longer carries parentID -- subagents will show as sessions"
+		has "$F" 'info: SessionInfo,' || miss "session events no longer carry info"
+		has "$F" 'namedError("MessageAbortedError"' || miss "MessageAbortedError is renamed -- an Esc will paint the light red"
+		pass "session events, parentID and MessageAbortedError are unchanged"
+	fi
+
+	# 7. Waiting on you. permission.asked / question.asked carry the request id
+	#    as `id`; the replies carry it as `requestID`. The plugin keeps the set of
+	#    open ids per session and clears the waiting marker when it empties.
+	P=packages/schema/src/v1/permission.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'type: "permission.asked"' || miss "the permission.asked event is renamed"
+		has "$F" 'type: "permission.replied",' || miss "the permission.replied event is renamed"
+		has "$F" 'schema: { sessionID: SessionID, requestID: ID, reply: Reply },' || miss "permission.replied no longer carries sessionID/requestID"
+		pass "permission.asked/replied are unchanged"
+	fi
+	P=packages/schema/src/v1/question.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		for ev in question.asked question.replied question.rejected; do
+			has "$F" "type: \"$ev\"" || miss "the $ev event is renamed or gone"
+		done
+		has "$F" 'export const Rejected = Schema.Struct({ sessionID: SessionID, requestID: ID })' ||
+			miss "question.rejected no longer carries sessionID/requestID"
+		pass "question.asked/replied/rejected are unchanged"
+	fi
+else
+	# ---- OpenCode 2.x. The same facts, where the rewrite keeps them. Every path
+	# below was read at v2.0.32; docs/plans/opencode-2-light.md has the design.
+
+	# 1. Where everything lives. 2.0 dropped xdg-basedir for its own copy of the
+	#    same rule (util/src/global-roots.ts): $XDG_DATA_HOME else ~/.local/share,
+	#    $XDG_CONFIG_HOME else ~/.config, with no platform branch -- so the paths
+	#    pc/providers/opencode.py and the installer compute for 1.x hold for 2.x
+	#    too, Windows included. A platform branch appearing here is the 2.x form
+	#    of check 1b's warning.
+	P=packages/util/src/global-roots.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'process.env.XDG_DATA_HOME || (home ? path.join(home, ".local", "share") : undefined)' ||
+			miss "the data root is no longer \$XDG_DATA_HOME else ~/.local/share"
+		has "$F" 'process.env.XDG_CONFIG_HOME || (home ? path.join(home, ".config") : undefined)' ||
+			miss "the config root is no longer \$XDG_CONFIG_HOME else ~/.config"
+		has "$F" 'data: path.join(data!, app),' || miss "the data dir is no longer <data root>/<app> -- opencode.db moved"
+		has "$F" 'config: path.join(config!, app),' || miss "the config dir is no longer <config root>/<app> -- the plugin is installed in the wrong place"
+		if grep -q 'win32\|process\.platform\|APPDATA' "$F"; then
+			miss "global-roots.ts has a platform branch -- Windows paths are no longer ~/.local/share"
+		fi
+		pass "data and config roots are still XDG's, with no platform branch"
+	fi
+	# The app name, and the one override of the config dir. The plugin
+	# directory scanned is the SERVICE's global.config, which is
+	# $OPENCODE_CONFIG_DIR when set and <config root>/opencode otherwise; BLINK
+	# installs into the latter, so a desk that sets the variable is one where
+	# blink.js is not found. Checked so that a second override source is noticed.
+	P=packages/util/src/global.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'const app = "opencode"' || miss "the app directory is no longer 'opencode'"
+		has "$F" 'const { data, cache, config, state, tmp } = roots(app)' || miss "global.ts no longer takes its dirs from global-roots.ts -- re-derive every path"
+		has "$F" 'acquire({ config: process.env.OPENCODE_CONFIG_DIR ?? Path.config })' ||
+			miss "the service's config dir no longer comes from OPENCODE_CONFIG_DIR else Path.config -- re-check where blink.js must go"
+		pass "the dirs are <root>/opencode, config overridable only by OPENCODE_CONFIG_DIR"
+	fi
+
+	# 2. The database, for the activity clock -- see the 1.x check 2 for why WAL
+	#    matters. 2.0 moved the file name out of core into the CLI that starts
+	#    the service (cli/src/database-path.ts); core only opens what it is given,
+	#    resolved against Global data.
+	P=packages/core/src/database/database.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'PRAGMA journal_mode = WAL' || miss "the DB is no longer WAL -- the -wal mtime is no longer where activity shows"
+		has "$F" 'join((yield* Global.Service).data, filename)' || miss "a relative DB name is no longer resolved against the data dir"
+		pass "the DB is opened in WAL mode, under the data dir"
+	fi
+	P=packages/cli/src/database-path.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" '? "opencode.db"' || miss "released 2.x builds no longer write opencode.db"
+		has "$F" 'path.resolve(data, filename)' || miss "the DB is no longer in the data dir"
+		grep -q '\["latest",' "$F" || miss "the release channel list changed -- re-read which builds write opencode.db"
+		pass "released builds still write <data>/opencode.db"
+	fi
+
+	# 3. Plugin discovery. Install writes <config>/opencode/plugin/blink.js.
+	#    2.0 lists {plugin,plugins} in every config dir and keeps a .js or .ts
+	#    file there; the global config dir is one of those dirs; and a lone file
+	#    -- not a package directory -- is loaded as its own server entrypoint
+	#    ("legacy auto-discovery", core/src/plugin/module.ts).
+	P=packages/core/src/plugin/source-directory.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'export const names = ["plugin", "plugins"] as const' || miss "plugins are no longer discovered in plugin/ and plugins/ -- blink.js will not load"
+		has "$F" 'entry.target.endsWith(".js")' || miss "a .js file in plugin/ is no longer picked up"
+		has "$F" 'if (entry.type === "file" && source) return Option.some(entry.target)' || miss "a plain file in plugin/ is no longer a plugin source"
+		pass "plugin/*.js is still auto-discovered"
+	fi
+	P=packages/core/src/config/plugin/source.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'PluginSourceDirectory.discover(fs, entry.path)' || miss "config dirs are no longer scanned for plugins"
+		pass "every config dir is still scanned for plugins"
+	fi
+	P=packages/core/src/config/discovery.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'const globalDirectory = AbsolutePath.make(global.config)' || miss "the global config dir is no longer global.config"
+		has "$F" 'const configDirectories = [...(system ? [system] : []), globalDirectory]' || miss "the global config dir is no longer a config (and so plugin) directory"
+		pass "the global config dir is still scanned"
+	fi
+
+	# 4. The plugin API. 2.0 decodes the module's default export as {id, effect}
+	#    or {id, setup}, effect first. blink.js exports setup and must NOT carry
+	#    an `effect` key, or 2.0 would take it for the Effect-native form. setup
+	#    gets a context whose event.subscribe() is an async iterable of every
+	#    event in the service, and may return a cleanup, which is how blink.js
+	#    stops its subscribe loop when the plugin is reloaded.
+	P=packages/core/src/plugin/module.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'effect: Schema.declare<Plugin["effect"]>((input): input is Plugin["effect"] => typeof input === "function"),' ||
+			miss "the {id, effect} variant of a plugin module changed"
+		has "$F" 'setup: Schema.declare<Parameters<typeof PluginPromise.fromPromise>[0]["setup"]>(' ||
+			miss "a plugin module can no longer be {id, setup} -- blink.js will not load on 2.x"
+		has "$F" 'const plugin = "effect" in value ? value : PluginPromise.fromPromise(value)' ||
+			miss "setup is no longer adapted through PluginPromise.fromPromise"
+		has "$F" '? { server: pathToFileURL(operation.target).href }' ||
+			miss "a lone plugin file is no longer its own server entrypoint -- plugin/blink.js may need a package around it"
+		pass "a default export of {id, setup} still loads, and a lone file is still an entrypoint"
+	fi
+	P=packages/plugin/src/promise/adapter.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'subscribe: (options) =>' || miss "setup's context no longer has event.subscribe(options)"
+		has "$F" 'host.event.subscribe().pipe(' || miss "event.subscribe no longer streams the host's events"
+		has "$F" 'plugin.setup(' || miss "setup is no longer called"
+		has "$F" '(cleanup) => (cleanup ? Effect.promise(() => Promise.resolve(cleanup())) : Effect.void),' ||
+			miss "the function setup returns is no longer called on release -- blink.js's subscribe loop would outlive a reload"
+		pass "setup still gets event.subscribe, and its returned cleanup still runs"
+	fi
+	# Which events reach a plugin at all: the host forwards server events and
+	# rpc.* only, and the server set includes the session, permission and form
+	# definitions the light needs.
+	P=packages/core/src/plugin/host.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'EventManifest.isServer(event) || isRpcEvent(event),' || miss "the host no longer forwards every server event to plugins"
+		pass "plugins still see every server event"
+	fi
+	P=packages/schema/src/event-manifest.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'const coreDefinitions = Event.inventory(...SessionEvent.Definitions)' || miss "session events are no longer core event definitions"
+		has "$F" '...coreDefinitions,' || miss "core (session) events are no longer in the manifest"
+		has "$F" '...Permission.Event.Definitions,' || miss "permission events are no longer in the manifest -- an approval will not light the waiting state"
+		has "$F" '...Form.Event.Definitions,' || miss "form events are no longer in the manifest -- a question will not light the waiting state"
+		pass "session, permission and form events are still server events"
+	fi
+
+	# 5 and 6. The light, from session events. 2.0 has no session.status for
+	#    plugins: the plugin reads execution.started/succeeded/failed/interrupted,
+	#    step.started and tool.called for running and finished, retry.scheduled
+	#    for a quota wait (`at`, the epoch ms the retry fires, where 1.x had
+	#    `next`), created (parentID folds a subagent into its parent; location
+	#    names the project) and deleted. Interrupted's reason decides whether the
+	#    turn is over: user and inactivity end it, shutdown and superseded do not.
+	P=packages/schema/src/session-event.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		for ev in session.created session.deleted session.execution.started session.execution.succeeded \
+			session.execution.failed session.execution.interrupted session.step.started session.tool.called \
+			session.retry.scheduled; do
+			has "$F" "type: \"$ev\"," || miss "the $ev event is renamed or gone"
+		done
+		grep -A1 'const Base = {' "$F" | grep -qF 'sessionID: SessionID,' || miss "session events no longer carry sessionID at the top of data"
+		has "$F" 'parentID: SessionID.pipe(optional),' || miss "session.created no longer carries parentID -- subagents will show as sessions"
+		has "$F" 'location: Location.Ref,' || miss "session.created no longer carries location -- the session's project name is lost"
+		has "$F" 'reason: Schema.Literals(["user", "shutdown", "superseded", "inactivity"])' ||
+			miss "execution.interrupted's reasons changed -- re-check which ones end the turn"
+		has "$F" 'at: NonNegativeInt,' || miss "a retry no longer carries at -- a quota wait cannot be told from a blip"
+		pass "the session events the light reads are unchanged"
+	fi
+	# `at` is absolute, not a delay: measured by reading where it is set.
+	P=packages/core/src/session/runner/retry.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'at: scheduled + input.decision.delay,' || miss "retry.scheduled's at is no longer now + delay (epoch ms)"
+		pass "retry.scheduled's at is still an epoch-ms time"
+	fi
+
+	# 7. Waiting on you. permission.asked carries the request as `id`, and
+	#    replied carries it as `requestID`. Questions are forms in 2.0: created
+	#    carries the whole form (its id and sessionID inside `form`), replied
+	#    and cancelled carry id and sessionID at the top.
+	P=packages/schema/src/permission.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'type: "permission.asked"' || miss "the permission.asked event is renamed"
+		has "$F" 'type: "permission.replied",' || miss "the permission.replied event is renamed"
+		grep -A1 'export const Request = Schema.Struct({' "$F" | grep -qF 'id: ID,' || miss "a permission request no longer carries id"
+		has "$F" 'requestID: ID,' || miss "permission.replied no longer carries requestID"
+		pass "permission.asked/replied are unchanged"
+	fi
+	P=packages/schema/src/form.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		has "$F" 'type: "form.created", schema: { form: Info }' || miss "form.created no longer carries { form }"
+		has "$F" 'type: "form.replied", schema: { id: ID, sessionID: Schema.String' || miss "form.replied no longer carries id and sessionID"
+		has "$F" 'type: "form.cancelled", schema: { id: ID, sessionID: Schema.String }' || miss "form.cancelled no longer carries id and sessionID"
+		pass "form.created/replied/cancelled are unchanged"
+	fi
 fi
 
 # 8. The credential. OpenCode 1.x keeps the Coding Plan key in
@@ -347,6 +581,10 @@ if [ "$MOVED" = yes ]; then
 			miss "the active connection is no longer the first of resolveConnections"
 		pass "the active credential is still the last of Credential.list"
 	fi
+elif [ "$LINE" = 2 ]; then
+	# Every 2.x release carries the migration; a 2.x ref without it is one
+	# where the reader would look for a table that is not there.
+	miss "no credential migration at a 2.x ref -- find where 2.x keeps the plan key"
 else
 	P=packages/opencode/src/auth/index.ts
 	F=$(fetch $P)
@@ -355,6 +593,54 @@ else
 		grep -A1 'type: Schema.Literal("api"),' "$F" | grep -qF 'key: Schema.String,' ||
 			miss "an api credential is no longer {type: \"api\", key}"
 		pass "the key is still in auth.json as {type: \"api\", key}"
+	fi
+fi
+
+# 8d. The token budget's tables (pc/providers/opencode_budget.py), 2.x only:
+#     1.x keeps messages in `message`, which no check here reads. The reader
+#     selects session_message's id, time_created, type and data, joins
+#     session_v2 on fork_session_id and time_created to skip a fork's copied
+#     messages, and reads $.model.providerID and $.tokens from data.
+# shellcheck disable=SC2016
+if [ "$LINE" = 2 ]; then
+	P=packages/core/src/database/schema.gen.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		# -F, and `|| true`: without -F, grep reads \` as a start-of-buffer
+		# anchor, and the first run of this matched nothing; and under set -e
+		# a table that is gone ended the script there, with no FAIL line.
+		msg=$(grep -F -A8 'CREATE TABLE \`session_message\` (' "$F" || true)
+		for col in '\`id\` text PRIMARY KEY,' '\`session_id\` text NOT NULL,' '\`type\` text NOT NULL,' '\`time_created\` integer NOT NULL,' '\`data\` text NOT NULL,'; do
+			printf '%s' "$msg" | grep -qF "$col" || miss "session_message no longer has $col -- the token budget reads it"
+		done
+		ses=$(grep -F -A40 'CREATE TABLE \`session_v2\` (' "$F" || true)
+		for col in '\`fork_session_id\` text,' '\`time_created\` integer NOT NULL,'; do
+			printf '%s' "$ses" | grep -qF "$col" || miss "session_v2 no longer has $col -- the budget's fork rule joins on it"
+		done
+		pass "session_message and session_v2 still have the columns the budget reads"
+	fi
+	P=packages/schema/src/session-message.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		grep -A3 'export const Assistant = Schema.Struct({' "$F" | grep -qF 'type: Schema.tag("assistant"),' ||
+			miss "an assistant message is no longer type 'assistant'"
+		has "$F" 'tokens: TokenUsage.Info.pipe(optional),' || miss "an assistant message no longer carries tokens"
+		pass "an assistant message still carries model and tokens"
+	fi
+	P=packages/schema/src/token-usage.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		for k in 'input: Schema.Finite,' 'output: Schema.Finite,' 'reasoning: Schema.Finite,' 'read: Schema.Finite,' 'write: Schema.Finite,'; do
+			has "$F" "$k" || miss "tokens no longer have $k -- message_total sums it"
+		done
+		pass "tokens are still input, output, reasoning, cache.read, cache.write"
+	fi
+	P=packages/schema/src/model.ts
+	F=$(fetch $P)
+	if need "$F" $P; then
+		grep -A3 'export const Ref = Schema.Struct({' "$F" | grep -qF 'providerID: Provider.ID,' ||
+			miss "a model ref no longer carries providerID -- plan traffic cannot be kept off the budget"
+		pass "a message's model still names its providerID"
 	fi
 fi
 

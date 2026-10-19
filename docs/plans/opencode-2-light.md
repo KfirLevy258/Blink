@@ -1,8 +1,11 @@
 # The activity light under OpenCode 2.0
 
-Status: design, 2026-10-19. Not built. Read `docs/plans/opencode.md` first;
-this changes only how OpenCode's live state reaches `~/.blink/state-opencode`,
-and nothing downstream of the slot files.
+Status: A built 2026-10-20 and run inside a real 2.0.32 service (running,
+your turn, waiting and its clearing, interrupt, long-retry failure, and the
+exit tombstone under `--standalone`); B deferred -- see "What building it
+changed" at the end, which supersedes this design where they disagree. Read
+`docs/plans/opencode.md` first; this changes only how OpenCode's live state
+reaches `~/.blink/state-opencode`, and nothing downstream of the slot files.
 
 ## Why this exists
 
@@ -179,4 +182,41 @@ their own `execution.*` events.
 - **v1 releases before 1.18.29**, which do not know the object form. They
   keep loading the named export, as today. Dual-shape files have an open bug
   on 1.18.31 (#50172); the lab run on 1.19.3 decides whether the named export
-  needs to move to a second file for that range.
+  needs to move to a second file for that range. (Wrong; see below.)
+
+## What building it changed
+
+Measured in a real 2.0.32 background service with a mock model, 2026-10-20,
+and from a review of the 2.0.32 and 1.x sources:
+
+- **No location filter: one tracker per process, deduplicated by event id.**
+  The `session.execution.*` events -- running and every way a turn ends --
+  carry no `location` at all (the bus attaches one only when a location
+  service is in context, `core/src/bus.ts` publish). Filtering on it would
+  have dropped exactly the events the light is made of. Every copy of the
+  plugin feeds one tracker on `globalThis`, which drops an event id it has
+  handled; only the types the tracker reads enter that set, because text
+  deltas would otherwise churn it in seconds.
+- **The tracker is keyed by the file's own digest.** 2.0 re-imports a plugin
+  whose mtime changed, and with a fixed key the new code inherited the old
+  tracker. `blink update` now takes effect without a service restart.
+- **One 'exit' listener per process**, on `globalThis`: 2.0 evaluates the
+  file per location and per reload.
+- **The stream is resubscribed** with backoff when it ends without an abort:
+  one event that fails to encode ends every subscriber's stream at once.
+- **1.x reads the object form from 1.3.4**, not 1.18.29 (`readV1Plugin(...,
+  "detect")` first appears in v1.3.4). Before that, 1.x calls every export as
+  a function: 1.2.11-1.3.3 show "Failed to load plugin" beside a working
+  light, and up to 1.2.10 the default object breaks OpenCode's plugin hooks.
+  Decided 2026-10-20: OpenCode 1.3.3 and older are not supported.
+- **The default must stay a plain object.** A function carrying `id`,
+  `server` and `setup` would have loaded once on every 1.x, but 2.0's schema
+  (effect 4.0.1) rejects any value whose typeof is not "object".
+- **Subagents emit their own `session.execution.*`** (`tool/plugin/
+  subagent.ts`), and `superseded` is in the schema but 2.0.32 never emits it.
+- **B is deferred.** It cannot show waiting, the `session_v2` columns it would
+  read were added five migrations in five weeks before 2.0.32, and the plan's
+  "no slot in the last minute" trigger would have turned a live waiting slot
+  into running after 60 s (a waiting slot is never rewritten). If it is ever
+  built, the plugin's slot must win whenever one exists, as in Codex's union
+  (`pc/providers/codex_cli.py`).

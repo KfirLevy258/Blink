@@ -133,14 +133,17 @@
 // run in the config directory -- network, a registry, a lockfile -- for the
 // sake of three file writes.
 //
-// EXACTLY ONE EXPORT. OpenCode loads every exported function in this file as a
-// plugin of its own, so a helper exported for a test would be called with the
-// plugin input and its return value taken as a set of hooks. The tests reach
-// everything through the one factory below.
+// EXACTLY TWO EXPORTS: the 1.x factory by name, and the default object both
+// lines read (see the end of the file). OpenCode releases that fall back to
+// calling every export load the named one, so a helper exported for a test
+// would be called with the plugin input and its return value taken as a set
+// of hooks. The tests reach everything through these two.
 
+import * as crypto from "node:crypto"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 
 // The shim's session-id pattern, verbatim: tools/blink-hook.sh, _ident. The
 // first character is alphanumeric because `.` and `..` are otherwise valid
@@ -334,25 +337,36 @@ function renameRetrying(from, to) {
 // a shared "": third review, 2026-10-19 -- every such instance landed on the
 // one key and each new one evicted the last, so at exit only the newest
 // ended its sessions and the rest held theirs on the panel.
+//
+// ONE PER PROCESS, not per module. OpenCode 2.0 evaluates this file afresh for
+// every project location, every reload and every location that comes back
+// after its idle eviction (core/src/plugin/supervisor.ts, a supervisor per
+// location; config/plugin/source.ts, the file's mtime in the revision). A
+// listener per evaluation would reach Node's limit of ten in a service that
+// has seen ten projects -- the stderr warning above -- and would pin every
+// old evaluation in memory (review, 2026-10-20). So the map and its one
+// listener live on globalThis, and a fresh evaluation finds them there.
 const MAX_INSTANCES = 64
-const enders = new Map()
-quietly(() => {
-  process.once("exit", () => {
-    for (const end of enders.values()) quietly(end)
-  })
-})
+const ENDERS_KEY = Symbol.for("blink.opencode.enders")
+const enders = (() => {
+  let m = globalThis[ENDERS_KEY]
+  if (!(m instanceof Map)) {
+    m = new Map()
+    globalThis[ENDERS_KEY] = m
+    quietly(() => {
+      process.once("exit", () => {
+        for (const end of m.values()) quietly(end)
+      })
+    })
+  }
+  return m
+})()
 
-export const BlinkStatePlugin = async (input) => {
-  // The directory OpenCode was started in. Used only as the fallback name for
-  // a session whose own info has not been seen -- a session resumed in a
-  // process that never saw it created. Under `opencode serve` this is the
-  // server's directory, not necessarily the session's, so the session's own
-  // info.directory always wins when there is one.
-  let fallbackDir = null
-  quietly(() => {
-    if (input && typeof input.directory === "string") fallbackDir = input.directory
-  })
-
+// Everything one plugin instance knows and writes, for either OpenCode line:
+// the 1.x factory below makes one per instance, and 2.0 shares one per
+// process (see THE 2.0 SHAPE further down). `fallbackDir` is the name of last
+// resort for a session whose own directory has not been seen.
+function makeTracker(fallbackDir) {
   // sid -> what this process knows about the session. Insertion-ordered, which
   // is what makes evicting the oldest a matter of taking the first key.
   const sessions = new Map()
@@ -745,6 +759,210 @@ export const BlinkStatePlugin = async (input) => {
     stillRunning(rootOf(sid))
   }
 
+  // --- OpenCode 2.0 ----------------------------------------------------------
+
+  // Event ids already handled. Every location's copy of the plugin receives
+  // every event (see THE 2.0 SHAPE), and they all feed this one tracker, so
+  // the first copy to deliver an event handles it and the rest are dropped
+  // here. Only the types below are remembered: the stream also carries every
+  // text and reasoning delta, which would push the window through in seconds
+  // and let a lagging copy replay an execution.started over a Stop (review,
+  // 2026-10-20). Bounded like the maps; at a few events per turn, an id
+  // evicted after this many has long since been delivered to every copy.
+  const seen = new Set()
+  const MAX_SEEN = 4096
+  const V2_TYPES = new Set([
+    "session.created",
+    "session.deleted",
+    "session.execution.started",
+    "session.execution.succeeded",
+    "session.execution.failed",
+    "session.execution.interrupted",
+    "session.step.started",
+    "session.tool.called",
+    "session.retry.scheduled",
+    "permission.asked",
+    "permission.replied",
+    "form.created",
+    "form.replied",
+    "form.cancelled",
+  ])
+
+  // The directory a 2.0 event happened in, kept for the slot's name. Taken
+  // from session.created's own location first, then from any event's
+  // envelope, and never overwritten once known: a session does not move
+  // between directories except by session.moved, which nothing here reads.
+  //
+  // A slot already written without a name is let through the refresh
+  // throttle on the next running event, so the name lands at once rather
+  // than up to REFRESH_MS later. Measured in a real 2.0.32 service: the first
+  // session in a project boots that project's location -- and this plugin
+  // with it -- so session.created has already gone by, execution.started
+  // carries no location, and the name arrived only with the next step's
+  // envelope, eight seconds after the slot.
+  function noteDir(sid, dir) {
+    const r = rec(sid)
+    if (r.dir || typeof dir !== "string") return
+    r.dir = dir
+    if (r.slot) r.lastWrite = 0
+  }
+
+  // The mapping is in docs/plans/opencode-2-light.md, "A. One plugin file,
+  // both shapes". It differs from 1.x's in two ways that matter here:
+  //   - one terminal event per turn (execution.succeeded / failed /
+  //     interrupted), so there is no error-then-idle latch to inherit;
+  //   - execution.started fires once per turn, not per model step, so the
+  //     running clock is kept fresh by the step and tool events instead.
+  function onV2Event(event) {
+    if (!event || typeof event !== "object") return
+    const type = event.type
+    const d = event.data
+    if (!V2_TYPES.has(type) || !d || typeof d !== "object") return
+    if (typeof event.id === "string") {
+      if (seen.has(event.id)) return
+      if (seen.size >= MAX_SEEN) seen.delete(seen.keys().next().value)
+      seen.add(event.id)
+    }
+    const where = event.location && typeof event.location === "object" ? event.location.directory : null
+
+    if (type === "form.created") {
+      // A form names its session inside `form`. "global" is the sentinel
+      // owner MCP elicitation uses for a form that belongs to no session
+      // (packages/schema/src/form.ts); it passes ID_RE, and a slot called
+      // global.state would be a session that does not exist.
+      const f = d.form
+      const sid = f && typeof f === "object" ? validId(f.sessionID) : null
+      if (!sid || sid === "global") return
+      noteDir(sid, where)
+      onAsked(sid, f.id)
+      return
+    }
+    const sid = validId(d.sessionID)
+    if (!sid || sid === "global") return
+    switch (type) {
+      case "session.created": {
+        const loc = d.location && typeof d.location === "object" ? d.location.directory : null
+        noteDir(sid, loc || where)
+        onInfo({ id: sid, parentID: d.parentID }, true)
+        return
+      }
+      case "session.deleted":
+        onDeleted({ id: sid })
+        return
+    }
+    noteDir(sid, where)
+    if (isChild(sid)) {
+      const root = rootOf(sid)
+      switch (type) {
+        case "session.execution.started":
+        case "session.step.started":
+        case "session.tool.called":
+          agentStart(sid)
+          stillRunning(root)
+          return
+        case "session.retry.scheduled":
+          agentStart(sid)
+          if (isLongRetryAt(d.at)) retryFail(root)
+          else stillRunning(root)
+          return
+        case "session.execution.succeeded":
+        case "session.execution.failed":
+          agentStop(sid)
+          return
+        case "session.execution.interrupted":
+          if (endsTurn(d.reason)) agentStop(sid)
+          return
+      }
+    } else {
+      const r = rec(sid)
+      switch (type) {
+        case "session.execution.started":
+          r.retryFailed = false
+          writeSlot(sid, "UserPromptSubmit")
+          syncMarker(sid)
+          return
+        case "session.step.started":
+        case "session.tool.called":
+          // stillRunning() will not repaint a finished turn, and lifts a
+          // long-retry failure once the retry has fired and a step begins.
+          stillRunning(sid)
+          return
+        case "session.retry.scheduled":
+          if (isLongRetryAt(d.at)) retryFail(sid)
+          else stillRunning(sid)
+          return
+        case "session.execution.succeeded":
+          finishTurn(sid, "Stop")
+          return
+        case "session.execution.failed":
+          finishTurn(sid, "StopFailure")
+          return
+        case "session.execution.interrupted":
+          if (endsTurn(d.reason)) finishTurn(sid, "Interrupt")
+          return
+      }
+    }
+    switch (type) {
+      case "permission.asked":
+        onAsked(sid, d.id)
+        return
+      case "permission.replied":
+        onAnswered(sid, d.requestID)
+        return
+      case "form.replied":
+      case "form.cancelled":
+        onAnswered(sid, d.id)
+        return
+    }
+  }
+
+  // A finished turn is asking nobody anything, whatever was left open.
+  function finishTurn(sid, event) {
+    rec(sid).retryFailed = false
+    dropRequests((v) => v.root === sid)
+    syncMarker(sid)
+    writeSlot(sid, event)
+  }
+
+  // "user" is Esc, "inactivity" OpenCode giving up on a turn nobody answered:
+  // both leave the session waiting on the person. "shutdown" keeps the turn
+  // claimed so it resumes when the service comes back, and "superseded" is a
+  // new prompt replacing the running one -- its own execution.started
+  // follows -- so neither ends anything the panel should show
+  // (packages/core/src/session/execution.ts).
+  function endsTurn(reason) {
+    return reason === "user" || reason === "inactivity"
+  }
+
+  // session.retry.scheduled carries the epoch ms the retry fires at
+  // (packages/core/src/session/runner/retry.ts), where 1.x carried `next`.
+  function isLongRetryAt(at) {
+    return typeof at === "number" && Number.isFinite(at) && at - Date.now() > LONG_RETRY_MS
+  }
+
+  // Every top-level session this tracker wrote a slot for, ended. For the
+  // 'exit' listener; see note 3 at the top.
+  function endAll() {
+    for (const [sid, r] of [...sessions]) {
+      if (!r.parent && r.slot) quietly(() => sessionEnd(sid))
+    }
+  }
+
+  return { onEvent, onTool, onV2Event, endAll }
+}
+
+export const BlinkStatePlugin = async (input) => {
+  // The directory OpenCode was started in. Used only as the fallback name for
+  // a session whose own info has not been seen -- a session resumed in a
+  // process that never saw it created. Under `opencode serve` this is the
+  // server's directory, not necessarily the session's, so the session's own
+  // info.directory always wins when there is one.
+  let fallbackDir = null
+  quietly(() => {
+    if (input && typeof input.directory === "string") fallbackDir = input.directory
+  })
+  const tracker = makeTracker(fallbackDir)
+
   // The process exiting is the session ending -- see note 3 at the top. The
   // top-level sessions this instance wrote a slot for get the SessionEnd
   // treatment, from the one listener registered at module scope above --
@@ -758,22 +976,153 @@ export const BlinkStatePlugin = async (input) => {
     const key = fallbackDir === null ? Symbol("no directory") : fallbackDir
     enders.delete(key)
     while (enders.size >= MAX_INSTANCES) enders.delete(enders.keys().next().value)
-    enders.set(key, () => {
-      for (const [sid, r] of [...sessions]) {
-        if (!r.parent && r.slot) quietly(() => sessionEnd(sid))
-      }
-    })
+    enders.set(key, tracker.endAll)
   })
 
   return {
     event: async (arg) => {
-      quietly(() => onEvent(arg && arg.event))
+      quietly(() => tracker.onEvent(arg && arg.event))
     },
     "tool.execute.before": async (hookInput) => {
-      quietly(() => onTool(hookInput))
+      quietly(() => tracker.onTool(hookInput))
     },
     "tool.execute.after": async (hookInput) => {
-      quietly(() => onTool(hookInput))
+      quietly(() => tracker.onTool(hookInput))
     },
   }
 }
+
+// THE 2.0 SHAPE. OpenCode 2.0 runs one background service per user, shared by
+// every TUI, `opencode run` and the Desktop app, and plugins run inside it.
+// It loads this file only through a default export of {id, setup}
+// (packages/core/src/plugin/module.ts), calls setup once per active project
+// location, and hands each call the whole service's event stream -- every
+// location's events, not just its own (core/src/plugin/host.ts). See
+// docs/plans/opencode-2-light.md.
+//
+// ONE TRACKER PER PROCESS. With a tracker per call, N open projects would be N
+// writers racing on the same slots, and a permission asked in one copy and
+// answered in another would leave the waiting marker behind. Filtering each
+// copy to its own location would fix that only for events that carry one,
+// and an event published outside a location carries none
+// (core/src/bus.ts, publish) -- and measured in a real 2.0.32 service, the
+// execution.* events, the very ones that say running and finished, carry
+// none. So every copy feeds the one tracker below, kept on globalThis because
+// OpenCode imports the file afresh per location, and the tracker drops an
+// event id it has already handled.
+//
+// THE TRACKER FOLLOWS THE FILE. `blink update` replaces blink.js under a
+// running service, and 2.0 re-imports it (the file's mtime is part of the
+// plugin's revision, config/plugin/source.ts). With a fixed key the new
+// module found the old module's tracker and went on running the old code
+// until the service restarted (review, 2026-10-20). The key is therefore the
+// file's own digest: a new file gets a new tracker, the same file read again
+// by another location gets the same one. A file that cannot be read for its
+// digest -- not a case anyone has seen -- shares one fixed key instead,
+// which is the old behaviour and still correct for a single version.
+//
+// The pid in a 2.0 slot is the service's, which outlives every TUI, and
+// closing a TUI fires nothing. A 2.0 slot therefore ends on session.deleted,
+// on the service exiting (the 'exit' listener, under one key for all 2.0
+// trackers so the newest replaces its predecessors), when the daemon finds
+// the service's pid dead, or by the one-hour abandonment sweep -- what 1.x
+// already gets for a TUI killed with ctrl-c.
+const TRACKER_KEY = Symbol.for("blink.opencode.tracker")
+const V2_ENDER_KEY = Symbol.for("blink.opencode.tracker.ender")
+
+function fileRevision() {
+  try {
+    const body = fs.readFileSync(fileURLToPath(import.meta.url))
+    return crypto.createHash("sha256").update(body).digest("hex")
+  } catch {
+    return "unreadable"
+  }
+}
+
+const REVISION = fileRevision()
+
+function sharedTracker() {
+  const held = globalThis[TRACKER_KEY]
+  if (held && held.revision === REVISION && held.tracker) return held.tracker
+  const tracker = makeTracker(null)
+  globalThis[TRACKER_KEY] = { revision: REVISION, tracker }
+  quietly(() => {
+    enders.delete(V2_ENDER_KEY)
+    while (enders.size >= MAX_INSTANCES) enders.delete(enders.keys().next().value)
+    enders.set(V2_ENDER_KEY, tracker.endAll)
+  })
+  return tracker
+}
+
+// A stream that ends without our abort is resubscribed, after a wait that
+// doubles from a second to half a minute and resets once events flow again.
+// 2.0 encodes every event once per subscriber, and one encode failure ends the
+// stream for every copy at once (packages/plugin/src/promise/adapter.ts,
+// event.subscribe); without this the light went dark until something happened
+// to reload the plugin (review, 2026-10-20).
+const RESUBSCRIBE_MIN_MS = 1000
+const RESUBSCRIBE_MAX_MS = 30 * 1000
+
+async function blinkV2(ctx) {
+  const controller = new AbortController()
+  quietly(() => {
+    const tracker = sharedTracker()
+    const signal = controller.signal
+    // The abort listener goes when the timer fires, not only on abort: one
+    // left per resubscribe kept its closure for the life of the setup, and a
+    // service whose stream failed now and then grew without bound (measured
+    // by the test driver's leak2 mode, 2026-10-20: 13 resubscribes, 13
+    // listeners).
+    const pause = (ms) =>
+      new Promise((resolve) => {
+        const onAbort = () => {
+          clearTimeout(t)
+          resolve()
+        }
+        const t = setTimeout(() => {
+          signal.removeEventListener("abort", onAbort)
+          resolve()
+        }, ms)
+        signal.addEventListener("abort", onAbort, { once: true })
+      })
+    // Not awaited: setup must return for the plugin to finish loading, and the
+    // loop lives until cleanup aborts it.
+    ;(async () => {
+      let wait = RESUBSCRIBE_MIN_MS
+      while (!signal.aborted) {
+        try {
+          for await (const event of ctx.event.subscribe({ signal })) {
+            wait = RESUBSCRIBE_MIN_MS
+            quietly(() => tracker.onV2Event(event))
+          }
+        } catch {
+          // Deliberately empty: resubscribed below. See SILENCE.
+        }
+        if (signal.aborted) return
+        await pause(wait)
+        wait = Math.min(wait * 2, RESUBSCRIBE_MAX_MS)
+      }
+    })().catch(() => {})
+  })
+  return () => {
+    quietly(() => controller.abort())
+  }
+}
+
+// What both lines load. 1.x from 1.3.4 detects a default export carrying
+// `server` and calls that once, in preference to the named export
+// (packages/opencode/src/plugin/index.ts, applyPlugin; first in v1.3.4); 2.0
+// takes `setup` and ignores the extra key, because its module schema is an
+// ordinary struct, which keeps only the properties it names
+// (core/src/plugin/module.ts). There must be no `effect` key: 2.0 tries that
+// variant first. And it must be a plain object, not a function carrying
+// these keys: 2.0's schema rejects anything whose typeof is not "object"
+// (effect 4.0.1, SchemaAST.ts).
+//
+// OpenCode 1.3.3 and older are NOT supported. They call every export as a
+// function: from 1.2.11 the default object fails with a "Failed to load
+// plugin" message beside a working light, and up to 1.2.10, with no catch
+// around the loop, it breaks OpenCode's plugin hooks altogether. Decided
+// 2026-10-20 rather than have the installer pick a file per version; the
+// README states the minimum.
+export default { id: "blink", server: BlinkStatePlugin, setup: blinkV2 }

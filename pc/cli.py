@@ -610,8 +610,11 @@ class Desk(NamedTuple):
         """The tools whose sessions can light the pip on this desk.
 
         Codex from its own session log, whatever its hooks are doing;
-        OpenCode only through our plugin, because it keeps session state in
-        memory and nowhere on disk (docs/plans/opencode.md).
+        OpenCode only through our plugin: 1.x keeps session state in memory
+        and nowhere on disk (docs/plans/opencode.md), and 2.0, which does
+        write run state to its database, still holds permission prompts --
+        the state the light exists for -- in memory only
+        (docs/plans/opencode-2-light.md).
         """
         return [n for n, on in (("Codex", self.codex),
                                 ("OpenCode",
@@ -2461,7 +2464,11 @@ def _announce():
         print("             you. The OpenCode plugin step below says what it")
         print("             records, and what Blink sends on OpenCode's behalf.")
         print(f"  Creates    {opencode.state_dir()}")
-        print("             one small file per open OpenCode session.")
+        # "Recent", not "open": under OpenCode 2.0 the sessions live in one
+        # background service that outlives every window, and closing a
+        # window ends nothing, so a slot stays until the session is deleted,
+        # the service stops, or the hour-long sweep takes it.
+        print("             one small file per recent OpenCode session.")
     print(f"  Changes    {settings_path()}")
     # This list has to stay exactly true. Install asks nothing, so the
     # disclosure is the only thing standing between us and silently editing a
@@ -3644,6 +3651,20 @@ def _opencode_lines(bridge_running=False, now=None, others_report=True):
             out.append("OpenCode    plugin installed, "
                        + (f"{n} live session{'s' if n != 1 else ''}"
                           if n else "no live sessions"))
+            # Nothing written by the plugin in the last hour -- not a slot,
+            # not a tombstone -- yet OpenCode's own database says it was
+            # used: the plugin is installed and not running.
+            # That is how OpenCode 2.0 left the light dark for five weeks --
+            # it skips a plugin it cannot load with a log warning only, and
+            # this line said "no live sessions" throughout. A restart is
+            # the one thing the person can do; a service started before the
+            # file existed is the likeliest cause we cannot rule out.
+            if (not n and not opencode.plugin_wrote_since(now - 3600)
+                    and opencode.recent_v2_sessions(now, within_s=3600)):
+                out.append("            but OpenCode was used in the last"
+                           " hour and the plugin reported nothing --")
+                out.append("            restart OpenCode (`opencode service"
+                           " restart`) so it loads the plugin.")
     elif os.path.lexists(target):
         out.append(f"OpenCode    plugin not installed: {target} is not"
                    " Blink's, so it was left alone")

@@ -366,7 +366,8 @@ def make_message_db(data_dir, v1=(), v2=None, sessions=(), name="opencode.db",
 
     `v1` rows go in a 1.x `message` table (always created); `v2` rows, when
     not None, in 2.0's session_message, with `sessions` as session_v2 rows
-    (id, fork_session_id, time_created_ms). `wal` False leaves no -wal or
+    (id, fork_session_id, time_created_ms), optionally with a fourth item,
+    the parent session id of a subagent's session. `wal` False leaves no -wal or
     -shm behind -- a closed OpenCode -- so a test can prove the reader does
     not create them.
     """
@@ -382,12 +383,15 @@ def make_message_db(data_dir, v1=(), v2=None, sessions=(), name="opencode.db",
             [(m, s, t, t, d) for m, s, t, d in v1])
         if v2 is not None:
             con.executescript(SESSION_TABLES_V2)
-            for sid, fork, t in sessions:
+            for row in sessions:
+                sid, fork, t = row[:3]
+                parent = row[3] if len(row) > 3 else None
                 con.execute(
-                    "INSERT INTO session_v2 (id, project_id, fork_session_id,"
-                    " slug, directory, version, time_created, time_updated)"
-                    " VALUES (?, 'prj', ?, 'slug', '/proj', '2', ?, ?)",
-                    (sid, fork, t, t))
+                    "INSERT INTO session_v2 (id, project_id, parent_id,"
+                    " fork_session_id, slug, directory, version,"
+                    " time_created, time_updated)"
+                    " VALUES (?, 'prj', ?, ?, 'slug', '/proj', '2', ?, ?)",
+                    (sid, parent, fork, t, t))
             for i, r in enumerate(v2):
                 con.execute(
                     "INSERT INTO session_message (id, session_id, type, seq,"

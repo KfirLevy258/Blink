@@ -100,6 +100,38 @@ made=$(cd "$WORK/home" && find . -mindepth 1 -print)
 [ -z "$made" ] || fail "wrote into a HOME with no state directory: $made"
 ok "writes nothing, and creates nothing, when the state directory is absent"
 
+# 3c. Step 3 for OpenCode 2.0. There the plugin runs inside one background
+#     service per user, and the service exiting is every session it held
+#     ending -- from the single ender the 2.0 tracker keeps under its own key
+#     on globalThis, not from a 1.x instance's. A service going away without
+#     it leaves "your turn" up until the pid check or the hour.
+rm -rf "${WORK:?}/home"
+mkdir -p "$WORK/home/.blink"
+mkdir "$DIR"
+chmod 700 "$DIR"
+HOME="$WORK/home" USERPROFILE="$WORK/home" \
+	node "$DRIVER" exit2 >"$WORK/out.txt" 2>"$WORK/err.txt" ||
+	fail "2.0 exit scenario failed: $(cat "$WORK/err.txt")"
+[ -s "$WORK/out.txt" ] && fail "printed to stdout on 2.0 exit: $(cat "$WORK/out.txt")"
+[ -s "$WORK/err.txt" ] && fail "printed to stderr on 2.0 exit: $(cat "$WORK/err.txt")"
+[ -e "$DIR/ses_v2exit.state" ] && fail "the 2.0 slot outlived the process"
+[ -e "$DIR/ses_v2exit" ] && fail "the 2.0 agent directory outlived the process"
+[ -e "$DIR/ses_v2exit.ended" ] || fail "no 2.0 tombstone after exit: $(ls -a "$DIR")"
+[ -e "$DIR/ses_v2exitkid.ended" ] && fail "a 2.0 subagent got a tombstone of its own"
+ok "2.0: exit ends the service's sessions and leaves tombstones"
+
+# 3d. Step 3b for 2.0: a service still running across `blink uninstall`.
+rm -rf "${WORK:?}/home"
+mkdir -p "$WORK/home"
+HOME="$WORK/home" USERPROFILE="$WORK/home" \
+	node "$DRIVER" exit2 >"$WORK/out.txt" 2>"$WORK/err.txt" ||
+	fail "2.0 exit scenario without a state directory failed: $(cat "$WORK/err.txt")"
+[ -s "$WORK/out.txt" ] && fail "2.0 printed to stdout without a state dir: $(cat "$WORK/out.txt")"
+[ -s "$WORK/err.txt" ] && fail "2.0 printed to stderr without a state dir: $(cat "$WORK/err.txt")"
+made=$(cd "$WORK/home" && find . -mindepth 1 -print)
+[ -z "$made" ] || fail "2.0 wrote into a HOME with no state directory: $made"
+ok "2.0: writes nothing, and creates nothing, when the state directory is absent"
+
 # 4. The marker is the first line, byte for byte: the installer refuses to
 #    touch a blink.js without it, so a reworded first line would make every
 #    installed copy look like somebody else's file.
@@ -121,5 +153,21 @@ ok "imports node: builtins only"
 grep -nE 'console\.|process\.(stdout|stderr)' "$ROOT/tools/blink-opencode.js" &&
 	fail "the plugin has a code path that prints"
 ok "has no code path that prints"
+
+# 7. Exactly two exports, the default one a literal object with no `effect`.
+#    The driver checks the loaded module; this checks the source, so that a
+#    second `export` cannot hide behind a re-export the runtime folds away.
+#    2.0 skips a module without {id, setup} with only a log warning -- how
+#    2.0.0 left the light dark for five weeks -- and it tries an `effect` key
+#    before `setup`, so one there would replace the whole 2.0 path.
+n=$(grep -c '^export ' "$ROOT/tools/blink-opencode.js" || true)
+[ "$n" -eq 2 ] || fail "wanted exactly 2 top-level exports, found $n"
+defaults=$(grep '^export default {' "$ROOT/tools/blink-opencode.js" || true)
+[ "$(printf '%s\n' "$defaults" | grep -c .)" -eq 1 ] ||
+	fail "wanted one 'export default {' line, got: $defaults"
+case $defaults in
+*effect:*) fail "the default export has an effect key: $defaults" ;;
+esac
+ok "exports the 1.x factory and one default object, with no effect key"
 
 printf 'opencode plugin: all checks passed\n'

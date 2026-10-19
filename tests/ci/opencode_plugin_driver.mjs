@@ -7,6 +7,12 @@
 //                                                      then exit
 //   node tests/ci/opencode_plugin_driver.mjs nodir     two instances with no
 //                                                      directory, then exit
+//   node tests/ci/opencode_plugin_driver.mjs exit2     one OpenCode 2.0 turn,
+//                                                      then exit
+//   node tests/ci/opencode_plugin_driver.mjs fixture2  `fixture`'s desk, built
+//                                                      from 2.0 events
+//   node tests/ci/opencode_plugin_driver.mjs leak2     the resubscribe leak
+//                                                      alone (also in `check`)
 //
 // Run with HOME pointed at a throwaway directory: the plugin writes into
 // ~/.blink/state-opencode and nowhere else, and this checks that it does.
@@ -22,6 +28,12 @@
 // {tool, sessionID, callID} plus an output object carrying the arguments.
 // Every payload below carries fields the plugin must be seen NOT to keep --
 // a command, a question, an error body -- and `check` greps for them.
+//
+// OpenCode 2.0 drives the same file through its default export instead: one
+// `setup(ctx)` per project location, each handed the whole service's event
+// stream as `ctx.event.subscribe({signal})`, an async iterable of
+// {id, created, type, location?, data}. The 2.0 half of this driver fakes that
+// stream with channel() below; see THE 2.0 SHAPE in the plugin.
 //
 // `check` prints nothing on success. tests/ci/check_opencode_plugin.sh holds
 // it to that, because the plugin's own silence is one of the things checked:
@@ -44,7 +56,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 // check fail: a checker nobody has seen fail is not known to check anything.
 const PLUGIN = process.env.BLINK_OPENCODE_PLUGIN || path.join(HERE, "..", "..", "tools", "blink-opencode.js")
 const DIR = path.join(os.homedir(), ".blink", "state-opencode")
-const SECRETS = ["swordfish", "rm -rf", "Which colour", "secret-body", "/x/y/"]
+const SECRETS = ["swordfish", "rm -rf", "Which colour", "secret-body", "hunter2", "/x/y/"]
 
 // --- trap every byte the plugin might print --------------------------------
 
@@ -71,17 +83,54 @@ function fail(msg) {
   failures.push(msg)
 }
 
+// The 2.0 entry point runs a loop setup never awaits; a rejection escaping it
+// would be printed by node into whatever the service logs to, and under a
+// stricter runtime would end the process. Recorded as a failure rather than
+// left to node's default, so it is reported with the rest.
+process.on("unhandledRejection", (e) => fail(`unhandled rejection: ${e && e.stack ? e.stack : e}`))
+
 // --- the plugin, driven ----------------------------------------------------
 
+// The exports, held to exactly what both OpenCode lines load, because each
+// way of getting them wrong has a cost nobody sees:
+//   - Exactly two. 1.x releases that fall back to calling every export would
+//     call any third one as a plugin factory.
+//   - `default` a plain object. 2.0's module schema rejects anything whose
+//     typeof is not "object" (effect 4.0.1, SchemaAST.ts), so a function
+//     carrying the same keys is not loaded at all.
+//   - `id` and `setup` on it. 2.0 skips a module without {id, setup} with
+//     nothing but a log warning in a service log nobody reads -- which is how
+//     2.0.0 left the light dark for five weeks.
+//   - `server` the 1.x factory itself: 1.x from 1.3.4 calls that in
+//     preference to the named export.
+//   - No `effect`: 2.0 tries that variant first, and it would win over setup.
+//   - No `tui`: a default carrying both `tui` and `server` throws on 1.x.
 const mod = await import(pathToFileURL(PLUGIN).href)
-const exported = Object.keys(mod)
-if (exported.length !== 1 || typeof mod[exported[0]] !== "function") {
-  // OpenCode calls EVERY exported function as a plugin factory.
-  untrap()
-  realErr(`FAIL the plugin must export exactly one function, got ${JSON.stringify(exported)}\n`)
-  process.exit(1)
+{
+  const exported = Object.keys(mod).sort()
+  const d = mod.default
+  const problems = []
+  if (JSON.stringify(exported) !== JSON.stringify(["BlinkStatePlugin", "default"])) {
+    problems.push(`the plugin must export exactly BlinkStatePlugin and default, got ${JSON.stringify(exported)}`)
+  } else {
+    if (typeof mod.BlinkStatePlugin !== "function") problems.push("BlinkStatePlugin is not a function")
+    if (d === null || typeof d !== "object") {
+      problems.push(`the default export must be a plain object, got ${d === null ? "null" : typeof d}`)
+    } else {
+      if (d.id !== "blink") problems.push(`default.id is ${JSON.stringify(d.id)}, wanted "blink"`)
+      if (d.server !== mod.BlinkStatePlugin) problems.push("default.server is not BlinkStatePlugin")
+      if (typeof d.setup !== "function") problems.push("default.setup is not a function")
+      if ("effect" in d) problems.push("the default export has an effect key, which 2.0 would take over setup")
+      if ("tui" in d) problems.push("the default export has a tui key, which throws beside server on 1.x")
+    }
+  }
+  if (problems.length) {
+    untrap()
+    realErr(problems.map((m) => `FAIL ${m}\n`).join(""))
+    process.exit(1)
+  }
 }
-const factory = mod[exported[0]]
+const factory = mod.BlinkStatePlugin
 
 async function plugin(directory = "/x/y/MyProj") {
   return factory({
@@ -120,6 +169,153 @@ const toolBefore = (h, sid) =>
 const toolAfter = (h, sid) =>
   h["tool.execute.after"]({ tool: "bash", sessionID: sid, callID: "call_1", args: { command: "rm -rf /" } },
     { title: "swordfish", output: "swordfish", metadata: {} })
+
+// --- the plugin, driven as OpenCode 2.0 drives it ---------------------------
+
+// A fake of ctx.event.subscribe: every subscribe() opens one async iterator,
+// and push() delivers to every iterator open at that moment, as the 2.0
+// service fans its one stream out to each subscriber. An abort ends the
+// iterator -- a pending next() resolves done -- which is how the plugin's
+// cleanup is seen to work. end() and fail() close every open iterator without
+// an abort: a stream that simply ends, and the one encode failure that ends
+// the stream for every copy at once (packages/plugin/src/promise/adapter.ts),
+// which is what the plugin's resubscribe loop exists for.
+function channel() {
+  const subs = new Set()
+  const ch = {
+    calls: 0,
+    signals: [],
+    subscribe({ signal } = {}) {
+      ch.calls++
+      ch.signals.push(signal)
+      const queue = []
+      const waiting = []
+      let done = false
+      let error = null
+      const onAbort = () => sub.finish(null)
+      const sub = {
+        deliver(v) {
+          if (done) return
+          if (waiting.length) waiting.shift().resolve({ value: v, done: false })
+          else queue.push(v)
+        },
+        finish(err) {
+          if (done) return
+          done = true
+          error = err
+          subs.delete(sub)
+          // Our own listener goes with the iterator, so that what is left on
+          // the signal afterwards is the plugin's alone.
+          if (signal) signal.removeEventListener("abort", onAbort)
+          for (const w of waiting.splice(0)) {
+            if (err) w.reject(err)
+            else w.resolve({ value: undefined, done: true })
+          }
+        },
+      }
+      subs.add(sub)
+      if (signal) {
+        if (signal.aborted) sub.finish(null)
+        else signal.addEventListener("abort", onAbort)
+      }
+      return {
+        [Symbol.asyncIterator]() {
+          return this
+        },
+        next() {
+          if (queue.length) return Promise.resolve({ value: queue.shift(), done: false })
+          if (done) return error ? Promise.reject(error) : Promise.resolve({ value: undefined, done: true })
+          return new Promise((resolve, reject) => waiting.push({ resolve, reject }))
+        },
+        return() {
+          sub.finish(null)
+          return Promise.resolve({ value: undefined, done: true })
+        },
+      }
+    },
+    push(ev) {
+      for (const s of [...subs]) s.deliver(ev)
+    },
+    fail(err = new Error("encode failed")) {
+      for (const s of [...subs]) s.finish(err)
+    },
+    end() {
+      for (const s of [...subs]) s.finish(null)
+    },
+    get closed() {
+      return subs.size === 0
+    },
+  }
+  return ch
+}
+
+// Every cleanup setup2 handed back, run at the end of a mode. A stream left
+// open holds nothing that keeps node alive, but a setup whose subscribe
+// threw sits in the plugin's backoff timer, which does.
+const cleanups = []
+
+// One 2.0 location: setup called as 2.0's plugin host calls it.
+async function setup2(ch, dir = "/x/y/MyProj", m = mod) {
+  const cleanup = await m.default.setup({ location: { directory: dir }, event: { subscribe: ch.subscribe } })
+  if (typeof cleanup === "function") cleanups.push(cleanup)
+  return cleanup
+}
+
+// The plugin's loop handles a delivered event in microtasks; two turns of
+// setImmediate are past all of them.
+const flush = () => new Promise((r) => setImmediate(() => setImmediate(r)))
+
+async function send(ch, ...events) {
+  for (const e of events) ch.push(e)
+  await flush()
+}
+
+// Event ids are unique for the whole run, not per case: the tracker is one
+// per process and remembers every handled id on globalThis, so a reused id
+// would be dropped as a duplicate and the case would test nothing.
+let evtN = 0
+function v2(type, data, loc) {
+  return { id: `evt_v2_${++evtN}`, created: Date.now(), type, data, ...(loc ? { location: { directory: loc } } : {}) }
+}
+const LONG = 3600 * 1000
+const e2 = {
+  created: (sid, extra = {}) =>
+    v2("session.created", { sessionID: sid, title: "swordfish", location: { directory: "/x/y/MyProj" }, ...extra }),
+  started: (sid, loc) => v2("session.execution.started", { sessionID: sid }, loc),
+  step: (sid) => v2("session.step.started", { sessionID: sid }),
+  tool: (sid) => v2("session.tool.called", { sessionID: sid, tool: "bash", input: { command: "rm -rf /" } }),
+  succeeded: (sid) => v2("session.execution.succeeded", { sessionID: sid }),
+  failed: (sid) => v2("session.execution.failed", { sessionID: sid, error: { message: "secret-body" } }),
+  interrupted: (sid, reason) => v2("session.execution.interrupted", { sessionID: sid, reason }),
+  retry: (sid, inMs) =>
+    v2("session.retry.scheduled", { sessionID: sid, attempt: 1, at: Date.now() + inMs, error: { message: "secret-body" } }),
+  asked: (sid, id) =>
+    v2("permission.asked", { id, sessionID: sid, permission: "bash", resources: ["rm -rf /"], message: "Which colour?" }),
+  replied: (sid, requestID) => v2("permission.replied", { sessionID: sid, requestID, reply: "once" }),
+  form: (sid, id) => v2("form.created", { form: { id, sessionID: sid, title: "Which colour?" } }),
+  formReplied: (sid, id) => v2("form.replied", { sessionID: sid, id, answer: "hunter2" }),
+  formCancelled: (sid, id) => v2("form.cancelled", { sessionID: sid, id }),
+  deleted: (sid) => v2("session.deleted", { sessionID: sid }),
+}
+
+// Every kind of 2.0 event the plugin writes for, against one session id.
+function everyEvent2(sid) {
+  const kid = `${sid}_kid`
+  return [e2.created(sid), e2.started(sid), e2.step(sid), e2.tool(sid), e2.asked(sid, `${sid}_p1`),
+    e2.form(sid, `${sid}_f1`), e2.replied(sid, `${sid}_p1`), e2.formReplied(sid, `${sid}_f1`),
+    e2.created(kid, { parentID: sid }), e2.started(kid), e2.retry(kid, LONG), e2.retry(sid, LONG),
+    e2.failed(sid), e2.started(sid), e2.interrupted(sid, "user"), e2.started(sid), e2.succeeded(sid),
+    e2.deleted(sid)]
+}
+
+async function until(pred, ms) {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    if (pred()) return true
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  return pred()
+}
 
 // --- what is on disk -------------------------------------------------------
 
@@ -215,8 +411,13 @@ async function check() {
   {
     const home = os.homedir()
     const h = await plugin()
+    // 2.0 as well: a service left running across the uninstall is the 2.0
+    // shape of the same thing, and it outlives every terminal.
+    const ch = channel()
+    await setup2(ch)
     try {
       await everyEvent(h, "ses_nodir")
+      await send(ch, ...everyEvent2("ses_v2nodir"))
     } catch (e) {
       fail(`events with no state directory threw: ${e}`)
     }
@@ -230,10 +431,14 @@ async function check() {
     await created(h2, "ses_uninst")
     await busy(h2, "ses_uninst")
     expectSlot("before the uninstall", "ses_uninst", "UserPromptSubmit")
+    await send(ch, e2.created("ses_v2uninst"), e2.started("ses_v2uninst"))
+    expectSlot("2.0 before the uninstall", "ses_v2uninst", "UserPromptSubmit")
     fs.rmSync(DIR, { recursive: true, force: true })
     try {
       await everyEvent(h2, "ses_uninst")
       await everyEvent(h2, "ses_uninst2")
+      await send(ch, ...everyEvent2("ses_v2uninst"))
+      await send(ch, ...everyEvent2("ses_v2uninst2"))
     } catch (e) {
       fail(`events after the state directory went threw: ${e}`)
     }
@@ -667,6 +872,8 @@ async function check() {
     }
   }
 
+  await check2()
+
   // Nothing the events carried, beyond ids and the directory's last segment.
   for (const f of walk(DIR)) {
     const full = p(f)
@@ -675,6 +882,359 @@ async function check() {
     for (const s of SECRETS) if (text.includes(s) || f.includes(s)) fail(`${f} carries payload content: ${s}`)
     if (/\.tmp$/.test(f)) fail(`a temp file was left behind: ${f}`)
   }
+}
+
+// --- check, OpenCode 2.0 ---------------------------------------------------
+
+// The same file loaded through its default export. One tracker serves every
+// setup in this process, so every case below uses session ids of its own
+// (ses_v2...), and every event id is fresh (see v2()).
+async function check2() {
+  const RUN = ["UserPromptSubmit", "PreToolUse", "PostToolUse"]
+  const running = (label, sid) => {
+    const t = slot(sid)
+    const evn = t === null ? null : JSON.parse(t).event
+    if (!RUN.includes(evn)) fail(`${label}: ${sid} is ${evn}, wanted a running event`)
+  }
+
+  // 17. A normal turn. execution.started fires once per turn and the step and
+  //     tool events keep the clock fresh -- throttled like 1.x's busy, so a
+  //     step inside REFRESH_MS must not rewrite the slot.
+  {
+    const ch = channel()
+    await setup2(ch)
+    await send(ch, e2.created("ses_v2norm"))
+    expectFile("2.0 created only", "ses_v2norm.state", false)
+    await send(ch, e2.started("ses_v2norm"))
+    expectSlot("2.0 started", "ses_v2norm", "UserPromptSubmit")
+    const before = ino("ses_v2norm")
+    await send(ch, e2.step("ses_v2norm"), e2.tool("ses_v2norm"))
+    if (ino("ses_v2norm") !== before) fail("2.0 running events inside the refresh window rewrote the slot")
+    await send(ch, e2.succeeded("ses_v2norm"))
+    expectSlot("2.0 succeeded", "ses_v2norm", "Stop")
+    // A tool event landing after the turn finished must not repaint it.
+    await send(ch, e2.tool("ses_v2norm"), e2.step("ses_v2norm"))
+    expectSlot("2.0 tool after stop", "ses_v2norm", "Stop")
+  }
+
+  // 18. Permissions: the marker follows the open requests, as in 1.x.
+  {
+    const ch = channel()
+    await setup2(ch)
+    await send(ch, e2.created("ses_v2perm"), e2.started("ses_v2perm"))
+    await send(ch, e2.asked("ses_v2perm", "per_v2_1"))
+    expectSlot("2.0 asked", "ses_v2perm", "PermissionRequest")
+    expectFile("2.0 asked", "ses_v2perm.waiting")
+    await send(ch, e2.replied("ses_v2perm", "per_v2_1"))
+    expectSlot("2.0 replied", "ses_v2perm", "PostToolUse")
+    expectFile("2.0 replied", "ses_v2perm.waiting", false)
+    // Two overlapping: the marker lasts until the LAST is answered.
+    await send(ch, e2.asked("ses_v2perm", "per_v2_a"), e2.asked("ses_v2perm", "per_v2_b"))
+    await send(ch, e2.replied("ses_v2perm", "per_v2_a"))
+    expectFile("2.0 one of two answered", "ses_v2perm.waiting")
+    await send(ch, e2.replied("ses_v2perm", "per_v2_b"))
+    expectFile("2.0 both answered", "ses_v2perm.waiting", false)
+    // An answer to a request this process never saw asked.
+    await send(ch, e2.asked("ses_v2perm", "per_v2_c"), e2.replied("ses_v2perm", "per_v2_unknown"))
+    expectFile("2.0 stray answer", "ses_v2perm.waiting")
+    // The turn finishing with one open: asking nobody anything, and the late
+    // answer to it does not repaint the finished turn as running.
+    await send(ch, e2.succeeded("ses_v2perm"))
+    expectFile("2.0 succeeded with one open", "ses_v2perm.waiting", false)
+    await send(ch, e2.replied("ses_v2perm", "per_v2_c"))
+    expectSlot("2.0 reply after succeeded", "ses_v2perm", "Stop")
+  }
+
+  // 19. Forms: 2.0's questions. The session is named inside data.form, and
+  //     "global" is MCP elicitation's owner for a form that belongs to no
+  //     session -- it passes the id pattern, so only the plugin's own check
+  //     keeps a global.state off the panel.
+  {
+    const ch = channel()
+    await setup2(ch)
+    await send(ch, e2.created("ses_v2form"), e2.started("ses_v2form"))
+    await send(ch, e2.form("ses_v2form", "frm_v2_1"))
+    expectSlot("2.0 form", "ses_v2form", "PermissionRequest")
+    expectFile("2.0 form", "ses_v2form.waiting")
+    await send(ch, e2.formReplied("ses_v2form", "frm_v2_1"))
+    expectFile("2.0 form replied", "ses_v2form.waiting", false)
+    expectSlot("2.0 form replied", "ses_v2form", "PostToolUse")
+    await send(ch, e2.form("ses_v2form", "frm_v2_2"))
+    await send(ch, e2.formCancelled("ses_v2form", "frm_v2_2"))
+    expectFile("2.0 form cancelled", "ses_v2form.waiting", false)
+    await send(ch, e2.form("global", "frm_v2_g"), e2.formReplied("global", "frm_v2_g"),
+      e2.started("global"), e2.asked("global", "per_v2_g"))
+    expectFile("2.0 global form", "global.state", false)
+    expectFile("2.0 global form", "global.waiting", false)
+  }
+
+  // 20. Retries. data.at is the epoch ms the retry fires at; one more than a
+  //     minute away is the quota case and reads as failed.
+  {
+    const ch = channel()
+    await setup2(ch)
+    await send(ch, e2.created("ses_v2retry"), e2.started("ses_v2retry"))
+    await send(ch, e2.retry("ses_v2retry", 1000))
+    running("2.0 short retry", "ses_v2retry")
+    await send(ch, e2.retry("ses_v2retry", LONG))
+    expectSlot("2.0 long retry", "ses_v2retry", "StopFailure")
+    // The retry fired and a step began: the failure is lifted.
+    await send(ch, e2.step("ses_v2retry"))
+    expectSlot("2.0 step after long retry", "ses_v2retry", "PreToolUse")
+    // A long retry, then the attempts run out.
+    await send(ch, e2.retry("ses_v2retry", LONG))
+    await send(ch, e2.failed("ses_v2retry"))
+    expectSlot("2.0 retries exhausted", "ses_v2retry", "StopFailure")
+    // A real failure is not lifted by a straggling step.
+    await send(ch, e2.step("ses_v2retry"), e2.tool("ses_v2retry"))
+    expectSlot("2.0 step after failure", "ses_v2retry", "StopFailure")
+    // A long retry arriving after the turn's Stop changes nothing.
+    await send(ch, e2.started("ses_v2retry"), e2.succeeded("ses_v2retry"))
+    await send(ch, e2.retry("ses_v2retry", LONG))
+    expectSlot("2.0 long retry after stop", "ses_v2retry", "Stop")
+  }
+
+  // 21. Interrupted, by reason. user (Esc) and inactivity end the turn;
+  //     shutdown keeps it claimed to resume, and superseded is followed by the
+  //     replacing prompt's own execution.started.
+  {
+    const ch = channel()
+    await setup2(ch)
+    for (const reason of ["user", "inactivity"]) {
+      const sid = `ses_v2int_${reason}`
+      await send(ch, e2.created(sid), e2.started(sid), e2.asked(sid, `per_v2_int_${reason}`))
+      await send(ch, e2.interrupted(sid, reason))
+      expectSlot(`2.0 interrupted ${reason}`, sid, "Interrupt")
+      expectFile(`2.0 interrupted ${reason}`, `${sid}.waiting`, false)
+    }
+    await send(ch, e2.created("ses_v2int_shut"), e2.started("ses_v2int_shut"))
+    await send(ch, e2.interrupted("ses_v2int_shut", "shutdown"))
+    expectSlot("2.0 interrupted shutdown", "ses_v2int_shut", "UserPromptSubmit")
+    await send(ch, e2.created("ses_v2int_sup"), e2.started("ses_v2int_sup"))
+    await send(ch, e2.interrupted("ses_v2int_sup", "superseded"))
+    await send(ch, e2.started("ses_v2int_sup"))
+    expectSlot("2.0 superseded then started", "ses_v2int_sup", "UserPromptSubmit")
+  }
+
+  // 22. Subagents: a file under the parent, never a slot of their own.
+  {
+    const ch = channel()
+    await setup2(ch)
+    await send(ch, e2.created("ses_v2par"), e2.started("ses_v2par"))
+    await send(ch, e2.created("ses_v2kid1", { parentID: "ses_v2par" }))
+    expectFile("2.0 child created", "ses_v2par/ses_v2kid1")
+    await send(ch, e2.started("ses_v2kid1"), e2.step("ses_v2kid1"), e2.tool("ses_v2kid1"))
+    expectFile("2.0 child started", "ses_v2kid1.state", false)
+    await send(ch, e2.asked("ses_v2kid1", "per_v2_kid"))
+    expectFile("2.0 child asks", "ses_v2par.waiting")
+    expectFile("2.0 child asks", "ses_v2kid1.waiting", false)
+    expectSlot("2.0 child asks", "ses_v2par", "PermissionRequest")
+    await send(ch, e2.replied("ses_v2kid1", "per_v2_kid"))
+    expectFile("2.0 child answered", "ses_v2par.waiting", false)
+    // A subagent waiting out a quota is its whole session waiting.
+    await send(ch, e2.retry("ses_v2kid1", LONG))
+    expectSlot("2.0 child long retry", "ses_v2par", "StopFailure")
+    await send(ch, e2.step("ses_v2kid1"))
+    expectSlot("2.0 child step after long retry", "ses_v2par", "PreToolUse")
+    await send(ch, e2.succeeded("ses_v2kid1"))
+    expectFile("2.0 child succeeded", "ses_v2par/ses_v2kid1", false)
+    // A child interrupted by the service shutting down is still claimed.
+    await send(ch, e2.created("ses_v2kid2", { parentID: "ses_v2par" }), e2.started("ses_v2kid2"))
+    await send(ch, e2.interrupted("ses_v2kid2", "shutdown"))
+    expectFile("2.0 child interrupted shutdown", "ses_v2par/ses_v2kid2")
+    await send(ch, e2.interrupted("ses_v2kid2", "user"))
+    expectFile("2.0 child interrupted user", "ses_v2par/ses_v2kid2", false)
+    for (const f of walk(DIR)) {
+      if (/ses_v2kid[^/\\]*\.(state|waiting|ended)$/.test(f)) fail(`a 2.0 subagent got a session file: ${f}`)
+    }
+
+    // 23. Deletion: the slot, marker and agent dir go, a tombstone stays,
+    //     and the session speaking again takes the tombstone back.
+    await send(ch, e2.created("ses_v2kid3", { parentID: "ses_v2par" }), e2.asked("ses_v2par", "per_v2_del"))
+    await send(ch, e2.deleted("ses_v2par"))
+    expectFile("2.0 deleted", "ses_v2par.state", false)
+    expectFile("2.0 deleted", "ses_v2par.waiting", false)
+    expectFile("2.0 deleted", "ses_v2par", false)
+    expectFile("2.0 deleted", "ses_v2par.ended")
+    await send(ch, e2.started("ses_v2par"))
+    expectFile("2.0 resumed", "ses_v2par.ended", false)
+  }
+
+  // 24. Names. Measured in a real 2.0.32 service: execution.* events carry no
+  //     `location`, so the name has to come from session.created's own
+  //     location and be remembered. An event envelope's location names a
+  //     session nothing else has; with neither, the key is left out.
+  {
+    const ch = channel()
+    await setup2(ch)
+    await send(ch, e2.created("ses_v2name"), e2.started("ses_v2name"))
+    expectSlot("2.0 name from created", "ses_v2name", "UserPromptSubmit", "MyProj")
+    await send(ch, e2.started("ses_v2loc", "/x/y/Loc"))
+    expectSlot("2.0 name from the envelope", "ses_v2loc", "UserPromptSubmit", "Loc")
+    await send(ch, e2.started("ses_v2anon"))
+    expectSlot("2.0 no name at all", "ses_v2anon", "UserPromptSubmit", null)
+  }
+
+  // 25. Every location's setup is handed the WHOLE service's stream, so the
+  //     same event reaches the tracker once per open project. It must be
+  //     handled once: written once, counted once.
+  {
+    const a = channel()
+    const b = channel()
+    await setup2(a, "/x/y/A")
+    await setup2(b, "/x/y/B")
+    await send(a, e2.created("ses_v2dup"))
+    const st = e2.started("ses_v2dup")
+    a.push(st)
+    await flush()
+    const first = ino("ses_v2dup")
+    b.push(st)
+    await flush()
+    if (ino("ses_v2dup") !== first) fail("2.0: the same event through two setups was written twice")
+    // A lagging copy replaying an event already handled -- the review's case
+    // (2026-10-20): execution.started arriving at the second copy after the
+    // first had already seen the turn finish.
+    const st2 = e2.started("ses_v2dup")
+    await send(a, st2, e2.succeeded("ses_v2dup"))
+    await send(b, st2)
+    expectSlot("2.0 lagging duplicate started", "ses_v2dup", "Stop")
+    // The same asked through both, then one reply: a double count would
+    // leave the marker behind.
+    await send(a, e2.started("ses_v2dup"))
+    const ask = e2.asked("ses_v2dup", "per_v2_dup")
+    await send(a, ask)
+    await send(b, ask)
+    await send(a, e2.replied("ses_v2dup", "per_v2_dup"))
+    expectFile("2.0 duplicate asked, one reply", "ses_v2dup.waiting", false)
+    // ... and an asked replayed after its reply does not bring it back.
+    const ask2 = e2.asked("ses_v2dup", "per_v2_dup2")
+    await send(a, ask2, e2.replied("ses_v2dup", "per_v2_dup2"))
+    await send(b, ask2)
+    expectFile("2.0 lagging duplicate asked", "ses_v2dup.waiting", false)
+
+    // 26. Asked through one location, answered through another: one tracker,
+    //     so the marker clears. With a tracker per setup it stayed for good.
+    await send(a, e2.created("ses_v2cross"), e2.started("ses_v2cross"))
+    await send(a, e2.asked("ses_v2cross", "per_v2_cross"))
+    expectFile("2.0 asked via A", "ses_v2cross.waiting")
+    await send(b, e2.replied("ses_v2cross", "per_v2_cross"))
+    expectFile("2.0 replied via B", "ses_v2cross.waiting", false)
+    expectSlot("2.0 replied via B", "ses_v2cross", "PostToolUse")
+  }
+
+  // 27. A second evaluation of the same file -- 2.0 imports it afresh per
+  //     location -- finds the first one's tracker on globalThis rather than
+  //     making a second writer, and adds no 'exit' listener of its own.
+  {
+    const KEY = Symbol.for("blink.opencode.tracker")
+    const held = globalThis[KEY]
+    if (!held || typeof held.revision !== "string" || !held.tracker) {
+      fail(`2.0: no tracker on globalThis, got ${JSON.stringify(held && Object.keys(held))}`)
+    }
+    const exits = process.listenerCount("exit")
+    const mod2 = await import(pathToFileURL(PLUGIN).href + "?copy=2")
+    if (mod2 === mod) fail("2.0: the second import was not a second evaluation")
+    const a = channel()
+    const b = channel()
+    await setup2(a, "/x/y/A", mod)
+    await setup2(b, "/x/y/B", mod2)
+    const now = globalThis[KEY]
+    if (now !== held || (now && held && (now.tracker !== held.tracker || now.revision !== held.revision))) {
+      fail("2.0: a second copy of the same file made a tracker of its own")
+    }
+    if (process.listenerCount("exit") !== exits) {
+      fail(`2.0: a second copy added 'exit' listeners: ${exits} -> ${process.listenerCount("exit")}`)
+    }
+    await send(a, e2.created("ses_v2copy"), e2.started("ses_v2copy"), e2.asked("ses_v2copy", "per_v2_copy"))
+    await send(b, e2.replied("ses_v2copy", "per_v2_copy"))
+    expectFile("2.0 asked in one copy, answered in the other", "ses_v2copy.waiting", false)
+  }
+
+  // 28. Cleanup aborts the subscription, and a stopped copy writes nothing.
+  {
+    const ch = channel()
+    const cleanup = await setup2(ch)
+    if (typeof cleanup !== "function") {
+      fail(`2.0 setup returned ${typeof cleanup}, wanted a cleanup function`)
+    } else {
+      cleanup()
+      const sig = ch.signals[0]
+      if (!sig || !sig.aborted) fail("2.0 cleanup did not abort the subscription's signal")
+      if (!ch.closed) fail("2.0 cleanup left the stream open")
+      await send(ch, e2.created("ses_v2gone"), e2.started("ses_v2gone"))
+      expectFile("2.0 after cleanup", "ses_v2gone.state", false)
+      try {
+        cleanup()
+      } catch (e) {
+        fail(`2.0 cleanup twice threw: ${e}`)
+      }
+      await new Promise((r) => setTimeout(r, 50))
+      if (ch.calls !== 1) fail(`2.0 resubscribed after cleanup: ${ch.calls} subscribes`)
+    }
+  }
+
+  // 29. A stream that ends, or fails, without our abort is resubscribed. One
+  //     encode failure ends the stream for every copy at once, and without
+  //     this the light stayed dark until something reloaded the plugin
+  //     (review, 2026-10-20). Real timers: the first wait is a second.
+  {
+    const ch = channel()
+    const cleanup = await setup2(ch)
+    ch.end()
+    if (!(await until(() => ch.calls >= 2, 1500))) fail(`2.0: an ended stream was not resubscribed (${ch.calls})`)
+    await send(ch, e2.created("ses_v2resub"), e2.started("ses_v2resub"))
+    expectSlot("2.0 after a resubscribe", "ses_v2resub", "UserPromptSubmit")
+    // Events flowed again, so the wait is back to a second.
+    ch.fail()
+    if (!(await until(() => ch.calls >= 3, 1500))) fail(`2.0: a failed stream was not resubscribed (${ch.calls})`)
+    await send(ch, e2.succeeded("ses_v2resub"))
+    expectSlot("2.0 after a failed stream", "ses_v2resub", "Stop")
+    cleanup()
+  }
+
+  // 30. Bad contexts: setup must return, never throw, whatever it is handed.
+  //     OpenCode is waiting on it to finish loading the plugin.
+  for (const [label, ctx] of [["undefined", undefined], ["{}", {}], ["{event:{}}", { event: {} }],
+    ["a throwing subscribe", { event: { subscribe() { throw new Error("no stream") } } }],
+    ["a subscribe returning nothing", { event: { subscribe() { return undefined } } }]]) {
+    try {
+      const cleanup = await mod.default.setup(ctx)
+      if (typeof cleanup !== "function") fail(`2.0 setup(${label}) returned ${typeof cleanup}`)
+      else cleanups.push(cleanup)
+    } catch (e) {
+      fail(`2.0 setup(${label}) threw: ${e}`)
+    }
+  }
+
+  // 31. Garbage and hostile ids: nothing escapes, nothing is written.
+  {
+    const ch = channel()
+    await setup2(ch)
+    const before = walk(DIR).sort().join("\n")
+    const bad = ["../x", "..", ".", "", "a/b", "a\\b", 'a"b', " ses", "x".repeat(65), null, 5, {}, ["ses_arr"]]
+    const junk = [null, undefined, 42, "session.execution.started", {}, { type: 5, data: { sessionID: "ses_v2j" } },
+      { type: "session.execution.started" }, { type: "session.execution.started", data: null },
+      { type: "session.execution.started", data: "ses_v2j" },
+      { id: 7, type: "session.execution.started", data: { sessionID: null } },
+      v2("form.created", { form: null }), v2("form.created", { form: "ses_v2j" }), v2("form.created", {}),
+      v2("session.created", { sessionID: "ses_v2junkkid", parentID: "../x" }),
+      v2("message.part.delta", { sessionID: "ses_v2j", delta: "swordfish" }),
+      v2("session.status", { sessionID: "ses_v2j", status: { type: "busy" } })]
+    for (const id of bad) {
+      junk.push(e2.created(id), e2.started(id), e2.step(id), e2.tool(id), e2.retry(id, LONG), e2.asked(id, "per_v2_bad"),
+        e2.replied(id, "per_v2_bad"), e2.form(id, "frm_v2_bad"), e2.formReplied(id, "frm_v2_bad"),
+        e2.failed(id), e2.interrupted(id, "user"), e2.succeeded(id), e2.deleted(id),
+        e2.created("ses_v2junkkid2", { parentID: id }))
+    }
+    await send(ch, ...junk)
+    const after = walk(DIR).sort().join("\n")
+    if (after !== before) fail(`2.0 garbage changed the state dir:\n${after}\nvs\n${before}`)
+    // "../x" from the state directory is ~/.blink/x*: the shim's traversal.
+    const blink = fs.readdirSync(path.dirname(DIR))
+    if (blink.join() !== "state-opencode") fail(`a 2.0 hostile id reached ~/.blink: ${blink.join(", ")}`)
+  }
+
+  for (const c of cleanups.splice(0)) c()
 }
 
 // --- fixture ---------------------------------------------------------------
@@ -700,6 +1260,65 @@ async function fixture() {
   await busy(h, "ses_kid2")
   await idle(h, "ses_kid2")
   await deleted(h, "ses_gone")
+}
+
+// `fixture`'s desk, state for state, built from 2.0 events: waiting is a
+// form, idle a succeeded turn, failed an execution.failed, the abort an
+// interrupt by the user. The same session ids, so the Python side holds both
+// to one expectation.
+async function fixture2() {
+  makeDir()
+  const ch = channel()
+  await setup2(ch)
+  for (const sid of ["ses_run", "ses_wait", "ses_idle", "ses_fail", "ses_abort", "ses_long", "ses_par", "ses_gone"]) {
+    await send(ch, e2.created(sid), e2.started(sid))
+  }
+  await send(ch,
+    e2.form("ses_wait", "frm_1"),
+    e2.succeeded("ses_idle"),
+    e2.failed("ses_fail"),
+    e2.interrupted("ses_abort", "user"),
+    e2.retry("ses_long", LONG),
+    e2.created("ses_kid1", { parentID: "ses_par" }), e2.started("ses_kid1"),
+    e2.created("ses_kid2", { parentID: "ses_par" }), e2.started("ses_kid2"), e2.succeeded("ses_kid2"),
+    e2.deleted("ses_gone"))
+}
+
+// One 2.0 turn, then the process exits: the service going away is every
+// session it held ending, from the one 2.0 ender on globalThis.
+async function exit2() {
+  const ch = channel()
+  await setup2(ch)
+  await send(ch, e2.created("ses_v2exit"), e2.started("ses_v2exit"), e2.succeeded("ses_v2exit"),
+    e2.created("ses_v2exitkid", { parentID: "ses_v2exit" }), e2.started("ses_v2exitkid"))
+}
+
+// Found while writing these tests, 2026-10-20, and fixed in the plugin the same
+// day: blinkV2's pause() added an "abort" listener to the subscription's
+// signal on every resubscribe and removed it only on abort, so a timer that
+// simply fired left its listener -- and its closure -- on the signal for the
+// life of the setup. Measured: 13 resubscribes, 13 listeners. A service whose
+// stream fails now and then for weeks grew without bound. Node prints no
+// MaxListeners warning for an AbortSignal (checked under 26.8.1), so this is
+// memory, not noise, and only a count can catch it. Run at the end of
+// `check`; takes about three seconds.
+async function leak2() {
+  const { getEventListeners } = await import("node:events")
+  const ch = channel()
+  const cleanup = await setup2(ch)
+  for (let i = 0; i < 2; i++) {
+    const want = ch.calls + 1
+    ch.end()
+    if (!(await until(() => ch.calls >= want, 1500))) fail(`stream ${i} was not resubscribed`)
+    // An event resets the plugin's wait to its one-second minimum.
+    await send(ch, e2.step(`ses_v2leak${i}`))
+  }
+  const sig = ch.signals[ch.signals.length - 1]
+  // The channel's own listener is the one for the open iterator; anything
+  // past it is the plugin's, and with no pause in progress there should be none.
+  const n = getEventListeners(sig, "abort").length
+  if (n > 1) fail(`after 2 resubscribes the signal holds ${n} abort listeners, wanted 1 (pause() never removes its own)`)
+  cleanup()
 }
 
 // --- instances -------------------------------------------------------------
@@ -751,7 +1370,10 @@ const mode = process.argv[2] || "check"
 trap()
 let crashed = null
 try {
-  if (mode === "check") await check()
+  if (mode === "check") {
+    await check()
+    await leak2()
+  }
   else if (mode === "exit") {
     const h = await plugin()
     await created(h, "ses_exit")
@@ -759,6 +1381,9 @@ try {
     await idle(h, "ses_exit")
     await created(h, "ses_exitkid", { parentID: "ses_exit" })
   } else if (mode === "fixture") await fixture()
+  else if (mode === "fixture2") await fixture2()
+  else if (mode === "exit2") await exit2()
+  else if (mode === "leak2") await leak2()
   else if (mode === "instances") await instances()
   else if (mode === "nodir") await nodir()
   else crashed = `unknown mode ${mode}`
@@ -772,7 +1397,7 @@ if (failures.length) {
   realErr(failures.map((f) => `FAIL ${f}\n`).join(""))
   process.exit(1)
 }
-if (mode === "fixture") {
+if (mode === "fixture" || mode === "fixture2") {
   realOut("ready\n")
   process.stdin.resume()
   process.stdin.on("end", () => process.exit(0))

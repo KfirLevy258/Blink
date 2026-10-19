@@ -63,7 +63,7 @@ this.
 
 - **Two dials, two countdowns.** Session and weekly limits, and the time until each one resets.
 - **An activity light.** Amber the moment any session - Claude, Codex or OpenCode - is waiting on you; a green pulse while everything is still working; red when a turn dies on an error - a rate limit, most often.
-- **A page per provider.** Claude and Codex each get their own screen. Swipe to switch; the needles move from one reading to the other. OpenCode gets one too; with all three in use, the second page follows whichever of Codex and OpenCode you used last.
+- **A page per provider.** Claude and Codex each get their own screen. Swipe to switch; the needles move from one reading to the other. OpenCode gets one too: on firmware 1.4.0 each of the three has its own page, in a fixed order; older firmware keeps two, and the second follows whichever of Codex and OpenCode you used last.
 - **It sleeps when your computer does.** About thirty seconds after the computer stops answering, the screen closes its eyes and dozes; it opens them the moment the computer is back. A tap while it sleeps shows the last figures.
 - **Claude Desktop too.** With Desktop alone the dials show percentages, a five-hour countdown whenever Desktop is holding a reset time, and a weekly countdown once one has been learned. Desktop keeps that reset time only while a window is running and clears it in between, so the countdown comes and goes; the fill rate covers the gaps. The dials follow Desktop's own refresh - about every 5 minutes while you are using it, up to 15 when it sits idle - where Claude Code updates them live.
 - **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, no network, nothing sent anywhere. OpenCode is the one exception, because OpenCode never writes its limits down - see [Privacy](#privacy).
@@ -119,7 +119,7 @@ Windows on Arm (Snapdragon laptops, Surface Pro X) gets the Arm64 build of the U
 ~/.blink/bin/blink uninstall   # put everything back
 ```
 
-Needs Claude Code 2.1.100 or newer. The installer changes one file, `~/.claude/settings.json` (the status line command and one hook per lifecycle event), says so before it does, and keeps your own status line running. If you use OpenCode it also adds one file, `blink.js`, to OpenCode's plugin folder (`~/.config/opencode/plugin/`). Everything it does is reversible with `uninstall`.
+Needs Claude Code 2.1.100 or newer. The installer changes one file, `~/.claude/settings.json` (the status line command and one hook per lifecycle event), says so before it does, and keeps your own status line running. If you use OpenCode (1.3.4 or newer, including 2.0) it also adds one file, `blink.js`, to OpenCode's plugin folder (`~/.config/opencode/plugin/`). Everything it does is reversible with `uninstall`.
 
 ## Something's wrong?
 

@@ -376,14 +376,26 @@ jobs:
   # the plugin keys on -- is a string literal in its TypeScript. The check
   # reads them at the ref that ships.
   #
-  # `dev`, not `main`: dev is OpenCode's default branch. In October 2026 it is
-  # the 2.0 rewrite, which moves the plugin API and moves auth.json into the
-  # database, so that cell is EXPECTED to be red until 2.0 support lands --
-  # it is there to list what 2.0 breaks, and to say when that list changes.
-  # The release cell is the blocking one, and goes red the day a release tag
-  # carries any of it.
+  # TWO LINES SHIP AT ONCE, and both cells that check them are required:
+  # 1.x as `opencode-ai` on npm, 2.x (the rewrite) as `@opencode/cli`.
+  # tools/blink-opencode.js loads on both, and each keeps the contract in
+  # different files, so each cell passes OPENCODE_LINE to the script.
+  #
+  # The version comes from npm's `latest` dist-tag, not from GitHub's
+  # releases/latest. This job used to resolve "the release" from GitHub, and
+  # releases/latest stayed on 1.19.3 for five weeks after 2.0.0 was published
+  # on npm (2.0.32 by October 2026): a shipping major version broke BLINK's
+  # activity light while every required check here stayed green, because no
+  # required check ever read 2.x. npm is where customers' installs come from,
+  # so npm is what is checked. The source is read at the git tag v<version>;
+  # a version npm has and the repo has no tag for fails loudly rather than
+  # being read at some other ref.
+  #
+  # `dev`, not `main`: dev is OpenCode's default branch, and the tip of the
+  # 2.x line. That cell is the early warning -- it lists what the next 2.x
+  # release will break -- and never blocks a merge.
   opencode-contract:
-    name: opencode contract (${{ matrix.ref }})
+    name: opencode contract (${{ matrix.pkg || matrix.ref }})
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.experimental }}
     strategy:
@@ -392,31 +404,40 @@ jobs:
         include:
           # The tip of the tree: an early warning, never a merge blocker.
           # Third-party mismatches (models.dev, CodexBar) fail only here; on
-          # the release cell they are warnings, because a refactor in somebody
-          # else's repo must not block a merge in this one.
-          - {ref: dev, experimental: true, third_party: fail}
-          # The latest release, resolved at run time below.
-          - {ref: release, experimental: false, third_party: warn}
+          # the release cells they are warnings, because a refactor in
+          # somebody else's repo must not block a merge in this one.
+          - {ref: dev, line: 2, experimental: true, third_party: fail}
+          # What `npm install -g opencode-ai` / `@opencode/cli` installs
+          # today, resolved at run time below.
+          - {ref: npm, pkg: opencode-ai, line: 1, experimental: false, third_party: warn}
+          - {ref: npm, pkg: "@opencode/cli", line: 2, experimental: false, third_party: warn}
     steps:
       - uses: actions/checkout@v4
       - name: resolve the ref
         id: ref
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          PKG: ${{ matrix.pkg }}
         run: |
-          if [ "${{ matrix.ref }}" = release ]; then
-            # Authenticated, for the same reason as codex-contract: the
-            # anonymous API limit is shared by every job on the runner's
-            # address. releases/latest skips drafts and prereleases, which is
-            # what customers' `opencode upgrade` installs.
-            tag=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-              https://api.github.com/repos/anomalyco/opencode/releases/latest | jq -r .tag_name)
-            echo "ref=$tag" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.ref }}" = npm ]; then
+            # The registry wants a scoped name's slash encoded:
+            # @opencode/cli -> @opencode%2fcli.
+            enc=$(printf '%s' "$PKG" | sed 's|/|%2f|')
+            ver=$(curl -fsSL "https://registry.npmjs.org/-/package/$enc/dist-tags" | jq -r .latest)
+            case "$ver" in
+              ''|null) echo "::error::npm has no latest dist-tag for $PKG"; exit 1 ;;
+            esac
+            if ! git ls-remote --exit-code --tags https://github.com/anomalyco/opencode "refs/tags/v$ver" >/dev/null; then
+              echo "::error::npm's latest $PKG is $ver, but anomalyco/opencode has no tag v$ver -- the source that shipped cannot be read; find where it was tagged"
+              exit 1
+            fi
+            echo "$PKG latest on npm: $ver"
+            echo "ref=v$ver" >> "$GITHUB_OUTPUT"
           else
             echo "ref=dev" >> "$GITHUB_OUTPUT"
           fi
       - run: sh tests/ci/check_opencode_contract.sh "${{ steps.ref.outputs.ref }}"
         env:
+          OPENCODE_LINE: ${{ matrix.line }}
           OPENCODE_THIRD_PARTY: ${{ matrix.third_party }}
 
   # The OpenCode plugin itself, run under node against scripted bus events.

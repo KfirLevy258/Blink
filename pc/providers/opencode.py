@@ -710,6 +710,74 @@ def _load_credentials(root=None):
     return {}
 
 
+# Top-level OpenCode 2.0 sessions touched since a cut-off, in ms as 2.0 stores
+# them. Counted, never read: the query names no column but the two it filters
+# on, so nothing about a session -- its title, its directory -- leaves SQLite.
+RECENT_V2_QUERY = ("SELECT COUNT(*) FROM session_v2"
+                   " WHERE parent_id IS NULL AND time_updated >= ?")
+
+
+def plugin_wrote_since(cutoff, state=None) -> bool:
+    """Whether the plugin wrote any slot or tombstone at or after `cutoff`
+    (epoch s). Names and mtimes only; nothing is opened.
+
+    Tombstones count: a 2.0 session deleted, or a service that exited,
+    leaves only `<sid>.ended`, and "no live sessions" beside a database that
+    shows the session is then exactly right, not a plugin that never ran.
+    """
+    d = state if state is not None else state_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return False
+    for n in names:
+        if not (n.endswith(".state") or n.endswith(".ended")):
+            continue
+        try:
+            if os.path.getmtime(os.path.join(d, n)) >= cutoff:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def recent_v2_sessions(now, within_s=3600, root=None) -> int:
+    """How many top-level OpenCode 2.0 sessions were active in the last
+    `within_s` seconds, from opencode.db's session_v2. 0 on 1.x (no such
+    table), on any error, and when OpenCode is absent. Never raises.
+
+    For `blink status` only, once per run, never the daemon: it is the
+    witness that says "OpenCode was used and our plugin reported nothing".
+    OpenCode 2.0 left the light dark for five weeks with nothing on either
+    side to say so -- it skips a plugin it cannot load with a log warning
+    only (packages/core/src/plugin/supervisor.ts) -- and the next change to
+    its plugin API would do the same. A daemon-side fallback built on this
+    table was considered and deferred (docs/plans/opencode-2-light.md,
+    "What building it changed"); one count at status time costs nothing.
+
+    opencode.db alone, the first of db_paths(): another release channel's
+    database is another OpenCode, whose plugin is not the one in question.
+    """
+    paths = db_paths(root if root is not None else data_dir())
+    if not paths:
+        return 0
+    con = None
+    try:
+        con = connect_readonly(paths[0])
+        row = con.execute(RECENT_V2_QUERY,
+                          [int((now - within_s) * 1000)]).fetchone()
+        n = row[0] if row else 0
+        return n if isinstance(n, int) and n > 0 else 0
+    except Exception:
+        return 0
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+
 def _plan_keys(root=None):
     """{provider_key: key} for the plan keys OpenCode holds, or {}.
 

@@ -68,11 +68,15 @@ def test_driver_check_mode_passes_silently(tmp_path):
     assert r.stdout == "" and r.stderr == ""
 
 
-@needs_node
-def test_python_reader_agrees_with_the_plugin(tmp_path):
+def _reader_agrees(tmp_path, mode):
+    """The fixture desk, read while the driver lives and after it exits.
+
+    `fixture` builds it from OpenCode 1.x events and `fixture2` from 2.0's,
+    with the same session ids in the same states, so one expectation holds
+    both writers to what claude_state reads."""
     env = dict(os.environ, HOME=str(tmp_path), USERPROFILE=str(tmp_path))
     state_dir = os.path.join(str(tmp_path), ".blink", "state-opencode")
-    proc = subprocess.Popen([NODE, DRIVER, "fixture"], stdin=subprocess.PIPE,
+    proc = subprocess.Popen([NODE, DRIVER, mode], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, env=env)
     try:
@@ -88,10 +92,13 @@ def test_python_reader_agrees_with_the_plugin(tmp_path):
             "ses_run": base.STATE_RUNNING,
             "ses_wait": base.STATE_WAITING,
             "ses_idle": base.STATE_IDLE,
-            # The error is followed by two idles, as captured from OpenCode,
-            # and still reads as failed.
+            # 1.x: the error is followed by two idles, as captured from
+            # OpenCode, and still reads as failed. 2.0: execution.failed.
             "ses_fail": base.STATE_FAILED,
+            # 1.x MessageAbortedError; 2.0 interrupted with reason "user".
+            # Either way the turn is the person's again, not a failure.
             "ses_abort": base.STATE_IDLE,
+            # A retry an hour away: 1.x status.next, 2.0 retry.scheduled's at.
             "ses_long": base.STATE_FAILED,
             "ses_par": base.STATE_RUNNING,
         }
@@ -125,6 +132,22 @@ def test_python_reader_agrees_with_the_plugin(tmp_path):
     leftovers = sorted(n for n in os.listdir(state_dir)
                        if not n.endswith(".ended"))
     assert leftovers == []
+
+
+@needs_node
+def test_python_reader_agrees_with_the_plugin(tmp_path):
+    _reader_agrees(tmp_path, "fixture")
+
+
+@needs_node
+def test_python_reader_agrees_with_the_plugin_under_opencode_2(tmp_path):
+    """The same desk through the default export's setup, as 2.0 loads it.
+
+    The 2.0 slots end differently -- there is no idle after a failure to
+    latch against, an abort is an interrupt with a reason, and the exit
+    that tombstones them comes from the one process-wide 2.0 ender rather
+    than a per-instance one -- so agreeing on 1.x proves nothing here."""
+    _reader_agrees(tmp_path, "fixture2")
 
 
 def _run_instances(tmp_path, *extra):
