@@ -49,8 +49,16 @@ Mac's own daemon, so the panel says HOST LOST until it is handed back.
 
 Measured 2026-10-19: elevated `pnputil /add-driver` of this package exits 0
 on the VM, where the x64 package exits 2 ("The system cannot find the file
-specified" -- its `CH341M64.SYS` was never in it). A1 and A2, with a board,
-not yet.
+specified" -- its `CH341M64.SYS` was never in it). A1 passed the same day,
+with the board passed through: `USB-SERIAL CH340 (COM3)`, status OK, bound to
+this package, and the daemon connected and exchanged welcome, time and usage
+with the board. A2 not yet.
+
+Passing the board through: UTM's command-line `utmctl usb connect` answered
+"The device cannot be found" every time, so use the VM window's USB icon ->
+USB Serial -> Connect, and Disconnect from the same menu to hand it back.
+The VM needs `UsbSharing` on in its settings, and the Mac's daemon stopped
+first so the port is free.
 
 ## Why not a VM on the Mac
 

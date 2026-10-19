@@ -112,7 +112,7 @@ On Windows, in PowerShell or Command Prompt:
 curl.exe -fsSL -o blink.zip https://github.com/KfirLevy258/Blink/releases/latest/download/blink-windows-x86_64.zip && tar -xf blink.zip && .\blink\blink.exe
 ```
 
-Windows on Arm (Snapdragon laptops, Surface Pro X) gets the Arm64 build of the USB chip's driver, which Windows on Arm accepts. A board on an Arm machine has not been tested end to end yet; any x64 Windows PC, Mac or Linux machine is proven.
+Windows on Arm (Snapdragon laptops, Surface Pro X) gets the Arm64 build of the USB chip's driver, and works: tested on Windows 11 on Arm with a real board. The rest of BLINK's Windows checks were done on an x64 PC.
 
 ```bash
 ~/.blink/bin/blink status      # is the panel getting data?

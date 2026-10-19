@@ -40,10 +40,9 @@ Windows 11 ARM64 VM (UTM), 2026-10-19, elevated:
 | `vendor/ch341ser` (3.9.2024.09) | exit 2, "The system cannot find the file specified" |
 | this one (4.0.2026.02) | exit 0, "Driver package added successfully", signer Microsoft Windows Hardware Compatibility Publisher |
 
-That proves Windows accepts the package on Arm64. It does not prove a board
-binds to it: that needs the board passed through to an Arm machine, and is
-the check to run before saying Windows on Arm works (see
-`docs/windows-check.md`).
+With the board passed through to the same VM, later that day: Windows
+bound it to this package as `USB-SERIAL CH340 (COM3)`, status OK, and the
+daemon connected on COM3 and exchanged welcome, time and usage with it.
 
 ## Bytes
 
