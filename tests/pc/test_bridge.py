@@ -726,12 +726,32 @@ def test_a_blank_page_is_held_from_a_board_too_old_to_draw_it(capsys):
     assert "too old" in capsys.readouterr().err
 
 
-def test_a_blank_page_waits_for_the_board_to_say_its_version():
+def test_a_blank_page_waits_for_the_board_to_say_its_version(capsys):
+    """And says nothing while it waits. On the real board (2026-10-19) the
+    first poll ran a second before hello, and the log told a desk on 1.3.3
+    that its firmware was too old -- then sent the page once hello came."""
     sent = []
     b = Bridge(write_msg=sent.append, fetch_usage=_blank,
                wall=lambda: (1752444000, 180))
     b.poll_once()
     assert not [m for m in sent if m["t"] == "usage"]
+    assert "too old" not in capsys.readouterr().err
+    b.on_message({"t": "hello", "v": 2, "fw": "1.3.3", "board": "cyd"})
+    sent.clear()
+    b.poll_once()
+    assert [m for m in sent if m["t"] == "usage"]
+    assert "too old" not in capsys.readouterr().err
+
+
+def test_an_old_board_is_told_once_its_version_arrives(capsys):
+    """The silence before hello must not swallow the line for good: a board
+    that turns out to be old still gets it."""
+    b = Bridge(write_msg=lambda m: None, fetch_usage=_blank,
+               wall=lambda: (1752444000, 180))
+    b.poll_once()
+    b.on_message({"t": "hello", "v": 2, "fw": "0.6.9", "board": "cyd"})
+    b.poll_once()
+    assert "too old" in capsys.readouterr().err
 
 
 def test_numbers_are_not_held_from_an_old_board():

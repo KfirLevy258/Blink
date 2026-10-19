@@ -557,6 +557,17 @@ class Bridge:
             # (ingest.IngestionBus._blank_poll), so None here means no tool
             # this daemon reads has run on the machine yet -- or that page
             # is being held from a board too old to draw it (_read_usage).
+            #
+            # Held while the board has not yet said its version is NOT "too
+            # old", and says nothing. Found on the real board, 2026-10-19:
+            # the first poll runs about a second before hello arrives, so
+            # board_fw is still None, draws_blank() says no, and the log told
+            # a desk on 1.3.3 to update its board -- then sent the page a
+            # heartbeat later. Saying nothing here leaves the latch open, so
+            # a board that really is old still gets the line once hello says
+            # so.
+            if self._held_blank and self._board_fw is None:
+                return
             if not self._said_no_source:
                 if self._held_blank:
                     print("[bridge] no tool here reports a usage figure, and"
