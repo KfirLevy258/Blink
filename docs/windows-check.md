@@ -52,7 +52,12 @@ on the VM, where the x64 package exits 2 ("The system cannot find the file
 specified" -- its `CH341M64.SYS` was never in it). A1 passed the same day,
 with the board passed through: `USB-SERIAL CH340 (COM3)`, status OK, bound to
 this package, and the daemon connected and exchanged welcome, time and usage
-with the board. A2 not yet.
+with the board. Later that day, the CI-built `blink-windows-latest` from
+949fcbb (the frozen x64 `blink.exe`, emulated) on the same VM with the
+driver deleted: `blink.exe driver` said `installed`, and `pnputil
+/enum-drivers` showed `ch341ser.inf` at `4.0.2026.2` -- so the shipped
+build picks the Arm package, not only the source tree. A2 not yet: it needs
+the board passed through, which only the VM window's menu can do.
 
 Passing the board through: UTM's command-line `utmctl usb connect` answered
 "The device cannot be found" every time, so use the VM window's USB icon ->
