@@ -1266,6 +1266,41 @@ def _plugin_source():
         return f.read()
 
 
+def _codex_log(tmp_path, monkeypatch, limits=True):
+    """A Codex session log under the sandboxed home, written moments ago.
+
+    With `limits` its token_count carries rate_limits shaped like a
+    ChatGPT login's; without, the field is null -- a Codex that writes no
+    usable limits (an API-key login), whose rollouts the daemon turns into
+    no frame at all. Built from tests/pc/test_codex_cli's generators, so
+    nothing here was captured from a real machine.
+    """
+    from tests.pc.test_codex_cli import (meta_line, rate_limits,
+                                         token_count_line, write_rollout)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    now = time.time()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(now - 30))
+    rl = (rate_limits(s_reset=now + 3600, w_reset=now + 86400)
+          if limits else None)
+    write_rollout(str(tmp_path / ".codex" / "sessions"),
+                  day=time.strftime("%Y/%m/%d", time.localtime(now)),
+                  lines=[meta_line("/work"), token_count_line(rl, stamp)])
+
+
+def _statusline(tmp_path, age_s=30):
+    """A Claude Code status line, `age_s` old, whose windows reset in the
+    future as written -- and so, at a few weeks old, in the past."""
+    blink = tmp_path / ".blink"
+    blink.mkdir(exist_ok=True)
+    written = time.time() - age_s
+    path = blink / "statusline.json"
+    path.write_text(json.dumps({"rate_limits": {
+        "five_hour": {"used_percentage": 25, "resets_at": written + 3600},
+        "seven_day": {"used_percentage": 42,
+                      "resets_at": written + 5 * 86400}}}))
+    os.utime(path, (written, written))
+
+
 def _put_plugin(plugin):
     """Lay down an installed copy of ours exactly as install writes it.
 
@@ -1531,10 +1566,10 @@ def test_opencode_beside_a_claude_status_line_keeps_its_light(
     _with_opencode(tmp_path, key=False)
     _no_fetch(monkeypatch)
     _put_plugin(_oc_plugin(tmp_path))
-    home = os.path.join(str(tmp_path), ".blink")
-    os.makedirs(home, exist_ok=True)
-    with open(os.path.join(home, "statusline.json"), "w") as f:
-        f.write("{}")
+    # A status line WITH numbers. This wrote "{}" until the third review,
+    # 2026-10-19, which passed only because status then counted any
+    # statusline.json at all as a number on the cable; "{}" sends nothing.
+    _statusline(tmp_path)
     cli.main(["status"])
     st = capsys.readouterr().out
     assert "its light works, there are no usage figures to show" in st
@@ -1624,8 +1659,11 @@ def test_no_plan_key_says_the_light_works_only_with_our_plugin(
     whose status had just said the plugin is not installed.
 
     Codex is on this desk so that something else reports a number: without
-    one there is no light at all, which the next test pins."""
+    one there is no light at all, which the next test pins. A real log with
+    limits in it since the third review, 2026-10-19: a patched
+    codex_present() alone was a number only to the old guess."""
     _no_cli(monkeypatch, desktop=False, codex=True)
+    _codex_log(tmp_path, monkeypatch)
     _with_opencode(tmp_path, key=False)
     calls = _no_fetch(monkeypatch)
     cli.main(["status"])
@@ -1814,12 +1852,115 @@ def test_a_keyless_opencode_alone_desk_is_not_promised_a_light(
 
 def test_a_keyless_opencode_beside_codex_keeps_its_light(
         tmp_path, capsys, monkeypatch):
-    """With Codex's numbers on the wire, OpenCode's light does ride."""
+    """With Codex's numbers on the wire, OpenCode's light does ride -- in
+    the note and in status alike. The log is real since the third review,
+    2026-10-19; a patched codex_present() was a number only to the old
+    guess."""
     _no_cli(monkeypatch, desktop=False, codex=True)
+    _codex_log(tmp_path, monkeypatch)
     _with_opencode(tmp_path, key=False)
     _no_fetch(monkeypatch)
+    _put_plugin(_oc_plugin(tmp_path))
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     note = " ".join(capsys.readouterr().out.split())
     assert "only its light" in note
+    assert "both Codex limits" in note
     assert "waiting screen" not in note
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "its light works, there are no usage figures to show" in st
+    assert "Usage data  from the Codex session log" in st
+    assert "waiting screen" not in st
+
+
+def _says_the_board_waits(tmp_path, capsys):
+    """Install's note and status's OpenCode row, both: the board waits."""
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    note = " ".join(capsys.readouterr().out.split())
+    assert "only its light" not in note
+    assert "activity light for" not in note
+    assert "both Codex limits" not in note
+    assert "board stays on its waiting screen" in note
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "its light works" not in st
+    assert ("nothing on this desk reports a usage figure, so the board"
+            " stays on its waiting screen") in st
+    return note, st
+
+
+def test_a_codex_without_limits_is_no_number_for_opencodes_light(
+        tmp_path, capsys, monkeypatch):
+    """Third review, 2026-10-19: a Codex whose rollouts carry no usable
+    rate_limits -- an API-key login -- sends no frame, so beside a keyless
+    OpenCode the daemon sends nothing and the board waits. The note asked
+    `desk.codex` and promised "only its light"; status asked the same and
+    said "its light works" under "Usage data  from the Codex session
+    log"."""
+    _no_cli(monkeypatch, desktop=False, codex=True)
+    _codex_log(tmp_path, monkeypatch, limits=False)
+    _with_opencode(tmp_path, key=False)
+    _no_fetch(monkeypatch)
+    _put_plugin(_oc_plugin(tmp_path))
+    _note, st = _says_the_board_waits(tmp_path, capsys)
+    assert "from the Codex session log" not in st
+
+
+def test_status_on_codex_alone_without_limits_says_none(
+        tmp_path, capsys, monkeypatch):
+    """The same Codex with no OpenCode beside it: "from the Codex session
+    log" was a source sending nothing, and the fall-through below it is
+    "open Claude Code once", on a desk that has no Claude Code."""
+    _no_cli(monkeypatch, desktop=False, codex=True)
+    _codex_log(tmp_path, monkeypatch, limits=False)
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert ("Usage data  none -- Codex's session log has no usage limits in"
+            " it yet") in st
+    assert "open Claude Code" not in st
+
+
+def test_a_weeks_old_status_line_is_no_number_for_opencodes_light(
+        tmp_path, capsys, monkeypatch):
+    """Third review, 2026-10-19: status counted any statusline.json ever
+    written. One three weeks old, whose windows have all reset since,
+    sends nothing -- measured through the look-only bus -- so the board
+    waits there too."""
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _statusline(tmp_path, age_s=21 * 86400)
+    _with_opencode(tmp_path, key=False)
+    _no_fetch(monkeypatch)
+    _put_plugin(_oc_plugin(tmp_path))
+    _says_the_board_waits(tmp_path, capsys)
+
+
+def test_the_two_commands_ask_one_predicate_and_it_matches_the_wire(
+        tmp_path, capsys, monkeypatch):
+    """numbered_sources against what `status --wire` would actually send,
+    with OpenCode's light-only state set aside: the two must agree, or the
+    copy describes a cable the daemon is not driving."""
+    _no_cli(monkeypatch, desktop=False, codex=True)
+    _codex_log(tmp_path, monkeypatch, limits=False)
+    assert cli.numbered_sources() == frozenset()
+    cli._wire_line()
+    assert "nothing to send" in capsys.readouterr().out
+    _codex_log(tmp_path, monkeypatch, limits=True)
+    assert cli.numbered_sources() == frozenset({"codex"})
+    cli._wire_line()
+    assert '"provider":"codex"' in capsys.readouterr().out
+
+
+def test_numbered_sources_sweeps_nothing(tmp_path, monkeypatch):
+    """Install asks it, and an install must not delete the hook slots it is
+    describing: an hour-old Claude slot and Codex slot both survive."""
+    old = time.time() - 2 * 3600
+    for d in ("state", "state-codex"):
+        sd = tmp_path / ".blink" / d
+        sd.mkdir(parents=True)
+        (sd / "s1.state").write_text(json.dumps({"event": "Stop", "t": old}))
+        os.utime(sd / "s1.state", (old, old))
+    cli.numbered_sources()
+    assert (tmp_path / ".blink" / "state" / "s1.state").exists()
+    assert (tmp_path / ".blink" / "state-codex" / "s1.state").exists()

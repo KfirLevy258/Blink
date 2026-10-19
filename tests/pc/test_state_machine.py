@@ -1086,6 +1086,23 @@ def test_windows_any_other_doubt_is_alive():
     assert k32.closed == [0x1234]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="needs the real kernel32 (Windows)")
+def test_windows_the_real_kernel32_tells_alive_from_gone():
+    """Every test above hands in a stand-in kernel32, so none of them would
+    notice the real one declared wrong -- a HANDLE truncated to a C int on
+    64-bit, a last error read from ctypes.windll's cache instead of
+    use_last_error. Third review, 2026-10-19: this one goes through
+    _win_kernel32() and the real calls. This process is alive; a child that
+    has been started and waited on is gone -- whether Windows then reports
+    ERROR_INVALID_PARAMETER for its id or, while a handle (Popen's) still
+    holds its object, an exit code other than STILL_ACTIVE."""
+    assert claude_state._windows_process_is_gone(os.getpid()) is False
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    child.wait()
+    assert claude_state._windows_process_is_gone(child.pid) is True
+    assert claude_state._safe_windows_probe(child.pid) is True
+
+
 def test_windows_probe_never_raises(monkeypatch):
     def boom(pid, kernel32=None, last_error=None):
         raise OSError("no kernel32 here")
@@ -1119,21 +1136,81 @@ def test_claude_and_codex_keep_no_liveness_on_windows(monkeypatch, state_dir):
 # --- SeenAlivePids: one directory's own rule --------------------------------
 
 
-def test_seen_alive_ends_a_session_only_for_a_pid_it_watched_live(state_dir):
-    alive = {7: True, 8: False}            # 8 was never alive here
+def test_seen_alive_ends_a_session_only_for_a_pid_it_watched_live(state_dir,
+                                                                 dead):
+    # Both pids are REAPED CHILDREN's, not made-up 7 and 8 (third review,
+    # 2026-10-19). The last assertion below is that the process-wide flag
+    # was not fed, and the only evidence settle_pid_trust suspends on is a
+    # slot written seconds ago whose pid the HOST says is gone, in a poll
+    # where no slot's pid is alive on the host. On Linux 7 and 8 are living
+    # kernel threads, so a regression routing this directory through the
+    # global rule left the flag True and the assertion passing anyway. The
+    # stand-in probe still calls `live` alive; the host does not.
+    live, never = dead(), dead()
+    alive = {live: True, never: False}     # `never` was never alive here
     seen = claude_state.SeenAlivePids(probe=lambda pid: not alive[pid])
-    write_session(state_dir, "a", "Stop", NOW - 2, pid=7)
-    write_session(state_dir, "b", "Stop", NOW - 2, pid=8)
+    write_session(state_dir, "a", "Stop", NOW - 2, pid=live)
+    write_session(state_dir, "b", "Stop", NOW - 2, pid=never)
     p = provider(state_dir, liveness=seen)
     assert p.poll(NOW)[0].n_idle == 2
-    alive[7] = False
-    # 7 is gone a second later: its session ends at once, slot age and all.
+    alive[live] = False
+    # `live` is gone a second later: its session ends at once, whatever
+    # the slot age.
     f = p.poll(NOW + 1)[0]
     assert f.n_idle == 1
     states, _, _ = p.census(NOW + 1)
     assert set(states) == {"b"}
     # The global flag was neither fed nor read.
     assert claude_state.pid_liveness_trusted() is True
+
+
+def test_seen_alive_a_reused_pid_does_not_revive_a_session_it_ended(
+        state_dir):
+    """Third review, 2026-10-19 (scratchpad bunexp/reuse.py): t0 the pid is
+    alive and idle; t1 OpenCode quits and the session drops; t2 an
+    unrelated process is handed the same pid. The verdict was re-derived
+    from the pid every poll, so the stranger brought the closed session
+    back as "your turn" for the rest of the hour."""
+    alive = {777: True}
+    seen = claude_state.SeenAlivePids(probe=lambda pid: not alive[pid])
+    write_session(state_dir, "s1", "Stop", NOW - 5, pid=777)
+    p = provider(state_dir, sweep=False, liveness=seen)
+    assert set(p.census(NOW)[0]) == {"s1"}
+    alive[777] = False
+    assert p.census(NOW + 2)[0] == {}
+    alive[777] = True                      # the pid, recycled
+    assert p.census(NOW + 4)[0] == {}
+    assert p.census(NOW + 3000)[0] == {}
+
+
+def test_seen_alive_a_new_event_revives_a_session_it_ended(state_dir):
+    """The verdict is keyed by the slot's clock, so the one thing that can
+    bring the session back is the one that should: a new event in the slot
+    (OpenCode started again on the same session, by a pid that is alive)."""
+    alive = {777: True, 778: True}
+    seen = claude_state.SeenAlivePids(probe=lambda pid: not alive[pid])
+    write_session(state_dir, "s1", "Stop", NOW - 5, pid=777)
+    p = provider(state_dir, sweep=False, liveness=seen)
+    p.census(NOW)
+    alive[777] = False
+    assert p.census(NOW + 2)[0] == {}
+    write_session(state_dir, "s1", "PreToolUse", NOW + 3, pid=778)
+    assert p.census(NOW + 4)[0] == {"s1": (base.STATE_RUNNING, "")}
+    # And the same pid with a new event counts as new evidence too.
+    alive[777] = True
+    write_session(state_dir, "s1", "Stop", NOW + 5, pid=777)
+    assert p.census(NOW + 6)[0] == {"s1": (base.STATE_IDLE, "")}
+
+
+def test_seen_alive_verdicts_are_bounded():
+    gone = set()
+    seen = claude_state.SeenAlivePids(limit=3, probe=lambda pid: pid in gone)
+    for pid in (3, 4, 5, 9):
+        seen.observe([("x", {"event": "Stop", "t": NOW, "pid": pid})], NOW)
+        gone.add(pid)
+        assert seen.says_ended(pid, 0.0, f"slot{pid}", slot_t=NOW) is True
+    assert len(seen._ended) == 3
+    assert "slot3" not in seen._ended
 
 
 def test_seen_alive_is_bounded_and_forgets_the_oldest():

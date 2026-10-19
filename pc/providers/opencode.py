@@ -207,6 +207,19 @@ LIMIT_TYPES = ("TOKENS_LIMIT", "CREDIT_LIMIT")
 # for the two clocks disagreeing.
 SESSION_RESET_SLACK_S = 5 * 3600.0 + 60.0
 
+# How far behind this desk's clock a reset may sit and still count as not yet
+# passed. Third review, 2026-10-19: the test was a bare `reset <= now`, so a
+# desk whose clock runs a couple of seconds ahead of Z.ai's -- ordinary NTP
+# drift -- read a window rolling over on the server's next tick as already
+# rolled, and blanked a reading fetched that same second, for as long as
+# the next fetch took (a minute while OpenCode is in use, ten otherwise). A
+# window the server still reports IS still running; the desk's clock is the
+# one that is early. Five seconds is skew, not a cached reply: a reply held
+# anywhere for longer than that is the stale one the strict test was for,
+# and it still blanks. The same slack retires a kept window in _usage_frame,
+# so a reading parsed inside it is not dropped by the very next poll.
+RESET_CLOCK_SLACK_S = 5.0
+
 # Plausible bounds for a reset, in seconds: 2020-01-01 to 2100-01-01, as the
 # other sources bound theirs. What it notices is a unit change.
 RESET_EPOCH_MIN = 1_577_836_800
@@ -583,7 +596,7 @@ def _limit_reset(limit, now_epoch, max_ahead_s=None):
     s = ms / 1000.0
     if not (RESET_EPOCH_MIN <= s <= RESET_EPOCH_MAX):
         return None
-    if s <= now_epoch:
+    if s <= now_epoch - RESET_CLOCK_SLACK_S:
         return None
     if max_ahead_s is not None and s > now_epoch + max_ahead_s:
         return None
@@ -592,13 +605,15 @@ def _limit_reset(limit, now_epoch, max_ahead_s=None):
 
 def _reset_has_passed(limit, now_epoch):
     """True when the limit names a plausible reset that is already behind
-    now_epoch. A missing or implausible stamp is not "passed": that window
-    keeps its percentage with no countdown, as _limit_reset decides."""
+    now_epoch by more than RESET_CLOCK_SLACK_S. A missing or implausible
+    stamp is not "passed": that window keeps its percentage with no
+    countdown, as _limit_reset decides."""
     ms = _number(limit.get("nextResetTime"))
     if ms is None:
         return False
     s = ms / 1000.0
-    return RESET_EPOCH_MIN <= s <= RESET_EPOCH_MAX and s <= now_epoch
+    return (RESET_EPOCH_MIN <= s <= RESET_EPOCH_MAX
+            and s <= now_epoch - RESET_CLOCK_SLACK_S)
 
 
 def parse_quota(payload, now_epoch):
@@ -1073,9 +1088,13 @@ class OpenCodeProvider(base.ProviderParser):
         # is reported unknown rather than carried across the reset. The
         # normalizer's docstring names the failure: usage that has already
         # been forgiven, shown with confidence.
-        if s_reset is not None and s_reset <= now_epoch:
+        #
+        # With the clock slack _parse_quota allows (RESET_CLOCK_SLACK_S): a
+        # reading it kept because its reset was a second or two behind this
+        # desk's fast clock must not be retired by the poll right after it.
+        if s_reset is not None and s_reset <= now_epoch - RESET_CLOCK_SLACK_S:
             s_pct, s_reset = base.UNKNOWN, None
-        if w_reset is not None and w_reset <= now_epoch:
+        if w_reset is not None and w_reset <= now_epoch - RESET_CLOCK_SLACK_S:
             w_pct, w_reset = base.UNKNOWN, None
         if s_pct < 0 and w_pct < 0:
             return None

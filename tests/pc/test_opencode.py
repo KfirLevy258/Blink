@@ -393,9 +393,37 @@ def test_a_window_whose_reset_has_passed_has_no_percentage():
     assert q.session_pct == base.UNKNOWN and q.session_resets_at is None
     assert q.weekly_pct >= 0 and q.weekly_resets_at is not None
     # Both windows over: no reading at all, rather than a frame of unknowns.
+    # Past the clock slack, not one second past: a reset a second behind is
+    # a fast desk clock since the third review (RESET_CLOCK_SLACK_S).
     assert opencode.parse_quota(
-        fx.credit_plan(NOW, session_reset_in=-60, weekly_reset_in=-1),
+        fx.credit_plan(NOW, session_reset_in=-60,
+                       weekly_reset_in=-(opencode.RESET_CLOCK_SLACK_S + 1)),
         NOW) is None
+
+
+def test_a_desk_clock_a_little_ahead_keeps_a_just_fetched_reading(dirs):
+    """Third review, 2026-10-19: with a bare `reset <= now`, a desk two
+    seconds ahead of the server blanked a window the server had just
+    reported as running -- until the next fetch. Inside
+    RESET_CLOCK_SLACK_S it is kept, on the poll right after the fetch too;
+    past it, the window still blanks."""
+    slack = opencode.RESET_CLOCK_SLACK_S
+    assert 0 < slack <= 10
+    q = opencode.parse_quota(
+        fx.credit_plan(NOW, session_reset_in=-2), NOW)
+    assert q.session_pct >= 0
+    ready(dirs, active_at=NOW)
+    p = provider(dirs, Recorder(fx.encode(
+        fx.credit_plan(NOW, session_reset_in=-2))))
+    p.tick(NOW)
+    f = [x for x in p.poll(NOW + 1) if x.src == opencode.SRC_ID][0]
+    assert f.session_pct >= 0
+    # Once the slack is spent the window is over, here as anywhere.
+    f = [x for x in p.poll(NOW + slack) if x.src == opencode.SRC_ID][0]
+    assert f.session_pct == base.UNKNOWN
+    q = opencode.parse_quota(
+        fx.credit_plan(NOW, session_reset_in=-(slack + 1)), NOW)
+    assert q.session_pct == base.UNKNOWN
 
 
 def test_a_passed_window_does_not_reach_the_panel(dirs):
@@ -958,10 +986,14 @@ def test_a_window_that_rolled_since_the_fetch_is_unknown(dirs):
     p = provider(dirs, Recorder(fx.encode(fx.credit_plan(
         NOW, session_reset_in=600, weekly_reset_in=7200))))
     p.tick(NOW)
-    (f,) = p.poll(NOW + 601)
+    # One second past each reset used to be enough; since the third review
+    # a window is retired once it is RESET_CLOCK_SLACK_S behind, so a desk
+    # clock a little ahead of the server's does not blank it early.
+    past = opencode.RESET_CLOCK_SLACK_S
+    (f,) = p.poll(NOW + 600 + past)
     assert f.session_pct == base.UNKNOWN and f.session_resets_at is None
     assert f.weekly_pct >= 0
-    assert p.poll(NOW + 7201) == []           # nothing left to show
+    assert p.poll(NOW + 7200 + past) == []    # nothing left to show
 
 
 def test_no_reading_no_usage_frame(dirs):

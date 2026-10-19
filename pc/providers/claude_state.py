@@ -598,6 +598,20 @@ class SeenAlivePids:
         self._limit = limit
         self._probe_override = probe
         self._seen = collections.OrderedDict()
+        # {slot path: (pid, slot t)} for every slot this object has already
+        # ended. Found in the third review, 2026-10-19 (scratchpad
+        # bunexp/reuse.py): the verdict used to be re-derived from the pid
+        # at every poll, so a pid seen alive and idle at t0, gone when
+        # OpenCode quit at t1, and REUSED by an unrelated process at t2 read
+        # alive again -- observe() even re-armed it -- and the closed
+        # session came back on the panel as "your turn" for the rest of the
+        # hour. A pid can only ever end a session once; what may revive it
+        # is a new event, which is a new `t` in the slot. A stranger who
+        # inherits the number writes nothing there, so the verdict holds.
+        # Bounded like _seen, and forgetting costs the same: that slot falls
+        # back to ABANDONED_AFTER_S, which a slot already dead long enough to
+        # be evicted is well on its way to.
+        self._ended = collections.OrderedDict()
 
     def _probe(self):
         if self._probe_override is not None:
@@ -608,8 +622,9 @@ class SeenAlivePids:
         return pid in self._seen
 
     def reset(self):
-        """Forget every pid. For tests."""
+        """Forget every pid, and every verdict. For tests."""
         self._seen.clear()
+        self._ended.clear()
 
     def observe(self, slots, now_epoch):
         """Remember every slot pid that is alive right now. Once per poll,
@@ -626,14 +641,36 @@ class SeenAlivePids:
             while len(self._seen) > self._limit:
                 self._seen.popitem(last=False)
 
-    def says_ended(self, pid, age_s, slot_path=""):
-        """True when a pid this process has seen alive is now gone."""
-        if pid is None or pid not in self._seen:
+    def says_ended(self, pid, age_s, slot_path="", slot_t=None):
+        """True when a pid this process has seen alive is now gone.
+
+        And it STAYS true for that slot, for as long as the slot's pid and
+        `t` are the ones it was ended on -- see _ended in __init__ for the
+        pid-reuse incident. `slot_t` None (a caller that has no clock to
+        offer) records no verdict: there would be nothing to clear it on.
+        """
+        if pid is None:
+            return False
+        verdict = self._ended.get(slot_path)
+        if verdict is not None:
+            if verdict == (pid, slot_t):
+                return True
+            # A new event in the slot, or a new process in it: the session
+            # is alive again on its own evidence, and judged afresh below.
+            del self._ended[slot_path]
+        if pid not in self._seen:
             return False
         probe = self._probe()
         if probe is None:
             return False
-        return bool(probe(pid))
+        if not probe(pid):
+            return False
+        if slot_t is not None:
+            self._ended[slot_path] = (pid, slot_t)
+            self._ended.move_to_end(slot_path)
+            while len(self._ended) > self._limit:
+                self._ended.popitem(last=False)
+        return True
 
 
 _RUNNING_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse",
@@ -788,14 +825,16 @@ class ClaudeStateProvider(base.ProviderParser):
         # session early, never keep one alive past ABANDONED_AFTER_S. A pid
         # that has been reused is the case that would otherwise argue for
         # "alive", and it is not allowed a vote.
-        if self._pid_ended(_slot_pid(payload), age, path):
+        if self._pid_ended(_slot_pid(payload), age, path, t):
             return base.STATE_UNKNOWN, age, name
         return state, age, name
 
-    def _pid_ended(self, pid, age, path):
+    def _pid_ended(self, pid, age, path, t=None):
         if self._liveness is None:
             return _pid_says_ended(pid, age, path)
-        return self._liveness.says_ended(pid, age, path)
+        # The slot's own clock, not the age: a SeenAlivePids remembers which
+        # event a dead pid ended, and only a new one revives the session.
+        return self._liveness.says_ended(pid, age, path, slot_t=t)
 
     def _count_agents(self, session_dir, now_epoch):
         """Live agents for one session.

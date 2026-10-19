@@ -5,6 +5,8 @@
 //   node tests/ci/opencode_plugin_driver.mjs fixture   a known desk, held open
 //   node tests/ci/opencode_plugin_driver.mjs instances several plugin instances,
 //                                                      then exit
+//   node tests/ci/opencode_plugin_driver.mjs nodir     two instances with no
+//                                                      directory, then exit
 //
 // Run with HOME pointed at a throwaway directory: the plugin writes into
 // ~/.blink/state-opencode and nowhere else, and this checks that it does.
@@ -728,6 +730,21 @@ async function instances() {
   }
 }
 
+// --- nodir -----------------------------------------------------------------
+
+// Third review, 2026-10-19: an instance whose input carries no `directory`
+// was keyed "" in the exit-handler map, so every such instance shared one
+// key and each evicted the last -- at exit only the newest ended anything.
+// Two of them here, ses_nodir1 and ses_nodir2: both must be tombstoned.
+async function nodir() {
+  makeDir()
+  for (const sid of ["ses_nodir1", "ses_nodir2"]) {
+    const h = await factory({ client: {}, $: () => {} })
+    await busy(h, sid)
+    await idle(h, sid)
+  }
+}
+
 // --- main ------------------------------------------------------------------
 
 const mode = process.argv[2] || "check"
@@ -743,6 +760,7 @@ try {
     await created(h, "ses_exitkid", { parentID: "ses_exit" })
   } else if (mode === "fixture") await fixture()
   else if (mode === "instances") await instances()
+  else if (mode === "nodir") await nodir()
   else crashed = `unknown mode ${mode}`
 } catch (e) {
   crashed = `the driver crashed: ${e && e.stack ? e.stack : e}`

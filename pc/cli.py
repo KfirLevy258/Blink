@@ -577,6 +577,21 @@ class Desk(NamedTuple):
     opencode: bool = False
     opencode_plan: bool = False
     opencode_plugin: bool = False
+    # The providers, OpenCode aside, that would put a NUMBER on the cable
+    # right now -- numbered_sources(), read off the same look-only bus
+    # `status --wire` builds. Not inferred from which tools are installed:
+    # see numbered_sources for the two desks that inference got wrong.
+    numbers: frozenset = frozenset()
+
+    @property
+    def others_report(self) -> bool:
+        """Whether anything but OpenCode puts a usage message on the cable.
+
+        The one predicate the install note and `blink status` both ask:
+        without such a message, and without a GLM plan key, the daemon sends
+        nothing at all and OpenCode's light has no frame to ride on.
+        """
+        return bool(self.numbers)
 
     @property
     def cli_answers(self) -> bool:
@@ -613,6 +628,45 @@ class Desk(NamedTuple):
         return self.desktop_installed and not self.desktop
 
 
+def numbered_sources(now=None) -> frozenset:
+    """The providers other than OpenCode with a usage figure to send now.
+
+    Third review, 2026-10-19: the install note asked `desk.codex or
+    desk.opencode_plan` and `blink status` asked "a statusline.json ever
+    written, or Desktop, or Codex" -- two different guesses at one question,
+    and both wrong for real desks. A Codex whose rollouts carry no usable
+    rate_limits (an API-key login writes none) sends no frame, and a
+    statusline.json weeks old, whose windows have since reset, sends
+    nothing either; on each, with a keyless OpenCode beside it, the daemon
+    sends no usage message and the board sits on its waiting screen while
+    both commands promised OpenCode's light.
+
+    So the question is put to the providers themselves: the look-only bus
+    `status --wire` builds (ingest.default_providers(look_only=True)), each
+    polled once, and normalizer.rank -- the step that decides which
+    providers get a ring -- says who has a number. OpenCode is left out:
+    its quota is the one source that needs the network, and on a desk with
+    a plan key that key is the number source anyway (desk.opencode_plan).
+    Polled directly rather than through IngestionBus.poll, which would also
+    write the weekly anchor and may walk Desktop's stores to seed it: the
+    install has no business changing ~/.blink to describe it. look_only
+    sweeps nothing.
+    """
+    from pc import ingest, normalizer
+    now = time.time() if now is None else now
+    frames = []
+    for p in ingest.default_providers(look_only=True):
+        if isinstance(p, opencode.OpenCodeProvider):
+            continue
+        try:
+            frames.extend(p.poll(now) or [])
+        except Exception:
+            # The bus contains a failing provider the same way, and a
+            # provider the daemon would skip has no number to send.
+            continue
+    return frozenset(m.provider for m in normalizer.rank(frames))
+
+
 def read_desk(version=None) -> Desk:
     """Read the machine once. `version` is a claude_version() result the
     caller already has: `blink install` used to ask twice, and a `claude`
@@ -630,7 +684,8 @@ def read_desk(version=None) -> Desk:
                 weekly=text is None and desktop and weekly_countdown_known(),
                 opencode=opencode_present(),
                 opencode_plan=opencode_plan_key(),
-                opencode_plugin=opencode_plugin_ours())
+                opencode_plugin=opencode_plugin_ours(),
+                numbers=numbered_sources())
 
 
 def _and(names) -> str:
@@ -1070,7 +1125,9 @@ def _note_tools_alone(desk):
     """
     import textwrap
     shown = []
-    if desk.codex:
+    # Only a Codex whose log has limits in it (numbered_sources): one that
+    # writes none -- an API-key login -- shows neither here.
+    if desk.codex and "codex" in desk.numbers:
         shown.append("both Codex limits and their countdowns, from the"
                      " session log Codex already writes")
     if desk.opencode_plan:
@@ -1080,8 +1137,9 @@ def _note_tools_alone(desk):
     # number: the daemon sends nothing at all on a desk where no source has
     # one, and the board stays on its waiting screen. Measured with real
     # OpenCode on the real board (2026-10-19) -- this note promised "only its
-    # light" to exactly that desk.
-    numbered = desk.codex or desk.opencode_plan
+    # light" to exactly that desk. Asked of the providers, not of which
+    # tools are installed (numbered_sources, third review 2026-10-19).
+    numbered = desk.others_report or desk.opencode_plan
     if desk.tool_lights and numbered:
         shown.append(f"the activity light for {_and(desk.tool_lights)}"
                      " sessions")
@@ -3119,7 +3177,7 @@ def cmd_status(args) -> int:
               " status line on this machine)")
     elif age is not None:
         print(f"Usage data  {age}s old -- open Claude Code to refresh it")
-    elif desk.codex:
+    elif desk.codex and "codex" in desk.numbers:
         print("Usage data  from the Codex session log (no Claude Code status"
               " line yet)")
     elif desk.opencode and desk.opencode_plan:
@@ -3134,6 +3192,13 @@ def cmd_status(args) -> int:
         # their OpenCode anyway. The OpenCode rows below say what would.
         print("Usage data  none -- nothing on this desk reports a usage"
               " figure (see the OpenCode rows below)")
+    elif desk.codex and not desk.on_path and not desk.unsigned_desktop:
+        # Codex alone, and its log has no limits in it -- an API-key login
+        # writes none. It used to say "from the Codex session log" here
+        # while the daemon sent nothing (third review, 2026-10-19), and
+        # "open Claude Code once" is no better for a desk without it.
+        print("Usage data  none -- Codex's session log has no usage limits"
+              " in it yet")
     elif desk.unsigned_desktop and not desk.on_path:
         print("Usage data  none yet -- Claude Desktop is installed; open it"
               " and sign in")
@@ -3144,11 +3209,13 @@ def cmd_status(args) -> int:
     # OpenCode holds a GLM plan key: there is no other place a GLM figure
     # exists to look at (see _opencode_lines). Its answer is handed to the
     # wire line below rather than fetched a second time there.
-    # Whether anything but OpenCode puts a number on the cable: a Claude Code
-    # status line ever written, Desktop's cache, a Codex log. Without one,
-    # OpenCode's light has no frame to ride on (see _opencode_lines).
-    others_report = age is not None or desk.desktop or desk.codex
-    oc_quota = _source_lines(bridge_running, others_report=others_report)
+    # Whether anything but OpenCode puts a number on the cable. Without one,
+    # OpenCode's light has no frame to ride on (see _opencode_lines). The
+    # Desk's answer, which the install note shares: this used to be its own
+    # guess -- "a status line ever written, Desktop, or Codex" -- and
+    # disagreed with the note's (numbered_sources, third review 2026-10-19).
+    oc_quota = _source_lines(bridge_running,
+                             others_report=desk.others_report)
     if getattr(args, "wire", False):
         _wire_line(oc_quota)
     return 0

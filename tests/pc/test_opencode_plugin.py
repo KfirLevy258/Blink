@@ -160,3 +160,21 @@ def test_the_exit_handlers_are_bounded(tmp_path):
         assert f"ses_d{i}.state" not in left, i
     # Older than ses_d0, so evicted before it.
     assert "ses_live.state" in left and "ses_other.state" in left
+
+
+@needs_node
+def test_instances_with_no_directory_each_keep_their_exit_handler(tmp_path):
+    """Third review, 2026-10-19: with no input.directory every instance was
+    keyed "" and each evicted the one before, so at exit only the newest
+    ended its sessions; the others held "your turn" until the pid check, or
+    for the hour if no poll had seen the process alive."""
+    env = dict(os.environ, HOME=str(tmp_path), USERPROFILE=str(tmp_path))
+    r = subprocess.run([NODE, DRIVER, "nodir"], capture_output=True,
+                       text=True, env=env, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "" and r.stderr == ""
+    left = set(os.listdir(os.path.join(str(tmp_path), ".blink",
+                                       "state-opencode")))
+    for sid in ("ses_nodir1", "ses_nodir2"):
+        assert f"{sid}.ended" in left, left
+        assert f"{sid}.state" not in left, left

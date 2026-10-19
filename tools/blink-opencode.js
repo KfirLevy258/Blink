@@ -323,8 +323,17 @@ function renameRetrying(from, to) {
 // over sessions they had last seen days ago, tombstoning ids that a live
 // instance (or another OpenCode process entirely) now owned. One ender per
 // directory: a new instance for a directory replaces its predecessor, whose
-// sessions, if any are still open, are left to the daemon's pid check.
+// sessions, if any are still open, are left to the daemon's pid check --
+// which ends them only if a poll saw this process alive (SeenAlivePids). A
+// process shorter than a poll that also lost its handler here keeps its
+// slots for the hour. `opencode run` builds one instance for one directory,
+// so in practice that is a `serve`'s problem, and a `serve` is seen alive.
 // Bounded as the maps are, oldest directory first.
+//
+// An instance with no directory gets a key of its own (a fresh Symbol), not
+// a shared "": third review, 2026-10-19 -- every such instance landed on the
+// one key and each new one evicted the last, so at exit only the newest
+// ended its sessions and the rest held theirs on the panel.
 const MAX_INSTANCES = 64
 const enders = new Map()
 quietly(() => {
@@ -736,12 +745,17 @@ export const BlinkStatePlugin = async (input) => {
     stillRunning(rootOf(sid))
   }
 
-  // The process exiting is the session ending -- see note 3 at the top. Every
-  // top-level session this instance wrote a slot for gets the SessionEnd
+  // The process exiting is the session ending -- see note 3 at the top. The
+  // top-level sessions this instance wrote a slot for get the SessionEnd
   // treatment, from the one listener registered at module scope above --
   // replacing whatever an earlier instance for the same directory left there.
+  // But only while this instance is the one registered for its directory
+  // and among the newest MAX_INSTANCES: one replaced or evicted before the
+  // exit ends nothing, and its sessions fall to the pid check (third review,
+  // 2026-10-19: this said "every" session, which a short `opencode run` that
+  // lost its handler would not get -- see the note on `enders`).
   quietly(() => {
-    const key = fallbackDir === null ? "" : fallbackDir
+    const key = fallbackDir === null ? Symbol("no directory") : fallbackDir
     enders.delete(key)
     while (enders.size >= MAX_INSTANCES) enders.delete(enders.keys().next().value)
     enders.set(key, () => {

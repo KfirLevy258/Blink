@@ -56,11 +56,16 @@ def default_providers(look_only=False):
     `look_only` is for a one-shot command (`blink status --wire`) rather than
     the daemon: OpenCode's provider then starts no quota thread -- whose
     first tick would otherwise send the customer's key to Z.ai from a
-    command that only meant to look -- and does not sweep its slots.
+    command that only meant to look -- and no provider sweeps its slots.
+    Claude's and Codex's included, since third review, 2026-10-19: `blink
+    install` now builds this list too (cli.numbered_sources), to say what
+    the panel will show, and an install that deleted hook slots on the way
+    to describing them would be changing the answer it was printing.
     """
     return [ClaudeCliProvider(), ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
-            ClaudeStateProvider(), CodexCliProvider(),
+            ClaudeStateProvider(sweep=not look_only),
+            CodexCliProvider(sweep=not look_only),
             # After Codex, and the order is a tie-break that matters: two
             # providers each with a session RUNNING both carry active_at =
             # now, and select_pair keeps poll order on a tie, so Codex -- the
