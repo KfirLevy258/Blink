@@ -1060,3 +1060,171 @@ def test_the_once_per_process_flag_survives_the_move(monkeypatch):
     bus.poll_frames()
     assert len(calls) == 1
     assert bus._seeded is True
+
+
+# --- OpenCode, the third provider ------------------------------------------
+
+
+def test_opencode_ships_in_the_default_provider_list_and_starts_nothing():
+    """Registered, so the board's preference can name it -- and building the
+    list makes no request: the quota thread starts on the first poll()."""
+    import threading
+    before = {t.ident for t in threading.enumerate()}
+    ids = [p.get_provider_id() for p in ingest.default_providers()]
+    assert "opencode" in ids
+    # After codex, so a tie between two live session slots keeps codex.
+    assert ids.index("opencode") > ids.index("codex")
+    started = [t for t in threading.enumerate()
+               if t.ident not in before and t.name == "blink-opencode-quota"]
+    assert started == []
+
+
+def test_the_board_can_prefer_opencode():
+    bus = ingest.IngestionBus(
+        providers=[Fixed(frame(provider="claude")),
+                   Fixed(frame(provider="opencode", src="zai"))],
+        now=lambda: NOW)
+    assert bus.set_preferred("opencode") is True
+    assert bus.poll()["provider"] == "opencode"
+
+
+def _used(provider, used_at, fetched_at=None, session=30.0):
+    """A merged-looking frame: read at `fetched_at`, last used at `used_at`."""
+    return base.NormalizedUsageFrame(
+        provider=provider, src="zai" if provider == "opencode" else "cli",
+        observed_at=fetched_at if fetched_at is not None else used_at,
+        active_at=used_at, session_pct=session, weekly_pct=10.0)
+
+
+def test_a_polled_opencode_does_not_take_the_ring_from_a_used_codex():
+    """Three providers, two rings. OpenCode's reading was fetched seconds
+    ago, but nobody has touched OpenCode for an hour; Codex was used two
+    minutes ago. The second ring is Codex's."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(_used("claude", NOW - 10)),
+                   Fixed(_used("opencode", NOW - 3600, fetched_at=NOW - 5)),
+                   Fixed(_used("codex", NOW - 120))],
+        preferred_provider="claude", now=lambda: NOW)
+    msg = bus.poll()
+    assert (msg["provider"], msg["p2"]) == ("claude", "codex")
+
+
+def test_a_used_opencode_takes_the_ring():
+    bus = ingest.IngestionBus(
+        providers=[Fixed(_used("claude", NOW - 10)),
+                   Fixed(_used("opencode", NOW - 30, fetched_at=NOW - 500)),
+                   Fixed(_used("codex", NOW - 120))],
+        preferred_provider="claude", now=lambda: NOW)
+    msg = bus.poll()
+    assert (msg["provider"], msg["p2"]) == ("claude", "opencode")
+    # And the fresh fetch is not "Reading is old": the age is the fetch's.
+    assert msg["p2_stale"] is False and msg["p2_age_s"] == 500
+
+
+def test_without_claude_the_most_recently_used_is_the_primary():
+    bus = ingest.IngestionBus(
+        providers=[Fixed(_used("opencode", NOW - 3600, fetched_at=NOW)),
+                   Fixed(_used("codex", NOW - 120))],
+        preferred_provider="claude", now=lambda: NOW)
+    msg = bus.poll()
+    assert (msg["provider"], msg["p2"]) == ("codex", "opencode")
+
+
+def test_an_opencode_weekly_reset_never_becomes_the_claude_anchor():
+    """weekly_anchor.observe is fed claude frames only. A Z.ai week is a
+    different account's week, and the anchor republishes as claude."""
+    f = frame(provider="opencode", src="zai")
+    f.weekly_resets_at = NOW + 3 * 86400
+    bus = ingest.IngestionBus(providers=[Fixed(f)], now=lambda: NOW)
+    bus.poll()
+    assert weekly_anchor.load(weekly_anchor.anchor_path()) is None
+
+
+# --- the light belongs to every provider, the rings to two -----------------
+
+
+def _lit(provider, used_at, state="", label="", **counts):
+    f = _used(provider, used_at)
+    f.state = state
+    f.label = label
+    for k, v in counts.items():
+        setattr(f, k, v)
+    return f
+
+
+def test_a_waiting_session_on_the_provider_without_a_ring_lights_the_panel():
+    """Claude and Codex hold the rings; OpenCode, used longest ago, has none
+    -- and its session is the one waiting on the person. Folding only the
+    pair left the light green over that for as long as it waited."""
+    bus = ingest.IngestionBus(
+        providers=[Fixed(_lit("claude", NOW - 10, base.STATE_RUNNING,
+                              n_run=1)),
+                   Fixed(_lit("codex", NOW - 60, base.STATE_RUNNING,
+                              n_run=2, n_agents=1)),
+                   Fixed(_lit("opencode", NOW - 600, base.STATE_WAITING,
+                              label="glm-project", n_wait=1, n_agents=2))],
+        preferred_provider="claude", now=lambda: NOW)
+    msg = bus.poll()
+    assert (msg["provider"], msg["p2"]) == ("claude", "codex")
+    assert "opencode" not in json.dumps(msg)        # no ring, no key
+    assert msg["state"] == base.STATE_WAITING
+    assert (msg["n_sess"], msg["n_run"], msg["n_wait"], msg["n_agents"]) == (
+        4, 3, 1, 3)
+    # The one waiting session is named, though its provider has no ring.
+    assert bus.session_pair() == ("glm-project", 1)
+
+
+def test_a_name_is_refused_when_a_ringless_provider_shares_the_state():
+    bus = ingest.IngestionBus(
+        providers=[Fixed(_lit("claude", NOW - 10, base.STATE_WAITING,
+                              label="mine", n_wait=1)),
+                   Fixed(_lit("codex", NOW - 60, base.STATE_RUNNING,
+                              n_run=1)),
+                   Fixed(_lit("opencode", NOW - 600, base.STATE_WAITING,
+                              n_wait=1))],
+        preferred_provider="claude", now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["state"] == base.STATE_WAITING and msg["n_wait"] == 2
+    assert bus.session_pair() == ("", 2)
+
+
+def test_one_and_two_provider_lines_are_byte_identical_without_others():
+    from pc import protocol
+    one = _lit("claude", NOW - 10, base.STATE_IDLE, label="x", n_idle=1)
+    two = _lit("codex", NOW - 60, base.STATE_WAITING, n_wait=2, n_agents=1)
+    for primary, secondary in ((one, None), (one, two), (two, one)):
+        assert protocol.encode(protocol.frame_to_usage(
+            primary, NOW, secondary)) == protocol.encode(
+            protocol.frame_to_usage(primary, NOW, secondary, others=[]))
+    bus = ingest.IngestionBus(providers=[Fixed(one), Fixed(two)],
+                              preferred_provider="claude", now=lambda: NOW)
+    assert bus.poll() == protocol.frame_to_usage(one, NOW, two)
+
+
+def test_a_provider_with_state_and_no_number_still_lights_the_light():
+    """OpenCode on a model outside the GLM plan: slots, no quota reading.
+
+    merge() has nothing for a ring and returns None, so rank() never saw the
+    provider, and its waiting session left the light green. It takes no ring
+    and adds no key -- only its state and counts.
+    """
+    waiting = base.NormalizedUsageFrame(
+        provider="opencode", src="state", observed_at=NOW,
+        state=base.STATE_WAITING, n_wait=1)
+    bus = ingest.IngestionBus(providers=[Fixed(frame()), Fixed(waiting)],
+                              now=lambda: NOW)
+    msg = bus.poll()
+    assert msg["provider"] == "claude"
+    assert msg["state"] == base.STATE_WAITING
+    assert msg["n_wait"] == 1
+    assert "opencode" not in json.dumps(msg)
+
+
+def test_state_alone_with_no_number_anywhere_is_still_nothing_known():
+    """No percentage from any provider is still no message: the light alone
+    is not a reading, and the board's waiting screen is the honest one."""
+    waiting = base.NormalizedUsageFrame(
+        provider="opencode", src="state", observed_at=NOW,
+        state=base.STATE_WAITING, n_wait=1)
+    bus = ingest.IngestionBus(providers=[Fixed(waiting)], now=lambda: NOW)
+    assert bus.poll() is None

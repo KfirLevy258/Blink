@@ -588,6 +588,35 @@ def shim_content_check(shims):
     return "; ".join(repaired) if repaired else None
 
 
+def refresher_check(refreshers):
+    """Run each refresher -- a callable returning a sentence or None -- under
+    the rules shim_content_check keeps.
+
+    For files that are not shims and so cannot be (path, name) pairs: today
+    the OpenCode plugin, whose ownership is a marker inside the file and
+    whose location is OpenCode's config directory, which pc/cli resolves
+    (pc/cli.refresh_opencode_plugin). The two gates are the same ones, for
+    the same reasons: the escape hatch turns all self-healing off, and a
+    missing install marker means the user uninstalled -- a daemon still
+    winding down must not put back what `blink uninstall` just removed.
+    Each refresher is already forbidden to CREATE a file that is absent;
+    the marker is the second lock on that door.
+    """
+    if os.environ.get(WATCHDOG_DISABLE_ENV):
+        return None
+    if not _read_marker():
+        return None
+    said = []
+    for refresh in refreshers:
+        try:
+            msg = refresh()
+        except Exception as e:
+            msg = f"a refresh failed: {e}"
+        if msg:
+            said.append(msg)
+    return "; ".join(said) if said else None
+
+
 class DriftWatchdog:
     """drift_check on an interval, with a cap on how hard it insists.
 
@@ -598,7 +627,7 @@ class DriftWatchdog:
     """
 
     def __init__(self, settings_path, shim_path, interval_s=300.0,
-                 now=None, check=drift_check, *, shims=()):
+                 now=None, check=drift_check, *, shims=(), refreshers=()):
         import time as _time
         self._settings = settings_path
         self._shim = shim_path
@@ -610,6 +639,9 @@ class DriftWatchdog:
         # until the hook shim turned out to go stale -- keeps working and
         # keeps its ticks free of any filesystem read it did not ask for.
         self._shims = tuple(shims)
+        # The same idea for files that are not shims (refresher_check), and
+        # defaulted to nothing for the same reason.
+        self._refreshers = tuple(refreshers)
         self._next = self._now()
         self._reinstatements = 0
         self._gave_up = False
@@ -649,5 +681,10 @@ class DriftWatchdog:
             stale = shim_content_check(self._shims)
             if stale:
                 found.append(stale)
+
+        if self._refreshers:
+            refreshed = refresher_check(self._refreshers)
+            if refreshed:
+                found.append(refreshed)
 
         return "; ".join(found) if found else None

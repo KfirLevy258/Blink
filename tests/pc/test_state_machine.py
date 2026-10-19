@@ -210,6 +210,29 @@ def test_an_empty_directory_is_silence(state_dir):
     assert provider(state_dir).poll(NOW) == []
 
 
+def test_the_frame_is_active_at_the_last_event_unless_something_runs(
+        state_dir):
+    """Found in review, 2026-10-19: the state frame said active_at = now for
+    as long as any slot was under an hour old, so every provider with a slot
+    tied for the second ring. It now says when the newest counted slot was
+    written -- and `now` while a session runs, because a long tool call
+    writes nothing until it ends (claude_state.activity_at)."""
+    write_session(state_dir, "s1", "Stop", NOW - 900)
+    write_session(state_dir, "s2", "StopFailure", NOW - 300)
+    f = provider(state_dir, sweep=False).poll(NOW)[0]
+    assert f.observed_at == NOW
+    assert f.active_at == NOW - 300
+    write_session(state_dir, "s3", "PreToolUse", NOW - 1200)
+    f = provider(state_dir, sweep=False).poll(NOW)[0]
+    assert f.active_at == NOW
+    # A slot past the hour is out of the census and lends no clock.
+    for sid in ("s1", "s2", "s3"):
+        (state_dir / f"{sid}.state").unlink()
+    write_session(state_dir, "s4", "Stop", NOW - 120)
+    write_session(state_dir, "old", "Stop", NOW - ABANDONED_AFTER_S - 5)
+    assert provider(state_dir, sweep=False).poll(NOW)[0].active_at == NOW - 120
+
+
 def test_one_running_session(state_dir):
     write_session(state_dir, "s1", "PreToolUse", NOW - 5)
     f = provider(state_dir).poll(NOW)[0]

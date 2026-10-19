@@ -11,7 +11,8 @@
 #
 # Scenarios: no-claude, no-settings, no-statusline, with-statusline,
 #            reinstall, foreign-uninstall, spaced-home
-#            all-sources, desktop-only, codex-only, broken-data
+#            all-sources, desktop-only, codex-only, opencode-only,
+#            broken-data
 #            install-uninstall-install, home-wiped-uninstall,
 #            unreadable-settings
 #
@@ -51,6 +52,13 @@ spaced-home) HOME="$WORK/a home with spaces" ;;
 esac
 mkdir -p "$HOME"
 export HOME
+# OpenCode's directories follow XDG, which outranks HOME -- and GitHub's
+# Ubuntu runners export XDG_CONFIG_HOME pointing into the runner's real
+# profile. Left set, the binary would install its OpenCode plugin there while
+# this script asserted against the scenario's HOME, the same shape as the
+# USERPROFILE incident below. Unset, so ~/.config and ~/.local/share under
+# the redirected HOME are what both sides see.
+unset XDG_CONFIG_HOME XDG_DATA_HOME
 
 # Windows resolves ~ from USERPROFILE, not HOME, so setting HOME alone left
 # the binary installing into the runner's REAL profile while this script
@@ -170,6 +178,15 @@ write_codex_log() {
 	EOF
 }
 
+# OpenCode has run here: its database exists. Empty is enough -- presence is
+# all the binary reads off it (pc/providers/opencode.present). No auth.json,
+# so no plan key: the binary must make no request to Z.ai from a runner.
+write_opencode_db() {
+	mkdir -p "$HOME/.local/share/opencode"
+	: >"$HOME/.local/share/opencode/opencode.db"
+}
+OC_PLUGIN="$HOME/.config/opencode/plugin/blink.js"
+
 case "$SCENARIO" in
 no-claude)
 	: ;;                                  # no ~/.claude at all
@@ -194,6 +211,8 @@ desktop-only)
 	write_desktop_cache ;;                # no ~/.claude, no Codex
 codex-only)
 	write_codex_log ;;                    # no ~/.claude, no Desktop
+opencode-only)
+	write_opencode_db ;;                  # no ~/.claude, no Desktop, no Codex
 home-wiped-uninstall)
 	write_settings '{"model": "opus"}' ;;
 unreadable-settings)
@@ -481,6 +500,32 @@ codex-only)
 	r=$(wire_get "$w" session_resets_in_s); [ "$r" -gt 0 ] || fail "codex reset countdown missing: $w"
 	ok "wire: codex primary with both countdowns"
 	;;
+opencode-only)
+	grep -qF "blink.js" "$WORK/disclosure.txt" || fail "disclosure omits the OpenCode plugin"
+	grep -q "OpenCode plugin installed" "$WORK/out.txt" || fail "install did not report the OpenCode plugin: $(cat "$WORK/out.txt")"
+	[ -f "$OC_PLUGIN" ] || fail "OpenCode plugin not installed at $OC_PLUGIN"
+	# Byte for byte: the frozen build must carry tools/blink-opencode.js (the
+	# --add-data line in tools/build_binary.sh), and is_current() compares
+	# exactly, so a CRLF copy would be "stale" forever.
+	cmp -s "$OC_PLUGIN" "$ROOT/tools/blink-opencode.js" || fail "installed plugin differs from tools/blink-opencode.js"
+	ok "OpenCode plugin installed where OpenCode loads it, as a copy of the source"
+
+	# One live session, in the plugin's slot format (= blink-hook.sh's).
+	mkdir -p "$HOME/.blink/state-opencode"
+	printf '{"event":"Stop","t":%s}' "$(date +%s)" >"$HOME/.blink/state-opencode/ses_ci.state"
+	st=$("$HOME/.blink/bin/$BINEXE" status 2>&1) || fail "status exited non-zero: $st"
+	echo "$st" | grep -q "OpenCode    database found" || fail "status does not see OpenCode: $st"
+	echo "$st" | grep -q "OpenCode    plugin installed, 1 live session" || fail "status does not count the OpenCode session: $st"
+	echo "$st" | grep -q "no GLM Coding Plan key" || fail "status does not say there is no plan key: $st"
+	if command -v claude >/dev/null 2>&1; then
+		ok "status reports OpenCode (claude is on PATH here, so the 'alone' wording is asserted on runners only)"
+	else
+		echo "$st" | grep -q "running on OpenCode alone" || fail "status does not say it runs on OpenCode alone: $st"
+		tr -s ' \n' '  ' <"$WORK/out.txt" | grep -q "runs on OpenCode alone" || fail "install did not tell an OpenCode-only user what the panel shows"
+		ok "status and install both explain the OpenCode-only panel"
+	fi
+	"$HOME/.blink/bin/$BINEXE" status --wire >/dev/null 2>&1 || fail "status --wire exited non-zero"
+	;;
 broken-data)
 	st=$("$HOME/.blink/bin/$BINEXE" status 2>&1) || fail "status exited non-zero on broken files: $st"
 	echo "$st" | grep -q "did not parse" || fail "status does not report the unparseable Desktop cache: $st"
@@ -532,6 +577,16 @@ with-statusline | reinstall | spaced-home | install-uninstall-install)
 		fail "uninstall left a statusLine behind" ;;
 esac
 [ ! -e "$SHIM" ] || fail "uninstall left the shim behind"
+if [ "$SCENARIO" = "opencode-only" ]; then
+	[ ! -e "$OC_PLUGIN" ] || fail "uninstall left the OpenCode plugin behind"
+	[ ! -e "$HOME/.blink/state-opencode" ] || fail "uninstall left OpenCode's slots behind"
+	[ -f "$HOME/.local/share/opencode/opencode.db" ] || fail "uninstall touched OpenCode's own data"
+	ok "uninstall removed the OpenCode plugin and slots, and nothing of OpenCode's"
+else
+	# Every other scenario has no OpenCode: install must not have created so
+	# much as its config directory, which OpenCode would npm-install into.
+	[ ! -e "$HOME/.config/opencode" ] || fail "install created an OpenCode config directory on a desk without OpenCode"
+fi
 
 # Windows cannot delete a running executable, and the uninstaller usually IS
 # the executable -- the undo hint we print names the installed copy. So on

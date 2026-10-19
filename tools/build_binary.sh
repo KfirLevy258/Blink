@@ -210,6 +210,7 @@ cd "$ROOT"
 	--specpath "$BUILD" \
 	--add-data "$ROOT/tools/blink-statusline.sh:." \
 	--add-data "$ROOT/tools/blink-hook.sh:." \
+	--add-data "$ROOT/tools/blink-opencode.js:." \
 	--collect-all esptool \
 	--collect-all bitstring \
 	--collect-all bitarray \

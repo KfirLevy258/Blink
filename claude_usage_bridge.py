@@ -705,8 +705,8 @@ def main(argv=None):
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
     from pc.cli import (_self_path, blink_home as _blink_home,
-                        hook_shim_path, installed_bin, settings_path,
-                        shim_path)
+                        hook_shim_path, installed_bin,
+                        refresh_opencode_plugin, settings_path, shim_path)
     self_bin = installed_bin()
     blink_home = _blink_home()
     update.recover(self_bin)
@@ -750,10 +750,17 @@ def main(argv=None):
     # are worth a line each; the other 1439 a day are not.
     time_frames = logbook.Repeats(("utc_offset_min",), "clock syncs")
     _REPEATED = {"usage": usage_frames, "time": time_frames}
+    #
+    # The OpenCode plugin ships inside the program the same way and falls
+    # behind the same way, so it rides the same interval -- but only ever
+    # rewritten where it already is and is ours (refresh_opencode_plugin):
+    # a desk with no OpenCode, or with a blink.js of somebody else's, is
+    # never written to from here.
     watchdog = install_statusline.DriftWatchdog(
         settings_path(), shim_path(),
         shims=((shim_path(), "blink-statusline.sh"),
-               (hook_shim_path(), "blink-hook.sh")))
+               (hook_shim_path(), "blink-hook.sh")),
+        refreshers=(refresh_opencode_plugin,))
 
     # Before the port is touched. The lock lives for the life of the process --
     # the file object is bound here so it is not garbage collected, which would

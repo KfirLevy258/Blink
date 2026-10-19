@@ -23,11 +23,13 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import NamedTuple
 
-from pc import (install_codex_hooks, install_hooks, install_statusline, ota,
-                protocol, statusline_source, update, win_driver)
+from pc import (install_codex_hooks, install_hooks, install_opencode_plugin,
+                install_statusline, ota, protocol, statusline_source, update,
+                win_driver)
 # Eagerly, unlike the other providers, which are imported inside the functions
 # that use them to keep the frozen binary's start-up cheap. This one costs
 # nothing to import (os, and claude_state, which is json/os/sys/time) and it
@@ -35,6 +37,12 @@ from pc import (install_codex_hooks, install_hooks, install_statusline, ota,
 # and a test has to be able to replace it without a real slot directory in
 # reach -- the scan behind it deletes files.
 from pc.providers import codex_state
+# Eagerly too, and for the same reason: `blink status` and the install steps
+# read it, and a test has to be able to replace its fetch_once -- the one call
+# in this file that makes a network request with a customer's key -- without
+# a real auth.json or a real Z.ai anywhere in reach. Importing it costs ssl
+# and urllib, which pc/ota already pulls in for every command.
+from pc.providers import opencode
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -376,6 +384,45 @@ def codex_present() -> bool:
         return False
 
 
+def opencode_present() -> bool:
+    """Has OpenCode run on this machine?
+
+    Its database, not its binary, for the reason codex_present gives: the file
+    is what proves the tool is used here (pc/providers/opencode.present).
+    """
+    try:
+        return opencode.present()
+    except Exception:
+        return False
+
+
+def opencode_plan_key() -> bool:
+    """Does OpenCode hold a GLM Coding Plan key Blink would read quota with?
+
+    A yes/no and nothing more: quota_source() returns which plan and which
+    host, never the key, so nothing that asks this is handed a secret it
+    could print. Reads auth.json; makes no request.
+    """
+    try:
+        return opencode.quota_source() is not None
+    except Exception:
+        return False
+
+
+def opencode_plugin_ours() -> bool:
+    """Is OUR plugin at the path OpenCode loads it from?
+
+    Ours by its marker line, not by its name: a blink.js somebody else wrote
+    lights nothing, and calling it Blink's would promise a light it cannot
+    give (install_opencode_plugin explains the ownership rule).
+    """
+    try:
+        return install_opencode_plugin.is_ours(
+            install_opencode_plugin.plugin_path(opencode.config_dir()))
+    except Exception:
+        return False
+
+
 def claude_on_path() -> bool:
     """Is there a `claude` on PATH, whether or not it answered --version?
 
@@ -517,10 +564,42 @@ class Desk(NamedTuple):
     codex: bool
     hooks: ClaudeHooks
     weekly: bool
+    # OpenCode, in three facts rather than one, because each changes a
+    # different sentence. `opencode`: it has run here (its database exists).
+    # `opencode_plan`: it holds a GLM Coding Plan key, so there is a quota to
+    # show -- without one an OpenCode desk gets a light and no numbers, and
+    # promising numbers there is the confidently-wrong copy this tuple was
+    # written to end. `opencode_plugin`: our plugin is the one at the path
+    # OpenCode loads, so its sessions can light the pip at all; a blink.js
+    # of somebody else's is left in place by install and lights nothing.
+    # Defaulted, so a test that builds a Desk by hand for a Claude-only
+    # question does not have to know OpenCode exists.
+    opencode: bool = False
+    opencode_plan: bool = False
+    opencode_plugin: bool = False
 
     @property
     def cli_answers(self) -> bool:
         return self.claude_text is not None
+
+    @property
+    def tools(self) -> list:
+        """The other vendors' tools on this desk, by name, in panel order."""
+        return [n for n, on in (("Codex", self.codex),
+                                ("OpenCode", self.opencode)) if on]
+
+    @property
+    def tool_lights(self) -> list:
+        """The tools whose sessions can light the pip on this desk.
+
+        Codex from its own session log, whatever its hooks are doing;
+        OpenCode only through our plugin, because it keeps session state in
+        memory and nowhere on disk (docs/plans/opencode.md).
+        """
+        return [n for n, on in (("Codex", self.codex),
+                                ("OpenCode",
+                                 self.opencode and self.opencode_plugin))
+                if on]
 
     @property
     def cli_silent(self) -> bool:
@@ -548,7 +627,18 @@ def read_desk(version=None) -> Desk:
                 desktop_installed=desktop or desktop_app_installed(),
                 codex=codex_present(),
                 hooks=claude_hooks(),
-                weekly=text is None and desktop and weekly_countdown_known())
+                weekly=text is None and desktop and weekly_countdown_known(),
+                opencode=opencode_present(),
+                opencode_plan=opencode_plan_key(),
+                opencode_plugin=opencode_plugin_ours())
+
+
+def _and(names) -> str:
+    """"A", "A and B", "A, B and C" -- for the lists of sources above."""
+    names = list(names)
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def _announce_codex_hooks() -> None:
@@ -617,6 +707,136 @@ def _install_codex_hooks() -> str:
         return f"skipped ({e})"
 
 
+def _announce_opencode_quota() -> None:
+    """Say, before it happens, that Blink will send OpenCode's key somewhere.
+
+    The first time this product makes a request with a customer's
+    credential (pc/providers/opencode.py, WHY A NETWORK REQUEST AT ALL), and
+    install asks nothing -- so this paragraph is the consent, such as it is,
+    and every clause in it is a rule that module enforces in code: the host
+    the key was issued for and no other, read-only, the cadence, nothing
+    logged. Change one there, change it here.
+
+    Said whether or not a key is there today. The daemon reads auth.json at
+    every fetch, so a key added next week starts the requests with no
+    install in between; disclosing it only when one is present now would
+    make this the only notice that person never gets. The last line says
+    which of the two this desk is, so nobody has to guess whether anything
+    is being sent yet.
+
+    Wrapped continuation lines start lower case, as in
+    _announce_codex_hooks: a line that continues a sentence is not a new one.
+    """
+    print("  Quota    If OpenCode holds a GLM Coding Plan key in its")
+    print("           auth.json, Blink reads that key and sends it to the")
+    print("           quota endpoint of whichever service issued it -- Z.ai,")
+    print("           or BigModel for a mainland plan -- and nowhere else.")
+    print("           The request only reads your plan's usage. It is made")
+    print("           about once a minute while OpenCode is in use, every 10")
+    print("           minutes otherwise, and not at all after a week idle.")
+    print("           The key is never logged or stored by Blink. Where")
+    print("           this machine uses an HTTPS proxy the request goes")
+    print("           through it like any other, the key inside the")
+    print("           encrypted connection.")
+    print("  Stop     Uninstalling Blink stops it, and so does removing the")
+    print("           plan key from OpenCode:")
+    print(f"             {installed_bin()} uninstall")
+    if opencode_plan_key():
+        print("  Now      A plan key is there, so the first read follows")
+        print("           within a minute of the service starting.")
+    else:
+        print("  Now      No plan key is there, so nothing is sent.")
+    print()
+
+
+def _opencode_plugin_text() -> str:
+    """The plugin's text, from the bundle when frozen, the tree when not.
+
+    _shim_source, not a second resolver: tools/blink-opencode.js ships beside
+    blink-hook.sh (--add-data in tools/build_binary.sh), and one function
+    deciding where the bundle is means a frozen build cannot read one file
+    from _MEIPASS and the other from somewhere else.
+    """
+    return _shim_source(install_opencode_plugin.SOURCE_NAME)
+
+
+def _install_opencode_plugin() -> str:
+    """Put our plugin where OpenCode loads plugins, if there is an OpenCode.
+
+    Detected, like the Codex step, and absent OpenCode NOTHING is written:
+    not the plugin, not the plugin directory, not ~/.config/opencode. A
+    directory created for a tool that is not installed is a stranger's
+    configuration left on the machine -- and this one is worse than most,
+    because OpenCode treats every config directory it finds as somewhere to
+    run `npm install` (install_opencode_plugin, OPENCODE'S OWN SIDE EFFECT).
+    """
+    if not opencode_present():
+        return "no OpenCode on this machine, nothing to do"
+    # Private from the first write, for the reason _install_codex_hooks gives:
+    # the slots name the projects someone has open.
+    #
+    # And made HERE, because the plugin no longer makes it: it writes only
+    # into a state directory that already exists, so that an OpenCode still
+    # running after `blink uninstall` -- which keeps the plugin loaded once
+    # its file is gone -- cannot put the directory back (found in review,
+    # 2026-10-19; tools/blink-opencode.js, THE DIRECTORY IS THE INSTALLER'S).
+    # Without this line the plugin would install and never light anything.
+    state_dir = opencode.state_dir()
+    os.makedirs(state_dir, exist_ok=True)
+    try:
+        os.chmod(state_dir, 0o700)
+    except OSError:
+        pass                 # Windows, where the mode does not apply
+    try:
+        text = _opencode_plugin_text()
+    except (OSError, UnicodeDecodeError) as e:
+        # A build that forgot the --add-data line. The status line is the
+        # product, and an install that has otherwise worked is not failed
+        # over the light of a third tool.
+        return f"skipped (the plugin is missing from this build: {e})"
+    return install_opencode_plugin.install(opencode.config_dir(), text)
+
+
+def _record_opencode_dirs():
+    """Hand the service the OpenCode directories this shell sees.
+
+    The service runs without this shell's XDG_DATA_HOME / XDG_CONFIG_HOME
+    (launchd, systemd and the Task Scheduler each start it with an
+    environment of their own), so where those move OpenCode off its
+    defaults the daemon would look in the wrong place and show nothing --
+    found in review, 2026-10-19; opencode.PATHS_RECORD has the whole story.
+    A line to print, or None. Never raises: an unwritable record costs the
+    gauges on an unusual desk, and is not worth failing the install over.
+    """
+    try:
+        return opencode.record_dirs()
+    except OSError as e:
+        return f"could not record OpenCode's directories for the service ({e})"
+
+
+def refresh_opencode_plugin():
+    """Rewrite OUR plugin if it is there and stale. None when nothing to do.
+
+    For `blink update` and DriftWatchdog: the plugin ships inside the program
+    exactly as the shims do, so an update leaves the previous release's copy
+    behind. install_opencode_plugin.refresh holds the two rules -- never
+    create one where none was, never touch a blink.js that is not ours --
+    and this only supplies the text. Never raises: it runs in the daemon's
+    poll loop.
+    """
+    try:
+        text = _opencode_plugin_text()
+    except (OSError, UnicodeDecodeError):
+        # Nothing to compare against: the same judgement shim_is_current
+        # makes about an unreadable bundle. Rewriting from nothing is
+        # impossible, and logging it every tick would be noise.
+        return None
+    try:
+        return install_opencode_plugin.refresh(opencode.config_dir(), text)
+    except Exception as e:
+        return f"OpenCode plugin could not be refreshed ({e})"
+
+
 def _note_rows(label, items):
     """A "Shown"/"Missing" block: label in a column, each item wrapped under it.
 
@@ -647,17 +867,28 @@ def _light_rows(desk):
     """
     shown, missing = [], []
     claude = desk.desktop and desk.hooks.light
-    if claude and desk.codex:
-        shown.append("the activity light, for Codex sessions and Desktop's"
+    # OpenCode is a third source with a third mechanism: its plugin, the
+    # only place its session state is ever written (docs/plans/opencode.md).
+    # So it is listed only when that plugin is ours and in place, and a desk
+    # whose blink.js belongs to somebody else hears why it has no light.
+    tools = desk.tool_lights
+    sessions = f"{_and(tools)} sessions" if tools else ""
+    if claude and tools:
+        sep = ", and " if len(tools) > 1 else " and "
+        shown.append(f"the activity light, for {sessions}{sep}Desktop's"
                      " Code tab")
     elif claude:
         shown.append("the activity light, while you work in Desktop's"
                      " Code tab")
-    elif desk.codex:
-        shown.append("the activity light, for Codex sessions")
+    elif tools:
+        shown.append(f"the activity light, for {sessions}")
     if desk.desktop and not desk.hooks.light:
         missing.append("the activity light for Desktop's Code tab -- "
                        + _hooks_gap(desk.hooks))
+    if desk.opencode and not desk.opencode_plugin:
+        missing.append("the activity light for OpenCode sessions -- its"
+                       " plugin is not installed (see the OpenCode plugin"
+                       " step above)")
     return shown, missing
 
 
@@ -715,13 +946,15 @@ def _note_if_no_claude_code(desk):
         print("  !  There is a `claude` on your PATH, but `claude --version`")
         print("     did not answer, so Blink cannot tell which version it is")
         print("     or whether it works. Run it yourself to see why.")
-        if desk.desktop or desk.codex:
-            source = " and ".join(
-                n for n, on in (("Claude Desktop", desk.desktop),
-                                ("Codex", desk.codex)) if on)
+        if desk.desktop or desk.tools:
+            source = _and((["Claude Desktop"] if desk.desktop else [])
+                          + desk.tools)
             print(f"     Meanwhile the panel also reads {source}.")
         return
 
+    if not desk.desktop and desk.opencode:
+        _note_tools_alone(desk)
+        return
     if not desk.desktop and desk.codex:
         # A Codex machine. Its light comes from the same session log as its
         # limits; Codex's hooks only add "waiting" on top, so this does not
@@ -787,11 +1020,16 @@ def _note_if_no_claude_code(desk):
     shown += light_shown
     if desk.codex:
         shown.append("Codex, on its own page")
+    if desk.opencode_plan and desk.opencode:
+        # Only with a plan key: without one OpenCode has no number to put on
+        # a page, and its light is already listed above.
+        shown.append("OpenCode's GLM plan quota, on its own page")
     missing += light_missing
     missing.append("an up-to-the-minute weekly percentage: it follows"
                    " Desktop's own refresh")
 
-    who = "Claude Desktop and Codex" if desk.codex else "Claude Desktop alone"
+    who = (f"{_and(['Claude Desktop'] + desk.tools)}" if desk.tools
+           else "Claude Desktop alone")
     print("  !  Claude Code is not installed on the command line, so the")
     print(f"     panel runs on {who}. That works, with less on it:")
     print()
@@ -817,6 +1055,57 @@ def _note_if_no_claude_code(desk):
           + ("" if desk.weekly else " and its countdown") + " with it:")
     print()
     print("       npm install -g @anthropic-ai/claude-code@latest")
+
+
+def _note_tools_alone(desk):
+    """The note for a desk with OpenCode and no Claude at all, Codex or not.
+
+    Built from parts rather than written out per combination: Codex alone
+    keeps its own hand-set paragraph above, and every desk with OpenCode on
+    it lands here, where three independent facts -- a plan key or not, our
+    plugin in place or not, Codex beside it or not -- decide what the panel
+    can show. Eight paragraphs written in advance is eight chances for one
+    to promise something its desk cannot do, which is the failure every
+    other branch of _note_if_no_claude_code was rewritten to stop.
+    """
+    import textwrap
+    shown = []
+    if desk.codex:
+        shown.append("both Codex limits and their countdowns, from the"
+                     " session log Codex already writes")
+    if desk.opencode_plan:
+        shown.append("OpenCode's GLM Coding Plan quota, read from the plan's"
+                     " own endpoint with the key OpenCode keeps")
+    if desk.tool_lights:
+        shown.append(f"the activity light for {_and(desk.tool_lights)}"
+                     " sessions")
+    who = (f"{desk.tools[0]} alone" if len(desk.tools) == 1
+           else _and(desk.tools))
+    text = f"Claude Code is not installed, so the panel runs on {who}"
+    # Commas between the items and ", and" before the last: the items carry
+    # "and" inside them ("limits and their countdowns"), and a bare " and "
+    # join ran the quota and the light together into one clause.
+    if len(shown) > 1:
+        shown = [", ".join(shown[:-1]) + ", and " + shown[-1]]
+    text += (": " + shown[0] + ".") if shown else "."
+    if not desk.opencode_plan:
+        # Not a fault to fix, so not phrased as one: OpenCode on any other
+        # model has no plan quota anywhere to read (docs/plans/opencode.md).
+        text += (" OpenCode holds no GLM Coding Plan key, so it has no"
+                 " usage figures to show"
+                 + (", only its light." if desk.opencode_plugin else "."))
+    if not desk.opencode_plugin:
+        text += (" OpenCode's light needs the plugin the step above could"
+                 " not install.")
+    if desk.unsigned_desktop:
+        text += (" Claude Desktop is installed but not signed in; sign in"
+                 " to it and the Claude page fills by itself.")
+    else:
+        text += (" The Claude page stays empty until you add Claude Code;"
+                 " the status line just installed starts working by itself"
+                 " when you do.")
+    print(textwrap.fill(text, 67, initial_indent="  !  ",
+                        subsequent_indent="     ", break_on_hyphens=False))
 
 
 def _warn_if_claude_too_old(desk):
@@ -1865,6 +2154,15 @@ def _refresh_shims() -> None:
             _write_shim(path, name)
         except OSError as e:
             print(f"  could not refresh {os.path.basename(path)}: {e}")
+    # The OpenCode plugin ships inside the program too, under the same two
+    # rules: only a plugin that is already there, and only one that is ours
+    # (refresh_opencode_plugin). Silent when it worked, like the shims above;
+    # a refusal or a failed write is said, because the plugin left behind is
+    # last release's and the light it drives may not match this daemon.
+    msg = refresh_opencode_plugin()
+    if msg and not msg.startswith(("OpenCode plugin updated",
+                                   "OpenCode plugin already")):
+        print(f"  {msg}")
 
 
 def halt_service() -> None:
@@ -2068,6 +2366,19 @@ def _announce():
     print("             arguments, no file paths, no message text.")
     print(f"  Creates    {os.path.join(blink_home(), 'state')}")
     print("             one small file per open session, deleted when it ends.")
+    # Named here only when it will really be written: the step below writes
+    # nothing on a desk with no OpenCode, and a "Creates" line for a file
+    # that never appears is the disclosure being wrong the other way.
+    oc = opencode_present()
+    if oc:
+        print("  Creates    "
+              + install_opencode_plugin.plugin_path(opencode.config_dir()))
+        print("             a plugin OpenCode loads, so the panel can show")
+        print("             whether an OpenCode session is busy or waiting on")
+        print("             you. The OpenCode plugin step below says what it")
+        print("             records, and what Blink sends on OpenCode's behalf.")
+        print(f"  Creates    {opencode.state_dir()}")
+        print("             one small file per open OpenCode session.")
     print(f"  Changes    {settings_path()}")
     # This list has to stay exactly true. Install asks nothing, so the
     # disclosure is the only thing standing between us and silently editing a
@@ -2095,7 +2406,23 @@ def _announce():
         print(f"  Creates    {created}")
         print("             so the bridge starts when you log in.")
     print()
-    print("  It reads no credential and no token, and sends nothing anywhere.")
+    # This sentence was unconditionally true until OpenCode: there is no
+    # usage figure for a GLM plan anywhere on disk, so Blink asks the plan's
+    # own endpoint with the key OpenCode holds (pc/providers/opencode.py).
+    # "Reads no credential, sends nothing" printed above a step that does
+    # exactly that would be the disclosure contradicting itself. And on a
+    # desk with no OpenCode today it is still said, briefly: the daemon reads
+    # auth.json whenever one appears, with no install in between.
+    if oc:
+        print("  It reads no Claude or Codex credential. The one thing it")
+        print("  sends anywhere is OpenCode's GLM Coding Plan key, if OpenCode")
+        print("  holds one, to that plan's own quota endpoint -- the OpenCode")
+        print("  plugin step below says exactly when.")
+    else:
+        print("  It reads no credential and no token, and sends nothing anywhere.")
+        print("  (One exception, should you add OpenCode on Z.ai's GLM Coding")
+        print("  Plan later: Blink then reads that plan's quota with the key")
+        print("  OpenCode keeps, from the plan's own endpoint and no other.)")
     print("  The usage figures come from Claude Code, Claude Desktop's usage")
     print("  cache, or the Codex session log -- each of which has already")
     print("  worked them out. From the Codex log it keeps only the rate-limit")
@@ -2106,8 +2433,13 @@ def _announce():
 
 
 def _install_steps() -> int:
-    """How many numbered steps `blink install` prints on this platform."""
-    return 6 if sys.platform == "win32" else 5
+    """How many numbered steps `blink install` prints on this platform.
+
+    Counted on every desk, OpenCode or not: the OpenCode step prints its
+    "nothing to do" line where there is none, as the Codex step does, so the
+    numbering is the same everywhere and docs/windows-check.md can name it.
+    """
+    return 7 if sys.platform == "win32" else 6
 
 
 def _stepper(total):
@@ -2284,10 +2616,11 @@ def cmd_install(_args) -> int:
         print(f"skipped ({e})")
 
     # The disclosure for this step is here rather than up in _announce(),
-    # because it is the only step that is conditional on what is already on
-    # the machine: on a Codex-free machine there is nothing to disclose, and a
-    # paragraph about another vendor's config file would be noise at best and
-    # alarming at worst.
+    # because it is conditional on what is already on the machine: on a
+    # Codex-free machine there is nothing to disclose, and a paragraph about
+    # another vendor's config file would be noise at best and alarming at
+    # worst. The OpenCode step below is the second such step, and for the
+    # same reason carries its own.
     step("Codex hooks")
     if codex_present():
         print()
@@ -2296,7 +2629,23 @@ def cmd_install(_args) -> int:
     else:
         print(_install_codex_hooks())
 
-    if steps == 6:
+    # Disclosure, then the write, as above -- and this one has two halves,
+    # because OpenCode is where Blink first sends a credential anywhere: the
+    # plugin it is about to put on disk, and the quota request the daemon
+    # will make with OpenCode's key.
+    step("OpenCode plugin")
+    if opencode_present():
+        print()
+        print(install_opencode_plugin.announce(opencode.config_dir()))
+        _announce_opencode_quota()
+        note = _record_opencode_dirs()
+        if note:
+            print("      " + note)
+        print("      " + _install_opencode_plugin())
+    else:
+        print(_install_opencode_plugin())
+
+    if sys.platform == "win32":
         step("USB driver")
         print(_install_driver_step())
 
@@ -2325,11 +2674,11 @@ def cmd_install(_args) -> int:
 def cmd_uninstall(_args) -> int:
     print("Blink uninstall.")
     print()
-    print("[1/5] Background service ... ", end="", flush=True)
+    print("[1/6] Background service ... ", end="", flush=True)
     print(_remove_service())
     _say_bye()
 
-    print("[2/5] Claude Code setting:")
+    print("[2/6] Claude Code setting:")
     try:
         print("      " + install_statusline.uninstall(settings_path(), shim_path()))
     except install_statusline.SettingsUnreadable as e:
@@ -2340,7 +2689,7 @@ def cmd_uninstall(_args) -> int:
         print(f"      Left alone: {e}")
         print("      Remove the statusLine.command line by hand once it parses.")
 
-    print("[3/5] Activity hooks:")
+    print("[3/6] Activity hooks:")
     try:
         print("      " + install_hooks.uninstall(settings_path(),
                                                  hook_shim_path()))
@@ -2349,10 +2698,18 @@ def cmd_uninstall(_args) -> int:
         # file we cannot parse by writing a fresh one over it.
         print(f"      Left alone: {e}")
 
-    print("[4/5] Codex hooks:")
+    print("[4/6] Codex hooks:")
     _uninstall_codex_hooks()
 
-    print("[5/5] Files ... ", end="", flush=True)
+    # Ours only: a blink.js without our marker line is somebody else's, and
+    # stays (install_opencode_plugin.uninstall). Nothing else of OpenCode's
+    # is touched -- not its config, not auth.json, not the directory, which
+    # OpenCode populates itself. Its slot directory goes with the others in
+    # the Files step below.
+    print("[5/6] OpenCode plugin:")
+    print("      " + install_opencode_plugin.uninstall(opencode.config_dir()))
+
+    print("[6/6] Files ... ", end="", flush=True)
     # Only what install created. NOT ~/.blink itself: it also holds the two
     # signing keys, which cannot be regenerated -- every board flashed with the
     # first one's public half, and every app carrying the second one's, would
@@ -2364,7 +2721,10 @@ def cmd_uninstall(_args) -> int:
               *glob.glob(os.path.join(blink_home(), "statusline.json.*.tmp")),
               os.path.join(blink_home(), "state.json"),
               os.path.join(blink_home(), "state.json.tmp"),
-              os.path.join(blink_home(), "pending_fw.json")):
+              os.path.join(blink_home(), "pending_fw.json"),
+              # Written by install only on a desk whose XDG variables move
+              # OpenCode (opencode.PATHS_RECORD); absent everywhere else.
+              opencode.paths_record_path()):
         _rm(p)
     # The per-session state directory, and everything under it. state.json
     # above is the single-slot file this replaced; it is still on the list so
@@ -2461,10 +2821,10 @@ def _rm_tree(root):
 
 
 def _rm_state_dir():
-    """Remove ~/.blink/state and ~/.blink/state-codex, and their subdirectories.
+    """Remove ~/.blink/state, state-codex and state-opencode, and what is in them.
 
-    Both directories, because the Codex slots deliberately live apart from the
-    Claude ones (pc/providers/codex_state explains why) -- and a slot
+    All three, because the Codex and OpenCode slots deliberately live apart
+    from the Claude ones (pc/providers/codex_state explains why) -- and a slot
     directory left behind by an uninstall is not litter, it is a lie: the
     daemon would go on counting sessions of a tool it no longer hooks.
 
@@ -2474,7 +2834,10 @@ def _rm_state_dir():
     because this runs against a path under the customer's home and a bounded
     loop cannot be talked into deleting more than it was told.
     """
-    for sub in ("state", "state-codex"):
+    # The OpenCode plugin writes the hook shim's exact layout -- <session>.state,
+    # <session>.waiting, <session>/<agent> -- so the same two levels hold
+    # (tools/blink-opencode.js, docs/plans/opencode.md).
+    for sub in ("state", "state-codex", "state-opencode"):
         root = os.path.join(blink_home(), sub)
         try:
             names = os.listdir(root)
@@ -2610,10 +2973,9 @@ def cmd_status(args) -> int:
         # claude_version() fails the same way for "absent" and "present but
         # not answering"; only the second is on PATH. The `elif ver is None`
         # branch below was unreachable for it.
-        also = [n for n, on in (("Claude Desktop", desk.desktop),
-                                ("Codex", desk.codex)) if on]
+        also = (["Claude Desktop"] if desk.desktop else []) + desk.tools
         print("Claude Code on PATH, but `claude --version` did not answer"
-              + (f" (the panel also reads {' and '.join(also)})"
+              + (f" (the panel also reads {_and(also)})"
                  if also else ""))
     elif text is None:
         # The consequence, not just the fact. "Not found" alone left someone
@@ -2626,21 +2988,26 @@ def cmd_status(args) -> int:
             if not desk.weekly:
                 # Not "yet": a chat-only desk may never learn one.
                 gaps.append("no weekly countdown")
+            lights = desk.tool_lights
             if desk.hooks.light:
                 gaps.append("activity light from the Code tab"
-                            + (" and Codex" if desk.codex else ""))
-            elif desk.codex:
-                gaps.append("activity light from Codex only: Claude hooks"
-                            " not working")
+                            + (f" and {_and(lights)}" if lights else ""))
+            elif lights:
+                gaps.append(f"activity light from {_and(lights)} only:"
+                            " Claude hooks not working")
             else:
                 gaps.append("no activity light: Claude hooks not working")
-            who = ("Claude Desktop and Codex" if desk.codex
+            who = (_and(["Claude Desktop"] + desk.tools) if desk.tools
                    else "Claude Desktop alone")
             print(f"Claude Code not found -- running on {who}"
                   f" ({'; '.join(gaps)})")
-        elif desk.codex:
-            # Codex sessions light the pip from their own session log.
-            print("Claude Code not found -- running on Codex alone"
+        elif desk.tools:
+            # Codex sessions light the pip from their own session log;
+            # OpenCode's from our plugin, and its gauges need a plan key --
+            # each said on its own OpenCode row below, not crammed in here.
+            who = (f"{desk.tools[0]} alone" if len(desk.tools) == 1
+                   else _and(desk.tools))
+            print(f"Claude Code not found -- running on {who}"
                   + (" (sign in to Claude Desktop for the Claude page)"
                      if desk.unsigned_desktop else " (no Claude page)"))
         elif desk.unsigned_desktop:
@@ -2741,19 +3108,26 @@ def cmd_status(args) -> int:
     elif desk.codex:
         print("Usage data  from the Codex session log (no Claude Code status"
               " line yet)")
+    elif desk.opencode and desk.opencode_plan:
+        print("Usage data  from OpenCode's GLM plan quota (no Claude Code"
+              " status line yet)")
     elif desk.unsigned_desktop and not desk.on_path:
         print("Usage data  none yet -- Claude Desktop is installed; open it"
               " and sign in")
     else:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
-    _source_lines()
+    # The one network request `blink status` makes, and only on a desk where
+    # OpenCode holds a GLM plan key: there is no other place a GLM figure
+    # exists to look at (see _opencode_lines). Its answer is handed to the
+    # wire line below rather than fetched a second time there.
+    oc_quota = _source_lines(bridge_running)
     if getattr(args, "wire", False):
-        _wire_line()
+        _wire_line(oc_quota)
     return 0
 
 
-def _wire_line():
+def _wire_line(oc_quota=None):
     """The usage message the bridge would put on the cable right now.
 
     The last thing that can be checked without a board: every source read,
@@ -2763,7 +3137,21 @@ def _wire_line():
     """
     import json as _json
     from pc import ingest
-    msg = ingest.IngestionBus().poll()
+    # look_only: the bus the daemon builds would start OpenCode's quota thread
+    # on this first poll, which makes a request with the customer's key the
+    # moment it is due -- that is, at once. A one-shot command must make no
+    # request it did not decide to make, and must not sweep the slots it is
+    # reporting on (_codex_hook_status gives that rule). So the OpenCode
+    # provider here fetches nothing; the reading status already took, if
+    # any, is handed to it instead, so the line still shows what the daemon
+    # would send.
+    providers = ingest.default_providers(look_only=True)
+    if oc_quota is not None:
+        quota, fetched_at = oc_quota
+        for p in providers:
+            if isinstance(p, opencode.OpenCodeProvider):
+                p.remember(quota, fetched_at)
+    msg = ingest.IngestionBus(providers=providers).poll()
     print()
     if msg is None:
         print("Wire        nothing to send -- no source has a reading")
@@ -2862,8 +3250,11 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink"):
         # command above is a no-op and the reader is left rerunning it.
         #
         # Answering it properly means asking the feed, and `blink status` does
-        # not touch the network on purpose: it has to work on a plane, and it
-        # is the first thing anyone runs when nothing works. So it names the
+        # not touch the network for this on purpose: it has to work on a
+        # plane, and it is the first thing anyone runs when nothing works.
+        # (Its one request is OpenCode's quota, which has no offline answer at
+        # all, made only on a desk holding a plan key and bounded at
+        # opencode.STATUS_FETCH_TIMEOUT_S -- see _opencode_lines.) So it names the
         # other possibility instead of guessing between them. The panel has
         # the same question and no room for this sentence --
         # docs/open-bugs/app-is-old-is-a-guess.md.
@@ -2928,14 +3319,18 @@ def _codex_hook_status():
     return [f"Codex hook  firing, {n} live session{'s' if n != 1 else ''}"]
 
 
-def _source_lines():
-    """One line each for the two sources CI cannot exercise.
+def _source_lines(bridge_running=False):
+    """One line each for the sources CI cannot exercise.
 
     Claude Desktop is a closed GUI app and Codex will not write a rollout
     without an account, so neither format change can be caught on a runner.
     It can only be caught here, on the machine where the file is -- and the
     daemon already knows (it logs once and goes quiet). This is where a
-    person finds out, and what they paste into a bug report.
+    person finds out, and what they paste into a bug report. OpenCode's
+    quota endpoint is the same story with a network in the way.
+
+    Returns OpenCode's (Quota, fetched_at) when this run read one, for the
+    wire line, or None.
     """
     from pc.providers import claude_desktop, codex_cli
     now = time.time()
@@ -2989,6 +3384,170 @@ def _source_lines():
     if logs or install_codex_hooks._read_marker():
         for line in _codex_hook_status():
             print(line)
+
+    lines, oc_quota = _opencode_lines(bridge_running)
+    for line in lines:
+        print(line)
+    return oc_quota
+
+
+def _opencode_dirs_mismatch():
+    """Lines warning that the service will look somewhere else, or [].
+
+    This shell resolves OpenCode's directories through its own XDG
+    variables; the service has none and goes by the record install wrote,
+    else the defaults (opencode.service_dirs). When the two disagree, every
+    other OpenCode line `blink status` prints describes a directory the
+    daemon never reads -- the very misreport that hid the gauges on an XDG
+    desk until review caught it, 2026-10-19. Running install again from
+    this shell rewrites the record.
+    """
+    try:
+        shell = (opencode.data_dir(), opencode.config_dir())
+        service = opencode.service_dirs()
+    except Exception:
+        return []
+    out = []
+    for what, mine, theirs in (("data", shell[0], service[0]),
+                               ("config", shell[1], service[1])):
+        if os.path.normcase(os.path.abspath(mine)) != os.path.normcase(
+                os.path.abspath(theirs)):
+            out.append(f"OpenCode    the service reads OpenCode's {what} from"
+                       f" {theirs}, not {mine}")
+    if out:
+        out.append(f"            Run `{installed_bin()} install` again from"
+                   " this shell to point it here.")
+    return out
+
+
+def _status_fetch(now):
+    """opencode.fetch_once for `blink status`, bounded by the clock.
+
+    urllib's timeout covers the connection and each read, NOT the name
+    lookup: getaddrinfo runs before the socket exists and blocks for as long
+    as the system resolver's own timeouts and retries take, which are not
+    ours to set. Found in review, 2026-10-19: on a network whose DNS server
+    has stopped answering, the four seconds STATUS_FETCH_TIMEOUT_S promises
+    became however long the resolver held on, in front of someone waiting
+    to read a status. So the fetch runs on a daemon thread and this waits for it
+    STATUS_FETCH_TIMEOUT_S and no longer; a fetch still running then is
+    reported as unreachable -- which is what it is -- and left to finish or
+    die with the process. Daemon, so it cannot hold `blink status` open.
+
+    A BaseException from the thread is re-raised here rather than turned
+    into a category: fetch_once already turns every Exception into one, so
+    anything else is a KeyboardInterrupt, or the test suite's guard against
+    a real request (tests/conftest.py), and both must stay loud.
+    """
+    box = []
+
+    def work():
+        try:
+            box.append(opencode.fetch_once(
+                now, timeout=opencode.STATUS_FETCH_TIMEOUT_S))
+        except BaseException as e:            # see the docstring
+            box.append(e)
+
+    t = threading.Thread(target=work, name="blink-status-quota", daemon=True)
+    t.start()
+    t.join(opencode.STATUS_FETCH_TIMEOUT_S)
+    if not box:
+        return None, opencode.ERR_UNREACHABLE
+    if isinstance(box[0], BaseException):
+        raise box[0]
+    return box[0]
+
+
+def _opencode_lines(bridge_running=False, now=None):
+    """The OpenCode lines of `blink status`, and the quota read for them.
+
+    Three questions, one row each, because each has a different repair:
+    has OpenCode run here, is our plugin the one it loads, and can the GLM
+    plan quota be read. ([lines], (Quota, fetched_at) or None).
+
+    The quota is the one network request `blink status` makes, and it is
+    made deliberately: there is no GLM usage figure anywhere on disk to
+    look at instead (docs/plans/opencode.md), so "is my quota being read?"
+    has no offline answer. One synchronous fetch_once(), bounded by its
+    timeout, and only where OpenCode holds a plan key -- quota_source()
+    says so without handing over the key, so nothing here can print it.
+    Its answer is a category ("unreachable", "rejected the key"), never an
+    exception's text.
+    """
+    now = time.time() if now is None else now
+    out = []
+    here = opencode_present()
+    target = install_opencode_plugin.plugin_path(opencode.config_dir())
+    mine = install_opencode_plugin.is_ours(target)
+    if not here and not mine:
+        # Same shape as the Codex row: say where we looked, because the
+        # person reading this may well have OpenCode under an XDG_DATA_HOME
+        # the daemon's login environment does not share.
+        out.append("OpenCode    no database (OpenCode not installed, or never"
+                   " run)")
+        out.append(f"            looked in {opencode.data_dir()}")
+        return out, None
+    if here:
+        out.append(f"OpenCode    database found in {opencode.data_dir()}")
+    out.extend(_opencode_dirs_mismatch())
+
+    if mine:
+        try:
+            # fetch=False and sweep=False: no thread, no request, and no
+            # collecting the slots being counted (_codex_hook_status gives
+            # the sweep rule; the fetch rule is _wire_line's).
+            frames = opencode.OpenCodeProvider(fetch=False,
+                                               sweep=False).poll(now)
+            n = sum(f.n_sessions() for f in frames
+                    if f.src == opencode.STATE_SRC_ID)
+        except Exception:
+            n = 0
+        try:
+            current = install_opencode_plugin.is_current(
+                opencode.config_dir(), _opencode_plugin_text())
+        except (OSError, UnicodeDecodeError):
+            # The bundle is unreadable: nothing to compare against, so say
+            # nothing about staleness, as shim_is_current does.
+            current = True
+        if not current:
+            out.append("OpenCode    "
+                       + _shim_repair_line("plugin is out of date",
+                                           bridge_running))
+        else:
+            out.append("OpenCode    plugin installed, "
+                       + (f"{n} live session{'s' if n != 1 else ''}"
+                          if n else "no live sessions"))
+    elif os.path.lexists(target):
+        out.append(f"OpenCode    plugin not installed: {target} is not"
+                   " Blink's, so it was left alone")
+        out.append("            Rename it and run install again to add"
+                   " Blink's.")
+    else:
+        out.append(f"OpenCode    plugin not installed -- run"
+                   f" `{installed_bin()} install` to add it")
+
+    if not here:
+        return out, None
+    # "Its light works" only where it does: our plugin is the one OpenCode
+    # loads. Found in review, 2026-10-19: this said so unconditionally, so a
+    # desk whose blink.js was somebody else's -- reported two lines above
+    # as "plugin not installed" -- was then told its light works.
+    no_key = ("OpenCode    no GLM Coding Plan key in OpenCode's auth.json -- "
+              + ("its light works, there are no usage figures to show"
+                 if mine else "there are no usage figures to show"))
+    if opencode.quota_source() is None:
+        out.append(no_key)
+        return out, None
+    quota, err = _status_fetch(now)
+    if quota is not None:
+        out.append(f"OpenCode    {opencode.describe(quota)}")
+        return out, (quota, now)
+    if err is None:
+        # The key went between the two reads. Not an error to report.
+        out.append(no_key)
+        return out, None
+    out.append(f"OpenCode    GLM plan quota could not be read: {err}")
+    return out, None
 
 
 def cmd_update(_args) -> int:

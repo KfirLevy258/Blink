@@ -494,3 +494,46 @@ def test_desktop_local_storage_supplies_a_reset_the_history_file_cannot():
     merged = normalizer.merge([history, local_storage])
     assert merged.session_resets_at == now + 3600
     assert merged.weekly_pct == 17.0
+
+
+def test_the_second_ring_goes_to_the_tool_used_last_not_read_last():
+    """active_at, not observed_at. A provider whose number is fetched on a
+    timer (OpenCode's quota endpoint) is fresh every ten minutes whether or
+    not anybody used it; ranking on that would hand it the ring."""
+    used_long_ago = base.NormalizedUsageFrame(
+        provider="opencode", src="zai", observed_at=NOW,
+        active_at=NOW - 7200, session_pct=5.0)
+    primary, secondary = normalizer.select_pair([
+        cli(NOW, session=10.0),
+        used_long_ago,
+        cli(NOW - 60, session=20.0, provider="codex"),
+    ], preferred="claude")
+    assert secondary.provider == "codex"
+
+
+def test_a_tie_in_use_keeps_the_order_providers_were_polled_in():
+    """Two live session slots both stamp `now`. Breaking the tie on the
+    reading's age would give it back to whichever was fetched last."""
+    a = cli(NOW - 600, session=10.0, provider="codex")
+    a.active_at = NOW
+    b = base.NormalizedUsageFrame(provider="opencode", src="zai",
+                                  observed_at=NOW, active_at=NOW,
+                                  session_pct=5.0)
+    primary, secondary = normalizer.select_pair([cli(NOW, session=1.0), a, b],
+                                                preferred="claude")
+    assert secondary.provider == "codex"
+
+
+def test_rank_keeps_the_providers_the_rings_drop():
+    ranked = normalizer.rank([
+        cli(NOW, session=10.0),
+        cli(NOW - 10, session=20.0, provider="codex"),
+        cli(NOW - 5, session=30.0, provider="opencode"),
+    ], preferred="claude")
+    assert [m.provider for m in ranked] == ["claude", "opencode", "codex"]
+    assert tuple(ranked[:2]) == normalizer.select_pair(
+        [cli(NOW, session=10.0),
+         cli(NOW - 10, session=20.0, provider="codex"),
+         cli(NOW - 5, session=30.0, provider="opencode")],
+        preferred="claude")
+    assert normalizer.rank([]) == []

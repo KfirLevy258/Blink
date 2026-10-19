@@ -364,7 +364,7 @@ class TestTheBundledPackage:
 class TestInstallSteps:
     def test_windows_has_one_step_more_than_the_others(self):
         from pc import cli
-        assert cli._install_steps() == (6 if sys.platform == "win32" else 5)
+        assert cli._install_steps() == (7 if sys.platform == "win32" else 6)
 
     def test_the_stepper_counts_to_the_total_it_was_given(self, capsys):
         from pc import cli

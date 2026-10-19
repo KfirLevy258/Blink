@@ -64,6 +64,21 @@ def scan(now_epoch, path=None, sweep=True):
     return {sid: state for sid, (state, _name) in states.items()}, agents
 
 
+def census(now_epoch, path=None, sweep=True):
+    """scan(), plus {session_id: t}: each counted slot's last event time.
+
+    For the Codex state frame's active_at (claude_state.activity_at), from
+    the same read as the states so the two cannot disagree. A separate
+    function rather than a change to scan()'s shape, which its callers and
+    tests depend on.
+    """
+    root = path if path is not None else os.path.expanduser(STATE_DIR)
+    states, agents, times = claude_state.ClaudeStateProvider(
+        path=root, sweep=sweep).census(now_epoch)
+    return ({sid: state for sid, (state, _name) in states.items()}, agents,
+            times)
+
+
 def ended(now_epoch, path=None, sweep=True):
     """The session ids the hook watched END, as a set.
 

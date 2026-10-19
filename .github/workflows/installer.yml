@@ -185,11 +185,13 @@ jobs:
           - foreign-uninstall  # never installed; must not touch their bar
           - spaced-home        # a HOME path containing spaces
           # The data paths, through the installed pieces: a status line
-          # render, hook events, a Desktop cache, a Codex log -- then what
-          # `status` says and what `status --wire` would send the board.
+          # render, hook events, a Desktop cache, a Codex log, an OpenCode
+          # database -- then what `status` says and what `status --wire`
+          # would send the board.
           - all-sources        # everything present, both sessions counted
           - desktop-only       # percentages and a burn rate, no reset time
           - codex-only         # codex primary with both countdowns
+          - opencode-only      # plugin installed, session counted, removed on uninstall
           - broken-data        # two unparseable files: named, and nothing sent
           # The sequences a customer actually makes.
           - install-uninstall-install  # came back: their bar chained again, not our stale shim
@@ -368,6 +370,77 @@ jobs:
           fi
       - run: sh tests/ci/check_codex_contract.sh "${{ steps.ref.outputs.ref }}"
 
+  # The third provider, watched the same way. OpenCode is open source too, and
+  # everything BLINK assumes about it -- where opencode.db and auth.json live,
+  # that <config>/opencode/plugin/*.js is loaded, the event names and fields
+  # the plugin keys on -- is a string literal in its TypeScript. The check
+  # reads them at the ref that ships.
+  #
+  # `dev`, not `main`: dev is OpenCode's default branch. In October 2026 it is
+  # the 2.0 rewrite, which moves the plugin API and moves auth.json into the
+  # database, so that cell is EXPECTED to be red until 2.0 support lands --
+  # it is there to list what 2.0 breaks, and to say when that list changes.
+  # The release cell is the blocking one, and goes red the day a release tag
+  # carries any of it.
+  opencode-contract:
+    name: opencode contract (${{ matrix.ref }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The tip of the tree: an early warning, never a merge blocker.
+          # Third-party mismatches (models.dev, CodexBar) fail only here; on
+          # the release cell they are warnings, because a refactor in somebody
+          # else's repo must not block a merge in this one.
+          - {ref: dev, experimental: true, third_party: fail}
+          # The latest release, resolved at run time below.
+          - {ref: release, experimental: false, third_party: warn}
+    steps:
+      - uses: actions/checkout@v4
+      - name: resolve the ref
+        id: ref
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ matrix.ref }}" = release ]; then
+            # Authenticated, for the same reason as codex-contract: the
+            # anonymous API limit is shared by every job on the runner's
+            # address. releases/latest skips drafts and prereleases, which is
+            # what customers' `opencode upgrade` installs.
+            tag=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+              https://api.github.com/repos/anomalyco/opencode/releases/latest | jq -r .tag_name)
+            echo "ref=$tag" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=dev" >> "$GITHUB_OUTPUT"
+          fi
+      - run: sh tests/ci/check_opencode_contract.sh "${{ steps.ref.outputs.ref }}"
+        env:
+          OPENCODE_THIRD_PARTY: ${{ matrix.third_party }}
+
+  # The OpenCode plugin itself, run under node against scripted bus events.
+  # OpenCode runs it under Bun; node is the stand-in CI has, and the plugin
+  # imports only node: builtins precisely so that both can load it. It is the
+  # half the contract check cannot reach: that the file loads, and that each
+  # event writes the slot claude_state expects.
+  opencode-plugin:
+    name: opencode plugin (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows too: the plugin writes files with modes and renames over an
+        # existing file, which are exactly the calls that behave differently
+        # there.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: sh tests/ci/check_opencode_plugin.sh
+
   lint:
     name: shellcheck
     runs-on: ubuntu-latest
@@ -388,7 +461,8 @@ jobs:
           sudo install "/tmp/shellcheck-$SHELLCHECK_VERSION/shellcheck" /usr/local/bin/
           shellcheck --version
       # -s sh: these must be POSIX. Checking them as bash would let a bashism
-      # through that breaks the /bin/sh they actually run under.
+      # through that breaks the /bin/sh they actually run under. The glob
+      # covers check_opencode_contract.sh and check_opencode_plugin.sh.
       - run: shellcheck -s sh tools/blink-statusline.sh tools/blink-hook.sh tools/build_binary.sh tests/ci/*.sh
 
       # The firmware and the daemon ship from one tag. A disagreement here is
@@ -399,7 +473,12 @@ jobs:
         run: sh tests/ci/check_versions.sh
       - name: reject CRLF line endings
         run: |
-          if grep -rlU $'\r' tools/blink-statusline.sh tools/blink-hook.sh tools/build_binary.sh tests/ci/; then
+          # tools/blink-opencode.js is in the list although it is not a
+          # shell script: its first line is the ownership marker uninstall
+          # compares byte for byte, and a trailing \r on it would make our own
+          # plugin look like somebody else's file -- never removed, never
+          # refreshed.
+          if grep -rlU $'\r' tools/blink-statusline.sh tools/blink-hook.sh tools/build_binary.sh tools/blink-opencode.js tests/ci/; then
             echo "CRLF found: a shim with CRLF fails with 'bad interpreter'" >&2
             exit 1
           fi

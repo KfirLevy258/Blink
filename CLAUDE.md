@@ -1,7 +1,7 @@
 # Working on BLINK
 
 A paid desk display: an ESP32 CYD (320x240, Zephyr / C99 / LVGL 9) showing
-Claude Code and Codex usage, fed by a Python daemon over USB serial. Shipped
+Claude Code, Codex and OpenCode usage, fed by a Python daemon over USB serial. Shipped
 hardware is in customers' hands, so a mistake here can brick a device that is
 already on someone's desk.
 

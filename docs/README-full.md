@@ -2,7 +2,7 @@
 
 <img src="img/brand/logo-wide.png" alt="BLINK" width="420">
 
-**A little desk gauge for your Claude Code and Codex usage.**
+**A little desk gauge for your Claude Code, Codex and OpenCode usage.**
 Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 <p>
@@ -39,13 +39,15 @@ by what each is doing.
 
 Blink is a small desk display that shows how much of your Claude Code usage you've spent - the same numbers as the `/usage` command, but always in view. It reads your **5-hour session** limit and your **7-day weekly** limit and draws each as a dial, green while you have room, amber as you get close, red when it's nearly gone. Glance over, know where you stand, keep working.
 
-Beside the dials is a small pip telling you whether anything is waiting on you - across every Claude Code and Codex session you have open, one light: amber the moment a session has finished or is asking permission, a green pulse while everything is still working, red when something is stuck or rate-limited. Under them, a countdown to each window's reset.
+Beside the dials is a small pip telling you whether anything is waiting on you - across every Claude Code, Codex and OpenCode session you have open, one light: amber the moment a session has finished or is asking permission, a green pulse while everything is still working, red when something is stuck or rate-limited. Under them, a countdown to each window's reset.
 
 It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the setup once, and it sits on your desk and keeps itself up to date.
 
 ### Where the numbers come from
 
-Blink never sees a credential and never sends anything anywhere. It reads figures other programs have already worked out, from files they already write, and keeps only the figures: from Codex's session log it takes the one rate-limit line and nothing of the conversation; from Claude Code's status line it keeps the last payload (which also names your working directory and session), readable by you alone.
+For Claude and Codex, Blink never sees a credential and never sends anything anywhere. It reads figures other programs have already worked out, from files they already write, and keeps only the figures: from Codex's session log it takes the one rate-limit line and nothing of the conversation; from Claude Code's status line it keeps the last payload (which also names your working directory and session), readable by you alone.
+
+**OpenCode is the one exception, and it is a deliberate one.** OpenCode records tokens and cost but never your plan's limit, so no file on your machine holds a percentage. The GLM Coding Plan publishes one, through its own quota endpoint, to whoever holds the plan's key - and OpenCode already holds it, in `~/.local/share/opencode/auth.json` (`%USERPROFILE%\.local\share\opencode\auth.json` on Windows). So for OpenCode, Blink reads that key at each fetch and sends it in one request, to one host: `api.z.ai` for a `zai-coding-plan` key, `open.bigmodel.cn` for a `zhipuai-coding-plan` key. A redirect is refused rather than followed, so the key cannot be forwarded anywhere else. The key is never written to disk, never logged, never put in an error message, and never sent to the board; the log records only a short reason when a fetch fails ("rejected the key", "unreachable"). Fetches happen about once a minute while OpenCode is in use, every ten minutes otherwise, and stop after a week without it. `blink install` says this before the first one.
 
 ### What it supports, and how well
 
@@ -56,6 +58,8 @@ Blink never sees a credential and never sends anything anywhere. It reads figure
 | **Claude Code in Claude Desktop's Code tab** | What Desktop chat gets (below), plus the activity light: the Code tab runs its own copy of Claude Code, which reads `~/.claude/settings.json`, so the hooks fire. It runs headless, so the status line never does, and the figures come from Desktop's files rather than from Claude Code. Measured on macOS (2026-09-26) and Windows 11 ARM64 (2026-09-30) | **Partial** |
 | **Claude Desktop chat, without Claude Code** | Both percentages and the five-hour countdown whenever Desktop holds a reset time (the fill rate covers the gaps). The five-hour figure and its countdown come from Desktop's Local Storage, refreshed within seconds of a turn; the weekly percentage follows Desktop's own refresh: about every 5 minutes while it is in use, every 15 (occasionally 30) when it sits idle, and at once when its usage panel is opened. The weekly countdown once learned, `--` until then. **No activity light** | **Partial** |
 | **Codex CLI** | Both limits and both countdowns, on its own page | **Full** |
+| **OpenCode on the GLM Coding Plan** (Z.ai, or BigModel in mainland China) | The plan's 5-hour and weekly quota and both countdowns, on its own page, and the activity light - running, waiting on a permission prompt or a question, your turn, failed. A plan bought before July 2026 reports the same two windows in its older format, and they show the same way | **Full** |
+| **OpenCode with any other model** | The activity light. The dials stay blank (`--%`): there is no plan quota to read, and a number from another provider would be a wrong one | **Light only** |
 | **claude.ai in a browser** | Nothing | **Not supported** |
 
 **How current the Desktop figure is.** This is the weekly percentage; the five-hour one comes from Local Storage within seconds of a turn (below). BLINK never asks the server; it reads the sample Desktop last wrote. Measured over 1,672 samples on one Mac (July-August 2026): Desktop writes one every 5 minutes while it is being used, every 15 minutes in the background (occasionally 30), and immediately when its usage panel is opened. The daemon reads the file every minute, so the board is at most a minute behind Desktop, and Desktop is at most 5-15 minutes behind the server. A person watching the board while the app sits idle sees the figure move in 15-minute steps - reported 2026-08-30 as "stuck on 16 %, then 21 %" - which is the app's clock, not a fault.
@@ -76,12 +80,16 @@ Blink never sees a credential and never sends anything anywhere. It reads figure
 | Claude Desktop's Local Storage | a five-hour reset time, refreshed within seconds of a turn | nothing - read if the app is installed |
 | A remembered weekly boundary | a weekly reset time, once one has been learned from any of the sources above; published only while nothing contradicts it | nothing - learned automatically, never configured |
 | Codex CLI's own session log | both limits and reset times, for Codex | nothing - read if Codex is installed |
+| The GLM Coding Plan's quota endpoint | both limits and reset times, for OpenCode | the plan key OpenCode already saved; sent to that plan's own host only |
+| Blink's OpenCode plugin | per-session busy / waiting / finished / rate-limited, for OpenCode | nothing - set up by `blink install` |
 
-**How each source is tested.** Claude Code: CI installs real releases (oldest supported, stable, latest, next) and checks the status-line contract is still there. Codex: CI reads the struct that defines `rate_limits` in Codex's own source at the latest release, and fails the day a field is renamed - Codex will not write a log without an account, so the parser is pinned to a real captured log instead. Claude Desktop: a closed app no runner can launch; the parser is pinned to a real captured cache file, and `blink status` reports on the customer's machine whether today's file still parses.
+**How each source is tested.** Claude Code: CI installs real releases (oldest supported, stable, latest, next) and checks the status-line contract is still there. Codex: CI reads the struct that defines `rate_limits` in Codex's own source at the latest release, and fails the day a field is renamed - Codex will not write a log without an account, so the parser is pinned to a real captured log instead. OpenCode: CI reads OpenCode's own source at the latest release - where the database and `auth.json` live, that the plugin folder is loaded, the event names the plugin listens for - and fails the day one moves; it also runs the plugin under node against scripted events. The quota endpoint answers only to a real key, so its parser is pinned to replies generated in the shape the endpoint publishes, never to a captured one. Claude Desktop: a closed app no runner can launch; the parser is pinned to a real captured cache file, and `blink status` reports on the customer's machine whether today's file still parses.
 
 When two of them disagree, the most recently observed number wins - field by field, so a source that knows your reset time still supplies it even when a fresher one takes over the percentage. [`docs/multi-provider.md`](multi-provider.md) has the details.
 
-**Two providers get a page each**, rather than sharing the dials. The name at the bottom of the screen says whose numbers you are looking at, and tapping it switches - as does a swipe up or down. Each page carries its own freshness, so a Codex reading that has gone quiet never puts "reading is old" over live Claude numbers. Changing page moves the needles from one reading to the other instead of redrawing the screen, because this is an instrument and that is what an instrument does.
+**Each provider gets a page**, rather than sharing the dials. The name at the bottom of the screen says whose numbers you are looking at, and tapping it switches - as does a swipe up or down. Each page carries its own freshness, so a Codex reading that has gone quiet never puts "reading is old" over live Claude numbers. Changing page moves the needles from one reading to the other instead of redrawing the screen, because this is an instrument and that is what an instrument does.
+
+**There are two pages and three providers.** The first page is Claude (or whichever provider the settings screen prefers). The second goes to whichever of the other two you used most recently, so an afternoon in Codex shows Codex and your first OpenCode prompt after it hands the page to OpenCode. Being asked for its quota does not count as use, so OpenCode cannot take the page just by being polled. The activity light is not split this way: it covers all three, so an OpenCode session waiting on you turns it amber even when OpenCode has no page in front.
 
 ## What's in here
 
@@ -228,10 +236,12 @@ Blink has to change.
 |---|---|
 | Changes | two keys in `~/.claude/settings.json`: `statusLine.command`, and one entry under `hooks` for each of ten Claude Code lifecycle events (`SessionStart`, `PreToolUse`, `Stop`, ... - the activity light is derived from them). Your own hooks are left in place |
 | Creates | `~/.blink/` (readable by you alone) - a copy of the program, the status line script, the hook script, and a `state/` directory holding one small file per open session (event name, time, and the session and agent ids Claude Code generates - nothing else) |
+| Creates | if OpenCode is installed, one file in its plugin folder: `~/.config/opencode/plugin/blink.js` (`%USERPROFILE%\.config\opencode\plugin\blink.js` on Windows). It writes OpenCode's session events as the same small slot files the Claude Code hooks write, into `~/.blink/state-opencode/`: event name, time, session id, process id and the last segment of the project folder's name - no prompt, no path, no command. Its first line marks it as Blink's, and uninstall removes it only when that line is still there |
 | Creates | a login item, so the bridge starts with your session (a LaunchAgent on macOS, a user systemd unit on Linux, a Scheduled Task on Windows) |
 | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
 | Keeps | the last status line payload Claude Code sent, in `~/.blink/statusline.json`. Alongside the two usage figures it carries the session id, working directory and transcript path; only the figures are read, and nothing in it leaves the machine |
 | Reads | Claude Desktop's usage cache and the tail of Codex's session log, when present; from each only the usage figures are kept. No credential, no token |
+| Reads, and sends | OpenCode's GLM Coding Plan key, from its `auth.json`, at each quota fetch - sent only to that plan's quota endpoint, and kept nowhere. OpenCode's database is never opened; only its modification time is read, as the clock for "is OpenCode in use" |
 
 **It does this without asking**, so that plugging the board in is the whole
 setup. It prints all of the above before it changes anything, and every part
@@ -394,7 +404,7 @@ The things that were open before the first release, and how each was settled.
 | **Company units** | The same image plays a company logo (a still or a short clip) after the boot animation when the factory wrote one to the `logo` partition (`tools/burn.sh --logo`). No logo partition, no logo: individuals are the default, and a re-burn without `--logo` erases it. |
 | **Windows on Arm** | Supported, with WCH's Arm64 driver (`vendor/ch341ser-arm64`). The package bundled for x64 lacks the Arm64 file its own `.INF` names, so on a Windows 11 ARM64 VM (2026-09-30) `pnputil` failed with exit 2 and a release told Arm customers no driver exists. WCH's current package carries one, and `blink install` stages it on Arm. Measured 2026-10-19 on a Windows 11 ARM64 VM with the board passed through: the driver installed Microsoft-signed, the board came up as `USB-SERIAL CH340 (COM3)`, and the daemon and board completed the handshake and exchanged usage. Not yet measured: the undriven case (`docs/windows-check.md`, A2) on Arm. |
 | **One board per computer** | The app drives one BLINK. A second one attached is ignored; `--port` picks one deterministically. |
-| **What is supported** | Claude Code in a terminal or IDE extension: everything. Codex CLI: everything, on its own page. Claude Desktop alone: a five-hour countdown whenever Desktop is holding a reset time - it keeps one only while a window is running and clears it in between, so the countdown comes and goes and the fill rate covers the gaps - a weekly countdown once one has been learned, and the activity light only in Desktop's Code tab. claude.ai in a browser: nothing. |
+| **What is supported** | Claude Code in a terminal or IDE extension: everything. Codex CLI: everything, on its own page. OpenCode on the GLM Coding Plan: everything, on its own page, from the plan's quota endpoint with the key OpenCode holds; with any other model, the activity light only. Claude Desktop alone: a five-hour countdown whenever Desktop is holding a reset time - it keeps one only while a window is running and clears it in between, so the countdown comes and goes and the fill rate covers the gaps - a weekly countdown once one has been learned, and the activity light only in Desktop's Code tab. claude.ai in a browser: nothing. |
 | **Automatic app updates** | **Off** for the first release. The signed manifest carries the switch (`daemon.auto`), so it can be turned on for a later release - and off again within minutes - without touching any installed machine. |
 | **What the app keeps on disk** | Exactly what the table under "What the installer changes" says, readable by the user alone, sent nowhere. |
 | **Not yet** | macOS notarisation (the binary is unsigned; Gatekeeper asks once). Apple Silicon runs the full suite and the real installer in CI, but has not yet been watched by a person. (Windows has: a real Windows 10 PC with a Hebrew user name, 2026-08-29 - which found four things that CI's ASCII English runners could not, fixed in 1.0.3 and 1.0.4.) Claude Desktop's cache location has been seen on macOS and on Windows 11 ARM64 (`%APPDATA%\Claude\`, written there despite the MSIX package, 2026-09-30); on Linux (`~/.config/Claude/`) it is the Electron convention, unconfirmed because there is no Linux Desktop to run. |
@@ -403,19 +413,20 @@ The things that were open before the first release, and how each was settled.
 
 - **Only you can update your device.** Firmware must be signed with your private key (kept off this repo, at `~/.blink/…`); the bootloader rejects anything else. App updates must be signed with a second key of yours, or the app will not install them. The public repo only lets people read and download the firmware, which holds no secrets.
 - **The device holds no credential.** It never signs in and never talks to Anthropic. The figures come from the Claude Code on your own machine, which has already worked them out, and reach the board over the cable. There is no token on the device to leak, and nothing to revoke if you sell or lend it.
-- **The setup touches one file.** `~/.claude/settings.json`: its `statusLine.command`, and a hook entry per lifecycle event - see "What the installer changes" above for exactly what is written and what is kept. All of it is reversible with one command.
+- **The setup touches one file**, and one more for OpenCode. `~/.claude/settings.json`: its `statusLine.command`, and a hook entry per lifecycle event; and on a machine with OpenCode, its plugin folder gets `blink.js`. See "What the installer changes" above for exactly what is written and what is kept. All of it is reversible with one command.
+- **One credential is used, for OpenCode only.** The GLM Coding Plan key OpenCode already saved is sent to that plan's own quota endpoint and nowhere else - see "Where the numbers come from". Nothing about Claude or Codex involves a credential.
 - The on-device Wi-Fi and sign-in path still exists in this repository, behind `CONFIG_BLINK_WIFI_MODE`, but is **not built into shipped firmware** - the release script refuses to publish an image containing it.
 
 ## The status dot
 
 A small dot in the top-right corner is one light for the whole desk: what
-your sessions need from you, across Claude Code and Codex together, worst one
-wins.
+your sessions need from you, across Claude Code, Codex and OpenCode together,
+worst one wins - all three, even though only two have a page.
 
 | Dot | Meaning |
 |---|---|
 | 🟢 green, pulsing | Everything is working; nothing needs you |
-| 🟠 amber | **Your turn** - a session has finished its answer (Claude or Codex), even if others are still working |
+| 🟠 amber | **Your turn** - a session has finished its answer (Claude, Codex or OpenCode), even if others are still working |
 | 🟠 amber, pulsing | A session is asking permission right now |
 | 🔴 red | A turn died on an API error - a rate limit shows here |
 | 🟢 green, steady | Connected, live data, no session has anything to say |
@@ -432,6 +443,13 @@ not typed into claims nothing, and neither does one that has ended. Codex has
 no hook interface, so its state comes from its own session log: a turn that
 started, finished or was interrupted. Codex permission prompts are not in that
 log, so a prompt shows as "working" until you answer it.
+
+OpenCode's state comes from Blink's plugin, which OpenCode loads and tells
+about every session event. Unlike Codex, OpenCode announces its permission
+prompts and questions, so those show as amber, pulsing. A retry that OpenCode
+schedules more than a minute out is a quota wait, and shows red; a sooner one
+is a brief "too busy" from the provider that clears by itself, and stays
+green. Pressing Esc to stop a turn is your turn, not a failure.
 
 ## Support
 

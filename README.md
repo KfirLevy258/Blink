@@ -2,7 +2,7 @@
 
 <a href="https://blink-buddy.com"><img src="docs/img/brand/logo-wide.png" alt="BLINK" width="420"></a>
 
-**Your Claude Code and Codex usage, as two live dials on your desk.**
+**Your Claude Code, Codex and OpenCode usage, as two live dials on your desk.**
 
 <p>
   <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=for-the-badge&labelColor=171B22&color=E8E8E8&label=release&logo=github&logoColor=white"></a>
@@ -62,11 +62,11 @@ this.
 ## Features
 
 - **Two dials, two countdowns.** Session and weekly limits, and the time until each one resets.
-- **An activity light.** Amber the moment any session - Claude or Codex - is waiting on you; a green pulse while everything is still working; red when a turn dies on an error - a rate limit, most often.
-- **A page per provider.** Claude and Codex each get their own screen. Swipe to switch; the needles move from one reading to the other.
+- **An activity light.** Amber the moment any session - Claude, Codex or OpenCode - is waiting on you; a green pulse while everything is still working; red when a turn dies on an error - a rate limit, most often.
+- **A page per provider.** Claude and Codex each get their own screen. Swipe to switch; the needles move from one reading to the other. OpenCode gets one too; with all three in use, the second page follows whichever of Codex and OpenCode you used last.
 - **It sleeps when your computer does.** About thirty seconds after the computer stops answering, the screen closes its eyes and dozes; it opens them the moment the computer is back. A tap while it sleeps shows the last figures.
 - **Claude Desktop too.** With Desktop alone the dials show percentages, a five-hour countdown whenever Desktop is holding a reset time, and a weekly countdown once one has been learned. Desktop keeps that reset time only while a window is running and clears it in between, so the countdown comes and goes; the fill rate covers the gaps. The dials follow Desktop's own refresh - about every 5 minutes while you are using it, up to 15 when it sits idle - where Claude Code updates them live.
-- **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, no network, nothing sent anywhere.
+- **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, no network, nothing sent anywhere. OpenCode is the one exception, because OpenCode never writes its limits down - see [Privacy](#privacy).
 - **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
 - **Cheap, open hardware.** An ESP32 "Cheap Yellow Display" (~$12) and a 3D-printed case.
 - **Company units.** A unit built for a company shows its logo - a still or a short clip - after the boot animation, written once at the factory.
@@ -119,7 +119,7 @@ Windows on Arm (Snapdragon laptops, Surface Pro X) gets the Arm64 build of the U
 ~/.blink/bin/blink uninstall   # put everything back
 ```
 
-Needs Claude Code 2.1.100 or newer. The installer changes one file, `~/.claude/settings.json` (the status line command and one hook per lifecycle event), says so before it does, and keeps your own status line running. Everything it does is reversible with `uninstall`.
+Needs Claude Code 2.1.100 or newer. The installer changes one file, `~/.claude/settings.json` (the status line command and one hook per lifecycle event), says so before it does, and keeps your own status line running. If you use OpenCode it also adds one file, `blink.js`, to OpenCode's plugin folder (`~/.config/opencode/plugin/`). Everything it does is reversible with `uninstall`.
 
 ## Something's wrong?
 
@@ -153,13 +153,23 @@ For Claude Desktop, the app learns usage by reading Claude Desktop's own local f
 |---|---|
 | Claude Code, in a terminal or an IDE | Everything |
 | Codex CLI | Everything, on its own page |
+| OpenCode on the GLM Coding Plan (Z.ai or BigModel) | The plan's 5-hour and weekly quota with both countdowns, on its own page, and the activity light |
+| OpenCode with any other model | The activity light; the dials stay blank (`--%`) rather than show a number from somewhere else |
 | Claude Code in Claude Desktop's Code tab | The same as Desktop below, plus the activity light: the Code tab runs Claude Code's hooks, though not its status line, so the figures are Desktop's rather than Claude Code's |
 | Claude Desktop, without Claude Code | Five-hour percentage and countdown, refreshed within seconds of a turn; weekly percentage on Desktop's own schedule (about 5 min in use, up to 15 idle); a weekly countdown too, once one has been learned, published only while nothing contradicts it; no activity light |
 | claude.ai in a browser | Nothing - there is no usage data to read |
 
 ## Privacy
 
-BLINK never sees a credential and never sends anything anywhere. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`. The device holds no token: nothing to leak, nothing to revoke if you lend it.
+For Claude and Codex, BLINK never sees a credential and never sends anything anywhere. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`. The device holds no token: nothing to leak, nothing to revoke if you lend it.
+
+**OpenCode is different, and here is exactly how.** OpenCode keeps token counts but never your plan's limit, so there is no percentage on your disk to read. Your GLM Coding Plan has one, behind its own usage endpoint. To show it, BLINK reads the Coding Plan key OpenCode already saved (in `~/.local/share/opencode/auth.json`) and asks that one endpoint for your quota:
+
+- The key goes **only** to the plan's own quota endpoint - `api.z.ai` for a Z.ai key, `open.bigmodel.cn` for a BigModel one - and nowhere else. It is never written down, never logged, and never sent to the board.
+- It asks about once a minute while you are using OpenCode, every ten minutes otherwise, and not at all after a week without it.
+- The activity light comes from a small plugin BLINK puts in OpenCode's plugin folder. It writes the same tiny files the Claude Code hooks do: what happened and when, the session ids, and the last part of the project folder's name. Never a prompt, a path or a command.
+
+`blink install` says all of this before it does anything, and `blink uninstall` removes the plugin.
 
 ## Building units
 
@@ -169,7 +179,7 @@ BLINK never sees a credential and never sends anything anywhere. It keeps the la
 
 - **[The full README](docs/README-full.md)** - how the numbers are found, what the installer changes line by line, ports and multiple boards, updates and signing, the decisions behind the first release
 - **[firmware/README.md](firmware/README.md)** - building, flashing and signing the firmware yourself
-- **[docs/multi-provider.md](docs/multi-provider.md)** - how two sources are merged into one reading
+- **[docs/multi-provider.md](docs/multi-provider.md)** - how the sources are merged into one reading, and what happens with three providers
 - **[docs/windows-check.md](docs/windows-check.md)** - the ten-minute check a Windows release needs a person for
 - **[docs/fleet-testing.md](docs/fleet-testing.md)** - the one command that proves a release on three real desks and three real boards, and what a green run does and does not prove
 

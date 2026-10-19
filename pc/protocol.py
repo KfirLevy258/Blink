@@ -8,7 +8,7 @@ import json
 import math
 
 from pc.version import PROTO_VERSION
-from pc.providers.base import STATE_UNKNOWN, worst_of
+from pc.providers.base import worst_of
 
 # Kept as a name because every message builder below already spells it this
 # way. It is the protocol's version, not the product's -- see pc/version.py.
@@ -488,7 +488,8 @@ def meaningful_usage(msg: dict) -> dict:
     return {k: v for k, v in msg.items() if k not in VOLATILE_USAGE_KEYS}
 
 
-def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
+def frame_to_usage(frame, now_epoch: float, secondary=None,
+                   others=()) -> dict:
     """Turn a NormalizedUsageFrame into the usage message for the board.
 
     The single crossing point from provider-space to wire-space. Providers
@@ -496,7 +497,21 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     would be free to invent its own field names and the firmware would need to
     learn each one. Everything upstream produces frames; this function is the
     only thing that decides what a frame looks like on the wire.
+
+    `others` are the providers past the two rings (normalizer.rank()[2:]).
+    They put nothing on a ring and no key of their own on the line; their
+    state and counts are folded into the desk-wide `state` and `n_*`, and
+    nothing else. That is the whole of their footprint, so the line is no
+    wider for them, and with none -- every desk with one or two providers --
+    the message is exactly what it was.
+
+    Why at all: the light is one claim about the desk. Before this, a desk
+    running Claude, Codex and OpenCode folded only the two ringed providers,
+    so an OpenCode session waiting on a permission prompt -- with Claude and
+    Codex holding the rings -- left the light green and the count short for
+    as long as the person did not happen to look at the terminal.
     """
+    lit = [f for f in (frame, secondary, *others) if f is not None]
     return usage(
         frame.session_pct, frame.session_resets_at,
         frame.weekly_pct, frame.weekly_resets_at,
@@ -510,14 +525,15 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         # ("something needs you"), and a Codex session waiting on them is
         # exactly as much their turn as a Claude one -- whichever page is
         # in front.
-        state=worst_of((frame.state,
-                        secondary.state if secondary else STATE_UNKNOWN)),
-        n_sess=frame.n_sessions() + (secondary.n_sessions() if secondary
-                                     else 0),
-        n_run=frame.n_run + (secondary.n_run if secondary else 0),
-        n_wait=frame.n_wait + (secondary.n_wait if secondary else 0),
-        n_stuck=frame.n_stuck + (secondary.n_stuck if secondary else 0),
-        n_agents=frame.n_agents + (secondary.n_agents if secondary else 0),
+        #
+        # Every provider, not only the two on the rings -- see `others` in
+        # the docstring.
+        state=worst_of([f.state for f in lit]),
+        n_sess=sum(f.n_sessions() for f in lit),
+        n_run=sum(f.n_run for f in lit),
+        n_wait=sum(f.n_wait for f in lit),
+        n_stuck=sum(f.n_stuck for f in lit),
+        n_agents=sum(f.n_agents for f in lit),
         p2=(secondary.provider if secondary else ""),
         p2_session_pct=(secondary.session_pct if secondary else UNKNOWN),
         p2_weekly_pct=(secondary.weekly_pct if secondary else UNKNOWN),
@@ -532,22 +548,32 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         age_s=_age_of(frame, now_epoch),
         p2_age_s=_age_of(secondary, now_epoch),
         # And the other question: how long since anything on this desk said
-        # anything at all. The freshest of the two pages, because the panel
-        # sleeps as one screen -- see usage() for why the two ages come
-        # apart and what the board does with each.
-        active_age_s=_active_age(frame, secondary, now_epoch),
+        # anything at all. The freshest of every provider the light folds --
+        # both pages and `others` -- because the panel sleeps as one screen;
+        # see usage() for why the two ages come apart and what the board
+        # does with each.
+        active_age_s=_active_age(lit, now_epoch),
     )
 
 
-def _active_age(frame, secondary, now_epoch: float) -> int:
+def _active_age(frames, now_epoch: float) -> int:
     """The age of the freshest contact on the bus, or -1 when nothing says.
 
-    The MINIMUM of the two providers' active ages, not of their reading
-    ages: a Codex rollout written a minute ago is evidence that somebody is
-    at this machine even on a day when the Claude page holds the dial.
+    The MINIMUM of the providers' active ages, not of their reading ages: a
+    Codex rollout written a minute ago is evidence that somebody is at this
+    machine even on a day when the Claude page holds the dial.
+
+    EVERY provider the light folds, not only the two on the rings. Found in
+    review, 2026-10-19: the state and the counts had learned to take
+    `others` (a third provider past the rings, or one with a state and no
+    number) while this still took the pair. So on a desk with Claude and
+    Codex on the rings, both untouched since yesterday, and somebody whose
+    OpenCode turn finished a minute ago, the board was told nobody had been
+    here for hours: with the light at "your turn", which the firmware lets
+    it sleep through, it dozed off in front of them once that age passed
+    SLEEP_ABSENT_AFTER_S.
     """
-    ages = [a for a in (_age_of(frame, now_epoch, "active_at"),
-                        _age_of(secondary, now_epoch, "active_at"))
+    ages = [a for a in (_age_of(f, now_epoch, "active_at") for f in frames)
             if a >= 0]
     return min(ages) if ages else -1
 

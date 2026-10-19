@@ -234,13 +234,82 @@ def select_pair(frames, preferred=None):
     the primary, applied twice: preference first, then recency. A third
     provider is dropped rather than rotated, because a ring that silently
     changes whose number it is showing is worse than one that never shows it.
+
+    Dropped from the RINGS, not from the light: see rank(), which the bus
+    uses so that a third provider's waiting session still turns it amber.
+    """
+    ranked = rank(frames, preferred)
+    if not ranked:
+        return None, None
+    return ranked[0], (ranked[1] if len(ranked) > 1 else None)
+
+
+def rank(frames, preferred=None):
+    """Every provider's merged frame, in ring order: [primary, secondary, ...].
+
+    select_pair() is the first two of this. The rest are the providers the
+    rings have no room for, and they are returned rather than discarded
+    because the activity light is not a ring. It is one claim about the
+    whole desk -- "something needs you" -- and a desk running Claude, Codex
+    and OpenCode whose only waiting session is OpenCode's needs the person
+    exactly as much as one where it is Claude's. Folding only the pair let
+    that session sit unseen behind a green light for as long as it waited
+    (pc/ingest.IngestionBus.poll and protocol.frame_to_usage's `others`).
     """
     merged = [m for m in (merge(g) for g in group_by_provider(frames).values())
               if m is not None]
     if not merged:
-        return None, None
-    merged.sort(key=lambda m: (m.provider != preferred, -m.observed_at))
-    return merged[0], (merged[1] if len(merged) > 1 else None)
+        return []
+    # Recency of USE, not of the reading: active_at, not observed_at.
+    #
+    # For Claude and Codex the two were close enough that nobody had to
+    # choose -- both read a file the tool itself writes while it is being
+    # used, so the reading's age IS how long ago the tool was last touched.
+    # OpenCode broke that. Its numbers come from Z.ai's quota endpoint,
+    # which the daemon asks on its own schedule, so its observed_at is the
+    # moment of the FETCH and is honestly fresh every ten minutes whether or
+    # not anybody has opened OpenCode today. Sorting on that handed the
+    # second ring to OpenCode on a desk where Codex was the tool in use,
+    # simply because OpenCode had been polled more recently
+    # (pc/providers/opencode.py sets active_at to its last real activity
+    # for exactly this sort, and the module docstring there says why
+    # observed_at could not carry it instead).
+    #
+    # Unchanged for every frame that does not set active_at: it defaults to
+    # observed_at (base.NormalizedUsageFrame.__post_init__). A tie -- two
+    # providers each with a session running both stamp `now`
+    # (claude_state.activity_at; any other state frame carries its last
+    # real event) -- keeps the order the providers were polled in, because
+    # sort() is stable; a tie-break on observed_at would hand it back to
+    # whichever was fetched last, which is the very thing this key exists
+    # to stop.
+    merged.sort(key=lambda m: (m.provider != preferred, -m.active_at))
+    return merged
+
+
+def light_only(frames):
+    """State frames of the providers that have nothing for a ring.
+
+    merge() returns None for a provider that reported a state and no
+    percentage at all, and rank() therefore never sees it. That was right for
+    the rings and wrong for the light. OpenCode is the case that made it
+    visible: its gauges come from the GLM plan's quota endpoint, so a desk
+    whose OpenCode runs any other model -- or whose first fetch has not
+    answered yet -- has live session slots and no number, and its session
+    waiting on a permission prompt left the light green.
+
+    Returned as the provider's own state frames, unmerged: they carry the
+    state and the counts and nothing else, which is all the light reads
+    (protocol.frame_to_usage's `others`). A provider that has a ring is not
+    here, so nothing is counted twice.
+    """
+    out = []
+    for group in group_by_provider(frames).values():
+        if merge(group) is not None:
+            continue
+        out.extend(f for f in group
+                   if f.state and f.state != base.STATE_UNKNOWN)
+    return out
 
 
 def select(frames, preferred=None):

@@ -54,6 +54,7 @@ import os
 from datetime import datetime, timezone
 
 from pc.providers import base
+from pc.providers import claude_state
 from pc.providers import codex_state
 
 PROVIDER_ID = "codex"
@@ -737,6 +738,9 @@ class CodexCliProvider(base.ProviderParser):
         # the session id is the only thing the two sources share.
         rollout_states = {}
         rollout_names = {}
+        # When each of those sessions last wrote its rollout: the frame's
+        # active_at, below.
+        rollout_times = {}
         paths = recent_rollouts(self._root)
         self._prune_names(set(paths))
         for path in paths:
@@ -758,6 +762,7 @@ class CodexCliProvider(base.ProviderParser):
                 # worse of the two errors.
                 key = rollout_session_id(path) or path
                 rollout_states[key] = state
+                rollout_times[key] = mtime
                 # A name is only collected from a session that made a claim.
                 # A terminal opened and not typed into has a cwd and no turn,
                 # and letting it lend its name would rename the panel after
@@ -809,7 +814,7 @@ class CodexCliProvider(base.ProviderParser):
         # Filtered before the update, never after: a hook slot is the newest
         # word on its own session, so a session that ended and was resumed
         # under the same id counts again the moment its slot reappears.
-        hook_states, agents = codex_state.scan(
+        hook_states, agents, hook_times = codex_state.census(
             now_epoch, path=self._state_dir, sweep=self._sweep)
         buried = codex_state.ended(
             now_epoch, path=self._state_dir, sweep=self._sweep)
@@ -822,6 +827,16 @@ class CodexCliProvider(base.ProviderParser):
             counts[merged_state] = counts.get(merged_state, 0) + 1
 
         if counts:
+            # The last real event among the sessions counted: a rollout's
+            # mtime, or a hook slot's clock, whichever is newer. Found in
+            # review, 2026-10-19: this frame said `now` -- like every state
+            # frame did -- so a Codex session finished fifty minutes ago
+            # tied an OpenCode turn finished one minute ago for the second
+            # ring, and won it on poll order. claude_state.activity_at has
+            # the rule, and why a RUNNING session still says `now`.
+            last = max([rollout_times[k] for k in merged if k in rollout_times]
+                       + [hook_times[k] for k in hook_states
+                          if k in hook_times], default=None)
             # A separate frame with no percentages, exactly as Claude's state
             # provider does it: it can never win a recency contest for
             # numbers, and the normalizer merges its state field by field.
@@ -840,6 +855,7 @@ class CodexCliProvider(base.ProviderParser):
                 provider=PROVIDER_ID,
                 src=STATE_SRC_ID,
                 observed_at=now_epoch,
+                active_at=claude_state.activity_at(counts, last, now_epoch),
                 state=state,
                 # Named only when exactly ONE session holds the state the
                 # frame is reporting, which is the rule claude_state.poll

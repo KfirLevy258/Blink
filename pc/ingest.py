@@ -21,6 +21,7 @@ from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
 from pc.providers.claude_state import ClaudeStateProvider
 from pc.providers.codex_cli import CodexCliProvider
+from pc.providers.opencode import OpenCodeProvider
 from pc.providers.weekly_anchor import DesktopHistoryProvider, WeeklyAnchorProvider
 
 
@@ -45,16 +46,35 @@ FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
 
-def default_providers():
+def default_providers(look_only=False):
     """Every provider shipped today, in preference order.
 
     Order is not the merge rule -- pc/normalizer merges by recency per field,
     not by position -- but it does decide which source is polled first and so
     which one a tie resolves toward.
+
+    `look_only` is for a one-shot command (`blink status --wire`) rather than
+    the daemon: OpenCode's provider then starts no quota thread -- whose
+    first tick would otherwise send the customer's key to Z.ai from a
+    command that only meant to look -- and does not sweep its slots.
     """
     return [ClaudeCliProvider(), ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
             ClaudeStateProvider(), CodexCliProvider(),
+            # After Codex, and the order is a tie-break that matters: two
+            # providers each with a session RUNNING both carry active_at =
+            # now, and select_pair keeps poll order on a tie, so Codex -- the
+            # provider that shipped first -- keeps the second ring rather
+            # than the two trading it on every poll. Only then: a state
+            # frame with nothing running carries its last real event, not
+            # `now` (claude_state.activity_at). Until review caught it,
+            # 2026-10-19, every slot under an hour old said `now`, and this
+            # tie-break decided the ring for an hour after Codex went idle.
+            #
+            # Constructing it starts nothing. Its quota fetcher is a thread
+            # that the first poll() starts, so a caller that only builds the
+            # list -- a test reading provider ids -- makes no request.
+            OpenCodeProvider(fetch=not look_only, sweep=not look_only),
             # LAST: it only ever offers a remembered projection, and every
             # source above it is polled first so any of them carrying a real
             # weekly reset is what observe() below learns from this cycle.
@@ -285,15 +305,31 @@ class IngestionBus:
 
     def poll(self):
         """The usage message for the board, or None when nothing is known."""
-        primary, secondary = normalizer.select_pair(
-            self.poll_frames(), preferred=self._preferred)
-        if primary is None:
+        frames = self.poll_frames()
+        ranked = normalizer.rank(frames, preferred=self._preferred)
+        if not ranked:
             return None
-        msg = protocol.frame_to_usage(primary, self._now(), secondary)
+        primary = ranked[0]
+        secondary = ranked[1] if len(ranked) > 1 else None
+        # The providers the two rings have no room for. They lose the rings
+        # and keep the light: their states and counts are folded into the
+        # message's own, because a third provider -- OpenCode beside Claude
+        # and Codex -- whose session is waiting on the person was otherwise
+        # invisible on the panel for exactly as long as it waited. Empty on
+        # a one- or two-provider desk, and then the message is byte for byte
+        # what it was before this existed.
+        #
+        # And the providers with no number at all, for the same reason: an
+        # OpenCode desk without a GLM plan key still has sessions that can
+        # wait on the person (normalizer.light_only).
+        others = ranked[2:] + normalizer.light_only(frames)
+        msg = protocol.frame_to_usage(primary, self._now(), secondary,
+                                      others=others)
         # Against the state the message actually carries, which is not always
         # the primary frame's own -- see _pair_from.
         self._session_pair = _pair_from(
-            primary, secondary, msg.get("state", base.STATE_UNKNOWN))
+            primary, secondary, msg.get("state", base.STATE_UNKNOWN),
+            others)
         return msg
 
     def session_pair(self):
@@ -357,7 +393,7 @@ _COUNT_FOR_STATE = {
 }
 
 
-def _pair_from(primary, secondary, wire_state):
+def _pair_from(primary, secondary, wire_state, others=()):
     """(label, n) for the state the usage message actually carries.
 
     Against the WIRE state rather than the primary frame's own, because
@@ -371,8 +407,14 @@ def _pair_from(primary, secondary, wire_state):
     the panel, and only when nothing else shares that state. Naming one of
     several is refused rather than guessed, which is the same rule
     claude_state.poll applies when it decides whether to set `label` at all.
+
+    Across EVERY provider the light was folded from, `others` included. The
+    wire state can now come from a provider that has no ring, and a name
+    picked while ignoring it would be the same wrong statement one provider
+    further out: Claude's only waiting session named on the panel while an
+    OpenCode session waits beside it uncounted.
     """
-    frames = [f for f in (primary, secondary) if f is not None]
+    frames = [f for f in (primary, secondary, *others) if f is not None]
     field = _COUNT_FOR_STATE.get(wire_state)
     n = sum(getattr(f, field, 0) for f in frames) if field else 0
     named = [f for f in frames

@@ -1226,3 +1226,507 @@ def test_a_matched_pair_says_none_of_it():
     out = _board_lines_for(RELEASE_VERSION)
     assert "they ship together" not in out
     assert "ahead of the published release" not in out
+
+
+# --- OpenCode ----------------------------------------------------------------
+#
+# The third tool, and the first place Blink sends a customer's credential
+# anywhere. These tests use the real install_opencode_plugin against the
+# sandboxed HOME (conftest unsets XDG_*, so ~/.config/opencode and
+# ~/.local/share/opencode are under tmp_path), and never let a quota request
+# out: fetch_once is replaced wherever a key exists, and conftest's
+# _no_real_quota_request fails any test that forgets.
+
+from tests.support import opencode_fixture as ocfx  # noqa: E402
+
+
+def _oc_data(tmp_path):
+    return str(tmp_path / ".local" / "share" / "opencode")
+
+
+def _oc_config(tmp_path):
+    return tmp_path / ".config" / "opencode"
+
+
+def _oc_plugin(tmp_path):
+    return _oc_config(tmp_path) / "plugin" / "blink.js"
+
+
+def _with_opencode(tmp_path, key=False):
+    """OpenCode has run here: its database exists, and a plan key if asked."""
+    ocfx.make_db(_oc_data(tmp_path), sqlite=False, wal=False)
+    if key:
+        ocfx.write_auth(_oc_data(tmp_path), ocfx.plan_key())
+
+
+def _plugin_source():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "tools", "blink-opencode.js"),
+              encoding="utf-8") as f:
+        return f.read()
+
+
+def _no_fetch(monkeypatch, answer=(None, None)):
+    """Replace the one network call; returns the list of calls it saw."""
+    calls = []
+
+    def fake(now_epoch=None, fetcher=None, root=None, timeout=None):
+        calls.append((now_epoch, timeout))
+        return answer
+
+    monkeypatch.setattr(cli.opencode, "fetch_once", fake)
+    return calls
+
+
+def _quota():
+    from pc.providers import opencode
+    now = time.time()
+    return opencode.Quota(34.0, now + 3600, 12.0, now + 400000)
+
+
+def test_opencode_only_desk_gets_the_plugin_and_says_what_it_sends(
+        tmp_path, capsys, monkeypatch):
+    """The desk this branch is for: OpenCode on the GLM plan, no Claude, no
+    Codex. The plugin lands where OpenCode loads it, the disclosure says
+    before the write that the key goes to Z.ai, and the closing note says
+    what the panel shows."""
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path, key=True)
+    calls = _no_fetch(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+
+    plugin = _oc_plugin(tmp_path)
+    assert plugin.exists(), "the plugin was not installed"
+    assert plugin.read_text(encoding="utf-8") == _plugin_source()
+    assert "[5/6] OpenCode plugin" in out or "[5/7] OpenCode plugin" in out
+
+    disclosure = out.split("[1/")[0]
+    assert str(plugin) in disclosure, "the disclosure does not name the plugin"
+    assert "sends nothing anywhere" not in disclosure, \
+        "the disclosure says nothing is sent above a step that sends the key"
+    step = out.split("OpenCode plugin ... ")[1]
+    before_write = step.split("OpenCode plugin installed")[0]
+    for must in ("Z.ai", "BigModel", "once a minute", "10", "never logged",
+                 "uninstall", "A plan key is there"):
+        assert must in before_write, f"disclosure lacks {must!r}"
+
+    flat = " ".join(out.split())       # the note is wrapped by textwrap
+    assert "runs on OpenCode alone" in flat
+    assert "GLM Coding Plan quota" in flat
+    assert "activity light for OpenCode sessions" in flat
+
+    d = tmp_path / ".blink" / "state-opencode"
+    assert d.is_dir()
+    if os.name != "nt":
+        import stat
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+    # Install itself makes no request: the daemon does, later.
+    assert calls == []
+    assert ocfx.FAKE_KEY not in out
+
+
+def test_install_on_a_desk_without_opencode_writes_nothing_of_opencode(
+        tmp_path, capsys):
+    """Absent OpenCode, not the plugin, not the plugin directory, not
+    ~/.config/opencode: OpenCode runs `npm install` in every config
+    directory it finds, so even an empty one would be a stranger's."""
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert not (tmp_path / ".config" / "opencode").exists()
+    assert not (tmp_path / ".blink" / "state-opencode").exists()
+    assert "no OpenCode on this machine, nothing to do" in out
+    disclosure = out.split("[1/")[0]
+    assert "blink.js" not in disclosure
+    assert "Blink is about to add a plugin to OpenCode" not in out
+    # The exception is still disclosed, because the daemon would make it the
+    # day a key appears, with no install in between.
+    assert "GLM Coding" in disclosure
+
+
+def test_opencode_without_a_plan_key_is_promised_a_light_and_no_numbers(
+        tmp_path, capsys, monkeypatch):
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path, key=False)
+    calls = _no_fetch(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "No plan key is there, so nothing is sent" in out
+    assert "no GLM Coding Plan key" in " ".join(out.split())
+    assert "GLM Coding Plan quota, read" not in out
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "no GLM Coding Plan key in OpenCode's auth.json" in st
+    assert calls == [], "status fetched with no key to fetch with"
+
+
+def test_a_desk_with_all_three_names_all_three(tmp_path, capsys, monkeypatch):
+    """Claude Desktop, Codex and OpenCode: the note lists every source and
+    the light names both tools' sessions, with the Code tab."""
+    _no_cli(monkeypatch, desktop=True, codex=True)
+    monkeypatch.setattr(cli.install_codex_hooks, "install",
+                        lambda p, s: "installed (10 events).")
+    _with_opencode(tmp_path, key=True)
+    _no_fetch(monkeypatch, (_quota(), None))
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    shown = _listed(out, "Shown")
+    assert "Claude Desktop, Codex and OpenCode" in out
+    assert _has(shown, "Codex and OpenCode sessions")
+    assert _has(shown, "OpenCode's GLM plan quota")
+    assert _oc_plugin(tmp_path).exists()
+
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "running on Claude Desktop, Codex and OpenCode" in st
+    assert "OpenCode    GLM plan quota: 34% (5h), 12% (week)" in st
+
+
+def test_a_blink_js_that_is_not_ours_is_left_alone_everywhere(
+        tmp_path, capsys, monkeypatch):
+    """The plugin directory is where people put their own plugins, and
+    blink.js is an ordinary name. Install, status, refresh and uninstall
+    must all leave somebody else's file exactly as it was."""
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path)
+    _no_fetch(monkeypatch)
+    plugin = _oc_plugin(tmp_path)
+    plugin.parent.mkdir(parents=True)
+    theirs = "// my own plugin\nexport const Mine = async () => ({})\n"
+    plugin.write_text(theirs)
+    _settings(tmp_path, {})
+
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert plugin.read_text() == theirs
+    assert "not Blink's" in out
+    assert "needs the plugin" in " ".join(out.split())
+    assert not _has(_listed(out, "Shown"), "OpenCode sessions")
+
+    cli.main(["status"])
+    assert "is not Blink's" in capsys.readouterr().out
+    assert cli.refresh_opencode_plugin() is None
+    cli._refresh_shims()
+    cli.main(["uninstall"])
+    assert plugin.read_text() == theirs
+
+
+def test_uninstall_removes_our_plugin_and_the_opencode_slots(
+        tmp_path, capsys, monkeypatch):
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path)
+    _no_fetch(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    slots = tmp_path / ".blink" / "state-opencode"
+    ocfx.slot(str(slots), "ses_1", "Stop", time.time())
+    ocfx.waiting(str(slots), "ses_1", time.time())
+    ocfx.agent(str(slots), "ses_1", "ses_2", time.time())
+    capsys.readouterr()
+
+    assert cli.main(["uninstall"]) == 0
+    out = capsys.readouterr().out
+    assert "[5/6] OpenCode plugin:" in out
+    assert "OpenCode plugin removed" in out
+    assert not _oc_plugin(tmp_path).exists()
+    assert not slots.exists(), "uninstall left OpenCode's slots behind"
+    # OpenCode's own tree stays: it populates that directory itself.
+    assert (tmp_path / ".local" / "share" / "opencode" / "opencode.db").exists()
+
+
+def test_refresh_rewrites_only_a_stale_plugin_that_is_ours(tmp_path,
+                                                           monkeypatch):
+    """`blink update` and the watchdog put this release's plugin on disk --
+    and never create one where none was."""
+    _with_opencode(tmp_path)
+    plugin = _oc_plugin(tmp_path)
+
+    assert cli.refresh_opencode_plugin() is None
+    cli._refresh_shims()
+    assert not plugin.exists(), "a refresh installed a plugin that was absent"
+    assert not _oc_config(tmp_path).exists()
+
+    plugin.parent.mkdir(parents=True)
+    stale = _plugin_source() + "// last release\n"
+    assert stale.startswith(cli.install_opencode_plugin.MARKER)
+    plugin.write_text(stale)
+    cli._refresh_shims()
+    assert plugin.read_text(encoding="utf-8") == _plugin_source()
+    assert cli.refresh_opencode_plugin() is None, "current, so nothing to do"
+
+
+def test_the_watchdog_refreshes_the_plugin_only_while_installed(
+        tmp_path, monkeypatch):
+    """Same rule as the shims: no install marker means the user
+    uninstalled, and a daemon winding down must not put anything back."""
+    _with_opencode(tmp_path)
+    plugin = _oc_plugin(tmp_path)
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text(cli.install_opencode_plugin.MARKER + " old\n")
+    monkeypatch.setattr(install_statusline, "_read_marker", lambda: None)
+    dog = install_statusline.DriftWatchdog(
+        "unused", "unused", check=lambda a, b: None,
+        refreshers=(cli.refresh_opencode_plugin,))
+    assert dog.tick() is None
+    assert plugin.read_text().endswith(" old\n")
+
+    monkeypatch.setattr(install_statusline, "_read_marker", lambda: "x")
+    dog = install_statusline.DriftWatchdog(
+        "unused", "unused", check=lambda a, b: None,
+        refreshers=(cli.refresh_opencode_plugin,))
+    assert "OpenCode plugin updated" in dog.tick()
+    assert plugin.read_text(encoding="utf-8") == _plugin_source()
+
+
+def test_status_reads_the_quota_once_and_never_prints_the_key(
+        tmp_path, capsys, monkeypatch):
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path, key=True)
+    calls = _no_fetch(monkeypatch, (_quota(), None))
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    capsys.readouterr()
+
+    assert cli.main(["status"]) == 0
+    st = capsys.readouterr().out
+    assert len(calls) == 1, f"status fetched {len(calls)} times"
+    # The short timeout, not the daemon's: a person is waiting on this
+    # command, and offline every other line of it answers at once.
+    assert calls[0][1] == cli.opencode.STATUS_FETCH_TIMEOUT_S
+    assert "OpenCode    database found in" in st
+    assert "OpenCode    plugin installed, no live sessions" in st
+    assert "OpenCode    GLM plan quota: 34% (5h), 12% (week)" in st
+    assert "running on OpenCode alone" in st
+    assert ocfx.FAKE_KEY not in st
+
+
+def test_status_names_the_category_when_the_quota_cannot_be_read(
+        tmp_path, capsys, monkeypatch):
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path, key=True)
+    _no_fetch(monkeypatch, (None, "rejected the key"))
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "GLM plan quota could not be read: rejected the key" in st
+    assert ocfx.FAKE_KEY not in st
+
+
+def test_status_gives_up_on_a_fetch_that_outlives_its_timeout(
+        tmp_path, capsys, monkeypatch):
+    """Found in review, 2026-10-19: urllib's timeout does not bound the DNS
+    lookup, so a dead resolver held `blink status` for as long as it liked.
+    The fetch now runs on a thread that status waits for only
+    STATUS_FETCH_TIMEOUT_S -- patched small here; the stand-in fetch would
+    otherwise hang for the whole five seconds it waits."""
+    import threading
+    from pc.providers import opencode
+    _with_opencode(tmp_path, key=True)
+    release = threading.Event()
+
+    def hangs(now_epoch=None, fetcher=None, root=None, timeout=None):
+        release.wait(5)
+        return _quota(), None
+
+    monkeypatch.setattr(cli.opencode, "fetch_once", hangs)
+    monkeypatch.setattr(opencode, "STATUS_FETCH_TIMEOUT_S", 0.2)
+    t0 = time.monotonic()
+    try:
+        cli.main(["status"])
+    finally:
+        elapsed = time.monotonic() - t0
+        release.set()
+    st = capsys.readouterr().out
+    assert elapsed < 3, f"status waited {elapsed:.1f} s on a hung fetch"
+    assert "GLM plan quota could not be read: unreachable" in st
+
+
+def test_status_reraises_what_fetch_once_never_turns_into_a_category(
+        tmp_path, monkeypatch):
+    """The thread must not swallow a KeyboardInterrupt -- or the suite's own
+    guard against a real request, which is why this matters here."""
+    _with_opencode(tmp_path, key=True)
+
+    def interrupted(now_epoch=None, fetcher=None, root=None, timeout=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.opencode, "fetch_once", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        cli._status_fetch(time.time())
+
+
+def test_no_plan_key_says_the_light_works_only_with_our_plugin(
+        tmp_path, capsys, monkeypatch):
+    """Found in review, 2026-10-19: the no-key line said "its light works"
+    on every desk, including one whose blink.js is somebody else's and
+    whose status had just said the plugin is not installed."""
+    _with_opencode(tmp_path, key=False)
+    calls = _no_fetch(monkeypatch)
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    line = [ln for ln in st.splitlines() if "no GLM Coding Plan key" in ln]
+    assert line == ["OpenCode    no GLM Coding Plan key in OpenCode's"
+                    " auth.json -- there are no usage figures to show"]
+
+    plugin = _oc_plugin(tmp_path)
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text("// my own plugin\n")
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "is not Blink's" in st
+    assert "its light works" not in st
+
+    plugin.write_text(_plugin_source(), encoding="utf-8")
+    cli.main(["status"])
+    assert ("no GLM Coding Plan key in OpenCode's auth.json -- its light"
+            " works") in capsys.readouterr().out
+    assert calls == []
+
+
+def test_an_xdg_desk_is_recorded_for_the_service_and_unrecorded_at_uninstall(
+        tmp_path, capsys, monkeypatch):
+    """Found in review, 2026-10-19: install and status ran in a shell with
+    XDG_DATA_HOME / XDG_CONFIG_HOME set and found OpenCode; the service,
+    started by launchd / systemd / Task Scheduler without those variables,
+    looked in ~/.local/share and showed nothing. Install now records what
+    the shell saw, the daemon's lookups read it, and uninstall removes it."""
+    from pc.providers import opencode
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    data_home, config_home = tmp_path / "xd", tmp_path / "xc"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    data = str(data_home / "opencode")
+    ocfx.make_db(data, sqlite=False, wal=False)
+    ocfx.write_auth(data, ocfx.plan_key())
+    _no_fetch(monkeypatch, (_quota(), None))
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "recorded OpenCode's directories" in out
+    assert (config_home / "opencode" / "plugin" / "blink.js").exists()
+
+    # As the service sees it: no XDG variables.
+    monkeypatch.delenv("XDG_DATA_HOME")
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    assert cli.opencode_present() and cli.opencode_plan_key()
+    assert cli.opencode_plugin_ours()
+    assert opencode.OpenCodeProvider(fetch=False).fetch_interval(
+        time.time()) is not None, "the service would not fetch"
+    cli.main(["status"])
+    assert "the service reads" not in capsys.readouterr().out
+
+    assert cli.main(["uninstall"]) == 0
+    capsys.readouterr()
+    assert not os.path.exists(opencode.paths_record_path())
+
+
+def test_status_warns_when_the_service_would_look_elsewhere(
+        tmp_path, capsys, monkeypatch):
+    """XDG set in this shell, and no record: every OpenCode line status
+    prints describes a directory the daemon never reads, so it says so."""
+    data_home = tmp_path / "xd"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    ocfx.make_db(str(data_home / "opencode"), sqlite=False, wal=False)
+    _no_fetch(monkeypatch)
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    want = os.path.join(str(tmp_path), ".local", "share", "opencode")
+    assert (f"OpenCode    the service reads OpenCode's data from {want},"
+            f" not {data_home / 'opencode'}") in st
+    assert "install` again from this shell" in st
+    assert "OpenCode's config" not in st        # that one was never moved
+
+    from pc.providers import opencode
+    opencode.record_dirs()
+    cli.main(["status"])
+    assert "the service reads" not in capsys.readouterr().out
+
+
+def test_status_counts_live_opencode_sessions_without_sweeping_them(
+        tmp_path, capsys, monkeypatch):
+    _with_opencode(tmp_path)
+    _no_fetch(monkeypatch)
+    plugin = _oc_plugin(tmp_path)
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text(_plugin_source(), encoding="utf-8")
+    slots = str(tmp_path / ".blink" / "state-opencode")
+    now = time.time()
+    ocfx.slot(slots, "ses_a", "UserPromptSubmit", now)
+    ocfx.slot(slots, "ses_b", "Stop", now)
+    # Older than claude_state.ABANDONED_AFTER_S: a sweep would collect it.
+    old = ocfx.slot(slots, "ses_old", "Stop", now - 7200)
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "OpenCode    plugin installed, 2 live sessions" in st
+    assert os.path.exists(old), "`blink status` swept OpenCode's slots"
+
+
+def test_status_on_a_desk_with_no_opencode_says_where_it_looked(
+        tmp_path, capsys, monkeypatch):
+    calls = _no_fetch(monkeypatch)
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "OpenCode    no database" in st
+    assert "plugin" not in st.split("OpenCode    no database")[1]
+    assert calls == []
+
+
+def test_status_wire_is_one_json_line_and_starts_no_quota_thread(
+        tmp_path, capsys, monkeypatch):
+    """The daemon's bus starts OpenCode's fetch thread on its first poll, and
+    that thread's first tick is a request with the key. `status --wire`
+    builds the same bus: it must start nothing and fetch nothing beyond the
+    one fetch_once the OpenCode row makes -- whose reading it reuses."""
+    import threading
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path, key=True)
+    calls = _no_fetch(monkeypatch, (_quota(), None))
+    from pc.providers import opencode
+    started = []
+    real = opencode.OpenCodeProvider._ensure_thread
+
+    def spy(self):
+        real(self)
+        if self._thread is not None:
+            started.append(self)
+            self.stop()
+
+    monkeypatch.setattr(opencode.OpenCodeProvider, "_ensure_thread", spy)
+    monkeypatch.setattr(opencode, "_fetch", lambda *a, **k: pytest.fail(
+        "status --wire made a quota request of its own"))
+
+    assert cli.main(["status", "--wire"]) == 0
+    out = capsys.readouterr().out
+    wire = [ln for ln in out.splitlines() if ln.startswith("{")]
+    assert len(wire) == 1, out
+    msg = json.loads(wire[0])
+    assert msg["provider"] == "opencode"
+    assert msg["session_pct"] == 34.0
+    assert len(calls) == 1
+    assert started == [], "status --wire started the quota thread"
+    assert not [t for t in threading.enumerate()
+                if t.name == "blink-opencode-quota"]
+    assert ocfx.FAKE_KEY not in out
+
+
+def test_the_suite_cannot_reach_the_real_quota_host():
+    """conftest's guard, proven to fire -- and to fire as a BaseException,
+    which fetch_once's `except Exception` cannot turn into "unreachable"."""
+    from pc.providers import opencode
+    with pytest.raises(pytest.fail.Exception):
+        opencode.http_get("https://api.z.ai" + opencode.QUOTA_PATH, "k", 1)
+    with pytest.raises(pytest.fail.Exception):
+        opencode.http_get("https://open.bigmodel.cn" + opencode.QUOTA_PATH,
+                          "k", 1)
+
+
+def test_the_opencode_disclosure_is_sentence_case(monkeypatch, capsys):
+    cli._announce_opencode_quota()
+    print(cli.install_opencode_plugin.announce("/x"))
+    for line in capsys.readouterr().out.splitlines():
+        if not line.strip() or line.startswith(_CODEX_WRAP):
+            continue
+        assert line.strip()[0].isupper(), f"copy is sentence case: {line!r}"

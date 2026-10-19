@@ -314,6 +314,39 @@ def test_the_shown_page_can_be_the_fresh_one_too():
     assert msg["active_age_s"] == 60
 
 
+def test_the_active_age_folds_the_providers_past_the_rings():
+    """Found in review, 2026-10-19: the state and counts folded `others` and
+    the active age still took only the two ringed pages. Claude and Codex
+    untouched for twelve hours, an OpenCode turn finished a minute ago --
+    one ranked past the rings, one with a state and no number at all -- and
+    the board was told nobody had been here for twelve hours."""
+    now = 1_787_700_000.0
+    old = now - 12 * 3600
+    claude = base.NormalizedUsageFrame(
+        provider="claude", src="cli", observed_at=old, active_at=old,
+        session_pct=27.0)
+    codex = base.NormalizedUsageFrame(
+        provider="codex", src="cli", observed_at=old, active_at=old,
+        session_pct=8.0)
+    third = base.NormalizedUsageFrame(
+        provider="opencode", src="zai", observed_at=now - 300,
+        active_at=now - 60, session_pct=5.0, state=base.STATE_IDLE, n_idle=1)
+    msg = protocol.frame_to_usage(claude, now, secondary=codex,
+                                  others=[third])
+    assert msg["active_age_s"] == 60
+    assert msg["n_sess"] == 1
+    # A state-only frame (normalizer.light_only) counts the same way.
+    state_only = base.NormalizedUsageFrame(
+        provider="opencode", src="state", observed_at=now - 30,
+        active_at=now - 30, state=base.STATE_IDLE, n_idle=1)
+    msg = protocol.frame_to_usage(claude, now, secondary=codex,
+                                  others=[state_only])
+    assert msg["active_age_s"] == 30
+    # And with nothing past the rings the pair alone decides, as before.
+    assert protocol.frame_to_usage(claude, now,
+                                   secondary=codex)["active_age_s"] == 12 * 3600
+
+
 def test_a_remembered_reading_does_not_age_the_desk():
     """The whole point of the field, at the seam that produces it: an old
     dial and a live machine in one frame."""
@@ -927,3 +960,39 @@ class VolatileUsageKeys(unittest.TestCase):
         msg = dict(self._loaded(), some_field_from_2027=7)
         self.assertEqual(
             protocol.meaningful_usage(msg)["some_field_from_2027"], 7)
+
+
+def test_the_widest_line_still_fits_with_opencode_in_either_ring():
+    """"opencode" is the longest provider id on the bus -- three bytes wider
+    than "codex", two wider than "claude" -- and it can be either ring.
+    Measured 2026-10-19: 450 bytes for claude+codex built this way, 453 with
+    opencode in either ring. Three bytes, but the board drops an over-long
+    line whole and silently, so the pairing is pinned rather than assumed.
+
+    Everything else exactly as wide as the test above builds it, including
+    src "cli-state" on the primary, which no opencode frame carries (its
+    sources are "zai" and "state"); the ceiling is measured, not the real
+    line.
+    """
+    now = 1_787_700_000.0
+
+    def widest(provider):
+        return base.NormalizedUsageFrame(
+            provider=provider, src="cli-state",
+            observed_at=now - 2147483647, active_at=now - 2147483647,
+            session_pct=102.33333333333333,
+            session_resets_at=now + 31536000.1234567,
+            weekly_pct=102.66666666666667,
+            weekly_resets_at=now + 31536000.1234567,
+            state="running", stale=False, session_burn_pph=999.93333,
+            n_run=99, n_wait=99, n_stuck=99, n_idle=99, n_agents=99,
+            label="a-project-with-a-long-name")
+
+    for first, second in (("opencode", "claude"), ("claude", "opencode"),
+                          ("opencode", "codex"), ("codex", "opencode")):
+        msg = protocol.frame_to_usage(widest(first), now,
+                                      secondary=widest(second))
+        raw, why = protocol.encode_checked(msg)
+        assert why is None, (first, second, why)
+        assert len(raw) <= protocol.MAX_LINE_BYTES, (first, second, len(raw))
+        assert msg["p2"] == second

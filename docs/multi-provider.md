@@ -1,6 +1,6 @@
 # The ingestion bus, as built
 
-How usage gets from four places into two dials, and why each piece is shaped
+How usage gets from five places into two dials, and why each piece is shaped
 the way it is. Read this before adding a provider, a source, or a field.
 
 Implemented on branch `desk-hud-universal`. Companion to
@@ -12,16 +12,16 @@ for and where this departs from it.
 ## 1. The shape
 
 ```
-  Claude Code            Claude Desktop         Codex
-  status line            plan-usage-history     rollout log
-       |                        |                      |
-  ~/.blink/              app's own cache        ~/.codex/sessions/
-  statusline.json               |                      |
-       |                        |                      |
-  ClaudeCliProvider   ClaudeDesktopProvider     CodexCliProvider
-  ClaudeStateProvider           |                      |
-       |                        |                      |
-       +------------------------+----------------------+
+  Claude Code         Claude Desktop       Codex              OpenCode
+  status line         plan-usage-history   rollout log        plugin + quota endpoint
+       |                     |                   |                   |
+  ~/.blink/           app's own cache     ~/.codex/sessions/  ~/.blink/state-opencode
+  statusline.json            |                   |            api.z.ai (GLM plan)
+       |                     |                   |                   |
+  ClaudeCliProvider  ClaudeDesktopProvider  CodexCliProvider   OpenCodeProvider
+  ClaudeStateProvider        |                   |                   |
+       |                     |                   |                   |
+       +---------------------+-------------------+-------------------+
                                 |
                           IngestionBus            pc/ingest.py
                                 |
@@ -37,9 +37,19 @@ for and where this departs from it.
                           proto.c -> usage_view.c
 ```
 
-Four sources, three of them for Claude. Adding a provider means writing one
+Five sources, three of them for Claude. Adding a provider means writing one
 class and appending it to `default_providers()`; the normalizer, the protocol
-and the firmware learn nothing new.
+and the firmware learn nothing new. OpenCode was added that way, and it held:
+the firmware was not touched, and the provider name is a free string the board
+renders as given (as `Opencode`, because `tag_cased` capitalises only the
+first letter).
+
+OpenCode is the one source that is not a file another program wrote. Its
+usage figures exist nowhere on disk -- OpenCode stores token counts and cost,
+never a limit -- so `OpenCodeProvider` asks the GLM Coding Plan's own quota
+endpoint, with the key OpenCode already holds. That is the first request this
+daemon makes with a customer's credential, and §3 says what it is allowed to
+do with it.
 
 ## 2. NormalizedUsageFrame
 
@@ -47,9 +57,10 @@ The only type that crosses from provider code into the normalizer.
 
 | field | meaning | unknown is |
 |---|---|---|
-| `provider` | `"claude"`, `"codex"`, … | — (required) |
-| `src` | `"cli"`, `"desktop"` | — (required) |
+| `provider` | `"claude"`, `"codex"`, `"opencode"` | — (required) |
+| `src` | `"cli"`, `"desktop"`, `"zai"`, `"state"`, … | — (required) |
 | `observed_at` | when the DATA was written, not when we read it | — (required) |
+| `active_at` | when somebody last USED the tool; decides the second ring and when the board dozes | `observed_at` |
 | `session_pct` / `weekly_pct` | rolling-window usage | `-1.0` |
 | `session_resets_at` / `weekly_resets_at` | absolute epoch | `None` |
 | `ctx_pct` | context window fullness | `-1.0` |
@@ -76,6 +87,8 @@ decision below rests on this being honest.
 | Weekly anchor (rolled forward, §3c) | — | — | **weekly only** | — | — | — |
 | Codex rollout log | ✓ | ✓ | ✓ | — | — | — |
 | Hook state file | — | — | — | — | — | ✓ |
+| GLM Coding Plan quota endpoint (OpenCode) | ✓ | ✓ | ✓ (five-hour dropped when implausible) | — | — | — |
+| OpenCode plugin (`state-opencode`) | — | — | — | — | — | ✓ |
 
 Two rows did not exist when this table was first written. Desktop Local
 Storage and the weekly anchor are the two sources §3c describes; between
@@ -103,6 +116,30 @@ from the specification:
   five-hour dial, 10080 → the seven-day one) and only fall back to position
   when that field is absent. Trusting the order would swap the two dials
   silently, which is the failure this whole document is written against.
+- **OpenCode's `observed_at` is the fetch, and its `active_at` is not.** The
+  quota endpoint is the account's own ledger, so a figure fetched a minute
+  ago is a minute old whatever this desk has been doing -- `stale` is
+  measured from the fetch. But a fetch is not somebody using OpenCode, so
+  `active_at` is the newest mtime of `opencode.db`, its WAL and the plugin's
+  slots. Before that split, polling every ten minutes made OpenCode look like
+  the most recently used tool on a desk where Codex was the one in use.
+- **The quota endpoint's windows are `(unit, number)` pairs, not positions.**
+  `(3, 5)` is the five-hour window and `(6, 1)` the week; both entries can
+  share a `type`, and their order differs between accounts. Its
+  `nextResetTime` is MILLISECONDS, and its five-hour reset is sometimes about
+  ten hours out (CodexBar #2712, #2871) -- one further than 5 h + 60 s away is
+  dropped rather than shown. `docs/research/opencode-contract.md` §5.
+- **Failures from that endpoint are HTTP 200.** `{"success": false, "code":
+  1001}` is "no key", `401` a bad one. The body is checked, never the status.
+- **The key goes to one host and nowhere else.** It is read from OpenCode's
+  `auth.json` at each fetch and held only in the request header: never
+  logged, never in an exception message, never written anywhere. A
+  `zai-coding-plan` key goes only to `api.z.ai`, a `zhipuai-coding-plan` key
+  only to `open.bigmodel.cn`, and a redirect is refused rather than followed,
+  because urllib would copy the header onto it. Fetches run on a background
+  thread -- once a minute while OpenCode is in use, every ten minutes
+  otherwise, never after seven idle days -- so the poll loop never waits on
+  the network, and a failure keeps the last good reading to age into `stale`.
 - **A claude.ai tab is not a source, and that is settled.** A browser
   extension was built to read usage from response headers and measured against
   the real site: 178 responses, none carrying a rate-limit header of any
@@ -420,9 +457,36 @@ LVGL invalidates only what moved.
 
 ### Beyond two
 
-`select_pair()` drops the third rather than rotating through them, and
-`RAIL_PAGES_MAX` is 2. A ring that silently changes whose number it is showing
-is worse than one that never shows it.
+Three providers exist now -- Claude, Codex and OpenCode -- and the panel still
+has two pages. `select_pair()` keeps the preferred provider (Claude unless the
+settings screen says otherwise) on the first page, and gives the second to
+whichever of the other two was **used** most recently, by `active_at`. The
+third is dropped rather than rotated through, and `RAIL_PAGES_MAX` stays 2. A
+ring that silently changes whose number it is showing is worse than one that
+never shows it.
+
+So on a desk running all three, the second page follows the tool you reached
+for last: an afternoon in Codex shows Codex, and the first OpenCode prompt
+after it hands the page to OpenCode. That is a page changing provider, which
+is the thing the sentence above warns against -- but it changes because the
+person changed tools, not because a timer fired, and the name on the pill
+changes with it. Recency of a FETCH would have been the timer: OpenCode's
+figures are fetched every ten minutes whether or not anybody has opened it,
+which is exactly why the sort is on `active_at` and not on `observed_at`.
+
+**Two rings, one light that covers all three.** The pages are limited to
+two; the activity light is not. The state on the wire and the `n_*` counts
+fold every provider's merged frame, worst state first, while the rings still
+show only the selected pair. Selecting the light by page would have been
+wrong, and nearly was. On a desk with live Claude, Codex and OpenCode
+sessions, the second page goes to whichever was used last, and a tie keeps
+poll order: two live session slots both stamp `active_at` = now, and the tie
+goes to Codex. An OpenCode session waiting on a permission prompt would then
+have left the light green. The light is a claim on the person ("something
+needs you"), and a session waiting on them is just as much their turn when
+its provider has no page in front. A third page, like an OpenCode edition of
+the board, is a separate decision (`docs/plans/opencode.md`, "Not in this
+change").
 
 ## 4c. Freshness is per page
 
@@ -578,9 +642,37 @@ than "idle" (2026-08-29; before that both were `idle`, and before that
 **Severity**, worst first, in `base.SEVERITY`: `failed`, `stuck`, `waiting`,
 `idle`, `running`. `idle` above `running` is the product decision that makes
 the light useful: "one finished, two working" is "your turn", not "busy". The
-wire layer (`protocol.frame_to_usage`) collapses BOTH providers with the same
-order and sums their session counts, so the single pip is the worst of
-everything on the desk, whichever page is in front.
+wire layer (`protocol.frame_to_usage`) collapses EVERY provider with the same
+order and sums their session counts -- all three, not only the two with
+pages (§4b) -- so the single pip is the worst of everything on the desk,
+whichever page is in front.
+
+**OpenCode** has no shell-hook configuration either, but it loads plugins.
+`blink install` puts `tools/blink-opencode.js` in OpenCode's plugin folder,
+and it turns OpenCode's bus events into exactly the slot files the Claude hook
+shim writes, under `~/.blink/state-opencode`, so `claude_state` reads them
+with its state machine unchanged:
+
+| OpenCode | written as | state |
+|---|---|---|
+| `session.status` busy; `tool.execute.before` / `.after` | `UserPromptSubmit`; `PreToolUse` | `running` |
+| `permission.asked`, `question.asked` | `PermissionRequest` + waiting marker | `waiting` |
+| `session.status` idle | `Stop` | `idle` |
+| `session.status` retry, next attempt more than 60 s away | `StopFailure` | `failed` |
+| `session.status` retry, sooner | `PreToolUse` | `running` |
+| `session.error` `MessageAbortedError` (Esc) | `Interrupt` | `idle` |
+| `session.error`, anything else | `StopFailure` | `failed` |
+| a session with `parentID` | an agent under its parent, not a session | -- |
+
+A retry a minute or more away is the quota case -- OpenCode honours a
+provider's `Retry-After` with no practical cap, and the database records
+nothing until all five attempts fail -- so that is red. A sooner one is a
+"high concurrency" blip that clears in seconds, and painting it red would cry
+wolf. Unlike Codex, OpenCode announces its permission prompts, so it does
+report `waiting`. The plugin keeps the shim's privacy rules: an event name, a
+time, the ids, the pid and the last segment of the project directory -- never
+a prompt, a path or a tool argument. `docs/research/opencode-contract.md` §3
+has the event contract as measured.
 
 **Codex** has no hooks. `CodexCliProvider` reads the same rollout log it reads
 for usage: the newest `task_started` / `task_complete` / `turn_aborted` in each
@@ -726,3 +818,25 @@ update" rather than in milliseconds.
 
 Nothing else changes — not the normalizer, not the protocol, not the firmware.
 That is the property the whole structure exists to have.
+
+6. **Add a contract check** in `tests/ci/`, run against the vendor's latest
+   release (blocking) and its default branch (an early warning), as
+   `check_codex_contract.sh` and `check_opencode_contract.sh` do. Every
+   provider here reads another vendor's file or endpoint under names that
+   vendor never promised to keep; a Python test feeds the parser strings this
+   repo wrote, and stays green the day upstream renames one.
+
+OpenCode tested that claim, and it mostly held. The provider was one class
+and one `default_providers()` entry; the firmware and the protocol were not
+touched. Two things did change, and both are worth knowing before the fourth
+provider:
+
+- **`active_at` was added to the frame**, because OpenCode is the first
+  source whose reading is not evidence that somebody is using the tool (§3,
+  §4b). A provider that reads a file the tool writes while in use needs
+  nothing; one that polls a server does.
+- **A provider that holds a credential has rules no file reader needed**:
+  one host per key, no redirects, no logging of anything about the request
+  but a fixed category, and an install disclosure that says so before the
+  first fetch. They live in `pc/providers/opencode.py`, enforced in one place
+  each.

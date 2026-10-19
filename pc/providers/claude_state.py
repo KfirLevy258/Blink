@@ -673,6 +673,19 @@ class ClaudeStateProvider(base.ProviderParser):
     def session_states(self, now_epoch):
         """({session_id: (state, name)}, live agents) for this directory.
 
+        census() without the event times; see there.
+        """
+        states, agents, _times = self.census(now_epoch)
+        return states, agents
+
+    def census(self, now_epoch):
+        """({session_id: (state, name)}, live agents, {session_id: t}).
+
+        `t` is each counted session's slot clock: the epoch of the last
+        event the hook wrote for it. Returned beside the states, from the
+        same read, for the state frame's active_at (see activity_at) --
+        a second walk of the directory could disagree with the first.
+
         The per-session view, split out of scan() because the Codex union
         needs the ids: a session that both the hook slots and the rollout
         reader can see has to be counted once, and the session id is the only
@@ -686,7 +699,7 @@ class ClaudeStateProvider(base.ProviderParser):
             entries = os.listdir(self._dir)
         except OSError:
             # No hooks installed, or nothing has happened yet. Both normal.
-            return {}, 0
+            return {}, 0, {}
 
         # Called for what it COLLECTS rather than for what it returns. The
         # shim leaves a tombstone in this directory as well as in the Codex
@@ -715,6 +728,7 @@ class ClaudeStateProvider(base.ProviderParser):
                          now_epoch)
 
         states = {}
+        times = {}
         agents = 0
         for name, state_path, payload in slots:
             sid = name[: -len(".state")]
@@ -754,9 +768,11 @@ class ClaudeStateProvider(base.ProviderParser):
                 state = base.STATE_WAITING
 
             states[sid] = (state, sess_name)
+            # _read_state has already proved this parses and is in range.
+            times[sid] = float(payload["t"])
             agents += self._count_agents(os.path.join(self._dir, sid),
                                          now_epoch)
-        return states, agents
+        return states, agents, times
 
     def scan(self, now_epoch):
         """{state: n_sessions}, {state: [names]}, total live agents.
@@ -764,45 +780,113 @@ class ClaudeStateProvider(base.ProviderParser):
         Counts derived from session_states() rather than gathered beside it,
         so the two views cannot drift apart. Sweeps what it finds dead.
         """
-        states, agents = self.session_states(now_epoch)
+        counts, names, agents, _last = self.scan_with_activity(now_epoch)
+        return counts, names, agents
+
+    def scan_with_activity(self, now_epoch):
+        """scan(), plus the newest slot clock among the sessions counted
+        (None when none is): the last real event, for frame_from_scan."""
+        states, agents, times = self.census(now_epoch)
         counts = {}
         names = {}
         for state, sess_name in states.values():
             counts[state] = counts.get(state, 0) + 1
             if sess_name:
                 names.setdefault(state, []).append(sess_name)
-        return counts, names, agents
+        return counts, names, agents, max(times.values(), default=None)
 
     def poll(self, now_epoch):
-        counts, names, agents = self.scan(now_epoch)
-        if not counts:
-            return []
-        state = worst_of(counts)
-        if state == base.STATE_UNKNOWN:
-            return []
-        # Named only when the winning state is held by exactly ONE session.
-        #
-        # Naming one of several is the mistake the context row was cut for:
-        # "88% of 4" qualified one number into honesty and still did not say
-        # WHICH. A count says something true about all of them; a name picked
-        # from three says something true about one and implies it about the
-        # rest.
-        label = ""
-        held = names.get(state, [])
-        if counts.get(state, 0) == 1 and len(held) == 1:
-            label = held[0]
-        frame = base.NormalizedUsageFrame(
-            provider=PROVIDER_ID, src=SRC_ID, observed_at=now_epoch,
-            state=state,
-            label=label,
-            n_run=counts.get(base.STATE_RUNNING, 0),
-            n_wait=counts.get(base.STATE_WAITING, 0),
-            n_stuck=(counts.get(base.STATE_STUCK, 0)
-                     + counts.get(base.STATE_FAILED, 0)),
-            n_idle=counts.get(base.STATE_IDLE, 0),
-            n_agents=agents,
-        )
-        return [frame]
+        counts, names, agents, last = self.scan_with_activity(now_epoch)
+        frame = frame_from_scan(PROVIDER_ID, SRC_ID, counts, names, agents,
+                                now_epoch, last_event_at=last)
+        return [frame] if frame is not None else []
+
+
+def activity_at(counts, last_event_at, now_epoch):
+    """The active_at a state frame carries: when this tool was last USED.
+
+    A state frame is observed NOW -- the census is taken this poll -- and
+    for as long as it said so in active_at too, every provider with any
+    session slot under an hour old claimed to have been used this second.
+    Found in review, 2026-10-19: normalizer.rank orders the second ring on
+    active_at, so on a desk with Claude preferred, a Codex session that
+    finished fifty minutes ago and an OpenCode turn that finished one
+    minute ago TIED at `now`, the stable sort kept poll order, and Codex
+    held the ring for the rest of that hour -- the reverse of "the tool
+    used most recently". The state frame now says when its newest slot was
+    last written, the time of the last real event, like every other frame
+    on the bus says when its own evidence was written.
+
+    Except while a session is RUNNING (or stuck, which is running gone
+    quiet): then it is `now`. Work in flight is use, and a long tool call
+    writes nothing for as long as it runs -- the slot's clock is the
+    moment the tool STARTED -- so its age would rank a tool that is busy
+    this second behind one that merely finished recently. Waiting, idle and
+    failed sessions are not in use; their last event is the honest time.
+
+    The board's sleep is unaffected in practice, which was checked rather
+    than assumed: the firmware never dozes while the wire state is running,
+    waiting or failed (sleep_gate.c nothing_wants_a_person), and the only
+    states this changes are idle and failed sessions under ABANDONED_AFTER_S
+    (an hour) old. Before, such a session pinned active_age_s at 0 for that
+    hour; now it reads the slot's own age, which inside that hour is under
+    an hour -- nowhere near SLEEP_ABSENT_AFTER_S, four hours. Past the hour
+    the slot is out of the census, and old and new read exactly the same
+    remaining frames. So the panel dozes at the same moment either way.
+
+    `last_event_at` None (a caller that has no clock to give) keeps the old
+    `now`, and a stamp in the future -- a clock that stepped -- is clamped
+    to `now`, as derive_state treats a negative age.
+    """
+    if last_event_at is None:
+        return now_epoch
+    if counts.get(base.STATE_RUNNING, 0) or counts.get(base.STATE_STUCK, 0):
+        return now_epoch
+    return min(float(last_event_at), now_epoch)
+
+
+def frame_from_scan(provider, src, counts, names, agents, now_epoch,
+                    last_event_at=None):
+    """The state frame for one scan() result, or None when it says nothing.
+
+    Split out of ClaudeStateProvider.poll so a third provider whose live
+    state arrives through the same slot files -- OpenCode, through its
+    plugin (pc/providers/opencode.py) -- builds its frame by the same rules
+    rather than by a copy of them. A copy is how two providers drift: the
+    label rule below was argued out once, and a second implementation of it
+    would be free to forget the half that stops a nameless holder from
+    being skipped over.
+    """
+    if not counts:
+        return None
+    state = worst_of(counts)
+    if state == base.STATE_UNKNOWN:
+        return None
+    # Named only when the winning state is held by exactly ONE session.
+    #
+    # Naming one of several is the mistake the context row was cut for:
+    # "88% of 4" qualified one number into honesty and still did not say
+    # WHICH. A count says something true about all of them; a name picked
+    # from three says something true about one and implies it about the
+    # rest.
+    label = ""
+    held = names.get(state, [])
+    if counts.get(state, 0) == 1 and len(held) == 1:
+        label = held[0]
+    return base.NormalizedUsageFrame(
+        provider=provider, src=src, observed_at=now_epoch,
+        # When the tool was last used, not when the census was taken; see
+        # activity_at.
+        active_at=activity_at(counts, last_event_at, now_epoch),
+        state=state,
+        label=label,
+        n_run=counts.get(base.STATE_RUNNING, 0),
+        n_wait=counts.get(base.STATE_WAITING, 0),
+        n_stuck=(counts.get(base.STATE_STUCK, 0)
+                 + counts.get(base.STATE_FAILED, 0)),
+        n_idle=counts.get(base.STATE_IDLE, 0),
+        n_agents=agents,
+    )
 
 
 def _unlink(path):
