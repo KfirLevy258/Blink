@@ -854,6 +854,23 @@ def test_status_on_desktop_alone_ignores_a_leftover_status_line(
     assert "from Claude Desktop's own files" in out
 
 
+def test_a_fresh_status_line_wins_even_with_no_claude_on_path(
+        tmp_path, capsys, monkeypatch):
+    """Something is rendering the status line -- a Claude Code outside PATH,
+    an IDE's copy -- so it is the live source. The leftover-payload fix hid
+    it behind "from Claude Desktop's own files", and CI's all-sources
+    scenario failed on its first run (2026-10-19)."""
+    _no_cli(monkeypatch)
+    _settings(tmp_path, {})
+    blink = tmp_path / ".blink"
+    blink.mkdir(exist_ok=True)
+    (blink / "statusline.json").write_text("{}")
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "Usage data  fresh" in out
+    assert "from Claude Desktop's own files" not in out
+
+
 def test_a_silent_claude_is_asked_once_and_desktop_still_described(
         tmp_path, capsys, monkeypatch):
     """A `claude` that hangs cost two 30 s timeouts after "Done." (measured

@@ -2709,30 +2709,35 @@ def cmd_status(args) -> int:
 
     # The most useful support answer: is fresh data actually arriving?
     #
-    # A desk with no `claude` on PATH is fed from Desktop's files even when
-    # a statusline.json is left over from an earlier Claude Code: "open
+    # A FRESH payload wins on any desk: something is rendering the status
+    # line right now, whatever `which claude` says -- a Claude Code outside
+    # PATH, an IDE's copy. Saying "from Claude Desktop's own files" there
+    # hid the one live source, and CI's all-sources scenario caught it the
+    # first time it ran (2026-10-19).
+    #
+    # A STALE one on a desk with no `claude` on PATH is a leftover from an
+    # earlier Claude Code, and that desk is fed from Desktop's files: "open
     # Claude Code to refresh it" under "running on Claude Desktop alone"
-    # sent people to a program they do not have. And with a `claude` that
-    # does exist, Desktop does not make the status line moot -- that desk
-    # still needs "open Claude Code once" (review, 2026-10-19).
+    # sent people to a program they do not have. With a `claude` that does
+    # exist, Desktop does not make the status line moot -- that desk still
+    # needs "open Claude Code once" (review, 2026-10-19).
     payload = os.path.join(blink_home(), "statusline.json")
-    desktop_fed = desk.desktop and not desk.on_path
-    if desktop_fed:
+    age = (int(time.time() - os.path.getmtime(payload))
+           if os.path.exists(payload) else None)
+    # The same bound the panel uses (statusline_source.STALE_AFTER_S): this
+    # said "old" at two minutes for a reading the board was still showing
+    # as live.
+    if age is not None and age < statusline_source.STALE_AFTER_S:
+        print(f"Usage data  fresh ({age}s old)")
+    elif desk.desktop and not desk.on_path:
         # "Open Claude Code once so it renders its status line" can never
         # clear on this desk: Desktop's Code tab runs Claude Code headless and
         # never renders one (measured 2026-09-26), and the board is already
         # being fed from Desktop's files.
         print("Usage data  from Claude Desktop's own files (no Claude Code"
               " status line on this machine)")
-    elif os.path.exists(payload):
-        age = int(time.time() - os.path.getmtime(payload))
-        # The same bound the panel uses (statusline_source.STALE_AFTER_S):
-        # this said "old" at two minutes for a reading the board was still
-        # showing as live.
-        if age < statusline_source.STALE_AFTER_S:
-            print(f"Usage data  fresh ({age}s old)")
-        else:
-            print(f"Usage data  {age}s old -- open Claude Code to refresh it")
+    elif age is not None:
+        print(f"Usage data  {age}s old -- open Claude Code to refresh it")
     elif desk.codex:
         print("Usage data  from the Codex session log (no Claude Code status"
               " line yet)")
