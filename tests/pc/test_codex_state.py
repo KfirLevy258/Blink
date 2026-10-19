@@ -262,3 +262,22 @@ def test_a_missing_directory_has_buried_nothing(tmp_path):
     and neither may raise on the poll path."""
     assert codex_state.ended(NOW, path=str(tmp_path / "nope"),
                              sweep=False) == set()
+
+
+def test_census_survives_a_slot_only_the_second_read_sees(d, monkeypatch):
+    """Found in review, 2026-10-19: claude_state.census raised TypeError when
+    its first read of a slot missed and _read_state's own re-read did not,
+    and codex_state.census is what CodexCliProvider.poll unions on -- so the
+    whole Codex provider fell off the bus for that poll."""
+    _slot(d, "s1", "Stop", NOW - 10)
+    real = claude_state.ClaudeStateProvider._load_slot
+    calls = []
+
+    def flaky(path):
+        calls.append(path)
+        return None if len(calls) == 1 else real(path)
+    monkeypatch.setattr(claude_state.ClaudeStateProvider, "_load_slot",
+                        staticmethod(flaky))
+    states, agents, times = codex_state.census(NOW, path=str(d), sweep=False)
+    assert states == {"s1": base.STATE_IDLE}
+    assert times == {"s1": NOW - 10}

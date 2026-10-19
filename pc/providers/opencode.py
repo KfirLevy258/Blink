@@ -6,8 +6,10 @@ and the measurements behind it):
   - a usage frame, src "zai", from the plan's own quota endpoint;
   - a state frame, src "state", from the hook slots tools/blink-opencode.js
     writes into ~/.blink/state-opencode in exactly blink-hook.sh's format,
-    read by claude_state unchanged -- its state machine, waiting marker,
-    tombstone, pid liveness and sweep -- as codex_state already does.
+    read by claude_state -- its state machine, waiting marker, tombstone and
+    sweep, unchanged, as codex_state already does. Pid liveness is the one
+    piece that is OpenCode's own: "trusted once seen alive" (SEEN_ALIVE
+    below), never the process-wide suspension Claude and Codex share.
 
 WHY A NETWORK REQUEST AT ALL
 ----------------------------
@@ -80,7 +82,8 @@ poll -- never waits on the network:
 A failure keeps the last good reading, which then ages into `stale` like any
 other -- except a failure that is about the key: the plan refusing it, or
 the key gone from auth.json. Those drop the reading, because the number
-then describes an account this desk can no longer see. The thread starts
+then describes an account this desk can no longer see. So does reaching the
+seven-day give-up: nothing would ever replace that reading. The thread starts
 on the first poll(), not in the constructor, so building a provider --
 `blink status`, a test, default_providers() -- spawns nothing until somebody
 actually polls one with fetch=True.
@@ -118,6 +121,32 @@ STATE_SRC_ID = "state"
 # evaluated at import, before tests/conftest.py can move HOME, and the scan
 # behind it DELETES abandoned slots. Same rule as claude_state.STATE_DIR.
 STATE_DIR = "~/.blink/state-opencode"
+
+# Which of this directory's pids this daemon process has seen alive, for
+# claude_state.SeenAlivePids -- OpenCode's own pid rule, kept apart from the
+# process-wide suspension Claude and Codex share.
+#
+# Found end to end with real OpenCode 1.19.3, 2026-10-19: a TUI quit with
+# ctrl-c, or `serve` sent SIGTERM, delivers no 'exit' and so never writes
+# SessionEnd, and quitting within FRESH_SLOT_S of the last event left the
+# fresh-slot-dead-pid that the global flag reads as "pids mean nothing on
+# this machine". The flag went False; the closed session held an amber "your
+# turn" for an hour, and Claude's and Codex's dead-pid drops went off with
+# it. Here a pid seen alive at any poll ends its session the moment it is
+# gone, whatever the slot's age, and a pid never seen alive (a container's,
+# under a bind-mounted ~/.blink) is never used to end one.
+#
+# Module-level rather than per provider instance, because what this process
+# has watched is a fact about the process: a provider rebuilt mid-run must
+# not forget that it saw OpenCode alive a poll ago.
+SEEN_ALIVE = claude_state.SeenAlivePids()
+
+
+def reset_pid_memory():
+    """Forget every pid seen alive. For tests: the memory is process-wide
+    and would otherwise carry one test's live pid into the next."""
+    SEEN_ALIVE.reset()
+
 
 # The two plan providers OpenCode knows, in the order they are tried, and the
 # only host each key is ever sent to. A global key on the mainland host (or
@@ -561,6 +590,17 @@ def _limit_reset(limit, now_epoch, max_ahead_s=None):
     return s
 
 
+def _reset_has_passed(limit, now_epoch):
+    """True when the limit names a plausible reset that is already behind
+    now_epoch. A missing or implausible stamp is not "passed": that window
+    keeps its percentage with no countdown, as _limit_reset decides."""
+    ms = _number(limit.get("nextResetTime"))
+    if ms is None:
+        return False
+    s = ms / 1000.0
+    return RESET_EPOCH_MIN <= s <= RESET_EPOCH_MAX and s <= now_epoch
+
+
 def parse_quota(payload, now_epoch):
     """A Quota from the endpoint's reply, or None. Never raises.
 
@@ -610,6 +650,17 @@ def _parse_quota(payload, now_epoch):
             continue
         pct = _limit_pct(limit)
         if pct is None:
+            continue
+        if _reset_has_passed(limit, now_epoch):
+            # The window this percentage describes is already over at the
+            # moment it is read: a reply cached somewhere on the way, or this
+            # desk's clock ahead of the server's. Found in review,
+            # 2026-10-19: the percentage was kept with its reset dropped to
+            # None -- and _usage_frame expires a window only by its reset, so
+            # a number for a window that had already rolled stayed on the
+            # panel, unexpiring, until the next good fetch. Usage already
+            # forgiven, shown with confidence. Treated as a window with no
+            # percentage, so a later entry for it may still fill it.
             continue
         reset = _limit_reset(
             limit, now_epoch,
@@ -704,7 +755,16 @@ def _category_for(exc):
         return ERR_CERT
     if isinstance(exc, urllib.error.HTTPError):
         code = getattr(exc, "code", None)
-        if code in (401, 403):
+        # 401 only. A 403 comes from whatever stands in front of the
+        # endpoint as often as from the endpoint -- a WAF, a geo block, a
+        # corporate proxy, Cloudflare's challenge page -- and none of those
+        # has looked at the key. Found in review, 2026-10-19: 403 was read as
+        # "rejected the key", which also DROPS the reading (tick), so one
+        # blocked request from a café network blanked a correct gauge and
+        # told the person their key was bad. The plan's own refusals arrive
+        # as HTTP 401 or in the body (AUTH_FAILURE_CODES), and only those
+        # are about the key.
+        if code == 401:
             return ERR_REJECTED
         if isinstance(code, int) and code >= 500:
             return ERR_UNREACHABLE
@@ -798,17 +858,19 @@ class OpenCodeProvider(base.ProviderParser):
     replace the network and the wall clock in tests. `data_path` and
     `state_dir` replace OpenCode's data directory and the slot directory;
     `sweep` is forwarded to claude_state, so a caller that only wants to
-    look can look without collecting.
+    look can look without collecting. `liveness` replaces SEEN_ALIVE in
+    tests.
     """
 
     def __init__(self, state_dir=None, data_path=None, sweep=True,
-                 fetch=True, fetcher=None, clock=time.time):
+                 fetch=True, fetcher=None, clock=time.time, liveness=None):
         self._state_dir = (state_dir if state_dir is not None
                            # Not state_dir(): the parameter shadows it.
                            else _home_path(STATE_DIR))
         self._data_path = data_path
-        self._state = claude_state.ClaudeStateProvider(path=self._state_dir,
-                                                       sweep=sweep)
+        self._state = claude_state.ClaudeStateProvider(
+            path=self._state_dir, sweep=sweep,
+            liveness=liveness if liveness is not None else SEEN_ALIVE)
         self._fetch_enabled = fetch
         self._fetcher = fetcher
         self._clock = clock
@@ -904,6 +966,15 @@ class OpenCodeProvider(base.ProviderParser):
         # the module docstring's, and this was the one path that broke it.
         interval = self._cadence(now_epoch)
         if interval is None:
+            # Not fetching any more -- OpenCode idle past GIVE_UP_AFTER_S, or
+            # its data gone -- and so nothing will ever replace or refuse the
+            # reading held here. Found in review, 2026-10-19: it was kept,
+            # and went on riding the bus as a `stale` frame for as long as
+            # the daemon ran; with no fetch to bring a new reset, a weekly
+            # window read a week ago was still OpenCode's page. Forgotten
+            # instead, as a key that disappears is (below). The first fetch
+            # after OpenCode is used again brings a fresh one.
+            self._forget()
             return False
         last = self._last_attempt
         if last is not None and 0 <= now_epoch - last < interval:
@@ -1009,6 +1080,17 @@ class OpenCodeProvider(base.ProviderParser):
         if s_pct < 0 and w_pct < 0:
             return None
         la = last_activity(self._root(), self._state_dir)
+        if la is not None:
+            # Never later than now. Found in review, 2026-10-19: a file whose
+            # mtime is in the future -- a clock that stepped back after the
+            # write, a DB copied in from a machine running fast, a `touch`
+            # -- made this frame claim to have been used AFTER this poll, and
+            # normalizer.select_pair, which hands the second ring to the
+            # newest active_at, gave OpenCode the ring over a tool in use
+            # this second, for as long as the clock took to catch up. The
+            # state frame already clamps the same way
+            # (claude_state.activity_at); this one did not.
+            la = min(la, now_epoch)
         return base.NormalizedUsageFrame(
             provider=PROVIDER_ID, src=SRC_ID,
             observed_at=fetched_at,

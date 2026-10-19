@@ -83,6 +83,7 @@ unlink are each atomic on their own path. PreToolUse deliberately does NOT
 remove it -- that is the one event known to arrive in the same second, so
 letting it clear the marker would reintroduce the race it exists to escape.
 """
+import collections
 import json
 import os
 import sys
@@ -230,6 +231,23 @@ FRESH_SLOT_S = 10.0
 # re-derive it. The message is printed at most once per process for the same
 # reason it always was -- a two-second poll would otherwise turn a real
 # warning into 43,200 log lines a day.
+#
+# Claude's directory and Codex's share it ON PURPOSE: both are written by
+# tools/blink-hook.sh from $PPID, so the question "does a slot's pid name the
+# session's process here?" has one answer for the two of them, and a
+# bind-mounted ~/.blink mounts both directories at once.
+#
+# OpenCode's directory does NOT, and never feeds or reads this flag (see
+# SeenAlivePids below). Found end to end with real OpenCode 1.19.3,
+# 2026-10-19: its plugin writes process.pid, measured equal to the TUI's and
+# serve's own process, and neither a TUI quit with ctrl-c nor `serve` on
+# SIGTERM delivers the 'exit' that writes SessionEnd. Quitting within
+# FRESH_SLOT_S of the last event -- ctrl-c one second after the answer
+# appears, the most ordinary way to leave -- left exactly the slot this flag
+# reads as "pids mean nothing here". Reproduced with the real TUI
+# (scratchpad oc-real/tui_quick.py): the flag went False, the closed session
+# held an amber "your turn" for the full hour, and Claude's and Codex's
+# dead-pid drops were switched off with it until some pid re-armed them.
 #
 # TO RETIRE THIS: measure it on Linux and Windows too. Run a real session,
 # read a fresh slot's pid, and check it against the `claude` process
@@ -435,6 +453,189 @@ def _pid_says_ended(pid, age_s, slot_path=""):
     return True
 
 
+# WINDOWS LIVENESS, for the directories that ask for it (SeenAlivePids) and
+# for no other. Not os.kill -- see _PID_LIVENESS_AVAILABLE for why that would
+# TERMINATE the process it asks about -- but the two calls that only ask:
+# OpenProcess for the right to read the exit code, and GetExitCodeProcess.
+#
+# Claude's and Codex's directories keep "no liveness on Windows": their pid
+# is the hook runner's $PPID, which has been measured on macOS only, and the
+# global suspension that guards that premise has never run there. OpenCode's
+# pid is process.pid, the process that owns the session, and without this a
+# Windows OpenCode TUI that was closed held "your turn" on the panel for the
+# full ABANDONED_AFTER_S -- an hour -- on every quit (found in review,
+# 2026-10-19).
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+STILL_ACTIVE = 259
+ERROR_ACCESS_DENIED = 5
+ERROR_INVALID_PARAMETER = 87
+
+_kernel32 = None
+
+
+def _win_kernel32():
+    """kernel32 with use_last_error, and the three signatures declared.
+
+    use_last_error=True and NOT ctypes.windll.kernel32: the cached handles
+    under ctypes.windll are loaded without it, so ctypes.get_last_error()
+    would read a stale value (the same trap pc/win_driver notes). The
+    signatures matter on 64-bit: an undeclared HANDLE return is truncated to
+    a C int.
+    """
+    global _kernel32
+    if _kernel32 is None:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int,
+                                    ctypes.c_uint32]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.GetExitCodeProcess.argtypes = [ctypes.c_void_p,
+                                           ctypes.POINTER(ctypes.c_uint32)]
+        k32.GetExitCodeProcess.restype = ctypes.c_int
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        k32.CloseHandle.restype = ctypes.c_int
+        _kernel32 = k32
+    return _kernel32
+
+
+def _windows_process_is_gone(pid, kernel32=None, last_error=None):
+    """True only when Windows says that pid names no running process.
+
+    The same contract as _process_is_gone, and the same direction for every
+    doubt: anything but a definite "gone" is ALIVE.
+
+      - OpenProcess fails with ERROR_INVALID_PARAMETER: no process has that
+        id. Gone.
+      - It fails with ERROR_ACCESS_DENIED: the process exists and belongs to
+        somebody else (or is protected). Alive, as PermissionError is on
+        POSIX.
+      - It opens, and GetExitCodeProcess says STILL_ACTIVE (259): alive. Any
+        other code means it has exited and something still holds a handle to
+        its object. Gone.
+
+    A process that exits WITH code 259 reads as alive forever. That is
+    Windows' own documented ambiguity, and it errs the safe way: a miss,
+    collected by ABANDONED_AFTER_S as before.
+
+    `kernel32` and `last_error` are for tests, which have no Windows.
+    """
+    import ctypes
+    k32 = kernel32 if kernel32 is not None else _win_kernel32()
+    get_error = last_error if last_error is not None else ctypes.get_last_error
+    handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return get_error() == ERROR_INVALID_PARAMETER
+    try:
+        code = ctypes.c_uint32()
+        if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value != STILL_ACTIVE
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _safe_windows_probe(pid):
+    try:
+        return _windows_process_is_gone(pid)
+    except Exception:
+        # A ctypes failure is not evidence of death.
+        return False
+
+
+def platform_pid_probe():
+    """The "is this pid gone?" question for this platform, or None.
+
+    For SeenAlivePids only. POSIX asks os.kill(pid, 0); Windows asks
+    OpenProcess/GetExitCodeProcess; anything else has no safe question.
+    """
+    if os.name == "posix":
+        return _process_is_gone
+    if os.name == "nt":
+        return _safe_windows_probe
+    return None
+
+
+# How many pids a SeenAlivePids remembers. One per OpenCode process that has
+# written a slot in this daemon's lifetime; a desk opens a handful a day.
+# Evicting the oldest costs only what forgetting always costs here: that
+# process's session falls back to ABANDONED_AFTER_S.
+SEEN_ALIVE_LIMIT = 256
+
+
+class SeenAlivePids:
+    """Pid liveness for ONE directory, by "trusted once seen alive".
+
+    The policy OpenCode's directory uses instead of the process-wide
+    suspension above, which it must never feed or read (the note on
+    _pid_trusted gives the incident). The rule:
+
+      - a slot's pid that THIS daemon process has observed alive, at any
+        poll, is trusted: once it is gone, the session is over, at once and
+        whatever the slot's age. That is OpenCode's real exit path -- a TUI
+        ctrl-c'd one second after its answer, a `serve` sent SIGTERM -- and
+        a two-second poll has seen every such process alive long before;
+      - a pid never seen alive is never used to end anything. Its session
+        falls back to ABANDONED_AFTER_S, exactly as before pids existed.
+
+    The second rule is what keeps the devcontainer case safe without any
+    suspension: a container pid that the host does not have is never seen
+    alive, so it can never drop a session. What it cannot defend against is
+    a container pid that COINCIDES with a living host process which later
+    exits -- the mixed desk the LIVENESS note already leaves open for
+    Claude. Container pids are small numbers, and on the host those belong
+    to processes started at boot that live as long as the machine does.
+
+    The cost is in a process that has not watched: `blink status`, built
+    fresh, has seen nothing alive, so a session whose OpenCode quit before
+    it ran is counted there until the hour. That disagreement points the
+    safe way -- a session reported too long, never one dropped while alive.
+
+    In memory and bounded (SEEN_ALIVE_LIMIT). `probe` replaces the platform
+    question in tests; None asks platform_pid_probe() at each use.
+    """
+
+    def __init__(self, limit=SEEN_ALIVE_LIMIT, probe=None):
+        self._limit = limit
+        self._probe_override = probe
+        self._seen = collections.OrderedDict()
+
+    def _probe(self):
+        if self._probe_override is not None:
+            return self._probe_override
+        return platform_pid_probe()
+
+    def seen(self, pid):
+        return pid in self._seen
+
+    def reset(self):
+        """Forget every pid. For tests."""
+        self._seen.clear()
+
+    def observe(self, slots, now_epoch):
+        """Remember every slot pid that is alive right now. Once per poll,
+        in place of settle_pid_trust, and over the same slots."""
+        probe = self._probe()
+        if probe is None:
+            return
+        for _path, payload in slots:
+            pid = _slot_pid(payload)
+            if pid is None or probe(pid):
+                continue
+            self._seen[pid] = now_epoch
+            self._seen.move_to_end(pid)
+            while len(self._seen) > self._limit:
+                self._seen.popitem(last=False)
+
+    def says_ended(self, pid, age_s, slot_path=""):
+        """True when a pid this process has seen alive is now gone."""
+        if pid is None or pid not in self._seen:
+            return False
+        probe = self._probe()
+        if probe is None:
+            return False
+        return bool(probe(pid))
+
+
 _RUNNING_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse",
                    "SubagentStop", "PreCompact", "PostCompact")
 # Only Stop is idle: the turn completed and the answer is waiting to be read.
@@ -523,11 +724,16 @@ class ClaudeStateProvider(base.ProviderParser):
     its numbers actually are. It contributes execution fields and nothing else.
     """
 
-    def __init__(self, path=None, now=time.time, sweep=True):
+    def __init__(self, path=None, now=time.time, sweep=True, liveness=None):
         self._dir = (path if path is not None
                      else os.path.expanduser(STATE_DIR))
         self._now = now
         self._sweep = sweep
+        # None: the process-wide suspension (settle_pid_trust), which
+        # Claude's and Codex's directories share on purpose. A SeenAlivePids:
+        # that directory's own rule, and the global flag is neither fed nor
+        # read for it -- OpenCode's, see the note on _pid_trusted.
+        self._liveness = liveness
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -582,9 +788,14 @@ class ClaudeStateProvider(base.ProviderParser):
         # session early, never keep one alive past ABANDONED_AFTER_S. A pid
         # that has been reused is the case that would otherwise argue for
         # "alive", and it is not allowed a vote.
-        if _pid_says_ended(_slot_pid(payload), age, path):
+        if self._pid_ended(_slot_pid(payload), age, path):
             return base.STATE_UNKNOWN, age, name
         return state, age, name
+
+    def _pid_ended(self, pid, age, path):
+        if self._liveness is None:
+            return _pid_says_ended(pid, age, path)
+        return self._liveness.says_ended(pid, age, path)
 
     def _count_agents(self, session_dir, now_epoch):
         """Live agents for one session.
@@ -724,8 +935,11 @@ class ClaudeStateProvider(base.ProviderParser):
                 continue
             path = os.path.join(self._dir, name)
             slots.append((name, path, self._load_slot(path)))
-        settle_pid_trust([(p, pl) for _, p, pl in slots if pl is not None],
-                         now_epoch)
+        readable = [(p, pl) for _, p, pl in slots if pl is not None]
+        if self._liveness is None:
+            settle_pid_trust(readable, now_epoch)
+        else:
+            self._liveness.observe(readable, now_epoch)
 
         states = {}
         times = {}
@@ -733,8 +947,28 @@ class ClaudeStateProvider(base.ProviderParser):
         for name, state_path, payload in slots:
             sid = name[: -len(".state")]
             marker_path = os.path.join(self._dir, sid + WAITING_MARKER_SUFFIX)
-            state, age, sess_name = self._read_state(state_path, now_epoch,
-                                                     payload)
+            if payload is None:
+                # Read again HERE, not inside _read_state, so the payload the
+                # state is judged on is the one its clock is taken from below.
+                # Found in review, 2026-10-19: the first read can miss (the
+                # hook's rename lands between listdir and open, or a write is
+                # caught half done on a filesystem without atomic rename)
+                # while _read_state's own re-read succeeds. The session was
+                # then counted with `payload` still None, and
+                # float(payload["t"]) raised TypeError out of poll() --
+                # taking Claude's state frame, and through codex_state.census
+                # Codex's whole provider, off the bus for that poll.
+                # Reproduced by failing only the first _load_slot.
+                #
+                # And never handed to _read_state as None, which would read
+                # the file a THIRD time behind this loop's back and reopen
+                # the same gap one read later.
+                payload = self._load_slot(state_path)
+            if payload is None:
+                state, age, sess_name = None, None, ""
+            else:
+                state, age, sess_name = self._read_state(
+                    state_path, now_epoch, payload)
 
             if state is None or state == base.STATE_UNKNOWN:
                 # Unreadable, or so old the session is certainly gone. Collect
@@ -768,7 +1002,8 @@ class ClaudeStateProvider(base.ProviderParser):
                 state = base.STATE_WAITING
 
             states[sid] = (state, sess_name)
-            # _read_state has already proved this parses and is in range.
+            # _read_state has already proved this parses and is in range --
+            # this very payload, not a re-read of the file (see above).
             times[sid] = float(payload["t"])
             agents += self._count_agents(os.path.join(self._dir, sid),
                                          now_epoch)

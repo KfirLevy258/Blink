@@ -27,6 +27,7 @@ import pytest
 
 from pc.providers import base
 from pc.providers import claude_state
+from pc.providers import opencode
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DRIVER = os.path.join(ROOT, "tests", "ci", "opencode_plugin_driver.mjs")
@@ -39,10 +40,13 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 @pytest.fixture(autouse=True)
 def _pid_trust_is_per_test():
     # Trust is process-wide (see claude_state.settle_pid_trust); a test that
-    # suspends it would otherwise disarm the checks in every later test.
+    # suspends it would otherwise disarm the checks in every later test. And
+    # OpenCode's own memory of pids seen alive is process-wide too.
     claude_state.reset_pid_liveness()
+    opencode.reset_pid_memory()
     yield
     claude_state.reset_pid_liveness()
+    opencode.reset_pid_memory()
 
 
 @needs_node
@@ -121,3 +125,38 @@ def test_python_reader_agrees_with_the_plugin(tmp_path):
     leftovers = sorted(n for n in os.listdir(state_dir)
                        if not n.endswith(".ended"))
     assert leftovers == []
+
+
+def _run_instances(tmp_path, *extra):
+    env = dict(os.environ, HOME=str(tmp_path), USERPROFILE=str(tmp_path))
+    r = subprocess.run([NODE, DRIVER, "instances", *extra],
+                       capture_output=True, text=True, env=env, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "" and r.stderr == ""
+    return set(os.listdir(os.path.join(str(tmp_path), ".blink",
+                                       "state-opencode")))
+
+
+@needs_node
+def test_a_newer_instance_for_a_directory_replaces_the_older_at_exit(
+        tmp_path):
+    """Found in review, 2026-10-19: every factory call kept its exit handler,
+    and with it its sessions map, for the life of a `serve` -- and at exit
+    the stale instances ended sessions a live one owned. One handler per
+    directory now."""
+    left = _run_instances(tmp_path)
+    assert "ses_live.ended" in left and "ses_live.state" not in left
+    assert "ses_other.ended" in left and "ses_other.state" not in left
+    # The replaced instance ran nothing at exit.
+    assert "ses_stale.state" in left and "ses_stale.ended" not in left
+
+
+@needs_node
+def test_the_exit_handlers_are_bounded(tmp_path):
+    left = _run_instances(tmp_path, "many")
+    assert "ses_d0.state" in left and "ses_d0.ended" not in left
+    for i in range(1, 65):
+        assert f"ses_d{i}.ended" in left, i
+        assert f"ses_d{i}.state" not in left, i
+    # Older than ses_d0, so evicted before it.
+    assert "ses_live.state" in left and "ses_other.state" in left

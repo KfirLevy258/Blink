@@ -1496,6 +1496,51 @@ def test_the_watchdog_refreshes_the_plugin_only_while_installed(
     assert plugin.read_text(encoding="utf-8") == _plugin_source()
 
 
+def test_opencode_alone_without_a_key_says_the_board_waits(
+        tmp_path, capsys, monkeypatch):
+    """Found end to end with real OpenCode 1.19.3 on the real board,
+    2026-10-19: OpenCode alone, no plan key. The daemon sent nothing -- no
+    usage message and so no session message -- and the board stayed on its
+    waiting screen, while status said "its light works" and, under "running
+    on OpenCode alone", told the person to open Claude Code."""
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path, key=False)
+    calls = _no_fetch(monkeypatch)
+    _put_plugin(_oc_plugin(tmp_path))
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "running on OpenCode alone" in st
+    assert "its light works" not in st
+    assert "open Claude Code" not in st
+    assert ("OpenCode    no GLM Coding Plan key in OpenCode's auth.json --"
+            " nothing on this desk reports a usage figure, so the board"
+            " stays on its waiting screen") in st
+    assert ("            Add the key with `opencode auth login`, provider"
+            " Z.AI Coding Plan, and OpenCode gets gauges.") in st
+    assert ("Usage data  none -- nothing on this desk reports a usage figure"
+            " (see the OpenCode rows below)") in st
+    assert calls == []
+
+
+def test_opencode_beside_a_claude_status_line_keeps_its_light(
+        tmp_path, capsys, monkeypatch):
+    """The other side: a status line has been written, so there is a usage
+    frame for OpenCode's light to ride on, and saying the board waits would
+    be the wrong untruth."""
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path, key=False)
+    _no_fetch(monkeypatch)
+    _put_plugin(_oc_plugin(tmp_path))
+    home = os.path.join(str(tmp_path), ".blink")
+    os.makedirs(home, exist_ok=True)
+    with open(os.path.join(home, "statusline.json"), "w") as f:
+        f.write("{}")
+    cli.main(["status"])
+    st = capsys.readouterr().out
+    assert "its light works, there are no usage figures to show" in st
+    assert "waiting screen" not in st
+
+
 def test_status_reads_the_quota_once_and_never_prints_the_key(
         tmp_path, capsys, monkeypatch):
     _no_cli(monkeypatch, desktop=False, codex=False)
@@ -1576,7 +1621,11 @@ def test_no_plan_key_says_the_light_works_only_with_our_plugin(
         tmp_path, capsys, monkeypatch):
     """Found in review, 2026-10-19: the no-key line said "its light works"
     on every desk, including one whose blink.js is somebody else's and
-    whose status had just said the plugin is not installed."""
+    whose status had just said the plugin is not installed.
+
+    Codex is on this desk so that something else reports a number: without
+    one there is no light at all, which the next test pins."""
+    _no_cli(monkeypatch, desktop=False, codex=True)
     _with_opencode(tmp_path, key=False)
     calls = _no_fetch(monkeypatch)
     cli.main(["status"])
@@ -1743,3 +1792,34 @@ def test_the_opencode_disclosure_is_sentence_case(monkeypatch, capsys):
         if not line.strip() or line.startswith(_CODEX_WRAP):
             continue
         assert line.strip()[0].isupper(), f"copy is sentence case: {line!r}"
+
+
+def test_a_keyless_opencode_alone_desk_is_not_promised_a_light(
+        tmp_path, capsys, monkeypatch):
+    """No GLM key and nothing else with a number: the daemon sends nothing,
+    so the board stays on its waiting screen -- measured on the real board
+    with real OpenCode (2026-10-19). The note used to promise "only its
+    light" to exactly this desk."""
+    _no_cli(monkeypatch, desktop=False, codex=False)
+    _with_opencode(tmp_path, key=False)
+    _no_fetch(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    note = " ".join(capsys.readouterr().out.split())
+    assert "only its light" not in note
+    assert "activity light for OpenCode" not in note
+    assert "board stays on its waiting screen" in note
+    assert "opencode auth login" in note
+
+
+def test_a_keyless_opencode_beside_codex_keeps_its_light(
+        tmp_path, capsys, monkeypatch):
+    """With Codex's numbers on the wire, OpenCode's light does ride."""
+    _no_cli(monkeypatch, desktop=False, codex=True)
+    _with_opencode(tmp_path, key=False)
+    _no_fetch(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    note = " ".join(capsys.readouterr().out.split())
+    assert "only its light" in note
+    assert "waiting screen" not in note

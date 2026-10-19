@@ -1076,7 +1076,13 @@ def _note_tools_alone(desk):
     if desk.opencode_plan:
         shown.append("OpenCode's GLM Coding Plan quota, read from the plan's"
                      " own endpoint with the key OpenCode keeps")
-    if desk.tool_lights:
+    # The light rides on a usage message, and there is none without a
+    # number: the daemon sends nothing at all on a desk where no source has
+    # one, and the board stays on its waiting screen. Measured with real
+    # OpenCode on the real board (2026-10-19) -- this note promised "only its
+    # light" to exactly that desk.
+    numbered = desk.codex or desk.opencode_plan
+    if desk.tool_lights and numbered:
         shown.append(f"the activity light for {_and(desk.tool_lights)}"
                      " sessions")
     who = (f"{desk.tools[0]} alone" if len(desk.tools) == 1
@@ -1091,9 +1097,17 @@ def _note_tools_alone(desk):
     if not desk.opencode_plan:
         # Not a fault to fix, so not phrased as one: OpenCode on any other
         # model has no plan quota anywhere to read (docs/plans/opencode.md).
-        text += (" OpenCode holds no GLM Coding Plan key, so it has no"
-                 " usage figures to show"
-                 + (", only its light." if desk.opencode_plugin else "."))
+        if numbered:
+            text += (" OpenCode holds no GLM Coding Plan key, so it has no"
+                     " usage figures to show"
+                     + (", only its light." if desk.opencode_plugin
+                        else "."))
+        else:
+            text += (" OpenCode holds no GLM Coding Plan key and nothing"
+                     " else here reports a usage figure, so the board stays"
+                     " on its waiting screen. Add the key with `opencode"
+                     " auth login`, provider Z.AI Coding Plan, and OpenCode"
+                     " gets gauges and its light.")
     if not desk.opencode_plugin:
         text += (" OpenCode's light needs the plugin the step above could"
                  " not install.")
@@ -3111,6 +3125,15 @@ def cmd_status(args) -> int:
     elif desk.opencode and desk.opencode_plan:
         print("Usage data  from OpenCode's GLM plan quota (no Claude Code"
               " status line yet)")
+    elif desk.opencode and not desk.on_path and not desk.unsigned_desktop:
+        # OpenCode is the only tool here and has no plan key. Found end to
+        # end with real OpenCode 1.19.3, 2026-10-19: this desk fell through
+        # to "open Claude Code once" -- printed straight under "Claude Code
+        # not found -- running on OpenCode alone", sending the person to a
+        # program they do not have, for a number it would not have given
+        # their OpenCode anyway. The OpenCode rows below say what would.
+        print("Usage data  none -- nothing on this desk reports a usage"
+              " figure (see the OpenCode rows below)")
     elif desk.unsigned_desktop and not desk.on_path:
         print("Usage data  none yet -- Claude Desktop is installed; open it"
               " and sign in")
@@ -3121,7 +3144,11 @@ def cmd_status(args) -> int:
     # OpenCode holds a GLM plan key: there is no other place a GLM figure
     # exists to look at (see _opencode_lines). Its answer is handed to the
     # wire line below rather than fetched a second time there.
-    oc_quota = _source_lines(bridge_running)
+    # Whether anything but OpenCode puts a number on the cable: a Claude Code
+    # status line ever written, Desktop's cache, a Codex log. Without one,
+    # OpenCode's light has no frame to ride on (see _opencode_lines).
+    others_report = age is not None or desk.desktop or desk.codex
+    oc_quota = _source_lines(bridge_running, others_report=others_report)
     if getattr(args, "wire", False):
         _wire_line(oc_quota)
     return 0
@@ -3319,7 +3346,7 @@ def _codex_hook_status():
     return [f"Codex hook  firing, {n} live session{'s' if n != 1 else ''}"]
 
 
-def _source_lines(bridge_running=False):
+def _source_lines(bridge_running=False, others_report=True):
     """One line each for the sources CI cannot exercise.
 
     Claude Desktop is a closed GUI app and Codex will not write a rollout
@@ -3385,7 +3412,8 @@ def _source_lines(bridge_running=False):
         for line in _codex_hook_status():
             print(line)
 
-    lines, oc_quota = _opencode_lines(bridge_running)
+    lines, oc_quota = _opencode_lines(bridge_running,
+                                      others_report=others_report)
     for line in lines:
         print(line)
     return oc_quota
@@ -3458,7 +3486,7 @@ def _status_fetch(now):
     return box[0]
 
 
-def _opencode_lines(bridge_running=False, now=None):
+def _opencode_lines(bridge_running=False, now=None, others_report=True):
     """The OpenCode lines of `blink status`, and the quota read for them.
 
     Three questions, one row each, because each has a different repair:
@@ -3473,6 +3501,11 @@ def _opencode_lines(bridge_running=False, now=None):
     says so without handing over the key, so nothing here can print it.
     Its answer is a category ("unreachable", "rejected the key"), never an
     exception's text.
+
+    `others_report` says whether any other source on this desk puts a
+    usage figure on the cable. Without one, and without a plan key, the
+    daemon sends nothing at all and the board keeps its waiting screen,
+    which the no-key line has to say rather than promise a light.
     """
     now = time.time() if now is None else now
     out = []
@@ -3532,11 +3565,30 @@ def _opencode_lines(bridge_running=False, now=None):
     # loads. Found in review, 2026-10-19: this said so unconditionally, so a
     # desk whose blink.js was somebody else's -- reported two lines above
     # as "plugin not installed" -- was then told its light works.
-    no_key = ("OpenCode    no GLM Coding Plan key in OpenCode's auth.json -- "
-              + ("its light works, there are no usage figures to show"
-                 if mine else "there are no usage figures to show"))
+    #
+    # And only where something else puts a number on the cable. Found end to
+    # end with real OpenCode 1.19.3 on the real board, 2026-10-19: on a desk
+    # with OpenCode alone and no plan key the daemon sent NOTHING -- no usage
+    # message, so no session message either, because the state frame rides
+    # on a usage frame and no source had one. The board stayed on its
+    # waiting screen through a whole permission prompt while this line said
+    # the light worked. The fix that is in the person's hands is the key, in
+    # OpenCode's own words: `opencode auth login` lists the provider as
+    # "Z.AI Coding Plan" ("Zhipu AI Coding Plan" on the mainland host), read
+    # from OpenCode 1.19.3's provider list.
+    if not others_report:
+        no_key = ["OpenCode    no GLM Coding Plan key in OpenCode's auth.json"
+                  " -- nothing on this desk reports a usage figure, so the"
+                  " board stays on its waiting screen",
+                  "            Add the key with `opencode auth login`,"
+                  " provider Z.AI Coding Plan, and OpenCode gets gauges."]
+    else:
+        no_key = ["OpenCode    no GLM Coding Plan key in OpenCode's auth.json"
+                  " -- "
+                  + ("its light works, there are no usage figures to show"
+                     if mine else "there are no usage figures to show")]
     if opencode.quota_source() is None:
-        out.append(no_key)
+        out.extend(no_key)
         return out, None
     quota, err = _status_fetch(now)
     if quota is not None:
@@ -3544,7 +3596,7 @@ def _opencode_lines(bridge_running=False, now=None):
         return out, (quota, now)
     if err is None:
         # The key went between the two reads. Not an error to report.
-        out.append(no_key)
+        out.extend(no_key)
         return out, None
     out.append(f"OpenCode    GLM plan quota could not be read: {err}")
     return out, None

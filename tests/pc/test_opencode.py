@@ -36,8 +36,10 @@ def _clean(monkeypatch):
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     claude_state.reset_pid_liveness()
+    opencode.reset_pid_memory()
     yield
     claude_state.reset_pid_liveness()
+    opencode.reset_pid_memory()
 
 
 @pytest.fixture
@@ -382,10 +384,30 @@ def test_a_reset_just_inside_five_hours_and_a_minute_is_kept():
     assert q.session_resets_at is None
 
 
-def test_a_reset_in_the_past_is_dropped():
+def test_a_window_whose_reset_has_passed_has_no_percentage():
+    """Found in review, 2026-10-19: the reset was dropped and the percentage
+    KEPT, and _usage_frame expires a window only by its reset -- so a number
+    for a window that had already rolled stayed on the panel, unexpiring."""
     q = opencode.parse_quota(
-        fx.credit_plan(NOW, session_reset_in=-60, weekly_reset_in=-1), NOW)
-    assert q.session_resets_at is None and q.weekly_resets_at is None
+        fx.credit_plan(NOW, session_reset_in=-60), NOW)
+    assert q.session_pct == base.UNKNOWN and q.session_resets_at is None
+    assert q.weekly_pct >= 0 and q.weekly_resets_at is not None
+    # Both windows over: no reading at all, rather than a frame of unknowns.
+    assert opencode.parse_quota(
+        fx.credit_plan(NOW, session_reset_in=-60, weekly_reset_in=-1),
+        NOW) is None
+
+
+def test_a_passed_window_does_not_reach_the_panel(dirs):
+    ready(dirs, active_at=NOW)
+    p = provider(dirs, Recorder(fx.encode(
+        fx.credit_plan(NOW, weekly_reset_in=-5))))
+    p.tick(NOW)
+    f = [x for x in p.poll(NOW) if x.src == opencode.SRC_ID][0]
+    assert f.weekly_pct == base.UNKNOWN and f.session_pct >= 0
+    # And it never comes back with time, as a kept percentage would have.
+    f = [x for x in p.poll(NOW + 600) if x.src == opencode.SRC_ID][0]
+    assert f.weekly_pct == base.UNKNOWN
 
 
 def test_a_reset_in_seconds_rather_than_ms_is_not_believed():
@@ -526,7 +548,9 @@ def _http_error(code):
     (TimeoutError(KEY), "unreachable"),
     (ConnectionResetError(KEY), "unreachable"),
     (_http_error(401), "rejected the key"),
-    (_http_error(403), "rejected the key"),
+    # Not the key: a WAF, a geo block or a proxy answers 403 without ever
+    # looking at it (review, 2026-10-19).
+    (_http_error(403), "unexpected reply"),
     (_http_error(502), "unreachable"),
     (_http_error(404), "unexpected reply"),
     (_http_error(302), "unexpected reply"),
@@ -797,6 +821,46 @@ def test_a_rejected_key_takes_its_reading_off_the_panel(dirs, refusal):
     assert [f.src for f in p.poll(NOW + 60)] == []
 
 
+def test_a_403_keeps_the_reading(dirs):
+    """Found in review, 2026-10-19: HTTP 403 was "rejected the key", which
+    drops the reading -- so one request blocked by a café network's proxy
+    blanked a correct gauge and blamed the key. Only 401 and the body's own
+    auth codes are about the key."""
+    ready(dirs, active_at=NOW)
+    p = provider(dirs, Recorder(fx.encode(fx.credit_plan(NOW)),
+                                _http_error(403)))
+    p.tick(NOW)
+    p.tick(NOW + 60)
+    assert p.last_error() == "unexpected reply"
+    assert p.last_reading() is not None
+    assert [f.src for f in p.poll(NOW + 60)] == ["zai"]
+
+
+def test_giving_up_after_a_week_idle_forgets_the_reading(dirs):
+    """Found in review, 2026-10-19: once OpenCode had been idle past
+    GIVE_UP_AFTER_S nothing would ever fetch again, and the last reading
+    went on riding the bus as a stale frame for as long as the daemon ran."""
+    data, _ = ready(dirs, active_at=NOW)
+    p = provider(dirs, Recorder(fx.encode(
+        fx.credit_plan(NOW, weekly_reset_in=30 * 86400))))
+    assert p.tick(NOW) is True
+    later = NOW + opencode.GIVE_UP_AFTER_S + 60
+    assert p.tick(later) is False
+    assert p.last_reading() is None
+    assert [f.src for f in p.poll(later)] == []
+
+
+def test_the_usage_frame_is_never_active_after_now(dirs):
+    """Found in review, 2026-10-19: a DB or slot mtime in the future (a
+    clock stepped back, a copied file) made the usage frame claim use after
+    this very poll, and the second ring goes to the newest active_at."""
+    data, _ = ready(dirs, active_at=NOW + 3600)
+    p = provider(dirs, Recorder(fx.encode(fx.credit_plan(NOW))))
+    p.tick(NOW)
+    f = [x for x in p.poll(NOW) if x.src == opencode.SRC_ID][0]
+    assert f.active_at == NOW
+
+
 def test_errors_are_reported_once_per_change(dirs, capsys):
     ready(dirs, active_at=NOW + 10_000)
     good = fx.encode(fx.credit_plan(NOW))
@@ -984,17 +1048,123 @@ def test_a_living_pid_keeps_its_session(dirs):
     assert _state(dirs).state == base.STATE_IDLE
 
 
-@pytest.mark.skipif(os.name != "posix", reason="pid liveness is POSIX only")
-def test_a_dead_pid_ends_its_session(dirs, tmp_path):
-    import time
-    now = time.time()
+# --- pid liveness: OpenCode's own rule, "trusted once seen alive" ----------
+#
+# Found end to end with real OpenCode 1.19.3, 2026-10-19 (the lab's
+# tui_quick.py): a TUI quit with ctrl-c one second after its Stop, or a
+# `serve` sent SIGTERM, delivers no 'exit', so no SessionEnd. Under the
+# process-wide suspension that fresh slot with a dead pid switched pid
+# liveness off for the whole daemon, and the closed session stayed "your
+# turn" for an hour. These run on Windows too: OpenCode's directory asks
+# OpenProcess/GetExitCodeProcess there (claude_state.platform_pid_probe).
+
+needs_probe = pytest.mark.skipif(os.name not in ("posix", "nt"),
+                                 reason="no pid probe on this platform")
+
+
+def _dead_pid():
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     child.wait()
-    fx.slot(dirs[1], "ses_live", "Stop", now - 300, pid=os.getpid())
-    fx.slot(dirs[1], "ses_dead", "UserPromptSubmit", now - 300,
-            pid=child.pid)
-    f = _state(dirs, now=now)
-    assert f.n_sessions() == 1 and f.state == base.STATE_IDLE
+    return child.pid
+
+
+def _a_live_opencode():
+    """A process standing in for OpenCode: alive until its stdin closes."""
+    return subprocess.Popen([sys.executable, "-c",
+                             "import sys; sys.stdin.read()"],
+                            stdin=subprocess.PIPE)
+
+
+@needs_probe
+def test_a_pid_seen_alive_ends_its_session_the_moment_it_dies(dirs, capsys):
+    """The real sequence: the slot is written, a poll sees OpenCode alive,
+    OpenCode dies one second after its Stop -- well inside FRESH_SLOT_S --
+    and the very next poll drops the session."""
+    import time
+    oc = _a_live_opencode()
+    try:
+        now = time.time()
+        fx.slot(dirs[1], "ses_tui", "Stop", now, pid=oc.pid, name="proj")
+        p = provider(dirs, Recorder(b"{}"))
+        f = [x for x in p.poll(now) if x.src == opencode.STATE_SRC_ID][0]
+        assert f.state == base.STATE_IDLE and f.n_idle == 1
+    finally:
+        oc.stdin.close()
+        oc.wait(timeout=30)
+    frames = p.poll(now + 1)
+    assert [x for x in frames if x.src == opencode.STATE_SRC_ID] == []
+    # Neither fed nor read the flag Claude and Codex share.
+    assert claude_state.pid_liveness_trusted() is True
+    assert "pid liveness is DISABLED" not in capsys.readouterr().err
+
+
+@needs_probe
+def test_a_pid_never_seen_alive_is_kept_until_the_hour(dirs, capsys):
+    """A container's pid under a bind-mounted ~/.blink is never alive on the
+    host, so it must never end a session: that is the devcontainer case the
+    global suspension existed for, kept safe without one."""
+    import time
+    now = time.time()
+    dead = _dead_pid()
+    fx.slot(dirs[1], "ses_fresh", "Stop", now - 2, pid=dead)
+    fx.slot(dirs[1], "ses_old", "UserPromptSubmit", now - 300, pid=dead)
+    p = provider(dirs, Recorder(b"{}"))
+    f = [x for x in p.poll(now) if x.src == opencode.STATE_SRC_ID][0]
+    assert f.n_sessions() == 2
+    f = [x for x in p.poll(now + claude_state.ABANDONED_AFTER_S - 400)
+         if x.src == opencode.STATE_SRC_ID][0]
+    assert f.n_sessions() == 2
+    assert [x for x in p.poll(now + claude_state.ABANDONED_AFTER_S + 10)
+            if x.src == opencode.STATE_SRC_ID] == []
+    assert claude_state.pid_liveness_trusted() is True
+    assert "pid liveness is DISABLED" not in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name != "posix",
+                    reason="Claude's pid liveness is POSIX only")
+def test_claude_still_drops_its_dead_session_beside_an_opencode_one(
+        dirs, tmp_path, capsys):
+    """The other half of the incident: Claude's own dead-pid drop must not
+    be switched off because OpenCode was quit quickly. The order is the
+    daemon's -- OpenCode polled first, then Claude."""
+    import time
+    now = time.time()
+    dead = _dead_pid()
+    claude_dir = tmp_path / "state"
+    claude_dir.mkdir()
+    fx.slot(str(claude_dir), "c1", "Stop", now - 300, pid=dead)
+    fx.slot(dirs[1], "ses_x", "Stop", now - 3, pid=dead, name="proj")
+    p = provider(dirs, Recorder(b"{}"))
+    assert [x.src for x in p.poll(now)] == [opencode.STATE_SRC_ID]
+    claude = claude_state.ClaudeStateProvider(path=str(claude_dir),
+                                              sweep=False)
+    assert claude.poll(now + 2) == []
+    assert claude_state.pid_liveness_trusted() is True
+    assert "[claude]" not in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name != "posix",
+                    reason="Claude's pid liveness is POSIX only")
+def test_a_claude_suspension_does_not_reach_opencode(dirs, tmp_path):
+    """And the reverse: a Claude slot that suspends the global flag must not
+    stop OpenCode's seen-alive pid from ending its session."""
+    import time
+    now = time.time()
+    claude_dir = tmp_path / "state"
+    claude_dir.mkdir()
+    fx.slot(str(claude_dir), "c1", "Stop", now - 2, pid=_dead_pid())
+    claude_state.ClaudeStateProvider(path=str(claude_dir),
+                                     sweep=False).poll(now)
+    assert claude_state.pid_liveness_trusted() is False
+    oc = _a_live_opencode()
+    try:
+        fx.slot(dirs[1], "ses_tui", "Stop", now, pid=oc.pid)
+        p = provider(dirs, Recorder(b"{}"))
+        assert [x.src for x in p.poll(now)] == [opencode.STATE_SRC_ID]
+    finally:
+        oc.stdin.close()
+        oc.wait(timeout=30)
+    assert p.poll(now + 1) == []
 
 
 def test_looking_without_sweeping_leaves_the_evidence(dirs):

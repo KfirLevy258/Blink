@@ -133,8 +133,29 @@ inside real OpenCode 1.19.3:
   all.
 - **The process exiting writes `SessionEnd`.** Only `opencode run` delivers
   that event; a TUI quit with ctrl-c and `serve` on SIGTERM do not. For those,
-  the pid check drops the slot. Catching the signals ourselves would stop
-  OpenCode exiting.
+  the pid check drops the slot on the next poll, as long as the daemon saw
+  that pid alive at some earlier poll -- which, polling every two seconds, it
+  has for any session that lasted longer than that. Catching the signals
+  ourselves would stop OpenCode exiting.
+
+  OpenCode's directory has its own pid rule, "trusted once seen alive"
+  (`claude_state.SeenAlivePids`), and never touches the process-wide
+  suspension Claude and Codex share. Found end to end with real OpenCode
+  1.19.3, 2026-10-19: ctrl-c one second after the answer left a slot
+  seconds old whose pid was gone, which that suspension reads as "pids mean
+  nothing on this machine". It switched pid liveness off for the whole
+  daemon, so the closed session stayed amber "your turn" for an hour, and
+  Claude's and Codex's dead sessions lingered with it. Now a pid the daemon
+  has seen alive ends its session the moment it is gone, whatever the
+  slot's age. A pid it has never seen alive -- a container's, under a
+  bind-mounted `~/.blink` -- never ends one, and that session falls back to
+  the hour. A fresh `blink status` has seen nothing alive, so it may count a
+  just-closed session that the daemon has already dropped. That errs the
+  safe way.
+
+  On Windows the check is `OpenProcess` + `GetExitCodeProcess`, for this
+  directory only. Claude's and Codex's directories still have no liveness
+  there.
 - **A session id that fails the pattern is skipped, not written as
   `unknown`.** One `serve` process carries many sessions, and folding them
   into one slot is the misreport the per-session slots exist to prevent.
@@ -168,7 +189,8 @@ The plugin keeps the shim's privacy rules:
   on its next event.
 - Writes go to a temp file named with the pid, then are renamed.
 - `pid` is `process.pid`. OpenCode is one process, so the pid is the
-  session's own process, and liveness works where the platform supports it.
+  session's own process, and liveness works on POSIX and Windows (see the
+  `SessionEnd` rule above).
 - Every handler is wrapped so that it can never throw into OpenCode.
 
 The first line of the file is an ownership marker. Uninstall removes the
@@ -202,7 +224,11 @@ credential. The rules:
   `stale` like any other -- unless the failure is the key itself: a key the
   plan rejects, or one removed from auth.json (the install text's way to
   stop the requests), drops the reading at once rather than leaving it on
-  the panel for up to a week.
+  the panel for up to a week. An HTTP 403 is not about the key -- a WAF, a
+  geo block or a proxy sends it without looking -- so it keeps the reading
+  (found in review, 2026-10-19). Reaching the 7-day give-up drops it too,
+  since no fetch will ever replace it, and a window whose reset is already
+  past when the reply is read has no percentage.
 - **Where OpenCode is.** The service (launchd, systemd, the Task Scheduler)
   runs without the shell's `XDG_DATA_HOME` / `XDG_CONFIG_HOME`. So where those
   move OpenCode off its defaults, `blink install` records the directories it

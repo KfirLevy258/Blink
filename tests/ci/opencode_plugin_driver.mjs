@@ -3,6 +3,8 @@
 //   node tests/ci/opencode_plugin_driver.mjs check     every scenario, asserted
 //   node tests/ci/opencode_plugin_driver.mjs exit      one session, then exit
 //   node tests/ci/opencode_plugin_driver.mjs fixture   a known desk, held open
+//   node tests/ci/opencode_plugin_driver.mjs instances several plugin instances,
+//                                                      then exit
 //
 // Run with HOME pointed at a throwaway directory: the plugin writes into
 // ~/.blink/state-opencode and nowhere else, and this checks that it does.
@@ -33,6 +35,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
+import { syncBuiltinESMExports } from "node:module"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 // Overridable so a test can hand this a deliberately broken copy and see the
@@ -614,6 +617,54 @@ async function check() {
     }
   }
 
+  // 16. A rename the platform refuses for a moment. Found in review,
+  //     2026-10-19: on Windows, renaming onto a file another process has open
+  //     fails with EPERM/EBUSY/EACCES, and the daemon opens every slot on a
+  //     two-second poll -- so the event was silently lost. The plugin's
+  //     `import * as fs` sees a patched builtin through
+  //     syncBuiltinESMExports, which is how this reaches it.
+  {
+    const real = fs.default.renameSync
+    let calls = 0
+    const refuse = (code) => {
+      calls++
+      throw Object.assign(new Error(code), { code })
+    }
+    const swap = (fn) => {
+      fs.default.renameSync = fn
+      syncBuiltinESMExports()
+    }
+    try {
+      const h = await plugin()
+      // Busy for three tries, then free: the write lands, late but whole.
+      swap((...a) => (calls < 3 ? refuse("EPERM") : (calls++, real(...a))))
+      await busy(h, "ses_ren")
+      if (calls !== 4) fail(`a briefly busy rename was tried ${calls} times, wanted 4`)
+      expectSlot("rename retried", "ses_ren", "UserPromptSubmit")
+      // Busy for good: given up after five tries, quietly, nothing thrown.
+      calls = 0
+      swap(() => refuse("EBUSY"))
+      await idle(h, "ses_ren")
+      if (calls !== 5) fail(`a rename that never frees was tried ${calls} times, wanted 5`)
+      expectSlot("rename given up", "ses_ren", "UserPromptSubmit")
+      calls = 0
+      swap(() => refuse("EACCES"))
+      await busy(h, "ses_ren_b")
+      if (calls !== 5) fail(`EACCES was tried ${calls} times, wanted 5`)
+      // Not a busy file: no retry, a failure is a failure.
+      calls = 0
+      swap(() => refuse("ENOSPC"))
+      await busy(h, "ses_ren_c")
+      if (calls !== 1) fail(`ENOSPC was retried: ${calls} tries`)
+      expectFile("rename refused", "ses_ren_b.state", false)
+      expectFile("rename refused", "ses_ren_c.state", false)
+    } catch (e) {
+      fail(`a refused rename threw: ${e}`)
+    } finally {
+      swap(real)
+    }
+  }
+
   // Nothing the events carried, beyond ids and the directory's last segment.
   for (const f of walk(DIR)) {
     const full = p(f)
@@ -649,6 +700,34 @@ async function fixture() {
   await deleted(h, "ses_gone")
 }
 
+// --- instances -------------------------------------------------------------
+
+// Found in review, 2026-10-19: every factory call left its exit handler, and
+// with it its sessions and requests maps, in a module-level Set for the life
+// of the process; at exit the stale instances ran sessionEnd as well. Now one
+// handler per directory, the newest replacing its predecessor, at most 64.
+//   - ses_stale: written by an instance for /x/y/Same that a later instance
+//     for the same directory replaced. Its slot must survive the exit.
+//   - ses_live, ses_other: the current instances for /x/y/Same and
+//     /x/y/Other. Tombstoned.
+//   - ses_d0 .. ses_d64: one instance each for 65 more directories. The
+//     oldest, ses_d0 -- evicted along with /x/y/Same's and /x/y/Other's
+//     instances, which are older still -- keeps its slot; the 64 newest are
+//     tombstoned.
+async function instances() {
+  makeDir()
+  const turn = async (h, sid) => {
+    await busy(h, sid)
+    await idle(h, sid)
+  }
+  await turn(await plugin("/x/y/Same"), "ses_stale")
+  await turn(await plugin("/x/y/Same"), "ses_live")
+  await turn(await plugin("/x/y/Other"), "ses_other")
+  if (process.argv[3] === "many") {
+    for (let i = 0; i <= 64; i++) await turn(await plugin(`/x/y/D${i}`), `ses_d${i}`)
+  }
+}
+
 // --- main ------------------------------------------------------------------
 
 const mode = process.argv[2] || "check"
@@ -663,6 +742,7 @@ try {
     await idle(h, "ses_exit")
     await created(h, "ses_exitkid", { parentID: "ses_exit" })
   } else if (mode === "fixture") await fixture()
+  else if (mode === "instances") await instances()
   else crashed = `unknown mode ${mode}`
 } catch (e) {
   crashed = `the driver crashed: ${e && e.stack ? e.stack : e}`

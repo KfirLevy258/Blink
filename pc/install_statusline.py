@@ -588,9 +588,21 @@ def shim_content_check(shims):
     return "; ".join(repaired) if repaired else None
 
 
-def refresher_check(refreshers):
+def refresher_check(refreshers, last=None):
     """Run each refresher -- a callable returning a sentence or None -- under
     the rules shim_content_check keeps.
+
+    `last` is the caller's memory of what each refresher said the time
+    before ({index: sentence or None}); with it, a sentence identical to the
+    previous one from the same refresher is not reported again, and a quiet
+    run clears the memory so the next sentence is. Found in review,
+    2026-10-19: a refresh that can never succeed -- blink.js a symlink into
+    a read-only tree, a config directory owned by root -- failed the same
+    way on every DriftWatchdog interval, and the daemon's log gained the
+    same line every five minutes for as long as it ran, 288 a day. A shim
+    repair cannot repeat like that (a failed one is an exception the next
+    tick retries and may well fix); a refresher's failure is a fact about
+    the machine, and once said it stays true.
 
     For files that are not shims and so cannot be (path, name) pairs: today
     the OpenCode plugin, whose ownership is a marker inside the file and
@@ -607,11 +619,16 @@ def refresher_check(refreshers):
     if not _read_marker():
         return None
     said = []
-    for refresh in refreshers:
+    for i, refresh in enumerate(refreshers):
         try:
             msg = refresh()
         except Exception as e:
             msg = f"a refresh failed: {e}"
+        if last is not None:
+            repeat = msg is not None and last.get(i) == msg
+            last[i] = msg or None
+            if repeat:
+                continue
         if msg:
             said.append(msg)
     return "; ".join(said) if said else None
@@ -642,6 +659,9 @@ class DriftWatchdog:
         # The same idea for files that are not shims (refresher_check), and
         # defaulted to nothing for the same reason.
         self._refreshers = tuple(refreshers)
+        # What each refresher said last, so one that fails the same way on
+        # every interval is logged once (refresher_check).
+        self._refreshed_said = {}
         self._next = self._now()
         self._reinstatements = 0
         self._gave_up = False
@@ -683,7 +703,8 @@ class DriftWatchdog:
                 found.append(stale)
 
         if self._refreshers:
-            refreshed = refresher_check(self._refreshers)
+            refreshed = refresher_check(self._refreshers,
+                                        self._refreshed_said)
             if refreshed:
                 found.append(refreshed)
 

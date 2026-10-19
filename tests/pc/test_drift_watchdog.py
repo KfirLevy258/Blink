@@ -198,3 +198,49 @@ def test_a_stale_shim_is_still_repaired_after_it_gave_up(monkeypatch):
     assert m == "blink-hook.sh was out of date"
     # And the shim rewrites never counted towards the cap on their way there.
     assert w._reinstatements == isl.MAX_REINSTATEMENTS
+
+
+# --- a refresher that can never succeed says so once ------------------------
+
+
+def test_a_refresh_that_always_fails_is_reported_once(monkeypatch):
+    """Found in review, 2026-10-19: blink.js a symlink into a read-only tree
+    fails its refresh identically on every interval, and the daemon logged
+    the same line every five minutes forever. Once per distinct message."""
+    monkeypatch.setattr(isl, "_read_marker", lambda: "x")
+    monkeypatch.delenv(isl.WATCHDOG_DISABLE_ENV, raising=False)
+    said = ["OpenCode plugin could not be refreshed (read-only)"]
+    clock = _Clock()
+    w = isl.DriftWatchdog("s", "p", interval_s=1.0, now=clock,
+                          check=lambda *a: None,
+                          refreshers=(lambda: said[0],))
+    seen = []
+    for i in range(6):
+        clock.t = i * 2.0
+        seen.append(w.tick())
+    assert seen == [said[0], None, None, None, None, None]
+
+    # A different sentence is news.
+    said[0] = "OpenCode plugin could not be refreshed (gone)"
+    clock.t = 20.0
+    assert w.tick() == said[0]
+    # And after a quiet interval the same one is news again.
+    said[0], clock.t = None, 22.0
+    assert w.tick() is None
+    said[0], clock.t = "OpenCode plugin could not be refreshed (gone)", 24.0
+    assert w.tick() == said[0]
+
+
+def test_a_raising_refresh_is_reported_once_too(monkeypatch):
+    monkeypatch.setattr(isl, "_read_marker", lambda: "x")
+    monkeypatch.delenv(isl.WATCHDOG_DISABLE_ENV, raising=False)
+
+    def boom():
+        raise OSError("read-only file system")
+    clock = _Clock()
+    w = isl.DriftWatchdog("s", "p", interval_s=1.0, now=clock,
+                          check=lambda *a: None, refreshers=(boom,))
+    first = w.tick()
+    assert "read-only file system" in first
+    clock.t = 2.0
+    assert w.tick() is None

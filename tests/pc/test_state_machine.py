@@ -979,3 +979,174 @@ def test_a_tombstone_does_not_silence_the_session_that_resumed(state_dir):
     counts, _, _ = provider(state_dir).scan(NOW)
 
     assert counts == {base.STATE_RUNNING: 1}
+
+
+# --- a slot that only the second read could see -----------------------------
+
+
+def _first_read_misses(monkeypatch):
+    """_load_slot that returns None the first time it is asked and the real
+    payload after: the hook's rename landing between listdir and open, or a
+    write caught half done where rename is not atomic."""
+    real = ClaudeStateProvider._load_slot
+    calls = []
+
+    def flaky(path):
+        calls.append(path)
+        return None if len(calls) == 1 else real(path)
+    monkeypatch.setattr(ClaudeStateProvider, "_load_slot",
+                        staticmethod(flaky))
+    return calls
+
+
+def test_a_slot_that_only_the_second_read_sees_does_not_crash_the_poll(
+        state_dir, monkeypatch):
+    """Found in review, 2026-10-19: census took the slot's clock from the
+    payload of its FIRST read, while _read_state had judged the slot on a
+    read of its own. When only the second succeeded, the session was counted
+    and float(None["t"]) raised TypeError out of poll() -- Claude's state
+    frame gone for that poll, and Codex's whole provider with it, through
+    codex_state.census."""
+    write_session(state_dir, "s1", "Stop", NOW - 10)
+    _first_read_misses(monkeypatch)
+    f = provider(state_dir).poll(NOW)[0]
+    assert f.state == base.STATE_IDLE and f.n_idle == 1
+    assert f.active_at == NOW - 10
+
+
+def test_census_takes_the_clock_from_the_payload_it_judged(state_dir,
+                                                         monkeypatch):
+    write_session(state_dir, "s1", "PreToolUse", NOW - 30)
+    _first_read_misses(monkeypatch)
+    states, agents, times = provider(state_dir).census(NOW)
+    assert states == {"s1": (base.STATE_RUNNING, "")}
+    assert times == {"s1": NOW - 30}
+
+
+# --- Windows liveness, through a stand-in kernel32 --------------------------
+
+
+class _K32:
+    """kernel32 as _windows_process_is_gone uses it: OpenProcess,
+    GetExitCodeProcess, CloseHandle. `exit_code` None means OpenProcess
+    fails, with `error` as the last error."""
+
+    def __init__(self, exit_code=None, error=0, read_ok=True):
+        self.exit_code, self.error, self.read_ok = exit_code, error, read_ok
+        self.opened, self.closed = [], []
+
+    def OpenProcess(self, access, inherit, pid):
+        self.opened.append((access, inherit, pid))
+        return None if self.exit_code is None else 0x1234
+
+    def GetExitCodeProcess(self, handle, code):
+        code._obj.value = self.exit_code       # byref(x)._obj is x
+        return self.read_ok
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+def _gone(k32):
+    return claude_state._windows_process_is_gone(
+        4242, kernel32=k32, last_error=lambda: k32.error)
+
+
+def test_windows_a_running_process_is_alive():
+    k32 = _K32(exit_code=claude_state.STILL_ACTIVE)
+    assert _gone(k32) is False
+    # Only the right to read the exit code -- never PROCESS_TERMINATE, which
+    # is what os.kill would have asked for.
+    assert k32.opened == [(claude_state.PROCESS_QUERY_LIMITED_INFORMATION,
+                           False, 4242)]
+    assert k32.closed == [0x1234], "the handle must not leak per poll"
+
+
+def test_windows_an_exited_process_still_held_open_is_gone():
+    k32 = _K32(exit_code=0)
+    assert _gone(k32) is True
+    assert k32.closed == [0x1234]
+
+
+def test_windows_no_such_process_is_gone():
+    assert _gone(_K32(error=claude_state.ERROR_INVALID_PARAMETER)) is True
+
+
+def test_windows_access_denied_is_alive():
+    """Somebody else's process, or a protected one: it exists. Reading this
+    as death would drop a live session -- the direction never allowed."""
+    assert _gone(_K32(error=claude_state.ERROR_ACCESS_DENIED)) is False
+
+
+def test_windows_any_other_doubt_is_alive():
+    assert _gone(_K32(error=31)) is False
+    k32 = _K32(exit_code=0, read_ok=False)
+    assert _gone(k32) is False
+    assert k32.closed == [0x1234]
+
+
+def test_windows_probe_never_raises(monkeypatch):
+    def boom(pid, kernel32=None, last_error=None):
+        raise OSError("no kernel32 here")
+    monkeypatch.setattr(claude_state, "_windows_process_is_gone", boom)
+    assert claude_state._safe_windows_probe(4242) is False
+
+
+def test_the_probe_is_chosen_by_platform_and_never_os_kill_on_windows(
+        monkeypatch):
+    monkeypatch.setattr(claude_state.os, "name", "nt")
+    assert claude_state.platform_pid_probe() is claude_state._safe_windows_probe
+    monkeypatch.setattr(claude_state.os, "name", "posix")
+    assert claude_state.platform_pid_probe() is claude_state._process_is_gone
+    monkeypatch.setattr(claude_state.os, "name", "java")
+    assert claude_state.platform_pid_probe() is None
+
+
+def test_claude_and_codex_keep_no_liveness_on_windows(monkeypatch, state_dir):
+    """The Windows probe is for directories that ask for it. Claude's pid is
+    the hook runner's $PPID, measured on macOS only, so its directory keeps
+    the hour there."""
+    monkeypatch.setattr(claude_state, "_PID_LIVENESS_AVAILABLE", False)
+    asked = []
+    monkeypatch.setattr(claude_state, "_windows_process_is_gone",
+                        lambda pid, **kw: asked.append(pid) or True)
+    write_session(state_dir, "s1", "PreToolUse", NOW - 300, pid=4242)
+    assert provider(state_dir).poll(NOW)[0].n_run == 1
+    assert asked == []
+
+
+# --- SeenAlivePids: one directory's own rule --------------------------------
+
+
+def test_seen_alive_ends_a_session_only_for_a_pid_it_watched_live(state_dir):
+    alive = {7: True, 8: False}            # 8 was never alive here
+    seen = claude_state.SeenAlivePids(probe=lambda pid: not alive[pid])
+    write_session(state_dir, "a", "Stop", NOW - 2, pid=7)
+    write_session(state_dir, "b", "Stop", NOW - 2, pid=8)
+    p = provider(state_dir, liveness=seen)
+    assert p.poll(NOW)[0].n_idle == 2
+    alive[7] = False
+    # 7 is gone a second later: its session ends at once, slot age and all.
+    f = p.poll(NOW + 1)[0]
+    assert f.n_idle == 1
+    states, _, _ = p.census(NOW + 1)
+    assert set(states) == {"b"}
+    # The global flag was neither fed nor read.
+    assert claude_state.pid_liveness_trusted() is True
+
+
+def test_seen_alive_is_bounded_and_forgets_the_oldest():
+    seen = claude_state.SeenAlivePids(limit=3, probe=lambda pid: False)
+    for pid in range(1, 6):
+        seen.observe([("x", {"event": "Stop", "t": NOW, "pid": pid})], NOW)
+    assert [seen.seen(p) for p in range(1, 6)] == [False, False, True, True,
+                                                   True]
+
+
+def test_seen_alive_on_a_platform_with_no_probe_ends_nothing(monkeypatch):
+    monkeypatch.setattr(claude_state, "platform_pid_probe", lambda: None)
+    seen = claude_state.SeenAlivePids()
+    seen.observe([("x", {"event": "Stop", "t": NOW, "pid": 7})], NOW)
+    assert not seen.seen(7)
+    assert seen.says_ended(7, 0.0) is False

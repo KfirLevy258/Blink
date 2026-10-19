@@ -75,18 +75,24 @@
 //      SessionEnd exactly then, when the terminal closes, and this does the
 //      same from process 'exit'. Without it every finished `opencode run`
 //      left a slot well under a second old whose pid had just died (measured:
-//      the Stop and the exit 50-60 ms apart), which is precisely the evidence
-//      that makes claude_state.settle_pid_trust SUSPEND pid liveness for the
-//      whole daemon (FRESH_SLOT_S).
+//      the Stop and the exit 50-60 ms apart) -- a run that short may never
+//      have been seen alive by a two-second poll, so the pid check alone
+//      would have left it on the panel for the hour.
 //
 //      Measured on 1.19.3, 'exit' fires for `opencode run` and for nothing
 //      else that ends a process: not when the TUI quits on ctrl-c (its slot
 //      stayed, so the plugin evidently runs where 'exit' is never delivered),
 //      and not for `opencode serve` on SIGTERM. Those keep their last slot,
-//      and the pid check drops them on the next poll -- every one of them, in
-//      the lab. A handler for the signals themselves is NOT the fix: adding a
-//      SIGTERM or SIGINT listener replaces the runtime's default of exiting,
-//      so it would change how OpenCode dies.
+//      and the pid check drops them on the next poll: OpenCode's directory
+//      trusts a pid the daemon has once seen alive, whatever the slot's age
+//      (claude_state.SeenAlivePids). It used to share Claude's process-wide
+//      suspension, and a ctrl-c within FRESH_SLOT_S of the last event --
+//      one second after the answer, measured with the real TUI, 2026-10-19
+//      -- switched pid liveness off for the whole daemon and held the closed
+//      session on "your turn" for an hour. A handler for the signals
+//      themselves is NOT the fix: adding a SIGTERM or SIGINT listener
+//      replaces the runtime's default of exiting, so it would change how
+//      OpenCode dies.
 //
 // PRIVACY. The shim's rules, kept:
 //   - What is written: an event name, a session id, a child session id, the
@@ -254,6 +260,50 @@ function removeFile(p) {
   quietly(() => fs.rmSync(p, { force: true }))
 }
 
+// RENAME ON WINDOWS. A rename onto a file another process has open fails
+// there -- EPERM, EBUSY or EACCES, depending on how it was opened -- where
+// POSIX simply swaps the name. The daemon opens every slot on a two-second
+// poll, so on a Windows desk some writes land in that window, and the event
+// they carried was dropped without a word: a Stop lost that way leaves the
+// panel saying "running" until the next event, which after a finished turn
+// may be an hour away (found in review, 2026-10-19). The daemon's read is a
+// single small file and is over in well under a millisecond, so a few short
+// retries get past it; past those, the write is given up exactly as before.
+//
+// Synchronous, because every write here is (see the 'exit' listener below),
+// and bounded: at most RENAME_TRIES - 1 waits of RENAME_WAIT_MS, 40 ms in
+// all, on an event handler OpenCode is waiting for.
+const RENAME_TRIES = 5
+const RENAME_WAIT_MS = 10
+const RENAME_BUSY = new Set(["EPERM", "EBUSY", "EACCES"])
+
+// A synchronous sleep: Atomics.wait on a buffer nobody will ever notify,
+// the standard way to block for a few ms without an event-loop turn. If the
+// runtime refuses it (some refuse Atomics.wait on the main thread), a short
+// spin on the clock does the same job for these few milliseconds.
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  } catch {
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      // Deliberately empty.
+    }
+  }
+}
+
+function renameRetrying(from, to) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      fs.renameSync(from, to)
+      return
+    } catch (e) {
+      if (attempt >= RENAME_TRIES || !e || !RENAME_BUSY.has(e.code)) throw e
+      sleepSync(RENAME_WAIT_MS)
+    }
+  }
+}
+
 // One 'exit' listener for the whole module, however many times OpenCode calls
 // the factory -- it builds one plugin instance per project directory a server
 // is asked about, and the tests build dozens. A listener per instance would
@@ -263,10 +313,23 @@ function removeFile(p) {
 //
 // Synchronous by necessity: 'exit' runs no further turns of the event loop,
 // which is also why everything in this file uses the sync fs calls.
-const enders = new Set()
+//
+// KEYED BY DIRECTORY, newest instance wins. Found in review, 2026-10-19: this
+// was a Set that every factory call added a closure to and nothing removed,
+// and each closure holds its instance's whole `sessions` and `requests` maps.
+// `serve` builds an instance per directory and builds it again whenever
+// OpenCode reloads that directory's instance, so a server that ran for weeks
+// kept every generation alive -- and at exit the stale ones ran sessionEnd
+// over sessions they had last seen days ago, tombstoning ids that a live
+// instance (or another OpenCode process entirely) now owned. One ender per
+// directory: a new instance for a directory replaces its predecessor, whose
+// sessions, if any are still open, are left to the daemon's pid check.
+// Bounded as the maps are, oldest directory first.
+const MAX_INSTANCES = 64
+const enders = new Map()
 quietly(() => {
   process.once("exit", () => {
-    for (const end of enders) quietly(end)
+    for (const end of enders.values()) quietly(end)
   })
 })
 
@@ -359,7 +422,7 @@ export const BlinkStatePlugin = async (input) => {
       // writeFileSync's mode applies only when it creates the file; a temp left
       // by a killed predecessor would keep whatever mode it had.
       quietly(() => fs.chmodSync(tmp, 0o600))
-      fs.renameSync(tmp, slot)
+      renameRetrying(tmp, slot)
     } catch (e) {
       removeFile(tmp)
       throw e
@@ -675,11 +738,17 @@ export const BlinkStatePlugin = async (input) => {
 
   // The process exiting is the session ending -- see note 3 at the top. Every
   // top-level session this instance wrote a slot for gets the SessionEnd
-  // treatment, from the one listener registered at module scope below.
-  enders.add(() => {
-    for (const [sid, r] of [...sessions]) {
-      if (!r.parent && r.slot) quietly(() => sessionEnd(sid))
-    }
+  // treatment, from the one listener registered at module scope above --
+  // replacing whatever an earlier instance for the same directory left there.
+  quietly(() => {
+    const key = fallbackDir === null ? "" : fallbackDir
+    enders.delete(key)
+    while (enders.size >= MAX_INSTANCES) enders.delete(enders.keys().next().value)
+    enders.set(key, () => {
+      for (const [sid, r] of [...sessions]) {
+        if (!r.parent && r.slot) quietly(() => sessionEnd(sid))
+      }
+    })
   })
 
   return {
