@@ -55,7 +55,13 @@ against a budget meant for their own server.
 
 Two rolling windows that end now: the last five hours and the last seven
 days, matching the two rings every other provider fills. A rolling window
-has no reset, so there is no countdown: the board draws `--`.
+has no reset: it never empties at one moment, each reply leaves it exactly
+one window after it was made. So under budget there is no countdown and the
+board draws `--`. OVER budget there is a moment worth counting down to: the
+one at which enough of the oldest replies have left that the window is back
+at its budget, if nothing more is used (clear_at). Asked for by the owner
+the morning after a test night left the five-hour ring at 132% with
+nothing to say when it would come down.
 
 WHEN IT IS READ
 ---------------
@@ -134,7 +140,9 @@ Budget = collections.namedtuple("Budget", ("session_tokens", "weekly_tokens"))
 # nothing" from "the server reported nothing": how many counted messages
 # fell in the week, and how many of those had a token count at all.
 TokenUse = collections.namedtuple(
-    "TokenUse", ("session_tokens", "weekly_tokens", "messages", "counted"))
+    "TokenUse", ("session_tokens", "weekly_tokens", "messages", "counted",
+                 "session_clear_at", "weekly_clear_at"),
+    defaults=(None, None))
 
 
 # --- the budget file --------------------------------------------------------
@@ -501,9 +509,36 @@ def _stamp(path):
     return tuple(out)
 
 
-def sum_rows(rows, now_epoch):
+def clear_at(rows, now_epoch, window_s, budget):
+    """When the window ending then is back at `budget`, if nothing more is
+    used: an epoch, or None when it is at or under budget already (or there
+    is no budget).
+
+    Each row leaves exactly window_s after it was made, oldest first, so
+    walk them in that order and stop at the first whose leaving brings the
+    sum down to the budget. A row stamped in the future counts as made now,
+    as in sum_rows.
+    """
+    if not budget:
+        return None
+    now_ms = now_epoch * 1000.0
+    start = now_ms - window_s * 1000.0
+    inside = sorted((min(t, now_ms), total) for t, total in rows
+                    if t >= start and total > 0)
+    used = sum(total for _t, total in inside)
+    for t, total in inside:
+        if used <= budget:
+            break
+        used -= total
+        if used <= budget:
+            return t / 1000.0 + window_s
+    return None
+
+
+def sum_rows(rows, now_epoch, budget=None):
     """TokenUse over the two windows ending at now_epoch. A row stamped in
-    the future -- a clock that stepped -- counts as now, in both."""
+    the future -- a clock that stepped -- counts as now, in both. With a
+    Budget, also when each window gets back to it (clear_at)."""
     s_start = (now_epoch - SESSION_WINDOW_S) * 1000.0
     w_start = (now_epoch - WEEKLY_WINDOW_S) * 1000.0
     session = weekly = messages = counted = 0
@@ -516,7 +551,12 @@ def sum_rows(rows, now_epoch):
             counted += 1
         if t >= s_start:
             session += total
-    return TokenUse(session, weekly, messages, counted)
+    if budget is None:
+        return TokenUse(session, weekly, messages, counted)
+    return TokenUse(
+        session, weekly, messages, counted,
+        clear_at(rows, now_epoch, SESSION_WINDOW_S, budget.session_tokens),
+        clear_at(rows, now_epoch, WEEKLY_WINDOW_S, budget.weekly_tokens))
 
 
 class TokenCounter:
@@ -533,7 +573,7 @@ class TokenCounter:
         self._cache = {}        # path -> (stamp, read_at, rows)
         self._reported = None
 
-    def use(self, paths, now_epoch):
+    def use(self, paths, now_epoch, budget=None):
         try:
             rows, ok = [], True
             for p in paths:
@@ -547,7 +587,7 @@ class TokenCounter:
         self._report(None if ok else ERR_DB)
         if not ok:
             return None
-        return sum_rows(rows, now_epoch)
+        return sum_rows(rows, now_epoch, budget)
 
     def _rows(self, path, now_epoch):
         stamp = _stamp(path)

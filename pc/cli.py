@@ -3756,6 +3756,16 @@ def _use_text(used, budget):
             f" {opencode_budget.format_tokens(budget)} ({pct:.0f}%)")
 
 
+def _clock_at(at, now):
+    """"at 14:05" today, "Thu 14:05" within the week -- a 7-day window can
+    put it days out."""
+    t = time.localtime(at)
+    if time.strftime("%Y%m%d", t) == time.strftime("%Y%m%d",
+                                                   time.localtime(now)):
+        return "at " + time.strftime("%H:%M", t)
+    return "on " + time.strftime("%a %H:%M", t)
+
+
 def _opencode_budget_lines(now=None):
     """The token budget's lines for `blink status` and `blink
     opencode-budget`: what is set, what OpenCode has used against it, and
@@ -3789,6 +3799,13 @@ def _opencode_budget_lines(now=None):
     weekly = _use_text(use.weekly_tokens, budget.weekly_tokens)
     out.append(f"OpenCode    used {session} in the last 5 hours,"
                f" {weekly} in the last 7 days")
+    # Over budget, the one thing the dial's countdown cannot say on its
+    # own: the clock time. Local time, because it is read off a desk.
+    for label, at in (("5-hour", use.session_clear_at),
+                      ("7-day", use.weekly_clear_at)):
+        if at is not None:
+            out.append(f"OpenCode    over the {label} budget -- back at it"
+                       f" {_clock_at(at, now)} if nothing more is used")
     if opencode_budget.no_counts(use):
         out.append("OpenCode    OpenCode recorded no token counts -- your model"
                    " server may not return usage, so the rings stay blank")

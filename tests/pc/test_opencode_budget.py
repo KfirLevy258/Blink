@@ -490,6 +490,54 @@ def test_a_reader_that_raises_never_reaches_the_bus(dirs, tmp_path):
     assert usage(p.poll(NOW)) == []
 
 
+# --- back at the budget ------------------------------------------------------
+
+
+def test_under_or_at_budget_there_is_nothing_to_count_down_to():
+    rows = [(NOW_MS - 4 * H, 600), (NOW_MS - H, 400)]
+    assert ob.clear_at(rows, NOW, ob.SESSION_WINDOW_S, 1000) is None
+    assert ob.clear_at(rows, NOW, ob.SESSION_WINDOW_S, 5000) is None
+    assert ob.clear_at(rows, NOW, ob.SESSION_WINDOW_S, None) is None
+
+
+def test_over_budget_counts_down_to_the_reply_whose_leaving_is_enough():
+    """1320 of 1000 used: the oldest reply (100) leaving is not enough,
+    the next (300) is -- so the moment is that one's, five hours on."""
+    rows = [(NOW_MS - 4 * H, 100), (NOW_MS - 3 * H, 300),
+            (NOW_MS - H, 900), (NOW_MS - 2 * H, 20)]
+    want = (NOW_MS - 3 * H) / 1000 + ob.SESSION_WINDOW_S
+    assert ob.clear_at(rows, NOW, ob.SESSION_WINDOW_S, 1000) == want
+    # Exactly at the budget is back: 1320 - 320 = 1000.
+    assert ob.clear_at([(NOW_MS - 4 * H, 320), (NOW_MS - H, 1000)], NOW,
+                       ob.SESSION_WINDOW_S, 1000) == \
+        (NOW_MS - 4 * H) / 1000 + ob.SESSION_WINDOW_S
+
+
+def test_a_reply_already_out_of_the_window_is_not_waited_for():
+    rows = [(NOW_MS - 6 * H, 5000), (NOW_MS - 2 * H, 800),
+            (NOW_MS - H, 700)]
+    assert ob.clear_at(rows, NOW, ob.SESSION_WINDOW_S, 1000) == \
+        (NOW_MS - 2 * H) / 1000 + ob.SESSION_WINDOW_S
+
+
+def test_one_reply_over_the_budget_by_itself_waits_a_whole_window():
+    rows = [(NOW_MS - H, 5000), (NOW_MS + 60_000, 10)]
+    # The future row (a clock that stepped) counts as made now.
+    assert ob.clear_at(rows, NOW, ob.SESSION_WINDOW_S, 1000) == \
+        (NOW_MS - H) / 1000 + ob.SESSION_WINDOW_S
+    assert ob.clear_at(rows, NOW, ob.SESSION_WINDOW_S, 4) == \
+        NOW + ob.SESSION_WINDOW_S
+
+
+def test_sum_rows_carries_both_moments_only_with_a_budget():
+    rows = [(NOW_MS - 2 * D, 3000), (NOW_MS - H, 1500)]
+    plain = ob.sum_rows(rows, NOW)
+    assert plain.session_clear_at is None and plain.weekly_clear_at is None
+    use = ob.sum_rows(rows, NOW, ob.Budget(1000, 4000))
+    assert use.session_clear_at == (NOW_MS - H) / 1000 + ob.SESSION_WINDOW_S
+    assert use.weekly_clear_at == (NOW_MS - 2 * D) / 1000 + ob.WEEKLY_WINDOW_S
+
+
 # --- the frame and the bus -----------------------------------------------------
 
 
@@ -542,6 +590,28 @@ def test_a_budget_puts_token_use_on_the_rings(dirs, tmp_path):
     assert msg["weekly_resets_in_s"] == -1
     line = protocol.encode_checked(msg)
     assert fx.SECRET_TEXT.encode() not in line
+
+
+def test_over_budget_the_rings_count_down_to_being_back_at_it(dirs, tmp_path):
+    """The owner's 132%: over the five-hour budget, the session ring counts
+    down to the moment it is back at 100%, plus the margin that keeps the
+    board's own zero from landing first. The weekly ring, under budget,
+    keeps `--`."""
+    data, _ = dirs
+    fx.make_message_db(data, v1=[
+        fx.v1_message(NOW_MS - 4 * H, tok=tok(1_000_000)),
+        fx.v1_message(NOW_MS - H, tok=tok(1_640_000)),
+    ])
+    p = provider(dirs, tmp_path, session=2_000_000, weekly=20_000_000)
+    [f] = usage(p.poll(NOW))
+    assert f.session_pct == pytest.approx(132.0)
+    back = (NOW_MS - 4 * H) / 1000 + ob.SESSION_WINDOW_S
+    assert f.session_resets_at == back + opencode.CLEAR_MARGIN_S
+    assert f.weekly_resets_at is None
+
+    msg = ingest.IngestionBus(providers=[p], now=lambda: NOW).poll()
+    assert msg["session_resets_in_s"] == H // 1000 + opencode.CLEAR_MARGIN_S
+    assert msg["weekly_resets_in_s"] == -1
 
 
 def test_one_window_budgeted_leaves_the_other_ring_blank(dirs, tmp_path):
@@ -669,6 +739,33 @@ def test_cli_shows_current_use_on_a_desk_with_opencode(tmp_path, capsys):
     assert "used 500K of 2M (25%) in the last 5 hours" in out
     assert "500K of 20M (2%) in the last 7 days" in out
     assert fx.SECRET_TEXT not in out
+
+
+def test_cli_says_when_an_overrun_window_is_back_at_its_budget(tmp_path,
+                                                                capsys):
+    import time
+    now = time.time()
+    made = now - 3600
+    fx.make_message_db(_oc_data(tmp_path),
+                       v1=[fx.v1_message(int(made * 1000), tok=tok(2_640_000))])
+    assert cli.main(["opencode-budget", "5h=2M", "7d=20M"]) == 0
+    out = capsys.readouterr().out
+    assert "(132%) in the last 5 hours" in out
+    back = time.strftime("%H:%M", time.localtime(made + ob.SESSION_WINDOW_S))
+    assert f"over the 5-hour budget -- back at it at {back}" in out \
+        or f"over the 5-hour budget -- back at it on " in out
+    assert "7-day" not in out
+
+
+def test_the_clock_time_names_the_day_when_it_is_not_today():
+    now = time_at(2026, 10, 20, 10, 0)
+    assert cli._clock_at(time_at(2026, 10, 20, 14, 5), now) == "at 14:05"
+    assert cli._clock_at(time_at(2026, 10, 22, 9, 30), now) == "on Thu 09:30"
+
+
+def time_at(*ymdhm):
+    import time
+    return time.mktime(tuple(ymdhm) + (0, 0, 0, -1))
 
 
 def test_status_says_when_the_server_reports_no_usage(tmp_path, capsys,

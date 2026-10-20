@@ -126,6 +126,17 @@ STATE_SRC_ID = "state"
 # reads it.
 TOKENS_SRC_ID = "tokens"
 
+# Seconds added to an over-budget countdown before it goes on the wire. The
+# board zeroes a page's percentage when its own countdown reaches 0
+# (usage_view.c, the per-second tick) -- right for a window that empties,
+# wrong for a rolling one, which at that moment is at its budget, not at
+# nothing. The daemon sees the window come back within one fast tick
+# (FAST_POLL_INTERVAL_S, 2 s) and sends the real figure with no countdown;
+# landing the board's zero a few seconds after that means it never draws a
+# 0% it would take back two seconds later. Five: two ticks and the clock
+# drift a board picks up between heartbeats.
+CLEAR_MARGIN_S = 5
+
 # Expanded when a provider is built, never here: a module-level expanduser is
 # evaluated at import, before tests/conftest.py can move HOME, and the scan
 # behind it DELETES abandoned slots. Same rule as claude_state.STATE_DIR.
@@ -149,6 +160,13 @@ STATE_DIR = "~/.blink/state-opencode"
 # has watched is a fact about the process: a provider rebuilt mid-run must
 # not forget that it saw OpenCode alive a poll ago.
 SEEN_ALIVE = claude_state.SeenAlivePids()
+
+
+def _clear_countdown(clear_at):
+    """The resets_at an over-budget window is given: when it is back at its
+    budget, plus CLEAR_MARGIN_S. None (the board's `--`) when it is not
+    over."""
+    return None if clear_at is None else clear_at + CLEAR_MARGIN_S
 
 
 def reset_pid_memory():
@@ -1376,7 +1394,8 @@ class OpenCodeProvider(base.ProviderParser):
             budget = self._budget.read()
             if budget is None:
                 return None, None
-            return budget, self._tokens.use(db_paths(self._root()), now_epoch)
+            return budget, self._tokens.use(db_paths(self._root()),
+                                            now_epoch, budget)
         except Exception:
             return None, None
 
@@ -1408,8 +1427,11 @@ class OpenCodeProvider(base.ProviderParser):
             active_at=min(la, now_epoch) if la is not None else now_epoch,
             session_pct=base.UNKNOWN if s_pct is None else s_pct,
             weekly_pct=base.UNKNOWN if w_pct is None else w_pct,
-            # Rolling windows have no reset: the board draws `--`.
-            session_resets_at=None, weekly_resets_at=None,
+            # Rolling windows have no reset, so under budget the board
+            # draws `--`. Over it, the countdown is to the moment the window
+            # is back at its budget (opencode_budget.clear_at).
+            session_resets_at=_clear_countdown(use.session_clear_at),
+            weekly_resets_at=_clear_countdown(use.weekly_clear_at),
         )
 
     def _plan_frame(self, now_epoch):
