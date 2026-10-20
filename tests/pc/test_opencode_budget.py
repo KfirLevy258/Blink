@@ -538,18 +538,114 @@ def test_sum_rows_carries_both_moments_only_with_a_budget():
     assert use.weekly_clear_at == (NOW_MS - 2 * D) / 1000 + ob.WEEKLY_WINDOW_S
 
 
+# --- with no budget: the person's own record ---------------------------------
+
+
+def test_the_record_is_the_busiest_finished_window():
+    rows = [(NOW_MS - 3 * D, 300), (NOW_MS - 3 * D + 4 * H, 200),   # 500
+            (NOW_MS - 10 * D, 450),
+            (NOW_MS - 2 * H, 9999)]          # the current window: not a record
+    assert ob.peak(rows, NOW, ob.SESSION_WINDOW_S) == 500
+
+
+def test_a_window_reaching_into_the_current_one_is_not_a_record():
+    """The last window allowed ends exactly where the current one starts."""
+    end = NOW_MS - 5 * H
+    rows = [(end, 700), (end + 1, 50)]
+    assert ob.peak(rows, NOW, ob.SESSION_WINDOW_S) == 700
+
+
+def test_the_record_forgets_what_is_older_than_the_history():
+    rows = [(NOW_MS - 31 * D, 5000), (NOW_MS - 20 * D, 100)]
+    assert ob.peak(rows, NOW, ob.SESSION_WINDOW_S) == 100
+    assert ob.peak(rows, NOW, ob.WEEKLY_WINDOW_S) == 100
+
+
+def test_no_finished_window_with_tokens_is_no_record():
+    assert ob.peak([], NOW, ob.SESSION_WINDOW_S) is None
+    assert ob.peak([(NOW_MS - H, 800)], NOW, ob.SESSION_WINDOW_S) is None
+    assert ob.peak([(NOW_MS - 2 * D, 0)], NOW, ob.SESSION_WINDOW_S) is None
+
+
+def test_the_record_agrees_with_trying_every_window():
+    """Against brute force: every window end, minute by minute."""
+    import random
+    rnd = random.Random(7)
+    rows = [(NOW_MS - rnd.randrange(0, 30 * D), rnd.randrange(1, 100))
+            for _ in range(60)]
+    first, w = NOW_MS - 30 * D, 5 * H
+    best = 0
+    for end in range(int(first + w), int(NOW_MS - w) + 1, 60_000):
+        best = max(best, sum(n for t, n in rows if end - w <= t <= end))
+    got = ob.peak(rows, NOW, ob.SESSION_WINDOW_S)
+    assert got >= best
+    # ...and it is a sum some window really held (ends on a reply).
+    ends = [t for t, _n in rows if first + w <= t <= NOW_MS - w]
+    assert got in {sum(n for t, n in rows if e - w <= t <= e)
+                   for e in ends + [NOW_MS - w, first + w]}
+
+
+def test_with_no_budget_the_rings_measure_against_the_record(dirs, tmp_path):
+    data, _ = dirs
+    fx.make_message_db(data, v1=[
+        fx.v1_message(NOW_MS - 3 * D, tok=tok(400_000)),      # the record
+        fx.v1_message(NOW_MS - H, tok=tok(100_000)),          # now
+    ])
+    p = provider(dirs, tmp_path)
+    [f] = usage(p.poll(NOW))
+    assert f.src == opencode.TOKENS_SRC_ID
+    assert f.session_pct == pytest.approx(25.0)
+    # The weekly window holds both; the only finished week holds nothing,
+    # so the weekly ring has no record yet.
+    assert f.weekly_pct == base.UNKNOWN
+    assert f.session_resets_at is None and f.weekly_resets_at is None
+
+
+def test_harder_than_ever_goes_past_100_with_no_countdown(dirs, tmp_path):
+    data, _ = dirs
+    fx.make_message_db(data, v1=[
+        fx.v1_message(NOW_MS - 3 * D, tok=tok(100_000)),
+        fx.v1_message(NOW_MS - H, tok=tok(250_000)),
+    ])
+    [f] = usage(provider(dirs, tmp_path).poll(NOW))
+    assert f.session_pct == pytest.approx(250.0)
+    assert f.session_resets_at is None
+
+
+def test_a_budget_wins_for_its_window_and_the_record_fills_the_other(
+        dirs, tmp_path):
+    data, _ = dirs
+    fx.make_message_db(data, v1=[
+        fx.v1_message(NOW_MS - 20 * D, tok=tok(1_000_000)),
+        fx.v1_message(NOW_MS - 3 * D, tok=tok(400_000)),
+        fx.v1_message(NOW_MS - H, tok=tok(100_000)),
+    ])
+    p = provider(dirs, tmp_path, session=200_000)
+    [f] = usage(p.poll(NOW))
+    assert f.session_pct == pytest.approx(50.0)                  # the budget
+    assert f.weekly_pct == pytest.approx(50.0)     # 500K of the 1M record
+
+
 # --- the frame and the bus -----------------------------------------------------
 
 
-def test_no_budget_never_opens_the_database(dirs, tmp_path):
-    data, _ = dirs
-    fx.make_message_db(data, v1=[fx.v1_message(NOW_MS - H, tok=tok(1000))])
+def test_no_opencode_database_reads_nothing(dirs, tmp_path):
     calls = []
     p = provider(dirs, tmp_path,
                  reader=lambda path, since: calls.append(path) or [])
     assert usage(p.poll(NOW)) == []
     assert p.token_use(NOW) == (None, None)
     assert calls == []
+
+
+def test_the_table_is_read_back_as_far_as_the_record_looks(dirs, tmp_path):
+    data, _ = dirs
+    fx.make_message_db(data, v1=[fx.v1_message(NOW_MS - H, tok=tok(1000))])
+    calls = []
+    p = provider(dirs, tmp_path,
+                 reader=lambda path, since: calls.append(since) or [])
+    p.token_use(NOW)
+    assert calls == [(NOW - ob.HISTORY_S) * 1000.0]
 
 
 def test_no_budget_is_the_blank_page_it_always_was(dirs, tmp_path):
@@ -766,6 +862,30 @@ def test_the_clock_time_names_the_day_when_it_is_not_today():
 def time_at(*ymdhm):
     import time
     return time.mktime(tuple(ymdhm) + (0, 0, 0, -1))
+
+
+def test_cli_with_no_budget_names_the_record(tmp_path, capsys):
+    import time
+    now_ms = int(time.time() * 1000)
+    fx.make_message_db(_oc_data(tmp_path), v1=[
+        fx.v1_message(now_ms - 3 * D, tok=tok(400_000)),
+        fx.v1_message(now_ms - H, tok=tok(100_000))])
+    assert cli.main(["opencode-budget"]) == 0
+    out = capsys.readouterr().out
+    assert "No OpenCode token budget set." in out
+    assert "against your busiest stretch in the last 30 days" in out
+    assert "100K in the last 5 hours, against your record of 400K (25%)" in out
+    assert "sets a fixed limit instead" in out
+    assert fx.SECRET_TEXT not in out
+
+
+def test_cli_with_no_history_says_the_record_comes_later(tmp_path, capsys):
+    import time
+    fx.make_message_db(_oc_data(tmp_path), v1=[
+        fx.v1_message(int(time.time() * 1000) - H, tok=tok(100_000))])
+    assert cli.main(["opencode-budget"]) == 0
+    out = capsys.readouterr().out
+    assert "once OpenCode has some history here" in out
 
 
 def test_status_says_when_the_server_reports_no_usage(tmp_path, capsys,

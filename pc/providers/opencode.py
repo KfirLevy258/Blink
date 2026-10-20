@@ -1388,20 +1388,22 @@ class OpenCodeProvider(base.ProviderParser):
         return self._token_frame(now_epoch)
 
     def token_use(self, now_epoch):
-        """(Budget or None, TokenUse or None) for the token budget. The
-        database is opened only when a budget is set. Never raises."""
+        """(Budget or None, TokenUse or None) for the rings. With no budget
+        the use is still read, for the person's own record
+        (opencode_budget, WITH NO BUDGET); with no OpenCode database there
+        is nothing to read and no use. Never raises."""
         try:
             budget = self._budget.read()
-            if budget is None:
-                return None, None
-            return budget, self._tokens.use(db_paths(self._root()),
-                                            now_epoch, budget)
+            paths = db_paths(self._root())
+            if not paths:
+                return budget, None
+            return budget, self._tokens.use(paths, now_epoch, budget)
         except Exception:
             return None, None
 
     def _token_frame(self, now_epoch):
         budget, use = self.token_use(now_epoch)
-        if budget is None or use is None:
+        if use is None:
             return None
         if opencode_budget.no_counts(use):
             # Messages in the week and not one token among them: the server
@@ -1410,10 +1412,16 @@ class OpenCodeProvider(base.ProviderParser):
             # does not have -- blank rings, as before a budget existed, and
             # `blink status` says why.
             return None
+        # Per window: the budget where one is set for it, else the
+        # person's own record. Both missing is the blank page it always was.
+        s_limit = budget.session_tokens if budget else None
+        w_limit = budget.weekly_tokens if budget else None
         s_pct = opencode_budget.percent(use.session_tokens,
-                                        budget.session_tokens)
+                                        s_limit or use.session_peak)
         w_pct = opencode_budget.percent(use.weekly_tokens,
-                                        budget.weekly_tokens)
+                                        w_limit or use.weekly_peak)
+        if s_pct is None and w_pct is None:
+            return None
         la = last_activity(self._root(), self._state_dir)
         return base.NormalizedUsageFrame(
             provider=PROVIDER_ID, src=TOKENS_SRC_ID,
@@ -1430,8 +1438,11 @@ class OpenCodeProvider(base.ProviderParser):
             # Rolling windows have no reset, so under budget the board
             # draws `--`. Over it, the countdown is to the moment the window
             # is back at its budget (opencode_budget.clear_at).
-            session_resets_at=_clear_countdown(use.session_clear_at),
-            weekly_resets_at=_clear_countdown(use.weekly_clear_at),
+            # A record has no reset, so only a budgeted window counts down.
+            session_resets_at=(_clear_countdown(use.session_clear_at)
+                               if s_limit else None),
+            weekly_resets_at=(_clear_countdown(use.weekly_clear_at)
+                              if w_limit else None),
         )
 
     def _plan_frame(self, now_epoch):

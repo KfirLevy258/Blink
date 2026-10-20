@@ -63,6 +63,19 @@ at its budget, if nothing more is used (clear_at). Asked for by the owner
 the morning after a test night left the five-hour ring at 132% with
 nothing to say when it would come down.
 
+WITH NO BUDGET
+--------------
+The owner's verdict on having to type a budget: "that sounds bad, I
+thought it's automatic". So a desk with no budget is no longer a page of
+blank rings. Each ring is measured against the person's own record
+instead: the busiest five hours (or seven days) in the last HISTORY_S,
+counting only windows that ended before the current one began, so the
+current one can go past it (peak). 100% then reads "as hard as I have
+ever worked here", above it "harder than ever". No countdown: a record
+has no reset and no moment of being back under. Until there is a
+finished window with tokens in it -- a new desk, a first afternoon --
+that ring stays `--%`. A budget, where one is set, wins for its window.
+
 WHEN IT IS READ
 ---------------
 Only when a budget is set: a desk that never ran `blink opencode-budget`
@@ -74,6 +87,7 @@ milliseconds while it streams a reply, and the daemon polls every two
 seconds. Between reads the cached rows are re-summed against the moving
 window, so a message still ages out on time with nothing new read.
 """
+import bisect
 import collections
 import json
 import math
@@ -94,6 +108,12 @@ MAX_BUDGET_BYTES = 4096
 
 SESSION_WINDOW_S = 5 * 3600
 WEEKLY_WINDOW_S = 7 * 86400
+
+# How far back the record (WITH NO BUDGET) looks, and so how far back the
+# table is read. Thirty days: long enough that the weekly ring has three
+# finished weeks to be measured against, short enough that a crunch from
+# last season does not make every ordinary week look idle.
+HISTORY_S = 30 * 86400
 
 # A budget below this is a typo -- "5h=2" for "5h=2M" -- that would put the
 # rings at a thousand percent after one reply. One above the ceiling is not
@@ -141,8 +161,9 @@ Budget = collections.namedtuple("Budget", ("session_tokens", "weekly_tokens"))
 # fell in the week, and how many of those had a token count at all.
 TokenUse = collections.namedtuple(
     "TokenUse", ("session_tokens", "weekly_tokens", "messages", "counted",
-                 "session_clear_at", "weekly_clear_at"),
-    defaults=(None, None))
+                 "session_clear_at", "weekly_clear_at",
+                 "session_peak", "weekly_peak"),
+    defaults=(None, None, None, None))
 
 
 # --- the budget file --------------------------------------------------------
@@ -535,6 +556,40 @@ def clear_at(rows, now_epoch, window_s, budget):
     return None
 
 
+def peak(rows, now_epoch, window_s, history_s=HISTORY_S):
+    """The most tokens any window_s-long window held, among the windows
+    that lie inside the last history_s and ended before the current window
+    began. None when no such window held a token.
+
+    The busiest window ends on a reply (moving its end later than the last
+    reply in it only lets older replies fall out), so the ends tried are the
+    replies' own times, plus the last end allowed.
+    """
+    now_ms = now_epoch * 1000.0
+    w_ms = window_s * 1000.0
+    first, last_end = now_ms - history_s * 1000.0, now_ms - w_ms
+    if last_end - w_ms < first:
+        return None
+    pts = sorted((t, total) for t, total in rows
+                 if first <= t <= last_end and total > 0)
+    if not pts:
+        return None
+    times = [t for t, _n in pts]
+    sums = [0]
+    for _t, n in pts:
+        sums.append(sums[-1] + n)
+    best = 0
+    for end in times + [last_end]:
+        if end < first + w_ms:
+            # A window ending here would start before the history does;
+            # the one ending at first + w_ms holds all of these replies.
+            end = first + w_ms
+        lo = bisect.bisect_left(times, end - w_ms)
+        hi = bisect.bisect_right(times, end)
+        best = max(best, sums[hi] - sums[lo])
+    return best or None
+
+
 def sum_rows(rows, now_epoch, budget=None):
     """TokenUse over the two windows ending at now_epoch. A row stamped in
     the future -- a clock that stepped -- counts as now, in both. With a
@@ -559,6 +614,12 @@ def sum_rows(rows, now_epoch, budget=None):
         clear_at(rows, now_epoch, WEEKLY_WINDOW_S, budget.weekly_tokens))
 
 
+def peaks(rows, now_epoch):
+    """(session_peak, weekly_peak) -- see peak."""
+    return (peak(rows, now_epoch, SESSION_WINDOW_S),
+            peak(rows, now_epoch, WEEKLY_WINDOW_S))
+
+
 class TokenCounter:
     """The cached read behind the rings. See WHEN IT IS READ.
 
@@ -572,6 +633,7 @@ class TokenCounter:
         self._report_on = report
         self._cache = {}        # path -> (stamp, read_at, rows)
         self._reported = None
+        self._peaks = None      # (rows' identities, minute, peaks)
 
     def use(self, paths, now_epoch, budget=None):
         try:
@@ -587,7 +649,24 @@ class TokenCounter:
         self._report(None if ok else ERR_DB)
         if not ok:
             return None
-        return sum_rows(rows, now_epoch, budget)
+        return sum_rows(rows, now_epoch, budget)._replace(
+            **dict(zip(("session_peak", "weekly_peak"),
+                       self._peaks_for(paths, rows, now_epoch))))
+
+    def _peaks_for(self, paths, rows, now_epoch):
+        """peaks(), worked out again only when the rows were re-read or a
+        minute has passed. The record is a month of rows walked with a
+        bisect per reply -- milliseconds for a month of ordinary use, but
+        the daemon asks every two seconds, and a record a minute stale is
+        the same record."""
+        ids = tuple(id(self._cache[p][2]) for p in paths if p in self._cache)
+        minute = int(now_epoch // 60)
+        hit = self._peaks
+        if hit is not None and hit[0] == ids and hit[1] == minute:
+            return hit[2]
+        got = peaks(rows, now_epoch)
+        self._peaks = (ids, minute, got)
+        return got
 
     def _rows(self, path, now_epoch):
         stamp = _stamp(path)
@@ -598,7 +677,7 @@ class TokenCounter:
             if old_stamp == stamp or fresh:
                 return rows
         try:
-            rows = self._reader(path, (now_epoch - WEEKLY_WINDOW_S) * 1000.0)
+            rows = self._reader(path, (now_epoch - HISTORY_S) * 1000.0)
         except Exception:
             self._cache.pop(path, None)
             return None

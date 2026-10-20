@@ -3711,6 +3711,13 @@ def _opencode_lines(bridge_running=False, now=None, others_report=True):
     # second one beside it is noise.
     budget_lines = _opencode_budget_lines(now)
     budgeted = opencode_budget.read_budget() is not None
+    # With no budget the rings measure against the person's own record
+    # (opencode_budget, WITH NO BUDGET), so a keyless desk with a record has
+    # numbers too, and "nothing to show" would be wrong.
+    if not budgeted and _opencode_record(now):
+        no_key = ["OpenCode    no GLM Coding Plan key saved in OpenCode --"
+                  " the rings show its token use against your own busiest"
+                  " stretch"]
     plan_budget = (budget_lines + [
         "OpenCode    the GLM plan quota is on the rings whenever it can be"
         " read, the budget only when it cannot"] if budgeted else [])
@@ -3766,6 +3773,47 @@ def _clock_at(at, now):
     return "on " + time.strftime("%a %H:%M", t)
 
 
+def _opencode_use(now):
+    """OpenCode's TokenUse right now, or None. Never raises."""
+    try:
+        return opencode.OpenCodeProvider(
+            fetch=False, sweep=False,
+            tokens=opencode_budget.TokenCounter(report=False)
+        ).token_use(now)[1]
+    except Exception:
+        return None
+
+
+def _opencode_record(now):
+    """True when either ring has a record to be measured against."""
+    use = _opencode_use(now)
+    return bool(use and (use.session_peak or use.weekly_peak)
+                and not opencode_budget.no_counts(use))
+
+
+def _record_lines(now):
+    """What the rings measure against with no budget set."""
+    use = _opencode_use(now)
+    hint = ("`blink opencode-budget 5h=2M 7d=20M` sets a fixed limit"
+            " instead")
+    if use is None or not (use.session_peak or use.weekly_peak):
+        return ["OpenCode    no token budget set -- the rings will measure"
+                " your use against your own busiest 5 hours and 7 days,"
+                " once OpenCode has some history here; " + hint]
+    parts = []
+    for label, used, rec in (("5 hours", use.session_tokens, use.session_peak),
+                             ("7 days", use.weekly_tokens, use.weekly_peak)):
+        if rec:
+            parts.append(f"{opencode_budget.format_tokens(used)} in the last"
+                         f" {label}, against your record of"
+                         f" {opencode_budget.format_tokens(rec)}"
+                         f" ({opencode_budget.percent(used, rec):.0f}%)")
+    return ["OpenCode    no token budget set -- the rings measure against"
+            " your busiest stretch in the last 30 days",
+            "OpenCode    " + "; ".join(parts),
+            "OpenCode    " + hint]
+
+
 def _opencode_budget_lines(now=None):
     """The token budget's lines for `blink status` and `blink
     opencode-budget`: what is set, what OpenCode has used against it, and
@@ -3781,8 +3829,7 @@ def _opencode_budget_lines(now=None):
     now = time.time() if now is None else now
     budget = opencode_budget.read_budget()
     if budget is None:
-        return ["OpenCode    no token budget set -- `blink opencode-budget"
-                " 5h=2M 7d=20M` shows its token use on the rings"]
+        return _record_lines(now)
     out = [f"OpenCode    token budget {_budget_text(budget)}"]
     try:
         _b, use = opencode.OpenCodeProvider(
@@ -3865,8 +3912,12 @@ def cmd_opencode_budget(args) -> int:
     else:
         budget = opencode_budget.read_budget(path)
         if budget is None:
-            print("No OpenCode token budget set. Set one with"
-                  " `blink opencode-budget 5h=2M 7d=20M`.")
+            print("No OpenCode token budget set.")
+            if opencode_present():
+                for line in _record_lines(time.time()):
+                    print(line)
+            else:
+                print("Set one with `blink opencode-budget 5h=2M 7d=20M`.")
             return 0
         print(f"OpenCode token budget: {_budget_text(budget)}.")
     if opencode_present():
