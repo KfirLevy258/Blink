@@ -172,6 +172,16 @@ const LONG_RETRY_MS = 60 * 1000
 // event for a clock that only needs to be fresh to the nearest hour.
 const REFRESH_MS = 5 * 1000
 
+// How long a finished OpenCode 2.0 session stays on the panel with nothing
+// happening before the plugin ends it (see scheduleIdleEnd). Long enough to
+// read a reply and type the next prompt. BLINK_OPENCODE_IDLE_END_MS shortens
+// it for the test driver, which cannot wait a quarter of an hour; nothing in
+// a customer's environment sets it.
+const IDLE_END_MS = (() => {
+  const v = Number(process.env.BLINK_OPENCODE_IDLE_END_MS)
+  return Number.isInteger(v) && v >= 1 ? v : 15 * 60 * 1000
+})()
+
 // The events claude_state files as running. Moving between them is only a
 // clock refresh as far as the panel is concerned, so it is throttled like one.
 const RUNNING = new Set(["UserPromptSubmit", "PreToolUse", "PostToolUse"])
@@ -373,6 +383,14 @@ function makeTracker(fallbackDir) {
   // open request id -> { sid, root }: who was asked, and whose slot shows it.
   // Request ids are never written anywhere; they are keys and nothing more.
   const requests = new Map()
+  // sid -> the idle-end timer of a finished 2.0 session. See scheduleIdleEnd.
+  const idleEnds = new Map()
+  // sid -> the directory of a session this tracker has ended, so that one
+  // picked up again keeps its name from its first slot: under 2.0 the event
+  // that resumes it, execution.started, carries no location, and the name
+  // otherwise came back only with the next step (found by the idle2 test,
+  // 2026-10-20). Bounded like the maps.
+  const endedDirs = new Map()
 
   function rec(sid) {
     let r = sessions.get(sid)
@@ -382,7 +400,7 @@ function makeTracker(fallbackDir) {
       }
       r = {
         parent: null, // the parent session id, for a subagent's session
-        dir: null, // info.directory, never written: projectName() takes the tail
+        dir: endedDirs.get(sid) || null, // info.directory, never written: projectName() takes the tail
         last: null, // the last event written to this session's slot
         lastWrite: 0, // when, in ms
         errored: false, // a session.error latched this turn; see note 1 above
@@ -453,6 +471,10 @@ function makeTracker(fallbackDir) {
     r.last = event
     r.lastWrite = now
     r.slot = true
+    // Anything but a turn ending on the person's move takes the session out
+    // of its idle countdown (see scheduleIdleEnd); finishTurn starts a fresh
+    // one after writing Stop or Interrupt.
+    if (event !== "Stop" && event !== "Interrupt") clearIdleEnd(sid)
     // A session that speaks again is not over: OpenCode resumes a session under
     // its own id, and an hour-old tombstone would otherwise go on hiding a
     // session somebody is sitting in front of. As the shim does, on every
@@ -528,6 +550,13 @@ function makeTracker(fallbackDir) {
   // --- session lifetime ----------------------------------------------------
 
   function sessionEnd(sid) {
+    clearIdleEnd(sid)
+    const ending = sessions.get(sid)
+    if (ending && ending.dir) {
+      endedDirs.delete(sid)
+      if (endedDirs.size >= MAX_SESSIONS) endedDirs.delete(endedDirs.keys().next().value)
+      endedDirs.set(sid, ending.dir)
+    }
     const dir = stateDir()
     // The whole session, agents and all. The path is built from an id that
     // passed ID_RE, so a traversal cannot reach here.
@@ -922,6 +951,57 @@ function makeTracker(fallbackDir) {
     dropRequests((v) => v.root === sid)
     syncMarker(sid)
     writeSlot(sid, event)
+    if (event === "Stop" || event === "Interrupt") scheduleIdleEnd(sid)
+  }
+
+  // A FINISHED 2.0 SESSION ENDS AFTER IDLE_END_MS. Found on the owner's desk,
+  // 2026-10-20: ten sessions on the panel while three were open. 2.0 keeps
+  // every session in one service that outlives every window, and nothing it
+  // publishes says a session was closed -- session.viewed is a read receipt,
+  // location eviction is an hour-long idle timer, and the TUI's tabs are
+  // client-side (packages/tui/src/context/session-tabs.tsx) -- so a finished
+  // session stayed for ABANDONED_AFTER_S, the full hour. Claude's sessions
+  // leave when their terminal's pid dies; 2.0's pid is the service's, so
+  // the nearest honest rule is idleness: a turn that ended on the person's
+  // move and saw nothing more for fifteen minutes is a session they have put
+  // down. Its next prompt writes a slot and removes the tombstone, so a
+  // session picked up again comes straight back. StopFailure is never ended
+  // early: a red light must not vanish before anyone has seen it.
+  //
+  // The timer ends the session only if the slot on disk is still the very
+  // one this tracker wrote. Another writer -- a newer tracker after a reload,
+  // or a second OpenCode -- may have taken the session up since, and must not
+  // have it tombstoned underneath it.
+  function scheduleIdleEnd(sid) {
+    clearIdleEnd(sid)
+    const r = sessions.get(sid)
+    if (!r || r.parent) return
+    const wrote = Math.floor(r.lastWrite / 1000)
+    const t = setTimeout(() => {
+      idleEnds.delete(sid)
+      quietly(() => {
+        const cur = sessions.get(sid)
+        if (!cur || (cur.last !== "Stop" && cur.last !== "Interrupt")) return
+        for (const v of requests.values()) if (v.root === sid) return
+        const dir = presentStateDir()
+        if (!dir) return
+        const onDisk = JSON.parse(fs.readFileSync(path.join(dir, `${sid}.state`), "utf8"))
+        if (onDisk.event !== cur.last || onDisk.t !== wrote) return
+        sessionEnd(sid)
+      })
+    }, IDLE_END_MS)
+    // A timer must not keep a process alive: `opencode run` exits when its
+    // turn is done, and the 'exit' listener already ends its sessions.
+    if (t && typeof t.unref === "function") t.unref()
+    idleEnds.set(sid, t)
+  }
+
+  function clearIdleEnd(sid) {
+    const t = idleEnds.get(sid)
+    if (t !== undefined) {
+      clearTimeout(t)
+      idleEnds.delete(sid)
+    }
   }
 
   // "user" is Esc, "inactivity" OpenCode giving up on a turn nobody answered:

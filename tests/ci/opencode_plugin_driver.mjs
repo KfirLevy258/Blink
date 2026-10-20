@@ -11,6 +11,9 @@
 //                                                      then exit
 //   node tests/ci/opencode_plugin_driver.mjs fixture2  `fixture`'s desk, built
 //                                                      from 2.0 events
+//   BLINK_OPENCODE_IDLE_END_MS=300 \
+//   node tests/ci/opencode_plugin_driver.mjs idle2     finished 2.0 sessions
+//                                                      end after idling
 //   node tests/ci/opencode_plugin_driver.mjs leak2     the resubscribe leak
 //                                                      alone (also in `check`)
 //
@@ -1293,6 +1296,53 @@ async function exit2() {
     e2.created("ses_v2exitkid", { parentID: "ses_v2exit" }), e2.started("ses_v2exitkid"))
 }
 
+// Run with BLINK_OPENCODE_IDLE_END_MS=300 (the plugin reads it once, at
+// load, so it has a process of its own). Found on the owner's desk,
+// 2026-10-20: ten sessions on the panel while three were open, because a
+// finished 2.0 session had nothing to end it but the hour-long sweep. Now a
+// session that finished on the person's move and saw nothing more for
+// IDLE_END_MS is ended -- and only then:
+//   ses_v2idle      Stop, then quiet: tombstoned, slot gone
+//   ses_v2int       Interrupt, then quiet: tombstoned too
+//   ses_v2busy      Stop, then a new turn inside the window: still there
+//   ses_v2red       StopFailure: never ended early, the red stays up
+//   ses_v2ask       asked after its Stop: waiting, never ended underneath
+//   ses_v2back      ended, then prompted again: slot back, tombstone gone
+//   ses_v2other     its slot rewritten by another writer after our Stop:
+//                   left alone, because it is no longer ours to end
+async function idle2() {
+  makeDir()
+  const ch = channel()
+  await setup2(ch)
+  const turn = (sid, end) => [e2.created(sid), e2.started(sid), end]
+  await send(ch, ...turn("ses_v2idle", e2.succeeded("ses_v2idle")),
+    ...turn("ses_v2int", e2.interrupted("ses_v2int", "user")),
+    ...turn("ses_v2busy", e2.succeeded("ses_v2busy")),
+    ...turn("ses_v2red", e2.failed("ses_v2red")),
+    ...turn("ses_v2ask", e2.succeeded("ses_v2ask")),
+    ...turn("ses_v2back", e2.succeeded("ses_v2back")),
+    ...turn("ses_v2other", e2.succeeded("ses_v2other")))
+  await new Promise((r) => setTimeout(r, 100))
+  await send(ch, e2.started("ses_v2busy"), e2.asked("ses_v2ask", "per_idle"))
+  fs.writeFileSync(p("ses_v2other.state"), '{"event":"Stop","t":1,"pid":1}')
+  await new Promise((r) => setTimeout(r, 700))
+  for (const sid of ["ses_v2idle", "ses_v2int"]) {
+    expectFile(`idle end ${sid}`, `${sid}.state`, false)
+    expectFile(`idle end ${sid}`, `${sid}.ended`)
+  }
+  expectSlot("a new turn cancels the idle end", "ses_v2busy", "UserPromptSubmit")
+  expectSlot("a failure is never ended early", "ses_v2red", "StopFailure")
+  expectSlot("an open question is never ended", "ses_v2ask", "PermissionRequest")
+  expectFile("an open question is never ended", "ses_v2ask.waiting")
+  expectFile("another writer's slot is left alone", "ses_v2other.state")
+  expectFile("another writer's slot is left alone", "ses_v2other.ended", false)
+  expectFile("ended before it came back", "ses_v2back.ended")
+  await send(ch, e2.started("ses_v2back"))
+  expectSlot("a session picked up again comes back", "ses_v2back", "UserPromptSubmit")
+  expectFile("a session picked up again comes back", "ses_v2back.ended", false)
+  for (const c of cleanups.splice(0)) await c()
+}
+
 // Found while writing these tests, 2026-10-20, and fixed in the plugin the same
 // day: blinkV2's pause() added an "abort" listener to the subscription's
 // signal on every resubscribe and removed it only on abort, so a timer that
@@ -1383,6 +1433,7 @@ try {
   } else if (mode === "fixture") await fixture()
   else if (mode === "fixture2") await fixture2()
   else if (mode === "exit2") await exit2()
+  else if (mode === "idle2") await idle2()
   else if (mode === "leak2") await leak2()
   else if (mode === "instances") await instances()
   else if (mode === "nodir") await nodir()

@@ -201,3 +201,18 @@ def test_instances_with_no_directory_each_keep_their_exit_handler(tmp_path):
     for sid in ("ses_nodir1", "ses_nodir2"):
         assert f"{sid}.ended" in left, left
         assert f"{sid}.state" not in left, left
+
+
+@needs_node
+def test_a_finished_opencode_2_session_ends_after_idling(tmp_path):
+    """The owner's desk, 2026-10-20: ten sessions on the panel while three
+    were open. A finished 2.0 session now ends after IDLE_END_MS of nothing,
+    shortened here to 300 ms; the driver's idle2 mode holds the cases."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home),
+               BLINK_OPENCODE_IDLE_END_MS="300")
+    r = subprocess.run([NODE, DRIVER, "idle2"], capture_output=True,
+                       text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "" and r.stderr == ""
