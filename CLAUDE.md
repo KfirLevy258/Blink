@@ -63,8 +63,7 @@ production caller at all — only tests exercised it.
 
 ```sh
 python3 -m venv .venv-test          # 3.11+; a bare `python` may not exist
-.venv-test/bin/python -m pip install \
-    pyserial==3.5 esptool==5.3.1 ecdsa==0.19.1 certifi==2026.7.22 \
+.venv-test/bin/python -m pip install -r pc/requirements.txt \
     pytest numpy Pillow
 .venv-test/bin/python -m pytest tests/ -q
 ```
@@ -74,8 +73,9 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**1503 passing** as of 2026-10-19, on macOS, Ubuntu and Windows (ARM64 VM). The first four packages are pinned in
-`pc/requirements.txt` and are pinned on purpose; `numpy` and `Pillow` are only
+**1503 passing** as of 2026-10-19, on macOS, Ubuntu and Windows (ARM64 VM). Everything in
+`pc/requirements.txt` is pinned on purpose, bitstring included, though
+nothing in `pc/` imports it; `numpy` and `Pillow` are only
 needed by the logo and boot-animation encoder tests. CI runs the same
 `pytest tests/ -q`.
 
