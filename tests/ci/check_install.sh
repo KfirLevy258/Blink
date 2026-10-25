@@ -310,7 +310,15 @@ grep -q "statusLine.command" "$WORK/disclosure.txt" || fail "disclosure omits th
 # between us and silently editing a file the customer owns.
 grep -q "hooks" "$WORK/disclosure.txt" || fail "disclosure omits the hooks key"
 grep -qF "blink-hook.sh" "$WORK/disclosure.txt" || fail "disclosure omits the hook shim"
-grep -qF "$BINEXE uninstall" "$WORK/disclosure.txt" ||
+# The undo command is quoted when the path needs it -- the spaced-home
+# scenario's does -- so the binary's name may be followed by the closing
+# quote: 'blink' on POSIX (shlex), and on Windows PowerShell's form,
+# & "...\blink.exe" uninstall, whose tail the third pattern matches, or
+# & '...\blink.exe' uninstall for a profile with a $ in it. A bare
+# path is printed bare, as it always was (pc/cli.py _quote_line,
+# 2026-10-25).
+grep -qF -e "$BINEXE uninstall" -e "$BINEXE' uninstall" \
+	-e "$BINEXE\" uninstall" "$WORK/disclosure.txt" ||
 	fail "disclosure omits the undo"
 ok "disclosure precedes the first step and names file, key, undo"
 

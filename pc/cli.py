@@ -20,6 +20,7 @@ prompt. A few lines of sh start in single-digit milliseconds.
 import argparse
 import glob
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -160,6 +161,130 @@ def _self_path() -> str:
     return sys.executable if _frozen() else os.path.abspath(sys.argv[0])
 
 
+def _repo_root() -> str:
+    """The source checkout this module runs from: blink_main.py sits at its
+    root, next to pc/. Only meaningful when not frozen."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _source_argv() -> list:
+    """How a source checkout runs this program, without the subcommand.
+
+    Shared by the login service and by the command a person is told to type,
+    so the two cannot name different programs. The script goes by path, not
+    `-m pc.cli`, for the reason _service_command() records.
+    """
+    return [sys.executable, os.path.join(_repo_root(), "blink_main.py")]
+
+
+# What cmd.exe treats specially in an unquoted word. list2cmdline quotes only
+# on whitespace, which is right for the C runtime's argv parsing but not for
+# the shell in front of it: `C:\Users\R&D\...` pasted bare runs `D\...` as a
+# second command. Not a full cmd quoter -- a Windows path cannot hold `"`,
+# and the rest of cmd's grammar never appears in one -- just enough that a
+# path we print pastes back as itself. Not `%`: cmd expands %VAR% inside
+# quotes too, so quoting it protects nothing, and it would newly quote a
+# path like C:\Users\50%\... that pasted fine bare. Not `^` either: cmd's
+# escape, but an ordinary character to PowerShell, where a bare path holding
+# one works and a quoted one needs the `& ` below (review, 2026-10-25).
+# And PowerShell's own three, ' $ and `, since a bare word holding one is
+# read as a string, a variable or an escape there.
+_WIN_NEEDS_QUOTES = frozenset(' \t"&()\'$`')
+
+# Live inside PowerShell's double quotes: $name expands and ` escapes, so a
+# word holding either is single-quoted instead, where nothing is special but
+# the quote itself, written twice. An apostrophe alone gets double quotes,
+# where it is ordinary -- bare, it opens a PowerShell string (review,
+# 2026-10-25).
+_PS_LIVE_IN_DOUBLE_QUOTES = frozenset("$`")
+
+
+def _win_quote(arg: str) -> str:
+    if arg and not (set(arg) & _WIN_NEEDS_QUOTES):
+        return arg
+    if set(arg) & _PS_LIVE_IN_DOUBLE_QUOTES:
+        return "'" + arg.replace("'", "''") + "'"
+    return f'"{arg}"'
+
+
+def _win_line(argv) -> str:
+    """argv as a line for PowerShell, the shell Windows Terminal opens.
+
+    Words are quoted only where _WIN_NEEDS_QUOTES says, so a line that needs
+    none is byte for byte what it always was and runs in cmd.exe too. When
+    the PROGRAM itself had to be quoted, the line starts with `& `: without
+    PowerShell's call operator a quoted first word is a string to print, and
+    the spaced profile's undo line echoed its own path and did nothing
+    (review, 2026-10-25). cmd.exe rejects that `& `; someone pasting into
+    cmd with a spaced profile drops it. Git Bash is not served.
+    """
+    words = [_win_quote(a) for a in argv]
+    line = " ".join(words)
+    if words and words[0] != argv[0]:
+        line = "& " + line
+    return line
+
+
+def _quote_line(argv) -> str:
+    """argv as one line a person can paste into this platform's shell.
+
+    On Windows, PowerShell's form: see _win_line. On POSIX, shlex.join,
+    which leaves a word of plain path characters alone -- every path an
+    install has printed so far -- and quotes anything else, including
+    non-ASCII letters, `~` and `!`, which then pastes back as itself.
+    """
+    if sys.platform == "win32":
+        return _win_line(argv)
+    return shlex.join(argv)
+
+
+def _program_argv() -> list:
+    """This program, as argv, without the subcommand: the installed binary
+    when frozen, the checkout's interpreter and script when not. The launchd
+    and systemd services and the command a person is told to type both
+    start from here, so the two cannot name different programs. The Windows
+    task does not: its launcher names blink.exe, which is why a Windows
+    checkout registers no service at all (_SchtasksBackend.checkout_refusal).
+    """
+    return [installed_bin()] if _frozen() else _source_argv()
+
+
+def user_command() -> str:
+    """The command a PERSON types to run this program again.
+
+    Every "run X", "Undo:" and "Check:" line that names a path goes through
+    this. The bare `blink driver` / `blink install` / `blink update` in
+    win_driver, install_statusline and the bridge's update notice do not:
+    they name the command as the README does rather than a path, so they
+    never pointed at a file that is missing, and routing them here would mean
+    importing cli into modules cli itself imports.
+
+    It answers for the RUNNING process, not for what is installed: a
+    developer who runs a checkout's `blink_main.py status` on a desk that
+    also has the frozen install is shown checkout commands, because those
+    are the ones that reach the code they are running.
+
+    installed_bin() used to be both: the path the frozen binary is
+    copied to, which process matching, the updater and swap-in need, and the
+    command printed to the reader. From a source checkout those differ.
+    `blink install` copies nothing there -- the service runs blink_main.py out
+    of the checkout -- yet it printed "Creates ~/.blink/bin/blink", an undo
+    line naming that empty directory, and "You can delete the folder you
+    downloaded", which is the folder the service had just been pointed at.
+    Found by gapietro installing from a checkout on their bench Mac,
+    2026-10-12.
+
+    Frozen, it is installed_bin(); from a checkout, the interpreter and the
+    script. Either way it is quoted the way the platform's shell splits a
+    line, and only where a word needs it -- see _quote_line. The frozen form
+    was printed bare until 2026-10-25, so a Windows profile with a space in
+    it ("C:\\Users\\John Smith\\...") was told to undo with a line the shell
+    reads as `C:\\Users\\John` (review, 2026-10-25). Quoted on Windows, it is
+    PowerShell's form, with a leading `& `; see _win_line for cmd.exe.
+    """
+    return _quote_line(_program_argv())
+
+
 def _shim_source(name: str = "blink-statusline.sh") -> str:
     """A shim's text, from the bundle when frozen, the tree when not.
 
@@ -172,8 +297,8 @@ def _shim_source(name: str = "blink-statusline.sh") -> str:
     if _frozen():
         base = getattr(sys, "_MEIPASS", os.path.dirname(_self_path()))
         return open(os.path.join(base, name), encoding="utf-8").read()
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return open(os.path.join(here, "tools", name), encoding="utf-8").read()
+    return open(os.path.join(_repo_root(), "tools", name),
+                encoding="utf-8").read()
 
 
 def _write_shim(path: str, name: str) -> None:
@@ -921,7 +1046,7 @@ _PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 """
 
-def _systemd_exec() -> str:
+def _systemd_exec(argv) -> str:
     """ExecStart, with every argument quoted.
 
     systemd splits ExecStart on whitespace, so a bare " ".join() broke on any
@@ -933,11 +1058,35 @@ def _systemd_exec() -> str:
     that uses a spaced home asserts only that the unit FILE exists.
 
     systemd's own quoting: double quotes, with \\ and \" escaped inside.
+    And % doubled and $ doubled, because quoting does not stop either: systemd
+    expands %-specifiers and $VARIABLES inside a quoted word too, so a
+    profile like /home/50%/ or a checkout under /src/$work/ was run as some
+    other path (review, 2026-10-25). _SystemdBackend.registered_argv undoes
+    all four.
     """
     out = []
-    for a in _service_command():
-        out.append('"%s"' % a.replace("\\", "\\\\").replace('"', '\\"'))
+    for a in argv:
+        a = a.replace("\\", "\\\\").replace('"', '\\"')
+        a = a.replace("%", "%%").replace("$", "$$")
+        out.append('"%s"' % a)
     return " ".join(out)
+
+
+def _undouble(word: str) -> str:
+    """One ExecStart word with _systemd_exec's doubled % and $ undone, left
+    to right, so a literal "%%" written as "%%%%" comes back as "%%"."""
+    out, i = [], 0
+    while i < len(word):
+        out.append(word[i])
+        i += 2 if word[i] in "%$" and word[i + 1:i + 2] == word[i] else 1
+    return "".join(out)
+
+
+def _unit_text(argv) -> str:
+    """The systemd unit for a service running `argv`. The one writer, used
+    by install() and by the tests that read it back, as _plist_text is for
+    launchd."""
+    return _UNIT_TEMPLATE.format(command=_systemd_exec(argv))
 
 
 _UNIT_TEMPLATE = """[Unit]
@@ -976,10 +1125,70 @@ def _service_command():
     PYTHONPATH: Python puts a script's own directory on sys.path, and
     blink_main.py sits at the repo root next to `pc/`.
     """
-    if _frozen():
-        return [installed_bin(), "run"]
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return [sys.executable, os.path.join(repo, "blink_main.py"), "run"]
+    return _program_argv() + ["run"]
+
+
+def _service_runs_checkout() -> bool:
+    """Whether, from a checkout, the login service would run this checkout.
+
+    Only launchd and systemd are handed _service_command(). The Windows
+    Scheduled Task runs LAUNCHER_VBS, which names ~\\.blink\\bin\\blink.exe
+    outright, and a Linux machine without systemctl registers nothing. Found
+    by review, 2026-10-25, against a checkout install that said "the
+    background service runs this folder's blink_main.py" on both. Each
+    backend answers for itself, next to its own install().
+    """
+    return not _frozen() and backend().runs_checkout()
+
+
+def _argv_ending_in_run(args):
+    """`args` minus its trailing `run`, if it is the shape _service_command()
+    writes; None for anything else, so a hand-edited service file is never
+    mistaken for ours."""
+    if (not isinstance(args, list) or len(args) < 2 or args[-1] != "run"
+            or not all(isinstance(a, str) for a in args)):
+        return None
+    return args[:-1]
+
+
+def service_program():
+    """The program the REGISTERED login service runs, minus `run`, or None.
+
+    None when no service is registered, when its file is not one we wrote,
+    and when any path in it is missing from disk: a plist naming a checkout
+    that was since deleted, or a launcher whose blink.exe was never copied,
+    runs nothing, and a hint naming it sends the reader to a file that is
+    not there. One rule for every backend; only Windows used to check
+    (review, 2026-10-25).
+
+    This, not _frozen(), is what decides anything about the service. Fleet
+    desks run the checkout's CLI from .venv-test beside a frozen service,
+    and about nine decisions keyed on which program was RUNNING -- update,
+    provision, the repair hints -- did the wrong thing to the service that
+    was registered. Never raises: an odd file only means "none".
+    """
+    try:
+        argv = backend().registered_argv()
+        if argv and all(os.path.exists(a) for a in argv):
+            return argv
+    except Exception:
+        pass
+    return None
+
+
+def _repair_command() -> str:
+    """The command a hint names to REPAIR an existing install.
+
+    Not user_command(), which is the program printing the hint. Fleet desks
+    run the checkout's CLI from .venv-test beside a live frozen install, and
+    after a failed burn or restore status told them to run the checkout's
+    `install` -- which re-registers the service against the checkout and
+    silently retires the frozen one (review, 2026-10-25). So when a service
+    is registered, the hint names what that service runs; with none, there
+    is nothing to protect and it is this program.
+    """
+    argv = service_program()
+    return _quote_line(argv) if argv else user_command()
 
 
 def _confirm_running(probe, tries=4) -> bool:
@@ -1044,9 +1253,26 @@ class _Backend:
         """
         return None
 
+    def checkout_refusal(self):
+        """Why install() will register nothing for this process, or None.
+        Said in the disclosure before anything is written, and returned by
+        install() itself."""
+        return None
+
+    def runs_checkout(self) -> bool:
+        """Whether install(), run from a checkout, starts the checkout."""
+        return False
+
+    def registered_argv(self):
+        """What the registered service runs, minus `run`, as its file says;
+        None if nothing is registered or the file is not one we wrote.
+        Whether those paths exist is service_program()'s question, asked
+        the same way for every backend."""
+        return None
+
     def install(self) -> str:
         return (f"not supported on {sys.platform}; run it yourself: "
-                f"{installed_bin()} run")
+                f"{user_command()} run")
 
     def restart(self) -> str:
         return "not running under a supervisor; restart it yourself"
@@ -1109,17 +1335,33 @@ class _Backend:
 _ESRCH = 3
 
 
+def _plist_text(argv) -> str:
+    """The launchd plist for a service running `argv`. The one writer, used
+    by install() and by the tests that check registered_argv() reads it
+    back, so the reader is tested against what is really written."""
+    args = "".join(f"    <string>{_xml_escape(a)}</string>\n" for a in argv)
+    return _PLIST_TEMPLATE.format(label=LABEL, args=args,
+                                  log=_xml_escape(log_path()))
+
+
 class _LaunchdBackend(_Backend):
     def creates(self):
         return plist_path()
 
+    def runs_checkout(self) -> bool:
+        return True
+
+    def registered_argv(self):
+        if not os.path.exists(plist_path()):
+            return None
+        import plistlib          # only status and provision reach this
+        with open(plist_path(), "rb") as f:
+            return _argv_ending_in_run(plistlib.load(f).get("ProgramArguments"))
+
     def install(self) -> str:
         os.makedirs(os.path.dirname(plist_path()), exist_ok=True)
         with open(plist_path(), "w", encoding="utf-8") as f:
-            args = "".join(f"    <string>{_xml_escape(a)}</string>\n"
-                           for a in _service_command())
-            f.write(_PLIST_TEMPLATE.format(label=LABEL, args=args,
-                                           log=_xml_escape(log_path())))
+            f.write(_plist_text(_service_command()))
         uid = os.getuid()
         # bootout first so a rerun replaces the running agent rather than
         # failing with "service already loaded".
@@ -1187,7 +1429,7 @@ class _LaunchdBackend(_Backend):
         # is the only thing that knows, so the claim we print is its answer and
         # not our hope.
         if _confirm_running(lambda: self._is_running(uid)):
-            return "running (launchd)"
+            return _RUNNING_LAUNCHD
         return ("registered with launchd, but it is not running -- "
                 f"start it with: launchctl kickstart -k gui/{uid}/{LABEL}")
 
@@ -1344,7 +1586,7 @@ class _LaunchdBackend(_Backend):
             # burning a board, and then asking.
             if os.path.exists(plist_path()):
                 return ("installed but not loaded -- run "
-                        f"`{installed_bin()} install` to start it")
+                        f"`{_repair_command()} install` to start it")
             return "not installed"
 
         fields = {}
@@ -1452,7 +1694,41 @@ def _start_launcher() -> None:
 
 
 class _SchtasksBackend(_Backend):
+    def checkout_refusal(self):
+        # The launcher names ~\.blink\bin\blink.exe outright (LAUNCHER_VBS),
+        # which a checkout never copies, so a task registered from one ran a
+        # missing file at every logon and install then advised
+        # `schtasks /run` on it (review, 2026-10-25). From a checkout,
+        # register nothing and say how to run it instead.
+        if _frozen():
+            return None
+        return ("no login service from a checkout on Windows; run it"
+                f" yourself: {user_command()} run")
+
+    def registered_argv(self):
+        # The launcher runs blink.exe whatever wrote it (LAUNCHER_VBS). An
+        # old checkout install wrote the launcher and no blink.exe;
+        # service_program() is where that reads as "none".
+        if os.path.exists(launcher_path()):
+            return [installed_bin()]
+        return None
+
+    def _clear_stale_checkout_registration(self):
+        """Take down what a checkout install registered before the refusal
+        existed: a task, a Run value and a launcher, all pointing at a
+        blink.exe that was never copied. Only when that binary really is
+        missing -- a fleet desk's frozen install sits under the same names,
+        and running install from a checkout there must not touch it."""
+        if not os.path.exists(launcher_path()) or os.path.exists(installed_bin()):
+            return
+        subprocess.run(["schtasks", "/delete", "/f", "/tn", TASK_NAME],
+                       capture_output=True, **update.ota.NO_WINDOW)
+        _autostart_clear()
+        _rm(launcher_path())
+
     def creates(self):
+        if self.checkout_refusal():
+            return None
         return (f'a Scheduled Task named "{TASK_NAME}", and {launcher_path()}\n'
                 "             the one-line script it runs, so the bridge starts\n"
                 "             with no window. If Windows will not register the\n"
@@ -1461,6 +1737,10 @@ class _SchtasksBackend(_Backend):
                 "             is used instead, which starts it the same way")
 
     def install(self) -> str:
+        refusal = self.checkout_refusal()
+        if refusal:
+            self._clear_stale_checkout_registration()
+            return refusal
         # The task runs the launcher, not the program: see launcher_path().
         # The bridge's output goes to bridge.log by its own hand (--log),
         # since a hidden window is nowhere for it to go.
@@ -1499,7 +1779,7 @@ class _SchtasksBackend(_Backend):
         # Six tries, not four: this is the first run of a freshly copied .exe,
         # and Windows may hold it while a virus scanner reads all of it.
         if _confirm_running(self._is_running, tries=6):
-            return "running (Scheduled Task)"
+            return _RUNNING_TASK
         return ("registered as a Scheduled Task, but it is not running -- "
                 f'start it with: schtasks /run /tn "{TASK_NAME}"')
 
@@ -1542,7 +1822,7 @@ class _SchtasksBackend(_Backend):
         _kill_recorded_daemon()
         _start_launcher()
         if _confirm_running(self._is_running, tries=6):
-            return "running (starts when you log in)"
+            return _RUNNING_RUN_KEY
         return ("set to start when you log in, but it is not running yet -- "
                 f"see {log_path()}")
 
@@ -1658,6 +1938,11 @@ class _SchtasksBackend(_Backend):
             r = run(["schtasks", "/end", "/tn", TASK_NAME],
                     capture_output=True, **update.ota.NO_WINDOW)
         killed = _kill_recorded_daemon(runner=run)
+        if not registered and _autostart_present():
+            # Installed through the Run key, because Windows would not
+            # register the task. Stopped, so start() brings it back: as
+            # "not installed" provision left it down (review, 2026-10-25).
+            return "stopped (started from the Run key)"
         if not registered:
             return ("not installed; killed a detached daemon" if killed
                     else "not installed")
@@ -1668,6 +1953,11 @@ class _SchtasksBackend(_Backend):
     def start(self, runner=None) -> str:
         run = runner or subprocess.run
         if not self._registered(run):
+            # The Run-key install restart() already knows about: start the
+            # launcher the key would have started at the next logon.
+            if _autostart_present():
+                _start_launcher()
+                return "started"
             return "not installed"
         r = run(["schtasks", "/run", "/tn", TASK_NAME],
                 capture_output=True, **update.ota.NO_WINDOW)
@@ -1716,14 +2006,41 @@ class _SystemdBackend(_Backend):
     def creates(self):
         return unit_path()
 
+    @staticmethod
+    def _booted() -> bool:
+        """systemd is PID 1 here. WSL ships systemctl without it, so
+        _has_systemctl() alone predicted a running service there."""
+        return os.path.isdir("/run/systemd/system")
+
+    def runs_checkout(self) -> bool:
+        # Without systemctl the unit is written but nothing runs it.
+        return self._has_systemctl() and self._booted()
+
+    def registered_argv(self):
+        if not os.path.exists(unit_path()):
+            return None
+        with open(unit_path(), encoding="utf-8") as f:
+            lines = [l for l in f.read().splitlines()
+                     if l.startswith("ExecStart=")]
+        if not lines:
+            return None
+        # systemd's double-quote escaping (see _systemd_exec) is a subset of
+        # what shlex undoes in POSIX mode; the doubled % and $ are undone by
+        # hand, in one pass so "%%%%" comes back as "%%".
+        words = shlex.split(lines[0][len("ExecStart="):])
+        return _argv_ending_in_run([_undouble(w) for w in words])
+
     def install(self) -> str:
         # The unit file is written either way. It costs nothing, and it means
         # a machine that gains systemd later already has the right file.
+        argv = _service_command()
         os.makedirs(os.path.dirname(unit_path()), exist_ok=True)
         with open(unit_path(), "w", encoding="utf-8") as f:
-            f.write(_UNIT_TEMPLATE.format(command=_systemd_exec()))
+            f.write(_unit_text(argv))
         if not self._has_systemctl():
-            return f"no systemd here; run it yourself: {installed_bin()} run"
+            # The program the unit names, which is what a person should
+            # start by hand in its place.
+            return f"no systemd here; run it yourself: {_quote_line(argv[:-1])} run"
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, **update.ota.NO_WINDOW)
         r = subprocess.run(["systemctl", "--user", "enable", "--now",
                             "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
@@ -1736,7 +2053,7 @@ class _SystemdBackend(_Backend):
         # executable "while `blink install` still printed running (systemd)".
         # Ask systemd instead.
         if _confirm_running(self._is_running):
-            return "running (systemd)"
+            return _RUNNING_SYSTEMD
         return ("enabled with systemd, but it is not running -- "
                 "see: systemctl --user status blink-bridge.service")
 
@@ -1848,6 +2165,25 @@ def _install_service() -> str:
     if _skip_service():
         return "skipped (BLINK_SKIP_SERVICE=1)"
     return backend().install()
+
+
+# The exact answers install() gives when the service is up, and nothing
+# else. Compared whole, for the reason _RESTART_OK below is: a prefix test on
+# "running" would accept any future "running (x), but ..." failure line.
+_RUNNING_LAUNCHD = "running (launchd)"
+_RUNNING_SYSTEMD = "running (systemd)"
+_RUNNING_TASK = "running (Scheduled Task)"
+_RUNNING_RUN_KEY = "running (starts when you log in)"
+_SERVICE_RUNNING = frozenset({_RUNNING_LAUNCHD, _RUNNING_SYSTEMD,
+                              _RUNNING_TASK, _RUNNING_RUN_KEY})
+
+
+def _service_started(result: str) -> bool:
+    """Whether _install_service()'s answer says the service is running.
+    Everything else -- skipped, no systemd, a failed bootstrap, WSL with no
+    user manager -- is something else, and install must not then say "the
+    service runs from" the checkout (review, 2026-10-25)."""
+    return result in _SERVICE_RUNNING
 
 
 def restart_service() -> str:
@@ -2106,9 +2442,27 @@ def _announce():
     """
     print("Blink setup. Here is everything it is about to do, before it does any of it.")
     print()
-    print(f"  Creates    {installed_bin()}")
-    print("             a copy of this program and its support files, so the")
-    print("             folder you downloaded can be deleted when this finishes.")
+    if _frozen():
+        print(f"  Creates    {installed_bin()}")
+        print("             a copy of this program and its support files, so the")
+        print("             folder you downloaded can be deleted when this finishes.")
+    else:
+        # A checkout copies nothing (see the Program step), so the frozen
+        # wording above would name a file that never appears and invite the
+        # reader to delete the folder everything printed below runs from --
+        # see user_command(). The service is named only where it will run
+        # the checkout: see _service_runs_checkout(). This is said before
+        # anything is installed, so it is a prediction; the closing summary
+        # goes by what the service step actually returned.
+        print(f"  Uses       {_repo_root()}")
+        print("             in place: from a source checkout nothing is copied.")
+        if _service_runs_checkout() and not _skip_service():
+            print("             The background service runs this folder's")
+            print("             blink_main.py. Keep the folder; moving or deleting")
+            print("             it stops the service.")
+        else:
+            print("             The commands printed below run from this folder,")
+            print("             so keep it.")
     print(f"  Creates    {shim_path()}")
     print("             the small script Claude Code runs to hand over the")
     print("             usage figures. It keeps the last status line payload")
@@ -2151,6 +2505,11 @@ def _announce():
     if created:
         print(f"  Creates    {created}")
         print("             so the bridge starts when you log in.")
+    refusal = backend().checkout_refusal()
+    if refusal:
+        # No closing period: the line ends in a command, and a period
+        # pasted with it made it `run.` (review, 2026-10-25).
+        print(f"  {win_driver.as_sentence(refusal)}")
     print()
     # Said to match the setting, not as a blanket promise: a reinstall over
     # an install with status-page alerts on keeps them on, and "sends
@@ -2168,7 +2527,7 @@ def _announce():
     print("  worked them out. From the Codex log it keeps only the rate-limit")
     print("  line, never the conversation.")
     print()
-    print(f"  To undo all of it:  {installed_bin()} uninstall")
+    print(f"  To undo all of it:  {user_command()} uninstall")
     print()
 
 
@@ -2251,7 +2610,7 @@ def cmd_driver(_args) -> int:
         if undriven:
             print()
             print("The board is set up. Check it with:")
-            print(f"  {installed_bin()} status")
+            print(f"  {user_command()} status")
         return 0
 
     # Installed, or claimed to be, and Windows still will not use the device.
@@ -2291,8 +2650,10 @@ def cmd_install(_args) -> int:
     step = _stepper(steps)
 
     step("Program")
-    os.makedirs(bin_dir(), exist_ok=True)
     if _frozen():
+        # Only here: a checkout copies nothing, and creating the directory
+        # anyway left an empty ~/.blink/bin the disclosure never mentioned.
+        os.makedirs(bin_dir(), exist_ok=True)
         # The program is a directory -- the executable and its _internal/
         # support files -- so it is staged whole and rotated in with the
         # same swap the updater uses: <bin>.new is copied, self-tested, and
@@ -2337,7 +2698,7 @@ def cmd_install(_args) -> int:
             pass          # absent (state/ appears on the first hook), or Windows
     _write_shim(shim_path(), "blink-statusline.sh")
     install_statusline._announce(settings_path(), shim_path(),
-                                 undo_hint=f"{installed_bin()} uninstall")
+                                 undo_hint=f"{user_command()} uninstall")
     print("      " + install_statusline.install(settings_path(), shim_path()))
 
     step("Activity hooks")
@@ -2368,15 +2729,24 @@ def cmd_install(_args) -> int:
         print(_install_driver_step())
 
     step("Background service")
-    print(_install_service())
+    service = _install_service()
+    print(service)
 
     print()
     print("Done. Plug the board in over USB -- it picks it up on its own.")
     print(f"  Log:     {log_path()}")
-    print(f"  Check:   {installed_bin()} status")
-    print(f"  Undo:    {installed_bin()} uninstall")
+    print(f"  Check:   {user_command()} status")
+    print(f"  Undo:    {user_command()} uninstall")
     print()
-    print("  You can delete the folder you downloaded.")
+    if _frozen():
+        print("  You can delete the folder you downloaded.")
+    elif _service_runs_checkout() and _service_started(service):
+        # By what the service step returned, not by what this platform
+        # would do: WSL with no user manager, a failed bootstrap and
+        # BLINK_SKIP_SERVICE all leave nothing running from the folder.
+        print(f"  Keep {_repo_root()}: the service runs from it.")
+    else:
+        print(f"  Keep {_repo_root()}: the commands above run from it.")
     # Absent first: it is a bigger fact than out-of-date, and the two are
     # mutually exclusive (claude_version() gives no version for an absent
     # install, which is exactly what _warn_if_claude_too_old returns on).
@@ -2649,7 +3019,7 @@ def _shim_repair_line(note: str, bridge_running: bool) -> str:
     """Format a stale-shim note, promising repair only when it will happen."""
     if _shim_repair_is_live(bridge_running):
         return f"{note} -- the daemon replaces it within five minutes of starting"
-    return f"{note} -- run `{installed_bin()} install` to fix it"
+    return f"{note} -- run `{_repair_command()} install` to fix it"
 
 
 def cmd_status(args) -> int:
@@ -2771,7 +3141,7 @@ def cmd_status(args) -> int:
             print(f"Activity    hooks installed ({ours}/{total} events{note})")
         elif ours:
             print(f"Activity    PARTIAL -- {ours}/{total} hooks present;"
-                  f" run `{installed_bin()} install` to restore them")
+                  f" run `{_repair_command()} install` to restore them")
         else:
             print("Activity    hooks not installed -- the busy/idle pip will"
                   " stay dark")
@@ -2868,7 +3238,8 @@ def _age(seconds: float) -> str:
     return f"{seconds // 86400} d"
 
 
-def board_lines(known, ports, undriven=(), blink_cmd="blink"):
+def board_lines(known, ports, undriven=(), blink_cmd="blink",
+                can_update=True):
     """The Board lines of `blink status`, from what the app remembers and
     what is plugged in right now.
 
@@ -2937,6 +3308,12 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink"):
     if ota.is_newer(known.get("fw") or "", RELEASE_VERSION):
         out.append(f"            the board is on {known['fw']} and this app is"
                    f" {RELEASE_VERSION} -- they ship together")
+        if not can_update:
+            # A checkout: `update` refuses there (see cmd_update), so naming
+            # it would send the reader into a dead end.
+            out.append("            this is a checkout: bring it up to date"
+                       " with git")
+            return out
         out.append(f"            run: {blink_cmd} update")
         # ...which can find nothing, and used not to admit it.
         #
@@ -2961,7 +3338,8 @@ def _board_lines():
     try:
         from claude_usage_bridge import describe_ports, remembered_board
         return board_lines(remembered_board(blink_home()), describe_ports(),
-                           win_driver.undriven_boards(), installed_bin())
+                           win_driver.undriven_boards(), user_command(),
+                           can_update=_update_reaches_the_service())
     except Exception as e:
         return [f"Board       could not list serial ports: {e}"]
 
@@ -2987,7 +3365,7 @@ def _codex_hook_status():
     free to drift from the first.
     """
     if not install_codex_hooks._read_marker():
-        return [f"Codex hook  not installed -- run `{installed_bin()} install`"
+        return [f"Codex hook  not installed -- run `{_repair_command()} install`"
                 " on a machine with Codex"]
     try:
         # sweep=False, for the reason codex_state.scan gives at length: a
@@ -3113,6 +3491,25 @@ def _source_lines(desk=None):
             print(line)
 
 
+def _update_reaches_the_service() -> bool:
+    """Whether `blink update` -- a frozen build unpacked into ~/.blink/bin,
+    then a restart -- changes the program that runs.
+
+    By what the SERVICE runs, not by which program is asking. Fleet desks
+    run the checkout's CLI beside a frozen service, and an earlier version
+    of this refused there, taking `update` away from the desks that use it
+    (review, 2026-10-25). So: yes when the service runs the installed
+    binary; no when it runs a checkout, whose service would go on running
+    the checkout after a download nobody can see; and with no service, yes
+    for the frozen binary (as before this check existed) and no for a
+    checkout.
+    """
+    prog = service_program()
+    if prog is not None:
+        return prog == [installed_bin()]
+    return bool(_frozen())
+
+
 def cmd_update(_args) -> int:
     """Fetch and install a newer daemon, then restart the service.
 
@@ -3121,6 +3518,9 @@ def cmd_update(_args) -> int:
     first release to switch it on is a decision someone makes, not a side
     effect of shipping this command.
     """
+    if not _update_reaches_the_service():
+        print("Running from a checkout: update with git.")
+        return 1
     print(f"Blink update. This app is {RELEASE_VERSION}.")
     print()
     manifest = update.fetch_signed_manifest()
@@ -3165,7 +3565,7 @@ def cmd_update(_args) -> int:
         print()
         print("The new version is installed, but the background service is")
         print("not running, so the board will stay on \"Link the PC daemon\".")
-        print(f"Run `{installed_bin()} install` to finish.")
+        print(f"Run `{_repair_command()} install` to finish.")
         return 1
     return 0
 
@@ -3198,25 +3598,50 @@ def cmd_provision(args) -> int:
         print("No board found. Plug one in, or pass --port.", file=sys.stderr)
         return 1
 
+    from pc import service_ctl
+
     stopped = False
     if not _skip_service():
         # Stop by pid first: the login service may not be registered on a
         # bench machine, and the pid file is the thing that is true either way.
         _kill_recorded_daemon()
-        try:
-            backend().remove()
-            # Put a service back afterwards only where one belongs: on a
-            # machine Blink is INSTALLED on. remove() reports "removed"
-            # whether or not anything was registered, and treating that as
-            # proof of a service left a bench laptop -- running the
-            # downloaded binary, never installed -- with a login item
-            # pointing at ~/.blink/bin/blink, which does not exist there,
-            # respawning on every throttle interval forever.
-            stopped = os.path.exists(installed_bin())
-        except Exception:
-            pass
-        time.sleep(1.0)
+        # Then stop the service itself, and later start it, with the pair
+        # the fleet suite uses: neither writes, moves or deletes the plist,
+        # the unit or the task. This used to remove() the service and
+        # install() it again, which put back the program RUNNING provision
+        # rather than the one the service ran -- and on Windows, from a
+        # checkout, install() refuses, so the frozen task was deleted and
+        # never came back (review, 2026-10-25). Before that it decided
+        # whether to reinstall by whether ~/.blink/bin/blink existed, and
+        # left a never-installed bench laptop with a login item for a
+        # missing binary. stop() answering "stopped" is the fact both
+        # needed: there was a service, and start() puts that same one back.
+        stopped = service_ctl.stop_service().detail.startswith("stopped")
+    # One try, opened the moment the service is down, so every way out --
+    # a dead port, no hello, a refusal, Ctrl-C during the settle sleep --
+    # starts it again exactly once. The restart used to sit at each return
+    # and in the port's own finally, which the sleeps ran ahead of: an
+    # interrupt there left the desk on HOST LOST (review, 2026-10-25).
+    try:
+        if not _skip_service():
+            # stop() reaches the task's instance and the recorded pid. A
+            # Windows daemon with no pid file -- from before the file
+            # existed, or one that died before writing it -- kept the COM
+            # port, and the open below failed with "Access is denied"
+            # (review, 2026-10-25). Matched on installed_bin()'s full path,
+            # as uninstall does, and a no-op off Windows. Here and not in
+            # stop(), which the fleet suite and halt() share.
+            _kill_by_path()
+            time.sleep(1.0)
+        return _stamp_edition(serial, port, args)
+    finally:
+        if stopped:
+            print(f"Background service ... {service_ctl.start_service()}")
 
+
+def _stamp_edition(serial, port, args) -> int:
+    """cmd_provision's half that holds the port: open it, wait for hello,
+    send the edition, read back the board's answer."""
     try:
         ser = serial.Serial()
         ser.port = port
@@ -3236,8 +3661,6 @@ def cmd_provision(args) -> int:
         ser.reset_input_buffer()
     except Exception as e:
         print(f"Could not open {port}: {e}", file=sys.stderr)
-        if stopped:
-            print("Background service ... " + _install_service())
         return 1
 
     try:
@@ -3264,14 +3687,20 @@ def cmd_provision(args) -> int:
                 ready = True
                 break
         if not ready:
+            # The finally below closes the port, and cmd_provision's starts
+            # the service. Both used to be done here as well, so this path
+            # started the service twice.
             print(f"No hello from the board on {port} within 10 s.",
                   file=sys.stderr)
-            ser.close()
-            if stopped:
-                print("Background service ... " + _install_service())
             return 1
 
-        ser.write(protocol.encode(protocol.edition(args.edition)))
+        # encode_checked, as every production writer is (CLAUDE.md): a line
+        # over the board's limit is dropped whole and silently.
+        raw, why = protocol.encode_checked(protocol.edition(args.edition))
+        if raw is None:
+            print(f"Not sent: {why}", file=sys.stderr)
+            return 1
+        ser.write(raw)
         ser.flush()
         # Read back what the board says about it. The firmware prints one
         # line either way, and that line is the whole confirmation: a board
@@ -3289,20 +3718,6 @@ def cmd_provision(args) -> int:
                 break
     finally:
         ser.close()
-        # The service goes back in the SAME finally that closes the port.
-        #
-        # It used to be restored only on the happy path and the two early
-        # returns, so a nudged cable, a CH340 re-enumerating, or Ctrl-C during
-        # the ten-second hello wait propagated straight past it: the launchd
-        # plist / systemd unit had already been deleted, nothing restarted the
-        # daemon at next login, and nothing said so. On an assembly line that
-        # is a unit boxed with a dead bridge.
-        #
-        # Idempotent by construction -- `stopped` is cleared here, so the tail
-        # of the function cannot install it twice.
-        if stopped:
-            print("Background service ... " + _install_service())
-            stopped = False
 
     said = [h for h in heard if "[cfg] edition" in h]
     if said:
@@ -3326,10 +3741,6 @@ def cmd_provision(args) -> int:
               " message.", file=sys.stderr)
         rc = 1
 
-    # Normally already done by the finally above; kept for the paths that
-    # never reached it.
-    if stopped:
-        print("Background service ... " + _install_service())
     return rc
 
 

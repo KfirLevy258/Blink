@@ -11,6 +11,8 @@ CI runs on a real macOS and Linux runner.
 """
 import json
 import os
+import shlex
+import subprocess
 import sys
 import time
 
@@ -18,6 +20,7 @@ import pytest
 
 from pc import cli, install_statusline
 from tests.support import desktop_cache as _dc
+from tests.support.process import as_checkout, as_frozen
 
 
 @pytest.fixture(autouse=True)
@@ -250,7 +253,9 @@ def test_uninstall_says_so_when_the_binary_will_not_go(tmp_path, monkeypatch,
     stopped crashing on startup and lived long enough to hold the file.
     """
     cli.main(["install"])
-    assert os.path.exists(cli.bin_dir())
+    # Made by hand: a checkout install no longer creates ~/.blink/bin, and
+    # this test is about a frozen install's binary refusing to go.
+    os.makedirs(cli.bin_dir(), exist_ok=True)
 
     monkeypatch.setattr(cli.shutil, "rmtree", lambda *a, **k: None)
     monkeypatch.setattr(cli.time, "sleep", lambda _s: None)   # no real waiting
@@ -271,6 +276,9 @@ def test_uninstall_says_so_when_the_binary_will_not_go(tmp_path, monkeypatch,
 
 def test_uninstall_reports_removed_when_it_worked(tmp_path, capsys):
     cli.main(["install"])
+    # By hand: a checkout install no longer makes ~/.blink/bin, and without
+    # it this would pass with uninstall's removal stubbed out.
+    os.makedirs(cli.bin_dir(), exist_ok=True)
     rc = cli.main(["uninstall"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -279,9 +287,12 @@ def test_uninstall_reports_removed_when_it_worked(tmp_path, capsys):
 
 
 def test_install_refuses_to_touch_a_settings_file_that_will_not_parse(
-        tmp_path, capsys):
+        tmp_path, capsys, monkeypatch):
     """Treating unparseable JSON as {} would write a fresh settings.json over
     whatever the customer was halfway through editing."""
+    # Frozen, so an install that went ahead would make ~/.blink/bin, which
+    # a checkout install no longer does.
+    as_frozen(monkeypatch)
     claude = tmp_path / ".claude"
     claude.mkdir(exist_ok=True)
     broken = '{"statusLine": {"command": "sh /their/bar.sh",}}'   # trailing comma
@@ -301,6 +312,9 @@ def test_uninstall_finishes_even_when_settings_will_not_parse(tmp_path, capsys):
     """The login service is removed before this step, so stopping here would
     leave the machine half-undone."""
     cli.main(["install"])
+    # By hand: a checkout install no longer makes ~/.blink/bin, and without
+    # it this would pass with uninstall's removal stubbed out.
+    os.makedirs(cli.bin_dir(), exist_ok=True)
     (tmp_path / ".claude" / "settings.json").write_text("{ not json")
 
     rc = cli.main(["uninstall"])
@@ -1215,11 +1229,11 @@ def test_status_does_not_sweep_the_codex_slots(tmp_path):
 # has to work on a plane, and it is the first thing anyone runs when nothing
 # works), so it cannot tell those apart and must not pretend to.
 
-def _board_lines_for(fw):
+def _board_lines_for(fw, **kw):
     from pc.cli import board_lines
     return "\n".join(board_lines({"port": "/dev/x", "board_id": "abc",
                                   "fw": fw},
-                                 [("/dev/x", "CH340")], (), "blink"))
+                                 [("/dev/x", "CH340")], (), "blink", **kw))
 
 
 def test_a_board_ahead_names_both_possibilities():
@@ -1507,3 +1521,579 @@ def test_status_reads_the_desktop_cache_once(monkeypatch, capsys):
     reads.clear()
     cli.main(["status"])
     assert reads == [1]
+
+
+# What a person is told to type, as distinct from where the frozen binary
+# lives. From a source checkout `blink install` copies nothing into
+# ~/.blink/bin, so every "run X" that named installed_bin() there named a file
+# that does not exist -- including the undo command (gapietro, 2026-10-12).
+
+def _split_like_the_shell(line):
+    """`line` split the way this platform's shell hands it to a program:
+    shlex for a POSIX shell, and on Windows the system's own
+    CommandLineToArgvW, which follows the C runtime rules cmd.exe relies on.
+    The real splitter, so a quoting test cannot agree with itself. A leading
+    `& ` is PowerShell's call operator, which the shell consumes, so it is
+    not part of the argv a program sees."""
+    if sys.platform != "win32":
+        return shlex.split(line)
+    if line.startswith("& "):
+        line = line[2:]
+    import ctypes
+    from ctypes import wintypes
+    f = ctypes.windll.shell32.CommandLineToArgvW
+    f.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    f.restype = ctypes.POINTER(wintypes.LPWSTR)
+    n = ctypes.c_int()
+    argv = f(line, ctypes.byref(n))
+    try:
+        return [argv[i] for i in range(n.value)]
+    finally:
+        ctypes.windll.kernel32.LocalFree(argv)
+
+
+def _home_with_a_space(tmp_path, monkeypatch):
+    """A profile like C:\\Users\\John Smith. Only cli's own idea of home moves:
+    conftest's sandbox stays where it is, and the new folder is inside it."""
+    home = tmp_path / "John Smith"
+    home.mkdir()
+    (home / ".claude").mkdir()
+    (home / ".claude" / "settings.json").write_text("{}")
+    monkeypatch.setattr(cli, "_home", lambda: str(home))
+    return home
+
+
+def test_a_checkout_names_itself_as_the_command_to_type(monkeypatch):
+    """On the real platform, never a forced one: the quoting is chosen by
+    sys.platform, and forcing darwin on a Windows runner quotes C:\\ paths the
+    POSIX way. Checked by splitting the line back with the platform's own
+    splitter, not by looking for the paths inside it: a checkout under a
+    folder with an apostrophe in its name is printed with that quote
+    escaped, and a substring check failed there (review, 2026-10-25)."""
+    as_checkout(monkeypatch)
+    cmd = cli.user_command()
+    assert _split_like_the_shell(cmd) == cli._source_argv()
+    assert cli._source_argv()[1] == os.path.join(cli._repo_root(),
+                                                 "blink_main.py")
+    assert os.path.exists(cli._source_argv()[1])
+    assert cli.installed_bin() not in _split_like_the_shell(cmd)
+
+
+def test_a_checkout_command_survives_a_space_in_the_interpreter_path(
+        monkeypatch):
+    """The quoting is the point: an interpreter under a folder with a space in
+    its name must still come back as one argument when the person pastes the
+    line into their shell. Checked with the platform's own splitter."""
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(sys, "executable",
+                        os.path.join(os.path.dirname(sys.executable),
+                                     "with space", "python"))
+    assert _split_like_the_shell(cli.user_command()) == cli._source_argv()
+
+
+def test_a_frozen_command_survives_a_space_in_the_profile(tmp_path,
+                                                         monkeypatch):
+    """`C:\\Users\\John Smith\\.blink\\bin\\blink.exe uninstall`, printed bare,
+    is `'C:\\Users\\John' is not recognized` once pasted (review, 2026-10-25)."""
+    as_frozen(monkeypatch)
+    _home_with_a_space(tmp_path, monkeypatch)
+    assert " " in cli.installed_bin()
+    assert _split_like_the_shell(cli.user_command() + " uninstall") == [
+        cli.installed_bin(), "uninstall"]
+
+
+@pytest.mark.parametrize("word,quoted", [
+    (r"C:\Users\kfir\.blink\bin\blink.exe", False),
+    (r"C:\Users\John Smith\.blink\bin\blink.exe", True),
+    (r"C:\Users\R&D\.blink\bin\blink.exe", True),
+    # Not quoted either: ^ is cmd's escape but an ordinary character to
+    # PowerShell, the shell Windows Terminal opens, and a path that worked
+    # there bare would have been newly quoted (review, 2026-10-25).
+    (r"C:\Users\a^b\.blink\bin\blink.exe", False),
+    # Not quoted: cmd expands %VAR% inside quotes as well, so quoting buys
+    # nothing, and PowerShell would then need `& ` in front (review,
+    # 2026-10-25). A path with a % and no space prints as it always did.
+    (r"C:\Users\50%\.blink\bin\blink.exe", False),
+    (r"C:\Program Files (x86)\Python\python.exe", True),
+    (r"C:\Users\x(1)\.blink\bin\blink.exe", True),
+])
+def test_windows_quoting_covers_what_cmd_treats_specially(word, quoted):
+    """Pure string work, so it runs on every runner. list2cmdline alone
+    quotes only on whitespace, and cmd.exe splits `R&D` into two commands."""
+    assert cli._win_quote(word) == (f'"{word}"' if quoted else word)
+
+
+@pytest.mark.parametrize("word,quoted", [
+    # An apostrophe ends a PowerShell single-quoted string and starts one
+    # bare, so it is quoted -- in double quotes, where it is ordinary.
+    (r"C:\Users\O'Brien\.blink\bin\blink.exe",
+     "\"" + r"C:\Users\O'Brien\.blink\bin\blink.exe" + "\""),
+    # $ and the backtick are live inside PowerShell's double quotes ($name
+    # expands, ` escapes), so those words take the single-quoted form, with
+    # any apostrophe doubled (review, 2026-10-25).
+    (r"C:\Users\$name\.blink\bin\blink.exe",
+     r"'C:\Users\$name\.blink\bin\blink.exe'"),
+    (r"C:\Users\a`b\.blink\bin\blink.exe",
+     r"'C:\Users\a`b\.blink\bin\blink.exe'"),
+    (r"C:\Users\O'$x\.blink\bin\blink.exe",
+     r"'C:\Users\O''$x\.blink\bin\blink.exe'"),
+])
+def test_windows_quoting_keeps_powershell_from_reading_the_path(word,
+                                                                quoted):
+    assert cli._win_quote(word) == quoted
+
+
+def test_a_windows_profile_with_a_dollar_gets_a_line_powershell_runs():
+    assert cli._win_line([r"C:\Users\$name\.blink\bin\blink.exe",
+                          "uninstall"]) == (
+        r"& 'C:\Users\$name\.blink\bin\blink.exe' uninstall")
+    assert cli._win_line([r"C:\Users\O'Brien\.blink\bin\blink.exe",
+                          "uninstall"]) == (
+        "& \"" + r"C:\Users\O'Brien\.blink\bin\blink.exe" + "\" uninstall")
+
+
+@pytest.mark.parametrize("argv,line", [
+    ([r"C:\Users\kfir\.blink\bin\blink.exe", "uninstall"],
+     r"C:\Users\kfir\.blink\bin\blink.exe uninstall"),
+    ([r"C:\Users\John Smith\.blink\bin\blink.exe", "uninstall"],
+     r'& "C:\Users\John Smith\.blink\bin\blink.exe" uninstall'),
+    # Only a quoted PROGRAM needs the call operator; a quoted argument
+    # after a bare one is an ordinary PowerShell argument.
+    ([r"C:\Python\python.exe", r"C:\my repo\blink_main.py", "status"],
+     r'C:\Python\python.exe "C:\my repo\blink_main.py" status'),
+])
+def test_a_quoted_windows_program_gets_powershells_call_operator(argv,
+                                                                 line):
+    """Windows Terminal opens PowerShell, which reads a line starting with a
+    quoted string as a string to print, not a program to run: the spaced
+    profile's undo line printed its own path back and did nothing (review,
+    2026-10-25). A line that needs no quoting is unchanged, and works in both
+    shells."""
+    assert cli._win_line(argv) == line
+
+
+def test_a_checkout_install_says_keep_the_folder(tmp_path, capsys,
+                                                 monkeypatch):
+    """The service runs out of the checkout, so "you can delete the folder you
+    downloaded" told someone to delete the program they had just set up."""
+    as_checkout(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "delete the folder" not in out
+    assert "can be deleted" not in out
+    assert f"Creates    {cli.installed_bin()}" not in out
+    assert cli._repo_root() in out
+    assert "Keep" in out
+    assert f"{cli.user_command()} uninstall" in out
+    assert f"{cli.user_command()} status" in out
+    assert f"{cli.installed_bin()} uninstall" not in out
+    assert f"{cli.installed_bin()} status" not in out
+
+
+def test_a_frozen_install_says_exactly_what_it_always_said(tmp_path, capsys,
+                                                           monkeypatch):
+    """Customers run the frozen binary, and the commands it prints are the
+    ones in the README and in every support answer: not one character of them
+    may move. Pinned for a profile path that needs no quoting, which is the
+    shape of every install that has ever worked; the case with a space is
+    the one below."""
+    as_frozen(monkeypatch)
+    if cli.user_command() != cli.installed_bin():
+        # The precondition: pytest's tmp path needs no quoting here. A
+        # runner whose temp dir has a space or a non-ASCII name is the case
+        # the tests below cover; this one pins the shape every install
+        # that worked before has.
+        pytest.skip("this runner's temp path needs quoting")
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    b = cli.installed_bin()
+    disclosure = [
+        f"  Creates    {b}",
+        "             a copy of this program and its support files, so the",
+        "             folder you downloaded can be deleted when this finishes.",
+    ]
+    i = lines.index(disclosure[0])
+    assert lines[i:i + 3] == disclosure
+    assert f"  To undo all of it:  {b} uninstall" in lines
+    j = lines.index(f"  Check:   {b} status")
+    assert lines[j:j + 4] == [
+        f"  Check:   {b} status",
+        f"  Undo:    {b} uninstall",
+        "",
+        "  You can delete the folder you downloaded.",
+    ]
+    assert not any(cli._repo_root() in l for l in lines)
+
+
+# Which backends really run _service_command(): per backend, in
+# tests/pc/test_service.py. The Windows task runs the launcher script, which
+# names ~\.blink\bin\blink.exe outright, and a Linux machine without systemd
+# runs nothing; telling either that "the service runs this folder's
+# blink_main.py" was false (review, 2026-10-25).
+
+def test_nothing_runs_the_checkout_once_frozen(monkeypatch):
+    as_frozen(monkeypatch)
+    assert cli._service_runs_checkout() is False
+
+
+def test_a_checkout_install_promises_the_service_only_where_it_runs_there(
+        tmp_path, capsys, monkeypatch):
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_service_runs_checkout", lambda: False)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    assert "blink_main.py. Keep" not in out
+    assert "service runs" not in out
+    assert "the service runs from it" not in out
+    # Still a checkout install, and still told not to delete the folder: the
+    # commands it printed run from there.
+    assert cli._repo_root() in out
+    assert "delete the folder" not in out
+    assert f"Keep {cli._repo_root()}" in out
+
+
+@pytest.mark.parametrize("result,runs", [
+    ("running (launchd)", True),
+    ("running (systemd)", True),
+    ("installed, but could not be started: launchctl bootstrap gui/501 x",
+     False),
+    ("no systemd here; run it yourself: python blink_main.py run", False),
+    ("skipped (BLINK_SKIP_SERVICE=1)", False),
+])
+def test_a_checkout_install_says_the_service_runs_only_once_it_does(
+        tmp_path, capsys, monkeypatch, result, runs):
+    """The closing line follows what the service step returned, not what the
+    platform would normally do: WSL with no user manager, a failed bootstrap
+    and BLINK_SKIP_SERVICE all leave nothing running from the folder, and
+    were told it did (review, 2026-10-25)."""
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_service_runs_checkout", lambda: True)
+    monkeypatch.setattr(cli, "_install_service", lambda *a: result)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    said = f"Keep {cli._repo_root()}: the service runs from it." in out
+    assert said is runs
+    if not runs:
+        assert f"Keep {cli._repo_root()}: the commands above run from it." \
+            in out
+
+
+def test_the_checkout_disclosure_names_the_service_where_it_will_run(
+        capsys, monkeypatch):
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_service_runs_checkout", lambda: True)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    cli._announce()
+    assert "The background service runs this folder's" in \
+        capsys.readouterr().out
+
+
+def test_the_checkout_disclosure_promises_no_service_that_will_not_run_it(
+        capsys, monkeypatch):
+    """_skip_service is False here on purpose: conftest's BLINK_SKIP_SERVICE
+    alone would hide the backend half of the gate, and a gate reduced to
+    `not _skip_service()` would pass every other test (review,
+    2026-10-25). Only _announce runs, which registers nothing."""
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_service_runs_checkout", lambda: False)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    cli._announce()
+    out = capsys.readouterr().out
+    assert "The background service runs" not in out
+    assert "The commands printed below run from this folder," in out
+
+
+def test_the_checkout_disclosure_promises_no_service_it_will_skip(
+        capsys, monkeypatch):
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_service_runs_checkout", lambda: True)
+    cli._announce()                      # conftest's BLINK_SKIP_SERVICE=1
+    out = capsys.readouterr().out
+    assert "The background service runs" not in out
+    assert "The commands printed below run from this folder," in out
+
+
+def test_a_windows_checkout_disclosure_says_no_task_is_registered(
+        capsys, monkeypatch):
+    """Said before anything is written, as install() itself returns it. The
+    Windows backend is used directly: sys.platform stays real, so the
+    command is quoted for this runner."""
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
+    cli._announce()
+    out = capsys.readouterr().out
+    want = ("  No login service from a checkout on Windows; run it yourself:"
+            f" {cli.user_command()} run")
+    # The command ends the line: a trailing period was pasted with it, and
+    # `run.` is not a subcommand (review, 2026-10-25).
+    assert want in out.splitlines()
+    assert "Scheduled Task" not in out
+
+
+# `blink update` downloads the frozen build into ~/.blink/bin and restarts
+# the service. Whether that does anything depends on what the SERVICE runs,
+# not on which program typed the command: fleet desks run the checkout's CLI
+# beside a frozen service, and refusing there (an earlier fix of this
+# branch) took `update` away from exactly the desks that use it. Refused
+# only where the download would change nothing anyone can see (review,
+# 2026-10-25).
+
+def _feed(monkeypatch):
+    asked = []
+    monkeypatch.setattr(cli.update, "fetch_signed_manifest",
+                        lambda: asked.append(1))     # None: no answer
+    return asked
+
+
+@pytest.mark.parametrize("process,service,refused", [
+    ("checkout", "frozen", False),     # the fleet desk
+    ("frozen", "frozen", False),       # a customer
+    ("frozen", None, False),           # a downloaded binary, never installed
+    ("checkout", "checkout", True),    # a checkout install
+    ("checkout", None, True),          # a bare checkout
+    ("frozen", "checkout", True),      # the service runs a checkout anyway
+])
+def test_update_follows_what_the_service_runs(capsys, monkeypatch, process,
+                                              service, refused):
+    asked = _feed(monkeypatch)
+    prog = {"frozen": [cli.installed_bin()], "checkout": cli._source_argv(),
+            None: None}[service]
+    monkeypatch.setattr(cli, "service_program", lambda: prog)
+    (as_frozen if process == "frozen" else as_checkout)(monkeypatch)
+    assert cli.main(["update"]) == 1
+    out = capsys.readouterr().out
+    assert ("Running from a checkout: update with git." in out) is refused
+    assert asked == ([] if refused else [1])
+
+
+def test_an_update_left_down_names_the_service_program(capsys, monkeypatch):
+    """"Run `<checkout> install` to finish" would re-register the frozen
+    service against the checkout."""
+    as_checkout(monkeypatch)
+    frozen = [cli.installed_bin()]
+    monkeypatch.setattr(cli, "service_program", lambda: frozen)
+    monkeypatch.setattr(cli.update, "fetch_signed_manifest", lambda: {})
+    monkeypatch.setattr(cli.update, "available", lambda _m: ("9.9.9", {}))
+    monkeypatch.setattr(cli.update, "platform_key", lambda: "k")
+    monkeypatch.setattr(cli.update, "download", lambda *_a: b"")
+    monkeypatch.setattr(cli.update, "apply", lambda *_a: (True, "applied"))
+    monkeypatch.setattr(cli, "halt_service", lambda: None)
+    monkeypatch.setattr(cli, "_refresh_shims", lambda: None)
+    monkeypatch.setattr(cli, "restart_service", lambda: "could not restart it")
+    assert cli.main(["update"]) == 1
+    out = capsys.readouterr().out
+    assert f"Run `{cli._quote_line(frozen)} install` to finish." in out
+
+
+def test_a_board_ahead_of_a_checkout_is_not_sent_to_update():
+    from pc.version import RELEASE_VERSION
+    a, b, c = RELEASE_VERSION.split(".")
+    out = _board_lines_for(f"{a}.{b}.{int(c) + 1}", can_update=False)
+    assert "they ship together" in out
+    assert " update" not in out.replace("they ship together", "")
+    assert "git" in out
+
+
+@pytest.mark.parametrize("process,service,can", [
+    ("checkout", "frozen", True),
+    ("checkout", None, False),
+    ("frozen", None, True),
+])
+def test_status_tells_board_lines_whether_update_can_run(monkeypatch,
+                                                         process, service,
+                                                         can):
+    seen = {}
+
+    def _capture(*a, **kw):
+        seen.update(kw)
+        return []
+    monkeypatch.setattr(cli, "board_lines", _capture)
+    import claude_usage_bridge
+    monkeypatch.setattr(claude_usage_bridge, "describe_ports", lambda: [])
+    monkeypatch.setattr(claude_usage_bridge, "remembered_board",
+                        lambda _h: {})
+    monkeypatch.setattr(cli, "service_program",
+                        lambda: [cli.installed_bin()] if service else None)
+    (as_frozen if process == "frozen" else as_checkout)(monkeypatch)
+    cli._board_lines()
+    assert seen.get("can_update") is can
+
+
+def test_a_frozen_install_under_a_spaced_profile_prints_pasteable_commands(
+        tmp_path, capsys, monkeypatch):
+    as_frozen(monkeypatch)
+    _home_with_a_space(tmp_path, monkeypatch)
+    assert cli.main(["install"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    b = cli.installed_bin()
+    undo = [l for l in lines if l.startswith("  Undo:    ")]
+    check = [l for l in lines if l.startswith("  Check:   ")]
+    assert len(undo) == 1 and len(check) == 1
+    assert _split_like_the_shell(undo[0][len("  Undo:    "):]) == [
+        b, "uninstall"]
+    assert _split_like_the_shell(check[0][len("  Check:   "):]) == [
+        b, "status"]
+
+
+def test_the_frozen_disclosure_under_a_spaced_profile_pastes_back(
+        tmp_path, capsys, monkeypatch):
+    """The disclosure's undo line, which tests/ci/check_install.sh greps for
+    in its spaced-home scenario. Quoting it broke that grep on all three
+    runners (review, 2026-10-25); the grep now also takes the binary's name
+    followed by the closing quote, which is what this prints."""
+    as_frozen(monkeypatch)
+    _home_with_a_space(tmp_path, monkeypatch)
+    cli._announce()
+    lines = capsys.readouterr().out.splitlines()
+    undo = [l for l in lines if l.startswith("  To undo all of it:  ")]
+    assert len(undo) == 1
+    cmd = undo[0][len("  To undo all of it:  "):]
+    assert _split_like_the_shell(cmd) == [cli.installed_bin(), "uninstall"]
+    name = os.path.basename(cli.installed_bin())
+    assert any(f"{name}{q} uninstall" in cmd for q in ("'", '"'))
+
+
+def test_a_checkout_under_a_folder_with_an_apostrophe_pastes_back(
+        tmp_path, monkeypatch):
+    """shlex escapes the quote, so the printed line holds neither path as a
+    substring; it still has to split back into the same argv."""
+    as_checkout(monkeypatch)
+    root = str(tmp_path / "kfir's checkout")
+    monkeypatch.setattr(cli, "_repo_root", lambda: root)
+    assert _split_like_the_shell(cli.user_command()) == cli._source_argv()
+    assert cli._source_argv()[1] == os.path.join(root, "blink_main.py")
+
+
+def test_a_checkout_install_leaves_no_empty_program_folder(tmp_path,
+                                                           monkeypatch):
+    """Nothing is copied from a checkout, and the disclosure does not mention
+    ~/.blink/bin, so install must not create it either."""
+    as_checkout(monkeypatch)
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    assert not os.path.exists(cli.bin_dir())
+    assert cli.main(["uninstall"]) == 0
+
+
+# A hint that repairs a service which already exists must name the program
+# that service runs, not the one printing the hint. Fleet desks run the
+# checkout's CLI next to a live frozen install; told to run the checkout's
+# `install`, they would silently swap the frozen service for a checkout one
+# (review, 2026-10-25). The service files are written here by the backends'
+# own writers; no launchctl, systemctl or schtasks is run.
+
+def _write_frozen_service_files(monkeypatch):
+    """The plist, the unit and the launcher a frozen install writes, and its
+    binary, then back to being a checkout process -- the fleet desk."""
+    as_frozen(monkeypatch)
+    frozen_argv = cli._service_command()
+    _write_plist(frozen_argv)
+    os.makedirs(os.path.dirname(cli.unit_path()), exist_ok=True)
+    with open(cli.unit_path(), "w", encoding="utf-8") as f:
+        f.write(cli._unit_text(frozen_argv))
+    os.makedirs(os.path.dirname(cli.launcher_path()), exist_ok=True)
+    with open(cli.launcher_path(), "w", encoding="utf-8") as f:
+        f.write(cli.LAUNCHER_VBS)
+    os.makedirs(cli.bin_dir(), exist_ok=True)
+    open(cli.installed_bin(), "w").close()
+    as_checkout(monkeypatch)
+    return frozen_argv[:-1]
+
+
+def _write_plist(argv):
+    """The plist launchd would be handed for `argv`, by the backend's own
+    writer, so the reader is tested against what install really writes."""
+    os.makedirs(os.path.dirname(cli.plist_path()), exist_ok=True)
+    with open(cli.plist_path(), "w", encoding="utf-8") as f:
+        f.write(cli._plist_text(argv))
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_the_registered_service_names_its_own_program(monkeypatch, platform):
+    """Only the service-file reader runs under the forced platform: it returns
+    a list, so no quoting is decided here."""
+    want = _write_frozen_service_files(monkeypatch)
+    monkeypatch.setattr(sys, "platform", platform)
+    if platform == "win32":
+        # The launcher names blink.exe outright, whatever wrote it; that
+        # binary, which the helper on this runner's platform may not have
+        # made, is what has to exist.
+        open(cli.installed_bin(), "w").close()
+        want = [cli.installed_bin()]
+    assert cli.service_program() == want
+
+
+def test_the_registered_service_survives_a_space_in_the_profile(
+        tmp_path, monkeypatch):
+    _home_with_a_space(tmp_path, monkeypatch)
+    want = _write_frozen_service_files(monkeypatch)
+    assert " " in want[0]
+    for platform in ("darwin", "linux"):
+        monkeypatch.setattr(sys, "platform", platform)
+        assert cli.service_program() == want
+
+
+def test_repair_hints_name_the_service_program(monkeypatch):
+    as_checkout(monkeypatch)
+    frozen = os.path.join(cli.bin_dir(), "blink")
+    monkeypatch.setattr(cli, "service_program", lambda: [frozen])
+    assert cli._repair_command() == frozen
+    assert f"run `{frozen} install` to fix it" in cli._shim_repair_line(
+        "x", bridge_running=False)
+    assert cli.user_command() not in cli._shim_repair_line("x", False)
+
+
+def test_repair_hints_fall_back_to_this_program_with_no_service(monkeypatch):
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "service_program", lambda: None)
+    assert cli._repair_command() == cli.user_command()
+
+
+def _skip_without_a_service_file_format():
+    if cli.service_program() is None:
+        pytest.skip(f"no service file format on {sys.platform}")
+
+
+def test_the_codex_hint_names_the_frozen_service_from_a_checkout(
+        monkeypatch):
+    """End to end on this platform's own service file, through a real hint."""
+    want = _write_frozen_service_files(monkeypatch)
+    _skip_without_a_service_file_format()
+    monkeypatch.setattr(cli.install_codex_hooks, "_read_marker", lambda: None)
+    line = cli._codex_hook_status()[0]
+    assert f"run `{cli._quote_line(want)} install`" in line
+    assert cli.user_command() not in line
+
+
+def test_the_partial_hooks_hint_names_the_frozen_service_from_a_checkout(
+        tmp_path, capsys, monkeypatch):
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    data = json.loads(_settings(tmp_path).read_text())
+    del data["hooks"]["Stop"]
+    _settings(tmp_path).write_text(json.dumps(data))
+    want = _write_frozen_service_files(monkeypatch)
+    _skip_without_a_service_file_format()
+    capsys.readouterr()
+    cli.main(["status"])
+    partial = [l for l in capsys.readouterr().out.splitlines()
+               if l.startswith("Activity    PARTIAL")]
+    assert partial and f"run `{cli._quote_line(want)} install`" in partial[0]
+    assert cli.user_command() not in partial[0]
+
+
+def test_launchd_not_loaded_names_the_frozen_service_from_a_checkout(
+        monkeypatch):
+    want = _write_frozen_service_files(monkeypatch)
+    monkeypatch.setattr(cli, "backend", lambda: cli._LaunchdBackend())
+    monkeypatch.setattr(cli.os, "getuid", lambda: 501, raising=False)
+    monkeypatch.setattr(
+        cli.subprocess, "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 113, "", ""))
+    line = cli._LaunchdBackend().status()
+    assert line == (f"installed but not loaded -- run "
+                    f"`{cli._quote_line(want)} install` to start it")

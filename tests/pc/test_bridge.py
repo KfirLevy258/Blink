@@ -1054,3 +1054,63 @@ def test_the_daemon_hands_the_remembered_version_to_the_bridge():
                and getattr(n.func, "id", None) == "Bridge"]
     assert bridges and all(
         any(k.arg == "board_fw_hint" for k in b.keywords) for b in bridges)
+
+
+# Self-update from a checkout. A checkout's daemon is not the program in
+# ~/.blink/bin, which is all the feed can replace: with `auto` on it
+# downloaded a frozen build there, restarted, came back as the same checkout
+# and did it again a minute later, forever -- and a board-tapped update did
+# the same through the Bridge, which a gate inside the daily tick never saw
+# (review, 2026-10-25). main() decides `frozen` once and wires both from it.
+
+def _main_node():
+    return next(n for n in ast.walk(_daemon_tree())
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+
+def _names(node):
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def test_a_checkout_daemon_hands_the_bridge_no_way_to_replace_itself():
+    bridges = [c for c in ast.walk(_main_node()) if isinstance(c, ast.Call)
+               and isinstance(c.func, ast.Name) and c.func.id == "Bridge"]
+    assert bridges
+    for call in bridges:
+        kw = {k.arg: k.value for k in call.keywords}["self_update"]
+        assert isinstance(kw, ast.IfExp), ast.dump(kw)
+        assert _names(kw.test) == {"frozen"}
+        assert isinstance(kw.orelse, ast.Constant) and kw.orelse.value is None
+
+
+def test_the_daily_update_tick_runs_only_when_frozen():
+    main = _main_node()
+    ticks = [c for c in ast.walk(main) if isinstance(c, ast.Call)
+             and isinstance(c.func, ast.Name)
+             and c.func.id == "_self_update_tick"]
+    assert ticks
+    guarded = set()
+    for node in ast.walk(main):
+        if isinstance(node, ast.If) and "frozen" in _names(node.test):
+            for c in ast.walk(node):
+                guarded.add(id(c))
+    assert all(id(t) in guarded for t in ticks)
+
+
+def test_frozen_is_decided_by_cli_not_by_hand():
+    """One definition of "frozen" for the CLI and the daemon."""
+    src = (pathlib.Path(claude_usage_bridge.__file__)).read_text(
+        encoding="utf-8")
+    main_src = ast.get_source_segment(src, _main_node())
+    assert 'getattr(sys, "frozen"' not in src
+    assert "frozen = _frozen()" in main_src
+
+
+def test_a_bridge_that_cannot_replace_itself_offers_the_firmware_alone(
+        capsys):
+    """What the checkout daemon's board tap now reaches: no download, no
+    restart, the firmware half only."""
+    sent = []
+    b = _ota_bridge(sent, _newer_release(_ahead_of_the_app()),
+                    app_update=("9.9.9", {}), self_update=None)
+    assert b._app_pairing({"version": _ahead_of_the_app()}) == ""

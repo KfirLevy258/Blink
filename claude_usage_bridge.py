@@ -624,6 +624,8 @@ def _self_update_tick(target):
     false, and turning it on is a decision made per release. Without a remote
     off switch, a bad build would keep installing itself on every machine that
     checked, and nothing here could stop it.
+
+    Only ever called by a frozen daemon: see `frozen` in main().
     """
     home = os.path.dirname(os.path.dirname(target))   # ~/.blink
     manifest = update.fetch_signed_manifest()
@@ -678,10 +680,22 @@ def main(argv=None):
     # binary aside and moving the new one in, the login service is pointing at
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
-    from pc.cli import (_self_path, blink_home as _blink_home,
+    from pc.cli import (_frozen, _self_path, blink_home as _blink_home,
                         hook_shim_path, installed_bin, settings_path,
                         shim_path)
     self_bin = installed_bin()
+    # Decided once, and everything that replaces this program keys off it:
+    # the daily check below and the board-tapped update the Bridge runs. The
+    # feed carries frozen builds for ~/.blink/bin, which a checkout's daemon
+    # is not: with `auto` on, a checkout daemon downloaded one, restarted,
+    # came back as the same checkout and did it again a minute later,
+    # forever, and a tap on the board did the same through the Bridge
+    # (review, 2026-10-25). The Bridge already reads self_update=None as
+    # "cannot replace itself" and offers the firmware alone.
+    frozen = _frozen()
+    if not frozen:
+        print("[update] running from a checkout: updates come from git",
+              file=sys.stderr)
     blink_home = _blink_home()
     update.recover(self_bin)
 
@@ -759,7 +773,7 @@ def main(argv=None):
     # Frozen: the executable is ~/.blink/bin/blink, two levels down. From a
     # checkout: the ordinary ~/.blink (a developer, not a login service).
     pid_file = (os.path.join(os.path.dirname(os.path.dirname(_self_path())),
-                             "bridge.pid") if getattr(sys, "frozen", False)
+                             "bridge.pid") if frozen
                 else os.path.join(blink_home, "bridge.pid"))
     try:
         with open(pid_file, "w", encoding="utf-8") as f:
@@ -1123,7 +1137,7 @@ def main(argv=None):
                         flash_image=flash_image,
                         report_failure=report_failure,
                         set_preferred=bus.set_preferred,
-                        self_update=self_update,
+                        self_update=self_update if frozen else None,
                         status_watch=svc_watch,
                         # For the svc gate only, when the boot hello is lost.
                         board_fw_hint=known.get("fw"),
@@ -1231,7 +1245,7 @@ def main(argv=None):
                 # wiped hook too -- the watchdog's own interval keeps either
                 # path from checking more often than it should.
                 _upkeep()
-                if time.monotonic() >= next_update:
+                if frozen and time.monotonic() >= next_update:
                     next_update = time.monotonic() + UPDATE_INTERVAL_S
                     try:
                         _self_update_tick(self_bin)

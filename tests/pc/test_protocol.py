@@ -384,13 +384,14 @@ class EveryFrameIsChecked(unittest.TestCase):
             "the None guard must sit between encode_checked and the write")
 
     def test_the_writers_that_skip_the_check_are_known(self):
-        """welcome, edition and bye go out unchecked, and are listed here.
+        """welcome and bye go out unchecked, and are listed here.
 
         Each is a short fixed-shape message written straight to a port it
         has just opened, outside send(): the welcome claude_usage_bridge uses
-        to identify a board, `blink edition` setting one, and the bye `blink
-        uninstall` says after the service is removed -- not before, because
-        until then the daemon holds the port. They are known and left alone.
+        to identify a board, and the bye `blink uninstall` says after the
+        service is removed -- not before, because until then the daemon holds
+        the port. They are known and left alone. `blink provision`'s edition
+        line was the third, until it moved to encode_checked (2026-10-25).
 
         The scan covers every .write() whose argument calls protocol.encode()
         or json.dumps(), in pc/, claude_usage_bridge.py and blink_main.py,
@@ -404,7 +405,7 @@ class EveryFrameIsChecked(unittest.TestCase):
         listed rather than filtered out, because the scan cannot tell a file
         from a port and should not be taught to guess.
 
-        When welcome, edition or bye moves to encode_checked, drop it from
+        When welcome or bye moves to encode_checked, drop it from
         this list: the test fails until it is, so the list cannot go stale.
         """
         found = []
@@ -414,7 +415,6 @@ class EveryFrameIsChecked(unittest.TestCase):
                 found.append((path.relative_to(ROOT).as_posix(), scope))
         self.assertEqual(sorted(found), sorted([
             ("claude_usage_bridge.py", "probe_is_our_board"),   # welcome
-            ("pc/cli.py", "cmd_provision"),                      # edition
             ("pc/cli.py", "_say_bye"),                           # bye
             ("claude_usage_bridge.py", "Tap._append"),  # tap file, no frame
         ]))
