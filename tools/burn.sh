@@ -95,8 +95,14 @@ if ! command -v esptool.py >/dev/null 2>&1; then
 		fi
 	done
 fi
-command -v esptool.py >/dev/null 2>&1 ||
-	die "esptool.py not found on PATH, in $ETOOLS, or next to $PY (pip install esptool, or set BLINK_ETOOLS)"
+# The pip hint carries the pins, for the interpreter this script chose: a
+# bare `pip install esptool` resolves bitstring 5.0.0, which espefuse cannot
+# import (see pc/requirements.txt). Same line lib_zephyr.sh prints.
+if ! command -v esptool.py >/dev/null 2>&1; then
+	HINT=$(blink_zephyr_pip_hint "$PY") ||
+		HINT="install esptool and bitstring at the versions pc/requirements.txt pins"
+	die "esptool.py not found on PATH, in $ETOOLS, or next to $PY ($HINT, or set BLINK_ETOOLS)"
+fi
 
 BOARD="${BLINK_BOARD:-esp32_devkitc/esp32/procpu}"
 KEY="${BLINK_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
@@ -182,11 +188,23 @@ if [ "$SKIP_BUILD" = 0 ]; then
 	[ -f "$KEY" ] || die "signing key not found at $KEY.
        Every unit must be signed with the SAME key or its OTA updates will be
        rejected in the field. See tools/backup_keys.sh."
-	blink_zephyr_activate || die "cannot build without a Zephyr workspace."
-	( cd "$ROOT/firmware" && west build --sysbuild -d build-sb -b "$BOARD" . -- \
+	# Both say why on stderr first; this line only stops the script. It used
+	# to read "cannot build without a Zephyr workspace", which was wrong
+	# whenever the workspace had been found and only a tool in it was missing.
+	blink_zephyr_activate || die "Zephyr environment not ready (see above)."
+	blink_zephyr_build_ready || die "Zephyr environment not ready (see above)."
+	# Kept, not thrown away: "run the west build by hand to see why" sent the
+	# operator to repeat a multi-minute build to read an error this one had
+	# already printed. Outside the build tree, which a pristine rebuild wipes.
+	BUILD_LOG=$(mktemp "${TMPDIR:-/tmp}/blink-burn-build.XXXXXX") ||
+		die "could not create a temp file for the build log"
+	if ! ( cd "$ROOT/firmware" && west build --sysbuild -d build-sb -b "$BOARD" . -- \
 		-DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
-		-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$KEY\"" ) >/dev/null 2>&1 \
-		|| die "build failed. Run the west build by hand to see why."
+		-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$KEY\"" ) >"$BUILD_LOG" 2>&1; then
+		tail -30 "$BUILD_LOG" >&2
+		die "build failed (last 30 lines above; full log at $BUILD_LOG)"
+	fi
+	rm -f "$BUILD_LOG"
 	echo "   built"
 else
 	echo "   (--no-build: using whatever is in $BUILD)"

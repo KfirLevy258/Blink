@@ -35,6 +35,21 @@ The board picks a data source at boot - you never choose one:
   0.17.4 rather than the 1.0.1 that 4.4.0 asks for. Do not register both SDKs
   at once -- 1.0.1's CMake config breaks 4.3.1's configure even when 0.17.4 is
   registered alongside it.
+
+  **esptool in the workspace venv, at this repo's pins.** Zephyr's own
+  `west packages pip --install` asks only for `esptool>=5.0.2`, and esptool
+  does not bound `bitstring`, so it installs bitstring 5.0.0 -- with which
+  `espefuse.py` dies on import if the eFuse check before a flash uses this
+  venv's copy (2026-10-12). From the repo root, after that command:
+
+  ```sh
+  <workspace>/.venv/bin/python -m pip install -c pc/requirements.txt esptool bitstring
+  ```
+
+  `blink_zephyr_build_ready` checks that esptool is on PATH before
+  `release.sh`, `burn.sh` and `dev.sh flash` build, and prints this line
+  when it is not. A broken bitstring shows up instead in the eFuse check,
+  which reports an espefuse.py that does not start.
 - The **CYD board** on USB (a CH340 serial port, `/dev/cu.usbserial-*` on macOS).
 - Your **signing keys** (see [Keys](#keys)).
 

@@ -49,6 +49,21 @@ up() {
 case "${1:-flash}" in
 flash)
 	down
+	# From here on the daemon comes back however this ends: the eFuse
+	# refusals below, a build check that fails, a failed west build or flash
+	# under `set -e`, an interrupt, or success. It used to be restarted only
+	# by the last line, so every early exit left the desk on HOST LOST. (Not
+	# after a failed activate: `up` needs the same venv, so it fails the same
+	# way.) The same shape as burn.sh's restore_daemon trap, and the only
+	# place `up` runs in this path, so a good flash starts it once.
+	#
+	# Each handler clears all three traps before it calls `up`, so the
+	# restore runs once. Otherwise a second Ctrl-C landing in `up`'s own
+	# `sleep 2` ran `up` again from the INT trap: two nohup'd daemons on one
+	# port (review, 2026-10-25).
+	trap 'trap - EXIT INT TERM; up' EXIT
+	trap 'trap - EXIT INT TERM; echo "flash interrupted; re-run dev.sh flash" >&2; up; exit 130' INT
+	trap 'trap - EXIT INT TERM; echo "flash interrupted; re-run dev.sh flash" >&2; up; exit 143' TERM
 	# dev.sh writes PLAINTEXT. A fused chip's ROM cannot read that, and the
 	# board goes dark until tools/flash_encrypted.sh restores it -- the exact
 	# mirror of the mistake that script refuses. Ask the chip, before the build.
@@ -89,12 +104,14 @@ flash)
 		esac
 	fi
 	activate   # sources zephyr-env.sh too
+	# Here and not in activate(), which `up` shares: the daemon must come back
+	# whether or not this machine can build.
+	blink_zephyr_build_ready || exit 1
 	cd "$ROOT/firmware"
 	west build -b "$BOARD" . -- -DUSE_CCACHE=0 | tail -3
 	# 921600 is beyond what this board's CH340 tolerates; it fails mid-write.
 	west flash --esp-device "$PORT" --esp-baud-rate 115200 | tail -1
-	up
-	;;
+	;;	# the EXIT trap starts the daemon
 up) down; up ;;
 down) down; echo "daemon down, $PORT free" ;;
 log) tail -f "$LOG" ;;

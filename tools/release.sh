@@ -107,6 +107,7 @@ KEY="${OTA_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
 # Note this is a RELEASE-path fix: a plain `west build` still produces 0.0.0+0,
 # which is fine and even desirable -- a dev image should never out-rank a
 # released one under direct-XIP.
+blink_zephyr_build_ready || exit 1
 ( cd "$ROOT/firmware" && west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
 	-- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
 	-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$KEY\"" \
