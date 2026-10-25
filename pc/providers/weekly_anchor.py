@@ -12,7 +12,6 @@ nothing contradicts this anchor -- needs the percentage-drop check too, or a
 refuted anchor keeps appearing on the panel for up to eight weeks after
 something proved it wrong.
 """
-import json
 import math
 
 from pc import weekly_anchor
@@ -50,13 +49,18 @@ class DesktopHistoryProvider:
         path = (self._path if self._path is not None
                 else claude_desktop.cache_path())
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                content = fh.read()
+            # claude_desktop's reader, not a second open(): it decodes the
+            # bytes itself, so a torn write or a UTF-16 file is None here
+            # rather than a UnicodeDecodeError out of a method documented
+            # never to raise (review, 2026-10-25).
+            content = claude_desktop.read_text(path)
         except OSError:
             return None
-        try:
-            doc = json.loads(content)
-        except (TypeError, ValueError):
+        # parse_json, not json.loads: it also refuses absurd nesting, whose
+        # RecursionError escaped the ValueError this caught (review,
+        # 2026-10-25). None from read_text comes back NOT_JSON too.
+        doc = claude_desktop.parse_json(content)
+        if doc is claude_desktop.NOT_JSON:
             return None
         return _in_time_order(claude_desktop.raw_samples(doc))
 

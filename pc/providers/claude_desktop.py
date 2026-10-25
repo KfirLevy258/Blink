@@ -74,6 +74,100 @@ def cache_path():
     return os.path.expanduser("~/.config/Claude/plan-usage-history.json")
 
 
+# What `blink status` can say about the cache file, from ClaudeDesktopProvider
+# .verdict(). poll() collapses all but the first into "no frame", which is
+# right for the daemon and was wrong for status: it printed "did not parse --
+# please report it" for a cache the app simply had not filled yet, and people
+# reported a fault that was not there (found by destaben in their fork,
+# 2026-10-19). Each of these is a different thing for the reader to do.
+VERDICT_FRAME = "frame"            # a reading: the normal case
+VERDICT_UNFILLED = "unfilled"      # the app's own empty shape: wait for it
+VERDICT_NOT_OURS = "not-ours"      # JSON, but no layout we know: report it
+VERDICT_GARBLED = "garbled"        # not JSON, or not UTF-8: report it
+VERDICT_UNREADABLE = "unreadable"  # could not be opened or read at all
+
+
+def read_text(path):
+    """The cache file's text, or None when its bytes are not UTF-8.
+
+    The one reader for this file: the provider and the weekly anchor's
+    DesktopHistoryProvider both come through here. Read as bytes and decoded
+    here, not with open(encoding="utf-8"): that raises UnicodeDecodeError, a
+    ValueError rather than an OSError, and it went straight out of poll() --
+    a torn write or a UTF-16 file took `blink status` down with a traceback,
+    losing every row after Desktop (review, 2026-10-25). OSError still
+    propagates; the callers each have their own answer to it.
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+# What parse_json returns for content that is not a JSON document. A
+# sentinel, not None: `null` is valid JSON, and it is a format change to
+# report rather than a garbled file.
+NOT_JSON = object()
+
+
+def parse_json(content):
+    """The document in `content`, or NOT_JSON. Never raises.
+
+    The one place this file's text becomes a document, for the provider and
+    the weekly anchor alike. RecursionError is caught with ValueError: deep
+    enough nesting (how deep depends on the interpreter) makes json.loads
+    raise it, it is neither a
+    ValueError nor an OSError, and it went out of every except clause that
+    read this file, taking `blink status` down at the Desktop row (review,
+    2026-10-25). TypeError is None from read_text, bytes that were not UTF-8.
+    """
+    try:
+        return json.loads(content)
+    except (TypeError, ValueError, RecursionError):
+        return NOT_JSON
+
+
+def _version(doc):
+    """The file's own `version`, when it is a scalar we could dispatch on,
+    else None. The one place that decides it, for parse_cache_file,
+    raw_samples and _is_unfilled_doc alike.
+
+    bool is refused first: True == 1 in Python, so `"version": true` would
+    otherwise be looked up as version 1. And only a scalar: a list or object
+    here once raised TypeError from the dict lookup -- outside every try in
+    parse_cache_file -- and the bus marked the whole source broken over one
+    odd field.
+    """
+    version = doc.get("version") if isinstance(doc, dict) else None
+    if isinstance(version, bool) or not isinstance(version, (int, str)):
+        return None
+    return version
+
+
+def _is_unfilled_doc(doc) -> bool:
+    """The two shapes of a cache the app has created but not yet sampled
+    into: an empty object, or a version we have a parser for with an empty
+    `samples` list and no other key. Nothing else qualifies. Keyed off
+    _PARSERS rather than a literal 2, so the version that adds a parser is
+    not reported as a format change while it is still empty.
+
+    Exact on purpose. The first version of this check asked only "is it
+    valid JSON", and the app always writes JSON, so renamed sample keys, a
+    `t` that moved to seconds, a version 3 with a new array and a bare
+    `null` all came out as "not filled yet" (review, 2026-10-25). A false
+    report costs one issue; a false all-clear hides a broken source.
+    """
+    if doc == {}:
+        return True
+    if not isinstance(doc, dict) or set(doc) != {"version", "samples"}:
+        return False
+    if _version(doc) not in _PARSERS:
+        return False
+    return isinstance(doc["samples"], list) and not doc["samples"]
+
+
 def _pct(u: dict, key: str) -> float:
     """One percentage out of a sample's `u` object, or UNKNOWN.
 
@@ -318,10 +412,11 @@ def raw_samples(doc):
     is exactly one parser for plan-usage-history.json in this codebase; this
     is that parser's other exit, not a second one.
     """
-    version = doc.get("version") if isinstance(doc, dict) else None
-    if not isinstance(version, (int, str)) or isinstance(version, bool):
-        version = None
-    if version == 2:
+    # Keyed off _PARSERS, as parse_cache_file and _is_unfilled_doc are, so a
+    # new version's parser is not dispatched differently here. Every parser
+    # so far keeps its series under `samples`; one that does not must say
+    # so here too.
+    if _version(doc) in _PARSERS:
         samples = doc.get("samples")
         return samples if isinstance(samples, list) and samples else None
     return _samples_array_by_shape(doc)
@@ -351,18 +446,16 @@ class ClaudeDesktopProvider(base.ProviderParser):
         taken. They agree in the normal case and diverge in exactly the case
         that matters -- a file rewritten with no new sample in it.
         """
-        try:
-            doc = json.loads(file_content)
-        except (TypeError, ValueError):
+        doc = parse_json(file_content)
+        if doc is NOT_JSON:
             return None
+        return self._frame_from_doc(doc, now_epoch, observed_at)
 
-        version = doc.get("version") if isinstance(doc, dict) else None
-        # Only a scalar can be looked up. A list or object here raised
-        # TypeError from dict.get -- outside every try in this function, so
-        # the bus marked the whole source broken over one odd field.
-        if not isinstance(version, (int, str)) or isinstance(version, bool):
-            version = None
-        parser = _PARSERS.get(version, _parse_by_shape)
+    def _frame_from_doc(self, doc, now_epoch, observed_at=None):
+        """parse_cache_file's work on a document already loaded, so the
+        verdict can decide from one json.loads rather than two."""
+        # _version refuses non-scalars and bools; see there for the incident.
+        parser = _PARSERS.get(_version(doc), _parse_by_shape)
         # The rate needs the whole series, not the newest point. Read off the
         # same document the parser is about to reduce, and never let a failure
         # here cost the reading itself -- the percentages are the product and
@@ -397,21 +490,61 @@ class ClaudeDesktopProvider(base.ProviderParser):
             session_burn_pph=burn,
         )
 
+    def _classify(self, content, now_epoch):
+        """(VERDICT_*, frame or None) for text read_text returned, with no
+        side effect at all. The one decision behind both verdict() and
+        poll(), so the daemon's log and `blink status` cannot disagree about
+        the same bytes."""
+        doc = parse_json(content)
+        if doc is NOT_JSON:
+            return VERDICT_GARBLED, None
+        frame = self._frame_from_doc(doc, now_epoch)
+        if frame is not None:
+            return VERDICT_FRAME, frame
+        if _is_unfilled_doc(doc):
+            return VERDICT_UNFILLED, None
+        return VERDICT_NOT_OURS, None
+
+    def verdict(self, now_epoch):
+        """(one of the VERDICT_* constants, frame or None), from ONE read.
+
+        For `blink status`. One read rather than poll() followed by a second
+        look: the app rewrites the file every few minutes, so two reads can
+        see two different files and describe neither. Side-effect free --
+        never prints, which poll()'s once-per-path complaint did, right above
+        the status row it contradicted -- and never raises.
+        """
+        try:
+            content = read_text(self.path())
+        except OSError:
+            return VERDICT_UNREADABLE, None
+        except Exception:
+            return VERDICT_GARBLED, None
+        return self._classify(content, now_epoch)
+
     def poll(self, now_epoch):
         path = self.path()
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
+            content = read_text(path)
         except OSError:
             # Not installed, not readable, not running. All normal, all
             # silent: this is an ambient source and its absence is not news.
             return []
-        frame = self.parse_cache_file(content, now_epoch)
-        if frame is None:
-            if self._complained_about != path:
-                print(f"[desktop] {path} did not parse as a usage cache;"
-                      " ignoring this source", file=sys.stderr)
-                self._complained_about = path
+        verdict, frame = self._classify(content, now_epoch)
+        if verdict == VERDICT_FRAME:
+            self._complained_about = None
+            return [frame]
+        if verdict == VERDICT_UNFILLED:
+            # The app before its first sample: nothing to read and nothing
+            # wrong. Complaining here put "did not parse" in bridge.log on
+            # every start of a freshly signed-in desk, and under the status
+            # row that called the same file not filled yet (review,
+            # 2026-10-25). Reset, so a later real format change is still
+            # said once.
+            self._complained_about = None
             return []
-        self._complained_about = None
-        return [frame]
+        if self._complained_about != path:
+            print(f"[desktop] {path} did not parse as a usage cache;"
+                  " ignoring this source", file=sys.stderr)
+            self._complained_about = path
+        return []

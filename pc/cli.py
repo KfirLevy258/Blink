@@ -276,26 +276,38 @@ def claude_version():
     return (out or None), tuple(parts)
 
 
-def desktop_app_present() -> bool:
-    """Has Claude Desktop ever written its usage cache on this machine?
+def desktop_reading():
+    """(VERDICT_*, frame or None) from ONE read of Claude Desktop's usage
+    cache, or None when there is no cache file at all.
 
     The file, not the application bundle. An installed app that has never run
     has nothing for us to read, and a machine where the app was removed but
     the cache remains still has a (stale, and reported as stale) reading. The
     file is the thing this product actually depends on, so the file is what
     gets asked about.
+
+    Read once per desk, by read_desk(), and every Desktop line of install and
+    status prints from that one answer. They used to ask separately -- an
+    exists() for the light, a parse for the row -- and the app rewrites the
+    file every few minutes, so the two could describe different files. The
+    split also let the app's own empty file read first as written usage,
+    then as "not signed in", which told a signed-in person to sign in
+    (review, 2026-10-25).
     """
     from pc.providers import claude_desktop
     try:
-        return os.path.exists(claude_desktop.cache_path())
+        provider = claude_desktop.ClaudeDesktopProvider()
+        if not os.path.exists(provider.path()):
+            return None
+        return provider.verdict(time.time())
     except Exception:
-        return False
+        return None
 
 
 def desktop_app_installed() -> bool:
     """Has Claude Desktop ever run here, even if it has recorded no usage yet?
 
-    desktop_app_present() asks for the usage cache, which Desktop writes only
+    desktop_reading() asks for the usage cache, which Desktop writes only
     after sign-in and its first usage check. Its data folder appears on first
     launch, before either. Measured on a Windows 11 VM, 2026-09-30: installed
     and not yet signed in, the folder held Local Storage and config.json and
@@ -367,7 +379,7 @@ def desktop_staleness_note(age_s):
 def codex_present() -> bool:
     """Has Codex CLI written a rollout log on this machine?
 
-    The logs, not the binary, for the reason desktop_app_present() gives: the
+    The logs, not the binary, for the reason desktop_reading() gives: the
     file the daemon reads is the thing that matters.
     """
     from pc.providers import codex_cli
@@ -515,6 +527,7 @@ class Desk(NamedTuple):
     on_path: bool               # a `claude` on PATH, answering or not
     desktop: bool               # Desktop has written usage (signed in)
     desktop_installed: bool     # Desktop has run here, signed in or not
+    desktop_reading: object     # desktop_reading(): (verdict, frame) or None
     codex: bool
     hooks: ClaudeHooks
     weekly: bool
@@ -531,8 +544,33 @@ class Desk(NamedTuple):
         return self.claude_text is None and self.on_path
 
     @property
+    def desktop_waiting(self) -> bool:
+        """Signed in -- the app writes its cache only after sign-in -- but
+        not one sample in it yet. Not "not signed in": that told someone
+        who had just signed in to sign in (review, 2026-10-25)."""
+        from pc.providers import claude_desktop
+        return (self.desktop_reading is not None and
+                self.desktop_reading[0] == claude_desktop.VERDICT_UNFILLED)
+
+    @property
+    def desktop_caveat(self) -> str:
+        """What a row crediting Desktop must add when the cache it credits
+        gave no reading: nothing for a reading, the app's empty file or no
+        file, and otherwise a pointer to the Desktop row. "Running on Claude
+        Desktop alone" sat above a Desktop row saying the file did not parse
+        (review, 2026-10-25)."""
+        from pc.providers import claude_desktop as cd
+        verdict = self.desktop_reading[0] if self.desktop_reading else None
+        if verdict == cd.VERDICT_UNREADABLE:
+            return " (but its usage cache could not be read; see the Desktop row)"
+        if verdict in (cd.VERDICT_NOT_OURS, cd.VERDICT_GARBLED):
+            return " (but its usage cache did not parse; see the Desktop row)"
+        return ""
+
+    @property
     def unsigned_desktop(self) -> bool:
-        return self.desktop_installed and not self.desktop
+        return (self.desktop_installed and not self.desktop
+                and not self.desktop_waiting)
 
 
 def read_desk(version=None) -> Desk:
@@ -541,12 +579,19 @@ def read_desk(version=None) -> Desk:
     that hangs costs its 30 s timeout per ask (measured 60.0 s, review
     2026-10-19). The weekly question is only asked where a desk can need it
     -- it may read Desktop's IndexedDB, and a CLI desk has no use for it."""
+    from pc.providers import claude_desktop
     text, ver = claude_version() if version is None else version
-    desktop = desktop_app_present()
+    reading = desktop_reading()
+    # Any cache but the empty one is usage the app wrote: one we cannot
+    # parse included, which the Desktop status row reports on its own.
+    desktop = (reading is not None
+               and reading[0] != claude_desktop.VERDICT_UNFILLED)
     return Desk(claude_text=text, claude_ver=ver,
                 on_path=text is not None or claude_on_path(),
                 desktop=desktop,
-                desktop_installed=desktop or desktop_app_installed(),
+                # The cache in any state is the app's own file.
+                desktop_installed=reading is not None or desktop_app_installed(),
+                desktop_reading=reading,
                 codex=codex_present(),
                 hooks=claude_hooks(),
                 weekly=text is None and desktop and weekly_countdown_known())
@@ -736,6 +781,10 @@ def _note_if_no_claude_code(desk):
             # 2026-10-19).
             print("     writes. Claude Desktop is installed but not signed in;")
             print("     sign in to it and the Claude page fills by itself.")
+        elif desk.desktop_waiting:
+            print("     writes. Claude Desktop is signed in but hasn't written a")
+            print("     reading yet; it does within a few minutes, and the Claude")
+            print("     page fills by itself.")
         else:
             print("     writes. The Claude page stays empty until you add")
             print("     Claude Code; the status line just installed starts")
@@ -748,6 +797,13 @@ def _note_if_no_claude_code(desk):
         print("     yet. Open it and sign in: Desktop writes its first figures")
         print("     within a minute, and the panel picks them up on its own,")
         print("     with nothing here to redo.")
+        return
+    if desk.desktop_waiting:
+        # Signed in, first sample not taken yet. Also fixes itself, and
+        # "sign in" here would be wrong (review, 2026-10-25).
+        print("  !  Claude Desktop is signed in but hasn't written a reading")
+        print("     yet; it does within a few minutes, and the panel picks it")
+        print("     up on its own, with nothing here to redo.")
         return
     if not desk.desktop:
         # No source exists. This is not a reduced panel, it is an empty
@@ -2654,12 +2710,21 @@ def cmd_status(args) -> int:
             who = ("Claude Desktop and Codex" if desk.codex
                    else "Claude Desktop alone")
             print(f"Claude Code not found -- running on {who}"
-                  f" ({'; '.join(gaps)})")
+                  f" ({'; '.join(gaps)}){desk.desktop_caveat}")
         elif desk.codex:
             # Codex sessions light the pip from their own session log.
-            print("Claude Code not found -- running on Codex alone"
-                  + (" (sign in to Claude Desktop for the Claude page)"
-                     if desk.unsigned_desktop else " (no Claude page)"))
+            if desk.unsigned_desktop:
+                why = " (sign in to Claude Desktop for the Claude page)"
+            elif desk.desktop_waiting:
+                why = (" (Claude Desktop hasn't written a reading yet; it"
+                       " does within a few minutes)")
+            else:
+                why = " (no Claude page)"
+            print("Claude Code not found -- running on Codex alone" + why)
+        elif desk.desktop_waiting:
+            print("Claude Code not found -- Claude Desktop is signed in but"
+                  " hasn't written a reading yet; it does within a few"
+                  " minutes")
         elif desk.unsigned_desktop:
             print("Claude Code not found -- Claude Desktop is installed but"
                   " has recorded no usage yet; open it and sign in")
@@ -2752,19 +2817,22 @@ def cmd_status(args) -> int:
         # never renders one (measured 2026-09-26), and the board is already
         # being fed from Desktop's files.
         print("Usage data  from Claude Desktop's own files (no Claude Code"
-              " status line on this machine)")
+              " status line on this machine)" + desk.desktop_caveat)
     elif age is not None:
         print(f"Usage data  {age}s old -- open Claude Code to refresh it")
     elif desk.codex:
         print("Usage data  from the Codex session log (no Claude Code status"
               " line yet)")
+    elif desk.desktop_waiting and not desk.on_path:
+        print("Usage data  none yet -- Claude Desktop hasn't written a"
+              " reading; it does within a few minutes")
     elif desk.unsigned_desktop and not desk.on_path:
         print("Usage data  none yet -- Claude Desktop is installed; open it"
               " and sign in")
     else:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
-    _source_lines()
+    _source_lines(desk)
     if getattr(args, "wire", False):
         _wire_line()
     return 0
@@ -2945,7 +3013,7 @@ def _codex_hook_status():
     return [f"Codex hook  firing, {n} live session{'s' if n != 1 else ''}"]
 
 
-def _source_lines():
+def _source_lines(desk=None):
     """One line each for the two sources CI cannot exercise.
 
     Claude Desktop is a closed GUI app and Codex will not write a rollout
@@ -2953,20 +3021,51 @@ def _source_lines():
     It can only be caught here, on the machine where the file is -- and the
     daemon already knows (it logs once and goes quiet). This is where a
     person finds out, and what they paste into a bug report.
+
+    The Desktop row prints from `desk`'s one reading of the cache, the same
+    one every other Desktop line of status came from; without a desk (a
+    caller that wants these rows alone) it takes its own.
     """
     from pc.providers import claude_desktop, codex_cli
     now = time.time()
 
     desktop = claude_desktop.ClaudeDesktopProvider()
-    if os.path.exists(desktop.path()):
-        frames = desktop.poll(now)
-        if frames:
-            age = now - frames[0].observed_at
+    reading = desk.desktop_reading if desk is not None else desktop_reading()
+    if reading is not None:
+        # verdict(), not poll(): one read decides the row, and nothing lands
+        # on stderr. poll() and a second look at the file could see two
+        # different files -- the app rewrites it every few minutes -- and
+        # poll()'s daemon-log complaint printed "did not parse" right above a
+        # row saying the opposite (review, 2026-10-25).
+        verdict, frame = reading
+        if verdict == claude_desktop.VERDICT_FRAME:
+            age = now - frame.observed_at
             print(f"Desktop     usage cache parsed, reading"
                   f" {_age(age)} old")
             for line in desktop_staleness_note(age):
                 print(f"            {line}")
+        elif verdict == claude_desktop.VERDICT_UNFILLED:
+            # The app's own empty shape, before its first sample, is not a
+            # changed format. It used to share the "please report it" line
+            # below, and people reported a fault that was not there
+            # (destaben, 2026-10-19). Only the exact empty shapes land here;
+            # see _is_unfilled_doc. The last line keeps a report open for an
+            # app that never fills it.
+            print("Desktop     usage cache present but holds no usage"
+                  " figures yet")
+            print("            Claude Desktop fills it in after its first"
+                  " reading; if it stays empty while")
+            print("            the app shows usage, please report it")
+        elif verdict == claude_desktop.VERDICT_UNREADABLE:
+            # Permissions, a Windows sharing lock, a file deleted between the
+            # exists() above and the read. None of those is a format change,
+            # and calling them one sent a report about the wrong thing.
+            print("Desktop     usage cache present but could not be read")
+            print(f"            looked at {desktop.path()}")
         else:
+            # VERDICT_NOT_OURS and VERDICT_GARBLED: JSON in a layout we do not
+            # know, or not JSON at all. Either may be the app changing its
+            # file, which is exactly what this row exists to catch.
             print("Desktop     usage cache present but did not parse --"
                   " the app's file format may have changed; please report it")
     else:
@@ -2974,8 +3073,14 @@ def _source_lines():
         # think it does has been seen on macOS and is a convention on the
         # other two; the first person to run this beside a signed-in Desktop
         # on Windows or Linux is the check, and this line is what they need.
-        print("Desktop     no usage cache (Claude Desktop not installed, or"
-              " never signed in)")
+        if desk is not None and desk.desktop_installed:
+            # Its Local Storage says the app has run here, so "not
+            # installed" is already ruled out.
+            print("Desktop     no usage cache (Claude Desktop installed but"
+                  " never signed in)")
+        else:
+            print("Desktop     no usage cache (Claude Desktop not installed,"
+                  " or never signed in)")
         print(f"            looked at {desktop.path()}")
 
     logs = codex_cli.recent_rollouts()

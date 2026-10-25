@@ -17,6 +17,7 @@ import time
 import pytest
 
 from pc import cli, install_statusline
+from tests.support import desktop_cache as _dc
 
 
 @pytest.fixture(autouse=True)
@@ -416,13 +417,24 @@ def test_status_says_so_when_no_hooks_are_installed(tmp_path, capsys):
 # 2026-09-30).
 
 
+def _desktop_reporting():
+    """desktop_reading() for a cache with a fresh sample in it, made by the
+    provider's own parser from a generated document."""
+    from pc.providers import claude_desktop
+    now = time.time()
+    frame = claude_desktop.ClaudeDesktopProvider(path="unused").parse_cache_file(
+        _dc.doc([_dc.sample(int(now * 1000))]), now)
+    return claude_desktop.VERDICT_FRAME, frame
+
+
 def _no_cli(monkeypatch, desktop=True, codex=False, desktop_installed=None):
     """A machine with no command-line Claude Code. claude_on_path is patched
     too: claude_version fails the same way for a broken install that IS on
     PATH, and a developer's own `claude` would otherwise leak in."""
     monkeypatch.setattr(cli, "claude_version", lambda: (None, None))
     monkeypatch.setattr(cli, "claude_on_path", lambda: False)
-    monkeypatch.setattr(cli, "desktop_app_present", lambda: desktop)
+    monkeypatch.setattr(cli, "desktop_reading",
+                        lambda: _desktop_reporting() if desktop else None)
     monkeypatch.setattr(cli, "codex_present", lambda: codex)
     installed = desktop if desktop_installed is None else desktop_installed
     monkeypatch.setattr(cli, "desktop_app_installed", lambda: installed)
@@ -827,7 +839,7 @@ def test_status_on_a_cli_and_desktop_desk_still_asks_for_the_status_line(
     monkeypatch.setattr(cli, "claude_version",
                         lambda: ("2.1.300 (Claude Code)", (2, 1, 300)))
     monkeypatch.setattr(cli, "claude_on_path", lambda: True)
-    monkeypatch.setattr(cli, "desktop_app_present", lambda: True)
+    monkeypatch.setattr(cli, "desktop_reading", _desktop_reporting)
     monkeypatch.setattr(cli, "codex_present", lambda: False)
     _settings(tmp_path, {})
     cli.main(["status"])
@@ -1226,3 +1238,272 @@ def test_a_matched_pair_says_none_of_it():
     out = _board_lines_for(RELEASE_VERSION)
     assert "they ship together" not in out
     assert "ahead of the published release" not in out
+
+
+# The Desktop row of `blink status`, driven by _source_lines() alone: the rest
+# of status runs `claude --version` (a 30 s timeout on a desk where it hangs)
+# and lists the real serial ports, and an assertion about stderr has to be
+# about this row, not about everything else on the machine (review,
+# 2026-10-25). The shapes are tests/support/desktop_cache.py's, shared with
+# the provider's own tests.
+
+def _desktop_cache(content):
+    """Write Claude Desktop's usage cache where status looks for it. The path
+    is resolved at call time, so it lands under conftest's sandbox HOME (and
+    APPDATA on Windows), never in the real one."""
+    from pc.providers import claude_desktop
+    path = claude_desktop.cache_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(_dc.as_bytes(content))
+    return path
+
+
+def _source_rows(capsys):
+    """(every line _source_lines printed, everything on stderr)."""
+    cli._source_lines()
+    cap = capsys.readouterr()
+    return cap.out.splitlines(), cap.err
+
+
+def _desktop_status(capsys):
+    """(the Desktop row with its continuation lines, everything on stderr)."""
+    lines, err = _source_rows(capsys)
+    starts = [i for i, l in enumerate(lines) if l.startswith("Desktop     ")]
+    assert starts, "status printed no Desktop line"
+    i = starts[0]
+    row = [lines[i]]
+    for l in lines[i + 1:]:
+        if not l.startswith("            "):
+            break
+        row.append(l)
+    return "\n".join(row), err
+
+
+_DESKTOP_REPORTABLE = {**_dc.NOT_UNFILLED, **_dc.GARBLED}
+
+
+@pytest.mark.parametrize("content", list(_dc.UNFILLED.values()),
+                         ids=list(_dc.UNFILLED))
+def test_status_calls_an_empty_desktop_cache_not_yet_filled(
+        capsys, content):
+    """The app before its first reading, not a format change. Asking for a
+    bug report there sent people off to report a fault that was not there."""
+    _desktop_cache(content)
+    row, err = _desktop_status(capsys)
+    assert "did not parse" not in row
+    assert "format may have changed" not in row
+    assert "holds no usage figures yet" in row
+    # poll()'s once-per-path daemon complaint used to land right above this
+    # row and contradict it.
+    assert err == ""
+
+
+@pytest.mark.parametrize("content", list(_DESKTOP_REPORTABLE.values()),
+                         ids=list(_DESKTOP_REPORTABLE))
+def test_status_still_asks_for_a_report_when_the_desktop_cache_is_not_ours(
+        capsys, content):
+    _desktop_cache(content)
+    row, err = _desktop_status(capsys)
+    assert "did not parse" in row
+    assert "please report it" in row
+    assert "holds no usage figures" not in row
+    assert err == ""
+
+
+@pytest.mark.parametrize("content", list(_dc.GARBLED.values()),
+                         ids=list(_dc.GARBLED))
+def test_a_cache_that_is_not_text_does_not_end_status_at_desktop(
+        capsys, content):
+    """UnicodeDecodeError went straight out of the Desktop row, and every row
+    after it was lost to a traceback (review, 2026-10-25)."""
+    _desktop_cache(content)
+    lines, _err = _source_rows(capsys)
+    assert any(l.startswith("Desktop     usage cache present but did not"
+                            " parse") for l in lines)
+    assert any(l.startswith("Codex       ") for l in lines), \
+        "the rows after Desktop went missing"
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="chmod 000 does not stop the owner reading on"
+                           " Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads a mode-000 file anyway")
+def test_an_unreadable_cache_is_not_called_a_format_change(capsys):
+    path = _desktop_cache(_dc.UNFILLED["version 2 with no samples"])
+    os.chmod(path, 0)
+    try:
+        row, err = _desktop_status(capsys)
+    finally:
+        os.chmod(path, 0o600)
+    assert "usage cache present but could not be read" in row
+    assert "format may have changed" not in row
+    assert "please report" not in row
+    assert err == ""
+
+
+@pytest.mark.parametrize("content", list(_dc.UNFILLED.values()),
+                         ids=list(_dc.UNFILLED))
+def test_status_wire_says_nothing_about_a_cache_not_filled_yet(capsys,
+                                                               content):
+    """`status --wire` polls the providers the way the daemon does, and
+    poll()'s "did not parse" complaint landed under a Desktop row that had
+    just called the same file not filled yet (review, 2026-10-25)."""
+    _desktop_cache(content)
+    cli._wire_line()
+    assert "did not parse" not in capsys.readouterr().err
+
+
+# One Desktop state per desk, from one read of the cache: absent, installed
+# but not signed in, signed in with no reading yet, or reporting. The empty
+# file used to count as "written usage", then as "not signed in", and the
+# second told a signed-in person to sign in (review, 2026-10-25).
+
+def _desk_with_cache(monkeypatch, content, codex=False, local_storage=False):
+    """read_desk() over a real cache file, with the command-line side
+    stubbed: no `claude` is run."""
+    monkeypatch.setattr(cli, "claude_version", lambda: (None, None))
+    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "codex_present", lambda: codex)
+    monkeypatch.setattr(cli, "desktop_app_installed", lambda: local_storage)
+    if content is not None:
+        _desktop_cache(content)
+    return cli.read_desk()
+
+
+_WAITING = "hasn't written a reading yet"
+
+
+@pytest.mark.parametrize("content", list(_dc.UNFILLED.values()),
+                         ids=list(_dc.UNFILLED))
+def test_a_cache_not_filled_yet_is_a_desk_waiting_for_its_reading(
+        monkeypatch, content):
+    desk = _desk_with_cache(monkeypatch, content)
+    assert desk.desktop is False            # nothing on the Claude page yet
+    assert desk.desktop_waiting is True
+    assert desk.desktop_installed is True   # the app's own file proves it
+    assert desk.unsigned_desktop is False   # and it is signed in
+
+
+@pytest.mark.parametrize("content", [
+    json.dumps({"version": 2, "samples": [_dc.sample(_dc.T_MS)]}),
+    *_dc.NOT_UNFILLED.values(), *_dc.GARBLED.values()],
+    ids=["a reading", *_dc.NOT_UNFILLED, *_dc.GARBLED])
+def test_any_other_cache_still_counts_as_desktop_usage(monkeypatch, content):
+    """A file in a layout we cannot read is still the app having written
+    usage; the status row is where that gets reported, not this light."""
+    desk = _desk_with_cache(monkeypatch, content)
+    assert desk.desktop is True
+    assert desk.desktop_waiting is False
+
+
+def test_no_cache_and_local_storage_is_not_signed_in(monkeypatch):
+    desk = _desk_with_cache(monkeypatch, None, local_storage=True)
+    assert desk.unsigned_desktop is True
+    assert desk.desktop_waiting is False
+
+
+@pytest.mark.parametrize("codex", [False, True], ids=["alone", "with Codex"])
+def test_a_waiting_desktop_is_never_told_to_sign_in(monkeypatch, capsys,
+                                                    codex):
+    desk = _desk_with_cache(monkeypatch, _dc.UNFILLED["an empty object"],
+                            codex=codex, local_storage=True)
+    cli._note_if_no_claude_code(desk)
+    monkeypatch.setattr(cli, "read_desk", lambda version=None: desk)
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "sign in" not in out
+    assert _WAITING in out
+
+
+def _status_rows(monkeypatch, capsys, desk):
+    monkeypatch.setattr(cli, "read_desk", lambda version=None: desk)
+    cli.main(["status"])
+    return capsys.readouterr().out.splitlines()
+
+
+def _row(lines, start):
+    rows = [l for l in lines if l.startswith(start)]
+    assert len(rows) == 1, (start, lines)
+    return rows[0]
+
+
+@pytest.mark.parametrize("content", [
+    *_dc.NOT_UNFILLED.values(), *_dc.GARBLED.values()],
+    ids=[*_dc.NOT_UNFILLED, *_dc.GARBLED])
+def test_rows_that_credit_desktop_admit_its_cache_did_not_parse(
+        monkeypatch, capsys, content):
+    """"Running on Claude Desktop alone" and "Usage data from Claude
+    Desktop's own files" above a Desktop row saying the file did not parse:
+    three rows, two of them wrong (review, 2026-10-25)."""
+    desk = _desk_with_cache(monkeypatch, content)
+    lines = _status_rows(monkeypatch, capsys, desk)
+    caveat = "(but its usage cache did not parse; see the Desktop row)"
+    assert _row(lines, "Claude Code not found -- running on").endswith(caveat)
+    assert _row(lines, "Usage data  ").endswith(caveat)
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="chmod 000 does not stop the owner reading on"
+                           " Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads a mode-000 file anyway")
+def test_rows_that_credit_desktop_admit_its_cache_could_not_be_read(
+        monkeypatch, capsys):
+    path = _desktop_cache(_dc.UNFILLED["an empty object"])
+    os.chmod(path, 0)
+    try:
+        desk = _desk_with_cache(monkeypatch, None)
+    finally:
+        os.chmod(path, 0o600)
+    lines = _status_rows(monkeypatch, capsys, desk)
+    caveat = "(but its usage cache could not be read; see the Desktop row)"
+    assert _row(lines, "Claude Code not found -- running on").endswith(caveat)
+    assert _row(lines, "Usage data  ").endswith(caveat)
+
+
+def test_a_reading_desktop_gets_no_caveat(monkeypatch, capsys):
+    desk = _desk_with_cache(monkeypatch, _dc.doc([_dc.sample(
+        int(time.time() * 1000))]))
+    lines = _status_rows(monkeypatch, capsys, desk)
+    assert "see the Desktop row" not in "\n".join(lines)
+
+
+def test_the_waiting_usage_row_says_yet_once(monkeypatch, capsys):
+    desk = _desk_with_cache(monkeypatch, _dc.UNFILLED["an empty object"])
+    row = _row(_status_rows(monkeypatch, capsys, desk), "Usage data  ")
+    assert row.count("yet") == 1
+
+
+def test_an_installed_desktop_with_no_cache_is_named_as_such(monkeypatch,
+                                                            capsys):
+    """Its Local Storage proves the app ran here, so "not installed, or
+    never signed in" offered a possibility the desk had already ruled out."""
+    desk = _desk_with_cache(monkeypatch, None, local_storage=True)
+    cli._source_lines(desk)
+    out = capsys.readouterr().out
+    assert ("Desktop     no usage cache (Claude Desktop installed but never"
+            " signed in)") in out
+    assert "Claude Desktop not installed" not in out
+
+
+def test_no_desktop_at_all_keeps_both_possibilities(monkeypatch, capsys):
+    desk = _desk_with_cache(monkeypatch, None, local_storage=False)
+    cli._source_lines(desk)
+    assert ("no usage cache (Claude Desktop not installed, or never signed"
+            " in)") in capsys.readouterr().out
+
+
+def test_status_reads_the_desktop_cache_once(monkeypatch, capsys):
+    """One read decides every Desktop line: the app rewrites the file every
+    few minutes, and two reads can disagree with each other."""
+    from pc.providers import claude_desktop
+    reads = []
+    real = claude_desktop.ClaudeDesktopProvider.verdict
+    monkeypatch.setattr(claude_desktop.ClaudeDesktopProvider, "verdict",
+                        lambda self, now: reads.append(1) or real(self, now))
+    _desk_with_cache(monkeypatch, _dc.UNFILLED["an empty object"])
+    reads.clear()
+    cli.main(["status"])
+    assert reads == [1]
