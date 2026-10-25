@@ -6,7 +6,6 @@ Run inside the Zephyr venv (has pyserial) or `pip install pyserial`:
 """
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -15,8 +14,8 @@ import serial  # pyserial
 from serial.tools import list_ports
 
 from pc import ota as ota_mod
-from pc import (ingest, install_statusline, logbook, protocol,
-                statusline_source, update, win_driver)
+from pc import (ingest, install_statusline, interval, logbook, protocol,
+                status_page, statusline_source, update, win_driver)
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
@@ -249,37 +248,12 @@ def poll_interval():
     the tap must count records whose msg["t"] == "usage" rather than counting
     tx records.
 
-    Malformed or non-positive is refused rather than obeyed: 0 or a negative
-    makes the poll gate true on every turn of the read loop, which would
-    hammer a rate-limited usage endpoint as fast as the loop spins. It falls
-    back to the default and says so -- once, because main() resolves this at
-    startup and never asks again.
-
-    Non-finite is refused for the opposite reason, and is the quieter hazard
-    of the two. "nan", "inf" and "1e400" all parse without raising, and a
-    positivity check alone lets them through -- every comparison against nan
-    is False, so `nan <= 0` is False. Either one poisons
-    `next_poll = monotonic() + interval`, after which `monotonic() >=
-    next_poll` is False for the rest of the run: polling stops dead, the
-    board never receives usage again, and nothing anywhere says why. Hence
-    isfinite FIRST, before any comparison that nan would win by default.
+    Malformed, non-positive and non-finite values are refused, with a line
+    saying so; pc/interval.py has why each of those is dangerous, and it is
+    shared with the status-page poll so the two cannot drift apart again.
     """
-    raw = os.environ.get("BLINK_POLL_INTERVAL_S")
-    if raw is None:
-        return POLL_INTERVAL_S
-    try:
-        seconds = float(raw)
-    except ValueError:
-        seconds = 0
-    if not math.isfinite(seconds) or seconds <= 0:
-        # "usable" rather than "positive": inf IS positive, and telling
-        # someone who typed it that it is not would send them looking in the
-        # wrong direction.
-        print(f"[bridge] BLINK_POLL_INTERVAL_S={raw!r} is not a usable"
-              f" number of seconds; polling every {POLL_INTERVAL_S} s.",
-              file=sys.stderr)
-        return POLL_INTERVAL_S
-    return seconds
+    return interval.seconds_from_env(os.environ, "BLINK_POLL_INTERVAL_S",
+                                     POLL_INTERVAL_S)
 
 
 def build_bus():
@@ -749,7 +723,13 @@ def main(argv=None):
     # offset -- a customer travelling, or the twice-yearly DST step. Those
     # are worth a line each; the other 1439 a day are not.
     time_frames = logbook.Repeats(("utc_offset_min",), "clock syncs")
-    _REPEATED = {"usage": usage_frames, "time": time_frames}
+    # The status-page level is re-stated with every heartbeat, one line per
+    # page, so it is kept per provider -- see logbook.RepeatsBy for why one
+    # shared Repeats would suppress nothing.
+    svc_frames = logbook.RepeatsBy("provider", ("level", "what"),
+                                   "status-page lines")
+    _REPEATED = {"usage": usage_frames, "time": time_frames,
+                 "svc": svc_frames}
     watchdog = install_statusline.DriftWatchdog(
         settings_path(), shim_path(),
         shims=((shim_path(), "blink-statusline.sh"),
@@ -801,7 +781,8 @@ def main(argv=None):
         drifted = watchdog.tick()
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
-        for line in (heartbeat.due(), usage_frames.due(), time_frames.due()):
+        for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
+                     svc_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):
@@ -829,6 +810,16 @@ def main(argv=None):
     # a property of this run, and the read loop turns often enough that an
     # environment lookup per pass would be a strange place to spend time.
     poll_every = poll_interval()
+
+    # The status-page watch, built once for the life of the process and NOT
+    # per connection: its debounce and its five-minute spacing describe the
+    # vendors' pages, not this cable, and a board nudged out and back in must
+    # neither forget a confirmed incident nor earn the pages an early fetch.
+    # Started unconditionally and costs nothing while the setting is off --
+    # it reads ~/.blink/config.json every few seconds and makes no request.
+    svc_watch = status_page.StatusWatch(
+        enabled=lambda: status_page.enabled(blink_home))
+    svc_watch.start()
 
     last_err = None
     explicit_port = bool(args.port)
@@ -1075,6 +1066,13 @@ def main(argv=None):
             # image boots -- so the "the screen goes dark for about 2 minutes"
             # frame has to be on screen BEFORE we take the port away, or the
             # blackout arrives with no explanation.
+            #
+            # The board stops showing pages here, so the status pages stop
+            # being asked here -- before esptool's 75 s, not after it. The
+            # first usage line after it boots names them again; the serial-
+            # lost handler below does the same, and status_page.WANT_TTL_S
+            # covers the paths that cannot say so and run out instead.
+            svc_watch.want(())
             time.sleep(4)
             print(f"[bridge] ota: closing port to flash {version}",
                   file=sys.stderr)
@@ -1126,6 +1124,9 @@ def main(argv=None):
                         report_failure=report_failure,
                         set_preferred=bus.set_preferred,
                         self_update=self_update,
+                        status_watch=svc_watch,
+                        # For the svc gate only, when the boot hello is lost.
+                        board_fw_hint=known.get("fw"),
                         pending=update.PendingFirmware(
                             os.path.join(blink_home, "pending_fw.json")))
         report_failure = None   # handed to the Bridge above; never repeated
@@ -1265,6 +1266,11 @@ def main(argv=None):
             asked.clear()
             searched = None
             patient = False
+            # No board, no pages on show, so nothing to ask the status pages
+            # about while the cable is out. Only the wanted set is cleared;
+            # what the watch already knows is kept for the board's return,
+            # and the next usage line it is sent names the pages again.
+            svc_watch.want(())
             time.sleep(1)
             port = wait_for_port(args.port, on_wait=_upkeep)
 

@@ -193,7 +193,7 @@ def test_a_writer_that_never_sends_a_newline_does_not_grow_memory():
     buf, j = _journal()
     for _ in range(20):
         j.write("x" * 1000)
-    assert len(j._partial) <= 8192
+    assert all(len(p) <= 8192 for p in j._partials.values())
     assert buf.getvalue()          # it got written out rather than held
 
 
@@ -511,6 +511,36 @@ def test_a_missing_log_is_not_an_error(tmp_path):
                                   io.StringIO()) is False
 
 
+def test_a_rotation_holds_the_journal_across_copy_and_truncate(tmp_path,
+                                                                 monkeypatch):
+    """With a second thread printing, a line written between the copy and
+    the truncation is in neither file. Holding the Journal's lock across
+    both closes that window for every line that goes through it."""
+    import threading
+    path, f = _live(tmp_path, 2000)
+    j = logbook.Journal(f)
+    seen = {}
+    real_copy = logbook._copy
+
+    def copy(src, dst):
+        got = []
+        t = threading.Thread(
+            target=lambda: got.append(j._lock.acquire(blocking=False)))
+        t.start()
+        t.join()
+        seen["other_thread_could_print"] = got[0]
+        if got[0]:
+            j._lock.release()
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(logbook, "_copy", copy)
+    try:
+        assert logbook.rotate_if_full(path, j, cap=1000) is True
+    finally:
+        f.close()
+    assert seen == {"other_thread_could_print": False}
+
+
 def test_a_rotation_that_cannot_be_written_does_not_raise(tmp_path,
                                                           monkeypatch):
     """This runs in the daemon's poll loop. A log that cannot be rotated is
@@ -526,3 +556,117 @@ def test_a_rotation_that_cannot_be_written_does_not_raise(tmp_path,
         assert logbook.rotate_if_full(path, f, cap=1000) is False
     finally:
         f.close()
+
+
+# ------------------------------------------------------------- two threads
+
+def test_two_threads_printing_at_once_never_glue_or_break_lines():
+    """The status-page watch is the daemon's first second thread, and both it
+    and the serial loop print through this. print() calls write() twice per
+    line, so an unguarded Journal glued one thread's text onto the other's
+    newline, emitted empty stamped lines, and raised IndexError out of
+    print() -- which on the serial loop escapes main() and ends the daemon.
+    """
+    import re
+    import sys
+    import threading
+
+    buf = io.StringIO()
+    j = logbook.Journal(buf, clock=lambda: "T")
+    errors = []
+    n = 2000
+
+    def talk(tag):
+        try:
+            for i in range(n):
+                print(f"[{tag}] line {i}", file=j)
+        except Exception as e:          # pragma: no cover - the failure
+            errors.append(e)
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=talk, args=(t,)) for t in "ab"]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(old)
+    j.flush()
+
+    assert errors == []
+    lines = buf.getvalue().splitlines()
+    bad = [ln for ln in lines if not re.fullmatch(r"T \[[ab]\] line \d+", ln)]
+    assert bad == []
+    for tag in "ab":
+        got = [int(ln.rsplit(" ", 1)[1]) for ln in lines
+               if ln.startswith(f"T [{tag}]")]
+        assert got == list(range(n))
+
+
+def test_a_final_flush_cannot_hang_on_a_held_lock():
+    """At interpreter shutdown the status thread can be frozen holding the
+    lock; the last flush must give up rather than wait for it forever."""
+    import threading
+    import time
+    buf = io.StringIO()
+    j = logbook.Journal(buf, clock=lambda: "T")
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with j._lock:
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    held.wait(5)
+    start = time.monotonic()
+    j.flush()
+    assert time.monotonic() - start < 5
+    release.set()
+    t.join()
+
+
+# ---------------------------------------------------- repeats, per provider
+
+def _svc(p, level, what=None):
+    m = {"t": "svc", "v": 2, "provider": p, "level": level}
+    if what:
+        m["what"] = what
+    return m
+
+
+def test_svc_restatements_are_counted_per_provider():
+    """The heartbeat re-states each page's status every minute. One Repeats
+    shared by both pages never matches -- claude and codex alternate -- so
+    each provider gets its own."""
+    r = logbook.RepeatsBy("provider", ("level", "what"), "svc lines")
+    logged = 0
+    for _ in range(1440):                     # a day of heartbeats
+        logged += r.worth_logging(_svc("claude", "ok"))
+        logged += r.worth_logging(_svc("codex", "ok"))
+    assert logged == 2
+
+
+def test_a_real_svc_change_is_still_logged():
+    r = logbook.RepeatsBy("provider", ("level", "what"), "svc lines")
+    assert r.worth_logging(_svc("claude", "ok"))
+    assert not r.worth_logging(_svc("claude", "ok"))
+    assert r.worth_logging(_svc("claude", "major", "Claude Code"))
+    assert r.worth_logging(_svc("codex", "major", "Codex"))
+    assert r.worth_logging(_svc("claude", "major", "API"))
+
+
+def test_per_provider_repeats_report_what_they_held_back():
+    t = [0.0]
+    r = logbook.RepeatsBy("provider", ("level", "what"), "svc lines",
+                          every_s=600, now=lambda: t[0])
+    for _ in range(5):
+        r.worth_logging(_svc("claude", "ok"))
+        r.worth_logging(_svc("codex", "ok"))
+    assert r.due() is None
+    t[0] = 601
+    assert r.due() == "[bridge] 8 unchanged svc lines not logged"
+    assert r.due() is None

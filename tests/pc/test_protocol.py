@@ -1244,3 +1244,58 @@ class VolatileUsageKeys(unittest.TestCase):
         msg = dict(self._loaded(), some_field_from_2027=7)
         self.assertEqual(
             protocol.meaningful_usage(msg)["some_field_from_2027"], 7)
+
+
+# --------------------------------------------------------------- svc message
+
+
+def test_svc_message_shape():
+    assert protocol.svc("claude", "major", "Claude Code") == {
+        "t": "svc", "v": 2, "provider": "claude", "level": "major",
+        "what": "Claude Code"}
+
+
+def test_svc_ok_carries_no_component():
+    """Omitted rather than sentinelled, like session's label: "ok" names
+    nothing, so a `what` left over from the incident before cannot ride
+    along with the all-clear."""
+    assert protocol.svc("codex", "ok", "Login") == {
+        "t": "svc", "v": 2, "provider": "codex", "level": "ok"}
+
+
+def test_svc_refuses_a_level_the_board_does_not_know():
+    import pytest
+    with pytest.raises(ValueError):
+        protocol.svc("claude", "major_outage", "Claude Code")
+
+
+def test_svc_levels_are_the_contract():
+    # The firmware is built to this list; changing it is a wire change.
+    assert protocol.SVC_LEVELS == ("ok", "maint", "degraded", "partial",
+                                   "major")
+
+
+def test_svc_caps_the_component_on_a_character_boundary():
+    m = protocol.svc("claude", "partial", "é" * 40)
+    assert protocol.SVC_WHAT_MAX_BYTES == 24
+    assert len(m["what"].encode("utf-8")) <= protocol.SVC_WHAT_MAX_BYTES
+    assert m["what"] == "é" * 12
+
+
+def test_the_longest_svc_line_fits_with_room_to_spare():
+    m = protocol.svc("x" * protocol.MODEL_MAX_CHARS, "degraded", "W" * 100)
+    raw, why = protocol.encode_checked(m)
+    assert why is None
+    assert len(raw) < 128, len(raw)
+
+
+def test_svc_keys_never_collide_with_its_values():
+    """msg_parse.c once read `"edition":"codex"` as the literal "edition"
+    because a value matched a key name (tests/msg_parse/host_test.c). No
+    value this message can carry may equal one of its own keys."""
+    from pc import status_page
+    keys = {"t", "v", "provider", "level", "what"}
+    values = set(protocol.SVC_LEVELS) | set(status_page.PAGES) | {
+        short for page in status_page.PAGES.values()
+        for _, short in page.components} | {"svc"}
+    assert not keys & values

@@ -34,7 +34,9 @@ and the HTML is derived from it rather than the other way round.
 Your 5-hour session and your 7-day week, each as a dial that runs green to
 amber to red, with a countdown to when it resets. It reads the figures Claude
 Code and Codex have already written on your own computer, so there is no
-account, no sign-in, and nothing leaves the machine.
+account, no sign-in, and none of your usage leaves the machine. (The app
+checks for its own updates once a day, and can read the public status pages
+if you turn that on.)
 
 ## What it does
 
@@ -163,7 +165,8 @@ adjust a line without a rewrite.
 > If you use Claude Code or Codex you have a 5-hour limit and a 7-day one, and
 > no way to see where you stand without stopping to check. BLINK shows both on
 > your desk: two dials, green to amber to red, counting down to each reset. It
-> reads what the tools already write on your own machine, so nothing leaves it.
+> reads what the tools already write on your own machine, so your usage never
+> leaves it.
 >
 > One $12 ESP32 board and six printed parts. No screws, nothing to solder, and
 > a stand that prints in place and folds flat into the back.

@@ -7,6 +7,7 @@ import time
 
 from pc import ota as ota_mod
 from pc import protocol
+from pc import status_page
 from pc.version import PROTO_VERSION, RELEASE_VERSION
 
 LIVENESS_WINDOW_S = 30.0
@@ -33,7 +34,8 @@ class Bridge:
                  app_ver=RELEASE_VERSION,
                  wall=_local_wall, fetch_manifest=None, fetch_firmware=None,
                  flash_image=None, self_update=None, pending=None,
-                 fetch_signed_manifest=None, report_failure=None):
+                 fetch_signed_manifest=None, report_failure=None,
+                 status_watch=None, board_fw_hint=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -70,6 +72,17 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
         self._last_session = None        # (label, n) last sent; see poll_once
+        # The status-page watch (pc/status_page.StatusWatch), or None on a
+        # Bridge wired without one -- every test fake -- which then sends no
+        # svc message at all, exactly as a daemon from before it did.
+        self._svc = status_watch
+        # What board.json says the board last ran. Only ever a fallback for
+        # the svc gate, for the connect whose boot hello was lost: never
+        # written into _board_fw, which the OTA guard reads.
+        self._board_fw_hint = board_fw_hint
+        self._svc_pair = None            # (provider, p2) of the last usage
+        self._svc_pages = ()             # those with a status page, in order
+        self._last_svc = {}              # provider -> (level, what) last sent
         # The last usage message actually PUT ON THE WIRE, minus the fields
         # that move on their own (protocol.VOLATILE_USAGE_KEYS). This is what
         # poll_if_changed decides against: "sent", not "read", because the
@@ -98,6 +111,8 @@ class Bridge:
         # the same shape as offer_if_newer on every connect rather than once
         # per daemon lifetime.
         self._last_session = None
+        # The status level needs no reset here: poll_once re-states it on
+        # every heartbeat, and this is one (see protocol.svc's contract).
         self.poll_once()                 # push current data immediately
         # Only once the board has been heard. On the no-reset connect path
         # greet() runs before any message has reached on_message, so
@@ -160,7 +175,17 @@ class Bridge:
             # rate-limited and this fires every 10 s.
             self._write(protocol.pong())
         elif t == "ota_query":
-            self._on_ota_query(msg.get("cur", ""))
+            # The board's own word on what it runs ALWAYS wins. _on_ota_query
+            # only fills an empty _board_fw, which is right for the guesses
+            # that also reach it -- board.json's version via offer_if_newer,
+            # and the "0.0.0" fallback -- and wrong for this: on a reconnect
+            # without a reset, board.json's 1.3.4 was latched first, and a
+            # board that had just updated itself to 1.4.0 said so and was
+            # ignored until the next reconnect.
+            cur = msg.get("cur", "")
+            if protocol._fw_tuple(cur) is not None:
+                self._board_fw = cur
+            self._on_ota_query(cur)
         elif t == "ota_flash":
             self._on_ota_flash()
         # unknown types ignored
@@ -534,6 +559,17 @@ class Bridge:
         epoch, off = self._wall()
         self._write(protocol.time_msg(epoch, off))
 
+        # The status level is re-stated with every heartbeat, and FIRST, so
+        # that nothing below can skip it. svc goes out on change, and the
+        # board drops a non-ok level it has not heard for 150 s (see
+        # protocol.svc) -- so this is both the repair for a line that was
+        # lost and the renewal that keeps a real incident up. It used to
+        # ride on the usage path, and a provider the bus had quarantined
+        # (usage None) left the last incident standing for as long as the
+        # quarantine lasted. Pages are the last ones usage named.
+        self._last_svc = {}
+        self._send_svc_if_changed()
+
         try:
             usage = self._read_usage()
         except Exception as e:
@@ -590,8 +626,11 @@ class Bridge:
         try:
             usage = self._read_usage()
         except Exception:
-            return
+            usage = None
         if usage is None:
+            # Nothing to say about usage, but the status pages still have
+            # their own news, and want() still has to be renewed.
+            self._send_svc_if_changed()
             return
         if protocol.meaningful_usage(usage) != self._last_pushed:
             self._send_usage(usage)
@@ -612,6 +651,9 @@ class Bridge:
         # line to carry it would spend the budget this comparison exists to
         # protect.
         self._send_session_if_changed()
+        # And the status level, which changes on the watch's own thread and
+        # would otherwise wait for the next usage change to be noticed.
+        self._send_svc_if_changed()
 
     def _read_usage(self):
         """The usage message as it would go out right now, or None if there is
@@ -637,6 +679,27 @@ class Bridge:
         self._last_pushed = protocol.meaningful_usage(usage)
 
         self._send_session_if_changed()
+
+        # Which pages the board has is read off the line it was just sent:
+        # `provider` is the outer ring and `p2`, when present, the inner one
+        # and the second page. That is the only place the daemon knows it,
+        # and it is what keeps a Claude-only desk from ever asking
+        # status.openai.com anything.
+        #
+        # When that pair changes -- the second page drops out or comes back,
+        # or the owner swaps which provider is main -- everything sent so far
+        # is forgotten and each page is told again. The board does not keep a
+        # page's status while the page is gone, so "it was told an hour ago"
+        # is not something it still knows.
+        pair = (usage.get("provider"), usage.get("p2") or None)
+        if pair != self._svc_pair:
+            self._svc_pair = pair
+            self._last_svc = {}
+            # A provider with no status page (OpenCode) gets no message,
+            # rather than an "ok" that would claim somebody had checked.
+            self._svc_pages = tuple(p for p in status_page.PAGES
+                                    if p in pair)
+        self._send_svc_if_changed()
 
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
@@ -668,3 +731,26 @@ class Bridge:
         if pair != self._last_session:
             self._write(protocol.session(*pair))
             self._last_session = pair
+
+    def _send_svc_if_changed(self):
+        """Put each page's status-page level on the wire, on change only.
+
+        Tells the watch which pages to fetch, then sends what it has for each.
+        The watch is never asked to fetch here -- this runs on the serial
+        loop, and the network belongs to the watch's own thread.
+        """
+        if self._svc is None:
+            return
+        # Firmware before 1.4.0 drops svc unread. Nothing is sent to it, and
+        # want() is not renewed either, so no vendor is asked on behalf of a
+        # board that could not show the answer.
+        if not protocol.fw_shows_svc(self._board_fw or self._board_fw_hint):
+            return
+        # Renewed on every call: a want() runs out (status_page.WANT_TTL_S),
+        # and this is the call that stops being made when the board does.
+        self._svc.want(self._svc_pages)
+        for p in self._svc_pages:
+            cur = tuple(self._svc.shown(p))
+            if self._last_svc.get(p) != cur:
+                self._write(protocol.svc(p, *cur))
+                self._last_svc[p] = cur

@@ -27,7 +27,8 @@ import time
 from typing import NamedTuple
 
 from pc import (install_codex_hooks, install_hooks, install_statusline, ota,
-                protocol, statusline_source, update, win_driver)
+                protocol, status_page, statusline_source, update,
+                user_config, win_driver)
 # Eagerly, unlike the other providers, which are imported inside the functions
 # that use them to keep the frozen binary's start-up cheap. This one costs
 # nothing to import (os, and claude_state, which is json/os/sys/time) and it
@@ -2095,7 +2096,17 @@ def _announce():
         print(f"  Creates    {created}")
         print("             so the bridge starts when you log in.")
     print()
-    print("  It reads no credential and no token, and sends nothing anywhere.")
+    # Said to match the setting, not as a blanket promise: a reinstall over
+    # an install with status-page alerts on keeps them on, and "sends
+    # nothing anywhere" would then be false on the screen that says it.
+    print("  It reads no credential and no token, and sends nothing of yours"
+          " anywhere.")
+    if status_page.enabled(blink_home()) is True:
+        print("  Status-page alerts are on: it reads status.claude.com, and")
+        print("  status.openai.com for a Codex page, every"
+              f" {status_page.POLL_S // 60} minutes.")
+    else:
+        print("  Status-page alerts are off (blink config status-page on).")
     print("  The usage figures come from Claude Code, Claude Desktop's usage")
     print("  cache, or the Codex session log -- each of which has already")
     print("  worked them out. From the Codex log it keeps only the rate-limit")
@@ -2364,7 +2375,13 @@ def cmd_uninstall(_args) -> int:
               *glob.glob(os.path.join(blink_home(), "statusline.json.*.tmp")),
               os.path.join(blink_home(), "state.json"),
               os.path.join(blink_home(), "state.json.tmp"),
-              os.path.join(blink_home(), "pending_fw.json")):
+              os.path.join(blink_home(), "pending_fw.json"),
+              # `blink config`'s settings, and any temp file a write left.
+              # Not install's, but the status-page opt-in is a choice about
+              # the network, and a reinstall must not find it already on.
+              user_config.path(blink_home()),
+              *install_statusline.temp_siblings(
+                  user_config.path(blink_home()))):
         _rm(p)
     # The per-session state directory, and everything under it. state.json
     # above is the single-slot file this replaced; it is still on the list so
@@ -3211,6 +3228,78 @@ def cmd_provision(args) -> int:
     return rc
 
 
+# `blink config <setting> [on|off]`. One table, so the listing, the parser's
+# choices and the setter cannot disagree about which settings exist.
+#
+# A `config` verb rather than a top-level `blink status-page on`: `blink
+# status` already means "is the panel getting data?", and a sibling called
+# status-page beside it reads as more of that diagnosis rather than as a
+# switch. It also gives the settings that come after this one a home instead
+# of a new verb each.
+class _Setting(NamedTuple):
+    key: str            # in <blink_home>/config.json
+    enabled: object     # callable(blink_home) -> True / False / None
+    what: str           # one line, for the listing
+    said_on: tuple      # printed after turning it on
+    said_off: tuple     # printed after turning it off
+
+
+# Said out loud, because it is the one setting that adds to who this computer
+# talks to -- otherwise only github.com, once a day, for updates. No restart
+# is needed: the daemon re-reads the file every few seconds
+# (status_page.TICK_S). The firmware line is there because a board before
+# 1.4.0 is not sent the message this turns on (protocol.FW_SHOWS_SVC), and
+# "I switched it on and nothing happened" should not need a support email.
+_CONFIG = {
+    "status-page": _Setting(
+        status_page.SETTING, status_page.enabled,
+        "show incidents from status.claude.com and status.openai.com"
+        " on the panel",
+        (f"The bridge will read each provider's public status page every"
+         f" {status_page.POLL_S // 60} minutes,",
+         "for the pages your board shows. No account, token or usage is"
+         " sent.",
+         "The panel needs board firmware 1.4.0 or later to show it."),
+        ("The bridge makes no status-page requests.",)),
+}
+
+
+def cmd_config(args) -> int:
+    name = getattr(args, "setting", None)
+    value = getattr(args, "value", None)
+    home = blink_home()
+
+    def state(setting):
+        on = setting.enabled(home)
+        return "unreadable" if on is None else ("on" if on else "off")
+
+    if name is None:
+        for n, setting in _CONFIG.items():
+            # 12 wide: "unreadable" is ten, and ran into the description.
+            print(f"{n:<14}{state(setting):<12}{setting.what}")
+        return 0
+    setting = _CONFIG[name]
+    if value is not None:
+        try:
+            user_config.put(home, setting.key, value == "on")
+        except user_config.Unreadable as e:
+            # Refused rather than replaced: a file that does not parse is
+            # usually one somebody is in the middle of editing. _load's own
+            # words, which already name the file and say which of "not valid
+            # JSON" or "valid JSON but not an object" it is.
+            print(f"{e}; it was left as it is.")
+            print("Fix it or delete it, then run this again.")
+            return 1
+        except OSError as e:
+            print(f"Could not save the setting: {e}")
+            return 1
+    print(f"{name}: {state(setting)}")
+    if value is not None:
+        for line in (setting.said_on if value == "on" else setting.said_off):
+            print(line)
+    return 0
+
+
 def cmd_run(args) -> int:
     """The daemon. This is what the login service starts.
 
@@ -3262,6 +3351,13 @@ def main(argv=None) -> int:
     prov_p.add_argument("--port", default=None,
                         help="Serial port (default: find the board)")
     prov_p.add_argument("--baud", type=int, default=115200)
+    config_p = sub.add_parser(
+        "config",
+        help="Show or change a setting (blink config status-page on)")
+    config_p.add_argument("setting", nargs="?", choices=list(_CONFIG),
+                          help="Which setting; omit to list them all")
+    config_p.add_argument("value", nargs="?", choices=["on", "off"],
+                          help="Turn it on or off; omit to show it")
     run_p = sub.add_parser("run", help="Run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
                        help="Serial port (default: find the board)")
@@ -3281,6 +3377,7 @@ def main(argv=None) -> int:
         "update": cmd_update,
         "driver": cmd_driver,
         "provision": cmd_provision,
+        "config": cmd_config,
         "run": cmd_run,
     }[args.cmd](args)
 

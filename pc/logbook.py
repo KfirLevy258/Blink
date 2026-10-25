@@ -33,7 +33,9 @@ Nothing here imports anything outside the standard library, and nothing here
 looks at a payload: ConsoleEcho splits on newlines and forwards, and the
 Journal counts bytes.
 """
+import contextlib
 import os
+import threading
 import time
 
 # Rotate at 4 MB and keep four older generations: 20 MB on a customer's disk,
@@ -94,6 +96,16 @@ class Journal:
     newline -- so lines are assembled here and judged whole. A partial line
     is held rather than written, because a line cannot be un-written once it
     has gone out, and flush() emits whatever is pending.
+
+    THREADS. The status-page watch (pc/status_page.py) made the daemon two
+    threads printing through one Journal, and a Journal without a lock broke
+    three ways under it, all reproduced: one thread's text glued to the other
+    thread's newline, empty stamped lines, and IndexError raised out of
+    print() from the block detector's index -- which on the serial loop
+    escapes main() and ends the daemon. So every entry point takes one lock,
+    and the partial line is kept PER THREAD: the lock alone cannot stop
+    thread B's whole line landing between thread A's text and A's newline,
+    because print() makes those two separate write() calls.
     """
 
     def __init__(self, stream, clock=None, window=REPEAT_WINDOW,
@@ -104,7 +116,8 @@ class Journal:
         self._now = now or _time.monotonic
         self._window = window
         self._tally_every = tally_every_s
-        self._partial = ""          # a line not yet terminated
+        self._lock = threading.RLock()
+        self._partials = {}         # thread id -> a line not yet terminated
         self._recent = []           # lines emitted, most recent last
         self._block = None          # the repeating block, once detected
         self._pos = 0               # how far into it the current pass is
@@ -181,34 +194,54 @@ class Journal:
     def write(self, s) -> int:
         if not s:
             return 0
-        self._partial += s
-        while True:
-            i = self._partial.find("\n")
-            if i < 0:
-                break
-            line = self._partial[:i].rstrip("\r")
-            self._partial = self._partial[i + 1:]
-            self._offer(line)
-        # A writer that never sends a newline must not grow this without
-        # bound. Nothing does; the cap is here because a buffer fed from
-        # somebody else's print() is the wrong place to assume it.
-        if len(self._partial) > 8192:
-            self._offer(self._partial)
-            self._partial = ""
+        me = threading.get_ident()
+        with self._lock:
+            partial = self._partials.pop(me, "") + s
+            while True:
+                i = partial.find("\n")
+                if i < 0:
+                    break
+                line = partial[:i].rstrip("\r")
+                partial = partial[i + 1:]
+                self._offer(line)
+            # A writer that never sends a newline must not grow this without
+            # bound. Nothing does; the cap is here because a buffer fed from
+            # somebody else's print() is the wrong place to assume it.
+            if len(partial) > 8192:
+                self._offer(partial)
+                partial = ""
+            if partial:
+                self._partials[me] = partial
         return len(s)
 
     def flush(self):
-        """Anything held goes out now.
+        """Anything this thread holds goes out now.
 
         Called after every print() by the daemon's own flushing, and at
         shutdown -- so a partial line, or a suppressed run at the moment the
-        process ends, is still reported rather than lost.
+        process ends, is still reported rather than lost. Only the calling
+        thread's partial line: another thread's is a line it is still in the
+        middle of printing, and emitting it here would cut it in two.
         """
-        if self._partial:
-            self._offer(self._partial)
-            self._partial = ""
-        self._tally()
-        self._stream.flush()
+        # With a timeout: at interpreter shutdown the status thread (a daemon
+        # thread) is frozen wherever it was, possibly holding this lock, and
+        # the last flush waiting on it would hang the exit forever. A second
+        # is long enough for any live writer and loses at most a tally.
+        if not self._lock.acquire(timeout=1.0):
+            return
+        try:
+            partial = self._partials.pop(threading.get_ident(), "")
+            if partial:
+                self._offer(partial)
+            self._tally()
+            self._stream.flush()
+        finally:
+            self._lock.release()
+
+    def hold(self):
+        """The lock every write takes, for a caller that must not be
+        written under -- rotate_if_full, between its copy and its truncate."""
+        return self._lock
 
     def isatty(self) -> bool:
         return False
@@ -372,6 +405,47 @@ class Repeats:
         return f"[bridge] {n} unchanged {self._label} not logged"
 
 
+class RepeatsBy:
+    """Repeats, kept separately for each value of one field.
+
+    For `svc`, which the heartbeat re-states once a minute per page shown. A
+    single Repeats over both pages never suppresses anything, because claude
+    and codex alternate and each line differs from the one before it -- and
+    logged in full those restatements made bridge.log seven to nine times
+    larger on every desk, with the feature on or off (an idle one-page desk:
+    151 lines and 8 KB a day became 1007 lines and 69 KB). One Repeats per
+    provider logs each page's changes and counts the rest.
+    """
+
+    def __init__(self, by, fields, label="messages", every_s=600.0, now=None):
+        self._by = by
+        self._make = lambda: Repeats(fields, label, every_s, now)
+        self._each = {}
+        self._label = label
+        self._every = every_s
+        self._now = now or time.monotonic
+        self._next = self._now() + every_s
+
+    def worth_logging(self, m) -> bool:
+        key = m.get(self._by)
+        if key not in self._each:
+            self._each[key] = self._make()
+        return self._each[key].worth_logging(m)
+
+    def due(self):
+        """One line for everything held back, across every key, or None."""
+        now = self._now()
+        if now < self._next:
+            return None
+        self._next = now + self._every
+        n = 0
+        for r in self._each.values():
+            n, r._n = n + r._n, 0
+        if not n:
+            return None
+        return f"[bridge] {n} unchanged {self._label} not logged"
+
+
 def brief(m):
     """The usage frame, in the width it deserves.
 
@@ -461,8 +535,14 @@ def rotate_if_full(path, stream, cap=CAP_BYTES, keep=KEEP) -> bool:
             nth = f"{path}.{i}"
             if os.path.exists(nth):
                 os.replace(nth, f"{path}.{i + 1}")
-        _copy(path, f"{path}.1")
-        os.truncate(path, 0)
+        # Under the Journal's lock when the stream is one: a line printed
+        # between the copy and the truncate is in neither file, and with the
+        # status-page thread printing too, "inherent" was no longer rare.
+        # Lines from outside the Journal (none today) keep the old window.
+        hold = getattr(stream, "hold", None)
+        with (hold() if hold is not None else contextlib.nullcontext()):
+            _copy(path, f"{path}.1")
+            os.truncate(path, 0)
     except OSError:
         # A log that cannot be rotated must never take the daemon down with
         # it. The next tick tries again; in the meantime the file grows,

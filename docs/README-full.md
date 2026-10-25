@@ -45,7 +45,7 @@ It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the
 
 ### Where the numbers come from
 
-Blink never sees a credential and never sends anything anywhere. It reads figures other programs have already worked out, from files they already write, and keeps only the figures: from Codex's session log it takes the one rate-limit line and nothing of the conversation; from Claude Code's status line it keeps the last payload (which also names your working directory and session), readable by you alone.
+Blink never sees a credential and never sends your usage or your sessions anywhere. (If you turn on status-page alerts, it reads the public status pages every 5 minutes; see "Security & privacy".) It reads figures other programs have already worked out, from files they already write, and keeps only the figures: from Codex's session log it takes the one rate-limit line and nothing of the conversation; from Claude Code's status line it keeps the last payload (which also names your working directory and session), readable by you alone.
 
 ### What it supports, and how well
 
@@ -231,6 +231,7 @@ Blink has to change.
 | Creates | a login item, so the bridge starts with your session (a LaunchAgent on macOS, a user systemd unit on Linux, a Scheduled Task on Windows) |
 | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
 | Keeps | the last status line payload Claude Code sent, in `~/.blink/statusline.json`. Alongside the two usage figures it carries the session id, working directory and transcript path; only the figures are read, and nothing in it leaves the machine |
+| Only if you ask | `~/.blink/config.json`, written by `blink config` (today the one setting is `status-page`). Removed by `blink uninstall`, so a reinstall starts with status-page alerts off |
 | Reads | Claude Desktop's usage cache and the tail of Codex's session log, when present; from each only the usage figures are kept. No credential, no token |
 
 **It does this without asking**, so that plugging the board in is the whole
@@ -403,6 +404,7 @@ The things that were open before the first release, and how each was settled.
 
 - **Only you can update your device.** Firmware must be signed with your private key (kept off this repo, at `~/.blink/…`); the bootloader rejects anything else. App updates must be signed with a second key of yours, or the app will not install them. The public repo only lets people read and download the firmware, which holds no secrets.
 - **The device holds no credential.** It never signs in and never talks to Anthropic. The figures come from the Claude Code on your own machine, which has already worked them out, and reach the board over the cable. There is no token on the device to leak, and nothing to revoke if you sell or lend it.
+- **Status-page alerts are off unless you turn them on.** `blink config status-page on` lets the app on your computer read the public status pages (status.claude.com, and status.openai.com when the board shows a Codex page) every 5 minutes, so the panel can say when the service, not your machine, is having trouble. The panel shows it from board firmware 1.4.0. These are plain public requests: no account, token or usage goes with them. Off, the app makes no such request at all.
 - **The setup touches one file.** `~/.claude/settings.json`: its `statusLine.command`, and a hook entry per lifecycle event - see "What the installer changes" above for exactly what is written and what is kept. All of it is reversible with one command.
 - The on-device Wi-Fi and sign-in path still exists in this repository, behind `CONFIG_BLINK_WIFI_MODE`, but is **not built into shipped firmware** - the release script refuses to publish an image containing it.
 

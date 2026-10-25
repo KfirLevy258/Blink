@@ -14,6 +14,13 @@ def raising(exc):
     return _f
 
 
+# Bridge's defaults for the release feed are the real ones, and a hello or an
+# ota_query asks them. These tests are about something else; with no stub
+# they fetched github.com on every run, which the socket guard in
+# tests/conftest.py now refuses.
+_NO_FEED = dict(fetch_manifest=lambda: None, fetch_signed_manifest=lambda: None)
+
+
 class FakeClock:
     def __init__(self):
         self.t = 1000.0
@@ -216,13 +223,13 @@ def test_a_board_ahead_is_refused_an_update_on_a_no_reset_connection(capsys):
 
 
 def test_the_firmware_version_is_learned_from_the_query():
-    b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None)
+    b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None, **_NO_FEED)
     b.on_message({"t": "ota_query", "v": 2, "cur": "0.6.0"})
     assert b._board_fw == "0.6.0"
 
 
 def test_hello_still_wins_and_does_not_double_announce(capsys):
-    b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None)
+    b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None, **_NO_FEED)
     b.on_message({"t": "hello", "v": 2, "fw": "0.6.0", "board": "cyd"})
     assert b._board_proto == 2
     assert b._board_fw == "0.6.0"
@@ -344,7 +351,8 @@ class OverageCapIsWiredTest(unittest.TestCase):
         return Bridge(write_msg=sent.append,
                       fetch_usage=lambda: {"t": "usage", "v": protocol.VERSION,
                                            "session_pct": 22.0,
-                                           "weekly_pct": 102.0})
+                                           "weekly_pct": 102.0},
+                      **_NO_FEED)
 
     def _weekly(self, sent):
         return [m for m in sent if m.get("t") == "usage"][0]["weekly_pct"]
@@ -686,3 +694,363 @@ def test_the_two_cadences_are_far_apart_and_the_heartbeat_stayed():
     assert fast >= 1, fast
     assert claude_usage_bridge.POLL_INTERVAL_S == 60
     assert fast * 5 < claude_usage_bridge.POLL_INTERVAL_S
+
+
+# ------------------------------------------------------------ svc (status page)
+
+
+class FakeWatch:
+    """What the Bridge sees of pc/status_page.StatusWatch."""
+
+    def __init__(self):
+        self.levels = {}
+        self.wanted = []
+
+    def want(self, providers):
+        self.wanted.append(set(providers))
+
+    def shown(self, provider):
+        return self.levels.get(provider, ("ok", ""))
+
+
+_TWO_PAGES = protocol.usage(10.0, None, 20.0, None, [], provider="claude",
+                            p2="codex", p2_session_pct=5.0)
+_ONE_PAGE = protocol.usage(10.0, None, 20.0, None, [], provider="claude")
+
+
+def _svc_bridge(usage):
+    sent = []
+    watch = FakeWatch()
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: dict(usage),
+               now=lambda: 0.0, wall=lambda: (1752444000, 0),
+               status_watch=watch, **_NO_FEED)
+    return b, sent, watch
+
+
+def _svcs(sent):
+    return [m for m in sent if m["t"] == "svc"]
+
+
+def _hello(fw="1.4.0"):
+    # 1.4.0: the first firmware that draws svc (protocol.FW_SHOWS_SVC).
+    return {"t": "hello", "v": 2, "fw": fw}
+
+
+def test_nothing_broken_means_nothing_beyond_the_first_ok():
+    """The fast tick adds nothing; only the hello's re-statement is sent."""
+    b, sent, _ = _svc_bridge(_TWO_PAGES)
+    b.on_message(_hello())
+    for _ in range(30):
+        b.poll_if_changed()
+    assert _svcs(sent) == [protocol.svc("claude", "ok"),
+                           protocol.svc("codex", "ok")]
+
+
+def test_the_heartbeat_restates_every_page():
+    """A lost all-clear would otherwise stand until the next change."""
+    b, sent, watch = _svc_bridge(_TWO_PAGES)
+    watch.levels["codex"] = ("major", "Codex")
+    b.on_message(_hello())
+    del sent[:]
+    b.poll_once()
+    b.poll_once()
+    assert _svcs(sent) == [protocol.svc("claude", "ok"),
+                           protocol.svc("codex", "major", "Codex")] * 2
+
+
+def test_a_change_is_sent_once():
+    b, sent, watch = _svc_bridge(_ONE_PAGE)
+    b.on_message(_hello())
+    watch.levels["claude"] = ("major", "Claude Code")
+    for _ in range(5):
+        b.poll_if_changed()
+    watch.levels["claude"] = ("ok", "")
+    b.poll_if_changed()
+    assert _svcs(sent) == [protocol.svc("claude", "ok"),
+                           protocol.svc("claude", "major", "Claude Code"),
+                           protocol.svc("claude", "ok")]
+
+
+def _switchable(usage):
+    live = dict(usage)
+    sent = []
+    watch = FakeWatch()
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: dict(live),
+               now=lambda: 0.0, wall=lambda: (1752444000, 0),
+               status_watch=watch, **_NO_FEED)
+    return b, sent, watch, live
+
+
+def test_a_second_page_that_comes_back_is_told_again():
+    """The board drops page two when p2 goes, and with it what it was told.
+    _last_svc used to remember having said it and never said it again."""
+    b, sent, watch, live = _switchable(_TWO_PAGES)
+    watch.levels["codex"] = ("major", "Codex")
+    b.on_message(_hello())
+    live.clear()
+    live.update(_ONE_PAGE)
+    b.poll_if_changed()
+    del sent[:]
+    live.clear()
+    live.update(_TWO_PAGES)
+    b.poll_if_changed()
+    assert protocol.svc("codex", "major", "Codex") in _svcs(sent)
+
+
+def test_a_swap_of_main_provider_is_announced():
+    b, sent, watch, live = _switchable(_TWO_PAGES)
+    watch.levels["claude"] = ("partial", "API")
+    b.on_message(_hello())
+    del sent[:]
+    live.clear()
+    live.update(protocol.usage(10.0, None, 20.0, None, [], provider="codex",
+                               p2="claude", p2_session_pct=5.0))
+    b.poll_if_changed()
+    assert _svcs(sent) == [protocol.svc("claude", "partial", "API"),
+                           protocol.svc("codex", "ok")]
+
+
+def test_a_component_change_at_the_same_level_is_sent():
+    b, sent, watch = _svc_bridge(_ONE_PAGE)
+    watch.levels["claude"] = ("partial", "API")
+    b.on_message(_hello())
+    watch.levels["claude"] = ("partial", "claude.ai")
+    b.poll_if_changed()
+    assert [m.get("what") for m in _svcs(sent)] == ["API", "claude.ai"]
+
+
+def test_a_new_hello_restates_the_status():
+    b, sent, watch = _svc_bridge(_ONE_PAGE)
+    watch.levels["claude"] = ("major", "Claude Code")
+    b.on_message(_hello())
+    b.on_message(_hello())
+    assert _svcs(sent) == [protocol.svc("claude", "major", "Claude Code")] * 2
+
+
+def test_only_the_pages_on_the_board_are_watched_and_sent():
+    b, sent, watch = _svc_bridge(_ONE_PAGE)
+    watch.levels["codex"] = ("major", "Codex")
+    b.on_message(_hello())
+    assert watch.wanted[-1] == {"claude"}
+    assert [m["provider"] for m in _svcs(sent)] == ["claude"]
+
+
+def test_the_codex_page_is_watched_once_it_appears():
+    usage = dict(_ONE_PAGE)
+    sent = []
+    watch = FakeWatch()
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: dict(usage),
+               now=lambda: 0.0, wall=lambda: (1752444000, 0),
+               status_watch=watch, **_NO_FEED)
+    b.on_message(_hello())
+    usage.update(_TWO_PAGES)
+    b.poll_if_changed()
+    assert watch.wanted[-1] == {"claude", "codex"}
+    # A new pair of pages re-tells both, the one that was already there too.
+    assert [m["provider"] for m in _svcs(sent)] == ["claude", "claude",
+                                                    "codex"]
+
+
+def test_a_bridge_without_a_watch_sends_no_svc():
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: dict(_TWO_PAGES),
+               now=lambda: 0.0, wall=lambda: (1752444000, 0), **_NO_FEED)
+    b.on_message(_hello())
+    b.poll_if_changed()
+    assert _svcs(sent) == []
+
+
+def test_the_daemon_builds_the_watch_once_and_hands_it_to_the_bridge():
+    """Outside every loop: a nudged cable must not reset the debounce, and a
+    watch per connection would start a fetch thread per reconnect."""
+    tree = _daemon_tree()
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    built = [n for n in _calls(tree, "StatusWatch")]
+    assert len(built) == 1
+    node = built[0]
+    while node in parents:
+        node = parents[node]
+        assert not isinstance(node, (ast.While, ast.For)), "built in a loop"
+    bridges = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and getattr(n.func, "id", None) == "Bridge"]
+    assert bridges and all(
+        any(k.arg == "status_watch" for k in b.keywords) for b in bridges)
+
+
+def test_every_way_out_of_a_connection_stops_the_status_requests():
+    """The want runs out by itself (status_page.WANT_TTL_S), but the two
+    exits that know the board is gone -- serial lost, and a reflash -- say
+    so at once rather than leaving two minutes of requests for nobody."""
+    tree = _daemon_tree()
+    handlers = [h for h in ast.walk(tree) if isinstance(h, ast.ExceptHandler)
+                and h.type is not None]
+
+    def names(h):
+        t = h.type
+        elts = t.elts if isinstance(t, ast.Tuple) else [t]
+        return {getattr(e, "id", None) or getattr(e, "attr", None)
+                for e in elts}
+
+    hs = [h for h in handlers if "SerialException" in names(h)]
+    assert hs and any(_calls(h, "want") for h in hs)
+
+
+def test_a_flash_stops_the_status_requests_before_esptool_starts():
+    """esptool holds the port for about 75 s; the want is withdrawn before
+    it starts, not after it returns."""
+    tree = _daemon_tree()
+    fn = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+          and n.name == "flash_image"]
+    assert len(fn) == 1
+    want = [c.lineno for c in _calls(fn[0], "want")]
+    flash = [c.lineno for c in _calls(fn[0], "flash")]
+    assert want and flash and min(want) < min(flash)
+
+
+def test_the_daemon_counts_svc_restatements_per_provider():
+    tree = _daemon_tree()
+    src = ast.unparse(tree)
+    assert "'svc': svc_frames" in src
+    assert "logbook.RepeatsBy('provider'" in src
+
+
+def test_a_day_of_heartbeats_logs_a_couple_of_svc_lines_per_provider():
+    """The heartbeat re-states svc every minute; logged in full that made
+    bridge.log 7-9x larger on every desk, feature on or off."""
+    from pc import logbook
+    r = logbook.RepeatsBy("provider", ("level", "what"), "svc lines")
+    logged = []
+
+    def write(m):
+        if m["t"] == "svc" and r.worth_logging(m):
+            logged.append(m)
+
+    watch = FakeWatch()
+    b = Bridge(write_msg=write, fetch_usage=lambda: dict(_TWO_PAGES),
+               now=lambda: 0.0, wall=lambda: (1752444000, 0),
+               status_watch=watch, **_NO_FEED)
+    b.on_message(_hello())
+    for minute in range(1440):
+        if minute == 600:
+            watch.levels["codex"] = ("major", "Codex")
+        if minute == 660:
+            watch.levels["codex"] = ("ok", "")
+        b.poll_once()
+        b.poll_if_changed()
+    per = {p: sum(m["provider"] == p for m in logged)
+           for p in ("claude", "codex")}
+    assert per["claude"] <= 2 and per["codex"] <= 4, per
+
+
+def test_an_all_clear_reaches_the_board_while_usage_reads_nothing():
+    """The board drops a non-ok svc that is not re-stated within 150 s, and
+    the heartbeat is what re-states it -- so the heartbeat must not depend
+    on usage. A quarantined provider (usage None) used to leave the last
+    incident standing on the panel for as long as the quarantine lasted."""
+    live = {"u": dict(_ONE_PAGE)}
+    sent = []
+    watch = FakeWatch()
+    b = Bridge(write_msg=sent.append,
+               fetch_usage=lambda: dict(live["u"]) if live["u"] else None,
+               now=lambda: 0.0, wall=lambda: (1752444000, 0),
+               status_watch=watch, **_NO_FEED)
+    watch.levels["claude"] = ("major", "Claude Code")
+    b.on_message(_hello())
+    live["u"] = None
+    del sent[:], watch.wanted[:]
+    b.poll_once()
+    assert _svcs(sent) == [protocol.svc("claude", "major", "Claude Code")]
+    watch.levels["claude"] = ("ok", "")
+    b.poll_if_changed()
+    b.poll_once()
+    assert _svcs(sent)[-1] == protocol.svc("claude", "ok")
+    assert watch.wanted and all(w == {"claude"} for w in watch.wanted)
+
+
+def test_old_firmware_gets_no_svc_and_causes_no_requests():
+    """1.3.4 drops svc unread, so sending it is noise in its log, and asking
+    the vendors on its behalf is a request nobody will ever see."""
+    b, sent, watch = _svc_bridge(_TWO_PAGES)
+    watch.levels["claude"] = ("major", "Claude Code")
+    b.on_message(_hello("1.3.4"))
+    for _ in range(5):
+        b.poll_if_changed()
+        b.poll_once()
+    assert _svcs(sent) == []
+    assert watch.wanted == []
+
+
+def test_an_unknown_firmware_gets_no_svc_until_it_says():
+    b, sent, watch = _svc_bridge(_ONE_PAGE)
+    b.greet()                                # no hello yet
+    assert _svcs(sent) == [] and watch.wanted == []
+    b.on_message(_hello("1.4.0"))
+    assert _svcs(sent) == [protocol.svc("claude", "ok")]
+
+
+def test_a_later_firmware_gets_svc():
+    b, sent, _ = _svc_bridge(_ONE_PAGE)
+    b.on_message(_hello("1.5.2"))
+    assert _svcs(sent) == [protocol.svc("claude", "ok")]
+
+
+def test_the_boards_own_version_beats_the_remembered_one():
+    """Reconnect without a reset: board.json's 1.3.4 was latched first, and
+    the board's own ota_query saying 1.4.0 -- it has just been updated --
+    was ignored, so it got no svc until the next reconnect."""
+    b, sent, _ = _svc_bridge(_ONE_PAGE)
+    b.greet()
+    b.offer_if_newer("1.3.4")
+    assert _svcs(sent) == []
+    b.on_message({"t": "ota_query", "v": 2, "cur": "1.4.0"})
+    b.poll_once()
+    assert _svcs(sent) == [protocol.svc("claude", "ok")]
+    assert b._board_fw == "1.4.0"
+
+
+def test_a_garbled_query_version_does_not_overwrite_a_real_one():
+    b, _, _ = _svc_bridge(_ONE_PAGE)
+    b.on_message(_hello("1.4.0"))
+    b.on_message({"t": "ota_query", "v": 2, "cur": "nonsense"})
+    assert b._board_fw == "1.4.0"
+
+
+def _hinted_bridge(hint):
+    sent = []
+    watch = FakeWatch()
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: dict(_ONE_PAGE),
+               now=lambda: 0.0, wall=lambda: (1752444000, 0),
+               status_watch=watch, board_fw_hint=hint, **_NO_FEED)
+    return b, sent
+
+
+def test_a_lost_hello_falls_back_to_the_remembered_version():
+    """The boot hello can be lost; board.json still knows what the board was
+    last running, which is better than treating it as unknown for good."""
+    b, sent = _hinted_bridge("1.4.0")
+    b.poll_once()
+    assert _svcs(sent) == [protocol.svc("claude", "ok")]
+
+
+def test_the_remembered_version_gates_like_a_real_one():
+    b, sent = _hinted_bridge("1.3.4")
+    b.poll_once()
+    assert _svcs(sent) == []
+
+
+def test_the_boards_own_version_beats_the_hint():
+    b, sent = _hinted_bridge("1.4.0")
+    b.on_message(_hello("1.3.4"))
+    b.poll_once()
+    assert _svcs(sent) == []
+
+
+def test_the_daemon_hands_the_remembered_version_to_the_bridge():
+    tree = _daemon_tree()
+    bridges = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and getattr(n.func, "id", None) == "Bridge"]
+    assert bridges and all(
+        any(k.arg == "board_fw_hint" for k in b.keywords) for b in bridges)

@@ -618,16 +618,115 @@ def session(label: str, n: int) -> dict:
     """
     msg = {"t": "session", "v": VERSION, "n": int(n)}
     if label:
-        # Truncate on a CHARACTER boundary that survives the byte bound --
-        # slicing bytes can halve a multibyte sequence and produce a field
-        # that cannot be decoded at the other end.
-        trimmed = label.encode("utf-8")[:SESSION_LABEL_MAX_BYTES]
-        msg["label"] = trimmed.decode("utf-8", "ignore")
+        msg["label"] = _clip_utf8(label, SESSION_LABEL_MAX_BYTES)
     return msg
+
+
+def _clip_utf8(s: str, max_bytes: int) -> str:
+    """`s` cut to at most `max_bytes` of UTF-8, on a CHARACTER boundary.
+
+    Slicing the bytes alone can halve a multibyte sequence and produce a
+    field that cannot be decoded at the other end; dropping the broken tail
+    keeps the bound and the encoding both.
+    """
+    return s.encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
 
 
 def status(state: str, detail: str = "") -> dict:
     return {"t": "status", "v": VERSION, "state": state, "detail": detail}
+
+
+# --- svc: an incident on the provider's public status page -----------------
+#
+# The five levels the board draws, mildest first. Statuspage's own names
+# (degraded_performance, partial_outage...) stay on this side: every string
+# the firmware compares against is flash it carries for good, and a vendor
+# adding a sixth status should be a daemon change, not a reflash. So the wire
+# speaks the short form and pc/status_page.py does the mapping. "ok" means "draw nothing" -- it is sent
+# for an operational page, but also for one we could not read, one whose last
+# good answer is over half an hour old, and for the feature being off,
+# because in every one of those cases the honest panel is a quiet one.
+SVC_LEVELS = ("ok", "maint", "degraded", "partial", "major")
+
+# A byte bound, like SESSION_LABEL_MAX_BYTES, for the same reason: it is the
+# only bound this side can enforce. The longest name status_page.py sends is
+# "Claude Code" (11); 24 leaves the firmware a fixed 28-byte buffer with room.
+SVC_WHAT_MAX_BYTES = 24
+
+# How long the board keeps a non-ok svc without hearing it again; see the
+# LIFETIME paragraph of svc(). The daemon does not use it -- it is here so
+# the number the firmware is built to is written down beside the message.
+SVC_HOLD_S = 150
+
+# The first firmware that draws svc. Unknown counts as older, for the reason
+# cap_overage_for_fw gives: the daemon greets a board before it has heard
+# which firmware it runs.
+FW_SHOWS_SVC = (1, 4, 0)
+
+
+def fw_shows_svc(board_fw) -> bool:
+    fw = _fw_tuple(board_fw)
+    return fw is not None and fw >= FW_SHOWS_SVC
+
+
+def svc(provider: str, level: str, what: str = "") -> dict:
+    """The status-page level for ONE provider's page.
+
+    Its own message rather than fields on `usage`, which is measured at 484
+    of 512 bytes with two providers loaded and drops whole when it overflows.
+    This one is under 100 bytes at its widest, one per page shown, and goes
+    out on the occasions listed at the end of this docstring.
+
+    Additive like `session` and `edition`: proto.c's dispatch ends in
+    "unknown types ignored", so firmware that predates this drops it without
+    a word, and PROTO_VERSION does not move.
+
+    `what` is omitted at "ok" rather than sent empty: the all-clear names
+    nothing, and leaving it off means a stale component from the incident
+    before cannot travel with it.
+
+    The contract the firmware is built to:
+      provider  "claude" or "codex" -- the page it belongs to, the same id
+                `usage` carries in `provider` and `p2`. Never another value
+                today; a board should ignore one it has no page for.
+      level     one of SVC_LEVELS. Anything else should be read as "ok".
+      what      present for every level but "ok": "Claude Code",
+                "claude.ai" or "API" on the claude page; "Codex", "API" or
+                "Login" on the codex page. At most SVC_WHAT_MAX_BYTES.
+    The board keys what it holds by `provider`, never by page slot: the
+    pages can swap (the owner picks a different main provider) and the
+    second one comes and goes with `p2`, so a slot would put Claude's
+    incident on the Codex page.
+
+    Sent per provider, only for a page the board is showing:
+      - when that page's (level, what) changes;
+      - again after every hello, and whenever the pair of pages on the board
+        changes (`provider` or `p2` in `usage`), so a page that comes back
+        is told its status rather than assumed to remember it;
+      - again with every heartbeat (Bridge.poll_once, every 60 s), whether
+        or not there is a usage reading, so a line that was lost -- an
+        all-clear above all -- is repaired within a minute instead of
+        standing until the next change.
+    A board that has heard nothing for a page should draw it as "ok".
+
+    LIFETIME. A non-ok level is shown only while it keeps being re-stated:
+    if no svc for that provider arrives within SVC_HOLD_S (150 s, two and a
+    half heartbeats), the board treats the page as "ok". An incident must
+    never outlive the daemon that reported it -- a crashed or uninstalled
+    app, or a provider the bus has quarantined, would otherwise leave
+    "major outage" on a desk indefinitely.
+
+    Only to firmware FW_SHOWS_SVC or later (Bridge gates it, the way
+    cap_overage_for_fw gates percentages). An older board would drop it
+    unread, so it is not sent, and no status page is asked on its behalf.
+    """
+    if level not in SVC_LEVELS:
+        raise ValueError(f"unknown svc level {level!r}; expected one of "
+                         + ", ".join(SVC_LEVELS))
+    msg = {"t": "svc", "v": VERSION, "provider": provider, "level": level}
+    if what and level != "ok":
+        msg["what"] = _clip_utf8(what, SVC_WHAT_MAX_BYTES)
+    return msg
 
 
 # --- OTA over the serial link (see pc/ota.py and the OTA block in proto.c) ---
