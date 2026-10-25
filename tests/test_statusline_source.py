@@ -211,11 +211,6 @@ def test_read_payload_malformed_json_returns_none_none(tmp_path):
     assert mtime is None
 
 
-def test_make_fetch_returns_none_with_no_payload(tmp_path):
-    fetch = ss.make_fetch(str(tmp_path / "does_not_exist.json"))
-    assert fetch() is None
-
-
 def test_a_short_pause_is_not_stale():
     """The file's age measures how long the user has been idle, not how wrong
     the numbers are. A 120s threshold made the panel flap amber/green while
@@ -287,3 +282,52 @@ def test_a_payload_of_the_wrong_shape_is_silence_not_an_exception():
             else ss.map_statusline({"payload": bad}, now, now)
         assert msg["session_pct"] == -1.0, bad
         assert msg["weekly_pct"] == -1.0, bad
+
+
+# --- where the payload is read from -----------------------------------------
+#
+# The path used to be expanduser'd into a module constant, and the readers took
+# that constant as a default argument: both evaluated at import, before
+# tests/conftest.py moves HOME. So in a test process the no-argument readers
+# named the developer's real ~/.blink/statusline.json -- the sandbox hole
+# CLAUDE.md describes. Found by gapietro in their fork. tests/test_sandbox.py
+# now checks the whole of pc/ for that shape.
+
+
+def test_the_payload_path_is_resolved_when_asked_not_at_import(tmp_path,
+                                                               move_home):
+    first, second = tmp_path / "first", tmp_path / "second"
+    move_home(first)
+    assert pathlib.Path(ss.payload_path()) == first / ".blink" / "statusline.json"
+    move_home(second)
+    assert pathlib.Path(ss.payload_path()) == second / ".blink" / "statusline.json"
+
+
+def test_read_payload_has_no_default_path_to_fall_back_on():
+    """A default is where the import-time path hid. With none, every caller
+    names the file, and the one that wants the real file asks payload_path().
+    make_fetch, the other no-argument reader, had no production caller left
+    (pc/ingest builds the fetch) and is gone with it."""
+    import inspect
+    path = inspect.signature(ss.read_payload).parameters["path"]
+    assert path.default is inspect.Parameter.empty
+    assert not hasattr(ss, "make_fetch")
+
+
+def test_the_cli_provider_follows_home_on_every_poll(tmp_path, move_home):
+    """ClaudeCliProvider() as pc/ingest builds it -- no path given -- and
+    built BEFORE home moves. Resolving once at construction is the same hole
+    one step later, for an object that lives as long as the daemon does."""
+    from pc.providers import claude_cli
+    empty, planted = tmp_path / "empty", tmp_path / "planted"
+    move_home(empty)
+    prov = claude_cli.ClaudeCliProvider()
+    assert prov.poll(1_000_000) == []
+
+    (planted / ".blink").mkdir(parents=True)
+    (planted / ".blink" / "statusline.json").write_text(json.dumps({
+        "rate_limits": {"five_hour": {"used_percentage": 41.0}}}))
+    move_home(planted)
+    assert pathlib.Path(prov.path()) == planted / ".blink" / "statusline.json"
+    frame, = prov.poll(1_000_000)
+    assert frame.session_pct == 41.0

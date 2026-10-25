@@ -24,20 +24,16 @@ from tests.support.process import as_checkout, as_frozen
 
 
 @pytest.fixture(autouse=True)
-def _sandbox(tmp_path, monkeypatch):
+def _sandbox(tmp_path):
     """The one thing these tests need that the whole suite does not.
 
-    The redirected HOME and the login-service guard both live in
-    tests/conftest.py now -- see the note there for what went wrong when they
-    were a per-file concern.
-
-    CODEX_HOME is cleared here for the same class of reason: install now edits
-    a file under it, and Codex honours the variable, so a developer who has it
-    set in their shell would have had these tests write a hooks.json into
-    their real Codex install. HOME alone does not sandbox a path that an
-    environment variable can override.
+    The redirected HOME, the cleared CODEX_HOME and the login-service guard
+    all live in tests/conftest.py now -- see the note there for what went
+    wrong when they were a per-file concern. CODEX_HOME was cleared here
+    first: install edits a file under it, so a developer with it set in their
+    shell had these tests one forgotten line from writing a hooks.json into
+    their real Codex install.
     """
-    monkeypatch.delenv("CODEX_HOME", raising=False)
     (tmp_path / ".claude").mkdir()
 
 
@@ -187,6 +183,29 @@ def test_status_runs_before_and_after_install(tmp_path, capsys):
     (tmp_path / ".blink" / "statusline.json").write_text("{}")
     assert cli.main(["status"]) == 0
     assert "fresh" in capsys.readouterr().out
+
+
+def test_status_and_uninstall_ask_where_the_payload_is(tmp_path, capsys,
+                                                       monkeypatch):
+    """One spelling of the payload path in Python, statusline_source's. These
+    two built their own from blink_home(), the same file today and a second
+    place to forget the day it moves."""
+    from pc import statusline_source
+    moved = tmp_path / "elsewhere" / "payload.json"
+    moved.parent.mkdir()
+    monkeypatch.setattr(statusline_source, "payload_path", lambda: str(moved))
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    moved.write_text("{}")
+    (moved.parent / "payload.json.123.tmp").write_text("{")
+    capsys.readouterr()
+
+    cli.main(["status"])
+    assert "Usage data  fresh" in capsys.readouterr().out
+
+    cli.main(["uninstall"])
+    assert not moved.exists()
+    assert not (moved.parent / "payload.json.123.tmp").exists()
 
 
 def test_the_shim_it_writes_is_the_one_in_the_tree(tmp_path):
@@ -998,7 +1017,7 @@ def test_a_statusline_that_is_not_a_dict_reads_as_absent():
 #
 # Install now edits a second vendor's configuration. These tests never let it
 # reach a real one: codex_present and install_codex_hooks.install are both
-# replaced, HOME is tmp_path (conftest) and CODEX_HOME is cleared (_sandbox).
+# replaced, HOME is tmp_path and CODEX_HOME is cleared (both tests/conftest.py).
 
 # The column the labelled block in _announce_codex_hooks wraps into. A line
 # indented this far continues the sentence above it and is not a new one, so

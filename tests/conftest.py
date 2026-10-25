@@ -1,8 +1,8 @@
 """Setup every test in this suite gets, whether it asks for it or not.
 
-Every fixture below is autouse, and each is here rather than in a test file
-because the failure mode is a test file that FORGETS them. That is not a
-hypothetical in either case:
+Every fixture below but move_home is autouse, and each is here rather than
+in a test file because the failure mode is a test file that FORGETS them.
+That is not a hypothetical in either case:
 
   - HOME was redirected but USERPROFILE was not, so on Windows twelve tests
     wrote into the real user profile while asserting against tmp_path. They
@@ -16,33 +16,78 @@ hypothetical in either case:
 A test that needs the real thing can still opt out with monkeypatch.delenv,
 which is the right way round: the safe behaviour is the default and the
 dangerous one has to be asked for.
+
+move_home is not autouse: it is for the tests that move home after import.
 """
 import ipaddress
 import os
+import pathlib
 import socket
 import urllib.request
 
 import pytest
 
+# Pointed under the sandbox's home for every test.
+SET_UNDER_HOME = ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA")
+# Removed for every test: each names a home of its own and outranks HOME for
+# the code that reads it.
+CLEARED = ("CODEX_HOME",)
 
-@pytest.fixture(autouse=True)
-def _sandboxed_home(tmp_path, monkeypatch):
-    """tmp_path is ~, on every platform.
+
+def _point_home_at(monkeypatch, home):
+    """Every variable that names a home directory, pointed under `home`.
 
     os.path.expanduser("~") reads HOME on POSIX and USERPROFILE on Windows.
-    Setting one without the other is the bug described above, so this is the
-    only place either of them is set.
+    Setting one without the other is the first bug described above, so this
+    is the only place either of them is set -- the sandbox below and the
+    move_home fixture both come through here.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     # Claude Desktop's files on Windows live under %APPDATA%, which is its
     # own variable and was never redirected: on a Windows 11 VM, 2026-09-30,
     # `blink status` inside the suite read a real plan-usage-history.json
     # from the profile and a test expecting "no usage data" failed. The same
     # layout as a real profile, so code joining paths under it sees nothing
     # unusual.
-    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    monkeypatch.setenv("APPDATA", str(home / "AppData" / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
+
+
+def sandbox_environment(monkeypatch, home):
+    """What the autouse sandbox does to the environment, as a function.
+
+    A function so tests/test_sandbox.py can export CODEX_HOME itself and
+    then check this clears it -- a test that relied on the developer's shell
+    having it set could never fail in CI.
+    """
+    _point_home_at(monkeypatch, pathlib.Path(home))
+    # CODEX_HOME outranks HOME in pc/providers/codex_cli.sessions_root and
+    # pc/install_codex_hooks, so a developer who exports it had every test
+    # that polls Codex reading their real rollouts, and every hooks test
+    # one forgotten delenv away from editing their real hooks.json. A few
+    # test files cleared it for themselves; that is the forgetting this file
+    # exists to make impossible. Cleared rather than set, so it falls back to
+    # ~/.codex, which is under tmp_path like everything else.
+    for var in CLEARED:
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _sandboxed_home(tmp_path, monkeypatch):
+    """tmp_path is ~, on every platform."""
+    sandbox_environment(monkeypatch, tmp_path)
+
+
+@pytest.fixture
+def move_home(monkeypatch):
+    """Call with a directory to make it ~ from then on, inside one test.
+
+    For the tests that pin call-time path resolution: they have to move home
+    AFTER import, and moving it by hand meant re-deriving which variables
+    count as home in each test file.
+    """
+    return lambda home: _point_home_at(monkeypatch, pathlib.Path(home))
 
 
 @pytest.fixture(autouse=True)

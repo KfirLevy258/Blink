@@ -37,8 +37,6 @@ as good an answer as we have. Persisting it would put a second copy of a
 file that already exists on disk into ~/.blink, with its own invalidation
 and corruption paths, for a case the field report does not contain.
 """
-import os
-
 from pc import statusline_source as ss
 from pc.providers import base
 
@@ -48,14 +46,17 @@ SRC_ID = ss.SRC_ID
 
 class ClaudeCliProvider(base.ProviderParser):
     def __init__(self, path=None):
-        # Resolved here, not taken from ss.PAYLOAD_PATH: that constant is
-        # expanduser'd at import, before tests/conftest.py redirects HOME, so
-        # every test that built the default bus read the developer's REAL
-        # ~/.blink/statusline.json -- found when `status --wire` under the
-        # sandbox put a live Claude reading on the wire (2026-10-19). Same
-        # file at run time; CLAUDE.md names this hole.
-        self._path = (path if path is not None
-                      else os.path.expanduser("~/.blink/statusline.json"))
+        # None means "wherever ss.payload_path() says", asked on every poll
+        # rather than once here. The default used to be a module constant in
+        # statusline_source, expanduser'd at import before tests/conftest.py
+        # redirects HOME, so every test that built the default bus read the
+        # developer's REAL ~/.blink/statusline.json -- found when `status
+        # --wire` under the sandbox put a live Claude reading on the wire
+        # (2026-10-19). Resolving at construction instead closed that and left
+        # the same hole one step later: the bus is built once and lives as
+        # long as the daemon, so its path was fixed by whatever HOME was when
+        # it was made (found in review). CLAUDE.md names this hole.
+        self._path = path
         # (payload, mtime) for the last reading that had a five-hour
         # percentage, or None before the first one. See the module docstring.
         self._remembered = None
@@ -64,7 +65,7 @@ class ClaudeCliProvider(base.ProviderParser):
         return PROVIDER_ID
 
     def path(self):
-        return self._path
+        return self._path if self._path is not None else ss.payload_path()
 
     def parse_cli_event(self, raw_payload, now_epoch, observed_at):
         """A push from Claude Code, already read.
@@ -79,7 +80,7 @@ class ClaudeCliProvider(base.ProviderParser):
         return ss.map_statusline_frame(raw_payload, now_epoch, observed_at)
 
     def poll(self, now_epoch):
-        payload, mtime = ss.read_payload(self._path)
+        payload, mtime = ss.read_payload(self.path())
         frames = []
         if payload is not None:
             live = self.parse_cli_event(payload, now_epoch, mtime)

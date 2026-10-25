@@ -62,8 +62,8 @@ class TestBridge(unittest.TestCase):
         self.assertEqual([m["t"] for m in self.sent], ["time", "usage"])
 
     def test_poll_with_no_payload_yet_sends_time_only(self):
-        """statusline_source.make_fetch() returns None before Claude Code has
-        ever written a payload. That is not an error -- there is simply
+        """The fetch returns None before Claude Code has ever written a
+        payload. That is not an error -- there is simply
         nothing to report yet -- so no 'usage' or 'status' message should
         follow, and the board just keeps whatever it last had."""
         b = Bridge(write_msg=self.sent.append, fetch_usage=lambda: None,

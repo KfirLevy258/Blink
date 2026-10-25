@@ -2795,10 +2795,12 @@ def cmd_uninstall(_args) -> int:
     # first one's public half, and every app carrying the second one's, would
     # stop accepting updates.
     for p in (shim_path(), hook_shim_path(), launcher_path(),
-              os.path.join(blink_home(), "statusline.json"),
-              os.path.join(blink_home(), "statusline.json.tmp"),
+              # Spelled once, in statusline_source.payload_path, and asked
+              # for here rather than rebuilt from blink_home().
+              statusline_source.payload_path(),
+              statusline_source.payload_path() + ".tmp",
               # Pid-scoped temp names, from a render interrupted mid-write.
-              *glob.glob(os.path.join(blink_home(), "statusline.json.*.tmp")),
+              *glob.glob(statusline_source.payload_path() + ".*.tmp"),
               os.path.join(blink_home(), "state.json"),
               os.path.join(blink_home(), "state.json.tmp"),
               os.path.join(blink_home(), "pending_fw.json"),
@@ -3173,7 +3175,7 @@ def cmd_status(args) -> int:
     # sent people to a program they do not have. With a `claude` that does
     # exist, Desktop does not make the status line moot -- that desk still
     # needs "open Claude Code once" (review, 2026-10-19).
-    payload = os.path.join(blink_home(), "statusline.json")
+    payload = statusline_source.payload_path()
     age = (int(time.time() - os.path.getmtime(payload))
            if os.path.exists(payload) else None)
     # The same bound the panel uses (statusline_source.STALE_AFTER_S): this

@@ -10,7 +10,6 @@ as live is the one failure mode worth designing against.
 """
 import json
 import os
-import time
 
 from pc import protocol
 from pc.providers import base
@@ -20,7 +19,29 @@ from pc.providers import base
 PROVIDER_ID = "claude"
 SRC_ID = "cli"
 
-PAYLOAD_PATH = os.path.expanduser("~/.blink/statusline.json")
+
+def payload_path() -> str:
+    """Where the shim writes the payload, resolved now rather than at import.
+
+    This was a module constant, expanduser'd when the module was imported,
+    and the readers here took it as a default argument -- all of it
+    evaluated before tests/conftest.py redirects HOME. So in a test process
+    the no-argument readers named the developer's REAL
+    ~/.blink/statusline.json, which on a desk with Blink installed holds live
+    usage: the sandbox hole CLAUDE.md describes. ClaudeCliProvider had already
+    stopped using the constant for the same reason (2026-10-19); found for the
+    readers by gapietro in their fork. The constant is gone rather than kept
+    beside this, so nothing can reach the import-time value again, and
+    tests/test_sandbox.py fails on any module-scope home lookup under pc/.
+
+    The ONE place the path is spelled in Python: the provider, `blink
+    status` and `blink uninstall` all ask here. Only the shell shim
+    (tools/blink-statusline.sh) writes it out separately, because it cannot
+    import this.
+    """
+    return os.path.expanduser("~/.blink/statusline.json")
+
+
 # How old the payload may get before we stop vouching for it.
 #
 # This was 120 s, and 120 s was wrong in kind, not just in value. Claude Code
@@ -129,8 +150,12 @@ def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
         map_statusline_frame(payload, now_epoch, mtime_epoch), now_epoch)
 
 
-def read_payload(path: str = PAYLOAD_PATH):
-    """(payload, mtime) or (None, None) when absent/unreadable/malformed."""
+def read_payload(path):
+    """(payload, mtime) or (None, None) when absent/unreadable/malformed.
+
+    The path has no default. A default was where the import-time path hid
+    (see payload_path), so every caller names the file it means.
+    """
     try:
         mtime = os.path.getmtime(path)
         # UTF-8 by name. Without it Windows opens the file in the machine's
@@ -143,13 +168,3 @@ def read_payload(path: str = PAYLOAD_PATH):
             return json.load(f), mtime
     except (OSError, ValueError):
         return None, None
-
-
-def make_fetch(path: str = PAYLOAD_PATH):
-    """Zero-arg callable for Bridge(fetch_usage=...). None when no data yet."""
-    def fetch():
-        payload, mtime = read_payload(path)
-        if payload is None:
-            return None
-        return map_statusline(payload, time.time(), mtime)
-    return fetch
