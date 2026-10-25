@@ -658,7 +658,7 @@ def test_a_live_status_line_keeps_the_board_awake_behind_an_old_dial(tmp_path):
     # No reset stamp on it, and that is load-bearing rather than lazy: a
     # stamp the clock has since passed is proof the window ended, and a
     # reading of a window that has ended is refused outright rather than
-    # aged (pc/statusline_source._rolled_over). This is the other case --
+    # aged (pc/providers/base.rolled_over). This is the other case --
     # nothing here says the twelve-hour-old reading has been superseded, so
     # it is offered, and offered with its own honest age.
     write({"rate_limits": {"five_hour": {"used_percentage": 27.0},

@@ -23,7 +23,7 @@ from the fresh source and 90% from one taken before the reset, and
 higher-wins would confidently show 90% for as long as the stale reading
 survives. Understating a limit is a real cost; inventing usage that has
 already been forgiven is a worse one, and it is the failure this project
-already spent code on (see pc/statusline_source._rolled_over).
+already spent code on (see pc/providers/base.rolled_over).
 """
 from pc.providers import base
 
@@ -53,8 +53,11 @@ def _rolled_at(frames, attr):
     """The latest observed rollover for this window, or None.
 
     Evidence, not inference: some source watched the window empty at this
-    epoch. Only the CLI status line can see it (pc/statusline_source), and it
-    used to discard the fact after acting on it.
+    epoch. Only a source with reset timestamps can see it: the Claude status
+    line (pc/statusline_source), Claude Desktop's Local Storage
+    (pc/providers/claude_desktop_ls) and, since a Codex window was seen
+    holding 98 past its own reset, the Codex rollout (pc/providers/codex_cli).
+    The status line used to discard the fact after acting on it.
 
     Then it discarded it a second way, which cost the same bug twice: the
     fact was reported only while the payload carrying it was fresh, so half
@@ -126,11 +129,33 @@ def merge(frames):
                    and _survives_rollover(f, w_rolled, "weekly_rolled_at")),
         lambda f: f.weekly_pct)
 
+    # Set when no percentage survives but a window was seen to end: the
+    # provider then goes out as unknown rather than not at all, dated and
+    # judged by the newest frame that saw a window end.
+    ended_evidence = None
     if session_src is None and weekly_src is None:
         # Nothing here carries a usage percentage. A frame with only a model
         # name would render as two blank dials, which is worse than the
         # board keeping the last reading it already has.
-        return None
+        #
+        # Unless the reason there is no percentage is that every window the
+        # sources knew about has ENDED. Then the last reading the board has
+        # is the pre-reset one, and keeping it is the failure: a Codex
+        # window that rolled over with Codex closed held 98 on the panel
+        # (DevOceanIT, 2026-10-01), and returning None here put it back the
+        # moment the reading aged past stale -- for Codex and, on the same
+        # path, for a Claude status line gone quiet across both resets. Two
+        # blank dials are the truth in that case, and they keep the
+        # provider's place on the panel and its state. Stale only if the
+        # newest witness is: a Desktop Local Storage record that saw the
+        # reset a minute ago is not an old reading. Blank does not mean
+        # first, either -- select() ranks a provider with numbers above it.
+        evidence = [f for f in frames
+                    if f.session_rolled_at is not None
+                    or f.weekly_rolled_at is not None]
+        if not evidence:
+            return None
+        ended_evidence = max(evidence, key=lambda f: f.observed_at)
 
     session_resets_at, _ = _pick(
         frames, lambda f: f.session_resets_at is not None,
@@ -172,7 +197,7 @@ def merge(frames):
     # desktop reading merged with an hours-old CLI reading is not a stale
     # panel, it is a live percentage next to a reset time that has simply
     # stopped being updated (and secs_until already refuses a past one).
-    primary = session_src or weekly_src
+    primary = session_src or weekly_src or ended_evidence
 
     # And the fact `primary` cannot carry: when this provider last said
     # anything at all.
@@ -231,16 +256,28 @@ def select_pair(frames, preferred=None):
 
     The panel has two rings per gauge and no more, so beyond two providers
     something has to be left off. The rule is the same one select() uses for
-    the primary, applied twice: preference first, then recency. A third
-    provider is dropped rather than rotated, because a ring that silently
-    changes whose number it is showing is worse than one that never shows it.
+    the primary, applied twice: a provider with a number first, then
+    preference, then recency. A third provider is dropped rather than
+    rotated, because a ring that silently changes whose number it is showing
+    is worse than one that never shows it.
+
+    A provider with no number is never the secondary. merge() sends one whose
+    windows have all ended so the board stops showing its pre-reset figure,
+    and that is reason enough to own the MAIN dial when nothing else has a
+    number. It is no reason for a second page: any Codex desk that ever ran
+    Claude Code keeps an old statusline.json whose rollover evidence never
+    expires, and it would carry a blank Claude inner ring forever, where
+    before that evidence reached the wire there was no second page at all.
     """
     merged = [m for m in (merge(g) for g in group_by_provider(frames).values())
               if m is not None]
     if not merged:
         return None, None
-    merged.sort(key=lambda m: (m.provider != preferred, -m.observed_at))
-    return merged[0], (merged[1] if len(merged) > 1 else None)
+    merged.sort(key=_rank(preferred))
+    secondary = merged[1] if len(merged) > 1 else None
+    if secondary is not None and not secondary.has_usage():
+        secondary = None
+    return merged[0], secondary
 
 
 def select(frames, preferred=None):
@@ -249,11 +286,13 @@ def select(frames, preferred=None):
     The panel has two dials and one of everything else, so with more than one
     provider reporting, something has to choose. The rule:
 
-      1. The preferred provider, if it has anything to say at all. A user who
-         has said "show me Claude" does not want the display silently handed
-         to another tool because that tool happened to write a file more
-         recently.
-      2. Otherwise the provider with the freshest reading.
+      1. A provider with a number before one without. merge() sends a
+         provider whose every window has ended as unknown, so that it is not
+         dropped -- it is not thereby entitled to the main dial.
+      2. The preferred provider. A user who has said "show me Claude" does
+         not want the display silently handed to another tool because that
+         tool happened to write a file more recently.
+      3. Otherwise the provider with the freshest reading.
 
     This is deliberately a choice between providers rather than a blend. What
     a two-provider panel SHOULD look like is a hardware design question and
@@ -263,8 +302,19 @@ def select(frames, preferred=None):
               if m is not None]
     if not merged:
         return None
-    if preferred:
-        for m in merged:
-            if m.provider == preferred:
-                return m
-    return max(merged, key=lambda m: m.observed_at)
+    return min(merged, key=_rank(preferred))
+
+
+def _rank(preferred):
+    """Sort key for merged frames, best first: see select().
+
+    Numbers before preference, and that order is the point. `preferred` is
+    always "claude" on a real desk (pc/ingest; the firmware announces it),
+    and an old statusline.json whose resets have both passed is rollover
+    evidence that never expires -- so ranked on preference alone, a Claude
+    Code last used weeks ago put two blank dials on the main page every day
+    and pushed a Codex in daily use, 55/33, to the inner ring. Before blank
+    providers reached the wire at all, Codex had that dial (found in review).
+    """
+    return lambda m: (not m.has_usage(), m.provider != preferred,
+                      -m.observed_at)

@@ -56,10 +56,11 @@ class ClaudeDesktopLocalStorageProvider(base.ProviderParser):
             resets_at = None
 
         rolled_at = None
-        if resets_at is not None and now_epoch >= resets_at:
-            # The window has rolled. The stored percentage describes a window
-            # that no longer exists, and the record will not be rewritten
-            # until the app next acts. Report the rollover as evidence and
+        if base.window_has_reset(resets_at, now_epoch):
+            # The window has rolled -- by the same test every source uses,
+            # base.window_has_reset, rather than a copy of it here. The
+            # stored percentage describes a window that no longer exists,
+            # and the record will not be rewritten until the app next acts. Report the rollover as evidence and
             # publish no number -- see this module's tests.
             rolled_at = resets_at
             resets_at = None

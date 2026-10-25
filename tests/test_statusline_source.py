@@ -2,6 +2,7 @@ import json
 import pathlib
 
 from pc import statusline_source as ss
+from pc.providers import base
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "statusline_payload.json"
 
@@ -72,7 +73,7 @@ def test_a_past_reset_reads_unknown_not_zero():
     "this window just rolled over" and zeroes the percentage with it. That is
     right for the firmware's own countdown running out and wrong coming from
     here, because the only payload that reaches _secs_until with a past reset
-    is a stale one -- the case _rolled_over() deliberately refuses to zero.
+    is a stale one -- the case base.rolled_over() deliberately refuses to zero.
     """
     assert ss._secs_until(1_787_100_000, 1_787_200_000) == -1
     assert ss._secs_until(1_787_300_000, 1_787_200_000) == 100_000
@@ -131,14 +132,14 @@ NOW = 1_787_900_000.0
 
 # --- the rollover, and the epoch it now reports ------------------------------
 #
-# Six tests pinning _rolled_over were deleted from this file on this branch,
+# Six tests pinning the rollover rule (now base.rolled_over) were deleted from this file on this branch,
 # which is how the normalizer came to be able to discard the very mechanism
 # they covered. These re-pin it, including the field that fixes that.
 
 
 def test_a_reset_window_reads_zero_and_reports_when_it_emptied():
     at = NOW - 60
-    pct, resets, rolled = ss._rolled_over(47.0, at, NOW, stale=False)
+    pct, resets, rolled = base.rolled_over(47.0, at, NOW, stale=False)
     assert pct == 0.0
     assert resets is None
     assert rolled == at, "the epoch is the evidence the normalizer needs"
@@ -151,13 +152,13 @@ def test_a_stale_reading_reports_the_rollover_it_watched_but_claims_no_zero():
     whole check on an old payload kept neither -- it kept the pre-reset 47%,
     which is the one answer that is definitely wrong."""
     at = NOW - 60
-    assert ss._rolled_over(47.0, at, NOW, stale=True) == (-1.0, None, at)
+    assert base.rolled_over(47.0, at, NOW, stale=True) == (-1.0, None, at)
 
 
 def test_a_window_that_has_not_reset_is_untouched():
     at = NOW + 3600
-    assert ss._rolled_over(47.0, at, NOW, stale=False) == (47.0, at, None)
-    assert ss._rolled_over(47.0, at, NOW, stale=True) == (47.0, at, None)
+    assert base.rolled_over(47.0, at, NOW, stale=False) == (47.0, at, None)
+    assert base.rolled_over(47.0, at, NOW, stale=True) == (47.0, at, None)
 
 
 def test_an_unknown_percentage_is_never_zeroed():
@@ -165,19 +166,19 @@ def test_an_unknown_percentage_is_never_zeroed():
     would have described has ended. The stamp still goes -- it is past, so it
     is neither a countdown nor a reset time anyone has -- and the rollover is
     still reported, because that much IS known."""
-    assert ss._rolled_over(-1.0, NOW - 60, NOW, stale=False) == (
+    assert base.rolled_over(-1.0, NOW - 60, NOW, stale=False) == (
         -1.0, None, NOW - 60)
 
 
 def test_no_reset_time_means_no_rollover_claim():
-    assert ss._rolled_over(47.0, None, NOW, stale=False) == (47.0, None, None)
-    assert ss._rolled_over(47.0, None, NOW, stale=True) == (47.0, None, None)
+    assert base.rolled_over(47.0, None, NOW, stale=False) == (47.0, None, None)
+    assert base.rolled_over(47.0, None, NOW, stale=True) == (47.0, None, None)
 
 
 # --- restored ---------------------------------------------------------------
 #
-# These were deleted on the multi-provider branch and only _rolled_over() was
-# re-pinned in their place, which left the freshness gate, the reset-to-zero
+# These were deleted on the multi-provider branch and only the rollover rule
+# was re-pinned in their place, which left the freshness gate, the reset-to-zero
 # rule, the real capture and the read paths untested. The assertions on a
 # `models` key are gone with the key itself.
 

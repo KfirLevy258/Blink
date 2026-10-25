@@ -494,3 +494,130 @@ def test_desktop_local_storage_supplies_a_reset_the_history_file_cannot():
     merged = normalizer.merge([history, local_storage])
     assert merged.session_resets_at == now + 3600
     assert merged.weekly_pct == 17.0
+
+
+# --- every window ended, and nothing has a number left ------------------------
+
+
+def _quiet_status_line_across_both_resets():
+    """A status line Claude Code last wrote three days ago, both of whose
+    windows have since ended: stale, so both read unknown (base.rolled_over),
+    with the rollovers reported."""
+    payload = {"rate_limits": {
+        "five_hour": {"used_percentage": 80.0, "resets_at": NOW - 200_000},
+        "seven_day": {"used_percentage": 60.0, "resets_at": NOW - 100_000}}}
+    return ss.map_statusline_frame(payload, NOW, NOW - 3 * 86400)
+
+
+def test_a_provider_whose_every_window_ended_stays_on_the_wire_as_unknown():
+    """None here takes the provider off the wire, and the board then keeps
+    drawing the last figure it was sent -- the pre-reset one. Unknown and
+    stale is the truth, and it keeps the provider's state and place."""
+    f = _quiet_status_line_across_both_resets()
+    assert (f.session_pct, f.weekly_pct) == (base.UNKNOWN, base.UNKNOWN)
+
+    merged = normalizer.merge([f, cli(NOW, state="running")])
+    assert merged is not None
+    assert (merged.session_pct, merged.weekly_pct) == (base.UNKNOWN,
+                                                       base.UNKNOWN)
+    assert merged.stale is True
+    assert merged.state == "running"
+    assert (merged.session_rolled_at, merged.weekly_rolled_at) == (
+        NOW - 200_000, NOW - 100_000)
+
+
+def test_no_number_and_no_rollover_is_still_nothing():
+    """The evidence is what earns the place: a frame with only a state, or
+    with unknowns nobody has explained, still keeps the board's last reading."""
+    assert normalizer.merge([cli(NOW, state="running")]) is None
+
+
+def test_a_blank_preferred_provider_yields_the_main_dial_to_one_with_numbers():
+    """Preference ranks providers that have something to show, and a blank
+    one is not a second page: the provider with a number takes the main
+    dial and there is no inner ring."""
+    primary, secondary = normalizer.select_pair([
+        _quiet_status_line_across_both_resets(),
+        cli(NOW - 60, session=12.0, weekly=30.0, provider="codex"),
+    ], preferred="claude")
+    assert primary.provider == "codex"
+    assert primary.session_pct == 12.0
+    assert secondary is None
+
+
+def test_a_claude_code_unused_for_weeks_does_not_take_codex_s_dial():
+    """The desk this would otherwise break, every day, for good.
+
+    `preferred` is always "claude" (pc/ingest; the firmware announces it),
+    and an old statusline.json whose resets are both past is rollover
+    evidence that never expires. Ranked on preference alone, a blank Claude
+    sat on the main dial and pushed Codex in daily use to the inner ring --
+    where on 63f2386, before blank providers reached the wire, Codex had the
+    main dial.
+    """
+    payload = {"rate_limits": {
+        "five_hour": {"used_percentage": 30.0, "resets_at": NOW - 9 * 86400},
+        "seven_day": {"used_percentage": 50.0, "resets_at": NOW - 8 * 86400}}}
+    old_claude = ss.map_statusline_frame(payload, NOW, NOW - 10 * 86400)
+    codex = cli(NOW - 30, session=55.0, weekly=33.0, provider="codex")
+
+    primary, secondary = normalizer.select_pair([old_claude, codex],
+                                                preferred="claude")
+    assert (primary.provider, primary.session_pct, primary.weekly_pct) == (
+        "codex", 55.0, 33.0)
+    # And no second page. Any Codex desk that ever ran Claude Code has this
+    # file, so a blank Claude inner ring would be on it forever, where
+    # before blank providers reached the wire there was none.
+    assert secondary is None
+
+    chosen = normalizer.select([old_claude, codex], preferred="claude")
+    assert (chosen.provider, chosen.session_pct) == ("codex", 55.0)
+
+
+def test_a_preferred_provider_with_numbers_still_wins():
+    primary, secondary = normalizer.select_pair([
+        cli(NOW - 3600, session=10.0),
+        cli(NOW, session=90.0, provider="codex"),
+    ], preferred="claude")
+    assert (primary.provider, secondary.provider) == ("claude", "codex")
+
+
+def test_a_desk_with_only_a_blank_provider_still_shows_it():
+    """Nothing better to rank above it: a Codex-only desk whose windows all
+    ended gets -1/-1 on the main dial rather than the board's stale 98."""
+    ended = base.NormalizedUsageFrame(
+        provider="codex", src="cli", observed_at=NOW - 6 * 86400,
+        session_rolled_at=NOW - 600, weekly_rolled_at=NOW - 60, stale=True)
+    primary, secondary = normalizer.select_pair([ended], preferred="claude")
+    assert (primary.provider, primary.session_pct, primary.weekly_pct) == (
+        "codex", base.UNKNOWN, base.UNKNOWN)
+    assert secondary is None
+    assert normalizer.select([ended], preferred="claude").provider == "codex"
+
+
+def _local_storage_rolled(at, rolled_at):
+    """A Claude Desktop Local Storage reading whose window has ended: it
+    publishes no number and reports the rollover (claude_desktop_ls)."""
+    return base.NormalizedUsageFrame(
+        provider="claude", src="desktop_ls", observed_at=at,
+        session_rolled_at=rolled_at, stale=False)
+
+
+def test_a_fresh_rollover_is_not_called_stale():
+    """No number survives, but the reading that says so was taken a minute
+    ago: blank dials, and not an "old reading" warning on top of them."""
+    merged = normalizer.merge([_local_storage_rolled(NOW - 60, NOW - 120)])
+    assert merged.session_pct == base.UNKNOWN
+    assert merged.stale is False
+
+
+def test_the_newest_rollover_speaks_for_a_provider_with_no_number():
+    """Two sources both saw the window end. The frame on the wire is dated
+    and judged by the newest of them, not the oldest."""
+    merged = normalizer.merge([
+        _quiet_status_line_across_both_resets(),        # three days, stale
+        _local_storage_rolled(NOW - 60, NOW - 120),     # a minute, fresh
+    ])
+    assert merged.session_pct == base.UNKNOWN
+    assert (merged.src, merged.observed_at, merged.stale) == (
+        "desktop_ls", NOW - 60, False)

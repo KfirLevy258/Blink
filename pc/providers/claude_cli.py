@@ -1,10 +1,11 @@
 """Claude Code's status line, as a provider on the ingestion bus.
 
 A thin adapter, on purpose. All of the reasoning about this source -- the
-freshness bound and why age is the wrong primary signal, carrying a window
-across its own reset, why an absent window is -1 and not 0 -- lives in
-pc/statusline_source and stays there. Re-implementing any of it here would
-give the project two rules for the same file.
+freshness bound and why age is the wrong primary signal, why an absent
+window is -1 and not 0, and where the file is -- lives in
+pc/statusline_source and stays there; carrying a window across its own
+reset is pc/providers/base.rolled_over, shared with Codex. Re-implementing
+any of it here would give the project two rules for the same file.
 
 This briefly read one payload per session, to take the worst of several
 context windows and name the model in use. Both came off the panel -- with

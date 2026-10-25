@@ -161,8 +161,9 @@ reasoned than the doc:
   non-numeric window rather than `0.0`, precisely because `0.0` reads as a confident
   "0% used" — a stronger claim than "we don't have this number".
 - `read_payload()` (line 150) turns every `OSError`/`ValueError` into `(None, None)`.
-- `_window_has_reset()` / `_rolled_over()` (lines 86-121) carry a window across its own
-  reset instead of disowning the reading, which is a case §4B does not contemplate at all.
+- `window_has_reset()` / `rolled_over()` (`pc/providers/base.py`, moved there from
+  `statusline_source` so Codex shares them) carry a window across its own reset instead
+  of disowning the reading, which is a case §4B does not contemplate at all.
 - The freshness bound is 1800 s with a documented argument for why age is the wrong
   primary signal (lines 18-37).
 

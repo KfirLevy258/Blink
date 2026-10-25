@@ -240,7 +240,9 @@ Smaller, still open:
 - **A state-only frame is dropped by the normalizer.** On a machine with the
   hooks installed but no statusline payload and no desktop app, the activity
   light has nothing to ride on: `merge()` returns None for a provider group
-  carrying no percentage, and sending one would blank the dials instead. The
+  carrying no percentage and no rollover evidence, and sending one would blank
+  the dials instead. (A group whose windows have all ENDED is sent, as unknown
+  -- blank is the truth there, and keeping the pre-reset figure is not.) The
   real answer is a `state`-only wire message that does not touch them.
 
 **The pip row (2026-09-02).** The header's single execution-state dot became a

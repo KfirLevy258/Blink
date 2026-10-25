@@ -34,7 +34,7 @@ PAYLOAD_PATH = os.path.expanduser("~/.blink/statusline.json")
 # both are checked below:
 #   - the window they describe resets, after which the reading is definitely
 #     wrong (usage went back to near zero and this file still says 47%).
-#     That is `_window_has_reset`, and it is exact rather than a guess.
+#     That is base.window_has_reset, and it is exact rather than a guess.
 #   - usage happens somewhere we cannot see -- claude.ai, the phone app --
 #     so an old reading can understate the truth. Nothing detects that, so
 #     this bound stays as the backstop. Half an hour is long enough that
@@ -75,73 +75,11 @@ def _window(rate_limits: dict, key: str):
 _secs_until = protocol.secs_until
 
 
-def _window_has_reset(resets_at, now_epoch: float) -> bool:
-    """True once the window this reading describes has rolled over.
-
-    At that moment the percentage is not merely old, it is wrong: usage went
-    back to near zero and the file still says whatever it said. Age cannot
-    detect this -- a reading taken one minute before a reset is stale the
-    moment the reset lands -- so it is checked directly.
-    """
-    return resets_at is not None and now_epoch >= resets_at
-
-
-def _rolled_over(pct: float, resets_at, now_epoch: float, stale: bool):
-    """Carry a window across its own reset instead of disowning the reading.
-
-    A window that has just reset is at 0%. That is not an estimate -- it is
-    what resetting means -- so there is a better answer available than "this
-    number may be wrong", which is what marking the message stale says.
-
-    It matters because the payload is only rewritten when Claude Code renders
-    its status line. Between a reset at 03:00 and its owner sitting down at
-    09:00, the old behaviour left the panel amber for six hours, announcing a
-    problem that did not exist. Observed 2026-08-22: a five-hour window rolled
-    over, the board flagged the whole message stale, and the weekly figure --
-    which was perfectly good -- was dragged down with it.
-
-    The reset time goes back to unknown rather than being guessed forward: the
-    next five-hour window does not start until the next message, so there is
-    no honest number to put there until Claude Code tells us one.
-
-    STALENESS CHANGES THE ANSWER BUT NOT THE QUESTION, and getting that
-    backwards was a field defect (reproduced 2026-09-02). This used to be
-    skipped entirely on an old payload, on the reasoning that a three-day-old
-    file has a long-past resets_at and any amount of usage may have happened
-    since, so 0% would be the lie. The first half of that is right and the
-    fallback it took was not: skipping the check did not fall back to
-    "unknown", it fell back to the PRE-RESET percentage, which is not merely
-    unvouched-for but definitely wrong -- and it threw away the rollover
-    evidence with it, so a Claude Desktop sample taken before the same reset
-    came back to the dial wearing its own stale=False. Two seconds either side
-    of STALE_AFTER_S the panel went from a correct 0% to a confident green 78%
-    for usage that had already been forgiven.
-
-    So all three outputs are decided separately now:
-
-      - The EPOCH the window emptied is reported either way. It is evidence
-        about the past, and evidence does not rot with the file's mtime: the
-        window ended when it ended, whatever age the reading has since
-        reached. pc/normalizer needs it to refuse a newer reading from a
-        source that cannot see reset times (this frame's own observed_at is
-        the payload's mtime and can be long before the reset, so nothing else
-        in the frame can carry that fact).
-      - The RESET TIME is discarded either way. A stamp the clock has already
-        passed is not a countdown -- protocol.secs_until refuses it -- and
-        merge() reads its mere presence as "a source supplied a reset time",
-        which silences the desktop burn rate. Neither is worth keeping for a
-        window that has ended.
-      - The PERCENTAGE is 0.0 only while the reading is fresh. On a stale one
-        it goes to UNKNOWN, which is the third option the old comment was
-        missing: it does not zero an old payload, and it does not re-offer a
-        number for a window that no longer exists. It is also the convention
-        _window() already sets two functions up -- an absent percentage reads
-        as -1 and not as a confident zero -- applied to a percentage we have
-        positive evidence against rather than merely none for.
-    """
-    if not _window_has_reset(resets_at, now_epoch):
-        return pct, resets_at, None
-    return (base.UNKNOWN if (stale or pct < 0) else 0.0), None, resets_at
+# The rollover rule that used to live here -- why an ended window reads 0 when
+# the reading is fresh and unknown when it is stale -- moved to
+# pc/providers/base as window_has_reset and rolled_over, when Codex turned out
+# to need it for the same situation (DevOceanIT, 2026-10-01). The reasoning
+# moved with it.
 
 
 def map_statusline_frame(payload: dict, now_epoch: float,
@@ -164,15 +102,15 @@ def map_statusline_frame(payload: dict, now_epoch: float,
     # Staleness is age, and only age. A window resetting used to set this too,
     # which conflated two different facts: "we cannot vouch for this reading"
     # and "this reading has been superseded by a zero we can compute". The
-    # second has a real answer, so it gets one -- see _rolled_over().
+    # second has a real answer, so it gets one -- see base.rolled_over().
     stale = (now_epoch - mtime_epoch) > STALE_AFTER_S
     # Unconditional, and `stale` is an INPUT to it rather than a gate on it:
     # whether a window has ended is a question about the clock, not about the
     # file's age, and only the answer's third value depends on how old the
-    # reading is. See _rolled_over().
-    session_pct, session_resets, session_rolled = _rolled_over(
+    # reading is. See base.rolled_over().
+    session_pct, session_resets, session_rolled = base.rolled_over(
         session_pct, session_resets, now_epoch, stale)
-    weekly_pct, weekly_resets, weekly_rolled = _rolled_over(
+    weekly_pct, weekly_resets, weekly_rolled = base.rolled_over(
         weekly_pct, weekly_resets, now_epoch, stale)
 
     return base.NormalizedUsageFrame(
