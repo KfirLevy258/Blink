@@ -31,9 +31,10 @@ green and honest and still not a licence to ship:
 Failing closed is the whole design. A missing file, an unreadable one, a
 damaged one, a missing inventory, or an interpreter with no tomllib are all
 refusals -- never a pass and, from main(), never a bare traceback either.
-That last case is real rather than theoretical: release.sh runs plain
-`python3`, and on this Mac /usr/bin/python3 is 3.9.6 with no tomllib while the
-homebrew python3 on PATH has it.
+That last case is real rather than theoretical: release.sh runs this under
+BLINK_PYTHON, else `python3`, and on this Mac /usr/bin/python3 is 3.9.6 with
+no tomllib while the homebrew python3 on PATH has it. release.sh now refuses
+anything below 3.11 before it gets here, but this module is also run by hand.
 
 Stdlib only, and nothing from the rest of pc/. This module runs under whatever
 interpreter a release shell happens to have, which is not the one the daemon's
@@ -45,7 +46,7 @@ import sys
 import time
 from pathlib import Path
 
-try:                                  # 3.11+; release.sh runs plain `python3`
+try:                                  # 3.11+; release.sh checks, by hand may not
     import tomllib
 except ModuleNotFoundError:           # pragma: no cover - exercised by a stub
     tomllib = None

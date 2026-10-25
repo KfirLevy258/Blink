@@ -20,9 +20,11 @@ Three of those ways are specific to this fleet and worth naming.
     desk named there reported a pass, so a shrunken run cannot vouch for
     itself.
 
-  - The gate cannot verify without tomllib, and release.sh calls plain
-    `python3`. On this Mac /usr/bin/python3 is 3.9.6 and has none, while the
-    homebrew python3 on PATH does. An interpreter that cannot read the
+  - The gate cannot verify without tomllib, and release.sh runs it under
+    `python3` unless BLINK_PYTHON names another. On this Mac
+    /usr/bin/python3 is 3.9.6 and has none, while the homebrew python3 on
+    PATH does. release.sh now refuses an interpreter below 3.11 itself, but
+    the gate must not rely on that. An interpreter that cannot read the
     inventory has nothing to say about the release, and that silence must
     refuse rather than pass.
 
@@ -408,9 +410,10 @@ def test_the_real_inventory_names_the_three_desks(tmp_path):
 # --- a gate that cannot verify --------------------------------------------
 
 def test_no_tomllib_refuses(tmp_path, monkeypatch):
-    # release.sh calls plain `python3`. On this Mac /usr/bin/python3 is 3.9.6
-    # and has no tomllib, so this is the difference between a refusal and a
-    # traceback in front of somebody publishing a release.
+    # release.sh runs the gate under BLINK_PYTHON, else `python3`. On this Mac
+    # /usr/bin/python3 is 3.9.6 and has no tomllib, so this is the difference
+    # between a refusal and a traceback in front of somebody publishing a
+    # release -- or running the gate by hand, past release.sh's own check.
     monkeypatch.setattr(fleet_gate, "tomllib", None)
     reason = gate(_state(tmp_path), SHA, _inventory(tmp_path),
                   now=lambda: 2000.0)
@@ -452,7 +455,7 @@ def test_main_refuses_the_wrong_number_of_arguments(tmp_path):
 
 
 def test_run_as_a_module_refuses_with_status_one(tmp_path):
-    # The whole path release.sh takes: `python3 -m pc.fleet_gate`, non-zero
+    # The whole path release.sh takes: `"$PY" -m pc.fleet_gate`, non-zero
     # status, reason on stderr beside the FATAL block that follows it.
     done = subprocess.run(
         [sys.executable, "-m", "pc.fleet_gate",

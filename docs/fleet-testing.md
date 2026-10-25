@@ -448,9 +448,15 @@ on. The desk list is read from `fleet.toml` rather than from the result,
 because a file cannot vouch for its own completeness.
 
 It refuses whenever it **cannot** check: no file, an unreadable one, a damaged
-one, a missing inventory, or a Python too old for `tomllib` (`release.sh` calls
-plain `python3`, and `/usr/bin/python3` on this Mac is still 3.9). Silence from
-a gate must never read as approval.
+one, a missing inventory, or a Python too old for `tomllib` (`/usr/bin/python3`
+on this Mac is still 3.9). Silence from a gate must never read as approval.
+`release.sh` runs the gate under `BLINK_PYTHON`, else `python3`, and refuses an
+interpreter below 3.11 just before the gate (with `BLINK_SKIP_FLEET=1` there is
+no gate, and no such floor):
+
+```sh
+BLINK_PYTHON=python3.13 tools/release.sh
+```
 
 ### Releasing without it
 

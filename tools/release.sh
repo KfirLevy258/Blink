@@ -5,6 +5,31 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
+# The interpreter for the three Python steps below: the fleet gate, the
+# manifest, and the check that its signature verifies. A bare python3 is
+# Apple's 3.9.6 in /usr/bin on a Mac with nothing else in front of it, which
+# has no tomllib for the gate, so a release from such a shell was refused
+# before any result was read, with no way to name a better interpreter.
+# BLINK_PYTHON is the override burn.sh and flash_encrypted.sh already take.
+# Found by gapietro in their fork (2026-10-13). Left unset it is python3,
+# looked up on PATH at each step -- and after blink_zephyr_activate below,
+# that lookup finds the Zephyr venv's, as it always has.
+PY="${BLINK_PYTHON:-python3}"
+# Asked before the interpreter is first used, because a wrong one otherwise
+# surfaced late and under the wrong name: as "the fleet gate refused" when the
+# gate had never run, or, with BLINK_SKIP_FLEET=1, only after the build and
+# the draft release. The same probe build_binary.sh makes, with a floor given
+# by the caller. Called below, where each path actually needs $PY.
+py_refuse_unless() {	# <major.minor floor> <what needs it>
+	PY_VER=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null) || PY_VER=""
+	"$PY" -c "import sys; sys.exit(0 if sys.version_info >= (${1%.*}, ${1#*.}) else 1)" \
+		>/dev/null 2>&1 && return 0
+	if [ -n "$PY_VER" ]; then PY_WHAT="Python $PY_VER"; else PY_WHAT="not an interpreter that runs"; fi
+	echo "FATAL: release.sh needs Python $1 or newer ($2)," >&2
+	echo "       and $PY is $PY_WHAT." >&2
+	echo "       Set BLINK_PYTHON to one that is, e.g. BLINK_PYTHON=python3.13." >&2
+	exit 1
+}
 REPO="${OTA_REPO:-KfirLevy258/Blink}"
 REPO_URL="${OTA_REPO_URL:-https://github.com/$REPO.git}"
 TAG="v$(sed -n 's/#define BLINK_FW_VERSION "\(.*\)"/\1/p' "$ROOT/firmware/src/version.h")"
@@ -25,21 +50,30 @@ VER="${TAG#v}"
 #
 # It refuses whenever it cannot check: no file, an unreadable one, a missing
 # inventory, or a python3 too old for tomllib (/usr/bin/python3 is still 3.9
-# on macOS, and this script calls plain `python3`). Silence from a gate must
-# never read as approval.
+# on macOS; set BLINK_PYTHON to run this under a newer one -- see PY at the
+# top). Silence from a gate must never read as approval.
 #
 # PYTHONPATH because -m adds the CALLER's directory to sys.path, not this
 # checkout, and a release may be started from anywhere.
 if [ "${BLINK_SKIP_FLEET:-}" = "1" ]; then
 	echo "WARNING: BLINK_SKIP_FLEET=1 -- $TAG is being built with no proof" >&2
 	echo "         that it runs on any board. Nothing below checks that." >&2
+	# No gate, so no tomllib floor. Left unset, python3 is looked up again
+	# after blink_zephyr_activate and may well be a different interpreter
+	# from the one on PATH now, so there is nothing true to ask of it here.
+	# A BLINK_PYTHON that was named is the one the manifest steps will run:
+	# make sure it runs at all (pc/ supports 3.9), before the build.
+	if [ -n "${BLINK_PYTHON:-}" ]; then
+		py_refuse_unless 3.9 "the manifest and signature steps"
+	fi
 else
-	PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m pc.fleet_gate \
+	py_refuse_unless 3.11 "tomllib, for the fleet gate"
+	PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m pc.fleet_gate \
 		"$ROOT/.fleet/last_run.json" "$(git -C "$ROOT" rev-parse HEAD)" \
 		"$ROOT/tools/fleet/fleet.toml" || {
 		echo "FATAL: the fleet gate refused $TAG for the reason above." >&2
 		echo "       Prove this commit on all three desks first:" >&2
-		echo "         python3 tools/fleet/run.py" >&2
+		echo "         $PY tools/fleet/run.py" >&2
 		echo "       BLINK_SKIP_FLEET=1 releases without it." >&2
 		exit 1; }
 fi
@@ -247,7 +281,7 @@ done
 # It used to be a second definition inline here, free to drift from the one the
 # daemon reads.
 ROOT="$ROOT" VER="$VER" PROTO="$PROTO" SIZE="$SIZE" SHA="$SHA" TMP="$TMP" \
-	ARTIFACTS="$ARTIFACTS" python3 - <<'PYEOF' > "$TMP/manifest.json"
+	ARTIFACTS="$ARTIFACTS" "$PY" - <<'PYEOF' > "$TMP/manifest.json"
 import hashlib, json, os, sys
 
 sys.path.insert(0, os.environ["ROOT"])
@@ -276,7 +310,7 @@ openssl dgst -sha256 -sign "$RELKEY" -out "$TMP/manifest.json.sig" \
 	"$TMP/manifest.json"
 # Prove the signature verifies with the public half that is compiled into the
 # binaries we just built, before anyone can download it.
-python3 - "$ROOT" "$TMP/manifest.json" "$TMP/manifest.json.sig" <<'PYEOF'
+"$PY" - "$ROOT" "$TMP/manifest.json" "$TMP/manifest.json.sig" <<'PYEOF'
 import sys
 # Explicit root: the firmware build left us in a different directory, and
 # picking pc/ up from the cwd would work here and nowhere else.
