@@ -11,12 +11,28 @@ from pc.version import PROTO_VERSION, RELEASE_VERSION
 _SAME = object()   # "the signed feed serves the same thing as the plain one"
 
 
+def _stub_flasher(flashed, flasher):
+    """Record what would be written, then do whatever `flasher` does after.
+
+    True is the plain recorder most tests want. A callable runs after the
+    recording, which is how TestFlash makes the stub leave the way the real
+    one does.
+    """
+    def flash_image(blob, v):
+        flashed.append((blob, v))
+        if callable(flasher):
+            flasher(blob, v)
+    return flash_image
+
+
 def bridge(manifest=None, firmware=b"", fw_raises=None, flasher=True,
            self_update=None, pending=None, signed=_SAME):
     """A Bridge with the network and the flasher replaced.
 
     Returns (bridge, sent, flashed) -- `flashed` collects (blob, version)
-    tuples so a test can assert what would have been written.
+    tuples so a test can assert what would have been written. `flasher` is
+    True for a recording stub, False for none, or a callable run after the
+    recording.
     """
     sent, flashed = [], []
 
@@ -27,7 +43,7 @@ def bridge(manifest=None, firmware=b"", fw_raises=None, flasher=True,
 
     b = Bridge(write_msg=sent.append, fetch_usage=lambda: {},
                fetch_manifest=lambda: manifest, fetch_firmware=fetch_fw,
-               flash_image=(lambda blob, v: flashed.append((blob, v)))
+               flash_image=_stub_flasher(flashed, flasher)
                if flasher else None,
                self_update=self_update, pending=pending,
                # The app-update decision reads a SIGNED manifest, never the
@@ -143,13 +159,51 @@ class TestCompatibility(unittest.TestCase):
         self.assertEqual(welcome["app_ver"], RELEASE_VERSION)
 
 
+class _Reflashed(Exception):
+    """Stands in for the Reflashed that claude_usage_bridge's flash_image
+    raises. It is defined inside main(), so it cannot be imported."""
+
+
 class TestFlash(unittest.TestCase):
+    """The stub flasher here leaves the way production's does: by raising.
+
+    claude_usage_bridge's flash_image closes the port, runs esptool and then
+    raises Reflashed on success and failure alike, which unwinds out of
+    Bridge.on_message to the reconnect loop. So nothing written after
+    self._flash() in bridge.py ever runs on a desk. A stub that returned
+    normally let such code run here and pass, so a step ordered after the
+    write -- telling the board the write is starting, say -- would be tested
+    and never executed.
+    """
     M = {"version": "0.4.9", "size": 5, "sha256": HELLO_SHA}
 
+    def rig(self, **kw):
+        """bridge(), with a flasher that raises and notes what had been sent."""
+        self.sent_at_flash = None
+        box = {}
+
+        def reflash(blob, v):
+            self.sent_at_flash = types(box["sent"])
+            raise _Reflashed()
+
+        kw.setdefault("flasher", reflash)
+        b, sent, flashed = bridge(**kw)
+        box["sent"] = sent
+        return b, sent, flashed
+
+    @staticmethod
+    def approve(b):
+        """Send the board's consent. True when the flasher was reached."""
+        try:
+            b.on_message({"t": "ota_flash"})
+        except _Reflashed:
+            return True
+        return False
+
     def test_approval_flashes_the_downloaded_image(self):
-        b, sent, flashed = bridge(manifest=self.M, firmware=b"hello")
+        b, sent, flashed = self.rig(manifest=self.M, firmware=b"hello")
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
-        b.on_message({"t": "ota_flash"})
+        self.assertTrue(self.approve(b))
         self.assertEqual(flashed, [(b"hello", "0.4.9")])
 
     def test_the_board_is_told_when_the_write_starts(self):
@@ -160,32 +214,70 @@ class TestFlash(unittest.TestCase):
         failure for an install that had not started, spending the breadcrumb
         so the real success went unreported.
         """
-        b, sent, flashed = bridge(manifest=self.M, firmware=b"hello")
+        b, sent, flashed = self.rig(manifest=self.M, firmware=b"hello")
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
-        b.on_message({"t": "ota_flash"})
+        self.approve(b)
         self.assertEqual(types(sent), ["ota_avail", "ota_begin"])
         self.assertEqual(sent[-1]["version"], "0.4.9")
         self.assertEqual(flashed, [(b"hello", "0.4.9")])
 
+    def test_ota_begin_is_on_the_wire_before_the_flasher_runs(self):
+        """Before, not merely somewhere in the transcript.
+
+        The flasher closes the port and never returns, so an ota_begin moved
+        to after self._flash() would never be sent -- yet with a recording
+        stub it still showed up in `sent` and the test above stayed green.
+        """
+        b, sent, flashed = self.rig(manifest=self.M, firmware=b"hello")
+        b.on_message({"t": "ota_query", "cur": "0.4.8"})
+        self.assertTrue(self.approve(b))
+        self.assertEqual(self.sent_at_flash, ["ota_avail", "ota_begin"])
+
     def test_nothing_is_begun_when_the_image_is_rejected(self):
         m = dict(self.M, sha256="cd" * 32)
-        b, sent, flashed = bridge(manifest=m, firmware=b"hello")
+        b, sent, flashed = self.rig(manifest=m, firmware=b"hello")
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
-        b.on_message({"t": "ota_flash"})
+        self.assertFalse(self.approve(b))
         self.assertNotIn("ota_begin", types(sent))
 
     def test_flash_without_an_offer_is_refused(self):
-        b, sent, flashed = bridge(manifest=self.M, firmware=b"hello")
-        b.on_message({"t": "ota_flash"})
+        b, sent, flashed = self.rig(manifest=self.M, firmware=b"hello")
+        self.assertFalse(self.approve(b))
         self.assertEqual(types(sent), ["ota_error"])
         self.assertEqual(flashed, [])
 
     def test_size_mismatch_is_never_written(self):
-        """slot0 has no auto-revert, so a bad image must not reach it."""
-        b, sent, flashed = bridge(manifest=self.M, firmware=b"much longer")
+        """slot0 has no auto-revert, so a bad image must not reach it.
+
+        The image here hashes to exactly what the manifest says; only the
+        size disagrees. It used to be b"much longer", which failed the sha256
+        check as well, so the size guard in bridge.py could be deleted and the
+        hash check would refuse the image instead, keeping this test green.
+        The mutation survey of 2026-09-05 (docs/plans/STATE.md) found it. With
+        the hash agreeing, the size guard is the only thing between this blob
+        and slot0.
+        """
+        m = dict(self.M, size=len(b"hello") + 1)
+        b, sent, flashed = self.rig(manifest=m, firmware=b"hello")
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
-        b.on_message({"t": "ota_flash"})
+        self.assertFalse(self.approve(b))
         self.assertEqual(types(sent), ["ota_avail", "ota_error"])
+        self.assertEqual(sent[-1]["why"], "size mismatch")
+        self.assertEqual(flashed, [])
+
+    def test_a_blob_longer_than_the_manifest_is_never_written(self):
+        """The mirror of the case above: the manifest claims less than came.
+
+        `!=` and not `<` is what refuses both, and only a test from each side
+        tells the two apart. The hash matches here too, so the size guard is
+        again the only thing refusing it.
+        """
+        m = dict(self.M, size=len(b"hello") - 1)
+        b, sent, flashed = self.rig(manifest=m, firmware=b"hello")
+        b.on_message({"t": "ota_query", "cur": "0.4.8"})
+        self.assertFalse(self.approve(b))
+        self.assertEqual(types(sent), ["ota_avail", "ota_error"])
+        self.assertEqual(sent[-1]["why"], "size mismatch")
         self.assertEqual(flashed, [])
 
     def test_sha_mismatch_is_never_written(self):
@@ -196,9 +288,9 @@ class TestFlash(unittest.TestCase):
         from the CDN would have been written to a slot with no auto-revert.
         """
         m = dict(self.M, sha256="cd" * 32)
-        b, sent, flashed = bridge(manifest=m, firmware=b"hello")
+        b, sent, flashed = self.rig(manifest=m, firmware=b"hello")
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
-        b.on_message({"t": "ota_flash"})
+        self.assertFalse(self.approve(b))
         self.assertEqual(types(sent), ["ota_avail", "ota_error"])
         self.assertEqual(sent[-1]["why"], "sha256 mismatch")
         self.assertEqual(flashed, [])
@@ -206,29 +298,31 @@ class TestFlash(unittest.TestCase):
     def test_hash_comparison_ignores_case_and_whitespace(self):
         """sha256sum and shasum disagree about case; neither is wrong."""
         m = dict(self.M, sha256="  " + HELLO_SHA.upper() + "\n")
-        b, sent, flashed = bridge(manifest=m, firmware=b"hello")
+        b, sent, flashed = self.rig(manifest=m, firmware=b"hello")
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
-        b.on_message({"t": "ota_flash"})
+        self.assertTrue(self.approve(b))
         self.assertEqual(flashed, [(b"hello", "0.4.9")])
 
     def test_download_failure_reports_instead_of_raising(self):
-        b, sent, flashed = bridge(manifest=self.M, fw_raises=OSError("no route"))
+        b, sent, flashed = self.rig(manifest=self.M,
+                                    fw_raises=OSError("no route"))
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
-        b.on_message({"t": "ota_flash"})
+        self.assertFalse(self.approve(b))
         self.assertEqual(types(sent), ["ota_avail", "ota_error"])
         self.assertEqual(flashed, [])
 
     def test_missing_flasher_reports_instead_of_crashing(self):
-        b, sent, _ = bridge(manifest=self.M, firmware=b"hello", flasher=False)
+        b, sent, _ = self.rig(manifest=self.M, firmware=b"hello",
+                              flasher=False)
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
-        b.on_message({"t": "ota_flash"})
+        self.assertFalse(self.approve(b))
         self.assertEqual(types(sent), ["ota_avail", "ota_error"])
 
     def test_offer_is_consumed_so_a_repeat_cannot_reflash(self):
-        b, sent, flashed = bridge(manifest=self.M, firmware=b"hello")
+        b, sent, flashed = self.rig(manifest=self.M, firmware=b"hello")
         b.on_message({"t": "ota_query", "cur": "0.4.8"})
-        b.on_message({"t": "ota_flash"})
-        b.on_message({"t": "ota_flash"})
+        self.assertTrue(self.approve(b))
+        self.assertFalse(self.approve(b))
         self.assertEqual(len(flashed), 1)
 
 

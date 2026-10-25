@@ -437,7 +437,15 @@ all-sources)
 	[ "$(wire_get "$w" p2_session_pct)" = "52.0" ] || fail "p2_session_pct wrong: $w"
 	[ "$(wire_get "$w" p2_stale)" = "false" ] || fail "codex reading should be fresh: $w"
 	[ -z "$(wire_get "$w" burn_pph)" ] || fail "a burn rate must not be sent when a reset time exists: $w"
-	[ "${#w}" -le 512 ] || fail "wire message over the board's 512-byte line: ${#w}"
+	# MAX_LINE_BYTES - 1: $(wire) strips the newline, and the board's budget
+	# counts it (drain_rx() keeps LINE_MAX - 1 bytes of text, then the '\n').
+	# Read from protocol.py rather than written here as 511, so this check
+	# cannot keep the old number after the budget moves.
+	# write(), not print(): no newline, so no '\r' from a Windows python
+	# for the integer test below to choke on.
+	max=$(cd "$ROOT" && py -c 'import sys; from pc import protocol; sys.stdout.write(str(protocol.MAX_LINE_BYTES - 1))') || fail "could not read MAX_LINE_BYTES from pc/protocol.py"
+	[ -n "$max" ] || fail "could not read MAX_LINE_BYTES from pc/protocol.py"
+	[ "${#w}" -le "$max" ] || fail "wire message over the board's line budget: ${#w} + newline, at most $max + newline"
 	ok "wire: claude (status line) primary with state and counts, codex secondary, under budget"
 	;;
 desktop-only)

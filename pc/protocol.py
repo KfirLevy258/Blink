@@ -16,12 +16,14 @@ VERSION = PROTO_VERSION
 
 # The firmware's inbound line buffer, mirrored here on purpose.
 #
-# proto.c:367-371 does not truncate an over-long line, it DROPS it: on
-# overflow it resets line_len to 0 and the whole message is gone. There is no
-# error, no partial parse and nothing on the panel to show for it -- the board
-# simply stops updating while the daemon reports success. Every field added to
-# a message spends this budget, so encode_checked() below refuses to put a
-# line on the wire that the board could not receive.
+# drain_rx() in proto.c does not truncate an over-long line, it DROPS it: on
+# overflow it discards to the next newline and the whole message is gone. It
+# keeps LINE_MAX - 1 bytes of text, and the newline ends the line without
+# being stored, so the limit below counts the newline. There is no error, no
+# partial parse and nothing on the panel to show for it -- the board simply
+# stops updating while the daemon reports success. Every field added to a
+# message spends this budget, so encode_checked() below refuses to put a line
+# on the wire that the board could not receive.
 MAX_LINE_BYTES = 512
 
 # The one variable-length field on the usage message. "Opus 5 (1M context)" is
@@ -324,9 +326,9 @@ The firmware reads this field: proto.c's "usage" handler calls
     #
     # Unknown fields are OMITTED rather than sent as sentinels. That is the
     # MAX_LINE_BYTES budget talking: an over-long line is dropped whole by the
-    # board (proto.c:367-371), so every key that carries no information is
-    # spending a budget a future field will need. An absent key already means
-    # "unknown" on both sides.
+    # board (drain_rx() in proto.c), so every key that carries no information
+    # is spending a budget a future field will need. An absent key already
+    # means "unknown" on both sides.
     extra = {"provider": provider, "src": src}
     if state:
         extra["state"] = state
