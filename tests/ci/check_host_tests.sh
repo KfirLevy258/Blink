@@ -104,6 +104,7 @@ run_one usage_contrast ""              "-lm"
 run_one usage_freshness "usage_freshness.c" ""
 run_one usage_layout ""                ""
 run_one usage_state  "usage_state.c"   ""
+run_one svc_state    "svc_state.c fmt.c" ""
 
 if [ "$failures" -ne 0 ]; then
 	printf '\n%d host test(s) failed\n' "$failures" >&2

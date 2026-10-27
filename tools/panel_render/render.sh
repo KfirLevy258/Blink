@@ -68,10 +68,11 @@ $CC -O1 -w -DLV_CONF_INCLUDE_SIMPLE=1 \
 	"$ROOT/firmware/src/usage_view.c" \
 	"$ROOT/firmware/src/fmt.c" \
 	"$ROOT/firmware/src/usage_state.c" \
+	"$ROOT/firmware/src/svc_state.c" \
 	@"$BUILD/srcs.txt" \
 	-o "$BUILD/render"
 
-for scene in 0 1 2 3 4 5 6 7 8 9 10 11; do
+for scene in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
 	"$BUILD/render" "$OUT/panel-$scene.ppm" "$scene"
 done
 echo "PPMs in $OUT (any image viewer opens them; convert with your tool of choice)"

@@ -258,4 +258,12 @@ void usage_view_set_provider2(const char *tag, double session_pct,
 			      double weekly_pct, int32_t session_resets_in_s,
 			      int32_t weekly_resets_in_s, bool stale);
 
+/*
+ * svc_state.c has heard a new `svc` message; redraw the line under the brand.
+ * The level itself is read from svc_state for whichever provider the page on
+ * screen belongs to, so this takes no arguments -- the view never holds a
+ * copy that could disagree with it.
+ */
+void usage_view_svc_changed(void);
+
 #endif /* USAGE_VIEW_H */

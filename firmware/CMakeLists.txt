@@ -33,6 +33,7 @@ target_sources(app PRIVATE
 	src/usage_freshness.c
 	src/fatal.c
 	src/fatal_policy.c
+	src/svc_state.c
 )
 
 # Diagnostic only; CONFIG_BLINK_TOUCH_TRACE is off in release builds.

@@ -16,6 +16,7 @@
 #include "usage_view.h"
 #include "usage_state.h"
 #include "usage_freshness.h"
+#include "svc_state.h"
 #include "net_time.h"
 #include "version.h"
 #include "cfg_store.h"
@@ -31,7 +32,36 @@
  * has not said goodbye is taken to be asleep -- see proto_host_lost(). */
 #define HOST_TIMEOUT_MS 30000
 #define LINE_MAX 512
-#define RX_RING_SIZE 1024
+/*
+ * Sized to the largest thing the daemon sends without waiting for an answer,
+ * not to a line. That is its reply to a hello: welcome, a waiting ota_error,
+ * time, svc for both pages, usage, session and an update offer, back to back.
+ * tests/pc/test_hello_burst.py builds it through the real Bridge at its
+ * widest -- the usage line counted at its 512-byte cap -- and measures 1266
+ * bytes. The daemon review's figure was about 1095. Either is over 1024.
+ *
+ * Whether the old ring overflowed is a race and not a certainty: at 115200
+ * baud a byte lands every 87 us, so 1024 bytes is 89 ms of line, and the
+ * ring only fills if the main loop stops draining for that long while the
+ * burst is in flight -- and the burst is timed to find the one moment it
+ * plausibly does. The second boot hello goes out from main.c just before
+ * run_usb(); the reply's usage line makes the next lv_timer_handler() paint
+ * the first full gauge frame, and the rest of the burst arrives behind it.
+ * Nobody has timed that frame on a board. Whatever arrives while the ring is
+ * full the ISR drops, which at the tail of this burst is the update offer the
+ * Settings row is waiting on -- and if its newline goes too, the next line
+ * is glued onto what is left of it and lost as well.
+ *
+ * Draining harder was the alternative, and it has no single place to go: the
+ * stalls are frame renders inside LVGL, a TLS handshake, the boot clip. A
+ * ring that holds the whole burst makes the length of any stall irrelevant to
+ * it, up to the daemon's next fast poll two seconds later: the burst is
+ * finite, and nothing but a pong follows it. 2048 holds the measured worst
+ * case with 782 bytes over, and costs exactly the 1 KB it adds: the ring
+ * links into dram1_0_seg, which went from 54532 to 55556 of 98304 bytes
+ * between the develop build and this one (2026-10-27), 42 KB still free.
+ */
+#define RX_RING_SIZE 2048
 
 static const struct device *const console_dev =
 	DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
@@ -682,6 +712,27 @@ static void dispatch(const char *json)
 		msg_get_str(json, "label", lbl, sizeof(lbl));
 		num(json, "n", &n, 0, 9999);
 		usage_view_set_session(lbl, (int)n);
+	} else if (strcmp(type, "svc") == 0) {
+		/*
+		 * What the provider's public status page says. The contract is
+		 * pc/protocol.py svc(); the decisions -- which levels exist,
+		 * how long one stands without being re-stated, what the line
+		 * says -- are in svc_state.c, where a host test reaches them.
+		 *
+		 * `level` gets 16 bytes for a word of at most 8: msg_get_str
+		 * truncates rather than failing, and a newer daemon's
+		 * "majority" cut to the 5 bytes of a tighter buffer would read
+		 * as "major". At 16 nothing truncates to a word this firmware
+		 * knows. `what` is absent at ok, which leaves it "".
+		 */
+		char prov[12] = "", lvl[16] = "", what[SVC_WHAT_MAX + 4] = "";
+
+		if (msg_get_str(json, "provider", prov, sizeof(prov))) {
+			msg_get_str(json, "level", lvl, sizeof(lvl));
+			msg_get_str(json, "what", what, sizeof(what));
+			svc_note(prov, lvl, what, k_uptime_get());
+			usage_view_svc_changed();
+		}
 	}
 	/* unknown types ignored */
 }

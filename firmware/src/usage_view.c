@@ -14,6 +14,7 @@
 #include "usage_layout.h"
 #include "fmt.h"
 #include "usage_state.h"
+#include "svc_state.h"
 #include "cfg_store.h"
 
 /* Severity colours: green under 60%, amber approaching, red near the limit. */
@@ -259,6 +260,16 @@ static int32_t age_s = -1;	/* seconds since the last usage message */
 static double last_s_pct = -1;	/* latest numbers, for the near-limit hint */
 static double last_w_pct = -1;
 static enum usage_status last_status = USAGE_STATUS_DISCONNECTED;
+/*
+ * The provider's own status page, for the page on screen and no other.
+ *
+ * svc_seen is the level set_status last worked out for this page, drawn or
+ * not, so usage_view_tick_1s can notice the hold running out and give the
+ * row back without waiting for some other message to arrive. svc_buf is
+ * static for the reason activity_hint's is: lv_label_set_text copies it.
+ */
+static enum svc_level svc_seen;
+static char svc_buf[FMT_HINT_MAX];
 
 /*
  * There are no per-model weekly windows, and no long-press card to pick
@@ -1600,6 +1611,18 @@ void usage_view_tick_1s(void)
 	}
 	refresh_rail();
 
+	/*
+	 * A status-page incident clears by itself: the daemon re-states it
+	 * every minute, and once SVC_HOLD_MS passes without that, the level
+	 * reads OK. Nothing arrives to say so -- the silence IS the message,
+	 * from a daemon that has crashed or been uninstalled -- so this tick is
+	 * the only thing that can notice. One comparison a second, and the
+	 * status switch re-runs only on the second it changes.
+	 */
+	if (svc_hint(page_tag(cur_page), k_uptime_get(), NULL, 0) != svc_seen) {
+		usage_view_set_status(last_status);
+	}
+
 	if (age_s >= 0) {
 		age_s++;
 		render_age();
@@ -2256,6 +2279,35 @@ static const char *activity_hint(void)
 	return hbuf;
 }
 
+/*
+ * Should the status-page sentence take the row from what is there?
+ *
+ * Called only where data health has nothing to say -- a used-up window,
+ * an old reading, an error or a lost host each outrank it, because those are
+ * about the numbers on THIS screen and the vendor's page is not. Below them
+ * it yields to an execution-state sentence already holding the row (a
+ * prompt waiting, a turn that died): that wants the person at the desk now,
+ * and an outage elsewhere does not. Above everything else, including the
+ * clock -- which it replaces on this row exactly as those sentences do,
+ * hidden rather than drawn over. An early preview put this text on the hint
+ * label with the clock still visible on the same row and the clock, created
+ * later, painted over it.
+ */
+static void svc_take_row(const char **text, lv_color_t *tc, bool *urgent)
+{
+	if (svc_seen == SVC_OK || (*urgent && (*text)[0])) {
+		return;
+	}
+	*text = svc_buf;
+	*tc = svc_tone(svc_seen) == FMT_TONE_RED ? COL_RED : COL_AMBER;
+	*urgent = true;
+}
+
+void usage_view_svc_changed(void)
+{
+	usage_view_set_status(last_status);
+}
+
 void usage_view_set_status(enum usage_status status)
 {
 	if (!built) {
@@ -2277,6 +2329,9 @@ void usage_view_set_status(enum usage_status status)
 	 * host test can reach it.
 	 */
 	bool urgent = true;
+
+	svc_seen = svc_hint(page_tag(cur_page), k_uptime_get(),
+			    svc_buf, sizeof(svc_buf));
 
 	switch (status) {
 	case USAGE_STATUS_OK:
@@ -2310,6 +2365,7 @@ void usage_view_set_status(enum usage_status status)
 			text = activity_hint();
 			tc = COL_DIM;
 			urgent = usage_activity_needs_row(activity);
+			svc_take_row(&text, &tc, &urgent);
 		}
 		break;
 	case USAGE_STATUS_STALE:
@@ -2348,6 +2404,7 @@ void usage_view_set_status(enum usage_status status)
 			tc = COL_DIM;
 			text = activity_hint();
 			urgent = usage_activity_needs_row(activity);
+			svc_take_row(&text, &tc, &urgent);
 		}
 		break;
 	case USAGE_STATUS_ERROR:

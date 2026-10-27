@@ -16,6 +16,8 @@
 #include <lvgl.h>
 #include "usage_view.h"
 #include "usage_layout.h"
+#include "svc_state.h"
+#include <zephyr/kernel.h>
 
 static uint16_t fb[SCR_W * SCR_H];
 
@@ -51,6 +53,33 @@ static void write_ppm(const char *path)
 		fwrite(out, 1, 3, f);
 	}
 	fclose(f);
+}
+
+/*
+ * The two-provider desk the status-page scenes share: Claude main, Codex on
+ * page 2, nothing else on the line under the brand that would outrank an
+ * incident -- both windows under 95 %, a session RUNNING (which leaves the
+ * row to the clock), 14:05 on the clock so its absence is visible.
+ */
+static void svc_desk(int page)
+{
+	usage_view_set_provider1("claude");
+	usage_view_update(27.0, 13231, 42.0, 598831);
+	usage_view_set_provider2("codex", 34.0, 61.0, 4320, 259200, false);
+	usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+	usage_view_set_sessions(1, 0);
+	usage_view_set_counts(1, 1, 0, 0);
+	usage_view_set_clock(14, 5);
+	if (page) {
+		usage_view_page_step(1);
+	}
+}
+
+/* One svc message, as proto.c's dispatch hands it on. */
+static void svc(const char *provider, const char *level, const char *what)
+{
+	svc_note(provider, level, what, k_uptime_get());
+	usage_view_svc_changed();
 }
 
 static void settle(void)
@@ -201,6 +230,66 @@ int main(int argc, char **argv)
 		usage_view_set_sessions(9999, 0);
 		usage_view_set_counts(29997, 9999, 9999, 9999);
 		usage_view_set_clock(20, 48);
+		break;
+	case 12: /* svc, Claude page: maintenance (amber) */
+		svc_desk(0);
+		svc("claude", "maint", "claude.ai");
+		break;
+	case 13: /* svc, Claude page: degraded (amber) */
+		svc_desk(0);
+		svc("claude", "degraded", "API");
+		break;
+	case 14: /* svc, Claude page: partial outage (amber) */
+		svc_desk(0);
+		svc("claude", "partial", "Claude Code");
+		break;
+	case 15: /* svc, Claude page: major outage (red) */
+		svc_desk(0);
+		svc("claude", "major", "Claude Code");
+		break;
+	case 16: /* svc, Codex page: maintenance (amber) */
+		svc_desk(1);
+		svc("codex", "maint", "Login");
+		break;
+	case 17: /* svc, Codex page: degraded (amber) */
+		svc_desk(1);
+		svc("codex", "degraded", "API");
+		break;
+	case 18: /* svc, Codex page: partial outage (amber) */
+		svc_desk(1);
+		svc("codex", "partial", "Codex");
+		break;
+	case 19: /* svc, Codex page: major outage (red) */
+		svc_desk(1);
+		svc("codex", "major", "Codex");
+		break;
+	case 20: /* Claude is down and the CODEX page is on screen: nothing
+		  * here, the clock keeps the row. Keyed by provider. */
+		svc_desk(1);
+		svc("claude", "major", "Claude Code");
+		break;
+	case 21: /* ...and the same incident with the Claude page brought
+		  * back: it is there, because it was held for the provider. */
+		svc_desk(1);
+		svc("claude", "major", "Claude Code");
+		usage_view_page_step(-1);
+		break;
+	case 22: /* A prompt is waiting AND Claude is down: the person at the
+		  * desk comes first, the outage yields the row. */
+		svc_desk(0);
+		svc("claude", "major", "Claude Code");
+		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
+		break;
+	case 23: /* The worst case for width: the longest level and a
+		  * component at the wire's 24-byte bound. */
+		svc_desk(0);
+		svc("claude", "partial", "abcdefghijklmnopqrstuvwx");
+		break;
+	case 24: /* Major outage, then the all-clear: back to the clock. */
+		svc_desk(0);
+		svc("claude", "major", "Claude Code");
+		settle();
+		svc("claude", "ok", NULL);
 		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_set_provider1("");
