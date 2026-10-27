@@ -17,6 +17,7 @@
 #include "ui_theme.h"
 #include "theme.h"
 #include "version.h"
+#include "ui_settings.h"
 #include "harness.h"
 
 /* --- cfg_store, in RAM -------------------------------------------------- */
@@ -153,12 +154,26 @@ bool ota_badge(void)
 
 /* main.c's handling of the two requests, at once instead of on its next
  * pass: upd_tap_act(), then proto_ota_check() or proto_ota_install(). */
+/*
+ * A check is also made visible. On a board it shows as the tile reading
+ * "Checking..." and comes back from the daemon as a state change; the
+ * bench answers this ota_query with ota_none, and UP_TO_DATE raises no
+ * notice, so on its own the check would leave nothing `expect` can see.
+ * The request therefore also puts up a notice -- of kind "ota", the one an
+ * update's outcome uses -- which the bench sees as modal=notice and nt=ota.
+ * That is what lets tools/bench/full_touch.txt say a swipe on the Update
+ * tile started no check: without it, the line could not fail. No shipped
+ * script taps the tile to check on purpose; one that does will find this
+ * notice up and must dismiss it.
+ */
 void ota_request_check(void)
 {
 	ota_staged_now = false;
 	ota_app_now[0] = '\0';
 	ota_ui_set(OTA_UI_CHECKING, NULL, 0);
 	harness_emit("{\"t\":\"ota_query\",\"v\":2,\"cur\":\"" BLINK_FW_VERSION "\"}");
+	ui_settings_notice("Update check requested");
+	ui_settings_bench_notice_is("ota");
 }
 
 void ota_request_install(void)

@@ -6,8 +6,9 @@
 /* Make `scr` (the gauge screen) open the settings panel on a left swipe.
  * The panel is an overlay on the same screen, NOT a separate LVGL screen:
  * the 16 KiB LVGL pool cannot hold two full screens (see usage_view_deinit).
- * It holds brightness and software update; the reset-and-reboot actions went
- * with the standalone WiFi mode on 2026-10-27. */
+ * It holds brightness, theme, Focus and the software update; the
+ * reset-and-reboot actions went with the standalone WiFi mode on
+ * 2026-10-27. */
 void ui_settings_attach(lv_obj_t *scr);
 
 /* One-line notice popup on the gauge screen (update outcome etc.). Safe to

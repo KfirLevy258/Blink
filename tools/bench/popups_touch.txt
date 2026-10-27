@@ -65,13 +65,13 @@ expect notice none
 tap settings.open
 fake ota_avail 1.4.0
 wait 0.5
-click "Software update"
+click "Update"
 expect ui_state ov=confirm
 mem
 expect-widget "Yes, do it"
 click "Cancel"
 expect ui_state ov=none
-click "Software update"
+click "Update"
 expect ui_state ov=confirm
 click "Yes, do it"
 expect ui_state modal=download

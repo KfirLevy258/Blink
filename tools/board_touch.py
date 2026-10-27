@@ -132,18 +132,18 @@ HEARTBEAT_S = 60       # the daemon's usage poll
 # the edge zones, the back button, the brightness stops -- are pinned by the
 # same test in the calls that set them.
 FW_LAYOUT = {
-    "ROW_H": 56,
-    "ROW_TOP": 56,
-    "ROW_GAP": 8,
-    "COL_L_W": 120,
-    "COL_R_W": 168,
+    "TILE_W": 144,
+    "TILE_H": 71,
+    "TILE_GAP": 8,
+    "TILE_TOP": 46,
     "BRIGHT_STOPS": 5,
     "THEME_SLOTS": 6,
     "THEME_TILE_W": 144,
     "THEME_TILE_H": 56,
     "THEME_TILE_GAP": 6,
     "THEME_GRID_Y": 46,
-    "FOCUS_BTN_W": 93,
+    "FOCUS_BTN_W": 92,
+    "FOCUS_BTN_GAP": 10,
     "FOCUS_BTN_H": 100,
     "FOCUS_BTN_Y": 56,
 }
@@ -172,13 +172,15 @@ P_SETTINGS_ZONE = rect_center(SCREEN_W - 44, (SCREEN_H - 150) // 2, 44, 150)
 P_EYE_ZONE = rect_center(0, (SCREEN_H - 150) // 2, 44, 150)
 # mk_back: 60 x 36 at (6, 2), the same on Settings and every screen in it.
 P_BACK = rect_center(6, 2, 60, 36)
-# build_panel: the left column (Brightness, Focus) at x 12, the right one
-# (Theme, Software update) at 12 + COL_L_W + ROW_GAP.
-_COL_R_X = 12 + _L["COL_L_W"] + _L["ROW_GAP"]
-_ROW2_Y = _L["ROW_TOP"] + _L["ROW_H"] + _L["ROW_GAP"]
-P_BRIGHT_ROW = rect_center(12, _L["ROW_TOP"], _L["COL_L_W"], _L["ROW_H"])
-P_THEME_ROW = rect_center(_COL_R_X, _L["ROW_TOP"], _L["COL_R_W"], _L["ROW_H"])
-P_FOCUS_ROW = rect_center(12, _ROW2_Y, _L["COL_L_W"], _L["ROW_H"])
+# mk_tile: tile k of four, two by two from (12, TILE_TOP) -- Brightness,
+# Theme, then Focus and Update.
+def _tile(k):
+    x = 12 + (k % 2) * (_L["TILE_W"] + _L["TILE_GAP"])
+    y = _L["TILE_TOP"] + (k // 2) * (_L["TILE_H"] + _L["TILE_GAP"])
+    return rect_center(x, y, _L["TILE_W"], _L["TILE_H"])
+
+
+P_BRIGHT_ROW, P_THEME_ROW, P_FOCUS_ROW = _tile(0), _tile(1), _tile(2)
 # show_theme: the page button, 60 x 36 in the top right corner (-6, 2).
 P_THEME_PAGE = rect_center(SCREEN_W - 6 - 60, 2, 60, 36)
 
@@ -201,7 +203,8 @@ def slot_center(k):
 
 def focus_btn(i):
     """show_focus: Off, Session, Weekly, side by side."""
-    return rect_center(12 + i * (_L["FOCUS_BTN_W"] + 8), _L["FOCUS_BTN_Y"],
+    return rect_center(12 + i * (_L["FOCUS_BTN_W"] + _L["FOCUS_BTN_GAP"]),
+                       _L["FOCUS_BTN_Y"],
                        _L["FOCUS_BTN_W"], _L["FOCUS_BTN_H"])
 
 
@@ -216,7 +219,8 @@ def theme_slot(theme_id):
 # control: a row or a brightness stop clears GESTURE_BUBBLE, so a back swipe
 # that started on one would never reach the handler that closes the screen.
 # y 230 is under every control on Settings and its three sub-screens (the
-# lowest, the footer's second line, ends at 228).
+# lowest, the theme screen's last row, ends at 226). Settings' footer runs to
+# 235, but it is two labels, and a label takes no press.
 SW_LEFT = ((260, 120), (100, 120))       # gauges -> Settings; leaves the clip
 SW_RIGHT = ((60, 120), (220, 120))       # gauges -> the eye clip
 SW_BACK = ((40, 230), (200, 230))        # closes whatever Settings shows
@@ -278,13 +282,13 @@ def _targets():
         _back_expect, 1.6,
         "swipe right along the bottom: closes a sub-screen, else Settings")
     add("brightness.open", "tap", [P_BRIGHT_ROW], on_settings,
-        {"ov": "brightness"}, 0.6, "the Brightness row")
+        {"ov": "brightness"}, 0.6, "the Brightness tile")
     for i in range(_L["BRIGHT_STOPS"]):
         add(f"brightness.level{i + 1}", "tap", [bright_stop(i)],
             {"ov": "brightness"}, {"ov": "brightness", "bl": 20 + 20 * i},
             0.3, f"brightness stop {i + 1} ({20 + 20 * i}%)")
     add("theme.open", "tap", [P_THEME_ROW], on_settings, {"ov": "theme"},
-        0.6, "the Theme row")
+        0.6, "the Theme tile")
     add("theme.next_page", "tap", [P_THEME_PAGE], {"ov": "theme"},
         {"ov": "theme"}, 0.3, "the theme screen's page button")
     for name, tid in THEME_IDS.items():
@@ -296,7 +300,7 @@ def _targets():
         {"ov": "theme", "edit": "opened"}, 0.6,
         "the Edit on computer slot (answered ok 1, as a daemon would)")
     add("focus.open", "tap", [P_FOCUS_ROW], on_settings, {"ov": "focus"},
-        0.6, "the Focus row")
+        0.6, "the Focus tile")
     for i, name in enumerate(FOCUS_NAMES):
         add(f"focus.{name}", "tap", [focus_btn(i)], {"ov": "focus"},
             {"ov": "focus", "focus": name}, 0.4, f"Focus: {name}")

@@ -4,7 +4,7 @@
 #include <stdbool.h>
 
 /*
- * What the "Software update" row on the settings screen says.
+ * What the Update tile on the settings screen says under its name.
  *
  * Pure, and in its own file, for the reason sleep_gate is: this decision was
  * three branches inlined in ui_settings.c, nothing could reach them from a
@@ -29,7 +29,7 @@
  */
 enum upd_row {
 	UPD_ROW_BLANK,		/* nothing to report */
-	UPD_ROW_READY,		/* an update is downloaded and waiting */
+	UPD_ROW_READY,		/* an update was offered, not yet installed */
 	UPD_ROW_APP_OLD,	/* this board is current; the computer is not */
 	UPD_ROW_UP_TO_DATE,	/* both halves current */
 };

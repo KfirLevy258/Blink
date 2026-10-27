@@ -159,7 +159,7 @@ calls it.)
 
 The board checks for an update when it comes up and once a day after that. A newer
 release shows a prompt on the gauge screen, **Update now** or **Later**, and can also
-be installed at any time from Settings, under **Software update → Install x.y.z**.
+be installed at any time from Settings, under **Update → Install x.y.z**.
 Whether it worked is shown on the boot that follows.
 
 ## How updates stay safe

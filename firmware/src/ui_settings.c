@@ -1,5 +1,5 @@
 /*
- * The Settings panel, which today holds brightness and the software update.
+ * The Settings panel: brightness, theme, Focus and the software update.
  *
  * Originally it existed for recovery without a reflash: drop the network,
  * sign out, or reset everything, each one wiping a layer of saved state and
@@ -37,6 +37,8 @@
 #include "mem_stats.h"
 #include "theme.h"
 #include "ui_theme.h"
+#include "settings_icons.h"
+#include "usage_layout.h"	/* FONT_LINE_H */
 
 /*
  * Roles in the active theme (theme.c), read when drawn. The comments give
@@ -54,9 +56,6 @@
 #define COL_PANEL	lv_color_hex(theme_pal()->card)
 /* the full-width section rules (#20252D) */
 #define COL_LINE	lv_color_hex(theme_pal()->line)
-/* factory tile: red-tinted, not solid red (#1E1412 / #7A2B23) */
-#define COL_DANGER_BG	lv_color_hex(theme_pal()->danger_bg)
-#define COL_DANGER_BD	lv_color_hex(theme_pal()->danger_bd)
 
 /*
  * No destructive actions, and no confirm-then-reboot machinery behind them.
@@ -67,8 +66,8 @@
  * left to erase. The config record a
  * reset would wipe contains a brightness level and an OTA breadcrumb the next
  * boot clears anyway, so the whole ceremony -- a confirm dialog, a cold
- * reboot -- bought a return to 100% brightness, which the Brightness row does
- * on the spot. See the layout note in build_panel().
+ * reboot -- bought a return to 100% brightness, which the Brightness tile
+ * does on the spot.
  */
 
 static lv_obj_t *panel;		/* NULL when closed */
@@ -870,11 +869,25 @@ static void show_install_confirm(const struct ota_ui *snap)
 	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 0, -18);
 }
 
+static void tile_fit(lv_obj_t *state);
+static bool tile_was_a_tap(void);
+static bool closing;	/* defined with the slide machinery below */
+
 static void upd_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	struct ota_ui snap;
 
+	/* As on the other three tiles: LVGL sends CLICKED on the release of a
+	 * swipe too, and the back swipe that starts on this tile must not
+	 * start a check -- or, with an update waiting, put up the install
+	 * confirm in the face of someone leaving. */
+	/* And not while Settings is on its way out: a tap between a close
+	 * latching and do_close running would start a check the panel is no
+	 * longer there to show. */
+	if (!tile_was_a_tap() || closing) {
+		return;
+	}
 	ota_ui_get(&snap);
 	if (snap.st == OTA_UI_IDLE || snap.st == OTA_UI_UP_TO_DATE) {
 		ota_request_check();
@@ -1111,7 +1124,7 @@ static void set_upd_row(lv_obj_t *lbl, enum upd_row row)
 {
 	switch (row) {
 	case UPD_ROW_READY:
-		lv_label_set_text(lbl, "Update ready");
+		lv_label_set_text(lbl, "Ready to install");
 		lv_obj_set_style_text_color(lbl, COL_GREEN, 0);
 		break;
 	case UPD_ROW_APP_OLD:
@@ -1299,8 +1312,8 @@ static void upd_timer_cb(lv_timer_t *t)
 
 	switch (snap.st) {
 	case OTA_UI_IDLE:
-		/* The title and chevron already say "Software update"; the
-		 * subtitle is a STATUS, blank until there's something to report.
+		/* The icon and name already say "Update"; the state line
+		 * is a STATUS, blank until there's something to report.
 		 * A pending badge is the exception.
 		 *
 		 * So is an out-of-date app: the board can update itself from
@@ -1326,12 +1339,11 @@ static void upd_timer_cb(lv_timer_t *t)
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	case OTA_UI_AVAILABLE:
-		/* Version only. This is the row's subtitle now, 134 px under
-		 * "Software update" (COL_R_W - COL_SUB_INSET), and it ellipsizes
-		 * past that; when it sat beside the name in a 296 px row the
-		 * size string made it 23 characters and the two overlapped
-		 * (user-reported 2026-07-25). Keep any future state text within
-		 * the budget "Update ready" (98 px) already fits. */
+		/* Version only. This is the tile's state line, 128 px under
+		 * "Update" (TILE_W - 16), and it ellipsizes past that. When it
+		 * sat beside the name in a 296 px row the size string made it
+		 * 23 characters and the two overlapped (user-reported
+		 * 2026-07-25). Keep any future state text within the 128. */
 		lv_label_set_text_fmt(upd_lbl, "Install %s", snap.version);
 		lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
@@ -1344,6 +1356,7 @@ static void upd_timer_cb(lv_timer_t *t)
 	default:
 		break;
 	}
+	tile_fit(upd_lbl);
 	upd_seen = snap.st;
 }
 
@@ -1450,30 +1463,62 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
 }
 
 /*
- * A list row: 296 x 56, which is 52.7 x 10.0 mm on a 2.8" 320x240 panel
- * (5.62 px/mm). A fingertip covers about 9 mm, so this is the smallest a row
- * can be and still be pressed on purpose rather than on average.
+ * The Settings tiles: four equal 144 x 71 buttons, two by two, each an icon
+ * over its name over its state. 71 px is 12.6 mm against a ~9 mm fingertip
+ * (5.62 px/mm on this 2.8" panel).
  *
- * Two lines, because the height is there either way and each subtitle earns
- * it: the level without opening brightness, both version numbers without
- * opening the updater, and what a factory reset does before you commit to
- * finding out.
+ * They replaced two columns of 120 and 168 px rows with a chevron, which the
+ * owner found uneven on the board (2026-10-28): measured on host LVGL, the
+ * right-hand pair were 40% wider than the left, and the chevron sat 3 px
+ * from "Brightness" but 10 px from "Software update". The split was uneven
+ * because the right-hand titles were the long ones; stacking the lines
+ * instead of setting them beside an icon gives every line the tile's full
+ * 128 px, so "Software update" could become "Update" -- the icon says which
+ * tile it is -- and nothing needs a wider column.
+ *
+ * Stacked rather than icon-beside-text for the state's sake: a 28 px icon on
+ * the left of a 144 px tile leaves 92 px for words, and the update tile's
+ * state must hold "Ready to install" and "Install 1.10.0".
+ *
+ * Not smaller, whatever else wants the height: the rows before these were
+ * measured at 30 px once, 5.3 mm sitting 5 px apart, and one press covered
+ * two of them -- which fired came down to where the pressure centroid fell.
+ *
+ * Inside the tile's 1 px border, top to bottom: 2 px, the icon (28), 2, the
+ * name (16), 4, the state (16), 1 -- so 3 and 2 from the tile's edges. LVGL
+ * places children inside the border, which is why the offsets below are one
+ * short of those. The 4 above the state was 2 in the first draft and read as
+ * one line run into the next.
  */
-/* `h` is a parameter because the number of rows decides it: the panel's usable
- * height is shared out among however many there are, so a row is as tall as it
- * can afford to be rather than a fixed 56. See the layout note at the call
- * site. Labels align to the row's middle, so they follow whatever height it
- * is given. */
+#define TILE_W 144
+#define TILE_H 71
+#define TILE_GAP 8
+#define TILE_TOP 46		/* clear of the title rule at y=40 */
+#define TILE_ICON_Y 2
+#define TILE_NAME_Y 32
+#define TILE_STATE_Y 52
+#define TILE_INNER_H (TILE_H - 2)	/* inside the border */
+/* With no state to show, the icon and name are one 46 px block, and they
+ * sit on the tile's middle instead of over an empty line. */
+#define TILE_BARE_DY ((TILE_INNER_H - \
+		       (TILE_NAME_Y + FONT_LINE_H - TILE_ICON_Y)) / 2 - TILE_ICON_Y)
+
+BUILD_ASSERT(2 * TILE_W + TILE_GAP == 296,
+	     "the settings tiles no longer fill the 296 px between margins");
+BUILD_ASSERT(TILE_STATE_Y + FONT_LINE_H < TILE_INNER_H,
+	     "the tile's state line runs into its border");
+
 /*
- * The rows' shared styles. Each row used to carry its own copy of the same
+ * The tiles' shared styles. Each row used to carry its own copy of the same
  * seven properties, and each of its labels a colour: measured on host LVGL
  * with this file, the Focus row (a fourth row) put 1.5 KB on the settings
  * panel, and sharing them took 240 B of that back with the panel rendering
- * byte for byte the same. Re-set on every panel build, never while a row
+ * byte for byte the same. Re-set on every panel build, never while a tile
  * exists: build_panel() only runs once the old panel is gone.
  */
-static lv_style_t st_row;	/* the row itself, and its title's colour */
-static lv_style_t st_row_dim;	/* its subtitle and chevron */
+static lv_style_t st_row;	/* the tile itself, and its name's colour */
+static lv_style_t st_row_dim;	/* its state line */
+static lv_style_t st_row_icon;	/* its icon */
 static bool st_row_ready;
 
 static void row_styles(void)
@@ -1481,6 +1526,7 @@ static void row_styles(void)
 	if (!st_row_ready) {
 		lv_style_init(&st_row);
 		lv_style_init(&st_row_dim);
+		lv_style_init(&st_row_icon);
 		st_row_ready = true;
 	}
 	lv_style_set_bg_color(&st_row, COL_PANEL);
@@ -1492,67 +1538,99 @@ static void row_styles(void)
 	lv_style_set_pad_all(&st_row, 0);
 	lv_style_set_text_color(&st_row, COL_TEXT);
 	lv_style_set_text_color(&st_row_dim, COL_DIM);
+	lv_style_set_text_align(&st_row_dim, LV_TEXT_ALIGN_CENTER);
+	/* The icons are A8 masks (settings_icons.c), which LVGL fills with
+	 * image_recolor: in the name's colour, they follow every theme and a
+	 * custom one with nothing stored per theme. On the image itself,
+	 * because image_recolor is not inherited: set on the tile, every icon
+	 * came out a dim grey on Dark (host render, 2026-10-28). */
+	lv_style_set_image_recolor(&st_row_icon, COL_TEXT);
+	lv_style_set_image_recolor_opa(&st_row_icon, LV_OPA_COVER);
 }
 
-static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
-			const char *sub, bool danger, lv_event_cb_t cb,
-			void *user, lv_obj_t **sub_out)
+/*
+ * Lift the icon and name onto the tile's middle while its state line is
+ * empty, and back when it is not. Only the update tile's state is ever
+ * empty -- blank until a check has something to report, on purpose (see
+ * upd_timer_cb) -- and it changes on a timer, so this runs from there and
+ * does nothing on a tick where the answer has not changed: the state's own
+ * HIDDEN flag is the record of which way the tile is laid out.
+ */
+static void tile_fit(lv_obj_t *state)
 {
-	lv_obj_t *row = lv_btn_create(parent);
+	bool bare = lv_label_get_text(state)[0] == '\0';
 
-	lv_obj_set_size(row, 296, h);
-	lv_obj_align(row, LV_ALIGN_TOP_LEFT, 12, y);
-	/* Everything rows have in common is in row_styles(), shared; only a
-	 * danger row carries its own colours on top. */
-	lv_obj_add_style(row, &st_row, 0);
-	if (danger) {
-		lv_obj_set_style_bg_color(row, COL_DANGER_BG, 0);
-		lv_obj_set_style_border_color(row, COL_DANGER_BD, 0);
-		lv_obj_set_style_text_color(row, COL_RED, 0);
+	if (bare == lv_obj_has_flag(state, LV_OBJ_FLAG_HIDDEN)) {
+		return;
 	}
-	/* Both flags off, as everywhere else on this panel: a horizontal drag
-	 * on a SCROLLABLE button is eaten as a scroll and the tap never fires,
-	 * and a press that drifts must not bubble into a panel close. */
-	lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(row, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, user);
+	lv_obj_t *name = lv_obj_get_user_data(state);
+	lv_obj_t *icon = lv_obj_get_user_data(name);
+	int dy = bare ? TILE_BARE_DY : 0;
 
-	lv_obj_t *t = lv_label_create(row);
+	lv_obj_set_flag(state, LV_OBJ_FLAG_HIDDEN, bare);
+	lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, TILE_ICON_Y + dy);
+	lv_obj_align(name, LV_ALIGN_TOP_MID, 0, TILE_NAME_Y + dy);
+}
 
-	lv_label_set_text(t, title);	/* its colour is the row's, inherited */
-	/* A NULL subtitle is a one-line row, and the title then sits on the
-	 * row's own middle rather than 11 px above a line that is not there.
-	 * No row is one-line today: the update row's version line moved out
-	 * to the footer, and its state took the subtitle's place when the
-	 * row went to half width for Focus. */
-	lv_obj_align(t, LV_ALIGN_LEFT_MID, 14, sub ? -11 : 0);
+/* Tile k of four, left to right and then down. */
+static lv_obj_t *mk_tile(lv_obj_t *parent, int k, const lv_image_dsc_t *icon,
+			 const char *name, const char *state,
+			 lv_event_cb_t cb, lv_obj_t **state_out)
+{
+	lv_obj_t *tile = lv_btn_create(parent);
 
-	lv_obj_t *sl = NULL;
+	lv_obj_set_size(tile, TILE_W, TILE_H);
+	lv_obj_align(tile, LV_ALIGN_TOP_LEFT, 12 + (k % 2) * (TILE_W + TILE_GAP),
+		     TILE_TOP + (k / 2) * (TILE_H + TILE_GAP));
+	lv_obj_add_style(tile, &st_row, 0);
+	/* Not scrollable: a horizontal drag on a SCROLLABLE button is eaten as
+	 * a scroll and the tap never fires. */
+	lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+	/*
+	 * Gestures BUBBLE from a tile, up to panel_gesture_cb, as they do from
+	 * the theme tiles and the Focus choices. Stopped here, a back swipe had
+	 * to start on bare panel, and the four tiles cover 296 x 150 of it:
+	 * that left y 40-46 and 196-240. tile_was_a_tap(), first in all four
+	 * callbacks, keeps the same swipe from opening the tile it began on.
+	 */
+	lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(tile, cb, LV_EVENT_CLICKED, NULL);
 
-	if (sub != NULL) {
-		sl = lv_label_create(row);
-		lv_label_set_text(sl, sub);
-		lv_obj_add_style(sl, &st_row_dim, 0);
-		/* Width-bounded and dotted. A centred line escapes this 320 px
-		 * panel around 45 characters, and two overflow bugs have
-		 * shipped that way. */
-		lv_obj_set_width(sl, 236);
-		lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
-		lv_obj_align(sl, LV_ALIGN_LEFT_MID, 14, 11);
+	/* tile_fit() moves the icon and name. It finds them through
+	 * user_data -- the state line holds the name, the name the icon --
+	 * rather than by child index, which a fourth child added first would
+	 * silently shift. The pointer is in every lv_obj already. */
+	lv_obj_t *ic = lv_image_create(tile);
+
+	lv_image_set_src(ic, icon);
+	lv_obj_add_style(ic, &st_row_icon, 0);
+	lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, TILE_ICON_Y);
+
+	lv_obj_t *t = lv_label_create(tile);
+
+	lv_label_set_text(t, name);	/* its colour is the tile's, inherited */
+	lv_obj_align(t, LV_ALIGN_TOP_MID, 0, TILE_NAME_Y);
+	lv_obj_set_user_data(t, ic);
+
+	lv_obj_t *sl = lv_label_create(tile);
+
+	lv_label_set_text(sl, state);
+	lv_obj_add_style(sl, &st_row_dim, 0);
+	/* Width-bounded and dotted, and the HEIGHT fixed to one line: LVGL
+	 * only dots a label whose text is taller than the label, and a
+	 * content-sized one simply grows -- so an "Install 1.10.0-beta.2"
+	 * (15 version characters, ota.h) wrapped instead, its second line
+	 * drawn over the tile's bottom border. */
+	lv_obj_set_size(sl, TILE_W - 16, FONT_LINE_H);
+	lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
+	lv_obj_align(sl, LV_ALIGN_TOP_MID, 0, TILE_STATE_Y);
+	lv_obj_set_user_data(sl, t);
+	tile_fit(sl);
+
+	if (state_out) {
+		*state_out = sl;
 	}
-
-	lv_obj_t *chev = lv_label_create(row);
-
-	lv_label_set_text(chev, LV_SYMBOL_RIGHT);
-	if (!danger) {
-		lv_obj_add_style(chev, &st_row_dim, 0);
-	}
-	lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -12, 0);
-
-	if (sub_out) {
-		*sub_out = sl;
-	}
-	return row;
+	return tile;
 }
 
 /* --- The brightness screen ------------------------------------------- */
@@ -2238,7 +2316,7 @@ static void theme_row_cb(lv_event_t *e)
 		return;
 	}
 	if (theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
-	    confirm == NULL) {
+	    confirm == NULL && !closing) {
 		lv_async_call(theme_open_cb, NULL);
 	}
 }
@@ -2251,20 +2329,25 @@ static void theme_row_cb(lv_event_t *e)
  * Settings, never automatically). Stored as the two bytes cfg_store reserved
  * for it; Off keeps the window, so turning Focus back on lands where it was.
  *
- * Three 93 x 100 buttons, 16.5 x 17.8 mm, side by side so the choice reads as
+ * Three 92 x 100 buttons, 16.4 x 17.8 mm, side by side so the choice reads as
  * one control. They share two static styles instead of carrying a dozen
  * local properties each, and the panel's contents are freed while this is
  * up (see sub_closed_cb): the LVGL pool is shared with the gauge screen, and
  * the theme screen was found running it out (orchestrator review,
  * 2026-10-27).
  */
-#define FOCUS_BTN_W 93
+/* 92 and 10, not 93 and 8: three 93s and two 8s come to 295, which left
+ * 12 px of margin on the left and 13 on the right (measured on host LVGL,
+ * 2026-10-28). Three widths and two gaps have to make the 296 between the
+ * margins exactly, and with an 8 px gap no whole width does. */
+#define FOCUS_BTN_W 92
+#define FOCUS_BTN_GAP 10
 #define FOCUS_BTN_H 100
 #define FOCUS_BTN_Y 56
 #define FOCUS_NOTE_Y 176
 
-BUILD_ASSERT(12 + FOCUS_CHOICES * FOCUS_BTN_W + (FOCUS_CHOICES - 1) * 8 <= 308,
-	     "the Focus choices run past the right margin");
+BUILD_ASSERT(FOCUS_CHOICES * FOCUS_BTN_W + (FOCUS_CHOICES - 1) * FOCUS_BTN_GAP ==
+	     296, "the Focus choices no longer fill the 296 px between margins");
 BUILD_ASSERT(FOCUS_BTN_Y + FOCUS_BTN_H < FOCUS_NOTE_Y,
 	     "the Focus note sits on the choices");
 
@@ -2457,8 +2540,8 @@ static void show_focus(lv_event_t *e)
 		lv_obj_add_style(b, &focus_st_btn, 0);
 		lv_obj_add_style(b, &focus_st_on, LV_STATE_CHECKED);
 		lv_obj_set_size(b, FOCUS_BTN_W, FOCUS_BTN_H);
-		lv_obj_align(b, LV_ALIGN_TOP_LEFT, 12 + i * (FOCUS_BTN_W + 8),
-			     FOCUS_BTN_Y);
+		lv_obj_align(b, LV_ALIGN_TOP_LEFT,
+			     12 + i * (FOCUS_BTN_W + FOCUS_BTN_GAP), FOCUS_BTN_Y);
 		/* Not scrollable, or a drag is eaten as a scroll and the tap
 		 * never fires. Gestures BUBBLE, as from a theme tile: the three
 		 * buttons fill the middle of the screen, so most back swipes
@@ -2504,8 +2587,11 @@ static void focus_open_cb(void *unused)
 
 static bool sub_can_open(void)
 {
+	/* !closing: since the tiles pass gestures up, a close latched by a
+	 * swipe is the common case, and an open queued in the one loop pass
+	 * before do_close would run against a panel being torn down. */
 	return theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
-	       confirm == NULL && !sub_closing;
+	       confirm == NULL && !sub_closing && !closing;
 }
 
 static void bright_row_cb(lv_event_t *e)
@@ -2882,71 +2968,24 @@ static void build_panel(lv_obj_t *parent_scr)
 	 * screen moves under it, in ui_slide_run(). */
 	lv_obj_set_pos(panel, 0, 0);
 
-	/*
-	 * Two rows and nothing else.
-	 *
-	 * The panel is 240 px tall and a fingertip covers about 9 mm, which is
-	 * 51 px at this panel's 5.62 px/mm. Take 40 for the title bar and 200
-	 * is left. There were three rows at 56 px (10.0 mm) while a "Reset to
-	 * defaults" row existed; it does not any more, because in this build
-	 * the only thing it reset was brightness -- and the row directly above
-	 * it sets brightness without a reboot.
-	 *
-	 * The freed height goes into the two that remain rather than being
-	 * left as a hole under them: 72 px each, 12.8 mm, with 24 px of margin
-	 * above and below the pair so it reads as centred instead of
-	 * top-aligned with something missing.
-	 *
-	 * What this replaces was measured and did not pass: 30 px rows are
-	 * 5.3 mm, sitting 5 px apart, so one press covered both and which one
-	 * fired came down to where the pressure centroid landed.
-	 */
 /*
- * 56 px is 10.0 mm against a ~9 mm fingertip -- the smallest a row can be and
- * still be pressed on purpose rather than on average.
- *
- * TWO rows now, brightness and software update: the main-source row went when
- * the providers got a page each. The height it freed is not redistributed. It
- * goes to the footer, which is the version pair and the one instruction this
- * device needs to give -- both of them things you read rather than press, and
- * neither of which belongs inside a button.
- */
-#define ROW_H 56
-#define ROW_TOP 56		/* first row, clear of the title rule at y=40 */
-#define ROW_GAP 8
-
-/* The two columns: Brightness and Focus on the left, Theme and Software
- * update on the right. See the layout note in build_panel(). */
-#define COL_L_W 120
-#define COL_R_W 168
-#define COL_R_X (12 + COL_L_W + ROW_GAP)
-/* A subtitle starts 14 px in and must stop short of the chevron. */
-#define COL_SUB_INSET 34
-
-BUILD_ASSERT(COL_L_W + ROW_GAP + COL_R_W == 296,
-	     "the two settings columns no longer fill the 296 px row");
-
-/*
- * The footer: two centred lines under the last row, on the panel itself.
+ * The footer: two centred lines under the tiles, on the panel itself.
  *
  * The version pair used to be the update row's subtitle, which put a fact
  * inside a control -- so reading the version meant looking at a button, and
- * the button's own state ("Update ready") had to be squeezed in beside it,
- * right-aligned and clear of a chevron. Separating them gives the button one
- * job and the footer room for the second line, which is the thing an update
- * actually needs someone to know.
+ * the button's own state ("Install 1.4.0") had to be squeezed in beside it.
+ * Separating them gives the button one job and the footer room for the
+ * second line, which is the thing an update actually needs someone to know.
  */
-#define FOOT_Y1 192
-#define FOOT_Y2 212
+#define FOOT_Y1 (TILE_TOP + 2 * TILE_H + TILE_GAP + 5)
+#define FOOT_Y2 (FOOT_Y1 + 18)
 
 /*
- * Two rows and a two-line footer, inside 240. Checked here rather than
- * eyeballed, because the last time these moved a row went off the bottom of a
- * 240 px screen and nobody noticed until it was flashed. FONT_LINE_H is 16 for
- * the default montserrat_14, so the second line ends at 228.
+ * Four tiles and a two-line footer, inside 240. Checked here rather than
+ * eyeballed, because a row once went off the bottom of a 240 px screen and
+ * nobody noticed until it was flashed. FONT_LINE_H is 16 for the default
+ * montserrat_14, so the second line ends at 235.
  */
-BUILD_ASSERT(ROW_TOP + 2 * ROW_H + ROW_GAP <= FOOT_Y1,
-	     "the settings rows now overlap the footer");
 BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 	     "the settings footer no longer fits on the panel");
 	/* No green edge seam here. It existed as a left-edge cue back when the
@@ -2968,55 +3007,23 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 	char sub[56];
 
 	/*
-	 * Four controls in two rows, a narrow column and a wide one.
+	 * Four tiles, two by two (see mk_tile). There is no room for a third
+	 * pair: the tiles and the two-line footer use the 240 px between them
+	 * (the BUILD_ASSERT above), and a fifth control would have to take
+	 * height from all four.
 	 *
-	 * There is no third row to give anything: two rows and the two-line
-	 * footer already use the 240 px (the BUILD_ASSERTs above). Splitting
-	 * the WIDTH keeps every target at the 56 px -- 10.0 mm -- height this
-	 * panel needs. Brightness and Theme shared the first row at 144 px each
-	 * until Focus needed a place; then the split moved to 120 | 168,
-	 * because the right-hand titles are the long ones. "Software update"
-	 * measures 121 px in montserrat_14 (lv_text_get_size on host), and a
-	 * 144 px half puts its last letters under the chevron at 123; 168 holds
-	 * it with the chevron clear. The narrow column is the tight one now:
-	 * "Brightness" ends 4 px short of its chevron (review, 2026-10-27), so
-	 * a longer word there would need the split moved back. "Focus" (43 px)
-	 * has room, and Theme's wider subtitle now holds "Colour-blind safe"
-	 * whole.
+	 * The update tile's state is set by upd_timer_cb() at the end of this,
+	 * so it starts empty -- and laid out bare -- like the row before it.
 	 */
 	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
-	lv_obj_t *half = mk_row(panel, ROW_TOP, ROW_H, "Brightness", sub, false,
-				bright_row_cb, NULL, &pct_lbl);
-
-	lv_obj_set_width(half, COL_L_W);
-	lv_obj_set_width(pct_lbl, COL_L_W - COL_SUB_INSET);
-
-	lv_obj_t *tsub;
-
-	half = mk_row(panel, ROW_TOP, ROW_H, "Theme",
-		      theme_name(theme_active_id()), false, theme_row_cb, NULL,
-		      &tsub);
-	lv_obj_set_width(half, COL_R_W);
-	lv_obj_align(half, LV_ALIGN_TOP_LEFT, COL_R_X, ROW_TOP);
-	lv_obj_set_width(tsub, COL_R_W - COL_SUB_INSET);
-
-	half = mk_row(panel, ROW_TOP + (ROW_H + ROW_GAP), ROW_H, "Focus",
-		      focus_name(), false, focus_row_cb, NULL, &focus_sub);
-	lv_obj_set_width(half, COL_L_W);
-	lv_obj_set_width(focus_sub, COL_L_W - COL_SUB_INSET);
-
-	/*
-	 * The row's state is its subtitle now -- "Up to date", "Install
-	 * 1.4.0" -- where it sat beside the name while the row had 296 px.
-	 * Same label, same words and colours (set_upd_row), one line lower.
-	 * "Update ready" is 98 px, inside the 134 the subtitle has.
-	 */
-	upd_btn = mk_row(panel, ROW_TOP + (ROW_H + ROW_GAP), ROW_H,
-			 "Software update", "", false, upd_cb, NULL, &upd_lbl);
-	lv_obj_set_width(upd_btn, COL_R_W);
-	lv_obj_align(upd_btn, LV_ALIGN_TOP_LEFT, COL_R_X,
-		     ROW_TOP + (ROW_H + ROW_GAP));
-	lv_obj_set_width(upd_lbl, COL_R_W - COL_SUB_INSET);
+	mk_tile(panel, 0, &settings_icon_bright, "Brightness", sub,
+		bright_row_cb, &pct_lbl);
+	mk_tile(panel, 1, &settings_icon_theme, "Theme",
+		theme_name(theme_active_id()), theme_row_cb, NULL);
+	mk_tile(panel, 2, &settings_icon_focus, "Focus", focus_name(),
+		focus_row_cb, &focus_sub);
+	upd_btn = mk_tile(panel, 3, &settings_icon_update, "Update", "",
+			  upd_cb, &upd_lbl);
 
 	/*
 	 * Both versions, on the panel rather than in the button.

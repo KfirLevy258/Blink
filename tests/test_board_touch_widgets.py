@@ -182,7 +182,7 @@ def test_the_popup_script_reaches_every_popup_it_says_it_does():
     steps = bt.parse_script((ROOT / "tools" / "bench" / "popups_touch.txt")
                             .read_text(encoding="utf-8"))
     clicked = {s.args[0] for s in steps if s.cmd == "click"}
-    assert {"Later", "Update now", "OK", "Software update", "Cancel",
+    assert {"Later", "Update now", "OK", "Update", "Cancel",
             "Yes, do it", "What's new", ">", "<", "Back"} <= clicked
     modals = {s.args[1].get("modal") for s in steps
               if s.cmd == "expect" and s.args[0] == "ui_state"}
@@ -615,7 +615,7 @@ def test_every_label_the_shipped_scripts_click_is_printable():
         for s in steps:
             if s.cmd == "click":
                 assert allow.allowed(s.args[0]), (name, s.args[0])
-    for label in ("BLINK", "Settings", "Software update", "Theme", "Focus",
+    for label in ("BLINK", "Settings", "Update", "Theme", "Focus",
                   "Brightness", "Edit on computer", "Opened on your computer",
                   "Run `blink theme` on your co", "What's new", "Back",
                   "Yes, do it", "Cancel", "Later", "Update now", "OK", "*",

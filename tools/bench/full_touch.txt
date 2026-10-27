@@ -29,6 +29,35 @@ mem
 tap back.swipe
 mem
 
+# --- the back swipe begun on a tile, the way a thumb starts it: the four
+# tiles cover most of Settings, so their gestures bubble to the panel and
+# close it. Once from the Focus tile's middle, once from Update's. A raw
+# swipe has no settle of its own, so each waits out the close's slide and
+# gesture mute (settings.back's 1.6 s) before the next open.
+tap settings.open
+swipe 84 160 244 160
+expect ui_state scr=gauges modal=none
+wait 2
+tap settings.open
+swipe 236 160 316 160
+expect ui_state scr=gauges modal=none
+wait 2
+expect notice none
+
+# --- a stroke that starts AND ends on the Update tile: LVGL still sends the
+# tile its CLICKED on release, and only tile_was_a_tap() keeps that from
+# starting a check -- or, with an update offered, raising the install
+# confirm. Left, so nothing closes. On the host harness a check puts up an
+# "ota" notice (touch/stubs.c), so this fails there without the guard; on a
+# board it would show as the tile reading "Checking...", which `expect`
+# cannot see, so there it only proves the dialog stayed down.
+tap settings.open
+swipe 300 160 180 160
+wait 1
+expect ui_state scr=settings ov=none modal=none
+expect notice none
+tap settings.back
+
 # --- the eye clip: the left edge zone in, a short left swipe out (too
 # short for ui_swipe; see eye.exit_short). The full swipe is at the end.
 tap eye.tap
@@ -94,7 +123,7 @@ expect notice none
 # fails as "covered". tools/bench/popups_touch.txt does the same for every
 # popup.
 tap settings.open
-expect-widget "Software update"
+expect-widget "Update"
 click "Focus"
 expect ui_state ov=focus
 click "Session"
