@@ -118,6 +118,14 @@ runs at import, including through one of our own functions that resolves
 home. If it flags your code, move the lookup into a function. Don't exempt
 it.
 
+**Test helpers take their home from the caller.** A helper that writes takes
+a `home` argument and passes our path through `tests/support/home.inside()`
+before writing. On 2026-10-27 a scratch script imported
+`tests.pc.test_hello_burst` and called its helper, which found `~/.blink` on
+its own and wrote a test theme into a real desk's `theme.json`.
+`tests/pc/__init__.py` now refuses a script import while HOME is the real
+one, but nothing else under `tests/` is guarded.
+
 ## Hardware
 
 **Zephyr 4.3.x, SDK 0.17.4 — not 4.4.0**, which cannot build this firmware:

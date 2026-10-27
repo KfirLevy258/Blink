@@ -19,6 +19,7 @@ import sys
 import pytest
 
 from pc import cli, service_ctl
+from tests.support.home import inside
 
 
 class _RealCommandAttempted(BaseException):
@@ -131,13 +132,18 @@ def _write(path, text="x"):
         f.write(text)
 
 
-def _pretend_installed(monkeypatch):
-    """Put this machine's own service artifact in the sandbox HOME."""
+def _pretend_installed(home, monkeypatch):
+    """Put this machine's own service artifact in the sandbox HOME.
+
+    Only inside the caller's `home` (tests/support/home.py): from a script
+    with the real HOME this would overwrite the desk's own launchd plist or
+    systemd unit with a stub.
+    """
     if sys.platform == "darwin":
-        _write(cli.plist_path())
+        _write(inside(home, cli.plist_path()))
     elif sys.platform.startswith("linux"):
         monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
-        _write(cli.unit_path())
+        _write(inside(home, cli.unit_path()))
     # Windows keeps the state in the Scheduled Task, not in a file, so the
     # stubbed schtasks /query answering 0 is what "installed" means there.
 
@@ -526,7 +532,7 @@ def test_a_skipped_stop_cannot_be_read_as_a_done_one(home, monkeypatch):
     """
     skipped = service_ctl.stop_service(runner=_Runs())
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    _pretend_installed(home, monkeypatch)
     done = service_ctl.stop_service(runner=_Runs())
     assert skipped.skipped and not done.skipped
     assert str(skipped) != str(done)
@@ -534,7 +540,7 @@ def test_a_skipped_stop_cannot_be_read_as_a_done_one(home, monkeypatch):
 
 def test_the_outcome_still_reads_as_the_line_it_replaced(home, monkeypatch):
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    _pretend_installed(home, monkeypatch)
     out = service_ctl.stop_service(runner=_Runs())
     assert str(out) == out.detail and isinstance(out.detail, str)
 
@@ -584,7 +590,7 @@ def test_a_runner_less_call_uses_the_runner_the_suite_stubbed(home, monkeypatch)
 
 def test_stop_and_start_drive_this_machine_platform(home, monkeypatch):
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    _pretend_installed(home, monkeypatch)
     r = _Runs()
     service_ctl.stop_service(runner=r)
     service_ctl.start_service(runner=r)
@@ -600,7 +606,7 @@ def test_stop_and_start_drive_this_machine_platform(home, monkeypatch):
 
 def test_a_failing_command_is_reported_not_raised(home, monkeypatch):
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    _pretend_installed(home, monkeypatch)
     # The command that has to FAIL is the stop itself, and on Windows that is
     # the second call: schtasks /query decides whether anything is installed,
     # and a /query that fails means "not installed", which stop() answers
@@ -641,7 +647,7 @@ def test_a_missing_tool_is_reported_not_raised(home, monkeypatch):
     """The fleet agent calls start_service from a finally block: an exception
     raised there would replace the real test failure with this one."""
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    _pretend_installed(home, monkeypatch)
 
     def _absent(argv, **kw):
         raise FileNotFoundError(2, "No such file or directory", argv[0])

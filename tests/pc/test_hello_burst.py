@@ -21,7 +21,6 @@ Built through the Bridge, not by adding up hand-written message sizes: the
 sequence and its contents are the Bridge's to decide, and a test that guessed
 them would go on passing after the Bridge learned to send an eighth message.
 """
-import os
 import pathlib
 import re
 
@@ -71,7 +70,15 @@ class _WidestWatch:
         return ("degraded", "x" * (protocol.SVC_WHAT_MAX_BYTES + 8))
 
 
-def _hello_burst():
+def _hello_burst(home):
+    """The lines the Bridge writes in reply to a hello, at their widest.
+
+    `home` is the .blink directory the owed themes are saved into, and it is
+    the caller's to name. This helper used to work it out itself from ~,
+    which is tmp_path only while tests/conftest.py is in force; a script
+    that imported it on 2026-10-27 had no conftest, and it wrote this
+    theme into the developer's real ~/.blink/theme.json.
+    """
     lines = []
 
     def write(msg):
@@ -83,9 +90,7 @@ def _hello_burst():
 
     # Themes owed in both files, at their widest: a custom save that differs
     # from the board and a preview waiting. None of it may join the burst
-    # (CONTRACT-theme, Addendum 2): it goes out on the next fast tick. ~ is
-    # tmp_path here (tests/conftest.py), resolved now, not at import.
-    home = os.path.join(os.path.expanduser("~"), ".blink")
+    # (CONTRACT-theme, Addendum 2): it goes out on the next fast tick.
     widest_theme = {"id": theme.CUSTOM, "c": ["ffffff", "000000"]
                     + ["123456"] * 5, "w": 22, "ends": "round", "dot": 1,
                     "by": "level"}
@@ -114,20 +119,22 @@ def _hello_burst():
     return lines
 
 
-def test_the_burst_is_what_this_test_thinks_it_is():
-    kinds = [protocol.json.loads(raw)["t"] for raw in _hello_burst()]
+def test_the_burst_is_what_this_test_thinks_it_is(tmp_path):
+    kinds = [protocol.json.loads(raw)["t"]
+             for raw in _hello_burst(str(tmp_path / ".blink"))]
     assert kinds.count("svc") == 2, kinds
     for t in ("welcome", "ota_error", "time", "usage", "session",
               "ota_avail"):
         assert t in kinds, kinds
 
 
-def test_no_theme_line_joins_the_burst():
-    kinds = [protocol.json.loads(raw)["t"] for raw in _hello_burst()]
+def test_no_theme_line_joins_the_burst(tmp_path):
+    kinds = [protocol.json.loads(raw)["t"]
+             for raw in _hello_burst(str(tmp_path / ".blink"))]
     assert "theme" not in kinds, kinds
 
 
-def test_the_widest_hello_reply_fits_the_boards_receive_ring():
+def test_the_widest_hello_reply_fits_the_boards_receive_ring(tmp_path):
     """With a quarter of the ring left over: the ring also holds whatever
     the board has not yet read when the burst starts (a pong, the tail of
     a heartbeat), and the daemon is free to grow by a field or two before
@@ -137,6 +144,17 @@ def test_the_widest_hello_reply_fits_the_boards_receive_ring():
     # number about it that encode_checked guarantees.
     total = sum(protocol.MAX_LINE_BYTES
                 if protocol.json.loads(raw)["t"] == "usage" else len(raw)
-                for raw in _hello_burst())
+                for raw in _hello_burst(str(tmp_path / ".blink")))
     ring = _ring_size()
     assert total <= ring * 3 // 4, (total, ring)
+
+
+def test_the_helper_writes_only_where_it_is_told(tmp_path):
+    """The themes the burst needs owed go under the directory the caller
+    names, and nowhere near ~. The helper once found its own way to
+    ~/.blink, which is tmp_path only under conftest; called from a script
+    it was a real desk's, and it overwrote that desk's theme.json."""
+    told = tmp_path / "told" / ".blink"
+    _hello_burst(str(told))
+    assert pathlib.Path(theme.theme_path(str(told))).exists()
+    assert not (tmp_path / ".blink").exists()

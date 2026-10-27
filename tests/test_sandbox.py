@@ -16,6 +16,10 @@ for home -- directly, or through a function of ours that does.
 import ast
 import os
 import pathlib
+import subprocess
+import sys
+
+import pytest
 
 from pc.providers import codex_cli
 from tests import conftest
@@ -302,3 +306,58 @@ def test_move_home_moves_every_home_variable(tmp_path, move_home):
         assert os.environ[var] == str(elsewhere)
     assert os.environ["APPDATA"] == str(elsewhere / "AppData" / "Roaming")
     assert os.environ["LOCALAPPDATA"] == str(elsewhere / "AppData" / "Local")
+
+
+def _import_tests_pc(home):
+    """A child that does what a scratch script does: import tests.pc with
+    no conftest in front of it. Only the package is imported -- nothing in
+    it is called -- so even with the guard gone the child writes nothing.
+    -s keeps it out of the user site-packages, so no .pth file under the
+    real home runs in it either."""
+    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home),
+               PYTHONDONTWRITEBYTECODE="1")
+    return subprocess.run([sys.executable, "-s", "-c", "import tests.pc"],
+                          cwd=ROOT, env=env, capture_output=True, text=True,
+                          timeout=60)
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="the guard asks pwd for the real home; POSIX only")
+def test_tests_pc_refuses_a_script_at_the_real_home(tmp_path):
+    """tests/pc/__init__.py stops a script importing a test helper while
+    HOME is still the account's own. On 2026-10-27 an agent measuring the
+    hello burst imported tests.pc.test_hello_burst from a scratch script and
+    called _hello_burst(), and with no conftest to move ~ it wrote the
+    widest custom theme into the developer's real ~/.blink/theme.json, which
+    the live daemon then took as the owner's choice.
+
+    The real home is read from the account database, as the guard reads
+    it, because under pytest $HOME is already tmp_path. A uid with no entry
+    (an arbitrary one in a container) has no real home to hand the child."""
+    import pwd
+    try:
+        real = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        pytest.skip("this uid has no passwd entry, so no real home")
+    refused = _import_tests_pc(real)
+    assert refused.returncode != 0, refused.stdout + refused.stderr
+    assert "outside pytest" in refused.stderr, refused.stderr
+
+    allowed = _import_tests_pc(tmp_path)
+    assert allowed.returncode == 0, allowed.stderr
+
+
+def test_a_helper_path_outside_the_callers_home_is_refused(tmp_path):
+    """tests/support/home.inside: the check a writing helper makes before it
+    writes to a path one of our functions worked out. Under pytest that path
+    is inside the home the test passed in; in a script with the real HOME it
+    is not, and the helper must stop there rather than write."""
+    from tests.support.home import inside
+    mine = tmp_path / "mine"
+    target = mine / ".blink" / "bridge.pid"
+    assert inside(mine, str(target)) == str(target)
+    with pytest.raises(AssertionError, match="outside"):
+        inside(mine, str(tmp_path / "real" / ".blink" / "bridge.pid"))
+    # A sibling that merely shares the prefix is not inside.
+    with pytest.raises(AssertionError, match="outside"):
+        inside(mine, str(tmp_path / "mine-too" / "x"))

@@ -16,6 +16,7 @@ import subprocess
 import pytest
 
 from pc import cli
+from tests.support.home import inside
 from tests.support.process import as_checkout, as_frozen
 
 
@@ -96,15 +97,21 @@ def _runs(monkeypatch, codes=None, stderr="", running=True, dump=None):
     return r
 
 
-def _recorded_pid(pid=4242):
+def _recorded_pid(home, pid=4242):
     """The pid the daemon writes for itself at startup, ~/.blink/bridge.pid.
 
     Windows health is read from this file (see _SchtasksBackend._is_running),
     so a test that wants a live daemon has to leave one the way a live daemon
     would -- and a test that wants a dead one simply does not.
+
+    `home` is the caller's, and the path must lie inside it
+    (tests/support/home.py): from a script with the real HOME this would
+    otherwise overwrite the live daemon's pid file, which on Windows is what
+    the health check and `taskkill /pid` act on.
     """
-    os.makedirs(cli.blink_home(), exist_ok=True)
-    with open(cli.pid_path(), "w", encoding="utf-8") as f:
+    path = inside(home, cli.pid_path())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         f.write(str(pid))
     return pid
 
@@ -320,7 +327,7 @@ def test_launchd_restart_reports_a_kickstart_that_failed(home, monkeypatch):
 def test_schtasks_install_registers_at_logon_then_starts_it(home, monkeypatch):
     _platform(monkeypatch, "win32")
     r = _runs(monkeypatch)
-    pid = _recorded_pid()
+    pid = _recorded_pid(home)
 
     assert cli.backend().install() == "running (Scheduled Task)"
     create = r.calls[0]
@@ -384,7 +391,7 @@ def test_schtasks_install_does_not_believe_a_dead_recorded_pid(home, monkeypatch
     corpse of the one before it as a success.
     """
     _platform(monkeypatch, "win32")
-    _recorded_pid(4242)
+    _recorded_pid(home, 4242)
     _runs(monkeypatch, running=False)      # tasklist finds no such process
 
     assert "not running" in cli.backend().install()
@@ -428,7 +435,7 @@ def test_schtasks_install_falls_back_when_windows_refuses_the_task(
     _platform(monkeypatch, "win32")
     _runs(monkeypatch, codes=[1], stderr="ERROR: Access is denied.\n")
     written = _autostart(monkeypatch)
-    _recorded_pid()
+    _recorded_pid(home)
 
     msg = cli.backend().install()
     assert msg == "running (starts when you log in)"
@@ -504,7 +511,7 @@ def test_schtasks_restart_starts_the_launcher_when_there_is_no_task(
     _runs(monkeypatch, codes=[0, 1])       # /end ok, /run fails: no such task
     written = _autostart(monkeypatch, present=True)
     monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda: None)
-    _recorded_pid()
+    _recorded_pid(home)
 
     assert cli.backend().restart() == "restarted"
     assert "start" in written
@@ -561,7 +568,7 @@ def test_schtasks_restart_kills_the_detached_successor(home, monkeypatch):
     killed = []
     monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda: killed.append("pid"))
 
-    _recorded_pid()
+    _recorded_pid(home)
 
     assert cli.backend().restart() == "restarted"
     assert killed == ["pid"]
@@ -795,15 +802,20 @@ def _windows_checkout(monkeypatch):
     as_checkout(monkeypatch)
 
 
-def _write_launcher():
-    os.makedirs(os.path.dirname(cli.launcher_path()), exist_ok=True)
-    with open(cli.launcher_path(), "w", encoding="ascii") as f:
+def _write_launcher(home):
+    """The launcher a frozen Windows install leaves, inside `home` only."""
+    path = inside(home, cli.launcher_path())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="ascii") as f:
         f.write(cli.LAUNCHER_VBS)
 
 
-def _make_binary():
-    os.makedirs(cli.bin_dir(), exist_ok=True)
-    open(cli.installed_bin(), "w").close()
+def _make_binary(home):
+    """An empty installed program, inside `home` only: from a real home this
+    would truncate the desk's own ~/.blink/bin/blink."""
+    path = inside(home, cli.installed_bin())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").close()
 
 
 def test_a_windows_checkout_registers_no_task(home, monkeypatch):
@@ -826,7 +838,7 @@ def test_a_windows_checkout_clears_the_task_an_old_checkout_left(
     from the checkout takes that dead registration down (review,
     2026-10-25)."""
     _windows_checkout(monkeypatch)
-    _write_launcher()
+    _write_launcher(home)
     cleared = []
     monkeypatch.setattr(cli, "_autostart_clear", lambda: cleared.append(1))
     r = _runs(monkeypatch)
@@ -840,8 +852,8 @@ def test_a_windows_checkout_leaves_a_frozen_install_alone(home, monkeypatch):
     """The fleet desk again: a frozen install's task, and a checkout running
     install. Its blink.exe is there, so the registration is not stale."""
     _windows_checkout(monkeypatch)
-    _write_launcher()
-    _make_binary()
+    _write_launcher(home)
+    _make_binary(home)
     monkeypatch.setattr(cli, "_autostart_clear",
                         lambda: pytest.fail("cleared a frozen install"))
     r = _runs(monkeypatch)
@@ -872,10 +884,10 @@ def test_the_frozen_windows_build_still_registers_its_task(home, monkeypatch):
 def test_a_windows_launcher_names_blink_exe_only_when_it_is_there(
         home, monkeypatch):
     _platform(monkeypatch, "win32")
-    _write_launcher()
+    _write_launcher(home)
     assert cli.backend().registered_argv() == [cli.installed_bin()]
     assert cli.service_program() is None
-    _make_binary()
+    _make_binary(home)
     assert cli.service_program() == [cli.installed_bin()]
 
 
@@ -887,7 +899,7 @@ def test_a_plist_naming_a_missing_program_is_no_service_program(
         f.write(cli._plist_text([cli.installed_bin(), "run"]))
     assert cli.backend().registered_argv() == [cli.installed_bin()]
     assert cli.service_program() is None
-    _make_binary()
+    _make_binary(home)
     assert cli.service_program() == [cli.installed_bin()]
 
 
@@ -1103,7 +1115,7 @@ def _service_bytes(path):
 def test_provision_leaves_the_launchd_plist_alone(home, monkeypatch, dead):
     _platform(monkeypatch, "darwin")
     as_frozen(monkeypatch)
-    _make_binary()
+    _make_binary(home)
     os.makedirs(os.path.dirname(cli.plist_path()), exist_ok=True)
     with open(cli.plist_path(), "w", encoding="utf-8") as f:
         f.write(cli._plist_text(cli._service_command()))
@@ -1136,8 +1148,8 @@ def test_provision_leaves_the_systemd_unit_alone(home, monkeypatch, dead):
 def test_provision_from_a_windows_checkout_keeps_the_frozen_task(
         home, monkeypatch, dead):
     _windows_checkout(monkeypatch)
-    _write_launcher()
-    _make_binary()
+    _write_launcher(home)
+    _make_binary(home)
     before = _service_bytes(cli.launcher_path())
     r = _runs(monkeypatch)
     assert _provision(monkeypatch, dead) == 1
@@ -1149,8 +1161,8 @@ def test_provision_from_a_windows_checkout_keeps_the_frozen_task(
 
 def test_provision_brings_a_run_key_install_back(home, monkeypatch):
     _platform(monkeypatch, "win32")
-    _write_launcher()
-    _make_binary()
+    _write_launcher(home)
+    _make_binary(home)
     run = _no_task(monkeypatch)
     started = []
     monkeypatch.setattr(cli, "_autostart_present", lambda: True)
@@ -1171,8 +1183,8 @@ def test_windows_provision_also_ends_a_daemon_with_no_pid_file(
     anything running the installed binary, as uninstall does; stop() itself
     does not, because the fleet suite and halt() share it."""
     _windows_checkout(monkeypatch)
-    _write_launcher()
-    _make_binary()
+    _write_launcher(home)
+    _make_binary(home)
     r = _runs(monkeypatch)
     assert _provision(monkeypatch) == 1
     ps = [c for c in r.calls if c[0] == "powershell"]
@@ -1216,7 +1228,7 @@ def test_provision_starts_nothing_where_nothing_was_installed(home,
     """The bench laptop running a downloaded binary: no service before, so
     none after."""
     _platform(monkeypatch, "darwin")
-    _make_binary()
+    _make_binary(home)
     r = _runs(monkeypatch)
     assert _provision(monkeypatch) == 1
     assert _starts(r.calls) == 0
