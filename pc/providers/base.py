@@ -40,6 +40,21 @@ STATE_FAILED = "failed"
 VALID_STATES = (STATE_UNKNOWN, STATE_IDLE, STATE_RUNNING, STATE_WAITING,
                 STATE_STUCK, STATE_FAILED)
 
+# What a claude page's percentages are a share OF -- NormalizedUsageFrame.plan.
+#
+# PLAN_WINDOWS is every frame this project produced before the Enterprise
+# work, and every frame it produces now unless Claude Code's status line
+# carries a `rate_limits.spend_limit` object. It is spelled out rather than
+# left as "" so that the wire can say "back to windows" in a word when an
+# account switch takes a spend page away (protocol.plan).
+PLAN_WINDOWS = "windows"
+PLAN_SPEND = "spend"
+PLAN_UNREPORTED = "unreported"
+# The periods Claude Code documents for a spend cap. Anything else in that
+# field is dropped rather than relayed: the firmware has a caption for each
+# of these three and none for a fourth.
+SPEND_PERIODS = ("daily", "weekly", "monthly")
+
 # Worst-first. This is the order the single scalar `state` collapses to when
 # several sessions -- of one provider or of both -- disagree, and the order is
 # a product decision rather than an implementation detail.
@@ -206,6 +221,39 @@ class NormalizedUsageFrame:
     # was taken. See pc/session_verdict for each kind and why quiet data is
     # never one.
     window_evidence: object = None
+    # WHICH ALLOWANCE session_pct describes. Claude Pro and Max are metered
+    # by a five-hour window and a seven-day one, which is what the two
+    # gauges were built for. A Claude Enterprise seat behind a Claude apps
+    # gateway is metered by spend instead -- a dollar cap per day, week or
+    # month set by its admin -- and has no five-hour window to report. The
+    # status line carries that as `rate_limits.spend_limit`, and
+    # pc/statusline_source turns it into:
+    #
+    #   PLAN_SPEND       session_pct is the share of the cap used and
+    #                    session_resets_at the end of its period; the weekly
+    #                    fields are UNKNOWN, because that window does not
+    #                    exist on this account. The dollars below come along
+    #                    when Claude Code had fetched them.
+    #   PLAN_UNREPORTED  An Enterprise or Team login with nothing on this
+    #                    machine to read. No percentage at all, on purpose:
+    #                    pc/claude_account makes it so the panel can say so
+    #                    in words instead of drawing two blank gauges.
+    #
+    # Said on the frame, not inferred downstream, because the alternative is
+    # a spend share travelling as an unlabelled session_pct and a board
+    # drawing it as "SESSION 5h" -- a real number under another account's
+    # name (gapietro, 2026-10-14, the fork this is written after).
+    plan: str = PLAN_WINDOWS
+    # Dollars, or None when the source did not say. None and not 0.0, for
+    # the reason UNKNOWN is not 0.0: "$0 spent" is a claim.
+    spend_usd: object = None
+    spend_limit_usd: object = None
+    # One of SPEND_PERIODS, or "" when not reported.
+    spend_period: str = ""
+    # "enterprise" or "team" on a PLAN_UNREPORTED frame, "" everywhere else.
+    # It is the word the board shows, and the only fact about the account
+    # that ever leaves pc/claude_account.
+    account: str = ""
 
     def __post_init__(self):
         if self.active_at is None:

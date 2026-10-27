@@ -301,7 +301,12 @@ def merge(frames):
     # provider then goes out as unknown rather than not at all, dated and
     # judged by the newest frame that saw a window end.
     ended_evidence = None
-    if session_src is None and weekly_src is None:
+    # "This account reports nothing" (pc/claude_account.select). It may
+    # stand in for a reading but never displace one, so it is consulted only
+    # when nothing carries a number -- and select() only makes it then.
+    stand_in = next((f for f in frames
+                       if f.plan == base.PLAN_UNREPORTED), None)
+    if session_src is None and weekly_src is None and stand_in is None:
         # Nothing here carries a usage percentage. A frame with only a model
         # name would render as two blank dials, which is worse than the
         # board keeping the last reading it already has.
@@ -375,7 +380,7 @@ def merge(frames):
     # the number drawn to within HOLD_BAND (_pick_pct, rule 3). Still a
     # source that vouches for the figure next to it, which is the point of
     # the paragraph above, and never a stale one while a fresh one agrees.
-    primary = session_dated or weekly_dated or ended_evidence
+    primary = session_dated or weekly_dated or stand_in or ended_evidence
 
     # And the fact `primary` cannot carry: when this provider last said
     # anything at all.
@@ -419,6 +424,18 @@ def merge(frames):
         n_idle=state_src.n_idle if state_src else 0,
         n_agents=state_src.n_agents if state_src else 0,
         label=state_src.label if state_src else "",
+        # Copied whole from `primary`, unlike the percentages above. A
+        # share, a cap and the dollars spent are three numbers from one
+        # response; picking each from whichever source is newest could
+        # print 63% next to a $500 cap that the 63% was not taken against.
+        # Mixing plans is not a risk here: by the time frames reach merge(),
+        # claude_account.select has dropped every reading whose plan differs
+        # from the newest one's.
+        plan=primary.plan,
+        spend_usd=primary.spend_usd,
+        spend_limit_usd=primary.spend_limit_usd,
+        spend_period=primary.spend_period,
+        account=primary.account,
     )
 
 

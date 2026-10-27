@@ -9,13 +9,15 @@ usually the middle of a line, so the line is lost and the next one with it.
 
 The reply to a hello is the largest thing the daemon ever sends without
 pausing for an answer: welcome, a waiting ota_error, time, svc for both
-pages, the usage line, the session name and an update offer, back to back.
-The daemon review put it at about 1095 bytes with an offer. Measured here at
-the widest the Bridge builds, with the usage line counted at its 512-byte cap
-and a 200-character failure report waiting, it is 1266 -- against a ring of
-1024, so the bytes lost were the tail: the offer, which is the message the
-Settings row turns into "Install 1.x.y". That is why the ring was enlarged to
-2048; this test is what notices if the burst ever outgrows it again.
+pages, the plan to a board that draws plans, the usage line, the session
+name and an update offer, back to back. The daemon review put it at about
+1095 bytes with an offer. Measured here at the widest the Bridge builds, with
+the usage line counted at its 512-byte cap and a 200-character failure report
+waiting, it was 1266 -- against a ring of 1024, so the bytes lost were the
+tail: the offer, which is the message the Settings row turns into "Install
+1.x.y". That is why the ring was enlarged to 2048; this test is what notices
+if the burst ever outgrows it again. With the widest plan message added for a
+board that announces plans, it measured 1405 on 2026-10-27.
 
 Built through the Bridge, not by adding up hand-written message sizes: the
 sequence and its contents are the Bridge's to decide, and a test that guessed
@@ -103,6 +105,11 @@ def _hello_burst(home):
     # allows, with a session count at the bus's clamp.
     fetch.session_pair = lambda: ("p" * (protocol.SESSION_LABEL_MAX_BYTES + 8),
                                   9999)
+    # And the plan, at its widest: a spend page with both amounts at the
+    # board's own bound, the longest period and a page name at the clip.
+    fetch.plan_msg = lambda: protocol.plan(
+        "p" * (protocol.MODEL_MAX_CHARS + 8), base.PLAN_SPEND, "monthly",
+        999_999_999.99, 999_999_999.99)
 
     b = Bridge(write_msg=write, fetch_usage=fetch,
                now=lambda: 0.0, wall=lambda: (4102444799, -840),
@@ -113,9 +120,10 @@ def _hello_burst(home):
                theme_sync=theme.ThemeSync(home),
                report_failure="x" * 200)
     b._app_available = lambda m: ("10.10.10", {"size": 1, "sha256": "cd" * 32})
-    # Both caps, so svc and theme are each as owed as they can be.
+    # Every cap the burst can owe, so svc, theme and the plan are each as
+    # owed as they can be.
     b.on_message({"t": "hello", "v": protocol.VERSION, "fw": "1.3.4",
-                  "caps": ["svc", "theme"]})
+                  "caps": ["svc", "theme", protocol.BOARD_CAP_PLAN]})
     return lines
 
 
@@ -123,7 +131,7 @@ def test_the_burst_is_what_this_test_thinks_it_is(tmp_path):
     kinds = [protocol.json.loads(raw)["t"]
              for raw in _hello_burst(str(tmp_path / ".blink"))]
     assert kinds.count("svc") == 2, kinds
-    for t in ("welcome", "ota_error", "time", "usage", "session",
+    for t in ("welcome", "ota_error", "time", "plan", "usage", "session",
               "ota_avail"):
         assert t in kinds, kinds
 

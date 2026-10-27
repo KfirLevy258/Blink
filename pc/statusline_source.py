@@ -9,6 +9,7 @@ old. Old is reported as `stale` rather than hidden -- a frozen meter presented
 as live is the one failure mode worth designing against.
 """
 import json
+import math
 import os
 
 from pc import protocol
@@ -160,6 +161,85 @@ _secs_until = protocol.secs_until
 # case DevOceanIT brought from their own desk.
 
 
+def _amount(v):
+    """A finite, non-negative number from the payload, else None.
+
+    bool is refused by name because it is an int: `"used_usd": true` is a
+    malformed field, not one dollar. A negative or infinite amount would
+    reach the panel as "$-4" or "$inf", and "not reported" is the honest
+    reading of either.
+    """
+    # type() rather than isinstance(): bool passes isinstance(v, int).
+    usable = type(v) in (int, float) and math.isfinite(v) and v >= 0
+    return float(v) if usable else None
+
+
+def _spend_frame(rate_limits: dict, now_epoch: float, mtime_epoch: float):
+    """The dollar cap Claude Code put on the status line, as a frame.
+
+    None when `rate_limits.spend_limit` is absent or unreadable. That object
+    is how one kind of Claude Enterprise seat reports its
+    allowance: one behind a Claude apps gateway that sets a dollar cap for
+    this developer (code.claude.com/docs/en/statusline, "spend limit
+    fields"). A desk on Pro or Max never has it, and nor does an Enterprise
+    login straight to claude.ai, so for every desk this project ships to
+    today this returns None and the payload is read exactly as it was.
+
+    Only `used_percentage` is required. Claude Code sends it, with
+    `resets_at`, on every response; `used_usd`, `limit_usd` and `period`
+    come from a second request that runs minutes behind and is skipped
+    altogether under CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC. A frame
+    without the dollars is therefore ordinary and is still drawn.
+
+    If the payload has the five-hour and seven-day windows as well, they
+    are ignored. The gateway checks the dollar cap on each request, so the
+    cap is what refuses work when it runs out; drawing both on one page
+    would put two different allowances under one heading.
+
+    When the period's reset has passed, the share goes through
+    base.settle_window exactly as a window's percentage does, and the
+    dollars spent are made to agree with whatever it decides: zero beside
+    a zero, unknown beside an unknown. The cap keeps its value. Reaching
+    the 1st of the month empties what was spent, not what may be spent.
+
+    Never logs anything from the object. A spend figure is somebody's
+    budget, and the rule for serial buffers applies to it in spirit.
+    """
+    obj = rate_limits.get("spend_limit")
+    if not isinstance(obj, dict):
+        return None
+    pct = _amount(obj.get("used_percentage"))
+    if pct is None:
+        # Not a percentage, or a negative or NaN one. Without it there is
+        # nothing to put on a gauge, and an object we cannot read is not
+        # evidence of an allowance -- so the payload is read the old way.
+        return None
+    resets = obj.get("resets_at")
+    if isinstance(resets, bool) or not isinstance(resets, (int, float)):
+        resets = None
+    period = obj.get("period")
+    if period not in base.SPEND_PERIODS:
+        period = ""
+    frame = base.NormalizedUsageFrame(
+        provider=PROVIDER_ID, src=SRC_ID, observed_at=mtime_epoch,
+        plan=base.PLAN_SPEND, spend_period=period,
+        spend_limit_usd=_amount(obj.get("limit_usd")),
+        stale=(now_epoch - mtime_epoch) > STALE_AFTER_S)
+    settled = base.settle_window(pct, resets, now_epoch, frame.stale)
+    share = settled.pct
+    frame.session_pct = share
+    frame.session_resets_at = settled.resets_at
+    frame.session_rolled_at = settled.ended_at
+    spent = _amount(obj.get("used_usd"))
+    if frame.session_rolled_at is not None:
+        # The period this was spent in is over. settle_window has said either
+        # 0.0 (a fresh reading: definitely empty) or UNKNOWN (an old one),
+        # and the dollar figure claims exactly as much.
+        spent = None if share < 0 else 0.0
+    frame.spend_usd = spent
+    return frame
+
+
 def map_statusline_frame(payload: dict, now_epoch: float,
                          mtime_epoch: float):
     """Convert a statusline payload into a NormalizedUsageFrame.
@@ -174,6 +254,11 @@ def map_statusline_frame(payload: dict, now_epoch: float,
     # took this source off the bus for the rest of the process.
     if not isinstance(rate_limits, dict):
         rate_limits = {}
+    # The only door to the spend page, and it opens only when Claude Code
+    # actually sent the object. See _spend_frame.
+    spend = _spend_frame(rate_limits, now_epoch, mtime_epoch)
+    if spend is not None:
+        return spend
     session_pct, session_resets = _window(rate_limits, "five_hour")
     weekly_pct, weekly_resets = _window(rate_limits, "seven_day")
 

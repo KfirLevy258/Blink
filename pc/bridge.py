@@ -152,6 +152,7 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
         self._last_session = None        # (label, n) last sent; see poll_once
+        self._last_plan = None           # plan message last sent; see _send_plan_if_changed
         # The status-page watch (pc/status_page.StatusWatch), or None on a
         # Bridge wired without one -- every test fake -- which then sends no
         # svc message at all, exactly as a daemon from before it did.
@@ -286,6 +287,9 @@ class Bridge:
         # the same shape as offer_if_newer on every connect rather than once
         # per daemon lifetime.
         self._last_session = None
+        # The plan, for the same reason: a board that just booted assumes
+        # windows, and on-change alone would leave a spend page unsaid.
+        self._last_plan = None
         # The status level needs no reset here: poll_once re-states it on
         # every heartbeat, and this is one (see protocol.svc's contract).
         self.poll_once()                 # push current data immediately
@@ -989,6 +993,10 @@ class Bridge:
             return
 
         if usage is None:
+            # Nothing to draw, but perhaps something to take down: straight
+            # after a switch back from a spend login there may be no reading
+            # at all, and the board still holds the old account's plan.
+            self._send_plan_if_changed()
             # No statusline payload yet. The board keeps its last values and
             # its own dot, which is right -- but the daemon used to say nothing
             # at all, so a machine where Claude Code has simply never rendered
@@ -1050,6 +1058,7 @@ class Bridge:
         if usage is None:
             # Nothing to say about usage, but the status pages still have
             # their own news, and want() still has to be renewed.
+            self._send_plan_if_changed()
             self._send_svc_if_changed()
             return
         if protocol.meaningful_usage(usage) != self._last_pushed:
@@ -1070,6 +1079,11 @@ class Bridge:
         # Only the name goes out in that case. Re-sending an identical usage
         # line to carry it would spend the budget this comparison exists to
         # protect.
+        #
+        # Likewise the plan: the dollar figures arrive from Claude Code on a
+        # timer of their own, several minutes after the share they belong
+        # to, so the cost can move with every usage field standing still.
+        self._send_plan_if_changed()
         self._send_session_if_changed()
         # And the status level, which changes on the watch's own thread and
         # would otherwise wait for the next usage change to be noticed.
@@ -1091,10 +1105,25 @@ class Bridge:
         # Percentages above 100 are real -- extra usage puts them there -- but
         # firmware older than protocol.FW_ACCEPTS_OVERAGE turns them into 0 on
         # the panel rather than clamping. Hold them at 100 for those boards.
-        return protocol.cap_overage_for_fw(usage, self._board_fw)
+        usage = protocol.cap_overage_for_fw(usage, self._board_fw)
+        # And a spend share is withheld from firmware that would draw it as
+        # "SESSION 5h" -- see protocol.BOARD_CAP_PLAN.
+        return protocol.hide_plan_for_board(
+            usage, self._plan_msg(), self._board_can(protocol.BOARD_CAP_PLAN))
+
+    def _plan_msg(self):
+        """Asked of the fetch when it can answer; None otherwise. A plain
+        callable fetch -- the tests' fakes, the single-source daemon -- has
+        no notion of plans, and neither does a bus that has seen none."""
+        ask = getattr(self._fetch, "plan_msg", None)
+        return None if ask is None else ask()
 
     def _send_usage(self, usage):
         """Put a usage message on the wire and remember what was in it."""
+        # The plan FIRST: it says what the figures on the usage line are,
+        # and the other order would draw a spend share under the old
+        # captions until the next message.
+        self._send_plan_if_changed()
         self._write(usage)
         # Recorded here, once, so that no path can push without moving the
         # baseline -- a push that forgot to would leave the fast tick
@@ -1277,6 +1306,23 @@ class Bridge:
             return
         self._write(msg)
         self._burn_sent[p] = (key, now)
+
+    def _send_plan_if_changed(self):
+        """Tell a board that draws plans what its pages are a share of.
+
+        A board that has not announced protocol.BOARD_CAP_PLAN is sent nothing:
+        it would drop the line unread, and its usage line is already
+        blanked where it would mislead. For one that has, the message goes
+        out when it differs from the last one sent -- a /login, the dollars
+        moving -- and greet() forgets the last one, so each connection
+        starts by stating it.
+        """
+        if not self._board_can(protocol.BOARD_CAP_PLAN):
+            return
+        current = self._plan_msg()
+        if current is not None and current != self._last_plan:
+            self._last_plan = current
+            self._write(current)
 
     def _send_svc_if_changed(self):
         """Put each page's status-page level on the wire, on change only.

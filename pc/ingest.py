@@ -14,8 +14,9 @@ able to stop it.
 import sys
 import time
 
-from pc import (burn_reader, cowork_audit, desktop_idb, desktop_paths,
-                normalizer, protocol, session_verdict, weekly_anchor)
+from pc import (burn_reader, claude_account, cowork_audit, desktop_idb,
+                desktop_paths, normalizer, protocol, session_verdict,
+                weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
@@ -78,7 +79,23 @@ DEFAULT_VERDICT = object()
 
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
-                 now=time.time, burn=None, verdict=DEFAULT_VERDICT):
+                 now=time.time, burn=None, verdict=DEFAULT_VERDICT,
+                 account=None):
+        # The login watch (pc/claude_account), made here only for the
+        # shipped providers. A bus built from a scenario exists to replay the
+        # same timeline on any desk, and whoever happens to be signed in to
+        # Claude on that desk is exactly what it must not depend on.
+        if account is None and providers is None:
+            account = claude_account.AccountWatch()
+        self._account = account
+        # False until a frame on this bus has had a plan other than windows
+        # -- in practice, until Claude Code's status line has carried a
+        # spend cap. Until then the account is never read and no frame is
+        # filtered for it, so a desk that has never seen a spend cap runs
+        # exactly the code it ran before any of this existed. Once true it
+        # stays true for the life of the process: the guard matters most
+        # straight AFTER the spend page goes away, at the switch back.
+        self._plans_seen = False
         self._providers = (default_providers() if providers is None
                            else list(providers))
         self._preferred = preferred_provider
@@ -148,6 +165,9 @@ class IngestionBus:
         # second time could pick a different winner and name a project that
         # does not belong to the state on the panel.
         self._session_pair = ("", 0)
+        # The plan message for the pair the last poll() chose, or None while
+        # this bus has never seen a plan -- see plan_msg().
+        self._plan = None
         # Guards the one-shot anchor seeding below: see
         # _seed_anchor_once. False until the first poll_frames() call,
         # regardless of whether that call finds anything to seed.
@@ -367,19 +387,62 @@ class IngestionBus:
         """
         return now >= sitting_out["retry_at"] or now < sitting_out["since"]
 
+    def _login(self, now):
+        """(kind, since, touched_at) from the login watch, or blanks.
+
+        Blanks when there is no watch and when it raises: the profile is
+        another application's file, and failing to read it has to leave the
+        page as it would have been without the watch, not cost the poll.
+        """
+        watch = self._account
+        if watch is None:
+            return "", None, None
+        try:
+            watch.poll(now)
+            return watch.kind, watch.since, watch.touched_at
+        except Exception:
+            return "", None, None
+
+    def _guard_account(self, frames, now):
+        """Filter this poll's frames for the signed-in login, once armed.
+
+        Not armed, the frames come back as they went in and the profile is
+        never opened -- see _plans_seen.
+        """
+        if not self._plans_seen:
+            self._plans_seen = any(
+                f is not None and f.plan != base.PLAN_WINDOWS for f in frames)
+            if not self._plans_seen:
+                return frames
+        kind, since, touched = self._login(now)
+        return claude_account.select(frames, now, kind, since, touched)
+
     def poll(self):
         """The usage message for the board, or None when nothing is known."""
+        frames = self.poll_frames()
+        # Read after the providers have run, as it always was: a slow poll
+        # must not date the usage line by the moment it started.
+        now = self._now()
+        frames = self._guard_account(frames, now)
         primary, secondary = normalizer.select_pair(
-            self.poll_frames(), preferred=self._preferred)
+            frames, preferred=self._preferred)
         # The claude page wherever it sits: the main one, or the second when
         # the owner made another provider main. A provider left off the
         # board's two pages has no page to draw a burn view on.
         self._pages = {f.provider: f for f in (primary, secondary)
                        if f is not None}
         self.prune_burn()
+        if self._plans_seen:
+            # Computed even when primary is None below. The moment that
+            # matters is /login back to Max: the guard has just thrown out
+            # every spend reading as pre-switch, Claude Code has not yet
+            # written a Max status line, and so there is nothing to draw --
+            # but the board is still captioning its Claude page SPEND. The
+            # "windows" this produces is what takes that caption down.
+            self._plan = protocol.plan_for(primary, secondary)
         if primary is None:
             return None
-        msg = protocol.frame_to_usage(primary, self._now(), secondary)
+        msg = protocol.frame_to_usage(primary, now, secondary)
         # Against the state the message actually carries, which is not always
         # the primary frame's own -- see _pair_from.
         self._session_pair = _pair_from(
@@ -453,6 +516,17 @@ class IngestionBus:
             prune = getattr(reader, "prune", None)
             if prune is not None:
                 prune(now)
+
+    def plan_msg(self):
+        """What the last poll() says the pages are a share of.
+
+        Stays None for as long as every frame this bus has seen was a windows
+        frame. That None is how the feature keeps off the wire on today's
+        desks: the Bridge has nothing to send. Once a spend reading has been
+        seen it is always a message, and "windows" is one of them -- the
+        board learns that a spend page has gone only by being told.
+        """
+        return self._plan
 
     def session_pair(self):
         """(label, n) for the state the last poll() put on the panel.
@@ -551,6 +625,9 @@ class _BusFetch:
 
     def burn(self, provider=claude_cli.PROVIDER_ID):
         return self._bus.burn(provider)
+
+    def plan_msg(self):
+        return self._bus.plan_msg()
 
 
 # Which count describes which state. STATE_FAILED reads n_stuck because that

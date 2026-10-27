@@ -8,7 +8,8 @@ import json
 import math
 
 from pc.version import PROTO_VERSION
-from pc.providers.base import STATE_UNKNOWN, worst_of
+from pc.providers.base import (PLAN_SPEND, PLAN_UNREPORTED, PLAN_WINDOWS,
+                               STATE_UNKNOWN, worst_of)
 
 # Kept as a name because every message builder below already spells it this
 # way. It is the protocol's version, not the product's -- see pc/version.py.
@@ -74,6 +75,18 @@ def encode(msg: dict) -> bytes:
 # under twelve days: comfortably clear of the seven-day window, and six digits.
 COUNTDOWN_MAX_S = 999999
 
+# A second, longer ceiling, used only for a spend page's session countdown.
+#
+# A monthly cap's period can have 30 days left in it, and COUNTDOWN_MAX_S is
+# under 12. Clamped to that, the countdown would sit frozen at the ceiling
+# for the first two and a half weeks of every month and only then begin to
+# move: false on each of those days, and in the direction that makes the
+# reset look sooner than it is. 32 days is more than the 31 a month can
+# have, so no honest period is cut short, and a stamp in milliseconds still
+# hits a ceiling. The extra digit is paid for by the same line no longer
+# carrying a weekly countdown: a spend page sends -1 there.
+SPEND_COUNTDOWN_MAX_S = 32 * 86400
+
 
 def encode_checked(msg: dict):
     """encode(), but None when the result could not be received.
@@ -90,7 +103,8 @@ def encode_checked(msg: dict):
     return raw, None
 
 
-def secs_until(resets_at, now_epoch: float) -> int:
+def secs_until(resets_at, now_epoch: float,
+               ceiling: int = COUNTDOWN_MAX_S) -> int:
     """Seconds until `resets_at`. -1 when unknown or already past.
 
     -1 rather than 0 for missing input: 0 renders as "resets now", which is a
@@ -117,7 +131,7 @@ def secs_until(resets_at, now_epoch: float) -> int:
     # have already passed. Ceiling keeps the value honest (the window really
     # does have "about a second" left) and keeps 0 reserved for the firmware's
     # own countdown reaching it.
-    return min(COUNTDOWN_MAX_S, max(1, math.ceil(resets_at - now_epoch)))
+    return min(ceiling, max(1, math.ceil(resets_at - now_epoch)))
 
 
 def decode(line: str):
@@ -631,7 +645,8 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         frame.session_pct, frame.session_resets_at,
         frame.weekly_pct, frame.weekly_resets_at,
         [],
-        session_resets_in_s=secs_until(frame.session_resets_at, now_epoch),
+        session_resets_in_s=secs_until(frame.session_resets_at, now_epoch,
+                                       _session_ceiling(frame)),
         weekly_resets_in_s=secs_until(frame.weekly_resets_at, now_epoch),
         stale=frame.stale,
         provider=frame.provider, src=frame.src,
@@ -652,7 +667,9 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         p2_session_pct=(secondary.session_pct if secondary else UNKNOWN),
         p2_weekly_pct=(secondary.weekly_pct if secondary else UNKNOWN),
         p2_session_resets_in_s=(secs_until(secondary.session_resets_at,
-                                           now_epoch) if secondary else -1),
+                                           now_epoch,
+                                           _session_ceiling(secondary))
+                                if secondary else -1),
         p2_weekly_resets_in_s=(secs_until(secondary.weekly_resets_at,
                                           now_epoch) if secondary else -1),
         p2_stale=(secondary.stale if secondary else False),
@@ -667,6 +684,136 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         # apart and what the board does with each.
         active_age_s=_active_age(frame, secondary, now_epoch),
     )
+
+
+def _session_ceiling(frame) -> int:
+    """How far out this frame's session countdown may reach -- see
+    SPEND_COUNTDOWN_MAX_S. Read with getattr so a frame-shaped object from
+    before plans existed (every older test double) keeps the old bound."""
+    if getattr(frame, "plan", PLAN_WINDOWS) == PLAN_SPEND:
+        return SPEND_COUNTDOWN_MAX_S
+    return COUNTDOWN_MAX_S
+
+
+# --- plan: what a page's percentages are a share of ------------------------
+
+# Whether a board draws the `plan` message is BOARD_CAP_PLAN, with the
+# other board capabilities further down: a capability and not a version,
+# because the svc status line shipped its own gate at 1.4.0 and a board may
+# well have the one and not the other. Gating plans on a number would hand
+# a spend share to such a board as its session figure.
+#
+# Without it, the usage line still reaches the board -- old firmware reads
+# that, and on a spend page it carries the dollar cap's share in
+# `session_pct`, which 1.3.x draws as "SESSION 5h 63%". For such a board that
+# share is blanked (hide_plan_for_board), and the page shows "--", as it did
+# for an Enterprise login before any of this.
+
+
+# The one provider with plans. A plan message always names its page, so a
+# future second one is a new value here and nothing on the board changes.
+PLAN_PROVIDER = "claude"
+
+# Whole cents. The panel shows "$314" and Claude Code's own /usage shows
+# cents; nothing finer is worth the bytes.
+_USD_PLACES = 2
+
+
+# The board refuses an amount above this (proto.c USD_MAX) and keeps its
+# -1, so a larger one would be sent only to be dropped. Clamping here keeps
+# the two ends agreeing on what "too big to be real" means.
+USD_MAX = 1e9
+
+
+def _dollars(v):
+    """A finite, non-negative amount in whole cents, at most USD_MAX,
+    else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if not math.isfinite(v) or v < 0:
+        return None
+    return round(min(float(v), USD_MAX), _USD_PLACES)
+
+
+def plan(provider, kind, period="", usd=None, limit=None, account=""):
+    """Which allowance one provider's page shows -- the `plan` message.
+
+    {"t":"plan","v":2,"p":"claude","plan":"spend","period":"monthly",
+     "usd":314.12,"lim":500.0}
+
+    Its own message rather than fields on `usage`, which measures 454 of
+    MAX_LINE_BYTES at its widest: dollars are not the bytes left. Sent
+    BEFORE the usage line it describes, on change, and again after every
+    connect, so a board never draws a spend share under the old captions for
+    the length of a poll.
+
+      p       the page it belongs to: the provider id `usage` carries in
+              `provider` or `p2`. The board keys it by that, not by slot.
+      plan    PLAN_WINDOWS, PLAN_SPEND or PLAN_UNREPORTED. "windows" is the
+              all-clear a switch back to a Max login sends, and a board
+              that has heard nothing should assume it.
+      period  spend only, one of base.SPEND_PERIODS; omitted when unknown.
+      usd     spend only, dollars used, and the cap; each omitted when
+      lim     unknown -- Claude Code sends them minutes after the share, or
+              never.
+      acct    unreported only: "enterprise" or "team", the word shown.
+
+    Additive: proto.c's dispatch ends in "unknown types ignored", so older
+    firmware drops it, and PROTO_VERSION does not move.
+    """
+    msg = {"t": "plan", "v": VERSION, "p": provider[:MODEL_MAX_CHARS],
+           "plan": kind}
+    if kind == PLAN_SPEND:
+        if period:
+            msg["period"] = period
+        for key, val in (("usd", usd), ("lim", limit)):
+            val = _dollars(val)
+            if val is not None:
+                msg[key] = val
+    elif kind == PLAN_UNREPORTED and account:
+        msg["acct"] = account
+    return msg
+
+
+def plan_for(primary, secondary=None) -> dict:
+    """Build `plan` from the (primary, secondary) frames on the panel.
+
+    The first frame in the pair with a plan other than windows is the one
+    described; with none, the claude page is told it is windows again.
+    """
+    for f in (primary, secondary):
+        if f is None:
+            continue
+        kind = getattr(f, "plan", PLAN_WINDOWS)
+        if kind != PLAN_WINDOWS:
+            return plan(f.provider, kind, f.spend_period, f.spend_usd,
+                        f.spend_limit_usd, f.account)
+    return plan(PLAN_PROVIDER, PLAN_WINDOWS)
+
+
+def hide_plan_for_board(msg, plan_msg, can_plan: bool):
+    """The usage line as a board without BOARD_CAP_PLAN may be shown it.
+
+    `can_plan` is whether this board listed BOARD_CAP_PLAN (Bridge passes
+    _board_can, which falls back to board.json's hint before the board has
+    spoken).
+
+    Only a spend plan has anything to hide, and only on the page the plan
+    names: its session share and countdown, in whichever slot that page is
+    -- `provider` for the main page, `p2` for the second. Everything else,
+    the other provider's page included, goes through as it was. The message
+    passed in is never changed; a blanked copy comes back.
+    """
+    spend = isinstance(plan_msg, dict) and plan_msg.get("plan") == PLAN_SPEND
+    if not isinstance(msg, dict) or not spend or can_plan:
+        return msg
+    page = plan_msg.get("p")
+    blanked = {k: v for k, v in msg.items()
+               if not (msg.get("p2") == page
+                       and k in ("p2_session_pct", "p2_s_in_s"))}
+    if msg.get("provider") == page:
+        blanked.update(session_pct=UNKNOWN, session_resets_in_s=-1)
+    return blanked
 
 
 def _active_age(frame, secondary, now_epoch: float) -> int:
@@ -803,6 +950,10 @@ BOARD_CAP_THEME = "theme"    # takes theme lines; answers theme_edit
 BOARD_CAP_EDIT_DONE = "edit_done"
 # Draws the five-hour burn view from burn lines (docs/plans/burn-5h.md).
 BOARD_CAP_BURN = "burn"
+# Draws the `plan` message: a spend page's dollars and captions
+# (docs/plans/enterprise-spend.md). A board without it is sent no plan, and
+# a spend share on its usage line is blanked -- see hide_plan_for_board.
+BOARD_CAP_PLAN = "plan"
 
 
 def board_caps(msg) -> frozenset:
