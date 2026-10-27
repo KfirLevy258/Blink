@@ -256,6 +256,38 @@ saw "Put it in a claude enclosure"
 ! grep -q "never box this unit" "$OUT" || fail "a plain build was called a selftest unit"
 ok "a selftest build is refused unless --selftest names it; the fused path refuses it too"
 
+echo "== burn.sh: a touch-inject build"
+# CONFIG_BLINK_TOUCH_INJECT boots like a release and passes every check here,
+# so nothing but this refusal stands between it and a box -- and it takes
+# touches from the cable. Same shape as the selftest case, its own flag.
+cp "$WORK/plain.config" "$CFG"
+printf '%s\n' 'CONFIG_BLINK_TOUCH_INJECT=y' >>"$CFG"
+board claude none
+export FAKE_BOARD_EDITION_REPLY='[cfg] edition stamped as claude'
+run 1 "$BURN" --edition claude --port $PORT --no-build
+saw "CONFIG_BLINK_TOUCH_INJECT=y"
+never "esptool.*write_flash"
+never "imgtool sign"
+# --selftest is not the way through for this one.
+run 1 "$BURN" --edition claude --port $PORT --no-build --selftest
+saw "CONFIG_BLINK_TOUCH_INJECT=y"
+never "esptool.*write_flash"
+run 0 "$BURN" --edition claude --port $PORT --no-build --bench
+saw "TOUCH INJECT build"
+called "esptool .*write_flash"
+saw "never box this unit"
+export FAKE_EFUSE_BITS=0000001
+run 1 "$ENC" $PORT
+export FAKE_EFUSE_BITS=0000000
+saw "CONFIG_BLINK_TOUCH_INJECT=y"
+never "esptool.*write_flash"
+cp "$WORK/plain.config" "$CFG"
+run 0 "$BURN" --edition claude --port $PORT --no-build --bench
+saw "not a touch-inject build"
+saw "Put it in a claude enclosure"
+! grep -q "never box this unit" "$OUT" || fail "a plain build was called a bench unit"
+ok "a touch-inject build is refused unless --bench names it; the fused path refuses it outright"
+
 echo "== flash_encrypted.sh"
 run 1 "$ENC" $PORT
 saw "flash encryption is NOT enabled"

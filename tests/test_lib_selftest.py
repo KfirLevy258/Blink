@@ -89,7 +89,12 @@ def test_the_phrase_it_looks_for_is_the_one_fatal_c_prints():
     a comment still carrying the phrase must not count, so this reads the
     phrase out of the lib's own grep and finds it inside the string literal
     of a printk, not anywhere in the file."""
-    (phrase,) = re.findall(r"grep -aqF '([^']+)'", LIB.read_text(encoding="utf-8"))
+    # The selftest function's own grep: the lib also holds the touch-inject
+    # check, with a phrase of its own (tests/test_lib_inject.py).
+    text = LIB.read_text(encoding="utf-8")
+    body = text[text.index("blink_refuse_selftest()"):
+                text.index("blink_refuse_inject()")]
+    (phrase,) = re.findall(r"grep -aqF '([^']+)'", body)
     src = (ROOT / "firmware" / "src" / "fatal.c").read_text(encoding="utf-8")
     code = re.sub(r"/\*.*?\*/|//[^\n]*", "", src, flags=re.S)
     literals = re.findall(r'printk\(\s*"((?:[^"\\]|\\.)*)"', code)

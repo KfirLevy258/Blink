@@ -2870,3 +2870,11 @@ void usage_view_apply_theme(void)
 	usage_view_set_status(last_status);	/* hint, dot, pips */
 	lv_obj_invalidate(gauge_scr);
 }
+
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+/* The gauge screen's own idea of its layout, for the bench's ui_state. */
+const char *usage_view_bench_focus(void)
+{
+	return !focus_on ? "off" : focus_weekly ? "weekly" : "session";
+}
+#endif

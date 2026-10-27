@@ -1,0 +1,97 @@
+# Every on-board interaction, with nobody at the panel.
+#
+#   tools/board_touch.py script tools/bench/full_touch.txt
+#
+# Needs a CONFIG_BLINK_TOUCH_INJECT board on its gauges (tools/board_touch.py
+# has the setup). Each `tap NAME` checks the screen it leads to; `mem` prints
+# the [mem] lines the board has printed since the last one, and the summary
+# at the end has each screen's peak against the 30632 B pool.
+#
+# It changes three settings and puts two of them back: it ends on Focus off
+# and Theme Dark. Brightness is left at 60% (level 3).
+#
+# Before every target the tool wakes a dozing board and takes down any
+# notice, saying "notice dismissed (KIND)"; `expect notice none` checks
+# that nothing put one up.
+
+expect ui_state scr=gauges modal=none slp=0
+expect notice none
+
+# --- Settings, first time: the edge zone in, the back button out
+tap settings.open
+mem
+tap settings.back
+mem
+
+# --- second time: a swipe in, a swipe out
+tap settings.swipe
+mem
+tap back.swipe
+mem
+
+# --- the eye clip: the left edge zone in, a short left swipe out (too
+# short for ui_swipe; see eye.exit_short). The full swipe is at the end.
+tap eye.tap
+wait 2
+tap eye.exit_short
+mem
+
+# --- third time, and everything inside it
+tap settings.open
+mem
+
+tap brightness.open
+tap brightness.level3
+expect ui_state ov=brightness bl=60
+tap back.swipe
+mem
+
+tap theme.open
+tap theme.light
+expect theme_now why=user id=9
+tap theme.edit_on_computer
+expect theme_edit
+tap settings.back
+mem
+
+# Each Focus choice is checked on the gauges themselves, not just in the
+# store: gf is the layout usage_view is drawing. Out to the gauges and back
+# in after each -- these opens are on top of the three above.
+tap focus.open
+tap focus.session
+tap settings.back
+tap settings.back
+expect ui_state scr=gauges focus=session gf=session
+tap settings.open
+tap focus.open
+tap focus.weekly
+tap back.swipe
+tap settings.back
+expect ui_state scr=gauges focus=weekly gf=weekly
+tap settings.open
+tap focus.open
+tap focus.off
+tap back.swipe
+expect ui_state focus=off gf=off
+mem
+
+tap theme.open
+tap theme.dark
+expect theme_now why=user id=0
+tap settings.back
+mem
+
+tap settings.back
+mem
+expect ui_state scr=gauges focus=off gf=off theme=0 stored=0
+expect notice none
+
+# --- the eye swipe, in and out the way a finger does it. Last, because on
+# the host harness the full left swipe out of the clip also opens Settings
+# (eye.exit_short in board_touch.py has why); if the board does the same,
+# this is where the script says so, after everything else has run.
+tap eye.swipe
+wait 2
+tap eye.exit
+mem
+expect ui_state scr=gauges

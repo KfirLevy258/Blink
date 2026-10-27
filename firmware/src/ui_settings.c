@@ -77,6 +77,21 @@ static lv_obj_t *confirm;	/* NULL when no dialog is up */
 
 /* Software-update widgets (all NULL when their owner is closed/absent). */
 static lv_obj_t *notice;	/* outcome popup on the top layer */
+/*
+ * Bench builds: what the notice up now is about, for ui_state's nt. Set
+ * right after a notice is put up (ui_settings_bench_notice_is) and cleared
+ * wherever one is created or deleted, so the word belongs to that popup and
+ * no other. It used to be kept with the popup's address, and LVGL hands a
+ * freed block straight back to the next object of the same size: a later
+ * notice from anywhere read as the old kind (review of the injector,
+ * SHOULD-1). A no-op in every other build.
+ */
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+static const char *bench_nt;
+#define bench_nt_clear() (bench_nt = NULL)
+#else
+#define bench_nt_clear() ((void)0)
+#endif
 static lv_obj_t *upd_btn;
 static lv_obj_t *upd_lbl;
 static lv_timer_t *upd_timer;	/* whole session, not just the panel */
@@ -264,6 +279,7 @@ static void notice_ok_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	lv_obj_del(notice);
+	bench_nt_clear();
 	notice = NULL;
 }
 
@@ -271,6 +287,7 @@ void ui_settings_notice_dismiss(void)
 {
 	if (notice) {
 		lv_obj_del(notice);
+		bench_nt_clear();
 		notice = NULL;
 	}
 }
@@ -525,11 +542,13 @@ void ui_settings_notice_update(const char *version, const char *summary,
 {
 	if (notice) {
 		lv_obj_del(notice);
+		bench_nt_clear();
 	}
 	snprintf(wn_from, sizeof(wn_from), "%s", from ? from : "");
 	snprintf(wn_to, sizeof(wn_to), "%s", to ? to : "");
 
 	notice = lv_obj_create(lv_layer_top());
+	bench_nt_clear();
 	lv_obj_set_width(notice, 300);
 	lv_obj_set_height(notice, LV_SIZE_CONTENT);
 	lv_obj_set_style_min_height(notice, 110, 0);
@@ -632,6 +651,7 @@ void ui_settings_notice_titled(const char *title, const char *body)
 {
 	if (notice) {
 		lv_obj_del(notice);
+		bench_nt_clear();
 	}
 	/*
 	 * Sized by its text, not fixed. A 130 px box held three lines; the
@@ -641,6 +661,7 @@ void ui_settings_notice_titled(const char *title, const char *body)
 	 * screen, with the label scrolling inside in the absurd case.
 	 */
 	notice = lv_obj_create(lv_layer_top());
+	bench_nt_clear();
 	lv_obj_set_width(notice, 300);
 	lv_obj_set_height(notice, LV_SIZE_CONTENT);
 	lv_obj_set_style_min_height(notice, 110, 0);
@@ -1261,6 +1282,9 @@ static void upd_timer_cb(lv_timer_t *t)
 			} else {
 				ui_settings_notice(base);
 			}
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+			ui_settings_bench_notice_is("ota");
+#endif
 			ota_ui_set(OTA_UI_IDLE, NULL, 0);
 		}
 		break;
@@ -3424,3 +3448,28 @@ void ui_settings_attach(lv_obj_t *scr)
 		upd_timer = lv_timer_create(upd_timer_cb, 250, NULL);
 	}
 }
+
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+void ui_settings_bench_notice_is(const char *kind)
+{
+	bench_nt = notice ? kind : NULL;
+}
+
+/* The bench injector's view of this file; see ui_settings.h. The sub-screen
+ * and the modal are named in the order they cover each other. */
+void ui_settings_bench_state(struct ui_settings_bench *out)
+{
+	out->nt = notice == NULL ? "none" : bench_nt ? bench_nt : "other";
+	out->open = panel != NULL;
+	out->sub = confirm ? "confirm" : bright_ov ? "brightness" :
+		   theme_ov ? "theme" : focus_ov ? "focus" : "none";
+	out->modal = wn ? "whatsnew" : dl_overlay ? "download" :
+		     upd_prompt ? "prompt" : notice ? "notice" : "none";
+	out->busy = want_open || want_close || want_page != 0 || closing ||
+		    sub_closing || theme_closing;
+	out->theme_page = theme_page;
+	out->edit = edit_note == edit_waiting ? "waiting" :
+		    edit_note == edit_opened ? "opened" :
+		    edit_note == edit_run ? "run" : "name";
+}
+#endif

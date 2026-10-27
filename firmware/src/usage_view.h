@@ -279,4 +279,10 @@ void usage_view_set_provider2(const char *tag, double session_pct,
  */
 void usage_view_svc_changed(void);
 
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+/* Bench builds only: the Focus layout the gauge screen is drawing,
+ * "off" | "session" | "weekly", from its own state rather than the store. */
+const char *usage_view_bench_focus(void);
+#endif
+
 #endif /* USAGE_VIEW_H */

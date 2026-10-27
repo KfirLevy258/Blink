@@ -112,6 +112,11 @@ APP_CONFIRMED="$BUILD/firmware/zephyr/zephyr.confirmed.bin"
 . "$HERE/lib_selftest.sh"
 blink_refuse_selftest "$BUILD/firmware/zephyr/.config" \
 	"$BUILD/firmware/zephyr/zephyr.signed.bin" || exit 1
+# Nor a CONFIG_BLINK_TOUCH_INJECT image, with no way through: the bench
+# injector belongs on a plaintext bench board (burn.sh --bench), and a fused
+# unit is the one most likely to be boxed.
+blink_refuse_inject "$BUILD/firmware/zephyr/.config" \
+	"$BUILD/firmware/zephyr/zephyr.signed.bin" || exit 1
 
 rm -f "$APP_CONFIRMED"
 "${BLINK_PYTHON:-python3}" "$HERE/sign_confirmed.py" \

@@ -42,6 +42,10 @@ target_sources(app PRIVATE
 # Diagnostic only; CONFIG_BLINK_TOUCH_TRACE is off in release builds.
 target_sources_ifdef(CONFIG_BLINK_TOUCH_TRACE app PRIVATE src/touch_trace.c)
 
+# Bench only; CONFIG_BLINK_TOUCH_INJECT is off in every release build, and
+# tools/lib_selftest.sh refuses an image that has it.
+target_sources_ifdef(CONFIG_BLINK_TOUCH_INJECT app PRIVATE src/touch_inject.c)
+
 
 # The [mem] lines (src/mem_stats.c), on whenever prj.conf keeps the heap
 # counters on. It reads the LVGL pool's free lists through Zephyr's private

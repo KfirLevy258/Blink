@@ -70,7 +70,10 @@ config BLINK_FATAL_SELFTEST
 
 	  then flash that directory, not build-sb:
 
-	    BLINK_BUILD_DIR=$PWD/build-selftest ../tools/burn.sh --no-build --selftest
+	    BLINK_BUILD_DIR=$PWD/build-selftest ../tools/burn.sh --edition claude --no-build --selftest
+
+	  (or --edition codex: the edition is stamped on the unit as on any
+	  burn).
 
 	  burn.sh refuses this build without --selftest, and release.sh and
 	  flash_encrypted.sh refuse it outright (tools/lib_selftest.sh).
@@ -82,6 +85,40 @@ config BLINK_FATAL_SELFTEST_AT_S
 	default 60
 	help
 	  Under 30 to test the halt, over 30 to test the reboot.
+
+config BLINK_TOUCH_INJECT
+	bool "Let the PC drive the touch panel (bench builds only)"
+	depends on INPUT_XPT2046
+	help
+	  BENCH BUILDS ONLY. NEVER SHIP THIS.
+
+	  Accepts {"t":"touch",...} lines over the cable and plays them into
+	  the XPT2046's input device as panel reports, so LVGL and ui_swipe
+	  both see a finger that is not there; and answers {"t":"ui_state"}
+	  with the screen and overlay on show. tools/board_touch.py drives it,
+	  so every on-board interaction can be tested with nobody at the
+	  panel (src/touch_inject.h has the wire). A shipped board with this
+	  in it could be operated by anything on the computer it is plugged
+	  into, so it is off by default and must stay out of prj.conf and of
+	  every .conf a release reads. The boot log says INJECT BUILD.
+
+	  Set it on the command line, in a build directory of its own -- a -D
+	  value stays in that directory's CMake cache, and a later plain build
+	  there would still carry it:
+
+	    west build -p always --sysbuild -d build-inject \
+	      -b esp32_devkitc/esp32/procpu . -- \
+	      -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
+	      -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.blink/ota_signing_key_p256.pem\"" \
+	      -Dfirmware_CONFIG_BLINK_TOUCH_INJECT=y
+
+	  then flash that directory, not build-sb:
+
+	    BLINK_BUILD_DIR=$PWD/build-inject ../tools/burn.sh --edition claude --no-build --bench
+
+	  (or --edition codex: the edition is stamped on the unit as on any
+	  burn). burn.sh refuses this build without --bench, and release.sh and
+	  flash_encrypted.sh refuse it outright (tools/lib_selftest.sh).
 
 endmenu
 

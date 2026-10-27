@@ -26,6 +26,9 @@
 #   - flash a CONFIG_BLINK_FATAL_SELFTEST build, which faults on every boot,
 #     unless --selftest says that is the point (the bench test in
 #     firmware/Kconfig); the unit it makes is never one to box
+#   - flash a CONFIG_BLINK_TOUCH_INJECT build, which lets the computer drive
+#     the touch panel, unless --bench says that is the point (the bench
+#     touch injector, tools/board_touch.py); never one to box either
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -36,6 +39,7 @@ EDITION=""
 PORT="${BLINK_PORT:-}"
 SKIP_BUILD=0
 SELFTEST=0
+BENCH=0
 LOGO=""
 # Must match logo_partition in firmware/boards/esp32_devkitc_esp32_procpu.overlay.
 LOGO_OFF=0x330000
@@ -48,7 +52,8 @@ while [ $# -gt 0 ]; do
 	--no-build) SKIP_BUILD=1; shift ;;
 	--logo)    LOGO="$2"; shift 2 ;;
 	--selftest) SELFTEST=1; shift ;;
-	*) echo "usage: $0 --edition claude|codex [--port DEV] [--no-build] [--logo FILE] [--selftest]" >&2
+	--bench)   BENCH=1; shift ;;
+	*) echo "usage: $0 --edition claude|codex [--port DEV] [--no-build] [--logo FILE] [--selftest] [--bench]" >&2
 	   exit 2 ;;
 	esac
 done
@@ -226,9 +231,15 @@ SIGNED="$BUILD/firmware/zephyr/zephyr.signed.bin"
 # the Kconfig help warns: one -D on the command line, kept in the CMake cache.
 # --selftest is the bench test that help describes, asked for by name. It is
 # a permission, not a label: the check runs either way, and only an image it
-# refuses is called a selftest unit. A build it cannot inspect counts as one,
-# which errs toward "never box this".
+# refuses is called a selftest unit.
+#
+# A build with no .config cannot be inspected at all, and is refused here
+# whatever the flags: under --selftest or --bench it used to fall into the
+# permitted branch and be flashed as the bench image it was never shown to
+# be (review of the injector, NICE-5). The image itself was checked above.
 . "$ROOT/tools/lib_selftest.sh"
+[ -f "$BUILD/firmware/zephyr/.config" ] ||
+	die "no $BUILD/firmware/zephyr/.config -- cannot tell what this build is"
 SELFTEST_IMAGE=0
 if [ "$SELFTEST" = 0 ]; then
 	blink_refuse_selftest "$BUILD/firmware/zephyr/.config" "$SIGNED" ||
@@ -238,6 +249,22 @@ elif blink_refuse_selftest "$BUILD/firmware/zephyr/.config" "$SIGNED" 2>/dev/nul
 else
 	SELFTEST_IMAGE=1
 	echo "   --selftest: flashing a SELFTEST build that faults on every boot"
+fi
+
+# The touch injector the same way, with its own flag. Its image does not
+# fault: it boots, passes every check below and looks like a release, which
+# is why it must never reach a box -- it takes touches from the cable, so the
+# computer it is plugged into can operate the panel. --bench, like
+# --selftest, is a permission and not a label.
+INJECT_IMAGE=0
+if [ "$BENCH" = 0 ]; then
+	blink_refuse_inject "$BUILD/firmware/zephyr/.config" "$SIGNED" ||
+		die "this is a touch-inject build (above). Pass --bench if that is the point."
+elif blink_refuse_inject "$BUILD/firmware/zephyr/.config" "$SIGNED" 2>/dev/null; then
+	echo "   --bench given, but this is not a touch-inject build: a normal unit"
+else
+	INJECT_IMAGE=1
+	echo "   --bench: flashing a TOUCH INJECT build the computer can drive"
 fi
 
 # ------------------------------------------- 2a. a CONFIRMED image to flash
@@ -474,6 +501,8 @@ fi
 printf '================================\n'
 if [ "$SELFTEST_IMAGE" = 1 ]; then
 	printf 'SELFTEST build: it faults on every boot -- never box this unit.\n'
+elif [ "$INJECT_IMAGE" = 1 ]; then
+	printf 'TOUCH INJECT build: the computer can drive its panel -- never box this unit.\n'
 else
 	printf 'Put it in a %s enclosure.\n' "$EDITION"
 fi

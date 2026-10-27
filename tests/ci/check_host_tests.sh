@@ -103,6 +103,9 @@ run_one ui_theme     "ui_theme.c cfg_store.c theme.c msg_parse.c" \
 	"-I$ROOT/tests/ui_theme/stub -I$ROOT/tests/cfg_store/stub -lm"
 run_one ui_slide_geom ""               ""
 run_one ui_swipe_geom ""               ""
+# The bench touch injector (CONFIG_BLINK_TOUCH_INJECT): its transform against
+# the LVGL glue, and its strokes against ui_swipe's own rules.
+run_one touch_inject ""                ""
 run_one upd_prompt  "upd_prompt.c"    ""
 run_one upd_row     "upd_row.c"       ""
 run_one upd_tap     "upd_tap.c"       ""

@@ -23,6 +23,7 @@
 #include "theme.h"
 #include "ui_theme.h"
 #include "ui_settings.h"
+#include "touch_inject.h"
 
 #define PROTO_VERSION BLINK_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
@@ -394,6 +395,13 @@ static void dispatch(const char *json)
 		return;
 	}
 	host_bye = false;
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	/* Bench images only: the PC's finger, and its question about what
+	 * the panel shows (touch_inject.h). */
+	if (touch_inject_dispatch(type, json)) {
+		return;
+	}
+#endif
 	if (strcmp(type, "usage") == 0) {
 		double sp = 0, wp = 0;
 		/* Remaining seconds, not the absolute resets_at timestamps: the
@@ -903,6 +911,9 @@ void proto_init(void)
 		uart_irq_rx_enable(console_dev);
 	}
 
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	touch_inject_init();
+#endif
 	send_hello();
 	last_ping_ms = k_uptime_get();
 }
@@ -949,6 +960,9 @@ bool proto_host_seen(void)
 void proto_service(void)
 {
 	drain_rx();
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	touch_inject_service();
+#endif
 	int64_t now = k_uptime_get();
 
 	if (now - last_ping_ms >= PING_INTERVAL_MS) {

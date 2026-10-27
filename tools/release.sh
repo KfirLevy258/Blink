@@ -186,6 +186,9 @@ done
 # the .config and the artifact both -- see tools/lib_selftest.sh.
 source "$ROOT/tools/lib_selftest.sh"
 blink_refuse_selftest "$CFG" "$BIN" || exit 1
+# Nor a touch-inject image, which boots like a release and takes touches from
+# the cable: every desk that took it could be operated from the computer.
+blink_refuse_inject "$CFG" "$BIN" || exit 1
 
 SIZE=$(stat -f%z "$BIN")
 SHA=$(shasum -a 256 "$BIN" | cut -d' ' -f1)

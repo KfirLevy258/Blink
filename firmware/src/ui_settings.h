@@ -68,4 +68,28 @@ void ui_settings_apply_theme(void);
  * unless the row is still waiting for an answer. */
 void ui_settings_theme_edit_reply(bool ok);
 
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+/*
+ * What Settings is showing, for the bench injector's ui_state reply
+ * (touch_inject.h). Read from the same pointers the screens are built and
+ * torn down through, so it cannot disagree with what is on the panel. Main
+ * thread only. Never in a release image: the option is off there.
+ */
+struct ui_settings_bench {
+	bool open;		/* the panel is up (or is the ground under one) */
+	const char *sub;	/* none|brightness|theme|focus|confirm */
+	const char *modal;	/* none|notice|whatsnew|prompt|download */
+	bool busy;		/* a transition is latched or a close queued */
+	int theme_page;		/* the theme screen's page, from 0 */
+	const char *edit;	/* "Edit on computer": name|waiting|opened|run */
+	const char *nt;		/* the notice up: none|sleep|ota|other */
+};
+void ui_settings_bench_state(struct ui_settings_bench *out);
+
+/* Say what the notice just put up is about ("sleep", "ota"). Cleared
+ * wherever a notice is created or deleted, so a later notice from anywhere
+ * else reads as "other" rather than inheriting the word. */
+void ui_settings_bench_notice_is(const char *kind);
+#endif
+
 #endif /* UI_SETTINGS_H */

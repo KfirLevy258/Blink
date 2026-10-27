@@ -279,6 +279,21 @@ flash)
 	blink_zephyr_build_ready || exit 1
 	cd "$ROOT/firmware"
 	west build -b "$BOARD" . -- -DUSE_CCACHE=0 | tail -3
+	# A developer's own board, so a bench image is not refused here -- but
+	# it is named, because a -D left in build/'s CMake cache makes every
+	# later dev.sh flash one without a word: a selftest faults on every
+	# boot, a touch-inject image takes touches from the cable
+	# (tools/lib_selftest.sh; burn.sh is where the refusal lives).
+	# A warning and never a stop, so a checkout without the lib flashes as
+	# before rather than failing on a missing file.
+	if [ -f "$ROOT/tools/lib_selftest.sh" ]; then
+		# shellcheck source=lib_selftest.sh
+		. "$ROOT/tools/lib_selftest.sh"
+		blink_refuse_selftest build/zephyr/.config build/zephyr/zephyr.bin \
+			2>/dev/null || echo "WARNING: flashing a SELFTEST build (or one nothing could inspect)" >&2
+		blink_refuse_inject build/zephyr/.config build/zephyr/zephyr.bin \
+			2>/dev/null || echo "WARNING: flashing a TOUCH INJECT build (or one nothing could inspect)" >&2
+	fi
 	# 921600 is beyond what this board's CH340 tolerates; it fails mid-write.
 	west flash --esp-device "$PORT" --esp-baud-rate 115200 | tail -1
 	;;	# the EXIT trap starts the daemon

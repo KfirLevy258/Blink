@@ -1,0 +1,1354 @@
+#!/usr/bin/env python3
+"""Drive a bench board's touch panel from the PC, and check what it shows.
+
+    tools/board_touch.py state
+    tools/board_touch.py tap settings.open
+    tools/board_touch.py raw tap 298 120
+    tools/board_touch.py swipe 260 120 100 120 [MS]
+    tools/board_touch.py script tools/bench/full_touch.txt
+    tools/board_touch.py targets
+
+Needs a board flashed with CONFIG_BLINK_TOUCH_INJECT (firmware/Kconfig has
+the build line; tools/burn.sh --bench flashes it). Such a board takes
+{"t":"touch"} lines and plays them into its touch controller's own input
+device, so LVGL and ui_swipe see them as a finger; and it answers
+{"t":"ui_state"} with the screen and overlay it is showing
+(firmware/src/touch_inject.h). This is the other end: it stands in for the
+daemon -- welcome, pongs, made-up usage every 60 s, so the board is "host
+connected" and on its gauges -- and plays named actions whose coordinates come
+from the firmware's layout code, asserting after each one that the screen it
+was meant to lead to is the screen the board reports.
+
+Run it with the repo's test venv or the Zephyr one: stdlib and pyserial.
+
+THE PORT. Opened with a plain pyserial open -- port, baud and a read timeout,
+nothing else. DTR and RTS are never touched: on this board's cross-coupled auto-reset
+circuit, setting them before the open resets the chip (CLAUDE.md). It refuses
+to start while anything else holds the port, or while a Blink daemon holds
+its lock -- on macOS a /dev/cu.* node is not exclusive, and two writers on one
+cable interleave. Stop the daemon first:
+
+    launchctl bootout gui/$(id -u)/com.blink.bridge      # and afterwards:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.blink.bridge.plist
+    launchctl kickstart -k gui/$(id -u)/com.blink.bridge
+
+WHAT IT PRINTS. Parsed fields and nothing else: ui_state's fields, theme_now's
+id/why/h, theme_edit, touch_done, the numbers on a [mem] or [swipe] line. A
+line it does not recognise -- including every other console line the board
+prints -- is never echoed: with -v it prints as "unparsed line (N bytes)",
+and either way it is counted in the summary. CLAUDE.md's rule is about the
+daemon's logs, and a bench tool that echoed the wire would be the easiest
+place to break it.
+
+DO NOT TOUCH THE PANEL DURING A RUN. A real finger is not locked out: its
+reports mix with the injected ones (firmware/src/touch_inject.c), and the
+run then fails, or passes, for reasons that are not the code's.
+
+IT PUTS THE BOARD BACK. The theme, brightness and Focus the board had when
+the run started are restored when it ends -- failed or interrupted runs
+included. A built-in theme goes back as the save line the PC would send; a
+custom one too, when ~/.blink/theme.json holds the colours the board's own
+hash names, and otherwise by its tile, which reselects the record the board
+still keeps. Brightness and Focus go back through the panel. --no-restore
+leaves the board as the run left it.
+
+USAGE IS MADE UP. The readings are fixed invented numbers, never anything read
+from this machine (CLAUDE.md: never generate usage, never ship a captured
+fixture). Every line goes out through protocol.encode_checked.
+
+Exit status: 0 when every expectation held, 1 when any failed, 2 for a usage
+error or a port it could not take.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pc import protocol  # noqa: E402
+from pc.providers.base import NormalizedUsageFrame  # noqa: E402
+
+BAUD = 115200
+SCREEN_W, SCREEN_H = 320, 240
+
+# The LVGL pool the board can actually hand out: CONFIG_LV_Z_MEM_POOL_SIZE
+# 30720 less the heap's own metadata, as every [mem] line's used+free sums to
+# (firmware/src/mem_stats.h).
+POOL_USABLE = 30632
+
+# A finger's tap and swipe, as the board will play them (touch_inject_geom.h
+# reports every 13 ms, the panel's median). 120 ms is a deliberate press;
+# 260 ms over 160 px is a brisk swipe -- and well past both ui_swipe's 36 px
+# and LVGL's 24 px gesture floor before the lift.
+TAP_MS = 120
+SWIPE_MS = 260
+
+HEARTBEAT_S = 60       # the daemon's usage poll
+
+# --- the firmware's layout, mirrored ---------------------------------------
+#
+# The #defines in firmware/src/ui_settings.c that place the controls. A
+# mirror rather than a parse at run time so this file stays usable from a
+# copy, and tests/test_board_touch.py reads each one back out of the C so the
+# two cannot drift. The handful of positions that are literals in the C --
+# the edge zones, the back button, the brightness stops -- are pinned by the
+# same test in the calls that set them.
+FW_LAYOUT = {
+    "ROW_H": 56,
+    "ROW_TOP": 56,
+    "ROW_GAP": 8,
+    "COL_L_W": 120,
+    "COL_R_W": 168,
+    "BRIGHT_STOPS": 5,
+    "THEME_SLOTS": 6,
+    "THEME_TILE_W": 144,
+    "THEME_TILE_H": 56,
+    "THEME_TILE_GAP": 6,
+    "THEME_GRID_Y": 46,
+    "FOCUS_BTN_W": 93,
+    "FOCUS_BTN_H": 100,
+    "FOCUS_BTN_Y": 56,
+}
+_L = FW_LAYOUT
+
+# firmware/src/theme.h, the built-in ids in their tile order.
+THEME_IDS = {
+    "dark": 0, "neon": 1, "bold": 2, "mono": 3, "ocean": 4, "synthwave": 5,
+    "forest": 6, "retro_lcd": 7, "cvd_safe": 8, "light": 9,
+    "light_soft": 10, "light_ink": 11,
+    # Only once a custom theme has been saved: the tile is not offered
+    # before (theme_list in ui_settings.c).
+    "custom": 12,
+}
+
+
+def rect_center(x, y, w, h):
+    """The middle of an LVGL object, the way a finger aims at it."""
+    return (x + w // 2, y + h // 2)
+
+
+# The two invisible 44 x 150 strips on the gauge screen (mk_edge_zone,
+# LV_ALIGN_RIGHT_MID / LEFT_MID): the right one opens Settings, the left one
+# plays the eye clip.
+P_SETTINGS_ZONE = rect_center(SCREEN_W - 44, (SCREEN_H - 150) // 2, 44, 150)
+P_EYE_ZONE = rect_center(0, (SCREEN_H - 150) // 2, 44, 150)
+# mk_back: 60 x 36 at (6, 2), the same on Settings and every screen in it.
+P_BACK = rect_center(6, 2, 60, 36)
+# build_panel: the left column (Brightness, Focus) at x 12, the right one
+# (Theme, Software update) at 12 + COL_L_W + ROW_GAP.
+_COL_R_X = 12 + _L["COL_L_W"] + _L["ROW_GAP"]
+_ROW2_Y = _L["ROW_TOP"] + _L["ROW_H"] + _L["ROW_GAP"]
+P_BRIGHT_ROW = rect_center(12, _L["ROW_TOP"], _L["COL_L_W"], _L["ROW_H"])
+P_THEME_ROW = rect_center(_COL_R_X, _L["ROW_TOP"], _L["COL_R_W"], _L["ROW_H"])
+P_FOCUS_ROW = rect_center(12, _ROW2_Y, _L["COL_L_W"], _L["ROW_H"])
+# show_theme: the page button, 60 x 36 in the top right corner (-6, 2).
+P_THEME_PAGE = rect_center(SCREEN_W - 6 - 60, 2, 60, 36)
+
+
+def bright_stop(i):
+    """show_bright: stop i of five, 56 x 116 at (12 + 60 i, 86); level
+    20 + 20 i percent."""
+    return rect_center(12 + i * 60, 86, 56, 116)
+
+
+def slot_center(k):
+    """mk_slot: theme slot k of six, two across, inside the grid at
+    THEME_GRID_Y. Slot 5 is "Edit on computer" when the app can open the
+    builder, which this tool always says it can."""
+    x = 12 + (k % 2) * (_L["THEME_TILE_W"] + 8)
+    y = _L["THEME_GRID_Y"] + (k // 2) * (_L["THEME_TILE_H"] +
+                                         _L["THEME_TILE_GAP"])
+    return rect_center(x, y, _L["THEME_TILE_W"], _L["THEME_TILE_H"])
+
+
+def focus_btn(i):
+    """show_focus: Off, Session, Weekly, side by side."""
+    return rect_center(12 + i * (_L["FOCUS_BTN_W"] + 8), _L["FOCUS_BTN_Y"],
+                       _L["FOCUS_BTN_W"], _L["FOCUS_BTN_H"])
+
+
+def theme_slot(theme_id):
+    """(page, slot) of a theme on the theme screen: ids in order, five a
+    page because the sixth slot is Edit (theme_per_page with caps theme)."""
+    per = _L["THEME_SLOTS"] - 1
+    return (theme_id // per, theme_id % per)
+
+
+# Swipes. Each starts on the ground of the screen it is meant for, not on a
+# control: a row or a brightness stop clears GESTURE_BUBBLE, so a back swipe
+# that started on one would never reach the handler that closes the screen.
+# y 230 is under every control on Settings and its three sub-screens (the
+# lowest, the footer's second line, ends at 228).
+SW_LEFT = ((260, 120), (100, 120))       # gauges -> Settings; leaves the clip
+SW_RIGHT = ((60, 120), (220, 120))       # gauges -> the eye clip
+SW_BACK = ((40, 230), (200, 230))        # closes whatever Settings shows
+# 30 px: past LVGL's 24 px gesture floor (tune_gestures), short of
+# ui_swipe's 36 px one (UI_SWIPE_MIN_PX). See eye.exit_short.
+SW_LEFT_SHORT = ((200, 120), (170, 120))
+SHORT_SWIPE_MS = 130
+
+FOCUS_NAMES = ("off", "session", "weekly")
+
+
+class Target:
+    """A named action: what to press, where it may be pressed from, and the
+    state it should leave behind."""
+
+    def __init__(self, name, kind, pts, needs, expect, settle, doc,
+                 ms=None):
+        self.name = name
+        self.ms = ms                # stroke length; None is the default
+        self.kind = kind            # "tap" | "swipe" | "theme"
+        self.pts = pts
+        self.needs = needs          # ui_state fields required beforehand
+        self.expect = expect        # f(before) -> fields required after
+        self.settle = settle        # seconds the screen keeps moving after
+        self.doc = doc
+
+    def points(self):
+        return list(self.pts)
+
+
+def _back_expect(before):
+    if before.get("ov", "none") != "none":
+        return {"scr": "settings", "ov": "none"}
+    return {"scr": "gauges"}
+
+
+def _targets():
+    t = {}
+
+    def add(name, kind, pts, needs, expect, settle, doc, ms=None):
+        t[name] = Target(name, kind, pts, needs,
+                         expect if callable(expect) else (lambda b, e=expect: e),
+                         settle, doc, ms)
+
+    gauges = {"scr": "gauges", "modal": "none"}
+    on_settings = {"scr": "settings", "ov": "none", "modal": "none"}
+    # Opening and closing Settings slide the whole screen and then mute
+    # gestures for UI_SLIDE_MS * 6 (ui_settings.c do_open/do_close); the
+    # settle covers both so the next stroke is not the one that gets muted.
+    add("settings.open", "tap", [P_SETTINGS_ZONE], gauges,
+        {"scr": "settings", "ov": "none"}, 1.6,
+        "tap the right edge zone on the gauges")
+    add("settings.swipe", "swipe", list(SW_LEFT), gauges,
+        {"scr": "settings", "ov": "none"}, 1.6,
+        "swipe left on the gauges")
+    add("settings.back", "tap", [P_BACK], {"scr": "settings"}, _back_expect,
+        1.6, "the back button: closes a sub-screen, else Settings")
+    add("back.swipe", "swipe", list(SW_BACK), {"scr": "settings"},
+        _back_expect, 1.6,
+        "swipe right along the bottom: closes a sub-screen, else Settings")
+    add("brightness.open", "tap", [P_BRIGHT_ROW], on_settings,
+        {"ov": "brightness"}, 0.6, "the Brightness row")
+    for i in range(_L["BRIGHT_STOPS"]):
+        add(f"brightness.level{i + 1}", "tap", [bright_stop(i)],
+            {"ov": "brightness"}, {"ov": "brightness", "bl": 20 + 20 * i},
+            0.3, f"brightness stop {i + 1} ({20 + 20 * i}%)")
+    add("theme.open", "tap", [P_THEME_ROW], on_settings, {"ov": "theme"},
+        0.6, "the Theme row")
+    add("theme.next_page", "tap", [P_THEME_PAGE], {"ov": "theme"},
+        {"ov": "theme"}, 0.3, "the theme screen's page button")
+    for name, tid in THEME_IDS.items():
+        _, slot = theme_slot(tid)
+        add(f"theme.{name}", "theme", [slot_center(slot)], {"ov": "theme"},
+            {"ov": "theme", "theme": tid, "stored": tid}, 0.6,
+            f"theme tile {name} (id {tid}), paging to it first")
+    add("theme.edit_on_computer", "tap", [slot_center(5)], {"ov": "theme"},
+        {"ov": "theme", "edit": "opened"}, 0.6,
+        "the Edit on computer slot (answered ok 1, as a daemon would)")
+    add("focus.open", "tap", [P_FOCUS_ROW], on_settings, {"ov": "focus"},
+        0.6, "the Focus row")
+    for i, name in enumerate(FOCUS_NAMES):
+        add(f"focus.{name}", "tap", [focus_btn(i)], {"ov": "focus"},
+            {"ov": "focus", "focus": name}, 0.4, f"Focus: {name}")
+    # The clip slides in and then holds a 250 ms entry mute (ui_anim.c).
+    add("eye.swipe", "swipe", list(SW_RIGHT), gauges, {"scr": "eyes"}, 1.2,
+        "swipe right on the gauges: the eye clip")
+    add("eye.tap", "tap", [P_EYE_ZONE], gauges, {"scr": "eyes"}, 1.2,
+        "tap the left edge zone: the eye clip")
+    # ui_anim.c's gesture_cb leaves on LV_DIR_LEFT only. The injector hands
+    # LVGL exactly the screen point it was given (touch_inject_geom.h), so
+    # that is a leftward stroke on the screen.
+    add("eye.exit", "swipe", list(SW_LEFT), {"scr": "eyes"},
+        {"scr": "gauges"}, 1.6, "swipe left on the clip: back to the gauges")
+    # The same exit, too short for ui_swipe to call it a swipe. The full one
+    # also reaches ui_swipe as a LEFT stroke while the clip holds the mode
+    # loop; its swipe_cb finds no mute and latches want_open, and Settings
+    # opens the moment the clip returns (seen on the host harness,
+    # tools/panel_render/touch.sh). This one leaves without that, for a
+    # script that needs the clip and then the gauges.
+    add("eye.exit_short", "swipe", list(SW_LEFT_SHORT), {"scr": "eyes"},
+        {"scr": "gauges"}, 1.6,
+        "a 30 px left swipe on the clip: LVGL's gesture, not ui_swipe's",
+        ms=SHORT_SWIPE_MS)
+    return t
+
+
+TARGETS = _targets()
+
+
+# --- the wire ---------------------------------------------------------------
+
+def touch_tap(x, y, ms=TAP_MS):
+    return {"t": "touch", "v": protocol.VERSION, "op": "tap", "x": int(x),
+            "y": int(y), "ms": int(ms)}
+
+
+def touch_swipe(x0, y0, x1, y1, ms=SWIPE_MS):
+    return {"t": "touch", "v": protocol.VERSION, "op": "swipe", "x0": int(x0),
+            "y0": int(y0), "x1": int(x1), "y1": int(y1), "ms": int(ms)}
+
+
+def touch_press(x, y):
+    return {"t": "touch", "v": protocol.VERSION, "op": "press", "x": int(x),
+            "y": int(y)}
+
+
+def touch_release():
+    return {"t": "touch", "v": protocol.VERSION, "op": "release"}
+
+
+def touch_dismiss():
+    return {"t": "touch", "v": protocol.VERSION, "op": "dismiss"}
+
+
+def touch_wake():
+    return {"t": "touch", "v": protocol.VERSION, "op": "wake"}
+
+
+def ui_state_query():
+    return {"t": "ui_state", "v": protocol.VERSION}
+
+
+# What ui_state may say, field by field (touch_inject.c, ui_state_line). A
+# reply with anything outside this is not printed and not believed.
+_STATE_WORDS = {
+    "scr": ("gauges", "settings", "connecting", "eyes"),
+    "ov": ("none", "brightness", "theme", "focus", "confirm"),
+    "modal": ("none", "notice", "whatsnew", "prompt", "download"),
+    "focus": FOCUS_NAMES,
+    "edit": ("name", "waiting", "opened", "run"),
+    "nt": ("none", "sleep", "ota", "other"),
+    "gf": FOCUS_NAMES,
+}
+_STATE_INTS = {"busy": (0, 1), "theme": (0, 12), "stored": (0, 12),
+               "tp": (0, 9), "bl": (0, 100), "slp": (0, 1)}
+STATE_KEYS = ("scr", "ov", "modal", "busy", "theme", "stored", "tp",
+              "focus", "bl", "edit", "slp", "nt", "gf")
+
+
+def _int_in(v, lo, hi):
+    return (isinstance(v, int) and not isinstance(v, bool)
+            and lo <= v <= hi)
+
+
+def parse_ui_state(obj):
+    """The fields of a ui_state reply, or None if any is missing or not one
+    of the values the firmware can send."""
+    out = {}
+    for k in STATE_KEYS:
+        v = obj.get(k)
+        if k in _STATE_WORDS:
+            if v not in _STATE_WORDS[k]:
+                return None
+        elif not _int_in(v, *_STATE_INTS[k]):
+            return None
+        out[k] = v
+    return out
+
+
+_MEM_RE = re.compile(
+    rb"^\[mem\] lvgl ([a-z][a-z0-9-]{0,23}): used=(\d{1,6}) free=(\d{1,6}) "
+    rb"largest=(\d{1,6}) peak=(\d{1,6}) boot_peak=(\d{1,6}) pool=(\d{1,6})$")
+_MEM_KEYS = ("used", "free", "largest", "peak", "boot_peak", "pool")
+_SWIPE_RE = re.compile(
+    rb"^\[swipe\] dx (-?\d{1,4}) dy (-?\d{1,4}) in (\d{1,6}) ms, "
+    rb"(\d{1,5}) samples -> (\d)$")
+_INJECT_LINE = (b"[touch] INJECT BUILD: the PC can drive this panel"
+                b" -- bench only, never ship this")
+_HEX8 = re.compile(r"^[0-9a-f]{8}$")
+_CAP_WORDS = frozenset({"svc", "theme"})
+_TOUCH_OPS = ("tap", "swipe", "press", "release", "dismiss", "wake")
+_REFUSALS = ("busy", "args", "not_held")
+_THEME_WHY = ("boot", "user", "saved")
+
+MAX_RX_LINE = 2048     # longer than anything the board sends on purpose
+
+
+# --- the script language ----------------------------------------------------
+
+class ScriptError(ValueError):
+    pass
+
+
+class Step:
+    def __init__(self, line, cmd, args):
+        self.line = line
+        self.cmd = cmd
+        self.args = args
+
+    def __repr__(self):
+        return f"Step({self.line}, {self.cmd!r}, {self.args!r})"
+
+
+def _ints(words, n_min, n_max, usage, lineno):
+    if not n_min <= len(words) <= n_max:
+        raise ScriptError(f"line {lineno}: usage: {usage}")
+    try:
+        vals = [int(w) for w in words]
+    except ValueError:
+        raise ScriptError(f"line {lineno}: usage: {usage}") from None
+    return vals
+
+
+def _on_panel(pts, lineno):
+    for x, y in pts:
+        if not (0 <= x < SCREEN_W and 0 <= y < SCREEN_H):
+            raise ScriptError(f"line {lineno}: ({x}, {y}) is off the panel "
+                              f"({SCREEN_W} x {SCREEN_H})")
+
+
+def parse_line(text, lineno=1):
+    """One script line as a Step, or None for a blank line or a comment."""
+    words = text.split("#", 1)[0].split()
+    if not words:
+        return None
+    cmd, rest = words[0], words[1:]
+    if cmd in ("tap", "swipe") and len(rest) == 1:
+        if rest[0] not in TARGETS:
+            raise ScriptError(f"line {lineno}: unknown target {rest[0]!r} "
+                              "(board_touch.py targets lists them)")
+        return Step(lineno, "tap", (rest[0],))
+    if cmd == "raw" and rest[:1] == ["tap"]:
+        v = _ints(rest[1:], 2, 3, "raw tap X Y [MS]", lineno)
+        _on_panel([v[:2]], lineno)
+        return Step(lineno, "raw_tap", (v[0], v[1], v[2] if len(v) > 2
+                                        else TAP_MS))
+    if cmd == "swipe":
+        v = _ints(rest, 4, 5, "swipe X0 Y0 X1 Y1 [MS]  or  swipe NAME", lineno)
+        _on_panel([v[0:2], v[2:4]], lineno)
+        return Step(lineno, "swipe", (v[0], v[1], v[2], v[3],
+                                      v[4] if len(v) > 4 else SWIPE_MS))
+    if cmd == "press":
+        v = _ints(rest, 2, 2, "press X Y", lineno)
+        _on_panel([v], lineno)
+        return Step(lineno, "press", (v[0], v[1]))
+    if cmd in ("release", "mem", "state") and not rest:
+        return Step(lineno, cmd, ())
+    if cmd == "wait":
+        try:
+            (s,) = rest
+            return Step(lineno, "wait", (float(s),))
+        except ValueError:
+            raise ScriptError(f"line {lineno}: usage: wait S") from None
+    if cmd == "expect":
+        what = rest[0] if rest else ""
+        if what == "notice":
+            kinds = _STATE_WORDS["nt"]
+            if len(rest) != 2 or rest[1] not in kinds:
+                raise ScriptError(f"line {lineno}: usage: expect notice "
+                                  + "|".join(kinds))
+            return Step(lineno, "expect", ("notice", {"nt": rest[1]}))
+        if what not in ("ui_state", "theme_now", "theme_edit"):
+            raise ScriptError(
+                f"line {lineno}: usage: expect ui_state K=V ... | "
+                "expect theme_now K=V ... | expect theme_edit | "
+                "expect notice none")
+        fields = {}
+        for w in rest[1:]:
+            k, sep, v = w.partition("=")
+            if not sep or not k or not v:
+                raise ScriptError(f"line {lineno}: expect wants key=value, "
+                                  f"got {w!r}")
+            fields[k] = v
+        if what == "ui_state":
+            bad = [k for k in fields if k not in STATE_KEYS]
+            if bad:
+                raise ScriptError(f"line {lineno}: ui_state has no field "
+                                  f"{bad[0]!r}")
+        return Step(lineno, "expect", (what, fields))
+    raise ScriptError(f"line {lineno}: unknown command {cmd!r}")
+
+
+def parse_script(text):
+    steps = []
+    for n, line in enumerate(text.splitlines(), 1):
+        s = parse_line(line, n)
+        if s is not None:
+            steps.append(s)
+    return steps
+
+
+# --- the port ---------------------------------------------------------------
+
+def port_holders(port, run=subprocess.run):
+    """PIDs other than ours with `port` open (and its /dev/tty. twin on
+    macOS), from lsof. None when lsof is not there to ask."""
+    if run is subprocess.run and shutil.which("lsof") is None:
+        return None
+    paths = [port]
+    if port.startswith("/dev/cu."):
+        paths.append("/dev/tty." + port[len("/dev/cu."):])
+    pids = set()
+    for p in paths:
+        r = run(["lsof", "-t", p], capture_output=True, text=True)
+        for tok in (r.stdout or "").split():
+            if tok.isdigit():
+                pids.add(int(tok))
+    pids.discard(os.getpid())
+    return sorted(pids)
+
+
+def take_daemon_lock():
+    """Hold the daemon's single-instance lock (claude_usage_bridge.py,
+    hold_single_instance) for as long as this runs. (handle, None), or
+    (None, why) when a daemon already has it. A daemon that starts while we
+    hold it waits instead of opening the port under us.
+
+    Resolved here, not at import: a module-level home path would point at the
+    real home inside the test sandbox (CLAUDE.md)."""
+    try:
+        import fcntl
+    except ImportError:
+        return None, None          # Windows: the port itself is exclusive
+    from pc.cli import blink_home
+    home = blink_home()
+    if not os.path.isdir(home):
+        return None, None          # no daemon has ever run here
+    fh = open(os.path.join(home, "bridge.lock"), "a", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None, ("a Blink daemon is running and has the board. Stop it "
+                      "first (see the top of this file).")
+    return fh, None
+
+
+def autodetect():
+    from claude_usage_bridge import candidate_ports
+    ports = candidate_ports()
+    return ports[0] if ports else None
+
+
+def open_port(port, baud):
+    import serial
+    # Plain open, nothing pre-set: see "THE PORT" at the top.
+    return serial.Serial(port, baud, timeout=0.2)
+
+
+class Link:
+    """The serial port, one writer at a time. The only write to the port in
+    this file is here, and the only caller is Bench.send."""
+
+    def __init__(self, ser):
+        self.ser = ser
+        self._wlock = threading.Lock()
+        self._stop = False
+
+    def write(self, raw):
+        with self._wlock:
+            self.ser.write(raw)
+
+    def read_loop(self, on_line, on_overlong):
+        buf = b""
+        dropping = 0
+        while not self._stop:
+            try:
+                chunk = self.ser.read(256)
+            except Exception:
+                return
+            if not chunk:
+                continue
+            buf += chunk
+            while True:
+                i = buf.find(b"\n")
+                if i < 0:
+                    break
+                line, buf = buf[:i], buf[i + 1:]
+                if dropping:
+                    on_overlong(dropping + len(line))
+                    dropping = 0
+                    continue
+                on_line(line)
+            if len(buf) > MAX_RX_LINE:
+                dropping += len(buf)
+                buf = b""
+
+    def stop(self):
+        self._stop = True
+
+
+class HarnessLink:
+    """tools/panel_render/touch.sh's harness in place of a board: the real
+    Settings code on host LVGL, speaking this wire on its stdin and stdout,
+    writing a PNG of each stroke into `renders`. Everything else -- targets,
+    expectations, the summary -- is the same code that runs against a board,
+    which is the point of it."""
+
+    def __init__(self, path, renders):
+        os.makedirs(renders, exist_ok=True)
+        self.proc = subprocess.Popen(
+            [path, renders], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL)
+
+    def write(self, raw):
+        self.proc.stdin.write(raw)
+        self.proc.stdin.flush()
+
+    def note(self, name):
+        """Name the next stroke's PNG after the target being pressed."""
+        raw, _ = protocol.encode_checked(
+            {"t": "note", "v": protocol.VERSION, "name": name})
+        if raw is not None:
+            self.write(raw)
+
+    def read_loop(self, on_line, on_overlong):
+        for line in self.proc.stdout:
+            if len(line) > MAX_RX_LINE:
+                on_overlong(len(line))
+            else:
+                on_line(line.rstrip(b"\n"))
+
+    def stop(self):
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+    def close(self):
+        pass
+
+
+# --- the bench --------------------------------------------------------------
+
+def _fake_frames(now, n=0):
+    """Two providers of invented numbers, so the board has both pages and a
+    reason to show its gauges. Never a reading from this machine.
+
+    The n-th heartbeat moves the session figures by a tenth of a percent
+    each, cycling over a few points, the way a desk in use does. What keeps
+    the board awake is the ages: observed_at and active_at are now, so the
+    board's active age is 0 against the 4 h SLEEP_ABSENT_AFTER_S its stale
+    doze waits for (sleep_gate.h), and the pongs keep host_lost false for
+    the other doze. The movement is so the gauges are seen to update."""
+    drift = (n % 30) / 10.0
+    claude = NormalizedUsageFrame(
+        provider="claude", src="bench", observed_at=now, active_at=now,
+        session_pct=42.0 + drift, session_resets_at=now + 2 * 3600,
+        weekly_pct=17.0, weekly_resets_at=now + 4 * 86400,
+        state="running", n_run=1)
+    codex = NormalizedUsageFrame(
+        provider="codex", src="bench", observed_at=now, active_at=now,
+        session_pct=63.0 + drift, session_resets_at=now + 3 * 3600,
+        weekly_pct=28.0, weekly_resets_at=now + 5 * 86400,
+        state="idle", n_idle=1)
+    return claude, codex
+
+
+def _utc_offset_min(now):
+    lt = time.localtime(now)
+    return int((lt.tm_gmtoff or 0) // 60)
+
+
+class Bench:
+    def __init__(self, link, out=None, settle_scale=1.0, verbose=False,
+                 edit_reply=True):
+        self.link = link
+        self.out = out or sys.stdout
+        self.scale = settle_scale
+        self.verbose = verbose
+        self.edit_reply = edit_reply
+        self.board_caps = frozenset()
+        self.failures = []
+        self.mem_lines = []
+        self._mem_seen = 0
+        self.unparsed = 0
+        self.withheld = 0
+        self.events = []           # parsed, in arrival order
+        self._mark = 0
+        self._cv = threading.Condition()
+        self._last_frames = None
+        self._frames_sent = 0
+        self.board_h = None        # the custom theme's hash, last theme_now
+
+    # -- output, parsed fields only --
+    def say(self, text):
+        print(text, file=self.out, flush=True)
+
+    def fail(self, text):
+        self.failures.append(text)
+        self.say("FAIL " + text)
+
+    # -- writing --
+    def send(self, msg):
+        raw, why = protocol.encode_checked(msg)
+        if raw is None:
+            self.say(f"not sent: {why}")
+            self.withheld += 1
+            return False
+        self.link.write(raw)
+        return True
+
+    def greet(self):
+        from pc.version import RELEASE_VERSION
+        self.send(protocol.welcome("blink-bench", RELEASE_VERSION))
+
+    def send_frames(self):
+        now = time.time()
+        claude, codex = _fake_frames(now, self._frames_sent)
+        self._frames_sent += 1
+        self.send(protocol.time_msg(int(now), _utc_offset_min(now)))
+        self.send(protocol.frame_to_usage(claude, now, secondary=codex))
+        # svc only to a board that listed it, as Bridge gates it.
+        if protocol.BOARD_CAP_SVC in self.board_caps:
+            self.send(protocol.svc("claude", "ok"))
+            self.send(protocol.svc("codex", "ok"))
+        self._last_frames = time.monotonic()
+
+    def maybe_heartbeat(self):
+        if (self._last_frames is not None and
+                time.monotonic() - self._last_frames >= HEARTBEAT_S):
+            self.send_frames()
+
+    # -- reading --
+    def _event(self, ev):
+        with self._cv:
+            self.events.append(ev)
+            self._cv.notify_all()
+
+    def _unparsed(self, n):
+        self.unparsed += 1
+        if self.verbose:
+            self.say(f"unparsed line ({n} bytes)")
+
+    def on_overlong(self, n):
+        self._unparsed(n)
+
+    def on_line(self, raw):
+        raw = raw.rstrip(b"\r")
+        if not raw:
+            return
+        if raw.startswith(b"{"):
+            if not self._on_json(raw):
+                self._unparsed(len(raw))
+            return
+        m = _MEM_RE.match(raw)
+        if m:
+            ev = {"t": "[mem]", "where": m.group(1).decode("ascii")}
+            for k, g in zip(_MEM_KEYS, m.groups()[1:]):
+                ev[k] = int(g)
+            self.mem_lines.append({k: v for k, v in ev.items() if k != "t"})
+            self.say("[mem] {where}: peak={peak} used={used} free={free} "
+                     "largest={largest} boot_peak={boot_peak}".format(**ev))
+            self._event(ev)
+            return
+        m = _SWIPE_RE.match(raw)
+        if m:
+            dx, dy, ms, n, d = (int(g) for g in m.groups())
+            self.say(f"[swipe] dx={dx} dy={dy} ms={ms} samples={n} dir={d}")
+            return
+        if raw == _INJECT_LINE:
+            self.say("board: touch inject build")
+            return
+        self._unparsed(len(raw))
+
+    def _on_json(self, raw):
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return False
+        if not isinstance(obj, dict) or not isinstance(obj.get("t"), str):
+            return False
+        t = obj["t"]
+        if t == "ping":
+            self.send(protocol.pong())
+            return True
+        if t == "ota_query":
+            # As a daemon with nothing newer answers. Unanswered, the
+            # board's own 30 s watchdog (main.c, OTA_UI_CHECKING) fails the
+            # check and upd_timer_cb puts "Couldn't check for updates" over
+            # the gauges -- the notice that stopped the first board run.
+            self.say("ota_query (answered ota_none)")
+            self.send(protocol.ota_none())
+            return True
+        if t == "ui_state":
+            st = parse_ui_state(obj)
+            if st is None:
+                return False
+            self.say("ui_state " + " ".join(f"{k}={st[k]}" for k in STATE_KEYS))
+            self._event(dict(st, t="ui_state"))
+            return True
+        if t == "touch_done":
+            op, ok = obj.get("op"), obj.get("ok")
+            if op not in _TOUCH_OPS or not _int_in(ok, 0, 1):
+                return False
+            auto = obj.get("auto") == 1
+            self.say(f"touch_done op={op} ok={ok}" + (" auto=1" if auto else ""))
+            self._event({"t": t, "op": op, "ok": ok})
+            return True
+        if t == "touch_refused":
+            why = obj.get("why")
+            if why not in _REFUSALS:
+                return False
+            self.say(f"touch_refused why={why}")
+            self._event({"t": t, "why": why})
+            return True
+        if t == "theme_now":
+            tid, why, h = obj.get("id"), obj.get("why"), obj.get("h")
+            if not _int_in(tid, 0, 12) or why not in _THEME_WHY:
+                return False
+            if h is not None and not (isinstance(h, str) and _HEX8.match(h)):
+                return False
+            self.say(f"theme_now id={tid} why={why}" + (f" h={h}" if h else ""))
+            ev = {"t": t, "id": str(tid), "why": why}
+            if h:
+                ev["h"] = h
+            self.board_h = h
+            self._event(ev)
+            return True
+        if t == "theme_edit":
+            self.say("theme_edit")
+            self._event({"t": t})
+            # Answered as the daemon does: ok only to a board that can
+            # theme, and only "ok 1" when we are told to pretend a browser
+            # opened. No browser is opened here.
+            if protocol.BOARD_CAP_THEME in self.board_caps:
+                self.send(protocol.theme_edit_reply(self.edit_reply))
+            else:
+                self.send(protocol.theme_edit_reply(False))
+            return True
+        if t in ("hello", "pref"):
+            caps = obj.get("caps")
+            if caps is not None and not (
+                    isinstance(caps, list)
+                    and all(isinstance(c, str) for c in caps)):
+                return False
+            known = sorted(set(caps or ()) & _CAP_WORDS)
+            self.board_caps = frozenset(known)
+            self.say(f"{t} caps={','.join(known) or '-'}")
+            self._event({"t": t})
+            if t == "hello":
+                # A board that just booted: greet it the way the daemon
+                # answers a hello, so it is host-connected again.
+                self.greet()
+                self.send_frames()
+            return True
+        return False
+
+    # -- waiting --
+    def mark(self):
+        with self._cv:
+            self._mark = len(self.events)
+
+    def _wait(self, pred, timeout):
+        """Wait until pred(events since the mark) returns something, or the
+        timeout; always looks at least once."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._cv:
+                got = pred(self.events[self._mark:])
+                if got is not None:
+                    return got
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self._cv.wait(min(left, 0.5))
+            self.maybe_heartbeat()
+
+    def sleep(self, seconds):
+        end = time.monotonic() + seconds * self.scale
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(left, 0.5))
+            self.maybe_heartbeat()
+
+    def query_state(self, timeout=2.0):
+        with self._cv:
+            n = len(self.events)
+        if not self.send(ui_state_query()):
+            return None
+        deadline = time.monotonic() + max(0.0, timeout * self.scale)
+        while True:
+            with self._cv:
+                for ev in self.events[n:]:
+                    if ev["t"] == "ui_state":
+                        return {k: ev[k] for k in STATE_KEYS}
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self._cv.wait(min(left, 0.5))
+            self.maybe_heartbeat()
+
+    def wait_state(self, want, timeout):
+        """Poll ui_state until it carries every field of `want` (compared as
+        text, the way a script spells them) and busy is 0."""
+        deadline = time.monotonic() + max(0.0, timeout * self.scale)
+        st = None
+        while True:
+            st = self.query_state()
+            if st is not None and st["busy"] == 0 and all(
+                    str(st.get(k)) == str(v) for k, v in want.items()):
+                return True, st
+            if time.monotonic() >= deadline:
+                return False, st
+            time.sleep(0.15)
+
+    # -- acting --
+    def stroke(self, msg, timeout=12.0):
+        """Send one stroke and wait for the board to finish playing it."""
+        self.mark()
+        if not self.send(msg):
+            self.fail(f"{msg['op']}: not sent")
+            return False
+        want_op = msg["op"]
+
+        def done(evs):
+            for ev in evs:
+                if ev["t"] == "touch_refused":
+                    return ev
+                if ev["t"] == "touch_done" and ev["op"] == want_op:
+                    return ev
+            return None
+
+        ev = self._wait(done, timeout)
+        if ev is None:
+            self.fail(f"{want_op}: no touch_done from the board -- is this "
+                      "a CONFIG_BLINK_TOUCH_INJECT image?")
+            return False
+        if ev["t"] == "touch_refused":
+            self.fail(f"{want_op}: refused ({ev['why']})")
+            return False
+        return True
+
+    def _play(self, target, pts):
+        if target.kind == "swipe":
+            (x0, y0), (x1, y1) = pts
+            return self.stroke(touch_swipe(x0, y0, x1, y1,
+                                           target.ms or SWIPE_MS))
+        (x, y), = pts
+        return self.stroke(touch_tap(x, y))
+
+    def _note(self, name):
+        """Tell a harness link which target the next stroke is, for its
+        PNG's name. A serial link has no such method and is told nothing."""
+        note = getattr(self.link, "note", None)
+        if note is not None:
+            note(name)
+
+    def _goto_theme_page(self, page):
+        for _ in range(4):
+            st = self.query_state()
+            if st is None:
+                return False
+            if st["tp"] == page:
+                return True
+            x, y = P_THEME_PAGE
+            self._note("theme.next_page")
+            if not self.stroke(touch_tap(x, y)):
+                return False
+            self.sleep(0.3)
+        return False
+
+    def clear_the_way(self, st):
+        """Wake a dozing board and take down a notice, saying so, before an
+        action. Neither is a target's business: both are things a person at
+        the desk would see and deal with before reaching for the panel, and
+        each, left alone, turns every later press into a press on it. Returns
+        the state afterwards (None if the board stopped answering)."""
+        if st["slp"]:
+            if not self.stroke(touch_wake()):
+                return None
+            ok, st = self.wait_state({"slp": 0}, timeout=8.0)
+            if not ok:
+                self.fail("the board would not wake")
+                return None
+            self.say("board woken")
+        if st["modal"] == "notice":
+            kind = st["nt"]
+            if not self.stroke(touch_dismiss()):
+                return None
+            ok, st = self.wait_state({"modal": "none"}, timeout=2.0)
+            if not ok:
+                self.fail(f"the notice ({kind}) would not go")
+                return None
+            self.say(f"notice dismissed ({kind})")
+        return st
+
+    def run_target(self, name):
+        t = TARGETS[name]
+        before = self.query_state()
+        if before is not None:
+            before = self.clear_the_way(before)
+        if before is None:
+            self.fail(f"{name}: no ui_state from the board")
+            return False
+        miss = {k: v for k, v in t.needs.items() if str(before[k]) != str(v)}
+        if miss:
+            self.fail(f"{name}: needs " +
+                      " ".join(f"{k}={v}" for k, v in t.needs.items()) +
+                      ", board is at " +
+                      " ".join(f"{k}={before[k]}" for k in t.needs))
+            return False
+        self.say(f"> {name}")
+        if t.kind == "theme":
+            tid = THEME_IDS[name.split(".", 1)[1]]
+            page, _ = theme_slot(tid)
+            if not self._goto_theme_page(page):
+                self.fail(f"{name}: could not page to theme page {page + 1}")
+                return False
+        self._note(name)
+        if not self._play(t, t.points()):
+            return False
+        want = t.expect(before)
+        ok, st = self.wait_state(want, timeout=t.settle + 3.0)
+        if not ok:
+            got = (" ".join(f"{k}={st[k]}" for k in want) if st
+                   else "no ui_state")
+            self.fail(f"{name}: expected " +
+                      " ".join(f"{k}={v}" for k, v in want.items()) +
+                      f", board says {got}")
+            return False
+        # The screen keeps moving after it reports the new state: a slide
+        # still running, a gesture mute still open (see each settle).
+        self.sleep(t.settle)
+        return True
+
+    def expect_state(self, fields, timeout=3.0):
+        ok, st = self.wait_state(fields, timeout)
+        if not ok:
+            got = (" ".join(f"{k}={st[k]}" for k in fields) if st
+                   else "no ui_state")
+            self.fail("expect ui_state " +
+                      " ".join(f"{k}={v}" for k, v in fields.items()) +
+                      f": board says {got}")
+        return ok
+
+    def expect_event(self, kind, fields, timeout=3.0):
+        def seen(evs):
+            for ev in evs:
+                if ev["t"] == kind and all(
+                        str(ev.get(k)) == str(v) for k, v in fields.items()):
+                    return ev
+            return None
+
+        if self._wait(seen, timeout * self.scale) is None:
+            self.fail(f"expect {kind} " + " ".join(
+                f"{k}={v}" for k, v in fields.items()) +
+                ": not seen since the last action")
+            return False
+        return True
+
+    def report_mem(self):
+        new = self.mem_lines[self._mem_seen:]
+        self._mem_seen = len(self.mem_lines)
+        if not new:
+            self.say("mem: no [mem] line since the last one")
+        for m in new:
+            self.say(f"mem {m['where']}: peak {m['peak']} of {POOL_USABLE} "
+                     f"({100.0 * m['peak'] / POOL_USABLE:.1f}%), "
+                     f"largest free {m['largest']}")
+
+    def run_step(self, s):
+        if s.cmd == "tap":
+            return self.run_target(s.args[0])
+        if s.cmd == "raw_tap":
+            return self.stroke(touch_tap(*s.args))
+        if s.cmd == "swipe":
+            return self.stroke(touch_swipe(*s.args))
+        if s.cmd == "press":
+            return self.stroke(touch_press(*s.args))
+        if s.cmd == "release":
+            return self.stroke(touch_release())
+        if s.cmd == "wait":
+            self.sleep(s.args[0])
+            return True
+        if s.cmd == "mem":
+            # Give a [mem] line printed by the last action a moment to land.
+            self.sleep(0.3)
+            self.report_mem()
+            return True
+        if s.cmd == "state":
+            return self.query_state() is not None
+        if s.cmd == "expect":
+            kind, fields = s.args
+            if kind in ("ui_state", "notice"):
+                return self.expect_state(fields)
+            return self.expect_event(kind, fields)
+        raise AssertionError(s.cmd)
+
+    def run_script(self, steps, keep_going=False):
+        """Run each step. Stops at the first failure unless keep_going:
+        every later target's precondition is the screen the failed one was
+        meant to reach, so carrying on reports one fault twenty times."""
+        for s in steps:
+            if s.cmd in ("tap", "raw_tap", "swipe", "press", "release"):
+                self.mark()
+            n = len(self.failures)
+            self.run_step(s)
+            if len(self.failures) > n:
+                self.failures[-1] = f"line {s.line}: {self.failures[-1]}"
+                if not keep_going:
+                    self.say(f"stopped at line {s.line} "
+                             "(--keep-going runs the rest)")
+                    return
+
+    def run_with_restore(self, steps, keep_going=False, restore=True):
+        """run_script, with the board put back as it was found afterwards,
+        however the script ends."""
+        start = self.query_state()
+        start_h = self.board_h
+        try:
+            self.run_script(steps, keep_going=keep_going)
+        finally:
+            if restore and start is not None:
+                self.restore(start, start_h=start_h)
+
+    def restore(self, start, start_h=None):
+        now = self.query_state()
+        if now is None:
+            self.fail("restore: no ui_state from the board")
+            return False
+        now = self.clear_the_way(now)
+        plan = restore_plan(start, now, start_h) if now else []
+        if not plan:
+            self.say("restore: nothing to put back")
+            return True
+        self.say("restore: theme {} bl {} focus {}".format(
+            start["stored"], start["bl"], start["focus"]))
+        n = len(self.failures)
+        # From wherever the run stopped to the gauges, which every UI step
+        # of the plan starts from.
+        for _ in range(4):
+            st = self.query_state()
+            if st is None or st["scr"] == "gauges":
+                break
+            if st["scr"] == "eyes":
+                self.run_target("eye.exit_short")
+            elif st["scr"] == "settings":
+                self.run_target("settings.back")
+            else:
+                break
+        for kind, what in plan:
+            if kind == "line":
+                self.mark()
+                self.send(what)
+                self.expect_event("theme_now",
+                                  {"why": "saved", "id": str(what["id"])})
+            elif not self.run_target(what):
+                break
+        for i in range(n, len(self.failures)):
+            self.failures[i] = "restore: " + self.failures[i]
+        return len(self.failures) == n
+
+    def summary(self):
+        peaks = {}
+        for m in self.mem_lines:
+            p = peaks.setdefault(m["where"], m)
+            if m["peak"] > p["peak"]:
+                peaks[m["where"]] = m
+        self.say("")
+        self.say(f"[mem] peak per screen, of {POOL_USABLE} B usable:")
+        self.say(f"  {'screen':<18}{'peak':>7}{'of pool':>9}{'headroom':>10}")
+        for where, m in peaks.items():
+            self.say(f"  {where:<18}{m['peak']:>7}"
+                     f"{100.0 * m['peak'] / POOL_USABLE:>8.1f}%"
+                     f"{POOL_USABLE - m['peak']:>10}")
+        if not peaks:
+            self.say("  (no [mem] lines seen)")
+        self.say(f"unparsed lines: {self.unparsed} (never printed)")
+        if self.withheld:
+            self.say(f"lines not sent (over the line limit): {self.withheld}")
+        if self.failures:
+            self.say(f"{len(self.failures)} expectation(s) FAILED:")
+            for f in self.failures:
+                self.say("  " + f)
+        else:
+            self.say("all expectations held")
+
+
+def _saved_custom_matching(h):
+    """The custom theme ~/.blink/theme.json holds, if it is the one the
+    board's hash names; None otherwise. Read, never written."""
+    if not h:
+        return None
+    from pc import theme as pc_theme
+    from pc.cli import blink_home
+    t = pc_theme.saved_custom(blink_home())
+    if t is None or pc_theme.theme_hash(t) != h:
+        return None
+    return t
+
+
+def restore_plan(start, now, start_h=None):
+    """What puts the board back from `now` to `start`: ("line", msg) for a
+    theme line, ("target", name) for a press, in order."""
+    from pc import theme as pc_theme
+    plan, ui = [], []
+    tid = start["stored"]
+    if now["stored"] != tid:
+        if tid != THEME_IDS["custom"]:
+            plan.append(("line", pc_theme.message("save", {"id": tid})))
+        else:
+            t = _saved_custom_matching(start_h)
+            if t is not None:
+                plan.append(("line", pc_theme.message("save", t)))
+            else:
+                ui += ["theme.open", "theme.custom", "settings.back"]
+    if now["bl"] != start["bl"]:
+        k = min(5, max(1, round(start["bl"] / 20)))
+        ui += ["brightness.open", f"brightness.level{k}", "settings.back"]
+    if now["focus"] != start["focus"]:
+        ui += ["focus.open", f"focus.{start['focus']}", "settings.back"]
+    if ui:
+        plan += ([("target", "settings.open")] +
+                 [("target", n) for n in ui] +
+                 [("target", "settings.back")])
+    return plan
+
+
+# --- main -------------------------------------------------------------------
+
+def _connect(args):
+    port = args.port or autodetect()
+    if not port:
+        print("no board found; pass --port", file=sys.stderr)
+        return None
+    holders = port_holders(port)
+    if holders:
+        print(f"{port} is held by pid(s) {', '.join(map(str, holders))}; "
+              "stop that first (the daemon: see the top of this file)",
+              file=sys.stderr)
+        return None
+    if holders is None:
+        print("warning: lsof not found; cannot check who holds the port",
+              file=sys.stderr)
+    lock, why = take_daemon_lock()
+    if why:
+        print(why, file=sys.stderr)
+        return None
+    try:
+        ser = open_port(port, args.baud)
+    except Exception as e:
+        # The exception's text names the port and the OS error, never data.
+        print(f"cannot open {port}: {type(e).__name__}", file=sys.stderr)
+        return None
+    return port, ser, lock
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Drive a CONFIG_BLINK_TOUCH_INJECT board's touch panel. "
+                    "Do not touch the panel during a run.")
+    ap.add_argument("--port")
+    ap.add_argument("--baud", type=int, default=BAUD)
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="say 'unparsed line (N bytes)' for each line "
+                         "this does not recognise")
+    ap.add_argument("--no-restore", action="store_true",
+                    help="leave the theme, brightness and Focus as the run "
+                         "left them")
+    ap.add_argument("--keep-going", action="store_true",
+                    help="run a script to the end after a failure")
+    ap.add_argument("--harness", metavar="BIN",
+                    help="run against tools/panel_render/touch.sh's host "
+                         "harness instead of a board")
+    ap.add_argument("--renders", metavar="DIR", default=".",
+                    help="with --harness: where the PNGs go")
+    ap.add_argument("--edit-reply", choices=("ok", "no"), default="ok",
+                    help="answer the board's theme_edit with ok 1 (as if a "
+                         "browser opened) or ok 0")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("state")
+    sub.add_parser("targets")
+    p = sub.add_parser("tap")
+    p.add_argument("name")
+    p = sub.add_parser("raw")
+    p.add_argument("kind", choices=("tap",))
+    p.add_argument("xy", nargs="+", type=int)
+    p = sub.add_parser("swipe")
+    p.add_argument("coords", nargs="+")
+    p = sub.add_parser("script")
+    p.add_argument("file")
+    args = ap.parse_args(argv)
+
+    if args.cmd == "targets":
+        for name, t in TARGETS.items():
+            pts = " -> ".join(f"({x},{y})" for x, y in t.points())
+            print(f"{name:<24} {t.kind:<6} {pts:<22} {t.doc}")
+        return 0
+
+    try:
+        if args.cmd == "script":
+            steps = parse_script(Path(args.file).read_text(encoding="utf-8"))
+        elif args.cmd == "tap":
+            steps = [parse_line("tap " + args.name)]
+        elif args.cmd == "raw":
+            steps = [parse_line("raw tap " + " ".join(map(str, args.xy)))]
+        elif args.cmd == "swipe":
+            steps = [parse_line("swipe " + " ".join(args.coords))]
+        else:
+            steps = [parse_line("state")]
+    except ScriptError as e:
+        print(f"{args.cmd}: {e}", file=sys.stderr)
+        return 2
+
+    if args.harness:
+        port, ser, lock = "the host harness", None, None
+        link = HarnessLink(args.harness, args.renders)
+    else:
+        conn = _connect(args)
+        if conn is None:
+            return 2
+        port, ser, lock = conn
+        link = Link(ser)
+    bench = Bench(link, verbose=args.verbose,
+                  edit_reply=args.edit_reply == "ok")
+    reader = threading.Thread(
+        target=link.read_loop, args=(bench.on_line, bench.on_overlong),
+        daemon=True)
+    reader.start()
+    try:
+        print(f"bench on {port}")
+        bench.greet()
+        # The board answers welcome with pref (its caps) and theme_now.
+        bench.mark()
+        bench._wait(lambda evs: next((e for e in evs if e["t"] == "pref"),
+                                     None), 3.0)
+        bench.send_frames()
+        bench.sleep(1.0)
+        if bench.query_state() is None:
+            bench.fail("the board does not answer ui_state -- is this a "
+                       "CONFIG_BLINK_TOUCH_INJECT image?")
+        else:
+            bench.run_with_restore(steps, keep_going=args.keep_going,
+                                   restore=not args.no_restore)
+        bench.summary()
+    finally:
+        link.stop()
+        reader.join(timeout=1.0)
+        if ser is not None:
+            ser.close()
+        if lock is not None:
+            lock.close()
+    return 1 if bench.failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
