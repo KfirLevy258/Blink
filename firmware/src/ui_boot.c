@@ -49,7 +49,16 @@ static lv_obj_t *scr;
 #define STRIP_BYTES 4096
 static uint8_t *strip_buf;
 
-/* Survives a warm reset; the magic guards against power-on garbage. */
+/* Survives a warm reset; the magic guards against power-on garbage.
+ *
+ * Survives it only by placement, though. MCUboot runs between the two boots
+ * and its own RAM overwrites the first ~22 KB of the app's .dram0.noinit
+ * (MCUboot's _end is 0x3ffed708, the section starts at 0x3ffe8000); this
+ * word sits at 0x3fff3000, past it, because the stacks and the LVGL pool
+ * are linked first (measured 2026-10-27). If it ever lands lower, an
+ * intentional reboot plays the full splash again -- cosmetic, which is why
+ * it stays here. fatal.c's streak could not afford that and lives in RTC
+ * slow memory instead. */
 static __noinit uint32_t skip_magic;
 #define SKIP_MAGIC 0xb007512bu
 

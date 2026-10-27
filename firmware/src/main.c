@@ -17,6 +17,7 @@
 #include "backlight.h"
 #include "net_time.h"
 #include "ui_boot.h"
+#include "fatal.h"
 #include "ui_sleep.h"
 #include "sleep_gate.h"
 #include "usage_freshness.h"
@@ -320,6 +321,7 @@ static void run_usb(void)
 			ota_health = true;	/* daemon delivered usage */
 		}
 		ota_boot_pump();
+		fatal_pump();
 
 		/* Two reasons to doze (docs/sleep-mode-design.md). The first
 		 * is silence past the host timeout. The second is an app that
@@ -563,6 +565,7 @@ static void run_usb(void)
 int main(void)
 {
 	printk("[usage] firmware boot OK\n");
+	fatal_boot();	/* settle the fault-reboot streak; see fatal_policy.h */
 
 	/* mbedTLS allocates from the kernel heap, not from libc. prj.conf turns
 	 * MBEDTLS_ENABLE_HEAP off, so there is no static _mbedtls_heap, and the

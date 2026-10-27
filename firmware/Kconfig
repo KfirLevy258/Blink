@@ -47,6 +47,39 @@ config BLINK_BL_SCALE_PCT
 	  than by lowering the default level -- which would have shrunk the
 	  usable 20..100 range instead of recentring it.
 
+config BLINK_FATAL_SELFTEST
+	bool "Fault on purpose, to test the fatal handler on a board"
+	help
+	  Board test for src/fatal.c only. The firmware writes through a NULL
+	  pointer from the system workqueue once it has been up
+	  BLINK_FATAL_SELFTEST_AT_S seconds, on every boot, so the halt inside
+	  the 30 s window, the reboot after it and the streak that halts the
+	  fourth reboot can all be watched without hand-patching the source.
+	  The boot log says SELFTEST BUILD.
+
+	  Never in prj.conf or any .conf a release reads. Set it on the command
+	  line, in a build directory of its own, because a -D value is kept in
+	  that directory's CMake cache and a later plain build there would
+	  still carry it:
+
+	    west build --sysbuild -d build-selftest -b esp32_devkitc/esp32/procpu . -- \
+	      -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
+	      -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.blink/ota_signing_key_p256.pem\"" \
+	      -Dfirmware_CONFIG_BLINK_FATAL_SELFTEST=y \
+	      -Dfirmware_CONFIG_BLINK_FATAL_SELFTEST_AT_S=60
+
+	  then flash that directory, not build-sb:
+
+	    BLINK_BUILD_DIR=$PWD/build-selftest ../tools/burn.sh --no-build
+
+config BLINK_FATAL_SELFTEST_AT_S
+	int "Uptime at which the selftest faults, in seconds"
+	depends on BLINK_FATAL_SELFTEST
+	range 1 3600
+	default 60
+	help
+	  Under 30 to test the halt, over 30 to test the reboot.
+
 endmenu
 
 source "Kconfig.zephyr"

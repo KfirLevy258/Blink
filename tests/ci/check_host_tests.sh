@@ -88,6 +88,7 @@ run_one() {
 echo "== firmware host tests"
 run_one backlight    ""                ""
 run_one bootanim     "bootanim_dec.c"  ""
+run_one fatal_policy "fatal_policy.c"  ""
 run_one fmt          "fmt.c"           ""
 run_one logo         "logo_parse.c bootanim_dec.c" ""
 run_one msg_parse    "msg_parse.c"     ""
