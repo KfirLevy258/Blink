@@ -40,7 +40,7 @@ def make(tmp_path, opener=None, hint=None, saved=None, run_async=inline):
     clock = Clock()
     b = Bridge(write_msg=sent.append, fetch_usage=lambda: None, now=clock,
                wall=lambda: (1752444000, 0), theme_sync=theme.ThemeSync(home),
-               open_builder=opener, board_fw_hint=hint, run_async=run_async,
+               open_builder=opener, board_caps_hint=hint, run_async=run_async,
                **_NO_FEED)
     return b, sent, home, clock
 
@@ -49,8 +49,12 @@ def themes(sent):
     return [m for m in sent if m["t"] == "theme"]
 
 
-def hello(b, fw="1.4.0"):
-    b.on_message({"t": "hello", "v": 2, "fw": fw})
+def hello(b, fw="1.3.4", caps=("svc", "theme")):
+    # The board's caps open the gate (theme contract, Addendum 3), not fw.
+    m = {"t": "hello", "v": 2, "fw": fw}
+    if caps is not None:
+        m["caps"] = list(caps)
+    b.on_message(m)
 
 
 def now(b, tid, why):
@@ -86,7 +90,7 @@ def test_the_quiet_window_is_one_fast_tick():
 
 def test_a_connect_without_a_reset_waits_too(tmp_path):
     # greet() straight from the daemon (already_running) is a burst as well.
-    b, sent, home, clock = make(tmp_path, saved={"id": 5}, hint="1.4.0")
+    b, sent, home, clock = make(tmp_path, saved={"id": 5}, hint=["svc", "theme"])
     b.greet()
     assert themes(sent) == []
     now(b, 0, "boot")
@@ -96,9 +100,9 @@ def test_a_connect_without_a_reset_waits_too(tmp_path):
     assert theme.load_saved(home) == {"id": 5}
 
 
-def test_a_board_on_1_3_4_is_sent_no_theme_line(tmp_path):
+def test_a_shipped_1_3_4_board_is_sent_no_theme_line(tmp_path):
     b, sent, home, clock = make(tmp_path, saved={"id": 5})
-    hello(b, fw="1.3.4")
+    hello(b, fw="1.3.4", caps=None)
     theme.write_preview(home, {"id": 2})
     clock.t += 10
     b.poll_if_changed()
@@ -106,15 +110,15 @@ def test_a_board_on_1_3_4_is_sent_no_theme_line(tmp_path):
     assert themes(sent) == []
 
 
-def test_an_unknown_board_version_is_sent_no_theme_line(tmp_path):
+def test_a_board_not_yet_heard_is_sent_no_theme_line(tmp_path):
     b, sent, home, _ = make(tmp_path)
     theme.save(home, {"id": 5})
     b.poll_if_changed()
     assert themes(sent) == []
 
 
-def test_the_board_json_hint_opens_the_gate_like_svc(tmp_path):
-    b, sent, home, _ = make(tmp_path, hint="1.4.0")
+def test_the_board_json_caps_open_the_gate_like_svc(tmp_path):
+    b, sent, home, _ = make(tmp_path, hint=["svc", "theme"])
     theme.save(home, {"id": 5})
     b.poll_if_changed()
     assert themes(sent) == [theme.message("save", {"id": 5})]
@@ -247,6 +251,8 @@ def test_an_answer_outlives_the_bridge_that_asked(tmp_path):
                 wall=lambda: (1, 0), theme_sync=theme.ThemeSync(home),
                 open_builder=lambda: True, run_async=pending.append,
                 edit_answers=answers, **_NO_FEED)
+    b1.on_message({"t": "pref", "v": 2, "provider": "claude",
+                   "caps": ["svc", "theme"]})
     b1.on_message({"t": "theme_edit", "v": 2})
     b2 = Bridge(write_msg=sent2.append, fetch_usage=lambda: None,
                 wall=lambda: (1, 0), theme_sync=theme.ThemeSync(home),

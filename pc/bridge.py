@@ -50,7 +50,7 @@ class Bridge:
                  wall=_local_wall, fetch_manifest=None, fetch_firmware=None,
                  flash_image=None, self_update=None, pending=None,
                  fetch_signed_manifest=None, report_failure=None,
-                 status_watch=None, board_fw_hint=None,
+                 status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
                  edit_answers=None):
         self._write = write_msg          # callable(dict)
@@ -93,10 +93,18 @@ class Bridge:
         # Bridge wired without one -- every test fake -- which then sends no
         # svc message at all, exactly as a daemon from before it did.
         self._svc = status_watch
-        # What board.json says the board last ran. Only ever a fallback for
-        # the svc gate, for the connect whose boot hello was lost: never
-        # written into _board_fw, which the OTA guard reads.
-        self._board_fw_hint = board_fw_hint
+        # What the board can show (protocol.board_caps): None until its
+        # hello or its pref has said, then whatever the last of those
+        # listed. Every board that has caps puts them on both, so a pref
+        # that lists none is a board without them -- not one that forgot.
+        self._board_caps = None
+        # What board.json says the last board listed. Only a stand-in until
+        # this one speaks: a daemon that restarts under a running board gets
+        # no hello, and greet()'s first poll runs before the pref that
+        # answers its welcome has arrived.
+        self._board_caps_hint = (frozenset(board_caps_hint)
+                                 if isinstance(board_caps_hint, (list, tuple))
+                                 else None)
         self._svc_pair = None            # (provider, p2) of the last usage
         self._svc_pages = ()             # those with a status page, in order
         self._last_svc = {}              # provider -> (level, what) last sent
@@ -196,6 +204,8 @@ class Bridge:
                 # so the board is greeted before it is asked to resume.
                 if t != "hello":
                     self._resume_pending()
+        if t in ("hello", "pref"):
+            self._board_caps = protocol.board_caps(msg)
         if t == "pref":
             # Which provider the user picked on the board's settings screen.
             # It arrives with every hello as well as on change, so a daemon
@@ -579,10 +589,14 @@ class Bridge:
 
     # --- themes ---
 
+    def _board_can(self, cap):
+        caps = self._board_caps
+        if caps is None:
+            caps = self._board_caps_hint
+        return caps is not None and cap in caps
+
     def _takes_theme(self):
-        # The svc gate, board.json's hint included, for the same reason: on
-        # the connect whose boot hello was lost it is the only word there is.
-        return protocol.fw_takes_theme(self._board_fw or self._board_fw_hint)
+        return self._board_can(protocol.BOARD_CAP_THEME)
 
     def _send_theme(self):
         """The preview, cancel or save the files say is owed. Called on both
@@ -612,6 +626,16 @@ class Bridge:
         """
         opener = self._open_builder
         answers = self._edit_answers
+        if not self._takes_theme():
+            # A board that did not say it takes themes would be sent none
+            # (_send_theme), so a builder opened for it could save nothing
+            # the panel ever shows. ok 0 puts "Run blink theme" on the board
+            # instead of "Opened on your computer" (Addendum 3). No firmware
+            # without the cap has the button; this is for one that does and
+            # lost its hello, until its next pref says otherwise.
+            answers.put(False)
+            self.pump()
+            return
 
         def work():
             ok = False
@@ -855,10 +879,10 @@ class Bridge:
         """
         if self._svc is None:
             return
-        # Firmware before 1.4.0 drops svc unread. Nothing is sent to it, and
-        # want() is not renewed either, so no vendor is asked on behalf of a
-        # board that could not show the answer.
-        if not protocol.fw_shows_svc(self._board_fw or self._board_fw_hint):
+        # A board that has not listed "svc" drops it unread. Nothing is sent
+        # to it, and want() is not renewed either, so no vendor is asked on
+        # behalf of a board that could not show the answer.
+        if not self._board_can(protocol.BOARD_CAP_SVC):
             return
         # Renewed on every call: a want() runs out (status_page.WANT_TTL_S),
         # and this is the call that stops being made when the board does.

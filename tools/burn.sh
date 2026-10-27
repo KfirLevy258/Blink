@@ -341,11 +341,18 @@ grep -E "Wrote|Hash of data" "$FLASH_LOG" || true
 
 # ------------------------------------------------- 4. boot, stamp, confirm
 say "Boot-verifying and stamping as $EDITION"
-"$PY" - "$PORT" "$EDITION" "$FW_VERSION" <<'EOF' || die "the board did not confirm the stamp"
+# PYTHONDONTWRITEBYTECODE: it imports pc/ from the tree (CLAUDE.md).
+PYTHONDONTWRITEBYTECODE=1 "$PY" - "$PORT" "$EDITION" "$FW_VERSION" "$ROOT" <<'EOF' || die "the board did not confirm the stamp"
 import json, sys, time
 import serial
 
 port, edition, want_fw = sys.argv[1], sys.argv[2], sys.argv[3]
+# pc/ is stdlib only, so the daemon's own encoder imports into any
+# interpreter that has pyserial. Its edition message, through the same
+# encode_checked every production writer uses (CLAUDE.md), rather than a
+# second hand-built copy of the line here.
+sys.path.insert(0, sys.argv[4])
+from pc import protocol
 s = serial.Serial(port, 115200, timeout=0.2)
 s.dtr = False; s.rts = True; time.sleep(0.15); s.rts = False
 
@@ -374,7 +381,11 @@ if hello.get("fw") != want_fw:
           file=sys.stderr)
     sys.exit(1)
 
-s.write((json.dumps({"t": "edition", "v": 2, "edition": edition}) + "\n").encode())
+raw, why = protocol.encode_checked(protocol.edition(edition))
+if raw is None:
+    print("   edition message not sent: %s" % why, file=sys.stderr)
+    sys.exit(1)
+s.write(raw)
 s.flush()
 
 # Wait for a COMPLETE line, not just the marker.

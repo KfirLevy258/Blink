@@ -154,12 +154,32 @@ static void emit(const char *json)
 	printk("%s\n", json);
 }
 
+/*
+ * What this board can show, on every hello and every pref (theme contract,
+ * Addendum 3). The daemon sends svc lines only to a board that lists "svc",
+ * and theme lines -- and an ok:1 to theme_edit -- only to one that lists
+ * "theme". It used to decide by version, fw >= 1.4.0, while this firmware
+ * was still numbered 1.3.4: a board built from it was sent neither, and a
+ * release bumped to anything short of 1.4.0 would have shipped both features
+ * dead (final review, 2026-10-27). A build says what it contains; a number
+ * only implies it.
+ *
+ * On pref as well as hello because hello goes out at boot and nowhere else,
+ * and pref is this board's answer to a welcome: a daemon that restarts
+ * under a running board hears no hello, only the pref. Older daemons read
+ * neither field. Append-only, like THEME_IDS.
+ */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\"]"
+
 void proto_send_pref(void)
 {
-	char buf[64];
+	/* 61 bytes at its widest ("claude"), measured by
+	 * tests/pc/test_board_caps.py, which fails if it outgrows this. */
+	char buf[96];
 
 	snprintf(buf, sizeof(buf),
-		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\"}",
+		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\","
+		 BOARD_CAPS "}",
 		 PROTO_VERSION,
 		 cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "codex" : "claude");
 	emit(buf);
@@ -180,11 +200,14 @@ static void send_hello(void)
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
+	/* 136 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.3.4"), measured by tests/pc/test_board_caps.py, which fails if it
+	 * outgrows this; a truncated hello is not JSON. */
 	char buf[160];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
 		 "\"board_id\":\"%s\",\"fw\":\"" BLINK_FW_VERSION "\","
-		 "\"reset\":\"0x%x\"}",
+		 "\"reset\":\"0x%x\"," BOARD_CAPS "}",
 		 PROTO_VERSION, idhex, cause);
 	emit(buf);
 	/* Straight after hello: a daemon that starts later, or restarts, has

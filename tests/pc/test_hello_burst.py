@@ -108,7 +108,9 @@ def _hello_burst():
                theme_sync=theme.ThemeSync(home),
                report_failure="x" * 200)
     b._app_available = lambda m: ("10.10.10", {"size": 1, "sha256": "cd" * 32})
-    b.on_message({"t": "hello", "v": protocol.VERSION, "fw": "1.4.0"})
+    # Both caps, so svc and theme are each as owed as they can be.
+    b.on_message({"t": "hello", "v": protocol.VERSION, "fw": "1.3.4",
+                  "caps": ["svc", "theme"]})
     return lines
 
 

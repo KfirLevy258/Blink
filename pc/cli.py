@@ -1031,6 +1031,37 @@ def _warn_if_claude_too_old(desk):
 # -------------------------------------------------------------------- service
 
 
+# How long the supervisor waits, after asking the daemon to stop, before it
+# kills it. The daemon defers a SIGTERM that lands inside a firmware write or
+# an app swap until the work returns (claude_usage_bridge.no_exit_while),
+# because esptool killed half way through slot 0 leaves a board that will
+# not boot until it is reflashed by hand. That deferral is only as long as
+# this: launchd's default ExitTimeOut is 20 s and systemd's TimeoutStopSec
+# 90 s, and past them comes SIGKILL, for esptool too (final review,
+# 2026-10-27, SHOULD 1).
+#
+# 180 s, derived from the longest thing guarded:
+#   - pc/ota.flash: an eFuse probe of a few seconds, then write_flash at the
+#     115200 baud the CH340 needs, about 75 s for the app image (pc/ota.py),
+#     then ONE retry of the same write if the first failed. 2 x 75 s plus
+#     the probe is about 155 s, and the retry is the attempt that repairs a
+#     slot the first left bad, so it has to fit as well.
+#   - update.apply: unpack and rename, which take a second, behind a
+#     self-test of the downloaded program that normally takes two and was
+#     measured at 97 s on a machine under load average 89 (pc/update.py).
+#     A self-test still running at 180 s is killed before any rename, which
+#     loses nothing: the old program is untouched and the staging directory
+#     is cleared by the next attempt.
+# An ordinary stop costs nothing extra: the daemon exits within a second of
+# SIGTERM whenever it is not inside a guarded block.
+#
+# Windows has no equivalent to set. `schtasks /end` and taskkill /f end the
+# process outright, with no signal and no grace period to configure, and the
+# SIGTERM deferral is POSIX only (exit_on_sigterm), so on Windows the guard
+# does nothing and no setting in the task could change that.
+STOP_GRACE_S = 180
+
+
 _PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD plist_path() 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1049,6 +1080,9 @@ _PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
        repeatable crash from becoming a spin. -->
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <!-- SIGTERM to SIGKILL: long enough for a firmware write to finish
+       (STOP_GRACE_S in pc/cli.py). launchd's default is 20 s. -->
+  <key>ExitTimeOut</key><integer>{grace}</integer>
   <key>StandardOutPath</key><string>{log}</string>
   <key>StandardErrorPath</key><string>{log}</string>
 </dict>
@@ -1095,7 +1129,8 @@ def _unit_text(argv) -> str:
     """The systemd unit for a service running `argv`. The one writer, used
     by install() and by the tests that read it back, as _plist_text is for
     launchd."""
-    return _UNIT_TEMPLATE.format(command=_systemd_exec(argv))
+    return _UNIT_TEMPLATE.format(command=_systemd_exec(argv),
+                                 grace=STOP_GRACE_S)
 
 
 _UNIT_TEMPLATE = """[Unit]
@@ -1106,6 +1141,15 @@ ExecStart={command}
 Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=10
+# A firmware write must be allowed to finish; see STOP_GRACE_S in pc/cli.py.
+# mixed, because the default (control-group) sends SIGTERM to esptool as
+# well as to the daemon, which kills the write at second zero whatever the
+# daemon defers. mixed sends it to the daemon alone, and SIGKILL to what is
+# left once the daemon has exited (or at the timeout). The one thing usually
+# left is a browser the theme builder started cold through xdg-open, which
+# now dies by SIGKILL instead of SIGTERM when the service stops; accepted.
+TimeoutStopSec={grace}
+KillMode=mixed
 
 [Install]
 WantedBy=default.target
@@ -1350,7 +1394,8 @@ def _plist_text(argv) -> str:
     back, so the reader is tested against what is really written."""
     args = "".join(f"    <string>{_xml_escape(a)}</string>\n" for a in argv)
     return _PLIST_TEMPLATE.format(label=LABEL, args=args,
-                                  log=_xml_escape(log_path()))
+                                  log=_xml_escape(log_path()),
+                                  grace=STOP_GRACE_S)
 
 
 class _LaunchdBackend(_Backend):
@@ -2000,6 +2045,32 @@ class _SchtasksBackend(_Backend):
         return "not installed"
 
 
+# How long a systemd stop may take before `blink update` or `uninstall`
+# says why it is waiting. An idle daemon exits within a second of SIGTERM;
+# one inside a firmware write or an app swap holds the stop until the work
+# returns, which with TimeoutStopSec=STOP_GRACE_S can be three minutes of a
+# command printing nothing (review of the caps change, 2026-10-27).
+SLOW_STOP_NOTE_S = 4.0
+
+
+def _noting_a_slow_stop(call):
+    """call(), with one line on stderr if it is still running after
+    SLOW_STOP_NOTE_S. systemctl gives no sign of what it is waiting on."""
+    import threading
+    note = threading.Timer(
+        SLOW_STOP_NOTE_S,
+        lambda: print("  Waiting for the bridge to finish a firmware write or"
+                      f" update before it stops (up to"
+                      f" {STOP_GRACE_S // 60} minutes)...",
+                      file=sys.stderr, flush=True))
+    note.daemon = True
+    note.start()
+    try:
+        return call()
+    finally:
+        note.cancel()
+
+
 class _SystemdBackend(_Backend):
     """Linux, where the supervisor may simply not be there.
 
@@ -2093,8 +2164,9 @@ class _SystemdBackend(_Backend):
     def restart(self) -> str:
         if not self._has_systemctl():
             return super().restart()
-        r = subprocess.run(["systemctl", "--user", "restart",
-                            "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
+        r = _noting_a_slow_stop(lambda: subprocess.run(
+            ["systemctl", "--user", "restart", "blink-bridge.service"],
+            capture_output=True, **update.ota.NO_WINDOW))
         if r.returncode != 0:
             return "could not restart it"
         if _confirm_running(self._is_running):
@@ -2136,8 +2208,10 @@ class _SystemdBackend(_Backend):
             # is left running", which would not be true.
             _rm(unit_path())
             return "no systemd here; stop it yourself if you started it"
-        subprocess.run(["systemctl", "--user", "disable", "--now",
-                        "blink-bridge.service"], capture_output=True, **update.ota.NO_WINDOW)
+        _noting_a_slow_stop(lambda: subprocess.run(
+            ["systemctl", "--user", "disable", "--now",
+             "blink-bridge.service"],
+            capture_output=True, **update.ota.NO_WINDOW))
         _rm(unit_path())
         subprocess.run(["systemctl", "--user", "daemon-reload"],
                        capture_output=True, **update.ota.NO_WINDOW)
@@ -2168,6 +2242,185 @@ def backend() -> _Backend:
     if sys.platform.startswith("linux"):
         return _SystemdBackend()
     return _Backend()
+
+
+# The service files earlier releases wrote, kept verbatim so the daemon can
+# tell one of ours from one somebody has edited (refresh_service_file).
+# Every release from v0.7.0, the first named Blink, to v1.3.4 wrote exactly
+# these two templates; v0.6.0 was com.clauge.bridge, at other paths, and is
+# nothing this could find. tests/pc/test_stop_grace.py compares them with
+# `git show <tag>:pc/cli.py` wherever the tags are in the clone. Append a
+# copy here, never edit one, whenever _PLIST_TEMPLATE or _UNIT_TEMPLATE
+# changes in a release.
+_PLIST_TEMPLATE_V134 = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD plist_path() 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+{args}  </array>
+  <!-- Frozen Python buffers stdout when it is a file, so without this the
+       log lags minutes behind the daemon and reads as a hang. -->
+  <key>EnvironmentVariables</key>
+  <dict><key>PYTHONUNBUFFERED</key><string>1</string></dict>
+  <key>RunAtLoad</key><true/>
+  <!-- The bridge waits for a board rather than exiting, so KeepAlive is a
+       backstop for a crash, not the normal path. ThrottleInterval keeps a
+       repeatable crash from becoming a spin. -->
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
+</dict>
+</plist>
+"""
+
+_UNIT_TEMPLATE_V134 = """[Unit]
+Description=Blink USB bridge
+
+[Service]
+ExecStart={command}
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _plist_text_v134(argv) -> str:
+    """The plist v0.7.0 to v1.3.4 wrote for `argv`, rendered their way."""
+    args = "".join(f"    <string>{_xml_escape(a)}</string>\n" for a in argv)
+    return _PLIST_TEMPLATE_V134.format(label=LABEL, args=args,
+                                       log=_xml_escape(log_path()))
+
+
+def _unit_text_v134(argv, exec_line=None) -> str:
+    """The unit v0.7.0 to v1.3.4 wrote. Their ExecStart quoted each word but
+    did not yet double % and $ (that came after 1.3.4, see _systemd_exec)."""
+    if exec_line is None:
+        exec_line = " ".join('"%s"' % a.replace("\\", "\\\\")
+                             .replace('"', '\\"') for a in argv)
+    return _UNIT_TEMPLATE_V134.format(command=exec_line)
+
+
+def _earlier_service_texts(argv) -> set:
+    """Every file a release of ours could have left at this path for argv."""
+    if sys.platform == "darwin":
+        return {_plist_text_v134(argv)}
+    # And the one develop wrote between 1.3.4 and the stop grace: the same
+    # template, ExecStart quoted the newer way.
+    return {_unit_text_v134(argv),
+            _unit_text_v134(argv, exec_line=_systemd_exec(argv))}
+
+
+def _is_this_program(argv) -> bool:
+    """Whether this process is the program `argv` names. Frozen, argv names
+    installed_bin() whichever copy is running, so a build unpacked in
+    ~/Downloads and started by hand would pass for the installed one; the
+    running binary has to be that file (round 2 review, R2-N1)."""
+    if not _frozen():
+        return True
+    try:
+        return (os.path.realpath(_self_path())
+                == os.path.realpath(installed_bin()))
+    except OSError:
+        return False
+
+
+def refresh_service_file():
+    """Bring the plist or unit up to this version's, if a release wrote it.
+
+    Called by the daemon at startup. Only `blink install` writes these files,
+    and nothing asks anyone to run it again, so a setting added to the
+    template -- ExitTimeOut and TimeoutStopSec, the first -- would otherwise
+    reach fresh installs only, and every machine updated from 1.3.4 would
+    keep launchd's 20 s and systemd's KillMode=control-group under a flash
+    (review of the caps change, 2026-10-27). Every update path ends with the
+    new daemon starting, so this one place covers all three of them.
+
+    Only a file that is byte for byte what a release of ours wrote for this
+    program (_earlier_service_texts) is rewritten. The first version of this
+    checked the program line alone and rewrote anything else that differed,
+    so an Environment=HTTPS_PROXY= added to the unit, or a BLINK_TAP in the
+    plist, was undone on every start without anyone asking (round 2 review,
+    R2-S1). `blink install` still overwrites edits, as it always has; it is
+    run on purpose.
+
+    Written, never reloaded. A bootout, a bootstrap or a daemon-reload from
+    inside the job is the daemon stopping or re-reading itself at a moment
+    it did not choose, possibly mid-flash. The file takes effect when the
+    supervisor next reads it: launchd at the next login, systemd at the
+    next daemon-reload or reboot, either at the next `blink install`. Until
+    then the running job keeps the settings it was started with, and
+    `blink update` does not change that: launchd's `kickstart -k` and
+    systemd's `restart` both restart the job from the definition already
+    loaded.
+
+    Left alone unless it names exactly the program this process would
+    register (_service_command) and this process is that program: a
+    checkout daemon run by hand beside a frozen install must not repoint
+    the login service at the checkout, nor a frozen one a checkout's. A
+    missing file is never created, and Windows has no file of this kind. A
+    symlinked file (stow, chezmoi) is replaced at its target, so the link
+    survives; a target that cannot be written is left as it is.
+
+    Races with the commands that also write it are harmless. Uninstall
+    stops the job before it removes the file (launchd bootout, systemd
+    disable --now), and this runs before the daemon's SIGTERM handler is
+    installed, so a daemon starting then dies before it could write; a
+    concurrent `blink install` either leaves a half-written file this does
+    not recognise, or one it rewrites to the same text install is writing.
+
+    Returns "updated" when the file was rewritten, "edited" when it is ours
+    but changed by hand (the daemon then names `blink install`), and None
+    when there was nothing to do or nothing it should touch.
+    """
+    if _skip_service():
+        return None
+    if sys.platform == "darwin":
+        path, render = plist_path(), _plist_text
+    elif sys.platform.startswith("linux"):
+        path, render = unit_path(), _unit_text
+    else:
+        return None
+    argv = _service_command()
+    try:
+        if (backend().registered_argv() != argv[:-1]
+                or not _is_this_program(argv)):
+            return None
+        target = os.path.realpath(path)
+        with open(target, encoding="utf-8") as f:
+            have = f.read()
+    except Exception:
+        # A plist that does not parse, a file we cannot read: the job it
+        # describes still runs, and that is what matters here.
+        return None
+    want = render(argv)
+    if have == want:
+        return None
+    if have not in _earlier_service_texts(argv):
+        return "edited"
+    tmp = target + ".tmp"
+    replaced = False
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(want)
+        os.replace(tmp, target)
+        replaced = True
+    except OSError:
+        return None
+    finally:
+        # Also on SIGTERM or ^C between the write and the replace: nothing
+        # of ours is left beside the real file in ~/Library/LaunchAgents.
+        if not replaced:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return "updated"
 
 
 def _install_service() -> str:
@@ -2299,8 +2552,13 @@ def _say_bye():
             port = json.load(f).get("port")
         if not port:
             return
+        # encode_checked, as every production writer is (CLAUDE.md); a bye
+        # the board dropped would be no bye at all.
+        raw, _why = protocol.encode_checked(protocol.bye())
+        if raw is None:
+            return
         with serial.Serial(port, 115200, timeout=0.2, write_timeout=1) as s:
-            s.write((json.dumps(protocol.bye(), separators=(",", ":")) + "\n").encode())
+            s.write(raw)
             s.flush()
     except Exception:
         pass
@@ -3776,9 +4034,12 @@ class _Setting(NamedTuple):
 # Said out loud, because it is the one setting that adds to who this computer
 # talks to -- otherwise only github.com, once a day, for updates. No restart
 # is needed: the daemon re-reads the file every few seconds
-# (status_page.TICK_S). The firmware line is there because a board before
-# 1.4.0 is not sent the message this turns on (protocol.FW_SHOWS_SVC), and
-# "I switched it on and nothing happened" should not need a support email.
+# (status_page.TICK_S). The firmware line is there because a board that does
+# not list "svc" in its caps is not sent the message this turns on
+# (protocol.BOARD_CAP_SVC), and "I switched it on and nothing happened"
+# should not need a support email. It names 1.3.4 rather than the release
+# that brings the feature: 1.3.4 is the last firmware without it, a fact that
+# cannot go stale the way a guess at the next version number can.
 _CONFIG = {
     "status-page": _Setting(
         status_page.SETTING, status_page.enabled,
@@ -3788,7 +4049,8 @@ _CONFIG = {
          f" {status_page.POLL_S // 60} minutes,",
          "for the pages your board shows. No account, token or usage is"
          " sent.",
-         "The panel needs board firmware 1.4.0 or later to show it."),
+         "Board firmware 1.3.4 and earlier does not show it; update the"
+         " board to see it."),
         ("The bridge makes no status-page requests.",)),
 }
 
@@ -3830,14 +4092,21 @@ def cmd_config(args) -> int:
 
 
 def _theme_board_note(home):
-    """A line when the board this computer last saw cannot take a theme."""
+    """A line when the board this computer last saw cannot take a theme.
+
+    From the caps the board listed (board.json, written by the daemon), not
+    its version number: see protocol.BOARD_CAP_THEME. Silent when board.json
+    has no caps at all -- it was written by a daemon from before they
+    existed, and a guess is worse than nothing here."""
     try:
         with open(os.path.join(home, "board.json"), encoding="utf-8") as f:
-            fw = json.load(f).get("fw")
+            known = json.load(f)
+        fw, caps = known.get("fw"), known.get("caps")
     except (OSError, ValueError, AttributeError):
         return None
-    if fw and not protocol.fw_takes_theme(fw):
-        return (f"Your board runs firmware {fw}; themes need 1.4.0 or later."
+    if isinstance(caps, list) and protocol.BOARD_CAP_THEME not in caps:
+        on = f"firmware {fw}" if fw else "firmware"
+        return (f"Your board runs {on}, which does not take themes."
                 " It will be sent once the board is updated.")
     return None
 

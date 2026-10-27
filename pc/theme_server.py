@@ -528,8 +528,10 @@ class Launcher:
 
         Waits at most a second for the lock. launch() holds it across the
         browser opener, and an opener stuck starting a browser kept a close
-        queued behind it for 28.7 s -- past launchd's 20 s ExitTimeOut, and
-        far past the 5 s burn.sh waits (review, 2026-10-27). Without the
+        queued behind it for 28.7 s -- far past the 5 s burn.sh waits for
+        the port after a stop, which is the bound that matters now
+        the plist allows 180 s (cli.STOP_GRACE_S) (review, 2026-10-27).
+        Without the
         lock the server is still finished: finish() is idempotent and locks
         for itself.
         """

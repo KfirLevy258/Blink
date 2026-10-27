@@ -823,7 +823,9 @@ def test_the_on_notice_says_what_it_does_and_what_it_needs(capsys):
     cli.main(["config", "status-page", "on"])
     out = capsys.readouterr().out
     assert f"every {sp.POLL_S // 60} minutes" in out
-    assert "1.4.0" in out
+    # The last firmware without it, which cannot go stale the way a guess
+    # at the release that brings it can (theme contract, Addendum 3).
+    assert "1.3.4 and earlier does not show it" in out
     assert "No account, token or usage is sent." in out
     cli.main(["config", "status-page", "off"])
     assert "makes no status-page requests" in capsys.readouterr().out

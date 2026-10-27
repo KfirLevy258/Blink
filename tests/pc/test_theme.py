@@ -139,12 +139,8 @@ def test_message_refuses_a_line_the_board_would_drop(monkeypatch):
         theme.message("save", DARKISH)
 
 
-def test_the_theme_gate_is_the_svc_gate():
-    assert protocol.FW_TAKES_THEME == protocol.FW_SHOWS_SVC
-    for fw in (None, "", "1.3.4", "1.3.99", "garbage"):
-        assert not protocol.fw_takes_theme(fw)
-    for fw in ("1.4.0", "1.4.1", "2.0.0"):
-        assert protocol.fw_takes_theme(fw)
+# The gate on theme lines is the board's "theme" cap now, not a version:
+# tests/pc/test_board_caps.py.
 
 
 def test_welcome_advertises_the_theme_capability():

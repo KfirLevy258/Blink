@@ -161,7 +161,7 @@ class LineReader:
 # advertised rather than inferred from app_ver for the reason
 # FW_ACCEPTS_OVERAGE's comment gives: a version string is a guess about what
 # a build contains, and this is the daemon saying it outright. Additive --
-# firmware before 1.4.0 reads no field it does not know.
+# firmware that predates it reads no field it does not know.
 CAPS = ("theme",)
 
 
@@ -673,15 +673,30 @@ SVC_WHAT_MAX_BYTES = 24
 # the number the firmware is built to is written down beside the message.
 SVC_HOLD_S = 150
 
-# The first firmware that draws svc. Unknown counts as older, for the reason
-# cap_overage_for_fw gives: the daemon greets a board before it has heard
-# which firmware it runs.
-FW_SHOWS_SVC = (1, 4, 0)
+# What the board says it can show, from the "caps" list on its hello and on
+# its pref (theme contract, Addendum 3). Replaces the fw >= 1.4.0 gate that
+# both svc and theme lines had: the firmware that draws them was still
+# numbered 1.3.4, so a board built from it was sent neither, and a release
+# bumped to anything short of 1.4.0 would have shipped both features dead
+# with nothing in CI to notice (final review, 2026-10-27, MUST 2). A version
+# number is a guess about what a build contains; the board saying so is not.
+# No released firmware sends caps, so there is no version fallback to keep.
+BOARD_CAP_SVC = "svc"        # draws the status-page level (svc)
+BOARD_CAP_THEME = "theme"    # takes theme lines; answers theme_edit
 
 
-def fw_shows_svc(board_fw) -> bool:
-    fw = _fw_tuple(board_fw)
-    return fw is not None and fw >= FW_SHOWS_SVC
+def board_caps(msg) -> frozenset:
+    """The capabilities a board message lists; empty when it lists none.
+
+    Anything that is not a list of strings counts as no caps at all rather
+    than a partial reading: a board that says something this daemon cannot
+    read is treated like one that said nothing, which is a board that is
+    sent only what every board understands.
+    """
+    caps = msg.get("caps") if isinstance(msg, dict) else None
+    if not isinstance(caps, list):
+        return frozenset()
+    return frozenset(c for c in caps if isinstance(c, str))
 
 
 def svc(provider: str, level: str, what: str = "") -> dict:
@@ -731,9 +746,9 @@ def svc(provider: str, level: str, what: str = "") -> dict:
     app, or a provider the bus has quarantined, would otherwise leave
     "major outage" on a desk indefinitely.
 
-    Only to firmware FW_SHOWS_SVC or later (Bridge gates it, the way
-    cap_overage_for_fw gates percentages). An older board would drop it
-    unread, so it is not sent, and no status page is asked on its behalf.
+    Only to a board whose hello or pref listed BOARD_CAP_SVC (Bridge gates
+    it). Any other board would drop it unread, so it is not sent, and no
+    status page is asked on its behalf.
     """
     if level not in SVC_LEVELS:
         raise ValueError(f"unknown svc level {level!r}; expected one of "
@@ -745,17 +760,6 @@ def svc(provider: str, level: str, what: str = "") -> dict:
 
 
 # --- Themes (pc/theme.py validates; these only shape the line) ----------
-
-# Theme lines go to the same firmware svc does, and the gate is the same one
-# rather than a second constant that could drift from it: both arrived in
-# 1.4.0, and an older board drops either unread.
-FW_TAKES_THEME = FW_SHOWS_SVC
-
-
-def fw_takes_theme(board_fw) -> bool:
-    fw = _fw_tuple(board_fw)
-    return fw is not None and fw >= FW_TAKES_THEME
-
 
 def theme(op: str, t: dict = None) -> dict:
     """{"t":"theme","op":..., "id":..., custom fields}. Not validated here:

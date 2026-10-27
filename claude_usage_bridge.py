@@ -455,7 +455,7 @@ def remembered_board(home):
         return {}
 
 
-def remember_board(home, port, board_id, fw=None):
+def remember_board(home, port, board_id, fw=None, caps=None):
     """Write down which port worked, so the next start goes straight to it.
 
     This is what makes the polite-probe cheap in the case that matters: a
@@ -468,7 +468,8 @@ def remember_board(home, port, board_id, fw=None):
         os.makedirs(home, exist_ok=True)
         tmp = _known_path(home) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"port": port, "board_id": board_id, "fw": fw}, f)
+            json.dump({"port": port, "board_id": board_id, "fw": fw,
+                       "caps": caps}, f)
         os.replace(tmp, _known_path(home))
     except OSError:
         pass                    # a convenience, never a requirement
@@ -496,10 +497,21 @@ def learn_board(known, port, msg):
 
     bridge.py has always read `cur` for its in-memory _board_fw, which is why
     the overage cap gates correctly; only the persisted record missed it.
+
+    `caps` (what the board can show: protocol.board_caps) comes from a hello
+    or a pref and from nothing else, and from those it is taken whole, an
+    absent list included: a board that has caps lists them on both, so a
+    pref without any is a board that has none. It is what Bridge falls back
+    on before the board has spoken (board_caps_hint), and what `blink theme`
+    reads to say the board will not show one.
     """
+    caps = known.get("caps")
+    if msg.get("t") in ("hello", "pref"):
+        caps = sorted(protocol.board_caps(msg))
     return {"port": port,
             "board_id": msg.get("board_id") or known.get("board_id"),
-            "fw": msg.get("fw") or msg.get("cur") or known.get("fw")}
+            "fw": msg.get("fw") or msg.get("cur") or known.get("fw"),
+            "caps": caps}
 
 
 def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
@@ -531,10 +543,22 @@ def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
     woke it. Unset BLINK_TAP means tap is None and this path is exactly what
     it always was.
     """
+    # encode_checked, as every production writer is (CLAUDE.md). This
+    # welcome is the one that decides what the board offers when the daemon
+    # restarts under it, and its caps can grow; a line over the board's limit
+    # would be dropped whole without a word. The reason is printed, never the
+    # bytes. A refused welcome still listens for the whole window: False
+    # here means "silent", which for a known port means pulling the reset
+    # line, and a board that pings on its own schedule is ours whether or
+    # not it was asked (review of the caps change, 2026-10-27).
+    raw, why = protocol.encode_checked(protocol.welcome("blink-bridge",
+                                                        RELEASE_VERSION))
+    if raw is None:
+        print(f"[bridge] probe not sent: {why}", file=sys.stderr)
     try:
         ser.reset_input_buffer()
-        ser.write(protocol.encode(protocol.welcome("blink-bridge",
-                                                   RELEASE_VERSION)))
+        if raw is not None:
+            ser.write(raw)
         deadline = time.time() + timeout
         reader = protocol.LineReader()
         while time.time() < deadline:
@@ -652,7 +676,11 @@ def _self_update_tick(target):
     except Exception as e:
         print(f"[update] download failed: {e}", file=sys.stderr)
         return
-    ok, message = update.apply(blob, target, version)
+    # The same guard as the board-tapped path in main(): a stop during the
+    # renames left the login service pointing at half an install (final
+    # review, 2026-10-27, SHOULD 2). See no_exit_while below.
+    with no_exit_while("app update"):
+        ok, message = update.apply(blob, target, version)
     print(f"[update] {message}", file=sys.stderr)
     if ok:
         update.restart_from_daemon(target)
@@ -749,6 +777,28 @@ def main(argv=None):
               file=sys.stderr)
     blink_home = _blink_home()
     update.recover(self_bin)
+    # Bring the login service's own file up to what this version would
+    # write -- today, the 180 s stop grace (cli.STOP_GRACE_S) -- because
+    # nothing else reaches an existing install: `blink update`, the daily
+    # update and the board-tapped one all replace the program and leave the
+    # plist or unit as the release before wrote it. Written only, never
+    # reloaded: see refresh_service_file.
+    try:
+        from pc import cli as _cli
+        done = _cli.refresh_service_file()
+        if done == "updated":
+            print("[bridge] login service file brought up to date; it takes"
+                  " effect at the next login or service reload",
+                  file=sys.stderr)
+        elif done == "edited":
+            # Somebody's edit, which is theirs to keep: say what it lacks.
+            print("[bridge] the login service file has been edited, so it was"
+                  " left as it is; run `blink install` to give it the"
+                  f" {_cli.STOP_GRACE_S} s stop grace a firmware write needs",
+                  file=sys.stderr)
+    except Exception as e:
+        print(f"[bridge] could not check the login service file: {e}",
+              file=sys.stderr)
 
     # Outside the reconnect loop, unlike next_poll. A board that comes and goes
     # -- a nudged cable, a laptop waking -- would otherwise re-arm the 60 s
@@ -1219,8 +1269,8 @@ def main(argv=None):
                         theme_sync=theme_sync,
                         open_builder=theme_builder.launch,
                         edit_answers=theme_answers,
-                        # For the svc gate only, when the boot hello is lost.
-                        board_fw_hint=known.get("fw"),
+                        # What the board can show, until it says again.
+                        board_caps_hint=known.get("caps"),
                         pending=update.PendingFirmware(
                             os.path.join(blink_home, "pending_fw.json")))
         report_failure = None   # handed to the Bridge above; never repeated
@@ -1288,7 +1338,8 @@ def main(argv=None):
                             known = learned
                             remember_board(blink_home, known["port"],
                                            known.get("board_id"),
-                                           known.get("fw"))
+                                           known.get("fw"),
+                                           known.get("caps"))
                         if not proven:
                             update.cleanup(self_bin)
                             proven = True

@@ -731,9 +731,13 @@ def _svcs(sent):
     return [m for m in sent if m["t"] == "svc"]
 
 
-def _hello(fw="1.4.0"):
-    # 1.4.0: the first firmware that draws svc (protocol.FW_SHOWS_SVC).
-    return {"t": "hello", "v": 2, "fw": fw}
+def _hello(fw="1.3.4", caps=("svc", "theme")):
+    # A board that draws svc says so in caps (theme contract, Addendum 3);
+    # the number is beside the point, so it is the one this branch builds.
+    m = {"t": "hello", "v": 2, "fw": fw}
+    if caps is not None:
+        m["caps"] = list(caps)
+    return m
 
 
 def test_nothing_broken_means_nothing_beyond_the_first_ok():
@@ -971,11 +975,12 @@ def test_an_all_clear_reaches_the_board_while_usage_reads_nothing():
 
 
 def test_old_firmware_gets_no_svc_and_causes_no_requests():
-    """1.3.4 drops svc unread, so sending it is noise in its log, and asking
-    the vendors on its behalf is a request nobody will ever see."""
+    """Shipped 1.3.4 lists no caps and drops svc unread, so sending it is
+    noise in its log, and asking the vendors on its behalf is a request
+    nobody will ever see."""
     b, sent, watch = _svc_bridge(_TWO_PAGES)
     watch.levels["claude"] = ("major", "Claude Code")
-    b.on_message(_hello("1.3.4"))
+    b.on_message(_hello("1.3.4", caps=None))
     for _ in range(5):
         b.poll_if_changed()
         b.poll_once()
@@ -983,32 +988,33 @@ def test_old_firmware_gets_no_svc_and_causes_no_requests():
     assert watch.wanted == []
 
 
-def test_an_unknown_firmware_gets_no_svc_until_it_says():
+def test_an_unknown_board_gets_no_svc_until_it_says():
     b, sent, watch = _svc_bridge(_ONE_PAGE)
     b.greet()                                # no hello yet
     assert _svcs(sent) == [] and watch.wanted == []
-    b.on_message(_hello("1.4.0"))
+    b.on_message(_hello())
     assert _svcs(sent) == [protocol.svc("claude", "ok")]
 
 
-def test_a_later_firmware_gets_svc():
+def test_the_version_number_opens_nothing():
+    """The gate was fw >= 1.4.0 and is now the board's own word."""
     b, sent, _ = _svc_bridge(_ONE_PAGE)
-    b.on_message(_hello("1.5.2"))
-    assert _svcs(sent) == [protocol.svc("claude", "ok")]
+    b.on_message(_hello("1.5.2", caps=None))
+    assert _svcs(sent) == []
 
 
-def test_the_boards_own_version_beats_the_remembered_one():
-    """Reconnect without a reset: board.json's 1.3.4 was latched first, and
-    the board's own ota_query saying 1.4.0 -- it has just been updated --
-    was ignored, so it got no svc until the next reconnect."""
+def test_the_pref_that_answers_a_welcome_says_it_too():
+    """Reconnect without a reset: no hello, and board.json's 1.3.4 is all the
+    daemon has. The pref the board sends back to greet()'s welcome carries
+    the same caps, and the fast tick sends svc on it."""
     b, sent, _ = _svc_bridge(_ONE_PAGE)
     b.greet()
     b.offer_if_newer("1.3.4")
     assert _svcs(sent) == []
-    b.on_message({"t": "ota_query", "v": 2, "cur": "1.4.0"})
-    b.poll_once()
+    b.on_message({"t": "pref", "v": 2, "provider": "claude",
+                  "caps": ["svc", "theme"]})
+    b.poll_if_changed()
     assert _svcs(sent) == [protocol.svc("claude", "ok")]
-    assert b._board_fw == "1.4.0"
 
 
 def test_a_garbled_query_version_does_not_overwrite_a_real_one():
@@ -1018,42 +1024,54 @@ def test_a_garbled_query_version_does_not_overwrite_a_real_one():
     assert b._board_fw == "1.4.0"
 
 
+def test_the_boards_own_ota_query_still_sets_its_version():
+    """Reconnect without a reset: board.json's 1.3.4 was latched first, and
+    the board's own ota_query saying 1.4.0 -- it has just been updated --
+    was ignored until the next reconnect. The version no longer gates svc,
+    but the OTA offer still reads it."""
+    b, _, _ = _svc_bridge(_ONE_PAGE)
+    b.greet()
+    b.offer_if_newer("1.3.4")
+    b.on_message({"t": "ota_query", "v": 2, "cur": "1.4.0"})
+    assert b._board_fw == "1.4.0"
+
+
 def _hinted_bridge(hint):
     sent = []
     watch = FakeWatch()
     b = Bridge(write_msg=sent.append, fetch_usage=lambda: dict(_ONE_PAGE),
                now=lambda: 0.0, wall=lambda: (1752444000, 0),
-               status_watch=watch, board_fw_hint=hint, **_NO_FEED)
+               status_watch=watch, board_caps_hint=hint, **_NO_FEED)
     return b, sent
 
 
-def test_a_lost_hello_falls_back_to_the_remembered_version():
-    """The boot hello can be lost; board.json still knows what the board was
-    last running, which is better than treating it as unknown for good."""
-    b, sent = _hinted_bridge("1.4.0")
+def test_a_lost_hello_falls_back_to_the_remembered_caps():
+    """The boot hello can be lost; board.json still knows what the board
+    last listed, which is better than treating it as unknown for good."""
+    b, sent = _hinted_bridge(["svc", "theme"])
     b.poll_once()
     assert _svcs(sent) == [protocol.svc("claude", "ok")]
 
 
-def test_the_remembered_version_gates_like_a_real_one():
-    b, sent = _hinted_bridge("1.3.4")
+def test_the_remembered_caps_gate_like_real_ones():
+    b, sent = _hinted_bridge([])
     b.poll_once()
     assert _svcs(sent) == []
 
 
-def test_the_boards_own_version_beats_the_hint():
-    b, sent = _hinted_bridge("1.4.0")
-    b.on_message(_hello("1.3.4"))
+def test_the_boards_own_caps_beat_the_hint():
+    b, sent = _hinted_bridge(["svc", "theme"])
+    b.on_message(_hello("1.3.4", caps=None))
     b.poll_once()
     assert _svcs(sent) == []
 
 
-def test_the_daemon_hands_the_remembered_version_to_the_bridge():
+def test_the_daemon_hands_the_remembered_caps_to_the_bridge():
     tree = _daemon_tree()
     bridges = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                and getattr(n.func, "id", None) == "Bridge"]
     assert bridges and all(
-        any(k.arg == "board_fw_hint" for k in b.keywords) for b in bridges)
+        any(k.arg == "board_caps_hint" for k in b.keywords) for b in bridges)
 
 
 # Self-update from a checkout. A checkout's daemon is not the program in

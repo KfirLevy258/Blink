@@ -94,12 +94,32 @@ def test_list_names_every_theme_and_marks_the_current_one(capsys):
     assert len(mark) == 1 and "mono" in mark[0]
 
 
-def test_an_old_board_is_named_when_a_theme_is_set(capsys):
+def _board_json(**known):
     os.makedirs(home(), exist_ok=True)
     with open(os.path.join(home(), "board.json"), "w") as f:
-        json.dump({"port": "/dev/x", "board_id": "ab", "fw": "1.3.4"}, f)
+        json.dump(dict({"port": "/dev/x", "board_id": "ab", "fw": "1.3.4"},
+                       **known), f)
+
+
+def test_an_old_board_is_named_when_a_theme_is_set(capsys):
+    # Shipped 1.3.4 lists no caps, which board.json records as [].
+    _board_json(caps=[])
     cli.main(["theme", "set", "neon"])
-    assert "1.4.0" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "firmware 1.3.4, which does not take themes" in out
+
+
+def test_a_board_with_the_cap_is_not_called_old_whatever_its_number(capsys):
+    _board_json(caps=["svc", "theme"])
+    cli.main(["theme", "set", "neon"])
+    assert "does not take themes" not in capsys.readouterr().out
+
+
+def test_a_board_json_from_before_caps_says_nothing(capsys):
+    # Written by an older daemon: no caps key at all, so nothing is known.
+    _board_json()
+    cli.main(["theme", "set", "neon"])
+    assert "does not take themes" not in capsys.readouterr().out
 
 
 def test_bare_theme_serves_the_builder_and_opens_it(monkeypatch, capsys):

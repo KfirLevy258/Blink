@@ -146,7 +146,8 @@ called "esptool .*write_flash 0x1000 $WORK/build/mcuboot/zephyr/zephyr.bin 0x200
 never "write_flash.*zephyr.signed.bin"
 called "imgtool sign .*--pad --confirm "
 never "write_flash.*0x330000"
-called 'host -> {"t": "edition", "v": 2, "edition": "claude"}'
+# protocol.encode_checked's compact form: burn.sh sends the daemon's own line.
+called 'host -> {"t":"edition","v":2,"edition":"claude"}'
 # The erase comes BEFORE the firmware is written: a failure there must stop
 # the burn while the board still runs what it ran before.
 [ "$(grep -n 'erase_region' "$FAKE_TOOL_LOG" | cut -d: -f1)" -lt \
