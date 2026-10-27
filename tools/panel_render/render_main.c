@@ -83,6 +83,34 @@ static void svc(const char *provider, const char *level, const char *what)
 	usage_view_svc_changed();
 }
 
+/*
+ * The Focus scenes' desk: both providers, at one of three levels, on one of
+ * the two pages. The session and weekly windows sit in DIFFERENT bands at
+ * the middle level so a single picture shows the big gauge and the dim line
+ * disagreeing in colour, which is the case where one of them could be wrong.
+ */
+static void focus_desk(int level, int page)
+{
+	static const double lv[3][4] = {
+		/* claude s, w     codex s, w */
+		{ 27.0, 42.0,      12.0, 20.0 },	/* low: all green */
+		{ 72.0, 41.0,      66.0, 83.0 },	/* mid: amber and green */
+		{ 96.0, 91.0,      93.0, 100.0 },	/* high: all red */
+	};
+
+	usage_view_set_provider1("claude");
+	usage_view_update(lv[level][0], 13231, lv[level][1], 598831);
+	usage_view_set_provider2("codex", lv[level][2], lv[level][3], 4320,
+				 259200, false);
+	usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+	usage_view_set_sessions(1, 0);
+	usage_view_set_counts(1, 1, 0, 0);
+	usage_view_set_clock(14, 5);
+	if (page) {
+		usage_view_page_step(1);
+	}
+}
+
 static void settle(void)
 {
 	/* LVGL needs a few passes: one to lay out, one to draw, and the
@@ -99,6 +127,8 @@ int main(int argc, char **argv)
 	const char *out = argc > 1 ? argv[1] : "panel.ppm";
 	int scene = argc > 2 ? atoi(argv[2]) : 0;
 	int theme = argc > 3 ? atoi(argv[3]) : THEME_DARK;
+	/* 0 two gauges, 1 Focus on the session window, 2 on the weekly. */
+	int focus = argc > 4 ? atoi(argv[4]) : 0;
 
 	lv_init();
 	lv_display_t *disp = lv_display_create(SCR_W, SCR_H);
@@ -130,6 +160,9 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	/* Before the screen, as main.c does from cfg_store, so the screen is
+	 * born in its mode. */
+	usage_view_set_focus(focus != 0, focus == 2);
 	usage_view_init();
 	settle();
 
@@ -315,6 +348,28 @@ int main(int argc, char **argv)
 		svc("claude", "major", "Claude Code");
 		settle();
 		svc("claude", "ok", NULL);
+		break;
+	case 25: case 26: case 27: case 28: case 29: case 30:
+		/* The Focus desk: low, mid, high, each on the Claude page and
+		 * then the Codex one. Meant to be run with a focus argument;
+		 * without one it is an ordinary two-provider desk. */
+		focus_desk((scene - 25) / 2, (scene - 25) % 2);
+		break;
+	case 31: /* CONNECTING: no host has ever spoken, the takeover is up */
+		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+		break;
+	case 32: /* HOST LOST: readings held, then the daemon went away */
+		focus_desk(1, 0);
+		settle();
+		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+		break;
+	case 33: /* An old reading on the Codex page: the age caption and the
+		  * "Reading is old" line. */
+		focus_desk(1, 1);
+		usage_view_set_ages(60, 1500);
+		usage_view_set_provider2("codex", 66.0, 83.0, 4320, 259200,
+					 true);
+		usage_view_set_status(USAGE_STATUS_STALE);
 		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_set_provider1("");

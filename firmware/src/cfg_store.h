@@ -135,9 +135,11 @@ struct cfg_theme {
 void cfg_get_theme(struct cfg_theme *out);
 int cfg_set_theme(const struct cfg_theme *t);
 
-/* Focus mode (task 19), stored now so its fields land in the same release as
- * the theme's and the record changes shape once, not twice. on: 0 off, 1 on.
- * win: 0 session, 1 weekly. Both 0 on a record from before them. */
+/* Focus mode: one big gauge instead of two. Its bytes landed with the theme's
+ * so the record changed shape once, not twice. on: 0 off, 1 on. win: 0
+ * session, 1 weekly. Both read 0 on a record from before them, and on any
+ * byte other than 1; the setter refuses anything but 0 and 1 (-EINVAL).
+ * Off keeps the window, so turning Focus back on lands where it was. */
 uint8_t cfg_get_focus_on(void);
 uint8_t cfg_get_focus_win(void);
 int cfg_set_focus(uint8_t on, uint8_t win);

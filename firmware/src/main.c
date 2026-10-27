@@ -597,6 +597,8 @@ int main(void)
 	/* The stored theme, before a single screen exists, so every screen is
 	 * born in it and nothing has to be repainted at boot. */
 	ui_theme_init();
+	/* Focus mode the same way: the gauge screen is born in it. */
+	usage_view_set_focus(cfg_get_focus_on(), cfg_get_focus_win());
 	ota_boot_begin();	/* unconfirmed image? start the confirm clock */
 	/* ...and from here the boot screen's own wait loops feed it too; they
 	 * block for seconds against a 30 s window. */

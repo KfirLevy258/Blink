@@ -35,6 +35,7 @@ target_sources(app PRIVATE
 	src/fatal_policy.c
 	src/svc_state.c
 	src/theme.c
+	src/font_focus_40.c
 	src/ui_theme.c
 )
 

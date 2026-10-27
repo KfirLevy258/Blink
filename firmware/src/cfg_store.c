@@ -81,7 +81,7 @@ struct rec {
 	uint8_t theme_ends;
 	uint8_t theme_dot;
 	uint8_t theme_by;
-	uint8_t focus_on;		/* task 19, reserved */
+	uint8_t focus_on;		/* Focus mode; see cfg_get_focus_on */
 	uint8_t focus_win;
 	uint32_t crc;		/* over everything above, always last */
 } __packed;
@@ -825,20 +825,30 @@ int cfg_set_theme(const struct cfg_theme *t)
 	return rc;
 }
 
+/*
+ * Only 1 means on, and only 1 means weekly. Anything else on flash -- a value
+ * a later firmware gave a third window, read back after a downgrade, or a
+ * flipped bit -- reads as the default, because Settings can only show Off,
+ * Session and Weekly and a panel stuck in a mode its own menu cannot name has
+ * no way back. tests/cfg_store plants such bytes.
+ */
 uint8_t cfg_get_focus_on(void)
 {
-	return cfg.focus_on;
+	return cfg.focus_on == 1 ? 1 : 0;
 }
 
 uint8_t cfg_get_focus_win(void)
 {
-	return cfg.focus_win;
+	return cfg.focus_win == 1 ? 1 : 0;
 }
 
 int cfg_set_focus(uint8_t on, uint8_t win)
 {
 	int rc;
 
+	if (on > 1 || win > 1) {
+		return -EINVAL;
+	}
 	k_mutex_lock(&cfg_lock, K_FOREVER);
 	cfg.focus_on = on;
 	cfg.focus_win = win;

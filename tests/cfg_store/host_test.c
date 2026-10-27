@@ -105,6 +105,35 @@ static bool boot_134(struct rec_134 *out)
 	return false;
 }
 
+/*
+ * Write raw Focus bytes into every sealed record on the fake flash, and seal
+ * it again -- what a newer firmware, or a flipped bit, would leave behind.
+ * The offsets are the contract's, not cfg_store.c's: the 1.3.4 record, then
+ * 26 theme bytes, then focus_on and focus_win, then the CRC over all of it.
+ */
+#define FOCUS_OFF (sizeof(struct rec_134) + 26)
+#define FULL_CRC_OFF (FOCUS_OFF + 2)
+
+static void plant_focus(uint8_t on, uint8_t win)
+{
+	const int slots[] = { SLOT_A, SLOT_B };
+
+	for (int i = 0; i < 2; i++) {
+		uint8_t *r = fake_flash + slots[i];
+		uint32_t magic, crc;
+
+		memcpy(&magic, r, sizeof(magic));
+		memcpy(&crc, r + FULL_CRC_OFF, sizeof(crc));
+		if (magic != REC_MAGIC || crc != crc32_ieee(r, FULL_CRC_OFF)) {
+			continue;
+		}
+		r[FOCUS_OFF] = on;
+		r[FOCUS_OFF + 1] = win;
+		crc = crc32_ieee(r, FULL_CRC_OFF);
+		memcpy(r + FULL_CRC_OFF, &crc, sizeof(crc));
+	}
+}
+
 static struct rec_134 desk_record(void)
 {
 	struct rec_134 r;
@@ -323,6 +352,63 @@ int main(void)
 			 " old theme or the new one (old %d, new %d, bad %d)",
 			 old_seen, new_seen, bad);
 		CHECK(bad == 0 && old_seen > 0 && new_seen > 0, msg);
+	}
+
+	/* --- 4b. From a build that already had the themes record ---
+	 *
+	 * fp/themes-fw stored the two Focus bytes but nothing ever set them,
+	 * so every record it wrote carries zeros there. The unit takes this
+	 * build: its theme and every 1.3.4 setting stay, and Focus is off.
+	 * The record is written by THIS cfg_store (it is the same layout),
+	 * with the Focus bytes forced back to what that build left in them.
+	 */
+	memset(fake_flash, 0xFF, sizeof(fake_flash));
+	old = desk_record();
+	write_134(SLOT_A, &old);
+	CHECK(cfg_init() == 0, "themes build: the store mounts");
+	memset(&th, 0, sizeof(th));
+	th.id = 9;		/* Light */
+	CHECK(cfg_set_theme(&th) == 0, "themes build: Light stored");
+	CHECK(cfg_init() == 0, "themes build -> focus: the store mounts");
+	cfg_get_theme(&th);
+	CHECK(th.id == 9, "themes build -> focus: the theme is kept");
+	check_desk_settings("themes build -> focus");
+	CHECK(cfg_get_focus_on() == 0 && cfg_get_focus_win() == 0,
+	      "themes build -> focus: Focus is off, on the session window");
+
+	/* Each setting is its own: storing one never moves the other. */
+	CHECK(cfg_set_focus(1, 1) == 0, "focus: on, weekly");
+	cfg_get_theme(&th);
+	CHECK(th.id == 9, "focus: storing Focus leaves the theme alone");
+	th.id = 2;
+	CHECK(cfg_set_theme(&th) == 0, "theme: Bold");
+	CHECK(cfg_get_focus_on() == 1 && cfg_get_focus_win() == 1,
+	      "theme: storing a theme leaves Focus alone");
+	/* Off keeps the window, so turning it back on lands where it was. */
+	CHECK(cfg_set_focus(0, 1) == 0 && cfg_get_focus_on() == 0 &&
+	      cfg_get_focus_win() == 1, "focus: off remembers weekly");
+	CHECK(cfg_init() == 0 && cfg_get_focus_on() == 0 &&
+	      cfg_get_focus_win() == 1, "reboot: off, and weekly, both kept");
+
+	/* A byte this build never writes reads as the default, not as "on":
+	 * a future firmware's value after a downgrade, or a bit flip, must
+	 * not leave the panel in a mode Settings cannot show. */
+	CHECK(cfg_set_focus(1, 1) == 0, "focus: on, weekly again");
+	CHECK(cfg_set_focus(7, 0) != 0 && cfg_set_focus(1, 9) != 0,
+	      "focus: out-of-range values are refused");
+	CHECK(cfg_get_focus_on() == 1 && cfg_get_focus_win() == 1,
+	      "focus: ...and a refusal leaves the stored choice alone");
+	plant_focus(7, 9);
+	CHECK(cfg_init() == 0 && cfg_get_focus_on() == 0 &&
+	      cfg_get_focus_win() == 0,
+	      "focus: bytes this build never writes read as off, session");
+	check_desk_settings("focus: odd bytes");
+	{
+		struct rec_134 seen;
+
+		CHECK(boot_134(&seen) && seen.bright_pct == 60 &&
+		      seen.edition_locked == 1,
+		      "focus: 1.3.4 still reads the record Focus wrote");
 	}
 
 	/* --- 5. A blank partition --- */

@@ -59,6 +59,15 @@ void usage_view_set_clock(int hh, int mm);
 void usage_view_apply_theme(void);
 
 /*
+ * Focus mode: one window as a big gauge (weekly = false: the session window)
+ * and the other as a dim line under it; off is the two-gauge screen. Takes
+ * effect in place, keeping every reading, and may be called before
+ * usage_view_init() -- the choice outlives the screen, so a rebuilt screen
+ * comes up in it. Storage is the caller's (cfg_store); this file only draws.
+ */
+void usage_view_set_focus(bool on, bool weekly);
+
+/*
  * Boot progress: one CONNECTING takeover with a segmented bar that fills
  * green, current step named below. Call _begin once with the steps (max 3;
  * the USB list is link daemon / first push, and the three-step room was for

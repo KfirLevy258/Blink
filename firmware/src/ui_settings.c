@@ -216,6 +216,12 @@ static lv_obj_t *bright_ov;	/* the brightness screen itself, or NULL */
 static lv_obj_t *theme_ov;	/* the theme screen, or NULL */
 static lv_obj_t *theme_grid;	/* its tiles' container */
 static lv_obj_t *theme_edit_lbl;	/* the "Edit on computer" row's words */
+static lv_obj_t *focus_ov;	/* the Focus screen, or NULL */
+static lv_obj_t *focus_sub;	/* the Focus row's subtitle: "Session" */
+static lv_obj_t *focus_note;	/* the Focus screen's line under its choices */
+#define FOCUS_CHOICES 3
+static lv_obj_t *focus_btn[FOCUS_CHOICES];
+static void focus_forget(void);
 static lv_obj_t *seg[BRIGHT_STOPS];
 
 static void bright_refresh(void)
@@ -1267,9 +1273,9 @@ static void upd_timer_cb(lv_timer_t *t)
 
 	switch (snap.st) {
 	case OTA_UI_IDLE:
-		/* Left label + chevron already say "Software update"; the right
-		 * side is a STATUS, blank until there's something to report, so
-		 * it can't crowd the title. A pending badge is the exception.
+		/* The title and chevron already say "Software update"; the
+		 * subtitle is a STATUS, blank until there's something to report.
+		 * A pending badge is the exception.
 		 *
 		 * So is an out-of-date app: the board can update itself from
 		 * here, but the half running on the customer's computer cannot
@@ -1294,11 +1300,12 @@ static void upd_timer_cb(lv_timer_t *t)
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	case OTA_UI_AVAILABLE:
-		/* Version only: this row shares 296 px with "Software update" on
-		 * the left, which leaves ~13 characters here before the two
-		 * collide (the size string made it 23 and they overlapped --
-		 * user-reported 2026-07-25). Keep any future state text within
-		 * the same budget as "Update ready". */
+		/* Version only. This is the row's subtitle now, 134 px under
+		 * "Software update" (COL_R_W - COL_SUB_INSET), and it ellipsizes
+		 * past that; when it sat beside the name in a 296 px row the
+		 * size string made it 23 characters and the two overlapped
+		 * (user-reported 2026-07-25). Keep any future state text within
+		 * the budget "Update ready" (98 px) already fits. */
 		lv_label_set_text_fmt(upd_lbl, "Install %s", snap.version);
 		lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
@@ -1431,22 +1438,52 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
  * can afford to be rather than a fixed 56. See the layout note at the call
  * site. Labels align to the row's middle, so they follow whatever height it
  * is given. */
+/*
+ * The rows' shared styles. Each row used to carry its own copy of the same
+ * seven properties, and each of its labels a colour: measured on host LVGL
+ * with this file, the Focus row (a fourth row) put 1.5 KB on the settings
+ * panel, and sharing them took 240 B of that back with the panel rendering
+ * byte for byte the same. Re-set on every panel build, never while a row
+ * exists: build_panel() only runs once the old panel is gone.
+ */
+static lv_style_t st_row;	/* the row itself, and its title's colour */
+static lv_style_t st_row_dim;	/* its subtitle and chevron */
+static bool st_row_ready;
+
+static void row_styles(void)
+{
+	if (!st_row_ready) {
+		lv_style_init(&st_row);
+		lv_style_init(&st_row_dim);
+		st_row_ready = true;
+	}
+	lv_style_set_bg_color(&st_row, COL_PANEL);
+	lv_style_set_bg_opa(&st_row, LV_OPA_COVER);
+	lv_style_set_border_color(&st_row, COL_TRACK);
+	lv_style_set_border_width(&st_row, 1);
+	lv_style_set_radius(&st_row, 10);
+	lv_style_set_shadow_width(&st_row, 0);
+	lv_style_set_pad_all(&st_row, 0);
+	lv_style_set_text_color(&st_row, COL_TEXT);
+	lv_style_set_text_color(&st_row_dim, COL_DIM);
+}
+
 static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
 			const char *sub, bool danger, lv_event_cb_t cb,
 			void *user, lv_obj_t **sub_out)
 {
-	lv_color_t fg = danger ? COL_RED : COL_TEXT;
 	lv_obj_t *row = lv_btn_create(parent);
 
 	lv_obj_set_size(row, 296, h);
 	lv_obj_align(row, LV_ALIGN_TOP_LEFT, 12, y);
-	lv_obj_set_style_bg_color(row, danger ? COL_DANGER_BG : COL_PANEL, 0);
-	lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(row, danger ? COL_DANGER_BD : COL_TRACK, 0);
-	lv_obj_set_style_border_width(row, 1, 0);
-	lv_obj_set_style_radius(row, 10, 0);
-	lv_obj_set_style_shadow_width(row, 0, 0);
-	lv_obj_set_style_pad_all(row, 0, 0);
+	/* Everything rows have in common is in row_styles(), shared; only a
+	 * danger row carries its own colours on top. */
+	lv_obj_add_style(row, &st_row, 0);
+	if (danger) {
+		lv_obj_set_style_bg_color(row, COL_DANGER_BG, 0);
+		lv_obj_set_style_border_color(row, COL_DANGER_BD, 0);
+		lv_obj_set_style_text_color(row, COL_RED, 0);
+	}
 	/* Both flags off, as everywhere else on this panel: a horizontal drag
 	 * on a SCROLLABLE button is eaten as a scroll and the tap never fires,
 	 * and a press that drifts must not bubble into a panel close. */
@@ -1456,12 +1493,12 @@ static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
 
 	lv_obj_t *t = lv_label_create(row);
 
-	lv_label_set_text(t, title);
-	lv_obj_set_style_text_color(t, fg, 0);
+	lv_label_set_text(t, title);	/* its colour is the row's, inherited */
 	/* A NULL subtitle is a one-line row, and the title then sits on the
 	 * row's own middle rather than 11 px above a line that is not there.
-	 * The update row is the only one: its version line moved out to the
-	 * footer, where it belongs to the panel and not to a button. */
+	 * No row is one-line today: the update row's version line moved out
+	 * to the footer, and its state took the subtitle's place when the
+	 * row went to half width for Focus. */
 	lv_obj_align(t, LV_ALIGN_LEFT_MID, 14, sub ? -11 : 0);
 
 	lv_obj_t *sl = NULL;
@@ -1469,7 +1506,7 @@ static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
 	if (sub != NULL) {
 		sl = lv_label_create(row);
 		lv_label_set_text(sl, sub);
-		lv_obj_set_style_text_color(sl, COL_DIM, 0);
+		lv_obj_add_style(sl, &st_row_dim, 0);
 		/* Width-bounded and dotted. A centred line escapes this 320 px
 		 * panel around 45 characters, and two overflow bugs have
 		 * shipped that way. */
@@ -1481,7 +1518,9 @@ static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
 	lv_obj_t *chev = lv_label_create(row);
 
 	lv_label_set_text(chev, LV_SYMBOL_RIGHT);
-	lv_obj_set_style_text_color(chev, danger ? COL_RED : COL_DIM, 0);
+	if (!danger) {
+		lv_obj_add_style(chev, &st_row_dim, 0);
+	}
 	lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -12, 0);
 
 	if (sub_out) {
@@ -1492,24 +1531,82 @@ static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
 
 /* --- The brightness screen ------------------------------------------- */
 
-static void bright_close(void)
+/*
+ * Brightness and Focus free the settings panel's contents while they are up,
+ * the way the theme screen does (see MEMORY at the theme screen): on host
+ * LVGL with this file, Brightness drawn over the whole panel peaked at
+ * 30,632 B once the Focus row was on it, against a board pool of 30,632
+ * usable. Without the panel underneath it is gauges plus one screen: 25,496
+ * for either, which is the panel's own build peak -- the sub-screens are no
+ * longer the deepest thing Settings draws. (Host, Dark, two providers;
+ * pointers are twice the board's, so the [mem] lines are the real figure.)
+ *
+ * So opening one empties the panel object -- kept, so "is settings open"
+ * still answers yes and its gesture handler still runs -- and closing one
+ * deletes the panel and builds it again, which is also what brings the rows
+ * back showing the level and the choice just made. Both directions are
+ * deferred through lv_async_call, because every caller is an event on an
+ * object the change deletes: the row being tapped, or the back button.
+ *
+ * Every pointer into the panel is forgotten before it is emptied:
+ * bright_refresh() and focus_refresh() write through them.
+ */
+static bool sub_closing;	/* a close is queued; see sub_close() */
+static void build_panel(lv_obj_t *parent_scr);
+static void show_focus(lv_event_t *e);
+
+static void panel_empty(void)
 {
-	if (bright_ov == NULL) {
+	upd_btn = NULL;
+	upd_lbl = NULL;
+	pct_lbl = NULL;
+	focus_sub = NULL;
+	lv_obj_clean(panel);
+}
+
+static void sub_closed_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	sub_closing = false;
+	if (panel == NULL) {
+		return;		/* the whole panel went in the meantime */
+	}
+	if (bright_ov != NULL) {
+		/* Before the delete, so it still measures the screen at its
+		 * deepest: this one, the gauges, and an empty panel. */
+		mem_stats_report("brightness-close");
+		bright_big = NULL;
+		for (int i = 0; i < BRIGHT_STOPS; i++) {
+			seg[i] = NULL;
+		}
+		bright_ov = NULL;
+	} else if (focus_ov != NULL) {
+		mem_stats_report("focus-close");
+		focus_forget();
+	} else {
 		return;
 	}
-	/* Forget the children BEFORE deleting the parent: bright_refresh() can
-	 * be called from a step at any time and writes through both. */
-	bright_big = NULL;
-	for (int i = 0; i < BRIGHT_STOPS; i++) {
-		seg[i] = NULL;
+	lv_obj_t *scr = lv_obj_get_parent(panel);
+
+	lv_obj_del(panel);
+	panel = NULL;
+	build_panel(scr);
+}
+
+/* Taps that land while the close is queued -- a second press of the back
+ * button, a swipe after it -- find sub_closing set and do nothing more. */
+static void sub_close(void)
+{
+	if ((bright_ov == NULL && focus_ov == NULL) || sub_closing) {
+		return;
 	}
-	/* The brightness screen, drawn on top of the whole settings panel:
-	 * both trees alive at once, the deepest stack of objects Settings
-	 * builds. */
-	mem_stats_report("brightness-close");
-	lv_obj_del(bright_ov);
-	bright_ov = NULL;
-	bright_refresh();	/* the row's subtitle survives and needs the number */
+	sub_closing = true;
+	lv_async_call(sub_closed_cb, NULL);
+}
+
+static void bright_close(void)
+{
+	sub_close();
 }
 
 static void bright_close_cb(lv_event_t *e)
@@ -1539,9 +1636,10 @@ static void bright_stop_cb(lv_event_t *e)
 static void show_bright(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (bright_ov || confirm) {
+	if (bright_ov || focus_ov || theme_ov || confirm || panel == NULL) {
 		return;
 	}
+	panel_empty();		/* see sub_closed_cb() */
 	bright_ov = lv_obj_create(panel);
 	lv_obj_set_size(bright_ov, LV_PCT(100), LV_PCT(100));
 	lv_obj_set_style_bg_color(bright_ov, COL_BG, 0);
@@ -1996,7 +2094,7 @@ static void show_theme(bool fresh)
 	int n = theme_list(ids);
 	int pages = theme_pages();
 
-	if (theme_ov || bright_ov || confirm || panel == NULL) {
+	if (theme_ov || bright_ov || focus_ov || confirm || panel == NULL) {
 		return;
 	}
 	if (fresh) {
@@ -2024,6 +2122,7 @@ static void show_theme(bool fresh)
 	upd_btn = NULL;
 	upd_lbl = NULL;
 	pct_lbl = NULL;
+	focus_forget();		/* the Focus row's subtitle goes too */
 	lv_obj_clean(panel);
 	theme_styles();
 
@@ -2108,8 +2207,291 @@ static void theme_row_cb(lv_event_t *e)
 	if (!tile_was_a_tap()) {
 		return;
 	}
-	if (theme_ov == NULL && bright_ov == NULL && confirm == NULL) {
+	if (theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
+	    confirm == NULL) {
 		lv_async_call(theme_open_cb, NULL);
+	}
+}
+
+/* --- The Focus screen ------------------------------------------------- */
+
+/*
+ * Off, Session or Weekly: three choices, because "on" alone is not a setting
+ * -- the owner picks which window goes big (user answer 2026-10-25: chosen in
+ * Settings, never automatically). Stored as the two bytes cfg_store reserved
+ * for it; Off keeps the window, so turning Focus back on lands where it was.
+ *
+ * Three 93 x 100 buttons, 16.5 x 17.8 mm, side by side so the choice reads as
+ * one control. They share two static styles instead of carrying a dozen
+ * local properties each, and the panel's contents are freed while this is
+ * up (see sub_closed_cb): the LVGL pool is shared with the gauge screen, and
+ * the theme screen was found running it out (orchestrator review,
+ * 2026-10-27).
+ */
+#define FOCUS_BTN_W 93
+#define FOCUS_BTN_H 100
+#define FOCUS_BTN_Y 56
+#define FOCUS_NOTE_Y 176
+
+BUILD_ASSERT(12 + FOCUS_CHOICES * FOCUS_BTN_W + (FOCUS_CHOICES - 1) * 8 <= 308,
+	     "the Focus choices run past the right margin");
+BUILD_ASSERT(FOCUS_BTN_Y + FOCUS_BTN_H < FOCUS_NOTE_Y,
+	     "the Focus note sits on the choices");
+
+static const char *const focus_words[FOCUS_CHOICES] = {
+	"Off", "Session", "Weekly"
+};
+/* What each choice does, in a line the panel can hold (the longest is
+ * 29 characters, about 200 px). */
+static const char *const focus_notes[FOCUS_CHOICES] = {
+	"Both windows, side by side",
+	"Session big, weekly as a line",
+	"Weekly big, session as a line",
+};
+
+static lv_style_t focus_st_btn;	/* every choice */
+static lv_style_t focus_st_on;	/* ...and the chosen one, as LV_STATE_CHECKED */
+static bool focus_st_ready;
+
+/* 0 off, 1 session, 2 weekly: what the store says now. */
+static int focus_choice(void)
+{
+	if (!cfg_get_focus_on()) {
+		return 0;
+	}
+	return cfg_get_focus_win() ? 2 : 1;
+}
+
+static const char *focus_name(void)
+{
+	return focus_words[focus_choice()];
+}
+
+static void focus_refresh(void)
+{
+	int c = focus_choice();
+
+	if (focus_sub) {
+		lv_label_set_text(focus_sub, focus_words[c]);
+	}
+	if (focus_note) {
+		lv_label_set_text(focus_note, focus_notes[c]);
+	}
+	for (int i = 0; i < FOCUS_CHOICES; i++) {
+		if (focus_btn[i] == NULL) {
+			continue;
+		}
+		if (i == c) {
+			lv_obj_add_state(focus_btn[i], LV_STATE_CHECKED);
+		} else {
+			lv_obj_clear_state(focus_btn[i], LV_STATE_CHECKED);
+		}
+	}
+}
+
+/*
+ * The styles are (re)filled each time the screen opens, never while it is
+ * open: a theme change rebuilds the whole panel (rebuild_cb), so by the time
+ * this runs again no object still points at them, and the colours are the
+ * new theme's roles. Reset first, so a property list never grows.
+ */
+static void focus_styles(void)
+{
+	if (focus_st_ready) {
+		lv_style_reset(&focus_st_btn);
+		lv_style_reset(&focus_st_on);
+	}
+	lv_style_init(&focus_st_btn);
+	lv_style_set_bg_color(&focus_st_btn, COL_PANEL);
+	lv_style_set_bg_opa(&focus_st_btn, LV_OPA_COVER);
+	lv_style_set_border_color(&focus_st_btn, COL_TRACK);
+	lv_style_set_border_width(&focus_st_btn, 1);
+	lv_style_set_radius(&focus_st_btn, 10);
+	lv_style_set_shadow_width(&focus_st_btn, 0);
+	lv_style_set_pad_all(&focus_st_btn, 0);
+	/* Inherited by the word inside, so it needs no style of its own. */
+	lv_style_set_text_color(&focus_st_btn, COL_DIM);
+
+	/* Ringed in the text colour, as the chosen theme tile is, and its
+	 * word brightened to match. */
+	lv_style_init(&focus_st_on);
+	lv_style_set_border_color(&focus_st_on, COL_TEXT);
+	lv_style_set_border_width(&focus_st_on, 2);
+	lv_style_set_text_color(&focus_st_on, COL_TEXT);
+	focus_st_ready = true;
+}
+
+/* Everything on the Focus screen, and its row's subtitle, die with the panel:
+ * forget them before it goes, so focus_refresh() never writes through a
+ * deleted object. */
+static void focus_forget(void)
+{
+	focus_ov = NULL;
+	focus_sub = NULL;
+	focus_note = NULL;
+	for (int i = 0; i < FOCUS_CHOICES; i++) {
+		focus_btn[i] = NULL;
+	}
+}
+
+/* Deferred, and the panel is built again behind it: see sub_closed_cb(),
+ * which also prints "focus-close" before anything is freed. */
+static void focus_close(void)
+{
+	sub_close();
+}
+
+static void focus_close_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	focus_close();
+}
+
+static void focus_gesture_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	/* As on the brightness screen: the closing swipe closes this first. */
+	if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
+		focus_close();
+	}
+}
+
+static void focus_pick_cb(lv_event_t *e)
+{
+	int c = (int)(intptr_t)lv_event_get_user_data(e);
+	uint8_t on = c != 0;
+	/* Off keeps whichever window was last chosen. */
+	uint8_t win = c == 0 ? cfg_get_focus_win() : (c == 2);
+
+	/* A back swipe that starts on a button is a swipe: without this it
+	 * stored that button's choice on the way out (review, 12 of 12 runs).
+	 * Nor does a press count once the close is queued. */
+	if (!tile_was_a_tap() || sub_closing) {
+		return;
+	}
+	if (c == focus_choice()) {
+		return;		/* a flash write that buys nothing */
+	}
+	if (cfg_set_focus(on, win) != 0) {
+		printk("[focus] could not store the choice\n");
+	}
+	/* The gauge screen is underneath this one and changes in place, so
+	 * the panel opens onto the new layout when it closes. Drawn from
+	 * what was stored, so the screen never shows a choice the next boot
+	 * would not. */
+	usage_view_set_focus(cfg_get_focus_on(), cfg_get_focus_win());
+	focus_refresh();
+}
+
+static void show_focus(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (focus_ov || bright_ov || theme_ov || confirm || panel == NULL) {
+		return;
+	}
+	/* The panel's contents go first, as for Brightness (sub_closed_cb).
+	 * Then the styles: nothing refers to them once the old screen and
+	 * panel are gone. */
+	panel_empty();
+	focus_styles();
+
+	focus_ov = lv_obj_create(panel);
+	lv_obj_set_size(focus_ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(focus_ov, COL_BG, 0);
+	lv_obj_set_style_bg_opa(focus_ov, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(focus_ov, 0, 0);
+	lv_obj_set_style_radius(focus_ov, 0, 0);
+	lv_obj_set_style_pad_all(focus_ov, 0, 0);
+	lv_obj_clear_flag(focus_ov, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(focus_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(focus_ov, focus_gesture_cb, LV_EVENT_GESTURE, NULL);
+	lv_obj_center(focus_ov);
+
+	mk_back(focus_ov, focus_close_cb);
+
+	lv_obj_t *title = lv_label_create(focus_ov);
+
+	lv_label_set_text(title, "Focus");
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+	mk_line(focus_ov, 40);
+
+	for (int i = 0; i < FOCUS_CHOICES; i++) {
+		lv_obj_t *b = lv_btn_create(focus_ov);
+
+		/* The LVGL theme's default button styles come off first, so
+		 * the shared pair is the whole look. */
+		lv_obj_remove_style_all(b);
+		lv_obj_add_style(b, &focus_st_btn, 0);
+		lv_obj_add_style(b, &focus_st_on, LV_STATE_CHECKED);
+		lv_obj_set_size(b, FOCUS_BTN_W, FOCUS_BTN_H);
+		lv_obj_align(b, LV_ALIGN_TOP_LEFT, 12 + i * (FOCUS_BTN_W + 8),
+			     FOCUS_BTN_Y);
+		/* Not scrollable, or a drag is eaten as a scroll and the tap
+		 * never fires. Gestures BUBBLE, as from a theme tile: the three
+		 * buttons fill the middle of the screen, so most back swipes
+		 * start on one, and they must reach focus_gesture_cb to close
+		 * it. tile_was_a_tap() in focus_pick_cb keeps that swipe from
+		 * also choosing the button it started on. */
+		lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+		lv_obj_add_flag(b, LV_OBJ_FLAG_GESTURE_BUBBLE);
+		lv_obj_add_event_cb(b, focus_pick_cb, LV_EVENT_CLICKED,
+				    (void *)(intptr_t)i);
+
+		lv_obj_t *l = lv_label_create(b);
+
+		lv_label_set_text(l, focus_words[i]);
+		lv_obj_center(l);
+		focus_btn[i] = b;
+	}
+
+	focus_note = lv_label_create(focus_ov);
+	lv_obj_set_style_text_color(focus_note, COL_DIM, 0);
+	lv_obj_align(focus_note, LV_ALIGN_TOP_MID, 0, FOCUS_NOTE_Y);
+
+	focus_refresh();
+}
+
+/*
+ * The Brightness and Focus rows' taps. Deferred, like the Theme row's,
+ * because opening either empties the panel, the tapped row among it. A
+ * second tap before it runs queues a second open, which finds the screen
+ * already up and returns.
+ */
+static void bright_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	show_bright(NULL);
+}
+
+static void focus_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	show_focus(NULL);
+}
+
+static bool sub_can_open(void)
+{
+	return theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
+	       confirm == NULL && !sub_closing;
+}
+
+static void bright_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	/* As the Theme row: a swipe that starts here is a swipe, not a tap. */
+	if (tile_was_a_tap() && sub_can_open()) {
+		lv_async_call(bright_open_cb, NULL);
+	}
+}
+
+static void focus_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (tile_was_a_tap() && sub_can_open()) {
+		lv_async_call(focus_open_cb, NULL);
 	}
 }
 
@@ -2249,6 +2631,7 @@ static void do_close(void (*pump)(void))
 	theme_ov = NULL;	/* these die with the panel too */
 	theme_grid = NULL;
 	theme_edit_lbl = NULL;
+	focus_forget();
 	lv_obj_del(panel);	/* deletes confirm and any overlay with it */
 	panel = NULL;
 	confirm = NULL;
@@ -2342,7 +2725,8 @@ static void back_cb(lv_event_t *e)
 	 * one is unreachable while it is up -- but the extended touch area
 	 * reaches past the overlay's edge, and a press landing there must not
 	 * close the panel out from under it. */
-	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL) {
+	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL &&
+	    focus_ov == NULL) {
 		close_panel();
 	}
 }
@@ -2351,6 +2735,7 @@ static void panel_gesture_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL &&
+	    focus_ov == NULL &&
 	    lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
 		close_panel();
 	}
@@ -2377,6 +2762,7 @@ static void rebuild_cb(void *unused)
 	}
 	bool theme_was_open = theme_ov != NULL;
 	bool bright_was_open = bright_ov != NULL;
+	bool focus_was_open = focus_ov != NULL;
 	lv_obj_t *scr = lv_obj_get_parent(panel);
 
 	upd_btn = NULL;
@@ -2390,6 +2776,7 @@ static void rebuild_cb(void *unused)
 	theme_grid = NULL;
 	theme_edit_lbl = NULL;
 	bright_ov = NULL;
+	focus_forget();
 	lv_obj_del(panel);
 	panel = NULL;
 	build_panel(scr);
@@ -2397,6 +2784,8 @@ static void rebuild_cb(void *unused)
 		show_theme(false);
 	} else if (bright_was_open) {
 		show_bright(NULL);
+	} else if (focus_was_open) {
+		show_focus(NULL);
 	}
 }
 
@@ -2441,6 +2830,7 @@ void ui_settings_apply_theme(void)
 
 static void build_panel(lv_obj_t *parent_scr)
 {
+	row_styles();
 	panel = lv_obj_create(parent_scr);
 	lv_obj_set_size(panel, LV_PCT(100), LV_PCT(100));
 	lv_obj_set_style_bg_color(panel, COL_BG, 0);
@@ -2495,6 +2885,17 @@ static void build_panel(lv_obj_t *parent_scr)
 #define ROW_TOP 56		/* first row, clear of the title rule at y=40 */
 #define ROW_GAP 8
 
+/* The two columns: Brightness and Focus on the left, Theme and Software
+ * update on the right. See the layout note in build_panel(). */
+#define COL_L_W 120
+#define COL_R_W 168
+#define COL_R_X (12 + COL_L_W + ROW_GAP)
+/* A subtitle starts 14 px in and must stop short of the chevron. */
+#define COL_SUB_INSET 34
+
+BUILD_ASSERT(COL_L_W + ROW_GAP + COL_R_W == 296,
+	     "the two settings columns no longer fill the 296 px row");
+
 /*
  * The footer: two centred lines under the last row, on the panel itself.
  *
@@ -2537,50 +2938,55 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 	char sub[56];
 
 	/*
-	 * Brightness and Theme share the first row, 144 px each.
+	 * Four controls in two rows, a narrow column and a wide one.
 	 *
-	 * There is no third row to give Theme: two rows and the two-line
-	 * footer already use the 240 px (the BUILD_ASSERTs above). Halving the
-	 * WIDTH keeps every target at the 56 px -- 10.0 mm -- height this panel
-	 * needs, and 144 px is still 25.6 mm across. Each subtitle is short by
-	 * nature, a level or a theme name, so neither loses anything.
+	 * There is no third row to give anything: two rows and the two-line
+	 * footer already use the 240 px (the BUILD_ASSERTs above). Splitting
+	 * the WIDTH keeps every target at the 56 px -- 10.0 mm -- height this
+	 * panel needs. Brightness and Theme shared the first row at 144 px each
+	 * until Focus needed a place; then the split moved to 120 | 168,
+	 * because the right-hand titles are the long ones. "Software update"
+	 * measures 121 px in montserrat_14 (lv_text_get_size on host), and a
+	 * 144 px half puts its last letters under the chevron at 123; 168 holds
+	 * it with the chevron clear. The narrow column is the tight one now:
+	 * "Brightness" ends 4 px short of its chevron (review, 2026-10-27), so
+	 * a longer word there would need the split moved back. "Focus" (43 px)
+	 * has room, and Theme's wider subtitle now holds "Colour-blind safe"
+	 * whole.
 	 */
 	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
 	lv_obj_t *half = mk_row(panel, ROW_TOP, ROW_H, "Brightness", sub, false,
-				show_bright, NULL, &pct_lbl);
+				bright_row_cb, NULL, &pct_lbl);
 
-	lv_obj_set_width(half, 144);
-	lv_obj_set_width(pct_lbl, 100);
+	lv_obj_set_width(half, COL_L_W);
+	lv_obj_set_width(pct_lbl, COL_L_W - COL_SUB_INSET);
 
 	lv_obj_t *tsub;
 
 	half = mk_row(panel, ROW_TOP, ROW_H, "Theme",
 		      theme_name(theme_active_id()), false, theme_row_cb, NULL,
 		      &tsub);
-	lv_obj_set_width(half, 144);
-	lv_obj_align(half, LV_ALIGN_TOP_LEFT, 164, ROW_TOP);
-	lv_obj_set_width(tsub, 100);
+	lv_obj_set_width(half, COL_R_W);
+	lv_obj_align(half, LV_ALIGN_TOP_LEFT, COL_R_X, ROW_TOP);
+	lv_obj_set_width(tsub, COL_R_W - COL_SUB_INSET);
+
+	half = mk_row(panel, ROW_TOP + (ROW_H + ROW_GAP), ROW_H, "Focus",
+		      focus_name(), false, focus_row_cb, NULL, &focus_sub);
+	lv_obj_set_width(half, COL_L_W);
+	lv_obj_set_width(focus_sub, COL_L_W - COL_SUB_INSET);
 
 	/*
-	 * Both versions live here, on the row that is already about versions.
-	 *
-	 * There is no footer left to put them in -- the two rows and their
-	 * margins use the height -- and a footer was the wrong home anyway: someone
-	 * looking for a version number is already on their way to this row. It
-	 * is also the only place on the device that can say which HALF of the
-	 * pair is behind, since the app's version is otherwise invisible from
-	 * the panel.
+	 * The row's state is its subtitle now -- "Up to date", "Install
+	 * 1.4.0" -- where it sat beside the name while the row had 296 px.
+	 * Same label, same words and colours (set_upd_row), one line lower.
+	 * "Update ready" is 98 px, inside the 134 the subtitle has.
 	 */
 	upd_btn = mk_row(panel, ROW_TOP + (ROW_H + ROW_GAP), ROW_H,
-			 "Software update", NULL,
-			 false, upd_cb, NULL, NULL);
-
-	/* The row's state, beside the row's name. Right-aligned clear of the
-	 * chevron so it can grow to "Install 0.6.1" without colliding, and on
-	 * the middle now that there is no second line to sit above. */
-	upd_lbl = lv_label_create(upd_btn);
-	lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
-	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -34, 0);
+			 "Software update", "", false, upd_cb, NULL, &upd_lbl);
+	lv_obj_set_width(upd_btn, COL_R_W);
+	lv_obj_align(upd_btn, LV_ALIGN_TOP_LEFT, COL_R_X,
+		     ROW_TOP + (ROW_H + ROW_GAP));
+	lv_obj_set_width(upd_lbl, COL_R_W - COL_SUB_INSET);
 
 	/*
 	 * Both versions, on the panel rather than in the button.

@@ -97,9 +97,41 @@ struct gauge {
 	 * countdown and falls back.
 	 */
 	double burn;
+	/*
+	 * The figure this gauge is showing right now, -1 for "--%" -- which
+	 * mid-swipe is neither page's reading but a number on its way between
+	 * them. Kept because in Focus mode the gauge that is not big has no
+	 * figure label to read it back from: its number lives inside the dim
+	 * line, and the line is rebuilt whenever either half of it moves.
+	 */
+	double shown;
 };
 
 static struct gauge session, weekly;
+
+/*
+ * Focus mode, and which window it puts in the middle.
+ *
+ * Kept here rather than read from cfg_store when drawing, so this file keeps
+ * drawing and nothing else -- panel_render builds it with no store at all --
+ * and so the choice survives usage_view_deinit(): a screen rebuilt in Focus
+ * comes back in Focus. Set by usage_view_set_focus().
+ */
+static bool focus_on;
+static bool focus_weekly;
+
+LV_FONT_DECLARE(font_focus_40);
+
+static struct gauge *focus_big(void)
+{
+	return focus_weekly ? &weekly : &session;
+}
+
+/* The gauge whose countdown label is carrying the dim line. */
+static bool is_focus_line(const struct gauge *g)
+{
+	return focus_on && g != focus_big();
+}
 /*
  * Two attention indicators -- but not the two 6540287 removed.
  *
@@ -278,6 +310,7 @@ static char svc_buf[FMT_HINT_MAX];
 
 static void render_weekly(void);
 static void render_age(void);
+static void morph_exec(void *unused, int32_t t);
 /* Defined beside pip_colour(), which it borrows; called from the 1 s tick,
  * which runs earlier in this file. */
 static void toast_hide(void);
@@ -367,6 +400,23 @@ static lv_color_t arc_tint(const struct gauge *g, double pct);
  * the gauge is built and again on every theme change, so a theme can never
  * reach one gauge and not the other.
  */
+/*
+ * A countdown is dim, always -- except when it is Focus mode's dim line, the
+ * only place the small window's number is on screen at all. Then it wears
+ * the severity of that number from 60% up, the same thresholds as every
+ * ring: a line that stayed grey at 95% would be the panel hiding a warning
+ * because it was drawn small. Its amber and red are the theme's mid and high,
+ * which tests/theme already holds to 4.5:1 as text on every theme because the
+ * hint line wears them.
+ */
+static lv_color_t countdown_colour(const struct gauge *g)
+{
+	if (is_focus_line(g) && g->shown >= 60.0) {
+		return severity(g->shown);
+	}
+	return COL_DIM;
+}
+
 static void style_gauge(struct gauge *g)
 {
 	const struct palette *p = theme_pal();
@@ -386,13 +436,14 @@ static void style_gauge(struct gauge *g)
 	lv_obj_set_style_border_opa(g->arc, knob, LV_PART_KNOB);
 	lv_obj_set_style_text_color(g->pct, COL_TEXT, 0);
 	lv_obj_set_style_text_color(g->name, COL_DIM, 0);
-	lv_obj_set_style_text_color(g->countdown, COL_DIM, 0);
+	lv_obj_set_style_text_color(g->countdown, countdown_colour(g), 0);
 }
 
 static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 			const char *title)
 {
 	g->resets_in_s = -1;
+	g->shown = -1;
 
 	g->arc = lv_arc_create(parent);
 	lv_obj_set_size(g->arc, GAUGE_ARC_SZ, GAUGE_ARC_SZ);
@@ -459,6 +510,82 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	style_gauge(g);
 }
 
+/* Show or hide one object without caring which it was. */
+static void show_obj(lv_obj_t *o, bool on)
+{
+	if (on) {
+		lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+	} else {
+		lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+	}
+}
+
+/* A gauge where the two-gauge screen keeps it: the geometry build_gauge()
+ * gave it, restated so leaving Focus puts back exactly that. */
+static void place_side(struct gauge *g, lv_coord_t cx)
+{
+	lv_obj_set_size(g->arc, GAUGE_ARC_SZ, GAUGE_ARC_SZ);
+	lv_obj_align(g->arc, LV_ALIGN_TOP_MID, cx, GAUGE_ARC_Y);
+	lv_obj_set_style_text_font(g->pct, &lv_font_montserrat_20, 0);
+	lv_obj_set_width(g->pct, GAUGE_PCT_MAX_W);
+	lv_label_set_long_mode(g->pct, LV_LABEL_LONG_WRAP);
+	lv_obj_align(g->pct, LV_ALIGN_TOP_MID, cx, GAUGE_PCT_Y);
+	lv_obj_align(g->name, LV_ALIGN_TOP_MID, cx, GAUGE_NAME_Y);
+	lv_obj_set_width(g->countdown, GAUGE_CD_MAX_W);
+	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
+	show_obj(g->arc, true);
+	show_obj(g->pct, true);
+	show_obj(g->name, true);
+}
+
+/*
+ * Put the gauges where the current mode wants them. Geometry and visibility
+ * only; the words are render_gauges()'s.
+ *
+ * Every call here changes a style property build_gauge() already set -- size,
+ * alignment, font, width -- or a flag, so LVGL rewrites values it holds and
+ * the pool does not grow by switching. Measured on host LVGL (2026-10-27,
+ * two providers, a status line, both pages visited): the screen holds
+ * 16,288 B in either mode and after any sequence of switches. What does move
+ * is the drawing peak, +608 B in Focus: LVGL draws a label's glyphs through
+ * one A8 buffer sized to its largest glyph, and the 40 px '%' is 32 x 29.
+ * It lives only while the gauge screen is being drawn, so it never stacks
+ * with Settings, which covers that screen.
+ */
+static void layout_gauges(void)
+{
+	struct gauge *big = focus_big();
+	struct gauge *small = big == &session ? &weekly : &session;
+
+	if (!focus_on) {
+		place_side(&session, -GAUGE_CX);
+		place_side(&weekly, GAUGE_CX);
+		return;
+	}
+	lv_obj_set_size(big->arc, FOCUS_ARC_SZ, FOCUS_ARC_SZ);
+	lv_obj_align(big->arc, LV_ALIGN_TOP_MID, 0, FOCUS_ARC_Y);
+	lv_obj_set_style_text_font(big->pct, &font_focus_40, 0);
+	lv_obj_set_width(big->pct, FOCUS_PCT_MAX_W);
+	/* Clipped, not wrapped, as a last resort: paint_pct() already drops
+	 * to the 20 px font from 200% (see FOCUS_PCT_MAX_W), and a wrapped
+	 * figure would fall onto the caption. paint_pct() also picks the
+	 * font; this sets the usual one before the first reading. */
+	lv_label_set_long_mode(big->pct, LV_LABEL_LONG_CLIP);
+	lv_obj_align(big->pct, LV_ALIGN_TOP_MID, 0, FOCUS_PCT_Y);
+	lv_obj_align(big->name, LV_ALIGN_TOP_MID, 0, FOCUS_NAME_Y);
+	lv_obj_set_width(big->countdown, GAUGE_CD_MAX_W);
+	lv_obj_align(big->countdown, LV_ALIGN_TOP_MID, 0, FOCUS_CD_Y);
+	show_obj(big->arc, true);
+	show_obj(big->pct, true);
+	show_obj(big->name, true);
+
+	show_obj(small->arc, false);
+	show_obj(small->pct, false);
+	show_obj(small->name, false);
+	lv_obj_set_width(small->countdown, FOCUS_OTHER_MAX_W);
+	lv_obj_align(small->countdown, LV_ALIGN_TOP_MID, 0, FOCUS_OTHER_Y);
+}
+
 static lv_color_t arc_tint(const struct gauge *g, double pct)
 {
 	return lv_color_hex(theme_arc_colour(theme_pal(), g == &weekly, pct));
@@ -475,14 +602,30 @@ static void render_countdown(struct gauge *g)
 	 * never mixed with one: either a time or a rate, never both, never one
 	 * standing in for the other while the other exists.
 	 */
+	buf[0] = '\0';
 	if (g->resets_in_s < 0 && g->burn > 0) {
 		fmt_burn(g->burn, buf, sizeof(buf));
-		if (buf[0] != '\0') {
-			lv_label_set_text(g->countdown, buf);
-			return;
-		}
 	}
-	fmt_countdown(g->resets_in_s, buf, sizeof(buf));
+	if (buf[0] == '\0') {
+		fmt_countdown(g->resets_in_s, buf, sizeof(buf));
+	}
+	/*
+	 * In Focus mode the small gauge has no ring, no figure and no caption
+	 * on screen, so its countdown line says all three: the dim line under
+	 * the big gauge. It is rebuilt from here, the one place that already
+	 * runs whenever the time moves -- every second, at a reset, at a page
+	 * change -- and from paint_pct() when the number does.
+	 */
+	if (is_focus_line(g)) {
+		char line[FMT_FOCUS_MAX];
+
+		fmt_focus_line(g == &weekly ? "Weekly" : "Session", g->shown,
+			       buf, line, sizeof(line));
+		lv_label_set_text(g->countdown, line);
+		lv_obj_set_style_text_color(g->countdown, countdown_colour(g),
+					    0);
+		return;
+	}
 	/*
 	 * A duration, and nothing else. The name used to ride with the number
 	 * because the panel showed two providers at once and a bare figure had
@@ -490,7 +633,53 @@ static void render_countdown(struct gauge *g)
 	 * question, so the answer stops being worth a line under both gauges.
 	 */
 	lv_label_set_text(g->countdown, buf);
+}
 
+/*
+ * One gauge's figure and ring, from a percentage (negative: "--%").
+ *
+ * Four copies of this lived in render_gauges(), render_weekly(), morph_arc()
+ * and expire_session(), identical but for which gauge they named. Focus mode
+ * gave them a fifth thing to do -- the small gauge's number is in the dim
+ * line, not in its own label -- and one function is how all four learn it.
+ */
+static void paint_pct(struct gauge *g, double pct)
+{
+	char buf[8];
+
+	g->shown = pct;
+	if (focus_on && g == focus_big()) {
+		/*
+		 * The 40 px figure holds every reading up to 199% inside the
+		 * thickest ring ("100%" is the widest, 103 px of the 112 the
+		 * hollow has). From 200 it does not: "200%" is 111 px and its
+		 * ends touch a 22 px arc (review, 2026-10-27). A reading that
+		 * far past its limit is rare and needs saying, not size, so
+		 * it drops to the two-gauge screen's 20 px figure.
+		 */
+		const lv_font_t *f = pct_int(pct) >= 200
+					     ? &lv_font_montserrat_20
+					     : &font_focus_40;
+
+		/* Only on a change: a style write re-lays the label out, and
+		 * a page swipe calls this every frame. */
+		if (lv_obj_get_style_text_font(g->pct, 0) != f) {
+			lv_obj_set_style_text_font(g->pct, f, 0);
+		}
+	}
+	if (pct < 0) {
+		lv_label_set_text(g->pct, "--%");
+		lv_arc_set_value(g->arc, 0);
+	} else {
+		snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(pct));
+		lv_label_set_text(g->pct, buf);
+		lv_arc_set_value(g->arc, arc_value(pct));
+		lv_obj_set_style_arc_color(g->arc, arc_tint(g, pct),
+					   LV_PART_INDICATOR);
+	}
+	if (is_focus_line(g)) {
+		render_countdown(g);
+	}
 }
 
 /* The weekly arc and its countdown: the overall weekly window. */
@@ -499,22 +688,8 @@ static void render_weekly(void)
 	/* One window, so the gauge never needs to say which one it is showing
 	 * -- but it still says it, because "WEEKLY 7d" is the honest name for
 	 * the number under it. */
-	double pct = last_w_pct;
-
 	lv_label_set_text(weekly.name, "WEEKLY 7d");
-	if (pct < 0) {
-		lv_label_set_text(weekly.pct, "--%");
-		lv_arc_set_value(weekly.arc, 0);
-		return;
-	}
-
-	char buf[8];
-
-	snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(pct));
-	lv_label_set_text(weekly.pct, buf);
-	lv_arc_set_value(weekly.arc, arc_value(pct));
-	lv_obj_set_style_arc_color(weekly.arc, arc_tint(&weekly, pct),
-				   LV_PART_INDICATOR);
+	paint_pct(&weekly, last_w_pct);
 }
 
 static lv_obj_t *gauge_scr;
@@ -893,7 +1068,41 @@ void usage_view_init(void)
 	lv_obj_set_style_text_color(boot_hint, COL_DIM, 0);
 	lv_obj_align(boot_hint, LV_ALIGN_TOP_MID, 0, 178);
 
+	/* Born in whichever mode the owner left it in, with the dim line
+	 * already saying "Weekly --%" rather than a bare "--". */
+	layout_gauges();
+	render_countdown(&session);
+	render_countdown(&weekly);
 	built = true;
+}
+
+void usage_view_set_focus(bool on, bool weekly_big)
+{
+	focus_on = on;
+	focus_weekly = weekly_big;
+	if (!built) {
+		return;		/* usage_view_init() lays it out */
+	}
+	/*
+	 * In place, the way a theme change is, and for the same reason: a
+	 * rebuild drops the readings until the daemon re-sends them, and this
+	 * is a setting the owner flips while looking at the result.
+	 *
+	 * A swipe in flight is finished first. Its animation interpolates both
+	 * rings and fades both countdowns, and one of them is about to become
+	 * the dim line; landing it on the page's real numbers before moving
+	 * anything is what keeps a half-faded line from being left behind.
+	 */
+	lv_anim_delete(NULL, morph_exec);
+	lv_obj_set_style_text_opa(session.countdown, LV_OPA_COVER, 0);
+	lv_obj_set_style_text_opa(weekly.countdown, LV_OPA_COVER, 0);
+	if (provider_lbl) {
+		lv_obj_set_style_text_opa(provider_lbl, LV_OPA_COVER, 0);
+	}
+	layout_gauges();
+	render_gauges();
+	usage_view_set_status(last_status);	/* what morph_done() would do */
+	lv_obj_invalidate(gauge_scr);
 }
 
 void usage_view_boot_begin(const char *const *steps, int nsteps)
@@ -927,7 +1136,6 @@ bool usage_view_have_data(void)
 static void render_gauges(void)
 {
 	struct page_data *p = &pg[cur_page];
-	char buf[8];
 
 	if (!built) {
 		return;
@@ -938,18 +1146,8 @@ static void render_gauges(void)
 	 * Claude Code's payload entirely. render_weekly() has always honoured
 	 * that; this side did not, so an absent five_hour window rendered as a
 	 * confident green 0%, which is the frozen-meter reading the sentinel
-	 * exists to prevent. */
-	if (p->s_pct < 0) {
-		lv_label_set_text(session.pct, "--%");
-		lv_arc_set_value(session.arc, 0);
-	} else {
-		snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(p->s_pct));
-		lv_label_set_text(session.pct, buf);
-		lv_arc_set_value(session.arc, arc_value(p->s_pct));
-		lv_obj_set_style_arc_color(session.arc,
-					   arc_tint(&session, p->s_pct),
-					   LV_PART_INDICATOR);
-	}
+	 * exists to prevent. paint_pct() draws "--%" for it. */
+	paint_pct(&session, p->s_pct);
 	session.resets_in_s = p->s_in_s;
 	session.burn = p->burn;
 	render_countdown(&session);
@@ -1215,24 +1413,15 @@ static void morph_text_opa(int32_t t)
 /* One ring: where it is now, on the way from one reading to the other. */
 static void morph_arc(struct gauge *g, double pct)
 {
-	char buf[8];
-
-	if (pct < 0) {
-		lv_label_set_text(g->pct, "--%");
-		lv_arc_set_value(g->arc, 0);
-		return;
-	}
-	snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(pct));
-	lv_label_set_text(g->pct, buf);
-	lv_arc_set_value(g->arc, arc_value(pct));
 	/*
 	 * Severity follows the value it is describing, so the ring changes
 	 * colour where it crosses the threshold rather than at either end.
 	 * Interpolating the colours themselves would put the ring through hues
 	 * that mean nothing -- olive between green and amber -- and this
-	 * palette's whole job is that a colour means one thing.
+	 * palette's whole job is that a colour means one thing. In Focus mode
+	 * the dim line's number travels too, inside the line.
 	 */
-	lv_obj_set_style_arc_color(g->arc, arc_tint(g, pct), LV_PART_INDICATOR);
+	paint_pct(g, pct);
 }
 
 static void morph_exec(void *unused, int32_t t)
@@ -1568,12 +1757,9 @@ static void expire_session(void)
 	pg[cur_page].s_in_s = -1;
 	pg[cur_page].s_pct = 0;
 	session.resets_in_s = -1;
-	render_countdown(&session);
 	last_s_pct = 0;
-	lv_label_set_text(session.pct, "0%");
-	lv_arc_set_value(session.arc, 0);
-	lv_obj_set_style_arc_color(session.arc, arc_tint(&session, 0),
-				   LV_PART_INDICATOR);
+	paint_pct(&session, 0);
+	render_countdown(&session);
 }
 
 static void expire_weekly(void)
@@ -2151,8 +2337,10 @@ static void refresh_provider1(void)
 	lv_obj_set_style_bg_color(weekly.arc, COL_TEXT, LV_PART_KNOB);
 	/* The countdown is a bare duration now, so there is no name on that
 	 * line for an identity hue to mark. It stays quiet. */
-	lv_obj_set_style_text_color(session.countdown, COL_DIM, 0);
-	lv_obj_set_style_text_color(weekly.countdown, COL_DIM, 0);
+	lv_obj_set_style_text_color(session.countdown,
+				    countdown_colour(&session), 0);
+	lv_obj_set_style_text_color(weekly.countdown,
+				    countdown_colour(&weekly), 0);
 	if (provider_lbl) {
 		char t[sizeof(provider1_tag)];
 

@@ -429,4 +429,62 @@
  */
 #define TOAST_TTL_S		5
 
+/*
+ * Focus mode: one window as a big gauge, the other as a dim line under it.
+ *
+ * The SAME objects as the two-gauge screen, moved and resized, never a second
+ * set: the LVGL pool is 30 KB and the gauge screen already used 19.3 KB of it
+ * on the desk board (mem_stats "gauges", 2026-10-27), so a second layout of
+ * objects -- Lite mode's original plan -- would have been 7 KB the settings
+ * panel no longer had. The focused gauge's arc, figure, caption and countdown
+ * take the middle; the other gauge's arc, figure and caption hide, and its
+ * countdown label becomes the dim line.
+ *
+ * Everything below the header is laid out around ONE fact: a 270-degree ring
+ * is open at the bottom. Its two ends sit at 45 degrees below the horizontal,
+ * so the quarter between them is empty and the caption and countdown can go
+ * there, and nothing of the ring reaches below its ends -- which is what lets
+ * the dim line run the full width under it.
+ *
+ * Every clearance is checked against the THICKEST arc a theme can draw
+ * (FOCUS_ARC_W_MAX, Bold's and a custom theme's 22 px, theme.h's
+ * THEME_ARC_W_MAX), with round ends and the ball on, because that is the
+ * stroke that eats the hollow. tests/usage_layout samples every pixel of each
+ * text box against that stroke.
+ */
+#define FOCUS_ARC_SZ		156
+#define FOCUS_ARC_Y		GAUGE_ARC_Y
+#define FOCUS_ARC_W_MAX		22
+#define FOCUS_CY		(FOCUS_ARC_Y + FOCUS_ARC_SZ / 2)
+/* font_focus_40.c's .line_height. Digits only, so no descender: the box is
+ * the glyphs. */
+#define FOCUS_PCT_FONT_H	29
+#define FOCUS_PCT_Y		(FOCUS_CY - FOCUS_PCT_FONT_H / 2)
+/*
+ * The hollow inside the thickest stroke. "100%" measures 103 px in
+ * font_focus_40 (lv_text_get_size on host, 2026-10-27), and the hollow is
+ * widest exactly at the centre line the figure sits on. Every reading under
+ * 200% fits ("100%" is the widest of them, measured over 0..199); "200%" is
+ * 111 px and touches a 22 px ring, so from 200 paint_pct() draws the figure
+ * in the 20 px font, where even the display clamp's "1000%" is 63.
+ */
+#define FOCUS_PCT_MAX_W		(FOCUS_ARC_SZ - 2 * FOCUS_ARC_W_MAX)
+/* "SESSION 5h" under the figure: 85 px measured, which the thick ring's
+ * hollow still holds at this depth -- it is 90 px wide at the label's lower
+ * edge. */
+#define FOCUS_NAME_Y		(FOCUS_PCT_Y + FOCUS_PCT_FONT_H + 2)
+#define FOCUS_NAME_W		85
+/* The countdown in the open quarter. "999d 23h" is the widest it gets, 67 px
+ * measured; "00m 00s" and "+999%/h" are 62. */
+#define FOCUS_CD_Y		(FOCUS_NAME_Y + FONT_LINE_H + 2)
+#define FOCUS_CD_W		67
+/*
+ * The other window. "Session 1000% <bullet> 999d 23h" -- fmt_focus_line()'s
+ * longest -- measures 182 px; an ordinary "Weekly 42% <bullet> 5d 6h" is
+ * about 140. Under the ring's ends and above the provider pill.
+ */
+#define FOCUS_OTHER_Y		184
+#define FOCUS_OTHER_MAX_W	200
+#define FOCUS_OTHER_W_LONGEST	182
+
 #endif /* USAGE_LAYOUT_H */

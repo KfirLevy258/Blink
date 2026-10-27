@@ -71,6 +71,7 @@ $CC -O1 -w -DLV_CONF_INCLUDE_SIMPLE=1 \
 	"$ROOT/firmware/src/svc_state.c" \
 	"$ROOT/firmware/src/theme.c" \
 	"$ROOT/firmware/src/msg_parse.c" \
+	"$ROOT/firmware/src/font_focus_40.c" \
 	@"$BUILD/srcs.txt" \
 	-lm -o "$BUILD/render"
 
@@ -86,6 +87,21 @@ done
 for theme in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
 	for scene in 0 1 13 15; do
 		"$BUILD/render" "$OUT/theme-$theme-$scene.ppm" "$scene" "$theme"
+	done
+done
+
+# Focus mode, on the session window (1) and the weekly one (2), in Dark (0),
+# Light (9), a thick theme (Bold, 2) and Colour-blind safe (8): low, mid and
+# high on both pages (25..30), the amber and red status lines on each page
+# (13, 15, 17, 19), the CONNECTING takeover (31), HOST LOST (32) and an old
+# reading's caption (33).
+for theme in 0 9 2 8; do
+	for focus in 1 2; do
+		for scene in 25 26 27 28 29 30 13 15 17 19 31 32 33; do
+			"$BUILD/render" \
+				"$OUT/focus-$focus-theme-$theme-$scene.ppm" \
+				"$scene" "$theme" "$focus"
+		done
 	done
 done
 echo "PPMs in $OUT (any image viewer opens them; convert with your tool of choice)"

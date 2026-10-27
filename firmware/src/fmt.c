@@ -299,3 +299,33 @@ void fmt_toast(enum fmt_pip_kind kind, const char *label, int count,
 	}
 	snprintf(buf, buflen, "A session %s", clause);
 }
+
+void fmt_focus_line(const char *name, double pct, const char *when,
+		    char *buf, size_t buflen)
+{
+	char fig[8];
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	/*
+	 * The arithmetic of usage_view.c's pct_int(), except that "unknown"
+	 * is said: nan fails this test and so does the daemon's -1.
+	 */
+	if (!(pct >= 0.0)) {
+		snprintf(fig, sizeof(fig), "--%%");
+	} else {
+		int v = pct > 1000.0 ? 1000 : (int)(pct + 0.5);
+
+		snprintf(fig, sizeof(fig), "%d%%", v);
+	}
+	/* "--" is the countdown's own word for "unknown", and an unknown
+	 * after a bullet reads as a second, broken figure. */
+	if (when == NULL || when[0] == '\0' ||
+	    (when[0] == '-' && when[1] == '-' && when[2] == '\0')) {
+		snprintf(buf, buflen, "%s %s", name ? name : "", fig);
+		return;
+	}
+	snprintf(buf, buflen, "%s %s " FMT_BULLET " %s", name ? name : "", fig,
+		 when);
+}
