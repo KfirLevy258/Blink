@@ -347,4 +347,24 @@ void usage_view_svc_changed(void);
 const char *usage_view_bench_focus(void);
 #endif
 
+/*
+ * What one provider's page is a share of -- the daemon's `plan` message
+ * (pc/protocol.plan). `prov` is the page, by provider tag, so the plan follows
+ * the provider to whichever slot it sits in.
+ *
+ *   "spend"       the left gauge is the share of a dollar cap and its period's
+ *                 reset; the right one is the same share as a ring with the
+ *                 dollars in it and the cap under it. `period` is "daily",
+ *                 "weekly", "monthly" or ""; `usd` and `lim` are -1 when not
+ *                 reported.
+ *   "unreported"  an Enterprise or Team login with nothing on the computer to
+ *                 read; `acct` is "enterprise" or "team", the word shown.
+ *   anything else, NULL included: windows, the page as it always was. So a
+ *                 kind from a newer daemon falls back to gauges this firmware
+ *                 can draw, rather than captions it would have to guess.
+ */
+void usage_view_set_plan(const char *prov, const char *plan,
+			 const char *period, const char *acct,
+			 double usd, double lim);
+
 #endif /* USAGE_VIEW_H */

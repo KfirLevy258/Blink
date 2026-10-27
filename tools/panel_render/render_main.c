@@ -507,6 +507,41 @@ int main(int argc, char **argv)
 			usage_view_page_step(-1);
 		}
 		break;
+	case 45: /* SPEND, monthly: the plan's own figures -- $314.12 of a
+		  * $500 cap, 62.8% -- with the month 16 days from rolling over.
+		  * The calls run in wire order: proto.c is handed the plan line
+		  * before the usage line, and that line's weekly fields are -1
+		  * because a spend account has no weekly window. */
+		usage_view_set_provider1("claude");
+		usage_view_set_plan("claude", "spend", "monthly", "", 314.12,
+				    500);
+		usage_view_update(62.8, 16 * 86400 + 9 * 3600, -1.0, -1);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_clock(11, 20);
+		break;
+	case 46: /* SPEND, daily, 96.4% and red. No amounts on the wire yet
+		  * -- they trail the share by minutes -- so this is the page
+		  * as it first appears, and the hint above the gauges is the
+		  * cap's sentence, never the session's. */
+		usage_view_set_provider1("claude");
+		usage_view_set_plan("claude", "spend", "daily", "", -1, -1);
+		usage_view_update(96.4, 3 * 3600 + 20 * 60, -1.0, -1);
+		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
+		usage_view_set_sessions(2, 1);
+		usage_view_set_clock(17, 52);
+		break;
+	case 47: /* UNREPORTED: signed in to Enterprise with no gateway, so
+		  * the status line carries no limits at all. Both gauges are
+		  * blank by necessity; the words say why. */
+		usage_view_set_provider1("claude");
+		usage_view_set_plan("claude", "unreported", "", "enterprise",
+				    -1, -1);
+		usage_view_update(-1.0, -1, -1.0, -1);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_clock(8, 45);
+		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_set_provider1("");
 		usage_view_update(-1.0, -1, -1.0, -1);

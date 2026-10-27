@@ -417,6 +417,85 @@ static void test_fmt_focus_line(void)
 		   strlen(tiny) == sizeof(tiny) - 1);
 }
 
+/*
+ * The spend page's words (fmt.h, THE SPEND PAGE), against the plan's
+ * figures: a $500 monthly cap, $314.12 of it used.
+ *
+ * Every fmt_usd case is one row, and the same rows answer the width
+ * question afterwards: the longest string any of them produced is what the
+ * gauge's hollow has to hold, so a new spelling added here is measured by
+ * being added.
+ */
+static const struct {
+	double in;
+	const char *out;
+} usd_cases[] = {
+	/* Not reported: the amounts trail the share by minutes, or never come. */
+	{ -1, "--" },
+	/* Cents, while the whole sum is cents. */
+	{ 0, "$0.00" }, { 4.371, "$4.37" }, { 9.994, "$9.99" },
+	/* Whole dollars, half up. */
+	{ 9.996, "$10" }, { 314.12, "$314" }, { 314.5, "$315" },
+	{ 9999.4, "$9999" },
+	/* Each wider unit begins where rounding the narrower one would spill. */
+	{ 9999.6, "$10.0k" }, { 12500, "$12.5k" }, { 99949, "$99.9k" },
+	{ 99951, "$100k" }, { 314000, "$314k" }, { 999499, "$999k" },
+	{ 999501, "$1.0M" }, { 12.5e6, "$12.5M" }, { 99.94e6, "$99.9M" },
+	{ 314e6, "$314M" },
+	/* Past proto.c's own $1e9 bound: a ceiling, not a figure. */
+	{ 1e9, "$999M" }, { 1e300, "$999M" },
+};
+
+static void test_fmt_spend(void)
+{
+	char b[FMT_USD_MAX];
+	size_t longest = 0;
+	volatile double zero = 0.0;
+
+	for (size_t i = 0; i < sizeof(usd_cases) / sizeof(usd_cases[0]); i++) {
+		fmt_usd(usd_cases[i].in, b, sizeof(b));
+		EXPECT_STR(b, usd_cases[i].out);
+		longest = strlen(b) > longest ? strlen(b) : longest;
+	}
+	fmt_usd(zero / zero, b, sizeof(b));		/* NaN */
+	EXPECT_STR(b, "--");
+	check_true("every dollar amount is six characters or fewer",
+		   longest <= 6);
+
+	/* A tiny buffer truncates rather than overruns. */
+	{
+		char tiny[4];
+
+		fmt_usd(314.12, tiny, sizeof(tiny));
+		EXPECT_STR(tiny, "$31");
+	}
+
+	fmt_usd_limit(500, b, sizeof(b));
+	EXPECT_STR(b, "of $500");
+	fmt_usd_limit(12500, b, sizeof(b));
+	EXPECT_STR(b, "of $12.5k");
+	fmt_usd_limit(-1, b, sizeof(b));
+	EXPECT_STR(b, "");
+
+	EXPECT_STR(fmt_spend_caption("monthly"), "SPEND month");
+	EXPECT_STR(fmt_spend_caption("weekly"), "SPEND week");
+	EXPECT_STR(fmt_spend_caption("daily"), "SPEND today");
+	EXPECT_STR(fmt_spend_caption(""), "SPEND");
+	EXPECT_STR(fmt_spend_caption(NULL), "SPEND");
+	EXPECT_STR(fmt_spend_caption("fortnightly"), "SPEND");
+
+	check_true("no spend hint below 95%", fmt_spend_hint(62.8) == NULL);
+	check_true("no spend hint when the share is unknown",
+		   fmt_spend_hint(-1) == NULL);
+	EXPECT_STR(fmt_spend_hint(96.4), "Spend limit almost used up");
+	EXPECT_STR(fmt_spend_hint(95.0), "Spend limit almost used up");
+	EXPECT_STR(fmt_spend_hint(99.5), "Spend limit used up");
+	EXPECT_STR(fmt_spend_hint(130), "Spend limit used up");
+	/* Inside what the board keeps of a status line. */
+	check_true("spend hints fit 47 characters",
+		   strlen(fmt_spend_hint(96)) <= 47);
+}
+
 int main(void)
 {
 	check("unknown", -1, "--");
@@ -491,6 +570,7 @@ int main(void)
 	test_fmt_tone();
 	test_fmt_toast();
 	test_fmt_focus_line();
+	test_fmt_spend();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");

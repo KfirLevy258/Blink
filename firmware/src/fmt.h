@@ -214,4 +214,55 @@ void fmt_toast(enum fmt_pip_kind kind, const char *label, int count,
 void fmt_focus_line(const char *name, double pct, const char *when,
 		    char *buf, size_t buflen);
 
+/*
+ * THE SPEND PAGE. A Claude Enterprise seat behind a Claude apps gateway is
+ * metered by a dollar cap per day, week or month, not by a five-hour window,
+ * and the daemon says so in a `plan` message (pc/protocol.plan). On that page
+ * the left gauge is the share of the cap used, with the period's reset under
+ * it, and the right gauge is the money: the same share as a ring, the dollars
+ * in its hollow, and the cap under it. Every word the page shows is decided
+ * here, where tests/fmt can reach it; usage_view.c needs LVGL and only places
+ * them.
+ */
+
+/* "of $99.9M" and its NUL, with room. */
+#define FMT_USD_MAX 16
+
+/*
+ * Dollars the way the ring's hollow can hold them, at most six characters
+ * at montserrat_20 (tests/usage_layout measures the widest against the arc):
+ *
+ *   negative, NaN    -> "--"      (not reported yet -- Claude Code sends the
+ *                                  dollars minutes after the share, or never)
+ *   under $10        -> "$4.37"   (cents are the figure when it is all cents)
+ *   under $10,000    -> "$314", "$9999"
+ *   under $100k      -> "$12.5k"
+ *   under $1M        -> "$314k"
+ *   beyond           -> "$1.2M" ... "$999M", where it stops
+ *
+ * To the nearest unit, and each step starts where rounding the one below it
+ * would have spilled into a wider spelling: $9999.60 is "$10.0k", not
+ * "$10000".
+ */
+void fmt_usd(double usd, char *buf, size_t buflen);
+
+/* The line under the dollars: "of $500", or "" when the cap is not known. */
+void fmt_usd_limit(double lim, char *buf, size_t buflen);
+
+/*
+ * The left gauge's caption for the wire's `period`: "SPEND month", "SPEND
+ * week", "SPEND today", or "SPEND" for one not reported (or not known to this
+ * firmware). Capitals because it sits where "SESSION 5h" sits, and those are
+ * captions, not sentences.
+ */
+const char *fmt_spend_caption(const char *period);
+
+/*
+ * The near-limit hint on a spend page, or NULL below the thresholds the
+ * session hint uses (95%, and 99.5% for "used up", the share the display
+ * rounds to 100%). Its own words because "Session almost used up" over a
+ * dollar cap names a window this account does not have.
+ */
+const char *fmt_spend_hint(double pct);
+
 #endif /* FMT_H */

@@ -191,7 +191,7 @@ WIRE_TYPES = frozenset({
     # host -> board
     "welcome", "bye", "pong", "time", "usage", "edition", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
-    "ota_none", "ota_error", "edit_state", "burn",
+    "ota_none", "ota_error", "edit_state", "burn", "plan",
 })
 
 UNKNOWN_TYPE = "(unknown type)"

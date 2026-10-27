@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "fmt.h"
 
 void fmt_countdown(int32_t secs, char *buf, size_t buflen)
@@ -328,4 +329,102 @@ void fmt_focus_line(const char *name, double pct, const char *when,
 	}
 	snprintf(buf, buflen, "%s %s " FMT_BULLET " %s", name ? name : "", fig,
 		 when);
+}
+
+void fmt_usd(double usd, char *buf, size_t buflen)
+{
+	/*
+	 * One row per spelling past whole dollars, largest first: an amount
+	 * from `from` up is divided by `scale` and written with `decimals`
+	 * places and `unit`. Each `from` is where the row below it, rounded,
+	 * would first print something wider -- $9999.50 as "$10000", $99.95k
+	 * as "$100.0k" -- so the string never grows by more than the unit.
+	 */
+	static const struct {
+		double from, scale;
+		int decimals;
+		char unit;
+	} steps[] = {
+		{ 99.95e6, 1e6, 0, 'M' },
+		{ 999.5e3, 1e6, 1, 'M' },
+		{ 99.95e3, 1e3, 0, 'k' },
+		{ 9999.5, 1e3, 1, 'k' },
+	};
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	/* usd != usd is the NaN test that needs no libm: NaN is the one
+	 * value not equal to itself. Either way, no amount to show. */
+	if (usd != usd || usd < 0) {
+		snprintf(buf, buflen, "--");
+		return;
+	}
+	if (usd >= 999.5e6) {
+		/*
+		 * A bound, not a figure. Nobody has a billion-dollar cap, so
+		 * this is a misread field, and proto.c already refuses one
+		 * past $1e9; this keeps the string six characters wide
+		 * whatever reaches it.
+		 */
+		snprintf(buf, buflen, "$999M");
+		return;
+	}
+	for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+		if (usd >= steps[i].from) {
+			snprintf(buf, buflen, "$%.*f%c", steps[i].decimals,
+				 usd / steps[i].scale, steps[i].unit);
+			return;
+		}
+	}
+	if (usd < 9.995) {
+		snprintf(buf, buflen, "$%.2f", usd);
+		return;
+	}
+	/* Half up, by hand: %.0f rounds an exact half to even, and "$314.50"
+	 * printed as "$314" reads as a rounding bug to anyone who checks. */
+	snprintf(buf, buflen, "$%d", (int)(usd + 0.5));
+}
+
+void fmt_usd_limit(double lim, char *buf, size_t buflen)
+{
+	char amount[FMT_USD_MAX];
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	/* Blank, not "of --": with no cap there is nothing to be "of". */
+	if (!(lim >= 0)) {
+		buf[0] = '\0';
+		return;
+	}
+	fmt_usd(lim, amount, sizeof(amount));
+	snprintf(buf, buflen, "of %s", amount);
+}
+
+const char *fmt_spend_caption(const char *period)
+{
+	if (period != NULL) {
+		if (strcmp(period, "daily") == 0) {
+			return "SPEND today";
+		}
+		if (strcmp(period, "weekly") == 0) {
+			return "SPEND week";
+		}
+		if (strcmp(period, "monthly") == 0) {
+			return "SPEND month";
+		}
+	}
+	return "SPEND";
+}
+
+const char *fmt_spend_hint(double pct)
+{
+	if (pct >= 99.5) {
+		return "Spend limit used up";
+	}
+	if (pct >= 95.0) {
+		return "Spend limit almost used up";
+	}
+	return NULL;
 }

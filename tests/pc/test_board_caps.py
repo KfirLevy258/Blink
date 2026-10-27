@@ -280,8 +280,9 @@ def _fw_line(name, buf_name="buf"):
 # Every cap this firmware lists. "burn" is the five-hour burn view
 # (docs/plans/burn-5h.md): the daemon sends a board `burn` lines only when its
 # caps say so, so a board built without the view must never claim it, and
-# one built with it must never forget to.
-FW_CAPS = {"svc", "theme", "edit_done", "burn"}
+# one built with it must never forget to. "plan" is the spend page
+# (docs/plans/enterprise-spend.md), on the same terms for `plan` lines.
+FW_CAPS = {"svc", "theme", "edit_done", "burn", "plan"}
 
 
 def test_the_boards_hello_carries_its_caps_and_fits_its_buffer():
@@ -303,9 +304,10 @@ def test_the_boards_pref_carries_its_caps_and_fits_its_buffer():
     assert protocol.board_caps(msg) == FW_CAPS
     # snprintf truncates silently, and a truncated pref is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
-    # Measured 126 B in the 128 B buffer (hello: 155 in 160), with "burn".
-    # A cap costs its name's length plus 3 B, so the next one, of any name,
-    # needs proto_send_pref's buffer made bigger first. The daemon reads
+    # Measured 133 B in the 160 B buffer (hello: 162 in 192), with "plan";
+    # 126 in 128 (155 in 160) before it, which is why both buffers grew.
+    # A cap costs its name's length plus 3 B, so "spendburn" will take
+    # them to 145 and 174. The daemon reads
     # 512 and the board itself drops a longer inbound line whole; a pref
     # anywhere near that is a mistake.
     assert len(line) <= 160, len(line)
@@ -318,7 +320,7 @@ def test_the_caps_are_appended_never_reordered():
     caps = re.search(r'#define BOARD_CAPS "\\"caps\\":\[(.*?)\]"', src)
     assert caps, "BOARD_CAPS is gone from proto.c"
     names = re.findall(r'\\"([a-z_]+)\\"', caps.group(1))
-    assert names == ["svc", "theme", "edit_done", "burn"], names
+    assert names == ["svc", "theme", "edit_done", "burn", "plan"], names
 
 
 def test_the_boards_pref_names_the_board_as_hello_does():

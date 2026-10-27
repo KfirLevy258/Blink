@@ -93,6 +93,37 @@ int main(void)
 		      "an absent key is still absent");
 	}
 
+	/*
+	 * The plan message is the same shape twice over: its type spells one
+	 * of its keys ("plan"), and its page key "p" is a prefix of the "p2"
+	 * the usage line carries. pc/protocol.plan writes it in this order.
+	 */
+	{
+		printf("\n-- the plan message --\n");
+		const char *plan =
+			"{\"t\":\"plan\",\"v\":2,\"p\":\"claude\",\"plan\":\"spend\","
+			"\"period\":\"monthly\",\"usd\":314.12,\"lim\":500.0}";
+		const char *bare = "{\"t\":\"plan\",\"v\":2,\"p\":\"claude\","
+				   "\"plan\":\"windows\"}";
+		char v[16];
+		double d = -1;
+
+		CHECK(msg_get_str(plan, "p", v, sizeof(v)) &&
+		      strcmp(v, "claude") == 0, "the page is read from \"p\"");
+		CHECK(msg_get_str(plan, "plan", v, sizeof(v)) &&
+		      strcmp(v, "spend") == 0,
+		      "the plan key wins over the type that spells it");
+		CHECK(msg_get_double(plan, "usd", &d) && d > 314.11 && d < 314.13,
+		      "the dollars parse");
+		CHECK(msg_get_double(plan, "lim", &d) && d == 500.0,
+		      "the cap parses");
+		CHECK(!msg_get_double(bare, "usd", &d),
+		      "a windows plan carries no amount");
+		CHECK(!msg_get_str("{\"t\":\"usage\",\"p2\":\"codex\"}", "p", v,
+				   sizeof(v)),
+		      "\"p2\" is not \"p\"");
+	}
+
 	/* The session message: an optional label and a count. */
 	{
 		char lbl[28] = "";

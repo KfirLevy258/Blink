@@ -287,6 +287,18 @@ int main(void)
 	 */
 	CHECK(63 <= GAUGE_ARC_SZ - 2 * GAUGE_ARC_W,
 	      "the widest percentage this label ever shows clears the arc's stroke");
+	/*
+	 * On a spend page the hollow holds money instead (fmt_usd). Every
+	 * spelling fmt_usd() has was summed from that glyph table's adv_w
+	 * (1/16 px units): the widest is "$99.9M" at 73.1 px -- the 'M' and
+	 * the decimal point together outweigh "$999M" (68.5) and "$99.9k"
+	 * (66.2) -- and all of them are wider than "1000%". So the money gets
+	 * its own check, at the widest one.
+	 */
+	CHECK(74 <= GAUGE_ARC_SZ - 2 * GAUGE_ARC_W,
+	      "\"$99.9M\" sits inside the ring without touching its stroke");
+	CHECK(74 <= GAUGE_PCT_MAX_W,
+	      "\"$99.9M\" fits the hollow's label box");
 	/* --- one countdown per gauge --- */
 	CHECK(cd_l.x1 <= cd_r.x0,
 	      "the two gauges' countdowns do not meet in the middle");
@@ -425,6 +437,32 @@ int main(void)
 	      "GAUGE_CD_MAX_W is sized for a bare countdown, not guessed");
 	CHECK(!BUDGET_FITS(GAUGE_CD_MAX_W, "claude  00m 00s"),
 	      "GAUGE_CD_MAX_W no longer has room for a named one");
+	/*
+	 * GAUGE_CD_MAX_W was set by "00m 00s", and plan pages reuse that box
+	 * for text of their own, which nobody widened it for. Each string is
+	 * therefore summed from montserrat_14's adv_w table here: "Not
+	 * reported" takes 92.2 of the 96 px -- the tightest fit anywhere on
+	 * those pages, which is why it stops at two words -- and "of $99.9M",
+	 * the longest cap line fmt_usd_limit() can make, takes 68.7.
+	 */
+	CHECK(BUDGET_FITS(GAUGE_CD_MAX_W, "Not reported"),
+	      "\"Not reported\" is inside the countdown budget's range");
+	CHECK(93 <= GAUGE_CD_MAX_W,
+	      "\"Not reported\", measured, fits the countdown box");
+	CHECK(BUDGET_FITS(GAUGE_CD_MAX_W, "of $99.9M"),
+	      "the widest spend cap line fits under its gauge");
+	CHECK(69 <= GAUGE_CD_MAX_W,
+	      "\"of $99.9M\", measured, fits the countdown box");
+	/*
+	 * The captions are auto-sized and centred on each gauge, GAUGE_CX
+	 * either side of the middle, so the widest pair must not meet across
+	 * it: "SPEND month" is 103.5 px and "ENTERPRISE" 91.2 at montserrat_14
+	 * -- each well inside the 2 * GAUGE_CX between the two centres.
+	 */
+	CHECK((104 + 92) / 2 < 2 * GAUGE_CX,
+	      "the spend page's two captions do not meet in the middle");
+	CHECK(104 / 2 < SCR_W / 2 - GAUGE_CX,
+	      "\"SPEND month\" clears the left bezel");
 	/* Sized for the LONGEST tag the pill can hold, not the one we happen
 	 * to ship: usage_view.c PILL_TAG_BUF is 12, so eleven characters is
 	 * what has to fit without reaching the clock and the status dot in the

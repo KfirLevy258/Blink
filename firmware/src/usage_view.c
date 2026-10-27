@@ -284,6 +284,49 @@ static int page_count(void)
 {
 	return provider2_tag[0] ? 2 : 1;
 }
+
+/*
+ * THE SPEND PAGE. A Claude Enterprise seat behind a Claude apps gateway has a
+ * dollar cap per day, week or month instead of a five-hour window, and an
+ * Enterprise login with nothing readable has neither. The daemon says which
+ * with a `plan` message (usage_view_set_plan), because the usage line has no
+ * room for dollars, and this is what it said.
+ *
+ * The record names a provider tag rather than a page number. Page order is a
+ * Settings choice that may flip between one message and the next, whereas a
+ * dollar cap is a fact about a Claude login -- so plan_of() asks "is the page
+ * at this index Claude's?" every time instead of remembering an index. There
+ * is a single record since Claude is the only provider metered by spend; if
+ * another ever is, the record becomes an array behind the same plan_of().
+ *
+ * Drawing the page changes words, never the gauges' geometry: the same two
+ * arcs, labels and countdowns as every other page, so the layout host test's
+ * boxes stay the boxes and nothing here allocates.
+ */
+enum plan_kind {
+	PLAN_KIND_WINDOWS,	/* SESSION 5h and WEEKLY 7d, as always */
+	PLAN_KIND_SPEND,	/* the share of a dollar cap, and the dollars */
+	PLAN_KIND_UNREPORTED,	/* an account with nothing to read */
+};
+
+struct plan_record {
+	char tag[USAGE_TAG_MAX];	/* whose page; "" for nobody's */
+	enum plan_kind kind;
+	char period[12];	/* "daily" / "weekly" / "monthly" / "" */
+	bool team;		/* unreported only: TEAM rather than ENTERPRISE */
+	double usd, lim;	/* -1 when not reported */
+};
+
+static struct plan_record plan_rec = { .usd = -1, .lim = -1 };
+
+static enum plan_kind plan_of(int page)
+{
+	if (plan_rec.tag[0] == '\0' || strcmp(page_tag(page), plan_rec.tag) != 0) {
+		return PLAN_KIND_WINDOWS;
+	}
+	return plan_rec.kind;
+}
+
 /* Defined below; set_provider2 has to call it, because whether a second
  * provider exists is what decides if the FIRST one is coloured at all. */
 static void refresh_provider1(void);
@@ -666,6 +709,33 @@ static void render_countdown(struct gauge *g)
 	char buf[FMT_COUNTDOWN_MAX];
 
 	/*
+	 * Plan pages put other words under the gauges, and they are decided in
+	 * this function rather than in render_gauges(): usage_view_tick_1s()
+	 * calls straight here every second, and would overwrite anything set
+	 * elsewhere with a countdown at the next tick. Under SPENT goes the cap
+	 * ("of $500"); under the spend share its own reset still counts down,
+	 * via the ordinary path below. "Not reported" goes under the left
+	 * gauge of an unreported page and nothing under the right one.
+	 */
+	switch (plan_of(cur_page)) {
+	case PLAN_KIND_SPEND:
+		if (g == &weekly) {
+			char lim[FMT_USD_MAX];
+
+			fmt_usd_limit(plan_rec.lim, lim, sizeof(lim));
+			lv_label_set_text(g->countdown, lim);
+			return;
+		}
+		break;
+	case PLAN_KIND_UNREPORTED:
+		lv_label_set_text(g->countdown,
+				  g == &session ? "Not reported" : "");
+		return;
+	default:
+		break;
+	}
+
+	/*
 	 * The real countdown always wins. The rate is what goes here when the
 	 * source cannot say when the window rolls -- Claude Desktop with no
 	 * Claude Code -- and it is a different KIND of statement, so it is
@@ -752,9 +822,80 @@ static void paint_pct(struct gauge *g, double pct)
 	}
 }
 
+/*
+ * SPENT: where the weekly window sits on other pages, a spend page puts the
+ * money. There is a single cap, so there is a single share, and the ring here
+ * repeats the left gauge's -- same length, same severity colour -- while the
+ * hollow says what that share costs. Somebody planning a month thinks in
+ * dollars; somebody about to be cut off is warned by the percentage. The page
+ * gives each its own gauge rather than making one gauge do both.
+ */
+static void draw_spent(void)
+{
+	char amount[FMT_USD_MAX];
+	double share = pg[cur_page].s_pct;
+
+	fmt_usd(plan_rec.usd, amount, sizeof(amount));
+	lv_label_set_text(weekly.name, "SPENT");
+	lv_label_set_text(weekly.pct, amount);
+	lv_arc_set_value(weekly.arc, share < 0 ? 0 : arc_value(share));
+	if (share >= 0) {
+		lv_obj_set_style_arc_color(weekly.arc, severity(share),
+					   LV_PART_INDICATOR);
+	}
+}
+
+/*
+ * An account that reports nothing: the gauge names the kind of login, so the
+ * empty rings read as "this account does not say" and not as a broken panel.
+ * "--%" as on every other gauge with no figure, the left one beside it
+ * included.
+ */
+static void draw_unreported_account(void)
+{
+	lv_label_set_text(weekly.name, plan_rec.team ? "TEAM" : "ENTERPRISE");
+	lv_label_set_text(weekly.pct, "--%");
+	lv_arc_set_value(weekly.arc, 0);
+}
+
+/* The right gauge of the page in front, when that page has a plan. */
+static void render_plan_right(void)
+{
+	if (plan_of(cur_page) == PLAN_KIND_SPEND) {
+		draw_spent();
+	} else {
+		draw_unreported_account();
+	}
+}
+
+/*
+ * The left gauge's caption, which a plan renames. build_gauge() writes
+ * "SESSION 5h" once, so anything that changes the page's words has to come
+ * back here: render_gauges(), and the midpoint of a page morph.
+ */
+static void render_captions(void)
+{
+	switch (plan_of(cur_page)) {
+	case PLAN_KIND_SPEND:
+		lv_label_set_text(session.name,
+				  fmt_spend_caption(plan_rec.period));
+		break;
+	case PLAN_KIND_UNREPORTED:
+		lv_label_set_text(session.name, "SPEND");
+		break;
+	default:
+		lv_label_set_text(session.name, "SESSION 5h");
+		break;
+	}
+}
+
 /* The weekly arc and its countdown: the overall weekly window. */
 static void render_weekly(void)
 {
+	if (plan_of(cur_page) != PLAN_KIND_WINDOWS) {
+		render_plan_right();
+		return;
+	}
 	/* One window, so the gauge never needs to say which one it is showing
 	 * -- but it still says it, because "WEEKLY 7d" is the honest name for
 	 * the number under it. */
@@ -1237,6 +1378,7 @@ static void render_gauges(void)
 
 	last_s_pct = p->s_pct;
 	last_w_pct = p->w_pct;
+	render_captions();
 	render_weekly();
 	refresh_provider1();	/* the name under the brand follows the page */
 	/*
@@ -1523,6 +1665,7 @@ static void morph_exec(void *unused, int32_t t)
 		 */
 		morph.swapped = true;
 		refresh_provider1();
+		render_captions();
 		session.resets_in_s = pg[cur_page].s_in_s;
 		session.burn = pg[cur_page].burn;
 		weekly.resets_in_s = pg[cur_page].w_in_s;
@@ -1552,6 +1695,22 @@ static void morph_exec(void *unused, int32_t t)
 		if (morph.swapped) {
 			morph_arc(&session, morph.s_to);
 			morph_arc(&weekly, morph.w_to);
+			/*
+			 * Paging onto or off a plan page always lands here,
+			 * because such a page sends its weekly figure as -1
+			 * and that forces morph.jump. The two morph_arc() calls
+			 * above treat the right gauge as a weekly window, so a
+			 * plan page needs its own right gauge drawn again on
+			 * top, and a windows page reached from a plan page
+			 * needs its "WEEKLY 7d" caption back. render_weekly()
+			 * cannot do the second job yet: last_w_pct is only
+			 * moved to the new page in morph_done().
+			 */
+			if (plan_of(cur_page) != PLAN_KIND_WINDOWS) {
+				render_plan_right();
+			} else if (plan_rec.tag[0] != '\0') {
+				lv_label_set_text(weekly.name, "WEEKLY 7d");
+			}
 		}
 		return;
 	}
@@ -2297,6 +2456,9 @@ static void expire_session(void)
 	last_s_pct = 0;
 	paint_pct(&session, 0);
 	render_countdown(&session);
+	if (plan_of(cur_page) == PLAN_KIND_SPEND) {
+		render_plan_right();	/* the ring and the dollars went too */
+	}
 }
 
 static void expire_weekly(void)
@@ -2347,6 +2509,16 @@ void usage_view_tick_1s(void)
 		if (pg[i].s_in_s > 0 && --pg[i].s_in_s == 0) {
 			pg[i].s_in_s = -1;
 			pg[i].s_pct = 0;
+			/*
+			 * On a spend page that was the period ending, and what
+			 * was spent in it went with it -- or "$314" would sit
+			 * in an empty ring until the daemon next spoke. An
+			 * unknown amount stays unknown: "$0.00" would be a
+			 * claim nobody made.
+			 */
+			if (plan_of(i) == PLAN_KIND_SPEND && plan_rec.usd >= 0) {
+				plan_rec.usd = 0;
+			}
 			if (i == cur_page) {
 				expire_session();
 			}
@@ -3125,6 +3297,7 @@ void usage_view_set_status(enum usage_status status)
 	 * host test can reach it.
 	 */
 	bool urgent = true;
+	const char *spend_hint;
 
 	svc_seen = svc_hint(page_tag(cur_page), k_uptime_get(),
 			    svc_buf, sizeof(svc_buf));
@@ -3136,8 +3309,22 @@ void usage_view_set_status(enum usage_status status)
 		 * (user request 2026-07-17). Session first -- it bites
 		 * sooner. At 100% (the display rounds >=99.5 up to "100%")
 		 * the limit is spent, not "almost" -- say so (user-reported
-		 * 2026-07-20). */
-		if (last_s_pct >= 99.5) {
+		 * 2026-07-20).
+		 *
+		 * On a spend page the left gauge is a dollar cap, and the
+		 * words say so: "Session almost used up" would name a window
+		 * that account does not have. fmt_spend_hint() keeps the same
+		 * thresholds, so once it has nothing to say the share is under
+		 * 95 and the session branches below cannot fire either; the
+		 * weekly ones cannot, because a spend page has no weekly
+		 * figure. */
+		spend_hint = plan_of(cur_page) == PLAN_KIND_SPEND
+				     ? fmt_spend_hint(last_s_pct)
+				     : NULL;
+		if (spend_hint != NULL) {
+			text = spend_hint;
+			tc = COL_RED;
+		} else if (last_s_pct >= 99.5) {
 			text = "Session used up";
 			tc = COL_RED;
 		} else if (last_s_pct >= 95.0) {
@@ -3434,3 +3621,61 @@ const char *usage_view_bench_focus(void)
 	return !focus_on ? "off" : focus_weekly ? "weekly" : "session";
 }
 #endif
+
+static bool plan_same(const struct plan_record *a,
+		      const struct plan_record *b)
+{
+	return a->kind == b->kind && a->team == b->team &&
+	       a->usd == b->usd && a->lim == b->lim &&
+	       strcmp(a->tag, b->tag) == 0 && strcmp(a->period, b->period) == 0;
+}
+
+void usage_view_set_plan(const char *prov, const char *plan,
+			 const char *period, const char *acct,
+			 double usd, double lim)
+{
+	struct plan_record next = { .kind = PLAN_KIND_WINDOWS,
+				    .usd = -1, .lim = -1 };
+
+	if (plan != NULL && strcmp(plan, "spend") == 0) {
+		next.kind = PLAN_KIND_SPEND;
+		next.usd = usd;
+		next.lim = lim;
+		snprintf(next.period, sizeof(next.period), "%s",
+			 period != NULL ? period : "");
+	} else if (plan != NULL && strcmp(plan, "unreported") == 0) {
+		next.kind = PLAN_KIND_UNREPORTED;
+		next.team = acct != NULL && strcmp(acct, "team") == 0;
+	}
+	/* Windows, and any kind this firmware has no page for, name nobody:
+	 * every page then draws the gauges it always drew. */
+	if (next.kind != PLAN_KIND_WINDOWS && prov != NULL) {
+		snprintf(next.tag, sizeof(next.tag), "%s", prov);
+	}
+
+	/*
+	 * Nothing to do when nothing moved, and that is most calls: proto.c
+	 * resets the plan on every welcome, so a board that has never had a
+	 * spend page hears "windows" at each connect -- the probe's welcome
+	 * during the boot clip included, where a redraw and a status re-ask
+	 * would raise the connecting overlay over the animation.
+	 */
+	if (plan_same(&next, &plan_rec)) {
+		return;
+	}
+	plan_rec = next;
+
+	/*
+	 * Kept while the screen is down as well (Settings frees it). The
+	 * daemon states a plan once, on change, so one arriving then would
+	 * otherwise be lost; the first render after the screen returns reads
+	 * it from here.
+	 */
+	if (built) {
+		render_gauges();
+		/* The captions moved, and with them whose near-limit words
+		 * apply -- spend or session -- so the status line is asked
+		 * again rather than left on the old page's sentence. */
+		usage_view_set_status(last_status);
+	}
+}

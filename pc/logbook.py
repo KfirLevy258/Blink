@@ -411,8 +411,8 @@ CONSOLE_RENDERED = ("[ota] update landed", "[ota] update REVERTED")
 # banners, the touch tracer's #TT rows -- is a fixed placeholder, because
 # its first word is the board's text too.
 CONSOLE_TAGS = frozenset({
-    "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "proto", "sleep",
-    "slide", "swipe", "theme", "time", "touch", "usage",
+    "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "plan", "proto",
+    "sleep", "slide", "swipe", "theme", "time", "touch", "usage",
 })
 
 BOARD_LINE = "(board line)"

@@ -401,3 +401,19 @@ def test_a_board_already_running_says_what_it_draws_in_its_pref():
     b.on_message({"t": "pref", "v": protocol.VERSION, "provider": "claude"})
     b.poll_if_changed()
     assert sent[-1]["t"] == "usage" and sent[-1]["session_pct"] == -1.0
+
+
+def test_plan_is_a_known_wire_type():
+    """The bridge's log names a message by its type only, and only a type in
+    WIRE_TYPES; a plan line outside it would log as "(unknown type)"."""
+    assert "plan" in protocol.WIRE_TYPES
+    msg = protocol.plan("claude", base.PLAN_SPEND, "monthly", 314.12, 500.0)
+    assert protocol.log_name(msg) == "plan"
+
+
+def test_plan_console_line_is_allowed():
+    """proto.c prints "[plan] <page> <kind> [period]" for each plan it takes.
+    bridge.log keeps the tag and nothing the board formatted after it."""
+    from pc import logbook
+    for line in ("[plan] claude spend monthly", "[plan] claude windows"):
+        assert logbook.console_line(line) == "[plan]"

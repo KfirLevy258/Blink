@@ -80,6 +80,11 @@ for scene in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; d
 	"$BUILD/render" "$OUT/panel-$scene.ppm" "$scene"
 done
 
+# The spend pages (45..47, render_main.c says what each is).
+for scene in 45 46 47; do
+	"$BUILD/render" "$OUT/panel-$scene.ppm" "$scene"
+done
+
 # The five-hour burn view (35..44, render_main.c says what each is), and
 # its four directions in every theme: Dark's colours are the contract's
 # bytes, every other theme's are worked out from its own roles, and those

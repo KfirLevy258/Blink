@@ -94,6 +94,12 @@ static size_t line_len;
  * and let usage_view saturate the ring.
  */
 #define PCT_MAX 1000.0
+/*
+ * Dollars, on the spend page. A billion is nobody's cap; it is the bound past
+ * which a field is a misread rather than a figure, and fmt_usd() is handed
+ * nothing it would have to guess at.
+ */
+#define USD_MAX 1e9
 
 static void num(const char *json, const char *key, double *out,
 		double lo, double hi)
@@ -177,7 +183,12 @@ static void emit(const char *json)
 /* burn: this firmware draws the five-hour burn view (docs/plans/burn-5h.md),
  * so the daemon may send it `burn` lines. A board that does not list it --
  * every 1.3.4 in the field -- never receives one. */
-#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\"]"
+/* plan: this firmware draws the spend page (docs/plans/enterprise-spend.md)
+ * from the daemon's `plan` message. Without it the daemon sends no plan and
+ * blanks a spend share on the usage line rather than let it be drawn as
+ * "SESSION 5h". A capability and not a version because 1.4.0 already means
+ * "draws svc", and the two features need not ship together. */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\"]"
 
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,
@@ -215,16 +226,17 @@ void proto_send_pref(void)
 	 * had nothing but board.json's memory to say which board it was --
 	 * and a remembered id must never decide whose theme wins.
 	 *
-	 * 126 bytes at its widest ("claude", a 32-digit id and the four
-	 * caps; 106 with this board's 12 digits), measured by
+	 * 133 bytes at its widest ("claude", a 32-digit id and the five
+	 * caps; 113 with this board's 12 digits), measured by
 	 * tests/pc/test_board_caps.py, which fails if it outgrows this. It was
-	 * 96 B for the 61 B line before the id, 107 before edit_done and 119
-	 * before burn. With the NUL that leaves 1 B of the 128: a cap costs
-	 * its name's length plus 3 B (the comma and two quotes), so the NEXT
-	 * cap of any name needs this buffer made bigger first. Both stay far
-	 * under the daemon's 512.
+	 * 96 B for the 61 B line before the id, 107 before edit_done, 119
+	 * before burn and 126 before plan. A cap costs its name's length plus
+	 * 3 B (the comma and two quotes); the buffer was 128 B and "plan" alone
+	 * would have overrun it, so it is 160, which also holds the 145 B the
+	 * line will measure once the spend page's "spendburn" cap follows.
+	 * Both stay far under the daemon's 512.
 	 */
-	char buf[128];
+	char buf[160];
 
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\","
@@ -242,13 +254,14 @@ static void send_hello(void)
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
-	/* 155 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
-	 * "1.4.0", the four caps), measured by tests/pc/test_board_caps.py,
-	 * which fails if it outgrows this; a truncated hello is not JSON. With
-	 * the NUL, 4 B of the 160 are spare. A cap costs its name's length
-	 * plus 3 B and a two-digit minor in fw 1 B, and whatever is added has
-	 * to sum to 4 or less. */
-	char buf[160];
+	/* 162 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.4.0", the five caps), measured by tests/pc/test_board_caps.py,
+	 * which fails if it outgrows this; a truncated hello is not JSON. It
+	 * was 155 before "plan", in a 160 B buffer that had 4 B to spare, so
+	 * the buffer is 192: room for the 174 B it will measure with the spend
+	 * page's "spendburn" cap as well. A cap costs its name's length plus
+	 * 3 B and a two-digit minor in fw 1 B. */
+	char buf[192];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
 		 "\"board_id\":\"%s\",\"fw\":\"" BLINK_FW_VERSION "\","
@@ -738,6 +751,14 @@ static void dispatch(const char *json)
 		 */
 		ota_request_check();
 		/*
+		 * Every page back to windows until this host says otherwise.
+		 * A daemon with a spend page states it again right after its
+		 * welcome (pc/bridge.greet), and one from before plans never
+		 * will -- so a spend page must not outlive the daemon that
+		 * described it, captioning another app's figures.
+		 */
+		usage_view_set_plan(NULL, NULL, NULL, NULL, -1, -1);
+		/*
 		 * Answer. The daemon sends `welcome` as a question -- "is a
 		 * Blink board on this port?" -- and decides whether to pull
 		 * the reset line on whether anything comes back within 1.5 s
@@ -959,6 +980,43 @@ static void dispatch(const char *json)
 			return;
 		}
 		usage_view_set_burn5h(&m, k_uptime_get());
+	} else if (strcmp(type, "plan") == 0) {
+		/*
+		 * Which allowance one page is showing: a dollar cap, a login
+		 * that reports nothing, or the five-hour and seven-day windows
+		 * (pc/protocol.plan). Dollars travel here and not on `usage`
+		 * because the widest usage line leaves single-digit bytes
+		 * spare. The daemon sends this ahead of the usage line it
+		 * explains, so the captions are right before the numbers land.
+		 *
+		 * Only `p` and `plan` always come. Absent amounts stay at -1
+		 * and are drawn as "--": Claude Code fetches the dollar figures
+		 * separately and later than the share, and with its
+		 * nonessential traffic switched off not at all, so a page
+		 * without them is a normal page.
+		 */
+		char who[USAGE_TAG_MAX] = "-", kind[12] = "windows";
+		char period[12] = "", acct[12] = "";
+		double usd = -1, lim = -1;
+
+		msg_get_str(json, "p", who, sizeof(who));
+		msg_get_str(json, "plan", kind, sizeof(kind));
+		msg_get_str(json, "period", period, sizeof(period));
+		msg_get_str(json, "acct", acct, sizeof(acct));
+		num(json, "usd", &usd, 0, USD_MAX);
+		num(json, "lim", &lim, 0, USD_MAX);
+		usage_view_set_plan(who, kind, period, acct, usd, lim);
+		/*
+		 * One console line per plan received, which a scripted run
+		 * (tests/fleet/spend_board_run.py) matches against the steps
+		 * it sent. Page, kind and period only: the dollar figures are
+		 * someone's budget and have no place in a console log.
+		 */
+		if (period[0] != '\0') {
+			printk("[plan] %s %s %s\n", who, kind, period);
+		} else {
+			printk("[plan] %s %s\n", who, kind);
+		}
 	}
 	/* unknown types ignored */
 }
