@@ -20,6 +20,9 @@
 #include "net_time.h"
 #include "version.h"
 #include "cfg_store.h"
+#include "theme.h"
+#include "ui_theme.h"
+#include "ui_settings.h"
 
 #define PROTO_VERSION BLINK_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
@@ -110,6 +113,9 @@ static bool host_bye;		/* the app said it is going, on purpose */
 static bool host_lost;		/* silence past the timeout, without a bye */
 static char host_ver[16];	/* the daemon's release version, from welcome */
 static int host_proto;		/* ...and the protocol it speaks */
+/* The last welcome listed "theme" in its caps: the daemon can open the theme
+ * builder, so Settings may offer "Edit on computer". */
+static bool host_can_theme;
 
 /*
  * RX is interrupt-driven, not polled. On a real UART at 115200 baud the 128-byte
@@ -184,6 +190,60 @@ static void send_hello(void)
 	/* Straight after hello: a daemon that starts later, or restarts, has
 	 * no other way to learn a preference the user set while it was gone. */
 	proto_send_pref();
+	proto_send_theme_now("boot");
+}
+
+/*
+ * Which theme this board has stored. The daemon compares it with the theme
+ * the user saved on the computer (~/.blink/theme.json) and sends that one if
+ * they differ, and the builder opens on it. A preview is deliberately not
+ * reported: it is the builder's own state, and reporting it would make the
+ * daemon "restore" an unsaved preview as if it were the saved theme.
+ *
+ * `why` (contract Addendum 2): "boot" answering a hello or welcome, "user"
+ * when the owner chose on the board, "saved" after storing the PC's save.
+ * The daemon adopts the board's theme ONLY on "user". Without the reason, a
+ * board answering hello with its stored theme looked exactly like an owner
+ * choosing it, and the daemon overwrote the theme saved on the computer.
+ *
+ * A custom theme adds "h", which says WHICH custom theme -- see
+ * theme_custom_hash().
+ */
+void proto_send_theme_now(const char *why)
+{
+	char buf[80];
+	int id = ui_theme_stored_id();
+	struct theme_custom t;
+
+	if (id == THEME_CUSTOM && ui_theme_custom_stored(&t)) {
+		char h[9];
+
+		theme_custom_hash(&t, h);
+		snprintf(buf, sizeof(buf),
+			 "{\"t\":\"theme_now\",\"v\":%d,\"id\":%d,"
+			 "\"why\":\"%s\",\"h\":\"%s\"}",
+			 PROTO_VERSION, id, why, h);
+	} else {
+		snprintf(buf, sizeof(buf),
+			 "{\"t\":\"theme_now\",\"v\":%d,\"id\":%d,"
+			 "\"why\":\"%s\"}",
+			 PROTO_VERSION, id, why);
+	}
+	emit(buf);
+}
+
+void proto_send_theme_edit(void)
+{
+	char buf[40];
+
+	snprintf(buf, sizeof(buf), "{\"t\":\"theme_edit\",\"v\":%d}",
+		 PROTO_VERSION);
+	emit(buf);
+}
+
+bool proto_host_can_theme(void)
+{
+	return host_can_theme;
 }
 
 static void send_ping(void)
@@ -574,6 +634,9 @@ static void dispatch(const char *json)
 			host_ver[0] = '\0';
 		}
 		host_proto = msg_get_double(json, "v", &hv) ? (int)hv : 0;
+		/* Every welcome decides it afresh: an app downgraded to one
+		 * without the builder must stop being offered as having one. */
+		host_can_theme = theme_caps_has(json, "theme");
 		printk("[proto] host connected: app %s, protocol %d\n",
 		       host_ver[0] ? host_ver : "?", host_proto);
 		/*
@@ -602,6 +665,38 @@ static void dispatch(const char *json)
 		 * hello for the same reason.
 		 */
 		proto_send_pref();
+		/* And the theme, for the same reason as the preference: a
+		 * daemon that restarted without resetting the board heard
+		 * the hello that carried it in a previous life. */
+		proto_send_theme_now("boot");
+	} else if (strcmp(type, "theme") == 0) {
+		/*
+		 * Validated whole before anything is applied: a line with one
+		 * bad value is refused entire, and the board keeps the theme
+		 * it has (contract 2026-10-27). Nothing from the line is
+		 * logged -- only that it was refused.
+		 */
+		struct theme_msg m;
+
+		if (!theme_msg_parse(json, &m)) {
+			printk("[theme] line refused\n");
+			return;
+		}
+		/* A preview or save is the builder at work, which answers an
+		 * "Edit on computer" that is still waiting as well as an
+		 * explicit reply would. */
+		if (m.op != THEME_OP_CANCEL) {
+			ui_settings_theme_edit_reply(true);
+		}
+		ui_theme_wire(&m);
+	} else if (strcmp(type, "theme_edit") == 0) {
+		/* The daemon's answer to ours: ok 1 once a browser is open,
+		 * ok 0 when it has no display to open one on. Absent reads as
+		 * 0, the answer that tells the user what to do instead. */
+		double ok = 0;
+
+		msg_get_double(json, "ok", &ok);
+		ui_settings_theme_edit_reply(ok == 1);
 	} else if (strcmp(type, "ota_avail") == 0) {
 		double sz = 0;
 

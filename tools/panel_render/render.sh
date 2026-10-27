@@ -69,10 +69,23 @@ $CC -O1 -w -DLV_CONF_INCLUDE_SIMPLE=1 \
 	"$ROOT/firmware/src/fmt.c" \
 	"$ROOT/firmware/src/usage_state.c" \
 	"$ROOT/firmware/src/svc_state.c" \
+	"$ROOT/firmware/src/theme.c" \
+	"$ROOT/firmware/src/msg_parse.c" \
 	@"$BUILD/srcs.txt" \
-	-o "$BUILD/render"
+	-lm -o "$BUILD/render"
 
 for scene in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
 	"$BUILD/render" "$OUT/panel-$scene.ppm" "$scene"
+done
+
+# Every theme, on the two scenes that between them show all three severity
+# levels -- 27/42% (both low) and 78/91% (mid and high) -- and on the two
+# status lines that wear a colour: degraded (amber, 13) and a major outage
+# (red, 15). Theme 12 is a sample custom theme in per-gauge mode, built in
+# render_main.c.
+for theme in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
+	for scene in 0 1 13 15; do
+		"$BUILD/render" "$OUT/theme-$theme-$scene.ppm" "$scene" "$theme"
+	done
 done
 echo "PPMs in $OUT (any image viewer opens them; convert with your tool of choice)"

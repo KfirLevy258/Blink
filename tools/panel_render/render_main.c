@@ -17,6 +17,7 @@
 #include "usage_view.h"
 #include "usage_layout.h"
 #include "svc_state.h"
+#include "theme.h"
 #include <zephyr/kernel.h>
 
 static uint16_t fb[SCR_W * SCR_H];
@@ -97,6 +98,7 @@ int main(int argc, char **argv)
 	static uint8_t buf[SCR_W * 40 * 2];
 	const char *out = argc > 1 ? argv[1] : "panel.ppm";
 	int scene = argc > 2 ? atoi(argv[2]) : 0;
+	int theme = argc > 3 ? atoi(argv[3]) : THEME_DARK;
 
 	lv_init();
 	lv_display_t *disp = lv_display_create(SCR_W, SCR_H);
@@ -104,6 +106,29 @@ int main(int argc, char **argv)
 	lv_display_set_flush_cb(disp, flush_cb);
 	lv_display_set_buffers(disp, buf, NULL, sizeof(buf),
 			       LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+	/*
+	 * The theme before the screen is built, the way the board does it
+	 * (ui_theme_init() runs before usage_view_init()). 12 is a sample
+	 * custom theme in per-gauge mode with thick flat arcs, so the one
+	 * style path no built-in exercises is rendered too.
+	 */
+	if (theme == THEME_CUSTOM) {
+		struct theme_custom t = {
+			.c = { 0x14121C, 0xF2EEF8, 0x7C9CFF, 0x5ED6A0,
+			       0x5ED6A0, 0xF0B04A, 0xFF5A5A },
+			.w = THEME_W_THICK, .flat = true, .dot = false,
+			.by_gauge = true,
+		};
+
+		if (!theme_select_custom(&t)) {
+			fprintf(stderr, "sample custom theme refused\n");
+			return 1;
+		}
+	} else if (!theme_select(theme)) {
+		fprintf(stderr, "no theme %d\n", theme);
+		return 1;
+	}
 
 	usage_view_init();
 	settle();

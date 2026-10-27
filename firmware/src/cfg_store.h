@@ -110,6 +110,38 @@ int cfg_set_ota_state(uint8_t st, const char *ver);
 /* Wipe everything (factory reset). */
 int cfg_reset(void);
 
+/*
+ * The theme: which one, and the custom theme's own colours and style.
+ *
+ * Kept as raw bytes rather than as theme.h's struct, so this file stays a
+ * store and the meaning lives in one place (theme.c / ui_theme.c). The layout
+ * is the 26 bytes the orchestrator's contract fixed on 2026-10-27:
+ *   id     0..12, 0 = Dark. A record from before themes reads 0.
+ *   rgb    the custom theme's seven colours, RGB888 in order bg, text,
+ *          gauge1, gauge2, low, mid, high.
+ *   w      arc width in px (5/12/22); 0 means "no custom theme stored".
+ *   ends   0 round, 1 flat.   dot 0 hidden, 1 shown.   by 0 level, 1 gauge.
+ * The custom bytes survive choosing a built-in, so Custom stays in the list.
+ */
+struct cfg_theme {
+	uint8_t id;
+	uint8_t rgb[21];
+	uint8_t w;
+	uint8_t ends;
+	uint8_t dot;
+	uint8_t by;
+};
+
+void cfg_get_theme(struct cfg_theme *out);
+int cfg_set_theme(const struct cfg_theme *t);
+
+/* Focus mode (task 19), stored now so its fields land in the same release as
+ * the theme's and the record changes shape once, not twice. on: 0 off, 1 on.
+ * win: 0 session, 1 weekly. Both 0 on a record from before them. */
+uint8_t cfg_get_focus_on(void);
+uint8_t cfg_get_focus_win(void);
+int cfg_set_focus(uint8_t on, uint8_t win);
+
 
 /*
  * Which edition this unit is: which boot clip it plays.

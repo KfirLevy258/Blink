@@ -54,6 +54,10 @@ void usage_view_tick_1s(void);
  * shown wrong). */
 void usage_view_set_clock(int hh, int mm);
 
+/* Repaint the gauge screen in the active theme (theme.h), keeping every
+ * reading on it. A no-op before usage_view_init(). */
+void usage_view_apply_theme(void);
+
 /*
  * Boot progress: one CONNECTING takeover with a segmented bar that fills
  * green, current step named below. Call _begin once with the steps (max 3;

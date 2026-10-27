@@ -16,14 +16,20 @@
  * layout test or by looking at a render. They are arithmetic, so they are
  * checked as arithmetic.
  *
- * The colours are duplicated here from usage_view.c rather than included: they
- * are #defines wrapped in lv_color_hex(), which needs LVGL. The final check in
- * this file greps the real source to prove the two lists still agree.
+ * The colours are listed here by name, and the final check proves the list
+ * still matches the palette usage_view.c actually draws with. That used to be
+ * a grep of usage_view.c's #defines; since themes, those #defines read the
+ * active theme and the values live in theme.c as the Dark theme -- so the
+ * check now asks theme.c directly instead of parsing anything.
  */
 #include <math.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "theme.h"
 
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
@@ -31,7 +37,7 @@ static int failures;
 
 struct swatch { const char *name; unsigned rgb; };
 
-/* Kept in step with firmware/src/usage_view.c by the check at the end. */
+/* Kept in step with Dark in firmware/src/theme.c by the check at the end. */
 static const struct swatch pal[] = {
 	{ "COL_BG",      0x0E1116 },
 	{ "COL_TEXT",    0xE6E8EB },
@@ -117,42 +123,31 @@ static unsigned by_name(const char *name)
 	return 0;
 }
 
-/* Does the real source still define this colour as this value? */
+/* Is this still Dark's value for the role usage_view.c draws this name as?
+ * The names are usage_view.c's macros, and so is the mapping. */
 static int source_agrees(const char *name, unsigned rgb)
 {
-	char needle[64], line[512];
-	FILE *f = fopen("../../firmware/src/usage_view.c", "r");
+	const struct palette *d = theme_builtin(THEME_DARK);
+	static const struct { const char *name; size_t off; } role[] = {
+		{ "COL_BG",    offsetof(struct palette, bg) },
+		{ "COL_TEXT",  offsetof(struct palette, text) },
+		{ "COL_DIM",   offsetof(struct palette, dim) },
+		{ "COL_GREEN", offsetof(struct palette, low) },
+		{ "COL_AMBER", offsetof(struct palette, mid) },
+		{ "COL_RED",   offsetof(struct palette, high) },
+		{ "COL_GREY",  offsetof(struct palette, grey) },
+		/* The old identity blue, kept as Dark's per-gauge colour. */
+		{ "COL_OTHER", offsetof(struct palette, g1) },
+	};
 
-	if (!f) {
-		f = fopen("firmware/src/usage_view.c", "r");
-	}
-	if (!f) {
-		return -1;	/* cannot check from here */
-	}
-	/*
-	 * Match the NAME and the VALUE independently rather than one exact
-	 * string. The source aligns these defines with tabs, so short names get
-	 * two and long ones get one -- and a check that hardcoded the spacing
-	 * reported three false drifts the first time it ran.
-	 */
-	snprintf(needle, sizeof(needle), "#define %s", name);
-	while (fgets(line, sizeof(line), f)) {
-		char *at = strstr(line, needle);
-		char hex[16];
+	for (unsigned i = 0; i < sizeof(role) / sizeof(role[0]); i++) {
+		if (strcmp(role[i].name, name) == 0) {
+			uint32_t v;
 
-		if (!at) {
-			continue;
+			memcpy(&v, (const char *)d + role[i].off, sizeof(v));
+			return v == rgb;
 		}
-		/* Guard against COL_GREEN matching COL_GREEN_INK. */
-		at += strlen(needle);
-		if (*at != ' ' && *at != '\t') {
-			continue;
-		}
-		snprintf(hex, sizeof(hex), "0x%06X", rgb);
-		fclose(f);
-		return strstr(line, hex) != NULL;
 	}
-	fclose(f);
 	return 0;
 }
 
@@ -292,13 +287,13 @@ int main(void)
 		checked++;
 		agreed += r;
 		if (!r) {
-			printf("       %s has drifted from usage_view.c\n",
+			printf("       %s has drifted from Dark in theme.c\n",
 			       pal[i].name);
 		}
 	}
 	if (checked) {
 		CHECK(agreed == checked,
-		      "this palette still matches firmware/src/usage_view.c");
+		      "this palette still matches Dark in firmware/src/theme.c");
 	} else {
 		printf("SKIP: usage_view.c not reachable from here\n");
 	}

@@ -32,6 +32,7 @@
 #include <zephyr/sys/printk.h>
 #include <lvgl.h>
 
+#include "theme.h"
 #include "ui_boot.h"
 #include "proto.h"
 #include "bootclip.h"
@@ -212,11 +213,13 @@ void ui_boot_splash(void)
 
 	scr = lv_obj_create(NULL);
 	lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-	/* Intentional reboots wear the UI background, not the clip's clay:
+	/* Intentional reboots wear the UI background -- the THEME's, since a
+	 * dark frame between two white screens is the same betrayal -- not the
+	 * clip's clay:
 	 * even 300 ms of brand orange between two dark screens betrayed the
 	 * restart (user feedback 2026-07-16). Cold boots keep the clay so
 	 * the clip has its stage. */
-	lv_obj_set_style_bg_color(scr, skip ? lv_color_hex(0x0E1116)
+	lv_obj_set_style_bg_color(scr, skip ? lv_color_hex(theme_pal()->bg)
 					    : lv_color_hex(clip->bg_rgb), 0);
 	lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 	lv_scr_load(scr);

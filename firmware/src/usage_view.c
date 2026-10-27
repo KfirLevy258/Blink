@@ -16,13 +16,19 @@
 #include "usage_state.h"
 #include "svc_state.h"
 #include "cfg_store.h"
+#include "theme.h"
 
-/* Severity colours: green under 60%, amber approaching, red near the limit. */
-#define COL_BG		lv_color_hex(0x0E1116)
-#define COL_PANEL	lv_color_hex(0x05070A)
-#define COL_TRACK	lv_color_hex(0x272C34)
-#define COL_TEXT	lv_color_hex(0xE6E8EB)
-#define COL_DIM		lv_color_hex(0x8A9199)
+/*
+ * Every colour on this screen is a ROLE in the active theme (theme.c), read
+ * when it is drawn. The values the notes below argue for are Dark's, which
+ * is the 1.3.4 palette unchanged -- tests/theme pins that byte for byte, and
+ * tests/usage_contrast still holds Dark to the rules these notes record.
+ */
+#define COL_BG		lv_color_hex(theme_pal()->bg)
+#define COL_PANEL	lv_color_hex(theme_pal()->panel)
+#define COL_TRACK	lv_color_hex(theme_pal()->track)
+#define COL_TEXT	lv_color_hex(theme_pal()->text)
+#define COL_DIM		lv_color_hex(theme_pal()->dim)
 /*
  * The severity ramp: green, amber, red -- and all three sit inside a 1.16x
  * luminance band on purpose.
@@ -60,36 +66,19 @@
  * panel actually shows -- see tests/usage_contrast, where computing contrast
  * for a colour the hardware cannot display was the gap that let this ship.
  */
-#define COL_GREEN	lv_color_hex(0x0DA243)
-#define COL_GREEN_INK	lv_color_hex(0x06210F)
-#define COL_AMBER	lv_color_hex(0xBA8107)
-#define COL_RED		lv_color_hex(0xFF1900)
+#define COL_GREEN	lv_color_hex(theme_pal()->low)	/* Dark: #0DA243 */
+#define COL_AMBER	lv_color_hex(theme_pal()->mid)	/* Dark: #BA8107 */
+#define COL_RED		lv_color_hex(theme_pal()->high)	/* Dark: #FF1900 */
 /* 3.91:1 against the background. Was #555B63 at 2.76:1, which is under the
  * 3:1 minimum for a graphic element -- and these are the swipe chevrons, which
  * exist only because nobody discovered the gestures without them. An
  * affordance too dim to notice is not an affordance. */
-#define COL_GREY	lv_color_hex(0x6B7280)
+#define COL_GREY	lv_color_hex(theme_pal()->grey)	/* Dark: #6B7280 */
 
-/*
- * Provider identity colours.
- *
- * Colour now says WHICH TOOL a ring belongs to, which means it is no longer
- * saying how close that tool is to its limit. Severity moved to the numerals
- * instead -- the percentage in the middle of each gauge still runs
- * green/amber/red -- so the warning is still there, just carried by the text
- * rather than the ring. Worth knowing when reading this file: the ring tells
- * you whose, the number tells you how bad.
- */
-/*
- * Identity colours, and they sit BELOW the severity ramp deliberately.
- *
- * The teal used to measure 10.16:1 -- brighter than every severity colour, so
- * a codex ball at 5% pulled more attention than a Claude arc at 95%. Identity
- * outranking urgency is exactly backwards. Both now sit inside the severity
- * band, still 1.56:1 apart from each other so the pair survives for anyone who
- * cannot resolve the hue difference.
- */
-#define COL_OTHER	lv_color_hex(0x4387DF)	/* anything else: a cool blue */
+/* The old provider-identity blue (#4387DF) is Dark's `g1` now: the identity
+ * colours went when each provider got a page of its own, and a per-gauge
+ * custom theme is the one place a gauge colour that is not a severity still
+ * means something. */
 
 struct gauge {
 	lv_obj_t *arc;
@@ -363,6 +352,43 @@ static lv_color_t severity(double pct)
 	return COL_GREEN;
 }
 
+/*
+ * An arc's own colour: severity, unless a custom theme gives each gauge a
+ * colour of its own -- and even then 90% and above turns `high`, because a
+ * per-gauge theme that hid the warning would be a theme that hid the one
+ * thing this panel is for. The rail keeps severity() either way: it ranks
+ * pages, and a page has no gauge colour.
+ */
+static lv_color_t arc_tint(const struct gauge *g, double pct);
+
+/*
+ * Everything about a gauge that the theme decides: width, ends, whether the
+ * ball is drawn, and the colours that are not the indicator's. Called when
+ * the gauge is built and again on every theme change, so a theme can never
+ * reach one gauge and not the other.
+ */
+static void style_gauge(struct gauge *g)
+{
+	const struct palette *p = theme_pal();
+	/* Hidden by opacity, not by dropping the part: the knob is what tracks
+	 * the end of the indicator, and a theme change back to one with a dot
+	 * must find it where the arc ends. */
+	lv_opa_t knob = p->dot ? LV_OPA_COVER : LV_OPA_TRANSP;
+
+	lv_obj_set_style_arc_width(g->arc, p->arc_w, LV_PART_MAIN);
+	lv_obj_set_style_arc_width(g->arc, p->arc_w, LV_PART_INDICATOR);
+	lv_obj_set_style_arc_rounded(g->arc, !p->flat, LV_PART_MAIN);
+	lv_obj_set_style_arc_rounded(g->arc, !p->flat, LV_PART_INDICATOR);
+	lv_obj_set_style_arc_color(g->arc, COL_TRACK, LV_PART_MAIN);
+	lv_obj_set_style_bg_color(g->arc, COL_TEXT, LV_PART_KNOB);
+	lv_obj_set_style_border_color(g->arc, COL_BG, LV_PART_KNOB);
+	lv_obj_set_style_bg_opa(g->arc, knob, LV_PART_KNOB);
+	lv_obj_set_style_border_opa(g->arc, knob, LV_PART_KNOB);
+	lv_obj_set_style_text_color(g->pct, COL_TEXT, 0);
+	lv_obj_set_style_text_color(g->name, COL_DIM, 0);
+	lv_obj_set_style_text_color(g->countdown, COL_DIM, 0);
+}
+
 static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 			const char *title)
 {
@@ -380,22 +406,15 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	 * arc stays unclickable -- this is still a readout. */
 	lv_obj_clear_flag(g->arc, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_set_style_pad_all(g->arc, GAUGE_BALL_PAD, LV_PART_KNOB);
-	lv_obj_set_style_bg_color(g->arc, COL_TEXT, LV_PART_KNOB);
-	lv_obj_set_style_bg_opa(g->arc, LV_OPA_COVER, LV_PART_KNOB);
 	/*
 	 * A ring of the panel's own ground, so the ball separates from the arc
 	 * it sits on whatever colour that arc happens to be. Without it the
 	 * ball measured 1.24:1 against a red arc and 1.07:1 against a green one
 	 * -- it vanished into the track at exactly the moments the track was
-	 * saying something.
+	 * saying something. Its colour, the ball's, the arc's width and ends
+	 * are the theme's, set in style_gauge() below.
 	 */
-	lv_obj_set_style_border_color(g->arc, COL_BG, LV_PART_KNOB);
 	lv_obj_set_style_border_width(g->arc, GAUGE_BALL_RING, LV_PART_KNOB);
-	lv_obj_set_style_border_opa(g->arc, LV_OPA_COVER, LV_PART_KNOB);
-	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_MAIN);
-	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_INDICATOR);
-	lv_obj_set_style_arc_color(g->arc, COL_TRACK, LV_PART_MAIN);
-	lv_obj_set_style_arc_color(g->arc, COL_GREEN, LV_PART_INDICATOR);
 
 	/* The second provider's ring, hidden until one exists. Created before
 	 * the labels so the text draws over it, not under. */
@@ -437,6 +456,12 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_obj_set_style_text_align(g->countdown, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
 
+	style_gauge(g);
+}
+
+static lv_color_t arc_tint(const struct gauge *g, double pct)
+{
+	return lv_color_hex(theme_arc_colour(theme_pal(), g == &weekly, pct));
 }
 
 static void render_countdown(struct gauge *g)
@@ -488,10 +513,13 @@ static void render_weekly(void)
 	snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(pct));
 	lv_label_set_text(weekly.pct, buf);
 	lv_arc_set_value(weekly.arc, arc_value(pct));
-	lv_obj_set_style_arc_color(weekly.arc, severity(pct), LV_PART_INDICATOR);
+	lv_obj_set_style_arc_color(weekly.arc, arc_tint(&weekly, pct),
+				   LV_PART_INDICATOR);
 }
 
 static lv_obj_t *gauge_scr;
+/* Kept only so a theme change can reach them; nothing else touches these. */
+static lv_obj_t *title_lbl, *chev_r, *chev_l;
 
 void usage_view_deinit(void)
 {
@@ -524,6 +552,7 @@ void usage_view_deinit(void)
 	 * set_status, the same way the health dot does.
 	 */
 	dot = NULL;
+	title_lbl = chev_r = chev_l = NULL;
 	for (int i = 0; i < PIP_MAX; i++) {
 		pip[i] = NULL;
 		pip_num[i] = NULL;
@@ -563,6 +592,7 @@ void usage_view_init(void)
 	 * shouted over the gauges; user feedback 2026-07-16). */
 	lv_obj_t *title = lv_label_create(scr);
 
+	title_lbl = title;
 	lv_label_set_text(title, BRAND_TEXT);
 	lv_obj_set_style_text_color(title, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(title, 2, 0);
@@ -749,11 +779,13 @@ void usage_view_init(void)
 	 * on them still reach the screen. */
 	lv_obj_t *chev = lv_label_create(scr);
 
+	chev_r = chev;
 	lv_label_set_text(chev, LV_SYMBOL_RIGHT);
 	lv_obj_set_style_text_color(chev, COL_GREY, 0);
 	lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -3, 0);
 
 	chev = lv_label_create(scr);
+	chev_l = chev;
 	lv_label_set_text(chev, LV_SYMBOL_LEFT);
 	lv_obj_set_style_text_color(chev, COL_GREY, 0);
 	lv_obj_align(chev, LV_ALIGN_LEFT_MID, 3, 0);
@@ -914,7 +946,8 @@ static void render_gauges(void)
 		snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(p->s_pct));
 		lv_label_set_text(session.pct, buf);
 		lv_arc_set_value(session.arc, arc_value(p->s_pct));
-		lv_obj_set_style_arc_color(session.arc, severity(p->s_pct),
+		lv_obj_set_style_arc_color(session.arc,
+					   arc_tint(&session, p->s_pct),
 					   LV_PART_INDICATOR);
 	}
 	session.resets_in_s = p->s_in_s;
@@ -1199,7 +1232,7 @@ static void morph_arc(struct gauge *g, double pct)
 	 * that mean nothing -- olive between green and amber -- and this
 	 * palette's whole job is that a colour means one thing.
 	 */
-	lv_obj_set_style_arc_color(g->arc, severity(pct), LV_PART_INDICATOR);
+	lv_obj_set_style_arc_color(g->arc, arc_tint(g, pct), LV_PART_INDICATOR);
 }
 
 static void morph_exec(void *unused, int32_t t)
@@ -1539,7 +1572,8 @@ static void expire_session(void)
 	last_s_pct = 0;
 	lv_label_set_text(session.pct, "0%");
 	lv_arc_set_value(session.arc, 0);
-	lv_obj_set_style_arc_color(session.arc, severity(0), LV_PART_INDICATOR);
+	lv_obj_set_style_arc_color(session.arc, arc_tint(&session, 0),
+				   LV_PART_INDICATOR);
 }
 
 static void expire_weekly(void)
@@ -1691,6 +1725,20 @@ static lv_color_t pip_colour(enum fmt_pip_kind k)
 	}
 }
 
+/*
+ * The same tone as TEXT: the tally digits and the toast. Green needs a text
+ * version because a pip is a 3:1 graphic and a numeral is 4.5:1 text, and on
+ * the light themes, Retro and colour-blind the arc green is only the first
+ * (theme.c, low_text; tests/theme measures both). Amber and red already
+ * clear 4.5 everywhere, because the hint line wears them.
+ */
+static lv_color_t pip_text_colour(enum fmt_pip_kind k)
+{
+	return fmt_pip_tone(k) == FMT_TONE_RED || fmt_pip_tone(k) == FMT_TONE_AMBER
+		       ? pip_colour(k)
+		       : lv_color_hex(theme_pal()->low_text);
+}
+
 static void toast_hide(void)
 {
 	toast_ttl = 0;
@@ -1713,13 +1761,16 @@ static void toast_hide(void)
  * and the timer restarts from it. The alternative is a card that keeps
  * talking after the news is stale, which is how a popup earns being ignored.
  */
+static enum fmt_pip_kind toast_kind;	/* the toast's tone, for a repaint */
+
 static void toast_show(enum fmt_pip_kind kind, const char *text)
 {
 	if (!toast || !toast_lbl) {
 		return;
 	}
 	lv_label_set_text(toast_lbl, text);
-	lv_obj_set_style_text_color(toast_lbl, pip_colour(kind), 0);
+	toast_kind = kind;	/* so a theme change can repaint it */
+	lv_obj_set_style_text_color(toast_lbl, pip_text_colour(kind), 0);
 	lv_obj_clear_flag(toast, LV_OBJ_FLAG_HIDDEN);
 	toast_ttl = TOAST_TTL_S;
 }
@@ -1954,7 +2005,8 @@ static void refresh_dots(void)
 
 		if (tally) {
 			lv_label_set_text(pip_num[i], b);
-			lv_obj_set_style_text_color(pip_num[i], c, 0);
+			lv_obj_set_style_text_color(pip_num[i],
+				lost ? COL_GREY : pip_text_colour(want[i].kind), 0);
 			lv_obj_align(pip_num[i], LV_ALIGN_TOP_LEFT,
 				     x + PIP_SZ + PIP_NUM_GAP, PIP_NUM_Y);
 			lv_obj_clear_flag(pip_num[i], LV_OBJ_FLAG_HIDDEN);
@@ -2576,4 +2628,57 @@ void usage_view_set_clock(int hh, int mm)
 
 	snprintf(buf, sizeof(buf), "%02d:%02d", hh, mm);
 	lv_label_set_text(clock_lbl, buf);
+}
+
+/*
+ * Repaint every widget on this screen in the active theme, in place.
+ *
+ * In place rather than by rebuilding the screen, which is what
+ * usage_view_deinit() + init() would do, because a rebuild loses the
+ * readings: they come back only when the daemon re-pushes, so every preview
+ * step from the theme builder would blank both gauges to "--" for a round
+ * trip. Instead the static styles are re-set here, and everything coloured
+ * by STATE -- the arcs, the pips, the rail, the hint line -- is re-rendered
+ * through the same functions that drew it, so it lands in the new theme by
+ * the route it always takes.
+ */
+void usage_view_apply_theme(void)
+{
+	if (!built) {
+		return;
+	}
+	lv_obj_set_style_bg_color(gauge_scr, COL_BG, 0);
+	lv_obj_set_style_text_color(title_lbl, COL_DIM, 0);
+	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
+	lv_obj_set_style_text_color(clock_lbl, COL_DIM, 0);
+	lv_obj_set_style_text_color(chev_r, COL_GREY, 0);
+	lv_obj_set_style_text_color(chev_l, COL_GREY, 0);
+	if (provider_lbl) {
+		lv_obj_set_style_text_color(provider_lbl, COL_TEXT, 0);
+		lv_obj_set_style_bg_color(provider_lbl, COL_PANEL, 0);
+	}
+	style_gauge(&session);
+	style_gauge(&weekly);
+	lv_obj_set_style_bg_color(toast, COL_PANEL, 0);
+	lv_obj_set_style_border_color(toast, COL_TRACK, 0);
+	lv_obj_set_style_text_color(toast_lbl, pip_text_colour(toast_kind), 0);
+
+	lv_obj_set_style_bg_color(overlay, COL_BG, 0);
+	lv_obj_set_style_text_color(wait_big, COL_TEXT, 0);
+	lv_obj_set_style_text_color(boot_cnt, COL_DIM, 0);
+	lv_obj_set_style_text_color(boot_step, COL_DIM, 0);
+	lv_obj_set_style_text_color(boot_hint, COL_DIM, 0);
+	for (int i = 0; i < BOOT_STEPS_MAX; i++) {
+		lv_obj_set_style_bg_color(boot_seg[i], COL_TRACK, 0);
+	}
+	if (boot_n > 0) {
+		/* Same stage again: recolours the bar and leaves the pulse
+		 * running, since the stage did not change. */
+		usage_view_boot_stage(boot_active >= 0 ? boot_active : boot_n);
+	}
+
+	render_gauges();	/* arcs, and refresh_provider1() with them */
+	refresh_rail();
+	usage_view_set_status(last_status);	/* hint, dot, pips */
+	lv_obj_invalidate(gauge_scr);
 }

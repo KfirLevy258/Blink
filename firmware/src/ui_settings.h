@@ -61,4 +61,11 @@ void ui_settings_service(void (*pump)(void));
  */
 bool ui_settings_busy(void);
 
+/* Repaint the settings panel, if it is open, in the active theme. */
+void ui_settings_apply_theme(void);
+
+/* The daemon answered "Edit on computer": ok means a browser opened. A no-op
+ * unless the row is still waiting for an answer. */
+void ui_settings_theme_edit_reply(bool ok);
+
 #endif /* UI_SETTINGS_H */

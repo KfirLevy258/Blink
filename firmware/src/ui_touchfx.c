@@ -11,8 +11,12 @@
 #include <lvgl.h>
 
 #include "ui_touchfx.h"
+#include "theme.h"
 
-#define FX_COLOR	0xFFFFFF	/* soft white reads on both dark and light */
+/* The echo wears the theme's text colour. It was a fixed soft white, chosen
+ * because it "reads on both dark and light" -- which it does not on a white
+ * ground, where Light and Ink would have had no echo at all. */
+#define FX_COLOR	(theme_pal()->text)
 #define FX_START	18		/* diameter (px) at the moment of the press */
 #define FX_END		44		/* diameter (px) once fully faded */
 #define FX_OPA		120		/* starting opacity (~47%, i.e. "half") */

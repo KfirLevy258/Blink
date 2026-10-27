@@ -14,6 +14,7 @@
 #include "proto.h"
 #include "usage_view.h"
 #include "cfg_store.h"
+#include "ui_theme.h"
 #include "backlight.h"
 #include "net_time.h"
 #include "ui_boot.h"
@@ -593,6 +594,9 @@ int main(void)
 	ui_touchfx_init();	/* light touch-echo feedback on every press */
 
 	cfg_init();
+	/* The stored theme, before a single screen exists, so every screen is
+	 * born in it and nothing has to be repainted at boot. */
+	ui_theme_init();
 	ota_boot_begin();	/* unconfirmed image? start the confirm clock */
 	/* ...and from here the boot screen's own wait loops feed it too; they
 	 * block for seconds against a 30 s window. */

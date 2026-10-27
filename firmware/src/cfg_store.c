@@ -60,6 +60,29 @@ struct rec {
 	uint8_t main_src;		/* 0 unset -> claude; else enum cfg_main_src */
 	uint8_t edition;		/* 0 unset -> claude; else enum cfg_edition */
 	uint8_t edition_locked;		/* 1 once stamped; see cfg_set_edition */
+	/*
+	 * 1.3.4's seal, kept where 1.3.4 looks for it.
+	 *
+	 * Everything above this line is the 1.3.4 record, byte for byte, and
+	 * this is its CRC over exactly those bytes. Every earlier field
+	 * addition moved the CRC to the new end, which kept UPDATES working
+	 * (each layout got a reader below) but meant a DOWNGRADE found a
+	 * record whose CRC was in the wrong place and treated it as blank --
+	 * losing brightness, timezone and, worse, the edition latch, which a
+	 * blank record does not have. The theme fields are the first to be
+	 * appended with a downgrade promised (orch contract 2026-10-27), so
+	 * they are appended AFTER a still-valid 1.3.4 record instead of
+	 * inside one. tests/cfg_store plays both directions.
+	 */
+	uint32_t crc_134;
+	uint8_t theme_id;		/* 0 Dark; see struct cfg_theme */
+	uint8_t theme_rgb[21];
+	uint8_t theme_w;
+	uint8_t theme_ends;
+	uint8_t theme_dot;
+	uint8_t theme_by;
+	uint8_t focus_on;		/* task 19, reserved */
+	uint8_t focus_win;
 	uint32_t crc;		/* over everything above, always last */
 } __packed;
 
@@ -171,6 +194,30 @@ static bool slot_load(int off, struct rec *out)
 	memcpy(out, buf, sizeof(*out));
 	if (out->magic == REC_MAGIC && out->crc == rec_crc(out)) {
 		return true;
+	}
+
+	/*
+	 * The 1.3.4 layout: the front of the current one, sealed by crc_134.
+	 *
+	 * Read straight out of `buf` rather than through a struct of its own,
+	 * because it IS the current struct's prefix -- and because this
+	 * function already holds four record-sized locals on the main stack.
+	 * The theme and Focus fields after it are whatever was on flash (a
+	 * 1.3.4 record pads with zeros, the sector beyond reads erased), so
+	 * they are zeroed: Dark, Focus off.
+	 */
+	{
+		uint32_t seal;
+
+		memcpy(&seal, buf + offsetof(struct rec, crc_134), sizeof(seal));
+		if (out->magic == REC_MAGIC &&
+		    seal == crc32_ieee(buf, offsetof(struct rec, crc_134))) {
+			memset((uint8_t *)out + offsetof(struct rec, crc_134), 0,
+			       sizeof(*out) - offsetof(struct rec, crc_134));
+			out->crc = rec_crc(out);
+			printk("[cfg] migrated 1.3.4 record (seq %u)\n", out->seq);
+			return true;
+		}
 	}
 
 	/* Not a current record -- try the layout from before the edition latch. */
@@ -317,6 +364,9 @@ static int persist(void)
 
 	cfg.magic = REC_MAGIC;
 	cfg.seq++;
+	/* Both seals, inner first: the outer CRC covers the inner one. */
+	cfg.crc_134 = crc32_ieee((const uint8_t *)&cfg,
+				 offsetof(struct rec, crc_134));
 	cfg.crc = rec_crc(&cfg);
 
 	memset(buf, 0, sizeof(buf));
@@ -335,6 +385,25 @@ static int persist(void)
 	return rc;
 }
 
+/* Is this slot a whole record of THIS layout, outer seal and all -- not one
+ * slot_load() could only read by migrating it? */
+static bool slot_whole(int off)
+{
+	/* On the stack, not static: this runs once, at boot, after
+	 * slot_load()'s larger frames have returned, so it reuses their room
+	 * instead of holding 507 bytes of RAM for the life of the board. */
+	uint8_t buf[sizeof(struct rec)];
+	uint32_t magic, crc;
+
+	if (flash_area_read(fa, off, buf, sizeof(buf)) != 0) {
+		return false;
+	}
+	memcpy(&magic, buf + offsetof(struct rec, magic), sizeof(magic));
+	memcpy(&crc, buf + offsetof(struct rec, crc), sizeof(crc));
+	return magic == REC_MAGIC &&
+	       crc == crc32_ieee(buf, offsetof(struct rec, crc));
+}
+
 int cfg_init(void)
 {
 	int rc = flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa);
@@ -347,16 +416,42 @@ int cfg_init(void)
 	struct rec a, b;
 	bool va = slot_load(SLOT_A, &a);
 	bool vb = slot_load(SLOT_B, &b);
+	const struct rec *other = NULL;
 
 	if (va && (!vb || a.seq >= b.seq)) {
 		cfg = a;
 		cur_slot = SLOT_A;
+		other = vb ? &b : NULL;
 	} else if (vb) {
 		cfg = b;
 		cur_slot = SLOT_B;
+		other = va ? &a : NULL;
 	} else {
 		memset(&cfg, 0, sizeof(cfg));
 		cur_slot = -1;	/* first persist() lands in slot A */
+	}
+
+	/*
+	 * The newer slot can be whole as 1.3.4 reads it and torn after that.
+	 *
+	 * A record is written front to back, and 1.3.4's seal sits 32 bytes
+	 * before the end. Power lost inside those 32 bytes leaves a slot that
+	 * passes the 1.3.4 check with the newer sequence -- so it wins, and on
+	 * its own it says Dark and Focus off. The same happens, by design,
+	 * after a downgrade: 1.3.4 writes its record and nothing after it.
+	 * Either way the other slot can still be a whole record of ours, and
+	 * the theme the owner had is sealed in it. Take the appended fields
+	 * from there; everything 1.3.4 knows about stays the newer slot's.
+	 * tests/cfg_store cuts a write at every one of its 513 byte counts.
+	 */
+	if (other != NULL && cur_slot >= 0 && !slot_whole(cur_slot) &&
+	    slot_whole(cur_slot == SLOT_A ? SLOT_B : SLOT_A)) {
+		size_t from = offsetof(struct rec, theme_id);
+
+		memcpy((uint8_t *)&cfg + from, (const uint8_t *)other + from,
+		       offsetof(struct rec, crc) - from);
+		cfg.crc = rec_crc(&cfg);	/* in RAM; resealed on next write */
+		printk("[cfg] theme and focus taken from the older slot\n");
 	}
 
 	/* Never log the token itself, only whether we have one. */
@@ -691,4 +786,63 @@ int cfg_reset(void)
 	}
 	k_mutex_unlock(&cfg_lock);
 	return 0;
+}
+
+void cfg_get_theme(struct cfg_theme *out)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	out->id = cfg.theme_id;
+	memcpy(out->rgb, cfg.theme_rgb, sizeof(out->rgb));
+	out->w = cfg.theme_w;
+	out->ends = cfg.theme_ends;
+	out->dot = cfg.theme_dot;
+	out->by = cfg.theme_by;
+	k_mutex_unlock(&cfg_lock);
+}
+
+int cfg_set_theme(const struct cfg_theme *t)
+{
+	int rc;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	/* Nothing changed, nothing written: a flash sector erased for the
+	 * same 26 bytes is wear and a power-cut window bought for nothing. */
+	if (cfg.theme_id == t->id &&
+	    memcmp(cfg.theme_rgb, t->rgb, sizeof(cfg.theme_rgb)) == 0 &&
+	    cfg.theme_w == t->w && cfg.theme_ends == t->ends &&
+	    cfg.theme_dot == t->dot && cfg.theme_by == t->by) {
+		k_mutex_unlock(&cfg_lock);
+		return 0;
+	}
+	cfg.theme_id = t->id;
+	memcpy(cfg.theme_rgb, t->rgb, sizeof(cfg.theme_rgb));
+	cfg.theme_w = t->w;
+	cfg.theme_ends = t->ends;
+	cfg.theme_dot = t->dot;
+	cfg.theme_by = t->by;
+	rc = persist();
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
+uint8_t cfg_get_focus_on(void)
+{
+	return cfg.focus_on;
+}
+
+uint8_t cfg_get_focus_win(void)
+{
+	return cfg.focus_win;
+}
+
+int cfg_set_focus(uint8_t on, uint8_t win)
+{
+	int rc;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	cfg.focus_on = on;
+	cfg.focus_win = win;
+	rc = persist();
+	k_mutex_unlock(&cfg_lock);
+	return rc;
 }

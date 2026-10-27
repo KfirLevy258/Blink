@@ -34,18 +34,28 @@
 #include "upd_row.h"
 #include "usage_view.h"
 #include "mem_stats.h"
+#include "theme.h"
+#include "ui_theme.h"
 
-#define COL_BG		lv_color_hex(0x0E1116)
-#define COL_TRACK	lv_color_hex(0x272C34)
-#define COL_TEXT	lv_color_hex(0xE6E8EB)
-#define COL_DIM		lv_color_hex(0x8A9199)
-#define COL_RED		lv_color_hex(0xE74C3C)
-#define COL_GREEN	lv_color_hex(0x2ECC71)
-#define COL_AMBER	lv_color_hex(0xF1C40F)
-#define COL_PANEL	lv_color_hex(0x161A20)	/* card fill, sits above COL_BG */
-#define COL_LINE	lv_color_hex(0x20252D)	/* the full-width section rules */
-#define COL_DANGER_BG	lv_color_hex(0x1E1412)	/* factory tile: red-tinted, not solid red */
-#define COL_DANGER_BD	lv_color_hex(0x7A2B23)
+/*
+ * Roles in the active theme (theme.c), read when drawn. The comments give
+ * Dark's value, which is what these were as constants in 1.3.4 -- this
+ * panel's green/amber/red were never the gauge's, and Dark keeps them apart.
+ */
+#define COL_BG		lv_color_hex(theme_pal()->bg)		/* #0E1116 */
+#define COL_TRACK	lv_color_hex(theme_pal()->track)	/* #272C34 */
+#define COL_TEXT	lv_color_hex(theme_pal()->text)		/* #E6E8EB */
+#define COL_DIM		lv_color_hex(theme_pal()->dim)		/* #8A9199 */
+#define COL_RED		lv_color_hex(theme_pal()->bad)		/* #E74C3C */
+#define COL_GREEN	lv_color_hex(theme_pal()->ok)		/* #2ECC71 */
+#define COL_AMBER	lv_color_hex(theme_pal()->warn)		/* #F1C40F */
+/* card fill, sits above COL_BG (#161A20) */
+#define COL_PANEL	lv_color_hex(theme_pal()->card)
+/* the full-width section rules (#20252D) */
+#define COL_LINE	lv_color_hex(theme_pal()->line)
+/* factory tile: red-tinted, not solid red (#1E1412 / #7A2B23) */
+#define COL_DANGER_BG	lv_color_hex(theme_pal()->danger_bg)
+#define COL_DANGER_BD	lv_color_hex(theme_pal()->danger_bd)
 
 /*
  * No destructive actions, and no confirm-then-reboot machinery behind them.
@@ -148,7 +158,16 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
 	lv_obj_t *l = lv_label_create(b);
 
 	lv_label_set_text(l, txt);
-	lv_obj_set_style_text_color(l, COL_TEXT, 0);
+	/*
+	 * On the green buttons ("Update now", "Yes, do it") the label wears the
+	 * theme's ok_ink. It was always COL_TEXT, which is right on Dark and
+	 * nowhere else: Mono's and Ink's text IS their ok colour (1.00:1), and
+	 * Neon measured 1.29, Retro 1.36. tests/theme holds every theme but Dark
+	 * to 4.5; Dark keeps the label it shipped with.
+	 */
+	lv_obj_set_style_text_color(l, lv_color_eq(bg, COL_GREEN)
+				       ? lv_color_hex(theme_pal()->ok_ink)
+				       : COL_TEXT, 0);
 	lv_obj_center(l);
 	return b;
 }
@@ -194,6 +213,9 @@ static lv_obj_t *pct_lbl;	/* the brightness row's subtitle: "60%" */
  */
 static lv_obj_t *bright_big;	/* the big readout on the brightness screen */
 static lv_obj_t *bright_ov;	/* the brightness screen itself, or NULL */
+static lv_obj_t *theme_ov;	/* the theme screen, or NULL */
+static lv_obj_t *theme_grid;	/* its tiles' container */
+static lv_obj_t *theme_edit_lbl;	/* the "Edit on computer" row's words */
 static lv_obj_t *seg[BRIGHT_STOPS];
 
 static void bright_refresh(void)
@@ -1577,6 +1599,495 @@ static void show_bright(lv_event_t *e)
 	bright_refresh();	/* paints the stops and the readout */
 }
 
+/* --- The theme screen ------------------------------------------------- */
+
+/*
+ * Six slots a page, two across and three down, 144 x 56 each: 25.6 x 10.0 mm,
+ * the same 10 mm height as every settings row, because that is the smallest a
+ * target can be on this resistive panel and still be pressed on purpose.
+ * Twelve built-ins and a custom one do not fit one screen at any size worth
+ * pressing, and the panel cannot scroll reliably (ui_swipe.h has the
+ * measurements: one physical swipe arrives as five or six short presses), so
+ * the list pages instead, from a button in the title bar. "Edit on computer"
+ * is the last slot of every page when the app can open the builder; it used
+ * to be a 36 px strip under the grid, the one target on the screen below the
+ * 10 mm line.
+ *
+ * Each tile is drawn IN its theme -- its ground, its name in its text, and a
+ * chip running from its plenty colour to its almost-gone one -- so the list
+ * is its own preview, and a theme that is wrong for the room is visible as
+ * wrong before it is chosen.
+ *
+ * MEMORY. This screen used to be built over the settings panel, and on host
+ * LVGL with the real code the three trees together measured 44,200 B -- 5.9 KB
+ * deeper than Brightness, the deepest screen until then, in a 30 KB pool the
+ * board had already been measured at 21 KB of on the gauges alone (review
+ * 2026-10-27). With asserts off a failed allocation is a NULL dereference,
+ * then a fault, then a reboot. So opening it frees the settings panel's
+ * contents first and closing it builds them again (rebuild_cb already did
+ * exactly that for a theme change), and every tile and chip shares ONE static
+ * style for everything they have in common, rather than each carrying its own
+ * copy of the same eight properties. Host LVGL, this file, Dark, peak pool:
+ * 35,160 B before and 26,640 after, against Brightness's 29,232 -- the theme
+ * screen is no longer the deepest one. Host pointers are twice the board's,
+ * so `[mem] theme-close` is the board's own figure and the one to trust.
+ */
+#define THEME_SLOTS 6
+#define THEME_TILE_W 144
+#define THEME_TILE_H 56
+#define THEME_TILE_GAP 6
+#define THEME_GRID_Y 46
+/* The name sits top-left and the chip under it, so a name has the tile's
+ * whole inner width rather than what a chip beside it leaves. "Colour-blind"
+ * once ended 2 px short of a chip on its right; widths are pixels, and the
+ * label is clipped to this many of them whatever its text. */
+#define THEME_NAME_W (THEME_TILE_W - 2 * 10)
+
+BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
+	     "the theme grid runs off the panel");
+
+/*
+ * "Edit on computer": the board asks, the daemon opens the builder in a
+ * browser and says so. Contract 2026-10-27: ok 1 means a browser opened;
+ * ok 0, or no answer inside 5 s, means the user has to start it themselves,
+ * and the slot says how. One ask per 10 s, so a double tap does not open two
+ * browser tabs.
+ */
+#define EDIT_WAIT_MS 5000
+#define EDIT_COOLDOWN_MS 10000
+
+static const char *const edit_name = "Edit on computer";
+static const char *const edit_waiting = "Opening on your computer";
+static const char *const edit_opened = "Opened on your computer";
+static const char *const edit_run = "Run `blink theme` on your computer";
+
+static int theme_page;		/* survives a repaint, so the page stays put */
+static const char *edit_note;	/* what the slot says; NULL is its name */
+static lv_timer_t *edit_timer;	/* non-NULL while waiting for the daemon */
+static int64_t edit_sent_ms;
+static bool edit_ever_sent;
+static bool theme_closing;	/* a close is queued; see theme_close() */
+
+/* Shared by every tile and every chip; see MEMORY above. Static, so they
+ * cost no pool beyond their property arrays, allocated once. */
+static lv_style_t st_tile, st_chip;
+static bool st_ready;
+
+static void show_theme(bool fresh);
+static void build_panel(lv_obj_t *parent_scr);
+
+/* Every theme that can be offered, Dark first. Custom only once a usable one
+ * has been saved -- an all-zero record would be a black-on-black tile. */
+static int theme_list(int ids[THEME_N])
+{
+	struct theme_custom t;
+	int n = 0;
+
+	for (int i = 0; i < THEME_BUILTIN_N; i++) {
+		ids[n++] = i;
+	}
+	if (ui_theme_custom_stored(&t)) {
+		ids[n++] = THEME_CUSTOM;
+	}
+	return n;
+}
+
+/* Theme tiles a page holds: all six, or five and the Edit slot. */
+static int theme_per_page(void)
+{
+	return proto_host_can_theme() ? THEME_SLOTS - 1 : THEME_SLOTS;
+}
+
+static int theme_pages(void)
+{
+	int ids[THEME_N];
+
+	return (theme_list(ids) + theme_per_page() - 1) / theme_per_page();
+}
+
+/*
+ * Was this release a tap? LVGL 9.3 sends CLICKED on release even when the
+ * press became a gesture, so the back swipe -- which most people start on
+ * whatever is under their thumb -- chose and STORED the theme under it on its
+ * way out. Same reasoning as zone_was_a_tap(), and the same two witnesses:
+ * ui_swipe, which reads the panel directly, and LVGL's own gesture.
+ */
+static bool tile_was_a_tap(void)
+{
+	return !ui_swipe_dragging() &&
+	       lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_NONE;
+}
+
+static void edit_paint(void)
+{
+	if (theme_edit_lbl) {
+		lv_label_set_text(theme_edit_lbl,
+				  edit_note ? edit_note : edit_name);
+	}
+}
+
+static void edit_timeout(lv_timer_t *t)
+{
+	ARG_UNUSED(t);
+	edit_timer = NULL;	/* repeat count 1: LVGL frees it */
+	edit_note = edit_run;
+	edit_paint();
+}
+
+static void theme_edit_cb(lv_event_t *e)
+{
+	int64_t now = k_uptime_get();
+
+	ARG_UNUSED(e);
+	if (!tile_was_a_tap()) {
+		return;
+	}
+	if (edit_ever_sent && now - edit_sent_ms < EDIT_COOLDOWN_MS) {
+		return;		/* the slot already says what happened */
+	}
+	edit_ever_sent = true;
+	edit_sent_ms = now;
+	proto_send_theme_edit();
+	edit_note = edit_waiting;
+	edit_paint();
+	if (edit_timer) {
+		lv_timer_reset(edit_timer);
+		return;
+	}
+	edit_timer = lv_timer_create(edit_timeout, EDIT_WAIT_MS, NULL);
+	if (edit_timer == NULL) {
+		/* Out of pool. Say the fallback now rather than wait for an
+		 * answer that has nothing left to land on. */
+		edit_note = edit_run;
+		edit_paint();
+		return;
+	}
+	lv_timer_set_repeat_count(edit_timer, 1);
+}
+
+void ui_settings_theme_edit_reply(bool ok)
+{
+	if (edit_timer == NULL) {
+		return;		/* nobody asked, or the 5 s already ran out */
+	}
+	lv_timer_delete(edit_timer);
+	edit_timer = NULL;
+	edit_note = ok ? edit_opened : edit_run;
+	edit_paint();
+}
+
+/*
+ * Leave the theme screen: delete it and build the settings panel back, both
+ * from lv_async_call because every caller is an event on a child of what gets
+ * deleted. Until it runs the theme screen stays up and inert.
+ */
+static void theme_closed_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	theme_closing = false;
+	if (panel == NULL || theme_ov == NULL) {
+		return;		/* the whole panel went in the meantime */
+	}
+	lv_obj_t *scr = lv_obj_get_parent(panel);
+
+	/* Measured the way brightness-close is, just before the delete. */
+	mem_stats_report("theme-close");
+	theme_ov = NULL;
+	theme_grid = NULL;
+	theme_edit_lbl = NULL;
+	lv_obj_del(panel);
+	panel = NULL;
+	build_panel(scr);
+}
+
+static void theme_close(void)
+{
+	if (theme_ov == NULL || theme_closing) {
+		return;
+	}
+	theme_closing = true;
+	lv_async_call(theme_closed_cb, NULL);
+}
+
+static void theme_close_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	theme_close();
+}
+
+static void theme_gesture_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	/* As on the brightness screen: the closing swipe closes this first. */
+	if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
+		theme_close();
+	}
+}
+
+static void theme_pick_cb(lv_event_t *e)
+{
+	int id = (int)(intptr_t)lv_event_get_user_data(e);
+
+	if (!tile_was_a_tap() || theme_closing) {
+		return;
+	}
+	/* Choosing what is already stored and showing costs a flash write
+	 * and buys nothing. */
+	if (id == ui_theme_stored_id() && id == theme_active_id()) {
+		return;
+	}
+	/* Repaints everything, this screen included -- see
+	 * ui_settings_apply_theme(), which rebuilds it after this returns. */
+	ui_theme_choose(id);
+}
+
+/* The shared styles, in the active theme. Re-set on every build: a style's
+ * colours are values, and the theme may have changed since the last one. */
+static void theme_styles(void)
+{
+	if (!st_ready) {
+		lv_style_init(&st_tile);
+		lv_style_init(&st_chip);
+		st_ready = true;
+	}
+	lv_style_set_width(&st_tile, THEME_TILE_W);
+	lv_style_set_height(&st_tile, THEME_TILE_H);
+	lv_style_set_bg_opa(&st_tile, LV_OPA_COVER);
+	lv_style_set_border_color(&st_tile, COL_TRACK);
+	lv_style_set_border_width(&st_tile, 1);
+	lv_style_set_radius(&st_tile, 10);
+	lv_style_set_shadow_width(&st_tile, 0);
+	lv_style_set_pad_all(&st_tile, 0);
+
+	lv_style_set_width(&st_chip, 40);
+	lv_style_set_height(&st_chip, 8);
+	lv_style_set_radius(&st_chip, 4);
+	lv_style_set_border_width(&st_chip, 0);
+	lv_style_set_bg_opa(&st_chip, LV_OPA_COVER);
+	lv_style_set_bg_grad_dir(&st_chip, LV_GRAD_DIR_HOR);
+}
+
+static lv_obj_t *mk_slot(int k)
+{
+	lv_obj_t *tile = lv_btn_create(theme_grid);
+
+	lv_obj_add_style(tile, &st_tile, 0);
+	lv_obj_align(tile, LV_ALIGN_TOP_LEFT,
+		     12 + (k % 2) * (THEME_TILE_W + 8),
+		     (k / 2) * (THEME_TILE_H + THEME_TILE_GAP));
+	lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	return tile;
+}
+
+static void theme_fill(void)
+{
+	int ids[THEME_N];
+	int n = theme_list(ids);
+	int per = theme_per_page();
+	int first = theme_page * per;
+
+	theme_edit_lbl = NULL;
+	lv_obj_clean(theme_grid);
+	for (int k = 0; k < per && first + k < n; k++) {
+		int id = ids[first + k];
+		const struct palette *p = theme_builtin(id);
+		struct palette cp;
+
+		if (p == NULL) {
+			struct theme_custom t;
+
+			ui_theme_custom_stored(&t);
+			theme_derive(&t, &cp);
+			p = &cp;
+		}
+		lv_obj_t *tile = mk_slot(k);
+
+		lv_obj_set_style_bg_color(tile, lv_color_hex(p->bg), 0);
+		/* The chosen one is ringed in THIS screen's text colour: the
+		 * tile's own colours belong to its theme, and its ground can
+		 * be the same as the panel's. */
+		if (id == theme_active_id()) {
+			lv_obj_set_style_border_color(tile, COL_TEXT, 0);
+			lv_obj_set_style_border_width(tile, 2, 0);
+		}
+		lv_obj_add_event_cb(tile, theme_pick_cb, LV_EVENT_CLICKED,
+				    (void *)(intptr_t)id);
+
+		lv_obj_t *name = lv_label_create(tile);
+
+		lv_label_set_text(name, theme_name(id));
+		lv_obj_set_style_text_color(name, lv_color_hex(p->text), 0);
+		lv_obj_set_width(name, THEME_NAME_W);
+		lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+		lv_obj_align(name, LV_ALIGN_TOP_LEFT, 10, 10);
+
+		lv_obj_t *chip = lv_obj_create(tile);
+
+		lv_obj_add_style(chip, &st_chip, 0);
+		lv_obj_set_style_bg_color(chip, lv_color_hex(p->low), 0);
+		lv_obj_set_style_bg_grad_color(chip, lv_color_hex(p->high), 0);
+		/* Not clickable, or a press on the chip would stop there and
+		 * never reach the tile. */
+		lv_obj_clear_flag(chip, LV_OBJ_FLAG_CLICKABLE);
+		lv_obj_align(chip, LV_ALIGN_BOTTOM_LEFT, 10, -12);
+	}
+
+	/*
+	 * Only when the app on the other end said it can open the builder
+	 * ("caps":["theme"] in its welcome). A newer board talking to an
+	 * older app must not offer a button that sends a message nothing
+	 * will answer.
+	 */
+	if (proto_host_can_theme()) {
+		lv_obj_t *slot = mk_slot(THEME_SLOTS - 1);
+
+		lv_obj_set_style_bg_color(slot, COL_PANEL, 0);
+		lv_obj_add_event_cb(slot, theme_edit_cb, LV_EVENT_CLICKED, NULL);
+		theme_edit_lbl = lv_label_create(slot);
+		lv_obj_set_width(theme_edit_lbl, THEME_NAME_W);
+		lv_label_set_long_mode(theme_edit_lbl, LV_LABEL_LONG_WRAP);
+		lv_obj_set_style_text_align(theme_edit_lbl, LV_TEXT_ALIGN_CENTER,
+					    0);
+		lv_obj_set_style_text_color(theme_edit_lbl, COL_TEXT, 0);
+		lv_obj_center(theme_edit_lbl);
+		edit_paint();
+	}
+}
+
+static void theme_page_cb(lv_event_t *e)
+{
+	int pages = theme_pages();
+	lv_obj_t *lbl = lv_obj_get_child(lv_event_get_target(e), 0);
+	char buf[32];
+
+	theme_page = (theme_page + 1) % pages;
+	snprintf(buf, sizeof(buf), "%d/%d " LV_SYMBOL_RIGHT, theme_page + 1,
+		 pages);
+	lv_label_set_text(lbl, buf);
+	theme_fill();	/* the grid is a sibling of this button, not a parent */
+}
+
+/* `fresh`: a visit from the Theme row, as opposed to a repaint of one
+ * already open (rebuild_cb). */
+static void show_theme(bool fresh)
+{
+	int ids[THEME_N];
+	int n = theme_list(ids);
+	int pages = theme_pages();
+
+	if (theme_ov || bright_ov || confirm || panel == NULL) {
+		return;
+	}
+	if (fresh) {
+		/* A fresh visit, not a repaint: start from the active theme's
+		 * page and from the slot's own name -- unless an ask is still
+		 * in flight, whose answer is worth seeing. */
+		for (int i = 0; i < n; i++) {
+			if (ids[i] == theme_active_id()) {
+				theme_page = i / theme_per_page();
+				break;
+			}
+		}
+		if (edit_timer == NULL) {
+			edit_note = NULL;
+		}
+	}
+	if (theme_page >= pages) {
+		theme_page = 0;
+	}
+
+	/* The settings panel's contents go first; see MEMORY above. The
+	 * panel object itself stays, so everything that asks "is settings
+	 * open" still gets yes, and its own gesture handler still runs. */
+	upd_btn = NULL;
+	upd_lbl = NULL;
+	pct_lbl = NULL;
+	lv_obj_clean(panel);
+	theme_styles();
+
+	theme_ov = lv_obj_create(panel);
+	lv_obj_set_size(theme_ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(theme_ov, COL_BG, 0);
+	lv_obj_set_style_bg_opa(theme_ov, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(theme_ov, 0, 0);
+	lv_obj_set_style_radius(theme_ov, 0, 0);
+	lv_obj_set_style_pad_all(theme_ov, 0, 0);
+	lv_obj_clear_flag(theme_ov, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(theme_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(theme_ov, theme_gesture_cb, LV_EVENT_GESTURE, NULL);
+	lv_obj_center(theme_ov);
+
+	mk_back(theme_ov, theme_close_cb);
+
+	lv_obj_t *title = lv_label_create(theme_ov);
+
+	lv_label_set_text(title, "Theme");
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+	if (pages > 1) {
+		/* The same 60 x 36 as the back control, in the opposite
+		 * corner, saying which page this is and that there is more. */
+		lv_obj_t *pg = lv_btn_create(theme_ov);
+		char buf[32];
+
+		lv_obj_set_size(pg, 60, 36);
+		lv_obj_align(pg, LV_ALIGN_TOP_RIGHT, -6, 2);
+		lv_obj_set_style_bg_color(pg, COL_PANEL, 0);
+		lv_obj_set_style_bg_opa(pg, LV_OPA_COVER, 0);
+		lv_obj_set_style_border_width(pg, 0, 0);
+		lv_obj_set_style_radius(pg, 9, 0);
+		lv_obj_set_style_shadow_width(pg, 0, 0);
+		lv_obj_set_style_pad_all(pg, 0, 0);
+		lv_obj_clear_flag(pg, LV_OBJ_FLAG_SCROLLABLE);
+		lv_obj_clear_flag(pg, LV_OBJ_FLAG_GESTURE_BUBBLE);
+		lv_obj_set_ext_click_area(pg, 10);
+		lv_obj_add_event_cb(pg, theme_page_cb, LV_EVENT_CLICKED, NULL);
+
+		lv_obj_t *l = lv_label_create(pg);
+
+		snprintf(buf, sizeof(buf), "%d/%d " LV_SYMBOL_RIGHT,
+			 theme_page + 1, pages);
+		lv_label_set_text(l, buf);
+		lv_obj_set_style_text_color(l, COL_DIM, 0);
+		lv_obj_center(l);
+	}
+
+	mk_line(theme_ov, 40);
+
+	theme_grid = lv_obj_create(theme_ov);
+	lv_obj_set_size(theme_grid, LV_HOR_RES,
+			3 * THEME_TILE_H + 2 * THEME_TILE_GAP);
+	lv_obj_align(theme_grid, LV_ALIGN_TOP_LEFT, 0, THEME_GRID_Y);
+	lv_obj_set_style_bg_opa(theme_grid, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(theme_grid, 0, 0);
+	lv_obj_set_style_pad_all(theme_grid, 0, 0);
+	lv_obj_clear_flag(theme_grid, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(theme_grid, LV_OBJ_FLAG_CLICKABLE);
+	theme_fill();
+}
+
+/*
+ * The Theme row's tap. Deferred, because opening the theme screen deletes the
+ * settings panel's contents -- the row this tap is still being delivered to
+ * among them.
+ */
+static void theme_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	show_theme(true);
+}
+
+static void theme_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (theme_ov == NULL && bright_ov == NULL && confirm == NULL) {
+		lv_async_call(theme_open_cb, NULL);
+	}
+}
+
 static void build_panel(lv_obj_t *parent_scr);
 
 /* Thread context. The tree surgery happens frozen: creating the panel would
@@ -1710,6 +2221,9 @@ static void do_close(void (*pump)(void))
 	for (int i = 0; i < BRIGHT_STOPS; i++) {
 		seg[i] = NULL;
 	}
+	theme_ov = NULL;	/* these die with the panel too */
+	theme_grid = NULL;
+	theme_edit_lbl = NULL;
 	lv_obj_del(panel);	/* deletes confirm and any overlay with it */
 	panel = NULL;
 	confirm = NULL;
@@ -1803,7 +2317,7 @@ static void back_cb(lv_event_t *e)
 	 * one is unreachable while it is up -- but the extended touch area
 	 * reaches past the overlay's edge, and a press landing there must not
 	 * close the panel out from under it. */
-	if (confirm == NULL && bright_ov == NULL) {
+	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL) {
 		close_panel();
 	}
 }
@@ -1811,9 +2325,92 @@ static void back_cb(lv_event_t *e)
 static void panel_gesture_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (confirm == NULL && bright_ov == NULL &&
+	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL &&
 	    lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
 		close_panel();
+	}
+}
+
+/*
+ * Rebuild the open panel in the active theme, on the screen it is open on.
+ *
+ * Rebuilt, not restyled: unlike the gauge screen this panel holds no readings
+ * -- every label on it is computed when it is built -- so building it again
+ * IS the restyle, with none of the bookkeeping. Asynchronous because the most
+ * common caller is a tap on a theme tile, i.e. an event handler running on an
+ * object this deletes.
+ *
+ * Skipped while a confirm dialog is up (the install prompt would vanish under
+ * the user's finger) or the panel is closing; the next open is built in the
+ * new theme either way.
+ */
+static void rebuild_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	if (panel == NULL || closing || confirm != NULL) {
+		return;
+	}
+	bool theme_was_open = theme_ov != NULL;
+	bool bright_was_open = bright_ov != NULL;
+	lv_obj_t *scr = lv_obj_get_parent(panel);
+
+	upd_btn = NULL;
+	upd_lbl = NULL;
+	pct_lbl = NULL;
+	bright_big = NULL;
+	for (int i = 0; i < BRIGHT_STOPS; i++) {
+		seg[i] = NULL;
+	}
+	theme_ov = NULL;
+	theme_grid = NULL;
+	theme_edit_lbl = NULL;
+	bright_ov = NULL;
+	lv_obj_del(panel);
+	panel = NULL;
+	build_panel(scr);
+	if (theme_was_open) {
+		show_theme(false);
+	} else if (bright_was_open) {
+		show_bright(NULL);
+	}
+}
+
+/*
+ * The top layer, which outlives the panel and so is not rebuilt with it.
+ *
+ * What's new redraws its page into the same screen; the update prompt and the
+ * download screen are taken down and put back from the live OTA state by the
+ * functions that always put them up. The plain notice keeps its colours until
+ * it is dismissed: it holds text nothing here kept a copy of, and it is the
+ * one that is dismissed in a tap.
+ */
+static void repaint_top_cb(void *unused)
+{
+	struct ota_ui snap;
+
+	ARG_UNUSED(unused);
+	if (wn) {
+		lv_obj_set_style_bg_color(wn, COL_BG, 0);
+		wn_draw();
+	}
+	if (upd_prompt) {
+		ota_ui_get(&snap);
+		upd_prompt_close();
+		upd_prompt_show(&snap);
+	}
+	if (dl_overlay) {
+		dl_overlay_hide();
+		upd_timer_cb(NULL);	/* the state that showed it shows it again */
+	}
+}
+
+void ui_settings_apply_theme(void)
+{
+	if (panel != NULL) {
+		lv_async_call(rebuild_cb, NULL);
+	}
+	if (wn || upd_prompt || dl_overlay) {
+		lv_async_call(repaint_top_cb, NULL);
 	}
 }
 
@@ -1914,9 +2511,30 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 
 	char sub[56];
 
+	/*
+	 * Brightness and Theme share the first row, 144 px each.
+	 *
+	 * There is no third row to give Theme: two rows and the two-line
+	 * footer already use the 240 px (the BUILD_ASSERTs above). Halving the
+	 * WIDTH keeps every target at the 56 px -- 10.0 mm -- height this panel
+	 * needs, and 144 px is still 25.6 mm across. Each subtitle is short by
+	 * nature, a level or a theme name, so neither loses anything.
+	 */
 	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
-	mk_row(panel, ROW_TOP, ROW_H, "Brightness", sub, false, show_bright, NULL,
-	       &pct_lbl);
+	lv_obj_t *half = mk_row(panel, ROW_TOP, ROW_H, "Brightness", sub, false,
+				show_bright, NULL, &pct_lbl);
+
+	lv_obj_set_width(half, 144);
+	lv_obj_set_width(pct_lbl, 100);
+
+	lv_obj_t *tsub;
+
+	half = mk_row(panel, ROW_TOP, ROW_H, "Theme",
+		      theme_name(theme_active_id()), false, theme_row_cb, NULL,
+		      &tsub);
+	lv_obj_set_width(half, 144);
+	lv_obj_align(half, LV_ALIGN_TOP_LEFT, 164, ROW_TOP);
+	lv_obj_set_width(tsub, 100);
 
 	/*
 	 * Both versions live here, on the row that is already about versions.
