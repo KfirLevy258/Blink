@@ -48,6 +48,10 @@ that are not part of the frame itself:
     board while the step also says `"no_session_window": true`, as on a
     real desk: the line is for an account with no session window.
     tests/fleet/bench/burn_states.json walks through every preset.
+
+A step may also give a reset as `session_resets_in_s` / `weekly_resets_in_s`,
+seconds after the reading, and the spend page in the plan message's own
+names: `plan`, `usd`, `lim`, `period`, `acct` (see protocol.plan).
 """
 import json
 import math
@@ -86,6 +90,30 @@ BURN_PRESETS = {
     # The widest total there is to format: about a million a bucket.
     "heavy": [999_000 - 2_500 * i for i in range(20)],
 }
+
+
+# Step keys that name a frame field by its wire name (protocol.plan) rather
+# than its frame name. `plan` needs no entry: it is both.
+_SHORT_NAMES = (("usd", "spend_usd"), ("lim", "spend_limit_usd"),
+                ("period", "spend_period"), ("acct", "account"))
+
+# Step keys holding a countdown, and the frame field each becomes. A scenario
+# is written once and replayed on any day, so it cannot name an epoch; it
+# names how far past the reading the window ends. The spend timeline is the
+# one that cannot do without it: a monthly period's end is weeks out, and the
+# panel's countdown for it is half of what that page shows.
+_COUNTDOWNS = {"session_resets_in_s": "session_resets_at",
+               "weekly_resets_in_s": "weekly_resets_at"}
+
+
+def _rebase_countdowns(fields, observed_at):
+    """Turn every countdown key in `fields` into its absolute field, in
+    place. A countdown that is not a number is dropped, as an absent reset
+    is: the frame's own default (no reset known) is the honest reading."""
+    for key in [k for k in fields if k in _COUNTDOWNS]:
+        secs = fields.pop(key)
+        if _is_number(secs):
+            fields[_COUNTDOWNS[key]] = observed_at + secs
 
 
 def _is_number(v):
@@ -273,14 +301,24 @@ class ScriptedProvider(ProviderParser):
         """
         try:
             age = step.get("age_s", 0)
+            observed_at = self._now() - age
             # `burn` is the stand-in reader's (see _take_burn), not a frame
             # field, and would otherwise drop the step as a typo.
             fields = {k: v for k, v in step.items()
                       if k not in ("at", "age_s", "provider", "burn")}
+            # The spend page in the wire's own short names, so a scenario
+            # reads like the plan message it produces. Spelling one field
+            # both ways is a typo, and lands as the TypeError below.
+            for short, field in _SHORT_NAMES:
+                if short in fields:
+                    if field in fields:
+                        raise TypeError(f"both {short!r} and {field!r}")
+                    fields[field] = fields.pop(short)
+            _rebase_countdowns(fields, observed_at)
             return NormalizedUsageFrame(
                 provider=step.get("provider", "claude"),
                 src="scripted",
-                observed_at=self._now() - age,
+                observed_at=observed_at,
                 **fields)
         except TypeError as e:
             print(f"scripted: skipping malformed step ({e})", file=sys.stderr)

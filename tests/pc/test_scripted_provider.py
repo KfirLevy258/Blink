@@ -89,3 +89,37 @@ def test_step_missing_at_is_skipped(tmp_path):
     sp = ScriptedProvider(p, now=lambda: 1000.0)
     frames = sp.poll(1000.0)
     assert [f.session_pct for f in frames] == [20.0]
+
+
+def test_scripted_spend_step(tmp_path):
+    """The spend page in a scenario, in the wire's own short names, with a
+    reset given relative to the step because a scenario file cannot know
+    the epoch it will run at -- and a monthly period's is weeks away."""
+    p = _write(tmp_path, [
+        {"at": 0, "session_pct": 62.8, "plan": "spend", "usd": 314.12,
+         "lim": 500, "period": "monthly",
+         "session_resets_in_s": 18 * 86400, "age_s": 30},
+        {"at": 5, "plan": "unreported", "acct": "enterprise"},
+    ])
+    clock = [1000.0]
+    sp = ScriptedProvider(p, now=lambda: clock[0])
+    f = sp.poll(clock[0])[0]
+    assert f.plan == "spend"
+    assert f.spend_usd == 314.12 and f.spend_limit_usd == 500
+    assert f.spend_period == "monthly"
+    # Relative to the reading, which is age_s old.
+    assert f.session_resets_at == 1000.0 - 30 + 18 * 86400
+    clock[0] += 5
+    f = sp.poll(clock[0])[0]
+    assert f.plan == "unreported" and f.account == "enterprise"
+    assert f.session_pct == -1.0
+
+
+def test_a_spend_step_with_a_bad_short_name_is_dropped_not_fatal(tmp_path):
+    p = _write(tmp_path, [
+        {"at": 0, "session_pct": 62.8, "plan": "spend", "usd": 314.12,
+         "spend_usd": 1.0},                       # two names, one field
+        {"at": 0, "session_pct": 20.0},
+    ])
+    sp = ScriptedProvider(p, now=lambda: 1000.0)
+    assert [f.session_pct for f in sp.poll(1000.0)] == [20.0]
