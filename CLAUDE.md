@@ -73,21 +73,50 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**1503 passing** as of 2026-10-19, on macOS, Ubuntu and Windows (ARM64 VM). Everything in
+**2205 passing** as of 2026-10-27, on macOS. The last count proved on all
+three platforms was 1503, on 2026-10-19, on macOS, Ubuntu and Windows (ARM64
+VM). Re-run Ubuntu and Windows before claiming them for the new number. Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though
 nothing in `pc/` imports it; `numpy` and `Pillow` are only
 needed by the logo and boot-animation encoder tests. CI runs the same
 `pytest tests/ -q`.
 
-`tests/conftest.py` redirects `HOME`, `USERPROFILE`, `APPDATA` and
-`LOCALAPPDATA` into `tmp_path` and sets `BLINK_SKIP_SERVICE=1`, autouse, for
-every test. Read its docstring before working around it — both fixtures exist
-because a test once booted out the launchd agent of the person logged in.
+`tests/conftest.py` sandboxes every test, autouse, because the failure it
+guards against is a test file that forgets. Read its docstring before working
+around it. It:
 
-**The sandbox has one hole:** a module-level constant computed with
-`os.path.expanduser("~")` is evaluated at import, before any fixture runs, so
-it points at the real home no matter what `conftest.py` does. Resolve paths
-inside functions, not at module scope.
+- points `HOME`, `USERPROFILE`, `APPDATA` and `LOCALAPPDATA` into `tmp_path`
+  (USERPROFILE because twelve tests once wrote into a real Windows profile;
+  APPDATA because a Windows VM's suite read a real Claude Desktop history) and
+  clears `CODEX_HOME`, which outranks HOME for Codex: a developer who exported
+  it had every Codex test reading their real rollouts. The environment half
+  is the plain function `sandbox_environment()`, so `tests/test_sandbox.py`
+  can set CODEX_HOME itself and prove it is cleared rather than rely on a
+  shell that CI never has;
+- sets `BLINK_SKIP_SERVICE=1`, because a test once booted out the launchd
+  agent of the person logged in;
+- refuses any socket off loopback, at name lookup and at `connect()`, and
+  clears proxies so one on 127.0.0.1 cannot carry a request through. Four
+  bridge tests had been fetching the release feed from github.com on every
+  run. It raises a `BaseException`, because the status-page reader catches
+  `Exception` on purpose and would have swallowed an AssertionError. A test
+  that really needs the network says `@pytest.mark.allow_network`.
+
+`move_home` (not autouse) moves home after import for tests that pin
+call-time path resolution, so the list of home variables lives in one place.
+The root `pytest.ini` exists so pytest started from inside `tests/pc` still
+loads this conftest; without it, the sandbox did not apply.
+
+**The sandbox has one hole:** a path computed with `os.path.expanduser("~")`
+at import (a module constant, a class attribute, a default argument) is
+evaluated before any fixture runs, so it points at the real home no matter
+what `conftest.py` does. It has been fallen into twice, both times reading
+this desk's live `statusline.json` from inside the suite. Resolve paths
+inside functions. `tests/test_sandbox.py` now enforces this: it parses every
+module under `pc/` and both entry points and fails on any home lookup that
+runs at import, including through one of our own functions that resolves
+home. If it flags your code, move the lookup into a function. Don't exempt
+it.
 
 ## Hardware
 
@@ -110,7 +139,12 @@ and boot-verified.
 
 `tools/burn.sh` is the reference for stopping and restoring the daemon around a
 flash. Note that `launchctl bootstrap` registers a job without starting it; a
-restore also needs `launchctl kickstart -k`.
+restore also needs `launchctl kickstart -k`. `tools/dev.sh flash` now does the
+same for the installed launchd agent. Before, it stopped only its own daemon,
+and the eFuse probe then refused a good board because the port was busy. It
+still writes with `west flash`, so its image is unconfirmed, as described
+above. Use it for bench iteration, and `burn.sh` for a board that is
+going on a desk.
 
 The board's auto-reset circuit is cross-coupled: EN is low only while RTS is
 asserted and DTR is not; IO0 is low only while DTR is asserted and RTS is not.
