@@ -1,12 +1,12 @@
 /*
- * The board's wall clock: an epoch the daemon sends over USB in its `time`
- * message, anchored to uptime, plus the local offset and the ISO-8601 ->
- * seconds-remaining arithmetic.
+ * Wall-clock time on the board. The daemon's `time` message carries a Unix
+ * epoch, which is pinned to k_uptime here; the local UTC offset rides along
+ * with it, and ISO-8601 reset stamps are turned into seconds left.
  *
- * It also synced over SNTP once, for the standalone WiFi mode, which needed a
- * real time for mbedTLS's certificate checks and to turn the API's absolute
- * resets_at into countdowns itself. That mode was removed on 2026-10-27, and
- * the file keeps its name because renaming it buys nothing.
+ * The "net" in the name dates from the standalone WiFi mode, which set this
+ * clock over SNTP so mbedTLS could check certificate dates and the board
+ * could count down to the API's resets_at on its own. The mode was deleted
+ * on 2026-10-27; the name stayed, since a rename would only churn includes.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/timeutil.h>
@@ -36,11 +36,13 @@ static int64_t sync_unix_s;
 static bool have_offset;
 static int32_t offset_min;
 
-/* The base is a 64-bit pair -- not atomic on this core -- so reads and writes
- * go through a spinlock (held for nanoseconds). It was written for the WiFi
- * mode's net worker, which set the clock while the UI thread read it; the
- * daemon's `time` message now arrives on the protocol thread while the UI
- * thread reads, so the lock still has a job. */
+/* sync_uptime_ms and sync_unix_s are 64-bit each, and the Xtensa LX6 stores
+ * 32 bits at a time, so a reader on another thread could see half of an
+ * update. That other thread was the WiFi mode's SNTP worker, removed
+ * 2026-10-27. Today the daemon's `time` message is parsed in proto_service()
+ * and the clock read by the 1 s tick, both on the main loop, so the lock is
+ * not contended; it stays because it costs nanoseconds and keeps a future
+ * second caller safe without anyone having to remember this. */
 static struct k_spinlock time_lock;
 
 bool net_time_valid(void)

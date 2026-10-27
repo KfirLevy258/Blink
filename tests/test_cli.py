@@ -1545,7 +1545,8 @@ def test_status_reads_the_desktop_cache_once(monkeypatch, capsys):
 # What a person is told to type, as distinct from where the frozen binary
 # lives. From a source checkout `blink install` copies nothing into
 # ~/.blink/bin, so every "run X" that named installed_bin() there named a file
-# that does not exist -- including the undo command (gapietro, 2026-10-12).
+# that does not exist -- including the undo command (gapietro's bench
+# Mac, 2026-10-12).
 
 def _split_like_the_shell(line):
     """`line` split the way this platform's shell hands it to a program:
@@ -1582,19 +1583,20 @@ def _home_with_a_space(tmp_path, monkeypatch):
     return home
 
 
-def test_a_checkout_names_itself_as_the_command_to_type(monkeypatch):
-    """On the real platform, never a forced one: the quoting is chosen by
-    sys.platform, and forcing darwin on a Windows runner quotes C:\\ paths the
-    POSIX way. Checked by splitting the line back with the platform's own
-    splitter, not by looking for the paths inside it: a checkout under a
+def test_from_a_checkout_the_printed_command_is_python_and_blink_main(
+        monkeypatch):
+    """Run on whatever platform the runner is: sys.platform picks the
+    quoting, so faking darwin on Windows would quote C:\\ paths as POSIX
+    ones and test nothing real. Checked by splitting the line back with the
+    platform's own splitter, not by looking for the paths inside it: a checkout under a
     folder with an apostrophe in its name is printed with that quote
     escaped, and a substring check failed there (review, 2026-10-25)."""
     as_checkout(monkeypatch)
-    cmd = cli.user_command()
-    assert _split_like_the_shell(cmd) == cli._source_argv()
-    assert cli._source_argv()[1] == os.path.join(cli._repo_root(),
+    cmd = cli.command_to_type()
+    assert _split_like_the_shell(cmd) == cli._checkout_argv()
+    assert cli._checkout_argv()[1] == os.path.join(cli._checkout_dir(),
                                                  "blink_main.py")
-    assert os.path.exists(cli._source_argv()[1])
+    assert os.path.exists(cli._checkout_argv()[1])
     assert cli.installed_bin() not in _split_like_the_shell(cmd)
 
 
@@ -1607,7 +1609,7 @@ def test_a_checkout_command_survives_a_space_in_the_interpreter_path(
     monkeypatch.setattr(sys, "executable",
                         os.path.join(os.path.dirname(sys.executable),
                                      "with space", "python"))
-    assert _split_like_the_shell(cli.user_command()) == cli._source_argv()
+    assert _split_like_the_shell(cli.command_to_type()) == cli._checkout_argv()
 
 
 def test_a_frozen_command_survives_a_space_in_the_profile(tmp_path,
@@ -1617,7 +1619,7 @@ def test_a_frozen_command_survives_a_space_in_the_profile(tmp_path,
     as_frozen(monkeypatch)
     _home_with_a_space(tmp_path, monkeypatch)
     assert " " in cli.installed_bin()
-    assert _split_like_the_shell(cli.user_command() + " uninstall") == [
+    assert _split_like_the_shell(cli.command_to_type() + " uninstall") == [
         cli.installed_bin(), "uninstall"]
 
 
@@ -1691,10 +1693,11 @@ def test_a_quoted_windows_program_gets_powershells_call_operator(argv,
     assert cli._win_line(argv) == line
 
 
-def test_a_checkout_install_says_keep_the_folder(tmp_path, capsys,
-                                                 monkeypatch):
-    """The service runs out of the checkout, so "you can delete the folder you
-    downloaded" told someone to delete the program they had just set up."""
+def test_installing_from_a_checkout_never_suggests_deleting_it(
+        tmp_path, capsys, monkeypatch):
+    """Nothing is copied out of a checkout, so the frozen build's "you can
+    delete the folder you downloaded" pointed at the very folder the new
+    install depends on."""
     as_checkout(monkeypatch)
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
@@ -1702,10 +1705,10 @@ def test_a_checkout_install_says_keep_the_folder(tmp_path, capsys,
     assert "delete the folder" not in out
     assert "can be deleted" not in out
     assert f"Creates    {cli.installed_bin()}" not in out
-    assert cli._repo_root() in out
-    assert "Keep" in out
-    assert f"{cli.user_command()} uninstall" in out
-    assert f"{cli.user_command()} status" in out
+    assert cli._checkout_dir() in out
+    assert "Leave" in out and "in place" in out
+    assert f"{cli.command_to_type()} uninstall" in out
+    assert f"{cli.command_to_type()} status" in out
     assert f"{cli.installed_bin()} uninstall" not in out
     assert f"{cli.installed_bin()} status" not in out
 
@@ -1718,7 +1721,7 @@ def test_a_frozen_install_says_exactly_what_it_always_said(tmp_path, capsys,
     shape of every install that has ever worked; the case with a space is
     the one below."""
     as_frozen(monkeypatch)
-    if cli.user_command() != cli.installed_bin():
+    if cli.command_to_type() != cli.installed_bin():
         # The precondition: pytest's tmp path needs no quoting here. A
         # runner whose temp dir has a space or a non-ASCII name is the case
         # the tests below cover; this one pins the shape every install
@@ -1743,7 +1746,7 @@ def test_a_frozen_install_says_exactly_what_it_always_said(tmp_path, capsys,
         "",
         "  You can delete the folder you downloaded.",
     ]
-    assert not any(cli._repo_root() in l for l in lines)
+    assert not any(cli._checkout_dir() in l for l in lines)
 
 
 # Which backends really run _service_command(): per backend, in
@@ -1764,14 +1767,13 @@ def test_a_checkout_install_promises_the_service_only_where_it_runs_there(
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
-    assert "blink_main.py. Keep" not in out
-    assert "service runs" not in out
-    assert "the service runs from it" not in out
+    assert "The login service starts" not in out
+    assert "the service starts" not in out
     # Still a checkout install, and still told not to delete the folder: the
     # commands it printed run from there.
-    assert cli._repo_root() in out
+    assert cli._checkout_dir() in out
     assert "delete the folder" not in out
-    assert f"Keep {cli._repo_root()}" in out
+    assert f"Leave {cli._checkout_dir()} in place" in out
 
 
 @pytest.mark.parametrize("result,runs", [
@@ -1794,11 +1796,10 @@ def test_a_checkout_install_says_the_service_runs_only_once_it_does(
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
-    said = f"Keep {cli._repo_root()}: the service runs from it." in out
-    assert said is runs
-    if not runs:
-        assert f"Keep {cli._repo_root()}: the commands above run from it." \
-            in out
+    lead = f"  Leave {cli._checkout_dir()} in place: "
+    closing = [l[len(lead):] for l in out.splitlines() if l.startswith(lead)]
+    assert closing == (["the service starts from there."] if runs
+                       else ["the commands above start from there."])
 
 
 def test_the_checkout_disclosure_names_the_service_where_it_will_run(
@@ -1807,7 +1808,7 @@ def test_the_checkout_disclosure_names_the_service_where_it_will_run(
     monkeypatch.setattr(cli, "_service_runs_checkout", lambda: True)
     monkeypatch.setattr(cli, "_skip_service", lambda: False)
     cli._announce()
-    assert "The background service runs this folder's" in \
+    assert "The login service starts blink_main.py from" in \
         capsys.readouterr().out
 
 
@@ -1822,8 +1823,8 @@ def test_the_checkout_disclosure_promises_no_service_that_will_not_run_it(
     monkeypatch.setattr(cli, "_skip_service", lambda: False)
     cli._announce()
     out = capsys.readouterr().out
-    assert "The background service runs" not in out
-    assert "The commands printed below run from this folder," in out
+    assert "The login service starts" not in out
+    assert "Every command printed below starts from this" in out
 
 
 def test_the_checkout_disclosure_promises_no_service_it_will_skip(
@@ -1832,8 +1833,8 @@ def test_the_checkout_disclosure_promises_no_service_it_will_skip(
     monkeypatch.setattr(cli, "_service_runs_checkout", lambda: True)
     cli._announce()                      # conftest's BLINK_SKIP_SERVICE=1
     out = capsys.readouterr().out
-    assert "The background service runs" not in out
-    assert "The commands printed below run from this folder," in out
+    assert "The login service starts" not in out
+    assert "Every command printed below starts from this" in out
 
 
 def test_a_windows_checkout_disclosure_says_no_task_is_registered(
@@ -1845,8 +1846,8 @@ def test_a_windows_checkout_disclosure_says_no_task_is_registered(
     monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
     cli._announce()
     out = capsys.readouterr().out
-    want = ("  No login service from a checkout on Windows; run it yourself:"
-            f" {cli.user_command()} run")
+    want = ("  A checkout on Windows gets no login service; start it by"
+            f" hand with: {cli.command_to_type()} run")
     # The command ends the line: a trailing period was pasted with it, and
     # `run.` is not a subcommand (review, 2026-10-25).
     assert want in out.splitlines()
@@ -1879,7 +1880,7 @@ def _feed(monkeypatch):
 def test_update_follows_what_the_service_runs(capsys, monkeypatch, process,
                                               service, refused):
     asked = _feed(monkeypatch)
-    prog = {"frozen": [cli.installed_bin()], "checkout": cli._source_argv(),
+    prog = {"frozen": [cli.installed_bin()], "checkout": cli._checkout_argv(),
             None: None}[service]
     monkeypatch.setattr(cli, "service_program", lambda: prog)
     (as_frozen if process == "frozen" else as_checkout)(monkeypatch)
@@ -1982,9 +1983,9 @@ def test_a_checkout_under_a_folder_with_an_apostrophe_pastes_back(
     substring; it still has to split back into the same argv."""
     as_checkout(monkeypatch)
     root = str(tmp_path / "kfir's checkout")
-    monkeypatch.setattr(cli, "_repo_root", lambda: root)
-    assert _split_like_the_shell(cli.user_command()) == cli._source_argv()
-    assert cli._source_argv()[1] == os.path.join(root, "blink_main.py")
+    monkeypatch.setattr(cli, "_checkout_dir", lambda: root)
+    assert _split_like_the_shell(cli.command_to_type()) == cli._checkout_argv()
+    assert cli._checkout_argv()[1] == os.path.join(root, "blink_main.py")
 
 
 def test_a_checkout_install_leaves_no_empty_program_folder(tmp_path,
@@ -2063,13 +2064,13 @@ def test_repair_hints_name_the_service_program(monkeypatch):
     assert cli._repair_command() == frozen
     assert f"run `{frozen} install` to fix it" in cli._shim_repair_line(
         "x", bridge_running=False)
-    assert cli.user_command() not in cli._shim_repair_line("x", False)
+    assert cli.command_to_type() not in cli._shim_repair_line("x", False)
 
 
 def test_repair_hints_fall_back_to_this_program_with_no_service(monkeypatch):
     as_checkout(monkeypatch)
     monkeypatch.setattr(cli, "service_program", lambda: None)
-    assert cli._repair_command() == cli.user_command()
+    assert cli._repair_command() == cli.command_to_type()
 
 
 def _skip_without_a_service_file_format():
@@ -2085,7 +2086,7 @@ def test_the_codex_hint_names_the_frozen_service_from_a_checkout(
     monkeypatch.setattr(cli.install_codex_hooks, "_read_marker", lambda: None)
     line = cli._codex_hook_status()[0]
     assert f"run `{cli._quote_line(want)} install`" in line
-    assert cli.user_command() not in line
+    assert cli.command_to_type() not in line
 
 
 def test_the_partial_hooks_hint_names_the_frozen_service_from_a_checkout(
@@ -2102,7 +2103,7 @@ def test_the_partial_hooks_hint_names_the_frozen_service_from_a_checkout(
     partial = [l for l in capsys.readouterr().out.splitlines()
                if l.startswith("Activity    PARTIAL")]
     assert partial and f"run `{cli._quote_line(want)} install`" in partial[0]
-    assert cli.user_command() not in partial[0]
+    assert cli.command_to_type() not in partial[0]
 
 
 def test_launchd_not_loaded_names_the_frozen_service_from_a_checkout(

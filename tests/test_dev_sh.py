@@ -103,6 +103,21 @@ _PS = r'''
 cat "$SYS/cmd.$4" 2>/dev/null || exit 1'''
 
 
+def _fake_workspace(where):
+    """The two files blink_zephyr_ws looks for, and nothing else: an
+    empty venv activate script and an empty zephyr-env.sh."""
+    for rel in (".venv/bin/activate", "zephyr/zephyr-env.sh"):
+        f = where / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("", encoding="utf-8")
+    return where
+
+
+def _fresh_dir(where):
+    where.mkdir()
+    return where
+
+
 def _rig(tmp_path, west_build_rc=0, esptool=True, efuse_bits="0000000",
          west_flash_rc=0):
     repo = tmp_path / "repo"
@@ -117,14 +132,9 @@ def _rig(tmp_path, west_build_rc=0, esptool=True, efuse_bits="0000000",
     assert "/tmp/" not in text.replace(str(tmp_path), "")
     (repo / "tools" / "dev.sh").write_text(text, encoding="utf-8")
 
-    ws = tmp_path / "ws"
-    (ws / ".venv" / "bin").mkdir(parents=True)
-    (ws / ".venv" / "bin" / "activate").write_text("", encoding="utf-8")
-    (ws / "zephyr").mkdir()
-    (ws / "zephyr" / "zephyr-env.sh").write_text("", encoding="utf-8")
+    ws = _fake_workspace(tmp_path / "ws")
 
-    etools = tmp_path / "etools"
-    etools.mkdir()
+    etools = _fresh_dir(tmp_path / "etools")
     shutil.copy(ROOT / "tests" / "ci" / "fakes" / "bin" / "espefuse.py",
                 etools / "espefuse.real")
     (etools / "espefuse.real").chmod(0o755)
@@ -135,10 +145,8 @@ def _rig(tmp_path, west_build_rc=0, esptool=True, efuse_bits="0000000",
     _stub(etools, "espefuse.py",
           f'echo "espefuse $*" >>"{calls}"\nexec "{etools}/espefuse.real" "$@"')
 
-    sys_dir = tmp_path / "sys"
-    sys_dir.mkdir()
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    sys_dir = _fresh_dir(tmp_path / "sys")
+    bin_dir = _fresh_dir(tmp_path / "bin")
     log = f'echo "$(basename "$0") $*" >>"{calls}"'
     _stub(bin_dir, "pkill", log + "\nexit 1")
     # The system's real launchctl is in /bin, on this PATH: the stand-in must
@@ -253,7 +261,7 @@ def test_a_fused_chip_refusal_brings_the_daemon_back(tmp_path):
 def test_a_missing_esptool_brings_the_daemon_back(tmp_path):
     r, ups, builds = _flash(tmp_path, esptool=False)
     assert r.returncode == 1
-    assert "esptool is not on PATH" in r.stderr
+    assert "no esptool on PATH" in r.stderr
     assert builds == []
     assert len(ups) == 1
 
@@ -329,9 +337,9 @@ def test_an_interrupted_flash_says_so_and_restores_once(tmp_path, sig,
 # ---------------------------------------------------------------------------
 # The installed daemon. `blink install` registers a launchd agent that holds
 # the port, and `down` only knows this script's own daemon -- so the eFuse
-# probe found the port busy and refused a board that was fine (found by
-# destaben in their fork). flash now steps the agent aside and puts it back,
-# once, however the run ends; anything else on the port is refused.
+# probe found the port busy and refused a board that was fine (destaben
+# hit it in their fork, 2026-10-15). flash now steps the agent aside and
+# puts it back, once, however the run ends; anything else on the port is refused.
 
 def _launchctl(calls):
     return [l for l in calls.read_text(encoding="utf-8").splitlines()
@@ -353,7 +361,7 @@ def _assert_put_back_once(tmp_path, out):
     # bootstrap registers, kickstart starts: in that order.
     lines = _launchctl(calls)
     assert lines.index(boot) < lines.index(kick)
-    assert out.count("installed daemon put back") == 1
+    assert out.count("installed daemon running again") == 1
 
 
 def test_the_installed_daemon_is_stepped_aside_and_put_back(tmp_path):
@@ -431,7 +439,7 @@ def test_a_blink_outside_launchd_is_refused_and_not_bootstrapped(tmp_path):
     calls = tmp_path / "calls.log"
     for verb in ("bootout", "bootstrap", "kickstart"):
         assert _verbs(calls, verb) == []
-    assert "installed daemon put back" not in r.stdout
+    assert "installed daemon running again" not in r.stdout
 
 
 def test_a_loaded_agent_with_the_port_closed_is_still_stepped_aside(tmp_path):
@@ -455,7 +463,7 @@ def test_a_loaded_agent_is_stepped_aside_before_a_stranger_is_refused(
         (t / "sys" / "agent").write_text("4242\n", encoding="utf-8")
     r, ups, builds = _flash(tmp_path, hold=hold, expect_up=False)
     assert r.returncode == 1
-    assert "held by pid 777" in r.stderr
+    assert "pid 777 (screen" in r.stderr
     assert builds == []
     _assert_put_back_once(tmp_path, r.stdout)
     assert ups == []
@@ -466,7 +474,7 @@ def test_a_dev_daemon_still_exiting_is_named_as_such(tmp_path):
         t, 888, f"python3 -u claude_usage_bridge.py --port {t}/no-such-port"))
     assert r.returncode == 1
     assert "the dev daemon (pid 888) is still exiting" in r.stderr
-    assert "not the Blink daemon" not in r.stderr
+    assert "no Blink daemon" not in r.stderr
     assert builds == []
 
 
@@ -491,7 +499,7 @@ def test_a_failed_bootstrap_is_retried(tmp_path):
     calls = tmp_path / "calls.log"
     assert len(_verbs(calls, "bootstrap")) == 3
     assert len(_verbs(calls, "kickstart")) == 1
-    assert r.stdout.count("installed daemon put back") == 1
+    assert r.stdout.count("installed daemon running again") == 1
 
 
 def test_a_restore_that_did_not_take_says_how_to_finish_it(tmp_path):
@@ -503,10 +511,10 @@ def test_a_restore_that_did_not_take_says_how_to_finish_it(tmp_path):
     r, ups, builds = _flash(tmp_path, hold=hold, expect_up=False)
     calls = tmp_path / "calls.log"
     assert len(_verbs(calls, "bootstrap")) == 3
-    assert "installed daemon put back" not in r.stdout
+    assert "installed daemon running again" not in r.stdout
     uid = os.getuid()
     plist = f"{tmp_path}/Library/LaunchAgents/com.blink.bridge.plist"
-    assert "the installed daemon did not come back" in r.stderr
+    assert "the installed daemon is still not running" in r.stderr
     assert f"launchctl bootstrap gui/{uid} {plist}" in r.stderr
     assert f"launchctl kickstart -k gui/{uid}/com.blink.bridge" in r.stderr
     assert ups == []
@@ -532,8 +540,9 @@ def test_a_foreign_holder_is_refused_and_nothing_is_flashed(tmp_path, cmd):
     r, ups, builds = _flash(tmp_path, hold=lambda t: _hold_port(t, 777, cmd))
     assert r.returncode == 1
     port = tmp_path / "no-such-port"
-    assert (f"FATAL: {port} is held by pid 777 ({cmd}), "
-            "which is not the Blink daemon.") in r.stderr
+    assert (f"FATAL: pid 777 ({cmd}) has {port} open, "
+            "and it is no Blink daemon.") in r.stderr
+    assert "Nothing was flashed." in r.stderr
     assert builds == []
     calls = tmp_path / "calls.log"
     assert not [l for l in calls.read_text(encoding="utf-8").splitlines()
@@ -542,7 +551,7 @@ def test_a_foreign_holder_is_refused_and_nothing_is_flashed(tmp_path, cmd):
     assert _verbs(calls, "bootout") == []
     assert _verbs(calls, "bootstrap") == []
     assert _verbs(calls, "kickstart") == []
-    assert "installed daemon put back" not in r.stdout
+    assert "installed daemon running again" not in r.stdout
     # The dev daemon `down` stopped still comes back, as on every exit.
     assert len(ups) == 1
 
@@ -553,7 +562,7 @@ def test_no_agent_and_a_free_port_stops_nothing(tmp_path):
     # launchd is asked whether the agent is loaded, and that is all.
     calls = tmp_path / "calls.log"
     assert [l.split()[1] for l in _launchctl(calls)] == ["print"]
-    assert "installed daemon put back" not in r.stdout
+    assert "installed daemon running again" not in r.stdout
     assert len(ups) == 1
 
 
@@ -612,6 +621,6 @@ def test_a_second_ctrl_c_during_the_restore_does_not_restore_twice(tmp_path):
         "the Ctrl-C killed the kickstart"
     assert len(_verbs(calls, "bootstrap")) == 1
     assert len(_verbs(calls, "kickstart")) == 1
-    assert out.count("installed daemon put back") == 1
+    assert out.count("installed daemon running again") == 1
     time.sleep(0.5)
     assert _launches(calls) == []

@@ -169,7 +169,7 @@ blink_zephyr_build_ready() {
 		return 1
 	}
 	command -v esptool >/dev/null 2>&1 && return 0
-	echo "FATAL: esptool is not on PATH, and the ESP32 build needs it." >&2
+	echo "FATAL: no esptool on PATH; an ESP32 firmware build cannot run without it." >&2
 	if _bz_hint=$(blink_zephyr_pip_hint "$_bz_ws/.venv/bin/python"); then
 		echo "       Install the versions this repo pins into the workspace venv:" >&2
 		echo "         $_bz_hint" >&2

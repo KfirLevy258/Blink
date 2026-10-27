@@ -305,7 +305,7 @@ def test_status_does_not_promise_repair_when_the_bridge_is_not_running(
 
     assert "the activity hook shim is out of date" in out
     assert "the daemon replaces it" not in out
-    assert f"run `{cli.user_command()} install` to fix it" in out
+    assert f"run `{cli.command_to_type()} install` to fix it" in out
 
 
 def test_status_does_not_promise_repair_when_never_installed(

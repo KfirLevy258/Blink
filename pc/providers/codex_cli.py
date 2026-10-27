@@ -725,67 +725,59 @@ class CodexCliProvider(base.ProviderParser):
         if limit_reached and s_pct >= 0:
             s_pct = 100.0
         stale = (now_epoch - observed_at) > STALE_AFTER_S
-        # How old the NUMBERS are, which is what decides whether an ended
-        # window may read as a confident 0. A refusal re-dates the frame so
-        # the spent 100 is not buried as stale, but it is evidence that the
-        # account was turned away, not that nothing has been used since the
-        # window reset -- only the window's own resets_at passing says the
-        # window reset, and only a recent reading can vouch for the 0 after
-        # it. Dated by the refusal, a 98 read hours ago came back as a fresh
-        # 0 the moment its window rolled (found in review).
-        numbers_stale = stale or (
-            read_at is not None and (now_epoch - read_at) > STALE_AFTER_S)
+        # The frame's date and the figures' date part ways in one case: a
+        # refusal (limit_reached) re-dates the frame so the spent 100 stays
+        # on screen. The refusal says the account was turned away; it says
+        # nothing about usage after a later reset. So whether an ended
+        # window may claim a fresh 0 is judged on the OLDER of the two
+        # dates. Judged on the refusal's, a 98 read hours earlier came back
+        # as a fresh 0 the moment its window rolled (found in review).
+        figures_at = observed_at if read_at is None else min(observed_at,
+                                                             read_at)
+        figures_stale = (now_epoch - figures_at) > STALE_AFTER_S
 
-        # A window the clock has already carried past its reset.
+        # Codex writes this log only while it runs, and nothing else ever
+        # refreshes it. Close Codex before a reset and the last pre-reset
+        # reading stays the newest one on disk indefinitely: on 2026-10-01
+        # DevOceanIT's desk held 98% after its window's resets_at had
+        # passed by four minutes, until someone resumed a Codex session. The expired stamp
+        # is in the reading itself, so the fix needs no new sample --
+        # base.settle_window, the rule the Claude status line uses, once per
+        # window. poll() compares these settled readings across rollout
+        # files on recency alone, and one left with no number at all is sent
+        # only when no file has one (see poll()).
         #
-        # Nothing polls this log; Codex writes it only while it runs. So when
-        # a window rolls over with Codex closed, the newest reading on disk
-        # is the last one of the window that just ended, and it stays the
-        # newest for as long as Codex stays closed. Reported by DevOceanIT
-        # from their desk 2026-10-01: the panel held 98 because the freshest
-        # rollout said used=98.0, four minutes after its own resets_at, and
-        # it moved only when a Codex session was resumed.
-        #
-        # The expired stamp was in the reading the whole time, so this needs
-        # no new sample. It is the Claude status line's rule, shared through
-        # base.rolled_over: 0% while the reading is fresh, unknown once it is
-        # stale, the reset time dropped, the rollover kept as evidence for
-        # the normalizer. Applied per window. poll() then picks one reading
-        # across rollout files on recency alone, so it compares corrected
-        # readings. One that came out of this with no number does not compete
-        # at all; it is sent only when no file has a number (see poll()).
-        #
-        # After the limit_reached override, not before. A session pinned at
-        # 100 because the account ran out is the one reading that most has to
-        # come down when its window resets, and doing this first would let
-        # the override put it straight back.
-        s_pct, s_reset, s_rolled = base.rolled_over(
-            s_pct, _epoch((session or {}).get("resets_at")), now_epoch,
-            numbers_stale)
-        w_pct, w_reset, w_rolled = base.rolled_over(
-            w_pct, _epoch((weekly or {}).get("resets_at")), now_epoch,
-            numbers_stale)
-        # The refusal's date was lent to this frame to keep the spent 100
-        # from being buried as stale. Once the session window has rolled the
-        # 100 is gone, and the loan has to go with it: kept, the refusal's
-        # date went on driving the stale flag, the age the board shows and
-        # poll()'s choice between rollout files, so a 98/16 read four hours
-        # ago went out as -1/16, fresh, 30 s old, and beat another rollout's
-        # newer 0/41 (found in review). The frame is as old as its numbers.
-        if limit_reached and s_rolled is not None and read_at is not None:
-            observed_at = read_at
-            stale = numbers_stale
+        # Deliberately after the limit_reached override: a session pinned at
+        # 100 by an exhausted account is the reading that most needs to drop
+        # when its window resets, and settling first would let the override
+        # pin it straight back.
+        def settle(window, pct):
+            resets = _epoch((window or {}).get("resets_at"))
+            return base.settle_window(pct, resets, now_epoch, figures_stale)
+
+        s_win, w_win = settle(session, s_pct), settle(weekly, w_pct)
+
+        # The refusal only lent the frame its date so the 100 would not be
+        # buried as stale. With the session window rolled, the 100 is gone
+        # and the date goes back: left in place it kept setting the stale
+        # flag, the age the board shows, and poll()'s pick between files,
+        # and a 98/16 from four hours earlier went out as a fresh -1/16, 30 s
+        # old, beating another rollout's newer 0/41 (found in review).
+        if (limit_reached and read_at is not None
+                and s_win.ended_at is not None):
+            observed_at, stale = read_at, figures_stale
+
         return base.NormalizedUsageFrame(
             provider=PROVIDER_ID,
             src=SRC_ID,
             observed_at=observed_at,
-            session_pct=s_pct,
-            session_resets_at=s_reset,
-            weekly_pct=w_pct,
-            weekly_resets_at=w_reset,
+            session_pct=s_win.pct,
+            session_resets_at=s_win.resets_at,
+            weekly_pct=w_win.pct,
+            weekly_resets_at=w_win.resets_at,
             stale=stale,
-            session_rolled_at=s_rolled,
-            weekly_rolled_at=w_rolled,
+            session_rolled_at=s_win.ended_at,
+            weekly_rolled_at=w_win.ended_at,
         )
 
     def poll(self, now_epoch):

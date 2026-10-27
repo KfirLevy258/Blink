@@ -19,7 +19,7 @@ from pc import cli
 def as_frozen(monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS",
-                        os.path.join(cli._repo_root(), "tools"), raising=False)
+                        os.path.join(cli._checkout_dir(), "tools"), raising=False)
     monkeypatch.setattr(cli, "_self_path", lambda: cli.installed_bin())
 
 

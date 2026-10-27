@@ -1,17 +1,18 @@
 /*
- * The board's answer to a fatal fault, in place of Zephyr's weak default
- * (kernel/fatal.c), which halts every time. Which faults reboot and which
- * halt, and why a reboot is safe for settings, logo and the confirmed image,
- * is in fatal_policy.h; this file only carries the decision out.
+ * k_sys_fatal_error_handler, overriding the weak one in Zephyr's
+ * kernel/fatal.c. That default stops the CPU on every fault, which on a desk
+ * display means a panel that keeps showing its last numbers with nothing to
+ * say they have stopped, until somebody pulls the cable. The policy -- when a
+ * fault reboots, when it halts, and why rebooting cannot hurt settings, the
+ * logo or the confirmed image -- is fatal_policy.h. This file only acts on it.
+ * The idea of rebooting instead came from DevOceanIT's fork (c86226e).
  *
- * From DevOceanIT's fork (c86226e). Before it, a fault at any hour of the day
- * left the panel frozen on its last reading until the cable was pulled.
- *
- * Runs with interrupts locked, possibly on a corrupted stack (STACK_SENTINEL
- * is the usual way here), so it does as little as it can: flush the log, say
- * one line, act. The line names the reason code and the uptime, never any
- * buffer -- the fault dump Zephyr printed before calling us already says
- * which thread and where.
+ * By the time we are called, interrupts are locked and the stack may be the
+ * thing that broke (a STACK_SENTINEL hit is the common case on this board),
+ * so the handler keeps to three steps: drain the log, print one line, act.
+ * That line carries the reason code, the uptime and the streak, and no
+ * buffer contents: Zephyr's own fault dump, printed just before this,
+ * already names the thread and the PC.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/fatal.h>
@@ -51,36 +52,46 @@ FATAL_IRAM void k_sys_fatal_error_handler(unsigned int reason,
 {
 	ARG_UNUSED(esf);
 
+	/* Deferred logging would otherwise lose whatever is still queued:
+	 * nothing will run the log thread again after this. */
 	LOG_PANIC();
 
-	int64_t up = k_uptime_get();
-	enum fatal_action act = fatal_decide(up, &fatal_memo);
-	/* Seconds in a uint32: no 64-bit printk conversion to depend on here. */
-	unsigned int up_s = (unsigned int)(up / 1000);
+	const int64_t now_ms = k_uptime_get();
+	const bool still_booting = now_ms < FATAL_BOOT_WINDOW_MS;
+	const enum fatal_action action = fatal_decide(now_ms, &fatal_memo);
+	/* printk's 64-bit conversions are a Kconfig option; seconds fit in 32. */
+	const unsigned int now_s = (unsigned int)(now_ms / 1000);
+	const unsigned int streak = (unsigned int)fatal_memo.streak;
 
-	if (act == FATAL_REBOOT) {
-		printk("[fatal] reason %u at %u s -- rebooting (%u in a row)\n",
-		       reason, up_s, (unsigned int)fatal_memo.streak);
-		/* Not ui_boot_mark_intentional_reboot(): the full splash is the
-		 * visible sign that the board went down and came back. */
+	switch (action) {
+	case FATAL_REBOOT:
+		printk("[fatal] reason %u, up %u s: rebooting, fault reboot"
+		       " %u of %d\n", reason, now_s, streak, FATAL_STREAK_MAX);
+		/* The full splash plays on the way back up, on purpose: it is
+		 * the only sign on the panel that the board went down. So no
+		 * ui_boot_mark_intentional_reboot() here. */
 		sys_reboot(SYS_REBOOT_COLD);
-	}
-
-	if (up < FATAL_REBOOT_GRACE_MS) {
-		printk("[fatal] reason %u at %u s, inside the %d s boot window"
-		       " -- halting\n", reason, up_s,
-		       FATAL_REBOOT_GRACE_MS / 1000);
-	} else {
-		printk("[fatal] reason %u at %u s after %u fault reboots in a"
-		       " row -- halting\n", reason, up_s,
-		       (unsigned int)fatal_memo.streak);
+		break;	/* sys_reboot does not return */
+	case FATAL_HALT:
+	default:
+		if (still_booting) {
+			printk("[fatal] reason %u, up %u s: halting, still in"
+			       " the first %d s of boot\n", reason, now_s,
+			       FATAL_BOOT_WINDOW_MS / 1000);
+		} else {
+			printk("[fatal] reason %u, up %u s: halting, %u fault"
+			       " reboots back to back already\n", reason,
+			       now_s, streak);
+		}
+		break;
 	}
 	k_fatal_halt(reason);
 }
 
 #if IS_ENABLED(CONFIG_BLINK_FATAL_SELFTEST)
-/* A real fault on purpose, from a thread, the way a bad pointer would make
- * one. See BLINK_FATAL_SELFTEST in firmware/Kconfig. */
+/* A genuine fault, raised from the system workqueue the way a stray pointer
+ * in any thread would raise one. Board-test builds only: see
+ * BLINK_FATAL_SELFTEST in firmware/Kconfig. */
 static void selftest_fault(struct k_work *w)
 {
 	ARG_UNUSED(w);
@@ -95,12 +106,15 @@ void fatal_boot(void)
 {
 	uint32_t cause = 0;
 
-	/* Unreadable is treated as warm: keeping a streak a power-on should
-	 * have cleared costs at worst one early halt, and only after a fault. */
+	/* An unreadable cause counts as a warm start. The cost of keeping a
+	 * streak a power-on should have wiped is one early halt at most, and
+	 * only after another fault. */
 	(void)hwinfo_get_reset_cause(&cause);
-	fatal_memo_at_boot(&fatal_memo, (cause & (RESET_POR | RESET_PIN)) != 0);
+	const bool cold = (cause & (RESET_POR | RESET_PIN)) != 0;
+
+	fatal_memo_at_boot(&fatal_memo, cold);
 	if (fatal_memo.streak != 0) {
-		printk("[fatal] %u fault reboot(s) in a row before this boot\n",
+		printk("[fatal] this boot follows %u fault reboot(s) in a row\n",
 		       (unsigned int)fatal_memo.streak);
 	}
 

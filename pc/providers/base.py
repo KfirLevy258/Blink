@@ -15,6 +15,7 @@ facts:
     absent key (proto.c, msg_get_double); this keeps one rule across all of it.
 """
 import dataclasses
+import typing
 
 # Percentages and context fullness use this when we simply do not know.
 # Deliberately the same sentinel the wire protocol and the firmware already
@@ -132,8 +133,8 @@ class NormalizedUsageFrame:
     # NEXT. This is evidence about the past: at this epoch the window emptied,
     # so any reading of it taken earlier describes a window that no longer
     # exists. Only a source that can see reset timestamps can ever set it:
-    # the Claude status line and the Codex rollout through rolled_over()
-    # below, and Claude Desktop's Local Storage through window_has_reset()
+    # the Claude status line and the Codex rollout through settle_window()
+    # below, and Claude Desktop's Local Storage through window_ended()
     # with its own answer for the percentage. pc/normalizer uses it to stop
     # an older reading from another source outliving the reset it never knew
     # about.
@@ -203,95 +204,82 @@ class NormalizedUsageFrame:
         return self.session_pct >= 0 or self.weekly_pct >= 0
 
 
-def window_has_reset(resets_at, now_epoch: float) -> bool:
-    """True once the window this reading describes has rolled over.
+def window_ended(resets_at, now_epoch: float) -> bool:
+    """Has the clock reached the reset time this reading carries?
 
-    At that moment the percentage is not merely old, it is wrong: usage went
-    back to near zero and the file still says whatever it said. Age cannot
-    detect this -- a reading taken one minute before a reset is stale the
-    moment the reset lands -- so it is checked directly.
+    Asked separately from age because age cannot answer it: a reading
+    taken a minute before the reset is accurate for that minute and wrong
+    from the instant the window empties, however young the file still is.
 
-    `now_epoch` is this machine's clock and `resets_at` the server's, and
-    nothing here corrects for skew between them. That is accepted, not
-    overlooked: the error is bounded by the skew itself, so a clock that is
-    N seconds fast zeroes a window N seconds early and a slow one holds the
-    old figure N seconds late, and an NTP-synced desk is off by well under a
-    second against windows measured in hours. Estimating the skew would need
-    a second server timestamp to compare against, and none of the sources
-    that call this carries one.
+    `resets_at` comes from the vendor's clock and `now_epoch` from ours, and
+    nothing here tries to reconcile them. The mistake that leaves is exactly
+    the skew -- N seconds fast ends a window N seconds early, N slow ends it
+    N late -- which on a time-synced machine is a fraction of a second
+    against windows of five hours and seven days. Measuring the skew would
+    take a second vendor timestamp, and no source that calls this has one.
     """
-    return resets_at is not None and now_epoch >= resets_at
+    if resets_at is None:
+        return False
+    return now_epoch >= resets_at
 
 
-def rolled_over(pct: float, resets_at, now_epoch: float, stale: bool):
-    """Carry a window across its own reset instead of disowning the reading.
+class SettledWindow(typing.NamedTuple):
+    """One window after settle_window(): what to show, the countdown still
+    worth sending, and when the window emptied if it already has."""
+    pct: float
+    resets_at: object
+    ended_at: object
 
-    A window that has just reset is at 0%. That is not an estimate -- it is
-    what resetting means -- so there is a better answer available than "this
-    number may be wrong", which is what marking the message stale says.
 
-    It matters because neither source that applies this is polled: the Claude
-    status line payload is rewritten only when Claude Code renders, and the
-    Codex rollout log only while Codex runs. Between a reset at 03:00 and its
-    owner sitting down at 09:00, the old behaviour left the panel amber for
-    six hours, announcing a problem that did not exist. Observed 2026-08-22:
-    a five-hour window rolled over, the board flagged the whole message
-    stale, and the weekly figure -- which was perfectly good -- was dragged
-    down with it.
+def settle_window(pct: float, resets_at, now_epoch: float,
+                  stale: bool) -> SettledWindow:
+    """Bring one window's reading up to date with its own reset time.
 
-    The reset time goes back to unknown rather than being guessed forward: the
-    next five-hour window does not start until the next message, so there is
-    no honest number to put there until the tool tells us one.
+    A window whose reset has passed is empty, by definition, so the honest
+    reading is 0% and not a stale flag on the old number. The two sources
+    that need this are both written only as a side effect of someone working
+    -- Claude Code's status line when it repaints, a Codex rollout while
+    Codex runs -- so nothing refreshes them overnight. Before this, a window
+    that rolled at 03:00 kept the panel amber until its owner came back at
+    09:00, and on 2026-08-22 a five-hour reset took a perfectly good weekly
+    figure down with it. DevOceanIT saw the same shape on Codex, 2026-10-01:
+    98% held after the window's resets_at had gone by four minutes, with
+    nobody running Codex, until a session was resumed; that is why this sits
+    in base and not in statusline_source, where it first lived.
 
-    The same shape on the Codex side, reported by DevOceanIT 2026-10-01: a
-    five-hour window rolled over with nobody using Codex, and the panel held
-    98 -- the newest rollout said used=98.0 with a resets_at four minutes in
-    the past -- until a Codex session was resumed. That is why this lives
-    here rather than in statusline_source, where it was written.
+    The three fields are answered one at a time, because the defect of
+    2026-09-02 came from answering them together. An old payload used to
+    skip this entirely, on the grounds that zeroing a three-day-old file
+    invents a quiet three days. True, but skipping kept the PRE-RESET figure,
+    which is certainly wrong, and dropped the evidence that the window had
+    ended; a Claude Desktop sample from before the same reset then won the
+    dial with stale=False. Crossing STALE_AFTER_S turned a correct 0% into a
+    confident green 78% of usage already forgiven.
 
-    STALENESS CHANGES THE ANSWER BUT NOT THE QUESTION, and getting that
-    backwards was a field defect (reproduced 2026-09-02). This used to be
-    skipped entirely on an old payload, on the reasoning that a three-day-old
-    file has a long-past resets_at and any amount of usage may have happened
-    since, so 0% would be the lie. The first half of that is right and the
-    fallback it took was not: skipping the check did not fall back to
-    "unknown", it fell back to the PRE-RESET percentage, which is not merely
-    unvouched-for but definitely wrong -- and it threw away the rollover
-    evidence with it, so a Claude Desktop sample taken before the same reset
-    came back to the dial wearing its own stale=False. Two seconds either side
-    of STALE_AFTER_S the panel went from a correct 0% to a confident green 78%
-    for usage that had already been forgiven.
+      ended_at   The reset epoch, whenever it has passed, stale or not. When
+                 a window ended does not change as the file ages, and
+                 pc/normalizer needs it to turn away a newer reading from a
+                 source that cannot see reset times; nothing else in the
+                 frame records it, since observed_at may predate the reset.
+      resets_at  None once passed. protocol.secs_until rejects a past stamp
+                 anyway, and merge() treats any reset time as "a source has
+                 one", which mutes Claude Desktop's burn rate.
+      pct        0.0 if the reading is fresh, UNKNOWN if it is stale (or was
+                 already unknown). A stale reading cannot vouch for the time
+                 since the reset, and the old figure is known to be wrong,
+                 so neither is offered -- the same -1 statusline_source
+                 gives a window that is missing.
 
-    So all three outputs are decided separately now:
-
-      - The EPOCH the window emptied is reported either way. It is evidence
-        about the past, and evidence does not rot with the file's mtime: the
-        window ended when it ended, whatever age the reading has since
-        reached. pc/normalizer needs it to refuse a newer reading from a
-        source that cannot see reset times (this frame's own observed_at is
-        the payload's mtime and can be long before the reset, so nothing else
-        in the frame can carry that fact).
-      - The RESET TIME is discarded either way. A stamp the clock has already
-        passed is not a countdown -- protocol.secs_until refuses it -- and
-        merge() reads its mere presence as "a source supplied a reset time",
-        which silences the desktop burn rate. Neither is worth keeping for a
-        window that has ended.
-      - The PERCENTAGE is 0.0 only while the reading is fresh. On a stale one
-        it goes to UNKNOWN, which is the third option the old comment was
-        missing: it does not zero an old payload, and it does not re-offer a
-        number for a window that no longer exists. It is also the convention
-        statusline_source._window() already sets -- an absent percentage
-        reads as -1 and not as a confident zero -- applied to a percentage we
-        have positive evidence against rather than merely none for.
-
-    A reading whose every window has ended can therefore carry no number at
-    all. It is still sent: pc/normalizer.merge puts a provider with rollover
-    evidence and no surviving percentage on the wire as unknown and stale,
-    rather than dropping it and leaving the board on the pre-reset figure.
+    So a reading can come out of this with no number in either window. It
+    still goes on the bus: pc/normalizer.merge sends such a provider as
+    unknown and stale instead of leaving the panel on the pre-reset value.
     """
-    if not window_has_reset(resets_at, now_epoch):
-        return pct, resets_at, None
-    return (UNKNOWN if (stale or pct < 0) else 0.0), None, resets_at
+    if not window_ended(resets_at, now_epoch):
+        return SettledWindow(pct, resets_at, None)
+    # Written as the negation on purpose: a NaN percentage is neither < 0
+    # nor >= 0, and a fresh NaN has always settled to 0.0, not UNKNOWN.
+    vouched = not (stale or pct < 0)
+    return SettledWindow(0.0 if vouched else UNKNOWN, None, resets_at)
 
 
 class ProviderParser:

@@ -12,28 +12,31 @@ static bool memo_valid(const struct fatal_memo *memo)
 	       memo->streak <= FATAL_STREAK_MAX;
 }
 
-/* Inlined by hand rather than calling the two helpers above: they are in
- * flash, and this is the one function here that runs inside the fault. */
+/* Runs inside the fault, so it touches nothing in flash: memo_valid and
+ * memo_clear above are not IRAM, and their logic is spelled out here
+ * instead of called. */
 FATAL_IRAM enum fatal_action fatal_decide(int64_t uptime_ms,
 					  struct fatal_memo *memo)
 {
-	/* Inside the grace window the memo is left alone: a halt is followed by
-	 * a power cycle, which clears it anyway. */
-	if (uptime_ms < FATAL_REBOOT_GRACE_MS) {
+	/* Still booting: halt, and leave the memo as it is. Getting past a
+	 * halt takes a power cycle, and that clears the memo regardless. */
+	if (uptime_ms < FATAL_BOOT_WINDOW_MS) {
 		return FATAL_HALT;
 	}
 
-	if (memo->magic != FATAL_MEMO_MAGIC ||
-	    memo->streak > FATAL_STREAK_MAX ||
-	    uptime_ms >= FATAL_STREAK_FORGET_MS) {
-		memo->magic = FATAL_MEMO_MAGIC;
-		memo->streak = 0;
-	}
+	/* A memo that is not ours, or a boot that ran long enough to have
+	 * proved itself, both mean this fault starts a new streak. */
+	const bool ours = memo->magic == FATAL_MEMO_MAGIC &&
+			  memo->streak <= FATAL_STREAK_MAX;
+	const uint32_t before =
+		(ours && uptime_ms < FATAL_STREAK_FORGET_MS) ? memo->streak : 0;
 
-	if (memo->streak >= FATAL_STREAK_MAX) {
+	memo->magic = FATAL_MEMO_MAGIC;
+	memo->streak = before;
+	if (before >= FATAL_STREAK_MAX) {
 		return FATAL_HALT;
 	}
-	memo->streak++;
+	memo->streak = before + 1;
 	return FATAL_REBOOT;
 }
 

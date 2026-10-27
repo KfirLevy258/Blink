@@ -1,10 +1,11 @@
 /*
- * Settings panel: brightness and software update.
+ * The Settings panel, which today holds brightness and the software update.
  *
- * It began as the recovery actions that used to require reflashing -- forget
- * the network, sign out, factory reset -- each clearing one persistence tier
- * and rebooting. Those belonged to the standalone WiFi mode and went with it
- * on 2026-10-27; see the note above `panel` for why a USB unit never had them.
+ * Originally it existed for recovery without a reflash: drop the network,
+ * sign out, or reset everything, each one wiping a layer of saved state and
+ * rebooting. All three were part of the standalone WiFi mode and were
+ * removed with it on 2026-10-27 (the comment above `panel` explains why a
+ * USB unit has no use for them).
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
@@ -60,9 +61,10 @@
 /*
  * No destructive actions, and no confirm-then-reboot machinery behind them.
  *
- * They were standalone-WiFi-only, and went with that mode on 2026-10-27.
- * Every one of them forgot something the device was holding: a network, a
- * token, or all of it. A USB unit holds none of that. The config record a
+ * The standalone WiFi mode had three -- drop the network, drop the sign-in
+ * token, drop both -- and they were removed with it on 2026-10-27. A unit on
+ * USB keeps neither a network nor a token, so none of them had anything
+ * left to erase. The config record a
  * reset would wipe contains a brightness level and an OTA breadcrumb the next
  * boot clears anyway, so the whole ceremony -- a confirm dialog, a cold
  * reboot -- bought a return to 100% brightness, which the Brightness row does
@@ -1771,7 +1773,6 @@ static bool theme_closing;	/* a close is queued; see theme_close() */
 /* Shared by every tile and every chip; see MEMORY above. Static, so they
  * cost no pool beyond their property arrays, allocated once. */
 static lv_style_t st_tile, st_chip;
-static bool st_ready;
 
 static void show_theme(bool fresh);
 static void build_panel(lv_obj_t *parent_scr);
@@ -1953,10 +1954,15 @@ static void theme_pick_cb(lv_event_t *e)
  * colours are values, and the theme may have changed since the last one. */
 static void theme_styles(void)
 {
-	if (!st_ready) {
+	/* lv_style_init once only: a second init would drop the property
+	 * arrays the tiles of an earlier build were given, without freeing
+	 * them. The setters below overwrite values in place. */
+	static bool initialised;
+
+	if (!initialised) {
 		lv_style_init(&st_tile);
 		lv_style_init(&st_chip);
-		st_ready = true;
+		initialised = true;
 	}
 	lv_style_set_width(&st_tile, THEME_TILE_W);
 	lv_style_set_height(&st_tile, THEME_TILE_H);
@@ -2251,7 +2257,7 @@ static const char *const focus_notes[FOCUS_CHOICES] = {
 
 static lv_style_t focus_st_btn;	/* every choice */
 static lv_style_t focus_st_on;	/* ...and the chosen one, as LV_STATE_CHECKED */
-static bool focus_st_ready;
+static bool focus_styles_made;	/* both styles above hold properties */
 
 /* 0 off, 1 session, 2 weekly: what the store says now. */
 static int focus_choice(void)
@@ -2297,7 +2303,7 @@ static void focus_refresh(void)
  */
 static void focus_styles(void)
 {
-	if (focus_st_ready) {
+	if (focus_styles_made) {
 		lv_style_reset(&focus_st_btn);
 		lv_style_reset(&focus_st_on);
 	}
@@ -2318,7 +2324,7 @@ static void focus_styles(void)
 	lv_style_set_border_color(&focus_st_on, COL_TEXT);
 	lv_style_set_border_width(&focus_st_on, 2);
 	lv_style_set_text_color(&focus_st_on, COL_TEXT);
-	focus_st_ready = true;
+	focus_styles_made = true;
 }
 
 /* Everything on the Focus screen, and its row's subtitle, die with the panel:

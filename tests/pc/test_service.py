@@ -768,7 +768,7 @@ class TestLinuxWithoutSystemd:
         r = _runs(monkeypatch)
         msg = cli.backend().install()
         assert "no systemd here" in msg
-        assert cli.user_command() in msg           # what to run by hand
+        assert cli.command_to_type() in msg           # what to run by hand
         assert os.path.exists(cli.unit_path())
         assert r.calls == []                       # nothing was invoked
 
@@ -813,8 +813,8 @@ def test_a_windows_checkout_registers_no_task(home, monkeypatch):
     _windows_checkout(monkeypatch)
     r = _runs(monkeypatch)
     msg = cli.backend().install()
-    assert msg.startswith("no login service from a checkout on Windows;")
-    assert f"run it yourself: {cli.user_command()} run" in msg
+    assert msg.startswith("a checkout on Windows gets no login service;")
+    assert f"start it by hand with: {cli.command_to_type()} run" in msg
     assert r.calls == []
     assert not os.path.exists(cli.launcher_path())
 
@@ -830,7 +830,7 @@ def test_a_windows_checkout_clears_the_task_an_old_checkout_left(
     cleared = []
     monkeypatch.setattr(cli, "_autostart_clear", lambda: cleared.append(1))
     r = _runs(monkeypatch)
-    assert cli.backend().install().startswith("no login service")
+    assert cli.backend().install().startswith("a checkout on Windows gets")
     assert r.ran("schtasks", "/delete", "/f", "/tn", cli.TASK_NAME)
     assert cleared == [1]
     assert not os.path.exists(cli.launcher_path())
@@ -845,7 +845,7 @@ def test_a_windows_checkout_leaves_a_frozen_install_alone(home, monkeypatch):
     monkeypatch.setattr(cli, "_autostart_clear",
                         lambda: pytest.fail("cleared a frozen install"))
     r = _runs(monkeypatch)
-    assert cli.backend().install().startswith("no login service")
+    assert cli.backend().install().startswith("a checkout on Windows gets")
     assert r.calls == []
     assert os.path.exists(cli.launcher_path())
 
@@ -854,7 +854,7 @@ def test_a_windows_checkout_discloses_no_task(home, monkeypatch):
     _windows_checkout(monkeypatch)
     b = cli.backend()
     assert b.creates() is None
-    assert b.checkout_refusal().startswith("no login service from a checkout")
+    assert b.checkout_refusal().startswith("a checkout on Windows gets no login service")
     assert b.runs_checkout() is False
 
 

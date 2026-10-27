@@ -4,7 +4,7 @@ A thin adapter, on purpose. All of the reasoning about this source -- the
 freshness bound and why age is the wrong primary signal, why an absent
 window is -1 and not 0, and where the file is -- lives in
 pc/statusline_source and stays there; carrying a window across its own
-reset is pc/providers/base.rolled_over, shared with Codex. Re-implementing
+reset is pc/providers/base.settle_window, shared with Codex. Re-implementing
 any of it here would give the project two rules for the same file.
 
 This briefly read one payload per session, to take the worst of several
@@ -149,7 +149,7 @@ class ClaudeCliProvider(base.ProviderParser):
         file's payload, then the remembered one), and the second can drop
         the first's entry if that block's window has ended. That costs
         little: an ended window already reads 0 or unknown
-        (base.rolled_over), and the block re-enters on the next poll dated
+        (base.settle_window), and the block re-enters on the next poll dated
         by its mtime, which is how every block was dated before this memory.
         """
         if len(self._fetch_times) < FETCH_MEMORY_LIMIT:

@@ -5,61 +5,65 @@
 #include <stdint.h>
 
 /*
- * What a fatal fault does to the board: halt where it stands, or reboot.
+ * When a fatal fault should restart the board, and when it should stop it.
  *
- * Zephyr's own answer is always "halt". On a desk display that answer is the
- * wrong one for a fault an hour into a working day: the panel freezes on its
- * last reading, nothing on it says it has stopped, and it stays that way
- * until someone notices the numbers have not moved and pulls the cable.
- * DevOceanIT's fork (c86226e) reboots instead once the board has been up for
- * 30 s, and halts inside that window. The window is the point of the change,
- * not a detail of it: a fault during boot rebooted at once would replay the
- * splash forever, and a crash loop that looks like a slow boot is the one
- * nobody reports. A frozen boot screen is a fault somebody can see.
+ * Zephyr stops, always. For a panel that sits on a desk all day that is the
+ * worse half of the choice once the board is past booting: the screen holds
+ * its last reading, looks perfectly healthy, and stays that way until the
+ * owner happens to notice the figures never move and pulls the cable. A
+ * restart puts it back to work in a few seconds. Rebooting past a boot
+ * window is DevOceanIT's idea, from their fork (c86226e); the streak
+ * guard below is ours.
  *
- * Added here, so that a reboot cannot become a loop either: a board whose
- * fault comes back every boot, a little after the 30 s line, would reboot
- * every minute for ever. So each reboot taken for a fault is counted in a
- * memo that outlives the reboot, and after FATAL_STREAK_MAX of them in a row
- * the next fault halts instead. A count is only "in a row" while nothing
- * else happens in between, so it is wiped by:
+ * Not during boot, though. For the first FATAL_BOOT_WINDOW_MS the board
+ * still halts, and that is a deliberate part of the rule, not a leftover. A
+ * fault that fires every boot and restarts every time plays the splash over
+ * and over, which reads as a slow boot and never gets reported; a board
+ * frozen on its boot screen is obviously broken.
  *
- *   - a boot that stays up FATAL_STREAK_FORGET_MS (fatal_memo_tick, from the
- *     main loop). Before that rule, the count only reset when a fault itself
- *     came late, so three rare faults weeks apart -- each followed by an OTA,
- *     a Settings reboot or an EN press that kept the memo -- added up to a
- *     halt. (Review of this change, 2026-10-27.)
- *   - a power-on or a reset pin (fatal_memo_at_boot): someone is at the desk
- *     and has started the board over on purpose.
- *   - garbage: RTC memory holds noise after a power loss, and the magic and
- *     range check read any bit pattern that is not ours as "no streak".
+ * Restarting must not turn into a loop either. A fault that returns a little
+ * after the boot window each time would cycle the board once a minute
+ * forever. So every restart taken for a fault is counted, in a memo that
+ * survives the restart, and once FATAL_STREAK_MAX have happened back to back
+ * the next fault halts. "Back to back" ends, and the count goes to zero, on
+ * any of:
  *
- * The rules are pure and live here, apart from the handler, so that
- * tests/fatal_policy can pin them on a host. The handler itself (fatal.c)
- * cannot be tested anywhere but on a board.
+ *   - a boot that has been up FATAL_STREAK_FORGET_MS (fatal_memo_tick, from
+ *     the main loop). Without it the count was cleared only by a fault that
+ *     itself arrived late, so three faults weeks apart, each followed by a
+ *     reboot that keeps the memo (an OTA, a Settings restart, EN), summed to
+ *     a halt. Caught reviewing this change, 2026-10-27.
+ *   - a power-on or reset-pin start (fatal_memo_at_boot): a person has
+ *     restarted the board by hand.
+ *   - a memo that is not ours: RTC memory is noise after power loss, and
+ *     the magic and the range check turn any foreign pattern into zero.
  *
- * Why a reboot here cannot cost the owner anything a halt would not:
- * cfg_store writes an A/B pair of sealed records, so a reset mid-write loses
- * at most the write in flight; the logo partition is only ever read by the
- * firmware (logo.c maps it, esptool writes it); and a reboot writes nothing
- * to MCUboot's trailer. An image still on its test boot is reverted by the
- * reboot, which is the same outcome as its 90 s confirm deadline in main.c.
- * A test boot that halts is reset by the watchdog that boot arms, about 60 s
- * after the last feed: its first 30 s stage only raises an interrupt, which
- * feeds it, and the reset comes from the second.
+ * The rules are plain functions, kept apart from the handler, so that
+ * tests/fatal_policy can run them on the host. fatal.c itself can only be
+ * exercised on a board, by a real fault.
  *
- * IRAM: fatal_decide and the handler are placed in IRAM (FATAL_IRAM), as are
- * the kernel calls the halt branch makes (k_fatal_halt, arch_system_halt,
- * the uptime read -- checked with nm, 2026-10-27). That is as far as it can
- * be taken from here. A fault while the flash cache is off -- only inside a
- * cfg_store or OTA flash operation, with interrupts already locked -- most
- * likely never reaches this code at all: Zephyr's own crash dump, which runs
- * first, formats strings that live in flash, and so do our printk lines and
- * the reboot path (sys_reboot, esp_restart). What such a fault does is
- * stop, which is the halt this code would have chosen inside the window
- * anyway; it cannot become a reboot loop.
+ * What a restart could cost, and why it costs nothing a halt would not:
+ * cfg_store keeps two sealed copies and writes one at a time, so a reset in
+ * the middle loses only that write; the firmware only ever reads the logo
+ * partition (logo.c maps it, esptool writes it); and rebooting touches
+ * nothing in MCUboot's trailer. An image still on its test boot gets
+ * reverted by the restart, the same thing its 90 s confirm deadline in
+ * main.c would do. A test boot that halts is reset by the watchdog it arms,
+ * about 60 s after the last feed -- its first 30 s stage only raises an
+ * interrupt, which feeds it, and the second stage resets.
+ *
+ * IRAM: the handler and fatal_decide are FATAL_IRAM, and so are the kernel
+ * functions the halt path calls (k_fatal_halt, arch_system_halt and the
+ * uptime read; nm, 2026-10-27). Nothing more can be done from this side. A
+ * fault while the flash cache is disabled, which happens only inside a
+ * cfg_store or OTA flash operation with interrupts already locked, almost
+ * certainly never arrives here: Zephyr's crash dump runs first and formats
+ * strings held in flash, as do our printk lines and the restart path
+ * (sys_reboot, esp_restart). Such a fault simply stops the CPU -- the halt
+ * this policy would pick in the boot window anyway -- and can never loop.
  */
-#define FATAL_REBOOT_GRACE_MS	30000
+/* Uptime below which a fault halts rather than restarts. */
+#define FATAL_BOOT_WINDOW_MS	30000
 #define FATAL_STREAK_MAX	3
 #define FATAL_STREAK_FORGET_MS	(10 * 60 * 1000)
 

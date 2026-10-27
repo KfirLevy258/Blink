@@ -17,7 +17,8 @@ and firmware updates when there are any. The device has no Wi-Fi and stores no t
 Older source trees also had a standalone Wi-Fi mode (captive-portal setup, an
 on-device sign-in, a usage fetch of its own). No release ever shipped it. It signed
 the board in to Anthropic using Claude Code's OAuth client id, so it was deleted on
-2026-10-27, as gapietro had already done in their fork; git history keeps it.
+2026-10-27, following gapietro's fork, which had dropped it first; git history
+keeps it.
 
 ## Prerequisites
 
@@ -109,9 +110,9 @@ esptool.py --port <port> --baud 115200 write_flash 0x1000 build-sb/mcuboot/zephy
 
 Port notes: opening the port resets the board, and only one process can own it at a
 time. To watch the console without disturbing behavior, use
-`tools/passive_log.py <port>` (resets once on open, then read-only). To wipe the
-stored settings for a clean first-run test, erase the settings region:
-`esptool.py --port <port> erase_region 0x3b0000 0x30000`.
+`tools/passive_log.py <port>`: it resets the board once, when it opens the port, and
+only reads from then on. For a clean first-run test, clear every saved setting by
+erasing their region: `esptool.py --port <port> erase_region 0x3b0000 0x30000`.
 
 Flash map (4 MB): MCUboot `0x1000`, slot 0 `0x20000`, slot 1 `0x170000`,
 scratch `0x2C0000` (unused in swap-move mode), **company logo `0x330000`
@@ -148,18 +149,18 @@ tools/release.sh
 version), signs the image, and attaches `blink-fw.bin` + `manifest.json` to the
 `v<version>` release on **`KfirLevy258/Blink`** - which is the feed every board reads.
 
-The board cannot reach the network, so its part is to say yes: the daemon downloads
-the release and esptool writes it to slot0. That takes about 75 s with no swap, because
-the bytes land where the bootloader already looks. The price is that nothing rolls
-back, which is acceptable only because a machine able to reflash the board is, by
-definition, already cabled to it. Requires `pip install esptool` wherever the daemon
-runs. (The deleted Wi-Fi mode updated itself another way, streaming the image into
-slot 1 over HTTPS; that half of `ota.c` remains in the source, unreachable.)
+With no network of its own, the board only approves an update; the daemon fetches the
+release and writes slot0 with esptool. Roughly 75 s, and no swap, since the image goes
+straight to the slot the bootloader boots. What that gives up is automatic rollback,
+which is tolerable only because whatever can reflash the board is already plugged into
+it. The machine running the daemon needs `pip install esptool`. (The removed Wi-Fi mode
+updated over HTTPS into slot 1 instead; that code path is still in `ota.c`, but nothing
+calls it.)
 
-A check runs as soon as the board is up (and daily after that). Anything newer raises a
-prompt on the gauge screen -- **Update now** / **Later** -- and the settings row still
-offers **Software update → Install x.y.z** on demand. The outcome is reported on the
-next boot.
+The board checks for an update when it comes up and once a day after that. A newer
+release shows a prompt on the gauge screen, **Update now** or **Later**, and can also
+be installed at any time from Settings, under **Software update → Install x.y.z**.
+Whether it worked is shown on the boot that follows.
 
 ## How updates stay safe
 

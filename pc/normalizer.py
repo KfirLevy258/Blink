@@ -23,7 +23,7 @@ from the fresh source and 90% from one taken before the reset, and
 higher-wins would confidently show 90% for as long as the stale reading
 survives. Understating a limit is a real cost; inventing usage that has
 already been forgiven is a worse one, and it is the failure this project
-already spent code on (see pc/providers/base.rolled_over).
+already spent code on (see pc/providers/base.settle_window).
 
 The two percentages are the exception to "strict recency", in two narrow
 ways, and both came from one logged trace (docs/open-bugs/usage-merge-jitter.md).
@@ -262,9 +262,10 @@ def merge(frames):
         # sources knew about has ENDED. Then the last reading the board has
         # is the pre-reset one, and keeping it is the failure: a Codex
         # window that rolled over with Codex closed held 98 on the panel
-        # (DevOceanIT, 2026-10-01), and returning None here put it back the
-        # moment the reading aged past stale -- for Codex and, on the same
-        # path, for a Claude status line gone quiet across both resets. Two
+        # (DevOceanIT's desk, 2026-10-01), and returning None here put it
+        # back the moment the reading aged past stale -- for Codex and, on
+        # the same path, for a Claude status line gone quiet across both
+        # resets. Two
         # blank dials are the truth in that case, and they keep the
         # provider's place on the panel and its state. Stale only if the
         # newest witness is: a Desktop Local Storage record that saw the

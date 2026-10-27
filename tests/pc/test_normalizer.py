@@ -501,7 +501,7 @@ def test_desktop_local_storage_supplies_a_reset_the_history_file_cannot():
 
 def _quiet_status_line_across_both_resets():
     """A status line Claude Code last wrote three days ago, both of whose
-    windows have since ended: stale, so both read unknown (base.rolled_over),
+    windows have since ended: stale, so both read unknown (base.settle_window),
     with the rollovers reported."""
     payload = {"rate_limits": {
         "five_hour": {"used_percentage": 80.0, "resets_at": NOW - 200_000},

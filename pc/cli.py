@@ -164,20 +164,25 @@ def _self_path() -> str:
     return sys.executable if _frozen() else os.path.abspath(sys.argv[0])
 
 
-def _repo_root() -> str:
-    """The source checkout this module runs from: blink_main.py sits at its
-    root, next to pc/. Only meaningful when not frozen."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The script a checkout is started through. It lives at the top of the
+# tree, one level above this package.
+_ENTRY_SCRIPT = "blink_main.py"
 
 
-def _source_argv() -> list:
-    """How a source checkout runs this program, without the subcommand.
+def _checkout_dir() -> str:
+    """Top of the source tree this file was loaded from. A frozen build has
+    no tree, so nothing frozen should ask."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(here, os.pardir))
 
-    Shared by the login service and by the command a person is told to type,
-    so the two cannot name different programs. The script goes by path, not
-    `-m pc.cli`, for the reason _service_command() records.
-    """
-    return [sys.executable, os.path.join(_repo_root(), "blink_main.py")]
+
+def _checkout_argv() -> list:
+    """argv that starts a checkout, minus the subcommand: this interpreter
+    and the entry script, by absolute path. A path and not `-m pc.cli`,
+    because a service started outside the tree has no package to find
+    (_service_command() has the full account)."""
+    entry = os.path.join(_checkout_dir(), _ENTRY_SCRIPT)
+    return [sys.executable, entry]
 
 
 # What cmd.exe treats specially in an unquoted word. list2cmdline quotes only
@@ -242,48 +247,49 @@ def _quote_line(argv) -> str:
 
 
 def _program_argv() -> list:
-    """This program, as argv, without the subcommand: the installed binary
-    when frozen, the checkout's interpreter and script when not. The launchd
-    and systemd services and the command a person is told to type both
-    start from here, so the two cannot name different programs. The Windows
-    task does not: its launcher names blink.exe, which is why a Windows
-    checkout registers no service at all (_SchtasksBackend.checkout_refusal).
+    """This program as argv, minus the subcommand.
+
+    The one place the frozen/checkout split is decided for anything that
+    starts the program: the launchd and systemd services take it, and so
+    does every line printed for a person to paste, which is what keeps a
+    service and the advice next to it from naming two different programs.
+    The Windows task is the exception -- its launcher hard-codes blink.exe
+    -- and a Windows checkout therefore registers nothing; see
+    _SchtasksBackend.checkout_refusal.
     """
-    return [installed_bin()] if _frozen() else _source_argv()
+    if _frozen():
+        return [installed_bin()]
+    return _checkout_argv()
 
 
-def user_command() -> str:
-    """The command a PERSON types to run this program again.
+def command_to_type() -> str:
+    """_program_argv() as one pasteable line: what install, status and
+    uninstall print whenever they tell a person to run this program.
 
-    Every "run X", "Undo:" and "Check:" line that names a path goes through
-    this. The bare `blink driver` / `blink install` / `blink update` in
-    win_driver, install_statusline and the bridge's update notice do not:
-    they name the command as the README does rather than a path, so they
-    never pointed at a file that is missing, and routing them here would mean
-    importing cli into modules cli itself imports.
+    It describes the process that is printing, not whatever happens to be
+    installed. Run a checkout's blink_main.py on a desk that also carries
+    the frozen build and the hints name the checkout, since that is the
+    code the reader is actually exercising. (Hints that must reach the
+    REGISTERED service, such as repairs, use _repair_command instead.)
+    Plain `blink update` / `blink driver` mentions in win_driver,
+    install_statusline and the bridge's update notice stay as the README
+    spells them: they never named a path, and cli imports those modules,
+    so they cannot import this.
 
-    It answers for the RUNNING process, not for what is installed: a
-    developer who runs a checkout's `blink_main.py status` on a desk that
-    also has the frozen install is shown checkout commands, because those
-    are the ones that reach the code they are running.
+    Why it is separate from installed_bin(): that is where the frozen
+    binary is copied to, which the updater, swap-in and process matching
+    all need, and for a long time it was also what got printed. A checkout
+    install copies nothing there, so on 2026-10-12 gapietro's bench Mac,
+    installing from a checkout, announced it was creating
+    ~/.blink/bin/blink, gave an undo line pointing into that empty folder,
+    and suggested deleting the downloaded folder -- the very folder the
+    service now ran from.
 
-    installed_bin() used to be both: the path the frozen binary is
-    copied to, which process matching, the updater and swap-in need, and the
-    command printed to the reader. From a source checkout those differ.
-    `blink install` copies nothing there -- the service runs blink_main.py out
-    of the checkout -- yet it printed "Creates ~/.blink/bin/blink", an undo
-    line naming that empty directory, and "You can delete the folder you
-    downloaded", which is the folder the service had just been pointed at.
-    Found by gapietro installing from a checkout on their bench Mac,
-    2026-10-12.
-
-    Frozen, it is installed_bin(); from a checkout, the interpreter and the
-    script. Either way it is quoted the way the platform's shell splits a
-    line, and only where a word needs it -- see _quote_line. The frozen form
-    was printed bare until 2026-10-25, so a Windows profile with a space in
-    it ("C:\\Users\\John Smith\\...") was told to undo with a line the shell
-    reads as `C:\\Users\\John` (review, 2026-10-25). Quoted on Windows, it is
-    PowerShell's form, with a leading `& `; see _win_line for cmd.exe.
+    Words are quoted only where this platform's shell would split or
+    expand them (_quote_line). Until 2026-10-25 the frozen path went out
+    bare, and a Windows profile such as C:\\Users\\John Smith received an
+    undo line that PowerShell cut at the space. On Windows the result is
+    PowerShell syntax, `& ` prefix included; _win_line covers cmd.exe.
     """
     return _quote_line(_program_argv())
 
@@ -300,7 +306,7 @@ def _shim_source(name: str = "blink-statusline.sh") -> str:
     if _frozen():
         base = getattr(sys, "_MEIPASS", os.path.dirname(_self_path()))
         return open(os.path.join(base, name), encoding="utf-8").read()
-    return open(os.path.join(_repo_root(), "tools", name),
+    return open(os.path.join(_checkout_dir(), "tools", name),
                 encoding="utf-8").read()
 
 
@@ -1136,10 +1142,10 @@ def _service_runs_checkout() -> bool:
 
     Only launchd and systemd are handed _service_command(). The Windows
     Scheduled Task runs LAUNCHER_VBS, which names ~\\.blink\\bin\\blink.exe
-    outright, and a Linux machine without systemctl registers nothing. Found
-    by review, 2026-10-25, against a checkout install that said "the
-    background service runs this folder's blink_main.py" on both. Each
-    backend answers for itself, next to its own install().
+    outright, and a Linux machine without systemctl registers nothing; a
+    checkout install on either promised a service running from the folder
+    (review, 2026-10-25). Each backend answers for itself, next to its own
+    install().
     """
     return not _frozen() and backend().runs_checkout()
 
@@ -1182,7 +1188,7 @@ def service_program():
 def _repair_command() -> str:
     """The command a hint names to REPAIR an existing install.
 
-    Not user_command(), which is the program printing the hint. Fleet desks
+    Not command_to_type(), which is the program printing the hint. Fleet desks
     run the checkout's CLI from .venv-test beside a live frozen install, and
     after a failed burn or restore status told them to run the checkout's
     `install` -- which re-registers the service against the checkout and
@@ -1191,7 +1197,7 @@ def _repair_command() -> str:
     is nothing to protect and it is this program.
     """
     argv = service_program()
-    return _quote_line(argv) if argv else user_command()
+    return _quote_line(argv) if argv else command_to_type()
 
 
 def _confirm_running(probe, tries=4) -> bool:
@@ -1275,7 +1281,7 @@ class _Backend:
 
     def install(self) -> str:
         return (f"not supported on {sys.platform}; run it yourself: "
-                f"{user_command()} run")
+                f"{command_to_type()} run")
 
     def restart(self) -> str:
         return "not running under a supervisor; restart it yourself"
@@ -1698,15 +1704,15 @@ def _start_launcher() -> None:
 
 class _SchtasksBackend(_Backend):
     def checkout_refusal(self):
-        # The launcher names ~\.blink\bin\blink.exe outright (LAUNCHER_VBS),
-        # which a checkout never copies, so a task registered from one ran a
-        # missing file at every logon and install then advised
-        # `schtasks /run` on it (review, 2026-10-25). From a checkout,
-        # register nothing and say how to run it instead.
-        if _frozen():
-            return None
-        return ("no login service from a checkout on Windows; run it"
-                f" yourself: {user_command()} run")
+        # LAUNCHER_VBS hard-codes ~\.blink\bin\blink.exe, and a checkout
+        # never puts anything there. Registered anyway, the task failed on a
+        # missing file at every logon while install recommended
+        # `schtasks /run` (review, 2026-10-25). So a checkout gets no task,
+        # only the line to start the daemon by hand.
+        if not _frozen():
+            return ("a checkout on Windows gets no login service; start it"
+                    f" by hand with: {command_to_type()} run")
+        return None
 
     def registered_argv(self):
         # The launcher runs blink.exe whatever wrote it (LAUNCHER_VBS). An
@@ -2450,22 +2456,22 @@ def _announce():
         print("             a copy of this program and its support files, so the")
         print("             folder you downloaded can be deleted when this finishes.")
     else:
-        # A checkout copies nothing (see the Program step), so the frozen
-        # wording above would name a file that never appears and invite the
-        # reader to delete the folder everything printed below runs from --
-        # see user_command(). The service is named only where it will run
-        # the checkout: see _service_runs_checkout(). This is said before
-        # anything is installed, so it is a prediction; the closing summary
-        # goes by what the service step actually returned.
-        print(f"  Uses       {_repo_root()}")
-        print("             in place: from a source checkout nothing is copied.")
+        # Nothing is copied from a checkout (the Program step skips it).
+        # The frozen paragraph would announce a file that never appears and
+        # suggest deleting the one folder every printed command depends on.
+        # This runs before any step, so what it says about the service is a
+        # forecast from the backend; the summary at the end of install
+        # reports what the service step really did.
+        pad = " " * 13
+        print(f"  Runs from  {_checkout_dir()}")
+        print(pad + "where it already is; a checkout is not copied.")
         if _service_runs_checkout() and not _skip_service():
-            print("             The background service runs this folder's")
-            print("             blink_main.py. Keep the folder; moving or deleting")
-            print("             it stops the service.")
+            print(pad + "The login service starts blink_main.py from")
+            print(pad + "this folder, so moving or deleting the folder")
+            print(pad + "stops it.")
         else:
-            print("             The commands printed below run from this folder,")
-            print("             so keep it.")
+            print(pad + "Every command printed below starts from this")
+            print(pad + "folder, so leave it where it is.")
     print(f"  Creates    {shim_path()}")
     print("             the small script Claude Code runs to hand over the")
     print("             usage figures. It keeps the last status line payload")
@@ -2530,7 +2536,7 @@ def _announce():
     print("  worked them out. From the Codex log it keeps only the rate-limit")
     print("  line, never the conversation.")
     print()
-    print(f"  To undo all of it:  {user_command()} uninstall")
+    print(f"  To undo all of it:  {command_to_type()} uninstall")
     print()
 
 
@@ -2613,7 +2619,7 @@ def cmd_driver(_args) -> int:
         if undriven:
             print()
             print("The board is set up. Check it with:")
-            print(f"  {user_command()} status")
+            print(f"  {command_to_type()} status")
         return 0
 
     # Installed, or claimed to be, and Windows still will not use the device.
@@ -2701,7 +2707,7 @@ def cmd_install(_args) -> int:
             pass          # absent (state/ appears on the first hook), or Windows
     _write_shim(shim_path(), "blink-statusline.sh")
     install_statusline._announce(settings_path(), shim_path(),
-                                 undo_hint=f"{user_command()} uninstall")
+                                 undo_hint=f"{command_to_type()} uninstall")
     print("      " + install_statusline.install(settings_path(), shim_path()))
 
     step("Activity hooks")
@@ -2738,18 +2744,20 @@ def cmd_install(_args) -> int:
     print()
     print("Done. Plug the board in over USB -- it picks it up on its own.")
     print(f"  Log:     {log_path()}")
-    print(f"  Check:   {user_command()} status")
-    print(f"  Undo:    {user_command()} uninstall")
+    print(f"  Check:   {command_to_type()} status")
+    print(f"  Undo:    {command_to_type()} uninstall")
     print()
     if _frozen():
         print("  You can delete the folder you downloaded.")
-    elif _service_runs_checkout() and _service_started(service):
-        # By what the service step returned, not by what this platform
-        # would do: WSL with no user manager, a failed bootstrap and
-        # BLINK_SKIP_SERVICE all leave nothing running from the folder.
-        print(f"  Keep {_repo_root()}: the service runs from it.")
     else:
-        print(f"  Keep {_repo_root()}: the commands above run from it.")
+        # Decided by the string the service step handed back, because the
+        # platform alone overpromises: WSL without a user manager, a
+        # bootstrap that failed, and BLINK_SKIP_SERVICE each end with no
+        # service running out of the folder.
+        started = _service_runs_checkout() and _service_started(service)
+        what = ("the service starts" if started
+                else "the commands above start")
+        print(f"  Leave {_checkout_dir()} in place: {what} from there.")
     # Absent first: it is a bigger fact than out-of-date, and the two are
     # mutually exclusive (claude_version() gives no version for an absent
     # install, which is exactly what _warn_if_claude_too_old returns on).
@@ -3343,7 +3351,7 @@ def _board_lines():
     try:
         from claude_usage_bridge import describe_ports, remembered_board
         return board_lines(remembered_board(blink_home()), describe_ports(),
-                           win_driver.undriven_boards(), user_command(),
+                           win_driver.undriven_boards(), command_to_type(),
                            can_update=_update_reaches_the_service())
     except Exception as e:
         return [f"Board       could not list serial ports: {e}"]
@@ -3431,9 +3439,9 @@ def _source_lines(desk=None):
             # The app's own empty shape, before its first sample, is not a
             # changed format. It used to share the "please report it" line
             # below, and people reported a fault that was not there
-            # (destaben, 2026-10-19). Only the exact empty shapes land here;
-            # see _is_unfilled_doc. The last line keeps a report open for an
-            # app that never fills it.
+            # (destaben noticed, 2026-10-19). Only the exact empty shapes
+            # land here; see _is_unfilled_doc. The last line keeps a report
+            # open for an app that never fills it.
             print("Desktop     usage cache present but holds no usage"
                   " figures yet")
             print("            Claude Desktop fills it in after its first"

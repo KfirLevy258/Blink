@@ -1,26 +1,28 @@
-"""tools/lib_zephyr.sh, sourced from the shells people actually type in.
+"""tools/lib_zephyr.sh, run in the shells a developer really types into.
 
-Two faults, both found by gapietro in their fork on 2026-10-12/13:
+What these pin, and where it came from (both first turned up in gapietro's
+fork, 2026-10-12/13; the zsh one again on this repo's own Mac on
+2026-10-25):
 
-  - zsh, the macOS login shell, aborts a whole command on a glob that matches
-    nothing. A Mac with just one of the four workspace candidates got
-    "no matches found: ~/zephyr-v*" from the documented
-    `. tools/lib_zephyr.sh && blink_zephyr_activate`, and nothing else. It
-    happened on this repo's own Mac on 2026-10-25 too.
-  - A workspace venv without esptool fails the firmware configure, and
-    Zephyr's own suggested fix installs a bitstring that espefuse cannot
-    import -- so the fix printed here installs both at the pinned versions.
+  - zsh, the default macOS shell, treats a glob that matches nothing as an
+    error and drops the whole command line. With only one of the workspace
+    candidates present, the documented
+    `. tools/lib_zephyr.sh && blink_zephyr_activate` printed
+    "no matches found: ~/zephyr-v*" and did nothing else.
+  - A workspace venv with no esptool fails the firmware configure, and the
+    fix Zephyr suggests installs a bitstring espefuse cannot import. So the
+    hint printed here installs both, held to pc/requirements.txt's pins.
 
-The esptool check is deliberately NOT part of blink_zephyr_activate. dev.sh
-`up` activates the workspace to relaunch the daemon, after `down` has killed
-it; an activate that failed over a build tool left the desk on HOST LOST for
-want of something the daemon never runs. So activate must succeed without
-esptool, and blink_zephyr_build_ready is called only right before a build.
+blink_zephyr_activate must NOT require esptool. dev.sh `up` activates the
+workspace only to restart the daemon after `down` stopped it, and an
+activate that failed over a build tool left the desk on HOST LOST for want
+of something the daemon never uses. The esptool check is
+blink_zephyr_build_ready, called immediately before a build and nowhere else.
 
-Every test runs the library in a real shell against a fake workspace in
-tmp_path. HOME is set explicitly for each child on top of the redirect in
-tests/conftest.py, so the real ~/zephyrproject can never be the one found,
-and the shells start without their startup files (see _run).
+Each test runs the real library in a real shell, against a fake workspace
+under tmp_path. HOME is set for every child on top of conftest.py's
+redirect, so the developer's own ~/zephyrproject cannot be the one found,
+and no shell reads its startup files (Sandbox.run says how).
 """
 import os
 import re
@@ -30,244 +32,261 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-LIB = ROOT / "tools" / "lib_zephyr.sh"
+REPO = Path(__file__).resolve().parents[1]
+LIBRARY = REPO / "tools" / "lib_zephyr.sh"
+REQUIREMENTS = REPO / "pc" / "requirements.txt"
 
 
-def _shell(name):
-    found = shutil.which(name)
-    return pytest.param(found, id=name, marks=pytest.mark.skipif(
-        found is None, reason=f"{name} is not installed here"))
+def _shell_param(name):
+    path = shutil.which(name)
+    return pytest.param(path, id=name, marks=pytest.mark.skipif(
+        path is None, reason=f"no {name} on this machine"))
 
 
-ZSH = _shell("zsh")
-POSIX_SHELLS = [_shell("sh"), _shell("bash"), _shell("dash")]
-ALL_SHELLS = [ZSH] + POSIX_SHELLS
+ZSH = _shell_param("zsh")
+BASH = _shell_param("bash")
+EVERY_SHELL = [ZSH, BASH, _shell_param("sh"), _shell_param("dash")]
+
+# Variables that would leak the caller's environment into the child: a
+# workspace override, a stale Zephyr, the repo root, or a startup file. A
+# developer's ~/.zshenv with nullglob set would mask the exact zsh failure
+# this file is about; BASH_ENV and ENV are the same hole for bash and sh.
+_SCRUB = ("BLINK_ZEPHYR", "ZEPHYR_BASE", "ROOT", "ZSH_VERSION", "ZDOTDIR",
+          "BASH_ENV", "ENV")
+
+# The scripts only call shell builtins until esptool is looked up, so a PATH
+# of one directory decides whether esptool "exists". Not on Windows: Git
+# Bash cannot be trusted to exec a chmod'ed #!/bin/sh stand-in.
+needs_exec = pytest.mark.skipif(os.name == "nt",
+                                reason="runs a #!/bin/sh stand-in")
+
+CHECK_BUILD = ('blink_zephyr_activate && blink_zephyr_build_ready;'
+               ' echo "status=$?"')
 
 
-def _workspace(home):
-    """The least that blink_zephyr_ws() takes for a west workspace."""
-    ws = home / "zephyrproject"
-    (ws / ".venv" / "bin").mkdir(parents=True)
-    (ws / ".venv" / "bin" / "activate").write_text("", encoding="utf-8")
-    (ws / "zephyr").mkdir()
-    (ws / "zephyr" / "zephyr-env.sh").write_text("", encoding="utf-8")
-    return ws
+class Sandbox:
+    """A fake HOME holding (optionally) a workspace, and a way to run the
+    library in a given shell against it."""
+
+    def __init__(self, shell, home):
+        self.shell = shell
+        self.home = home
+
+    def add_workspace(self):
+        """Just enough of a west workspace for blink_zephyr_ws to accept."""
+        ws = self.home / "zephyrproject"
+        for rel in (".venv/bin/activate", "zephyr/zephyr-env.sh"):
+            f = ws / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("", encoding="utf-8")
+        return ws
+
+    def path_with(self, esptool):
+        """A one-directory PATH, with or without a stand-in esptool."""
+        d = self.home / "bin"
+        d.mkdir(exist_ok=True)
+        if esptool:
+            stub = d / "esptool"
+            stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            stub.chmod(0o755)
+        return str(d)
+
+    def subdir(self, name):
+        d = self.home / name
+        d.mkdir()
+        return str(d)
+
+    def run(self, script, path=None, in_repo=True, cwd=None, setup=""):
+        env = {k: v for k, v in os.environ.items() if k not in _SCRUB}
+        env["HOME"] = str(self.home)
+        if in_repo:
+            env["ROOT"] = str(REPO)
+        if path is not None:
+            env["PATH"] = path
+        cmd = [self.shell]
+        if os.path.basename(self.shell).startswith("zsh"):
+            cmd.append("-f")    # skip /etc/zshenv and ~/.zshenv
+        # `setup` is the caller's own shell state, in place before sourcing.
+        cmd += ["-c", f'{setup}\n. "{LIBRARY}"; {script}']
+        return subprocess.run(cmd, env=env, cwd=cwd, capture_output=True,
+                              text=True, timeout=30)
 
 
-def _run(shell, script, home, path=None, root=True, cwd=None, pre=""):
-    env = dict(os.environ)
-    # Anything that would make a shell read a startup file. A developer's
-    # .zshenv that sets nullglob would otherwise hide the very zsh fault
-    # these tests exist for; BASH_ENV and ENV do the same for bash and sh.
-    for leak in ("BLINK_ZEPHYR", "ZEPHYR_BASE", "ROOT", "ZSH_VERSION",
-                 "ZDOTDIR", "BASH_ENV", "ENV"):
-        env.pop(leak, None)
-    env["HOME"] = str(home)
-    if root:
-        env["ROOT"] = str(ROOT)
-    if path is not None:
-        env["PATH"] = path
-    argv = [shell]
-    if os.path.basename(shell).startswith("zsh"):
-        argv.append("-f")   # no /etc/zshenv, no ~/.zshenv
-    # `pre` runs before the library is sourced: a caller's own settings.
-    argv += ["-c", f'{pre}\n. "{LIB}"; {script}']
-    return subprocess.run(argv, env=env, cwd=cwd, capture_output=True,
-                          text=True, timeout=30)
+@pytest.fixture
+def box(request, tmp_path):
+    return Sandbox(request.param, tmp_path)
 
 
-# The expected path is printed by the same shell rather than built here: Git
-# Bash on Windows turns HOME's C:\Users\... into /c/Users/..., so a path made
-# in Python can never equal what the shell prints there (gapietro's fork hit
-# this on its Windows runner, 8bc2c8e). The shell's own spelling of
-# "$HOME/zephyrproject" is right on every platform.
-FIND = 'blink_zephyr_ws; echo "exit=$?"; printf "want=%s\\n" "$HOME/zephyrproject"'
+def _with_shells(shells):
+    return pytest.mark.parametrize("box", shells, indirect=True)
 
 
-@pytest.mark.parametrize("shell", ALL_SHELLS)
-def test_the_workspace_is_found_when_the_other_candidates_are_absent(
-        shell, tmp_path):
-    """Only ~/zephyrproject exists, so the three other candidates match
-    nothing: the zsh case that aborted, and the sh/bash case that must not
-    change."""
-    _workspace(tmp_path)
-    r = _run(shell, FIND, tmp_path)
+# The shell prints the path it expects next to the one it found, so the
+# comparison is in the shell's own spelling: Git Bash rewrites HOME's
+# C:\Users\... as /c/Users/..., which no path built in Python would match
+# (gapietro's fork ran into it on its Windows runner, 8bc2c8e).
+LOCATE = ('blink_zephyr_ws; echo "status=$?";'
+          ' printf "expect=%s\\n" "$HOME/zephyrproject"')
+
+
+def _located(result, then=()):
+    """LOCATE's three lines, and exactly `then` after them: a stray line
+    (a second path, a warning on stdout) fails the test instead of being
+    skipped over."""
+    lines = result.stdout.splitlines()
+    assert lines[3:] == list(then), lines
+    found, status, expect = lines[:3]
+    assert expect.startswith("expect=")
+    return found, status, expect[len("expect="):]
+
+
+def _pip_hints(stderr):
+    return [line.strip() for line in stderr.splitlines()
+            if "pip install" in line]
+
+
+def _is_pinned_hint(hint):
+    """An interpreter from the workspace venv, installing both packages
+    with pc/requirements.txt as the constraints file that pins them."""
+    pins = REQUIREMENTS.read_text(encoding="utf-8")
+    assert re.search(r"^esptool==", pins, re.M)
+    assert re.search(r"^bitstring==", pins, re.M)
+    python, _, rest = hint.partition(" -m pip ")
+    return (python.endswith(".venv/bin/python")
+            and rest == f"install -c {REQUIREMENTS} esptool bitstring")
+
+
+@_with_shells(EVERY_SHELL)
+def test_the_one_existing_candidate_is_found(box):
+    """~/zephyrproject alone, so every other candidate glob is empty: the
+    zsh abort, and the sh/bash behaviour that has to stay as it was."""
+    box.add_workspace()
+    r = box.run(LOCATE)
     assert "no matches found" not in r.stderr
-    got, status, want = r.stdout.splitlines()
-    assert status == "exit=0"
-    assert want.startswith("want=") and got == want[len("want="):]
+    found, status, expect = _located(r)
+    assert (status, found) == ("status=0", expect)
 
 
-@pytest.mark.parametrize("shell", ALL_SHELLS)
-def test_no_workspace_is_a_failure_status_not_an_abort(shell, tmp_path):
-    r = _run(shell, 'blink_zephyr_ws; echo "exit=$?"', tmp_path)
+@_with_shells(EVERY_SHELL)
+def test_a_missing_workspace_returns_1_instead_of_aborting(box):
+    r = box.run('blink_zephyr_ws; echo "status=$?"')
     assert "no matches found" not in r.stderr
-    assert r.stdout.strip() == "exit=1"
+    assert r.stdout.strip() == "status=1"
 
 
-@pytest.mark.parametrize("shell", [ZSH])
-def test_zsh_callers_keep_their_own_glob_setting(shell, tmp_path):
-    """nullglob is set only for the function's own duration."""
-    _workspace(tmp_path)
-    r = _run(shell,
-             "blink_zephyr_ws >/dev/null; "
-             "[[ -o nullglob ]] && echo nullglob=on || echo nullglob=off",
-             tmp_path)
-    assert r.stdout.strip() == "nullglob=off"
+@_with_shells([ZSH])
+def test_zsh_nullglob_is_back_off_after_the_search(box):
+    """The search turns nullglob on for itself and puts it back."""
+    box.add_workspace()
+    r = box.run("blink_zephyr_ws >/dev/null;"
+                " if [[ -o nullglob ]]; then echo on; else echo off; fi")
+    assert r.stdout.strip() == "off"
 
 
-@pytest.mark.parametrize("shell", [_shell("bash")])
-def test_bash_with_failglob_finds_the_workspace_and_keeps_failglob(
-        shell, tmp_path):
-    """`shopt -s failglob` makes bash abort on an unmatched glob just as zsh
-    does by default. The search turns it off for its own length only."""
-    _workspace(tmp_path)
-    r = _run(shell, FIND + '; shopt -q failglob && echo failglob=on',
-             tmp_path, pre="shopt -s failglob")
+@_with_shells([BASH])
+def test_bash_failglob_neither_breaks_the_search_nor_is_lost(box):
+    """failglob makes bash abort on an empty glob the way zsh does. The
+    search suspends it while it runs and restores it after."""
+    box.add_workspace()
+    r = box.run(LOCATE + "; shopt -q failglob && echo failglob-kept",
+                setup="shopt -s failglob")
     assert "no match" not in r.stderr
-    got, status, want, fg = r.stdout.splitlines()
-    assert status == "exit=0" and got == want[len("want="):]
-    assert fg == "failglob=on"
+    found, status, expect = _located(r, then=["failglob-kept"])
+    assert (status, found) == ("status=0", expect)
 
 
-def _pip_lines(stderr):
-    return [l for l in stderr.splitlines() if "pip install" in l]
+@needs_exec
+@_with_shells(EVERY_SHELL)
+def test_activating_without_esptool_succeeds_quietly(box):
+    """dev.sh `up` restarts the daemon via activate; failing it for a
+    missing build tool is what left a desk on HOST LOST."""
+    box.add_workspace()
+    r = box.run('blink_zephyr_activate; echo "status=$?"',
+                path=box.path_with(esptool=False))
+    assert (r.stdout.strip(), r.stderr) == ("status=0", ""), r.stderr
 
 
-def _assert_pinned(line, python_suffix=".venv/bin/python"):
-    """The line names an interpreter and installs both packages through
-    pc/requirements.txt as constraints, which is what pins them."""
-    req = ROOT / "pc" / "requirements.txt"
-    text = req.read_text(encoding="utf-8")
-    assert re.search(r"^esptool==", text, re.M)
-    assert re.search(r"^bitstring==", text, re.M)
-    hint = line.strip()
-    assert hint.endswith(f" -m pip install -c {req} esptool bitstring"), hint
-    assert hint.split(" -m pip ")[0].endswith(python_suffix), hint
+@needs_exec
+@_with_shells(EVERY_SHELL)
+def test_build_ready_refuses_without_esptool_and_prints_a_pinned_fix(box):
+    box.add_workspace()
+    r = box.run(CHECK_BUILD, path=box.path_with(esptool=False))
+    assert r.stdout.strip() == "status=1"
+    assert "no esptool on PATH" in r.stderr
+    # Exactly one line to paste, and a pinned one: plain `pip install
+    # esptool` pulls in bitstring 5.0.0 again.
+    hints = _pip_hints(r.stderr)
+    assert len(hints) == 1 and _is_pinned_hint(hints[0]), hints
 
 
-# PATH is an empty directory, or one holding a stand-in esptool: activate and
-# the check use only shell builtins, so whether esptool is "installed" is
-# decided entirely by what goes in there. Skipped on Windows, where a
-# #!/bin/sh stand-in made executable by chmod is not something Git Bash can
-# be relied on to run.
-posix_only = pytest.mark.skipif(os.name == "nt",
-                                reason="exec of a #!/bin/sh stand-in")
+@needs_exec
+@_with_shells(EVERY_SHELL)
+def test_build_ready_is_silent_when_esptool_is_there(box):
+    box.add_workspace()
+    r = box.run(CHECK_BUILD, path=box.path_with(esptool=True))
+    assert (r.stdout.strip(), r.stderr) == ("status=0", ""), r.stderr
 
 
-def _bin(tmp_path, esptool):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    if esptool:
-        fake = bin_dir / "esptool"
-        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        fake.chmod(0o755)
-    return str(bin_dir)
-
-
-@posix_only
-@pytest.mark.parametrize("shell", ALL_SHELLS)
-def test_activate_does_not_need_esptool(shell, tmp_path):
-    """dev.sh `up` relaunches the daemon through activate. Failing it over a
-    build tool left the desk on HOST LOST."""
-    _workspace(tmp_path)
-    r = _run(shell, 'blink_zephyr_activate; echo "exit=$?"', tmp_path,
-             path=_bin(tmp_path, esptool=False))
-    assert r.stdout.strip() == "exit=0", r.stderr
-    assert r.stderr == ""
-
-
-@posix_only
-@pytest.mark.parametrize("shell", ALL_SHELLS)
-def test_the_build_check_stops_without_esptool(shell, tmp_path):
-    _workspace(tmp_path)
-    r = _run(shell, 'blink_zephyr_activate && blink_zephyr_build_ready; '
-                    'echo "exit=$?"', tmp_path,
-             path=_bin(tmp_path, esptool=False))
-    assert r.stdout.strip() == "exit=1"
-    assert "esptool is not on PATH" in r.stderr
-    # The line to paste installs what pc/requirements.txt pins -- a bare
-    # `pip install esptool` would bring back bitstring 5.0.0.
-    (line,) = _pip_lines(r.stderr)
-    _assert_pinned(line)
-
-
-@posix_only
-@pytest.mark.parametrize("shell", ALL_SHELLS)
-def test_the_build_check_passes_a_ready_workspace(shell, tmp_path):
-    _workspace(tmp_path)
-    r = _run(shell, 'blink_zephyr_activate && blink_zephyr_build_ready; '
-                    'echo "exit=$?"', tmp_path,
-             path=_bin(tmp_path, esptool=True))
-    assert r.stdout.strip() == "exit=0", r.stderr
-    assert r.stderr == ""
-
-
-@posix_only
-@pytest.mark.parametrize("shell", ALL_SHELLS)
-def test_outside_the_repo_the_hint_is_pinned_or_not_a_command(shell,
-                                                               tmp_path):
-    """ROOT unset and the shell somewhere else. The library finds the repo
-    from its own path where the shell can say what that is (bash, zsh). A
-    plain POSIX sh cannot, and must then print prose, never a pip line with
-    the versions missing: pasted into bash that installed bitstring 5.0.0,
-    and in zsh it handed a stray `#` to pip."""
-    _workspace(tmp_path)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    r = _run(shell, 'blink_zephyr_activate && blink_zephyr_build_ready; '
-                    'echo "exit=$?"', tmp_path,
-             path=_bin(tmp_path, esptool=False), root=False,
-             cwd=str(elsewhere))
-    assert r.stdout.strip() == "exit=1"
-    for line in _pip_lines(r.stderr):
-        _assert_pinned(line)
-    name = os.path.basename(shell)
-    if name.startswith(("bash", "zsh")):
-        assert len(_pip_lines(r.stderr)) == 1, r.stderr
+@needs_exec
+@_with_shells(EVERY_SHELL)
+def test_away_from_the_repo_the_fix_is_pinned_or_written_as_prose(box):
+    """No ROOT, and the shell started in an unrelated directory. bash and
+    zsh can still name the library's own path, so the repo is found and one
+    pinned line comes out. Plain sh cannot; it has to describe the fix in
+    words, never print a pip line without the pins -- pasted into bash that
+    installed bitstring 5.0.0, and zsh passed pip a stray `#`."""
+    box.add_workspace()
+    r = box.run(CHECK_BUILD, path=box.path_with(esptool=False),
+                in_repo=False, cwd=box.subdir("unrelated"))
+    assert r.stdout.strip() == "status=1"
+    hints = _pip_hints(r.stderr)
+    assert all(_is_pinned_hint(h) for h in hints), hints
+    if os.path.basename(box.shell).startswith(("bash", "zsh")):
+        assert len(hints) == 1, r.stderr
     else:
         assert "pc/requirements.txt" in r.stderr
 
 
-@posix_only
-@pytest.mark.parametrize("shell", [ZSH])
-def test_a_chatty_chpwd_hook_does_not_spoil_the_hint(shell, tmp_path):
-    """An interactive zsh runs chpwd hooks on every cd, and one that lists
-    the directory (as this repo's own Mac's does) used to land in the
-    capture that finds the repo, so no pinned line was printed. -f keeps
-    the real startup files out; the hook is defined by hand instead."""
-    _workspace(tmp_path)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    r = _run(shell, 'blink_zephyr_activate && blink_zephyr_build_ready; '
-                    'echo "exit=$?"', tmp_path,
-             path=_bin(tmp_path, esptool=False), root=False,
-             cwd=str(elsewhere),
-             pre="chpwd() { echo NOISE-FROM-CHPWD; echo second line; }")
-    assert r.stdout.strip() == "exit=1"
-    assert "NOISE-FROM-CHPWD" not in r.stderr
-    (line,) = _pip_lines(r.stderr)
-    _assert_pinned(line)
+@needs_exec
+@_with_shells([ZSH])
+def test_output_from_a_zsh_chpwd_hook_stays_out_of_the_fix(box):
+    """Interactive zsh runs chpwd after every cd, and a hook that lists the
+    directory (this repo's Mac has one) used to end up inside the capture
+    that locates the repo, so no pinned line came out. -f keeps the real
+    startup files away, so the hook is declared here."""
+    box.add_workspace()
+    r = box.run(CHECK_BUILD, path=box.path_with(esptool=False),
+                in_repo=False, cwd=box.subdir("unrelated"),
+                setup="chpwd() { echo CHPWD-OUTPUT; echo more; }")
+    assert r.stdout.strip() == "status=1"
+    assert "CHPWD-OUTPUT" not in r.stderr
+    hints = _pip_hints(r.stderr)
+    assert len(hints) == 1 and _is_pinned_hint(hints[0]), hints
+
+
+# The first line that RUNS `west build`: plain, behind `if !`, or inside a
+# `( cd ... &&` subshell. Comments that mention it do not start that way.
+_BUILD_COMMAND = re.compile(
+    r"\s*(if\s+!\s*)?(\(\s*cd [^&]*&&\s*)?west build\b")
 
 
 @pytest.mark.parametrize("script", ["release.sh", "burn.sh", "dev.sh"])
-def test_every_build_is_preceded_by_the_check(script):
-    """Read from the scripts rather than run: running them builds firmware,
-    and dev.sh's runs stop the daemon. Comments mention `west build` too,
-    so this looks for the first build COMMAND, a line that starts with it
-    after optional indentation, an `if !`, or a subshell's `( cd ... &&`."""
-    text = (ROOT / "tools" / script).read_text(encoding="utf-8")
-    lines = text.splitlines()
-    build = next(i for i, l in enumerate(lines)
-                 if re.match(r"\s*(if\s+!\s*)?(\(\s*cd [^&]*&&\s*)?west build\b", l))
-    before = "\n".join(lines[:build])
-    # A command, not a mention: a comment naming the function must not count.
-    assert re.search(r"^\s*blink_zephyr_build_ready\b", before, re.M)
+def test_build_ready_runs_before_the_first_build(script):
+    """Checked in the text, not by running: running these builds firmware,
+    and dev.sh stops the daemon on the way."""
+    lines = (REPO / "tools" / script).read_text(encoding="utf-8").splitlines()
+    first = next(n for n, line in enumerate(lines)
+                 if _BUILD_COMMAND.match(line))
+    # Called, at the start of a line; a comment that names it is not a call.
+    called = [line for line in lines[:first]
+              if re.match(r"\s*blink_zephyr_build_ready\b", line)]
+    assert called, f"{script}: no build check before line {first + 1}"
 
 
-def test_dev_sh_activate_does_not_run_the_build_check():
-    """`dev.sh up` goes through activate(); the check belongs to flash."""
-    text = (ROOT / "tools" / "dev.sh").read_text(encoding="utf-8")
-    body = re.search(r"^activate\(\) \{\n(.*?)^\}", text, re.M | re.S)
-    assert body and "blink_zephyr_build_ready" not in body.group(1)
+def test_dev_sh_activate_leaves_the_build_check_to_flash():
+    """`dev.sh up` relaunches through activate(), which must not need
+    esptool."""
+    text = (REPO / "tools" / "dev.sh").read_text(encoding="utf-8")
+    m = re.search(r"^activate\(\) \{\n(.*?)^\}", text, re.M | re.S)
+    assert m is not None
+    assert "blink_zephyr_build_ready" not in m.group(1)

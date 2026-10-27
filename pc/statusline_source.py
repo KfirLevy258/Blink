@@ -29,10 +29,10 @@ def payload_path() -> str:
     the no-argument readers named the developer's REAL
     ~/.blink/statusline.json, which on a desk with Blink installed holds live
     usage: the sandbox hole CLAUDE.md describes. ClaudeCliProvider had already
-    stopped using the constant for the same reason (2026-10-19); found for the
-    readers by gapietro in their fork. The constant is gone rather than kept
-    beside this, so nothing can reach the import-time value again, and
-    tests/test_sandbox.py fails on any module-scope home lookup under pc/.
+    stopped using the constant for the same reason (2026-10-19);
+    gapietro's fork is where the readers' half turned up. The constant is
+    gone rather than kept beside this, so nothing can reach the
+    import-time value again, and tests/test_sandbox.py fails on any module-scope home lookup under pc/.
 
     The ONE place the path is spelled in Python: the provider, `blink
     status` and `blink uninstall` all ask here. Only the shell shim
@@ -55,7 +55,7 @@ def payload_path() -> str:
 # both are checked below:
 #   - the window they describe resets, after which the reading is definitely
 #     wrong (usage went back to near zero and this file still says 47%).
-#     That is base.window_has_reset, and it is exact rather than a guess.
+#     That is base.window_ended, and it is exact rather than a guess.
 #   - usage happens somewhere we cannot see -- claude.ai, the phone app --
 #     so an old reading can understate the truth. Nothing detects that, so
 #     this bound stays as the backstop. Half an hour is long enough that
@@ -96,11 +96,11 @@ def _window(rate_limits: dict, key: str):
 _secs_until = protocol.secs_until
 
 
-# The rollover rule that used to live here -- why an ended window reads 0 when
-# the reading is fresh and unknown when it is stale -- moved to
-# pc/providers/base as window_has_reset and rolled_over, when Codex turned out
-# to need it for the same situation (DevOceanIT, 2026-10-01). The reasoning
-# moved with it.
+# What happens to a window once its reset has passed is decided in
+# pc/providers/base (window_ended, settle_window), along with the reasons.
+# It was written here first and moved on 2026-10-01, when a Codex rollout
+# turned out to hold a pre-reset figure in exactly the same way -- the
+# case DevOceanIT brought from their own desk.
 
 
 def map_statusline_frame(payload: dict, now_epoch: float,
@@ -123,22 +123,21 @@ def map_statusline_frame(payload: dict, now_epoch: float,
     # Staleness is age, and only age. A window resetting used to set this too,
     # which conflated two different facts: "we cannot vouch for this reading"
     # and "this reading has been superseded by a zero we can compute". The
-    # second has a real answer, so it gets one -- see base.rolled_over().
+    # second has a real answer, so it gets one -- see base.settle_window().
     stale = (now_epoch - mtime_epoch) > STALE_AFTER_S
     # Unconditional, and `stale` is an INPUT to it rather than a gate on it:
     # whether a window has ended is a question about the clock, not about the
-    # file's age, and only the answer's third value depends on how old the
-    # reading is. See base.rolled_over().
-    session_pct, session_resets, session_rolled = base.rolled_over(
-        session_pct, session_resets, now_epoch, stale)
-    weekly_pct, weekly_resets, weekly_rolled = base.rolled_over(
-        weekly_pct, weekly_resets, now_epoch, stale)
+    # file's age, and only the percentage it hands back depends on how old
+    # the reading is. See base.settle_window().
+    session = base.settle_window(session_pct, session_resets, now_epoch,
+                                 stale)
+    weekly = base.settle_window(weekly_pct, weekly_resets, now_epoch, stale)
 
     return base.NormalizedUsageFrame(
         provider=PROVIDER_ID, src=SRC_ID, observed_at=mtime_epoch,
-        session_rolled_at=session_rolled, weekly_rolled_at=weekly_rolled,
-        session_pct=session_pct, session_resets_at=session_resets,
-        weekly_pct=weekly_pct, weekly_resets_at=weekly_resets,
+        session_rolled_at=session.ended_at, weekly_rolled_at=weekly.ended_at,
+        session_pct=session.pct, session_resets_at=session.resets_at,
+        weekly_pct=weekly.pct, weekly_resets_at=weekly.resets_at,
         stale=stale,
     )
 

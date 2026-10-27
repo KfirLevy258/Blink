@@ -30,12 +30,12 @@ int main(void)
 	m = (struct fatal_memo){ FATAL_MEMO_MAGIC, 0 };
 	CHECK(fatal_decide(0, &m) == FATAL_HALT);
 	CHECK(fatal_decide(SEC(10), &m) == FATAL_HALT);
-	CHECK(fatal_decide(FATAL_REBOOT_GRACE_MS - 1, &m) == FATAL_HALT);
+	CHECK(fatal_decide(FATAL_BOOT_WINDOW_MS - 1, &m) == FATAL_HALT);
 	CHECK(m.streak == 0);	/* a halt counts nothing */
 
 	/* --- the first fault after the window reboots --- */
 	m = (struct fatal_memo){ FATAL_MEMO_MAGIC, 0 };
-	CHECK(fatal_decide(FATAL_REBOOT_GRACE_MS, &m) == FATAL_REBOOT);
+	CHECK(fatal_decide(FATAL_BOOT_WINDOW_MS, &m) == FATAL_REBOOT);
 	CHECK(m.streak == 1);
 
 	/* --- power-on garbage is no streak, in either field --- */
@@ -135,8 +135,8 @@ int main(void)
 	CHECK(m.streak == 0);
 
 	/* --- the numbers the rest of this file leans on --- */
-	CHECK(FATAL_REBOOT_GRACE_MS == 30000);
-	CHECK(FATAL_STREAK_FORGET_MS > FATAL_REBOOT_GRACE_MS);
+	CHECK(FATAL_BOOT_WINDOW_MS == 30000);
+	CHECK(FATAL_STREAK_FORGET_MS > FATAL_BOOT_WINDOW_MS);
 	CHECK(FATAL_STREAK_MAX >= 1);
 
 	return fails ? 1 : 0;

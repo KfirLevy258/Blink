@@ -56,8 +56,8 @@ INSTALLED_WAS_UP=0
 # `down` only knows this script's own daemon. On a desk that has run `blink
 # install`, the port belongs to the launchd agent, and the eFuse probe below
 # then said "cannot tell whether this chip is fused -- is the port free?"
-# about a board that was fine. Found by destaben in their fork, flashing a
-# bench board on 2026-10-15.
+# about a board that was fine. destaben ran into it in their fork, on a
+# bench board, 2026-10-15.
 #
 # Whether the agent is in the way is launchd's answer, not the port's. The
 # daemon closes the port whenever the board is unplugged or not answering,
@@ -121,52 +121,57 @@ step_installed_aside() {
 			echo "       Give it a moment, or kill $pid, and run this again." >&2
 			;;
 		*)
-			echo "FATAL: $PORT is held by pid $pid ($cmd), which is not the Blink daemon." >&2
-			echo "       Stop it and run this again." >&2
+			# Anything else: a terminal, a serial monitor, another flasher.
+			echo "FATAL: pid $pid ($cmd) has $PORT open, and it is no Blink daemon." >&2
+			echo "       Nothing was flashed. Close it, then rerun." >&2
 			;;
 		esac
 		exit 1
 	done
 }
 
-restore_installed() {
-	local uid i
-	uid="$(id -u)"
-	# bootout is asynchronous at this end too: a bootstrap while launchd is
-	# still tearing the old job down fails, and left a reinstall with no
-	# service at all (pc/cli.py _LaunchdBackend.install, which retries for
-	# the same reason). Wait for launchd to forget the job, then retry.
-	i=0
-	while [ $i -lt 20 ] && launchctl print "$AGENT" >/dev/null 2>&1; do
-		i=$((i + 1))
-		sleep 0.25
+# Run "$@" until it succeeds, at most $1 times, $2 seconds apart. Returns 1
+# if no attempt succeeded.
+attempt() {
+	local tries="$1" pause="$2" n=1
+	shift 2
+	until "$@"; do
+		[ "$n" -lt "$tries" ] || return 1
+		n=$((n + 1))
+		sleep "$pause"
 	done
-	i=1
-	until launchctl bootstrap "gui/$uid" "$AGENT_PLIST" >/dev/null 2>&1; do
-		[ $i -lt 3 ] || break
-		i=$((i + 1))
-		sleep 0.5
-	done
-	# BOOTSTRAP REGISTERS; IT DOES NOT START. Measured five times out of five
-	# on the install path (pc/cli.py _LaunchdBackend.install, 2026-09-04), and
-	# burn.sh's restore had the same gap until 2026-09-06. kickstart runs it.
+}
+
+agent_unknown() { ! launchctl print "$AGENT" >/dev/null 2>&1; }
+agent_running() { launchctl print "$AGENT" 2>/dev/null | grep -q "state = running"; }
+agent_register() { launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" >/dev/null 2>&1; }
+
+# Put the login agent back after step_installed_aside booted it out.
+#
+# Three launchd facts shape this, each one already paid for elsewhere:
+#   - bootout finishes after it returns. Bootstrapping while launchd still
+#     holds the old job fails, which once left a reinstall with no service
+#     (pc/cli.py, _LaunchdBackend.install, retries for the same reason). So
+#     wait, up to ~5 s, for `print` to stop knowing the job, then try the
+#     bootstrap up to three times.
+#   - bootstrap only registers. Five installs out of five on 2026-09-04 came
+#     up registered and idle, and burn.sh's restore had that gap until
+#     2026-09-06; kickstart is what starts it.
+#   - neither command returning means a process exists. Saying the daemon
+#     is back over a job that is not running sends the reader away from a
+#     desk on HOST LOST, so ask launchd, for up to 2 s while kickstart's
+#     hand-off lands, and print the manual steps if it never shows.
+relaunch_agent() {
+	attempt 20 0.25 agent_unknown || true
+	attempt 3 0.5 agent_register || true
 	launchctl kickstart -k "$AGENT" >/dev/null 2>&1 || true
-	# And then ask. Commands that returned are not a process that exists, and
-	# "put back" printed over a job that is not running sends the reader away
-	# from a desk on HOST LOST. kickstart hands off and returns, so allow it
-	# two seconds to show up.
-	i=0
-	while [ $i -lt 8 ]; do
-		if launchctl print "$AGENT" 2>/dev/null | grep -q "state = running"; then
-			echo "installed daemon put back"
-			return 0
-		fi
-		i=$((i + 1))
-		sleep 0.25
-	done
+	if attempt 8 0.25 agent_running; then
+		echo "installed daemon running again"
+		return 0
+	fi
 	{
-		echo "warning: the installed daemon did not come back. Put it back by hand:"
-		echo "  launchctl bootstrap gui/$uid $AGENT_PLIST"
+		echo "warning: the installed daemon is still not running; to start it:"
+		echo "  launchctl bootstrap gui/$(id -u) $AGENT_PLIST"
 		echo "  launchctl kickstart -k $AGENT"
 	} >&2
 }
@@ -185,7 +190,7 @@ restore() {
 	trap - EXIT
 	trap '' INT TERM
 	if [ "$INSTALLED_WAS_UP" = 1 ]; then
-		restore_installed
+		relaunch_agent
 	else
 		up
 	fi

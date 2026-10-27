@@ -73,7 +73,7 @@ def test_a_past_reset_reads_unknown_not_zero():
     "this window just rolled over" and zeroes the percentage with it. That is
     right for the firmware's own countdown running out and wrong coming from
     here, because the only payload that reaches _secs_until with a past reset
-    is a stale one -- the case base.rolled_over() deliberately refuses to zero.
+    is a stale one -- the case base.settle_window() deliberately refuses to zero.
     """
     assert ss._secs_until(1_787_100_000, 1_787_200_000) == -1
     assert ss._secs_until(1_787_300_000, 1_787_200_000) == 100_000
@@ -132,14 +132,14 @@ NOW = 1_787_900_000.0
 
 # --- the rollover, and the epoch it now reports ------------------------------
 #
-# Six tests pinning the rollover rule (now base.rolled_over) were deleted from this file on this branch,
+# Six tests pinning the rollover rule (now base.settle_window) were deleted from this file on this branch,
 # which is how the normalizer came to be able to discard the very mechanism
 # they covered. These re-pin it, including the field that fixes that.
 
 
 def test_a_reset_window_reads_zero_and_reports_when_it_emptied():
     at = NOW - 60
-    pct, resets, rolled = base.rolled_over(47.0, at, NOW, stale=False)
+    pct, resets, rolled = base.settle_window(47.0, at, NOW, stale=False)
     assert pct == 0.0
     assert resets is None
     assert rolled == at, "the epoch is the evidence the normalizer needs"
@@ -152,13 +152,38 @@ def test_a_stale_reading_reports_the_rollover_it_watched_but_claims_no_zero():
     whole check on an old payload kept neither -- it kept the pre-reset 47%,
     which is the one answer that is definitely wrong."""
     at = NOW - 60
-    assert base.rolled_over(47.0, at, NOW, stale=True) == (-1.0, None, at)
+    assert base.settle_window(47.0, at, NOW, stale=True) == (-1.0, None, at)
 
 
 def test_a_window_that_has_not_reset_is_untouched():
     at = NOW + 3600
-    assert base.rolled_over(47.0, at, NOW, stale=False) == (47.0, at, None)
-    assert base.rolled_over(47.0, at, NOW, stale=True) == (47.0, at, None)
+    assert base.settle_window(47.0, at, NOW, stale=False) == (47.0, at, None)
+    assert base.settle_window(47.0, at, NOW, stale=True) == (47.0, at, None)
+
+
+def test_a_window_ends_at_its_reset_second_not_after_it():
+    """The boundary belongs to the new window, and no reset time is no end."""
+    assert base.window_ended(NOW, NOW) is True
+    assert base.window_ended(NOW + 1, NOW) is False
+    assert base.window_ended(None, NOW) is False
+
+
+def test_a_nan_percentage_settles_like_any_other_fresh_reading():
+    """NaN compares false both ways. The rule has always been "unknown only
+    if stale or negative", so a fresh NaN past its reset is 0.0, and a stale
+    one is unknown; a rewrite that asked "is it >= 0" flipped the first."""
+    nan = float("nan")
+    assert base.settle_window(nan, NOW - 60, NOW, stale=False) == (
+        0.0, None, NOW - 60)
+    assert base.settle_window(nan, NOW - 60, NOW, stale=True) == (
+        -1.0, None, NOW - 60)
+
+
+def test_a_settled_window_is_read_by_field_name():
+    """Callers (codex_cli, this module) read .pct / .resets_at / .ended_at,
+    so the order of the tuple and the names have to agree."""
+    w = base.settle_window(47.0, NOW - 60, NOW, stale=False)
+    assert (w.pct, w.resets_at, w.ended_at) == (0.0, None, NOW - 60)
 
 
 def test_an_unknown_percentage_is_never_zeroed():
@@ -166,13 +191,13 @@ def test_an_unknown_percentage_is_never_zeroed():
     would have described has ended. The stamp still goes -- it is past, so it
     is neither a countdown nor a reset time anyone has -- and the rollover is
     still reported, because that much IS known."""
-    assert base.rolled_over(-1.0, NOW - 60, NOW, stale=False) == (
+    assert base.settle_window(-1.0, NOW - 60, NOW, stale=False) == (
         -1.0, None, NOW - 60)
 
 
 def test_no_reset_time_means_no_rollover_claim():
-    assert base.rolled_over(47.0, None, NOW, stale=False) == (47.0, None, None)
-    assert base.rolled_over(47.0, None, NOW, stale=True) == (47.0, None, None)
+    assert base.settle_window(47.0, None, NOW, stale=False) == (47.0, None, None)
+    assert base.settle_window(47.0, None, NOW, stale=True) == (47.0, None, None)
 
 
 # --- restored ---------------------------------------------------------------
@@ -290,7 +315,7 @@ def test_a_payload_of_the_wrong_shape_is_silence_not_an_exception():
 # that constant as a default argument: both evaluated at import, before
 # tests/conftest.py moves HOME. So in a test process the no-argument readers
 # named the developer's real ~/.blink/statusline.json -- the sandbox hole
-# CLAUDE.md describes. Found by gapietro in their fork. tests/test_sandbox.py
+# CLAUDE.md describes; gapietro's fork turned it up. tests/test_sandbox.py
 # now checks the whole of pc/ for that shape.
 
 
