@@ -35,6 +35,7 @@
 uint8_t fake_flash[FAKE_FLASH_SIZE];
 long fake_write_budget = -1;
 int fake_writes;
+int fake_erase_rc;
 
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
@@ -213,6 +214,16 @@ int main(void)
 
 		CHECK(cfg_set_theme(&th) == 0 && fake_writes == before,
 		      "theme: storing the same bytes again writes nothing");
+	}
+	{
+		/* A tap on the Focus button already lit cost a sector erase
+		 * and a power-cut window before this (final review N2). No
+		 * write here also keeps step 3's slot arithmetic true: the
+		 * Focus write above is still the last one, and went to A. */
+		int before = fake_writes;
+
+		CHECK(cfg_set_focus(1, 1) == 0 && fake_writes == before,
+		      "focus: storing the same choice again writes nothing");
 	}
 
 	CHECK(cfg_init() == 0, "reboot: the store mounts");
@@ -409,6 +420,49 @@ int main(void)
 		CHECK(boot_134(&seen) && seen.bright_pct == 60 &&
 		      seen.edition_locked == 1,
 		      "focus: 1.3.4 still reads the record Focus wrote");
+	}
+
+	/* --- A write that fails leaves RAM as it was ---
+	 *
+	 * Both setters put the new values into the RAM record before they
+	 * write it, and until the review of 1cb4fd6 (M1) neither put the old
+	 * ones back on a failure. Everything reads that RAM -- theme_now, the
+	 * screen's "stored" theme, and each setter's own "nothing changed"
+	 * check -- so after one failure the board reported an unstored theme
+	 * as held, and a retry of the same values wrote nothing and returned
+	 * success. A flash refusing erases is the simplest failure to plant;
+	 * a failed write after a good erase takes the same path in persist().
+	 */
+	{
+		struct cfg_theme was, back, want;
+		int before;
+
+		CHECK(cfg_set_focus(1, 1) == 0, "failed write: Focus on, to start");
+		cfg_get_theme(&was);
+		want = was;
+		want.id = (uint8_t)(was.id == 4 ? 5 : 4);
+		fake_erase_rc = -5;
+		CHECK(cfg_set_theme(&want) != 0, "failed write: theme refused");
+		cfg_get_theme(&back);
+		CHECK(memcmp(&back, &was, sizeof(was)) == 0,
+		      "failed write: the theme in RAM is the one on flash");
+		CHECK(cfg_set_focus(0, 0) != 0, "failed write: Focus refused");
+		CHECK(cfg_get_focus_on() == 1 && cfg_get_focus_win() == 1,
+		      "failed write: Focus in RAM is the one on flash");
+		fake_erase_rc = 0;
+
+		before = fake_writes;
+		CHECK(cfg_set_theme(&want) == 0 && fake_writes > before,
+		      "failed write, retried: the theme is really written");
+		before = fake_writes;
+		CHECK(cfg_set_focus(0, 0) == 0 && fake_writes > before,
+		      "failed write, retried: Focus is really written");
+		CHECK(cfg_init() == 0, "failed write, retried: reboot");
+		cfg_get_theme(&back);
+		CHECK(back.id == want.id && cfg_get_focus_on() == 0 &&
+		      cfg_get_focus_win() == 0,
+		      "failed write, retried: both survive the reboot");
+		check_desk_settings("failed write, retried");
 	}
 
 	/* --- 5. A blank partition --- */

@@ -13,6 +13,9 @@ extern uint8_t fake_flash[FAKE_FLASH_SIZE];
  * And a count of writes, to prove one was skipped. */
 extern long fake_write_budget;
 extern int fake_writes;
+/* Non-zero: every erase fails with this code, as a flash that has stopped
+ * taking erases does. The record setters must then leave RAM as it was. */
+extern int fake_erase_rc;
 
 struct flash_area { int unused; };
 #define FIXED_PARTITION_ID(x) 0
@@ -58,6 +61,9 @@ static inline int flash_area_erase(const struct flash_area *fa, long off,
 	(void)fa;
 	if (off < 0 || off + (long)len > FAKE_FLASH_SIZE) {
 		return -1;
+	}
+	if (fake_erase_rc != 0) {
+		return fake_erase_rc;
 	}
 	memset(fake_flash + off, 0xFF, len);
 	return 0;

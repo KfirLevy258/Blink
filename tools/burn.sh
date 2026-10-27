@@ -23,6 +23,9 @@
 #   - flash without MCUboot (a plain `west flash` writes only the app and takes
 #     the bootloader with it, which silently removes OTA from the unit)
 #   - report success on a board that did not confirm the stamp
+#   - flash a CONFIG_BLINK_FATAL_SELFTEST build, which faults on every boot,
+#     unless --selftest says that is the point (the bench test in
+#     firmware/Kconfig); the unit it makes is never one to box
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -32,6 +35,7 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 EDITION=""
 PORT="${BLINK_PORT:-}"
 SKIP_BUILD=0
+SELFTEST=0
 LOGO=""
 # Must match logo_partition in firmware/boards/esp32_devkitc_esp32_procpu.overlay.
 LOGO_OFF=0x330000
@@ -43,7 +47,8 @@ while [ $# -gt 0 ]; do
 	--port)    PORT="$2"; shift 2 ;;
 	--no-build) SKIP_BUILD=1; shift ;;
 	--logo)    LOGO="$2"; shift 2 ;;
-	*) echo "usage: $0 --edition claude|codex [--port DEV] [--no-build] [--logo FILE]" >&2
+	--selftest) SELFTEST=1; shift ;;
+	*) echo "usage: $0 --edition claude|codex [--port DEV] [--no-build] [--logo FILE] [--selftest]" >&2
 	   exit 2 ;;
 	esac
 done
@@ -214,6 +219,26 @@ MCUBOOT="$BUILD/mcuboot/zephyr/zephyr.bin"
 SIGNED="$BUILD/firmware/zephyr/zephyr.signed.bin"
 [ -f "$MCUBOOT" ] || die "no bootloader at $MCUBOOT"
 [ -f "$SIGNED" ]  || die "no signed app at $SIGNED"
+
+# A selftest image faults BLINK_FATAL_SELFTEST_AT_S seconds into every boot,
+# and the boot check below is over in less than that, so without this a burn
+# of one says PASS and the unit goes in a box. It gets into build-sb the way
+# the Kconfig help warns: one -D on the command line, kept in the CMake cache.
+# --selftest is the bench test that help describes, asked for by name. It is
+# a permission, not a label: the check runs either way, and only an image it
+# refuses is called a selftest unit. A build it cannot inspect counts as one,
+# which errs toward "never box this".
+. "$ROOT/tools/lib_selftest.sh"
+SELFTEST_IMAGE=0
+if [ "$SELFTEST" = 0 ]; then
+	blink_refuse_selftest "$BUILD/firmware/zephyr/.config" "$SIGNED" ||
+		die "this is a selftest build (above). Pass --selftest if that is the point."
+elif blink_refuse_selftest "$BUILD/firmware/zephyr/.config" "$SIGNED" 2>/dev/null; then
+	echo "   --selftest given, but this is not a selftest build: a normal unit"
+else
+	SELFTEST_IMAGE=1
+	echo "   --selftest: flashing a SELFTEST build that faults on every boot"
+fi
 
 # ------------------------------------------- 2a. a CONFIRMED image to flash
 # zephyr.signed.bin is signed but not confirmed: its trailer says "boot this
@@ -436,4 +461,8 @@ else
 	printf 'PASS -- this unit is a %s board (individual)\n' "$EDITION"
 fi
 printf '================================\n'
-printf 'Put it in a %s enclosure.\n' "$EDITION"
+if [ "$SELFTEST_IMAGE" = 1 ]; then
+	printf 'SELFTEST build: it faults on every boot -- never box this unit.\n'
+else
+	printf 'Put it in a %s enclosure.\n' "$EDITION"
+fi

@@ -70,7 +70,10 @@ config BLINK_FATAL_SELFTEST
 
 	  then flash that directory, not build-sb:
 
-	    BLINK_BUILD_DIR=$PWD/build-selftest ../tools/burn.sh --no-build
+	    BLINK_BUILD_DIR=$PWD/build-selftest ../tools/burn.sh --no-build --selftest
+
+	  burn.sh refuses this build without --selftest, and release.sh and
+	  flash_encrypted.sh refuse it outright (tools/lib_selftest.sh).
 
 config BLINK_FATAL_SELFTEST_AT_S
 	int "Uptime at which the selftest faults, in seconds"

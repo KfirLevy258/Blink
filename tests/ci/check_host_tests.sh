@@ -97,6 +97,10 @@ run_one msg_parse    "msg_parse.c"     ""
 run_one ota_parse    "ota_parse.c"     ""
 run_one sleep_gate   "sleep_gate.c usage_freshness.c" ""
 run_one theme        "theme.c msg_parse.c" "-lm"
+# ui_theme.c and cfg_store.c unchanged, on cfg_store's RAM flash; the test
+# file stands in for proto, the screens and LVGL's timer.
+run_one ui_theme     "ui_theme.c cfg_store.c theme.c msg_parse.c" \
+	"-I$ROOT/tests/ui_theme/stub -I$ROOT/tests/cfg_store/stub -lm"
 run_one ui_slide_geom ""               ""
 run_one ui_swipe_geom ""               ""
 run_one upd_prompt  "upd_prompt.c"    ""

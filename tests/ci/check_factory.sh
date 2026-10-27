@@ -34,6 +34,10 @@ head -c 20000 /dev/zero | tr '\0' 'M' >"$WORK/build/mcuboot/zephyr/zephyr.bin"
 head -c 90000 /dev/zero | tr '\0' 'A' >"$WORK/build/firmware/zephyr/zephyr.bin"
 head -c 90000 /dev/zero | tr '\0' 'A' >"$WORK/build/firmware/zephyr/zephyr.signed.bin"
 head -c 32 /dev/zero >"$WORK/home/flash_key.bin"
+# Both flashers refuse a build with no .config to read (tools/lib_selftest.sh),
+# so the fake build has one: a plain build's, the selftest symbol unset.
+printf '%s\n' 'CONFIG_BLINK_PANEL_SCALE=60' \
+	'# CONFIG_BLINK_FATAL_SELFTEST is not set' >"$WORK/build/firmware/zephyr/.config"
 
 # tools/sign_confirmed.py reads the signing parameters out of the build's own
 # build.ninja rather than hard-coding them, so the fake build needs one. The
@@ -218,6 +222,38 @@ unset FAKE_ESPTOOL_FAIL
 saw "flash failed"
 never "host -> "
 ok "no stamp is attempted over a torn image"
+
+echo "== burn.sh: a selftest build"
+# CONFIG_BLINK_FATAL_SELFTEST faults on every boot, on purpose -- after the
+# boot check here is long over, so a burn of one would say PASS and the unit
+# would be boxed. A -D value in build-sb's CMake cache is all it takes.
+CFG="$WORK/build/firmware/zephyr/.config"
+cp "$CFG" "$WORK/plain.config"
+printf '%s\n' 'CONFIG_BLINK_FATAL_SELFTEST=y' >>"$CFG"
+board claude none
+export FAKE_BOARD_EDITION_REPLY='[cfg] edition stamped as claude'
+run 1 "$BURN" --edition claude --port $PORT --no-build
+saw "CONFIG_BLINK_FATAL_SELFTEST=y"
+never "esptool.*write_flash"
+never "imgtool sign"
+# The bench test the Kconfig help describes still has a way through, by name.
+run 0 "$BURN" --edition claude --port $PORT --no-build --selftest
+saw "SELFTEST build"
+called "esptool .*write_flash"
+saw "never box this unit"
+export FAKE_EFUSE_BITS=0000001
+run 1 "$ENC" $PORT
+export FAKE_EFUSE_BITS=0000000
+saw "CONFIG_BLINK_FATAL_SELFTEST=y"
+never "esptool.*write_flash"
+cp "$WORK/plain.config" "$CFG"
+# --selftest is a permission, not a label: on a plain build the unit is a
+# normal one, and the burn says so rather than "never box this unit".
+run 0 "$BURN" --edition claude --port $PORT --no-build --selftest
+saw "not a selftest build"
+saw "Put it in a claude enclosure"
+! grep -q "never box this unit" "$OUT" || fail "a plain build was called a selftest unit"
+ok "a selftest build is refused unless --selftest names it; the fused path refuses it too"
 
 echo "== flash_encrypted.sh"
 run 1 "$ENC" $PORT

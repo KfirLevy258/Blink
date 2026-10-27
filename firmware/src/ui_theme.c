@@ -126,7 +126,16 @@ static bool show(int id, const struct theme_custom *t)
 	return id == THEME_CUSTOM ? theme_select_custom(t) : theme_select(id);
 }
 
-static void store(int id, const struct theme_custom *t)
+/*
+ * True only when the theme is on flash. Every caller tells the host on true
+ * and on nothing else: theme_now names the STORED id, so a "saved" or "user"
+ * sent after a failed store would vouch for a theme the board does not hold.
+ * Until the final review of the theme work (N1, 2026-10-27) this returned
+ * nothing, and a failed store was logged and then answered why=saved; the
+ * daemon recorded it in theme_sent.json and never sent the save again.
+ * tests/ui_theme holds the callers to this.
+ */
+static bool store(int id, const struct theme_custom *t)
 {
 	struct cfg_theme r;
 
@@ -139,7 +148,32 @@ static void store(int id, const struct theme_custom *t)
 	}
 	if (cfg_set_theme(&r) != 0) {
 		printk("[theme] could not store the theme\n");
+		return false;
 	}
+	return true;
+}
+
+/*
+ * A store failed: show what the board really holds again, and tell the host
+ * nothing. The contract has no word for "could not store", and the two it
+ * does have both mislead here. "saved" is the lie being removed. "boot"
+ * would make the daemon ask again on its next fast tick (FAST_POLL_INTERVAL_S,
+ * 2 s) -- an erase attempt every two seconds on a flash that has just
+ * refused one. Saying nothing leaves the daemon's `asked` holding the save
+ * until it next greets the board -- a board reboot, or the daemon
+ * reconnecting. The board answers that welcome with why=boot and the id it
+ * really stored (cfg_store.c puts its RAM record back on a failed write, so
+ * that is the old one), the daemon sees it differs from the saved theme, and
+ * the save goes out once more. theme_sent.json keeps the last theme the
+ * board truly confirmed. Showing the stored theme keeps the screen,
+ * theme_now and the next boot all in agreement; leaving the new one up would
+ * be colours that a reboot takes away, the very surprise PREVIEW_MS exists
+ * to prevent.
+ */
+static void store_failed(void)
+{
+	select_stored();
+	repaint();
 }
 
 bool ui_theme_choose(int id)
@@ -153,7 +187,10 @@ bool ui_theme_choose(int id)
 		return false;
 	}
 	end_preview();
-	store(id, &t);
+	if (!store(id, &t)) {
+		store_failed();
+		return false;
+	}
 	repaint();
 	proto_send_theme_now("user");
 	return true;
@@ -197,7 +234,10 @@ void ui_theme_wire(const struct theme_msg *m)
 			return;
 		}
 		end_preview();
-		store(m->id, &m->custom);
+		if (!store(m->id, &m->custom)) {
+			store_failed();
+			return;
+		}
 		repaint();
 		proto_send_theme_now("saved");
 		printk("[theme] saved\n");

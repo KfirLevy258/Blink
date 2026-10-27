@@ -25,7 +25,8 @@ bool ui_theme_custom_stored(struct theme_custom *out);
 
 /* Settings picked a theme: store it, show it, tell the host. A preview from
  * the computer, if one is up, ends here. Returns false for an id it cannot
- * honour (Custom with nothing stored). */
+ * honour (Custom with nothing stored), and when the store fails: then the
+ * stored theme is shown again and the host is told nothing. */
 bool ui_theme_choose(int id);
 
 /* A validated `theme` line from the host (see theme_msg_parse). */

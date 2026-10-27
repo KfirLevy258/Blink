@@ -103,6 +103,16 @@ enc() { # address, plaintext-in, encrypted-out
 # no network at the bench, never becomes healthy, and reverts at 90 s. See
 # tools/sign_confirmed.py.
 APP_CONFIRMED="$BUILD/firmware/zephyr/zephyr.confirmed.bin"
+
+# Never a CONFIG_BLINK_FATAL_SELFTEST image: it faults on every boot, on
+# purpose, and a fused unit is the hardest one to take it back off. The
+# bench test the Kconfig help describes goes through tools/burn.sh
+# --selftest, on a plaintext board. See tools/lib_selftest.sh.
+# shellcheck source=lib_selftest.sh
+. "$HERE/lib_selftest.sh"
+blink_refuse_selftest "$BUILD/firmware/zephyr/.config" \
+	"$BUILD/firmware/zephyr/zephyr.signed.bin" || exit 1
+
 rm -f "$APP_CONFIRMED"
 "${BLINK_PYTHON:-python3}" "$HERE/sign_confirmed.py" \
 	--build-dir "$BUILD" --out "$APP_CONFIRMED" || {

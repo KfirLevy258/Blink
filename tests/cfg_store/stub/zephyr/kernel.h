@@ -19,6 +19,11 @@ static inline int k_mutex_unlock(struct k_mutex *m)
 	return 0;
 }
 
+/* For tests/ui_theme, which links cfg_store.c against these same stubs. */
+#ifndef ARG_UNUSED
+#define ARG_UNUSED(x) (void)(x)
+#endif
+
 #ifndef __packed
 #define __packed __attribute__((__packed__))
 #endif

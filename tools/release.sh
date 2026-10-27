@@ -180,6 +180,13 @@ for pat in "/api/oauth/usage" "refresh_token" "claude-code/"; do
 	fi
 done
 
+# Nor a selftest image, which faults on every boot on purpose. One -D in
+# build-sb's CMake cache from a bench test and this build carries it without a
+# word; shipped, every desk that took the update would fault and halt. Checks
+# the .config and the artifact both -- see tools/lib_selftest.sh.
+source "$ROOT/tools/lib_selftest.sh"
+blink_refuse_selftest "$CFG" "$BIN" || exit 1
+
 SIZE=$(stat -f%z "$BIN")
 SHA=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
 SLOT=$((0x150000))
