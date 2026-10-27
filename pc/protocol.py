@@ -152,8 +152,22 @@ class LineReader:
         return out
 
 
+# What this daemon can do for the board, carried in welcome.
+#
+# "theme": it answers theme_edit by opening the theme builder. The board shows
+# Settings > Theme > "Edit on computer" only when the last welcome said so,
+# because a button that sends a message nobody answers is a button that
+# appears to do nothing (plan, Answers 2026-10-25). The capability is
+# advertised rather than inferred from app_ver for the reason
+# FW_ACCEPTS_OVERAGE's comment gives: a version string is a guess about what
+# a build contains, and this is the daemon saying it outright. Additive --
+# firmware before 1.4.0 reads no field it does not know.
+CAPS = ("theme",)
+
+
 def welcome(app: str, app_ver: str) -> dict:
-    return {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver}
+    return {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver,
+            "caps": list(CAPS)}
 
 
 def bye() -> dict:
@@ -728,6 +742,41 @@ def svc(provider: str, level: str, what: str = "") -> dict:
     if what and level != "ok":
         msg["what"] = _clip_utf8(what, SVC_WHAT_MAX_BYTES)
     return msg
+
+
+# --- Themes (pc/theme.py validates; these only shape the line) ----------
+
+# Theme lines go to the same firmware svc does, and the gate is the same one
+# rather than a second constant that could drift from it: both arrived in
+# 1.4.0, and an older board drops either unread.
+FW_TAKES_THEME = FW_SHOWS_SVC
+
+
+def fw_takes_theme(board_fw) -> bool:
+    fw = _fw_tuple(board_fw)
+    return fw is not None and fw >= FW_TAKES_THEME
+
+
+def theme(op: str, t: dict = None) -> dict:
+    """{"t":"theme","op":..., "id":..., custom fields}. Not validated here:
+    call pc.theme.message, which validates first and measures after.
+
+    preview applies without storing (the board drops it after 15 min of
+    silence, or on cancel); save applies and stores; cancel goes back to the
+    stored theme. A bad value makes the board ignore the whole line.
+    """
+    msg = {"t": "theme", "v": VERSION, "op": op}
+    if t is not None:
+        msg.update(t)
+    return msg
+
+
+def theme_edit_reply(ok: bool) -> dict:
+    """The answer to the board's theme_edit: ok 1 once a browser has been
+    opened on the builder, 0 when there is nothing to open one on. The board
+    shows "Run `blink theme` on your computer" for 0, and also after 5 s of
+    no answer at all, which is what a daemon from before this sends."""
+    return {"t": "theme_edit", "v": VERSION, "ok": 1 if ok else 0}
 
 
 # --- OTA over the serial link (see pc/ota.py and the OTA block in proto.c) ---

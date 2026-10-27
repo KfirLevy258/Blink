@@ -5,8 +5,12 @@ Run inside the Zephyr venv (has pyserial) or `pip install pyserial`:
     python3 claude_usage_bridge.py --port /dev/cu.usbmodemXXXX
 """
 import argparse
+import atexit
+import contextlib
 import json
 import os
+import queue
+import signal
 import sys
 import time
 
@@ -15,7 +19,8 @@ from serial.tools import list_ports
 
 from pc import ota as ota_mod
 from pc import (ingest, install_statusline, interval, logbook, protocol,
-                status_page, statusline_source, update, win_driver)
+                status_page, statusline_source, theme, theme_server, update,
+                win_driver)
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
@@ -653,6 +658,52 @@ def _self_update_tick(target):
         update.restart_from_daemon(target)
 
 
+# SIGTERM, and what must not be interrupted by it.
+#
+# launchd and systemd stop the service with SIGTERM, and so do dev.sh down,
+# pkill and the fleet agent's terminate(). Python's default for it is to die
+# on the spot without running atexit, which left a theme preview standing on
+# the board, so exit_on_sigterm() turns it into an ordinary exit.
+#
+# An ordinary exit is a SystemExit raised wherever the main thread happens to
+# be -- and during an OTA that is inside subprocess.run waiting on esptool.
+# subprocess.run answers any exception there by KILLING its child, so a stop
+# mid write_flash left slot 0 half written, and slot 0 has no revert: a board
+# that will not boot until somebody reflashes it by hand (review,
+# 2026-10-27). So inside no_exit_while() the handler only notes the signal,
+# and the exit happens the moment the guarded work returns.
+_TERM = {"holding": None, "pending": False}
+
+
+def _on_sigterm(signum, frame):
+    if _TERM["holding"]:
+        if not _TERM["pending"]:
+            print(f"[bridge] stopping once the {_TERM['holding']} has"
+                  " finished", file=sys.stderr)
+        _TERM["pending"] = True
+        return
+    sys.exit(0)
+
+
+def exit_on_sigterm():
+    """POSIX only, and only where nothing else has claimed SIGTERM."""
+    if (sys.platform != "win32" and hasattr(signal, "SIGTERM")
+            and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL):
+        signal.signal(signal.SIGTERM, _on_sigterm)
+
+
+@contextlib.contextmanager
+def no_exit_while(what):
+    """A SIGTERM during the block waits for the block, then exits."""
+    _TERM["holding"] = what
+    try:
+        yield
+    finally:
+        _TERM["holding"] = None
+        if _TERM["pending"]:
+            sys.exit(0)
+
+
 def main(argv=None):
     """argv is passed explicitly by the `blink run` subcommand.
 
@@ -834,6 +885,28 @@ def main(argv=None):
     svc_watch = status_page.StatusWatch(
         enabled=lambda: status_page.enabled(blink_home))
     svc_watch.start()
+
+    # Themes, for the life of the process like the watch above: what the
+    # board is believed to hold outlives a reconnect, and the builder a
+    # board's "Edit on computer" opened must not close because the cable
+    # was nudged. The builder runs on its own threads (pc/theme_server.py);
+    # this loop only ever reads the files it writes.
+    theme_sync = theme.ThemeSync(blink_home)
+    theme_builder = theme_server.Launcher(blink_home)
+    # theme_edit answers, kept for the life of the process like the two
+    # above: an open that returns after a reconnect is answered on the new
+    # connection rather than into a Bridge that is gone.
+    theme_answers = queue.SimpleQueue()
+    # On the way out, a live builder writes a cancel. That does not reach
+    # the board from here -- the port is going too -- but the cancel waits
+    # in theme_preview.json, and the next daemon sends it on its first tick,
+    # so the board drops the preview then instead of holding it for its own
+    # 15 minutes; with no next daemon, those 15 minutes are the backstop.
+    # atexit covers a normal exit and Ctrl-C; SIGTERM, how launchd and
+    # systemd stop the service, is turned into an ordinary exit so that it
+    # runs (see no_exit_while for the one place that must not be cut short).
+    atexit.register(theme_builder.close)
+    exit_on_sigterm()
 
     last_err = None
     explicit_port = bool(args.port)
@@ -1094,7 +1167,8 @@ def main(argv=None):
                 ser.close()
             except Exception:
                 pass
-            ok, why = ota_mod.flash(port, blob)
+            with no_exit_while("firmware write"):
+                ok, why = ota_mod.flash(port, blob)
             print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
                   file=sys.stderr)
             raise Reflashed(None if ok else why)
@@ -1111,7 +1185,10 @@ def main(argv=None):
             except Exception as e:
                 print(f"[update] download failed: {e}", file=sys.stderr)
                 return False
-            ok, message = update.apply(blob, self_bin, version)
+            # Replacing this program's own files: a stop half way would leave
+            # the login service pointing at half an install.
+            with no_exit_while("app update"):
+                ok, message = update.apply(blob, self_bin, version)
             print(f"[update] {message}", file=sys.stderr)
             if not ok:
                 return False
@@ -1139,6 +1216,9 @@ def main(argv=None):
                         set_preferred=bus.set_preferred,
                         self_update=self_update if frozen else None,
                         status_watch=svc_watch,
+                        theme_sync=theme_sync,
+                        open_builder=theme_builder.launch,
+                        edit_answers=theme_answers,
                         # For the svc gate only, when the boot hello is lost.
                         board_fw_hint=known.get("fw"),
                         pending=update.PendingFirmware(
@@ -1212,6 +1292,10 @@ def main(argv=None):
                         if not proven:
                             update.cleanup(self_bin)
                             proven = True
+                # A theme_edit answer, ready once the browser has opened on
+                # its own thread. Every pass, so it goes out within one read
+                # timeout of the open returning.
+                bridge.pump()
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
                     # the liveness window): there is no point talking to a

@@ -2,7 +2,9 @@
 liveness. I/O (serial) is injected so this is unit-testable without hardware."""
 import datetime
 import hashlib
+import queue
 import sys
+import threading
 import time
 
 from pc import ota as ota_mod
@@ -11,6 +13,19 @@ from pc import status_page
 from pc.version import PROTO_VERSION, RELEASE_VERSION
 
 LIVENESS_WINDOW_S = 30.0
+
+# How long after a greeting no theme line is sent: one fast tick
+# (claude_usage_bridge.FAST_POLL_INTERVAL_S). The reply to a hello is already
+# the largest thing the daemon sends without pausing (tests/pc/
+# test_hello_burst.py), and the board's theme_now answers that same welcome,
+# so a save decided inside the burst would be decided on a report not yet
+# heard. Addendum 2 of the theme contract: theme lines go out on the next
+# fast tick instead.
+THEME_QUIET_S = 2.0
+
+
+def _spawn(fn):
+    threading.Thread(target=fn, name="blink-theme-open", daemon=True).start()
 
 # The 429 backoff that lived here is gone with the endpoint it was for.
 #
@@ -35,7 +50,9 @@ class Bridge:
                  wall=_local_wall, fetch_manifest=None, fetch_firmware=None,
                  flash_image=None, self_update=None, pending=None,
                  fetch_signed_manifest=None, report_failure=None,
-                 status_watch=None, board_fw_hint=None):
+                 status_watch=None, board_fw_hint=None,
+                 theme_sync=None, open_builder=None, run_async=_spawn,
+                 edit_answers=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -88,6 +105,24 @@ class Bridge:
         # poll_if_changed decides against: "sent", not "read", because the
         # capping on the way out is part of what the board received.
         self._last_pushed = None
+        # Themes (pc/theme.py). theme_sync owns the files and what the
+        # board is believed to hold; open_builder starts the builder and a
+        # browser on it, returning whether one opened, and is rate-limited
+        # itself (theme_server.Launcher). Both None on a Bridge wired without
+        # them -- every older test -- which then sends no theme line at all
+        # and answers theme_edit with ok 0.
+        self._theme = theme_sync
+        self._open_builder = open_builder
+        # The open runs on run_async's thread: starting a browser can take a
+        # second or more, and this object lives on the serial thread. The
+        # answer comes back through the queue and pump() writes it, so only
+        # the serial thread ever writes to the port. The daemon hands in one
+        # queue for its whole life, so an open that returns after a
+        # reconnect is answered on the new connection.
+        self._run_async = run_async
+        self._edit_answers = (edit_answers if edit_answers is not None
+                              else queue.SimpleQueue())
+        self._theme_quiet_until = None
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -102,6 +137,12 @@ class Bridge:
         this existed.
         """
         self._write(protocol.welcome("blink-bridge", self._app_ver))
+        if self._theme is not None:
+            # A greeting starts a new conversation: the board answers it with
+            # theme_now why=boot, and nothing about themes is said until a
+            # fast tick after that (THEME_QUIET_S).
+            self._theme.hello()
+            self._theme_quiet_until = self._now() + THEME_QUIET_S
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
@@ -188,6 +229,13 @@ class Bridge:
             self._on_ota_query(cur)
         elif t == "ota_flash":
             self._on_ota_flash()
+        elif t == "theme_now":
+            # Recorded, never answered here: whatever it makes owed goes out
+            # on the next tick (see THEME_QUIET_S).
+            if self._theme is not None:
+                self._theme.board_now(msg)
+        elif t == "theme_edit":
+            self._on_theme_edit()
         # unknown types ignored
 
     # --- OTA, for a board with no network of its own -------------------
@@ -529,6 +577,68 @@ class Bridge:
         self._write(protocol.ota_begin(version))
         self._flash(blob, version)
 
+    # --- themes ---
+
+    def _takes_theme(self):
+        # The svc gate, board.json's hint included, for the same reason: on
+        # the connect whose boot hello was lost it is the only word there is.
+        return protocol.fw_takes_theme(self._board_fw or self._board_fw_hint)
+
+    def _send_theme(self):
+        """The preview, cancel or save the files say is owed. Called on both
+        ticks; the fast one is what makes a preview follow the builder."""
+        if self._theme is None:
+            return
+        if (self._theme_quiet_until is not None
+                and self._now() < self._theme_quiet_until):
+            return
+        try:
+            lines = self._theme.outgoing(deliver=self._takes_theme())
+        except Exception as e:
+            # A theme is never worth the serial loop. Only the reason is
+            # printed; theme.ThemeError's words never hold file contents.
+            print(f"[bridge] theme not sent: {e}", file=sys.stderr)
+            return
+        for m in lines:
+            self._write(m)
+
+    def _on_theme_edit(self):
+        """Settings > Theme > "Edit on computer" on the board.
+
+        Every tap is answered, because the board counts down 5 s to its own
+        "Run blink theme" fallback each time. The Launcher decides whether a
+        tap opens a new tab; its rate limit outlives a reconnect, which one
+        kept here would not.
+        """
+        opener = self._open_builder
+        answers = self._edit_answers
+
+        def work():
+            ok = False
+            if opener is not None:
+                try:
+                    ok = bool(opener())
+                except Exception as e:
+                    print(f"[bridge] theme builder did not open: {e}",
+                          file=sys.stderr)
+            if not ok:
+                print("[bridge] theme builder: no browser to open here; the"
+                      " board says to run blink theme", file=sys.stderr)
+            answers.put(ok)
+        self._run_async(work)
+        self.pump()
+
+    def pump(self):
+        """Write any theme_edit answers that are ready. Called by the daemon
+        on every pass of its serial loop, so an answer goes out within one
+        read timeout of the browser opening -- well inside the board's 5 s."""
+        while True:
+            try:
+                ok = self._edit_answers.get_nowait()
+            except queue.Empty:
+                return
+            self._write(protocol.theme_edit_reply(ok))
+
     def board_alive(self) -> bool:
         return (self._last_ping is not None
                 and self._now() - self._last_ping <= LIVENESS_WINDOW_S)
@@ -569,6 +679,7 @@ class Bridge:
         # quarantine lasted. Pages are the last ones usage named.
         self._last_svc = {}
         self._send_svc_if_changed()
+        self._send_theme()
 
         try:
             usage = self._read_usage()
@@ -623,6 +734,9 @@ class Bridge:
         a minute into thirty; poll_once already reports both at a cadence a
         person can actually read.
         """
+        # First, and before any return below: a preview is somebody watching
+        # the board while they drag a colour, and it must not wait on usage.
+        self._send_theme()
         try:
             usage = self._read_usage()
         except Exception:

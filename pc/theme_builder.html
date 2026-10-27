@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BLINK theme builder</title>
+<!--
+  Served by pc/theme_server.py from 127.0.0.1 only. Self-contained on purpose:
+  no fonts, scripts or styles from anywhere else, so it works on a desk with no
+  network and the server's Content-Security-Policy can forbid every outside
+  request. Built from the published design (claude.ai artifact
+  WG9LpsFRVuL7R6JsbwDUhB, 2026-10-25); the share code is the wire contract's
+  JSON form, not the design's packed bytes.
+-->
+<style>
+:root {
+  color-scheme: light;
+  --bg: #F4F4F2; --surface: #FFFFFF; --fg: #17191C; --dim: #5B6168; --faint: #8C9298; --hair: #E1E1DD; --chip: #ECECE8;
+  --accent: #D9742B; --ok: #1F9D55; --warn: #B7791F; --bad: #D93A2B;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display: Montserrat, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0E1113; --surface: #161A1D; --fg: #E7E9EB; --dim: #A2A9AF; --faint: #737B82; --hair: #262C30; --chip: #1F2428;
+  --accent: #E8873A; --ok: #3CBF72; --warn: #E0A93C; --bad: #F05A4A; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0E1113; --surface: #161A1D; --fg: #E7E9EB; --dim: #A2A9AF; --faint: #737B82; --hair: #262C30; --chip: #1F2428;
+  --accent: #E8873A; --ok: #3CBF72; --warn: #E0A93C; --bad: #F05A4A; color-scheme: dark }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14.5px; line-height: 1.5; }
+.wrap { max-width: 1160px; margin: 0 auto; padding: 28px 16px 64px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); }
+h1 { font-family: var(--display); font-weight: 600; font-size: clamp(26px, 4vw, 36px); letter-spacing: -.02em; margin: 6px 0 6px; line-height: 1.1; }
+.lede { color: var(--dim); margin: 0 0 18px; max-width: 72ch; }
+code { font-family: var(--mono); font-size: .9em; background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+
+.bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 22px; }
+.bar .status { flex: 1 1 260px; font-size: 13.5px; color: var(--dim); }
+.status.err { color: var(--bad); }
+.btn { font: 600 13.5px var(--sans); border-radius: 8px; padding: 8px 16px; cursor: pointer; border: 1px solid var(--hair); background: var(--surface); color: var(--fg); }
+.btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.bench { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+.stage { position: sticky; top: 12px; display: grid; gap: 12px; min-width: 0; }
+.device { background: #1A1D20; border-radius: 22px; padding: 18px; box-shadow: 0 12px 30px -18px rgba(0,0,0,.6); }
+.device svg { display: block; width: 100%; height: auto; border-radius: 6px; }
+.stage-row { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--hair); border-radius: 8px; overflow: hidden; }
+.seg button { font: 500 12.5px var(--sans); color: var(--dim); background: var(--surface); border: 0; padding: 6px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--hair); }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.seg button:focus-visible, .presets button:focus-visible, .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.slider { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dim); }
+.slider input { width: 110px; accent-color: var(--accent); }
+.slider output { font-family: var(--mono); color: var(--fg); min-width: 36px; font-variant-numeric: tabular-nums; }
+
+.panel { background: var(--surface); border: 1px solid var(--hair); border-radius: 14px; padding: 18px; min-width: 0; }
+.panel + .panel { margin-top: 14px; }
+.panel h2 { font-size: 13px; font-family: var(--mono); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin: 0 0 12px; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.presets button { display: inline-flex; align-items: center; gap: 7px; font: 500 12.5px var(--sans); color: var(--fg); background: var(--chip); border: 1px solid transparent; border-radius: 999px; padding: 4px 11px 4px 5px; cursor: pointer; }
+.presets button[aria-pressed="true"] { border-color: var(--fg); }
+.sw { width: 16px; height: 16px; border-radius: 50%; display: inline-block; box-shadow: 0 0 0 1px rgba(0,0,0,.15) inset; }
+
+.slots { display: grid; gap: 2px; }
+.slot { display: grid; grid-template-columns: 30px minmax(0, 1fr) 92px; gap: 10px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--hair); }
+.slot:last-child { border-bottom: 0; }
+.slot input[type=color] { width: 30px; height: 30px; border: 1px solid var(--hair); border-radius: 8px; padding: 0; background: none; cursor: pointer; }
+.slot input[type=color]::-webkit-color-swatch-wrapper { padding: 2px; } .slot input[type=color]::-webkit-color-swatch { border: 0; border-radius: 6px; }
+.slot label { font-weight: 500; font-size: 14px; }
+.slot small { display: block; color: var(--faint); font-size: 12px; font-weight: 400; }
+.slot input[type=text], .paste input { font: 12.5px var(--mono); width: 100%; padding: 5px 7px; border: 1px solid var(--hair); border-radius: 6px; background: var(--bg); color: var(--fg); }
+.slot input[type=text] { text-transform: uppercase; }
+.slot.off { opacity: .45; }
+.band { display: grid; grid-template-columns: repeat(3, 1fr); height: 8px; border-radius: 4px; overflow: hidden; margin: 10px 0 2px; }
+.bandl { display: grid; grid-template-columns: repeat(3, 1fr); font: 11px var(--mono); color: var(--faint); }
+.bandl span:nth-child(2) { text-align: center; } .bandl span:last-child { text-align: right; }
+
+.opts { display: grid; gap: 12px; }
+.opt { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; align-items: center; }
+.opt > span { font-size: 13.5px; color: var(--dim); }
+
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.checks li { display: flex; gap: 8px; align-items: baseline; }
+.mark { font: 600 10px var(--mono); padding: 1px 6px; border-radius: 3px; color: #fff; flex: none; }
+.m-ok { background: var(--ok); } .m-warn { background: var(--warn); } .m-bad { background: var(--bad); }
+
+.out { margin-top: 28px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.cmd { background: #0B0E10; color: #D8DDE1; border-radius: 12px; padding: 14px 16px; font: 12.5px/1.6 var(--mono); overflow-x: auto; white-space: pre; min-width: 0; }
+.cmd .k { color: #8EA0AE; } .cmd .v { color: #F2B26B; }
+.cmd.wrapcode { white-space: normal; word-break: break-all; }
+.cmdbox { min-width: 0; }
+.cmdbox h3 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+.cmdbox p { margin: 6px 0 0; font-size: 12.5px; color: var(--dim); }
+.copy { font: 500 12px var(--sans); border: 1px solid var(--hair); background: var(--surface); color: var(--fg); padding: 4px 10px; border-radius: 6px; cursor: pointer; float: right; }
+.paste { display: flex; gap: 8px; margin-top: 10px; }
+.note { font-size: 12.5px; color: var(--faint); margin-top: 6px; }
+
+@media (max-width: 900px) {
+  .bench { grid-template-columns: minmax(0, 1fr); }
+  .stage { position: static; }
+  .out { grid-template-columns: minmax(0, 1fr); }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="eyebrow">BLINK · theme builder</span>
+  <h1>Theme builder</h1>
+  <p class="lede">Pick a theme or choose the seven colours. Your board shows each change as a preview, without keeping it. Save keeps it on the board; Cancel, closing this tab, or ten minutes without a change puts the board back as it was.</p>
+
+  <div class="bar">
+    <button type="button" class="btn primary" id="save">Save to board</button>
+    <button type="button" class="btn" id="cancel">Cancel</button>
+    <span class="status" id="status" role="status" aria-live="polite">Loading your current theme.</span>
+  </div>
+
+  <div class="bench">
+    <div class="stage">
+      <div class="device"><svg id="scr" viewBox="0 0 320 240" role="img" aria-label="Preview of the board screen"></svg></div>
+      <div class="stage-row">
+        <div class="seg" role="group" aria-label="Screen">
+          <button type="button" data-v="gauges" aria-pressed="true">Gauges</button>
+          <button type="button" data-v="focus" aria-pressed="false">Focus mode</button>
+        </div>
+        <label class="slider" for="p1">Session <input type="range" id="p1" min="0" max="100" value="42"><output id="o1">42%</output></label>
+        <label class="slider" for="p2">Weekly <input type="range" id="p2" min="0" max="100" value="91"><output id="o2">91%</output></label>
+      </div>
+      <div class="panel">
+        <h2>Checks</h2>
+        <ul class="checks" id="checks"></ul>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>Start from</h2>
+        <div class="presets" id="presets"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Colours</h2>
+        <div class="opt" style="margin-bottom:10px"><span>Arc colour</span>
+          <div class="seg" role="group" aria-label="Arc colour">
+            <button type="button" data-m="level" aria-pressed="true">By level</button>
+            <button type="button" data-m="gauge" aria-pressed="false">Per gauge</button>
+          </div>
+        </div>
+        <div class="slots" id="slots"></div>
+        <div class="band" id="band"></div>
+        <div class="bandl"><span>0</span><span>60%</span><span>90% · 100</span></div>
+        <p class="note" id="modenote"></p>
+      </div>
+
+      <div class="panel">
+        <h2>Style</h2>
+        <div class="opts">
+          <div class="opt"><span>Arc thickness</span><div class="seg" role="group" aria-label="Arc thickness">
+            <button type="button" data-w="5" aria-pressed="false">Thin</button><button type="button" data-w="12" aria-pressed="true">Normal</button><button type="button" data-w="22" aria-pressed="false">Thick</button></div></div>
+          <div class="opt"><span>Arc ends</span><div class="seg" role="group" aria-label="Arc ends">
+            <button type="button" data-e="round" aria-pressed="true">Round</button><button type="button" data-e="flat" aria-pressed="false">Flat</button></div></div>
+          <div class="opt"><span>Moving dot</span><div class="seg" role="group" aria-label="Moving dot">
+            <button type="button" data-d="on" aria-pressed="true">Show</button><button type="button" data-d="off" aria-pressed="false">Hide</button></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="out">
+    <div class="cmdbox"><h3>Share code <button type="button" class="copy" id="copy-code">Copy</button></h3>
+      <div class="cmd wrapcode" id="code"></div>
+      <p>The same theme as one code, for <code>blink theme set &lt;code&gt;</code> on another desk, or to post for other people.</p>
+      <div class="paste"><input type="text" id="paste" placeholder="Paste a share code (BT1.…)" aria-label="Share code to load" spellcheck="false" autocomplete="off"><button type="button" class="btn" id="load">Load</button></div>
+    </div>
+    <div class="cmdbox"><h3>The same from a terminal <button type="button" class="copy" id="copy-cmd">Copy</button></h3>
+      <div class="cmd" id="cmd"></div>
+      <p>Runs on this computer and saves the theme exactly as Save does.</p></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  // The order of the colours on the wire (contract "c"), and their keys here.
+  var SLOTS = [
+    { k: 'bg',   w: 'bg',     name: 'Background',     hint: 'Behind everything' },
+    { k: 'text', w: 'text',   name: 'Text',           hint: 'Numbers, labels, the dot' },
+    { k: 'g1',   w: 'gauge1', name: 'Gauge 1',        hint: 'Left arc (session), in per-gauge mode', mode: 'gauge' },
+    { k: 'g2',   w: 'gauge2', name: 'Gauge 2',        hint: 'Right arc (weekly), in per-gauge mode', mode: 'gauge' },
+    { k: 'low',  w: 'low',    name: 'Under 60%',      hint: 'Plenty left' },
+    { k: 'mid',  w: 'mid',    name: '60% to 90%',     hint: 'Getting there' },
+    { k: 'high', w: 'high',   name: '90% and above',  hint: 'Almost used up; also the warning line' }
+  ];
+  // THEME_IDS 0..11, in id order. These colours draw the preview here; the
+  // board draws a built-in theme from its own table, so a built-in is sent
+  // as its id alone.
+  var PRESETS = [
+    ['Dark',      { bg:'0E1116', text:'E6E8EB', g1:'4387DF', g2:'0DA243', low:'0DA243', mid:'BA8107', high:'FF1900', w:12, e:'round', d:'on' }],
+    ['Neon',      { bg:'05060A', text:'F5F7FF', g1:'00F0FF', g2:'B26BFF', low:'00F0FF', mid:'FFE600', high:'FF2E88', w:5,  e:'round', d:'off' }],
+    ['Bold',      { bg:'000000', text:'FFFFFF', g1:'60A5FA', g2:'22C55E', low:'22C55E', mid:'FACC15', high:'EF4444', w:22, e:'flat',  d:'off' }],
+    ['Mono',      { bg:'000000', text:'FFFFFF', g1:'FFFFFF', g2:'BDBDBD', low:'FFFFFF', mid:'FFFFFF', high:'FF3B30', w:5,  e:'flat',  d:'off' }],
+    ['Ocean',     { bg:'0A1A2F', text:'E8F1FA', g1:'7FB2FF', g2:'2EC4B6', low:'2EC4B6', mid:'FFB347', high:'FF6B6B', w:12, e:'round', d:'on' }],
+    ['Synthwave', { bg:'1A0B2E', text:'FBEAFF', g1:'01CDFE', g2:'FF71CE', low:'FF71CE', mid:'FFB86B', high:'FF3860', w:8,  e:'round', d:'on' }],
+    ['Forest',    { bg:'0F1A14', text:'EEF3E9', g1:'A3C4BC', g2:'8FBF7F', low:'8FBF7F', mid:'D9A441', high:'D9643A', w:12, e:'round', d:'on' }],
+    ['Retro LCD', { bg:'9BBC0F', text:'0F380F', g1:'306230', g2:'0F380F', low:'306230', mid:'306230', high:'0F380F', w:12, e:'flat',  d:'off' }],
+    ['Colour-blind safe', { bg:'0E1116', text:'E6E8EB', g1:'1E88E5', g2:'E69F00', low:'1E88E5', mid:'E69F00', high:'D55E00', w:12, e:'round', d:'on' }],
+    ['Light',     { bg:'FFFFFF', text:'111418', g1:'2F6FCB', g2:'0E9F48', low:'0E9F48', mid:'C27C00', high:'E02400', w:12, e:'round', d:'on' }],
+    ['Light soft',{ bg:'F1F3F6', text:'1B2027', g1:'3D7BD9', g2:'2E9E68', low:'2E9E68', mid:'CB8A13', high:'D9452B', w:8,  e:'round', d:'off' }],
+    ['Light ink', { bg:'FFFFFF', text:'000000', g1:'000000', g2:'555555', low:'000000', mid:'000000', high:'E10600', w:5,  e:'flat',  d:'off' }]
+  ];
+  var CLI_NAMES = ['dark','neon','bold','mono','ocean','synthwave','forest','retro-lcd','cvd-safe','light','light-soft','light-ink'];
+  // 3.05, the computer's floor (pc/theme.py MIN_CONTRAST): clear of the
+  // board's own 3:1 check, so nothing passed here is refused there.
+  var CUSTOM = 12, WIDTHS = [5, 12, 22], MIN_CONTRAST = 3.05;
+  var HEX = /^[0-9a-fA-F]{6}$/;
+
+  // preset: the id of an untouched built-in, or -1 for the custom theme.
+  var st = Object.assign({ mode: 'level', view: 'gauges', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
+  var finished = false, previewTimer = null, lastSent = null;
+
+  function hex2rgb(h) { return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)]; }
+  function rgb2hex(c) { return c.map(function (v) { return Math.round(v).toString(16).padStart(2,'0'); }).join('').toUpperCase(); }
+  function mix(a, b, t) { var x = hex2rgb(a), y = hex2rgb(b); return rgb2hex([0,1,2].map(function (i) { return x[i] + (y[i]-x[i]) * t; })); }
+  function lum(h) { return hex2rgb(h).map(function (v) { v /= 255; return v <= .03928 ? v/12.92 : Math.pow((v+.055)/1.055, 2.4); }).reduce(function (s, v, i) { return s + v * [.2126,.7152,.0722][i]; }, 0); }
+  function contrast(a, b) { var l1 = lum(a), l2 = lum(b); return (Math.max(l1,l2)+.05)/(Math.min(l1,l2)+.05); }
+  function dist(a, b) { var x = hex2rgb(a), y = hex2rgb(b); return Math.sqrt(x.reduce(function (s, v, i) { return s + (v-y[i])*(v-y[i]); }, 0)); }
+  function levelCol(p) { return p >= 90 ? st.high : p >= 60 ? st.mid : st.low; }
+  function arcCol(which, p) {
+    if (st.mode === 'level') return levelCol(p);
+    return p >= 90 ? st.high : (which === 1 ? st.g1 : st.g2);
+  }
+  // The custom theme takes only the three widths the board has; a preset
+  // drawn at another width is moved to the nearest the moment it is edited.
+  function snapW(w) { return WIDTHS.reduce(function (b, x) { return Math.abs(x - w) < Math.abs(b - w) ? x : b; }, WIDTHS[0]); }
+  function markCustom() { st.preset = -1; st.w = snapW(st.w); }
+
+  // ---------------------------------------------------------------- drawing
+  var NS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs, text) { var e = document.createElementNS(NS, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; }
+  function pt(cx, cy, r, deg) { var a = deg * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
+  function arcPath(cx, cy, r, a0, a1) {
+    var p0 = pt(cx, cy, r, a0), p1 = pt(cx, cy, r, a1), large = (a1 - a0) > 180 ? 1 : 0;
+    return 'M' + p0[0].toFixed(2) + ' ' + p0[1].toFixed(2) + ' A' + r + ' ' + r + ' 0 ' + large + ' 1 ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2);
+  }
+  function gauge(svg, cx, cy, size, w, p, col, track, txt, pctSize) {
+    var r = size / 2 - w / 2, cap = st.e === 'round' ? 'round' : 'butt';
+    svg.appendChild(el('path', { d: arcPath(cx, cy, r, 135, 405), fill: 'none', stroke: '#' + track, 'stroke-width': w, 'stroke-linecap': cap }));
+    var end = 135 + 270 * Math.max(0, Math.min(100, p)) / 100;
+    if (p > 0) svg.appendChild(el('path', { d: arcPath(cx, cy, r, 135, Math.max(end, 135.5)), fill: 'none', stroke: '#' + col, 'stroke-width': w, 'stroke-linecap': cap }));
+    if (st.d === 'on') { var k = pt(cx, cy, r, end); svg.appendChild(el('circle', { cx: k[0], cy: k[1], r: Math.max(5, w / 2 + 2), fill: '#' + txt, stroke: '#' + st.bg, 'stroke-width': 2 })); }
+    svg.appendChild(el('text', { x: cx, y: cy + pctSize * .36, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': pctSize, 'font-weight': 500, fill: '#' + txt }, Math.round(p) + '%'));
+  }
+  function render() {
+    var svg = document.getElementById('scr'); while (svg.firstChild) svg.removeChild(svg.firstChild);
+    // The board derives dim text and the arc track by mixing text and bg
+    // (contract: 25% bg into text, and 15% text into bg); so does this.
+    var dim = mix(st.text, st.bg, .25), track = mix(st.bg, st.text, .15), pill = mix(st.bg, st.text, .1);
+    svg.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: '#' + st.bg }));
+    var F = 'Montserrat, sans-serif';
+    if (st.view === 'gauges') {
+      svg.appendChild(el('text', { x: 160, y: 18, 'text-anchor': 'middle', 'font-family': F, 'font-size': 11.5, 'letter-spacing': 3, fill: '#' + dim }, 'BLINK'));
+      var warn = Math.max(st.p1, st.p2) >= 95;
+      svg.appendChild(el('text', { x: 160, y: 34, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (warn ? st.high : dim) }, warn ? (st.p1 >= st.p2 ? 'Session almost used up' : 'Weekly almost used up') : '14:05'));
+      svg.appendChild(el('circle', { cx: 302, cy: 14, r: 5, fill: '#' + st.low }));
+      gauge(svg, 80, 104, 120, st.w, st.p1, arcCol(1, st.p1), track, st.text, 20);
+      gauge(svg, 240, 104, 120, st.w, st.p2, arcCol(2, st.p2), track, st.text, 20);
+      [['SESSION 5h', '3h 40m', 80], ['WEEKLY 7d', '1d 1h', 240]].forEach(function (g) {
+        svg.appendChild(el('text', { x: g[2], y: 180, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, g[0]));
+        svg.appendChild(el('text', { x: g[2], y: 196, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, g[1]));
+      });
+      svg.appendChild(el('rect', { x: 132, y: 205, width: 56, height: 18, rx: 9, fill: '#' + pill }));
+      svg.appendChild(el('text', { x: 160, y: 218, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + st.text }, 'Claude'));
+      svg.appendChild(el('path', { d: 'M9 114 L4 119 L9 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
+      svg.appendChild(el('path', { d: 'M311 114 L316 119 L311 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
+    } else {
+      var focusP = Math.max(st.p1, st.p2), isS = st.p1 >= st.p2;
+      gauge(svg, 160, 118, 210, Math.round(st.w * 1.35), focusP, arcCol(isS ? 1 : 2, focusP), track, st.text, 48);
+      svg.appendChild(el('text', { x: 160, y: 158, 'text-anchor': 'middle', 'font-family': F, 'font-size': 15, fill: '#' + dim }, isS ? 'SESSION  3h 40m' : 'WEEK  1d 1h'));
+      svg.appendChild(el('text', { x: 160, y: 228, 'text-anchor': 'middle', 'font-family': F, 'font-size': 13, fill: '#' + dim }, (isS ? 'week ' + st.p2 : 'session ' + st.p1) + '%'));
+    }
+    paintControls(); checks(); output();
+  }
+  function paintControls() {
+    SLOTS.forEach(function (s) {
+      var row = document.getElementById('row-' + s.k);
+      row.classList.toggle('off', !!s.mode && s.mode !== st.mode);
+      document.getElementById('c-' + s.k).value = '#' + st[s.k].toLowerCase();
+      var t = document.getElementById('t-' + s.k); if (document.activeElement !== t) t.value = '#' + st[s.k];
+    });
+    var band = document.getElementById('band'); while (band.firstChild) band.removeChild(band.firstChild);
+    ['low','mid','high'].forEach(function (k) { var d = document.createElement('span'); d.style.background = '#' + st[k]; band.appendChild(d); });
+    document.getElementById('modenote').textContent = st.mode === 'level'
+      ? 'By level: both arcs take the colour of their own level. Gauge 1 and Gauge 2 are not used.'
+      : 'Per gauge: each arc keeps its own colour, and switches to the 90%-and-above colour near the limit so a warning is never missed. The under-60% colour is used for the status dot.';
+    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view);
+    document.querySelectorAll('#presets button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.p === st.preset)); });
+  }
+  function press(sel, key, val) { document.querySelectorAll(sel).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset[key] === val)); }); }
+  function textContrast() { return contrast(st.text, st.bg); }
+  function checks() {
+    var out = [], c = textContrast();
+    out.push(c >= 4.5 ? ['ok', 'Text is readable: ' + c.toFixed(1) + ':1 against the background.'] : c >= MIN_CONTRAST ? ['warn', 'Text is faint: ' + c.toFixed(1) + ':1. Small labels will be hard to read on the panel; 4.5:1 or more is better.'] : ['bad', 'Text is unreadable: ' + c.toFixed(1) + ':1. It needs at least 3:1 before it can go to the board.']);
+    var used = st.mode === 'level' ? ['low','mid','high'] : ['g1','g2','high'];
+    var names = { low: 'Under 60%', mid: '60% to 90%', high: '90% and above', g1: 'Gauge 1', g2: 'Gauge 2' };
+    var weak = used.filter(function (k) { return contrast(st[k], st.bg) < 2; });
+    out.push(weak.length ? ['warn', weak.map(function (k) { return names[k]; }).join(', ') + ' barely shows against the background.'] : ['ok', 'Every arc colour stands out from the background.']);
+    if (st.mode === 'level') {
+      var pairs = [['low','mid'],['mid','high'],['low','high']].filter(function (p) { return dist(st[p[0]], st[p[1]]) < 60; });
+      out.push(pairs.length ? ['warn', 'Two levels look almost the same (' + pairs.map(function (p) { return names[p[0]] + ' and ' + names[p[1]]; }).join('; ') + '). The arc will not tell you when you cross a threshold.'] : ['ok', 'The three levels are easy to tell apart.']);
+    }
+    var ul = document.getElementById('checks'); while (ul.firstChild) ul.removeChild(ul.firstChild);
+    out.forEach(function (o) {
+      var li = document.createElement('li'), m = document.createElement('span'), t = document.createElement('span');
+      m.className = 'mark m-' + o[0]; m.textContent = o[0] === 'ok' ? 'OK' : o[0] === 'warn' ? 'CHECK' : 'NO';
+      t.textContent = o[1]; li.appendChild(m); li.appendChild(t); ul.appendChild(li);
+    });
+    if (!finished) document.getElementById('save').disabled = c < MIN_CONTRAST;
+  }
+
+  // ---------------------------------------------------------------- the wire
+  function customFields() {
+    return { c: SLOTS.map(function (s) { return st[s.k].toLowerCase(); }), w: snapW(st.w),
+             ends: st.e, dot: st.d === 'on' ? 1 : 0, by: st.mode };
+  }
+  function wireTheme() {
+    if (st.preset >= 0) return { id: st.preset };
+    return Object.assign({ id: CUSTOM }, customFields());
+  }
+  function b64url(s) { return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  function shareCode() { return st.preset >= 0 ? null : 'BT1.' + b64url(JSON.stringify(customFields())); }
+  function cliArgs() {
+    if (st.preset >= 0) return [CLI_NAMES[st.preset]];
+    var f = customFields(), width = { 5: 'thin', 12: 'normal', 22: 'thick' }[f.w];
+    return SLOTS.map(function (s, i) { return s.w + '=' + f.c[i]; })
+      .concat(['width=' + width, 'ends=' + f.ends, 'dot=' + (f.dot ? 'on' : 'off'), 'arcs=' + (f.by === 'level' ? 'by-level' : 'per-gauge')]);
+  }
+  function output() {
+    var args = cliArgs(), cmd = document.getElementById('cmd');
+    while (cmd.firstChild) cmd.removeChild(cmd.firstChild);
+    function span(cls, text) { var s = document.createElement('span'); s.className = cls; s.textContent = text; cmd.appendChild(s); }
+    span('k', '$ '); cmd.appendChild(document.createTextNode('blink theme set' + (args.length > 1 ? ' \\\n' : ' ')));
+    args.forEach(function (a, i) {
+      var kv = a.split('=');
+      if (args.length > 1) cmd.appendChild(document.createTextNode('    '));
+      if (kv.length > 1) { span('k', kv[0] + '='); span('v', kv[1]); } else span('v', a);
+      if (i < args.length - 1) cmd.appendChild(document.createTextNode(' \\\n'));
+    });
+    cmd.dataset.plain = 'blink theme set ' + args.join(' ');
+    var code = shareCode(), box = document.getElementById('code');
+    box.textContent = code || 'Built-in themes share by name: blink theme set ' + args[0];
+    box.dataset.plain = code ? 'blink theme set ' + code : 'blink theme set ' + args[0];
+  }
+
+  function say(text, bad) { var s = document.getElementById('status'); s.textContent = text; s.classList.toggle('err', !!bad); }
+  function gone() {
+    finished = true;
+    document.getElementById('save').disabled = true; document.getElementById('cancel').disabled = true;
+  }
+  function post(path, body) {
+    return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+                         body: body == null ? '' : JSON.stringify(body) })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.status = r.status; return j; }); });
+  }
+  function stopped() { gone(); say('The builder has stopped. Run blink theme on your computer to start it again.', true); }
+  function schedulePreview() {
+    if (finished) return;
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(function () {
+      if (textContrast() < MIN_CONTRAST) { say('Text is unreadable, so the board keeps the last preview.', true); return; }
+      var t = wireTheme(), key = JSON.stringify(t);
+      if (key === lastSent) return;
+      post('/api/preview', t).then(function (j) {
+        if (j.status === 200) { lastSent = key; say('Showing on your board as a preview.'); }
+        else if (j.status === 400) say(j.error || 'The board would refuse that theme.', true);
+        else stopped();
+      }, stopped);
+    }, 250);
+  }
+  function changed() { render(); schedulePreview(); }
+
+  // ---------------------------------------------------------------- controls
+  var pre = document.getElementById('presets');
+  PRESETS.forEach(function (entry, i) {
+    var name = entry[0], p = entry[1], b = document.createElement('button'), sw = document.createElement('span');
+    b.type = 'button'; b.dataset.p = String(i);
+    sw.className = 'sw';
+    sw.style.background = 'conic-gradient(#' + p.low + ' 0 33%, #' + p.mid + ' 0 66%, #' + p.high + ' 0) padding-box, #' + p.bg;
+    sw.style.border = '3px solid #' + p.bg;
+    b.appendChild(sw); b.appendChild(document.createTextNode(name));
+    b.addEventListener('click', function () { Object.assign(st, PRESETS[i][1]); st.preset = i; changed(); });
+    pre.appendChild(b);
+  });
+  var slots = document.getElementById('slots');
+  SLOTS.forEach(function (s) {
+    var row = document.createElement('div'); row.className = 'slot'; row.id = 'row-' + s.k;
+    var c = document.createElement('input'); c.type = 'color'; c.id = 'c-' + s.k; c.setAttribute('aria-label', s.name);
+    var l = document.createElement('label'); l.htmlFor = c.id; l.textContent = s.name;
+    var sm = document.createElement('small'); sm.textContent = s.hint; l.appendChild(sm);
+    var t = document.createElement('input'); t.type = 'text'; t.id = 't-' + s.k; t.maxLength = 7; t.setAttribute('aria-label', s.name + ' hex');
+    row.appendChild(c); row.appendChild(l); row.appendChild(t); slots.appendChild(row);
+    c.addEventListener('input', function (e) { st[s.k] = e.target.value.slice(1).toUpperCase(); markCustom(); changed(); });
+    t.addEventListener('input', function (e) { var v = e.target.value.replace('#', ''); if (HEX.test(v)) { st[s.k] = v.toUpperCase(); markCustom(); changed(); } });
+  });
+  document.querySelectorAll('[data-m]').forEach(function (b) { b.addEventListener('click', function () { st.mode = b.dataset.m; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-w]').forEach(function (b) { b.addEventListener('click', function () { st.w = +b.dataset.w; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-e]').forEach(function (b) { b.addEventListener('click', function () { st.e = b.dataset.e; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-d]').forEach(function (b) { b.addEventListener('click', function () { st.d = b.dataset.d; markCustom(); changed(); }); });
+  // The screen and the two sliders only move the drawing here; they are not
+  // part of the theme and send nothing.
+  document.querySelectorAll('[data-v]').forEach(function (b) { b.addEventListener('click', function () { st.view = b.dataset.v; render(); }); });
+  [['p1','o1'],['p2','o2']].forEach(function (x) { var r = document.getElementById(x[0]); r.addEventListener('input', function () { st[x[0]] = +r.value; document.getElementById(x[1]).textContent = r.value + '%'; render(); }); });
+
+  function copy(id, btn) {
+    var t = document.getElementById(id).dataset.plain, b = document.getElementById(btn);
+    function ok() { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1400); }
+    function fallback() { var r = document.createRange(); r.selectNodeContents(document.getElementById(id)); var s = getSelection(); s.removeAllRanges(); s.addRange(r); b.textContent = 'Selected'; }
+    try { navigator.clipboard.writeText(t).then(ok, fallback); } catch (e) { fallback(); }
+  }
+  document.getElementById('copy-cmd').addEventListener('click', function () { copy('cmd', 'copy-cmd'); });
+  document.getElementById('copy-code').addEventListener('click', function () { copy('code', 'copy-code'); });
+
+  function applyCustom(f) {
+    if (!f || !Array.isArray(f.c) || f.c.length !== 7 || !f.c.every(function (h) { return typeof h === 'string' && HEX.test(h); })) return false;
+    if (WIDTHS.indexOf(f.w) < 0 || ['round','flat'].indexOf(f.ends) < 0 || [0,1].indexOf(+f.dot) < 0 || ['level','gauge'].indexOf(f.by) < 0) return false;
+    SLOTS.forEach(function (s, i) { st[s.k] = f.c[i].toUpperCase(); });
+    st.w = f.w; st.e = f.ends; st.d = +f.dot ? 'on' : 'off'; st.mode = f.by; st.preset = -1;
+    return true;
+  }
+  document.getElementById('load').addEventListener('click', function () {
+    var code = document.getElementById('paste').value.trim().replace(/^blink theme set\s+/, ''), f = null;
+    try {
+      if (code.indexOf('BT1.') !== 0) throw 0;
+      var b = code.slice(4).replace(/-/g, '+').replace(/_/g, '/');
+      while (b.length % 4) b += '=';
+      f = JSON.parse(atob(b));
+    } catch (e) { f = null; }
+    if (applyCustom(f)) { document.getElementById('paste').value = ''; changed(); }
+    else say('That is not a theme share code. They start BT1.', true);
+  });
+
+  document.getElementById('save').addEventListener('click', function () {
+    if (finished || textContrast() < MIN_CONTRAST) return;
+    clearTimeout(previewTimer);
+    post('/api/save', wireTheme()).then(function (j) {
+      if (j.status === 200) { gone(); say('Saved. Your board keeps this theme. You can close this tab.'); }
+      else if (j.status === 400 || j.status === 500) say(j.error || 'The board would refuse that theme.', true);
+      else stopped();
+    }, stopped);
+  });
+  document.getElementById('cancel').addEventListener('click', function () {
+    if (finished) return;
+    clearTimeout(previewTimer);
+    post('/api/cancel').then(function () { gone(); say('Cancelled. Your board is back on its saved theme. You can close this tab.'); }, stopped);
+  });
+  // Closing the tab cancels. A reload also fires pagehide, and the server
+  // waits a few seconds for this page to load again before it gives up.
+  window.addEventListener('pagehide', function () {
+    if (finished) return;
+    try { fetch('/api/closed', { method: 'POST', credentials: 'same-origin', keepalive: true, body: '' }); } catch (e) {}
+  });
+
+  // Tells the server this tab is still open, so "Edit on computer" on the
+  // board does not open a second one beside it. Not an edit: an open tab
+  // nobody touches still times out after ten minutes.
+  setInterval(function () {
+    if (!finished) post('/api/ping').then(function (j) { if (j.status !== 200) stopped(); }, stopped);
+  }, 20000);
+
+  fetch('/api/state', { credentials: 'same-origin' }).then(function (r) {
+    if (r.status !== 200) throw 0;
+    return r.json();
+  }).then(function (j) {
+    var t = j.saved;
+    if (t && t.id === CUSTOM) applyCustom(t);
+    else if (t && t.id >= 0 && t.id < PRESETS.length) { Object.assign(st, PRESETS[t.id][1]); st.preset = t.id; }
+    lastSent = JSON.stringify(wireTheme());
+    say(t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
+    render();
+  }, function () { render(); stopped(); });
+  render();
+})();
+</script>
+</body>
+</html>

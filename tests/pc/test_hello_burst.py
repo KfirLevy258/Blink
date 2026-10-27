@@ -21,10 +21,12 @@ Built through the Bridge, not by adding up hand-written message sizes: the
 sequence and its contents are the Bridge's to decide, and a test that guessed
 them would go on passing after the Bridge learned to send an eighth message.
 """
+import os
 import pathlib
 import re
 
 from pc import protocol
+from pc import theme
 from pc.bridge import Bridge
 from pc.providers import base
 
@@ -79,6 +81,17 @@ def _hello_burst():
 
     usage = _widest_usage()
 
+    # Themes owed in both files, at their widest: a custom save that differs
+    # from the board and a preview waiting. None of it may join the burst
+    # (CONTRACT-theme, Addendum 2): it goes out on the next fast tick. ~ is
+    # tmp_path here (tests/conftest.py), resolved now, not at import.
+    home = os.path.join(os.path.expanduser("~"), ".blink")
+    widest_theme = {"id": theme.CUSTOM, "c": ["ffffff", "000000"]
+                    + ["123456"] * 5, "w": 22, "ends": "round", "dot": 1,
+                    "by": "level"}
+    theme.save(home, widest_theme)
+    theme.write_preview(home, widest_theme)
+
     def fetch():
         return dict(usage)
     # The project name rides its own message; the widest one the daemon
@@ -92,6 +105,7 @@ def _hello_burst():
                                        "sha256": "ab" * 32},
                fetch_signed_manifest=lambda: None,
                status_watch=_WidestWatch(),
+               theme_sync=theme.ThemeSync(home),
                report_failure="x" * 200)
     b._app_available = lambda m: ("10.10.10", {"size": 1, "sha256": "cd" * 32})
     b.on_message({"t": "hello", "v": protocol.VERSION, "fw": "1.4.0"})
@@ -104,6 +118,11 @@ def test_the_burst_is_what_this_test_thinks_it_is():
     for t in ("welcome", "ota_error", "time", "usage", "session",
               "ota_avail"):
         assert t in kinds, kinds
+
+
+def test_no_theme_line_joins_the_burst():
+    kinds = [protocol.json.loads(raw)["t"] for raw in _hello_burst()]
+    assert "theme" not in kinds, kinds
 
 
 def test_the_widest_hello_reply_fits_the_boards_receive_ring():

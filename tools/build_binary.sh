@@ -210,6 +210,7 @@ cd "$ROOT"
 	--specpath "$BUILD" \
 	--add-data "$ROOT/tools/blink-statusline.sh:." \
 	--add-data "$ROOT/tools/blink-hook.sh:." \
+	--add-data "$ROOT/pc/theme_builder.html:pc" \
 	--collect-all esptool \
 	--collect-all bitstring \
 	--collect-all bitarray \
@@ -228,6 +229,14 @@ cd "$ROOT"
 
 BUILT="$OUT/blink/blink"
 [ -f "$BUILT" ] || BUILT="$OUT/blink/blink.exe"
+
+# The theme builder is a data file, invisible to PyInstaller's analysis. A
+# build without it runs, installs, and fails only when somebody taps "Edit on
+# computer" -- so the build fails here instead.
+test -f "$OUT/blink/_internal/pc/theme_builder.html" || {
+	echo "FATAL: pc/theme_builder.html is missing from the bundle" >&2
+	exit 1
+}
 [ -f "$BUILT" ] || { echo "FATAL: no executable under $OUT/blink" >&2; exit 1; }
 
 # --collect-all bitarray brings its own test suite and a C header along with

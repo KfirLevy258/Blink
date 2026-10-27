@@ -33,7 +33,8 @@ class TestProtocol(unittest.TestCase):
 
     def test_builders(self):
         self.assertEqual(protocol.welcome("app", "0.2.0"),
-                         {"t": "welcome", "v": 2, "app": "app", "app_ver": "0.2.0"})
+                         {"t": "welcome", "v": 2, "app": "app", "app_ver": "0.2.0",
+                          "caps": ["theme"]})
         u = protocol.usage(61.0, "R1", 26.0, "R2", [{"name": "sonnet", "weekly_pct": 2.0}])
         self.assertEqual(u["t"], "usage")
         self.assertEqual(u["session_pct"], 61.0)

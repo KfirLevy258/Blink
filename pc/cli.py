@@ -19,6 +19,7 @@ prompt. A few lines of sh start in single-digit milliseconds.
 """
 import argparse
 import glob
+import json
 import os
 import shlex
 import shutil
@@ -30,6 +31,8 @@ from typing import NamedTuple
 from pc import (install_codex_hooks, install_hooks, install_statusline, ota,
                 protocol, status_page, statusline_source, update,
                 user_config, win_driver)
+from pc import theme as theme_mod
+from pc import theme_server
 # Eagerly, unlike the other providers, which are imported inside the functions
 # that use them to keep the frozen binary's start-up cheap. This one costs
 # nothing to import (os, and claude_state, which is json/os/sys/time) and it
@@ -3818,6 +3821,122 @@ def cmd_config(args) -> int:
     return 0
 
 
+def _theme_board_note(home):
+    """A line when the board this computer last saw cannot take a theme."""
+    try:
+        with open(os.path.join(home, "board.json"), encoding="utf-8") as f:
+            fw = json.load(f).get("fw")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if fw and not protocol.fw_takes_theme(fw):
+        return (f"Your board runs firmware {fw}; themes need 1.4.0 or later."
+                " It will be sent once the board is updated.")
+    return None
+
+
+def _theme_lines(t):
+    """How `blink theme show` and `set` describe a theme."""
+    if t is None:
+        return ["Theme: the board's own choice. Nothing is set from this"
+                " computer."]
+    name = theme_mod.display_name(t["id"])
+    if t["id"] != theme_mod.CUSTOM:
+        return [f"Theme: {name}",
+                f"On another desk: blink theme set {name}"]
+    return [f"Theme: {name}",
+            "As a command:   blink theme set " + " ".join(
+                theme_mod.as_args(t)),
+            f"Share code:     {theme_mod.to_share_code(t)}"]
+
+
+def _theme_builder(home) -> int:
+    """`blink theme`: the builder, in the foreground, until it finishes."""
+    try:
+        server = theme_server.BuilderServer(home)
+    except FileNotFoundError:
+        print("The theme builder page is missing from this install;"
+              " reinstall BLINK to get it back.")
+        return 1
+    except OSError as e:
+        print(f"The theme builder could not start: {e}")
+        return 1
+    server.start()
+    url = server.new_link()
+    # The link is printed only here, to the person's own terminal: it is the
+    # one-time key to the server, and the daemon never prints it.
+    print("Opening the theme builder in your browser.")
+    print(f"If it does not open, go to this link on this computer: {url}")
+    print("Save or cancel there. Closing the tab cancels, and so does Ctrl-C"
+          " here.")
+    if not theme_server.open_url(url):
+        print("No browser opened here, so use the link above.")
+    try:
+        outcome = server.wait()
+    except KeyboardInterrupt:
+        server.finish("cancelled")
+        outcome = server.wait(5)
+    if outcome == "saved":
+        print("Saved. The bridge sends it to the board within a few seconds.")
+        for line in _theme_lines(theme_mod.load_saved(home)):
+            print(line)
+        note = _theme_board_note(home)
+        if note:
+            print(note)
+    elif outcome == "idle":
+        print("Ten minutes with no change, so the builder stopped. The board"
+              " is back on its saved theme.")
+    else:
+        print("Cancelled. The board is back on its saved theme.")
+    return 0
+
+
+def cmd_theme(args) -> int:
+    home = blink_home()
+    action = getattr(args, "action", None)
+    values = list(getattr(args, "values", None) or [])
+    if action is None:
+        return _theme_builder(home)
+    if action == "list":
+        cur = theme_mod.load_saved(home)
+        for i in range(len(theme_mod.NAMES)):
+            mark = "*" if cur is not None and cur["id"] == i else " "
+            extra = "  (blink theme set key=value, or the builder)" \
+                if i == theme_mod.CUSTOM else ""
+            print(f" {mark} {i:>2}  {theme_mod.display_name(i)}{extra}")
+        return 0
+    if action == "show":
+        for line in _theme_lines(theme_mod.load_saved(home)):
+            print(line)
+        return 0
+    if action == "reset":
+        t = {"id": 0}
+    else:   # set
+        try:
+            t = theme_mod.from_args(values, theme_mod.saved_custom(home))
+        except theme_mod.ThemeError as e:
+            print(f"Not set: {e}.")
+            print("For example: blink theme set ocean, blink theme set"
+                  " bg=000000 text=ffffff, or blink theme set BT1.<code>")
+            return 2
+    try:
+        keep = theme_mod.saved_custom(home) \
+            if t["id"] != theme_mod.CUSTOM else None
+        theme_mod.save(home, t, keep_custom=keep)
+        # A preview left by a builder that died would otherwise reach the
+        # board after this and show something other than what was set.
+        theme_mod.drop_preview(home)
+    except OSError as e:
+        print(f"Could not save the theme: {e}")
+        return 1
+    for line in _theme_lines(theme_mod.load_saved(home)):
+        print(line)
+    print("The bridge sends it to the board within a few seconds.")
+    note = _theme_board_note(home)
+    if note:
+        print(note)
+    return 0
+
+
 def cmd_run(args) -> int:
     """The daemon. This is what the login service starts.
 
@@ -3876,6 +3995,16 @@ def main(argv=None) -> int:
                           help="Which setting; omit to list them all")
     config_p.add_argument("value", nargs="?", choices=["on", "off"],
                           help="Turn it on or off; omit to show it")
+    theme_p = sub.add_parser(
+        "theme",
+        help="Change the board's colours (blink theme opens the builder)")
+    theme_p.add_argument("action", nargs="?",
+                         choices=["set", "reset", "list", "show"],
+                         help="Omit to open the theme builder in a browser")
+    theme_p.add_argument("values", nargs="*",
+                         help="For set: a theme name, a BT1. share code, or"
+                              " key=value pairs (bg text gauge1 gauge2 low"
+                              " mid high width ends dot arcs)")
     run_p = sub.add_parser("run", help="Run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
                        help="Serial port (default: find the board)")
@@ -3896,6 +4025,7 @@ def main(argv=None) -> int:
         "driver": cmd_driver,
         "provision": cmd_provision,
         "config": cmd_config,
+        "theme": cmd_theme,
         "run": cmd_run,
     }[args.cmd](args)
 
