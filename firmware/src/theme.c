@@ -394,7 +394,14 @@ bool theme_custom_valid(const struct theme_custom *t)
 	 * anything but our own daemon -- or from a daemon with a bug -- must
 	 * not be able to put text the colour of the ground on the one device
 	 * whose whole job is being read. */
-	return width_ok(t->w) && theme_contrast(t->c[1], t->c[0]) >= 3.0;
+	/*
+	 * 2.995, not 3.0: the daemon measures with pow() and this with a
+	 * 16-bit table, and a pair it passed at exactly 3.0 can come out a
+	 * hair under here (#595959 on black: 3.00 there, 2.998 here). A
+	 * theme the PC accepted must not be refused for rounding. The PC
+	 * itself refuses below 3.05, so nothing it sends sits this close.
+	 */
+	return width_ok(t->w) && theme_contrast(t->c[1], t->c[0]) >= 2.995;
 }
 
 void theme_derive(const struct theme_custom *t, struct palette *p)

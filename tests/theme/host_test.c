@@ -86,6 +86,12 @@ static void check_palette(const char *name, const struct palette *p,
 	snprintf(m, sizeof(m), "%s: dim on a settings row %.2f:1 >= 4.5",
 		 name, cr(p->dim, p->card));
 	CHECK(cr(p->dim, p->card) >= 4.5, m);
+	/* The plain buttons -- Later, Cancel, OK, Back, What's new's arrows --
+	 * are mk_btn() on a track fill with the default text on it. Retro LCD
+	 * is the closest, at 4.90. */
+	snprintf(m, sizeof(m), "%s: text on a track-filled button %.2f:1 >= 4.5",
+		 name, cr(p->text, p->track));
+	CHECK(cr(p->text, p->track) >= 4.5, m);
 	snprintf(m, sizeof(m), "%s: text on the pill %.2f:1 >= 4.5",
 		 name, cr(p->text, p->panel));
 	CHECK(cr(p->text, p->panel) >= 4.5, m);
@@ -133,7 +139,7 @@ static void check_palette(const char *name, const struct palette *p,
 	CHECK(user || cr(p->low_text, p->bg) >= 4.5, m);
 
 	/* The update buttons write on an `ok` fill. Dark keeps 1.3.4's
-	 * #E6E8EB there (2.0:1 on #2ECC71, as it shipped); every other theme
+	 * #E6E8EB there (1.71:1 on #2ECC71, as it shipped); every other theme
 	 * was 1.00 in Mono and Ink before ok_ink existed. */
 	if (p != theme_builtin(THEME_DARK)) {
 		snprintf(m, sizeof(m), "%s: button label on an ok fill %.2f:1"
@@ -314,6 +320,27 @@ int main(void)
 	      "custom track is the ground with 15% of the text");
 	check_palette("custom sample", &dp, false, true);
 
+	{
+		/*
+		 * The 3:1 floor, met with the PC's arithmetic, must not be
+		 * refused by the board's. The board computes from a 16-bit
+		 * table and the daemon from pow(), so a theme the daemon
+		 * passed at exactly 3.0 can land a hair under it here:
+		 * #595959 on black is 3.00 by pow() and 2.998 by the table.
+		 * The board allows 0.005 for that; the PC leaves 0.05 more
+		 * (it refuses below 3.05).
+		 */
+		struct theme_custom edge = t;
+
+		edge.c[0] = 0x000000;
+		edge.c[1] = 0x595959;
+		CHECK(theme_custom_valid(&edge),
+		      "custom at 3:1 by the PC's maths is not refused for"
+		      " table rounding");
+		edge.c[1] = 0x555555;
+		CHECK(!theme_custom_valid(&edge),
+		      "custom clearly under 3:1 is still refused");
+	}
 	{
 		struct theme_custom bad = t;
 

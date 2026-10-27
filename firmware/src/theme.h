@@ -108,8 +108,9 @@ const struct palette *theme_builtin(int id);
 const char *theme_name(int id);
 
 /* Does this custom theme make a usable screen? Checks every field's range
- * and that the text reads against the background (>= 3:1, the same floor the
- * daemon refuses below). */
+ * and that the text reads against the background: 3:1, less 0.005 for the
+ * board's table rounding (the daemon refuses below 3.05, so its themes
+ * never sit that close). */
 bool theme_custom_valid(const struct theme_custom *t);
 
 /* Expand a custom theme into a full palette. Dim text and the arc track are

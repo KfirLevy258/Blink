@@ -163,7 +163,7 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
 	 * theme's ok_ink. It was always COL_TEXT, which is right on Dark and
 	 * nowhere else: Mono's and Ink's text IS their ok colour (1.00:1), and
 	 * Neon measured 1.29, Retro 1.36. tests/theme holds every theme but Dark
-	 * to 4.5; Dark keeps the label it shipped with.
+	 * to 4.5; Dark keeps the label it shipped with, which is 1.71:1.
 	 */
 	lv_obj_set_style_text_color(l, lv_color_eq(bg, COL_GREEN)
 				       ? lv_color_hex(theme_pal()->ok_ink)
@@ -1618,19 +1618,21 @@ static void show_bright(lv_event_t *e)
  * is its own preview, and a theme that is wrong for the room is visible as
  * wrong before it is chosen.
  *
- * MEMORY. This screen used to be built over the settings panel, and on host
- * LVGL with the real code the three trees together measured 44,200 B -- 5.9 KB
- * deeper than Brightness, the deepest screen until then, in a 30 KB pool the
- * board had already been measured at 21 KB of on the gauges alone (review
- * 2026-10-27). With asserts off a failed allocation is a NULL dereference,
- * then a fault, then a reboot. So opening it frees the settings panel's
- * contents first and closing it builds them again (rebuild_cb already did
- * exactly that for a theme change), and every tile and chip shares ONE static
- * style for everything they have in common, rather than each carrying its own
- * copy of the same eight properties. Host LVGL, this file, Dark, peak pool:
- * 35,160 B before and 26,640 after, against Brightness's 29,232 -- the theme
- * screen is no longer the deepest one. Host pointers are twice the board's,
- * so `[mem] theme-close` is the board's own figure and the one to trust.
+ * MEMORY. This screen used to be built over the settings panel, and it was
+ * the deepest stack on the board: in the 2026-10-27 review's host harness,
+ * with a gauge screen carrying two providers (25,272 B), the three trees
+ * together came to 44,200 B, 5.9 KB more than Brightness -- in a 30 KB pool
+ * the board had already measured at 21 KB on the gauges alone. With asserts
+ * off a failed allocation is a NULL dereference, then a fault, then a reboot.
+ * So opening it frees the settings panel's contents first and closing it
+ * builds them again (rebuild_cb already did exactly that for a theme change),
+ * and the tiles and their chips share TWO static styles, one each, for
+ * everything they have in common, rather than every object carrying its own
+ * copy. A second harness, one provider and a lighter gauge screen (16,216 B),
+ * measures the same code in Dark at a 35,160 B peak before and 26,640 B
+ * after, against Brightness's 29,232: the theme screen is no longer the
+ * deepest one. Host pointers are twice the board's, so `[mem] theme-close`
+ * is the board's own figure and the one to trust.
  */
 #define THEME_SLOTS 6
 #define THEME_TILE_W 144
@@ -1743,7 +1745,15 @@ static void theme_edit_cb(lv_event_t *e)
 		return;
 	}
 	if (edit_ever_sent && now - edit_sent_ms < EDIT_COOLDOWN_MS) {
-		return;		/* the slot already says what happened */
+		/* No second browser tab, but no blank answer either: a tap
+		 * here used to do nothing at all while the slot read its own
+		 * name again (a visit to another page resets it). Say what the
+		 * last ask came to, or that it opened, if nothing has said. */
+		if (edit_note == NULL || edit_note == edit_name) {
+			edit_note = edit_opened;
+		}
+		edit_paint();
+		return;
 	}
 	edit_ever_sent = true;
 	edit_sent_ms = now;
@@ -1876,7 +1886,13 @@ static lv_obj_t *mk_slot(int k)
 		     12 + (k % 2) * (THEME_TILE_W + 8),
 		     (k / 2) * (THEME_TILE_H + THEME_TILE_GAP));
 	lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	/*
+	 * Gestures BUBBLE from a tile, up to theme_gesture_cb. They used to
+	 * stop here, so a back swipe started on a tile -- six of them fill the
+	 * screen, so most back swipes -- did nothing. tile_was_a_tap() is what
+	 * keeps the same swipe from choosing the tile it started on.
+	 */
+	lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	return tile;
 }
 
@@ -1961,6 +1977,10 @@ static void theme_page_cb(lv_event_t *e)
 	lv_obj_t *lbl = lv_obj_get_child(lv_event_get_target(e), 0);
 	char buf[32];
 
+	if (!tile_was_a_tap()) {
+		return;		/* a swipe that began on the button */
+	}
+
 	theme_page = (theme_page + 1) % pages;
 	snprintf(buf, sizeof(buf), "%d/%d " LV_SYMBOL_RIGHT, theme_page + 1,
 		 pages);
@@ -1989,7 +2009,8 @@ static void show_theme(bool fresh)
 				break;
 			}
 		}
-		if (edit_timer == NULL) {
+		if (edit_timer == NULL && (!edit_ever_sent ||
+		    k_uptime_get() - edit_sent_ms >= EDIT_COOLDOWN_MS)) {
 			edit_note = NULL;
 		}
 	}
@@ -2083,6 +2104,10 @@ static void theme_open_cb(void *unused)
 static void theme_row_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
+	/* The row sits where a swipe to close Settings often begins. */
+	if (!tile_was_a_tap()) {
+		return;
+	}
 	if (theme_ov == NULL && bright_ov == NULL && confirm == NULL) {
 		lv_async_call(theme_open_cb, NULL);
 	}
