@@ -24,8 +24,37 @@ higher-wins would confidently show 90% for as long as the stale reading
 survives. Understating a limit is a real cost; inventing usage that has
 already been forgiven is a worse one, and it is the failure this project
 already spent code on (see pc/providers/base.rolled_over).
+
+The two percentages are the exception to "strict recency", in two narrow
+ways, and both came from one logged trace (docs/open-bugs/usage-merge-jitter.md).
+Recency there means the newest FETCH (first_seen_at), not the newest file
+write: the status line is rewritten on every redraw. And a fresh reading may
+keep the dial against a newer one that is at most HOLD_BAND below it, because
+within a window usage only ever rises and a fraction of a point between two
+sources is a disagreement, not a fall. See _pick_pct.
 """
 from pc.providers import base
+
+# How far below the dial a newer reading may land and still be taken for
+# rounding rather than a fall.
+#
+# The widest disagreement the logged trace showed between the status line
+# and Claude Desktop on one window was a whole point (cli 39, desktop 40), so
+# the band is exactly that and no wider. Anything wider is drawn at once as
+# the real change it probably is -- a reset to 0, or a fall of 2. A band that
+# swallowed a genuine fall would be the frozen meter this project exists to
+# avoid, so it errs narrow.
+HOLD_BAND = 1.0
+
+# Two reset stamps this close are the same window. Claude's are fixed per
+# window; Codex derives its from a countdown and a timestamp, so it can drift
+# by a second or two. A different five-hour window is hours away.
+SAME_WINDOW_S = 300
+
+# How long each window lasts, which is what lets a reading with no reset
+# stamp be placed against one that has a stamp: see _same_window.
+SESSION_WINDOW_S = 5 * 3600
+WEEKLY_WINDOW_S = 7 * 86400
 
 
 def _known_pct(v):
@@ -47,6 +76,97 @@ def _pick(frames, has, get):
         if best is None or f.observed_at > best.observed_at:
             best = f
     return get(best) if best is not None else None, best
+
+
+def _same_window(a, b, resets_attr, window_s):
+    """Could these two frames be readings of the same window?
+
+    Both stamped: only if the stamps agree to within SAME_WINDOW_S.
+
+    One stamped, one not (Claude Desktop's cache has no stamps): the stamp
+    says when the current window opened, resets_at - window_s, and a
+    stampless reading taken before that moment is of an earlier window.
+    Without this the hold had a reset hole: Claude Code can fetch a new
+    window without ever having seen the old one end, so no rollover is
+    reported, and a Desktop sample of 0.8 taken a minute before the reset
+    sat within a point of the status line's post-reset 0.3 and came back
+    onto the dial (found in review). A stamp rounded to the hour puts the
+    computed opening up to an hour early, and a sample taken in that hour
+    before the real reset still passes, so where stamps are rounded this
+    narrows the hole and does not close it. The rollover evidence in merge()
+    is the rule that closes it, whenever any source watched the reset.
+
+    Neither stamped: nothing to compare, so yes.
+    """
+    ra = getattr(a, resets_attr, None)
+    rb = getattr(b, resets_attr, None)
+    if ra is not None and rb is not None:
+        return abs(ra - rb) <= SAME_WINDOW_S
+    if ra is None and rb is None:
+        return True
+    stamped, bare = (a, b) if ra is not None else (b, a)
+    opened = getattr(stamped, resets_attr) - window_s
+    return bare.observed_at >= opened
+
+
+def _pick_pct(frames, has, attr, resets_attr, window_s):
+    """(value to show, the frame that won, the frame to date it by).
+
+    All three are None when no frame has this window. Three rules, each
+    found the hard way:
+
+      1. Fresh before stale, then the newest FETCH. Ranking by observed_at
+         let a status-line redraw -- a new mtime over the same numbers --
+         retake the dial from a Desktop sample taken after those numbers
+         were fetched. A stale frame is still a candidate; it just loses to
+         any fresh one, and among stale frames recency still rules, which
+         is what pc/providers/claude_cli's payload memory relies on.
+      2. The hold. When the winner is fresh, a fresh frame a little ABOVE it
+         -- at most HOLD_BAND -- keeps the dial, so a rounding difference
+         between two sources never draws as a step back. Never a stale
+         frame, never a frame from another window, and never a frame `has`
+         turned away: that predicate is where merge() puts the rollover
+         rule, so a reading from before a reset cannot come back this way.
+      3. The date. Whichever frame holds the number, the caption is dated
+         by the freshest fresh frame whose value agrees with what is shown
+         to within the band. Holding Desktop's 40 against a status line
+         redrawn a second ago at 39 must not put "5 min ago" under the dial
+         when the old merge drew a live one. While the number shown is one
+         the old merge would also have accepted, the panel's age caption
+         and stale mark can appear later because of this, never sooner. The
+         one way they can appear sooner is rule 1 putting a DIFFERENT number
+         up -- Desktop's 40 over a redrawn 38 -- and then the caption is
+         that number's own age, which is the honest one.
+
+    The hold ends when the held frame goes stale, and the dial then drops
+    to the winner: a hold is a delay, not a promise. Desktop's 40 sampled
+    at 30 s over a live status-line 39 reads 40 until the sample passes the
+    half-hour bound, then 39 -- one step back, half an hour later, where the
+    old merge drew one every time the two sources took turns.
+    """
+    candidates = [f for f in frames if has(f)]
+    if not candidates:
+        return None, None, None
+    winner = min(candidates, key=lambda f: (f.stale, -f.first_seen_at,
+                                            -f.observed_at))
+    shown = getattr(winner, attr)
+    if winner.stale:
+        return shown, winner, winner
+
+    # Fresh readings of the winner's own window. The winner is one of them.
+    peers = [f for f in candidates
+             if not f.stale
+             and _same_window(f, winner, resets_attr, window_s)]
+
+    # Rule 2: the highest peer whose excess over the winner fits the band.
+    shown = max(getattr(f, attr) for f in peers
+                if 0 <= getattr(f, attr) - shown <= HOLD_BAND)
+
+    # Rule 3: of the peers that agree with `shown`, the most recently heard.
+    dated_by = max((f for f in peers
+                    if 0 <= shown - getattr(f, attr) <= HOLD_BAND),
+                   key=lambda f: f.observed_at)
+    return shown, winner, dated_by
 
 
 def _rolled_at(frames, attr):
@@ -118,16 +238,16 @@ def merge(frames):
     s_rolled = _rolled_at(frames, "session_rolled_at")
     w_rolled = _rolled_at(frames, "weekly_rolled_at")
 
-    session_pct, session_src = _pick(
+    session_pct, session_src, session_dated = _pick_pct(
         frames,
         lambda f: (_known_pct(f.session_pct)
                    and _survives_rollover(f, s_rolled, "session_rolled_at")),
-        lambda f: f.session_pct)
-    weekly_pct, weekly_src = _pick(
+        "session_pct", "session_resets_at", SESSION_WINDOW_S)
+    weekly_pct, weekly_src, weekly_dated = _pick_pct(
         frames,
         lambda f: (_known_pct(f.weekly_pct)
                    and _survives_rollover(f, w_rolled, "weekly_rolled_at")),
-        lambda f: f.weekly_pct)
+        "weekly_pct", "weekly_resets_at", WEEKLY_WINDOW_S)
 
     # Set when no percentage survives but a window was seen to end: the
     # provider then goes out as unknown rather than not at all, dated and
@@ -197,7 +317,13 @@ def merge(frames):
     # desktop reading merged with an hours-old CLI reading is not a stale
     # panel, it is a live percentage next to a reset time that has simply
     # stopped being updated (and secs_until already refuses a past one).
-    primary = session_src or weekly_src or ended_evidence
+    #
+    # Since the hold, the frame that names and dates the dial is not always
+    # the frame that won it: it is the freshest one whose figure agrees with
+    # the number drawn to within HOLD_BAND (_pick_pct, rule 3). Still a
+    # source that vouches for the figure next to it, which is the point of
+    # the paragraph above, and never a stale one while a fresh one agrees.
+    primary = session_dated or weekly_dated or ended_evidence
 
     # And the fact `primary` cannot carry: when this provider last said
     # anything at all.
@@ -218,6 +344,7 @@ def merge(frames):
         provider=provider,
         src=primary.src,
         observed_at=primary.observed_at,
+        first_seen_at=primary.first_seen_at,
         active_at=active_at,
         session_pct=session_pct if session_pct is not None else base.UNKNOWN,
         session_resets_at=session_resets_at,

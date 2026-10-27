@@ -36,12 +36,65 @@ almost always an app update or a login -- after which the desktop cache is
 as good an answer as we have. Persisting it would put a second copy of a
 file that already exists on disk into ~/.blink, with its own invalidation
 and corruption paths, for a case the field report does not contain.
+
+There is a second memory, and it answers a different question: not which
+payload to fall back on, but how long ago the figures in the current one
+were fetched. An mtime cannot say. Each repaint of the status line puts a
+new mtime on the same rate_limits block, and when the merge ranked by mtime
+a repainted 39 beat a Claude Desktop 40 sampled after it -- 39, 40, 39, 41
+on the panel (docs/open-bugs/usage-merge-jitter.md). So each distinct block
+is keyed to the oldest mtime it has appeared under, the frame carries that
+as first_seen_at, and observed_at is left as the mtime.
+
+It is not persisted either, for the reason above. A daemon that has just
+started has never seen any block before, so the first poll dates each one
+by its file's mtime; the cost is one poll of the old ranking, once per
+restart.
 """
+import json
+
 from pc import statusline_source as ss
 from pc.providers import base
 
 PROVIDER_ID = ss.PROVIDER_ID
 SRC_ID = ss.SRC_ID
+
+# The cap on the fetch-time memory, in blocks.
+#
+# Every new figure is a new key: a five-hour window that climbs from 0 to
+# 100 a tenth at a time is a thousand keys, and a daemon runs for weeks. Yet
+# a lookup only ever hits the payload in the file now or the one remembered
+# for the session dial, so nearly all of the history is dead weight. 256
+# keeps a generous margin over the two that matter; at under 200 bytes of
+# JSON per key the whole table stays below about 50 KB.
+FETCH_MEMORY_LIMIT = 256
+
+
+def _block_key(payload):
+    """(key, ends_at) for the payload's rate_limits block.
+
+    `key` is the block as JSON with sorted keys, so two writes of the same
+    figures compare equal whatever order the shim wrote them in. `ends_at`
+    is the earliest reset stamp in the block, or None if it has none. Both
+    are None when the payload has no usable block: there is nothing to
+    remember, and the caller dates the frame by its mtime.
+    """
+    limits = payload.get("rate_limits") if isinstance(payload, dict) else None
+    if not isinstance(limits, dict) or not limits:
+        return None, None
+    try:
+        key = json.dumps(limits, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return None, None
+    # The first moment this block describes a window that has ended: after
+    # it, Claude Code's next fetch is certain to be a different block, so an
+    # ended entry is the cheapest one to forget.
+    ends = []
+    for w in limits.values():
+        r = w.get("resets_at") if isinstance(w, dict) else None
+        if isinstance(r, (int, float)) and not isinstance(r, bool):
+            ends.append(float(r))
+    return key, (min(ends) if ends else None)
 
 
 class ClaudeCliProvider(base.ProviderParser):
@@ -60,6 +113,53 @@ class ClaudeCliProvider(base.ProviderParser):
         # (payload, mtime) for the last reading that had a five-hour
         # percentage, or None before the first one. See the module docstring.
         self._remembered = None
+        # {block key: [oldest mtime it appeared under, epoch its first
+        # window ends]}. See the module docstring and FETCH_MEMORY_LIMIT.
+        self._fetch_times = {}
+
+    def _note_fetch(self, payload, mtime, now_epoch):
+        """Record this sighting of the payload's block; return its fetch time.
+
+        The fetch time is the oldest mtime the block has appeared under, so
+        a repaint never moves it forward. It CAN move back: if the file now
+        carries an mtime older than the one on record, that mtime wins. A
+        wound-back clock or a file restored from backup does that, and the
+        alternative -- a fetch time later than the file's own stamp --
+        would claim the figures were fetched after they were written down.
+        """
+        key, ends_at = _block_key(payload)
+        if key is None:
+            return mtime
+        known = self._fetch_times.get(key)
+        if known is None:
+            self._make_room(now_epoch)
+            self._fetch_times[key] = [mtime, ends_at]
+            return mtime
+        if mtime < known[0]:
+            known[0] = mtime
+        return known[0]
+
+    def _make_room(self, now_epoch):
+        """Shrink the table below FETCH_MEMORY_LIMIT before an insert.
+
+        Blocks whose window has ended go first, all of them, since Claude
+        Code's next fetch cannot reproduce them; only if that frees nothing
+        does the block with the oldest fetch time go. The key about to be
+        inserted cannot be dropped, but one poll can make two lookups (the
+        file's payload, then the remembered one), and the second can drop
+        the first's entry if that block's window has ended. That costs
+        little: an ended window already reads 0 or unknown
+        (base.rolled_over), and the block re-enters on the next poll dated
+        by its mtime, which is how every block was dated before this memory.
+        """
+        if len(self._fetch_times) < FETCH_MEMORY_LIMIT:
+            return
+        for key in [k for k, (_, ends_at) in self._fetch_times.items()
+                    if ends_at is not None and ends_at <= now_epoch]:
+            del self._fetch_times[key]
+        if len(self._fetch_times) >= FETCH_MEMORY_LIMIT:
+            del self._fetch_times[min(self._fetch_times.items(),
+                                      key=lambda kv: kv[1][0])[0]]
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -85,6 +185,8 @@ class ClaudeCliProvider(base.ProviderParser):
         if payload is not None:
             live = self.parse_cli_event(payload, now_epoch, mtime)
             if live is not None:
+                live.first_seen_at = self._note_fetch(payload, mtime,
+                                                      now_epoch)
                 frames.append(live)
                 # base.UNKNOWN is -1.0; anything >= 0 is a real percentage,
                 # including the hard 0.0 map_statusline_frame computes for a
@@ -105,5 +207,7 @@ class ClaudeCliProvider(base.ProviderParser):
             payload, mtime = self._remembered
             remembered = self.parse_cli_event(payload, now_epoch, mtime)
             if remembered is not None:
+                remembered.first_seen_at = self._note_fetch(payload, mtime,
+                                                            now_epoch)
                 frames.append(remembered)
         return frames

@@ -586,8 +586,15 @@ def test_the_panel_reports_the_age_of_the_last_claude_code_reading(tmp_path):
         os.utime(p, (mtime, mtime))
 
     cli = ClaudeCliProvider(path=str(p))
-    desktop = Fixed(frame(src="desktop", at=NOW - 57 * 3600, session=0.0,
-                          weekly=0.0))
+    # Stale, as ClaudeDesktopProvider marks any sample past its half-hour
+    # bound. This fixture used to say stale=False for a 57-hour-old sample,
+    # which no provider produces; it did not matter while the merge ranked
+    # by recency alone, and since fresh frames rank before stale ones it
+    # handed a fictional "fresh" desktop reading the dial.
+    desktop_frame = frame(src="desktop", at=NOW - 57 * 3600, session=0.0,
+                          weekly=0.0)
+    desktop_frame.stale = True
+    desktop = Fixed(desktop_frame)
 
     write({"rate_limits": {"five_hour": {"used_percentage": 27.0}}},
           NOW - 6 * 3600)

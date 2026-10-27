@@ -166,10 +166,28 @@ class NormalizedUsageFrame:
     # cwd that sanitises to nothing. Every other source leaves it empty and
     # the board falls back to the count.
     label: str = ""
+    # The age of the FIGURES, for a source whose file can be younger than
+    # what it says. Ranking percentages by observed_at assumes that writing
+    # the file and fetching the numbers in it happen together, and for the
+    # status line they do not: a repaint stamps a new mtime on an old
+    # rate_limits block. A repainted 39 then outranked a Claude Desktop 40
+    # sampled after the 39 was fetched, and the panel went 39, 40, 39, 41
+    # (docs/open-bugs/usage-merge-jitter.md). pc/normalizer ranks the two
+    # percentages by this field instead.
+    #
+    # ClaudeCliProvider sets it to the oldest mtime its block has appeared
+    # under. No other source sets it, and None is filled in below as
+    # observed_at, so for them nothing changes. It is clamped so it is never
+    # after observed_at. observed_at itself, and every age derived from it
+    # (the wire's age_s, staleness), mean what they always meant.
+    first_seen_at: object = None
 
     def __post_init__(self):
         if self.active_at is None:
             self.active_at = self.observed_at
+        if (self.first_seen_at is None or self.observed_at is None
+                or self.first_seen_at > self.observed_at):
+            self.first_seen_at = self.observed_at
 
     def n_sessions(self) -> int:
         return self.n_run + self.n_wait + self.n_stuck + self.n_idle
