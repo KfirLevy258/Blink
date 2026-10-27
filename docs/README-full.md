@@ -335,7 +335,7 @@ in `FAILED` rather than a boxed unit. Run it locally with
 
 You only need this to put firmware on a board yourself (after that, it updates over the air). It uses the [Zephyr](https://zephyrproject.org/) toolchain.
 
-The default build is what ships: USB only, with no radio, no sign-in and no token store compiled in. The on-device Wi-Fi path is still here and still builds - add `-DEXTRA_CONF_FILE=wifi.conf` to the command below - it is simply not in anything released.
+There is one shipped build: USB only. It has no radio, no sign-in and nowhere to keep a token.
 
 ```bash
 . tools/lib_zephyr.sh && blink_zephyr_activate   # finds the workspace itself
@@ -406,7 +406,7 @@ The things that were open before the first release, and how each was settled.
 - **The device holds no credential.** It never signs in and never talks to Anthropic. The figures come from the Claude Code on your own machine, which has already worked them out, and reach the board over the cable. There is no token on the device to leak, and nothing to revoke if you sell or lend it.
 - **Status-page alerts are off unless you turn them on.** `blink config status-page on` lets the app on your computer read the public status pages (status.claude.com, and status.openai.com when the board shows a Codex page) every 5 minutes, so the panel can say when the service, not your machine, is having trouble. The panel shows it from board firmware 1.4.0. These are plain public requests: no account, token or usage goes with them. Off, the app makes no such request at all.
 - **The setup touches one file.** `~/.claude/settings.json`: its `statusLine.command`, and a hook entry per lifecycle event - see "What the installer changes" above for exactly what is written and what is kept. All of it is reversible with one command.
-- The on-device Wi-Fi and sign-in path still exists in this repository, behind `CONFIG_BLINK_WIFI_MODE`, but is **not built into shipped firmware** - the release script refuses to publish an image containing it.
+- Earlier versions of this repository also held an on-device Wi-Fi and sign-in path, which no release ever included. It used Claude Code's OAuth client id to sign the board in to Anthropic, and it was deleted on 2026-10-27. If its strings ever reappear in an image, the release script refuses to publish it.
 
 ## The status dot
 

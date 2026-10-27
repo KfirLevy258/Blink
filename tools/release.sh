@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build, sign, and publish a Blink firmware release the board can install
-# over WiFi. The version comes from firmware/src/version.h -- bump it FIRST.
+# Build, sign, and publish a Blink firmware release the daemon can install
+# over USB. The version comes from firmware/src/version.h -- bump it FIRST.
 # Requires: zephyr env NOT needed here (script sources it), `gh auth status` ok.
 set -euo pipefail
 
@@ -149,10 +149,12 @@ blink_zephyr_build_ready || exit 1
 
 BIN="$ROOT/firmware/build-sb/firmware/zephyr/zephyr.signed.bin"
 
-# A release must not carry the on-device network path. CONFIG_BLINK_WIFI_MODE
-# defaults to n, but a default is not a guarantee: a stray EXTRA_CONF_FILE or a
-# sticky build directory flips it silently, and nobody would find out until a
-# customer's board signed itself in to Anthropic as Claude Code.
+# A release must not carry the on-device network path. The code and its
+# CONFIG_BLINK_WIFI_MODE switch were deleted on 2026-10-27, so on this tree
+# neither check below can fire. They stay as tripwires: the path could
+# return through an old build directory, an undone commit or a merge from
+# a fork, and the first anyone would hear of it is a customer's board
+# signing in to Anthropic as Claude Code.
 #
 # Checks the ARTIFACT, not only the config, because the artifact is what ships.
 # If the OAuth path were ever linked in, these strings would be in the image.
@@ -185,11 +187,12 @@ SLOT=$((0x150000))
 
 # The OTA artifact must stay UNCONFIRMED -- the opposite of what the factory
 # scripts flash (tools/sign_confirmed.py). It lands in slot 1, boots once, and
-# firmware/src/main.c confirms it only after WiFi+TLS or the daemon proves the
-# image works. A pre-confirmed artifact would take that safety net away: a bad
-# release would then be permanent on every board that accepted it, with no
-# revert. The size check above already catches --pad, which pads to the full
-# slot -- this names the reason, so nobody "fixes" it by padding here too.
+# firmware/src/main.c confirms it only once the daemon has delivered usage
+# to it, which proves the image works. A pre-confirmed artifact would take
+# that safety net away: a bad release would then be permanent on every board
+# that accepted it, with no revert. The size check above already catches
+# --pad, which pads to the full slot -- this names the reason, so nobody
+# "fixes" it by padding here too.
 [ "$SIZE" -lt "$SLOT" ] || {
 	echo "FATAL: $BIN is exactly the slot size -- it looks padded, and a"
 	echo "       padded image carries a trailer. The OTA artifact must be"

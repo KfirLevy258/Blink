@@ -1,15 +1,14 @@
 /*
- * SNTP wall-clock sync + ISO-8601 -> seconds-remaining.
+ * The board's wall clock: an epoch the daemon sends over USB in its `time`
+ * message, anchored to uptime, plus the local offset and the ISO-8601 ->
+ * seconds-remaining arithmetic.
  *
- * Two jobs, both needed only in standalone WiFi mode: give mbedTLS a real time
- * so certificate validity checks pass, and let the board turn the API's
- * absolute resets_at timestamps into live countdowns itself (over USB the PC
- * does this instead).
+ * It also synced over SNTP once, for the standalone WiFi mode, which needed a
+ * real time for mbedTLS's certificate checks and to turn the API's absolute
+ * resets_at into countdowns itself. That mode was removed on 2026-10-27, and
+ * the file keeps its name because renaming it buys nothing.
  */
 #include <zephyr/kernel.h>
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-#include <zephyr/net/sntp.h>
-#endif
 #include <zephyr/sys/timeutil.h>
 #include <zephyr/sys/printk.h>
 #include <string.h>
@@ -37,47 +36,12 @@ static int64_t sync_unix_s;
 static bool have_offset;
 static int32_t offset_min;
 
-/* The standalone net worker syncs/adjusts time while the UI thread reads the
- * clock every second. The base is a 64-bit pair -- not atomic on this core --
- * so reads and writes go through a spinlock (held for nanoseconds). */
+/* The base is a 64-bit pair -- not atomic on this core -- so reads and writes
+ * go through a spinlock (held for nanoseconds). It was written for the WiFi
+ * mode's net worker, which set the clock while the UI thread read it; the
+ * daemon's `time` message now arrives on the protocol thread while the UI
+ * thread reads, so the lock still has a job. */
 static struct k_spinlock time_lock;
-
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* The only part of this file that needs a network. The rest -- set_manual,
- * set_offset, local, secs_until -- is arithmetic on a clock the daemon sets
- * over USB, and is what a tethered board actually uses. */
-int net_time_sync(int timeout_s)
-{
-	struct sntp_time t;
-	const char *servers[] = { "pool.ntp.org", "time.google.com", "time.cloudflare.com" };
-
-	for (int i = 0; i < 3; i++) {
-		int rc = sntp_simple(servers[i], timeout_s * 1000, &t);
-
-		if (rc == 0 && !time_sane((int64_t)t.seconds)) {
-			/* A "successful" sync outside the sane window is
-			 * worse than none: TLS would then trust certificates
-			 * against a lie. Try the next server. */
-			printk("[time] %s answered insane time %lld; rejected\n",
-			       servers[i], (long long)t.seconds);
-			rc = -EINVAL;
-		}
-		if (rc == 0) {
-			k_spinlock_key_t key = k_spin_lock(&time_lock);
-
-			sync_unix_s = (int64_t)t.seconds;
-			sync_uptime_ms = k_uptime_get();
-			have_time = true;
-			k_spin_unlock(&time_lock, key);
-			printk("[time] synced via %s (unix %lld)\n", servers[i],
-			       (long long)sync_unix_s);
-			return 0;
-		}
-		printk("[time] %s failed: %d\n", servers[i], rc);
-	}
-	return -ETIMEDOUT;
-}
-#endif /* CONFIG_BLINK_WIFI_MODE */
 
 bool net_time_valid(void)
 {

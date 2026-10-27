@@ -1,10 +1,10 @@
 /*
- * Settings panel: the recovery actions that used to require reflashing.
+ * Settings panel: brightness and software update.
  *
- * Each action clears one persistence tier and reboots -- the boot path then
- * lands in the right flow by itself (no creds -> provisioning, no token ->
- * sign-in, nothing -> mode selection). Deliberately no in-place teardown of
- * the running mode: a cold reboot is simpler and reclaims all memory.
+ * It began as the recovery actions that used to require reflashing -- forget
+ * the network, sign out, factory reset -- each clearing one persistence tier
+ * and rebooting. Those belonged to the standalone WiFi mode and went with it
+ * on 2026-10-27; see the note above `panel` for why a USB unit never had them.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
@@ -25,9 +25,6 @@
 #include "ui_anim.h"
 #include "ui_swipe.h"
 #include "ui_slide.h"
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-#include "net_wifi.h"
-#endif
 #include "fmt.h"
 #include "version.h"
 #include "backlight.h"
@@ -51,30 +48,20 @@
 #define COL_DANGER_BD	lv_color_hex(0x7A2B23)
 
 /*
- * Destructive actions -- and the confirm-then-reboot machinery behind them --
- * are standalone-WiFi-only.
+ * No destructive actions, and no confirm-then-reboot machinery behind them.
  *
- * Every one of them forgets something the device is holding: a network, a
+ * They were standalone-WiFi-only, and went with that mode on 2026-10-27.
+ * Every one of them forgot something the device was holding: a network, a
  * token, or all of it. A USB unit holds none of that. The config record a
  * reset would wipe contains a brightness level and an OTA breadcrumb the next
  * boot clears anyway, so the whole ceremony -- a confirm dialog, a cold
  * reboot -- bought a return to 100% brightness, which the Brightness row does
- * on the spot. See the layout note in the USB panel builder.
+ * on the spot. See the layout note in build_panel().
  */
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-enum action {
-	ACT_WIFI,	/* forget network, keep token */
-	ACT_SIGNIN,	/* forget token, keep network */
-	ACT_FACTORY,	/* forget everything */
-};
-#endif
 
 static lv_obj_t *panel;		/* NULL when closed */
-/* Shared with the software-update install dialog, which is in both builds. */
+/* The software-update install dialog. */
 static lv_obj_t *confirm;	/* NULL when no dialog is up */
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-static enum action pending;
-#endif
 
 /* Software-update widgets (all NULL when their owner is closed/absent). */
 static lv_obj_t *notice;	/* outcome popup on the top layer */
@@ -136,49 +123,6 @@ static int64_t upd_revert_at;	/* "Up to date" shows briefly, then idles */
 #define USB_DL_DEADLINE_MS 300000
 static int64_t usb_dl_deadline;
 
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* "Factory reset" is the honest name here and only here: this build's config
- * record really does hold the network credentials, the refresh token and the
- * AP password, so clearing it returns the device to the state it shipped in. */
-static const char *const act_label[] = {
-	[ACT_WIFI] = "Reset WiFi",
-	[ACT_SIGNIN] = "Re-sign-in",
-	[ACT_FACTORY] = "Factory reset",
-};
-
-/* Red is for the action that costs a full re-setup, and only that one;
- * painting every confirm red made them all look equally scary. */
-static inline bool act_is_danger(enum action a)
-{
-	return a == ACT_FACTORY;
-}
-
-static void do_pending(void)
-{
-	printk("[settings] %s -> reboot\n", act_label[pending]);
-	switch (pending) {
-	case ACT_WIFI:
-		cfg_clear_wifi();
-		break;
-	case ACT_SIGNIN:
-		cfg_clear_token();
-		break;
-	case ACT_FACTORY:
-		cfg_reset();
-		break;
-	}
-	k_msleep(200);	/* let the NVS writes land */
-	ui_boot_mark_intentional_reboot();
-	sys_reboot(SYS_REBOOT_COLD);
-}
-
-static void confirm_yes_cb(lv_event_t *e)
-{
-	ARG_UNUSED(e);
-	do_pending();	/* never returns */
-}
-#endif /* CONFIG_BLINK_WIFI_MODE -- destructive actions */
-
 static void confirm_no_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
@@ -222,30 +166,6 @@ static void mk_line(lv_obj_t *parent, int y)
 	lv_obj_set_style_radius(l, 0, 0);
 	lv_obj_clear_flag(l, LV_OBJ_FLAG_SCROLLABLE);
 }
-
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* A raised panel-coloured card (decoration only -- not clickable, so the
- * controls sitting on top of it still get every touch). */
-static lv_obj_t *mk_card(lv_obj_t *parent, int x, int y, int w, int h)
-{
-	lv_obj_t *c = lv_obj_create(parent);
-
-	lv_obj_set_size(c, w, h);
-	lv_obj_align(c, LV_ALIGN_TOP_LEFT, x, y);
-	lv_obj_set_style_bg_color(c, COL_PANEL, 0);
-	lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(c, COL_TRACK, 0);
-	lv_obj_set_style_border_width(c, 1, 0);
-	lv_obj_set_style_radius(c, 11, 0);
-	lv_obj_set_style_pad_all(c, 0, 0);
-	lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
-	/* The card is clickable-by-default and sits under the brightness gap;
-	 * without this a drift-press between the steppers would bubble up and
-	 * close the panel. Swallow the gesture here. */
-	lv_obj_clear_flag(c, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	return c;
-}
-#endif /* CONFIG_BLINK_WIFI_MODE */
 
 /*
  * Brightness is five discrete levels -- 20/40/60/80/100, see backlight.h -- so
@@ -307,59 +227,6 @@ static void bright_refresh(void)
 			lvl < p ? COL_DIM : (lvl == p ? COL_TEXT : COL_TRACK), 0);
 	}
 }
-
-/* user_data carries the step direction (+1 / -1). */
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* The +/- stepper, kept for the WiFi layout only. The shipped panel picks a
- * level directly -- see show_bright() -- because stepping needed four presses
- * to cross a range with five positions. */
-static void bright_step_cb(lv_event_t *e)
-{
-	backlight_step((int)(intptr_t)lv_event_get_user_data(e));
-	bright_refresh();
-}
-#endif /* CONFIG_BLINK_WIFI_MODE */
-
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-static void show_confirm(void)
-{
-	confirm = lv_obj_create(panel);
-	lv_obj_set_size(confirm, LV_PCT(100), LV_PCT(100));
-	lv_obj_set_style_bg_color(confirm, COL_BG, 0);
-	lv_obj_set_style_bg_opa(confirm, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_width(confirm, 0, 0);
-	lv_obj_set_style_pad_all(confirm, 0, 0);
-	lv_obj_clear_flag(confirm, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_center(confirm);
-
-	lv_obj_t *q = lv_label_create(confirm);
-
-	lv_label_set_text_fmt(q, "%s?\nThe device will reboot.",
-			      act_label[pending]);
-	lv_obj_set_style_text_color(q, COL_TEXT, 0);
-	lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(q, LV_ALIGN_TOP_MID, 0, 40);
-
-	/* Red is reserved for the one action that costs a full re-setup;
-	 * painting every confirm red made them all look equally scary. */
-	lv_obj_t *yes = mk_btn(confirm, "Yes, do it",
-			       act_is_danger(pending) ? COL_RED : COL_GREEN,
-			       confirm_yes_cb, NULL);
-
-	lv_obj_align(yes, LV_ALIGN_BOTTOM_MID, 0, -70);
-
-	lv_obj_t *no = mk_btn(confirm, "Cancel", COL_TRACK,
-			      confirm_no_cb, NULL);
-
-	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 0, -18);
-}
-
-static void act_cb(lv_event_t *e)
-{
-	pending = (enum action)(intptr_t)lv_event_get_user_data(e);
-	show_confirm();
-}
-#endif /* CONFIG_BLINK_WIFI_MODE */
 
 /* --- Software update: tile state machine, confirm, progress overlay --- */
 
@@ -1012,7 +879,10 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		/* Which link this is arriving on. Serial tops out near 11 KB/s
 		 * against WiFi's hundreds, so a USB update legitimately takes
 		 * minutes -- saying so up front is the difference between
-		 * "slow" and "stuck" (user request 2026-08-20). */
+		 * "slow" and "stuck" (user request 2026-08-20). The WiFi
+		 * branch below is ota.c's HTTPS route, which no shipped build
+		 * reaches since the WiFi mode went (2026-10-27); it stays with
+		 * that half of ota.c. */
 		dl_src = lv_label_create(dl_overlay);
 		lv_obj_set_style_text_color(dl_src, COL_DIM, 0);
 		lv_obj_align(dl_src, LV_ALIGN_CENTER, 0, -8);
@@ -1468,11 +1338,8 @@ static volatile bool want_open;
 static volatile int want_page;
 static volatile bool want_close;
 
-#if !IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* The shipped panel's furniture: a back control, a list row, and the
- * brightness screen. The WiFi layout above predates all three and keeps
- * its own card-and-tiles arrangement, which is the only thing five
- * actions fit into. */
+/* What the panel is built from: the back control, list rows, and the
+ * brightness screen. */
 /*
  * The back control.
  *
@@ -1709,7 +1576,6 @@ static void show_bright(lv_event_t *e)
 
 	bright_refresh();	/* paints the stops and the readout */
 }
-#endif /* !CONFIG_BLINK_WIFI_MODE */
 
 static void build_panel(lv_obj_t *parent_scr);
 
@@ -1722,8 +1588,10 @@ static void do_open(void (*pump)(void))
 	mem_stats_report("gauges");
 	ui_slide_begin();
 	/* The live screen, not one cached when the gesture landed. The cached
-	 * pointer outlived its object on the failed-join path, where
-	 * usage_view_deinit() deletes the gauge screen before provisioning. */
+	 * pointer outlived its object on the WiFi mode's failed-join path,
+	 * where usage_view_deinit() deleted the gauge screen before
+	 * provisioning. That path is gone (2026-10-27); asking the live
+	 * screen costs nothing and keeps the next such path safe. */
 	build_panel(lv_screen_active());
 	lv_obj_update_layout(panel);
 	ui_slide_freeze(false);
@@ -1972,269 +1840,6 @@ static void build_panel(lv_obj_t *parent_scr)
 	 * screen moves under it, in ui_slide_run(). */
 	lv_obj_set_pos(panel, 0, 0);
 
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-	/* --- Header: green edge seam + back chevron + title + rule. The
-	 * chevron used to be a full-height LEFT_MID button that the reset tiles
-	 * kept covering; it now lives in the top bar (still a left-edge cue via
-	 * the seam). Tap or swipe-right both go home. */
-	lv_obj_t *seam = lv_obj_create(panel);
-
-	lv_obj_set_size(seam, 3, 30);
-	lv_obj_align(seam, LV_ALIGN_TOP_LEFT, 0, 0);
-	lv_obj_set_style_bg_color(seam, COL_GREEN, 0);
-	lv_obj_set_style_bg_opa(seam, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_width(seam, 0, 0);
-	lv_obj_set_style_radius(seam, 0, 0);
-	lv_obj_clear_flag(seam, LV_OBJ_FLAG_SCROLLABLE);
-
-	lv_obj_t *back = lv_btn_create(panel);
-
-	/* Drawn narrow and short (x 2..42, y 2..28), no gesture-bubble: it used
-	 * to be 48 wide and sat right on top of the brightness "-" stepper, so a
-	 * high tap on "-" hit the chevron and bounced you home (user-reported
-	 * 2026-07-20). The steppers below start at y=39 -- an 11px gap. */
-	lv_obj_set_size(back, 40, 26);
-	lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_shadow_width(back, 0, 0);
-	lv_obj_align(back, LV_ALIGN_TOP_LEFT, 2, 2);
-	/* Gestures MUST bubble from here. The extended touch area below covers
-	 * the green seam and a strip of bare panel, and whatever the hit test
-	 * lands on becomes the gesture's origin -- so with bubbling off, a
-	 * swipe-right starting anywhere in that region died on this button
-	 * instead of reaching panel_gesture_cb, silently un-closing ~814 px of
-	 * a panel whose own seam comment promises the swipe works.
-	 * close_panel() is idempotent (its `closing` guard), so a release that
-	 * also fires back_cb costs nothing. */
-	lv_obj_add_flag(back, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	/*
-	 * 40x26 is too small to hit reliably on a resistive panel that already
-	 * needs 16 averaged reads per report -- reported as "not really
-	 * clickable" 2026-07-27. Grow the TOUCH area without growing the drawn
-	 * button: the chevron stays visually where it belongs in the top bar,
-	 * but answers to a region 12 px larger on every side. That is 64x50 nominally;
-	 * 10 px of it falls off the top and left edges of the screen, so the reachable
-	 * area is 54x40.
-	 *
-	 * Safe against the 2026-07-20 regression even though the extended area
-	 * now reaches into the stepper row: lv_indev hit-tests children last to
-	 * first and takes the first hit, and "minus" is created after this, so
-	 * it wins wherever the two overlap. Keep it that way -- moving this
-	 * button's creation below the steppers would silently restore the bug.
-	 */
-	lv_obj_set_ext_click_area(back, 12);
-	lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
-
-	lv_obj_t *bl = lv_label_create(back);
-
-	lv_label_set_text(bl, LV_SYMBOL_LEFT);
-	lv_obj_set_style_text_color(bl, COL_DIM, 0);
-	lv_obj_center(bl);
-
-	lv_obj_t *title = lv_label_create(panel);
-
-	lv_label_set_text(title, "Settings");
-	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
-	lv_obj_set_style_text_color(title, COL_TEXT, 0);
-	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
-
-	mk_line(panel, 30);
-
-	/* --- Brightness: card, big opposite-corner steppers, and a stacked
-	 * "Brightness / 70%" readout. The pips are gone -- the number already
-	 * says the level (user-reported the panel was too crowded). --- */
-	mk_card(panel, 12, 34, 296, 50);
-
-	/* Wide steppers filling the row to a 4px edge inset (minus x16..104, plus
-	 * x216..304), leaving ~112px in the centre for the value/label. Centred
-	 * in the 50px card (y39..79): the card runs y34..84, a 5px margin top and
-	 * bottom. The back chevron ends at y28, so the 11px gap keeps a high tap
-	 * on "-" off it even at the left edge. */
-	lv_obj_t *minus = mk_btn(panel, LV_SYMBOL_MINUS, COL_TRACK,
-				 bright_step_cb, (void *)(intptr_t)-1);
-	lv_obj_set_size(minus, 88, 40);
-	lv_obj_set_style_radius(minus, 8, 0);
-	lv_obj_align(minus, LV_ALIGN_TOP_LEFT, 16, 39);
-
-	lv_obj_t *plus = mk_btn(panel, LV_SYMBOL_PLUS, COL_TRACK,
-				bright_step_cb, (void *)(intptr_t)1);
-	lv_obj_set_size(plus, 88, 40);
-	lv_obj_set_style_radius(plus, 8, 0);
-	lv_obj_align(plus, LV_ALIGN_TOP_RIGHT, -16, 39);
-
-	lv_obj_t *blab = lv_label_create(panel);
-
-	lv_label_set_text(blab, "Brightness");
-	lv_obj_set_style_text_color(blab, COL_DIM, 0);
-	lv_obj_align(blab, LV_ALIGN_TOP_MID, 0, 40);
-
-	pct_lbl = lv_label_create(panel);
-	lv_obj_set_style_text_font(pct_lbl, &lv_font_montserrat_20, 0);
-	lv_obj_set_style_text_color(pct_lbl, COL_TEXT, 0);
-	lv_obj_align(pct_lbl, LV_ALIGN_TOP_MID, 0, 56);
-	bright_refresh();
-
-	/* --- Software update: its own row directly under brightness, fenced
-	 * by rules so it never reads as a fourth reset action --- */
-	mk_line(panel, 89);
-
-	upd_btn = lv_btn_create(panel);
-	lv_obj_set_size(upd_btn, 296, 30);
-	lv_obj_align(upd_btn, LV_ALIGN_TOP_LEFT, 12, 94);
-	lv_obj_set_style_bg_color(upd_btn, COL_PANEL, 0);
-	lv_obj_set_style_bg_opa(upd_btn, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(upd_btn, COL_TRACK, 0);
-	lv_obj_set_style_border_width(upd_btn, 1, 0);
-	lv_obj_set_style_radius(upd_btn, 9, 0);
-	lv_obj_set_style_shadow_width(upd_btn, 0, 0);
-	lv_obj_set_style_pad_all(upd_btn, 0, 0);
-	/* Same as the other controls: don't scroll its (wide) contents and don't
-	 * bubble drift-gestures into a close. A horizontal drag on a SCROLLABLE
-	 * button gets eaten as a scroll and the tap never fires -- that is why
-	 * this row felt dead (user-reported 2026-07-20). */
-	lv_obj_clear_flag(upd_btn, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(upd_btn, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	lv_obj_add_event_cb(upd_btn, upd_cb, LV_EVENT_CLICKED, NULL);
-
-	lv_obj_t *swl = lv_label_create(upd_btn);
-
-	lv_label_set_text(swl, "Software update");
-	lv_obj_set_style_text_color(swl, COL_TEXT, 0);
-	lv_obj_align(swl, LV_ALIGN_LEFT_MID, 12, 0);
-
-	lv_obj_t *swchev = lv_label_create(upd_btn);
-
-	lv_label_set_text(swchev, LV_SYMBOL_RIGHT);
-	lv_obj_set_style_text_color(swchev, COL_DIM, 0);
-	lv_obj_align(swchev, LV_ALIGN_RIGHT_MID, -10, 0);
-
-	/* The right-hand label IS the OTA state readout (driven by
-	 * upd_timer_cb); "Software update" on the left never changes. */
-	upd_lbl = lv_label_create(upd_btn);
-	lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
-	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -26, 0);
-
-	upd_timer_cb(NULL);	/* correct the row before the first tick */
-
-	/* --- Reset actions --- */
-	mk_line(panel, 129);
-
-	static const char *const acticon[] = {
-		[ACT_WIFI] = LV_SYMBOL_WIFI,
-		[ACT_SIGNIN] = LV_SYMBOL_REFRESH,
-		[ACT_FACTORY] = LV_SYMBOL_TRASH,
-	};
-
-	/* (already inside the WiFi-only branch that opens above) */
-	/* Three actions: a centred heading over a row of three tiles.
-	 *
-	 * The labels are one word each because three of them share 296 px; the
-	 * single-action layout below has the room to say "Factory reset" in
-	 * full, and does. */
-	static const char *const acttext[] = {
-		[ACT_WIFI] = "Wi-Fi",
-		[ACT_SIGNIN] = "Sign-in",
-		[ACT_FACTORY] = "Factory",
-	};
-
-	lv_obj_t *rlab = lv_label_create(panel);
-
-	lv_label_set_text(rlab, "RESET");
-	lv_obj_set_style_text_color(rlab, COL_DIM, 0);
-	lv_obj_set_style_text_letter_space(rlab, 2, 0);
-	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 134);
-
-	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
-	static const int tilex[] = { 12, 114, 216 };
-
-	/* ARRAY_SIZE, not a literal 3. It WAS a literal, and when this build
-	 * stopped shipping the radio the arrays shrank to one entry while the
-	 * loop kept running three times -- reading acts[1..2] and tilex[1..2]
-	 * off the end, using the garbage as an index into acticon/acttext, and
-	 * handing whatever pointer came back to lv_label_set_text. Two extra
-	 * tiles in junk positions with junk labels, which is what "the settings
-	 * page looks weird" turned out to be. */
-	for (unsigned int i = 0; i < ARRAY_SIZE(acts); i++) {
-		enum action a = acts[i];
-		bool danger = a == ACT_FACTORY;
-		lv_obj_t *tile = lv_btn_create(panel);
-		lv_color_t fg = danger ? COL_RED : COL_TEXT;
-
-		lv_obj_set_size(tile, 92, 58);
-		lv_obj_set_style_bg_color(tile,
-			danger ? COL_DANGER_BG : COL_PANEL, 0);
-		lv_obj_set_style_border_color(tile,
-			danger ? COL_DANGER_BD : COL_TRACK, 0);
-		lv_obj_set_style_border_width(tile, 1, 0);
-		lv_obj_set_style_radius(tile, 12, 0);
-		lv_obj_set_style_shadow_width(tile, 0, 0);
-		/* Zero the theme's button padding: it shrank the 58px content box
-		 * until the icon (top) and label (bottom) overprinted each other
-		 * (user-reported 2026-07-20). And no gesture-bubble -> a drift on
-		 * a tile can't close the panel. */
-		lv_obj_set_style_pad_all(tile, 0, 0);
-		lv_obj_clear_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
-		lv_obj_align(tile, LV_ALIGN_TOP_LEFT, tilex[i], 152);
-		lv_obj_add_event_cb(tile, act_cb, LV_EVENT_CLICKED,
-				    (void *)(intptr_t)a);
-
-		lv_obj_t *ic = lv_label_create(tile);
-
-		lv_label_set_text(ic, acticon[a]);
-		lv_obj_set_style_text_color(ic, fg, 0);
-		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 8);
-
-		lv_obj_t *tx = lv_label_create(tile);
-
-		lv_label_set_text(tx, acttext[a]);
-		lv_obj_set_style_text_color(tx, fg, 0);
-		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -8);
-	}
-
-	/* Debug-me line: build + network, answered without a serial cable
-	 * (which would reset the board). IP dropped at the user's request
-	 * (2026-07-20); the SSID gets more room, capped so it can't overrun. */
-	char line[56];
-	/* (already inside the WiFi-only branch that opens above) */
-	char ip[16], ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
-
-	/* (already inside the WiFi-only branch that opens above) */
-	if (net_wifi_sta_ip(ip, sizeof(ip)) &&
-	    cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
-		char ssid_a[CFG_SSID_MAX];
-
-		fmt_ascii(ssid, ssid_a, sizeof(ssid_a));
-		snprintf(line, sizeof(line), "Blink %s  |  %.20s",
-			 BLINK_FW_VERSION, ssid_a);
-	} else
-	{
-		/* Both halves when the daemon has introduced itself: they ship
-		 * from one tag, so the useful support question is which of the
-		 * two is behind -- and the version of the half running on the
-		 * customer's computer is otherwise invisible from here.
-		 *
-		 * Nested rather than chained onto the #if'd branch above: that
-		 * `else` only exists in a WiFi build, and an `else if` here
-		 * left the USB build with an else and no if. */
-		if (proto_host_version()[0]) {
-			snprintf(line, sizeof(line), "Blink %s  |  App %s",
-				 BLINK_FW_VERSION, proto_host_version());
-		} else {
-			snprintf(line, sizeof(line), "Blink %s",
-				 BLINK_FW_VERSION);
-		}
-	}
-
-	lv_obj_t *info = lv_label_create(panel);
-
-	lv_label_set_text(info, line);
-	lv_obj_set_style_text_color(info, COL_DIM, 0);
-	/* One line, dotted if it would run wider than the screen. Narrower than
-	 * the screen so the dots land inside the right edge, not on it. */
-	lv_obj_set_size(info, 296, 17);
-	lv_label_set_long_mode(info, LV_LABEL_LONG_DOT);
-	lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -2);
-#else
 	/*
 	 * Two rows and nothing else.
 	 *
@@ -2369,9 +1974,6 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 	lv_obj_align(keep, LV_ALIGN_TOP_MID, 0, FOOT_Y2);
 
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
-
-#endif
-
 }
 
 /*
@@ -2555,12 +2157,15 @@ static void swipe_cb(enum ui_swipe_dir dir)
  * "the settings gesture is dead the whole time we're waiting for a host"
  * would not happen -- that is now the behaviour we want for swipes.
  *
- * This tap is NOT blocked, and that is deliberate. Blocking both would strand
- * the board: a WiFi join that succeeds while the fetch never does leaves the
+ * This tap is NOT blocked. It was kept as the escape hatch for the standalone
+ * WiFi mode: a WiFi join that succeeded while the fetch never did left the
  * bar up indefinitely with have_data false, and with no way into settings
- * there is no way to sign out or change network short of a power cycle. A tap
- * on the edge chevron is a deliberate act rather than an accidental one, so it
- * stays as the escape hatch.
+ * there was no way to sign out or change network short of a power cycle.
+ * That mode was removed on 2026-10-27, which leaves the tap with a weaker
+ * reason -- the software-update row and the version are still worth reaching
+ * from a board that is waiting -- and it was left alone rather than
+ * re-decided, because the removal was meant to change no shipped byte. A tap
+ * on the edge chevron is a deliberate act rather than an accidental one.
  */
 /*
  * A tap on an edge zone -- but only if it was a tap.

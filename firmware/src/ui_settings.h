@@ -6,8 +6,8 @@
 /* Make `scr` (the gauge screen) open the settings panel on a left swipe.
  * The panel is an overlay on the same screen, NOT a separate LVGL screen:
  * the 16 KiB LVGL pool cannot hold two full screens (see usage_view_deinit).
- * All three actions (Reset WiFi / Re-sign-in / Factory reset) confirm first,
- * then persist the change and reboot. */
+ * It holds brightness and software update; the reset-and-reboot actions went
+ * with the standalone WiFi mode on 2026-10-27. */
 void ui_settings_attach(lv_obj_t *scr);
 
 /* One-line notice popup on the gauge screen (update outcome etc.). Safe to
@@ -35,13 +35,15 @@ void ui_settings_notice_dismiss(void);
 /*
  * Discard any open/close the handlers latched but nobody serviced.
  *
- * ui_settings_attach() arms the gestures long before either mode loop exists:
- * main.c runs boot_ssid_scan() and the WiFi settle in between, which pump
- * lv_timer_handler() with touch fully live and can take a minute on a failed
- * join. A tap latched in that window would otherwise be acted on by the mode
- * loop's first iteration -- the panel sliding in by itself long after the user
- * gave up on it. Call this once before entering a mode loop; a deliberate tap
- * repeats, and from there on the latch is serviced within one iteration.
+ * ui_settings_attach() arms the gestures before the mode loop exists. In the
+ * standalone WiFi mode (removed 2026-10-27) main.c ran a network scan and a
+ * WiFi settle in between, which pumped lv_timer_handler() with touch fully
+ * live and could take a minute on a failed join; a tap latched in that window
+ * was acted on by the mode loop's first iteration -- the panel sliding in by
+ * itself long after the user gave up on it. The gap is short now, but the
+ * call costs nothing. Call this once before entering the mode loop; a
+ * deliberate tap repeats, and from there on the latch is serviced within one
+ * iteration.
  */
 void ui_settings_drop_pending(void);
 

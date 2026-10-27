@@ -12,8 +12,8 @@ void proto_init(void);
  * periodic ping. Call repeatedly from the main loop. */
 void proto_service(void);
 
-/* True once any protocol message has arrived from a PC daemon -- used at boot
- * to choose USB mode over WiFi. */
+/* True once any protocol message has arrived from a PC daemon -- read at boot
+ * to know whether a daemon spoke during the splash. */
 bool proto_host_seen(void);
 
 /* True from the moment the host has been silent past the timeout without

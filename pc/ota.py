@@ -1,11 +1,10 @@
 """Release fetch and serial push, for OTA while the board is tethered.
 
-USB-bridge mode has no network on the board -- run_usb() never starts
-net_worker, so the firmware's own HTTPS updater is unreachable and the update
-row did nothing there. We have both an internet connection and the board's
-serial link, so the split is: we fetch from the same GitHub release feed the
-WiFi path uses, and push the image down; the board writes and verifies it with
-exactly the same code either way.
+The board has no network of its own -- the firmware's standalone WiFi mode,
+which fetched updates itself over HTTPS, was removed on 2026-10-27 -- so the
+update row did nothing until this existed. We have both an internet connection
+and the board's serial link, so the split is: we fetch from the GitHub release
+feed that WiFi path used, and esptool writes the image.
 
 Nothing here trusts the transport, but note WHERE that check now lives. Over
 WiFi the board hashed what it received. Over USB the board is not part of the

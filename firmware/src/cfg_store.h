@@ -14,6 +14,18 @@ enum cfg_mode {
 	CFG_MODE_WIFI,		/* board fetches usage itself */
 };
 
+/*
+ * The mode, the WiFi credentials, the token, the setup AP's password, the
+ * weekly-gauge choice and the stored UTC offset all belong to the standalone
+ * WiFi mode, removed on 2026-10-27. Their fields stay in the record, at the
+ * same offsets and sizes, and so do these accessors: the record's layout is
+ * what boards in the field carry, and an OTA from 1.3.4 has to find every
+ * other setting exactly where it left it. Treat them as reserved. The only
+ * reader left is main.c's boot-time erase of a token an old WiFi build
+ * stored; an unused accessor costs nothing, because the linker drops it.
+ * Nothing clears the network or setup-AP passwords such a board still
+ * holds -- see the comment at that erase.
+ */
 #define CFG_SSID_MAX 33		/* 32 + NUL */
 #define CFG_PSK_MAX 65		/* 64 + NUL */
 #define CFG_TOKEN_MAX 320	/* OAuth refresh tokens are long */

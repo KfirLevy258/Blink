@@ -2,7 +2,7 @@
 
 The firmware that runs on the **ESP32-2432S028 "Cheap Yellow Display" (CYD)**: two
 270° gauges for your Claude Code **session (5 h)** and **weekly (7 d)** usage, a wall
-clock, per-model breakdown, and over-the-air updates. Built on **Zephyr** + LVGL,
+clock, and over-the-air updates. Built on **Zephyr** + LVGL,
 booting through **MCUboot**, with flash encryption on units whose eFuses are burned.
 
 The firmware version lives in [`src/version.h`](src/version.h) and is reported over
@@ -10,15 +10,14 @@ serial in the boot `hello` message.
 
 ## How it gets your usage
 
-The board picks a data source at boot - you never choose one:
+Only from the daemon on your computer, over the USB cable. At boot the board sends a
+`hello` on the serial port, and the daemon replies with NDJSON lines: usage, the time,
+and firmware updates when there are any. The device has no Wi-Fi and stores no token.
 
-1. **USB bridge.** If a host daemon answers the boot `hello` over serial, the board
-   takes its usage from there (streamed as NDJSON). No Wi-Fi or token on the device.
-2. **Wi-Fi.** Otherwise, if it has stored Wi-Fi credentials and a sign-in token, it
-   fetches usage itself over TLS, about once a minute.
-3. **First-time setup.** With neither available, it shows a setup screen and hosts a
-   short phone flow to get onto Wi-Fi and signed in. The setup Wi-Fi is WPA2 with a
-   random per-device password carried in the on-screen QR, so the phone types nothing.
+Older source trees also had a standalone Wi-Fi mode (captive-portal setup, an
+on-device sign-in, a usage fetch of its own). No release ever shipped it. It signed
+the board in to Anthropic using Claude Code's OAuth client id, so it was deleted on
+2026-10-27, as gapietro had already done in their fork; git history keeps it.
 
 ## Prerequisites
 
@@ -66,13 +65,10 @@ west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
 
 Notes:
 
-- **This builds the shipped configuration: USB only.** `CONFIG_BLINK_WIFI_MODE`
-  defaults to `n`, so the captive-portal setup, the OAuth sign-in, the refresh-token
-  store and the on-device usage fetch are never handed to the compiler -- absent from
-  the image rather than unreachable within it, and about half its size. The source
-  stays in `src/`; add `-DEXTRA_CONF_FILE=wifi.conf` to build it back in. `tools/release.sh`
-  refuses to publish an image that contains it, checking the artifact and not only the
-  config.
+- **This is the one shipped build: USB only.** It has no radio, no sign-in and no
+  token store. `tools/release.sh` scans the finished artifact, not just the config,
+  for the deleted Wi-Fi mode's strings and refuses to publish if it finds them -- a
+  guard against that code drifting back in through a merge or an undone commit.
 - **Sysbuild + MCUboot is required.** Flash encryption needs the MCUboot boot chain;
   a plain single-image build produces something the encrypted chip can't boot.
 - The board target is **`esp32_devkitc/esp32/procpu`** - there's no upstream CYD board,
@@ -113,8 +109,8 @@ esptool.py --port <port> --baud 115200 write_flash 0x1000 build-sb/mcuboot/zephy
 
 Port notes: opening the port resets the board, and only one process can own it at a
 time. To watch the console without disturbing behavior, use
-`tools/passive_log.py <port>` (resets once on open, then read-only). To wipe stored
-Wi-Fi / token / setup password for a clean first-run test, erase the NVS region:
+`tools/passive_log.py <port>` (resets once on open, then read-only). To wipe the
+stored settings for a clean first-run test, erase the settings region:
 `esptool.py --port <port> erase_region 0x3b0000 0x30000`.
 
 Flash map (4 MB): MCUboot `0x1000`, slot 0 `0x20000`, slot 1 `0x170000`,
@@ -152,59 +148,56 @@ tools/release.sh
 version), signs the image, and attaches `blink-fw.bin` + `manifest.json` to the
 `v<version>` release on **`KfirLevy258/Blink`** - which is the feed every board reads.
 
-On the device there are two ways in, and it picks by itself:
-
-- **Standalone (WiFi).** The board streams the image into its spare slot, verifies the
-  SHA-256, reboots, and MCUboot swaps it in.
-- **Tethered (USB bridge).** This mode has no network of its own -- `run_usb()` never
-  starts `net_worker` -- so the board only *approves*, and the daemon fetches the
-  release and writes slot0 with esptool. About 75 s, and no swap, because the bytes
-  land where the bootloader already looks. The trade is no automatic rollback on that
-  route; it is acceptable only because a machine that can reflash the board is by
-  definition already cabled to it. Requires `pip install esptool` wherever the daemon
-  runs.
+The board cannot reach the network, so its part is to say yes: the daemon downloads
+the release and esptool writes it to slot0. That takes about 75 s with no swap, because
+the bytes land where the bootloader already looks. The price is that nothing rolls
+back, which is acceptable only because a machine able to reflash the board is, by
+definition, already cabled to it. Requires `pip install esptool` wherever the daemon
+runs. (The deleted Wi-Fi mode updated itself another way, streaming the image into
+slot 1 over HTTPS; that half of `ota.c` remains in the source, unreachable.)
 
 A check runs as soon as the board is up (and daily after that). Anything newer raises a
 prompt on the gauge screen -- **Update now** / **Later** -- and the settings row still
-offers **Software update → Install x.y.z** on demand. Either route reports the outcome
-on the next boot.
+offers **Software update → Install x.y.z** on demand. The outcome is reported on the
+next boot.
 
 ## How updates stay safe
 
-Four independent layers, each guarding one thing:
+Each of three checks guards something different:
 
-- **TLS with pinned roots** authenticates the *download*.
-- **The manifest's SHA-256** pins the *exact bytes*, end to end.
+- **HTTPS** proves where the *download* came from. The daemon pulls it from GitHub
+  and verifies the certificate against the OS store and certifi (`pc/ota.py`).
+- **The manifest's SHA-256** fixes the *exact bytes*. Nothing is written until the
+  download hashes to it.
 - **MCUboot's ECDSA P-256 signature check** gates *what may boot* - only images signed
   with your private key run, so even a hash-passing forgery is rejected.
-- **Automatic rollback** - a fresh image boots in test mode and must prove itself
-  (fetch usage) within 90 s. If it hangs or crashes, the watchdog reboots and MCUboot
-  restores the previous version, which then reports *"Update failed, previous version
-  restored."*
 
-The first three hold on both routes. The fourth does not apply to the USB one, which
-writes the running slot in place -- there is no spare copy to fall back to. The daemon
-compensates where it can: it verifies the asset against its manifest before writing,
-and it reads the chip's eFuses and refuses outright if it cannot tell whether flash
-encryption is burned, since a plaintext write to a fused board leaves it dark.
+Nothing rolls back automatically: slot0 is overwritten where it sits, and no second
+copy exists to return to. The daemon compensates where it can: it verifies the asset
+against its manifest before writing, and it reads the chip's eFuses and refuses
+outright if it cannot tell whether flash encryption is burned, since a plaintext write
+to a fused board leaves it dark.
 
-On a fused unit, flash encryption keeps secrets (Wi-Fi password, token) unreadable at
-rest. **An unfused development board has no such protection** - its stored Wi-Fi
-password and OAuth token are readable from a flash dump, so treat one as a device that
-holds live credentials in the clear. Published images hold no secrets either way -
-installability is gated by the signing key, not secrecy.
+A board that has only ever run this firmware holds no secrets. **A board that once ran
+a Wi-Fi build may still hold some.** On its first boot of this firmware it erases any
+sign-in token it finds, but nothing erases the network name and password or the setup
+hotspot's password: they stay in the settings record, and on an unfused board anyone
+with the cable and esptool can read them in plain text. To remove them, erase the
+settings region -- `esptool.py --port <port> erase_region 0x3b0000 0x30000`. That
+clears the whole record: brightness and the other settings go back to their defaults,
+and the unit's edition reads as Claude until it is stamped again with
+`blink provision --edition codex`, so re-provision a Codex unit afterwards. The record
+keeps those old fields, unread, so that its layout, and every setting in it, survives
+an update. Published images hold no secrets either way; what lets an image install is
+the signing key, not secrecy.
 
 ## Hardware notes
 
 Things worth knowing when hacking on the CYD:
 
-- The radio occasionally boots blind (all scans empty) after a soft reset; the firmware
-  self-reboots to re-roll it, bounded by a `.noinit` counter.
 - Touch (XPT2046) needs averaging (`reads = <8>`), and devicetree properties are
   last-one-wins - a stray duplicate silently degrades it.
 - The backlight (GPIO 21) runs on LEDC PWM and is adjustable in Settings.
-- A Wi-Fi join only completes from a clean boot on this driver, which is why the
-  first-run flow reboots on purpose (invisibly - the CONNECTING bar spans the reset).
 
 ## Source map
 
@@ -212,12 +205,10 @@ Things worth knowing when hacking on the CYD:
 |------|-------|
 | Boot, orchestration, workers | `main.c` |
 | Boot splash (streamed past LVGL) | `ui_boot.c`, `bootanim_dec.c` |
-| First-run setup screen | `ui_setup.c` |
-| Phone captive portal | `portal.c`, `dns_hijack.c` |
-| Gauges, warnings, model card | `usage_view.c` |
+| Gauge screen, hints and toasts | `usage_view.c` |
 | Settings + software-update UI | `ui_settings.c` |
 | OTA engine (check, install, verify) | `ota.c`, `ota_parse.c` |
-| Networking, time, sign-in, fetch | `net_wifi.c`, `net_time.c`, `oauth.c`, `usage_client.c`, `usage_parse.c`, `tz_fetch.c` |
+| Clock (the daemon's `time` message) | `net_time.c` |
 | Persisted config (A/B, CRC-sealed) | `cfg_store.c` |
 | Serial NDJSON protocol | `proto.c`, `msg_parse.c` |
 

@@ -168,11 +168,11 @@ static void send_ping(void)
 /*
  * --- OTA while tethered ---
  *
- * USB-bridge mode has no network of its own: run_usb() never starts
- * net_worker, so ota.c's HTTPS updater is unreachable and the update row did
- * nothing here. The daemon has both an internet connection and the board's
- * USB serial link, so the split is: the board asks and approves, the daemon
- * fetches and writes.
+ * The board has no network of its own (the standalone WiFi mode, which
+ * did, was removed on 2026-10-27), so ota.c's HTTPS updater is
+ * unreachable and the update row used to do nothing here. The daemon has
+ * both an internet connection and the board's USB serial link, so the split
+ * is: the board asks and approves, the daemon fetches and writes.
  *
  * The board does NOT receive the image. An earlier revision pushed it down
  * this protocol in base64 chunks and it was hopeless -- 33% encoding overhead

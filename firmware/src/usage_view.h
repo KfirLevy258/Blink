@@ -56,11 +56,11 @@ void usage_view_set_clock(int hh, int mm);
 
 /*
  * Boot progress: one CONNECTING takeover with a segmented bar that fills
- * green, current step named below. Both modes wear the same screen -- only
- * the step list differs (USB: link daemon / first push; WiFi: join / sign
- * in / first fetch). Call _begin once with the mode's steps (max 3), then
- * _stage as the worker advances. Segments before `stage` render as done,
- * `stage` pulses, the rest stay dim; stage == n means "Ready".
+ * green, current step named below. Call _begin once with the steps (max 3;
+ * the USB list is link daemon / first push, and the three-step room was for
+ * the WiFi mode removed on 2026-10-27), then _stage as the worker advances.
+ * Segments before `stage` render as done, `stage` pulses, the rest stay dim;
+ * stage == n means "Ready".
  */
 void usage_view_boot_begin(const char *const *steps, int nsteps);
 void usage_view_boot_stage(int stage);
