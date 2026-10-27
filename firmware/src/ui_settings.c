@@ -36,6 +36,7 @@
 #include "upd_prompt.h"
 #include "upd_row.h"
 #include "usage_view.h"
+#include "mem_stats.h"
 
 #define COL_BG		lv_color_hex(0x0E1116)
 #define COL_TRACK	lv_color_hex(0x272C34)
@@ -1613,6 +1614,10 @@ static void bright_close(void)
 	for (int i = 0; i < BRIGHT_STOPS; i++) {
 		seg[i] = NULL;
 	}
+	/* The brightness screen, drawn on top of the whole settings panel:
+	 * both trees alive at once, the deepest stack of objects Settings
+	 * builds. */
+	mem_stats_report("brightness-close");
 	lv_obj_del(bright_ov);
 	bright_ov = NULL;
 	bright_refresh();	/* the row's subtitle survives and needs the number */
@@ -1713,6 +1718,8 @@ static void build_panel(lv_obj_t *parent_scr);
  * repaint over the very gauge pixels the scroll is about to move away. */
 static void do_open(void (*pump)(void))
 {
+	/* The gauge screen's stretch ends here; see mem_stats.h. */
+	mem_stats_report("gauges");
 	ui_slide_begin();
 	/* The live screen, not one cached when the gesture landed. The cached
 	 * pointer outlived its object on the failed-join path, where
@@ -1733,6 +1740,8 @@ static void do_open(void (*pump)(void))
 	/* Gauges exit left, settings enters from the right. */
 	ui_slide_run(UI_SLIDE_LEFT, pump);
 	ui_anim_gesture_mute(250);	/* short tail past the input burst */
+	/* Built, slid in and drawn: the panel's own peak. */
+	mem_stats_report("settings");
 }
 
 /*
@@ -1820,6 +1829,9 @@ static void do_close(void (*pump)(void))
 		return;
 	}
 
+	/* Everything shown since "settings", the brightness screen included
+	 * when it was opened and closed in between. */
+	mem_stats_report("settings-close");
 	ui_slide_begin();
 	/* upd_timer deliberately survives the panel -- see upd_timer_cb. It is
 	 * created once in ui_settings_attach(). */

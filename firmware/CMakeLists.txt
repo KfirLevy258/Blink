@@ -55,3 +55,11 @@ target_sources_ifdef(CONFIG_BLINK_WIFI_MODE app PRIVATE
 # Diagnostic only; CONFIG_BLINK_TOUCH_TRACE is off in release builds.
 target_sources_ifdef(CONFIG_BLINK_TOUCH_TRACE app PRIVATE src/touch_trace.c)
 
+
+# The [mem] lines (src/mem_stats.c), on whenever prj.conf keeps the heap
+# counters on. It reads the LVGL pool's free lists through Zephyr's private
+# lib/heap/heap.h, so ZEPHYR_BASE is on the path for this one file only and
+# the file includes "lib/heap/heap.h" by that full name.
+target_sources_ifdef(CONFIG_SYS_HEAP_RUNTIME_STATS app PRIVATE src/mem_stats.c)
+set_source_files_properties(src/mem_stats.c PROPERTIES
+	INCLUDE_DIRECTORIES ${ZEPHYR_BASE})

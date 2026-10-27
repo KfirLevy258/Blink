@@ -34,6 +34,7 @@
 #include "whatsnew.h"
 #include "ui_touchfx.h"
 #include "version.h"
+#include "mem_stats.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
@@ -1649,6 +1650,11 @@ static void run_usb(void)
 			ui_anim_run(usb_anim_pump);
 		}
 		ui_settings_service(usb_anim_pump);
+		/* Not while Settings is up or asked for: the line is the gauge
+		 * screen's, and do_open prints its own on the way in. */
+		if (!ui_settings_busy()) {
+			mem_stats_gauges_tick(usage_view_have_data());
+		}
 
 		if (!usage_view_have_data()) {
 			/* Keep the bar honest: hello was answered at boot,

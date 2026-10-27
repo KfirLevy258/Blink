@@ -29,6 +29,7 @@
 #include "bootclip.h"
 #include "bootanim_dec.h"
 #include "ui_slide.h"
+#include "mem_stats.h"
 
 #define STRIP_BYTES 4096
 
@@ -296,6 +297,9 @@ void ui_anim_run(void (*pump)(void))
 		idle_until(k_uptime_get() + 600, pump, &last_tick);
 	}
 
+	/* While the 4 KB strip is still held: the clip's slide and every
+	 * frame since are this line's peak. */
+	mem_stats_report("eye-clip");
 	if (strip) {
 		lv_free(strip);
 	}
