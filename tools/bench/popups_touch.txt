@@ -1,0 +1,109 @@
+# Every popup on the panel, pressed by the words on its buttons.
+#
+#   tools/board_touch.py script tools/bench/popups_touch.txt
+#   tools/panel_render/touch.sh OUTDIR tools/bench/popups_touch.txt
+#
+# `click "LABEL"` lists the panel's widgets (firmware/src/touch_widgets.h)
+# and taps the one with those words through the real input path, so a
+# button that something covers fails here as "covered" rather than being
+# pressed from underneath. `fake` raises what a run cannot otherwise reach:
+# ota_avail, ota_none and ota_error are the real protocol lines, the board's
+# own answer path; boot_notice and reverted_notice are the host harness's
+# only (a board raises them on the boot after an update), so on a board this
+# script stops at the last section, with everything before it run.
+#
+# Nothing here installs anything. "Update now" and "Yes, do it" send
+# ota_flash to the bench, which never answers it -- the daemon is what would
+# run esptool -- and the `fake ota_error` after each takes the download
+# screen down as a daemon that gave up would. It ends on ota_none, so the
+# board is left with nothing on offer.
+
+expect ui_state scr=gauges modal=none
+expect notice none
+
+# --- the update offer on the gauges: Later
+fake ota_avail 1.4.0
+wait-widget "Later" 3
+expect ui_state modal=prompt
+mem
+expect-widget "Version 1.4.0 is available."
+click "Later"
+expect ui_state modal=none
+
+# The offer is once a boot ("Later" means later, upd_prompt.h): a failure
+# lifts that latch. This one fails from AVAILABLE, which the board calls an
+# update, not a check -- and the notice it raises has an OK to press.
+fake ota_error
+wait-widget "Update failed" 3
+expect ui_state modal=notice nt=ota
+click "OK"
+expect ui_state modal=none
+
+# --- the offer again: Update now, the download screen, and its end
+fake ota_avail 1.4.0
+wait-widget "Update now" 3
+click "Update now"
+expect ui_state modal=download
+# Full-screen and swallowing every touch on purpose (ui_settings.c,
+# dl_overlay_show): nothing under it is reachable, which is what this says.
+widgets
+mem
+fake ota_error the computer stopped responding
+wait-widget "Update failed" 3
+click "OK"
+expect ui_state modal=none
+
+# --- a check that fails: the plain notice
+fake ota_none
+wait 3.5
+fake ota_error
+wait-widget "Couldn't check for updates." 3
+click "OK"
+expect notice none
+
+# --- the install confirm inside Settings
+tap settings.open
+fake ota_avail 1.4.0
+wait 0.5
+click "Software update"
+expect ui_state ov=confirm
+mem
+expect-widget "Yes, do it"
+click "Cancel"
+expect ui_state ov=none
+click "Software update"
+expect ui_state ov=confirm
+click "Yes, do it"
+expect ui_state modal=download
+fake ota_error
+wait-widget "Update failed" 3
+click "OK"
+expect ui_state modal=none
+click "<"
+expect ui_state scr=gauges
+fake ota_none
+wait 3.5
+
+# --- the boot after an update (host harness only): the notice, What's new
+# behind it, its pager and its Back, then OK
+fake boot_notice 1.3.1
+wait-widget "What's new" 3
+expect ui_state modal=notice
+mem
+click "What's new"
+expect ui_state modal=whatsnew
+widgets
+mem
+click ">"
+click "<"
+click "Back"
+expect ui_state modal=notice
+click "OK"
+expect notice none
+
+fake reverted_notice
+wait-widget "Update failed, previous" 3
+click "OK"
+expect notice none
+expect ui_state scr=gauges modal=none
+mem

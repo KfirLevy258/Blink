@@ -42,13 +42,22 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/input/input.h>
+#include <lvgl.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
+#if defined(CONFIG_LOG_MODE_DEFERRED) && defined(CONFIG_LOG_PROCESS_THREAD)
+#include <zephyr/logging/log_ctrl.h>
+#define TI_LOG_KICK() log_thread_trigger()
+#else
+#define TI_LOG_KICK() ((void)0)
+#endif
 #include <stdio.h>
 #include <string.h>
 
 #include "touch_inject.h"
 #include "touch_inject_geom.h"
+#include "touch_widgets.h"
+#include "touch_widgets_fmt.h"
 #include "msg_parse.h"
 #include "version.h"
 #include "backlight.h"
@@ -81,6 +90,9 @@ static atomic_t release_asked;
  * the first is IDLE -- but a press says "press" when it lands and "release"
  * when it lifts, so those two are kept apart. */
 #define AUTO_LIFT 0x10
+/* ...and AS_CLICK when the tap was a click by index, so its answer names the
+ * op the PC sent. */
+#define AS_CLICK 0x20
 static atomic_t done_press;
 static atomic_t done;
 /* dismiss and wake: their own slot, since either may land while a stroke is
@@ -90,6 +102,7 @@ static atomic_t done_now;
 /* The stroke in play. Written by dispatch only while IDLE, read only by the
  * work item after; the state change between them orders the two. */
 static struct ti_stroke cur;
+static bool cur_click;
 static int next_i;
 static int last_t;
 static bool lifting;
@@ -122,7 +135,7 @@ static void at(int t_ms)
 
 static void finish(int what)
 {
-	atomic_set(&done, what);
+	atomic_set(&done, what | (cur_click ? AS_CLICK : 0));
 	atomic_set(&state, IDLE);
 }
 
@@ -186,6 +199,8 @@ static const char *op_name(int op)
 		return "dismiss";
 	case TI_OP_WAKE:
 		return "wake";
+	case AS_CLICK:
+		return "click";
 	default:
 		return "?";
 	}
@@ -195,6 +210,7 @@ static void refuse(const char *why)
 {
 	printk("{\"t\":\"touch_refused\",\"v\":%d,\"why\":\"%s\"}\n",
 	       BLINK_PROTO_VERSION, why);
+	TI_LOG_KICK();
 }
 
 /* An integer field, or -1 when it is absent or not a number: every field
@@ -210,6 +226,9 @@ static int field(const char *json, const char *key)
 	return (int)v;
 }
 
+static void click_line(const char *json);
+static void start(const struct ti_stroke *s, bool click);
+
 static void touch_line(const char *json)
 {
 	char opname[12];
@@ -217,6 +236,10 @@ static void touch_line(const char *json)
 
 	if (!msg_get_str(json, "op", opname, sizeof(opname))) {
 		refuse("args");
+		return;
+	}
+	if (strcmp(opname, "click") == 0) {
+		click_line(json);
 		return;
 	}
 	s.op = ti_op_from_name(opname);
@@ -273,11 +296,72 @@ static void touch_line(const char *json)
 		refuse("args");
 		return;
 	}
-	if (!atomic_cas(&state, IDLE, s.op == TI_OP_PRESS ? HELD : PLAYING)) {
+	start(&s, false);
+}
+
+/*
+ * A click: a tap at a widget of the latest listing (touch_widgets.h), played
+ * exactly as a tap is -- into the panel's input device, through LVGL's own hit
+ * test -- at the point the listing found that test reaches the widget. Never
+ * lv_obj_send_event(): an event sent to the object proves its handler and
+ * nothing else, and what a bench is for is the press a finger makes, which
+ * can land on something else.
+ *
+ *   {"t":"touch","op":"click","i":N,"gen":G[,"ms":HOLD][,"force":1]}
+ *
+ * Refused "stale" when the panel no longer shows the listing G named, so
+ * index N of a screen that has since been replaced is never pressed on the
+ * new one; "range" when it does and has no index N; "disabled" for a control
+ * LVGL would drop the press on, unless force; "covered" when the widget is
+ * still there but no point of it is reachable -- something else is on top;
+ * "busy" while a transition is latched or a screen load is animating, when
+ * LVGL drops input altogether. The aim is found again here, from the panel
+ * as it is now, not taken from the listing the PC read. The parsing and the
+ * aim are tw_click_parse(), which the host harness runs too.
+ */
+static void click_line(const char *json)
+{
+	struct ui_settings_bench b;
+	struct ti_stroke s;
+	const char *why;
+
+	ui_settings_bench_state(&b);
+	why = tw_click_parse(json, b.busy || ui_anim_pending(), &s);
+	if (why) {
+		refuse(why);
+		return;
+	}
+	start(&s, true);
+}
+
+/* Widgets, one page a line (touch_widgets_fmt.h has why four). The buffer is
+ * static rather than on the main stack, which also runs LVGL's handlers and
+ * the walk's recursion: this is bench-image RAM, 448 B of .bss, and a release
+ * does not have it. */
+static void widgets_line(const char *json)
+{
+	static char buf[TW_LINE_MAX];
+
+	if (tw_widgets_reply(json, buf, sizeof(buf), BLINK_PROTO_VERSION) <= 0) {
+		refuse("args");
+		return;
+	}
+	printk("%s\n", buf);
+	/* Out now rather than at the log thread's next wake (it sleeps up to
+	 * CONFIG_LOG_PROCESS_THREAD_SLEEP_MS, 1000, below ten queued
+	 * messages), so a listing of six pages is six round trips and not six
+	 * seconds, and the 1024 B log buffer never holds two pages at once. */
+	TI_LOG_KICK();
+}
+
+static void start(const struct ti_stroke *s, bool click)
+{
+	if (!atomic_cas(&state, IDLE, s->op == TI_OP_PRESS ? HELD : PLAYING)) {
 		refuse("busy");
 		return;
 	}
-	cur = s;
+	cur = *s;
+	cur_click = click;
 	next_i = 0;
 	last_t = 0;
 	lifting = false;
@@ -322,11 +406,17 @@ static void ui_state_line(void)
 		 "\"tp\":%d,\"focus\":\"%s\",\"bl\":%d,\"edit\":\"%s\","
 		 "\"slp\":%d,\"nt\":\"%s\",\"gf\":\"%s\"}",
 		 BLINK_PROTO_VERSION, scr, b.open ? b.sub : "none", b.modal,
-		 (b.busy || ui_anim_pending()) ? 1 : 0, theme_active_id(),
+		 /* A screen load still animating is busy too: tw_click_parse
+		  * refuses a click then, so wait_state must be able to wait it
+		  * out (review r2, N4). */
+		 (b.busy || ui_anim_pending() ||
+		  lv_display_get_screen_prev(NULL) != NULL) ? 1 : 0,
+		 theme_active_id(),
 		 ui_theme_stored_id(), b.theme_page, focus,
 		 (int)backlight_get(), b.edit, ui_sleep_bench_dozing() ? 1 : 0,
 		 b.nt, usage_view_bench_focus());
 	printk("%s\n", buf);
+	TI_LOG_KICK();		/* see touch_inject_service */
 }
 
 bool touch_inject_dispatch(const char *type, const char *json)
@@ -339,27 +429,52 @@ bool touch_inject_dispatch(const char *type, const char *json)
 		ui_state_line();
 		return true;
 	}
+	if (strcmp(type, "widgets") == 0) {
+		widgets_line(json);
+		return true;
+	}
 	return false;
 }
 
+/*
+ * Every reply here goes out through printk, which on this board is the
+ * deferred log (CONFIG_LOG_PRINTK, LOG_MODE_DEFERRED, overflow drops the
+ * OLDEST message), drained by a thread at the lowest application priority.
+ * While the main thread is busy -- a slide, a panel build, LVGL drawing --
+ * nothing drains it, and whatever else is printed meanwhile pushes the reply
+ * out. The first board run of the widget image lost 22 touch_done and
+ * ui_state replies that way, every one on a move into the Settings panel,
+ * and the bench reported each as a missing reply. So each reply kicks the
+ * log thread (it runs at the main loop's next sleep instead of at its 1 s
+ * timer), and the bench image's log buffer is larger (firmware/Kconfig,
+ * LOG_BUFFER_SIZE, only with this option).
+ */
 void touch_inject_service(void)
 {
 	int what;
+	bool said = false;
 
 	if (atomic_clear(&done_press)) {
 		printk("{\"t\":\"touch_done\",\"v\":%d,\"op\":\"press\","
 		       "\"ok\":1}\n", BLINK_PROTO_VERSION);
+		said = true;
 	}
 	what = (int)atomic_clear(&done_now);
 	if (what) {
 		printk("{\"t\":\"touch_done\",\"v\":%d,\"op\":\"%s\",\"ok\":1}\n",
 		       BLINK_PROTO_VERSION, op_name(what));
+		said = true;
 	}
 	what = (int)atomic_clear(&done);
 	if (what) {
 		printk("{\"t\":\"touch_done\",\"v\":%d,\"op\":\"%s\",\"ok\":1%s}\n",
-		       BLINK_PROTO_VERSION, op_name(what & ~AUTO_LIFT),
+		       BLINK_PROTO_VERSION,
+		       op_name((what & AS_CLICK) ? AS_CLICK : (what & ~AUTO_LIFT)),
 		       (what & AUTO_LIFT) ? ",\"auto\":1" : "");
+		said = true;
+	}
+	if (said) {
+		TI_LOG_KICK();
 	}
 }
 

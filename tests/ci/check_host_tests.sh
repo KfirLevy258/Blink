@@ -106,6 +106,9 @@ run_one ui_swipe_geom ""               ""
 # The bench touch injector (CONFIG_BLINK_TOUCH_INJECT): its transform against
 # the LVGL glue, and its strokes against ui_swipe's own rules.
 run_one touch_inject ""                ""
+# Its widget listing's wire format: the worst page fits, a label needs no
+# escaping, the aim grid finds a strip beside a popup.
+run_one touch_widgets ""               ""
 run_one upd_prompt  "upd_prompt.c"    ""
 run_one upd_row     "upd_row.c"       ""
 run_one upd_tap     "upd_tap.c"       ""

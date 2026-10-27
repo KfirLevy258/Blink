@@ -16,6 +16,7 @@
 #include "ui_boot.h"
 #include "ui_theme.h"
 #include "theme.h"
+#include "version.h"
 #include "harness.h"
 
 /* --- cfg_store, in RAM -------------------------------------------------- */
@@ -90,12 +91,24 @@ void backlight_step(int dir)
 	bright = backlight_next_level(bright, dir);
 }
 
-/* --- OTA: always idle ------------------------------------------------------ */
+/* --- OTA: the state ota.c keeps, moved the way proto.c and main.c move it --
+ *
+ * So the popups only an update can raise -- the offer, the install confirm,
+ * the download screen, the failure notice -- come up here from the same wire
+ * lines a board gets: harness.c hands ota_avail, ota_none and ota_error to
+ * the three harness_ota_* below, as proto.c's dispatch does. A tap on
+ * "Update now" or "Yes, do it" says ota_flash on stdout, as
+ * proto_ota_install() does, and nothing else: the bench never answers it,
+ * and there is no flash here to write. */
+
+static struct ota_ui ota_now = { .st = OTA_UI_IDLE };
+static bool ota_staged_now;
+static char ota_app_now[16];
+static bool ota_badge_now;
 
 void ota_ui_get(struct ota_ui *out)
 {
-	memset(out, 0, sizeof(*out));
-	out->st = OTA_UI_IDLE;
+	*out = ota_now;
 }
 
 enum ota_source ota_ui_source(void)
@@ -108,29 +121,86 @@ void ota_ui_set_source(enum ota_source src)
 	(void)src;
 }
 
-void ota_request_check(void)
-{
-}
-
-void ota_request_install(void)
-{
-}
-
+/* ota.c's ota_ui_set, without the lock. */
 void ota_ui_set(enum ota_ui_state st, const struct ota_manifest *m, uint8_t pct)
 {
-	(void)st;
-	(void)m;
-	(void)pct;
+	ota_now.st = st;
+	if (m) {
+		snprintf(ota_now.version, sizeof(ota_now.version), "%s",
+			 m->version);
+		ota_now.size = m->size;
+	}
+	ota_now.pct = pct;
+	if (st != OTA_UI_FAILED) {
+		ota_now.err[0] = '\0';
+	}
+	if (st == OTA_UI_AVAILABLE) {
+		ota_badge_now = true;
+	} else if (st == OTA_UI_UP_TO_DATE || st == OTA_UI_REBOOTING) {
+		ota_badge_now = false;
+	}
 }
 
 void ota_ui_set_error(const char *why)
 {
-	(void)why;
+	snprintf(ota_now.err, sizeof(ota_now.err), "%s", why ? why : "");
 }
 
 bool ota_badge(void)
 {
-	return false;
+	return ota_badge_now;
+}
+
+/* main.c's handling of the two requests, at once instead of on its next
+ * pass: upd_tap_act(), then proto_ota_check() or proto_ota_install(). */
+void ota_request_check(void)
+{
+	ota_staged_now = false;
+	ota_app_now[0] = '\0';
+	ota_ui_set(OTA_UI_CHECKING, NULL, 0);
+	harness_emit("{\"t\":\"ota_query\",\"v\":2,\"cur\":\"" BLINK_FW_VERSION "\"}");
+}
+
+void ota_request_install(void)
+{
+	if (!ota_staged_now) {
+		ota_ui_set(OTA_UI_FAILED, NULL, 0);
+		/* main.c's UPD_ACT_REFUSED wording, copied: main.c is not
+		 * compiled here, and tests/test_board_touch_widgets.py holds the
+		 * two to the same sentence. */
+		ota_ui_set_error("The app stopped answering");
+		return;
+	}
+	ota_ui_set(OTA_UI_DOWNLOADING, NULL, 0);
+	harness_emit("{\"t\":\"ota_flash\",\"v\":2}");
+}
+
+/* proto.c's dispatch of the three answers. */
+void harness_ota_avail(const char *version, uint32_t size, const char *app)
+{
+	struct ota_manifest m = { 0 };
+
+	snprintf(m.version, sizeof(m.version), "%s", version);
+	m.size = size;
+	snprintf(ota_app_now, sizeof(ota_app_now), "%s", app ? app : "");
+	ota_staged_now = true;
+	ota_ui_set(OTA_UI_AVAILABLE, &m, 0);
+}
+
+void harness_ota_none(void)
+{
+	ota_staged_now = false;
+	ota_app_now[0] = '\0';
+	ota_ui_set(OTA_UI_UP_TO_DATE, NULL, 0);
+}
+
+void harness_ota_error(const char *why)
+{
+	ota_staged_now = false;
+	ota_ui_set(OTA_UI_FAILED, NULL, 0);
+	if (why && why[0]) {
+		ota_ui_set_error(why);
+	}
 }
 
 /* --- the protocol ---------------------------------------------------------- */
@@ -156,7 +226,7 @@ void proto_ota_check(void)
 
 const char *proto_ota_app_version(void)
 {
-	return "";
+	return ota_app_now;
 }
 
 bool proto_ota_install(void)
@@ -166,7 +236,7 @@ bool proto_ota_install(void)
 
 bool proto_ota_staged(void)
 {
-	return false;
+	return ota_staged_now;
 }
 
 void harness_theme_now(const char *why)

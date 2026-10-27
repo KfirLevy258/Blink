@@ -44,7 +44,8 @@ target_sources_ifdef(CONFIG_BLINK_TOUCH_TRACE app PRIVATE src/touch_trace.c)
 
 # Bench only; CONFIG_BLINK_TOUCH_INJECT is off in every release build, and
 # tools/lib_selftest.sh refuses an image that has it.
-target_sources_ifdef(CONFIG_BLINK_TOUCH_INJECT app PRIVATE src/touch_inject.c)
+target_sources_ifdef(CONFIG_BLINK_TOUCH_INJECT app PRIVATE src/touch_inject.c
+		     src/touch_widgets.c)
 
 
 # The [mem] lines (src/mem_stats.c), on whenever prj.conf keeps the heap

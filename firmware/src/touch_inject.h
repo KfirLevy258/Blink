@@ -27,10 +27,28 @@
  *         {"t":"touch","op":"release"}
  *         {"t":"touch","op":"dismiss"}   take down the notice popup
  *         {"t":"touch","op":"wake"}      end a doze (ui_sleep.c)
+ *         {"t":"touch","op":"click","i":N,"gen":G[,"ms":HOLD][,"force":1]}
+ *                                        a tap on widget N of listing G
  *   board {"t":"touch_done","op":OP,"ok":1}        once the stroke is played
  *         ...,"auto":1 on a release nobody asked for: a press that let
  *         go by itself at TI_HOLD_MAX_MS
- *         {"t":"touch_refused","why":"busy"|"args"|"not_held"}
+ *         {"t":"touch_refused","why":"busy"|"args"|"not_held"|
+ *                                     "stale"|"range"|"disabled"|"covered"}
+ *         stale: the panel no longer shows listing G; range: it does, and
+ *         has no widget N; disabled: LVGL would drop the press (force:1
+ *         presses anyway); covered: widget N is there but nothing of it is
+ *         reachable; busy, for a click: a transition or a screen load is
+ *         running (touch_widgets.h)
+ *
+ *   PC    {"t":"widgets","page":P}
+ *   board {"t":"widgets","page":P,"w":[[i,"kind","label",x,y,w,h,ax,ay,f],
+ *          ...],"n":TOTAL,"more":0|1,"gen":G}
+ *         TW_PER_PAGE entries a page, every clickable object on the panel
+ *         (touch_widgets.c). kind: obj|button|switch|slider|list|check|
+ *         screen|layer. x,y,w,h: the part inside the panel and its
+ *         parents. ax,ay: where the real hit test reaches it, -1,-1 when
+ *         nowhere does. f: checked 1, disabled 2, hit 4, has an event
+ *         callback 8, on lv_layer_top 16, on lv_layer_sys/bottom 32.
  *
  *   PC    {"t":"ui_state"}
  *   board {"t":"ui_state","scr":..,"ov":..,"modal":..,"busy":0|1,

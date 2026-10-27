@@ -44,6 +44,7 @@ $CC -O1 -w -DLV_CONF_INCLUDE_SIMPLE=1 -DCONFIG_BLINK_TOUCH_INJECT=1 \
 	-I"$BUILD" -I"$HERE/touch" -I"$LVGL_DIR" -I"$LVGL_DIR/src" \
 	-I"$ROOT/firmware/src" \
 	"$HERE/touch/harness.c" "$HERE/touch/stubs.c" "$HERE/touch/png.c" \
+	"$ROOT/firmware/src/touch_widgets.c" \
 	"$ROOT/firmware/src/ui_settings.c" \
 	"$ROOT/firmware/src/ui_theme.c" \
 	"$ROOT/firmware/src/usage_view.c" \

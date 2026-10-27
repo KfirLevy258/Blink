@@ -7,6 +7,10 @@
     tools/board_touch.py swipe 260 120 100 120 [MS]
     tools/board_touch.py script tools/bench/full_touch.txt
     tools/board_touch.py targets
+    tools/board_touch.py widgets
+    tools/board_touch.py click "Later"
+    tools/board_touch.py click --index 7
+    tools/board_touch.py script tools/bench/popups_touch.txt
 
 Needs a board flashed with CONFIG_BLINK_TOUCH_INJECT (firmware/Kconfig has
 the build line; tools/burn.sh --bench flashes it). Such a board takes
@@ -36,9 +40,24 @@ WHAT IT PRINTS. Parsed fields and nothing else: ui_state's fields, theme_now's
 id/why/h, theme_edit, touch_done, the numbers on a [mem] or [swipe] line. A
 line it does not recognise -- including every other console line the board
 prints -- is never echoed: with -v it prints as "unparsed line (N bytes)",
-and either way it is counted in the summary. CLAUDE.md's rule is about the
-daemon's logs, and a bench tool that echoed the wire would be the easiest
-place to break it.
+and either way it is counted in the summary. CLAUDE.md's rule names no program,
+and a bench tool that echoed the wire would be the easiest place to break
+it.
+
+WIDGETS. `widgets` lists every clickable object on the panel, popups
+included, with the words on it; `click "Later"` taps one by those words and
+`click --index N` by its place in the listing, both through the same real
+input path a tap takes (firmware/src/touch_widgets.h). A label is matched in
+memory, but printed only when it is text this repository already holds -- a
+string literal in firmware/src or the harness, or a reason in pc/bridge.py,
+as the firmware would cut it, with typed holes for numbers and versions
+(LabelAllowList). Any other label prints as "label withheld, N chars": the
+OTA failure notice carries the daemon's reason and the offer carries the
+host's version string, and a decoded value off the wire is exactly what the
+rule above forbids printing. A label of a shape the firmware does not write
+fails the whole line, which is then counted and never shown. A disabled
+widget is not clicked without --force, and before "Update now" or "Yes, do
+it" the port is checked again for anyone else holding it.
 
 DO NOT TOUCH THE PANEL DURING A RUN. A real finger is not locked out: its
 reports mix with the injected ones (firmware/src/touch_inject.c), and the
@@ -63,6 +82,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -84,6 +104,15 @@ SCREEN_W, SCREEN_H = 320, 240
 # 30720 less the heap's own metadata, as every [mem] line's used+free sums to
 # (firmware/src/mem_stats.h).
 POOL_USABLE = 30632
+
+
+def _pool_of(m):
+    """The pool a [mem] line is out of: the board's, or for the host
+    harness's host-* lines the host pool the line itself names (64 KB of
+    eight-byte pointers, so its numbers are not the board's)."""
+    if m["where"].startswith("host-") and m.get("pool"):
+        return m["pool"]
+    return POOL_USABLE
 
 # A finger's tap and swipe, as the board will play them (touch_inject_geom.h
 # reports every 13 ms, the panel's median). 120 ms is a deliberate press;
@@ -330,6 +359,480 @@ def ui_state_query():
     return {"t": "ui_state", "v": protocol.VERSION}
 
 
+def widgets_query(page=0):
+    return {"t": "widgets", "v": protocol.VERSION, "page": int(page)}
+
+
+def touch_click(index, gen, ms=TAP_MS, force=False):
+    msg = {"t": "touch", "v": protocol.VERSION, "op": "click",
+           "i": int(index), "gen": int(gen), "ms": int(ms)}
+    if force:
+        msg["force"] = 1        # press it even though it is disabled
+    return msg
+
+
+# --- the widget listing (firmware/src/touch_widgets.h) ----------------------
+#
+# The board's answer to {"t":"widgets","page":P}: every clickable object on
+# the panel, four a line, each [i,"kind","label",x,y,w,h,ax,ay,f]. The
+# firmware writes a label as printable ASCII with nothing to escape
+# (touch_widgets_fmt.h, tw_label_copy), cut at 28; anything else in that
+# position is not a label this firmware wrote, and the whole line is then
+# treated as unparsed -- counted, never printed.
+
+LABEL_MAX = 28
+PER_PAGE = 4
+WIDGET_KINDS = ("obj", "button", "switch", "slider", "list", "check",
+                "screen", "layer")
+W_CHECKED, W_DISABLED, W_HIT, W_EVENTS, W_TOP, W_SYS = 1, 2, 4, 8, 16, 32
+# fullmatch, not match with $: `$` also matches before a trailing newline, so
+# a 29-character label ending in one used to pass (review, S5).
+_LABEL_RE = re.compile(r"[ !#-\[\]-~]{0,%d}" % LABEL_MAX)
+# Kinds a person would call a button, preferred when a name matches more than
+# one reachable widget: a box and a button inside it can both contain the
+# words asked for, and the one meant is the one that can be pressed.
+_PRESSABLE = ("button", "switch", "slider", "list", "check")
+# The two presses that consent to an install (ui_settings.c, upd_prompt_show
+# and show_install_confirm). Before either, the port is checked again: see
+# Bench.click.
+INSTALL_WORDS = ("Update now", "Yes, do it")
+# How long the end of a run waits for the ota_flash an install press sets off
+# (Bench.end_install). It is one main-loop pass behind the press on a board;
+# 2 s is far past that and short enough not to be noticed.
+INSTALL_FLASH_WAIT_S = 2.0
+
+
+class Widget:
+    __slots__ = ("i", "kind", "label", "x", "y", "w", "h", "ax", "ay", "f")
+
+    def __init__(self, i, kind, label, x, y, w, h, ax, ay, f):
+        self.i, self.kind, self.label = i, kind, label
+        self.x, self.y, self.w, self.h = x, y, w, h
+        self.ax, self.ay, self.f = ax, ay, f
+
+    @property
+    def hit(self):
+        return bool(self.f & W_HIT)
+
+    @property
+    def disabled(self):
+        return bool(self.f & W_DISABLED)
+
+    def __repr__(self):
+        # Never the label: a repr ends up in assertion messages and logs.
+        return f"Widget({self.i}, {self.kind!r})"
+
+
+def parse_widgets(obj):
+    """A widgets reply as {page, n, more, gen, items}, or None if any part of
+    it is not what touch_widgets.c writes."""
+    page, n, more, gen = (obj.get(k) for k in ("page", "n", "more", "gen"))
+    rows = obj.get("w")
+    if not (_int_in(page, 0, 999) and _int_in(n, 0, 10000)
+            and _int_in(more, 0, 1) and _int_in(gen, 0, 2 ** 32 - 1)
+            and isinstance(rows, list) and len(rows) <= PER_PAGE):
+        return None
+    items = []
+    for r in rows:
+        if not (isinstance(r, list) and len(r) == 10):
+            return None
+        i, kind, label, x, y, w, h, ax, ay, f = r
+        if not (_int_in(i, 0, 9999) and kind in WIDGET_KINDS
+                and isinstance(label, str) and _LABEL_RE.fullmatch(label)
+                and _int_in(x, 0, SCREEN_W - 1) and _int_in(y, 0, SCREEN_H - 1)
+                and _int_in(w, 1, SCREEN_W) and _int_in(h, 1, SCREEN_H)
+                and _int_in(ax, -1, SCREEN_W - 1)
+                and _int_in(ay, -1, SCREEN_H - 1)
+                and _int_in(f, 0, 63)):
+            return None
+        items.append(Widget(i, kind, label, x, y, w, h, ax, ay, f))
+    return {"page": page, "n": n, "more": more, "gen": gen, "items": items}
+
+
+# --- which labels may be printed --------------------------------------------
+#
+# CLAUDE.md: never log the contents of a serial buffer. A label is a decoded
+# value off the wire, and some carry text the board was sent rather than text
+# it was built with -- an OTA failure notice ends with the daemon's reason,
+# the offer names whatever version the host offered. Shape is not enough: any
+# 28 printable characters pass parse_widgets (review, M1).
+#
+# So a label is printed only when it is text this repository already holds:
+# a string literal in firmware/src (and the host harness's own), or one of the
+# daemon's reasons in pc/bridge.py, put through label_copy() -- a port of the
+# firmware's tw_label_copy, held to the C by tests/test_board_touch_widgets.py
+# -- exactly as the panel would show it. A literal with printf holes becomes a
+# template: %d is a number, a %s listed in VERSION_HOLES is a version (or the
+# plural "s"), and a literal with any other hole is no template at all, so a
+# label built from it is never shown. Anything else prints as "label
+# withheld, N chars". Read from the source at run time, never from a capture.
+#
+# A decision, recorded: the typed holes do print values the host sent -- the
+# offered version, a page number -- when they fit the type (digits, or
+# N.N.N). They are the reason a listing is readable at all, and a version or
+# a count cannot carry session content; anything wider than the type is
+# withheld (review r2, N1).
+#
+# Matching a click is a different question and stays on the label in memory:
+# `click "X"` works on anything the board shows, it just never echoes it.
+
+# Every firmware format whose %s is a version (or a plural "s"), by the whole
+# literal as joined in the source. tests/test_board_touch_widgets.py checks
+# each is still there.
+VERSION_HOLES = {
+    "Updated to %s": ("ver",),
+    "Version %s is available.": ("ver",),
+    "Version %s is available.\nThis also updates the app on your computer.":
+        ("ver",),
+    "Install version %s?\nThe screen restarts when done.": ("ver",),
+    "Updating to %s...": ("ver",),
+    "Downloading version %s...": ("ver",),
+    "Install %s": ("ver",),
+    "Blink %s": ("ver",),
+    "Blink %s  |  App %s": ("ver", "ver"),
+    "%d change%s since %s": ("plural", "ver"),
+    "%d change%s": ("plural",),
+}
+_HOLE_RE = {
+    "num": (re.compile(r"-?\d{1,5}"), re.compile(r"-?\d{0,5}")),
+    "ver": (re.compile(r"\d{1,3}(\.\d{1,3}){2}"),
+            re.compile(r"\d{0,3}(\.(\d{0,3}(\.\d{0,3})?)?)?")),
+    "plural": (re.compile(r"s?"), re.compile(r"s?")),
+}
+# The LVGL symbols the panel's controls use, as their UTF-8 bytes (lv_symbol_def.h).
+_LV_SYMBOLS = {"LV_SYMBOL_LEFT": b"\xef\x81\x93",
+               "LV_SYMBOL_RIGHT": b"\xef\x81\x94",
+               "LV_SYMBOL_OK": b"\xef\x80\x8c"}
+_C_CONV = re.compile(rb"%(%|[-+ #0]*\d*(?:\.\d+)?(?:hh|h|ll|l|z|j|t)?([a-zA-Z]))")
+
+
+def _label_map(raw, limit=None):
+    """touch_widgets_fmt.h's tw_label_copy, byte for byte: printable ASCII
+    through, " to ', \\ to /, newline and tab to space, the three symbols to
+    < > *, any other UTF-8 character to one ?, other control bytes to ?. Cut
+    at `limit` characters when given."""
+    out = []
+    i = 0
+    while i < len(raw) and (limit is None or len(out) < limit):
+        c = raw[i]
+        if c == 0:
+            break
+        if c >= 0x80:
+            seq = raw[i:i + 3]
+            out.append({b"\xef\x81\x93": "<", b"\xef\x81\x94": ">",
+                        b"\xef\x80\x8c": "*"}.get(seq, "?"))
+            i += 1
+            while i < len(raw) and (raw[i] & 0xC0) == 0x80:
+                i += 1
+            continue
+        ch = chr(c)
+        out.append("'" if ch == '"' else "/" if ch == "\\" else
+                   " " if ch in "\n\t" else
+                   "?" if c < 0x20 or c == 0x7F else ch)
+        i += 1
+    return "".join(out)
+
+
+def label_copy(raw):
+    """What the board puts on the wire for a label whose bytes are `raw`."""
+    return _label_map(raw, LABEL_MAX)
+
+
+def _c_unescape(body):
+    """A C string literal's body as bytes."""
+    out = bytearray()
+    i = 0
+    simple = {"n": 10, "t": 9, "r": 13, "0": 0, "\\": 92, '"': 34, "'": 39,
+              "a": 7, "b": 8, "f": 12, "v": 11, "?": 63}
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\":
+            out += ch.encode("utf-8")
+            i += 1
+            continue
+        nxt = body[i + 1:i + 2]
+        if nxt == "x":
+            m = re.match(r"[0-9a-fA-F]{1,2}", body[i + 2:])
+            out.append(int(m.group(0), 16) if m else 0)
+            i += 2 + (len(m.group(0)) if m else 0)
+        elif nxt in simple:
+            out.append(simple[nxt])
+            i += 2
+        else:
+            out += nxt.encode("utf-8")
+            i += 2
+    return bytes(out)
+
+
+_C_TOKEN = re.compile(r'"((?:[^"\\\n]|\\.)*)"|(LV_SYMBOL_\w+)|(\S)')
+
+
+def c_literals(text):
+    """Every string literal in C source `text`, adjacent ones joined and the
+    LVGL symbols spelled as their bytes; comments and character constants
+    left out."""
+    text = re.sub(r"/\*.*?\*/|//[^\n]*", " ", text, flags=re.S)
+    text = re.sub(r"'(?:[^'\\\n]|\\.)+'", " ", text)
+    out, cur = [], None
+    for m in _C_TOKEN.finditer(text):
+        lit, sym, other = m.groups()
+        if lit is not None or sym is not None:
+            piece = _c_unescape(lit) if lit is not None else \
+                _LV_SYMBOLS.get(sym, b"\xef\x80\x80")
+            cur = piece if cur is None else cur + piece
+        elif cur is not None:
+            out.append(cur)
+            cur = None
+    if cur is not None:
+        out.append(cur)
+    return out
+
+
+def _template(raw):
+    """A literal's tokens: ("lit", char) and ("hole", kind), or None when it
+    has a hole that is not a number and not a listed version."""
+    holes = VERSION_HOLES.get(raw.decode("utf-8", "replace"))
+    s_seen = 0
+    toks = []
+    pos = 0
+    for m in _C_CONV.finditer(raw):
+        toks += [("lit", c) for c in _label_map(raw[pos:m.start()])]
+        pos = m.end()
+        if m.group(1) == b"%":
+            toks.append(("lit", "%"))
+            continue
+        conv = m.group(2)
+        if conv in b"diu" and len(conv) == 1:
+            toks.append(("hole", "num"))
+        elif conv == b"s" and holes and s_seen < len(holes):
+            toks.append(("hole", holes[s_seen]))
+            s_seen += 1
+        else:
+            return None
+    toks += [("lit", c) for c in _label_map(raw[pos:])]
+    return tuple(toks)
+
+
+def _tmatch(label, i, toks, j, prefix_ok):
+    """Does label[i:] match toks[j:]? With prefix_ok, running out of label
+    part way through is a match: the board cut it at LABEL_MAX."""
+    if j == len(toks):
+        return i == len(label)
+    if i == len(label):
+        # Out of label: fine if it was cut, or if all that is left are holes
+        # that may be empty (the plural "s" of "1 change").
+        return prefix_ok or all(k == "hole" and _HOLE_RE[v][0].fullmatch("")
+                                for k, v in toks[j:])
+    kind, v = toks[j]
+    if kind == "lit":
+        return label[i] == v and _tmatch(label, i + 1, toks, j + 1, prefix_ok)
+    full, part = _HOLE_RE[v]
+    for k in range(len(label) - i, -1, -1):
+        seg = label[i:i + k]
+        if full.fullmatch(seg) and _tmatch(label, i + k, toks, j + 1,
+                                           prefix_ok):
+            return True
+        if prefix_ok and i + k == len(label) and part.fullmatch(seg):
+            return True
+    return False
+
+
+class LabelAllowList:
+    """The labels this repository can account for (see above)."""
+
+    def __init__(self, root=None):
+        root = Path(root) if root else ROOT
+        raws = []
+        # Headers too: the gauge screen's "BLINK" is a #define in
+        # usage_layout.h, and a label from a macro is a literal all the same.
+        fw = root / "firmware" / "src"
+        for src in sorted(list(fw.glob("*.c")) + list(fw.glob("*.h"))):
+            raws += c_literals(src.read_text(encoding="utf-8"))
+        harness = root / "tools" / "panel_render" / "touch"
+        for src in sorted(harness.glob("*.c")):
+            raws += c_literals(src.read_text(encoding="utf-8"))
+        raws += self._py_literals(root / "pc" / "bridge.py")
+        self.plain = set()
+        self.templates = set()
+        for raw in raws:
+            toks = _template(raw)
+            if toks is None:
+                continue
+            if all(k == "lit" for k, _ in toks):
+                text = "".join(v for _, v in toks)
+                if text:
+                    self.plain.add(text)
+                    # ui_settings.c capitalises the first letter of the
+                    # reason it puts under a failure notice.
+                    self.plain.add(text[0].upper() + text[1:])
+            else:
+                self.templates.add(toks)
+        self._plain_sorted = sorted(self.plain)
+        self._cache = {}
+
+    @staticmethod
+    def _py_literals(path):
+        import ast
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            return []
+        return [n.value.encode("utf-8") for n in ast.walk(tree)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+
+    def _one(self, label, prefix_ok):
+        if label in self.plain:
+            return True
+        if prefix_ok and any(p.startswith(label) for p in self._plain_sorted):
+            return True
+        return any(_tmatch(label, 0, t, 0, prefix_ok) for t in self.templates)
+
+    def allowed(self, label):
+        """True when `label` is text the repository holds, whole, cut at
+        LABEL_MAX, or as two such texts joined by the space a newline
+        becomes (a notice's sentence and the reason under it)."""
+        if label in self._cache:
+            return self._cache[label]
+        cut = len(label) >= LABEL_MAX
+        ok = label == "" or self._one(label, cut)
+        if not ok:
+            for p, ch in enumerate(label):
+                if ch == " " and self._one(label[:p], False) and \
+                        _tail_ok(label[p + 1:]) and \
+                        (p + 1 == len(label) or self._one(label[p + 1:], cut)):
+                    ok = True
+                    break
+        self._cache[label] = ok
+        return ok
+
+
+def _tail_ok(tail):
+    """The second half of a joined label: nothing, or something that reads
+    as a sentence -- four characters or more, a letter among them. Without
+    this the tail matched the bare-hole templates (%d, %d:%d) and the one-
+    and two-letter literals, so "Updated to 1.3.4 12345" and "OK OK" printed
+    (review r2, N1): never free text, but wider than a reason under a notice
+    needs to be."""
+    return tail == "" or (len(tail) >= 4 and any(c.isalpha() for c in tail))
+
+
+_ALLOW = None
+
+
+def label_allow():
+    """The allow-list, built once per run from the source beside this file."""
+    global _ALLOW
+    if _ALLOW is None:
+        _ALLOW = LabelAllowList()
+    return _ALLOW
+
+
+def shown_label(label):
+    """A label as it may be printed: itself when the repository accounts for
+    it, otherwise only its length."""
+    if label_allow().allowed(label):
+        return repr(label)
+    return f"<label withheld, {len(label)} chars>"
+
+
+def reachable_matches(items, text, force=False):
+    """The widgets `text` names that a finger can press, as (list, None), or
+    ([], why).
+
+    Exact label first, then a label that starts with it (labels are cut at
+    LABEL_MAX, so a longer name is matched on its first LABEL_MAX), then one
+    that contains it; the first of those that matches anything decides, and
+    of what it matched, only what the hit test reaches and LVGL would take a
+    press on (not disabled, unless forced) is kept. A reason names indices
+    and kinds and the operator's own words, never a label."""
+    q = text[:LABEL_MAX]
+    tiers = (lambda l: l == text or (len(text) > LABEL_MAX and l == q),
+             lambda l: l.startswith(q),
+             lambda l: q in l)
+    cands = []
+    for tier in tiers:
+        cands = [w for w in items if w.label and tier(w.label)]
+        if cands:
+            break
+    if not cands:
+        return [], f"no widget says {text!r}"
+    reach = [w for w in cands if w.hit]
+    if not reach:
+        return [], (f"{text!r} is on the panel but covered "
+                    f"(widget {', '.join(str(w.i) for w in cands)}): "
+                    "something is on top of it")
+    live = reach if force else [w for w in reach if not w.disabled]
+    if not live:
+        return [], (f"{text!r} is disabled (widget "
+                    f"{', '.join(str(w.i) for w in reach)}): LVGL drops a "
+                    "press on it; --force presses it anyway")
+    return live, None
+
+
+def find_widget(items, text, force=False):
+    """The one widget `text` names, as (widget, None), or (None, why): of
+    reachable_matches, a button over a box, and more than one left is
+    ambiguous and refused, never guessed."""
+    reach, why = reachable_matches(items, text, force)
+    if not reach:
+        return None, why
+    if len(reach) > 1:
+        press = [w for w in reach if w.kind in _PRESSABLE]
+        if len(press) == 1:
+            return press[0], None
+
+        def one(w):
+            lab = (" " + repr(w.label)
+                   if label_allow().allowed(w.label) else "")
+            return f"{w.i} {w.kind}{lab}"
+        return None, (f"{text!r} names {len(reach)} widgets ("
+                      + ", ".join(one(w) for w in reach)
+                      + "); use click --index")
+    return reach[0], None
+
+
+def widget_table(items):
+    """The listing as lines of text: index, kind, label (when allowed; see
+    above), rectangle, aim and what the flags say."""
+    width = LABEL_MAX + 2
+    out = [f"  {'i':>3} {'kind':<7} {'label':<{width}} "
+           f"{'x,y':>8} {'w x h':>9} {'aim':>9}  flags"]
+    for w in items:
+        aim = f"{w.ax},{w.ay}" if w.hit else "covered"
+        fl = [n for b, n in ((W_CHECKED, "checked"), (W_DISABLED, "disabled"),
+                             (W_EVENTS, "cb"), (W_TOP, "top"), (W_SYS, "sys"))
+              if w.f & b]
+        out.append(f"  {w.i:>3} {w.kind:<7} {shown_label(w.label):<{width}} "
+                   f"{f'{w.x},{w.y}':>8} {f'{w.w}x{w.h}':>9} {aim:>9}  "
+                   + " ".join(fl))
+    return out
+
+
+def _mem_wheres():
+    """The screen names a [mem] line may carry: those firmware/src passes to
+    mem_stats_report, and the host harness's host-* ones (harness.c,
+    bench_mem: a modal, a sub-screen, or the screen)."""
+    names = set()
+    for src in (ROOT / "firmware" / "src").glob("*.c"):
+        names.update(re.findall(r'mem_stats_report\("([a-z0-9-]+)"\)',
+                                src.read_text(encoding="utf-8")))
+    for w in (("eyes", "gauges", "settings") + _STATE_WORDS["modal"]
+              + _STATE_WORDS["ov"]):
+        names.add("host-" + w)
+    return names
+
+
+_WHERES = None
+
+
+def shown_where(where):
+    """A [mem] line's screen name as it may be printed (review, N6)."""
+    global _WHERES
+    if _WHERES is None:
+        _WHERES = _mem_wheres()
+    return where if where in _WHERES else f"<screen withheld, {len(where)} chars>"
+
+
 # What ui_state may say, field by field (touch_inject.c, ui_state_line). A
 # reply with anything outside this is not printed and not believed.
 _STATE_WORDS = {
@@ -374,12 +877,55 @@ _MEM_KEYS = ("used", "free", "largest", "peak", "boot_peak", "pool")
 _SWIPE_RE = re.compile(
     rb"^\[swipe\] dx (-?\d{1,4}) dy (-?\d{1,4}) in (\d{1,6}) ms, "
     rb"(\d{1,5}) samples -> (\d)$")
+# What an unparsed line is, in words this file chose, never the line itself:
+# a Zephyr log line's level and module (the module only when it is one of
+# these names, else "other"), a printk's leading [tag] (only tags
+# firmware/src prints), else "other". Enough to say "LVGL is warning on every
+# frame" without reading a byte of what it said.
+_LOG_DROPPED_RE = re.compile(rb"--- (\d{1,9}) messages dropped ---")
+_ZLOG_RE = re.compile(
+    rb"^(?:\x1b\[[0-9;]*m)?\[\d{2}:\d{2}:\d{2}\.\d{3},\d{3}\] "
+    rb"<(err|wrn|inf|dbg)> ([a-z][a-z0-9_]{0,31}):")
+_LOG_MODULES = frozenset({"lvgl", "os", "uart", "input", "xpt2046", "spi",
+                          "gpio", "flash", "display", "mcuboot", "net",
+                          "esp32", "heap", "kernel"})
+_TAG_RE = re.compile(rb"^\[([a-z]{1,12})\] ")
+_TAGS = None
+
+
+def _printk_tags():
+    global _TAGS
+    if _TAGS is None:
+        tags = set()
+        for src in (ROOT / "firmware" / "src").glob("*.c"):
+            tags.update(re.findall(r'"\[([a-z]{1,12})\] ',
+                                   src.read_text(encoding="utf-8")))
+        _TAGS = frozenset(tags)
+    return _TAGS
+
+
+def unparsed_kind(raw):
+    """A category for an unparsed line, from this file's own words."""
+    m = _ZLOG_RE.match(raw)
+    if m:
+        mod = m.group(2).decode("ascii")
+        return (f"log {m.group(1).decode('ascii')} "
+                f"{mod if mod in _LOG_MODULES else 'other'}")
+    m = _TAG_RE.match(raw)
+    if m and m.group(1).decode("ascii") in _printk_tags():
+        return f"printk [{m.group(1).decode('ascii')}]"
+    if raw.startswith(b"{"):
+        return "json not understood"
+    return "other"
+
+
 _INJECT_LINE = (b"[touch] INJECT BUILD: the PC can drive this panel"
                 b" -- bench only, never ship this")
 _HEX8 = re.compile(r"^[0-9a-f]{8}$")
 _CAP_WORDS = frozenset({"svc", "theme"})
-_TOUCH_OPS = ("tap", "swipe", "press", "release", "dismiss", "wake")
-_REFUSALS = ("busy", "args", "not_held")
+_TOUCH_OPS = ("tap", "swipe", "press", "release", "dismiss", "wake", "click")
+_REFUSALS = ("busy", "args", "not_held", "stale", "covered", "range",
+             "disabled")
 _THEME_WHY = ("boot", "user", "saved")
 
 MAX_RX_LINE = 2048     # longer than anything the board sends on purpose
@@ -418,9 +964,86 @@ def _on_panel(pts, lineno):
                               f"({SCREEN_W} x {SCREEN_H})")
 
 
+# The commands that name a widget by its words, which have spaces in them:
+# these lines are split shell-style, so `click "Update now"` is one name and a
+# `#` inside the quotes is not a comment.
+_QUOTED_CMDS = ("click", "expect-widget", "wait-widget", "widgets", "fake")
+FAKE_KINDS = ("ota_avail", "ota_none", "ota_error", "boot_notice",
+              "reverted_notice")
+
+
+def _parse_quoted(cmd, rest, lineno):
+    if cmd == "widgets":
+        if rest:
+            raise ScriptError(f"line {lineno}: usage: widgets")
+        return Step(lineno, "widgets", ())
+    if cmd == "click":
+        # --force: press a disabled widget anyway (it is refused otherwise,
+        # because LVGL would drop the press and the step would pass).
+        forced = rest[:1] == ["--force"]
+        extra = (True,) if forced else ()
+        if forced:
+            rest = rest[1:]
+        if len(rest) == 2 and rest[0] in ("index", "--index"):
+            try:
+                return Step(lineno, "click_index", (int(rest[1]),) + extra)
+            except ValueError:
+                pass
+        elif len(rest) == 1 and rest[0]:
+            return Step(lineno, "click", (rest[0],) + extra)
+        raise ScriptError(f'line {lineno}: usage: click [--force] "LABEL"  '
+                          "or  click [--force] index N")
+    if cmd == "expect-widget":
+        if len(rest) == 1 and rest[0]:
+            return Step(lineno, "expect_widget", (rest[0],))
+        raise ScriptError(f'line {lineno}: usage: expect-widget "LABEL"')
+    if cmd == "wait-widget":
+        try:
+            label, secs = rest
+            if label:
+                return Step(lineno, "wait_widget", (label, float(secs)))
+        except ValueError:
+            pass
+        raise ScriptError(f'line {lineno}: usage: wait-widget "LABEL" S')
+    # fake: a line the PC would not normally send, to raise a popup.
+    kind = rest[0] if rest else ""
+    if kind not in FAKE_KINDS:
+        raise ScriptError(f"line {lineno}: usage: fake "
+                          + "|".join(FAKE_KINDS) + " [ARG]")
+    if kind == "ota_avail" and len(rest) in (2, 3):
+        return Step(lineno, "fake", tuple(rest))
+    if kind in ("ota_none", "reverted_notice") and len(rest) == 1:
+        return Step(lineno, "fake", tuple(rest))
+    if kind == "ota_error":
+        # The reason is the rest of the line, as the daemon's sentence is.
+        return Step(lineno, "fake", (kind,) + ((" ".join(rest[1:]),)
+                                               if rest[1:] else ()))
+    if kind == "boot_notice" and len(rest) in (1, 2):
+        return Step(lineno, "fake", tuple(rest))
+    raise ScriptError(f"line {lineno}: usage: fake ota_avail VERSION [APP] | "
+                      "fake ota_none | fake ota_error [WHY] | "
+                      "fake boot_notice [FROM] | fake reverted_notice")
+
+
 def parse_line(text, lineno=1):
     """One script line as a Step, or None for a blank line or a comment."""
-    words = text.split("#", 1)[0].split()
+    head = text.split("#", 1)[0].split()
+    if head[:2] == ["fake", "ota_error"]:
+        # The reason is the rest of the line as written, the way the
+        # daemon's sentence is: shlex would call "it's late" an unbalanced
+        # quote (review r2, N5). Quotes around the whole of it come off.
+        rest = text.split("#", 1)[0].split(None, 2)[2:]
+        why = rest[0].strip() if rest else ""
+        if len(why) >= 2 and why[0] == why[-1] and why[0] in "'\"":
+            why = why[1:-1]
+        return Step(lineno, "fake", ("ota_error",) + ((why,) if why else ()))
+    if head and head[0] in _QUOTED_CMDS:
+        try:
+            words = shlex.split(text, comments=True)
+        except ValueError:
+            raise ScriptError(f"line {lineno}: unbalanced quote") from None
+        return _parse_quoted(words[0], words[1:], lineno)
+    words = head
     if not words:
         return None
     cmd, rest = words[0], words[1:]
@@ -523,9 +1146,21 @@ def take_daemon_lock():
         return None, None          # Windows: the port itself is exclusive
     from pc.cli import blink_home
     home = blink_home()
-    if not os.path.isdir(home):
-        return None, None          # no daemon has ever run here
-    fh = open(os.path.join(home, "bridge.lock"), "a", encoding="utf-8")
+    # Made if it is not there, as hold_single_instance does. It used to
+    # mean "no daemon has ever run here, so no lock", and a daemon that
+    # was then installed or kickstarted mid-run took the lock and the port
+    # beside this tool -- a /dev/cu.* node is not exclusive on macOS -- and
+    # could answer the board's next check with a real offer (review, S2).
+    # A home that cannot be written refuses the run with a sentence, as
+    # hold_single_instance catches OSError too: without the lock nothing
+    # keeps a daemon off the port (review r2, N3).
+    try:
+        os.makedirs(home, exist_ok=True)
+        fh = open(os.path.join(home, "bridge.lock"), "a", encoding="utf-8")
+    except OSError as e:
+        return None, (f"cannot take the daemon's lock in {home} "
+                      f"({type(e).__name__}); without it a daemon could "
+                      "open the port beside this tool")
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -678,6 +1313,8 @@ class Bench:
         self.mem_lines = []
         self._mem_seen = 0
         self.unparsed = 0
+        self.unparsed_kinds = {}   # unparsed_kind() -> count
+        self.log_dropped = 0       # messages Zephyr's log said it dropped
         self.withheld = 0
         self.events = []           # parsed, in arrival order
         self._mark = 0
@@ -685,6 +1322,16 @@ class Bench:
         self._last_frames = None
         self._frames_sent = 0
         self.board_h = None        # the custom theme's hash, last theme_now
+        self.walk_stats = None     # host harness: what the widget walks took
+        self.force = False         # --force: click a disabled widget anyway
+        # f() -> pids other than ours on the port, or None when it cannot be
+        # asked; None here means there is no port (the host harness).
+        self.port_check = None
+        self.ota_flash_pending = False  # a consent nobody has answered
+        # An install press landed (INSTALL_WORDS). Its ota_flash comes a loop
+        # pass after the touch_done, behind the next ui_state reply, so a run
+        # ending on the press can end before the line arrives (review r2, S1).
+        self.install_pressed = False
 
     # -- output, parsed fields only --
     def say(self, text):
@@ -731,10 +1378,12 @@ class Bench:
             self.events.append(ev)
             self._cv.notify_all()
 
-    def _unparsed(self, n):
+    def _unparsed(self, n, raw=None):
         self.unparsed += 1
+        kind = unparsed_kind(raw) if raw is not None else "over-long"
+        self.unparsed_kinds[kind] = self.unparsed_kinds.get(kind, 0) + 1
         if self.verbose:
-            self.say(f"unparsed line ({n} bytes)")
+            self.say(f"unparsed line ({n} bytes, {kind})")
 
     def on_overlong(self, n):
         self._unparsed(n)
@@ -745,7 +1394,7 @@ class Bench:
             return
         if raw.startswith(b"{"):
             if not self._on_json(raw):
-                self._unparsed(len(raw))
+                self._unparsed(len(raw), raw)
             return
         m = _MEM_RE.match(raw)
         if m:
@@ -753,8 +1402,9 @@ class Bench:
             for k, g in zip(_MEM_KEYS, m.groups()[1:]):
                 ev[k] = int(g)
             self.mem_lines.append({k: v for k, v in ev.items() if k != "t"})
-            self.say("[mem] {where}: peak={peak} used={used} free={free} "
-                     "largest={largest} boot_peak={boot_peak}".format(**ev))
+            self.say("[mem] {w}: peak={peak} used={used} free={free} "
+                     "largest={largest} boot_peak={boot_peak}".format(
+                         w=shown_where(ev["where"]), **ev))
             self._event(ev)
             return
         m = _SWIPE_RE.match(raw)
@@ -765,7 +1415,20 @@ class Bench:
         if raw == _INJECT_LINE:
             self.say("board: touch inject build")
             return
-        self._unparsed(len(raw))
+        m = _LOG_DROPPED_RE.search(raw)
+        if m:
+            # Zephyr's deferred log threw messages away. Every protocol line
+            # the board sends goes through it, so a reply this tool is
+            # waiting on may be among them: said when it happens, with the
+            # number, because it is the cause of a "no touch_done" that
+            # follows (the 2026-10-28 board run lost 22 replies this way).
+            n = int(m.group(1))
+            self.log_dropped += n
+            self.say(f"board log dropped {n} message(s): a reply may be "
+                     "lost")
+            self._event({"t": "log_dropped", "n": n})
+            return
+        self._unparsed(len(raw), raw)
 
     def _on_json(self, raw):
         try:
@@ -792,6 +1455,41 @@ class Bench:
                 return False
             self.say("ui_state " + " ".join(f"{k}={st[k]}" for k in STATE_KEYS))
             self._event(dict(st, t="ui_state"))
+            return True
+        if t == "bench_walk":
+            # The host harness only: what the widget walks have left in the
+            # pool, worst case over every one so far (harness.c,
+            # pool_sample). The walk must take nothing; the layout it runs
+            # first does what the next refresh would have.
+            vals = [obj.get(k) for k in ("walks", "grew", "rise", "layout")]
+            if not all(_int_in(v, 0, 10 ** 7) for v in vals):
+                return False
+            walks, grew, rise, layout = vals
+            self.walk_stats = {"walks": walks, "grew": grew, "rise": rise,
+                               "layout": layout}
+            self.say(f"host walk: {walks} walks, +{grew} B left and "
+                     f"+{rise} B high-water by the walk, +{layout} B by the "
+                     "layout before it")
+            if grew or rise:
+                self.fail(f"the widget walk took {max(grew, rise)} B "
+                          "from the pool; it must take nothing")
+            return True
+        if t == "ota_flash":
+            # The board's consent to an install. Never answered: a daemon
+            # would run esptool now, and this tool installs nothing. A
+            # `fake ota_error` takes the download screen down again.
+            self.say("ota_flash (not answered: the bench installs nothing)")
+            self.ota_flash_pending = True
+            self._event({"t": "ota_flash"})
+            return True
+        if t == "widgets":
+            page = parse_widgets(obj)
+            if page is None:
+                return False
+            if self.verbose:
+                self.say(f"widgets page {page['page']}: "
+                         f"{len(page['items'])} of {page['n']}")
+            self._event(dict(page, t="widgets"))
             return True
         if t == "touch_done":
             op, ok = obj.get("op"), obj.get("ok")
@@ -914,6 +1612,7 @@ class Bench:
     def stroke(self, msg, timeout=12.0):
         """Send one stroke and wait for the board to finish playing it."""
         self.mark()
+        drops = self.log_dropped   # before the send: a drop can beat it back
         if not self.send(msg):
             self.fail(f"{msg['op']}: not sent")
             return False
@@ -929,13 +1628,23 @@ class Bench:
 
         ev = self._wait(done, timeout)
         if ev is None:
-            self.fail(f"{want_op}: no touch_done from the board -- is this "
-                      "a CONFIG_BLINK_TOUCH_INJECT image?")
+            self.fail(f"{want_op}: " + self._lost_why(drops))
             return False
         if ev["t"] == "touch_refused":
             self.fail(f"{want_op}: refused ({ev['why']})")
             return False
         return True
+
+    def _lost_why(self, drops_before):
+        """Why a reply never came, as far as this side can tell. The first
+        board run of the widget image blamed the image ("is this an inject
+        build?") for 22 replies that Zephyr's log had dropped."""
+        if self.log_dropped > drops_before:
+            return ("no touch_done: the board's log dropped "
+                    f"{self.log_dropped - drops_before} message(s) meanwhile, "
+                    "and the reply was probably one of them")
+        return ("no touch_done from the board -- is this a "
+                "CONFIG_BLINK_TOUCH_INJECT image?")
 
     def _play(self, target, pts):
         if target.kind == "swipe":
@@ -1055,14 +1764,258 @@ class Bench:
             return False
         return True
 
+    # -- widgets --
+    def _widgets_page(self, page, timeout=2.0):
+        with self._cv:
+            n = len(self.events)
+        if not self.send(widgets_query(page)):
+            return None
+        deadline = time.monotonic() + max(0.0, timeout * self.scale)
+        while True:
+            with self._cv:
+                for ev in self.events[n:]:
+                    if ev["t"] == "widgets" and ev["page"] == page:
+                        return ev
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self._cv.wait(min(left, 0.5))
+            self.maybe_heartbeat()
+
+    def _list(self):
+        """((gen, [Widget]), None) for the whole panel, or (None, why). Page
+        by page, and all of one generation: a page that comes back under
+        another one means the panel changed while it was being read, so the
+        listing starts again -- three times, then it is called a panel that
+        will not hold still. Records no failure: a caller that polls may
+        try again, and only it knows when trying is over (review, S3)."""
+        # Not mid-transition: a listing taken while a slide or a queued
+        # close is still running is of a screen that is about to go.
+        self.wait_state({}, timeout=3.0)
+        for _ in range(3):
+            items, gen, page = [], None, 0
+            while True:
+                ev = self._widgets_page(page)
+                if ev is None:
+                    return None, ("no widgets reply from the board -- is this "
+                                  "a CONFIG_BLINK_TOUCH_INJECT image with the "
+                                  "widget walk?")
+                if gen is None:
+                    gen = ev["gen"]
+                elif ev["gen"] != gen:
+                    break
+                items += ev["items"]
+                if not ev["more"]:
+                    return (gen, items), None
+                page += 1
+                if page > 999:
+                    break
+        return None, "the panel kept changing while its widgets were listed"
+
+    def list_widgets(self):
+        """(gen, [Widget]), or None with the failure recorded."""
+        got, why = self._list()
+        if got is None:
+            self.fail(why)
+        return got
+
+    def show_widgets(self):
+        got = self.list_widgets()
+        if got is None:
+            return False
+        gen, items = got
+        self.say(f"widgets: {len(items)} (gen {gen})")
+        for line in widget_table(items):
+            self.say(line)
+        return True
+
+    def _install_press_ok(self, w):
+        """Before a press that consents to an install: is the port still
+        ours alone? A daemon that started mid-run has the board's next
+        ota_query to answer with a real offer, and would take the ota_flash
+        this press sends as its cue to install a release over the bench
+        image (review, S2). _connect checked once, at the start; this is the
+        check at the moment it matters."""
+        if self.port_check is None or w.label not in INSTALL_WORDS:
+            return True
+        holders = self.port_check()
+        if holders is None:
+            self.fail("refusing an install press: lsof is not here to say "
+                      "who else holds the port")
+            return False
+        if holders:
+            self.fail("refusing an install press: pid(s) "
+                      f"{', '.join(map(str, holders))} also hold the port, "
+                      "and a daemon there would install a release over this "
+                      "bench image")
+            return False
+        return True
+
+    def click(self, text=None, index=None, ms=TAP_MS, force=None):
+        """Tap a widget by its words or by its index in a fresh listing,
+        through the real input path (touch_widgets.c, tw_click_parse). A
+        listing gone stale between reading it and pressing is read again
+        once; a board busy with a transition is given a few seconds. What is
+        said names the index, kind and aim -- and the label only by
+        shown_label, and never for a click by index (review, M1, N7)."""
+        force = self.force if force is None else force
+        tries_busy = 10
+        attempt = 0
+        while True:
+            attempt += 1
+            got = self.list_widgets()
+            if got is None:
+                return False
+            gen, items = got
+            if index is not None:
+                w = next((w for w in items if w.i == index), None)
+                if w is None:
+                    self.fail(f"click index {index}: no such widget "
+                              f"({len(items)} listed)")
+                    return False
+                if w.disabled and not force:
+                    self.fail(f"click index {index}: widget {w.i} is "
+                              "disabled; LVGL drops a press on it (--force "
+                              "presses it anyway)")
+                    return False
+                what = f"index {index}"
+                self.say(f"> click {what}: widget {w.i} {w.kind} at "
+                         f"{w.ax},{w.ay}")
+            else:
+                w, why = find_widget(items, text, force)
+                if w is None:
+                    self.fail(f"click {text!r}: {why}")
+                    return False
+                what = repr(text)
+                self.say(f"> click {what}: widget {w.i} {w.kind} "
+                         f"{shown_label(w.label)} at {w.ax},{w.ay}")
+            if not self._install_press_ok(w):
+                return False
+            self._note(f"click-{w.i}")
+            self.mark()
+            drops = self.log_dropped
+            if not self.send(touch_click(w.i, gen, ms, force)):
+                self.fail(f"click {what}: not sent")
+                return False
+
+            def done(evs):
+                for ev in evs:
+                    if ev["t"] == "touch_refused":
+                        return ev
+                    if ev["t"] == "touch_done" and ev["op"] == "click":
+                        return ev
+                return None
+
+            ev = self._wait(done, 12.0)
+            if ev is None:
+                self.fail(f"click {what}: " + self._lost_why(drops))
+                return False
+            if ev["t"] == "touch_done":
+                if w.label in INSTALL_WORDS:
+                    self.install_pressed = True
+                # The press is in; let what it started (a slide, a screen
+                # load) finish before the next step looks (review, N3).
+                self.wait_state({}, timeout=3.0)
+                return True
+            if ev["why"] == "stale" and attempt == 1:
+                self.say("listing went stale before the press; reading again")
+                continue
+            if ev["why"] == "busy" and tries_busy > 0:
+                tries_busy -= 1
+                time.sleep(0.3)
+                continue
+            self.fail(f"click {what}: refused ({ev['why']})")
+            return False
+
+    def wait_widget(self, text, timeout):
+        """Until a reachable widget says `text`, or the timeout: the first
+        such widget, or None. Polls, and records a failure only at the
+        deadline; expect-widget is this with a short timeout."""
+        deadline = time.monotonic() + max(0.0, timeout * self.scale)
+        why = "no listing"
+        while True:
+            got, lwhy = self._list()
+            if got is not None:
+                reach, why = reachable_matches(got[1], text, force=True)
+                if reach:
+                    return reach[0]
+            else:
+                why = lwhy
+            if time.monotonic() >= deadline:
+                self.fail(f"widget {text!r}: {why}")
+                return None
+            time.sleep(0.3)
+
+    def fake(self, kind, *args):
+        """A line that raises a popup a run cannot otherwise reach. The OTA
+        ones are real protocol lines, the board's own answer path: an offer,
+        a check that found nothing, a failure. Pressing "Update now" after
+        one sends ota_flash to this tool, which never answers it -- nothing
+        is written to the board -- and a later `fake ota_error` takes the
+        download screen down the way a daemon that gave up would; so does
+        the restore, if the run ends first. The two notices are the
+        harness's alone: only a boot after a real update raises them on a
+        board."""
+        if kind == "ota_avail":
+            ver = args[0]
+            app = args[1] if len(args) > 1 else None
+            # Invented size and digest: nothing will ever be downloaded.
+            return self.send(protocol.ota_avail(ver, 1_200_000, "0" * 64,
+                                                app=app))
+        if kind == "ota_none":
+            return self.send(protocol.ota_none())
+        if kind == "ota_error":
+            self.ota_flash_pending = False
+            self.install_pressed = False
+            return self.send(protocol.ota_error(args[0] if args else ""))
+        if getattr(self.link, "note", None) is None:
+            self.fail(f"fake {kind}: the host harness only (--harness); a "
+                      "board raises it only on the boot after an update")
+            return False
+        msg = {"t": "bench_notice", "v": protocol.VERSION,
+               "kind": "reverted" if kind == "reverted_notice" else "update"}
+        if kind == "boot_notice" and args:
+            msg["from"] = args[0]
+        return self.send(msg)
+
+    def end_install(self):
+        """A consent the bench never answered leaves the board on the
+        download screen, which has no timeout of its own and holds off the
+        doze until a power cycle (review, S2). Answered as a daemon that gave
+        up would: ota_error, then ota_none, so the board goes back to having
+        nothing on offer.
+
+        After an install press whose ota_flash has not been seen, it is
+        waited for, up to INSTALL_FLASH_WAIT_S: on a board main.c prints it
+        on the loop pass after the one that answered the bench's ui_state,
+        so a run that ends on the press used to find nothing pending and
+        leave the board waiting (review r2, S1). Then the two lines go out
+        either way: on a board that never reached the download screen they
+        only put up a failure notice, on a bench board."""
+        if not (self.ota_flash_pending or self.install_pressed):
+            return
+        if not self.ota_flash_pending:
+            self._wait(lambda evs: next(
+                (e for e in evs if e["t"] == "ota_flash"), None),
+                INSTALL_FLASH_WAIT_S)
+        self.say("ending the install the board was left waiting on")
+        self.send(protocol.ota_error("the bench run ended"))
+        self.sleep(0.5)
+        self.send(protocol.ota_none())
+        self.ota_flash_pending = False
+        self.install_pressed = False
+        self.sleep(0.5)
+
     def report_mem(self):
         new = self.mem_lines[self._mem_seen:]
         self._mem_seen = len(self.mem_lines)
         if not new:
             self.say("mem: no [mem] line since the last one")
         for m in new:
-            self.say(f"mem {m['where']}: peak {m['peak']} of {POOL_USABLE} "
-                     f"({100.0 * m['peak'] / POOL_USABLE:.1f}%), "
+            pool = _pool_of(m)
+            self.say(f"mem {shown_where(m['where'])}: peak {m['peak']} "
+                     f"of {pool} "
+                     f"({100.0 * m['peak'] / pool:.1f}%), "
                      f"largest free {m['largest']}")
 
     def run_step(self, s):
@@ -1080,12 +2033,29 @@ class Bench:
             self.sleep(s.args[0])
             return True
         if s.cmd == "mem":
+            # The harness prints a [mem] line only when asked (its pool is
+            # the host's; see harness.c), and says what the walks took.
+            if getattr(self.link, "note", None) is not None:
+                self.send({"t": "bench_mem", "v": protocol.VERSION})
             # Give a [mem] line printed by the last action a moment to land.
             self.sleep(0.3)
             self.report_mem()
             return True
         if s.cmd == "state":
             return self.query_state() is not None
+        if s.cmd == "widgets":
+            return self.show_widgets()
+        if s.cmd == "click":
+            return self.click(text=s.args[0], force=len(s.args) > 1 or None)
+        if s.cmd == "click_index":
+            return self.click(index=s.args[0], force=len(s.args) > 1 or None)
+        if s.cmd == "expect_widget":
+            return self.wait_widget(s.args[0], 3.0) is not None
+        if s.cmd == "wait_widget":
+            return self.wait_widget(*s.args) is not None
+        if s.cmd == "fake":
+            self.mark()
+            return self.fake(*s.args)
         if s.cmd == "expect":
             kind, fields = s.args
             if kind in ("ui_state", "notice"):
@@ -1098,7 +2068,8 @@ class Bench:
         every later target's precondition is the screen the failed one was
         meant to reach, so carrying on reports one fault twenty times."""
         for s in steps:
-            if s.cmd in ("tap", "raw_tap", "swipe", "press", "release"):
+            if s.cmd in ("tap", "raw_tap", "swipe", "press", "release",
+                         "click", "click_index"):
                 self.mark()
             n = len(self.failures)
             self.run_step(s)
@@ -1117,6 +2088,9 @@ class Bench:
         try:
             self.run_script(steps, keep_going=keep_going)
         finally:
+            # Even with --no-restore: the download screen is not a setting
+            # the run chose, it is a board left waiting for a daemon.
+            self.end_install()
             if restore and start is not None:
                 self.restore(start, start_h=start_h)
 
@@ -1164,15 +2138,25 @@ class Bench:
             if m["peak"] > p["peak"]:
                 peaks[m["where"]] = m
         self.say("")
-        self.say(f"[mem] peak per screen, of {POOL_USABLE} B usable:")
+        self.say(f"[mem] peak per screen, of {POOL_USABLE} B usable "
+                 "(host-* lines: of the host pool they name):")
         self.say(f"  {'screen':<18}{'peak':>7}{'of pool':>9}{'headroom':>10}")
         for where, m in peaks.items():
-            self.say(f"  {where:<18}{m['peak']:>7}"
-                     f"{100.0 * m['peak'] / POOL_USABLE:>8.1f}%"
-                     f"{POOL_USABLE - m['peak']:>10}")
+            pool = _pool_of(m)
+            self.say(f"  {shown_where(where):<18}{m['peak']:>7}"
+                     f"{100.0 * m['peak'] / pool:>8.1f}%"
+                     f"{pool - m['peak']:>10}")
         if not peaks:
             self.say("  (no [mem] lines seen)")
         self.say(f"unparsed lines: {self.unparsed} (never printed)")
+        if self.unparsed_kinds:
+            self.say("  by kind: " + ", ".join(
+                f"{k} {v}" for k, v in sorted(
+                    self.unparsed_kinds.items(), key=lambda kv: -kv[1])))
+        if self.log_dropped:
+            self.say(f"the board's log dropped {self.log_dropped} "
+                     "message(s); a reply that never came was probably one "
+                     "of them")
         if self.withheld:
             self.say(f"lines not sent (over the line limit): {self.withheld}")
         if self.failures:
@@ -1271,6 +2255,9 @@ def main(argv=None):
                          "harness instead of a board")
     ap.add_argument("--renders", metavar="DIR", default=".",
                     help="with --harness: where the PNGs go")
+    ap.add_argument("--force", action="store_true",
+                    help="click a widget even when it is disabled (LVGL "
+                         "drops the press; refused without this)")
     ap.add_argument("--edit-reply", choices=("ok", "no"), default="ok",
                     help="answer the board's theme_edit with ok 1 (as if a "
                          "browser opened) or ok 0")
@@ -1286,6 +2273,12 @@ def main(argv=None):
     p.add_argument("coords", nargs="+")
     p = sub.add_parser("script")
     p.add_argument("file")
+    sub.add_parser("widgets", help="list every clickable widget on the panel")
+    p = sub.add_parser("click", help="tap a widget by its label, or by "
+                                     "--index from the listing")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("label", nargs="?")
+    g.add_argument("--index", type=int)
     args = ap.parse_args(argv)
 
     if args.cmd == "targets":
@@ -1303,6 +2296,12 @@ def main(argv=None):
             steps = [parse_line("raw tap " + " ".join(map(str, args.xy)))]
         elif args.cmd == "swipe":
             steps = [parse_line("swipe " + " ".join(args.coords))]
+        elif args.cmd == "widgets":
+            steps = [Step(1, "widgets", ())]
+        elif args.cmd == "click":
+            steps = [Step(1, "click_index", (args.index,))
+                     if args.index is not None
+                     else Step(1, "click", (args.label,))]
         else:
             steps = [parse_line("state")]
     except ScriptError as e:
@@ -1320,6 +2319,9 @@ def main(argv=None):
         link = Link(ser)
     bench = Bench(link, verbose=args.verbose,
                   edit_reply=args.edit_reply == "ok")
+    bench.force = args.force
+    if ser is not None:
+        bench.port_check = lambda: port_holders(port)
     reader = threading.Thread(
         target=link.read_loop, args=(bench.on_line, bench.on_overlong),
         daemon=True)

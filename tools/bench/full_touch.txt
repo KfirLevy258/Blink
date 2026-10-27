@@ -86,6 +86,47 @@ mem
 expect ui_state scr=gauges focus=off gf=off theme=0 stored=0
 expect notice none
 
+# --- once more, by the words on the controls. `click "LABEL"` lists the
+# panel's widgets and presses the one that says LABEL, through the same real
+# input path as every tap above (firmware/src/touch_widgets.h), at the point
+# LVGL's own hit test reaches it -- so these lines do not depend on the
+# coordinates mirrored in board_touch.py, and a control something covers
+# fails as "covered". tools/bench/popups_touch.txt does the same for every
+# popup.
+tap settings.open
+expect-widget "Software update"
+click "Focus"
+expect ui_state ov=focus
+click "Session"
+expect ui_state focus=session
+click "Off"
+expect ui_state focus=off
+click "<"
+expect ui_state ov=none
+click "Theme"
+expect ui_state ov=theme tp=0
+click "Ocean"
+expect theme_now why=user id=4
+click "Edit on computer"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+click "Dark"
+expect theme_now why=user id=0
+click "<"
+expect ui_state ov=none
+click "Brightness"
+expect ui_state ov=brightness
+click "<"
+expect ui_state ov=none
+click "<"
+expect ui_state scr=gauges focus=off theme=0 stored=0
+# Closing Settings mutes gestures for UI_SLIDE_MS * 6 (ui_settings.c,
+# do_close). A named target waits that out in its settle; a click does not
+# know where it led, so the script does. Without this the eye swipe below
+# lands inside the mute and does nothing (seen on the host harness).
+wait 1.6
+mem
+
 # --- the eye swipe, in and out the way a finger does it. Last, because on
 # the host harness the full left swipe out of the clip also opens Settings
 # (eye.exit_short in board_touch.py has why); if the board does the same,

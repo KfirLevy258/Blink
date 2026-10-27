@@ -94,8 +94,11 @@ config BLINK_TOUCH_INJECT
 
 	  Accepts {"t":"touch",...} lines over the cable and plays them into
 	  the XPT2046's input device as panel reports, so LVGL and ui_swipe
-	  both see a finger that is not there; and answers {"t":"ui_state"}
-	  with the screen and overlay on show. tools/board_touch.py drives it,
+	  both see a finger that is not there; answers {"t":"ui_state"}
+	  with the screen and overlay on show; and answers {"t":"widgets"}
+	  with every clickable control on the panel, popups included, so a
+	  "click" by index taps any of them through the same input path
+	  (src/touch_widgets.h). tools/board_touch.py drives it,
 	  so every on-board interaction can be tested with nobody at the
 	  panel (src/touch_inject.h has the wire). A shipped board with this
 	  in it could be operated by anything on the computer it is plugged
@@ -121,5 +124,16 @@ config BLINK_TOUCH_INJECT
 	  flash_encrypted.sh refuse it outright (tools/lib_selftest.sh).
 
 endmenu
+
+# The deferred log carries every protocol line this board sends, and drops
+# the OLDEST message when it is full. A bench image answers the PC far more
+# often than a desk does -- a ui_state every 150 ms, a touch_done per stroke
+# -- and the first board run of the widget image lost 22 of those replies
+# behind whatever else was printed while a Settings transition held the main
+# thread (src/touch_inject.c, touch_inject_service). 8 KB of DRAM in the
+# bench image only: with the option off this default is not taken, the
+# Zephyr default (1024) is, and a release image is unchanged.
+config LOG_BUFFER_SIZE
+	default 8192 if BLINK_TOUCH_INJECT
 
 source "Kconfig.zephyr"

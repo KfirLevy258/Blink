@@ -29,8 +29,10 @@
  *     running LVGL, which is the part of that the targets can notice.
  *   - storage, the backlight, OTA and the rest of proto: stubs.c.
  *
- * Host pointers are twice the board's, so no [mem] line is printed here; the
- * board's own are the figures to trust.
+ * Host pointers are twice the board's, so the [mem] lines printed here (one
+ * per `mem` step, answered to the bench's harness-only bench_mem line) are
+ * named host-*, and the board's own are the figures to trust. What they are
+ * good for is pool_sample's question: whether the widget walk takes anything.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +54,10 @@
 #include "theme.h"
 #include "cfg_store.h"
 #include "backlight.h"
+#include "touch_widgets.h"
+#include "touch_widgets_fmt.h"
+#include "whatsnew.h"
+#include "version.h"
 #include "harness.h"
 
 #define W TI_SCREEN_W
@@ -270,10 +276,71 @@ void ui_slide_run(int dir, void (*pump)(void))
 
 /* --- the loop ------------------------------------------------------------ */
 
+/* --- the pool, as LVGL's own monitor reads it ---------------------------
+ *
+ * The board's [mem] lines are the figures to trust (the header above says
+ * why). These are the host's, from the same widgets on a pool whose
+ * pointers are twice as wide, and they answer one question the board cannot
+ * answer as cleanly: does the widget walk itself take anything from the
+ * pool? Each walk is measured with the layout already brought up to date,
+ * so what it leaves is the walk's alone, and the layout it runs first is
+ * measured beside it. */
+static size_t peak_since;	/* the most in use since the last bench_mem */
+static size_t walk_grew, walk_rise, layout_grew;
+static int walks;
+
+static size_t pool_used(lv_mem_monitor_t *m)
+{
+	lv_mem_monitor(m);
+	return m->total_size - m->free_size;
+}
+
+static void pool_sample(void)
+{
+	lv_mem_monitor_t m;
+	size_t u = pool_used(&m);
+
+	if (u > peak_since) {
+		peak_since = u;
+	}
+}
+
+static void walk_begin(lv_mem_monitor_t *before)
+{
+	lv_mem_monitor_t m0;
+	size_t u0 = pool_used(&m0), u1;
+
+	lv_obj_update_layout(lv_layer_sys());
+	lv_obj_update_layout(lv_layer_top());
+	lv_obj_update_layout(lv_screen_active());
+	lv_obj_update_layout(lv_layer_bottom());
+	u1 = pool_used(before);
+	if (u1 > u0 && u1 - u0 > layout_grew) {
+		layout_grew = u1 - u0;
+	}
+}
+
+static void walk_end(const lv_mem_monitor_t *before)
+{
+	lv_mem_monitor_t a;
+	size_t ub = before->total_size - before->free_size;
+	size_t ua = pool_used(&a);
+
+	walks++;
+	if (ua > ub && ua - ub > walk_grew) {
+		walk_grew = ua - ub;
+	}
+	if (a.max_used > before->max_used &&
+	    a.max_used - before->max_used > walk_rise) {
+		walk_rise = a.max_used - before->max_used;
+	}
+}
+
 static void loop_once(void)
 {
 	tick(LOOP_MS);
 	lv_timer_handler();
+	pool_sample();
 	swipe_service();
 	anim_service();
 	/* ui_anim_run() holds the mode loop for the whole clip: Settings is
@@ -430,7 +497,29 @@ static void touch_line(const char *json)
 		reply("{\"t\":\"touch_refused\",\"v\":2,\"why\":\"args\"}");
 		return;
 	}
-	s.op = ti_op_from_name(op);
+	if (strcmp(op, "click") == 0) {
+		/* touch_inject.c's click_line, the same function: it parses the
+		 * line and finds the aim, and from there it is a tap like any
+		 * other. Only the busy test is this file's, from the same
+		 * getters the board's uses. */
+		struct ui_settings_bench bs;
+		lv_mem_monitor_t mb;
+		const char *why;
+
+		ui_settings_bench_state(&bs);
+		walk_begin(&mb);
+		why = tw_click_parse(json, bs.busy || anim_pending, &s);
+		walk_end(&mb);
+		if (why) {
+			snprintf(buf, sizeof(buf),
+				 "{\"t\":\"touch_refused\",\"v\":%d,"
+				 "\"why\":\"%s\"}", BLINK_PROTO_VERSION, why);
+			reply(buf);
+			return;
+		}
+	} else {
+		s.op = ti_op_from_name(op);
+	}
 	/* Not strokes, as on the board: answered at once, nothing drawn.
 	 * Nothing dozes here, so a wake has nothing to end. */
 	if (s.op == TI_OP_DISMISS || s.op == TI_OP_WAKE) {
@@ -449,7 +538,7 @@ static void touch_line(const char *json)
 		s.x1 = field(json, "x1");
 		s.y1 = field(json, "y1");
 		s.ms = field(json, "ms");
-	} else if (s.op != TI_OP_RELEASE) {
+	} else if (s.op != TI_OP_RELEASE && strcmp(op, "click") != 0) {
 		s.x0 = field(json, "x");
 		s.y0 = field(json, "y");
 		s.ms = s.op == TI_OP_TAP ? field(json, "ms") : 0;
@@ -494,7 +583,9 @@ static void ui_state_line(void)
 		 "\"tp\":%d,\"focus\":\"%s\",\"bl\":%d,\"edit\":\"%s\","
 		 "\"slp\":0,\"nt\":\"%s\",\"gf\":\"%s\"}",
 		 scr, b.open ? b.sub : "none", b.modal,
-		 (b.busy || anim_pending) ? 1 : 0, theme_active_id(),
+		 (b.busy || anim_pending ||
+		  lv_display_get_screen_prev(NULL) != NULL) ? 1 : 0,
+		 theme_active_id(),
 		 ui_theme_stored_id(), b.theme_page,
 		 !cfg_get_focus_on() ? "off" :
 		 cfg_get_focus_win() ? "weekly" : "session",
@@ -513,6 +604,90 @@ static void dispatch(const char *json)
 		touch_line(json);
 	} else if (strcmp(t, "ui_state") == 0) {
 		ui_state_line();
+	} else if (strcmp(t, "widgets") == 0) {
+		static char wbuf[TW_LINE_MAX];
+		lv_mem_monitor_t mb;
+		int n;
+
+		/* touch_inject.c's widgets_line, the same function. */
+		walk_begin(&mb);
+		n = tw_widgets_reply(json, wbuf, sizeof(wbuf),
+				     BLINK_PROTO_VERSION);
+		walk_end(&mb);
+		if (n > 0) {
+			reply(wbuf);
+		} else {
+			reply("{\"t\":\"touch_refused\",\"v\":2,\"why\":\"args\"}");
+		}
+	} else if (strcmp(t, "bench_mem") == 0) {
+		/* A [mem] line in mem_stats.h's own shape, named for the screen
+		 * up now, then what the walks have taken (see pool_sample). */
+		struct ui_settings_bench b;
+		lv_mem_monitor_t m;
+		size_t used = pool_used(&m);
+		char where[24], buf[200];
+
+		ui_settings_bench_state(&b);
+		snprintf(where, sizeof(where), "host-%s",
+			 anim_showing ? "eyes" :
+			 strcmp(b.modal, "none") ? b.modal : !b.open ? "gauges" :
+			 strcmp(b.sub, "none") ? b.sub : "settings");
+		if (peak_since < used) {
+			peak_since = used;
+		}
+		snprintf(buf, sizeof(buf),
+			 "[mem] lvgl %s: used=%zu free=%zu largest=%zu peak=%zu "
+			 "boot_peak=%zu pool=%zu", where, used, m.free_size,
+			 m.free_biggest_size, peak_since, m.max_used,
+			 m.total_size);
+		reply(buf);
+		peak_since = used;
+		snprintf(buf, sizeof(buf),
+			 "{\"t\":\"bench_walk\",\"v\":2,\"walks\":%d,\"grew\":%zu,"
+			 "\"rise\":%zu,\"layout\":%zu}", walks, walk_grew,
+			 walk_rise, layout_grew);
+		reply(buf);
+	} else if (strcmp(t, "ota_avail") == 0) {
+		/* proto.c's checks, then its state change (stubs.c). */
+		char ver[16], sha[65], app[16] = "";
+		double sz = 0;
+
+		if (msg_get_str(json, "version", ver, sizeof(ver)) &&
+		    msg_get_str(json, "sha256", sha, sizeof(sha)) &&
+		    msg_get_double(json, "size", &sz) && sz > 0) {
+			msg_get_str(json, "app", app, sizeof(app));
+			harness_ota_avail(ver, (uint32_t)sz, app);
+		} else {
+			harness_ota_error("");
+		}
+	} else if (strcmp(t, "ota_none") == 0) {
+		harness_ota_none();
+	} else if (strcmp(t, "ota_error") == 0) {
+		char why[48] = "";
+
+		msg_get_str(json, "why", why, sizeof(why));
+		harness_ota_error(why);
+	} else if (strcmp(t, "bench_notice") == 0) {
+		/*
+		 * Harness only: the notice main.c puts up on the first boot
+		 * after an update, which no wire line can raise. "update" is
+		 * the landed one, with What's new behind it when the table has
+		 * an entry between `from` and this version; "reverted" is the
+		 * other.
+		 */
+		char kind[12] = "", from[16] = "1.3.3", summary[64];
+
+		msg_get_str(json, "kind", kind, sizeof(kind));
+		msg_get_str(json, "from", from, sizeof(from));
+		if (strcmp(kind, "reverted") == 0) {
+			ui_settings_notice("Update failed, previous version "
+					   "restored.");
+		} else {
+			whatsnew_summary(from, BLINK_FW_VERSION, summary,
+					 sizeof(summary));
+			ui_settings_notice_update(BLINK_FW_VERSION, summary, from,
+						  BLINK_FW_VERSION);
+		}
 	} else if (strcmp(t, "note") == 0) {
 		/* The target about to be pressed, for the next file name. */
 		char n[40];
