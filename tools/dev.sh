@@ -52,6 +52,11 @@ AGENT_PLIST="$HOME/Library/LaunchAgents/com.blink.bridge.plist"
 # 1 only once THIS run has found the agent loaded and booted it out, so a dev
 # flash never hands a machine an installed daemon it was not already running.
 INSTALLED_WAS_UP=0
+# 1 when the agent this run booted out was still exiting at the end of the
+# stop grace: relaunch_agent then says how to finish rather than wait again.
+INSTALLED_STUCK=0
+# shellcheck source=lib_launchd.sh
+. "$ROOT/tools/lib_launchd.sh"
 
 # `down` only knows this script's own daemon. On a desk that has run `blink
 # install`, the port belongs to the launchd agent, and the eFuse probe below
@@ -82,6 +87,18 @@ step_installed_aside() {
 		# (pc/cli.py, _LaunchdBackend.stop).
 		INSTALLED_WAS_UP=1
 		launchctl bootout "$AGENT" >/dev/null 2>&1 || true
+		# First for launchd to let the job go, for as long as the daemon's
+		# stop grace: a daemon inside an OTA write holds its SIGTERM for up
+		# to 180 s (tools/lib_launchd.sh), and the 10 s below alone refused
+		# with the write still running. A job still there at the deadline is
+		# refused and left to launchd, and the restore does not wait for it
+		# all over again (INSTALLED_STUCK).
+		if ! blink_wait_agent_gone "$AGENT"; then
+			INSTALLED_STUCK=1
+			echo "FATAL: the installed daemon is still stopping after $((BLINK_STOP_GRACE_S + BLINK_STOP_MARGIN_S)) s." >&2
+			echo "       Nothing was flashed. Check it with: launchctl print $AGENT" >&2
+			exit 1
+		fi
 		# bootout RETURNS before the process is gone, and the process holds
 		# the port until it is: burn.sh lost that race on 2026-09-06 and
 		# refused a good board. Wait, up to 10 s, for the agent's own pid to
@@ -142,7 +159,6 @@ attempt() {
 	done
 }
 
-agent_unknown() { ! launchctl print "$AGENT" >/dev/null 2>&1; }
 agent_running() { launchctl print "$AGENT" 2>/dev/null | grep -q "state = running"; }
 agent_register() { launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" >/dev/null 2>&1; }
 
@@ -152,8 +168,13 @@ agent_register() { launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" >/dev/null 
 #   - bootout finishes after it returns. Bootstrapping while launchd still
 #     holds the old job fails, which once left a reinstall with no service
 #     (pc/cli.py, _LaunchdBackend.install, retries for the same reason). So
-#     wait, up to ~5 s, for `print` to stop knowing the job, then try the
-#     bootstrap up to three times.
+#     wait for `print` to stop knowing the job -- as long as the daemon's
+#     stop grace, not the ~5 s this once allowed, because an instance still
+#     inside an OTA write is still exiting (tools/lib_launchd.sh) -- then
+#     try the bootstrap up to three times. An instance that is still there
+#     is never acted on: kickstart is plain, not -k, which would kill it
+#     mid-write; on a job just bootstrapped the plain one starts it all the
+#     same (pc/cli.py, _LaunchdBackend.start).
 #   - bootstrap only registers. Five installs out of five on 2026-09-04 came
 #     up registered and idle, and burn.sh's restore had that gap until
 #     2026-09-06; kickstart is what starts it.
@@ -162,9 +183,16 @@ agent_register() { launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" >/dev/null 
 #     desk on HOST LOST, so ask launchd, for up to 2 s while kickstart's
 #     hand-off lands, and print the manual steps if it never shows.
 relaunch_agent() {
-	attempt 20 0.25 agent_unknown || true
+	if [ "$INSTALLED_STUCK" = 1 ] || ! blink_wait_agent_gone "$AGENT"; then
+		{
+			echo "warning: the installed daemon is still stopping; once it has, start it with:"
+			echo "  launchctl bootstrap gui/$(id -u) $AGENT_PLIST"
+			echo "  launchctl kickstart $AGENT"
+		} >&2
+		return 0
+	fi
 	attempt 3 0.5 agent_register || true
-	launchctl kickstart -k "$AGENT" >/dev/null 2>&1 || true
+	launchctl kickstart "$AGENT" >/dev/null 2>&1 || true
 	if attempt 8 0.25 agent_running; then
 		echo "installed daemon running again"
 		return 0
@@ -172,7 +200,7 @@ relaunch_agent() {
 	{
 		echo "warning: the installed daemon is still not running; to start it:"
 		echo "  launchctl bootstrap gui/$(id -u) $AGENT_PLIST"
-		echo "  launchctl kickstart -k $AGENT"
+		echo "  launchctl kickstart $AGENT"
 	} >&2
 }
 

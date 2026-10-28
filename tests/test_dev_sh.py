@@ -123,7 +123,7 @@ def _rig(tmp_path, west_build_rc=0, esptool=True, efuse_bits="0000000",
     repo = tmp_path / "repo"
     (repo / "tools").mkdir(parents=True)
     (repo / "firmware").mkdir()
-    for lib in ("lib_zephyr.sh", "lib_efuse.sh"):
+    for lib in ("lib_zephyr.sh", "lib_efuse.sh", "lib_launchd.sh"):
         shutil.copy(ROOT / "tools" / lib, repo / "tools" / lib)
     text = (ROOT / "tools" / "dev.sh").read_text(encoding="utf-8")
     assert text.count(REAL_PIDFILE) == 1 and text.count(REAL_LOG) == 1
@@ -357,7 +357,9 @@ def _assert_put_back_once(tmp_path, out):
     assert boot.endswith(
         f"{tmp_path}/Library/LaunchAgents/com.blink.bridge.plist")
     (kick,) = _verbs(calls, "kickstart")
-    assert kick.split()[2] == "-k"
+    # Plain: -k kills a running instance, and one still exiting may be in
+    # the middle of a firmware write (tools/lib_launchd.sh).
+    assert "-k" not in kick.split()
     # bootstrap registers, kickstart starts: in that order.
     lines = _launchctl(calls)
     assert lines.index(boot) < lines.index(kick)
@@ -490,6 +492,49 @@ def test_the_restore_waits_for_launchd_to_forget_the_job(tmp_path):
     _assert_put_back_once(tmp_path, r.stdout)
 
 
+def test_a_daemon_inside_its_stop_grace_is_waited_for_and_named(tmp_path):
+    """A daemon inside an OTA write holds its SIGTERM for up to 180 s, and
+    launchd keeps the job until it exits. 40 polls is 10 s: past the old
+    limit, and past the 4 s after which the wait says what it is for. The
+    flash goes ahead once the job has gone, and nothing is kicked while it
+    was still there."""
+    def hold(t):
+        _hold_with_installed(t)
+        (t / "sys" / "linger").write_text("40\n", encoding="utf-8")
+    r, ups, builds = _flash(tmp_path, hold=hold, expect_up=False)
+    assert r.returncode == 0, r.stderr
+    assert len(builds) == 1
+    assert r.stderr.count("waiting for the installed daemon to finish a "
+                          "firmware write or update") == 1
+    assert not (tmp_path / "sys" / "too-early").exists()
+    _assert_put_back_once(tmp_path, r.stdout)
+
+
+def test_a_daemon_that_never_stops_is_refused_and_not_kicked(tmp_path):
+    """Past the grace, a job launchd still holds is refused before the
+    probe, and the restore neither bootstraps nor kickstarts it -- nor waits
+    the whole grace again. The grace is shortened to keep the test quick;
+    tests/test_lib_launchd.py pins the real one to pc/cli.py's."""
+    script, env, calls = _rig(tmp_path)
+    _hold_with_installed(tmp_path)
+    (tmp_path / "sys" / "linger").write_text("100000\n", encoding="utf-8")
+    env["BLINK_STOP_GRACE_S"] = "1"
+    r = subprocess.run(["bash", str(script), "flash"], env=env,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 1
+    assert "the installed daemon is still stopping after 11 s" in r.stderr
+    assert "Nothing was flashed." in r.stderr
+    lines = calls.read_text(encoding="utf-8").splitlines()
+    assert not [l for l in lines if l.startswith(("west ", "espefuse "))]
+    assert _verbs(calls, "bootstrap") == []
+    assert _verbs(calls, "kickstart") == []
+    # One wait, not two: (1 + 10) s of quarter-second polls, plus the
+    # listing and the bootout's own print.
+    assert len(_verbs(calls, "print")) <= 46
+    assert "once it has, start it with" in r.stderr
+    assert "installed daemon running again" not in r.stdout
+
+
 def test_a_failed_bootstrap_is_retried(tmp_path):
     def hold(t):
         _hold_with_installed(t)
@@ -516,7 +561,7 @@ def test_a_restore_that_did_not_take_says_how_to_finish_it(tmp_path):
     plist = f"{tmp_path}/Library/LaunchAgents/com.blink.bridge.plist"
     assert "the installed daemon is still not running" in r.stderr
     assert f"launchctl bootstrap gui/{uid} {plist}" in r.stderr
-    assert f"launchctl kickstart -k gui/{uid}/com.blink.bridge" in r.stderr
+    assert f"launchctl kickstart gui/{uid}/com.blink.bridge" in r.stderr
     assert ups == []
 
 

@@ -35,6 +35,7 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 # Sourced here rather than beside lib_efuse.sh below, because the Python this
 # script picks (a few lines down) may come from the Zephyr venv.
 . "$ROOT/tools/lib_zephyr.sh"
+. "$ROOT/tools/lib_launchd.sh"
 EDITION=""
 PORT="${BLINK_PORT:-}"
 SKIP_BUILD=0
@@ -127,22 +128,18 @@ say "Finding the board"
 # on the way out, whatever happens -- including a Ctrl-C mid-flash.
 AGENT="gui/$(id -u)/com.blink.bridge"
 DAEMON_WAS_UP=0
-if launchctl print "$AGENT" >/dev/null 2>&1; then
-	DAEMON_WAS_UP=1
-	launchctl bootout "$AGENT" >/dev/null 2>&1 || true
-	# bootout RETURNS before the process is gone, and the process holds the
-	# port until it is. Probing straight afterwards read as "cannot tell
-	# whether this chip is fused -- is the port free?" and refused to flash
-	# a board that was perfectly fine (2026-09-06, this desk). Wait for the
-	# job to actually leave rather than racing it.
-	i=0
-	while [ $i -lt 20 ] && launchctl print "$AGENT" >/dev/null 2>&1; do
-		i=$((i + 1))
-		sleep 0.25
-	done
-fi
 restore_daemon() {
 	[ "$DAEMON_WAS_UP" = 1 ] || return 0
+	# Never over an instance that is still exiting: bootstrap fails against
+	# a job launchd still holds, and a kickstart could only reach the old
+	# instance. An interrupt during the wait below lands here with it still
+	# leaving, so wait for it again rather than act on it.
+	if ! blink_wait_agent_gone "$AGENT"; then
+		echo "warning: the installed daemon is still stopping; once it has, start it with:" >&2
+		echo "  launchctl bootstrap gui/$(id -u) $HOME/Library/LaunchAgents/com.blink.bridge.plist" >&2
+		echo "  launchctl kickstart $AGENT" >&2
+		return 0
+	fi
 	launchctl bootstrap "gui/$(id -u)" \
 		"$HOME/Library/LaunchAgents/com.blink.bridge.plist" >/dev/null 2>&1 || true
 	# BOOTSTRAP REGISTERS; IT DOES NOT START. RunAtLoad is honoured at login,
@@ -151,7 +148,12 @@ restore_daemon() {
 	# printed PASS. Measured five times out of five on the install path
 	# (pc/cli.py _LaunchdBackend.install, 2026-09-04); this is the same
 	# defect in the same shape, and it bit here on 2026-09-06.
-	launchctl kickstart -k "$AGENT" >/dev/null 2>&1 || true
+	#
+	# Plain kickstart, not -k: on the job just bootstrapped it starts it all
+	# the same (pc/cli.py _LaunchdBackend.start), and if anything else loaded
+	# it meanwhile, -k would kill whatever that instance is doing -- a
+	# firmware write included -- where plain kickstart leaves it be.
+	launchctl kickstart "$AGENT" >/dev/null 2>&1 || true
 }
 # EXIT restores; INT/TERM restore AND EXIT. A trap that only restored let a
 # Ctrl-C mid-flash carry straight on to the stamp step, with the daemon just
@@ -159,6 +161,29 @@ restore_daemon() {
 # over a torn image.
 trap restore_daemon EXIT
 trap 'restore_daemon; trap - EXIT; exit 130' INT TERM
+
+if launchctl print "$AGENT" >/dev/null 2>&1; then
+	DAEMON_WAS_UP=1
+	launchctl bootout "$AGENT" >/dev/null 2>&1 || true
+	# bootout RETURNS before the process is gone, and the process holds the
+	# port until it is. Probing straight afterwards read as "cannot tell
+	# whether this chip is fused -- is the port free?" and refused to flash
+	# a board that was perfectly fine (2026-09-06, this desk). Wait for the
+	# job to actually leave rather than racing it -- for as long as the
+	# daemon's own stop grace, because a daemon inside an OTA write holds
+	# its SIGTERM for up to 180 s (tools/lib_launchd.sh). This used to give
+	# up after 5 s and carry on with the port still held.
+	#
+	# Under the traps, so a Ctrl-C during those minutes still puts the
+	# daemon back once it has gone. A job still there at the deadline is
+	# left alone, and so is the restore: waiting the same minutes again in
+	# the EXIT trap would tell the reader nothing new.
+	if ! blink_wait_agent_gone "$AGENT"; then
+		DAEMON_WAS_UP=0
+		die "the installed daemon is still stopping after $((BLINK_STOP_GRACE_S + BLINK_STOP_MARGIN_S)) s.
+       Nothing was flashed. Check it with: launchctl print $AGENT"
+	fi
+fi
 
 if [ -z "$PORT" ]; then
 	PORT=$("$PY" - <<'EOF'
