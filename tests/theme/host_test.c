@@ -372,7 +372,8 @@ int main(void)
 	{
 		uint32_t x = 0x2545F491u;
 		int tried = 0, kept = 0, walked = 0;
-		double worst = 99.0, worst_24 = 99.0;
+		double worst = 99.0, worst_24 = 99.0, worst_grey = 99.0;
+		int grey_walked = 0, grey_moved = 0;
 		uint32_t worst_bg = 0, worst_tx = 0;
 
 		while (kept < 20000 && tried < 2000000) {
@@ -407,6 +408,23 @@ int main(void)
 
 			if (rp.dim != plain) {
 				walked++;
+			}
+			/* Grey: 3:1 or the text's own, on the ground, and the
+			 * plain 45% mix wherever that already reads. */
+			{
+				double gw = tx_bg < 3.0 ? tx_bg : 3.0;
+				double g = cr(rp.grey, r.c[0]) / gw;
+				uint32_t gp = theme_mix(r.c[1], r.c[0], 0.45);
+
+				if (g < worst_grey) {
+					worst_grey = g;
+				}
+				if (cr(gp, r.c[0]) >= gw && rp.grey != gp) {
+					grey_moved++;
+				}
+				if (rp.grey != gp) {
+					grey_walked++;
+				}
 			}
 			if (got_bg / want_bg < worst) {
 				worst = got_bg / want_bg;
@@ -444,6 +462,14 @@ int main(void)
 			 " %.4f of the target, %06X on %06X)", worst,
 			 (unsigned)worst_tx, (unsigned)worst_bg);
 		CHECK(worst >= 1.0, m);
+		snprintf(m, sizeof(m), "every custom grey, as drawn, meets"
+			 " min(3.0, text) on the ground (worst %.4f of the"
+			 " target; %d needed a lighter mix)", worst_grey,
+			 grey_walked);
+		CHECK(worst_grey >= 1.0 && grey_walked > 0, m);
+		snprintf(m, sizeof(m), "and keeps the plain 45%% mix wherever"
+			 " that already read (%d moved)", grey_moved);
+		CHECK(grey_moved == 0, m);
 		/* Not a check: how far the builder's 24-bit preview can read
 		 * from the panel. Measured 0.94 of the target at worst, which
 		 * is rounding to 565 alone; recorded so a change in it shows. */
@@ -466,6 +492,11 @@ int main(void)
 					f.c[0]));
 		CHECK(cr(fp.dim, f.c[0]) >=
 		      cr(f.c[1], f.c[0]), m);
+		snprintf(m, sizeof(m), "custom at the 3:1 floor: grey %.2f:1,"
+			 " was %.2f:1 with the plain mix",
+			 cr(fp.grey, f.c[0]),
+			 cr(theme_mix(f.c[1], f.c[0], 0.45), f.c[0]));
+		CHECK(cr(fp.grey, f.c[0]) >= cr(f.c[1], f.c[0]), m);
 		f.c[0] = 0x101A3A;
 		f.c[1] = 0x8A8F9A;
 		theme_derive(&f, &fp);

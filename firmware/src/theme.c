@@ -446,22 +446,50 @@ static double shown_contrast(uint32_t a, uint32_t b)
 	return theme_contrast(q565(a), q565(b));
 }
 
-static uint32_t custom_dim(uint32_t tx, uint32_t bg, uint32_t card)
+/*
+ * The text mixed `pct` percent into the ground, stepped back a percent at a
+ * time until it reads at least `floor` -- or the text's own ratio, if that is
+ * lower -- on both `bg` and `on`. At 0 it is the text, which always passes,
+ * so the loop ends.
+ */
+static uint32_t readable_mix(uint32_t tx, uint32_t bg, uint32_t on, int pct,
+			     double floor)
 {
 	double want_bg = shown_contrast(tx, bg);
-	double want_card = shown_contrast(tx, card);
+	double want_on = shown_contrast(tx, on);
 
-	want_bg = want_bg < DIM_MIN_CONTRAST ? want_bg : DIM_MIN_CONTRAST;
-	want_card = want_card < DIM_MIN_CONTRAST ? want_card : DIM_MIN_CONTRAST;
-	for (int pct = 25; pct > 0; pct--) {
+	want_bg = want_bg < floor ? want_bg : floor;
+	want_on = want_on < floor ? want_on : floor;
+	for (; pct > 0; pct--) {
 		uint32_t d = theme_mix(tx, bg, pct / 100.0);
 
 		if (shown_contrast(d, bg) >= want_bg &&
-		    shown_contrast(d, card) >= want_card) {
+		    shown_contrast(d, on) >= want_on) {
 			return d;
 		}
 	}
 	return tx;
+}
+
+static uint32_t custom_dim(uint32_t tx, uint32_t bg, uint32_t card)
+{
+	return readable_mix(tx, bg, card, 25, DIM_MIN_CONTRAST);
+}
+
+/*
+ * Grey, 45% of the way into the ground, has the same floor problem as dim,
+ * and worse: at 3:1 text it came to about 1.5:1. It is drawn as text too --
+ * the pip numbers and the page chevrons on the gauges (usage_view.c) -- so
+ * it walks back the same way, to 3:1, the figure every built-in palette's
+ * grey meets on the ground (tests/theme). It is checked on the ground only,
+ * because that is the only place it is drawn (fp/fix-fwlog review, NICE-4).
+ * The builder page draws no grey, so it has nothing to keep in step.
+ */
+#define GREY_MIN_CONTRAST 3.0
+
+static uint32_t custom_grey(uint32_t tx, uint32_t bg)
+{
+	return readable_mix(tx, bg, bg, 45, GREY_MIN_CONTRAST);
 }
 
 void theme_derive(const struct theme_custom *t, struct palette *p)
@@ -481,7 +509,7 @@ void theme_derive(const struct theme_custom *t, struct palette *p)
 	 * the track takes 15% of it. Dim takes less of the ground when 25%
 	 * would leave it hard to read; see custom_dim(). */
 	p->track = theme_mix(bg, tx, 0.15);
-	p->grey = theme_mix(tx, bg, 0.45);
+	p->grey = custom_grey(tx, bg);
 	p->panel = theme_mix(bg, tx, 0.08);
 	p->card = theme_mix(bg, tx, 0.06);
 	p->dim = custom_dim(tx, bg, p->card);
