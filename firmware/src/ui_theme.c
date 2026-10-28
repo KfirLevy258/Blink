@@ -121,6 +121,11 @@ void ui_theme_init(void)
 	select_stored();
 }
 
+bool ui_theme_previewing(void)
+{
+	return preview_timer != NULL;
+}
+
 static bool show(int id, const struct theme_custom *t)
 {
 	return id == THEME_CUSTOM ? theme_select_custom(t) : theme_select(id);

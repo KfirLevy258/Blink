@@ -81,12 +81,20 @@ expect ui_state scr=settings ov=none bl=60
 mem
 
 tap theme.open
-# A left swipe begun on the page button ("1/3 >") must not turn the page:
-# the button lets gestures through now, and only its tile_was_a_tap()
-# guard stands between the swipe and a page turn.
+# A swipe begun on the page button ("1/3 >"). Left must not turn the page:
+# LVGL sends the button its CLICKED after a gesture too, and only
+# tile_was_a_tap() stops that (it already did before the button let
+# gestures through, so this half guards against a regression only).
 swipe 300 20 180 20
 wait 1
 expect ui_state ov=theme tp=0
+# Right, the back gesture, must close Theme. This half is the change: the
+# button used to keep gestures, so a back swipe begun on it did nothing.
+# 56 px, past LVGL's 50 px gesture limit.
+swipe 262 20 318 20
+wait 2
+expect ui_state scr=settings ov=none
+tap theme.open
 tap theme.light
 expect theme_now why=user id=9
 tap theme.edit_on_computer

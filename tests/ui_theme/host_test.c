@@ -231,6 +231,21 @@ int main(void)
 	      "failed save after a preview: the preview is over, not left to"
 	      " time out later");
 
+	/* --- a preview is visible to Settings, and choosing ends it --- */
+	fresh(THEME_DARK);
+	CHECK(!ui_theme_previewing(), "previewing: not before a preview");
+	m = msg(THEME_OP_PREVIEW, 4);
+	ui_theme_wire(&m);
+	CHECK(ui_theme_previewing(), "previewing: while one is up");
+	CHECK(ui_theme_choose(THEME_DARK) && !ui_theme_previewing() &&
+	      theme_active_id() == THEME_DARK && stored_id() == THEME_DARK,
+	      "choosing the stored theme during a preview takes it down");
+	m = msg(THEME_OP_PREVIEW, 4);
+	ui_theme_wire(&m);
+	m = msg(THEME_OP_CANCEL, 0);
+	ui_theme_wire(&m);
+	CHECK(!ui_theme_previewing(), "previewing: not after a cancel");
+
 	/* --- the owner picks in Settings --- */
 	fresh(THEME_DARK);
 	CHECK(ui_theme_choose(9) && stored_id() == 9 &&

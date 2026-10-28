@@ -20,6 +20,9 @@ void ui_theme_init(void);
 /* The id the board has STORED (not a preview): what theme_now reports. */
 int ui_theme_stored_id(void);
 
+/* A preview from the computer is showing in place of the stored theme. */
+bool ui_theme_previewing(void);
+
 /* The stored custom theme, if a usable one has ever been saved. */
 bool ui_theme_custom_stored(struct theme_custom *out);
 

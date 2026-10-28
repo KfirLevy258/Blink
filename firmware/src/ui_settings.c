@@ -158,13 +158,17 @@ static int64_t usb_dl_deadline;
  */
 static bool rebuild_owed;
 static void rebuild_cb(void *unused);
+/* The top layer's repaint, owed when ui_settings_apply_theme() could not
+ * queue it. Paid, like a rebuild still owed, by ui_settings_service(). */
+static bool repaint_top_owed;
+static void repaint_top_cb(void *unused);
 
 static void confirm_gone(void)
 {
 	confirm = NULL;
 	/* Async for the reason rebuild_cb is: the caller is an event on a
 	 * button inside the panel this rebuilds. If the queue fails the
-	 * debt stays, and the next theme change or confirm pays it. */
+	 * debt stays, and ui_settings_service() pays it from the mode loop. */
 	if (rebuild_owed && lv_async_call(rebuild_cb, NULL) == LV_RESULT_OK) {
 		rebuild_owed = false;
 	}
@@ -787,6 +791,8 @@ static void upd_prompt_now_cb(lv_event_t *e)
  * -- is upd_prompt_step() in upd_prompt.h, so that all of it can be reached
  * from a host test instead of only from a finger on the panel.
  */
+static void upd_prompt_draw(const struct ota_ui *snap);
+
 static void upd_prompt_show(const struct ota_ui *snap)
 {
 	/* Called only for UPD_PROMPT_SHOW, which already answered every
@@ -794,7 +800,19 @@ static void upd_prompt_show(const struct ota_ui *snap)
 	 * moment the box is really put up rather than every service tick that
 	 * finds it already there. Pairs with the withdrawal line. */
 	printk("[ota] offer shown: %s\n", snap->version);
+	upd_prompt_draw(snap);
+}
 
+/*
+ * The box itself, without the log line. repaint_top_cb() redraws it in a
+ * new theme by taking it down and drawing it again, and it used to do that
+ * through upd_prompt_show(): every step of a builder preview, a few a
+ * second while the owner drags a colour, printed "[ota] offer shown" again
+ * for an offer shown once (2026-10-28 review, NICE-7). Under the log that
+ * now waits for room, each of those lines is also panel time.
+ */
+static void upd_prompt_draw(const struct ota_ui *snap)
+{
 	upd_prompt = lv_obj_create(lv_layer_top());
 	lv_obj_set_size(upd_prompt, 300, 130);
 	lv_obj_set_style_bg_color(upd_prompt, COL_BG, 0);
@@ -2088,8 +2106,15 @@ static void theme_pick_cb(lv_event_t *e)
 		return;
 	}
 	/* Choosing what is already stored and showing costs a flash write
-	 * and buys nothing. */
-	if (id == ui_theme_stored_id() && id == theme_active_id()) {
+	 * and buys nothing. "Showing" has to mean the stored colours, not
+	 * only the stored id: with a Custom theme stored and the builder
+	 * previewing a different custom one, both ids read Custom, and a tap
+	 * on the Custom tile -- the one way back on the board -- did nothing
+	 * (2026-10-28 review, NICE-7). During a preview the tap goes through;
+	 * ui_theme_choose() ends the preview, and cfg_set_theme() writes
+	 * nothing for bytes it already holds. */
+	if (id == ui_theme_stored_id() && id == theme_active_id() &&
+	    !ui_theme_previewing()) {
 		return;
 	}
 	/* Repaints everything, this screen included -- see
@@ -2848,6 +2873,27 @@ bool ui_settings_busy(void)
 
 void ui_settings_service(void (*pump)(void))
 {
+	/*
+	 * Theme work an lv_async_call could not queue (the call allocates a
+	 * timer from the LVGL pool). The mode loop is not inside any LVGL
+	 * event, so here the two callbacks can simply run. Before this a
+	 * failed queue was ignored, and a theme change silently missed the
+	 * open panel until it was closed and opened again (fp/fix-fwlog
+	 * review, NICE-8). A rebuild still waits for the install confirm,
+	 * as rebuild_cb does, and is forgotten once the panel is gone, since
+	 * the next open is built in the theme anyway.
+	 */
+	if (rebuild_owed && confirm == NULL) {
+		if (panel == NULL) {
+			rebuild_owed = false;
+		} else if (!closing) {
+			rebuild_cb(NULL);	/* clears rebuild_owed */
+		}
+	}
+	if (repaint_top_owed) {
+		repaint_top_owed = false;
+		repaint_top_cb(NULL);
+	}
 	if (want_open && panel == NULL) {
 		want_open = false;
 		do_open(pump);
@@ -2981,7 +3027,7 @@ static void repaint_top_cb(void *unused)
 	if (upd_prompt) {
 		ota_ui_get(&snap);
 		upd_prompt_close();
-		upd_prompt_show(&snap);
+		upd_prompt_draw(&snap);	/* a repaint, not a new offer */
 	}
 	if (dl_overlay) {
 		dl_overlay_hide();
@@ -2991,11 +3037,13 @@ static void repaint_top_cb(void *unused)
 
 void ui_settings_apply_theme(void)
 {
-	if (panel != NULL) {
-		lv_async_call(rebuild_cb, NULL);
+	/* A queue that fails leaves the work owed to ui_settings_service(). */
+	if (panel != NULL && lv_async_call(rebuild_cb, NULL) != LV_RESULT_OK) {
+		rebuild_owed = true;
 	}
-	if (wn || upd_prompt || dl_overlay) {
-		lv_async_call(repaint_top_cb, NULL);
+	if ((wn || upd_prompt || dl_overlay) &&
+	    lv_async_call(repaint_top_cb, NULL) != LV_RESULT_OK) {
+		repaint_top_owed = true;
 	}
 }
 
