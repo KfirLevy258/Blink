@@ -76,6 +76,26 @@ def test_the_header_is_the_whole_name(tmp_path):
     assert "pub id: Uuid" in out and "cwd" not in out
 
 
+@pytest.mark.parametrize("decl", [
+    "pub struct SessionMeta(pub Inner);",
+    "pub struct SessionMeta;",
+])
+def test_an_item_with_no_body_ends_at_its_semicolon(tmp_path, decl):
+    """Without a brace it used to run to the end of the file, and the next
+    item's cwd passed the check (review of fp/fix-tools, NICE 1)."""
+    text = decl + "\n" + _struct("Other", ["cwd: PathBuf"])
+    out = _item(tmp_path, text, "pub struct SessionMeta")
+    assert out.strip() == decl
+
+
+def test_a_comment_naming_the_header_is_not_the_header(tmp_path):
+    text = ("/// replaces pub struct SessionMeta { cwd }\n"
+            + _struct("SessionMeta", ["id: Uuid"]))
+    out = _item(tmp_path, text, "pub struct SessionMeta")
+    assert out.startswith("pub struct SessionMeta {")
+    assert "replaces" not in out
+
+
 def test_no_such_item_prints_nothing(tmp_path):
     assert _item(tmp_path, _struct("Else", ["a: u8"]),
                  "pub struct SessionMeta") == ""
