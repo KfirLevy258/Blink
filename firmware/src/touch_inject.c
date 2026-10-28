@@ -347,10 +347,12 @@ static void widgets_line(const char *json)
 		return;
 	}
 	printk("%s\n", buf);
-	/* Out now rather than at the log thread's next wake (it sleeps up to
-	 * CONFIG_LOG_PROCESS_THREAD_SLEEP_MS, 1000, below ten queued
-	 * messages), so a listing of six pages is six round trips and not six
-	 * seconds, and the 1024 B log buffer never holds two pages at once. */
+	/* Out now rather than at the log thread's next wake. With Zephyr's
+	 * default trigger of ten queued messages it slept up to
+	 * CONFIG_LOG_PROCESS_THREAD_SLEEP_MS, 1000, so a listing of six pages
+	 * was six seconds rather than six round trips. prj.conf's threshold of
+	 * 1 now wakes it on the first line anyway; the kick stays so this
+	 * reply never depends on that setting. */
 	TI_LOG_KICK();
 }
 
@@ -438,16 +440,18 @@ bool touch_inject_dispatch(const char *type, const char *json)
 
 /*
  * Every reply here goes out through printk, which on this board is the
- * deferred log (CONFIG_LOG_PRINTK, LOG_MODE_DEFERRED, overflow drops the
- * OLDEST message), drained by a thread at the lowest application priority.
- * While the main thread is busy -- a slide, a panel build, LVGL drawing --
- * nothing drains it, and whatever else is printed meanwhile pushes the reply
- * out. The first board run of the widget image lost 22 touch_done and
- * ui_state replies that way, every one on a move into the Settings panel,
- * and the bench reported each as a missing reply. So each reply kicks the
- * log thread (it runs at the main loop's next sleep instead of at its 1 s
- * timer), and the bench image's log buffer is larger (firmware/Kconfig,
- * LOG_BUFFER_SIZE, only with this option).
+ * deferred log (CONFIG_LOG_PRINTK, LOG_MODE_DEFERRED), drained by a thread at
+ * the lowest application priority. While the main thread is busy -- a slide,
+ * a panel build, LVGL drawing -- nothing drains it. Until 2026-10-28 the log
+ * then dropped its OLDEST message to make room, so whatever else was printed
+ * pushed the reply out: the first board run of the widget image lost 22
+ * touch_done and ui_state replies that way, every one on a move into the
+ * Settings panel, and the bench reported each as a missing reply. prj.conf
+ * now has a writer wait for room instead (LOG_BLOCK_IN_THREAD, OVERFLOW off),
+ * which every image shares. Each reply still kicks the log thread, so it
+ * leaves at the main loop's next sleep, and the bench image's log buffer is
+ * still the larger one (firmware/Kconfig, LOG_BUFFER_SIZE), so the waits it
+ * can now cause stay rare at the bench's reply rate.
  */
 void touch_inject_service(void)
 {

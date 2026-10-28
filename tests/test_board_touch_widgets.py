@@ -1213,7 +1213,11 @@ def test_the_bench_image_alone_gets_a_bigger_log_buffer():
     block = k[k.index("config LOG_BUFFER_SIZE"):]
     block = block[:block.index("source \"Kconfig.zephyr\"")]
     defaults = re.findall(r"^\s*default\s+(.*)$", block, re.M)
-    assert defaults == ["8192 if BLINK_TOUCH_INJECT"]
+    # The bench first; Kconfig takes the first default whose condition
+    # holds, so a release image gets the plain 4096 (prj.conf's comment on
+    # LOG_BLOCK_IN_THREAD says why it no longer decides whether a reply
+    # survives).
+    assert defaults == ["8192 if BLINK_TOUCH_INJECT", "4096"]
     # Declared before Zephyr's own, so its default is the one taken.
     assert k.index("config LOG_BUFFER_SIZE") < k.rindex('source "Kconfig.zephyr"')
     for conf in (ROOT / "firmware").glob("*.conf"):

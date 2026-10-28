@@ -125,15 +125,25 @@ config BLINK_TOUCH_INJECT
 
 endmenu
 
-# The deferred log carries every protocol line this board sends, and drops
-# the OLDEST message when it is full. A bench image answers the PC far more
-# often than a desk does -- a ui_state every 150 ms, a touch_done per stroke
-# -- and the first board run of the widget image lost 22 of those replies
-# behind whatever else was printed while a Settings transition held the main
-# thread (src/touch_inject.c, touch_inject_service). 8 KB of DRAM in the
-# bench image only: with the option off this default is not taken, the
-# Zephyr default (1024) is, and a release image is unchanged.
+# The deferred log carries every protocol line this board sends. It used to
+# drop the OLDEST message when it was full; since prj.conf's
+# LOG_BLOCK_IN_THREAD it drops nothing printed from a thread, and a writer
+# that finds it full waits for the UART instead. So the size no longer
+# decides whether a reply survives, only how long a burst the main thread
+# can print before it has to wait.
+#
+# A bench image answers the PC far more often than a desk does -- a ui_state
+# every 150 ms, a touch_done per stroke -- and the first board run of the
+# widget image lost 22 of those replies behind whatever else was printed
+# while a Settings transition held the main thread (src/touch_inject.c,
+# touch_inject_service). It keeps 8 KB so the bench's timings stay what they
+# were measured at.
+#
+# A release image goes from Zephyr's 1024 to 4096: 3 KB of the ~74 KB dram0
+# has free (120632 of 196608 B used at 94d07db), for a boot or a slide
+# printing four times as much before the panel waits on the wire.
 config LOG_BUFFER_SIZE
 	default 8192 if BLINK_TOUCH_INJECT
+	default 4096
 
 source "Kconfig.zephyr"

@@ -22,9 +22,12 @@
  * Four widgets a line. The board's own inbound budget is 512 (proto.c drops a
  * longer line whole), and the bench reads up to 2048, so the wire would take
  * more -- but every printk on this board goes through the deferred log
- * (CONFIG_LOG_PRINTK with LOG_MODE_DEFERRED, LOG_BUFFER_SIZE 1024, overflow
- * drops the OLDEST message). A reply of half that buffer, landing beside a
- * [mem] line and a ping, is how a protocol line silently vanishes. Four at
+ * (CONFIG_LOG_PRINTK with LOG_MODE_DEFERRED). When this was written it was
+ * 1024 B and dropped its OLDEST message when full, so a reply of half that
+ * buffer, landing beside a [mem] line and a ping, was how a protocol line
+ * silently vanished. Since prj.conf's LOG_BLOCK_IN_THREAD nothing is
+ * dropped, but a page that size still makes the main thread wait on the
+ * wire sooner, and a smaller page costs nothing. Four at
  * the worst-case entry below is 370 bytes with the head and tail (369 at
  * protocol v2; every aim at 319,239, the widest), which tests/touch_widgets
  * checks, and touch_inject.c kicks the log thread after
