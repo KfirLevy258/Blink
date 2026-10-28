@@ -72,10 +72,21 @@ mem
 tap brightness.open
 tap brightness.level3
 expect ui_state ov=brightness bl=60
-tap back.swipe
+# The back swipe begun on a stop, the 20% one. The stops are most of the
+# screen, so most back swipes start on one; they used to keep the gesture
+# and STORE the level under the thumb, leaving Brightness open at 20%.
+swipe 40 144 200 144
+wait 2
+expect ui_state scr=settings ov=none bl=60
 mem
 
 tap theme.open
+# A left swipe begun on the page button ("1/3 >") must not turn the page:
+# the button lets gestures through now, and only its tile_was_a_tap()
+# guard stands between the swipe and a page turn.
+swipe 300 20 180 20
+wait 1
+expect ui_state ov=theme tp=0
 tap theme.light
 expect theme_now why=user id=9
 tap theme.edit_on_computer

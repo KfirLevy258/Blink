@@ -149,11 +149,32 @@ static int64_t upd_revert_at;	/* "Up to date" shows briefly, then idles */
 #define USB_DL_DEADLINE_MS 300000
 static int64_t usb_dl_deadline;
 
+/*
+ * A theme change that rebuild_cb() had to skip because the install confirm
+ * was up. It used to be skipped for good: Cancel uncovered a Settings panel
+ * still in the old colours, over gauges already in the new ones, until
+ * Settings was closed and opened again (2026-10-28 review, NICE-7). Now the
+ * rebuild is owed, and paid when the confirm goes.
+ */
+static bool rebuild_owed;
+static void rebuild_cb(void *unused);
+
+static void confirm_gone(void)
+{
+	confirm = NULL;
+	/* Async for the reason rebuild_cb is: the caller is an event on a
+	 * button inside the panel this rebuilds. If the queue fails the
+	 * debt stays, and the next theme change or confirm pays it. */
+	if (rebuild_owed && lv_async_call(rebuild_cb, NULL) == LV_RESULT_OK) {
+		rebuild_owed = false;
+	}
+}
+
 static void confirm_no_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	lv_obj_del(confirm);
-	confirm = NULL;
+	confirm_gone();
 }
 
 static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
@@ -836,7 +857,7 @@ static void install_yes_cb(lv_event_t *e)
 	ARG_UNUSED(e);
 	ota_request_install();
 	lv_obj_del(confirm);
-	confirm = NULL;
+	confirm_gone();
 }
 
 static void show_install_confirm(const struct ota_ui *snap)
@@ -1705,7 +1726,15 @@ static void sub_close(void)
 		return;
 	}
 	sub_closing = true;
-	lv_async_call(sub_closed_cb, NULL);
+	/* lv_async_call allocates a timer from the LVGL pool and can fail.
+	 * The latch used to stay set when it did, and with it every later
+	 * back press and swipe was ignored until a reboot: the screen stuck
+	 * open with nothing that could shut it, and the bench's ui_state
+	 * reading busy for good (2026-10-28 review, NICE-7). Unlatched, the
+	 * next press simply asks again. */
+	if (lv_async_call(sub_closed_cb, NULL) != LV_RESULT_OK) {
+		sub_closing = false;
+	}
 }
 
 static void bright_close(void)
@@ -1733,6 +1762,14 @@ static void bright_gesture_cb(lv_event_t *e)
 
 static void bright_stop_cb(lv_event_t *e)
 {
+	/* The five stops fill the middle of the screen, so a back swipe
+	 * usually starts on one, and LVGL 9 sends CLICKED on the release of
+	 * a press that became a gesture: the swipe that meant "go back" also
+	 * STORED the level under the thumb (2026-10-28 review, NICE-7). Same
+	 * guard as every other tile on these screens. */
+	if (!tile_was_a_tap()) {
+		return;
+	}
 	backlight_set((uint8_t)(intptr_t)lv_event_get_user_data(e));
 	bright_refresh();
 }
@@ -1787,7 +1824,11 @@ static void show_bright(lv_event_t *e)
 		lv_obj_set_style_shadow_width(seg[i], 0, 0);
 		lv_obj_set_style_pad_all(seg[i], 0, 0);
 		lv_obj_clear_flag(seg[i], LV_OBJ_FLAG_SCROLLABLE);
-		lv_obj_clear_flag(seg[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
+		/* Gestures BUBBLE, up to bright_gesture_cb, as from a theme
+		 * tile or a Focus button. They used to stop here, so a back
+		 * swipe begun on a stop -- most of them, the stops being most
+		 * of the screen -- did nothing but set a level. */
+		lv_obj_add_flag(seg[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
 		lv_obj_add_event_cb(seg[i], bright_stop_cb, LV_EVENT_CLICKED,
 				    (void *)(intptr_t)lvl);
 	}
@@ -2017,7 +2058,11 @@ static void theme_close(void)
 		return;
 	}
 	theme_closing = true;
-	lv_async_call(theme_closed_cb, NULL);
+	/* As in sub_close(): a failed queue must not leave the latch set,
+	 * or the theme screen can never be closed again before a reboot. */
+	if (lv_async_call(theme_closed_cb, NULL) != LV_RESULT_OK) {
+		theme_closing = false;
+	}
 }
 
 static void theme_close_cb(lv_event_t *e)
@@ -2270,7 +2315,11 @@ static void show_theme(bool fresh)
 		lv_obj_set_style_shadow_width(pg, 0, 0);
 		lv_obj_set_style_pad_all(pg, 0, 0);
 		lv_obj_clear_flag(pg, LV_OBJ_FLAG_SCROLLABLE);
-		lv_obj_clear_flag(pg, LV_OBJ_FLAG_GESTURE_BUBBLE);
+		/* Gestures bubble to theme_gesture_cb; theme_page_cb's
+		 * tile_was_a_tap() keeps the swipe from turning the page. The
+		 * flag used to be cleared, so a back swipe begun on this
+		 * button was swallowed whole. */
+		lv_obj_add_flag(pg, LV_OBJ_FLAG_GESTURE_BUBBLE);
 		lv_obj_set_ext_click_area(pg, 10);
 		lv_obj_add_event_cb(pg, theme_page_cb, LV_EVENT_CLICKED, NULL);
 
@@ -2751,6 +2800,7 @@ static void do_close(void (*pump)(void))
 	lv_obj_del(panel);	/* deletes confirm and any overlay with it */
 	panel = NULL;
 	confirm = NULL;
+	rebuild_owed = false;	/* the next open is built in the theme */
 	bright_ov = NULL;
 	lv_obj_update_layout(lv_screen_active());
 	ui_slide_freeze(false);
@@ -2866,16 +2916,21 @@ static void panel_gesture_cb(lv_event_t *e)
  * common caller is a tap on a theme tile, i.e. an event handler running on an
  * object this deletes.
  *
- * Skipped while a confirm dialog is up (the install prompt would vanish under
- * the user's finger) or the panel is closing; the next open is built in the
- * new theme either way.
+ * Put off while a confirm dialog is up (the install prompt would vanish under
+ * the user's finger) until confirm_gone(), and skipped while the panel is
+ * closing, since the next open is built in the new theme anyway.
  */
 static void rebuild_cb(void *unused)
 {
 	ARG_UNUSED(unused);
-	if (panel == NULL || closing || confirm != NULL) {
+	if (confirm != NULL && panel != NULL && !closing) {
+		rebuild_owed = true;	/* paid by confirm_gone() */
 		return;
 	}
+	if (panel == NULL || closing) {
+		return;
+	}
+	rebuild_owed = false;
 	bool theme_was_open = theme_ov != NULL;
 	bool bright_was_open = bright_ov != NULL;
 	bool focus_was_open = focus_ov != NULL;
