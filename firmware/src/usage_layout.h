@@ -459,7 +459,18 @@
 /* font_focus_40.c's .line_height. Digits only, so no descender: the box is
  * the glyphs. */
 #define FOCUS_PCT_FONT_H	29
-#define FOCUS_PCT_Y		(FOCUS_CY - FOCUS_PCT_FONT_H / 2)
+/*
+ * Raised 3 px off the centre line, and the caption below given a 6 px gap
+ * where it had 2: at 2 the big figure all but sat on "SESSION 5h" (audit,
+ * 2026-10-28, seen in the harness). Raising the figure costs it nothing --
+ * the hollow is still 106 px wide at its top edge, against 103 for "100%"
+ * -- and the caption gives up only 1 px of the depth it had, which the
+ * hollow still holds. tests/usage_layout checks both, and the gap.
+ */
+#define FOCUS_PCT_RAISE		3
+#define FOCUS_PCT_GAP		6
+#define FOCUS_PCT_Y		(FOCUS_CY - FOCUS_PCT_FONT_H / 2 - \
+				 FOCUS_PCT_RAISE)
 /*
  * The hollow inside the thickest stroke. "100%" measures 103 px in
  * font_focus_40 (lv_text_get_size on host, 2026-10-27), and the hollow is
@@ -472,7 +483,7 @@
 /* "SESSION 5h" under the figure: 85 px measured, which the thick ring's
  * hollow still holds at this depth -- it is 90 px wide at the label's lower
  * edge. */
-#define FOCUS_NAME_Y		(FOCUS_PCT_Y + FOCUS_PCT_FONT_H + 2)
+#define FOCUS_NAME_Y		(FOCUS_PCT_Y + FOCUS_PCT_FONT_H + FOCUS_PCT_GAP)
 #define FOCUS_NAME_W		85
 /* The countdown in the open quarter. "999d 23h" is the widest it gets, 67 px
  * measured; "00m 00s" and "+999%/h" are 62. */

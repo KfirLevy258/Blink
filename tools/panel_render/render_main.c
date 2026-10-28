@@ -371,6 +371,16 @@ int main(int argc, char **argv)
 					 true);
 		usage_view_set_status(USAGE_STATUS_STALE);
 		break;
+	case 34: /* Focus at its widest figure: both windows at "100%", the
+		  * reading that measures 103 px and sits nearest the ring and
+		  * the caption under it (audit, 2026-10-28). */
+		usage_view_set_provider1("claude");
+		usage_view_update(100.0, 13231, 100.0, 598831);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_counts(1, 1, 0, 0);
+		usage_view_set_clock(14, 5);
+		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_set_provider1("");
 		usage_view_update(-1.0, -1, -1.0, -1);

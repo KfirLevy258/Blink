@@ -104,4 +104,13 @@ for theme in 0 9 2 8; do
 		done
 	done
 done
+# The widest Focus figure, "100%", in every theme and the custom one, on both
+# windows (34): the spacing between it and its caption, and its clearance of
+# the ring, are worth seeing at the thickest arc and in every colour.
+for theme in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
+	for focus in 1 2; do
+		"$BUILD/render" "$OUT/focus-$focus-theme-$theme-34.ppm" 34 \
+			"$theme" "$focus"
+	done
+done
 echo "PPMs in $OUT (any image viewer opens them; convert with your tool of choice)"

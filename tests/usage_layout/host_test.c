@@ -175,6 +175,10 @@ static void check_focus(void)
 	CHECK(!overlaps(pct, name) && !overlaps(name, cd) &&
 	      !overlaps(cd, other),
 	      "focus: figure, caption, countdown and line do not touch");
+	/* Not overlapping is not enough: at 2 px the figure read as sitting
+	 * on the caption (audit, 2026-10-28). */
+	CHECK(name.y0 - pct.y1 >= 6,
+	      "focus: at least 6 px between the figure and its caption");
 	CHECK(FOCUS_OTHER_MAX_W >= FOCUS_OTHER_W_LONGEST,
 	      "focus: the line's box holds fmt_focus_line()'s longest");
 	CHECK(!overlaps(other, pill),
