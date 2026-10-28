@@ -171,12 +171,21 @@ def test_the_old_commands_still_split_the_old_way():
     assert (s.cmd, s.args) == ("tap", ("settings.open",))
 
 
-@pytest.mark.parametrize("name", ["full_touch.txt", "popups_touch.txt",
-                                  "eye_mute_touch.txt"])
+@pytest.mark.parametrize("name", ["full_touch.txt", "popups_touch.txt"])
 def test_the_shipped_scripts_parse(name):
     steps = bt.parse_script((ROOT / "tools" / "bench" / name).read_text(
         encoding="utf-8"))
     assert any(s.cmd == "click" for s in steps)
+
+
+def test_the_in_mute_eye_script_is_two_raw_strokes_with_nothing_between():
+    # Its whole point is timing: an expect, wait or settled target between
+    # the two strokes would carry the exit past the mute it pins.
+    steps = bt.parse_script((ROOT / "tools" / "bench" / "eye_mute_touch.txt")
+                            .read_text(encoding="utf-8"))
+    cmds = [s.cmd for s in steps]
+    i = cmds.index("swipe")
+    assert cmds[i:i + 2] == ["swipe", "swipe"], cmds
 
 
 def test_the_popup_script_reaches_every_popup_it_says_it_does():
