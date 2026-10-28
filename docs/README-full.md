@@ -232,6 +232,7 @@ Blink has to change.
 | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
 | Keeps | the last status line payload Claude Code sent, in `~/.blink/statusline.json`. Alongside the two usage figures it carries the session id, working directory and transcript path; only the figures are read, and nothing in it leaves the machine |
 | Only if you ask | `~/.blink/config.json`, written by `blink config` (today the one setting is `status-page`). Removed by `blink uninstall`, so a reinstall starts with status-page alerts off |
+| Keeps | the board's theme, for a board that can show one (firmware 1.4.0 and later). `~/.blink/theme.json` holds the theme you set here or picked on the board, and the last theme the board was known to have, so a theme picked on the board while the app was off is kept rather than overwritten. `theme_sent.json` records the last theme the board confirmed storing, and `theme_preview.json` lives for a second or two at a time while the theme builder is open. All three are removed by `blink uninstall`, so a reinstall does not send an old theme back to the board |
 | Reads | Claude Desktop's usage cache and the tail of Codex's session log, when present; from each only the usage figures are kept. No credential, no token |
 
 **It does this without asking**, so that plugging the board in is the whole
@@ -434,6 +435,115 @@ not typed into claims nothing, and neither does one that has ended. Codex has
 no hook interface, so its state comes from its own session log: a turn that
 started, finished or was interrupted. Codex permission prompts are not in that
 log, so a prompt shows as "working" until you answer it.
+
+## Settings on the board
+
+Settings is the screen beside the dials: swipe across from them to reach it,
+and back to return. It is four tiles, each with an icon:
+
+| Tile | What it does |
+|---|---|
+| **Brightness** | Tap a level. It is kept across a power cycle |
+| **Theme** | The panel's colours: twelve built-in themes and one of your own (below) |
+| **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Turning Focus off keeps your choice of window, so turning it back on lands where it was |
+| **Update** | The software update: **Up to date**, an offer to install, or **App is old** when the half on your computer is behind (see "Updates") |
+
+Theme and Focus need board firmware 1.4.0 or later. A board on 1.3.4 or
+earlier shows its old settings screen; update it to see these.
+
+### Themes
+
+Twelve themes are built in: **Dark** (the default), **Neon**, **Bold**,
+**Mono**, **Ocean**, **Synthwave**, **Forest**, **Retro LCD**,
+**Colour-blind** (blue, orange and yellow, getting brighter as a dial
+fills, so the levels part for someone who sees no hue at all), and three
+light ones for a bright room - **Light**, **Light soft** and **Light ink**.
+Each sets every colour on the panel, the width of the dials' arcs, round or
+flat arc ends, and whether a dot rides the tip of each arc.
+
+The thirteenth tile, **Custom**, is a theme you make on your computer:
+
+- seven colours - background, text, the two gauges, and the low, middle and
+  high levels a dial turns as it fills;
+- arcs thin, normal or thick, with round or flat ends;
+- the dot at the tip of each arc, on or off;
+- arcs coloured by how full they are, or one colour per gauge. Per gauge, a
+  dial still turns to your high colour from 90 %.
+
+Text has to stand out from the background by at least 3:1, the point below
+which the small labels stop being readable at arm's length. A theme under
+that is refused with the measured ratio, before it reaches the board,
+because a panel nobody can read is one you would have to find Settings on
+through that same text.
+
+A theme lives on the board and on your computer at once. One picked on the
+board is taken up by the computer; one set on the computer goes to the
+board within a few seconds. A theme picked on the board while the app was
+off or asleep is kept when it comes back. If both sides changed while they
+were apart, the board's choice wins - it is the one in front of you.
+
+### Making a theme on your computer
+
+On the board, **Settings > Theme > Edit on computer** opens the theme builder
+in your computer's browser. The board says **Opened on your computer**, or,
+on a computer with no browser to open (a server, or an SSH session), it asks
+you to **Run `blink theme` on your computer** instead. Running it yourself
+does the same thing:
+
+```bash
+~/.blink/bin/blink theme
+```
+
+The builder is a page served by the app to your own browser and nobody else:
+it listens on 127.0.0.1 only, on a link that works once, and fetches nothing
+from the internet. Every change shows on the board as you make it, as a
+preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
+without a change puts the board back on the theme it had. A preview the
+board never hears the end of - the computer went to sleep mid-edit - drops
+by itself after 15 minutes.
+
+A custom theme has a **share code**, a line starting `BT1.`, that carries the
+whole theme. Copy it from the builder to send to somebody; paste one in to
+load theirs. A built-in theme shares by its name.
+
+The same, from a terminal:
+
+```bash
+blink theme list                    # every theme, and which one is set
+blink theme show                    # the theme set now, and how to set it elsewhere
+blink theme set ocean               # a built-in, by name
+blink theme set BT1.eyJjIjpb...     # a shared custom theme
+blink theme set bg=000000 text=ffffff width=thick ends=flat dot=off arcs=per-gauge
+blink theme reset                   # back to Dark
+```
+
+`set` with colours edits your custom theme, starting from the one you have
+(or from Dark's colours, the first time), so one setting changes one thing.
+The settings are `bg`, `text`, `gauge1`, `gauge2`, `low`, `mid`, `high`,
+`width` (thin, normal, thick), `ends` (round, flat), `dot` (on, off) and
+`arcs` (by-level, per-gauge). `blink theme show` prints the command, and
+for a custom theme the share code, that sets the same theme on another desk.
+
+### Status-page alerts, per provider
+
+With `blink config status-page on`, each provider's page on the board says
+when that provider's own service is having trouble: the Claude page reads
+status.claude.com, and the Codex page, when the board shows one, reads
+status.openai.com. An incident appears on the page it belongs to, so a Codex
+outage never sits over live Claude numbers. Only confirmed incidents are
+shown - one has to be reported on two checks in a row, at least five
+minutes apart -
+and a failed check shows nothing rather than a guess. It is off until you
+turn it on; see "Security & privacy" for what it asks and of whom.
+
+## Third-party notices
+
+The panel's text is drawn in **Montserrat**, Copyright 2011 The Montserrat
+Project Authors (https://github.com/JulietaUla/Montserrat), used under the
+SIL Open Font License 1.1: the sizes LVGL builds in, and Focus mode's large
+figure, a subset in `firmware/src/font_focus_40.c`. The licence is in
+`firmware/src/fonts/OFL.txt`. That font data is under the OFL, not under the
+PolyForm licence that covers the rest of this repository.
 
 ## Support
 

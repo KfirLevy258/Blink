@@ -12,6 +12,12 @@
 > built, measured against the real site, found to have nothing to forward, and
 > removed along with its localhost listener. This file is a dated audit and is
 > left as it was written; `next-steps.md` section A carries the finding.
+>
+> **Superseded again, 2026-10-27.** The WiFi build this audit describes as
+> present -- `firmware/wifi.conf`, `CONFIG_BLINK_WIFI_MODE`, `net_wifi.c`,
+> `oauth.c` and `usage_client.c` -- was deleted from the tree, and no release
+> ever included it. Every mention of it below describes the tree as audited,
+> not as it is; README-full's "Security & privacy" has the current account.
 
 Audit of the "Desk HUD — Universal Architecture, Multi-Provider Design & Technical
 Handoff" document against this repository.

@@ -67,6 +67,10 @@ this.
 - **It sleeps when your computer does.** About thirty seconds after the computer stops answering, the screen closes its eyes and dozes; it opens them the moment the computer is back. A tap while it sleeps shows the last figures.
 - **Claude Desktop too.** With Desktop alone the dials show percentages, a five-hour countdown whenever Desktop is holding a reset time, and a weekly countdown once one has been learned. Desktop keeps that reset time only while a window is running and clears it in between, so the countdown comes and goes; the fill rate covers the gaps. The dials follow Desktop's own refresh - about every 5 minutes while you are using it, up to 15 when it sits idle - where Claude Code updates them live.
 - **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, and nothing about you sent anywhere. The one optional extra, status-page alerts, reads the public status pages and is off until you turn it on.
+- **Themes.** Twelve built in, three of them light for a bright room, and one of your own: seven colours, arc width and ends, made in a builder that opens in your browser from the board's own Settings (or `blink theme`) and previews on the panel as you edit. A custom theme travels as a short share code.
+- **Focus.** One window big instead of two - session or weekly - with the other kept as a line under it.
+- **Settings on the board.** Brightness, Theme, Focus and Update, four tiles on the screen beside the dials.
+- **Status pages, per provider.** Optional: each provider's page says when that provider's own service is having trouble, so you know it is not your machine.
 - **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
 - **Cheap, open hardware.** An ESP32 "Cheap Yellow Display" (~$12) and a 3D-printed case.
 - **Company units.** A unit built for a company shows its logo - a still or a short clip - after the boot animation, written once at the factory.
