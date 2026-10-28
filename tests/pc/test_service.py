@@ -42,7 +42,24 @@ class _Runs:
         self._running = running
         self._dump = dump
 
+    _gone = False
+
     def __call__(self, argv, **kw):
+        # launchd forgets a job once a bootout it accepted has finished, and
+        # `print` then exits 113 until the next bootstrap. install() waits on
+        # exactly that before it bootstraps again (the old instance may be
+        # inside its stop grace), so the stand-in models it, without taking
+        # one of the exit codes a test queued for the commands it lists.
+        if len(argv) > 1 and argv[1] == "bootout":
+            self._gone = True
+        elif len(argv) > 1 and argv[1] == "bootstrap":
+            self._gone = False
+        elif len(argv) > 1 and argv[1] == "print" and self._gone:
+            self.calls.append(list(argv))
+            if hasattr(self, "kwargs"):
+                self.kwargs.append(kw)
+            return subprocess.CompletedProcess(argv, 113, stdout="",
+                                               stderr="")
         self.calls.append(list(argv))
         code = self._codes.pop(0) if self._codes else 0
         out = ""
@@ -164,13 +181,16 @@ def test_launchd_install_writes_the_plist_and_bootstraps(home, monkeypatch):
     assert "<key>Label</key><string>com.blink.bridge</string>" in plist
     assert "<key>KeepAlive</key><true/>" in plist
     assert cli.log_path() in plist
-    # bootout must come first, or bootstrap fails on "already loaded".
+    # bootout must come first, or bootstrap fails on "already loaded";
+    # then the old job is seen to have gone before the bootstrap.
     assert r.calls[0][:2] == ["launchctl", "bootout"]
-    assert r.calls[1][:2] == ["launchctl", "bootstrap"]
-    assert r.calls[1][2] == "gui/501"
-    # And STARTED, not merely registered. bootstrap accepts the job; it does
-    # not run it, and on a bootout/bootstrap cycle it routinely does not.
+    assert r.calls[1][:2] == ["launchctl", "print"]
+    assert r.calls[2][:2] == ["launchctl", "bootstrap"]
+    assert r.calls[2][2] == "gui/501"
+    # And STARTED, not merely registered: a plain kickstart, which starts an
+    # idle job and leaves a running one be.
     assert r.ran("launchctl", "kickstart", "gui/501/com.blink.bridge")
+    assert not r.ran("kickstart", "-k")
 
 
 def test_launchd_install_retries_bootstrap(home, monkeypatch):
@@ -219,7 +239,7 @@ def test_launchd_install_will_not_claim_running_when_it_is_not(home, monkeypatch
     assert "running (launchd)" != msg
     assert "not running" in msg
     # And it has to be a command someone can paste, like its sibling above.
-    assert "launchctl kickstart -k gui/501/com.blink.bridge" in msg
+    assert "launchctl kickstart gui/501/com.blink.bridge" in msg
 
 
 def test_launchd_remove_boots_out_and_deletes_the_plist(home, monkeypatch):

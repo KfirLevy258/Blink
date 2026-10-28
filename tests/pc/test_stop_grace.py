@@ -30,7 +30,24 @@ class _Runs:
     def __init__(self):
         self.calls = []
 
+    _gone = False
+
     def __call__(self, argv, **kw):
+        # launchd forgets a job once a bootout it accepted has finished, and
+        # `print` then exits 113 until the next bootstrap. install() waits on
+        # exactly that before it bootstraps again (the old instance may be
+        # inside its stop grace), so the stand-in models it, without taking
+        # one of the exit codes a test queued for the commands it lists.
+        if len(argv) > 1 and argv[1] == "bootout":
+            self._gone = True
+        elif len(argv) > 1 and argv[1] == "bootstrap":
+            self._gone = False
+        elif len(argv) > 1 and argv[1] == "print" and self._gone:
+            self.calls.append(list(argv))
+            if hasattr(self, "kwargs"):
+                self.kwargs.append(kw)
+            return subprocess.CompletedProcess(argv, 113, stdout="",
+                                               stderr="")
         self.calls.append(list(argv))
         out = ""
         if len(argv) > 1 and argv[1] == "print":

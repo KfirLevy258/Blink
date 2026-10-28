@@ -45,7 +45,24 @@ class _Runs:
         # nothing makes every launchd path report "not running".
         self._running = running
 
+    _gone = False
+
     def __call__(self, argv, **kw):
+        # launchd forgets a job once a bootout it accepted has finished, and
+        # `print` then exits 113 until the next bootstrap. install() waits on
+        # exactly that before it bootstraps again (the old instance may be
+        # inside its stop grace), so the stand-in models it, without taking
+        # one of the exit codes a test queued for the commands it lists.
+        if len(argv) > 1 and argv[1] == "bootout":
+            self._gone = True
+        elif len(argv) > 1 and argv[1] == "bootstrap":
+            self._gone = False
+        elif len(argv) > 1 and argv[1] == "print" and self._gone:
+            self.calls.append(list(argv))
+            if hasattr(self, "kwargs"):
+                self.kwargs.append(kw)
+            return subprocess.CompletedProcess(argv, 113, stdout="",
+                                               stderr="")
         self.calls.append(list(argv))
         self.kwargs.append(kw)
         code = self._codes.pop(0) if self._codes else 0
@@ -244,9 +261,11 @@ def test_launchd_install_kickstarts_and_only_then_claims_it_is_running(
 
     # ...and then ASKS. A kickstart that returns zero is a request accepted,
     # not a process that exists, so the claim comes from launchctl print.
-    assert [c[1] for c in r.calls] == ["bootout", "bootstrap", "kickstart",
-                                       "print"]
-    assert r.ran("launchctl", "kickstart", "-k", "gui/501/com.blink.bridge")
+    # (The first print is the wait for the old instance to leave.)
+    assert [c[1] for c in r.calls] == ["bootout", "print", "bootstrap",
+                                       "kickstart", "print"]
+    assert r.ran("launchctl", "kickstart", "gui/501/com.blink.bridge")
+    assert not r.ran("kickstart", "-k")
     # The v1.2.1 rule reaches the new call site too: nothing Blink starts may
     # flash a console window. NO_WINDOW is empty off Windows, so a sentinel is
     # what actually pins a call site that dropped the spread.
@@ -273,7 +292,7 @@ def test_launchd_install_does_not_claim_running_when_the_kickstart_fails(
     assert "running (launchd)" != msg
     assert "not running" in msg
     # And a command someone can paste.
-    assert "launchctl kickstart -k gui/501/com.blink.bridge" in msg
+    assert "launchctl kickstart gui/501/com.blink.bridge" in msg
 
 
 def test_launchd_install_does_not_kickstart_a_bootstrap_that_never_took(
@@ -655,3 +674,70 @@ def test_a_missing_tool_is_reported_not_raised(home, monkeypatch):
     for out in (service_ctl.stop_service(runner=_absent),
                 service_ctl.start_service(runner=_absent)):
         assert out.ok is False and isinstance(out.detail, str)
+
+
+class _Lingering(_Runs):
+    """launchd still answering `print` for the old job for `polls` asks
+    after its bootout, as it does while a daemon inside a firmware write
+    holds its SIGTERM (measured with a throwaway agent, 2026-10-28)."""
+
+    def __init__(self, polls, **kw):
+        super().__init__(**kw)
+        self.polls = polls
+
+    def __call__(self, argv, **kw):
+        if (len(argv) > 1 and argv[1] == "print" and self._gone
+                and self.polls > 0):
+            self.polls -= 1
+            self.calls.append(list(argv))
+            self.kwargs.append(kw)
+            return subprocess.CompletedProcess(argv, 0, stdout="state = running",
+                                               stderr="")
+        return super().__call__(argv, **kw)
+
+
+def test_launchd_install_waits_for_the_old_instance_to_leave(
+        home, monkeypatch):
+    """A reinstall during an OTA write: the old instance holds its stop for
+    up to STOP_GRACE_S. bootstrap only once launchd has let it go, and never
+    with -k, which would kill whatever is running (review of fp/fix-tools,
+    NICE 3)."""
+    _platform(monkeypatch, "darwin")
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    r = _Lingering(polls=200)
+    monkeypatch.setattr(cli.subprocess, "run", r)
+
+    assert cli._LaunchdBackend().install() == "running (launchd)"
+    verbs = [c[1] for c in r.calls]
+    first_boot = verbs.index("bootstrap")
+    assert verbs[:first_boot].count("print") == 201
+    assert verbs.count("bootstrap") == 1
+    assert not r.ran("kickstart", "-k")
+
+
+def test_launchd_install_leaves_an_instance_that_never_leaves(
+        home, monkeypatch):
+    _platform(monkeypatch, "darwin")
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    r = _Lingering(polls=10 ** 6)
+    monkeypatch.setattr(cli.subprocess, "run", r)
+
+    msg = cli._LaunchdBackend().install()
+    assert "still stopping" in msg
+    assert "launchctl bootstrap gui/501" in msg
+    assert "launchctl kickstart gui/501/com.blink.bridge" in msg
+    assert not r.ran("bootstrap") and not r.ran("kickstart")
+    assert [c[1] for c in r.calls].count("print") == (cli.STOP_GRACE_S + 10) * 4
+
+
+def test_launchd_install_does_not_wait_after_a_refused_bootout(
+        home, monkeypatch):
+    """ESRCH (not loaded) or a refusal: no old instance is leaving, so there
+    is nothing to wait for."""
+    _platform(monkeypatch, "darwin")
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    for code in (3, 5):
+        r = _Runs(codes=[code])
+        monkeypatch.setattr(cli.subprocess, "run", r)
+        cli._LaunchdBackend().install()
+        assert [c[1] for c in r.calls][:2] == ["bootout", "bootstrap"], code

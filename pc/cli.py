@@ -1419,8 +1419,24 @@ class _LaunchdBackend(_Backend):
         uid = os.getuid()
         # bootout first so a rerun replaces the running agent rather than
         # failing with "service already loaded".
-        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"],
-                       capture_output=True, **update.ota.NO_WINDOW)
+        out = subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"],
+                             capture_output=True, **update.ota.NO_WINDOW)
+        # Then wait for the old instance to be GONE, as long as its own stop
+        # grace. A daemon inside a firmware write holds its SIGTERM for up
+        # to STOP_GRACE_S, and launchd keeps the job -- `print` still
+        # answers -- until it exits, so a reinstall started mid-OTA used to
+        # spend its ~5 s of bootstrap retries against a job still leaving
+        # and report "installed, but could not be started" (review of
+        # fp/fix-tools, NICE 3; tools/lib_launchd.sh is the same wait for
+        # burn.sh and dev.sh). Only after a bootout launchd accepted: on
+        # ESRCH there is nothing to wait for, and after a refusal the old
+        # job is not leaving at all.
+        if out.returncode == 0 and not _noting_a_slow_stop(
+                lambda: self._wait_gone(uid)):
+            return ("installed, but the running bridge is still stopping -- "
+                    "once it has, start it with: "
+                    f"launchctl bootstrap gui/{uid} {plist_path()} && "
+                    f"launchctl kickstart gui/{uid}/{LABEL}")
         # ...and then retry, because bootout is asynchronous. The bootstrap
         # immediately after it can fail while launchd is still tearing the old
         # job down, which left a reinstall with no service running at all --
@@ -1475,7 +1491,20 @@ class _LaunchdBackend(_Backend):
         # This is the same defect tools/burn.sh has in its restore path, and
         # the same lesson _service_command() already records one screen up:
         # registration is not health.
-        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{LABEL}"],
+        #
+        # It depends on the macOS release. Re-measured 2026-10-28 on macOS
+        # 27.0.1 with a throwaway agent of this plist's shape (RunAtLoad,
+        # KeepAlive, ExitTimeOut 180): bootstrap started the job by itself
+        # five times out of five, running within a second. A plain kickstart
+        # after it left the same pid; `kickstart -k` killed it and started a
+        # second one (runs = 2). So the kickstart stays, for the releases
+        # that only register, and it is plain, for the ones that start.
+        #
+        # Plain kickstart, not -k. It starts the job just bootstrapped all
+        # the same (start() below), and -k would kill an instance that is
+        # already running -- on macOS 27 the one this bootstrap just
+        # started, and possibly a firmware write it has begun.
+        subprocess.run(["launchctl", "kickstart", f"gui/{uid}/{LABEL}"],
                        capture_output=True, **update.ota.NO_WINDOW)
 
         # And then ASK, rather than assume. Everything above is a command that
@@ -1485,7 +1514,21 @@ class _LaunchdBackend(_Backend):
         if _confirm_running(lambda: self._is_running(uid)):
             return _RUNNING_LAUNCHD
         return ("registered with launchd, but it is not running -- "
-                f"start it with: launchctl kickstart -k gui/{uid}/{LABEL}")
+                f"start it with: launchctl kickstart gui/{uid}/{LABEL}")
+
+    @staticmethod
+    def _wait_gone(uid) -> bool:
+        """True once launchd no longer knows the job, polled every quarter
+        second for up to the stop grace plus 10 s for launchd's own SIGKILL
+        to land. Counted in polls rather than read off a clock, so a test
+        with time.sleep stubbed cannot spin for three real minutes."""
+        for _ in range((STOP_GRACE_S + 10) * 4):
+            r = subprocess.run(["launchctl", "print", f"gui/{uid}/{LABEL}"],
+                               capture_output=True, **update.ota.NO_WINDOW)
+            if r.returncode != 0:
+                return True
+            time.sleep(0.25)
+        return False
 
     def _is_running(self, uid) -> bool:
         """Does launchd say a process actually exists? Its answer, not ours.
