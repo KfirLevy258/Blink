@@ -3126,7 +3126,7 @@ def cmd_uninstall(_args) -> int:
               user_config.path(blink_home()),
               *install_statusline.temp_siblings(
                   user_config.path(blink_home())),
-              # The theme's files (pc/theme.FILES): the saved theme with its
+              # The theme's files (pc/theme.FILES): the saved theme, the
               # "seen" record, a preview the builder left, the board's last
               # confirmed theme. Kept, a reinstall sent the old theme to the
               # board on its first connect, which is not what starting over
@@ -4180,6 +4180,26 @@ def _theme_board_note(home):
     return None
 
 
+def _theme_kept_note(home):
+    """A line when the board's own choice was kept over a theme set here.
+
+    The contract lets the board win when both sides changed while the app
+    was off (Addendum 4), and the only trace of it was a line in
+    bridge.log, so a `blink theme set` that did not stick looked like a
+    fault (review of fp/fix-pc, N6). Shown while theme.json is still the
+    board's choice; setting a theme again makes it moot."""
+    kept = theme_mod.board_kept(home)
+    if kept is None:
+        return None
+    lost = kept[1]
+    line = ("Picked on the board while the app was off, so it was kept over"
+            " the theme set here then")
+    if lost["id"] == theme_mod.CUSTOM:
+        return line + " (a custom one)."
+    name = theme_mod.display_name(lost["id"])
+    return line + f" ({name}). blink theme set {name} sends that one."
+
+
 def _theme_lines(t):
     """How `blink theme show` and `set` describe a theme."""
     if t is None:
@@ -4253,6 +4273,9 @@ def cmd_theme(args) -> int:
     if action == "show":
         for line in _theme_lines(theme_mod.load_saved(home)):
             print(line)
+        note = _theme_kept_note(home)
+        if note:
+            print(note)
         return 0
     if action == "reset":
         t = {"id": 0}

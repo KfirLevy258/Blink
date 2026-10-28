@@ -320,6 +320,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if t["id"] != theme.CUSTOM else None
         try:
             theme.save(self.builder.home, t, keep_custom=keep)
+        except theme.Unreadable as e:
+            # theme.json is there and unreadable, so it is not written over
+            # (contract Addendum 4a); the message says which file, not what
+            # it holds.
+            return self._json(500, {"error": f"Not saved: {e}."})
         except OSError as e:
             # Said to the page, and the builder stays up so Save can be tried
             # again. "Saved" over a failed write is a lie the owner acts on.

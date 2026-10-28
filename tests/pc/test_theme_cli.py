@@ -10,6 +10,7 @@ import pytest
 from pc import cli
 from pc import theme
 from pc import theme_server
+from tests.support.home import inside
 
 
 def home():
@@ -218,14 +219,18 @@ def test_bare_theme_says_it_is_opening_and_gives_the_link(monkeypatch,
 
 # ------------------------------------------------------------- set vs preview
 
-def _sent_after_set(stored, args):
+def _sent_after_set(h, stored, args):
     """What a daemon's next tick sends after `blink theme set <args>`, on a
-    board holding `stored` while a builder's preview is showing."""
-    theme.save(home(), stored)
-    sync = theme.ThemeSync(home())
+    board holding `stored` while a builder's preview is showing. `h` is the
+    caller's home, the one `blink` resolves under pytest; checked before
+    anything is written into it (tests/support/home.py)."""
+    inside(h, theme.theme_path(h))
+    inside(h, theme.preview_path(h))
+    theme.save(h, stored)
+    sync = theme.ThemeSync(h)
     sync.board_now({"t": "theme_now", "v": 2, "id": stored["id"],
                     "why": "boot"})
-    theme.write_preview(home(), {"id": 3})
+    theme.write_preview(h, {"id": 3})
     assert sync.outgoing() == [theme.message("preview", {"id": 3})]
     assert cli.main(["theme", "set"] + args) == 0
     return sync.outgoing()
@@ -233,12 +238,49 @@ def _sent_after_set(stored, args):
 
 def test_setting_the_stored_theme_ends_a_preview(capsys):
     # Review NICE-4: no save is owed, so only a cancel ends the preview.
-    assert _sent_after_set({"id": 4}, ["ocean"]) == [theme.message("cancel")]
+    assert _sent_after_set(home(), {"id": 4}, ["ocean"]) == [
+        theme.message("cancel")]
 
 
 def test_setting_a_new_theme_sends_the_save_and_no_cancel(capsys):
-    assert _sent_after_set({"id": 4}, ["neon"]) == [
+    assert _sent_after_set(home(), {"id": 4}, ["neon"]) == [
         theme.message("save", {"id": 1})]
+
+
+def test_show_says_when_the_boards_choice_was_kept(capsys):
+    # Review of fp/fix-pc, N6: the board wins when both changed while the
+    # app was off, and `show` is where the owner finds out why.
+    h = home()
+    theme.save(h, {"id": 4})
+    theme.ThemeSync(h).board_now({"t": "theme_now", "v": 2, "id": 4,
+                                  "why": "saved"}, board_id="ab12")
+    theme.save(h, {"id": 7})             # set here while the app was off
+    s = theme.ThemeSync(h)
+    s.hello()
+    s.board_now({"t": "theme_now", "v": 2, "id": 1, "why": "boot"},
+                board_id="ab12")         # and Neon picked on the board
+    capsys.readouterr()
+    assert cli.main(["theme", "show"]) == 0
+    out = capsys.readouterr().out
+    assert "Theme: neon" in out
+    assert "kept over the theme set here then (retro-lcd)" in out
+    assert "blink theme set retro-lcd" in out
+    assert cli.main(["theme", "set", "ocean"]) == 0
+    capsys.readouterr()
+    cli.main(["theme", "show"])
+    assert "kept over" not in capsys.readouterr().out
+
+
+def test_set_refuses_to_write_over_an_unreadable_theme_json(capsys):
+    h = home()
+    os.makedirs(h, exist_ok=True)
+    path = inside(h, theme.theme_path(h))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"id": 4,')
+    assert cli.main(["theme", "set", "ocean"]) == 1
+    out = capsys.readouterr().out
+    assert "could not be read" in out
+    assert open(path, encoding="utf-8").read() == '{"id": 4,'
 
 
 # ------------------------------------------------------------- uninstall
@@ -262,7 +304,7 @@ def test_uninstall_removes_every_theme_file(tmp_path, monkeypatch, capsys):
         open(p, "w").close()
     for name in theme.FILES:
         assert os.path.exists(os.path.join(h, name)), name
-    assert "seen" in json.load(open(theme.theme_path(h), encoding="utf-8"))
+    assert os.path.exists(theme.seen_path(h))
     keep = os.path.join(h, "signing-key-stand-in")
     open(keep, "w").close()
     cli.main(["uninstall"])

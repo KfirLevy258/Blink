@@ -52,7 +52,7 @@ class Bridge:
                  fetch_signed_manifest=None, report_failure=None,
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
-                 edit_answers=None, board_id_hint=None):
+                 edit_answers=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -72,12 +72,15 @@ class Bridge:
         self._board_proto = None
         self._board_fw = None
         # Which board this is, for the theme's "seen" record (theme contract
-        # Addendum 4). Only a hello says; until one does, board.json's id
-        # from the last connection stands in. A daemon restarted under a
-        # running board hears no hello at all, and that restart is exactly
-        # when a theme picked on the board in the meantime has to be kept.
-        self._board_id = (board_id_hint if isinstance(board_id_hint, str)
-                          and board_id_hint else None)
+        # Addendum 4), and only as the wire said it: a hello, or a pref,
+        # which names the board from firmware 1.4.0 on and answers every
+        # welcome (Addendum 5). Never board.json's id. A hot-plugged board's
+        # hello usually reaches nobody -- it is sent about a second after
+        # power-up, and the daemon polls for ports every 3 s -- so board.json
+        # can name the previous board for a whole connection, and a theme
+        # adopted on its say-so was the wrong board's (review of fp/fix-pc,
+        # S1, reproduced). None until the wire says.
+        self._board_id = None
         self._announced_ahead = False
         # Pair updates. self_update replaces this program and does not return
         # when it works; pending remembers the consent across that restart;
@@ -214,6 +217,12 @@ class Bridge:
         if t in ("hello", "pref"):
             self._board_caps = protocol.board_caps(msg)
         if t == "pref":
+            # The board's id, from firmware that puts it on pref (Addendum
+            # 5). One without it says nothing either way: older firmware
+            # named itself in the hello only, and that id stands.
+            bid = self._wire_id(msg)
+            if bid is not None:
+                self._board_id = bid
             # Which provider the user picked on the board's settings screen.
             # It arrives with every hello as well as on change, so a daemon
             # that restarts picks the choice back up without the user
@@ -278,11 +287,18 @@ class Bridge:
         except (TypeError, ValueError):
             self._board_proto = None
         self._board_fw = hello.get("fw")
-        # The hello's word replaces the hint, an absent id included: a board
-        # that cannot read its own id is not the board board.json remembers.
-        bid = hello.get("board_id")
-        self._board_id = bid if isinstance(bid, str) and bid else None
+        # A hello's word is final, an absent id included: a board that
+        # cannot read its own id is not one to compare with a record.
+        self._board_id = self._wire_id(hello)
         self._announce_if_ahead()
+
+    @staticmethod
+    def _wire_id(msg):
+        bid = msg.get("board_id")
+        # The firmware sends "unknown" when hwinfo has no id to give.
+        if not isinstance(bid, str) or not bid or bid == "unknown":
+            return None
+        return bid
 
     def _announce_if_ahead(self):
         if self._board_ahead() and not self._announced_ahead:

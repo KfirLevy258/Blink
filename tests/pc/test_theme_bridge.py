@@ -61,70 +61,131 @@ def now(b, tid, why):
     b.on_message({"t": "theme_now", "v": 2, "id": tid, "why": why})
 
 
-def bridge_on(home, board_id_hint=None):
+BOARD_A = "a1b2c3d4e5f6"
+BOARD_B = "0f1e2d3c4b5a"
+
+
+def bridge_on(home):
     """A daemon start on `home`: its own ThemeSync, as after a restart."""
     sent = []
     clock = Clock()
     b = Bridge(write_msg=sent.append, fetch_usage=lambda: None, now=clock,
                wall=lambda: (1752444000, 0), theme_sync=theme.ThemeSync(home),
-               board_caps_hint=["svc", "theme"],
-               board_id_hint=board_id_hint, **_NO_FEED)
+               board_caps_hint=["svc", "theme"], **_NO_FEED)
     return b, sent, clock
 
 
-def test_a_theme_picked_on_the_board_while_away_survives_a_restart(tmp_path):
-    # Review S2 through the Bridge: the board's id comes from its hello on
-    # the first run and from board.json's hint on the restart, which hears
-    # no hello (the daemon connects to a board already running).
-    home = str(tmp_path / ".blink")
-    theme.save(home, {"id": 4})
+def board_hello(b, board_id):
+    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0", "board_id": board_id,
+                  "caps": ["svc", "theme"]})
+
+
+def board_pref(b, board_id=None):
+    """The pref a board answers a welcome with; 1.4.0 names itself on it
+    (contract Addendum 5), older firmware does not."""
+    m = {"t": "pref", "v": 2, "provider": "claude", "caps": ["svc", "theme"]}
+    if board_id is not None:
+        m["board_id"] = board_id
+    b.on_message(m)
+
+
+def tick(b, clock):
+    clock.t += THEME_QUIET_S
+    b.poll_if_changed()
+
+
+def neon_seen_on_a(home):
+    """theme.json Neon, confirmed on board A by an earlier daemon run, and
+    board.json naming A -- as a real run leaves them."""
+    import claude_usage_bridge
+    theme.save(home, {"id": 1})
     b, sent, clock = bridge_on(home)
-    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0", "board_id": "ab12",
-                  "caps": ["svc", "theme"]})
-    now(b, 0, "boot")
-    clock.t += THEME_QUIET_S
-    b.poll_if_changed()
-    assert themes(sent) == [theme.message("save", {"id": 4})]
-    now(b, 4, "saved")
-    # The daemon goes away; Neon is picked on the board; the daemon comes
-    # back under the running board.
-    b, sent, clock = bridge_on(home, board_id_hint="ab12")
-    b.greet()
-    now(b, 1, "boot")
-    clock.t += THEME_QUIET_S
-    b.poll_if_changed()
-    assert themes(sent) == []
-    assert theme.load_saved(home) == {"id": 1}
+    board_hello(b, BOARD_A)
+    now(b, 1, "saved")
+    claude_usage_bridge.remember_board(
+        home, "/dev/cu.test", BOARD_A, "1.4.0", ["svc", "theme"])
+    assert theme.load_seen(home)["board_id"] == BOARD_A
 
 
-def test_a_hellos_board_id_replaces_the_hint(tmp_path):
-    # board.json remembered another board; this one says who it is.
+def test_a_restart_under_a_board_that_names_itself_on_pref(tmp_path):
+    # Review S2 through the Bridge: the daemon restarts under a running
+    # board, so no hello; the pref answering the welcome names the board.
     home = str(tmp_path / ".blink")
-    theme.save(home, {"id": 4})
-    theme.ThemeSync(home).board_now(
-        {"t": "theme_now", "v": 2, "id": 4, "why": "saved"}, board_id="ab12")
-    b, sent, clock = bridge_on(home, board_id_hint="ab12")
-    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0", "board_id": "cd34",
-                  "caps": ["svc", "theme"]})
-    now(b, 1, "boot")
-    clock.t += THEME_QUIET_S
-    b.poll_if_changed()
-    assert themes(sent) == [theme.message("save", {"id": 4})]
-    assert theme.load_seen(home) == ("cd34", {"id": 1})
+    neon_seen_on_a(home)
+    b, sent, clock = bridge_on(home)
+    b.greet()
+    board_pref(b, BOARD_A)
+    now(b, 4, "boot")                    # Ocean, picked while we were away
+    tick(b, clock)
+    assert themes(sent) == []
+    assert theme.load_saved(home) == {"id": 4}
+
+
+def test_the_reviewers_board_swap_keeps_theme_json(tmp_path):
+    # Review of fp/fix-pc, S1, reproduced: the laptop moves to board B,
+    # which holds Ocean. B's hello went to nobody and board.json still names
+    # A; B's pref names B. theme.json wins: B is not the board seen.
+    home = str(tmp_path / ".blink")
+    neon_seen_on_a(home)
+    b, sent, clock = bridge_on(home)
+    b.greet()
+    board_pref(b, BOARD_B)
+    now(b, 4, "boot")
+    tick(b, clock)
+    assert themes(sent) == [theme.message("save", {"id": 1})]
+    assert theme.load_saved(home) == {"id": 1}
+    assert theme.load_seen(home)["board_id"] == BOARD_B
+
+
+def test_a_swap_to_old_firmware_with_a_stale_board_json_keeps_theme_json(
+        tmp_path):
+    # The same swap with a board whose pref does not name it: the only id
+    # there is, board.json's, is A's and wrong. It is never used, so
+    # theme.json wins and nothing is recorded until the wire names a board.
+    home = str(tmp_path / ".blink")
+    neon_seen_on_a(home)
+    b, sent, clock = bridge_on(home)
+    b.greet()
+    board_pref(b)
+    now(b, 4, "boot")
+    tick(b, clock)
+    assert themes(sent) == [theme.message("save", {"id": 1})]
+    assert theme.load_saved(home) == {"id": 1}
+    rec = theme.load_seen(home)
+    assert (rec["board_id"], rec["fp"]) == (BOARD_A, {"id": 1})
+
+
+def test_old_firmware_adopts_only_after_a_hello(tmp_path):
+    home = str(tmp_path / ".blink")
+    neon_seen_on_a(home)
+    b, sent, clock = bridge_on(home)
+    board_hello(b, BOARD_A)
+    board_pref(b)                        # no id: the hello's stands
+    now(b, 4, "boot")
+    tick(b, clock)
+    assert themes(sent) == []
+    assert theme.load_saved(home) == {"id": 4}
 
 
 def test_a_hello_without_an_id_compares_nothing(tmp_path):
     home = str(tmp_path / ".blink")
-    theme.save(home, {"id": 4})
-    theme.ThemeSync(home).board_now(
-        {"t": "theme_now", "v": 2, "id": 4, "why": "saved"}, board_id="ab12")
-    b, sent, clock = bridge_on(home, board_id_hint="ab12")
-    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0", "board_id": "",
-                  "caps": ["svc", "theme"]})
-    now(b, 1, "boot")
-    clock.t += THEME_QUIET_S
-    b.poll_if_changed()
-    assert themes(sent) == [theme.message("save", {"id": 4})]
+    neon_seen_on_a(home)
+    for unnamed in ("", "unknown"):      # "unknown": hwinfo had no id
+        b, sent, clock = bridge_on(home)
+        board_hello(b, unnamed)
+        now(b, 4, "boot")
+        tick(b, clock)
+        assert themes(sent) == [theme.message("save", {"id": 1})]
+        assert theme.load_saved(home) == {"id": 1}
+
+
+def test_the_daemon_hands_the_bridge_no_board_json_id():
+    # The connect loop once passed board.json's id in as a hint. Bridge no
+    # longer takes one, so it cannot come back by accident.
+    import inspect
+    import claude_usage_bridge
+    assert "board_id_hint" not in inspect.signature(Bridge).parameters
+    assert "board_id_hint" not in inspect.getsource(claude_usage_bridge)
 
 
 def test_welcome_carries_the_capability(tmp_path):

@@ -10,16 +10,17 @@ theme, which is safe and also silent: the person editing sees nothing change
 and is told nothing. So every value is checked here, before a line is built,
 and a refusal comes back as words the CLI and the builder page can show.
 
-Three files, all under ~/.blink and all handed in as `home`, never resolved
+Four files, all under ~/.blink and all handed in as `home`, never resolved
 here (tests/test_sandbox.py: a path computed at import reads the real ~):
 
   theme.json          the theme this computer wants the board to keep. The
                       daemon sends op=save when it changes, and after a hello
                       when the board reports a different one -- unless the
-                      board changed it while the daemon was away, which the
-                      "seen" record kept beside the theme tells apart
-                      (contract Addendum 4, ThemeSync below). Every writer
-                      keeps the keys it does not know.
+                      board changed it while the daemon was away, which
+                      theme_seen.json tells apart (contract Addendum 4,
+                      ThemeSync below). Every writer keeps the keys it does
+                      not know, and one that exists but cannot be read is
+                      never written over (Addendum 4a).
   theme_preview.json  written by the builder on every edit. The daemon's fast
                       tick sends it as op=preview (or op=cancel) and deletes
                       it, so a preview is sent once, never replayed.
@@ -27,6 +28,14 @@ here (tests/test_sandbox.py: a path computed at import reads the real ~):
                       why=saved), as a fingerprint. Written by the daemon
                       only; it is what "the board holds" means before the
                       board has said anything on this connection.
+  theme_seen.json     the last theme the daemon knew a board had, keyed by
+                      the board's id, plus a save sent to it and not yet
+                      confirmed. Written by the daemon only (Addendum 4a):
+                      kept inside theme.json at first, it made every board
+                      report a read-modify-write of the file `blink theme
+                      set` and the builder write, and a set landing between
+                      the read and the write was lost (review of fp/fix-pc,
+                      S3).
 
 `blink uninstall` removes every one of them, and their temp files, from
 FILES below, so a file added here cannot be left behind by the uninstaller.
@@ -86,20 +95,19 @@ SHARE_MAX_CHARS = 400
 THEME_FILE = "theme.json"
 PREVIEW_FILE = "theme_preview.json"
 SENT_FILE = "theme_sent.json"
+SEEN_FILE = "theme_seen.json"
 # Every file this module writes under ~/.blink, for `blink uninstall`, which
 # also takes their temp siblings. The ".taken" name is take_preview's claim,
 # left behind by a daemon killed between its rename and its unlink.
-FILES = (THEME_FILE, PREVIEW_FILE, PREVIEW_FILE + ".taken", SENT_FILE)
-# The key in theme.json holding what the daemon last knew a board had
-# (Addendum 4). Not a theme field: validate() drops it and save() keeps it.
-SEEN_KEY = "seen"
+FILES = (THEME_FILE, PREVIEW_FILE, PREVIEW_FILE + ".taken", SENT_FILE,
+         SEEN_FILE)
 
 # Why the board sent a theme_now (CONTRACT-theme, Addendum 2). "user" -- the
 # owner picking a theme in Settings on the board -- is a choice the computer
 # adopts. "saved" confirms a save this computer sent and is never adopted.
-# "boot" reports what the board holds, and is adopted only when the "seen"
-# record says the board changed it while the daemon was away (Addendum 4,
-# ThemeSync); adopting every one would let a board that missed a save, or
+# "boot" reports what the board holds, and is adopted only when
+# theme_seen.json says the board changed it while the daemon was away
+# (Addendum 4, ThemeSync); adopting every one would let a board that missed a save, or
 # simply rebooted, overwrite the theme somebody set here.
 WHY_ADOPT = "user"
 WHY_BOOT = "boot"
@@ -475,24 +483,54 @@ def load_saved(home):
         return None
 
 
-def _kept_keys(obj):
-    """What theme.json holds besides a theme: "seen" today, and whatever a
-    newer daemon adds, which the contract says every reader keeps
-    (Addendum 4). Without this, `blink theme set` dropped the record of what
-    the board had, and the next boot report read as the board's own change.
+class Unreadable(OSError):
+    """theme.json is there and could not be read, so it must not be written
+    over. The message names the file and the kind of failure, never what the
+    file holds."""
+
+
+def _read_existing(path):
+    """theme.json as a dict before it is rewritten: {} when there is no
+    file, and Unreadable for anything else that is not a JSON object.
+
+    Only FileNotFoundError means "empty" (Addendum 4a). _read_json reads
+    every failure as None, which is right for a reader and wrong for a
+    writer: an antivirus scan or a backup tool holding the file without read
+    sharing, a OneDrive placeholder that did not download, EACCES, EIO, a
+    hand edit with a typo -- each read as empty, and the write that followed
+    replaced the owner's theme and custom colours (review of fp/fix-pc, S2,
+    reproduced with chmod 0 on macOS).
     """
-    if not isinstance(obj, dict):
+    try:
+        with open(path, encoding="utf-8") as f:
+            obj = json.load(f)
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError) as e:
+        raise Unreadable(f"{path} is there but could not be read"
+                         f" ({type(e).__name__}); it was left as it is."
+                         " Fix it or delete it") from None
+    if not isinstance(obj, dict):
+        raise Unreadable(f"{path} does not hold a theme; it was left as it"
+                         " is. Fix it or delete it")
+    return obj
+
+
+def _kept_keys(obj):
+    """What theme.json holds besides a theme: whatever a newer daemon adds,
+    which the contract says every writer keeps (Addendum 4). A "seen" that
+    a development build left here is kept too, and read by nobody."""
     theme_keys = ("id",) + CUSTOM_FIELDS
     return {k: v for k, v in obj.items() if k not in theme_keys}
 
 
 def save(home, t, keep_custom=None):
     """Write theme.json. `keep_custom` (a custom theme) is stored beside a
-    built-in id; a custom `t` is its own. Keys that are not a theme's, the
-    daemon's "seen" among them, are carried over."""
+    built-in id; a custom `t` is its own. Keys that are not a theme's are
+    carried over. Unreadable (an OSError) when the file is there and cannot
+    be read: it is never written over."""
     t = validate(t)
-    obj = _kept_keys(_read_json(theme_path(home)))
+    obj = _kept_keys(_read_existing(theme_path(home)))
     obj.update(t)
     if t["id"] != CUSTOM and keep_custom is not None:
         for k in CUSTOM_FIELDS:
@@ -502,10 +540,9 @@ def save(home, t, keep_custom=None):
 
 
 def forget(home):
-    """Stop holding a theme. The "seen" record stays: what the board has is
-    still known after this computer stops wanting anything of it, and
-    dropping it would make the next boot report look like the first."""
-    kept = _kept_keys(_read_json(theme_path(home)))
+    """Stop holding a theme. Keys that are not a theme's stay; with none,
+    the file goes. Unreadable when it is there and cannot be read."""
+    kept = _kept_keys(_read_existing(theme_path(home)))
     if kept:
         _write_json(theme_path(home), kept)
         return
@@ -515,58 +552,90 @@ def forget(home):
         pass
 
 
-def _seen_of(obj):
-    """theme.json's "seen" as (board_id, fingerprint), or None when it is
-    absent or not one to trust. A record that does not parse is no record,
-    and the rule for no record is the rule from before Addendum 4 (theme.json
-    wins), so a damaged one can cost the owner a choice made on the board,
-    never the sync itself."""
-    if not isinstance(obj, dict):
-        return None
-    seen = obj.get(SEEN_KEY)
-    if not isinstance(seen, dict):
-        return None
-    bid = seen.get("board_id")
-    if not isinstance(bid, str) or not bid:
-        return None
-    fp = _reported(seen)
+# ------------------------------------------------------------- what was seen
+
+def seen_path(home):
+    return os.path.join(home, SEEN_FILE)
+
+
+def _fp_of(obj):
+    """A fingerprint stored in theme_seen.json, or None: a custom one without
+    a usable hash is not one, because it would match nothing honestly."""
+    fp = _reported(obj)
     if fp is None or (fp["id"] == CUSTOM and fp["h"] is None):
         return None
-    return bid, fp
+    return fp
 
 
 def load_seen(home):
-    """What the daemon last knew a board had: (board_id, fingerprint), or
-    None."""
-    return _seen_of(_read_json(theme_path(home)))
+    """theme_seen.json as {"board_id", "fp", "asked", "kept", "lost"}, or
+    None when it is absent or not one to trust.
 
+    board_id/fp  what the daemon last knew that board had (Addendum 4).
+    asked        a save sent to that board and not yet confirmed (review of
+                 fp/fix-pc, N1), so a boot report of it reads as our own save
+                 having landed, not as the board's choice.
+    kept/lost    a boot report adopted over a theme set here while the two
+                 were apart: what the board kept, and what this computer had.
+                 `blink theme show` says so while theme.json is still `kept`.
 
-def _write_seen(home, board_id, fp):
-    """Record `fp` as what `board_id` has; with fp None, drop the record.
-
-    A read-modify-write of theme.json, which the CLI and the builder write
-    too. It runs only when the record changes -- a theme_now that says
-    something new, a few a day -- and the read and the write are
-    microseconds apart. A `blink theme set` landing exactly between them is
-    not worth a cross-process lock that pc/ would have to build from msvcrt
-    and fcntl by hand.
+    A record that does not parse is no record, and the rule for no record is
+    the rule from before Addendum 4 (theme.json wins), so a damaged one can
+    cost the owner a choice made on the board, never the sync itself. This
+    file is the daemon's alone and holds nothing of the owner's, so it is
+    simply rewritten.
     """
-    obj = _read_json(theme_path(home))
+    obj = _read_json(seen_path(home))
     if not isinstance(obj, dict):
-        obj = {}
+        return None
+    bid = obj.get("board_id")
+    if not isinstance(bid, str) or not bid:
+        return None
+    fp = _fp_of(obj)
     if fp is None:
-        if SEEN_KEY not in obj:
-            return
-        del obj[SEEN_KEY]
-    else:
-        obj[SEEN_KEY] = dict(fp, board_id=board_id)
-    if obj:
-        _write_json(theme_path(home), obj)
+        return None
+    return {"board_id": bid, "fp": fp,
+            "asked": _fp_of(obj.get("asked")),
+            "kept": _fp_of(obj.get("kept")),
+            "lost": _fp_of(obj.get("lost"))}
+
+
+def _seen_obj(rec):
+    """A load_seen() record as it is stored (contract Addendum 4a: board_id,
+    id, h; the rest are additions a reader ignores)."""
+    obj = dict(rec["fp"], board_id=rec["board_id"])
+    for k in ("asked", "kept", "lost"):
+        if rec.get(k) is not None:
+            obj[k] = rec[k]
+    return obj
+
+
+def _write_seen(home, rec):
+    """Write theme_seen.json, or remove it when rec is None. Only when it
+    changes: the daemon calls this on every theme_now."""
+    old = load_seen(home)
+    if rec == old:
         return
-    try:
-        os.unlink(theme_path(home))
-    except FileNotFoundError:
-        pass
+    if rec is None:
+        try:
+            os.unlink(seen_path(home))
+        except FileNotFoundError:
+            pass
+        return
+    _write_json(seen_path(home), _seen_obj(rec))
+
+
+def board_kept(home):
+    """(kept, lost) fingerprints when the board's own choice was kept over a
+    theme set on this computer while the two were apart, and theme.json is
+    still that choice; else None. For `blink theme show` (review N6)."""
+    rec = load_seen(home)
+    if rec is None or rec["kept"] is None or rec["lost"] is None:
+        return None
+    want = load_saved(home)
+    if want is None or fingerprint(want) != rec["kept"]:
+        return None
+    return rec["kept"], rec["lost"]
 
 
 def write_preview(home, t):
@@ -640,24 +709,32 @@ class ThemeSync:
     daemon heard was a boot report that differed from theme.json, and it
     sent theme.json back: the owner's Neon became Ocean again, with no
     message (review S2, reproduced in a scratch home on 2026-10-28). So
-    theme.json also keeps "seen", what the daemon last knew a board had,
-    from any theme_now, keyed by the board's id. On a boot report from that
-    same board:
+    theme_seen.json keeps what the daemon last knew a board had, from any
+    theme_now, keyed by the board's id (Addendum 4a). On a boot report from
+    that same board:
       - the board still has what was seen: it did not change, so if
         theme.json differs it is this computer that changed, and the save
         goes out as before;
+      - the board has the save we sent and never heard confirmed: our own
+        save landed and its why=saved was lost (a dropped line, a daemon
+        killed in the window). Not the board's choice -- adopting it would
+        let this computer's earlier save beat its later one (N1);
       - the board has something else: it was changed on the board, so it is
         adopted, exactly as a why=user would have been, and nothing is sent;
       - no record, one that does not parse, or another board's: theme.json
         wins, as before Addendum 4, and the record starts from this report.
     When both sides changed while apart, the board wins: it is the change
     the owner made last that they can see, and the one they would have to
-    make again by hand.
+    make again by hand. The record says so, for `blink theme show`.
 
-    The board's id is the caller's to give: only a hello carries it, and a
-    daemon that restarts under a running board hears no hello, so Bridge
-    falls back on the id board.json kept. With no id at all, nothing is
-    compared or recorded.
+    The board's id is the caller's to give, and only from the wire: a hello,
+    or a pref, which names the board from firmware 1.4.0 on (Addendum 5).
+    An id known only from board.json is never passed. A board swapped while
+    the daemon was off, whose hello went to nobody, would be read as the
+    board board.json remembers, and its theme adopted over this computer's
+    (review of fp/fix-pc, S1). With no id, nothing is compared or recorded:
+    theme.json wins, as it did before Addendum 4, so a board whose pref does
+    not name it is only ever adopted from after a hello.
 
     Nothing here sends in reply to a message: Bridge sends what outgoing()
     returns on its ticks, and holds them off for one fast tick after a
@@ -667,27 +744,42 @@ class ThemeSync:
     def __init__(self, home):
         self._home = home
         self._board = None
+        self._board_id = None
         self._asked = None
         sent = _read_json(sent_path(home))
         self._sent = _reported(sent)
 
     def hello(self):
         self._board = None
+        self._board_id = None
         self._asked = None
 
+    def _record_for(self, board_id):
+        """theme_seen.json's record when it is about `board_id`, else None."""
+        rec = load_seen(self._home)
+        if rec is None or board_id is None or rec["board_id"] != board_id:
+            return None
+        return rec
+
     def board_now(self, msg, board_id=None):
-        """Record a theme_now from the board `board_id` (None: not known).
+        """Record a theme_now from the board `board_id`: an id off the wire,
+        or None when this connection has not heard one.
 
         Adopts the theme on why=user, and on why=boot when the board's
-        theme is not the one last seen on that same board (Addendum 4).
+        theme is neither the one last seen on that same board nor a save we
+        sent it unconfirmed (Addendum 4, N1).
         """
         fp = _reported(msg)
         if fp is None:
             return
         if not isinstance(board_id, str) or not board_id:
             board_id = None
+        if board_id is not None:
+            self._board_id = board_id
         why = msg.get("why")
         self._board = fp
+        rec = self._record_for(board_id)
+        kept = lost = None
         if why == "saved":
             self._sent = fp
             try:
@@ -697,41 +789,70 @@ class ThemeSync:
                       file=sys.stderr)
         elif why == WHY_ADOPT:
             self._adopt(fp)
-        elif why == WHY_BOOT and self._changed_while_away(board_id, fp):
+        elif (why == WHY_BOOT and rec is not None and _fp_of(fp) is not None
+              and fp != rec["fp"] and fp != rec["asked"]):
+            want = load_saved(self._home)
+            mine = fingerprint(want) if want is not None else None
+            if mine is not None and mine != rec["fp"] and mine != fp:
+                # Both sides changed while apart. Said in the log, and kept
+                # in the record so `blink theme show` can say it too.
+                kept, lost = fp, mine
             # Says that it happened, never what: the id is a value off the
             # wire (CLAUDE.md, serial buffers).
             print("[theme] the theme was changed on the board while this app"
                   " was away; keeping the board's", file=sys.stderr)
             self._adopt(fp)
         else:
-            # "boot" from a board that did not change, or one with no record,
-            # or a word a newer board knows and we do not: a report, never a
-            # choice. Whatever was asked before it may have been lost to the
-            # reboot it announces.
+            # "boot" from a board that did not change, or that holds the save
+            # we sent it, or one with no record; or a word a newer board knows
+            # and we do not: a report, never a choice. Whatever was asked
+            # before it may have been lost to the reboot it announces.
             self._asked = None
-        self._note_seen(board_id, fp)
+        self._note_seen(board_id, fp, why, rec, kept, lost)
 
-    def _changed_while_away(self, board_id, fp):
-        if board_id is None or (fp["id"] == CUSTOM and fp["h"] is None):
-            return False
-        seen = load_seen(self._home)
-        return seen is not None and seen[0] == board_id and seen[1] != fp
-
-    def _note_seen(self, board_id, fp):
-        """Keep theme.json's "seen" in step with the board, writing only when
-        it changes. A custom report with no usable hash drops the record:
-        what the board has is no longer known, and a stale record would let
-        a later boot report pass for no change."""
+    def _note_seen(self, board_id, fp, why, rec, kept, lost):
+        """Keep theme_seen.json in step with the board. A custom report with
+        no usable hash drops the record: what the board has is no longer
+        known, and a stale record would let a later boot report pass for no
+        change. Written only when it changes."""
         if board_id is None:
             return
-        if fp["id"] == CUSTOM and fp["h"] is None:
-            fp = None
-        elif load_seen(self._home) == (board_id, fp):
-            return
+        if _fp_of(fp) is None:
+            new = None if rec is not None else load_seen(self._home)
+        else:
+            new = {"board_id": board_id, "fp": fp, "asked": None,
+                   "kept": kept, "lost": lost}
+            if rec is not None:
+                # A save still unconfirmed stays owed only past a confirmation
+                # of some other theme; a boot or a choice on the board ends it.
+                if why == "saved" and rec["asked"] != fp:
+                    new["asked"] = rec["asked"]
+                # What the board kept over us is news until our next save
+                # lands, or the board is adopted again.
+                if kept is None and why != "saved":
+                    new["kept"], new["lost"] = rec["kept"], rec["lost"]
         try:
-            _write_seen(self._home, board_id, fp)
+            _write_seen(self._home, new)
         except OSError as e:
             print(f"[theme] could not record the board's theme: {e}",
+                  file=sys.stderr)
+
+    def _note_asked(self, fp):
+        """A save just went to the board: remember it until it is confirmed,
+        in the record, so a daemon that restarts in between still knows."""
+        if self._board_id is None or self._board is None:
+            return
+        rec = self._record_for(self._board_id)
+        if rec is None:
+            rec = {"board_id": self._board_id, "fp": self._board,
+                   "asked": None, "kept": None, "lost": None}
+            if _fp_of(self._board) is None:
+                return
+        rec = dict(rec, asked=fp)
+        try:
+            _write_seen(self._home, rec)
+        except OSError as e:
+            print(f"[theme] could not record the save sent: {e}",
                   file=sys.stderr)
 
     def _adopt(self, fp):
@@ -770,6 +891,7 @@ class ThemeSync:
             if fp != holds and fp != self._asked:
                 save = message("save", want)
                 self._asked = fp
+                self._note_asked(fp)
         # Save in the builder and `blink theme set` always leave a cancel,
         # because a Save of the theme already stored owes no save line, and
         # without the cancel the last preview stayed on the board for its
