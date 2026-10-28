@@ -121,11 +121,16 @@ int main(void)
 	/* --- the install confirm comes down with the offer ----------------- */
 	for (i = 0; i < NSTATES; i++) {
 		/* Up only while an update is available, in every other state. */
-		CHECK(upd_confirm_withdraw(ALL[i], true) ==
+		CHECK(upd_confirm_withdraw(ALL[i], true, "1.4.0", "1.4.0") ==
 		      (ALL[i] != OTA_UI_AVAILABLE));
 		/* Nothing to take down when it is not up. */
-		CHECK(!upd_confirm_withdraw(ALL[i], false));
+		CHECK(!upd_confirm_withdraw(ALL[i], false, "1.4.0", "1.4.0"));
+		CHECK(!upd_confirm_withdraw(ALL[i], false, "1.4.1", "1.4.0"));
 	}
+	/* ... and when the offer is another version, still AVAILABLE: a check
+	 * that came back inside one tick with a newer release. */
+	CHECK(upd_confirm_withdraw(OTA_UI_AVAILABLE, true, "1.4.1", "1.4.0"));
+	CHECK(upd_confirm_withdraw(OTA_UI_AVAILABLE, true, "", "1.4.0"));
 
 	printf("%s\n", fails ? "FAILURES" : "all checks passed");
 	return fails ? 1 : 0;

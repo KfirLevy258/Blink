@@ -18,6 +18,7 @@
 #include <indev/lv_indev_private.h>
 #include <lvgl.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ui_settings.h"
 #include "cfg_store.h"
@@ -174,11 +175,12 @@ static void confirm_gone(void)
 	}
 }
 
+static void confirm_close(void);
+
 static void confirm_no_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	lv_obj_del(confirm);
-	confirm_gone();
+	confirm_close();
 }
 
 static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
@@ -870,16 +872,47 @@ static void upd_prompt_draw(const struct ota_ui *snap)
 	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 70, -10);
 }
 
-static void install_yes_cb(lv_event_t *e)
+/* The version the install confirm names, so it can be held to it. */
+static char confirm_ver[sizeof(((struct ota_ui *)0)->version)];
+
+/*
+ * Every way the confirm goes, but Settings closing under it. The [mem] line
+ * comes first, so it measures the confirm at its deepest -- whatever sat on
+ * top of it included -- the way theme-close measures Theme. The popups bench
+ * script reads it (tools/bench/popups_touch.txt).
+ */
+static void confirm_close(void)
 {
-	ARG_UNUSED(e);
-	ota_request_install();
+	mem_stats_report("confirm-close");
 	lv_obj_del(confirm);
 	confirm_gone();
 }
 
+static void install_yes_cb(lv_event_t *e)
+{
+	struct ota_ui now;
+
+	ARG_UNUSED(e);
+	/* The confirm is held to the offer by upd_timer_cb, but only on its
+	 * 250 ms ticks. A "Yes" between the state leaving AVAILABLE -- or the
+	 * version changing -- and the next tick used to spend the consent on
+	 * whatever was there now: "The app stopped answering" after a check
+	 * had cleared the staged image, or an install of a version this dialog
+	 * never named (fp/pool review, N1). Asked again here, the same way. */
+	ota_ui_get(&now);
+	if (upd_confirm_withdraw(now.st, true, now.version, confirm_ver)) {
+		printk("[ota] install not started: the offer changed under the"
+		       " confirm\n");
+	} else {
+		ota_request_install();
+	}
+	confirm_close();
+}
+
 static void show_install_confirm(const struct ota_ui *snap)
 {
+	strncpy(confirm_ver, snap->version, sizeof(confirm_ver) - 1);
+	confirm_ver[sizeof(confirm_ver) - 1] = '\0';
 	confirm = lv_obj_create(panel);
 	lv_obj_set_size(confirm, LV_PCT(100), LV_PCT(100));
 	lv_obj_set_style_bg_color(confirm, COL_BG, 0);
@@ -1261,11 +1294,11 @@ static void upd_timer_cb(lv_timer_t *t)
 	 * the confirm. A timer callback, not an event on the confirm, so it
 	 * can be deleted outright; confirm_gone() pays any rebuild a theme
 	 * change left owed while it was up. */
-	if (upd_confirm_withdraw(snap.st, confirm != NULL)) {
-		lv_obj_del(confirm);
-		confirm_gone();
-		printk("[ota] install confirm withdrawn: state is no longer"
-		       " available\n");
+	if (upd_confirm_withdraw(snap.st, confirm != NULL, snap.version,
+				 confirm_ver)) {
+		confirm_close();
+		printk("[ota] install confirm withdrawn: the offer it named is"
+		       " no longer available\n");
 	}
 
 	switch (snap.st) {

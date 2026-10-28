@@ -89,20 +89,46 @@ wait 3.5
 # and stops answering, and main.c's 30 s deadline raises FAILED. ota_error
 # is the same FAILED without the wait. The confirm used to stay up under the
 # notice, the deepest stack the LVGL pool can reach; it is now withdrawn as
-# soon as the state leaves "available", so the notice lands on Settings. The
-# mem lines are the board's figures for both states.
+# soon as the state leaves "available", so the notice lands on Settings.
+#
+# What each `mem` step shows. A board reports on leaving a screen, never on
+# arriving, so on a board the first prints confirm-close (the withdrawal:
+# the confirm's peak) and the second settings-close, which covers the
+# notice over Settings. The host harness answers `mem` with a host-* line
+# for whatever is up at that moment instead, so there they are the notice
+# and the gauges.
 tap settings.open
 fake ota_avail 1.4.0
 wait 0.5
 click "Update"
 expect ui_state ov=confirm
-mem
 fake ota_error the computer stopped responding
 wait-widget "Update failed" 3
 expect ui_state ov=none modal=notice
 mem
 click "OK"
 expect ui_state ov=none modal=none
+click "<"
+expect ui_state scr=gauges
+mem
+fake ota_none
+wait 3.5
+
+# --- a failed check's notice landing over Theme (fp/pool review, N5). On a
+# desk: tap Update for a check, open Theme, and the check fails 30 s later;
+# nothing withdraws Theme. ota_error from no offer is that failure without
+# the wait. On a board, leaving Theme prints theme-close, Theme's peak with
+# the notice on top of it, and the `mem` after it shows that line.
+tap settings.open
+tap theme.open
+expect ui_state ov=theme
+fake ota_error
+wait-widget "Couldn't check for updates." 3
+expect ui_state ov=theme modal=notice
+click "OK"
+expect ui_state ov=theme modal=none
+click "<"
+expect ui_state scr=settings ov=none
 mem
 click "<"
 expect ui_state scr=gauges
