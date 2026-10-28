@@ -264,6 +264,12 @@ def _fw_line(name, buf_name="buf"):
     assert call[pos:].lstrip().startswith(","), call
     widest = {"d": str(protocol.VERSION), "x": "f" * 8, "s": "f" * 32}
     line = re.sub(r"%([dxs])", lambda m: widest[m.group(1)], fmt)
+    # Any other conversion (%u, %02x, %lu...) would stay in the line as
+    # literal text, under-measure it, and still parse inside a JSON string,
+    # so the widest-line checks would pass on nothing. Teach `widest` the
+    # new one instead.
+    left = re.search(r"%[-0-9.lhz]*[a-zA-Z]", line)
+    assert left is None, f"{name}: unfilled conversion {left.group(0)!r}"
     return line, size
 
 

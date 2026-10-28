@@ -175,7 +175,11 @@ static void emit(const char *json)
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,
  * 12 digits on this ESP32 (its 6-byte MAC), 32 at most, "unknown" if the
- * driver has none. Read once; it cannot change while the board runs.
+ * driver has none. Kept once read, since it cannot change while the board
+ * runs -- but only a real id is kept. "unknown" is asked again next time,
+ * so a read that failed once does not name the board "unknown" until the
+ * next reboot. The ESP32's eFuse MAC read cannot fail that way; another
+ * board's driver might.
  */
 static const char *board_id_hex(void)
 {
@@ -185,7 +189,9 @@ static const char *board_id_hex(void)
 		uint8_t id[16];
 		ssize_t n = hwinfo_get_device_id(id, sizeof(id));
 
-		strcpy(idhex, "unknown");
+		if (n <= 0) {
+			return "unknown";
+		}
 		for (ssize_t i = 0; i < n && i < 16; i++) {
 			snprintf(idhex + i * 2, 3, "%02x", id[i]);
 		}
