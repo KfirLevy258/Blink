@@ -194,9 +194,10 @@ the signing key, not secrecy.
 
 ## Bench builds
 
-Two build options exist only for testing a board on the bench. **Neither is ever
-shipped.** `tools/release.sh` and `tools/flash_encrypted.sh` refuse both outright,
-and `tools/burn.sh` refuses them unless you pass the matching flag.
+Three builds exist only for testing a board on the bench. **None is ever
+shipped.** `tools/release.sh` refuses all three, `tools/flash_encrypted.sh` refuses
+the first two outright, and `tools/burn.sh` refuses those two unless you pass the
+matching flag.
 
 - **The touch injector** (`CONFIG_BLINK_TOUCH_INJECT`) lets the computer drive
   the touch panel and read back what the screen shows, so every interaction can be
@@ -207,6 +208,11 @@ and `tools/burn.sh` refuses them unless you pass the matching flag.
 - **The fault self-test** (`CONFIG_BLINK_FATAL_SELFTEST`) faults on purpose a
   set time into every boot, to prove the fatal handler. Flash it with
   `burn.sh --selftest`.
+- **The touch trace** (`trace.conf` with `trace.overlay`, which set
+  `CONFIG_BLINK_TOUCH_TRACE`) prints every raw touch sample on the console, to
+  diagnose how a finger's stroke reaches the panel. Layer it on with
+  `-Dfirmware_EXTRA_CONF_FILE=trace.conf` and the overlay; the first lines of
+  `trace.conf` say how.
 
 With an inject board on its gauges, `tools/board_touch.py` stands in for the
 daemon and plays taps, swipes and clicks:

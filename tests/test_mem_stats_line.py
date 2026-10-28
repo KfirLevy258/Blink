@@ -83,6 +83,17 @@ def test_the_lvgl_pool_is_32_kib_and_the_bench_knows_it():
     assert bt.POOL_USABLE == 32768 - 88
 
 
+def test_no_overlay_resizes_the_lvgl_pool():
+    # trace.conf cut it to 27648, under what the board is measured to use
+    # opening Theme, so a trace build rebooted mid-trace (fp/pool review,
+    # S1). Every image runs prj.conf's pool.
+    overlays = [c for c in FW.glob("*.conf") if c.name != "prj.conf"]
+    assert any(c.name == "trace.conf" for c in overlays)
+    for conf in overlays:
+        assert not re.search(r"^CONFIG_LV_Z_MEM_POOL_SIZE=",
+                             conf.read_text(), re.M), conf.name
+
+
 def test_no_setting_for_the_removed_network_stack_is_left():
     # Each made every build warn that its dependencies are off, which hides
     # the next warning that matters.

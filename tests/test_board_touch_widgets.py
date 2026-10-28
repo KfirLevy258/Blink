@@ -456,10 +456,26 @@ def test_a_host_mem_line_is_held_to_its_own_pool():
               b"peak=38536 boot_peak=39000 pool=59440")
     b.report_mem()
     assert "of 59440" in out.getvalue()
-    b.on_line(b"[mem] lvgl theme: used=20000 free=10000 largest=8000 "
-              b"peak=27000 boot_peak=27400 pool=30632")
+    b.on_line(b"[mem] lvgl theme: used=20000 free=12680 largest=8000 "
+              b"peak=27000 boot_peak=27400 pool=32768")
     b.report_mem()
     assert f"of {bt.POOL_USABLE}" in out.getvalue()
+
+
+def test_a_board_mem_line_is_held_to_the_pool_it_reports():
+    # A trace build's 27648 B pool is 27560 usable. Judged against the
+    # release constant it read 5120 B roomier than it was.
+    out = io.StringIO()
+    b, _ = _bench([], out=out)
+    b.on_line(b"[mem] lvgl theme-close: used=21000 free=6560 largest=4000 "
+              b"peak=27400 boot_peak=27400 pool=27648")
+    b.report_mem()
+    b.summary()
+    text = out.getvalue()
+    assert "of 27560" in text
+    row = next(l for l in text.splitlines()
+               if l.strip().startswith("theme-close "))
+    assert row.split()[-1] == "160"     # headroom, against 27560
 
 
 # --- the firmware's own constants --------------------------------------------

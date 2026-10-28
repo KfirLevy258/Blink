@@ -114,11 +114,21 @@ POOL_USABLE = 32680
 
 
 def _pool_of(m):
-    """The pool a [mem] line is out of: the board's, or for the host
-    harness's host-* lines the host pool the line itself names (64 KB of
-    eight-byte pointers, so its numbers are not the board's)."""
+    """The pool a [mem] line is out of, usable bytes.
+
+    For the host harness's host-* lines, the host pool the line itself names
+    (64 KB of eight-byte pointers, so its numbers are not the board's). For a
+    board line, its own used+free, which is the pool less the heap's metadata
+    (firmware/src/mem_stats.h) -- so a build with another pool size is judged
+    against its own pool. Judged against the constant, a trace build's 27648 B
+    pool read as 5120 B roomier than it was (fp/pool review, S1). A line whose
+    used+free is below its own peak is not a pool reading at all; for that,
+    the release figure."""
     if m["where"].startswith("host-") and m.get("pool"):
         return m["pool"]
+    total = m.get("used", 0) + m.get("free", 0)
+    if total > 0 and total >= m.get("peak", 0):
+        return total
     return POOL_USABLE
 
 # A finger's tap and swipe, as the board will play them (touch_inject_geom.h
@@ -2322,8 +2332,9 @@ class Bench:
             if m["peak"] > p["peak"]:
                 peaks[m["where"]] = m
         self.say("")
-        self.say(f"[mem] peak per screen, of {POOL_USABLE} B usable "
-                 "(host-* lines: of the host pool they name):")
+        self.say(f"[mem] peak per screen, of the pool each line reports "
+                 f"({POOL_USABLE} B usable on a release board; host-* lines: "
+                 "of the host pool they name):")
         self.say(f"  {'screen':<18}{'peak':>7}{'of pool':>9}{'headroom':>10}")
         for where, m in peaks.items():
             pool = _pool_of(m)
