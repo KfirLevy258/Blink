@@ -135,9 +135,8 @@ restore_daemon() {
 	# instance. An interrupt during the wait below lands here with it still
 	# leaving, so wait for it again rather than act on it.
 	if ! blink_wait_agent_gone "$AGENT"; then
-		echo "warning: the installed daemon is still stopping; once it has, start it with:" >&2
-		echo "  launchctl bootstrap gui/$(id -u) $HOME/Library/LaunchAgents/com.blink.bridge.plist" >&2
-		echo "  launchctl kickstart $AGENT" >&2
+		echo "warning: the installed daemon is still stopping." >&2
+		blink_restart_hint "$AGENT" "$HOME/Library/LaunchAgents/com.blink.bridge.plist"
 		return 0
 	fi
 	launchctl bootstrap "gui/$(id -u)" \
@@ -164,7 +163,16 @@ trap 'restore_daemon; trap - EXIT; exit 130' INT TERM
 
 if launchctl print "$AGENT" >/dev/null 2>&1; then
 	DAEMON_WAS_UP=1
-	launchctl bootout "$AGENT" >/dev/null 2>&1 || true
+	# A refused bootout is refused here, at once: the daemon is still
+	# running, nobody asked it to stop, and waiting three minutes for it
+	# would end in "still stopping", which is not what happened. It is left
+	# running, so there is nothing to restore.
+	if ! blink_bootout "$AGENT"; then
+		DAEMON_WAS_UP=0
+		die "could not stop the installed daemon (launchctl bootout exited $BLINK_BOOTOUT_RC).
+       Nothing was flashed, and the daemon is still running. Check it with:
+         launchctl print $AGENT"
+	fi
 	# bootout RETURNS before the process is gone, and the process holds the
 	# port until it is. Probing straight afterwards read as "cannot tell
 	# whether this chip is fused -- is the port free?" and refused to flash
@@ -178,10 +186,15 @@ if launchctl print "$AGENT" >/dev/null 2>&1; then
 	# daemon back once it has gone. A job still there at the deadline is
 	# left alone, and so is the restore: waiting the same minutes again in
 	# the EXIT trap would tell the reader nothing new.
+	# The job WAS booted out, so once it does exit nothing brings it back
+	# before the next login: the way back is printed, as dev.sh prints it.
 	if ! blink_wait_agent_gone "$AGENT"; then
 		DAEMON_WAS_UP=0
-		die "the installed daemon is still stopping after $((BLINK_STOP_GRACE_S + BLINK_STOP_MARGIN_S)) s.
-       Nothing was flashed. Check it with: launchctl print $AGENT"
+		printf '\nFAILED: the installed daemon is still stopping after %s s.\n' \
+			"$((BLINK_STOP_GRACE_S + BLINK_STOP_MARGIN_S))" >&2
+		echo "       Nothing was flashed. Check it with: launchctl print $AGENT" >&2
+		blink_restart_hint "$AGENT" "$HOME/Library/LaunchAgents/com.blink.bridge.plist"
+		exit 1
 	fi
 fi
 

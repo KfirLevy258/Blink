@@ -51,7 +51,8 @@ def _stub(bin_dir, name, body):
 # `sticky`); `linger` keeps launchd answering print for that many more calls
 # after a bootout, as the real one does while it tears the job down, and a
 # bootstrap in that window fails and is noted in `too-early`.
-# `bootstrap-fails` makes that many bootstraps fail. bootstrap loads the job
+# `bootstrap-fails` makes that many bootstraps fail; `bootout-fails`
+# makes bootout refuse (rc 5, "Input/output error") and leave the job. bootstrap loads the job
 # idle; kickstart runs it. With KICK_MARKER set, kickstart marks that it has
 # started, waits, and notes `kick-done` only if it was not killed meanwhile.
 _LAUNCHCTL = r'''
@@ -68,6 +69,7 @@ print)
   exit 0 ;;
 bootout)
   [ -f "$SYS/agent" ] || exit 3
+  [ -f "$SYS/bootout-fails" ] && exit 5
   if [ ! -f "$SYS/sticky" ] && [ "$(cat "$SYS/holder" 2>/dev/null)" = "$(cat "$SYS/agent")" ]; then
     rm -f "$SYS/holder"
   fi
@@ -669,3 +671,66 @@ def test_a_second_ctrl_c_during_the_restore_does_not_restore_twice(tmp_path):
     assert out.count("installed daemon running again") == 1
     time.sleep(0.5)
     assert _launches(calls) == []
+
+
+def test_a_refused_bootout_is_refused_at_once_and_nothing_restarts(tmp_path):
+    """bootout exits 5 and the agent keeps running, unasked. Not three
+    minutes of "still stopping": refused now, nothing flashed, and nothing
+    started afterwards -- not the agent, which never left, and not the dev
+    daemon, which would share its port."""
+    def hold(t):
+        _hold_with_installed(t)
+        (t / "sys" / "bootout-fails").write_text("", encoding="utf-8")
+    r, ups, builds = _flash(tmp_path, hold=hold, expect_up=False)
+    assert r.returncode == 1
+    assert ("could not stop the installed daemon (launchctl bootout "
+            "exited 5)") in r.stderr
+    assert "still stopping" not in r.stderr
+    calls = tmp_path / "calls.log"
+    lines = calls.read_text(encoding="utf-8").splitlines()
+    assert not [l for l in lines if l.startswith(("west ", "espefuse "))]
+    assert _verbs(calls, "bootstrap") == []
+    assert _verbs(calls, "kickstart") == []
+    # The listing, and nothing polled after the refusal.
+    assert len(_verbs(calls, "print")) == 1
+    assert ups == []
+
+
+def test_a_bootout_of_a_job_already_gone_is_fine(tmp_path):
+    """ESRCH (3) is "not loaded": an answer, not a failure (pc/cli.py)."""
+    def hold(t):
+        # Loaded at the listing, gone by the bootout: the stand-in answers
+        # print from `leaving` and bootout finds no agent, so exits 3.
+        (t / "sys" / "leaving").write_text("1\n", encoding="utf-8")
+    r, ups, builds = _flash(tmp_path, hold=hold, expect_up=False)
+    assert r.returncode == 0, r.stderr
+    assert "could not stop" not in r.stderr
+    assert len(builds) == 1
+
+
+def test_a_ctrl_c_in_the_stop_wait_says_the_restore_is_waiting(tmp_path):
+    """restore() ignores INT and TERM, so after a Ctrl-C in the stop wait the
+    rest of that wait cannot be cut short. It says so, then restores once."""
+    script, env, calls = _rig(tmp_path)
+    _hold_with_installed(tmp_path)
+    (tmp_path / "sys" / "linger").write_text("400\n", encoding="utf-8")
+    p = subprocess.Popen(["bash", str(script), "flash"], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True)
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and len(
+                _verbs(calls, "print")) < 30:
+            time.sleep(0.02)
+        assert len(_verbs(calls, "print")) >= 30, "never reached the wait"
+        p.send_signal(signal.SIGINT)
+        out, err = p.communicate(timeout=60)
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.communicate()
+    assert p.returncode == 130
+    assert ("putting the installed daemon back once it has stopped "
+            "(up to 3 minutes)") in err
+    assert not (tmp_path / "sys" / "too-early").exists()
+    _assert_put_back_once(tmp_path, out)

@@ -34,6 +34,31 @@ blink_agent_loaded() {
 	launchctl print "$1" >/dev/null 2>&1
 }
 
+# blink_bootout AGENT: ask launchd to stop AGENT. Returns 0 when it agreed,
+# or when the job was not loaded -- launchctl exits with the errno, and
+# ESRCH (3, "Boot-out failed: 3: No such process") is an answer, not a
+# failure (pc/cli.py _ESRCH, _LaunchdBackend.stop). Anything else returns 1
+# with the code in BLINK_BOOTOUT_RC. It used to be `|| true`, and a refused
+# bootout ("5: Input/output error") then looked exactly like a slow stop:
+# the daemon kept running, unasked, while the script polled for three
+# minutes and called it "still stopping" (review of fp/fix-tools, S-2).
+blink_bootout() {
+	BLINK_BOOTOUT_RC=0
+	launchctl bootout "$1" >/dev/null 2>&1 || BLINK_BOOTOUT_RC=$?
+	case "$BLINK_BOOTOUT_RC" in
+	0 | 3) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+# blink_restart_hint AGENT PLIST: the two commands that put the daemon back
+# by hand, on stderr, for a run that leaves it stopped.
+blink_restart_hint() {
+	echo "       Once it has stopped, start it again with:" >&2
+	echo "         launchctl bootstrap gui/$(id -u) $2" >&2
+	echo "         launchctl kickstart $1" >&2
+}
+
 # blink_wait_agent_gone AGENT: wait, in quarter seconds, for launchd to
 # forget AGENT, up to the stop grace plus its margin. Says once, on stderr,
 # what it is waiting for if that takes longer than an ordinary stop. Returns

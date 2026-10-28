@@ -59,7 +59,7 @@ def test_burn_waits_under_its_trap_and_before_the_probe():
     trap = next(i for i, l in enumerate(code)
                 if l.startswith("trap restore_daemon EXIT"))
     bootout = next(i for i, l in enumerate(code)
-                   if 'launchctl bootout "$AGENT"' in l)
+                   if 'blink_bootout "$AGENT"' in l)
     wait = next(i for i, l in enumerate(code)
                 if "blink_wait_agent_gone" in l and i > bootout)
     probe = next(i for i, l in enumerate(code) if l.startswith("efuse_probe"))
@@ -120,3 +120,41 @@ def test_a_job_that_outlives_the_grace_is_reported(tmp_path):
     assert r.returncode == 1
     left = int((tmp_path / "left").read_text())
     assert 10 ** 6 - left == 45
+
+
+@needs_sh
+@pytest.mark.parametrize("rc,ok", [(0, True), (3, True), (5, False),
+                                   (1, False)])
+def test_bootout_s_answer_is_kept(tmp_path, rc, ok):
+    """0 and ESRCH (3, not loaded) are a stop; anything else is a refusal,
+    with the code kept for the message (review of fp/fix-tools, S-2)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "launchctl").write_text(f"#!/bin/sh\nexit {rc}\n",
+                                       encoding="utf-8")
+    (bin_dir / "launchctl").chmod(0o755)
+    r = subprocess.run(
+        ["sh", "-c", f'. "{LIB}"; blink_bootout gui/1/x; '
+                     'echo "rc=$? code=$BLINK_BOOTOUT_RC"'],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+        capture_output=True, text=True, timeout=30)
+    assert r.stdout.strip() == f"rc={0 if ok else 1} code={rc}"
+
+
+@pytest.mark.parametrize("script", ["burn.sh", "dev.sh"])
+def test_no_bootout_answer_is_thrown_away(script):
+    code = _code(ROOT / "tools" / script)
+    assert not [l for l in code if re.match(r"\s*launchctl bootout\b", l)]
+    assert any("blink_bootout" in l for l in code)
+
+
+def test_burn_s_stuck_refusal_says_how_to_restart():
+    """The job was booted out, so once it exits nothing brings it back
+    before the next login; the refusal prints the way back."""
+    code = _code(ROOT / "tools" / "burn.sh")
+    bootout = next(i for i, l in enumerate(code) if "blink_bootout" in l)
+    wait = next(i for i, l in enumerate(code)
+                if "if ! blink_wait_agent_gone" in l and i > bootout)
+    body = code[wait:wait + 8]
+    assert any("blink_restart_hint" in l for l in body), body
+    assert any("exit 1" in l for l in body)

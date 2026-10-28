@@ -55,6 +55,10 @@ INSTALLED_WAS_UP=0
 # 1 when the agent this run booted out was still exiting at the end of the
 # stop grace: relaunch_agent then says how to finish rather than wait again.
 INSTALLED_STUCK=0
+# 1 when the agent refused its bootout and is still running: the restore
+# then starts nothing, neither the agent (it never left) nor the dev daemon
+# (it would share the port with it).
+INSTALLED_LEFT_RUNNING=0
 # shellcheck source=lib_launchd.sh
 . "$ROOT/tools/lib_launchd.sh"
 
@@ -86,7 +90,17 @@ step_installed_aside() {
 		# KeepAlive, and a stopped job is back on the port within a second
 		# (pc/cli.py, _LaunchdBackend.stop).
 		INSTALLED_WAS_UP=1
-		launchctl bootout "$AGENT" >/dev/null 2>&1 || true
+		# A refused bootout leaves the agent running, unasked: refused at
+		# once, rather than three minutes of waiting for a stop nobody
+		# started, and nothing to put back -- and not the dev daemon either,
+		# which would open the port beside it (INSTALLED_LEFT_RUNNING).
+		if ! blink_bootout "$AGENT"; then
+			INSTALLED_WAS_UP=0
+			INSTALLED_LEFT_RUNNING=1
+			echo "FATAL: could not stop the installed daemon (launchctl bootout exited $BLINK_BOOTOUT_RC)." >&2
+			echo "       Nothing was flashed, and it is still running. Check it with: launchctl print $AGENT" >&2
+			exit 1
+		fi
 		# First for launchd to let the job go, for as long as the daemon's
 		# stop grace: a daemon inside an OTA write holds its SIGTERM for up
 		# to 180 s (tools/lib_launchd.sh), and the 10 s below alone refused
@@ -183,6 +197,13 @@ agent_register() { launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" >/dev/null 
 #     desk on HOST LOST, so ask launchd, for up to 2 s while kickstart's
 #     hand-off lands, and print the manual steps if it never shows.
 relaunch_agent() {
+	# restore() ignores INT and TERM, so a Ctrl-C during the stop wait in
+	# step_installed_aside lands here, in a wait of up to three minutes that
+	# no second Ctrl-C can end. Said, so the ignored keypress does not look
+	# like a hang (review of fp/fix-tools, NICE 2).
+	if [ "$INSTALLED_STUCK" != 1 ] && blink_agent_loaded "$AGENT"; then
+		echo "putting the installed daemon back once it has stopped (up to $((BLINK_STOP_GRACE_S / 60)) minutes)" >&2
+	fi
 	if [ "$INSTALLED_STUCK" = 1 ] || ! blink_wait_agent_gone "$AGENT"; then
 		{
 			echo "warning: the installed daemon is still stopping; once it has, start it with:"
@@ -219,6 +240,8 @@ restore() {
 	trap '' INT TERM
 	if [ "$INSTALLED_WAS_UP" = 1 ]; then
 		relaunch_agent
+	elif [ "$INSTALLED_LEFT_RUNNING" = 1 ]; then
+		:	# the agent never stopped; it still has the port
 	else
 		up
 	fi
