@@ -134,6 +134,7 @@ _ESCAPES = [
     (r"\0", b"\x00"), (r"\101BC", b"ABC"), (r"\1012", b"A2"),
     (r"\x41", b"A"), (r"\x0041", b"A"),     # \x takes every hex digit
     (r"\u00b0", b"\xc2\xb0"), (r"\U0001F600", b"\xf0\x9f\x98\x80"),
+    (r"\u0024", b"$"),                      # one of the three C allows
     (r"\n\t\r\\\"\'\?", b"\n\t\r\\\"'?"),
 ]
 
@@ -146,7 +147,8 @@ def test_escapes_decode_as_c_decodes_them():
 
 def test_escapes_c_would_refuse_are_refused_not_guessed():
     bt = _bt()
-    for body in (r"\x", r"\x100", r"\777", r"\u12", r"\q"):
+    for body in (r"\x", r"\x100", r"\777", r"\u12", r"\q", r"\u0041",
+                 r"\u009f"):
         try:
             bt._c_unescape(body)
         except ValueError:

@@ -18,6 +18,7 @@
 # guard AND the mute check removed it fails, Settings opening as the clip
 # returns. So the exit below really is decided inside the mute.
 
+harness-only
 expect ui_state scr=gauges modal=none busy=0
 # Into the clip and straight back out: SW_RIGHT, then SW_LEFT.
 swipe 60 120 220 120

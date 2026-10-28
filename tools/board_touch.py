@@ -597,9 +597,10 @@ def _c_unescape(body):
             continue
         if nxt == "x":
             m = re.match(r"[0-9a-fA-F]+", body[i + 2:])
-            if not m or int(m.group(0), 16) > 0xFF:
-                raise ValueError("a \\x escape needs one to two hex digits"
-                                 " worth of value")
+            if not m:
+                raise ValueError("\\x with no hex digits after it")
+            if int(m.group(0), 16) > 0xFF:
+                raise ValueError(f"\\x{m.group(0)} is more than a byte")
             out.append(int(m.group(0), 16))
             i += 2 + len(m.group(0))
             continue
@@ -608,7 +609,14 @@ def _c_unescape(body):
             digits = body[i + 2:i + 2 + n]
             if not re.fullmatch(r"[0-9a-fA-F]{%d}" % n, digits):
                 raise ValueError(f"\\{nxt} needs {n} hex digits")
-            out += chr(int(digits, 16)).encode("utf-8")
+            cp = int(digits, 16)
+            # C11 6.4.3: a universal name below U+00A0 is allowed only for
+            # $, @ and `; the others are refused, as cc refuses them
+            # (review of fp/audit-nice r2, NICE 7).
+            if cp < 0xA0 and cp not in (0x24, 0x40, 0x60):
+                raise ValueError(f"\\{nxt}{digits} names a character C"
+                                 " spells only as itself")
+            out += chr(cp).encode("utf-8")
             i += 2 + n
             continue
         raise ValueError(f"unknown escape \\{nxt}")
@@ -1274,6 +1282,10 @@ def parse_line(text, lineno=1):
         return Step(lineno, "press", (v[0], v[1]))
     if cmd in ("release", "mem", "state") and not rest:
         return Step(lineno, cmd, ())
+    if cmd == "harness-only":
+        if rest:
+            raise ScriptError(f"line {lineno}: usage: harness-only")
+        return Step(lineno, "harness_only", ())
     if cmd == "wait":
         try:
             (s,) = rest
@@ -2307,6 +2319,17 @@ class Bench:
         if s.cmd == "fake":
             self.mark()
             return self.fake(*s.args)
+        if s.cmd == "harness_only":
+            # A script whose test is only meaningful on the host harness's
+            # clock. On a board it would run and pass without testing
+            # anything (eye_mute_touch.txt: the board's entry slide
+            # swallows the second stroke), so it stops here instead
+            # (review of fp/audit-nice r2, NICE 8).
+            if getattr(self.link, "note", None) is None:
+                self.fail("this script runs on the host harness only"
+                          " (--harness); on a board it would test nothing")
+                return False
+            return True
         if s.cmd == "expect_none":
             return self.expect_none(s.args[0])
         if s.cmd == "expect":

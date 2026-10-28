@@ -325,7 +325,9 @@ def test_the_builders_status_dot_follows_the_boards_rule(tmp_path):
     the review of fp/audit-nice found it still drawing `low`, a grey dot
     where Mono and Light ink now draw white and black. Both sides run on
     the same colours here: the C through a compiler, the page's own
-    functions through node (both are on every CI runner)."""
+    functions through node. The ubuntu and macOS CI runners have both, so
+    it runs there; windows-latest has gcc but no `cc` on PATH, so it skips
+    there, cleanly."""
     cc, node = shutil.which("cc"), shutil.which("node")
     if cc is None or node is None:
         pytest.skip("needs a C compiler and node")

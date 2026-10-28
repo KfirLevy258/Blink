@@ -1283,3 +1283,23 @@ def test_the_edit_done_lines_parse():
     for bad in ("expect no", "expect no theme_now", "fake edit_done 1"):
         with pytest.raises(bt.ScriptError):
             bt.parse_line(bad)
+
+
+def test_a_harness_only_script_stops_on_a_board():
+    # eye_mute_touch.txt would pass on a board without testing anything:
+    # the board's entry slide swallows its second stroke (review r2, NICE 8).
+    steps = bt.parse_script("harness-only\nwait 0\n")
+    assert [s.cmd for s in steps] == ["harness_only", "wait"]
+    b, link = _bench([])                       # a board: no `note`
+    b.run_script(steps)
+    assert b.failures and "host harness only" in b.failures[0]
+    link.note = lambda *a: None                # what the harness link has
+    b2, _ = _bench([])
+    b2.link.note = link.note
+    b2.run_script(steps)
+    assert not b2.failures
+    first = bt.parse_script((ROOT / "tools" / "bench" / "eye_mute_touch.txt")
+                            .read_text(encoding="utf-8"))[0]
+    assert first.cmd == "harness_only"
+    with pytest.raises(bt.ScriptError):
+        bt.parse_line("harness-only now")
