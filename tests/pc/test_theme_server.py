@@ -477,6 +477,7 @@ class FakeServer:
         self.links = 0
         self.finished = None
         self.alive = False
+        self.touches = 0
         FakeServer.made.append(self)
 
     def start(self):
@@ -488,6 +489,9 @@ class FakeServer:
 
     def page_alive(self):
         return self.alive
+
+    def touch(self):
+        self.touches += 1
 
     def finish(self, outcome, cancel=True):
         self.done = True

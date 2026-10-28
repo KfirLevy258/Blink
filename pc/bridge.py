@@ -695,8 +695,14 @@ class Bridge:
         # After any answer, so a board that asked again as the old builder
         # ended hears "ok" for the new one before "done" for the old: its
         # done is ignored while an ask is in flight, never the other way.
+        # The board's cap first, so a done for a board not yet heard from
+        # (a fresh connection before its hello) waits for it rather than
+        # being used up on nobody (review r2, NICE 3); and only to firmware
+        # that says it handles the line.
         ended = self._builder_ended
-        if ended is not None and ended() and self._takes_theme():
+        if (ended is not None
+                and self._board_can(protocol.BOARD_CAP_EDIT_DONE)
+                and ended()):
             self._write(protocol.theme_edit_done())
 
     def board_alive(self) -> bool:

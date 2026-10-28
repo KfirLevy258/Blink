@@ -170,7 +170,10 @@ static void emit(const char *json)
  * under a running board hears no hello, only the pref. Older daemons read
  * neither field. Append-only, like THEME_IDS.
  */
-#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\"]"
+/* edit_done: this firmware handles theme_edit done:1 (theme contract
+ * Addendum 6). A cap of its own because the 1.4.0 builds before the handler
+ * already said "theme", and the daemon must not send them the line. */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\"]"
 
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,

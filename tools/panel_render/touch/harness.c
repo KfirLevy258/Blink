@@ -697,7 +697,7 @@ static void dispatch(const char *json)
 		}
 	} else if (strcmp(t, "welcome") == 0) {
 		reply("{\"t\":\"pref\",\"v\":2,\"provider\":\"claude\","
-		      "\"caps\":[\"svc\",\"theme\"]}");
+		      "\"caps\":[\"svc\",\"theme\",\"edit_done\"]}");
 		harness_theme_now("boot");
 	} else if (strcmp(t, "theme") == 0) {
 		/* As proto.c does it: the real parser and ui_theme.c's wire

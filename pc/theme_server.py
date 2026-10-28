@@ -48,6 +48,11 @@ from pc import theme
 
 IDLE_S = 600            # 10 minutes with no edit (plan, revision 2026-10-25)
 CLOSE_GRACE_S = 5       # a reload fires pagehide too, then loads again
+# How long a one-time link may wait to be used. The CLI prints one for a
+# person to click when no browser opened, so it is the builder's own idle
+# limit: a link older than that belongs to a builder that would have
+# stopped anyway.
+LINK_LIFE_S = 600
 MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
 # A builder heartbeat (/api/ping) arrives every 20 s from an open page. A page
 # heard within this long is "still open": the Launcher does not put a second
@@ -176,6 +181,20 @@ def open_url(url, platform=None, environ=None, runner=None, popen=None,
         own session, so the browser it launches is not a child the service
         manager kills with the daemon on the next restart.
     Every collaborator is injectable; the tests never start a browser.
+
+    Opened is not the same as in front. When "Edit on computer" reshows a
+    builder whose tab is behind other windows (contract Addendum 6), the
+    browser gets the URL and opens a tab, but whether its window is raised
+    is the desktop's decision. Windows' foreground lock lets a process
+    that is not in the foreground -- the daemon never is -- start a tab
+    but usually only flash the browser on the taskbar; GNOME's focus-
+    stealing prevention does the same ("... is ready"); macOS raises it.
+    There is no standard-library way past that: AllowSetForegroundWindow
+    can only hand on a right the caller holds, and the daemon holds none,
+    and anything that could would be a new dependency (CLAUDE.md). So this
+    stays the limit, written down, and docs/windows-check.md 10d records
+    what each release's Windows pass sees (review of fp/audit-nice r2,
+    SHOULD-2).
     """
     platform = platform or sys.platform
     environ = os.environ if environ is None else environ
@@ -401,7 +420,7 @@ class BuilderServer:
         self._now = now
         self._tick_s = tick_s
         self._lock = threading.Lock()
-        self._links = set()
+        self._links = {}            # unspent link -> when it was made
         self._sessions = set()
         self._last = now()
         self._seen = None
@@ -442,19 +461,27 @@ class BuilderServer:
     # -- tokens
 
     def new_link(self):
+        """A one-time link. It replaces any link not yet used, and lives
+        LINK_LIFE_S: "Edit on computer" mints one on every reshow (contract
+        Addendum 6), and each used to stay valid, unspent, for the server's
+        whole life (review of fp/audit-nice r2, NICE 1). A spent link was
+        always refused; now so is a superseded or stale one."""
         k = secrets.token_urlsafe(32)
         with self._lock:
-            self._links.add(k)
+            self._links = {k: self._now()}
         return f"http://127.0.0.1:{self.port}/open?k={k}"
 
     def redeem(self, k):
         with self._lock:
-            for good in list(self._links):
+            now = self._now()
+            for good, made in list(self._links.items()):
                 if _same(good, k):
-                    self._links.discard(good)
+                    del self._links[good]
+                    if now - made >= LINK_LIFE_S:
+                        return None
                     s = secrets.token_urlsafe(32)
                     self._sessions.add(s)
-                    self._last = self._seen = self._now()
+                    self._last = self._seen = now
                     return s
         return None
 
@@ -469,10 +496,18 @@ class BuilderServer:
             self._last = self._seen = self._now()
             self._closed_at = None
 
+    def _prune_tabs(self, now):
+        # A tab unheard from for PAGE_ALIVE_S no longer counts (it crashed,
+        # or its machine slept); dropped rather than kept for the server's
+        # life (review r2, NICE 2).
+        self._tabs = {k: t for k, t in self._tabs.items()
+                      if now - t < PAGE_ALIVE_S}
+
     def seen(self, tab=None):
         with self._lock:
             self._seen = self._now()
             self._closed_at = None
+            self._prune_tabs(self._seen)
             if tab is not None:
                 self._tabs[tab] = self._seen
 
@@ -487,7 +522,8 @@ class BuilderServer:
         with self._lock:
             now = self._now()
             self._tabs.pop(tab, None)
-            if any(now - t < PAGE_ALIVE_S for t in self._tabs.values()):
+            self._prune_tabs(now)
+            if self._tabs:
                 return      # another tab is still showing this builder
             self._closed_at = now
 
@@ -555,55 +591,93 @@ class Launcher:
             live = server is not None and not server.done
             if live and self._opened_at is not None and (
                     now - self._opened_at < OPEN_EVERY_S):
+                # Answered with what the open under 10 s ago achieved, and
+                # no new window: the one narrow case of an ok with nothing
+                # newly shown. The board's own 10 s guard means only a tap
+                # after leaving and re-entering the theme page reaches it,
+                # and a window did open moments before (review r2, NICE 4).
                 return self._last_ok
             # A page already open in a tab used to be answered ok 1 with
             # nothing shown, on the idea that a second tab would fight the
             # first; but a tab behind other windows is one the owner cannot
             # find, and "Opened on your computer" over no window is the
             # silent ok the contract now forbids (Addendum 6). So a fresh
-            # one-time link is opened on the running builder, which the
-            # browser shows; the tabs share one session and the server
-            # counts them (BuilderServer.seen), so closing the older one
-            # does not end the builder under the newer.
-            fresh = not live
-            if fresh:
-                try:
-                    server = self._make(self._home)
-                except OSError as e:
-                    # The page missing from a broken install, or no port to
-                    # bind. One line, and the board's own fallback.
-                    print(f"[theme] builder could not start: {e}",
-                          file=sys.stderr)
-                    self._server = None
-                    return False
-                server.start()
-                self._server = server
+            # one-time link is opened on the running builder; the tabs
+            # share one session and the server counts them
+            # (BuilderServer.seen), so closing the older one does not end
+            # the builder under the newer. Whether the browser comes to the
+            # FRONT is the desktop's call, not ours: see open_url.
             self._opened_at = now
-            # Held across the opener on purpose, so two taps cannot open two
-            # tabs; close() does not wait for it (see there).
-            ok = bool(self._opener(server.new_link()))
+            ok, server = self._open(server if live else None)
+            if ok and server.done:
+                # It ended while the browser was opening: its tab had just
+                # closed and its grace ran out, or it went idle. The board
+                # would be told "opened" over a dead builder and, the done
+                # being ignored while its ask is in flight, would sit on
+                # that for 10 s -- the owner's bug again (review r2,
+                # SHOULD-1). So once more, on a builder of its own.
+                ok, server = self._open(None)
+                if ok and server.done:
+                    ok = False
             self._last_ok = ok
             if ok:
                 self._told = server
-            if not ok and fresh:
-                # Nothing was ever shown, so there is nothing to cancel; the
-                # board puts up its own "Run blink theme" fallback.
-                server.finish("no browser", cancel=False)
-                if self._server is server:
-                    self._server = None
             return ok
+
+    def _open(self, server):
+        """Open a browser on `server`, or on a new builder when it is None.
+        (ok, the server it was opened on). Called with the lock held."""
+        fresh = server is None
+        if fresh:
+            try:
+                server = self._make(self._home)
+            except OSError as e:
+                # The page missing from a broken install, or no port to
+                # bind. One line, and the board's own fallback.
+                print(f"[theme] builder could not start: {e}",
+                      file=sys.stderr)
+                self._server = None
+                return False, None
+            server.start()
+            self._server = server
+        else:
+            # A tap is an intent to edit: it holds off this builder's idle
+            # limit and the close grace of a tab that has just gone, which
+            # would otherwise end it before the new tab loads (review r2,
+            # SHOULD-1). redeem() alone does not clear the grace.
+            server.touch()
+        # Held across the opener on purpose, so two taps cannot open two
+        # tabs; close() and ended() do not wait for it (see there).
+        ok = bool(self._opener(server.new_link()))
+        if not ok and fresh:
+            # Nothing was ever shown, so there is nothing to cancel; the
+            # board puts up its own "Run blink theme" fallback.
+            server.finish("no browser", cancel=False)
+            if self._server is server:
+                self._server = None
+        return ok, server
 
     def ended(self):
         """True, once, when a builder opened for the board has ended --
         saved, cancelled, its tab closed, idle, or stopped -- so the daemon
-        can send theme_edit done:1 (contract Addendum 6). Polled from the
-        serial loop, which is where the line can be written."""
-        with self._lock:
+        can send theme_edit done:1 (contract Addendum 6).
+
+        Polled from the serial loop on every pass, so it must never wait:
+        launch() holds the lock across the browser opener, which has been
+        measured stuck for 28.7 s (close(), below), and the first version
+        of this blocked the serial thread that long -- no reads, no pong,
+        HOST LOST on the board at 30 s (review r2, MUST-1). When launch()
+        has the lock this answers False and is asked again next pass."""
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
             server = self._told
             if server is not None and server.done:
                 self._told = None
                 return True
             return False
+        finally:
+            self._lock.release()
 
     def close(self):
         """On daemon exit: a live builder writes its cancel and stops.

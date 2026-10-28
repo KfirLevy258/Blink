@@ -683,6 +683,11 @@ SVC_HOLD_S = 150
 # No released firmware sends caps, so there is no version fallback to keep.
 BOARD_CAP_SVC = "svc"        # draws the status-page level (svc)
 BOARD_CAP_THEME = "theme"    # takes theme lines; answers theme_edit
+# Handles theme_edit done:1 (contract Addendum 6). Its own cap, not implied
+# by "theme": 1.4.0 boards built before the handler read a done that lands
+# while their ask is in flight as an ok 0, put up "run blink theme", and
+# then ignore the real ok 1 (review of fp/audit-nice r2, SHOULD-1).
+BOARD_CAP_EDIT_DONE = "edit_done"
 
 
 def board_caps(msg) -> frozenset:
@@ -789,8 +794,9 @@ def theme_edit_done() -> dict:
     Addendum 6). The board clears its 10 s double-tap guard and the slot's
     "Opened on your computer" on it, so the next tap asks again. Before
     this, a builder closed inside those 10 s left a tap that sent nothing
-    (board, 2026-10-29). A board from before ignores the line: it reads
-    done as no ok, and acts on an answer only while it is waiting for one."""
+    (board, 2026-10-29). Sent only to a board that lists
+    BOARD_CAP_EDIT_DONE: one from before reads it as an ok 0 whenever an ask
+    of its own is in flight."""
     return {"t": "theme_edit", "v": VERSION, "done": 1}
 
 

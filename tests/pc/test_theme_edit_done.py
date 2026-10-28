@@ -18,6 +18,8 @@ board's line budget would fail here rather than vanish on the wire.
 """
 import json
 import queue
+import threading
+import time
 
 from pc import protocol
 from pc import theme
@@ -32,7 +34,7 @@ def inline(fn):
     fn()
 
 
-def wired(tmp_path, launcher, caps=("svc", "theme")):
+def wired(tmp_path, launcher, caps=("svc", "theme", "edit_done")):
     """A Bridge wired to `launcher` the way claude_usage_bridge does it,
     writing through encode_checked."""
     home = str(tmp_path / ".blink")
@@ -48,7 +50,9 @@ def wired(tmp_path, launcher, caps=("svc", "theme")):
                wall=lambda: (1752444000, 0), theme_sync=theme.ThemeSync(home),
                open_builder=launcher.launch, builder_ended=launcher.ended,
                run_async=inline, edit_answers=queue.Queue(), **_NO_FEED)
-    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0", "caps": list(caps)})
+    if caps is not None:
+        b.on_message({"t": "hello", "v": 2, "fw": "1.4.0",
+                      "caps": list(caps)})
     return b, sent
 
 
@@ -185,3 +189,109 @@ def test_the_page_names_its_tab_on_ping_and_close():
     assert "post('/api/ping', { tab: TAB })" in page
     assert "body: JSON.stringify({ tab: TAB })" in page
     assert "ping();" in page
+
+
+# ------------------------------------------------------------- review r2
+
+def test_pump_never_waits_for_a_browser_that_is_slow_to_open(tmp_path):
+    """MUST-1 of the second review: ended() took the Launcher's lock, which
+    launch() holds across the opener, so every tap stalled the serial loop
+    until the browser had started -- 1.90 s measured with a 2 s opener, and
+    an opener has been seen stuck for 28.7 s, past the board's 30 s HOST
+    LOST."""
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(url):
+        entered.set()
+        release.wait(5)
+        return True
+
+    lau, _ = launcher_with(str(tmp_path), slow)
+    b, sent = wired(tmp_path, lau)
+    t = threading.Thread(target=lau.launch)
+    t.start()
+    try:
+        assert entered.wait(2)
+        t0 = time.monotonic()
+        b.pump()
+        assert lau.ended() is False
+        assert time.monotonic() - t0 < 0.2
+    finally:
+        release.set()
+        t.join(5)
+
+
+def test_a_reshow_holds_off_the_builders_own_end(tmp_path):
+    # A tap is an intent to edit: the running builder is touched before
+    # its link is opened, so a tab closed a moment ago, or an idle limit
+    # about to run out, cannot end it under the new tab.
+    lau, clock = launcher_with(str(tmp_path), lambda u: True)
+    lau.launch()
+    clock.t += theme_server.OPEN_EVERY_S
+    lau.launch()
+    assert len(FakeServer.made) == 1
+    assert FakeServer.made[0].touches == 1
+
+
+def test_a_builder_that_ends_while_the_browser_opens_is_replaced(tmp_path):
+    # It finished inside the opener (its grace ran out). Telling the board
+    # "opened" over it would bring the owner's bug back for 10 s.
+    lau, clock = launcher_with(str(tmp_path), lambda u: True)
+    b, sent = wired(tmp_path, lau)
+    b.on_message({"t": "theme_edit", "v": 2})
+    first = FakeServer.made[0]
+
+    def dying(url):
+        if url.startswith("http://127.0.0.1:1/open?k=2"):
+            first.finish("closed")
+        return True
+
+    lau._opener = dying
+    clock.t += theme_server.OPEN_EVERY_S
+    b.on_message({"t": "theme_edit", "v": 2})
+    assert len(FakeServer.made) == 2          # a builder of its own
+    assert edit_lines(sent)[-1] == OK
+    b.pump()
+    assert DONE not in edit_lines(sent)       # the new one is still up
+    FakeServer.made[1].finish("saved")
+    b.pump()
+    assert edit_lines(sent)[-1] == DONE
+
+
+def test_no_done_to_a_theme_board_without_the_handler(tmp_path):
+    # 1.4.0 builds before the handler say "theme" but not "edit_done", and
+    # read a done during their own ask as an ok 0.
+    lau, _ = launcher_with(str(tmp_path), lambda u: True)
+    b, sent = wired(tmp_path, lau, caps=("svc", "theme"))
+    b.on_message({"t": "theme_edit", "v": 2})
+    FakeServer.made[0].finish("closed")
+    b.pump()
+    assert edit_lines(sent) == [OK]
+
+
+def test_a_done_waits_for_a_board_that_has_not_spoken_yet(tmp_path):
+    lau, _ = launcher_with(str(tmp_path), lambda u: True)
+    lau.launch()
+    FakeServer.made[0].finish("closed")
+    b, sent = wired(tmp_path, lau, caps=None)  # a fresh connection
+    b.pump()
+    assert DONE not in sent                    # not used up on nobody
+    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0",
+                  "caps": ["svc", "theme", "edit_done"]})
+    b.pump()
+    assert edit_lines(sent)[-1] == DONE
+
+
+def test_only_the_newest_unspent_link_opens_and_only_while_fresh(tmp_path):
+    s, clock = server(tmp_path)
+    try:
+        old = s.new_link().split("k=", 1)[1]
+        new = s.new_link().split("k=", 1)[1]
+        assert s.redeem(old) is None           # superseded
+        assert s.redeem(new) is not None
+        assert s.redeem(new) is None           # spent
+        late = s.new_link().split("k=", 1)[1]
+        clock.t += theme_server.LINK_LIFE_S
+        assert s.redeem(late) is None          # stale
+    finally:
+        s.finish("test over")
