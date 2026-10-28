@@ -205,9 +205,12 @@ def test_the_popup_script_reaches_every_popup_it_says_it_does():
             if steps[i].args[0] in ("boot_notice", "reverted_notice")]
     board = [i for i in fakes if i not in host]
     assert host and max(board) < min(host)
-    # And the board is left with nothing on offer.
-    assert ("fake", ("ota_none",)) in [(steps[i].cmd, steps[i].args)
-                                       for i in board[-1:]]
+    # And the board is left with nothing on offer: the last OTA line it is
+    # sent is ota_none. (The "Edit on computer" section's edit_done lines
+    # come after it, and offer nothing.)
+    ota = [i for i in board if steps[i].args[0].startswith("ota_")]
+    assert steps[ota[-1]].args == ("ota_none",)
+    assert "edit_done" in {steps[i].args[0] for i in board}
 
 
 def test_the_default_script_has_a_click_by_label_pass():
@@ -1271,3 +1274,12 @@ def test_a_marker_in_a_printk_line_is_not_lvgl_s():
               b"[proto] host status: failed to allocate\r\n")
     b.summary()
     assert b.pool_dry == 0 and b.failures == []
+
+
+def test_the_edit_done_lines_parse():
+    # Addendum 6's bench lines: the daemon's done, and a guard that holds.
+    assert bt.parse_line("fake edit_done").args == ("edit_done",)
+    assert bt.parse_line("expect no theme_edit").cmd == "expect_none"
+    for bad in ("expect no", "expect no theme_now", "fake edit_done 1"):
+        with pytest.raises(bt.ScriptError):
+            bt.parse_line(bad)

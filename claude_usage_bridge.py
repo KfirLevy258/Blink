@@ -1268,6 +1268,7 @@ def main(argv=None):
                         status_watch=svc_watch,
                         theme_sync=theme_sync,
                         open_builder=theme_builder.launch,
+                        builder_ended=theme_builder.ended,
                         edit_answers=theme_answers,
                         # What the board can show, until it says again.
                         board_caps_hint=known.get("caps"),

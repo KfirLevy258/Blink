@@ -753,9 +753,16 @@ static void dispatch(const char *json)
 	} else if (strcmp(type, "theme_edit") == 0) {
 		/* The daemon's answer to ours: ok 1 once a browser is open,
 		 * ok 0 when it has no display to open one on. Absent reads as
-		 * 0, the answer that tells the user what to do instead. */
-		double ok = 0;
+		 * 0, the answer that tells the user what to do instead.
+		 * done 1 is the other line it sends (Addendum 6): the builder
+		 * it opened has ended, so the next tap must ask again. */
+		double ok = 0, done = 0;
 
+		msg_get_double(json, "done", &done);
+		if (done == 1) {
+			ui_settings_theme_edit_done();
+			return;
+		}
 		msg_get_double(json, "ok", &ok);
 		ui_settings_theme_edit_reply(ok == 1);
 	} else if (strcmp(type, "ota_avail") == 0) {

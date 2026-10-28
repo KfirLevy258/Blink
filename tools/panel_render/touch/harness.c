@@ -708,8 +708,14 @@ static void dispatch(const char *json)
 			ui_theme_wire(&m);
 		}
 	} else if (strcmp(t, "theme_edit") == 0) {
-		double ok = 0;
+		/* As proto.c does it, done (Addendum 6) first. */
+		double ok = 0, done = 0;
 
+		msg_get_double(json, "done", &done);
+		if (done == 1) {
+			ui_settings_theme_edit_done();
+			return;
+		}
 		msg_get_double(json, "ok", &ok);
 		ui_settings_theme_edit_reply(ok == 1);
 	}

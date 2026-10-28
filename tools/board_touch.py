@@ -1174,7 +1174,7 @@ def _on_panel(pts, lineno):
 # `#` inside the quotes is not a comment.
 _QUOTED_CMDS = ("click", "expect-widget", "wait-widget", "widgets", "fake")
 FAKE_KINDS = ("ota_avail", "ota_none", "ota_error", "boot_notice",
-              "reverted_notice")
+              "reverted_notice", "edit_done")
 
 
 def _parse_quoted(cmd, rest, lineno):
@@ -1217,7 +1217,8 @@ def _parse_quoted(cmd, rest, lineno):
                           + "|".join(FAKE_KINDS) + " [ARG]")
     if kind == "ota_avail" and len(rest) in (2, 3):
         return Step(lineno, "fake", tuple(rest))
-    if kind in ("ota_none", "reverted_notice") and len(rest) == 1:
+    if kind in ("ota_none", "reverted_notice", "edit_done") and \
+            len(rest) == 1:
         return Step(lineno, "fake", tuple(rest))
     if kind == "ota_error":
         # The reason is the rest of the line, as the daemon's sentence is.
@@ -1287,6 +1288,13 @@ def parse_line(text, lineno=1):
                 raise ScriptError(f"line {lineno}: usage: expect notice "
                                   + "|".join(kinds))
             return Step(lineno, "expect", ("notice", {"nt": rest[1]}))
+        if what == "no":
+            # The board must NOT say this, within QUIET_S of the last
+            # action: a guard that holds is the absence of a line.
+            if rest[1:] != ["theme_edit"]:
+                raise ScriptError(f"line {lineno}: usage: expect no"
+                                  " theme_edit")
+            return Step(lineno, "expect_none", ("theme_edit",))
         if what not in ("ui_state", "theme_now", "theme_edit"):
             raise ScriptError(
                 f"line {lineno}: usage: expect ui_state K=V ... | "
@@ -1973,6 +1981,20 @@ class Bench:
                       f": board says {got}")
         return ok
 
+    QUIET_S = 1.5
+
+    def expect_none(self, kind):
+        """Fail if the board sends `kind` within QUIET_S of the last
+        action. Long enough for a tap's line to cross the wire on a board,
+        which answers inside a few hundred ms."""
+        def seen(evs):
+            return next((ev for ev in evs if ev["t"] == kind), None)
+
+        if self._wait(seen, self.QUIET_S * self.scale) is not None:
+            self.fail(f"expect no {kind}: the board sent one")
+            return False
+        return True
+
     def expect_event(self, kind, fields, timeout=3.0):
         def seen(evs):
             for ev in evs:
@@ -2188,6 +2210,11 @@ class Bench:
                                                 app=app))
         if kind == "ota_none":
             return self.send(protocol.ota_none())
+        if kind == "edit_done":
+            # The daemon's word that the builder it opened has ended: a
+            # real protocol line, so a board takes it as well as the
+            # harness does.
+            return self.send(protocol.theme_edit_done())
         if kind == "ota_error":
             self.ota_flash_pending = False
             self.install_pressed = False
@@ -2280,6 +2307,8 @@ class Bench:
         if s.cmd == "fake":
             self.mark()
             return self.fake(*s.args)
+        if s.cmd == "expect_none":
+            return self.expect_none(s.args[0])
         if s.cmd == "expect":
             kind, fields = s.args
             if kind in ("ui_state", "notice"):

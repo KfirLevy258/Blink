@@ -783,6 +783,17 @@ def theme_edit_reply(ok: bool) -> dict:
     return {"t": "theme_edit", "v": VERSION, "ok": 1 if ok else 0}
 
 
+def theme_edit_done() -> dict:
+    """The builder the daemon opened for the board's "Edit on computer" has
+    ended -- saved, cancelled, its tab closed, or timed out (contract
+    Addendum 6). The board clears its 10 s double-tap guard and the slot's
+    "Opened on your computer" on it, so the next tap asks again. Before
+    this, a builder closed inside those 10 s left a tap that sent nothing
+    (board, 2026-10-29). A board from before ignores the line: it reads
+    done as no ok, and acts on an answer only while it is waiting for one."""
+    return {"t": "theme_edit", "v": VERSION, "done": 1}
+
+
 # --- OTA over the serial link (see pc/ota.py and the OTA block in proto.c) ---
 
 

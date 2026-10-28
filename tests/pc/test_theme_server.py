@@ -524,17 +524,19 @@ def test_the_launcher_opens_at_most_once_per_ten_seconds(home):
     assert theme_server.OPEN_EVERY_S == 10
 
 
-def test_no_new_tab_while_the_page_is_open(home):
+def test_an_open_page_is_shown_again_on_a_fresh_link(home):
+    # It used to be answered ok with no window at all (contract Addendum
+    # 6 forbids that): a tab behind other windows is one the owner cannot
+    # find. Same builder, a new one-time link, a browser told to show it.
     opened = []
     lau, clock = launcher_with(home, lambda u: opened.append(u) or True)
     lau.launch()
     FakeServer.made[0].alive = True
     clock.t += 300
     assert lau.launch()
-    assert len(opened) == 1
-    FakeServer.made[0].alive = False
-    assert lau.launch()
-    assert len(opened) == 2
+    assert len(FakeServer.made) == 1
+    assert opened == ["http://127.0.0.1:1/open?k=1",
+                      "http://127.0.0.1:1/open?k=2"]
 
 
 def test_the_launcher_gives_up_quietly_with_no_browser(home):

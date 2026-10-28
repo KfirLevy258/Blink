@@ -1963,6 +1963,15 @@ BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
  * browser tabs.
  */
 #define EDIT_WAIT_MS 5000
+/*
+ * A double-tap guard, and only that (contract Addendum 6). It used to be the
+ * whole answer to "may this tap ask?", so a builder closed inside the 10 s
+ * -- the owner closed the browser window and tapped again -- left a tap that
+ * sent nothing under a slot still saying "Opened on your computer", until a
+ * visit to another page reset it (board, 2026-10-29). Now the daemon says
+ * when the builder it opened has ended (theme_edit done:1), and that clears
+ * this; see ui_settings_theme_edit_done.
+ */
 #define EDIT_COOLDOWN_MS 10000
 
 static const char *const edit_name = "Edit on computer";
@@ -2095,6 +2104,22 @@ void ui_settings_theme_edit_reply(bool ok)
 	lv_timer_delete(edit_timer);
 	edit_timer = NULL;
 	edit_note = ok ? edit_opened : edit_run;
+	edit_paint();
+}
+
+void ui_settings_theme_edit_done(void)
+{
+	/*
+	 * An ask still in flight keeps its guard and its answer: it was made
+	 * after the builder that just ended was opened, so the daemon is
+	 * opening a new one for it, and dropping the timer here would leave
+	 * that reply nothing to land on.
+	 */
+	if (edit_timer != NULL) {
+		return;
+	}
+	edit_ever_sent = false;
+	edit_note = NULL;
 	edit_paint();
 }
 

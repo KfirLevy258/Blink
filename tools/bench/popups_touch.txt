@@ -135,6 +135,36 @@ expect ui_state scr=gauges
 fake ota_none
 wait 3.5
 
+# --- "Edit on computer" and the builder ending (theme contract Addendum 6).
+# Found on the board 2026-10-29: open the builder, close the browser window,
+# tap again inside 10 s, and nothing was sent while the slot still said
+# "Opened on your computer". A tap before the builder ends is still a double
+# tap and sends nothing; once the daemon says done (here `fake edit_done`,
+# the daemon's real line), the slot reads its name and the next tap asks.
+# On a board, run with --edit-reply ok (the default) so the asks are opened.
+tap settings.open
+click "Theme"
+expect ui_state ov=theme tp=0
+click "Edit on computer"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+click "Opened on your computer"
+expect no theme_edit
+expect ui_state edit=opened
+fake edit_done
+wait-widget "Edit on computer" 3
+expect ui_state edit=name
+click "Edit on computer"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+fake edit_done
+wait-widget "Edit on computer" 3
+click "<"
+expect ui_state ov=none
+click "<"
+expect ui_state scr=gauges
+wait 1.6
+
 # --- the boot after an update (host harness only): the notice, What's new
 # behind it, its pager and its Back, then OK
 fake boot_notice 1.3.1

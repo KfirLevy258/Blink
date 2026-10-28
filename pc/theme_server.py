@@ -326,11 +326,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._json(200, {"ok": True})
             return self.builder.finish("cancelled")
         if path == "/api/closed":
-            self.builder.closing()
+            self.builder.closing(_tab_of(raw))
             return self._json(200, {"ok": True})
         if path == "/api/ping":
             # Alive, not active: an open tab nobody touches still times out.
-            self.builder.seen()
+            self.builder.seen(_tab_of(raw))
             return self._json(200, {"ok": True})
         if path not in ("/api/preview", "/api/save"):
             return self._refuse(404)
@@ -369,6 +369,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.builder.finish("saved")
 
 
+def _tab_of(raw):
+    """The page's own id from a ping or close body, or None. Short and
+    plain or nothing: it is only ever a key in BuilderServer._tabs."""
+    try:
+        tab = json.loads(raw.decode("utf-8")).get("tab") if raw else None
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        return None
+    if isinstance(tab, str) and 0 < len(tab) <= 32 and tab.isalnum():
+        return tab
+    return None
+
+
 class _HTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
@@ -394,6 +406,11 @@ class BuilderServer:
         self._last = now()
         self._seen = None
         self._closed_at = None
+        # Each open page by the id it made for itself, and when it last
+        # pinged. Two tabs can share the session -- "Edit on computer"
+        # while one is open opens another -- and the older one's close
+        # must not end the builder the newer one is showing.
+        self._tabs = {}
         self.outcome = None
         self._done = threading.Event()
         self.page_bytes = page().encode("utf-8")
@@ -452,10 +469,12 @@ class BuilderServer:
             self._last = self._seen = self._now()
             self._closed_at = None
 
-    def seen(self):
+    def seen(self, tab=None):
         with self._lock:
             self._seen = self._now()
             self._closed_at = None
+            if tab is not None:
+                self._tabs[tab] = self._seen
 
     def page_alive(self):
         """Is a builder page open on this server right now?"""
@@ -464,9 +483,13 @@ class BuilderServer:
                     and self._closed_at is None
                     and self._now() - self._seen < PAGE_ALIVE_S)
 
-    def closing(self):
+    def closing(self, tab=None):
         with self._lock:
-            self._closed_at = self._now()
+            now = self._now()
+            self._tabs.pop(tab, None)
+            if any(now - t < PAGE_ALIVE_S for t in self._tabs.values()):
+                return      # another tab is still showing this builder
+            self._closed_at = now
 
     def tick(self):
         with self._lock:
@@ -519,6 +542,9 @@ class Launcher:
         self._server = None
         self._opened_at = None
         self._last_ok = False
+        # The builder a board's ask opened, until its end has been told to
+        # the board once (ended(), contract Addendum 6).
+        self._told = None
         self._lock = threading.Lock()
 
     def launch(self):
@@ -530,10 +556,15 @@ class Launcher:
             if live and self._opened_at is not None and (
                     now - self._opened_at < OPEN_EVERY_S):
                 return self._last_ok
-            if live and server.page_alive():
-                # The page is open in a tab already; a second one would
-                # send previews that fight the first.
-                return True
+            # A page already open in a tab used to be answered ok 1 with
+            # nothing shown, on the idea that a second tab would fight the
+            # first; but a tab behind other windows is one the owner cannot
+            # find, and "Opened on your computer" over no window is the
+            # silent ok the contract now forbids (Addendum 6). So a fresh
+            # one-time link is opened on the running builder, which the
+            # browser shows; the tabs share one session and the server
+            # counts them (BuilderServer.seen), so closing the older one
+            # does not end the builder under the newer.
             fresh = not live
             if fresh:
                 try:
@@ -552,6 +583,8 @@ class Launcher:
             # tabs; close() does not wait for it (see there).
             ok = bool(self._opener(server.new_link()))
             self._last_ok = ok
+            if ok:
+                self._told = server
             if not ok and fresh:
                 # Nothing was ever shown, so there is nothing to cancel; the
                 # board puts up its own "Run blink theme" fallback.
@@ -559,6 +592,18 @@ class Launcher:
                 if self._server is server:
                     self._server = None
             return ok
+
+    def ended(self):
+        """True, once, when a builder opened for the board has ended --
+        saved, cancelled, its tab closed, idle, or stopped -- so the daemon
+        can send theme_edit done:1 (contract Addendum 6). Polled from the
+        serial loop, which is where the line can be written."""
+        with self._lock:
+            server = self._told
+            if server is not None and server.done:
+                self._told = None
+                return True
+            return False
 
     def close(self):
         """On daemon exit: a live builder writes its cancel and stops.

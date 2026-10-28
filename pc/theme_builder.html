@@ -215,6 +215,10 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
   // preset: the id of an untouched built-in, or -1 for the custom theme.
   var st = Object.assign({ mode: 'level', view: 'gauges', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
   var finished = false, previewTimer = null, lastSent = null;
+  // This tab's id, so the server can tell two tabs on one builder apart:
+  // "Edit on computer" with a tab already open opens a second, and closing
+  // the first must not end the builder the second is showing.
+  var TAB = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
 
   function hex2rgb(h) { return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)]; }
   function rgb2hex(c) { return c.map(function (v) { return Math.round(v).toString(16).padStart(2,'0'); }).join('').toUpperCase(); }
@@ -488,15 +492,15 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
   // waits a few seconds for this page to load again before it gives up.
   window.addEventListener('pagehide', function () {
     if (finished) return;
-    try { fetch('/api/closed', { method: 'POST', credentials: 'same-origin', keepalive: true, body: '' }); } catch (e) {}
+    try { fetch('/api/closed', { method: 'POST', credentials: 'same-origin', keepalive: true, body: JSON.stringify({ tab: TAB }) }); } catch (e) {}
   });
 
   // Tells the server this tab is still open, so "Edit on computer" on the
   // board does not open a second one beside it. Not an edit: an open tab
   // nobody touches still times out after ten minutes.
-  setInterval(function () {
-    if (!finished) post('/api/ping').then(function (j) { if (j.status !== 200) stopped(); }, stopped);
-  }, 20000);
+  function ping() { if (!finished) post('/api/ping', { tab: TAB }).then(function (j) { if (j.status !== 200) stopped(); }, stopped); }
+  setInterval(ping, 20000);
+  ping();     // counted as a tab at once, not 20 s from now
 
   fetch('/api/state', { credentials: 'same-origin' }).then(function (r) {
     if (r.status !== 200) throw 0;

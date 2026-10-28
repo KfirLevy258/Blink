@@ -52,7 +52,7 @@ class Bridge:
                  fetch_signed_manifest=None, report_failure=None,
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
-                 edit_answers=None):
+                 edit_answers=None, builder_ended=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -131,6 +131,9 @@ class Bridge:
         # and answers theme_edit with ok 0.
         self._theme = theme_sync
         self._open_builder = open_builder
+        # callable() -> True once when the builder open_builder opened has
+        # ended (Launcher.ended); pump() then tells the board (Addendum 6).
+        self._builder_ended = builder_ended
         # The open runs on run_async's thread: starting a browser can take a
         # second or more, and this object lives on the serial thread. The
         # answer comes back through the queue and pump() writes it, so only
@@ -687,8 +690,14 @@ class Bridge:
             try:
                 ok = self._edit_answers.get_nowait()
             except queue.Empty:
-                return
+                break
             self._write(protocol.theme_edit_reply(ok))
+        # After any answer, so a board that asked again as the old builder
+        # ended hears "ok" for the new one before "done" for the old: its
+        # done is ignored while an ask is in flight, never the other way.
+        ended = self._builder_ended
+        if ended is not None and ended() and self._takes_theme():
+            self._write(protocol.theme_edit_done())
 
     def board_alive(self) -> bool:
         return (self._last_ping is not None

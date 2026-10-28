@@ -72,6 +72,11 @@ void ui_settings_apply_theme(void);
  * unless the row is still waiting for an answer. */
 void ui_settings_theme_edit_reply(bool ok);
 
+/* The builder the daemon opened for "Edit on computer" has ended (theme
+ * contract Addendum 6): the slot reads its name again and the next tap asks
+ * again, whatever the cooldown says. */
+void ui_settings_theme_edit_done(void);
+
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 /*
  * What Settings is showing, for the bench injector's ui_state reply
