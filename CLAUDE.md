@@ -73,7 +73,7 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**2427 passing** as of 2026-10-28, on macOS. The last count proved on all
+**2456 passing** as of 2026-10-28, on macOS. The last count proved on all
 three platforms was 1503, on 2026-10-19, on macOS, Ubuntu and Windows (ARM64
 VM). Re-run Ubuntu and Windows before claiming them for the new number. Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though
@@ -147,8 +147,11 @@ and boot-verified.
 
 `tools/burn.sh` is the reference for stopping and restoring the daemon around a
 flash. Note that `launchctl bootstrap` registers a job without starting it; a
-restore also needs `launchctl kickstart -k`. `tools/dev.sh flash` now does the
-same for the installed launchd agent. Before, it stopped only its own daemon,
+restore also needs `launchctl kickstart`. Plain, not `-k`: a daemon inside an
+OTA write holds its SIGTERM for up to 180 s, and `-k` kills an instance that is
+still exiting, mid-write. Both scripts wait out that grace through
+`tools/lib_launchd.sh` before they flash or restore. `tools/dev.sh flash` now
+does the same for the installed launchd agent. Before, it stopped only its own daemon,
 and the eFuse probe then refused a good board because the port was busy. It
 still writes with `west flash`, so its image is unconfirmed, as described
 above. Use it for bench iteration, and `burn.sh` for a board that is
