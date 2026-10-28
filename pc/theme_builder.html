@@ -226,6 +226,23 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
   function mix(a, b, t) { var x = hex2rgb(a), y = hex2rgb(b); return rgb2hex([0,1,2].map(function (i) { return x[i] + (y[i]-x[i]) * t; })); }
   function lum(h) { return hex2rgb(h).map(function (v) { v /= 255; return v <= .03928 ? v/12.92 : Math.pow((v+.055)/1.055, 2.4); }).reduce(function (s, v, i) { return s + v * [.2126,.7152,.0722][i]; }, 0); }
   function contrast(a, b) { var l1 = lum(a), l2 = lum(b); return (Math.max(l1,l2)+.05)/(Math.min(l1,l2)+.05); }
+  // firmware/src/theme.c custom_dim(), step for step: measured on the
+  // colours as the panel draws them (RGB565, widened back), against the
+  // settings card as well as the ground. The board's luminance table and
+  // this pow() can disagree in the last digit, so on a hairline the page
+  // and the board may pick neighbouring percentages.
+  function q565(h) { var c = hex2rgb(h); var r = c[0] >> 3 << 3 | c[0] >> 5, g = c[1] >> 2 << 2 | c[1] >> 6, b = c[2] >> 3 << 3 | c[2] >> 5; return rgb2hex([r, g, b]); }
+  function shown(a, b) { return contrast(q565(a), q565(b)); }
+  function boardMix(a, b, t) { var x = hex2rgb(a), y = hex2rgb(b); return rgb2hex([0,1,2].map(function (i) { return Math.min(255, Math.floor(x[i] + (y[i]-x[i]) * t + .5)); })); }
+  function customDim(tx, bg) {
+    var card = boardMix(bg, tx, .06);
+    var wantBg = Math.min(4.5, shown(tx, bg)), wantCard = Math.min(4.5, shown(tx, card));
+    for (var pct = 25; pct > 0; pct--) {
+      var d = boardMix(tx, bg, pct / 100);
+      if (shown(d, bg) >= wantBg && shown(d, card) >= wantCard) return d;
+    }
+    return tx;
+  }
   function dist(a, b) { var x = hex2rgb(a), y = hex2rgb(b); return Math.sqrt(x.reduce(function (s, v, i) { return s + (v-y[i])*(v-y[i]); }, 0)); }
   function levelCol(p) { return p >= 90 ? st.high : p >= 60 ? st.mid : st.low; }
   function arcCol(which, p) {
@@ -257,7 +274,9 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
     var svg = document.getElementById('scr'); while (svg.firstChild) svg.removeChild(svg.firstChild);
     // The board derives dim text and the arc track by mixing text and bg
     // (contract: 25% bg into text, and 15% text into bg); so does this.
-    var dim = mix(st.text, st.bg, .25), track = mix(st.bg, st.text, .15), pill = mix(st.bg, st.text, .1);
+    // Dim takes less of the ground when 25% would read under 4.5:1, as on
+    // the board (firmware/src/theme.c, custom_dim).
+    var dim = customDim(st.text, st.bg), track = mix(st.bg, st.text, .15), pill = mix(st.bg, st.text, .1);
     svg.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: '#' + st.bg }));
     var F = 'Montserrat, sans-serif';
     if (st.view === 'gauges') {

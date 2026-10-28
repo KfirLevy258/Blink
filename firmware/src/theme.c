@@ -404,6 +404,66 @@ bool theme_custom_valid(const struct theme_custom *t)
 	return width_ok(t->w) && theme_contrast(t->c[1], t->c[0]) >= 2.995;
 }
 
+/*
+ * Dim text for a custom theme: the text moved toward the ground, but never so
+ * far that it reads worse than 4.5:1 -- the ratio every built-in palette's dim
+ * meets on the ground and on a settings card (tests/theme) -- or, when the
+ * owner's own text is below that, worse than the text itself.
+ *
+ * The contract's plain 25% mix (2026-10-27) is kept wherever it is readable,
+ * which is every custom theme with text of about 7:1 or better, so most
+ * themes draw exactly as before. It stopped being enough at the floor: the
+ * board accepts text at 3:1 (theme_custom_valid), and 25% of the ground
+ * mixed into such text came to 2.0-2.3:1, for the clock, the window names
+ * and every settings subtitle (2026-10-28 review, NICE-8). Here the mix
+ * walks back a percent at a time; at 0 it is the text, which always passes,
+ * so the loop ends. 26 contrast pairs at most, once per theme selection.
+ * pc/theme_builder.html draws its preview with the same walk.
+ */
+#define DIM_MIN_CONTRAST 4.5
+
+/*
+ * A colour as the panel shows it: truncated to RGB565 as LVGL's
+ * lv_color_to_u16 does, and widened back by repeating the top bits -- the
+ * same model tests/theme measures every palette with. Measured in 24 bits
+ * instead, the walk let through a dim 4.7% under its target once drawn (the
+ * truncation darkens a colour, which on a dark ground is toward the ground;
+ * worst of 20,000 random customs in tests/theme), so it measures what is
+ * drawn.
+ */
+static uint32_t q565(uint32_t c)
+{
+	unsigned r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+
+	r = ((r >> 3) << 3) | (r >> 5);
+	g = ((g >> 2) << 2) | (g >> 6);
+	b = ((b >> 3) << 3) | (b >> 5);
+	return (r << 16) | (g << 8) | b;
+}
+
+static double shown_contrast(uint32_t a, uint32_t b)
+{
+	return theme_contrast(q565(a), q565(b));
+}
+
+static uint32_t custom_dim(uint32_t tx, uint32_t bg, uint32_t card)
+{
+	double want_bg = shown_contrast(tx, bg);
+	double want_card = shown_contrast(tx, card);
+
+	want_bg = want_bg < DIM_MIN_CONTRAST ? want_bg : DIM_MIN_CONTRAST;
+	want_card = want_card < DIM_MIN_CONTRAST ? want_card : DIM_MIN_CONTRAST;
+	for (int pct = 25; pct > 0; pct--) {
+		uint32_t d = theme_mix(tx, bg, pct / 100.0);
+
+		if (shown_contrast(d, bg) >= want_bg &&
+		    shown_contrast(d, card) >= want_card) {
+			return d;
+		}
+	}
+	return tx;
+}
+
 void theme_derive(const struct theme_custom *t, struct palette *p)
 {
 	uint32_t bg = t->c[0], tx = t->c[1];
@@ -418,12 +478,13 @@ void theme_derive(const struct theme_custom *t, struct palette *p)
 	p->high = t->c[6];
 	/* Contract (2026-10-27): dim and track are text mixed into the ground,
 	 * 25% and 15% of the way respectively -- dim keeps 75% of the text,
-	 * the track takes 15% of it. */
-	p->dim = theme_mix(tx, bg, 0.25);
+	 * the track takes 15% of it. Dim takes less of the ground when 25%
+	 * would leave it hard to read; see custom_dim(). */
 	p->track = theme_mix(bg, tx, 0.15);
 	p->grey = theme_mix(tx, bg, 0.45);
 	p->panel = theme_mix(bg, tx, 0.08);
 	p->card = theme_mix(bg, tx, 0.06);
+	p->dim = custom_dim(tx, bg, p->card);
 	p->line = theme_mix(bg, tx, 0.10);
 	p->low_text = p->low;	/* the user's colour; theirs to choose */
 	p->ok = p->low;

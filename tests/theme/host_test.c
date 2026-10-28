@@ -352,6 +352,131 @@ int main(void)
 		CHECK(!theme_custom_valid(&bad), "custom with width 7 is refused");
 	}
 
+	/*
+	 * --- Custom: dim stays readable ---
+	 *
+	 * Dim is the board's own colour in a custom theme: the clock, the
+	 * window names, every settings subtitle. Mixed a plain 25% into the
+	 * ground it came to 2.0-2.3:1 on themes at the 3:1 text floor
+	 * (2026-10-28 review, NICE-8). It must now reach 4.5:1 -- the
+	 * built-ins' figure -- on the ground and on a settings card, or match
+	 * the text where the owner's text is itself below that; and wherever
+	 * the 25% mix was already readable it must still be exactly that mix,
+	 * so the builder's preview and themes already in use do not move.
+	 *
+	 * Over random customs: the ground and the text drawn at random and
+	 * kept when the board would accept the pair, so the floor and the
+	 * near-floor themes are well represented. A fixed xorshift seed keeps
+	 * every run the same set.
+	 */
+	{
+		uint32_t x = 0x2545F491u;
+		int tried = 0, kept = 0, walked = 0;
+		double worst = 99.0, worst_24 = 99.0;
+		uint32_t worst_bg = 0, worst_tx = 0;
+
+		while (kept < 20000 && tried < 2000000) {
+			struct theme_custom r = t;
+			struct palette rp;
+
+			tried++;
+			for (int k = 0; k < 2; k++) {
+				x ^= x << 13;
+				x ^= x >> 17;
+				x ^= x << 5;
+				r.c[k] = x & 0xFFFFFF;
+			}
+			if (!theme_custom_valid(&r)) {
+				continue;
+			}
+			kept++;
+			theme_derive(&r, &rp);
+
+			/* Measured as the panel shows it (cr(), RGB565), the
+			 * way custom_dim() measures and every palette check in
+			 * this file does. */
+			double tx_bg = cr(r.c[1], r.c[0]);
+			double tx_card = cr(r.c[1], rp.card);
+			double want_bg = tx_bg < 4.5 ? tx_bg : 4.5;
+			double want_card = tx_card < 4.5 ? tx_card : 4.5;
+			double got_bg = cr(rp.dim, r.c[0]);
+			double got_card = cr(rp.dim, rp.card);
+			uint32_t plain = theme_mix(r.c[1], r.c[0], 0.25);
+			bool plain_ok = cr(plain, r.c[0]) >= want_bg &&
+					cr(plain, rp.card) >= want_card;
+
+			if (rp.dim != plain) {
+				walked++;
+			}
+			if (got_bg / want_bg < worst) {
+				worst = got_bg / want_bg;
+				worst_bg = r.c[0];
+				worst_tx = r.c[1];
+			}
+			if (got_card / want_card < worst) {
+				worst = got_card / want_card;
+				worst_bg = r.c[0];
+				worst_tx = r.c[1];
+			}
+			/* And the 24-bit figure the builder page computes,
+			 * which may sit a little either side of the panel's. */
+			double q = theme_contrast(rp.dim, r.c[0]) /
+				   (theme_contrast(r.c[1], r.c[0]) < 4.5
+				    ? theme_contrast(r.c[1], r.c[0]) : 4.5);
+
+			if (q < worst_24) {
+				worst_24 = q;
+			}
+			if (plain_ok && rp.dim != plain) {
+				snprintf(m, sizeof(m), "custom %06X on %06X: dim"
+					 " left the 25%% mix though it was"
+					 " readable", (unsigned)r.c[1],
+					 (unsigned)r.c[0]);
+				CHECK(0, m);
+			}
+		}
+		snprintf(m, sizeof(m), "%d random customs accepted (of %d"
+			 " drawn), %d needed a lighter mix", kept, tried,
+			 walked);
+		CHECK(kept == 20000 && walked > 0 && walked < kept, m);
+		snprintf(m, sizeof(m), "every custom dim, as drawn, meets"
+			 " min(4.5, text) on the ground and a card (worst"
+			 " %.4f of the target, %06X on %06X)", worst,
+			 (unsigned)worst_tx, (unsigned)worst_bg);
+		CHECK(worst >= 1.0, m);
+		/* Not a check: how far the builder's 24-bit preview can read
+		 * from the panel. Measured 0.94 of the target at worst, which
+		 * is rounding to 565 alone; recorded so a change in it shows. */
+		printf("  note: 24-bit reading of the same dims, worst %.4f of"
+		       " the target\n", worst_24);
+	}
+	{
+		/* The floor case the review measured, and a near-floor one:
+		 * grey text on black at 3:1 and on navy at about 4:1. */
+		struct theme_custom f = t;
+		struct palette fp;
+
+		f.c[0] = 0x000000;
+		f.c[1] = 0x595959;
+		theme_derive(&f, &fp);
+		snprintf(m, sizeof(m), "custom at the 3:1 floor: dim %.2f:1,"
+			 " was %.2f:1 with the plain mix",
+			 cr(fp.dim, f.c[0]),
+			 cr(theme_mix(f.c[1], f.c[0], 0.25),
+					f.c[0]));
+		CHECK(cr(fp.dim, f.c[0]) >=
+		      cr(f.c[1], f.c[0]), m);
+		f.c[0] = 0x101A3A;
+		f.c[1] = 0x8A8F9A;
+		theme_derive(&f, &fp);
+		snprintf(m, sizeof(m), "custom near the floor (text %.2f:1):"
+			 " dim %.2f:1", cr(f.c[1], f.c[0]),
+			 cr(fp.dim, f.c[0]));
+		CHECK(cr(fp.dim, f.c[0]) >=
+		      (cr(f.c[1], f.c[0]) < 4.5
+		       ? cr(f.c[1], f.c[0]) : 4.5), m);
+	}
+
 	/* --- Selection never half-applies --- */
 	CHECK(theme_select(THEME_OCEAN) && theme_active_id() == THEME_OCEAN &&
 	      theme_pal() == theme_builtin(THEME_OCEAN), "select a built-in");
