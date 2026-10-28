@@ -2,9 +2,11 @@
 # Sourced by tools/release.sh, tools/burn.sh and tools/flash_encrypted.sh.
 # POSIX sh: burn.sh is /bin/sh.
 #
-# Two bench-only builds are refused here: the fatal selftest
-# (blink_refuse_selftest, next) and the touch injector (blink_refuse_inject,
-# at the end).
+# Four builds that must not ship are refused here: the fatal selftest
+# (blink_refuse_selftest, next), the touch injector (blink_refuse_inject),
+# the touch trace (blink_refuse_trace) and the pilot-panel build
+# (blink_refuse_pilot). The last two are release.sh's alone, since both are
+# flashed to boards on purpose.
 #
 # blink_refuse_selftest <.config> <image>
 #
@@ -88,6 +90,90 @@ blink_refuse_inject() {
 	if grep -aqF 'INJECT BUILD' "$2"; then
 		echo "FATAL: $2 contains the touch inject boot line, though the" >&2
 		echo "       .config says otherwise. It takes touches from the cable." >&2
+		return 1
+	fi
+	return 0
+}
+
+# blink_refuse_trace <.config> <image>
+#
+# The same two looks for CONFIG_BLINK_TOUCH_TRACE (trace.conf), the touch
+# trace diagnostic: every XPT2046 report goes into a RAM ring and out over
+# the console as CSV each time a finger lifts. It boots like a release, so
+# nothing after the build would notice it; shipped as an OTA, every desk
+# that took it would print every touch onto the cable the daemon reads.
+# The image carries touch_trace.c's "#TT-BEGIN" dump header, and nothing
+# else prints it.
+#
+# Called by release.sh only. A trace image is meant to be flashed to a
+# board, fused ones included -- flash_encrypted.sh's BLINK_BUILD_DIR exists
+# for build-trace -- so the flashing scripts do not refuse it (review of
+# develop/fork-picks, 2026-10-28, S6).
+blink_refuse_trace() {
+	if [ ! -f "$1" ]; then
+		echo "FATAL: no $1 -- cannot tell whether this is a touch-trace build." >&2
+		echo "       Refusing an image nothing has inspected." >&2
+		return 1
+	fi
+	if [ ! -f "$2" ]; then
+		echo "FATAL: no image at $2 to inspect." >&2
+		return 1
+	fi
+	if grep -q '^CONFIG_BLINK_TOUCH_TRACE=y' "$1"; then
+		echo "FATAL: CONFIG_BLINK_TOUCH_TRACE=y in $1." >&2
+		echo "       This image prints every touch on the console; it is a" >&2
+		echo "       diagnostic. A -D value or EXTRA_CONF_FILE=trace.conf stays" >&2
+		echo "       in the build directory's CMake cache: rebuild it pristine" >&2
+		echo "       (west build -p always) without it." >&2
+		return 1
+	fi
+	if grep -aqF '#TT-BEGIN seq=' "$2"; then
+		echo "FATAL: $2 contains the touch trace dump, though the" >&2
+		echo "       .config says otherwise. It prints every touch." >&2
+		return 1
+	fi
+	return 0
+}
+
+# blink_refuse_pilot <.config> <image>
+#
+# The same two looks for CONFIG_BLINK_PANEL_PILOT (pilot.conf), the build
+# for the two pilot boards, whose display modules differ from production.
+# It compiles out main.c's MADCTL correction, so on a production panel it
+# renders mirrored, red and blue swapped, and dim (firmware/Kconfig, measured
+# 2026-08-21). Shipped as an OTA, that is every desk.
+#
+# The image look runs the other way round from the others: a pilot build
+# prints nothing of its own, but a production build carries the
+# "panel: MADCTL=0x" line of the correction it compiles in (present in every
+# build directory on this desk, 2026-10-28), and a pilot build has none of
+# it. An image without that line is not a production image, whatever its
+# .config says.
+#
+# Called by release.sh only: the pilot boards are flashed with this build on
+# purpose (flash_encrypted.sh; dev.sh's fused-chip message says how).
+blink_refuse_pilot() {
+	if [ ! -f "$1" ]; then
+		echo "FATAL: no $1 -- cannot tell whether this is a pilot-panel build." >&2
+		echo "       Refusing an image nothing has inspected." >&2
+		return 1
+	fi
+	if [ ! -f "$2" ]; then
+		echo "FATAL: no image at $2 to inspect." >&2
+		return 1
+	fi
+	if grep -q '^CONFIG_BLINK_PANEL_PILOT=y' "$1"; then
+		echo "FATAL: CONFIG_BLINK_PANEL_PILOT=y in $1." >&2
+		echo "       This image is for the two pilot boards; on a production" >&2
+		echo "       panel it is mirrored, colour-swapped and dim. A -D value or" >&2
+		echo "       EXTRA_CONF_FILE=pilot.conf stays in the build directory's" >&2
+		echo "       CMake cache: rebuild it pristine (west build -p always)" >&2
+		echo "       without it." >&2
+		return 1
+	fi
+	if ! grep -aqF 'panel: MADCTL=0x' "$2"; then
+		echo "FATAL: $2 lacks the production panel correction, though the" >&2
+		echo "       .config says otherwise. It would render mirrored." >&2
 		return 1
 	fi
 	return 0

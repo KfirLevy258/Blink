@@ -130,3 +130,118 @@ def test_burn_sh_checks_before_it_signs_or_flashes():
     flash = next(i for i, l in enumerate(lines) if "write_flash" in l
                  and not l.lstrip().startswith("#"))
     assert guard < sign and guard < flash
+
+
+# --- the touch trace and the pilot panel: release.sh's alone (review, S6) ---
+
+PRODUCTION_LINE = b"[usage] panel: MADCTL=0x%02x\n"
+TRACE_LINE = b"\n#TT-BEGIN seq=%u n=%u sat=%u frame=channel240x320\n"
+
+
+def _check_fn(tmp_path, fn, config, image):
+    cfg = tmp_path / ".config"
+    img = tmp_path / "zephyr.signed.bin"
+    cfg.write_text(config, encoding="utf-8")
+    img.write_bytes(image)
+    return subprocess.run(
+        ["sh", "-c", f'. "$0"; {fn} "$1" "$2"', str(LIB), str(cfg), str(img)],
+        capture_output=True, text=True, timeout=30)
+
+
+def test_a_production_image_passes_both(tmp_path):
+    for fn in ("blink_refuse_trace", "blink_refuse_pilot"):
+        r = _check_fn(tmp_path, fn, PLAIN_CONFIG, _image(PRODUCTION_LINE))
+        assert r.returncode == 0, (fn, r.stderr)
+        assert r.stderr == ""
+
+
+@pytest.mark.parametrize("fn,symbol", [
+    ("blink_refuse_trace", "CONFIG_BLINK_TOUCH_TRACE=y"),
+    ("blink_refuse_pilot", "CONFIG_BLINK_PANEL_PILOT=y"),
+])
+def test_the_trace_and_pilot_symbols_refuse(tmp_path, fn, symbol):
+    r = _check_fn(tmp_path, fn, PLAIN_CONFIG + symbol + "\n",
+                  _image(PRODUCTION_LINE))
+    assert r.returncode == 1
+    assert symbol in r.stderr
+    assert "pristine" in r.stderr
+
+
+def test_the_trace_dump_in_the_image_refuses(tmp_path):
+    r = _check_fn(tmp_path, "blink_refuse_trace", PLAIN_CONFIG,
+                  _image(PRODUCTION_LINE, TRACE_LINE))
+    assert r.returncode == 1
+    assert "touch trace dump" in r.stderr
+
+
+def test_an_image_without_the_panel_correction_refuses(tmp_path):
+    """A pilot build prints nothing of its own; what it lacks is the line
+    of the correction it compiles out."""
+    r = _check_fn(tmp_path, "blink_refuse_pilot", PLAIN_CONFIG, _image())
+    assert r.returncode == 1
+    assert "lacks the production panel correction" in r.stderr
+
+
+@pytest.mark.parametrize("fn", ["blink_refuse_trace", "blink_refuse_pilot"])
+def test_a_missing_config_refuses_trace_and_pilot(tmp_path, fn):
+    img = tmp_path / "zephyr.signed.bin"
+    img.write_bytes(_image(PRODUCTION_LINE))
+    r = subprocess.run(
+        ["sh", "-c", f'. "$0"; {fn} "$1" "$2"', str(LIB),
+         str(tmp_path / ".config"), str(img)],
+        capture_output=True, text=True, timeout=30)
+    assert r.returncode == 1
+    assert "cannot tell" in r.stderr
+
+
+def _fn_body(text, fn):
+    start = text.index(f"{fn}()")
+    end = text.find("\n}\n", start)
+    return text[start:end]
+
+
+def _printk_literals(path):
+    code = re.sub(r"/\*.*?\*/|//[^\n]*", "",
+                  path.read_text(encoding="utf-8"), flags=re.S)
+    return code, re.findall(r'printk\(\s*"((?:[^"\\]|\\.)*)"', code)
+
+
+def test_the_trace_phrase_is_the_one_touch_trace_c_prints():
+    (phrase,) = re.findall(r"grep -aqF '([^']+)'",
+                           _fn_body(LIB.read_text(encoding="utf-8"),
+                                    "blink_refuse_trace"))
+    _, lits = _printk_literals(ROOT / "firmware" / "src" / "touch_trace.c")
+    assert any(phrase in lit for lit in lits), (phrase, lits)
+
+
+def test_the_pilot_phrase_is_printed_only_by_a_production_build():
+    """Reworded in main.c, every image would read as a pilot one and the
+    release would stop -- loud, but this says why. Compiled in only on the
+    production side of the CONFIG_BLINK_PANEL_PILOT #ifdef, or a pilot image
+    would carry it too and pass."""
+    (phrase,) = re.findall(r"grep -aqF '([^']+)'",
+                           _fn_body(LIB.read_text(encoding="utf-8"),
+                                    "blink_refuse_pilot"))
+    code, _ = _printk_literals(ROOT / "firmware" / "src" / "main.c")
+    start = code.index("#ifdef CONFIG_BLINK_PANEL_PILOT")
+    els = code.index("#else", start)
+    end = code.index("#endif", els)
+    assert phrase not in code[start:els]
+    prod = re.findall(r'printk\(\s*"((?:[^"\\]|\\.)*)"', code[els:end])
+    assert any(phrase in lit for lit in prod), (phrase, prod)
+    assert code.count(phrase) == 1
+
+
+def test_release_sh_refuses_trace_and_pilot_before_publishing():
+    lines = (ROOT / "tools" / "release.sh").read_text(
+        encoding="utf-8").splitlines()
+
+    def first(pattern):
+        return next(i for i, l in enumerate(lines) if re.match(pattern, l))
+
+    build = first(r"\s*(\(\s*cd [^&]*&&\s*)?west build\b")
+    publish = first(r"\s*gh release (create|edit|upload)\b")
+    for fn in ("blink_refuse_trace", "blink_refuse_pilot"):
+        guard = first(rf"\s*{fn}\b")
+        assert build < guard < publish, fn
+        assert re.search(rf'{fn} "\$CFG" "\$BIN" \|\| exit 1', lines[guard])

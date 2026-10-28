@@ -103,7 +103,9 @@ def test_the_phrase_it_looks_for_is_the_one_touch_inject_c_prints():
     image. Read from the lib's grep, found inside a printk literal (adjacent
     literals joined), not in a comment."""
     text = LIB.read_text(encoding="utf-8")
-    body = text[text.index("blink_refuse_inject()"):]
+    # To the end of the function: the lib holds more refusals after it.
+    start = text.index("blink_refuse_inject()")
+    body = text[start:text.index("\n}\n", start)]
     (phrase,) = re.findall(r"grep -aqF '([^']+)'", body)
     src = (ROOT / "firmware" / "src" / "touch_inject.c").read_text(
         encoding="utf-8")
