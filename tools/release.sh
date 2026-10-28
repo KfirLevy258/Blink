@@ -1,6 +1,10 @@
 #!/bin/bash
 # Build, sign, and publish a Blink firmware release the daemon can install
-# over USB. The version comes from firmware/src/version.h -- bump it FIRST.
+# over USB. The version comes from firmware/src/version.h -- bump it LAST,
+# after every firmware commit for the release; check_versions.sh --release
+# refuses otherwise. "FIRST" stood here, and following it put 1.4.0's bump
+# ahead of nine firmware commits that every 1.4.0 board would never have
+# been offered (full review #3, M1).
 # Requires: zephyr env NOT needed here (script sources it), `gh auth status` ok.
 set -euo pipefail
 
