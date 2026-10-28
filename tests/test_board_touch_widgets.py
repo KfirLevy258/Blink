@@ -288,9 +288,9 @@ def test_exact_beats_prefix_beats_substring():
 
 
 def test_a_long_name_matches_the_label_it_was_cut_to():
-    cut = "Run `blink theme` on your computer"[:bt.LABEL_MAX]
+    cut = "On your computer, run: blink theme"[:bt.LABEL_MAX]
     items = _items(_w(4, cut))
-    assert bt.find_widget(items, "Run `blink theme` on your computer"
+    assert bt.find_widget(items, "On your computer, run: blink theme"
                           )[0].i == 4
 
 
@@ -633,7 +633,7 @@ def test_every_label_the_shipped_scripts_click_is_printable():
                 assert allow.allowed(s.args[0]), (name, s.args[0])
     for label in ("BLINK", "Settings", "Update", "Theme", "Focus",
                   "Brightness", "Edit on computer", "Opened on your computer",
-                  "Run `blink theme` on your co", "What's new", "Back",
+                  "On your computer, run: blink", "What's new", "Back",
                   "Yes, do it", "Cancel", "Later", "Update now", "OK", "*",
                   "Updated to 1.3.4", "Couldn't check for updates."):
         assert allow.allowed(label), label
@@ -658,7 +658,7 @@ def test_the_label_port_is_the_firmware_s_byte_for_byte(tmp_path):
     cases = [b"Update now", b'say "hi" a\\b', b"a\nb\tc", b"\xef\x81\x93",
              b"1/3 \xef\x81\x94", b"\xef\x80\x8c ok", b"caf\xc3\xa9!",
              b"a\x01b\x7fc", b"x" * 60, b"\xe2\x80\x94dash",
-             b"Run `blink theme` on your computer", b"",
+             b"On your computer, run: blink theme", b"",
              bytes(range(32, 127)), bytes(range(128, 256)),
              b"\xef\x81", b"\xef"]
     src = tmp_path / "t.c"

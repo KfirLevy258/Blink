@@ -1968,7 +1968,13 @@ BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
 static const char *const edit_name = "Edit on computer";
 static const char *const edit_waiting = "Opening on your computer";
 static const char *const edit_opened = "Opened on your computer";
-static const char *const edit_run = "Run `blink theme` on your computer";
+/* The command comes last, after a colon, so it reads as the thing to type
+ * with nothing to mark it out. It was "Run `blink theme` on your computer",
+ * and the panel drew the backticks as backticks (audit, 2026-10-28):
+ * Markdown on a screen that has none. tests/test_panel_strings.py now
+ * refuses a backtick, or any character the built-in fonts lack, in any
+ * firmware string. */
+static const char *const edit_run = "On your computer, run: blink theme";
 
 static int theme_page;		/* survives a repaint, so the page stays put */
 static const char *edit_note;	/* what the slot says; NULL is its name */

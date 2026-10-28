@@ -38,7 +38,7 @@
 
 /*
  * A label is cut at 28 characters. The longest copy a control carries today
- * is the Edit slot's "Run `blink theme` on your computer" (34); a bench
+ * is the Edit slot's "On your computer, run: blink theme" (34); a bench
  * matches by prefix, so 28 still names it uniquely, and the line stays
  * inside the budget above.
  */

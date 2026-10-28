@@ -112,9 +112,9 @@ static void label_copy(void)
 	eq("a long label is cut at TW_LABEL_MAX", (long)strlen(out),
 	   TW_LABEL_MAX);
 
-	tw_label_copy(out, sizeof(out), "Run `blink theme` on your computer");
+	tw_label_copy(out, sizeof(out), "On your computer, run: blink theme");
 	seq("the longest copy on the panel keeps a unique prefix", out,
-	    "Run `blink theme` on your co");
+	    "On your computer, run: blink");
 
 	tw_label_copy(out, sizeof(out), NULL);
 	seq("no label is empty", out, "");

@@ -778,7 +778,7 @@ def theme(op: str, t: dict = None) -> dict:
 def theme_edit_reply(ok: bool) -> dict:
     """The answer to the board's theme_edit: ok 1 once a browser has been
     opened on the builder, 0 when there is nothing to open one on. The board
-    shows "Run `blink theme` on your computer" for 0, and also after 5 s of
+    shows "On your computer, run: blink theme" for 0, and also after 5 s of
     no answer at all, which is what a daemon from before this sends."""
     return {"t": "theme_edit", "v": VERSION, "ok": 1 if ok else 0}
 

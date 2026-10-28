@@ -492,9 +492,9 @@ theme.
 
 On the board, **Settings > Theme > Edit on computer** opens the theme builder
 in your computer's browser. The board says **Opened on your computer**, or,
-on a computer with no browser to open (a server, or an SSH session), it asks
-you to **Run `blink theme` on your computer** instead. Running it yourself
-does the same thing:
+on a computer with no browser to open (a server, or an SSH session), it says
+**On your computer, run: blink theme** instead. Running that yourself does
+the same thing:
 
 ```bash
 ~/.blink/bin/blink theme
