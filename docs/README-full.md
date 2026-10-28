@@ -515,7 +515,10 @@ The builder is a page served by the app to your own browser and nobody else:
 it listens on 127.0.0.1 only, on a link that works once, and fetches nothing
 from the internet. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
-without a change puts the board back on the theme it had. A preview the
+without a change puts the board back on the theme it had. Once the builder
+has closed, the board's button reads **Edit on computer** again and opens a
+new one; tapped while the builder is still open, it brings that page up
+again. A preview the
 board never hears the end of - the computer went to sleep mid-edit - drops
 by itself after 15 minutes.
 
