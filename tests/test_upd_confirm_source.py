@@ -77,3 +77,18 @@ def test_a_refused_update_now_lets_the_offer_ask_again():
     refused = body[body.index("upd_confirm_withdraw("):
                    body.index("ota_request_install();")]
     assert "upd_prompt_done = false;" in refused
+
+
+def test_the_timer_withdraws_the_offer_when_the_version_changes():
+    # upd_prompt_step reads the state alone, so a newer release staged
+    # inside one tick left the older offer on the glass, and "Later" on it
+    # latched the boot against an offer never seen (final review, NICE-1).
+    # The version check runs before the step, and lifts the latch, so the
+    # step can put up the current offer on the same tick.
+    body = _body("upd_timer_cb")
+    check = body.index("strcmp(snap.version, prompt_ver)")
+    step = body.index("upd_prompt_step(")
+    assert check < step
+    withdrawn = body[check:step]
+    assert "upd_prompt_close();" in withdrawn
+    assert "upd_prompt_done = false;" in withdrawn

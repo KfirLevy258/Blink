@@ -1291,7 +1291,25 @@ static void upd_timer_cb(lv_timer_t *t)
 	 * board withdrew was never answered at all, so the next genuine
 	 * AVAILABLE has to be allowed to ask again. Without that, a daemon
 	 * restart at the wrong moment would eat the offer for the whole boot.
+	 *
+	 * It also goes when the version on offer is no longer the one it names,
+	 * the rule the install confirm follows (upd_confirm_withdraw). A
+	 * welcome's check answered inside one tick brings the state back to
+	 * AVAILABLE with a newer release staged, so upd_prompt_step, which reads
+	 * the state alone, left "Version 1.4.0 is available." up over a staged
+	 * 1.4.1; "Later" on it then latched the prompt for the boot against an
+	 * offer the owner never saw (final review, NICE-1). The box was never
+	 * answered, so the latch is lifted with it, and the step below puts up
+	 * the current offer on this same tick when nothing is busy.
+	 * upd_prompt_now_cb's own check stays as the last guard, for a tap that
+	 * lands between two ticks.
 	 */
+	if (upd_prompt && snap.st == OTA_UI_AVAILABLE &&
+	    strcmp(snap.version, prompt_ver) != 0) {
+		upd_prompt_close();
+		upd_prompt_done = false;
+		printk("[ota] offer withdrawn: a different version is on offer\n");
+	}
 	{
 		struct upd_prompt_turn pt = upd_prompt_step(
 			snap.st, upd_prompt != NULL, upd_prompt_done,
