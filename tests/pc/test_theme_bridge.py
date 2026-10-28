@@ -65,12 +65,14 @@ BOARD_A = "a1b2c3d4e5f6"
 BOARD_B = "0f1e2d3c4b5a"
 
 
-def bridge_on(home):
-    """A daemon start on `home`: its own ThemeSync, as after a restart."""
+def bridge_on(home, sync=None):
+    """A daemon start on `home`: its own ThemeSync, as after a restart --
+    or, given `sync`, a reconnect within one daemon run, which keeps it."""
     sent = []
     clock = Clock()
     b = Bridge(write_msg=sent.append, fetch_usage=lambda: None, now=clock,
-               wall=lambda: (1752444000, 0), theme_sync=theme.ThemeSync(home),
+               wall=lambda: (1752444000, 0),
+               theme_sync=sync or theme.ThemeSync(home),
                board_caps_hint=["svc", "theme"], **_NO_FEED)
     return b, sent, clock
 
@@ -177,6 +179,113 @@ def test_a_hello_without_an_id_compares_nothing(tmp_path):
         tick(b, clock)
         assert themes(sent) == [theme.message("save", {"id": 1})]
         assert theme.load_saved(home) == {"id": 1}
+
+
+class _Locked:
+    """theme.json unreadable while `on` -- an antivirus scan or a backup
+    tool holding it -- through a patched open, so it holds on any runner
+    (chmod 0 does not stop root)."""
+
+    def __init__(self, monkeypatch):
+        import builtins
+        self.on = False
+        real = builtins.open
+
+        def guarded(path, *a, **k):
+            if self.on and str(path).endswith("theme.json"):
+                raise PermissionError(13, "held by another process")
+            return real(path, *a, **k)
+        monkeypatch.setattr(builtins, "open", guarded)
+
+
+def _ocean_on_a(home):
+    theme.save(home, {"id": 4})
+    b, sent, clock = bridge_on(home)
+    board_hello(b, BOARD_A)
+    now(b, 4, "boot")
+    tick(b, clock)
+    assert themes(sent) == []
+    return b, sent, clock
+
+
+def test_a_refused_pick_survives_a_reconnect(tmp_path, monkeypatch):
+    # Round 3, R5, scenario D: Neon picked on the board while theme.json
+    # cannot be read; the cable is nudged before it reads again. The record
+    # must not have moved to Neon, or the boot report after the reconnect
+    # reads as "no change" and Ocean is sent back.
+    home = str(tmp_path / ".blink")
+    lock = _Locked(monkeypatch)
+    b, sent, clock = _ocean_on_a(home)
+    lock.on = True
+    now(b, 1, "user")
+    assert theme.load_seen(home)["fp"] == {"id": 4}
+    b2, sent2, clock2 = bridge_on(home, sync=b._theme)
+    b2.greet()
+    board_pref(b2, BOARD_A)
+    now(b2, 1, "boot")
+    lock.on = False
+    tick(b2, clock2)
+    tick(b2, clock2)
+    assert themes(sent2) == []
+    assert theme.load_saved(home) == {"id": 1}
+    assert theme.load_seen(home)["fp"] == {"id": 1}
+
+
+def test_a_refused_pick_survives_a_daemon_restart(tmp_path, monkeypatch):
+    # Scenario E: the same, but the daemon itself restarts in between.
+    home = str(tmp_path / ".blink")
+    lock = _Locked(monkeypatch)
+    b, sent, clock = _ocean_on_a(home)
+    lock.on = True
+    now(b, 1, "user")
+    lock.on = False
+    b, sent, clock = bridge_on(home)     # a new ThemeSync: nothing pending
+    board_hello(b, BOARD_A)
+    now(b, 1, "boot")
+    tick(b, clock)
+    assert themes(sent) == []
+    assert theme.load_saved(home) == {"id": 1}
+
+
+def test_a_theme_json_rewritten_after_a_refusal_is_not_overwritten(
+        tmp_path):
+    # Scenario F (R6): theme.json does not parse, so the board's Neon is
+    # refused; before the next tick the owner deletes it and runs `blink
+    # theme set retro-lcd`. The retry must not put Neon over that: the newer
+    # choice is this computer's, and it is sent.
+    import os
+    from tests.support.home import inside
+    home = str(tmp_path / ".blink")
+    b, sent, clock = _ocean_on_a(home)
+    path = inside(home, theme.theme_path(home))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("{broken")
+    os.utime(path, (1_000_000_000, 1_000_000_000))
+    now(b, 1, "user")
+    assert theme.load_saved(home) is None
+    os.unlink(path)
+    theme.save(home, {"id": 7})
+    del sent[:]
+    tick(b, clock)
+    assert theme.load_saved(home) == {"id": 7}
+    assert themes(sent) == [theme.message("save", {"id": 7})]
+    assert theme.load_seen(home)["fp"] == {"id": 1}
+
+
+def test_a_refused_pick_is_still_retried_when_the_file_is_untouched(
+        tmp_path, monkeypatch):
+    # R6 must not swallow R1: a lock that lifts leaves the mtime as it was,
+    # and the retry adopts.
+    home = str(tmp_path / ".blink")
+    lock = _Locked(monkeypatch)
+    b, sent, clock = _ocean_on_a(home)
+    lock.on = True
+    now(b, 1, "user")
+    tick(b, clock)
+    lock.on = False
+    tick(b, clock)
+    assert themes(sent) == []
+    assert theme.load_saved(home) == {"id": 1}
 
 
 def test_the_daemon_hands_the_bridge_no_board_json_id():

@@ -752,7 +752,19 @@ class ThemeSync:
         # back read the old theme, saw it differ from the board, and sent
         # it: the owner's pick reverted on the panel, with no message
         # (round-2 review of fp/fix-pc, R1, reproduced).
+        #
+        # Only the fast path within one connection. While it stands the seen
+        # record is NOT moved to the board's pick, so after a reconnect or a
+        # restart the boot report still differs from the record and the pick
+        # is adopted again (round 3, R5: moved, the boot report read as "no
+        # change" and the old theme was sent). _pending_note is what to
+        # record once the adopt goes through: (board_id, why, kept, lost).
+        # _pending_mtime is theme.json's mtime at the refusal: a file
+        # written after it is the computer's newer choice, which the retry
+        # must not overwrite (R6).
         self._pending = None
+        self._pending_note = None
+        self._pending_mtime = None
         sent = _read_json(sent_path(home))
         self._sent = _reported(sent)
 
@@ -761,6 +773,7 @@ class ThemeSync:
         self._board_id = None
         self._asked = None
         self._pending = None
+        self._pending_note = None
 
     def _record_for(self, board_id):
         """theme_seen.json's record when it is about `board_id`, else None."""
@@ -789,7 +802,10 @@ class ThemeSync:
         if why in (WHY_ADOPT, WHY_BOOT):
             # The board has spoken again; what it says now decides, and
             # sets a new pending adopt below if that one is refused too.
+            # The record was left where it was, so a boot report after a
+            # reconnect still reads as the board's change (R5).
             self._pending = None
+            self._pending_note = None
         rec = self._record_for(board_id)
         kept = lost = None
         if why == "saved":
@@ -820,6 +836,11 @@ class ThemeSync:
             # and we do not: a report, never a choice. Whatever was asked
             # before it may have been lost to the reboot it announces.
             self._asked = None
+        if self._pending is not None:
+            # Refused: the record keeps what it had (R5), and is moved once
+            # the adopt goes through.
+            self._pending_note = (board_id, why, kept, lost)
+            return
         self._note_seen(board_id, fp, why, rec, kept, lost)
 
     def _note_seen(self, board_id, fp, why, rec, kept, lost):
@@ -886,10 +907,44 @@ class ThemeSync:
                 # Once per refusal, not once per retry tick.
                 print(f"[theme] could not keep the board's choice: {e}",
                       file=sys.stderr)
+                self._pending_mtime = self._theme_mtime()
             self._pending = fp
         else:
             self._pending = None
         self._asked = None
+
+    def _theme_mtime(self):
+        try:
+            return os.stat(theme_path(self._home)).st_mtime_ns
+        except OSError:
+            return None
+
+    def _retry_pending(self):
+        """Retry a refused adopt; or drop it when theme.json was written
+        after the refusal and now reads. That write is this computer's newer
+        choice (a `blink theme set`, an editor's save), and the retry would
+        have put the board's older pick over it without a word (R6,
+        reproduced). Either way the record then moves to the board's pick:
+        the board does have it, so the normal rule decides what is owed."""
+        fp, note = self._pending, self._pending_note
+        now = self._theme_mtime()
+        rewritten = now is not None and now != self._pending_mtime
+        if rewritten:
+            try:
+                _read_existing(theme_path(self._home))
+            except Unreadable:
+                rewritten = False
+        if rewritten:
+            self._pending = None
+        else:
+            self._adopt(fp)
+        if self._pending is None and note is not None:
+            board_id, why, kept, lost = note
+            if rewritten:
+                kept = lost = None
+            self._note_seen(board_id, fp, why, self._record_for(board_id),
+                            kept, lost)
+            self._pending_note = None
 
     def outgoing(self, deliver=True):
         """Lines the files say are owed: a preview or cancel, then a save.
@@ -901,7 +956,7 @@ class ThemeSync:
         out = []
         taken = take_preview(self._home)
         if self._pending is not None:
-            self._adopt(self._pending)
+            self._retry_pending()
         if not deliver:
             return out
         save = None
