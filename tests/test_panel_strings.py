@@ -18,6 +18,7 @@ to a label: telling the two apart reliably means parsing C, and a wire
 format or a log line never needs a backtick or a curly quote either.
 """
 import importlib.util
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,43 @@ def _bt():
     return mod
 
 
+# One pass over the source, every token kind in the order C reads them, so a
+# "//" inside a string is part of the string and a '"' is a character. The
+# first version borrowed board_touch.c_literals, which strips comments
+# before it looks for strings and so lost "https://" in ota_parse.c whole,
+# along with anything a URL on the panel might hold (review of
+# fp/audit-fixes, NICE 5).
+_TOKEN = re.compile(r"""
+      (?P<line>//[^\n]*)
+    | (?P<block>/\*.*?\*/)
+    | (?P<char>'(?:[^'\\\n]|\\.)*')
+    | "(?P<str>(?:[^"\\\n]|\\.)*)"
+    | (?P<sym>LV_SYMBOL_\w+)
+    | (?P<other>\S)
+""", re.S | re.X)
+
+
+def literals(text, bt):
+    """Every string literal in C source `text`, adjacent ones (and the LVGL
+    symbols between them) joined, as bytes."""
+    out, cur = [], None
+    for m in _TOKEN.finditer(text):
+        if m.group("str") is not None or m.group("sym") is not None:
+            piece = (bt._c_unescape(m.group("str"))
+                     if m.group("str") is not None
+                     else bt._LV_SYMBOLS.get(m.group("sym"),
+                                             b"\xef\x80\x80"))
+            cur = piece if cur is None else cur + piece
+        elif m.group("line") or m.group("block"):
+            continue        # a comment between two pieces still joins them
+        elif cur is not None:
+            out.append(cur)
+            cur = None
+    if cur is not None:
+        out.append(cur)
+    return out
+
+
 def _bad_chars(raw):
     text = raw.decode("utf-8", "replace")
     out = []
@@ -60,7 +98,7 @@ def test_no_firmware_string_holds_a_character_the_panel_draws_badly():
     bt = _bt()
     found = []
     for path in sorted(SRC.glob("*.[ch]")):
-        for raw in bt.c_literals(path.read_text(encoding="utf-8")):
+        for raw in literals(path.read_text(encoding="utf-8"), bt):
             bad = _bad_chars(raw)
             if bad:
                 found.append((path.name, raw[:60], bad))
@@ -72,3 +110,17 @@ def test_the_check_would_have_caught_the_backticks():
     assert _bad_chars("Reading is old — wait".encode()) == ["—"]
     assert _bad_chars("Session 42% • 3h".encode()) == []
     assert _bad_chars(b"\xef\x80\x8c ok") == []      # LV_SYMBOL_OK
+
+
+def test_the_scan_reads_strings_the_way_c_does():
+    bt = _bt()
+    src = ('char q = \'"\'; /* "not a string" */ // "nor this"\n'
+           'f("https://x.test/" "y", \'\\\'\'); g("a" LV_SYMBOL_OK "b");\n'
+           'h("one // two");\n')
+    assert literals(src, bt) == [b"https://x.test/y", b"a\xef\x80\x8cb",
+                                 b"one // two"]
+
+
+def test_the_url_board_touch_used_to_lose_is_scanned():
+    lits = literals((SRC / "ota_parse.c").read_text(encoding="utf-8"), _bt())
+    assert any(l.startswith(b"https://") for l in lits)
