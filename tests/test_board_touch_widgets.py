@@ -988,6 +988,13 @@ def test_an_unparsed_line_is_counted_by_kind_never_shown():
     assert "by kind:" in text and "log wrn lvgl 1" in text
 
 
+def _glue_line(level, text):
+    """A line Zephyr's LVGL glue logs itself (zephyr/modules/lvgl/input/
+    lvgl_pointer_input.c: LOG_WRN("Could not put input data into queue")):
+    module lvgl, but no LVGL timestamp and no function."""
+    return _zephyr_line(level, "lvgl", text)
+
+
 def test_lvgl_lines_are_told_apart_by_function_and_pool_markers():
     out = io.StringIO()
     b, _ = _bench([], out=out)
@@ -997,10 +1004,9 @@ def test_lvgl_lines_are_told_apart_by_function_and_pool_markers():
         _lvgl_line("wrn", b"lv_draw_buf_create_ex", b"No memory: 8x8"),
         _lvgl_line("wrn", b"lv_draw_layer_alloc_buf",
                    b"Allocating layer buffer failed. Try later"),
-        _lvgl_line("wrn", b"lv_indev_read",
-                   b"Could not put input data into queue"),
         _lvgl_line("err", b"lv_obj_delete", b"x"),
-        # A name that is not identifier-shaped is withheld, never printed.
+        # Identifier-shaped, but not on the list: counted, not named.
+        _lvgl_line("wrn", b"sk_private_fn", b"y"),
         _lvgl_line("wrn", SECRET.encode(), b"y"),
         _lvgl_line("wrn", b"Bad Name", b"z"),
         # The markers count wherever they appear, but only as a number.
@@ -1009,26 +1015,163 @@ def test_lvgl_lines_are_told_apart_by_function_and_pool_markers():
     b.summary()
     text = out.getvalue()
     assert SECRET not in text and "PRIVATE" not in text
-    assert "Bad Name" not in text
+    assert "Bad Name" not in text and "sk_private_fn" not in text
+    assert "lv_obj_delete" not in text
     assert b.lvgl_sources == {"wrn lv_draw_buf_create_ex": 2,
                               "wrn lv_draw_layer_alloc_buf": 1,
-                              "wrn lv_indev_read": 1,
-                              "err lv_obj_delete": 1,
-                              "wrn (name withheld)": 2}
+                              "err (other LVGL function)": 1,
+                              "wrn (other LVGL function)": 2,
+                              # Not LVGL's shape at all: read as glue.
+                              "wrn (other glue line)": 1}
     assert b.pool_dry == 4
     assert "wrn lv_draw_buf_create_ex 2" in text
     assert "LVGL OUT OF MEMORY: 4 line(s)" in text
     # The message text itself is never shown, markers included.
-    assert "320x40" not in text and "Could not put" not in text
+    assert "320x40" not in text and "Try later" not in text
+
+
+# Every allocation-failure line, in the shape it reaches the console. The
+# texts are LVGL 9's own (modules/lib/gui/lvgl/src in Zephyr 4.3.1) and the
+# glue's, each one a case the marker list must catch.
+_OOM_LINES = [
+    # LV_ASSERT_MALLOC (src/misc/lv_assert.h), on in this build: the line
+    # that actually reaches the console, since lv_malloc's own message is
+    # LV_LOG_INFO and filtered at WARN.
+    ("err", b"lv_draw_add_task",
+     b"Asserted at expression: new_task != NULL (Out of memory)"),
+    ("err", b"lv_obj_class_create_obj",
+     b"Asserted at expression: obj != NULL (Out of memory)"),
+    ("wrn", b"allocate_item", b"Failed to allocate item for the gradient"),
+    ("wrn", b"lv_cache_entry_alloc", b"malloc failed"),
+    ("err", b"lv_realloc", b"couldn't reallocate memory"),
+    ("err", b"lv_image_decoder_post_process",
+     b"No memory for premultiplying."),
+    ("wrn", b"lv_draw_layer_alloc_buf",
+     b"LV_DRAW_LAYER_MAX_MEMORY was reached when allocating the layer."),
+    ("wrn", b"lv_draw_sw_grad_get", b"alloc grad item failed, no free slot"),
+]
+
+
+@pytest.mark.parametrize("level,func,msg", _OOM_LINES)
+def test_every_allocation_failure_fails_the_run(level, func, msg):
+    out = io.StringIO()
+    b, _ = _bench([], out=out)
+    _cable(b, _lvgl_line(level, func, msg))
+    b.summary()
+    assert b.pool_dry == 1, msg
+    assert any(f.startswith("LVGL out of memory: 1 line") for f in b.failures)
+    assert "all expectations held" not in out.getvalue()
+    assert msg.decode() not in out.getvalue()
+
+
+def test_the_assert_shape_is_counted_on_its_own():
+    out = io.StringIO()
+    b, _ = _bench([], out=out)
+    _cable(b, b"".join(_lvgl_line(*l) for l in _OOM_LINES[:3]))
+    b.summary()
+    assert (b.pool_dry, b.pool_dry_asserts) == (3, 2)
+    assert "3 line(s), 2 of them LV_ASSERT_MALLOC" in out.getvalue()
+
+
+def test_the_glue_s_rendering_buffer_failure_counts_too():
+    b, _ = _bench([], out=io.StringIO())
+    _cable(b, _glue_line(
+        "err", b"Failed to allocate memory for rendering buffer"))
+    assert b.pool_dry == 1
+
+
+def test_an_out_of_memory_run_exits_non_zero(monkeypatch):
+    """main()'s exit code is `1 if bench.failures`; the hit has to be one."""
+    b, _ = _bench([], out=io.StringIO())
+    _cable(b, _lvgl_line(*_OOM_LINES[0]))
+    b.summary()
+    b.summary()     # printed twice, recorded once
+    assert sum(f.startswith("LVGL out of memory") for f in b.failures) == 1
+    assert "return 1 if bench.failures else 0" in TOOL.read_text()
+
+
+def test_the_input_queue_warning_has_a_count_of_its_own():
+    """The benign reading of M1, told apart from a dry pool by a number."""
+    out = io.StringIO()
+    b, _ = _bench([], out=out)
+    _cable(b, b"".join(
+        [_glue_line("wrn", b"Could not put input data into queue")] * 3
+        + [_glue_line("wrn", b"something: " + SECRET.encode())]))
+    b.summary()
+    text = out.getvalue()
+    assert b.input_queue_full == 3
+    assert "input queue full (Zephyr LVGL input glue): 3" in text
+    assert b.lvgl_sources == {"wrn (glue: input queue full)": 3,
+                              "wrn (other glue line)": 1}
+    # A glue line's first word is never read as a function name.
+    assert "something" not in text and SECRET not in text
+    assert b.pool_dry == 0 and b.failures == []
+
+
+def test_without_the_lvgl_timestamp_no_name_is_taken():
+    b, _ = _bench([], out=io.StringIO())
+    _cable(b, _zephyr_line("wrn", "lvgl", b"lv_draw_buf_create_ex: x"))
+    assert b.lvgl_sources == {"wrn (other glue line)": 1}
+
+
+def _zephyr_43():
+    """The Zephyr 4.3 workspace, read-only, from the account's real home
+    (under pytest ~ is tmp_path), as test_board_touch.py's glue check finds
+    it. None where there is none (CI)."""
+    import glob
+    import os
+    try:
+        import pwd
+        real = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError):
+        return None
+    roots = [os.environ.get("BLINK_ZEPHYR", "")] + glob.glob(
+        os.path.join(real, "Projects", "zephyr-v4.3*")) + glob.glob(
+        os.path.join(real, "zephyr-v4.3*"))
+    for r in roots:
+        if r and (Path(r) / "modules" / "lib" / "gui" / "lvgl" / "src").is_dir():
+            return Path(r)
+    return None
+
+
+def test_the_lists_match_lvgl_and_the_glue_when_they_are_here():
+    """Every name on _LVGL_FUNCS is a function LVGL defines, every glue
+    message is one the glue logs, and every out-of-memory line in
+    _OOM_LINES is text LVGL carries -- pinned to the source the lists were
+    derived from, where it is on this machine."""
+    for name in bt._LVGL_FUNCS:
+        assert re.fullmatch(r"[a-z_][a-z0-9_]{0,63}", name), name
+    ws = _zephyr_43()
+    if ws is None:
+        pytest.skip("no Zephyr 4.3 workspace here")
+    src = ws / "modules" / "lib" / "gui" / "lvgl" / "src"
+    lv = "\n".join(f.read_text(encoding="utf-8", errors="replace")
+                   for f in src.rglob("*.[ch]"))
+    for name in bt._LVGL_FUNCS:
+        assert re.search(rf"^\S[^\n;]*\b{name}\(", lv, re.M), name
+    glue = "\n".join(f.read_text(encoding="utf-8")
+                     for f in (ws / "zephyr" / "modules" / "lvgl").rglob("*.c"))
+    for mark, _ in bt._LVGL_GLUE:
+        assert f'LOG_WRN("{mark.decode()}")' in glue, mark
+    assert '"Failed to allocate memory for rendering buffer"' in glue
+    assert 'LV_LOG_ERROR("Asserted at expression: %s (%s)"' in lv
+    assert 'LV_ASSERT_MSG(p != NULL, "Out of memory")' in lv
+    for _, _, msg in _OOM_LINES:
+        text = msg.decode().replace("new_task != NULL", "%s").replace(
+            "obj != NULL", "%s")
+        if text.startswith("Asserted at expression"):
+            continue
+        assert text in lv, text
 
 
 def test_a_clean_run_says_no_lvgl_pool_failures():
     out = io.StringIO()
     b, _ = _bench([], out=out)
-    _cable(b, _lvgl_line("wrn", b"lv_indev_read", b"queue full"))
+    _cable(b, _glue_line("wrn", b"Could not put input data into queue"))
     b.summary()
     assert b.pool_dry == 0
     assert "LVGL out-of-memory lines: 0" in out.getvalue()
+    assert "all expectations held" in out.getvalue()
 
 
 def test_a_colour_only_line_is_not_counted():

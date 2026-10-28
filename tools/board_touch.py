@@ -40,11 +40,13 @@ WHAT IT PRINTS. Parsed fields and nothing else: ui_state's fields, theme_now's
 id/why/h, theme_edit, touch_done, the numbers on a [mem] or [swipe] line. A
 line it does not recognise -- including every other console line the board
 prints -- is never echoed: with -v it prints as "unparsed line (N bytes)",
-and either way it is counted in the summary. Two things are read from an
-LVGL log line, and only these: the LVGL function that logged it (a name
-compiled into the firmware, printed only when it is identifier-shaped), and
-whether it carries LVGL's fixed "No memory" or "Allocating layer buffer
-failed" marker, which prints as a count. CLAUDE.md's rule names no program,
+and either way it is counted in the summary. Three things are read from a
+line logged under the lvgl module, and only these: the LVGL function that
+logged it (printed only when it is on _LVGL_FUNCS, a short list of names
+compiled into the firmware), whether it is the Zephyr glue's input-queue
+warning, and whether it carries one of the fixed out-of-memory markers
+(_POOL_DRY_MARKERS). The last two print as counts, and an out-of-memory hit
+fails the run. CLAUDE.md's rule names no program,
 and a bench tool that echoed the wire would be the easiest place to break
 it.
 
@@ -913,27 +915,92 @@ _ZLOG_RE = re.compile(
 # warning reached this tool as two lines and was counted twice. The tail is
 # part of the line before it, so it is folded in -- not counted, not shown.
 _COLOUR_ONLY_RE = re.compile(rb"^(?:\x1b\[[0-9;]*m)+$")
-# What follows "lvgl: " in an LVGL line. Zephyr's lvgl_log()
+# What follows "lvgl: " in a line LVGL itself logged. Zephyr's lvgl_log()
 # (modules/lvgl/lvgl.c) strips LVGL's "[Warn]" and the one character after
 # it, and with CONFIG_LV_LOG_USE_TIMESTAMP=y (this build) what is left starts
-# "(12.345, +5)\t " -- LOG_TIMESTAMP_FMT, then the " %s: " that LV_LOG_WARN
-# fills with __func__. That function name is the only thing read from the
-# line: it is an identifier compiled into the firmware, never anything the
-# owner's data put there, and it is taken only when it has the shape of a C
-# identifier LVGL would use, so a line that is not what this expects yields
-# "withheld" and not a fragment of itself. It is what tells a run whose
-# warnings are input-queue noise (lv_indev_read) from one whose pool ran dry
-# (lv_draw_buf_create_ex).
+# "(12.345, +5)\t " -- LOG_TIMESTAMP_FMT, which only lv_log_add()
+# (src/misc/lv_log.c) writes -- then the " %s: " that LV_LOG_WARN fills with
+# __func__. The timestamp is REQUIRED: without it the first word of any
+# Zephyr glue line under the same "lvgl" module (lvgl_pointer_input.c's
+# "Could not put input data into queue", say) could be read as a function
+# name, and the rule below would hold by the luck of how those lines are
+# worded rather than by construction.
 _LVGL_FUNC_RE = re.compile(
-    rb"lvgl: (?:\(\d{1,9}\.\d{3}, \+\d{1,9}\)\t )?([^:\s]{1,64}): ")
-_LVGL_FUNC_OK = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
-# LVGL's own words for "the pool ran dry": lv_draw_buf.c's "No memory: WxH,
-# ..." (and the decoders' "No memory for ..."), and lv_draw.c's "Allocating
-# layer buffer failed. Try later". Fixed substrings of LVGL's source, matched
-# as such; only how many lines carry them is ever printed. Either one means a
-# screen drew with a failed allocation, which on a customer's panel is a
-# reboot, so a run that sees one must not read as clean.
-_POOL_DRY_MARKERS = (b"No memory", b"Allocating layer buffer failed")
+    rb"lvgl: \(\d{1,9}\.\d{3}, \+\d{1,9}\)\t ([^:\s]{1,64}): ")
+# The function names worth telling apart, and the only ones ever printed:
+# every LVGL 9 function on the paths this firmware draws through that logs an
+# allocation failure, found by grepping the LVGL tree Zephyr 4.3.1 pins
+# (modules/lib/gui/lvgl/src: core, draw, draw/sw, display, indev, misc/cache,
+# misc/lv_style.c, stdlib) for LV_ASSERT_MALLOC and for LV_LOG_WARN/ERROR
+# text about memory, and taking the enclosing function (2026-10-28). Any
+# other name -- every one of them is compiled into the firmware, but a list is
+# airtight where a shape check is not -- counts as "(other LVGL function)".
+_LVGL_FUNCS = frozenset({
+    # draw: buffers, layers, tasks
+    "lv_draw_buf_create_ex", "lv_draw_buf_destroy", "lv_draw_layer_create",
+    "lv_draw_layer_alloc_buf", "lv_draw_add_task", "lv_draw_create_unit",
+    "cleanup_task",
+    # software renderer: gradients (the theme chips draw LV_GRAD_DIR_HOR),
+    # masks
+    "allocate_item", "lv_draw_sw_grad_get", "lv_draw_sw_mask_radius_init",
+    "circ_calc_aa4",
+    # images and their cache
+    "lv_image_decoder_create", "lv_image_decoder_post_process",
+    "lv_cache_create", "lv_cache_entry_alloc", "alloc_cb",
+    # objects, styles, refresh
+    "lv_obj_class_create_obj", "lv_obj_allocate_spec_attr",
+    "lv_obj_add_style", "lv_obj_style_create_transition", "get_local_style",
+    "lv_obj_set_transform", "lv_obj_assign_id", "lv_style_init",
+    "lv_style_register_prop", "refr_area", "lv_group_create",
+    "lv_group_add_obj",
+    # display, input, the allocator
+    "lv_display_create", "lv_indev_create", "lv_realloc", "lv_mem_add_pool",
+})
+# Lines Zephyr's LVGL glue logs under the same module, with no LVGL
+# timestamp or function: fixed messages from zephyr/modules/lvgl/input/*.c,
+# each counted under a label of this file's. The queue one is the benign
+# reading of M1 -- touches arriving faster than LVGL reads them during a long
+# slide -- and it has to be told apart from a dry pool by a number, not left
+# in a bucket with everything else.
+_LVGL_GLUE = (
+    (b"Could not put input data into queue", "input queue full"),
+    (b"Could not put input data into keypad queue", "input queue full"),
+)
+# Every way LVGL 9 or its Zephyr glue says an allocation failed, as fixed
+# substrings, matched case-folded; only how many lines carry one is printed.
+# Derived from the source, not from memory: LV_LOG_WARN/ERROR messages
+# grepped out of modules/lib/gui/lvgl/src and LOG_ERR out of
+# zephyr/modules/lvgl (Zephyr 4.3.1, 2026-10-28).
+#   "out of memory"  LV_ASSERT_MALLOC (src/misc/lv_assert.h), on with
+#                    CONFIG_LV_USE_ASSERT_MALLOC=y: "Asserted at expression:
+#                    new_task != NULL (Out of memory)" from lv_draw_add_task,
+#                    lv_obj_class_create_obj and the rest. This is the line
+#                    that actually reaches the console, because lv_malloc's
+#                    own "couldn't allocate memory" is LV_LOG_INFO and is
+#                    filtered at WARN. Also the decoders' plain "Out of
+#                    memory".
+#   "no memory"      lv_draw_buf.c's "No memory: WxH, ..." and the decoders'
+#                    "No memory for ...".
+#   "allocating layer buffer failed"   lv_draw.c.
+#   "failed to allocate"   lv_draw_sw_grad.c's "Failed to allocate item for
+#                    the gradient", the glue's "Failed to allocate memory for
+#                    rendering buffer".
+#   "malloc failed"  the cache and display classes.
+#   "allocate memory"  "Could not allocate memory for ...", "couldn't
+#                    allocate memory for ...".
+#   "alloc failed", "allocation failed", "alloc grad item failed",
+#   "max_memory was reached"   the draw buffer, file and layer variants.
+# Any one means a screen drew with a failed allocation. With
+# LV_ASSERT_HANDLER a no-op and CONFIG_ASSERT off, the next instruction uses
+# the NULL, which on a customer's panel is a reboot -- so a hit fails the run
+# (Bench.summary), and the exit code says so.
+_POOL_DRY_MARKERS = (
+    b"out of memory", b"no memory", b"allocating layer buffer failed",
+    b"failed to allocate", b"malloc failed", b"allocate memory",
+    b"alloc failed", b"allocation failed", b"alloc grad item failed",
+    b"max_memory was reached",
+)
+_ASSERT_MARK = b"Asserted at expression"
 _LOG_MODULES = frozenset({"lvgl", "os", "uart", "input", "xpt2046", "spi",
                           "gpio", "flash", "display", "mcuboot", "net",
                           "esp32", "heap", "kernel"})
@@ -968,27 +1035,38 @@ def unparsed_kind(raw):
 
 
 def lvgl_source(raw):
-    """(level, LVGL function name) for an LVGL log line, else None. The name
-    is replaced by "(name withheld)" unless it is identifier-shaped."""
+    """(level, label) for a line logged under the lvgl module, else None.
+    The label is an LVGL function on _LVGL_FUNCS, "(other LVGL function)",
+    a glue label from _LVGL_GLUE, or "(other glue line)" -- never a word of
+    the line that is not on one of those lists."""
     m = _ZLOG_RE.match(raw)
     if not m or m.group(2) != b"lvgl":
         return None
     level = m.group(1).decode("ascii")
     f = _LVGL_FUNC_RE.match(raw, m.start(2))
-    name = None
     if f:
+        name = f.group(1)
         try:
-            name = f.group(1).decode("ascii")
+            name = name.decode("ascii")
         except UnicodeDecodeError:
-            name = None
-    if name is None or not _LVGL_FUNC_OK.match(name):
-        name = "(name withheld)"
-    return level, name
+            name = ""
+        return level, name if name in _LVGL_FUNCS else "(other LVGL function)"
+    for mark, label in _LVGL_GLUE:
+        if mark in raw:
+            return level, f"(glue: {label})"
+    return level, "(other glue line)"
 
 
 def pool_dry(raw):
-    """True when a line carries one of LVGL's out-of-memory markers."""
-    return any(k in raw for k in _POOL_DRY_MARKERS)
+    """True when a line carries one of the out-of-memory markers."""
+    low = raw.lower()
+    return any(k in low for k in _POOL_DRY_MARKERS)
+
+
+def input_queue_full(raw):
+    """True for the Zephyr glue's input-queue overflow warning."""
+    return any(mark in raw for mark, label in _LVGL_GLUE
+               if label == "input queue full")
 
 
 _INJECT_LINE = (b"[touch] INJECT BUILD: the PC can drive this panel"
@@ -1388,6 +1466,8 @@ class Bench:
         self.unparsed_kinds = {}   # unparsed_kind() -> count
         self.lvgl_sources = {}     # "wrn lv_func" -> count (lvgl_source())
         self.pool_dry = 0          # lines with an LVGL out-of-memory marker
+        self.pool_dry_asserts = 0  # ...of them, LV_ASSERT_MALLOC's shape
+        self.input_queue_full = 0  # the glue's input-queue overflow lines
         self.log_dropped = 0       # messages Zephyr's log said it dropped
         self.withheld = 0
         self.events = []           # parsed, in arrival order
@@ -1463,6 +1543,10 @@ class Bench:
                 self.lvgl_sources[key] = self.lvgl_sources.get(key, 0) + 1
             if pool_dry(raw):
                 self.pool_dry += 1
+                if _ASSERT_MARK in raw:
+                    self.pool_dry_asserts += 1
+            if input_queue_full(raw):
+                self.input_queue_full += 1
         if self.verbose:
             self.say(f"unparsed line ({n} bytes, {kind})")
 
@@ -2240,10 +2324,20 @@ class Bench:
             self.say("  LVGL lines by function: " + ", ".join(
                 f"{k} {v}" for k, v in sorted(
                     self.lvgl_sources.items(), key=lambda kv: -kv[1])))
+        self.say(f"input queue full (Zephyr LVGL input glue): "
+                 f"{self.input_queue_full}")
         if self.pool_dry:
-            self.say(f"LVGL OUT OF MEMORY: {self.pool_dry} line(s) said "
-                     "\"No memory\" or \"Allocating layer buffer failed\" "
+            self.say(f"LVGL OUT OF MEMORY: {self.pool_dry} line(s), "
+                     f"{self.pool_dry_asserts} of them LV_ASSERT_MALLOC "
                      "-- a screen drew with a failed allocation")
+            # A failure, not a remark: the run must not end "all
+            # expectations held", rc 0, over a pool that ran dry. Recorded
+            # once, however often the summary is printed.
+            oom = (f"LVGL out of memory: {self.pool_dry} line(s) carried an "
+                   "allocation-failure marker")
+            self.failures = [f for f in self.failures
+                             if not f.startswith("LVGL out of memory: ")]
+            self.failures.append(oom)
         else:
             self.say("LVGL out-of-memory lines: 0")
         if self.log_dropped:
