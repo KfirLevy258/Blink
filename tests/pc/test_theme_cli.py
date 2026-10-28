@@ -52,6 +52,49 @@ def test_set_refuses_unreadable_text_and_keeps_the_old_theme(capsys):
     assert theme.load_saved(home()) == {"id": 1}
 
 
+def test_set_takes_the_number_list_shows(capsys):
+    # `list` prints a number beside each theme; `set 4` used to answer
+    # "no theme called '4'" (audit S1, 2026-10-28).
+    assert cli.main(["theme", "set", "4"]) == 0
+    assert theme.load_saved(home()) == {"id": 4}
+    assert "Theme: Ocean" in capsys.readouterr().out
+
+
+def test_set_takes_the_name_on_the_boards_tile(capsys):
+    assert cli.main(["theme", "set", "Colour-blind"]) == 0
+    assert theme.load_saved(home()) == {"id": 8}
+    assert cli.main(["theme", "set", "retro", "lcd"]) == 2  # two words
+    assert cli.main(["theme", "set", "Retro LCD"]) == 0
+    assert theme.load_saved(home()) == {"id": 7}
+
+
+def test_set_refuses_a_number_past_the_list_and_the_custom_number(capsys):
+    cli.main(["theme", "set", "neon"])
+    capsys.readouterr()
+    assert cli.main(["theme", "set", "13"]) == 2
+    assert "no theme called '13'" in capsys.readouterr().out
+    # 12 is custom, which is made of colours rather than picked.
+    assert cli.main(["theme", "set", "12"]) == 2
+    assert "set with colours" in capsys.readouterr().out
+    assert theme.load_saved(home()) == {"id": 1}
+
+
+def test_a_damaged_share_code_is_called_damaged_not_missing_its_prefix(
+        capsys):
+    assert cli.main(["theme", "set", "BT1.garbage"]) == 2
+    out = capsys.readouterr().out
+    assert "damaged or cut short" in out
+    assert "they start BT1." not in out
+    good = theme.to_share_code({"id": 12, "c": ["000000", "ffffff",
+                                                "111111", "222222", "00ff00",
+                                                "ffff00", "ff0000"],
+                                "w": 22, "ends": "flat", "dot": 0,
+                                "by": "gauge"})
+    assert cli.main(["theme", "set", good[:len(good) // 2]]) == 2
+    assert "damaged or cut short" in capsys.readouterr().out
+    assert theme.load_saved(home()) is None
+
+
 def test_set_refuses_an_unknown_key(capsys):
     assert cli.main(["theme", "set", "sparkle=on"]) == 2
     assert theme.load_saved(home()) is None
@@ -262,8 +305,8 @@ def test_show_says_when_the_boards_choice_was_kept(capsys):
     capsys.readouterr()
     assert cli.main(["theme", "show"]) == 0
     out = capsys.readouterr().out
-    assert "Theme: neon" in out
-    assert "kept over the theme set here then (retro-lcd)" in out
+    assert "Theme: Neon" in out
+    assert "kept over the theme set here then (Retro LCD)" in out
     assert "blink theme set retro-lcd" in out
     assert cli.main(["theme", "set", "ocean"]) == 0
     capsys.readouterr()

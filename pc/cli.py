@@ -4197,7 +4197,8 @@ def _theme_kept_note(home):
     if lost["id"] == theme_mod.CUSTOM:
         return line + " (a custom one)."
     name = theme_mod.display_name(lost["id"])
-    return line + f" ({name}). blink theme set {name} sends that one."
+    shown = theme_mod.board_name(lost["id"])
+    return line + f" ({shown}). blink theme set {name} sends that one."
 
 
 def _theme_lines(t):
@@ -4205,11 +4206,14 @@ def _theme_lines(t):
     if t is None:
         return ["Theme: the board's own choice. Nothing is set from this"
                 " computer."]
+    # Named as its tile on the board names it; the command keeps the typed
+    # spelling, which is what works in every shell without quotes.
     name = theme_mod.display_name(t["id"])
+    shown = theme_mod.board_name(t["id"])
     if t["id"] != theme_mod.CUSTOM:
-        return [f"Theme: {name}",
+        return [f"Theme: {shown}",
                 f"On another desk: blink theme set {name}"]
-    return [f"Theme: {name}",
+    return [f"Theme: {shown}",
             "As a command:   blink theme set " + " ".join(
                 theme_mod.as_args(t)),
             f"Share code:     {theme_mod.to_share_code(t)}"]
@@ -4263,12 +4267,18 @@ def cmd_theme(args) -> int:
     if action is None:
         return _theme_builder(home)
     if action == "list":
+        # Three columns: the number and the typed name, which `set` both
+        # takes, and the name the board's tile shows, so the list can be
+        # matched against Settings > Theme. The number used to be printed
+        # and then refused by `set` (audit, 2026-10-28).
         cur = theme_mod.load_saved(home)
+        print("Set one with blink theme set <name> or <number>.")
         for i in range(len(theme_mod.NAMES)):
             mark = "*" if cur is not None and cur["id"] == i else " "
-            extra = "  (blink theme set key=value, or the builder)" \
+            extra = "  (set with key=value, or the builder)" \
                 if i == theme_mod.CUSTOM else ""
-            print(f" {mark} {i:>2}  {theme_mod.display_name(i)}{extra}")
+            print(f" {mark} {i:>2}  {theme_mod.display_name(i):<12}"
+                  f"{theme_mod.board_name(i)}{extra}")
         return 0
     if action == "show":
         for line in _theme_lines(theme_mod.load_saved(home)):
@@ -4375,7 +4385,8 @@ def main(argv=None) -> int:
                          choices=["set", "reset", "list", "show"],
                          help="Omit to open the theme builder in a browser")
     theme_p.add_argument("values", nargs="*",
-                         help="For set: a theme name, a BT1. share code, or"
+                         help="For set: a theme name or its number in"
+                              " blink theme list, a BT1. share code, or"
                               " key=value pairs (bg text gauge1 gauge2 low"
                               " mid high width ends dot arcs)")
     run_p = sub.add_parser("run", help="Run the bridge in the foreground")

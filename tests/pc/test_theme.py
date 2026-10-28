@@ -190,8 +190,29 @@ def test_a_share_code_with_unreadable_text_is_refused():
     import base64
     js = json.dumps({k: t[k] for k in ("c", "w", "ends", "dot", "by")})
     code = "BT1." + base64.urlsafe_b64encode(js.encode()).decode()
-    with pytest.raises(theme.ThemeError):
+    with pytest.raises(theme.ThemeError) as e:
         theme.from_share_code(code)
+    assert "the board cannot use" in str(e.value)
+    assert "3:1" in str(e.value)
+
+
+@pytest.mark.parametrize("bad, says", [
+    ("nonsense", "they start BT1."),
+    ("BT2.abc", "they start BT1."),
+    # Each of these starts BT1., so "they start BT1." was the wrong answer
+    # (audit S2, 2026-10-28).
+    ("BT1.", "damaged or cut short"),
+    ("BT1.garbage", "damaged or cut short"),
+    ("BT1.bm90IGpzb24", "damaged or cut short"),          # "not json"
+    ("BT1.WzFd", "damaged or cut short"),                  # [1]
+    ("BT1." + "A" * 900, "far too long"),
+])
+def test_a_bad_share_code_says_what_is_wrong_with_it(bad, says):
+    with pytest.raises(theme.ThemeError) as e:
+        theme.from_share_code(bad)
+    assert says in str(e.value)
+    if bad.startswith("BT1."):
+        assert "they start BT1." not in str(e.value)
 
 
 def test_a_built_in_theme_has_no_share_code():

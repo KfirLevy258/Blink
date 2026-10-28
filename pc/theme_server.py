@@ -80,12 +80,37 @@ def _same(good, offered):
 PAGE_FILE = "theme_builder.html"
 
 
+# Where the page takes its built-in themes. The page used to type its own
+# copy of the presets, and the board's palettes changed under it for a whole
+# firmware round: Colour-blind safe, Light, Light soft and Retro LCD all
+# previewed colours the board never drew (audit, 2026-10-28). Now the server
+# writes the list in, from pc/theme_builtins.py, which is generated from the
+# firmware's own table, so there is no second copy left to drift.
+BUILTINS_MARK = "/*@BUILTINS@*/null"
+
+
+def builtins_json():
+    """The built-ins as the page reads them: the board's tile name, the name
+    `blink theme set` takes, and the custom-theme fields."""
+    rows = [dict(b, cli=theme.display_name(b["id"]))
+            for b in theme.theme_builtins.BUILTINS]
+    # "</" cannot close the script element it sits in, whatever a name
+    # might one day hold.
+    return json.dumps(rows, separators=(",", ":")).replace("</", "<\\/")
+
+
 def page():
     """The builder page. Read from beside this file, which is also where
-    tools/build_binary.sh puts it in the frozen app (--add-data ...:pc)."""
+    tools/build_binary.sh puts it in the frozen app (--add-data ...:pc),
+    with the built-in themes written in."""
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            PAGE_FILE), encoding="utf-8") as f:
-        return f.read()
+        text = f.read()
+    if text.count(BUILTINS_MARK) != 1:
+        # A page that cannot show the presets is a broken install, and the
+        # caller already says so for a missing one.
+        raise FileNotFoundError(f"{PAGE_FILE} has no place for the themes")
+    return text.replace(BUILTINS_MARK, builtins_json())
 
 
 # ------------------------------------------------------------- opening a browser

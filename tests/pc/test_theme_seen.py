@@ -551,3 +551,5 @@ def test_the_adoption_line_carries_no_value_off_the_wire(home, capsys):
     err = capsys.readouterr().err
     assert "changed on the board" in err
     assert "11" not in err and BOARD not in err
+    # A whole sentence: it ended "keeping the board's" (audit S5).
+    assert "keeping the board's choice" in err

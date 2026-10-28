@@ -317,12 +317,40 @@ def test_the_page_has_no_outside_resources():
             assert needle not in page.lower()
 
 
+def _page_builtins(page):
+    line = next(l for l in page.splitlines() if "var BUILTINS = " in l)
+    return json.loads(line.split("var BUILTINS = ", 1)[1].rstrip().rstrip(";"))
+
+
 def test_the_page_names_every_built_in_theme_in_id_order():
-    page = theme_server.page()
-    order = [page.index(f"'{n}'") for n in (
+    # As the board's tiles name them: the page said "Colour-blind safe"
+    # beside a board that says "Colour-blind" (audit D3, 2026-10-28).
+    rows = _page_builtins(theme_server.page())
+    assert [r["id"] for r in rows] == list(range(12))
+    assert [r["name"] for r in rows] == [
         "Dark", "Neon", "Bold", "Mono", "Ocean", "Synthwave", "Forest",
-        "Retro LCD", "Colour-blind safe", "Light", "Light soft", "Light ink")]
-    assert order == sorted(order)
+        "Retro LCD", "Colour-blind", "Light", "Light soft", "Light ink"]
+    assert [r["cli"] for r in rows] == [theme.display_name(i)
+                                        for i in range(12)]
+
+
+def test_the_served_page_has_no_placeholder_left():
+    page = theme_server.page()
+    assert theme_server.BUILTINS_MARK not in page
+    assert "@BUILTINS@" not in page
+
+
+def test_a_page_with_nowhere_for_the_themes_is_a_broken_install(
+        tmp_path, monkeypatch):
+    # The page is read from beside the module; one that cannot hold the
+    # presets must fail like a missing one, which the CLI reports, rather
+    # than serve a builder whose script stops on its first line.
+    (tmp_path / theme_server.PAGE_FILE).write_text("<html></html>",
+                                                   encoding="utf-8")
+    monkeypatch.setattr(theme_server, "__file__",
+                        str(tmp_path / "theme_server.py"))
+    with pytest.raises(FileNotFoundError):
+        theme_server.page()
 
 
 def test_the_page_ships_in_the_binary():

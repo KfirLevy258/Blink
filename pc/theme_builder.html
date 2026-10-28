@@ -194,24 +194,19 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
     { k: 'mid',  w: 'mid',    name: '60% to 90%',     hint: 'Getting there' },
     { k: 'high', w: 'high',   name: '90% and above',  hint: 'Almost used up; also the warning line' }
   ];
-  // THEME_IDS 0..11, in id order. These colours draw the preview here; the
-  // board draws a built-in theme from its own table, so a built-in is sent
-  // as its id alone.
-  var PRESETS = [
-    ['Dark',      { bg:'0E1116', text:'E6E8EB', g1:'4387DF', g2:'0DA243', low:'0DA243', mid:'BA8107', high:'FF1900', w:12, e:'round', d:'on' }],
-    ['Neon',      { bg:'05060A', text:'F5F7FF', g1:'00F0FF', g2:'B26BFF', low:'00F0FF', mid:'FFE600', high:'FF2E88', w:5,  e:'round', d:'off' }],
-    ['Bold',      { bg:'000000', text:'FFFFFF', g1:'60A5FA', g2:'22C55E', low:'22C55E', mid:'FACC15', high:'EF4444', w:22, e:'flat',  d:'off' }],
-    ['Mono',      { bg:'000000', text:'FFFFFF', g1:'FFFFFF', g2:'BDBDBD', low:'FFFFFF', mid:'FFFFFF', high:'FF3B30', w:5,  e:'flat',  d:'off' }],
-    ['Ocean',     { bg:'0A1A2F', text:'E8F1FA', g1:'7FB2FF', g2:'2EC4B6', low:'2EC4B6', mid:'FFB347', high:'FF6B6B', w:12, e:'round', d:'on' }],
-    ['Synthwave', { bg:'1A0B2E', text:'FBEAFF', g1:'01CDFE', g2:'FF71CE', low:'FF71CE', mid:'FFB86B', high:'FF3860', w:8,  e:'round', d:'on' }],
-    ['Forest',    { bg:'0F1A14', text:'EEF3E9', g1:'A3C4BC', g2:'8FBF7F', low:'8FBF7F', mid:'D9A441', high:'D9643A', w:12, e:'round', d:'on' }],
-    ['Retro LCD', { bg:'9BBC0F', text:'0F380F', g1:'306230', g2:'0F380F', low:'306230', mid:'306230', high:'0F380F', w:12, e:'flat',  d:'off' }],
-    ['Colour-blind safe', { bg:'0E1116', text:'E6E8EB', g1:'1E88E5', g2:'E69F00', low:'1E88E5', mid:'E69F00', high:'D55E00', w:12, e:'round', d:'on' }],
-    ['Light',     { bg:'FFFFFF', text:'111418', g1:'2F6FCB', g2:'0E9F48', low:'0E9F48', mid:'C27C00', high:'E02400', w:12, e:'round', d:'on' }],
-    ['Light soft',{ bg:'F1F3F6', text:'1B2027', g1:'3D7BD9', g2:'2E9E68', low:'2E9E68', mid:'CB8A13', high:'D9452B', w:8,  e:'round', d:'off' }],
-    ['Light ink', { bg:'FFFFFF', text:'000000', g1:'000000', g2:'555555', low:'000000', mid:'000000', high:'E10600', w:5,  e:'flat',  d:'off' }]
-  ];
-  var CLI_NAMES = ['dark','neon','bold','mono','ocean','synthwave','forest','retro-lcd','cvd-safe','light','light-soft','light-ink'];
+  // THEME_IDS 0..11, in id order, written in by pc/theme_server.py from
+  // pc/theme_builtins.py, which is generated from the firmware's own table
+  // (firmware/src/theme.c). They were typed here once, and the board's
+  // palettes changed under them for a whole firmware round. These colours
+  // draw the preview; the board draws a built-in from its own table, so a
+  // built-in is sent as its id alone. The name is the one its tile shows.
+  var BUILTINS = /*@BUILTINS@*/null;
+  var PRESETS = BUILTINS.map(function (b) {
+    var c = b.c.map(function (h) { return h.toUpperCase(); });
+    return [b.name, { bg: c[0], text: c[1], g1: c[2], g2: c[3], low: c[4], mid: c[5], high: c[6],
+                      w: b.w, e: b.ends, d: b.dot ? 'on' : 'off', mode: b.by }];
+  });
+  var CLI_NAMES = BUILTINS.map(function (b) { return b.cli; });
   // 3.05, the computer's floor (pc/theme.py MIN_CONTRAST): clear of the
   // board's own 3:1 check, so nothing passed here is refused there.
   var CUSTOM = 12, WIDTHS = [5, 12, 22], MIN_CONTRAST = 3.05;
@@ -450,14 +445,19 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
   }
   document.getElementById('load').addEventListener('click', function () {
     var code = document.getElementById('paste').value.trim().replace(/^blink theme set\s+/, ''), f = null;
+    // Said as what is wrong with it. "They start BT1." was the only answer,
+    // and it was also the answer to a code that did start BT1. but had
+    // lost its end in a copy (audit, 2026-10-28), which pointed at the one
+    // part of it that was right. pc/theme.py from_share_code says the same.
+    if (code.indexOf('BT1.') !== 0) { say('That is not a theme share code. They start BT1.', true); return; }
     try {
-      if (code.indexOf('BT1.') !== 0) throw 0;
       var b = code.slice(4).replace(/-/g, '+').replace(/_/g, '/');
       while (b.length % 4) b += '=';
       f = JSON.parse(atob(b));
     } catch (e) { f = null; }
-    if (applyCustom(f)) { document.getElementById('paste').value = ''; changed(); }
-    else say('That is not a theme share code. They start BT1.', true);
+    if (f === null || typeof f !== 'object' || Array.isArray(f)) say('That share code is damaged or cut short. Copy all of it again.', true);
+    else if (applyCustom(f)) { document.getElementById('paste').value = ''; changed(); }
+    else say('That share code holds a theme the board cannot use.', true);
   });
 
   document.getElementById('save').addEventListener('click', function () {

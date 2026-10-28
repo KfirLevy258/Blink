@@ -50,6 +50,7 @@ import sys
 
 from pc import install_statusline
 from pc import protocol
+from pc import theme_builtins
 
 # THEME_IDS, stable and append-only: the number is what cfg_store keeps, so a
 # renumbering would repaint every board in the field the day it updated.
@@ -79,13 +80,15 @@ CUSTOM_FIELDS = ("c", "w", "ends", "dot", "by")
 # every theme the computer accepts clear of the board's rounding.
 MIN_CONTRAST = 3.05
 
-# The custom theme `blink theme set k=v` starts from when none is saved: the
-# builder's Dark preset, so editing one colour gives a theme that differs from
-# what is on screen by that colour and nothing else.
-DEFAULT_CUSTOM = {"id": CUSTOM,
-                  "c": ["0e1116", "e6e8eb", "4387df", "0da243",
-                        "0da243", "ba8107", "ff1900"],
-                  "w": 12, "ends": "round", "dot": 1, "by": "level"}
+# The custom theme `blink theme set k=v` starts from when none is saved:
+# Dark, as the board draws it, so editing one colour gives a theme that
+# differs from what is on screen by that colour and nothing else. Taken from
+# pc/theme_builtins.py, which is generated from firmware/src/theme.c, rather
+# than typed here: the builder's typed copy of the presets drifted from the
+# board's for a whole firmware round before anyone saw it (audit, 2026-10-28).
+DEFAULT_CUSTOM = dict(
+    {k: theme_builtins.BUILTINS[0][k] for k in CUSTOM_FIELDS},
+    id=CUSTOM, c=list(theme_builtins.BUILTINS[0]["c"]))
 
 SHARE_PREFIX = "BT1."
 # A real code is about 140 characters. Anything far longer is not one, and is
@@ -281,29 +284,60 @@ def to_share_code(t):
 
 
 def from_share_code(code):
-    """The custom theme a share code holds, or ThemeError."""
-    bad = ThemeError("that is not a theme share code (they start BT1.)")
-    if (not isinstance(code, str) or not code.startswith(SHARE_PREFIX)
-            or len(code) > SHARE_MAX_CHARS):
-        raise bad
+    """The custom theme a share code holds, or ThemeError.
+
+    Each refusal says what is wrong with the code. There was one message,
+    "that is not a theme share code (they start BT1.)", and it was also
+    the answer to `blink theme set BT1.garbage` -- a code that does start
+    BT1. -- so it pointed at the one part that was right (audit,
+    2026-10-28). The usual real cause is a copy that lost its end, and the
+    builder page says the same words for the same cases."""
+    if not isinstance(code, str) or not code.startswith(SHARE_PREFIX):
+        raise ThemeError("that is not a theme share code (they start BT1.)")
+    if len(code) > SHARE_MAX_CHARS:
+        raise ThemeError("that share code is far too long to be one; a real"
+                         " one is about 140 characters")
+    damaged = ThemeError("that share code is damaged or cut short; copy all"
+                         " of it again")
     body = code[len(SHARE_PREFIX):].strip()
     if not body:
-        raise bad
+        raise damaged
     try:
         raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
         fields = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        raise bad
+        raise damaged
     if not isinstance(fields, dict):
-        raise bad
-    return validate(dict(fields, id=CUSTOM))
+        raise damaged
+    try:
+        return validate(dict(fields, id=CUSTOM))
+    except ThemeError as e:
+        raise ThemeError(f"that share code holds a theme the board cannot"
+                         f" use: {e}") from None
 
 
 # ------------------------------------------------------------- k=v
 
+def _key(word):
+    return "_".join(word.strip().lower().replace("-", " ").split())
+
+
 def _name_id(word):
-    n = word.strip().lower().replace("-", "_")
-    return NAMES.index(n) if n in NAMES else None
+    """A theme's id from what someone typed: its name as `blink theme list`
+    prints it (retro-lcd), the name its tile shows on the board ("Retro
+    LCD", "Colour-blind"), or its number in that list. The number is taken
+    because the list prints it: a column that `set` then refused was the
+    first thing the audit of 2026-10-28 tripped on."""
+    w = word.strip()
+    if w.isascii() and w.isdigit():
+        return int(w) if int(w) < len(NAMES) else None
+    n = _key(w)
+    if n in NAMES:
+        return NAMES.index(n)
+    for tid in range(len(NAMES)):
+        if _key(board_name(tid)) == n:
+            return tid
+    return None
 
 
 def _onoff(v):
@@ -389,6 +423,16 @@ def as_args(t):
 def display_name(tid):
     """How a person types it: retro-lcd, not retro_lcd."""
     return NAMES[tid].replace("_", "-")
+
+
+def board_name(tid):
+    """What the theme's tile says on the board: "Colour-blind", "Light ink".
+    The builder and `blink theme list` and `show` use it too, so a theme
+    has one name wherever it is shown (audit D3: the builder said "Colour-
+    blind safe" beside a board that said "Colour-blind")."""
+    if tid == CUSTOM:
+        return theme_builtins.CUSTOM_NAME
+    return theme_builtins.BUILTINS[tid]["name"]
 
 
 # ------------------------------------------------------------- files
@@ -826,9 +870,11 @@ class ThemeSync:
                 # in the record so `blink theme show` can say it too.
                 kept, lost = fp, mine
             # Says that it happened, never what: the id is a value off the
-            # wire (CLAUDE.md, serial buffers).
+            # wire (CLAUDE.md, serial buffers). It ended "keeping the
+            # board's" until the audit of 2026-10-28 read it as cut off.
             print("[theme] the theme was changed on the board while this app"
-                  " was away; keeping the board's", file=sys.stderr)
+                  " was away; keeping the board's choice",
+                  file=sys.stderr)
             self._adopt(fp)
         else:
             # "boot" from a board that did not change, or that holds the save
