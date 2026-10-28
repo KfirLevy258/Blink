@@ -23,6 +23,7 @@ script disagree, so change theme.c and run this, never the output.
 Standard library only, and deterministic: the same sources always give the
 same bytes.
 """
+import json
 import os
 import re
 import sys
@@ -76,18 +77,47 @@ def palettes(c_src, h_src):
     out = {}
     for name, body in re.findall(r"\[THEME_(\w+)\]\s*=\s*\{(.*?)\}",
                                  table, re.S):
-        fields = {}
-        for key, val in re.findall(r"\.(\w+)\s*=\s*([^,\s]+)", body):
-            if val.startswith("0x"):
-                fields[key] = "%06x" % int(val, 16)
-            elif val in ("true", "false"):
-                fields[key] = val == "true"
-            elif val in widths:
-                fields[key] = widths[val]
-            else:
-                fields[key] = int(val)
-        out[name] = fields
+        out[name] = _fields(name, body, widths)
     return out
+
+
+# One designated initialiser whose value is a single token: a hex colour, a
+# number, true or false, or one of theme.h's THEME_W_* widths.
+_FIELD = re.compile(r"\s*\.(\w+)\s*=\s*(0x[0-9A-Fa-f]{1,6}|\d+|true|false"
+                    r"|THEME_W_\w+)\s*")
+
+
+def _fields(name, body, widths):
+    """A palette's initialisers, each one read whole or refused.
+
+    The first version took the first token after each `=`, so
+    `.low = 0x0DA243 | 0` would have read as 0x0DA243 with no word said,
+    and only `+ 0` on a width failed, as an int() error (review of
+    fp/audit-fixes, NICE 2). The table is plain on purpose; an expression
+    in it is a change this script has to be taught, not one to guess at."""
+    fields = {}
+    pieces = body.split(",")
+    if pieces and not pieces[-1].strip():
+        pieces = pieces[:-1]            # the trailing comma
+    for piece in pieces:
+        m = _FIELD.fullmatch(piece)
+        if m is None:
+            raise ValueError(f"theme.c: THEME_{name}: cannot read"
+                             f" {piece.strip()!r}; give each role a plain"
+                             " value")
+        key, val = m.groups()
+        if val.startswith("0x"):
+            fields[key] = "%06x" % int(val, 16)
+        elif val in ("true", "false"):
+            fields[key] = val == "true"
+        elif val.startswith("THEME_W_"):
+            if val not in widths:
+                raise ValueError(f"theme.c: THEME_{name}: no {val} in"
+                                 " theme.h")
+            fields[key] = widths[val]
+        else:
+            fields[key] = int(val)
+    return fields
 
 
 def board_names(c_src):
@@ -95,7 +125,17 @@ def board_names(c_src):
     src = _strip_comments(c_src)
     start = src.index("names[THEME_N]")
     table = src[start:src.index("};", start)]
-    return dict(re.findall(r'\[THEME_(\w+)\]\s*=\s*"([^"]*)"', table))
+    out = {}
+    entry = r'\[THEME_(\w+)\]\s*=\s*"((?:[^"\\\n]|\\.)*)"'
+    for key, name in re.findall(entry, table):
+        # A tile name is plain printable ASCII (tests/test_panel_strings.py
+        # holds the panel to that). An escape would need C's rules, not
+        # this script's, to read, so it is refused rather than guessed.
+        if "\\" in name or not all(" " <= ch <= "~" for ch in name):
+            raise ValueError(f"theme.c: the name of THEME_{key} is not plain"
+                             " ASCII")
+        out[key] = name
+    return out
 
 
 def builtins(h_src=None, c_src=None):
@@ -145,20 +185,24 @@ def source():
         "",
         "BUILTINS = (",
     ]
+    # Every string through json.dumps, whose output for ASCII is also a
+    # valid Python literal, so a quote or backslash in a name could never
+    # write a different string than theme.c holds (review NICE 1).
+    q = json.dumps
     for r in rows:
         lines.append(
-            f'    {{"id": {r["id"]}, "key": "{r["key"]}",'
-            f' "name": "{r["name"]}",')
+            f'    {{"id": {r["id"]}, "key": {q(r["key"])},'
+            f' "name": {q(r["name"])},')
         lines.append(
-            '     "c": [' + ", ".join(f'"{c}"' for c in r["c"]) + "],")
+            '     "c": [' + ", ".join(q(c) for c in r["c"]) + "],")
         lines.append(
-            f'     "w": {r["w"]}, "ends": "{r["ends"]}", "dot": {r["dot"]},'
-            f' "by": "{r["by"]}"}},')
+            f'     "w": {r["w"]}, "ends": {q(r["ends"])}, "dot": {r["dot"]},'
+            f' "by": {q(r["by"])}}},')
     lines += [
         ")",
         "",
         f"CUSTOM_ID = {custom[0]}",
-        f'CUSTOM_NAME = "{board_names(c_src)["CUSTOM"]}"',
+        f'CUSTOM_NAME = {json.dumps(board_names(c_src)["CUSTOM"])}',
         "",
     ]
     return "\n".join(lines)

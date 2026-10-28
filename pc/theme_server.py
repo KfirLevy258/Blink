@@ -94,9 +94,12 @@ def builtins_json():
     `blink theme set` takes, and the custom-theme fields."""
     rows = [dict(b, cli=theme.display_name(b["id"]))
             for b in theme.theme_builtins.BUILTINS]
-    # "</" cannot close the script element it sits in, whatever a name
-    # might one day hold.
-    return json.dumps(rows, separators=(",", ":")).replace("</", "<\\/")
+    # No "<" at all, as <, which JSON and the script read the same: so
+    # nothing a name might one day hold can close the script element it
+    # sits in ("</") or tip the HTML parser into its escaped states
+    # ("<!--"). Escaping only "</" left the second open (review of
+    # fp/audit-fixes, NICE 3). ensure_ascii, the default, does the rest.
+    return json.dumps(rows, separators=(",", ":")).replace("<", "\\u003c")
 
 
 def page():

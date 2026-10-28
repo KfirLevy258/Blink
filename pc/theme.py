@@ -307,7 +307,12 @@ def from_share_code(code):
         fields = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         raise damaged
-    if not isinstance(fields, dict):
+    # An object with none of a theme's fields is no theme at all: "BT1.e30"
+    # is "{}", which validate() answered with the list of fields it lacks
+    # -- accurate, and of no use to someone holding a bad copy (review of
+    # fp/audit-fixes, NICE 7).
+    if not isinstance(fields, dict) or not any(
+            k in fields for k in CUSTOM_FIELDS):
         raise damaged
     try:
         return validate(dict(fields, id=CUSTOM))

@@ -205,6 +205,8 @@ def test_a_share_code_with_unreadable_text_is_refused():
     ("BT1.garbage", "damaged or cut short"),
     ("BT1.bm90IGpzb24", "damaged or cut short"),          # "not json"
     ("BT1.WzFd", "damaged or cut short"),                  # [1]
+    ("BT1.e30", "damaged or cut short"),                   # {}
+    ("BT1.eyJ4IjoxfQ", "damaged or cut short"),            # {"x":1}
     ("BT1." + "A" * 900, "far too long"),
 ])
 def test_a_bad_share_code_says_what_is_wrong_with_it(bad, says):

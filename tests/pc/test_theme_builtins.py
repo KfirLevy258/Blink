@@ -76,6 +76,51 @@ def test_the_generator_refuses_a_table_with_a_theme_missing():
         raise AssertionError("a missing palette was not noticed")
 
 
+def test_the_generator_refuses_an_expression_rather_than_misreading_it():
+    # It once read the first token after "=", so "| 0" was dropped without
+    # a word (review of fp/audit-fixes, NICE 2).
+    gen = _gen()
+    for was, now in ((".low = 0x22C55E,", ".low = 0x22C55E | 0,"),
+                     (".arc_w = THEME_W_THICK,", ".arc_w = THEME_W_THICK + 0,"),
+                     (".flat = true,", ".flat = !false,")):
+        c_src = _c("theme.c")
+        assert was in c_src, was
+        try:
+            gen.palettes(c_src.replace(was, now, 1), _c("theme.h"))
+        except ValueError as e:
+            assert "cannot read" in str(e), e
+        else:
+            raise AssertionError(f"{now!r} was read as a plain value")
+
+
+def test_the_generator_refuses_a_tile_name_it_would_have_to_unescape():
+    gen = _gen()
+    c_src = _c("theme.c").replace('"Forest"', '"For\\"est"')
+    try:
+        gen.board_names(c_src)
+    except ValueError as e:
+        assert "FOREST" in str(e)
+    else:
+        raise AssertionError("an escaped name was taken")
+
+
+def test_a_name_with_a_quote_or_backslash_is_written_as_that_name(
+        monkeypatch):
+    # The module text used to be f-strings around "...": a quote in a name
+    # would have ended the literal early (review NICE 1). Every string now
+    # goes through json.dumps; executing the output gives back the name.
+    gen = _gen()
+    odd = 'Say "hi" \\ </script>'
+    real_names = gen.board_names
+    monkeypatch.setattr(gen, "board_names",
+                        lambda c: dict(real_names(c), CUSTOM=odd,
+                                       FOREST=odd))
+    ns = {}
+    exec(compile(gen.source(), "theme_builtins", "exec"), ns)
+    assert ns["BUILTINS"][6]["name"] == odd
+    assert ns["CUSTOM_NAME"] == odd
+
+
 # ------------------------------------------------------------- ids and names
 
 def test_theme_ids_agree_between_the_firmware_and_the_computer():
@@ -139,10 +184,28 @@ def test_the_builder_previews_every_built_in_in_the_boards_own_colours():
 
 def test_the_builder_page_types_no_palette_of_its_own():
     # The copy that drifted: any 6-digit hex literal in the page's script
-    # is a colour that did not come from theme.c.
+    # is a colour that did not come from theme.c -- in either quote, with
+    # or without its "#", or bare as a CSS-style #rrggbb inside a longer
+    # string. Single quotes alone let "ABCDEF" and '#abcdef' through
+    # (review of fp/audit-fixes, NICE 4).
     html = PAGE.read_text(encoding="utf-8")
     script = html[html.index("<script>"):]
-    assert not re.findall(r"'[0-9A-Fa-f]{6}'", script)
+    assert not _palette_literals(script)
+
+
+def _palette_literals(text):
+    return re.findall(r"""['"`]#?[0-9A-Fa-f]{6}['"`]|#[0-9A-Fa-f]{6}\b""",
+                      text)
+
+
+def test_the_palette_check_sees_every_spelling_of_a_colour():
+    for typed in ("'ABCDEF'", '"abcdef"', "'#abcdef'", '"#ABCDEF"',
+                  "`0e1116`", "'fill: #ff1900'"):
+        assert _palette_literals(typed), typed
+    # What the page legitimately holds: built strings and lengths.
+    for fine in ("'#' + st.bg", "HEX.test(v)", "padStart(2,'0')",
+                 "/^[0-9a-fA-F]{6}$/"):
+        assert not _palette_literals(fine), fine
 
 
 def test_a_custom_theme_started_from_nothing_is_dark_as_the_board_draws_it():

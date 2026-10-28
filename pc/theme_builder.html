@@ -455,7 +455,7 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
       while (b.length % 4) b += '=';
       f = JSON.parse(atob(b));
     } catch (e) { f = null; }
-    if (f === null || typeof f !== 'object' || Array.isArray(f)) say('That share code is damaged or cut short. Copy all of it again.', true);
+    if (f === null || typeof f !== 'object' || Array.isArray(f) || !['c','w','ends','dot','by'].some(function (k) { return k in f; })) say('That share code is damaged or cut short. Copy all of it again.', true);
     else if (applyCustom(f)) { document.getElementById('paste').value = ''; changed(); }
     else say('That share code holds a theme the board cannot use.', true);
   });

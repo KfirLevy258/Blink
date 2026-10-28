@@ -334,6 +334,24 @@ def test_the_page_names_every_built_in_theme_in_id_order():
                                         for i in range(12)]
 
 
+def test_no_name_can_reach_the_script_element_as_markup(monkeypatch):
+    # Every "<" leaves as <, not only "</" (review NICE 3): "<!--"
+    # would otherwise put the HTML parser into its escaped script state.
+    odd = "</script><!--<script>"
+    rows = [dict(b) for b in theme.theme_builtins.BUILTINS]
+    rows[0]["name"] = odd
+    monkeypatch.setattr(theme.theme_builtins, "BUILTINS", tuple(rows))
+    text = theme_server.builtins_json()
+    assert "<" not in text
+    assert json.loads(text)[0]["name"] == odd
+    assert "<" not in _page_builtins_line(theme_server.page())
+
+
+def _page_builtins_line(page):
+    return next(l for l in page.splitlines() if "var BUILTINS = " in l
+                ).split("var BUILTINS = ", 1)[1]
+
+
 def test_the_served_page_has_no_placeholder_left():
     page = theme_server.page()
     assert theme_server.BUILTINS_MARK not in page
