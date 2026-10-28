@@ -393,7 +393,7 @@ static void ui_state_line(void)
 	char buf[256];
 
 	ui_settings_bench_state(&b);
-	if (ui_anim_bench_showing()) {
+	if (ui_anim_showing()) {
 		scr = "eyes";
 	} else if (b.open) {
 		scr = "settings";

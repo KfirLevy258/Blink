@@ -51,7 +51,9 @@ void ui_anim_gesture_mute(int ms);
  * The clip owns the screen: true from the moment ui_anim_run() builds its
  * overlay until it has slid back out. A stroke ui_swipe decides in that time
  * was made on the clip, and nothing underneath may act on it -- see
- * swipe_cb in ui_settings.c for what it used to do.
+ * swipe_cb in ui_settings.c for what it used to do. The bench injector's
+ * ui_state reads it too (scr=eyes); it had a bench-only twin of this until
+ * the flag was kept in every build.
  */
 bool ui_anim_showing(void);
 
@@ -59,12 +61,5 @@ bool ui_anim_showing(void);
  * reloaded. `pump` (may be NULL) runs between frames so the mode's
  * background duties -- serial protocol, event queue -- stay alive. */
 void ui_anim_run(void (*pump)(void));
-
-#ifdef CONFIG_BLINK_TOUCH_INJECT
-/* The clip is on screen: from the moment ui_anim_run() builds its overlay
- * until it has slid back out. For the bench injector's ui_state (it is
- * asked from pump(), which runs inside ui_anim_run). Bench builds only. */
-bool ui_anim_bench_showing(void);
-#endif
 
 #endif /* UI_ANIM_H */

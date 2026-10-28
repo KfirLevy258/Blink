@@ -50,13 +50,6 @@ bool ui_anim_showing(void)
 	return showing;
 }
 
-#ifdef CONFIG_BLINK_TOUCH_INJECT
-bool ui_anim_bench_showing(void)
-{
-	return showing;
-}
-#endif
-
 void ui_anim_request(void)
 {
 	pending = true;

@@ -200,11 +200,6 @@ void ui_anim_gesture_mute(int ms)
 	}
 }
 
-bool ui_anim_bench_showing(void)
-{
-	return anim_showing;
-}
-
 bool ui_anim_showing(void)
 {
 	return anim_showing;

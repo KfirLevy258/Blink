@@ -171,7 +171,8 @@ def test_the_old_commands_still_split_the_old_way():
     assert (s.cmd, s.args) == ("tap", ("settings.open",))
 
 
-@pytest.mark.parametrize("name", ["full_touch.txt", "popups_touch.txt"])
+@pytest.mark.parametrize("name", ["full_touch.txt", "popups_touch.txt",
+                                  "eye_mute_touch.txt"])
 def test_the_shipped_scripts_parse(name):
     steps = bt.parse_script((ROOT / "tools" / "bench" / name).read_text(
         encoding="utf-8"))

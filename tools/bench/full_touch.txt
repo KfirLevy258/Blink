@@ -178,22 +178,27 @@ mem
 # --- the eye swipe, in and out the way a finger does it. The full left
 # swipe out of the clip used to latch Settings too, whenever ui_swipe
 # decided it before LVGL's gesture ended the clip and the clip's entry mute
-# had run out (about 1.25 s after it landed): Settings then opened by
-# itself as the gauges came back. The host harness hit that on most runs;
-# swipe_cb now ignores every stroke made while the clip is up. Twice: once
-# straight away, inside the mute, and once after 3 s, well past it, which
-# is the case that failed.
+# had run out (1.5 s from the start of the entry slide): Settings then
+# opened by itself as the gauges came back. The host harness hit that on
+# most runs; swipe_cb now ignores every stroke made while the clip is up.
+#
+# Both exits here are past the mute -- the first at about 1.9 s, since
+# eye.swipe's settle alone is 1.2 s, the second after 3 s more. An earlier
+# version of this comment called the first one "inside the mute", which it
+# was not (review of fp/audit-nice, SHOULD-2). The exit inside the mute
+# takes raw strokes with no settle, which a board's entry slide would
+# swallow, so it is host-only: tools/bench/eye_mute_touch.txt.
 tap eye.swipe
 wait 0.3
 tap eye.exit
-expect ui_state scr=gauges modal=none
+expect ui_state scr=gauges modal=none busy=0
 wait 1.6
 tap eye.swipe
 wait 3
 # An up stroke on the clip, which the clip ignores. It used to latch a page
-# change for the moment the clip was left.
+# change for the moment the clip was left, which held the board busy=1.
 swipe 160 200 160 60
-expect ui_state scr=eyes
+expect ui_state scr=eyes busy=0
 tap eye.exit
 mem
-expect ui_state scr=gauges modal=none
+expect ui_state scr=gauges modal=none busy=0
