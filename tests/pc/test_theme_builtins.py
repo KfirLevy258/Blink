@@ -18,7 +18,11 @@ import importlib.util
 import json
 import math
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from pc import cli
 from pc import theme
@@ -254,3 +258,82 @@ def test_no_built_in_earns_a_warning_from_the_builders_own_checks():
         if b["by"] == "level":
             for x, y in ((low, mid), (mid, high), (low, high)):
                 assert _dist(x, y) >= 60, (b["name"], x, y)
+
+
+# ------------------------------------------------------------- the dot
+
+def _js_functions(html, names):
+    """The source of each named `function NAME(...) {...}` in the page, by
+    brace matching (none of these holds a brace inside a string)."""
+    out = []
+    for name in names:
+        start = html.index(f"function {name}(")
+        depth, i = 0, html.index("{", start)
+        while True:
+            depth += {"{": 1, "}": -1}.get(html[i], 0)
+            i += 1
+            if depth == 0:
+                break
+        out.append(html[start:i])
+    return "\n".join(out)
+
+
+# (bg, low, mid) beyond the built-ins: the cases the rule turns on -- a
+# neutral pair either way round, on a dark ground and a light one, a
+# near-grey that must not count as one, an equal pair, and a hued pair.
+_DOT_CUSTOM = [
+    ("000000", "9c9c9c", "ffffff"), ("000000", "ffffff", "9c9c9c"),
+    ("ffffff", "555555", "000000"), ("ffffff", "000000", "555555"),
+    ("101010", "9c9c9d", "ffffff"), ("000000", "808080", "808080"),
+    ("0e1116", "0da243", "ba8107"), ("ffffff", "777777", "e0e0e0"),
+]
+
+
+def test_the_builders_status_dot_follows_the_boards_rule(tmp_path):
+    """The builder draws the header dot, so it ports theme_dot_colours();
+    the review of fp/audit-nice found it still drawing `low`, a grey dot
+    where Mono and Light ink now draw white and black. Both sides run on
+    the same colours here: the C through a compiler, the page's own
+    functions through node (both are on every CI runner)."""
+    cc, node = shutil.which("cc"), shutil.which("node")
+    if cc is None or node is None:
+        pytest.skip("needs a C compiler and node")
+    cases = [(b["c"][0], b["c"][4], b["c"][5]) for b in _served()]
+    cases += _DOT_CUSTOM
+    body = "\n".join(
+        f"\tp.bg = 0x{bg}; p.low = 0x{lo}; p.mid = 0x{mi};\n"
+        "\ttheme_dot_colours(&p, &a, &b);\n"
+        '\tprintf("%06x %06x\\n", (unsigned)a, (unsigned)b);'
+        for bg, lo, mi in cases)
+    src = tmp_path / "dot.c"
+    src.write_text('#include <stdio.h>\n#include "theme.h"\n'
+                   "int main(void)\n{\n\tstruct palette p = {0};\n"
+                   f"\tuint32_t a, b;\n\n{body}\n\treturn 0;\n}}\n",
+                   encoding="utf-8")
+    exe = tmp_path / "dot"
+    subprocess.run([cc, "-I", str(SRC), str(src), str(SRC / "theme.c"),
+                    str(SRC / "msg_parse.c"), "-lm", "-o", str(exe)],
+                   check=True)
+    c_out = subprocess.run([str(exe)], check=True, capture_output=True,
+                           text=True).stdout.splitlines()
+    js = _js_functions(PAGE.read_text(encoding="utf-8"),
+                       ("hex2rgb", "lum", "contrast", "dotColours"))
+    js += ("\nconst cases = " + json.dumps(cases) + ";\n"
+           "for (const [bg, lo, mi] of cases) {"
+           " const d = dotColours(lo, mi, bg);"
+           " console.log(d[0].toLowerCase() + ' ' + d[1].toLowerCase()); }\n")
+    (tmp_path / "dot.js").write_text(js, encoding="utf-8")
+    js_out = subprocess.run([node, str(tmp_path / "dot.js")], check=True,
+                            capture_output=True, text=True).stdout.splitlines()
+    assert len(c_out) == len(cases)
+    assert js_out == c_out
+    by_name = dict(zip((b["name"] for b in _served()), c_out))
+    assert by_name["Mono"] == "ffffff 9c9c9c"
+    assert by_name["Light ink"] == "000000 555555"
+    assert by_name["Dark"] == "0da243 ba8107"
+
+
+def test_the_builder_draws_the_dot_through_the_rule():
+    html = PAGE.read_text(encoding="utf-8")
+    assert "fill: '#' + dotColours(st.low, st.mid, st.bg)[0]" in html
+    assert "fill: '#' + st.low }" not in html

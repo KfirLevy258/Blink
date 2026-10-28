@@ -750,6 +750,28 @@ int main(void)
 		CHECK(live == 0x0DA243 && stale == 0xBA8107,
 		      "Dark: the dot is 1.3.4's green and amber");
 	}
+	/* "A custom theme made the same way" (theme.h): through
+	 * theme_derive, the path a custom theme reaches the dot by. */
+	{
+		struct theme_custom grey = {
+			.c = { 0x000000, 0xFFFFFF, 0xFFFFFF, 0xBDBDBD,
+			       0x9C9C9C, 0xFFFFFF, 0xFF3B30 },
+			.w = THEME_W_NORMAL, .dot = true,
+		};
+		struct theme_custom hue = grey;
+		struct palette d;
+		uint32_t live, stale;
+
+		theme_derive(&grey, &d);
+		theme_dot_colours(&d, &live, &stale);
+		CHECK(live == 0xFFFFFF && stale == 0x9C9C9C,
+		      "custom: grey low under white mid swaps, as Mono does");
+		hue.c[4] = 0x22C55E;	/* a green low: the hue tells them apart */
+		theme_derive(&hue, &d);
+		theme_dot_colours(&d, &live, &stale);
+		CHECK(live == 0x22C55E && stale == 0xFFFFFF,
+		      "custom: a hued low keeps low and mid");
+	}
 
 	printf(failures ? "\n%d FAILED\n" : "\nall theme checks passed\n",
 	       failures);

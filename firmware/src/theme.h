@@ -152,6 +152,15 @@ uint32_t theme_mix(uint32_t a, uint32_t b, double t);
  * disconnected one (review of fp/audit-fixes, NICE 6). There the two swap:
  * full ink while the reading is sound, fading to the lighter ink when it
  * goes old, and the disconnected grey after that.
+ *
+ * Only the dot swaps, on purpose. In Mono the "Reading is old" hint stays
+ * in mid (white) beside a grey stale dot, and a waiting pip stays white
+ * beside a grey running one. Those follow the arc's order -- the lighter
+ * ink is calm, full ink asks for attention -- and the hint is words, read
+ * as words; dimming it to match the dot would make the warning the
+ * quietest text on the screen. The dot alone is a single mark whose only
+ * message is its strength, so it alone takes the other order (review of
+ * fp/audit-nice, NICE 5, judged 2026-10-29).
  */
 void theme_dot_colours(const struct palette *p, uint32_t *live,
 		       uint32_t *stale);
