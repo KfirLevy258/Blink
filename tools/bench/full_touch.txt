@@ -5,7 +5,7 @@
 # Needs a CONFIG_BLINK_TOUCH_INJECT board on its gauges (tools/board_touch.py
 # has the setup). Each `tap NAME` checks the screen it leads to; `mem` prints
 # the [mem] lines the board has printed since the last one, and the summary
-# at the end has each screen's peak against the 30632 B pool.
+# at the end has each screen's peak against the 32680 B pool.
 #
 # It changes three settings and puts two of them back: it ends on Focus off
 # and Theme Dark. Brightness is left at 60% (level 3).

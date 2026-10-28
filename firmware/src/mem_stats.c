@@ -1,8 +1,9 @@
 /*
  * How full the LVGL pool is, measured on the board instead of argued about.
  *
- * prj.conf has called the 30720-byte pool "ample headroom" since it was cut
- * from 32768, and nothing ever measured it. gapietro's fork measured theirs on
+ * prj.conf called the 30720-byte pool "ample headroom" from the day it was
+ * cut from 32768 until 2026-10-28, when these numbers put it back, and
+ * nothing had ever measured it. gapietro's fork measured theirs on
  * 2026-10-14, after a settings panel one row longer than ours halted the board
  * the moment it opened: LVGL wrote through a glyph buffer whose allocation had
  * just failed (lv_draw_label.c:610), with the pool at 23504 used and 7128 free

@@ -64,3 +64,28 @@ def test_the_line_reaches_the_log_whole():
     out = logbook.ConsoleEcho().feed(line.encode())
     assert out == [line.rstrip("\n")]
     assert out[0].startswith("[mem] lvgl settings: used=1 ")
+
+
+def test_the_lvgl_pool_is_32_kib_and_the_bench_knows_it():
+    # 30720 left 2320 B on the board's deepest measured popup path, and a
+    # notice over the install confirm was estimated at under 1.3 KB (full
+    # review #2, M1). The 2 KB it had given up went to a networking stack
+    # that no longer exists.
+    assert int(_conf("LV_Z_MEM_POOL_SIZE")) == 32768
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "board_touch", ROOT / "tools" / "board_touch.py")
+    bt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bt)
+    # The heap's own metadata: 10 chunks of 8 B plus the 4 B footer and
+    # the 4 B lost to rounding the end down, the same at both sizes
+    # (twelve free-list buckets either way).
+    assert bt.POOL_USABLE == 32768 - 88
+
+
+def test_no_setting_for_the_removed_network_stack_is_left():
+    # Each made every build warn that its dependencies are off, which hides
+    # the next warning that matters.
+    conf = (FW / "prj.conf").read_text()
+    for name in ("NET_SOCKETS_SERVICE_STACK_SIZE", "ZVFS_OPEN_MAX"):
+        assert not re.search(rf"^CONFIG_{name}=", conf, re.M), name

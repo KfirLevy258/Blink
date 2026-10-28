@@ -107,9 +107,10 @@ BAUD = 115200
 SCREEN_W, SCREEN_H = 320, 240
 
 # The LVGL pool the board can actually hand out: CONFIG_LV_Z_MEM_POOL_SIZE
-# 30720 less the heap's own metadata, as every [mem] line's used+free sums to
-# (firmware/src/mem_stats.h).
-POOL_USABLE = 30632
+# 32768 less the heap's own 88 B of metadata, as every [mem] line's used+free
+# sums to (firmware/src/mem_stats.h). It was 30632 of 30720 until 2026-10-28;
+# both sizes need twelve free-list buckets, so the metadata did not change.
+POOL_USABLE = 32680
 
 
 def _pool_of(m):

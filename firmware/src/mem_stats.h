@@ -12,8 +12,9 @@
  *   [mem] lvgl <where>: used=N free=N largest=N peak=N boot_peak=N pool=N
  *
  *   used, free  bytes in allocated / free chunks, headers included, so their
- *               sum is the pool less the heap's own metadata -- about 30632
- *               of the 30720, and the same on every line.
+ *               sum is the pool less the heap's own metadata -- 32680 of
+ *               the 32768 (30632 of 30720 before 2026-10-28), and the same
+ *               on every line.
  *   largest     the biggest free chunk, as the request it could hold: a
  *               ceiling, not a promise (see largest_free). A 4 KB
  *               strip (ui_boot.c, ui_anim.c) needs 4096 contiguous bytes, and

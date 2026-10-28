@@ -385,12 +385,13 @@ def test_the_summary_lists_each_screen_s_peak_against_the_pool():
     for where, peak in (("gauges", 21000), ("settings", 25000),
                         ("theme-close", 26640), ("settings", 25496)):
         b.on_line(f"[mem] lvgl {where}: used=1 free=2 largest=3 peak={peak} "
-                  f"boot_peak=27000 pool=30632".encode())
+                  f"boot_peak=27000 pool=32768".encode())
     b.summary()
     text = out.getvalue()
-    assert "30632" in text
+    # Against what the board can hand out, 32768 less the heap's metadata.
+    assert "32680" in text
     row = next(l for l in text.splitlines() if l.strip().startswith("settings "))
-    assert "25496" in row and "83.2%" in row
+    assert "25496" in row and "78.0%" in row
     assert "theme-close" in text
 
 
