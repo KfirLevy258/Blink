@@ -517,8 +517,10 @@ from the internet. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
 without a change puts the board back on the theme it had. Once the builder
 has closed, the board's button reads **Edit on computer** again and opens a
-new one; tapped while the builder is still open, it brings that page up
-again. A preview the
+new one; tapped while the builder is still open, it opens it again in your
+browser, in a new tab. On Windows, and on some Linux desktops, that tab may
+open behind your other windows, with only the browser's taskbar button
+flashing. A preview the
 board never hears the end of - the computer went to sleep mid-edit - drops
 by itself after 15 minutes.
 
