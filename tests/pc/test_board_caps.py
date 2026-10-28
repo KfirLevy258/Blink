@@ -292,8 +292,11 @@ def test_the_boards_pref_carries_both_caps_and_fits_its_buffer():
     assert protocol.board_caps(msg) == {"svc", "theme", "edit_done"}
     # snprintf truncates silently, and a truncated pref is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
-    # Measured 107 B. The daemon reads 512 and the board itself drops a
-    # longer inbound line whole; a pref anywhere near that is a mistake.
+    # Measured 119 B in the 128 B buffer (hello: 148 in 160). A cap costs
+    # its name's length plus 3 B, so one named in more than five characters
+    # needs proto_send_pref's buffer made bigger first. The daemon reads
+    # 512 and the board itself drops a longer inbound line whole; a pref
+    # anywhere near that is a mistake.
     assert len(line) <= 160, len(line)
 
 

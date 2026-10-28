@@ -211,10 +211,14 @@ void proto_send_pref(void)
 	 * had nothing but board.json's memory to say which board it was --
 	 * and a remembered id must never decide whose theme wins.
 	 *
-	 * 107 bytes at its widest ("claude" and a 32-digit id; 87 with this
-	 * board's 12 digits), measured by tests/pc/test_board_caps.py, which
-	 * fails if it outgrows this. It was 96 B for the 61 B line before the
-	 * id; 128 leaves room, and both stay far under the daemon's 512.
+	 * 119 bytes at its widest ("claude", a 32-digit id and the three
+	 * caps; 99 with this board's 12 digits), measured by
+	 * tests/pc/test_board_caps.py, which fails if it outgrows this. It was
+	 * 96 B for the 61 B line before the id, and 107 before edit_done.
+	 * With the NUL that leaves 8 B of the 128. A cap costs its name's
+	 * length plus 3 B (the comma and two quotes), so a name of five
+	 * characters or fewer still fits and a longer one needs this buffer
+	 * made bigger first. Both stay far under the daemon's 512.
 	 */
 	char buf[128];
 
@@ -234,9 +238,12 @@ static void send_hello(void)
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
-	/* 136 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
-	 * "1.3.4"), measured by tests/pc/test_board_caps.py, which fails if it
-	 * outgrows this; a truncated hello is not JSON. */
+	/* 148 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.4.0", the three caps), measured by tests/pc/test_board_caps.py,
+	 * which fails if it outgrows this; a truncated hello is not JSON. With
+	 * the NUL, 11 B of the 160 are spare. A cap costs its name's length
+	 * plus 3 B and a two-digit minor in fw 1 B, and whatever is added has
+	 * to sum to 11 or less. */
 	char buf[160];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
