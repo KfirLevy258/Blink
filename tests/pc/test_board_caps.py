@@ -278,7 +278,49 @@ def test_the_boards_hello_carries_both_caps_and_fits_its_buffer():
 
 def test_the_boards_pref_carries_both_caps_and_fits_its_buffer():
     line, size = _fw_line("proto_send_pref")
-    msg = json.loads(line.replace("f" * 32, "claude"))
+    # The first %s is the provider, at its widest "claude"; the second is
+    # the board id at hwinfo's widest, 32 hex digits.
+    line = line.replace("f" * 32, "claude", 1)
+    msg = json.loads(line)
     assert msg["t"] == "pref"
     assert protocol.board_caps(msg) == {"svc", "theme"}
-    assert len(line.replace("f" * 32, "claude")) + 1 <= size
+    # snprintf truncates silently, and a truncated pref is not JSON.
+    assert len(line) + 1 <= size, (len(line), size)
+    # Measured 107 B. The daemon reads 512 and the board itself drops a
+    # longer inbound line whole; a pref anywhere near that is a mistake.
+    assert len(line) <= 160, len(line)
+
+
+def test_the_boards_pref_names_the_board_as_hello_does():
+    """Theme contract, Addendum 5: the same id, from the same function."""
+    src = (ROOT / "firmware" / "src" / "proto.c").read_text()
+    pref, _ = _fw_line("proto_send_pref")
+    hello_line, _ = _fw_line("send_hello")
+    assert json.loads(pref.replace("f" * 32, "claude", 1))["board_id"] \
+        == "f" * 32
+    assert "board_id" in json.loads(hello_line)
+    for name in ("proto_send_pref", "send_hello"):
+        body = re.search(r"\n[a-z ]*\b" + name + r"\(void\)\n\{(.*?)\n\}\n",
+                         src, re.S).group(1)
+        assert "board_id_hex()" in body, name
+        assert "hwinfo_get_device_id" not in body, name
+
+
+def test_a_pref_with_a_board_id_is_read_as_before(tmp_path):
+    # The daemon reads a pref's provider and caps and ignores keys it does
+    # not know, so Addendum 5's board_id costs an older daemon nothing.
+    picked = []
+    home = str(tmp_path / ".blink")
+    b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: dict(_ONE_PAGE),
+               now=Clock(), wall=lambda: (1752444000, 0),
+               status_watch=Watch(), theme_sync=theme.ThemeSync(home),
+               open_builder=Opener(), run_async=lambda fn: fn(),
+               set_preferred=lambda p: picked.append(p) or True, **_NO_FEED)
+    b.on_message({"t": "pref", "v": 2, "provider": "codex",
+                  "board_id": "a1b2c3d4e5f6", "caps": BOTH})
+    assert picked == ["codex"]
+    assert b._board_caps == {"svc", "theme"}
+    known = learn_board({}, "COM3", {"t": "pref", "provider": "codex",
+                                     "board_id": "a1b2c3d4e5f6",
+                                     "caps": BOTH})
+    assert set(known["caps"]) == {"svc", "theme"}

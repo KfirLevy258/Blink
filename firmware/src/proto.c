@@ -172,31 +172,55 @@ static void emit(const char *json)
  */
 #define BOARD_CAPS "\"caps\":[\"svc\",\"theme\"]"
 
+/*
+ * The board's id, as hello and pref both say it: hwinfo's device id in hex,
+ * 12 digits on this ESP32 (its 6-byte MAC), 32 at most, "unknown" if the
+ * driver has none. Read once; it cannot change while the board runs.
+ */
+static const char *board_id_hex(void)
+{
+	static char idhex[33];
+
+	if (idhex[0] == '\0') {
+		uint8_t id[16];
+		ssize_t n = hwinfo_get_device_id(id, sizeof(id));
+
+		strcpy(idhex, "unknown");
+		for (ssize_t i = 0; i < n && i < 16; i++) {
+			snprintf(idhex + i * 2, 3, "%02x", id[i]);
+		}
+	}
+	return idhex;
+}
+
 void proto_send_pref(void)
 {
-	/* 61 bytes at its widest ("claude"), measured by
-	 * tests/pc/test_board_caps.py, which fails if it outgrows this. */
-	char buf[96];
+	/*
+	 * The board's id rides on every pref, not only on hello (theme
+	 * contract, Addendum 5). hello goes out at boot and nowhere else, so a
+	 * daemon that restarts under a running board heard only this pref and
+	 * had nothing but board.json's memory to say which board it was --
+	 * and a remembered id must never decide whose theme wins.
+	 *
+	 * 107 bytes at its widest ("claude" and a 32-digit id; 87 with this
+	 * board's 12 digits), measured by tests/pc/test_board_caps.py, which
+	 * fails if it outgrows this. It was 96 B for the 61 B line before the
+	 * id; 128 leaves room, and both stay far under the daemon's 512.
+	 */
+	char buf[128];
 
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\","
-		 BOARD_CAPS "}",
+		 "\"board_id\":\"%s\"," BOARD_CAPS "}",
 		 PROTO_VERSION,
-		 cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "codex" : "claude");
+		 cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "codex" : "claude",
+		 board_id_hex());
 	emit(buf);
 }
 
 static void send_hello(void)
 {
-	uint8_t id[16];
-	char idhex[33] = "unknown";
-	ssize_t n = hwinfo_get_device_id(id, sizeof(id));
-
-	if (n > 0) {
-		for (ssize_t i = 0; i < n && i < 16; i++) {
-			snprintf(idhex + i * 2, 3, "%02x", id[i]);
-		}
-	}
+	const char *idhex = board_id_hex();
 
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
