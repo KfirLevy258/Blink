@@ -917,27 +917,125 @@ def test_ui_state_busy_covers_a_screen_load_on_board_and_harness():
 
 # --- the first board run: replies lost in the board's log ---------------------
 
+# The bytes a Zephyr 4.3.1 board puts on the cable, built the way the source
+# builds them rather than typed from memory: an earlier fixture put the colour
+# before the timestamp, the board never did, and the test agreed with the bug.
+#   subsys/logging/log_output.c prefix_print(): timestamp_print()
+#     "[%02u:%02u:%02u.%03u,%03u] ", then color_prefix() (colors[level], or
+#     LOG_COLOR_CODE_DEFAULT when the level has none: inf and dbg in this
+#     build), then ids_print() "<%s> " and "%s: ";
+#   postfix_print(): color_postfix() "\x1b[0m", then newline_print() "\r\n".
+_Z_COLOUR = {"err": b"\x1b[1;31m", "wrn": b"\x1b[1;33m",
+             "inf": b"\x1b[0m", "dbg": b"\x1b[0m"}
+
+
+def _zephyr_line(level, module, text, secs=62.345):
+    s, us = int(secs), round((secs % 1) * 1e6)
+    stamp = b"[%02u:%02u:%02u.%03u,%03u] " % (
+        s // 3600, s // 60 % 60, s % 60, us // 1000, us % 1000)
+    return (stamp + _Z_COLOUR[level] + b"<" + level.encode() + b"> "
+            + module.encode() + b": " + text + b"\x1b[0m\r\n")
+
+
+def _lvgl_line(level, func, msg, t_ms=62345, since=5):
+    """An LVGL message through Zephyr's glue. lv_log_add() (lvgl
+    src/misc/lv_log.c) formats "[Warn]" LOG_TIMESTAMP_FMT " %s: %s"
+    LOG_FILE_LINE_FMT "\n" with this build's CONFIG_LV_LOG_USE_TIMESTAMP and
+    _FILE_LINE on; modules/lvgl/lvgl.c lvgl_log() drops sizeof("[Warn] ")-1
+    characters of it and LOG_WRNs the rest. The trailing "\n" is LVGL's own."""
+    tag = {"wrn": b"[Warn]", "err": b"[Error]"}[level]
+    buf = (tag + b"\t(%d.%03d, +%d)\t" % (t_ms // 1000, t_ms % 1000, since)
+           + b" " + func + b": " + msg + b" lv_draw_buf.c:325\n")
+    return _zephyr_line(level, "lvgl", buf[len(tag) + 1:])
+
+
+def _cable(bench, data):
+    """What Link.read_loop does with the bytes: split on LF, one line each."""
+    *lines, rest = data.split(b"\n")
+    assert rest == b""
+    for line in lines:
+        bench.on_line(line)
+
+
+def test_the_fixture_is_the_shape_zephyr_4_3_sends():
+    raw = _lvgl_line("wrn", b"lv_draw_buf_create_ex", b"No memory: 1x1")
+    assert raw == (b"[00:01:02.345,000] \x1b[1;33m<wrn> lvgl: "
+                   b"(62.345, +5)\t lv_draw_buf_create_ex: No memory: 1x1"
+                   b" lv_draw_buf.c:325\n\x1b[0m\r\n")
+
+
 def test_an_unparsed_line_is_counted_by_kind_never_shown():
     out = io.StringIO()
     b, _ = _bench([], out=out)
     b.verbose = True
-    lines = [
-        b"\x1b[1;33m[00:01:02.345,000] <wrn> lvgl: lv_draw_buf_create_ex: "
-        b"No memory " + SECRET.encode(),
-        b"[00:01:02.346,000] <err> sk_private_mod: " + SECRET.encode(),
-        b"[proto] host status: " + SECRET.encode(),
-        b"[zzz] " + SECRET.encode(),
-        SECRET.encode(),
-    ]
-    for raw in lines:
-        b.on_line(raw)
+    _cable(b, b"".join([
+        _lvgl_line("wrn", b"lv_draw_buf_create_ex",
+                   b"No memory: " + SECRET.encode()),
+        _zephyr_line("err", "sk_private_mod", SECRET.encode()),
+        _zephyr_line("inf", "os", SECRET.encode()),
+        b"[proto] host status: " + SECRET.encode() + b"\r\n",
+        b"[zzz] " + SECRET.encode() + b"\r\n",
+        SECRET.encode() + b"\r\n",
+    ]))
     b.summary()
     text = out.getvalue()
     assert SECRET not in text and "PRIVATE" not in text
     assert "sk_private_mod" not in text
+    # One LVGL warning is one line: its colour-reset tail is folded in.
     assert b.unparsed_kinds == {"log wrn lvgl": 1, "log err other": 1,
-                                "printk [proto]": 1, "other": 2}
+                                "log inf os": 1, "printk [proto]": 1,
+                                "other": 2}
     assert "by kind:" in text and "log wrn lvgl 1" in text
+
+
+def test_lvgl_lines_are_told_apart_by_function_and_pool_markers():
+    out = io.StringIO()
+    b, _ = _bench([], out=out)
+    _cable(b, b"".join([
+        _lvgl_line("wrn", b"lv_draw_buf_create_ex",
+                   b"No memory: 320x40, cf: 18, " + SECRET.encode()),
+        _lvgl_line("wrn", b"lv_draw_buf_create_ex", b"No memory: 8x8"),
+        _lvgl_line("wrn", b"lv_draw_layer_alloc_buf",
+                   b"Allocating layer buffer failed. Try later"),
+        _lvgl_line("wrn", b"lv_indev_read",
+                   b"Could not put input data into queue"),
+        _lvgl_line("err", b"lv_obj_delete", b"x"),
+        # A name that is not identifier-shaped is withheld, never printed.
+        _lvgl_line("wrn", SECRET.encode(), b"y"),
+        _lvgl_line("wrn", b"Bad Name", b"z"),
+        # The markers count wherever they appear, but only as a number.
+        b"No memory " + SECRET.encode() + b"\r\n",
+    ]))
+    b.summary()
+    text = out.getvalue()
+    assert SECRET not in text and "PRIVATE" not in text
+    assert "Bad Name" not in text
+    assert b.lvgl_sources == {"wrn lv_draw_buf_create_ex": 2,
+                              "wrn lv_draw_layer_alloc_buf": 1,
+                              "wrn lv_indev_read": 1,
+                              "err lv_obj_delete": 1,
+                              "wrn (name withheld)": 2}
+    assert b.pool_dry == 4
+    assert "wrn lv_draw_buf_create_ex 2" in text
+    assert "LVGL OUT OF MEMORY: 4 line(s)" in text
+    # The message text itself is never shown, markers included.
+    assert "320x40" not in text and "Could not put" not in text
+
+
+def test_a_clean_run_says_no_lvgl_pool_failures():
+    out = io.StringIO()
+    b, _ = _bench([], out=out)
+    _cable(b, _lvgl_line("wrn", b"lv_indev_read", b"queue full"))
+    b.summary()
+    assert b.pool_dry == 0
+    assert "LVGL out-of-memory lines: 0" in out.getvalue()
+
+
+def test_a_colour_only_line_is_not_counted():
+    b, _ = _bench([], out=io.StringIO())
+    for raw in (b"\x1b[0m", b"\x1b[0m\r", b"\x1b[1;33m\x1b[0m"):
+        b.on_line(raw)
+    assert b.unparsed == 0
 
 
 def test_a_dropped_log_message_is_said_and_explains_a_lost_reply():

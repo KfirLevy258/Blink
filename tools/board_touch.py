@@ -40,7 +40,11 @@ WHAT IT PRINTS. Parsed fields and nothing else: ui_state's fields, theme_now's
 id/why/h, theme_edit, touch_done, the numbers on a [mem] or [swipe] line. A
 line it does not recognise -- including every other console line the board
 prints -- is never echoed: with -v it prints as "unparsed line (N bytes)",
-and either way it is counted in the summary. CLAUDE.md's rule names no program,
+and either way it is counted in the summary. Two things are read from an
+LVGL log line, and only these: the LVGL function that logged it (a name
+compiled into the firmware, printed only when it is identifier-shaped), and
+whether it carries LVGL's fixed "No memory" or "Allocating layer buffer
+failed" marker, which prints as a count. CLAUDE.md's rule names no program,
 and a bench tool that echoed the wire would be the easiest place to break
 it.
 
@@ -887,9 +891,49 @@ _SWIPE_RE = re.compile(
 # firmware/src prints), else "other". Enough to say "LVGL is warning on every
 # frame" without reading a byte of what it said.
 _LOG_DROPPED_RE = re.compile(rb"--- (\d{1,9}) messages dropped ---")
+# The shape of a Zephyr 4.3 log line, read from the source rather than
+# guessed. subsys/logging/log_output.c:prefix_print() writes the timestamp
+# first ("[%02u:%02u:%02u.%03u,%03u] ", timestamp_print), THEN the colour
+# (color_prefix), THEN "<wrn> module: " (ids_print); postfix_print() ends it
+# with the colour reset "\x1b[0m" and "\r\n". With
+# CONFIG_LOG_BACKEND_SHOW_COLOR=y every level gets a code at the front -- red
+# or yellow for err and wrn, the reset "\x1b[0m" for inf and dbg, whose
+# colours this build leaves off. This pattern used to expect the colour before
+# the timestamp, the order the board never sends, so every coloured line read
+# as "other": the 2026-10-28 bench run filed ~1,700 lines that way and the
+# question of what LVGL was warning about could not be answered. The hours
+# field is %02u, so it widens past 99 h of uptime rather than wrapping.
 _ZLOG_RE = re.compile(
-    rb"^(?:\x1b\[[0-9;]*m)?\[\d{2}:\d{2}:\d{2}\.\d{3},\d{3}\] "
+    rb"^\[\d{2,5}:\d{2}:\d{2}\.\d{3},\d{3}\] (?:\x1b\[[0-9;]*m)?"
     rb"<(err|wrn|inf|dbg)> ([a-z][a-z0-9_]{0,31}):")
+# A line that is nothing but colour codes. lv_log_add() (lvgl
+# src/misc/lv_log.c) ends the text it hands to Zephyr with its own "\n", and
+# log_output.c's out_func passes that through untouched, so the colour reset
+# and CRLF that postfix_print() adds land on a line of their own: one LVGL
+# warning reached this tool as two lines and was counted twice. The tail is
+# part of the line before it, so it is folded in -- not counted, not shown.
+_COLOUR_ONLY_RE = re.compile(rb"^(?:\x1b\[[0-9;]*m)+$")
+# What follows "lvgl: " in an LVGL line. Zephyr's lvgl_log()
+# (modules/lvgl/lvgl.c) strips LVGL's "[Warn]" and the one character after
+# it, and with CONFIG_LV_LOG_USE_TIMESTAMP=y (this build) what is left starts
+# "(12.345, +5)\t " -- LOG_TIMESTAMP_FMT, then the " %s: " that LV_LOG_WARN
+# fills with __func__. That function name is the only thing read from the
+# line: it is an identifier compiled into the firmware, never anything the
+# owner's data put there, and it is taken only when it has the shape of a C
+# identifier LVGL would use, so a line that is not what this expects yields
+# "withheld" and not a fragment of itself. It is what tells a run whose
+# warnings are input-queue noise (lv_indev_read) from one whose pool ran dry
+# (lv_draw_buf_create_ex).
+_LVGL_FUNC_RE = re.compile(
+    rb"lvgl: (?:\(\d{1,9}\.\d{3}, \+\d{1,9}\)\t )?([^:\s]{1,64}): ")
+_LVGL_FUNC_OK = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
+# LVGL's own words for "the pool ran dry": lv_draw_buf.c's "No memory: WxH,
+# ..." (and the decoders' "No memory for ..."), and lv_draw.c's "Allocating
+# layer buffer failed. Try later". Fixed substrings of LVGL's source, matched
+# as such; only how many lines carry them is ever printed. Either one means a
+# screen drew with a failed allocation, which on a customer's panel is a
+# reboot, so a run that sees one must not read as clean.
+_POOL_DRY_MARKERS = (b"No memory", b"Allocating layer buffer failed")
 _LOG_MODULES = frozenset({"lvgl", "os", "uart", "input", "xpt2046", "spi",
                           "gpio", "flash", "display", "mcuboot", "net",
                           "esp32", "heap", "kernel"})
@@ -921,6 +965,30 @@ def unparsed_kind(raw):
     if raw.startswith(b"{"):
         return "json not understood"
     return "other"
+
+
+def lvgl_source(raw):
+    """(level, LVGL function name) for an LVGL log line, else None. The name
+    is replaced by "(name withheld)" unless it is identifier-shaped."""
+    m = _ZLOG_RE.match(raw)
+    if not m or m.group(2) != b"lvgl":
+        return None
+    level = m.group(1).decode("ascii")
+    f = _LVGL_FUNC_RE.match(raw, m.start(2))
+    name = None
+    if f:
+        try:
+            name = f.group(1).decode("ascii")
+        except UnicodeDecodeError:
+            name = None
+    if name is None or not _LVGL_FUNC_OK.match(name):
+        name = "(name withheld)"
+    return level, name
+
+
+def pool_dry(raw):
+    """True when a line carries one of LVGL's out-of-memory markers."""
+    return any(k in raw for k in _POOL_DRY_MARKERS)
 
 
 _INJECT_LINE = (b"[touch] INJECT BUILD: the PC can drive this panel"
@@ -1318,6 +1386,8 @@ class Bench:
         self._mem_seen = 0
         self.unparsed = 0
         self.unparsed_kinds = {}   # unparsed_kind() -> count
+        self.lvgl_sources = {}     # "wrn lv_func" -> count (lvgl_source())
+        self.pool_dry = 0          # lines with an LVGL out-of-memory marker
         self.log_dropped = 0       # messages Zephyr's log said it dropped
         self.withheld = 0
         self.events = []           # parsed, in arrival order
@@ -1386,6 +1456,13 @@ class Bench:
         self.unparsed += 1
         kind = unparsed_kind(raw) if raw is not None else "over-long"
         self.unparsed_kinds[kind] = self.unparsed_kinds.get(kind, 0) + 1
+        if raw is not None:
+            src = lvgl_source(raw)
+            if src is not None:
+                key = " ".join(src)
+                self.lvgl_sources[key] = self.lvgl_sources.get(key, 0) + 1
+            if pool_dry(raw):
+                self.pool_dry += 1
         if self.verbose:
             self.say(f"unparsed line ({n} bytes, {kind})")
 
@@ -1394,7 +1471,9 @@ class Bench:
 
     def on_line(self, raw):
         raw = raw.rstrip(b"\r")
-        if not raw:
+        if not raw or _COLOUR_ONLY_RE.match(raw):
+            # Empty, or the colour-reset tail of an LVGL line that carried
+            # its own newline (see _COLOUR_ONLY_RE): part of the line before.
             return
         if raw.startswith(b"{"):
             if not self._on_json(raw):
@@ -2157,6 +2236,16 @@ class Bench:
             self.say("  by kind: " + ", ".join(
                 f"{k} {v}" for k, v in sorted(
                     self.unparsed_kinds.items(), key=lambda kv: -kv[1])))
+        if self.lvgl_sources:
+            self.say("  LVGL lines by function: " + ", ".join(
+                f"{k} {v}" for k, v in sorted(
+                    self.lvgl_sources.items(), key=lambda kv: -kv[1])))
+        if self.pool_dry:
+            self.say(f"LVGL OUT OF MEMORY: {self.pool_dry} line(s) said "
+                     "\"No memory\" or \"Allocating layer buffer failed\" "
+                     "-- a screen drew with a failed allocation")
+        else:
+            self.say("LVGL out-of-memory lines: 0")
         if self.log_dropped:
             self.say(f"the board's log dropped {self.log_dropped} "
                      "message(s); a reply that never came was probably one "
