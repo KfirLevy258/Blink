@@ -447,7 +447,7 @@ bool touch_inject_dispatch(const char *type, const char *json)
  * pushed the reply out: the first board run of the widget image lost 22
  * touch_done and ui_state replies that way, every one on a move into the
  * Settings panel, and the bench reported each as a missing reply. prj.conf
- * now has a writer wait for room instead (LOG_BLOCK_IN_THREAD, OVERFLOW off),
+ * now has a writer wait for room instead (LOG_BLOCK_IN_THREAD),
  * which every image shares. Each reply still kicks the log thread, so it
  * leaves at the main loop's next sleep, and the bench image's log buffer is
  * still the larger one (firmware/Kconfig, LOG_BUFFER_SIZE), so the waits it

@@ -25,9 +25,10 @@
  * (CONFIG_LOG_PRINTK with LOG_MODE_DEFERRED). When this was written it was
  * 1024 B and dropped its OLDEST message when full, so a reply of half that
  * buffer, landing beside a [mem] line and a ping, was how a protocol line
- * silently vanished. Since prj.conf's LOG_BLOCK_IN_THREAD nothing is
- * dropped, but a page that size still makes the main thread wait on the
- * wire sooner, and a smaller page costs nothing. Four at
+ * silently vanished. Since prj.conf's LOG_BLOCK_IN_THREAD a thread's line
+ * waits for room instead of being dropped, but a page that size still makes
+ * the main thread wait on the wire sooner, and a smaller page costs nothing.
+ * Four at
  * the worst-case entry below is 370 bytes with the head and tail (369 at
  * protocol v2; every aim at 319,239, the widest), which tests/touch_widgets
  * checks, and touch_inject.c kicks the log thread after
