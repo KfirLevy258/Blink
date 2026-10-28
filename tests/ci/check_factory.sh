@@ -247,6 +247,8 @@ run 1 "$ENC" $PORT
 export FAKE_EFUSE_BITS=0000000
 saw "CONFIG_BLINK_FATAL_SELFTEST=y"
 never "esptool.*write_flash"
+# Refused from the build alone, before the probe opens the port.
+never "espefuse"
 cp "$WORK/plain.config" "$CFG"
 # --selftest is a permission, not a label: on a plain build the unit is a
 # normal one, and the burn says so rather than "never box this unit".
@@ -281,6 +283,8 @@ run 1 "$ENC" $PORT
 export FAKE_EFUSE_BITS=0000000
 saw "CONFIG_BLINK_TOUCH_INJECT=y"
 never "esptool.*write_flash"
+# Refused from the build alone, before the probe opens the port.
+never "espefuse"
 cp "$WORK/plain.config" "$CFG"
 run 0 "$BURN" --edition claude --port $PORT --no-build --bench
 saw "not a touch-inject build"

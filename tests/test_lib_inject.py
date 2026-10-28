@@ -152,6 +152,13 @@ def test_flash_encrypted_sh_refuses_before_it_signs():
     flash = next(i for i, l in enumerate(lines) if "write_flash" in l
                  and not l.lstrip().startswith(("#", "echo")))
     assert guard < sign and guard < flash
+    # And before the eFuse probe: a refusal needs only the build, and the
+    # probe opens the port (review of develop/fork-picks, 2026-10-28).
+    probe = next(i for i, l in enumerate(lines)
+                 if re.match(r"\s*efuse_probe\b", l))
+    selftest = next(i for i, l in enumerate(lines)
+                    if re.match(r"\s*blink_refuse_selftest\b", l))
+    assert guard < probe and selftest < probe
     # Outright: no flag on this path lets an inject image through.
     assert not re.search(r"^\s*--bench\)", text, re.M)
 
