@@ -52,3 +52,17 @@ def test_no_sample_sits_close_enough_to_an_edge_for_a_last_bit_to_flip_it():
         nearest = min(abs(fn((k % n + 0.5) / gen.SS, (k // n + 0.5) / gen.SS))
                       for k in range(n * n))
         assert nearest > 1e-9, (name, nearest)
+
+
+def test_every_icon_array_is_aligned_for_lvgl():
+    # LVGL 9's lv_draw_buf_init() warns "Data is not aligned, ignored" on
+    # each decode of an image whose data is not on LV_DRAW_BUF_ALIGN, and
+    # with no image cache that is each draw. Unaligned, the four icons were
+    # all 836 of LVGL's warnings in one full_touch board run (2026-10-28).
+    import re
+    c = (SRC / "settings_icons.c").read_text(encoding="utf-8")
+    arrays = re.findall(r"^static const uint8_t (icon_\w+_map)\[\](.*?)=",
+                        c, re.M)
+    assert len(arrays) == 4
+    for name, attrs in arrays:
+        assert "aligned(LV_DRAW_BUF_ALIGN)" in attrs, name
