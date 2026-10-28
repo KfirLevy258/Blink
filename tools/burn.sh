@@ -146,7 +146,10 @@ restore_daemon() {
 	# the next login -- the board silently unattended after a burn that
 	# printed PASS. Measured five times out of five on the install path
 	# (pc/cli.py _LaunchdBackend.install, 2026-09-04); this is the same
-	# defect in the same shape, and it bit here on 2026-09-06.
+	# defect in the same shape, and it bit here on 2026-09-06. On macOS
+	# 27.0.1 (re-measured 2026-10-28, pc/cli.py install) bootstrap DID start
+	# a RunAtLoad job, five times out of five: which one a desk does depends
+	# on its macOS release, so the kickstart stays.
 	#
 	# Plain kickstart, not -k: on the job just bootstrapped it starts it all
 	# the same (pc/cli.py _LaunchdBackend.start), and if anything else loaded

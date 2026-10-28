@@ -191,7 +191,8 @@ agent_register() { launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" >/dev/null 
 #     same (pc/cli.py, _LaunchdBackend.start).
 #   - bootstrap only registers. Five installs out of five on 2026-09-04 came
 #     up registered and idle, and burn.sh's restore had that gap until
-#     2026-09-06; kickstart is what starts it.
+#     2026-09-06; kickstart is what starts it. (On macOS 27.0.1 bootstrap
+#     does start it, measured 2026-10-28; plain kickstart is right on both.)
 #   - neither command returning means a process exists. Saying the daemon
 #     is back over a job that is not running sends the reader away from a
 #     desk on HOST LOST, so ask launchd, for up to 2 s while kickstart's
