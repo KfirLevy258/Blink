@@ -73,7 +73,7 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**2641 passing** as of 2026-10-29, on macOS. The last count proved on all
+**2645 passing** as of 2026-10-29, on macOS. The last count proved on all
 three platforms was 1503, on 2026-10-19, on macOS, Ubuntu and Windows (ARM64
 VM). Re-run Ubuntu and Windows before claiming them for the new number. Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though
