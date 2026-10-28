@@ -41,9 +41,16 @@ static int64_t mute_until;
 static int64_t enter_mute_until;
 static volatile bool leave;
 
-#ifdef CONFIG_BLINK_TOUCH_INJECT
-static bool showing;
+/* Written by the mode loop in ui_anim_run(), read by swipe_cb on the LVGL
+ * timer that ui_anim_run's own idle_until() drives -- the same thread. */
+static volatile bool showing;
 
+bool ui_anim_showing(void)
+{
+	return showing;
+}
+
+#ifdef CONFIG_BLINK_TOUCH_INJECT
 bool ui_anim_bench_showing(void)
 {
 	return showing;
@@ -216,9 +223,7 @@ void ui_anim_run(void (*pump)(void))
 
 	pending = false;
 	leave = false;
-#ifdef CONFIG_BLINK_TOUCH_INJECT
 	showing = true;
-#endif
 
 	/*
 	 * Built frozen and already full size. Creating it would otherwise
@@ -353,7 +358,5 @@ void ui_anim_run(void (*pump)(void))
 	 * again through ui_settings' handlers. The exit slide above blocks long
 	 * enough for those events to land, so clearing here is the last word. */
 	pending = false;
-#ifdef CONFIG_BLINK_TOUCH_INJECT
 	showing = false;
-#endif
 }

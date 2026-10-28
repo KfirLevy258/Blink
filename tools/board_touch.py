@@ -331,12 +331,13 @@ def _targets():
     # that is a leftward stroke on the screen.
     add("eye.exit", "swipe", list(SW_LEFT), {"scr": "eyes"},
         {"scr": "gauges"}, 1.6, "swipe left on the clip: back to the gauges")
-    # The same exit, too short for ui_swipe to call it a swipe. The full one
-    # also reaches ui_swipe as a LEFT stroke while the clip holds the mode
-    # loop; its swipe_cb finds no mute and latches want_open, and Settings
-    # opens the moment the clip returns (seen on the host harness,
-    # tools/panel_render/touch.sh). This one leaves without that, for a
-    # script that needs the clip and then the gauges.
+    # The same exit, too short for ui_swipe to call it a swipe: LVGL's
+    # gesture alone. The full one also reaches ui_swipe as a LEFT stroke
+    # while the clip holds the mode loop, and swipe_cb used to latch
+    # want_open from it once the clip's entry mute had run out, so Settings
+    # opened as the clip returned (host harness, 2026-10-28). swipe_cb now
+    # ignores strokes while the clip shows; this stays for a script that
+    # wants an exit ui_swipe never sees.
     add("eye.exit_short", "swipe", list(SW_LEFT_SHORT), {"scr": "eyes"},
         {"scr": "gauges"}, 1.6,
         "a 30 px left swipe on the clip: LVGL's gesture, not ui_swipe's",

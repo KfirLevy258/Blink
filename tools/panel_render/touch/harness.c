@@ -205,6 +205,11 @@ bool ui_anim_bench_showing(void)
 	return anim_showing;
 }
 
+bool ui_anim_showing(void)
+{
+	return anim_showing;
+}
+
 static void anim_gesture_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);

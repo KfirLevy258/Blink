@@ -47,6 +47,14 @@ bool ui_anim_gesture_muted(void);
  */
 void ui_anim_gesture_mute(int ms);
 
+/*
+ * The clip owns the screen: true from the moment ui_anim_run() builds its
+ * overlay until it has slid back out. A stroke ui_swipe decides in that time
+ * was made on the clip, and nothing underneath may act on it -- see
+ * swipe_cb in ui_settings.c for what it used to do.
+ */
+bool ui_anim_showing(void);
+
 /* Play until the user swipes back; returns with the previous screen
  * reloaded. `pump` (may be NULL) runs between frames so the mode's
  * background duties -- serial protocol, event queue -- stay alive. */

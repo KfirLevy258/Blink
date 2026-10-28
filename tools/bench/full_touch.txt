@@ -175,12 +175,25 @@ expect ui_state scr=gauges focus=off theme=0 stored=0
 wait 1.6
 mem
 
-# --- the eye swipe, in and out the way a finger does it. Last, because on
-# the host harness the full left swipe out of the clip also opens Settings
-# (eye.exit_short in board_touch.py has why); if the board does the same,
-# this is where the script says so, after everything else has run.
+# --- the eye swipe, in and out the way a finger does it. The full left
+# swipe out of the clip used to latch Settings too, whenever ui_swipe
+# decided it before LVGL's gesture ended the clip and the clip's entry mute
+# had run out (about 1.25 s after it landed): Settings then opened by
+# itself as the gauges came back. The host harness hit that on most runs;
+# swipe_cb now ignores every stroke made while the clip is up. Twice: once
+# straight away, inside the mute, and once after 3 s, well past it, which
+# is the case that failed.
 tap eye.swipe
-wait 2
+wait 0.3
+tap eye.exit
+expect ui_state scr=gauges modal=none
+wait 1.6
+tap eye.swipe
+wait 3
+# An up stroke on the clip, which the clip ignores. It used to latch a page
+# change for the moment the clip was left.
+swipe 160 200 160 60
+expect ui_state scr=eyes
 tap eye.exit
 mem
-expect ui_state scr=gauges
+expect ui_state scr=gauges modal=none

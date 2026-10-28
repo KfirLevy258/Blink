@@ -3306,6 +3306,23 @@ static void swipe_cb(enum ui_swipe_dir dir)
 	if (ui_anim_gesture_muted()) {
 		return;	/* the swipe that just closed the clip, replayed */
 	}
+	/*
+	 * And nothing at all while the clip is up. ui_anim_run() holds the mode
+	 * loop but keeps LVGL's timers running, so this drain fires for strokes
+	 * made ON the clip, and the mute above covers only its first ~1.25 s.
+	 * After that, the left stroke that leaves the clip also latched
+	 * want_open here whenever ui_swipe decided it (at 36 px, on the input
+	 * thread) before LVGL's lagging gesture ended the clip, and Settings
+	 * opened by itself the moment the gauges came back. The host harness
+	 * hit it on most runs of full_touch's eye.exit (review of
+	 * fp/audit-fixes, SHOULD-2, 2026-10-28); a board run happened to win
+	 * the race. An up or down stroke on the clip, which the clip ignores,
+	 * latched a page change the same way, held until the clip was left.
+	 * The clip has its own exit, and owns every stroke made on it.
+	 */
+	if (ui_anim_showing()) {
+		return;
+	}
 	if (dir == UI_SWIPE_LEFT) {
 		/* Not off the CONNECTING screen. A swipe is the ACCIDENTAL
 		 * route -- see the edge zones below, which stay open on
