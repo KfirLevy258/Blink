@@ -707,6 +707,50 @@ int main(void)
 			      "\"note\":\"theme\"}", "theme"),
 	      "caps: theme outside the array does not count");
 
+	/*
+	 * The header dot. Mono and Light ink drew a healthy reading in their
+	 * lighter ink and a stale one in full ink once their low and mid
+	 * parted (review of fp/audit-fixes, NICE 6): the warning was the bold
+	 * mark, and healthy sat in the disconnected dot's grey family. Where
+	 * the two are neutral, strength is all that separates them, so a sound
+	 * reading must be the stronger mark; with a hue, the hue does it.
+	 */
+	for (int id = 0; id < THEME_BUILTIN_N; id++) {
+		const struct palette *p = theme_builtin(id);
+		uint32_t live, stale;
+		bool grey_pair;
+
+		theme_dot_colours(p, &live, &stale);
+		grey_pair = ((live >> 16) & 0xFF) == (live & 0xFF) &&
+			    ((live >> 8) & 0xFF) == (live & 0xFF) &&
+			    ((stale >> 16) & 0xFF) == (stale & 0xFF) &&
+			    ((stale >> 8) & 0xFF) == (stale & 0xFF);
+		snprintf(m, sizeof(m), "%s: the dot's live and stale differ",
+			 theme_name(id));
+		CHECK(live != stale && live != p->grey && stale != p->grey, m);
+		snprintf(m, sizeof(m), "%s: a stale dot is no stronger than a"
+			 " live one where only strength tells them apart"
+			 " (%.2f >= %.2f)", theme_name(id), cr(live, p->bg),
+			 cr(stale, p->bg));
+		CHECK(!grey_pair || cr(live, p->bg) >= cr(stale, p->bg), m);
+		snprintf(m, sizeof(m), "%s: the dot is still low and mid where a"
+			 " hue separates them", theme_name(id));
+		CHECK(grey_pair || (live == p->low && stale == p->mid), m);
+	}
+	{
+		uint32_t live, stale;
+
+		theme_dot_colours(theme_builtin(THEME_MONO), &live, &stale);
+		CHECK(live == 0xFFFFFF && stale == 0x9C9C9C,
+		      "Mono: the dot is white when sound, grey when old");
+		theme_dot_colours(theme_builtin(THEME_LIGHT_INK), &live, &stale);
+		CHECK(live == 0x000000 && stale == 0x555555,
+		      "Light ink: the dot is black when sound, grey when old");
+		theme_dot_colours(theme_builtin(THEME_DARK), &live, &stale);
+		CHECK(live == 0x0DA243 && stale == 0xBA8107,
+		      "Dark: the dot is 1.3.4's green and amber");
+	}
+
 	printf(failures ? "\n%d FAILED\n" : "\nall theme checks passed\n",
 	       failures);
 	return failures ? 1 : 0;

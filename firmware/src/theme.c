@@ -593,6 +593,24 @@ bool theme_select_custom(const struct theme_custom *t)
 	return true;
 }
 
+static bool neutral(uint32_t c)
+{
+	return ((c >> 16) & 0xFF) == ((c >> 8) & 0xFF) &&
+	       ((c >> 8) & 0xFF) == (c & 0xFF);
+}
+
+void theme_dot_colours(const struct palette *p, uint32_t *live,
+		       uint32_t *stale)
+{
+	*live = p->low;
+	*stale = p->mid;
+	if (neutral(p->low) && neutral(p->mid) &&
+	    theme_contrast(p->mid, p->bg) > theme_contrast(p->low, p->bg)) {
+		*live = p->mid;
+		*stale = p->low;
+	}
+}
+
 uint32_t theme_arc_colour(const struct palette *p, int which, double pct)
 {
 	if (pct >= 90.0) {

@@ -2028,6 +2028,10 @@ static void refresh_dots(void)
 	int x;
 
 	if (dot) {
+		uint32_t live, stale;
+
+		/* Low and mid, unless both are neutral: theme.h says why. */
+		theme_dot_colours(theme_pal(), &live, &stale);
 		switch (data_health) {
 		case USAGE_STATUS_ERROR:
 			hc = COL_RED;
@@ -2042,14 +2046,14 @@ static void refresh_dots(void)
 			 * this page's numbers really are sound. What the tool
 			 * is doing is the other dot's business now.
 			 */
-			hc = stale_here() ? COL_AMBER : COL_GREEN;
+			hc = lv_color_hex(stale_here() ? stale : live);
 			break;
 		case USAGE_STATUS_DISCONNECTED:
 			hc = COL_GREY;
 			break;
 		case USAGE_STATUS_OK:
 		default:
-			hc = COL_GREEN;
+			hc = lv_color_hex(live);
 			break;
 		}
 		lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);

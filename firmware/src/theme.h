@@ -141,6 +141,21 @@ double theme_contrast(uint32_t a, uint32_t b);
 uint16_t theme_lin(uint8_t v);
 uint32_t theme_mix(uint32_t a, uint32_t b, double t);
 
+/*
+ * The header dot's two "there is data" colours: `live` for a sound reading,
+ * `stale` for an old one. Ordinarily low and mid, the green and the amber.
+ *
+ * Where both are neutral -- Mono's grey and white, Light ink's grey and
+ * black, or a custom theme made the same way -- hue cannot tell them apart,
+ * only strength can, and low-then-mid would put the BOLDER mark on the
+ * stale reading and a healthy dot in the same grey family as the
+ * disconnected one (review of fp/audit-fixes, NICE 6). There the two swap:
+ * full ink while the reading is sound, fading to the lighter ink when it
+ * goes old, and the disconnected grey after that.
+ */
+void theme_dot_colours(const struct palette *p, uint32_t *live,
+		       uint32_t *stale);
+
 /* The arc colour for gauge `which` (0 session, 1 weekly) at `pct`. */
 uint32_t theme_arc_colour(const struct palette *p, int which, double pct);
 
