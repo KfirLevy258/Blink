@@ -232,7 +232,7 @@ Blink has to change.
 | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
 | Keeps | the last status line payload Claude Code sent, in `~/.blink/statusline.json`. Alongside the two usage figures it carries the session id, working directory and transcript path; only the figures are read, and nothing in it leaves the machine |
 | Only if you ask | `~/.blink/config.json`, written by `blink config` (today the one setting is `status-page`). Removed by `blink uninstall`, so a reinstall starts with status-page alerts off |
-| Keeps | the board's theme, for a board that can show one (firmware 1.4.0 and later). `~/.blink/theme.json` holds the theme you set here or picked on the board, and the last theme the board was known to have, so a theme picked on the board while the app was off is kept rather than overwritten. `theme_sent.json` records the last theme the board confirmed storing, and `theme_preview.json` lives for a second or two at a time while the theme builder is open. All three are removed by `blink uninstall`, so a reinstall does not send an old theme back to the board |
+| Keeps | the board's theme, for a board that can show one (firmware 1.4.0 and later). `~/.blink/theme.json` holds the theme you set here or picked on the board. `theme_seen.json`, written by the app alone, holds the last theme it knew the board had, so a theme picked on the board while the app was off is kept rather than overwritten. `theme_sent.json` records the last theme the board confirmed storing, and `theme_preview.json` holds a builder preview or a cancel briefly, until the app next sends it to the board. All four are removed by `blink uninstall`, so a reinstall does not send an old theme back to the board |
 | Reads | Claude Desktop's usage cache and the tail of Codex's session log, when present; from each only the usage figures are kept. No credential, no token |
 
 **It does this without asking**, so that plugging the board in is the whole
@@ -445,7 +445,7 @@ and back to return. It is four tiles, each with an icon:
 |---|---|
 | **Brightness** | Tap a level. It is kept across a power cycle |
 | **Theme** | The panel's colours: twelve built-in themes and one of your own (below) |
-| **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Turning Focus off keeps your choice of window, so turning it back on lands where it was |
+| **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Off remembers which window was big |
 | **Update** | The software update: **Up to date**, an offer to install, or **App is old** when the half on your computer is behind (see "Updates") |
 
 Theme and Focus need board firmware 1.4.0 or later. A board on 1.3.4 or
@@ -459,7 +459,10 @@ Twelve themes are built in: **Dark** (the default), **Neon**, **Bold**,
 fills, so the levels part for someone who sees no hue at all), and three
 light ones for a bright room - **Light**, **Light soft** and **Light ink**.
 Each sets every colour on the panel, the width of the dials' arcs, round or
-flat arc ends, and whether a dot rides the tip of each arc.
+flat arc ends, and whether a dot rides the tip of each arc. Those are the
+names on the board's tiles; on the command line a few are spelt differently
+(`cvd-safe`, `retro-lcd`, `light-soft`), and `blink theme list` shows the
+names to type.
 
 The thirteenth tile, **Custom**, is a theme you make on your computer:
 
@@ -480,7 +483,9 @@ A theme lives on the board and on your computer at once. One picked on the
 board is taken up by the computer; one set on the computer goes to the
 board within a few seconds. A theme picked on the board while the app was
 off or asleep is kept when it comes back. If both sides changed while they
-were apart, the board's choice wins - it is the one in front of you.
+were apart, the board's choice wins - it is the one in front of you - and
+`blink theme show` says so, naming the theme that was set here. A board the
+computer has not met before is sent the computer's theme.
 
 ### Making a theme on your computer
 
@@ -542,8 +547,12 @@ The panel's text is drawn in **Montserrat**, Copyright 2011 The Montserrat
 Project Authors (https://github.com/JulietaUla/Montserrat), used under the
 SIL Open Font License 1.1: the sizes LVGL builds in, and Focus mode's large
 figure, a subset in `firmware/src/font_focus_40.c`. The licence is in
-`firmware/src/fonts/OFL.txt`. That font data is under the OFL, not under the
-PolyForm licence that covers the rest of this repository.
+`firmware/src/fonts/OFL.txt`. The arrows and the check mark on the panel
+are from **Font Awesome Free**, by Fonticons, Inc.
+(https://fontawesome.com), which LVGL merges into those same built-in fonts;
+the font is also under the SIL Open Font License 1.1. That font data is
+under the OFL, not under the PolyForm licence that covers the rest of this
+repository.
 
 ## Support
 
