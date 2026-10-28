@@ -5,7 +5,10 @@
 
 /* Make `scr` (the gauge screen) open the settings panel on a left swipe.
  * The panel is an overlay on the same screen, NOT a separate LVGL screen:
- * the 16 KiB LVGL pool cannot hold two full screens (see usage_view_deinit).
+ * the LVGL pool cannot hold two full screens (see usage_view_deinit). It was
+ * 16 KiB when that was written and is 32 KiB now (prj.conf,
+ * LV_Z_MEM_POOL_SIZE), and two screens still do not fit: the gauges and an
+ * open Settings come to about 25 KB on the board before any popup.
  * It holds brightness, theme, Focus and the software update; the
  * reset-and-reboot actions went with the standalone WiFi mode on
  * 2026-10-27. */

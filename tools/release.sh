@@ -200,14 +200,18 @@ SHA=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
 SLOT=$((0x150000))
 [ "$SIZE" -le "$SLOT" ] || { echo "FATAL: image $SIZE > slot $SLOT"; exit 1; }
 
-# The OTA artifact must stay UNCONFIRMED -- the opposite of what the factory
-# scripts flash (tools/sign_confirmed.py). It lands in slot 1, boots once, and
-# firmware/src/main.c confirms it only once the daemon has delivered usage
-# to it, which proves the image works. A pre-confirmed artifact would take
-# that safety net away: a bad release would then be permanent on every board
-# that accepted it, with no revert. The size check above already catches
-# --pad, which pads to the full slot -- this names the reason, so nobody
-# "fixes" it by padding here too.
+# The OTA artifact must stay UNCONFIRMED and unpadded -- the opposite of what
+# the factory scripts flash (tools/sign_confirmed.py). The daemon writes it
+# into slot 0 with esptool (pc/ota.py, APP_OFFSET), in place: there is no
+# swap and no older image behind it to revert to, so what keeps a bad release
+# off a board is the daemon's own checking, the manifest sha256 before the
+# write and esptool's MD5 read-back after it. This comment used to say the
+# image lands in slot 1, boots once, and is confirmed by main.c with a revert
+# behind it. That was the WiFi path's MCUboot swap, which went with the radio
+# on 2026-10-27; what an unconfirmed image does at boot now is
+# firmware/src/main.c, ota_boot_begin(). The size check above already
+# catches --pad, which pads to the full slot -- this names the reason, so
+# nobody "fixes" it by padding here too.
 [ "$SIZE" -lt "$SLOT" ] || {
 	echo "FATAL: $BIN is exactly the slot size -- it looks padded, and a"
 	echo "       padded image carries a trailer. The OTA artifact must be"

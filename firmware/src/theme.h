@@ -104,7 +104,9 @@ struct theme_custom {
 /* A built-in palette, or NULL for anything that is not 0..11. */
 const struct palette *theme_builtin(int id);
 
-/* Name for the settings list, sentence case, fits a 96 px tile. */
+/* Name for the theme screen, sentence case. A tile is 144 px wide and its
+ * label is clipped to THEME_NAME_W, 124 px (ui_settings.c); the 96 px tile
+ * this used to name went with the old grid. */
 const char *theme_name(int id);
 
 /* Does this custom theme make a usable screen? Checks every field's range

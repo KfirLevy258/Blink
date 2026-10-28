@@ -192,6 +192,46 @@ keeps those old fields, unread, so that its layout, and every setting in it, sur
 an update. Published images hold no secrets either way; what lets an image install is
 the signing key, not secrecy.
 
+## Bench builds
+
+Two build options exist only for testing a board on the bench. **Neither is ever
+shipped.** `tools/release.sh` and `tools/flash_encrypted.sh` refuse both outright,
+and `tools/burn.sh` refuses them unless you pass the matching flag.
+
+- **The touch injector** (`CONFIG_BLINK_TOUCH_INJECT`) lets the computer drive
+  the touch panel and read back what the screen shows, so every interaction can be
+  tested with nobody at the panel. Build it into its own directory, never into
+  `build-sb` (the help text of `BLINK_TOUCH_INJECT` in `Kconfig` has the full
+  `west build` line), then flash it with
+  `BLINK_BUILD_DIR=$PWD/build-inject ../tools/burn.sh --edition claude --no-build --bench`.
+- **The fault self-test** (`CONFIG_BLINK_FATAL_SELFTEST`) faults on purpose a
+  set time into every boot, to prove the fatal handler. Flash it with
+  `burn.sh --selftest`.
+
+With an inject board on its gauges, `tools/board_touch.py` stands in for the
+daemon and plays taps, swipes and clicks:
+
+```sh
+tools/board_touch.py state                                # what the screen shows
+tools/board_touch.py widgets                              # every control, and where
+tools/board_touch.py click "Later"
+tools/board_touch.py script tools/bench/full_touch.txt    # every Settings path
+tools/board_touch.py script tools/bench/popups_touch.txt  # every popup
+```
+
+It takes the daemon's lock and refuses while anything else holds the port, so stop
+the installed daemon first (the `launchctl` lines are in its docstring). At the end
+of a script it prints each screen's peak use of the LVGL pool, and an LVGL
+allocation failure on the console (`No memory`, `Allocating layer buffer failed`
+and the like) fails the run, because on a customer's panel it is a reboot.
+
+The same scripts run without a board on the host harness, which compiles the
+firmware's UI against LVGL on the laptop and saves a PNG of every step:
+`tools/panel_render/touch.sh OUTDIR [SCRIPT]`.
+
+When you are done, flash a normal image with `burn.sh` before the unit goes
+anywhere but the bench.
+
 ## Hardware notes
 
 Things worth knowing when hacking on the CYD:
