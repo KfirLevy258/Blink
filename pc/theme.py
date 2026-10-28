@@ -746,6 +746,13 @@ class ThemeSync:
         self._board = None
         self._board_id = None
         self._asked = None
+        # A board choice whose adopt was refused because theme.json could
+        # not be read (Unreadable). Retried on every tick, and while it
+        # stands no save goes out. Without it, the tick after the file came
+        # back read the old theme, saw it differ from the board, and sent
+        # it: the owner's pick reverted on the panel, with no message
+        # (round-2 review of fp/fix-pc, R1, reproduced).
+        self._pending = None
         sent = _read_json(sent_path(home))
         self._sent = _reported(sent)
 
@@ -753,6 +760,7 @@ class ThemeSync:
         self._board = None
         self._board_id = None
         self._asked = None
+        self._pending = None
 
     def _record_for(self, board_id):
         """theme_seen.json's record when it is about `board_id`, else None."""
@@ -778,6 +786,10 @@ class ThemeSync:
             self._board_id = board_id
         why = msg.get("why")
         self._board = fp
+        if why in (WHY_ADOPT, WHY_BOOT):
+            # The board has spoken again; what it says now decides, and
+            # sets a new pending adopt below if that one is refused too.
+            self._pending = None
         rec = self._record_for(board_id)
         kept = lost = None
         if why == "saved":
@@ -828,8 +840,10 @@ class ThemeSync:
                 if why == "saved" and rec["asked"] != fp:
                     new["asked"] = rec["asked"]
                 # What the board kept over us is news until our next save
-                # lands, or the board is adopted again.
-                if kept is None and why != "saved":
+                # lands, or the owner picks again on the board. Carried past
+                # a why=user, it came back stale the day the owner picked the
+                # kept theme again (round-2 review, R4).
+                if kept is None and why not in ("saved", WHY_ADOPT):
                     new["kept"], new["lost"] = rec["kept"], rec["lost"]
         try:
             _write_seen(self._home, new)
@@ -868,8 +882,13 @@ class ThemeSync:
                 # holding a theme that would overwrite them.
                 forget(self._home)
         except OSError as e:
-            print(f"[theme] could not keep the board's choice: {e}",
-                  file=sys.stderr)
+            if self._pending != fp:
+                # Once per refusal, not once per retry tick.
+                print(f"[theme] could not keep the board's choice: {e}",
+                      file=sys.stderr)
+            self._pending = fp
+        else:
+            self._pending = None
         self._asked = None
 
     def outgoing(self, deliver=True):
@@ -881,11 +900,15 @@ class ThemeSync:
         """
         out = []
         taken = take_preview(self._home)
+        if self._pending is not None:
+            self._adopt(self._pending)
         if not deliver:
             return out
         save = None
         want = load_saved(self._home)
-        if want is not None:
+        # A refused adopt still standing: the file may read again before the
+        # adopt goes through, and then it holds the theme the board left.
+        if want is not None and self._pending is None:
             fp = fingerprint(want)
             holds = self._board if self._board is not None else self._sent
             if fp != holds and fp != self._asked:

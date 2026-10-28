@@ -607,6 +607,28 @@ def test_a_failed_save_is_reported_to_the_page(server, home, monkeypatch):
     assert not server.done
 
 
+def test_save_leaves_an_unreadable_theme_json_alone(server, home):
+    # Round-2 review, R2: the builder's own Unreadable branch, with a real
+    # theme.json that does not parse rather than a patched save().
+    from tests.support.home import inside
+    os.makedirs(home, exist_ok=True)
+    path = inside(home, theme.theme_path(home))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"id": 4, "owner": "text"')
+    cookie = login(server)
+    status, _, body = request(server, "POST", "/api/save", {"id": 3},
+                              cookie=cookie)
+    assert status == 500
+    err = json.loads(body)["error"]
+    assert err.startswith("Not saved: ")
+    assert "left as it is" in err
+    assert "owner" not in err
+    assert not server.done                 # Save can be tried again
+    with open(path, encoding="utf-8") as f:
+        assert f.read() == '{"id": 4, "owner": "text"'
+    assert theme.take_preview(home) is None   # and no cancel was written
+
+
 def test_the_page_heartbeat_keeps_it_alive_without_counting_as_an_edit(
         server):
     cookie = login(server)

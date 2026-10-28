@@ -484,8 +484,9 @@ board is taken up by the computer; one set on the computer goes to the
 board within a few seconds. A theme picked on the board while the app was
 off or asleep is kept when it comes back. If both sides changed while they
 were apart, the board's choice wins - it is the one in front of you - and
-`blink theme show` says so, naming the theme that was set here. A board the
-computer has not met before is sent the computer's theme.
+`blink theme show` says so, naming the theme that was set here. A board
+other than the last one the computer talked to is sent the computer's
+theme.
 
 ### Making a theme on your computer
 

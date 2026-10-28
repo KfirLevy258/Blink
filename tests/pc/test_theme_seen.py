@@ -328,6 +328,90 @@ def test_a_theme_json_that_does_not_parse_is_left_alone(home, capsys):
     assert "owner text" not in err
 
 
+def _fail_theme_json_reads(monkeypatch, times):
+    """The next `times` opens of theme.json raise PermissionError, as an
+    antivirus scan or a backup tool holding it would."""
+    real_open = builtins.open
+    left = [times]
+
+    def flaky(path, *a, **k):
+        if os.path.basename(str(path)) == "theme.json" and left[0] > 0:
+            left[0] -= 1
+            raise PermissionError(13, "held by another process")
+        return real_open(path, *a, **k)
+    monkeypatch.setattr(builtins, "open", flaky)
+    return left
+
+
+@pytest.mark.parametrize("why", ["user", "boot"])
+def test_a_refused_adopt_is_retried_and_never_turns_into_a_save(
+        home, monkeypatch, capsys, why):
+    # Round-2 review, R1, reproduced: theme.json Ocean; Neon picked on the
+    # board while the file cannot be read. The adopt is refused, rightly,
+    # and the next tick read Ocean again and sent it, reverting the panel.
+    theme.save(home, {"id": 4})
+    confirmed(home, 4)
+    s = connect(home)
+    s.board_now(now_msg(4, "boot"), board_id=BOARD)
+    # Unreadable for the length of the report, readable again after it.
+    left = _fail_theme_json_reads(monkeypatch, 10 ** 6)
+    s.board_now(now_msg(1, why), board_id=BOARD)
+    left[0] = 0
+    assert theme.load_saved(home) == {"id": 4}      # refused, not written
+    assert s.outgoing() == []                       # retried: goes through
+    assert theme.load_saved(home) == {"id": 1}
+    assert s.outgoing() == []
+    assert capsys.readouterr().err.count("could not keep") == 1
+
+
+def test_a_file_that_stays_unreadable_sends_nothing(home, monkeypatch,
+                                                     capsys):
+    theme.save(home, {"id": 4})
+    s = connect(home)
+    s.board_now(now_msg(4, "boot"), board_id=BOARD)
+    _fail_theme_json_reads(monkeypatch, 10 ** 6)
+    s.board_now(now_msg(1, "user"), board_id=BOARD)
+    for _ in range(3):
+        assert s.outgoing() == []
+    # Logged once, not once per tick.
+    assert capsys.readouterr().err.count("could not keep") == 1
+
+
+def test_a_pending_adopt_ends_on_a_hello_or_the_next_report(home,
+                                                            monkeypatch):
+    theme.save(home, {"id": 4})
+    s = connect(home)
+    s.board_now(now_msg(4, "boot"), board_id=BOARD)
+    left = _fail_theme_json_reads(monkeypatch, 10 ** 6)
+    s.board_now(now_msg(1, "user"), board_id=BOARD)
+    left[0] = 0
+    s.hello()                            # the board rebooted: it says again
+    s.board_now(now_msg(4, "boot"))      # and holds Ocean after all
+    assert saves(s.outgoing()) == []
+    assert theme.load_saved(home) == {"id": 4}
+    left[0] = 10 ** 6
+    s.board_now(now_msg(1, "user"), board_id=BOARD)
+    left[0] = 0
+    s.board_now(now_msg(6, "user"), board_id=BOARD)  # a newer pick decides
+    assert s.outgoing() == []
+    assert theme.load_saved(home) == {"id": 6}
+
+
+def test_a_new_pick_on_the_board_clears_the_kept_note(home):
+    # Round-2 review, R4: the note was carried past a why=user, so picking
+    # the kept theme again later brought a stale "kept over" back.
+    theme.save(home, {"id": 4})
+    confirmed(home, 4)
+    theme.save(home, {"id": 7})
+    s = connect(home)
+    s.board_now(now_msg(1, "boot"), board_id=BOARD)
+    assert theme.board_kept(home) == ({"id": 1}, {"id": 7})
+    s.board_now(now_msg(2, "user"), board_id=BOARD)
+    s.board_now(now_msg(1, "user"), board_id=BOARD)
+    assert theme.load_saved(home) == {"id": 1}
+    assert theme.board_kept(home) is None
+
+
 def test_only_a_missing_theme_json_reads_as_empty(home):
     theme.forget(home)                   # no file: nothing to do, no error
     theme.save(home, {"id": 3})
