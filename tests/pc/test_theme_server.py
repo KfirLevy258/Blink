@@ -215,8 +215,40 @@ def test_save_writes_the_theme_and_shuts_down(server, home):
     assert status == 200
     assert server.wait(5) == "saved"
     assert theme.load_saved(home) == DARKISH
-    # The preview still waiting is dropped: what was saved is what goes out.
-    assert theme.take_preview(home) is None
+    # The preview still waiting is replaced by a cancel: what was saved is
+    # what goes out, and a preview already shown is ended (review NICE-4).
+    assert theme.take_preview(home) == ("cancel", None)
+
+
+def _daemon_sends_after_save(server, home, stored, picked):
+    """The lines a daemon's next tick sends after the builder saves
+    `picked`, on a board holding `stored` with a preview showing."""
+    theme.save(home, stored)
+    sync = theme.ThemeSync(home)
+    sync.board_now({"t": "theme_now", "v": 2, "id": stored["id"],
+                    "why": "boot"})
+    cookie = login(server)
+    request(server, "POST", "/api/preview", {"id": 3}, cookie=cookie)
+    assert sync.outgoing() == [theme.message("preview", {"id": 3})]
+    status, _, _ = request(server, "POST", "/api/save", picked,
+                           cookie=cookie)
+    assert status == 200
+    assert server.wait(5) == "saved"
+    return sync.outgoing()
+
+
+def test_saving_the_stored_theme_ends_the_preview(server, home):
+    # NICE-4: no save is owed, so before this nothing went out and the
+    # preview stayed on the board for 15 minutes under a page saying Saved.
+    assert _daemon_sends_after_save(server, home, {"id": 4}, {"id": 4}) == [
+        theme.message("cancel")]
+
+
+def test_saving_a_new_theme_sends_only_the_save(server, home):
+    # A cancel before the save would repaint the old stored theme for a
+    # moment; the save ends the preview on the board by itself.
+    assert _daemon_sends_after_save(server, home, {"id": 4}, {"id": 6}) == [
+        theme.message("save", {"id": 6})]
 
 
 def test_cancel_restores_and_shuts_down(server, home):

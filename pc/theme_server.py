@@ -325,9 +325,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # again. "Saved" over a failed write is a lie the owner acts on.
             return self._json(500, {"error": "Not saved: this computer could"
                                     f" not write the theme file ({e})."})
-        # A preview still waiting would reach the board after the save and
-        # show something other than what was just stored.
-        theme.drop_preview(self.builder.home)
+        # A cancel, not just dropping the preview file: a preview still
+        # waiting would reach the board after the save and show something
+        # other than what was just stored, and one already sent stays on the
+        # board for 15 minutes when this Save picked the theme already
+        # stored, because then no save line goes out to end it (review
+        # NICE-4). ThemeSync.outgoing drops the cancel when a save is owed.
+        theme.write_cancel(self.builder.home)
         self._json(200, {"ok": True})
         self.builder.finish("saved")
 

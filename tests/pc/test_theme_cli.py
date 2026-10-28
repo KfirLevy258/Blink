@@ -214,3 +214,65 @@ def test_bare_theme_says_it_is_opening_and_gives_the_link(monkeypatch,
     out = capsys.readouterr().out
     assert "opening" in out.lower()
     assert links[0] in out
+
+
+# ------------------------------------------------------------- set vs preview
+
+def _sent_after_set(stored, args):
+    """What a daemon's next tick sends after `blink theme set <args>`, on a
+    board holding `stored` while a builder's preview is showing."""
+    theme.save(home(), stored)
+    sync = theme.ThemeSync(home())
+    sync.board_now({"t": "theme_now", "v": 2, "id": stored["id"],
+                    "why": "boot"})
+    theme.write_preview(home(), {"id": 3})
+    assert sync.outgoing() == [theme.message("preview", {"id": 3})]
+    assert cli.main(["theme", "set"] + args) == 0
+    return sync.outgoing()
+
+
+def test_setting_the_stored_theme_ends_a_preview(capsys):
+    # Review NICE-4: no save is owed, so only a cancel ends the preview.
+    assert _sent_after_set({"id": 4}, ["ocean"]) == [theme.message("cancel")]
+
+
+def test_setting_a_new_theme_sends_the_save_and_no_cancel(capsys):
+    assert _sent_after_set({"id": 4}, ["neon"]) == [
+        theme.message("save", {"id": 1})]
+
+
+# ------------------------------------------------------------- uninstall
+
+def test_uninstall_removes_every_theme_file(tmp_path, monkeypatch, capsys):
+    # Review S7: kept, a reinstall sent the old theme to the board on its
+    # first connect. Every name in theme.FILES, their temp siblings, and the
+    # mkstemp names of the first development builds.
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    (tmp_path / ".claude").mkdir()
+    h = home()
+    theme.save(h, {"id": 4})
+    theme.write_preview(h, {"id": 2})
+    theme.ThemeSync(h).board_now({"t": "theme_now", "v": 2, "id": 4,
+                                  "why": "saved"}, board_id="ab12")
+    strays = [os.path.join(h, "theme_preview.json.taken"),
+              theme.theme_path(h) + ".0123456789abcdef.blink-tmp",
+              theme.sent_path(h) + ".fedcba9876543210.blink-tmp",
+              os.path.join(h, ".theme-k2j3h4.tmp")]
+    for p in strays:
+        open(p, "w").close()
+    for name in theme.FILES:
+        assert os.path.exists(os.path.join(h, name)), name
+    assert "seen" in json.load(open(theme.theme_path(h), encoding="utf-8"))
+    keep = os.path.join(h, "signing-key-stand-in")
+    open(keep, "w").close()
+    cli.main(["uninstall"])
+    left = sorted(os.listdir(h))
+    assert not [n for n in left if "theme" in n], left
+    assert os.path.exists(keep)
+
+
+def test_every_theme_file_the_module_writes_is_listed():
+    # FILES is what uninstall goes by; a new *_FILE must be in it.
+    names = {v for k, v in vars(theme).items()
+             if k.endswith("_FILE") and isinstance(v, str)}
+    assert names and names <= set(theme.FILES)

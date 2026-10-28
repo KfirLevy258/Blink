@@ -3125,7 +3125,13 @@ def cmd_uninstall(_args) -> int:
               # the network, and a reinstall must not find it already on.
               user_config.path(blink_home()),
               *install_statusline.temp_siblings(
-                  user_config.path(blink_home()))):
+                  user_config.path(blink_home())),
+              # The theme's files (pc/theme.FILES): the saved theme with its
+              # "seen" record, a preview the builder left, the board's last
+              # confirmed theme. Kept, a reinstall sent the old theme to the
+              # board on its first connect, which is not what starting over
+              # means (review S7, 2026-10-28).
+              *_theme_files(blink_home())):
         _rm(p)
     # The per-session state directory, and everything under it. state.json
     # above is the single-slot file this replaced; it is still on the list so
@@ -3141,6 +3147,22 @@ def cmd_uninstall(_args) -> int:
     print("back in, then delete it by hand:")
     print(f"  {bin_dir()}")
     return 1
+
+
+def _theme_files(home: str) -> list:
+    """Every file the theme feature may have left in `home`, temp files
+    included: the names come from pc/theme.FILES and the temp siblings from
+    install_statusline.temp_siblings, which is what theme._write_json writes
+    through, so a file added there is removed here without anyone
+    remembering to. `.theme-*.tmp` is the mkstemp name the first
+    development builds used, before 1.4.0 shipped."""
+    out = []
+    for name in theme_mod.FILES:
+        p = os.path.join(home, name)
+        out.append(p)
+        out.extend(install_statusline.temp_siblings(p))
+    out.extend(glob.glob(os.path.join(glob.escape(home), ".theme-*.tmp")))
+    return out
 
 
 def _uninstall_codex_hooks() -> None:
@@ -4246,9 +4268,13 @@ def cmd_theme(args) -> int:
         keep = theme_mod.saved_custom(home) \
             if t["id"] != theme_mod.CUSTOM else None
         theme_mod.save(home, t, keep_custom=keep)
-        # A preview left by a builder that died would otherwise reach the
-        # board after this and show something other than what was set.
-        theme_mod.drop_preview(home)
+        # A cancel in place of any preview a builder left: that preview
+        # would otherwise reach the board after this and show something
+        # other than what was set, and one already on the board stays there
+        # 15 minutes when this sets the theme already stored, since no save
+        # goes out then to end it (review NICE-4). ThemeSync.outgoing drops
+        # the cancel when a save is owed.
+        theme_mod.write_cancel(home)
     except OSError as e:
         print(f"Could not save the theme: {e}")
         return 1

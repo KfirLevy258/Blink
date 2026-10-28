@@ -52,7 +52,7 @@ class Bridge:
                  fetch_signed_manifest=None, report_failure=None,
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
-                 edit_answers=None):
+                 edit_answers=None, board_id_hint=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -71,6 +71,13 @@ class Bridge:
         # What the board says it is. Set from hello; None until it speaks.
         self._board_proto = None
         self._board_fw = None
+        # Which board this is, for the theme's "seen" record (theme contract
+        # Addendum 4). Only a hello says; until one does, board.json's id
+        # from the last connection stands in. A daemon restarted under a
+        # running board hears no hello at all, and that restart is exactly
+        # when a theme picked on the board in the meantime has to be kept.
+        self._board_id = (board_id_hint if isinstance(board_id_hint, str)
+                          and board_id_hint else None)
         self._announced_ahead = False
         # Pair updates. self_update replaces this program and does not return
         # when it works; pending remembers the consent across that restart;
@@ -243,7 +250,7 @@ class Bridge:
             # Recorded, never answered here: whatever it makes owed goes out
             # on the next tick (see THEME_QUIET_S).
             if self._theme is not None:
-                self._theme.board_now(msg)
+                self._theme.board_now(msg, board_id=self._board_id)
         elif t == "theme_edit":
             self._on_theme_edit()
         # unknown types ignored
@@ -271,6 +278,10 @@ class Bridge:
         except (TypeError, ValueError):
             self._board_proto = None
         self._board_fw = hello.get("fw")
+        # The hello's word replaces the hint, an absent id included: a board
+        # that cannot read its own id is not the board board.json remembers.
+        bid = hello.get("board_id")
+        self._board_id = bid if isinstance(bid, str) and bid else None
         self._announce_if_ahead()
 
     def _announce_if_ahead(self):

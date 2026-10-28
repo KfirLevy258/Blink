@@ -1271,6 +1271,9 @@ def main(argv=None):
                         edit_answers=theme_answers,
                         # What the board can show, until it says again.
                         board_caps_hint=known.get("caps"),
+                        # Which board, until a hello says: the theme's
+                        # "seen" record is per board (pc/theme.ThemeSync).
+                        board_id_hint=known.get("board_id"),
                         pending=update.PendingFirmware(
                             os.path.join(blink_home, "pending_fw.json")))
         report_failure = None   # handed to the Bridge above; never repeated

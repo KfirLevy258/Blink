@@ -262,7 +262,7 @@ def test_save_and_load(tmp_path):
     assert theme.load_saved(home) is None
     theme.save(home, DARKISH)
     assert theme.load_saved(home) == DARKISH
-    assert not [n for n in os.listdir(home) if n.endswith(".tmp")]
+    assert os.listdir(home) == ["theme.json"]
 
 
 def test_a_broken_theme_file_reads_as_nothing(tmp_path):
@@ -560,6 +560,36 @@ def test_a_cancel_goes_out(tmp_path):
     assert s.outgoing() == [theme.message("cancel")]
 
 
+def test_a_cancel_is_dropped_when_a_save_goes_out_with_it(tmp_path):
+    # Review NICE-4: Save leaves a cancel. Sent before the save, it would
+    # repaint the old stored theme for a moment; the save ends the preview.
+    home = str(tmp_path / ".blink")
+    s = theme.ThemeSync(home)
+    s.board_now(now_msg(4, "boot"))
+    theme.save(home, {"id": 6})
+    theme.write_cancel(home)
+    assert s.outgoing() == [theme.message("save", {"id": 6})]
+    assert s.outgoing() == []
+
+
+def test_a_cancel_goes_out_when_the_save_was_already_sent(tmp_path):
+    home = str(tmp_path / ".blink")
+    s = theme.ThemeSync(home)
+    s.board_now(now_msg(4, "boot"))
+    theme.save(home, {"id": 6})
+    assert s.outgoing() == [theme.message("save", {"id": 6})]
+    theme.write_cancel(home)
+    assert s.outgoing() == [theme.message("cancel")]
+
+
+def test_a_cancel_is_taken_and_not_sent_to_a_board_without_themes(tmp_path):
+    home = str(tmp_path / ".blink")
+    s = theme.ThemeSync(home)
+    theme.write_cancel(home)
+    assert s.outgoing(deliver=False) == []
+    assert theme.take_preview(home) is None
+
+
 def test_an_old_board_is_sent_nothing_and_the_preview_is_dropped(tmp_path):
     home = str(tmp_path / ".blink")
     s = theme.ThemeSync(home)
@@ -600,7 +630,7 @@ def test_a_refused_write_is_reported_not_swallowed(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "replace", refuse)
     with pytest.raises(OSError):
         theme.save(home, {"id": 2})
-    assert not [n for n in os.listdir(home) if n.endswith(".tmp")]
+    assert os.listdir(home) == []
 
 
 def test_the_contrast_floor_sits_above_the_boards():
@@ -613,3 +643,65 @@ def test_the_sync_resolves_nothing_at_import():
     # The home is handed in; the module holds no path of its own.
     src = open(theme.__file__, encoding="utf-8").read()
     assert "expanduser" not in src
+
+
+# ------------------------------------------------------------- the temp file
+
+def test_a_folder_that_refuses_new_files_fails_at_once(tmp_path, monkeypatch):
+    # tempfile.mkstemp on Python 3.11 reads PermissionError as "name taken"
+    # and tries the next of os.TMP_MAX names -- about two billion on Windows
+    # -- on the daemon's serial thread (review S4, 2026-10-28). The write
+    # must give up on the first refusal, and say so.
+    home = str(tmp_path / ".blink")
+    os.makedirs(home)
+    real_open = os.open
+    tries = []
+
+    def refuse(path, flags, *a, **k):
+        if flags & os.O_EXCL:
+            tries.append(path)
+            raise PermissionError(13, "refused by policy")
+        return real_open(path, flags, *a, **k)
+    monkeypatch.setattr(os, "open", refuse)
+    with pytest.raises(PermissionError):
+        theme.save(home, {"id": 2})
+    assert len(tries) == 1
+    assert os.listdir(home) == []
+
+
+def test_the_module_does_not_use_mkstemp():
+    src = open(theme.__file__, encoding="utf-8").read()
+    assert "import tempfile" not in src
+    assert "mkstemp(" not in src
+
+
+def test_a_killed_writes_temp_file_is_one_uninstall_finds(tmp_path,
+                                                          monkeypatch):
+    # A write killed between its temp file and the replace leaves the temp
+    # behind. It must carry a name install_statusline.temp_siblings finds,
+    # which the sweep and `blink uninstall` both go by.
+    from pc import install_statusline, update
+    home = str(tmp_path / ".blink")
+    left = []
+
+    def die(src, dst, **k):
+        left.append(src)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(update, "_replace", die)
+    monkeypatch.setattr(install_statusline, "_remove", lambda p: None)
+    with pytest.raises(KeyboardInterrupt):
+        theme.save(home, {"id": 2})
+    assert install_statusline.temp_siblings(theme.theme_path(home)) == left
+
+
+def test_a_stale_temp_file_is_swept_on_the_next_write(tmp_path):
+    from pc import install_statusline
+    home = str(tmp_path / ".blink")
+    os.makedirs(home)
+    stale = theme.theme_path(home) + ".0123456789abcdef.blink-tmp"
+    with open(stale, "w") as f:
+        f.write("{}")
+    old = os.path.getmtime(stale) - install_statusline.STALE_TEMP_S - 60
+    os.utime(stale, (old, old))
+    theme.save(home, {"id": 3})
+    assert os.listdir(home) == ["theme.json"]

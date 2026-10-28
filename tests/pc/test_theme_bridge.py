@@ -61,6 +61,72 @@ def now(b, tid, why):
     b.on_message({"t": "theme_now", "v": 2, "id": tid, "why": why})
 
 
+def bridge_on(home, board_id_hint=None):
+    """A daemon start on `home`: its own ThemeSync, as after a restart."""
+    sent = []
+    clock = Clock()
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: None, now=clock,
+               wall=lambda: (1752444000, 0), theme_sync=theme.ThemeSync(home),
+               board_caps_hint=["svc", "theme"],
+               board_id_hint=board_id_hint, **_NO_FEED)
+    return b, sent, clock
+
+
+def test_a_theme_picked_on_the_board_while_away_survives_a_restart(tmp_path):
+    # Review S2 through the Bridge: the board's id comes from its hello on
+    # the first run and from board.json's hint on the restart, which hears
+    # no hello (the daemon connects to a board already running).
+    home = str(tmp_path / ".blink")
+    theme.save(home, {"id": 4})
+    b, sent, clock = bridge_on(home)
+    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0", "board_id": "ab12",
+                  "caps": ["svc", "theme"]})
+    now(b, 0, "boot")
+    clock.t += THEME_QUIET_S
+    b.poll_if_changed()
+    assert themes(sent) == [theme.message("save", {"id": 4})]
+    now(b, 4, "saved")
+    # The daemon goes away; Neon is picked on the board; the daemon comes
+    # back under the running board.
+    b, sent, clock = bridge_on(home, board_id_hint="ab12")
+    b.greet()
+    now(b, 1, "boot")
+    clock.t += THEME_QUIET_S
+    b.poll_if_changed()
+    assert themes(sent) == []
+    assert theme.load_saved(home) == {"id": 1}
+
+
+def test_a_hellos_board_id_replaces_the_hint(tmp_path):
+    # board.json remembered another board; this one says who it is.
+    home = str(tmp_path / ".blink")
+    theme.save(home, {"id": 4})
+    theme.ThemeSync(home).board_now(
+        {"t": "theme_now", "v": 2, "id": 4, "why": "saved"}, board_id="ab12")
+    b, sent, clock = bridge_on(home, board_id_hint="ab12")
+    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0", "board_id": "cd34",
+                  "caps": ["svc", "theme"]})
+    now(b, 1, "boot")
+    clock.t += THEME_QUIET_S
+    b.poll_if_changed()
+    assert themes(sent) == [theme.message("save", {"id": 4})]
+    assert theme.load_seen(home) == ("cd34", {"id": 1})
+
+
+def test_a_hello_without_an_id_compares_nothing(tmp_path):
+    home = str(tmp_path / ".blink")
+    theme.save(home, {"id": 4})
+    theme.ThemeSync(home).board_now(
+        {"t": "theme_now", "v": 2, "id": 4, "why": "saved"}, board_id="ab12")
+    b, sent, clock = bridge_on(home, board_id_hint="ab12")
+    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0", "board_id": "",
+                  "caps": ["svc", "theme"]})
+    now(b, 1, "boot")
+    clock.t += THEME_QUIET_S
+    b.poll_if_changed()
+    assert themes(sent) == [theme.message("save", {"id": 4})]
+
+
 def test_welcome_carries_the_capability(tmp_path):
     b, sent, home, _ = make(tmp_path)
     hello(b)
