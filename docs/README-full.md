@@ -460,11 +460,22 @@ fills, so the levels part for someone who sees no hue at all), and three
 light ones for a bright room - **Light**, **Light soft** and **Light ink**.
 Each sets every colour on the panel, the width of the dials' arcs, round or
 flat arc ends, and whether a dot rides the tip of each arc. Those are the
-names on the board's tiles; on the command line a few are spelt differently
-(`cvd-safe`, `retro-lcd`, `light-soft`), and `blink theme list` shows the
-names to type.
+names on the board's tiles, and the theme builder and `blink theme show`
+use them too. On the command line a few are spelt differently
+(`cvd-safe`, `retro-lcd`, `light-soft`, `light-ink`); `blink theme set`
+takes that spelling in any capitals, with `-` or `_`, and also the tile's
+own name in quotes (`"Colour-blind"`) or the theme's number.
+`blink theme list` shows all three:
 
-The thirteenth tile, **Custom**, is a theme you make on your computer:
+```bash
+~/.blink/bin/blink theme list       # number, name to type, name on the board
+~/.blink/bin/blink theme set 8      # the same as: blink theme set cvd-safe
+```
+
+**Custom**, a thirteenth tile, is a theme you make on your computer. The
+tile appears on the board only once a custom theme has been saved, from the
+builder or with `blink theme set`; until then the picker shows the twelve
+built-ins. A custom theme has:
 
 - seven colours - background, text, the two gauges, and the low, middle and
   high levels a dial turns as it fills;
