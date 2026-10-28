@@ -84,6 +84,31 @@ expect ui_state scr=gauges
 fake ota_none
 wait 3.5
 
+# --- a failure landing while the install confirm is up (full review #2,
+# M1). On a desk: Settings left on "Install version X?", the app reconnects
+# and stops answering, and main.c's 30 s deadline raises FAILED. ota_error
+# is the same FAILED without the wait. The confirm used to stay up under the
+# notice, the deepest stack the LVGL pool can reach; it is now withdrawn as
+# soon as the state leaves "available", so the notice lands on Settings. The
+# mem lines are the board's figures for both states.
+tap settings.open
+fake ota_avail 1.4.0
+wait 0.5
+click "Update"
+expect ui_state ov=confirm
+mem
+fake ota_error the computer stopped responding
+wait-widget "Update failed" 3
+expect ui_state ov=none modal=notice
+mem
+click "OK"
+expect ui_state ov=none modal=none
+mem
+click "<"
+expect ui_state scr=gauges
+fake ota_none
+wait 3.5
+
 # --- the boot after an update (host harness only): the notice, What's new
 # behind it, its pager and its Back, then OK
 fake boot_notice 1.3.1

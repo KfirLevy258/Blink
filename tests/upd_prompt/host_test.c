@@ -118,6 +118,15 @@ int main(void)
 		CHECK(t.latched == true);   /* nothing here lifts it */
 	}
 
+	/* --- the install confirm comes down with the offer ----------------- */
+	for (i = 0; i < NSTATES; i++) {
+		/* Up only while an update is available, in every other state. */
+		CHECK(upd_confirm_withdraw(ALL[i], true) ==
+		      (ALL[i] != OTA_UI_AVAILABLE));
+		/* Nothing to take down when it is not up. */
+		CHECK(!upd_confirm_withdraw(ALL[i], false));
+	}
+
 	printf("%s\n", fails ? "FAILURES" : "all checks passed");
 	return fails ? 1 : 0;
 }

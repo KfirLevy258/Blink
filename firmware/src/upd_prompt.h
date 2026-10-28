@@ -65,4 +65,20 @@ struct upd_prompt_turn {
 struct upd_prompt_turn upd_prompt_step(enum ota_ui_state st, bool prompt_open,
 				       bool latched, bool busy);
 
+/*
+ * Whether the install confirm inside Settings ("Install version X?") must come
+ * down. It asserts the same thing the offer on the gauges does -- an update is
+ * available right now -- and it used to outlive that state: nothing but its
+ * two buttons and closing Settings removed it. A daemon that reconnected
+ * under it moved the board to CHECKING, and if nothing answered, main.c's
+ * 30 s deadline raised FAILED with a notice on top of the confirm. That stack
+ * was the deepest the LVGL pool can be driven to (+4632 B over Settings on
+ * the host harness, 0.65-1.3 KB left on the board; full review #2, M1), and
+ * a "Yes" pressed on the stale dialog answered "The app stopped answering".
+ *
+ * No latch: the confirm is only raised by a tap, so there is nothing to
+ * re-arm.
+ */
+bool upd_confirm_withdraw(enum ota_ui_state st, bool confirm_open);
+
 #endif /* UPD_PROMPT_H */

@@ -34,3 +34,8 @@ struct upd_prompt_turn upd_prompt_step(enum ota_ui_state st, bool prompt_open,
 
 	return t;
 }
+
+bool upd_confirm_withdraw(enum ota_ui_state st, bool confirm_open)
+{
+	return confirm_open && st != OTA_UI_AVAILABLE;
+}

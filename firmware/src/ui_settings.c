@@ -1255,6 +1255,19 @@ static void upd_timer_cb(lv_timer_t *t)
 		}
 	}
 
+	/* The install confirm, by the same rule (upd_prompt.h,
+	 * upd_confirm_withdraw). Here, before the switch below raises a
+	 * FAILED notice, so the notice lands on Settings and never on top of
+	 * the confirm. A timer callback, not an event on the confirm, so it
+	 * can be deleted outright; confirm_gone() pays any rebuild a theme
+	 * change left owed while it was up. */
+	if (upd_confirm_withdraw(snap.st, confirm != NULL)) {
+		lv_obj_del(confirm);
+		confirm_gone();
+		printk("[ota] install confirm withdrawn: state is no longer"
+		       " available\n");
+	}
+
 	switch (snap.st) {
 	case OTA_UI_DOWNLOADING:
 		dl_overlay_show(&snap, false);
