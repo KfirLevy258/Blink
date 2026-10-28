@@ -75,19 +75,30 @@ static const struct palette builtin[THEME_BUILTIN_N] = {
 		.low_text = 0x22C55E, .ok_ink = 0x000000,
 		.arc_w = THEME_W_THICK, .flat = true, .dot = false,
 	},
-	/* Black and white, with red reserved for the last 10%. Low and mid are
-	 * both white on purpose: the only threshold this theme draws is the
-	 * one that matters. */
+	/*
+	 * Black and white, with red reserved for the last 10%.
+	 *
+	 * Low and mid were both white, on the idea that the only threshold
+	 * worth drawing is the last one. The builder's own check flagged it
+	 * ("two levels look almost the same", audit of 2026-10-28), and it
+	 * was right: crossing 60% changed nothing on the screen, so the arc
+	 * said less than every other theme's. The low arc is now a grey that
+	 * brightens to white at 60% -- the ink gets heavier as the window
+	 * fills, which keeps the theme to black, white and the one red. #9C9C9C
+	 * is 7.8:1 on the ground (6.9 on the pill, for the toast) and 171 from
+	 * white by the builder's measure, where it asks for 60. Light ink is
+	 * the same idea on paper.
+	 */
 	[THEME_MONO] = {
 		.bg = 0x000000, .panel = 0x161616, .track = 0x262626,
 		.text = 0xFFFFFF, .dim = 0xBFBFBF, .grey = 0x666666,
-		.low = 0xFFFFFF, .mid = 0xFFFFFF,
+		.low = 0x9C9C9C, .mid = 0xFFFFFF,
 		.high = 0xFF3B30,
 		.g1 = 0xFFFFFF, .g2 = 0xBDBDBD,
 		.card = 0x0F0F0F, .line = 0x1A1A1A,
 		.ok = 0xFFFFFF, .warn = 0xFFFFFF, .bad = 0xFF3B30,
 		.danger_bg = 0x1A0605, .danger_bd = 0x731B16,
-		.low_text = 0xFFFFFF, .ok_ink = 0x000000,
+		.low_text = 0x9C9C9C, .ok_ink = 0x000000,
 		.arc_w = THEME_W_THIN, .flat = true, .dot = false,
 	},
 	[THEME_OCEAN] = {
@@ -240,16 +251,29 @@ static const struct palette builtin[THEME_BUILTIN_N] = {
 		.low_text = 0x21734B, .ok_ink = 0xEFF3F7,
 		.arc_w = 8, .flat = false, .dot = false,
 	},
+	/*
+	 * Ink on paper: pencil, then pen, then the red one.
+	 *
+	 * Low and mid were both black, so the arc looked the same at 10% and
+	 * at 89%, and the builder's check flagged the shipped preset (audit of
+	 * 2026-10-28). Under 60% now draws in the theme's own grey ink, the
+	 * #555555 its second gauge already used, and turns black at 60%: the
+	 * stroke gets heavier as the window fills and nothing new joins the
+	 * palette. #555555 is 7.5:1 on the paper and 6.6 on the pill (as
+	 * RGB565 draws it), so it holds as text too, and 147 from black by
+	 * the builder's measure, where it asks for 60. Mid stays the text
+	 * colour, which the light themes' 5.2:1 margin allows.
+	 */
 	[THEME_LIGHT_INK] = {
 		.bg = 0xFFFFFF, .panel = 0xEDEDED, .track = 0xD9D9D9,
 		.text = 0x000000, .dim = 0x404040, .grey = 0x8B8B8B,
-		.low = 0x000000, .mid = 0x000000,
+		.low = 0x555555, .mid = 0x000000,
 		.high = 0xD00600,
 		.g1 = 0x000000, .g2 = 0x555555,
 		.card = 0xEDEDED, .line = 0xE6E6E6,
 		.ok = 0x000000, .warn = 0x000000, .bad = 0xD00600,
 		.danger_bg = 0xFCE6E6, .danger_bd = 0xF28F8C,
-		.low_text = 0x000000, .ok_ink = 0xFFFFFF,
+		.low_text = 0x555555, .ok_ink = 0xFFFFFF,
 		.arc_w = THEME_W_THIN, .flat = true, .dot = false,
 	},
 };

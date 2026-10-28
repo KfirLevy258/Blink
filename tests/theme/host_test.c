@@ -153,16 +153,33 @@ static void check_palette(const char *name, const struct palette *p,
 	 * window drew like a normal one. 60 is the builder's own threshold
 	 * for "two levels look almost the same" (Euclidean RGB distance).
 	 */
+	/*
+	 * And no two levels may look alike, low and mid included. Mono and
+	 * Light ink shipped to the 1.4.0 branch with low and mid the same
+	 * colour, and the builder's own check warned about both presets
+	 * (audit, 2026-10-28): crossing 60% changed nothing on the arc. This
+	 * is the same rule the builder applies, so no built-in can earn its
+	 * warning again; tests/pc/test_theme_builtins.py holds the page to it
+	 * from the other side.
+	 */
 	if (!user) {
-		uint32_t a = p->mid, b = p->high;
-		int dr = (int)((a >> 16) & 0xFF) - (int)((b >> 16) & 0xFF);
-		int dg = (int)((a >> 8) & 0xFF) - (int)((b >> 8) & 0xFF);
-		int db = (int)(a & 0xFF) - (int)(b & 0xFF);
-		double d = sqrt((double)(dr * dr + dg * dg + db * db));
+		struct { const char *what; uint32_t a, b; } pair[] = {
+			{ "under 60% and 60-90%", p->low, p->mid },
+			{ "60-90% and 90%+", p->mid, p->high },
+			{ "under 60% and 90%+", p->low, p->high },
+		};
 
-		snprintf(m, sizeof(m), "%s: almost-gone is not amber (distance"
-			 " %.0f >= 60)", name, d);
-		CHECK(d >= 60, m);
+		for (unsigned i = 0; i < 3; i++) {
+			uint32_t a = pair[i].a, b = pair[i].b;
+			int dr = (int)((a >> 16) & 0xFF) - (int)((b >> 16) & 0xFF);
+			int dg = (int)((a >> 8) & 0xFF) - (int)((b >> 8) & 0xFF);
+			int db = (int)(a & 0xFF) - (int)(b & 0xFF);
+			double d = sqrt((double)(dr * dr + dg * dg + db * db));
+
+			snprintf(m, sizeof(m), "%s: %s are told apart"
+				 " (distance %.0f >= 60)", name, pair[i].what, d);
+			CHECK(d >= 60, m);
+		}
 		snprintf(m, sizeof(m), "%s: almost-gone is not the text colour",
 			 name);
 		CHECK(p->high != p->text, m);
