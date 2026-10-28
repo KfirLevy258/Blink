@@ -1,7 +1,8 @@
 /* The config record across an update and a downgrade, on a laptop.
  *
  * Build & run (tests/ci/check_host_tests.sh does this):
- *   cc -I firmware/src -I tests/cfg_store/stub tests/cfg_store/host_test.c \
+ *   cc -DCFG_STUB_CAPTURE -I firmware/src -I tests/cfg_store/stub \
+ *      tests/cfg_store/host_test.c \
  *      firmware/src/cfg_store.c -o /tmp/cfg && /tmp/cfg
  *
  * cfg_store.c is compiled UNCHANGED against a RAM "flash" (stub/), so the
@@ -22,6 +23,7 @@
  * firmware/src/cfg_store.c). It is a copy on purpose and must never be
  * "kept in step": it describes firmware already on desks.
  */
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -40,6 +42,34 @@ int fake_erase_rc;
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
 	else { printf("PASS: %s\n", m); } } while (0)
+
+/* Everything the store printed since the last reset, for the boot-line
+ * checks. Truncates rather than overruns; 4 KiB is far more than one
+ * cfg_init() prints. */
+static char logged[4096];
+static size_t logged_len;
+
+int stub_printk(const char *fmt, ...)
+{
+	char line[512];
+	va_list ap;
+
+	va_start(ap, fmt);
+	int n = vsnprintf(line, sizeof(line), fmt, ap);
+
+	va_end(ap);
+	printf("  log: %s", line);
+	size_t room = sizeof(logged) - 1 - logged_len;
+	size_t len = strlen(line);
+
+	if (len > room) {
+		len = room;
+	}
+	memcpy(logged + logged_len, line, len);
+	logged_len += len;
+	logged[logged_len] = '\0';
+	return n;
+}
 
 #define REC_MAGIC 0xC1A46EF6u
 #define SLOT_A 0
@@ -187,8 +217,17 @@ int main(void)
 	old = desk_record();
 	write_134(SLOT_A, &old);
 
+	logged_len = 0;
+	logged[0] = '\0';
 	CHECK(cfg_init() == 0, "update: the store mounts");
 	check_desk_settings("update");
+	/* The record still holds "desk-net" (check_desk_settings just read it
+	 * back), and the daemon copies every boot line into bridge.log, the
+	 * file customers send with a support request. */
+	CHECK(strstr(logged, "[cfg] mode=") != NULL &&
+	      strstr(logged, "ssid=present") != NULL &&
+	      strstr(logged, "desk-net") == NULL,
+	      "boot line: says a network is stored without naming it");
 	cfg_get_theme(&th);
 	CHECK(th.id == 0, "update: the theme defaults to Dark");
 	CHECK(cfg_get_focus_on() == 0 && cfg_get_focus_win() == 0,

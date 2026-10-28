@@ -480,9 +480,16 @@ int cfg_init(void)
 		printk("[cfg] theme and focus taken from the older slot\n");
 	}
 
-	/* Never log the token itself, only whether we have one. */
+	/* Never log the token itself, only whether we have one -- and the
+	 * same for the SSID. This line used to print the stored network name
+	 * verbatim, and the daemon copies the boot lines into bridge.log,
+	 * which is the support file customers send us: a unit set up for
+	 * WiFi before 2026-10-27 still carries its owner's network name in
+	 * the record, and the name of somebody's home network is theirs, not
+	 * ours to collect. WiFi is gone from the image, so nothing reads it
+	 * now beyond whether it is there (review NICE-2, 2026-10-28). */
 	printk("[cfg] mode=%d ssid=%s token=%s\n", cfg.mode,
-	       cfg.ssid[0] ? cfg.ssid : "(none)",
+	       cfg.ssid[0] ? "present" : "(none)",
 	       cfg.token[0] ? "present" : "(none)");
 	return 0;
 }
