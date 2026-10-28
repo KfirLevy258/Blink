@@ -1280,7 +1280,10 @@ def test_the_edit_done_lines_parse():
     # Addendum 6's bench lines: the daemon's done, and a guard that holds.
     assert bt.parse_line("fake edit_done").args == ("edit_done",)
     assert bt.parse_line("expect no theme_edit").cmd == "expect_none"
-    for bad in ("expect no", "expect no theme_now", "fake edit_done 1"):
+    # And the install consent a refused "Update now" must not send (N2).
+    assert bt.parse_line("expect no ota_flash").args == ("ota_flash",)
+    for bad in ("expect no", "expect no theme_now", "fake edit_done 1",
+                "expect no ota_flash theme_edit"):
         with pytest.raises(bt.ScriptError):
             bt.parse_line(bad)
 

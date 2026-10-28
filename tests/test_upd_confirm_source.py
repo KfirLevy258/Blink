@@ -45,3 +45,35 @@ def test_every_way_the_confirm_goes_through_confirm_close():
     # do_close takes it with the whole panel.
     assert src.count("lv_obj_del(confirm);") == 1
     assert "lv_obj_del(confirm);" in _body("confirm_close")
+
+
+def test_update_now_asks_the_same_question_before_it_installs():
+    # The offer on the gauges took the consent without asking: a tap inside
+    # the 250 ms tick after a welcome's CHECKING answered "The app stopped
+    # answering", and a newer release offered within one tick installed
+    # under the older text (fp/pool review r2, NICE-1; full review #3, N2).
+    body = _body("upd_prompt_now_cb")
+    ask = body.index("upd_confirm_withdraw(")
+    assert ask < body.index("ota_request_install();")
+    assert "prompt_ver" in body[ask:]
+    # A changed offer is refused, not installed: the refusal returns
+    # before the install line.
+    refused = body[ask:body.index("ota_request_install();")]
+    assert "install not started" in refused and "return;" in refused
+
+
+def test_the_prompt_records_the_version_it_draws():
+    # Recorded in the drawing, not in upd_prompt_show, so a theme repaint
+    # that redraws the box from the live state keeps the two in step.
+    body = _body("upd_prompt_draw")
+    assert "prompt_ver" in body[:body.index("lv_obj_create(")]
+
+
+def test_a_refused_update_now_lets_the_offer_ask_again():
+    # The owner said yes and got nothing; without lifting the once-a-boot
+    # latch, a newer release that replaced the one shown would go
+    # unannounced on the gauges until the next boot.
+    body = _body("upd_prompt_now_cb")
+    refused = body[body.index("upd_confirm_withdraw("):
+                   body.index("ota_request_install();")]
+    assert "upd_prompt_done = false;" in refused

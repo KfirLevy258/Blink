@@ -762,6 +762,11 @@ void ui_settings_notice_titled(const char *title, const char *body)
  */
 static lv_obj_t *upd_prompt;
 static bool upd_prompt_done;
+/* The version the offer on the glass names, so "Update now" can be held to
+ * it the way the install confirm is held to confirm_ver. Written wherever the
+ * box is drawn, a theme repaint included, because that is the text the owner
+ * is agreeing to. */
+static char prompt_ver[sizeof(((struct ota_ui *)0)->version)];
 
 static void upd_prompt_close(void)
 {
@@ -779,11 +784,32 @@ static void upd_prompt_later_cb(lv_event_t *e)
 
 static void upd_prompt_now_cb(lv_event_t *e)
 {
+	struct ota_ui now;
+
 	ARG_UNUSED(e);
 	upd_prompt_close();
-	/* The download overlay is screen-level and upd_timer now runs whether
+	/* Asked again before the consent is spent, as install_yes_cb asks it.
+	 * upd_prompt_step withdraws the box only on the 250 ms ticks, and only
+	 * when the state leaves AVAILABLE, so a tap inside the tick after a
+	 * welcome's CHECKING answered "The app stopped answering", and a newer
+	 * release offered within one tick installed under "Version 1.4.0 is
+	 * available." (fp/pool review r2, NICE-1; full review #3, N2). The box
+	 * comes down either way: the offer it showed is not the one on offer.
+	 * A refusal lifts the once-a-boot latch, because the owner said yes to
+	 * an offer and got nothing: the next tick that finds AVAILABLE asks
+	 * again, naming what is on offer now, rather than leaving a newer
+	 * release unannounced until the next boot.
+	 *
+	 * The download overlay is screen-level and upd_timer now runs whether
 	 * or not the panel is open, so the bar appears without going through
 	 * settings. */
+	ota_ui_get(&now);
+	if (upd_confirm_withdraw(now.st, true, now.version, prompt_ver)) {
+		printk("[ota] install not started: the offer changed under the"
+		       " prompt\n");
+		upd_prompt_done = false;
+		return;
+	}
 	ota_request_install();
 }
 
@@ -815,6 +841,8 @@ static void upd_prompt_show(const struct ota_ui *snap)
  */
 static void upd_prompt_draw(const struct ota_ui *snap)
 {
+	strncpy(prompt_ver, snap->version, sizeof(prompt_ver) - 1);
+	prompt_ver[sizeof(prompt_ver) - 1] = '\0';
 	upd_prompt = lv_obj_create(lv_layer_top());
 	lv_obj_set_size(upd_prompt, 300, 130);
 	lv_obj_set_style_bg_color(upd_prompt, COL_BG, 0);

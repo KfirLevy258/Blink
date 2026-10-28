@@ -53,6 +53,23 @@ wait-widget "Update failed" 3
 click "OK"
 expect ui_state modal=none
 
+# --- "Update now" on an offer that changed under it (full review #3, N2).
+# A newer release offered while the box is up leaves the state AVAILABLE, so
+# nothing withdraws "Version 1.4.0 is available.", and the press used to
+# install 1.4.1 under it. It is now asked again: nothing is sent, and the
+# offer comes back naming 1.4.1. The board logs "[ota] install not started".
+fake ota_avail 1.4.0
+wait-widget "Update now" 3
+fake ota_avail 1.4.1
+wait 0.5
+expect-widget "Version 1.4.0 is available."
+click "Update now"
+expect no ota_flash
+wait-widget "Version 1.4.1 is available." 3
+expect ui_state modal=prompt
+click "Later"
+expect ui_state modal=none
+
 # --- a check that fails: the plain notice
 fake ota_none
 wait 3.5

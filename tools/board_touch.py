@@ -1302,11 +1302,13 @@ def parse_line(text, lineno=1):
             return Step(lineno, "expect", ("notice", {"nt": rest[1]}))
         if what == "no":
             # The board must NOT say this, within QUIET_S of the last
-            # action: a guard that holds is the absence of a line.
-            if rest[1:] != ["theme_edit"]:
+            # action: a guard that holds is the absence of a line. ota_flash
+            # is the install consent: "Update now" on an offer that changed
+            # under it must not send one (full review #3, N2).
+            if len(rest) != 2 or rest[1] not in ("theme_edit", "ota_flash"):
                 raise ScriptError(f"line {lineno}: usage: expect no"
-                                  " theme_edit")
-            return Step(lineno, "expect_none", ("theme_edit",))
+                                  " theme_edit|ota_flash")
+            return Step(lineno, "expect_none", (rest[1],))
         if what not in ("ui_state", "theme_now", "theme_edit"):
             raise ScriptError(
                 f"line {lineno}: usage: expect ui_state K=V ... | "
@@ -2005,6 +2007,11 @@ class Bench:
         if self._wait(seen, self.QUIET_S * self.scale) is not None:
             self.fail(f"expect no {kind}: the board sent one")
             return False
+        if kind == "ota_flash":
+            # The install press this follows was refused, so there is no
+            # consent for end_install to wait out and answer: left set, the
+            # run would end by raising a failure notice nothing caused.
+            self.install_pressed = False
         return True
 
     def expect_event(self, kind, fields, timeout=3.0):
