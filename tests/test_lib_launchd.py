@@ -122,16 +122,32 @@ def test_a_job_that_outlives_the_grace_is_reported(tmp_path):
     assert 10 ** 6 - left == 45
 
 
+# (bootout's code, what `print` says afterwards: None for "not loaded"),
+# and whether that is a stop.
 @needs_sh
-@pytest.mark.parametrize("rc,ok", [(0, True), (3, True), (5, False),
-                                   (1, False)])
-def test_bootout_s_answer_is_kept(tmp_path, rc, ok):
-    """0 and ESRCH (3, not loaded) are a stop; anything else is a refusal,
-    with the code kept for the message (review of fp/fix-tools, S-2)."""
+@pytest.mark.parametrize("rc,listing,ok", [
+    (0, "state = running", True),       # accepted; the wait does the rest
+    (3, None, True),                    # ESRCH: was not loaded
+    (5, "state = running", False),      # refused, and still running
+    (1, "state = running", False),
+    # A stop under way that an older macOS answers with a code
+    # ("36: Operation now in progress"): launchd's state says what it is.
+    (36, "state = SIGTERMed", True),
+    (5, None, True),                    # gone by the time it is asked
+])
+def test_bootout_s_answer_is_read_with_launchd_s_state(tmp_path, rc, listing,
+                                                       ok):
+    """0 and ESRCH are a stop. Any other code is decided by `launchctl
+    print`: only "state = running" is a refusal (re-review of fp/fix-tools,
+    SHOULD-2). The code is kept for the message either way."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "launchctl").write_text(f"#!/bin/sh\nexit {rc}\n",
-                                       encoding="utf-8")
+    show = (f"printf '\\tpid = 4242\\n\\t{listing}\\n'; exit 0"
+            if listing else "exit 113")
+    (bin_dir / "launchctl").write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = print ]; then {show}; fi\n'
+        f"exit {rc}\n", encoding="utf-8")
     (bin_dir / "launchctl").chmod(0o755)
     r = subprocess.run(
         ["sh", "-c", f'. "{LIB}"; blink_bootout gui/1/x; '

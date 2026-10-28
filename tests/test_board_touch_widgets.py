@@ -1009,8 +1009,9 @@ def test_lvgl_lines_are_told_apart_by_function_and_pool_markers():
         _lvgl_line("wrn", b"sk_private_fn", b"y"),
         _lvgl_line("wrn", SECRET.encode(), b"y"),
         _lvgl_line("wrn", b"Bad Name", b"z"),
-        # The markers count wherever they appear, but only as a number.
-        b"No memory " + SECRET.encode() + b"\r\n",
+        # A marker in a log line of another module still counts, as a
+        # number only.
+        _zephyr_line("err", "os", b"No memory " + SECRET.encode()),
     ]))
     b.summary()
     text = out.getvalue()
@@ -1228,3 +1229,15 @@ def test_every_reply_kicks_the_log_thread():
         body = code[code.index(head):]
         body = body[:body.index("\n}\n")]
         assert "TI_LOG_KICK()" in body, head
+
+
+def test_a_marker_in_a_printk_line_is_not_lvgl_s():
+    """[proto] printks carry text the host sent (proto.c "ota failed: %s",
+    "host status: %s"); words like "out of memory" there are not a dry pool
+    (re-review of fp/fix-tools, NICE-1)."""
+    out = io.StringIO()
+    b, _ = _bench([], out=out)
+    _cable(b, b"[proto] ota failed: host out of memory\r\n"
+              b"[proto] host status: failed to allocate\r\n")
+    b.summary()
+    assert b.pool_dry == 0 and b.failures == []

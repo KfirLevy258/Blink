@@ -1428,10 +1428,14 @@ class _LaunchdBackend(_Backend):
         # spend its ~5 s of bootstrap retries against a job still leaving
         # and report "installed, but could not be started" (review of
         # fp/fix-tools, NICE 3; tools/lib_launchd.sh is the same wait for
-        # burn.sh and dev.sh). Only after a bootout launchd accepted: on
-        # ESRCH there is nothing to wait for, and after a refusal the old
-        # job is not leaving at all.
-        if out.returncode == 0 and not _noting_a_slow_stop(
+        # burn.sh and dev.sh). On ESRCH there is nothing to wait for. Any
+        # other non-zero code is read with launchd's state rather than on
+        # its own, as blink_bootout does: an older macOS is reported to
+        # answer a stop under way with "36: Operation now in progress", and
+        # only "state = running" means the old job is not leaving.
+        leaving = out.returncode == 0 or (
+            out.returncode != _ESRCH and not self._is_running(uid))
+        if leaving and not _noting_a_slow_stop(
                 lambda: self._wait_gone(uid)):
             return ("installed, but the running bridge is still stopping -- "
                     "once it has, start it with: "

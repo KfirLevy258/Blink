@@ -730,14 +730,68 @@ def test_launchd_install_leaves_an_instance_that_never_leaves(
     assert [c[1] for c in r.calls].count("print") == (cli.STOP_GRACE_S + 10) * 4
 
 
+class _Refused(_Runs):
+    """bootout exits `code` and leaves the job in `state`: launchd's own
+    answer, which install() reads instead of the code alone."""
+
+    def __init__(self, code, state, **kw):
+        super().__init__(codes=[code], **kw)
+        self.state = state
+        self.asked = 0
+
+    def __call__(self, argv, **kw):
+        if len(argv) > 1 and argv[1] == "bootout":
+            self.calls.append(list(argv))
+            self.kwargs.append(kw)
+            return subprocess.CompletedProcess(argv, self._codes.pop(0),
+                                               stdout="", stderr="")
+        if len(argv) > 1 and argv[1] == "bootstrap":
+            # The new job: from here launchd answers for it, not the old.
+            self.state = None
+        if (len(argv) > 1 and argv[1] == "print" and self.state
+                and not self._gone):
+            self.calls.append(list(argv))
+            self.kwargs.append(kw)
+            out = f"\tstate = {self.state}\n"
+            # A stop under way finishes after one more look.
+            if self.state != "running":
+                self.asked += 1
+                if self.asked > 1:
+                    self._gone = True
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+        return super().__call__(argv, **kw)
+
+
 def test_launchd_install_does_not_wait_after_a_refused_bootout(
         home, monkeypatch):
-    """ESRCH (not loaded) or a refusal: no old instance is leaving, so there
-    is nothing to wait for."""
+    """ESRCH (not loaded), or a refusal that leaves the job running: no old
+    instance is leaving, so there is nothing to wait for."""
     _platform(monkeypatch, "darwin")
     monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
-    for code in (3, 5):
-        r = _Runs(codes=[code])
-        monkeypatch.setattr(cli.subprocess, "run", r)
-        cli._LaunchdBackend().install()
-        assert [c[1] for c in r.calls][:2] == ["bootout", "bootstrap"], code
+    r = _Runs(codes=[3])
+    monkeypatch.setattr(cli.subprocess, "run", r)
+    cli._LaunchdBackend().install()
+    assert [c[1] for c in r.calls][:2] == ["bootout", "bootstrap"]
+
+    r = _Refused(5, "running")
+    monkeypatch.setattr(cli.subprocess, "run", r)
+    cli._LaunchdBackend().install()
+    # One look at launchd's state, then on: it is not leaving.
+    assert [c[1] for c in r.calls][:3] == ["bootout", "print", "bootstrap"]
+
+
+def test_launchd_install_waits_out_a_stop_an_older_macos_reports_as_a_code(
+        home, monkeypatch):
+    """An older macOS is reported to answer a stop under way with "36:
+    Operation now in progress". launchd's state says it is leaving
+    (SIGTERMed), so install waits for it like any other (re-review of
+    fp/fix-tools, SHOULD-2)."""
+    _platform(monkeypatch, "darwin")
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    r = _Refused(36, "SIGTERMed")
+    monkeypatch.setattr(cli.subprocess, "run", r)
+    assert cli._LaunchdBackend().install() == "running (launchd)"
+    verbs = [c[1] for c in r.calls]
+    assert verbs.index("bootstrap") > 2
+    assert verbs[:verbs.index("bootstrap")].count("print") >= 2
+    assert not r.ran("kickstart", "-k")

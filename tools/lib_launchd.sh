@@ -34,21 +34,36 @@ blink_agent_loaded() {
 	launchctl print "$1" >/dev/null 2>&1
 }
 
-# blink_bootout AGENT: ask launchd to stop AGENT. Returns 0 when it agreed,
-# or when the job was not loaded -- launchctl exits with the errno, and
-# ESRCH (3, "Boot-out failed: 3: No such process") is an answer, not a
-# failure (pc/cli.py _ESRCH, _LaunchdBackend.stop). Anything else returns 1
-# with the code in BLINK_BOOTOUT_RC. It used to be `|| true`, and a refused
-# bootout ("5: Input/output error") then looked exactly like a slow stop:
-# the daemon kept running, unasked, while the script polled for three
-# minutes and called it "still stopping" (review of fp/fix-tools, S-2).
+# blink_bootout AGENT: ask launchd to stop AGENT. Returns 0 when the stop
+# is under way or there was nothing to stop, 1 when the job is plainly still
+# running, with the code in BLINK_BOOTOUT_RC either way. It used to be
+# `|| true`, and a refused bootout ("5: Input/output error") then looked
+# exactly like a slow stop: the daemon kept running, unasked, while the
+# script polled for three minutes and called it "still stopping" (review of
+# fp/fix-tools, S-2).
+#
+# 0 is a stop and ESRCH (3, "Boot-out failed: 3: No such process") is "not
+# loaded" -- an answer, not a failure (pc/cli.py _ESRCH,
+# _LaunchdBackend.stop). Any other code is not decided from the code alone,
+# because what launchctl returns for a stop it has started but not finished
+# differs between macOS releases: on 27.0.1 a second bootout inside the
+# grace gave 0 and `print` read "state = SIGTERMed" (measured 2026-10-28),
+# and older releases are reported to answer "36: Operation now in progress"
+# -- exactly the mid-OTA case. Treating that as "still running" would print
+# no way back and leave the desk on HOST LOST once the daemon exited. So
+# launchd is asked: gone, or any state but running, is a stop under way;
+# only "state = running" is a refusal.
 blink_bootout() {
 	BLINK_BOOTOUT_RC=0
 	launchctl bootout "$1" >/dev/null 2>&1 || BLINK_BOOTOUT_RC=$?
 	case "$BLINK_BOOTOUT_RC" in
 	0 | 3) return 0 ;;
-	*) return 1 ;;
 	esac
+	_bl_listing=$(launchctl print "$1" 2>/dev/null) || return 0
+	if printf '%s\n' "$_bl_listing" | grep -q '^[[:space:]]*state = running$'; then
+		return 1
+	fi
+	return 0
 }
 
 # blink_restart_hint AGENT PLIST: the two commands that put the daemon back

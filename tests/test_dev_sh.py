@@ -691,8 +691,9 @@ def test_a_refused_bootout_is_refused_at_once_and_nothing_restarts(tmp_path):
     assert not [l for l in lines if l.startswith(("west ", "espefuse "))]
     assert _verbs(calls, "bootstrap") == []
     assert _verbs(calls, "kickstart") == []
-    # The listing, and nothing polled after the refusal.
-    assert len(_verbs(calls, "print")) == 1
+    # The listing, one look at launchd's state after the refused bootout
+    # (still "running", so a refusal), and nothing polled after that.
+    assert len(_verbs(calls, "print")) == 2
     assert ups == []
 
 

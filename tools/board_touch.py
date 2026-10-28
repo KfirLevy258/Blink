@@ -928,13 +928,17 @@ _COLOUR_ONLY_RE = re.compile(rb"^(?:\x1b\[[0-9;]*m)+$")
 _LVGL_FUNC_RE = re.compile(
     rb"lvgl: \(\d{1,9}\.\d{3}, \+\d{1,9}\)\t ([^:\s]{1,64}): ")
 # The function names worth telling apart, and the only ones ever printed:
-# every LVGL 9 function on the paths this firmware draws through that logs an
-# allocation failure, found by grepping the LVGL tree Zephyr 4.3.1 pins
-# (modules/lib/gui/lvgl/src: core, draw, draw/sw, display, indev, misc/cache,
-# misc/lv_style.c, stdlib) for LV_ASSERT_MALLOC and for LV_LOG_WARN/ERROR
-# text about memory, and taking the enclosing function (2026-10-28). Any
-# other name -- every one of them is compiled into the firmware, but a list is
-# airtight where a shape check is not -- counts as "(other LVGL function)".
+# LVGL 9 functions that log an allocation failure, found by grepping the LVGL
+# tree Zephyr 4.3.1 pins (modules/lib/gui/lvgl/src: core, draw, draw/sw,
+# display, indev, font, misc, stdlib, and the label, arc and image widgets)
+# for LV_ASSERT_MALLOC and for LV_LOG_WARN/ERROR text about memory, and
+# taking the enclosing function (2026-10-28). It covers the allocators this
+# firmware reaches on every frame -- slides, text updates, the usage rings --
+# but not every allocator LVGL has, so a dry pool can still show as
+# "(other LVGL function)". It is counted and fails the run all the same; the
+# name only says where. A list rather than a shape check, because a list is
+# airtight. tests/test_board_touch_widgets.py pins every name to a definition
+# in that tree.
 _LVGL_FUNCS = frozenset({
     # draw: buffers, layers, tasks
     "lv_draw_buf_create_ex", "lv_draw_buf_destroy", "lv_draw_layer_create",
@@ -955,6 +959,16 @@ _LVGL_FUNCS = frozenset({
     "lv_group_add_obj",
     # display, input, the allocator
     "lv_display_create", "lv_indev_create", "lv_realloc", "lv_mem_add_pool",
+    # the busy ones (re-review of fp/fix-tools, SHOULD-1): every slide starts
+    # animations, every reading sets label text, the rings are arcs
+    "lv_anim_start", "lv_timer_create", "lv_label_set_text",
+    "lv_label_ins_text", "lv_text_set_text_vfmt", "lv_draw_label",
+    "lv_draw_label_iterate_characters", "lv_draw_unit_draw_letter",
+    "lv_draw_sw_arc", "lv_draw_sw_box_shadow", "transform_and_recolor",
+    "lv_image_set_src",
+    # containers under them
+    "lv_array_init", "lv_circle_buf_create", "rb_create_node",
+    "lv_iter_create",
 })
 # Lines Zephyr's LVGL glue logs under the same module, with no LVGL
 # timestamp or function: fixed messages from zephyr/modules/lvgl/input/*.c,
@@ -1541,7 +1555,9 @@ class Bench:
             if src is not None:
                 key = " ".join(src)
                 self.lvgl_sources[key] = self.lvgl_sources.get(key, 0) + 1
-            if pool_dry(raw):
+            # Only on a Zephyr log line: a [proto] printk can carry text the
+            # host sent ("ota failed: %s"), which must not read as LVGL's.
+            if _ZLOG_RE.match(raw) and pool_dry(raw):
                 self.pool_dry += 1
                 if _ASSERT_MARK in raw:
                     self.pool_dry_asserts += 1
