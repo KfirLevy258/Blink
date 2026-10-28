@@ -169,17 +169,35 @@ def test_burn_sh_checks_before_it_signs_or_flashes():
     assert "never box this unit" in text
 
 
+def _source_files(fw, pattern):
+    """Files under firmware/ matching `pattern`, outside any build directory.
+
+    A Zephyr build tree is not source: it holds generated .conf files and,
+    in every build dir, a DIRECTORY named Kconfig (build-44/Kconfig), which
+    rglob("Kconfig*") returns and read_text() raises IsADirectoryError on.
+    The suite was red on any desk that had built the firmware -- this one,
+    with build, build-44, build-sb and build-wifi -- and green only on CI's
+    fresh checkout, so the count in CLAUDE.md could not be reproduced on the
+    machine it was written on. Both filters, because either alone misses a
+    case: a build dir named some other way still has no Kconfig file, and a
+    non-file outside one would still crash the read."""
+    for path in sorted(fw.rglob(pattern)):
+        if any(p.startswith("build") for p in path.relative_to(fw).parts):
+            continue
+        if not path.is_file():
+            continue
+        yield path
+
+
 def test_no_conf_or_kconfig_anywhere_turns_it_on():
     """Zephyr also reads firmware/boards/*.conf and sysbuild reads
     firmware/sysbuild/*.conf; a `select` or `imply` elsewhere would turn it
     on too. The .config gate would still catch any of these at release, so
     this is about failing early (review, NICE-3)."""
     fw = ROOT / "firmware"
-    for conf in fw.rglob("*.conf"):
-        if any(p.startswith("build") for p in conf.relative_to(fw).parts):
-            continue
+    for conf in _source_files(fw, "*.conf"):
         assert "BLINK_TOUCH_INJECT" not in conf.read_text(encoding="utf-8"), conf
-    for k in fw.rglob("Kconfig*"):
+    for k in _source_files(fw, "Kconfig*"):
         text = k.read_text(encoding="utf-8")
         assert not re.search(r"^\s*(select|imply)\s+BLINK_TOUCH_INJECT\b",
                              text, re.M), k
