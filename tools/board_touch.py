@@ -561,10 +561,19 @@ def label_copy(raw):
 
 
 def _c_unescape(body):
-    """A C string literal's body as bytes."""
+    """A C string literal's body as bytes, read as a C compiler reads it.
+
+    Octal (\\302, one to three digits), hex (\\x, every hex digit that
+    follows, as C takes them) and universal names (\\u, \\U, as UTF-8, the
+    build's execution character set). The first version knew none of
+    octal or \\u and took two digits of \\x, so "\\302\\260" -- a degree
+    sign -- read as the text "302260" and anything spelt that way passed
+    tests/test_panel_strings.py unseen (review of fp/audit-nice, NICE 4).
+    An escape C would refuse, or one this does not know, raises ValueError
+    rather than being guessed at."""
     out = bytearray()
     i = 0
-    simple = {"n": 10, "t": 9, "r": 13, "0": 0, "\\": 92, '"': 34, "'": 39,
+    simple = {"n": 10, "t": 9, "r": 13, "\\": 92, '"': 34, "'": 39,
               "a": 7, "b": 8, "f": 12, "v": 11, "?": 63}
     while i < len(body):
         ch = body[i]
@@ -573,16 +582,36 @@ def _c_unescape(body):
             i += 1
             continue
         nxt = body[i + 1:i + 2]
-        if nxt == "x":
-            m = re.match(r"[0-9a-fA-F]{1,2}", body[i + 2:])
-            out.append(int(m.group(0), 16) if m else 0)
-            i += 2 + (len(m.group(0)) if m else 0)
-        elif nxt in simple:
+        if nxt in simple:
             out.append(simple[nxt])
             i += 2
-        else:
-            out += nxt.encode("utf-8")
-            i += 2
+            continue
+        m = re.match(r"[0-7]{1,3}", body[i + 1:])
+        if m:
+            v = int(m.group(0), 8)
+            if v > 0xFF:
+                raise ValueError(f"octal escape \\{m.group(0)} is out of"
+                                 " range")
+            out.append(v)
+            i += 1 + len(m.group(0))
+            continue
+        if nxt == "x":
+            m = re.match(r"[0-9a-fA-F]+", body[i + 2:])
+            if not m or int(m.group(0), 16) > 0xFF:
+                raise ValueError("a \\x escape needs one to two hex digits"
+                                 " worth of value")
+            out.append(int(m.group(0), 16))
+            i += 2 + len(m.group(0))
+            continue
+        if nxt in ("u", "U"):
+            n = 4 if nxt == "u" else 8
+            digits = body[i + 2:i + 2 + n]
+            if not re.fullmatch(r"[0-9a-fA-F]{%d}" % n, digits):
+                raise ValueError(f"\\{nxt} needs {n} hex digits")
+            out += chr(int(digits, 16)).encode("utf-8")
+            i += 2 + n
+            continue
+        raise ValueError(f"unknown escape \\{nxt}")
     return bytes(out)
 
 

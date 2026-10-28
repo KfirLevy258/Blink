@@ -124,3 +124,58 @@ def test_the_scan_reads_strings_the_way_c_does():
 def test_the_url_board_touch_used_to_lose_is_scanned():
     lits = literals((SRC / "ota_parse.c").read_text(encoding="utf-8"), _bt())
     assert any(l.startswith(b"https://") for l in lits)
+
+
+# What C makes of each escape, checked against the compiler where one is
+# here: the scan is only as good as this decoding (review of fp/audit-nice,
+# NICE 4 -- "\302\260" used to read as the text "302260").
+_ESCAPES = [
+    (r"\302\260", b"\xc2\xb0"),            # octal, three digits each
+    (r"\0", b"\x00"), (r"\101BC", b"ABC"), (r"\1012", b"A2"),
+    (r"\x41", b"A"), (r"\x0041", b"A"),     # \x takes every hex digit
+    (r"\u00b0", b"\xc2\xb0"), (r"\U0001F600", b"\xf0\x9f\x98\x80"),
+    (r"\n\t\r\\\"\'\?", b"\n\t\r\\\"'?"),
+]
+
+
+def test_escapes_decode_as_c_decodes_them():
+    bt = _bt()
+    for body, want in _ESCAPES:
+        assert bt._c_unescape(body) == want, body
+
+
+def test_escapes_c_would_refuse_are_refused_not_guessed():
+    bt = _bt()
+    for body in (r"\x", r"\x100", r"\777", r"\u12", r"\q"):
+        try:
+            bt._c_unescape(body)
+        except ValueError:
+            continue
+        raise AssertionError(f"{body!r} was decoded")
+
+
+def test_the_decoding_matches_the_compiler(tmp_path):
+    import shutil
+    import subprocess
+    cc = shutil.which("cc")
+    if cc is None:
+        import pytest
+        pytest.skip("no C compiler")
+    lines = []
+    for i, (body, _) in enumerate(_ESCAPES):
+        lines.append(f'\t{{ static const char s[] = "{body}";'
+                     f' dump(s, sizeof(s) - 1); }}')
+    src = tmp_path / "esc.c"
+    src.write_text(
+        "#include <stdio.h>\n"
+        "static void dump(const char *s, unsigned n)\n{\n"
+        '\tfor (unsigned i = 0; i < n; i++) printf("%02x", (unsigned char)s[i]);\n'
+        '\tprintf("\\n");\n}\n'
+        "int main(void)\n{\n" + "\n".join(lines) + "\n\treturn 0;\n}\n",
+        encoding="utf-8")
+    exe = tmp_path / "esc"
+    subprocess.run([cc, "-w", str(src), "-o", str(exe)], check=True)
+    got = subprocess.run([str(exe)], check=True, capture_output=True,
+                         text=True).stdout.splitlines()
+    bt = _bt()
+    assert got == [bt._c_unescape(b).hex() for b, _ in _ESCAPES]

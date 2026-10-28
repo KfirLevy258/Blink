@@ -87,6 +87,10 @@ _FIELD = re.compile(r"\s*\.(\w+)\s*=\s*(0x[0-9A-Fa-f]{1,6}|\d+|true|false"
                     r"|THEME_W_\w+)\s*")
 
 
+# The struct palette members that are not 0xRRGGBB colours.
+_NOT_COLOURS = ("arc_w", "flat", "dot", "by_gauge")
+
+
 def _fields(name, body, widths):
     """A palette's initialisers, each one read whole or refused.
 
@@ -106,6 +110,14 @@ def _fields(name, body, widths):
                              f" {piece.strip()!r}; give each role a plain"
                              " value")
         key, val = m.groups()
+        # A colour is six hex digits and nothing else is. `.bg = 0` reads
+        # as a valid C zero, and was taken as the number 0 until a later
+        # test's hex check failed on it (review of fp/audit-nice, NICE 3).
+        if (key in _NOT_COLOURS) == bool(re.fullmatch(r"0x[0-9A-Fa-f]{6}",
+                                                      val)):
+            raise ValueError(f"theme.c: THEME_{name}: .{key} = {val} is not"
+                             + (" a number or switch" if key in _NOT_COLOURS
+                                else " a colour (0xRRGGBB)"))
         if val.startswith("0x"):
             fields[key] = "%06x" % int(val, 16)
         elif val in ("true", "false"):
@@ -123,11 +135,22 @@ def _fields(name, body, widths):
 def board_names(c_src):
     """theme.c's names[] as {"DARK": "Dark", ...}: what the tiles say."""
     src = _strip_comments(c_src)
-    start = src.index("names[THEME_N]")
+    start = src.index("{", src.index("names[THEME_N]")) + 1
     table = src[start:src.index("};", start)]
     out = {}
-    entry = r'\[THEME_(\w+)\]\s*=\s*"((?:[^"\\\n]|\\.)*)"'
-    for key, name in re.findall(entry, table):
+    # Each entry whole, from its [THEME_X] to the next one: a findall for
+    # the first literal read [THEME_FOREST] = "For" "est" as "For" and
+    # never looked at the rest (review of fp/audit-nice, NICE 3).
+    one = re.compile(r'\s*"((?:[^"\\\n]|\\.)*)"\s*,?\s*')
+    heads = list(re.finditer(r"\[THEME_(\w+)\]\s*=", table))
+    for i, h in enumerate(heads):
+        key = h.group(1)
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(table)
+        m = one.fullmatch(table[h.end():end])
+        if m is None:
+            raise ValueError(f"theme.c: the name of THEME_{key} is not one"
+                             " plain string")
+        name = m.group(1)
         # A tile name is plain printable ASCII (tests/test_panel_strings.py
         # holds the panel to that). An escape would need C's rules, not
         # this script's, to read, so it is refused rather than guessed.

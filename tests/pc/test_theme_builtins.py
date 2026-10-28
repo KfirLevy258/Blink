@@ -108,6 +108,37 @@ def test_the_generator_refuses_a_tile_name_it_would_have_to_unescape():
         raise AssertionError("an escaped name was taken")
 
 
+def test_the_generator_refuses_a_name_split_over_adjacent_literals():
+    # C joins "For" "est"; the reader took "For" and stopped (review of
+    # fp/audit-nice, NICE 3).
+    gen = _gen()
+    for odd in ('"For" "est"', '"Forest" X', 'NAME_FOREST'):
+        c_src = _c("theme.c").replace('"Forest"', odd, 1)
+        try:
+            gen.board_names(c_src)
+        except ValueError as e:
+            assert "FOREST" in str(e), e
+        else:
+            raise AssertionError(f"{odd} was read as a name")
+
+
+def test_the_generator_refuses_a_colour_that_is_not_six_hex_digits():
+    gen = _gen()
+    for was, now in ((".bg = 0x0F1A14,", ".bg = 0,"),
+                     (".bg = 0x0F1A14,", ".bg = 0xF1A14,"),
+                     (".arc_w = THEME_W_NORMAL, .flat = false, .dot = true,"
+                      "\n\t},\n\t/*", ".arc_w = 0x00000C, .flat = false,"
+                      " .dot = true,\n\t},\n\t/*")):
+        c_src = _c("theme.c")
+        assert was in c_src, was
+        try:
+            gen.palettes(c_src.replace(was, now, 1), _c("theme.h"))
+        except ValueError as e:
+            assert "is not" in str(e), e
+        else:
+            raise AssertionError(f"{now!r} was taken")
+
+
 def test_a_name_with_a_quote_or_backslash_is_written_as_that_name(
         monkeypatch):
     # The module text used to be f-strings around "...": a quote in a name
