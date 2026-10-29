@@ -498,7 +498,15 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
   // Tells the server this tab is still open, so "Edit on computer" on the
   // board does not open a second one beside it. Not an edit: an open tab
   // nobody touches still times out after ten minutes.
-  function ping() { if (!finished) post('/api/ping', { tab: TAB }).then(function (j) { if (j.status !== 200) stopped(); }, stopped); }
+  // One live tab per builder: when a newer tab has opened on it (another
+  // press of Edit on computer), this one stops sending and closes itself, or,
+  // where the browser will not let a script close a tab, says so.
+  function superseded() {
+    gone();
+    try { window.close(); } catch (e) {}
+    setTimeout(function () { say('Continued in a newer tab. You can close this one.'); }, 300);
+  }
+  function ping() { if (!finished) post('/api/ping', { tab: TAB }).then(function (j) { if (j.status !== 200) stopped(); else if (j.newer) superseded(); }, stopped); }
   setInterval(ping, 20000);
   ping();     // counted as a tab at once, not 20 s from now
 

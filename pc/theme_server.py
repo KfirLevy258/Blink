@@ -360,8 +360,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if path == "/api/ping":
             # Alive, not active: an open tab nobody touches still times out.
-            self.builder.seen(_tab_of(raw))
-            return self._json(200, {"ok": True})
+            # "newer": a later tab has taken over, so this one stops.
+            newer = self.builder.seen(_tab_of(raw))
+            return self._json(200, {"ok": True, "newer": bool(newer)})
         if path not in ("/api/preview", "/api/save"):
             return self._refuse(404)
         try:
@@ -441,6 +442,9 @@ class BuilderServer:
         # while one is open opens another -- and the older one's close
         # must not end the builder the newer one is showing.
         self._tabs = {}
+        # Every tab id in the order it was first heard. Only the newest is
+        # live; see seen().
+        self._order = {}
         self.outcome = None
         self._done = threading.Event()
         self.page_bytes = page().encode("utf-8")
@@ -515,12 +519,32 @@ class BuilderServer:
                       if now - t < PAGE_ALIVE_S}
 
     def seen(self, tab=None):
+        """A ping. True when `tab` has been superseded by a newer one.
+
+        One live tab per builder. Every press of "Edit on computer" while
+        the builder is open opens another tab on it, and on Windows that
+        tab often opens behind other windows, so the owner presses again:
+        with the button no longer locked out, that made a pile of tabs, all
+        able to send previews (review of fp/edit-reset, SHOULD-1). Now the
+        newest tab -- the last id first heard -- is the live one, and an
+        older tab is told so on its next ping and stops (the page closes
+        itself where the browser allows, and says "Continued in a newer
+        tab" where it does not). A superseded tab's ping keeps nothing
+        alive: it does not count as seen, and it leaves the tab count, so
+        the newest tab's close still ends the builder."""
         with self._lock:
-            self._seen = self._now()
-            self._closed_at = None
-            self._prune_tabs(self._seen)
+            now = self._now()
             if tab is not None:
-                self._tabs[tab] = self._seen
+                seq = self._order.setdefault(tab, len(self._order))
+                if seq < len(self._order) - 1:
+                    self._tabs.pop(tab, None)
+                    return True
+            self._seen = now
+            self._closed_at = None
+            self._prune_tabs(now)
+            if tab is not None:
+                self._tabs[tab] = now
+            return False
 
     def page_alive(self):
         """Is a builder page open on this server right now?"""

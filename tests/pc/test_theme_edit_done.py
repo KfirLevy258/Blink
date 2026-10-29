@@ -316,3 +316,83 @@ def test_a_press_after_the_board_gives_its_button_back_opens_again():
     opened_ms = int(m.group(1))
     assert theme_server.OPEN_EVERY_S * 1000 < opened_ms
     assert "EDIT_COOLDOWN_MS" not in src
+
+
+# ------------------------------------------------------------- one live tab
+
+def test_a_newer_tab_supersedes_the_older_ones(tmp_path):
+    """Review of fp/edit-reset, SHOULD-1: with the board's button no longer
+    locked out, each press while the builder was open added a tab, and on
+    Windows they pile up behind other windows. The newest tab is the live
+    one; an older tab is told on its next ping and stops."""
+    s, clock = server(tmp_path)
+    try:
+        assert s.seen("a") is False
+        assert s.seen("b") is False           # a press opened another
+        assert s.seen("a") is True            # a's next ping: stop
+        assert s.seen("a") is True            # and it stays stopped
+        assert s.seen("b") is False
+        assert s.seen() is False              # an id-less ping is never
+    finally:                                  # told to stop
+        s.finish("test over")
+
+
+def test_a_superseded_tab_keeps_nothing_alive(tmp_path):
+    # Its ping must not count as the page being seen, or a stopped tab
+    # left open would hold the builder up after the live one closed.
+    s, clock = server(tmp_path)
+    try:
+        s.seen("a")
+        s.seen("b")
+        assert s.seen("a") is True
+        s.closing("b")
+        s.seen("a")                           # the old tab pings again
+        clock.t += theme_server.CLOSE_GRACE_S + 1
+        s.tick()
+        assert s.outcome == "closed"
+    finally:
+        s.finish("test over")
+
+
+def test_a_tab_back_from_sleep_does_not_take_over_from_the_newest(tmp_path):
+    # Order is by first sight, not last ping: a tab pruned after
+    # PAGE_ALIVE_S that pings again is still the older one.
+    s, clock = server(tmp_path)
+    try:
+        s.seen("a")
+        s.seen("b")
+        clock.t += theme_server.PAGE_ALIVE_S + 1
+        s.seen("b")
+        assert s.seen("a") is True
+        assert s.seen("b") is False
+    finally:
+        s.finish("test over")
+
+
+def test_the_ping_answer_tells_an_older_tab_over_http(tmp_path):
+    from tests.pc.test_theme_server import login, request
+    s, clock = server(tmp_path)
+    s.start()
+    try:
+        cookie = login(s)
+        ping = lambda tab: json.loads(request(
+            s, "POST", "/api/ping", {"tab": tab}, cookie=cookie)[2])
+        assert ping("old1") == {"ok": True, "newer": False}
+        assert ping("new2") == {"ok": True, "newer": False}
+        assert ping("old1") == {"ok": True, "newer": True}
+    finally:
+        s.finish("test over")
+        s.wait(5)
+
+
+def test_the_page_stops_and_closes_itself_when_told_it_is_superseded():
+    # The page half, kept to its script (another change is redoing the
+    # page's markup): a "newer" answer stops it sending, tries
+    # window.close(), and says so where the browser keeps the tab open.
+    page = theme_server.page()
+    assert "else if (j.newer) superseded();" in page
+    body = page[page.index("function superseded() {"):]
+    body = body[:body.index("\n  }") + 4]
+    assert "gone();" in body                  # finished: no more previews,
+    assert "window.close()" in body           # and no /api/closed on hide
+    assert "Continued in a newer tab." in body
