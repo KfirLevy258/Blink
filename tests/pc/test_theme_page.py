@@ -11,6 +11,8 @@ review read.
 """
 import re
 
+import pytest
+
 from pc import theme_server
 from tests.support import builder_page
 
@@ -145,3 +147,181 @@ def test_every_control_rule_is_at_least_44_px_tall():
         heights = [max(_px(d.get("min-height")) or 0, _px(d.get("height")) or 0)
                    for sels, d in rules if control in sels]
         assert heights and max(heights) >= 44, (control, heights)
+
+
+# --------------------------------------------------- the inactive-tab notice
+#
+# A tab that stopped being the live builder said so only in the status bar,
+# over controls that looked live, and most browsers refuse the
+# window.close() meant to take it away (the owner's report, 2026-10-29).
+# It shows a notice over an inert page now. Each test here reads the notice
+# itself, so a page without it fails every one.
+
+NOTICE = """
+    const hid = (id) => $(id).getAttribute('hidden') !== null;
+    const d = $('notice-dialog');
+    return {
+      shown: !hid('notice'),
+      title: $('notice-title').textContent, why: $('notice-why').textContent,
+      end: $('notice-end').textContent,
+      role: d.getAttribute('role'), modal: d.getAttribute('aria-modal'),
+      focused: document.activeElement === d,
+      inert: ['.top', '.studio'].map(s => document.querySelector(s).getAttribute('inert') !== null),
+      offer: !hid('notice-copy') && !hid('notice-keep-text'),
+      live: document.querySelectorAll('header button, main button, main input')
+              .filter(e => !e.disabled).map(e => e.id || e.tagName),
+      closed: window.closed,
+    };
+"""
+
+_OCEAN = "preset('Ocean'); await advance(300);"
+_NEWER = """answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
+    await advance(20000);"""
+_NO_ANSWER = "answer('/api/ping', () => 'fail'); await advance(20000);"
+
+# reason: (what the tab does first, what ends it, the sentence)
+REASONS = {
+    "saved": ("", "$('save').click(); await advance(10);",
+              "The theme was saved."),
+    "cancelled": ("", "$('cancel').click(); await advance(10);",
+                  "The builder was cancelled."),
+    "superseded": ("", _NEWER, "The builder continued in a newer tab."),
+    "stopped, no answer": ("", _NO_ANSWER, "The builder stopped."),
+    "stopped, refused": (
+        "", "answer('/api/ping', () => ({ status: 403, body: {} })); await advance(20000);",
+        "The builder stopped."),
+    "stopped, preview unanswered": (
+        "answer('/api/preview', () => 'fail');", _OCEAN, "The builder stopped."),
+}
+
+
+@pytest.mark.parametrize("reason", REASONS)
+def test_every_ending_shows_the_notice_with_its_reason(reason):
+    before, ending, sentence = REASONS[reason]
+    r = builder_page.run(f"""
+    await advance(10);
+    {before}
+    {ending}
+    """ + NOTICE, SAVED_DARK)
+    assert r["shown"] is True
+    assert r["title"] == "This tab is no longer active."
+    assert r["why"] == sentence
+    assert r["end"] == "You can close this tab."
+    assert (r["role"], r["modal"]) == ("dialog", "true")
+    assert r["focused"] is True
+    assert r["inert"] == [True, True]
+    assert r["live"] == []          # every control behind it, copy included
+
+
+def test_a_tab_whose_builder_never_answered_shows_the_notice():
+    r = builder_page.run("await advance(10);" + NOTICE,
+                         {"/api/state": {"status": 500, "body": {}}})
+    assert r["shown"] is True and r["why"] == "The builder stopped."
+    assert r["offer"] is False      # it never had the owner's theme
+
+
+def test_a_live_tab_shows_no_notice():
+    r = builder_page.run("await advance(10);" + _OCEAN + NOTICE, SAVED_DARK)
+    assert r["shown"] is False
+    assert r["inert"] == [False, False]
+    assert "save" in r["live"] and "copy-code" in r["live"]
+
+
+@pytest.mark.parametrize("before, ending, offer", [
+    (_OCEAN, _NEWER, True),
+    ("", _NEWER, False),
+    (_OCEAN, _NO_ANSWER, True),
+    ("", _NO_ANSWER, False),
+    (_OCEAN, "$('save').click(); await advance(10);", False),
+    (_OCEAN, "$('cancel').click(); await advance(10);", False),
+], ids=["newer, draft", "newer, none", "stopped, draft", "stopped, none",
+        "saved", "cancelled"])
+def test_the_copy_button_is_offered_only_with_a_draft(before, ending, offer):
+    """Cancel throws the changes away on purpose and Save keeps them, so
+    only a tab taken over or stopped with changes in it offers them."""
+    r = builder_page.run(f"""
+    await advance(10);
+    {before}
+    {ending}
+    """ + NOTICE, SAVED_DARK)
+    assert r["shown"] is True
+    assert r["offer"] is offer
+
+
+def test_a_superseded_tab_with_nothing_unsaved_still_tries_to_close():
+    r = builder_page.run("await advance(10);" + _NEWER + NOTICE, SAVED_DARK)
+    assert r["closed"] == 1
+    assert r["shown"] is True       # what stays when the browser refuses
+
+
+def test_a_superseded_tab_with_a_draft_does_not_close():
+    r = builder_page.run("await advance(10);" + _OCEAN + _NEWER + NOTICE,
+                         SAVED_DARK)
+    assert r["closed"] == 0 and r["offer"] is True
+
+
+def test_the_notices_copy_button_copies_the_share_code():
+    r = builder_page.run("""
+    await advance(10);
+    pick('c-high', '#ff0000');
+    await advance(300);
+    """ + _NEWER + """
+    $('notice-copy').click();
+    await flush();
+    return { wrote: clipboard.writes, box: $('code').dataset.plain,
+             label: $('notice-copy').querySelector('.lbl').textContent };
+    """, SAVED_DARK)
+    assert r["box"].startswith("blink theme set BT1.")
+    assert r["wrote"] == [r["box"]]
+    assert r["label"] == "Copied"
+
+
+def test_focus_stays_inside_the_notice():
+    r = builder_page.run("""
+    await advance(10);
+    """ + _OCEAN + _NEWER + """
+    const d = $('notice-dialog'), at = [];
+    for (let i = 0; i < 3; i++) {
+      const e = document.fire('keydown', { key: 'Tab' });
+      at.push([document.activeElement === d ? 'dialog' : document.activeElement.id, !!e.prevented]);
+    }
+    $('save').focus();
+    document.fire('focusin', { target: $('save') });
+    return { at, back: document.activeElement === d };
+    """, SAVED_DARK)
+    assert r["at"] == [["notice-copy", True], ["dialog", True],
+                       ["notice-copy", True]]
+    assert r["back"] is True
+
+
+def test_the_first_ending_is_the_one_the_notice_keeps():
+    """A ping in flight when Save lands, failing once the builder has gone,
+    must not turn "saved" into "stopped"."""
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/ping', () => 'fail');
+    $('save').click();
+    await advance(10);
+    await advance(20000);
+    """ + NOTICE, SAVED_DARK)
+    assert r["why"] == "The theme was saved."
+
+
+def test_the_page_writes_no_markup_from_script():
+    """The notice's words, like every other word the script writes, go in
+    by textContent."""
+    _, script = builder_page.page_parts()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML",
+                 "document.write"):
+        assert sink not in script, sink
+
+
+def test_the_notice_fades_only_for_those_who_allow_motion():
+    page = theme_server.page()
+    css = re.sub(r"/\*.*?\*/", "",
+                 page[page.index("<style>"):page.index("</style>")], flags=re.S)
+    assert re.search(r"\.notice\s*\{[^}]*animation:\s*notice-in", css)
+    reduced = re.search(
+        r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\}\s*\}", css,
+        re.S)
+    assert reduced and "animation: none !important" in reduced.group(1)

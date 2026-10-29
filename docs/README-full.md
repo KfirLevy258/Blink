@@ -522,9 +522,16 @@ in your browser, in a new tab, and once it has closed it opens a new one.
 On Windows, and on some Linux desktops, that tab may open behind your other
 windows, with only the browser's taskbar button flashing. Only the newest
 tab is live, and it opens on the changes you have made so far. Within about
-a minute the older tab stops: it closes itself if it has nothing you have
-not saved, and otherwise says **Continued in a newer tab** and keeps its
-colours and share code on screen until you close it. A preview the
+a minute the older tab stops: it tries to close itself if it has nothing
+you have not saved, and otherwise keeps your colours on screen.
+
+A tab that is no longer the live builder - you saved or cancelled, a newer
+tab took over, or the builder stopped (ten minutes idle, or the app
+quit) - dims and says **This tab is no longer active.**, with the reason
+and **You can close this tab.** Its controls stop working. If it still
+holds changes you have not saved, it offers **Copy share code**, so you
+can paste them into the newer tab or keep them. Most browsers will not let
+a page close a tab, so this notice is usually what you see. A preview the
 board never hears the end of - the computer went to sleep mid-edit - drops
 by itself after 15 minutes.
 

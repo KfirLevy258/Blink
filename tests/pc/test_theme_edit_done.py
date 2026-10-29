@@ -419,7 +419,8 @@ def test_an_older_tab_with_a_draft_never_closes_itself():
     """R2-SHOULD-1: Chrome, Edge and Firefox let a script close a tab with
     one history entry, which a builder tab opened from the board is. So the
     older tab closed itself, draft and all, without a word. It stays now,
-    still, with its colours and share code."""
+    still, with its colours, and its notice offers the share code; the
+    copy buttons behind the notice are as still as the rest."""
     r = builder_page.run("""
     await advance(10);
     preset('Ocean');
@@ -429,12 +430,14 @@ def test_an_older_tab_with_a_draft_never_closes_itself():
              ocean: $('presets').querySelectorAll('button')
                       .filter(b => b.getAttribute('aria-pressed') === 'true')
                       .map(b => b.querySelector('.pn').textContent),
-             copy: $('copy-code').disabled, copyCmd: $('copy-cmd').disabled };
+             copy: $('copy-code').disabled, copyCmd: $('copy-cmd').disabled,
+             offer: $('notice-copy').getAttribute('hidden') === null && !$('notice-copy').disabled };
     """, SAVED_DARK)
     assert r["closed"] == 0
     assert r["status"].startswith("Continued in a newer tab. Your changes")
     assert r["ocean"] == ["Ocean"]
-    assert r["copy"] is False and r["copyCmd"] is False
+    assert r["copy"] is True and r["copyCmd"] is True
+    assert r["offer"] is True
 
 
 def test_a_superseded_tab_goes_still_and_keeps_its_message():

@@ -109,7 +109,7 @@ const document = {
   querySelectorAll(sel) { return select(sel, root); },
   querySelector(sel) { return select(sel, root)[0] || null; },
   addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
-  fire(t) { (this.listeners[t] || []).forEach((f) => f({})); },
+  fire(t, extra) { const e = Object.assign({ preventDefault() { e.prevented = true; } }, extra || {}); (this.listeners[t] || []).forEach((f) => f(e)); return e; },
 };
 
 // Timers on a clock the scenario moves: advance(ms) runs what falls due.
@@ -135,9 +135,13 @@ function fetch_(path, opts) {
 
 const win = { closed: 0, listeners: {}, close() { this.closed++; }, addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); } };
 
+// The clipboard takes every write and keeps it, so a test can read what a
+// copy button copied.
+const clipboard = { writes: [], writeText(t) { this.writes.push(String(t)); return Promise.resolve(); } };
+
 const sandbox = {
   document, window: win, fetch: fetch_, setTimeout: setTimeout_, setInterval: setInterval_,
-  clearTimeout: clearTimer, clearInterval: clearTimer, navigator: {},
+  clearTimeout: clearTimer, clearInterval: clearTimer, navigator: { clipboard },
   getSelection: () => ({ removeAllRanges() {}, addRange() {} }),
   btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
   atob: (s) => { if (/[^A-Za-z0-9+/=]/.test(s)) throw new Error('bad'); return Buffer.from(s, 'base64').toString('binary'); },
@@ -174,7 +178,7 @@ function liveWrites() {
   return out;
 }
 
-const helpers = { $, document, window: win, advance, flush, type, pick, preset, answer, requests, liveWrites };
+const helpers = { $, document, window: win, advance, flush, type, pick, preset, answer, requests, liveWrites, clipboard };
 const names = Object.keys(sandbox);
 // The page script, as the browser would run it, against this DOM.
 new Function(...names, spec.script)(...names.map((k) => sandbox[k]));

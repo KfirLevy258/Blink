@@ -37,7 +37,7 @@
   --bg: #0E1116; --card: #161A20; --sunk: #12151A; --line: #272C34; --edge: #646C76;
   --text: #E6E8EB; --dim: #8A9199; --ok: #2ECC71; --ok-text: #2ECC71; --warn: #F1C40F; --on-warn: #0E1116;
   --bad: #E74C3C; --bad-text: #FF7A6E; --on-bad: #0E1116; --accent: #2ECC71; --on-accent: #0E1116; --focus: #2ECC71;
-  --shadow: rgba(0,0,0,.55); color-scheme: dark;
+  --shadow: rgba(0,0,0,.55); --scrim: rgba(5,6,8,.72); color-scheme: dark;
   --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -45,12 +45,12 @@
   --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
   --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
   --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
-  --shadow: rgba(17,20,24,.16); color-scheme: light; } }
+  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; } }
 :root[data-theme="light"] {
   --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
   --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
   --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
-  --shadow: rgba(17,20,24,.16); color-scheme: light; }
+  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; }
 
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
@@ -217,6 +217,32 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   .opt { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .slot { grid-template-columns: 44px minmax(0, 1fr) 100px; }
 }
+/* The notice a tab shows once it is no longer the live builder: saved,
+   cancelled, taken over by a newer tab, or the builder gone. A browser
+   refuses window.close() on most tabs it did not open by script, so the
+   status bar's last word was all an old tab said, in 15 px at the top of a
+   page that still looked live (the owner's report, 2026-10-29). The card
+   is drawn in the page's own tokens, so its words measure as the page's
+   do: --text on --card 14.2:1 dark and 18.5:1 light, --dim on --card 5.5:1
+   and 7.0:1, the primary button 9.0:1. The scrim only dims; nothing is
+   read through it. Its fade is the one motion here, and the reduced-motion
+   rule below takes it away. */
+.notice { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px; background: var(--scrim); animation: notice-in .2s ease; }
+.notice[hidden] { display: none; }
+.notice-card { width: 100%; max-width: 440px; display: grid; gap: 12px; padding: 28px; border-radius: 16px; border: 1px solid var(--line);
+  background: var(--card); color: var(--text); box-shadow: 0 24px 64px -24px var(--shadow); }
+/* Focus is put on the card itself, as the dialog, so that a screen reader
+   reads its heading and words; it is not a control, and a ring round the
+   whole card on opening read as a fault. Its button keeps the page's ring. */
+.notice-card:focus { outline: none; }
+.notice-card h2 { font-size: 20px; font-weight: 650; line-height: 1.3; letter-spacing: -.01em; }
+.notice-card p { margin: 0; }
+.notice-card .n-end { color: var(--dim); }
+.notice-card .btn { justify-self: start; }
+/* .btn sets its own display, which outranks the hidden attribute. */
+.notice-card [hidden] { display: none; }
+@keyframes notice-in { from { opacity: 0; } to { opacity: 1; } }
+@media (max-width: 640px) { .notice-card { padding: 22px 18px; } .notice-card .btn { justify-self: stretch; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
 </style>
 </head>
@@ -318,6 +344,22 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     </section>
   </aside>
 </main>
+
+<!--
+  Shown, and the page behind it made inert, when this tab stops being the
+  live builder. Its words are written by the script with textContent; the
+  reason sentence is the only part that changes.
+-->
+<div class="notice" id="notice" hidden>
+  <div class="notice-card" id="notice-dialog" role="dialog" aria-modal="true" aria-labelledby="notice-title" aria-describedby="notice-why notice-keep-text notice-end" tabindex="-1">
+    <h2 id="notice-title">This tab is no longer active.</h2>
+    <p id="notice-why"></p>
+    <p id="notice-keep-text" hidden>Your changes here are not saved. Copy the share code to keep them.</p>
+    <button type="button" class="btn primary" id="notice-copy" hidden><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
+    <div class="code" id="notice-code" hidden></div>
+    <p class="n-end" id="notice-end">You can close this tab.</p>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -571,16 +613,59 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   }
   function themeName() { return st.preset >= 0 ? PRESETS[st.preset][0] : 'your custom theme'; }
   // Nothing more is sent from this tab. The whole form goes still with it,
-  // so a colour that changes here cannot look as if it reached the board;
-  // the two copy buttons stay, since a share code is how a draft left in a
-  // stopped tab is carried anywhere else. The preview timer goes too: a
-  // change made in the 250 ms before the answer still sent one preview
-  // after the tab had stopped (review of fp/edit-reset r2, NICE 1).
+  // so a colour that changes here cannot look as if it reached the board.
+  // The preview timer goes too: a change made in the 250 ms before the
+  // answer still sent one preview after the tab had stopped (review of
+  // fp/edit-reset r2, NICE 1). The two copy buttons used to stay live, as
+  // the way a draft left here is carried anywhere else; the notice below
+  // has that button now, and everything behind it is still.
   function gone() {
     finished = true;
     clearTimeout(previewTimer);
-    document.querySelectorAll('main button, main input, #save, #cancel').forEach(function (e) { if (e.id !== 'copy-cmd') e.disabled = true; });
+    document.querySelectorAll('header button, main button, main input').forEach(function (e) { e.disabled = true; });
   }
+  // The notice, over a page made inert. A tab that had stopped said so
+  // only in the status bar, over controls that looked live, and most
+  // browsers refuse the window.close() meant to take it away (the owner's
+  // report, 2026-10-29). why: one sentence naming the reason. keep: the
+  // tab holds changes nobody saved, so the notice offers their share code.
+  // Focus stays in the card: inert does that where the browser has it (all
+  // current ones), and the two listeners after this where it does not.
+  var notice = document.getElementById('notice'), dialog = document.getElementById('notice-dialog');
+  function showNotice(why, keep) {
+    document.getElementById('notice-why').textContent = why;
+    ['notice-keep-text', 'notice-copy'].forEach(function (id) {
+      var e = document.getElementById(id);
+      if (keep) e.removeAttribute('hidden'); else e.setAttribute('hidden', '');
+    });
+    document.querySelectorAll('.top, .studio').forEach(function (e) { e.setAttribute('inert', ''); e.setAttribute('aria-hidden', 'true'); });
+    notice.removeAttribute('hidden');
+    dialog.focus();
+  }
+  function noticeOpen() { return notice.getAttribute('hidden') === null; }
+  document.addEventListener('focusin', function (e) { if (noticeOpen() && !dialog.contains(e.target)) dialog.focus(); });
+  // One button at most, so Tab and Shift+Tab both go between it and the
+  // card, and never out of it.
+  document.addEventListener('keydown', function (e) {
+    if (!noticeOpen() || e.key !== 'Tab') return;
+    var b = document.getElementById('notice-copy'), on = b.getAttribute('hidden') === null;
+    e.preventDefault();
+    (on && document.activeElement !== b ? b : dialog).focus();
+  });
+  // The last word of a tab: the status bar's sentence, which stays under
+  // the notice as the record, then the notice. Once only: a reply still in
+  // flight after a save must not turn "saved" into "stopped".
+  function retire(why, text, kind, keep) {
+    if (sealed) return false;
+    gone();
+    end(text, kind);
+    showNotice(why, keep);
+    return true;
+  }
+  // Changes here the board has not kept. Unlike unsaved(), a tab that never
+  // heard its saved theme holds none: it has nothing of the owner's to
+  // copy, only the page's default colours.
+  function holdsDraft() { return savedKey !== null && JSON.stringify(wireTheme()) !== savedKey; }
   // Every write carries this tab's id, so the server can refuse one from a
   // tab a newer one has taken over (409, "newer") without waiting for that
   // tab's next ping.
@@ -589,7 +674,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
                          body: body == null ? '' : JSON.stringify(body) })
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.status = r.status; return j; }); });
   }
-  function stopped() { gone(); end('The builder has stopped. Run blink theme on your computer to start it again.', true); }
+  // The idle timeout, the daemon exiting and a lost session all look the
+  // same from here, a ping refused or unanswered, so the notice says no
+  // more than that the builder stopped.
+  function stopped() { retire('The builder stopped.', 'The builder has stopped. Run blink theme on your computer to start it again.', true, holdsDraft()); }
   function schedulePreview() {
     if (finished) return;
     clearTimeout(previewTimer);
@@ -659,17 +747,27 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   document.querySelectorAll('[data-v]').forEach(function (b) { b.addEventListener('click', function () { st.view = b.dataset.v; render(); }); });
   [['p1','o1'],['p2','o2']].forEach(function (x) { var r = document.getElementById(x[0]); r.addEventListener('input', function () { st[x[0]] = +r.value; document.getElementById(x[1]).textContent = r.value + '%'; render(); }); });
 
-  function copy(id, btn) {
+  // shown: run before a refused copy selects the text, for a box that is
+  // hidden until then.
+  function copy(id, btn, shown) {
     // Only the label changes: the button also holds its icon, which a
     // textContent on the whole button would wipe.
     var t = document.getElementById(id).dataset.plain, b = document.getElementById(btn);
     var lbl = b.querySelector('.lbl') || b, was = lbl.dataset.was || (lbl.dataset.was = lbl.textContent);
     function ok() { lbl.textContent = 'Copied'; setTimeout(function () { lbl.textContent = was; }, 1400); }
-    function fallback() { var r = document.createRange(); r.selectNodeContents(document.getElementById(id)); var s = getSelection(); s.removeAllRanges(); s.addRange(r); lbl.textContent = 'Selected'; }
+    function fallback() { if (shown) shown(); var r = document.createRange(); r.selectNodeContents(document.getElementById(id)); var s = getSelection(); s.removeAllRanges(); s.addRange(r); lbl.textContent = 'Selected'; }
     try { navigator.clipboard.writeText(t).then(ok, fallback); } catch (e) { fallback(); }
   }
   document.getElementById('copy-cmd').addEventListener('click', function () { copy('cmd', 'copy-cmd'); });
   document.getElementById('copy-code').addEventListener('click', function () { copy('code', 'copy-code'); });
+  // The notice's copy: the same text from the same box. When the clipboard
+  // is refused, the code is shown and selected in the card instead, since
+  // the box it comes from is behind the notice, and inert.
+  document.getElementById('notice-copy').addEventListener('click', function () {
+    var box = document.getElementById('notice-code');
+    box.textContent = box.dataset.plain = document.getElementById('code').dataset.plain;
+    copy('notice-code', 'notice-copy', function () { box.removeAttribute('hidden'); });
+  });
 
   function applyCustom(f) {
     if (!f || !Array.isArray(f.c) || f.c.length !== 7 || !f.c.every(function (h) { return typeof h === 'string' && HEX.test(h); })) return false;
@@ -712,7 +810,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     clearTimeout(previewTimer);
     var name = themeName();
     post('/api/save', wireTheme()).then(function (j) {
-      if (j.status === 200) { savedKey = JSON.stringify(wireTheme()); gone(); end('Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok'); }
+      if (j.status === 200) { savedKey = JSON.stringify(wireTheme()); retire('The theme was saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', false); }
       else if (j.status === 409) superseded();
       else if (j.status === 400 || j.status === 500) say(j.error || 'The board would refuse that theme.', true);
       else stopped();
@@ -723,7 +821,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     clearTimeout(previewTimer);
     post('/api/cancel').then(function (j) {
       if (j.status === 409) return superseded();
-      gone(); end('Cancelled. Your board is back on its saved theme. You can close this tab.');
+      // No share code offered: Cancel is the owner throwing the changes away.
+      retire('The builder was cancelled.', 'Cancelled. Your board is back on its saved theme. You can close this tab.', undefined, false);
     }, stopped);
   });
   // Closing the tab cancels. A reload also fires pagehide, and the server
@@ -748,12 +847,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var savedKey = null;
   function unsaved() { return savedKey === null || JSON.stringify(wireTheme()) !== savedKey; }
   function superseded() {
-    if (sealed) return;
-    var keep = unsaved();
-    gone();
-    if (keep) { end('Continued in a newer tab. Your changes are still here: copy the share code to take them across.'); return; }
-    end('Continued in a newer tab. You can close this one.');
-    try { window.close(); } catch (e) {}
+    var why = 'The builder continued in a newer tab.';
+    if (unsaved()) { retire(why, 'Continued in a newer tab. Your changes are still here: copy the share code to take them across.', undefined, holdsDraft()); return; }
+    // The notice first: it is what stays when the browser refuses.
+    if (retire(why, 'Continued in a newer tab. You can close this one.', undefined, false)) { try { window.close(); } catch (e) {} }
   }
   function ping() { if (!finished) post('/api/ping', { tab: TAB }).then(function (j) { if (j.status !== 200) stopped(); else if (j.newer) superseded(); }, stopped); }
   setInterval(ping, 20000);
@@ -764,6 +861,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // taken over. The server refuses that action anyway (409); this makes
   // the tab say so before the first click rather than after it.
   document.addEventListener('visibilitychange', function () { if (!document.hidden) ping(); });
+  // A tab brought back from the back-forward cache sent /api/closed on its
+  // way out, and the builder may have ended since: ask before it is used.
+  window.addEventListener('pageshow', function (e) { if (e.persisted) ping(); });
 
   // --top-h follows the header: 80 px as a rule, more when a long status
   // wraps it. It was 73 px, written in, with the header at 80 (review of
