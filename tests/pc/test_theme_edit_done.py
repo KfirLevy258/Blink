@@ -17,9 +17,12 @@ as the daemon's writer does (CLAUDE.md), so a done that outgrew the
 board's line budget would fail here rather than vanish on the wire.
 """
 import json
+import os
 import queue
 import threading
 import time
+
+import pytest
 
 from pc import protocol
 from pc import theme
@@ -28,6 +31,7 @@ from pc.bridge import Bridge
 
 from tests.pc.test_theme_server import Clock, FakeServer, launcher_with
 from tests.pc.test_theme_bridge import _NO_FEED
+from tests.support import builder_page
 
 
 def inline(fn):
@@ -385,17 +389,178 @@ def test_the_ping_answer_tells_an_older_tab_over_http(tmp_path):
         s.wait(5)
 
 
-def test_the_page_stops_and_closes_itself_when_told_it_is_superseded():
-    # The page half, kept to its script (another change is redoing the
-    # page's markup): a "newer" answer stops it sending, tries
-    # window.close(), and says so where the browser keeps the tab open.
-    page = theme_server.page()
-    assert "else if (j.newer) superseded();" in page
-    body = page[page.index("function superseded() {"):]
-    body = body[:body.index("\n  }") + 4]
-    assert "gone();" in body                  # finished: no more previews,
-    assert "window.close()" in body           # and no /api/closed on hide
-    assert "Continued in a newer tab." in body
+# The page half, run as a browser would run it (tests/support/builder_dom.js):
+# the tests that stood here matched strings in the script, and the review
+# of fp/edit-reset r2 found what that let through.
+SAVED_DARK = {"/api/state": {"status": 200,
+                             "body": {"saved": {"id": 0}, "draft": None}}}
+
+
+def _newer_on_ping(extra=""):
+    return f"""
+    answer('/api/ping', () => ({{ status: 200, body: {{ ok: true, newer: true }} }}));
+    {extra}
+    await advance(20000);
+    """
+
+
+def test_an_older_tab_with_nothing_unsaved_closes_itself():
+    r = builder_page.run("""
+    await advance(10);
+    """ + _newer_on_ping() + """
+    return { closed: window.closed, status: $('status-text').textContent,
+             save: $('save').disabled };
+    """, SAVED_DARK)
+    assert r == {"closed": 1, "save": True,
+                 "status": "Continued in a newer tab. You can close this one."}
+
+
+def test_an_older_tab_with_a_draft_never_closes_itself():
+    """R2-SHOULD-1: Chrome, Edge and Firefox let a script close a tab with
+    one history entry, which a builder tab opened from the board is. So the
+    older tab closed itself, draft and all, without a word. It stays now,
+    still, with its colours and share code."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean');
+    await advance(300);
+    """ + _newer_on_ping() + """
+    return { closed: window.closed, status: $('status-text').textContent,
+             ocean: $('presets').querySelectorAll('button')
+                      .filter(b => b.getAttribute('aria-pressed') === 'true')
+                      .map(b => b.querySelector('.pn').textContent),
+             copy: $('copy-code').disabled, copyCmd: $('copy-cmd').disabled };
+    """, SAVED_DARK)
+    assert r["closed"] == 0
+    assert r["status"].startswith("Continued in a newer tab. Your changes")
+    assert r["ocean"] == ["Ocean"]
+    assert r["copy"] is False and r["copyCmd"] is False
+
+
+def test_a_superseded_tab_goes_still_and_keeps_its_message():
+    """R2-NICE 1 and 2: a change in the 250 ms before the answer still sent
+    a preview after the tab stopped, and the controls stayed live under a
+    status any later say() could overwrite."""
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
+    await advance(19900);
+    preset('Ocean');                 // its preview is due at +250 ms
+    await advance(100);              // the ping lands first: superseded
+    const said = $('status-text').textContent;
+    await advance(1000);
+    $('paste').value = 'nonsense';
+    $('load').fire('click');         // disabled; and a message would go
+    return {                         // under the box, not over the bar
+      previews: requests.filter(q => q.path === '/api/preview').length,
+      said, now: $('status-text').textContent,
+      live: document.querySelectorAll('main button, main input')
+              .filter(e => !e.disabled && e.id !== 'copy-cmd').map(e => e.id),
+    };
+    """, SAVED_DARK)
+    assert r["previews"] == 0
+    assert r["said"].startswith("Continued in a newer tab.")
+    assert r["now"] == r["said"]
+    assert r["live"] == []
+
+
+@pytest.mark.parametrize("path, button", [("/api/save", "save"),
+                                          ("/api/cancel", "cancel")])
+def test_a_refused_save_or_cancel_stops_the_older_tab(path, button):
+    """R2-SHOULD-2, the page half: every write carries the tab id, and a
+    409 "newer" stops the tab as a ping would have, keeping its draft."""
+    r = builder_page.run(f"""
+    await advance(10);
+    preset('Ocean');
+    await advance(300);
+    answer('{path}', () => ({{ status: 409, body: {{ newer: true }} }}));
+    $('{button}').click();
+    await advance(10);
+    return {{ closed: window.closed, status: $('status-text').textContent,
+             tabs: requests.filter(q => q.method === 'POST' && q.path !== '/api/closed')
+                     .map(q => q.headers['X-Blink-Tab'] || null) }};
+    """, SAVED_DARK)
+    assert r["closed"] == 0
+    assert r["status"].startswith("Continued in a newer tab.")
+    assert all(r["tabs"]) and len(set(r["tabs"])) == 1
+
+
+def test_a_tab_coming_back_into_view_asks_at_once():
+    r = builder_page.run("""
+    await advance(10);
+    const before = requests.filter(q => q.path === '/api/ping').length;
+    document.hidden = true; document.fire('visibilitychange');
+    const hidden = requests.filter(q => q.path === '/api/ping').length;
+    document.hidden = false; document.fire('visibilitychange');
+    return [before, hidden, requests.filter(q => q.path === '/api/ping').length];
+    """, SAVED_DARK)
+    assert r == [1, 1, 2]
+
+
+def test_a_newer_tab_opens_on_the_draft():
+    """R2-SHOULD-1, option (b): /api/state carries the last preview, and
+    the newer tab starts from it rather than from the saved theme."""
+    r = builder_page.run("""
+    await advance(300);
+    return { status: $('status-text').textContent,
+             pressed: $('presets').querySelectorAll('button')
+                        .filter(b => b.getAttribute('aria-pressed') === 'true')
+                        .map(b => b.querySelector('.pn').textContent),
+             previews: requests.filter(q => q.path === '/api/preview').length };
+    """, {"/api/state": {"status": 200, "body": {"saved": {"id": 0},
+                                                 "draft": {"id": 1}}}})
+    names = [b["name"] for b in __import__(
+        "json").loads(theme_server.builtins_json())]
+    assert r["pressed"] == [names[1]]
+    assert r["status"].startswith("This picks up the changes")
+    assert r["previews"] == 0         # the board already shows it
+
+
+def test_the_server_refuses_a_superseded_tabs_write(tmp_path):
+    """R2-SHOULD-2, the server half: before the older tab's next ping, its
+    Save or Cancel ended the builder under the newer tab."""
+    from tests.pc.test_theme_server import login, request
+    s, clock = server(tmp_path)
+    s.start()
+    try:
+        cookie = login(s)
+        s.seen("old1")
+        s.seen("new2")
+        tab = lambda t: {"X-Blink-Tab": t}
+        for path in ("/api/preview", "/api/save", "/api/cancel"):
+            status, _, body = request(s, "POST", path, {"id": 3},
+                                      cookie=cookie, extra=tab("old1"))
+            assert status == 409, path
+            assert json.loads(body)["newer"] is True
+        assert s.outcome is None
+        assert not os.path.exists(theme.preview_path(s.home))
+        status, _, _ = request(s, "POST", "/api/preview", {"id": 3},
+                               cookie=cookie, extra=tab("new2"))
+        assert status == 200
+        # An id not yet heard is a page that has just loaded: the newest.
+        status, _, _ = request(s, "POST", "/api/preview", {"id": 4},
+                               cookie=cookie, extra=tab("fresh3"))
+        assert status == 200
+        assert s.outcome is None
+    finally:
+        s.finish("test over")
+        s.wait(5)
+
+
+def test_state_carries_the_last_preview_as_the_draft(tmp_path):
+    from tests.pc.test_theme_server import login, request
+    s, clock = server(tmp_path)
+    s.start()
+    try:
+        cookie = login(s)
+        state = lambda: json.loads(request(s, "GET", "/api/state",
+                                           cookie=cookie)[2])
+        assert state()["draft"] is None
+        request(s, "POST", "/api/preview", {"id": 5}, cookie=cookie)
+        assert state()["draft"] == {"id": 5}
+    finally:
+        s.finish("test over")
+        s.wait(5)
 
 
 def test_the_done_is_logged_once_for_a_desk_check(tmp_path, capsys):
@@ -409,4 +574,4 @@ def test_the_done_is_logged_once_for_a_desk_check(tmp_path, capsys):
     b.pump()
     b.pump()
     err = capsys.readouterr().err
-    assert err.count("[theme] the builder closed; told the board") == 1
+    assert err.count("[theme] the builder ended; told the board") == 1

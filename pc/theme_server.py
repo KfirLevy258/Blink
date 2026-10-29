@@ -54,6 +54,10 @@ CLOSE_GRACE_S = 5       # a reload fires pagehide too, then loads again
 # stopped anyway.
 LINK_LIFE_S = 600
 MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
+# The page's tab id on a preview, save or cancel. A header and not a body
+# field because those bodies are the theme itself, which theme.validate
+# checks key by key; see _Handler.do_POST.
+TAB_HEADER = "X-Blink-Tab"
 # A builder heartbeat (/api/ping) arrives every 20 s from an open page. A page
 # heard within this long is "still open": the Launcher does not put a second
 # tab beside it. Chrome slows a hidden tab's timers to once a minute, hence
@@ -328,8 +332,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 ("X-Frame-Options", "DENY")))
         if url.path == "/api/state":
             self.builder.touch()
+            # "draft": the last preview this builder took, so a tab opened
+            # by another press of Edit on computer starts on the colours the
+            # board is showing and not on the saved theme. Without it the
+            # older tab was told to stop and the newer one opened on the
+            # saved theme: the draft was on the board and in no tab that
+            # could still send it (review of fp/edit-reset r2, SHOULD-1).
             return self._json(200, {"saved": theme.load_saved(
-                self.builder.home), "idle_s": self.builder.idle_s})
+                self.builder.home), "draft": self.builder.draft,
+                "idle_s": self.builder.idle_s})
         return self._refuse(404)
 
     # -- POST
@@ -352,6 +363,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if err:
             self.close_connection = True
             return self._refuse(err)
+        # Preview, Save and Cancel each carry the page's tab id, and an
+        # older tab's is refused here rather than on its next ping. The ping
+        # comes every 20 s while a tab is visible and about once a minute
+        # while it is hidden, and in that window an older tab's Save or
+        # Cancel ended the builder under the newer one, whose next ping then
+        # said the builder had stopped (review of fp/edit-reset r2,
+        # SHOULD-2). 409 with "newer", so the page stops as a ping would
+        # have told it to.
+        if path in ("/api/preview", "/api/save", "/api/cancel") and \
+                self.builder.superseded(_tab_id(
+                    self.headers.get(TAB_HEADER))):
+            return self._json(409, {"newer": True, "error":
+                                    "Continued in a newer tab."})
         if path == "/api/cancel":
             self._json(200, {"ok": True})
             return self.builder.finish("cancelled")
@@ -374,6 +398,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/preview":
             self.builder.touch()
             theme.write_preview(self.builder.home, t)
+            self.builder.draft = t
             return self._json(200, {"ok": True})
         keep = theme.saved_custom(self.builder.home) \
             if t["id"] != theme.CUSTOM else None
@@ -401,12 +426,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 
 def _tab_of(raw):
-    """The page's own id from a ping or close body, or None. Short and
-    plain or nothing: it is only ever a key in BuilderServer._tabs."""
+    """The page's own id from a ping or close body, or None."""
     try:
         tab = json.loads(raw.decode("utf-8")).get("tab") if raw else None
     except (ValueError, UnicodeDecodeError, AttributeError):
         return None
+    return _tab_id(tab)
+
+
+def _tab_id(tab):
+    """Short and plain or nothing: it is only ever a key in
+    BuilderServer._tabs and _order."""
     if isinstance(tab, str) and 0 < len(tab) <= 32 and tab.isalnum():
         return tab
     return None
@@ -445,6 +475,8 @@ class BuilderServer:
         # Every tab id in the order it was first heard. Only the newest is
         # live; see seen().
         self._order = {}
+        # The last theme a preview sent, or None; see /api/state.
+        self.draft = None
         self.outcome = None
         self._done = threading.Event()
         self.page_bytes = page().encode("utf-8")
@@ -527,11 +559,14 @@ class BuilderServer:
         with the button no longer locked out, that made a pile of tabs, all
         able to send previews (review of fp/edit-reset, SHOULD-1). Now the
         newest tab -- the last id first heard -- is the live one, and an
-        older tab is told so on its next ping and stops (the page closes
-        itself where the browser allows, and says "Continued in a newer
-        tab" where it does not). A superseded tab's ping keeps nothing
-        alive: it does not count as seen, and it leaves the tab count, so
-        the newest tab's close still ends the builder."""
+        older tab is told so on its next ping, or by a 409 on its next
+        preview, save or cancel (superseded()), and stops. The page closes
+        itself only when it holds nothing unsaved and the browser allows;
+        otherwise it says "Continued in a newer tab" and keeps its colours
+        and share code on screen, and the newer tab opens on the last
+        preview anyway (/api/state "draft"). A superseded tab's ping keeps
+        nothing alive: it does not count as seen, and it leaves the tab
+        count, so the newest tab's close still ends the builder."""
         with self._lock:
             now = self._now()
             if tab is not None:
@@ -545,6 +580,15 @@ class BuilderServer:
             if tab is not None:
                 self._tabs[tab] = now
             return False
+
+    def superseded(self, tab):
+        """Has a newer tab taken over from `tab`? Only a tab already heard
+        is ever older: an id not yet pinged is a page that has just loaded,
+        which is the newest there is, and no id at all is a client from
+        before tab ids (or a test), which is let through as it always was."""
+        with self._lock:
+            seq = self._order.get(tab) if tab is not None else None
+            return seq is not None and seq < len(self._order) - 1
 
     def page_alive(self):
         """Is a builder page open on this server right now?"""

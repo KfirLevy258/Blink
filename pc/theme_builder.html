@@ -506,7 +506,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // kind: true for an error (kept from when it was a flag), or 'ok' for a
   // finished save or a preview the board has, so the bar can say which
   // with its colour and icon as well as its words.
+  // sealed: the tab has said its last word (saved, cancelled, stopped, or
+  // continued in a newer tab), and nothing later -- a reply still in
+  // flight, a share-code error -- writes over it. A tab told it was
+  // superseded used to keep its controls live and lose that message to the
+  // next say() (review of fp/edit-reset r2, NICE 2).
+  var sealed = false;
+  function end(text, kind) { say(text, kind); sealed = true; }
   function say(text, kind) {
+    if (sealed) return;
     var s = document.getElementById('status');
     document.getElementById('status-text').textContent = text;
     s.classList.toggle('err', kind === true); s.classList.toggle('ok', kind === 'ok');
@@ -522,25 +530,40 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     if (box) box.setAttribute('aria-invalid', String(!!m && m[0] === 'bad'));
   }
   function themeName() { return st.preset >= 0 ? PRESETS[st.preset][0] : 'your custom theme'; }
+  // Nothing more is sent from this tab. The whole form goes still with it,
+  // so a colour that changes here cannot look as if it reached the board;
+  // the two copy buttons stay, since a share code is how a draft left in a
+  // stopped tab is carried anywhere else. The preview timer goes too: a
+  // change made in the 250 ms before the answer still sent one preview
+  // after the tab had stopped (review of fp/edit-reset r2, NICE 1).
   function gone() {
     finished = true;
-    document.getElementById('save').disabled = true; document.getElementById('cancel').disabled = true;
+    clearTimeout(previewTimer);
+    document.querySelectorAll('main button, main input, #save, #cancel').forEach(function (e) { if (e.id !== 'copy-cmd') e.disabled = true; });
   }
+  // Every write carries this tab's id, so the server can refuse one from a
+  // tab a newer one has taken over (409, "newer") without waiting for that
+  // tab's next ping.
   function post(path, body) {
-    return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+    return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Blink-Tab': TAB },
                          body: body == null ? '' : JSON.stringify(body) })
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.status = r.status; return j; }); });
   }
-  function stopped() { gone(); say('The builder has stopped. Run blink theme on your computer to start it again.', true); }
+  function stopped() { gone(); end('The builder has stopped. Run blink theme on your computer to start it again.', true); }
   function schedulePreview() {
     if (finished) return;
     clearTimeout(previewTimer);
     previewTimer = setTimeout(function () {
+      if (finished) return;
       if (textContrast() < MIN_CONTRAST) { say('Text is unreadable, so the board keeps the last preview.', true); return; }
-      var t = wireTheme(), key = JSON.stringify(t);
+      // The name as it was when this preview was sent: a preset clicked
+      // while the reply is on its way must not take this reply's words
+      // (review of fp/builder-look, N3).
+      var t = wireTheme(), key = JSON.stringify(t), name = themeName();
       if (key === lastSent) return;
       post('/api/preview', t).then(function (j) {
-        if (j.status === 200) { lastSent = key; say('Preview sent: ' + themeName() + ' is on your board until you save or cancel.', 'ok'); }
+        if (j.status === 200) { lastSent = key; say('Preview sent: ' + name + ' is on your board until you save or cancel.', 'ok'); }
+        else if (j.status === 409) superseded();
         else if (j.status === 400) say(j.error || 'The board would refuse that theme.', true);
         else stopped();
       }, stopped);
@@ -637,8 +660,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   document.getElementById('save').addEventListener('click', function () {
     if (finished || textContrast() < MIN_CONTRAST) return;
     clearTimeout(previewTimer);
+    var name = themeName();
     post('/api/save', wireTheme()).then(function (j) {
-      if (j.status === 200) { gone(); say('Saved: ' + themeName() + '. Your board keeps it. You can close this tab.', 'ok'); }
+      if (j.status === 200) { savedKey = JSON.stringify(wireTheme()); gone(); end('Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok'); }
+      else if (j.status === 409) superseded();
       else if (j.status === 400 || j.status === 500) say(j.error || 'The board would refuse that theme.', true);
       else stopped();
     }, stopped);
@@ -646,7 +671,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   document.getElementById('cancel').addEventListener('click', function () {
     if (finished) return;
     clearTimeout(previewTimer);
-    post('/api/cancel').then(function () { gone(); say('Cancelled. Your board is back on its saved theme. You can close this tab.'); }, stopped);
+    post('/api/cancel').then(function (j) {
+      if (j.status === 409) return superseded();
+      gone(); end('Cancelled. Your board is back on its saved theme. You can close this tab.');
+    }, stopped);
   });
   // Closing the tab cancels. A reload also fires pagehide, and the server
   // waits a few seconds for this page to load again before it gives up.
@@ -659,26 +687,56 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // board does not open a second one beside it. Not an edit: an open tab
   // nobody touches still times out after ten minutes.
   // One live tab per builder: when a newer tab has opened on it (another
-  // press of Edit on computer), this one stops sending and closes itself, or,
-  // where the browser will not let a script close a tab, says so.
+  // press of Edit on computer), this one stops sending. It closes itself
+  // only when it holds nothing the owner has not saved. Chrome, Edge and
+  // Firefox all let a script close a tab with one history entry, which a
+  // builder tab opened from the board is, so "closes itself" was the usual
+  // ending, and it took an unsaved draft with it without a word (review of
+  // fp/edit-reset r2, SHOULD-1). A tab with changes stays, still, with its
+  // colours and share code on screen; the newer tab opens on the last
+  // preview this one sent (/api/state "draft").
+  var savedKey = null;
+  function unsaved() { return savedKey === null || JSON.stringify(wireTheme()) !== savedKey; }
   function superseded() {
+    if (sealed) return;
+    var keep = unsaved();
     gone();
+    if (keep) { end('Continued in a newer tab. Your changes are still here: copy the share code to take them across.'); return; }
+    end('Continued in a newer tab. You can close this one.');
     try { window.close(); } catch (e) {}
-    setTimeout(function () { say('Continued in a newer tab. You can close this one.'); }, 300);
   }
   function ping() { if (!finished) post('/api/ping', { tab: TAB }).then(function (j) { if (j.status !== 200) stopped(); else if (j.newer) superseded(); }, stopped); }
   setInterval(ping, 20000);
   ping();     // counted as a tab at once, not 20 s from now
+  // And at once on coming back into view. A hidden tab's timer runs about
+  // once a minute, and longer when the browser has frozen it, so the owner
+  // returning to an older tab could act in it before it heard it had been
+  // taken over. The server refuses that action anyway (409); this makes
+  // the tab say so before the first click rather than after it.
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) ping(); });
 
+  // A theme as /api/state gives it, onto the page. False if it is neither a
+  // built-in nor a custom theme this page can show.
+  function applyTheme(t) {
+    if (t && t.id === CUSTOM) return applyCustom(t);
+    if (t && t.id >= 0 && t.id < PRESETS.length) { Object.assign(st, PRESETS[t.id][1]); st.preset = t.id; return true; }
+    return false;
+  }
   fetch('/api/state', { credentials: 'same-origin' }).then(function (r) {
     if (r.status !== 200) throw 0;
     return r.json();
   }).then(function (j) {
     var t = j.saved;
-    if (t && t.id === CUSTOM) applyCustom(t);
-    else if (t && t.id >= 0 && t.id < PRESETS.length) { Object.assign(st, PRESETS[t.id][1]); st.preset = t.id; }
-    lastSent = JSON.stringify(wireTheme());
-    say(t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
+    applyTheme(t);
+    savedKey = JSON.stringify(wireTheme());
+    lastSent = savedKey;
+    // A draft: this builder was already showing a preview, from a tab this
+    // one has just taken over. Start from it, since it is what the board
+    // shows now; it is still unsaved, so Cancel puts the board back.
+    var draft = false;
+    if (j.draft && applyTheme(j.draft)) { lastSent = JSON.stringify(wireTheme()); draft = lastSent !== savedKey; }
+    say(draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
+        : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
     render();
   }, function () { render(); stopped(); });
   render();

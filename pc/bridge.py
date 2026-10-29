@@ -708,7 +708,7 @@ class Bridge:
             # name after 3 s on its own, the board no longer shows when the
             # done arrives, so the log is where a desk check can see it.
             # Says that it was sent, never anything read off the wire.
-            print("[theme] the builder closed; told the board",
+            print("[theme] the builder ended; told the board",
                   file=sys.stderr)
 
     def board_alive(self) -> bool:

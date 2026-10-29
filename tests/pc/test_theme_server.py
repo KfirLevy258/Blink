@@ -48,9 +48,10 @@ def server(home):
 
 
 def request(server, method, path, body=None, cookie=None, host=None,
-            origin=None, ctype="application/json"):
+            origin=None, ctype="application/json", extra=None):
     c = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
     headers = {"Host": host or f"127.0.0.1:{server.port}"}
+    headers.update(extra or {})
     if cookie:
         headers["Cookie"] = cookie
     if origin:
