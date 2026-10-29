@@ -209,7 +209,10 @@ implementation:
    Still open: the Claude Desktop cache path on Linux -- an Electron
    convention, never observed, and there is no Linux Desktop to observe it
    with (Windows was settled 2026-09-30: `%APPDATA%\Claude`, written there
-   despite the MSIX package -- docs/research/claude-desktop-window-sources.md);
+   despite the MSIX package -- docs/research/claude-desktop-window-sources.md;
+   a later Store build moves it to `%LOCALAPPDATA%\Claude-Data\<name>`
+   behind a `.user-data-left.<name>` marker, measured 2026-10-29 and followed
+   by pc/desktop_paths.py);
    macOS
    notarisation (needs an Apple developer account); a board
    id on the settings screen; the disclosure question on the five known

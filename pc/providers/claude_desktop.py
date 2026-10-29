@@ -22,9 +22,9 @@ mistake that produces a confidently wrong panel rather than an error:
     by field instead of picking one winning source per poll.
 """
 import json
-import os
 import sys
 
+from pc import desktop_paths
 from pc.providers import base
 
 PROVIDER_ID = "claude"
@@ -58,20 +58,10 @@ def cache_path():
 
     Returns the path whether or not it exists -- absence is a normal state
     (the app may simply not be installed) and is handled by the reader, not
-    by pretending we do not know where to look.
+    by pretending we do not know where to look. The folder it sits in is
+    pc/desktop_paths's to find, because the Store build moves it.
     """
-    if sys.platform == "darwin":
-        return os.path.expanduser(
-            "~/Library/Application Support/Claude/plan-usage-history.json")
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA")
-        if not appdata:
-            # Fall back rather than crash: a Windows session with no APPDATA
-            # is broken in ways that are not ours to fix, but it must not
-            # take the daemon with it.
-            appdata = os.path.expanduser("~\\AppData\\Roaming")
-        return os.path.join(appdata, "Claude", "plan-usage-history.json")
-    return os.path.expanduser("~/.config/Claude/plan-usage-history.json")
+    return desktop_paths.usage_cache_path()
 
 
 # What `blink status` can say about the cache file, from ClaudeDesktopProvider

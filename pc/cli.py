@@ -3744,6 +3744,7 @@ def _source_lines(desk=None):
     one every other Desktop line of status came from; without a desk (a
     caller that wants these rows alone) it takes its own.
     """
+    from pc import desktop_paths
     from pc.providers import claude_desktop, codex_cli
     now = time.time()
 
@@ -3800,6 +3801,20 @@ def _source_lines(desk=None):
             print("Desktop     no usage cache (Claude Desktop not installed,"
                   " or never signed in)")
         print(f"            looked at {desktop.path()}")
+        if desktop_paths.marker_without_data():
+            # The app left a note saying where its data went, and that
+            # folder is gone. Reading Roaming instead is the right fallback,
+            # and this line is what a Store-build report needs to say why.
+            print("            Store build marker found, its data folder"
+                  " is missing")
+    source = desktop_paths.data_dir_source()
+    if source.startswith(desktop_paths.SOURCE_MARKER_PREFIX):
+        # Windows only. On the Store build measured 2026-10-29 Roaming held
+        # nothing but the marker, so a report that does not name the folder
+        # actually read leaves the reader guessing which of two layouts
+        # this desk has. See pc/desktop_paths.
+        print(f"            data moved by the Store build:"
+              f" {desktop_paths.data_dir()}")
 
     logs = codex_cli.recent_rollouts()
     if logs:
