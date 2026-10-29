@@ -458,7 +458,7 @@ def test_a_superseded_tab_goes_still_and_keeps_its_message():
       previews: requests.filter(q => q.path === '/api/preview').length,
       said, now: $('status-text').textContent,
       live: document.querySelectorAll('main button, main input')
-              .filter(e => !e.disabled && e.id !== 'copy-cmd').map(e => e.id),
+              .filter(e => !e.disabled).map(e => e.id),
     };
     """, SAVED_DARK)
     assert r["previews"] == 0

@@ -129,20 +129,35 @@ function fetch_(path, opts) {
   const req = { path, method: opts.method || 'GET', headers: opts.headers || {}, body: opts.body ? JSON.parse(opts.body || 'null') : null };
   requests.push(req);
   const a = (answers[path] || (() => ({ status: 200, body: { ok: true } })))(req);
-  if (a === 'fail') return Promise.reject(new Error('network'));
-  return Promise.resolve({ status: a.status, json: () => Promise.resolve(JSON.parse(JSON.stringify(a.body || {}))) });
+  // An answer can be a promise, from hold(), so a scenario decides when a
+  // reply lands and in what order against the others.
+  const settle = (x) => {
+    if (x === 'fail') return Promise.reject(new Error('network'));
+    // 'hold': a reply that never comes, for one the page asks for as it
+    // loads, before a scenario can hold() it.
+    if (x === 'hold') return new Promise(() => {});
+    return Promise.resolve({ status: x.status, json: () => Promise.resolve(JSON.parse(JSON.stringify(x.body || {}))) });
+  };
+  return a && typeof a.then === 'function' ? a.then(settle) : settle(a);
 }
 
 const win = { closed: 0, listeners: {}, close() { this.closed++; }, addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); } };
 
 // The clipboard takes every write and keeps it, so a test can read what a
-// copy button copied.
-const clipboard = { writes: [], writeText(t) { this.writes.push(String(t)); return Promise.resolve(); } };
+// copy button copied. refuse = true makes it reject, as a browser does
+// without permission or outside a secure context.
+const clipboard = { writes: [], refuse: false, writeText(t) { if (this.refuse) return Promise.reject(new Error('denied')); this.writes.push(String(t)); return Promise.resolve(); } };
+// What a copy's fallback selected, by the node it selected.
+const selection = { node: null };
+document.createRange = () => ({ selectNodeContents(n) { this.node = n; } });
+// A reply the scenario releases: answer(path, () => h.p), then h.release(x)
+// with an answer ({status, body} or 'fail').
+function hold() { let release; const p = new Promise((r) => { release = r; }); return { p, release }; }
 
 const sandbox = {
   document, window: win, fetch: fetch_, setTimeout: setTimeout_, setInterval: setInterval_,
   clearTimeout: clearTimer, clearInterval: clearTimer, navigator: { clipboard },
-  getSelection: () => ({ removeAllRanges() {}, addRange() {} }),
+  getSelection: () => ({ removeAllRanges() { selection.node = null; }, addRange(r) { selection.node = r.node; } }),
   btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
   atob: (s) => { if (/[^A-Za-z0-9+/=]/.test(s)) throw new Error('bad'); return Buffer.from(s, 'base64').toString('binary'); },
 };
@@ -178,7 +193,7 @@ function liveWrites() {
   return out;
 }
 
-const helpers = { $, document, window: win, advance, flush, type, pick, preset, answer, requests, liveWrites, clipboard };
+const helpers = { $, document, window: win, advance, flush, type, pick, preset, answer, requests, liveWrites, clipboard, selection, hold };
 const names = Object.keys(sandbox);
 // The page script, as the browser would run it, against this DOM.
 new Function(...names, spec.script)(...names.map((k) => sandbox[k]));

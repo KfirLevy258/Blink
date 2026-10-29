@@ -168,6 +168,8 @@ NOTICE = """
       focused: document.activeElement === d,
       inert: ['.top', '.studio'].map(s => document.querySelector(s).getAttribute('inert') !== null),
       offer: !hid('notice-copy') && !hid('notice-keep-text'),
+      described: d.getAttribute('aria-describedby'),
+      status: $('status-text').textContent,
       live: document.querySelectorAll('header button, main button, main input')
               .filter(e => !e.disabled).map(e => e.id || e.tagName),
       closed: window.closed,
@@ -177,7 +179,8 @@ NOTICE = """
 _OCEAN = "preset('Ocean'); await advance(300);"
 _NEWER = """answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
     await advance(20000);"""
-_NO_ANSWER = "answer('/api/ping', () => 'fail'); await advance(20000);"
+# A ping missed, and its retry 3 s later missed too.
+_NO_ANSWER = "answer('/api/ping', () => 'fail'); await advance(23100);"
 
 # reason: (what the tab does first, what ends it, the sentence)
 REASONS = {
@@ -188,7 +191,7 @@ REASONS = {
     "superseded": ("", _NEWER, "The builder continued in a newer tab."),
     "stopped, no answer": ("", _NO_ANSWER, "The builder stopped."),
     "stopped, refused": (
-        "", "answer('/api/ping', () => ({ status: 403, body: {} })); await advance(20000);",
+        "", "answer('/api/ping', () => ({ status: 403, body: {} })); await advance(23100);",
         "The builder stopped."),
     "stopped, preview unanswered": (
         "answer('/api/preview', () => 'fail');", _OCEAN, "The builder stopped."),
@@ -294,17 +297,159 @@ def test_focus_stays_inside_the_notice():
     assert r["back"] is True
 
 
-def test_the_first_ending_is_the_one_the_notice_keeps():
-    """A ping in flight when Save lands, failing once the builder has gone,
-    must not turn "saved" into "stopped"."""
+_SAVE = "$('save').click(); await advance(10);"
+_CANCEL = "$('cancel').click(); await advance(10);"
+_KEEP = "notice-why notice-keep-text notice-end"
+_PLAIN = "notice-why notice-end"
+
+
+@pytest.mark.parametrize("before, ending, described", [
+    ("", _SAVE, _PLAIN), (_OCEAN, _SAVE, _PLAIN),
+    (_OCEAN, _CANCEL, _PLAIN), ("", _NEWER, _PLAIN),
+    (_OCEAN, _NEWER, _KEEP), ("", _NO_ANSWER, _PLAIN),
+    (_OCEAN, _NO_ANSWER, _KEEP),
+], ids=["saved", "saved, after a change", "cancelled", "newer, none",
+        "newer, draft", "stopped, none", "stopped, draft"])
+def test_the_dialog_is_described_by_only_what_it_shows(before, ending,
+                                                       described):
+    """M1: the description named the "not saved" line in every case, and a
+    description reads an element it names even while it is hidden, so
+    Chromium's accessibility tree read a saved tab as "The theme was saved.
+    Your changes here are not saved." """
+    r = builder_page.run(f"""
+    await advance(10);
+    {before}
+    {ending}
+    """ + NOTICE, SAVED_DARK)
+    assert r["described"] == described
+
+
+def test_a_reply_landing_after_the_ending_does_not_replace_it():
+    """S1: a preview's reply held back past Save's, then failing, reaches
+    stopped() after the tab has already ended as saved. Only the guard in
+    retire() keeps the notice saying saved."""
+    r = builder_page.run("""
+    await advance(10);
+    const h = hold();
+    answer('/api/preview', () => h.p);
+    preset('Ocean'); await advance(300);       // preview sent, reply held
+    $('save').click(); await advance(10);       // saved
+    h.release('fail'); await advance(10);       // then the preview fails
+    """ + NOTICE, SAVED_DARK)
+    assert r["why"] == "The theme was saved."
+    assert r["offer"] is False
+    assert r["status"].startswith("Saved: Ocean.")
+
+
+def test_a_save_in_flight_outranks_a_failure_that_lands_first():
+    """N3: a failure settling before Save's reply said "stopped" over a save
+    that the server had stored."""
+    r = builder_page.run("""
+    await advance(10);
+    const p = hold(), s = hold();
+    answer('/api/preview', () => p.p);
+    answer('/api/save', () => s.p);
+    preset('Ocean'); await advance(300);
+    $('save').click(); await advance(10);
+    p.release('fail'); await advance(10);       // lands first
+    const during = $('notice').getAttribute('hidden') !== null;
+    s.release({ status: 200, body: { ok: true } }); await advance(10);
+    """ + NOTICE.replace("return {", "return { during,"), SAVED_DARK)
+    assert r["during"] is True                  # no notice while Save is out
+    assert r["why"] == "The theme was saved."
+
+
+def test_a_stop_held_for_a_save_that_failed_still_comes():
+    r = builder_page.run("""
+    await advance(10);
+    const p = hold(), s = hold();
+    answer('/api/preview', () => p.p);
+    answer('/api/save', () => s.p);
+    preset('Ocean'); await advance(300);
+    $('save').click(); await advance(10);
+    p.release('fail'); await advance(10);
+    s.release({ status: 500, body: { error: 'Not saved: no.' } }); await advance(10);
+    """ + NOTICE, SAVED_DARK)
+    assert r["why"] == "The builder stopped."
+    assert r["offer"] is True
+
+
+def test_one_missed_ping_is_asked_again_before_the_tab_stops():
+    """N2: one dropped request on loopback ended a live tab for good."""
+    r = builder_page.run("""
+    await advance(10);
+    let n = 0;
+    answer('/api/ping', () => (++n === 1 ? 'fail' : { status: 200, body: { ok: true } }));
+    await advance(20000);
+    const after1 = $('notice').getAttribute('hidden') !== null;
+    await advance(3100);
+    const pings = requests.filter(q => q.path === '/api/ping').length;
+    """ + NOTICE.replace("return {", "return { after1, pings,"), SAVED_DARK)
+    assert r["after1"] is True
+    assert r["pings"] == 3            # load, the miss, its retry
+    assert r["shown"] is False and r["live"]
+
+
+def test_two_missed_pings_stop_the_tab():
     r = builder_page.run("""
     await advance(10);
     answer('/api/ping', () => 'fail');
-    $('save').click();
-    await advance(10);
     await advance(20000);
-    """ + NOTICE, SAVED_DARK)
-    assert r["why"] == "The theme was saved."
+    const early = $('notice').getAttribute('hidden') === null;
+    await advance(3100);
+    """ + NOTICE.replace("return {", "return { early,"), SAVED_DARK)
+    assert r["early"] is False
+    assert r["shown"] is True and r["why"] == "The builder stopped."
+
+
+def test_a_tab_back_from_the_back_forward_cache_asks_at_once():
+    """S2: such a tab sent /api/closed as it left, and the builder may have
+    ended since."""
+    r = builder_page.run("""
+    await advance(10);
+    const count = () => requests.filter(q => q.path === '/api/ping').length;
+    const at = count();
+    window.listeners.pageshow.forEach(f => f({ persisted: false }));
+    await flush();
+    const fresh = count();
+    window.listeners.pageshow.forEach(f => f({ persisted: true }));
+    await flush();
+    return [at, fresh, count()];
+    """, SAVED_DARK)
+    assert r == [1, 1, 2]
+
+
+def test_a_refused_clipboard_shows_the_code_in_the_notice_selected():
+    """S3: the code's own box is behind the notice and inert, so a refused
+    copy shows the code in the card and selects it there."""
+    r = builder_page.run("""
+    await advance(10);
+    """ + _OCEAN + _NEWER + """
+    clipboard.refuse = true;
+    const before = $('notice-code').getAttribute('hidden') !== null;
+    $('notice-copy').click();
+    await flush();
+    return { before, shown: $('notice-code').getAttribute('hidden') === null,
+             text: $('notice-code').textContent, box: $('code').dataset.plain,
+             selected: selection.node === $('notice-code'),
+             label: $('notice-copy').querySelector('.lbl').textContent };
+    """, SAVED_DARK)
+    assert r["before"] is True and r["shown"] is True
+    assert r["text"] == r["box"] and r["text"].startswith("blink theme set")
+    assert r["selected"] is True
+    assert r["label"] == "Selected"
+
+
+def test_a_tab_with_nothing_to_copy_is_not_told_to_copy():
+    """N1: a tab superseded before it heard its saved theme said "copy the
+    share code" in the bar while its notice offered none. It still does
+    not close, since it cannot know it holds nothing."""
+    r = builder_page.run("""
+    await advance(10);
+    """ + _NEWER + NOTICE, {"/api/state": "hold"})
+    assert r["status"] == "Continued in a newer tab. You can close this one."
+    assert r["offer"] is False
+    assert r["closed"] == 0
 
 
 def test_the_page_writes_no_markup_from_script():

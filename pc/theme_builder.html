@@ -351,7 +351,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   reason sentence is the only part that changes.
 -->
 <div class="notice" id="notice" hidden>
-  <div class="notice-card" id="notice-dialog" role="dialog" aria-modal="true" aria-labelledby="notice-title" aria-describedby="notice-why notice-keep-text notice-end" tabindex="-1">
+  <div class="notice-card" id="notice-dialog" role="dialog" aria-modal="true" aria-labelledby="notice-title" aria-describedby="notice-why notice-end" tabindex="-1">
     <h2 id="notice-title">This tab is no longer active.</h2>
     <p id="notice-why"></p>
     <p id="notice-keep-text" hidden>Your changes here are not saved. Copy the share code to keep them.</p>
@@ -638,6 +638,11 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       var e = document.getElementById(id);
       if (keep) e.removeAttribute('hidden'); else e.setAttribute('hidden', '');
     });
+    // Named here, not fixed in the markup: a description reads an element
+    // it names even while that element is hidden, so a saved tab told a
+    // screen reader "Your changes here are not saved", measured in
+    // Chromium's accessibility tree (review of fp/tab-notice, M1).
+    dialog.setAttribute('aria-describedby', keep ? 'notice-why notice-keep-text notice-end' : 'notice-why notice-end');
     document.querySelectorAll('.top, .studio').forEach(function (e) { e.setAttribute('inert', ''); e.setAttribute('aria-hidden', 'true'); });
     notice.removeAttribute('hidden');
     dialog.focus();
@@ -677,7 +682,16 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The idle timeout, the daemon exiting and a lost session all look the
   // same from here, a ping refused or unanswered, so the notice says no
   // more than that the builder stopped.
-  function stopped() { retire('The builder stopped.', 'The builder has stopped. Run blink theme on your computer to start it again.', true, holdsDraft()); }
+  // A Save still on its way outranks a failure that lands first: the
+  // builder ends once a save is stored, and the reply to some request sent
+  // just before can settle ahead of Save's own. "Stopped" over a save that
+  // went through sends the owner to save again (review of fp/tab-notice,
+  // N3). So while Save is out, a stop waits for its answer.
+  var saving = false, stopOwed = false;
+  function stopped() {
+    if (saving) { stopOwed = true; return; }
+    retire('The builder stopped.', 'The builder has stopped. Run blink theme on your computer to start it again.', true, holdsDraft());
+  }
   function schedulePreview() {
     if (finished) return;
     clearTimeout(previewTimer);
@@ -809,12 +823,16 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     if (finished || textContrast() < MIN_CONTRAST) return;
     clearTimeout(previewTimer);
     var name = themeName();
+    saving = true;
+    function settled() { saving = false; var owed = stopOwed; stopOwed = false; return owed; }
     post('/api/save', wireTheme()).then(function (j) {
+      var owed = settled();
       if (j.status === 200) { savedKey = JSON.stringify(wireTheme()); retire('The theme was saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', false); }
       else if (j.status === 409) superseded();
+      else if (owed) stopped();
       else if (j.status === 400 || j.status === 500) say(j.error || 'The board would refuse that theme.', true);
       else stopped();
-    }, stopped);
+    }, function () { settled(); stopped(); });
   });
   document.getElementById('cancel').addEventListener('click', function () {
     if (finished) return;
@@ -842,18 +860,34 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // builder tab opened from the board is, so "closes itself" was the usual
   // ending, and it took an unsaved draft with it without a word (review of
   // fp/edit-reset r2, SHOULD-1). A tab with changes stays, still, with its
-  // colours and share code on screen; the newer tab opens on the last
-  // preview this one sent (/api/state "draft").
+  // colours on screen under the notice, which offers its share code; the
+  // newer tab opens on the last preview this one sent (/api/state "draft").
   var savedKey = null;
   function unsaved() { return savedKey === null || JSON.stringify(wireTheme()) !== savedKey; }
   function superseded() {
-    var why = 'The builder continued in a newer tab.';
-    if (unsaved()) { retire(why, 'Continued in a newer tab. Your changes are still here: copy the share code to take them across.', undefined, holdsDraft()); return; }
+    // keep: not closed, since the tab may hold something unsaved, which
+    // includes a tab that never heard its saved theme. draft: it holds
+    // changes it can offer. The bar's words follow the offer, so a tab
+    // with nothing to copy is not told to copy (review of fp/tab-notice,
+    // N1).
+    var keep = unsaved(), draft = holdsDraft(), why = 'The builder continued in a newer tab.';
+    var ended = retire(why, draft ? 'Continued in a newer tab. Your changes are still here: copy the share code to take them across.'
+                                  : 'Continued in a newer tab. You can close this one.', undefined, draft);
     // The notice first: it is what stays when the browser refuses.
-    if (retire(why, 'Continued in a newer tab. You can close this one.', undefined, false)) { try { window.close(); } catch (e) {} }
+    if (ended && !keep) { try { window.close(); } catch (e) {} }
   }
-  function ping() { if (!finished) post('/api/ping', { tab: TAB }).then(function (j) { if (j.status !== 200) stopped(); else if (j.newer) superseded(); }, stopped); }
-  setInterval(ping, 20000);
+  // One miss is asked again before the tab calls the builder stopped. A
+  // single dropped request on loopback ended a live builder's tab for good,
+  // and behind a full-page notice since the notice came (review of
+  // fp/tab-notice, N2). Three seconds: the builder is either up again by
+  // then or gone.
+  var RETRY_MS = 3000;
+  function ping(again) {
+    if (finished) return;
+    function miss() { if (again) stopped(); else setTimeout(function () { ping(true); }, RETRY_MS); }
+    post('/api/ping', { tab: TAB }).then(function (j) { if (j.status !== 200) miss(); else if (j.newer) superseded(); }, miss);
+  }
+  setInterval(function () { ping(); }, 20000);
   ping();     // counted as a tab at once, not 20 s from now
   // And at once on coming back into view. A hidden tab's timer runs about
   // once a minute, and longer when the browser has frozen it, so the owner
