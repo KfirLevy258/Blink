@@ -704,6 +704,12 @@ class Bridge:
                 and self._board_can(protocol.BOARD_CAP_EDIT_DONE)
                 and ended()):
             self._write(protocol.theme_edit_done())
+            # One line, for windows-check 10c: with the slot back to its
+            # name after 3 s on its own, the board no longer shows when the
+            # done arrives, so the log is where a desk check can see it.
+            # Says that it was sent, never anything read off the wire.
+            print("[theme] the builder closed; told the board",
+                  file=sys.stderr)
 
     def board_alive(self) -> bool:
         return (self._last_ping is not None

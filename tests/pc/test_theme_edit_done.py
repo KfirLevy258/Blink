@@ -396,3 +396,17 @@ def test_the_page_stops_and_closes_itself_when_told_it_is_superseded():
     assert "gone();" in body                  # finished: no more previews,
     assert "window.close()" in body           # and no /api/closed on hide
     assert "Continued in a newer tab." in body
+
+
+def test_the_done_is_logged_once_for_a_desk_check(tmp_path, capsys):
+    # windows-check 10c reads it: the board no longer shows a done, since
+    # the slot comes back to its name by itself.
+    lau, _ = launcher_with(str(tmp_path), lambda u: True)
+    b, sent = wired(tmp_path, lau)
+    b.on_message({"t": "theme_edit", "v": 2})
+    capsys.readouterr()
+    FakeServer.made[0].finish("closed")
+    b.pump()
+    b.pump()
+    err = capsys.readouterr().err
+    assert err.count("[theme] the builder closed; told the board") == 1

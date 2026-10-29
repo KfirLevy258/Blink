@@ -160,7 +160,10 @@ wait 3.5
 # The one guard left is an ask in flight, so a double tap cannot open two
 # tabs. `edit-reply` sets how this tool answers the board's asks (hold: not
 # at all, the in-flight case), and `fake edit_done` is the daemon's real line
-# for a builder that ended. A board runs all of it.
+# for a builder that ended. A board runs all of it. The waits are generous
+# on purpose: the harness clock advances only as fast as its loop runs, and
+# on a loaded machine its 8 s fallback took longer than the 10 s first
+# allowed for it (2026-10-29). A board keeps real time.
 tap settings.open
 click "Theme"
 expect ui_state ov=theme tp=0
@@ -168,7 +171,7 @@ expect ui_state ov=theme tp=0
 click "Edit on computer"
 expect theme_edit
 wait-widget "Opened on your computer" 3
-wait-widget "Edit on computer" 5
+wait-widget "Edit on computer" 8
 expect ui_state edit=name
 click "Edit on computer"
 expect theme_edit
@@ -188,20 +191,22 @@ click "Edit on computer"
 expect theme_edit
 click "Opening on your computer"
 expect no theme_edit
-wait-widget "On your computer, run: blink" 7
+wait-widget "On your computer, run: blink" 10
 expect ui_state edit=run
 edit-reply ok
 click "On your computer, run: blink"
 expect theme_edit
 wait-widget "Opened on your computer" 3
-wait-widget "Edit on computer" 5
+wait-widget "Edit on computer" 8
 # no: the fallback, read for 8 s, then the name on its own.
 edit-reply no
 click "Edit on computer"
 expect theme_edit
 wait-widget "On your computer, run: blink" 3
-wait-widget "Edit on computer" 10
+wait-widget "Edit on computer" 15
 expect ui_state edit=name
+# Back to answering ok for whatever follows. Note this overrides an
+# --edit-reply no given on the command line for every later step.
 edit-reply ok
 click "<"
 expect ui_state ov=none
