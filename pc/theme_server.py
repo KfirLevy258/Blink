@@ -59,10 +59,21 @@ MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
 # tab beside it. Chrome slows a hidden tab's timers to once a minute, hence
 # the margin over 60 s.
 PAGE_ALIVE_S = 75
-# One browser opened per this many seconds of "Edit on computer" (plan,
-# Answers 2026-10-25). On the Launcher, not the Bridge: a Bridge is rebuilt on
-# every reconnect, and a nudged cable must not reset the limit.
-OPEN_EVERY_S = 10
+# Asks for "Edit on computer" within this long of the last open (counted
+# from when the open began) are folded into it: answered with that open's
+# ok, and no second window. On the Launcher, not the Bridge: a Bridge is
+# rebuilt on every reconnect, and a nudged cable must not reset it.
+#
+# It was 10 s, one browser per 10 s (plan, Answers 2026-10-25), matching the
+# board's 10 s lock-out. The board now takes a tap at any time except while
+# its ask is in flight, and reads "Edit on computer" again 3 s after "Opened
+# on your computer" (owner, 2026-10-29); at 10 s the daemon would have
+# answered the first press after that ok with no window at all. At 2 s, a
+# press after the note has gone always opens again (the board's 3 s starts
+# at the reply, after the open began). A press within 2 s of the open --
+# a replayed ask, or a deliberate one on the "Opened" note itself -- is
+# folded into it, which is benign: a window opened moments earlier.
+OPEN_EVERY_S = 2
 
 
 def cookie_name(port):
@@ -591,11 +602,12 @@ class Launcher:
             live = server is not None and not server.done
             if live and self._opened_at is not None and (
                     now - self._opened_at < OPEN_EVERY_S):
-                # Answered with what the open under 10 s ago achieved, and
-                # no new window: the one narrow case of an ok with nothing
-                # newly shown. The board's own 10 s guard means only a tap
-                # after leaving and re-entering the theme page reaches it,
-                # and a window did open moments before (review r2, NICE 4).
+                # Answered with what the open under OPEN_EVERY_S ago
+                # achieved, and no new window: the one narrow case of an ok
+                # with nothing newly shown. Any ask within 2 s of the open
+                # reaches it -- a replayed one, or a press on the board's
+                # "Opened" note -- moments after a window opened (review
+                # r2, NICE 4; review of fp/edit-reset, SHOULD-2).
                 return self._last_ok
             # A page already open in a tab used to be answered ok 1 with
             # nothing shown, on the idea that a second tab would fight the
@@ -612,10 +624,11 @@ class Launcher:
             if ok and server.done:
                 # It ended while the browser was opening: its tab had just
                 # closed and its grace ran out, or it went idle. The board
-                # would be told "opened" over a dead builder and, the done
-                # being ignored while its ask is in flight, would sit on
-                # that for 10 s -- the owner's bug again (review r2,
-                # SHOULD-1). So once more, on a builder of its own.
+                # would be told "opened" over a dead builder, the done
+                # having been ignored while its ask was in flight, and a
+                # press on its note would be folded into this dead open
+                # (review r2, SHOULD-1). So once more, on a builder of its
+                # own.
                 ok, server = self._open(None)
                 if ok and server.done:
                     ok = False

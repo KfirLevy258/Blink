@@ -502,10 +502,11 @@ theme.
 ### Making a theme on your computer
 
 On the board, **Settings > Theme > Edit on computer** opens the theme builder
-in your computer's browser. The board says **Opened on your computer**, or,
-on a computer with no browser to open (a server, or an SSH session), it says
-**On your computer, run: blink theme** instead. Running that yourself does
-the same thing:
+in your computer's browser. The board says **Opened on your computer** for
+a few seconds and then the button reads **Edit on computer** again, ready to
+press. On a computer with no browser to open (a server, or an SSH session),
+it says **On your computer, run: blink theme** instead, for long enough to
+read. Running that yourself does the same thing:
 
 ```bash
 ~/.blink/bin/blink theme
@@ -515,12 +516,11 @@ The builder is a page served by the app to your own browser and nobody else:
 it listens on 127.0.0.1 only, on a link that works once, and fetches nothing
 from the internet. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
-without a change puts the board back on the theme it had. Once the builder
-has closed, the board's button reads **Edit on computer** again and opens a
-new one; tapped while the builder is still open, it opens it again in your
-browser, in a new tab. On Windows, and on some Linux desktops, that tab may
-open behind your other windows, with only the browser's taskbar button
-flashing. A preview the
+without a change puts the board back on the theme it had. Press **Edit on
+computer** again at any time: with the builder still open it opens it again
+in your browser, in a new tab, and once it has closed it opens a new one.
+On Windows, and on some Linux desktops, that tab may open behind your other
+windows, with only the browser's taskbar button flashing. A preview the
 board never hears the end of - the computer went to sleep mid-edit - drops
 by itself after 15 minutes.
 

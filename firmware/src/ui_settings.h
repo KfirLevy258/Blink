@@ -73,8 +73,8 @@ void ui_settings_apply_theme(void);
 void ui_settings_theme_edit_reply(bool ok);
 
 /* The builder the daemon opened for "Edit on computer" has ended (theme
- * contract Addendum 6): the slot reads its name again and the next tap asks
- * again, whatever the cooldown says. */
+ * contract Addendum 6): whatever note the slot shows goes, and it reads its
+ * name again. An ask still in flight keeps its answer. */
 void ui_settings_theme_edit_done(void);
 
 #ifdef CONFIG_BLINK_TOUCH_INJECT

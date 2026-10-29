@@ -154,30 +154,55 @@ expect ui_state scr=gauges
 fake ota_none
 wait 3.5
 
-# --- "Edit on computer" and the builder ending (theme contract Addendum 6).
-# Found on the board 2026-10-29: open the builder, close the browser window,
-# tap again inside 10 s, and nothing was sent while the slot still said
-# "Opened on your computer". A tap before the builder ends is still a double
-# tap and sends nothing; once the daemon says done (here `fake edit_done`,
-# the daemon's real line), the slot reads its name and the next tap asks.
-# On a board, run with --edit-reply ok (the default) so the asks are opened.
+# --- "Edit on computer", a button that comes back (owner, 2026-10-29).
+# After an answer the slot shows it for a moment and reads its name again,
+# and a tap at any time asks again; the daemon opens the builder once more.
+# The one guard left is an ask in flight, so a double tap cannot open two
+# tabs. `edit-reply` sets how this tool answers the board's asks (hold: not
+# at all, the in-flight case), and `fake edit_done` is the daemon's real line
+# for a builder that ended. A board runs all of it.
 tap settings.open
 click "Theme"
 expect ui_state ov=theme tp=0
+# ok: "Opened" for 3 s, then the name, then a press asks again.
 click "Edit on computer"
 expect theme_edit
 wait-widget "Opened on your computer" 3
-click "Opened on your computer"
-expect no theme_edit
-expect ui_state edit=opened
-fake edit_done
-wait-widget "Edit on computer" 3
+wait-widget "Edit on computer" 5
 expect ui_state edit=name
 click "Edit on computer"
 expect theme_edit
 wait-widget "Opened on your computer" 3
+# A press while "Opened" still shows is no double tap: it asks again too.
+click "Opened on your computer"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+# The builder ended: the note goes at once.
 fake edit_done
 wait-widget "Edit on computer" 3
+expect ui_state edit=name
+# In flight: no answer yet, so a second press sends nothing, and after 5 s
+# the fallback; a press on the fallback asks again.
+edit-reply hold
+click "Edit on computer"
+expect theme_edit
+click "Opening on your computer"
+expect no theme_edit
+wait-widget "On your computer, run: blink" 7
+expect ui_state edit=run
+edit-reply ok
+click "On your computer, run: blink"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+wait-widget "Edit on computer" 5
+# no: the fallback, read for 8 s, then the name on its own.
+edit-reply no
+click "Edit on computer"
+expect theme_edit
+wait-widget "On your computer, run: blink" 3
+wait-widget "Edit on computer" 10
+expect ui_state edit=name
+edit-reply ok
 click "<"
 expect ui_state ov=none
 click "<"

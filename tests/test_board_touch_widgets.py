@@ -1306,3 +1306,18 @@ def test_a_harness_only_script_stops_on_a_board():
     assert first.cmd == "harness_only"
     with pytest.raises(bt.ScriptError):
         bt.parse_line("harness-only now")
+
+
+def test_edit_reply_parses_and_hold_answers_nothing():
+    # popups_touch.txt taps while the board's ask is in flight, which needs
+    # a bench that does not answer at once.
+    assert bt.parse_line("edit-reply hold").args == ("hold",)
+    with pytest.raises(bt.ScriptError):
+        bt.parse_line("edit-reply maybe")
+    b, link = _bench([])
+    b.run_script(bt.parse_script("edit-reply hold\n"))
+    assert b.edit_reply is None
+    b.board_caps = {"theme"}
+    n = len(link.writes)
+    b.on_line(b'{"t":"theme_edit","v":2}')
+    assert len(link.writes) == n                 # nothing sent back

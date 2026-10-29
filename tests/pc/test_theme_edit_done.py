@@ -235,7 +235,8 @@ def test_a_reshow_holds_off_the_builders_own_end(tmp_path):
 
 def test_a_builder_that_ends_while_the_browser_opens_is_replaced(tmp_path):
     # It finished inside the opener (its grace ran out). Telling the board
-    # "opened" over it would bring the owner's bug back for 10 s.
+    # "opened" over it would put "Opened on your computer" over a builder
+    # that is not there.
     lau, clock = launcher_with(str(tmp_path), lambda u: True)
     b, sent = wired(tmp_path, lau)
     b.on_message({"t": "theme_edit", "v": 2})
@@ -295,3 +296,23 @@ def test_only_the_newest_unspent_link_opens_and_only_while_fresh(tmp_path):
         assert s.redeem(late) is None          # stale
     finally:
         s.finish("test over")
+
+
+def test_a_press_after_the_board_gives_its_button_back_opens_again():
+    """The board takes a tap at any time except while its ask is in flight,
+    and shows "Opened on your computer" for EDIT_OPENED_MS before reading
+    its name again (owner, 2026-10-29). The Launcher folds an ask within
+    OPEN_EVERY_S of the open into it, with no new window -- a press on the
+    "Opened" note included, which is benign. What must hold is that a press
+    after the note has gone always opens again: the board's 3 s starts at
+    the reply and the daemon's 2 s before the opener runs, so the daemon's
+    window must be the shorter."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "firmware" / "src"
+           / "ui_settings.c").read_text(encoding="utf-8")
+    m = re.search(r"#define EDIT_OPENED_MS\s+(\d+)\s*$", src, re.M)
+    assert m, "EDIT_OPENED_MS not found as a plain integer in ui_settings.c"
+    opened_ms = int(m.group(1))
+    assert theme_server.OPEN_EVERY_S * 1000 < opened_ms
+    assert "EDIT_COOLDOWN_MS" not in src

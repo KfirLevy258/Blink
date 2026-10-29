@@ -791,10 +791,12 @@ def theme_edit_reply(ok: bool) -> dict:
 def theme_edit_done() -> dict:
     """The builder the daemon opened for the board's "Edit on computer" has
     ended -- saved, cancelled, its tab closed, or timed out (contract
-    Addendum 6). The board clears its 10 s double-tap guard and the slot's
-    "Opened on your computer" on it, so the next tap asks again. Before
-    this, a builder closed inside those 10 s left a tap that sent nothing
-    (board, 2026-10-29). Sent only to a board that lists
+    Addendum 6). The board clears whatever note its slot is showing on it.
+    It was the line that freed a 10 s lock-out, after a builder closed
+    inside those 10 s left a tap that sent nothing (board, 2026-10-29);
+    the board now gives its button back by itself 3 s after "Opened on your
+    computer" (owner, 2026-10-29), so done only cuts a note short. Sent
+    only to a board that lists
     BOARD_CAP_EDIT_DONE: one from before reads it as an ok 0 whenever an ask
     of its own is in flight."""
     return {"t": "theme_edit", "v": VERSION, "done": 1}

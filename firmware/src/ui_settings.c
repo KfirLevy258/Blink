@@ -2005,20 +2005,31 @@ BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
  * "Edit on computer": the board asks, the daemon opens the builder in a
  * browser and says so. Contract 2026-10-27: ok 1 means a browser opened;
  * ok 0, or no answer inside 5 s, means the user has to start it themselves,
- * and the slot says how. One ask per 10 s, so a double tap does not open two
- * browser tabs.
+ * and the slot says how.
+ *
+ * The slot is a button that comes back (owner, 2026-10-29). It used to hold
+ * "Opened on your computer" and refuse taps for 10 s, and then until the
+ * builder ended, which read as a button that had stopped working -- the
+ * board report behind Addendum 6. Now each answer is shown for a moment and
+ * the slot reads its name again, and a tap at any time sends an ask: the
+ * daemon opens the running builder in the browser once more (its reshow
+ * path), or a new one -- except within 2 s of its last open, a press on the
+ * "Opened" note included, which it folds into that open (OPEN_EVERY_S in
+ * pc/theme_server.py). The one guard here is the ask in flight, so a double
+ * tap cannot open two tabs: up to EDIT_WAIT_MS, until the answer.
  */
 #define EDIT_WAIT_MS 5000
+/* Long enough to read three words and look up at the computer. */
+#define EDIT_OPENED_MS 3000
 /*
- * A double-tap guard, and only that (contract Addendum 6). It used to be the
- * whole answer to "may this tap ask?", so a builder closed inside the 10 s
- * -- the owner closed the browser window and tapped again -- left a tap that
- * sent nothing under a slot still saying "Opened on your computer", until a
- * visit to another page reset it (board, 2026-10-29). Now the daemon says
- * when the builder it opened has ended (theme_edit done:1), and that clears
- * this; see ui_settings_theme_edit_done.
+ * The fallback is an instruction, "On your computer, run: blink theme", over
+ * three lines, and it is only useful if it can be read and typed from: 3 s
+ * is too short for that, and a fallback that never left would hide the
+ * button under it. 8 s, then the name; and a tap before then asks again
+ * rather than waiting it out, since the reason (no browser, no daemon) may
+ * be gone by now.
  */
-#define EDIT_COOLDOWN_MS 10000
+#define EDIT_RUN_MS 8000
 
 static const char *const edit_name = "Edit on computer";
 static const char *const edit_waiting = "Opening on your computer";
@@ -2033,9 +2044,10 @@ static const char *const edit_run = "On your computer, run: blink theme";
 
 static int theme_page;		/* survives a repaint, so the page stays put */
 static const char *edit_note;	/* what the slot says; NULL is its name */
-static lv_timer_t *edit_timer;	/* non-NULL while waiting for the daemon */
-static int64_t edit_sent_ms;
-static bool edit_ever_sent;
+/* The slot's one pending change: the 5 s wait for an answer while
+ * edit_asking, or the return to the name after an answer was shown. */
+static lv_timer_t *edit_timer;
+static bool edit_asking;	/* an ask is in flight: the only guard */
 static bool theme_closing;	/* a close is queued; see theme_close() */
 
 /* Shared by every tile and every chip; see MEMORY above. Static, so they
@@ -2095,76 +2107,92 @@ static void edit_paint(void)
 	}
 }
 
-static void edit_timeout(lv_timer_t *t)
+static void edit_timer_cb(lv_timer_t *t);
+
+/* Show `note` now, and arm the slot's timer for `ms` from now. */
+static void edit_show(const char *note, uint32_t ms)
+{
+	edit_note = note;
+	edit_paint();
+	if (edit_timer != NULL) {
+		lv_timer_set_period(edit_timer, ms);
+		lv_timer_reset(edit_timer);
+		return;
+	}
+	edit_timer = lv_timer_create(edit_timer_cb, ms, NULL);
+	if (edit_timer != NULL) {
+		lv_timer_set_repeat_count(edit_timer, 1);
+	}
+	/* Out of pool: the note simply stays until the next tap, which is
+	 * never refused unless an ask is in flight -- and an ask with no
+	 * timer is not left in flight (theme_edit_cb). */
+}
+
+static void edit_timer_cb(lv_timer_t *t)
 {
 	ARG_UNUSED(t);
 	edit_timer = NULL;	/* repeat count 1: LVGL frees it */
-	edit_note = edit_run;
+	if (edit_asking) {
+		/* No answer in 5 s: an old daemon, or none. */
+		edit_asking = false;
+		edit_show(edit_run, EDIT_RUN_MS);
+		return;
+	}
+	edit_note = NULL;	/* back to "Edit on computer" */
 	edit_paint();
 }
 
 static void theme_edit_cb(lv_event_t *e)
 {
-	int64_t now = k_uptime_get();
-
 	ARG_UNUSED(e);
 	if (!tile_was_a_tap()) {
 		return;
 	}
-	if (edit_ever_sent && now - edit_sent_ms < EDIT_COOLDOWN_MS) {
-		/* No second browser tab, but no blank answer either: a tap
-		 * here used to do nothing at all while the slot read its own
-		 * name again (a visit to another page resets it). Say what the
-		 * last ask came to, or that it opened, if nothing has said. */
-		if (edit_note == NULL || edit_note == edit_name) {
-			edit_note = edit_opened;
-		}
-		edit_paint();
+	if (edit_asking) {
+		/* The double tap: the first ask is still on its way, and a
+		 * second would open a second tab beside the first. */
 		return;
 	}
-	edit_ever_sent = true;
-	edit_sent_ms = now;
 	proto_send_theme_edit();
-	edit_note = edit_waiting;
-	edit_paint();
-	if (edit_timer) {
-		lv_timer_reset(edit_timer);
-		return;
-	}
-	edit_timer = lv_timer_create(edit_timeout, EDIT_WAIT_MS, NULL);
+	edit_asking = true;
+	edit_show(edit_waiting, EDIT_WAIT_MS);
 	if (edit_timer == NULL) {
 		/* Out of pool. Say the fallback now rather than wait for an
-		 * answer that has nothing left to land on. */
+		 * answer with nothing to time it out. */
+		edit_asking = false;
 		edit_note = edit_run;
 		edit_paint();
-		return;
 	}
-	lv_timer_set_repeat_count(edit_timer, 1);
 }
 
 void ui_settings_theme_edit_reply(bool ok)
 {
-	if (edit_timer == NULL) {
+	if (!edit_asking) {
 		return;		/* nobody asked, or the 5 s already ran out */
 	}
-	lv_timer_delete(edit_timer);
-	edit_timer = NULL;
-	edit_note = ok ? edit_opened : edit_run;
-	edit_paint();
+	edit_asking = false;
+	edit_show(ok ? edit_opened : edit_run,
+		  ok ? EDIT_OPENED_MS : EDIT_RUN_MS);
 }
 
 void ui_settings_theme_edit_done(void)
 {
 	/*
-	 * An ask still in flight keeps its guard and its answer: it was made
-	 * after the builder that just ended was opened, so the daemon is
-	 * opening a new one for it, and dropping the timer here would leave
-	 * that reply nothing to land on.
+	 * The builder the daemon opened has ended (contract Addendum 6). With
+	 * the slot coming back on its own after 3 s this mostly finds it
+	 * reading its name already; it still matters for a note on screen
+	 * when the builder ends -- saved within 3 s, or the fallback's 8 s --
+	 * which goes now. An ask still in flight keeps its answer: it was made
+	 * after the builder that ended was opened, so the daemon is opening a
+	 * new one for it.
 	 */
-	if (edit_timer != NULL) {
+	if (edit_asking) {
 		return;
 	}
-	edit_ever_sent = false;
+	if (edit_timer != NULL) {
+		lv_timer_delete(edit_timer);
+		edit_timer = NULL;
+	}
 	edit_note = NULL;
 	edit_paint();
 }
@@ -2408,8 +2436,11 @@ static void show_theme(bool fresh)
 				break;
 			}
 		}
-		if (edit_timer == NULL && (!edit_ever_sent ||
-		    k_uptime_get() - edit_sent_ms >= EDIT_COOLDOWN_MS)) {
+		if (!edit_asking) {
+			if (edit_timer != NULL) {
+				lv_timer_delete(edit_timer);
+				edit_timer = NULL;
+			}
 			edit_note = NULL;
 		}
 	}

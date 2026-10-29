@@ -517,7 +517,7 @@ def test_the_launcher_starts_one_server_and_reopens_it(home):
                       "http://127.0.0.1:1/open?k=2"]
 
 
-def test_the_launcher_opens_at_most_once_per_ten_seconds(home):
+def test_an_ask_repeated_within_two_seconds_is_the_same_ask(home):
     opened = []
     lau, clock = launcher_with(home, lambda u: opened.append(u) or True)
     assert lau.launch()
@@ -525,7 +525,13 @@ def test_the_launcher_opens_at_most_once_per_ten_seconds(home):
     # Answered with what the open already under way achieved.
     assert lau.launch()
     assert len(opened) == 1
-    assert theme_server.OPEN_EVERY_S == 10
+    # Under the 3 s the board shows "Opened on your computer" for, so a
+    # press after the button comes back always opens again (owner,
+    # 2026-10-29); it was 10 s, which answered that press with no window.
+    assert theme_server.OPEN_EVERY_S == 2
+    clock.t += 2
+    assert lau.launch()
+    assert len(opened) == 2
 
 
 def test_an_open_page_is_shown_again_on_a_fresh_link(home):

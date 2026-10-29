@@ -1282,6 +1282,12 @@ def parse_line(text, lineno=1):
         return Step(lineno, "press", (v[0], v[1]))
     if cmd in ("release", "mem", "state") and not rest:
         return Step(lineno, cmd, ())
+    if cmd == "edit-reply":
+        # How later theme_edit asks are answered: ok (a browser opened),
+        # no (none to open), or hold (no answer, the in-flight case).
+        if rest not in (["ok"], ["no"], ["hold"]):
+            raise ScriptError(f"line {lineno}: usage: edit-reply ok|no|hold")
+        return Step(lineno, "edit_reply", (rest[0],))
     if cmd == "harness-only":
         if rest:
             raise ScriptError(f"line {lineno}: usage: harness-only")
@@ -1770,8 +1776,12 @@ class Bench:
             self._event({"t": t})
             # Answered as the daemon does: ok only to a board that can
             # theme, and only "ok 1" when we are told to pretend a browser
-            # opened. No browser is opened here.
-            if protocol.BOARD_CAP_THEME in self.board_caps:
+            # opened. No browser is opened here. "hold" answers nothing,
+            # as a daemon from before Edit on computer does, so a script
+            # can tap while the board's ask is still in flight.
+            if self.edit_reply is None:
+                pass
+            elif protocol.BOARD_CAP_THEME in self.board_caps:
                 self.send(protocol.theme_edit_reply(self.edit_reply))
             else:
                 self.send(protocol.theme_edit_reply(False))
@@ -2326,6 +2336,10 @@ class Bench:
         if s.cmd == "fake":
             self.mark()
             return self.fake(*s.args)
+        if s.cmd == "edit_reply":
+            self.edit_reply = {"ok": True, "no": False, "hold": None}[
+                s.args[0]]
+            return True
         if s.cmd == "harness_only":
             # A script whose test is only meaningful on the host harness's
             # clock. On a board it would run and pass without testing
