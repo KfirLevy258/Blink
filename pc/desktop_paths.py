@@ -90,3 +90,27 @@ def data_dir() -> str:
             relocated = None
         return relocated or roaming
     return os.path.expanduser("~/.config/Claude")
+
+
+# The files inside it. Each is returned whether or not it exists, for the
+# same reason as data_dir().
+
+def cache_path() -> str:
+    """The usage history pc.providers.claude_desktop reads."""
+    return os.path.join(data_dir(), "plan-usage-history.json")
+
+
+def local_storage_path() -> str:
+    """The Local Storage store pc.desktop_local_storage reads."""
+    return os.path.join(data_dir(), "Local Storage", "leveldb")
+
+
+def indexeddb_path() -> str:
+    """The claude.ai IndexedDB store pc.desktop_idb reads."""
+    return os.path.join(data_dir(), "IndexedDB",
+                        "https_claude.ai_0.indexeddb.leveldb")
+
+
+def sessions_dir() -> str:
+    """The Cowork session logs pc.cowork_audit reads."""
+    return os.path.join(data_dir(), "local-agent-mode-sessions")

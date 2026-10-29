@@ -22,7 +22,6 @@ mistake that produces a confidently wrong panel rather than an error:
     by field instead of picking one winning source per poll.
 """
 import json
-import os
 import sys
 
 from pc import desktop_paths
@@ -52,16 +51,6 @@ MS_PER_S = 1000.0
 # written, for exactly this reason.
 SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
-
-
-def cache_path():
-    """Where the desktop app keeps its usage history on this platform.
-
-    Returns the path whether or not it exists -- absence is a normal state
-    (the app may simply not be installed) and is handled by the reader, not
-    by pretending we do not know where to look.
-    """
-    return os.path.join(desktop_paths.data_dir(), "plan-usage-history.json")
 
 
 def _pct(u: dict, key: str) -> float:
@@ -329,7 +318,9 @@ class ClaudeDesktopProvider(base.ProviderParser):
         return PROVIDER_ID
 
     def path(self):
-        return self._path if self._path is not None else cache_path()
+        if self._path is not None:
+            return self._path
+        return desktop_paths.cache_path()
 
     def parse_cache_file(self, file_content, now_epoch, observed_at=None):
         """A NormalizedUsageFrame from the cache's contents, or None.

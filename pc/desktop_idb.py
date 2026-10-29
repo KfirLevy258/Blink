@@ -25,7 +25,6 @@ IndexedDB KEY and by nothing else: not the value, not the filesystem around
 it.
 """
 import math
-import os
 
 from pc import cowork_audit, desktop_paths, leveldb, v8_clone
 
@@ -47,11 +46,6 @@ MAX_DEPTH = 16
 # Keys are UTF-16 on a real machine and ASCII in the fixtures. Match both
 # rather than depending on which.
 _KEY_MARKERS = (b"cowork", b"c\x00o\x00w\x00o\x00r\x00k")
-
-
-def store_path() -> str:
-    return os.path.join(desktop_paths.data_dir(), "IndexedDB",
-                        "https_claude.ai_0.indexeddb.leveldb")
 
 
 def _wanted_key(key: bytes) -> bool:
@@ -134,7 +128,7 @@ def seven_day_reset(dir_path=None):
     None means absent, never zero, and absence is the normal answer: most
     machines have never run a Cowork session at all. Never raises.
     """
-    path = dir_path if dir_path is not None else store_path()
+    path = dir_path if dir_path is not None else desktop_paths.indexeddb_path()
     try:
         rows = leveldb.scan(path, _wanted_key)
     except Exception:

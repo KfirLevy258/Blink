@@ -802,7 +802,7 @@ def test_the_default_history_provider_lets_a_contradicted_anchor_be_refuted():
     connected -- proving DesktopHistoryProvider actually reaches refuted_by
     inside the shipped provider list, not only in an isolated unit test."""
     import os
-    from pc.providers.claude_desktop import cache_path
+    from pc.desktop_paths import cache_path
 
     week = 604800.0
     weekly_anchor.save(weekly_anchor.anchor_path(), NOW, NOW - week)
@@ -828,7 +828,7 @@ def test_the_default_history_provider_leaves_an_unrefuted_anchor_published():
     round's fix -- refuted_by only ever refutes, never confirms, and an
     anchor nothing contradicts is not withdrawn."""
     import os
-    from pc.providers.claude_desktop import cache_path
+    from pc.desktop_paths import cache_path
 
     week = 604800.0
     weekly_anchor.save(weekly_anchor.anchor_path(), NOW, NOW - week)

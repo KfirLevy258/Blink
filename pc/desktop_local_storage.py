@@ -21,9 +21,8 @@ is why it is the store this project reads. Anything that changes it to read a
 different one has to re-establish that property first.
 """
 import json
-import os
 
-from pc import desktop_paths, leveldb
+from pc import leveldb
 
 # The logical key is obfuscated and carries the organization uuid. We match
 # on the stable middle rather than reconstructing the whole thing, because
@@ -36,15 +35,6 @@ USAGE_KEY_MARKER = b"ochre_heron_tide"
 # forever.
 SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
-
-
-def store_path() -> str:
-    """Where Claude Desktop keeps its Local Storage on this platform.
-
-    Returned whether or not it exists: absence is a normal state and is
-    handled by the reader, not by pretending we do not know where to look.
-    """
-    return os.path.join(desktop_paths.data_dir(), "Local Storage", "leveldb")
 
 
 def decode_value(raw: bytes):
