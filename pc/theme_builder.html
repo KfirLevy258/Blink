@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>BLINK theme builder</title>
 <!--
   Served by pc/theme_server.py from 127.0.0.1 only. Self-contained on purpose:
@@ -13,173 +14,286 @@
   JSON form, not the design's packed bytes.
 -->
 <style>
+/*
+  The page wears the board's own themes: Dark (firmware/src/theme.c, id 0)
+  first, because that is what a new board shows, and Light (id 9) when the
+  computer asks for light. --bad is the board's red, for borders. Words in
+  red take --bad-text: the board's #E74C3C measures 4.57:1 on the dark
+  card, a hair over the 4.5:1 small text needs, and 6.9:1 for the lighter
+  red. The marks in Checks are 11 px on a coloured chip, and white on the
+  board's red measured 3.8:1, so the NO chip is dark ink on --bad-text in
+  dark (7.4:1) and white on the board's light red in light (5.6:1). Dark
+  ink on the light scheme's amber measured 3.2:1, so --on-warn is white
+  there (5.9:1).
+*/
 :root {
-  color-scheme: light;
-  --bg: #F4F4F2; --surface: #FFFFFF; --fg: #17191C; --dim: #5B6168; --faint: #8C9298; --hair: #E1E1DD; --chip: #ECECE8;
-  --accent: #D9742B; --ok: #1F9D55; --warn: #B7791F; --bad: #D93A2B;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --bg: #0E1116; --card: #161A20; --sunk: #12151A; --line: #272C34;
+  --text: #E6E8EB; --dim: #8A9199; --ok: #2ECC71; --ok-text: #2ECC71; --warn: #F1C40F; --on-warn: #0E1116;
+  --bad: #E74C3C; --bad-text: #FF7A6E; --on-bad: #0E1116; --accent: #2ECC71; --on-accent: #0E1116; --focus: #2ECC71;
+  --shadow: rgba(0,0,0,.55); color-scheme: dark;
+  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --display: Montserrat, "Helvetica Neue", Arial, sans-serif;
 }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg: #0E1113; --surface: #161A1D; --fg: #E7E9EB; --dim: #A2A9AF; --faint: #737B82; --hair: #262C30; --chip: #1F2428;
-  --accent: #E8873A; --ok: #3CBF72; --warn: #E0A93C; --bad: #F05A4A; color-scheme: dark } }
-:root[data-theme="dark"] {
-  --bg: #0E1113; --surface: #161A1D; --fg: #E7E9EB; --dim: #A2A9AF; --faint: #737B82; --hair: #262C30; --chip: #1F2428;
-  --accent: #E8873A; --ok: #3CBF72; --warn: #E0A93C; --bad: #F05A4A; color-scheme: dark }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {
+  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6;
+  --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
+  --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
+  --shadow: rgba(17,20,24,.16); color-scheme: light; } }
+:root[data-theme="light"] {
+  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6;
+  --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
+  --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
+  --shadow: rgba(17,20,24,.16); color-scheme: light; }
+
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14.5px; line-height: 1.5; }
-.wrap { max-width: 1160px; margin: 0 auto; padding: 28px 16px 64px; }
-.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); }
-h1 { font-family: var(--display); font-weight: 600; font-size: clamp(26px, 4vw, 36px); letter-spacing: -.02em; margin: 6px 0 6px; line-height: 1.1; }
-.lede { color: var(--dim); margin: 0 0 18px; max-width: 72ch; }
-code { font-family: var(--mono); font-size: .9em; background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+button, input { font: inherit; color: inherit; }
+h1, h2 { margin: 0; }
+code { font-family: var(--mono); font-size: .875em; background: var(--sunk); border: 1px solid var(--line); padding: 1px 6px; border-radius: 6px; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.icon { width: 18px; height: 18px; flex: none; }
+.eyebrow { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); }
+.lede { color: var(--dim); margin: 0; max-width: 68ch; }
+.desc { color: var(--dim); margin: 6px 0 0; font-size: 14px; }
 
-.bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 22px; }
-.bar .status { flex: 1 1 260px; font-size: 13.5px; color: var(--dim); }
-.status.err { color: var(--bad); }
-.btn { font: 600 13.5px var(--sans); border-radius: 8px; padding: 8px 16px; cursor: pointer; border: 1px solid var(--hair); background: var(--surface); color: var(--fg); }
-.btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+/* Every button, segment, swatch and box is at least 44 px tall: the page
+   is opened from the board, and as often as not on a touch laptop. */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 18px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 15px; cursor: pointer; white-space: nowrap;
+  transition: background-color .2s ease, border-color .2s ease, color .2s ease, opacity .2s ease; }
+.btn:hover:not(:disabled) { border-color: var(--dim); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover:not(:disabled) { border-color: var(--text); }
+.btn.ghost { background: transparent; }
+.btn.small { padding: 0 12px; font-size: 14px; }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
-.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.bench { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 28px; align-items: start; }
-.stage { position: sticky; top: 12px; display: grid; gap: 12px; min-width: 0; }
-.device { background: #1A1D20; border-radius: 22px; padding: 18px; box-shadow: 0 12px 30px -18px rgba(0,0,0,.6); }
-.device svg { display: block; width: 100%; height: auto; border-radius: 6px; }
-.stage-row { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
-.seg { display: inline-flex; border: 1px solid var(--hair); border-radius: 8px; overflow: hidden; }
-.seg button { font: 500 12.5px var(--sans); color: var(--dim); background: var(--surface); border: 0; padding: 6px 12px; cursor: pointer; }
-.seg button + button { border-left: 1px solid var(--hair); }
-.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
-.seg button:focus-visible, .presets button:focus-visible, .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.slider { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dim); }
-.slider input { width: 110px; accent-color: var(--accent); }
-.slider output { font-family: var(--mono); color: var(--fg); min-width: 36px; font-variant-numeric: tabular-nums; }
+/* The status says how it went in its icon and colour as well as its words. */
+.status { display: flex; gap: 8px; align-items: flex-start; color: var(--dim); font-size: 15px; min-width: 0; transition: color .2s ease; }
+.status .icon { margin-top: 2px; display: none; }
+.status .s-info { display: block; }
+.status.ok { color: var(--text); } .status.ok .s-info { display: none; } .status.ok .s-ok { display: block; color: var(--ok); }
+.status.err { color: var(--bad-text); } .status.err .s-info { display: none; } .status.err .s-err { display: block; }
 
-.panel { background: var(--surface); border: 1px solid var(--hair); border-radius: 14px; padding: 18px; min-width: 0; }
-.panel + .panel { margin-top: 14px; }
-.panel h2 { font-size: 13px; font-family: var(--mono); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin: 0 0 12px; }
-.presets { display: flex; flex-wrap: wrap; gap: 6px; }
-.presets button { display: inline-flex; align-items: center; gap: 7px; font: 500 12.5px var(--sans); color: var(--fg); background: var(--chip); border: 1px solid transparent; border-radius: 999px; padding: 4px 11px 4px 5px; cursor: pointer; }
-.presets button[aria-pressed="true"] { border-color: var(--fg); }
-.sw { width: 16px; height: 16px; border-radius: 50%; display: inline-block; box-shadow: 0 0 0 1px rgba(0,0,0,.15) inset; }
+/* The board, framed as a device so the preview reads as the panel on the
+   desk and not as one more picture on a page. */
+.device { margin: 0; position: relative; padding: clamp(12px, 2.4vw, 26px); border-radius: clamp(16px, 2.6vw, 30px);
+  background: linear-gradient(155deg, #2A2F37 0%, #16191E 55%, #0B0D10 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 0 0 1px rgba(255,255,255,.04), 0 40px 80px -40px var(--shadow), 0 12px 24px -12px var(--shadow); }
+.device::after { content: ""; position: absolute; right: -5px; top: 44%; width: 5px; height: 30px; border-radius: 0 3px 3px 0; background: #2A2F37; }
+.screen { border-radius: 4px; overflow: hidden; box-shadow: 0 0 0 2px #050608, 0 0 0 3px rgba(255,255,255,.05); }
+.screen svg { display: block; width: 100%; height: auto; }
 
-.slots { display: grid; gap: 2px; }
-.slot { display: grid; grid-template-columns: 30px minmax(0, 1fr) 92px; gap: 10px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--hair); }
+.view { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--sunk); }
+.seg button { min-height: 42px; min-width: 44px; padding: 0 14px; border: 0; background: transparent; color: var(--dim); font-size: 15px; font-weight: 500; cursor: pointer;
+  transition: background-color .2s ease, color .2s ease; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button:hover { color: var(--text); }
+.seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+.seg button:focus-visible { outline-offset: -3px; }
+.slider { display: flex; align-items: center; gap: 10px; font-size: 15px; color: var(--dim); min-width: 0; }
+.slider input { width: 120px; height: 44px; margin: 0; accent-color: var(--accent); }
+.slider output { font: 14px var(--mono); color: var(--text); min-width: 40px; font-variant-numeric: tabular-nums; }
+
+/* A built-in as a small board: its ground, a text line, and its three
+   level colours, drawn from the injected list (the script sets them). */
+.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
+.preset { display: flex; flex-direction: column; gap: 8px; padding: 8px 8px 10px; min-height: 44px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--card); text-align: left; cursor: pointer; transition: border-color .2s ease, box-shadow .2s ease; }
+.preset:hover { border-color: var(--dim); }
+.preset[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.preset .pn { font-size: 14px; font-weight: 600; line-height: 1.25; padding: 0 2px; }
+.sw { position: relative; display: block; height: 48px; border-radius: 7px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(128,128,128,.28); }
+.sw i { position: absolute; display: block; border-radius: 2px; }
+.sw .sw-text { top: 9px; left: 9px; width: 38%; height: 4px; }
+.sw .sw-low, .sw .sw-mid, .sw .sw-high { bottom: 9px; height: 7px; width: calc((100% - 30px) / 3); }
+.sw .sw-low { left: 9px; } .sw .sw-mid { left: calc(12px + (100% - 30px) / 3); } .sw .sw-high { left: calc(15px + 2 * (100% - 30px) / 3); }
+
+.slots { display: grid; }
+.slot { display: grid; grid-template-columns: 44px minmax(0, 1fr) 112px; column-gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); transition: opacity .2s ease; }
 .slot:last-child { border-bottom: 0; }
-.slot input[type=color] { width: 30px; height: 30px; border: 1px solid var(--hair); border-radius: 8px; padding: 0; background: none; cursor: pointer; }
-.slot input[type=color]::-webkit-color-swatch-wrapper { padding: 2px; } .slot input[type=color]::-webkit-color-swatch { border: 0; border-radius: 6px; }
-.slot label { font-weight: 500; font-size: 14px; }
-.slot small { display: block; color: var(--faint); font-size: 12px; font-weight: 400; }
-.slot input[type=text], .paste input { font: 12.5px var(--mono); width: 100%; padding: 5px 7px; border: 1px solid var(--hair); border-radius: 6px; background: var(--bg); color: var(--fg); }
-.slot input[type=text] { text-transform: uppercase; }
+.slot input[type=color] { width: 44px; height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: none; cursor: pointer; }
+.slot input[type=color]::-webkit-color-swatch-wrapper { padding: 3px; }
+.slot input[type=color]::-webkit-color-swatch { border: 0; border-radius: 7px; }
+.slot input[type=color]::-moz-color-swatch { border: 0; border-radius: 7px; }
+.slot label { font-weight: 600; font-size: 15px; line-height: 1.3; }
+.slot small { display: block; color: var(--dim); font-size: 13px; font-weight: 400; margin-top: 2px; }
+.slot input[type=text], .paste input { font: 15px var(--mono); width: 100%; min-height: 44px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--sunk); color: var(--text); transition: border-color .2s ease; }
+.slot input[type=text] { text-transform: uppercase; letter-spacing: .02em; }
+.slot input[type=text]:hover, .paste input:hover { border-color: var(--dim); }
+[aria-invalid="true"] { border-color: var(--bad) !important; }
 .slot.off { opacity: .45; }
-.band { display: grid; grid-template-columns: repeat(3, 1fr); height: 8px; border-radius: 4px; overflow: hidden; margin: 10px 0 2px; }
-.bandl { display: grid; grid-template-columns: repeat(3, 1fr); font: 11px var(--mono); color: var(--faint); }
+/* A field's own message sits under it, across the label and the box. */
+.slot .fmsg { grid-column: 2 / -1; }
+.fmsg { margin: 6px 0 0; font-size: 14px; line-height: 1.4; }
+.fmsg:empty { display: none; }
+.f-ok { color: var(--ok-text); } .f-warn { color: var(--warn); } .f-bad { color: var(--bad-text); }
+
+.band { display: grid; grid-template-columns: repeat(3, 1fr); height: 8px; border-radius: 4px; overflow: hidden; margin: 14px 0 4px; }
+.bandl { display: grid; grid-template-columns: repeat(3, 1fr); font: 12px var(--mono); color: var(--dim); }
 .bandl span:nth-child(2) { text-align: center; } .bandl span:last-child { text-align: right; }
+.note { font-size: 14px; color: var(--dim); margin: 10px 0 0; }
 
 .opts { display: grid; gap: 12px; }
-.opt { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; align-items: center; }
-.opt > span { font-size: 13.5px; color: var(--dim); }
+.opt { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 12px; align-items: center; }
+.opt .seg { justify-self: start; }
+.olabel { font-size: 15px; color: var(--dim); }
 
-.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
-.checks li { display: flex; gap: 8px; align-items: baseline; }
-.mark { font: 600 10px var(--mono); padding: 1px 6px; border-radius: 3px; color: #fff; flex: none; }
-.m-ok { background: var(--ok); } .m-warn { background: var(--warn); } .m-bad { background: var(--bad); }
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 15px; }
+.checks li { display: flex; gap: 10px; align-items: baseline; }
+.mark { font: 700 11px/1 var(--mono); letter-spacing: .04em; padding: 4px 7px; border-radius: 5px; flex: none; color: var(--on-accent); }
+.m-ok { background: var(--ok); } .m-warn { background: var(--warn); color: var(--on-warn); } .m-bad { background: var(--bad-text); color: var(--on-bad); }
 
-.out { margin-top: 28px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
-.cmd { background: #0B0E10; color: #D8DDE1; border-radius: 12px; padding: 14px 16px; font: 12.5px/1.6 var(--mono); overflow-x: auto; white-space: pre; min-width: 0; }
-.cmd .k { color: #8EA0AE; } .cmd .v { color: #F2B26B; }
-.cmd.wrapcode { white-space: normal; word-break: break-all; }
-.cmdbox { min-width: 0; }
-.cmdbox h3 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
-.cmdbox p { margin: 6px 0 0; font-size: 12.5px; color: var(--dim); }
-.copy { font: 500 12px var(--sans); border: 1px solid var(--hair); background: var(--surface); color: var(--fg); padding: 4px 10px; border-radius: 6px; cursor: pointer; float: right; }
-.paste { display: flex; gap: 8px; margin-top: 10px; }
-.note { font-size: 12.5px; color: var(--faint); margin-top: 6px; }
+.code, .cmd { font: 14px/1.6 var(--mono); background: var(--sunk); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+/* anywhere, not break-all: the built-in sentence breaks at its spaces and
+   only the share code itself, one long word, breaks inside. */
+.code { overflow-wrap: anywhere; }
+.cmd { white-space: pre; overflow-x: auto; }
+.cmd .k { color: var(--dim); } .cmd .v { color: var(--ok-text); }
+.paste { display: flex; gap: 8px; margin-top: 14px; }
+.paste input { flex: 1 1 auto; min-width: 0; }
+.termhead { display: flex; align-items: center; gap: 8px; margin: 22px 0 8px; font-weight: 600; font-size: 15px; }
+.termhead .btn { margin-left: auto; }
 
-@media (max-width: 900px) {
-  .bench { grid-template-columns: minmax(0, 1fr); }
-  .stage { position: static; }
-  .out { grid-template-columns: minmax(0, 1fr); }
+/* ---------------------------------------------------------------- layout */
+.top { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px clamp(16px, 3vw, 40px);
+  background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand .icon { width: 26px; height: 26px; color: var(--ok); }
+.brand h1 { font-size: 18px; font-weight: 650; letter-spacing: -.01em; }
+.top .status { flex: 1 1 280px; }
+.studio { display: grid; grid-template-columns: minmax(0, 1fr) 460px; align-items: start; }
+.stage { position: sticky; top: 73px; min-height: calc(100vh - 73px); display: grid; place-items: center; padding: 48px clamp(16px, 4vw, 64px);
+  background: radial-gradient(60% 55% at 50% 42%, color-mix(in srgb, var(--text) 7%, transparent), transparent 70%); }
+.stage-inner { width: 100%; max-width: 780px; display: grid; gap: 24px; }
+.stage .view { justify-content: center; }
+.stage .lede { text-align: center; margin: 0 auto; font-size: 15px; }
+.stage .checks { max-width: 560px; margin: 0 auto; width: 100%; }
+.inspector { background: var(--card); border-left: 1px solid var(--line); min-height: calc(100vh - 73px); }
+.group { padding: 24px 28px; border-bottom: 1px solid var(--line); }
+.group h2 { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); margin-bottom: 16px; }
+.inspector .presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.colours .opt { margin-bottom: 6px; }
+@media (max-width: 1100px) {
+  .studio { grid-template-columns: minmax(0, 1fr); }
+  .stage { position: static; min-height: 0; padding: 32px 16px; }
+  .inspector { border-left: 0; border-top: 1px solid var(--line); min-height: 0; }
+  .inspector .presets { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
 }
+@media (max-width: 640px) {
+  .top { position: static; }
+  .top .actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .top .actions #copy-code { grid-column: 1 / -1; }
+  .group { padding: 20px 16px; }
+  .slider input { width: 100%; } .slider { flex: 1 1 100%; } .slider span { width: 64px; flex: none; }
+  .opt { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .slot { grid-template-columns: 44px minmax(0, 1fr) 100px; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <span class="eyebrow">BLINK · theme builder</span>
-  <h1>Theme builder</h1>
-  <p class="lede">Pick a theme or choose the seven colours. Your board shows each change as a preview, without keeping it. Save keeps it on the board; Cancel, closing this tab, or ten minutes without a change puts the board back as it was.</p>
-
-  <div class="bar">
-    <button type="button" class="btn primary" id="save">Save to board</button>
-    <button type="button" class="btn" id="cancel">Cancel</button>
-    <span class="status" id="status" role="status" aria-live="polite">Loading your current theme.</span>
+<!--
+  Laid out as a product shot (the owner's pick of three directions,
+  2026-10-29): the board is the largest thing on the page and stays in view
+  while the panel beside it scrolls, because every control is judged by what
+  it does to the panel. Icons are inline and drawn in currentColor, so the
+  page fetches nothing and every icon follows the light or dark scheme.
+-->
+<header class="top">
+  <div class="brand">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M7 15a5 5 0 0 1 10 0"/></svg>
+    <div><span class="eyebrow">BLINK</span><h1>Theme builder</h1></div>
   </div>
+  <div class="status" id="status" role="status" aria-live="polite">
+    <svg class="icon s-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/></svg>
+    <svg class="icon s-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>
+    <svg class="icon s-err" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
+    <span id="status-text">Loading your current theme.</span>
+  </div>
+  <div class="actions">
+    <button type="button" class="btn primary" id="save"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Save to board</span></button>
+    <button type="button" class="btn" id="cancel"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg><span>Cancel</span></button>
+    <button type="button" class="btn ghost" id="copy-code"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
+  </div>
+</header>
 
-  <div class="bench">
-    <div class="stage">
-      <div class="device"><svg id="scr" viewBox="0 0 320 240" role="img" aria-label="Preview of the board screen"></svg></div>
-      <div class="stage-row">
+<main class="studio">
+  <section class="stage" aria-label="Preview">
+    <div class="stage-inner">
+      <figure class="device">
+        <div class="screen"><svg id="scr" viewBox="0 0 320 240" role="img" aria-label="Preview of the board screen"></svg></div>
+        <figcaption class="visually-hidden">The board, 320 by 240</figcaption>
+      </figure>
+      <div class="view">
         <div class="seg" role="group" aria-label="Screen">
           <button type="button" data-v="gauges" aria-pressed="true">Gauges</button>
           <button type="button" data-v="focus" aria-pressed="false">Focus mode</button>
         </div>
-        <label class="slider" for="p1">Session <input type="range" id="p1" min="0" max="100" value="42"><output id="o1">42%</output></label>
-        <label class="slider" for="p2">Weekly <input type="range" id="p2" min="0" max="100" value="91"><output id="o2">91%</output></label>
+        <label class="slider" for="p1"><span>Session</span><input type="range" id="p1" min="0" max="100" value="42"><output id="o1">42%</output></label>
+        <label class="slider" for="p2"><span>Weekly</span><input type="range" id="p2" min="0" max="100" value="91"><output id="o2">91%</output></label>
       </div>
-      <div class="panel">
-        <h2>Checks</h2>
-        <ul class="checks" id="checks"></ul>
-      </div>
+      <p class="lede">Pick a theme or choose the seven colours. Your board shows each change as a preview, without keeping it. Save keeps it on the board; Cancel, closing this tab, or ten minutes without a change puts the board back as it was.</p>
+      <ul class="checks" id="checks" aria-label="Checks"></ul>
     </div>
+  </section>
 
-    <div>
-      <div class="panel">
-        <h2>Start from</h2>
-        <div class="presets" id="presets"></div>
-      </div>
+  <aside class="inspector" aria-label="Theme settings">
+    <section class="group">
+      <h2>Built-in themes</h2>
+      <div class="presets" id="presets"></div>
+    </section>
 
-      <div class="panel">
-        <h2>Colours</h2>
-        <div class="opt" style="margin-bottom:10px"><span>Arc colour</span>
-          <div class="seg" role="group" aria-label="Arc colour">
-            <button type="button" data-m="level" aria-pressed="true">By level</button>
-            <button type="button" data-m="gauge" aria-pressed="false">Per gauge</button>
-          </div>
-        </div>
-        <div class="slots" id="slots"></div>
-        <div class="band" id="band"></div>
-        <div class="bandl"><span>0</span><span>60%</span><span>90% · 100</span></div>
-        <p class="note" id="modenote"></p>
-      </div>
-
-      <div class="panel">
-        <h2>Style</h2>
-        <div class="opts">
-          <div class="opt"><span>Arc thickness</span><div class="seg" role="group" aria-label="Arc thickness">
-            <button type="button" data-w="5" aria-pressed="false">Thin</button><button type="button" data-w="12" aria-pressed="true">Normal</button><button type="button" data-w="22" aria-pressed="false">Thick</button></div></div>
-          <div class="opt"><span>Arc ends</span><div class="seg" role="group" aria-label="Arc ends">
-            <button type="button" data-e="round" aria-pressed="true">Round</button><button type="button" data-e="flat" aria-pressed="false">Flat</button></div></div>
-          <div class="opt"><span>Moving dot</span><div class="seg" role="group" aria-label="Moving dot">
-            <button type="button" data-d="on" aria-pressed="true">Show</button><button type="button" data-d="off" aria-pressed="false">Hide</button></div></div>
+    <section class="group colours">
+      <h2>Colours</h2>
+      <div class="opt"><span class="olabel">Arc colour</span>
+        <div class="seg" role="group" aria-label="Arc colour">
+          <button type="button" data-m="level" aria-pressed="true">By level</button>
+          <button type="button" data-m="gauge" aria-pressed="false">Per gauge</button>
         </div>
       </div>
-    </div>
-  </div>
+      <div class="slots" id="slots"></div>
+      <div class="band" id="band" aria-hidden="true"></div>
+      <div class="bandl" aria-hidden="true"><span>0</span><span>60%</span><span>90% · 100</span></div>
+      <p class="note" id="modenote"></p>
+    </section>
 
-  <div class="out">
-    <div class="cmdbox"><h3>Share code <button type="button" class="copy" id="copy-code">Copy</button></h3>
-      <div class="cmd wrapcode" id="code"></div>
-      <p>The same theme as one code, for <code>blink theme set &lt;code&gt;</code> on another desk, or to post for other people.</p>
-      <div class="paste"><input type="text" id="paste" placeholder="Paste a share code (BT1.…)" aria-label="Share code to load" spellcheck="false" autocomplete="off"><button type="button" class="btn" id="load">Load</button></div>
-    </div>
-    <div class="cmdbox"><h3>The same from a terminal <button type="button" class="copy" id="copy-cmd">Copy</button></h3>
+    <section class="group">
+      <h2>Arcs and dot</h2>
+      <div class="opts">
+        <div class="opt"><span class="olabel">Arc thickness</span><div class="seg" role="group" aria-label="Arc thickness">
+          <button type="button" data-w="5" aria-pressed="false">Thin</button><button type="button" data-w="12" aria-pressed="true">Normal</button><button type="button" data-w="22" aria-pressed="false">Thick</button></div></div>
+        <div class="opt"><span class="olabel">Arc ends</span><div class="seg" role="group" aria-label="Arc ends">
+          <button type="button" data-e="round" aria-pressed="true">Round</button><button type="button" data-e="flat" aria-pressed="false">Flat</button></div></div>
+        <div class="opt"><span class="olabel">Moving dot</span><div class="seg" role="group" aria-label="Moving dot">
+          <button type="button" data-d="on" aria-pressed="true">Show</button><button type="button" data-d="off" aria-pressed="false">Hide</button></div></div>
+      </div>
+    </section>
+
+    <section class="group">
+      <h2>Share code</h2>
+      <div class="code" id="code"></div>
+      <p class="desc">The same theme as one code, for <code>blink theme set &lt;code&gt;</code> on another desk, or to post for other people.</p>
+      <div class="paste">
+        <label class="visually-hidden" for="paste">Share code to load</label>
+        <input type="text" id="paste" placeholder="Paste a share code (BT1.…)" spellcheck="false" autocomplete="off" aria-describedby="m-paste">
+        <button type="button" class="btn" id="load"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span>Load</span></button>
+      </div>
+      <p class="fmsg" id="m-paste" aria-live="polite"></p>
+      <div class="termhead">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+        <span>The same from a terminal</span>
+        <button type="button" class="btn small ghost" id="copy-cmd"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy</span></button>
+      </div>
       <div class="cmd" id="cmd"></div>
-      <p>Runs on this computer and saves the theme exactly as Save does.</p></div>
-  </div>
-</div>
+      <p class="desc">Runs on this computer and saves the theme exactly as Save does.</p>
+    </section>
+  </aside>
+</main>
 
 <script>
 (function () {
@@ -339,6 +453,13 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
       var pairs = [['low','mid'],['mid','high'],['low','high']].filter(function (p) { return dist(st[p[0]], st[p[1]]) < 60; });
       out.push(pairs.length ? ['warn', 'Two levels look almost the same (' + pairs.map(function (p) { return names[p[0]] + ' and ' + names[p[1]]; }).join('; ') + '). The arc will not tell you when you cross a threshold.'] : ['ok', 'The three levels are easy to tell apart.']);
     }
+    // The same findings again, under the field they are about: a list at
+    // the side says what is wrong, but the owner fixing it is looking at
+    // the colour, not the list.
+    var at = {};
+    if (c < 4.5) at.text = at.bg = [c >= MIN_CONTRAST ? 'warn' : 'bad', (c >= MIN_CONTRAST ? 'Faint' : 'Unreadable') + ': text is ' + c.toFixed(1) + ':1 on the background.'];
+    weak.forEach(function (k) { at[k] = ['warn', 'Barely shows against the background.']; });
+    SLOTS.forEach(function (s) { if (!bad[s.k]) fieldSay(s.k, at[s.k]); });
     var ul = document.getElementById('checks'); while (ul.firstChild) ul.removeChild(ul.firstChild);
     out.forEach(function (o) {
       var li = document.createElement('li'), m = document.createElement('span'), t = document.createElement('span');
@@ -382,7 +503,25 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
     box.dataset.plain = code ? 'blink theme set ' + code : 'blink theme set ' + args[0];
   }
 
-  function say(text, bad) { var s = document.getElementById('status'); s.textContent = text; s.classList.toggle('err', !!bad); }
+  // kind: true for an error (kept from when it was a flag), or 'ok' for a
+  // finished save or a preview the board has, so the bar can say which
+  // with its colour and icon as well as its words.
+  function say(text, kind) {
+    var s = document.getElementById('status');
+    document.getElementById('status-text').textContent = text;
+    s.classList.toggle('err', kind === true); s.classList.toggle('ok', kind === 'ok');
+  }
+  // A message under one field: the hex boxes, and the share code box.
+  // bad[k] holds a hex box's own typing error, which outranks a contrast
+  // note about the colour it last held.
+  var bad = {};
+  function fieldSay(k, m) {
+    var p = document.getElementById('m-' + k); if (!p) return;
+    p.textContent = m ? m[1] : ''; p.className = 'fmsg' + (m ? ' f-' + m[0] : '');
+    var box = document.getElementById(k === 'paste' ? 'paste' : 't-' + k);
+    if (box) box.setAttribute('aria-invalid', String(!!m && m[0] === 'bad'));
+  }
+  function themeName() { return st.preset >= 0 ? PRESETS[st.preset][0] : 'your custom theme'; }
   function gone() {
     finished = true;
     document.getElementById('save').disabled = true; document.getElementById('cancel').disabled = true;
@@ -401,7 +540,7 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
       var t = wireTheme(), key = JSON.stringify(t);
       if (key === lastSent) return;
       post('/api/preview', t).then(function (j) {
-        if (j.status === 200) { lastSent = key; say('Showing on your board as a preview.'); }
+        if (j.status === 200) { lastSent = key; say('Preview sent: ' + themeName() + ' is on your board until you save or cancel.', 'ok'); }
         else if (j.status === 400) say(j.error || 'The board would refuse that theme.', true);
         else stopped();
       }, stopped);
@@ -412,12 +551,15 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
   // ---------------------------------------------------------------- controls
   var pre = document.getElementById('presets');
   PRESETS.forEach(function (entry, i) {
+    // A card: the theme's ground with its text and three level colours on
+    // it, as a small board would show them, then the name its tile shows.
     var name = entry[0], p = entry[1], b = document.createElement('button'), sw = document.createElement('span');
-    b.type = 'button'; b.dataset.p = String(i);
-    sw.className = 'sw';
-    sw.style.background = 'conic-gradient(#' + p.low + ' 0 33%, #' + p.mid + ' 0 66%, #' + p.high + ' 0) padding-box, #' + p.bg;
-    sw.style.border = '3px solid #' + p.bg;
-    b.appendChild(sw); b.appendChild(document.createTextNode(name));
+    b.type = 'button'; b.dataset.p = String(i); b.className = 'preset';
+    sw.className = 'sw'; sw.setAttribute('aria-hidden', 'true');
+    sw.style.background = '#' + p.bg;
+    ['text', 'low', 'mid', 'high'].forEach(function (k) { var d = document.createElement('i'); d.className = 'sw-' + k; d.style.background = '#' + p[k]; sw.appendChild(d); });
+    var n = document.createElement('span'); n.className = 'pn'; n.textContent = name;
+    b.appendChild(sw); b.appendChild(n);
     b.addEventListener('click', function () { Object.assign(st, PRESETS[i][1]); st.preset = i; changed(); });
     pre.appendChild(b);
   });
@@ -428,9 +570,20 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
     var l = document.createElement('label'); l.htmlFor = c.id; l.textContent = s.name;
     var sm = document.createElement('small'); sm.textContent = s.hint; l.appendChild(sm);
     var t = document.createElement('input'); t.type = 'text'; t.id = 't-' + s.k; t.maxLength = 7; t.setAttribute('aria-label', s.name + ' hex');
-    row.appendChild(c); row.appendChild(l); row.appendChild(t); slots.appendChild(row);
-    c.addEventListener('input', function (e) { st[s.k] = e.target.value.slice(1).toUpperCase(); markCustom(); changed(); });
-    t.addEventListener('input', function (e) { var v = e.target.value.replace('#', ''); if (HEX.test(v)) { st[s.k] = v.toUpperCase(); markCustom(); changed(); } });
+    t.spellcheck = false; t.autocomplete = 'off'; t.setAttribute('aria-describedby', 'm-' + s.k);
+    var m = document.createElement('p'); m.className = 'fmsg'; m.id = 'm-' + s.k; m.setAttribute('aria-live', 'polite');
+    row.appendChild(c); row.appendChild(l); row.appendChild(t); row.appendChild(m); slots.appendChild(row);
+    c.addEventListener('input', function (e) { st[s.k] = e.target.value.slice(1).toUpperCase(); delete bad[s.k]; markCustom(); changed(); });
+    // Half-typed is not wrong, so a box is only told off once it has its
+    // seven characters, or when it is left with something it cannot use.
+    function typed() {
+      var v = t.value.replace('#', '');
+      if (HEX.test(v)) { delete bad[s.k]; st[s.k] = v.toUpperCase(); markCustom(); changed(); return; }
+      if (t.value.length >= 7) { bad[s.k] = 1; fieldSay(s.k, ['bad', 'Use six hex digits, 0 to 9 and A to F.']); }
+      else if (bad[s.k]) { delete bad[s.k]; fieldSay(s.k, null); }
+    }
+    t.addEventListener('input', function () { typed(); });
+    t.addEventListener('blur', function () { if (bad[s.k]) return; if (!HEX.test(t.value.replace('#', ''))) { t.value = '#' + st[s.k]; fieldSay(s.k, null); render(); } });
   });
   document.querySelectorAll('[data-m]').forEach(function (b) { b.addEventListener('click', function () { st.mode = b.dataset.m; markCustom(); changed(); }); });
   document.querySelectorAll('[data-w]').forEach(function (b) { b.addEventListener('click', function () { st.w = +b.dataset.w; markCustom(); changed(); }); });
@@ -442,9 +595,12 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
   [['p1','o1'],['p2','o2']].forEach(function (x) { var r = document.getElementById(x[0]); r.addEventListener('input', function () { st[x[0]] = +r.value; document.getElementById(x[1]).textContent = r.value + '%'; render(); }); });
 
   function copy(id, btn) {
+    // Only the label changes: the button also holds its icon, which a
+    // textContent on the whole button would wipe.
     var t = document.getElementById(id).dataset.plain, b = document.getElementById(btn);
-    function ok() { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1400); }
-    function fallback() { var r = document.createRange(); r.selectNodeContents(document.getElementById(id)); var s = getSelection(); s.removeAllRanges(); s.addRange(r); b.textContent = 'Selected'; }
+    var lbl = b.querySelector('.lbl') || b, was = lbl.dataset.was || (lbl.dataset.was = lbl.textContent);
+    function ok() { lbl.textContent = 'Copied'; setTimeout(function () { lbl.textContent = was; }, 1400); }
+    function fallback() { var r = document.createRange(); r.selectNodeContents(document.getElementById(id)); var s = getSelection(); s.removeAllRanges(); s.addRange(r); lbl.textContent = 'Selected'; }
     try { navigator.clipboard.writeText(t).then(ok, fallback); } catch (e) { fallback(); }
   }
   document.getElementById('copy-cmd').addEventListener('click', function () { copy('cmd', 'copy-cmd'); });
@@ -457,28 +613,32 @@ code { font-family: var(--mono); font-size: .9em; background: var(--chip); paddi
     st.w = f.w; st.e = f.ends; st.d = +f.dot ? 'on' : 'off'; st.mode = f.by; st.preset = -1;
     return true;
   }
+  document.getElementById('paste').addEventListener('input', function () { fieldSay('paste', null); });
+  document.getElementById('paste').addEventListener('keydown', function (e) { if (e.key === 'Enter') document.getElementById('load').click(); });
   document.getElementById('load').addEventListener('click', function () {
     var code = document.getElementById('paste').value.trim().replace(/^blink theme set\s+/, ''), f = null;
     // Said as what is wrong with it. "They start BT1." was the only answer,
     // and it was also the answer to a code that did start BT1. but had
     // lost its end in a copy (audit, 2026-10-28), which pointed at the one
     // part of it that was right. pc/theme.py from_share_code says the same.
-    if (code.indexOf('BT1.') !== 0) { say('That is not a theme share code. They start BT1.', true); return; }
+    // Said under the box it is about, not in the bar at the top, which is
+    // a screen away from here on a phone.
+    if (code.indexOf('BT1.') !== 0) { fieldSay('paste', ['bad', 'That is not a theme share code. They start BT1.']); return; }
     try {
       var b = code.slice(4).replace(/-/g, '+').replace(/_/g, '/');
       while (b.length % 4) b += '=';
       f = JSON.parse(atob(b));
     } catch (e) { f = null; }
-    if (f === null || typeof f !== 'object' || Array.isArray(f) || !['c','w','ends','dot','by'].some(function (k) { return k in f; })) say('That share code is damaged or cut short. Copy all of it again.', true);
-    else if (applyCustom(f)) { document.getElementById('paste').value = ''; changed(); }
-    else say('That share code holds a theme the board cannot use.', true);
+    if (f === null || typeof f !== 'object' || Array.isArray(f) || !['c','w','ends','dot','by'].some(function (k) { return k in f; })) fieldSay('paste', ['bad', 'That share code is damaged or cut short. Copy all of it again.']);
+    else if (applyCustom(f)) { document.getElementById('paste').value = ''; fieldSay('paste', ['ok', 'Loaded. The preview and your board show it now.']); changed(); }
+    else fieldSay('paste', ['bad', 'That share code holds a theme the board cannot use.']);
   });
 
   document.getElementById('save').addEventListener('click', function () {
     if (finished || textContrast() < MIN_CONTRAST) return;
     clearTimeout(previewTimer);
     post('/api/save', wireTheme()).then(function (j) {
-      if (j.status === 200) { gone(); say('Saved. Your board keeps this theme. You can close this tab.'); }
+      if (j.status === 200) { gone(); say('Saved: ' + themeName() + '. Your board keeps it. You can close this tab.', 'ok'); }
       else if (j.status === 400 || j.status === 500) say(j.error || 'The board would refuse that theme.', true);
       else stopped();
     }, stopped);

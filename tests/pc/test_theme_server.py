@@ -6,6 +6,7 @@ No browser is ever started: every opener is a stub.
 import http.client
 import json
 import os
+import re
 import socket
 import threading
 import urllib.parse
@@ -304,6 +305,50 @@ def test_after_it_finishes_the_port_is_closed(server):
     with pytest.raises(OSError):
         s = socket.create_connection(("127.0.0.1", port), timeout=1)
         s.close()
+
+
+def _markup_and_script(page):
+    i = page.index("<script>")
+    return page[:i], page[i:]
+
+
+def test_every_element_the_script_looks_up_is_in_the_markup():
+    """The 2026-10-29 redesign moved every control into new markup around
+    an unchanged script. The script does nothing but look its elements up
+    by id, and a missing one is a TypeError that stops it on load: no
+    preview, no Save, a page that only looks right. So every id it names,
+    and the two sliders it names through a variable, must be there."""
+    markup, script = _markup_and_script(theme_server.page())
+    wanted = set(re.findall(r"getElementById\('([\w-]+)'\)", script))
+    wanted |= {"p1", "o1", "p2", "o2"}
+    # Not an empty search: the ids the page cannot work without are in it.
+    assert {"save", "cancel", "status", "status-text", "scr", "presets",
+            "slots", "code", "paste", "load"} <= wanted
+    for name in sorted(wanted):
+        assert f'id="{name}"' in markup, name
+    # The m-<slot> messages are made with their rows, but the share box's
+    # is markup: fieldSay('paste', ...) writes nothing without it.
+    assert 'id="m-paste"' in markup
+
+
+def test_every_button_the_script_wires_by_data_attribute_is_there():
+    markup, _ = _markup_and_script(theme_server.page())
+    for attr, values in (("v", ("gauges", "focus")), ("m", ("level", "gauge")),
+                         ("w", ("5", "12", "22")), ("e", ("round", "flat")),
+                         ("d", ("on", "off"))):
+        for v in values:
+            assert f'data-{attr}="{v}"' in markup, (attr, v)
+
+
+def test_the_page_follows_the_computer_and_is_usable_without_a_mouse():
+    # Dark first, as a new board is; light when the computer asks for it;
+    # a ring on whatever the keyboard is on; and no motion for someone who
+    # turned it off.
+    markup, _ = _markup_and_script(theme_server.page())
+    assert "@media (prefers-color-scheme: light)" in markup
+    assert "@media (prefers-reduced-motion: reduce)" in markup
+    assert ":focus-visible" in markup
+    assert "min-height: 44px" in markup
 
 
 def test_the_page_has_no_outside_resources():
