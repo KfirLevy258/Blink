@@ -25,6 +25,7 @@ import json
 import os
 import sys
 
+from pc import desktop_paths
 from pc.providers import base
 
 PROVIDER_ID = "claude"
@@ -60,18 +61,7 @@ def cache_path():
     (the app may simply not be installed) and is handled by the reader, not
     by pretending we do not know where to look.
     """
-    if sys.platform == "darwin":
-        return os.path.expanduser(
-            "~/Library/Application Support/Claude/plan-usage-history.json")
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA")
-        if not appdata:
-            # Fall back rather than crash: a Windows session with no APPDATA
-            # is broken in ways that are not ours to fix, but it must not
-            # take the daemon with it.
-            appdata = os.path.expanduser("~\\AppData\\Roaming")
-        return os.path.join(appdata, "Claude", "plan-usage-history.json")
-    return os.path.expanduser("~/.config/Claude/plan-usage-history.json")
+    return os.path.join(desktop_paths.data_dir(), "plan-usage-history.json")
 
 
 def _pct(u: dict, key: str) -> float:

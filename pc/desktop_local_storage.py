@@ -22,9 +22,8 @@ different one has to re-establish that property first.
 """
 import json
 import os
-import sys
 
-from pc import leveldb
+from pc import desktop_paths, leveldb
 
 # The logical key is obfuscated and carries the organization uuid. We match
 # on the stable middle rather than reconstructing the whole thing, because
@@ -45,14 +44,7 @@ def store_path() -> str:
     Returned whether or not it exists: absence is a normal state and is
     handled by the reader, not by pretending we do not know where to look.
     """
-    if sys.platform == "darwin":
-        return os.path.expanduser(
-            "~/Library/Application Support/Claude/Local Storage/leveldb")
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA") or os.path.expanduser(
-            "~\\AppData\\Roaming")
-        return os.path.join(appdata, "Claude", "Local Storage", "leveldb")
-    return os.path.expanduser("~/.config/Claude/Local Storage/leveldb")
+    return os.path.join(desktop_paths.data_dir(), "Local Storage", "leveldb")
 
 
 def decode_value(raw: bytes):
