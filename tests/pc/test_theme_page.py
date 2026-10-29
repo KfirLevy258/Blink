@@ -526,10 +526,15 @@ def test_a_refused_clipboard_shows_the_code_in_the_notice_selected():
 def test_a_tab_with_nothing_to_copy_is_not_told_to_copy():
     """N1: a tab superseded before it heard its saved theme said "copy the
     share code" in the bar while its notice offered none. It still does
-    not close, since it cannot know it holds nothing."""
+    not close, since it cannot know it holds nothing. The newer tab is
+    heard from a ping asked on coming back into view, inside the 10 s that
+    /api/state is now given (R4-N2); the 20 s timer's ping came after it,
+    when the unanswered state had already ended the tab."""
     r = builder_page.run("""
     await advance(10);
-    """ + _NEWER + NOTICE, {"/api/state": "hold"})
+    answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
+    document.fire('visibilitychange'); await advance(10);
+    """ + NOTICE, {"/api/state": "hold"})
     assert r["status"] == "Continued in a newer tab. You can close this one."
     assert r["offer"] is False
     assert r["closed"] == 0
@@ -651,3 +656,60 @@ def test_saving_shows_until_a_late_answer():
     assert r["preview"].startswith("Preview sent: Forest")
     assert r["late"] == ["Saving…", False]
     assert r["end"] == "The theme was saved."
+
+
+def test_a_late_ping_from_a_failed_preview_does_not_undo_a_newer_one():
+    """R4-N1, probe A: preview A failed and the ping it asked was slow;
+    preview B went through; then A's ping came back alive and wrote "did
+    not reach your board" over B's "Preview sent", though the board showed
+    B. A's news is older than B's, so B's stands."""
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/preview', () => 'fail');
+    const slow = hold();
+    answer('/api/ping', () => slow.p);
+    preset('Ocean'); await advance(300);        // A fails, its ping is out
+    answer('/api/preview', () => ({ status: 200, body: { ok: true } }));
+    preset('Forest'); await advance(300);       // B goes through
+    const sent = $('status-text').textContent;
+    slow.release({ status: 200, body: { ok: true } }); await advance(10);
+    return { sent, now: $('status-text').textContent,
+             bad: $('status').classList.contains('err') };
+    """, SAVED_DARK)
+    assert r["sent"].startswith("Preview sent: Forest")
+    assert r["now"] == r["sent"]
+    assert r["bad"] is False
+
+
+def test_a_late_ping_still_says_unsent_when_nothing_newer_went_through():
+    """The other side of R4-N1: a slow ping with no preview through since
+    still says the failed one did not reach the board."""
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/preview', () => 'fail');
+    const slow = hold();
+    answer('/api/ping', () => slow.p);
+    preset('Ocean'); await advance(300);
+    preset('Forest'); await advance(300);       // fails too, no newer news
+    slow.release({ status: 200, body: { ok: true } }); await advance(10);
+    return $('status-text').textContent;
+    """, SAVED_DARK)
+    assert r == "The preview did not reach your board."
+
+
+def test_a_state_that_never_answers_ends_in_the_notice():
+    """R4-N2, probe E: a GET /api/state that never answered left the bar at
+    "Loading your current theme." for good. It is given up on after 10 s,
+    the same limit the posts have, and ends as a refused one does."""
+    r = builder_page.run("""
+    await advance(9000);
+    const at9 = [$('notice').getAttribute('hidden') !== null,
+                 $('status-text').textContent];
+    await advance(1100);
+    const limited = requests.filter(q => q.path === '/api/state').every(q => q.limited);
+    """ + NOTICE.replace("return {", "return { at9, limited,"),
+                         {"/api/state": "hold"})
+    assert r["at9"] == [True, "Loading your current theme."]
+    assert r["limited"] is True
+    assert r["shown"] is True and r["why"] == "The builder stopped."
+    assert r["offer"] is False      # it never had the owner's theme

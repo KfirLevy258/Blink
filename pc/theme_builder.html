@@ -395,6 +395,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // preset: the id of an untouched built-in, or -1 for the custom theme.
   var st = Object.assign({ mode: 'level', view: 'gauges', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
   var finished = false, previewTimer = null, lastSent = null;
+  // delivered: previews the builder has taken, counted. See unsent().
+  var delivered = 0;
   // This tab's id, so the server can tell two tabs on one builder apart:
   // "Edit on computer" with a tab already open opens a second, and closing
   // the first must not end the builder the second is showing.
@@ -724,15 +726,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       var t = wireTheme(), key = JSON.stringify(t), name = themeName();
       if (key === lastSent) return;
       post('/api/preview', t, true).then(function (j) {
-        if (j.status === 200) { lastSent = key; say('Preview sent: ' + name + ' is on your board until you save or cancel.', 'ok'); }
+        if (j.status === 200) { lastSent = key; delivered++; say('Preview sent: ' + name + ' is on your board until you save or cancel.', 'ok'); }
         else if (j.status === 409) superseded();
         else if (j.status === 400) say(j.error || 'The board would refuse that theme.', true);
         // Any other ending is asked of a ping, with its one retry, rather
         // than taken as the builder gone: a preview is the request sent
         // most often, and one dropped on loopback retired a live tab
         // (review of fp/tab-notice r2, N1).
-        else ping(false, unsent);
-      }, function () { ping(false, unsent); });
+        else ping(false, unsent(delivered));
+      }, function () { ping(false, unsent(delivered)); });
     }, 250);
   }
   // The builder answered the ping a failed preview asked, so it is up and
@@ -740,7 +742,19 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // (the server has no message for it). The bar kept saying the board
   // showed each change (review of fp/tab-notice r3, S1). lastSent stays as
   // it was, so the next change is sent again.
-  function unsent() { say('The preview did not reach your board.', true); }
+  // at: how many previews had gone through when this one failed, read at
+  // the failure and not when the ping answers. That ping can take up to
+  // REQUEST_MS, and its retry more, and a later preview can go through
+  // meanwhile: the bar said "Preview sent: Forest", then the late ping
+  // wrote "did not reach your board" over it while the board showed
+  // Forest (review of fp/tab-notice r4, N1, probe A). A preview that went
+  // through since is newer news, so it stands. A count rather than lastSent
+  // itself: lastSent can come back round to the value it had (on Ocean,
+  // Forest fails, then Sky and Ocean again go through), and a count only
+  // goes up.
+  function unsent(at) {
+    return function () { if (delivered === at) say('The preview did not reach your board.', true); };
+  }
   function changed() { render(); schedulePreview(); }
 
   // ---------------------------------------------------------------- controls
@@ -977,10 +991,22 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     if (t && t.id >= 0 && t.id < PRESETS.length) { Object.assign(st, PRESETS[t.id][1]); st.preset = t.id; fromOutside(); return true; }
     return false;
   }
-  fetch('/api/state', { credentials: 'same-origin' }).then(function (r) {
+  // Limited like the posts, and ending the same way as a refused one: the
+  // tab stops. With no limit, a builder that took the connection and never
+  // answered left the bar at "Loading your current theme." for good, over
+  // controls that showed a theme the page had never read (review of
+  // fp/tab-notice r4, N2, probe E). The pings did find a dead builder
+  // there, but nothing ever ended the wait itself. Without the theme the
+  // board has, the page has nothing true to start from, which is why a
+  // failed /api/state already ended the tab; one that never answers now
+  // ends it the same way, after REQUEST_MS, the same 10 s the posts get.
+  var stateCtl = typeof AbortController === 'function' ? new AbortController() : null;
+  var stateLimit = stateCtl ? setTimeout(function () { stateCtl.abort(); }, REQUEST_MS) : null;
+  fetch('/api/state', { credentials: 'same-origin', signal: stateCtl ? stateCtl.signal : undefined }).then(function (r) {
     if (r.status !== 200) throw 0;
     return r.json();
   }).then(function (j) {
+    clearTimeout(stateLimit);
     var t = j.saved;
     applyTheme(t);
     savedKey = JSON.stringify(wireTheme());
@@ -993,7 +1019,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     say(draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
         : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
     render();
-  }, function () { render(); stopped(); });
+  }, function () { clearTimeout(stateLimit); render(); stopped(); });
   render();
 })();
 </script>
