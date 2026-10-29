@@ -349,7 +349,9 @@ def test_the_page_follows_the_computer_and_is_usable_without_a_mouse():
     assert "@media (prefers-color-scheme: light)" in markup
     assert "@media (prefers-reduced-motion: reduce)" in markup
     assert ":focus-visible" in markup
-    assert "min-height: 44px" in markup
+    # The 44 px rule is checked control by control in test_theme_page.py:
+    # a "min-height: 44px" anywhere in the file passed while the segment
+    # buttons were 42 (review of fp/builder-look, S6).
 
 
 def test_the_page_has_no_outside_resources():

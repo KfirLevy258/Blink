@@ -24,10 +24,17 @@
   board's red measured 3.8:1, so the NO chip is dark ink on --bad-text in
   dark (7.4:1) and white on the board's light red in light (5.6:1). Dark
   ink on the light scheme's amber measured 3.2:1, so --on-warn is white
-  there (5.9:1).
+  there (5.9:1). --line is a hairline between parts of the page, at about
+  1.25:1; a box that takes typing is drawn in --edge instead, 3.3:1 on the
+  card and 3.4:1 on the sunk ground in dark, 3.6:1 and 3.4:1 in light,
+  since WCAG 1.4.11 asks 3:1 of the edge that says "this is a field" and
+  the empty paste box read as no box at all (review of fp/builder-look, N2).
+  The page's chrome sits under a header whose height is --top-h; the
+  script keeps it to the header as drawn (review, S4).
 */
 :root {
-  --bg: #0E1116; --card: #161A20; --sunk: #12151A; --line: #272C34;
+  --top-h: 80px;
+  --bg: #0E1116; --card: #161A20; --sunk: #12151A; --line: #272C34; --edge: #646C76;
   --text: #E6E8EB; --dim: #8A9199; --ok: #2ECC71; --ok-text: #2ECC71; --warn: #F1C40F; --on-warn: #0E1116;
   --bad: #E74C3C; --bad-text: #FF7A6E; --on-bad: #0E1116; --accent: #2ECC71; --on-accent: #0E1116; --focus: #2ECC71;
   --shadow: rgba(0,0,0,.55); color-scheme: dark;
@@ -35,12 +42,12 @@
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {
-  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6;
+  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
   --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
   --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
   --shadow: rgba(17,20,24,.16); color-scheme: light; } }
 :root[data-theme="light"] {
-  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6;
+  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
   --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
   --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
   --shadow: rgba(17,20,24,.16); color-scheme: light; }
@@ -52,14 +59,17 @@ button, input { font: inherit; color: inherit; }
 h1, h2 { margin: 0; }
 code { font-family: var(--mono); font-size: .875em; background: var(--sunk); border: 1px solid var(--line); padding: 1px 6px; border-radius: 6px; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .icon { width: 18px; height: 18px; flex: none; }
 .eyebrow { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); }
 .lede { color: var(--dim); margin: 0; max-width: 68ch; }
 .desc { color: var(--dim); margin: 6px 0 0; font-size: 14px; }
 
 /* Every button, segment, swatch and box is at least 44 px tall: the page
-   is opened from the board, and as often as not on a touch laptop. */
+   is opened from the board, and as often as not on a touch laptop. The
+   segment buttons were 42 px and the claim was here regardless (review of
+   fp/builder-look, S6); tests/pc/test_theme_page.py reads each control's
+   rule now, rather than finding "44px" somewhere in the file. */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 18px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 15px; cursor: pointer; white-space: nowrap;
   transition: background-color .2s ease, border-color .2s ease, color .2s ease, opacity .2s ease; }
@@ -89,7 +99,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
 
 .view { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
 .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--sunk); }
-.seg button { min-height: 42px; min-width: 44px; padding: 0 14px; border: 0; background: transparent; color: var(--dim); font-size: 15px; font-weight: 500; cursor: pointer;
+.seg button { min-height: 44px; min-width: 44px; padding: 0 14px; border: 0; background: transparent; color: var(--dim); font-size: 15px; font-weight: 500; cursor: pointer;
   transition: background-color .2s ease, color .2s ease; }
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button:hover { color: var(--text); }
@@ -105,7 +115,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
 .preset { display: flex; flex-direction: column; gap: 8px; padding: 8px 8px 10px; min-height: 44px; border: 1px solid var(--line); border-radius: 12px;
   background: var(--card); text-align: left; cursor: pointer; transition: border-color .2s ease, box-shadow .2s ease; }
 .preset:hover { border-color: var(--dim); }
-.preset[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+/* --focus, not --accent: the board's green on a white card is 2.1:1, under
+   the 3:1 a state needs; the light focus green is 3.5:1 (review, N1). */
+.preset[aria-pressed="true"] { border-color: var(--focus); box-shadow: inset 0 0 0 1px var(--focus); }
 .preset .pn { font-size: 14px; font-weight: 600; line-height: 1.25; padding: 0 2px; }
 .sw { position: relative; display: block; height: 48px; border-radius: 7px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(128,128,128,.28); }
 .sw i { position: absolute; display: block; border-radius: 2px; }
@@ -116,13 +128,13 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
 .slots { display: grid; }
 .slot { display: grid; grid-template-columns: 44px minmax(0, 1fr) 112px; column-gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); transition: opacity .2s ease; }
 .slot:last-child { border-bottom: 0; }
-.slot input[type=color] { width: 44px; height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: none; cursor: pointer; }
+.slot input[type=color] { width: 44px; height: 44px; padding: 0; border: 1px solid var(--edge); border-radius: 10px; background: none; cursor: pointer; }
 .slot input[type=color]::-webkit-color-swatch-wrapper { padding: 3px; }
 .slot input[type=color]::-webkit-color-swatch { border: 0; border-radius: 7px; }
 .slot input[type=color]::-moz-color-swatch { border: 0; border-radius: 7px; }
 .slot label { font-weight: 600; font-size: 15px; line-height: 1.3; }
 .slot small { display: block; color: var(--dim); font-size: 13px; font-weight: 400; margin-top: 2px; }
-.slot input[type=text], .paste input { font: 15px var(--mono); width: 100%; min-height: 44px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--sunk); color: var(--text); transition: border-color .2s ease; }
+.slot input[type=text], .paste input { font: 15px var(--mono); width: 100%; min-height: 44px; padding: 0 10px; border: 1px solid var(--edge); border-radius: 10px; background: var(--sunk); color: var(--text); transition: border-color .2s ease; }
 .slot input[type=text] { text-transform: uppercase; letter-spacing: .02em; }
 .slot input[type=text]:hover, .paste input:hover { border-color: var(--dim); }
 [aria-invalid="true"] { border-color: var(--bad) !important; }
@@ -161,19 +173,31 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
 
 /* ---------------------------------------------------------------- layout */
 .top { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px clamp(16px, 3vw, 40px);
-  background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+  background: var(--bg); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand .icon { width: 26px; height: 26px; color: var(--ok); }
 .brand h1 { font-size: 18px; font-weight: 650; letter-spacing: -.01em; }
 .top .status { flex: 1 1 280px; }
 .studio { display: grid; grid-template-columns: minmax(0, 1fr) 460px; align-items: start; }
-.stage { position: sticky; top: 73px; min-height: calc(100vh - 73px); display: grid; place-items: center; padding: 48px clamp(16px, 4vw, 64px);
+.stage { position: sticky; top: var(--top-h); min-height: calc(100vh - var(--top-h)); display: grid; place-items: center; padding: 32px clamp(16px, 4vw, 64px);
   background: radial-gradient(60% 55% at 50% 42%, color-mix(in srgb, var(--text) 7%, transparent), transparent 70%); }
-.stage-inner { width: 100%; max-width: 780px; display: grid; gap: 24px; }
+/* The device is sized by the window's height as well as its width, so the
+   Checks under it are in view on a laptop. Sized by width alone, it was
+   967 px of stage in a 900 px window at 1440x900, and the Checks list sat
+   below the fold through the whole scroll (review of fp/builder-look, S3).
+   The 420 px is what stands beside the screen at 1440x900, measured: the
+   view row (98, on two lines), the lede (68), three checks (89), the gaps
+   (60), the stage's padding (64) and the frame round the screen (about
+   13 over 3/4 of its width), with some 20 px spare for a check that wraps.
+   4/3 is the panel's shape. The floor keeps a short window from shrinking
+   it to a stamp. The Checks come before the lede, so it is the lede and
+   not a check that a window too short for both leaves below the fold: with
+   every warning showing, the checks wrap to five lines. */
+.stage-inner { width: 100%; max-width: clamp(420px, calc((100vh - var(--top-h) - 420px) * 4 / 3), 780px); display: grid; gap: 20px; }
 .stage .view { justify-content: center; }
 .stage .lede { text-align: center; margin: 0 auto; font-size: 15px; }
 .stage .checks { max-width: 560px; margin: 0 auto; width: 100%; }
-.inspector { background: var(--card); border-left: 1px solid var(--line); min-height: calc(100vh - 73px); }
+.inspector { background: var(--card); border-left: 1px solid var(--line); min-height: calc(100vh - var(--top-h)); }
 .group { padding: 24px 28px; border-bottom: 1px solid var(--line); }
 .group h2 { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); margin-bottom: 16px; }
 .inspector .presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -237,8 +261,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
         <label class="slider" for="p1"><span>Session</span><input type="range" id="p1" min="0" max="100" value="42"><output id="o1">42%</output></label>
         <label class="slider" for="p2"><span>Weekly</span><input type="range" id="p2" min="0" max="100" value="91"><output id="o2">91%</output></label>
       </div>
-      <p class="lede">Pick a theme or choose the seven colours. Your board shows each change as a preview, without keeping it. Save keeps it on the board; Cancel, closing this tab, or ten minutes without a change puts the board back as it was.</p>
       <ul class="checks" id="checks" aria-label="Checks"></ul>
+      <p class="lede">Pick a theme or choose the seven colours. Your board shows each change as a preview, without keeping it. Save keeps it on the board; Cancel, closing this tab, or ten minutes without a change puts the board back as it was.</p>
     </div>
   </section>
 
@@ -375,7 +399,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The custom theme takes only the three widths the board has; a preset
   // drawn at another width is moved to the nearest the moment it is edited.
   function snapW(w) { return WIDTHS.reduce(function (b, x) { return Math.abs(x - w) < Math.abs(b - w) ? x : b; }, WIDTHS[0]); }
-  function markCustom() { st.preset = -1; st.w = snapW(st.w); }
+  // Any edit here moves on from a loaded share code, so its "Loaded" goes
+  // (review of fp/builder-look, S2).
+  function markCustom() { st.preset = -1; st.w = snapW(st.w); fieldSay('paste', null); }
+  // The colours were set from outside the hex boxes -- a preset, a share
+  // code, the saved theme or a draft -- so a box's own typing error is
+  // about a value it no longer holds. It outlived it: "Use six hex digits"
+  // and aria-invalid stayed under a valid colour after a preset click
+  // (review of fp/builder-look, S1).
+  function fromOutside() { bad = {}; }
 
   // ---------------------------------------------------------------- drawing
   var NS = 'http://www.w3.org/2000/svg';
@@ -515,8 +547,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   function end(text, kind) { say(text, kind); sealed = true; }
   function say(text, kind) {
     if (sealed) return;
-    var s = document.getElementById('status');
-    document.getElementById('status-text').textContent = text;
+    var s = document.getElementById('status'), t = document.getElementById('status-text');
+    // The bar is a live region too; see fieldSay.
+    if (t.textContent !== text) t.textContent = text;
     s.classList.toggle('err', kind === true); s.classList.toggle('ok', kind === 'ok');
   }
   // A message under one field: the hex boxes, and the share code box.
@@ -525,7 +558,14 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var bad = {};
   function fieldSay(k, m) {
     var p = document.getElementById('m-' + k); if (!p) return;
-    p.textContent = m ? m[1] : ''; p.className = 'fmsg' + (m ? ' f-' + m[0] : '');
+    // Only on a change. Every render() comes through here for all seven
+    // slots, and a replaced text node is re-announced by VoiceOver and NVDA
+    // even when its words are the same: ten ticks of the Session slider on
+    // a faint theme were twenty announcements (review of fp/builder-look,
+    // S5).
+    var text = m ? m[1] : '', cls = 'fmsg' + (m ? ' f-' + m[0] : '');
+    if (p.textContent === text && p.className === cls) return;
+    p.textContent = text; p.className = cls;
     var box = document.getElementById(k === 'paste' ? 'paste' : 't-' + k);
     if (box) box.setAttribute('aria-invalid', String(!!m && m[0] === 'bad'));
   }
@@ -583,7 +623,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     ['text', 'low', 'mid', 'high'].forEach(function (k) { var d = document.createElement('i'); d.className = 'sw-' + k; d.style.background = '#' + p[k]; sw.appendChild(d); });
     var n = document.createElement('span'); n.className = 'pn'; n.textContent = name;
     b.appendChild(sw); b.appendChild(n);
-    b.addEventListener('click', function () { Object.assign(st, PRESETS[i][1]); st.preset = i; changed(); });
+    b.addEventListener('click', function () { Object.assign(st, PRESETS[i][1]); st.preset = i; fromOutside(); fieldSay('paste', null); changed(); });
     pre.appendChild(b);
   });
   var slots = document.getElementById('slots');
@@ -594,7 +634,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     var sm = document.createElement('small'); sm.textContent = s.hint; l.appendChild(sm);
     var t = document.createElement('input'); t.type = 'text'; t.id = 't-' + s.k; t.maxLength = 7; t.setAttribute('aria-label', s.name + ' hex');
     t.spellcheck = false; t.autocomplete = 'off'; t.setAttribute('aria-describedby', 'm-' + s.k);
-    var m = document.createElement('p'); m.className = 'fmsg'; m.id = 'm-' + s.k; m.setAttribute('aria-live', 'polite');
+    // Live, except the background's: its note is the text's, word for
+    // word, and a screen reader heard it twice (review, S5).
+    var m = document.createElement('p'); m.className = 'fmsg'; m.id = 'm-' + s.k; if (s.k !== 'bg') m.setAttribute('aria-live', 'polite');
     row.appendChild(c); row.appendChild(l); row.appendChild(t); row.appendChild(m); slots.appendChild(row);
     c.addEventListener('input', function (e) { st[s.k] = e.target.value.slice(1).toUpperCase(); delete bad[s.k]; markCustom(); changed(); });
     // Half-typed is not wrong, so a box is only told off once it has its
@@ -634,6 +676,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     if (WIDTHS.indexOf(f.w) < 0 || ['round','flat'].indexOf(f.ends) < 0 || [0,1].indexOf(+f.dot) < 0 || ['level','gauge'].indexOf(f.by) < 0) return false;
     SLOTS.forEach(function (s, i) { st[s.k] = f.c[i].toUpperCase(); });
     st.w = f.w; st.e = f.ends; st.d = +f.dot ? 'on' : 'off'; st.mode = f.by; st.preset = -1;
+    fromOutside();
     return true;
   }
   document.getElementById('paste').addEventListener('input', function () { fieldSay('paste', null); });
@@ -653,7 +696,14 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       f = JSON.parse(atob(b));
     } catch (e) { f = null; }
     if (f === null || typeof f !== 'object' || Array.isArray(f) || !['c','w','ends','dot','by'].some(function (k) { return k in f; })) fieldSay('paste', ['bad', 'That share code is damaged or cut short. Copy all of it again.']);
-    else if (applyCustom(f)) { document.getElementById('paste').value = ''; fieldSay('paste', ['ok', 'Loaded. The preview and your board show it now.']); changed(); }
+    // Loaded, and nothing more unless it needs saying: the status bar
+    // reports the preview. It said "your board shows it now" over a code
+    // whose text was unreadable, while the bar said the board kept the
+    // last preview (review of fp/builder-look, S2).
+    else if (applyCustom(f)) {
+      document.getElementById('paste').value = ''; changed();
+      fieldSay('paste', textContrast() < MIN_CONTRAST ? ['warn', 'Loaded, but its text is unreadable, so the board keeps the last preview.'] : ['ok', 'Loaded.']);
+    }
     else fieldSay('paste', ['bad', 'That share code holds a theme the board cannot use.']);
   });
 
@@ -715,11 +765,21 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // the tab say so before the first click rather than after it.
   document.addEventListener('visibilitychange', function () { if (!document.hidden) ping(); });
 
+  // --top-h follows the header: 80 px as a rule, more when a long status
+  // wraps it. It was 73 px, written in, with the header at 80 (review of
+  // fp/builder-look, S4).
+  (function () {
+    var top = document.querySelector('.top'), rootStyle = document.documentElement.style;
+    function fit() { if (top.offsetHeight) rootStyle.setProperty('--top-h', top.offsetHeight + 'px'); }
+    if (window.ResizeObserver) new ResizeObserver(fit).observe(top);
+    fit();
+  })();
+
   // A theme as /api/state gives it, onto the page. False if it is neither a
   // built-in nor a custom theme this page can show.
   function applyTheme(t) {
     if (t && t.id === CUSTOM) return applyCustom(t);
-    if (t && t.id >= 0 && t.id < PRESETS.length) { Object.assign(st, PRESETS[t.id][1]); st.preset = t.id; return true; }
+    if (t && t.id >= 0 && t.id < PRESETS.length) { Object.assign(st, PRESETS[t.id][1]); st.preset = t.id; fromOutside(); return true; }
     return false;
   }
   fetch('/api/state', { credentials: 'same-origin' }).then(function (r) {
