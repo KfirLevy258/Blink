@@ -709,7 +709,104 @@ def test_a_state_that_never_answers_ends_in_the_notice():
     const limited = requests.filter(q => q.path === '/api/state').every(q => q.limited);
     """ + NOTICE.replace("return {", "return { at9, limited,"),
                          {"/api/state": "hold"})
-    assert r["at9"] == [True, "Loading your current theme."]
+    assert r["at9"] == [True, "Loading your current theme. Changes and Save wait"
+                       " until it is here."]
     assert r["limited"] is True
     assert r["shown"] is True and r["why"] == "The builder stopped."
     assert r["offer"] is False      # it never had the owner's theme
+
+
+# ------------------------------------------- nothing is sent before the state
+#
+# NN-3 of the review of fp/tab-notice-nice, probe P5: Save was live before
+# GET /api/state answered, and a tab that never read the owner's theme saved
+# the page's own default over it ("Saved: Dark"). A preview from then reached
+# the board too, and the state landing next threw the edit away under a bar
+# that said the board showed the saved theme. The state here is "held", so
+# it answers when the test says, and the owner's theme is Synthwave, so a
+# save of Dark, the page's default, cannot pass for it.
+
+_RELEASE_SYNTHWAVE = ("held['/api/state'][0].release({ status: 200, body: "
+                      "{ saved: { id: 5 }, draft: null } }); await advance(10);")
+_FORM = "document.querySelectorAll('main button, main input')"
+
+
+def test_save_is_off_until_the_state_answers():
+    r = builder_page.run("""
+    await advance(10);
+    const before = $('save').disabled;
+    $('save').fire('click');     // a click that arrives anyway is ignored
+    await advance(10);
+    const early = requests.filter(q => q.path === '/api/save').length;
+    """ + _RELEASE_SYNTHWAVE + """
+    const after = $('save').disabled;
+    $('save').click(); await advance(10);
+    return { before, early, after, why: $('notice-why').textContent,
+             sent: requests.filter(q => q.path === '/api/save').map(q => q.body) };
+    """, {"/api/state": "held"})
+    assert r["before"] is True and r["early"] == 0
+    assert r["after"] is False
+    assert r["sent"] == [{"id": 5}]
+    assert r["why"] == "The theme was saved."
+
+
+def test_nothing_is_previewed_before_the_state_answers():
+    """A preset click and a typed colour before the state are not sent, and
+    the form is off and says it is waiting until the state is here."""
+    r = builder_page.run("""
+    await advance(10);
+    const off = """ + _FORM + """.every(e => e.disabled);
+    const busy = document.querySelector('main').getAttribute('aria-busy');
+    const ocean = document.querySelectorAll('#presets button').find(b => b.querySelector('.pn').textContent === 'Ocean');
+    ocean.fire('click');         // arriving past disabled, as Save's does
+    $('t-low').value = '#123456'; $('t-low').fire('input');
+    await advance(300);
+    const early = requests.filter(q => q.path === '/api/preview').length;
+    """ + _RELEASE_SYNTHWAVE + """
+    const on = """ + _FORM + """.every(e => !e.disabled);
+    const busyAfter = document.querySelector('main').getAttribute('aria-busy');
+    const bar = $('status-text').textContent;
+    preset('Ocean'); await advance(300);
+    return { off, busy, early, on, busyAfter, bar,
+             previews: requests.filter(q => q.path === '/api/preview').map(q => q.body) };
+    """, {"/api/state": "held"})
+    assert r["off"] is True and r["busy"] == "true"
+    assert r["early"] == 0
+    assert r["on"] is True and r["busyAfter"] is None
+    assert r["bar"] == ("This is the theme your board has now. Changes show"
+                        " on it as a preview.")
+    assert r["previews"] == [{"id": 4}]
+
+
+@pytest.mark.parametrize("ending", [
+    "held['/api/state'][0].release({ status: 500, body: {} }); await advance(10);",
+    "await advance(10100);"], ids=["refused", "never answers"])
+def test_a_tab_whose_state_never_came_never_turns_save_on(ending):
+    """Stopped before the owner's theme was here: Save stays off, and a
+    click that arrives anyway sends nothing."""
+    r = builder_page.run("""
+    await advance(10);
+    const early = $('save').disabled;
+    """ + ending + """
+    $('save').fire('click'); await advance(10);
+    return { early, now: $('save').disabled, why: $('notice-why').textContent,
+             saves: requests.filter(q => q.path === '/api/save').length };
+    """, {"/api/state": "held"})
+    assert r["early"] is True and r["now"] is True
+    assert r["why"] == "The builder stopped."
+    assert r["saves"] == 0
+
+
+def test_a_tab_taken_over_while_its_state_was_out_stays_off():
+    """The state landing after the tab has ended does not turn its form
+    back on behind the notice."""
+    r = builder_page.run("""
+    await advance(10);
+    const early = $('save').disabled;
+    answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
+    document.fire('visibilitychange'); await advance(10);
+    """ + _RELEASE_SYNTHWAVE + NOTICE.replace("return {", "return { early,"),
+                         {"/api/state": "held"})
+    assert r["early"] is True
+    assert r["why"] == "The builder continued in a newer tab."
+    assert r["live"] == []

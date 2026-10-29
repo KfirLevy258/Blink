@@ -79,6 +79,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
 .btn.ghost { background: transparent; }
 .btn.small { padding: 0 12px; font-size: 14px; }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
+/* Until /api/state answers, the form is off (see "loaded" in the script);
+   a preset or a segment button has no disabled look of its own, so the
+   whole studio says it is waiting. */
+.studio[aria-busy="true"] { opacity: .6; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* The status says how it went in its icon and colour as well as its words. */
@@ -263,16 +267,16 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     <svg class="icon s-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/></svg>
     <svg class="icon s-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>
     <svg class="icon s-err" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
-    <span id="status-text">Loading your current theme.</span>
+    <span id="status-text">Loading your current theme. Changes and Save wait until it is here.</span>
   </div>
   <div class="actions">
-    <button type="button" class="btn primary" id="save"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Save to board</span></button>
+    <button type="button" class="btn primary" id="save" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Save to board</span></button>
     <button type="button" class="btn" id="cancel"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg><span>Cancel</span></button>
     <button type="button" class="btn ghost" id="copy-code"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
   </div>
 </header>
 
-<main class="studio">
+<main class="studio" aria-busy="true">
   <section class="stage" aria-label="Preview">
     <div class="stage-inner">
       <figure class="device">
@@ -395,6 +399,20 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // preset: the id of an untouched built-in, or -1 for the custom theme.
   var st = Object.assign({ mode: 'level', view: 'gauges', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
   var finished = false, previewTimer = null, lastSent = null;
+  // loaded: /api/state has answered and the page shows the owner's theme.
+  // Until then the page holds only its own default, preset 0, and Save was
+  // live over it: a tab whose state had not answered saved "Saved: Dark"
+  // over a theme it never read (review of fp/tab-notice-nice, NN-3, probe
+  // P5). So nothing that writes -- Save, or a preview, which reaches the
+  // board and becomes the builder's draft for the next tab -- goes out
+  // before it, and the form is off: an edit made then was thrown away when
+  // the state landed, under a bar that then said "This is the theme your
+  // board has now" while the board showed the edit's preview. A state that
+  // fails or never answers ends the tab, so loaded stays false for good.
+  // The server takes no part: GET /api/state carries no tab id, and a save
+  // of any valid theme is one the owner may mean, so only the page knows
+  // whether it read the theme it is about to write over.
+  var loaded = false;
   // delivered: previews the builder has taken, counted. See unsent().
   var delivered = 0;
   // This tab's id, so the server can tell two tabs on one builder apart:
@@ -542,8 +560,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       m.className = 'mark m-' + o[0]; m.textContent = o[0] === 'ok' ? 'OK' : o[0] === 'warn' ? 'CHECK' : 'NO';
       t.textContent = o[1]; li.appendChild(m); li.appendChild(t); ul.appendChild(li);
     });
-    // Not while a Save is out, either; see the Save handler.
-    if (!finished) document.getElementById('save').disabled = saving || c < MIN_CONTRAST;
+    // Not while a Save is out, either; see the Save handler. Nor before the
+    // owner's theme is here; see loaded.
+    if (!finished) document.getElementById('save').disabled = !loaded || saving || c < MIN_CONTRAST;
   }
 
   // ---------------------------------------------------------------- the wire
@@ -715,7 +734,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     retire('The builder stopped.', 'The builder has stopped. Run blink theme on your computer to start it again.', true, holdsDraft());
   }
   function schedulePreview() {
-    if (finished) return;
+    if (finished || !loaded) return;
     clearTimeout(previewTimer);
     previewTimer = setTimeout(function () {
       if (finished) return;
@@ -864,7 +883,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   });
 
   document.getElementById('save').addEventListener('click', function () {
-    if (finished || textContrast() < MIN_CONTRAST) return;
+    // A click is ignored before the state, not only kept off by disabled:
+    // disabled is whatever the last render() left, and a click dispatched
+    // by script or an extension reaches this handler whatever it says.
+    if (finished || !loaded || textContrast() < MIN_CONTRAST) return;
     clearTimeout(previewTimer);
     if (saving) return;
     var name = themeName(), save = document.getElementById('save');
@@ -1000,6 +1022,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // board has, the page has nothing true to start from, which is why a
   // failed /api/state already ended the tab; one that never answers now
   // ends it the same way, after REQUEST_MS, the same 10 s the posts get.
+  // The form is off until then; see loaded. Cancel stays on: it writes
+  // nothing of its own, only puts the board back on the theme it keeps.
+  var FORM = 'main button, main input';
+  document.querySelectorAll(FORM).forEach(function (e) { e.disabled = true; });
   var stateCtl = typeof AbortController === 'function' ? new AbortController() : null;
   var stateLimit = stateCtl ? setTimeout(function () { stateCtl.abort(); }, REQUEST_MS) : null;
   fetch('/api/state', { credentials: 'same-origin', signal: stateCtl ? stateCtl.signal : undefined }).then(function (r) {
@@ -1016,6 +1042,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // shows now; it is still unsaved, so Cancel puts the board back.
     var draft = false;
     if (j.draft && applyTheme(j.draft)) { lastSent = JSON.stringify(wireTheme()); draft = lastSent !== savedKey; }
+    // On only while the tab is live: a tab taken over or stopped while the
+    // state was on its way has its form off for good.
+    loaded = true;
+    if (!finished) { document.querySelectorAll(FORM).forEach(function (e) { e.disabled = false; }); document.querySelector('main').removeAttribute('aria-busy'); }
     say(draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
         : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
     render();

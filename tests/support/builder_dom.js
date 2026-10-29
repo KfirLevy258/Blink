@@ -123,6 +123,11 @@ function clearTimer(id) { timers.delete(id); }
 // the scenario installs with answer(path, fn). Every request is kept.
 const requests = [];
 const answers = {};
+// 'held': a reply kept back for the scenario to release, for one the page
+// asks for as it loads, before a scenario can hold() it: held[path] lists
+// them in order, each a hold(). The Save-before-state fix (NN-3) needed a
+// GET /api/state that answers late rather than never.
+const held = {};
 Object.entries(spec.answers || {}).forEach(([p, a]) => { answers[p] = () => a; });
 function fetch_(path, opts) {
   opts = opts || {};
@@ -138,7 +143,9 @@ function fetch_(path, opts) {
     if (x === 'hold') return new Promise(() => {});
     return Promise.resolve({ status: x.status, json: () => Promise.resolve(JSON.parse(JSON.stringify(x.body || {}))) });
   };
-  const reply = a && typeof a.then === 'function' ? a.then(settle) : settle(a);
+  let reply;
+  if (a === 'held') { const h = hold(); (held[path] = held[path] || []).push(h); reply = h.p.then(settle); }
+  else reply = a && typeof a.then === 'function' ? a.then(settle) : settle(a);
   // An aborted request rejects, as a browser's fetch does, whether or not
   // its reply was ever coming. node's own AbortController drives it.
   if (!opts.signal) return reply;
@@ -201,7 +208,7 @@ function liveWrites() {
   return out;
 }
 
-const helpers = { $, document, window: win, advance, flush, type, pick, preset, answer, requests, liveWrites, clipboard, selection, hold };
+const helpers = { $, document, window: win, advance, flush, type, pick, preset, answer, requests, liveWrites, clipboard, selection, hold, held };
 const names = Object.keys(sandbox);
 // The page script, as the browser would run it, against this DOM.
 new Function(...names, spec.script)(...names.map((k) => sandbox[k]));
