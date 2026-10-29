@@ -15,7 +15,7 @@ something proved it wrong.
 import json
 import math
 
-from pc import weekly_anchor
+from pc import desktop_paths, weekly_anchor
 from pc.providers import base
 from pc.providers import claude_desktop
 
@@ -28,12 +28,12 @@ class DesktopHistoryProvider:
     sample series `weekly_anchor.refuted_by` needs.
 
     There is exactly one parser for plan-usage-history.json in this
-    codebase, in pc.providers.claude_desktop -- this borrows its cache_path()
-    and its raw_samples() rather than growing a second reader for the same
-    file. refuted_by wants the whole series (to notice a drop), not the
-    single newest reading ClaudeDesktopProvider itself hands the normalizer,
-    which is why this goes to raw_samples() instead of duplicating that
-    provider outright.
+    codebase, in pc.providers.claude_desktop -- this borrows its
+    raw_samples(), on the file at pc.desktop_paths.cache_path(), rather than
+    growing a second reader for the same file. refuted_by wants the whole
+    series (to notice a drop), not the single newest reading
+    ClaudeDesktopProvider itself hands the normalizer, which is why this goes
+    to raw_samples() instead of duplicating that provider outright.
 
     Lazy on purpose: the file is opened fresh inside samples(), never at
     construction, so a machine with no Claude Desktop installed -- a normal,
@@ -48,7 +48,7 @@ class DesktopHistoryProvider:
 
     def samples(self, now_epoch):
         path = (self._path if self._path is not None
-                else claude_desktop.cache_path())
+                else desktop_paths.cache_path())
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 content = fh.read()

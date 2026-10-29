@@ -284,9 +284,9 @@ def desktop_app_present() -> bool:
     file is the thing this product actually depends on, so the file is what
     gets asked about.
     """
-    from pc.providers import claude_desktop
+    from pc import desktop_paths
     try:
-        return os.path.exists(claude_desktop.cache_path())
+        return os.path.exists(desktop_paths.cache_path())
     except Exception:
         return False
 
@@ -309,11 +309,12 @@ def desktop_app_installed() -> bool:
     Storage is written by the app's own browser engine and nothing else
     (review, 2026-10-19).
     """
-    from pc import desktop_local_storage
+    from pc import desktop_paths
     try:
         # The "Local Storage" folder, one above the leveldb store: the
         # Windows measurement saw the folder, not what was inside it.
-        return os.path.isdir(os.path.dirname(desktop_local_storage.store_path()))
+        return os.path.isdir(
+            os.path.dirname(desktop_paths.local_storage_path()))
     except Exception:
         return False
 

@@ -17,7 +17,8 @@ import datetime
 import math
 import json
 import os
-import sys
+
+from pc import desktop_paths
 
 SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
@@ -27,17 +28,6 @@ SAMPLE_EPOCH_MAX = 4_102_444_800
 # machines is every start, forever.
 MAX_FILES = 20
 TAIL_BYTES = 262144
-
-
-def sessions_dir() -> str:
-    if sys.platform == "darwin":
-        return os.path.expanduser(
-            "~/Library/Application Support/Claude/local-agent-mode-sessions")
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA") or os.path.expanduser(
-            "~\\AppData\\Roaming")
-        return os.path.join(appdata, "Claude", "local-agent-mode-sessions")
-    return os.path.expanduser("~/.config/Claude/local-agent-mode-sessions")
 
 
 def _zone_seconds(zone):
@@ -198,7 +188,7 @@ def seven_day_reset(root=None, max_files=MAX_FILES, tail_bytes=TAIL_BYTES):
     object and a line with no windows are all normal states here, and every
     one of them is folded into the same None -- the caller falls back.
     """
-    root = root if root is not None else sessions_dir()
+    root = root if root is not None else desktop_paths.sessions_dir()
     best = None
     try:
         files = _audit_files(root, max_files)

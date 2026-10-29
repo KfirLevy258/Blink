@@ -21,8 +21,6 @@ is why it is the store this project reads. Anything that changes it to read a
 different one has to re-establish that property first.
 """
 import json
-import os
-import sys
 
 from pc import leveldb
 
@@ -37,22 +35,6 @@ USAGE_KEY_MARKER = b"ochre_heron_tide"
 # forever.
 SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
-
-
-def store_path() -> str:
-    """Where Claude Desktop keeps its Local Storage on this platform.
-
-    Returned whether or not it exists: absence is a normal state and is
-    handled by the reader, not by pretending we do not know where to look.
-    """
-    if sys.platform == "darwin":
-        return os.path.expanduser(
-            "~/Library/Application Support/Claude/Local Storage/leveldb")
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA") or os.path.expanduser(
-            "~\\AppData\\Roaming")
-        return os.path.join(appdata, "Claude", "Local Storage", "leveldb")
-    return os.path.expanduser("~/.config/Claude/Local Storage/leveldb")
 
 
 def decode_value(raw: bytes):

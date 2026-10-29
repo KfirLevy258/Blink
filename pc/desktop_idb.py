@@ -25,10 +25,8 @@ IndexedDB KEY and by nothing else: not the value, not the filesystem around
 it.
 """
 import math
-import os
-import sys
 
-from pc import cowork_audit, leveldb, v8_clone
+from pc import cowork_audit, desktop_paths, leveldb, v8_clone
 
 SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
@@ -48,18 +46,6 @@ MAX_DEPTH = 16
 # Keys are UTF-16 on a real machine and ASCII in the fixtures. Match both
 # rather than depending on which.
 _KEY_MARKERS = (b"cowork", b"c\x00o\x00w\x00o\x00r\x00k")
-
-
-def store_path() -> str:
-    leaf = os.path.join("IndexedDB", "https_claude.ai_0.indexeddb.leveldb")
-    if sys.platform == "darwin":
-        return os.path.expanduser(
-            "~/Library/Application Support/Claude/" + leaf)
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA") or os.path.expanduser(
-            "~\\AppData\\Roaming")
-        return os.path.join(appdata, "Claude", leaf)
-    return os.path.expanduser("~/.config/Claude/" + leaf)
 
 
 def _wanted_key(key: bytes) -> bool:
@@ -142,7 +128,7 @@ def seven_day_reset(dir_path=None):
     None means absent, never zero, and absence is the normal answer: most
     machines have never run a Cowork session at all. Never raises.
     """
-    path = dir_path if dir_path is not None else store_path()
+    path = dir_path if dir_path is not None else desktop_paths.indexeddb_path()
     try:
         rows = leveldb.scan(path, _wanted_key)
     except Exception:

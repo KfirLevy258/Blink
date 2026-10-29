@@ -10,6 +10,7 @@ rate. This gives them a real countdown. The burn rate stays: it answers a
 different question and it survives this source being absent.
 """
 from pc import desktop_local_storage as ls
+from pc import desktop_paths
 from pc.providers import base
 
 PROVIDER_ID = "claude"
@@ -30,7 +31,9 @@ class ClaudeDesktopLocalStorageProvider(base.ProviderParser):
         return PROVIDER_ID
 
     def path(self):
-        return self._dir if self._dir is not None else ls.store_path()
+        if self._dir is not None:
+            return self._dir
+        return desktop_paths.local_storage_path()
 
     def record_to_frame(self, rec, now_epoch):
         """A NormalizedUsageFrame from one record, or None."""

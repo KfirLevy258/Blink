@@ -9,7 +9,7 @@ opens, walks, or otherwise touches a real Claude Desktop store, and the
 autouse _sandboxed_home fixture in tests/conftest.py keeps ~ inside tmp_path
 besides.
 """
-from pc import desktop_idb
+from pc import desktop_idb, desktop_paths
 from tests.support import leveldb_fixture as fx
 from tests.support import v8_fixture as vfx
 
@@ -220,7 +220,7 @@ def test_an_unparseable_value_is_not_an_error(tmp_path):
     assert desktop_idb.seven_day_reset(d) is None
 
 
-def test_a_default_store_path_is_absolute():
-    p = desktop_idb.store_path()
+def test_a_default_indexeddb_path_is_absolute():
+    p = desktop_paths.indexeddb_path()
     assert p.endswith("https_claude.ai_0.indexeddb.leveldb")
     assert "~" not in p

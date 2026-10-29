@@ -897,14 +897,13 @@ def test_desktop_app_installed_wants_desktops_own_files(tmp_path):
     """Not the data folder alone: MCP setup tools create it to write
     claude_desktop_config.json on machines that never ran Desktop. Local
     Storage only the app's own browser engine writes."""
-    from pc import desktop_local_storage
-    from pc.providers import claude_desktop
-    folder = os.path.dirname(claude_desktop.cache_path())
+    from pc import desktop_paths
+    folder = os.path.dirname(desktop_paths.cache_path())
     os.makedirs(folder)
     with open(os.path.join(folder, "claude_desktop_config.json"), "w") as f:
         f.write("{}")
     assert not cli.desktop_app_installed()
-    os.makedirs(desktop_local_storage.store_path())
+    os.makedirs(desktop_paths.local_storage_path())
     assert cli.desktop_app_installed()
 
 
