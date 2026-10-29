@@ -190,7 +190,7 @@ def test_a_tab_id_is_taken_only_when_short_and_plain():
 
 def test_the_page_names_its_tab_on_ping_and_close():
     page = theme_server.page()
-    assert "post('/api/ping', { tab: TAB })" in page
+    assert "post('/api/ping', { tab: TAB }, true)" in page
     assert "body: JSON.stringify({ tab: TAB })" in page
     assert "ping();" in page
 

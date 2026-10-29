@@ -553,3 +553,101 @@ def test_the_notice_fades_only_for_those_who_allow_motion():
         r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\}\s*\}", css,
         re.S)
     assert reduced and "animation: none !important" in reduced.group(1)
+
+
+def test_a_preview_that_fails_with_the_builder_up_says_so():
+    """R3-S1: a preview failing on a full disk asked a ping, the ping came
+    back alive, and the bar went on saying the board showed each change.
+    The theme is still unsent, so choosing it again sends it again."""
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/preview', () => 'fail');
+    preset('Ocean'); await advance(300);
+    const said = $('status-text').textContent, bad = $('status').classList.contains('err');
+    answer('/api/preview', () => ({ status: 200, body: { ok: true } }));
+    preset('Ocean'); await advance(300);
+    return { said, bad, notice: $('notice').getAttribute('hidden') === null,
+             previews: requests.filter(q => q.path === '/api/preview').length,
+             now: $('status-text').textContent };
+    """, SAVED_DARK)
+    assert r["said"] == "The preview did not reach your board."
+    assert r["bad"] is True and r["notice"] is False
+    assert r["previews"] == 2
+    assert r["now"].startswith("Preview sent: Ocean")
+
+
+def test_a_change_made_while_save_is_out_stays_unsaved():
+    """R3-N2: savedKey took the page as it was when Save's reply came, so
+    a colour changed in between counted as saved, and was never offered."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    $('save').click(); await advance(10);
+    const sent = requests.filter(q => q.path === '/api/save')[0].body;
+    pick('c-high', '#ff0000'); await advance(10);
+    s.release({ status: 200, body: { ok: true } }); await advance(10);
+    $('notice-copy').click(); await flush();
+    """ + NOTICE.replace("return {", "return { sent, copied: clipboard.writes,"), SAVED_DARK)
+    assert r["sent"]["id"] != 12      # Ocean, a built-in, went to the server
+    assert r["why"] == "The theme was saved."
+    assert r["offer"] is True
+    assert r["described"] == _KEEP
+    assert len(r["copied"]) == 1 and r["copied"][0].startswith("blink theme set BT1.")
+
+
+def test_a_server_that_never_answers_ends_in_the_notice():
+    """R3-N3: a server that takes the connection and never answers held
+    every ping forever, so the tab looked live for good. Each ping is given
+    up on after 10 s, then its retry, then the notice."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    answer('/api/ping', () => hold().p);
+    await advance(29000);                       // the 20 s ping, 9 s in
+    const at29 = $('notice').getAttribute('hidden') !== null;
+    await advance(16000);                       // abort, retry, abort
+    const limited = requests.filter(q => q.path === '/api/ping').every(q => q.limited);
+    """ + NOTICE.replace("return {", "return { at29, limited,"), SAVED_DARK)
+    assert r["at29"] is True
+    assert r["limited"] is True
+    assert r["shown"] is True and r["why"] == "The builder stopped."
+    assert r["offer"] is True
+
+
+def test_a_save_is_not_given_up_on_by_the_request_limit():
+    """Save keeps its own deadline, and its answer still counts after it:
+    one stuck 15 s in the server still saved, in Chromium."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    $('save').click(); await advance(15000);
+    s.release({ status: 200, body: { ok: true } }); await advance(10);
+    """ + NOTICE, SAVED_DARK)
+    assert r["why"] == "The theme was saved."
+
+
+def test_saving_shows_until_a_late_answer():
+    """R3-N4: between Save's deadline and a late answer, Save was back on
+    and the bar said something else, as if the click had been lost."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    $('save').click(); await advance(10);
+    const click = $('status-text').textContent;
+    preset('Forest'); await advance(300);       // a preview says its piece
+    const preview = $('status-text').textContent;
+    await advance(10000);                       // past the deadline
+    const late = [$('status-text').textContent, $('save').disabled];
+    s.release({ status: 200, body: { ok: true } }); await advance(10);
+    return { click, preview, late, end: $('notice-why').textContent };
+    """, SAVED_DARK)
+    assert r["click"] == "Saving…"
+    assert r["preview"].startswith("Preview sent: Forest")
+    assert r["late"] == ["Saving…", False]
+    assert r["end"] == "The theme was saved."

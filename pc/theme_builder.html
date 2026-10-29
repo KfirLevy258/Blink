@@ -675,10 +675,22 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // Every write carries this tab's id, so the server can refuse one from a
   // tab a newer one has taken over (409, "newer") without waiting for that
   // tab's next ping.
-  function post(path, body) {
+  // limited: given up on, as a failed request, after REQUEST_MS. A server
+  // that takes the connection and never answers (a stopped process, whose
+  // backlog the kernel still accepts, or one paused in a debugger) held
+  // every ping forever, so no miss and no stop ever came and the tab
+  // looked live for good (review of fp/tab-notice r3, N3). 10 s is the
+  // server's own handler timeout. Save is not limited this way: it has its
+  // own deadline, and its answer still counts after that.
+  var REQUEST_MS = 10000;
+  function post(path, body, limited) {
+    var ctl = limited && typeof AbortController === 'function' ? new AbortController() : null;
+    var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
+    function over() { clearTimeout(limit); }
     return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Blink-Tab': TAB },
-                         body: body == null ? '' : JSON.stringify(body) })
-      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.status = r.status; return j; }); });
+                         body: body == null ? '' : JSON.stringify(body), signal: ctl ? ctl.signal : undefined })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { over(); j.status = r.status; return j; }); },
+            function (e) { over(); throw e; });
   }
   // The idle timeout, the daemon exiting and a lost session all look the
   // same from here, a ping refused or unanswered, so the notice says no
@@ -711,7 +723,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       // (review of fp/builder-look, N3).
       var t = wireTheme(), key = JSON.stringify(t), name = themeName();
       if (key === lastSent) return;
-      post('/api/preview', t).then(function (j) {
+      post('/api/preview', t, true).then(function (j) {
         if (j.status === 200) { lastSent = key; say('Preview sent: ' + name + ' is on your board until you save or cancel.', 'ok'); }
         else if (j.status === 409) superseded();
         else if (j.status === 400) say(j.error || 'The board would refuse that theme.', true);
@@ -719,10 +731,16 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
         // than taken as the builder gone: a preview is the request sent
         // most often, and one dropped on loopback retired a live tab
         // (review of fp/tab-notice r2, N1).
-        else ping();
-      }, function () { ping(); });
+        else ping(false, unsent);
+      }, function () { ping(false, unsent); });
     }, 250);
   }
+  // The builder answered the ping a failed preview asked, so it is up and
+  // the preview itself is what failed: a full disk or a read-only ~/.blink
+  // (the server has no message for it). The bar kept saying the board
+  // showed each change (review of fp/tab-notice r3, S1). lastSent stays as
+  // it was, so the next change is sent again.
+  function unsent() { say('The preview did not reach your board.', true); }
   function changed() { render(); schedulePreview(); }
 
   // ---------------------------------------------------------------- controls
@@ -840,7 +858,12 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // state, and the first answer cleared it under the second (review of
     // fp/tab-notice r2, N2). It also shows the click was taken.
     saving = true; save.disabled = true;
-    var deadline = setTimeout(function () { if (settled()) stopped(); else ping(); }, SAVE_WAIT_MS);
+    // Said from the click, and again at the deadline: from then Save is
+    // back on while a late answer may still come, and the bar read as if
+    // the click had been lost (review of fp/tab-notice r3, N4).
+    say('Saving…');
+    // An owed stop shown here is not replaced by a late 200 (r3, N1).
+    var deadline = setTimeout(function () { var owed = settled(); say('Saving…'); if (owed) stopped(); else ping(); }, SAVE_WAIT_MS);
     // Once per Save: by its answer, its failure or its deadline, whichever
     // comes first. A late answer still counts when it is a 200.
     var done = false;
@@ -850,9 +873,14 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       if (!finished) save.disabled = textContrast() < MIN_CONTRAST;
       var owed = stopOwed; stopOwed = false; return owed;
     }
-    post('/api/save', wireTheme()).then(function (j) {
+    // What was sent is what the server stored. savedKey took the page as
+    // it was when the reply came, so a colour changed while Save was out
+    // counted as saved and was never offered (review of fp/tab-notice r3,
+    // N2). Now it is a draft, and the notice offers it.
+    var sent = wireTheme();
+    post('/api/save', sent).then(function (j) {
       var owed = settled();
-      if (j.status === 200) { savedKey = JSON.stringify(wireTheme()); retire('The theme was saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', false); }
+      if (j.status === 200) { savedKey = JSON.stringify(sent); retire('The theme was saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', holdsDraft()); }
       else if (j.status === 409) superseded();
       // An answer at all means the builder was up to give it, so a stop
       // held back meanwhile is not taken on trust: the owner reads why the
@@ -866,7 +894,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   document.getElementById('cancel').addEventListener('click', function () {
     if (finished) return;
     clearTimeout(previewTimer);
-    post('/api/cancel').then(function (j) {
+    post('/api/cancel', null, true).then(function (j) {
       if (j.status === 409) return superseded();
       // No share code offered: Cancel is the owner throwing the changes away.
       retire('The builder was cancelled.', 'Cancelled. Your board is back on its saved theme. You can close this tab.', undefined, false);
@@ -911,10 +939,14 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // fp/tab-notice, N2). Three seconds: the builder is either up again by
   // then or gone.
   var RETRY_MS = 3000;
-  function ping(again) {
+  // alive: called when the builder answers and this tab is still its live
+  // one; see unsent().
+  function ping(again, alive) {
     if (finished) return;
-    function miss() { if (again) stopped(); else setTimeout(function () { ping(true); }, RETRY_MS); }
-    post('/api/ping', { tab: TAB }).then(function (j) { if (j.status !== 200) miss(); else if (j.newer) superseded(); }, miss);
+    function miss() { if (again) stopped(); else setTimeout(function () { ping(true, alive); }, RETRY_MS); }
+    post('/api/ping', { tab: TAB }, true).then(function (j) {
+      if (j.status !== 200) miss(); else if (j.newer) superseded(); else if (alive) alive();
+    }, miss);
   }
   setInterval(function () { ping(); }, 20000);
   ping();     // counted as a tab at once, not 20 s from now

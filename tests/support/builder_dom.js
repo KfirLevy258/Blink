@@ -138,7 +138,15 @@ function fetch_(path, opts) {
     if (x === 'hold') return new Promise(() => {});
     return Promise.resolve({ status: x.status, json: () => Promise.resolve(JSON.parse(JSON.stringify(x.body || {}))) });
   };
-  return a && typeof a.then === 'function' ? a.then(settle) : settle(a);
+  const reply = a && typeof a.then === 'function' ? a.then(settle) : settle(a);
+  // An aborted request rejects, as a browser's fetch does, whether or not
+  // its reply was ever coming. node's own AbortController drives it.
+  if (!opts.signal) return reply;
+  req.limited = true;
+  return new Promise((resolve, reject) => {
+    opts.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    reply.then(resolve, reject);
+  });
 }
 
 const win = { closed: 0, listeners: {}, close() { this.closed++; }, addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); } };
