@@ -193,8 +193,10 @@ REASONS = {
     "stopped, refused": (
         "", "answer('/api/ping', () => ({ status: 403, body: {} })); await advance(23100);",
         "The builder stopped."),
+    # A failed preview asks a ping, and the ping and its retry fail too.
     "stopped, preview unanswered": (
-        "answer('/api/preview', () => 'fail');", _OCEAN, "The builder stopped."),
+        "answer('/api/preview', () => 'fail'); answer('/api/ping', () => 'fail');",
+        "preset('Ocean'); await advance(3500);", "The builder stopped."),
 }
 
 
@@ -325,53 +327,134 @@ def test_the_dialog_is_described_by_only_what_it_shows(before, ending,
 
 
 def test_a_reply_landing_after_the_ending_does_not_replace_it():
-    """S1: a preview's reply held back past Save's, then failing, reaches
-    stopped() after the tab has already ended as saved. Only the guard in
-    retire() keeps the notice saying saved."""
+    """S1: a ping's reply held back past Save's, then saying a newer tab
+    took over, reaches superseded() after the tab has already ended as
+    saved. Only the guard in retire() keeps the notice saying saved."""
     r = builder_page.run("""
     await advance(10);
+    preset('Ocean'); await advance(300);
     const h = hold();
-    answer('/api/preview', () => h.p);
-    preset('Ocean'); await advance(300);       // preview sent, reply held
+    answer('/api/ping', () => h.p);
+    await advance(19700);                       // the ping is out, held
     $('save').click(); await advance(10);       // saved
-    h.release('fail'); await advance(10);       // then the preview fails
+    h.release({ status: 200, body: { ok: true, newer: true } }); await advance(10);
     """ + NOTICE, SAVED_DARK)
     assert r["why"] == "The theme was saved."
     assert r["offer"] is False
     assert r["status"].startswith("Saved: Ocean.")
 
 
+# Save held from t = 19610, just before the 20 s ping. The ping and its
+# retry 3 s later both miss, so a stop is owed while Save is still out,
+# well inside Save's 10 s deadline.
+_OWED = """
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    await advance(19300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    answer('/api/ping', () => 'fail');
+    $('save').click(); await advance(10);
+    await advance(3500);
+    const during = $('notice').getAttribute('hidden') !== null;
+"""
+
+
 def test_a_save_in_flight_outranks_a_failure_that_lands_first():
     """N3: a failure settling before Save's reply said "stopped" over a save
     that the server had stored."""
-    r = builder_page.run("""
-    await advance(10);
-    const p = hold(), s = hold();
-    answer('/api/preview', () => p.p);
-    answer('/api/save', () => s.p);
-    preset('Ocean'); await advance(300);
-    $('save').click(); await advance(10);
-    p.release('fail'); await advance(10);       // lands first
-    const during = $('notice').getAttribute('hidden') !== null;
+    r = builder_page.run(_OWED + """
     s.release({ status: 200, body: { ok: true } }); await advance(10);
     """ + NOTICE.replace("return {", "return { during,"), SAVED_DARK)
     assert r["during"] is True                  # no notice while Save is out
     assert r["why"] == "The theme was saved."
 
 
-def test_a_stop_held_for_a_save_that_failed_still_comes():
+def test_a_save_that_never_answers_lets_a_held_stop_through():
+    """R2-MUST: a Save stuck inside the server held every stop back for
+    good. After the server's own handler timeout the stop shows."""
+    r = builder_page.run(_OWED + """
+    const before = $('notice').getAttribute('hidden') !== null;
+    await advance(7000);                        // past t = 29610
+    """ + NOTICE.replace("return {", "return { during, before,"), SAVED_DARK)
+    assert r["during"] is True and r["before"] is True
+    assert r["shown"] is True and r["why"] == "The builder stopped."
+    assert r["offer"] is True
+
+
+def test_a_save_that_never_answers_with_nothing_owed_asks_a_ping():
     r = builder_page.run("""
     await advance(10);
-    const p = hold(), s = hold();
-    answer('/api/preview', () => p.p);
-    answer('/api/save', () => s.p);
     preset('Ocean'); await advance(300);
+    answer('/api/save', () => hold().p);
     $('save').click(); await advance(10);
-    p.release('fail'); await advance(10);
-    s.release({ status: 500, body: { error: 'Not saved: no.' } }); await advance(10);
-    """ + NOTICE, SAVED_DARK)
-    assert r["why"] == "The builder stopped."
-    assert r["offer"] is True
+    const pings = () => requests.filter(q => q.path === '/api/ping').length;
+    const at = pings();
+    await advance(10100);
+    return [at, pings(), $('save').disabled, $('notice').getAttribute('hidden') !== null];
+    """, SAVED_DARK)
+    assert r == [1, 2, False, True]   # asked; the builder is up; Save again
+
+
+def test_a_save_refused_with_an_error_says_why_and_keeps_the_tab():
+    """R2-S1: Save answering 500 proves the builder is up, but a stop owed
+    from before still won, sending the owner to restart a builder that was
+    running and never saying why the save failed."""
+    r = builder_page.run(_OWED + """
+    answer('/api/ping', () => ({ status: 200, body: { ok: true } }));
+    s.release({ status: 500, body: { error: 'Not saved: this computer could not write the theme file.' } });
+    await advance(10);
+    await advance(3500);
+    """ + NOTICE.replace("return {", "return { during, save: $('save').disabled,"), SAVED_DARK)
+    assert r["during"] is True
+    assert r["shown"] is False
+    assert r["status"] == "Not saved: this computer could not write the theme file."
+    assert r["save"] is False and "paste" in r["live"]
+
+
+def test_a_save_refused_with_an_error_then_a_dead_builder_stops():
+    r = builder_page.run(_OWED + """
+    s.release({ status: 500, body: { error: 'Not saved: no.' } });
+    await advance(10);
+    const said = $('status-text').textContent;
+    await advance(3500);                        // the ping and its retry miss
+    """ + NOTICE.replace("return {", "return { said,"), SAVED_DARK)
+    assert r["said"] == "Not saved: no."
+    assert r["shown"] is True and r["why"] == "The builder stopped."
+
+
+def test_one_failed_preview_asks_a_ping_rather_than_stopping():
+    """R2-N1: one dropped preview retired a live tab at once."""
+    r = builder_page.run("""
+    await advance(10);
+    let n = 0;
+    answer('/api/preview', () => (++n === 1 ? 'fail' : { status: 200, body: { ok: true } }));
+    preset('Ocean'); await advance(300);
+    const pings = requests.filter(q => q.path === '/api/ping').length;
+    preset('Forest'); await advance(300);
+    """ + NOTICE.replace("return {", "return { pings,"), SAVED_DARK)
+    assert r["pings"] == 2            # the one at load, and the one asked
+    assert r["shown"] is False
+    assert r["status"].startswith("Preview sent: Forest")
+
+
+def test_save_is_off_while_one_is_out():
+    """R2-N2: a second click shared the first's state."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    $('save').click(); await advance(10);
+    const during = $('save').disabled;
+    pick('c-high', '#ff0000'); await advance(10);   // a render: still off
+    const rendered = $('save').disabled;
+    $('save').click(); await advance(10);
+    const saves = requests.filter(q => q.path === '/api/save').length;
+    s.release({ status: 400, body: { error: 'Refused.' } }); await advance(10);
+    return [during, rendered, saves, $('save').disabled];
+    """, SAVED_DARK)
+    assert r == [True, True, 1, False]
 
 
 def test_one_missed_ping_is_asked_again_before_the_tab_stops():
@@ -409,10 +492,10 @@ def test_a_tab_back_from_the_back_forward_cache_asks_at_once():
     await advance(10);
     const count = () => requests.filter(q => q.path === '/api/ping').length;
     const at = count();
-    window.listeners.pageshow.forEach(f => f({ persisted: false }));
+    (window.listeners.pageshow || []).forEach(f => f({ persisted: false }));
     await flush();
     const fresh = count();
-    window.listeners.pageshow.forEach(f => f({ persisted: true }));
+    (window.listeners.pageshow || []).forEach(f => f({ persisted: true }));
     await flush();
     return [at, fresh, count()];
     """, SAVED_DARK)
