@@ -220,8 +220,11 @@ def test_every_short_name_fits_the_wire():
     json.dumps({"components": [{"name": ["Claude Code"],
                                 "status": "major_outage"}]}).encode(),
     # Deep enough to exhaust the parser's recursion: RecursionError, which
-    # is not a ValueError.
-    b"[" * 100_000,
+    # is not a ValueError. Named by hand: pytest puts the test id into the
+    # PYTEST_CURRENT_TEST environment variable, and a 100,000-bracket id is
+    # past Windows' 32,767-character limit, so on the Windows ARM64 VM
+    # (2026-10-30) this case errored in setup and teardown instead of running.
+    pytest.param(b"[" * 100_000, id="deep-nesting"),
     # None of ours at all: a page that renamed them says nothing about them.
     json.dumps({"components": [{"name": "Something Else",
                                 "status": "major_outage"}]}).encode(),
