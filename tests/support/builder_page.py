@@ -84,7 +84,12 @@ def run(scenario, answers=None, tmp=None):
         path = os.path.join(d, "case.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(case, f)
+        # UTF-8 both ways, said out loud. node writes a string to a pipe
+        # as UTF-8 whatever the console code page, but text=True alone
+        # decodes in the locale's encoding: cp1252 on the Windows runner,
+        # where the page's "Saving…" came back mangled (CI run
+        # 41093831896) while macOS and Linux, UTF-8 by default, passed.
         out = subprocess.run([node, DOM_JS, path], capture_output=True,
-                             text=True, timeout=60)
+                             encoding="utf-8", timeout=60)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
