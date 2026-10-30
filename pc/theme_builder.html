@@ -360,11 +360,12 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
 <!--
   Shown, and the page behind it made inert, when this tab stops being the
   live builder. Its words are written by the script with textContent; the
-  reason sentence is the only part that changes.
+  heading and the reason sentence change with the ending, so the heading
+  is empty here (see showNotice).
 -->
 <div class="notice" id="notice" hidden>
   <div class="notice-card" id="notice-dialog" role="dialog" aria-modal="true" aria-labelledby="notice-title" aria-describedby="notice-why notice-end" tabindex="-1">
-    <h2 id="notice-title">This tab is no longer active.</h2>
+    <h2 id="notice-title"></h2>
     <p id="notice-why"></p>
     <p id="notice-keep-text" hidden>Your changes here are not saved. Copy the share code to keep them.</p>
     <button type="button" class="btn primary" id="notice-copy" hidden><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
@@ -671,12 +672,19 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The notice, over a page made inert. A tab that had stopped said so
   // only in the status bar, over controls that looked live, and most
   // browsers refuse the window.close() meant to take it away (the owner's
-  // report, 2026-10-29). why: one sentence naming the reason. keep: the
-  // tab holds changes nobody saved, so the notice offers their share code.
+  // report, 2026-10-29). title: the heading, which names the ending. It
+  // was fixed in the markup as "This tab is no longer active." for every
+  // one, so a save that had worked (the daemon logged it, the board took
+  // the theme) put up a full-page notice the owner read as an error (the
+  // owner's manual test on a board, 2026-10-30). why: one sentence under
+  // it, saying what follows from the ending rather than the heading again.
+  // keep: the tab holds changes nobody saved, so the notice offers their
+  // share code.
   // Focus stays in the card: inert does that where the browser has it (all
   // current ones), and the two listeners after this where it does not.
   var notice = document.getElementById('notice'), dialog = document.getElementById('notice-dialog');
-  function showNotice(why, keep) {
+  function showNotice(title, why, keep) {
+    document.getElementById('notice-title').textContent = title;
     document.getElementById('notice-why').textContent = why;
     ['notice-keep-text', 'notice-copy'].forEach(function (id) {
       var e = document.getElementById(id);
@@ -704,11 +712,11 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The last word of a tab: the status bar's sentence, which stays under
   // the notice as the record, then the notice. Once only: a reply still in
   // flight after a save must not turn "saved" into "stopped".
-  function retire(why, text, kind, keep) {
+  function retire(title, why, text, kind, keep) {
     if (sealed) return false;
     gone();
     end(text, kind);
-    showNotice(why, keep);
+    showNotice(title, why, keep);
     return true;
   }
   // Changes here the board has not kept. Unlike unsaved(), a tab that never
@@ -753,7 +761,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var saving = false, stopOwed = false;
   function stopped() {
     if (saving) { stopOwed = true; return; }
-    retire('The builder stopped.', 'The builder has stopped. Run blink theme on your computer to start it again.', true, holdsDraft());
+    retire('The builder stopped.', 'Run blink theme on your computer to start it again.', 'The builder has stopped. Run blink theme on your computer to start it again.', true, holdsDraft());
   }
   function schedulePreview() {
     if (finished) return;
@@ -942,7 +950,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     var sent = wireTheme();
     post('/api/save', sent).then(function (j) {
       var owed = settled();
-      if (j.status === 200) { savedKey = JSON.stringify(sent); retire('The theme was saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', holdsDraft()); }
+      if (j.status === 200) { savedKey = JSON.stringify(sent); retire('Saved.', 'Your board keeps the theme you saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', holdsDraft()); }
       else if (j.status === 409) superseded();
       // An answer at all means the builder was up to give it, so a stop
       // held back meanwhile is not taken on trust: the owner reads why the
@@ -959,7 +967,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     post('/api/cancel', null, true).then(function (j) {
       if (j.status === 409) return superseded();
       // No share code offered: Cancel is the owner throwing the changes away.
-      retire('The builder was cancelled.', 'Cancelled. Your board is back on its saved theme. You can close this tab.', undefined, false);
+      retire('Cancelled.', 'Your board is back on its saved theme.', 'Cancelled. Your board is back on its saved theme. You can close this tab.', undefined, false);
     }, stopped);
   });
   // Closing the tab cancels. A reload also fires pagehide, and the server
@@ -990,7 +998,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // with nothing to copy is not told to copy (review of fp/tab-notice,
     // N1).
     var keep = unsaved(), draft = holdsDraft(), why = 'The builder continued in a newer tab.';
-    var ended = retire(why, draft ? 'Continued in a newer tab. Your changes are still here: copy the share code to take them across.'
+    var ended = retire('This tab is no longer active.', why, draft ? 'Continued in a newer tab. Your changes are still here: copy the share code to take them across.'
                                   : 'Continued in a newer tab. You can close this one.', undefined, draft);
     // The notice first: it is what stays when the browser refuses.
     if (ended && !keep) { try { window.close(); } catch (e) {} }
