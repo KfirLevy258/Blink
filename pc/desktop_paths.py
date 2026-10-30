@@ -286,7 +286,10 @@ def one_answer(answer=None):
     """Resolve once, and give every reader inside the block that folder.
 
     `answer` pins one already taken: status reuses read_desk's. A nested
-    hold keeps the outer answer. Per thread, so the serial thread's poll
+    hold keeps the outer answer, and that includes a pinned `answer` passed
+    inside an outer hold: the pin is ignored and the outer answer yielded.
+    Nothing does that today -- status pins only after read_desk's hold has
+    closed, and never inside a poll. Per thread, so the serial thread's poll
     never lends its answer to a call on another thread.
     """
     outer = getattr(_held, "answer", None)

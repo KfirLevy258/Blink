@@ -462,6 +462,41 @@ def test_status_names_the_folder_desk_read(win, tmp_path, capsys,
     assert "Roaming is newer" not in out
 
 
+def test_read_desk_resolves_the_folder_once(win, tmp_path, monkeypatch):
+    """Every Desktop reader in read_desk under its one hold: the cache,
+    Local Storage and the weekly sources. A reader moved outside the hold
+    resolves again, and could describe a different folder."""
+    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    # No cache, so read_desk also asks desktop_app_installed (Local
+    # Storage); a signed-in reading would skip that reader.
+    _marker(tmp_path, _roaming(tmp_path))
+    _mkdir(tmp_path, os.path.join(_target(tmp_path), "Local Storage",
+                                  "leveldb"))
+    calls = []
+    real = dp._resolve_windows
+    monkeypatch.setattr(dp, "_resolve_windows",
+                        lambda: calls.append(1) or real())
+    desk = cli.read_desk(version=(None, None))
+    assert desk.desktop_installed
+    assert len(calls) == 1
+
+
+def test_read_desk_resolves_once_with_a_reading(win, tmp_path, monkeypatch):
+    """The signed-in path: the cache, then the weekly sources."""
+    import time
+    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    _marker(tmp_path, _roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path), content=_dc.doc(
+        [_dc.sample(int(time.time() * 1000))]))
+    calls = []
+    real = dp._resolve_windows
+    monkeypatch.setattr(dp, "_resolve_windows",
+                        lambda: calls.append(1) or real())
+    desk = cli.read_desk(version=(None, None))
+    assert desk.desktop
+    assert len(calls) == 1
+
+
 # --- one answer per poll ----------------------------------------------------
 
 def test_one_answer_holds_and_releases(win, tmp_path):
@@ -588,3 +623,28 @@ def test_case_variant_markers_in_one_folder_are_one_name(win, monkeypatch):
     monkeypatch.setattr(dp.os, "listdir", lambda folder: [
         dp.MARKER_PREFIX + NAME, dp.MARKER_PREFIX + NAME.upper()])
     assert dp.marker_names("anywhere") == [NAME.upper()]
+
+
+def test_mixed_case_markers_in_one_folder_are_one_name(win, monkeypatch):
+    """Mixed case, so neither spelling is the other's .lower(): an
+    all-lower-case name let a case-sensitive dedupe pass (review round 2)."""
+    monkeypatch.setattr(dp.os, "listdir", lambda folder: [
+        dp.MARKER_PREFIX + "claude_Ab", dp.MARKER_PREFIX + "Claude_ab"])
+    assert dp.marker_names("anywhere") == ["Claude_ab"]
+
+
+def test_mixed_case_markers_across_folders_are_one_name(win, tmp_path,
+                                                        monkeypatch):
+    """One spelling in Roaming, another in the package's Roaming: the
+    targets are looked up for one name, not two."""
+    _marker(tmp_path, _roaming(tmp_path), "Claude_ab")
+    _marker(tmp_path, _package_roaming(tmp_path), "claude_Ab")
+    _cache(tmp_path, _target(tmp_path, "Claude_ab"))
+    asked = []
+    real = dp._candidate_targets
+    monkeypatch.setattr(dp, "_candidate_targets",
+                        lambda names, *a: asked.append(list(names))
+                        or real(names, *a))
+    assert dp.windows_data_dir() == (_target(tmp_path, "Claude_ab"),
+                                     "marker:Claude_ab")
+    assert asked == [["Claude_ab"]]
