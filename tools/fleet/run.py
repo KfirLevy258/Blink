@@ -1038,6 +1038,13 @@ class Bench:
         # Ctrl-C during the wait that follows would otherwise skip the
         # handback and leave the board in the VM. Found by a test.
         self.lent_to = None
+        # Handbacks a Ctrl-C cut short, as warnings owed to the result. A
+        # second Ctrl-C during disconnect() used to skip the "did not come
+        # back" warning with the rest of it, so a board that may still be
+        # in a guest left no word of it anywhere (review of fp/docs-pass,
+        # N1). release() hands these over, from the finally that always
+        # runs after the VMs.
+        self.unconfirmed = []
 
     # -- this Mac's installed service ------------------------------------
 
@@ -1077,13 +1084,19 @@ class Bench:
         return self.problems
 
     def release(self):
-        """Start this Mac's service again. Warnings, or []."""
+        """Start this Mac's service again. Warnings, or [].
+
+        Any interrupted handback's warning comes first, whether or not the
+        service was held.
+        """
+        owed, self.unconfirmed = self.unconfirmed, []
         if not self.held:
-            return []
+            return owed
         self.held = False
         problems, _ = self._service("start")
-        return [f"{p} The board on this Mac will stay dark until it is"
-                f" started (blink install puts it back)." for p in problems]
+        return owed + [f"{p} The board on this Mac will stay dark until it"
+                       f" is started (blink install puts it back)."
+                       for p in problems]
 
     # -- the board --------------------------------------------------------
 
@@ -1177,8 +1190,26 @@ class Bench:
         evidence is complete by now -- and a hard stop for every VM after
         it: bench.problems is set, so no later VM is handed a board this
         Mac has not got back, and each one fails saying so.
+
+        A Ctrl-C in here (a second one, usually: the first is what brought
+        the run here) ends the handback where it stands, and is let
+        through. It leaves a warning behind first, kept for release() and
+        printed now as well: on an interrupt main() re-raises out of its
+        finally, so the table that would show the warning never prints.
         """
         self.lent_to = None
+        try:
+            return self._take_back(name)
+        except KeyboardInterrupt:
+            said = (f"The handback from {name} was interrupted before this"
+                    f" Mac saw the board. It may still be in that VM:"
+                    f" disconnect it from its USB menu.")
+            self.unconfirmed.append(said)
+            print(f"\n{said}", file=sys.stderr)
+            raise
+
+    def _take_back(self, name):
+        """disconnect() without the interrupt handling. Warnings, or []."""
         prompt = (f"\n>>> Take the board back from {name}: in its UTM"
                   f" window, USB icon -> USB Serial -> Disconnect.\n"
                   f"    Press Enter once it is disconnected. ")

@@ -551,20 +551,22 @@ file order. (`--sequential` asks the same of any inventory.)
      be found" every time -- the run asks the operator to do it from the VM
      window (USB icon -> USB Serial -> Connect) and waits for Enter.
      `--handoff utmctl` never asks to connect; `--handoff operator` never
-     tries utmctl. (Either one may ask to *disconnect*, below, when the
-     board has not come home and somebody is at the keyboard.) With nobody
+     tries utmctl. (At a keyboard, operator mode always asks to
+     *disconnect*, below, and the other two ask only when the board has
+     not come home.) With nobody
      at the keyboard, a handoff utmctl could not do is a failed desk, not a
      wait. A Ctrl-C at the prompt stops the run; it does not move on to the
      next VM. It does not stop at once, though: it runs the whole handback
      below first -- up to 150 s of `utmctl usb disconnect` (not in
      operator mode), 90 s waiting for this Mac to see the board, and, at a
-     keyboard, a prompt to disconnect it by hand -- so allow it up to about
-     four minutes. A **second Ctrl-C** during that ends the handback where
-     it stands: nothing waits for the board, and nothing warns that it may
-     still be in the VM, so look at the VM's USB menu yourself. This Mac's
-     service is still started again, and the result is still written, as a
-     failed run; a third Ctrl-C skips the service start too, and `blink
-     install` puts it back.
+     keyboard, a prompt to disconnect it by hand followed by another 90 s
+     -- so allow it about six minutes, plus the prompt. A **second Ctrl-C**
+     during that ends the handback where it stands: nothing waits for the
+     board, and the run says, on the terminal and in the result's
+     warnings, that it may still be in that VM, so look at its USB menu.
+     This Mac's service is still started again, and the result is still
+     written, as a failed run; a third Ctrl-C skips the service start too,
+     and `blink install` puts it back.
    - **The guest has to see the board** before the agent starts:
      `python -m tests.fleet.board_present --usb 1A86:7523 --wait 90` runs
      in the VM, by USB id like the daemon. An agent started before the driver

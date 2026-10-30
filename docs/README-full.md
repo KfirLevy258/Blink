@@ -6,7 +6,7 @@
 Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 <p>
-  <img src="https://img.shields.io/badge/firmware-v1.4.0-D97757?style=flat-square&labelColor=171B22">
+  <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=flat-square&labelColor=171B22&color=D97757&label=release"></a>
   <img src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-8A8F98?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/RTOS-Zephyr-6FBF8B?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/updates-over--the--air-E8A05C?style=flat-square&labelColor=171B22">
@@ -516,7 +516,7 @@ The builder is a page served by the app to your own browser and nobody else:
 it listens on 127.0.0.1 only, on a link that works once, and fetches nothing
 from the internet. It opens on the theme your board has now, and until it
 has read that (usually at once) it says **Loading your current theme.** and
-its controls stay off, so nothing can be saved over a theme it has not
+its controls, all but **Cancel**, stay off, so nothing can be saved over a theme it has not
 seen. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
 without a change puts the board back on the theme it had. Press **Edit on

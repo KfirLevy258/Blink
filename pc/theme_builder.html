@@ -657,11 +657,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // has that button now, and everything behind it is still. The loading
   // dim's timer ends with the tab as well: a state refused in 10 ms used
   // to dim the controls behind the notice 140 ms later (review of
-  // fp/save-before-load r2, NICE 1).
+  // fp/save-before-load r2, NICE 1). A dim already on, and the busy mark,
+  // come off too: the tab is not loading any more, it has ended (review of
+  // fp/docs-pass, N8).
   function gone() {
     finished = true;
     clearTimeout(previewTimer);
     clearTimeout(waiting);
+    var main = document.querySelector('main');
+    main.classList.remove('waiting'); main.removeAttribute('aria-busy');
     document.querySelectorAll('header button, main button, main input').forEach(function (e) { e.disabled = true; });
   }
   // The notice, over a page made inert. A tab that had stopped said so

@@ -879,6 +879,23 @@ def test_a_tab_that_ends_before_the_dim_never_dims():
     assert r == {"shown": True, "dim": False}
 
 
+def test_a_tab_that_ends_after_the_dim_takes_it_off():
+    """Review of fp/docs-pass, N8: a state slower than 150 ms and then
+    refused left the dim on, and main marked busy, behind the notice. The
+    tab has ended rather than still loading, so gone() takes both off."""
+    r = builder_page.run("""
+    const main = document.querySelector('main');
+    await advance(200);
+    const before = [main.classList.contains('waiting'), main.getAttribute('aria-busy')];
+    held['/api/state'][0].release({ status: 500, body: {} }); await advance(10);
+    return { before, dim: main.classList.contains('waiting'),
+             busy: main.getAttribute('aria-busy'),
+             shown: $('notice').getAttribute('hidden') === null };
+    """, {"/api/state": "held"})
+    assert r == {"before": [True, "true"], "dim": False, "busy": None,
+                 "shown": True}
+
+
 def test_the_loading_dim_leaves_the_words_readable():
     """N2: opacity .6 on the whole studio put the dim text, the lede and
     each description, at 2.6 to 2.9:1 in both schemes. The dim is on the

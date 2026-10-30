@@ -635,13 +635,15 @@ def test_the_service_comes_back_when_the_run_is_interrupted(tmp_path):
 
 
 def test_a_second_ctrl_c_ends_the_handback_but_not_the_service_start(
-        tmp_path):
+        tmp_path, capsys):
     """What docs/fleet-testing.md says a second Ctrl-C does, pinned. The
     first, at the connect prompt, starts the handback (utmctl disconnect,
     then up to 90 s waiting for this Mac to see the board). A second one
-    during it ends the handback where it stands: no wait for the board, and
-    no warning saying it may still be in the VM. This Mac's service is
-    still started again, and the result is still written, failed."""
+    during it ends the handback where it stands: no wait for the board,
+    but a warning that it may still be in the VM, in the result and on
+    stderr -- it used to leave none (review of fp/docs-pass, N1). This
+    Mac's service is still started again, and the result is still written,
+    failed."""
     (tmp_path / "wd").mkdir()
     runner = VmRunner(local_workdir=tmp_path / "wd",
                       fail={"connect": _done(1, b"error"),
@@ -658,7 +660,9 @@ def test_a_second_ctrl_c_ends_the_handback_but_not_the_service_start(
     assert "disconnect" in runner.kinds and "here_wait" not in runner.kinds
     assert runner.kinds[-1] == "release"
     doc = json.loads(state.read_text(encoding="utf-8"))
-    assert doc["ok"] is False and doc["warnings"] == []
+    assert doc["ok"] is False and len(doc["warnings"]) == 1
+    assert "may still be in that VM" in doc["warnings"][0]
+    assert "may still be in that VM" in capsys.readouterr().err
 
 
 def test_a_vm_dry_run_contacts_nothing(tmp_path, capsys):
