@@ -216,15 +216,17 @@ implementation:
    macOS
    notarisation (needs an Apple developer account); a board
    id on the settings screen; the disclosure question on the five known
-   concerns -- four of which are WiFi-build only and are not compiled into
-   the shipping image, but whose code is public; and whether the Codex clip,
-   which mirrors the Claude clip and lands on a `>_` glyph on Codex blue,
-   trades on a second company's mark.
-2. **Merge and cut a release.** The published v0.6.0 predates the second page,
-   the swipe detector, Codex as a provider, the Codex edition, per-page
-   freshness, the burn rate and every fix from the August review.
-3. **Two things nobody has watched run**: Windows, and an M-series Mac. CI
-   exercises the installer on both; no human has seen the product work there.
+   concerns -- four of which were WiFi-build only, never compiled into a
+   shipping image, and whose code was deleted on 2026-10-27; and whether
+   the Codex clip, which mirrors the Claude clip and lands on a `>_` glyph
+   on Codex blue, trades on a second company's mark.
+2. **Merge and cut a release.** Done: 1.0.0 carried the second page, the
+   swipe detector, Codex as a provider, the Codex edition, per-page
+   freshness, the burn rate and every fix from the August review, and
+   releases have followed since (docs/releases/).
+3. **Two things nobody had watched run**: Windows, and an M-series Mac. Both
+   have now: a real Windows 10 PC on 2026-08-29 (docs/windows-check.md), and
+   an Apple-silicon Mac is the desk BLINK is developed and proved on.
 
 Smaller, still open:
 

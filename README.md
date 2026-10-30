@@ -175,7 +175,7 @@ BLINK never sees a credential and never sends your usage or your sessions anywhe
 - **[firmware/README.md](firmware/README.md)** - building, flashing and signing the firmware yourself
 - **[docs/multi-provider.md](docs/multi-provider.md)** - how two sources are merged into one reading
 - **[docs/windows-check.md](docs/windows-check.md)** - the ten-minute check a Windows release needs a person for
-- **[docs/fleet-testing.md](docs/fleet-testing.md)** - the one command that proves a release on three real desks and three real boards, and what a green run does and does not prove
+- **[docs/fleet-testing.md](docs/fleet-testing.md)** - the one command that proves a release on three real desks and three real boards, the narrower VM fleet that can stand in for them, and what a green run does and does not prove
 
 <div align="center">
 <sub>Firmware: Zephyr, C. App: Python, one binary.</sub>&nbsp;<br>

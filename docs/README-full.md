@@ -6,7 +6,7 @@
 Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 <p>
-  <img src="https://img.shields.io/badge/firmware-v0.6.0-D97757?style=flat-square&labelColor=171B22">
+  <img src="https://img.shields.io/badge/firmware-v1.4.0-D97757?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-8A8F98?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/RTOS-Zephyr-6FBF8B?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/updates-over--the--air-E8A05C?style=flat-square&labelColor=171B22">
@@ -101,7 +101,7 @@ Blink runs on the **ESP32-2432S028 "Cheap Yellow Display" (CYD)** - a popular al
 
 ### Enclosure
 
-A 3D-printable case gives the bare board a home on your desk. **[Download the CAD files](#)** *(coming soon)*
+A 3D-printable case gives the bare board a home on your desk. The files are on **[MakerWorld](https://makerworld.com/en/models/3294736-blink-claude-code-codex-usage-monitor)**.
 
 ## Connecting it
 
@@ -399,7 +399,7 @@ The things that were open before the first release, and how each was settled.
 | **What is supported** | Claude Code in a terminal or IDE extension: everything. Codex CLI: everything, on its own page. Claude Desktop alone: a five-hour countdown whenever Desktop is holding a reset time - it keeps one only while a window is running and clears it in between, so the countdown comes and goes and the fill rate covers the gaps - a weekly countdown once one has been learned, and the activity light only in Desktop's Code tab. claude.ai in a browser: nothing. |
 | **Automatic app updates** | **Off** for the first release. The signed manifest carries the switch (`daemon.auto`), so it can be turned on for a later release - and off again within minutes - without touching any installed machine. |
 | **What the app keeps on disk** | Exactly what the table under "What the installer changes" says, readable by the user alone, sent nowhere. |
-| **Not yet** | macOS notarisation (the binary is unsigned; Gatekeeper asks once). Apple Silicon runs the full suite and the real installer in CI, but has not yet been watched by a person. (Windows has: a real Windows 10 PC with a Hebrew user name, 2026-08-29 - which found four things that CI's ASCII English runners could not, fixed in 1.0.3 and 1.0.4.) Claude Desktop's cache location has been seen on macOS and on Windows 11 ARM64 (`%APPDATA%\Claude\`, written there despite the MSIX package, 2026-09-30). A later Store build, 3.6556.2.0 on Windows 11 (measured by Mor Gal, 2026-10-29), moves it to `%LOCALAPPDATA%\Claude-Data\<name>` and leaves a `.user-data-left.<name>` marker in `%APPDATA%\Claude\`; BLINK follows the marker, and `blink status` names the folder. On Linux (`~/.config/Claude/`) it is the Electron convention, unconfirmed because there is no Linux Desktop to run. |
+| **Not yet** | macOS notarisation (the binary is unsigned; Gatekeeper asks once). Apple silicon runs the full suite and the real installer in CI, and is the desk BLINK is developed and released on (the fleet's `local-mac`). (Windows has been watched too: a real Windows 10 PC with a Hebrew user name, 2026-08-29 - which found four things that CI's ASCII English runners could not, fixed in 1.0.3 and 1.0.4.) Claude Desktop's cache location has been seen on macOS and on Windows 11 ARM64 (`%APPDATA%\Claude\`, written there despite the MSIX package, 2026-09-30). A later Store build, 3.6556.2.0 on Windows 11 (measured by Mor Gal, 2026-10-29), moves it to `%LOCALAPPDATA%\Claude-Data\<name>` and leaves a `.user-data-left.<name>` marker in `%APPDATA%\Claude\`; BLINK follows the marker, and `blink status` names the folder. On Linux (`~/.config/Claude/`) it is the Electron convention, unconfirmed because there is no Linux Desktop to run. |
 
 ## Security &amp; privacy
 
@@ -514,7 +514,10 @@ Running that yourself does the same thing:
 
 The builder is a page served by the app to your own browser and nobody else:
 it listens on 127.0.0.1 only, on a link that works once, and fetches nothing
-from the internet. Every change shows on the board as you make it, as a
+from the internet. It opens on the theme your board has now, and until it
+has read that (usually at once) it says **Loading your current theme.** and
+its controls stay off, so nothing can be saved over a theme it has not
+seen. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
 without a change puts the board back on the theme it had. Press **Edit on
 computer** again at any time: with the builder still open it opens it again

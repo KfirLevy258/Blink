@@ -5,7 +5,9 @@ board on a USB cable, an account signed in, or a login service that has been
 running since somebody's last reboot. This suite does: it drives the **real
 daemon** against a **real board** on three desks -- a Mac, an Ubuntu machine
 and a Windows 10 machine -- and `tools/release.sh` refuses to build a release
-until it has.
+until it has. When those desks are out of reach, a narrower run on this Mac
+and its two UTM VMs, with one board handed round, can stand in, and the gate
+keeps the two apart ([The VM fleet](#the-vm-fleet)).
 
 One run stops the installed service on three machines and takes their boards
 for the best part of ten minutes. That is the cost, and it buys the only
@@ -548,10 +550,21 @@ file order. (`--sequential` asks the same of any inventory.)
      When utmctl cannot -- and on 2026-10-19 it answered "The device cannot
      be found" every time -- the run asks the operator to do it from the VM
      window (USB icon -> USB Serial -> Connect) and waits for Enter.
-     `--handoff utmctl` never asks; `--handoff operator` never tries utmctl.
-     With nobody at the keyboard, a handoff utmctl could not do is a failed
-     desk, not a wait. A Ctrl-C at the prompt stops the run; it does not
-     move on to the next VM.
+     `--handoff utmctl` never asks to connect; `--handoff operator` never
+     tries utmctl. (Either one may ask to *disconnect*, below, when the
+     board has not come home and somebody is at the keyboard.) With nobody
+     at the keyboard, a handoff utmctl could not do is a failed desk, not a
+     wait. A Ctrl-C at the prompt stops the run; it does not move on to the
+     next VM. It does not stop at once, though: it runs the whole handback
+     below first -- up to 150 s of `utmctl usb disconnect` (not in
+     operator mode), 90 s waiting for this Mac to see the board, and, at a
+     keyboard, a prompt to disconnect it by hand -- so allow it up to about
+     four minutes. A **second Ctrl-C** during that ends the handback where
+     it stands: nothing waits for the board, and nothing warns that it may
+     still be in the VM, so look at the VM's USB menu yourself. This Mac's
+     service is still started again, and the result is still written, as a
+     failed run; a third Ctrl-C skips the service start too, and `blink
+     install` puts it back.
    - **The guest has to see the board** before the agent starts:
      `python -m tests.fleet.board_present --usb 1A86:7523 --wait 90` runs
      in the VM, by USB id like the daemon. An agent started before the driver
