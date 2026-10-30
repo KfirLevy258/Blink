@@ -709,8 +709,8 @@ def test_a_state_that_never_answers_ends_in_the_notice():
     const limited = requests.filter(q => q.path === '/api/state').every(q => q.limited);
     """ + NOTICE.replace("return {", "return { at9, limited,"),
                          {"/api/state": "hold"})
-    assert r["at9"] == [True, "Loading your current theme. Changes and Save wait"
-                       " until it is here."]
+    assert r["at9"] == [True, "Loading your current theme. You can make"
+                       " changes once it's here."]
     assert r["limited"] is True
     assert r["shown"] is True and r["why"] == "The builder stopped."
     assert r["offer"] is False      # it never had the owner's theme
@@ -728,7 +728,7 @@ def test_a_state_that_never_answers_ends_in_the_notice():
 
 _RELEASE_SYNTHWAVE = ("held['/api/state'][0].release({ status: 200, body: "
                       "{ saved: { id: 5 }, draft: null } }); await advance(10);")
-_FORM = "document.querySelectorAll('main button, main input')"
+_FORM = "document.querySelectorAll('main button, main input, #copy-code')"
 
 
 def test_save_is_off_until_the_state_answers():
@@ -810,3 +810,69 @@ def test_a_tab_taken_over_while_its_state_was_out_stays_off():
     assert r["early"] is True
     assert r["why"] == "The builder continued in a newer tab."
     assert r["live"] == []
+
+
+def test_a_handler_dispatched_past_disabled_before_the_state_does_nothing():
+    """Review of fp/save-before-load, N1 and S1: every control that
+    changes the theme or copies it is fired by script before the state,
+    past its disabled, the way an extension could. With saved: null the
+    state leaves the page's colours as they are, so any change that got in
+    would survive it and be what Save writes (probe P7), and a share code
+    loaded then kept its "Loaded." over a page that no longer showed it
+    (P6). Each handler is fired alone in effect: all the others are
+    guarded, so any one unguarded changes what Save sends, the message
+    under the share box, or the clipboard."""
+    r = builder_page.run(f"""
+    await advance(10);
+    const by = (sel, key, v) => document.querySelectorAll(sel).find(b => b.dataset[key] === v);
+    document.querySelectorAll('#presets button').find(b => b.querySelector('.pn').textContent === 'Ocean').fire('click');
+    $('c-low').value = '#123456'; $('c-low').fire('input');
+    $('t-mid').value = '#654321'; $('t-mid').fire('input');
+    by('[data-m]', 'm', 'gauge').fire('click');
+    by('[data-w]', 'w', '22').fire('click');
+    by('[data-e]', 'e', 'flat').fire('click');
+    by('[data-d]', 'd', 'off').fire('click');
+    $('paste').value = '{_code(["4387df", "0da243", "0da243", "ba8107", "ff1900"], text="e6e8eb", bg="0e1116")}';
+    $('load').fire('click');
+    $('copy-cmd').fire('click'); $('copy-code').fire('click');
+    await advance(300);
+    held['/api/state'][0].release({{ status: 200, body: {{ saved: null, draft: null }} }}); await advance(10);
+    const paste = $('m-paste').textContent, copied = clipboard.writes.slice();
+    $('save').click(); await advance(10);
+    return {{ paste, copied, sent: requests.filter(q => q.path === '/api/save').map(q => q.body),
+             previews: requests.filter(q => q.path === '/api/preview').length }};
+    """, {"/api/state": "held"})
+    assert r["sent"] == [{"id": 0}]    # the page's default, untouched
+    assert r["paste"] == ""
+    assert r["copied"] == []
+    assert r["previews"] == 0
+
+
+def test_the_controls_dim_only_once_a_state_is_slow():
+    """N3: dimmed from the first frame, a state answered on loopback in a
+    few milliseconds flashed the controls dim. They dim at 150 ms, and
+    come back when the state lands."""
+    r = builder_page.run("""
+    const cls = () => document.querySelector('main').classList.contains('waiting');
+    await advance(100);
+    const at100 = cls();
+    await advance(100);
+    const at200 = cls();
+    """ + _RELEASE_SYNTHWAVE + """
+    return { at100, at200, after: cls() };
+    """, {"/api/state": "held"})
+    assert r == {"at100": False, "at200": True, "after": False}
+
+
+def test_the_loading_dim_leaves_the_words_readable():
+    """N2: opacity .6 on the whole studio put the dim text, the lede and
+    each description, at 2.6 to 2.9:1 in both schemes. The dim is on the
+    controls alone, and never on .btn, which has its own disabled look."""
+    page = theme_server.page()
+    css = page[page.index("<style>"):page.index("</style>")]
+    busy = [(sels, d) for sels, d in _rules(css)
+            if any("waiting" in s or "aria-busy" in s for s in sels)]
+    assert busy
+    for sels, d in busy:
+        for s in sels:
+            assert re.search(r"(button:not\(\.btn\)|input)$", s), s

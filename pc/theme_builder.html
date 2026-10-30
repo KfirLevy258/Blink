@@ -79,10 +79,18 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
 .btn.ghost { background: transparent; }
 .btn.small { padding: 0 12px; font-size: 14px; }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
-/* Until /api/state answers, the form is off (see "loaded" in the script);
-   a preset or a segment button has no disabled look of its own, so the
-   whole studio says it is waiting. */
-.studio[aria-busy="true"] { opacity: .6; }
+/* Until /api/state answers, the form is off (see "loaded" in the script),
+   and a preset or a segment button has no disabled look of its own, so the
+   controls dim -- the controls only. The whole studio at .6 put the dim
+   text (the lede, each .desc, the slot hints) at 2.6 to 2.9:1, from 5.5 to
+   7.0:1, in both schemes (review of fp/save-before-load, N2); the words
+   that say what the page is for stay as they are. .btn has its own
+   disabled look and is left to it. "waiting" comes 150 ms after the page
+   runs and not with it, so a state answered on loopback in a few
+   milliseconds does not flash the controls dim for a frame (N3). A class
+   set late and not an animation delay: the notice's fade is the one
+   motion here, and reduced motion takes every animation away. */
+.studio.waiting button:not(.btn), .studio.waiting input { opacity: .5; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* The status says how it went in its icon and colour as well as its words. */
@@ -267,7 +275,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     <svg class="icon s-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/></svg>
     <svg class="icon s-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>
     <svg class="icon s-err" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
-    <span id="status-text">Loading your current theme. Changes and Save wait until it is here.</span>
+    <span id="status-text">Loading your current theme. You can make changes once it's here.</span>
   </div>
   <div class="actions">
     <button type="button" class="btn primary" id="save" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Save to board</span></button>
@@ -409,6 +417,12 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // the state landed, under a bar that then said "This is the theme your
   // board has now" while the board showed the edit's preview. A state that
   // fails or never answers ends the tab, so loaded stays false for good.
+  // Each handler that changes the theme or copies it asks loaded itself,
+  // as Save's does, and does not lean on disabled alone: a click or input
+  // dispatched by script or an extension reaches a handler whatever
+  // disabled says. One on a hex box before a state of saved: null outlived
+  // the state, which leaves the page's colours as they are, and became
+  // what Save wrote (review of fp/save-before-load, N1, probe P7).
   // The server takes no part: GET /api/state carries no tab id, and a save
   // of any valid theme is one the owner may mean, so only the page knows
   // whether it read the theme it is about to write over.
@@ -734,7 +748,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     retire('The builder stopped.', 'The builder has stopped. Run blink theme on your computer to start it again.', true, holdsDraft());
   }
   function schedulePreview() {
-    if (finished || !loaded) return;
+    if (finished) return;
     clearTimeout(previewTimer);
     previewTimer = setTimeout(function () {
       if (finished) return;
@@ -788,7 +802,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     ['text', 'low', 'mid', 'high'].forEach(function (k) { var d = document.createElement('i'); d.className = 'sw-' + k; d.style.background = '#' + p[k]; sw.appendChild(d); });
     var n = document.createElement('span'); n.className = 'pn'; n.textContent = name;
     b.appendChild(sw); b.appendChild(n);
-    b.addEventListener('click', function () { Object.assign(st, PRESETS[i][1]); st.preset = i; fromOutside(); fieldSay('paste', null); changed(); });
+    b.addEventListener('click', function () { if (!loaded) return; Object.assign(st, PRESETS[i][1]); st.preset = i; fromOutside(); fieldSay('paste', null); changed(); });
     pre.appendChild(b);
   });
   var slots = document.getElementById('slots');
@@ -803,10 +817,11 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // word, and a screen reader heard it twice (review, S5).
     var m = document.createElement('p'); m.className = 'fmsg'; m.id = 'm-' + s.k; if (s.k !== 'bg') m.setAttribute('aria-live', 'polite');
     row.appendChild(c); row.appendChild(l); row.appendChild(t); row.appendChild(m); slots.appendChild(row);
-    c.addEventListener('input', function (e) { st[s.k] = e.target.value.slice(1).toUpperCase(); delete bad[s.k]; markCustom(); changed(); });
+    c.addEventListener('input', function (e) { if (!loaded) return; st[s.k] = e.target.value.slice(1).toUpperCase(); delete bad[s.k]; markCustom(); changed(); });
     // Half-typed is not wrong, so a box is only told off once it has its
     // seven characters, or when it is left with something it cannot use.
     function typed() {
+      if (!loaded) return;
       var v = t.value.replace('#', '');
       if (HEX.test(v)) { delete bad[s.k]; st[s.k] = v.toUpperCase(); markCustom(); changed(); return; }
       if (t.value.length >= 7) { bad[s.k] = 1; fieldSay(s.k, ['bad', 'Use six hex digits, 0 to 9 and A to F.']); }
@@ -815,10 +830,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     t.addEventListener('input', function () { typed(); });
     t.addEventListener('blur', function () { if (bad[s.k]) return; if (!HEX.test(t.value.replace('#', ''))) { t.value = '#' + st[s.k]; fieldSay(s.k, null); render(); } });
   });
-  document.querySelectorAll('[data-m]').forEach(function (b) { b.addEventListener('click', function () { st.mode = b.dataset.m; markCustom(); changed(); }); });
-  document.querySelectorAll('[data-w]').forEach(function (b) { b.addEventListener('click', function () { st.w = +b.dataset.w; markCustom(); changed(); }); });
-  document.querySelectorAll('[data-e]').forEach(function (b) { b.addEventListener('click', function () { st.e = b.dataset.e; markCustom(); changed(); }); });
-  document.querySelectorAll('[data-d]').forEach(function (b) { b.addEventListener('click', function () { st.d = b.dataset.d; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-m]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.mode = b.dataset.m; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-w]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.w = +b.dataset.w; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-e]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.e = b.dataset.e; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-d]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.d = b.dataset.d; markCustom(); changed(); }); });
   // The screen and the two sliders only move the drawing here; they are not
   // part of the theme and send nothing.
   document.querySelectorAll('[data-v]').forEach(function (b) { b.addEventListener('click', function () { st.view = b.dataset.v; render(); }); });
@@ -835,8 +850,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     function fallback() { if (shown) shown(); var r = document.createRange(); r.selectNodeContents(document.getElementById(id)); var s = getSelection(); s.removeAllRanges(); s.addRange(r); lbl.textContent = 'Selected'; }
     try { navigator.clipboard.writeText(t).then(ok, fallback); } catch (e) { fallback(); }
   }
-  document.getElementById('copy-cmd').addEventListener('click', function () { copy('cmd', 'copy-cmd'); });
-  document.getElementById('copy-code').addEventListener('click', function () { copy('code', 'copy-code'); });
+  // Not before the state: both copy the page's own default, which is no
+  // theme of the owner's (review of fp/save-before-load, S1).
+  document.getElementById('copy-cmd').addEventListener('click', function () { if (loaded) copy('cmd', 'copy-cmd'); });
+  document.getElementById('copy-code').addEventListener('click', function () { if (loaded) copy('code', 'copy-code'); });
   // The notice's copy: the same text from the same box. When the clipboard
   // is refused, the code is shown and selected in the card instead, since
   // the box it comes from is behind the notice, and inert.
@@ -857,6 +874,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   document.getElementById('paste').addEventListener('input', function () { fieldSay('paste', null); });
   document.getElementById('paste').addEventListener('keydown', function (e) { if (e.key === 'Enter') document.getElementById('load').click(); });
   document.getElementById('load').addEventListener('click', function () {
+    if (!loaded) return;
     var code = document.getElementById('paste').value.trim().replace(/^blink theme set\s+/, ''), f = null;
     // Said as what is wrong with it. "They start BT1." was the only answer,
     // and it was also the answer to a code that did start BT1. but had
@@ -1022,10 +1040,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // board has, the page has nothing true to start from, which is why a
   // failed /api/state already ended the tab; one that never answers now
   // ends it the same way, after REQUEST_MS, the same 10 s the posts get.
-  // The form is off until then; see loaded. Cancel stays on: it writes
-  // nothing of its own, only puts the board back on the theme it keeps.
-  var FORM = 'main button, main input';
+  // The form is off until then; see loaded. Copy share code with it, which
+  // copied "blink theme set dark", a theme the page had never read, under
+  // a bar asking the owner to wait (review of fp/save-before-load, S1).
+  // Cancel stays on: it writes nothing of its own, only puts the board
+  // back on the theme it keeps.
+  var FORM = 'main button, main input, #copy-code';
   document.querySelectorAll(FORM).forEach(function (e) { e.disabled = true; });
+  var studio = document.querySelector('main');
+  var waiting = setTimeout(function () { if (!loaded) studio.classList.add('waiting'); }, 150);
   var stateCtl = typeof AbortController === 'function' ? new AbortController() : null;
   var stateLimit = stateCtl ? setTimeout(function () { stateCtl.abort(); }, REQUEST_MS) : null;
   fetch('/api/state', { credentials: 'same-origin', signal: stateCtl ? stateCtl.signal : undefined }).then(function (r) {
@@ -1045,7 +1068,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // On only while the tab is live: a tab taken over or stopped while the
     // state was on its way has its form off for good.
     loaded = true;
-    if (!finished) { document.querySelectorAll(FORM).forEach(function (e) { e.disabled = false; }); document.querySelector('main').removeAttribute('aria-busy'); }
+    clearTimeout(waiting); studio.classList.remove('waiting');
+    if (!finished) { document.querySelectorAll(FORM).forEach(function (e) { e.disabled = false; }); studio.removeAttribute('aria-busy'); }
     say(draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
         : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
     render();
