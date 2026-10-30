@@ -775,18 +775,30 @@ def test_close_does_not_wait_on_a_browser_that_is_still_opening(home):
     worker.join(5)
 
 
-def test_starting_a_builder_asks_dns_nothing(home, monkeypatch):
-    """http.server's server_bind does a reverse lookup (socket.getfqdn) for
-    a name nothing here uses, inside launch() with the Launcher's lock
-    held; on macOS CI the first builder a child started never got past it
-    in 10 s. Any lookup now fails the test rather than going unnoticed."""
+def test_starting_a_builder_makes_no_reverse_lookup(home, monkeypatch):
+    """http.server's server_bind does a reverse lookup (socket.getfqdn, by
+    way of gethostbyaddr) for a name nothing here uses, inside launch()
+    with the Launcher's lock held. It is the likeliest reason a child's
+    builder never got past launch() in 10 s on one macOS runner image --
+    inferred, not measured there; see _HTTPServer.server_bind.
+
+    Caught: getfqdn, gethostbyaddr, getnameinfo and gethostbyname, the
+    socket module's name lookups other than getaddrinfo, which conftest.py
+    already polices. A lookup made some other way would get past this."""
     def lookup(*a, **k):
-        raise AssertionError(f"a DNS lookup while starting: {a}")
-    monkeypatch.setattr(socket, "getfqdn", lookup)
-    monkeypatch.setattr(socket, "gethostbyaddr", lookup)
+        raise AssertionError(f"a name lookup while starting: {a}")
+    for name in ("getfqdn", "gethostbyaddr", "getnameinfo",
+                 "gethostbyname"):
+        monkeypatch.setattr(socket, name, lookup)
     s = theme_server.BuilderServer(home, tick_s=3600)
+    # Started, as production always does before finish(): shutdown() on a
+    # server whose serve_forever never ran waits for ever, which left a
+    # stuck stop thread and a listening port behind for the whole session.
+    s.start()
     try:
         assert s.address == ("127.0.0.1", s.port) and s.port > 0
         assert s.new_link().startswith(f"http://127.0.0.1:{s.port}/")
     finally:
         s.finish("test over", cancel=False)
+        s.wait(5)
+    assert s._done.is_set()

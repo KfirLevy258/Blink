@@ -450,17 +450,26 @@ class _HTTPServer(http.server.ThreadingHTTPServer):
     def server_bind(self):
         # http.server's own server_bind asks socket.getfqdn() for a name to
         # keep in server_name, which nothing here reads -- every link is
-        # http://127.0.0.1:<port>. getfqdn is a reverse DNS lookup, and on a
-        # Mac it can stall for seconds where the resolver is slow to answer
-        # (bpo-6085; GitHub's macOS runners, actions/runner-images#8649).
-        # It runs inside launch() with the Launcher's lock held. The child
-        # in tests/pc/test_daemon_exit.py that starts a builder never got
-        # past launch() within 10 s on macos-latest, in two runs out of two
-        # (41093831896, 41094198669), while the in-process servers later in
-        # the same job started at once. The same job's batch holding the
-        # one status-page test with a stock http.server ran ~35 s longer
-        # than on Ubuntu. A first, uncached lookup stalling about 30 s is
-        # the likeliest reading, though nobody has timed one on the runner.
+        # http://127.0.0.1:<port>. getfqdn is a reverse lookup through
+        # gethostbyaddr, which goes to the system resolver (the old value on
+        # a stock Mac was '1.0.0.127.in-addr.arpa'), and it ran inside
+        # launch() with the Launcher's lock held, while the board counts down
+        # 5 s to its own "Run blink theme" fallback (bridge.py).
+        #
+        # Why it went, and how sure that is: the child in
+        # tests/pc/test_daemon_exit.py that starts a builder never got past
+        # launch() within 10 s on macos-latest, in both runs of fp/ci-fixes'
+        # base (41093831896, 41094198669), both on runner image
+        # macos-26-arm64 20261026.0455.2. The macOS system-Python job runs
+        # the same test with the same lookup and passed both times, on the
+        # older images 20261013.0424.1 and 20261021.0445.8. The child does
+        # the job's first reverse lookup of 127.0.0.1; the second, in a
+        # status-page test with a stock http.server, sat in a progress line
+        # ~35 s slower than Ubuntu's, and later ones were fast. A resolver
+        # made to take 30 s reproduces the CI failure exactly, and this bind
+        # passes under it. That makes a slow first lookup on that image the
+        # likeliest cause, but it is inferred, not measured on the runner: a
+        # stall on the job's first listen() would leave the same timings.
         # The lookup buys nothing either way, so it is skipped: bind, and
         # name the address as given.
         socketserver.TCPServer.server_bind(self)
