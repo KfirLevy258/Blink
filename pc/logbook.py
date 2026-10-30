@@ -446,32 +446,6 @@ class RepeatsBy:
         return f"[bridge] {n} unchanged {self._label} not logged"
 
 
-def brief(m):
-    """The usage frame, in the width it deserves.
-
-    A frame is 279 bytes as a dict repr and it goes out every poll. Once the
-    heartbeat stopped being logged it was 48% of the whole file, and almost
-    all of that is field names re-printed every minute -- the payload is
-    twelve short values.
-
-    Nothing parses this log (checked: no test, doc or tool greps the arrow
-    lines), and `blink status --wire` prints the full frame on demand for
-    anyone who wants every field. So the log gets the values.
-
-    Returns None for anything that is not a usage frame, so the caller falls
-    back to the full repr -- an unexpected message is exactly when you want
-    every field, and those are rare by definition.
-    """
-    if m.get("t") != "usage":
-        return None
-    return ("usage %s/%s %s%%/%ss %s%%/%ss %s n=%s/%s age=%ss%s" % (
-        m.get("provider", "?"), m.get("src", "?"),
-        m.get("session_pct"), m.get("session_resets_in_s"),
-        m.get("weekly_pct"), m.get("weekly_resets_in_s"),
-        m.get("state", "?"), m.get("n_sess"), m.get("n_run"),
-        m.get("age_s"), " STALE" if m.get("stale") else ""))
-
-
 def _is_the_same_file(path, stream) -> bool:
     """Is `stream` actually writing to `path`?
 

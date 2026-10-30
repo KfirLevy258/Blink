@@ -128,8 +128,13 @@ class IngestionBus:
             return False
         known = {p.get_provider_id() for p in self._providers}
         if provider not in known:
-            print(f"[ingest] board asked for provider {provider!r}, which is"
-                  f" not reporting; keeping {self._preferred!r}",
+            # Not named: an unknown name is by definition one this daemon
+            # did not produce, so it is a raw value off the serial buffer
+            # (the board's `pref`), and CLAUDE.md keeps those out of every
+            # log line. This printed it with !r until 2026-10-30. What we
+            # keep is ours, so that one is still said.
+            print(f"[ingest] the board asked for a provider that is not"
+                  f" reporting; keeping {self._preferred!r}",
                   file=sys.stderr)
             return False
         self._preferred = provider

@@ -1150,19 +1150,23 @@ def main(argv=None):
             # payload of the whole product, so it is never dropped for being
             # routine -- only for being the same thing this log already said
             # a minute ago, which on an idle desk it is 1439 times a day.
+            #
+            # By type only: `-> usage`, never its fields. This printed the
+            # whole message (and the usage frame as a 60-byte digest of its
+            # numbers), which put the board's id, the session labels, the
+            # theme colours and every usage figure into the file a customer
+            # emails us -- the CLAUDE.md serial-buffer rule, broken on every
+            # line. `blink status --wire` still shows a frame whole, on the
+            # customer's own screen, when it is asked to. The suppression
+            # still compares the fields, so a `-> usage` line still means
+            # the reading moved.
             kind = m.get("t")
             if kind in _REPEATED:
                 if _REPEATED[kind].worth_logging(m):
-                    # Compact for the frame that repeats all day: 279 bytes
-                    # of dict repr against 60 of values, and once the
-                    # heartbeat was gone this was 48% of the file. Anything
-                    # logbook.brief does not recognise falls through to the
-                    # full repr, because an unexpected message is exactly
-                    # when every field is wanted.
-                    short = logbook.brief(m)
-                    print(f"[bridge] -> {short or m}", file=sys.stderr)
+                    print(f"[bridge] -> {protocol.log_name(m)}",
+                          file=sys.stderr)
             elif kind not in ("ota_data", "pong"):
-                print(f"[bridge] -> {m}", file=sys.stderr)
+                print(f"[bridge] -> {protocol.log_name(m)}", file=sys.stderr)
             # encode_CHECKED. This is the only writer, and it used to call
             # plain encode() -- so protocol.encode_checked, written precisely
             # to guard the board's 512-byte cliff and documented as the thing
@@ -1322,10 +1326,19 @@ def main(argv=None):
                         # The keepalive is counted, not printed. At one ping
                         # every 10 s it was 60% of the log by line count and
                         # says nothing the next real message does not.
+                        #
+                        # Everything else by type alone, `<- hello`. This
+                        # printed the decoded message whole -- the board's id,
+                        # its firmware version, the theme it reports -- into
+                        # bridge.log, which is a value off the serial buffer
+                        # in the one file we ask customers to send (CLAUDE.md).
+                        # A t outside protocol.WIRE_TYPES is logged as a fixed
+                        # placeholder, because t is off the wire too.
                         if msg.get("t") == "ping":
                             heartbeat.beat()
                         else:
-                            print(f"[bridge] <- {msg}", file=sys.stderr)
+                            print(f"[bridge] <- {protocol.log_name(msg)}",
+                                  file=sys.stderr)
                         dispatch(msg)
                         # A message of ours off this port is the only
                         # positive identification there is. Write it down:

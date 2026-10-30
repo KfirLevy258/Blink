@@ -605,3 +605,8 @@ The daemon does not write a line for every message it sends. The board's
 repeats what the previous one said is held back; both are reported as a count
 every ten minutes. So a quiet stretch in the log means a quiet desk, not a
 daemon that stopped.
+
+A message to or from the board is logged by its type alone - `-> usage`,
+`<- hello` - never by what it carries: no usage figures, project names,
+theme colours or the board's id. `blink status --wire` shows the next usage
+message in full on your own screen when you want to see it.

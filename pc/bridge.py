@@ -43,6 +43,19 @@ def _local_wall():
     return int(now.timestamp()), int(now.utcoffset().total_seconds() // 60)
 
 
+def _version_for_log(fw) -> str:
+    """A board's firmware version as a log line may say it: rebuilt from the
+    integers protocol._fw_tuple parsed, or "an unreadable version". Never the
+    string as it came off the wire -- see the ota "board has" line."""
+    parts = protocol._fw_tuple(fw)
+    # Bounded as well as parsed: int() takes any run of digits, so without a
+    # ceiling "1.2.<four thousand digits>" would still carry four thousand
+    # characters of whatever the board chose into the log.
+    if parts is None or not all(0 <= p <= 9999 for p in parts):
+        return "an unreadable version"
+    return "%d.%d.%d" % parts
+
+
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  set_preferred=None,
@@ -377,7 +390,15 @@ class Bridge:
             # update row tells the truth.
             self._app_update = self._app_available(m)
             app = self._app_update[0] if self._app_update else None
-            print(f"[bridge] ota: board has {cur}, release has {have}"
+            # The board's version as the three numbers this daemon parsed out
+            # of it, never the string itself: `cur` is the raw ota_query
+            # field (or board.json's copy of an earlier one), and CLAUDE.md
+            # keeps serial-buffer values out of the log. Re-formatting the
+            # parsed integers keeps the one thing support needs from this
+            # line -- which firmware the desk runs -- and nothing a board
+            # could put there that is not a version.
+            print(f"[bridge] ota: board has {_version_for_log(cur)},"
+                  f" release has {have}"
                   " -- nothing to do" + (f", app {app}" if app else ""),
                   file=sys.stderr)
             self._manifest = None

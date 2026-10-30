@@ -152,6 +152,47 @@ class LineReader:
         return out
 
 
+# Every message type either side puts on the wire, and the only text a log
+# line may say about a message (log_name below).
+#
+# bridge.log used to print each message whole, both ways: `<- {'t': 'hello',
+# 'board_id': ...}` for what the board sent and `-> usage claude/statusline
+# 41%/...` for what went back. That is the file README-full.md asks a
+# customer to email us, and CLAUDE.md forbids logging any value decoded off
+# the serial buffer at any level -- the board's id, the theme it reports,
+# the version it claims, the labels and numbers it is shown. The owner chose
+# to keep the arrow lines and drop their fields (2026-10-30): a support
+# reader still sees what was said in which order, and nothing it said.
+#
+# A fixed set, not "whatever t is": t is itself a value off the wire, and a
+# board that sent t="<anything>" would otherwise have that text written into
+# the log verbatim. Board-to-host types are the ones firmware/src sends;
+# touch_done, touch_refused, ui_state and widgets answer the bench touch
+# injector (firmware/src/touch_inject.h, tools/board_touch.py), listed so a
+# bench board on a desk daemon logs them by name too.
+WIRE_TYPES = frozenset({
+    # board -> host
+    "hello", "ping", "pref", "ota_query", "ota_flash", "theme_now",
+    "theme_edit", "touch_done", "touch_refused", "ui_state", "widgets",
+    # host -> board
+    "welcome", "bye", "pong", "time", "usage", "edition", "session",
+    "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
+    "ota_none", "ota_error",
+})
+
+UNKNOWN_TYPE = "(unknown type)"
+
+
+def log_name(msg) -> str:
+    """What a log line may say about `msg`: its type, from WIRE_TYPES, and
+    nothing else. Anything else -- a missing, non-string or unrecognised t --
+    is the fixed placeholder, never the raw value."""
+    t = msg.get("t") if isinstance(msg, dict) else None
+    if isinstance(t, str) and t in WIRE_TYPES:
+        return t
+    return UNKNOWN_TYPE
+
+
 # What this daemon can do for the board, carried in welcome.
 #
 # "theme": it answers theme_edit by opening the theme builder. The board shows

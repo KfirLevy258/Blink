@@ -356,44 +356,6 @@ def test_nothing_held_back_means_nothing_said():
     assert r.due() is None
 
 
-# ------------------------------------------------------------------ brief
-
-def test_the_usage_frame_is_logged_by_its_values():
-    """279 bytes of dict repr, every minute, mostly field names.
-
-    Once the heartbeat stopped being logged this was 48% of the file by
-    bytes. Nothing parses the log -- no test, doc or tool greps the arrow
-    lines -- and `blink status --wire` prints the whole frame on demand, so
-    the log gets the values.
-    """
-    m = {"t": "usage", "v": 2, "session_pct": 12.0,
-         "session_resets_in_s": 11723, "weekly_pct": 9.0,
-         "weekly_resets_in_s": 549923, "stale": False, "provider": "claude",
-         "src": "cli", "state": "idle", "n_sess": 4, "n_run": 3,
-         "age_s": 3, "active_age_s": 0}
-    out = logbook.brief(m)
-    assert len(out) < len(repr(m)) / 3
-    # Everything a support reader reaches for is still in it.
-    for want in ("claude", "cli", "12.0%", "9.0%", "idle", "n=4/3", "age=3s"):
-        assert want in out, want
-    assert "STALE" not in out
-
-
-def test_a_stale_reading_says_so():
-    """The one flag worth a word rather than a number: it changes what the
-    panel is showing, and a reader scanning for trouble scans for words."""
-    out = logbook.brief({"t": "usage", "stale": True})
-    assert "STALE" in out
-
-
-def test_anything_else_falls_through_to_the_full_message():
-    """An unexpected message is exactly when every field is wanted, and by
-    definition those are the rare ones -- so there is nothing to save."""
-    assert logbook.brief({"t": "session", "n": 2}) is None
-    assert logbook.brief({"t": "ota_avail", "version": "1.3.3"}) is None
-    assert logbook.brief({}) is None
-
-
 # ---------------------------------------------------------------- rotation
 
 def _live(tmp_path, size):
