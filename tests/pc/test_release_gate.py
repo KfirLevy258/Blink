@@ -483,10 +483,12 @@ def _vm_inventory(tmp_path, kind="vm"):
     return p
 
 
-def _vm_state(tmp_path, kind="vm"):
+def _vm_state(tmp_path, kind="vm", **kw):
+    """A VM run made with the inventory _vm_inventory writes."""
     return _state(tmp_path, hosts=_hosts(*VM_DESKS),
                   fleet={"kind": kind, "sequential": True,
-                         "inventory": "tools/fleet/fleet-vm.toml"})
+                         "inventory": str(tmp_path / "fleet-vm.toml")},
+                  **kw)
 
 
 def test_a_vm_run_passes_against_the_vm_inventory(tmp_path):
@@ -515,6 +517,29 @@ def test_a_fleet_kind_nothing_knows_is_refused(tmp_path):
     assert "kind" in reason
     reason = _refuse(tmp_path, fleet="vm")
     assert "kind" in reason
+    # Pinned to its own sentence: refused as an unknown kind, not merely as
+    # some other kind of run.
+    assert "kind nothing here knows" in _refuse(tmp_path,
+                                                fleet={"kind": "cloud"})
+
+
+def test_a_run_made_with_another_inventory_file_is_refused(tmp_path):
+    """Same kind, same desk names, different file. (Review N1)"""
+    state = _vm_state(tmp_path)
+    doc = json.loads(state.read_text(encoding="utf-8"))
+    doc["fleet"]["inventory"] = str(tmp_path / "my-own.toml")
+    state.write_text(json.dumps(doc), encoding="utf-8")
+    reason = gate(state, SHA, _vm_inventory(tmp_path), now=lambda: 2000.0)
+    assert reason and "my-own.toml" in reason
+
+
+def test_a_recorded_relative_inventory_is_read_against_the_checkout():
+    assert fleet_gate._same_inventory(
+        "tools/fleet/fleet-vm.toml", ROOT / "tools" / "fleet"
+        / "fleet-vm.toml")
+    assert not fleet_gate._same_inventory(
+        "tools/fleet/fleet-vm.toml", ROOT / "tools" / "fleet" / "fleet.toml")
+    assert not fleet_gate._same_inventory(None, ROOT / "x")
 
 
 def test_an_inventory_kind_nothing_knows_is_refused(tmp_path):
@@ -532,6 +557,19 @@ def test_a_vm_pass_says_it_was_vms_on_the_line_that_licenses_it(
     assert fleet_gate.main([str(p), SHA, str(_vm_inventory(tmp_path))]) == 0
     out = capsys.readouterr().out
     assert "VM fleet run" in out and "not Windows 10 on x86" in out
+
+
+def test_the_vm_pass_line_says_what_the_run_did_not_contain():
+    """The narrower claim on the line that licenses the release. (S4)"""
+    bare = {"real_account": False,
+            "hosts": {"a": {"scenarios": {"overage": {"ok": True}}}}}
+    said = " ".join(fleet_gate.vm_caveats(bare))
+    assert "--no-real-account" in said
+    assert "No install or update scenario" in said
+    full = {"real_account": True,
+            "hosts": {"a": {"scenarios": {"fresh_install": {"ok": True}}}}}
+    said = " ".join(fleet_gate.vm_caveats(full))
+    assert "--no-real-account" not in said and "No install" not in said
 
 
 def test_the_shipped_vm_inventory_reads_as_vm():

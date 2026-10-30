@@ -118,6 +118,18 @@ def _failing_desks(doc):
                           and result.get("ok") is True))
 
 
+def _checkout():
+    """The checkout this module sits in. run.py records the inventory it was
+    given relative to the checkout when it lies inside it, so that is what a
+    relative recorded path is resolved against. A function, not a module
+    constant: tests/test_sandbox.py refuses path resolution at import."""
+    return Path(__file__).resolve().parents[1]
+
+# The two scenarios that prove the customer path, by the names the agent
+# gives them (tests/fleet/agent.py). Named here only to say, on a VM pass,
+# whether they ran.
+CUSTOMER_PATH = ("fresh_install", "update_path")
+
 # What an inventory with no [fleet] table is: the desk fleet, as fleet.toml
 # always was. Mirrors tools/fleet/run.py, which records the same default.
 DEFAULT_KIND = "desks"
@@ -183,6 +195,40 @@ def run_kind(doc):
         return None
     kind = fleet.get("kind", DEFAULT_KIND)
     return kind if kind in KNOWN_KINDS else None
+
+
+def _same_inventory(recorded, inventory_path):
+    """Whether the inventory a run recorded is the one the gate was given."""
+    if not isinstance(recorded, str) or not recorded.strip():
+        return False
+    path = Path(recorded)
+    if not path.is_absolute():
+        path = _checkout() / path
+    try:
+        return path.resolve() == Path(inventory_path).resolve()
+    except OSError:
+        return False
+
+
+def vm_caveats(doc):
+    """What a passing VM run did NOT contain, as sentences for the pass line.
+
+    The narrower claim belongs on the line that licenses the release, not
+    only in the docs: a VM run can pass with no customer-path scenario on
+    any desk (Ubuntu aarch64 has no release archive, and --bundle names one
+    file for every desk) and, since neither VM is signed in, with no
+    real-account pass either.
+    """
+    lines = ["Windows was a Windows 11 ARM64 VM, not Windows 10 on x86."]
+    if doc.get("real_account") is False:
+        lines.append("It ran with --no-real-account: no desk was asked to"
+                     " read its own account.")
+    hosts = doc.get("hosts") if isinstance(doc.get("hosts"), dict) else {}
+    ran = {name for result in hosts.values() if isinstance(result, dict)
+           for name in (result.get("scenarios") or {})}
+    if not ran.intersection(CUSTOMER_PATH):
+        lines.append("No install or update scenario ran on any desk.")
+    return lines
 
 
 def gate(path, head_sha, inventory_path, now=time.time, max_age_s=MAX_AGE_S):
@@ -342,6 +388,17 @@ def gate(path, head_sha, inventory_path, now=time.time, max_age_s=MAX_AGE_S):
         return (f"That run was a desk fleet run, and {inventory_path} is a"
                 f" {kind} inventory. Check the run against the inventory it"
                 f" was made with.")
+    # 7b. And the same FILE. The kind alone would let a hand-written
+    #     inventory that happened to reuse these desk names vouch for the
+    #     shipped one. A result from before this was recorded has no
+    #     inventory, and is judged on the rest.
+    fleet = doc.get("fleet")
+    if isinstance(fleet, dict) and "inventory" in fleet \
+            and not _same_inventory(fleet["inventory"], inventory_path):
+        return (f"That run was made with the inventory"
+                f" {fleet['inventory']!r}, and the gate was asked about"
+                f" {inventory_path}. A run proves the desks it was given."
+                f" Run the fleet with that inventory.")
     missing = [name for name in wanted if name not in hosts]
     if missing:
         return (f"The fleet run says nothing about {', '.join(missing)},"
@@ -393,10 +450,13 @@ def main(argv=None):
         if _inventory(inventory)[1] == "vm":
             # On stdout with the pass, so the line that licenses the release
             # is never read without it.
+            doc = json.loads(Path(state).read_text(encoding="utf-8"))
             print("Fleet gate: that was a VM fleet run -- this Mac and its"
-                  " UTM guests, one board handed round. Windows was an ARM64"
-                  " VM, not Windows 10 on x86; say so in the release notes.")
-    except ValueError:  # pragma: no cover - gate() has just read it
+                  " UTM guests, one board handed round. Say so in the"
+                  " release notes:")
+            for line in vm_caveats(doc):
+                print(f"  {line}")
+    except (ValueError, OSError):  # pragma: no cover - gate() just read both
         pass
     return 0
 

@@ -446,7 +446,11 @@ It insists on all seven of:
 7. The run was the same **kind** of fleet as that inventory: a VM run
    (below) is refused against `fleet.toml`, and a desk run against
    `fleet-vm.toml`. A result from before the VM fleet existed has no `kind`
-   and reads as the desks, which is what it was.
+   and reads as the desks, which is what it was. And it was made with **that
+   inventory file**: the run records the inventory it was given, and one
+   made with a hand-written file is refused even if its desk names and kind
+   match. (run.py refuses an inventory with a VM in it whose kind is not
+   `vm`, so the kind cannot be declared away either.)
 
 The last three are why the gate is not simply a `grep ok`. `run.py --only
 kfir-ubuntu` exits 0 and writes `ok: true`, and is *right* to -- that run did
@@ -483,7 +487,9 @@ NOTE: BLINK_FLEET=vm -- v1.4.0 is gated on the VM fleet: this Mac
 `BLINK_FLEET` takes `desks` (the default) or `vm` and nothing else. It is a
 name rather than a path on purpose: a path would let any file with one desk
 in it vouch for a release. The gate's pass line for a VM run carries the same
-caveat, and the release notes should too -- see
+caveat, plus what the run did not contain -- `--no-real-account`, and no
+install or update scenario on any desk, which is the usual case (below) --
+and the release notes should too -- see
 [The VM fleet](#the-vm-fleet) for what it does and does not prove.
 
 ### Releasing without it
@@ -537,26 +543,46 @@ file order. (`--sequential` asks the same of any inventory.)
      the inventory's ssh line says `tester@{address}`.
    - **The snapshot is pushed** while the board is still here.
    - **The board is handed over**: `utmctl usb connect <uuid> 1A86:7523`.
+     It is recorded as lent out *before* utmctl is asked, because an
+     AppleEvent that timed out here can still have been carried out in UTM.
      When utmctl cannot -- and on 2026-10-19 it answered "The device cannot
      be found" every time -- the run asks the operator to do it from the VM
      window (USB icon -> USB Serial -> Connect) and waits for Enter.
      `--handoff utmctl` never asks; `--handoff operator` never tries utmctl.
      With nobody at the keyboard, a handoff utmctl could not do is a failed
-     desk, not a wait.
+     desk, not a wait. A Ctrl-C at the prompt stops the run; it does not
+     move on to the next VM.
    - **The guest has to see the board** before the agent starts:
      `python -m tests.fleet.board_present --usb 1A86:7523 --wait 90` runs
      in the VM, by USB id like the daemon. An agent started before the driver
      bound would fail three settles and read as a dead board.
    - **The agent runs** exactly as on any desk, and its result comes back.
    - **The board is handed back** from a `finally` -- on a failed agent, a
-     timeout and a Ctrl-C too -- and the run waits for this Mac to see it
-     again before the next VM is handed anything. A board that does not come
-     home is a **warning** under the table, not a failed desk: that desk's
-     evidence was already complete.
-4. **This Mac's service is started again**, from a `finally`.
+     timeout, a failed handoff and a Ctrl-C at any point after the handoff
+     began -- and the run waits for this Mac to see it again. Seeing it is
+     the test, not utmctl's answer: a board that never left is home at once.
+     A board that does not come home is a **warning** on that desk, whose
+     evidence was already complete, and a **hard stop** for every VM after
+     it: none of them is handed the board, and each fails saying why.
+4. **This Mac's service is started again**, from a `finally` -- after any
+   stop that was attempted, including one that timed out or failed, since
+   it may have stopped the agent all the same. Only the `BLINK_SKIP_SERVICE`
+   no-op is left alone.
 
 `--dry-run` prints every one of those commands, in order, and contacts
 nothing.
+
+**Unverified:** the PowerShell transport (`shell = "powershell"`, below) has
+been tested only as text. No command has yet crossed the Windows VM's real
+sshd this way -- the VM would not start when this was written. Before the
+first release on the VM fleet, prove it with one narrowed run (which the
+gate refuses, so it costs nothing):
+
+```bash
+python3 tools/fleet/run.py --inventory tools/fleet/fleet-vm.toml \
+    --only windows-vm --scenarios stale_age --no-real-account \
+    --state .fleet/scratch.json
+```
 
 The result records `fleet: {kind: "vm", sequential: true, inventory:
 "tools/fleet/fleet-vm.toml"}`, each VM desk's UUID, the address it was
@@ -594,8 +620,18 @@ Measured 2026-10-30:
 
 It proves the same things as the desk fleet ([below](#what-a-green-run-proves))
 on these three machines: real frames out, the board applying them in its own
-words, a real sleep and wake, and the customer path where bundles exist. On
-macOS that is the real thing -- the Mac is a real desk.
+words, a real sleep and wake. On macOS that is the real thing -- the Mac
+is a real desk.
+
+What a passing VM run usually does **not** contain, and the gate's pass line
+says so when it is true:
+
+- **No install or update scenario.** `--bundle` names one archive for every
+  desk, archives are per-platform, and there is no Linux aarch64 archive at
+  all -- so a full VM run cannot carry bundles, and the customer path is
+  proved nowhere. Run those per desk on the desk fleet, or by hand.
+- **No real-account pass** if it ran with `--no-real-account`, which it has
+  to until the VMs are signed in.
 
 It is **not** the desk fleet, and the gate keeps the two apart:
 

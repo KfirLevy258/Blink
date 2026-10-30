@@ -116,8 +116,11 @@ class VmRunner:
             self.inputs.append(cmd)
         kind = self._kind(cmd)
         self.kinds.append(kind)
-        if kind in self.fail:
-            answer = self.fail[kind]
+        answer = self.fail.get(kind)
+        if isinstance(answer, list):
+            # One answer per call, then success.
+            answer = answer.pop(0) if answer else None
+        if answer is not None:
             if isinstance(answer, BaseException):
                 raise answer
             return answer
@@ -264,6 +267,15 @@ def test_a_malformed_fleet_table_is_refused(tmp_path, fleet, word):
     assert word in str(e.value)
 
 
+def test_an_inventory_with_a_vm_has_to_say_it_is_a_vm_fleet(tmp_path):
+    """The kind is what the gate reads, and a VM in the inventory decides it.
+    (Review of 7c6b2a3, S2: a VM inventory with no kind recorded "desks".)"""
+    text = _FLEET.replace('kind = "vm"\n', '') + _VM_HOST
+    with pytest.raises(ValueError) as e:
+        fleet_run.load_inventory(_write(tmp_path, text))
+    assert 'kind = "vm"' in str(e.value)
+
+
 def test_powershell_is_only_a_windows_shell(tmp_path):
     text = ('[hosts.a]\nssh = "u@h"\nos = "linux"\nshell = "powershell"\n'
             'board = "claude"\npython = "p"\nworkdir = "~/w"\n'
@@ -382,7 +394,10 @@ def test_a_handoff_nobody_can_finish_is_a_failed_desk_not_a_wait(tmp_path):
     assert result["ok"] is False
     assert "could not be handed" in result["problems"][0]
     assert "USB Serial -> Connect" in result["problems"][0]
-    assert "agent" not in runner.kinds and "disconnect" not in runner.kinds
+    assert "agent" not in runner.kinds
+    # Asked back all the same -- utmctl's word is not trusted either way --
+    # and found home at once, so nothing is held against the next VM.
+    assert "disconnect" in runner.kinds and "here_wait" in runner.kinds
 
 
 def test_an_operator_finishes_what_utmctl_could_not(tmp_path):
@@ -393,9 +408,22 @@ def test_an_operator_finishes_what_utmctl_could_not(tmp_path):
                                ask=asked.append, interactive=True)
     assert result["ok"] is True, result["problems"]
     assert result["vm"]["handoff"] == "operator"
-    assert len(asked) == 2
-    assert "Connect" in asked[0] and "Disconnect" in asked[1]
+    # utmctl's disconnect failed, but the board was seen home, which is the
+    # test -- so nobody is asked to do what has already happened.
+    assert len(asked) == 1 and "Connect" in asked[0]
     assert warnings == []
+
+
+def test_the_operator_is_asked_back_only_when_the_board_is_not_home(
+        tmp_path):
+    runner = VmRunner(fail={"disconnect": _done(1, b"", b"nope"),
+                            "here_wait": [_done(1, b"no board")]})
+    asked = []
+    result, warnings = _run_vm(UBUNTU_VM, runner, tmp_path,
+                               ask=asked.append, interactive=True)
+    assert result["ok"] is True
+    assert len(asked) == 1 and "Disconnect" in asked[0]
+    assert runner.kinds.count("here_wait") == 2 and warnings == []
 
 
 def test_operator_mode_never_runs_utmctl_usb(tmp_path):
@@ -406,11 +434,64 @@ def test_operator_mode_never_runs_utmctl_usb(tmp_path):
     assert "connect" not in runner.kinds and "disconnect" not in runner.kinds
 
 
-def test_a_board_that_does_not_come_home_is_a_warning(tmp_path):
+def test_a_board_that_does_not_come_home_stops_every_later_vm(tmp_path):
+    """A warning on the desk that had it -- its evidence is complete -- and
+    a hard stop for the next one, which is never handed a board this Mac
+    has not got back. (Review of 7c6b2a3, M2: the next VM was handed it.)"""
     runner = VmRunner(fail={"here_wait": _done(1, b"no board")})
-    result, warnings = _run_vm(UBUNTU_VM, runner, tmp_path)
+    bench = _bench(runner)
+    result, warnings = fleet_run.run_vm_host("u", UBUNTU_VM, bench,
+                                             runner=runner,
+                                             leases=tmp_path / "none")
     assert result["ok"] is True
     assert warnings and "did not come back" in warnings[0]
+    connects = runner.kinds.count("connect")
+    second, _ = fleet_run.run_vm_host("w", WIN_VM, bench, runner=runner,
+                                      leases=tmp_path / "none")
+    assert runner.kinds.count("connect") == connects
+    assert second["ok"] is False
+    assert "never came back to this Mac from u" in second["problems"][0]
+
+
+def test_a_utmctl_timeout_during_the_handoff_still_asks_the_board_back(
+        tmp_path):
+    """-1712 at this end can still have been carried out in UTM. (M1)"""
+    runner = VmRunner(fail={"connect": subprocess.TimeoutExpired("utmctl",
+                                                                 150)})
+    result, _ = _run_vm(UBUNTU_VM, runner, tmp_path, interactive=False)
+    assert result["ok"] is False
+    assert "disconnect" in runner.kinds
+
+
+def test_a_ctrl_c_during_the_handoff_still_asks_the_board_back(tmp_path):
+    runner = VmRunner(fail={"connect": KeyboardInterrupt()})
+    with pytest.raises(KeyboardInterrupt):
+        _run_vm(UBUNTU_VM, runner, tmp_path, interactive=False)
+    assert "disconnect" in runner.kinds
+
+
+def test_a_ctrl_c_at_the_prompt_stops_the_run(tmp_path):
+    """It used to be swallowed, and the run moved on to the next VM's
+    handoff and prompt. (S6)"""
+    runner = VmRunner(fail={"connect": _done(1, b"error")})
+
+    def ask(prompt):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_vm(UBUNTU_VM, runner, tmp_path, ask=ask, interactive=True)
+    assert "disconnect" in runner.kinds and "agent" not in runner.kinds
+
+
+def test_an_end_of_input_at_the_prompt_is_a_failed_desk(tmp_path):
+    runner = VmRunner(fail={"connect": _done(1, b"error")})
+
+    def ask(prompt):
+        raise EOFError
+
+    result, _ = _run_vm(UBUNTU_VM, runner, tmp_path, ask=ask,
+                        interactive=True)
+    assert result["ok"] is False and "abandoned" in result["problems"][0]
 
 
 # --------------------------------------------------------------------------
@@ -428,6 +509,20 @@ def test_a_skipped_service_stop_hands_no_board_anywhere(tmp_path):
     assert "connect" not in runner.kinds
     # Nothing was stopped, so nothing is started on the way out.
     assert bench.release() == [] and "release" not in runner.kinds
+
+
+@pytest.mark.parametrize("answer", [
+    subprocess.TimeoutExpired("python", 300),
+    _done(1, b"launchctl bootout: 5: Input/output error"),
+])
+def test_a_stop_that_failed_is_still_followed_by_a_start(tmp_path, answer):
+    """It may have booted the agent out all the same; starting a running
+    service costs nothing. (S1)"""
+    runner = VmRunner(fail={"hold": answer})
+    bench = _bench(runner)
+    assert bench.hold()
+    bench.release()
+    assert "release" in runner.kinds
 
 
 def test_the_service_is_started_again_and_says_so_when_it_will_not(tmp_path):
@@ -622,3 +717,54 @@ def test_the_service_helper_reports_a_skip_as_its_own_code():
     assert service.main(["stop"],
                         stop=lambda: Outcome(False, False, "no")) == 1
     assert service.main(["restart"]) == 2
+
+
+def test_a_vm_run_with_the_desk_names_cannot_pass_the_desk_gate(tmp_path):
+    """The reviewer's probe E2: a hand-written VM inventory reusing the
+    desks' names. run.py now refuses it at load; and a run made with any
+    other file is refused by the gate's inventory check."""
+    from pc import fleet_gate
+    desks = sorted(fleet_run.load_inventory(fleet_run.DEFAULT_INVENTORY))
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    text = ('[fleet]\nsequential = true\nboard_usb = "1A86:7523"\n'
+            'host_python = "venv/bin/python"\n'
+            f'[hosts.{desks[0]}]\nssh = ""\nos = "darwin"\nboard = "claude"\n'
+            f'python = "p"\nworkdir = "{wd.as_posix()}"\n'
+            'has_claude_desktop = true\n')
+    for i, name in enumerate(desks[1:]):
+        text += (f'[hosts.{name}]\nssh = "tester@{{address}}"\nos = "linux"\n'
+                 'board = "claude"\npython = "/usr/bin/python3"\n'
+                 'workdir = "~/blink-fleet"\nhas_claude_desktop = false\n'
+                 f'[hosts.{name}.vm]\nutm = "UUID-{i}"\n')
+    inv = _write(tmp_path, text)
+    with pytest.raises(ValueError):
+        fleet_run.load_inventory(inv)
+    # Declared honestly, it runs -- and is then refused against fleet.toml.
+    inv.write_text(text.replace("[fleet]\n", '[fleet]\nkind = "vm"\n'),
+                   encoding="utf-8")
+    state = tmp_path / "s.json"
+    fleet_run.main(["--inventory", str(inv), "--state", str(state)],
+                   runner=VmRunner(local_workdir=wd), ask=lambda q: None,
+                   interactive=False, leases=tmp_path / "none")
+    doc = json.loads(state.read_text(encoding="utf-8"))
+    assert doc["ok"] is True
+    assert fleet_gate.gate(str(state), doc["sha"],
+                           str(fleet_run.DEFAULT_INVENTORY)) is not None
+    # Even with the kind written as desks in the result, the file differs.
+    doc["fleet"]["kind"] = "desks"
+    state.write_text(json.dumps(doc), encoding="utf-8")
+    reason = fleet_gate.gate(str(state), doc["sha"],
+                             str(fleet_run.DEFAULT_INVENTORY))
+    assert reason and "inventory" in reason
+
+
+def test_a_percent_in_a_path_for_a_powershell_desk_is_refused(tmp_path,
+                                                              capsys):
+    """A batch file eats a % that a command line would have kept. (N2)"""
+    code = fleet_run.main(["--inventory", str(VM_INVENTORY), "--dry-run",
+                           "--bundle", "bundles/50%/blink.zip",
+                           "--expect-version", "1.4.0"],
+                          runner=lambda *a, **k: None)
+    assert code == 2
+    assert "%" in capsys.readouterr().err

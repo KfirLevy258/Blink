@@ -7,7 +7,7 @@
 # not a cheaper copy of it, and the release gate knows which one it was given:
 # a run against this file records kind = "vm" in .fleet/last_run.json, and
 # the gate only accepts it when it was asked about THIS inventory
-# (BLINK_FLEET_INVENTORY=tools/fleet/fleet-vm.toml tools/release.sh).
+# (BLINK_FLEET=vm tools/release.sh -- a name, never a path).
 #
 # What it does not prove, written here so nobody has to find out from the
 # docs: neither VM is the machine a customer has. Both are arm64 guests on

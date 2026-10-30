@@ -1,8 +1,9 @@
-"""Run the fleet agent on all three desks from one of them, and add it up.
+"""Run the fleet agent on every desk in an inventory, and add it up.
 
     python tools/fleet/run.py                       # the whole fleet
     python tools/fleet/run.py --only galit-win10    # one desk
     python tools/fleet/run.py --scenarios overage   # one scenario, everywhere
+    python tools/fleet/run.py --inventory tools/fleet/fleet-vm.toml  # the VMs
 
 Each desk gets a snapshot of THIS checkout at HEAD (`git archive` piped into
 `tar -x` over ssh), runs tests/fleet/agent.py against its own board, and hands
@@ -328,6 +329,15 @@ def _check_vm_fields(name, cfg, settings, path):
             f"Host {name} in {path} is a VM, so [fleet] needs board_usb (the"
             f" id the board is handed over by) and host_python (an"
             f" interpreter here with pyserial, to see it come back).")
+    if settings["kind"] != "vm":
+        # The kind is what the release gate reads, and here it is known for
+        # certain rather than declared: an inventory with a VM in it that
+        # called itself the desks would record a VM run as a desk run.
+        raise ValueError(
+            f"Host {name} in {path} is a VM, so the inventory is a VM fleet"
+            f" and needs kind = \"vm\" under [fleet]. The release gate reads"
+            f" that kind, and a VM run recorded as the desks would be"
+            f" accepted as them.")
 
 
 def is_local(cfg):
@@ -1032,19 +1042,21 @@ class Bench:
     # -- this Mac's installed service ------------------------------------
 
     def _service(self, verb):
+        """(problems, skipped) for one service call."""
         done, problems = _run(service_argv(self.python, verb), self.runner,
                               f"Asking this Mac's service to {verb}",
                               cwd=str(REPO_ROOT), timeout=PULL_TIMEOUT_S)
         if problems:
-            return problems
+            return problems, False
         said = _tail(done)
         if done.returncode == 3:
             return [f"BLINK_SKIP_SERVICE is set in this shell, so this Mac's"
                     f" service was not {verb}ped and still holds the port"
-                    f" UTM would have to take. Unset it and start again."]
+                    f" UTM would have to take. Unset it and start again."], \
+                True
         if done.returncode != 0:
-            return [f"This Mac's service would not {verb}: {said}."]
-        return []
+            return [f"This Mac's service would not {verb}: {said}."], False
+        return [], False
 
     def hold(self):
         """Stop this Mac's service for the VM phase. Problems, or [].
@@ -1052,12 +1064,16 @@ class Bench:
         A port somebody has open is not a device UTM can take: the board
         was passed through by hand on 2026-10-19 only with the daemon
         stopped first (docs/windows-check.md).
+
+        Any attempt counts as held, except the BLINK_SKIP_SERVICE no-op: a
+        stop that timed out or answered 1 may still have booted the agent
+        out, and starting a service that is already running costs nothing,
+        while not starting one that was stopped leaves this Mac dark.
         """
-        self.problems = self._service("stop")
-        self.held = not self.problems
-        if self.problems:
-            self.problems = [f"No VM was handed the board. {p}"
-                             for p in self.problems]
+        problems, skipped = self._service("stop")
+        self.held = not skipped
+        self.problems = [f"No VM was handed the board. {p}"
+                         for p in problems]
         return self.problems
 
     def release(self):
@@ -1065,27 +1081,40 @@ class Bench:
         if not self.held:
             return []
         self.held = False
-        problems = self._service("start")
+        problems, _ = self._service("start")
         return [f"{p} The board on this Mac will stay dark until it is"
                 f" started (blink install puts it back)." for p in problems]
 
     # -- the board --------------------------------------------------------
 
     def _prompt(self, text):
+        """Ask the operator; False when there is nobody to answer (EOF).
+
+        Only EOF. A Ctrl-C at this prompt means stop the run, and is let
+        through to the finallys that hand the board back and restart this
+        Mac's service -- swallowing it used to move straight on to the next
+        VM's handoff and its prompt.
+        """
         try:
             self.ask(text)
             return True
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             return False
 
     def connect(self, name, cfg):
         """Hand the board to a VM and wait for the guest to see it.
 
-        Returns (handed, problems): `handed` is whether the board may now be
-        in that VM, which decides whether it has to be asked back.
+        Returns (handed, problems). The board is recorded as lent out
+        BEFORE utmctl is asked, not after it answers: utmctl talks to UTM by
+        AppleEvent, and an event that timed out at this end (-1712, UTM's
+        commonest failure here) or a Ctrl-C during the call can still have
+        been carried out at the other. Asking back a board that never left
+        costs one failed utmctl call and a wait that succeeds at once;
+        not asking back one that did leaves this Mac's board in a guest.
         """
         if self.problems:
             return False, list(self.problems)
+        self.lent_to = name
         how, said = None, ""
         if self.mode != "operator":
             done, problems = _run(usb_connect_cmd(cfg, self.usb),
@@ -1111,7 +1140,6 @@ class Bench:
                                f" prompt was abandoned."]
             how = "operator"
         self.handoffs[name] = how
-        self.lent_to = name
         argv = board_wait_argv(_python(cfg), self.usb)
         done, problems = run_remote_line(
             cfg, remote_line(cfg, argv), self.runner,
@@ -1127,39 +1155,51 @@ class Bench:
                 f" /dev/ttyUSB0."]
         return True, []
 
-    def disconnect(self, name, cfg):
-        """Take the board back to this Mac. Warnings, or [].
-
-        Warnings rather than a failed desk: the desk's evidence is complete
-        by now, and the board not coming home is this Mac's problem -- and
-        the next VM's, whose handoff will then fail and say so.
-        """
-        self.lent_to = None
-        how = None
-        if self.mode != "operator":
-            done, _ = _run(usb_disconnect_cmd(self.usb), self.runner,
-                           f"Taking the board back from {name}",
-                           timeout=UTM_TIMEOUT_S)
-            if _utm_worked(done):
-                how = "utmctl"
-        if how is None:
-            if not self.interactive or not self._prompt(
-                    f"\n>>> Take the board back from {name}: in its UTM"
-                    f" window, USB icon -> USB Serial -> Disconnect.\n"
-                    f"    Press Enter once it is disconnected. "):
-                return [f"The board may still be in {name}. Disconnect it"
-                        f" from that VM's USB menu to give it back to this"
-                        f" Mac."]
+    def _home(self, name):
+        """Wait for this Mac to see the board. (home, what was said)."""
         done, problems = _run(board_wait_argv(self.python, self.usb),
                               self.runner,
                               f"Waiting for the board to come back from"
                               f" {name}", cwd=str(REPO_ROOT),
                               timeout=BOARD_WAIT_S + PULL_TIMEOUT_S)
-        if problems or done.returncode != 0:
-            said = problems[0] if problems else _tail(done)
-            return [f"The board did not come back to this Mac from {name}"
-                    f" ({said}). Disconnect it from that VM's USB menu."]
-        return []
+        if problems:
+            return False, problems[0]
+        return done.returncode == 0, _tail(done)
+
+    def disconnect(self, name, cfg):
+        """Take the board back to this Mac. Warnings, or [].
+
+        The test of success is this Mac seeing the board, not utmctl's
+        answer: a board that never left (a handoff that failed) is home at
+        once, and one utmctl claims to have released may not be.
+
+        A board that does not come home is a warning for THIS desk, whose
+        evidence is complete by now -- and a hard stop for every VM after
+        it: bench.problems is set, so no later VM is handed a board this
+        Mac has not got back, and each one fails saying so.
+        """
+        self.lent_to = None
+        prompt = (f"\n>>> Take the board back from {name}: in its UTM"
+                  f" window, USB icon -> USB Serial -> Disconnect.\n"
+                  f"    Press Enter once it is disconnected. ")
+        if self.mode == "operator":
+            if self.interactive:
+                self._prompt(prompt)
+        else:
+            _run(usb_disconnect_cmd(self.usb), self.runner,
+                 f"Taking the board back from {name}", timeout=UTM_TIMEOUT_S)
+        home, said = self._home(name)
+        if not home and self.interactive and self.mode != "operator":
+            if self._prompt(prompt):
+                home, said = self._home(name)
+        if home:
+            return []
+        self.problems.append(
+            f"The board never came back to this Mac from {name} ({said}),"
+            f" so no later VM was handed it. Disconnect it from {name}'s USB"
+            f" menu and run again.")
+        return [f"The board did not come back to this Mac from {name}"
+                f" ({said}). Disconnect it from that VM's USB menu."]
 
 
 def run_vm_host(name, cfg, bench, runner=subprocess.run,
@@ -1516,6 +1556,20 @@ def main(argv=None, runner=subprocess.run, ask=input, interactive=None,
                   f" {', '.join(sorted(inventory))}.", file=sys.stderr)
             return 2
         inventory = {name: inventory[name] for name in wanted}
+
+    # A PowerShell desk gets its command line as a batch file, and in a
+    # batch file a % that is not a variable is eaten -- on a command line it
+    # would have survived. So a path that carries one is refused rather than
+    # quietly sent somewhere else.
+    if any(_powershell(cfg) for cfg in inventory.values()):
+        for flag, value in (("--bundle", args.bundle),
+                            ("--prev-bundle", args.prev_bundle),
+                            ("--ota-dir", args.ota_dir)):
+            if value and "%" in value:
+                print(f"{flag} {value!r} has a %, which a PowerShell desk's"
+                      f" batch file would eat. Rename the path.",
+                      file=sys.stderr)
+                return 2
 
     if args.dry_run:
         _print_dry_run(inventory, settings, args)

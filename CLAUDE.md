@@ -73,7 +73,7 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**2806 passing** as of 2026-10-30, on macOS. The last count proved on all
+**2866 passing** as of 2026-10-30, on macOS. The last count proved on all
 three platforms was 1503, on 2026-10-19, on macOS, Ubuntu and Windows (ARM64
 VM). Re-run Ubuntu and Windows before claiming them for the new number. Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though
@@ -189,6 +189,7 @@ how it was found. No trailers (see the top of this file).
   flash.
 - `docs/windows-check.md` — the ten-minute manual pass, once per release.
 - `docs/fleet-testing.md` and `tools/fleet/fleet.toml` — the three desks a
-  release is proved on.
+  release is proved on; `tools/fleet/fleet-vm.toml` is this Mac and its two
+  UTM VMs with one board handed round, a narrower claim the gate keeps apart.
 - `docs/open-bugs/` — open faults with what has been measured, so nobody
   re-derives it.
