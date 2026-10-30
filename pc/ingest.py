@@ -14,7 +14,8 @@ able to stop it.
 import sys
 import time
 
-from pc import cowork_audit, desktop_idb, normalizer, protocol, weekly_anchor
+from pc import (cowork_audit, desktop_idb, desktop_paths, normalizer, protocol,
+                weekly_anchor)
 from pc.providers import base
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
@@ -207,6 +208,14 @@ class IngestionBus:
         that logs the same traceback on a timer is its own defect, and it is
         the reason the retry could not simply be "try it every poll".
         """
+        # One Desktop data folder for the whole poll. Four readers here ask
+        # for it, every 2 s on the serial thread; held, they resolve it once
+        # and cannot split across two folders mid-poll. See pc/desktop_paths.
+        with desktop_paths.one_answer():
+            return self._collect_frames()
+
+    def _collect_frames(self):
+        """poll_frames()'s body, run under one Desktop folder answer."""
         frames = []
         now = self._now()
         for p in self._providers:

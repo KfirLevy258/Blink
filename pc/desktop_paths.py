@@ -30,33 +30,58 @@ marker (docs/README-full.md). That is an older build, but a desk that has not
 updated still has it, so plain Roaming stays the default and the answer
 whenever nothing better is found.
 
-What this adds over the first fix, each for a case it left open:
+How the folder is chosen:
 
   - Freshest wins. Two markers with both targets present are possible (an
-    install, an uninstall, a reinstall under a new name), and "first in
-    sorted order" picks one for no reason. The one written to most recently
-    is the one the app is using.
+    install, an uninstall, a reinstall under a new name), and sorted order
+    would pick one for no reason. The one written to most recently -- usage
+    cache, Local Storage or IndexedDB -- is the one the app is using. Equal
+    freshness falls back to the name, so one tree always gives one answer.
   - A stale marker does not win for ever. Someone who went back to the exe
     build has a marker and an old Claude-Data left behind while the app
     writes Roaming again. When Roaming is strictly fresher than the best
-    target, Roaming is read.
+    target, Roaming is read, and `blink status` says the marker was ignored.
+  - Two live installs (the exe and the Store build both in use, in turn)
+    therefore alternate: the reading follows whichever wrote last. That is
+    by design -- both report the same account, and the last one written
+    holds the newer figure.
   - Names are checked hard before they are joined into a path: no
     separators, no `:` (ntpath.join(local, "Claude-Data", "D:evil") is
-    "D:evil", a drive reset), no `.` or `..`, nothing Windows would silently
-    trim, and the joined result must sit directly under Claude-Data. NTFS
-    should never list a name that fails this, which is why it is cheap
-    insurance rather than a fix.
+    "D:evil", a drive reset), no NUL, no `.` or `..`, nothing Windows would
+    silently trim, and the joined result must sit directly under
+    Claude-Data. NTFS should never list a name that fails this, which is why
+    it is cheap insurance rather than a fix.
 
 Everything resolves when called. Nothing touches home at import
 (tests/test_sandbox.py enforces that), and the resolver never raises into
-the daemon: any failure falls back to Roaming. It runs once per poll, every
-60 s; the listdir and the glob cost nothing worth caching.
+the daemon: any failure falls back to Roaming.
+
+What it costs, and why one_answer() exists. The daemon polls every 2 s
+(claude_usage_bridge.FAST_POLL_INTERVAL_S), on the thread that reads the
+board's serial port, and one poll asked for the folder four times: the
+Desktop cache, Local Storage, the weekly history and the anchor seeders. A
+resolve is a listdir of %APPDATA%\\Claude, one glob of
+%LOCALAPPDATA%\\Packages\\Claude_*, a listdir of each package's Roaming, and
+a few stats. Measured 2026-10-30 on macOS APFS, warm, against a synthetic
+profile with 400 Packages entries in the Store layout: 0.39 ms per resolve,
+1.6 ms a poll, while the virtualised-Local glob still ran once per marker
+name; 0.20 ms per resolve with one Packages glob, and one resolve a poll.
+NTFS with Defender is unmeasured and will be several times that. So
+pc/ingest holds one answer for the whole poll
+(one_answer()), which also means the four readers in a poll cannot straddle
+an mtime change and read two different folders; `blink status` holds one
+the same way, so its lines cannot contradict each other. Outside a hold
+every call resolves afresh. There is no timed cache, so nothing goes stale
+under a test that moves HOME between calls.
 
 Nothing here opens a file. It lists names and reads mtimes, and logs neither.
 """
+import contextlib
 import glob
 import os
 import sys
+import threading
+from typing import NamedTuple
 
 MARKER_PREFIX = ".user-data-left."
 RELOCATED_DIRNAME = "Claude-Data"
@@ -103,9 +128,14 @@ def _safe_component(name, root, pathmod=os.path):
         return False
     # Windows drops trailing dots and spaces from a path component, so
     # "name." and "name " open "name" -- a different folder from the one the
-    # marker named.
+    # marker named. Leading ones are refused too: Windows keeps them, but no
+    # Store name has been seen with one, and refusing costs nothing.
     if name.strip(" .") != name:
         return False
+    # The backstop. Every name the checks above let through already stays
+    # under root, so this decides nothing today; it is here so that loosening
+    # one of them cannot turn a marker into a way out of Claude-Data.
+    # tests/pc/test_desktop_paths.py proves it holds on its own.
     joined = pathmod.normpath(pathmod.join(root, name))
     return pathmod.dirname(joined) == pathmod.normpath(root)
 
@@ -113,51 +143,61 @@ def _safe_component(name, root, pathmod=os.path):
 def marker_names(folder):
     """The names `.user-data-left.<name>` files in `folder` point at.
 
-    Matched without regard to case, because Windows names are. A name that
-    fails _safe_component is dropped here, so no caller ever joins one.
+    Matched without regard to case, because Windows names are, and
+    de-duplicated the same way. A name that fails _safe_component is dropped
+    here, so no caller ever joins one.
     """
     try:
         entries = os.listdir(folder)
     except OSError:
         return []
     names = []
+    seen = set()
     prefix = MARKER_PREFIX.lower()
-    for entry in entries:
+    for entry in sorted(entries):
         if not entry.lower().startswith(prefix):
             continue
         name = entry[len(MARKER_PREFIX):]
-        if name in names:
+        if name.lower() in seen:
             continue
         # Checked against a relative root here and again against each real
         # root in _candidate_targets: the name alone, then the join.
         if _safe_component(name, RELOCATED_DIRNAME):
+            seen.add(name.lower())
             names.append(name)
     return names
 
 
-def _marker_folders(roaming_claude, local):
-    """Where markers are looked for: real Roaming first, then the Store
-    package's virtualised Roaming, in sorted order."""
-    pattern = os.path.join(glob.escape(local), "Packages", "Claude_*",
-                           "LocalCache", "Roaming", "Claude")
-    return [roaming_claude] + sorted(glob.glob(pattern))
+def _packages(local):
+    """Claude's Store package folders, sorted. One glob per resolve: both the
+    virtualised Roaming and the virtualised Local hang off these. Escaped,
+    because a profile folder can have `[` in its name, which glob would read
+    as a character class and then match nothing."""
+    pattern = os.path.join(glob.escape(local), "Packages", "Claude_*")
+    return sorted(glob.glob(pattern))
 
 
-def _candidate_targets(names, local):
+def _marker_folders(roaming_claude, packages):
+    """Where markers are looked for: real Roaming first, then each Store
+    package's virtualised Roaming."""
+    return [roaming_claude] + [
+        os.path.join(p, "LocalCache", "Roaming", "Claude") for p in packages]
+
+
+def _candidate_targets(names, local, packages):
     """[(name, folder)] for each marker name whose data folder exists.
 
     The real %LOCALAPPDATA%\\Claude-Data is what was measured. The package's
     virtualised Local is UNMEASURED: no build has been seen writing there,
     but the Store can redirect Local the same way it redirected Roaming, and
-    looking costs one glob.
+    looking costs one stat per name.
     """
+    roots = [os.path.join(local, RELOCATED_DIRNAME)] + [
+        os.path.join(p, "LocalCache", "Local", RELOCATED_DIRNAME)
+        for p in packages]
     out = []
     seen = set()
     for name in names:
-        roots = [os.path.join(local, RELOCATED_DIRNAME)]
-        pattern = os.path.join(glob.escape(local), "Packages", "Claude_*",
-                               "LocalCache", "Local", RELOCATED_DIRNAME)
-        roots += sorted(glob.glob(pattern))
         for root in roots:
             if not _safe_component(name, root):
                 continue
@@ -183,69 +223,111 @@ def _freshness(folder):
     return best
 
 
+class Answer(NamedTuple):
+    """One resolve, with what `blink status` needs to explain it.
+
+    source: "default" off Windows, else "roaming" or "marker:<name>".
+    dangling: a marker was found, and none of its data folders exists.
+    ignored: a marker's data folder exists, but Roaming is fresher and won.
+    """
+    path: str
+    source: str
+    dangling: bool = False
+    ignored: bool = False
+
+    @property
+    def moved(self) -> bool:
+        return self.source.startswith(SOURCE_MARKER_PREFIX)
+
+
 def _resolve_windows():
-    """(path, source, dangling) -- dangling is True when a marker was found
-    but none of its data folders exists."""
     roaming, local = _windows_roots()
+    packages = _packages(local)
     names = []
-    for folder in _marker_folders(roaming, local):
+    seen = set()
+    for folder in _marker_folders(roaming, packages):
         for name in marker_names(folder):
-            if name not in names:
+            if name.lower() not in seen:
+                seen.add(name.lower())
                 names.append(name)
     if not names:
-        return roaming, SOURCE_ROAMING, False
-    targets = _candidate_targets(names, local)
+        return Answer(roaming, SOURCE_ROAMING)
+    targets = _candidate_targets(names, local, packages)
     if not targets:
-        return roaming, SOURCE_ROAMING, True
-    # Freshest first; equal freshness falls back to name, then path, so the
-    # same tree always gives the same answer.
-    targets.sort(key=lambda t: (-_freshness(t[1]), t[0], t[1]))
-    name, folder = targets[0]
-    if _freshness(roaming) > _freshness(folder):
+        return Answer(roaming, SOURCE_ROAMING, dangling=True)
+    # Freshest first; equal freshness falls back to name, then path.
+    scored = sorted((-_freshness(f), n, f) for n, f in targets)
+    neg_fresh, name, folder = scored[0]
+    if _freshness(roaming) > -neg_fresh:
         # The exe build writing Roaming again beside a marker it left behind.
-        return roaming, SOURCE_ROAMING, False
-    return folder, SOURCE_MARKER_PREFIX + name, False
+        return Answer(roaming, SOURCE_ROAMING, ignored=True)
+    return Answer(folder, SOURCE_MARKER_PREFIX + name)
 
 
-def _windows_answer():
+def _resolve():
+    if sys.platform == "darwin":
+        return Answer(os.path.expanduser(
+            "~/Library/Application Support/Claude"), SOURCE_DEFAULT)
+    if os.name != "nt":
+        return Answer(os.path.expanduser("~/.config/Claude"), SOURCE_DEFAULT)
     try:
         return _resolve_windows()
     except Exception:
         # Never into the daemon. Roaming is where every build before the
         # relocation wrote, so it is the least surprising wrong answer.
-        return _windows_roots()[0], SOURCE_ROAMING, False
+        return Answer(_windows_roots()[0], SOURCE_ROAMING)
+
+
+_held = threading.local()
+
+
+@contextlib.contextmanager
+def one_answer(answer=None):
+    """Resolve once, and give every reader inside the block that folder.
+
+    `answer` pins one already taken: status reuses read_desk's. A nested
+    hold keeps the outer answer. Per thread, so the serial thread's poll
+    never lends its answer to a call on another thread.
+    """
+    outer = getattr(_held, "answer", None)
+    if outer is not None:
+        yield outer
+        return
+    _held.answer = answer if answer is not None else _resolve()
+    try:
+        yield _held.answer
+    finally:
+        _held.answer = None
+
+
+def resolve():
+    """The Answer in force: the held one inside one_answer(), else fresh."""
+    held = getattr(_held, "answer", None)
+    return held if held is not None else _resolve()
 
 
 def windows_data_dir():
-    """(path, source) on Windows: source is "roaming" or "marker:<name>"."""
-    path, source, _ = _windows_answer()
-    return path, source
+    """(path, source): source is "roaming" or "marker:<name>" on Windows."""
+    answer = resolve()
+    return answer.path, answer.source
 
 
 def data_dir():
     """Claude Desktop's data folder on this platform, whether or not it
     exists -- absence is a normal state, handled by the readers."""
-    if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support/Claude")
-    if os.name == "nt":
-        return windows_data_dir()[0]
-    return os.path.expanduser("~/.config/Claude")
+    return resolve().path
 
 
 def data_dir_source():
-    """How data_dir() was chosen, for `blink status`: "roaming",
-    "marker:<name>", or "default" off Windows."""
-    if sys.platform == "darwin" or os.name != "nt":
-        return SOURCE_DEFAULT
-    return windows_data_dir()[1]
+    """How data_dir() was chosen: "roaming", "marker:<name>", or "default"
+    off Windows."""
+    return resolve().source
 
 
 def marker_without_data():
     """True on Windows when a Store-build marker names a data folder that is
-    not there. Status says so: it is what a bug report needs."""
-    if sys.platform == "darwin" or os.name != "nt":
-        return False
-    return _windows_answer()[2]
+    not there."""
+    return resolve().dangling
 
 
 def usage_cache_path():

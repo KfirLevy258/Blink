@@ -409,8 +409,7 @@ def test_status_says_when_the_marker_points_at_nothing(win, tmp_path, capsys):
     _marker(tmp_path, _roaming(tmp_path))
     row = _desktop_row(capsys)
     assert row[0].startswith("Desktop     no usage cache")
-    assert ("            Store build marker found, its data folder is"
-            " missing") in row
+    assert "            Store build marker found but its folder is gone" in row
     assert not any("moved by the Store build" in l for l in row)
 
 
@@ -418,3 +417,174 @@ def test_status_says_nothing_extra_for_a_plain_install(win, tmp_path, capsys):
     _cache(tmp_path, _roaming(tmp_path))
     row = _desktop_row(capsys)
     assert not any("Store build" in l for l in row)
+
+
+def test_status_says_when_a_fresher_roaming_beat_the_marker(win, tmp_path,
+                                                             capsys):
+    """Back on the exe build. Without the line this desk's report looks
+    exactly like a plain install."""
+    _marker(tmp_path, _roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path), mtime=1_000_000)
+    _cache(tmp_path, _roaming(tmp_path), mtime=2_000_000)
+    row = _desktop_row(capsys)
+    assert "            Store build marker ignored, Roaming is newer" in row
+    assert not any("moved by" in l or "is gone" in l for l in row)
+
+
+def test_status_resolves_the_folder_once(win, tmp_path, capsys, monkeypatch):
+    """Source and path from one answer: two resolves could straddle a
+    rewrite and print "moved" beside the Roaming path."""
+    target = _store_layout(tmp_path)
+    calls = []
+    real = dp._resolve_windows
+    monkeypatch.setattr(dp, "_resolve_windows",
+                        lambda: calls.append(1) or real())
+    row = _desktop_row(capsys)
+    assert ("            data moved by the Store build: " + target) in row
+    assert len(calls) == 1
+
+
+def test_status_names_the_folder_desk_read(win, tmp_path, capsys,
+                                           monkeypatch):
+    """With a desk, the row explains the folder read_desk's reading came
+    from, even if the tree changes before the row prints."""
+    # shutil.which under a simulated win32 reaches for _winapi, which a
+    # posix host does not have; PATH is not what this test is about.
+    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    target = _store_layout(tmp_path)
+    desk = cli.read_desk(version=(None, None))
+    assert desk.desktop_paths.path == target
+    # Now the exe build writes Roaming again; the desk was read before that.
+    _cache(tmp_path, _roaming(tmp_path), mtime=4_000_000_000)
+    cli._source_lines(desk)
+    out = capsys.readouterr().out
+    assert "data moved by the Store build: " + target in out
+    assert "Roaming is newer" not in out
+
+
+# --- one answer per poll ----------------------------------------------------
+
+def test_one_answer_holds_and_releases(win, tmp_path):
+    target = _store_layout(tmp_path)
+    with dp.one_answer() as held:
+        assert held.path == target
+        # The tree changes mid-poll; every reader in the poll still agrees.
+        _cache(tmp_path, _roaming(tmp_path), mtime=4_000_000_000)
+        assert claude_desktop.cache_path().startswith(target)
+        assert desktop_idb.store_path().startswith(target)
+        with dp.one_answer() as inner:
+            assert inner is held
+    # Released: the next call sees the change.
+    assert dp.data_dir() == _roaming(tmp_path)
+
+
+def test_one_answer_is_per_thread(win, tmp_path):
+    import threading
+    target = _store_layout(tmp_path)
+    seen = []
+    with dp.one_answer():
+        _cache(tmp_path, _roaming(tmp_path), mtime=4_000_000_000)
+        t = threading.Thread(target=lambda: seen.append(dp.data_dir()))
+        t.start()
+        t.join()
+        assert dp.data_dir() == target
+    assert seen == [_roaming(tmp_path)]
+
+
+def test_a_poll_resolves_the_folder_once(win, tmp_path, monkeypatch):
+    """Four readers ask per poll, every 2 s on the serial thread."""
+    from pc import ingest
+    _store_layout(tmp_path)
+    calls = []
+    real = dp._resolve_windows
+    monkeypatch.setattr(dp, "_resolve_windows",
+                        lambda: calls.append(1) or real())
+    bus = ingest.IngestionBus()
+    bus.poll_frames()
+    assert len(calls) == 1
+    bus.poll_frames()
+    assert len(calls) == 2
+
+
+# --- review 2026-10-30: branches the first tests left unproved ---------------
+
+def test_a_bracket_in_the_profile_path_still_finds_the_package(
+        win, tmp_path, monkeypatch):
+    """A user name with `[` in it. Unescaped, glob reads `[b]` as a
+    character class, matches nothing, and the package marker is missed."""
+    local = tmp_path / "a[b]" / "AppData" / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    _marker(tmp_path, _package_roaming(tmp_path))
+    target = _target(tmp_path)
+    _cache(tmp_path, target)
+    assert dp.windows_data_dir() == (target, "marker:" + NAME)
+
+
+def test_the_virtualised_local_is_followed(win, tmp_path):
+    """UNMEASURED layout (see _candidate_targets): the Store redirecting
+    Local the way it redirected Roaming."""
+    _marker(tmp_path, _roaming(tmp_path))
+    target = os.path.join(_local(tmp_path), "Packages", "Claude_pzs8sxrjxfjjc",
+                          "LocalCache", "Local", "Claude-Data", NAME)
+    _cache(tmp_path, target)
+    assert dp.windows_data_dir() == (target, "marker:" + NAME)
+
+
+def test_the_virtualised_local_cannot_be_escaped(win, tmp_path):
+    _marker(tmp_path, _roaming(tmp_path), "..")
+    _cache(tmp_path, os.path.join(_local(tmp_path), "Packages",
+                                  "Claude_pzs8sxrjxfjjc", "LocalCache",
+                                  "Local", "Claude-Data"))
+    assert dp.windows_data_dir() == (_roaming(tmp_path), "roaming")
+
+
+def _fake_profile(monkeypatch, profile):
+    """expanduser for the Windows spellings the fallbacks use. On a posix
+    host "~\\AppData\\..." does not expand at all, so the call is mapped
+    here rather than trusted to the host."""
+    def expand(path):
+        if path.startswith("~\\"):
+            return os.path.join(str(profile), *path[2:].split("\\"))
+        return path
+    monkeypatch.setattr(dp.os.path, "expanduser", expand)
+
+
+def test_appdata_falls_back_to_the_profile(win, tmp_path, monkeypatch):
+    monkeypatch.delenv("APPDATA")
+    _fake_profile(monkeypatch, tmp_path)
+    roaming = os.path.join(str(tmp_path), "AppData", "Roaming", "Claude")
+    _cache(tmp_path, roaming)
+    assert dp.windows_data_dir() == (roaming, "roaming")
+
+
+def test_localappdata_falls_back_to_the_profile(win, tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCALAPPDATA")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "elsewhere" / "Roaming"))
+    _fake_profile(monkeypatch, tmp_path)
+    _marker(tmp_path, os.path.join(os.environ["APPDATA"], "Claude"))
+    target = os.path.join(str(tmp_path), "AppData", "Local", "Claude-Data",
+                          NAME)
+    _cache(tmp_path, target)
+    assert dp.windows_data_dir() == (target, "marker:" + NAME)
+
+
+@pytest.mark.parametrize("name", ["D:evil", "a\\b", "a/b"])
+def test_containment_holds_without_the_character_filter(monkeypatch, name):
+    """The backstop on its own: with the character filter emptied, the join
+    check still refuses a drive reset and a nested path."""
+    monkeypatch.setattr(dp, "_BAD_CHARS", ())
+    assert not dp._safe_component(name, r"C:\L\Claude-Data", ntpath)
+
+
+def test_case_variant_markers_are_one_name(win, tmp_path):
+    _marker(tmp_path, _roaming(tmp_path), NAME.upper())
+    _marker(tmp_path, _package_roaming(tmp_path), NAME)
+    assert dp.marker_names(_roaming(tmp_path)) == [NAME.upper()]
+
+
+def test_case_variant_markers_in_one_folder_are_one_name(win, monkeypatch):
+    """Both spellings in one folder. A case-insensitive host (APFS by
+    default, NTFS) cannot hold the two files, so the listing is faked."""
+    monkeypatch.setattr(dp.os, "listdir", lambda folder: [
+        dp.MARKER_PREFIX + NAME, dp.MARKER_PREFIX + NAME.upper()])
+    assert dp.marker_names("anywhere") == [NAME.upper()]

@@ -665,6 +665,9 @@ class Desk(NamedTuple):
     codex: bool
     hooks: ClaudeHooks
     weekly: bool
+    # desktop_paths.Answer the Desktop lines above were read under, so the
+    # status rows explaining the folder name the one actually read.
+    desktop_paths: object = None
 
     @property
     def cli_answers(self) -> bool:
@@ -713,22 +716,29 @@ def read_desk(version=None) -> Desk:
     that hangs costs its 30 s timeout per ask (measured 60.0 s, review
     2026-10-19). The weekly question is only asked where a desk can need it
     -- it may read Desktop's IndexedDB, and a CLI desk has no use for it."""
+    from pc import desktop_paths
     from pc.providers import claude_desktop
     text, ver = claude_version() if version is None else version
-    reading = desktop_reading()
-    # Any cache but the empty one is usage the app wrote: one we cannot
-    # parse included, which the Desktop status row reports on its own.
-    desktop = (reading is not None
-               and reading[0] != claude_desktop.VERDICT_UNFILLED)
+    # Every Desktop question below under one folder answer: the cache, Local
+    # Storage and the weekly sources must describe the same folder.
+    with desktop_paths.one_answer() as folder:
+        reading = desktop_reading()
+        # Any cache but the empty one is usage the app wrote: one we cannot
+        # parse included, which the Desktop status row reports on its own.
+        desktop = (reading is not None
+                   and reading[0] != claude_desktop.VERDICT_UNFILLED)
+        installed = reading is not None or desktop_app_installed()
+        weekly = text is None and desktop and weekly_countdown_known()
     return Desk(claude_text=text, claude_ver=ver,
                 on_path=text is not None or claude_on_path(),
                 desktop=desktop,
                 # The cache in any state is the app's own file.
-                desktop_installed=reading is not None or desktop_app_installed(),
+                desktop_installed=installed,
                 desktop_reading=reading,
                 codex=codex_present(),
                 hooks=claude_hooks(),
-                weekly=text is None and desktop and weekly_countdown_known())
+                weekly=weekly,
+                desktop_paths=folder)
 
 
 def _announce_codex_hooks() -> None:
@@ -3745,9 +3755,22 @@ def _source_lines(desk=None):
     caller that wants these rows alone) it takes its own.
     """
     from pc import desktop_paths
-    from pc.providers import claude_desktop, codex_cli
     now = time.time()
 
+    # One folder answer for the whole Desktop row: desk's, when the reading
+    # came from there, so the row names the folder the reading came from.
+    # Asked separately, the source and the path were two resolves, and a
+    # cache rewritten between them could print "moved by the Store build"
+    # beside the Roaming path (review, 2026-10-30).
+    held = desk.desktop_paths if desk is not None else None
+    with desktop_paths.one_answer(held) as folder:
+        _source_lines_desktop(desk, folder, now)
+    _source_lines_codex(now)
+
+
+def _source_lines_desktop(desk, folder, now):
+    """_source_lines' Desktop row, under the folder answer `folder`."""
+    from pc.providers import claude_desktop
     desktop = claude_desktop.ClaudeDesktopProvider()
     reading = desk.desktop_reading if desk is not None else desktop_reading()
     if reading is not None:
@@ -3801,21 +3824,29 @@ def _source_lines(desk=None):
             print("Desktop     no usage cache (Claude Desktop not installed,"
                   " or never signed in)")
         print(f"            looked at {desktop.path()}")
-        if desktop_paths.marker_without_data():
+        if folder.dangling:
             # The app left a note saying where its data went, and that
             # folder is gone. Reading Roaming instead is the right fallback,
             # and this line is what a Store-build report needs to say why.
-            print("            Store build marker found, its data folder"
-                  " is missing")
-    source = desktop_paths.data_dir_source()
-    if source.startswith(desktop_paths.SOURCE_MARKER_PREFIX):
+            print("            Store build marker found but its folder"
+                  " is gone")
+    if folder.moved:
         # Windows only. On the Store build measured 2026-10-29 Roaming held
         # nothing but the marker, so a report that does not name the folder
         # actually read leaves the reader guessing which of two layouts
         # this desk has. See pc/desktop_paths.
-        print(f"            data moved by the Store build:"
-              f" {desktop_paths.data_dir()}")
+        print(f"            data moved by the Store build: {folder.path}")
+    elif folder.ignored:
+        # A marker and its folder are there, but Roaming was written more
+        # recently -- the exe build back in use. Without this line the
+        # report reads like a plain install, and "why is it reading Roaming
+        # when I have Claude-Data?" has no answer in it.
+        print("            Store build marker ignored, Roaming is newer")
 
+
+def _source_lines_codex(now):
+    """_source_lines' Codex rows."""
+    from pc.providers import codex_cli
     logs = codex_cli.recent_rollouts()
     if logs:
         # sweep=False, matching _live_sessions above and for the same reason:
