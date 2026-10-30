@@ -28,9 +28,19 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32",
                                        " daemon another way")
 
 
+# Put first in every child, so wait_for can ask a stuck one where it is
+# stuck. Without it a child that hung printed nothing at all: the review of
+# fp/ci-fixes made the resolver take 30 s and got "(still running);
+# stderr:" with an empty stderr after it. SIGUSR1 rather than
+# PYTHONFAULTHANDLER and SIGABRT, which also works but aborts the child and
+# leaves a macOS crash report behind. Child line numbers shift by two.
+_DUMP_ON_USR1 = ("import faulthandler, signal\n"
+                 "faulthandler.register(signal.SIGUSR1)\n")
+
+
 def spawn(tmp_path, body):
     script = tmp_path / "child.py"
-    script.write_text(textwrap.dedent(body), encoding="utf-8")
+    script.write_text(_DUMP_ON_USR1 + textwrap.dedent(body), encoding="utf-8")
     env = dict(os.environ, HOME=str(tmp_path), PYTHONPATH=ROOT,
                PYTHONDONTWRITEBYTECODE="1", BLINK_SKIP_SERVICE="1")
     return subprocess.Popen([sys.executable, str(script), str(tmp_path)],
@@ -43,7 +53,9 @@ def wait_for(path, proc, timeout=10):
     what the child did: on macos-latest this once came back as a bare
     `assert False` twice running, with nothing to tell a child that died
     from one that was stuck. A child that has exited is reported at once
-    rather than waited out."""
+    rather than waited out, with its stderr; a stuck one is first asked
+    for every thread's stack (_DUMP_ON_USR1), so the failure shows the
+    frame it was stuck in."""
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if os.path.exists(path):
@@ -51,9 +63,16 @@ def wait_for(path, proc, timeout=10):
         if proc.poll() is not None:
             break
         time.sleep(0.02)
+    # Looked at once more: a child may make the file and exit between the
+    # check above and its poll(). None of today's children exit after
+    # making theirs, but a future one would fail here for nothing.
+    if os.path.exists(path):
+        return True
     state = ("still running" if proc.poll() is None
              else f"exited {proc.returncode}")
     if proc.poll() is None:
+        proc.send_signal(signal.SIGUSR1)
+        time.sleep(0.5)     # faulthandler writes from its own handler
         proc.kill()
     _, err = proc.communicate(timeout=10)
     pytest.fail(f"child made no {os.path.basename(path)!r} ({state});"
