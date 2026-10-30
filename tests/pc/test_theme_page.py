@@ -710,7 +710,7 @@ def test_a_state_that_never_answers_ends_in_the_notice():
     """ + NOTICE.replace("return {", "return { at9, limited,"),
                          {"/api/state": "hold"})
     assert r["at9"] == [True, "Loading your current theme. You can make"
-                       " changes once it's here."]
+                       " changes once it is here."]
     assert r["limited"] is True
     assert r["shown"] is True and r["why"] == "The builder stopped."
     assert r["offer"] is False      # it never had the owner's theme
@@ -862,6 +862,21 @@ def test_the_controls_dim_only_once_a_state_is_slow():
     return { at100, at200, after: cls() };
     """, {"/api/state": "held"})
     assert r == {"at100": False, "at200": True, "after": False}
+
+
+def test_a_tab_that_ends_before_the_dim_never_dims():
+    """Review of fp/save-before-load r2, NICE 1: the 150 ms timer outlived
+    a state refused at 10 ms, and dimmed the controls behind the notice.
+    gone() ends it with the tab."""
+    r = builder_page.run("""
+    const cls = () => document.querySelector('main').classList.contains('waiting');
+    await advance(10);
+    held['/api/state'][0].release({ status: 500, body: {} }); await advance(10);
+    const shown = $('notice').getAttribute('hidden') === null;
+    await advance(300);
+    return { shown, dim: cls() };
+    """, {"/api/state": "held"})
+    assert r == {"shown": True, "dim": False}
 
 
 def test_the_loading_dim_leaves_the_words_readable():

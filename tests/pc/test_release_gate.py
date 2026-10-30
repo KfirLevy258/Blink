@@ -542,6 +542,24 @@ def test_a_recorded_relative_inventory_is_read_against_the_checkout():
     assert not fleet_gate._same_inventory(None, ROOT / "x")
 
 
+def test_the_recorded_inventory_is_not_read_against_where_the_gate_runs(
+        tmp_path, monkeypatch):
+    """Review of fp/fleet-vms r2, N-a: every other test runs from the repo
+    root, where the checkout and the working directory are one folder, so
+    a later "simplification" that resolved the recorded path against the
+    cwd survived them all. From outside the checkout -- with a decoy
+    inventory at the same relative path in the cwd -- the recorded path
+    still means the checkout's file, and only that one."""
+    decoy = tmp_path / "tools" / "fleet" / "fleet-vm.toml"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("[hosts]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert fleet_gate._same_inventory(
+        "tools/fleet/fleet-vm.toml", ROOT / "tools" / "fleet"
+        / "fleet-vm.toml")
+    assert not fleet_gate._same_inventory("tools/fleet/fleet-vm.toml", decoy)
+
+
 def test_an_inventory_kind_nothing_knows_is_refused(tmp_path):
     reason = gate(_vm_state(tmp_path), SHA,
                   _vm_inventory(tmp_path, kind="cloud"), now=lambda: 2000.0)

@@ -275,7 +275,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     <svg class="icon s-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/></svg>
     <svg class="icon s-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>
     <svg class="icon s-err" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
-    <span id="status-text">Loading your current theme. You can make changes once it's here.</span>
+    <span id="status-text">Loading your current theme. You can make changes once it is here.</span>
   </div>
   <div class="actions">
     <button type="button" class="btn primary" id="save" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Save to board</span></button>
@@ -654,10 +654,14 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // answer still sent one preview after the tab had stopped (review of
   // fp/edit-reset r2, NICE 1). The two copy buttons used to stay live, as
   // the way a draft left here is carried anywhere else; the notice below
-  // has that button now, and everything behind it is still.
+  // has that button now, and everything behind it is still. The loading
+  // dim's timer ends with the tab as well: a state refused in 10 ms used
+  // to dim the controls behind the notice 140 ms later (review of
+  // fp/save-before-load r2, NICE 1).
   function gone() {
     finished = true;
     clearTimeout(previewTimer);
+    clearTimeout(waiting);
     document.querySelectorAll('header button, main button, main input').forEach(function (e) { e.disabled = true; });
   }
   // The notice, over a page made inert. A tab that had stopped said so
