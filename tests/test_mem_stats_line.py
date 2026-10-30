@@ -1,8 +1,10 @@
-"""The board's "[mem] lvgl ..." line, and the path it takes to bridge.log.
+"""The board's "[mem] lvgl ..." line, and what of it reaches bridge.log.
 
 The LVGL pool is read on the board (firmware/src/mem_stats.c) and printed to
-the console; the daemon's console echo is what puts it in ~/.blink/bridge.log,
-where the next feature to need that pool gets sized from it. Two ways for the
+the console, where the next feature to need that pool gets sized from it. The
+daemon's console echo once copied the whole line into ~/.blink/bridge.log; it
+now copies only "[mem]" (pc/logbook.console_line), because the figures are
+values off the serial buffer. Two ways for the
 number to silently stop arriving are pinned here, because neither shows up as
 a build error:
 
@@ -13,9 +15,8 @@ a build error:
   - CONFIG_SYS_HEAP_ARRAY_SIZE at its default 0. The LVGL heap is then not
     findable and every line says "pool not found".
 
-And the line must stay one the echo keeps: it drops anything starting with
-'{' as protocol JSON (pc/logbook.py), so the format is checked by running a
-line rendered from the firmware's own format string through it.
+And what the echo makes of it is checked by running a line rendered from the
+firmware's own format string through it: the tag, and none of the figures.
 """
 import re
 from pathlib import Path
@@ -58,12 +59,16 @@ def test_the_line_names_every_field_the_measurement_needs():
     assert fmt.endswith("\\n")
 
 
-def test_the_line_reaches_the_log_whole():
+def test_the_line_reaches_the_log_as_its_tag_only():
+    """It used to reach bridge.log whole. Its figures are values off the
+    serial buffer, and since 2026-10-30 the echo keeps a tag and a fixed set
+    of messages and nothing else (pc/logbook.CONSOLE_MESSAGES), so a
+    customer's log says a report happened and the numbers are read from the
+    board's console on a bench."""
     fmt = _printk_format().replace("\\n", "\n")
-    line = fmt.replace("%s", "settings", 1).replace("%u", "1")
+    line = fmt.replace("%s", "settings", 1).replace("%u", "31337")
     out = logbook.ConsoleEcho().feed(line.encode())
-    assert out == [line.rstrip("\n")]
-    assert out[0].startswith("[mem] lvgl settings: used=1 ")
+    assert out == ["[mem]"]
 
 
 def test_the_lvgl_pool_is_32_kib_and_the_bench_knows_it():

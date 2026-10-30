@@ -29,9 +29,9 @@ Three separate faults were producing that, and they need three answers:
      assembles whole lines and hands them to the same print path, so there
      is one writer again.
 
-Nothing here imports anything outside the standard library, and nothing here
-looks at a payload: ConsoleEcho splits on newlines and forwards, and the
-Journal counts bytes.
+Nothing here imports anything outside the standard library. The Journal
+counts bytes and looks at no payload. ConsoleEcho does look at what it
+forwards, on purpose and only to cut it down: see console_line.
 """
 import contextlib
 import os
@@ -267,6 +267,160 @@ class Journal:
         return getattr(self._stream, "buffer", None)
 
 
+# What a line of the board's console may say in bridge.log.
+#
+# ConsoleEcho used to forward each printk line verbatim, and the firmware
+# prints values: the usage it applied (proto.c:620, "[usage] session 41%
+# (11723s) weekly 9% ..."), every version on offer and running (ota.c:374,
+# ui_settings.c:830, main.c:126, main.c:233), the app and protocol of the
+# host (proto.c:711), the edition (bootclip.c:68), heap figures
+# (mem_stats.c:131), touch coordinates (ui_swipe.c:190 and :313), the
+# backlight level (backlight.c:39) -- and until 2026-10-28 the stored WiFi
+# network's name, verbatim (cfg_store.c:491, which now says only "present").
+# All of it landed in the file a customer emails us, against the CLAUDE.md
+# rule that no value off the serial buffer is logged; the SSID was fixed at
+# the firmware end, which only protects boards that have taken the update. Dropping the echo would also drop the only firmware-side evidence
+# of an OTA, a fault reboot or a failed store, so the owner chose
+# (2026-10-30) to keep the tag and a fixed set of messages and nothing else.
+#
+# Each entry is the constant text a printk in firmware/src starts with, up
+# to its first formatted value: the whole message when it has none, and the
+# words before the value when it does, so "[ota] downloading %s (%u bytes)"
+# logs as "[ota] downloading". The values are cut, never carried.
+# tests/pc/test_console_allowlist.py fails if an entry stops being the
+# prefix of a real printk, so the list cannot drift away from the firmware
+# silently. Matched longest first, because several share a beginning.
+#
+# Left out on purpose, and logged as the bare tag: messages whose constant
+# prefix says nothing without its value ("[ota] latest", "[ota] image %u",
+# "[mem] lvgl", "[swipe] dx", "[slide] dir", "[bl]", "[cfg] mode=" -- that
+# last one is the SSID and token line, so even its stem stays out, because a
+# board on older firmware still prints the network's name after it).
+#
+# The cost: "[mem] lvgl <where>: used=... peak=..." (mem_stats.c:131) no
+# longer carries its numbers into bridge.log. Size the LVGL pool from the
+# board's own console on a bench (a serial monitor, with the daemon
+# stopped), not from a customer's log.
+CONSOLE_MESSAGES = tuple(sorted((
+    # [ota] -- firmware/src/ota.c, ui_settings.c, main.c
+    "[ota] slot1 write failed",                                # ota.c:175
+    "[ota] bad redirect target",                               # ota.c:344
+    "[ota] too many redirects for",                            # ota.c:352
+    "[ota] downloading",                                       # ota.c:412
+    "[ota] transfer ended",                                    # ota.c:436
+    "[ota] truncated",                                         # ota.c:466
+    "[ota] sha256 mismatch",                                   # ota.c:480
+    "[ota] install not started: the offer changed under the prompt",
+    "[ota] install not started: the offer changed under the confirm",
+    "[ota] offer shown",                              # ui_settings.c:830
+    "[ota] offer withdrawn: a different version is on offer",  # :1311
+    "[ota] offer withdrawn: state is no longer available",     # :1326
+    "[ota] install confirm withdrawn: the offer it named is no longer"
+    " available",                                     # ui_settings.c:1346
+    "[ota] test boot of",                                      # main.c:126
+    "[ota] image confirmed",                                   # main.c:160
+    "[ota] not healthy within 90 s -- rebooting to revert",    # main.c:164
+    # [proto] -- firmware/src/proto.c
+    "[proto] host says bye",                                   # :433
+    "[proto] host time synced",                                # :632
+    "[proto] host connected",                                  # :711
+    "[proto] daemon offers",                                   # :796
+    "[proto] ota: writing",                                    # :810
+    "[proto] daemon resuming install of",                      # :830
+    "[proto] ota failed",                                      # :860
+    "[proto] host status",                                     # :867
+    "[proto] rx ring overflow, dropped",                       # :947
+    "[proto] host went away",                                  # :1025
+    # [fatal] -- firmware/src/fatal.c. The three "reason" lines differ only
+    # after their numbers, so they share one stem.
+    "[fatal] reason",                                          # :68 :78 :82
+    "[fatal] selftest: writing through NULL at",               # :98
+    "[fatal] this boot follows",                               # :117
+    "[fatal] SELFTEST BUILD: will fault at",                   # :122
+    # [usage] -- firmware/src/main.c, proto.c
+    "[usage] panel: DBI bus not ready, MADCTL uncorrected",    # main.c:97
+    "[usage] panel: MADCTL write failed",                      # main.c:103
+    "[usage] no app after 60 s; dozing until one speaks",      # main.c:542
+    "[usage] firmware boot OK",                                # main.c:568
+    "[usage] FATAL: mbedTLS allocator hookup failed",          # main.c:584
+    "[usage] display not ready",                               # main.c:589
+    "[usage] cleared a stored refresh token: no WiFi in this build",
+    "[usage] mode: USB bridge (no host yet)",                  # main.c:663
+    "[usage] mode: USB bridge",                                # main.c:639
+    "[usage] session",                                         # proto.c:620
+    # [cfg] -- firmware/src/cfg_store.c, proto.c
+    "[cfg] migrated 1.3.4 record",                             # :218
+    "[cfg] migrated pre-lock record",                          # :268
+    "[cfg] migrated pre-edition record",                       # :301
+    "[cfg] migrated pre-main_src record",                      # :329
+    "[cfg] migrated pre-OTA record",                           # :355
+    "[cfg] persist failed",                                    # :383
+    "[cfg] storage open failed",                               # :412
+    "[cfg] theme and focus taken from the older slot",         # :480
+    "[cfg] unknown edition",                                   # proto.c:666
+    "[cfg] edition already stamped as",                        # proto.c:683
+    "[cfg] edition set to",                                    # proto.c:688
+    "[cfg] could not store the edition",                       # proto.c:691
+    # [theme] -- firmware/src/ui_theme.c, proto.c
+    "[theme] preview timed out; back to the stored theme",     # :114
+    "[theme] could not store the theme",                       # :155
+    "[theme] preview cancelled",                               # :214
+    "[theme] saved",                                           # :248
+    "[theme] line refused",                                    # proto.c:753
+    # [boot] -- firmware/src/ui_boot.c, logo.c, bootclip.c
+    "[boot] logo: frame failed to decode",                     # ui_boot.c:203
+    "[boot] logo: cannot map partition",                       # logo.c:38
+    "[boot] logo: company",                                    # logo.c:46
+    "[boot] logo: none",                                       # logo.c:53
+    "[boot] unknown edition",                                  # bootclip.c:64
+    "[boot] edition",                                          # bootclip.c:68
+    # the rest
+    "[sleep] dozing",                                          # ui_sleep.c:183
+    "[sleep] waking",                                          # ui_sleep.c:201
+    "[focus] could not store the choice",                # ui_settings.c:2717
+    "[slide] VSCRDEF refused; transitions will not scroll",    # ui_slide.c:131
+    "[touch] INJECT BUILD: the PC can drive this panel -- bench only, never"
+    " ship this",                                         # touch_inject.c:490
+    "[time] manual time",                                      # net_time.c:67
+), key=len, reverse=True))
+
+# "[ota] update %s: wanted %s, running %s (from %s)" (main.c:233) is the line
+# that says whether an update landed or was reverted, and its first value is
+# one of two words the firmware picks itself, never one it was sent. Those
+# two renderings are kept whole; everything after them is cut like any other
+# value.
+CONSOLE_RENDERED = ("[ota] update landed", "[ota] update REVERTED")
+
+# Every tag a printk in firmware/src opens with. A line opening with any
+# other bracketed word -- or with none: the bootloader's and Zephyr's own
+# banners, the touch tracer's #TT rows -- is a fixed placeholder, because
+# its first word is the board's text too.
+CONSOLE_TAGS = frozenset({
+    "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "proto", "sleep",
+    "slide", "swipe", "theme", "time", "touch", "usage",
+})
+
+BOARD_LINE = "(board line)"
+
+
+def console_line(line: str) -> str:
+    """What bridge.log may say for one line of the board's console.
+
+    A known message logs as its constant text, a known tag on anything else
+    as the bare tag, and everything else as BOARD_LINE. Nothing the board
+    formatted into the line survives.
+    """
+    text = line.strip()
+    for known in CONSOLE_RENDERED + CONSOLE_MESSAGES:
+        if text.startswith(known):
+            return known
+    if text.startswith("[") and "]" in text:
+        tag = text[1:text.index("]")]
+        if tag in CONSOLE_TAGS:
+            return f"[{tag}]"
+    return BOARD_LINE
+
+
 class ConsoleEcho:
     """The board's own console output, one whole line at a time.
 
@@ -280,7 +434,8 @@ class ConsoleEcho:
     which is most of the traffic, is written a third time as the pong going
     back. What is left is what the echo was actually for: the board's printk
     output, its [proto] and [ota] and [usage] lines, which exist nowhere
-    else.
+    else -- and those are cut to console_line() before they are returned,
+    because the firmware formats values into them.
     """
 
     # Deliberately a shape test on the first character and not a parse. This
@@ -308,7 +463,7 @@ class ConsoleEcho:
                 continue
             if line.lstrip().startswith("{"):
                 continue            # protocol JSON: logged parsed instead
-            lines.append(line)
+            lines.append(console_line(line))
         if len(self._buf) > self._limit:
             del self._buf[:-self._limit]
         return lines

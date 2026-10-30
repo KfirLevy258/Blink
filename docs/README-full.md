@@ -609,4 +609,8 @@ daemon that stopped.
 A message to or from the board is logged by its type alone - `-> usage`,
 `<- hello` - never by what it carries: no usage figures, project names,
 theme colours or the board's id. `blink status --wire` shows the next usage
-message in full on your own screen when you want to see it.
+message in full on your own screen when you want to see it. The board's own
+console lines are copied in the same spirit: a known message as its fixed
+words (`[ota] image confirmed`, `[ota] downloading`), anything else as its
+tag alone (`[mem]`), and never a number, version or name the board printed
+after them.
