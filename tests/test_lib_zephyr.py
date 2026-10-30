@@ -107,7 +107,14 @@ class Sandbox:
         if os.path.basename(self.shell).startswith("zsh"):
             cmd.append("-f")    # skip /etc/zshenv and ~/.zshenv
         # `setup` is the caller's own shell state, in place before sourcing.
-        cmd += ["-c", f'{setup}\n. "{LIBRARY}"; {script}']
+        # The library in forward slashes: on Windows str(LIBRARY) is
+        # D:\a\...\lib_zephyr.sh, a name with no "/" in it, and POSIX `.`
+        # looks such a name up on PATH instead of opening it. bash falls
+        # back to opening it anyway; Git for Windows' dash does not, and
+        # said "lib_zephyr.sh: not found" (CI run 41093831896). D:/a/...
+        # has a slash, so every shell opens it, and the MSYS runtime
+        # accepts that spelling of a drive path.
+        cmd += ["-c", f'{setup}\n. "{LIBRARY.as_posix()}"; {script}']
         return subprocess.run(cmd, env=env, cwd=cwd, capture_output=True,
                               text=True, timeout=30)
 
