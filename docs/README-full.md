@@ -609,8 +609,13 @@ daemon that stopped.
 A message to or from the board is logged by its type alone - `-> usage`,
 `<- hello` - never by what it carries: no usage figures, project names,
 theme colours or the board's id. `blink status --wire` shows the next usage
-message in full on your own screen when you want to see it. The board's own
-console lines are copied in the same spirit: a known message as its fixed
-words (`[ota] image confirmed`, `[ota] downloading`), anything else as its
-tag alone (`[mem]`), and never a number, version or name the board printed
-after them.
+message in full on your own screen when you want to see it. The one thing
+the board reports that the log does repeat is which firmware it runs, in
+the update check (`ota: board has 1.4.0, release has 1.4.0`), and that is
+rebuilt from the numbers the app read rather than copied as sent. The
+board's own console lines are copied in the same spirit: a known message as
+its fixed words (`[ota] image confirmed`, `[ota] downloading`), a known tag
+on anything else as the tag alone (`[mem]`), and a line from anything other
+than BLINK's own firmware code - the bootloader, the operating system, the
+graphics library - as `(board line)`. Nothing the board printed after those
+words is kept.

@@ -301,6 +301,20 @@ class Journal:
 # longer carries its numbers into bridge.log. Size the LVGL pool from the
 # board's own console on a bench (a serial monitor, with the daemon
 # stopped), not from a customer's log.
+#
+# And every line that is not one of our printks is now "(board line)": the
+# lines firmware/prj.conf calls out as the evidence before a fault --
+# LVGL's pool-exhaustion warnings ("No memory", "Allocating layer buffer
+# failed"), Zephyr's "--- N messages dropped ---", and ">>> ZEPHYR FATAL
+# ERROR" with its register dump. Their text is fixed, but it lives in Zephyr
+# and LVGL, not in this repository, so no test here could fail when an
+# upgrade rewords it the way test_console_allowlist fails for ours; and the
+# LOG_* lines arrive behind a timestamp and, on a colour console, an ANSI
+# prefix, so a stem would have to be matched past text the board chose.
+# Left out for those reasons (review of 2026-10-30, N1). The placeholder
+# still marks that the board said something at that moment, and a fault is
+# still named by our own "[fatal] reason" as it happens and "[fatal] this
+# boot follows" on the next boot.
 CONSOLE_MESSAGES = tuple(sorted((
     # [ota] -- firmware/src/ota.c, ui_settings.c, main.c
     "[ota] slot1 write failed",                                # ota.c:175

@@ -52,8 +52,13 @@ mutates the tree.
 
 The board reads NDJSON lines and **drops an over-long line whole**, silently,
 with no error on either side — the panel just stops updating while the daemon's
-log keeps printing the message as sent. The budget is 512 bytes and a loaded
+log keeps saying it was sent (`-> usage`). The budget is 512 bytes and a loaded
 two-provider frame already measures 484.
+
+That log line names the type and nothing else, in both directions, and the
+board's console is cut to a fixed allowlist (`protocol.log_name`,
+`logbook.console_line`). Until 2026-10-30 both printed whole messages and
+lines, ids and usage figures included, into the file customers send us.
 
 So: every production writer uses `protocol.encode_checked()`, never plain
 `encode()`. `encode_checked` was written for exactly this and once had no
@@ -73,10 +78,10 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**2984 passing** as of 2026-10-30, on macOS. The last count proved on all
+**2988 passing** as of 2026-10-30, on macOS. The last count proved on all
 three platforms was 2871, earlier that day: Ubuntu (Docker, x86_64) 2787
-passed and 84 skipped,
-Windows (ARM64 VM) 2626 passed and 239 skipped, none failing. The skips are
+passed and 84 skipped, Windows (ARM64 VM) 2626 passed and 239 skipped, none
+failing. The skips are
 platform tests and, on Windows, the builder-page tests that need Node. Re-run
 Ubuntu and Windows before claiming them for a new number. Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though

@@ -13,6 +13,7 @@ line, so "not in the log" is a real check and not a coincidence of wording.
 """
 import ast
 import pathlib
+import re
 
 import pytest
 
@@ -85,9 +86,51 @@ def test_every_type_the_daemon_builds_is_one_the_log_can_name():
              protocol.edition("claude"), protocol.session("p", 1),
              protocol.status("ok"), protocol.theme("cancel"),
              protocol.theme_edit_reply(True), protocol.theme_edit_done(),
-             protocol.ota_none()]
+             protocol.svc("claude", "ok"),
+             protocol.ota_avail("1.4.0", 1, "0" * 64),
+             protocol.ota_begin("1.4.0"), protocol.ota_resume("1.4.0"),
+             protocol.ota_none(), protocol.ota_error("x")]
     for m in built:
         assert protocol.log_name(m) == m["t"]
+
+
+# The firmware's side of the same check. Review of this branch (2026-10-30)
+# deleted svc, ota_flash and ota_avail from WIRE_TYPES one at a time and no
+# test failed -- and those lines would then have logged as "(unknown type)",
+# losing the OTA trail that is most of what support reads this log for.
+_FW_SRC = ROOT / "firmware" / "src"
+# Received by the bench injector from tools/board_touch.py, never from the
+# daemon, so the daemon's log never has it to name.
+_BENCH_ONLY = {"touch"}
+_SENT = re.compile(r'\\"t\\":\\"([a-z_]+)')
+_READ = re.compile(r'strcmp\(type,\s*"([a-z_]+)"\)')
+
+
+def _firmware_types():
+    sent, received = set(), set()
+    for path in sorted(_FW_SRC.rglob("*.[ch]")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        sent.update(_SENT.findall(text))
+        received.update(_READ.findall(text))
+    return sent, received
+
+
+def test_every_type_the_firmware_sends_or_reads_is_one_the_log_can_name():
+    sent, received = _firmware_types()
+    # The scan going blind would pass the subset check vacuously.
+    assert {"hello", "ping", "ota_query", "ota_flash"} <= sent
+    assert {"usage", "svc", "ota_avail", "ota_none"} <= received
+    missing = (sent | received) - _BENCH_ONLY - protocol.WIRE_TYPES
+    assert not missing, (
+        f"firmware/src uses message types {sorted(missing)} that "
+        f"protocol.WIRE_TYPES does not list; they would log as "
+        f"{protocol.UNKNOWN_TYPE!r}")
+
+
+def test_wire_types_names_nothing_the_firmware_does_not_use():
+    sent, received = _firmware_types()
+    stale = protocol.WIRE_TYPES - sent - received
+    assert not stale, sorted(stale)
 
 
 # --- the daemon's own arrow lines -------------------------------------------
@@ -158,6 +201,25 @@ def test_a_version_of_endless_digits_is_not_carried_either(capsys):
     err = capsys.readouterr().err
     assert "7" * 20 not in err
     assert "board has an unreadable version" in err
+
+
+def test_a_protocol_number_of_endless_digits_is_not_carried(capsys):
+    """v is int()-parsed, so it cannot carry text, but it has no length:
+    review put a ping with a 300-digit v through and got all 300 digits in
+    bridge.log (2026-10-30, S1)."""
+    b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None, **_NO_FEED)
+    b.on_message({"t": "ping", "v": int("9" * 300)})
+    b.on_message({"t": "ota_query", "v": int("9" * 300), "cur": "1.3.4"})
+    err = capsys.readouterr().err
+    assert "9" * 20 not in err
+    assert "the board speaks a newer protocol and" in err
+    assert "ota: board speaks a newer protocol," in err
+
+
+def test_a_real_protocol_number_is_still_named(capsys):
+    b = Bridge(write_msg=lambda m: None, fetch_usage=lambda: None, **_NO_FEED)
+    b.on_message({"t": "ping", "v": 99})
+    assert "the board speaks protocol 99 and" in capsys.readouterr().err
 
 
 class _Fixed(base.ProviderParser):

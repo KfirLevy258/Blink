@@ -56,6 +56,20 @@ def _version_for_log(fw) -> str:
     return "%d.%d.%d" % parts
 
 
+def _proto_for_log(proto) -> str:
+    """The board's protocol number as a log line may say it.
+
+    It is int(msg["v"]), so it cannot carry text, but it is still a value
+    off the wire with no length: review of this branch (2026-10-30) put a
+    ping with a 300-digit v through and got all 300 digits in bridge.log.
+    Bounded the way _version_for_log is. Only ever printed for a board ahead
+    of us, so anything out of range is still truthfully "a newer protocol".
+    """
+    if isinstance(proto, int) and 0 <= proto <= 9999:
+        return f"protocol {proto}"
+    return "a newer protocol"
+
+
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  set_preferred=None,
@@ -318,7 +332,8 @@ class Bridge:
 
     def _announce_if_ahead(self):
         if self._board_ahead() and not self._announced_ahead:
-            print(f"[bridge] the board speaks protocol {self._board_proto} and"
+            print(f"[bridge] the board speaks"
+                  f" {_proto_for_log(self._board_proto)} and"
                   f" this app speaks {PROTO_VERSION} -- update the app on this"
                   " computer; firmware updates are held until you do",
                   file=sys.stderr)
@@ -365,7 +380,8 @@ class Bridge:
         # not a good enough basis for the one operation that can leave a
         # customer holding a device that does not start.
         if self._board_ahead():
-            print(f"[bridge] ota: board speaks protocol {self._board_proto},"
+            print(f"[bridge] ota: board speaks"
+                  f" {_proto_for_log(self._board_proto)},"
                   f" this app speaks {PROTO_VERSION} -- not offering an update",
                   file=sys.stderr)
             self._ota_reset()
