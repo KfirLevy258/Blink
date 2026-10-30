@@ -516,8 +516,8 @@ The builder is a page served by the app to your own browser and nobody else:
 it listens on 127.0.0.1 only, on a link that works once, and fetches nothing
 from the internet. It opens on the theme your board has now, and until it
 has read that (usually at once) it says **Loading your current theme.** and
-its controls, all but **Cancel**, stay off, so nothing can be saved over a theme it has not
-seen. Every change shows on the board as you make it, as a
+its controls, all but **Cancel**, stay off, so nothing can be saved over a
+theme it has not seen. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
 without a change puts the board back on the theme it had. Press **Edit on
 computer** again at any time: with the builder still open it opens it again

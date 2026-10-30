@@ -799,3 +799,26 @@ def test_a_percent_in_a_path_for_a_powershell_desk_is_refused(tmp_path,
                           runner=lambda *a, **k: None)
     assert code == 2
     assert "%" in capsys.readouterr().err
+
+
+def test_a_ctrl_c_during_a_handback_stops_the_run_and_says_so(tmp_path):
+    """A single Ctrl-C during an ordinary handback, with nothing else in
+    flight: disconnect() records its warning and lets the interrupt
+    through, so no later VM is handed the board. Swallowing it instead
+    (a `return []` in place of the `raise`) would move on to the next VM's
+    handoff with this board unaccounted for. (Review of fp/docs-pass r2,
+    N1)"""
+    (tmp_path / "wd").mkdir()
+    runner = VmRunner(local_workdir=tmp_path / "wd",
+                      fail={"disconnect": KeyboardInterrupt()})
+    state = tmp_path / "s.json"
+    with pytest.raises(KeyboardInterrupt):
+        fleet_run.main(["--inventory", str(_vm_inventory(tmp_path)),
+                        "--state", str(state)], runner=runner,
+                       ask=lambda p: None, interactive=False,
+                       leases=tmp_path / "none")
+    assert runner.kinds.count("connect") == 1
+    assert runner.kinds[-1] == "release"
+    doc = json.loads(state.read_text(encoding="utf-8"))
+    assert doc["ok"] is False
+    assert ["may still be in that VM" in w for w in doc["warnings"]] == [True]
