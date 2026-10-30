@@ -151,7 +151,8 @@ fi
 # downloaded here. A build without it is supported and is what every machine
 # produces by default: pc/win_driver.py finds no package and says so.
 # A native C:\... path and a ";" separator, unlike the two scripts'
-# --add-data lines. Both were arrived at the hard way on the release desk (2026-09-06):
+# --add-data lines. Both were arrived at the hard way on the release desk
+# (2026-09-06):
 #
 #   - Handing Git Bash the /c/Users/... form produced
 #     \c\Users\...\vendor\ch341ser -- slashes flipped, drive letter never
