@@ -43,7 +43,8 @@ def _python39(tmp_path, name="python3.9"):
     return fake
 
 
-def _release(tmp_path, python=None, skip_fleet=False, path_prefix=None):
+def _release(tmp_path, python=None, skip_fleet=False, path_prefix=None,
+             fleet=None):
     repo = tmp_path / "repo"
     (repo / "tools").mkdir(parents=True)
     (repo / "firmware" / "src").mkdir(parents=True)
@@ -52,7 +53,7 @@ def _release(tmp_path, python=None, skip_fleet=False, path_prefix=None):
     shutil.copy(ROOT / "tools" / "release.sh", repo / "tools" / "release.sh")
     env = dict(os.environ)
     for leak in ("BLINK_SKIP_FLEET", "BLINK_PYTHON", "BASH_ENV", "ENV",
-                 "OTA_REPO", "OTA_REPO_URL"):
+                 "OTA_REPO", "OTA_REPO_URL", "BLINK_FLEET"):
         env.pop(leak, None)
     env["HOME"] = str(tmp_path)
     env["OTA_REPO_URL"] = str(tmp_path / "no-such-remote")
@@ -60,6 +61,8 @@ def _release(tmp_path, python=None, skip_fleet=False, path_prefix=None):
         env["BLINK_PYTHON"] = str(python)
     if skip_fleet:
         env["BLINK_SKIP_FLEET"] = "1"
+    if fleet is not None:
+        env["BLINK_FLEET"] = fleet
     if path_prefix is not None:
         env["PATH"] = f"{path_prefix}:{env['PATH']}"
     return subprocess.run(["bash", str(repo / "tools" / "release.sh")],
@@ -117,3 +120,22 @@ def test_skipping_the_gate_takes_a_named_3_9(tmp_path):
     r = _release(tmp_path, fake, skip_fleet=True)
     assert "needs Python" not in r.stderr
     assert "is not on the remote" in r.stderr
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11),
+                    reason="needs this interpreter to be one release.sh takes")
+def test_the_vm_fleet_is_asked_for_by_name_and_announced(tmp_path):
+    r = _release(tmp_path, sys.executable, fleet="vm")
+    assert "NOTE: BLINK_FLEET=vm" in r.stderr
+    assert "not Windows 10 on x86" in r.stderr
+    assert "the fleet gate refused" in r.stderr
+    assert "--inventory tools/fleet/fleet-vm.toml" in r.stderr
+
+
+def test_a_fleet_nobody_committed_is_refused_before_the_gate(tmp_path):
+    """Only the two committed inventories can be named: a path would let
+    any file with one desk in it vouch for a release."""
+    r = _release(tmp_path, sys.executable, fleet="tools/one-desk.toml")
+    assert r.returncode == 1
+    assert "it is desks or vm" in r.stderr
+    assert "the fleet gate refused" not in r.stderr

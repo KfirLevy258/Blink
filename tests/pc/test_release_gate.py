@@ -463,3 +463,80 @@ def test_run_as_a_module_refuses_with_status_one(tmp_path):
         cwd=str(ROOT), capture_output=True, text=True)
     assert done.returncode == 1
     assert "commit" in done.stderr
+
+
+# --- the VM fleet ---------------------------------------------------------
+#
+# tools/fleet/fleet-vm.toml proves this Mac and its UTM guests with one board
+# handed round. That is honest evidence of something narrower than the
+# desks, so the gate reads it only when asked about that inventory by name,
+# and a VM run never stands in for the desk fleet.
+
+VM_DESKS = ("local-mac", "ubuntu-vm", "windows-vm")
+
+
+def _vm_inventory(tmp_path, kind="vm"):
+    body = f'[fleet]\nkind = "{kind}"\nsequential = true\n' + "".join(
+        f'[hosts.{name}]\nos = "linux"\nssh = ""\n' for name in VM_DESKS)
+    p = tmp_path / "fleet-vm.toml"
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def _vm_state(tmp_path, kind="vm"):
+    return _state(tmp_path, hosts=_hosts(*VM_DESKS),
+                  fleet={"kind": kind, "sequential": True,
+                         "inventory": "tools/fleet/fleet-vm.toml"})
+
+
+def test_a_vm_run_passes_against_the_vm_inventory(tmp_path):
+    assert gate(_vm_state(tmp_path), SHA, _vm_inventory(tmp_path),
+                now=lambda: 2000.0) is None
+
+
+def test_a_vm_run_does_not_stand_in_for_the_desks(tmp_path):
+    """Even with the desk names: the kind is what the run proved."""
+    state = _state(tmp_path, fleet={"kind": "vm", "sequential": True})
+    reason = gate(state, SHA, _inventory(tmp_path), now=lambda: 2000.0)
+    assert reason and "VM fleet run" in reason
+    assert "BLINK_FLEET=vm" in reason
+
+
+def test_a_desk_run_is_not_a_vm_run_either(tmp_path):
+    """A result from before the VM fleet existed has no `fleet` key, and
+    reads as the desks -- which is what it was."""
+    state = _state(tmp_path, hosts=_hosts(*VM_DESKS))
+    reason = gate(state, SHA, _vm_inventory(tmp_path), now=lambda: 2000.0)
+    assert reason and "desk fleet run" in reason
+
+
+def test_a_fleet_kind_nothing_knows_is_refused(tmp_path):
+    reason = _refuse(tmp_path, fleet={"kind": "cloud"})
+    assert "kind" in reason
+    reason = _refuse(tmp_path, fleet="vm")
+    assert "kind" in reason
+
+
+def test_an_inventory_kind_nothing_knows_is_refused(tmp_path):
+    reason = gate(_vm_state(tmp_path), SHA,
+                  _vm_inventory(tmp_path, kind="cloud"), now=lambda: 2000.0)
+    assert reason and "cloud" in reason
+
+
+def test_a_vm_pass_says_it_was_vms_on_the_line_that_licenses_it(
+        tmp_path, capsys):
+    p = _vm_state(tmp_path)
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    doc["finished_at"] = time.time()
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    assert fleet_gate.main([str(p), SHA, str(_vm_inventory(tmp_path))]) == 0
+    out = capsys.readouterr().out
+    assert "VM fleet run" in out and "not Windows 10 on x86" in out
+
+
+def test_the_shipped_vm_inventory_reads_as_vm():
+    names, kind = fleet_gate._inventory(ROOT / "tools" / "fleet"
+                                        / "fleet-vm.toml")
+    assert kind == "vm" and names == sorted(VM_DESKS)
+    assert fleet_gate._inventory(ROOT / "tools" / "fleet"
+                                 / "fleet.toml")[1] == "desks"

@@ -52,9 +52,25 @@ that BEGINS with one, so every line built here begins with a bare verb (cd,
 mkdir). And %errorlevel% inside a one-liner is expanded when the line is
 parsed, not when it runs, so it always reads 0: the exit code that is
 believed is the one ssh itself returns, which is the last command's.
+
+The VM fleet (fleet-vm.toml, `--inventory tools/fleet/fleet-vm.toml`) is
+the same run with one board instead of three. This Mac goes first, then each
+UTM VM in turn: its snapshot is pushed while the board is still here, the
+board is handed to it (`utmctl usb connect`, or the operator from the VM
+window's USB menu when utmctl cannot), the agent is started only once the
+guest can see the board, and the board is handed back from a finally. This
+Mac's installed service is held stopped for that whole phase, because a port
+somebody has open is not a device UTM can take. The run records that it was
+a VM run (`fleet.kind`), and the release gate refuses to read it as the desk
+fleet. Two VM-only wrinkles in the transport: each VM needs its own ssh key,
+so a host may carry `ssh_options`, and the Windows VM's sshd lands in
+PowerShell, which hands stdin to native programs as text -- so for a host
+with shell = "powershell" nothing is piped at all, and the snapshot and each
+cmd.exe line travel as files by scp.
 """
 import argparse
 import concurrent.futures
+import ipaddress
 import json
 import os
 import shlex
@@ -77,6 +93,40 @@ RESULT_NAME = "result.json"
 REQUIRED_KEYS = ("ssh", "os", "board", "python", "workdir",
                  "has_claude_desktop")
 KNOWN_OS = ("darwin", "linux", "windows")
+KNOWN_SHELLS = ("cmd", "powershell")
+
+# What kind of fleet an inventory describes. The desks are real machines a
+# customer could own; "vm" is this Mac and its UTM guests sharing one board.
+# Recorded in the result so the gate can refuse to read one as the other.
+KNOWN_KINDS = ("desks", "vm")
+DEFAULT_KIND = "desks"
+
+# The placeholder a VM host's ssh line carries, filled in at run time: UTM's
+# shared network renumbers its guests, so an address written down here works
+# until it does not, and then fails as a dead desk.
+ADDRESS = "{address}"
+
+# Where macOS's own DHCP server (bootpd, which UTM's shared network uses)
+# writes its leases. The fallback for a guest whose agent does not answer:
+# utmctl ip-address answered OSStatus -1712 (an AppleEvent timeout) for a VM
+# that was booting, on 2026-10-30.
+DHCP_LEASES = Path("/var/db/dhcpd_leases")
+
+# utmctl drives UTM by AppleEvent, and an AppleEvent to a busy UTM times out
+# at about two minutes (-1712) rather than failing fast. Past that it is not
+# coming back.
+UTM_TIMEOUT_S = 150.0
+
+# Seconds for the guest to enumerate the board after it is handed over, and
+# for this Mac to see it again after it is handed back. USB redirection plus
+# a driver bind is seconds, not minutes; ninety is room for a Windows guest
+# installing the device for the first time.
+BOARD_WAIT_S = 90.0
+
+# The files a PowerShell host is sent instead of a pipe, relative to its
+# home directory -- which is where both scp and Windows sshd start.
+PS_STEP = "blink-fleet-step.cmd"
+PS_SNAPSHOT = "blink-fleet-snapshot.tar"
 
 # BatchMode turns "please enter a passphrase" into an error rather than a
 # machine sitting at a prompt until somebody notices the release stalled.
@@ -125,20 +175,12 @@ def load_inventory(path=DEFAULT_INVENTORY):
     fault on a board that was busy answering the first.
     """
     path = Path(path)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        raise ValueError(f"The fleet inventory could not be read: {e}."
-                         f" It should be a TOML file at {path}.") from e
-    try:
-        doc = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
-        raise ValueError(f"The fleet inventory at {path} is not valid"
-                         f" TOML: {e}") from e
+    doc = _read_inventory(path)
     hosts = doc.get("hosts") or {}
     if not hosts:
         raise ValueError(f"The fleet inventory at {path} names no hosts."
                          f" It needs a [hosts.<name>] table per desk.")
+    settings = _settings(doc, path)
     machines = {}
     for name, cfg in hosts.items():
         if not isinstance(cfg, dict):
@@ -154,7 +196,12 @@ def load_inventory(path=DEFAULT_INVENTORY):
                 f"Host {name} in {path} has os = {cfg['os']!r}, which this"
                 f" orchestrator has no shell for. Use one of"
                 f" {', '.join(KNOWN_OS)}.")
+        _check_vm_fields(name, cfg, settings, path)
         where = str(cfg["ssh"]).strip()
+        if is_vm(cfg):
+            # Every VM's ssh line is the same placeholder, so the machine is
+            # the VM itself.
+            where = f"{where} utm:{cfg['vm']['utm']}"
         if where in machines:
             first = machines[where]
             which = (f"ssh = {where!r}" if where else
@@ -170,9 +217,135 @@ def load_inventory(path=DEFAULT_INVENTORY):
     return hosts
 
 
+def _read_inventory(path):
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ValueError(f"The fleet inventory could not be read: {e}."
+                         f" It should be a TOML file at {path}.") from e
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"The fleet inventory at {path} is not valid"
+                         f" TOML: {e}") from e
+
+
+def load_settings(path=DEFAULT_INVENTORY):
+    """The inventory's [fleet] table, with its defaults filled in.
+
+    fleet.toml has none, and reads as a fleet of real desks run in parallel
+    -- which is what it always was.
+    """
+    return _settings(_read_inventory(path), Path(path))
+
+
+def _settings(doc, path):
+    fleet = doc.get("fleet", {})
+    if not isinstance(fleet, dict):
+        raise ValueError(f"[fleet] in {path} is not a table.")
+    kind = fleet.get("kind", DEFAULT_KIND)
+    if kind not in KNOWN_KINDS:
+        raise ValueError(
+            f"[fleet] in {path} has kind = {kind!r}. It is one of"
+            f" {', '.join(KNOWN_KINDS)}: the release gate reads it, so a"
+            f" kind nothing knows would be a claim nothing checks.")
+    sequential = fleet.get("sequential", False)
+    if not isinstance(sequential, bool):
+        raise ValueError(f"[fleet] in {path} has sequential ="
+                         f" {sequential!r}; it is true or false.")
+    usb = fleet.get("board_usb")
+    if usb is not None and not _usb_id(usb):
+        raise ValueError(
+            f"[fleet] in {path} has board_usb = {usb!r}. It is the board's"
+            f" USB id as VID:PID in hex, e.g. \"1A86:7523\".")
+    host_python = fleet.get("host_python")
+    if host_python is not None and not isinstance(host_python, str):
+        raise ValueError(f"[fleet] in {path} has host_python ="
+                         f" {host_python!r}; it is a path.")
+    return {"kind": kind, "sequential": sequential, "board_usb": usb,
+            "host_python": host_python}
+
+
+def _usb_id(text):
+    """(vid, pid) from "1A86:7523", or None for anything else."""
+    if not isinstance(text, str):
+        return None
+    parts = text.split(":")
+    if len(parts) != 2 or not all(len(p) == 4 for p in parts):
+        return None
+    try:
+        return int(parts[0], 16), int(parts[1], 16)
+    except ValueError:
+        return None
+
+
+def _check_vm_fields(name, cfg, settings, path):
+    """The optional fields only the VM fleet uses, refused if malformed.
+
+    Refused here and not at the handoff for the reason load_inventory gives:
+    by the handoff, this Mac's desk has already been run and its service
+    stopped, and a typo is not worth an hour.
+    """
+    options = cfg.get("ssh_options", [])
+    if not (isinstance(options, list)
+            and all(isinstance(o, str) for o in options)):
+        raise ValueError(f"Host {name} in {path} has ssh_options that are"
+                         f" not a list of strings.")
+    shell = cfg.get("shell", "cmd")
+    if shell not in KNOWN_SHELLS:
+        raise ValueError(f"Host {name} in {path} has shell = {shell!r}. It"
+                         f" is one of {', '.join(KNOWN_SHELLS)}.")
+    if shell != "cmd" and cfg["os"] != "windows":
+        raise ValueError(f"Host {name} in {path} names shell = {shell!r},"
+                         f" which only means something on windows.")
+    vm = cfg.get("vm")
+    placeholder = ADDRESS in str(cfg["ssh"])
+    if vm is None:
+        if placeholder:
+            raise ValueError(
+                f"Host {name} in {path} has {ADDRESS} in its ssh line but no"
+                f" [hosts.{name}.vm] table to find the address from.")
+        return
+    if not isinstance(vm, dict) or not isinstance(vm.get("utm"), str) \
+            or not vm["utm"].strip():
+        raise ValueError(
+            f"Host {name} in {path} has a vm table without utm, the VM's"
+            f" UUID from `utmctl list`. A name is not enough: UTM will"
+            f" happily register one bundle three times under one name.")
+    if "hostname" in vm and not isinstance(vm["hostname"], str):
+        raise ValueError(f"Host {name} in {path} has a vm hostname that is"
+                         f" not a string.")
+    if not cfg["ssh"]:
+        raise ValueError(f"Host {name} in {path} is a VM with no ssh line.")
+    if not settings["sequential"]:
+        raise ValueError(
+            f"Host {name} in {path} is a VM, and VMs share this Mac's board,"
+            f" so the inventory needs sequential = true under [fleet]. Run"
+            f" side by side, two desks would be handed the same board.")
+    if not settings["board_usb"] or not settings["host_python"]:
+        raise ValueError(
+            f"Host {name} in {path} is a VM, so [fleet] needs board_usb (the"
+            f" id the board is handed over by) and host_python (an"
+            f" interpreter here with pyserial, to see it come back).")
+
+
 def is_local(cfg):
     """A desk with no ssh line is this machine, and gets no ssh."""
     return not cfg.get("ssh")
+
+
+def is_vm(cfg):
+    """A desk that is a UTM guest on this Mac, borrowing its board."""
+    return isinstance(cfg.get("vm"), dict)
+
+
+def _powershell(cfg):
+    return cfg["os"] == "windows" and cfg.get("shell", "cmd") == "powershell"
+
+
+def _ssh(cfg):
+    return ["ssh", *SSH_OPTS, *cfg.get("ssh_options", []), cfg["ssh"]]
 
 
 def local_workdir(cfg):
@@ -234,13 +407,37 @@ def remote_cmd(cfg, argv):
     """
     if is_local(cfg):
         return list(argv)
+    if _powershell(cfg):
+        return [*_ssh(cfg), PS_INVOKE]
+    return [*_ssh(cfg), remote_line(cfg, argv)]
+
+
+def remote_line(cfg, argv):
+    """The shell line that runs argv in the desk's workdir.
+
+    For a PowerShell host this is what goes into the step file, and the ssh
+    command line carries only PS_INVOKE.
+    """
     line = shell_line(cfg, argv)
     if cfg["os"] == "windows":
         # /d because the workdir may be on another drive than cmd starts on.
-        line = f"cd /d {shell_path(cfg)} && {line}"
-    else:
-        line = f"cd {shell_path(cfg)} && {line}"
-    return ["ssh", *SSH_OPTS, cfg["ssh"], line]
+        return f"cd /d {shell_path(cfg)} && {line}"
+    return f"cd {shell_path(cfg)} && {line}"
+
+
+# What a PowerShell host is asked to run: the step file, under cmd.exe, with
+# its exit code carried out. `powershell -c` otherwise exits 0 or 1 by
+# whether the last command "succeeded", which turns the agent's 1, cmd's 9009
+# for a missing python and everything else into one indistinguishable 1.
+# $env:USERPROFILE is expanded by PowerShell on the far side, so no profile
+# name crosses this end.
+PS_INVOKE = (f"cmd.exe /d /c \"$env:USERPROFILE\\{PS_STEP}\";"
+             f" exit $LASTEXITCODE")
+
+
+def step_file_text(line):
+    """A cmd.exe line as a batch file. CRLF, because that is cmd's."""
+    return f"@echo off\r\n{line}\r\n"
 
 
 def push_cmd(cfg):
@@ -258,17 +455,68 @@ def push_cmd(cfg):
     """
     if is_local(cfg):
         return ["tar", "-x", "-f", "-", "-C", str(local_workdir(cfg))]
+    if _powershell(cfg):
+        return [*_ssh(cfg), PS_INVOKE]
+    return [*_ssh(cfg), push_line(cfg)]
+
+
+def push_line(cfg):
     directory = shell_path(cfg)
     result = shell_path(cfg, RESULT_NAME)
+    if _powershell(cfg):
+        # The archive was sent ahead by scp, so tar reads a file, not stdin.
+        # Windows' own bsdtar by full path: Git for Windows puts a GNU tar
+        # on some PATHs, and GNU tar reads "C:..." as a remote host.
+        return (f"mkdir {directory} 2>nul"
+                f" & del /q {result} 2>nul"
+                f" & %SystemRoot%\\System32\\tar.exe -x"
+                f" -f \"%USERPROFILE%\\{PS_SNAPSHOT}\" -C {directory}")
     if cfg["os"] == "windows":
-        line = (f"mkdir {directory} 2>nul"
+        return (f"mkdir {directory} 2>nul"
                 f" & del /q {result} 2>nul"
                 f" & tar -x -f - -C {directory}")
-    else:
-        line = (f"mkdir -p {directory}"
-                f" && rm -f {result}"
-                f" && tar -x -f - -C {directory}")
-    return ["ssh", *SSH_OPTS, cfg["ssh"], line]
+    return (f"mkdir -p {directory}"
+            f" && rm -f {result}"
+            f" && tar -x -f - -C {directory}")
+
+
+def send_file_cmd(cfg, local, remote_name):
+    """scp one file to the desk's home directory."""
+    return ["scp", *SSH_OPTS, *cfg.get("ssh_options", []), str(local),
+            f"{cfg['ssh']}:{remote_name}"]
+
+
+def _send_text(cfg, runner, text_or_bytes, remote_name, what):
+    """Write a file here and scp it there. Returns problems, or []."""
+    data = (text_or_bytes.encode("utf-8") if isinstance(text_or_bytes, str)
+            else text_or_bytes)
+    with tempfile.TemporaryDirectory(prefix="blink-fleet-send-") as tmp:
+        local = Path(tmp) / remote_name
+        local.write_bytes(data)
+        done, problems = _run(send_file_cmd(cfg, local, remote_name), runner,
+                              what, timeout=PUSH_TIMEOUT_S)
+    if problems:
+        return problems
+    if done.returncode != 0:
+        return [f"{what} failed (exit {done.returncode}): {_tail(done)}"]
+    return []
+
+
+def run_remote_line(cfg, line, runner, what, **kwargs):
+    """Run one shell line on a remote desk. (completed or None, problems).
+
+    The one place the PowerShell host differs: its line goes as a step file
+    and only PS_INVOKE crosses the ssh command line, because PowerShell
+    rewrites quotes and percent signs on the way to a native program and has
+    no && in the Windows PowerShell 5.1 that ships with the OS.
+    """
+    if _powershell(cfg):
+        problems = _send_text(cfg, runner, step_file_text(line), PS_STEP,
+                              f"Sending the next command to {cfg['ssh']}")
+        if problems:
+            return None, problems
+        return _run([*_ssh(cfg), PS_INVOKE], runner, what, **kwargs)
+    return _run([*_ssh(cfg), line], runner, what, **kwargs)
 
 
 def pull_cmd(cfg, dest):
@@ -285,8 +533,8 @@ def pull_cmd(cfg, dest):
             workdir = workdir[len(prefix):]
             break
     workdir = workdir.replace("\\", "/").rstrip("/")
-    return ["scp", *SSH_OPTS, f"{cfg['ssh']}:{workdir}/{RESULT_NAME}",
-            str(dest)]
+    return ["scp", *SSH_OPTS, *cfg.get("ssh_options", []),
+            f"{cfg['ssh']}:{workdir}/{RESULT_NAME}", str(dest)]
 
 
 def _python(cfg):
@@ -417,9 +665,18 @@ def push_snapshot(cfg, runner, name=None, timeout=PUSH_TIMEOUT_S):
         # The same stale-result delete the remote line does inline.
         (workdir / RESULT_NAME).unlink(missing_ok=True)
 
-    done, problems = _run(push_cmd(cfg), runner,
-                          f"Unpacking the snapshot on {name}",
-                          input=archive, timeout=timeout)
+    if _powershell(cfg):
+        problems = _send_text(cfg, runner, archive, PS_SNAPSHOT,
+                              f"Sending the snapshot to {name}")
+        if problems:
+            return problems
+        done, problems = run_remote_line(
+            cfg, push_line(cfg), runner, f"Unpacking the snapshot on {name}",
+            timeout=timeout)
+    else:
+        done, problems = _run(push_cmd(cfg), runner,
+                              f"Unpacking the snapshot on {name}",
+                              input=archive, timeout=timeout)
     if problems:
         return problems
     if done.returncode != 0:
@@ -462,12 +719,14 @@ def _read_result(cfg, name, runner, workroot):
 def _failed(name, cfg, problems):
     return {"desk": name, "board": cfg.get("board"), "os": cfg.get("os"),
             "has_claude_desktop": cfg.get("has_claude_desktop"),
+            "note": cfg.get("note"),
             "scenarios": {}, "problems": list(problems), "ok": False}
 
 
 def run_host(name, cfg, runner=subprocess.run, scenarios=None, bundle=None,
              prev_bundle=None, ota_dir=None, expect_version=None,
-             real_account=True, timeout=AGENT_TIMEOUT_S, workroot=None):
+             real_account=True, timeout=AGENT_TIMEOUT_S, workroot=None,
+             before_agent=None):
     """Prove one desk. Always returns a result; never raises.
 
     The agent's own verdict is returned as it wrote it, because its problems
@@ -481,21 +740,33 @@ def run_host(name, cfg, runner=subprocess.run, scenarios=None, bundle=None,
     result that says the same while the agent exited non-zero cannot have
     both halves be true. Both become failures, because a release gate that
     guesses in favour of shipping is not a gate.
+
+    `before_agent(cfg)` runs between the push and the agent and returns
+    problems, or []. It is where a VM desk is handed the board: after the
+    snapshot is there, because a push does not need the board and a push
+    that fails should not have cost anybody theirs.
     """
     try:
         problems = push_snapshot(cfg, runner, name=name)
         if problems:
             return _failed(name, cfg, problems)
+        if before_agent is not None:
+            problems = before_agent(cfg)
+            if problems:
+                return _failed(name, cfg, problems)
 
         argv = agent_argv(cfg, scenarios=scenarios, bundle=bundle,
                           prev_bundle=prev_bundle, ota_dir=ota_dir,
                           expect_version=expect_version,
                           real_account=real_account)
-        kwargs = {"timeout": timeout}
+        what = f"The fleet agent on {name}"
         if is_local(cfg):
-            kwargs["cwd"] = str(local_workdir(cfg))
-        done, problems = _run(remote_cmd(cfg, argv), runner,
-                              f"The fleet agent on {name}", **kwargs)
+            done, problems = _run(remote_cmd(cfg, argv), runner, what,
+                                  timeout=timeout,
+                                  cwd=str(local_workdir(cfg)))
+        else:
+            done, problems = run_remote_line(cfg, remote_line(cfg, argv),
+                                             runner, what, timeout=timeout)
         if done is None:
             # A run cut off from this end says nothing about what it left
             # behind on that end. The agent hands the serial port back from a
@@ -541,6 +812,10 @@ def run_host(name, cfg, runner=subprocess.run, scenarios=None, bundle=None,
         result["desk"] = name
         result["os"] = cfg.get("os")
         result["has_claude_desktop"] = cfg.get("has_claude_desktop")
+        # What this desk actually is, from the inventory, carried into the
+        # evidence: "windows" alone would let a Windows 11 ARM VM read as the
+        # Windows 10 PC a customer has.
+        result["note"] = cfg.get("note")
 
         # The agent exits 1 when it has failures to report, which it has just
         # reported in its own words. Repeating "exited 1" under every failing
@@ -609,6 +884,339 @@ class _workroot:
 
 
 # ---------------------------------------------------------------------------
+# The VM fleet: one board, handed from desk to desk
+# ---------------------------------------------------------------------------
+
+def address_cmd(cfg):
+    return ["utmctl", "ip-address", cfg["vm"]["utm"]]
+
+
+def _first_ipv4(text):
+    """The first IPv4 address in utmctl's answer, or None.
+
+    By shape rather than by line: utmctl prints "Error from event: ..." for a
+    guest whose agent did not answer and has been seen to exit 0 doing it,
+    and it lists IPv6 addresses after the IPv4 one.
+    """
+    for word in text.split():
+        try:
+            address = ipaddress.ip_address(word)
+        except ValueError:
+            continue
+        if address.version == 4 and not address.is_loopback:
+            return word
+    return None
+
+
+def lease_address(hostname, leases_text):
+    """The address macOS's DHCP server most recently gave `hostname`.
+
+    /var/db/dhcpd_leases is a list of {...} blocks of key=value lines. One
+    guest can hold more than one block -- the Ubuntu VM had two on
+    2026-10-30, .2 and .3, under two client ids -- so the block whose lease
+    runs latest wins, since that is the one the guest asked for last.
+    """
+    best = None
+    for block in leases_text.split("{")[1:]:
+        fields = {}
+        for raw in block.split("}")[0].splitlines():
+            key, sep, value = raw.strip().partition("=")
+            if sep:
+                fields[key] = value
+        if fields.get("name") != hostname or "ip_address" not in fields:
+            continue
+        try:
+            expires = int(fields.get("lease", "0"), 16)
+        except ValueError:
+            expires = 0
+        if best is None or expires > best[0]:
+            best = (expires, fields["ip_address"])
+    return best[1] if best else None
+
+
+def resolve_address(name, cfg, runner, leases=DHCP_LEASES):
+    """Where to reach a VM desk now. (address or None, how, problems)."""
+    done, problems = _run(address_cmd(cfg), runner,
+                          f"Asking UTM for {name}'s address",
+                          timeout=UTM_TIMEOUT_S)
+    if done is not None and done.returncode == 0:
+        address = _first_ipv4(_text(done.stdout))
+        if address:
+            return address, "utmctl", []
+    said = problems[0] if problems else (
+        _tail(done) if done is not None else "no answer")
+    hostname = cfg["vm"].get("hostname")
+    if hostname:
+        try:
+            text = Path(leases).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        address = lease_address(hostname, text)
+        if address:
+            return address, "dhcp lease", []
+    return None, None, [
+        f"{name} has no address. UTM's guest agent did not give one ({said})"
+        + (f" and there is no DHCP lease for {hostname} in {leases}"
+           if hostname else "")
+        + ". Is the VM started and booted? `utmctl list` says which."]
+
+
+def with_address(cfg, address):
+    return dict(cfg, ssh=str(cfg["ssh"]).replace(ADDRESS, address))
+
+
+def usb_connect_cmd(cfg, usb):
+    return ["utmctl", "usb", "connect", cfg["vm"]["utm"], usb]
+
+
+def usb_disconnect_cmd(usb):
+    return ["utmctl", "usb", "disconnect", usb]
+
+
+def board_wait_argv(python, usb, seconds=BOARD_WAIT_S, gone=False):
+    argv = [python, "-m", "tests.fleet.board_present", "--usb", usb,
+            "--wait", str(int(seconds))]
+    if gone:
+        argv.append("--gone")
+    return argv
+
+
+def service_argv(python, verb):
+    return [python, "-m", "tests.fleet.service", verb]
+
+
+def _utm_worked(done):
+    """utmctl's own word, read suspiciously.
+
+    It reports AppleEvent failures as "Error from event: ..." and has been
+    seen to exit 0 while doing it, so the exit code alone is not believed.
+    """
+    if done is None or done.returncode != 0:
+        return False
+    said = (_text(done.stdout) + _text(done.stderr)).lower()
+    return "error" not in said and "cannot be found" not in said
+
+
+class Bench:
+    """This Mac's end of a VM run: its service, and the board's handoffs.
+
+    Only one thing here is about the product, and it is not in this class:
+    the guest's own agent. Everything here is plumbing that makes the one
+    board available to it, and every failure in it is reported as that --
+    a desk that never got the board -- rather than as a board fault.
+
+    `ask` is input() unless a test says otherwise, and is only called when
+    `interactive`: a run with nobody at the keyboard (a CI-like shell, a
+    pipe) cannot be waited on, so a handoff utmctl could not do is a failed
+    desk there, not a prompt nobody will answer.
+    """
+
+    def __init__(self, settings, runner, mode="auto", ask=input,
+                 interactive=False):
+        self.usb = settings["board_usb"]
+        self.python = _python({"ssh": "",
+                               "python": settings["host_python"]})
+        self.runner = runner
+        self.mode = mode
+        self.ask = ask
+        self.interactive = interactive
+        self.held = False
+        self.problems = []
+        self.handoffs = {}
+        # The VM the board may be in right now, set the moment a handoff is
+        # believed to have happened rather than when connect() returns: a
+        # Ctrl-C during the wait that follows would otherwise skip the
+        # handback and leave the board in the VM. Found by a test.
+        self.lent_to = None
+
+    # -- this Mac's installed service ------------------------------------
+
+    def _service(self, verb):
+        done, problems = _run(service_argv(self.python, verb), self.runner,
+                              f"Asking this Mac's service to {verb}",
+                              cwd=str(REPO_ROOT), timeout=PULL_TIMEOUT_S)
+        if problems:
+            return problems
+        said = _tail(done)
+        if done.returncode == 3:
+            return [f"BLINK_SKIP_SERVICE is set in this shell, so this Mac's"
+                    f" service was not {verb}ped and still holds the port"
+                    f" UTM would have to take. Unset it and start again."]
+        if done.returncode != 0:
+            return [f"This Mac's service would not {verb}: {said}."]
+        return []
+
+    def hold(self):
+        """Stop this Mac's service for the VM phase. Problems, or [].
+
+        A port somebody has open is not a device UTM can take: the board
+        was passed through by hand on 2026-10-19 only with the daemon
+        stopped first (docs/windows-check.md).
+        """
+        self.problems = self._service("stop")
+        self.held = not self.problems
+        if self.problems:
+            self.problems = [f"No VM was handed the board. {p}"
+                             for p in self.problems]
+        return self.problems
+
+    def release(self):
+        """Start this Mac's service again. Warnings, or []."""
+        if not self.held:
+            return []
+        self.held = False
+        problems = self._service("start")
+        return [f"{p} The board on this Mac will stay dark until it is"
+                f" started (blink install puts it back)." for p in problems]
+
+    # -- the board --------------------------------------------------------
+
+    def _prompt(self, text):
+        try:
+            self.ask(text)
+            return True
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    def connect(self, name, cfg):
+        """Hand the board to a VM and wait for the guest to see it.
+
+        Returns (handed, problems): `handed` is whether the board may now be
+        in that VM, which decides whether it has to be asked back.
+        """
+        if self.problems:
+            return False, list(self.problems)
+        how, said = None, ""
+        if self.mode != "operator":
+            done, problems = _run(usb_connect_cmd(cfg, self.usb),
+                                  self.runner,
+                                  f"Handing the board to {name}",
+                                  timeout=UTM_TIMEOUT_S)
+            if _utm_worked(done):
+                how = "utmctl"
+            else:
+                said = problems[0] if problems else _tail(done)
+        if how is None:
+            if self.mode == "utmctl" or not self.interactive:
+                return False, [
+                    f"The board could not be handed to {name}: utmctl said"
+                    f" {said!r}. Run again from a terminal to be asked to"
+                    f" do it from the VM window instead (its USB icon ->"
+                    f" USB Serial -> Connect)."]
+            if not self._prompt(
+                    f"\n>>> Hand the board to {name}: in its UTM window,"
+                    f" USB icon -> USB Serial -> Connect.\n"
+                    f"    Press Enter once it is connected. "):
+                return False, [f"The board was not handed to {name}: the"
+                               f" prompt was abandoned."]
+            how = "operator"
+        self.handoffs[name] = how
+        self.lent_to = name
+        argv = board_wait_argv(_python(cfg), self.usb)
+        done, problems = run_remote_line(
+            cfg, remote_line(cfg, argv), self.runner,
+            f"Waiting for {name} to see the board",
+            timeout=BOARD_WAIT_S + PULL_TIMEOUT_S)
+        if problems:
+            return True, problems
+        if done.returncode != 0:
+            return True, [
+                f"{name} never saw the board ({self.usb}) after it was"
+                f" handed over by {how}: {_tail(done)}. On Windows, check"
+                f" Device Manager for USB-SERIAL CH340; on Linux,"
+                f" /dev/ttyUSB0."]
+        return True, []
+
+    def disconnect(self, name, cfg):
+        """Take the board back to this Mac. Warnings, or [].
+
+        Warnings rather than a failed desk: the desk's evidence is complete
+        by now, and the board not coming home is this Mac's problem -- and
+        the next VM's, whose handoff will then fail and say so.
+        """
+        self.lent_to = None
+        how = None
+        if self.mode != "operator":
+            done, _ = _run(usb_disconnect_cmd(self.usb), self.runner,
+                           f"Taking the board back from {name}",
+                           timeout=UTM_TIMEOUT_S)
+            if _utm_worked(done):
+                how = "utmctl"
+        if how is None:
+            if not self.interactive or not self._prompt(
+                    f"\n>>> Take the board back from {name}: in its UTM"
+                    f" window, USB icon -> USB Serial -> Disconnect.\n"
+                    f"    Press Enter once it is disconnected. "):
+                return [f"The board may still be in {name}. Disconnect it"
+                        f" from that VM's USB menu to give it back to this"
+                        f" Mac."]
+        done, problems = _run(board_wait_argv(self.python, self.usb),
+                              self.runner,
+                              f"Waiting for the board to come back from"
+                              f" {name}", cwd=str(REPO_ROOT),
+                              timeout=BOARD_WAIT_S + PULL_TIMEOUT_S)
+        if problems or done.returncode != 0:
+            said = problems[0] if problems else _tail(done)
+            return [f"The board did not come back to this Mac from {name}"
+                    f" ({said}). Disconnect it from that VM's USB menu."]
+        return []
+
+
+def run_vm_host(name, cfg, bench, runner=subprocess.run,
+                leases=DHCP_LEASES, **kwargs):
+    """Prove one VM desk with the borrowed board. (result, warnings).
+
+    Never raises, like run_host. The board is asked back from a finally
+    whenever it may have been handed over, including when the agent failed
+    or timed out: a board left in a VM is a dark board on this Mac.
+    """
+    warnings = []
+    try:
+        address, found_by, problems = resolve_address(name, cfg, runner,
+                                                       leases)
+        if address is None:
+            result = _failed(name, cfg, problems)
+        else:
+            cfg = with_address(cfg, address)
+
+            def take(target):
+                return bench.connect(name, target)[1]
+
+            try:
+                result = run_host(name, cfg, runner=runner,
+                                  before_agent=take, **kwargs)
+            finally:
+                if bench.lent_to == name:
+                    warnings += bench.disconnect(name, cfg)
+        result["vm"] = {"utm": cfg["vm"]["utm"],
+                        "address": address, "address_from": found_by,
+                        "handoff": bench.handoffs.get(name)}
+        return result, warnings
+    except Exception as e:  # noqa: BLE001 - a desk may not take the run down
+        return _failed(name, cfg, [f"Proving {name} stopped on an unexpected"
+                                   f" error: {e!r}"]), warnings
+
+
+def run_order(inventory):
+    """Desks with their own board first, in file order, then the VMs.
+
+    The board starts on this Mac, and its service is held stopped for as
+    long as the board is lent out. A local desk run in the middle of that
+    would find its own service already stopped by somebody else.
+    """
+    return ([name for name, cfg in inventory.items() if not is_vm(cfg)]
+            + [name for name, cfg in inventory.items() if is_vm(cfg)])
+
+
+def _relative(path):
+    path = Path(path).resolve()
+    try:
+        return path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
+# ---------------------------------------------------------------------------
 # The verdict
 # ---------------------------------------------------------------------------
 
@@ -635,6 +1243,11 @@ def format_report(state):
     lines = [""]
     lines.append(f"Fleet run {_short(state.get('sha', 'unknown'))}:"
                  f" {len(hosts)} desk(s) in {took / 60:.1f} min")
+    fleet = state.get("fleet") or {}
+    if fleet.get("kind") == "vm":
+        # Said at the top, where nobody can read the table without it.
+        lines.append("A VM fleet run: this Mac and its UTM guests, one board"
+                     " handed from desk to desk. Not the desk fleet.")
     lines.append("-" * 72)
     for name in sorted(hosts):
         result = hosts[name]
@@ -647,6 +1260,8 @@ def format_report(state):
         else:
             summary = "Nothing ran"
         lines.append(f"{name:<16}{verdict:<8}{summary}")
+        if result.get("note"):
+            lines.append(f"{'':<16}({result['note']})")
         for problem in result.get("problems") or []:
             lines.append(f"{'':<16}{problem}")
         for scenario, outcome in sorted(scenarios.items()):
@@ -670,6 +1285,8 @@ def format_report(state):
         lines.append(f"The fleet did NOT pass. Blocked by: {blocked}.")
     for problem in state.get("problems") or []:
         lines.append(problem)
+    for warning in state.get("warnings") or []:
+        lines.append(f"Warning: {warning}")
     lines.append("")
     return lines
 
@@ -731,10 +1348,145 @@ def parse_args(argv=None):
     ap.add_argument("--dry-run", action="store_true",
                     help="Print the commands each desk would be sent and"
                          " stop, without connecting to anything")
+    ap.add_argument("--sequential", action="store_true",
+                    help="One desk at a time, in inventory order. The VM"
+                         " inventory always runs this way")
+    ap.add_argument("--handoff", choices=("auto", "utmctl", "operator"),
+                    default="auto",
+                    help="How a VM is handed the board: utmctl, the operator"
+                         " at the VM window's USB menu, or utmctl and then"
+                         " the operator if it fails (the default)")
     return ap.parse_args(argv)
 
 
-def main(argv=None, runner=subprocess.run):
+def _print_dry_run(inventory, settings, args):
+    """Every command the run would make, in the order it would make them.
+
+    This run stops somebody's daemon on three machines and takes their boards
+    for the best part of an hour. Being able to read the exact lines first --
+    particularly the cmd.exe one, which cannot be tested anywhere but on that
+    desk -- is cheaper than finding out halfway.
+    """
+    sequential = settings["sequential"] or args.sequential
+    names = run_order(inventory) if sequential else sorted(inventory)
+    if settings["kind"] == "vm":
+        print("A VM fleet: one board, handed from desk to desk.")
+    if sequential:
+        print(f"One desk at a time: {', '.join(names)}.")
+    bench = None
+    for name in names:
+        cfg = inventory[name]
+        argv = agent_argv(cfg, scenarios=args.scenarios, bundle=args.bundle,
+                          prev_bundle=args.prev_bundle, ota_dir=args.ota_dir,
+                          expect_version=args.expect_version,
+                          real_account=not args.no_real_account)
+        if is_vm(cfg):
+            if bench is None:
+                bench = Bench(settings, runner=None)
+                print(f"\nthis Mac, before the first VM:\n"
+                      f"  hold: {service_argv(bench.python, 'stop')}")
+            print(f"\n{name} ({cfg['os']}, UTM {cfg['vm']['utm']}):")
+            print(f"  addr: {address_cmd(cfg)}, else the newest DHCP lease"
+                  f" for {cfg['vm'].get('hostname') or '(no hostname)'}")
+            cfg = with_address(cfg, "<address>")
+        else:
+            print(f"\n{name} ({cfg['os']},"
+                  f" {cfg['ssh'] or 'no ssh, this machine'}):")
+        if _powershell(cfg):
+            print(f"  send: {send_file_cmd(cfg, '<snapshot>', PS_SNAPSHOT)}")
+            print(f"  push: {PS_STEP} = {push_line(cfg)}")
+            print(f"        {push_cmd(cfg)}")
+        else:
+            print(f"  push: {push_cmd(cfg)}")
+        if is_vm(cfg):
+            if args.handoff != "operator":
+                print(f"  give: {usb_connect_cmd(cfg, bench.usb)}")
+            if args.handoff == "auto":
+                print("        (or, if utmctl cannot, the operator at the VM"
+                      " window's USB menu)")
+            elif args.handoff == "operator":
+                print("  give: the operator, at the VM window's USB menu")
+            wait = remote_line(cfg, board_wait_argv(_python(cfg), bench.usb))
+            print(f"  wait: {wait}")
+        if _powershell(cfg):
+            print(f"  run : {PS_STEP} = {remote_line(cfg, argv)}")
+            print(f"        {remote_cmd(cfg, argv)}")
+        else:
+            print(f"  run : {remote_cmd(cfg, argv)}")
+        if not is_local(cfg):
+            print(f"  pull: {pull_cmd(cfg, '<temporary file>')}")
+        if is_vm(cfg):
+            if args.handoff != "operator":
+                print(f"  back: {usb_disconnect_cmd(bench.usb)}")
+            print(f"  here: {board_wait_argv(bench.python, bench.usb)}")
+    if bench is not None:
+        print(f"\nthis Mac, after the last VM:\n"
+              f"  free: {service_argv(bench.python, 'start')}")
+    print("\nNothing was run and no desk was contacted.")
+
+
+def _agent_kwargs(args):
+    return {"scenarios": args.scenarios, "bundle": args.bundle,
+            "prev_bundle": args.prev_bundle, "ota_dir": args.ota_dir,
+            "expect_version": args.expect_version,
+            "real_account": not args.no_real_account,
+            "timeout": args.timeout}
+
+
+def _run_side_by_side(inventory, args, runner, doc):
+    """Every desk at once: one board each, no shared state."""
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, len(inventory))) as pool:
+        futures = {pool.submit(run_host, name, cfg, runner=runner,
+                               **_agent_kwargs(args)): name
+                   for name, cfg in inventory.items()}
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                doc["hosts"][name] = future.result()
+            except BaseException as e:  # noqa: BLE001
+                doc["hosts"][name] = _failed(
+                    name, inventory[name],
+                    [f"Proving {name} died in its own thread: {e!r}"])
+
+
+def _run_in_turn(inventory, settings, args, runner, doc, ask, interactive,
+                 leases):
+    """One desk at a time, the VMs last, with this Mac's service held for
+    as long as the board is lent out -- and given back from a finally."""
+    bench = None
+    try:
+        for name in run_order(inventory):
+            cfg = inventory[name]
+            print(f"\n== {name}")
+            if is_vm(cfg):
+                if bench is None:
+                    bench = Bench(settings, runner, mode=args.handoff,
+                                  ask=ask, interactive=interactive)
+                    bench.hold()
+                result, warnings = run_vm_host(name, cfg, bench,
+                                               runner=runner, leases=leases,
+                                               **_agent_kwargs(args))
+                doc["warnings"] += warnings
+            else:
+                result = run_host(name, cfg, runner=runner,
+                                  **_agent_kwargs(args))
+            doc["hosts"][name] = result
+            print(f"== {name}: {'PASSED' if result.get('ok') else 'FAILED'}")
+    finally:
+        if bench is not None:
+            doc["warnings"] += bench.release()
+
+
+def _interactive():
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def main(argv=None, runner=subprocess.run, ask=input, interactive=None,
+         leases=DHCP_LEASES):
     args = parse_args(argv)
     state = Path(args.state)
     if not args.dry_run:
@@ -748,6 +1500,7 @@ def main(argv=None, runner=subprocess.run):
 
     try:
         inventory = load_inventory(args.inventory)
+        settings = load_settings(args.inventory)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 2
@@ -765,54 +1518,34 @@ def main(argv=None, runner=subprocess.run):
         inventory = {name: inventory[name] for name in wanted}
 
     if args.dry_run:
-        # This run stops somebody's daemon on three machines and takes their
-        # boards for the best part of an hour. Being able to read the exact
-        # lines first -- particularly the cmd.exe one, which cannot be tested
-        # anywhere but on that desk -- is cheaper than finding out halfway.
-        for name, cfg in sorted(inventory.items()):
-            argv = agent_argv(cfg, scenarios=args.scenarios,
-                              bundle=args.bundle,
-                              prev_bundle=args.prev_bundle,
-                              ota_dir=args.ota_dir,
-                              expect_version=args.expect_version,
-                              real_account=not args.no_real_account)
-            print(f"\n{name} ({cfg['os']},"
-                  f" {cfg['ssh'] or 'no ssh, this machine'}):")
-            print(f"  push: {push_cmd(cfg)}")
-            print(f"  run : {remote_cmd(cfg, argv)}")
-            if not is_local(cfg):
-                print(f"  pull: {pull_cmd(cfg, '<temporary file>')}")
-        print("\nNothing was run and no desk was contacted.")
+        _print_dry_run(inventory, settings, args)
         return 0
 
+    sequential = settings["sequential"] or args.sequential
     sha, problems = _head_sha(runner)
     doc = {"sha": sha, "started_at": time.time(), "finished_at": None,
            "ok": False, "hosts": {}, "problems": problems,
            # Recorded so the release gate can tell a full fleet run from a
            # one-desk or one-scenario run that happens to be green.
-           "only": wanted, "scenarios": args.scenarios}
+           "only": wanted, "scenarios": args.scenarios,
+           # And so it can tell a VM run from the desk fleet: the gate
+           # compares `kind` with the inventory it was asked about, and
+           # refuses a VM run offered as the desks.
+           "fleet": {"kind": settings["kind"], "sequential": sequential,
+                     "inventory": _relative(args.inventory)},
+           "real_account": not args.no_real_account,
+           "warnings": []}
     print(f"Fleet run of {_short(sha)} on {len(inventory)} desk(s):"
-          f" {', '.join(sorted(inventory))}.")
+          f" {', '.join(sorted(inventory))}"
+          f"{', one at a time' if sequential else ''}.")
+    if interactive is None:
+        interactive = _interactive()
     try:
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max(1, len(inventory))) as pool:
-            futures = {
-                pool.submit(run_host, name, cfg, runner=runner,
-                            scenarios=args.scenarios, bundle=args.bundle,
-                            prev_bundle=args.prev_bundle,
-                            ota_dir=args.ota_dir,
-                            expect_version=args.expect_version,
-                            real_account=not args.no_real_account,
-                            timeout=args.timeout): name
-                for name, cfg in inventory.items()}
-            for future in concurrent.futures.as_completed(futures):
-                name = futures[future]
-                try:
-                    doc["hosts"][name] = future.result()
-                except BaseException as e:  # noqa: BLE001
-                    doc["hosts"][name] = _failed(
-                        name, inventory[name],
-                        [f"Proving {name} died in its own thread: {e!r}"])
+        if sequential:
+            _run_in_turn(inventory, settings, args, runner, doc, ask,
+                         interactive, leases)
+        else:
+            _run_side_by_side(inventory, args, runner, doc)
     finally:
         doc["finished_at"] = time.time()
         missing = sorted(set(inventory) - set(doc["hosts"]))

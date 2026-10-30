@@ -42,9 +42,18 @@ VER="${TAG#v}"
 [ -n "$VER" ] || { echo "FATAL: no version in version.h"; exit 1; }
 # A release nobody put on a board is a guess. tools/fleet/run.py drives a real
 # board on all three desks and writes .fleet/last_run.json; pc/fleet_gate.py
-# re-reads that file here and insists on all six of: green, for THIS commit,
+# re-reads that file here and insists on all seven of: green, for THIS commit,
 # finished within twelve hours, not narrowed by --only, not narrowed by
-# --scenarios, and one clean pass from every desk in tools/fleet/fleet.toml.
+# --scenarios, one clean pass from every desk in tools/fleet/fleet.toml, and
+# the same kind of fleet as that inventory.
+#
+# BLINK_FLEET=vm checks the run against tools/fleet/fleet-vm.toml instead:
+# this Mac and its two UTM VMs, one board handed round, for when the desks
+# are out of reach. It is a narrower claim -- the Windows desk is a Windows
+# 11 ARM64 VM, not Windows 10 on x86 -- so it is a name typed on purpose,
+# never a fallback, and a VM run is refused under the default. Only the two
+# committed inventories can be named: a path here would let any file with
+# one desk in it vouch for a release.
 #
 # The last two are why the gate is not simply `grep ok`. `run.py --only
 # kfir-ubuntu` exits 0 with ok: true and is RIGHT to -- that run passed -- so
@@ -71,13 +80,23 @@ if [ "${BLINK_SKIP_FLEET:-}" = "1" ]; then
 		py_refuse_unless 3.9 "the manifest and signature steps"
 	fi
 else
+	case "${BLINK_FLEET:-desks}" in
+	desks)	FLEET_TOML="$ROOT/tools/fleet/fleet.toml"; FLEET_RUN_ARGS="" ;;
+	vm)	FLEET_TOML="$ROOT/tools/fleet/fleet-vm.toml"
+		FLEET_RUN_ARGS=" --inventory tools/fleet/fleet-vm.toml"
+		echo "NOTE: BLINK_FLEET=vm -- $TAG is gated on the VM fleet: this Mac" >&2
+		echo "      and its UTM guests, one board handed round. Windows there" >&2
+		echo "      is an ARM64 VM, not Windows 10 on x86." >&2 ;;
+	*)	echo "FATAL: BLINK_FLEET is \"$BLINK_FLEET\"; it is desks or vm." >&2
+		exit 1 ;;
+	esac
 	py_refuse_unless 3.11 "tomllib, for the fleet gate"
 	PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m pc.fleet_gate \
 		"$ROOT/.fleet/last_run.json" "$(git -C "$ROOT" rev-parse HEAD)" \
-		"$ROOT/tools/fleet/fleet.toml" || {
+		"$FLEET_TOML" || {
 		echo "FATAL: the fleet gate refused $TAG for the reason above." >&2
-		echo "       Prove this commit on all three desks first:" >&2
-		echo "         $PY tools/fleet/run.py" >&2
+		echo "       Prove this commit on every desk in $FLEET_TOML first:" >&2
+		echo "         $PY tools/fleet/run.py$FLEET_RUN_ARGS" >&2
 		echo "       BLINK_SKIP_FLEET=1 releases without it." >&2
 		exit 1; }
 fi

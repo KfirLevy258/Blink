@@ -97,6 +97,9 @@ cannot be tested anywhere but on that desk.
 | `--state .fleet/scratch.json` | Write the verdict somewhere else |
 | `--no-real-account` | Skip the pass against each desk's own account |
 | `--timeout 3600` | Seconds to allow one desk |
+| `--inventory tools/fleet/fleet-vm.toml` | A different inventory -- this one is [the VM fleet](#the-vm-fleet) |
+| `--sequential` | One desk at a time, in inventory order (the VM fleet always is) |
+| `--handoff operator` | How a VM is handed the board: `auto` (utmctl, then the operator), `utmctl`, or `operator` |
 
 Both narrowing flags are recorded in the result, and **the release gate refuses
 a run that used either** -- see [The release gate](#the-release-gate). Use
@@ -428,7 +431,7 @@ You can run exactly that by hand from the checkout root. It exits 0 and prints
 one line when the commit may be released, or exits 1 with the reason on stderr;
 with no arguments it prints its usage and exits 2.
 
-It insists on all six of:
+It insists on all seven of:
 
 1. The run's own verdict is `ok: true`, with no top-level problems.
 2. It names **this** commit. The desks proved code, and a run for another
@@ -440,6 +443,10 @@ It insists on all six of:
 4. It was not narrowed with `--only`.
 5. It was not narrowed with `--scenarios`.
 6. Every desk named in `tools/fleet/fleet.toml` is present and green.
+7. The run was the same **kind** of fleet as that inventory: a VM run
+   (below) is refused against `fleet.toml`, and a desk run against
+   `fleet-vm.toml`. A result from before the VM fleet existed has no `kind`
+   and reads as the desks, which is what it was.
 
 The last three are why the gate is not simply a `grep ok`. `run.py --only
 kfir-ubuntu` exits 0 and writes `ok: true`, and is *right* to -- that run did
@@ -458,6 +465,27 @@ no gate, and no such floor):
 BLINK_PYTHON=python3.13 tools/release.sh
 ```
 
+### Releasing on the VM fleet
+
+```bash
+BLINK_FLEET=vm tools/release.sh
+```
+
+checks the run against `tools/fleet/fleet-vm.toml` instead, and says so
+before anything is built:
+
+```
+NOTE: BLINK_FLEET=vm -- v1.4.0 is gated on the VM fleet: this Mac
+      and its UTM guests, one board handed round. Windows there
+      is an ARM64 VM, not Windows 10 on x86.
+```
+
+`BLINK_FLEET` takes `desks` (the default) or `vm` and nothing else. It is a
+name rather than a path on purpose: a path would let any file with one desk
+in it vouch for a release. The gate's pass line for a VM run carries the same
+caveat, and the release notes should too -- see
+[The VM fleet](#the-vm-fleet) for what it does and does not prove.
+
 ### Releasing without it
 
 ```bash
@@ -474,6 +502,122 @@ WARNING: BLINK_SKIP_FLEET=1 -- v1.2.6 is being built with no proof
 Nothing below it checks. The firmware in that release goes to every board in
 the field, signed with a key that exists only on this Mac, and the fleet run is
 the last thing between a bad build and all of them.
+
+## The VM fleet
+
+When the three desks are out of reach, the same suite runs on **this Mac and
+the two UTM VMs it hosts**, with **one board** handed from desk to desk:
+
+```bash
+python3 tools/fleet/run.py --inventory tools/fleet/fleet-vm.toml
+```
+
+and, to release on it, `BLINK_FLEET=vm tools/release.sh`
+([above](#releasing-on-the-vm-fleet)). The VMs, their key and their quirks
+are in `~/Projects/Blink/test-machines` (its README), outside this repository.
+
+### What happens
+
+`fleet-vm.toml` says `sequential = true` under `[fleet]`, so the desks run
+**one at a time**, desks with their own board first and the VMs after, each in
+file order. (`--sequential` asks the same of any inventory.)
+
+1. **local-mac** runs exactly as on the desk fleet: its agent stops this
+   Mac's service, proves the board, and starts the service again.
+2. **This Mac's service is stopped again** and held stopped for the whole VM
+   phase, under the inventory's `host_python` (`python -m tests.fleet.service
+   stop`). A port somebody has open is not a device UTM can take: the board
+   was passed through by hand on 2026-10-19 only with the daemon stopped
+   first. A `BLINK_SKIP_SERVICE` in the shell turns that stop into a no-op,
+   and then no VM is handed the board at all.
+3. For each VM, in turn:
+   - **Its address** is asked of the guest agent (`utmctl ip-address
+     <uuid>`), else read from macOS's DHCP leases for its hostname, newest
+     lease first. UTM renumbers its guests, so no address is written down;
+     the inventory's ssh line says `tester@{address}`.
+   - **The snapshot is pushed** while the board is still here.
+   - **The board is handed over**: `utmctl usb connect <uuid> 1A86:7523`.
+     When utmctl cannot -- and on 2026-10-19 it answered "The device cannot
+     be found" every time -- the run asks the operator to do it from the VM
+     window (USB icon -> USB Serial -> Connect) and waits for Enter.
+     `--handoff utmctl` never asks; `--handoff operator` never tries utmctl.
+     With nobody at the keyboard, a handoff utmctl could not do is a failed
+     desk, not a wait.
+   - **The guest has to see the board** before the agent starts:
+     `python -m tests.fleet.board_present --usb 1A86:7523 --wait 90` runs
+     in the VM, by USB id like the daemon. An agent started before the driver
+     bound would fail three settles and read as a dead board.
+   - **The agent runs** exactly as on any desk, and its result comes back.
+   - **The board is handed back** from a `finally` -- on a failed agent, a
+     timeout and a Ctrl-C too -- and the run waits for this Mac to see it
+     again before the next VM is handed anything. A board that does not come
+     home is a **warning** under the table, not a failed desk: that desk's
+     evidence was already complete.
+4. **This Mac's service is started again**, from a `finally`.
+
+`--dry-run` prints every one of those commands, in order, and contacts
+nothing.
+
+The result records `fleet: {kind: "vm", sequential: true, inventory:
+"tools/fleet/fleet-vm.toml"}`, each VM desk's UUID, the address it was
+reached at and how the board was handed to it (`utmctl` or `operator`), and
+the inventory's `note` for every desk, so `windows` alone never reads as the
+desk a customer has. The table opens by saying it was a VM run.
+
+### The inventory's extra fields
+
+| Field | Means |
+|---|---|
+| `[fleet] kind` | `desks` (the default, and all of `fleet.toml`) or `vm`. Recorded in the result; the gate compares it with the inventory it is handed. |
+| `[fleet] sequential` | One desk at a time. Required with any VM host. |
+| `[fleet] board_usb` | The board's USB id, `1A86:7523` (CH340), as utmctl names a device and as the guests look for it. |
+| `[fleet] host_python` | An interpreter on this Mac with pyserial, for the service hold and for seeing the board come back. Relative to this checkout. |
+| `ssh_options` | Extra ssh/scp options for that desk. The VMs use their own key and known_hosts from `test-machines/ssh`; ssh expands the tilde itself. |
+| `shell` | `powershell` for a Windows desk whose sshd lands in PowerShell, as the VM's does. PowerShell hands stdin to native programs as text, so nothing is piped to it: the snapshot and each cmd.exe line go by scp as files (`blink-fleet-snapshot.tar`, `blink-fleet-step.cmd` in its home), and only `cmd.exe /d /c "$env:USERPROFILE\blink-fleet-step.cmd"; exit $LASTEXITCODE` crosses the ssh command line. The `exit` is there because `powershell -c` otherwise turns every failure into exit 1. |
+| `note` | What that desk really is, carried into its result and the table. |
+| `[hosts.<name>.vm] utm` | The VM's UUID from `utmctl list`. Not its name: UTM has registered the Ubuntu bundle three times, all called "Blink Ubuntu". |
+| `[hosts.<name>.vm] hostname` | The guest's DHCP hostname, for the lease fallback. |
+
+### Getting the VMs ready
+
+Measured 2026-10-30:
+
+| | State | To do |
+|---|---|---|
+| Ubuntu VM | Ubuntu 26.04.1 **aarch64**, Python 3.14.4 with pyserial 3.5, `tester` in `dialout`, sshd listening, no BLINK service installed (so the agent's stop is "not installed", which is fine). Boots with `utmctl start F849B207-...`. | Nothing in the guest. |
+| Windows VM | Would not start: `utmctl start` timed out with OSStatus -1712 three times and the VM stayed `stopped`, with or without the Ubuntu VM running. | Start it from UTM's window and read the error it shows. Then check `C:\Python311-x64\python.exe -c "import serial"` in it (`pip install pyserial==3.5` into that interpreter if not), and that `test-machines/windows-vm/ssh.sh` still gets in. |
+| This Mac | From the shell that tried, ssh and even ping to the VMs answered "No route to host" while the route existed and the guest was up and listening -- the mark of macOS's Local Network privacy refusing that app. | Run the fleet from a terminal that has Local Network access (System Settings -> Privacy & Security -> Local Network). `test-machines/ubuntu-vm/ssh.sh` working from it is the check. |
+| UTM | Wedged once: a VM showed `started` with QEMU idle and every AppleEvent answering -1712 or -609. Quitting UTM (it needed a kill) and starting it again cleared it. | If `utmctl` hangs, restart UTM before blaming a desk. |
+| The real-account pass | Neither VM has Claude Code or Codex signed in, so that pass fails there -- correctly. | Sign the VMs in, or run with `--no-real-account` and say so: the result records `real_account: false`. |
+
+### What it proves, and what it does not
+
+It proves the same things as the desk fleet ([below](#what-a-green-run-proves))
+on these three machines: real frames out, the board applying them in its own
+words, a real sleep and wake, and the customer path where bundles exist. On
+macOS that is the real thing -- the Mac is a real desk.
+
+It is **not** the desk fleet, and the gate keeps the two apart:
+
+- **Windows is Windows 11 on ARM, in a VM.** The desk it stands in for is
+  Windows 10 on an x86 PC with a non-ASCII profile name. The VM runs x64
+  Python under Windows' own emulation, binds WCH's **Arm64** CH340 driver
+  (`vendor/ch341ser-arm64`), and its profile is `tester`. The x64 driver, the
+  Windows 10 USB stack, native x64 and the Hebrew `%USERPROFILE%` that once
+  broke `blink status --wire` are not exercised at all.
+- **Ubuntu is aarch64.** No release archive is published for Linux on Arm,
+  so `--bundle` / `--prev-bundle` have nothing to install there; the
+  customer path on Linux goes unproved. The desk it stands in for was a
+  real machine with Ubuntu on its own disk and the board on its own port.
+- **The board reaches both through UTM's USB redirection** (SPICE usbredir),
+  not a host controller of their own. A timing fault that only a real port
+  shows can hide behind it, and one that only redirection shows can look
+  like a firmware bug.
+- **It is one board.** The desk fleet put two boards, and both editions, in
+  front of the suite; this puts one, of one edition, through three hosts. A
+  fault that belongs to the other edition's page goes unseen.
+- **The desks run one after another**, so the run takes the sum of three
+  desks -- twenty minutes or so plus handoffs -- not the longest one.
 
 ## Troubleshooting
 
@@ -553,7 +697,9 @@ green, which ends the gate.
 written claim, and a wrong one goes green on the wrong page.
 
 **It says nothing about desks it did not run.** That is the gate's entire
-reason for reading `fleet.toml` instead of the result file.
+reason for reading `fleet.toml` instead of the result file -- and a VM run
+says nothing about the desks it stood in for; see
+[The VM fleet](#what-it-proves-and-what-it-does-not).
 
 So watch the panels while the run goes by. That is not ceremony: several of the
 things this suite cannot see are the things most likely to be wrong.
