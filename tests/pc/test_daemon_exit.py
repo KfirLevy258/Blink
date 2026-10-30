@@ -38,13 +38,26 @@ def spawn(tmp_path, body):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-def wait_for(path, timeout=10):
+def wait_for(path, proc, timeout=10):
+    """True once the child has made `path`. Otherwise a failure that says
+    what the child did: on macos-latest this once came back as a bare
+    `assert False` twice running, with nothing to tell a child that died
+    from one that was stuck. A child that has exited is reported at once
+    rather than waited out."""
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if os.path.exists(path):
             return True
+        if proc.poll() is not None:
+            break
         time.sleep(0.02)
-    return False
+    state = ("still running" if proc.poll() is None
+             else f"exited {proc.returncode}")
+    if proc.poll() is None:
+        proc.kill()
+    _, err = proc.communicate(timeout=10)
+    pytest.fail(f"child made no {os.path.basename(path)!r} ({state});"
+                f" stderr:\n{err.decode(errors='replace')}")
 
 
 def test_sigterm_mid_flash_lets_the_flash_finish_then_exits(tmp_path):
@@ -69,7 +82,7 @@ def test_sigterm_mid_flash_lets_the_flash_finish_then_exits(tmp_path):
         time.sleep(30)
     """)
     try:
-        assert wait_for(tmp_path / "started")
+        assert wait_for(tmp_path / "started", proc)
         proc.send_signal(signal.SIGTERM)
         rc = proc.wait(timeout=15)
     finally:
@@ -91,7 +104,7 @@ def test_sigterm_outside_a_flash_exits_at_once(tmp_path):
         time.sleep(30)
     """)
     try:
-        assert wait_for(tmp_path / "ready")
+        assert wait_for(tmp_path / "ready", proc)
         t0 = time.monotonic()
         proc.send_signal(signal.SIGTERM)
         assert proc.wait(timeout=10) == 0
@@ -115,7 +128,7 @@ def test_sigterm_runs_atexit_and_the_builder_cancels(tmp_path):
         time.sleep(30)
     """)
     try:
-        assert wait_for(tmp_path / "ready")
+        assert wait_for(tmp_path / "ready", proc)
         proc.send_signal(signal.SIGTERM)
         assert proc.wait(timeout=10) == 0
     finally:

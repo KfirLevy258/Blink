@@ -37,6 +37,7 @@ import json
 import os
 import secrets
 import shutil
+import socketserver
 import subprocess
 import sys
 import threading
@@ -445,6 +446,25 @@ def _tab_id(tab):
 class _HTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
+
+    def server_bind(self):
+        # http.server's own server_bind asks socket.getfqdn() for a name to
+        # keep in server_name, which nothing here reads -- every link is
+        # http://127.0.0.1:<port>. getfqdn is a reverse DNS lookup, and on a
+        # Mac it can stall for seconds where the resolver is slow to answer
+        # (bpo-6085; GitHub's macOS runners, actions/runner-images#8649).
+        # It runs inside launch() with the Launcher's lock held. The child
+        # in tests/pc/test_daemon_exit.py that starts a builder never got
+        # past launch() within 10 s on macos-latest, in two runs out of two
+        # (41093831896, 41094198669), while the in-process servers later in
+        # the same job started at once. The same job's batch holding the
+        # one status-page test with a stock http.server ran ~35 s longer
+        # than on Ubuntu. A first, uncached lookup stalling about 30 s is
+        # the likeliest reading, though nobody has timed one on the runner.
+        # The lookup buys nothing either way, so it is skipped: bind, and
+        # name the address as given.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
         # socketserver prints a traceback to stderr here, and under the daemon

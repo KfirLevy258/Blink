@@ -773,3 +773,20 @@ def test_close_does_not_wait_on_a_browser_that_is_still_opening(home):
     assert FakeServer.made[0].finished == ("daemon stopping", True)
     release.set()
     worker.join(5)
+
+
+def test_starting_a_builder_asks_dns_nothing(home, monkeypatch):
+    """http.server's server_bind does a reverse lookup (socket.getfqdn) for
+    a name nothing here uses, inside launch() with the Launcher's lock
+    held; on macOS CI the first builder a child started never got past it
+    in 10 s. Any lookup now fails the test rather than going unnoticed."""
+    def lookup(*a, **k):
+        raise AssertionError(f"a DNS lookup while starting: {a}")
+    monkeypatch.setattr(socket, "getfqdn", lookup)
+    monkeypatch.setattr(socket, "gethostbyaddr", lookup)
+    s = theme_server.BuilderServer(home, tick_s=3600)
+    try:
+        assert s.address == ("127.0.0.1", s.port) and s.port > 0
+        assert s.new_link().startswith(f"http://127.0.0.1:{s.port}/")
+    finally:
+        s.finish("test over", cancel=False)
