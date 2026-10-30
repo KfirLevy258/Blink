@@ -73,8 +73,9 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**2871 passing** as of 2026-10-30, on macOS. The same tree was proved on all
-three platforms that day: Ubuntu (Docker, x86_64) 2787 passed and 84 skipped,
+**2984 passing** as of 2026-10-30, on macOS. The last count proved on all
+three platforms was 2871, earlier that day: Ubuntu (Docker, x86_64) 2787
+passed and 84 skipped,
 Windows (ARM64 VM) 2626 passed and 239 skipped, none failing. The skips are
 platform tests and, on Windows, the builder-page tests that need Node. Re-run
 Ubuntu and Windows before claiming them for a new number. Everything in
