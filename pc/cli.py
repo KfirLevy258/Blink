@@ -4287,7 +4287,9 @@ def _theme_builder(home) -> int:
     if not theme_server.open_url(url):
         print("No browser opened here, so use the link above.")
     try:
-        outcome = server.wait()
+        # In slices: see wait_interruptibly, or Ctrl-C does nothing on
+        # Windows.
+        outcome = server.wait_interruptibly()
     except KeyboardInterrupt:
         server.finish("cancelled")
         outcome = server.wait(5)

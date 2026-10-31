@@ -275,6 +275,50 @@ def test_closing_the_tab_cancels_after_a_grace(server, home):
     assert theme.take_preview(home) == ("cancel", None)
 
 
+class _SlicedEvent:
+    """Stands in for BuilderServer._done: says "not yet" twice, then done,
+    and keeps every timeout it was asked to wait for."""
+
+    def __init__(self):
+        self.asked = []
+
+    def wait(self, timeout=None):
+        self.asked.append(timeout)
+        return len(self.asked) > 2
+
+    def set(self):
+        pass
+
+
+def test_waiting_for_the_end_is_done_in_short_slices(home):
+    """Review of 1.4.0 (builder), S2. `blink theme` blocked in
+    Event.wait(None), and a lock acquire with no timeout is not
+    interruptible on Windows in CPython 3.11 (Python/thread_nt.h: "intr_flag
+    does nothing on Windows, and lock acquires are uninterruptible"), the
+    Python the Windows binary is built with. So Ctrl-C was held back until
+    the builder ended by itself, and the "so does Ctrl-C here" the command
+    prints was not true. A timed wait is interrupted on every platform."""
+    s = theme_server.BuilderServer(home, tick_s=3600)
+    s.start()
+    real, fake = s._done, _SlicedEvent()
+    try:
+        s.outcome = "saved"
+        s._done = fake
+        assert s.wait_interruptibly() == "saved"
+        assert len(fake.asked) == 3
+        assert all(t is not None and 0 < t <= 1 for t in fake.asked)
+    finally:
+        s._done, s.outcome = real, None
+        s.finish("test over", cancel=False)
+        s.wait(5)
+
+
+def test_waiting_in_slices_still_returns_when_the_builder_ends(server):
+    cookie = login(server)
+    request(server, "POST", "/api/cancel", b"", cookie=cookie)
+    assert server.wait_interruptibly() == "cancelled"
+
+
 def test_a_reload_inside_the_grace_keeps_the_builder_open(server):
     cookie = login(server)
     request(server, "POST", "/api/closed", b"", cookie=cookie)

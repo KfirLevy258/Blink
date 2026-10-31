@@ -222,6 +222,32 @@ def test_bare_theme_with_no_browser_prints_the_link(monkeypatch, capsys):
     assert theme.take_preview(home()) == ("cancel", None)
 
 
+def test_ctrl_c_in_bare_theme_cancels_without_an_unbounded_wait(
+        monkeypatch, capsys):
+    """Review of 1.4.0 (builder), S2: the command prints "so does Ctrl-C
+    here" and then blocked in a wait with no timeout, which CPython 3.11
+    cannot interrupt on Windows. The wait it makes must be timed. Here the
+    unbounded one is made to fail, and a Ctrl-C (interrupt_main, which
+    raises KeyboardInterrupt in the main thread the way the signal does) is
+    sent once the builder is up."""
+    import _thread
+    real = theme_server.BuilderServer.wait
+
+    def timed_only(self, timeout=None):
+        assert timeout is not None and timeout <= 10, "an unbounded wait"
+        return real(self, timeout)
+    monkeypatch.setattr(theme_server.BuilderServer, "wait", timed_only)
+
+    def opener(url):
+        threading.Timer(0.3, _thread.interrupt_main).start()
+        return True
+
+    monkeypatch.setattr(theme_server, "open_url", opener)
+    assert cli.main(["theme"]) == 0
+    assert "Cancelled." in capsys.readouterr().out
+    assert theme.take_preview(home()) == ("cancel", None)
+
+
 def test_a_missing_page_is_one_sentence(monkeypatch, capsys):
     monkeypatch.setattr(theme_server, "PAGE_FILE", "not-there.html")
     monkeypatch.setattr(theme_server, "open_url", lambda u: True)

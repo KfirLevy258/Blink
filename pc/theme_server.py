@@ -79,6 +79,9 @@ PAGE_ALIVE_S = 75
 # a replayed ask, or a deliberate one on the "Opened" note itself -- is
 # folded into it, which is benign: a window opened moments earlier.
 OPEN_EVERY_S = 2
+# The longest a Ctrl-C in `blink theme` waits to be noticed; see
+# BuilderServer.wait_interruptibly.
+WAIT_SLICE_S = 0.5
 
 
 def cookie_name(port):
@@ -681,6 +684,25 @@ class BuilderServer:
 
     def wait(self, timeout=None):
         self._done.wait(timeout)
+        return self.outcome
+
+    def wait_interruptibly(self):
+        """wait() with no end, for a foreground command that Ctrl-C must
+        be able to stop. In slices, because a lock acquire with no timeout
+        is not interruptible on Windows in CPython 3.11, the Python the
+        Windows binary is built with: Python/thread_nt.h says "Fow now,
+        intr_flag does nothing on Windows, and lock acquires are
+        uninterruptible", and Event.wait(None) is exactly such an acquire.
+        `blink theme` then ignored Ctrl-C until the builder ended by itself
+        -- Save, Cancel, the tab closed, ten minutes idle -- while telling
+        the owner that Ctrl-C cancels it (review of 1.4.0, builder S2). A
+        timed wait is interrupted on every platform. Half a second is the
+        longest a Ctrl-C can wait. Measured on Windows 11 with Python
+        3.11.9: a SIGINT raised at 2 s reached Event.wait(None) at 8 s,
+        when the event was set, and a loop of wait(0.5) at 2.0 s, by both
+        signal.raise_signal and _thread.interrupt_main."""
+        while not self._done.wait(WAIT_SLICE_S):
+            pass
         return self.outcome
 
 
