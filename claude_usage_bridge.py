@@ -1223,8 +1223,13 @@ def main(argv=None):
                 pass
             with no_exit_while("firmware write"):
                 ok, why = ota_mod.flash(port, blob)
-            print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
-                  file=sys.stderr)
+                # Inside the guard, not after it: when a stop arrived during
+                # the write, the guard's exit runs the moment this block ends
+                # and a line printed after it never did. The log then ended
+                # at "stopping once the firmware write has finished" with no
+                # word on whether it had (review, 2026-10-31).
+                print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
+                      file=sys.stderr)
             raise Reflashed(None if ok else why)
 
         def self_update(version, artifact):
