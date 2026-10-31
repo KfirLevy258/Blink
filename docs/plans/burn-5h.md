@@ -31,8 +31,11 @@ hour falls on a bucket's left edge, and the board can label hours.
 ## Wire contract: the `burn` line
 
 ```
-{"t":"burn","v":1,"p":"claude","q":1793430000,"b":[0,0,4,12,...20 ints]}
+{"t":"burn","v":2,"p":"claude","q":1793430000,"b":[0,0,4,12,...20 ints]}
 ```
+
+- `v`: `PROTO_VERSION`, like every other line. The board reads `v` only on
+  `welcome`.
 
 - `q`: epoch seconds of the **newest** bucket's start (the quarter-hour the
   daemon's clock is in now). Bucket `i` (0 = oldest) starts at
@@ -47,7 +50,8 @@ hour falls on a bucket's left edge, and the board can label hours.
 **Sent only to a board whose caps list `"burn"`** (`protocol.board_caps`,
 the same gate `svc` and `theme` use). A 1.3.4 board never lists it, so it never
 gets the line. The daemon sends it while the claude page's frame has
-`no_session_window`: once right after the welcome/pref exchange, then whenever
+`no_session_window`. It stays out of the hello burst. It goes out on the first
+tick after the 2 s quiet window, the way themes do, then whenever
 `q` or `b` changes, and at least every 60 seconds as a heartbeat, at most once
 every 15 seconds. When the flag clears it simply stops sending. There is no
 "off" message.
