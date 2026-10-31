@@ -2936,10 +2936,14 @@ def _announce():
               f" {status_page.POLL_S // 60} minutes.")
     else:
         print("  Status-page alerts are off (blink config status-page on).")
+    # Every source the daemon reads usage from, and only those. Local
+    # Storage was missing until the review follow-up of 2026-11-01, though
+    # pc/desktop_local_storage.py has read the five-hour figure and its
+    # countdown out of it since Desktop started keeping one there.
     print("  The usage figures come from Claude Code, Claude Desktop's usage")
-    print("  cache, or the Codex session log -- each of which has already")
-    print("  worked them out. From the Codex log it keeps only the rate-limit")
-    print("  line, never the conversation.")
+    print("  cache and Local Storage, or the Codex session log -- each of")
+    print("  which has already worked them out. From the Codex log it keeps")
+    print("  only the rate-limit line, never the conversation.")
     # The burn view's source (pc/burn_reader), missing from this note until
     # the /code-review max of 2026-11-01: on a desk whose account has no
     # five-hour window, the daemon reads Claude Code's own transcripts --
