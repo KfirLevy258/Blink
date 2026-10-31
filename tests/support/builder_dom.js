@@ -156,7 +156,11 @@ function fetch_(path, opts) {
   });
 }
 
-const win = { closed: 0, listeners: {}, close() { this.closed++; }, addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); } };
+// closed counts the closes the browser allowed (a real window.closed is a
+// boolean, and either reads as true here); calls counts every ask. A
+// scenario sets refuse = true to be a browser that will not close a tab
+// that has a history behind it.
+const win = { closed: 0, calls: 0, refuse: false, listeners: {}, close() { this.calls++; if (!this.refuse) this.closed++; }, addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); } };
 
 // The clipboard takes every write and keeps it, so a test can read what a
 // copy button copied. refuse = true makes it reject, as a browser does

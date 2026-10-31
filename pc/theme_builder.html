@@ -674,6 +674,56 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     if (keep) document.getElementById('copy-code').disabled = false;
     return true;
   }
+  // A tab that saved or cancelled, and holds nothing the owner would miss,
+  // closes itself after CLOSE_AFTER_S, with the seconds in the status line
+  // (the owner asked for it, 2026-10-31: "can we just close the tab after
+  // like 5 sec?"). A script may close a top-level tab whose session
+  // history holds one document (HTML Standard, "script-closable"), and the
+  // builder is opened at /open?k=..., which answers 303 to /: a redirect
+  // replaces the entry it came from and adds none, for the link the board
+  // opens and the one `blink theme` prints alike. A tab the owner pasted
+  // the link into after other pages has a longer history, and the browser
+  // refuses: window.closed is still false CLOSE_CHECK_MS later and the line
+  // says "You can close this tab." as it did before. The countdown is the
+  // owner's to stop, so that nobody loses a tab they are reading: a key, a
+  // click, a touch or the wheel, or a mouse that has moved more than
+  // MOVE_PX from where it first was. The first mousemove is only the
+  // baseline, since the mouse is usually still moving as the click that
+  // saved lets go. aria-live is off for the ticks: one announcement a
+  // second is a stream, and the first line has already said it; the line
+  // that ends the countdown is announced again.
+  var CLOSE_AFTER_S = 5, CLOSE_CHECK_MS = 600, MOVE_PX = 12;
+  var closer = null;
+  function rewrite(text) {
+    var t = document.getElementById('status-text');
+    if (t.textContent !== text) t.textContent = text;
+  }
+  function closingLine(base, left) { return base + ' This tab closes in ' + left + ' s.'; }
+  // Starts the countdown whose first line retire() has just written.
+  function closeSoon(base) {
+    var left = CLOSE_AFTER_S, bar = document.getElementById('status');
+    function line() { return closingLine(base, left); }
+    function settle() {
+      closer = null;
+      bar.setAttribute('aria-live', 'polite');
+      rewrite(base + ' You can close this tab.');
+    }
+    function tick() {
+      left--;
+      if (left > 0) { rewrite(line()); closer.timer = setTimeout(tick, 1000); return; }
+      try { window.close(); } catch (e) {}
+      closer.timer = setTimeout(function () { if (!window.closed) settle(); else closer = null; }, CLOSE_CHECK_MS);
+    }
+    closer = { settle: settle, x: null, y: null, timer: setTimeout(tick, 1000) };
+    bar.setAttribute('aria-live', 'off');
+  }
+  function interrupt() { if (closer) { clearTimeout(closer.timer); closer.settle(); } }
+  ['mousedown', 'keydown', 'touchstart', 'wheel'].forEach(function (t) { document.addEventListener(t, interrupt); });
+  document.addEventListener('mousemove', function (e) {
+    if (!closer) return;
+    if (closer.x === null) { closer.x = e.clientX; closer.y = e.clientY; return; }
+    if (Math.abs(e.clientX - closer.x) + Math.abs(e.clientY - closer.y) > MOVE_PX) interrupt();
+  });
   // The bar's second sentence when the tab holds changes the board has not
   // kept. Under "Saved" the usual "Your changes here are not saved" read as
   // a contradiction at a glance (review of fp/notice-title, NICE-3), so a
@@ -946,7 +996,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       if (j.status === 200) {
         savedKey = JSON.stringify(sent);
         var keep = holdsDraft(), text = 'Saved: ' + name + '. Your board keeps it.';
-        retire(text + ' ' + (keep ? KEEP_AFTER_SAVE : 'You can close this tab.'), 'ok', keep);
+        if (retire(keep ? text + ' ' + KEEP_AFTER_SAVE : closingLine(text, CLOSE_AFTER_S), 'ok', keep) && !keep) closeSoon(text);
       }
       else if (j.status === 409) superseded();
       // An answer at all means the builder was up to give it, so a stop
@@ -964,7 +1014,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     post('/api/cancel', null, true).then(function (j) {
       if (j.status === 409) return superseded();
       // No share code offered: Cancel is the owner throwing the changes away.
-      retire('Cancelled. Your board is back on its saved theme. You can close this tab.');
+      var text = 'Cancelled. Your board is back on its saved theme.';
+      if (retire(closingLine(text, CLOSE_AFTER_S))) closeSoon(text);
     }, stopped);
   });
   // Closing the tab cancels. A reload also fires pagehide, and the server

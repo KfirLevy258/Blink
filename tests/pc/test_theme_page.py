@@ -186,8 +186,10 @@ _NO_ANSWER = "answer('/api/ping', () => 'fail'); await advance(23100);"
 # longer active." for every ending, so a save that worked read as an error
 # (manual test on a board, 2026-10-30), and the next step was to have no
 # dialog at all.
-SAVED = "Saved: Dark. Your board keeps it. You can close this tab."
-CANCELLED = "Cancelled. Your board is back on its saved theme. You can close this tab."
+# What a save and a cancel say the moment they land: the tab closes itself in
+# five seconds when it holds nothing unsaved (tests/pc/test_theme_close.py).
+SAVED = "Saved: Dark. Your board keeps it. This tab closes in 5 s."
+CANCELLED = "Cancelled. Your board is back on its saved theme. This tab closes in 5 s."
 SUPERSEDED = "This builder continued in a newer tab. You can close this one."
 STOPPED = "The builder has stopped. Run blink theme on your computer to start it again."
 # What the bar adds when the tab holds changes nobody saved.
@@ -355,7 +357,7 @@ def test_a_reply_landing_after_the_ending_does_not_replace_it():
     $('save').click(); await advance(10);       // saved
     h.release({ status: 200, body: { ok: true, newer: true } }); await advance(10);
     """ + ENDED, SAVED_DARK)
-    assert r["status"] == "Saved: Ocean. Your board keeps it. You can close this tab."
+    assert r["status"] == "Saved: Ocean. Your board keeps it. This tab closes in 5 s."
     assert r["offer"] is False
 
 
@@ -382,7 +384,7 @@ def test_a_save_in_flight_outranks_a_failure_that_lands_first():
     s.release({ status: 200, body: { ok: true } }); await advance(10);
     """ + ENDED.replace("return {", "return { during,"), SAVED_DARK)
     assert r["during"] is True                  # not ended while Save is out
-    assert r["status"] == "Saved: Ocean. Your board keeps it. You can close this tab."
+    assert r["status"] == "Saved: Ocean. Your board keeps it. This tab closes in 5 s."
 
 
 def test_a_save_that_never_answers_lets_a_held_stop_through():
@@ -667,7 +669,7 @@ def test_a_save_is_not_given_up_on_by_the_request_limit():
     $('save').click(); await advance(15000);
     s.release({ status: 200, body: { ok: true } }); await advance(10);
     """ + ENDED, SAVED_DARK)
-    assert r["status"] == "Saved: Ocean. Your board keeps it. You can close this tab."
+    assert r["status"] == "Saved: Ocean. Your board keeps it. This tab closes in 5 s."
 
 
 def test_saving_shows_until_a_late_answer():
@@ -785,7 +787,7 @@ def test_save_is_off_until_the_state_answers():
     assert r["before"] is True and r["early"] == 0
     assert r["after"] is False
     assert r["sent"] == [{"id": 5}]
-    assert r["status"] == "Saved: Synthwave. Your board keeps it. You can close this tab."
+    assert r["status"] == "Saved: Synthwave. Your board keeps it. This tab closes in 5 s."
 
 
 def test_nothing_is_previewed_before_the_state_answers():
