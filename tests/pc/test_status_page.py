@@ -1086,3 +1086,45 @@ def test_a_real_server_trickling_bytes_is_cut_off_at_the_deadline(
         server.server_close()
     assert result is None
     assert took <= 3 + 1, took
+
+
+# --------------------------------------------- the wall clock steps back
+#
+# Review of 1.4.0 (tests and docs), N3/S11. _fresh() has a lower bound,
+# -CLOCK_SLACK_S, so an answer stamped "in the future" (the clock was reset
+# behind it) is not held up as fresh. Removing the bound passed the suite:
+# nothing tested a stamp ahead of now.
+
+def test_fresh_has_a_lower_bound_as_well_as_an_upper():
+    now = 1_760_000_000.0
+    assert sp._fresh(now - 10, now, sp.STALE_S) is True
+    assert sp._fresh(now - sp.STALE_S, now, sp.STALE_S) is True
+    assert sp._fresh(now - sp.STALE_S - 1, now, sp.STALE_S) is False
+    # An NTP slew: a stamp a little ahead of now is the same moment.
+    assert sp._fresh(now + sp.CLOCK_SLACK_S, now, sp.STALE_S) is True
+    # A clock that was reset: a stamp further ahead than the slack is not.
+    assert sp._fresh(now + sp.CLOCK_SLACK_S + 1, now, sp.STALE_S) is False
+    assert sp._fresh(None, now, sp.STALE_S) is False
+
+
+def test_an_answer_stamped_after_a_clock_reset_does_not_hold_an_incident():
+    """The incident was confirmed, then the clock was put back an hour and
+    the page stopped answering. Its age measured across the step is
+    negative; counted as fresh, the incident would stay on the desk until
+    the clock caught up with it."""
+    op = Opener({CLAUDE_URL: _incident("major_outage")})
+    desk = Desk(op)
+    desk.poll(2)
+    assert desk.shown() == ("major", "Claude Code")
+    op.raises = OSError("network down")
+    desk.t -= 3600
+    assert desk.shown() == sp.OK
+
+
+def test_a_small_step_back_keeps_the_incident():
+    op = Opener({CLAUDE_URL: _incident("major_outage")})
+    desk = Desk(op)
+    desk.poll(2)
+    op.raises = OSError("network down")
+    desk.t -= sp.CLOCK_SLACK_S - 1
+    assert desk.shown() == ("major", "Claude Code")
