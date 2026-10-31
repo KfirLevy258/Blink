@@ -97,6 +97,28 @@ def test_burn_is_named_in_the_log_and_is_a_cap_the_board_can_list():
         {"caps": ["svc", "theme", "edit_done", "burn"]})
 
 
+def test_the_board_keeps_the_view_for_three_heartbeats():
+    """The board drops the view BURN_FRESH_MS after the last line
+    (firmware/src/usage_view.c), and the daemon re-sends at least every
+    BURN_HEARTBEAT_S (pc/bridge). Both comments say three missed lines, and
+    nothing tied the two numbers: a heartbeat raised past the board's window,
+    or the window cut below it, and the view would blink off between lines
+    with every test still green (/code-review max, 2026-11-01). Read from
+    the C rather than copied, the way test_theme_page_burn reads burn_inks().
+    """
+    import re
+    from pc import bridge
+    src = (ROOT / "firmware" / "src" / "usage_view.c").read_text(
+        encoding="utf-8")
+    m = re.search(r"#define\s+BURN_FRESH_MS\s+\((\d+)\s*\*\s*1000\)", src)
+    assert m, "BURN_FRESH_MS is no longer (<seconds> * 1000)"
+    fresh_s = int(m.group(1))
+    assert fresh_s == 3 * bridge.BURN_HEARTBEAT_S
+    # And a line can be held back by the minimum gap, so even one late
+    # heartbeat lands inside the window.
+    assert fresh_s > bridge.BURN_HEARTBEAT_S + bridge.BURN_MIN_GAP_S
+
+
 # -------------------------------------------------------------------- bus
 
 
@@ -385,6 +407,30 @@ def test_a_burn_that_is_not_finite_is_reported_not_raised(tmp_path, capsys):
 
     assert fetch.burn()["b"] == [0] * 20        # idle, held
     assert capsys.readouterr().err.count("burn ignored") == 2
+
+
+def test_a_burn_count_too_big_for_a_float_is_capped_not_raised(tmp_path,
+                                                                capsys):
+    """math.isfinite() of an int past a float's range raises OverflowError
+    rather than answering, and _take_burn caught only ValueError, so a
+    step with a 400-digit count took the provider's poll down (/code-review
+    max, 2026-11-01). An int is always finite; the line caps it at
+    BURN_MAX like any other count."""
+    huge = "9" * 400
+    path = tmp_path / "scenario.json"
+    path.write_text(
+        '{"name": "t", "steps": ['
+        '{"at": 0, "provider": "claude", "weekly_pct": 12.0,'
+        ' "no_session_window": true, "burn": [' + huge + ', 0' * 19 + ']}]}',
+        encoding="utf-8")
+    clock = [float(NOW)]
+    sp = scripted.ScriptedProvider(str(path), now=lambda: clock[0])
+    fetch = ingest.IngestionBus(providers=[sp], now=lambda: clock[0],
+                                burn=sp.burn_source()).fetch()
+    assert fetch()["weekly_pct"] == 12.0
+
+    assert fetch.burn()["b"] == [protocol.BURN_MAX] + [0] * 19
+    assert "burn ignored" not in capsys.readouterr().err
 
 
 def test_the_bench_scenario_walks_every_state_and_is_not_a_fleet_one():

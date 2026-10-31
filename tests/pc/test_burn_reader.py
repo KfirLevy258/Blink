@@ -679,6 +679,55 @@ def test_a_file_that_opens_but_never_reads_stops_holding_the_view_back(
     assert capsys.readouterr() == ("", "")
 
 
+class _Unclosable:
+    """A file that reads, and whose close() fails -- an NFS or SMB share
+    reports a deferred write-back or a dropped server there."""
+
+    def __init__(self, fh):
+        self._fh = fh
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def close(self):
+        self._fh.close()
+        raise OSError(5, "MARKER-input/output error")
+
+    def seek(self, *args):
+        return self._fh.seek(*args)
+
+    def read(self, *args):
+        return self._fh.read(*args)
+
+
+def test_a_close_that_fails_never_escapes_the_poll(tmp_path, monkeypatch,
+                                                   capsys):
+    """The `with` sat outside the try that caught the read's OSError, so one
+    raised by close() left poll() on every poll instead of counting towards
+    READ_TRIES (/code-review max, 2026-11-01). It is one more way for a read
+    to fail, on the same path as the rest."""
+    tx.write(tmp_path, session(tmp_path), [a(1, start(19), 8)], mtime=NOW)
+    r = reader(tmp_path)
+    real_open = open
+
+    def unclosable(path, *a, **k):
+        return _Unclosable(real_open(path, *a, **k))
+
+    with monkeypatch.context() as m:
+        m.setattr("builtins.open", unclosable)
+        assert sum(r.poll(NOW)[1]) == 8   # all of it was read before close()
+    tx.write(tmp_path, session(tmp_path), [a(2, start(19), 5)], mtime=NOW,
+             append=True)
+    with monkeypatch.context() as m:
+        m.setattr("builtins.open", unclosable)
+        got = [r.poll(NOW + LATER + k) for k in range(br.READ_TRIES)]
+    assert all(g is not None and sum(g[1]) == 13 for g in got), got
+    assert capsys.readouterr() == ("", "")
+
+
 def test_a_read_that_fails_once_is_waited_for(tmp_path, monkeypatch):
     """The other half of READ_TRIES: one failure is transient until proved
     otherwise, and the sum waits for the file rather than going out short."""
@@ -729,13 +778,76 @@ def test_a_project_that_cannot_be_listed_is_nothing_to_say_until_it_can(
     r = reader(tmp_path)
     assert sum(r.poll(NOW)[1]) == 13
 
-    refusing_listings(monkeypatch, [other])
-    assert r.poll(NOW + LATER) is None
-    assert r.last.files == 2
+    # A context of its own and not monkeypatch.undo(), which reverts every
+    # change the test's monkeypatch holds -- conftest's autouse sandbox
+    # included: HOME, the network and browser guards, BLINK_SKIP_SERVICE
+    # (/code-review max, 2026-11-01).
+    with monkeypatch.context() as m:
+        refusing_listings(m, [other])
+        assert r.poll(NOW + LATER) is None
+        assert r.last.files == 2
 
-    monkeypatch.undo()
     assert sum(r.poll(NOW + 2 * LATER)[1]) == 13
     assert r.last.read_bytes == 0
+
+
+def test_a_project_that_never_lists_stops_holding_the_view_back(
+        tmp_path, monkeypatch, capsys):
+    """READ_TRIES for a directory. A project left owned by root -- a
+    `sudo claude` -- refused every walk, and poll() returned None for the
+    life of the daemon with nothing said anywhere (/code-review max,
+    2026-11-01). After READ_TRIES walks in a row the sum goes out without
+    it, bridge.log is told once that part of the desk is left out -- the
+    kind of problem and never the path, which names the project -- and the
+    project is counted the moment it lists."""
+    tx.write(tmp_path, session(tmp_path), [a(1, start(19), 8)], mtime=NOW)
+    other = projects(tmp_path) / "-work-locked"
+    tx.write(tmp_path, other / "s.jsonl", [a(2, start(19), 5)], mtime=NOW)
+    r = reader(tmp_path)
+    with monkeypatch.context() as m:
+        refusing_listings(m, [other])
+        got = [r.poll(NOW + k * LATER) for k in range(br.READ_TRIES + 1)]
+    assert got[:br.READ_TRIES - 1] == [None] * (br.READ_TRIES - 1)
+    assert [sum(g[1]) for g in got[br.READ_TRIES - 1:]] == [8, 8]
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.count("\n") == 1, err
+    assert "cannot be listed" in err
+    assert "locked" not in err and "MARKER" not in err
+
+    assert sum(r.poll(NOW + (br.READ_TRIES + 1) * LATER)[1]) == 13
+    out, err = capsys.readouterr()
+    assert err.count("\n") == 1 and "locked" not in err, err
+
+
+def test_a_project_given_up_on_does_not_keep_deleted_files(tmp_path,
+                                                           monkeypatch):
+    """While a directory is refused, what it held is kept, so it is not read
+    again from the start once it lists. That is no reason to keep the rest:
+    a transcript deleted elsewhere is still forgotten."""
+    tx.write(tmp_path, session(tmp_path, "kept"), [a(1, start(19), 8)],
+             mtime=NOW)
+    tx.write(tmp_path, session(tmp_path, "gone"), [a(3, start(19), 2)],
+             mtime=NOW)
+    other = projects(tmp_path) / "-work-locked"
+    tx.write(tmp_path, other / "s.jsonl", [a(2, start(19), 5)], mtime=NOW)
+    r = reader(tmp_path)
+    assert sum(r.poll(NOW)[1]) == 15
+    session(tmp_path, "gone").unlink()
+    refusing_listings(monkeypatch, [other])
+    r.poll(NOW + LATER)
+    assert r.last.files == 2            # the locked one is kept, not "gone"
+
+
+def test_a_projects_directory_that_never_lists_is_never_given_up_on(
+        tmp_path, monkeypatch, capsys):
+    """The root is not one project among many: without it there is nothing
+    to sum, and twenty zeros would be the confident "idle" again."""
+    tx.write(tmp_path, session(tmp_path), [a(1, start(19), 8)], mtime=NOW)
+    refusing_listings(monkeypatch, [projects(tmp_path)])
+    r = reader(tmp_path)
+    assert [r.poll(NOW + k * LATER)
+            for k in range(br.READ_TRIES + 2)] == [None] * (br.READ_TRIES + 2)
 
 
 def test_a_project_that_vanishes_mid_walk_is_simply_gone(tmp_path,

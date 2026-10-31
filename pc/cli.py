@@ -3668,11 +3668,22 @@ def _session_window_line(page, verdict):
     session figure (review, 2026-10-31). `verdict` is the SessionVerdict that
     marked it, the persisted one the daemon writes, so a fresh `blink
     status` says what the running daemon says (finding 5).
+
+    No page at all is a different case: no source has a reading, so there
+    is no figure the row could contradict, and the saved verdict alone
+    decides. A Claude Code-only Ultra desk in a session before its first
+    reply has a status line with no rate_limits; the daemon, which
+    remembers its last reading, is marked and sending the burn line, and
+    the row went missing here because a fresh process has nothing to
+    merge (/code-review max, 2026-11-01).
     """
-    if page is None or not page.no_session_window:
-        return
     from pc import session_verdict
     current = verdict.current() if verdict is not None else None
+    if page is None:
+        if current is None or current[0]:
+            return
+    elif not page.no_session_window:
+        return
     why = session_verdict.DESCRIBE.get(current[1]) if current else None
     print("Session     no five-hour window"
           + (f" ({why})" if why else ""))

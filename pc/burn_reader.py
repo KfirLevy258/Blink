@@ -19,6 +19,8 @@ transcript is somebody's whole working session; what leaves this module is
 twenty sums. That includes the OSError a failed open, read or listing
 raises, whose text is the transcript's path and so the customer's project
 name: it is swallowed, and the file or directory is simply tried again.
+The one thing this module ever says is that a project directory is being
+left out of the sum (SAID_LEFT_OUT), in a fixed sentence with no path in it.
 
 THE SHAPE, measured on the development desk 2026-10-31, counts only: 4401
 transcripts, 3.3 GB, in 107 directories -- 3606 session files one level down
@@ -78,6 +80,7 @@ last -- is pc/bridge's; this only answers "what are the twenty numbers now".
 import json
 import os
 import stat
+import sys
 import typing
 
 from pc import protocol
@@ -128,6 +131,14 @@ MAX_LINE_BYTES = 16 * 1024 * 1024
 # and the reader returned None for the life of the daemon (review,
 # 2026-10-31).
 READ_TRIES = 3
+
+# What bridge.log is told when READ_TRIES gives up on a directory, and when
+# every directory lists again. Fixed strings: the path of a project
+# directory is the customer's project name, and the OSError of a listing
+# carries it, so neither is ever part of the line (CLAUDE.md).
+SAID_LEFT_OUT = ("[burn] a project directory cannot be listed; the burn view "
+                 "goes on without it")
+SAID_WHOLE = "[burn] every project directory lists again"
 
 # How many bytes before a file's offset vouch for it: the reader keeps a
 # hash of the last ANCHOR_BYTES it took, reads them again ahead of the next
@@ -193,10 +204,10 @@ def _transcripts(root, refused, depth=0):
 
     A directory that exists and cannot be listed, the projects directory or
     any below it, appends to `refused`, and the caller then has nothing
-    honest to say: the sum without it is a total that leaves part of the
-    desk out and is drawn as if it were the whole. The listing's OSError
-    used to be swallowed, so an unlistable projects directory read as
-    twenty zeros, a confident "idle" (review, 2026-10-31).
+    honest to say, for READ_TRIES walks: the sum without it is a total that
+    leaves part of the desk out and is drawn as if it were the whole. The
+    listing's OSError used to be swallowed, so an unlistable projects
+    directory read as twenty zeros, a confident "idle" (review, 2026-10-31).
     """
     try:
         entries = os.scandir(root)
@@ -291,6 +302,11 @@ class BurnReader:
         # Did the last walk find the root and list every directory under
         # it? Neither is something twenty zeros could honestly stand for.
         self._listed = False
+        # Directory -> walks in a row that could not list it, READ_TRIES for
+        # directories: see _walk. And whether bridge.log has been told that
+        # one of them is being left out, so it is told once.
+        self._refusals = {}
+        self._left_out_said = False
         self._kept_from = None      # the oldest bucket the last prune kept
         self.last = PollCost(False, 0, 0, 0, 0)
 
@@ -306,9 +322,10 @@ class BurnReader:
         whole output tokens, which is what the wire carries too.
 
         None while there is no projects directory, or one this user cannot
-        list all of -- twenty zeros would be a confident "idle" about
-        transcripts never found -- and while any file is still owed a read,
-        for the reason the module docstring gives.
+        list -- twenty zeros would be a confident "idle" about transcripts
+        never found -- while a directory under it has failed to list for
+        fewer than READ_TRIES walks in a row, and while any file is still
+        owed a read, for the reason the module docstring gives.
         """
         walked = (self._walked_at is None
                   or now - self._walked_at >= self._scan_every
@@ -366,13 +383,31 @@ class BurnReader:
                 f.restart(0)
             f.looked = min(f.looked, st.st_size)
             f.size, f.mtime, f.ino = st.st_size, st.st_mtime, st.st_ino
-        self._listed = not refused
-        if refused:
-            # What the refused directories hold was not listed, which is not
-            # the same as gone: forgotten, every file in them touched inside
-            # the window would be read again from its start once they list.
-            return
-        for gone in [p for p in self._files if p not in present]:
+        # READ_TRIES, for a directory. One under projects/ that this user
+        # cannot list -- a project left owned by root by a `sudo claude` --
+        # used to hold poll() at None for the life of the daemon, silently:
+        # the files rule had a bound and the directories none (/code-review
+        # max, 2026-11-01). A refusal is waited for, as a read's is, and
+        # after READ_TRIES walks in a row the sum goes out without what that
+        # directory holds; it is still listed on every walk, and counted the
+        # moment it lists. The projects directory itself is never given up
+        # on: without it there is no sum at all to send short.
+        self._refusals = {d: self._refusals.get(d, 0) + 1 for d in refused}
+        waiting = [d for d in refused
+                   if d == root or self._refusals[d] < READ_TRIES]
+        self._listed = not waiting
+        left_out = any(d != root and self._refusals[d] >= READ_TRIES
+                       for d in refused)
+        if left_out != self._left_out_said:
+            self._left_out_said = left_out
+            print(SAID_LEFT_OUT if left_out else SAID_WHOLE, file=sys.stderr)
+        # What a refused directory holds was not listed, which is not the
+        # same as gone: forgotten, every file in it touched inside the
+        # window would be read again from its start once it lists. The
+        # rest of the tree was listed, and what is missing from it is gone.
+        under = tuple(os.path.join(d, "") for d in refused)
+        for gone in [p for p in self._files
+                     if p not in present and not p.startswith(under)]:
             del self._files[gone]
 
     def _prune(self, oldest):
@@ -413,13 +448,11 @@ class BurnReader:
         Before it reads on from an offset it reads the ANCHOR_BYTES before
         it again, and starts from the beginning of the file if they are not
         the ones it took. A read that raises before it has finished counts
-        towards READ_TRIES, whatever raised: the open, a seek, a read().
+        towards READ_TRIES, whatever raised: the open, a seek, a read() or
+        the close. The close sat outside the try, so an OSError from it left
+        poll() every time (/code-review max, 2026-11-01); one try now holds
+        all four, and nothing raised is ever said.
         """
-        try:
-            fh = open(path, "rb")
-        except OSError:
-            f.failures += 1             # tried again next poll; never said
-            return 0
         read = 0
         pos = f.offset                  # where `pending` starts in the file
         pending = bytearray()
@@ -429,8 +462,8 @@ class BurnReader:
         tail = None
         skipping = False
         failed = True
-        with fh:
-            try:
+        try:
+            with open(path, "rb") as fh:
                 if pos:
                     k = min(pos, ANCHOR_BYTES)
                     fh.seek(pos - k)
@@ -474,9 +507,9 @@ class BurnReader:
                     del pending[:end + 1]
                     if read >= budget:
                         break
-                failed = False
-            except OSError:
-                pass                    # what was taken stands; the rest waits
+            failed = False
+        except OSError:
+            pass                        # what was taken stands; the rest waits
         f.failures = f.failures + 1 if failed else 0
         f.offset = pos
         f.looked = pos + len(pending)
