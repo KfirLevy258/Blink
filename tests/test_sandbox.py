@@ -566,3 +566,35 @@ def test_the_marker_lets_a_test_have_the_real_thing():
     """Checked by identity only: nothing here calls it."""
     assert not _guarded(webbrowser.open)
     assert not _guarded(subprocess.Popen.__init__)
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="the probe asks pwd for the real home; POSIX only")
+def test_a_run_started_inside_tests_pc_still_loads_the_sandbox():
+    """The root pytest.ini is what makes this true. Without any ini file,
+    pytest takes the common ancestor of its arguments as rootdir and stops
+    looking for conftest.py there, so a run started in tests/pc never loaded
+    tests/conftest.py and every test ran against the real HOME (CLAUDE.md).
+    Nothing pinned the one-line file: deleting it failed no test (review of
+    PR #4, 2026-10-31; shown by moving it away and rerunning this probe).
+
+    The child runs with the account's REAL home as HOME, which is the point;
+    the probe only reads the environment. It lives in tests/pc and is named by
+    its bare file name from there, because that is the shape that fails: the
+    same probe reached from elsewhere found the sandbox with no ini at all."""
+    import pwd
+    try:
+        real = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        pytest.skip("this uid has no passwd entry, so no real home")
+    assert (ROOT / "pytest.ini").is_file(), \
+        "the root pytest.ini is gone; see this test's docstring"
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("PYTEST_", "BLINK_"))}
+    env.update(HOME=real, USERPROFILE=real, PYTHONDONTWRITEBYTECODE="1")
+    out = subprocess.run(
+        [sys.executable, "-s", "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "sandbox_probe.py"],
+        cwd=ROOT / "tests" / "pc", env=env, capture_output=True, text=True,
+        timeout=120)
+    assert out.returncode == 0, out.stdout + out.stderr
