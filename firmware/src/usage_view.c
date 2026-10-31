@@ -535,6 +535,12 @@ static void show_obj(lv_obj_t *o, bool on)
  */
 static lv_obj_t *burn_obj;
 static bool burn_on;
+/*
+ * How many hands are on the half (usage_view_hold_half): ui_anim_run() for
+ * the eye clip, ui_slide_run() for a wipe, the clip's wipes inside the
+ * clip's own hold. While any is, burn_sync() decides nothing.
+ */
+static int half_holds;
 
 /*
  * The session side is the gauge OR the burn view, never a mix: one call
@@ -1764,15 +1770,21 @@ void usage_view_page_step(int delta)
  * the gauge screen held 16,216 B before the view and 16,496 B with it,
  * +280 B, the same whether the view is showing or not, and showing it
  * leaves the screen's drawing peak where it was. The touch harness's
- * Settings-over-gauges peak went from 37,728 to 38,032 B. The board's own
- * figure is the "[mem] lvgl gauges" line (mem_stats.c).
+ * Settings-over-gauges peak went from 37,728 to 38,032 B. The 180 s's own
+ * timer (burn_timer) added 72 B more on the same harness, the gauge
+ * screen's "used" going from 27,592 to 27,664 B in full_touch.txt; it is
+ * made once, with the view's object. The board's own figure is the
+ * "[mem] lvgl gauges" line (mem_stats.c).
  *
  * WHO HOLDS THE HALF is decided in burn_sync() and nowhere else, and only
  * shown and hidden by layout_gauges(). The rule, from the contract: the
  * page's session reading is unknown (s_pct < 0), a burn line for that
  * page's provider arrived within the last 180 s, and the screen is the
  * two-gauge one. A session reading coming back takes the half back at
- * once -- render_gauges() asks on every usage line.
+ * once -- render_gauges() asks on every usage line. Nothing is decided
+ * while the eye clip or a wipe has the screen in its hands
+ * (usage_view_hold_half), and the 180 s runs on LVGL's clock, so it holds
+ * through a doze's peek as well (burn_timer).
  */
 
 /* The contract's window: the daemon re-sends at least every 60 s, so 180 is
@@ -1964,6 +1976,36 @@ static void burn_draw_cb(lv_event_t *e)
 		  LV_TEXT_ALIGN_CENTER);
 }
 
+/*
+ * The view's 180 s, kept on LVGL's clock rather than the mode loop's.
+ *
+ * It used to run from usage_view_tick_1s(), which only the mode loop and
+ * the eye clip call. A doze blocks the mode loop for as long as it lasts
+ * (ui_sleep_run) and never ticks, so a board that dozed when its host went
+ * away kept the view, and a peek hours later drew a chart whose line had
+ * stopped long before, as though it were live (review of 2026-10-31). The
+ * status popup had the same fault, and is taken down as the eyes close
+ * (usage_view_set_sleeping). The view cannot be: a doze can begin a minute
+ * after the last line, and a peek in the two minutes after that must still
+ * show it. So it asks on a timer instead. lv_timer_handler() runs in every
+ * loop that can put this screen on the panel -- the mode loop, the eye
+ * clip, the doze's clips and its peek -- which is what "whenever the
+ * screen is shown" comes to.
+ *
+ * Every second whether or not the view is up: deciding costs a few
+ * comparisons when it is not wanted, and asking regardless means a path
+ * that forgets to ask cannot leave the half wrong for longer than that.
+ * Created once, with the view's object, and kept for the life of the
+ * board, as ui_settings.c keeps upd_timer.
+ */
+static lv_timer_t *burn_timer;
+
+static void burn_timer_cb(lv_timer_t *t)
+{
+	ARG_UNUSED(t);
+	burn_sync();
+}
+
 static void burn_build(lv_obj_t *parent)
 {
 	burn_obj = lv_obj_create(parent);
@@ -1987,6 +2029,10 @@ static void burn_build(lv_obj_t *parent)
 	lv_obj_add_flag(burn_obj, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_add_flag(burn_obj, LV_OBJ_FLAG_HIDDEN);
 	lv_obj_add_event_cb(burn_obj, burn_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+	/* The 180 s's own clock; see burn_timer. Once, not per screen. */
+	if (burn_timer == NULL) {
+		burn_timer = lv_timer_create(burn_timer_cb, 1000, NULL);
+	}
 }
 
 static int burn_slot_for(const char *tag)
@@ -2062,8 +2108,8 @@ static void burn_compose(const struct burn5h *m, struct burn_drawn *d)
  * if what it shows has changed. Safe to call from anywhere, any number of
  * times: every path that could change the answer -- a usage reading, a burn
  * line, a page change reaching its midpoint, Focus, a provider's name, the
- * UTC offset, the 180 s running out -- calls this, and none of them decides
- * anything for itself.
+ * UTC offset, the 180 s running out, a hold let go -- calls this, and none
+ * of them decides anything for itself.
  */
 static void burn_sync(void)
 {
@@ -2071,6 +2117,14 @@ static void burn_sync(void)
 	int s = -1;
 
 	if (!built || burn_obj == NULL) {
+		return;
+	}
+	/*
+	 * Not while the eye clip or a wipe has the screen in its hands: the
+	 * half stays as it is until the last of them lets go, and that release
+	 * asks again (usage_view_hold_half says why).
+	 */
+	if (half_holds > 0) {
 		return;
 	}
 	/*
@@ -2101,6 +2155,47 @@ static void burn_sync(void)
 	if ((s >= 0) != burn_on) {
 		burn_on = s >= 0;
 		layout_gauges();
+	}
+}
+
+/*
+ * Hold the half where it is, or let it go.
+ *
+ * Two things put this screen on the panel in a way a change of hands
+ * cannot survive, and both keep the protocol running while they do it.
+ *
+ * The eye clip hides every child of this screen for the length of the show
+ * and, on its way out, unhides exactly the set it hid: a record taken when
+ * the clip STARTED (ui_anim.c, peers_set_hidden). A burn line, a session
+ * reading or the view's 180 s running out mid-clip used to change hands
+ * underneath it. The flip showed its objects under the clip's overlay,
+ * where any repaint punches a hole in the streamed eyes, and on the way
+ * out the restore put back what the flip had hidden, so the session gauge
+ * and the burn view were drawn over each other until the next change of
+ * hands -- which on a steady desk is never (review of 2026-10-31,
+ * reproduced by tools/panel_render/clip.sh). The CONNECTING bar had the
+ * same fault, and usage_view_sync_takeover() re-decides it on the way out.
+ * The half is held instead, because a change mid-clip is not only stale on
+ * the way out: it also draws on the way in.
+ *
+ * And a wipe (ui_slide_run) paints the incoming screen one strip at a time
+ * with invalidation frozen and the protocol serviced between strips, so a
+ * change of hands mid-wipe left the strips already painted showing one
+ * half and the rest the other until the wipe ended: up to 650 ms of part
+ * ring, part bar chart.
+ *
+ * Holds nest -- the clip's two wipes run inside its own hold -- and the last
+ * release asks burn_sync() at once, so whatever arrived while the screen
+ * was held lands then, in one piece.
+ */
+void usage_view_hold_half(bool hold)
+{
+	if (hold) {
+		half_holds++;
+		return;
+	}
+	if (half_holds > 0 && --half_holds == 0) {
+		burn_sync();
 	}
 }
 
@@ -2304,17 +2399,12 @@ void usage_view_tick_1s(void)
 	refresh_rail();
 
 	/*
-	 * A burn view whose line has gone quiet for 180 s gives the half back
-	 * to "--%". Nothing arrives to say so -- the daemon simply stops
-	 * sending when the account gets a session window again, or stops
-	 * altogether -- so, like the status-page hold below, this tick is the
-	 * only thing that can notice. Only while the view is up: an unshown
-	 * one can only become wanted when a line or a usage reading arrives,
-	 * and both of those ask for themselves.
+	 * Not the burn view's 180 s, which this tick used to run. Nothing
+	 * arrives to end it -- the daemon simply stops sending -- and this
+	 * tick does not run while the board dozes, so the view kept a chart
+	 * through a doze for a peek to show hours later. It runs on LVGL's
+	 * clock now; see burn_timer.
 	 */
-	if (burn_on) {
-		burn_sync();
-	}
 
 	/*
 	 * A status-page incident clears by itself: the daemon re-states it

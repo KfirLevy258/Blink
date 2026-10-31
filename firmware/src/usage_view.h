@@ -99,6 +99,19 @@ bool usage_view_takeover_active(void);
  */
 void usage_view_sync_takeover(void);
 
+/*
+ * Keep the burn view and the session gauge from changing hands, or let
+ * them again. For code that puts this screen on the panel in pieces with
+ * the protocol still running: the eye clip (ui_anim.c), which hides every
+ * child for the show and restores them from a record taken as it began,
+ * and a wipe (ui_slide.c), which paints one strip at a time. A change of
+ * hands inside either left the left half part ring, part bar chart.
+ *
+ * Nests. The last release applies whatever the decision is by then, at
+ * once. Every hold must be released; see the definition.
+ */
+void usage_view_hold_half(bool hold);
+
 /* Fable's weekly utilization for the long-press card (Claude's windows
  * today are all-models + fable); -1 = unknown. Fed by either data source
  * alongside the headline numbers. */
@@ -245,8 +258,9 @@ struct burn5h;
  * an account with no five-hour window) and only for 180 s after the line
  * arrived. The daemon re-sends at least once a minute while the account
  * has no window, and simply stops when one comes back, so a view that
- * outlives its data reverts to "--%" on its own. Not the same "burn" as
- * usage_view_set_burn() above, which is percent per hour.
+ * outlives its data reverts to "--%" on its own, in a doze's peek as much
+ * as on the dashboard. Not the same "burn" as usage_view_set_burn() above,
+ * which is percent per hour.
  *
  * Recorded before the built guard, like the counts: it is data, and the
  * line may land before the screen exists.
