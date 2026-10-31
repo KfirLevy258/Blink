@@ -683,7 +683,9 @@ nothing.
 
 **Unverified:** the PowerShell transport (`shell = "powershell"`, below) has
 been tested only as text. No command has yet crossed the Windows VM's real
-sshd this way -- the VM would not start when this was written. Before the
+sshd this way -- the VM would not start when this was first written; it
+started later the same day and ran the suite and the board scenarios
+directly, but not yet through this transport. Before the
 first release on the VM fleet, prove it with one narrowed run (which the
 gate refuses, so it costs nothing):
 
@@ -720,7 +722,7 @@ Measured 2026-10-30:
 | | State | To do |
 |---|---|---|
 | Ubuntu VM | Ubuntu 26.04.1 **aarch64**, Python 3.14.4 with pyserial 3.5, `tester` in `dialout`, sshd listening, no BLINK service installed (so the agent's stop is "not installed", which is fine). Boots with `utmctl start F849B207-...`. | Nothing in the guest. |
-| Windows VM | Would not start: `utmctl start` timed out with OSStatus -1712 three times and the VM stayed `stopped`, with or without the Ubuntu VM running. | Start it from UTM's window and read the error it shows. Then check `C:\Python311-x64\python.exe -c "import serial"` in it (`pip install pyserial==3.5` into that interpreter if not), and that `test-machines/windows-vm/ssh.sh` still gets in. |
+| Windows VM | Starts, after the first attempts did not: on 2026-10-30 `utmctl start` timed out with OSStatus -1712 three times and the VM stayed `stopped`, with or without the Ubuntu VM running. Later that day it ran the whole suite (2626 passed, 239 skipped) and all four board scenarios, run directly in the guest. Still unproved: the PowerShell transport over its sshd. | If `utmctl start` times out, start it from UTM's window and read the error it shows. Then check `C:\Python311-x64\python.exe -c "import serial"` in it (`pip install pyserial==3.5` into that interpreter if not), and that `test-machines/windows-vm/ssh.sh` still gets in. |
 | This Mac | From the shell that tried, ssh and even ping to the VMs answered "No route to host" while the route existed and the guest was up and listening -- the mark of macOS's Local Network privacy refusing that app. | Run the fleet from a terminal that has Local Network access (System Settings -> Privacy & Security -> Local Network). `test-machines/ubuntu-vm/ssh.sh` working from it is the check. |
 | UTM | Wedged once: a VM showed `started` with QEMU idle and every AppleEvent answering -1712 or -609. Quitting UTM (it needed a kill) and starting it again cleared it. | If `utmctl` hangs, restart UTM before blaming a desk. |
 | The real-account pass | Neither VM has Claude Code or Codex signed in, so that pass fails there -- correctly. | Sign the VMs in, or run with `--no-real-account` and say so: the result records `real_account: false`. |
