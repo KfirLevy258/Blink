@@ -110,9 +110,14 @@ def _burn_of(value):
     # isfinite: a scenario is JSON, and Python's json reads the bare literal
     # Infinity, which passed `v >= 0` and then raised OverflowError out of
     # int(), uncaught, taking the provider's poll down with it (review,
-    # 2026-10-31). NaN already failed `v >= 0`; this says so for both.
+    # 2026-10-31). NaN already failed `v >= 0`; this says so for both. An
+    # int is finite by definition and is not asked: isfinite() converts it
+    # to a float first, and one past a float's range raised OverflowError,
+    # which the caller does not catch either (/code-review max,
+    # 2026-11-01). protocol.burn caps it at BURN_MAX like any other count.
     if (isinstance(value, list) and len(value) == protocol.BURN_BUCKETS
-            and all(_is_number(v) and math.isfinite(v) and v >= 0
+            and all(_is_number(v)
+                    and (isinstance(v, int) or math.isfinite(v)) and v >= 0
                     for v in value)):
         return [int(v) for v in value]
     raise ValueError("burn is a preset name or twenty finite counts of zero"
