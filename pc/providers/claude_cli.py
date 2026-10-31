@@ -179,6 +179,61 @@ class ClaudeCliProvider(base.ProviderParser):
             return None
         return ss.map_statusline_frame(raw_payload, now_epoch, observed_at)
 
+    def _lacks_session_window(self, payload, live, now_epoch):
+        """Does this fresh payload say the account has no five-hour window?
+
+        Verified Ultra accounts (2026-10-30) have none, and Claude Code's
+        status line then carries rate_limits.seven_day and no five_hour key
+        while it renders every few seconds. Measured on such a desk,
+        `blink status --wire` printed session_pct 1.0, src desktop, stale
+        true, age_s 136136 one second after the file was written: the dial
+        was filled by a Desktop sample two days old, and that borrowed
+        source then named and dated the whole frame.
+
+        Four conditions, each there because a real shape would otherwise be
+        misread:
+
+          - The payload is FRESH. A file nobody has rendered in half an hour
+            says nothing about what the account has now.
+          - The five_hour KEY is absent. Present without used_percentage is
+            the likeliest shape of a payload change (statusline_source.
+            _window), and not something to conclude "no window" from.
+          - A weekly figure is usable. Without one there is nothing to put in
+            the dial's place and the frame keeps its old behaviour.
+          - The remembered five-hour window, if there is one, has ENDED. This
+            is the discriminator, and it is read from the data: a window
+            whose resets_at is still ahead is proof the account has one, so a
+            render that leaves it out (Claude Code reports a window only
+            after a session's first response) must not blank a live dial. An
+            unstamped remembered window cannot be shown to have ended and
+            counts the same way. Real payloads always carry the stamp, so
+            this costs an unverified-then-verified account at most five
+            hours of its old window ageing out.
+
+        What this cannot tell apart is the other shape that ALSO has no
+        five_hour key: a Pro or Max window that expired while nobody
+        rendered, seen on the first render afterwards, with the previous
+        window already ended in memory or no memory at all (a fresh daemon,
+        or `blink status`, which is a fresh process). It is the same payload
+        byte for byte. The rule treats it as Ultra for as long as the key
+        stays away -- a "--%" session dial instead of 0% or a Desktop sample
+        -- and the next payload that carries five_hour (a session's first
+        response, normally within minutes of someone working) puts everything
+        back. The other choice shows Ultra owners a borrowed number from a
+        window they do not have, indefinitely, and that is what shipped.
+        """
+        if live.stale or live.weekly_pct < 0:
+            return False
+        limits = payload.get("rate_limits")
+        if not isinstance(limits, dict) or "five_hour" in limits:
+            return False
+        if self._remembered is None:
+            return True
+        old = self._remembered[0].get("rate_limits")
+        _, resets_at = ss._window(old if isinstance(old, dict) else {},
+                                  "five_hour")
+        return base.window_ended(resets_at, now_epoch)
+
     def poll(self, now_epoch):
         payload, mtime = ss.read_payload(self.path())
         frames = []
@@ -187,6 +242,8 @@ class ClaudeCliProvider(base.ProviderParser):
             if live is not None:
                 live.first_seen_at = self._note_fetch(payload, mtime,
                                                       now_epoch)
+                live.no_session_window = self._lacks_session_window(
+                    payload, live, now_epoch)
                 frames.append(live)
                 # base.UNKNOWN is -1.0; anything >= 0 is a real percentage,
                 # including the hard 0.0 map_statusline_frame computes for a

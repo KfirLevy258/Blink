@@ -258,11 +258,23 @@ def merge(frames):
     s_rolled = _rolled_at(frames, "session_rolled_at")
     w_rolled = _rolled_at(frames, "weekly_rolled_at")
 
-    session_pct, session_src, session_dated = _pick_pct(
-        frames,
-        lambda f: (_known_pct(f.session_pct)
-                   and _survives_rollover(f, s_rolled, "session_rolled_at")),
-        "session_pct", "session_resets_at", SESSION_WINDOW_S)
+    # An account with no session window has no session figure to pick. The
+    # frame that says so is fresh by construction (ClaudeCliProvider marks
+    # only a fresh payload), and it is also the right frame to date and name
+    # the reading by: it IS the live status line. Without this, a remembered
+    # payload or a Claude Desktop sample two days old filled the dial, won
+    # `primary` below, and the board was told live data was 37 hours old
+    # (measured 2026-10-30, a verified Ultra account).
+    no_window = [f for f in frames if f.no_session_window and not f.stale]
+    if no_window:
+        session_pct, session_src, session_dated = None, None, None
+    else:
+        session_pct, session_src, session_dated = _pick_pct(
+            frames,
+            lambda f: (_known_pct(f.session_pct)
+                       and _survives_rollover(f, s_rolled,
+                                              "session_rolled_at")),
+            "session_pct", "session_resets_at", SESSION_WINDOW_S)
     weekly_pct, weekly_src, weekly_dated = _pick_pct(
         frames,
         lambda f: (_known_pct(f.weekly_pct)
@@ -298,9 +310,14 @@ def merge(frames):
             return None
         ended_evidence = max(evidence, key=lambda f: f.observed_at)
 
-    session_resets_at, _ = _pick(
-        frames, lambda f: _stamp(f, "session_resets_at") is not None,
-        lambda f: f.session_resets_at)
+    # Nor a countdown or a rate for it: a remembered window's reset stamp
+    # would otherwise ride along on a dial that is drawn "--%".
+    if no_window:
+        session_resets_at = None
+    else:
+        session_resets_at, _ = _pick(
+            frames, lambda f: _stamp(f, "session_resets_at") is not None,
+            lambda f: f.session_resets_at)
     weekly_resets_at, _ = _pick(
         frames, lambda f: _stamp(f, "weekly_resets_at") is not None,
         lambda f: f.weekly_resets_at)
@@ -316,7 +333,9 @@ def merge(frames):
     # reset the rate stops being sent -- no precedence contest, no state to
     # unwind, and one invariant the panel can rely on: a frame never carries
     # both.
-    if session_resets_at is None:
+    if no_window:
+        session_burn_pph = None
+    elif session_resets_at is None:
         # Same rule for the rate: a slope measured before the window emptied
         # describes the old window. It is the strongest case for the rule --
         # a reset leaves session_resets_at None, which is precisely the state
@@ -344,7 +363,10 @@ def merge(frames):
     # the number drawn to within HOLD_BAND (_pick_pct, rule 3). Still a
     # source that vouches for the figure next to it, which is the point of
     # the paragraph above, and never a stale one while a fresh one agrees.
-    primary = session_dated or weekly_dated or ended_evidence
+    if no_window:
+        primary = max(no_window, key=lambda f: f.observed_at)
+    else:
+        primary = session_dated or weekly_dated or ended_evidence
 
     # And the fact `primary` cannot carry: when this provider last said
     # anything at all.
@@ -377,6 +399,7 @@ def merge(frames):
         # Carried so a merged frame is still a valid input to another merge.
         session_rolled_at=s_rolled,
         weekly_rolled_at=w_rolled,
+        no_session_window=bool(no_window),
         # The counts travel with the state they describe. Taking them
         # field-by-field like everything else would let a session count from
         # one source sit beside a state from another, which is a panel saying

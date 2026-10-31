@@ -182,6 +182,22 @@ class NormalizedUsageFrame:
     # after observed_at. observed_at itself, and every age derived from it
     # (the wire's age_s, staleness), mean what they always meant.
     first_seen_at: object = None
+    # This provider's account has NO session window, and this fresh frame is
+    # the evidence: the status line is rendering and its rate_limits carries
+    # a weekly figure and no five_hour key at all. Verified Ultra accounts
+    # (2026-10-30) look like this, permanently.
+    #
+    # The frame says it rather than leaving pc/normalizer to infer it from
+    # session_pct == UNKNOWN, because that value also means "the window
+    # expired while nobody rendered", and the two want opposite answers: the
+    # second borrows a session figure from the bus, the first must not, since
+    # whatever it borrowed (a remembered payload, a Claude Desktop sample two
+    # days old) describes a window the account does not have. Only the
+    # provider that holds the payload and its memory can tell them apart --
+    # see ClaudeCliProvider._lacks_session_window, which owns that decision.
+    # pc/normalizer.merge owns what the decision means, and carries it on the
+    # merged frame so merging a merged frame stays valid.
+    no_session_window: bool = False
 
     def __post_init__(self):
         if self.active_at is None:
