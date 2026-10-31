@@ -183,6 +183,9 @@ class ClaudeCliProvider(base.ProviderParser):
         # one is measured from. See _reply_without_window and
         # REPLY_MEMORY_LIMIT.
         self._weekly_only = {}
+        # Block keys _make_room may not drop during the current poll: the
+        # payloads poll() is about to look up. See _make_room.
+        self._keep = ()
         # {block key: [oldest mtime it appeared under, epoch its first
         # window ends]}. See the module docstring and FETCH_MEMORY_LIMIT.
         self._fetch_times = {}
@@ -214,22 +217,31 @@ class ClaudeCliProvider(base.ProviderParser):
 
         Blocks whose window has ended go first, all of them, since Claude
         Code's next fetch cannot reproduce them; only if that frees nothing
-        does the block with the oldest fetch time go. The key about to be
-        inserted cannot be dropped, but one poll can make two lookups (the
-        file's payload, then the remembered one), and the second can drop
-        the first's entry if that block's window has ended. That costs
-        little: an ended window already reads 0 or unknown
-        (base.settle_window), and the block re-enters on the next poll dated
-        by its mtime, which is how every block was dated before this memory.
+        does the block with the oldest fetch time go.
+
+        Except the blocks this poll looks up (self._keep): the file's
+        payload, the remembered one and the last with any figure, three
+        lookups a poll. The remembered payload is very often a block whose
+        window has ended -- it is offered precisely because the file has no
+        session figure any more -- and when the table filled it was purged
+        with the other ended blocks, then re-entered by the next lookup
+        under the remembered mtime, a later one: the dial's figure was
+        re-dated forward by up to a window (the /code-review max of
+        2026-11-01, finding 8, which needs 256 distinct blocks). A kept key
+        can leave the table over the limit by at most two entries.
         """
         if len(self._fetch_times) < FETCH_MEMORY_LIMIT:
             return
+        keep = self._keep
         for key in [k for k, (_, ends_at) in self._fetch_times.items()
-                    if ends_at is not None and ends_at <= now_epoch]:
+                    if ends_at is not None and ends_at <= now_epoch
+                    and k not in keep]:
             del self._fetch_times[key]
         if len(self._fetch_times) >= FETCH_MEMORY_LIMIT:
-            del self._fetch_times[min(self._fetch_times.items(),
-                                      key=lambda kv: kv[1][0])[0]]
+            spare = [kv for kv in self._fetch_times.items()
+                     if kv[0] not in keep]
+            if spare:
+                del self._fetch_times[min(spare, key=lambda kv: kv[1][0])[0]]
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -387,6 +399,10 @@ class ClaudeCliProvider(base.ProviderParser):
 
     def poll(self, now_epoch):
         payload, mtime = ss.read_payload(self.path())
+        self._keep = tuple(
+            _block_key(p)[0] for p in (
+                payload, *(m[0] for m in (self._remembered, self._any)
+                           if m is not None)))
         frames = []
         has_figure = False
         if payload is not None:

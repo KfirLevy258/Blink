@@ -1600,6 +1600,28 @@ def test_finding_4_an_old_terminals_block_does_not_unmark_a_restart(
     assert session_verdict.load(session_verdict.verdict_path())[0] is False
 
 
+def test_finding_8_a_full_fetch_table_does_not_re_date_the_dial(tmp_path):
+    """A remembered five_hour block whose window has ended is purged with
+    the other ended blocks when the table fills, and re-entered on the next
+    lookup under the remembered (later) mtime: its first_seen_at, the
+    figure's date in the merge, moved forward by an hour."""
+    T = NOW
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+    r = status(five=40.0, five_resets=T - 600, seven=20.0, session="a")
+    write(p, r, T - 4 * 3600)
+    prov.poll(T - 4 * 3600 + 1)
+    write(p, r, T - 3 * 3600)
+    prov.poll(T - 3 * 3600 + 1)
+    for i in range(claude_cli.FETCH_MEMORY_LIMIT + 4):
+        write(p, status(seven=21.0 + i / 100.0, session="f%d" % i),
+              T - 170 * 60 + i * 30)
+        frames = prov.poll(T - 170 * 60 + i * 30 + 1)
+
+    dial = [f for f in frames if f.session_pct >= 0 or f.session_rolled_at]
+    assert [f.first_seen_at for f in dial] == [T - 4 * 3600]
+
+
 def test_finding_7_a_failed_save_is_retried_and_leaves_no_temp(
         tmp_path, monkeypatch):
     """The verdict was written only on the poll where it flipped, through a
