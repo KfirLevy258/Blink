@@ -247,6 +247,18 @@ def _read_capped(r, deadline, clock):
     sock = _socket_of(r)
     chunks, n = [], 0
     while n <= MAX_BYTES:
+        # Since CPython 3.11.8 and 3.12.2, read1() closes the connection
+        # inside the call that returns the last bytes of a Content-Length
+        # body, and urllib then closes the socket under us. Asking the
+        # closed socket for a timeout raised OSError(9, 'Bad file
+        # descriptor') -- measured on 3.13 and 3.14 against a loopback
+        # server, and 3.11.9 is what the release binaries are built with --
+        # so every reply that carried a Content-Length read as unreadable.
+        # A closed response has given everything it will; stop before
+        # touching its socket. (3.9, the macOS system Python, closes later
+        # and never showed it; a BytesIO has no isclosed, hence the getattr.)
+        if getattr(r, "isclosed", lambda: False)():
+            break
         left = deadline - clock()
         if left <= 0:
             raise _TooSlow()
