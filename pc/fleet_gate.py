@@ -118,12 +118,10 @@ def _failing_desks(doc):
                           and result.get("ok") is True))
 
 
-def _checkout():
-    """The checkout this module sits in. run.py records the inventory it was
-    given relative to the checkout when it lies inside it, so that is what a
-    relative recorded path is resolved against. A function, not a module
-    constant: tests/test_sandbox.py refuses path resolution at import."""
-    return Path(__file__).resolve().parents[1]
+# The checkout this module sits in. run.py records the inventory it was given
+# relative to the checkout when it lies inside it, so that is what a relative
+# recorded path is resolved against.
+_CHECKOUT = Path(__file__).resolve().parents[1]
 
 # The two scenarios that prove the customer path, by the names the agent
 # gives them (tests/fleet/agent.py). Named here only to say, on a VM pass,
@@ -203,7 +201,7 @@ def _same_inventory(recorded, inventory_path):
         return False
     path = Path(recorded)
     if not path.is_absolute():
-        path = _checkout() / path
+        path = _CHECKOUT / path
     try:
         return path.resolve() == Path(inventory_path).resolve()
     except OSError:

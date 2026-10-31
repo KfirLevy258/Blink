@@ -56,17 +56,60 @@ def _is_environ(node):
             or (isinstance(node, ast.Name) and node.id == "environ"))
 
 
-def _asks_for_home(node, helpers=frozenset()):
+def _module_aliases(tree, stems):
+    """The names this module binds to one of OUR modules (`stems` are their
+    file names without .py): `import pc.cli as c`, `from pc import cli`,
+    `import claude_usage_bridge`. A call through one of them is a call to our
+    function of that name; a call through any other name is a method on
+    something else."""
+    aliases = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name.split(".")[-1] in stems:
+                    aliases.add(a.asname or a.name.split(".")[0])
+        elif isinstance(n, ast.ImportFrom):
+            for a in n.names:
+                if a.name in stems:
+                    aliases.add(a.asname or a.name)
+    return frozenset(aliases)
+
+
+def _calls_our_function(call, helpers, mods, stems):
+    """Is this Call a call to one of `helpers`, which are module-level
+    functions of ours?
+
+    A bare `helper()`, or `module.helper()` / `pc.module.helper()` where the
+    module is ours. Never a method on an arbitrary expression: pc/ gained
+    desktop_paths.resolve(), and by name alone every `Path(__file__).resolve()`
+    at import read as a home lookup -- pc/fleet_gate.py had to turn a constant
+    into a function to get past it (review of PR #4, 2026-10-31).
+    """
+    f = call.func
+    if isinstance(f, ast.Name):
+        return f.id in helpers
+    if isinstance(f, ast.Attribute) and f.attr in helpers:
+        v = f.value
+        if isinstance(v, ast.Name):
+            return v.id in mods
+        if isinstance(v, ast.Attribute):
+            return v.attr in stems
+    return False
+
+
+def _asks_for_home(node, helpers=frozenset(), mods=frozenset(),
+                   stems=frozenset()):
     """Does this one node resolve a home directory?
 
     `helpers` are the names of our own functions that do (see
     _home_helpers): calling one of them at import is the same hole with a
     function call in front of it, which is the shape `X = ss.payload_path()`
-    would take.
+    would take. `mods` and `stems` say which attribute calls are ours.
     """
     if isinstance(node, ast.Call):
         name = _called_name(node)
-        if name in HOME_CALLS or name in helpers:
+        if name in HOME_CALLS or _calls_our_function(
+                node, helpers, mods, stems):
             return True
         # os.getenv("HOME"), os.environ.get("HOME")
         if name in ("getenv", "get") and node.args:
@@ -139,7 +182,7 @@ def _import_time_nodes(body):
                     stack.append(child)
 
 
-def _home_helpers(trees):
+def _home_helpers(trees, stems=frozenset()):
     """Names of our module-level functions that resolve home when called.
 
     Found from the source rather than listed, so a new helper is covered the
@@ -149,13 +192,16 @@ def _home_helpers(trees):
     """
     funcs = {}
     for tree in trees:
+        mods = _module_aliases(tree, stems)
         for stmt in tree.body:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                funcs[stmt.name] = stmt
+                funcs[stmt.name] = (stmt, mods)
     helpers = set()
     while True:
-        found = {name for name, fn in funcs.items() if name not in helpers
-                 and any(_asks_for_home(n, helpers) for n in ast.walk(fn))}
+        found = {name for name, (fn, mods) in funcs.items()
+                 if name not in helpers
+                 and any(_asks_for_home(n, helpers, mods, stems)
+                         for n in ast.walk(fn))}
         if not found:
             return frozenset(helpers)
         helpers |= found
@@ -169,10 +215,12 @@ def offenders(sources):
     another.
     """
     trees = {name: ast.parse(src, name) for name, src in sources.items()}
-    helpers = _home_helpers(trees.values())
+    stems = frozenset(pathlib.PurePosixPath(n).stem for n in sources)
+    helpers = _home_helpers(trees.values(), stems)
     return [(name, n.lineno) for name, tree in trees.items()
+            for mods in [_module_aliases(tree, stems)]
             for n in _import_time_nodes(tree.body)
-            if _asks_for_home(n, helpers)]
+            if _asks_for_home(n, helpers, mods, stems)]
 
 
 def import_time_offenders(sources):
@@ -243,6 +291,38 @@ def test_a_bare_main_in_blink_main_is_caught_and_a_guarded_one_is_not():
         ("blink_main.py", 2)]
     assert import_time_offenders({"blink_main.py": guarded,
                                   "pc/cli.py": helper}) == []
+
+
+def test_a_method_that_shares_a_helpers_name_is_not_a_helper_call():
+    """desktop_paths has a resolve(); `Path(__file__).resolve()` is not it."""
+    paths = ('import os\ndef resolve():\n'
+             '    return os.path.expanduser("~")\n')
+    innocent = [
+        'import pathlib\nROOT = pathlib.Path(__file__).resolve().parent\n',
+        'ROOT = Path(__file__).resolve()\n',
+        'class C:\n    x = some.thing.resolve()\n',
+    ]
+    for src in innocent:
+        assert offenders({"pc/desktop_paths.py": paths,
+                          "pc/x.py": src}) == [], src
+
+
+def test_a_helper_is_still_caught_through_every_way_of_naming_its_module():
+    paths = ('import os\ndef resolve():\n'
+             '    return os.path.expanduser("~")\n')
+    caught = [
+        'from pc import desktop_paths\nR = desktop_paths.resolve()\n',
+        'from pc import desktop_paths as dp\nR = dp.resolve()\n',
+        'import pc.desktop_paths as dp\nR = dp.resolve()\n',
+        'import pc.desktop_paths\nR = pc.desktop_paths.resolve()\n',
+        'from pc.desktop_paths import resolve\nR = resolve()\n',
+        # The helper-of-a-helper, as blink_home() is of _home().
+        'from pc import desktop_paths as dp\n'
+        'def where():\n    return dp.resolve()\nW = where()\n',
+    ]
+    for src in caught:
+        assert offenders({"pc/desktop_paths.py": paths, "pc/x.py": src}) == [
+            ("pc/x.py", src.count("\n"))], src
 
 
 def test_the_guard_follows_a_helper_across_modules():
