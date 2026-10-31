@@ -213,7 +213,8 @@ def test_the_builder_previews_every_built_in_in_the_boards_own_colours():
     got = _served()
     assert len(got) == len(want) == 12
     for g, w in zip(got, want):
-        for k in ("id", "name", "c", "w", "ends", "dot", "by"):
+        # track and grey: the burn view's preview mixes from a built-in's own.
+        for k in ("id", "name", "c", "w", "ends", "dot", "by", "track", "grey"):
             assert g[k] == w[k], (w["name"], k, g[k], w[k])
 
 

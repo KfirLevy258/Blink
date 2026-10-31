@@ -7,6 +7,8 @@ tests/pc/test_theme_builtins.py fails when the two disagree.
 Each built-in is its id, its key (the enum name), the name its tile
 shows, and the seven colours and style a custom theme is made of,
 in the wire's field names and order (pc/theme.py CUSTOM_FIELDS).
+Its track and grey are the table's own, which the builder's burn
+view mixes from; they are not part of a theme on the wire.
 The board needs none of this -- a built-in travels by id alone --
 but the builder's preview, and a custom theme started from a
 built-in, need the colours the board really draws."""
@@ -14,39 +16,51 @@ built-in, need the colours the board really draws."""
 BUILTINS = (
     {"id": 0, "key": "dark", "name": "Dark",
      "c": ["0e1116", "e6e8eb", "4387df", "0da243", "0da243", "ba8107", "ff1900"],
+     "track": "272c34", "grey": "6b7280",
      "w": 12, "ends": "round", "dot": 1, "by": "level"},
     {"id": 1, "key": "neon", "name": "Neon",
      "c": ["05060a", "f5f7ff", "00f0ff", "b26bff", "00f0ff", "ffe600", "ff2e88"],
+     "track": "292a2f", "grey": "65666c",
      "w": 5, "ends": "round", "dot": 0, "by": "level"},
     {"id": 2, "key": "bold", "name": "Bold",
      "c": ["000000", "ffffff", "60a5fa", "22c55e", "22c55e", "facc15", "ef4444"],
+     "track": "262626", "grey": "666666",
      "w": 22, "ends": "flat", "dot": 0, "by": "level"},
     {"id": 3, "key": "mono", "name": "Mono",
      "c": ["000000", "ffffff", "ffffff", "bdbdbd", "9c9c9c", "ffffff", "ff3b30"],
+     "track": "262626", "grey": "666666",
      "w": 5, "ends": "flat", "dot": 0, "by": "level"},
     {"id": 4, "key": "ocean", "name": "Ocean",
      "c": ["0a1a2f", "e8f1fa", "7fb2ff", "2ec4b6", "2ec4b6", "ffb347", "ff6b6b"],
+     "track": "2b3a4d", "grey": "637080",
      "w": 12, "ends": "round", "dot": 1, "by": "level"},
     {"id": 5, "key": "synthwave", "name": "Synthwave",
      "c": ["1a0b2e", "fbeaff", "01cdfe", "ff71ce", "ff71ce", "ffb86b", "ff3860"],
+     "track": "3c2c4d", "grey": "746482",
      "w": 8, "ends": "round", "dot": 1, "by": "level"},
     {"id": 6, "key": "forest", "name": "Forest",
      "c": ["0f1a14", "eef3e9", "a3c4bc", "8fbf7f", "8fbf7f", "d9a441", "d9643a"],
+     "track": "303b34", "grey": "687169",
      "w": 12, "ends": "round", "dot": 1, "by": "level"},
     {"id": 7, "key": "retro_lcd", "name": "Retro LCD",
      "c": ["9bbc0f", "0f380f", "306230", "0f380f", "306230", "3d3000", "6e0f0f"],
+     "track": "86a80f", "grey": "385f0f",
      "w": 12, "ends": "flat", "dot": 0, "by": "level"},
     {"id": 8, "key": "cvd_safe", "name": "Colour-blind",
      "c": ["0e1116", "e6e8eb", "0072b2", "d69400", "0072b2", "d69400", "f0e442"],
+     "track": "2e3136", "grey": "65686c",
      "w": 12, "ends": "round", "dot": 1, "by": "level"},
     {"id": 9, "key": "light", "name": "Light",
      "c": ["ffffff", "111418", "2f6fcb", "0e9f48", "0e9f48", "976100", "cc2000"],
+     "track": "dbdcdc", "grey": "898a8d",
      "w": 12, "ends": "round", "dot": 1, "by": "level"},
     {"id": 10, "key": "light_soft", "name": "Light soft",
      "c": ["eff3f7", "1b2027", "3d7bd9", "2e9e68", "2e9e68", "875b0c", "b3301e"],
+     "track": "d1d3d7", "grey": "7f8388",
      "w": 8, "ends": "round", "dot": 0, "by": "level"},
     {"id": 11, "key": "light_ink", "name": "Light ink",
      "c": ["ffffff", "000000", "000000", "555555", "555555", "000000", "d00600"],
+     "track": "d9d9d9", "grey": "8b8b8b",
      "w": 5, "ends": "flat", "dot": 0, "by": "level"},
 )
 
