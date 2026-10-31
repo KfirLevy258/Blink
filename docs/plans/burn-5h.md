@@ -9,19 +9,27 @@ the research branch, and the artifact linked from it).
 Only when the account has no session window. The daemon already decides that:
 `NormalizedUsageFrame.no_session_window` on the merged claude frame, set by
 `pc/session_verdict` on positive evidence only, never because data is quiet.
-Proof of no window: a Claude Desktop history sample with a usable `sd` and
-no `fh` key (measured on a verified Ultra account, 2026-10-31), or a Claude
-Code session that replied twice without `five_hour` (its
+Proof of no window: two consecutive Claude Desktop history samples less
+than one idle poll apart (`DESKTOP_RISE_MAX_GAP_S`, 1000 s) where `sd` rose
+strictly and the later sample has no `fh` key, or a Claude Code session that replied twice without `five_hour` (its
 `cost.total_cost_usd` rose between weekly-only status lines, at two replies
 25 minutes to 4 h 35 min apart, so that no single reset explains both: one
-request streaming across a Pro or Max reset does it once). Proof of a window,
-which clears the mark: a status line with `five_hour`, a Desktop sample whose
+request streaming across a Pro or Max reset does it once). A single Desktop
+sample with no `fh` proved it until the owner's decision of 2026-11-01. It
+had been measured on Ultra only, and a Pro or Max account idle for over five
+hours may write the same sample, so a rise is required. Usage that recent
+sits inside an open window on any plan that has one. The samples must be one
+poll apart, not five hours, because usage can land at the end of a window
+that then closes (`claude_desktop._no_window_rise` has the example). The
+measured owner desk's pair (`{fh: 1, sd: 23}` on 10-29, `{sd: 19}` on 10-31)
+is not Desktop proof under this rule; its Claude Code replies are. Proof of
+a window, which clears the mark: a status line with `five_hour`, a Desktop sample whose
 `fh` is a number, a Local Storage reading or reset stamp. The newest evidence
 wins. With none either way there is no mark, so Pro and Max never see this
 view at a reset, a laptop asleep across one, or a fresh process. The verdict
 is persisted in `~/.blink/session-window.json`, so a restarted daemon shows
 the view at once and `blink status` agrees with the daemon. A Desktop-only
-Ultra desk gets the view too, from its history alone; its Code tab writes
+Ultra desk gets the view too, from its history alone, once a rise is seen; its Code tab writes
 transcripts, and with none there is no burn line. On that page the usage
 frame carries `session_pct` -1. If a window comes back, the mark goes and the
 board goes back to the session gauge.

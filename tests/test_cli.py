@@ -2275,16 +2275,24 @@ def test_status_on_a_pro_desk_after_a_reset_says_nothing(tmp_path, capsys):
 def test_status_on_a_desktop_only_ultra_desk_prints_the_row(tmp_path,
                                                            capsys):
     """Claude Desktop's Code tab never runs the status line, so a desk with
-    Desktop alone has its proof in Desktop's history: a weekly figure and
-    no fh key (measured 2026-10-31)."""
+    Desktop alone has its proof in Desktop's history: weekly usage risen
+    between two samples one poll apart, the later with no fh key (owner's
+    decision, 2026-11-01). A single such sample is not proof."""
     now_ms = int(time.time() * 1000)
-    s = _dc.sample(now_ms - 300_000, sd=12)
-    del s["u"]["fh"]
-    _desktop_cache(tmp_path, _dc.doc([s]))
+    rows = []
+    for t_ms, sd in ((now_ms - 1_200_000, 11), (now_ms - 300_000, 12)):
+        s = _dc.sample(t_ms, sd=sd)
+        del s["u"]["fh"]
+        rows.append(s)
 
+    _desktop_cache(tmp_path, _dc.doc(rows[1:]))
     assert cli.main(["status"]) == 0
-    assert ("Session     no five-hour window (Claude Desktop reports weekly"
-            " usage only)") in capsys.readouterr().out
+    assert "Session     " not in capsys.readouterr().out
+
+    _desktop_cache(tmp_path, _dc.doc(rows))
+    assert cli.main(["status"]) == 0
+    assert ("Session     no five-hour window (Claude Desktop's weekly usage"
+            " rose with no five-hour figure)") in capsys.readouterr().out
 
     pro = _dc.sample(now_ms - 300_000, fh=4, sd=12)
     _desktop_cache(tmp_path, _dc.doc([pro]))
