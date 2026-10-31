@@ -2868,11 +2868,22 @@ def _announce():
             print(pad + "folder, so leave it where it is.")
     print(f"  Creates    {shim_path()}")
     print("             the small script Claude Code runs to hand over the")
+    # What the daemon reads out of that payload, said field by field. This
+    # said "Only the usage figures are read out of it" for the whole of
+    # feat/ultra-burn while pc/providers/claude_cli read session_id and
+    # cost.total_cost_usd on every poll, to tell a reply that came back
+    # without a five-hour window (pc/session_verdict) -- the /code-review max
+    # of 2026-11-01 found it. Both stay in the daemon's memory, 64 sessions
+    # at most, and are never logged, saved or sent.
     print("             usage figures. It keeps the last status line payload")
     print("             Claude Code sent, which also names the session, the")
-    print("             working directory and the transcript file. Only the")
-    print("             usage figures are read out of it, and nothing in it")
-    print("             leaves this machine. It is readable by you alone.")
+    print("             working directory and the transcript file. The bridge")
+    print("             reads three things from it: the usage figures, the")
+    print("             session id and the session's running cost. The last")
+    print("             two only tell it whether a reply came back without a")
+    print("             five-hour limit, and are never logged or saved.")
+    print("             Nothing in it leaves this machine, and it is readable")
+    print("             by you alone.")
     print(f"  Creates    {hook_shim_path()}")
     print("             a second small script, run when Claude Code starts and")
     print("             finishes work, so the panel can show whether it is busy.")
@@ -2929,6 +2940,22 @@ def _announce():
     print("  cache, or the Codex session log -- each of which has already")
     print("  worked them out. From the Codex log it keeps only the rate-limit")
     print("  line, never the conversation.")
+    # The burn view's source (pc/burn_reader), missing from this note until
+    # the /code-review max of 2026-11-01: on a desk whose account has no
+    # five-hour window, the daemon reads Claude Code's own transcripts --
+    # the customer's whole working sessions -- so the one place that tells
+    # them what is read has to say so. Conditional in fact, not in print:
+    # install cannot know the verdict yet, so it says when it happens.
+    # The folder is the reader's own, so CLAUDE_CONFIG_DIR is honoured here
+    # exactly as it is there.
+    from pc import burn_reader
+    # On a line of its own, like the paths above: a home folder's length is
+    # unbounded, and inline it ran the paragraph off its margin.
+    print("  On an account with no five-hour limit, it also reads the")
+    print("  output-token count of each reply from Claude Code's transcripts:")
+    print(f"    {burn_reader.transcripts_root()}")
+    print("  It holds those counts in memory and sends the board only a total")
+    print("  per quarter-hour, never the conversation.")
     print()
     print(f"  To undo all of it:  {command_to_type()} uninstall")
     print()

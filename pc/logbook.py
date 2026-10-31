@@ -393,7 +393,7 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[sleep] dozing",                                          # ui_sleep.c:183
     "[sleep] waking",                                          # ui_sleep.c:201
     "[focus] could not store the choice",                # ui_settings.c:2717
-    "[slide] VSCRDEF refused; transitions will not scroll",    # ui_slide.c:131
+    "[slide] VSCRDEF refused; transitions will not scroll",    # ui_slide.c:132
     "[touch] INJECT BUILD: the PC can drive this panel -- bench only, never"
     " ship this",                                         # touch_inject.c:490
     "[time] manual time",                                      # net_time.c:67
