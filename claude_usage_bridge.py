@@ -681,7 +681,11 @@ def _self_update_tick(target):
     # review, 2026-10-27, SHOULD 2). See no_exit_while below.
     with no_exit_while("app update"):
         ok, message = update.apply(blob, target, version)
-    print(f"[update] {message}", file=sys.stderr)
+        # Inside the guard: its exit runs the moment the block ends when a
+        # stop arrived during the swap, so a line printed after it never did
+        # and the log said nothing of whether the swap had worked (review,
+        # 2026-10-31; the firmware write had the same defect).
+        print(f"[update] {message}", file=sys.stderr)
     if ok:
         update.restart_from_daemon(target)
 
@@ -1248,7 +1252,7 @@ def main(argv=None):
             # the login service pointing at half an install.
             with no_exit_while("app update"):
                 ok, message = update.apply(blob, self_bin, version)
-            print(f"[update] {message}", file=sys.stderr)
+                print(f"[update] {message}", file=sys.stderr)  # inside the guard, as in _self_update_tick
             if not ok:
                 return False
             try:
