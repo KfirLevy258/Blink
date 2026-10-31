@@ -4304,10 +4304,10 @@ def _theme_builder(home) -> int:
     # counts, and so does another `blink theme`.
     if theme_server.running_builder(home) is not None:
         print("A theme builder is already open on this computer, from the"
-              " app or from another blink theme. Use its tab. To get the tab"
-              " back, press Edit on computer on the board, or close the"
-              " builder first; it stops by itself after ten minutes with no"
-              " change.")
+              " app or from another blink theme. Use its tab, or close it"
+              " first; it stops by itself after ten minutes with no change."
+              " If it is the app's, Edit on computer on the board opens its"
+              " tab again.")
         return 1
     try:
         server = theme_server.BuilderServer(home)
