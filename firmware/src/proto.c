@@ -535,7 +535,7 @@ static void dispatch(const char *json)
 		num(json, "n_stuck", &nst, 0, 9999);
 		usage_view_set_counts((int)ns, (int)nr, (int)nw, (int)nst);
 
-		char p1[16];
+		char p1[USAGE_TAG_MAX];
 
 		if (msg_get_str(json, "provider", p1, sizeof(p1))) {
 			usage_view_set_provider1(p1);
@@ -556,7 +556,7 @@ static void dispatch(const char *json)
 		num(json, "burn_pph", &burn, 0, 9999);
 		usage_view_set_burn(burn);
 
-		char p2[16];
+		char p2[USAGE_TAG_MAX];
 		double p2s = -1, p2w = -1, p2si = -1, p2wi = -1;
 
 		if (msg_get_str(json, "p2", p2, sizeof(p2))) {

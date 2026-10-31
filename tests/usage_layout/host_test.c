@@ -425,9 +425,11 @@ int main(void)
 	      "GAUGE_CD_MAX_W is sized for a bare countdown, not guessed");
 	CHECK(!BUDGET_FITS(GAUGE_CD_MAX_W, "claude  00m 00s"),
 	      "GAUGE_CD_MAX_W no longer has room for a named one");
-	/* Sized for the LONGEST tag the buffer can hold, not the one we happen
-	 * to ship: provider1_tag is char[12], so eleven characters is what has
-	 * to fit without reaching the clock and the status dot in the corners. */
+	/* Sized for the LONGEST tag the pill can hold, not the one we happen
+	 * to ship: usage_view.c PILL_TAG_BUF is 12, so eleven characters is
+	 * what has to fit without reaching the clock and the status dot in the
+	 * corners. (The page tags themselves are USAGE_TAG_MAX, for matching;
+	 * the pill shows the first eleven.) */
 	CHECK(BUDGET_FITS(PILL_MAX_W, "claude code"),
 	      "PILL_MAX_W is sized for the longest tag, not guessed");
 	/* The status line replaced a 140 px name with a whole sentence, so it

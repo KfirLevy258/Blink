@@ -56,7 +56,13 @@ hour falls on a bucket's left edge, and the board can label hours.
   2001 then 1999 tokens per quarter read "easing", and 1000 then 4 read
   "steady". The widest line is about 240 bytes.
 - `p`: the provider the page belongs to. Always `"claude"` for now; it leaves
-  room for Codex.
+  room for Codex. Lowercase letters, digits, `_` and `-`, at most 15
+  characters: the board names a page by the first 15 of `usage`'s
+  `provider` (`USAGE_TAG_MAX` in `firmware/src/usage_view.h`) and refuses a
+  longer `p` whole rather than cutting it, so a longer id gets the session
+  gauge, never another page's view. Until 2026-11-01 the board kept 11 for
+  `p` while naming the page by 11 of 15, so an id of 12 to 15 characters had
+  every line refused.
 - Written through `protocol.encode_checked()`. It is its own line, not part of
   `usage`, which has no room for 20 more numbers (512-byte budget).
 

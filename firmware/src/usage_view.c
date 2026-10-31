@@ -199,9 +199,16 @@ static bool toast_have_prev;
 static bool sleeping;
 /* Filled by usage_view_set_session() from the daemon; see proto.c. */
 static char session_label[28] = "";
-static char provider1_tag[12];	/* whichever provider the daemon made primary */
+static char provider1_tag[USAGE_TAG_MAX];	/* whichever provider the daemon made primary */
 static lv_obj_t *provider_lbl;	/* the tag, spelled out under the brand */
-static char provider2_tag[12];	/* "" when there is only one provider */
+static char provider2_tag[USAGE_TAG_MAX];	/* "" when there is only one provider */
+/*
+ * The pill's text, NUL included: eleven characters, what PILL_MAX_W is
+ * measured for (tests/usage_layout, "claude code"). It was the tags' own
+ * size until those grew to USAGE_TAG_MAX for matching; the pill keeps the
+ * eleven it always showed rather than learning to draw a longer name.
+ */
+#define PILL_TAG_BUF		12
 
 /*
  * PAGES. One provider per screen, reached by swiping vertically.
@@ -259,7 +266,15 @@ static const char *page_tag(int i)
  */
 static void tag_cased(char *dst, size_t n, const char *tag)
 {
-	snprintf(dst, n, "%s", tag);
+	size_t i = 0;
+
+	/* By hand, not snprintf: the pill's buffer (PILL_TAG_BUF) is smaller
+	 * than a tag's on purpose, and GCC warns of the cut snprintf would
+	 * make, which here is the point. */
+	for (; i + 1 < n && tag[i] != '\0'; i++) {
+		dst[i] = tag[i];
+	}
+	dst[i] = '\0';
 	if (dst[0] >= 'a' && dst[0] <= 'z') {
 		dst[0] = (char)(dst[0] - 'a' + 'A');
 	}
@@ -2893,7 +2908,7 @@ static void refresh_provider1(void)
 	lv_obj_set_style_text_color(weekly.countdown,
 				    countdown_colour(&weekly), 0);
 	if (provider_lbl) {
-		char t[sizeof(provider1_tag)];
+		char t[PILL_TAG_BUF];
 
 		tag_cased(t, sizeof(t), tag);
 		lv_label_set_text(provider_lbl, t);

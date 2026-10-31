@@ -62,6 +62,15 @@ static void test_parse_good(void)
 	}
 	CHECK(parses("{\"t\":\"burn\",\"p\":\"abcdefghijk\",\"q\":" Q
 		     ",\"b\":" B20 "}"), "an 11-character tag parses");
+	/* Every id a page can be named by in full: proto.c reads `provider`
+	 * into USAGE_TAG_MAX, and the page keeps that many. At 12 bytes a
+	 * 12-to-15-character id had its page named and every burn line
+	 * refused (the /code-review max of 2026-11-01). */
+	CHECK(BURN5H_TAG_MAX == USAGE_TAG_MAX,
+	      "the burn tag is the page tag's size");
+	CHECK(parses("{\"t\":\"burn\",\"p\":\"abcdefghijklmno\",\"q\":" Q
+		     ",\"b\":" B20 "}"),
+	      "a 15-character tag, the longest a page keeps, parses");
 	CHECK(parses("{\"t\":\"burn\",\"p\":\"b\",\"q\":" Q ",\"b\":" B20 "}"),
 	      "a tag spelled like a key is not taken for one");
 }
@@ -72,7 +81,8 @@ static void test_parse_refused(void)
 		/* p */
 		"{\"t\":\"burn\",\"q\":" Q ",\"b\":" B20 "}",
 		"{\"t\":\"burn\",\"p\":\"\",\"q\":" Q ",\"b\":" B20 "}",
-		"{\"t\":\"burn\",\"p\":\"abcdefghijkl\",\"q\":" Q ",\"b\":" B20 "}",
+		/* One past what a page keeps: refused, never cut to match. */
+		"{\"t\":\"burn\",\"p\":\"abcdefghijklmnop\",\"q\":" Q ",\"b\":" B20 "}",
 		"{\"t\":\"burn\",\"p\":\"Claude\",\"q\":" Q ",\"b\":" B20 "}",
 		"{\"t\":\"burn\",\"p\":7,\"x\":\"claude\",\"q\":" Q ",\"b\":" B20 "}",
 		"{\"t\":\"burn\",\"p\":\"cla\\\"ude\",\"q\":" Q ",\"b\":" B20 "}",

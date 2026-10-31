@@ -22,6 +22,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "usage_view.h"
+
 /* Twenty buckets of fifteen minutes: the trailing five hours. */
 #define BURN5H_N		20
 #define BURN5H_BUCKET_S		900
@@ -43,9 +45,14 @@
 #define BURN5H_LAST_FROM	(BURN5H_N - 1 - BURN5H_HOUR_N)
 #define BURN5H_PREV_FROM	(BURN5H_LAST_FROM - BURN5H_HOUR_N)
 
-/* The provider tag, NUL included -- the size of the page tags in
- * usage_view.c, which is what it is compared against. */
-#define BURN5H_TAG_MAX		12
+/*
+ * The provider tag, NUL included: the size of the page tags in usage_view.c,
+ * which is what it is compared against, so it is their figure and not a
+ * copy of it. It was 12 beside a `provider` read into 16, so an id of 12 to
+ * 15 characters had every burn line refused while its page was named; see
+ * USAGE_TAG_MAX for what an id longer than that gets.
+ */
+#define BURN5H_TAG_MAX		USAGE_TAG_MAX
 
 /*
  * One bucket's ceiling, in output tokens: a hundred million in fifteen
