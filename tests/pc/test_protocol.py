@@ -216,8 +216,8 @@ class FirmwareLineBuffer(unittest.TestCase):
 
         And not less. A budget of 480 is safe for every board and was
         accepted by the less-or-equal version of this test, but it refuses a
-        loaded two-provider frame (484 bytes today) that every board would
-        have shown. The panel freezes all the same, only from this end.
+        loaded two-provider frame (484 bytes when this was written, 454 now)
+        that every board would have shown. The panel freezes all the same, only from this end.
         """
         line_max = _line_max()
         self.assertIsNotNone(line_max, "proto.c no longer has a plain "
@@ -679,6 +679,21 @@ def test_a_frame_with_no_epoch_at_all_says_so():
     assert "age_s" not in msg
 
 
+def _declared_source_ids():
+    """Every `src` a provider module or the status line declares, found by
+    reading their SRC_ID and *_SRC_ID constants rather than from a list that
+    could miss a new one."""
+    import importlib
+    import pkgutil
+    from pc import providers, statusline_source
+    mods = [statusline_source] + [
+        importlib.import_module("pc.providers." + m.name)
+        for m in pkgutil.iter_modules(providers.__path__)]
+    return sorted({v for m in mods for k, v in vars(m).items()
+                   if (k == "SRC_ID" or k.endswith("_SRC_ID"))
+                   and isinstance(v, str)})
+
+
 def test_the_widest_line_the_daemon_can_build_still_fits():
     """The measurement that decides whether this field was affordable.
 
@@ -691,12 +706,17 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     three ages at INT32_MAX -- the bound proto.c's SECS_MAX permits, and
     reachable from a file stamped at the epoch.
 
-    450 of 512 bytes, measured at 8d4ad2a, and the assert below holds it to
-    that figure instead of trusting this sentence. It read "509" until the
-    firmware review of 2026-10-31 rebuilt this exact construction and got 450
-    (the same on 1.3.4); the figure had gone stale when the absolute reset
-    stamps came off the wire, and a stale figure understates the headroom
-    when the next field is being weighed. The board drops an over-long line
+    454 of 512 bytes, measured at 8d4ad2a (2026-10-31), and the assert below
+    holds it to that figure instead of trusting this sentence. The width is
+    COMPUTED over every source id the providers declare (a SRC_ID or
+    *_SRC_ID constant in pc/providers/ or the status-line source), and the
+    widest is "weekly_anchor": merge() takes the source of the frame that
+    dates the dial, so it can reach the wire. The first version of this test
+    used "cli-state" and measured 450, four bytes short of the real widest.
+    The docstring read "509" until the firmware review of 2026-10-31 got 450;
+    the figure had gone stale when the absolute reset stamps came off the
+    wire, and a stale figure understates the headroom when the next field is
+    being weighed. The board drops an over-long line
     whole with no error, so this test is the guard: the next field, a longer
     provider or source id, or a fourth age fails here rather than on a desk.
 
@@ -719,9 +739,9 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     """
     now = 1_787_700_000.0
 
-    def widest(provider):
+    def widest(provider, src):
         return base.NormalizedUsageFrame(
-            provider=provider, src="cli-state",   # codex_cli.STATE_SRC_ID
+            provider=provider, src=src,
             observed_at=now - 2147483647, active_at=now - 2147483647,
             session_pct=102.33333333333333,
             # Fractional, and far past any real window: both are shapes a
@@ -734,16 +754,23 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
             n_run=99, n_wait=99, n_stuck=99, n_idle=99, n_agents=99,
             label="a-project-with-a-long-name")
 
-    msg = protocol.frame_to_usage(widest("claude"), now,
-                                  secondary=widest("codex"))
-    raw, why = protocol.encode_checked(msg)
-    assert why is None
-    assert msg["active_age_s"] == 2147483647
-    assert len(raw) <= protocol.MAX_LINE_BYTES, len(raw)
+    widths = {}
+    for src in _declared_source_ids():
+        msg = protocol.frame_to_usage(widest("claude", src), now,
+                                      secondary=widest("codex", src))
+        raw, why = protocol.encode_checked(msg)
+        assert why is None, (src, why)
+        assert msg["active_age_s"] == 2147483647
+        assert len(raw) <= protocol.MAX_LINE_BYTES, (src, len(raw))
+        widths[src] = len(raw)
+    # The sources that matter are in the set, so the maximum is the real one.
+    assert {"cli", "cli-state", "desktop", "desktop_ls",
+            "weekly_anchor"} <= set(widths), widths
+    widest_src = max(widths, key=widths.get)
     # The measured width, asserted so the docstring cannot go stale again. A
-    # new field that moves it is a deliberate change: say the new figure here
-    # and above.
-    assert len(raw) == 450, len(raw)
+    # new field or source id that moves it is a deliberate change: say the new
+    # figure here and above.
+    assert (widest_src, widths[widest_src]) == ("weekly_anchor", 454), widths
 
 
 def test_a_countdown_beyond_any_real_window_is_clamped():

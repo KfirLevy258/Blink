@@ -748,8 +748,8 @@ def board_caps(msg) -> frozenset:
 def svc(provider: str, level: str, what: str = "") -> dict:
     """The status-page level for ONE provider's page.
 
-    Its own message rather than fields on `usage`, which is measured at 484
-    of 512 bytes with two providers loaded and drops whole when it overflows.
+    Its own message rather than fields on `usage`, which is measured at 454
+    of 512 bytes (2026-10-31) with two providers loaded and drops whole when it overflows.
     This one is under 100 bytes at its widest, one per page shown, and goes
     out on the occasions listed at the end of this docstring.
 

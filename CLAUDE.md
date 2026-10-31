@@ -53,7 +53,8 @@ mutates the tree.
 The board reads NDJSON lines and **drops an over-long line whole**, silently,
 with no error on either side — the panel just stops updating while the daemon's
 log keeps saying it was sent (`-> usage`). The budget is 512 bytes and a loaded
-two-provider frame already measures 484.
+two-provider frame already measures 454 (the widest it can be, computed
+over every source id by `tests/pc/test_protocol.py`, 2026-10-31).
 
 That log line names the type and nothing else, in both directions, and the
 board's console is cut to a fixed allowlist (`protocol.log_name`,

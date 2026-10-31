@@ -142,7 +142,7 @@ class Tap:
 
         `sent` is not decoration. send() refuses any line over the board's
         512-byte limit -- and a fully loaded two-provider frame already
-        measures 484 -- so the refusal happens in exactly the boundary cases
+        measures 454 (2026-10-31) -- so the refusal happens in exactly the boundary cases
         this suite exists to catch. A transcript that recorded the refusal as
         a plain tx would say the host sent a frame the board ignored, and the
         hunt would start in the firmware for a bug that is in the host.
@@ -1181,7 +1181,7 @@ def main(argv=None):
             # line, it DROPS it whole (proto.c) with no error on either side:
             # the panel silently stops updating while this log keeps printing
             # the message as sent. A fully loaded two-provider frame already
-            # measures 484 of the 512 bytes.
+            # measures 454 of the 512 bytes (2026-10-31).
             raw, why = protocol.encode_checked(m)
             if raw is None:
                 print(f"[bridge] NOT SENT: {why}", file=sys.stderr)
