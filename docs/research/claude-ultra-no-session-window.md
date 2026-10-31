@@ -38,23 +38,51 @@ None of these says "ultra", and even after a rename a tier string cannot tell
 a verified Ultra account (no window) from an unverified one (temporary
 window). Reading the keychain also means asking for a secret we do not need.
 
-**So detect the window, not the plan.** The rule that shipped
-(`ClaudeCliProvider._has_no_window`): the newest payload carries a usable
-`seven_day` and no five-hour window, and no five-hour window has been seen
-within `SESSION_WINDOW_S` plus slack before it. Ultra never carries one. Pro
-and Max carried one within the last five hours, the window that just reset,
-so the post-reset render Claude Code writes a second after every reset does
-not qualify. Two earlier attempts got this wrong and review caught both:
+**So detect the window, not the plan.** The rule now in the code
+(`pc/session_verdict`) marks the account on positive evidence only, and
+quiet data proves nothing. Proof of no window is either of these:
 
-- deciding per render, from fresh payloads only, brought the old frame back
-  whenever Claude Code went quiet and flipped it on renders with no
-  `rate_limits`;
-- a sticky latch fixed that but held `--%` on every Pro and Max desk after
+- **Claude Code.** One session that replied twice without `five_hour`, with
+  the replies far enough apart that no single reset explains both.
+- **Claude Desktop.** Two consecutive samples in `plan-usage-history.json`,
+  less than `DESKTOP_RISE_MAX_GAP_S` (1000 s, one idle poll) apart, where
+  `sd` rose strictly and the later sample has no `fh` key.
+
+Proof of a window clears the mark: a status line with `five_hour`, a Desktop
+sample whose `fh` is a number (0 included), or a Local Storage reading or
+reset stamp. The newest evidence wins.
+
+The Desktop half was first a single sample with `sd` and no `fh`, which is
+what the measured Ultra desk wrote. But that was measured on Ultra only. A
+Pro or Max account idle for over five hours has no window open and may write
+the same sample, and it would have been shown the burn view, which is the
+worst outcome. So after the 2026-11-01 review the owner required a rise:
+usage that recent sits inside an open window on any plan that has one, so
+the sample would carry `fh`. The gap was proposed as five hours. It is one
+poll, because usage can also land at the end of a window that was already
+open and then closes. Take a Pro window that opened at T-4h. Desktop takes a
+sample at T-0.1h, the user chats at T and closes the app, and the window
+closes at T+1h. When the app reopens at T+4h, `sd` has risen within five
+hours, and there is no window. With the samples one poll apart, the only case
+left is a window that closes within about 16 minutes of the usage. The cost
+falls on the safe side: a Desktop-only Ultra desk proves it only while it is
+being used.
+
+The measured owner desk had `{fh: 1, sd: 23}` on 10-29 at 21:29 and `{sd: 19}`
+on 10-31 at 18:29. That pair is 45 hours apart and falling, so it is not
+Desktop evidence. Claude Code's two-reply proof is what marks that desk.
+
+Three earlier rules got this wrong, and review caught each one:
+
+- Deciding per render, from fresh payloads only, brought the old frame back
+  whenever Claude Code went quiet, and flipped the mark on renders with no
+  `rate_limits`.
+- A sticky latch fixed that, but held `--%` on every Pro and Max desk after
   every reset, until the next reply.
-
-The one remaining ambiguity is a freshly started process on a Pro or Max desk
-right after a reset, which has no memory of the window that just ended. If
-`five_hour` comes back, the gauge comes back.
+- Inferring no window from a weekly-only status line, once five hours had
+  passed without seeing one, read quiet as Ultra. That happens on a laptop
+  asleep across a reset, a 40-day-old status line read at start, or a fresh
+  `blink status` (review, 2026-10-31).
 
 ## What the daemon did before the fix (wrong on Ultra)
 

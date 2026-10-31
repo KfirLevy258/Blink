@@ -18,11 +18,14 @@ each read as Ultra (review, 2026-10-31, findings 2, 3, 5 and 10).
 Evidence of NO window, measured on this desk's verified Ultra account on
 2026-10-31, read-only:
 
-  - a Claude Desktop usage-history sample with a usable `sd` and NO `fh`
-    key. The newest sample after the change had exactly that, and the
-    samples before it (10-28, 10-29) had `fh` 0 and 1. A key that is
-    present and null is not this evidence: absent is the claim.
-    (pc/providers/claude_desktop)
+  - a Claude Desktop usage-history sample with NO `fh` key whose `sd`
+    rose strictly since the sample just before it, the two one poll apart
+    (DESKTOP_RISE_MAX_GAP_S). The newest sample after the change had `sd`
+    and no `fh`, and the samples before it (10-28, 10-29) had `fh` 0 and 1;
+    that alone was proof until the owner's decision of 2026-11-01, since a
+    Pro or Max account idle past its window may write the same. A key that
+    is present and null is not this evidence: absent is the claim.
+    (pc/providers/claude_desktop, _no_window_rise)
   - Claude Code replies that came back without a five-hour window. On Pro
     and Max every API response carries the five-hour headers, so a reply
     brings five_hour back into the status line. One reply after which it is
@@ -69,7 +72,8 @@ DESCRIBE = {
     KIND_STATUSLINE_WINDOW: "Claude Code reported a five-hour window",
     KIND_STATUSLINE_REPLY: "a Claude Code reply came back without one",
     KIND_DESKTOP_FH: "Claude Desktop reported a five-hour figure",
-    KIND_DESKTOP_NO_FH: "Claude Desktop reports weekly usage only",
+    KIND_DESKTOP_NO_FH: ("Claude Desktop's weekly usage rose with no"
+                         " five-hour figure"),
     KIND_LOCAL_STORAGE: "Claude Desktop holds an open five-hour window",
 }
 # Every kind evidence can carry. Taken from DESCRIBE rather than restated

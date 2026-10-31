@@ -221,32 +221,63 @@ def _sample_to_frame(sample: dict, now_epoch=None):
         # purely by being newer, which is how a fresh empty source blanks a
         # good stale one.
         return None, None
-    window = _window_evidence(u, fh, sd, observed_at)
+    window = (session_verdict.evidence(
+        True, session_verdict.KIND_DESKTOP_FH, observed_at) if fh >= 0
+        else None)
+    # Absent, not null or out of range: _pct reads all three as UNKNOWN, so
+    # the test is on the key itself. Only a candidate: see _no_window_rise.
+    weekly_only = "fh" not in u and sd >= 0
     if now_epoch is not None and base.session_outlived(observed_at, now_epoch):
         fh = base.UNKNOWN
-    return {"session_pct": fh, "weekly_pct": sd, "window": window}, observed_at
+    return {"session_pct": fh, "weekly_pct": sd, "window": window,
+            "weekly_only": weekly_only}, observed_at
 
 
-def _window_evidence(u, fh, sd, observed_at):
-    """What this sample proves about the account's five-hour window
-    (pc/session_verdict), dated by the sample: from the raw figures, so a
-    figure retired for its age still says what the account had then.
+def _no_window_rise(fields, observed_at, previous):
+    """Evidence that the account has no five-hour window
+    (pc/session_verdict), or None: from a sample with a usable `sd` and no
+    `fh` key, judged against `previous`, the (observed_at, sd) of the sample
+    Desktop took just before it, or None when there is none. Dated by the
+    later sample.
 
-    Measured 2026-10-31 on this desk's verified Ultra account, read-only:
-    the newest sample, after the change, had `sd` and NO `fh` key at all,
-    and the samples before it, 10-28 and 10-29, had `fh` 0 and 1. So a
-    usable `sd` with the key absent is proof of no window, and an `fh`
-    holding a number, 0 included, is proof of one. A key present and null,
-    or a number out of range, proves nothing: absent is the claim, and
-    _pct reads all three as UNKNOWN, so the test is on the key itself.
+    An `fh` holding a number, 0 included, is proof of a window, and
+    _sample_to_frame says so on its own. Its absence is not, on its own,
+    proof of none. Measured 2026-10-31 on this desk's verified Ultra
+    account, read-only: the newest sample after the change had `sd` and no
+    `fh` key, and the samples before it, 10-28 and 10-29, had `fh` 0 and 1.
+    That was taken as proof until the 2026-11-01 review, which pointed out
+    it was measured on Ultra alone: a Pro or Max account idle for over five
+    hours has no window open, may well write the same sample, and would
+    have been marked and shown the burn view -- the worst outcome.
+
+    So the owner decided: the sample proves no window only when weekly
+    usage ROSE since the sample before it, strictly. Usage that recent, on
+    any plan with a five-hour window, sits inside an open one, so the later
+    sample would carry `fh`; only an account with no window shows a rise
+    and no `fh`.
+
+    The two must be consecutive polls, DESKTOP_RISE_MAX_GAP_S apart at
+    most, not the five hours first proposed. Found while writing the rule:
+    usage need not open a window, it can land at the end of one already
+    open, which then closes. A Pro window opened at T-4h, Desktop sampled
+    at T-0.1h, the user chatted at T and closed the app, the window closed
+    at T+1h, and the app reopened at T+4h: sd rose within five hours and
+    there is no window now. One poll apart, what remains is a window that
+    closed within about sixteen minutes of the usage. The cost runs the safe
+    way: a Desktop-only Ultra desk proves it rarely (only while its owner
+    is using it), and the owner's own desk, whose measured pair was
+    {fh: 1, sd: 23} on 10-29 and {sd: 19} on 10-31, is not proved by
+    Desktop at all. Claude Code's two-reply proof marks it.
     """
-    if fh >= 0:
-        return session_verdict.evidence(
-            True, session_verdict.KIND_DESKTOP_FH, observed_at)
-    if "fh" not in u and sd >= 0:
-        return session_verdict.evidence(
-            False, session_verdict.KIND_DESKTOP_NO_FH, observed_at)
-    return None
+    if not fields["weekly_only"] or previous is None:
+        return None
+    prev_at, prev_sd = previous
+    if prev_sd < 0 or observed_at - prev_at >= DESKTOP_RISE_MAX_GAP_S:
+        return None
+    if not fields["weekly_pct"] > prev_sd:
+        return None
+    return session_verdict.evidence(
+        False, session_verdict.KIND_DESKTOP_NO_FH, observed_at)
 
 
 def _newest_sample(samples, now_epoch=None):
@@ -273,16 +304,26 @@ def _newest_sample(samples, now_epoch=None):
     not on screen. That answer used to come from a second pass over the
     file without the clock, which could only ever find the same.
     """
-    best, best_rank = None, None
+    best, best_rank, seen = None, None, []
     for s in samples:
         fields, observed_at = _sample_to_frame(s, now_epoch)
         if fields is None:
             continue
+        # sd is never retired, so this is the raw weekly figure.
+        seen.append((observed_at, fields["weekly_pct"]))
         rank = (fields["session_pct"] >= 0 or fields["weekly_pct"] >= 0,
                 observed_at)
         if best_rank is None or rank > best_rank:
             best, best_rank = fields, rank
-    return best, (best_rank[1] if best_rank is not None else None)
+    if best is None:
+        return None, None
+    at = best_rank[1]
+    if best["window"] is None:
+        # The sample before it in time, not in the list (see above).
+        before = [p for p in seen if p[0] < at]
+        best["window"] = _no_window_rise(
+            best, at, max(before) if before else None)
+    return best, at
 
 
 # --- burn rate -----------------------------------------------------------
@@ -351,6 +392,13 @@ BURN_WINDOW_S = 3600.0
 # control -- if the rate disappears again, measure the gaps in
 # plan-usage-history.json before touching anything else.
 BURN_MAX_GAP_S = 1000.0
+
+# How far apart two samples may be for a rise in weekly usage between them,
+# the later with no `fh` key, to prove the account has no five-hour window:
+# consecutive polls and no more. The same bound as above, for the same
+# reason -- past it the app was closed in between -- and see
+# _no_window_rise for why a longer gap is a Pro or Max desk wrongly marked.
+DESKTOP_RISE_MAX_GAP_S = BURN_MAX_GAP_S
 
 # Below this the two endpoints are too close together for the slope to mean
 # anything: a single 5-minute step would swing it by the whole window.

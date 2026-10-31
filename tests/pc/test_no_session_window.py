@@ -15,8 +15,9 @@ borrowed source then also named and dated the frame, because merge() takes
 `primary = session_src or weekly_src`.
 
 The rule is positive evidence (pc/session_verdict). The account is marked
-only on proof it has no window -- a Claude Desktop sample with a weekly
-figure and no `fh` key, or a Claude Code reply that came back without a
+only on proof it has no window -- Claude Desktop's weekly figure risen
+between two samples one poll apart, the later with no `fh` key (owner's
+decision, 2026-11-01), or a Claude Code reply that came back without a
 five-hour window -- and the mark goes on proof it has one. Quiet data is
 never proof: the latch first, and then a rule that read five hours of
 weekly-only status line as Ultra, held "--%" on Pro and Max desks after a
@@ -126,6 +127,15 @@ NO_LIMITS = {"session_id": "s", "model": {"id": "m"}}
 ABSENT = "absent"
 
 
+def rose(at, weekly=2):
+    """The Desktop shape that proves no window (owner's decision,
+    2026-11-01): two samples one 15-minute idle poll apart, weekly usage
+    risen between them, neither with an `fh` key, the newer at `at`. A
+    sample with no `fh` key alone proves nothing
+    (claude_desktop._no_window_rise)."""
+    return [(at - 900, ABSENT, weekly - 1), (at, ABSENT, weekly)]
+
+
 def desktop_doc(path, samples):
     """samples: [(epoch_s, fh, sd)]; fh ABSENT leaves the key out."""
     rows = []
@@ -138,11 +148,15 @@ def desktop_doc(path, samples):
     return path
 
 
-def desktop_at(tmp_path, age_s, session=1, weekly=2):
+def desktop_at(tmp_path, age_s, session=1, weekly=2, rising=False):
     """A real Desktop provider over a generated cache whose newest sample is
-    `age_s` old. `session` ABSENT is the measured Ultra shape."""
-    f = desktop_doc(tmp_path / "plan-usage-history.json",
-                    [(NOW - age_s, session, weekly)])
+    `age_s` old. `session` ABSENT is the measured Ultra shape, and with
+    `rising` it is proof: a sample one poll earlier, a point lower, comes
+    before it (rose())."""
+    samples = [(NOW - age_s, session, weekly)]
+    if rising:
+        samples.insert(0, (NOW - age_s - 900, session, weekly - 1))
+    f = desktop_doc(tmp_path / "plan-usage-history.json", samples)
     return ClaudeDesktopProvider(path=str(f))
 
 
@@ -203,12 +217,14 @@ def brief(msg):
 
 
 def test_a_fresh_weekly_only_payload_is_live_with_an_unknown_session(tmp_path):
-    """The measured wire line, reproduced and then inverted, on the measured
-    Desktop history: a sample from before the change with `fh`, two days
-    old, and the newest after it with `sd` and no `fh` key."""
+    """The measured wire line, reproduced and then inverted, on a Desktop
+    history like the measured one: a sample from before the change with
+    `fh`, two days old, and after it `sd` with no `fh` key -- here risen
+    between two polls, which is what proves no window (rose()). The
+    measured pair alone proves nothing: scenario A0 below."""
     p = write(tmp_path / "statusline.json", weekly_only(2.0), NOW - 1)
     f = desktop_doc(tmp_path / "plan-usage-history.json",
-                    [(NOW - 136136, 1, 2), (NOW - 3600, ABSENT, 2)])
+                    [(NOW - 136136, 1, 2)] + rose(NOW - 3600))
     bus = ingest.IngestionBus(
         providers=[ClaudeCliProvider(path=str(p)),
                    ClaudeDesktopProvider(path=str(f))],
@@ -261,7 +277,7 @@ def test_five_hour_coming_back_behaves_as_before(tmp_path):
     p = tmp_path / "statusline.json"
     bus = ingest.IngestionBus(
         providers=[ClaudeCliProvider(path=str(p)),
-                   desktop_at(tmp_path, 3600, session=ABSENT)],
+                   desktop_at(tmp_path, 3600, session=ABSENT, rising=True)],
         now=lambda: NOW)
 
     write(p, weekly_only(2.0), NOW - 10)
@@ -317,7 +333,7 @@ def test_the_wire_ages_the_status_line_not_the_figure(tmp_path, doc):
         return ingest.IngestionBus(
             providers=[ClaudeCliProvider(path=str(p)),
                        desktop_at(tmp_path, 4000, session=weekly,
-                                  weekly=24)],
+                                  weekly=24, rising=weekly is ABSENT)],
             now=lambda: clock[0])
     running = bus()
     for at in (NOW - 1200, NOW - 600, NOW - 60, NOW - 1):
@@ -577,20 +593,116 @@ def test_the_weekly_figure_is_judged_at_the_payloads_own_time(tmp_path):
 
 
 @pytest.mark.parametrize("fh, want", [
-    (ABSENT, False), (0, True), (37, True), (None, None), (5000, None)],
+    (ABSENT, None), (0, True), (37, True), (None, None), (5000, None)],
     ids=["no fh key", "fh 0", "fh 37", "fh null", "fh out of range"])
 def test_desktop_proves_by_its_fh_key(tmp_path, fh, want):
-    """Measured on this desk's verified Ultra account, 2026-10-31: the
-    newest sample after the change had `sd` and no `fh` key, and the samples
-    before it had fh 0 and 1. Absent is the claim; null proves nothing."""
+    """A number under `fh`, 0 included, proves a window. A sample alone
+    with no `fh` key proves nothing (owner's decision, 2026-11-01): a Pro
+    or Max account with no window open may write that too. Null and out of
+    range prove nothing either way."""
     frame = desktop_at(tmp_path, 600, session=fh, weekly=2).poll(NOW)[0]
 
     if want is None:
         assert frame.window_evidence is None
     else:
         assert frame.window_evidence == (
-            want, session_verdict.KIND_DESKTOP_NO_FH if want is False
-            else session_verdict.KIND_DESKTOP_FH, NOW - 600)
+            True, session_verdict.KIND_DESKTOP_FH, NOW - 600)
+
+
+# Desktop's no-window evidence is a RISE (owner's decision after the
+# 2026-11-01 review): weekly usage that went up between two consecutive
+# samples, the later of which has no `fh` key. The gap is Desktop's own
+# sampling cadence bound, claude_desktop.DESKTOP_RISE_MAX_GAP_S.
+def _rise_gap():
+    from pc.providers import claude_desktop
+    return claude_desktop.DESKTOP_RISE_MAX_GAP_S
+
+
+def desktop_evidence(tmp_path, samples):
+    f = desktop_doc(tmp_path / "plan-usage-history.json", samples)
+    return ClaudeDesktopProvider(path=str(f)).poll(NOW)[0].window_evidence
+
+
+@pytest.mark.parametrize("before", [(ABSENT, 11), (40, 11), (0, 11)],
+                         ids=["no fh before", "fh 40 before", "fh 0 before"])
+def test_desktop_weekly_rising_with_no_fh_proves_no_window(tmp_path, before):
+    """Weekly usage went up between two samples Desktop took one poll
+    apart, and the later has no `fh`. On a plan with a five-hour window,
+    usage that recent sits inside an open one, and the sample would carry
+    fh; only an account with no window can show both. The earlier sample's
+    own fh does not matter: the claim is the later one's."""
+    fh, sd = before
+    ev = desktop_evidence(tmp_path, [(NOW - 1500, fh, sd),
+                                     (NOW - 600, ABSENT, 12)])
+
+    assert ev == (False, session_verdict.KIND_DESKTOP_NO_FH, NOW - 600)
+
+
+def test_an_idle_pro_desk_with_no_fh_is_not_marked(tmp_path):
+    """The case the rule exists for. A Pro or Max account idle for over
+    five hours has no window open, and may write a sample with `sd` and no
+    `fh` -- which the single-sample rule read as Ultra, and showed the burn
+    view: the worst outcome. Its weekly figure did not move."""
+    ev = desktop_evidence(tmp_path, [(NOW - 6 * 3600, 30, 12),
+                                     (NOW - 600, ABSENT, 12)])
+
+    assert ev is None
+
+
+def test_a_rise_across_a_gap_longer_than_a_poll_is_not_proof(tmp_path):
+    """Found while writing this rule, 2026-11-01. A rise does not always
+    open a window: usage can land at the end of one already open, which
+    then closes. A Pro window opened at T-4h, Desktop sampled at T-0.1h,
+    the user chatted at T and closed the app, the window closed at T+1h,
+    and the app reopened at T+4h: sd rose within five hours, and there is
+    no window now. So only consecutive poll samples are trusted."""
+    t = NOW - 600
+    assert desktop_evidence(tmp_path, [(t - 4.1 * 3600, 80, 10),
+                                       (t, ABSENT, 11)]) is None
+
+
+@pytest.mark.parametrize("gap_extra", [0, 1], ids=["at the bound", "past"])
+def test_the_gap_must_be_less_than_the_bound(tmp_path, gap_extra):
+    t = NOW - 600
+    assert desktop_evidence(tmp_path, [(t - _rise_gap() - gap_extra, 3, 10),
+                                       (t, ABSENT, 11)]) is None
+
+
+@pytest.mark.parametrize("sd", [12, 11], ids=["equal", "falling"])
+def test_weekly_usage_that_did_not_rise_is_not_proof(tmp_path, sd):
+    assert desktop_evidence(tmp_path, [(NOW - 1500, ABSENT, 12),
+                                       (NOW - 600, ABSENT, sd)]) is None
+
+
+def test_the_measured_owner_desk_is_not_desktop_proof(tmp_path):
+    """This desk's verified Ultra account, read-only, 2026-10-31: samples
+    10-29 21:29 {fh: 1, sd: 23} and 10-31 18:29 {sd: 19}. Forty-five hours
+    apart and falling (the weekly window rolled between): not a rise one
+    poll apart, so not evidence. Claude Code's two-reply proof is what
+    marks that desk."""
+    t = NOW - 600
+    assert desktop_evidence(tmp_path, [(t - 45 * 3600, 1, 23),
+                                       (t, ABSENT, 19)]) is None
+
+
+def test_the_previous_sample_is_the_previous_in_time(tmp_path):
+    """By timestamp, not by position: the file is sorted today, and that is
+    an observation about one file (_newest_sample). Here the sample before
+    the newest in the list is hours old, and the one just before it in time
+    is lower."""
+    ev = desktop_evidence(tmp_path, [(NOW - 600, ABSENT, 12),
+                                     (NOW - 6 * 3600, 30, 12),
+                                     (NOW - 1500, ABSENT, 11)])
+    assert ev == (False, session_verdict.KIND_DESKTOP_NO_FH, NOW - 600)
+
+    assert desktop_evidence(tmp_path, [(NOW - 600, ABSENT, 12),
+                                       (NOW - 1500, ABSENT, 12),
+                                       (NOW - 2400, ABSENT, 11)]) is None
+
+
+def test_a_previous_sample_with_no_weekly_figure_proves_nothing(tmp_path):
+    assert desktop_evidence(tmp_path, [(NOW - 1500, 3, None),
+                                       (NOW - 600, ABSENT, 12)]) is None
 
 
 def test_desktop_with_no_weekly_figure_and_no_fh_proves_nothing(tmp_path):
@@ -830,7 +942,7 @@ def _desktop_only_bus(tmp_path, fh, transcripts):
                        entrypoint="claude-desktop") for i in range(20)],
                  mtime=bl.NOW - 2)
     f = desktop_doc(tmp_path / "plan-usage-history.json",
-                    [(bl.NOW - 300, fh, 12)])
+                    [(bl.NOW - 1200, fh, 11), (bl.NOW - 300, fh, 12)])
     return ingest.IngestionBus(
         providers=[ClaudeDesktopProvider(path=str(f))],
         now=lambda: bl.NOW,
@@ -1226,8 +1338,10 @@ def test_the_mark_survives_a_second_merge():
 # The evidence rule changed the inputs of the Ultra rows, A to E and U: their
 # Desktop samples carried `fh`, which a verified Ultra account's Desktop no
 # longer writes (measured 2026-10-31). A sample with fh is proof of a window
-# now, so those rows carry the measured shape, sd and no fh key, and keep
-# the lines they drew. "A0" keeps the 10-30 inputs, a 37-hour-old pre-change
+# now, so those rows carry sd and no fh key, and keep the lines they drew.
+# Since the owner's decision of 2026-11-01 that shape proves no window only
+# as a rise between two samples one poll apart (rose()), so the rows carry
+# that; A1 is the measured 10-31 pair, which no longer proves anything. "A0" keeps the 10-30 inputs, a 37-hour-old pre-change
 # sample and a status line that has not replied, and shows the rule's (c):
 # no proof either way, no mark, the session unknown on its own. G2 is the
 # row the rule rightly changes: a fresh process after a Pro or Max reset
@@ -1235,7 +1349,10 @@ def test_the_mark_survives_a_second_merge():
 
 W = status(seven=2.0)
 DK_PRE = [(NOW - 136136, 1, 2)]                 # the 10-30 measured sample
-DK_MEASURED = DK_PRE + [(NOW - 3600, ABSENT, 2)]
+# Not the 10-31 measured sample beside it, which proves nothing on its own
+# (owner's decision, 2026-11-01; A0 and A1): the proving shape, a rise one
+# poll apart with no fh.
+DK_ROSE = DK_PRE + rose(NOW - 3600)
 TORN, GONE = "torn", "gone"
 REPLIED = session_verdict.evidence(
     False, session_verdict.KIND_STATUSLINE_REPLY, NOW - 7200)
@@ -1253,37 +1370,44 @@ SCENARIOS = {
     "A0 the 10-30 inputs, nothing proved": dict(
         steps=[(W, NOW - 1, NOW)], desktop=DK_PRE,
         want=[(-1, "cli", False, 1)], marked=False),
+    # The 10-31 measured pair, {fh: 1, sd: 23} then {sd: 19} 45 h later:
+    # no rise one poll apart, so Desktop proves nothing, and with no reply
+    # yet nothing is marked. On the owner's desk it is the replies that do.
+    "A1 the 10-31 measured pair, nothing replied": dict(
+        steps=[(W, NOW - 1, NOW)],
+        desktop=[(NOW - 3600 - 45 * 3600, 1, 23), (NOW - 3600, ABSENT, 19)],
+        want=[(-1, "cli", False, 1)], marked=False),
     # Ultra, the measured inputs.
     "A measured": dict(
-        steps=[(W, NOW - 1, NOW)], desktop=DK_MEASURED,
+        steps=[(W, NOW - 1, NOW)], desktop=DK_ROSE,
         want=[(-1, "cli", False, 1)], marked=True),
     "B restart, payload 40 min old": dict(
-        steps=[(W, NOW - 2400, NOW)], desktop=DK_MEASURED,
+        steps=[(W, NOW - 2400, NOW)], desktop=DK_ROSE,
         want=[(-1, "cli", True, 2400)], marked=True),
     "C two hours idle": dict(
         steps=[(W, NOW - 1, NOW), (None, None, NOW + 7200)],
-        desktop=DK_MEASURED,
+        desktop=DK_ROSE,
         want=[(-1, "cli", False, 1), (-1, "cli", True, 7201)], marked=True),
     # Ultra, a Desktop sample inside its own bound.
     "D1 Desktop 2 h old": dict(
-        steps=[(W, NOW - 1, NOW)], desktop=[(NOW - 7200, ABSENT, 2)],
+        steps=[(W, NOW - 1, NOW)], desktop=rose(NOW - 7200),
         want=[(-1, "cli", False, 1)], marked=True),
     "D2 Desktop 5 h old": dict(
-        steps=[(W, NOW - 1, NOW)], desktop=[(NOW - 18000, ABSENT, 2)],
+        steps=[(W, NOW - 1, NOW)], desktop=rose(NOW - 18000),
         want=[(-1, "cli", False, 1)], marked=True),
     "D3 restart, Desktop 2 h old": dict(
-        steps=[(W, NOW - 2400, NOW)], desktop=[(NOW - 7200, ABSENT, 2)],
+        steps=[(W, NOW - 2400, NOW)], desktop=rose(NOW - 7200),
         want=[(-1, "cli", True, 2400)], marked=True),
     # Desktop's weekly figure is the newest, so it names the frame.
     "D4 Desktop sampled between two polls": dict(
-        steps=[(W, NOW - 1, NOW, DK_MEASURED),
+        steps=[(W, NOW - 1, NOW, DK_ROSE),
                (None, None, NOW + 7200,
-                DK_MEASURED + [(NOW + 3600, ABSENT, 2)])],
-        desktop=DK_MEASURED,
+                DK_ROSE + rose(NOW + 3600, weekly=3))],
+        desktop=DK_ROSE,
         want=[(-1, "cli", False, 1), (-1, "desktop", True, 3600)],
         marked=True),
     "D5 Desktop newer than the render": dict(
-        steps=[(W, NOW - 600, NOW)], desktop=[(NOW - 60, ABSENT, 2)],
+        steps=[(W, NOW - 600, NOW)], desktop=rose(NOW - 60),
         want=[(-1, "desktop", False, 60)], marked=True),
     # A rising series from before a reply proved there is no window: the
     # reply is the newer evidence, and the rate goes with the figure.
@@ -1297,7 +1421,7 @@ SCENARIOS = {
     "E alternating renders, Desktop 2 h old": dict(
         steps=[(W, NOW - 7, NOW - 6), (NO_LIMITS, NOW - 5, NOW - 4),
                (W, NOW - 3, NOW - 2), (NO_LIMITS, NOW - 1, NOW)],
-        desktop=[(NOW - 7200, ABSENT, 2)],
+        desktop=rose(NOW - 7200),
         want=[(-1, "cli", False, 1), (-1, "cli", False, 3)] * 2,
         marked=True, pushes=1),
     "E2 alternating renders, Desktop 37 h old, verdict on disk": dict(
@@ -1360,7 +1484,7 @@ SCENARIOS = {
     "U torn write, then the file gone": dict(
         steps=[(W, NOW - 5, NOW - 4), (TORN, None, NOW - 2),
                (GONE, None, NOW)],
-        desktop=[(NOW - 7200, ABSENT, 2)],
+        desktop=rose(NOW - 7200),
         want=[(-1, "cli", False, 1), (-1, "cli", False, 3),
               (-1, "cli", False, 5)], marked=True, pushes=1),
 }
