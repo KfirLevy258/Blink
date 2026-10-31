@@ -104,6 +104,17 @@ bar per quarter-hour, and an arrow comparing this hour with the one before.
 
 *Rendered by the shipping firmware's own drawing code, not mocked up.*
 
+### The theme builder
+
+<img src="docs/img/theme-builder.png" alt="The theme builder in a browser: a preview of the board on the left, here showing the burn view, with switches for Gauges or Focus mode and for the session gauge or the burn view; the twelve built-in themes and the colour pickers on the right; Save to board, Cancel and Copy share code along the top.">
+
+Tap *Edit on computer* in the board's Theme settings, or run `blink theme`, and
+the builder opens in your browser. Pick a built-in theme or choose the seven
+colours yourself; every change shows on the board as a preview until you save
+or cancel. The preview beside it can show either left half, the session gauge
+or the burn view, so a theme can be judged on both. Readability checks under
+the preview flag text or arcs that would be hard to see.
+
 ## Setup
 
 One file. Download it, run it, delete it. It copies itself to `~/.blink/bin`, finds the board, and starts again every time you log in.
