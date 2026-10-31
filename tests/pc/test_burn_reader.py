@@ -759,11 +759,36 @@ def test_a_projects_directory_that_cannot_be_listed_is_nothing_to_say(
         tmp_path, monkeypatch, capsys):
     """It exists, so the walk called it found, and the listing's OSError
     was swallowed: twenty zeros, a confident "idle" about transcripts never
-    seen (review, 2026-10-31). The same as no directory at all."""
+    seen (review, 2026-10-31). The same as no directory at all, for what
+    poll() returns -- but not for bridge.log. It used to say nothing, so a
+    desk whose projects folder was left owned by root showed no burn view
+    for good with not a word anywhere to say why (review follow-up,
+    2026-11-01). Now one fixed line, once, when the refusals start: no path,
+    which names the customer's home, and no error text, which carries it."""
     tx.write(tmp_path, session(tmp_path), [a(1, start(19), 8)], mtime=NOW)
-    refusing_listings(monkeypatch, [projects(tmp_path)])
+    r = reader(tmp_path)
+    with monkeypatch.context() as m:
+        refusing_listings(m, [projects(tmp_path)])
+        assert [r.poll(NOW + k * LATER)
+                for k in range(br.READ_TRIES + 2)] == [None] * (br.READ_TRIES
+                                                             + 2)
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err == br.SAID_ROOT_REFUSED + "\n"
+    assert "MARKER" not in err and str(tmp_path) not in err
 
-    assert reader(tmp_path).poll(NOW) is None
+    # And one when it lists again, once, with the view back.
+    assert sum(r.poll(NOW + (br.READ_TRIES + 2) * LATER)[1]) == 8
+    assert sum(r.poll(NOW + (br.READ_TRIES + 3) * LATER)[1]) == 8
+    out, err = capsys.readouterr()
+    assert (out, err) == ("", br.SAID_ROOT_LISTS + "\n")
+
+
+def test_a_missing_projects_directory_says_nothing(tmp_path, capsys):
+    """No folder at all is a desk without Claude Code, not a refusal: the
+    refusal line would be untrue there, and it would be in every log."""
+    r = reader(tmp_path)
+    assert [r.poll(NOW + k * LATER) for k in range(3)] == [None] * 3
     assert capsys.readouterr() == ("", "")
 
 

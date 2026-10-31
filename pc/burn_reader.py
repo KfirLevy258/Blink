@@ -140,6 +140,17 @@ SAID_LEFT_OUT = ("[burn] a project directory cannot be listed; the burn view "
                  "goes on without it")
 SAID_WHOLE = "[burn] every project directory lists again"
 
+# The same, for the projects folder itself. A refused root is never given up
+# on -- there is no sum without it -- so poll() says nothing for as long as
+# it lasts, and until the review follow-up of 2026-11-01 bridge.log said
+# nothing either: a desk whose projects folder a `sudo claude` left owned by
+# root lost the burn view for good with no word anywhere of why. Told once
+# when the refusals start and once when it lists again; fixed strings for
+# the reason above, the folder's path being under the customer's home.
+SAID_ROOT_REFUSED = ("[burn] the Claude Code projects folder cannot be "
+                     "listed; no burn view until it can")
+SAID_ROOT_LISTS = "[burn] the Claude Code projects folder lists again"
+
 # How many bytes before a file's offset vouch for it: the reader keeps a
 # hash of the last ANCHOR_BYTES it took, reads them again ahead of the next
 # read, and starts the file over if they differ. Size and inode cannot see
@@ -307,6 +318,7 @@ class BurnReader:
         # one of them is being left out, so it is told once.
         self._refusals = {}
         self._left_out_said = False
+        self._root_refused_said = False     # SAID_ROOT_REFUSED, once
         self._kept_from = None      # the oldest bucket the last prune kept
         self.last = PollCost(False, 0, 0, 0, 0)
 
@@ -401,6 +413,17 @@ class BurnReader:
         if left_out != self._left_out_said:
             self._left_out_said = left_out
             print(SAID_LEFT_OUT if left_out else SAID_WHOLE, file=sys.stderr)
+        # A root that vanished between the isdir() above and its listing is
+        # in `refused` too (_transcripts' _GONE case), and is a missing
+        # folder, not a refused one: asked again so that race says nothing.
+        # A missing folder leaves the flag as it was, in either direction --
+        # it is neither a refusal nor a listing.
+        root_refused = root in refused and os.path.isdir(root)
+        if root_refused != self._root_refused_said and (
+                root_refused or root not in refused):
+            self._root_refused_said = root_refused
+            print(SAID_ROOT_REFUSED if root_refused else SAID_ROOT_LISTS,
+                  file=sys.stderr)
         # What a refused directory holds was not listed, which is not the
         # same as gone: forgotten, every file in it touched inside the
         # window would be read again from its start once it lists. The
