@@ -273,12 +273,21 @@ def build_bus():
     It replaces rather than joins the set on purpose: a real Claude install
     on the test machine would otherwise merge its own readings into the
     scenario and the assertion would depend on whose desk it ran on.
+
+    The burn line's source follows the same rule. The real bus reads this
+    machine's Claude Code transcripts (pc/burn_reader); a scenario's bus
+    replays the scenario's own buckets instead, which is also how a bench
+    puts every state of the burn view on a board without spending anybody's
+    quota.
     """
     scenario = os.environ.get("BLINK_SCENARIO")
     if not scenario:
-        return ingest.IngestionBus()
+        from pc.burn_reader import BurnReader
+        return ingest.IngestionBus(burn=BurnReader())
     from pc.providers.scripted import ScriptedProvider
-    return ingest.IngestionBus(providers=[ScriptedProvider(scenario)])
+    scripted = ScriptedProvider(scenario)
+    return ingest.IngestionBus(providers=[scripted],
+                               burn=scripted.burn_source())
 
 
 def describe_ports():
@@ -847,8 +856,17 @@ def main(argv=None):
     # shared Repeats would suppress nothing.
     svc_frames = logbook.RepeatsBy("provider", ("level", "what"),
                                    "status-page lines")
+    # The burn line goes out every 15 s while Claude Code is producing and
+    # every minute while it is not, so logged in full it would be some 1900
+    # lines a day on a working desk -- the growth svc_frames above was
+    # written to undo. Compared on the page and the quarter-hour, the way
+    # time_frames is compared on the offset and not the epoch: `b` moves
+    # with every reply by construction, and the reader of bridge.log needs
+    # to see that the line is flowing, not each number in it. A line per
+    # quarter-hour, and the rest counted.
+    burn_frames = logbook.Repeats(("p", "q"), "burn lines")
     _REPEATED = {"usage": usage_frames, "time": time_frames,
-                 "svc": svc_frames}
+                 "svc": svc_frames, "burn": burn_frames}
     watchdog = install_statusline.DriftWatchdog(
         settings_path(), shim_path(),
         shims=((shim_path(), "blink-statusline.sh"),
@@ -901,7 +919,7 @@ def main(argv=None):
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
         for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
-                     svc_frames.due()):
+                     svc_frames.due(), burn_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):

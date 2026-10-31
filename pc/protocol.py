@@ -177,7 +177,7 @@ WIRE_TYPES = frozenset({
     # host -> board
     "welcome", "bye", "pong", "time", "usage", "edition", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
-    "ota_none", "ota_error", "edit_state",
+    "ota_none", "ota_error", "edit_state", "burn",
 })
 
 UNKNOWN_TYPE = "(unknown type)"
@@ -801,6 +801,8 @@ BOARD_CAP_THEME = "theme"    # takes theme lines; answers theme_edit
 # while their ask is in flight as an ok 0, put up "run blink theme", and
 # then ignore the real ok 1 (review of fp/audit-nice r2, SHOULD-1).
 BOARD_CAP_EDIT_DONE = "edit_done"
+# Draws the five-hour burn view from burn lines (docs/plans/burn-5h.md).
+BOARD_CAP_BURN = "burn"
 
 
 def board_caps(msg) -> frozenset:
@@ -875,6 +877,52 @@ def svc(provider: str, level: str, what: str = "") -> dict:
     if what and level != "ok":
         msg["what"] = _clip_utf8(what, SVC_WHAT_MAX_BYTES)
     return msg
+
+
+# --- burn: the five-hour view for an account with no session window -------
+#
+# docs/plans/burn-5h.md is the contract; pc/burn_reader reads the numbers and
+# pc/bridge decides when they go out.
+BURN_BUCKETS = 20
+BURN_BUCKET_S = 900
+
+# A bucket's ceiling on the wire, in thousands: a billion output tokens in a
+# quarter-hour, which nothing produces. It is there so the line has a widest
+# case to measure (tests/pc/test_burn_line.py) instead of growing with
+# whatever a transcript claims.
+BURN_K_MAX = 999999
+
+
+def burn(provider: str, q: int, tokens) -> dict:
+    """The burn line: twenty quarter-hours of output tokens for one page.
+
+        {"t":"burn","v":2,"p":"claude","q":1793430000,"b":[0,0,4,12,...]}
+
+    `q` is the epoch second the NEWEST bucket starts, the quarter-hour the
+    daemon's clock is in now, so bucket i (0 = oldest) starts at
+    q - (19 - i) * 900. `b` is exactly twenty non-negative integers, oldest
+    first, in THOUSANDS of output tokens, rounded up so that any activity at
+    all shows as at least 1. `p` names the page it belongs to, the id `usage`
+    carries in `provider`; always "claude" for now.
+
+    Its own line, not fields on `usage`, which measures 484 of 512 bytes with
+    two providers loaded and has no room for twenty numbers. Additive like
+    `svc`: firmware that predates it ignores an unknown type, and it is sent
+    only to a board whose caps list BOARD_CAP_BURN anyway. `v` is
+    PROTO_VERSION like every other line; the board reads `v` only on welcome.
+
+    `tokens` are whole output tokens, in the same order; the thousands are
+    taken here so the one rounding rule has one home.
+    """
+    tokens = list(tokens)
+    if len(tokens) != BURN_BUCKETS:
+        raise ValueError(f"a burn line has {BURN_BUCKETS} buckets, not "
+                         f"{len(tokens)}")
+    q = int(q)
+    if q % BURN_BUCKET_S:
+        raise ValueError("q must start a quarter-hour")
+    b = [min(BURN_K_MAX, -(-max(0, int(t)) // 1000)) for t in tokens]
+    return {"t": "burn", "v": VERSION, "p": provider, "q": q, "b": b}
 
 
 # --- Themes (pc/theme.py validates; these only shape the line) ----------

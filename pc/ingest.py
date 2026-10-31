@@ -17,6 +17,7 @@ import time
 from pc import (cowork_audit, desktop_idb, desktop_paths, normalizer, protocol,
                 weekly_anchor)
 from pc.providers import base
+from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
@@ -72,11 +73,25 @@ def default_providers():
 
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
-                 now=time.time):
+                 now=time.time, burn=None):
         self._providers = (default_providers() if providers is None
                            else list(providers))
         self._preferred = preferred_provider
         self._now = now
+        # What answers burn() below: anything with poll(now) -> (q, tokens)
+        # or None -- pc/burn_reader.BurnReader on a desk, the scenario's
+        # replay under BLINK_SCENARIO. None, the default, means no burn line
+        # at all. It is handed in rather than built here so that a bus made
+        # of scripted providers can never read the machine's real
+        # transcripts: claude_usage_bridge.build_bus decides, the way it
+        # decides the providers.
+        self._burn = burn
+        # Whether the claude page of the last poll() has no session window
+        # (NormalizedUsageFrame.no_session_window): the one condition under
+        # which a burn line is sent. Recorded there, like _session_pair, so
+        # it answers for the same poll the usage line came from.
+        self._burn_wanted = False
+        self._burn_failed = False
         # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
         # out after a failure. Keyed by IDENTITY, not by class: two instances
         # of the same provider class are two sources -- two Codex homes, the
@@ -301,6 +316,12 @@ class IngestionBus:
         """The usage message for the board, or None when nothing is known."""
         primary, secondary = normalizer.select_pair(
             self.poll_frames(), preferred=self._preferred)
+        # The claude page wherever it sits: the main one, or the second when
+        # the owner made another provider main. A provider left off the
+        # board's two pages has no page to draw a burn view on.
+        self._burn_wanted = any(
+            f is not None and f.provider == claude_cli.PROVIDER_ID
+            and f.no_session_window for f in (primary, secondary))
         if primary is None:
             return None
         msg = protocol.frame_to_usage(primary, self._now(), secondary)
@@ -320,6 +341,42 @@ class IngestionBus:
         """
         return self._session_pair
 
+    def burn(self):
+        """The burn line for the board, or None when there is none to send.
+
+        None unless the last poll() found the claude page without a session
+        window, so on a Pro or Max desk the transcripts are never read at
+        all, and None while the reader has nothing honest to say yet (no
+        transcripts directory, or a cold start still being read). The reader
+        is asked only from here, and this only from Bridge, after the
+        board's caps have been checked: a board that cannot draw the view
+        costs nothing.
+
+        Contained like a provider: a reader that raises costs the burn line,
+        never the poll. The log names the exception's type and nothing more,
+        because its text could be a transcript's path or a value read out of
+        one (CLAUDE.md).
+        """
+        if self._burn is None or not self._burn_wanted:
+            return None
+        try:
+            got = self._burn.poll(self._now())
+        except Exception as e:
+            if not self._burn_failed:
+                self._burn_failed = True
+                print(f"[ingest] the transcript reader failed"
+                      f" ({type(e).__name__}); no burn line until it"
+                      f" recovers", file=sys.stderr)
+            return None
+        if self._burn_failed:
+            self._burn_failed = False
+            print("[ingest] the transcript reader is working again",
+                  file=sys.stderr)
+        if got is None:
+            return None
+        q, tokens = got
+        return protocol.burn(claude_cli.PROVIDER_ID, q, tokens)
+
     def fetch(self):
         """The callable to hand Bridge(fetch_usage=...).
 
@@ -336,7 +393,8 @@ class IngestionBus:
 
 
 class _BusFetch:
-    """A zero-arg callable that also knows the project name.
+    """A zero-arg callable that also knows the project name, and the burn
+    line (IngestionBus.burn) for the same poll.
 
     An object rather than a function with an attribute bolted on: the Bridge
     is handed a zero-arg callable returning a finished usage dict and never
@@ -355,6 +413,9 @@ class _BusFetch:
 
     def session_pair(self):
         return self._bus.session_pair()
+
+    def burn(self):
+        return self._bus.burn()
 
 
 # Which count describes which state. STATE_FAILED reads n_stuck because that

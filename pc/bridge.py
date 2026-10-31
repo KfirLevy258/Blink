@@ -38,6 +38,16 @@ THEME_QUIET_S = 2.0
 # holds: preview and cancel write no flash.
 THEME_SAVE_HOLD_S = 0.5
 
+# The burn line's cadence (docs/plans/burn-5h.md): after the quiet window
+# that follows a greeting -- THEME_QUIET_S, for the same reason, since it is
+# not part of the hello burst -- then whenever q or b changes, never sooner
+# than BURN_MIN_GAP_S after the last one, and at least every BURN_HEARTBEAT_S
+# so a board that lost a line, or rebooted without a hello reaching us, has
+# it back within a minute. The board keeps the view up for 180 s after the
+# last line, three heartbeats.
+BURN_MIN_GAP_S = 15.0
+BURN_HEARTBEAT_S = 60.0
+
 
 def _spawn(fn):
     threading.Thread(target=fn, name="blink-theme-open", daemon=True).start()
@@ -197,6 +207,13 @@ class Bridge:
         self._theme_quiet_until = None
         self._sleep = sleep
         self._store_until = None         # see THEME_SAVE_HOLD_S
+        # The burn line (see BURN_MIN_GAP_S). What was last put on the wire,
+        # as (p, q, b), and when by self._now; None for nothing since the
+        # last greeting or since the line stopped.
+        self._burn_sent = None
+        self._burn_sent_at = None
+        self._burn_quiet_until = None
+        self._burn_failed = False
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -228,6 +245,17 @@ class Bridge:
             # fast tick after that (THEME_QUIET_S).
             self._theme.hello()
             self._theme_quiet_until = self._now() + THEME_QUIET_S
+        # The burn line waits out the same quiet window, BEFORE the poll
+        # below: it is not part of the hello burst, which is measured
+        # against the board's receive ring (tests/pc/test_hello_burst.py),
+        # and the pref that answers this welcome may still be on its way
+        # with the caps that decide whether the line goes at all. A board
+        # that has just booted holds no burn line, so whatever went to the
+        # last connection is forgotten and the first tick after the window
+        # sends one, unchanged or not.
+        self._burn_sent = None
+        self._burn_sent_at = None
+        self._burn_quiet_until = self._now() + THEME_QUIET_S
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
@@ -1023,6 +1051,9 @@ class Bridge:
         # And the status level, which changes on the watch's own thread and
         # would otherwise wait for the next usage change to be noticed.
         self._send_svc_if_changed()
+        # And the burn view, whose numbers move while the usage line holds
+        # still: an Ultra desk's session dial says "--%" all day.
+        self._send_burn_if_due()
 
     def _read_usage(self):
         """The usage message as it would go out right now, or None if there is
@@ -1069,6 +1100,10 @@ class Bridge:
             self._svc_pages = tuple(p for p in status_page.PAGES
                                     if p in pair)
         self._send_svc_if_changed()
+        # After the usage line it belongs beside: both come from the same
+        # poll, and the board draws the view only while that line says the
+        # session is unknown.
+        self._send_burn_if_due()
 
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
@@ -1100,6 +1135,56 @@ class Bridge:
         if pair != self._last_session:
             self._write(protocol.session(*pair))
             self._last_session = pair
+
+    def _send_burn_if_due(self):
+        """Put the burn line on the wire when its cadence says so.
+
+        Read off the fetch callable, like session_pair: the bus's fetch has
+        `burn`, every test fake and older fetch has not and sends nothing.
+        Asked only for a board that lists BOARD_CAP_BURN, and not inside the
+        quiet window or the minimum gap, so the transcripts behind it are
+        read only when a line could actually go out.
+
+        None from the fetch means "do not send": the claude page has a
+        session window again, or the reader has nothing honest yet. The
+        line then simply stops -- there is no "off" message; the board
+        restores the gauge from the usage line itself -- and what was sent
+        is forgotten, so the next line goes out as soon as the gap allows.
+        """
+        burn = getattr(self._fetch, "burn", None)
+        if burn is None:
+            return
+        if not self._board_can(protocol.BOARD_CAP_BURN):
+            # A board that says it can again (its next pref) holds nothing
+            # from before, so it is sent the line as if new.
+            self._burn_sent = None
+            return
+        now = self._now()
+        if self._burn_quiet_until is not None and now < self._burn_quiet_until:
+            return
+        if (self._burn_sent_at is not None
+                and now - self._burn_sent_at < BURN_MIN_GAP_S):
+            return
+        try:
+            msg = burn()
+        except Exception as e:
+            # Never worth the serial loop. The type only: the text of an
+            # exception from the reader can be a transcript's path.
+            if not self._burn_failed:
+                self._burn_failed = True
+                print(f"[bridge] burn not sent: {type(e).__name__}",
+                      file=sys.stderr)
+            return
+        self._burn_failed = False
+        if msg is None:
+            self._burn_sent = None
+            return
+        key = (msg.get("p"), msg.get("q"), tuple(msg.get("b") or ()))
+        if (key == self._burn_sent
+                and now - self._burn_sent_at < BURN_HEARTBEAT_S):
+            return
+        self._write(msg)
+        self._burn_sent, self._burn_sent_at = key, now
 
     def _send_svc_if_changed(self):
         """Put each page's status-page level on the wire, on change only.
