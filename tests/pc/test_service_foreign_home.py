@@ -76,17 +76,25 @@ def test_the_explicit_variable_lets_it_through(armed, monkeypatch):
     assert cli._skip_service() is False
 
 
-def test_the_account_own_home_is_not_foreign(armed, monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(armed))
+def test_the_account_own_home_is_not_foreign(armed, move_home):
+    """move_home, not setenv("HOME"): expanduser reads USERPROFILE on Windows,
+    where setting HOME alone left the home foreign and this failed on the
+    Windows job of CI run 41192997263. On Windows the real check fails open
+    anyway (no password database); this runs the comparison with a stand-in
+    account home, on every platform."""
+    move_home(armed)
     assert cli._skip_service() is False
 
 
-def test_a_symlinked_home_is_the_same_home(armed, monkeypatch, tmp_path):
+def test_a_symlinked_home_is_the_same_home(armed, move_home, tmp_path):
     """A customer whose HOME is a symlink to the account's directory (a
     relocated home, /home -> /export/home) must not be refused."""
     link = tmp_path / "link"
-    link.symlink_to(armed)
-    monkeypatch.setenv("HOME", str(link))
+    try:
+        link.symlink_to(armed, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this account may not create symlinks (Windows)")
+    move_home(link)
     assert cli._skip_service() is False
 
 
