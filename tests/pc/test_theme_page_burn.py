@@ -49,6 +49,7 @@ const drawn = () => $('scr').children.map(n => ({
   y: n.attrs.y === undefined ? null : +n.attrs.y,
   w: n.attrs.width === undefined ? null : +n.attrs.width,
   h: n.attrs.height === undefined ? null : +n.attrs.height,
+  fs: n.attrs['font-size'] === undefined ? null : +n.attrs['font-size'],
   text: n.textContent === '' ? null : n.textContent }));
 const left = () => document.querySelectorAll('[data-l]');
 const pressed = () => Object.fromEntries(left().map(b => [b.dataset.l, b.getAttribute('aria-pressed')]));
@@ -692,3 +693,37 @@ def test_the_ported_floor_is_the_firmwares_own(tmp_path):
         want.append(" ".join(k[n] for n in ("hot", "cold", "base", "tick")))
     assert out == want
 
+
+# --------------------------------------------- the rows beside the view
+
+def _layout(name):
+    m = re.search(rf"#define {name}\s+(\d+)", _c("usage_layout.h"))
+    assert m, name
+    return int(m.group(1))
+
+
+def test_the_burn_views_caption_rows_are_the_weekly_gauges_rows():
+    """On the board "BURN 5h" sits where "SESSION 5h" does and the rate line
+    where the countdown does: default-font labels, Montserrat 14 in 16 px
+    rows from GAUGE_NAME_Y and GAUGE_CD_Y. The page drew the burn rows that
+    way and the weekly gauge's at 12 px, 1 and 3 px higher, so the two
+    halves of one row did not match (the /code-review max of 2026-11-01).
+    Both follow the board now."""
+    r = _run("""
+    const gauge = drawn();
+    left()[1].click();
+    return { gauge, burn: drawn() };
+    """)
+    name_y, cd_y = _layout("GAUGE_NAME_Y") + 13, _layout("GAUGE_CD_Y") + 13
+
+    def rows(nodes, cls):
+        return [(n["text"], n["y"], n["fs"]) for n in nodes
+                if n["cls"] == cls]
+    assert rows(r["gauge"], "gauge-name") == [("SESSION 5h", name_y, 14),
+                                              ("WEEKLY 7d", name_y, 14)]
+    assert rows(r["gauge"], "gauge-cd") == [("3h 40m", cd_y, 14),
+                                            ("1d 1h", cd_y, 14)]
+    assert rows(r["burn"], "gauge-name") == [("WEEKLY 7d", name_y, 14)]
+    assert rows(r["burn"], "burn-name") == [("BURN 5h", name_y, 14)]
+    assert [(y, fs) for _, y, fs in rows(r["burn"], "burn-rate")] == \
+        [(cd_y, 14)]

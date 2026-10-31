@@ -697,9 +697,16 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       svg.appendChild(el('circle', { cx: 302, cy: 14, r: 5, fill: '#' + dotColours(st.low, st.mid, st.bg)[0] }));
       if (burn) burnView(svg, F, dim); else gauge(svg, 80, 104, 120, st.w, st.p1, arcCol(1, st.p1), track, st.text, 20);
       gauge(svg, 240, 104, 120, st.w, st.p2, arcCol(2, st.p2), track, st.text, 20);
+      // The window name and its countdown: on the board two default-font
+      // labels, Montserrat 14 in 16 px rows from GAUGE_NAME_Y (168) and
+      // GAUGE_CD_Y (186), so the text sits 13 px below each row's top, as
+      // the burn view's own "BURN 5h" and rate line do. They were 12 px at
+      // 180 and 196 here, which put the burn view's rows, drawn the
+      // board's way, visibly larger and lower than the weekly gauge's
+      // beside them (the /code-review max of 2026-11-01).
       [['SESSION 5h', '3h 40m', 80], ['WEEKLY 7d', '1d 1h', 240]].slice(burn ? 1 : 0).forEach(function (g) {
-        svg.appendChild(el('text', { x: g[2], y: 180, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, g[0]));
-        svg.appendChild(el('text', { x: g[2], y: 196, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, g[1]));
+        svg.appendChild(el('text', { 'class': 'gauge-name', x: g[2], y: 168 + 13, 'text-anchor': 'middle', 'font-family': F, 'font-size': 14, fill: '#' + dim }, g[0]));
+        svg.appendChild(el('text', { 'class': 'gauge-cd', x: g[2], y: 186 + 13, 'text-anchor': 'middle', 'font-family': F, 'font-size': 14, fill: '#' + dim }, g[1]));
       });
       svg.appendChild(el('rect', { x: 132, y: 205, width: 56, height: 18, rx: 9, fill: '#' + pill }));
       svg.appendChild(el('text', { x: 160, y: 218, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + st.text }, 'Claude'));
