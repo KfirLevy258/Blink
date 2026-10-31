@@ -86,13 +86,12 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**3279 passing, 1 skipped** (os.startfile, Windows only) as of 2026-10-31, on
-macOS. The last runs on the other two platforms were on 2026-10-30, each
-measured on the tree of its own run and not added up into one number: Ubuntu
-(Docker, x86_64) 2787 passed and 84 skipped, Windows (ARM64 VM) 2626 passed
-and 239 skipped, none failing. The skips are platform tests and, on Windows,
-the builder-page tests that need Node. Re-run Ubuntu and Windows before
-claiming them for a new number. Everything in
+**3281 passing, 1 skipped** (os.startfile, Windows only) as of 2026-10-31, on
+macOS. The same tree on the other two platforms the same day, each its own
+count: Ubuntu (Docker, x86_64) 3133 passed and 149 skipped, Windows (ARM64 VM)
+2962 passed and 314 skipped, none failing. The skips are platform tests and,
+on Windows, the builder-page tests that need Node. Re-run Ubuntu and Windows
+before claiming them for a new number. Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though
 nothing in `pc/` imports it; `numpy` and `Pillow` are only
 needed by the logo and boot-animation encoder tests. CI runs the same
