@@ -270,10 +270,10 @@ class Journal:
 # What a line of the board's console may say in bridge.log.
 #
 # ConsoleEcho used to forward each printk line verbatim, and the firmware
-# prints values: the usage it applied (proto.c:620, "[usage] session 41%
+# prints values: the usage it applied (proto.c:627, "[usage] session 41%
 # (11723s) weekly 9% ..."), every version on offer and running (ota.c:374,
 # ui_settings.c:830, main.c:126, main.c:233), the app and protocol of the
-# host (proto.c:711), the edition (bootclip.c:68), heap figures
+# host (proto.c:727), the edition (bootclip.c:68), heap figures
 # (mem_stats.c:131), touch coordinates (ui_swipe.c:190 and :313), the
 # backlight level (backlight.c:39) -- and until 2026-10-28 the stored WiFi
 # network's name, verbatim (cfg_store.c:491, which now says only "present").
@@ -335,16 +335,17 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[ota] image confirmed",                                   # main.c:160
     "[ota] not healthy within 90 s -- rebooting to revert",    # main.c:164
     # [proto] -- firmware/src/proto.c
-    "[proto] host says bye",                                   # :433
-    "[proto] host time synced",                                # :632
-    "[proto] host connected",                                  # :711
-    "[proto] daemon offers",                                   # :796
-    "[proto] ota: writing",                                    # :810
-    "[proto] daemon resuming install of",                      # :830
-    "[proto] ota failed",                                      # :860
-    "[proto] host status",                                     # :867
-    "[proto] rx ring overflow, dropped",                       # :947
-    "[proto] host went away",                                  # :1025
+    "[proto] host says bye",                                   # :437
+    "[proto] host time synced",                                # :642
+    "[proto] host connected",                                  # :727
+    "[proto] daemon offers",                                   # :825
+    "[proto] ota: writing",                                    # :839
+    "[proto] daemon resuming install of",                      # :859
+    "[proto] ota failed",                                      # :889
+    "[proto] host status",                                     # :896
+    "[proto] burn line refused",                               # :958
+    "[proto] rx ring overflow, dropped",                       # :1000
+    "[proto] host went away",                                  # :1078
     # [fatal] -- firmware/src/fatal.c. The three "reason" lines differ only
     # after their numbers, so they share one stem.
     "[fatal] reason",                                          # :68 :78 :82
@@ -361,7 +362,7 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[usage] cleared a stored refresh token: no WiFi in this build",
     "[usage] mode: USB bridge (no host yet)",                  # main.c:663
     "[usage] mode: USB bridge",                                # main.c:639
-    "[usage] session",                                         # proto.c:620
+    "[usage] session",                                         # proto.c:627
     # [cfg] -- firmware/src/cfg_store.c, proto.c
     "[cfg] migrated 1.3.4 record",                             # :218
     "[cfg] migrated pre-lock record",                          # :268
@@ -371,16 +372,16 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[cfg] persist failed",                                    # :383
     "[cfg] storage open failed",                               # :412
     "[cfg] theme and focus taken from the older slot",         # :480
-    "[cfg] unknown edition",                                   # proto.c:666
-    "[cfg] edition already stamped as",                        # proto.c:683
-    "[cfg] edition set to",                                    # proto.c:688
-    "[cfg] could not store the edition",                       # proto.c:691
+    "[cfg] unknown edition",                                   # proto.c:676
+    "[cfg] edition already stamped as",                        # proto.c:693
+    "[cfg] edition set to",                                    # proto.c:698
+    "[cfg] could not store the edition",                       # proto.c:701
     # [theme] -- firmware/src/ui_theme.c, proto.c
     "[theme] preview timed out; back to the stored theme",     # :114
     "[theme] could not store the theme",                       # :155
     "[theme] preview cancelled",                               # :214
     "[theme] saved",                                           # :248
-    "[theme] line refused",                                    # proto.c:753
+    "[theme] line refused",                                    # proto.c:769
     # [boot] -- firmware/src/ui_boot.c, logo.c, bootclip.c
     "[boot] logo: frame failed to decode",                     # ui_boot.c:203
     "[boot] logo: cannot map partition",                       # logo.c:38
