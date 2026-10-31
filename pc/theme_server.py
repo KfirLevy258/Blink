@@ -27,7 +27,8 @@ read the answers. So:
     that is a log file the README asks customers to send us.
 
 When it stops. Save writes theme.json and stops. Cancel, closing the tab (the
-page says so on pagehide, and a reload inside CLOSE_GRACE_S takes it back),
+page says so on pagehide, and a reload inside the grace takes it back --
+CLOSE_GRACE_S, or RELOAD_GRACE_S when this page had only just been served),
 or IDLE_S with no edit, write a cancel for the daemon -- the board goes back
 to its stored theme -- and stop.
 """
@@ -49,7 +50,30 @@ import webbrowser
 from pc import theme
 
 IDLE_S = 600            # 10 minutes with no edit (plan, revision 2026-10-25)
-CLOSE_GRACE_S = 5       # a reload fires pagehide too, then loads again
+# A reload fires pagehide too, then loads the page again, and the builder
+# must not end in between. It waited 5 s for every close, and the owner
+# closed a tab and watched the board's slot stay on "Editing on your
+# computer" for about 6 s (2026-10-31). The wait is now short for a close
+# and long only where the close looks like a reload:
+#
+#   - A reload's navigation reaches this server (GET /) before the old page
+#     is unloaded, because a browser unloads the page it leaves only once
+#     the new one's response has arrived. So a /api/closed that comes within
+#     RELOAD_WINDOW_S of a page being served is taken for a reload and given
+#     RELOAD_GRACE_S, the old 5 s. Where a browser unloads first and asks
+#     after, the GET / lands later than the close and touch() clears it.
+#   - Any other close waits CLOSE_GRACE_S, which has to outlast the page
+#     being unloaded and the next one asking, on a loopback socket: the
+#     time from a pagehide to the new page's first request is milliseconds
+#     of work and a scheduler wake-up. 1.5 s is that with a margin of two
+#     orders for a machine that stalls (a Windows VM under load), and
+#     short enough that the slot has changed by the time the owner looks.
+CLOSE_GRACE_S = 1.5
+RELOAD_GRACE_S = 5
+RELOAD_WINDOW_S = 3
+# How often the deadlines above are checked. The grace is measured in whole
+# ticks of this, so at the old 1 s a 5 s grace ended after 5 to 6 s.
+TICK_S = 0.25
 # How long a one-time link may wait to be used. The CLI prints one for a
 # person to click when no browser opened, so it is the builder's own idle
 # limit: a link older than that belongs to a builder that would have
@@ -344,7 +368,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if not self._session_ok():
             return self._refuse()
         if url.path == "/":
-            self.builder.touch()
+            self.builder.page_served()
             return self._send(200, self.builder.page_bytes,
                               "text/html; charset=utf-8", headers=(
                 ("Content-Security-Policy",
@@ -523,7 +547,8 @@ class _HTTPServer(http.server.ThreadingHTTPServer):
 class BuilderServer:
     """One builder session: a server, its tokens, and its deadlines."""
 
-    def __init__(self, home, idle_s=IDLE_S, now=time.monotonic, tick_s=1.0):
+    def __init__(self, home, idle_s=IDLE_S, now=time.monotonic,
+                 tick_s=TICK_S):
         self.home = home
         self.idle_s = idle_s
         self._now = now
@@ -538,6 +563,9 @@ class BuilderServer:
         self._last = now()
         self._seen = None
         self._closed_at = None
+        self._close_grace = CLOSE_GRACE_S
+        # When the page was last served (GET /); see CLOSE_GRACE_S.
+        self._served_at = None
         # Each open page by the id it made for itself, and when it last
         # pinged. Two tabs can share the session -- "Edit on computer"
         # while one is open opens another -- and the older one's close
@@ -682,6 +710,13 @@ class BuilderServer:
             self._last = self._seen = self._now()
             self._closed_at = None
 
+    def page_served(self):
+        """The page itself was asked for: a touch, and the time kept so a
+        close that follows at once is read as a reload (CLOSE_GRACE_S)."""
+        with self._lock:
+            self._last = self._seen = self._served_at = self._now()
+            self._closed_at = None
+
     def _prune_tabs(self, now):
         # A tab unheard from for PAGE_ALIVE_S no longer counts (it crashed,
         # or its machine slept); dropped rather than kept for the server's
@@ -755,12 +790,15 @@ class BuilderServer:
             if any(self._order.get(k) == newest for k in self._tabs):
                 return      # the live tab is still showing this builder
             self._closed_at = now
+            reload = (self._served_at is not None
+                      and now - self._served_at < RELOAD_WINDOW_S)
+            self._close_grace = RELOAD_GRACE_S if reload else CLOSE_GRACE_S
 
     def tick(self):
         with self._lock:
             now = self._now()
             closed = (self._closed_at is not None
-                      and now - self._closed_at >= CLOSE_GRACE_S)
+                      and now - self._closed_at >= self._close_grace)
             idle = now - self._last >= self.idle_s
         if closed:
             self.finish("closed")

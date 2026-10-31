@@ -506,7 +506,7 @@ On the board, **Settings > Theme > Edit on computer** opens the theme builder
 in your computer's browser. While the builder is open the button reads
 **Editing on your computer**, dimmed, and does nothing when pressed, so one
 edit stays in one tab; it reads **Edit on computer** again, ready to press,
-a few seconds after the builder closes (about 6 s after its tab does). It
+a moment after the builder closes (about 2 s after its tab does). It
 also comes back while the board has lost its connection to the computer,
 and is held again when the connection returns with the builder still
 open. (With an app from before this, the board says
@@ -540,11 +540,18 @@ newest tab is live, and it opens on the changes you have made so far.
 Within about a minute the older tab stops: it tries to close itself if it
 has nothing you have not saved, and otherwise keeps your colours on screen.
 
+After **Save to board** or **Cancel**, a tab that holds nothing you have not
+saved counts down in the line at the top (**This tab closes in 5 s.**) and
+closes itself. Press a key, click, scroll, touch it or move the mouse and it
+stays open, with **You can close this tab.** instead. A browser that will not
+let a page close a tab (one you pasted the link into after other pages) gets
+the same words when the count ends.
+
 A tab that is no longer the live builder says why in the line at the top, and
 its controls stop working. The page stays as it was, readable, with nothing
-over it. The line reads **Saved: <name>. Your board keeps it. You can close
-this tab.**, **Cancelled. Your board is back on its saved theme. You can
-close this tab.**, **This builder continued in a newer tab. You can close
+over it. The line reads **Saved: <name>. Your board keeps it.**, **Cancelled.
+Your board is back on its saved theme.** (each followed by the countdown, or
+by **You can close this tab.** once it has ended), **This builder continued in a newer tab. You can close
 this one.** when a newer tab took over, or **The builder has stopped. Run
 blink theme on your computer to start it again.** (ten minutes idle, or the
 app quit). If the tab still holds changes you have not saved, the line says
