@@ -69,6 +69,7 @@ this.
 - **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, and nothing about you sent anywhere. The one optional extra, status-page alerts, reads the public status pages and is off until you turn it on.
 - **Themes.** Twelve built in, three of them light for a bright room, and one of your own: seven colours, arc width and ends, made in a builder that opens in your browser from the board's own Settings (or `blink theme`) and previews on the panel as you edit. A custom theme travels as a short share code.
 - **Focus.** One window big instead of two - session or weekly - with the other kept as a line under it.
+- **A burn view where there is no five-hour limit.** Claude Ultra accounts have no five-hour window (from 2026-10-30), so a session dial would have nothing to show. There, BLINK draws the last five hours of Claude Code output instead: the total, an arrow for whether you are speeding up or easing off, and a bar for every quarter-hour, labelled with the hour. Pro and Max keep the session dial, and the weekly dial is the same on every plan.
 - **Settings on the board.** Brightness, Theme, Focus and Update, four tiles on the screen beside the dials.
 - **Status pages, per provider.** Optional: each provider's page says when that provider's own service is having trouble, so you know it is not your machine.
 - **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
@@ -79,14 +80,16 @@ this.
 
 <table>
   <tr>
-    <td width="33%"><img src="docs/img/screen-claude.png" alt="The Claude page: six coloured marks in the top-left corner, one per live session, the clock under the BLINK wordmark, and the session and weekly dials."></td>
-    <td width="33%"><img src="docs/img/screen-codex.png" alt="The Codex page, with its own session and weekly dials."></td>
-    <td width="33%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop alone: the session dial shows a fill rate where a countdown would otherwise be."></td>
+    <td width="25%"><img src="docs/img/screen-claude.png" alt="The Claude page: six coloured marks in the top-left corner, one per live session, the clock under the BLINK wordmark, and the session and weekly dials."></td>
+    <td width="25%"><img src="docs/img/screen-codex.png" alt="The Codex page, with its own session and weekly dials."></td>
+    <td width="25%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop alone: the session dial shows a fill rate where a countdown would otherwise be."></td>
+    <td width="25%"><img src="docs/img/screen-burn.png" alt="An account with no five-hour window: the left half shows 2.9M tokens in five hours with an up arrow, a bar per quarter-hour labelled 10 to 14, and 1.1M/h rising; the weekly dial stays on the right."></td>
   </tr>
   <tr>
     <td align="center"><sub><b>Claude</b></sub>&nbsp;</td>
     <td align="center"><sub><b>Codex</b></sub>&nbsp;</td>
     <td align="center"><sub><b>Desktop alone</b></sub>&nbsp;</td>
+    <td align="center"><sub><b>No five-hour window</b></sub>&nbsp;</td>
   </tr>
 </table>
 
@@ -95,6 +98,9 @@ The marks in the top-left corner are your live sessions - one per session,
 coloured by what each is doing. Claude and Codex each get a page of their own,
 and a swipe moves between them. With Claude Desktop alone there is often no reset
 time to count down to, so the session dial shows how fast it is filling instead.
+On an account with no five-hour window, such as Claude Ultra, the session dial
+gives way to the burn view: Claude Code's output over the last five hours, a
+bar per quarter-hour, and an arrow comparing this hour with the one before.
 
 *Rendered by the shipping firmware's own drawing code, not mocked up.*
 
