@@ -15,8 +15,9 @@ host_python instead, which has them. Same pc.service_ctl the agent uses, so
 the same rules hold: nothing installed, moved or deleted, only stopped and
 started.
 
-Exit 0 when it worked, 1 when it did not, 3 when BLINK_SKIP_SERVICE made it a
-no-op -- which run.py refuses, because a skipped stop leaves the daemon
+Exit 0 when it worked, 1 when it did not, 3 when the service code skipped it
+-- BLINK_SKIP_SERVICE, or a HOME that is not the account's own -- and the line
+it printed says which. run.py refuses a skip, because a skipped stop leaves the daemon
 holding the port UTM needs, and the handoff would fail looking like UTM's
 fault.
 """

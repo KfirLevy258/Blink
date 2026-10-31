@@ -1057,10 +1057,17 @@ class Bench:
             return problems, False
         said = _tail(done)
         if done.returncode == 3:
-            return [f"BLINK_SKIP_SERVICE is set in this shell, so this Mac's"
-                    f" service was not {verb}ped and still holds the port"
-                    f" UTM would have to take. Unset it and start again."], \
-                True
+            # Exit 3 is the service code skipping, for either of its two
+            # reasons: BLINK_SKIP_SERVICE in this shell, or a HOME that is
+            # not the account's own (pc/cli.py _skip_service). The helper's
+            # own line says which, so it is repeated and not guessed at.
+            done_verb = {"stop": "stopped", "start": "started"}.get(
+                verb, verb + "ed")
+            return [f"The service helper skipped the {verb} ({said}), so"
+                    f" this Mac's service was not {done_verb} and still"
+                    f" holds the port UTM would have to take. Unset"
+                    f" BLINK_SKIP_SERVICE, or run from the account's own"
+                    f" HOME, and start again."], True
         if done.returncode != 0:
             return [f"This Mac's service would not {verb}: {said}."], False
         return [], False

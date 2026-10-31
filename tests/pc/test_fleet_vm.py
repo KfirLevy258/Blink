@@ -525,6 +525,20 @@ def test_a_stop_that_failed_is_still_followed_by_a_start(tmp_path, answer):
     assert "release" in runner.kinds
 
 
+def test_a_skipped_stop_names_the_actual_cause(tmp_path):
+    """Exit 3 also means the foreign-HOME check fired (pc/cli.py), and
+    "BLINK_SKIP_SERVICE is set in this shell" sent the operator to unset a
+    variable that was not set (review of fp/safety-guards, S3). The helper's
+    own line says which, so it is repeated, and the fix names both."""
+    said = ("[fleet] stop service: skipped (HOME is not this account's home;"
+            " set BLINK_ALLOW_FOREIGN_HOME=1 to use it anyway)")
+    runner = VmRunner(fail={"hold": _done(3, said.encode())})
+    problems = _bench(runner).hold()
+    assert problems and "HOME is not this account's home" in problems[0]
+    assert "run from the account's own HOME" in problems[0]
+    assert "BLINK_SKIP_SERVICE is set in this shell" not in problems[0]
+
+
 def test_the_service_is_started_again_and_says_so_when_it_will_not(tmp_path):
     runner = VmRunner(fail={"release": _done(1, b"launchctl said no")})
     bench = _bench(runner)
