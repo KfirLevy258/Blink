@@ -505,9 +505,10 @@ On the board, **Settings > Theme > Edit on computer** opens the theme builder
 in your computer's browser. While the builder is open the button reads
 **Editing on your computer**, dimmed, and does nothing when pressed, so one
 edit stays in one tab; it reads **Edit on computer** again, ready to press,
-the moment the builder closes. It also comes back if the board loses its
-connection to the computer, and as a last resort after 15 minutes with no
-change made in the builder. (With an app from before this, the board says
+a few seconds after the builder closes (about 6 s after its tab does). It
+also comes back while the board has lost its connection to the computer,
+and is held again when the connection returns with the builder still
+open. (With an app from before this, the board says
 **Opened on your computer** for a few seconds and the button comes straight
 back.) On a computer with no browser to open (a server, or an SSH session),
 it says **On your computer, run: blink theme** instead, for 8 seconds.
@@ -529,9 +530,9 @@ closed, **Edit on computer** opens a new one. On Windows, and on some Linux
 desktops, the builder's tab may open behind your other windows, with only
 the browser's taskbar button flashing. If a second tab does open on the same
 builder - from a board whose firmware predates the held button - only the
-newest tab is live, and it opens on the changes you have made so far. Within about
-a minute the older tab stops: it tries to close itself if it has nothing
-you have not saved, and otherwise keeps your colours on screen.
+newest tab is live, and it opens on the changes you have made so far.
+Within about a minute the older tab stops: it tries to close itself if it
+has nothing you have not saved, and otherwise keeps your colours on screen.
 
 A tab that is no longer the live builder - you saved or cancelled, a newer
 tab took over, or the builder stopped (ten minutes idle, or the app
