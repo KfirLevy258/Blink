@@ -54,7 +54,14 @@ class Node {
   removeAttribute(k) { delete this.attrs[k]; }
   set htmlFor(v) { this.attrs.for = v; }
   addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); }
-  fire(t, extra) { const e = Object.assign({ target: this, preventDefault() {} }, extra || {}); (this.listeners[t] || []).forEach((f) => f(e)); }
+  // bubbles: true takes the event up the parents and then to the document,
+  // as a real mousedown on a backdrop or a disabled button's neighbour
+  // does; without it only this node's own listeners run, as before.
+  fire(t, extra) {
+    const e = Object.assign({ target: this, preventDefault() {} }, extra || {});
+    for (let n = this; n; n = e.bubbles ? n.parentNode : null) (n.listeners[t] || []).forEach((f) => f(e));
+    if (e.bubbles) (document.listeners[t] || []).forEach((f) => f(e));
+  }
   click() { if (!this.disabled) this.fire('click'); }
   focus() { if (active && active !== this) { const was = active; active = null; was.fire('blur'); } active = this; }
   blur() { if (active === this) { active = null; this.fire('blur'); } }

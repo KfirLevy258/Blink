@@ -465,18 +465,22 @@ def test_an_older_tab_with_nothing_unsaved_closes_itself():
     await advance(10);
     """ + _newer_on_ping() + """
     return { closed: window.closed, status: $('status-text').textContent,
+             title: $('notice-title').textContent,
+             why: $('notice-why').textContent, end: $('notice-end').textContent,
              save: $('save').disabled };
     """, SAVED_DARK)
-    assert r == {"closed": 1, "save": True,
-                 "status": "This builder continued in a newer tab. You can close this one."}
+    assert r == {"closed": 1, "save": True, "status": "Continued in a newer tab.",
+                 "title": "Continued in a newer tab.",
+                 "why": "This tab has handed over to the newer one.",
+                 "end": "You can close this tab."}
 
 
 def test_an_older_tab_with_a_draft_never_closes_itself():
     """R2-SHOULD-1: Chrome, Edge and Firefox let a script close a tab with
     one history entry, which a builder tab opened from the board is. So the
     older tab closed itself, draft and all, without a word. It stays now,
-    still, with its colours, and the bar offers the share code through the
-    top bar's Copy share code; every other control, the command's Copy
+    still, with its colours, and the popup offers the share code through its
+    own Copy share code; every control behind it, the command's Copy
     included, is as still as the rest."""
     r = builder_page.run("""
     await advance(10);
@@ -487,16 +491,17 @@ def test_an_older_tab_with_a_draft_never_closes_itself():
              ocean: $('presets').querySelectorAll('button')
                       .filter(b => b.getAttribute('aria-pressed') === 'true')
                       .map(b => b.querySelector('.pn').textContent),
-             copy: $('copy-code').disabled, copyCmd: $('copy-cmd').disabled,
-             notice: $('notice') !== null };
+             keep: $('notice-keep-text').textContent,
+             offer: $('notice-copy').getAttribute('hidden') === null,
+             copy: $('copy-code').disabled, copyCmd: $('copy-cmd').disabled };
     """, SAVED_DARK)
     assert r["closed"] == 0
-    assert r["status"] == ("This builder continued in a newer tab. Your"
-                           " changes here are not saved. Copy the share code"
-                           " to keep them.")
+    assert r["status"] == "Continued in a newer tab."
+    assert r["keep"] == ("Your changes here are not saved. Copy the share"
+                         " code to keep them.")
     assert r["ocean"] == ["Ocean"]
-    assert r["copy"] is False and r["copyCmd"] is True
-    assert r["notice"] is False
+    assert r["offer"] is True
+    assert r["copy"] is True and r["copyCmd"] is True
 
 
 def test_a_superseded_tab_goes_still_and_keeps_its_message():
@@ -521,7 +526,7 @@ def test_a_superseded_tab_goes_still_and_keeps_its_message():
     };
     """, SAVED_DARK)
     assert r["previews"] == 0
-    assert r["said"].startswith("This builder continued in a newer tab.")
+    assert r["said"] == "Continued in a newer tab."
     assert r["now"] == r["said"]
     assert r["live"] == []
 
@@ -543,7 +548,7 @@ def test_a_refused_save_or_cancel_stops_the_older_tab(path, button):
                      .map(q => q.headers['X-Blink-Tab'] || null) }};
     """, SAVED_DARK)
     assert r["closed"] == 0
-    assert r["status"].startswith("This builder continued in a newer tab.")
+    assert r["status"] == "Continued in a newer tab."
     assert all(r["tabs"]) and len(set(r["tabs"])) == 1
 
 

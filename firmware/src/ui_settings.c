@@ -2023,7 +2023,7 @@ BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
  * 2026-10-30, after a board run): "the edit on computer button should
  * re-appear ... only once the page is not active / closed". A button back
  * after 3 s with the builder still open took a press, opened a second tab
- * on it, and left the first saying "This tab is no longer active." -- two
+ * on it, and left the first handed over to the newer one -- two
  * tabs for one edit. The lock-out of before 2026-10-29 read as broken
  * because it outlived the builder by a fixed 10 s and had no "why" on the
  * slot; this one ends the moment the daemon says the builder has (done:1),

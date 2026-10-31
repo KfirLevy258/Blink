@@ -1,14 +1,16 @@
-"""A builder tab that saved or cancelled closes itself, and a tab the owner
-closes ends the builder without a long wait.
+"""A builder tab that saved or cancelled counts down in its popup and closes
+itself, and a tab the owner closes ends the builder without a long wait.
 
 The owner, 2026-10-31: "can we just close the tab after like 5 sec?" and "i
 closed the tab on the computer, but the board took like 5 seconds to return
-to edit on computer". The page half runs in the Node harness on a fake
-clock; the server half drives BuilderServer's own clock. Nothing here opens a
-browser, so what a browser does with window.close() is argued from the page
-and the redirect, not measured: see the comment on closeSoon in the page.
+to edit on computer". The countdown first sat in the status line; the owner
+asked for it in the popup ("you removed the popup - lets do this in the
+popup"), with a Close tab button beside it. The page half runs in the Node
+harness on a fake clock; the server half drives BuilderServer's own clock.
+Nothing here opens a browser, so what a browser does with window.close() is
+argued from the page and the redirect, not measured: see the comment on
+closeSoon in the page.
 """
-import re
 import urllib.parse
 
 import pytest
@@ -24,34 +26,35 @@ SAVED_DARK = {"/api/state": {"status": 200,
 _OCEAN = "preset('Ocean'); await advance(300);"
 _SAVE = "$('save').click(); await advance(10);"
 _CANCEL = "$('cancel').click(); await advance(10);"
+_LINE = "$('notice-end').textContent"
+_LIVE = "$('notice-end').getAttribute('aria-live')"
 _BAR = "$('status-text').textContent"
-_SAVED = "Saved: Dark. Your board keeps it."
-_CANCELLED = "Cancelled. Your board is back on its saved theme."
+_BUTTON = "$('notice-close')"
 
 
-@pytest.mark.parametrize("press, base", [(_SAVE, _SAVED),
-                                         (_CANCEL, _CANCELLED)],
-                         ids=["save", "cancel"])
-def test_a_clean_tab_counts_down_and_closes(press, base):
+@pytest.mark.parametrize("press", [_SAVE, _CANCEL], ids=["save", "cancel"])
+def test_a_clean_tab_counts_down_in_the_popup_and_closes(press):
     r = builder_page.run(f"""
     await advance(10);
     {press}
-    const at = [{_BAR}];
-    for (let i = 0; i < 4; i++) {{ await advance(1000); at.push({_BAR}); }}
+    const at = [{_LINE}];
+    for (let i = 0; i < 4; i++) {{ await advance(1000); at.push({_LINE}); }}
     const before = window.calls;
     await advance(1000);
-    const live = $('status').getAttribute('aria-live');
+    const live = {_LIVE};
     await advance(5000);
     return {{ at, before, calls: window.calls, closed: window.closed,
-             after: {_BAR}, live }};
+             after: {_LINE}, live, bar: {_BAR} }};
     """, SAVED_DARK)
-    assert r["at"] == [f"{base} This tab closes in {n} s." for n in
-                       (5, 4, 3, 2, 1)]
+    assert r["at"] == [f"This tab closes in {n} s." for n in (5, 4, 3, 2, 1)]
     assert r["before"] == 0         # not a second early
     assert r["calls"] == 1 and r["closed"] == 1
     # The browser took it, so the line is left as it was: nothing says
     # "close it yourself" over a tab that is going.
-    assert r["after"] == f"{base} This tab closes in 1 s."
+    assert r["after"] == "This tab closes in 1 s."
+    assert r["live"] == "off"       # no announcement a second
+    # The status line keeps its short sentence and does not count.
+    assert "closes" not in r["bar"]
 
 
 def test_a_tab_the_browser_refuses_to_close_says_so_after_a_moment():
@@ -60,14 +63,13 @@ def test_a_tab_the_browser_refuses_to_close_says_so_after_a_moment():
     window.refuse = true;
     {_SAVE}
     await advance(5000);
-    const asked = [window.calls, {_BAR}];
-    const live = $('status').getAttribute('aria-live');
+    const asked = [window.calls, {_LINE}];
+    const live = {_LIVE};
     await advance(700);
-    return {{ asked, now: {_BAR}, live: [live, $('status').getAttribute('aria-live')],
-             calls: window.calls }};
+    return {{ asked, now: {_LINE}, live: [live, {_LIVE}], calls: window.calls }};
     """, SAVED_DARK)
-    assert r["asked"] == [1, f"{_SAVED} This tab closes in 1 s."]
-    assert r["now"] == f"{_SAVED} You can close this tab."
+    assert r["asked"] == [1, "This tab closes in 1 s."]
+    assert r["now"] == "You can close this tab."
     # Off for the ticks, so a screen reader is not read a line a second,
     # and back on for the line that ends them.
     assert r["live"] == ["off", "polite"]
@@ -77,23 +79,45 @@ def test_a_tab_the_browser_refuses_to_close_says_so_after_a_moment():
 @pytest.mark.parametrize("event", [
     "document.fire('keydown', { key: 'a' })",
     "document.fire('mousedown', { clientX: 5, clientY: 5 })",
+    "document.fire('click', {})",
     "document.fire('touchstart', {})",
-], ids=["key", "click", "touch"])
+], ids=["key", "mousedown", "click", "touch"])
 def test_the_owner_stops_the_countdown_and_keeps_the_tab(event):
     r = builder_page.run(f"""
     await advance(10);
     {_SAVE}
     await advance(2000);
     {event};
-    const said = {_BAR};
+    const said = {_LINE};
     await advance(20000);
-    return {{ said, now: {_BAR}, calls: window.calls,
-             live: $('status').getAttribute('aria-live') }};
+    return {{ said, now: {_LINE}, calls: window.calls, live: {_LIVE} }};
     """, SAVED_DARK)
-    assert r["said"] == f"{_SAVED} You can close this tab."
+    assert r["said"] == "You can close this tab."
     assert r["now"] == r["said"]
-    assert r["calls"] == 0          # never closed under somebody reading it
+    assert r["calls"] == 0          # never closed under somebody reading
     assert r["live"] == "polite"
+
+
+@pytest.mark.parametrize("target", ["notice", "notice-dialog", "notice-title",
+                                    "save", "studio"])
+def test_a_click_on_the_popup_its_backdrop_or_what_is_behind_it_stops_it(target):
+    """The page behind the popup is inert and covered, so a click aimed at
+    one of its disabled controls lands on the backdrop; a browser may also
+    swallow it on the control itself. Either way it must reach the document,
+    which is where the countdown listens. The harness bubbles these events
+    the way a browser does; a listener put on the controls themselves would
+    not see the first two."""
+    node = {"studio": "document.querySelector('.studio')"}.get(
+        target, f"$('{target}')")
+    r = builder_page.run(f"""
+    await advance(10);
+    {_SAVE}
+    await advance(2000);
+    {node}.fire('mousedown', {{ bubbles: true }});
+    await advance(20000);
+    return {{ now: {_LINE}, calls: window.calls }};
+    """, SAVED_DARK)
+    assert r == {"now": "You can close this tab.", "calls": 0}
 
 
 def test_moving_the_mouse_or_the_wheel_does_not_stop_the_countdown():
@@ -103,26 +127,94 @@ def test_moving_the_mouse_or_the_wheel_does_not_stop_the_countdown():
     r = builder_page.run(f"""
     await advance(10);
     {_SAVE}
-    document.fire('mousemove', {{ clientX: 100, clientY: 100 }});
-    document.fire('mousemove', {{ clientX: 900, clientY: 700 }});
-    document.fire('wheel', {{ deltaY: 40 }});
+    for (const t of ['mousemove', 'mouseover', 'pointermove', 'wheel', 'scroll']) {{
+      document.fire(t, {{ clientX: 100, clientY: 100, deltaY: 40 }});
+      $('notice').fire(t, {{ bubbles: true, clientX: 900, clientY: 700 }});
+    }}
     await advance(5100);
     return {{ calls: window.calls, closed: window.closed }};
     """, SAVED_DARK)
     assert r == {"calls": 1, "closed": 1}
 
 
-def test_input_after_the_tab_closed_or_before_a_save_does_nothing():
+def test_close_tab_closes_at_once_and_does_not_stop_itself():
+    r = builder_page.run(f"""
+    await advance(10);
+    {_SAVE}
+    await advance(2000);
+    {_BUTTON}.fire('mousedown', {{ bubbles: true }});
+    {_BUTTON}.fire('touchstart', {{ bubbles: true }});
+    {_BUTTON}.fire('keydown', {{ bubbles: true, key: 'Enter' }});
+    const between = [window.calls, {_LINE}];
+    {_BUTTON}.click();
+    const at = [window.calls, window.closed];
+    await advance(20000);
+    return {{ between, at, calls: window.calls, now: {_LINE} }};
+    """, SAVED_DARK)
+    # Pressing it is not an interruption; the line still counts.
+    assert r["between"] == [0, "This tab closes in 3 s."]
+    assert r["at"] == [1, 1]
+    assert r["calls"] == 1          # the countdown did not ask again
+    assert r["now"] == "This tab closes in 3 s."
+
+
+@pytest.mark.parametrize("ending, ask", [
+    (_SAVE, "{b}.click();"), (_CANCEL, "{b}.click();"),
+    ("answer('/api/ping', () => 'fail'); await advance(23100);",
+     "{b}.click();"),
+], ids=["saved", "cancelled", "stopped"])
+def test_close_tab_works_without_waiting_and_in_every_clean_ending(ending, ask):
+    r = builder_page.run(f"""
+    await advance(10);
+    {ending}
+    const shown = {_BUTTON}.getAttribute('hidden') === null;
+    {ask.format(b=_BUTTON)}
+    return {{ shown, calls: window.calls, closed: window.closed }};
+    """, SAVED_DARK)
+    assert r == {"shown": True, "calls": 1, "closed": 1}
+
+
+def test_close_tab_refused_falls_back_to_the_same_line():
+    r = builder_page.run(f"""
+    await advance(10);
+    window.refuse = true;
+    {_SAVE}
+    await advance(1000);
+    {_BUTTON}.click();
+    const at = [window.calls, {_LINE}];
+    await advance(700);
+    const later = [{_LINE}, {_LIVE}];
+    await advance(10000);
+    return {{ at, later, calls: window.calls, now: {_LINE} }};
+    """, SAVED_DARK)
+    assert r["at"] == [1, "This tab closes in 4 s."]
+    assert r["later"] == ["You can close this tab.", "polite"]
+    assert r["calls"] == 1          # the countdown it replaced never ran on
+    assert r["now"] == "You can close this tab."
+
+
+def test_close_tab_on_a_popup_with_no_countdown_falls_back_too():
+    r = builder_page.run(f"""
+    await advance(10);
+    window.refuse = true;
+    answer('/api/ping', () => 'fail'); await advance(23100);
+    {_BUTTON}.click();
+    await advance(700);
+    return {{ calls: window.calls, now: {_LINE}, title: $('notice-title').textContent }};
+    """, SAVED_DARK)
+    assert r == {"calls": 1, "now": "You can close this tab.",
+                 "title": "The builder stopped."}
+
+
+def test_input_before_a_save_does_nothing():
     r = builder_page.run(f"""
     await advance(10);
     document.fire('keydown', {{ key: 'a' }});
-    document.fire('mousemove', {{ clientX: 1, clientY: 1 }});
-    document.fire('mousemove', {{ clientX: 900, clientY: 900 }});
-    const live = {_BAR};
+    document.fire('click', {{}});
     {_SAVE}
-    return {{ live, now: {_BAR} }};
+    return {{ now: {_LINE} }};
     """, SAVED_DARK)
-    assert r["now"] == f"{_SAVED} This tab closes in 5 s."
+    assert r["now"] == "This tab closes in 5 s."
 
 
 def test_a_tab_with_changes_made_after_saving_is_not_closed():
@@ -135,13 +227,16 @@ def test_a_tab_with_changes_made_after_saving_is_not_closed():
     pick('c-high', '#ff0000'); await advance(10);
     s.release({{ status: 200, body: {{ ok: true }} }}); await advance(10);
     await advance(30000);
-    return {{ said: {_BAR}, calls: window.calls,
-             copy: $('copy-code').disabled }};
+    const hid = (id) => $(id).getAttribute('hidden') !== null;
+    return {{ title: $('notice-title').textContent,
+             keep: $('notice-keep-text').textContent, calls: window.calls,
+             copy: !hid('notice-copy'), count: !hid('notice-end'),
+             close: !hid('notice-close') }};
     """, SAVED_DARK)
-    assert r["said"].startswith("Saved: Ocean. Your board keeps it. Changes"
-                                " you made after saving")
-    assert "closes in" not in r["said"]
-    assert r["calls"] == 0 and r["copy"] is False
+    assert r["title"] == "Saved."
+    assert r["keep"].startswith("Changes you made after saving")
+    assert r["calls"] == 0
+    assert r["copy"] is True and r["count"] is False and r["close"] is False
 
 
 @pytest.mark.parametrize("ending", [
@@ -153,10 +248,10 @@ def test_other_endings_never_count_down(ending):
     await advance(10);
     {ending}
     await advance(30000);
-    return {{ said: {_BAR} }};
+    return {{ line: {_LINE}, live: {_LIVE} }};
     """, SAVED_DARK)
-    assert "closes in" not in r["said"]
-    assert "This tab closes" not in r["said"]
+    assert r["line"] == "You can close this tab."
+    assert r["live"] == "polite"
 
 
 def test_a_cancel_that_never_reached_the_builder_does_not_count_down():
@@ -165,10 +260,26 @@ def test_a_cancel_that_never_reached_the_builder_does_not_count_down():
     answer('/api/cancel', () => 'fail');
     {_CANCEL}
     await advance(30000);
-    return {{ said: {_BAR}, calls: window.calls }};
+    return {{ title: $('notice-title').textContent, line: {_LINE},
+             calls: window.calls }};
     """, SAVED_DARK)
-    assert r["said"].startswith("The builder has stopped.")
-    assert r["calls"] == 0
+    assert r == {"title": "The builder stopped.",
+                 "line": "You can close this tab.", "calls": 0}
+
+
+def test_cancel_counts_down_whatever_the_tab_holds():
+    """Cancel is the owner throwing the changes away, so unlike Save it does
+    not hold the tab for a share code: the docs say so too."""
+    r = builder_page.run(f"""
+    await advance(10);
+    {_OCEAN}
+    {_CANCEL}
+    const line = {_LINE};
+    await advance(5100);
+    const hid = (id) => $(id).getAttribute('hidden') !== null;
+    return {{ line, calls: window.calls, copy: !hid('notice-copy') }};
+    """, SAVED_DARK)
+    assert r == {"line": "This tab closes in 5 s.", "calls": 1, "copy": False}
 
 
 # ----------------------------------------- what makes the close allowed
@@ -262,3 +373,14 @@ def test_the_deadlines_are_checked_often_enough_to_keep_the_grace():
     ended after 5 to 6 s, which is what the owner saw."""
     assert theme_server.TICK_S <= 0.25
     assert theme_server.CLOSE_GRACE_S + theme_server.TICK_S <= 2
+
+
+def test_a_builder_checks_its_deadlines_at_the_tick_it_promises():
+    """The tests build their servers with a huge tick and a fake clock, so
+    the constant above could be right and the default a builder really runs
+    with could still be the old 1 s, which the owner measured as a 5 to 6 s
+    wait (review of the page ending, NICE 4)."""
+    import inspect
+    default = inspect.signature(
+        theme_server.BuilderServer.__init__).parameters["tick_s"].default
+    assert default == theme_server.TICK_S

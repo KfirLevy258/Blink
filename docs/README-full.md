@@ -540,26 +540,39 @@ newest tab is live, and it opens on the changes you have made so far.
 Within about a minute the older tab stops: it tries to close itself if it
 has nothing you have not saved, and otherwise keeps your colours on screen.
 
-After **Save to board** or **Cancel**, a tab that holds nothing you have not
-saved counts down in the line at the top (**This tab closes in 5 s.**) and
-closes itself. Press a key, click or touch it and it stays open (moving the
-mouse does not count), with **You can close this tab.** instead. A browser that will not
-let a page close a tab (one you pasted the link into after other pages) gets
-the same words when the count ends.
+When a builder tab ends, a popup appears over the page, which is dimmed and
+stops working behind it. Its heading says what happened and the line under it
+says what follows:
 
-A tab that is no longer the live builder says why in the line at the top, and
-its controls stop working. The page stays as it was, readable, with nothing
-over it. The line reads **Saved: <name>. Your board keeps it.**, **Cancelled.
-Your board is back on its saved theme.** (each followed by the countdown, or
-by **You can close this tab.** once it has ended), **This builder continued in a newer tab. You can close
-this one.** when a newer tab took over, or **The builder has stopped. Run
-blink theme on your computer to start it again.** (ten minutes idle, or the
-app quit). If the tab still holds changes you have not saved, the line says
-so and **Copy share code** at the top stays on, so you can paste them into
-the newer tab or keep them. It is the one control that does. Most browsers
-will not let a page close a tab, so this line is usually all an old tab
-says. A preview the board never hears the end of - the
-computer went to sleep mid-edit - drops by itself after 15 minutes.
+| Ending | Heading | Under it |
+|---|---|---|
+| You pressed Save to board | **Saved.** | Your board keeps *name*. |
+| You pressed Cancel | **Cancelled.** | Your board is back on its saved theme. |
+| The builder stopped (ten minutes idle, or the app quit) | **The builder stopped.** | Run blink theme on your computer to start it again. |
+| A newer tab took over | **Continued in a newer tab.** | This tab has handed over to the newer one. |
+
+After **Save to board** or **Cancel** the popup counts down (**This tab closes
+in 5 s.**) and then closes the tab. A **Close tab** button closes it at once.
+Press a key, click or touch anywhere, the popup and the dimmed page behind it
+included, and the count stops and the line reads **You can close this tab.**
+(moving the mouse and scrolling do not count; clicking **Close tab** does not
+stop the count, it closes the tab). After Save the countdown runs only if you
+have changed nothing since; after Cancel it runs whatever the tab held,
+because Cancel throws the changes away. A browser that will not let a page
+close a tab (one you pasted the link into after other pages) gets the same
+**You can close this tab.** when the count ends or **Close tab** is pressed.
+A stopped builder and a tab a newer one took over show that line and
+**Close tab** at once, with no countdown.
+
+If the tab holds changes you have not saved (a stopped builder, a tab a newer
+one took over, or changes made after you saved), there is no countdown and no
+**Close tab**. The popup says **Your changes here are not saved. Copy the
+share code to keep them.** (after a save: **Changes you made after saving are
+not on the board. Copy the share code to keep them.**) and offers **Copy share
+code**, so you can paste them into the newer tab or keep them. The status line
+at the top keeps a short version of the ending under the popup. A preview the
+board never hears the end of - the computer went to sleep mid-edit - drops by
+itself after 15 minutes.
 
 A custom theme has a **share code**, a line starting `BT1.`, that carries the
 whole theme. Copy it from the builder to send to somebody; paste one in to

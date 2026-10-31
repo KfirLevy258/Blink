@@ -11,7 +11,8 @@
  * re-appear ... only once the page is not active / closed". Until then the
  * slot read "Opened on your computer" for 3 s and then its own name again,
  * pressable while the builder was still open; a press opened another tab
- * on it, the older tab went to "This tab is no longer active.", and the
+ * on it, the older tab stopped and told its owner a newer one had taken
+ * over, and the
  * owner had two tabs for one edit. Now an ok 1 holds the slot, reading
  * "Editing on your computer" and refusing taps, until the daemon says the
  * builder has ended (theme_edit done:1, contract Addendum 6).
