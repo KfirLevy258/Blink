@@ -1043,3 +1043,61 @@ def test_the_record_of_old_links_stays_small(server):
     for _ in range(100):
         server.new_link()
     assert len(server._gone) <= 16
+
+
+# ------------------------------------ a preview still in flight at the end
+#
+# Review of 1.4.0 (builder), N5. do_POST never asked whether the builder had
+# ended, and the preview and Save handlers run on separate threads. A
+# preview whose write is slow (a scanner holding theme_preview.json on
+# Windows) landed after Save's cancel when the owner saved the theme already
+# stored, so the daemon sent only op=preview and the board showed that
+# preview for 15 minutes under "Saved".
+
+def test_a_preview_in_flight_during_save_does_not_land_over_the_cancel(
+        server, home, monkeypatch):
+    gate, entered = threading.Event(), threading.Event()
+    real = theme.write_preview
+
+    def slow(h, t):
+        entered.set()
+        gate.wait(5)
+        real(h, t)
+    monkeypatch.setattr(theme, "write_preview", slow)
+    cookie = login(server)
+    theme.save(home, {"id": 4})                 # Ocean already stored
+    answers = {}
+
+    def call(name, path, body):
+        answers[name] = request(server, "POST", path, body,
+                                cookie=cookie)[0]
+    preview = threading.Thread(target=call,
+                               args=("preview", "/api/preview", {"id": 6}))
+    preview.start()
+    assert entered.wait(5)                      # the preview is inside
+    save = threading.Thread(target=call,
+                            args=("save", "/api/save", {"id": 4}))
+    save.start()
+    time.sleep(0.2)                             # Save waits its turn
+    gate.set()
+    preview.join(5)
+    save.join(5)
+    assert answers == {"preview": 200, "save": 200}
+    sync = theme.ThemeSync(home)
+    sync.board_now({"t": "theme_now", "v": 2, "id": 4, "why": "boot"})
+    assert sync.outgoing() == [theme.message("cancel")]
+
+
+def test_nothing_is_written_to_the_preview_file_after_the_builder_ended(
+        home):
+    s = theme_server.BuilderServer(home, tick_s=3600)
+    s.start()
+    try:
+        assert s.write_preview({"id": 3}) is True
+        s.finish("cancelled")
+        s.wait(5)
+        assert s.write_preview({"id": 6}) is False
+        assert theme.take_preview(home) == ("cancel", None)
+    finally:
+        s.finish("test over")
+        s.wait(5)

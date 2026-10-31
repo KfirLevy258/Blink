@@ -418,30 +418,37 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._json(400, {"error": msg})
         if path == "/api/preview":
             self.builder.touch()
-            theme.write_preview(self.builder.home, t)
-            self.builder.draft = t
+            self.builder.write_preview(t)
             return self._json(200, {"ok": True})
-        keep = theme.saved_custom(self.builder.home) \
-            if t["id"] != theme.CUSTOM else None
-        try:
-            theme.save(self.builder.home, t, keep_custom=keep)
-        except theme.Unreadable as e:
-            # theme.json is there and unreadable, so it is not written over
-            # (contract Addendum 4a); the message says which file, not what
-            # it holds.
-            return self._json(500, {"error": f"Not saved: {e}."})
-        except OSError as e:
-            # Said to the page, and the builder stays up so Save can be tried
-            # again. "Saved" over a failed write is a lie the owner acts on.
-            return self._json(500, {"error": "Not saved: this computer could"
-                                    f" not write the theme file ({e})."})
-        # A cancel, not just dropping the preview file: a preview still
-        # waiting would reach the board after the save and show something
-        # other than what was just stored, and one already sent stays on the
-        # board for 15 minutes when this Save picked the theme already
-        # stored, because then no save line goes out to end it (review
-        # NICE-4). ThemeSync.outgoing drops the cancel when a save is owed.
-        theme.write_cancel(self.builder.home)
+        # Under the builder's file lock from the stored theme to the cancel,
+        # so a preview still being written cannot land between them or after
+        # (review of 1.4.0, builder N5).
+        with self.builder.writing():
+            keep = theme.saved_custom(self.builder.home) \
+                if t["id"] != theme.CUSTOM else None
+            try:
+                theme.save(self.builder.home, t, keep_custom=keep)
+            except theme.Unreadable as e:
+                # theme.json is there and unreadable, so it is not written
+                # over (contract Addendum 4a); the message says which file,
+                # not what it holds.
+                return self._json(500, {"error": f"Not saved: {e}."})
+            except OSError as e:
+                # Said to the page, and the builder stays up so Save can be
+                # tried again. "Saved" over a failed write is a lie the
+                # owner acts on.
+                return self._json(500, {"error": "Not saved: this computer"
+                                        f" could not write the theme file"
+                                        f" ({e})."})
+            # A cancel, not just dropping the preview file: a preview still
+            # waiting would reach the board after the save and show
+            # something other than what was just stored, and one already
+            # sent stays on the board for 15 minutes when this Save picked
+            # the theme already stored, because then no save line goes out
+            # to end it (review NICE-4). ThemeSync.outgoing drops the cancel
+            # when a save is owed.
+            theme.write_cancel(self.builder.home)
+            self.builder.stop_writing()
         self._json(200, {"ok": True})
         self.builder.finish("saved")
 
@@ -530,6 +537,11 @@ class BuilderServer:
         self._order = {}
         # The last theme a preview sent, or None; see /api/state.
         self.draft = None
+        # Held by whoever writes the preview file or the theme, and what
+        # makes the end final: once a save or a finish has written its
+        # cancel, nothing later is written (write_preview, writing).
+        self._files = threading.Lock()
+        self._writing = True
         self.outcome = None
         self._done = threading.Event()
         self.page_bytes = page().encode("utf-8")
@@ -543,6 +555,32 @@ class BuilderServer:
         # Finished, not merely stopped: the Launcher must not hand out a link
         # to a server that is on its way down.
         return self.outcome is not None
+
+    def writing(self):
+        """The file lock, for a handler that writes the theme and then the
+        cancel as one step. Call stop_writing() inside it once the cancel is
+        written."""
+        return self._files
+
+    def stop_writing(self):
+        self._writing = False
+
+    def write_preview(self, t):
+        """Write a preview for the daemon, unless the builder has ended.
+        True when written.
+
+        The preview and Save handlers run on separate threads and do_POST
+        never asked whether the builder was over. A preview whose write was
+        slow (a scanner holding theme_preview.json on Windows) landed after
+        Save's cancel when the theme saved was the one already stored, so
+        the daemon sent only op=preview and the board showed it for 15
+        minutes under "Saved" (review of 1.4.0, builder N5)."""
+        with self._files:
+            if not self._writing:
+                return False
+            theme.write_preview(self.home, t)
+            self.draft = t
+            return True
 
     def listening_socket(self):
         return self._httpd.socket
@@ -721,11 +759,13 @@ class BuilderServer:
             theme.remove_builder(self.home, self.port)
         except OSError:
             pass
-        if cancel and outcome != "saved":
-            try:
-                theme.write_cancel(self.home)
-            except OSError:
-                pass
+        with self._files:
+            self._writing = False
+            if cancel and outcome != "saved":
+                try:
+                    theme.write_cancel(self.home)
+                except OSError:
+                    pass
 
         def stop():
             self._httpd.shutdown()
