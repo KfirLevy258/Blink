@@ -34,11 +34,16 @@ bool edit_hold_reply(struct edit_hold *h, bool ok)
 	return false;
 }
 
-bool edit_hold_done(struct edit_hold *h, bool asking)
+bool edit_hold_state(struct edit_hold *h, bool editing)
 {
-	if (asking) {
+	if (!h->host_tells) {
 		return false;
 	}
+	return set_held(h, editing);
+}
+
+bool edit_hold_done(struct edit_hold *h)
+{
 	return set_held(h, false);
 }
 

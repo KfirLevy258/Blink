@@ -19,6 +19,7 @@ import json
 import queue
 import re
 import threading
+import time
 from pathlib import Path
 
 from pc import protocol
@@ -36,7 +37,8 @@ def inline(fn):
     fn()
 
 
-def wired(tmp_path, launcher, builder_open="launcher"):
+def wired(tmp_path, launcher, builder_open="launcher", clock=None,
+          run_async=inline, open_builder=None):
     home = str(tmp_path / ".blink")
     sent = []
 
@@ -48,10 +50,12 @@ def wired(tmp_path, launcher, builder_open="launcher"):
 
     if builder_open == "launcher":
         builder_open = launcher.editing
-    b = Bridge(write_msg=write, fetch_usage=lambda: None, now=Clock(),
-               wall=lambda: (1752444000, 0), theme_sync=theme.ThemeSync(home),
-               open_builder=launcher.launch, builder_ended=launcher.ended,
-               builder_open=builder_open, run_async=inline,
+    b = Bridge(write_msg=write, fetch_usage=lambda: None,
+               now=clock or Clock(), wall=lambda: (1752444000, 0),
+               theme_sync=theme.ThemeSync(home),
+               open_builder=open_builder or launcher.launch,
+               builder_ended=launcher.ended,
+               builder_open=builder_open, run_async=run_async,
                edit_answers=queue.Queue(), **_NO_FEED)
     return b, sent
 
@@ -68,9 +72,11 @@ def welcomes(sent):
 def test_the_welcome_promises_the_done():
     w = protocol.welcome("blink-bridge", "1.4.0")
     assert "edit_done" in w["caps"]
-    # The board finds a cap as a whole member of this list; it must stay a
-    # list of plain strings, "theme" still first for the boards before it.
-    assert w["caps"][0] == "theme"
+    # The board finds a cap as a whole member of this list wherever it is
+    # (theme_caps_has walks them all), so only "a list of plain strings"
+    # matters, and "theme" is still in it for the boards before the hold.
+    assert all(isinstance(c, str) for c in w["caps"])
+    assert "theme" in w["caps"]
     # The probe's welcome cannot say, and says nothing.
     assert "editing" not in w
 
@@ -211,23 +217,207 @@ def test_the_board_reads_the_cap_by_the_name_the_daemon_sends():
     assert "edit_done" in protocol.CAPS
 
 
-def test_the_boards_bound_outlasts_the_builders_idle_limit():
-    """The board's hold ends by itself after EDIT_HOLD_MS with neither a
-    done nor a preview, for a done lost on the wire. A builder no one edits
-    ends by itself after IDLE_S and is told to the board at once, so the
-    bound must be the longer, or a quiet builder still open would get its
-    button back early -- and a second tab."""
+def _hold_ms():
     src = _firmware("ui_settings.c")
-    m = re.search(r"#define EDIT_HOLD_MS \((\d+) \* (\d+) \* (\d+)\)", src)
-    assert m, "EDIT_HOLD_MS not found as (a * b * c) in ui_settings.c"
-    hold_ms = int(m.group(1)) * int(m.group(2)) * int(m.group(3))
-    assert hold_ms > theme_server.IDLE_S * 1000
-    # And no longer than the board's own limit on a preview it never hears
-    # the end of: past that the builder's colours are gone from the panel.
-    p = re.search(r"#define PREVIEW_MS \((\d+) \* (\d+) \* (\d+)\)",
-                  _firmware("ui_theme.c"))
-    assert p
-    assert hold_ms <= int(p.group(1)) * int(p.group(2)) * int(p.group(3))
+    m = re.search(r"#ifndef EDIT_HOLD_MS\n#define EDIT_HOLD_MS \((\d+) \* "
+                  r"(\d+)\)\n#endif", src)
+    assert m, ("EDIT_HOLD_MS not found as #ifndef / (a * b) / #endif in "
+               "ui_settings.c")
+    return int(m.group(1)) * int(m.group(2))
+
+
+def test_the_boards_bound_outlasts_two_restatements():
+    """The board lets its hold go after EDIT_HOLD_MS with no restatement,
+    ok 1 or preview. edit_state comes every EDIT_STATE_EVERY_S, so one lost
+    line must not cost a builder that is open its hold -- two and a half,
+    as svc lines have over SVC_HOLD_S -- and the bound must stay short
+    enough that a hold over nothing (a done that overtook its ok) is gone
+    in minutes, not the quarter of an hour it was."""
+    hold_ms = _hold_ms()
+    every_ms = protocol.EDIT_STATE_EVERY_S * 1000
+    assert hold_ms >= 2.5 * every_ms
+    assert hold_ms <= 5 * 60 * 1000
+    # The serial loop's liveness window is shorter still, so a board heard
+    # again after a silence is told at once, well inside it.
+    from pc import bridge
+    assert bridge.LIVENESS_WINDOW_S * 1000 < hold_ms
+
+
+def test_the_bound_script_names_the_override_it_needs():
+    # touch.sh hands BLINK_TOUCH_CFLAGS to the compiler; the script that
+    # waits the bound out must say which value it was written for.
+    script = (ROOT / "tools" / "bench" / "edit_hold_bound.txt").read_text(
+        encoding="utf-8")
+    assert "BLINK_TOUCH_CFLAGS=-DEDIT_HOLD_MS=4000" in script
+    assert "harness-only" in script.splitlines()
+    assert "${BLINK_TOUCH_CFLAGS:-}" in (
+        ROOT / "tools" / "panel_render" / "touch.sh").read_text(
+            encoding="utf-8")
+
+
+# ------------------------------------------------------- the restatement
+
+def alive(b, clock):
+    hello(b)
+    b.on_message({"t": "ping", "v": 2})
+
+
+def states(sent):
+    return [m["editing"] for m in sent if m["t"] == "edit_state"]
+
+
+def test_the_state_is_restated_while_the_board_listens(tmp_path):
+    clock = Clock()
+    lau, _ = launcher_with(str(tmp_path), lambda u: True)
+    b, sent = wired(tmp_path, lau, clock=clock)
+    alive(b, clock)
+    b.pump()
+    assert states(sent) == [0]
+    b.on_message({"t": "theme_edit", "v": 2})
+    b.pump()
+    assert states(sent) == [0]               # not before a minute is up
+    clock.t += protocol.EDIT_STATE_EVERY_S
+    b.on_message({"t": "ping", "v": 2})
+    b.pump()
+    assert states(sent) == [0, 1]
+    FakeServer.made[0].finish("closed")
+    clock.t += protocol.EDIT_STATE_EVERY_S
+    b.on_message({"t": "ping", "v": 2})
+    b.pump()
+    # The done first, then the state that agrees with it.
+    tail = [m for m in sent if m["t"] in ("theme_edit", "edit_state")][-2:]
+    assert tail == [{"t": "theme_edit", "v": protocol.VERSION, "done": 1},
+                    {"t": "edit_state", "v": protocol.VERSION, "editing": 0}]
+
+
+def test_the_owners_lunch_holds_again_when_the_same_connection_wakes(
+        tmp_path):
+    """Review SHOULD-1, the reviewer's demo turned round: the Mac sleeps
+    with the builder open, the board declares HOST LOST after 30 s and lets
+    its hold go, and the same connection wakes. No welcome comes, but the
+    first ping heard after the silence has the state said at once."""
+    clock = Clock()
+    lau, _ = launcher_with(str(tmp_path), lambda u: True)
+    b, sent = wired(tmp_path, lau, clock=clock)
+    alive(b, clock)
+    b.on_message({"t": "theme_edit", "v": 2})
+    b.pump()
+    n = len(sent)
+    clock.t += 45                            # asleep; the board is HOST LOST
+    assert not b.board_alive()
+    b.pump()
+    assert sent[n:] == []                    # nothing into a silent port
+    clock.t += 1
+    b.on_message({"t": "ping", "v": 2})      # awake, same connection
+    b.pump()
+    assert [m for m in sent[n:] if m["t"] == "edit_state"] == [
+        {"t": "edit_state", "v": protocol.VERSION, "editing": 1}]
+
+
+def test_a_done_that_overtook_its_ok_is_made_good(tmp_path):
+    """Review NICE-1: launch() records the builder before work() queues its
+    ok, so a builder that ends in that instant has its done written first,
+    and the board, still asking, drops the done and then holds on the ok.
+    The next restatement says no builder is open, which frees it."""
+    clock = Clock()
+    lau, _ = launcher_with(str(tmp_path), lambda u: True)
+    returned, go = threading.Event(), threading.Event()
+
+    def opener_then_pause():
+        ok = lau.launch()
+        returned.set()
+        go.wait(5)
+        return ok
+
+    def spawn(fn):
+        spawn.t = threading.Thread(target=fn)
+        spawn.t.start()
+
+    b, sent = wired(tmp_path, lau, clock=clock, run_async=spawn,
+                    open_builder=opener_then_pause)
+    alive(b, clock)
+    b.pump()
+    b.on_message({"t": "theme_edit", "v": 2})
+    assert returned.wait(2)
+    FakeServer.made[0].finish("closed")      # ends in the window
+    b.pump()
+    go.set()
+    spawn.t.join(5)
+    b.pump()
+    edit = [m for m in sent if m["t"] == "theme_edit"]
+    assert edit[-2:] == [{"t": "theme_edit", "v": protocol.VERSION,
+                          "done": 1},
+                         {"t": "theme_edit", "v": protocol.VERSION, "ok": 1}]
+    clock.t += protocol.EDIT_STATE_EVERY_S
+    b.on_message({"t": "ping", "v": 2})
+    b.pump()
+    assert states(sent)[-1] == 0
+
+
+def test_no_restatement_to_a_board_without_the_handler(tmp_path):
+    clock = Clock()
+    lau, _ = launcher_with(str(tmp_path), lambda u: True)
+    b, sent = wired(tmp_path, lau, clock=clock)
+    b.on_message({"t": "hello", "v": 2, "fw": "1.4.0",
+                  "caps": ["svc", "theme"]})
+    b.on_message({"t": "ping", "v": 2})
+    b.pump()
+    assert states(sent) == []
+
+
+def test_the_restatement_never_waits_for_a_slow_browser(tmp_path):
+    clock = Clock()
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(url):
+        entered.set()
+        release.wait(5)
+        return True
+
+    lau, _ = launcher_with(str(tmp_path), slow)
+    b, sent = wired(tmp_path, lau, clock=clock)
+    alive(b, clock)
+    t = threading.Thread(target=lau.launch)
+    t.start()
+    try:
+        assert entered.wait(2)
+        t0 = time.monotonic()
+        b.pump()
+        assert time.monotonic() - t0 < 0.2
+        assert states(sent) == []            # unknown: said next pass
+    finally:
+        release.set()
+        t.join(5)
+    b.pump()
+    assert states(sent) == [1]
+
+
+def test_a_failing_state_read_is_not_tried_every_pass(tmp_path, capsys):
+    clock = Clock()
+    lau, _ = launcher_with(str(tmp_path), lambda u: True)
+    calls = []
+
+    def broken():
+        calls.append(1)
+        raise RuntimeError("boom")
+
+    b, sent = wired(tmp_path, lau, builder_open=broken, clock=clock)
+    alive(b, clock)
+    n = len(calls)
+    b.pump()
+    b.pump()
+    b.pump()
+    assert len(calls) == n + 1
+    assert states(sent) == []
+
+
+def test_the_restatement_fits_and_says_one_thing():
+    for editing in (True, False):
+        raw, why = protocol.encode_checked(protocol.edit_state(editing))
+        assert raw is not None, why
+        assert len(raw) < 64
+        assert set(json.loads(raw)) == {"t", "v", "editing"}
+    assert "edit_state" in protocol.WIRE_TYPES
 
 
 def test_the_held_slot_says_so_in_sentence_case_and_fits():

@@ -78,6 +78,12 @@ PAGE_ALIVE_S = 75
 # at the reply, after the open began). A press within 2 s of the open --
 # a replayed ask, or a deliberate one on the "Opened" note itself -- is
 # folded into it, which is benign: a window opened moments earlier.
+#
+# That 3 s comeback is now only what firmware from before the hold does.
+# A board that hears this daemon's "edit_done" cap holds the slot from ok 1
+# until the builder ends (owner, 2026-10-30) and sends no ask meanwhile, so
+# for it this limit only meets a replayed ask; it stays 2 s for the older
+# boards, which still press again after 3 s.
 OPEN_EVERY_S = 2
 
 

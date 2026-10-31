@@ -177,7 +177,7 @@ WIRE_TYPES = frozenset({
     # host -> board
     "welcome", "bye", "pong", "time", "usage", "edition", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
-    "ota_none", "ota_error",
+    "ota_none", "ota_error", "edit_state",
 })
 
 UNKNOWN_TYPE = "(unknown type)"
@@ -214,7 +214,17 @@ def log_name(msg) -> str:
 # comes back. Every daemon since Addendum 6 sends the done; the cap is what
 # the board can know that by. Additive both ways: firmware before the hold
 # reads only "theme" out of caps (theme_caps_has matches whole members).
+#
+# The same word is a cap in both directions, with two meanings. In the
+# board's hello and pref (BOARD_CAP_EDIT_DONE) it says "I handle done:1";
+# in this welcome it says "I send done:1, `editing`, and edit_state".
 CAPS = ("theme", "edit_done")
+
+# How often edit_state restates whether a builder is open (Bridge.pump), and
+# the board lets a hold go when it has heard no restatement, no ok 1 and no
+# preview for EDIT_HOLD_MS (150 s in firmware/src/ui_settings.c): two and a
+# half of these, the same margin svc lines have over SVC_HOLD_S.
+EDIT_STATE_EVERY_S = 60
 
 
 def welcome(app: str, app_ver: str, editing=None) -> dict:
@@ -228,15 +238,49 @@ def welcome(app: str, app_ver: str, editing=None) -> dict:
 
     It is what puts a board right after it was away while the builder
     opened or ended: one that rebooted (its hold is gone, the builder is
-    not), one whose host went quiet (it freed the hold on HOST LOST), and
-    one under a daemon that restarted (the builder lived in the old
-    process). A number, not a JSON boolean, like every flag this protocol
+    not), one whose cable was out (a new connection greets), and one under
+    a daemon that restarted (the builder lived in the old process). A host
+    that went quiet on a connection that stayed open is not greeted again;
+    edit_state below is what puts that board right. A number, not a JSON
+    boolean, like every flag this protocol
     already carries (done, ok)."""
     msg = {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver,
            "caps": list(CAPS)}
     if editing is not None:
         msg["editing"] = 1 if editing else 0
     return msg
+
+
+def edit_state(editing: bool) -> dict:
+    """Whether the builder this daemon opened for the board's "Edit on
+    computer" is open right now: the welcome's `editing`, restated on its
+    own line.
+
+    Why a restatement, and why not the welcome. A welcome is written only
+    when a connection starts, and a board can lose its host without the
+    connection ending: the Mac sleeps over lunch with the builder open, or
+    the serial loop stalls past 30 s (the browser opener, measured stuck for
+    28.7 s, is one). The board frees its hold on HOST LOST, and nothing
+    would have held it again when the same connection woke -- a press then
+    opened a second tab on the builder still open (review of fp/edit-held,
+    SHOULD-1). Re-sending a welcome to say so would set the board answering
+    it with pref, theme_now and a firmware check each time.
+
+    So the board holds only while this keeps being said, as it shows an
+    svc incident only while that is restated: every EDIT_STATE_EVERY_S, and
+    at once when the board is heard again after a silence (Bridge.pump).
+    It also covers the two ways the builder's life and the board's bound
+    used to disagree: a page reload restarts the builder's idle clock with
+    nothing sent to the board, and a done that overtook its own ok (review
+    NICE-1) left a hold over no builder. Both now last at most one
+    restatement.
+
+    Its own type, not a field on theme_edit: firmware from before the hold
+    reads a theme_edit with neither done nor ok as an ok 0, which would put
+    "run blink theme" over an ask in flight. Unknown types are dropped
+    without a word by every firmware (proto.c's dispatch), and this goes
+    only to a board that lists BOARD_CAP_EDIT_DONE."""
+    return {"t": "edit_state", "v": VERSION, "editing": 1 if editing else 0}
 
 
 def bye() -> dict:
@@ -866,9 +910,9 @@ def theme_edit_done() -> dict:
     then the board gave its button back by itself 3 s after "Opened on
     your computer" (owner, 2026-10-29), and a press opened a second tab on
     the builder still open. Now it is the line that frees the hold an ok 1
-    puts on the slot (owner, 2026-10-30; CAPS "edit_done"), so a done that
-    never arrives keeps the button away until the board's own bound, 15
-    min. Sent only to a board that lists
+    puts on the slot (owner, 2026-10-30; CAPS "edit_done"); a done that
+    never arrives is made good by the next edit_state, within
+    EDIT_STATE_EVERY_S. Sent only to a board that lists
     BOARD_CAP_EDIT_DONE: one from before reads it as an ok 0 whenever an ask
     of its own is in flight."""
     return {"t": "theme_edit", "v": VERSION, "done": 1}

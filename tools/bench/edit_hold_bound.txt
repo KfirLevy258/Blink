@@ -1,0 +1,90 @@
+# "Edit on computer"'s hold bound, on a clock short enough to wait out.
+# Host harness only, built with the bound at 4 s:
+#
+#   BLINK_TOUCH_CFLAGS=-DEDIT_HOLD_MS=4000 \
+#       tools/panel_render/touch.sh OUTDIR tools/bench/edit_hold_bound.txt
+#
+# The bound is EDIT_HOLD_MS (150 s on a board): the slot lets its hold go
+# when nothing has said the builder is open for that long -- no edit_state
+# restatement, no ok 1, no preview (ui_settings.c). Nothing else exercised
+# the timer behind it, and a mutant that made the hold permanent, and one
+# where a preview no longer started the bound again, passed every test
+# (review of fp/edit-held, SHOULD-2). Each check below waits past the
+# bound counted from the ok and short of it counted from the restart, with
+# room either side for the harness clock, which runs only as fast as its
+# loop (popups_touch.txt): a restart at 3 s and a look at 6.5 s tell the two
+# apart while the harness keeps between 0.62 and 1.14 of real time.
+#
+# Built with the default bound this fails at the first wait-widget, which is
+# the point: it cannot pass without testing anything.
+
+harness-only
+tap settings.open
+click "Theme"
+expect ui_state ov=theme
+# Held, and with nothing said the bound frees it.
+click "Edit on computer"
+expect theme_edit
+wait-widget "Editing on your computer" 3
+wait-widget "Edit on computer" 10
+expect ui_state edit=name
+# A preview starts the bound again: still held past 4 s from the ok.
+click "Edit on computer"
+wait-widget "Editing on your computer" 3
+wait 3
+fake preview
+wait 3.5
+expect ui_state edit=held
+wait-widget "Edit on computer" 10
+# So does a restatement, and so does a late ok 1.
+click "Edit on computer"
+wait-widget "Editing on your computer" 3
+wait 3
+fake edit_state open
+wait 3.5
+expect ui_state edit=held
+wait-widget "Edit on computer" 10
+click "Edit on computer"
+wait-widget "Editing on your computer" 3
+wait 3
+fake edit_answer ok
+wait 3.5
+expect ui_state edit=held
+# An ok 0 on a builder still running leaves the hold as it is, and a
+# restatement that none is open frees it at once.
+fake edit_answer no
+expect ui_state edit=held
+fake edit_state shut
+wait-widget "Edit on computer" 2
+expect ui_state edit=name
+# The owner's lunch (review SHOULD-1): held, HOST LOST frees it, and the
+# same connection wakes with the builder still open. No welcome comes; the
+# restatement the daemon sends on hearing the board again holds it.
+click "Edit on computer"
+wait-widget "Editing on your computer" 3
+fake host_gone
+wait-widget "Edit on computer" 2
+expect ui_state edit=name
+fake edit_state open
+wait-widget "Editing on your computer" 2
+expect ui_state edit=held
+fake edit_done
+wait-widget "Edit on computer" 2
+# A preview never holds the slot by itself: it may be a builder `blink
+# theme` opened, whose end this board is never told. Neither with no ask...
+fake preview
+wait 0.5
+expect ui_state edit=name
+# ...nor as the answer to one, which shows "Opened" and lets it go.
+edit-reply hold
+click "Edit on computer"
+expect theme_edit
+fake preview
+wait-widget "Opened on your computer" 2
+expect ui_state edit=opened
+wait-widget "Edit on computer" 8
+edit-reply ok
+click "<"
+expect ui_state ov=none
+click "<"
+expect ui_state scr=gauges

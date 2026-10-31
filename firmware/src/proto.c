@@ -786,6 +786,17 @@ static void dispatch(const char *json)
 		}
 		msg_get_double(json, "ok", &ok);
 		ui_settings_theme_edit_reply(ok == 1);
+	} else if (strcmp(type, "edit_state") == 0) {
+		/* The daemon restating whether the builder it opened for "Edit
+		 * on computer" is open (pc/protocol.edit_state): every 60 s,
+		 * and at once when it hears this board after a silence, so a
+		 * hold freed on HOST LOST comes back on a connection that never
+		 * closed. Absent reads as 0: a line that says nothing must not
+		 * keep a button away. */
+		double editing = 0;
+
+		msg_get_double(json, "editing", &editing);
+		ui_settings_theme_edit_state(editing == 1);
 	} else if (strcmp(type, "ota_avail") == 0) {
 		double sz = 0;
 

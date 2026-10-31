@@ -1183,7 +1183,8 @@ def _on_panel(pts, lineno):
 # `#` inside the quotes is not a comment.
 _QUOTED_CMDS = ("click", "expect-widget", "wait-widget", "widgets", "fake")
 FAKE_KINDS = ("ota_avail", "ota_none", "ota_error", "boot_notice",
-              "reverted_notice", "edit_done", "welcome")
+              "reverted_notice", "edit_done", "welcome", "edit_state",
+              "edit_answer", "preview", "host_gone")
 WELCOME_KINDS = ("open", "shut", "old")
 
 
@@ -1235,6 +1236,16 @@ def _parse_quoted(cmd, rest, lineno):
             return Step(lineno, "fake", tuple(rest))
         raise ScriptError(f"line {lineno}: usage: fake welcome "
                           + "|".join(WELCOME_KINDS))
+    if kind == "edit_state":
+        if len(rest) == 2 and rest[1] in ("open", "shut"):
+            return Step(lineno, "fake", tuple(rest))
+        raise ScriptError(f"line {lineno}: usage: fake edit_state open|shut")
+    if kind == "edit_answer":
+        if len(rest) == 2 and rest[1] in ("ok", "no"):
+            return Step(lineno, "fake", tuple(rest))
+        raise ScriptError(f"line {lineno}: usage: fake edit_answer ok|no")
+    if kind in ("preview", "host_gone") and len(rest) == 1:
+        return Step(lineno, "fake", tuple(rest))
     if kind == "ota_error":
         # The reason is the rest of the line, as the daemon's sentence is.
         return Step(lineno, "fake", (kind,) + ((" ".join(rest[1:]),)
@@ -2266,14 +2277,34 @@ class Bench:
                 msg.pop("editing")
                 msg["caps"] = [protocol.BOARD_CAP_THEME]
             return self.send(msg)
+        if kind == "edit_state":
+            # The daemon's restatement of whether its builder is open.
+            return self.send(protocol.edit_state(args[0] == "open"))
+        if kind == "edit_answer":
+            # A theme_edit answer nobody asked for just now: the late ok of
+            # a slow browser, or an ok 0 on a builder still running.
+            return self.send(protocol.theme_edit_reply(args[0] == "ok"))
+        if kind == "preview":
+            # A builder at work: a preview of the theme the harness starts
+            # on (Dark, id 0), so nothing on the panel moves. Harness
+            # scripts only: on a board it would stand for 15 min.
+            from pc import theme as pc_theme
+            return self.send(pc_theme.message("preview", {"id": 0}))
         if kind == "ota_error":
             self.ota_flash_pending = False
             self.install_pressed = False
             return self.send(protocol.ota_error(args[0] if args else ""))
         if getattr(self.link, "note", None) is None:
             self.fail(f"fake {kind}: the host harness only (--harness); a "
-                      "board raises it only on the boot after an update")
+                      "board raises it only on the boot after an update"
+                      if kind != "host_gone" else
+                      "fake host_gone: the host harness only (--harness);"
+                      " a board raises it after 30 s of silence")
             return False
+        if kind == "host_gone":
+            # The board's HOST LOST, for "Edit on computer" (harness.c).
+            return self.send({"t": "bench_host_gone",
+                              "v": protocol.VERSION})
         msg = {"t": "bench_notice", "v": protocol.VERSION,
                "kind": "reverted" if kind == "reverted_notice" else "update"}
         if kind == "boot_notice" and args:

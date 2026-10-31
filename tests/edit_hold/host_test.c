@@ -65,9 +65,9 @@ int main(void)
 	CHECK(edit_hold_reply(&h, true));
 	CHECK(h.held);
 	CHECK(!edit_hold_reply(&h, true));	/* already held: no repaint */
-	CHECK(edit_hold_done(&h, false));
+	CHECK(edit_hold_done(&h));
 	CHECK(!h.held);
-	CHECK(!edit_hold_done(&h, false));	/* a second done: nothing */
+	CHECK(!edit_hold_done(&h));		/* a second done: nothing */
 
 	/* --- the hold never starts without a daemon that tells --- */
 	/* Before any welcome at all (a board whose host has not spoken). */
@@ -98,14 +98,26 @@ int main(void)
 	/* A reshow whose browser would not open, on a builder still running. */
 	CHECK(!edit_hold_reply(&h, false) && h.held);
 
-	/* --- a done mid-ask is for an older builder --- */
+	/* --- edit_state: the restatement --- */
+	/* The owner's lunch: held, the Mac sleeps, HOST LOST frees, and the
+	 * same connection wakes with the builder still open. No welcome comes;
+	 * the restatement holds it again. */
 	h = telling();
-	CHECK(!edit_hold_done(&h, true) && !h.held);
-	edit_hold_reply(&h, true);		/* the new builder's ok */
-	CHECK(h.held);
-	/* And held, the board cannot be asking; but if it were, the done
-	 * still waits for the answer rather than freeing under it. */
-	CHECK(!edit_hold_done(&h, true) && h.held);
+	edit_hold_reply(&h, true);
+	edit_hold_host_gone(&h);
+	CHECK(!h.held);
+	CHECK(edit_hold_state(&h, true) && h.held);
+	CHECK(!edit_hold_state(&h, true));	/* restated: no repaint */
+	/* A hold over a builder that is gone -- a done that overtook its own
+	 * ok -- goes with the next restatement. */
+	CHECK(edit_hold_state(&h, false) && !h.held);
+	CHECK(!edit_hold_state(&h, false));
+	/* From a daemon that never promised it, it is not believed. */
+	h = (struct edit_hold){0};
+	edit_hold_welcome(&h, W_THEME_ONLY);
+	CHECK(!edit_hold_state(&h, true) && !h.held);
+	h = (struct edit_hold){0};		/* nobody has said anything yet */
+	CHECK(!edit_hold_state(&h, true) && !h.held);
 
 	/* --- a late ok, after the board's own 5 s fallback --- */
 	h = telling();

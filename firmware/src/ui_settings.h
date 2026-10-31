@@ -87,6 +87,10 @@ void ui_settings_theme_edit_done(void);
  * its "editing" field whether a builder it opened is still open. */
 void ui_settings_theme_edit_welcome(const char *json);
 
+/* An edit_state line: the daemon restating whether that builder is open
+ * (pc/protocol.edit_state). Holds, frees, or starts the bound again. */
+void ui_settings_theme_edit_state(bool editing);
+
 /* The host went away (HOST LOST) or said bye: the hold goes. */
 void ui_settings_theme_edit_host_gone(void);
 

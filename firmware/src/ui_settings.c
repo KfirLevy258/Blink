@@ -2036,18 +2036,28 @@ BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
 /* Long enough to read three words and look up at the computer. */
 #define EDIT_OPENED_MS 3000
 /*
- * The hold's upper bound, for a done:1 lost on the wire -- the one way out
- * that edit_hold.c cannot see coming. A builder with no edit for IDLE_S
- * (600 s, pc/theme_server.py) ends itself and the daemon says so within a
- * pass of its serial loop, so a live builder outlasts 10 min only by being
- * edited, and every edit reaches this board as a preview line, which starts
- * this count again (ui_settings_theme_edit_builder_seen). 15 min is the
- * board's own limit for a preview it never hears the end of (PREVIEW_MS in
- * ui_theme.c), for the same kind of reason, and it leaves the daemon five
- * minutes of slack past its idle limit. Past it the slot comes back as a
- * button, which costs at worst a second tab: the behaviour of before.
+ * The hold lasts only while it keeps being said, as an svc incident does
+ * (SVC_HOLD_S). The daemon restates "editing" every 60 s in an edit_state
+ * line (pc/bridge.py, _restate_edit); this is two and a half of those,
+ * the svc margin, and an ok 1 or a preview line starts it again as well.
+ *
+ * It was 15 min, from the ok, with only previews to start it again
+ * (review of fp/edit-held). That was too long and too short at once: too
+ * long for a done lost on the wire, or one that overtook its own ok, which
+ * left the button gone for a quarter of an hour over no builder; too short
+ * for a page reloaded with no edit, which starts the builder's 10 min idle
+ * clock again (theme_server.py, BuilderServer.touch) with nothing reaching
+ * this board, so the slot came back with the page still open. A
+ * restatement answers both. Past this with nothing heard the slot is a
+ * button again, which costs at worst a second tab: the behaviour before
+ * the hold.
+ *
+ * Overridable at build time only for the touch harness's own run of it
+ * (tools/bench/edit_hold_bound.txt), which cannot wait 150 s per check.
  */
-#define EDIT_HOLD_MS (15 * 60 * 1000)
+#ifndef EDIT_HOLD_MS
+#define EDIT_HOLD_MS (150 * 1000)
+#endif
 /*
  * The fallback is an instruction, "On your computer, run: blink theme", over
  * three lines, and it is only useful if it can be read and typed from: 3 s
@@ -2201,8 +2211,9 @@ static void edit_timer_cb(lv_timer_t *t)
 	ARG_UNUSED(t);
 	edit_timer = NULL;	/* repeat count 1: LVGL frees it */
 	if (edit_h.held) {
-		/* EDIT_HOLD_MS with neither a done nor a preview: a done
-		 * lost on the wire, most likely. Give the button back. */
+		/* EDIT_HOLD_MS with no restatement, ok 1 or preview: the
+		 * daemon has stopped saying the builder is open. Give the
+		 * button back. */
 		edit_hold_expired(&edit_h);
 		edit_note = NULL;
 		edit_paint();
@@ -2310,35 +2321,45 @@ void ui_settings_theme_edit_done(void)
 	if (edit_asking) {
 		return;
 	}
-	edit_hold_done(&edit_h, false);
-	if (edit_timer != NULL) {
-		lv_timer_delete(edit_timer);
-		edit_timer = NULL;
+	edit_hold_done(&edit_h);
+	edit_hold_free();
+}
+
+/* A welcome or edit_state has just run edit_hold.c: `changed` is what it
+ * returned. Draw what it decided, and while held start the bound again,
+ * since the daemon has just said the builder is open. */
+static void edit_hold_said(bool was, bool changed)
+{
+	if (changed && edit_h.held) {
+		edit_hold_show();
+	} else if (changed && was) {
+		edit_hold_free();
+	} else if (edit_h.held && edit_timer != NULL) {
+		lv_timer_reset(edit_timer);
 	}
-	edit_note = NULL;
-	edit_paint();
 }
 
 void ui_settings_theme_edit_welcome(const char *json)
 {
 	bool was = edit_h.held;
 
-	if (!edit_hold_welcome(&edit_h, json)) {
-		return;
-	}
-	if (edit_h.held) {
-		edit_hold_show();
-	} else if (was) {
-		edit_hold_free();
-	}
+	edit_hold_said(was, edit_hold_welcome(&edit_h, json));
+}
+
+void ui_settings_theme_edit_state(bool editing)
+{
+	bool was = edit_h.held;
+
+	edit_hold_said(was, edit_hold_state(&edit_h, editing));
 }
 
 void ui_settings_theme_edit_host_gone(void)
 {
 	/* Nothing can open, end or report a builder for this board while
-	 * its host is away; the welcome that comes with the host's return
-	 * says whether one is still open. Held meanwhile, the slot would say
-	 * "Editing" over a daemon that may never come back. */
+	 * its host is away; the first edit_state after the host's return
+	 * (sent at once when the daemon hears the board again) or its next
+	 * welcome says whether one is still open. Held meanwhile, the slot
+	 * would say "Editing" over a daemon that may never come back. */
 	if (edit_hold_host_gone(&edit_h)) {
 		edit_hold_free();
 	}

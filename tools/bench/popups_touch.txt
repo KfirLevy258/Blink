@@ -163,8 +163,9 @@ wait 3.5
 # open|shut|old` greets again as a daemon whose builder is still open, one
 # with none, and one from before the hold, which keeps the 3 s "Opened" note
 # of 2026-10-29. `edit-reply` sets how asks are answered (hold: not at all,
-# the in-flight case). A board runs all of it; HOST LOST, which frees the
-# hold too, takes 30 s of silence and is checked by hand. The waits are
+# the in-flight case). A board runs all of it. HOST LOST, the bound and the
+# edit_state restatement are in edit_hold_bound.txt, on the harness. The
+# waits are
 # generous on purpose: the harness clock advances only as fast as its loop
 # runs, and on a loaded machine its 8 s fallback took longer than the 10 s
 # first allowed for it (2026-10-29). A board keeps real time.

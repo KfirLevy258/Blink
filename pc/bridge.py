@@ -167,6 +167,7 @@ class Bridge:
         # frees "Edit on computer" to match. None (not wired) leaves the
         # field out, and the board as it is.
         self._builder_open = builder_open
+        self._edit_said_at = None        # last edit_state; see _restate_edit
         # The open runs on run_async's thread: starting a browser can take a
         # second or more, and this object lives on the serial thread. The
         # answer comes back through the queue and pump() writes it, so only
@@ -283,6 +284,11 @@ class Bridge:
             self.greet()
             self.offer_if_newer(msg.get("fw"))
         elif t == "ping":
+            if self._last_ping is not None and not self.board_alive():
+                # Heard again after a silence the board calls HOST LOST: it
+                # has let go of "Edit on computer", so say now whether the
+                # builder is still open (_restate_edit).
+                self._edit_said_at = None
             self._last_ping = self._now()
             # Free: never fetch here. The usage endpoint is aggressively
             # rate-limited and this fires every 10 s.
@@ -757,12 +763,42 @@ class Bridge:
                 and self._board_can(protocol.BOARD_CAP_EDIT_DONE)
                 and ended()):
             self._write(protocol.theme_edit_done())
-            # One line, for windows-check 10c: with the slot back to its
-            # name after 3 s on its own, the board no longer shows when the
-            # done arrives, so the log is where a desk check can see it.
-            # Says that it was sent, never anything read off the wire.
+            # One line, for windows-check 10c, which times the board's slot
+            # coming back against it. Says that it was sent, never anything
+            # read off the wire.
             print("[theme] the builder ended; told the board",
                   file=sys.stderr)
+        self._restate_edit()
+
+    def _restate_edit(self):
+        """protocol.edit_state, every EDIT_STATE_EVERY_S and at once when the
+        board is heard again after a silence (on_message's ping), so a board
+        that freed its hold on HOST LOST holds again when the same
+        connection wakes, and a hold over a builder that has gone lasts one
+        restatement at most. From pump(), after the answers and the done, so
+        it never says a builder is open before the ok that opened it.
+
+        Never waits: Launcher.editing() answers None while launch() holds its
+        lock, and this tries again on the next pass. Only to a board that is
+        alive and lists BOARD_CAP_EDIT_DONE."""
+        state = self._builder_open
+        if (state is None or not self.board_alive()
+                or not self._board_can(protocol.BOARD_CAP_EDIT_DONE)):
+            return
+        now = self._now()
+        if (self._edit_said_at is not None
+                and now - self._edit_said_at < protocol.EDIT_STATE_EVERY_S):
+            return
+        try:
+            editing = state()
+        except Exception as e:
+            print(f"[bridge] builder state unknown: {e}", file=sys.stderr)
+            self._edit_said_at = now     # once a minute, not every pass
+            return
+        if editing is None:
+            return                       # a launch in progress; next pass
+        self._write(protocol.edit_state(editing))
+        self._edit_said_at = now
 
     def board_alive(self) -> bool:
         return (self._last_ping is not None
