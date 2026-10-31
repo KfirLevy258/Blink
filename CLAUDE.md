@@ -45,6 +45,13 @@ scripts: they install, uninstall and reinstall the service for real, so on a
 developer's own desk the board goes to HOST LOST while they are looking at it.
 CI runners are the only place they belong.
 
+**Importing a module of ours must do nothing.** `blink_main.py` once ran
+`blink install` on import (a bare `blink` is install) and a reviewer's import
+booted out the owner's real launchd job on 2026-10-30. Entry points run under
+`if __name__ == "__main__":`; `tests/test_import_is_inert.py` imports every
+module in a child whose PATH holds only recording launchctl/systemctl/schtasks
+stubs.
+
 Never create `.bak` files. Set `PYTHONDONTWRITEBYTECODE=1` on anything that
 mutates the tree.
 
@@ -78,7 +85,7 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**2989 passing** as of 2026-10-30, on macOS. The last count proved on all
+**3022 passing, 1 skipped** (os.startfile, Windows only) as of 2026-10-31, on macOS. The last count proved on all
 three platforms was 2871, earlier that day: Ubuntu (Docker, x86_64) 2787
 passed and 84 skipped, Windows (ARM64 VM) 2626 passed and 239 skipped, none
 failing. The skips are
@@ -102,7 +109,12 @@ around it. It:
   can set CODEX_HOME itself and prove it is cleared rather than rely on a
   shell that CI never has;
 - sets `BLINK_SKIP_SERVICE=1`, because a test once booted out the launchd
-  agent of the person logged in;
+  agent of the person logged in. The service code now also skips on its own
+  when `HOME` is not the account's home (`pwd`, POSIX), which is every test,
+  so a test that clears `BLINK_SKIP_SERVICE` to drive the backends with a
+  faked `subprocess` sets `BLINK_ALLOW_FOREIGN_HOME=1` as well. That check is
+  what `HOME=/tmp/x blink install` meets; the CI install script sets the
+  override only where `CI` is set;
 - refuses any socket off loopback, at name lookup and at `connect()`, and
   clears proxies so one on 127.0.0.1 cannot carry a request through. Four
   bridge tests had been fetching the release feed from github.com on every
