@@ -50,7 +50,7 @@ def test_set_refuses_unreadable_text_and_keeps_the_old_theme(capsys):
     cli.main(["theme", "set", "neon"])
     assert cli.main(["theme", "set", "bg=777777", "text=999999"]) == 2
     out = capsys.readouterr().out
-    assert "3:1" in out
+    assert "3.05:1" in out
     assert theme.load_saved(home()) == {"id": 1}
 
 

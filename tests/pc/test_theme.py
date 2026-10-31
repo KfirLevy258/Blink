@@ -84,7 +84,7 @@ def test_a_missing_custom_field_is_refused():
 def test_unreadable_text_is_refused_before_the_board_sees_it():
     # Grey on grey: 1.3:1. The plan's floor is 3:1.
     t = custom(c=["777777", "999999"] + DARKISH["c"][2:])
-    with pytest.raises(theme.ThemeError, match="3:1"):
+    with pytest.raises(theme.ThemeError, match="3.05:1"):
         theme.validate(t)
 
 
@@ -193,7 +193,7 @@ def test_a_share_code_with_unreadable_text_is_refused():
     with pytest.raises(theme.ThemeError) as e:
         theme.from_share_code(code)
     assert "the board cannot use" in str(e.value)
-    assert "3:1" in str(e.value)
+    assert "3.05:1" in str(e.value)
 
 
 @pytest.mark.parametrize("bad, says", [
@@ -728,3 +728,21 @@ def test_a_stale_temp_file_is_swept_on_the_next_write(tmp_path):
     os.utime(stale, (old, old))
     theme.save(home, {"id": 3})
     assert os.listdir(home) == ["theme.json"]
+
+
+def test_the_refusal_names_the_floor_it_enforces_and_does_not_round_up():
+    """Review of 1.4.0 (builder), N2. The floor is 3.05 (MIN_CONTRAST) but
+    the words said 3:1, so 949494 on white was refused as "3.03:1, and the
+    board needs at least 3:1": over the floor named, under the one enforced.
+    8787fb on white measures 3.0484, which rounds to 3.05 and was refused
+    as "3.05:1" against a floor of 3.05. The measured ratio is cut, not
+    rounded, so it never reaches the floor it was refused for."""
+    t = custom(c=["ffffff", "8787fb"] + DARKISH["c"][2:])
+    with pytest.raises(theme.ThemeError) as e:
+        theme.validate(t)
+    assert str(e.value) == ("text on background is 3.04:1, and the board"
+                            " needs at least 3.05:1 to be readable")
+    t = custom(c=["ffffff", "949494"] + DARKISH["c"][2:])
+    with pytest.raises(theme.ThemeError) as e:
+        theme.validate(t)
+    assert "3.03:1" in str(e.value) and "at least 3.05:1" in str(e.value)

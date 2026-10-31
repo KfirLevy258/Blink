@@ -45,6 +45,7 @@ Stdlib only, like the rest of pc/.
 import base64
 import hashlib
 import json
+import math
 import os
 import sys
 import time
@@ -201,8 +202,14 @@ def validate(obj):
         raise ThemeError("arcs must be by-level or per-gauge")
     ratio = contrast(colours[1], colours[0])
     if ratio < MIN_CONTRAST:
-        raise ThemeError(f"text on background is {ratio:.2f}:1, and the"
-                         " board needs at least 3:1 to be readable")
+        # Cut to two decimals, not rounded, and the floor named as it is
+        # enforced: "3.03:1 ... at least 3:1" was over the floor it named
+        # and under the one applied, and 3.0484 rounded to the 3.05 it
+        # fell short of (review of 1.4.0, builder N2).
+        shown = math.floor(ratio * 100) / 100
+        raise ThemeError(f"text on background is {shown:.2f}:1, and the"
+                         f" board needs at least {MIN_CONTRAST:.2f}:1 to be"
+                         " readable")
     return {"id": CUSTOM, "c": colours, "w": w, "ends": obj["ends"],
             "dot": dot, "by": obj["by"]}
 

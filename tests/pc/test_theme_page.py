@@ -1070,3 +1070,42 @@ def test_the_check_does_not_write_over_a_newer_message():
     return [mid, $('status-text').textContent];
     """, SAVED_DARK)
     assert r[0] == r[1] and "Preview sent" not in r[1]
+
+
+# ------------------------------- the contrast words match the floor enforced
+#
+# Review of 1.4.0 (builder), N2. The page rounded to one decimal and named a
+# floor of 3:1, so 949494 on white (3.0335) read "Text is unreadable: 3.0:1.
+# It needs at least 3:1" with Save off, and 777777 (4.478) read "Text is
+# faint: 4.5:1 ... 4.5:1 or more is better". The floor is 3.05
+# (MIN_CONTRAST), and a ratio is cut to two decimals, never rounded up to
+# the number it fell short of.
+
+def _text_on_white(colour):
+    return builder_page.run(f"""
+    await advance(10);
+    type('t-text', '#{colour}');
+    await advance(400);
+    return {{ checks: document.querySelectorAll('#checks li').map(li => li.textContent)[0],
+             field: $('m-text').textContent, save: $('save').disabled }};
+    """, {"/api/state": {"status": 200, "body": {"saved": {
+        "id": 12, "c": ["ffffff", "202020", "4387df", "0da243", "0da243",
+                        "ba8107", "ff1900"],
+        "w": 12, "ends": "round", "dot": 1, "by": "level"}, "draft": None}}})
+
+
+@pytest.mark.parametrize("colour, shown", [("949494", "3.03"),
+                                           ("8787fb", "3.04")])
+def test_unreadable_text_names_the_floor_and_a_ratio_under_it(colour, shown):
+    r = _text_on_white(colour)
+    assert (f"Text is unreadable: {shown}:1. It needs at least 3.05:1"
+            " before it can go to the board.") in r["checks"]
+    assert r["field"] == f"Unreadable: text is {shown}:1 on the background."
+    assert r["save"] is True
+
+
+def test_faint_text_is_not_rounded_up_to_the_readable_mark():
+    r = _text_on_white("777777")
+    assert "Text is faint: 4.47:1." in r["checks"]
+    assert r["field"] == "Faint: text is 4.47:1 on the background."
+    assert r["save"] is False

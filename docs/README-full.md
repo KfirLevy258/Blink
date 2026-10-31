@@ -484,11 +484,12 @@ built-ins. A custom theme has:
 - arcs coloured by how full they are, or one colour per gauge. Per gauge, a
   dial still turns to your high colour from 90 %.
 
-Text has to stand out from the background by at least 3:1, the point below
-which the small labels stop being readable at arm's length. A theme under
-that is refused with the measured ratio, before it reaches the board,
-because a panel nobody can read is one you would have to find Settings on
-through that same text.
+Text has to stand out from the background by at least 3.05:1: about 3:1 is
+the point below which the small labels stop being readable at arm's length,
+and the last 0.05 keeps a theme this side accepts clear of the board's own
+rounding. A theme under that is refused with the measured ratio, before it
+reaches the board, because a panel nobody can read is one you would have to
+find Settings on through that same text.
 
 A theme lives on the board and on your computer at once. One picked on the
 board is taken up by the computer; one set on the computer goes to the

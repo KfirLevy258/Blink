@@ -551,9 +551,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   }
   function press(sel, key, val) { document.querySelectorAll(sel).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset[key] === val)); }); }
   function textContrast() { return contrast(st.text, st.bg); }
+  // A ratio as the words give it: cut to two decimals, never rounded. One
+  // decimal, rounded, made 3.0335 read "3.0:1" under a floor named 3:1 and
+  // 4.478 read "4.5:1" under "4.5:1 or more is better"; a number rounded up
+  // to the one it fell short of contradicts the sentence it sits in (review
+  // of 1.4.0, builder N2).
+  function ratioText(c) { return (Math.floor(c * 100) / 100).toFixed(2); }
   function checks() {
     var out = [], c = textContrast();
-    out.push(c >= 4.5 ? ['ok', 'Text is readable: ' + c.toFixed(1) + ':1 against the background.'] : c >= MIN_CONTRAST ? ['warn', 'Text is faint: ' + c.toFixed(1) + ':1. Small labels will be hard to read on the panel; 4.5:1 or more is better.'] : ['bad', 'Text is unreadable: ' + c.toFixed(1) + ':1. It needs at least 3:1 before it can go to the board.']);
+    out.push(c >= 4.5 ? ['ok', 'Text is readable: ' + ratioText(c) + ':1 against the background.'] : c >= MIN_CONTRAST ? ['warn', 'Text is faint: ' + ratioText(c) + ':1. Small labels will be hard to read on the panel; 4.5:1 or more is better.'] : ['bad', 'Text is unreadable: ' + ratioText(c) + ':1. It needs at least ' + MIN_CONTRAST.toFixed(2) + ':1 before it can go to the board.']);
     var used = st.mode === 'level' ? ['low','mid','high'] : ['g1','g2','high'];
     var names = { low: 'Under 60%', mid: '60% to 90%', high: '90% and above', g1: 'Gauge 1', g2: 'Gauge 2' };
     var weak = used.filter(function (k) { return contrast(st[k], st.bg) < 2; });
@@ -566,7 +572,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // the side says what is wrong, but the owner fixing it is looking at
     // the colour, not the list.
     var at = {};
-    if (c < 4.5) at.text = at.bg = [c >= MIN_CONTRAST ? 'warn' : 'bad', (c >= MIN_CONTRAST ? 'Faint' : 'Unreadable') + ': text is ' + c.toFixed(1) + ':1 on the background.'];
+    if (c < 4.5) at.text = at.bg = [c >= MIN_CONTRAST ? 'warn' : 'bad', (c >= MIN_CONTRAST ? 'Faint' : 'Unreadable') + ': text is ' + ratioText(c) + ':1 on the background.'];
     weak.forEach(function (k) { at[k] = ['warn', 'Barely shows against the background.']; });
     SLOTS.forEach(function (s) { if (!bad[s.k]) fieldSay(s.k, at[s.k]); });
     var ul = document.getElementById('checks'); while (ul.firstChild) ul.removeChild(ul.firstChild);
