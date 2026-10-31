@@ -3254,7 +3254,16 @@ def cmd_uninstall(_args) -> int:
               # confirmed theme. Kept, a reinstall sent the old theme to the
               # board on its first connect, which is not what starting over
               # means (review S7, 2026-10-28).
-              *_theme_files(blink_home())):
+              *_theme_files(blink_home()),
+              # Whether the account has a five-hour window
+              # (pc/session_verdict), and the temp names its writer,
+              # theme._write_json, leaves after a killed write; `.tmp` is the
+              # fixed name the writer used before the /code-review max of
+              # 2026-11-01. Owner's decision that day: a reinstall starts
+              # fresh. Kept, an old "no window" verdict -- a misread one
+              # included -- put the next install straight into the burn view
+              # before it had seen any evidence of its own.
+              *_verdict_files()):
         _rm(p)
     # The per-session state directory, and everything under it. state.json
     # above is the single-slot file this replaced; it is still on the list so
@@ -3292,6 +3301,15 @@ def _theme_files(home: str) -> list:
         out.extend(install_statusline.temp_siblings(p))
     out.extend(glob.glob(os.path.join(glob.escape(home), ".theme-*.tmp")))
     return out
+
+
+def _verdict_files() -> list:
+    """The session-window verdict and every temp file its writer may have
+    left. The path is session_verdict's, resolved now, never at import
+    (tests/test_sandbox.py)."""
+    from pc import session_verdict
+    p = session_verdict.verdict_path()
+    return [p, p + ".tmp", *install_statusline.temp_siblings(p)]
 
 
 def _uninstall_codex_hooks() -> None:

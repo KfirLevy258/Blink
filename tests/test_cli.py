@@ -306,6 +306,34 @@ def test_uninstall_reports_removed_when_it_worked(tmp_path, capsys):
     assert not os.path.exists(cli.bin_dir())
 
 
+def test_uninstall_forgets_whether_the_account_has_a_window(tmp_path):
+    """Owner's decision after the /code-review max of 2026-11-01: a
+    reinstall starts fresh. Kept, an old "no window" verdict -- a misread
+    one included -- put the next install straight into the burn view before
+    any evidence had been seen. The verdict, the temp names theme._write_json
+    writes it through, and the fixed `.tmp` an earlier writer used all go.
+    Paths are asked of the code and checked against the caller's home
+    (tests/support/home.py) before anything is written."""
+    from pc import session_verdict
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    _verdict(tmp_path, False, time.time() - 60)
+    path = inside(tmp_path, session_verdict.verdict_path())
+    leftovers = [path + ".tmp", path + ".1234.0.blink-tmp",
+                 path + install_statusline._TEMP_SUFFIX]
+    for p in leftovers:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("{")
+    assert set(leftovers) <= set(
+        install_statusline.temp_siblings(path) + [path + ".tmp"])
+
+    cli.main(["uninstall"])
+
+    for p in [path] + leftovers:
+        assert not os.path.exists(p), p
+    assert session_verdict.SessionVerdict().current() is None
+
+
 def test_install_refuses_to_touch_a_settings_file_that_will_not_parse(
         tmp_path, capsys, monkeypatch):
     """Treating unparseable JSON as {} would write a fresh settings.json over
