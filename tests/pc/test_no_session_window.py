@@ -1687,3 +1687,22 @@ def test_every_described_kind_is_a_kind_evidence_can_carry():
     """KINDS restated DESCRIBE's keys by hand; a kind left out of one would
     have its evidence, and a verdict saved on it, silently dropped."""
     assert session_verdict.KINDS == tuple(session_verdict.DESCRIBE)
+
+
+def test_a_cost_too_big_for_a_float_is_no_cost(tmp_path):
+    """json reads an integer of any length up to 4300 digits, and float()
+    of one past 308 raises OverflowError: a status line whose
+    cost.total_cost_usd was such an int made every poll() raise, and the
+    status-line source was benched with backoff for as long as the file
+    said it. Claude Code would never write one; a corrupt or hand-edited
+    file can."""
+    p = tmp_path / "statusline.json"
+    doc = status(seven=12.0)
+    text = json.dumps(doc).replace('"total_cost_usd": 1.0',
+                                   '"total_cost_usd": 1' + "0" * 400)
+    p.write_text(text, encoding="utf-8")
+    os.utime(p, (NOW - 1, NOW - 1))
+
+    frames = ClaudeCliProvider(path=str(p)).poll(NOW)
+    assert frames[0].weekly_pct == 12.0
+    assert frames[0].window_evidence is None

@@ -500,8 +500,18 @@ def _cost(payload):
 
 
 def _number(v):
-    """A finite number as a float, else None: never a bool, NaN or inf."""
+    """A finite number as a float, else None: never a bool, NaN or inf.
+
+    Nor an int too big for a float. json reads integers of up to 4300
+    digits, float() of one past 308 raises OverflowError, and a cost that
+    size in the status line made every poll() raise, so the source was
+    benched for as long as the file said it (the /code-review max of
+    2026-11-01). Claude Code does not write one; a corrupt file can.
+    """
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    v = float(v)
+    try:
+        v = float(v)
+    except OverflowError:
+        return None
     return v if math.isfinite(v) else None
