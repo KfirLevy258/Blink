@@ -545,6 +545,70 @@ class TestEsptoolTextStaysOut(unittest.TestCase):
         self.assertIn("Timed out", why)
         self.assertNotIn("/dev/x", why)
 
+    def test_the_probe_timing_out_does_not_say_it_was_writing(self):
+        """The eFuse probe only reads; a log line saying "Timed out writing
+        the chip" after it sent a reader hunting for a write (review,
+        2026-10-31)."""
+        import subprocess
+
+        def slow(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, 60)
+        said = self._stderr_of(
+            lambda: self.assertIsNone(ota.flash_encrypted_chip(
+                "/dev/cu.fake", run=slow)))
+        self.assertIn("Timed out", said)
+        self.assertNotIn("writing", said)
+
+    def test_an_unclassified_failure_is_sentence_case(self):
+        """This reaches the board's screen, where every sentence starts with
+        one capital letter."""
+        why = ota.flash("/dev/cu.fake", b"x", run=self._run(
+            write_out="something nobody has seen", write_rc=3))[1]
+        self.assertTrue(why[0].isupper(), why)
+        self.assertEqual(why.split("(")[0].strip().split()[0], "Flash")
+        self.assertLessEqual(len(why), 47)
+
+    def test_a_cable_pulled_mid_write_is_told_from_an_unknown_failure(self):
+        """esptool 5.x: "A serial exception error occurred: ... device
+        disconnected or multiple access on port?"."""
+        why = ota.flash("/dev/cu.fake", b"x", run=self._run(
+            write_out="A serial exception error occurred: read failed: [Errno"
+                      " 6] Device not configured. Device disconnected or"
+                      " multiple access on port?", write_rc=2))[1]
+        self.assertIn("Serial port busy or missing", why)
+
+    def test_no_phrase_outgrows_the_board_even_with_a_windows_exit_code(self):
+        """3221225477 is 0xC0000005, an access violation, and ten digits."""
+        phrases = [p for _, p in ota._FAILURES]
+        phrases += [ota._why_it_failed("nothing known", 3221225477)]
+        for p in phrases:
+            line = p if "(exit" in p else f"{p} (exit 3221225477)"
+            self.assertLessEqual(len(line), 47, line)
+        self.assertLessEqual(len(ota._why_it_failed(
+            "failed to connect", 3221225477)), 47)
+
+    def test_the_first_matching_family_wins(self):
+        """The order in _FAILURES is deliberate: a failed connect that also
+        mentions line noise is a failed connect, and says so."""
+        why = ota.flash("/dev/cu.fake", b"x", run=self._run(
+            write_out=self.NOISE, write_rc=2))[1]
+        self.assertIn("Could not reach the chip", why)
+        self.assertNotIn("Transfer stopped", why)
+
+    def test_a_runner_failure_outside_the_tool_run_names_its_class_only(self):
+        """flash()'s own except is the last net: whatever raises past
+        _esptool_run is reported as a class name, never its message."""
+        original = ota._esptool_run
+
+        def boom(*a, **k):
+            raise RuntimeError("MAC " + self.MAC + " and byte 0x41")
+        ota._esptool_run = boom
+        try:
+            why = ota.flash("/dev/cu.fake", b"x", run=self._run())[1]
+        finally:
+            ota._esptool_run = original
+        self.assertEqual(why, "Flash failed (RuntimeError)")
+
 
 if __name__ == "__main__":
     unittest.main()

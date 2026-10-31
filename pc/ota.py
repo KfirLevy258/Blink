@@ -237,15 +237,17 @@ FLASH_BAUD = 115200
 # by looking for these fragments (lower case) in the tool's output. First match
 # wins, so the order is deliberate: a failed connect that also mentions line
 # noise is a failed connect. Each phrase fits the 47 characters the board
-# keeps. The output itself is looked at and thrown away -- see
+# keeps even beside a Windows exit code of ten digits (3221225477); the
+# longest, "Serial port busy or missing", is 45 with one. The output itself is looked at and thrown away -- see
 # _why_it_failed.
 _FAILURES = (
     (("could not open port", "access is denied", "resource busy",
-      "permission denied", "no such file", "could not configure port"),
+      "permission denied", "no such file", "could not configure port",
+      "serial exception", "device disconnected", "device not configured"),
      "Serial port busy or missing"),
     (("failed to connect", "wrong boot mode", "no serial data received",
       "timed out waiting for packet header"),
-     "Could not reach the bootloader"),
+     "Could not reach the chip"),
     (("md5 of file does not match", "verify failed", "content mismatch"),
      "Write did not verify"),
     (("invalid head of packet", "possible serial noise", "packet content"),
@@ -268,13 +270,15 @@ def _why_it_failed(text, returncode, exc=None):
     """
     if exc is not None:
         if isinstance(exc, subprocess.TimeoutExpired):
-            return "Timed out writing the chip"
+            # Not "writing": the eFuse probe times out too, and only reads.
+            return "Timed out talking to the chip"
         return f"Could not run esptool ({type(exc).__name__})"
     low = (text or "").lower()
     for fragments, phrase in _FAILURES:
         if any(f in low for f in fragments):
             return f"{phrase} (exit {returncode})"
-    return f"esptool failed (exit {returncode})"
+    # Sentence case: this reaches the board's screen.
+    return f"Flash failed (exit {returncode})"
 
 
 def _esptool_run(exe, port, baud, args, run, timeout=900):
