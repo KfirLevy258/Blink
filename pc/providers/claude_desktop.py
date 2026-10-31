@@ -193,15 +193,11 @@ def _pct(u: dict, key: str) -> float:
 def _sample_to_frame(sample: dict, now_epoch=None):
     """(frame-shaped dict, observed_at) from one sample, or (None, None).
 
-    With `now_epoch`, a session figure older than a window is dropped HERE,
-    before the test for a sample carrying neither percentage, so a sample
-    whose only figure has retired counts as one that says nothing and an
-    older sample with a weekly figure is used instead. Retired after that
-    test, as it first was, a newest sample with fh and no sd became a frame
-    with no usage at all, the weekly figure in the samples before it was
-    never offered, and on a Desktop-only desk the bus sent nothing (review,
-    2026-10-31). The rate's series reads samples without a clock, since it
-    judges age its own way.
+    With `now_epoch`, a session figure older than a window is retired
+    (base.session_outlived): it comes back UNKNOWN. A sample whose only
+    figure has retired is still returned, with both figures unknown, and
+    _newest_sample ranks it below any sample that says more. The rate's
+    series reads samples without a clock, since it judges age its own way.
     """
     if not isinstance(sample, dict):
         return None, None
@@ -219,14 +215,14 @@ def _sample_to_frame(sample: dict, now_epoch=None):
         return None, None
     fh = _pct(u, "fh")
     sd = _pct(u, "sd")
-    if now_epoch is not None and base.session_outlived(observed_at, now_epoch):
-        fh = base.UNKNOWN
     if fh < 0 and sd < 0:
         # A sample carrying neither percentage tells us nothing. Returning it
         # anyway would let it win a recency contest against a real reading
         # purely by being newer, which is how a fresh empty source blanks a
         # good stale one.
         return None, None
+    if now_epoch is not None and base.session_outlived(observed_at, now_epoch):
+        fh = base.UNKNOWN
     return {"session_pct": fh, "weekly_pct": sd}, observed_at
 
 
@@ -239,15 +235,31 @@ def _newest_sample(samples, now_epoch=None):
     not control, and the cost of being wrong is silently showing an old
     reading as current. max() costs one pass over a list that is a few
     thousand entries at most.
+
+    A sample with a figure still standing outranks every sample whose only
+    figure has retired (_sample_to_frame), however much newer: retired, a
+    newest sample with fh and no sd says nothing, and the weekly figure in
+    the samples before it must still be offered (review, 2026-10-31). When
+    every sample is retired, the newest of them is the answer, with both
+    figures unknown: the file is still the app's and still read -- `blink
+    status` must not call it a changed format -- so it stands with nothing
+    to offer but its age. Alone on the bus that sends nothing, after five
+    hours and ten minutes with no sample, which means Claude Desktop has
+    been closed that long: the board went to sleep at four hours without
+    contact (firmware SLEEP_ABSENT_AFTER_S), so the reading it last drew is
+    not on screen. That answer used to come from a second pass over the
+    file without the clock, which could only ever find the same.
     """
-    best, best_t = None, None
+    best, best_rank = None, None
     for s in samples:
         fields, observed_at = _sample_to_frame(s, now_epoch)
         if fields is None:
             continue
-        if best_t is None or observed_at > best_t:
-            best, best_t = fields, observed_at
-    return best, best_t
+        rank = (fields["session_pct"] >= 0 or fields["weekly_pct"] >= 0,
+                observed_at)
+        if best_rank is None or rank > best_rank:
+            best, best_rank = fields, rank
+    return best, (best_rank[1] if best_rank is not None else None)
 
 
 # --- burn rate -----------------------------------------------------------
@@ -484,20 +496,10 @@ class ClaudeDesktopProvider(base.ProviderParser):
         except Exception:
             burn = None
         try:
+            # Every sample's only figure a retired session still comes back,
+            # both figures unknown, at the newest sample's time: see
+            # _newest_sample.
             fields, sample_at = parser(doc, now_epoch)
-            if fields is None:
-                # Every sample's only figure is a retired session. The file
-                # is still ours and still read -- `blink status` must not
-                # call it a changed format -- so the newest sample stands,
-                # with nothing to offer but its age. Alone on the bus that
-                # sends nothing, after five hours and ten minutes with no
-                # sample, which means Claude Desktop has been closed that
-                # long: the board went to sleep at four hours without
-                # contact (firmware SLEEP_ABSENT_AFTER_S), so the reading it
-                # last drew is not on screen.
-                fields, sample_at = parser(doc)
-                if fields is not None:
-                    fields = dict(fields, session_pct=base.UNKNOWN)
         except Exception:
             # A parser is not allowed to take the daemon down over an
             # upstream layout change. This is the graceful-degradation path:

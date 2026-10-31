@@ -659,6 +659,31 @@ def test_a_cache_whose_only_figures_retired_is_still_read(tmp_path):
     assert not frame.has_usage()
 
 
+def test_a_cache_whose_only_figures_retired_is_reduced_once(tmp_path,
+                                                           monkeypatch):
+    """It was parsed a second time, without the clock, for a result that
+    could only ever be both figures unknown at the newest sample's time
+    (review, 2026-10-31). Each sample is now read once for the reading and
+    once for the rate's series, which judges age its own way."""
+    from pc.providers import claude_desktop
+    f = desktop_doc(tmp_path / "plan-usage-history.json",
+                    [(NOW - 7 * 3600, 20, None), (NOW - 6 * 3600, 30, None)])
+    calls = []
+    real = claude_desktop._sample_to_frame
+
+    def counting(sample, *args):
+        calls.append(sample)
+        return real(sample, *args)
+    monkeypatch.setattr(claude_desktop, "_sample_to_frame", counting)
+
+    frame = ClaudeDesktopProvider(path=str(f)).poll(NOW)[0]
+
+    assert (frame.session_pct, frame.weekly_pct) == (base.UNKNOWN,
+                                                     base.UNKNOWN)
+    assert frame.observed_at == NOW - 6 * 3600
+    assert len(calls) == 2 * 2
+
+
 # --- merge: what voids the mark (findings 3, 4, 13) --------------------------
 
 

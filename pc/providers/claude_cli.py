@@ -124,12 +124,18 @@ class ClaudeCliProvider(base.ProviderParser):
         # long as the daemon, so its path was fixed by whatever HOME was when
         # it was made (found in review). CLAUDE.md names this hole.
         self._path = path
-        # (payload, mtime) for the last reading that had a five-hour
-        # percentage, or None before the first one. See the module docstring.
+        # (payload, mtime) for the last reading whose frame put a figure on
+        # the session dial when it was read, or None before the first one.
+        # The frame's, not the payload's: a five_hour percentage the frame
+        # refused -- one whose resets_at will not read, fetched more than a
+        # window ago (_frame) -- is not remembered. See the module docstring.
         self._remembered = None
-        # (payload, mtime) for the last reading with any usable figure, or
-        # None. The same tuple object as _remembered when one payload is
-        # both, which is how poll() knows not to offer it twice.
+        # (payload, mtime) for the last reading whose payload has any usable
+        # figure, or None. When that reading also became _remembered, poll()
+        # stored the same tuple object in both, and it compares them by
+        # identity so as not to offer one payload twice. A reading with a
+        # weekly figure and no session one is this and not _remembered, and
+        # so is one whose five_hour figure the frame refused.
         self._any = None
         # The latest moment a payload this process read showed a five-hour
         # window to exist, or None if it has read none. A time, not a flag:
@@ -238,18 +244,21 @@ class ClaudeCliProvider(base.ProviderParser):
         was filled by a Desktop sample two days old, and that borrowed
         source then named and dated the whole frame.
 
-        Yes when the payload has a usable seven_day, no five-hour window
-        (statusline_source.window_present, the one definition), and no
-        payload this provider has read showed a window existing within
-        SESSION_WINDOW_S + SESSION_SLACK_S before the figures in this one
-        were fetched (_note_window). Both halves are read off the payload
-        and its own times, never the poll's clock: a file read an hour after
-        it was written says what it said when it was written. The previous
-        rule judged the weekly figure at the poll's clock and the window at
-        the payload's (review, 2026-10-31). A payload that carries a window
-        is also its own sighting, since poll() notes it first, so the
-        window_present test below is what the sentence says rather than
-        the only thing that keeps such a payload unmarked.
+        Yes when the payload has a usable seven_day, and no payload this
+        provider has read showed a window existing within SESSION_WINDOW_S +
+        SESSION_SLACK_S before the figures in this one were fetched
+        (_note_window; base.session_outlived is that bound, the one Claude
+        Desktop's samples and a stampless five_hour are retired by). Both
+        halves are read off the payload and its own times, never the poll's
+        clock: a file read an hour after it was written says what it said
+        when it was written. The previous rule judged the weekly figure at
+        the poll's clock and the window at the payload's (review,
+        2026-10-31). A payload that carries a five-hour window
+        (statusline_source.window_present, the one definition) is never
+        marked, because it is its own sighting: poll() notes it before any
+        frame is made of it, at no earlier than its mtime, and the fetch
+        time is never later than the mtime. It used to be asked
+        window_present a second time here as well (review, 2026-10-31).
 
         The last condition is what tells Ultra from the shape that looks
         exactly like it. Claude Code drops an expired five_hour and
@@ -285,15 +294,11 @@ class ClaudeCliProvider(base.ProviderParser):
         sooner when it holds a window that is still open: a reset time ahead
         of the clock proves a window (normalizer.merge).
         """
-        limits = _limits(payload)
-        if limits is None or ss.window_present(limits, "five_hour"):
-            return False
-        if not ss.window_usable(limits, "seven_day"):
+        if not ss.window_usable(_limits(payload), "seven_day"):
             # Nothing to put in the dial's place, and no claim to make.
             return False
         seen = self._window_seen_at
-        return (seen is None or fetched_at - seen
-                > base.SESSION_WINDOW_S + base.SESSION_SLACK_S)
+        return seen is None or base.session_outlived(seen, fetched_at)
 
     def _frame(self, payload, mtime, now_epoch):
         """The frame this payload maps to now, dated, bounded and marked.
