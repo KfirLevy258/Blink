@@ -54,7 +54,8 @@ persisted, but by pc/session_verdict, as a verdict and not as a payload.
 
 What this provider proves about that window goes on its frames as
 window_evidence, for pc/session_verdict to weigh. A payload with a
-five-hour window proves one, dated when its block was fetched. A payload without one proves nothing on its own: that is
+five-hour window proves one, dated no later than the start of that window
+(_window_dated). A payload without one proves nothing on its own: that is
 also every Pro and Max status line from a reset to the next reply. Proof of
 NO window is two replies of one session that came back without one, far
 enough apart that no reset can explain them (_reply_without_window).
@@ -377,13 +378,11 @@ class ClaudeCliProvider(base.ProviderParser):
             # Desktop's stampless samples are: five hours and ten minutes
             # after it was fetched, a window open then has ended.
             frame.session_pct = base.UNKNOWN
-        if ss.window_present(_limits(payload), "five_hour"):
-            # A window, dated when its block was fetched: a remembered
-            # payload re-offered hours later is evidence from then, and
-            # anything newer outranks it (pc/session_verdict).
+        limits = _limits(payload)
+        if ss.window_present(limits, "five_hour"):
             frame.window_evidence = session_verdict.evidence(
                 True, session_verdict.KIND_STATUSLINE_WINDOW,
-                frame.first_seen_at)
+                _window_dated(limits, frame.first_seen_at))
         return frame
 
     def poll(self, now_epoch):
@@ -438,6 +437,35 @@ class ClaudeCliProvider(base.ProviderParser):
             if last is not None:
                 frames.append(last)
         return frames
+
+
+def _window_dated(limits, first_seen_at):
+    """When a five_hour block proves the account had a window.
+
+    No later than the start of the window it describes, its resets_at less
+    a window, when that stamp reads. first_seen_at, the date this used to
+    carry, is this process's first sighting of the block, and it is only
+    the fetch time if the process was watching when the block arrived. A
+    restarted daemon, or one that first saw a terminal left open repaint a
+    block it fetched hours ago, dated that block by the repaint: on an Ultra
+    desk a block fetched before the change, repainted after a reply had
+    proved no window, overturned the saved verdict (the /code-review max of
+    2026-11-01, finding 4). The window's start does not depend on who was
+    watching, and it is the moment the account certainly had a window.
+
+    Earlier is the safe side here. The only evidence it now loses to is a
+    no-window proof from inside the window itself, and on Pro or Max there
+    is none such (_reply_without_window); a change of plan to Ultra is the
+    one real case, and there the proof is right. A change back opens
+    windows that start after it. The min() with first_seen_at also keeps a
+    stamp in the wrong unit, or from a broken clock, from dating a window
+    in the future, where it would outrank every proof for as long as the
+    clock took to catch up.
+    """
+    resets_at = ss._window(limits, "five_hour")[1]
+    if resets_at is None:
+        return first_seen_at
+    return min(first_seen_at, resets_at - base.SESSION_WINDOW_S)
 
 
 def _limits(payload):

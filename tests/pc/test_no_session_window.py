@@ -255,7 +255,9 @@ def test_the_borrowed_burn_rate_and_countdown_are_not_sent(tmp_path):
 
 def test_five_hour_coming_back_behaves_as_before(tmp_path):
     """An unverified account, or a policy reversal: a status line with a
-    window is newer evidence than the Desktop sample that set the mark."""
+    window is newer evidence than the Desktop sample that set the mark. The
+    window is one that opened after that sample, as a reversal's would: a
+    block is dated by its window's start (claude_cli._window_dated)."""
     p = tmp_path / "statusline.json"
     bus = ingest.IngestionBus(
         providers=[ClaudeCliProvider(path=str(p)),
@@ -266,10 +268,12 @@ def test_five_hour_coming_back_behaves_as_before(tmp_path):
     assert wire(bus)["session_pct"] == -1
     assert bus.claude_page().no_session_window is True
 
-    write(p, payload(five_hour=31.0, resets_at=NOW + 3600), NOW - 1)
+    opened = NOW - 600
+    write(p, payload(five_hour=31.0,
+                     resets_at=opened + base.SESSION_WINDOW_S), NOW - 1)
     msg = wire(bus)
     assert msg["session_pct"] == 31.0
-    assert msg["session_resets_in_s"] == 3600
+    assert msg["session_resets_in_s"] == base.SESSION_WINDOW_S - 600
     assert msg["src"] == "cli"
     assert msg["stale"] is False
     assert bus.claude_page().no_session_window is False
@@ -1573,6 +1577,26 @@ def test_a_single_reply_is_not_yet_proof_and_a_second_is(tmp_path):
         proofs += watched(prov, v, p, [(status(cost=cost), t)])
 
     assert proofs and proofs[0][1] == session_verdict.KIND_STATUSLINE_REPLY
+    assert session_verdict.load(session_verdict.verdict_path())[0] is False
+
+
+def test_finding_4_an_old_terminals_block_does_not_unmark_a_restart(
+        tmp_path):
+    """Ultra, verified: terminal Y's reply proved no window at T-1000 s and
+    the verdict was saved. Terminal X still holds a five_hour block it
+    fetched at T-2h, before the change, and repaints it at T-30 s. A
+    restarted daemon had never seen that block, dated it by the repaint,
+    and the window "outranked" the proof: the saved verdict went to
+    window. Dated from the block's own reset stamp, it is from T-2h."""
+    T = NOW
+    proved(tmp_path, has_window=False, at=T - 1000)
+    p = tmp_path / "statusline.json"
+    x = status(five=40.0, five_resets=T - 2 * 3600 + base.SESSION_WINDOW_S,
+               seven=20.0, session="x", cost=7.0)
+    v = session_verdict.SessionVerdict()
+    write(p, x, T - 30)
+
+    assert v.observe(ClaudeCliProvider(path=str(p)).poll(T), T) is True
     assert session_verdict.load(session_verdict.verdict_path())[0] is False
 
 
