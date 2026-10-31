@@ -11,8 +11,10 @@ Only when the account has no session window. The daemon already decides that:
 `pc/session_verdict` on positive evidence only, never because data is quiet.
 Proof of no window: a Claude Desktop history sample with a usable `sd` and
 no `fh` key (measured on a verified Ultra account, 2026-10-31), or a Claude
-Code reply that came back without `five_hour` (the same session's
-`cost.total_cost_usd` rose between two weekly-only status lines). Proof of a window,
+Code session that replied twice without `five_hour` (its
+`cost.total_cost_usd` rose between weekly-only status lines, at two replies
+25 minutes to 4 h 35 min apart, so that no single reset explains both: one
+request streaming across a Pro or Max reset does it once). Proof of a window,
 which clears the mark: a status line with `five_hour`, a Desktop sample whose
 `fh` is a number, a Local Storage reading or reset stamp. The newest evidence
 wins. With none either way there is no mark, so Pro and Max never see this

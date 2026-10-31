@@ -23,10 +23,12 @@ Evidence of NO window, measured on this desk's verified Ultra account on
     samples before it (10-28, 10-29) had `fh` 0 and 1. A key that is
     present and null is not this evidence: absent is the claim.
     (pc/providers/claude_desktop)
-  - a Claude Code reply that came back without a five-hour window. On Pro
+  - Claude Code replies that came back without a five-hour window. On Pro
     and Max every API response carries the five-hour headers, so a reply
-    brings five_hour back into the status line; a reply after which it is
-    still absent is proof. (pc/providers/claude_cli)
+    brings five_hour back into the status line. One reply after which it is
+    still absent is not enough -- a request in flight across a reset does
+    that on Pro and Max -- but two in one session, far enough apart that no
+    single reset explains both, are proof. (pc/providers/claude_cli)
 
 Evidence of a window, any of which clears the mark:
 

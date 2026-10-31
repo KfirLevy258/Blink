@@ -54,10 +54,10 @@ persisted, but by pc/session_verdict, as a verdict and not as a payload.
 
 What this provider proves about that window goes on its frames as
 window_evidence, for pc/session_verdict to weigh. A payload with a
-five-hour window proves one, dated when its block was fetched. A payload
-without one proves nothing on its own: that is also every Pro and Max
-status line from a reset to the next reply. Proof of NO window is a reply
-that came back without one (_reply_without_window).
+five-hour window proves one, dated when its block was fetched. A payload without one proves nothing on its own: that is
+also every Pro and Max status line from a reset to the next reply. Proof of
+NO window is two replies of one session that came back without one, far
+enough apart that no reset can explain them (_reply_without_window).
 
 There is one more memory, and it answers a different question: not which
 payload to fall back on, but how long ago the figures in the current one
@@ -97,6 +97,30 @@ FETCH_MEMORY_LIMIT = 256
 # session this process has seen render weekly-only; a desk runs a handful at
 # once, and the oldest goes first.
 REPLY_MEMORY_LIMIT = 64
+
+# What a reply without a window has to look like before it is proof. See
+# _reply_without_window for the argument; the three numbers are its inputs.
+#
+# REPLY_GAP_S: the longest two renders of one session may be apart for the
+# cost between them to count as a reply. Claude Code renders every few
+# seconds while it is open (docs/research/claude-ultra-no-session-window.md),
+# so a longer silence is time nobody was watching -- the board unplugged
+# (polls run only while it is alive), a provider cooldown, the daemon down
+# -- and a whole window can open and close inside it. That is finding 2 of
+# the /code-review max of 2026-11-01: a 09:00 baseline at 3.00, five hours
+# of unpolled replies with five_hour, and a 14:05 weekly-only render at
+# 4.00 read as a reply.
+REPLY_GAP_S = 600
+# REPLY_STREAM_S: the longest one API request can stream. Claude Code gives
+# up on a request after API_TIMEOUT_MS, ten minutes unless the user raises
+# it; five more minutes of margin. A request accepted before a reset and
+# finished after it is the other half of the problem (finding 1).
+REPLY_STREAM_S = 900
+# REPLY_APART_S and REPLY_WITHIN_S: how far apart the two replies that make
+# a proof must be. Far enough that one reset cannot explain both, and close
+# enough that two consecutive resets, five hours apart, cannot either.
+REPLY_APART_S = REPLY_GAP_S + REPLY_STREAM_S
+REPLY_WITHIN_S = base.SESSION_WINDOW_S - REPLY_APART_S
 
 
 def _block_key(payload):
@@ -152,9 +176,10 @@ class ClaudeCliProvider(base.ProviderParser):
         # weekly figure and no session one is this and not _remembered, and
         # so is one whose five_hour figure the frame refused.
         self._any = None
-        # {session_id: cost.total_cost_usd, or None} of that session's last
-        # weekly-only payload: the baseline a reply is
-        # recognised against. See _reply_without_window and
+        # {session_id: (cost.total_cost_usd or None, mtime, first reply's
+        # mtime or None)} of that session's last weekly-only payload: the
+        # baseline a reply is recognised against, and the reply a second
+        # one is measured from. See _reply_without_window and
         # REPLY_MEMORY_LIMIT.
         self._weekly_only = {}
         # {block key: [oldest mtime it appeared under, epoch its first
@@ -252,28 +277,79 @@ class ClaudeCliProvider(base.ProviderParser):
         came after it, and the burn reader that has them only runs once the
         verdict is in.
 
-        Dated by the payload's mtime, the render after the reply. Its
-        rate_limits block may be one the fetch-time memory has seen before
-        -- the weekly figure need not move -- so first_seen_at would date it
-        to before the reply.
+        ONE REPLY IS NOT PROOF; two far enough apart are. The /code-review
+        max of 2026-11-01 found two ways a Pro or Max desk produced "a
+        reply without a window", and either one saved a no-window verdict
+        that outlived a restart -- the burn view on a desk that has a
+        session gauge, which is the worst thing this module can do:
+
+          - finding 1, a request accepted before a reset and still
+            streaming after it. Claude Code re-renders a second after the
+            reset without the expired five_hour; when the stream ends it
+            credits the cost and applies headers whose five_hour resets at
+            that same moment, which the render filter drops again. Cost
+            rose between two weekly-only renders. Parallel subagents in
+            flight across the reset do it several times;
+          - finding 2, a baseline from before a gap in the polling. Polls
+            run only while the board is alive, and a session that replied
+            all morning with five_hour while nobody polled, then re-rendered
+            weekly-only when the window ended, had risen since its 09:00
+            baseline.
+
+        So a reply counts only against a render of the same session at
+        most REPLY_GAP_S before it (finding 2: an older baseline is a new
+        baseline, never a comparison). On Pro or Max such a reply, rendered
+        weekly-only at t, can only be a request that was accepted inside a
+        window and finished after its reset R: accepted after its previous
+        render less REPLY_STREAM_S, so R lies in (t - REPLY_APART_S, t].
+        Two replies at least REPLY_APART_S apart then need two different
+        resets, and consecutive resets are at least a window apart, so two
+        replies also less than REPLY_WITHIN_S apart cannot both happen on
+        Pro or Max. On Ultra a working session makes them within half an
+        hour, and the verdict is kept from then on.
+
+        Every five_hour seen in the file, from any session, starts every
+        session's count again: the account has a window, whatever the
+        arithmetic says. And so does this session's cost falling, which is
+        not one counter going down but two processes on one session_id
+        (`claude --continue` twice): their idle repaints alternate, and
+        every other one was a rise (finding 1's second trigger).
+
+        Dated by the payload's mtime, the render after the second reply.
+        Its rate_limits block may be one the fetch-time memory has seen
+        before -- the weekly figure need not move -- so first_seen_at would
+        date it to before the reply.
         """
         limits = _limits(payload)
+        if ss.window_present(limits, "five_hour"):
+            # A window: every session's next weekly-only payload starts a
+            # new count rather than being compared across it.
+            self._weekly_only.clear()
+            return None
         sid = payload.get("session_id") if isinstance(payload, dict) else None
         if not isinstance(sid, str) or not sid:
-            return None
-        if ss.window_present(limits, "five_hour"):
-            # A window: the next weekly-only payload of this session starts
-            # a new baseline rather than being compared across it.
-            self._weekly_only.pop(sid, None)
             return None
         if not ss.window_usable(limits, "seven_day"):
             return None
         cost = _number(_cost(payload))
         before = self._weekly_only.pop(sid, None)
-        self._weekly_only[sid] = cost           # newest last, for the cap
+        first = None
+        proof = False
+        if before is not None and cost is not None and before[0] is not None:
+            was, seen, first = before
+            if not 0 <= mtime - seen <= REPLY_GAP_S or cost < was:
+                first = None                # unwatched, or two processes
+            elif cost > was:                # a reply
+                if first is not None and mtime - first >= REPLY_WITHIN_S:
+                    first = None
+                if first is None:
+                    first = mtime
+                else:
+                    proof = mtime - first >= REPLY_APART_S
+        self._weekly_only[sid] = (cost, mtime, first)   # newest last
         while len(self._weekly_only) > REPLY_MEMORY_LIMIT:
             del self._weekly_only[next(iter(self._weekly_only))]
-        if before is None or cost is None or not cost > before:
+        if not proof:
             return None
         return session_verdict.evidence(
             False, session_verdict.KIND_STATUSLINE_REPLY, mtime)
