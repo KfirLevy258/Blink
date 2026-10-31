@@ -85,12 +85,13 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**3022 passing, 1 skipped** (os.startfile, Windows only) as of 2026-10-31, on macOS. The last count proved on all
-three platforms was 2871, earlier that day: Ubuntu (Docker, x86_64) 2787
-passed and 84 skipped, Windows (ARM64 VM) 2626 passed and 239 skipped, none
-failing. The skips are
-platform tests and, on Windows, the builder-page tests that need Node. Re-run
-Ubuntu and Windows before claiming them for a new number. Everything in
+**3032 passing, 1 skipped** (os.startfile, Windows only) as of 2026-10-31, on
+macOS. The last runs on the other two platforms were on 2026-10-30, each
+measured on the tree of its own run and not added up into one number: Ubuntu
+(Docker, x86_64) 2787 passed and 84 skipped, Windows (ARM64 VM) 2626 passed
+and 239 skipped, none failing. The skips are platform tests and, on Windows,
+the builder-page tests that need Node. Re-run Ubuntu and Windows before
+claiming them for a new number. Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though
 nothing in `pc/` imports it; `numpy` and `Pillow` are only
 needed by the logo and boot-animation encoder tests. CI runs the same
@@ -107,7 +108,9 @@ around it. It:
   it had every Codex test reading their real rollouts. The environment half
   is the plain function `sandbox_environment()`, so `tests/test_sandbox.py`
   can set CODEX_HOME itself and prove it is cleared rather than rely on a
-  shell that CI never has;
+  shell that CI never has. It clears the daemon's `BLINK_*` variables too
+  (`BLINK_STATUS_DIR` alone, exported, failed 31 tests), and
+  `tests/test_sandbox.py` fails on a new one it does not handle;
 - sets `BLINK_SKIP_SERVICE=1`, because a test once booted out the launchd
   agent of the person logged in. The service code now also skips on its own
   when `HOME` is not the account's home (`pwd`, POSIX), which is every test,
