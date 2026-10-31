@@ -922,8 +922,10 @@ def burn(provider: str, q: int, tokens) -> dict:
     and 1 and read "steady". `p` names the page it belongs to, the id `usage`
     carries in `provider`; always "claude" for now.
 
-    Its own line, not fields on `usage`, which measures 484 of 512 bytes with
-    two providers loaded and has no room for twenty numbers. Additive like
+    Its own line, not fields on `usage`, which measures 454 of 512 bytes at
+    its widest with two providers loaded (computed over every source id by
+    tests/pc/test_protocol.py, 2026-10-31; this said 484, a figure from
+    before) and has no room for twenty numbers. Additive like
     `svc`: firmware that predates it ignores an unknown type, and it is sent
     only to a board whose caps list BOARD_CAP_BURN anyway. `v` is
     PROTO_VERSION like every other line; the board reads `v` only on welcome.
