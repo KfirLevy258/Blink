@@ -4385,6 +4385,16 @@ def cmd_theme(args) -> int:
                   f"{theme_mod.board_name(i)}{extra}")
         return 0
     if action == "show":
+        # A theme.json that is there and cannot be read is not "nothing set":
+        # set and reset refuse to write over it, and show said the board
+        # chose for itself, so the refusal that followed had no explanation
+        # (review of 1.4.0, builder N7).
+        try:
+            theme_mod.read_saved_file(home)
+        except theme_mod.Unreadable as e:
+            print("Theme: the saved theme file could not be read.")
+            print(f"{e}.")
+            return 1
         for line in _theme_lines(theme_mod.load_saved(home)):
             print(line)
         note = _theme_kept_note(home)
@@ -4413,7 +4423,7 @@ def cmd_theme(args) -> int:
         # the cancel when a save is owed.
         theme_mod.write_cancel(home)
     except OSError as e:
-        print(f"Could not save the theme: {e}")
+        print(f"Could not save the theme: {e}.")
         return 1
     for line in _theme_lines(theme_mod.load_saved(home)):
         print(line)

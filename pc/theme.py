@@ -576,6 +576,13 @@ def _read_existing(path):
     return obj
 
 
+def read_saved_file(home):
+    """theme.json as a dict ({} when there is none), or Unreadable when it is
+    there and cannot be read. For a reader that must tell "nothing set" from
+    "could not look"."""
+    return _read_existing(theme_path(home))
+
+
 def _kept_keys(obj):
     """What theme.json holds besides a theme: whatever a newer daemon adds,
     which the contract says every writer keeps (Addendum 4). A "seen" that

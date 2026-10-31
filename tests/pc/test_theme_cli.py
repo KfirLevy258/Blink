@@ -531,3 +531,33 @@ def test_reset_list_and_show_take_no_other_words(argv, capsys):
     assert f"blink theme {argv[1]} takes nothing after it" in out
     assert "blink theme set ocean" in out      # what was probably meant
     assert theme.load_saved(home()) == {"id": 1}
+
+
+def test_show_says_when_the_theme_file_cannot_be_read(capsys):
+    """Review of 1.4.0 (builder), N7. With theme.json holding `{"id": 4,`,
+    set and reset refused ("... is there but could not be read
+    (JSONDecodeError); it was left as it is"), but show said "Theme: the
+    board's own choice. Nothing is set from this computer", which is false
+    of a file that is there, and the next set was refused with no hint why.
+    The refusals also ended without a full stop."""
+    h = home()
+    os.makedirs(h, exist_ok=True)
+    with open(inside(h, theme.theme_path(h)), "w", encoding="utf-8") as f:
+        f.write('{"id": 4,')
+    assert cli.main(["theme", "show"]) == 1
+    out = capsys.readouterr().out
+    assert "could not be read" in out
+    assert "Nothing is set" not in out
+    assert "(JSONDecodeError)" in out
+    assert out.strip().endswith("Fix it or delete it.")
+    for argv in (["theme", "set", "ocean"], ["theme", "reset"]):
+        assert cli.main(argv) == 1
+        assert capsys.readouterr().out.strip().endswith(
+            "Fix it or delete it.")
+    with open(theme.theme_path(h), encoding="utf-8") as f:
+        assert f.read() == '{"id": 4,'          # left as it was
+
+
+def test_show_with_no_theme_file_still_says_nothing_is_set(capsys):
+    assert cli.main(["theme", "show"]) == 0
+    assert "Nothing is set from this computer" in capsys.readouterr().out
