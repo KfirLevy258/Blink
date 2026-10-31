@@ -37,9 +37,23 @@ import pytest
 
 # Pointed under the sandbox's home for every test.
 SET_UNDER_HOME = ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA")
-# Removed for every test: each names a home of its own and outranks HOME for
-# the code that reads it.
-CLEARED = ("CODEX_HOME",)
+# Removed for every test. CODEX_HOME names a home of its own and outranks HOME
+# for the code that reads it. The BLINK_* ones are each read by the daemon and
+# each outranks something a test injects: BLINK_STATUS_DIR is read INSTEAD of
+# the injected status-page opener (exported, it failed 31 tests, among them
+# the one that proves the suite refuses a real request, found by the review of
+# PR #4, 2026-10-31); BLINK_RELEASE_PUBKEY_FILE replaces the shipped release
+# key; BLINK_OTA_DIR replaces the release feed; BLINK_TAP and BLINK_SCENARIO
+# make the daemon write a transcript or play a script; the rest switch the
+# poll interval, the watchdog and auto-update. A test that wants one sets it
+# itself, after this. tests/test_sandbox.py fails if the code reads a BLINK_*
+# variable that is in neither this list nor SET_BY_FIXTURE.
+CLEARED = ("CODEX_HOME", "BLINK_STATUS_DIR", "BLINK_STATUS_POLL_S",
+           "BLINK_RELEASE_PUBKEY_FILE", "BLINK_OTA_DIR", "BLINK_TAP",
+           "BLINK_SCENARIO", "BLINK_POLL_INTERVAL_S", "BLINK_NO_WATCHDOG",
+           "BLINK_NO_AUTO_UPDATE", "BLINK_ALLOW_FOREIGN_HOME")
+# Set to a value for every test, by their own fixtures below.
+SET_BY_FIXTURE = ("BLINK_SKIP_SERVICE",)
 
 
 def _point_home_at(monkeypatch, home):

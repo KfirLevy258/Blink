@@ -348,6 +348,34 @@ def test_the_guard_leaves_call_time_resolution_alone():
         assert offenders({"<src>": src}) == [], src
 
 
+def test_the_sandbox_clears_every_variable_it_lists(tmp_path, monkeypatch):
+    """Exported in the developer's shell, any of them changes what a test
+    reads: BLINK_STATUS_DIR alone failed 31 tests. As with CODEX_HOME below,
+    they are exported HERE and the sandbox applied, because a shell that CI
+    never has cannot be relied on to set them."""
+    for var in conftest.CLEARED:
+        monkeypatch.setenv(var, str(tmp_path / "from-the-shell"))
+    conftest.sandbox_environment(monkeypatch, tmp_path)
+    left = [v for v in conftest.CLEARED if v in os.environ]
+    assert left == []
+
+
+def test_every_blink_variable_the_code_reads_is_in_the_sandbox():
+    """A new BLINK_* environment variable in pc/ or the entry points has to
+    be cleared for the tests (conftest.CLEARED) or set by a fixture, or a
+    developer who exports it gets a different suite from CI's."""
+    import re
+    known = set(conftest.CLEARED) | set(conftest.SET_BY_FIXTURE)
+    found = {}
+    for path in _sources():
+        text = path.read_text(encoding="utf-8")
+        for name in re.findall(r'"(BLINK_[A-Z0-9_]+)"', text):
+            found.setdefault(name, path.name)
+    missing = {n: p for n, p in found.items() if n not in known}
+    assert missing == {}, (
+        "read by the code but not handled by tests/conftest.py: %r" % missing)
+
+
 def test_the_sandbox_clears_codex_home_even_when_it_is_exported(
         tmp_path, monkeypatch):
     """CODEX_HOME outranks HOME in codex_cli.sessions_root, so redirecting
