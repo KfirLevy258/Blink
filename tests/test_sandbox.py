@@ -174,29 +174,13 @@ def offenders(sources):
             if _asks_for_home(n, helpers)]
 
 
-def _the_program_running(sources):
-    """The one import-time call allowed: blink_main.py's last line.
-
-    blink_main.py is the frozen binary's script and ends in
-    `raise SystemExit(main())` at module scope. That is the program running
-    -- what a __main__ block does by another spelling -- and nothing imports
-    the file. Exempted by place, not by the name `main`, so a module-level
-    main() anywhere else, or any other line of blink_main.py, is still
-    caught.
-    """
-    src = sources.get("blink_main.py")
-    if src is None:
-        return set()
-    last = ast.parse(src).body[-1]
-    assert ast.unparse(last) == "raise SystemExit(main())", (
-        "blink_main.py no longer ends where this exemption expects")
-    return {("blink_main.py", last.lineno)}
-
-
 def import_time_offenders(sources):
-    """offenders(), less the program-running exemption."""
-    allowed = _the_program_running(sources)
-    return [o for o in offenders(sources) if o not in allowed]
+    """offenders(). There is no exemption for blink_main.py any more: it used
+    to end in a bare `raise SystemExit(main())`, allowed here as "the program
+    running", and that was the hole itself -- importing it ran the CLI (see
+    tests/test_import_is_inert.py). Its call now sits under a __main__ guard,
+    which _import_time_nodes already skips."""
+    return offenders(sources)
 
 
 def test_nothing_resolves_home_at_import():
@@ -242,17 +226,22 @@ def test_the_guard_catches_every_shape_the_hole_has_taken():
         assert offenders({"<src>": src}), src
 
 
-def test_the_program_running_is_exempt_by_place_and_nothing_else():
-    """blink_main.py's last line is the one allowed call. A second offending
-    line in the same file is still caught."""
-    blink_main = ('import os\nfrom pc.cli import main\n'
-                  'HOME = os.path.expanduser("~")\n'
-                  'raise SystemExit(main())\n')
+def test_a_bare_main_in_blink_main_is_caught_and_a_guarded_one_is_not():
+    """blink_main.py's launcher call was once exempt by place. It is not now:
+    a bare module-level main() that resolves home is flagged like any other,
+    and the same call under `if __name__ == "__main__":` is a program
+    running, not an import."""
     helper = ('import os\ndef main():\n'
               '    return os.path.expanduser("~")\n')
-    found = import_time_offenders({"blink_main.py": blink_main,
-                                   "pc/cli.py": helper})
-    assert found == [("blink_main.py", 3)]
+    bare = 'from pc.cli import main\nraise SystemExit(main())\n'
+    guarded = ('from pc.cli import main\n'
+               'if __name__ == "__main__":\n'
+               '    raise SystemExit(main())\n')
+    assert import_time_offenders({"blink_main.py": bare,
+                                  "pc/cli.py": helper}) == [
+        ("blink_main.py", 2)]
+    assert import_time_offenders({"blink_main.py": guarded,
+                                  "pc/cli.py": helper}) == []
 
 
 def test_the_guard_follows_a_helper_across_modules():
