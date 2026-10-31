@@ -204,7 +204,11 @@ class Bridge:
         self._run_async = run_async
         self._edit_answers = (edit_answers if edit_answers is not None
                               else queue.SimpleQueue())
-        self._theme_quiet_until = None
+        # The end of the quiet window after a greeting (THEME_QUIET_S), in
+        # which neither a theme line nor the burn line is written. One field
+        # for both: the burn line kept a copy of its own, set at the same
+        # moment to the same value (review, 2026-10-31).
+        self._quiet_until = None
         self._sleep = sleep
         self._store_until = None         # see THEME_SAVE_HOLD_S
         # The burn line (see BURN_MIN_GAP_S). What was last put on the wire,
@@ -212,7 +216,6 @@ class Bridge:
         # last greeting or since the line stopped.
         self._burn_sent = None
         self._burn_sent_at = None
-        self._burn_quiet_until = None
         self._burn_failed = False
 
     def greet(self):
@@ -239,23 +242,22 @@ class Bridge:
         self._write(protocol.welcome("blink-bridge", self._app_ver,
                                      editing=editing))
         self._store_until = None         # a new conversation, a new board
+        # A greeting starts a new conversation: the board answers it with
+        # theme_now why=boot, and nothing about themes is said until a fast
+        # tick after that (THEME_QUIET_S). The burn line waits out the same
+        # window, which starts BEFORE the poll below: it is not part of the
+        # hello burst, which is measured against the board's receive ring
+        # (tests/pc/test_hello_burst.py), and the pref that answers this
+        # welcome may still be on its way with the caps that decide whether
+        # the line goes at all.
+        self._quiet_until = self._now() + THEME_QUIET_S
         if self._theme is not None:
-            # A greeting starts a new conversation: the board answers it with
-            # theme_now why=boot, and nothing about themes is said until a
-            # fast tick after that (THEME_QUIET_S).
             self._theme.hello()
-            self._theme_quiet_until = self._now() + THEME_QUIET_S
-        # The burn line waits out the same quiet window, BEFORE the poll
-        # below: it is not part of the hello burst, which is measured
-        # against the board's receive ring (tests/pc/test_hello_burst.py),
-        # and the pref that answers this welcome may still be on its way
-        # with the caps that decide whether the line goes at all. A board
-        # that has just booted holds no burn line, so whatever went to the
-        # last connection is forgotten and the first tick after the window
-        # sends one, unchanged or not.
+        # A board that has just booted holds no burn line, so whatever went
+        # to the last connection is forgotten and the first tick after the
+        # window sends one, unchanged or not.
         self._burn_sent = None
         self._burn_sent_at = None
-        self._burn_quiet_until = self._now() + THEME_QUIET_S
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
@@ -736,6 +738,9 @@ class Bridge:
     def _takes_theme(self):
         return self._board_can(protocol.BOARD_CAP_THEME)
 
+    def _in_quiet_window(self):
+        return self._quiet_until is not None and self._now() < self._quiet_until
+
     def _send_theme(self):
         """The preview, cancel or save the files say is owed. Called on both
         ticks; the fast one is what makes a preview follow the builder.
@@ -745,8 +750,7 @@ class Bridge:
         """
         if self._theme is None:
             return False
-        if (self._theme_quiet_until is not None
-                and self._now() < self._theme_quiet_until):
+        if self._in_quiet_window():
             return False
         try:
             lines = self._theme.outgoing(deliver=self._takes_theme())
@@ -1159,23 +1163,27 @@ class Bridge:
             # from before, so it is sent the line as if new.
             self._burn_sent = None
             return
-        now = self._now()
-        if self._burn_quiet_until is not None and now < self._burn_quiet_until:
+        if self._in_quiet_window():
             return
+        now = self._now()
         if (self._burn_sent_at is not None
                 and now - self._burn_sent_at < BURN_MIN_GAP_S):
             return
         try:
             msg = burn()
         except Exception as e:
-            # Never worth the serial loop. The type only: the text of an
-            # exception from the reader can be a transcript's path.
+            # Never worth the serial loop, and the only place a failure of
+            # the line, the transcript reader's included, is caught. Said
+            # once, and the type only: the text of an exception from the
+            # reader can be a transcript's path or a value read out of one.
             if not self._burn_failed:
                 self._burn_failed = True
                 print(f"[bridge] burn not sent: {type(e).__name__}",
                       file=sys.stderr)
             return
-        self._burn_failed = False
+        if self._burn_failed:
+            self._burn_failed = False
+            print("[bridge] burn line working again", file=sys.stderr)
         if msg is None:
             self._burn_sent = None
             return

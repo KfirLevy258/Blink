@@ -212,30 +212,9 @@ def test_a_bus_without_a_reader_sends_none(tmp_path):
     assert fetch.burn() is None
 
 
-def test_a_reader_that_raises_costs_the_line_and_names_only_its_type(
-        tmp_path, capsys):
-    payload(tmp_path)
-
-    class Broken:
-        fail = True
-
-        def poll(self, now):
-            if self.fail:
-                raise ValueError("MARKER-from-a-transcript")
-            return Q, [0] * 20
-
-    broken = Broken()
-    fetch = bus_for(tmp_path, reader=broken).fetch()
-    fetch()
-
-    assert fetch.burn() is None and fetch.burn() is None
-    err = capsys.readouterr().err
-    assert "MARKER" not in err
-    assert err.count("transcript reader failed (ValueError)") == 1
-
-    broken.fail = False
-    assert fetch.burn() == protocol.burn("claude", Q, [0] * 20)
-    assert "working again" in capsys.readouterr().err
+# A reader that raises is caught once, by Bridge._send_burn_if_due:
+# tests/pc/test_burn_bridge.py, test_a_burn_source_that_raises_... and
+# test_the_bus_leaves_a_reader_failure_to_the_bridge.
 
 
 # ------------------------------------------------- the daemon's two sources

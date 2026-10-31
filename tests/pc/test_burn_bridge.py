@@ -10,6 +10,8 @@ import ast
 import json
 import pathlib
 
+import pytest
+
 from pc import logbook, protocol
 from pc.bridge import (BURN_HEARTBEAT_S, BURN_MIN_GAP_S, THEME_QUIET_S,
                        Bridge)
@@ -231,11 +233,20 @@ def test_a_board_that_lists_burn_again_is_sent_the_line_at_once():
 
 
 def test_a_burn_source_that_raises_is_not_worth_the_serial_loop(capsys):
+    """The one place a failure of the burn line is caught. The bus caught
+    its reader's as well, with a log-once flag of its own, so a failure
+    had two handlers and two flags to say it twice (review, 2026-10-31).
+    The log names the type only: the text of an exception from the reader
+    can be a transcript's path, or a value read out of one (CLAUDE.md)."""
     fetch = Fetch()
+    broken = [True]
+    real = fetch.burn
 
-    def boom():
-        raise RuntimeError("MARKER /home/someone/.claude/projects/x.jsonl")
-    fetch.burn = boom
+    def flaky():
+        if broken[0]:
+            raise RuntimeError("MARKER /home/someone/.claude/projects/x.jsonl")
+        return real()
+    fetch.burn = flaky
     b, sent, clock, _ = make(fetch)
     b.on_message(hello())
 
@@ -245,6 +256,41 @@ def test_a_burn_source_that_raises_is_not_worth_the_serial_loop(capsys):
     assert "MARKER" not in err and ".claude" not in err
     assert err.count("burn not sent: RuntimeError") == 1
     assert any(m["t"] == "usage" for _, m in sent)
+    assert burns(sent) == []
+
+    broken[0] = False
+    ticks(b, clock, 2)
+
+    assert [m for _, m in burns(sent)] == [LINE]
+    assert capsys.readouterr().err.count("burn line working again") == 1
+
+
+def test_the_bus_leaves_a_reader_failure_to_the_bridge(tmp_path):
+    """Raised through fetch.burn(), which only Bridge calls, and there inside
+    the one handler above."""
+    from pc import ingest
+    from pc.providers.claude_cli import ClaudeCliProvider
+    status = tmp_path / "statusline.json"
+    status.write_text(json.dumps({"rate_limits": {"seven_day": {
+        "used_percentage": 12.0, "resets_at": 4_000_000_000}}}),
+        encoding="utf-8")
+
+    class Broken:
+        def poll(self, now):
+            raise ValueError("MARKER")
+
+    fetch = ingest.IngestionBus(
+        providers=[ClaudeCliProvider(path=str(status))],
+        burn=Broken()).fetch()
+    assert fetch()["session_pct"] == -1
+    with pytest.raises(ValueError):
+        fetch.burn()
+
+    b, sent, clock, _ = make(fetch)
+    b.on_message(hello())
+    ticks(b, clock, 4)
+
+    assert burns(sent) == [] and any(m["t"] == "usage" for _, m in sent)
 
 
 # ---------------------------------------------------------------- the log

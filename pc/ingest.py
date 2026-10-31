@@ -86,14 +86,11 @@ class IngestionBus:
         # transcripts: claude_usage_bridge.build_bus decides, the way it
         # decides the providers.
         self._burn = burn
-        # Whether the claude page of the last poll() has no session window
-        # (NormalizedUsageFrame.no_session_window): the one condition under
-        # which a burn line is sent. Recorded there, like _session_pair, so
-        # it answers for the same poll the usage line came from.
-        self._burn_wanted = False
-        self._burn_failed = False
         # The merged claude frame of the last poll(), when it was on one of
-        # the board's two pages. See claude_page().
+        # the board's two pages. See claude_page(). Its no_session_window is
+        # the one condition under which a burn line is sent, read off this
+        # frame rather than copied into a flag of its own, so that it answers
+        # for the same poll the usage line came from.
         self._claude_page = None
         # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
         # out after a failure. Keyed by IDENTITY, not by class: two instances
@@ -325,8 +322,6 @@ class IngestionBus:
         self._claude_page = next(
             (f for f in (primary, secondary)
              if f is not None and f.provider == claude_cli.PROVIDER_ID), None)
-        self._burn_wanted = (self._claude_page is not None
-                             and self._claude_page.no_session_window)
         if primary is None:
             return None
         msg = protocol.frame_to_usage(primary, self._now(), secondary)
@@ -369,26 +364,16 @@ class IngestionBus:
         board's caps have been checked: a board that cannot draw the view
         costs nothing.
 
-        Contained like a provider: a reader that raises costs the burn line,
-        never the poll. The log names the exception's type and nothing more,
-        because its text could be a transcript's path or a value read out of
-        one (CLAUDE.md).
+        A reader that raises is not caught here. Bridge._send_burn_if_due,
+        the only caller, contains it -- it costs the burn line, never the
+        poll -- and logs it once, by type. It was caught here too, with a
+        log-once flag of its own, so one failure had two handlers (review,
+        2026-10-31).
         """
-        if self._burn is None or not self._burn_wanted:
+        page = self._claude_page
+        if self._burn is None or page is None or not page.no_session_window:
             return None
-        try:
-            got = self._burn.poll(self._now())
-        except Exception as e:
-            if not self._burn_failed:
-                self._burn_failed = True
-                print(f"[ingest] the transcript reader failed"
-                      f" ({type(e).__name__}); no burn line until it"
-                      f" recovers", file=sys.stderr)
-            return None
-        if self._burn_failed:
-            self._burn_failed = False
-            print("[ingest] the transcript reader is working again",
-                  file=sys.stderr)
+        got = self._burn.poll(self._now())
         if got is None:
             return None
         q, tokens = got
