@@ -430,3 +430,43 @@ def test_every_theme_file_the_module_writes_is_listed():
     names = {v for k, v in vars(theme).items()
              if k.endswith("_FILE") and isinstance(v, str)}
     assert names and names <= set(theme.FILES)
+
+
+def test_an_old_board_is_named_before_the_builder_opens(monkeypatch, capsys):
+    """Review of 1.4.0 (builder), S3: with a 1.3.4 board the builder opened
+    without a word, its previews all answered 200, and the note that the
+    board takes no themes came only after Save. This release is that window
+    for every owner who has not yet tapped to install the firmware."""
+    _board_json(caps=[])
+    said_before_open = []
+
+    def opener(url):
+        said_before_open.append(capsys.readouterr().out)
+        def cancel():
+            link = urllib.parse.urlsplit(url)
+            c = http.client.HTTPConnection("127.0.0.1", link.port,
+                                           timeout=5)
+            c.request("GET", link.path + "?" + link.query)
+            r = c.getresponse()
+            cookie = r.getheader("Set-Cookie").split(";", 1)[0]
+            r.read()
+            c.request("POST", "/api/cancel", body=b"",
+                      headers={"Cookie": cookie})
+            c.getresponse().read()
+            c.close()
+        threading.Timer(0.2, cancel).start()
+        return True
+
+    monkeypatch.setattr(theme_server, "open_url", opener)
+    assert cli.main(["theme"]) == 0
+    assert "firmware 1.3.4, which does not take themes" in said_before_open[0]
+
+
+def test_a_board_that_takes_themes_gets_no_note_from_the_builder(
+        monkeypatch, capsys):
+    _board_json(caps=["svc", "theme"])
+    monkeypatch.setattr(theme_server, "open_url", lambda u: False)
+    monkeypatch.setattr(theme_server.BuilderServer, "wait_interruptibly",
+                        lambda self: "cancelled")
+    assert cli.main(["theme"]) == 0
+    assert "does not take themes" not in capsys.readouterr().out

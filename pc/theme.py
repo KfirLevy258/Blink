@@ -47,6 +47,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 
 from pc import install_statusline
 from pc import protocol
@@ -700,6 +701,42 @@ def drop_preview(home):
         os.unlink(preview_path(home))
     except FileNotFoundError:
         pass
+
+
+def board_takes_themes(home):
+    """(takes, fw): whether the board this computer last saw takes theme
+    lines, from the caps it listed (board.json, written by the daemon), not
+    its version number: see protocol.BOARD_CAP_THEME. takes is None when
+    that is not known -- no board.json, or one written by a daemon from
+    before caps existed -- because a guess is worse than nothing here. fw is
+    the version string it recorded, or None.
+
+    Read by `blink theme` for its note and by the builder's /api/state: the
+    daemon sends theme lines only to a board whose caps list "theme", so
+    every preview to a 1.3.4 board is taken from the file and dropped, and a
+    page saying "Preview sent" over that is false (review of 1.4.0,
+    builder S3)."""
+    try:
+        with open(os.path.join(home, "board.json"), encoding="utf-8") as f:
+            known = json.load(f)
+        fw, caps = known.get("fw"), known.get("caps")
+    except (OSError, ValueError, AttributeError):
+        return None, None
+    fw = fw if isinstance(fw, str) and fw else None
+    if not isinstance(caps, list):
+        return None, fw
+    return protocol.BOARD_CAP_THEME in caps, fw
+
+
+def preview_waiting_s(home):
+    """Seconds the preview file has been waiting for the daemon to take it,
+    or None when there is no file. The daemon takes it on its fast tick,
+    two seconds (claude_usage_bridge.FAST_POLL_INTERVAL_S), so a file that
+    has waited well past that has no daemon, or no board, behind it."""
+    try:
+        return max(0.0, time.time() - os.path.getmtime(preview_path(home)))
+    except OSError:
+        return None
 
 
 def take_preview(home):

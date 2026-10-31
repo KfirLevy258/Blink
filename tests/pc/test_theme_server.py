@@ -9,6 +9,7 @@ import os
 import re
 import socket
 import threading
+import time
 import urllib.parse
 
 import pytest
@@ -846,3 +847,50 @@ def test_starting_a_builder_makes_no_reverse_lookup(home, monkeypatch):
         s.finish("test over", cancel=False)
         s.wait(5)
     assert s._done.is_set()
+
+
+# ------------------------------------------- what /api/state says of delivery
+#
+# Review of 1.4.0 (builder), S3: the page said each preview was on the board
+# when the board takes no themes (a 1.3.4 board lists no caps, and the daemon
+# sends it no theme line) or when nothing is running to take the file.
+
+def _write_board(home, **known):
+    os.makedirs(home, exist_ok=True)
+    with open(os.path.join(home, "board.json"), "w") as f:
+        json.dump(dict({"port": "/dev/x", "board_id": "ab", "fw": "1.3.4"},
+                       **known), f)
+
+
+def _state(server, cookie):
+    status, _, body = request(server, "GET", "/api/state", cookie=cookie)
+    assert status == 200
+    return json.loads(body)
+
+
+@pytest.mark.parametrize("known, themes", [
+    ({"caps": []}, False),                      # a shipped 1.3.4
+    ({"caps": ["svc"]}, False),
+    ({"caps": ["svc", "theme"]}, True),
+    ({}, None),                                 # a daemon from before caps
+], ids=["none", "other caps", "theme", "no caps key"])
+def test_the_state_says_whether_the_board_takes_themes(server, home, known,
+                                                       themes):
+    _write_board(home, **known)
+    assert _state(server, login(server))["board"] == {"themes": themes}
+
+
+def test_the_state_says_unknown_with_no_board_json(server):
+    assert _state(server, login(server))["board"] == {"themes": None}
+
+
+def test_the_state_says_how_long_a_preview_has_waited(server, home):
+    cookie = login(server)
+    assert _state(server, cookie)["waiting_s"] is None
+    theme.write_preview(home, {"id": 4})
+    path = theme.preview_path(home)
+    old = time.time() - 7
+    os.utime(path, (old, old))
+    assert 6.5 < _state(server, cookie)["waiting_s"] < 12
+    theme.take_preview(home)                  # the daemon's tick
+    assert _state(server, cookie)["waiting_s"] is None

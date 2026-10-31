@@ -519,7 +519,12 @@ has read that (usually at once) it says **Loading your current theme.** and
 its controls, all but **Cancel**, stay off, so nothing can be saved over a
 theme it has not seen. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
-without a change puts the board back on the theme it had. Press **Edit on
+without a change puts the board back on the theme it had. When it cannot
+be so, it says that instead of "Preview sent": a board still on firmware
+1.3.4 shows no preview (the builder and `blink theme` say so, and a saved
+theme is sent once the board is updated), and a preview that nothing has
+picked up after a few seconds, because the app is not running or the board
+is not plugged in, is named as not on the board. Press **Edit on
 computer** again at any time: with the builder still open it opens it again
 in your browser, in a new tab, and once it has closed it opens a new one.
 On Windows, and on some Linux desktops, that tab may open behind your other

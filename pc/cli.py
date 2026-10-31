@@ -4211,17 +4211,10 @@ def cmd_config(args) -> int:
 def _theme_board_note(home):
     """A line when the board this computer last saw cannot take a theme.
 
-    From the caps the board listed (board.json, written by the daemon), not
-    its version number: see protocol.BOARD_CAP_THEME. Silent when board.json
-    has no caps at all -- it was written by a daemon from before they
-    existed, and a guess is worse than nothing here."""
-    try:
-        with open(os.path.join(home, "board.json"), encoding="utf-8") as f:
-            known = json.load(f)
-        fw, caps = known.get("fw"), known.get("caps")
-    except (OSError, ValueError, AttributeError):
-        return None
-    if isinstance(caps, list) and protocol.BOARD_CAP_THEME not in caps:
+    From the caps the board listed, not its version number (see
+    theme.board_takes_themes). Silent when they are not known."""
+    takes, fw = theme_mod.board_takes_themes(home)
+    if takes is False:
         on = f"firmware {fw}" if fw else "firmware"
         return (f"Your board runs {on}, which does not take themes."
                 " It will be sent once the board is updated.")
@@ -4321,6 +4314,12 @@ def _theme_builder(home) -> int:
     print(f"If it does not open, go to this link on this computer: {url}")
     print("Save or cancel there. Closing the tab cancels, and so does Ctrl-C"
           " here.")
+    # Said now and not only after Save: the page's previews all answer 200
+    # whatever the board takes, so with a 1.3.4 board nothing here told the
+    # owner that none of it would show (review of 1.4.0, builder S3).
+    note = _theme_board_note(home)
+    if note:
+        print(note)
     try:
         with _signals_cancel():
             if not theme_server.open_url(url):

@@ -970,3 +970,103 @@ def test_the_loading_dim_leaves_the_words_readable():
     for sels, d in busy:
         for s in sels:
             assert re.search(r"(button:not\(\.btn\)|input)$", s), s
+
+
+# ------------------------------------- a preview nothing is going to show
+#
+# Review of 1.4.0 (builder), S3. The daemon sends theme lines only to a board
+# whose caps list "theme", and a preview waits in theme_preview.json for the
+# daemon to take it. With a 1.3.4 board, or with no bridge running, every
+# preview was accepted (200) and the bar still said "Preview sent: Ocean is
+# on your board until you save or cancel", over a board that was never going
+# to show it. This release is exactly that window: the notes say to run
+# `blink update` and then tap to install the firmware, and advertise `blink
+# theme` with "Every change shows on the board as you make it."
+
+def _state(**more):
+    body = {"saved": {"id": 0}, "draft": None}
+    body.update(more)
+    return {"/api/state": {"status": 200, "body": body}}
+
+
+OLD_BOARD = _state(board={"themes": False})
+
+
+def test_a_board_that_takes_no_themes_is_said_so_on_load():
+    r = builder_page.run("""
+    await advance(10);
+    return $('status-text').textContent;
+    """, OLD_BOARD)
+    assert r == ("Your board's firmware does not show themes yet. Update it"
+                 " to see previews.")
+
+
+def test_a_preview_is_not_called_sent_to_a_board_that_takes_no_themes():
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    return { said: $('status-text').textContent,
+             ok: $('status').classList.contains('ok'),
+             sent: requests.filter(q => q.path === '/api/preview').length };
+    """, OLD_BOARD)
+    assert r["sent"] == 1                  # kept: a save is sent later
+    assert r["ok"] is False
+    assert r["said"] == ("Your board's firmware does not show themes yet, so"
+                         " there is no preview. A saved theme is sent once"
+                         " the board is updated.")
+
+
+@pytest.mark.parametrize("board", [None, {"themes": None}, {"themes": True}],
+                         ids=["no board key", "unknown", "takes themes"])
+def test_a_board_that_may_take_themes_keeps_the_old_words(board):
+    more = {} if board is None else {"board": board}
+    r = builder_page.run("""
+    await advance(10);
+    const load = $('status-text').textContent;
+    preset('Ocean'); await advance(300);
+    return [load, $('status-text').textContent];
+    """, _state(**more))
+    assert r[0] == ("This is the theme your board has now. Changes show on it"
+                    " as a preview.")
+    assert r[1] == "Preview sent: Ocean is on your board until you save or cancel."
+
+
+_TAKEN = """
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const sent = $('status-text').textContent;
+    answer('/api/state', () => ({ status: 200, body: { saved: { id: 0 }, draft: null, waiting_s: %s } }));
+    await advance(6500);
+    return [sent, $('status-text').textContent, $('status').classList.contains('err'),
+            requests.filter(q => q.path === '/api/state').length];
+"""
+
+
+def test_a_preview_nothing_has_taken_is_said_not_to_be_on_the_board():
+    sent, now, err, asked = builder_page.run(_TAKEN % "7", SAVED_DARK)
+    assert sent.startswith("Preview sent: Ocean")
+    assert now == ("Nothing has taken this preview yet. Is BLINK running and"
+                   " the board plugged in? blink status tells you.")
+    assert err is True
+    assert asked == 2                      # the load, and this one
+
+
+def test_a_preview_the_daemon_took_keeps_its_words():
+    sent, now, err, asked = builder_page.run(_TAKEN % "null", SAVED_DARK)
+    assert now == sent and err is False
+    assert asked == 2
+
+
+def test_the_check_does_not_write_over_a_newer_message():
+    """The bar said something else by the time the answer came (the text
+    went unreadable, say): that stands."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    answer('/api/state', () => ({ status: 200, body: { saved: { id: 0 }, draft: null, waiting_s: 9 } }));
+    type('t-text', '#0e1116'); await advance(400);        // text on its ground
+    const mid = $('status-text').textContent;
+    await advance(6500);
+    return [mid, $('status-text').textContent];
+    """, SAVED_DARK)
+    assert r[0] == r[1] and "Preview sent" not in r[1]

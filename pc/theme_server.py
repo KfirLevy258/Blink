@@ -342,9 +342,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # older tab was told to stop and the newer one opened on the
             # saved theme: the draft was on the board and in no tab that
             # could still send it (review of fp/edit-reset r2, SHOULD-1).
+            #
+            # "board" and "waiting_s": whether anything will show a preview.
+            # The page said "Preview sent: ... is on your board" after every
+            # change, to a 1.3.4 board that takes no theme line and with no
+            # bridge running to take the file (review of 1.4.0, builder S3).
+            takes, _ = theme.board_takes_themes(self.builder.home)
             return self._json(200, {"saved": theme.load_saved(
                 self.builder.home), "draft": self.builder.draft,
-                "idle_s": self.builder.idle_s})
+                "idle_s": self.builder.idle_s,
+                "board": {"themes": takes},
+                "waiting_s": theme.preview_waiting_s(self.builder.home)})
         return self._refuse(404)
 
     # -- POST

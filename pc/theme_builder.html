@@ -781,7 +781,11 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       var t = wireTheme(), key = JSON.stringify(t), name = themeName();
       if (key === lastSent) return;
       post('/api/preview', t, true).then(function (j) {
-        if (j.status === 200) { lastSent = key; delivered++; say('Preview sent: ' + name + ' is on your board until you save or cancel.', 'ok'); }
+        if (j.status === 200) {
+          lastSent = key; delivered++;
+          if (oldBoard) say(OLD_BOARD_PREVIEW);
+          else { var said = 'Preview sent: ' + name + ' is on your board until you save or cancel.'; say(said, 'ok'); checkTaken(key, said); }
+        }
         else if (j.status === 409) superseded();
         else if (j.status === 400) say(j.error || 'The board would refuse that theme.', true);
         // Any other ending is asked of a ping, with its one retry, rather
@@ -807,6 +811,35 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // itself: lastSent can come back round to the value it had (on Ocean,
   // Forest fails, then Sky and Ocean again go through), and a count only
   // goes up.
+  // What /api/state says of the board: false when its firmware takes no
+  // theme line, so a preview is accepted here and never shown (the daemon
+  // sends one only to a board that lists "theme"). null or absent is
+  // unknown, and gets the words it always had (review of 1.4.0, builder S3).
+  var oldBoard = false;
+  var OLD_BOARD_LOAD = 'Your board\'s firmware does not show themes yet. Update it to see previews.';
+  var OLD_BOARD_PREVIEW = 'Your board\'s firmware does not show themes yet, so there is no preview. A saved theme is sent once the board is updated.';
+  // The other half: a preview waits in a file until BLINK's bridge takes it
+  // (every 2 s), so with the app not running, or the board not plugged in,
+  // "Preview sent" is not so. A few seconds after a preview went through,
+  // ask what the server sees; if the file is still waiting after 5 s, say
+  // so. Not over a newer message, a newer preview or a tab that has ended.
+  var TAKEN_MS = 6000, takenTimer = null;
+  function checkTaken(key, said) {
+    clearTimeout(takenTimer);
+    takenTimer = setTimeout(function () {
+      if (finished || lastSent !== key) return;
+      var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+      var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
+      fetch('/api/state', { credentials: 'same-origin', signal: ctl ? ctl.signal : undefined }).then(function (r) {
+        clearTimeout(limit);
+        return r.status === 200 ? r.json() : null;
+      }).then(function (j) {
+        if (!j || finished || lastSent !== key || typeof j.waiting_s !== 'number' || j.waiting_s < 5) return;
+        if (document.getElementById('status-text').textContent !== said) return;
+        say('Nothing has taken this preview yet. Is BLINK running and the board plugged in? blink status tells you.', true);
+      }, function () { clearTimeout(limit); });
+    }, TAKEN_MS);
+  }
   function unsent(at) {
     return function () { if (delivered === at) say('The preview did not reach your board.', true); };
   }
@@ -1079,6 +1112,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   }).then(function (j) {
     clearTimeout(stateLimit);
     var t = j.saved;
+    oldBoard = !!j.board && j.board.themes === false;
     applyTheme(t);
     savedKey = JSON.stringify(wireTheme());
     lastSent = savedKey;
@@ -1092,7 +1126,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     loaded = true;
     clearTimeout(waiting); studio.classList.remove('waiting');
     if (!finished) { document.querySelectorAll(FORM).forEach(function (e) { e.disabled = false; }); studio.removeAttribute('aria-busy'); }
-    say(draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
+    say(oldBoard ? OLD_BOARD_LOAD : draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
         : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
     render();
   }, function () { clearTimeout(stateLimit); render(); stopped(); });
