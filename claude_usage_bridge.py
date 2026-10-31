@@ -1273,6 +1273,7 @@ def main(argv=None):
                         theme_sync=theme_sync,
                         open_builder=theme_builder.launch,
                         builder_ended=theme_builder.ended,
+                        builder_open=theme_builder.editing,
                         edit_answers=theme_answers,
                         # What the board can show, until it says again.
                         board_caps_hint=known.get("caps"),

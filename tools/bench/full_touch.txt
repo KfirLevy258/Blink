@@ -99,6 +99,10 @@ tap theme.light
 expect theme_now why=user id=9
 tap theme.edit_on_computer
 expect theme_edit
+# Held now, as with a real builder open; the builder "ends", so the rest of
+# the run, and the desk after it, find the button as it was.
+fake edit_done
+wait-widget "Edit on computer" 3
 tap settings.back
 mem
 
@@ -157,7 +161,9 @@ click "Ocean"
 expect theme_now why=user id=4
 click "Edit on computer"
 expect theme_edit
-wait-widget "Opened on your computer" 3
+wait-widget "Editing on your computer" 3
+fake edit_done
+wait-widget "Edit on computer" 3
 click "Dark"
 expect theme_now why=user id=0
 click "<"

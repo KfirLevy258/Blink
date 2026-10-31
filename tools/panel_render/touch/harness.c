@@ -696,6 +696,9 @@ static void dispatch(const char *json)
 			snprintf(note, sizeof(note), "%s", n);
 		}
 	} else if (strcmp(t, "welcome") == 0) {
+		/* As proto.c does it: the caps and "editing" decide whether
+		 * "Edit on computer" is held (edit_hold.h). */
+		ui_settings_theme_edit_welcome(json);
 		reply("{\"t\":\"pref\",\"v\":2,\"provider\":\"claude\","
 		      "\"caps\":[\"svc\",\"theme\",\"edit_done\"]}");
 		harness_theme_now("boot");
@@ -705,6 +708,9 @@ static void dispatch(const char *json)
 		struct theme_msg m;
 
 		if (theme_msg_parse(json, &m)) {
+			if (m.op != THEME_OP_CANCEL) {
+				ui_settings_theme_edit_builder_seen();
+			}
 			ui_theme_wire(&m);
 		}
 	} else if (strcmp(t, "theme_edit") == 0) {

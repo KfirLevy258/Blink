@@ -203,12 +203,40 @@ def log_name(msg) -> str:
 # FW_ACCEPTS_OVERAGE's comment gives: a version string is a guess about what
 # a build contains, and this is the daemon saying it outright. Additive --
 # firmware that predates it reads no field it does not know.
-CAPS = ("theme",)
+#
+# "edit_done": a promise, two halves. This daemon sends theme_edit done:1
+# when a builder it opened for the board ends (Addendum 6), and the welcome
+# greet() writes says in "editing" whether one is open right now. A board
+# that hears it holds "Edit on computer" from an ok 1 until the done (owner,
+# 2026-10-30: "the edit on computer button should re-appear ... only once
+# the page is not active / closed"), and one that does not hear it keeps the
+# 3 s "Opened" note: a hold nobody promised to end is a button that never
+# comes back. Every daemon since Addendum 6 sends the done; the cap is what
+# the board can know that by. Additive both ways: firmware before the hold
+# reads only "theme" out of caps (theme_caps_has matches whole members).
+CAPS = ("theme", "edit_done")
 
 
-def welcome(app: str, app_ver: str) -> dict:
-    return {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver,
-            "caps": list(CAPS)}
+def welcome(app: str, app_ver: str, editing=None) -> dict:
+    """`editing`: whether the builder this daemon opened for the board's
+    "Edit on computer" is still open -- True, False, or None for "this
+    writer cannot say", which leaves the field out. The board holds or frees
+    its slot on 1 or 0 and keeps it as it is when the field is absent
+    (firmware/src/edit_hold.h). Only greet() knows: the probe's welcome
+    (claude_usage_bridge.probe_is_our_board) is asked before any Bridge
+    exists, and greet()'s follows it.
+
+    It is what puts a board right after it was away while the builder
+    opened or ended: one that rebooted (its hold is gone, the builder is
+    not), one whose host went quiet (it freed the hold on HOST LOST), and
+    one under a daemon that restarted (the builder lived in the old
+    process). A number, not a JSON boolean, like every flag this protocol
+    already carries (done, ok)."""
+    msg = {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver,
+           "caps": list(CAPS)}
+    if editing is not None:
+        msg["editing"] = 1 if editing else 0
+    return msg
 
 
 def bye() -> dict:
@@ -835,9 +863,12 @@ def theme_edit_done() -> dict:
     Addendum 6). The board clears whatever note its slot is showing on it.
     It was the line that freed a 10 s lock-out, after a builder closed
     inside those 10 s left a tap that sent nothing (board, 2026-10-29);
-    the board now gives its button back by itself 3 s after "Opened on your
-    computer" (owner, 2026-10-29), so done only cuts a note short. Sent
-    only to a board that lists
+    then the board gave its button back by itself 3 s after "Opened on
+    your computer" (owner, 2026-10-29), and a press opened a second tab on
+    the builder still open. Now it is the line that frees the hold an ok 1
+    puts on the slot (owner, 2026-10-30; CAPS "edit_done"), so a done that
+    never arrives keeps the button away until the board's own bound, 15
+    min. Sent only to a board that lists
     BOARD_CAP_EDIT_DONE: one from before reads it as an ok 0 whenever an ask
     of its own is in flight."""
     return {"t": "theme_edit", "v": VERSION, "done": 1}

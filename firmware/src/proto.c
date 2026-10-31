@@ -432,6 +432,9 @@ static void dispatch(const char *json)
 		 */
 		printk("[proto] host says bye\n");
 		host_bye = true;
+		/* The daemon is going, and its builder with it (Launcher.close
+		 * in pc/theme_server.py). */
+		ui_settings_theme_edit_host_gone();
 		return;
 	}
 	host_bye = false;
@@ -708,6 +711,12 @@ static void dispatch(const char *json)
 		/* Every welcome decides it afresh: an app downgraded to one
 		 * without the builder must stop being offered as having one. */
 		host_can_theme = theme_caps_has(json, "theme");
+		/* And whether "Edit on computer" is held: this daemon's caps
+		 * say whether it reports a builder's end, and greet()'s
+		 * welcome whether one it opened for us is open right now --
+		 * the only way a board that rebooted, or was unplugged, while
+		 * one opened can know (edit_hold.h). */
+		ui_settings_theme_edit_welcome(json);
 		printk("[proto] host connected: app %s, protocol %d\n",
 		       host_ver[0] ? host_ver : "?", host_proto);
 		/*
@@ -755,9 +764,11 @@ static void dispatch(const char *json)
 		}
 		/* A preview or save is the builder at work, which answers an
 		 * "Edit on computer" that is still waiting as well as an
-		 * explicit reply would. */
+		 * explicit reply would, and keeps a held slot held. Not an
+		 * explicit ok: the builder may be one `blink theme` opened,
+		 * whose end the board is never told. */
 		if (m.op != THEME_OP_CANCEL) {
-			ui_settings_theme_edit_reply(true);
+			ui_settings_theme_edit_builder_seen();
 		}
 		ui_theme_wire(&m);
 	} else if (strcmp(type, "theme_edit") == 0) {
@@ -1028,6 +1039,7 @@ void proto_service(void)
 		host_seen = false;
 		host_lost = !host_bye;
 		host_bye = false;
+		ui_settings_theme_edit_host_gone();
 	}
 }
 

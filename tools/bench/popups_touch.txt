@@ -154,38 +154,55 @@ expect ui_state scr=gauges
 fake ota_none
 wait 3.5
 
-# --- "Edit on computer", a button that comes back (owner, 2026-10-29).
-# After an answer the slot shows it for a moment and reads its name again,
-# and a tap at any time asks again; the daemon opens the builder once more.
-# The one guard left is an ask in flight, so a double tap cannot open two
-# tabs. `edit-reply` sets how this tool answers the board's asks (hold: not
-# at all, the in-flight case), and `fake edit_done` is the daemon's real line
-# for a builder that ended. A board runs all of it. The waits are generous
-# on purpose: the harness clock advances only as fast as its loop runs, and
-# on a loaded machine its 8 s fallback took longer than the 10 s first
-# allowed for it (2026-10-29). A board keeps real time.
+# --- "Edit on computer", held while its builder is open (owner, 2026-10-30:
+# "the edit on computer button should re-appear ... only once the page is
+# not active / closed"). This tool greets as a daemon that promises the
+# done (caps "edit_done", "editing":0), so an ok 1 holds the slot, reading
+# "Editing on your computer" and sending nothing when pressed, until `fake
+# edit_done`, the daemon's real line for a builder that ended. `fake welcome
+# open|shut|old` greets again as a daemon whose builder is still open, one
+# with none, and one from before the hold, which keeps the 3 s "Opened" note
+# of 2026-10-29. `edit-reply` sets how asks are answered (hold: not at all,
+# the in-flight case). A board runs all of it; HOST LOST, which frees the
+# hold too, takes 30 s of silence and is checked by hand. The waits are
+# generous on purpose: the harness clock advances only as fast as its loop
+# runs, and on a loaded machine its 8 s fallback took longer than the 10 s
+# first allowed for it (2026-10-29). A board keeps real time.
 tap settings.open
 click "Theme"
 expect ui_state ov=theme tp=0
-# ok: "Opened" for 3 s, then the name, then a press asks again.
+# ok: held, and a press on the held slot sends nothing.
 click "Edit on computer"
 expect theme_edit
-wait-widget "Opened on your computer" 3
-wait-widget "Edit on computer" 8
-expect ui_state edit=name
-click "Edit on computer"
-expect theme_edit
-wait-widget "Opened on your computer" 3
-# A press while "Opened" still shows is no double tap: it asks again too.
-click "Opened on your computer"
-expect theme_edit
-wait-widget "Opened on your computer" 3
-# The builder ended: the note goes at once.
+wait-widget "Editing on your computer" 3
+expect ui_state edit=held
+click "Editing on your computer"
+expect no theme_edit
+# Leaving the page and coming back is no way round it.
+click "<"
+expect ui_state scr=settings ov=none
+click "Theme"
+expect ui_state ov=theme edit=held
+# The builder ended: the button is back at once, and asks again.
 fake edit_done
 wait-widget "Edit on computer" 3
 expect ui_state edit=name
+click "Edit on computer"
+expect theme_edit
+wait-widget "Editing on your computer" 3
+# Greeted again by a new daemon process: its builder went with the old one.
+fake welcome shut
+wait-widget "Edit on computer" 3
+expect ui_state edit=name
+# Greeted again with the builder still open, as after an unplug or a
+# reboot of the board: held again with no ask of its own.
+fake welcome open
+wait-widget "Editing on your computer" 3
+expect ui_state edit=held
+fake edit_done
+wait-widget "Edit on computer" 3
 # In flight: no answer yet, so a second press sends nothing, and after 5 s
-# the fallback; a press on the fallback asks again.
+# the fallback; a press on the fallback asks again, and its ok holds.
 edit-reply hold
 click "Edit on computer"
 expect theme_edit
@@ -196,9 +213,28 @@ expect ui_state edit=run
 edit-reply ok
 click "On your computer, run: blink"
 expect theme_edit
+wait-widget "Editing on your computer" 3
+fake edit_done
+wait-widget "Edit on computer" 3
+# A daemon from before the hold: "Opened" for 3 s, then the name, and a
+# press at any time asks again, as on 2026-10-29.
+fake welcome old
+click "Edit on computer"
+expect theme_edit
 wait-widget "Opened on your computer" 3
 wait-widget "Edit on computer" 8
-# no: the fallback, read for 8 s, then the name on its own.
+expect ui_state edit=name
+click "Edit on computer"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+click "Opened on your computer"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+fake edit_done
+wait-widget "Edit on computer" 3
+expect ui_state edit=name
+fake welcome shut
+# no: the fallback, read for 8 s, then the name on its own, never held.
 edit-reply no
 click "Edit on computer"
 expect theme_edit

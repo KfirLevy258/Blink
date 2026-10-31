@@ -79,7 +79,7 @@ class Bridge:
                  fetch_signed_manifest=None, report_failure=None,
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
-                 edit_answers=None, builder_ended=None):
+                 edit_answers=None, builder_ended=None, builder_open=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -161,6 +161,12 @@ class Bridge:
         # callable() -> True once when the builder open_builder opened has
         # ended (Launcher.ended); pump() then tells the board (Addendum 6).
         self._builder_ended = builder_ended
+        # callable() -> True/False/None: is that builder open right now
+        # (Launcher.editing)? Said in every welcome greet() writes, so a
+        # board that rebooted or was away while it opened or ended holds or
+        # frees "Edit on computer" to match. None (not wired) leaves the
+        # field out, and the board as it is.
+        self._builder_open = builder_open
         # The open runs on run_async's thread: starting a browser can take a
         # second or more, and this object lives on the serial thread. The
         # answer comes back through the queue and pump() writes it, so only
@@ -184,7 +190,17 @@ class Bridge:
         panel after every service restart. Measured doing exactly that before
         this existed.
         """
-        self._write(protocol.welcome("blink-bridge", self._app_ver))
+        editing = None
+        if self._builder_open is not None:
+            try:
+                editing = self._builder_open()
+            except Exception as e:
+                # A welcome must go out whatever this says; without the
+                # field the board keeps the slot as it is.
+                print(f"[bridge] builder state unknown: {e}",
+                      file=sys.stderr)
+        self._write(protocol.welcome("blink-bridge", self._app_ver,
+                                     editing=editing))
         if self._theme is not None:
             # A greeting starts a new conversation: the board answers it with
             # theme_now why=boot, and nothing about themes is said until a

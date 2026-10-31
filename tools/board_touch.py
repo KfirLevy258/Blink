@@ -314,8 +314,9 @@ def _targets():
             {"ov": "theme", "theme": tid, "stored": tid}, 0.6,
             f"theme tile {name} (id {tid}), paging to it first")
     add("theme.edit_on_computer", "tap", [slot_center(5)], {"ov": "theme"},
-        {"ov": "theme", "edit": "opened"}, 0.6,
-        "the Edit on computer slot (answered ok 1, as a daemon would)")
+        {"ov": "theme", "edit": "held"}, 0.6,
+        "the Edit on computer slot (answered ok 1, as a daemon would; held"
+        " until a done, since this tool greets with the edit_done cap)")
     add("focus.open", "tap", [P_FOCUS_ROW], on_settings, {"ov": "focus"},
         0.6, "the Focus tile")
     for i, name in enumerate(FOCUS_NAMES):
@@ -899,7 +900,7 @@ _STATE_WORDS = {
     "ov": ("none", "brightness", "theme", "focus", "confirm"),
     "modal": ("none", "notice", "whatsnew", "prompt", "download"),
     "focus": FOCUS_NAMES,
-    "edit": ("name", "waiting", "opened", "run"),
+    "edit": ("name", "waiting", "opened", "run", "held"),
     "nt": ("none", "sleep", "ota", "other"),
     "gf": FOCUS_NAMES,
 }
@@ -1182,7 +1183,8 @@ def _on_panel(pts, lineno):
 # `#` inside the quotes is not a comment.
 _QUOTED_CMDS = ("click", "expect-widget", "wait-widget", "widgets", "fake")
 FAKE_KINDS = ("ota_avail", "ota_none", "ota_error", "boot_notice",
-              "reverted_notice", "edit_done")
+              "reverted_notice", "edit_done", "welcome")
+WELCOME_KINDS = ("open", "shut", "old")
 
 
 def _parse_quoted(cmd, rest, lineno):
@@ -1228,6 +1230,11 @@ def _parse_quoted(cmd, rest, lineno):
     if kind in ("ota_none", "reverted_notice", "edit_done") and \
             len(rest) == 1:
         return Step(lineno, "fake", tuple(rest))
+    if kind == "welcome":
+        if len(rest) == 2 and rest[1] in WELCOME_KINDS:
+            return Step(lineno, "fake", tuple(rest))
+        raise ScriptError(f"line {lineno}: usage: fake welcome "
+                          + "|".join(WELCOME_KINDS))
     if kind == "ota_error":
         # The reason is the rest of the line, as the daemon's sentence is.
         return Step(lineno, "fake", (kind,) + ((" ".join(rest[1:]),)
@@ -1590,7 +1597,10 @@ class Bench:
 
     def greet(self):
         from pc.version import RELEASE_VERSION
-        self.send(protocol.welcome("blink-bench", RELEASE_VERSION))
+        # editing=False: no builder is open here, and a bench run must not
+        # start on an "Edit on computer" held by whatever ran before it.
+        self.send(protocol.welcome("blink-bench", RELEASE_VERSION,
+                                   editing=False))
 
     def send_frames(self):
         now = time.time()
@@ -2244,6 +2254,18 @@ class Bench:
             # real protocol line, so a board takes it as well as the
             # harness does.
             return self.send(protocol.theme_edit_done())
+        if kind == "welcome":
+            # A daemon greeting again: "open" one whose builder is still
+            # open (a board back from a reboot or an unplug), "shut" one
+            # with none, "old" one from before the hold that never
+            # promises a done (caps "theme" only). Real lines all three.
+            from pc.version import RELEASE_VERSION
+            msg = protocol.welcome("blink-bench", RELEASE_VERSION,
+                                   editing=args[0] == "open")
+            if args[0] == "old":
+                msg.pop("editing")
+                msg["caps"] = [protocol.BOARD_CAP_THEME]
+            return self.send(msg)
         if kind == "ota_error":
             self.ota_flash_pending = False
             self.install_pressed = False

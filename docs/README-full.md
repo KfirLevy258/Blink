@@ -502,9 +502,14 @@ theme.
 ### Making a theme on your computer
 
 On the board, **Settings > Theme > Edit on computer** opens the theme builder
-in your computer's browser. The board says **Opened on your computer** for
-a few seconds and then the button reads **Edit on computer** again, ready to
-press. On a computer with no browser to open (a server, or an SSH session),
+in your computer's browser. While the builder is open the button reads
+**Editing on your computer**, dimmed, and does nothing when pressed, so one
+edit stays in one tab; it reads **Edit on computer** again, ready to press,
+the moment the builder closes. It also comes back if the board loses its
+connection to the computer, and as a last resort after 15 minutes with no
+change made in the builder. (With an app from before this, the board says
+**Opened on your computer** for a few seconds and the button comes straight
+back.) On a computer with no browser to open (a server, or an SSH session),
 it says **On your computer, run: blink theme** instead, for 8 seconds.
 Running that yourself does the same thing:
 
@@ -519,12 +524,12 @@ has read that (usually at once) it says **Loading your current theme.** and
 its controls, all but **Cancel**, stay off, so nothing can be saved over a
 theme it has not seen. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
-without a change puts the board back on the theme it had. Press **Edit on
-computer** again at any time: with the builder still open it opens it again
-in your browser, in a new tab, and once it has closed it opens a new one.
-On Windows, and on some Linux desktops, that tab may open behind your other
-windows, with only the browser's taskbar button flashing. Only the newest
-tab is live, and it opens on the changes you have made so far. Within about
+without a change puts the board back on the theme it had. Once it has
+closed, **Edit on computer** opens a new one. On Windows, and on some Linux
+desktops, the builder's tab may open behind your other windows, with only
+the browser's taskbar button flashing. If a second tab does open on the same
+builder - from a board whose firmware predates the held button - only the
+newest tab is live, and it opens on the changes you have made so far. Within about
 a minute the older tab stops: it tries to close itself if it has nothing
 you have not saved, and otherwise keeps your colours on screen.
 

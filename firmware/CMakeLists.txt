@@ -22,6 +22,7 @@ target_sources(app PRIVATE
 	src/logo_parse.c
 	src/logo.c
 	src/ui_settings.c
+	src/edit_hold.c
 	src/settings_icons.c
 	src/ui_anim.c
 	src/ui_slide.c

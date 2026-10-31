@@ -790,6 +790,30 @@ class Launcher:
         finally:
             self._lock.release()
 
+    def editing(self):
+        """Is the builder a board's ask opened still open? True, False, or
+        None when that cannot be said without waiting. For the welcome
+        greet() writes ("editing", protocol.welcome), which is how a board
+        that rebooted or was unplugged meanwhile learns whether to hold its
+        "Edit on computer" slot.
+
+        Never waits, for the reason ended() does: greet() runs on the serial
+        thread, and launch() holds the lock across a browser opener measured
+        stuck for 28.7 s. A launch in progress answers None, which leaves
+        the board as it is; the ok 1 that launch is about to put on the
+        queue holds it if a builder opens (the board takes a late ok).
+
+        `_told` is the builder until its end has been told to the board, so
+        an ended builder whose done is still waiting for the board's caps
+        reads False here and the done that follows is a no-op."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            server = self._told
+            return server is not None and not server.done
+        finally:
+            self._lock.release()
+
     def close(self):
         """On daemon exit: a live builder writes its cancel and stops.
 
