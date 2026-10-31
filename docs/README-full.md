@@ -531,13 +531,12 @@ you have not saved, and otherwise keeps your colours on screen.
 A tab that is no longer the live builder dims under a notice that names
 why: **Saved.** or **Cancelled.**, **This tab is no longer active.** when a
 newer tab took over, or **The builder stopped.** (ten minutes idle, or the
-app quit), each with a line on what follows and **You can close this
-tab.** Its controls stop working. If it still
-holds changes you have not saved, it offers **Copy share code**, so you
-can paste them into the newer tab or keep them. Most browsers will not let
-a page close a tab, so this notice is usually what you see. A preview the
-board never hears the end of - the computer went to sleep mid-edit - drops
-by itself after 15 minutes.
+app quit), each with a line on what follows and **You can close this tab.**
+Its controls stop working. If it still holds changes you have not saved, it
+offers **Copy share code**, so you can paste them into the newer tab or keep
+them. Most browsers will not let a page close a tab, so this notice is
+usually what you see. A preview the board never hears the end of - the
+computer went to sleep mid-edit - drops by itself after 15 minutes.
 
 A custom theme has a **share code**, a line starting `BT1.`, that carries the
 whole theme. Copy it from the builder to send to somebody; paste one in to

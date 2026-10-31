@@ -367,7 +367,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   <div class="notice-card" id="notice-dialog" role="dialog" aria-modal="true" aria-labelledby="notice-title" aria-describedby="notice-why notice-end" tabindex="-1">
     <h2 id="notice-title"></h2>
     <p id="notice-why"></p>
-    <p id="notice-keep-text" hidden>Your changes here are not saved. Copy the share code to keep them.</p>
+    <p id="notice-keep-text" hidden></p>
     <button type="button" class="btn primary" id="notice-copy" hidden><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
     <div class="code" id="notice-code" hidden></div>
     <p class="n-end" id="notice-end">You can close this tab.</p>
@@ -679,13 +679,19 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // owner's manual test on a board, 2026-10-30). why: one sentence under
   // it, saying what follows from the ending rather than the heading again.
   // keep: the tab holds changes nobody saved, so the notice offers their
-  // share code.
+  // share code. It is the line to show, or false for none: under "Saved."
+  // the usual "Your changes here are not saved." read as a contradiction at
+  // a glance (review of fp/notice-title, NICE-3), so a save says which
+  // changes it means.
   // Focus stays in the card: inert does that where the browser has it (all
   // current ones), and the two listeners after this where it does not.
   var notice = document.getElementById('notice'), dialog = document.getElementById('notice-dialog');
+  var KEEP_LINE = 'Your changes here are not saved. Copy the share code to keep them.';
+  var KEEP_AFTER_SAVE = 'Changes you made after saving are not on the board. Copy the share code to keep them.';
   function showNotice(title, why, keep) {
     document.getElementById('notice-title').textContent = title;
     document.getElementById('notice-why').textContent = why;
+    document.getElementById('notice-keep-text').textContent = keep || '';
     ['notice-keep-text', 'notice-copy'].forEach(function (id) {
       var e = document.getElementById(id);
       if (keep) e.removeAttribute('hidden'); else e.setAttribute('hidden', '');
@@ -761,7 +767,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var saving = false, stopOwed = false;
   function stopped() {
     if (saving) { stopOwed = true; return; }
-    retire('The builder stopped.', 'Run blink theme on your computer to start it again.', 'The builder has stopped. Run blink theme on your computer to start it again.', true, holdsDraft());
+    retire('The builder stopped.', 'Run blink theme on your computer to start it again.', 'The builder stopped. Run blink theme on your computer to start it again.', true, holdsDraft() && KEEP_LINE);
   }
   function schedulePreview() {
     if (finished) return;
@@ -950,7 +956,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     var sent = wireTheme();
     post('/api/save', sent).then(function (j) {
       var owed = settled();
-      if (j.status === 200) { savedKey = JSON.stringify(sent); retire('Saved.', 'Your board keeps the theme you saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', holdsDraft()); }
+      if (j.status === 200) { savedKey = JSON.stringify(sent); retire('Saved.', 'Your board keeps the theme you saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', holdsDraft() && KEEP_AFTER_SAVE); }
       else if (j.status === 409) superseded();
       // An answer at all means the builder was up to give it, so a stop
       // held back meanwhile is not taken on trust: the owner reads why the
@@ -999,7 +1005,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // N1).
     var keep = unsaved(), draft = holdsDraft(), why = 'The builder continued in a newer tab.';
     var ended = retire('This tab is no longer active.', why, draft ? 'Continued in a newer tab. Your changes are still here: copy the share code to take them across.'
-                                  : 'Continued in a newer tab. You can close this one.', undefined, draft);
+                                  : 'Continued in a newer tab. You can close this one.', undefined, draft && KEEP_LINE);
     // The notice first: it is what stays when the browser refuses.
     if (ended && !keep) { try { window.close(); } catch (e) {} }
   }

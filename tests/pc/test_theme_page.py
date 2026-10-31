@@ -169,6 +169,7 @@ NOTICE = """
       focused: document.activeElement === d,
       inert: ['.top', '.studio'].map(s => document.querySelector(s).getAttribute('inert') !== null),
       offer: !hid('notice-copy') && !hid('notice-keep-text'),
+      keep: $('notice-keep-text').textContent,
       described: d.getAttribute('aria-describedby'),
       status: $('status-text').textContent,
       live: document.querySelectorAll('header button, main button, main input')
@@ -218,6 +219,18 @@ REASONS = {
     "cancel superseded": (
         "", "answer('/api/cancel', () => ({ status: 409, body: {} })); $('cancel').click(); await advance(10);",
         SUPERSEDED),
+    # Cancel unanswered is a stop too: the builder that was to be cancelled
+    # is not there, and "Cancelled." would say the board was put back when
+    # nothing was heard to have done it (review of fp/notice-title, SHOULD-1).
+    "cancel unanswered": (
+        "", "answer('/api/cancel', () => 'fail'); $('cancel').click(); await advance(10);",
+        STOPPED),
+    # Save answered with something it does not expect (a proxy's 502, a
+    # 403 from a builder that is no longer this session's) is a stop as well,
+    # not a superseded tab and not a tab left live under "Saving...".
+    "save refused, not 400/409/500": (
+        "", "answer('/api/save', () => ({ status: 403, body: {} })); $('save').click(); await advance(10);",
+        STOPPED),
 }
 
 
@@ -233,6 +246,10 @@ def test_every_ending_shows_the_notice_with_its_reason(reason):
     assert r["title"] == title
     assert r["why"] == sentence
     assert r["title"] != r["why"]
+    if (title, sentence) in (STOPPED, CANCELLED):
+        # The bar is the record under the notice and begins with the same
+        # words, tense included: it said "has stopped" under "stopped".
+        assert r["status"].startswith(f"{title} {sentence}")
     assert r["end"] == "You can close this tab."
     assert (r["role"], r["modal"]) == ("dialog", "true")
     assert r["labelled"] == "notice-title"
@@ -339,8 +356,9 @@ def test_the_dialog_is_described_by_only_what_it_shows(before, ending,
                                                        described):
     """M1: the description named the "not saved" line in every case, and a
     description reads an element it names even while it is hidden, so
-    Chromium's accessibility tree read a saved tab as "The theme was saved.
-    Your changes here are not saved." """
+    Chromium's accessibility tree read a saved tab as the saved sentence
+    (then "The theme was saved.") followed by "Your changes here are not
+    saved." """
     r = builder_page.run(f"""
     await advance(10);
     {before}
@@ -362,7 +380,7 @@ def test_a_reply_landing_after_the_ending_does_not_replace_it():
     $('save').click(); await advance(10);       // saved
     h.release({ status: 200, body: { ok: true, newer: true } }); await advance(10);
     """ + NOTICE, SAVED_DARK)
-    assert r["why"] == SAVED[1]
+    assert (r["title"], r["why"]) == SAVED
     assert r["offer"] is False
     assert r["status"].startswith("Saved: Ocean.")
 
@@ -390,7 +408,7 @@ def test_a_save_in_flight_outranks_a_failure_that_lands_first():
     s.release({ status: 200, body: { ok: true } }); await advance(10);
     """ + NOTICE.replace("return {", "return { during,"), SAVED_DARK)
     assert r["during"] is True                  # no notice while Save is out
-    assert r["why"] == SAVED[1]
+    assert (r["title"], r["why"]) == SAVED
 
 
 def test_a_save_that_never_answers_lets_a_held_stop_through():
@@ -401,7 +419,7 @@ def test_a_save_that_never_answers_lets_a_held_stop_through():
     await advance(7000);                        // past t = 29610
     """ + NOTICE.replace("return {", "return { during, before,"), SAVED_DARK)
     assert r["during"] is True and r["before"] is True
-    assert r["shown"] is True and r["why"] == STOPPED[1]
+    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
     assert r["offer"] is True
 
 
@@ -443,7 +461,7 @@ def test_a_save_refused_with_an_error_then_a_dead_builder_stops():
     await advance(3500);                        // the ping and its retry miss
     """ + NOTICE.replace("return {", "return { said,"), SAVED_DARK)
     assert r["said"] == "Not saved: no."
-    assert r["shown"] is True and r["why"] == STOPPED[1]
+    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
 
 
 def test_one_failed_preview_asks_a_ping_rather_than_stopping():
@@ -505,7 +523,7 @@ def test_two_missed_pings_stop_the_tab():
     await advance(3100);
     """ + NOTICE.replace("return {", "return { early,"), SAVED_DARK)
     assert r["early"] is False
-    assert r["shown"] is True and r["why"] == STOPPED[1]
+    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
 
 
 def test_a_tab_back_from_the_back_forward_cache_asks_at_once():
@@ -619,10 +637,28 @@ def test_a_change_made_while_save_is_out_stays_unsaved():
     $('notice-copy').click(); await flush();
     """ + NOTICE.replace("return {", "return { sent, copied: clipboard.writes,"), SAVED_DARK)
     assert r["sent"]["id"] != 12      # Ocean, a built-in, went to the server
-    assert r["why"] == SAVED[1]
+    assert (r["title"], r["why"]) == SAVED
     assert r["offer"] is True
     assert r["described"] == _KEEP
+    # Under "Saved." the usual "Your changes here are not saved." read as a
+    # contradiction at a glance (review of fp/notice-title, NICE-3): this
+    # line says which changes it means.
+    assert r["keep"] == ("Changes you made after saving are not on the board."
+                         " Copy the share code to keep them.")
     assert len(r["copied"]) == 1 and r["copied"][0].startswith("blink theme set BT1.")
+
+
+@pytest.mark.parametrize("ending", [_NEWER, _NO_ANSWER],
+                         ids=["newer", "stopped"])
+def test_changes_that_were_never_saved_are_offered_as_not_saved(ending):
+    r = builder_page.run(f"""
+    await advance(10);
+    {_OCEAN}
+    {ending}
+    """ + NOTICE, SAVED_DARK)
+    assert r["offer"] is True
+    assert r["keep"] == ("Your changes here are not saved. Copy the share"
+                         " code to keep them.")
 
 
 def test_a_server_that_never_answers_ends_in_the_notice():
@@ -640,7 +676,7 @@ def test_a_server_that_never_answers_ends_in_the_notice():
     """ + NOTICE.replace("return {", "return { at29, limited,"), SAVED_DARK)
     assert r["at29"] is True
     assert r["limited"] is True
-    assert r["shown"] is True and r["why"] == STOPPED[1]
+    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
     assert r["offer"] is True
 
 
@@ -655,7 +691,7 @@ def test_a_save_is_not_given_up_on_by_the_request_limit():
     $('save').click(); await advance(15000);
     s.release({ status: 200, body: { ok: true } }); await advance(10);
     """ + NOTICE, SAVED_DARK)
-    assert r["why"] == SAVED[1]
+    assert (r["title"], r["why"]) == SAVED
 
 
 def test_saving_shows_until_a_late_answer():
@@ -673,12 +709,13 @@ def test_saving_shows_until_a_late_answer():
     await advance(10000);                       // past the deadline
     const late = [$('status-text').textContent, $('save').disabled];
     s.release({ status: 200, body: { ok: true } }); await advance(10);
-    return { click, preview, late, end: $('notice-why').textContent };
+    return { click, preview, late,
+             end: [$('notice-title').textContent, $('notice-why').textContent] };
     """, SAVED_DARK)
     assert r["click"] == "Saving…"
     assert r["preview"].startswith("Preview sent: Forest")
     assert r["late"] == ["Saving…", False]
-    assert r["end"] == SAVED[1]
+    assert r["end"] == list(SAVED)
 
 
 def test_a_late_ping_from_a_failed_preview_does_not_undo_a_newer_one():
@@ -735,7 +772,7 @@ def test_a_state_that_never_answers_ends_in_the_notice():
     assert r["at9"] == [True, "Loading your current theme. You can make"
                        " changes once it is here."]
     assert r["limited"] is True
-    assert r["shown"] is True and r["why"] == STOPPED[1]
+    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
     assert r["offer"] is False      # it never had the owner's theme
 
 
@@ -764,13 +801,14 @@ def test_save_is_off_until_the_state_answers():
     """ + _RELEASE_SYNTHWAVE + """
     const after = $('save').disabled;
     $('save').click(); await advance(10);
-    return { before, early, after, why: $('notice-why').textContent,
+    return { before, early, after, title: $('notice-title').textContent,
+             why: $('notice-why').textContent,
              sent: requests.filter(q => q.path === '/api/save').map(q => q.body) };
     """, {"/api/state": "held"})
     assert r["before"] is True and r["early"] == 0
     assert r["after"] is False
     assert r["sent"] == [{"id": 5}]
-    assert r["why"] == SAVED[1]
+    assert (r["title"], r["why"]) == SAVED
 
 
 def test_nothing_is_previewed_before_the_state_answers():
@@ -812,11 +850,12 @@ def test_a_tab_whose_state_never_came_never_turns_save_on(ending):
     const early = $('save').disabled;
     """ + ending + """
     $('save').fire('click'); await advance(10);
-    return { early, now: $('save').disabled, why: $('notice-why').textContent,
+    return { early, now: $('save').disabled, title: $('notice-title').textContent,
+             why: $('notice-why').textContent,
              saves: requests.filter(q => q.path === '/api/save').length };
     """, {"/api/state": "held"})
     assert r["early"] is True and r["now"] is True
-    assert r["why"] == STOPPED[1]
+    assert (r["title"], r["why"]) == STOPPED
     assert r["saves"] == 0
 
 
@@ -831,7 +870,7 @@ def test_a_tab_taken_over_while_its_state_was_out_stays_off():
     """ + _RELEASE_SYNTHWAVE + NOTICE.replace("return {", "return { early,"),
                          {"/api/state": "held"})
     assert r["early"] is True
-    assert r["why"] == SUPERSEDED[1]
+    assert (r["title"], r["why"]) == SUPERSEDED
     assert r["live"] == []
 
 
