@@ -839,7 +839,11 @@ class Launcher:
     def __init__(self, home, opener=None, make_server=BuilderServer,
                  now=time.monotonic):
         self._home = home
-        self._opener = opener or open_url
+        # `is None`, not `or`: a stub that was falsy (a list subclass, empty
+        # until its first call) became the real open_url, which is
+        # webbrowser.open on macOS -- a review probe opened two tabs in the
+        # owner's own browser (review of 1.4.0, builder N8).
+        self._opener = opener if opener is not None else open_url
         self._make = make_server
         self._now = now
         self._server = None

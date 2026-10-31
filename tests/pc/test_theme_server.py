@@ -1101,3 +1101,44 @@ def test_nothing_is_written_to_the_preview_file_after_the_builder_ended(
     finally:
         s.finish("test over")
         s.wait(5)
+
+
+class _FalsyOpener:
+    """A stub that is falsy, as a list subclass is while it is empty."""
+
+    def __init__(self):
+        self.urls = []
+
+    def __bool__(self):
+        return False
+
+    def __call__(self, url):
+        self.urls.append(url)
+        return True
+
+
+def test_a_falsy_opener_is_still_the_opener(home, monkeypatch):
+    """Review of 1.4.0 (builder), N8. Launcher took `opener or open_url`, so
+    a stub that was falsy -- an opener recorded in a list subclass, empty
+    until its first call -- became the real open_url, which is
+    webbrowser.open on macOS: a review probe opened two tabs in the owner's
+    own browser. Only None means "no opener given"."""
+    def real(url):
+        raise AssertionError("the real opener was used")
+    monkeypatch.setattr(theme_server, "open_url", real)
+    stub = _FalsyOpener()
+    lau = theme_server.Launcher(home, opener=stub)
+    try:
+        assert lau.launch() is True
+        assert len(stub.urls) == 1
+    finally:
+        lau.close()
+
+
+def test_no_opener_given_means_the_real_one(home, monkeypatch):
+    monkeypatch.setattr(theme_server, "open_url", lambda url: True)
+    lau = theme_server.Launcher(home)
+    try:
+        assert lau._opener is theme_server.open_url
+    finally:
+        lau.close()
