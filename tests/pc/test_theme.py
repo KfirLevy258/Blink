@@ -10,6 +10,7 @@ import pytest
 
 from pc import protocol
 from pc import theme
+from pc import theme_server
 
 
 DARKISH = {"id": 12,
@@ -84,7 +85,7 @@ def test_a_missing_custom_field_is_refused():
 def test_unreadable_text_is_refused_before_the_board_sees_it():
     # Grey on grey: 1.3:1. The plan's floor is 3:1.
     t = custom(c=["777777", "999999"] + DARKISH["c"][2:])
-    with pytest.raises(theme.ThemeError, match="3:1"):
+    with pytest.raises(theme.ThemeError, match="3.05:1"):
         theme.validate(t)
 
 
@@ -193,7 +194,7 @@ def test_a_share_code_with_unreadable_text_is_refused():
     with pytest.raises(theme.ThemeError) as e:
         theme.from_share_code(code)
     assert "the board cannot use" in str(e.value)
-    assert "3:1" in str(e.value)
+    assert "3.05:1" in str(e.value)
 
 
 @pytest.mark.parametrize("bad, says", [
@@ -728,3 +729,96 @@ def test_a_stale_temp_file_is_swept_on_the_next_write(tmp_path):
     os.utime(stale, (old, old))
     theme.save(home, {"id": 3})
     assert os.listdir(home) == ["theme.json"]
+
+
+def test_the_refusal_names_the_floor_it_enforces_and_does_not_round_up():
+    """Review of 1.4.0 (builder), N2. The floor is 3.05 (MIN_CONTRAST) but
+    the words said 3:1, so 949494 on white was refused as "3.03:1, and the
+    board needs at least 3:1": over the floor named, under the one enforced.
+    8787fb on white measures 3.0484, which rounds to 3.05 and was refused
+    as "3.05:1" against a floor of 3.05. The measured ratio is cut, not
+    rounded, so it never reaches the floor it was refused for."""
+    t = custom(c=["ffffff", "8787fb"] + DARKISH["c"][2:])
+    with pytest.raises(theme.ThemeError) as e:
+        theme.validate(t)
+    assert str(e.value) == ("text on background is 3.04:1, and the board"
+                            " needs at least 3.05:1 to be readable")
+    t = custom(c=["ffffff", "949494"] + DARKISH["c"][2:])
+    with pytest.raises(theme.ThemeError) as e:
+        theme.validate(t)
+    assert "3.03:1" in str(e.value) and "at least 3.05:1" in str(e.value)
+
+
+# ----------------------------------------------- guards that had no test
+#
+# Review of 1.4.0 (tests and docs), N3. Each of these has a stated reason in
+# validate()/_colour() and survived deleting its check: the whole suite
+# passed with the hex-character check, the integer-width check or the
+# colour-count check removed.
+
+@pytest.mark.parametrize("bad", ["+0e111", " 0e111", "-0e111", "0e1_11",
+                                 "0x0e11"])
+def test_a_colour_int_would_take_but_the_board_does_not_is_refused(bad):
+    """int("+0e111", 16) is 3,637,521, so a length-and-int check alone lets
+    "+0e111" through, and the board's parser takes hex digits only: the
+    line is refused there, and "sends it within a few seconds" changes
+    nothing."""
+    t = custom(c=[bad] + DARKISH["c"][1:])
+    with pytest.raises(theme.ThemeError, match="six hex digits"):
+        theme.validate(t)
+
+
+def test_int_really_does_take_a_signed_six_character_string():
+    # The reason for the check above, held here so it cannot be argued away.
+    assert int("+0e111", 16) == 0x0e111
+    assert int(" 0e111", 16) == 0x0e111
+
+
+@pytest.mark.parametrize("w", [12.0, 5.0, "12", True, None, 6, 0])
+def test_a_width_that_is_not_an_exact_int_of_the_three_is_refused(w):
+    """The board's parser wants an integer; 12.0 passes `in WIDTHS.values()`
+    because 12.0 == 12, so only the type check keeps it off the wire."""
+    with pytest.raises(theme.ThemeError, match="width must be"):
+        theme.validate(custom(w=w))
+
+
+@pytest.mark.parametrize("n", [0, 1, 6, 8])
+def test_a_custom_theme_has_exactly_seven_colours(n):
+    """zip() would truncate eight to seven and accept six."""
+    c = (DARKISH["c"] * 2)[:n]
+    with pytest.raises(theme.ThemeError, match="7 colours"):
+        theme.validate(custom(c=c))
+
+
+def test_the_pages_floor_is_the_validators_floor():
+    """Review of 1.4.0 (tests and docs), N3/T10: the page enables Save by its
+    own MIN_CONTRAST, so one that drifts from pc/theme.py's enables Save for
+    a theme the server then refuses (or refuses one the board would take).
+    Mutant: the page's 3.05 changed to 3.0 survived."""
+    import re
+    page = theme_server.page()
+    floors = re.findall(r"MIN_CONTRAST = ([0-9.]+)", page)
+    assert floors == [str(theme.MIN_CONTRAST)]
+
+
+def test_the_floor_is_said_the_same_everywhere():
+    """Review of 1.4.0 (tests and docs), S1. The floor is 3.05, and the
+    command line said "at least 3:1" (and "3.04:1" under it), the page said
+    "3.0:1 ... at least 3:1", and the README said 3:1. One number, in every
+    place a person reads it, taken from MIN_CONTRAST."""
+    import pathlib
+    import re
+    floor = f"{theme.MIN_CONTRAST:.2f}:1"
+    # The validator, which the command line and the server both print.
+    with pytest.raises(theme.ThemeError) as e:
+        theme.validate(custom(c=["ffffff", "949494"] + DARKISH["c"][2:]))
+    assert f"at least {floor}" in str(e.value)
+    # The page, which builds its sentence from its own constant.
+    page = theme_server.page()
+    assert "at least ' + MIN_CONTRAST.toFixed(2) + ':1" in page
+    assert "at least 3:1" not in page
+    # The README.
+    readme = (pathlib.Path(__file__).resolve().parents[2] / "docs"
+              / "README-full.md").read_text(encoding="utf-8")
+    assert f"at least {floor}" in readme
+    assert not re.search(r"at least 3:1\b", readme)

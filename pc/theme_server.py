@@ -32,6 +32,7 @@ or IDLE_S with no edit, write a cancel for the daemon -- the board goes back
 to its stored theme -- and stop.
 """
 import hmac
+import http.client
 import http.server
 import json
 import os
@@ -59,6 +60,10 @@ MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
 # field because those bodies are the theme itself, which theme.validate
 # checks key by key; see _Handler.do_POST.
 TAB_HEADER = "X-Blink-Tab"
+# The requests BuilderServer.count tallies, for the line it logs when it
+# ends. Paths only: nothing a request carries is kept.
+_COUNTED = ("/api/ping", "/api/preview", "/api/save", "/api/cancel",
+            "/api/closed")
 # A builder heartbeat (/api/ping) arrives every 20 s from an open page. A page
 # heard within this long is "still open": the Launcher does not put a second
 # tab beside it. Chrome slows a hidden tab's timers to once a minute, hence
@@ -79,6 +84,9 @@ PAGE_ALIVE_S = 75
 # a replayed ask, or a deliberate one on the "Opened" note itself -- is
 # folded into it, which is benign: a window opened moments earlier.
 OPEN_EVERY_S = 2
+# The longest a Ctrl-C in `blink theme` waits to be noticed; see
+# BuilderServer.wait_interruptibly.
+WAIT_SLICE_S = 0.5
 
 
 def cookie_name(port):
@@ -313,6 +321,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             k = urllib.parse.parse_qs(url.query).get("k", [""])[0]
             session = self.builder.redeem(k)
             if session is None:
+                fate = self.builder.link_fate(k)
+                if fate == "replaced":
+                    return self._send(403, b"This link was replaced by a"
+                                      b" newer one. Use the newest builder"
+                                      b" tab.\n")
+                if fate == "used":
+                    return self._send(403, b"This link was opened already."
+                                      b" Use the tab it opened.\n")
                 return self._refuse()
             return self._send(303, headers=(
                 ("Location", "/"),
@@ -339,9 +355,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # older tab was told to stop and the newer one opened on the
             # saved theme: the draft was on the board and in no tab that
             # could still send it (review of fp/edit-reset r2, SHOULD-1).
+            #
+            # "board" and "waiting_s": whether anything will show a preview.
+            # The page said "Preview sent: ... is on your board" after every
+            # change, to a 1.3.4 board that takes no theme line and with no
+            # bridge running to take the file (review of 1.4.0, builder S3).
+            takes, _ = theme.board_takes_themes(self.builder.home)
             return self._json(200, {"saved": theme.load_saved(
                 self.builder.home), "draft": self.builder.draft,
-                "idle_s": self.builder.idle_s})
+                "idle_s": self.builder.idle_s,
+                "board": {"themes": takes},
+                "waiting_s": theme.preview_waiting_s(self.builder.home)})
         return self._refuse(404)
 
     # -- POST
@@ -360,6 +384,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 and self._origin_ok()):
             return self._refuse()
         path = urllib.parse.urlsplit(self.path).path
+        self.builder.count(path)
         raw, err = self._body()
         if err:
             self.close_connection = True
@@ -398,30 +423,37 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._json(400, {"error": msg})
         if path == "/api/preview":
             self.builder.touch()
-            theme.write_preview(self.builder.home, t)
-            self.builder.draft = t
+            self.builder.write_preview(t)
             return self._json(200, {"ok": True})
-        keep = theme.saved_custom(self.builder.home) \
-            if t["id"] != theme.CUSTOM else None
-        try:
-            theme.save(self.builder.home, t, keep_custom=keep)
-        except theme.Unreadable as e:
-            # theme.json is there and unreadable, so it is not written over
-            # (contract Addendum 4a); the message says which file, not what
-            # it holds.
-            return self._json(500, {"error": f"Not saved: {e}."})
-        except OSError as e:
-            # Said to the page, and the builder stays up so Save can be tried
-            # again. "Saved" over a failed write is a lie the owner acts on.
-            return self._json(500, {"error": "Not saved: this computer could"
-                                    f" not write the theme file ({e})."})
-        # A cancel, not just dropping the preview file: a preview still
-        # waiting would reach the board after the save and show something
-        # other than what was just stored, and one already sent stays on the
-        # board for 15 minutes when this Save picked the theme already
-        # stored, because then no save line goes out to end it (review
-        # NICE-4). ThemeSync.outgoing drops the cancel when a save is owed.
-        theme.write_cancel(self.builder.home)
+        # Under the builder's file lock from the stored theme to the cancel,
+        # so a preview still being written cannot land between them or after
+        # (review of 1.4.0, builder N5).
+        with self.builder.writing():
+            keep = theme.saved_custom(self.builder.home) \
+                if t["id"] != theme.CUSTOM else None
+            try:
+                theme.save(self.builder.home, t, keep_custom=keep)
+            except theme.Unreadable as e:
+                # theme.json is there and unreadable, so it is not written
+                # over (contract Addendum 4a); the message says which file,
+                # not what it holds.
+                return self._json(500, {"error": f"Not saved: {e}."})
+            except OSError as e:
+                # Said to the page, and the builder stays up so Save can be
+                # tried again. "Saved" over a failed write is a lie the
+                # owner acts on.
+                return self._json(500, {"error": "Not saved: this computer"
+                                        f" could not write the theme file"
+                                        f" ({e})."})
+            # A cancel, not just dropping the preview file: a preview still
+            # waiting would reach the board after the save and show
+            # something other than what was just stored, and one already
+            # sent stays on the board for 15 minutes when this Save picked
+            # the theme already stored, because then no save line goes out
+            # to end it (review NICE-4). ThemeSync.outgoing drops the cancel
+            # when a save is owed.
+            theme.write_cancel(self.builder.home)
+            self.builder.stop_writing()
         self._json(200, {"ok": True})
         self.builder.finish("saved")
 
@@ -492,6 +524,10 @@ class BuilderServer:
         self._tick_s = tick_s
         self._lock = threading.Lock()
         self._links = {}            # unspent link -> when it was made
+        # Links that no longer work and why, "replaced" or "used", newest
+        # last and kept few: only so the page the browser lands on can say
+        # which (see link_fate).
+        self._gone = {}
         self._sessions = set()
         self._last = now()
         self._seen = None
@@ -506,7 +542,19 @@ class BuilderServer:
         self._order = {}
         # The last theme a preview sent, or None; see /api/state.
         self.draft = None
+        # Held by whoever writes the preview file or the theme, and what
+        # makes the end final: once a save or a finish has written its
+        # cancel, nothing later is written (write_preview, writing).
+        self._files = threading.Lock()
+        self._writing = True
         self.outcome = None
+        # What the daemon's log says when this builder ends, or None. Set by
+        # the Launcher, so `blink theme` prints nothing beyond its own words.
+        self.say = None
+        # What this builder was asked, counted by kind and never by content,
+        # and when it started; see _account.
+        self._born = now()
+        self._counts = dict.fromkeys(_COUNTED, 0)
         self._done = threading.Event()
         self.page_bytes = page().encode("utf-8")
         self._httpd = _HTTPServer(("127.0.0.1", 0), _Handler)
@@ -520,10 +568,45 @@ class BuilderServer:
         # to a server that is on its way down.
         return self.outcome is not None
 
+    def writing(self):
+        """The file lock, for a handler that writes the theme and then the
+        cancel as one step. Call stop_writing() inside it once the cancel is
+        written."""
+        return self._files
+
+    def stop_writing(self):
+        self._writing = False
+
+    def write_preview(self, t):
+        """Write a preview for the daemon, unless the builder has ended.
+        True when written.
+
+        The preview and Save handlers run on separate threads and do_POST
+        never asked whether the builder was over. A preview whose write was
+        slow (a scanner holding theme_preview.json on Windows) landed after
+        Save's cancel when the theme saved was the one already stored, so
+        the daemon sent only op=preview and the board showed it for 15
+        minutes under "Saved" (review of 1.4.0, builder N5)."""
+        with self._files:
+            if not self._writing:
+                return False
+            theme.write_preview(self.home, t)
+            self.draft = t
+            return True
+
     def listening_socket(self):
         return self._httpd.socket
 
     def start(self):
+        # Recorded so that `blink theme` does not start a second builder on
+        # this home: two write the same preview file, and one's cancel,
+        # close or idle end took the other's live preview off the board while
+        # its tab went on saying "Preview sent" (review of 1.4.0, builder
+        # N1). A failure to write it costs only that protection.
+        try:
+            theme.write_builder(self.home, self.port)
+        except OSError:
+            pass
         threading.Thread(target=self._httpd.serve_forever,
                          kwargs={"poll_interval": 0.2},
                          name="blink-theme-http", daemon=True).start()
@@ -544,8 +627,28 @@ class BuilderServer:
         always refused; now so is a superseded or stale one."""
         k = secrets.token_urlsafe(32)
         with self._lock:
+            for old in self._links:
+                self._retire_link(old, "replaced")
             self._links = {k: self._now()}
         return f"http://127.0.0.1:{self.port}/open?k={k}"
+
+    def _retire_link(self, k, why):
+        """Called with the lock held."""
+        self._gone[k] = why
+        while len(self._gone) > 16:
+            del self._gone[next(iter(self._gone))]
+
+    def link_fate(self, k):
+        """"replaced" or "used" for a link that once worked, else None. A
+        slow browser still loading the first link when the owner pressed
+        Edit on computer again was told "Not allowed. Run blink theme
+        again.", which reads as an instruction to start a second builder,
+        while the newer tab worked (review of 1.4.0, builder N4)."""
+        with self._lock:
+            for gone, why in self._gone.items():
+                if _same(gone, k):
+                    return why
+        return None
 
     def redeem(self, k):
         with self._lock:
@@ -555,6 +658,7 @@ class BuilderServer:
                     del self._links[good]
                     if now - made >= LINK_LIFE_S:
                         return None
+                    self._retire_link(good, "used")
                     s = secrets.token_urlsafe(32)
                     self._sessions.add(s)
                     self._last = self._seen = now
@@ -632,8 +736,17 @@ class BuilderServer:
             now = self._now()
             self._tabs.pop(tab, None)
             self._prune_tabs(now)
-            if self._tabs:
-                return      # another tab is still showing this builder
+            # Only the newest tab is live (seen()). An older one that has
+            # not yet pinged since the newer arrived is still in the count,
+            # but it is not showing this builder: its next ping says it is
+            # superseded and drops it, and a retired tab sends no
+            # /api/closed, so nothing would ever set the close again. The
+            # builder then ran with no live tab until IDLE_S, 600 s after
+            # the last edit, and the board kept the closed tab's last
+            # preview all that time (review of 1.4.0, builder S1).
+            newest = len(self._order) - 1
+            if any(self._order.get(k) == newest for k in self._tabs):
+                return      # the live tab is still showing this builder
             self._closed_at = now
 
     def tick(self):
@@ -647,6 +760,26 @@ class BuilderServer:
         elif idle:
             self.finish("idle")
 
+    def count(self, path):
+        """One more request of this kind, for the line finish() says. Only
+        the paths named in _COUNTED are kept: a tally by kind can hold no
+        theme, no link and no cookie."""
+        if path in self._counts:
+            with self._lock:
+                self._counts[path] += 1
+
+    def _account(self, outcome):
+        """How this builder ended, as one line. The outcome is one of the
+        fixed words finish() is called with; the rest are whole numbers."""
+        with self._lock:
+            n = dict(self._counts)
+            tabs = len(self._order)
+            secs = int(self._now() - self._born)
+        return (f"[theme] builder ended: {outcome} after {secs} s"
+                f" (pings={n['/api/ping']} previews={n['/api/preview']}"
+                f" saves={n['/api/save']} cancels={n['/api/cancel']}"
+                f" closes={n['/api/closed']} tabs={tabs})")
+
     def finish(self, outcome, cancel=True):
         """Stop. Anything but a save also tells the board to drop the
         preview, through the same file every preview went through."""
@@ -654,11 +787,26 @@ class BuilderServer:
             if self.outcome is not None:
                 return
             self.outcome = outcome
-        if cancel and outcome != "saved":
+        # Said first, before anything below can fail: it is the one record
+        # of why the builder ended. On 2026-10-31 a builder ended 6 s after
+        # the board opened it and the log could not say a Save from a closed
+        # tab. A log that cannot be written must not stop the builder.
+        if self.say is not None:
             try:
-                theme.write_cancel(self.home)
-            except OSError:
+                self.say(self._account(outcome))
+            except Exception:
                 pass
+        try:
+            theme.remove_builder(self.home, self.port)
+        except OSError:
+            pass
+        with self._files:
+            self._writing = False
+            if cancel and outcome != "saved":
+                try:
+                    theme.write_cancel(self.home)
+                except OSError:
+                    pass
 
         def stop():
             self._httpd.shutdown()
@@ -674,6 +822,63 @@ class BuilderServer:
         self._done.wait(timeout)
         return self.outcome
 
+    def wait_interruptibly(self):
+        """wait() with no end, for a foreground command that Ctrl-C must
+        be able to stop. In slices, because a lock acquire with no timeout
+        is not interruptible on Windows in CPython 3.11, the Python the
+        Windows binary is built with: Python/thread_nt.h says "Fow now,
+        intr_flag does nothing on Windows, and lock acquires are
+        uninterruptible", and Event.wait(None) is exactly such an acquire.
+        `blink theme` then ignored Ctrl-C until the builder ended by itself
+        -- Save, Cancel, the tab closed, ten minutes idle -- while telling
+        the owner that Ctrl-C cancels it (review of 1.4.0, builder S2). A
+        timed wait is interrupted on every platform. Half a second is the
+        longest a Ctrl-C can wait. Measured on Windows 11 with Python
+        3.11.9: a SIGINT raised at 2 s reached Event.wait(None) at 8 s,
+        when the event was set, and a loop of wait(0.5) at 2.0 s, by both
+        signal.raise_signal and _thread.interrupt_main."""
+        while not self._done.wait(WAIT_SLICE_S):
+            pass
+        return self.outcome
+
+
+def running_builder(home):
+    """The port of a builder running on `home`, or None.
+
+    From the record every builder keeps (theme.BUILDER_FILE), then asked: a
+    builder killed before it could remove its record leaves one behind, and
+    its port may since have gone to some other program. So the port must
+    answer the way this server does to a request with no session, 403 and
+    "Not allowed", and a record that fails that is stale and is taken
+    away."""
+    port = theme.read_builder(home)
+    if port is None:
+        return None
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            c.request("GET", "/api/state", headers={
+                "Host": f"127.0.0.1:{port}"})
+            r = c.getresponse()
+            alive = r.status == 403 and r.read(64).startswith(b"Not allowed")
+        finally:
+            c.close()
+    except (OSError, http.client.HTTPException):
+        alive = False
+    if alive:
+        return port
+    try:
+        theme.remove_builder(home, port)
+    except OSError:
+        pass
+    return None
+
+
+def _say_ending(line):
+    # The daemon's stderr is bridge.log. The line is built by
+    # BuilderServer._account: a fixed outcome word and counts.
+    print(line, file=sys.stderr)
+
 
 class Launcher:
     """The daemon's builder: at most one running, reopened on request."""
@@ -681,7 +886,11 @@ class Launcher:
     def __init__(self, home, opener=None, make_server=BuilderServer,
                  now=time.monotonic):
         self._home = home
-        self._opener = opener or open_url
+        # `is None`, not `or`: a stub that was falsy (a list subclass, empty
+        # until its first call) became the real open_url, which is
+        # webbrowser.open on macOS -- a review probe opened two tabs in the
+        # owner's own browser (review of 1.4.0, builder N8).
+        self._opener = opener if opener is not None else open_url
         self._make = make_server
         self._now = now
         self._server = None
@@ -749,6 +958,7 @@ class Launcher:
                       file=sys.stderr)
                 self._server = None
                 return False, None
+            server.say = _say_ending
             server.start()
             self._server = server
         else:

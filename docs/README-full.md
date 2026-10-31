@@ -484,11 +484,12 @@ built-ins. A custom theme has:
 - arcs coloured by how full they are, or one colour per gauge. Per gauge, a
   dial still turns to your high colour from 90 %.
 
-Text has to stand out from the background by at least 3:1, the point below
-which the small labels stop being readable at arm's length. A theme under
-that is refused with the measured ratio, before it reaches the board,
-because a panel nobody can read is one you would have to find Settings on
-through that same text.
+Text has to stand out from the background by at least 3.05:1: about 3:1 is
+the point below which the small labels stop being readable at arm's length,
+and the last 0.05 keeps a theme this side accepts clear of the board's own
+rounding. A theme under that is refused with the measured ratio, before it
+reaches the board, because a panel nobody can read is one you would have to
+find Settings on through that same text.
 
 A theme lives on the board and on your computer at once. One picked on the
 board is taken up by the computer; one set on the computer goes to the
@@ -519,7 +520,12 @@ has read that (usually at once) it says **Loading your current theme.** and
 its controls, all but **Cancel**, stay off, so nothing can be saved over a
 theme it has not seen. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
-without a change puts the board back on the theme it had. Press **Edit on
+without a change puts the board back on the theme it had. When it cannot
+be so, it says that instead of "Preview sent": a board still on firmware
+1.3.4 shows no preview (the builder and `blink theme` say so, and a saved
+theme is sent once the board is updated), and a preview that nothing has
+picked up after a few seconds, because the app is not running or the board
+is not plugged in, is named as not on the board. Press **Edit on
 computer** again at any time: with the builder still open it opens it again
 in your browser, in a new tab, and once it has closed it opens a new one.
 On Windows, and on some Linux desktops, that tab may open behind your other
@@ -528,15 +534,15 @@ tab is live, and it opens on the changes you have made so far. Within about
 a minute the older tab stops: it tries to close itself if it has nothing
 you have not saved, and otherwise keeps your colours on screen.
 
-A tab that is no longer the live builder - you saved or cancelled, a newer
-tab took over, or the builder stopped (ten minutes idle, or the app
-quit) - dims and says **This tab is no longer active.**, with the reason
-and **You can close this tab.** Its controls stop working. If it still
-holds changes you have not saved, it offers **Copy share code**, so you
-can paste them into the newer tab or keep them. Most browsers will not let
-a page close a tab, so this notice is usually what you see. A preview the
-board never hears the end of - the computer went to sleep mid-edit - drops
-by itself after 15 minutes.
+A tab that is no longer the live builder dims under a notice that names
+why: **Saved.** or **Cancelled.**, **This tab is no longer active.** when a
+newer tab took over, or **The builder stopped.** (ten minutes idle, or the
+app quit), each with a line on what follows and **You can close this tab.**
+Its controls stop working. If it still holds changes you have not saved, it
+offers **Copy share code**, so you can paste them into the newer tab or keep
+them. Most browsers will not let a page close a tab, so this notice is
+usually what you see. A preview the board never hears the end of - the
+computer went to sleep mid-edit - drops by itself after 15 minutes.
 
 A custom theme has a **share code**, a line starting `BT1.`, that carries the
 whole theme. Copy it from the builder to send to somebody; paste one in to

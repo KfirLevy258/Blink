@@ -1,6 +1,8 @@
 """`blink theme` and its subcommands. ~ is tmp_path (tests/conftest.py)."""
 import json
 import os
+import signal
+import sys
 import threading
 import urllib.parse
 import http.client
@@ -48,7 +50,7 @@ def test_set_refuses_unreadable_text_and_keeps_the_old_theme(capsys):
     cli.main(["theme", "set", "neon"])
     assert cli.main(["theme", "set", "bg=777777", "text=999999"]) == 2
     out = capsys.readouterr().out
-    assert "3:1" in out
+    assert "3.05:1" in out
     assert theme.load_saved(home()) == {"id": 1}
 
 
@@ -222,6 +224,73 @@ def test_bare_theme_with_no_browser_prints_the_link(monkeypatch, capsys):
     assert theme.take_preview(home()) == ("cancel", None)
 
 
+def test_ctrl_c_in_bare_theme_cancels_without_an_unbounded_wait(
+        monkeypatch, capsys):
+    """Review of 1.4.0 (builder), S2: the command prints "so does Ctrl-C
+    here" and then blocked in a wait with no timeout, which CPython 3.11
+    cannot interrupt on Windows. The wait it makes must be timed. Here the
+    unbounded one is made to fail, and a Ctrl-C (interrupt_main, which
+    raises KeyboardInterrupt in the main thread the way the signal does) is
+    sent once the builder is up."""
+    import _thread
+    real = theme_server.BuilderServer.wait
+
+    def timed_only(self, timeout=None):
+        assert timeout is not None and timeout <= 10, "an unbounded wait"
+        return real(self, timeout)
+    monkeypatch.setattr(theme_server.BuilderServer, "wait", timed_only)
+
+    def opener(url):
+        threading.Timer(0.3, _thread.interrupt_main).start()
+        return True
+
+    monkeypatch.setattr(theme_server, "open_url", opener)
+    assert cli.main(["theme"]) == 0
+    assert "Cancelled." in capsys.readouterr().out
+    assert theme.take_preview(home()) == ("cancel", None)
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="signals other than Ctrl-C are POSIX")
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_a_closed_terminal_or_a_kill_cancels_like_ctrl_c(name, monkeypatch,
+                                                         capsys):
+    """Review of 1.4.0 (builder), N10: closing the terminal window (SIGHUP)
+    or a kill (SIGTERM) ended `blink theme` without a cancel, so the last
+    preview stayed on the board until its own 15 minute backstop, and with
+    no bridge running it stayed in theme_preview.json for the next start to
+    send. The daemon turns SIGTERM into an ordinary exit for the same
+    reason (exit_on_sigterm).
+
+    The signal is sent to this process, so the test first puts a handler of
+    its own on it: without the fix the signal is then only recorded, and the
+    test fails instead of the signal ending pytest. A timer ends the wait
+    after 3 s for the same reason."""
+    import _thread
+    sig = getattr(signal, name)
+    heard = []
+
+    def stand_in(signum, frame):
+        heard.append(signum)
+    before = signal.signal(sig, stand_in)
+    backstop = threading.Timer(3, _thread.interrupt_main)
+    try:
+        def opener(url):
+            threading.Timer(0.3, os.kill, (os.getpid(), sig)).start()
+            backstop.start()
+            return True
+
+        monkeypatch.setattr(theme_server, "open_url", opener)
+        assert cli.main(["theme"]) == 0
+        assert heard == []
+        assert "Cancelled." in capsys.readouterr().out
+        assert theme.take_preview(home()) == ("cancel", None)
+        assert signal.getsignal(sig) is stand_in      # put back
+    finally:
+        backstop.cancel()
+        signal.signal(sig, before)
+
+
 def test_a_missing_page_is_one_sentence(monkeypatch, capsys):
     monkeypatch.setattr(theme_server, "PAGE_FILE", "not-there.html")
     monkeypatch.setattr(theme_server, "open_url", lambda u: True)
@@ -345,6 +414,7 @@ def test_uninstall_removes_every_theme_file(tmp_path, monkeypatch, capsys):
               os.path.join(h, ".theme-k2j3h4.tmp")]
     for p in strays:
         open(p, "w").close()
+    theme.write_builder(h, 4321)      # a builder killed before it cleaned up
     for name in theme.FILES:
         assert os.path.exists(os.path.join(h, name)), name
     assert os.path.exists(theme.seen_path(h))
@@ -361,3 +431,133 @@ def test_every_theme_file_the_module_writes_is_listed():
     names = {v for k, v in vars(theme).items()
              if k.endswith("_FILE") and isinstance(v, str)}
     assert names and names <= set(theme.FILES)
+
+
+def test_an_old_board_is_named_before_the_builder_opens(monkeypatch, capsys):
+    """Review of 1.4.0 (builder), S3: with a 1.3.4 board the builder opened
+    without a word, its previews all answered 200, and the note that the
+    board takes no themes came only after Save. This release is that window
+    for every owner who has not yet tapped to install the firmware."""
+    _board_json(caps=[])
+    said_before_open = []
+
+    def opener(url):
+        said_before_open.append(capsys.readouterr().out)
+        def cancel():
+            link = urllib.parse.urlsplit(url)
+            c = http.client.HTTPConnection("127.0.0.1", link.port,
+                                           timeout=5)
+            c.request("GET", link.path + "?" + link.query)
+            r = c.getresponse()
+            cookie = r.getheader("Set-Cookie").split(";", 1)[0]
+            r.read()
+            c.request("POST", "/api/cancel", body=b"",
+                      headers={"Cookie": cookie})
+            c.getresponse().read()
+            c.close()
+        threading.Timer(0.2, cancel).start()
+        return True
+
+    monkeypatch.setattr(theme_server, "open_url", opener)
+    assert cli.main(["theme"]) == 0
+    assert "firmware 1.3.4, which does not take themes" in said_before_open[0]
+
+
+def test_a_board_that_takes_themes_gets_no_note_from_the_builder(
+        monkeypatch, capsys):
+    _board_json(caps=["svc", "theme"])
+    monkeypatch.setattr(theme_server, "open_url", lambda u: False)
+    monkeypatch.setattr(theme_server.BuilderServer, "wait_interruptibly",
+                        lambda self: "cancelled")
+    assert cli.main(["theme"]) == 0
+    assert "does not take themes" not in capsys.readouterr().out
+
+
+def test_a_second_builder_is_not_started_beside_a_running_one(monkeypatch,
+                                                              capsys):
+    """Review of 1.4.0 (builder), N1: `blink theme` beside the app's own
+    builder, or two of it, ended each other's previews through the one
+    preview file. The second says where the first is and starts nothing, and
+    leaves the first's preview alone."""
+    h = home()
+    first = theme_server.BuilderServer(h, tick_s=3600)
+    first.start()
+    try:
+        theme.write_preview(h, {"id": 4})
+
+        def never(*a, **k):
+            raise AssertionError("a second builder was made")
+        monkeypatch.setattr(theme_server, "BuilderServer", never)
+        monkeypatch.setattr(theme_server, "open_url", never)
+        assert cli.main(["theme"]) == 1
+        out = capsys.readouterr().out
+        assert "already open" in out
+        assert "Edit on computer" in out          # how to get its tab back
+        assert theme.take_preview(h) == ("preview", {"id": 4})
+    finally:
+        first.finish("test over")
+        first.wait(5)
+
+
+def test_a_record_left_by_a_killed_builder_does_not_stop_blink_theme(
+        monkeypatch, capsys):
+    import socket
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    theme.write_builder(home(), port)
+    monkeypatch.setattr(theme_server, "open_url", lambda u: False)
+    monkeypatch.setattr(theme_server.BuilderServer, "wait_interruptibly",
+                        lambda self: "cancelled")
+    assert cli.main(["theme"]) == 0
+    assert "already open" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [
+    ["theme", "reset", "ocean"],
+    ["theme", "list", "light"],
+    ["theme", "show", "ocean"],
+])
+def test_reset_list_and_show_take_no_other_words(argv, capsys):
+    """Review of 1.4.0 (builder), N6: `blink theme reset ocean` set Dark and
+    said nothing of the word it dropped, and `show ocean` and `list light`
+    printed as if it had not been typed. Refused with exit 2, as `set`
+    refuses what it cannot take, and nothing is written."""
+    cli.main(["theme", "set", "neon"])
+    capsys.readouterr()
+    assert cli.main(argv) == 2
+    out = capsys.readouterr().out
+    assert f"blink theme {argv[1]} takes nothing after it" in out
+    assert "blink theme set ocean" in out      # what was probably meant
+    assert theme.load_saved(home()) == {"id": 1}
+
+
+def test_show_says_when_the_theme_file_cannot_be_read(capsys):
+    """Review of 1.4.0 (builder), N7. With theme.json holding `{"id": 4,`,
+    set and reset refused ("... is there but could not be read
+    (JSONDecodeError); it was left as it is"), but show said "Theme: the
+    board's own choice. Nothing is set from this computer", which is false
+    of a file that is there, and the next set was refused with no hint why.
+    The refusals also ended without a full stop."""
+    h = home()
+    os.makedirs(h, exist_ok=True)
+    with open(inside(h, theme.theme_path(h)), "w", encoding="utf-8") as f:
+        f.write('{"id": 4,')
+    assert cli.main(["theme", "show"]) == 1
+    out = capsys.readouterr().out
+    assert "could not be read" in out
+    assert "Nothing is set" not in out
+    assert "(JSONDecodeError)" in out
+    assert out.strip().endswith("Fix it or delete it.")
+    for argv in (["theme", "set", "ocean"], ["theme", "reset"]):
+        assert cli.main(argv) == 1
+        assert capsys.readouterr().out.strip().endswith(
+            "Fix it or delete it.")
+    with open(theme.theme_path(h), encoding="utf-8") as f:
+        assert f.read() == '{"id": 4,'          # left as it was
+
+
+def test_show_with_no_theme_file_still_says_nothing_is_set(capsys):
+    assert cli.main(["theme", "show"]) == 0
+    assert "Nothing is set from this computer" in capsys.readouterr().out

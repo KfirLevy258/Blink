@@ -165,6 +165,62 @@ def test_closing_the_older_tab_does_not_end_the_builder_in_the_newer(
         s.finish("test over")
 
 
+def test_the_newest_tab_closing_ends_the_builder_before_the_older_has_heard(
+        tmp_path):
+    """Review of 1.4.0 (builder), S1. Two presses of Edit on computer make
+    two tabs, and on Windows the second often opens behind the first. The
+    owner closes the one in front, meaning to cancel, and the older tab
+    pings as it comes into view. The close arrived first, while the older
+    tab was still in the tab count because nothing had yet told it that it
+    was superseded, so closing() left the builder up; the ping then found
+    it superseded and dropped it from the count, and nothing set the close
+    again, since a retired tab sends no /api/closed. Measured: outcome
+    'idle' 600 s later where 'closed' after 5 s was expected, with the
+    board holding the closed tab's last preview all that time. Only the
+    newest tab keeps a builder up."""
+    s, clock = server(tmp_path)
+    try:
+        s.seen("a")
+        clock.t += 1
+        s.seen("b")
+        clock.t += 1
+        s.closing("b")                        # the live tab is closed
+        clock.t += 5
+        assert s.seen("a") is True            # a's next ping: superseded
+        clock.t += theme_server.CLOSE_GRACE_S + 1
+        s.tick()
+        assert s.outcome == "closed"
+    finally:
+        s.finish("test over")
+
+
+def test_the_same_through_the_handler_with_two_links(tmp_path):
+    """The same order over HTTP, with two redeemed links as two presses
+    make: a's ping is answered as superseded, and after the grace the
+    builder ends and the board is told to drop the preview a sent."""
+    from tests.pc.test_theme_server import login, request
+    s, clock = server(tmp_path)
+    s.start()
+    try:
+        ca = login(s)
+        request(s, "POST", "/api/ping", {"tab": "taba"}, cookie=ca)
+        assert request(s, "POST", "/api/preview", {"id": 6}, cookie=ca,
+                       extra={"X-Blink-Tab": "taba"})[0] == 200
+        cb = login(s)
+        request(s, "POST", "/api/ping", {"tab": "tabb"}, cookie=cb)
+        request(s, "POST", "/api/closed", {"tab": "tabb"}, cookie=cb)
+        clock.t += 3
+        assert request(s, "POST", "/api/ping", {"tab": "taba"},
+                       cookie=ca)[2] == b'{"ok": true, "newer": true}'
+        clock.t += theme_server.CLOSE_GRACE_S + 1
+        s.tick()
+        assert s.outcome == "closed"
+        assert theme.take_preview(s.home) == ("cancel", None)
+    finally:
+        s.finish("test over")
+        s.wait(5)
+
+
 def test_a_tab_gone_quiet_does_not_hold_the_builder_open(tmp_path):
     # A tab that crashed never says it closed; past PAGE_ALIVE_S it no
     # longer counts, so the last tab's close still ends the builder.

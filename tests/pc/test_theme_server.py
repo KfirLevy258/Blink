@@ -9,6 +9,7 @@ import os
 import re
 import socket
 import threading
+import time
 import urllib.parse
 
 import pytest
@@ -273,6 +274,50 @@ def test_closing_the_tab_cancels_after_a_grace(server, home):
     server.tick()
     assert server.wait(5) == "closed"
     assert theme.take_preview(home) == ("cancel", None)
+
+
+class _SlicedEvent:
+    """Stands in for BuilderServer._done: says "not yet" twice, then done,
+    and keeps every timeout it was asked to wait for."""
+
+    def __init__(self):
+        self.asked = []
+
+    def wait(self, timeout=None):
+        self.asked.append(timeout)
+        return len(self.asked) > 2
+
+    def set(self):
+        pass
+
+
+def test_waiting_for_the_end_is_done_in_short_slices(home):
+    """Review of 1.4.0 (builder), S2. `blink theme` blocked in
+    Event.wait(None), and a lock acquire with no timeout is not
+    interruptible on Windows in CPython 3.11 (Python/thread_nt.h: "intr_flag
+    does nothing on Windows, and lock acquires are uninterruptible"), the
+    Python the Windows binary is built with. So Ctrl-C was held back until
+    the builder ended by itself, and the "so does Ctrl-C here" the command
+    prints was not true. A timed wait is interrupted on every platform."""
+    s = theme_server.BuilderServer(home, tick_s=3600)
+    s.start()
+    real, fake = s._done, _SlicedEvent()
+    try:
+        s.outcome = "saved"
+        s._done = fake
+        assert s.wait_interruptibly() == "saved"
+        assert len(fake.asked) == 3
+        assert all(t is not None and 0 < t <= 1 for t in fake.asked)
+    finally:
+        s._done, s.outcome = real, None
+        s.finish("test over", cancel=False)
+        s.wait(5)
+
+
+def test_waiting_in_slices_still_returns_when_the_builder_ends(server):
+    cookie = login(server)
+    request(server, "POST", "/api/cancel", b"", cookie=cookie)
+    assert server.wait_interruptibly() == "cancelled"
 
 
 def test_a_reload_inside_the_grace_keeps_the_builder_open(server):
@@ -802,3 +847,298 @@ def test_starting_a_builder_makes_no_reverse_lookup(home, monkeypatch):
         s.finish("test over", cancel=False)
         s.wait(5)
     assert s._done.is_set()
+
+
+# ------------------------------------------- what /api/state says of delivery
+#
+# Review of 1.4.0 (builder), S3: the page said each preview was on the board
+# when the board takes no themes (a 1.3.4 board lists no caps, and the daemon
+# sends it no theme line) or when nothing is running to take the file.
+
+def _write_board(home, **known):
+    os.makedirs(home, exist_ok=True)
+    with open(os.path.join(home, "board.json"), "w") as f:
+        json.dump(dict({"port": "/dev/x", "board_id": "ab", "fw": "1.3.4"},
+                       **known), f)
+
+
+def _state(server, cookie):
+    status, _, body = request(server, "GET", "/api/state", cookie=cookie)
+    assert status == 200
+    return json.loads(body)
+
+
+@pytest.mark.parametrize("known, themes", [
+    ({"caps": []}, False),                      # a shipped 1.3.4
+    ({"caps": ["svc"]}, False),
+    ({"caps": ["svc", "theme"]}, True),
+    ({}, None),                                 # a daemon from before caps
+], ids=["none", "other caps", "theme", "no caps key"])
+def test_the_state_says_whether_the_board_takes_themes(server, home, known,
+                                                       themes):
+    _write_board(home, **known)
+    assert _state(server, login(server))["board"] == {"themes": themes}
+
+
+def test_the_state_says_unknown_with_no_board_json(server):
+    assert _state(server, login(server))["board"] == {"themes": None}
+
+
+def test_the_state_says_how_long_a_preview_has_waited(server, home):
+    cookie = login(server)
+    assert _state(server, cookie)["waiting_s"] is None
+    theme.write_preview(home, {"id": 4})
+    path = theme.preview_path(home)
+    old = time.time() - 7
+    os.utime(path, (old, old))
+    assert 6.5 < _state(server, cookie)["waiting_s"] < 12
+    theme.take_preview(home)                  # the daemon's tick
+    assert _state(server, cookie)["waiting_s"] is None
+
+
+# ------------------------------------------------- one builder to a home
+#
+# Review of 1.4.0 (builder), N1. Two builders on one home write the same
+# theme_preview.json, so when one is cancelled, closed or goes idle, its
+# cancel ended the other's live preview on the board while the other's tab
+# went on saying "Preview sent: ... is on your board". Probe: the daemon took
+# ('cancel', None) while builder 1 was still live. A builder now records its
+# port in theme_builder.json, and `blink theme` will not start a second.
+
+def test_a_builder_records_its_port_and_removes_it_when_it_ends(home):
+    s = theme_server.BuilderServer(home, tick_s=3600)
+    s.start()
+    try:
+        assert theme.read_builder(home) == s.port
+    finally:
+        s.finish("test over")
+        s.wait(5)
+    assert theme.read_builder(home) is None
+    assert not os.path.exists(os.path.join(home, theme.BUILDER_FILE))
+
+
+def test_a_builder_ending_leaves_the_record_of_a_newer_one(home):
+    first = theme_server.BuilderServer(home, tick_s=3600)
+    second = theme_server.BuilderServer(home, tick_s=3600)
+    first.start()
+    second.start()
+    try:
+        first.finish("test over")
+        first.wait(5)
+        assert theme.read_builder(home) == second.port
+    finally:
+        second.finish("test over")
+        second.wait(5)
+
+
+def test_a_running_builder_is_found_by_its_record(home):
+    s = theme_server.BuilderServer(home, tick_s=3600)
+    s.start()
+    try:
+        assert theme_server.running_builder(home) == s.port
+    finally:
+        s.finish("test over")
+        s.wait(5)
+    assert theme_server.running_builder(home) is None
+
+
+def test_a_record_left_by_a_killed_builder_is_taken_away(home):
+    # Nothing listens on the port: the process was killed before it could
+    # remove its record.
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    theme.write_builder(home, port)
+    assert theme_server.running_builder(home) is None
+    assert theme.read_builder(home) is None
+
+
+def test_another_program_on_the_recorded_port_is_not_a_builder(home):
+    # The port was reused after a kill: something answers, but it is not
+    # this server, so the record is stale.
+    import http.server
+
+    class Other(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"hi")
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Other)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        theme.write_builder(home, httpd.server_address[1])
+        assert theme_server.running_builder(home) is None
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+# ------------------------------------- what a link that no longer works says
+#
+# Review of 1.4.0 (builder), N4. new_link() replaces any unspent link, and
+# the board gives its button back 3 s after ok 1. A browser that takes longer
+# than that to start (a cold Edge on a busy laptop) is still loading the
+# first link when the owner presses again, so tab 1 got the plain "Not
+# allowed. Run blink theme again." -- an instruction to start a second
+# builder (see N1) -- while tab 2 worked.
+
+class _Opened:
+    """A stub opener that is always truthy, whatever it has collected."""
+
+    def __init__(self):
+        self.urls = []
+
+    def __call__(self, url):
+        self.urls.append(url)
+        return True
+
+
+def _get(s, url):
+    u = urllib.parse.urlsplit(url)
+    return request(s, "GET", u.path + "?" + u.query)
+
+
+def test_a_link_replaced_by_a_second_press_says_so(tmp_path):
+    clock = Clock()
+    opened = _Opened()
+    lau = theme_server.Launcher(str(tmp_path / ".blink"), opener=opened,
+                                now=clock)
+    try:
+        assert lau.launch()
+        clock.t += 3.5                     # the board's button is back
+        assert lau.launch()
+        assert len(opened.urls) == 2
+        s = lau._server
+        status, _, body = _get(s, opened.urls[0])    # the slow browser
+        assert status == 403
+        assert body == (b"This link was replaced by a newer one. Use the"
+                        b" newest builder tab.\n")
+        assert _get(s, opened.urls[1])[0] == 303
+    finally:
+        lau.close()
+
+
+def test_a_link_already_opened_says_so(server):
+    url = server.new_link()
+    assert _get(server, url)[0] == 303
+    status, _, body = _get(server, url)
+    assert status == 403
+    assert body == (b"This link was opened already. Use the tab it opened.\n")
+
+
+def test_a_link_nobody_made_says_only_that_it_is_not_allowed(server):
+    status, _, body = request(server, "GET", "/open?k=made-up")
+    assert status == 403
+    assert body == b"Not allowed. Run blink theme again.\n"
+
+
+def test_the_record_of_old_links_stays_small(server):
+    for _ in range(100):
+        server.new_link()
+    assert len(server._gone) <= 16
+
+
+# ------------------------------------ a preview still in flight at the end
+#
+# Review of 1.4.0 (builder), N5. do_POST never asked whether the builder had
+# ended, and the preview and Save handlers run on separate threads. A
+# preview whose write is slow (a scanner holding theme_preview.json on
+# Windows) landed after Save's cancel when the owner saved the theme already
+# stored, so the daemon sent only op=preview and the board showed that
+# preview for 15 minutes under "Saved".
+
+def test_a_preview_in_flight_during_save_does_not_land_over_the_cancel(
+        server, home, monkeypatch):
+    gate, entered = threading.Event(), threading.Event()
+    real = theme.write_preview
+
+    def slow(h, t):
+        entered.set()
+        gate.wait(5)
+        real(h, t)
+    monkeypatch.setattr(theme, "write_preview", slow)
+    cookie = login(server)
+    theme.save(home, {"id": 4})                 # Ocean already stored
+    answers = {}
+
+    def call(name, path, body):
+        answers[name] = request(server, "POST", path, body,
+                                cookie=cookie)[0]
+    preview = threading.Thread(target=call,
+                               args=("preview", "/api/preview", {"id": 6}))
+    preview.start()
+    assert entered.wait(5)                      # the preview is inside
+    save = threading.Thread(target=call,
+                            args=("save", "/api/save", {"id": 4}))
+    save.start()
+    time.sleep(0.2)                             # Save waits its turn
+    gate.set()
+    preview.join(5)
+    save.join(5)
+    assert answers == {"preview": 200, "save": 200}
+    sync = theme.ThemeSync(home)
+    sync.board_now({"t": "theme_now", "v": 2, "id": 4, "why": "boot"})
+    assert sync.outgoing() == [theme.message("cancel")]
+
+
+def test_nothing_is_written_to_the_preview_file_after_the_builder_ended(
+        home):
+    s = theme_server.BuilderServer(home, tick_s=3600)
+    s.start()
+    try:
+        assert s.write_preview({"id": 3}) is True
+        s.finish("cancelled")
+        s.wait(5)
+        assert s.write_preview({"id": 6}) is False
+        assert theme.take_preview(home) == ("cancel", None)
+    finally:
+        s.finish("test over")
+        s.wait(5)
+
+
+class _FalsyOpener:
+    """A stub that is falsy, as a list subclass is while it is empty."""
+
+    def __init__(self):
+        self.urls = []
+
+    def __bool__(self):
+        return False
+
+    def __call__(self, url):
+        self.urls.append(url)
+        return True
+
+
+def test_a_falsy_opener_is_still_the_opener(home, monkeypatch):
+    """Review of 1.4.0 (builder), N8. Launcher took `opener or open_url`, so
+    a stub that was falsy -- an opener recorded in a list subclass, empty
+    until its first call -- became the real open_url, which is
+    webbrowser.open on macOS: a review probe opened two tabs in the owner's
+    own browser. Only None means "no opener given"."""
+    def real(url):
+        raise AssertionError("the real opener was used")
+    monkeypatch.setattr(theme_server, "open_url", real)
+    stub = _FalsyOpener()
+    lau = theme_server.Launcher(home, opener=stub)
+    try:
+        assert lau.launch() is True
+        assert len(stub.urls) == 1
+    finally:
+        lau.close()
+
+
+def test_no_opener_given_means_the_real_one(home, monkeypatch):
+    monkeypatch.setattr(theme_server, "open_url", lambda url: True)
+    lau = theme_server.Launcher(home)
+    try:
+        assert lau._opener is theme_server.open_url
+    finally:
+        lau.close()

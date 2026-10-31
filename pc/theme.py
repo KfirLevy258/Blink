@@ -45,8 +45,10 @@ Stdlib only, like the rest of pc/.
 import base64
 import hashlib
 import json
+import math
 import os
 import sys
+import time
 
 from pc import install_statusline
 from pc import protocol
@@ -99,11 +101,14 @@ THEME_FILE = "theme.json"
 PREVIEW_FILE = "theme_preview.json"
 SENT_FILE = "theme_sent.json"
 SEEN_FILE = "theme_seen.json"
+# The port of the builder running on this home, if one is; see
+# theme_server.running_builder.
+BUILDER_FILE = "theme_builder.json"
 # Every file this module writes under ~/.blink, for `blink uninstall`, which
 # also takes their temp siblings. The ".taken" name is take_preview's claim,
 # left behind by a daemon killed between its rename and its unlink.
 FILES = (THEME_FILE, PREVIEW_FILE, PREVIEW_FILE + ".taken", SENT_FILE,
-         SEEN_FILE)
+         SEEN_FILE, BUILDER_FILE)
 
 # Why the board sent a theme_now (CONTRACT-theme, Addendum 2). "user" -- the
 # owner picking a theme in Settings on the board -- is a choice the computer
@@ -197,8 +202,14 @@ def validate(obj):
         raise ThemeError("arcs must be by-level or per-gauge")
     ratio = contrast(colours[1], colours[0])
     if ratio < MIN_CONTRAST:
-        raise ThemeError(f"text on background is {ratio:.2f}:1, and the"
-                         " board needs at least 3:1 to be readable")
+        # Cut to two decimals, not rounded, and the floor named as it is
+        # enforced: "3.03:1 ... at least 3:1" was over the floor it named
+        # and under the one applied, and 3.0484 rounded to the 3.05 it
+        # fell short of (review of 1.4.0, builder N2).
+        shown = math.floor(ratio * 100) / 100
+        raise ThemeError(f"text on background is {shown:.2f}:1, and the"
+                         f" board needs at least {MIN_CONTRAST:.2f}:1 to be"
+                         " readable")
     return {"id": CUSTOM, "c": colours, "w": w, "ends": obj["ends"],
             "dot": dot, "by": obj["by"]}
 
@@ -565,6 +576,13 @@ def _read_existing(path):
     return obj
 
 
+def read_saved_file(home):
+    """theme.json as a dict ({} when there is none), or Unreadable when it is
+    there and cannot be read. For a reader that must tell "nothing set" from
+    "could not look"."""
+    return _read_existing(theme_path(home))
+
+
 def _kept_keys(obj):
     """What theme.json holds besides a theme: whatever a newer daemon adds,
     which the contract says every writer keeps (Addendum 4). A "seen" that
@@ -700,6 +718,71 @@ def drop_preview(home):
         os.unlink(preview_path(home))
     except FileNotFoundError:
         pass
+
+
+def builder_path(home):
+    return os.path.join(home, BUILDER_FILE)
+
+
+def write_builder(home, port):
+    _write_json(builder_path(home), {"port": port})
+
+
+def read_builder(home):
+    """The port a builder recorded, or None."""
+    obj = _read_json(builder_path(home))
+    port = obj.get("port") if isinstance(obj, dict) else None
+    if isinstance(port, int) and not isinstance(port, bool) and \
+            0 < port < 65536:
+        return port
+    return None
+
+
+def remove_builder(home, port):
+    """Take the record away, but only a record of `port`: a builder that
+    ends after a newer one has written its own must not delete that one."""
+    if read_builder(home) != port:
+        return
+    try:
+        os.unlink(builder_path(home))
+    except OSError:
+        pass
+
+
+def board_takes_themes(home):
+    """(takes, fw): whether the board this computer last saw takes theme
+    lines, from the caps it listed (board.json, written by the daemon), not
+    its version number: see protocol.BOARD_CAP_THEME. takes is None when
+    that is not known -- no board.json, or one written by a daemon from
+    before caps existed -- because a guess is worse than nothing here. fw is
+    the version string it recorded, or None.
+
+    Read by `blink theme` for its note and by the builder's /api/state: the
+    daemon sends theme lines only to a board whose caps list "theme", so
+    every preview to a 1.3.4 board is taken from the file and dropped, and a
+    page saying "Preview sent" over that is false (review of 1.4.0,
+    builder S3)."""
+    try:
+        with open(os.path.join(home, "board.json"), encoding="utf-8") as f:
+            known = json.load(f)
+        fw, caps = known.get("fw"), known.get("caps")
+    except (OSError, ValueError, AttributeError):
+        return None, None
+    fw = fw if isinstance(fw, str) and fw else None
+    if not isinstance(caps, list):
+        return None, fw
+    return protocol.BOARD_CAP_THEME in caps, fw
+
+
+def preview_waiting_s(home):
+    """Seconds the preview file has been waiting for the daemon to take it,
+    or None when there is no file. The daemon takes it on its fast tick,
+    two seconds (claude_usage_bridge.FAST_POLL_INTERVAL_S), so a file that
+    has waited well past that has no daemon, or no board, behind it."""
+    try:
+        return max(0.0, time.time() - os.path.getmtime(preview_path(home)))
+    except OSError:
+        return None
 
 
 def take_preview(home):

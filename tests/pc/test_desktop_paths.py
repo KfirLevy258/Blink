@@ -648,3 +648,26 @@ def test_mixed_case_markers_across_folders_are_one_name(win, tmp_path,
     assert dp.windows_data_dir() == (_target(tmp_path, "Claude_ab"),
                                      "marker:Claude_ab")
     assert asked == [["Claude_ab"]]
+
+
+def test_freshness_counts_indexeddb_on_its_own(win, tmp_path):
+    """Review of 1.4.0 (tests and docs), N3/D9. The test above is named for
+    Local Storage and IndexedDB and only ever touches Local Storage, so
+    dropping IndexedDB from _freshness() passed the suite. Here the live side
+    has nothing but an IndexedDB folder: no usage cache, no Local Storage."""
+    for name in (NAME, OTHER):
+        _marker(tmp_path, _roaming(tmp_path), name)
+    _cache(tmp_path, _target(tmp_path, OTHER), mtime=1_000_000)
+    idb = _mkdir(tmp_path, os.path.join(_target(tmp_path, NAME), "IndexedDB"))
+    os.utime(idb, (2_000_000, 2_000_000))
+    assert dp._freshness(_target(tmp_path, NAME)) == 2_000_000
+    assert dp.windows_data_dir()[0] == _target(tmp_path, NAME)
+
+
+def test_an_old_indexeddb_does_not_beat_a_newer_cache(win, tmp_path):
+    for name in (NAME, OTHER):
+        _marker(tmp_path, _roaming(tmp_path), name)
+    _cache(tmp_path, _target(tmp_path, OTHER), mtime=2_000_000)
+    idb = _mkdir(tmp_path, os.path.join(_target(tmp_path, NAME), "IndexedDB"))
+    os.utime(idb, (1_000_000, 1_000_000))
+    assert dp.windows_data_dir()[0] == _target(tmp_path, OTHER)

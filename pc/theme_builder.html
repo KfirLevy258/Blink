@@ -296,6 +296,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
           <button type="button" data-v="gauges" aria-pressed="true">Gauges</button>
           <button type="button" data-v="focus" aria-pressed="false">Focus mode</button>
         </div>
+        <div class="seg" role="group" aria-label="Focus window">
+          <button type="button" data-f="session" aria-pressed="true">Session</button>
+          <button type="button" data-f="weekly" aria-pressed="false">Weekly</button>
+        </div>
         <label class="slider" for="p1"><span>Session</span><input type="range" id="p1" min="0" max="100" value="42"><output id="o1">42%</output></label>
         <label class="slider" for="p2"><span>Weekly</span><input type="range" id="p2" min="0" max="100" value="91"><output id="o2">91%</output></label>
       </div>
@@ -360,13 +364,14 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
 <!--
   Shown, and the page behind it made inert, when this tab stops being the
   live builder. Its words are written by the script with textContent; the
-  reason sentence is the only part that changes.
+  heading and the reason sentence change with the ending, so the heading
+  is empty here (see showNotice).
 -->
 <div class="notice" id="notice" hidden>
   <div class="notice-card" id="notice-dialog" role="dialog" aria-modal="true" aria-labelledby="notice-title" aria-describedby="notice-why notice-end" tabindex="-1">
-    <h2 id="notice-title">This tab is no longer active.</h2>
+    <h2 id="notice-title"></h2>
     <p id="notice-why"></p>
-    <p id="notice-keep-text" hidden>Your changes here are not saved. Copy the share code to keep them.</p>
+    <p id="notice-keep-text" hidden></p>
     <button type="button" class="btn primary" id="notice-copy" hidden><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
     <div class="code" id="notice-code" hidden></div>
     <p class="n-end" id="notice-end">You can close this tab.</p>
@@ -405,7 +410,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var HEX = /^[0-9a-fA-F]{6}$/;
 
   // preset: the id of an untouched built-in, or -1 for the custom theme.
-  var st = Object.assign({ mode: 'level', view: 'gauges', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
+  var st = Object.assign({ mode: 'level', view: 'gauges', fw: 'session', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
   var finished = false, previewTimer = null, lastSent = null;
   // loaded: /api/state has answered and the page shows the owner's theme.
   // Until then the page holds only its own default, preset 0, and Save was
@@ -526,10 +531,24 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       svg.appendChild(el('path', { d: 'M9 114 L4 119 L9 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
       svg.appendChild(el('path', { d: 'M311 114 L316 119 L311 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
     } else {
-      var focusP = Math.max(st.p1, st.p2), isS = st.p1 >= st.p2;
-      gauge(svg, 160, 118, 210, Math.round(st.w * 1.35), focusP, arcCol(isS ? 1 : 2, focusP), track, st.text, 48);
-      svg.appendChild(el('text', { x: 160, y: 158, 'text-anchor': 'middle', 'font-family': F, 'font-size': 15, fill: '#' + dim }, isS ? 'SESSION  3h 40m' : 'WEEK  1d 1h'));
-      svg.appendChild(el('text', { x: 160, y: 228, 'text-anchor': 'middle', 'font-family': F, 'font-size': 13, fill: '#' + dim }, (isS ? 'week ' + st.p2 : 'session ' + st.p1) + '%'));
+      // Focus mode as usage_view.c draws it, not as it was guessed (review
+      // of 1.4.0, builder N9). The big window is the one Settings > Focus
+      // names, not the higher of the two. The other is one dim line, built
+      // by fmt_focus_line() as "Weekly 91% <bullet> 1d 1h", and
+      // countdown_colour() paints it in the theme's mid from 60 percent and
+      // its high from 90, the same thresholds as every ring, so those two
+      // colours are previewed as text where the board uses them most. The
+      // big gauge is captioned with its own name and countdown, in two
+      // lines, as in the two-gauge view. Sizes and rows are
+      // usage_layout.h's FOCUS_*: a 156 px ring from y 44, the caption at
+      // 140, the countdown at 158, the line at 184, each a 16 px row whose
+      // 12 px text sits 12 px down.
+      var wk = st.fw === 'weekly', bigP = wk ? st.p2 : st.p1, otherP = wk ? st.p1 : st.p2;
+      gauge(svg, 160, 122, 156, st.w, bigP, arcCol(wk ? 2 : 1, bigP), track, st.text, 40);
+      svg.appendChild(el('text', { x: 160, y: 152, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, wk ? 'WEEKLY 7d' : 'SESSION 5h'));
+      svg.appendChild(el('text', { x: 160, y: 170, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, wk ? '1d 1h' : '3h 40m'));
+      svg.appendChild(el('text', { x: 160, y: 196, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (otherP >= 90 ? st.high : otherP >= 60 ? st.mid : dim) },
+                         (wk ? 'Session ' : 'Weekly ') + Math.round(otherP) + '% \u2022 ' + (wk ? '3h 40m' : '1d 1h')));
     }
     paintControls(); checks(); output();
   }
@@ -545,14 +564,20 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     document.getElementById('modenote').textContent = st.mode === 'level'
       ? 'By level: both arcs take the colour of their own level. Gauge 1 and Gauge 2 are not used.'
       : 'Per gauge: each arc keeps its own colour, and switches to the 90%-and-above colour near the limit so a warning is never missed. The status dot uses the under-60% colour, or, when it and the 60%-to-90% colour are both greys, whichever stands out more.';
-    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view);
+    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view); press('[data-f]', 'f', st.fw);
     document.querySelectorAll('#presets button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.p === st.preset)); });
   }
   function press(sel, key, val) { document.querySelectorAll(sel).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset[key] === val)); }); }
   function textContrast() { return contrast(st.text, st.bg); }
+  // A ratio as the words give it: cut to two decimals, never rounded. One
+  // decimal, rounded, made 3.0335 read "3.0:1" under a floor named 3:1 and
+  // 4.478 read "4.5:1" under "4.5:1 or more is better"; a number rounded up
+  // to the one it fell short of contradicts the sentence it sits in (review
+  // of 1.4.0, builder N2).
+  function ratioText(c) { return (Math.floor(c * 100) / 100).toFixed(2); }
   function checks() {
     var out = [], c = textContrast();
-    out.push(c >= 4.5 ? ['ok', 'Text is readable: ' + c.toFixed(1) + ':1 against the background.'] : c >= MIN_CONTRAST ? ['warn', 'Text is faint: ' + c.toFixed(1) + ':1. Small labels will be hard to read on the panel; 4.5:1 or more is better.'] : ['bad', 'Text is unreadable: ' + c.toFixed(1) + ':1. It needs at least 3:1 before it can go to the board.']);
+    out.push(c >= 4.5 ? ['ok', 'Text is readable: ' + ratioText(c) + ':1 against the background.'] : c >= MIN_CONTRAST ? ['warn', 'Text is faint: ' + ratioText(c) + ':1. Small labels will be hard to read on the panel; 4.5:1 or more is better.'] : ['bad', 'Text is unreadable: ' + ratioText(c) + ':1. It needs at least ' + MIN_CONTRAST.toFixed(2) + ':1 before it can go to the board.']);
     var used = st.mode === 'level' ? ['low','mid','high'] : ['g1','g2','high'];
     var names = { low: 'Under 60%', mid: '60% to 90%', high: '90% and above', g1: 'Gauge 1', g2: 'Gauge 2' };
     var weak = used.filter(function (k) { return contrast(st[k], st.bg) < 2; });
@@ -565,7 +590,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // the side says what is wrong, but the owner fixing it is looking at
     // the colour, not the list.
     var at = {};
-    if (c < 4.5) at.text = at.bg = [c >= MIN_CONTRAST ? 'warn' : 'bad', (c >= MIN_CONTRAST ? 'Faint' : 'Unreadable') + ': text is ' + c.toFixed(1) + ':1 on the background.'];
+    if (c < 4.5) at.text = at.bg = [c >= MIN_CONTRAST ? 'warn' : 'bad', (c >= MIN_CONTRAST ? 'Faint' : 'Unreadable') + ': text is ' + ratioText(c) + ':1 on the background.'];
     weak.forEach(function (k) { at[k] = ['warn', 'Barely shows against the background.']; });
     SLOTS.forEach(function (s) { if (!bad[s.k]) fieldSay(s.k, at[s.k]); });
     var ul = document.getElementById('checks'); while (ul.firstChild) ul.removeChild(ul.firstChild);
@@ -671,13 +696,26 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The notice, over a page made inert. A tab that had stopped said so
   // only in the status bar, over controls that looked live, and most
   // browsers refuse the window.close() meant to take it away (the owner's
-  // report, 2026-10-29). why: one sentence naming the reason. keep: the
-  // tab holds changes nobody saved, so the notice offers their share code.
+  // report, 2026-10-29). title: the heading, which names the ending. It
+  // was fixed in the markup as "This tab is no longer active." for every
+  // one, so a save that had worked (the daemon logged it, the board took
+  // the theme) put up a full-page notice the owner read as an error (the
+  // owner's manual test on a board, 2026-10-30). why: one sentence under
+  // it, saying what follows from the ending rather than the heading again.
+  // keep: the tab holds changes nobody saved, so the notice offers their
+  // share code. It is the line to show, or false for none: under "Saved."
+  // the usual "Your changes here are not saved." read as a contradiction at
+  // a glance (review of fp/notice-title, NICE-3), so a save says which
+  // changes it means.
   // Focus stays in the card: inert does that where the browser has it (all
   // current ones), and the two listeners after this where it does not.
   var notice = document.getElementById('notice'), dialog = document.getElementById('notice-dialog');
-  function showNotice(why, keep) {
+  var KEEP_LINE = 'Your changes here are not saved. Copy the share code to keep them.';
+  var KEEP_AFTER_SAVE = 'Changes you made after saving are not on the board. Copy the share code to keep them.';
+  function showNotice(title, why, keep) {
+    document.getElementById('notice-title').textContent = title;
     document.getElementById('notice-why').textContent = why;
+    document.getElementById('notice-keep-text').textContent = keep || '';
     ['notice-keep-text', 'notice-copy'].forEach(function (id) {
       var e = document.getElementById(id);
       if (keep) e.removeAttribute('hidden'); else e.setAttribute('hidden', '');
@@ -704,11 +742,11 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The last word of a tab: the status bar's sentence, which stays under
   // the notice as the record, then the notice. Once only: a reply still in
   // flight after a save must not turn "saved" into "stopped".
-  function retire(why, text, kind, keep) {
+  function retire(title, why, text, kind, keep) {
     if (sealed) return false;
     gone();
     end(text, kind);
-    showNotice(why, keep);
+    showNotice(title, why, keep);
     return true;
   }
   // Changes here the board has not kept. Unlike unsaved(), a tab that never
@@ -753,7 +791,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var saving = false, stopOwed = false;
   function stopped() {
     if (saving) { stopOwed = true; return; }
-    retire('The builder stopped.', 'The builder has stopped. Run blink theme on your computer to start it again.', true, holdsDraft());
+    retire('The builder stopped.', 'Run blink theme on your computer to start it again.', 'The builder stopped. Run blink theme on your computer to start it again.', true, holdsDraft() && KEEP_LINE);
   }
   function schedulePreview() {
     if (finished) return;
@@ -767,7 +805,11 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       var t = wireTheme(), key = JSON.stringify(t), name = themeName();
       if (key === lastSent) return;
       post('/api/preview', t, true).then(function (j) {
-        if (j.status === 200) { lastSent = key; delivered++; say('Preview sent: ' + name + ' is on your board until you save or cancel.', 'ok'); }
+        if (j.status === 200) {
+          lastSent = key; delivered++;
+          if (oldBoard) say(OLD_BOARD_PREVIEW);
+          else { var said = 'Preview sent: ' + name + ' is on your board until you save or cancel.'; say(said, 'ok'); checkTaken(key, said); }
+        }
         else if (j.status === 409) superseded();
         else if (j.status === 400) say(j.error || 'The board would refuse that theme.', true);
         // Any other ending is asked of a ping, with its one retry, rather
@@ -793,6 +835,35 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // itself: lastSent can come back round to the value it had (on Ocean,
   // Forest fails, then Sky and Ocean again go through), and a count only
   // goes up.
+  // What /api/state says of the board: false when its firmware takes no
+  // theme line, so a preview is accepted here and never shown (the daemon
+  // sends one only to a board that lists "theme"). null or absent is
+  // unknown, and gets the words it always had (review of 1.4.0, builder S3).
+  var oldBoard = false;
+  var OLD_BOARD_LOAD = 'Your board\'s firmware does not show themes yet. Update it to see previews.';
+  var OLD_BOARD_PREVIEW = 'Your board\'s firmware does not show themes yet, so there is no preview. A saved theme is sent once the board is updated.';
+  // The other half: a preview waits in a file until BLINK's bridge takes it
+  // (every 2 s), so with the app not running, or the board not plugged in,
+  // "Preview sent" is not so. A few seconds after a preview went through,
+  // ask what the server sees; if the file is still waiting after 5 s, say
+  // so. Not over a newer message, a newer preview or a tab that has ended.
+  var TAKEN_MS = 6000, takenTimer = null;
+  function checkTaken(key, said) {
+    clearTimeout(takenTimer);
+    takenTimer = setTimeout(function () {
+      if (finished || lastSent !== key) return;
+      var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+      var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
+      fetch('/api/state', { credentials: 'same-origin', signal: ctl ? ctl.signal : undefined }).then(function (r) {
+        clearTimeout(limit);
+        return r.status === 200 ? r.json() : null;
+      }).then(function (j) {
+        if (!j || finished || lastSent !== key || typeof j.waiting_s !== 'number' || j.waiting_s < 5) return;
+        if (document.getElementById('status-text').textContent !== said) return;
+        say('Nothing has taken this preview yet. Is BLINK running and the board plugged in? blink status tells you.', true);
+      }, function () { clearTimeout(limit); });
+    }, TAKEN_MS);
+  }
   function unsent(at) {
     return function () { if (delivered === at) say('The preview did not reach your board.', true); };
   }
@@ -845,6 +916,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The screen and the two sliders only move the drawing here; they are not
   // part of the theme and send nothing.
   document.querySelectorAll('[data-v]').forEach(function (b) { b.addEventListener('click', function () { st.view = b.dataset.v; render(); }); });
+  // Choosing a focus window shows the focus view, since it is the only view
+  // that window changes.
+  document.querySelectorAll('[data-f]').forEach(function (b) { b.addEventListener('click', function () { st.fw = b.dataset.f; st.view = 'focus'; render(); }); });
   [['p1','o1'],['p2','o2']].forEach(function (x) { var r = document.getElementById(x[0]); r.addEventListener('input', function () { st[x[0]] = +r.value; document.getElementById(x[1]).textContent = r.value + '%'; render(); }); });
 
   // shown: run before a refused copy selects the text, for a box that is
@@ -871,11 +945,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     copy('notice-code', 'notice-copy', function () { box.removeAttribute('hidden'); });
   });
 
+  // The dot is the number 0 or 1 or a bool, exactly what theme.validate
+  // takes. It was tested with unary plus, which coerced null, "" and [] to
+  // off and "1" and [1] to on, so a code the command line refuses loaded
+  // here (review of 1.4.0, builder N3).
   function applyCustom(f) {
     if (!f || !Array.isArray(f.c) || f.c.length !== 7 || !f.c.every(function (h) { return typeof h === 'string' && HEX.test(h); })) return false;
-    if (WIDTHS.indexOf(f.w) < 0 || ['round','flat'].indexOf(f.ends) < 0 || [0,1].indexOf(+f.dot) < 0 || ['level','gauge'].indexOf(f.by) < 0) return false;
+    if (WIDTHS.indexOf(f.w) < 0 || ['round','flat'].indexOf(f.ends) < 0 || [0,1,true,false].indexOf(f.dot) < 0 || ['level','gauge'].indexOf(f.by) < 0) return false;
     SLOTS.forEach(function (s, i) { st[s.k] = f.c[i].toUpperCase(); });
-    st.w = f.w; st.e = f.ends; st.d = +f.dot ? 'on' : 'off'; st.mode = f.by; st.preset = -1;
+    st.w = f.w; st.e = f.ends; st.d = f.dot ? 'on' : 'off'; st.mode = f.by; st.preset = -1;
     fromOutside();
     return true;
   }
@@ -942,7 +1020,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     var sent = wireTheme();
     post('/api/save', sent).then(function (j) {
       var owed = settled();
-      if (j.status === 200) { savedKey = JSON.stringify(sent); retire('The theme was saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', holdsDraft()); }
+      if (j.status === 200) { savedKey = JSON.stringify(sent); retire('Saved.', 'Your board keeps the theme you saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', holdsDraft() && KEEP_AFTER_SAVE); }
       else if (j.status === 409) superseded();
       // An answer at all means the builder was up to give it, so a stop
       // held back meanwhile is not taken on trust: the owner reads why the
@@ -959,7 +1037,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     post('/api/cancel', null, true).then(function (j) {
       if (j.status === 409) return superseded();
       // No share code offered: Cancel is the owner throwing the changes away.
-      retire('The builder was cancelled.', 'Cancelled. Your board is back on its saved theme. You can close this tab.', undefined, false);
+      retire('Cancelled.', 'Your board is back on its saved theme.', 'Cancelled. Your board is back on its saved theme. You can close this tab.', undefined, false);
     }, stopped);
   });
   // Closing the tab cancels. A reload also fires pagehide, and the server
@@ -990,8 +1068,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // with nothing to copy is not told to copy (review of fp/tab-notice,
     // N1).
     var keep = unsaved(), draft = holdsDraft(), why = 'The builder continued in a newer tab.';
-    var ended = retire(why, draft ? 'Continued in a newer tab. Your changes are still here: copy the share code to take them across.'
-                                  : 'Continued in a newer tab. You can close this one.', undefined, draft);
+    var ended = retire('This tab is no longer active.', why, draft ? 'Continued in a newer tab. Your changes are still here: copy the share code to take them across.'
+                                  : 'Continued in a newer tab. You can close this one.', undefined, draft && KEEP_LINE);
     // The notice first: it is what stays when the browser refuses.
     if (ended && !keep) { try { window.close(); } catch (e) {} }
   }
@@ -1065,6 +1143,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   }).then(function (j) {
     clearTimeout(stateLimit);
     var t = j.saved;
+    oldBoard = !!j.board && j.board.themes === false;
     applyTheme(t);
     savedKey = JSON.stringify(wireTheme());
     lastSent = savedKey;
@@ -1078,7 +1157,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     loaded = true;
     clearTimeout(waiting); studio.classList.remove('waiting');
     if (!finished) { document.querySelectorAll(FORM).forEach(function (e) { e.disabled = false; }); studio.removeAttribute('aria-busy'); }
-    say(draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
+    say(oldBoard ? OLD_BOARD_LOAD : draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
         : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
     render();
   }, function () { clearTimeout(stateLimit); render(); stopped(); });

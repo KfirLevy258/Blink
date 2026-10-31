@@ -18,11 +18,13 @@ because it unpacks itself first -- that delay would land in the customer's
 prompt. A few lines of sh start in single-digit milliseconds.
 """
 import argparse
+import contextlib
 import glob
 import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -4305,17 +4307,10 @@ def cmd_config(args) -> int:
 def _theme_board_note(home):
     """A line when the board this computer last saw cannot take a theme.
 
-    From the caps the board listed (board.json, written by the daemon), not
-    its version number: see protocol.BOARD_CAP_THEME. Silent when board.json
-    has no caps at all -- it was written by a daemon from before they
-    existed, and a guess is worse than nothing here."""
-    try:
-        with open(os.path.join(home, "board.json"), encoding="utf-8") as f:
-            known = json.load(f)
-        fw, caps = known.get("fw"), known.get("caps")
-    except (OSError, ValueError, AttributeError):
-        return None
-    if isinstance(caps, list) and protocol.BOARD_CAP_THEME not in caps:
+    From the caps the board listed, not its version number (see
+    theme.board_takes_themes). Silent when they are not known."""
+    takes, fw = theme_mod.board_takes_themes(home)
+    if takes is False:
         on = f"firmware {fw}" if fw else "firmware"
         return (f"Your board runs {on}, which does not take themes."
                 " It will be sent once the board is updated.")
@@ -4361,8 +4356,55 @@ def _theme_lines(t):
             f"Share code:     {theme_mod.to_share_code(t)}"]
 
 
+@contextlib.contextmanager
+def _signals_cancel():
+    """While `blink theme` runs, a closed terminal or a kill ends it the way
+    Ctrl-C does, so the cancel is written.
+
+    SIGHUP (the terminal window closed) and SIGTERM killed the process on
+    the spot, and the preview stayed on the board until its own 15 minute
+    backstop; with no bridge running it stayed in theme_preview.json for the
+    next start to send (review of 1.4.0, builder N10). The daemon makes the
+    same turn for SIGTERM (exit_on_sigterm). SIGBREAK is Ctrl-Break on
+    Windows, which the C runtime also raises when a console window is
+    closed; whether that leaves time to write the cancel was not measured.
+    The handlers are put back afterwards, and nothing is installed off the
+    main thread, where signal.signal refuses."""
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+    old = {}
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            old[sig] = signal.signal(sig, stop)
+        except (ValueError, OSError):
+            pass
+    try:
+        yield
+    finally:
+        for sig, handler in old.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
+
+
 def _theme_builder(home) -> int:
     """`blink theme`: the builder, in the foreground, until it finishes."""
+    # One builder to a home. Two write the same preview file, and the end of
+    # one (a cancel, a closed tab, ten minutes idle) took the other's live
+    # preview off the board while its tab still said "Preview sent" (review
+    # of 1.4.0, builder N1). The app's own builder, opened from the board,
+    # counts, and so does another `blink theme`.
+    if theme_server.running_builder(home) is not None:
+        print("A theme builder is already open on this computer, from the"
+              " app or from another blink theme. Use its tab, or close it"
+              " first; it stops by itself after ten minutes with no change."
+              " If it is the app's, Edit on computer on the board opens its"
+              " tab again.")
+        return 1
     try:
         server = theme_server.BuilderServer(home)
     except FileNotFoundError:
@@ -4380,10 +4422,19 @@ def _theme_builder(home) -> int:
     print(f"If it does not open, go to this link on this computer: {url}")
     print("Save or cancel there. Closing the tab cancels, and so does Ctrl-C"
           " here.")
-    if not theme_server.open_url(url):
-        print("No browser opened here, so use the link above.")
+    # Said now and not only after Save: the page's previews all answer 200
+    # whatever the board takes, so with a 1.3.4 board nothing here told the
+    # owner that none of it would show (review of 1.4.0, builder S3).
+    note = _theme_board_note(home)
+    if note:
+        print(note)
     try:
-        outcome = server.wait()
+        with _signals_cancel():
+            if not theme_server.open_url(url):
+                print("No browser opened here, so use the link above.")
+            # In slices: see wait_interruptibly, or Ctrl-C does nothing on
+            # Windows.
+            outcome = server.wait_interruptibly()
     except KeyboardInterrupt:
         server.finish("cancelled")
         outcome = server.wait(5)
@@ -4408,6 +4459,13 @@ def cmd_theme(args) -> int:
     values = list(getattr(args, "values", None) or [])
     if action is None:
         return _theme_builder(home)
+    if action != "set" and values:
+        # `reset ocean` set Dark and dropped the word, and `show ocean` and
+        # `list light` printed as if it had not been typed (review of 1.4.0,
+        # builder N6). Only `set` takes values.
+        print(f"blink theme {action} takes nothing after it."
+              " To change the theme: blink theme set ocean, for example.")
+        return 2
     if action == "list":
         # Three columns: the number and the typed name, which `set` both
         # takes, and the name the board's tile shows, so the list can be
@@ -4423,6 +4481,16 @@ def cmd_theme(args) -> int:
                   f"{theme_mod.board_name(i)}{extra}")
         return 0
     if action == "show":
+        # A theme.json that is there and cannot be read is not "nothing set":
+        # set and reset refuse to write over it, and show said the board
+        # chose for itself, so the refusal that followed had no explanation
+        # (review of 1.4.0, builder N7).
+        try:
+            theme_mod.read_saved_file(home)
+        except theme_mod.Unreadable as e:
+            print("Theme: the saved theme file could not be read.")
+            print(f"{e}.")
+            return 1
         for line in _theme_lines(theme_mod.load_saved(home)):
             print(line)
         note = _theme_kept_note(home)
@@ -4451,7 +4519,7 @@ def cmd_theme(args) -> int:
         # the cancel when a save is owed.
         theme_mod.write_cancel(home)
     except OSError as e:
-        print(f"Could not save the theme: {e}")
+        print(f"Could not save the theme: {e}.")
         return 1
     for line in _theme_lines(theme_mod.load_saved(home)):
         print(line)
