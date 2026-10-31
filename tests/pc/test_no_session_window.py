@@ -1392,19 +1392,25 @@ def test_the_altitude_scenarios(tmp_path, name):
 # --- the burn view: sent on Ultra, not on Pro or Max after a reset -----------
 
 
-def _burn_desk(tmp_path, docs):
+def _burn_desk(home, docs):
     """A real bus (status line + transcript reader) feeding a real Bridge
     whose board lists "burn". `docs` is [(status line, mtime)], each polled
-    in turn; returns the burn lines the bridge put on the wire."""
+    in turn; returns the burn lines the bridge put on the wire.
+
+    The bus saves the account's verdict, so it is handed a SessionVerdict
+    whose path has been through inside() for the caller's home: the
+    default one finds home on its own (CLAUDE.md, test helpers)."""
     from pc import burn_reader
     from tests.pc import test_burn_line as bl
-    bl.transcripts(tmp_path, [0] * 18 + [1500, 260_000])
-    p = tmp_path / "statusline.json"
+    verdict = session_verdict.SessionVerdict(
+        path=inside(home, session_verdict.verdict_path()))
+    bl.transcripts(home, [0] * 18 + [1500, 260_000])
+    p = home / "statusline.json"
     clock = [0.0]
     bus = ingest.IngestionBus(
         providers=[ClaudeCliProvider(path=str(p))], now=lambda: clock[0],
-        burn=burn_reader.BurnReader(root=str(tmp_path / ".claude"
-                                             / "projects")))
+        burn=burn_reader.BurnReader(root=str(home / ".claude" / "projects")),
+        verdict=verdict)
     sent = []
     bridge_clock = [1000.0]
     bridge = Bridge(write_msg=sent.append, fetch_usage=bus.fetch(),
@@ -1446,6 +1452,20 @@ def test_a_pro_or_max_desk_after_a_reset_is_sent_no_burn_line(tmp_path):
     assert burns == []
     assert bus.claude_page().no_session_window is False
     assert bus.claude_page().session_pct == 0.0
+
+
+def test_the_burn_desk_writes_its_verdict_only_inside_the_home_it_is_given(
+        tmp_path):
+    """_burn_desk's bus saved its verdict through the default SessionVerdict,
+    to wherever verdict_path() found home, without asking home.inside()
+    first (/code-review max, 2026-11-01). Under pytest that is tmp_path; in a
+    script that imported this file it is a real desk's ~/.blink. Handed a
+    home that is not where the verdict would go, it stops before writing."""
+    from tests.pc import test_burn_line as bl
+    elsewhere = tmp_path / "elsewhere"
+    with pytest.raises(AssertionError, match="outside the caller's home"):
+        _burn_desk(elsewhere, [(status(seven=12.0, cost=1.0), bl.NOW - 31)])
+    assert not os.path.exists(session_verdict.verdict_path())
 
 
 def test_an_ultra_desk_after_a_restart_is_sent_its_burn_line_at_once(
