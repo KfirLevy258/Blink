@@ -306,23 +306,45 @@ def _unchecked_writes(tree):
     """
     found = []
 
-    def visit(node, scope, in_func):
+    def builds_a_frame(n):
+        return _protocol_call(n) == "encode" or _is_json_dumps(n)
+
+    def frame_names(func):
+        """Names bound anywhere in `func` to something that builds a frame:
+        `raw = protocol.encode(m)`, then `ser.write(raw)` later. The scan
+        used to look only inside the write's own argument, and the two-step
+        form walked past it: the review of PR #4 (2026-10-31) mutated
+        `blink uninstall`'s bye to that shape and the whole suite stayed
+        green."""
+        names = set()
+        for n in ast.walk(func):
+            value = getattr(n, "value", None)
+            if (isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign,
+                               ast.NamedExpr)) and value is not None
+                    and any(builds_a_frame(m) for m in ast.walk(value))):
+                names.update(_assigned_names(n))
+        return names
+
+    def visit(node, scope, in_func, frames):
         for child in ast.iter_child_nodes(node):
             if (isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
                                    ast.ClassDef)) and not in_func):
                 inner = child.name if scope == "<module>" \
                     else f"{scope}.{child.name}"
-                visit(child, inner, not isinstance(child, ast.ClassDef))
+                is_func = not isinstance(child, ast.ClassDef)
+                visit(child, inner, is_func,
+                      frame_names(child) if is_func else frames)
                 continue
             if (isinstance(child, ast.Call)
                     and isinstance(child.func, ast.Attribute)
                     and child.func.attr == "write"
-                    and any(_protocol_call(n) == "encode" or _is_json_dumps(n)
+                    and any(builds_a_frame(n)
+                            or (isinstance(n, ast.Name) and n.id in frames)
                             for a in child.args for n in ast.walk(a))):
                 found.append((scope, child.lineno))
-            visit(child, scope, in_func)
+            visit(child, scope, in_func, frames)
 
-    visit(tree, "<module>", False)
+    visit(tree, "<module>", False, set())
     return found
 
 
@@ -419,6 +441,59 @@ class EveryFrameIsChecked(unittest.TestCase):
         self.assertEqual(sorted(found), sorted([
             ("claude_usage_bridge.py", "Tap._append"),  # tap file, no frame
         ]))
+
+
+class TheScanSeesATwoStepEncode(unittest.TestCase):
+    """_unchecked_writes follows a frame through a variable.
+
+    Found by mutating `blink uninstall`'s bye (pc/cli.py, _say_bye) to
+    `raw = protocol.encode(protocol.bye())` then `s.write(raw)`: the scan
+    looked only inside the write's argument and the whole suite stayed green.
+    """
+
+    def scan(self, src):
+        return [scope for scope, _ in _unchecked_writes(ast.parse(src))]
+
+    def test_inline_and_two_step_are_both_caught(self):
+        inline = "def w(s, m):\n    s.write(protocol.encode(m))\n"
+        two = "def w(s, m):\n    raw = protocol.encode(m)\n    s.write(raw)\n"
+        dumps = ("def w(s, m):\n    data = json.dumps(m).encode()\n"
+                 "    s.write(data)\n")
+        method = ("class C:\n    def w(self, m):\n"
+                  "        raw, extra = protocol.encode(m), 1\n"
+                  "        self.s.write(raw + b'\\n')\n")
+        self.assertEqual(self.scan(inline), ["w"])
+        self.assertEqual(self.scan(two), ["w"])
+        self.assertEqual(self.scan(dumps), ["w"])
+        self.assertEqual(self.scan(method), ["C.w"])
+
+    def test_the_checked_form_and_unrelated_writes_are_not_flagged(self):
+        checked = ("def w(s, m):\n"
+                   "    raw, why = protocol.encode_checked(m)\n"
+                   "    s.write(raw)\n")
+        other = "def w(f, text):\n    out = text.strip()\n    f.write(out)\n"
+        self.assertEqual(self.scan(checked), [])
+        self.assertEqual(self.scan(other), [])
+
+    def test_a_name_bound_in_another_function_is_not_followed(self):
+        src = ("def a(m):\n    raw = protocol.encode(m)\n    return raw\n"
+               "def b(s, raw):\n    s.write(raw)\n")
+        self.assertEqual(self.scan(src), [])
+
+    def test_no_production_module_calls_protocol_encode_at_all(self):
+        """Simpler than any scan of writers, and with no blind spot: the
+        only caller of encode() is encode_checked, inside protocol.py."""
+        for path in FILES:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            bad = [n.lineno for n in ast.walk(tree)
+                   if _protocol_call(n) == "encode"]
+            self.assertEqual(bad, [], f"{path.name} calls protocol.encode()")
+            imported = [n.lineno for n in ast.walk(tree)
+                        if isinstance(n, ast.ImportFrom)
+                        and (n.module or "").endswith("protocol")
+                        and any(a.name == "encode" for a in n.names)]
+            self.assertEqual(imported, [],
+                             f"{path.name} imports protocol.encode")
 
 
 class AdditiveFields(unittest.TestCase):
