@@ -278,8 +278,10 @@ static const struct palette builtin[THEME_BUILTIN_N] = {
 	},
 };
 
-/* Tile labels. 96 px at Montserrat 14 holds about twelve characters, which is
- * why it is "Colour-blind" and not "Colour-blind safe". */
+/* Tile labels. They are clipped to THEME_NAME_W, 124 px (ui_settings.c; see
+ * theme.h), which holds roughly sixteen characters at Montserrat 14, so it is
+ * "Colour-blind" and not "Colour-blind safe". The 96 px tile this was first
+ * sized for went with the old grid. */
 static const char *const names[THEME_N] = {
 	[THEME_DARK] = "Dark",
 	[THEME_NEON] = "Neon",
