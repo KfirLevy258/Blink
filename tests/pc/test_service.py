@@ -1107,6 +1107,7 @@ class _Port:
 def _provision(monkeypatch, dead=True):
     import serial
     monkeypatch.delenv("BLINK_SKIP_SERVICE", raising=False)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda **kw: 0)
     monkeypatch.setattr(serial, "Serial", _Port(dead))
     clock = [0.0]
@@ -1372,6 +1373,7 @@ def test_halt_service_never_raises(home, monkeypatch):
     _platform(monkeypatch, "win32")
 
     monkeypatch.delenv("BLINK_SKIP_SERVICE", raising=False)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     reached = []
 
     class Boom:

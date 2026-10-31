@@ -255,6 +255,7 @@ def _rig_status(tmp_path, monkeypatch, *, bridge_running, marker,
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("BLINK_SKIP_SERVICE", raising=False)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     monkeypatch.delenv(install_statusline.WATCHDOG_DISABLE_ENV, raising=False)
     if watchdog_disabled:
         monkeypatch.setenv(install_statusline.WATCHDOG_DISABLE_ENV, "1")

@@ -52,6 +52,18 @@ esac
 mkdir -p "$HOME"
 export HOME
 
+# The binary refuses to touch the login service while HOME is not the
+# account's own, because launchd's label and systemd's unit name are global
+# and a scratch HOME otherwise boots out the real agent (the 2026-10-30
+# import, tests/test_import_is_inert.py). This script is the one place that
+# means to do exactly that, so it says so -- but only where CI is set, which
+# every GitHub runner does: run by hand on a desk, without
+# BLINK_SKIP_SERVICE=1 as the header asks, it is still refused.
+if [ -n "${CI:-}" ]; then
+	BLINK_ALLOW_FOREIGN_HOME=1
+	export BLINK_ALLOW_FOREIGN_HOME
+fi
+
 # Windows resolves ~ from USERPROFILE, not HOME, so setting HOME alone left
 # the binary installing into the runner's REAL profile while this script
 # asserted against a temporary one -- six scenarios failed for that and

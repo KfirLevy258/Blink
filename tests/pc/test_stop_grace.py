@@ -254,6 +254,7 @@ def service_on(monkeypatch, runs):
     # conftest sets BLINK_SKIP_SERVICE=1 for every test; these are about the
     # file alone, with subprocess still faked by `runs`.
     monkeypatch.delenv("BLINK_SKIP_SERVICE", raising=False)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     return runs
 
 

@@ -151,8 +151,59 @@ MIN_CLAUDE = (2, 1, 100)
 # and the systemd unit name are constants while everything else is scoped to
 # $HOME, so without this a test under a temporary HOME still boots out the
 # real agent of whoever is logged in.
+#
+# Also skipped, with no variable set, when HOME is not the account's own home.
+# BLINK_SKIP_SERVICE needs the caller to think of it, and on 2026-10-30
+# nobody did: a reviewer imported blink_main.py with HOME pointed at a
+# scratch folder, it ran `blink install`, and launchctl -- which acts on the
+# gui/<uid> domain whatever HOME says -- booted out the owner's real
+# com.blink.bridge and bootstrapped a stray daemon against the real board.
+# BLINK_ALLOW_FOREIGN_HOME=1 says the caller means it: the CI install script
+# runs a real install under a throwaway HOME on a runner, and nothing else
+# does. POSIX only: Windows has no password database to ask, and its
+# Scheduled Task is per user and not at risk from a HOME variable it does not
+# read.
+_ALLOW_FOREIGN_HOME = "BLINK_ALLOW_FOREIGN_HOME"
+
+
+def _account_home():
+    """The home directory the account database names for this user, or None
+    where there is no such thing to ask (Windows) or this uid has no entry
+    (an arbitrary one in a container). Asked of pwd and not of $HOME,
+    because $HOME is the thing being checked."""
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, OSError):
+        return None
+
+
+def _foreign_home() -> bool:
+    if os.environ.get(_ALLOW_FOREIGN_HOME) == "1":
+        return False
+    real = _account_home()
+    if not real:
+        return False
+    mine = os.path.expanduser("~")
+    try:
+        return not os.path.samefile(real, mine)
+    except OSError:
+        # One of them does not exist. A HOME that is not there is not the
+        # account's home; compare the names so a missing real one (a
+        # container) does not refuse by accident.
+        return os.path.realpath(real) != os.path.realpath(mine)
+
+
 def _skip_service():
-    return os.environ.get("BLINK_SKIP_SERVICE") == "1"
+    return os.environ.get("BLINK_SKIP_SERVICE") == "1" or _foreign_home()
+
+
+def _skip_reason() -> str:
+    """What the line that reports a skip puts in its brackets."""
+    if os.environ.get("BLINK_SKIP_SERVICE") == "1":
+        return "BLINK_SKIP_SERVICE=1"
+    return (f"HOME is not this account's home; set {_ALLOW_FOREIGN_HOME}=1"
+            " to use it anyway")
 
 
 def _frozen() -> bool:
@@ -2482,7 +2533,7 @@ def refresh_service_file():
 
 def _install_service() -> str:
     if _skip_service():
-        return "skipped (BLINK_SKIP_SERVICE=1)"
+        return f"skipped ({_skip_reason()})"
     return backend().install()
 
 
@@ -2515,7 +2566,7 @@ def restart_service() -> str:
     onlogon trigger does not restart anything, so it is told explicitly.
     """
     if _skip_service():
-        return "skipped (BLINK_SKIP_SERVICE=1)"
+        return f"skipped ({_skip_reason()})"
     return backend().restart()
 
 
@@ -2623,7 +2674,7 @@ def _say_bye():
 
 def _remove_service() -> str:
     if _skip_service():
-        return "skipped (BLINK_SKIP_SERVICE=1)"
+        return f"skipped ({_skip_reason()})"
     return backend().remove()
 
 
@@ -2894,7 +2945,7 @@ def _install_driver_step() -> str:
     prompt on a machine nobody is sitting at hangs the run until it times out.
     """
     if _skip_service():
-        return "not checked (BLINK_SKIP_SERVICE=1)"
+        return f"not checked ({_skip_reason()})"
     try:
         _, line = win_driver.ensure_driver()
         return line
@@ -3386,7 +3437,7 @@ def cmd_status(args) -> int:
         # else is scoped to $HOME, so querying them under a test HOME reports
         # the real user's agent -- which read as "installed" for an install
         # that never happened.
-        print("Bridge      not checked (BLINK_SKIP_SERVICE=1)")
+        print(f"Bridge      not checked ({_skip_reason()})")
         bridge_running = False
     else:
         bridge_status = backend().status()

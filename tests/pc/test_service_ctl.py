@@ -464,6 +464,7 @@ def test_a_launchd_job_that_was_not_loaded_counts_as_stopped(home, monkeypatch):
     probably still held", about a port nothing is holding.
     """
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     _platform(monkeypatch, "darwin")
     _write(cli.plist_path())
     out = service_ctl.stop_service(runner=_Runs(codes=[3]))
@@ -551,6 +552,7 @@ def test_a_skipped_stop_cannot_be_read_as_a_done_one(home, monkeypatch):
     """
     skipped = service_ctl.stop_service(runner=_Runs())
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     _pretend_installed(home, monkeypatch)
     done = service_ctl.stop_service(runner=_Runs())
     assert skipped.skipped and not done.skipped
@@ -559,6 +561,7 @@ def test_a_skipped_stop_cannot_be_read_as_a_done_one(home, monkeypatch):
 
 def test_the_outcome_still_reads_as_the_line_it_replaced(home, monkeypatch):
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     _pretend_installed(home, monkeypatch)
     out = service_ctl.stop_service(runner=_Runs())
     assert str(out) == out.detail and isinstance(out.detail, str)
@@ -567,6 +570,7 @@ def test_the_outcome_still_reads_as_the_line_it_replaced(home, monkeypatch):
 def test_ok_tracks_what_the_backend_actually_did(home, monkeypatch, killer):
     """Pins service_ctl._WORKED to the phrases the backends really return."""
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     _platform(monkeypatch, "darwin")
     assert service_ctl.stop_service(runner=_Runs()).ok          # not installed
     _write(cli.plist_path())
@@ -597,6 +601,7 @@ def test_a_runner_less_call_uses_the_runner_the_suite_stubbed(home, monkeypatch)
     binding time is the part that bites, so that is the part pinned here.
     """
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     stub = _Runs()
     monkeypatch.setattr(cli.subprocess, "run", stub)
     b = _RecordingBackend()
@@ -609,6 +614,7 @@ def test_a_runner_less_call_uses_the_runner_the_suite_stubbed(home, monkeypatch)
 
 def test_stop_and_start_drive_this_machine_platform(home, monkeypatch):
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     _pretend_installed(home, monkeypatch)
     r = _Runs()
     service_ctl.stop_service(runner=r)
@@ -625,6 +631,7 @@ def test_stop_and_start_drive_this_machine_platform(home, monkeypatch):
 
 def test_a_failing_command_is_reported_not_raised(home, monkeypatch):
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     _pretend_installed(home, monkeypatch)
     # The command that has to FAIL is the stop itself, and on Windows that is
     # the second call: schtasks /query decides whether anything is installed,
@@ -648,6 +655,7 @@ def test_a_backend_that_does_not_answer_in_prose_is_reported_not_raised(
     service and no explanation.
     """
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
 
     class _Terse:
         def stop(self, runner=None):
@@ -666,6 +674,7 @@ def test_a_missing_tool_is_reported_not_raised(home, monkeypatch):
     """The fleet agent calls start_service from a finally block: an exception
     raised there would replace the real test failure with this one."""
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     _pretend_installed(home, monkeypatch)
 
     def _absent(argv, **kw):
