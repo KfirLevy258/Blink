@@ -436,7 +436,114 @@ class TestFlashGuards(unittest.TestCase):
 
         ok, why = ota.flash("/dev/null", b"x", run=run)
         self.assertFalse(ok)
-        self.assertIn("mismatch", why)
+        self.assertIn("did not verify", why)
+        # esptool's own words are not passed on: see TestEsptoolTextStaysOut.
+        self.assertNotIn("0x20000", why)
+
+
+class TestEsptoolTextStaysOut(unittest.TestCase):
+    """What esptool says never reaches bridge.log or the board.
+
+    flash()'s reason is printed as "[bridge] ota: FAILED: <why>" and sent to
+    the board as ota_error, and the probe's stderr was printed whole. esptool
+    quotes what it read off the port ("Invalid head of packet (0x41)") and
+    prints the chip's MAC, so a failed update put a byte off the wire and a
+    board id into the file customers send to support -- found in review on
+    2026-10-31, against the rule that no log carries values read from the
+    serial port. The reason is now one of a fixed set of phrases chosen by
+    matching esptool's message, or an exit code, or an exception's class.
+    """
+
+    MAC = "20:50:0d:33:40:dc"
+    NOISE = ("A fatal error occurred: Failed to connect to ESP32: Invalid"
+             " head of packet (0x41): Possible serial noise or corruption.")
+    CHIP = ("Connected to ESP32 on /dev/cu.fake:\nChip type: ESP32-D0WD-V3\n"
+            "MAC: 20:50:0d:33:40:dc\nStub flasher running.\n")
+
+    def setUp(self):
+        self._tools = (ota._esptool, ota._efuse_probe)
+        ota._esptool = lambda: ["python", "-m", "esptool"]
+        ota._efuse_probe = lambda: ["python", "-m", "pc.efuse_probe"]
+
+    def tearDown(self):
+        ota._esptool, ota._efuse_probe = self._tools
+
+    def _run(self, probe_err="", write_out="", write_rc=2, raises=None):
+        def run(cmd, **kw):
+            if raises is not None and "write_flash" in " ".join(cmd):
+                raise raises
+
+            class R:
+                pass
+            r = R()
+            if "efuse_probe" in " ".join(cmd):
+                r.returncode = 2 if probe_err else 0
+                r.stdout = "" if probe_err else "flash_encryption disabled\n"
+                r.stderr = probe_err
+            else:
+                r.returncode = write_rc
+                r.stdout, r.stderr = write_out, ""
+            return r
+        return run
+
+    def _stderr_of(self, fn):
+        err = io.StringIO()
+        real, sys.stderr = sys.stderr, err
+        try:
+            fn()
+        finally:
+            sys.stderr = real
+        return err.getvalue()
+
+    def test_a_probe_failure_prints_no_byte_off_the_port(self):
+        run = self._run(probe_err=self.NOISE + " MAC: " + self.MAC)
+        said = self._stderr_of(
+            lambda: self.assertIsNone(ota.flash_encrypted_chip(
+                "/dev/cu.fake", run=run)))
+        self.assertIn("could not read the chip's eFuses", said)
+        self.assertNotIn("0x41", said)
+        self.assertNotIn(self.MAC, said)
+        self.assertNotIn("Invalid head", said)
+        self.assertIn("exit 2", said)
+
+    def test_a_failed_write_reason_carries_no_esptool_text(self):
+        for out in (self.CHIP + self.NOISE, self.CHIP,
+                    self.CHIP + "A fatal error occurred: something new"):
+            why = ota.flash("/dev/cu.fake", b"x", run=self._run(
+                write_out=out))[1]
+            self.assertNotIn(self.MAC, why)
+            self.assertNotIn("0x41", why)
+            self.assertNotIn("ESP32-D0WD", why)
+            # Fits the board's 47 characters, and says something.
+            self.assertTrue(0 < len(why) <= 47, why)
+
+    def test_the_kind_of_failure_is_still_told_apart(self):
+        said = {}
+        for key, text in (
+                ("connect", "A fatal error occurred: Failed to connect"),
+                ("busy", "could not open port 'COM3': Access is denied."),
+                ("verify", "MD5 of file does not match data in flash!"),
+                ("stopped", "Packet content transfer stopped"),
+                ("other", "something nobody has seen")):
+            said[key] = ota.flash("/dev/cu.fake", b"x", run=self._run(
+                write_out=text, write_rc=3))[1]
+        self.assertEqual(len(set(said.values())), 5, said)
+        self.assertIn("exit 3", said["other"])
+
+    def test_an_exception_from_the_runner_names_its_class_only(self):
+        boom = OSError("could not open /dev/cu.fake: MAC " + self.MAC)
+        why = ota.flash("/dev/cu.fake", b"x", run=self._run(raises=boom))[1]
+        self.assertIn("OSError", why)
+        self.assertNotIn(self.MAC, why)
+        self.assertNotIn("/dev/cu.fake", why)
+        self.assertLessEqual(len(why), 47)
+
+    def test_a_timeout_is_told_apart_from_a_missing_tool(self):
+        import subprocess
+        slow = subprocess.TimeoutExpired(["esptool", "--port", "/dev/x"], 900)
+        why = ota.flash("/dev/cu.fake", b"x", run=self._run(raises=slow))[1]
+        self.assertIn("Timed out", why)
+        self.assertNotIn("/dev/x", why)
 
 
 if __name__ == "__main__":
@@ -877,7 +984,10 @@ class TestTheEfuseProbeAnswer(unittest.TestCase):
         said = err.getvalue()
         self.assertIn("could not read the chip's eFuses", said)
         self.assertIn("COM25", said)
-        self.assertIn("Access is denied", said)
+        # The kind of failure, in our words and not esptool's.
+        self.assertIn("Serial port busy or missing", said)
+        self.assertIn("exit 1", said)
+        self.assertNotIn("Access is denied", said)
 
     def test_an_exception_from_the_runner_is_reported(self):
         tries = []
@@ -894,7 +1004,9 @@ class TestTheEfuseProbeAnswer(unittest.TestCase):
         finally:
             sys.stderr = real
         self.assertEqual(len(tries), 1)
-        self.assertIn("the port vanished", err.getvalue())
+        # The exception's class, not its message.
+        self.assertIn("OSError", err.getvalue())
+        self.assertNotIn("the port vanished", err.getvalue())
 
     def test_the_probe_is_the_bundled_module_when_frozen(self):
         import sys
