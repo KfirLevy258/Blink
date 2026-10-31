@@ -686,13 +686,14 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // refuses: window.closed is still false CLOSE_CHECK_MS later and the line
   // says "You can close this tab." as it did before. The countdown is the
   // owner's to stop, so that nobody loses a tab they are reading: a key, a
-  // click, a touch or the wheel, or a mouse that has moved more than
-  // MOVE_PX from where it first was. The first mousemove is only the
-  // baseline, since the mouse is usually still moving as the click that
-  // saved lets go. aria-live is off for the ticks: one announcement a
-  // second is a stream, and the first line has already said it; the line
-  // that ends the countdown is announced again.
-  var CLOSE_AFTER_S = 5, CLOSE_CHECK_MS = 600, MOVE_PX = 12;
+  // click or a touch. Not the mouse moving, and not the wheel: the first
+  // version stopped it for a mouse that had moved 12 px, and on the owner's
+  // desk (2026-10-31, real Chrome) every saved tab stayed open, because a
+  // hand moves the mouse away from Save as a matter of course. aria-live is
+  // off for the ticks: one announcement a second is a stream, and the first
+  // line has already said it; the line that ends the countdown is
+  // announced again.
+  var CLOSE_AFTER_S = 5, CLOSE_CHECK_MS = 600;
   var closer = null;
   function rewrite(text) {
     var t = document.getElementById('status-text');
@@ -714,16 +715,11 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       try { window.close(); } catch (e) {}
       closer.timer = setTimeout(function () { if (!window.closed) settle(); else closer = null; }, CLOSE_CHECK_MS);
     }
-    closer = { settle: settle, x: null, y: null, timer: setTimeout(tick, 1000) };
+    closer = { settle: settle, timer: setTimeout(tick, 1000) };
     bar.setAttribute('aria-live', 'off');
   }
   function interrupt() { if (closer) { clearTimeout(closer.timer); closer.settle(); } }
-  ['mousedown', 'keydown', 'touchstart', 'wheel'].forEach(function (t) { document.addEventListener(t, interrupt); });
-  document.addEventListener('mousemove', function (e) {
-    if (!closer) return;
-    if (closer.x === null) { closer.x = e.clientX; closer.y = e.clientY; return; }
-    if (Math.abs(e.clientX - closer.x) + Math.abs(e.clientY - closer.y) > MOVE_PX) interrupt();
-  });
+  ['mousedown', 'keydown', 'touchstart'].forEach(function (t) { document.addEventListener(t, interrupt); });
   // The bar's second sentence when the tab holds changes the board has not
   // kept. Under "Saved" the usual "Your changes here are not saved" read as
   // a contradiction at a glance (review of fp/notice-title, NICE-3), so a

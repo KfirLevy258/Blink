@@ -78,10 +78,7 @@ def test_a_tab_the_browser_refuses_to_close_says_so_after_a_moment():
     "document.fire('keydown', { key: 'a' })",
     "document.fire('mousedown', { clientX: 5, clientY: 5 })",
     "document.fire('touchstart', {})",
-    "document.fire('wheel', { deltaY: 40 })",
-    "document.fire('mousemove', { clientX: 10, clientY: 10 });"
-    " document.fire('mousemove', { clientX: 60, clientY: 10 })",
-], ids=["key", "click", "touch", "wheel", "mouse moved"])
+], ids=["key", "click", "touch"])
 def test_the_owner_stops_the_countdown_and_keeps_the_tab(event):
     r = builder_page.run(f"""
     await advance(10);
@@ -99,15 +96,16 @@ def test_the_owner_stops_the_countdown_and_keeps_the_tab(event):
     assert r["live"] == "polite"
 
 
-def test_a_mouse_that_only_settles_does_not_stop_the_countdown():
-    """The mouse is usually still moving as the click that saved lets go.
-    The first move is the baseline and a few pixels after it are nothing."""
+def test_moving_the_mouse_or_the_wheel_does_not_stop_the_countdown():
+    """A hand moves the mouse away from Save as a matter of course. The
+    first version stopped the countdown for 12 px of it, and on the owner's
+    desk (2026-10-31, real Chrome) no saved tab ever closed."""
     r = builder_page.run(f"""
     await advance(10);
     {_SAVE}
     document.fire('mousemove', {{ clientX: 100, clientY: 100 }});
-    document.fire('mousemove', {{ clientX: 103, clientY: 102 }});
-    document.fire('mousemove', {{ clientX: 99, clientY: 104 }});
+    document.fire('mousemove', {{ clientX: 900, clientY: 700 }});
+    document.fire('wheel', {{ deltaY: 40 }});
     await advance(5100);
     return {{ calls: window.calls, closed: window.closed }};
     """, SAVED_DARK)

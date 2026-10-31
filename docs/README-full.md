@@ -542,8 +542,8 @@ has nothing you have not saved, and otherwise keeps your colours on screen.
 
 After **Save to board** or **Cancel**, a tab that holds nothing you have not
 saved counts down in the line at the top (**This tab closes in 5 s.**) and
-closes itself. Press a key, click, scroll, touch it or move the mouse and it
-stays open, with **You can close this tab.** instead. A browser that will not
+closes itself. Press a key, click or touch it and it stays open (moving the
+mouse does not count), with **You can close this tab.** instead. A browser that will not
 let a page close a tab (one you pasted the link into after other pages) gets
 the same words when the count ends.
 
