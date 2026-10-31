@@ -86,6 +86,14 @@ def _window(rate_limits: dict, key: str):
         # object present but missing its percentage is the likeliest shape of
         # a payload change, so it is the case worth getting right.
         pct = -1.0
+    # Finite and 0..1000, as the Desktop and Codex readers already require
+    # (1000 and not 100: overage carries a window past its limit). json reads
+    # 1e999 as infinity, and an infinite percentage reached the merge, where
+    # inf - inf is NaN and max() of nothing raised, so one corrupt number in
+    # statusline.json took the whole poll -- the Codex page too -- down.
+    # NaN fails both comparisons, so it lands here as well.
+    if not (0 <= pct <= 1000):
+        pct = -1.0
     resets = w.get("resets_at")
     return pct, resets if isinstance(resets, (int, float)) else None
 

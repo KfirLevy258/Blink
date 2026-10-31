@@ -33,6 +33,8 @@ keep the dial against a newer one that is at most HOLD_BAND below it, because
 within a window usage only ever rises and a fraction of a point between two
 sources is a disagreement, not a fall. See _pick_pct.
 """
+import math
+
 from pc.providers import base
 
 # How far below the dial a newer reading may land and still be taken for
@@ -58,7 +60,14 @@ WEEKLY_WINDOW_S = 7 * 86400
 
 
 def _known_pct(v):
-    return v is not None and v >= 0
+    # Finite, because a hold compares readings by subtracting them and
+    # inf - inf is NaN, which fails every comparison and left max() with
+    # nothing to choose from: one infinite percentage took the whole poll
+    # down, every provider's numbers with it. A reading that is not a number
+    # is no reading, for that frame alone. Sources check their own range
+    # (statusline_source._window); this keeps the merge safe from one that
+    # does not.
+    return v is not None and math.isfinite(v) and v >= 0
 
 
 def _pick(frames, has, get):

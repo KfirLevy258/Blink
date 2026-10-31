@@ -1,4 +1,6 @@
 """Conflict and recency resolution across sources that each see a slice."""
+import pytest
+
 from pc import normalizer
 from pc import statusline_source as ss
 from pc.providers import base
@@ -621,3 +623,43 @@ def test_the_newest_rollover_speaks_for_a_provider_with_no_number():
     assert merged.session_pct == base.UNKNOWN
     assert (merged.src, merged.observed_at, merged.stale) == (
         "desktop_ls", NOW - 60, False)
+
+
+# A percentage that is infinite or NaN. Claude Code does not write one, but a
+# hand-edited or half-corrupt statusline.json can (json.loads reads 1e999 as
+# inf), and it used to cost the whole poll: _pick_pct computes inf - inf,
+# which is NaN, both comparisons in the hold are false, and max() of an empty
+# sequence raises ValueError. select_pair merges every provider in one
+# expression, so the panel got `status error "max() iterable argument is
+# empty"` and no usage at all, the Codex page included. Main sent
+# "session_pct":Infinity and kept Codex. Found in review, 2026-10-31.
+
+
+def _status_line(pct, now=NOW):
+    return ss.map_statusline_frame(
+        {"rate_limits": {"five_hour": {"used_percentage": pct,
+                                       "resets_at": now + 3600}}},
+        now, now - 5)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"),
+                                 float("nan"), 1001, -5])
+def test_the_status_line_reads_an_impossible_percentage_as_unknown(bad):
+    assert _status_line(bad).session_pct == base.UNKNOWN
+
+
+def test_a_corrupt_status_line_costs_only_its_own_provider():
+    codex = cli(NOW - 5, session=12.0, provider="codex")
+    primary, secondary = normalizer.select_pair(
+        [_status_line(float("inf")), codex])
+    assert primary.provider == "codex" and primary.session_pct == 12.0
+
+
+def test_a_frame_that_carries_an_infinite_percentage_does_not_raise():
+    """The same, from a source that skipped the check above: merge() itself
+    treats a non-finite reading as no reading."""
+    bad = cli(NOW - 5, session=float("inf"), weekly=float("nan"))
+    good = desktop(NOW - 60, session=30.0)
+    assert normalizer.merge([bad, good]).session_pct == 30.0
+    alone = normalizer.merge([bad])
+    assert alone is None or alone.session_pct == base.UNKNOWN
