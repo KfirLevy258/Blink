@@ -97,6 +97,28 @@ def test_burn_is_named_in_the_log_and_is_a_cap_the_board_can_list():
         {"caps": ["svc", "theme", "edit_done", "burn"]})
 
 
+def test_the_board_keeps_the_view_for_three_heartbeats():
+    """The board drops the view BURN_FRESH_MS after the last line
+    (firmware/src/usage_view.c), and the daemon re-sends at least every
+    BURN_HEARTBEAT_S (pc/bridge). Both comments say three missed lines, and
+    nothing tied the two numbers: a heartbeat raised past the board's window,
+    or the window cut below it, and the view would blink off between lines
+    with every test still green (/code-review max, 2026-11-01). Read from
+    the C rather than copied, the way test_theme_page_burn reads burn_inks().
+    """
+    import re
+    from pc import bridge
+    src = (ROOT / "firmware" / "src" / "usage_view.c").read_text(
+        encoding="utf-8")
+    m = re.search(r"#define\s+BURN_FRESH_MS\s+\((\d+)\s*\*\s*1000\)", src)
+    assert m, "BURN_FRESH_MS is no longer (<seconds> * 1000)"
+    fresh_s = int(m.group(1))
+    assert fresh_s == 3 * bridge.BURN_HEARTBEAT_S
+    # And a line can be held back by the minimum gap, so even one late
+    # heartbeat lands inside the window.
+    assert fresh_s > bridge.BURN_HEARTBEAT_S + bridge.BURN_MIN_GAP_S
+
+
 # -------------------------------------------------------------------- bus
 
 
