@@ -924,11 +924,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     copy('notice-code', 'notice-copy', function () { box.removeAttribute('hidden'); });
   });
 
+  // The dot is the number 0 or 1 or a bool, exactly what theme.validate
+  // takes. It was tested with unary plus, which coerced null, "" and [] to
+  // off and "1" and [1] to on, so a code the command line refuses loaded
+  // here (review of 1.4.0, builder N3).
   function applyCustom(f) {
     if (!f || !Array.isArray(f.c) || f.c.length !== 7 || !f.c.every(function (h) { return typeof h === 'string' && HEX.test(h); })) return false;
-    if (WIDTHS.indexOf(f.w) < 0 || ['round','flat'].indexOf(f.ends) < 0 || [0,1].indexOf(+f.dot) < 0 || ['level','gauge'].indexOf(f.by) < 0) return false;
+    if (WIDTHS.indexOf(f.w) < 0 || ['round','flat'].indexOf(f.ends) < 0 || [0,1,true,false].indexOf(f.dot) < 0 || ['level','gauge'].indexOf(f.by) < 0) return false;
     SLOTS.forEach(function (s, i) { st[s.k] = f.c[i].toUpperCase(); });
-    st.w = f.w; st.e = f.ends; st.d = +f.dot ? 'on' : 'off'; st.mode = f.by; st.preset = -1;
+    st.w = f.w; st.e = f.ends; st.d = f.dot ? 'on' : 'off'; st.mode = f.by; st.preset = -1;
     fromOutside();
     return true;
   }

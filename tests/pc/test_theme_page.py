@@ -1109,3 +1109,38 @@ def test_faint_text_is_not_rounded_up_to_the_readable_mark():
     assert "Text is faint: 4.47:1." in r["checks"]
     assert r["field"] == "Faint: text is 4.47:1 on the background."
     assert r["save"] is False
+
+
+@pytest.mark.parametrize("dot", [None, "1", "", [], [1], "0", False, True,
+                                 0, 1])
+def test_the_page_takes_the_share_codes_the_command_line_takes(dot):
+    """Review of 1.4.0 (builder), N3. The page tested the dot with
+    [0, 1].indexOf(+f.dot), and unary plus coerces: null, "" and [] loaded
+    as off, "1" and [1] as on, where `blink theme set` refuses all five with
+    "dot must be on or off". The board was never at risk, the page sends a
+    clean 0 or 1, but a hand-made code worked in the builder and not in a
+    terminal. Probe: five of six disagreed."""
+    import base64
+    import json
+    from pc import theme
+    fields = {"c": ["0e1116", "e6e8eb", "4387df", "0da243", "0da243",
+                    "ba8107", "ff1900"], "w": 12, "ends": "round",
+              "dot": dot, "by": "level"}
+    raw = json.dumps(fields, separators=(",", ":")).encode()
+    code = "BT1." + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    try:
+        theme.from_share_code(code)
+        cli_takes = True
+    except theme.ThemeError:
+        cli_takes = False
+    r = builder_page.run(f"""
+    await advance(10);
+    $('paste').focus(); $('paste').value = '{code}';
+    $('load').click();
+    await advance(400);
+    return {{ msg: $('m-paste').textContent,
+             sent: requests.filter(q => q.path === '/api/preview').map(q => q.body) }};
+    """, SAVED_DARK)
+    assert r["msg"].startswith("Loaded") == cli_takes
+    if cli_takes:
+        assert r["sent"][-1]["dot"] == (1 if dot in (1, True) else 0)
