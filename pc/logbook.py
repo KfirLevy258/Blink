@@ -669,22 +669,24 @@ def rotate_if_full(path, stream, cap=CAP_BYTES, keep=KEEP) -> bool:
     if not _is_the_same_file(path, stream):
         return False
 
-    # Oldest first, so nothing is overwritten before it has been moved.
     try:
-        oldest = f"{path}.{keep}"
-        if os.path.exists(oldest):
-            os.remove(oldest)
-        for i in range(keep - 1, 0, -1):
-            nth = f"{path}.{i}"
-            if os.path.exists(nth):
-                os.replace(nth, f"{path}.{i + 1}")
         # Under the Journal's lock when the stream is one: a line printed
         # between the copy and the truncate is in neither file, and with the
         # status-page thread printing too, "inherent" was no longer rare.
         # Lines from outside the Journal (none today) keep the old window.
+        #
+        # Everything that can fail comes BEFORE the truncate, and every
+        # failure leaves the generations in a state the next attempt can
+        # finish without losing more than a clean rotation would.
         hold = getattr(stream, "hold", None)
         with (hold() if hold is not None else contextlib.nullcontext()):
-            _copy(path, f"{path}.1")
+            # The copy goes to a side name first, so a copy that dies half
+            # way (a full disk) never leaves a short file sitting in .1 for
+            # the next attempt to shift up as if it were a generation.
+            staged = f"{path}.part"
+            _copy(path, staged)
+            _shift(path, keep)
+            os.replace(staged, f"{path}.1")
             os.truncate(path, 0)
     except OSError:
         # A log that cannot be rotated must never take the daemon down with
@@ -692,6 +694,32 @@ def rotate_if_full(path, stream, cap=CAP_BYTES, keep=KEEP) -> bool:
         # which is what it did for the whole of this product's life so far.
         return False
     return True
+
+
+def _shift(path, keep):
+    """Move bridge.log.1 .. .N each up one, making .1 free.
+
+    Only the unbroken run that starts at .1 moves, highest first, so every
+    destination is vacant -- except the last when the run reaches `keep`,
+    where the oldest generation is the one that falls off, and os.replace
+    overwrites it. The oldest used to be deleted up front, on every attempt,
+    and that cost a generation per failure: a rename refused part way (a
+    Windows antivirus or a log viewer holding .2 for a moment) was retried one
+    serial-loop pass later, deleted .4 again, and by then .4 was the old .3.
+    Measured with keep=4 and one refused rename: only generations 1 and 2
+    survived, where a clean rotation keeps 1 to 3. Found in review,
+    2026-10-31.
+
+    Moving only the run from .1 also makes the retry exact: a first attempt
+    that got as far as vacating .3 and .1 leaves a gap, which the run stops
+    at, so the retry moves what is still below the gap and leaves what is
+    above it. A generation someone deleted by hand is treated the same.
+    """
+    run = 0
+    while run < keep and os.path.exists(f"{path}.{run + 1}"):
+        run += 1
+    for i in range(min(run, keep - 1), 0, -1):
+        os.replace(f"{path}.{i}", f"{path}.{i + 1}")
 
 
 def _copy(src, dst):
