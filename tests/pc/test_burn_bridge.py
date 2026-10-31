@@ -270,6 +270,8 @@ def test_the_bus_leaves_a_reader_failure_to_the_bridge(tmp_path):
     the one handler above."""
     from pc import ingest
     from pc.providers.claude_cli import ClaudeCliProvider
+    from tests.pc.test_burn_line import ultra
+    ultra(tmp_path, at=1_000_000_000)
     status = tmp_path / "statusline.json"
     status.write_text(json.dumps({"rate_limits": {"seven_day": {
         "used_percentage": 12.0, "resets_at": 4_000_000_000}}}),

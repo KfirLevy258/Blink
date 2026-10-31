@@ -286,8 +286,13 @@ def build_bus():
         return ingest.IngestionBus(burn=BurnReader())
     from pc.providers.scripted import ScriptedProvider
     scripted = ScriptedProvider(scenario)
+    # verdict=None: a step says itself whether the account has a five-hour
+    # window ("no_session_window"), and this desk's persisted verdict
+    # (pc/session_verdict) must not say it for the scenario. On this Ultra
+    # desk it would hold "no window" over the bench step that gives the
+    # account its window back.
     return ingest.IngestionBus(providers=[scripted],
-                               burn=scripted.burn_source())
+                               burn=scripted.burn_source(), verdict=None)
 
 
 def describe_ports():

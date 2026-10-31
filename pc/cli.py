@@ -3649,64 +3649,78 @@ def cmd_status(args) -> int:
         # The Session row comes out of the same poll as the wire line.
         _wire_line()
     else:
-        _session_window_line(_claude_page(desk))
+        _session_window_line(*_claude_page(desk))
     return 0
 
 
-def _session_window_line(page):
+def _session_window_line(page, verdict):
     """Say so when the claude page is being treated as having no five-hour
-    window.
+    window, and what proved it.
 
-    The rule is inferred from an absent key (ClaudeCliProvider.
-    _has_no_window), so a vendor rename of five_hour that kept seven_day
-    would switch it on for every Pro and Max desk with nothing on screen but
-    a "--%" dial, and a Pro or Max file read by a fresh process just after
-    a reset looks the same as Ultra. This line is how support tells them
-    apart, and it is what support asks for first.
+    The mark rests on evidence (pc/session_verdict), and evidence can be
+    misread: a vendor rename of five_hour, a Desktop history whose `fh` key
+    went away for some other reason. This line is how support tells a real
+    Ultra account from that, and it is what support asks for first.
 
     `page` is the merged claude frame, so the row says what the merge
-    decided, never what one provider thought. It used to poll a provider of
-    its own, which knew nothing of a Local Storage window that lifts the
-    rule, and printed "no five-hour window" above a wire line carrying a
-    session figure (review, 2026-10-31).
+    decided, never what one provider thought: it used to poll a provider of
+    its own, and printed "no five-hour window" above a wire line carrying a
+    session figure (review, 2026-10-31). `verdict` is the SessionVerdict that
+    marked it, the persisted one the daemon writes, so a fresh `blink
+    status` says what the running daemon says (finding 5).
     """
-    if page is not None and page.no_session_window:
-        print("Session     no five-hour window (Claude Code reports weekly"
-              " only)")
+    if page is None or not page.no_session_window:
+        return
+    from pc import session_verdict
+    current = verdict.current() if verdict is not None else None
+    why = session_verdict.DESCRIBE.get(current[1]) if current else None
+    print("Session     no five-hour window"
+          + (f" ({why})" if why else ""))
 
 
 def _claude_page(desk):
-    """The merged claude frame for plain `blink status`, or None.
+    """(merged claude frame, its SessionVerdict) for plain `blink status`;
+    the frame is None when no source has a reading.
 
-    The merge the daemon runs, over the three sources that can say anything
-    about a session window: the status line, Claude Desktop's usage cache
-    (desk's one reading of it, the same one the Desktop row prints from)
-    and its Local Storage. Not a whole IngestionBus poll, which `--wire`
-    does: that also writes the weekly anchor and, on a desk that has none,
-    seeds it by walking Claude Desktop's IndexedDB, which holds the
-    customer's conversations -- not something a plain status should do to
-    print one row. The sources left out carry no session figure (activity
-    state, Codex, the weekly projection), so they cannot change the answer.
+    The merge the daemon runs, over the sources that can say anything about
+    a session window: the status line and Claude Desktop's usage cache
+    (desk's one reading of it, the same one the Desktop row prints from),
+    weighed by the verdict the daemon persists. Read-only: a status command
+    reports the verdict and never writes it. Claude Desktop's Local Storage,
+    whose LevelDB this used to parse on every run, is read only when the
+    account is marked, because the only thing it can prove is a window
+    (pc/providers/claude_desktop_ls), which can only lift a mark. Not a whole
+    IngestionBus poll, which `--wire` does: that also writes the weekly
+    anchor and, on a desk that has none, seeds it by walking Claude
+    Desktop's IndexedDB, which holds the customer's conversations -- not
+    something a plain status should do to print one row. The sources left
+    out carry no session figure (activity state, Codex, the weekly
+    projection), so they cannot change the answer.
     """
-    from pc import normalizer
+    from pc import normalizer, session_verdict
     from pc.providers import claude_desktop
     from pc.providers.claude_cli import ClaudeCliProvider
     from pc.providers.claude_desktop_ls import (
         ClaudeDesktopLocalStorageProvider)
     now = time.time()
-    frames = []
-    for provider in (ClaudeCliProvider(),
-                     ClaudeDesktopLocalStorageProvider()):
+    verdict = session_verdict.SessionVerdict(persist=False)
+
+    def polled(provider):
         try:
-            frames.extend(provider.poll(now) or [])
+            return list(provider.poll(now) or [])
         except Exception:
             # As the bus contains a provider: a source that cannot be read
             # costs its own say, not the status report.
-            continue
+            return []
+
+    frames = polled(ClaudeCliProvider())
     reading = desk.desktop_reading if desk is not None else None
     if reading is not None and reading[0] == claude_desktop.VERDICT_FRAME:
         frames.append(reading[1])
-    return normalizer.merge(frames) if frames else None
+    if verdict.observe(frames, now):
+        frames.extend(polled(ClaudeDesktopLocalStorageProvider()))
+    verdict.mark(frames, now)
+    return (normalizer.merge(frames) if frames else None), verdict
 
 
 def _wire_line():
@@ -3719,10 +3733,12 @@ def _wire_line():
     would have and asserts on this line; a person can paste it into a report.
     """
     import json as _json
-    from pc import ingest
-    bus = ingest.IngestionBus()
+    from pc import ingest, session_verdict
+    # The persisted verdict, read and never written: the daemon writes it.
+    bus = ingest.IngestionBus(
+        verdict=session_verdict.SessionVerdict(persist=False))
     msg = bus.poll()
-    _session_window_line(bus.claude_page())
+    _session_window_line(bus.claude_page(), bus.verdict())
     print()
     if msg is None:
         print("Wire        nothing to send -- no source has a reading")

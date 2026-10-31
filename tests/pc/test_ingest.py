@@ -732,7 +732,7 @@ def test_a_five_hour_window_that_ended_leaves_the_dial_empty_not_wrong(tmp_path)
     The rewrite KEEPS its five_hour key, with the ended stamp. It used to
     drop the key, and that stopped exercising base.settle_window the moment a
     payload with no five_hour key was read as "this account has no window"
-    (ClaudeCliProvider._has_no_window): the dial was blank for that
+    (a rule since replaced by pc/session_verdict): the dial was blank for that
     reason and settle_window could be broken without this test noticing.
     Two phases, one per way it breaks. A fresh file must read 0, not the
     pre-reset 27 (a settle that keeps the figure of an ended window); an old

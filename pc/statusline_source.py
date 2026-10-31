@@ -77,8 +77,9 @@ def window_present(rate_limits, key: str) -> bool:
     """Does the payload carry this window at all?
 
     An object under the key, and nothing else: absent, null, a string or a
-    list is no window. The ONE definition. ClaudeCliProvider decides "this
-    account has no five-hour window" from it, and it used to ask with
+    list is no window. The ONE definition. ClaudeCliProvider reports a
+    window from it, and tells a reply that came back without one by it
+    (pc/session_verdict), and it used to ask with
     `"five_hour" in limits` while _window below treated null as absent, so a
     `"five_hour": null` was a window to one and not to the other (review,
     2026-10-31). An object with no usable percentage IS a window here: that
@@ -98,13 +99,6 @@ def window_usable(rate_limits, key: str) -> bool:
     """
     return window_present(rate_limits, key) and _window(rate_limits,
                                                         key)[0] >= 0
-
-
-def window_resets_at(rate_limits, key: str):
-    """This window's reset stamp as _window reads it, or None. Clock-free,
-    like window_usable."""
-    return _window(rate_limits, key)[1] if window_present(rate_limits,
-                                                          key) else None
 
 
 def _window(rate_limits: dict, key: str):

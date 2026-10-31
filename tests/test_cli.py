@@ -2137,34 +2137,100 @@ def test_launchd_not_loaded_names_the_frozen_service_from_a_checkout(
                     f"`{cli._quote_line(want)} install` to start it")
 
 
+def _verdict(home, has_window, at, kind="statusline_reply"):
+    """The verdict the daemon leaves in ~/.blink (pc/session_verdict),
+    inside the caller's `home` or not at all (tests/support/home.py)."""
+    from pc import session_verdict
+    session_verdict.save(inside(home, session_verdict.verdict_path()),
+                         session_verdict.evidence(has_window, kind, at))
+
+
 def test_status_says_when_the_account_has_no_five_hour_window(
         tmp_path, capsys):
-    """The no-window rule is inferred from an absent key, so a vendor rename
-    of five_hour that kept seven_day would turn it on for every Pro and Max
-    desk with only a "--%" dial to show for it. This line is how support
-    tells the two apart (review, 2026-10-31)."""
+    """The mark rests on evidence that can be misread -- a vendor rename of
+    five_hour, a Desktop history whose fh key went for another reason -- so
+    this row says it and what proved it. It is how support tells a real
+    Ultra account from a misread one (review, 2026-10-31). The row reads
+    the verdict the running daemon persisted, and a fresh `blink status`
+    writes nothing."""
+    from pc import session_verdict
     from tests.pc.test_claude_cli import payload
     _settings(tmp_path, {})
     cli.main(["install"])
-    status = tmp_path / ".blink" / "statusline.json"
-    status.write_text(json.dumps(payload(five_hour=None, seven_day=2.0)))
+    status = inside(tmp_path, statusline_source_path())
+    with open(status, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload(five_hour=None, seven_day=2.0)))
+    _verdict(tmp_path, False, time.time() - 60)
+    before = open(session_verdict.verdict_path(), "rb").read()
     capsys.readouterr()
 
     assert cli.main(["status"]) == 0
-    assert ("Session     no five-hour window (Claude Code reports weekly"
-            " only)") in capsys.readouterr().out
+    assert ("Session     no five-hour window (a Claude Code reply came back"
+            " without one)") in capsys.readouterr().out
 
-    status.write_text(json.dumps(payload(five_hour=27.0,
-                                         resets_at=time.time() + 3600)))
+    with open(status, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload(five_hour=27.0,
+                                   resets_at=time.time() + 3600)))
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+    assert open(session_verdict.verdict_path(), "rb").read() == before
+
+
+def statusline_source_path():
+    from pc import statusline_source
+    return statusline_source.payload_path()
+
+
+def test_status_on_a_pro_desk_after_a_reset_says_nothing(tmp_path, capsys):
+    """Finding 5. `blink status` is a fresh process, and it read a Pro or
+    Max status line rendered after a reset -- weekly-only, byte for byte an
+    Ultra one -- as no window, while the daemon beside it was drawing the
+    session. Quiet proves nothing now, and the daemon's verdict, a window,
+    is on disk."""
+    from tests.pc.test_claude_cli import payload
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    with open(inside(tmp_path, statusline_source_path()), "w",
+              encoding="utf-8") as f:
+        f.write(json.dumps(payload(five_hour=None, seven_day=30.0)))
+    capsys.readouterr()
+
+    for verdict in (None, (True, time.time() - 3 * 3600)):
+        if verdict is not None:
+            _verdict(tmp_path, *verdict, kind="statusline_window")
+        assert cli.main(["status"]) == 0
+        assert "Session     " not in capsys.readouterr().out, verdict
+        assert cli.main(["status", "--wire"]) == 0
+        out = capsys.readouterr().out
+        assert "Session     " not in out, verdict
+
+
+def test_status_on_a_desktop_only_ultra_desk_prints_the_row(tmp_path,
+                                                           capsys):
+    """Claude Desktop's Code tab never runs the status line, so a desk with
+    Desktop alone has its proof in Desktop's history: a weekly figure and
+    no fh key (measured 2026-10-31)."""
+    now_ms = int(time.time() * 1000)
+    s = _dc.sample(now_ms - 300_000, sd=12)
+    del s["u"]["fh"]
+    _desktop_cache(tmp_path, _dc.doc([s]))
+
+    assert cli.main(["status"]) == 0
+    assert ("Session     no five-hour window (Claude Desktop reports weekly"
+            " usage only)") in capsys.readouterr().out
+
+    pro = _dc.sample(now_ms - 300_000, fh=4, sd=12)
+    _desktop_cache(tmp_path, _dc.doc([pro]))
     assert cli.main(["status"]) == 0
     assert "Session     " not in capsys.readouterr().out
 
 
 def _ultra_desk_with_an_open_desktop_window(home, monkeypatch):
-    """A weekly-only status line beside a Claude Desktop Local Storage
-    record whose window is still open: the shape a Pro or Max desk has when
-    a fresh process reads its status line just after a reset. The record is
-    generated and handed over where the LevelDB reader would return it.
+    """A weekly-only status line and an hour-old "no window" verdict beside
+    a Claude Desktop Local Storage record, written since, whose window is
+    still open: proof newer than the verdict that the account has a window.
+    The record is generated and handed over where the LevelDB reader would
+    return it.
 
     `blink install` and the status line land inside the caller's `home` or
     not at all (tests/support/home.py): from a script with the real HOME,
@@ -2180,6 +2246,9 @@ def _ultra_desk_with_an_open_desktop_window(home, monkeypatch):
     with open(status, "w", encoding="utf-8") as f:
         f.write(json.dumps(payload(five_hour=None, seven_day=2.0)))
     now = time.time()
+    # An hour-old verdict that the account has no window, which the record
+    # below, written since, overrules (pc/session_verdict).
+    _verdict(home, False, now - 3600)
     record = {"resetsAt": now + 4 * 3600, "utilization": 0.08,
               "observedAt": now - 300}
     monkeypatch.setattr(desktop_local_storage, "newest_record",

@@ -192,15 +192,20 @@ class NormalizedUsageFrame:
     # expired while nobody rendered", and the two want opposite answers: the
     # second borrows a session figure from the bus, the first must not, since
     # whatever it borrowed (a remembered payload, a Claude Desktop sample two
-    # days old) describes a window the account does not have. Only the
-    # provider that holds the payload and its memory can tell them apart --
-    # ClaudeCliProvider._has_no_window owns that decision, and it is an
-    # evidence rule, not a latch: see there for why a sticky flag held
-    # "--%" on every Pro and Max desk at every five-hour reset.
+    # days old) describes a window the account does not have. No single
+    # provider can tell them apart: pc/session_verdict weighs the evidence
+    # every claude source reports (window_evidence, below) and marks the
+    # frames before they are merged, on positive evidence only.
     # pc/normalizer.merge owns what the decision means; on a merged frame
     # the field is True exactly when merge() reported the session unknown
     # because of it, which is what the burn view (pc/ingest) keys on.
     no_session_window: bool = False
+    # What this frame's source proves about the account's five-hour window,
+    # or None when it proves nothing: (has_window, kind, at), built by
+    # pc/session_verdict.evidence, `at` being when the figure it rests on
+    # was taken. See pc/session_verdict for each kind and why quiet data is
+    # never one.
+    window_evidence: object = None
 
     def __post_init__(self):
         if self.active_at is None:

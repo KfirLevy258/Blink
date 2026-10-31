@@ -7,18 +7,22 @@ the research branch, and the artifact linked from it).
 ## When it shows
 
 Only when the account has no session window. The daemon already decides that:
-`NormalizedUsageFrame.no_session_window` on the merged claude frame. The
-status line marks a payload that has a usable `seven_day` and no `five_hour`
-window, when the daemon has seen no five-hour window within five hours and ten
-minutes of that payload's figures being fetched
-(`ClaudeCliProvider._has_no_window`); a Claude Desktop source carrying a reset
-time still ahead overrides it. On that page the usage frame carries
-`session_pct` -1. If `five_hour` comes back, the mark goes and the board goes
-back to the session gauge. Pro and Max do not see this view at a five-hour
-reset, because the window that just reset is the evidence they have one. A
-freshly started daemon has no such memory, so on a Pro or Max desk whose last
-render came after a reset it shows the view until Claude Code's next reply.
-Neither does a Desktop-only desk, which has no status line.
+`NormalizedUsageFrame.no_session_window` on the merged claude frame, set by
+`pc/session_verdict` on positive evidence only, never because data is quiet.
+Proof of no window: a Claude Desktop history sample with a usable `sd` and
+no `fh` key (measured on a verified Ultra account, 2026-10-31), or a Claude
+Code reply that came back without `five_hour` (the same session's
+`cost.total_cost_usd` rose between two weekly-only status lines). Proof of a window,
+which clears the mark: a status line with `five_hour`, a Desktop sample whose
+`fh` is a number, a Local Storage reading or reset stamp. The newest evidence
+wins. With none either way there is no mark, so Pro and Max never see this
+view at a reset, a laptop asleep across one, or a fresh process. The verdict
+is persisted in `~/.blink/session-window.json`, so a restarted daemon shows
+the view at once and `blink status` agrees with the daemon. A Desktop-only
+Ultra desk gets the view too, from its history alone; its Code tab writes
+transcripts, and with none there is no burn line. On that page the usage
+frame carries `session_pct` -1. If a window comes back, the mark goes and the
+board goes back to the session gauge.
 
 ## What it measures
 

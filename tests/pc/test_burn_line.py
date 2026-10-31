@@ -8,10 +8,11 @@ import json
 import os
 import pathlib
 
-from pc import burn_reader, ingest, protocol
+from pc import burn_reader, ingest, protocol, session_verdict
 from pc.providers import base, scripted
 from pc.providers.claude_cli import ClaudeCliProvider
 from tests.support import transcripts as tx
+from tests.support.home import inside
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 Q = 1_793_430_000
@@ -99,6 +100,17 @@ def test_burn_is_named_in_the_log_and_is_a_cap_the_board_can_list():
 # -------------------------------------------------------------------- bus
 
 
+def ultra(home, at=NOW - 60):
+    """The verdict a daemon leaves on an Ultra desk (pc/session_verdict),
+    where it leaves it, under `home`: proof, a minute old, that a reply came
+    back without a five-hour window. A weekly-only status line alone proves
+    nothing."""
+    session_verdict.save(
+        inside(home, session_verdict.verdict_path()),
+        session_verdict.evidence(
+            False, session_verdict.KIND_STATUSLINE_REPLY, at))
+
+
 def payload(tmp_path, five_hour=False, mtime=NOW - 1):
     """The status line as Claude Code writes it: seven_day, and five_hour
     only when the account has one (no key at all on Ultra)."""
@@ -154,6 +166,7 @@ def bus_for(tmp_path, *others, preferred="claude", reader=None):
 
 def test_an_account_with_no_session_window_is_sent_its_burn(tmp_path):
     payload(tmp_path)
+    ultra(tmp_path)
     tokens = [0] * 18 + [1500, 260_000]
     transcripts(tmp_path, tokens)
     fetch = bus_for(tmp_path).fetch()
@@ -176,6 +189,7 @@ def test_an_account_with_a_window_is_sent_none_and_nothing_is_read(tmp_path):
 
 def test_when_the_window_comes_back_the_line_stops(tmp_path):
     payload(tmp_path)
+    ultra(tmp_path)
     transcripts(tmp_path, [0] * 19 + [7000])
     fetch = bus_for(tmp_path).fetch()
     fetch()
@@ -189,6 +203,7 @@ def test_when_the_window_comes_back_the_line_stops(tmp_path):
 
 def test_the_claude_page_as_the_second_page_still_gets_its_line(tmp_path):
     payload(tmp_path)
+    ultra(tmp_path)
     transcripts(tmp_path, [0] * 19 + [3000])
     codex = Fixed(base.NormalizedUsageFrame(
         provider="codex", src="cli", observed_at=NOW - 5, session_pct=40.0,
@@ -203,6 +218,7 @@ def test_the_claude_page_as_the_second_page_still_gets_its_line(tmp_path):
 
 def test_a_bus_without_a_reader_sends_none(tmp_path):
     payload(tmp_path)
+    ultra(tmp_path)
     bus = ingest.IngestionBus(
         providers=[ClaudeCliProvider(path=str(tmp_path / "statusline.json"))],
         now=lambda: NOW)

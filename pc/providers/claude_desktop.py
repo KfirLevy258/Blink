@@ -24,7 +24,7 @@ mistake that produces a confidently wrong panel rather than an error:
 import json
 import sys
 
-from pc import desktop_paths
+from pc import desktop_paths, session_verdict
 from pc.providers import base
 
 PROVIDER_ID = "claude"
@@ -221,9 +221,32 @@ def _sample_to_frame(sample: dict, now_epoch=None):
         # purely by being newer, which is how a fresh empty source blanks a
         # good stale one.
         return None, None
+    window = _window_evidence(u, fh, sd, observed_at)
     if now_epoch is not None and base.session_outlived(observed_at, now_epoch):
         fh = base.UNKNOWN
-    return {"session_pct": fh, "weekly_pct": sd}, observed_at
+    return {"session_pct": fh, "weekly_pct": sd, "window": window}, observed_at
+
+
+def _window_evidence(u, fh, sd, observed_at):
+    """What this sample proves about the account's five-hour window
+    (pc/session_verdict), dated by the sample: from the raw figures, so a
+    figure retired for its age still says what the account had then.
+
+    Measured 2026-10-31 on this desk's verified Ultra account, read-only:
+    the newest sample, after the change, had `sd` and NO `fh` key at all,
+    and the samples before it, 10-28 and 10-29, had `fh` 0 and 1. So a
+    usable `sd` with the key absent is proof of no window, and an `fh`
+    holding a number, 0 included, is proof of one. A key present and null,
+    or a number out of range, proves nothing: absent is the claim, and
+    _pct reads all three as UNKNOWN, so the test is on the key itself.
+    """
+    if fh >= 0:
+        return session_verdict.evidence(
+            True, session_verdict.KIND_DESKTOP_FH, observed_at)
+    if "fh" not in u and sd >= 0:
+        return session_verdict.evidence(
+            False, session_verdict.KIND_DESKTOP_NO_FH, observed_at)
+    return None
 
 
 def _newest_sample(samples, now_epoch=None):
@@ -525,6 +548,7 @@ class ClaudeDesktopProvider(base.ProviderParser):
             session_resets_at=None, weekly_resets_at=None,
             stale=stale,
             session_burn_pph=burn,
+            window_evidence=fields.get("window"),
         )
 
     def _classify(self, content, now_epoch):

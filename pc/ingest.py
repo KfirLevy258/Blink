@@ -15,7 +15,7 @@ import sys
 import time
 
 from pc import (cowork_audit, desktop_idb, desktop_paths, normalizer, protocol,
-                weekly_anchor)
+                session_verdict, weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
@@ -71,13 +71,28 @@ def default_providers():
             WeeklyAnchorProvider(history_provider=DesktopHistoryProvider())]
 
 
+# IngestionBus(verdict=...)'s default: a persisted SessionVerdict, built per
+# bus. A sentinel and not None, because None means "mark nothing".
+DEFAULT_VERDICT = object()
+
+
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
-                 now=time.time, burn=None):
+                 now=time.time, burn=None, verdict=DEFAULT_VERDICT):
         self._providers = (default_providers() if providers is None
                            else list(providers))
         self._preferred = preferred_provider
         self._now = now
+        # Weighs what the claude sources prove about the account's
+        # five-hour window and marks their frames before the merge
+        # (pc/session_verdict). The default is the persisted one under
+        # ~/.blink. None marks nothing, and a bus that replays a scenario
+        # is built with None (claude_usage_bridge.build_bus): its steps say
+        # for themselves whether the account has a window, and the desk's
+        # own verdict -- an Ultra desk's "no window", say -- must not decide
+        # it for them on a bench.
+        self._verdict = (session_verdict.SessionVerdict()
+                         if verdict is DEFAULT_VERDICT else verdict)
         # What answers burn() below: anything with poll(now) -> (q, tokens)
         # or None -- pc/burn_reader.BurnReader on a desk, the scenario's
         # replay under BLINK_SCENARIO. None, the default, means no burn line
@@ -296,7 +311,21 @@ class IngestionBus:
         # the first poll of every process, to learn a boundary the status line
         # was about to hand over for free.
         self._seed_anchor_once()
+        if self._verdict is not None:
+            # Before any merge, so every claude frame -- the status line's,
+            # or Claude Desktop's alone on a desk that runs no Claude Code --
+            # carries the account's verdict into it. Contained like a
+            # provider: the verdict is a bonus on the poll, never its cost.
+            try:
+                self._verdict.mark(frames, now)
+            except Exception:
+                pass
         return frames
+
+    def verdict(self):
+        """The bus's SessionVerdict, or None: for `blink status`, which says
+        what the verdict rests on."""
+        return self._verdict
 
     @staticmethod
     def _cooldown_over(sitting_out, now) -> bool:

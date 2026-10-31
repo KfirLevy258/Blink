@@ -262,8 +262,8 @@ def merge(frames):
 
     # An account with no session window has no session figure to pick.
     #
-    # ClaudeCliProvider marks the frames of a payload that says so (see
-    # _has_no_window for the evidence). Without this, a remembered payload
+    # pc/session_verdict marks the frames of an account proved to have none
+    # (see there for the evidence). Without this, a remembered payload
     # or a Claude Desktop sample two days old filled the dial, won `primary`
     # below, and the board was told live data was 37 hours old (measured
     # 2026-10-30, a verified Ultra account). The mark applies whatever the
@@ -273,32 +273,17 @@ def merge(frames):
     # history, not its Local Storage, not the remembered payload -- and the
     # countdown and the burn rate go with the figure.
     #
-    # One thing voids the mark: an unmarked source carrying a session reset
-    # time. Every provider drops a stamp that has passed (base.settle_window;
-    # Local Storage through window_ended), so one that is carried was ahead
-    # of the clock it was read by, and merge needs no clock of its own. That
-    # is a window, so the mark was wrong, and the merge goes on exactly as
-    # if no frame carried it: the
-    # stamped source gives the countdown and every reading competes for the
-    # dial by the ordinary rules. Not "only the stamped source may fill
-    # it", which is what the previous rule did and why a stale Local
-    # Storage record took the dial back from Desktop samples taken after it
-    # (review, 2026-10-31). Nothing is logged: it is not a fault, and the
-    # next Claude Code reply carries the window anyway.
-    #
-    # The previous rule had a second way out, a reading observed after the
-    # newest marked frame. It existed for merging a merged frame, which
-    # production never does, and it let any Desktop sample taken after the
-    # last repaint lift the veto (same review); it is gone.
+    # Nothing here voids the mark. It used to be lifted by an unmarked
+    # source carrying a session reset time, back when the mark was inferred
+    # from quiet data and needed a way out. Now it is a verdict on evidence
+    # that already weighed that source: a Local Storage window, a status
+    # line with five_hour, a Desktop fh figure each clear it at once when
+    # they are newer than the proof against them (pc/session_verdict).
     #
     # So `no_window` on the merged frame is True exactly when the session
     # below is unknown because of this rule, and pc/ingest's burn view keys
     # on that.
-    marked = any(f.no_session_window for f in frames)
-    proved = any(not f.no_session_window
-                 and _stamp(f, "session_resets_at") is not None
-                 for f in frames)
-    no_window = marked and not proved
+    no_window = any(f.no_session_window for f in frames)
     session_frames = [] if no_window else frames
 
     session_pct, session_src, session_dated = _pick_pct(
