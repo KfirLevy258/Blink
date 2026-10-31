@@ -79,8 +79,12 @@ def hello(fw, caps=None):
 
 
 def settle(b, clock):
-    """The board's theme_now, then a fast tick past the quiet window."""
+    """The board's theme_now, then a fast tick past the quiet window, then
+    the next one: a tick that writes a theme save writes nothing behind it
+    (THEME_SAVE_HOLD_S), so what was owed besides goes out on the second."""
     b.on_message({"t": "theme_now", "v": 2, "id": 0, "why": "boot"})
+    clock.t += THEME_QUIET_S
+    b.poll_if_changed()
     clock.t += THEME_QUIET_S
     b.poll_if_changed()
 
