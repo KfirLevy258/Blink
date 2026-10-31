@@ -2344,3 +2344,16 @@ def test_status_wire_prints_the_row_and_the_line_from_one_poll(
     wire = json.loads(out.strip().splitlines()[-1])
     assert wire["session_pct"] == -1 and wire["src"] == "cli"
     assert out.count("Session     no five-hour window") == 1
+
+
+def test_the_disclosure_names_every_usage_source_the_daemon_reads(capsys):
+    """The install note said the figures come from "Claude Code, Claude
+    Desktop's usage cache, or the Codex session log", and left out Desktop's
+    Local Storage, which pc/desktop_local_storage.py reads for the five-hour
+    figure and its countdown (review follow-up, 2026-11-01). Install asks
+    nothing, so this sentence is the disclosure; it has to be the whole
+    list."""
+    cli._announce()
+    said = " ".join(l.strip() for l in capsys.readouterr().out.splitlines())
+    assert ("The usage figures come from Claude Code, Claude Desktop's usage"
+            " cache and Local Storage, or the Codex session log") in said
