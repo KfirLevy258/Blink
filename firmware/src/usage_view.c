@@ -1904,7 +1904,15 @@ static void burn_draw_cb(lv_event_t *e)
 	burn_inks(&k);
 
 	/* Bars first, then the baseline they stand on. An empty bucket draws
-	 * nothing at all: the baseline under it is the zero. */
+	 * nothing at all: the baseline under it is the zero.
+	 *
+	 * The bright bars are the newest four (16-19), the one still filling
+	 * included, while the "/h" rate and the arrow use the four complete
+	 * quarter-hours (15-18). That is one bucket apart on purpose. The
+	 * 2026-11-01 review flagged it (for up to 15 minutes after a burst the
+	 * panel can say "rising" with no bright bar under the burst), and the
+	 * owner compared panel renders of three ways to line them up and kept
+	 * this one: the newest activity should look newest. Don't "fix" it. */
 	for (int i = 0; i < BURN5H_N; i++) {
 		if (bd.bar_h[i] == 0) {
 			continue;
