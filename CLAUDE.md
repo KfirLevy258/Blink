@@ -108,7 +108,15 @@ around it. It:
   bridge tests had been fetching the release feed from github.com on every
   run. It raises a `BaseException`, because the status-page reader catches
   `Exception` on purpose and would have swallowed an AssertionError. A test
-  that really needs the network says `@pytest.mark.allow_network`.
+  that really needs the network says `@pytest.mark.allow_network`;
+- refuses to open a browser: `webbrowser.open`/`open_new`/`open_new_tab`/`get`,
+  `os.startfile`, `os.system`, and any subprocess launch of `open`,
+  `osascript`, `xdg-open`, `start` or `explorer`. On 2026-10-30 a test's
+  falsy stub opener made `theme_server.Launcher` fall back to the real one
+  and tabs opened in the owner's Chrome. It raises a `BaseException` and
+  also records the attempt, failing the test at teardown if the code under
+  test swallowed the refusal. A test that really needs it says
+  `@pytest.mark.allow_browser`.
 
 `move_home` (not autouse) moves home after import for tests that pin
 call-time path resolution, so the list of home variables lives in one place.

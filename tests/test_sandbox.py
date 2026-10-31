@@ -18,6 +18,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import webbrowser
 
 import pytest
 
@@ -350,3 +351,110 @@ def test_a_helper_path_outside_the_callers_home_is_refused(tmp_path):
     # A sibling that merely shares the prefix is not inside.
     with pytest.raises(AssertionError, match="outside"):
         inside(mine, str(tmp_path / "mine-too" / "x"))
+
+
+# --- the browser guard ----------------------------------------------------
+#
+# Every attempt below is made AFTER checking that the guard is what is
+# installed, because a guard that is missing is a real tab in the owner's
+# Chrome: the tests that prove it fires must not be the ones that open it.
+
+
+def _guarded(fn):
+    return getattr(fn, "blink_browser_guard", False)
+
+
+@pytest.mark.parametrize("name", ["open", "open_new", "open_new_tab"])
+def test_webbrowser_is_refused(name):
+    """On 2026-10-30 a test's falsy stub opener made theme_server.Launcher
+    fall back to the real one, and tabs opened in the owner's Chrome. The
+    socket guard did not see it: a browser is started by a subprocess or a
+    file handler, never by a connect() from here."""
+    fn = getattr(webbrowser, name)
+    assert _guarded(fn), "the browser guard is not installed"
+    with pytest.raises(conftest.RealBrowserRefused):
+        fn("http://127.0.0.1:1/")
+    conftest.forget_browser_attempts()      # the refusal is the test passing
+
+
+@pytest.mark.parametrize("argv", [
+    ["open", "/nonexistent-blink-guard-test"],
+    ["/usr/bin/open", "/nonexistent-blink-guard-test"],
+    ["osascript", "-e", ""],
+    ["xdg-open", "/nonexistent-blink-guard-test"],
+    ["explorer", "/nonexistent-blink-guard-test"],
+    ["explorer.exe", "/nonexistent-blink-guard-test"],
+    ["start", "/nonexistent-blink-guard-test"],
+    ["cmd", "/c", "start", "", "http://127.0.0.1:1/"],
+    ["CMD.EXE", "/C", "START", "http://127.0.0.1:1/"],
+])
+def test_launching_an_opener_is_refused(argv):
+    """The arguments are ones that open nothing even if the guard is gone."""
+    assert _guarded(subprocess.Popen.__init__), \
+        "the browser guard is not installed"
+    with pytest.raises(conftest.RealBrowserRefused):
+        subprocess.run(argv, capture_output=True)
+    with pytest.raises(conftest.RealBrowserRefused):
+        subprocess.Popen(argv)
+    conftest.forget_browser_attempts()
+
+
+def test_a_shell_string_is_read_by_its_first_word():
+    assert _guarded(subprocess.Popen.__init__)
+    assert _guarded(os.system)
+    with pytest.raises(conftest.RealBrowserRefused):
+        subprocess.run("osascript -e ''", shell=True, capture_output=True)
+    with pytest.raises(conftest.RealBrowserRefused):
+        os.system("open /nonexistent-blink-guard-test")
+    conftest.forget_browser_attempts()
+
+
+def test_ordinary_commands_are_untouched():
+    """The guard is a list of openers, not a ban on subprocesses."""
+    out = subprocess.run([sys.executable, "-c", "print('hi')"],
+                         capture_output=True, text=True)
+    assert out.stdout.strip() == "hi"
+    # Contains the word but is not the program: `echo open`.
+    assert conftest.browser_launcher(["echo", "open"]) is None
+    assert conftest.browser_launcher(["cmd", "/c", "echo", "start"]) is None
+    assert conftest.browser_launcher("ls -l") is None
+    assert conftest.browser_launcher(["launchctl", "print", "open"]) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "startfile"),
+                    reason="os.startfile is Windows-only")
+def test_startfile_is_refused():
+    assert _guarded(os.startfile)
+    with pytest.raises(conftest.RealBrowserRefused):
+        os.startfile("http://127.0.0.1:1/")
+    conftest.forget_browser_attempts()
+
+
+def test_startfile_is_not_invented_where_it_does_not_exist():
+    """Code decides it is on Windows by whether os.startfile exists; a guard
+    that created one on a Mac would change the answer."""
+    assert hasattr(os, "startfile") == (sys.platform == "win32")
+
+
+def test_a_refusal_swallowed_by_the_caller_still_fails_the_test():
+    """A BaseException can still be caught by a bare except, or die in a
+    worker thread, and then the test would pass with the attempt made. So
+    the attempt is also recorded and the test fails in teardown. Here the
+    teardown is run by hand, on a refusal the code under test swallowed."""
+    assert _guarded(webbrowser.open)
+    try:
+        webbrowser.open("http://127.0.0.1:1/")
+    except conftest.RealBrowserRefused:
+        pass                                # swallowed, as a bare except would
+    attempts = conftest.browser_attempts()
+    assert len(attempts) == 1 and "webbrowser.open" in attempts[0]
+    with pytest.raises(pytest.fail.Exception, match="opened a browser"):
+        conftest.fail_on_browser_attempts()
+    assert conftest.browser_attempts() == []
+
+
+@pytest.mark.allow_browser
+def test_the_marker_lets_a_test_have_the_real_thing():
+    """Checked by identity only: nothing here calls it."""
+    assert not _guarded(webbrowser.open)
+    assert not _guarded(subprocess.Popen.__init__)

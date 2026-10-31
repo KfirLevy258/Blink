@@ -13,6 +13,11 @@ That is not a hypothetical in either case:
     other path is scoped to HOME, so it booted out the agent of the person
     logged in. The board on the desk went to HOST LOST 35 seconds later.
 
+  - theme_server.Launcher fell back to the real opener when a test's stub
+    opener was falsy, and on 2026-10-30 tabs opened in the owner's Chrome
+    while the suite ran. The socket guard cannot see that: a browser is
+    started by a process or a file handler, not by a connect() from here.
+
 A test that needs the real thing can still opt out with monkeypatch.delenv,
 which is the right way round: the safe behaviour is the default and the
 dangerous one has to be asked for.
@@ -22,8 +27,11 @@ move_home is not autouse: it is for the tests that move home after import.
 import ipaddress
 import os
 import pathlib
+import re
 import socket
+import subprocess
 import urllib.request
+import webbrowser
 
 import pytest
 
@@ -100,6 +108,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "allow_network: this test may open a socket to another"
                    " host (none does today)")
+    config.addinivalue_line(
+        "markers", "allow_browser: this test may start the real browser or"
+                   " file opener (none does today)")
 
 
 def _loopback(address):
@@ -173,3 +184,162 @@ def _no_real_network(request, monkeypatch):
 
 class RealNetworkRefused(BaseException):
     """See _no_real_network."""
+
+
+# What can start the owner's browser from inside a test. `open` and
+# `osascript` are what webbrowser runs on macOS, `xdg-open` on Linux; `start`
+# and `explorer` are Windows' (os.startfile is the usual way there, and is
+# guarded below). The rest are the Linux desktops' own spellings.
+_OPENERS = frozenset({
+    "open", "osascript", "xdg-open", "gnome-open", "kde-open",
+    "sensible-browser", "x-www-browser", "wslview", "start", "explorer"})
+
+# Every refusal, whether or not the code under test let the exception through.
+# A BaseException can still be caught by a bare `except:` or die in a worker
+# thread, and then the test would pass having opened the browser; the
+# autouse fixture fails the test at teardown if this is not empty.
+_BROWSER_ATTEMPTS = []
+
+
+class RealBrowserRefused(BaseException):
+    """See _no_real_browser. A BaseException for the reason given on
+    RealNetworkRefused: theme_server's opener catches Exception."""
+
+
+def browser_attempts():
+    return list(_BROWSER_ATTEMPTS)
+
+
+def forget_browser_attempts():
+    """For the tests of the guard itself, which provoke it on purpose."""
+    del _BROWSER_ATTEMPTS[:]
+
+
+def fail_on_browser_attempts():
+    if _BROWSER_ATTEMPTS:
+        what = ", ".join(_BROWSER_ATTEMPTS)
+        forget_browser_attempts()
+        pytest.fail(f"this test opened a browser ({what}); inject an opener,"
+                    " or mark it @pytest.mark.allow_browser", pytrace=False)
+
+
+def _stem(word):
+    """`C:\\Windows\\Explorer.EXE` and `/usr/bin/open` are `explorer`, `open`."""
+    name = re.split(r"[\\/]", word)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def browser_launcher(args):
+    """The opener a command would start, or None.
+
+    `args` is what subprocess or os.system is handed: a list, or a string
+    whose first word is the program (the shell reads it that way, and so
+    does a bare Popen). `cmd /c start ...` is a shell built-in, so for cmd
+    the first word that is not a /switch is what counts. It looks at the
+    program, never at the words after it: `echo open` is not an opener.
+    """
+    if isinstance(args, os.PathLike):
+        args = os.fspath(args)
+    if isinstance(args, (str, bytes)):
+        words = os.fsdecode(args).split()
+    else:
+        try:
+            words = [os.fsdecode(a) for a in args]
+        except TypeError:
+            return None
+    if not words:
+        return None
+    prog = _stem(words[0])
+    if prog in _OPENERS:
+        return prog
+    if prog == "cmd":
+        rest = [w for w in " ".join(words[1:]).split()
+                if not w.startswith("/")]
+        if rest and rest[0].lower() in _OPENERS:
+            return "cmd /c " + rest[0].lower()
+    return None
+
+
+def _guard(fn):
+    fn.blink_browser_guard = True       # tests/test_sandbox.py looks for it
+    return fn
+
+
+class _RefusingBrowser:
+    """What webbrowser.get() hands back: the controllers for Chrome, Firefox
+    and the rest run their own binaries, which the launcher list above would
+    not know by name on a Linux runner that has one installed."""
+    name = "refused"
+
+    def __init__(self, refuse):
+        self._refuse = refuse
+
+    def open(self, url, new=0, autoraise=True):
+        self._refuse("webbrowser.get().open")
+
+    def open_new(self, url):
+        self._refuse("webbrowser.get().open_new")
+
+    def open_new_tab(self, url):
+        self._refuse("webbrowser.get().open_new_tab")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser(request, monkeypatch):
+    """No test may open the owner's browser, or any file opener.
+
+    Refused at webbrowser, at os.startfile and os.system, and at every
+    subprocess launch of an opener by name (Popen is what subprocess.run,
+    check_output and os.popen all come to), so the failure names the
+    opener instead of a tab appearing in someone's Chrome. A test that
+    injects its own opener replaces these by monkeypatch and is unaffected.
+
+    Raised as a BaseException, and recorded as well: see _BROWSER_ATTEMPTS.
+    """
+    if request.node.get_closest_marker("allow_browser"):
+        yield
+        return
+
+    def refuse(what):
+        _BROWSER_ATTEMPTS.append(what)
+        raise RealBrowserRefused(
+            f"a test tried to open a browser through {what}; inject an"
+            " opener, or mark it @pytest.mark.allow_browser")
+
+    def refusing(name):
+        def opener(*a, **k):
+            refuse(f"webbrowser.{name}")
+        return _guard(opener)
+
+    for name in ("open", "open_new", "open_new_tab"):
+        monkeypatch.setattr(webbrowser, name, refusing(name))
+    monkeypatch.setattr(webbrowser, "get",
+                        _guard(lambda *a, **k: _RefusingBrowser(refuse)))
+
+    # Only where it exists: code tells Windows by the presence of
+    # os.startfile, and a guard that invented one would change the answer.
+    if hasattr(os, "startfile"):
+        monkeypatch.setattr(
+            os, "startfile", _guard(lambda *a, **k: refuse("os.startfile")))
+
+    real_system = os.system
+
+    def system(command):
+        name = browser_launcher(command)
+        if name:
+            refuse(f"os.system {name}")
+        return real_system(command)
+
+    monkeypatch.setattr(os, "system", _guard(system))
+
+    real_init = subprocess.Popen.__init__
+
+    def popen_init(self, args, *a, **k):
+        name = browser_launcher(args)
+        if name:
+            refuse(f"subprocess {name}")
+        return real_init(self, args, *a, **k)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", _guard(popen_init))
+    yield
+    fail_on_browser_attempts()
