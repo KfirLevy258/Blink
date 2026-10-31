@@ -7,12 +7,10 @@ boundaries, output tokens only, read incrementally, de-duplicated on
 tests/support/transcripts.py; none is captured from a machine.
 """
 import os
-import sys
-
-import pytest
 
 from pc import burn_reader as br
 from tests.support import transcripts as tx
+from tests.support.home import inside
 
 Q = 1_793_430_000           # the contract's own example, a quarter-hour
 NOW = Q + 600               # ten minutes into it
@@ -233,6 +231,32 @@ def test_a_file_untouched_for_more_than_5h15m_is_not_read(tmp_path):
     assert sum(r.poll(NOW + LATER)[1]) == 6
 
 
+def test_a_known_file_that_has_gone_cold_is_followed_from_its_end(tmp_path):
+    """The fast-forward applied only to a file seen for the first time. One
+    already followed kept its offset, so after a stretch with no polls --
+    the board unplugged overnight -- everything appended in the meantime was
+    read though none of it could count, and the line was held back while it
+    was (review, 2026-10-31)."""
+    p = tx.write(tmp_path, session(tmp_path), [a(1, start(19), 10)],
+                 mtime=NOW)
+    r = reader(tmp_path, read_budget=4096, chunk_bytes=1024)
+    assert sum(r.poll(NOW)[1]) == 10
+
+    worked_until = NOW + 8 * 3600
+    tx.write(tmp_path, p,
+             [tx.user(NOW + 3600 + n, text="w" * 2000) for n in range(40)]
+             + [a(2, NOW + 3600 + 50, 999)], mtime=worked_until, append=True)
+    back = worked_until + br.FOLLOW_S + 60
+
+    got = r.poll(back)
+
+    assert got is not None and sum(got[1]) == 0
+    assert r.last.read_bytes == 0
+    # Resumed: what the resumption adds is read, and nothing before it.
+    tx.write(tmp_path, p, [a(3, back, 5)], mtime=back, append=True)
+    assert sum(r.poll(back + LATER)[1]) == 5
+
+
 def test_a_file_touched_just_inside_5h15m_is_read(tmp_path):
     tx.write(tmp_path, session(tmp_path), [a(1, start(0), 5)],
              mtime=NOW - br.FOLLOW_S + 60)
@@ -257,19 +281,24 @@ def test_a_partial_last_line_is_held_back_until_it_is_finished(tmp_path):
 
 
 def test_only_the_bytes_after_the_last_read_are_read(tmp_path):
-    """Proved by changing what was already read, keeping its length: a
-    reader that went back to the start would count the new first line."""
+    """Proved by changing what was already read, keeping its length, ahead
+    of the ANCHOR_BYTES that vouch for the offset: a reader that went back
+    to the start would count the new first line. What it reads is the
+    appended line and those few bytes, nothing more."""
     p = session(tmp_path)
-    tx.write(tmp_path, p, [a(1, start(19), 100)], mtime=NOW)
+    filler = tx.user(start(19), text="f" * 1000)
+    tx.write(tmp_path, p, [a(1, start(19), 100), filler], mtime=NOW)
     r = reader(tmp_path)
     assert sum(r.poll(NOW)[1]) == 100
 
     same_length = tx.encode(a(9, start(19), 900))
     assert len(same_length) == len(tx.encode(a(1, start(19), 100)))
-    tx.write(tmp_path, p, [same_length, a(2, start(19), 1)], mtime=NOW + 1)
+    tx.write(tmp_path, p, [same_length, filler, a(2, start(19), 1)],
+             mtime=NOW + 1)
 
     assert sum(r.poll(NOW + LATER)[1]) == 101
-    assert r.last.read_bytes == len(tx.encode(a(2, start(19), 1)))
+    assert r.last.read_bytes == (len(tx.encode(a(2, start(19), 1)))
+                                 + br.ANCHOR_BYTES)
 
 
 def test_a_poll_with_nothing_new_reads_nothing(tmp_path):
@@ -299,8 +328,6 @@ def test_a_truncated_file_is_read_again_from_the_start(tmp_path):
     assert sum(r.poll(NOW + 2 * LATER)[1]) == 304
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="DirEntry.stat() has no inode on Windows")
 def test_a_replaced_file_is_read_again_from_the_start(tmp_path):
     p = session(tmp_path)
     tx.write(tmp_path, p, [a(1, start(19), 100)], mtime=NOW)
@@ -313,6 +340,66 @@ def test_a_replaced_file_is_read_again_from_the_start(tmp_path):
     os.replace(fresh, p)
 
     assert sum(r.poll(NOW + LATER)[1]) == 135
+
+
+def without_inodes(monkeypatch):
+    """The walk as Windows sees it: DirEntry.stat() there has st_ino 0, so
+    a replaced file cannot be told by its inode."""
+    real = br._transcripts
+
+    def walk(root, *args, **kwargs):
+        for path, st in real(root, *args, **kwargs):
+            yield path, os.stat_result(
+                (st.st_mode, 0, st.st_dev, st.st_nlink, st.st_uid, st.st_gid,
+                 st.st_size, int(st.st_atime), int(st.st_mtime),
+                 int(st.st_ctime)))
+    monkeypatch.setattr(br, "_transcripts", walk)
+
+
+def test_a_replaced_file_with_no_inode_to_tell_is_read_again(tmp_path,
+                                                             monkeypatch):
+    """Windows, where every replace looked like an append: the read began at
+    the old offset, in the middle of a line of the new file, and the replies
+    before it were lost (review, 2026-10-31)."""
+    without_inodes(monkeypatch)
+    p = session(tmp_path)
+    tx.write(tmp_path, p, [a(1, start(19), 100)], mtime=NOW)
+    r = reader(tmp_path)
+    r.poll(NOW)
+
+    fresh = tmp_path / "fresh.jsonl"
+    tx.write(tmp_path, fresh, [a(7, start(19), 5), a(1, start(19), 100),
+                               a(2, start(19), 30)], mtime=NOW + 1)
+    os.replace(fresh, p)
+
+    assert sum(r.poll(NOW + LATER)[1]) == 135
+
+
+def test_a_rewrite_in_place_past_the_old_offset_is_read_again(tmp_path):
+    """Claude Code drops a tombstoned message after an API retry by opening
+    the transcript r+, truncating it and writing it out again. Same file,
+    same inode, and when the next reply lands it is no shorter than what
+    was read: the read went on from the old offset, inside a line, and that
+    reply's tokens were lost (review, 2026-10-31)."""
+    p = session(tmp_path)
+    first, kept = a(1, start(19), 100), a(2, start(19), 200)
+    tx.write(tmp_path, p, [first, kept], mtime=NOW)
+    r = reader(tmp_path)
+    assert sum(r.poll(NOW)[1]) == 300
+
+    reply = tx.encode(a(3, start(19), 4000, text="z" * 400))
+    with open(inside(tmp_path, p), "r+b") as f:
+        f.truncate(0)
+        f.write(tx.encode(kept) + reply)
+    os.utime(p, (NOW + 1, NOW + 1))
+    assert os.path.getsize(p) >= len(tx.encode(first) + tx.encode(kept))
+
+    assert sum(r.poll(NOW + LATER)[1]) == 4300
+    tx.write(tmp_path, p, [a(4, start(19), 7)], mtime=NOW + 2, append=True)
+    assert sum(r.poll(NOW + 2 * LATER)[1]) == 4307
+    # Only the appended line and the few bytes that vouch for the old
+    # offset: an append is not mistaken for a rewrite.
+    assert r.last.read_bytes <= len(tx.encode(a(4, start(19), 7))) + 256
 
 
 def test_a_new_session_is_found_at_the_next_walk_and_not_before(tmp_path):
@@ -398,6 +485,23 @@ def test_an_over_long_line_is_skipped_and_reading_goes_on(tmp_path):
     got = reader(tmp_path, chunk_bytes=1024, max_line_bytes=4096).poll(NOW)
 
     assert sum(got[1]) == 1
+
+
+def test_a_line_passed_over_still_vouches_for_the_offset_after_it(tmp_path):
+    """The anchor is the bytes before the offset whichever way they were
+    taken, a skipped line's included: kept wrong, every append after an
+    over-long last line would read the whole file again."""
+    p = tx.write(tmp_path, session(tmp_path),
+                 [a(1, start(19), 2), a(2, start(19), 42, text="y" * 50_000)],
+                 mtime=NOW)
+    r = reader(tmp_path, chunk_bytes=1024, max_line_bytes=4096)
+    assert sum(r.poll(NOW)[1]) == 2
+
+    tx.write(tmp_path, p, [a(3, start(19), 1)], mtime=NOW + 1, append=True)
+
+    assert sum(r.poll(NOW + LATER)[1]) == 3
+    assert r.last.read_bytes == (len(tx.encode(a(3, start(19), 1)))
+                                 + br.ANCHOR_BYTES)
 
 
 def test_messages_that_leave_the_window_are_forgotten(tmp_path):
@@ -501,7 +605,7 @@ def test_a_file_that_cannot_be_opened_is_tried_again(tmp_path, monkeypatch,
 def test_a_file_that_never_opens_stops_holding_the_view_back(tmp_path,
                                                             monkeypatch):
     """One transcript left owned by another user must not cost a desk the
-    whole view: after OPEN_TRIES refusals the sum goes out without it, and
+    whole view: after READ_TRIES refusals the sum goes out without it, and
     it is still counted the moment it opens."""
     tx.write(tmp_path, session(tmp_path, "locked"), [a(1, start(19), 8)],
              mtime=NOW)
@@ -516,12 +620,140 @@ def test_a_file_that_never_opens_stops_holding_the_view_back(tmp_path,
         return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr("builtins.open", refuse)
-    got = [r.poll(NOW + k) for k in range(br.OPEN_TRIES)]
-    assert got[:-1] == [None] * (br.OPEN_TRIES - 1)
+    got = [r.poll(NOW + k) for k in range(br.READ_TRIES)]
+    assert got[:-1] == [None] * (br.READ_TRIES - 1)
     assert sum(got[-1][1]) == 5
     monkeypatch.setattr("builtins.open", real_open)
 
-    assert sum(r.poll(NOW + br.OPEN_TRIES)[1]) == 13
+    assert sum(r.poll(NOW + br.READ_TRIES)[1]) == 13
+
+
+class _Unreadable:
+    """A file that opens and then fails every seek or read, as a transcript
+    on a failing disk or a network share that dropped does."""
+
+    def __init__(self, fh):
+        self._fh = fh
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._fh.close()
+
+    def close(self):
+        self._fh.close()
+
+    def seek(self, *args):
+        raise OSError(5, "MARKER-input/output error")
+
+    def read(self, *args):
+        raise OSError(5, "MARKER-input/output error")
+
+
+def test_a_file_that_opens_but_never_reads_stops_holding_the_view_back(
+        tmp_path, monkeypatch, capsys):
+    """Only a refused open was counted. A successful open reset the count,
+    and the OSError out of seek() or read() was swallowed, so a transcript
+    that opened but could not be read stayed owed for good and poll()
+    returned None for the life of the daemon (review, 2026-10-31). A read
+    that fails counts the same as an open that does."""
+    tx.write(tmp_path, session(tmp_path, "bad"), [a(1, start(19), 8)],
+             mtime=NOW)
+    tx.write(tmp_path, session(tmp_path, "good"), [a(2, start(19), 5)],
+             mtime=NOW)
+    r = reader(tmp_path)
+    real_open = open
+
+    def flaky(path, *args, **kwargs):
+        fh = real_open(path, *args, **kwargs)
+        return _Unreadable(fh) if str(path).endswith("bad.jsonl") else fh
+
+    monkeypatch.setattr("builtins.open", flaky)
+    got = [r.poll(NOW + k) for k in range(br.READ_TRIES)]
+    assert got[:-1] == [None] * (br.READ_TRIES - 1)
+    assert sum(got[-1][1]) == 5
+    monkeypatch.setattr("builtins.open", real_open)
+
+    assert sum(r.poll(NOW + br.READ_TRIES)[1]) == 13
+    assert capsys.readouterr() == ("", "")
+
+
+def test_a_read_that_fails_once_is_waited_for(tmp_path, monkeypatch):
+    """The other half of READ_TRIES: one failure is transient until proved
+    otherwise, and the sum waits for the file rather than going out short."""
+    tx.write(tmp_path, session(tmp_path), [a(1, start(19), 8)], mtime=NOW)
+    r = reader(tmp_path)
+    real_open = open
+    monkeypatch.setattr("builtins.open",
+                        lambda path, *a, **k: _Unreadable(real_open(path, *a,
+                                                                    **k)))
+    assert r.poll(NOW) is None
+    monkeypatch.setattr("builtins.open", real_open)
+
+    assert sum(r.poll(NOW + 1)[1]) == 8
+
+
+def refusing_listings(monkeypatch, refused):
+    """os.scandir as it behaves on a directory this user may not list."""
+    real = os.scandir
+
+    def scandir(path="."):
+        if os.path.normcase(os.fspath(path)) in {
+                os.path.normcase(str(p)) for p in refused}:
+            raise PermissionError(13, "MARKER-permission denied")
+        return real(path)
+    monkeypatch.setattr(br.os, "scandir", scandir)
+
+
+def test_a_projects_directory_that_cannot_be_listed_is_nothing_to_say(
+        tmp_path, monkeypatch, capsys):
+    """It exists, so the walk called it found, and the listing's OSError
+    was swallowed: twenty zeros, a confident "idle" about transcripts never
+    seen (review, 2026-10-31). The same as no directory at all."""
+    tx.write(tmp_path, session(tmp_path), [a(1, start(19), 8)], mtime=NOW)
+    refusing_listings(monkeypatch, [projects(tmp_path)])
+
+    assert reader(tmp_path).poll(NOW) is None
+    assert capsys.readouterr() == ("", "")
+
+
+def test_a_project_that_cannot_be_listed_is_nothing_to_say_until_it_can(
+        tmp_path, monkeypatch):
+    """The sum without it would be a total that leaves out a project, drawn
+    as if it were the whole. What was known is kept, so the view comes back
+    with nothing read twice once the directory lists again."""
+    tx.write(tmp_path, session(tmp_path), [a(1, start(19), 8)], mtime=NOW)
+    other = projects(tmp_path) / "-work-other"
+    tx.write(tmp_path, other / "s.jsonl", [a(2, start(19), 5)], mtime=NOW)
+    r = reader(tmp_path)
+    assert sum(r.poll(NOW)[1]) == 13
+
+    refusing_listings(monkeypatch, [other])
+    assert r.poll(NOW + LATER) is None
+    assert r.last.files == 2
+
+    monkeypatch.undo()
+    assert sum(r.poll(NOW + 2 * LATER)[1]) == 13
+    assert r.last.read_bytes == 0
+
+
+def test_a_project_that_vanishes_mid_walk_is_simply_gone(tmp_path,
+                                                         monkeypatch):
+    """Deleted between its parent's listing and its own: not unlistable, just
+    no longer there, the way a deleted transcript is."""
+    tx.write(tmp_path, session(tmp_path), [a(1, start(19), 8)], mtime=NOW)
+    gone = projects(tmp_path) / "-work-gone"
+    gone.mkdir()
+    real = os.scandir
+
+    def scandir(path="."):
+        if os.path.normcase(os.fspath(path)) == os.path.normcase(str(gone)):
+            raise FileNotFoundError(2, "MARKER-gone")
+        return real(path)
+    monkeypatch.setattr(br.os, "scandir", scandir)
+
+    assert sum(reader(tmp_path).poll(NOW)[1]) == 8
 
 
 # ------------------------------------------------------------ where it looks

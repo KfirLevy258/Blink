@@ -16,9 +16,9 @@ is set. Of each line this reads `type`, `timestamp`, `message.id`,
 nothing else. Nothing read here is ever logged, printed or raised -- not a
 line, not a slice of one, not a value from one, at any level (CLAUDE.md). A
 transcript is somebody's whole working session; what leaves this module is
-twenty sums. That includes the OSError a failed open raises, whose text is
-the transcript's path and so the customer's project name: it is swallowed,
-and the file is simply tried again.
+twenty sums. That includes the OSError a failed open, read or listing
+raises, whose text is the transcript's path and so the customer's project
+name: it is swallowed, and the file or directory is simply tried again.
 
 THE SHAPE, measured on the development desk 2026-10-31, counts only: 4401
 transcripts, 3.3 GB, in 107 directories -- 3606 session files one level down
@@ -61,29 +61,37 @@ With every subagent file given a directory of its own (1698 directories),
 the walk rose to about 32 ms, and os.walk with a stat per file took the
 same: the cost is the listing, not the code around it.
 
+MEASURED AGAIN 2026-10-31, after the review's fixes, on a second generated
+tree of the same shape (237 MB touched) at a load average near 4, the old
+reader and the new on the same copy, two runs each: the cold start went
+from 248 ms to 277 ms, still 8 polls, the slowest 70 ms either way. About
+5 ms of that is the anchors (ANCHOR_BYTES) and about 22 ms the timestamp
+parser now shared with pc/cowork_audit, 2.3 us a stamp against 0.8 us for
+the copy this module kept (measured by swapping that copy back in). An
+append costs 256 bytes
+more read for each file it touched: 1254 bytes for three sessions' 486.
+Walks and polls between them did not move beyond the noise.
+
 The cadence of the LINE -- on change, every 60 s, never within 15 s of the
 last -- is pc/bridge's; this only answers "what are the twenty numbers now".
 """
-import datetime
 import json
 import os
-import re
 import stat
 import typing
 
-# The contract's buckets: twenty quarter-hours on epoch boundaries,
-# floor(ts / 900) * 900. A quarter-hour of epoch time is a wall-clock
-# quarter-hour in every time zone, since every UTC offset in use is a
-# multiple of fifteen minutes (+5:30 and +5:45 included), so each full local
-# hour is some bucket's left edge and the board can label the hours.
-BUCKET_S = 900
-BUCKETS = 20
+from pc import protocol
+from pc.cowork_audit import iso_to_epoch
 
+# The contract's buckets -- protocol.BURN_BUCKETS quarter-hours of
+# protocol.BURN_BUCKET_S on epoch boundaries -- are named in pc/protocol,
+# once, for this reader, the scenario that stands in for it, and the encoder.
+#
 # A file whose last write is older than this holds nothing inside the
 # window: five hours of buckets, and a quarter-hour more because a file's
 # mtime and the stamps inside it are written by different calls and an
 # archive or a backup restore can set the first to anything.
-FOLLOW_S = BUCKETS * BUCKET_S + BUCKET_S
+FOLLOW_S = (protocol.BURN_BUCKETS + 1) * protocol.BURN_BUCKET_S
 
 # How often the tree is walked, which is the per-file cost of all this. The
 # board is sent a change no sooner than 15 s after the last line
@@ -108,13 +116,36 @@ CHUNK_BYTES = 1024 * 1024
 # nothing else.
 MAX_LINE_BYTES = 16 * 1024 * 1024
 
-# How many failed opens in a row a transcript may hold the view back for. A
-# transient failure gets past this, and the sum waits for it. A file that can
-# never be opened -- one left owned by another user, say -- would otherwise
-# keep the reader "behind" for good and that desk would never see the view.
-# After this many tries the sum goes out without it; it is still tried on
-# every poll, and counted once it opens.
-OPEN_TRIES = 3
+# How many failed reads in a row a transcript may hold the view back for,
+# where a read fails if the open, a seek or a read() raises before it
+# reaches the end of what it set out to read. A transient failure gets past
+# this, and the sum waits for it. A file that can never be read -- one left
+# owned by another user, one on a disk going bad -- would otherwise keep the
+# reader "behind" for good and that desk would never see the view. After
+# this many tries the sum goes out without it; it is still tried on every
+# poll, and counted once it reads. Only a refused open was counted at first:
+# a file that opened and then failed its read() reset the count every poll,
+# and the reader returned None for the life of the daemon (review,
+# 2026-10-31).
+READ_TRIES = 3
+
+# How many bytes before a file's offset vouch for it: the reader keeps a
+# hash of the last ANCHOR_BYTES it took, reads them again ahead of the next
+# read, and starts the file over if they differ. Size and inode cannot see
+# every rewrite. Claude Code drops a tombstoned message after an API retry
+# by opening the transcript r+, truncating it and writing it out again --
+# same inode -- and once the next reply lands the file is no shorter than
+# what was read, so the read went on from the old offset, inside a line,
+# and lost that reply. On Windows, DirEntry.stat() has st_ino 0, so every
+# os.replace looked like that too (review, 2026-10-31). An append never
+# changes a byte before the offset, so it is never mistaken for a rewrite,
+# and a start over counts nothing twice: a message already counted is
+# recognised by its (message.id, requestId). 256 bytes is the tail of one
+# line, which carries its uuid and timestamp, so two different files agree
+# there only by copying each other. It costs one 256-byte read, from the
+# page cache, per file per read; see the module docstring for what that
+# came to.
+ANCHOR_BYTES = 256
 
 # How many directories down a transcript can be: <project>/<session>/
 # subagents/agent-*.jsonl is three, the deepest layout measured. Bounding it
@@ -127,11 +158,10 @@ SYNTHETIC_MODEL = "<synthetic>"
 # that carried output_tokens on the dev desk was an assistant line.
 _NEEDLE = b'"output_tokens"'
 
-# UTC with Z is what Claude Code writes. An explicit offset is honoured, and
-# anything else -- no zone at all, above all -- is refused rather than
-# guessed at, because a guess is an hour in the wrong bucket.
-_STAMP = re.compile(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?"
-                    r"(?:Z|([+-])(\d\d):?(\d\d))\Z")
+# A listing that fails with one of these is a directory that has gone --
+# deleted between its parent's listing and its own -- not one that cannot be
+# read, and it is passed over the way a deleted transcript is.
+_GONE = (FileNotFoundError, NotADirectoryError)
 
 
 def transcripts_root() -> str:
@@ -154,49 +184,53 @@ def transcripts_root() -> str:
     return os.path.join(base, "projects")
 
 
-def _epoch(value):
-    """A transcript's timestamp as epoch seconds, or None."""
-    if not isinstance(value, str):
-        return None
-    m = _STAMP.match(value)
-    if m is None:
-        return None
-    y, mo, d, h, mi, s = (int(x) for x in m.groups()[:6])
-    try:
-        at = datetime.datetime(y, mo, d, h, mi, s,
-                               tzinfo=datetime.timezone.utc).timestamp()
-    except (ValueError, OverflowError):
-        return None                     # 2026-13-01, a leap second
-    sign = m.group(7)
-    if sign:
-        offset = (int(m.group(8)) * 60 + int(m.group(9))) * 60
-        at += -offset if sign == "+" else offset
-    return at
-
-
-def _transcripts(root, depth=0):
+def _transcripts(root, refused, depth=0):
     """(path, stat) for every regular *.jsonl at most MAX_DEPTH down.
 
     os.scandir rather than os.walk: the entry knows whether it is a
     directory without another syscall. A directory link is not followed --
     one pointing back up would make the walk endless.
+
+    A directory that exists and cannot be listed, the projects directory or
+    any below it, appends to `refused`, and the caller then has nothing
+    honest to say: the sum without it is a total that leaves part of the
+    desk out and is drawn as if it were the whole. The listing's OSError
+    used to be swallowed, so an unlistable projects directory read as
+    twenty zeros, a confident "idle" (review, 2026-10-31).
     """
     try:
         entries = os.scandir(root)
+    except _GONE:
+        if depth == 0:
+            refused.append(root)        # the root itself: not found at all
+        return
     except OSError:
+        refused.append(root)
         return
     with entries:
-        for e in entries:
+        while True:
+            try:
+                e = next(entries)
+            except StopIteration:
+                return
+            except OSError:
+                refused.append(root)    # the listing broke off part-way
+                return
             try:
                 if e.is_dir(follow_symlinks=False):
                     if depth < MAX_DEPTH:
-                        yield from _transcripts(e.path, depth + 1)
+                        yield from _transcripts(e.path, refused, depth + 1)
                 elif e.name.endswith(".jsonl"):
                     st = e.stat()
                     if stat.S_ISREG(st.st_mode):
                         yield e.path, st
             except OSError:
                 continue                # gone between the listing and now
+
+
+def _tail(tail, buf, end):
+    """The last ANCHOR_BYTES of `tail` followed by buf[:end]."""
+    return (tail + bytes(buf[max(0, end - ANCHOR_BYTES):end]))[-ANCHOR_BYTES:]
 
 
 class PollCost(typing.NamedTuple):
@@ -215,14 +249,23 @@ class _File:
     line taken. `looked` is how far the last read got, which is further when
     it ended on a line still being written -- held back, to be read again
     once its newline arrives. A file is owed a read while it is longer than
-    `looked`.
+    `looked`. `anchor` is the hash of the ANCHOR_BYTES before `offset`, the
+    last ones taken, or None where nothing has been read to vouch for it (a
+    file followed from its end). A hash and not the bytes, so that nothing
+    of a transcript is held from one poll to the next.
     """
-    __slots__ = ("offset", "looked", "size", "mtime", "ino", "failures")
+    __slots__ = ("offset", "looked", "size", "mtime", "ino", "failures",
+                 "anchor")
 
     def __init__(self, st, skip):
         self.size, self.mtime, self.ino = st.st_size, st.st_mtime, st.st_ino
-        self.offset = self.looked = st.st_size if skip else 0
-        self.failures = 0           # opens refused in a row (OPEN_TRIES)
+        self.failures = 0           # reads failed in a row (READ_TRIES)
+        self.restart(st.st_size if skip else 0)
+
+    def restart(self, at):
+        """Read on from `at`, with nothing known about what precedes it."""
+        self.offset = self.looked = at
+        self.anchor = None
 
 
 class BurnReader:
@@ -245,7 +288,9 @@ class BurnReader:
         self._seen = {}
         self._buckets = {}          # bucket start, epoch s -> output tokens
         self._walked_at = None
-        self._found = False         # did the last walk find the root
+        # Did the last walk find the root and list every directory under
+        # it? Neither is something twenty zeros could honestly stand for.
+        self._listed = False
         self._kept_from = None      # the oldest bucket the last prune kept
         self.last = PollCost(False, 0, 0, 0, 0)
 
@@ -258,11 +303,12 @@ class BurnReader:
 
         q is the start of the quarter-hour `now` is in, and tokens the twenty
         buckets oldest first: bucket i covers q - (19 - i) * 900 onwards, in
-        whole output tokens. The wire's thousands are pc/protocol.burn's.
+        whole output tokens, which is what the wire carries too.
 
-        None while there is no projects directory -- twenty zeros would be a
-        confident "idle" about transcripts never found -- and while any file
-        is still owed a read, for the reason the module docstring gives.
+        None while there is no projects directory, or one this user cannot
+        list all of -- twenty zeros would be a confident "idle" about
+        transcripts never found -- and while any file is still owed a read,
+        for the reason the module docstring gives.
         """
         walked = (self._walked_at is None
                   or now - self._walked_at >= self._scan_every
@@ -271,44 +317,61 @@ class BurnReader:
                   or now < self._walked_at)
         if walked:
             self._walk(now)
-        q = int(now // BUCKET_S) * BUCKET_S
-        oldest = q - (BUCKETS - 1) * BUCKET_S
+        q = protocol.burn_quarter(now)
+        oldest = q - (protocol.BURN_BUCKETS - 1) * protocol.BURN_BUCKET_S
         self._prune(oldest)
         read = self._drain(oldest)
         behind = sum(f.size - f.looked for f in self._files.values()
-                     if f.size > f.looked and f.failures < OPEN_TRIES)
+                     if f.size > f.looked and f.failures < READ_TRIES)
         self.last = PollCost(walked, len(self._files), read, behind,
                              len(self._seen))
-        if not self._found or behind:
+        if not self._listed or behind:
             return None
-        return q, [self._buckets.get(oldest + i * BUCKET_S, 0)
-                   for i in range(BUCKETS)]
+        return q, [self._buckets.get(oldest + i * protocol.BURN_BUCKET_S, 0)
+                   for i in range(protocol.BURN_BUCKETS)]
 
     def _walk(self, now):
         self._walked_at = now
         root = self.root()
         if not os.path.isdir(root):
-            self._found = False
+            self._listed = False
             self._files.clear()
             return
-        self._found = True
         cutoff = now - FOLLOW_S
         present = set()
-        for path, st in _transcripts(root):
+        refused = []
+        for path, st in _transcripts(root, refused):
             present.add(path)
             f = self._files.get(path)
             if f is None:
                 self._files[path] = _File(st, skip=st.st_mtime < cutoff)
                 continue
-            # Shorter than what was taken, or another file under the same
-            # name (an inode, where the platform's listing gives one): read
-            # it again from the start. Nothing is counted twice, because a
-            # message already counted is recognised by its id.
-            if (st.st_size < f.offset
+            if st.st_mtime < cutoff:
+                # Gone cold: whatever it gained since the last read is older
+                # than the window, so it is followed from its end, the way a
+                # file first seen cold is. Only new files were, and a known
+                # one kept its offset: after a stretch with no polls -- the
+                # board unplugged overnight -- everything appended in the
+                # meantime was read though none of it could count, and the
+                # line was held back while it was (review, 2026-10-31).
+                f.restart(st.st_size)
+            elif (st.st_size < f.offset
                     or (st.st_ino and f.ino and st.st_ino != f.ino)):
-                f.offset = f.looked = 0
+                # Shorter than what was taken, or another file under the
+                # same name (an inode, where the platform's listing gives
+                # one): read it again from the start. Nothing is counted
+                # twice, because a message already counted is recognised by
+                # its id. A rewrite neither of these can see is caught by
+                # the anchor (ANCHOR_BYTES) when the file is next read.
+                f.restart(0)
             f.looked = min(f.looked, st.st_size)
             f.size, f.mtime, f.ino = st.st_size, st.st_mtime, st.st_ino
+        self._listed = not refused
+        if refused:
+            # What the refused directories hold was not listed, which is not
+            # the same as gone: forgotten, every file in them touched inside
+            # the window would be read again from its start once they list.
+            return
         for gone in [p for p in self._files if p not in present]:
             del self._files[gone]
 
@@ -346,20 +409,40 @@ class BurnReader:
         finished once: a line longer than the budget would then be started
         afresh on every poll and never finished, so it is read to its end
         whatever that costs (MAX_LINE_BYTES bounds the memory, not the time).
+
+        Before it reads on from an offset it reads the ANCHOR_BYTES before
+        it again, and starts from the beginning of the file if they are not
+        the ones it took. A read that raises before it has finished counts
+        towards READ_TRIES, whatever raised: the open, a seek, a read().
         """
         try:
             fh = open(path, "rb")
         except OSError:
             f.failures += 1             # tried again next poll; never said
             return 0
-        f.failures = 0
         read = 0
         pos = f.offset                  # where `pending` starts in the file
         pending = bytearray()
+        # The last ANCHOR_BYTES taken, ending at `pos`; None until the read
+        # has established them, so a read that fails first leaves the anchor
+        # it had.
+        tail = None
         skipping = False
+        failed = True
         with fh:
             try:
-                fh.seek(pos)
+                if pos:
+                    k = min(pos, ANCHOR_BYTES)
+                    fh.seek(pos - k)
+                    tail = fh.read(k)
+                    read += len(tail)
+                    if len(tail) != k or (f.anchor is not None
+                                          and hash(tail) != f.anchor):
+                        # Rewritten under the same name: start over.
+                        pos, tail = 0, b""
+                        fh.seek(0)
+                else:
+                    tail = b""
                 while True:
                     chunk = fh.read(self._chunk)
                     if not chunk:
@@ -369,8 +452,10 @@ class BurnReader:
                         nl = chunk.find(b"\n")
                         if nl < 0:
                             pos += len(chunk)
+                            tail = _tail(tail, chunk, len(chunk))
                             continue
                         pos += nl + 1
+                        tail = _tail(tail, chunk, nl + 1)
                         chunk = chunk[nl + 1:]
                         skipping = False
                     pending += chunk
@@ -378,19 +463,25 @@ class BurnReader:
                     if end < 0:
                         if len(pending) > self._max_line:
                             pos += len(pending)
+                            tail = _tail(tail, pending, len(pending))
                             pending.clear()
                             skipping = True
                         continue
                     for line in pending[:end].split(b"\n"):
                         self._take(line, oldest)
                     pos += end + 1
+                    tail = _tail(tail, pending, end + 1)
                     del pending[:end + 1]
                     if read >= budget:
                         break
+                failed = False
             except OSError:
                 pass                    # what was taken stands; the rest waits
+        f.failures = f.failures + 1 if failed else 0
         f.offset = pos
         f.looked = pos + len(pending)
+        if tail is not None:
+            f.anchor = hash(tail) if pos else None
         return read
 
     def _take(self, line, oldest):
@@ -415,10 +506,16 @@ class BurnReader:
         mid = msg.get("id")
         if not isinstance(mid, str) or not mid:
             return                      # nothing to recognise a repeat by
-        at = _epoch(obj.get("timestamp"))
+        # cowork_audit's parser, the codebase's one: UTC with Z is what
+        # Claude Code writes, an explicit offset is honoured, and no zone at
+        # all is refused rather than guessed at, since a guess is an hour in
+        # the wrong bucket. It keeps the fraction of a second this module's
+        # own parser dropped, which moves no stamp across a quarter-hour,
+        # and it refuses an offset past +23:59, which that one took.
+        at = iso_to_epoch(obj.get("timestamp"))
         if at is None:
             return
-        bucket = int(at // BUCKET_S) * BUCKET_S
+        bucket = protocol.burn_quarter(at)
         if bucket < oldest:
             return
         rid = obj.get("requestId")
