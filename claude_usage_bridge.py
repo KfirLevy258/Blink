@@ -1169,7 +1169,9 @@ def main(argv=None):
                 if _REPEATED[kind].worth_logging(m):
                     print(f"[bridge] -> {protocol.log_name(m)}",
                           file=sys.stderr)
-            elif kind not in ("ota_data", "pong"):
+            # edit_state is a once-a-minute restatement (pc/bridge.py,
+            # _restate_edit), like pong a line that says nothing new.
+            elif kind not in ("ota_data", "pong", "edit_state"):
                 print(f"[bridge] -> {protocol.log_name(m)}", file=sys.stderr)
             # encode_CHECKED. This is the only writer, and it used to call
             # plain encode() -- so protocol.encode_checked, written precisely
@@ -1282,6 +1284,7 @@ def main(argv=None):
                         theme_sync=theme_sync,
                         open_builder=theme_builder.launch,
                         builder_ended=theme_builder.ended,
+                        builder_open=theme_builder.editing,
                         edit_answers=theme_answers,
                         # What the board can show, until it says again.
                         board_caps_hint=known.get("caps"),

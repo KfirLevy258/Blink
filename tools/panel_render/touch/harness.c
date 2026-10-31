@@ -688,6 +688,15 @@ static void dispatch(const char *json)
 			ui_settings_notice_update(BLINK_FW_VERSION, summary, from,
 						  BLINK_FW_VERSION);
 		}
+	} else if (strcmp(t, "bench_host_gone") == 0) {
+		/*
+		 * Harness only: what proto_service does after 30 s of silence,
+		 * or dispatch on a bye, for "Edit on computer" -- the board's
+		 * HOST LOST, which no line can raise and a script cannot wait
+		 * 30 s for. proto.c's own call is pinned by
+		 * tests/test_proto_edit_calls.py.
+		 */
+		ui_settings_theme_edit_host_gone();
 	} else if (strcmp(t, "note") == 0) {
 		/* The target about to be pressed, for the next file name. */
 		char n[40];
@@ -696,6 +705,9 @@ static void dispatch(const char *json)
 			snprintf(note, sizeof(note), "%s", n);
 		}
 	} else if (strcmp(t, "welcome") == 0) {
+		/* As proto.c does it: the caps and "editing" decide whether
+		 * "Edit on computer" is held (edit_hold.h). */
+		ui_settings_theme_edit_welcome(json);
 		reply("{\"t\":\"pref\",\"v\":2,\"provider\":\"claude\","
 		      "\"caps\":[\"svc\",\"theme\",\"edit_done\"]}");
 		harness_theme_now("boot");
@@ -705,6 +717,9 @@ static void dispatch(const char *json)
 		struct theme_msg m;
 
 		if (theme_msg_parse(json, &m)) {
+			if (m.op != THEME_OP_CANCEL) {
+				ui_settings_theme_edit_builder_seen();
+			}
 			ui_theme_wire(&m);
 		}
 	} else if (strcmp(t, "theme_edit") == 0) {
@@ -718,6 +733,12 @@ static void dispatch(const char *json)
 		}
 		msg_get_double(json, "ok", &ok);
 		ui_settings_theme_edit_reply(ok == 1);
+	} else if (strcmp(t, "edit_state") == 0) {
+		/* As proto.c does it: absent reads as 0. */
+		double editing = 0;
+
+		msg_get_double(json, "editing", &editing);
+		ui_settings_theme_edit_state(editing == 1);
 	}
 	/* time, usage, svc, pong, ota_none: the desk below is fixed. */
 }

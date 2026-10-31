@@ -10,7 +10,10 @@
 # script's: nonzero if any expectation failed.
 #
 # Needs the Zephyr LVGL checkout, like render.sh. Set LVGL_DIR to override,
-# and BLINK_PYTHON for a Python other than python3.
+# and BLINK_PYTHON for a Python other than python3. BLINK_TOUCH_CFLAGS is
+# handed to the compiler as well, for a script that needs a constant made
+# short enough to wait out: tools/bench/edit_hold_bound.txt wants
+# -DEDIT_HOLD_MS=4000, and says so at its top.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -40,12 +43,15 @@ sed -e 's|#if 0 /\* Set this to "1" to enable content \*/|#if 1|' \
 # The touch stubs first on the path, so their zephyr/kernel.h (a simulated
 # clock) wins over render.sh's wall-clock one. CONFIG_BLINK_TOUCH_INJECT, so
 # ui_settings.c compiles the state getter the board's ui_state reply reads.
+# shellcheck disable=SC2086
 $CC -O1 -w -DLV_CONF_INCLUDE_SIMPLE=1 -DCONFIG_BLINK_TOUCH_INJECT=1 \
+	${BLINK_TOUCH_CFLAGS:-} \
 	-I"$BUILD" -I"$HERE/touch" -I"$LVGL_DIR" -I"$LVGL_DIR/src" \
 	-I"$ROOT/firmware/src" \
 	"$HERE/touch/harness.c" "$HERE/touch/stubs.c" "$HERE/touch/png.c" \
 	"$ROOT/firmware/src/touch_widgets.c" \
 	"$ROOT/firmware/src/ui_settings.c" \
+	"$ROOT/firmware/src/edit_hold.c" \
 	"$ROOT/firmware/src/settings_icons.c" \
 	"$ROOT/firmware/src/ui_theme.c" \
 	"$ROOT/firmware/src/usage_view.c" \

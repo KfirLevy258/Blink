@@ -91,6 +91,8 @@ run_one bootanim     "bootanim_dec.c"  ""
 # cfg_store.c unchanged against a RAM flash; the stubs stand in for Zephyr.
 # CFG_STUB_CAPTURE keeps its log lines for the boot-line check.
 run_one cfg_store    "cfg_store.c"     "-I$ROOT/tests/cfg_store/stub -DCFG_STUB_CAPTURE"
+# "Edit on computer" held while its builder is open: every way out of it.
+run_one edit_hold    "edit_hold.c theme.c msg_parse.c" "-lm"
 run_one fatal_policy "fatal_policy.c"  ""
 run_one fmt          "fmt.c"           ""
 run_one logo         "logo_parse.c bootanim_dec.c" ""

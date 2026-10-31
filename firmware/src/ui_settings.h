@@ -68,14 +68,31 @@ bool ui_settings_busy(void);
 /* Repaint the settings panel, if it is open, in the active theme. */
 void ui_settings_apply_theme(void);
 
-/* The daemon answered "Edit on computer": ok means a browser opened. A no-op
- * unless the row is still waiting for an answer. */
+/* The daemon answered "Edit on computer" (an explicit theme_edit ok): ok
+ * means a browser opened. From a daemon that promises done:1, ok 1 holds the
+ * slot until the builder ends, whenever it arrives (edit_hold.h); otherwise
+ * a no-op unless the row is still waiting for an answer. */
 void ui_settings_theme_edit_reply(bool ok);
 
+/* A theme preview or save line arrived: a builder is at work. Answers an ask
+ * still in flight, and while held starts the hold's upper bound again. */
+void ui_settings_theme_edit_builder_seen(void);
+
 /* The builder the daemon opened for "Edit on computer" has ended (theme
- * contract Addendum 6): whatever note the slot shows goes, and it reads its
- * name again. An ask still in flight keeps its answer. */
+ * contract Addendum 6): the hold goes, whatever note the slot shows goes,
+ * and it reads its name again. An ask still in flight keeps its answer. */
 void ui_settings_theme_edit_done(void);
+
+/* A welcome line, whole: its caps say whether this daemon sends done:1, and
+ * its "editing" field whether a builder it opened is still open. */
+void ui_settings_theme_edit_welcome(const char *json);
+
+/* An edit_state line: the daemon restating whether that builder is open
+ * (pc/protocol.edit_state). Holds, frees, or starts the bound again. */
+void ui_settings_theme_edit_state(bool editing);
+
+/* The host went away (HOST LOST) or said bye: the hold goes. */
+void ui_settings_theme_edit_host_gone(void);
 
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 /*
@@ -90,7 +107,7 @@ struct ui_settings_bench {
 	const char *modal;	/* none|notice|whatsnew|prompt|download */
 	bool busy;		/* a transition is latched or a close queued */
 	int theme_page;		/* the theme screen's page, from 0 */
-	const char *edit;	/* "Edit on computer": name|waiting|opened|run */
+	const char *edit;	/* "Edit on computer": name|waiting|opened|run|held */
 	const char *nt;		/* the notice up: none|sleep|ota|other */
 };
 void ui_settings_bench_state(struct ui_settings_bench *out);

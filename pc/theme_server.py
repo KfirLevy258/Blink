@@ -83,6 +83,12 @@ PAGE_ALIVE_S = 75
 # at the reply, after the open began). A press within 2 s of the open --
 # a replayed ask, or a deliberate one on the "Opened" note itself -- is
 # folded into it, which is benign: a window opened moments earlier.
+#
+# That 3 s comeback is now only what firmware from before the hold does.
+# A board that hears this daemon's "edit_done" cap holds the slot from ok 1
+# until the builder ends (owner, 2026-10-30) and sends no ask meanwhile, so
+# for it this limit only meets a replayed ask; it stays 2 s for the older
+# boards, which still press again after 3 s.
 OPEN_EVERY_S = 2
 # The longest a Ctrl-C in `blink theme` waits to be noticed; see
 # BuilderServer.wait_interruptibly.
@@ -997,6 +1003,30 @@ class Launcher:
                 self._told = None
                 return True
             return False
+        finally:
+            self._lock.release()
+
+    def editing(self):
+        """Is the builder a board's ask opened still open? True, False, or
+        None when that cannot be said without waiting. For the welcome
+        greet() writes ("editing", protocol.welcome), which is how a board
+        that rebooted or was unplugged meanwhile learns whether to hold its
+        "Edit on computer" slot.
+
+        Never waits, for the reason ended() does: greet() runs on the serial
+        thread, and launch() holds the lock across a browser opener measured
+        stuck for 28.7 s. A launch in progress answers None, which leaves
+        the board as it is; the ok 1 that launch is about to put on the
+        queue holds it if a builder opens (the board takes a late ok).
+
+        `_told` is the builder until its end has been told to the board, so
+        an ended builder whose done is still waiting for the board's caps
+        reads False here and the done that follows is a no-op."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            server = self._told
+            return server is not None and not server.done
         finally:
             self._lock.release()
 

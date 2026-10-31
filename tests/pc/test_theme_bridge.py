@@ -301,7 +301,7 @@ def test_welcome_carries_the_capability(tmp_path):
     b, sent, home, _ = make(tmp_path)
     hello(b)
     w = [m for m in sent if m["t"] == "welcome"][0]
-    assert w["caps"] == ["theme"]
+    assert w["caps"] == ["theme", "edit_done"]
 
 
 def test_no_theme_line_rides_the_hello_burst(tmp_path):

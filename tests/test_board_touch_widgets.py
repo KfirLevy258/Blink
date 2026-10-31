@@ -221,7 +221,7 @@ def test_the_default_script_has_a_click_by_label_pass():
                   "Dark", "Brightness", "<"):
         assert label in clicked, label
     assert any(s.cmd == "wait_widget"
-               and s.args[0] == "Opened on your computer" for s in steps)
+               and s.args[0] == "Editing on your computer" for s in steps)
     # The full eye swipe is still last.
     taps = [s.args[0] for s in steps if s.cmd == "tap"]
     assert taps[-1] == "eye.exit"

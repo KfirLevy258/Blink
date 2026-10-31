@@ -39,6 +39,7 @@
 #include "theme.h"
 #include "ui_theme.h"
 #include "settings_icons.h"
+#include "edit_hold.h"
 #include "usage_layout.h"	/* FONT_LINE_H */
 
 /*
@@ -2017,10 +2018,46 @@ BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
  * "Opened" note included, which it folds into that open (OPEN_EVERY_S in
  * pc/theme_server.py). The one guard here is the ask in flight, so a double
  * tap cannot open two tabs: up to EDIT_WAIT_MS, until the answer.
+ *
+ * And then held after all, but only while the builder is open (owner,
+ * 2026-10-30, after a board run): "the edit on computer button should
+ * re-appear ... only once the page is not active / closed". A button back
+ * after 3 s with the builder still open took a press, opened a second tab
+ * on it, and left the first saying "This tab is no longer active." -- two
+ * tabs for one edit. The lock-out of before 2026-10-29 read as broken
+ * because it outlived the builder by a fixed 10 s and had no "why" on the
+ * slot; this one ends the moment the daemon says the builder has (done:1),
+ * and says what it is waiting for. Which line holds it and which frees it
+ * is edit_hold.c's to decide, host-tested; this file draws it. A daemon
+ * that does not promise the done (no "edit_done" in its welcome caps) never
+ * holds the slot, so with one the 3 s "Opened" note below stays as it was.
  */
 #define EDIT_WAIT_MS 5000
 /* Long enough to read three words and look up at the computer. */
 #define EDIT_OPENED_MS 3000
+/*
+ * The hold lasts only while it keeps being said, as an svc incident does
+ * (SVC_HOLD_S). The daemon restates "editing" every 60 s in an edit_state
+ * line (pc/bridge.py, _restate_edit); this is two and a half of those,
+ * the svc margin, and an ok 1 or a preview line starts it again as well.
+ *
+ * It was 15 min, from the ok, with only previews to start it again
+ * (review of fp/edit-held). That was too long and too short at once: too
+ * long for a done lost on the wire, or one that overtook its own ok, which
+ * left the button gone for a quarter of an hour over no builder; too short
+ * for a page reloaded with no edit, which starts the builder's 10 min idle
+ * clock again (theme_server.py, BuilderServer.touch) with nothing reaching
+ * this board, so the slot came back with the page still open. A
+ * restatement answers both. Past this with nothing heard the slot is a
+ * button again, which costs at worst a second tab: the behaviour before
+ * the hold.
+ *
+ * Overridable at build time only for the touch harness's own run of it
+ * (tools/bench/edit_hold_bound.txt), which cannot wait 150 s per check.
+ */
+#ifndef EDIT_HOLD_MS
+#define EDIT_HOLD_MS (150 * 1000)
+#endif
 /*
  * The fallback is an instruction, "On your computer, run: blink theme", over
  * three lines, and it is only useful if it can be read and typed from: 3 s
@@ -2034,6 +2071,10 @@ BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
 static const char *const edit_name = "Edit on computer";
 static const char *const edit_waiting = "Opening on your computer";
 static const char *const edit_opened = "Opened on your computer";
+/* The held slot. The same length and shape as the two above, so it wraps
+ * to the same two lines in the slot's 124 px; drawn dim, the way a control
+ * that is waiting on something else looks everywhere else in Settings. */
+static const char *const edit_holding = "Editing on your computer";
 /* The command comes last, after a colon, so it reads as the thing to type
  * with nothing to mark it out. It was "Run `blink theme` on your computer",
  * and the panel drew the backticks as backticks (audit, 2026-10-28):
@@ -2047,7 +2088,12 @@ static const char *edit_note;	/* what the slot says; NULL is its name */
 /* The slot's one pending change: the 5 s wait for an answer while
  * edit_asking, or the return to the name after an answer was shown. */
 static lv_timer_t *edit_timer;
-static bool edit_asking;	/* an ask is in flight: the only guard */
+static bool edit_asking;	/* an ask is in flight */
+/* Held while the builder is open (edit_hold.h). Survives leaving the theme
+ * screen and the settings panel, as the builder does; a reboot clears it,
+ * and the welcome that answers the board's hello puts it back if the
+ * builder is still open. While held, edit_timer is the upper bound. */
+static struct edit_hold edit_h;
 static bool theme_closing;	/* a close is queued; see theme_close() */
 
 /* Shared by every tile and every chip; see MEMORY above. Static, so they
@@ -2104,6 +2150,8 @@ static void edit_paint(void)
 	if (theme_edit_lbl) {
 		lv_label_set_text(theme_edit_lbl,
 				  edit_note ? edit_note : edit_name);
+		lv_obj_set_style_text_color(theme_edit_lbl, edit_h.held ?
+					    COL_DIM : COL_TEXT, 0);
 	}
 }
 
@@ -2125,13 +2173,52 @@ static void edit_show(const char *note, uint32_t ms)
 	}
 	/* Out of pool: the note simply stays until the next tap, which is
 	 * never refused unless an ask is in flight -- and an ask with no
-	 * timer is not left in flight (theme_edit_cb). */
+	 * timer is not left in flight (theme_edit_cb), nor a hold with no
+	 * bound (edit_hold_show). */
+}
+
+/* edit_hold.c has just held the slot. Any ask in flight is answered by
+ * it, and the slot's one timer becomes the hold's upper bound. */
+static void edit_hold_show(void)
+{
+	edit_asking = false;
+	edit_show(edit_holding, EDIT_HOLD_MS);
+	if (edit_timer == NULL) {
+		/* Out of pool: a hold with nothing to bound it could outlive
+		 * a lost done for good. Drop it and say what the slot said
+		 * before there was one; the next tap asks as it always did. */
+		edit_hold_expired(&edit_h);
+		edit_note = edit_opened;
+		edit_paint();
+	}
+}
+
+/* edit_hold.c has just freed the slot: its name, and nothing pending. A
+ * hold is never set with an ask in flight (edit_hold_show ends it), so
+ * there is no ask here to keep. */
+static void edit_hold_free(void)
+{
+	if (edit_timer != NULL) {
+		lv_timer_delete(edit_timer);
+		edit_timer = NULL;
+	}
+	edit_note = NULL;
+	edit_paint();
 }
 
 static void edit_timer_cb(lv_timer_t *t)
 {
 	ARG_UNUSED(t);
 	edit_timer = NULL;	/* repeat count 1: LVGL frees it */
+	if (edit_h.held) {
+		/* EDIT_HOLD_MS with no restatement, ok 1 or preview: the
+		 * daemon has stopped saying the builder is open. Give the
+		 * button back. */
+		edit_hold_expired(&edit_h);
+		edit_note = NULL;
+		edit_paint();
+		return;
+	}
 	if (edit_asking) {
 		/* No answer in 5 s: an old daemon, or none. */
 		edit_asking = false;
@@ -2146,6 +2233,12 @@ static void theme_edit_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	if (!tile_was_a_tap()) {
+		return;
+	}
+	if (edit_h.held) {
+		/* The builder is open on the computer, and a press here would
+		 * open a second tab on it and retire the first (owner,
+		 * 2026-10-30). The slot already says why. */
 		return;
 	}
 	if (edit_asking) {
@@ -2167,6 +2260,22 @@ static void theme_edit_cb(lv_event_t *e)
 
 void ui_settings_theme_edit_reply(bool ok)
 {
+	if (edit_hold_reply(&edit_h, ok)) {
+		/* Held, from a daemon that will say when the builder ends --
+		 * late answers included: one whose browser took 28 s opened
+		 * the builder just the same. */
+		edit_hold_show();
+		return;
+	}
+	if (edit_h.held) {
+		/* Already held. An ok 1 is the builder still open, so the
+		 * bound starts again; an ok 0 is a browser that would not open
+		 * on a builder that is still running, and the hold stands. */
+		if (ok && edit_timer != NULL) {
+			lv_timer_reset(edit_timer);
+		}
+		return;
+	}
 	if (!edit_asking) {
 		return;		/* nobody asked, or the 5 s already ran out */
 	}
@@ -2175,26 +2284,85 @@ void ui_settings_theme_edit_reply(bool ok)
 		  ok ? EDIT_OPENED_MS : EDIT_RUN_MS);
 }
 
+void ui_settings_theme_edit_builder_seen(void)
+{
+	/*
+	 * A preview or save line: a builder is at work. While held it is the
+	 * evidence that the one held for is still open, so the bound starts
+	 * again, and a builder in use is never given up on. It does not hold
+	 * the slot by itself: it may come from one `blink theme` opened,
+	 * whose end the daemon never reports to the board. An ask in flight
+	 * takes it as its answer, as it always has, and the daemon's own ok,
+	 * a moment behind it, holds the slot.
+	 */
+	if (edit_h.held) {
+		if (edit_timer != NULL) {
+			lv_timer_reset(edit_timer);
+		}
+		return;
+	}
+	if (!edit_asking) {
+		return;
+	}
+	edit_asking = false;
+	edit_show(edit_opened, EDIT_OPENED_MS);
+}
+
 void ui_settings_theme_edit_done(void)
 {
 	/*
-	 * The builder the daemon opened has ended (contract Addendum 6). With
-	 * the slot coming back on its own after 3 s this mostly finds it
-	 * reading its name already; it still matters for a note on screen
-	 * when the builder ends -- saved within 3 s, or the fallback's 8 s --
-	 * which goes now. An ask still in flight keeps its answer: it was made
-	 * after the builder that ended was opened, so the daemon is opening a
-	 * new one for it.
+	 * The builder the daemon opened has ended (contract Addendum 6): the
+	 * hold goes and the slot reads its name. Without a hold it still cuts
+	 * short a note on screen when the builder ends -- saved within 3 s,
+	 * or the fallback's 8 s. An ask still in flight keeps its answer: it
+	 * was made after the builder that ended was opened, so the daemon is
+	 * opening a new one for it (edit_hold_done).
 	 */
 	if (edit_asking) {
 		return;
 	}
-	if (edit_timer != NULL) {
-		lv_timer_delete(edit_timer);
-		edit_timer = NULL;
+	edit_hold_done(&edit_h);
+	edit_hold_free();
+}
+
+/* A welcome or edit_state has just run edit_hold.c: `changed` is what it
+ * returned. Draw what it decided, and while held start the bound again,
+ * since the daemon has just said the builder is open. */
+static void edit_hold_said(bool was, bool changed)
+{
+	if (changed && edit_h.held) {
+		edit_hold_show();
+	} else if (changed && was) {
+		edit_hold_free();
+	} else if (edit_h.held && edit_timer != NULL) {
+		lv_timer_reset(edit_timer);
 	}
-	edit_note = NULL;
-	edit_paint();
+}
+
+void ui_settings_theme_edit_welcome(const char *json)
+{
+	bool was = edit_h.held;
+
+	edit_hold_said(was, edit_hold_welcome(&edit_h, json));
+}
+
+void ui_settings_theme_edit_state(bool editing)
+{
+	bool was = edit_h.held;
+
+	edit_hold_said(was, edit_hold_state(&edit_h, editing));
+}
+
+void ui_settings_theme_edit_host_gone(void)
+{
+	/* Nothing can open, end or report a builder for this board while
+	 * its host is away; the first edit_state after the host's return
+	 * (sent at once when the daemon hears the board again) or its next
+	 * welcome says whether one is still open. Held meanwhile, the slot
+	 * would say "Editing" over a daemon that may never come back. */
+	if (edit_hold_host_gone(&edit_h)) {
+		edit_hold_free();
+	}
 }
 
 /*
@@ -2429,14 +2597,17 @@ static void show_theme(bool fresh)
 	if (fresh) {
 		/* A fresh visit, not a repaint: start from the active theme's
 		 * page and from the slot's own name -- unless an ask is still
-		 * in flight, whose answer is worth seeing. */
+		 * in flight, whose answer is worth seeing, or the slot is held:
+		 * the builder is as open as it was before the visit, and
+		 * leaving the page and coming back must not be a way round the
+		 * hold (it was the way round the 10 s lock-out). */
 		for (int i = 0; i < n; i++) {
 			if (ids[i] == theme_active_id()) {
 				theme_page = i / theme_per_page();
 				break;
 			}
 		}
-		if (!edit_asking) {
+		if (!edit_asking && !edit_h.held) {
 			if (edit_timer != NULL) {
 				lv_timer_delete(edit_timer);
 				edit_timer = NULL;
@@ -3749,7 +3920,8 @@ void ui_settings_bench_state(struct ui_settings_bench *out)
 	out->busy = want_open || want_close || want_page != 0 || closing ||
 		    sub_closing || theme_closing;
 	out->theme_page = theme_page;
-	out->edit = edit_note == edit_waiting ? "waiting" :
+	out->edit = edit_note == edit_holding ? "held" :
+		    edit_note == edit_waiting ? "waiting" :
 		    edit_note == edit_opened ? "opened" :
 		    edit_note == edit_run ? "run" : "name";
 }
