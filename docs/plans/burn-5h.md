@@ -46,8 +46,11 @@ hour falls on a bucket's left edge, and the board can label hours.
 - `q`: epoch seconds of the **newest** bucket's start (the quarter-hour the
   daemon's clock is in now). Bucket `i` (0 = oldest) starts at
   `q - (19 - i) * 900`.
-- `b`: exactly 20 non-negative integers, oldest first: output tokens in
-  **thousands**, rounded up, so any activity at all shows as at least 1.
+- `b`: exactly 20 non-negative integers, oldest first: output **tokens**,
+  exact, each capped at 99,999,999. They were thousands rounded up until the
+  2026-10-31 review showed the rounding deciding the arrow at light use:
+  2001 then 1999 tokens per quarter read "easing", and 1000 then 4 read
+  "steady". The widest line is about 240 bytes.
 - `p`: the provider the page belongs to. Always `"claude"` for now; it leaves
   room for Codex.
 - Written through `protocol.encode_checked()`. It is its own line, not part of
@@ -92,11 +95,14 @@ every 15 seconds. When the flag clears it simply stops sending. There is no
   - caption `BURN 5h` where `SESSION 5h` sits (y = `GAUGE_NAME_Y`, 168), and
     under it, where the countdown sits (`GAUGE_CD_Y`, 186):
     `<last hour>/h · <word>`, for example `1.1M/h · rising`, in `COL_DIM`.
-- Direction: the last hour (newest 4 buckets) against the hour before (the
-  4 before that). Both zero is `idle`. Previous zero with current above zero is
-  `rising`. Otherwise more than +10% is `rising`, less than -10% is `easing`,
-  and anything between is `steady`. The board computes it from `b`, so it costs
-  no wire bytes.
+- Direction and the `/h` rate use **complete quarter-hours only**. The newest
+  bucket (19) is the one the clock is in, still filling, and is drawn but not
+  compared. The last hour is buckets 15-18 and the hour before is 11-14. Using
+  bucket 19 as if complete made a steady workload read "easing" for the first
+  9 minutes of every quarter-hour (review, 2026-10-31). Both zero is `idle`.
+  Previous zero with the last hour above zero is `rising`. Otherwise more than
+  +10% is `rising`, less than -10% is `easing`, and anything between is
+  `steady`. The board computes it from `b`, so it costs no wire bytes.
 - Every object is created once and hidden or shown. Nothing is allocated
   per frame. Measure flash and RAM before and after (the LVGL pool is
   32 KiB).
