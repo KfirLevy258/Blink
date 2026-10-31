@@ -978,3 +978,68 @@ def test_another_program_on_the_recorded_port_is_not_a_builder(home):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# ------------------------------------- what a link that no longer works says
+#
+# Review of 1.4.0 (builder), N4. new_link() replaces any unspent link, and
+# the board gives its button back 3 s after ok 1. A browser that takes longer
+# than that to start (a cold Edge on a busy laptop) is still loading the
+# first link when the owner presses again, so tab 1 got the plain "Not
+# allowed. Run blink theme again." -- an instruction to start a second
+# builder (see N1) -- while tab 2 worked.
+
+class _Opened:
+    """A stub opener that is always truthy, whatever it has collected."""
+
+    def __init__(self):
+        self.urls = []
+
+    def __call__(self, url):
+        self.urls.append(url)
+        return True
+
+
+def _get(s, url):
+    u = urllib.parse.urlsplit(url)
+    return request(s, "GET", u.path + "?" + u.query)
+
+
+def test_a_link_replaced_by_a_second_press_says_so(tmp_path):
+    clock = Clock()
+    opened = _Opened()
+    lau = theme_server.Launcher(str(tmp_path / ".blink"), opener=opened,
+                                now=clock)
+    try:
+        assert lau.launch()
+        clock.t += 3.5                     # the board's button is back
+        assert lau.launch()
+        assert len(opened.urls) == 2
+        s = lau._server
+        status, _, body = _get(s, opened.urls[0])    # the slow browser
+        assert status == 403
+        assert body == (b"This link was replaced by a newer one. Use the"
+                        b" newest builder tab.\n")
+        assert _get(s, opened.urls[1])[0] == 303
+    finally:
+        lau.close()
+
+
+def test_a_link_already_opened_says_so(server):
+    url = server.new_link()
+    assert _get(server, url)[0] == 303
+    status, _, body = _get(server, url)
+    assert status == 403
+    assert body == (b"This link was opened already. Use the tab it opened.\n")
+
+
+def test_a_link_nobody_made_says_only_that_it_is_not_allowed(server):
+    status, _, body = request(server, "GET", "/open?k=made-up")
+    assert status == 403
+    assert body == b"Not allowed. Run blink theme again.\n"
+
+
+def test_the_record_of_old_links_stays_small(server):
+    for _ in range(100):
+        server.new_link()
+    assert len(server._gone) <= 16

@@ -317,6 +317,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             k = urllib.parse.parse_qs(url.query).get("k", [""])[0]
             session = self.builder.redeem(k)
             if session is None:
+                fate = self.builder.link_fate(k)
+                if fate == "replaced":
+                    return self._send(403, b"This link was replaced by a"
+                                      b" newer one. Use the newest builder"
+                                      b" tab.\n")
+                if fate == "used":
+                    return self._send(403, b"This link was opened already."
+                                      b" Use the tab it opened.\n")
                 return self._refuse()
             return self._send(303, headers=(
                 ("Location", "/"),
@@ -504,6 +512,10 @@ class BuilderServer:
         self._tick_s = tick_s
         self._lock = threading.Lock()
         self._links = {}            # unspent link -> when it was made
+        # Links that no longer work and why, "replaced" or "used", newest
+        # last and kept few: only so the page the browser lands on can say
+        # which (see link_fate).
+        self._gone = {}
         self._sessions = set()
         self._last = now()
         self._seen = None
@@ -565,8 +577,28 @@ class BuilderServer:
         always refused; now so is a superseded or stale one."""
         k = secrets.token_urlsafe(32)
         with self._lock:
+            for old in self._links:
+                self._retire_link(old, "replaced")
             self._links = {k: self._now()}
         return f"http://127.0.0.1:{self.port}/open?k={k}"
+
+    def _retire_link(self, k, why):
+        """Called with the lock held."""
+        self._gone[k] = why
+        while len(self._gone) > 16:
+            del self._gone[next(iter(self._gone))]
+
+    def link_fate(self, k):
+        """"replaced" or "used" for a link that once worked, else None. A
+        slow browser still loading the first link when the owner pressed
+        Edit on computer again was told "Not allowed. Run blink theme
+        again.", which reads as an instruction to start a second builder,
+        while the newer tab worked (review of 1.4.0, builder N4)."""
+        with self._lock:
+            for gone, why in self._gone.items():
+                if _same(gone, k):
+                    return why
+        return None
 
     def redeem(self, k):
         with self._lock:
@@ -576,6 +608,7 @@ class BuilderServer:
                     del self._links[good]
                     if now - made >= LINK_LIFE_S:
                         return None
+                    self._retire_link(good, "used")
                     s = secrets.token_urlsafe(32)
                     self._sessions.add(s)
                     self._last = self._seen = now
