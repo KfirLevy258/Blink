@@ -2176,6 +2176,43 @@ def test_status_says_when_the_account_has_no_five_hour_window(
     assert open(session_verdict.verdict_path(), "rb").read() == before
 
 
+def test_status_on_a_marked_desk_with_no_reading_yet_still_prints_the_row(
+        tmp_path, capsys):
+    """A Claude Code-only Ultra desk, its verdict saved, in a session that
+    has not had its first reply: the status line carries no rate_limits.
+    The daemon remembers its last reading and is marked and sending the
+    burn line; a fresh `blink status` has nothing to merge, and the row
+    went missing with the page (/code-review max, 2026-11-01). With no
+    reading at all there is no figure the row could contradict, so it
+    says what the saved verdict says, for `--wire` too."""
+    from pc import session_verdict
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    with open(inside(tmp_path, statusline_source_path()), "w",
+              encoding="utf-8") as f:
+        f.write(json.dumps({"session_id": "s1",
+                            "cost": {"total_cost_usd": 0.0}}))
+    _verdict(tmp_path, False, time.time() - 60)
+    before = open(session_verdict.verdict_path(), "rb").read()
+    capsys.readouterr()
+
+    row = ("Session     no five-hour window (a Claude Code reply came back"
+           " without one)")
+    assert cli.main(["status"]) == 0
+    assert row in capsys.readouterr().out
+    assert cli.main(["status", "--wire"]) == 0
+    assert capsys.readouterr().out.count(row) == 1
+    assert open(session_verdict.verdict_path(), "rb").read() == before
+
+    # A window on disk, or no verdict at all, and the row stays away.
+    _verdict(tmp_path, True, time.time() - 30, kind="statusline_window")
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+    os.remove(session_verdict.verdict_path())
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+
+
 def statusline_source_path():
     from pc import statusline_source
     return statusline_source.payload_path()
