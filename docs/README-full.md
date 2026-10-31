@@ -569,7 +569,7 @@ status.openai.com. An incident appears on the page it belongs to, so a Codex
 outage never sits over live Claude numbers. Only confirmed incidents are
 shown - one has to be reported on two checks in a row, at least five
 minutes apart -
-and a failed check shows nothing rather than a guess. It is off until you
+and a check that fails changes nothing: the last good answer stands for up to half an hour, then the panel goes back to showing nothing, and a page that cannot be read never shows an incident. It is off until you
 turn it on; see "Security & privacy" for what it asks and of whom.
 
 ## Third-party notices
