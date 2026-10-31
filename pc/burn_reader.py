@@ -50,6 +50,17 @@ loop, on desks with thousands of transcripts, so every part of it is bounded:
     the window (5744 on that desk, a heavy day of parallel agents), and
     twenty buckets.
 
+MEASURED 2026-10-31 on a generated tree of that shape -- 4401 transcripts in
+the same 107 directories, 150 of them touched, 228 MB -- on the dev Mac at a
+load average near 5: a cold start took 7 polls and 296 ms of work in all, the
+slowest poll 54 ms. A walk that found nothing new took 10.7 ms, and one after
+three sessions had each appended a reply took 11.1 ms and read exactly the
+16 245 bytes they added. A poll between walks took 0.1 ms. After the cold
+start it held 5.8 MB, 11 702 messages remembered, with a peak of 9.4 MB.
+With every subagent file given a directory of its own (1698 directories),
+the walk rose to about 32 ms, and os.walk with a stat per file took the
+same: the cost is the listing, not the code around it.
+
 The cadence of the LINE -- on change, every 60 s, never within 15 s of the
 last -- is pc/bridge's; this only answers "what are the twenty numbers now".
 """
@@ -82,8 +93,9 @@ SCAN_EVERY_S = 15.0
 
 # The most a single poll reads, finishing whatever line it is in. Measured
 # on the dev desk: reading 227 MB and testing every line for "output_tokens"
-# took 205 ms, so this is about 30 ms of the serial loop, and the cold start
-# above clears in eight polls -- sixteen seconds of fast ticks.
+# took 205 ms, so this is about 30 ms of the serial loop. The generated tree
+# in the module docstring cleared its cold start in seven polls -- twelve
+# seconds of fast ticks -- the slowest 54 ms.
 READ_BUDGET_BYTES = 32 * 1024 * 1024
 
 # One read() call. Lines are cut out of each chunk, so memory follows this
