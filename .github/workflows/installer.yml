@@ -61,6 +61,12 @@ jobs:
           - {os: windows-latest, python: '3.13'}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history and tags. test_the_frozen_copies_are_the_released_
+          # templates reads v0.7.0..v1.3.4 with `git show`, and a shallow
+          # checkout has none of them: the four tests skipped on every run,
+          # so nothing in CI pinned the frozen service templates.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -79,6 +85,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0              # tags: see the unit job above
       - name: which python does macOS ship
         run: /usr/bin/python3 --version
       - name: run the suite on it

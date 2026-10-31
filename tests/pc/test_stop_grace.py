@@ -228,7 +228,16 @@ def _tag_source(tag):
     r = subprocess.run(["git", "-C", str(ROOT), "show", f"{tag}:pc/cli.py"],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        pytest.skip(f"{tag} is not in this clone (shallow checkout)")
+        # Skipped on a developer's shallow clone, FAILED where CI is set. These
+        # four are the only check that the frozen v1.3.4 templates are what
+        # releases really wrote, and they skipped on every CI run because
+        # actions/checkout is shallow and fetches no tags (found by the
+        # review of PR #4, 2026-10-31): a check that cannot run must not look
+        # like one that passed. installer.yml's test jobs fetch full history.
+        msg = f"{tag} is not in this clone (shallow checkout)"
+        if os.environ.get("CI"):
+            pytest.fail(msg + "; fetch-depth: 0 on the checkout", pytrace=False)
+        pytest.skip(msg)
     return r.stdout
 
 
@@ -462,3 +471,15 @@ def test_burn_sh_stamps_the_edition_through_encode_checked():
     src = (ROOT / "tools" / "burn.sh").read_text("utf-8")
     assert "encode_checked(protocol.edition(" in src
     assert 'json.dumps({"t": "edition"' not in src
+
+
+def test_a_missing_tag_fails_in_ci_and_skips_elsewhere(monkeypatch):
+    """The released-template pin must not skip quietly on CI."""
+    gone = subprocess.CompletedProcess([], 128, "", "bad object")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: gone)
+    monkeypatch.setenv("CI", "true")
+    with pytest.raises(pytest.fail.Exception, match="fetch-depth"):
+        _tag_source("v1.3.4")
+    monkeypatch.delenv("CI")
+    with pytest.raises(pytest.skip.Exception):
+        _tag_source("v1.3.4")
