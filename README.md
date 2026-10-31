@@ -83,7 +83,7 @@ this.
     <td width="25%"><img src="docs/img/screen-claude.png" alt="The Claude page: six coloured marks in the top-left corner, one per live session, the clock under the BLINK wordmark, and the session and weekly dials."></td>
     <td width="25%"><img src="docs/img/screen-codex.png" alt="The Codex page, with its own session and weekly dials."></td>
     <td width="25%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop alone: the session dial shows a fill rate where a countdown would otherwise be."></td>
-    <td width="25%"><img src="docs/img/screen-burn.png" alt="An account with no five-hour window: the left half shows 2.9M tokens in five hours with an up arrow, a bar per quarter-hour labelled 10 to 14, and 1.1M/h rising; the weekly dial stays on the right."></td>
+    <td width="25%"><img src="docs/img/screen-burn.png" alt="An account with no five-hour window: the left half shows 2.9M tokens in five hours with an up arrow, a bar per quarter-hour labelled 10 to 14, and 940k/h rising; the weekly dial stays on the right."></td>
   </tr>
   <tr>
     <td align="center"><sub><b>Claude</b></sub>&nbsp;</td>
