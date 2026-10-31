@@ -1458,3 +1458,55 @@ def test_an_ultra_desk_after_a_restart_is_sent_its_burn_line_at_once(
 
     assert len(burns) == 1 and burns[0]["p"] == "claude"
     assert bus.claude_page().no_session_window is True
+
+
+# --- the review of 2026-11-01 ------------------------------------------------
+#
+# /code-review max of feat/ultra-burn. Each test names the finding it pins.
+
+
+def test_finding_7_a_failed_save_is_retried_and_leaves_no_temp(
+        tmp_path, monkeypatch):
+    """The verdict was written only on the poll where it flipped, through a
+    fixed temp name, with no retry: one failed os.replace (WinError 32
+    while `blink status` held the file) left the disk stale for the
+    daemon's life and a .tmp beside it."""
+    path = inside(tmp_path, session_verdict.verdict_path())
+    real, calls = os.replace, []
+
+    def refuse_once(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            raise PermissionError(13, "held by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(os, "replace", refuse_once)
+    v = session_verdict.SessionVerdict()
+    assert v.observe([framed(no(NOW - 60))], NOW) is True
+    assert not os.path.exists(path)
+    assert os.listdir(os.path.dirname(path)) == []
+
+    v.observe([], NOW + 2 + session_verdict.SAVE_RETRY_S)
+    assert session_verdict.load(path)[0] is False
+    assert os.listdir(os.path.dirname(path)) == ["session-window.json"]
+
+
+@pytest.mark.parametrize("text", [
+    '{"state": "no_window", "evidence": "statusline_reply", "at": 1%s}'
+    % ("0" * 400),
+    "[" * 200000 + "]" * 200000],
+    ids=["an int too big for a float", "nested too deep"])
+def test_finding_12_a_verdict_file_that_cannot_be_numbered_is_none(
+        tmp_path, text):
+    path = inside(tmp_path, session_verdict.verdict_path())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    assert session_verdict.load(path) is None
+
+
+def test_every_described_kind_is_a_kind_evidence_can_carry():
+    """KINDS restated DESCRIBE's keys by hand; a kind left out of one would
+    have its evidence, and a verdict saved on it, silently dropped."""
+    assert session_verdict.KINDS == tuple(session_verdict.DESCRIBE)

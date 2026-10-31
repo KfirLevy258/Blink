@@ -57,8 +57,6 @@ KIND_STATUSLINE_REPLY = "statusline_reply"
 KIND_DESKTOP_FH = "desktop_fh"
 KIND_DESKTOP_NO_FH = "desktop_no_fh"
 KIND_LOCAL_STORAGE = "local_storage"
-KINDS = (KIND_STATUSLINE_WINDOW, KIND_STATUSLINE_REPLY, KIND_DESKTOP_FH,
-         KIND_DESKTOP_NO_FH, KIND_LOCAL_STORAGE)
 
 STATE_WINDOW = "window"
 STATE_NO_WINDOW = "no_window"
@@ -72,6 +70,17 @@ DESCRIBE = {
     KIND_DESKTOP_NO_FH: "Claude Desktop reports weekly usage only",
     KIND_LOCAL_STORAGE: "Claude Desktop holds an open five-hour window",
 }
+# Every kind evidence can carry. Taken from DESCRIBE rather than restated
+# beside it: a kind written into one list and not the other had its evidence,
+# and a verdict saved on it, dropped as invalid without a word (the
+# /code-review max of 2026-11-01). A tuple, not a frozenset: _valid asks
+# `ev[1] in KINDS` of whatever a frame carries, and a frozenset raises
+# TypeError on an unhashable value where a tuple just says no.
+KINDS = tuple(DESCRIBE)
+
+# How long after a failed write the verdict is written again. See
+# SessionVerdict.observe.
+SAVE_RETRY_S = 60
 
 
 def verdict_path() -> str:
@@ -97,7 +106,10 @@ def load(path):
     try:
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: json's decoder raises it on an array nested a few
+        # thousand deep, and `blink status` died on one with a traceback
+        # (the /code-review max of 2026-11-01, finding 12).
         return None
     if not isinstance(doc, dict):
         return None
@@ -106,25 +118,35 @@ def load(path):
         return None
     if isinstance(at, bool) or not isinstance(at, (int, float)):
         return None
-    ev = (state == STATE_WINDOW, kind, float(at))
+    try:
+        at = float(at)
+    except OverflowError:       # an int of 309 digits or more
+        return None
+    ev = (state == STATE_WINDOW, kind, at)
     return ev if _valid(ev) else None
 
 
-def save(path, ev) -> None:
-    """Persist a verdict: temp file and os.replace, so a reader never sees
-    half of one. A write that fails costs the next restart its memory and
-    nothing else, so it is not worth an exception."""
+def save(path, ev) -> bool:
+    """Persist a verdict; True when it is on disk.
+
+    Through pc/theme's _write_json: a unique temp name, os.replace retried
+    on Windows' WinError 5 and 32, and the temp removed when the write
+    fails. This used a fixed `.tmp` name and one os.replace, so a single
+    refusal -- `blink status` holding the file on Windows -- left the temp
+    beside it, and the caller never asked again (the /code-review max of
+    2026-11-01, finding 7). A failure is not worth an exception: it costs
+    the next restart its memory and nothing else, and observe() tries
+    again.
+    """
     has_window, kind, at = ev
+    from pc import theme        # here: the daemon's tick does not need it
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"state": STATE_WINDOW if has_window
-                       else STATE_NO_WINDOW,
-                       "evidence": kind, "at": at}, f)
-        os.replace(tmp, path)
+        theme._write_json(path, {"state": STATE_WINDOW if has_window
+                                 else STATE_NO_WINDOW,
+                                 "evidence": kind, "at": at})
     except OSError:
-        return
+        return False
+    return True
 
 
 def newest(frames):
@@ -151,6 +173,10 @@ class SessionVerdict:
         self._persist = persist
         self._current = None
         self._loaded = False
+        # The state on disk as this process last knew it (True, False, or
+        # None for no file), and when a failed write may next be retried.
+        self._on_disk = None
+        self._retry_at = 0.0
 
     def path(self):
         return self._path if self._path is not None else verdict_path()
@@ -160,6 +186,8 @@ class SessionVerdict:
         if not self._loaded:
             self._loaded = True
             self._current = load(self.path())
+            self._on_disk = (None if self._current is None
+                             else self._current[0])
         return self._current
 
     def observe(self, frames, now_epoch):
@@ -175,10 +203,17 @@ class SessionVerdict:
         ev = newest(frames)
         if ev is not None and (cur is None
                                or (ev[2], ev[0]) > (cur[2], cur[0])):
-            changed = cur is None or ev[0] != cur[0]
             self._current = cur = ev
-            if changed and self._persist:
-                save(self.path(), ev)
+        # Written when the verdict differs from what is on disk, which on a
+        # desk is once and then never. Not only on the poll where it flips:
+        # a write that failed then is tried again, at most once a
+        # SAVE_RETRY_S, until it lands.
+        if (self._persist and cur is not None and cur[0] != self._on_disk
+                and now_epoch >= self._retry_at):
+            if save(self.path(), cur):
+                self._on_disk = cur[0]
+            else:
+                self._retry_at = now_epoch + SAVE_RETRY_S
         return cur is not None and not cur[0]
 
     def mark(self, frames, now_epoch):
