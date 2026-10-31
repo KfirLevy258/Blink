@@ -78,9 +78,18 @@ def test_host_lost_frees_the_hold():
 
 
 def test_no_other_call_into_the_hold():
-    # A new caller is a new way in or out, and belongs in edit_hold.h's
-    # list and in a test here before it ships.
-    assert _calls(SRC) == {
-        "ui_settings_theme_edit_welcome", "ui_settings_theme_edit_builder_seen",
-        "ui_settings_theme_edit_done", "ui_settings_theme_edit_reply",
-        "ui_settings_theme_edit_state", "ui_settings_theme_edit_host_gone"}
+    """A new caller is a new way in or out, and belongs in edit_hold.h's
+    list and in a test here before it ships. Counted, not just named: a
+    second review added a host_gone call at the top of proto_service, and
+    one on every dispatched line, and both passed the checks above, each
+    freeing the hold on every pass -- the owner's bug again."""
+    sites = re.findall(r"\b(ui_settings_theme_edit_\w+)\(", SRC)
+    assert sorted(sites) == sorted([
+        "ui_settings_theme_edit_welcome",
+        "ui_settings_theme_edit_builder_seen",
+        "ui_settings_theme_edit_done",
+        "ui_settings_theme_edit_reply",
+        "ui_settings_theme_edit_state",
+        "ui_settings_theme_edit_host_gone",     # bye
+        "ui_settings_theme_edit_host_gone",     # HOST LOST
+    ])

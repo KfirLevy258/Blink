@@ -37,8 +37,19 @@ def inline(fn):
     fn()
 
 
+class Wall:
+    """The Bridge's wall clock, (unix seconds, utc offset): moved apart from
+    the monotonic Clock to model a sleep, in which only this one runs."""
+
+    def __init__(self):
+        self.t = 1752444000
+
+    def __call__(self):
+        return self.t, 0
+
+
 def wired(tmp_path, launcher, builder_open="launcher", clock=None,
-          run_async=inline, open_builder=None):
+          run_async=inline, open_builder=None, wall=None):
     home = str(tmp_path / ".blink")
     sent = []
 
@@ -51,7 +62,7 @@ def wired(tmp_path, launcher, builder_open="launcher", clock=None,
     if builder_open == "launcher":
         builder_open = launcher.editing
     b = Bridge(write_msg=write, fetch_usage=lambda: None,
-               now=clock or Clock(), wall=lambda: (1752444000, 0),
+               now=clock or Clock(), wall=wall or (lambda: (1752444000, 0)),
                theme_sync=theme.ThemeSync(home),
                open_builder=open_builder or launcher.launch,
                builder_ended=launcher.ended,
@@ -290,28 +301,126 @@ def test_the_state_is_restated_while_the_board_listens(tmp_path):
                     {"t": "edit_state", "v": protocol.VERSION, "editing": 0}]
 
 
-def test_the_owners_lunch_holds_again_when_the_same_connection_wakes(
-        tmp_path):
-    """Review SHOULD-1, the reviewer's demo turned round: the Mac sleeps
-    with the builder open, the board declares HOST LOST after 30 s and lets
-    its hold go, and the same connection wakes. No welcome comes, but the
-    first ping heard after the silence has the state said at once."""
-    clock = Clock()
+def _held_and_quiet(tmp_path, clock, wall):
+    """A board held over an open builder, its state just said, with a few
+    pings since: the start of every silence below."""
     lau, _ = launcher_with(str(tmp_path), lambda u: True)
-    b, sent = wired(tmp_path, lau, clock=clock)
+    b, sent = wired(tmp_path, lau, clock=clock, wall=wall)
     alive(b, clock)
     b.on_message({"t": "theme_edit", "v": 2})
+    clock.t += protocol.EDIT_STATE_EVERY_S
+    wall.t += protocol.EDIT_STATE_EVERY_S
+    b.on_message({"t": "ping", "v": 2})
     b.pump()
+    assert states(sent)[-1] == 1
+    for _ in range(2):                       # the 10 s pings, awake
+        clock.t += 10
+        wall.t += 10
+        b.on_message({"t": "ping", "v": 2})
+        b.pump()
+    return b, sent
+
+
+def test_the_owners_lunch_holds_again_when_the_mac_wakes(tmp_path):
+    """Review SHOULD-1, and round 2's correction of it: the Mac sleeps with
+    the builder open and the board powered, the board declares HOST LOST
+    after 30 s and lets its hold go, and the same connection wakes. A sleep
+    is modelled as a Mac has one: time.monotonic, the Bridge's own clock,
+    does not move while it sleeps (mach_absolute_time; 93.7 h of it against
+    193.6 h since boot on the desk Mac), and only wall time does. Round 1's
+    test moved the monotonic clock instead, which is a stall, and passed
+    while the real wake said nothing for up to a minute."""
+    clock, wall = Clock(), Wall()
+    b, sent = _held_and_quiet(tmp_path, clock, wall)
     n = len(sent)
-    clock.t += 45                            # asleep; the board is HOST LOST
-    assert not b.board_alive()
-    b.pump()
-    assert sent[n:] == []                    # nothing into a silent port
-    clock.t += 1
+    wall.t += 3600                           # an hour asleep
+    clock.t += 2                             # and two seconds awake after
+    assert b.board_alive()                   # the monotonic gap is nothing
     b.on_message({"t": "ping", "v": 2})      # awake, same connection
     b.pump()
     assert [m for m in sent[n:] if m["t"] == "edit_state"] == [
         {"t": "edit_state", "v": protocol.VERSION, "editing": 1}]
+
+
+def test_a_stall_while_awake_is_a_silence_too(tmp_path):
+    # The serial loop stalled past the board's 30 s with the computer
+    # awake: both clocks move, and the monotonic one alone would see it.
+    clock, wall = Clock(), Wall()
+    b, sent = _held_and_quiet(tmp_path, clock, wall)
+    n = len(sent)
+    clock.t += 45
+    assert not b.board_alive()
+    b.pump()
+    assert sent[n:] == []                    # nothing into a silent port
+    b.on_message({"t": "ping", "v": 2})
+    b.pump()
+    assert states(sent[n:]) == [1]
+
+
+def test_a_wall_clock_stepped_back_costs_one_line_and_misses_none(tmp_path):
+    clock, wall = Clock(), Wall()
+    b, sent = _held_and_quiet(tmp_path, clock, wall)
+    n = len(sent)
+    wall.t -= 3600                           # a time zone or NTP step
+    clock.t += 10
+    b.on_message({"t": "ping", "v": 2})
+    b.pump()
+    assert states(sent[n:]) == [1]
+    clock.t += 10                            # and then nothing extra
+    wall.t += 10
+    b.on_message({"t": "ping", "v": 2})
+    b.pump()
+    assert states(sent[n:]) == [1]
+
+
+def test_ordinary_pings_say_nothing_between_minutes(tmp_path):
+    clock, wall = Clock(), Wall()
+    b, sent = _held_and_quiet(tmp_path, clock, wall)
+    # Once with the ok (theme_edit pumps), once at the minute, and nothing
+    # for the two 10 s pings between.
+    assert states(sent) == [1, 1]
+
+
+def test_nothing_is_said_to_a_board_that_has_gone_quiet(tmp_path):
+    # The minute is up, but no ping for 61 s: the board is not listening,
+    # and a line into a dead port is no restatement.
+    clock, wall = Clock(), Wall()
+    b, sent = _held_and_quiet(tmp_path, clock, wall)
+    n = len(sent)
+    clock.t += protocol.EDIT_STATE_EVERY_S + 1
+    wall.t += protocol.EDIT_STATE_EVERY_S + 1
+    b.pump()
+    assert sent[n:] == []
+
+
+def test_nothing_is_said_behind_a_theme_save(tmp_path):
+    """fp/daemon-fixes holds every write for THEME_SAVE_HOLD_S after a theme
+    save (the board's flash erase masks its UART) and says how long is left
+    in Bridge._store_wait(). _restate_edit waits it out when it exists; this
+    stands in for that method, so the hook is held to its name."""
+    clock, wall = Clock(), Wall()
+    b, sent = _held_and_quiet(tmp_path, clock, wall)
+    n = len(sent)
+    left = [0.4]
+    b._store_wait = lambda: left[0]
+    clock.t += protocol.EDIT_STATE_EVERY_S
+    wall.t += protocol.EDIT_STATE_EVERY_S
+    b.on_message({"t": "ping", "v": 2})
+    b.pump()
+    assert states(sent[n:]) == []
+    left[0] = 0
+    b.pump()
+    assert states(sent[n:]) == [1]
+
+
+def test_the_restatement_is_left_out_of_the_arrow_log():
+    # Once a minute, saying nothing new: bridge.log skips it as it skips
+    # pong. Read, never imported.
+    src = (ROOT / "claude_usage_bridge.py").read_text(encoding="utf-8")
+    m = re.search(r"elif kind not in \(([^)]*)\):\n\s*print\(f\"\[bridge\] "
+                  r"-> \{protocol\.log_name\(m\)\}\"", src)
+    assert m, "the arrow log's skip list has moved"
+    assert '"edit_state"' in m.group(1) and '"pong"' in m.group(1)
 
 
 def test_a_done_that_overtook_its_ok_is_made_good(tmp_path):

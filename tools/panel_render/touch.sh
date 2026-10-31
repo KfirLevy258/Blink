@@ -13,7 +13,7 @@
 # and BLINK_PYTHON for a Python other than python3. BLINK_TOUCH_CFLAGS is
 # handed to the compiler as well, for a script that needs a constant made
 # short enough to wait out: tools/bench/edit_hold_bound.txt wants
-# -DEDIT_HOLD_MS=3000, and says so at its top.
+# -DEDIT_HOLD_MS=4000, and says so at its top.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)

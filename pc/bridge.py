@@ -168,6 +168,7 @@ class Bridge:
         # field out, and the board as it is.
         self._builder_open = builder_open
         self._edit_said_at = None        # last edit_state; see _restate_edit
+        self._last_ping_wall = None      # see _edit_after_silence
         # The open runs on run_async's thread: starting a browser can take a
         # second or more, and this object lives on the serial thread. The
         # answer comes back through the queue and pump() writes it, so only
@@ -284,11 +285,7 @@ class Bridge:
             self.greet()
             self.offer_if_newer(msg.get("fw"))
         elif t == "ping":
-            if self._last_ping is not None and not self.board_alive():
-                # Heard again after a silence the board calls HOST LOST: it
-                # has let go of "Edit on computer", so say now whether the
-                # builder is still open (_restate_edit).
-                self._edit_said_at = None
+            self._edit_after_silence()
             self._last_ping = self._now()
             # Free: never fetch here. The usage endpoint is aggressively
             # rate-limited and this fires every 10 s.
@@ -770,20 +767,58 @@ class Bridge:
                   file=sys.stderr)
         self._restate_edit()
 
+    def _edit_after_silence(self):
+        """On every ping, before it is counted: if the board was silent long
+        enough to have declared HOST LOST, it has let go of "Edit on
+        computer", so the next pump() says at once whether the builder is
+        still open (_restate_edit).
+
+        The silence is measured in wall time, not in self._now. That is
+        time.monotonic, which on macOS (mach_absolute_time) and Linux stops
+        while the computer sleeps -- 93.7 h of it against 193.6 h since
+        boot, measured on the desk Mac (review of fp/edit-held r2,
+        SHOULD-1; status_page.py moved to wall time for the same reason).
+        Across the owner's lunch the monotonic gap was the few awake seconds
+        either side, nothing was said until the next minute came round, and
+        for up to 60 s the slot read "Edit on computer" over the open
+        builder. Wall time sees that and a serial loop that stalled while
+        the computer stayed awake alike. A wall clock that steps back counts
+        as a silence too: it costs one 37-byte line, never a missed one."""
+        wall = self._wall()[0]
+        last, self._last_ping_wall = self._last_ping_wall, wall
+        if last is None:
+            return                       # the first ping: greet() just said
+        gap = wall - last
+        if gap > LIVENESS_WINDOW_S or gap < 0:
+            self._edit_said_at = None
+
     def _restate_edit(self):
         """protocol.edit_state, every EDIT_STATE_EVERY_S and at once when the
-        board is heard again after a silence (on_message's ping), so a board
-        that freed its hold on HOST LOST holds again when the same
+        board is heard again after a silence (_edit_after_silence), so a
+        board that freed its hold on HOST LOST holds again when the same
         connection wakes, and a hold over a builder that has gone lasts one
         restatement at most. From pump(), after the answers and the done, so
-        it never says a builder is open before the ok that opened it.
+        a done is never contradicted by a state written before it. It can
+        say a builder is open just before that builder's ok reaches the
+        board -- launch() records the builder before work() queues the
+        answer -- which is harmless: the board holds on either line.
 
         Never waits: Launcher.editing() answers None while launch() holds its
         lock, and this tries again on the next pass. Only to a board that is
-        alive and lists BOARD_CAP_EDIT_DONE."""
+        alive and lists BOARD_CAP_EDIT_DONE.
+
+        Not behind a theme save: fp/daemon-fixes holds every write for
+        THEME_SAVE_HOLD_S after one, because the board's flash erase masks
+        its UART, and exposes how long is left as self._store_wait(). Where
+        that exists this waits it out like the rest and is said on a later
+        pass; on a branch without it the lookup finds nothing and costs
+        nothing."""
         state = self._builder_open
         if (state is None or not self.board_alive()
                 or not self._board_can(protocol.BOARD_CAP_EDIT_DONE)):
+            return
+        store_wait = getattr(self, "_store_wait", None)
+        if store_wait is not None and store_wait() > 0:
             return
         now = self._now()
         if (self._edit_said_at is not None
