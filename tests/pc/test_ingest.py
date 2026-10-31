@@ -556,8 +556,8 @@ def test_two_real_files_reach_the_wire_together(tmp_path):
     # The sample is 5 h 55 m old, and its 24.0 describes a five-hour window
     # that was open when it was taken and has certainly ended since: the
     # Desktop cache has no reset stamps to say so, so the provider retires a
-    # session reading after 5 h + 10 min (claude_desktop.SESSION_RETIRE_
-    # AFTER_S) rather than carry it for as long as the file lives. This used
+    # session reading after 5 h + 10 min (base.session_outlived) rather
+    # than carry it for as long as the file lives. This used
     # to pin 24.0; that was the same borrowed-and-aged number that told an
     # Ultra desk its live data was 37 hours old. The weekly figure outlives
     # the session window by days and is kept.
@@ -576,11 +576,16 @@ def test_two_real_files_reach_the_wire_together(tmp_path):
 def test_the_panel_reports_the_age_of_the_last_claude_code_reading(tmp_path):
     """The field bug, end to end (2026-09-02).
 
-    Claude Code was used six hours ago and its five-hour window has since
+    Claude Code was used hours ago and its five-hour window has since
     expired, so the status line no longer carries a percentage. Claude
     Desktop was last open 57 hours ago. The message must carry the CLI
     reading and ITS age -- the desktop sample's 57 hours is an honest answer
     to a question nobody asked.
+
+    Five hours here where the field report had six. The payload carries no
+    reset stamp, and an unstamped figure is lent for one window's length
+    and its slack (base.session_outlived), after which the window it
+    describes has certainly ended.
     """
     import json
     import os
@@ -605,8 +610,8 @@ def test_the_panel_reports_the_age_of_the_last_claude_code_reading(tmp_path):
     desktop = Fixed(desktop_frame)
 
     write({"rate_limits": {"five_hour": {"used_percentage": 27.0}}},
-          NOW - 6 * 3600)
-    now = [NOW - 6 * 3600 + 1]
+          NOW - 5 * 3600)
+    now = [NOW - 5 * 3600 + 1]
     bus = ingest.IngestionBus(providers=[cli, desktop],
                               now=lambda: now[0])
     bus.poll()
@@ -617,11 +622,11 @@ def test_the_panel_reports_the_age_of_the_last_claude_code_reading(tmp_path):
 
     assert msg["src"] == "cli"
     assert msg["session_pct"] == 27.0
-    assert msg["age_s"] == 6 * 3600
+    assert msg["age_s"] == 5 * 3600
     assert msg["stale"] is True
 
     now[0] = NOW + 60
-    assert bus.poll()["age_s"] == 6 * 3600 + 60
+    assert bus.poll()["age_s"] == 5 * 3600 + 60
 
 
 def _sleep_absent_after_s():
@@ -648,14 +653,14 @@ def test_a_live_status_line_keeps_the_board_awake_behind_an_old_dial(tmp_path):
     five-hour window expired overnight, so the rewrite carries only the
     seven-day figure -- the shape pc/providers/claude_cli's own docstring
     describes, and the shape the field report describes. The remembered
-    five-hour reading from twelve hours ago wins the session dial and brings
-    its own mtime with it.
+    five-hour reading from hours ago wins the session dial and brings its
+    own mtime with it.
 
-    So the dial IS twelve hours old, and the wire says so, honestly. What
-    must not follow is the board deciding that nobody is at the desk: the
-    file under all of this was written five seconds ago. With only one age
-    on the wire it was 43200, the four-hour gate fired, and the panel closed
-    its eyes on an owner who was watching it.
+    So the dial IS hours old, and the wire says so, honestly. What must not
+    follow is the board deciding that nobody is at the desk: the file under
+    all of this was written five seconds ago. With only one age on the wire
+    it was 43200 (twelve hours, the field case), the four-hour gate fired,
+    and the panel closed its eyes on an owner who was watching it.
     """
     import os
 
@@ -666,23 +671,26 @@ def test_a_live_status_line_keeps_the_board_awake_behind_an_old_dial(tmp_path):
         os.utime(p, (mtime, mtime))
 
     cli = ClaudeCliProvider(path=str(p))
-    now = [NOW - 12 * 3600 + 1]
+    now = [NOW - 5 * 3600 + 1]
     bus = ingest.IngestionBus(providers=[cli], now=lambda: now[0])
 
-    # Overnight: a real five-hour reading, which the provider remembers.
-    # No reset stamp on it, and that is load-bearing rather than lazy: a
-    # stamp the clock has since passed is proof the window ended, and a
-    # reading of a window that has ended is refused outright rather than
-    # aged (pc/providers/base.settle_window). This is the other case --
-    # nothing here says the twelve-hour-old reading has been superseded, so
-    # it is offered, and offered with its own honest age.
+    # Five hours ago: a real five-hour reading, which the provider
+    # remembers. No reset stamp on it, and that is load-bearing rather than
+    # lazy: a stamp the clock has since passed is proof the window ended,
+    # and a reading of a window that has ended is refused outright rather
+    # than aged (pc/providers/base.settle_window). This is the other case --
+    # nothing here says the five-hour-old reading has been superseded, so
+    # it is offered, and offered with its own honest age. Twelve hours, as
+    # this test first said, is past the bound after which an unstamped
+    # figure is not lent at all (base.session_outlived): the window it
+    # describes has certainly ended by then.
     write({"rate_limits": {"five_hour": {"used_percentage": 27.0},
                            "seven_day": {"used_percentage": 26.0}}},
-          NOW - 12 * 3600)
+          NOW - 5 * 3600)
     assert bus.poll()["session_pct"] == 27.0
 
-    # This morning: the five-hour window is gone from the rewrite, the
-    # seven-day figure is not, and the file is five seconds old.
+    # Now: the five-hour window is gone from the rewrite, the seven-day
+    # figure is not, and the file is five seconds old.
     write({"rate_limits": {"seven_day": {"used_percentage": 41.0}}}, NOW - 5)
     now[0] = NOW
     msg = bus.poll()
@@ -690,13 +698,13 @@ def test_a_live_status_line_keeps_the_board_awake_behind_an_old_dial(tmp_path):
     assert msg["src"] == "cli"
     assert msg["session_pct"] == 27.0        # the remembered dial
     assert msg["weekly_pct"] == 41.0         # from the live rewrite
-    assert msg["age_s"] == 12 * 3600         # and it really is that old
+    assert msg["age_s"] == 5 * 3600          # and it really is that old
     assert msg["active_age_s"] == 5          # but the desk is not
 
     # The question the firmware asks, with the numbers this message carries.
     # The first line is the bug; the second is why the board stays awake.
     #
-    # The threshold is pinned as well as read. Twelve hours and five seconds
+    # The threshold is pinned as well as read. Five hours and five seconds
     # straddle every plausible value, so the two comparisons below pass
     # whatever the header says -- confirmed by a survey that changed
     # SLEEP_ABSENT_AFTER_S from four hours to thirty minutes and watched all
@@ -724,7 +732,7 @@ def test_a_five_hour_window_that_ended_leaves_the_dial_empty_not_wrong(tmp_path)
     The rewrite KEEPS its five_hour key, with the ended stamp. It used to
     drop the key, and that stopped exercising base.settle_window the moment a
     payload with no five_hour key was read as "this account has no window"
-    (ClaudeCliProvider._note_window_shape): the dial was blank for that
+    (ClaudeCliProvider._has_no_window): the dial was blank for that
     reason and settle_window could be broken without this test noticing.
     Two phases, one per way it breaks. A fresh file must read 0, not the
     pre-reset 27 (a settle that keeps the figure of an ended window); an old

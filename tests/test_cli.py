@@ -2158,3 +2158,55 @@ def test_status_says_when_the_account_has_no_five_hour_window(
                                          resets_at=time.time() + 3600)))
     assert cli.main(["status"]) == 0
     assert "Session     " not in capsys.readouterr().out
+
+
+def _ultra_desk_with_an_open_desktop_window(tmp_path, monkeypatch):
+    """A weekly-only status line beside a Claude Desktop Local Storage
+    record whose window is still open: the shape a Pro or Max desk has when
+    a fresh process reads its status line just after a reset. The record is
+    generated and handed over where the LevelDB reader would return it."""
+    from pc import desktop_local_storage
+    from tests.pc.test_claude_cli import payload
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    status = tmp_path / ".blink" / "statusline.json"
+    status.write_text(json.dumps(payload(five_hour=None, seven_day=2.0)))
+    now = time.time()
+    record = {"resetsAt": now + 4 * 3600, "utilization": 0.08,
+              "observedAt": now - 300}
+    monkeypatch.setattr(desktop_local_storage, "newest_record",
+                        lambda path: dict(record))
+
+
+def test_the_session_row_follows_the_merge_not_one_provider(
+        tmp_path, capsys, monkeypatch):
+    """The row used to come from a provider of its own, which knew nothing
+    of a Local Storage window that lifts the rule in the merge: it printed
+    "no five-hour window" for a desk whose daemon was drawing 8% (review,
+    2026-10-31)."""
+    _ultra_desk_with_an_open_desktop_window(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+
+
+def test_status_wire_prints_the_row_and_the_line_from_one_poll(
+        tmp_path, capsys, monkeypatch):
+    _ultra_desk_with_an_open_desktop_window(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    assert cli.main(["status", "--wire"]) == 0
+    out = capsys.readouterr().out
+    wire = json.loads(out.strip().splitlines()[-1])
+    assert wire["session_pct"] == 8.0 and wire["src"] == "desktop_ls"
+    assert "Session     " not in out
+
+    from pc import desktop_local_storage
+    monkeypatch.setattr(desktop_local_storage, "newest_record",
+                        lambda path: None)        # the window closes
+    assert cli.main(["status", "--wire"]) == 0
+    out = capsys.readouterr().out
+    wire = json.loads(out.strip().splitlines()[-1])
+    assert wire["session_pct"] == -1 and wire["src"] == "cli"
+    assert out.count("Session     no five-hour window") == 1

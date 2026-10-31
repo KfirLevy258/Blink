@@ -54,8 +54,10 @@ HOLD_BAND = 1.0
 SAME_WINDOW_S = 300
 
 # How long each window lasts, which is what lets a reading with no reset
-# stamp be placed against one that has a stamp: see _same_window.
-SESSION_WINDOW_S = 5 * 3600
+# stamp be placed against one that has a stamp: see _same_window. The
+# five-hour figure is base's, where the sources that retire a stampless
+# session reading read it too.
+SESSION_WINDOW_S = base.SESSION_WINDOW_S
 WEEKLY_WINDOW_S = 7 * 86400
 
 
@@ -260,50 +262,44 @@ def merge(frames):
 
     # An account with no session window has no session figure to pick.
     #
-    # ClaudeCliProvider latches "no five_hour window" from the status line
-    # and stamps it on its frames (see _note_window_shape for what sets and
-    # clears it). Without this, a remembered payload or a Claude Desktop
-    # sample two days old filled the dial, won `primary` below, and the board
-    # was told live data was 37 hours old (measured 2026-10-30, a verified
-    # Ultra account). The flag applies whatever the age of the frame that
-    # carries it: a stale payload still says the account has no window, and
-    # its own staleness is then reported honestly through `primary` below.
+    # ClaudeCliProvider marks the frames of a payload that says so (see
+    # _has_no_window for the evidence). Without this, a remembered payload
+    # or a Claude Desktop sample two days old filled the dial, won `primary`
+    # below, and the board was told live data was 37 hours old (measured
+    # 2026-10-30, a verified Ultra account). The mark applies whatever the
+    # age of the frame that carries it: a stale payload still says what the
+    # account had, and its own staleness is reported honestly through
+    # `primary` below. Nothing is borrowed then -- not Claude Desktop's
+    # history, not its Local Storage, not the remembered payload -- and the
+    # countdown and the burn rate go with the figure.
     #
-    # Two things override it, each a session reading that proves a window
-    # exists or came after the evidence that it did not:
+    # One thing voids the mark: an unmarked source carrying a session reset
+    # time. Every provider drops a stamp that has passed (base.settle_window;
+    # Local Storage through window_ended), so one that is carried was ahead
+    # of the clock it was read by, and merge needs no clock of its own. That
+    # is a window, so the mark was wrong, and the merge goes on exactly as
+    # if no frame carried it: the
+    # stamped source gives the countdown and every reading competes for the
+    # dial by the ordinary rules. Not "only the stamped source may fill
+    # it", which is what the previous rule did and why a stale Local
+    # Storage record took the dial back from Desktop samples taken after it
+    # (review, 2026-10-31). Nothing is logged: it is not a fault, and the
+    # next Claude Code reply carries the window anyway.
     #
-    #   - A reading that carries a reset time still ahead. ClaudeCliProvider
-    #     cannot tell an Ultra account from a Pro or Max one whose window
-    #     expired while nobody rendered (the same payload byte for byte), so
-    #     the flag can be wrong on a desk that has a window, and Claude
-    #     Desktop's Local Storage sees it: resetsAt in the future is the
-    #     server's own statement that a window is open. Every provider has
-    #     already dropped a stamp that has passed (base.settle_window), so
-    #     "carries one" is "ahead of the clock the provider read", and merge
-    #     needs no clock of its own. A reading without a stamp (the Desktop
-    #     cache has none) proves nothing and stays vetoed, and so does a
-    #     flagged frame, which cannot vouch against its own flag. Stale or
-    #     not: the stamp, not the sample's age, is the proof.
-    #   - A reading observed after the newest flagged frame. A flag is a
-    #     statement as of the frame that carries it; merging a merged frame
-    #     carries it forward, and it must not veto what was observed since.
-    #     Strictly after, so the remembered payload (older than the live one
-    #     that flagged it) can never fill the dial.
+    # The previous rule had a second way out, a reading observed after the
+    # newest marked frame. It existed for merging a merged frame, which
+    # production never does, and it let any Desktop sample taken after the
+    # last repaint lift the veto (same review); it is gone.
     #
-    # Only those readings are candidates then; the rest of the sources keep
-    # no say in the session window. Everything session-side below is fed
-    # `session_frames`, so there is one place where the rule applies.
-    flagged = [f for f in frames if f.no_session_window]
-    if flagged:
-        flagged_at = max(f.observed_at for f in flagged)
-        session_frames = [
-            f for f in frames
-            if not f.no_session_window and _known_pct(f.session_pct)
-            and (f.session_resets_at is not None
-                 or f.observed_at > flagged_at)]
-    else:
-        session_frames = frames
-    no_window = bool(flagged) and not session_frames
+    # So `no_window` on the merged frame is True exactly when the session
+    # below is unknown because of this rule, and pc/ingest's burn view keys
+    # on that.
+    marked = any(f.no_session_window for f in frames)
+    proved = any(not f.no_session_window
+                 and _stamp(f, "session_resets_at") is not None
+                 for f in frames)
+    no_window = marked and not proved
+    session_frames = [] if no_window else frames
 
     session_pct, session_src, session_dated = _pick_pct(
         session_frames,
@@ -347,7 +343,7 @@ def merge(frames):
 
     # Nor a countdown or a rate for it: a remembered window's reset stamp
     # would otherwise ride along on a dial that is drawn "--%". Picked from
-    # session_frames, so there is none to pick when the window is vetoed.
+    # session_frames, so there is none to pick under the rule above.
     session_resets_at, _ = _pick(
         session_frames, lambda f: _stamp(f, "session_resets_at") is not None,
         lambda f: f.session_resets_at)

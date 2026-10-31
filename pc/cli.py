@@ -42,7 +42,6 @@ from pc import theme_server
 # and a test has to be able to replace it without a real slot directory in
 # reach -- the scan behind it deletes files.
 from pc.providers import codex_state
-from pc.providers.claude_cli import ClaudeCliProvider
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -3646,35 +3645,73 @@ def cmd_status(args) -> int:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
     _source_lines(desk)
-    _session_window_line()
     if getattr(args, "wire", False):
+        # The Session row comes out of the same poll as the wire line.
         _wire_line()
+    else:
+        _session_window_line(_claude_page(desk))
     return 0
 
 
-def _session_window_line():
-    """Say so when the daemon is treating this account as having no
-    five-hour window.
+def _session_window_line(page):
+    """Say so when the claude page is being treated as having no five-hour
+    window.
 
-    The rule is inferred from the absence of a key (ClaudeCliProvider.
-    _note_window_shape), so a vendor rename of five_hour that kept seven_day
+    The rule is inferred from an absent key (ClaudeCliProvider.
+    _has_no_window), so a vendor rename of five_hour that kept seven_day
     would switch it on for every Pro and Max desk with nothing on screen but
-    a "--%" dial. Where Claude Desktop is running the normalizer lifts the
-    rule by itself; this line is for the desks where it does not, and it is
-    what support asks for first. Shown only when active, from a fresh read
-    of the status line exactly as the daemon would hold it after a restart.
+    a "--%" dial, and a Pro or Max file read by a fresh process just after
+    a reset looks the same as Ultra. This line is how support tells them
+    apart, and it is what support asks for first.
+
+    `page` is the merged claude frame, so the row says what the merge
+    decided, never what one provider thought. It used to poll a provider of
+    its own, which knew nothing of a Local Storage window that lifts the
+    rule, and printed "no five-hour window" above a wire line carrying a
+    session figure (review, 2026-10-31).
     """
-    try:
-        frames = ClaudeCliProvider().poll(time.time())
-    except Exception:
-        return
-    if any(f.no_session_window for f in frames):
+    if page is not None and page.no_session_window:
         print("Session     no five-hour window (Claude Code reports weekly"
               " only)")
 
 
+def _claude_page(desk):
+    """The merged claude frame for plain `blink status`, or None.
+
+    The merge the daemon runs, over the three sources that can say anything
+    about a session window: the status line, Claude Desktop's usage cache
+    (desk's one reading of it, the same one the Desktop row prints from)
+    and its Local Storage. Not a whole IngestionBus poll, which `--wire`
+    does: that also writes the weekly anchor and, on a desk that has none,
+    seeds it by walking Claude Desktop's IndexedDB, which holds the
+    customer's conversations -- not something a plain status should do to
+    print one row. The sources left out carry no session figure (activity
+    state, Codex, the weekly projection), so they cannot change the answer.
+    """
+    from pc import normalizer
+    from pc.providers import claude_desktop
+    from pc.providers.claude_cli import ClaudeCliProvider
+    from pc.providers.claude_desktop_ls import (
+        ClaudeDesktopLocalStorageProvider)
+    now = time.time()
+    frames = []
+    for provider in (ClaudeCliProvider(),
+                     ClaudeDesktopLocalStorageProvider()):
+        try:
+            frames.extend(provider.poll(now) or [])
+        except Exception:
+            # As the bus contains a provider: a source that cannot be read
+            # costs its own say, not the status report.
+            continue
+    reading = desk.desktop_reading if desk is not None else None
+    if reading is not None and reading[0] == claude_desktop.VERDICT_FRAME:
+        frames.append(reading[1])
+    return normalizer.merge(frames) if frames else None
+
+
 def _wire_line():
-    """The usage message the bridge would put on the cable right now.
+    """The Session row and the usage message the bridge would put on the
+    cable right now, from one poll.
 
     The last thing that can be checked without a board: every source read,
     merged and encoded exactly as the daemon does it (pc/ingest -> normalizer
@@ -3683,7 +3720,9 @@ def _wire_line():
     """
     import json as _json
     from pc import ingest
-    msg = ingest.IngestionBus().poll()
+    bus = ingest.IngestionBus()
+    msg = bus.poll()
+    _session_window_line(bus.claude_page())
     print()
     if msg is None:
         print("Wire        nothing to send -- no source has a reading")

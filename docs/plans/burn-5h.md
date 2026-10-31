@@ -7,12 +7,18 @@ the research branch, and the artifact linked from it).
 ## When it shows
 
 Only when the account has no session window. The daemon already decides that:
-`NormalizedUsageFrame.no_session_window` (fix/ultra-stale-daemon). That flag
-is set when a fresh status line has `seven_day` and no `five_hour` key. On
-that page the usage frame carries `session_pct` -1. If `five_hour` comes back,
-the flag clears and the board goes back to the session gauge. Pro and Max
-never see this view. Neither does a Desktop-only desk, which has no fresh
-status line.
+`NormalizedUsageFrame.no_session_window` on the merged claude frame. The
+status line marks a payload that has a usable `seven_day` and no `five_hour`
+window, when the daemon has seen no five-hour window within five hours and ten
+minutes of that payload's figures being fetched
+(`ClaudeCliProvider._has_no_window`); a Claude Desktop source carrying a reset
+time still ahead overrides it. On that page the usage frame carries
+`session_pct` -1. If `five_hour` comes back, the mark goes and the board goes
+back to the session gauge. Pro and Max do not see this view at a five-hour
+reset, because the window that just reset is the evidence they have one. A
+freshly started daemon has no such memory, so on a Pro or Max desk whose last
+render came after a reset it shows the view until Claude Code's next reply.
+Neither does a Desktop-only desk, which has no status line.
 
 ## What it measures
 

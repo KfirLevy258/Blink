@@ -92,6 +92,9 @@ class IngestionBus:
         # it answers for the same poll the usage line came from.
         self._burn_wanted = False
         self._burn_failed = False
+        # The merged claude frame of the last poll(), when it was on one of
+        # the board's two pages. See claude_page().
+        self._claude_page = None
         # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
         # out after a failure. Keyed by IDENTITY, not by class: two instances
         # of the same provider class are two sources -- two Codex homes, the
@@ -319,9 +322,11 @@ class IngestionBus:
         # The claude page wherever it sits: the main one, or the second when
         # the owner made another provider main. A provider left off the
         # board's two pages has no page to draw a burn view on.
-        self._burn_wanted = any(
-            f is not None and f.provider == claude_cli.PROVIDER_ID
-            and f.no_session_window for f in (primary, secondary))
+        self._claude_page = next(
+            (f for f in (primary, secondary)
+             if f is not None and f.provider == claude_cli.PROVIDER_ID), None)
+        self._burn_wanted = (self._claude_page is not None
+                             and self._claude_page.no_session_window)
         if primary is None:
             return None
         msg = protocol.frame_to_usage(primary, self._now(), secondary)
@@ -330,6 +335,18 @@ class IngestionBus:
         self._session_pair = _pair_from(
             primary, secondary, msg.get("state", base.STATE_UNKNOWN))
         return msg
+
+    def claude_page(self):
+        """The merged claude frame the last poll() put on a page, or None.
+
+        For `blink status --wire`, whose "Session" row says whether the
+        account is being treated as having no five-hour window. It used to
+        build a provider of its own and ask that, which disagreed with the
+        line printed under it: a Local Storage window lifts the rule in the
+        merge, and a fresh provider never saw it (review, 2026-10-31). This
+        is the frame the usage line was made from.
+        """
+        return self._claude_page
 
     def session_pair(self):
         """(label, n) for the state the last poll() put on the panel.

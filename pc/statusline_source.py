@@ -73,6 +73,40 @@ RESET_EPOCH_MIN = 0
 RESET_EPOCH_MAX = 4_102_444_800
 
 
+def window_present(rate_limits, key: str) -> bool:
+    """Does the payload carry this window at all?
+
+    An object under the key, and nothing else: absent, null, a string or a
+    list is no window. The ONE definition. ClaudeCliProvider decides "this
+    account has no five-hour window" from it, and it used to ask with
+    `"five_hour" in limits` while _window below treated null as absent, so a
+    `"five_hour": null` was a window to one and not to the other (review,
+    2026-10-31). An object with no usable percentage IS a window here: that
+    is the likeliest shape of a payload change, and not something to
+    conclude "this account has no limit" from.
+    """
+    return isinstance(rate_limits, dict) and isinstance(rate_limits.get(key),
+                                                        dict)
+
+
+def window_usable(rate_limits, key: str) -> bool:
+    """Does this window carry a percentage the dial could show?
+
+    Asked of the payload alone, with no clock: what the file said when it
+    was written, which is the question a payload's own shape answers.
+    Whether that figure still holds now is settle_window's business, below.
+    """
+    return window_present(rate_limits, key) and _window(rate_limits,
+                                                        key)[0] >= 0
+
+
+def window_resets_at(rate_limits, key: str):
+    """This window's reset stamp as _window reads it, or None. Clock-free,
+    like window_usable."""
+    return _window(rate_limits, key)[1] if window_present(rate_limits,
+                                                          key) else None
+
+
 def _window(rate_limits: dict, key: str):
     """(used_percentage, resets_at_epoch|None) for one window.
 
@@ -83,9 +117,9 @@ def _window(rate_limits: dict, key: str):
     "0% used", which is a stronger claim than "we don't have this number" and
     is exactly the frozen-meter failure mode this module exists to avoid.
     """
-    w = rate_limits.get(key)
-    if not isinstance(w, dict):
+    if not window_present(rate_limits, key):
         return -1.0, None
+    w = rate_limits[key]
     try:
         pct = float(w["used_percentage"])
     except (KeyError, TypeError, ValueError):

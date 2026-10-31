@@ -37,21 +37,20 @@ SRC_ID = "desktop"
 # app as live.
 STALE_AFTER_S = 1800
 
-# How old a session reading may be before this source stops offering it.
+# A session reading older than a window is not offered: base.session_outlived.
 #
 # A five-hour window that was open when the sample was taken has certainly
-# ended five hours later, and ten minutes of slack covers a sample taken at
-# the very start of the clock and the app's five-minute write interval. This
-# source has no reset stamps to say so itself, so without a bound the figure
-# stayed on the bus for as long as the file did: on 2026-10-30 a sample from
-# 37 hours before a verified Ultra account stopped having a window was still
-# filling the session dial, and it is the same shape on a restarted daemon,
-# which has no memory that would veto it. Past the bound the session is
-# UNKNOWN (and rateless: the rate is refused past BURN_MAX_GAP_S anyway), and
-# the weekly figure, which lasts seven days, is kept. `stale` is a separate
-# and earlier judgement (half an hour): between the two the number is shown,
-# honestly aged.
-SESSION_RETIRE_AFTER_S = 5 * 3600 + 600
+# ended five hours later, and this source has no reset stamps to say so
+# itself, so without a bound the figure stayed on the bus for as long as the
+# file did: on 2026-10-30 a sample from 37 hours before a verified Ultra
+# account stopped having a window was still filling the session dial, and it
+# is the same shape on a restarted daemon, which has no memory of the
+# account. Past the bound the session is UNKNOWN (and rateless: the rate is
+# refused past BURN_MAX_GAP_S anyway), and the weekly figure, which lasts
+# seven days, is kept. `stale` is a separate and earlier judgement (half an
+# hour): between the two the number is shown, honestly aged. The bound and
+# its slack are base's, where the normalizer's window length lives too; this
+# module spelled them out on its own until review (2026-10-31).
 
 # Milliseconds, per the module docstring. Named rather than inlined so the
 # unit is stated at every use.
@@ -191,8 +190,19 @@ def _pct(u: dict, key: str) -> float:
     return v if 0 <= v <= 1000 else base.UNKNOWN
 
 
-def _sample_to_frame(sample: dict):
-    """(frame-shaped dict, observed_at) from one sample, or (None, None)."""
+def _sample_to_frame(sample: dict, now_epoch=None):
+    """(frame-shaped dict, observed_at) from one sample, or (None, None).
+
+    With `now_epoch`, a session figure older than a window is dropped HERE,
+    before the test for a sample carrying neither percentage, so a sample
+    whose only figure has retired counts as one that says nothing and an
+    older sample with a weekly figure is used instead. Retired after that
+    test, as it first was, a newest sample with fh and no sd became a frame
+    with no usage at all, the weekly figure in the samples before it was
+    never offered, and on a Desktop-only desk the bus sent nothing (review,
+    2026-10-31). The rate's series reads samples without a clock, since it
+    judges age its own way.
+    """
     if not isinstance(sample, dict):
         return None, None
     u = sample.get("u")
@@ -209,6 +219,8 @@ def _sample_to_frame(sample: dict):
         return None, None
     fh = _pct(u, "fh")
     sd = _pct(u, "sd")
+    if now_epoch is not None and base.session_outlived(observed_at, now_epoch):
+        fh = base.UNKNOWN
     if fh < 0 and sd < 0:
         # A sample carrying neither percentage tells us nothing. Returning it
         # anyway would let it win a recency contest against a real reading
@@ -218,7 +230,7 @@ def _sample_to_frame(sample: dict):
     return {"session_pct": fh, "weekly_pct": sd}, observed_at
 
 
-def _newest_sample(samples):
+def _newest_sample(samples, now_epoch=None):
     """The most recent usable sample.
 
     Chosen by MAXIMUM timestamp rather than by taking samples[-1]. The real
@@ -230,7 +242,7 @@ def _newest_sample(samples):
     """
     best, best_t = None, None
     for s in samples:
-        fields, observed_at = _sample_to_frame(s)
+        fields, observed_at = _sample_to_frame(s, now_epoch)
         if fields is None:
             continue
         if best_t is None or observed_at > best_t:
@@ -384,20 +396,20 @@ def _samples_array_by_shape(doc):
     return None
 
 
-def _parse_v2(doc):
+def _parse_v2(doc, now_epoch=None):
     """The layout observed in the wild: {"version": 2, "samples": [...]}."""
     samples = doc.get("samples")
     if not isinstance(samples, list) or not samples:
         return None, None
-    return _newest_sample(samples)
+    return _newest_sample(samples, now_epoch)
 
 
-def _parse_by_shape(doc):
+def _parse_by_shape(doc, now_epoch=None):
     """Last resort for a version we have never seen."""
     samples = _samples_array_by_shape(doc)
     if samples is None:
         return None, None
-    return _newest_sample(samples)
+    return _newest_sample(samples, now_epoch)
 
 
 # Versioned adapters, dispatched on the file's own `version` field. The file
@@ -472,7 +484,20 @@ class ClaudeDesktopProvider(base.ProviderParser):
         except Exception:
             burn = None
         try:
-            fields, sample_at = parser(doc)
+            fields, sample_at = parser(doc, now_epoch)
+            if fields is None:
+                # Every sample's only figure is a retired session. The file
+                # is still ours and still read -- `blink status` must not
+                # call it a changed format -- so the newest sample stands,
+                # with nothing to offer but its age. Alone on the bus that
+                # sends nothing, after five hours and ten minutes with no
+                # sample, which means Claude Desktop has been closed that
+                # long: the board went to sleep at four hours without
+                # contact (firmware SLEEP_ABSENT_AFTER_S), so the reading it
+                # last drew is not on screen.
+                fields, sample_at = parser(doc)
+                if fields is not None:
+                    fields = dict(fields, session_pct=base.UNKNOWN)
         except Exception:
             # A parser is not allowed to take the daemon down over an
             # upstream layout change. This is the graceful-degradation path:
@@ -485,15 +510,13 @@ class ClaudeDesktopProvider(base.ProviderParser):
             sample_at = observed_at if observed_at is not None else now_epoch
 
         stale = (now_epoch - sample_at) > self._stale_after
-        session_pct = fields["session_pct"]
-        if (now_epoch - sample_at) > SESSION_RETIRE_AFTER_S:
-            # No rate to retire with it: session_burn_pph refuses any series
-            # whose newest sample is over BURN_MAX_GAP_S old, so by this age
-            # `burn` is already None (pinned in test_no_session_window).
-            session_pct = base.UNKNOWN
+        # A retired session figure (_sample_to_frame) has no rate to retire
+        # with it: session_burn_pph refuses any series whose newest sample
+        # is over BURN_MAX_GAP_S old, so by that age `burn` is already None
+        # (pinned in test_no_session_window).
         return base.NormalizedUsageFrame(
             provider=PROVIDER_ID, src=SRC_ID, observed_at=sample_at,
-            session_pct=session_pct,
+            session_pct=fields["session_pct"],
             weekly_pct=fields["weekly_pct"],
             # No reset timestamps in this source at all -- see the module
             # docstring. None, not a guess.
