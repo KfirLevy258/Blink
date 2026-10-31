@@ -226,6 +226,43 @@ def test_a_desktop_only_desk_is_untouched(tmp_path):
 # --- Ultra in its steady state ----------------------------------------------
 
 
+@pytest.mark.parametrize("doc", [
+    status(seven=24.0),
+    status(five=40.0, five_resets=NOW + 3600, seven=24.0)],
+    ids=["no window", "pro or max, session held still"])
+def test_the_wire_ages_the_status_line_not_the_figure(tmp_path, doc):
+    """The mark is judged by when the figures were FETCHED (first_seen_at),
+    and that must not leak into the reading's age. A weekly percentage holds
+    still for many minutes on an Ultra desk -- one point of a weekly cap is a
+    lot of work -- while Claude Code repaints the line every few seconds; aged
+    by the figure, the board would draw "20m ago" over live data from
+    AGE_CAPTION_MIN_S on. The age is the file's, as it is for a Pro or Max
+    desk whose session percentage holds still, on a running daemon and on a
+    fresh process alike (questioned on the owner's desk, 2026-10-31)."""
+    p = tmp_path / "statusline.json"
+    clock = [NOW - 1200]
+    bus = ingest.IngestionBus(
+        providers=[ClaudeCliProvider(path=str(p)),
+                   desktop_at(tmp_path, 4000, session=1, weekly=24)],
+        now=lambda: clock[0])
+    for at in (NOW - 1200, NOW - 600, NOW - 60, NOW - 1):
+        write(p, doc, at)                       # the same block, repainted
+        clock[0] = at + 0.5
+        wire(bus)
+    clock[0] = NOW
+
+    running = wire(bus)
+    fresh = wire(ingest.IngestionBus(
+        providers=[ClaudeCliProvider(path=str(p)),
+                   desktop_at(tmp_path, 4000, session=1, weekly=24)],
+        now=lambda: NOW))
+
+    for msg in (running, fresh):
+        assert msg["src"] == "cli"
+        assert msg["stale"] is False
+        assert msg["age_s"] <= 2
+
+
 def test_a_stale_payload_stays_marked_and_nothing_is_borrowed(tmp_path):
     """Idle. At 30 minutes the first version stopped marking and the 37
     hours came back, until the board slept at four. The frame is stale,
