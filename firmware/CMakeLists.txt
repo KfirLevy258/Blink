@@ -39,6 +39,7 @@ target_sources(app PRIVATE
 	src/theme.c
 	src/font_focus_40.c
 	src/ui_theme.c
+	src/burn5h.c
 )
 
 # Diagnostic only; CONFIG_BLINK_TOUCH_TRACE is off in release builds.

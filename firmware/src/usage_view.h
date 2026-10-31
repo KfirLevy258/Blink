@@ -232,6 +232,35 @@ void usage_view_page_preview(int delta, int pct);
  */
 void usage_view_set_burn(double pph);
 
+struct burn5h;
+
+/*
+ * One `burn` line, already validated by burn5h_parse(), and the uptime it
+ * arrived at (k_uptime_get(), from the caller, so a harness can hand over
+ * an old one). docs/plans/burn-5h.md is the contract.
+ *
+ * Kept per provider, and drawn on the page whose tag matches its `p` --
+ * where it takes the session gauge's half of the screen, but only while
+ * that page's session reading is unknown (the usage line's session_pct -1:
+ * an account with no five-hour window) and only for 180 s after the line
+ * arrived. The daemon re-sends at least once a minute while the account
+ * has no window, and simply stops when one comes back, so a view that
+ * outlives its data reverts to "--%" on its own. Not the same "burn" as
+ * usage_view_set_burn() above, which is percent per hour.
+ *
+ * Recorded before the built guard, like the counts: it is data, and the
+ * line may land before the screen exists.
+ */
+void usage_view_set_burn5h(const struct burn5h *m, int64_t at_ms);
+
+/*
+ * The board clock's offset from UTC, minutes east, as the `time` message
+ * gave it. The burn view labels its hours in local time and draws no hour
+ * axis at all until this has arrived: no labels beats wrong ones, the rule
+ * the clock already follows.
+ */
+void usage_view_set_utc_offset(int32_t off_min);
+
 /*
  * How old each provider's READING is, in seconds, as measured by the daemon
  * (pc/protocol.py, `age_s`/`p2_age_s`); -1 where it did not say.

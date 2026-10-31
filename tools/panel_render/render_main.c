@@ -18,6 +18,7 @@
 #include "usage_layout.h"
 #include "svc_state.h"
 #include "theme.h"
+#include "burn5h.h"
 #include <zephyr/kernel.h>
 
 static uint16_t fb[SCR_W * SCR_H];
@@ -120,6 +121,64 @@ static void settle(void)
 		lv_timer_handler();
 	}
 }
+
+/*
+ * The five-hour burn view's desk (docs/plans/burn-5h.md): an account with
+ * no session window -- session_pct -1, the way the daemon sends it -- and a
+ * weekly one, at 14:52 local on a board told UTC+2.
+ *
+ * The `q` below is 12:45 UTC, so the newest bucket starts 14:45 local and
+ * the axis reads 10..14, with a two-digit label on the leftmost tick.
+ */
+#define BURN_Q "1793450700"
+
+static void ultra_desk(void)
+{
+	usage_view_set_provider1("claude");
+	usage_view_update(-1.0, -1, 42.0, 598831);
+	usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+	usage_view_set_sessions(1, 0);
+	usage_view_set_counts(1, 1, 0, 0);
+	usage_view_set_clock(14, 52);
+	usage_view_set_utc_offset(120);
+}
+
+/*
+ * One burn line, through the real parser, the way proto.c hands it over,
+ * stamped `age_ms` before now. A line the parser refuses stops the render:
+ * a scene that silently drew nothing would look like a passing one.
+ */
+static void burn_line(const char *json, int64_t age_ms)
+{
+	struct burn5h m;
+
+	if (!burn5h_parse(json, &m)) {
+		fprintf(stderr, "burn line refused: the scene is wrong\n");
+		exit(1);
+	}
+	usage_view_set_burn5h(&m, k_uptime_get() - age_ms);
+}
+
+/* The last hour 1.1M against 620k before it: rising, the contract's own
+ * example figure. */
+static const char burn_rising[] =
+	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[90,120,80,0,0,40,110,150,130,160,140,120,"
+	"150,140,170,160,230,260,290,320]}";
+/* 815k against 800k: inside the 10% band. */
+static const char burn_steady[] =
+	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[60,90,120,150,170,160,140,180,175,190,185,200,"
+	"180,210,190,220,200,195,215,205]}";
+/* 160k against 700k: easing, a session winding down. */
+static const char burn_easing[] =
+	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[20,40,90,160,180,210,190,230,200,180,170,190,"
+	"200,180,170,150,90,40,20,10]}";
+/* Nothing for five hours. */
+static const char burn_idle[] =
+	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}";
 
 int main(int argc, char **argv)
 {
@@ -380,6 +439,65 @@ int main(int argc, char **argv)
 		usage_view_set_sessions(1, 0);
 		usage_view_set_counts(1, 1, 0, 0);
 		usage_view_set_clock(14, 5);
+		break;
+	/*
+	 * The five-hour burn view. 35..38 are the four directions; 39 is the
+	 * same account before any burn line has arrived, which must be
+	 * today's "--%" and nothing else; 40 a line that arrived 181 s ago,
+	 * past the 180 s the view holds for; 41 the session window coming
+	 * back, which takes the half back at once; 42 a board that has not
+	 * been told its UTC offset, which draws no hour axis rather than a
+	 * wrong one. 43 and 44 swipe from the burn page to a Codex page and
+	 * back, through the real morph, and land on each page whole.
+	 */
+	case 35:
+		ultra_desk();
+		burn_line(burn_rising, 0);
+		break;
+	case 36:
+		ultra_desk();
+		burn_line(burn_steady, 0);
+		break;
+	case 37:
+		ultra_desk();
+		burn_line(burn_idle, 0);
+		break;
+	case 38:
+		ultra_desk();
+		burn_line(burn_easing, 0);
+		break;
+	case 39:
+		ultra_desk();
+		break;
+	case 40:
+		ultra_desk();
+		burn_line(burn_rising, 181 * 1000);
+		break;
+	case 41:
+		ultra_desk();
+		burn_line(burn_rising, 0);
+		settle();
+		usage_view_update(37.0, 9000, 42.0, 598831);
+		break;
+	case 42:
+		usage_view_set_provider1("claude");
+		usage_view_update(-1.0, -1, 42.0, 598831);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_counts(1, 1, 0, 0);
+		burn_line(burn_rising, 0);
+		break;
+	case 43: case 44:
+		ultra_desk();
+		usage_view_set_provider2("codex", 34.0, 61.0, 4320, 259200,
+					 false);
+		burn_line(burn_rising, 0);
+		settle();
+		usage_view_page_step(1);
+		if (scene == 44) {
+			settle();
+			usage_view_page_step(-1);
+		}
 		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_set_provider1("");

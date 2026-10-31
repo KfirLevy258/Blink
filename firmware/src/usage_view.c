@@ -17,6 +17,7 @@
 #include "svc_state.h"
 #include "cfg_store.h"
 #include "theme.h"
+#include "burn5h.h"
 
 /*
  * Every colour on this screen is a ROLE in the active theme (theme.c), read
@@ -311,6 +312,10 @@ static char svc_buf[FMT_HINT_MAX];
 static void render_weekly(void);
 static void render_age(void);
 static void morph_exec(void *unused, int32_t t);
+/* The burn view's one decision point, and its one object; defined with the
+ * view, after the page change it has to wait for. */
+static void burn_sync(void);
+static void burn_build(lv_obj_t *parent);
 /* Defined beside pip_colour(), which it borrows; called from the 1 s tick,
  * which runs earlier in this file. */
 static void toast_hide(void);
@@ -520,6 +525,37 @@ static void show_obj(lv_obj_t *o, bool on)
 	}
 }
 
+/*
+ * The five-hour burn view's object, and whether it holds the left half.
+ *
+ * Declared up here because layout_gauges() below is the one place that
+ * shows and hides it, the same as every other object on the session side.
+ * burn_on is DECIDED in exactly one place, burn_sync(), with the view's own
+ * code further down; everything here only obeys it.
+ */
+static lv_obj_t *burn_obj;
+static bool burn_on;
+
+/*
+ * The session side is the gauge OR the burn view, never a mix: one call
+ * flips all five objects, and nothing is drawn between two flags -- LVGL
+ * renders from lv_timer_handler(), never from inside this function -- so
+ * no frame can catch the left half halfway from one to the other.
+ *
+ * The countdown goes with the gauge here, which it never had to before:
+ * the burn view writes its own line where the countdown sits.
+ */
+static void show_session_side(bool gauge)
+{
+	show_obj(session.arc, gauge);
+	show_obj(session.pct, gauge);
+	show_obj(session.name, gauge);
+	show_obj(session.countdown, gauge);
+	if (burn_obj) {
+		show_obj(burn_obj, !gauge);
+	}
+}
+
 /* A gauge where the two-gauge screen keeps it: the geometry build_gauge()
  * gave it, restated so leaving Focus puts back exactly that. */
 static void place_side(struct gauge *g, lv_coord_t cx)
@@ -560,8 +596,19 @@ static void layout_gauges(void)
 	if (!focus_on) {
 		place_side(&session, -GAUGE_CX);
 		place_side(&weekly, GAUGE_CX);
+		show_session_side(!burn_on);
 		return;
 	}
+	/*
+	 * Focus keeps exactly today's screen, burn view or not. The view is
+	 * laid out for the left half, and Focus has no left half -- its big
+	 * ring is centred and 156 px across -- so a session window that is
+	 * not there reads "--%" here, as it always has. Cleared HERE rather
+	 * than left for burn_sync() to notice, so that "the view is showing"
+	 * can never be true of a Focus screen even for the length of a call.
+	 */
+	burn_on = false;
+	show_session_side(true);
 	lv_obj_set_size(big->arc, FOCUS_ARC_SZ, FOCUS_ARC_SZ);
 	lv_obj_align(big->arc, LV_ALIGN_TOP_MID, 0, FOCUS_ARC_Y);
 	lv_obj_set_style_text_font(big->pct, &font_focus_40, 0);
@@ -728,6 +775,10 @@ void usage_view_deinit(void)
 	 */
 	dot = NULL;
 	title_lbl = chev_r = chev_l = NULL;
+	/* The burn view's object dies with the screen too; its lines do not,
+	 * they are data (usage_view_set_burn5h). */
+	burn_obj = NULL;
+	burn_on = false;
 	for (int i = 0; i < PIP_MAX; i++) {
 		pip[i] = NULL;
 		pip_num[i] = NULL;
@@ -946,6 +997,10 @@ void usage_view_init(void)
 
 	build_gauge(&session, scr, -GAUGE_CX, "SESSION 5h");
 	build_gauge(&weekly, scr, GAUGE_CX, "WEEKLY 7d");
+	/* Hidden until an account with no session window has a burn line to
+	 * show; layout_gauges() below is what decides. Before the chevrons,
+	 * the toast and the takeover, so all three still draw over it. */
+	burn_build(scr);
 
 
 	/* Edge affordances: without them nobody discovers the swipes (user
@@ -1161,6 +1216,13 @@ static void render_gauges(void)
 	last_w_pct = p->w_pct;
 	render_weekly();
 	refresh_provider1();	/* the name under the brand follows the page */
+	/*
+	 * Last, after the gauge holds this page's numbers: a session reading
+	 * that has just come back takes the half from the burn view at once,
+	 * and one that has just gone hands it over -- and the gauge it hands
+	 * back to is already painted.
+	 */
+	burn_sync();
 }
 
 /*
@@ -1443,6 +1505,17 @@ static void morph_exec(void *unused, int32_t t)
 		weekly.resets_in_s = pg[cur_page].w_in_s;
 		render_countdown(&session);
 		render_countdown(&weekly);
+		/*
+		 * The burn view is the other thing on this panel that has no
+		 * midpoint: a bar chart does not travel into a ring. So the
+		 * left half changes hands here, with the words, and only here
+		 * -- burn_sync() refuses to move it before this point, which
+		 * is what keeps a usage line landing mid-swipe from flipping
+		 * it early. Any morph that involves the view is a `jump`
+		 * (its page's session reading is -1), so the rings snap at
+		 * this same moment: the whole half changes in one frame.
+		 */
+		burn_sync();
 	}
 	morph_text_opa(t);
 
@@ -1663,6 +1736,405 @@ void usage_view_page_step(int delta)
 	lv_anim_start(&a);
 }
 
+/*
+ * THE FIVE-HOUR BURN VIEW (docs/plans/burn-5h.md).
+ *
+ * An account with no five-hour window -- Anthropic dropped it for verified
+ * Ultra accounts -- has nothing for the session gauge to say but "--%". On
+ * that page, while the daemon is sending `burn` lines, the left half shows
+ * what the account has been doing instead: output tokens over the trailing
+ * five hours, in twenty quarter-hour bars, with the total, which way the
+ * last hour is heading, and an hour axis in local time. The weekly gauge,
+ * the header, the pips, the pill and the rail do not change.
+ *
+ * ONE OBJECT THAT DRAWS ITSELF, not a widget per mark. Twenty bars, a
+ * baseline, five ticks, five hour numbers and five lines of text as LVGL
+ * objects would be about forty, and every one of them costs pool for its
+ * own struct and its local styles for as long as the screen exists. That
+ * pool is the budget the settings panel lives in on top of this screen,
+ * and it has been measured near empty with a popup stacked over Settings
+ * (prj.conf, CONFIG_LV_Z_MEM_POOL_SIZE). One object with no styles, drawn
+ * from burn_draw_cb() out of numbers worked out when the data changed,
+ * costs one struct. Created once, hidden or shown; nothing is allocated
+ * per frame by this file -- the draw tasks LVGL makes for each mark are
+ * the same ones forty widgets would make, and each is dispatched and freed
+ * as it is made (lv_draw_finalize_task_creation, no draw thread here).
+ *
+ * Measured on host LVGL (64-bit, so pointers count double; 2026-10-31):
+ * the gauge screen held 16,216 B before the view and 16,496 B with it,
+ * +280 B, the same whether the view is showing or not, and showing it
+ * leaves the screen's drawing peak where it was. The touch harness's
+ * Settings-over-gauges peak went from 37,728 to 38,032 B. The board's own
+ * figure is the "[mem] lvgl gauges" line (mem_stats.c).
+ *
+ * WHO HOLDS THE HALF is decided in burn_sync() and nowhere else, and only
+ * shown and hidden by layout_gauges(). The rule, from the contract: the
+ * page's session reading is unknown (s_pct < 0), a burn line for that
+ * page's provider arrived within the last 180 s, and the screen is the
+ * two-gauge one. A session reading coming back takes the half back at
+ * once -- render_gauges() asks on every usage line.
+ */
+
+/* The contract's window: the daemon re-sends at least every 60 s, so 180 is
+ * three missed lines before the view gives up. */
+#define BURN_FRESH_MS		(180 * 1000)
+
+/*
+ * The idle mark, in the glyph's place. The contract asks for an en dash,
+ * and no font this board links has one: LVGL's Montserrat carries ASCII,
+ * the degree sign, the bullet and its symbols, and anything else draws as
+ * an empty box (tests/test_panel_strings.py holds every string to that).
+ * The minus from the same symbol set as the three arrows is the mark that
+ * reads as "flat" at the arrows' own size and weight.
+ */
+#define BURN_IDLE_GLYPH		LV_SYMBOL_MINUS
+
+/*
+ * One line per provider, which is what the wire's `p` leaves room for: a
+ * daemon that one day sends a codex line beside the claude one must not have
+ * the two take turns overwriting each other, which with one slot would
+ * blink the claude page's view off every other line.
+ */
+#define BURN_SLOTS		RAIL_PAGES_MAX
+
+static struct {
+	struct burn5h m;
+	int64_t at_ms;			/* the uptime it arrived at */
+	bool have;
+} burn_slot[BURN_SLOTS];
+
+/* The board clock's UTC offset, for the hour axis; see usage_view.h. */
+static bool burn_off_known;
+static int32_t burn_off_min;
+
+/*
+ * What the draw callback paints, worked out once per change rather than per
+ * frame. Compared byte for byte in burn_sync() to decide whether anything
+ * needs redrawing, which is why burn_compose() zeroes it first: the padding
+ * has to agree as well as the fields.
+ */
+struct burn_drawn {
+	char total[BURN5H_TOKENS_MAX];
+	char rate[BURN5H_RATE_MAX];
+	const char *glyph;
+	bool accent;			/* the glyph in g1 rather than dim */
+	int16_t total_x, glyph_x;	/* the pair, centred as one group */
+	uint8_t bar_h[BURN5H_N];
+	char hour[BURN5H_N][3];		/* "" where a bucket starts no hour */
+};
+
+static struct burn_drawn bd;
+
+/*
+ * The view's colours.
+ *
+ * Dark's are the contract's bytes, and Dark is the only theme the contract
+ * names. Two of them are already Dark ROLES -- the arrow's #4387DF is g1 and
+ * the hour numbers' #6B7280 is grey -- so those two are read from the theme
+ * on every theme, like every other colour on this screen. The other four are
+ * a kind of mark this screen never had and no role describes, so Dark keeps
+ * the contract's exact values and every other theme gets the same
+ * RELATIONSHIPS from its own roles. Those are what the contract's values
+ * are, to within a few steps of RGB: the last hour is g1 a third of the way
+ * to the text colour, the older bars g1 a third of the way into the ground,
+ * the baseline and the ticks the track lifted 30% and 77% towards grey.
+ * Expressed that way the last hour is still the stronger mark on a white
+ * ground, where "brighter" would have made it the fainter one.
+ */
+struct burn_inks {
+	uint32_t hot;			/* the newest hour's four bars */
+	uint32_t cold;			/* the sixteen before them */
+	uint32_t base;			/* the baseline */
+	uint32_t tick;			/* the hour ticks */
+};
+
+static void burn_inks(struct burn_inks *k)
+{
+	const struct palette *p = theme_pal();
+
+	if (theme_active_id() == THEME_DARK) {
+		k->hot = 0x7FB2F0;
+		k->cold = 0x2D5C99;
+		k->base = 0x3A414B;
+		k->tick = 0x5C636B;
+		return;
+	}
+	k->hot = theme_mix(p->g1, p->text, 0.35);
+	k->cold = theme_mix(p->g1, p->bg, 0.35);
+	k->base = theme_mix(p->track, p->grey, 0.30);
+	k->tick = theme_mix(p->track, p->grey, 0.77);
+}
+
+static void burn_fill(lv_layer_t *layer, uint32_t rgb, int32_t x1, int32_t y1,
+		      int32_t x2, int32_t y2)
+{
+	lv_draw_fill_dsc_t f;
+	lv_area_t a = { .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2 };
+
+	lv_draw_fill_dsc_init(&f);
+	f.color = lv_color_hex(rgb);
+	f.opa = LV_OPA_COVER;
+	lv_draw_fill(layer, &f, &a);
+}
+
+/*
+ * One line of text in a box `w` wide and one line of `font` tall. Every
+ * string handed here is static -- bd's buffers or a literal -- so LVGL may
+ * keep the pointer until the task runs (text_local stays 0, no copy).
+ */
+static void burn_text(lv_layer_t *layer, const char *s, const lv_font_t *font,
+		      lv_color_t c, int32_t x1, int32_t y1, int32_t w,
+		      lv_text_align_t align)
+{
+	lv_draw_label_dsc_t t;
+	lv_area_t a = { .x1 = x1, .y1 = y1, .x2 = x1 + w - 1,
+			.y2 = y1 + lv_font_get_line_height(font) - 1 };
+
+	lv_draw_label_dsc_init(&t);
+	t.text = s;
+	t.font = font;
+	t.color = c;
+	t.align = align;
+	lv_draw_label(layer, &t, &a);
+}
+
+static void burn_draw_cb(lv_event_t *e)
+{
+	lv_layer_t *layer = lv_event_get_layer(e);
+	const struct palette *p = theme_pal();
+	struct burn_inks k;
+	int32_t x;
+
+	burn_inks(&k);
+
+	/* Bars first, then the baseline they stand on. An empty bucket draws
+	 * nothing at all: the baseline under it is the zero. */
+	for (int i = 0; i < BURN5H_N; i++) {
+		if (bd.bar_h[i] == 0) {
+			continue;
+		}
+		x = BURN_BAR_X0 + i * BURN_BAR_PITCH;
+		burn_fill(layer,
+			  i >= BURN5H_N - BURN5H_HOUR_N ? k.hot : k.cold,
+			  x, BURN_BASE_Y - bd.bar_h[i],
+			  x + BURN_BAR_W - 1, BURN_BASE_Y - 1);
+	}
+	burn_fill(layer, k.base, BURN_BAR_X0, BURN_BASE_Y,
+		  BURN_BAR_X0 + BURN5H_N * BURN_BAR_PITCH - 1, BURN_BASE_Y);
+
+	/* The hour axis: a tick at the left edge of each bucket that starts
+	 * a full local hour, its number centred under it. */
+	for (int i = 0; i < BURN5H_N; i++) {
+		if (bd.hour[i][0] == '\0') {
+			continue;
+		}
+		x = BURN_BAR_X0 + i * BURN_BAR_PITCH;
+		burn_fill(layer, k.tick, x, BURN_BASE_Y + 1, x,
+			  BURN_BASE_Y + BURN_TICK_H);
+		burn_text(layer, bd.hour[i], &lv_font_montserrat_14,
+			  lv_color_hex(p->grey), x - BURN_HOUR_W / 2,
+			  BURN_HOUR_CY - FONT_LINE_H / 2, BURN_HOUR_W,
+			  LV_TEXT_ALIGN_CENTER);
+	}
+
+	/*
+	 * The total and its arrow, from the positions burn_compose() measured.
+	 * Their boxes are wider than the text on purpose: a box exactly as
+	 * wide as its measured text is one rounding away from LVGL wrapping
+	 * the last glyph onto a line nobody sees.
+	 */
+	burn_text(layer, bd.total, &lv_font_montserrat_20, COL_TEXT,
+		  bd.total_x, BURN_TOTAL_CY - BURN_TOTAL_FONT_H / 2,
+		  BURN_TEXT_W, LV_TEXT_ALIGN_LEFT);
+	burn_text(layer, bd.glyph, &lv_font_montserrat_16,
+		  bd.accent ? lv_color_hex(p->g1) : COL_DIM,
+		  bd.glyph_x, BURN_GLYPH_CY - BURN_GLYPH_FONT_H / 2,
+		  BURN_GLYPH_FONT_H * 2, LV_TEXT_ALIGN_LEFT);
+	burn_text(layer, "tokens " FMT_BULLET " 5h", &lv_font_montserrat_14,
+		  COL_DIM, BURN_CX - BURN_TEXT_W / 2,
+		  BURN_UNIT_CY - FONT_LINE_H / 2, BURN_TEXT_W,
+		  LV_TEXT_ALIGN_CENTER);
+
+	/* Where "SESSION 5h" and its countdown sit on the gauge. */
+	burn_text(layer, "BURN 5h", &lv_font_montserrat_14, COL_DIM,
+		  BURN_CX - BURN_TEXT_W / 2, GAUGE_NAME_Y, BURN_TEXT_W,
+		  LV_TEXT_ALIGN_CENTER);
+	burn_text(layer, bd.rate, &lv_font_montserrat_14, COL_DIM,
+		  BURN_CX - BURN_TEXT_W / 2, GAUGE_CD_Y, BURN_TEXT_W,
+		  LV_TEXT_ALIGN_CENTER);
+}
+
+static void burn_build(lv_obj_t *parent)
+{
+	burn_obj = lv_obj_create(parent);
+	/*
+	 * No styles at all, the theme's included: a plain object would wear
+	 * the default theme's card -- a fill, a border, padding -- and each of
+	 * those is pool. With none, it draws nothing of its own and is
+	 * transparent over the screen's ground.
+	 */
+	lv_obj_remove_style_all(burn_obj);
+	lv_obj_set_pos(burn_obj, BURN_OBJ_X, BURN_OBJ_Y);
+	lv_obj_set_size(burn_obj, BURN_OBJ_W, BURN_OBJ_H);
+	/*
+	 * Not clickable, and gestures bubble: lv_obj_create() sets CLICKABLE,
+	 * and LVGL's hit test walks children back to front, so a clickable box
+	 * over the left half would swallow the swipes this screen is driven by
+	 * -- the lesson the rail dots and the pip row both record.
+	 */
+	lv_obj_clear_flag(burn_obj, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_clear_flag(burn_obj, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_add_flag(burn_obj, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_flag(burn_obj, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_add_event_cb(burn_obj, burn_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+}
+
+static int burn_slot_for(const char *tag)
+{
+	if (tag == NULL || tag[0] == '\0') {
+		return -1;
+	}
+	for (int i = 0; i < BURN_SLOTS; i++) {
+		if (burn_slot[i].have && strcmp(burn_slot[i].m.p, tag) == 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static bool burn_fresh(int s)
+{
+	return burn_slot[s].have &&
+	       k_uptime_get() - burn_slot[s].at_ms <= BURN_FRESH_MS;
+}
+
+static void burn_compose(const struct burn5h *m, struct burn_drawn *d)
+{
+	enum burn5h_dir dir = burn5h_direction(m);
+	uint32_t max = 0;
+	lv_point_t tw, gw;
+	int32_t group;
+
+	memset(d, 0, sizeof(*d));
+	burn5h_fmt_tokens(burn5h_total(m), d->total, sizeof(d->total));
+	burn5h_fmt_rate(m, d->rate, sizeof(d->rate));
+	d->glyph = dir == BURN5H_RISING   ? LV_SYMBOL_UP
+		 : dir == BURN5H_EASING   ? LV_SYMBOL_DOWN
+		 : dir == BURN5H_STEADY   ? LV_SYMBOL_RIGHT
+					  : BURN_IDLE_GLYPH;
+	d->accent = dir == BURN5H_RISING || dir == BURN5H_EASING;
+
+	for (int i = 0; i < BURN5H_N; i++) {
+		max = MAX(max, m->b[i]);
+	}
+	for (int i = 0; i < BURN5H_N; i++) {
+		int h = burn_off_known ? burn5h_hour(m->q, i, burn_off_min)
+				       : -1;
+
+		d->bar_h[i] = (uint8_t)burn5h_bar_h(m->b[i], max,
+						    BURN_BAR_MAX_H,
+						    BURN_BAR_MIN_H);
+		/* By hand rather than snprintf: two digits at most, and
+		 * that is plainer than a format the compiler has to be
+		 * persuaded fits in three bytes. */
+		if (h >= 10) {
+			d->hour[i][0] = (char)('0' + h / 10);
+			d->hour[i][1] = (char)('0' + h % 10);
+		} else if (h >= 0) {
+			d->hour[i][0] = (char)('0' + h);
+		}
+	}
+
+	/* The pair is centred as one group; see BURN_GLYPH_GAP. Measured, as
+	 * refresh_dots() measures its tallies: Montserrat's digits are
+	 * proportional, so "111k" and "444k" are different widths. */
+	lv_text_get_size(&tw, d->total, &lv_font_montserrat_20, 0, 0,
+			 LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+	lv_text_get_size(&gw, d->glyph, &lv_font_montserrat_16, 0, 0,
+			 LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+	group = tw.x + BURN_GLYPH_GAP + gw.x;
+	d->total_x = (int16_t)(BURN_CX - group / 2);
+	d->glyph_x = (int16_t)(d->total_x + tw.x + BURN_GLYPH_GAP);
+}
+
+/*
+ * Who holds the left half, decided from the current state, and redrawn only
+ * if what it shows has changed. Safe to call from anywhere, any number of
+ * times: every path that could change the answer -- a usage reading, a burn
+ * line, a page change reaching its midpoint, Focus, a provider's name, the
+ * UTC offset, the 180 s running out -- calls this, and none of them decides
+ * anything for itself.
+ */
+static void burn_sync(void)
+{
+	struct burn_drawn d;
+	int s = -1;
+
+	if (!built || burn_obj == NULL) {
+		return;
+	}
+	/*
+	 * Not while a page change is short of its midpoint. Until then the
+	 * screen is still showing the page being LEFT -- its words are fading
+	 * out and, in a jump, its rings have not moved -- and cur_page has
+	 * already advanced, so answering now would put the arriving page's
+	 * left half beside the departing page's everything else. morph_exec
+	 * asks again at the midpoint and morph_done at the end.
+	 */
+	if (!morph.swapped && lv_anim_get(NULL, morph_exec) != NULL) {
+		return;
+	}
+
+	if (!focus_on && pg[cur_page].have && pg[cur_page].s_pct < 0) {
+		s = burn_slot_for(page_tag(cur_page));
+		if (s >= 0 && !burn_fresh(s)) {
+			s = -1;
+		}
+	}
+	if (s >= 0) {
+		burn_compose(&burn_slot[s].m, &d);
+		if (!burn_on || memcmp(&d, &bd, sizeof(d)) != 0) {
+			bd = d;
+			lv_obj_invalidate(burn_obj);
+		}
+	}
+	if ((s >= 0) != burn_on) {
+		burn_on = s >= 0;
+		layout_gauges();
+	}
+}
+
+void usage_view_set_burn5h(const struct burn5h *m, int64_t at_ms)
+{
+	int s = burn_slot_for(m->p);
+
+	if (s < 0) {
+		/* A provider not seen before: an empty slot, else whichever
+		 * was heard from longest ago. */
+		s = 0;
+		for (int i = 0; i < BURN_SLOTS; i++) {
+			if (!burn_slot[i].have) {
+				s = i;
+				break;
+			}
+			if (burn_slot[i].at_ms < burn_slot[s].at_ms) {
+				s = i;
+			}
+		}
+	}
+	burn_slot[s].m = *m;
+	burn_slot[s].at_ms = at_ms;
+	burn_slot[s].have = true;
+	burn_sync();
+}
+
+void usage_view_set_utc_offset(int32_t off_min)
+{
+	burn_off_min = off_min;
+	burn_off_known = true;
+	burn_sync();
+}
+
 
 /*
  * A window whose reset moment has passed is over, whatever percentage came
@@ -1830,6 +2302,19 @@ void usage_view_tick_1s(void)
 		render_countdown(&weekly);
 	}
 	refresh_rail();
+
+	/*
+	 * A burn view whose line has gone quiet for 180 s gives the half back
+	 * to "--%". Nothing arrives to say so -- the daemon simply stops
+	 * sending when the account gets a session window again, or stops
+	 * altogether -- so, like the status-page hold below, this tick is the
+	 * only thing that can notice. Only while the view is up: an unshown
+	 * one can only become wanted when a line or a usage reading arrives,
+	 * and both of those ask for themselves.
+	 */
+	if (burn_on) {
+		burn_sync();
+	}
 
 	/*
 	 * A status-page incident clears by itself: the daemon re-states it
@@ -2421,6 +2906,13 @@ void usage_view_set_provider1(const char *tag)
 	 * not the ring position. */
 	snprintf(provider1_tag, sizeof(provider1_tag), "%s", tag ? tag : "");
 	refresh_provider1();
+	/*
+	 * The burn view finds its page by this tag, and proto.c sets it AFTER
+	 * usage_view_update() has already rendered the page -- so on the
+	 * first usage line of a connection the page had no name yet when it
+	 * was asked whether a burn line was its own.
+	 */
+	burn_sync();
 }
 
 void usage_view_set_provider2(const char *tag, double session_pct,
