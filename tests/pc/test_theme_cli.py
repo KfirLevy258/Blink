@@ -1,6 +1,8 @@
 """`blink theme` and its subcommands. ~ is tmp_path (tests/conftest.py)."""
 import json
 import os
+import signal
+import sys
 import threading
 import urllib.parse
 import http.client
@@ -246,6 +248,47 @@ def test_ctrl_c_in_bare_theme_cancels_without_an_unbounded_wait(
     assert cli.main(["theme"]) == 0
     assert "Cancelled." in capsys.readouterr().out
     assert theme.take_preview(home()) == ("cancel", None)
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="signals other than Ctrl-C are POSIX")
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_a_closed_terminal_or_a_kill_cancels_like_ctrl_c(name, monkeypatch,
+                                                         capsys):
+    """Review of 1.4.0 (builder), N10: closing the terminal window (SIGHUP)
+    or a kill (SIGTERM) ended `blink theme` without a cancel, so the last
+    preview stayed on the board until its own 15 minute backstop, and with
+    no bridge running it stayed in theme_preview.json for the next start to
+    send. The daemon turns SIGTERM into an ordinary exit for the same
+    reason (exit_on_sigterm).
+
+    The signal is sent to this process, so the test first puts a handler of
+    its own on it: without the fix the signal is then only recorded, and the
+    test fails instead of the signal ending pytest. A timer ends the wait
+    after 3 s for the same reason."""
+    import _thread
+    sig = getattr(signal, name)
+    heard = []
+
+    def stand_in(signum, frame):
+        heard.append(signum)
+    before = signal.signal(sig, stand_in)
+    backstop = threading.Timer(3, _thread.interrupt_main)
+    try:
+        def opener(url):
+            threading.Timer(0.3, os.kill, (os.getpid(), sig)).start()
+            backstop.start()
+            return True
+
+        monkeypatch.setattr(theme_server, "open_url", opener)
+        assert cli.main(["theme"]) == 0
+        assert heard == []
+        assert "Cancelled." in capsys.readouterr().out
+        assert theme.take_preview(home()) == ("cancel", None)
+        assert signal.getsignal(sig) is stand_in      # put back
+    finally:
+        backstop.cancel()
+        signal.signal(sig, before)
 
 
 def test_a_missing_page_is_one_sentence(monkeypatch, capsys):

@@ -18,11 +18,13 @@ because it unpacks itself first -- that delay would land in the customer's
 prompt. A few lines of sh start in single-digit milliseconds.
 """
 import argparse
+import contextlib
 import glob
 import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -4265,6 +4267,41 @@ def _theme_lines(t):
             f"Share code:     {theme_mod.to_share_code(t)}"]
 
 
+@contextlib.contextmanager
+def _signals_cancel():
+    """While `blink theme` runs, a closed terminal or a kill ends it the way
+    Ctrl-C does, so the cancel is written.
+
+    SIGHUP (the terminal window closed) and SIGTERM killed the process on
+    the spot, and the preview stayed on the board until its own 15 minute
+    backstop; with no bridge running it stayed in theme_preview.json for the
+    next start to send (review of 1.4.0, builder N10). The daemon makes the
+    same turn for SIGTERM (exit_on_sigterm). SIGBREAK is Ctrl-Break on
+    Windows, which the C runtime also raises when a console window is
+    closed; whether that leaves time to write the cancel was not measured.
+    The handlers are put back afterwards, and nothing is installed off the
+    main thread, where signal.signal refuses."""
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+    old = {}
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            old[sig] = signal.signal(sig, stop)
+        except (ValueError, OSError):
+            pass
+    try:
+        yield
+    finally:
+        for sig, handler in old.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
+
+
 def _theme_builder(home) -> int:
     """`blink theme`: the builder, in the foreground, until it finishes."""
     try:
@@ -4284,12 +4321,13 @@ def _theme_builder(home) -> int:
     print(f"If it does not open, go to this link on this computer: {url}")
     print("Save or cancel there. Closing the tab cancels, and so does Ctrl-C"
           " here.")
-    if not theme_server.open_url(url):
-        print("No browser opened here, so use the link above.")
     try:
-        # In slices: see wait_interruptibly, or Ctrl-C does nothing on
-        # Windows.
-        outcome = server.wait_interruptibly()
+        with _signals_cancel():
+            if not theme_server.open_url(url):
+                print("No browser opened here, so use the link above.")
+            # In slices: see wait_interruptibly, or Ctrl-C does nothing on
+            # Windows.
+            outcome = server.wait_interruptibly()
     except KeyboardInterrupt:
         server.finish("cancelled")
         outcome = server.wait(5)
