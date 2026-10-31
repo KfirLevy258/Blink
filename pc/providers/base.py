@@ -182,10 +182,12 @@ class NormalizedUsageFrame:
     # after observed_at. observed_at itself, and every age derived from it
     # (the wire's age_s, staleness), mean what they always meant.
     first_seen_at: object = None
-    # This provider's account has NO session window, and this fresh frame is
-    # the evidence: the status line is rendering and its rate_limits carries
-    # a weekly figure and no five_hour key at all. Verified Ultra accounts
-    # (2026-10-30) look like this, permanently.
+    # This provider's account has NO session window. The status line's
+    # rate_limits carried a weekly figure and no five_hour key at all, and no
+    # payload since has carried one. Verified Ultra accounts (2026-10-30) look
+    # like this, permanently. A latch held by the provider, so it is true of
+    # a stale frame and of one whose own payload had no rate_limits too; the
+    # frame's age is its own business.
     #
     # The frame says it rather than leaving pc/normalizer to infer it from
     # session_pct == UNKNOWN, because that value also means "the window
@@ -194,7 +196,7 @@ class NormalizedUsageFrame:
     # whatever it borrowed (a remembered payload, a Claude Desktop sample two
     # days old) describes a window the account does not have. Only the
     # provider that holds the payload and its memory can tell them apart --
-    # see ClaudeCliProvider._lacks_session_window, which owns that decision.
+    # see ClaudeCliProvider._note_window_shape, which owns that decision.
     # pc/normalizer.merge owns what the decision means, and carries it on the
     # merged frame so merging a merged frame stays valid.
     no_session_window: bool = False

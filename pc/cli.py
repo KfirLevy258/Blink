@@ -42,6 +42,7 @@ from pc import theme_server
 # and a test has to be able to replace it without a real slot directory in
 # reach -- the scan behind it deletes files.
 from pc.providers import codex_state
+from pc.providers.claude_cli import ClaudeCliProvider
 from pc.version import RELEASE_VERSION
 
 # Resolved per call, not at import. These used to be module constants, which
@@ -3645,9 +3646,31 @@ def cmd_status(args) -> int:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
     _source_lines(desk)
+    _session_window_line()
     if getattr(args, "wire", False):
         _wire_line()
     return 0
+
+
+def _session_window_line():
+    """Say so when the daemon is treating this account as having no
+    five-hour window.
+
+    The rule is inferred from the absence of a key (ClaudeCliProvider.
+    _note_window_shape), so a vendor rename of five_hour that kept seven_day
+    would switch it on for every Pro and Max desk with nothing on screen but
+    a "--%" dial. Where Claude Desktop is running the normalizer lifts the
+    rule by itself; this line is for the desks where it does not, and it is
+    what support asks for first. Shown only when active, from a fresh read
+    of the status line exactly as the daemon would hold it after a restart.
+    """
+    try:
+        frames = ClaudeCliProvider().poll(time.time())
+    except Exception:
+        return
+    if any(f.no_session_window for f in frames):
+        print("Session     no five-hour window (Claude Code reports weekly"
+              " only)")
 
 
 def _wire_line():

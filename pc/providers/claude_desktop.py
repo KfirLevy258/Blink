@@ -37,6 +37,22 @@ SRC_ID = "desktop"
 # app as live.
 STALE_AFTER_S = 1800
 
+# How old a session reading may be before this source stops offering it.
+#
+# A five-hour window that was open when the sample was taken has certainly
+# ended five hours later, and ten minutes of slack covers a sample taken at
+# the very start of the clock and the app's five-minute write interval. This
+# source has no reset stamps to say so itself, so without a bound the figure
+# stayed on the bus for as long as the file did: on 2026-10-30 a sample from
+# 37 hours before a verified Ultra account stopped having a window was still
+# filling the session dial, and it is the same shape on a restarted daemon,
+# which has no memory that would veto it. Past the bound the session is
+# UNKNOWN (and rateless: the rate is refused past BURN_MAX_GAP_S anyway), and
+# the weekly figure, which lasts seven days, is kept. `stale` is a separate
+# and earlier judgement (half an hour): between the two the number is shown,
+# honestly aged.
+SESSION_RETIRE_AFTER_S = 5 * 3600 + 600
+
 # Milliseconds, per the module docstring. Named rather than inlined so the
 # unit is stated at every use.
 MS_PER_S = 1000.0
@@ -469,9 +485,15 @@ class ClaudeDesktopProvider(base.ProviderParser):
             sample_at = observed_at if observed_at is not None else now_epoch
 
         stale = (now_epoch - sample_at) > self._stale_after
+        session_pct = fields["session_pct"]
+        if (now_epoch - sample_at) > SESSION_RETIRE_AFTER_S:
+            # No rate to retire with it: session_burn_pph refuses any series
+            # whose newest sample is over BURN_MAX_GAP_S old, so by this age
+            # `burn` is already None (pinned in test_no_session_window).
+            session_pct = base.UNKNOWN
         return base.NormalizedUsageFrame(
             provider=PROVIDER_ID, src=SRC_ID, observed_at=sample_at,
-            session_pct=fields["session_pct"],
+            session_pct=session_pct,
             weekly_pct=fields["weekly_pct"],
             # No reset timestamps in this source at all -- see the module
             # docstring. None, not a guess.

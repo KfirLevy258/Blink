@@ -2135,3 +2135,26 @@ def test_launchd_not_loaded_names_the_frozen_service_from_a_checkout(
     line = cli._LaunchdBackend().status()
     assert line == (f"installed but not loaded -- run "
                     f"`{cli._quote_line(want)} install` to start it")
+
+
+def test_status_says_when_the_account_has_no_five_hour_window(
+        tmp_path, capsys):
+    """The no-window rule is inferred from an absent key, so a vendor rename
+    of five_hour that kept seven_day would turn it on for every Pro and Max
+    desk with only a "--%" dial to show for it. This line is how support
+    tells the two apart (review, 2026-10-31)."""
+    from tests.pc.test_claude_cli import payload
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    status = tmp_path / ".blink" / "statusline.json"
+    status.write_text(json.dumps(payload(five_hour=None, seven_day=2.0)))
+    capsys.readouterr()
+
+    assert cli.main(["status"]) == 0
+    assert ("Session     no five-hour window (Claude Code reports weekly"
+            " only)") in capsys.readouterr().out
+
+    status.write_text(json.dumps(payload(five_hour=27.0,
+                                         resets_at=time.time() + 3600)))
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out

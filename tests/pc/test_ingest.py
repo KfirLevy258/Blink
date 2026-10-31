@@ -553,7 +553,15 @@ def test_two_real_files_reach_the_wire_together(tmp_path):
         now=lambda: now)
     msg = bus.poll()
     assert msg["provider"] == "claude" and msg["src"] == "desktop"
-    assert msg["session_pct"] == 24.0 and msg["weekly_pct"] == 25.0
+    # The sample is 5 h 55 m old, and its 24.0 describes a five-hour window
+    # that was open when it was taken and has certainly ended since: the
+    # Desktop cache has no reset stamps to say so, so the provider retires a
+    # session reading after 5 h + 10 min (claude_desktop.SESSION_RETIRE_
+    # AFTER_S) rather than carry it for as long as the file lives. This used
+    # to pin 24.0; that was the same borrowed-and-aged number that told an
+    # Ultra desk its live data was 37 hours old. The weekly figure outlives
+    # the session window by days and is kept.
+    assert msg["session_pct"] == -1.0 and msg["weekly_pct"] == 25.0
     assert msg["session_resets_in_s"] == -1          # Desktop has none
     assert msg["stale"] is True                       # six hours old
     assert "burn_pph" not in msg                      # no rate off a stale file
@@ -707,10 +715,21 @@ def test_a_five_hour_window_that_ended_leaves_the_dial_empty_not_wrong(tmp_path)
     clock has passed it.
 
     That reading is not old, it is about a window that no longer exists, so
-    the dial goes to unknown rather than showing usage the account has
-    already been forgiven. Everything else on the message survives: the
-    seven-day figure from the live rewrite, and an active age that keeps the
-    board awake for the person sitting in front of it.
+    the dial goes to empty (fresh) or unknown (stale) rather than showing
+    usage the account has already been forgiven. Everything else on the
+    message survives: the seven-day figure from the live rewrite, and an
+    active age that keeps the board awake for the person sitting in front of
+    it.
+
+    The rewrite KEEPS its five_hour key, with the ended stamp. It used to
+    drop the key, and that stopped exercising base.settle_window the moment a
+    payload with no five_hour key was read as "this account has no window"
+    (ClaudeCliProvider._note_window_shape): the dial was blank for that
+    reason and settle_window could be broken without this test noticing.
+    Two phases, one per way it breaks. A fresh file must read 0, not the
+    pre-reset 27 (a settle that keeps the figure of an ended window); an old
+    one must read unknown, not 27 (a settle that skips a stale payload, the
+    2026-09-02 shape).
     """
     import os
 
@@ -724,20 +743,34 @@ def test_a_five_hour_window_that_ended_leaves_the_dial_empty_not_wrong(tmp_path)
     now = [NOW - 12 * 3600 + 1]
     bus = ingest.IngestionBus(providers=[cli], now=lambda: now[0])
 
-    write({"rate_limits": {"five_hour": {"used_percentage": 27.0,
-                                         "resets_at": NOW - 10 * 3600},
+    ended = {"used_percentage": 27.0, "resets_at": NOW - 10 * 3600}
+    write({"rate_limits": {"five_hour": ended,
                            "seven_day": {"used_percentage": 26.0}}},
           NOW - 12 * 3600)
     assert bus.poll()["session_pct"] == 27.0     # still inside its window
 
-    write({"rate_limits": {"seven_day": {"used_percentage": 41.0}}}, NOW - 5)
     now[0] = NOW
+    write({"rate_limits": {"five_hour": ended,
+                           "seven_day": {"used_percentage": 41.0}}}, NOW - 5)
     msg = bus.poll()
 
-    assert msg["session_pct"] == -1.0
+    assert msg["session_pct"] == 0.0             # empty, not forgiven 27
     assert msg["session_resets_in_s"] == -1
     assert msg["weekly_pct"] == 41.0
     assert msg["active_age_s"] == 5
+
+    # A new daemon for the second phase: the first one remembers its own 0.
+    bus = ingest.IngestionBus(
+        providers=[ClaudeCliProvider(path=str(p))], now=lambda: now[0])
+    write({"rate_limits": {"five_hour": ended,
+                           "seven_day": {"used_percentage": 41.0}}},
+          NOW - 3600)
+    msg = bus.poll()
+
+    assert msg["session_pct"] == -1.0            # unknown, not 27
+    assert msg["session_resets_in_s"] == -1
+    assert msg["weekly_pct"] == 41.0
+    assert msg["active_age_s"] == 3600
 
 
 # --- Task 10 fix round 1: the learning wiring, and the account boundary ----
