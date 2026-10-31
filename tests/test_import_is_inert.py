@@ -73,6 +73,23 @@ def _exits(run):
     return [ln for ln in run.stdout.splitlines() if ln.startswith("EXIT ")]
 
 
+def assert_stubs_shadow(bindir, env):
+    """Every service tool resolves to its stub in `env`, or the test stops.
+
+    One `command -v` per tool: dash, which is /bin/sh on Debian and Ubuntu,
+    answers only for the first operand of `command -v a b c`, so the three at
+    once passed on macOS and failed on the Linux runners (CI run
+    41192997263). `command -v` is a builtin, so it needs no PATH of its own;
+    the script is the same on every POSIX shell."""
+    for tool in SERVICE_TOOLS:
+        seen = subprocess.run(
+            ["/bin/sh", "-c", 'command -v "$1"', "sh", tool],
+            env=env, capture_output=True, text=True, timeout=30)
+        assert seen.stdout.strip() == str(bindir / tool), (
+            "the stub for %s does not shadow the real tool; refusing to"
+            " import: %r" % (tool, seen.stdout))
+
+
 def _modules():
     mods = ["blink_main", "claude_usage_bridge"]
     for p in sorted((ROOT / "pc").rglob("*.py")):
@@ -100,12 +117,7 @@ def _import_in_a_child(tmp_path, modules):
     }
     # The stubs must be what a bare name resolves to, or this test is the
     # incident. `command -v` is a builtin, so it needs no PATH of its own.
-    seen = subprocess.run(
-        ["/bin/sh", "-c", "command -v launchctl systemctl schtasks"],
-        env=env, capture_output=True, text=True, timeout=30)
-    assert seen.stdout.split() == [str(bindir / t) for t in SERVICE_TOOLS], (
-        "the stubs do not shadow the real tools; refusing to import: "
-        + seen.stdout)
+    assert_stubs_shadow(bindir, env)
     try:
         run = subprocess.run(
             [sys.executable, "-s", "-c", _CHILD, *modules], cwd=ROOT,
@@ -168,3 +180,14 @@ def test_the_dash_m_branch_still_runs_a_module(tmp_path):
          "this"], env=env, capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert "Zen of Python" in out.stdout
+
+
+def test_the_shadow_check_refuses_a_stub_that_is_missing(tmp_path):
+    """The check is only worth its place if it can fail: a PATH with a stub
+    for two of the three tools, or none, is refused, on every shell."""
+    bindir, _log = _stub_path(tmp_path)
+    (bindir / "systemctl").unlink()
+    with pytest.raises(AssertionError, match="systemctl"):
+        assert_stubs_shadow(bindir, {"PATH": str(bindir)})
+    with pytest.raises(AssertionError, match="launchctl"):
+        assert_stubs_shadow(bindir, {"PATH": str(tmp_path)})

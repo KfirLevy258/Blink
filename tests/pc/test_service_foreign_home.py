@@ -122,7 +122,8 @@ def test_install_under_a_scratch_home_never_reaches_the_service_manager(
     import subprocess
     import sys
 
-    from tests.test_import_is_inert import ROOT, SERVICE_TOOLS, _stub_path
+    from tests.test_import_is_inert import (
+        ROOT, _stub_path, assert_stubs_shadow)
 
     if cli._account_home() is None:
         pytest.skip("this uid has no passwd entry, so no account home")
@@ -131,10 +132,7 @@ def test_install_under_a_scratch_home_never_reaches_the_service_manager(
     home.mkdir()
     env = {"PATH": str(bindir), "HOME": str(home),
            "PYTHONDONTWRITEBYTECODE": "1", "BLINK_SKIP_DEPS": "1"}
-    seen = subprocess.run(
-        ["/bin/sh", "-c", "command -v " + " ".join(SERVICE_TOOLS)],
-        env=env, capture_output=True, text=True, timeout=30)
-    assert seen.stdout.split() == [str(bindir / t) for t in SERVICE_TOOLS]
+    assert_stubs_shadow(bindir, env)
 
     out = subprocess.run(
         [sys.executable, "-s", str(ROOT / "blink_main.py"), "install"],
