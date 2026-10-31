@@ -454,11 +454,11 @@ class TestEsptoolTextStaysOut(unittest.TestCase):
     matching esptool's message, or an exit code, or an exception's class.
     """
 
-    MAC = "20:50:0d:33:40:dc"
+    MAC = "02:00:00:00:00:01"
     NOISE = ("A fatal error occurred: Failed to connect to ESP32: Invalid"
              " head of packet (0x41): Possible serial noise or corruption.")
     CHIP = ("Connected to ESP32 on /dev/cu.fake:\nChip type: ESP32-D0WD-V3\n"
-            "MAC: 20:50:0d:33:40:dc\nStub flasher running.\n")
+            "MAC: 02:00:00:00:00:01\nStub flasher running.\n")
 
     def setUp(self):
         self._tools = (ota._esptool, ota._efuse_probe)

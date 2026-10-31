@@ -492,7 +492,10 @@ def test_a_second_builder_is_not_started_beside_a_running_one(monkeypatch,
         assert cli.main(["theme"]) == 1
         out = capsys.readouterr().out
         assert "already open" in out
-        assert "Edit on computer" in out          # how to get its tab back
+        # What the board shows while the app's builder is open, not a tap the
+        # held button would refuse.
+        assert "Editing on your computer" in out
+        assert "opens its tab again" not in out
         assert theme.take_preview(h) == ("preview", {"id": 4})
     finally:
         first.finish("test over")

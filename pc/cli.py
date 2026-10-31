@@ -4397,13 +4397,17 @@ def _theme_builder(home) -> int:
     # one (a cancel, a closed tab, ten minutes idle) took the other's live
     # preview off the board while its tab still said "Preview sent" (review
     # of 1.4.0, builder N1). The app's own builder, opened from the board,
-    # counts, and so does another `blink theme`.
+    # counts, and so does another `blink theme`. The refusal once said Edit
+    # on computer would reopen the app's tab; with the held button the board
+    # refuses that tap for exactly as long as this refusal can be printed
+    # (final review of 1.4.0, SHOULD 1), so it now says what the board shows.
     if theme_server.running_builder(home) is not None:
         print("A theme builder is already open on this computer, from the"
               " app or from another blink theme. Use its tab, or close it"
               " first; it stops by itself after ten minutes with no change."
-              " If it is the app's, Edit on computer on the board opens its"
-              " tab again.")
+              " If it is the app's, the board shows Editing on your"
+              " computer while it is open, and Edit on computer comes back"
+              " once its tab is closed.")
         return 1
     try:
         server = theme_server.BuilderServer(home)

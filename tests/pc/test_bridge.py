@@ -456,7 +456,7 @@ class SessionMessageIsSent(unittest.TestCase):
 
     def test_a_name_alone_does_not_re_send_the_usage_line(self):
         """The tick's whole reason for comparing: the fully-loaded usage line
-        is 450 of the 512 bytes the firmware accepts, and the name has its
+        is 454 of the 512 bytes the firmware accepts, and the name has its
         own message precisely so it need not ride one."""
         self.bridge.poll_once()
         self.sent.clear()

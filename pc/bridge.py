@@ -970,7 +970,7 @@ class Bridge:
         0.0004 s; a poll costs a stat per file plus a fresh parse of whatever
         Chromium actually rewrote -- ordinarily just the small .log.
 
-        Writing was never free either: the fully-loaded usage line runs to 450
+        Writing was never free either: the fully-loaded usage line runs to 454
         of the 512 bytes the firmware will accept (tests/pc/test_protocol.py
         holds the figure), and putting one on the wire
         every two seconds when nothing changed is thirty times the traffic
