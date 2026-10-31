@@ -25,25 +25,42 @@
 /* Twenty buckets of fifteen minutes: the trailing five hours. */
 #define BURN5H_N		20
 #define BURN5H_BUCKET_S		900
-/* The newest four buckets are "the last hour"; the four before them are the
- * hour it is compared against. */
+/* Four buckets make an hour: the newest four are the bars drawn brighter. */
 #define BURN5H_HOUR_N		4
+
+/*
+ * The hours the direction and the rate are worked out from, by their first
+ * bucket: complete quarter-hours only. The newest bucket (19) is the one the
+ * daemon's clock is in, still filling, so it is drawn but never compared.
+ * The last hour is buckets 15-18 and the hour before it 11-14.
+ *
+ * It used to be 16-19 against 12-15, and the review of 2026-10-31 measured
+ * what that cost: a quarter-hour that has run for m minutes holds m/15 of a
+ * full one, so a desk writing at an even pace read "easing" for the first
+ * 9 minutes of every quarter-hour -- 45k plus 1k a minute against 60k is
+ * under 54k until minute 9.
+ */
+#define BURN5H_LAST_FROM	(BURN5H_N - 1 - BURN5H_HOUR_N)
+#define BURN5H_PREV_FROM	(BURN5H_LAST_FROM - BURN5H_HOUR_N)
 
 /* The provider tag, NUL included -- the size of the page tags in
  * usage_view.c, which is what it is compared against. */
 #define BURN5H_TAG_MAX		12
 
 /*
- * One bucket's ceiling, in thousands of output tokens: ten billion tokens in
- * fifteen minutes, around a thousand times what a busy desk writes. A value
- * past it is not a reading, it is a misparse on one side or the other, and
- * the line it rides on is refused whole.
+ * One bucket's ceiling, in output tokens: a hundred million in fifteen
+ * minutes, more than a hundred times the heaviest quarter-hour the dev
+ * desk has written (under a million). pc/protocol.py caps what it sends at
+ * the same figure (BURN_MAX), so a value past it is not a reading but a
+ * misparse on one side or the other, and the line it rides on is refused
+ * whole.
  *
- * It also bounds the arithmetic. Twenty of these sum to under 2e8, so a
- * total, an hour, and a bar height (a bucket times BURN5H_BAR_MAX_H at most)
- * all stay inside 32 bits with room to spare.
+ * It also bounds the arithmetic. Twenty of these sum to 1,999,999,980, so
+ * the total and an hour fit 32 bits unsigned; what does not -- an hour
+ * times eleven, a bucket times a bar's height in pixels -- is worked in
+ * 64 bits where it is worked.
  */
-#define BURN5H_BUCKET_MAX	9999999u
+#define BURN5H_BUCKET_MAX	99999999u
 
 /*
  * `q` is a quarter-hour of epoch time, and nothing outside the window the
@@ -54,7 +71,7 @@
 struct burn5h {
 	char p[BURN5H_TAG_MAX];		/* whose page this belongs to */
 	int64_t q;			/* epoch s: the NEWEST bucket's start */
-	uint32_t b[BURN5H_N];		/* thousands of output tokens, oldest first */
+	uint32_t b[BURN5H_N];		/* output tokens, exact, oldest first */
 };
 
 /*
@@ -71,12 +88,15 @@ struct burn5h {
  */
 bool burn5h_parse(const char *json, struct burn5h *out);
 
-/* All twenty buckets, and the newest four, in thousands of tokens. */
+/* All twenty buckets, and the last complete hour (BURN5H_LAST_FROM), in
+ * tokens. */
 uint32_t burn5h_total(const struct burn5h *m);
 uint32_t burn5h_last_hour(const struct burn5h *m);
 
 /*
- * Which way it is heading: the last hour against the hour before.
+ * Which way it is heading: the last complete hour against the one before
+ * it (BURN5H_LAST_FROM against BURN5H_PREV_FROM; the quarter-hour still
+ * filling is not compared).
  *
  *   both zero                    -> IDLE
  *   before zero, now above zero  -> RISING
@@ -99,24 +119,27 @@ enum burn5h_dir burn5h_direction(const struct burn5h *m);
 const char *burn5h_word(enum burn5h_dir d);
 
 /*
- * Thousands of tokens, the way the panel writes them:
+ * Tokens, the way the panel writes them:
  *
  *   0                 -> "0"
- *   412               -> "412k"
- *   2149              -> "2.1M"      one decimal below ten
- *   23400             -> "23M"
- *   2149000           -> "2.1B"
+ *   412               -> "412"       under a thousand, as they are
+ *   2149              -> "2.1k"      one decimal below ten of a unit
+ *   412000            -> "412k"
+ *   2149000           -> "2.1M"
+ *   23400000          -> "23M"
+ *   1999999980        -> "2.0B"      twenty buckets at the ceiling
  *
- * Four characters at most -- "999k", "9.9M", "999M" -- so the total never
- * outgrows the room beside its glyph.
+ * Four characters at most -- "999", "9.9k", "999k", "999M" -- so the total
+ * never outgrows the room beside its glyph.
  */
 #define BURN5H_TOKENS_MAX	8
-void burn5h_fmt_tokens(uint32_t k, char *buf, size_t buflen);
+void burn5h_fmt_tokens(uint32_t tokens, char *buf, size_t buflen);
 
 /*
- * The line where the session countdown sits: the last hour as a rate, and
- * which way it is going -- "1.1M/h <bullet> rising", "0/h <bullet> idle".
- * "999M/h <bullet> steady" is the longest, 17 bytes with the bullet's three.
+ * The line where the session countdown sits: the last complete hour as a
+ * rate, and which way it is going -- "1.1M/h <bullet> rising",
+ * "0/h <bullet> idle". "999k/h <bullet> steady" is the longest, 17 bytes
+ * with the bullet's three; four buckets at the ceiling read "400M/h".
  */
 #define BURN5H_RATE_MAX		24
 void burn5h_fmt_rate(const struct burn5h *m, char *buf, size_t buflen);

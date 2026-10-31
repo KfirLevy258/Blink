@@ -159,22 +159,30 @@ static void burn_line(const char *json, int64_t age_ms)
 	usage_view_set_burn5h(&m, k_uptime_get() - age_ms);
 }
 
-/* The last hour 1.1M against 620k before it: rising, the contract's own
- * example figure. */
+/*
+ * The lines carry exact output tokens. These are the bars the scenes drew
+ * when the wire carried thousands, multiplied out, so the pictures differ
+ * from those only where the contract does: the rate is the last COMPLETE
+ * hour, buckets 15-18 against 11-14, and the quarter-hour still filling is
+ * drawn but not compared.
+ *
+ * The last complete hour 940k against 580k before it: rising.
+ */
 static const char burn_rising[] =
 	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
-	"[90,120,80,0,0,40,110,150,130,160,140,120,"
-	"150,140,170,160,230,260,290,320]}";
-/* 815k against 800k: inside the 10% band. */
+	"[90000,120000,80000,0,0,40000,110000,150000,130000,160000,140000,"
+	"120000,150000,140000,170000,160000,230000,260000,290000,320000]}";
+/* 830k against 780k: inside the 10% band. */
 static const char burn_steady[] =
 	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
-	"[60,90,120,150,170,160,140,180,175,190,185,200,"
-	"180,210,190,220,200,195,215,205]}";
-/* 160k against 700k: easing, a session winding down. */
+	"[60000,90000,120000,150000,170000,160000,140000,180000,175000,"
+	"190000,185000,200000,180000,210000,190000,220000,200000,195000,"
+	"215000,205000]}";
+/* 300k against 740k: easing, a session winding down. */
 static const char burn_easing[] =
 	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
-	"[20,40,90,160,180,210,190,230,200,180,170,190,"
-	"200,180,170,150,90,40,20,10]}";
+	"[20000,40000,90000,160000,180000,210000,190000,230000,200000,180000,"
+	"170000,190000,200000,180000,170000,150000,90000,40000,20000,10000]}";
 /* Nothing for five hours. */
 static const char burn_idle[] =
 	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"

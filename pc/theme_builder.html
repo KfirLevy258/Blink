@@ -535,12 +535,16 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // docs/plans/burn-5h.md is the contract.
   //
   // The sample is BURN_PRESETS["rising"] of pc/providers/scripted.py, in
-  // output tokens, which the wire carries in thousands rounded up
-  // (pc/protocol.burn): the same twenty buckets a bench board is given.
-  var BURN_TOKENS = [0, 0, 0, 0, 4000, 9000, 6000, 12000, 18000, 15000, 22000, 30000,
-                     26000, 34000, 41000, 38000, 95000, 140000, 210000, 265000];
-  var BURN_B = BURN_TOKENS.map(function (t) { return Math.ceil(t / 1000); });
-  var BURN_N = 20, BURN_HOUR_N = 4, BURN_BUCKET_S = 900;
+  // output tokens, exact, as the wire carries them (pc/protocol.burn): the
+  // same twenty buckets a bench board is given.
+  var BURN_B = [0, 0, 0, 0, 4000, 9000, 6000, 12000, 18000, 15000, 22000, 30000,
+                26000, 34000, 41000, 38000, 95000, 140000, 210000, 265000];
+  // burn5h.h: four buckets to an hour, and the two hours that are compared
+  // by their first bucket. Complete quarter-hours only: the newest bucket
+  // is the one the daemon's clock is in, still filling, so it is drawn and
+  // never compared. The last hour is 15-18 and the hour before it 11-14.
+  var BURN_N = 20, BURN_HOUR_N = 4, BURN_BUCKET_S = 900,
+      BURN_LAST_FROM = BURN_N - 1 - BURN_HOUR_N, BURN_PREV_FROM = BURN_LAST_FROM - BURN_HOUR_N;
   // The newest bucket starts at 14:00 on a board told UTC+0, so the page's
   // 14:05 is inside it and the axis reads 10 to 14. (The page has no clock
   // of its own to hold and no offset to ask; both are as fixed as 14:05.)
@@ -554,28 +558,30 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   function hexOf(n) { return n.toString(16).padStart(6, '0').toUpperCase(); }
 
   // burn5h_total(), burn5h_last_hour() and burn5h_direction(): the last
-  // hour against the hour before, 64-bit on the board and plain numbers
-  // here, where a sum of twenty thousand-counts is nowhere near 2^53.
+  // complete hour against the one before it, 64-bit on the board and plain
+  // numbers here, where twenty buckets of at most 99,999,999 tokens are
+  // nowhere near 2^53.
   function burnSum(b, from, n) { var s = 0; for (var i = from; i < from + n; i++) s += b[i]; return s; }
+  function burnLastHour(b) { return burnSum(b, BURN_LAST_FROM, BURN_HOUR_N); }
   function burnDir(b) {
-    var now = burnSum(b, BURN_N - BURN_HOUR_N, BURN_HOUR_N), before = burnSum(b, BURN_N - 2 * BURN_HOUR_N, BURN_HOUR_N);
+    var now = burnLastHour(b), before = burnSum(b, BURN_PREV_FROM, BURN_HOUR_N);
     if (now === 0 && before === 0) return 'idle';
     if (before === 0) return 'rising';
     if (now * 10 > before * 11) return 'rising';
     if (now * 10 < before * 9) return 'easing';
     return 'steady';
   }
-  // burn5h_fmt_tokens(): rounded to the nearest in integers, a tenth of the
-  // unit while that is under ten units, whole units from there, the check on
-  // the ROUNDED figure so 9.96M is "10M" and never "10.0M".
-  function burnTokens(k) {
-    var scale = [[1000, 'M'], [1000000, 'B']];
-    if (k === 0) return '0';
-    if (k < 1000) return k + 'k';
+  // burn5h_fmt_tokens(): under a thousand as they are, then rounded to the
+  // nearest in integers, a tenth of the unit while that is under ten units,
+  // whole units from there, the check on the ROUNDED figure so 9,960 is
+  // "10k" and never "10.0k".
+  function burnTokens(t) {
+    var scale = [[1000, 'k'], [1000000, 'M'], [1000000000, 'B']];
+    if (t < 1000) return String(t);
     for (var i = 0; i < scale.length; i++) {
-      var per = scale[i][0], tenths = Math.floor((k + per / 20) / (per / 10));
+      var per = scale[i][0], tenths = Math.floor((t + per / 20) / (per / 10));
       if (tenths < 100) return Math.floor(tenths / 10) + '.' + (tenths % 10) + scale[i][1];
-      var whole = Math.floor((k + per / 2) / per);
+      var whole = Math.floor((t + per / 2) / per);
       if (whole < 1000 || i + 1 === scale.length) return whole + scale[i][1];
     }
   }
@@ -609,7 +615,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var BURN_ADV20 = { '.': 5.6, 'k': 11, 'M': 17.6, 'B': 13.8 };
   function burnView(svg, F, dim) {
     var k = burnInks(), b = BURN_B, dir = burnDir(b), max = Math.max.apply(null, b);
-    var total = burnTokens(burnSum(b, 0, BURN_N)), rate = burnTokens(burnSum(b, BURN_N - BURN_HOUR_N, BURN_HOUR_N)) + '/h • ' + dir;
+    var total = burnTokens(burnSum(b, 0, BURN_N)), rate = burnTokens(burnLastHour(b)) + '/h • ' + dir;
     var BASE_Y = 148, X0 = 20, PITCH = 6, i, x;
     for (i = 0; i < BURN_N; i++) {
       var h = burnBarH(b[i], max, 56, 2), hot = i >= BURN_N - BURN_HOUR_N; x = X0 + i * PITCH;

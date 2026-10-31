@@ -142,10 +142,11 @@ def test_the_sample_reads_as_the_rising_preset_does_on_the_board():
     by = {}
     for n in r:
         by.setdefault(n["cls"], []).append(n)
-    # BURN_PRESETS["rising"], in thousands, rounded up: 965 in all, 710 in
-    # the last hour against 139 before it.
+    # BURN_PRESETS["rising"], in exact tokens: 965,000 in all, and 483,000
+    # in the last complete hour (buckets 15-18) against 131,000 in the one
+    # before it (11-14). The newest bucket, 265,000, is drawn, not counted.
     assert [n["text"] for n in by["burn-total"]] == ["965k"]
-    assert [n["text"] for n in by["burn-rate"]] == ["710k/h • rising"]
+    assert [n["text"] for n in by["burn-rate"]] == ["483k/h • rising"]
     assert [n["text"] for n in by["burn-unit"]] == ["tokens • 5h"]
     assert [n["text"] for n in by["burn-name"]] == ["BURN 5h"]
     # Sixteen bars, four of the twenty buckets being empty; the newest four
@@ -412,29 +413,38 @@ def test_an_edited_dark_is_a_custom_theme_and_gets_the_derived_colours():
 # -------------------------------- the numbers and words, beside the C
 
 def _burn_vectors():
-    """(buckets in thousands, q, UTC offset in minutes): the presets of
-    pc/providers/scripted.py, then the edge each rule has."""
+    """(buckets in output tokens, q, UTC offset in minutes): the presets of
+    pc/providers/scripted.py as the wire carries them, then the edge each
+    rule has. The last complete hour is buckets 15-18, the one before it
+    11-14, and bucket 19 is drawn but never compared."""
     from pc.providers import scripted
     q = 1793455200
-    v = [([-(-t // 1000) for t in tokens], q, 0)
-         for tokens in scripted.BURN_PRESETS.values()]
-    v += [([0] * 19 + [1], q, 0),
+    v = [(list(tokens), q, 0) for tokens in scripted.BURN_PRESETS.values()]
+    v += [([0] * 19 + [1], q, 0),                    # only bucket 19: idle
           ([0] * 15 + [10, 0, 0, 0, 0], q + 900, 330),
-          ([5] * 16 + [11, 11, 11, 11], q, -480),
-          ([100] * 16 + [110] * 4, q, 345),          # +10%: steady
-          ([100] * 16 + [111] * 4, q, 0),            # over +10%: rising
-          ([100] * 16 + [90] * 4, q, 0),             # -10%: steady
-          ([100] * 16 + [89] * 4, q, 0),             # under -10%: easing
-          ([0] * 16 + [3, 0, 0, 0], q + 1800, 60),   # before zero: rising
-          ([9999999] * 20, q, 0)]
+          ([5] * 15 + [11, 11, 11, 11, 5], q, -480),
+          ([100] * 15 + [110] * 4 + [0], q, 345),    # +10%: steady
+          ([100] * 15 + [111] * 4 + [0], q, 0),      # over +10%: rising
+          ([100] * 15 + [90] * 4 + [500], q, 0),     # -10%: steady
+          ([100] * 15 + [89] * 4 + [0], q, 0),       # under -10%: easing
+          ([0] * 15 + [3, 0, 0, 0, 0], q + 1800, 60),  # before zero: rising
+          # The review of 2026-10-31's cases: 1,000 tokens a minute is
+          # steady at every minute of the quarter-hour still filling, and
+          # 2,001 then 1,999 a quarter-hour is steady, not "easing".
+          ([15000] * 19 + [0], q, 0),
+          ([15000] * 19 + [8000], q, 0),
+          ([15000] * 19 + [14000], q, 0),
+          ([0] * 11 + [2001] * 4 + [1999] * 4 + [0], q, 0),
+          ([0] * 11 + [1000] * 4 + [4] * 4 + [0], q, 0),
+          ([99999999] * 20, q, 0)]
     return v
 
 
-# Either side of every rounding edge the format has.
+# Tokens either side of every rounding edge the format has.
 _FMT_KS = [0, 1, 7, 412, 999, 1000, 1049, 1050, 1099, 1100, 2149, 2150, 9949,
            9950, 9999, 10000, 10499, 10500, 99499, 99500, 100000, 999499,
            999500, 999999, 1000000, 1049999, 1050000, 9949999, 9950000,
-           99999999, 199999980]
+           99999999, 999499999, 999500000, 1999999980]
 
 
 def _js_functions(html, names):
@@ -495,8 +505,8 @@ def test_the_ported_decisions_match_burn5h_c_line_for_line(tmp_path):
 
     html = PAGE.read_text(encoding="utf-8")
     js = re.search(r"var BURN_N = [^;]*;", html).group(0) + "\n"
-    js += _js_functions(html, ("burnSum", "burnDir", "burnTokens",
-                               "burnBarH", "burnHour"))
+    js += _js_functions(html, ("burnSum", "burnLastHour", "burnDir",
+                               "burnTokens", "burnBarH", "burnHour"))
     js += f"\nconst ks = {json.dumps(_FMT_KS)}, vs = {json.dumps(_burn_vectors())};\n"
     js += """
 const out = [];
@@ -504,7 +514,7 @@ for (const k of ks) out.push('fmt ' + k + ' ' + burnTokens(k));
 for (const [b, q, off] of vs) {
   const mx = Math.max(...b);
   out.push('view ' + burnTokens(burnSum(b, 0, 20)) + ' | '
-    + burnTokens(burnSum(b, 16, 4)) + '/h \\u2022 ' + burnDir(b) + ' |'
+    + burnTokens(burnLastHour(b)) + '/h \\u2022 ' + burnDir(b) + ' |'
     + b.map(v => ' ' + burnBarH(v, mx, 56, 2)).join('') + ' |'
     + b.map((v, i) => ' ' + burnHour(q, i, off)).join(''));
 }

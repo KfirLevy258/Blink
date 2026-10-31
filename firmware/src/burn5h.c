@@ -150,15 +150,15 @@ uint32_t burn5h_total(const struct burn5h *m)
 
 uint32_t burn5h_last_hour(const struct burn5h *m)
 {
-	return sum(m, BURN5H_N - BURN5H_HOUR_N, BURN5H_HOUR_N);
+	return sum(m, BURN5H_LAST_FROM, BURN5H_HOUR_N);
 }
 
 enum burn5h_dir burn5h_direction(const struct burn5h *m)
 {
 	/* 64-bit for the comparison only: an hour fits in 32 bits, eleven of
-	 * them may not. */
+	 * them do not. */
 	uint64_t now = burn5h_last_hour(m);
-	uint64_t before = sum(m, BURN5H_N - 2 * BURN5H_HOUR_N, BURN5H_HOUR_N);
+	uint64_t before = sum(m, BURN5H_PREV_FROM, BURN5H_HOUR_N);
 
 	if (now == 0 && before == 0) {
 		return BURN5H_IDLE;
@@ -186,37 +186,43 @@ const char *burn5h_word(enum burn5h_dir d)
 }
 
 /*
- * Rounded to the nearest, in integers: a tenth of the unit while that is
- * under ten units, whole units from there. The check is on the ROUNDED
- * figure, so 9.96M becomes "10M" and not "10.0M", and 999.6M becomes "1.0B"
- * rather than "1000M" -- both of which would be a fifth character.
+ * Rounded to the nearest, in integers: under a thousand as it is, then a
+ * tenth of the unit while that is under ten units, whole units from there.
+ * The check is on the ROUNDED figure, so 9,960 becomes "10k" and not
+ * "10.0k", and 999,600 becomes "1.0M" rather than "1000k" -- both of which
+ * would be a fifth character. The same at every unit, now that the wire
+ * carries exact tokens: it carried thousands until the review of
+ * 2026-10-31, and "k" was then the smallest thing it could say.
+ *
+ * 64-bit inside, so whatever 32-bit count it is handed rounds without
+ * wrapping. The largest total there can be, 1,999,999,980, would fit
+ * either way; a count near the top of 32 bits plus half a billion for the
+ * rounding would not.
  */
-void burn5h_fmt_tokens(uint32_t k, char *buf, size_t buflen)
+void burn5h_fmt_tokens(uint32_t tokens, char *buf, size_t buflen)
 {
 	static const struct { uint32_t per; char unit; } scale[] = {
-		{ 1000u, 'M' },		/* thousands of tokens per million */
-		{ 1000000u, 'B' },
+		{ 1000u, 'k' },
+		{ 1000000u, 'M' },
+		{ 1000000000u, 'B' },
 	};
+	const uint64_t t = tokens;
 	unsigned whole;
 
-	if (k == 0) {
-		snprintf(buf, buflen, "0");
-		return;
-	}
-	if (k < 1000u) {
-		snprintf(buf, buflen, "%uk", (unsigned)k);
+	if (t < 1000u) {
+		snprintf(buf, buflen, "%u", (unsigned)t);
 		return;
 	}
 	for (size_t i = 0; i < sizeof(scale) / sizeof(scale[0]); i++) {
-		uint32_t per = scale[i].per;
-		unsigned tenths = (unsigned)((k + per / 20) / (per / 10));
+		uint64_t per = scale[i].per;
+		unsigned tenths = (unsigned)((t + per / 20) / (per / 10));
 
 		if (tenths < 100) {
 			snprintf(buf, buflen, "%u.%u%c", tenths / 10,
 				 tenths % 10, scale[i].unit);
 			return;
 		}
-		whole = (unsigned)((k + per / 2) / per);
+		whole = (unsigned)((t + per / 2) / per);
 		if (whole < 1000 || i + 1 == sizeof(scale) / sizeof(scale[0])) {
 			snprintf(buf, buflen, "%u%c", whole, scale[i].unit);
 			return;
