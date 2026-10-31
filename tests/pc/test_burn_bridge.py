@@ -114,7 +114,7 @@ def test_a_change_goes_out_but_never_within_15_s_of_the_last():
     times = [t for t, _ in burns(sent)]
     assert len(times) == 2
     assert BURN_MIN_GAP_S <= times[1] - first < BURN_MIN_GAP_S + 2
-    assert burns(sent)[-1][1]["b"][-1] == 13
+    assert burns(sent)[-1][1]["b"][-1] == 13000
 
 
 def test_an_unchanged_line_is_restated_every_minute():

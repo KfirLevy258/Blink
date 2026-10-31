@@ -50,27 +50,33 @@ that are not part of the frame itself:
     tests/fleet/bench/burn_states.json walks through every preset.
 """
 import json
+import math
 import sys
 import time
 
+from pc import protocol
 from pc.providers.base import NormalizedUsageFrame, ProviderParser
 
 # Bucket sets for the burn view, in output tokens, oldest first: one for each
-# thing the board draws differently. Its direction compares the last hour
-# (the newest four) with the hour before (the four ahead of those): both
-# zero is idle, otherwise more than +10% is rising and less than -10% easing.
+# thing the board draws differently. They go on the wire as they are, since
+# the line carries exact tokens (protocol.burn). The board's direction
+# compares complete quarter-hours only: the last hour is buckets 15-18 and
+# the hour before it 11-14, and bucket 19, the quarter-hour still filling, is
+# drawn but not compared. Both zero is idle, otherwise more than +10% is
+# rising and less than -10% easing (docs/plans/burn-5h.md).
 BURN_PRESETS = {
     # Nothing in five hours: "0", an en dash, no bars.
     "idle": [0] * 20,
-    # The last hour within a point of the one before.
+    # The last hour within a point of the one before (+0.8%).
     "steady": [84_000, 92_000, 88_000, 95_000, 90_000, 86_000, 93_000,
                89_000, 91_000, 87_000, 94_000, 90_000, 88_000, 92_000,
                90_000, 91_000, 89_000, 93_000, 90_000, 90_000],
-    # Quiet early, then five times the hour before.
+    # Quiet early, then nearly four times the hour before.
     "rising": [0, 0, 0, 0, 4_000, 9_000, 6_000, 12_000, 18_000, 15_000,
                22_000, 30_000, 26_000, 34_000, 41_000, 38_000, 95_000,
                140_000, 210_000, 265_000],
-    # A busy hour tailing off to a quarter of itself.
+    # A busy hour tailing off to half of itself, and the quarter-hour in
+    # progress down to a trickle.
     "easing": [40_000, 55_000, 70_000, 62_000, 80_000, 96_000, 110_000,
                120_000, 135_000, 150_000, 160_000, 170_000, 240_000,
                260_000, 230_000, 210_000, 120_000, 70_000, 35_000, 12_000],
@@ -101,10 +107,16 @@ def _burn_of(value):
             raise ValueError("unknown burn preset; expected one of "
                              + ", ".join(sorted(BURN_PRESETS)))
         return list(BURN_PRESETS[value])
-    if (isinstance(value, list) and len(value) == 20
-            and all(_is_number(v) and v >= 0 for v in value)):
+    # isfinite: a scenario is JSON, and Python's json reads the bare literal
+    # Infinity, which passed `v >= 0` and then raised OverflowError out of
+    # int(), uncaught, taking the provider's poll down with it (review,
+    # 2026-10-31). NaN already failed `v >= 0`; this says so for both.
+    if (isinstance(value, list) and len(value) == protocol.BURN_BUCKETS
+            and all(_is_number(v) and math.isfinite(v) and v >= 0
+                    for v in value)):
         return [int(v) for v in value]
-    raise ValueError("burn is a preset name or twenty counts of zero or more")
+    raise ValueError("burn is a preset name or twenty finite counts of zero"
+                     " or more")
 
 
 class ScriptedBurn:
@@ -122,7 +134,7 @@ class ScriptedBurn:
         tokens = self._provider.burn_tokens()
         if tokens is None:
             return None
-        return int(now // 900) * 900, list(tokens)
+        return protocol.burn_quarter(now), list(tokens)
 
 
 class ScriptedProvider(ProviderParser):

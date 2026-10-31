@@ -16,8 +16,9 @@ from tests.support import transcripts as tx
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 Q = 1_793_430_000
 NOW = Q + 600
-RISING_K = [0, 0, 0, 0, 4, 9, 6, 12, 18, 15, 22, 30, 26, 34, 41, 38, 95, 140,
-            210, 265]
+RISING = [0, 0, 0, 0, 4_000, 9_000, 6_000, 12_000, 18_000, 15_000, 22_000,
+          30_000, 26_000, 34_000, 41_000, 38_000, 95_000, 140_000, 210_000,
+          265_000]
 
 
 def start(i):
@@ -33,17 +34,22 @@ def test_the_line_is_the_contracts_to_the_byte():
 
     assert why is None
     assert raw == (b'{"t":"burn","v":2,"p":"claude","q":1793430000,"b":['
-                   b'0,0,0,0,4,9,6,12,18,15,22,30,26,34,41,38,95,140,210,'
-                   b'265]}\n')
-    assert len(raw) == 109
-    assert msg["b"] == RISING_K and msg["v"] == protocol.VERSION
+                   b'0,0,0,0,4000,9000,6000,12000,18000,15000,22000,30000,'
+                   b'26000,34000,41000,38000,95000,140000,210000,265000]}\n')
+    assert len(raw) == 157
+    assert msg["b"] == RISING and msg["v"] == protocol.VERSION
 
 
-def test_thousands_are_rounded_up_so_any_activity_shows():
-    b = protocol.burn("claude", Q, [0, 1, 999, 1000, 1001, 2_100_000]
-                      + [0] * 14)["b"]
+def test_the_buckets_are_exact_tokens_so_light_use_keeps_its_shape():
+    """They were thousands rounded up, and the rounding decided the arrow
+    at light use: 2001 then 1999 tokens a quarter-hour went out as 3 then 2
+    and read "easing", and 1000 then 4 went out as 1 and 1 and read
+    "steady" (review, 2026-10-31). The board is sent what was counted."""
+    b = protocol.burn("claude", Q, [0, 1, 4, 999, 1000, 1001, 1999, 2001,
+                                    2_100_000] + [0] * 11)["b"]
 
-    assert b[:6] == [0, 1, 1, 1, 2, 2100]
+    assert b[:9] == [0, 1, 4, 999, 1000, 1001, 1999, 2001, 2_100_000]
+    assert all(type(v) is int for v in b)
 
 
 def test_a_line_has_twenty_buckets_starting_on_a_quarter_hour():
@@ -62,15 +68,23 @@ def test_a_line_has_twenty_buckets_starting_on_a_quarter_hour():
 
 
 def test_the_widest_line_fits_with_room_to_spare():
-    """Every bucket at the ceiling and q in 2100: 193 bytes of the 512 the
+    """Every bucket at the ceiling and q in 2100: 233 bytes of the 512 the
     board takes before it drops a line whole."""
     msg = protocol.burn("claude", 4_102_444_800, [10 ** 15] * 20)
     raw, why = protocol.encode_checked(msg)
 
     assert why is None
-    assert msg["b"] == [protocol.BURN_K_MAX] * 20
-    assert len(raw) == 193 < protocol.MAX_LINE_BYTES
+    assert protocol.BURN_MAX == 99_999_999
+    assert msg["b"] == [protocol.BURN_MAX] * 20
+    assert len(raw) == 233 < protocol.MAX_LINE_BYTES
     assert protocol.burn("claude", Q, [-5] * 20)["b"] == [0] * 20
+
+
+def test_twenty_buckets_at_the_ceiling_still_sum_in_a_signed_32_bit_int():
+    """The board adds all twenty for the total. 99,999,999 is the widest
+    eight-digit count, and twenty of them stay under 2**31, so no sum the
+    board makes of the line can wrap, signed or not."""
+    assert protocol.BURN_MAX * protocol.BURN_BUCKETS < 2 ** 31
 
 
 def test_burn_is_named_in_the_log_and_is_a_cap_the_board_can_list():
@@ -247,16 +261,17 @@ def test_the_daemon_reads_transcripts_and_a_scenario_never_does(
     fetch()
 
     line = fetch.burn()
-    assert line["b"] == protocol.burn(
-        "claude", Q, scripted.BURN_PRESETS["steady"])["b"]
+    assert line["b"] == scripted.BURN_PRESETS["steady"]
 
 
 # ---------------------------------------------------------- scripted burn
 
 
 def direction(b):
-    """The board's rule (docs/plans/burn-5h.md), on the wire's thousands."""
-    cur, prev = sum(b[16:]), sum(b[12:16])
+    """The board's rule (docs/plans/burn-5h.md), on the wire's tokens, over
+    complete quarter-hours only: the last hour is buckets 15-18 and the hour
+    before it 11-14. Bucket 19 is the quarter-hour still filling."""
+    cur, prev = sum(b[15:19]), sum(b[11:15])
     if cur == 0 and prev == 0:
         return "idle"
     if prev == 0:
@@ -269,15 +284,18 @@ def direction(b):
 
 
 def test_each_preset_shows_the_state_it_is_named_for():
-    k = {name: protocol.burn("claude", Q, tokens)["b"]
+    """On the line as it goes out, which is each preset unchanged."""
+    b = {name: protocol.burn("claude", Q, tokens)["b"]
          for name, tokens in scripted.BURN_PRESETS.items()}
 
+    for name, tokens in scripted.BURN_PRESETS.items():
+        assert b[name] == tokens, name
     for name in ("idle", "steady", "rising", "easing"):
-        assert direction(k[name]) == name, name
-    assert sum(k["idle"]) == 0
-    others = [v for i, v in enumerate(k["spike"]) if i != 9]
-    assert k["spike"][9] >= 500 * max(others) and min(others) > 0
-    assert sum(scripted.BURN_PRESETS["heavy"]) > 10_000_000
+        assert direction(b[name]) == name, name
+    assert sum(b["idle"]) == 0
+    others = [v for i, v in enumerate(b["spike"]) if i != 9]
+    assert b["spike"][9] >= 500 * max(others) and min(others) > 0
+    assert sum(b["heavy"]) > 10_000_000
 
 
 def scripted_bus(tmp_path, steps, clock):
@@ -306,7 +324,7 @@ def test_a_scenario_step_puts_its_buckets_on_the_line(tmp_path):
 
     assert fetch()["session_pct"] == -1
     assert fetch.burn() == {"t": "burn", "v": 2, "p": "claude", "q": Q,
-                            "b": RISING_K}
+                            "b": RISING}
 
 
 def test_scenario_buckets_hold_until_a_step_changes_them(tmp_path):
@@ -322,10 +340,10 @@ def test_scenario_buckets_hold_until_a_step_changes_them(tmp_path):
         line = fetch.burn()
         return None if line is None else line["b"]
 
-    spike = protocol.burn("claude", Q, scripted.BURN_PRESETS["spike"])["b"]
+    spike = scripted.BURN_PRESETS["spike"]
     assert at(0) == spike
     assert at(10) == spike                      # no burn key: held
-    assert at(20) == protocol.burn("claude", Q, explicit)["b"]
+    assert at(20) == explicit
     assert at(30) is None                       # a window again: no line
     assert at(40) is None                       # null clears it
 
@@ -342,6 +360,33 @@ def test_a_bad_burn_is_reported_and_the_step_still_plays(tmp_path, capsys):
     assert fetch.burn()["b"] == [0] * 20        # idle, held
     err = capsys.readouterr().err
     assert err.count("burn ignored") == 2
+
+
+def test_a_burn_that_is_not_finite_is_reported_not_raised(tmp_path, capsys):
+    """A scenario is JSON, and Python's json reads the bare literals
+    Infinity and NaN. int(inf) raises OverflowError, which nothing caught:
+    a step with one took the provider's poll down (review, 2026-10-31)."""
+    path = tmp_path / "scenario.json"
+    path.write_text(
+        '{"name": "t", "steps": ['
+        '{"at": 0, "provider": "claude", "weekly_pct": 12.0,'
+        ' "no_session_window": true, "burn": "idle"},'
+        '{"at": 10, "provider": "claude", "weekly_pct": 12.0,'
+        ' "no_session_window": true, "burn": [Infinity' + ', 0' * 19 + ']},'
+        '{"at": 20, "provider": "claude", "weekly_pct": 12.0,'
+        ' "no_session_window": true, "burn": [NaN' + ', 0' * 19 + ']}]}',
+        encoding="utf-8")
+    clock = [float(NOW)]
+    sp = scripted.ScriptedProvider(str(path), now=lambda: clock[0])
+    fetch = ingest.IngestionBus(providers=[sp], now=lambda: clock[0],
+                                burn=sp.burn_source()).fetch()
+    fetch()
+    for t in (10, 20):
+        clock[0] = NOW + t
+        assert fetch()["weekly_pct"] == 12.0
+
+    assert fetch.burn()["b"] == [0] * 20        # idle, held
+    assert capsys.readouterr().err.count("burn ignored") == 2
 
 
 def test_the_bench_scenario_walks_every_state_and_is_not_a_fleet_one():
