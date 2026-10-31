@@ -234,7 +234,10 @@ class Bridge:
         if self._board_proto is None:
             try:
                 self._board_proto = int(msg["v"])
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):
+                # OverflowError because json reads 1e400 as infinity and
+                # int(inf) raises it; uncaught, it left the read loop and
+                # ended the daemon.
                 pass
             else:
                 self._announce_if_ahead()
@@ -314,7 +317,7 @@ class Bridge:
         """
         try:
             self._board_proto = int(hello.get("v"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):    # 1e400 is inf
             self._board_proto = None
         self._board_fw = hello.get("fw")
         # A hello's word is final, an absent id included: a board that

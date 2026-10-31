@@ -2,6 +2,8 @@ import ast
 import pathlib
 import unittest
 
+import pytest
+
 import claude_usage_bridge
 from pc import protocol
 from pc.bridge import Bridge
@@ -1132,3 +1134,24 @@ def test_a_bridge_that_cannot_replace_itself_offers_the_firmware_alone(
     b = _ota_bridge(sent, _newer_release(_ahead_of_the_app()),
                     app_update=("9.9.9", {}), self_update=None)
     assert b._app_pairing({"version": _ahead_of_the_app()}) == ""
+
+
+@pytest.mark.parametrize("t", ["ping", "hello", "pref", "ota_query"])
+@pytest.mark.parametrize("v", ["1e400", "-1e400", "NaN"])
+def test_a_protocol_number_that_is_not_a_number_is_not_the_daemons_end(t, v):
+    """json.loads reads 1e400 as infinity and int(inf) raises OverflowError,
+    which on_message did not catch (it caught KeyError, TypeError and
+    ValueError, the last of which is what NaN raises). The exception left the
+    read loop and ended the daemon; the service manager then restarted it. A
+    board never sends this, but the line is a line off a wire. Found in
+    review, 2026-10-31. The number is read as unreadable, as NaN always was,
+    and the next good message from the board is still believed.
+    """
+    msg = protocol.LineReader().feed(
+        ('{"t":"%s","v":%s}\n' % (t, v)).encode())[0]
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: None, **_NO_FEED)
+    b.on_message(msg)
+    assert b._board_proto is None
+    b.on_message({"t": "ping", "v": 5, "up_ms": 10})
+    assert b._board_proto == 5
