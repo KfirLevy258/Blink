@@ -54,10 +54,12 @@ persisted, but by pc/session_verdict, as a verdict and not as a payload.
 
 What this provider proves about that window goes on its frames as
 window_evidence, for pc/session_verdict to weigh. A payload with a
-five-hour window proves one, dated when its block was fetched. A payload
-without one proves nothing on its own: that is also every Pro and Max
-status line from a reset to the next reply. Proof of NO window is a reply
-that came back without one (_reply_without_window).
+five-hour window proves one, dated when its block arrived if this process
+watched it arrive with a reply, and otherwise no later than the start of
+that window (_window_dated). A payload without one proves nothing on its own: that is
+also every Pro and Max status line from a reset to the next reply. Proof of
+NO window is two replies of one session that came back without one, far
+enough apart that no reset can explain them (_reply_without_window).
 
 There is one more memory, and it answers a different question: not which
 payload to fall back on, but how long ago the figures in the current one
@@ -97,6 +99,30 @@ FETCH_MEMORY_LIMIT = 256
 # session this process has seen render weekly-only; a desk runs a handful at
 # once, and the oldest goes first.
 REPLY_MEMORY_LIMIT = 64
+
+# What a reply without a window has to look like before it is proof. See
+# _reply_without_window for the argument; the three numbers are its inputs.
+#
+# REPLY_GAP_S: the longest two renders of one session may be apart for the
+# cost between them to count as a reply. Claude Code renders every few
+# seconds while it is open (docs/research/claude-ultra-no-session-window.md),
+# so a longer silence is time nobody was watching -- the board unplugged
+# (polls run only while it is alive), a provider cooldown, the daemon down
+# -- and a whole window can open and close inside it. That is finding 2 of
+# the /code-review max of 2026-11-01: a 09:00 baseline at 3.00, five hours
+# of unpolled replies with five_hour, and a 14:05 weekly-only render at
+# 4.00 read as a reply.
+REPLY_GAP_S = 600
+# REPLY_STREAM_S: the longest one API request can stream. Claude Code gives
+# up on a request after API_TIMEOUT_MS, ten minutes unless the user raises
+# it; five more minutes of margin. A request accepted before a reset and
+# finished after it is the other half of the problem (finding 1).
+REPLY_STREAM_S = 900
+# REPLY_APART_S and REPLY_WITHIN_S: how far apart the two replies that make
+# a proof must be. Far enough that one reset cannot explain both, and close
+# enough that two consecutive resets, five hours apart, cannot either.
+REPLY_APART_S = REPLY_GAP_S + REPLY_STREAM_S
+REPLY_WITHIN_S = base.SESSION_WINDOW_S - REPLY_APART_S
 
 
 def _block_key(payload):
@@ -152,11 +178,20 @@ class ClaudeCliProvider(base.ProviderParser):
         # weekly figure and no session one is this and not _remembered, and
         # so is one whose five_hour figure the frame refused.
         self._any = None
-        # {session_id: cost.total_cost_usd, or None} of that session's last
-        # weekly-only payload: the baseline a reply is
-        # recognised against. See _reply_without_window and
+        # {session_id: (cost.total_cost_usd or None, mtime, first reply's
+        # mtime or None)} of that session's last weekly-only payload: the
+        # baseline a reply is recognised against, and the reply a second
+        # one is measured from. See _reply_without_window and
         # REPLY_MEMORY_LIMIT.
         self._weekly_only = {}
+        # Block keys _make_room may not drop during the current poll: the
+        # payloads poll() is about to look up. See _make_room.
+        self._keep = ()
+        # {session_id: (cost.total_cost_usd or None, mtime)} of that
+        # session's last payload of any shape, for telling a block that
+        # arrived with a reply this process watched from one it merely
+        # found (_arrived). Capped like _weekly_only.
+        self._costs = {}
         # {block key: [oldest mtime it appeared under, epoch its first
         # window ends]}. See the module docstring and FETCH_MEMORY_LIMIT.
         self._fetch_times = {}
@@ -188,22 +223,31 @@ class ClaudeCliProvider(base.ProviderParser):
 
         Blocks whose window has ended go first, all of them, since Claude
         Code's next fetch cannot reproduce them; only if that frees nothing
-        does the block with the oldest fetch time go. The key about to be
-        inserted cannot be dropped, but one poll can make two lookups (the
-        file's payload, then the remembered one), and the second can drop
-        the first's entry if that block's window has ended. That costs
-        little: an ended window already reads 0 or unknown
-        (base.settle_window), and the block re-enters on the next poll dated
-        by its mtime, which is how every block was dated before this memory.
+        does the block with the oldest fetch time go.
+
+        Except the blocks this poll looks up (self._keep): the file's
+        payload, the remembered one and the last with any figure, three
+        lookups a poll. The remembered payload is very often a block whose
+        window has ended -- it is offered precisely because the file has no
+        session figure any more -- and when the table filled it was purged
+        with the other ended blocks, then re-entered by the next lookup
+        under the remembered mtime, a later one: the dial's figure was
+        re-dated forward by up to a window (the /code-review max of
+        2026-11-01, finding 8, which needs 256 distinct blocks). A kept key
+        can leave the table over the limit by at most two entries.
         """
         if len(self._fetch_times) < FETCH_MEMORY_LIMIT:
             return
+        keep = self._keep
         for key in [k for k, (_, ends_at) in self._fetch_times.items()
-                    if ends_at is not None and ends_at <= now_epoch]:
+                    if ends_at is not None and ends_at <= now_epoch
+                    and k not in keep]:
             del self._fetch_times[key]
         if len(self._fetch_times) >= FETCH_MEMORY_LIMIT:
-            del self._fetch_times[min(self._fetch_times.items(),
-                                      key=lambda kv: kv[1][0])[0]]
+            spare = [kv for kv in self._fetch_times.items()
+                     if kv[0] not in keep]
+            if spare:
+                del self._fetch_times[min(spare, key=lambda kv: kv[1][0])[0]]
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -252,39 +296,110 @@ class ClaudeCliProvider(base.ProviderParser):
         came after it, and the burn reader that has them only runs once the
         verdict is in.
 
-        Dated by the payload's mtime, the render after the reply. Its
-        rate_limits block may be one the fetch-time memory has seen before
-        -- the weekly figure need not move -- so first_seen_at would date it
-        to before the reply.
+        ONE REPLY IS NOT PROOF; two far enough apart are. The /code-review
+        max of 2026-11-01 found two ways a Pro or Max desk produced "a
+        reply without a window", and either one saved a no-window verdict
+        that outlived a restart -- the burn view on a desk that has a
+        session gauge, which is the worst thing this module can do:
+
+          - finding 1, a request accepted before a reset and still
+            streaming after it. Claude Code re-renders a second after the
+            reset without the expired five_hour; when the stream ends it
+            credits the cost and applies headers whose five_hour resets at
+            that same moment, which the render filter drops again. Cost
+            rose between two weekly-only renders. Parallel subagents in
+            flight across the reset do it several times;
+          - finding 2, a baseline from before a gap in the polling. Polls
+            run only while the board is alive, and a session that replied
+            all morning with five_hour while nobody polled, then re-rendered
+            weekly-only when the window ended, had risen since its 09:00
+            baseline.
+
+        So a reply counts only against a render of the same session at
+        most REPLY_GAP_S before it (finding 2: an older baseline is a new
+        baseline, never a comparison). On Pro or Max such a reply, rendered
+        weekly-only at t, can only be a request that was accepted inside a
+        window and finished after its reset R: accepted after its previous
+        render less REPLY_STREAM_S, so R lies in (t - REPLY_APART_S, t].
+        Two replies at least REPLY_APART_S apart then need two different
+        resets, and consecutive resets are at least a window apart, so two
+        replies also less than REPLY_WITHIN_S apart cannot both happen on
+        Pro or Max. On Ultra a working session makes them within half an
+        hour, and the verdict is kept from then on.
+
+        Every five_hour seen in the file, from any session, starts every
+        session's count again: the account has a window, whatever the
+        arithmetic says. And so does this session's cost falling, which is
+        not one counter going down but two processes on one session_id
+        (`claude --continue` twice): their idle repaints alternate, and
+        every other one was a rise (finding 1's second trigger).
+
+        Dated by the payload's mtime, the render after the second reply.
+        Its rate_limits block may be one the fetch-time memory has seen
+        before -- the weekly figure need not move -- so first_seen_at would
+        date it to before the reply.
         """
         limits = _limits(payload)
+        if ss.window_present(limits, "five_hour"):
+            # A window: every session's next weekly-only payload starts a
+            # new count rather than being compared across it.
+            self._weekly_only.clear()
+            return None
         sid = payload.get("session_id") if isinstance(payload, dict) else None
         if not isinstance(sid, str) or not sid:
-            return None
-        if ss.window_present(limits, "five_hour"):
-            # A window: the next weekly-only payload of this session starts
-            # a new baseline rather than being compared across it.
-            self._weekly_only.pop(sid, None)
             return None
         if not ss.window_usable(limits, "seven_day"):
             return None
         cost = _number(_cost(payload))
         before = self._weekly_only.pop(sid, None)
-        self._weekly_only[sid] = cost           # newest last, for the cap
+        first = None
+        proof = False
+        if before is not None and cost is not None and before[0] is not None:
+            was, seen, first = before
+            if not 0 <= mtime - seen <= REPLY_GAP_S or cost < was:
+                first = None                # unwatched, or two processes
+            elif cost > was:                # a reply
+                if first is not None and mtime - first >= REPLY_WITHIN_S:
+                    first = None
+                if first is None:
+                    first = mtime
+                else:
+                    proof = mtime - first >= REPLY_APART_S
+        self._weekly_only[sid] = (cost, mtime, first)   # newest last
         while len(self._weekly_only) > REPLY_MEMORY_LIMIT:
             del self._weekly_only[next(iter(self._weekly_only))]
-        if before is None or cost is None or not cost > before:
+        if not proof:
             return None
         return session_verdict.evidence(
             False, session_verdict.KIND_STATUSLINE_REPLY, mtime)
 
-    def _frame(self, payload, mtime, now_epoch):
+    def _arrived(self, payload, mtime):
+        """Did this payload come with a reply this process watched?
+
+        True when the same session rendered at most REPLY_GAP_S before it
+        at a lower cost: its block was fetched between those two renders,
+        and first_seen_at is its fetch time to within that gap. Asked of
+        the live payload, once per read, before anything else updates.
+        """
+        sid = payload.get("session_id") if isinstance(payload, dict) else None
+        if not isinstance(sid, str) or not sid:
+            return False
+        cost = _number(_cost(payload))
+        before = self._costs.pop(sid, None)
+        self._costs[sid] = (cost, mtime)        # newest last, for the cap
+        while len(self._costs) > REPLY_MEMORY_LIMIT:
+            del self._costs[next(iter(self._costs))]
+        return (before is not None and cost is not None
+                and before[0] is not None and cost > before[0]
+                and 0 <= mtime - before[1] <= REPLY_GAP_S)
+
+    def _frame(self, payload, mtime, now_epoch, arrived=False):
         """The frame this payload maps to now, dated, bounded, and carrying
         the evidence its payload alone gives.
 
         One path for every frame poll() offers, the remembered ones
         included, so a payload is judged the same way whichever memory it
-        came out of.
+        came out of. `arrived`: _arrived said so of this payload.
         """
         frame = self.parse_cli_event(payload, now_epoch, mtime)
         if frame is None:
@@ -301,31 +416,38 @@ class ClaudeCliProvider(base.ProviderParser):
             # Desktop's stampless samples are: five hours and ten minutes
             # after it was fetched, a window open then has ended.
             frame.session_pct = base.UNKNOWN
-        if ss.window_present(_limits(payload), "five_hour"):
-            # A window, dated when its block was fetched: a remembered
-            # payload re-offered hours later is evidence from then, and
-            # anything newer outranks it (pc/session_verdict).
+        limits = _limits(payload)
+        if ss.window_present(limits, "five_hour"):
             frame.window_evidence = session_verdict.evidence(
                 True, session_verdict.KIND_STATUSLINE_WINDOW,
-                frame.first_seen_at)
+                frame.first_seen_at if arrived
+                else _window_dated(limits, frame.first_seen_at))
         return frame
 
     def poll(self, now_epoch):
         payload, mtime = ss.read_payload(self.path())
+        self._keep = tuple(
+            _block_key(p)[0] for p in (
+                payload, *(m[0] for m in (self._remembered, self._any)
+                           if m is not None)))
         frames = []
         has_figure = False
         if payload is not None:
             # Asked of the live payload only, and on every read of it: the
             # baseline it keeps is this file's history, not a memory's.
+            arrived = self._arrived(payload, mtime)
             reply = self._reply_without_window(payload, mtime)
-            live = self._frame(payload, mtime, now_epoch)
+            live = self._frame(payload, mtime, now_epoch, arrived)
             if live is not None:
                 if reply is not None:
                     live.window_evidence = reply
                 frames.append(live)
-                limits = _limits(payload)
-                has_figure = (ss.window_usable(limits, "five_hour")
-                              or ss.window_usable(limits, "seven_day"))
+                # The frame's figures, not the payload's: a five_hour the
+                # frame refused (_frame) is no figure, and a payload with
+                # nothing else in it used to replace the last one that had
+                # one, weekly figure and all (the /code-review max of
+                # 2026-11-01, finding 14).
+                has_figure = live.has_usage()
                 seen = (payload, mtime)
                 if has_figure:
                     self._any = seen
@@ -364,6 +486,40 @@ class ClaudeCliProvider(base.ProviderParser):
         return frames
 
 
+def _window_dated(limits, first_seen_at):
+    """When a five_hour block proves the account had a window.
+
+    No later than the start of the window it describes, its resets_at less
+    a window, when that stamp reads. first_seen_at, the date this used to
+    carry, is this process's first sighting of the block, and it is only
+    the fetch time if the process was watching when the block arrived. A
+    restarted daemon, or one that first saw a terminal left open repaint a
+    block it fetched hours ago, dated that block by the repaint: on an Ultra
+    desk a block fetched before the change, repainted after a reply had
+    proved no window, overturned the saved verdict (the /code-review max of
+    2026-11-01, finding 4). The window's start does not depend on who was
+    watching, and it is the moment the account certainly had a window.
+
+    Earlier is the safe side for a block nobody saw arrive. The only
+    evidence it loses to is a no-window proof from inside the window
+    itself, and on Pro or Max the reply rule makes none
+    (_reply_without_window); a change of plan to Ultra is the one real
+    case, and there the proof is right, while a change back opens windows
+    that start after it. But a mark that should never have been made would
+    then hold a Pro or Max dial until the next window, up to five hours, so
+    a block that arrived with a reply this process watched is not dated
+    here: it is dated by its arrival (_arrived), and the next reply lifts
+    such a mark. The min() with first_seen_at also keeps a stamp in the
+    wrong unit, or from a broken clock, from dating a window in the future,
+    where it would outrank every proof for as long as the clock took to
+    catch up.
+    """
+    resets_at = ss._window(limits, "five_hour")[1]
+    if resets_at is None:
+        return first_seen_at
+    return min(first_seen_at, resets_at - base.SESSION_WINDOW_S)
+
+
 def _limits(payload):
     """The payload's rate_limits object, or None."""
     limits = payload.get("rate_limits") if isinstance(payload, dict) else None
@@ -377,8 +533,18 @@ def _cost(payload):
 
 
 def _number(v):
-    """A finite number as a float, else None: never a bool, NaN or inf."""
+    """A finite number as a float, else None: never a bool, NaN or inf.
+
+    Nor an int too big for a float. json reads integers of up to 4300
+    digits, float() of one past 308 raises OverflowError, and a cost that
+    size in the status line made every poll() raise, so the source was
+    benched for as long as the file said it (the /code-review max of
+    2026-11-01). Claude Code does not write one; a corrupt file can.
+    """
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    v = float(v)
+    try:
+        v = float(v)
+    except OverflowError:
+        return None
     return v if math.isfinite(v) else None

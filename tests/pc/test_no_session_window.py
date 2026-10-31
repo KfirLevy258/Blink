@@ -37,7 +37,7 @@ import pytest
 
 from pc import ingest, normalizer, protocol, session_verdict
 from pc.bridge import THEME_QUIET_S, Bridge
-from pc.providers import base
+from pc.providers import base, claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import (VERDICT_FRAME,
                                          ClaudeDesktopProvider)
@@ -75,18 +75,30 @@ def status(five=None, five_resets=None, seven=2.0, seven_resets=WEEK_END,
 
 
 def replied(poll, p, at, seven=2.0, session="s", limits=None):
-    """Claude Code's status line before and after a reply that came back
-    with no five-hour window, each render read by `poll(now)` a second
-    after it is written: the same session, weekly-only both times, its cost
-    risen in between, the second render written at `at`. Returns what the
-    last poll returned. `limits` replaces both renders' rate_limits."""
-    for cost, when in ((1.0, at - 30), (1.25, at)):
+    """Claude Code's status line through two replies that came back with no
+    five-hour window, each render read by `poll(now)` a second after it is
+    written: the same session, weekly-only throughout and repainted every
+    five minutes, its cost risen at a first reply and again at a second,
+    claude_cli.REPLY_APART_S later, written at `at`. One reply is not proof
+    (claude_cli._reply_without_window). Returns what the last poll
+    returned. `limits` replaces every render's rate_limits."""
+    first = at - claude_cli.REPLY_APART_S
+    renders = [(1.0, first - 30), (1.25, first)]
+    renders += [(1.25, t) for t in range(int(first) + 300, int(at), 300)]
+    renders += [(1.50, at)]
+    for cost, when in renders:
         doc = status(seven=seven, session=session, cost=cost)
         if limits is not None:
             doc["rate_limits"] = limits
         write(p, doc, when)
         got = poll(when + 1)
     return got
+
+
+def no_mark_on_disk():
+    """True unless the verdict on disk says the account has no window."""
+    ev = session_verdict.load(session_verdict.verdict_path())
+    return ev is None or ev[0] is True
 
 
 def ticking(bus, clock):
@@ -243,7 +255,9 @@ def test_the_borrowed_burn_rate_and_countdown_are_not_sent(tmp_path):
 
 def test_five_hour_coming_back_behaves_as_before(tmp_path):
     """An unverified account, or a policy reversal: a status line with a
-    window is newer evidence than the Desktop sample that set the mark."""
+    window is newer evidence than the Desktop sample that set the mark. The
+    window is one that opened after that sample, as a reversal's would: a
+    block is dated by its window's start (claude_cli._window_dated)."""
     p = tmp_path / "statusline.json"
     bus = ingest.IngestionBus(
         providers=[ClaudeCliProvider(path=str(p)),
@@ -254,10 +268,12 @@ def test_five_hour_coming_back_behaves_as_before(tmp_path):
     assert wire(bus)["session_pct"] == -1
     assert bus.claude_page().no_session_window is True
 
-    write(p, payload(five_hour=31.0, resets_at=NOW + 3600), NOW - 1)
+    opened = NOW - 600
+    write(p, payload(five_hour=31.0,
+                     resets_at=opened + base.SESSION_WINDOW_S), NOW - 1)
     msg = wire(bus)
     assert msg["session_pct"] == 31.0
-    assert msg["session_resets_in_s"] == 3600
+    assert msg["session_resets_in_s"] == base.SESSION_WINDOW_S - 600
     assert msg["src"] == "cli"
     assert msg["stale"] is False
     assert bus.claude_page().no_session_window is False
@@ -553,9 +569,8 @@ def test_the_weekly_figure_is_judged_at_the_payloads_own_time(tmp_path):
     and still proves the account had no five-hour window then."""
     p = tmp_path / "statusline.json"
     prov = ClaudeCliProvider(path=str(p))
-    for cost, at in ((1.0, NOW - 3630), (1.25, NOW - 3600)):
-        write(p, status(seven=2.0, seven_resets=NOW - 1800, cost=cost), at)
-        frames = prov.poll(NOW)
+    frames = replied(lambda now: prov.poll(NOW), p, NOW - 3600, limits={
+        "seven_day": {"used_percentage": 2.0, "resets_at": NOW - 1800}})
 
     assert frames[0].weekly_pct == base.UNKNOWN     # settled at the poll
     assert frames[0].window_evidence[0] is False    # judged at the payload
@@ -1224,6 +1239,15 @@ DK_MEASURED = DK_PRE + [(NOW - 3600, ABSENT, 2)]
 TORN, GONE = "torn", "gone"
 REPLIED = session_verdict.evidence(
     False, session_verdict.KIND_STATUSLINE_REPLY, NOW - 7200)
+# replied()'s renders as scenario steps, the last written at NOW - 1: two
+# replies far enough apart to be proof.
+_FIRST = NOW - 1 - claude_cli.REPLY_APART_S
+REPLY_STEPS = (
+    [(status(seven=2.0, cost=1.0), _FIRST - 30, _FIRST - 29),
+     (status(seven=2.0, cost=1.25), _FIRST, _FIRST + 1)]
+    + [(status(seven=2.0, cost=1.25), t, t + 1)
+       for t in range(int(_FIRST) + 300, int(NOW - 1), 300)]
+    + [(status(seven=2.0, cost=1.50), NOW - 1, NOW)])
 
 SCENARIOS = {
     "A0 the 10-30 inputs, nothing proved": dict(
@@ -1264,10 +1288,10 @@ SCENARIOS = {
     # A rising series from before a reply proved there is no window: the
     # reply is the newer evidence, and the rate goes with the figure.
     "D6 a rising Desktop series, then a reply": dict(
-        steps=[(status(seven=2.0, cost=1.0), NOW - 31, NOW - 30),
-               (status(seven=2.0, cost=1.25), NOW - 1, NOW)],
-        desktop=[(NOW - 900 + i * 300, 10 + 5 * i, 2) for i in range(3)],
-        want=[(20.0, "desktop", False, 270), (-1, "cli", False, 1)],
+        steps=REPLY_STEPS,
+        desktop=[(NOW - 2700 + i * 300, 10 + 5 * i, 2) for i in range(3)],
+        want=[(20.0, "desktop", False, t + 1 - (NOW - 2100))
+              for _, t, _ in REPLY_STEPS[:-1]] + [(-1, "cli", False, 1)],
         marked=True),
     # Renders with no rate_limits.
     "E alternating renders, Desktop 2 h old": dict(
@@ -1284,9 +1308,8 @@ SCENARIOS = {
         marked=True, pushes=1),
     # Ultra proved by a reply alone, and a restart that reads it back.
     "R a reply without a window": dict(
-        steps=[(status(seven=2.0, cost=1.0), NOW - 31, NOW - 30),
-               (status(seven=2.0, cost=1.25), NOW - 1, NOW)],
-        want=[(-1, "cli", False, 1), (-1, "cli", False, 1)], marked=True),
+        steps=REPLY_STEPS, want=[(-1, "cli", False, 1)] * len(REPLY_STEPS),
+        marked=True),
     "R2 restart, verdict on disk, nothing else": dict(
         steps=[(W, NOW - 1, NOW)], verdict=REPLIED,
         want=[(-1, "cli", False, 1)], marked=True),
@@ -1425,9 +1448,12 @@ def _burn_desk(tmp_path, docs):
 
 def test_an_ultra_desk_is_sent_its_burn_line(tmp_path):
     from tests.pc import test_burn_line as bl
+    first = bl.NOW - 1 - claude_cli.REPLY_APART_S
+    costs = [(1.0, first - 30), (1.25, first)]
+    costs += [(1.25, t) for t in range(int(first) + 300, int(bl.NOW - 1), 300)]
+    costs += [(1.50, bl.NOW - 1)]
     bus, burns = _burn_desk(tmp_path, [
-        (status(seven=12.0, cost=1.0), bl.NOW - 31),
-        (status(seven=12.0, cost=1.25), bl.NOW - 1)])
+        (status(seven=12.0, cost=c), t) for c, t in costs])
 
     assert burns and burns[-1]["p"] == "claude"
     assert bus.claude_page().no_session_window is True
@@ -1458,3 +1484,250 @@ def test_an_ultra_desk_after_a_restart_is_sent_its_burn_line_at_once(
 
     assert len(burns) == 1 and burns[0]["p"] == "claude"
     assert bus.claude_page().no_session_window is True
+
+
+# --- the review of 2026-11-01 ------------------------------------------------
+#
+# /code-review max of feat/ultra-burn. Each test names the finding it pins.
+
+
+def watched(prov, verdict, p, renders):
+    """Write each (doc, mtime) render and poll it a second later, through a
+    real provider and verdict. Returns every piece of no-window evidence
+    the provider put on a frame, as (has_window, kind, at)."""
+    proofs = []
+    for doc, mtime in renders:
+        write(p, doc, mtime)
+        frames = prov.poll(mtime + 1)
+        verdict.observe(frames, mtime + 1)
+        proofs += [f.window_evidence for f in frames
+                   if f.window_evidence is not None
+                   and f.window_evidence[0] is False]
+    return proofs
+
+
+def test_finding_1_a_reply_streaming_across_a_reset_proves_nothing(tmp_path):
+    """Pro or Max. A request accepted before the reset at R still streams
+    after it. Claude Code re-renders at R+1 s and drops the expired
+    five_hour; when the stream ends it credits the cost and applies headers
+    whose five_hour resets at R, which the render filter drops again. So the
+    session's cost rises between two weekly-only renders, and that read as
+    proof: the desk was marked and the verdict saved. Two parallel
+    subagents straddling the same reset rise it twice."""
+    R = NOW - 3600
+    p = tmp_path / "statusline.json"
+    v = session_verdict.SessionVerdict()
+    renders = [(status(five=60.0, five_resets=R, cost=1.0), R - 60)]
+    renders += [(status(cost=1.0), R + 1 + i * 5) for i in range(12)]
+    renders += [(status(cost=1.30), R + 300), (status(cost=1.30), R + 305),
+                (status(cost=1.55), R + 540), (status(cost=1.55), R + 545)]
+    renders += [(status(five=1.0, five_resets=R + 5 * 3600 + 600,
+                        cost=1.60), R + 600)]
+
+    assert watched(ClaudeCliProvider(path=str(p)), v, p, renders) == []
+    assert no_mark_on_disk()
+
+
+def test_finding_1_two_processes_on_one_session_prove_nothing(tmp_path):
+    """`claude --continue` in two terminals: one session_id, two running
+    costs, each repainted while idle. Alternating, every other render is a
+    rise, for as long as both stay open."""
+    p = tmp_path / "statusline.json"
+    v = session_verdict.SessionVerdict()
+    renders = [(status(cost=(1.0, 1.30)[i % 2]), NOW - 7200 + i * 5)
+               for i in range(7200 // 5)]
+
+    assert watched(ClaudeCliProvider(path=str(p)), v, p, renders) == []
+    assert no_mark_on_disk()
+
+
+def test_finding_2_a_baseline_from_before_a_gap_proves_nothing(tmp_path):
+    """Pro or Max. Polls run only while the board is alive. At 09:00, just
+    after a reset, a weekly-only render at cost 3.00 was the baseline; the
+    board was unplugged, the session replied all morning with five_hour
+    (none of it polled), the window ended, and Claude Code re-rendered
+    weekly-only at 4.00. On reconnect 3.00 < 4.00 read as a reply."""
+    p = tmp_path / "statusline.json"
+    v = session_verdict.SessionVerdict()
+    t9 = NOW - 6 * 3600
+    renders = [(status(cost=3.00), t9 + i * 5) for i in range(6)]
+    renders += [(status(cost=4.00), t9 + 5 * 3600 + 300 + i * 5)
+                for i in range(6)]
+    renders += [(status(cost=4.00), t9 + 5 * 3600 + 300 + i * 600)
+                for i in range(1, 4)]
+
+    assert watched(ClaudeCliProvider(path=str(p)), v, p, renders) == []
+    assert no_mark_on_disk()
+
+
+def test_a_single_reply_is_not_yet_proof_and_a_second_is(tmp_path):
+    """The measured Ultra case still proves, once a second reply comes far
+    enough after the first that no single reset can account for both."""
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+    v = session_verdict.SessionVerdict()
+    t0 = NOW - claude_cli.REPLY_APART_S - 120
+    first = watched(prov, v, p, [(status(cost=1.0), t0),
+                                 (status(cost=1.25), t0 + 30)])
+    assert first == []
+    t, cost, proofs = t0 + 30, 1.25, []
+    while t < NOW:
+        t = min(t + 120, NOW)
+        cost += 0.05
+        proofs += watched(prov, v, p, [(status(cost=cost), t)])
+
+    assert proofs and proofs[0][1] == session_verdict.KIND_STATUSLINE_REPLY
+    assert session_verdict.load(session_verdict.verdict_path())[0] is False
+
+
+def test_finding_4_an_old_terminals_block_does_not_unmark_a_restart(
+        tmp_path):
+    """Ultra, verified: terminal Y's reply proved no window at T-1000 s and
+    the verdict was saved. Terminal X still holds a five_hour block it
+    fetched at T-2h, before the change, and repaints it at T-30 s. A
+    restarted daemon had never seen that block, dated it by the repaint,
+    and the window "outranked" the proof: the saved verdict went to
+    window. Dated from the block's own reset stamp, it is from T-2h."""
+    T = NOW
+    proved(tmp_path, has_window=False, at=T - 1000)
+    p = tmp_path / "statusline.json"
+    x = status(five=40.0, five_resets=T - 2 * 3600 + base.SESSION_WINDOW_S,
+               seven=20.0, session="x", cost=7.0)
+    v = session_verdict.SessionVerdict()
+    write(p, x, T - 30)
+
+    assert v.observe(ClaudeCliProvider(path=str(p)).poll(T), T) is True
+    assert session_verdict.load(session_verdict.verdict_path())[0] is False
+
+
+def test_finding_8_a_full_fetch_table_does_not_re_date_the_dial(tmp_path):
+    """A remembered five_hour block whose window has ended is purged with
+    the other ended blocks when the table fills, and re-entered on the next
+    lookup under the remembered (later) mtime: its first_seen_at, the
+    figure's date in the merge, moved forward by an hour."""
+    T = NOW
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+    r = status(five=40.0, five_resets=T - 600, seven=20.0, session="a")
+    write(p, r, T - 4 * 3600)
+    prov.poll(T - 4 * 3600 + 1)
+    write(p, r, T - 3 * 3600)
+    prov.poll(T - 3 * 3600 + 1)
+    for i in range(claude_cli.FETCH_MEMORY_LIMIT + 4):
+        write(p, status(seven=21.0 + i / 100.0, session="f%d" % i),
+              T - 170 * 60 + i * 30)
+        frames = prov.poll(T - 170 * 60 + i * 30 + 1)
+
+    dial = [f for f in frames if f.session_pct >= 0 or f.session_rolled_at]
+    assert [f.first_seen_at for f in dial] == [T - 4 * 3600]
+
+
+def test_finding_14_a_refused_five_hour_does_not_replace_the_last_figure(
+        tmp_path):
+    """poll() decided "this payload has a figure" from the raw payload,
+    while the frame refuses a five_hour whose resets_at will not read once
+    it is older than a window. Such a payload overwrote the last payload
+    with a figure, and the weekly figure went with it."""
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+    write(p, status(seven=33.0), NOW - 60)
+    prov.poll(NOW - 59)
+    refused = {"session_id": "s",
+               "rate_limits": {"five_hour": {"used_percentage": 40.0,
+                                             "resets_at": None}}}
+    write(p, refused, NOW - BOUND - 60)
+
+    frames = prov.poll(NOW)
+    assert not frames[0].has_usage()
+    assert 33.0 in [f.weekly_pct for f in frames]
+
+
+def test_finding_7_a_failed_save_is_retried_and_leaves_no_temp(
+        tmp_path, monkeypatch):
+    """The verdict was written only on the poll where it flipped, through a
+    fixed temp name, with no retry: one failed os.replace (WinError 32
+    while `blink status` held the file) left the disk stale for the
+    daemon's life and a .tmp beside it."""
+    path = inside(tmp_path, session_verdict.verdict_path())
+    real, calls = os.replace, []
+
+    def refuse_once(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            raise PermissionError(13, "held by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(os, "replace", refuse_once)
+    v = session_verdict.SessionVerdict()
+    assert v.observe([framed(no(NOW - 60))], NOW) is True
+    assert not os.path.exists(path)
+    assert os.listdir(os.path.dirname(path)) == []
+
+    v.observe([], NOW + 2 + session_verdict.SAVE_RETRY_S)
+    assert session_verdict.load(path)[0] is False
+    assert os.listdir(os.path.dirname(path)) == ["session-window.json"]
+
+
+@pytest.mark.parametrize("text", [
+    '{"state": "no_window", "evidence": "statusline_reply", "at": 1%s}'
+    % ("0" * 400),
+    "[" * 200000 + "]" * 200000],
+    ids=["an int too big for a float", "nested too deep"])
+def test_finding_12_a_verdict_file_that_cannot_be_numbered_is_none(
+        tmp_path, text):
+    path = inside(tmp_path, session_verdict.verdict_path())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    assert session_verdict.load(path) is None
+
+
+def test_every_described_kind_is_a_kind_evidence_can_carry():
+    """KINDS restated DESCRIBE's keys by hand; a kind left out of one would
+    have its evidence, and a verdict saved on it, silently dropped."""
+    assert session_verdict.KINDS == tuple(session_verdict.DESCRIBE)
+
+
+def test_a_cost_too_big_for_a_float_is_no_cost(tmp_path):
+    """json reads an integer of any length up to 4300 digits, and float()
+    of one past 308 raises OverflowError: a status line whose
+    cost.total_cost_usd was such an int made every poll() raise, and the
+    status-line source was benched with backoff for as long as the file
+    said it. Claude Code would never write one; a corrupt or hand-edited
+    file can."""
+    p = tmp_path / "statusline.json"
+    doc = status(seven=12.0)
+    text = json.dumps(doc).replace('"total_cost_usd": 1.0',
+                                   '"total_cost_usd": 1' + "0" * 400)
+    p.write_text(text, encoding="utf-8")
+    os.utime(p, (NOW - 1, NOW - 1))
+
+    frames = ClaudeCliProvider(path=str(p)).poll(NOW)
+    assert frames[0].weekly_pct == 12.0
+    assert frames[0].window_evidence is None
+
+
+def test_a_window_block_this_process_saw_arrive_is_dated_when_it_did(
+        tmp_path):
+    """The other side of finding 4's fix. Dated from its window's start, a
+    block on a Pro or Max desk loses to any no-window mark from inside that
+    window, so a mark that should never have been made would hold the dial
+    for up to five hours. A block that arrived with a reply this process
+    watched -- the same session, rendered minutes before at a lower cost --
+    was fetched between those two renders, and is dated by its arrival:
+    the next reply lifts such a mark."""
+    p = tmp_path / "statusline.json"
+    opened = NOW - 4 * 3600
+    proved(tmp_path, has_window=False, at=NOW - 600)
+    v = session_verdict.SessionVerdict()
+    prov = ClaudeCliProvider(path=str(p))
+    before = status(five=30.0, five_resets=opened + base.SESSION_WINDOW_S,
+                    seven=20.0, cost=2.0)
+    write(p, before, NOW - 120)
+    assert v.observe(prov.poll(NOW - 119), NOW - 119) is True   # a repaint
+
+    after = status(five=31.0, five_resets=opened + base.SESSION_WINDOW_S,
+                   seven=20.0, cost=2.25)
+    write(p, after, NOW - 1)
+    assert v.observe(prov.poll(NOW), NOW) is False
