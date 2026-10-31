@@ -471,6 +471,100 @@ no gate, and no such floor):
 BLINK_PYTHON=python3.13 tools/release.sh
 ```
 
+### The order, start to finish
+
+The gate compares the recorded commit with `HEAD` by SHA (`pc/fleet_gate.py`,
+condition 2), not by tree. Every way of merging a branch into `main` gives
+`main` a new SHA -- a merge commit, a squash, and a rebase too, which rewrites
+the committers -- so a fleet pass on the branch tip proves code the gate will
+not accept once it is merged. The same goes for merging `main` into a
+development branch afterwards. A pass has to be recorded **on the commit that
+is released**, from the checkout that releases it, and the order that gets
+there is:
+
+1. **Merge everything first.** Every pull request and branch the release
+   contains lands on `main`. Nothing is run for the release before this.
+2. **Clone `main` fresh**, and work only in that clone. `release.sh` refuses a
+   dirty tree and reads the verdict from `<clone>/.fleet/last_run.json`.
+3. **Create the test venv in the clone.** `.venv-test/` and `.fleet/` are both
+   gitignored, so a fresh clone has neither, and the inventories' `host_python`
+   is `.venv-test/bin/python`, relative to the checkout:
+
+   ```bash
+   python3 -m venv .venv-test          # 3.11 or newer
+   .venv-test/bin/python -m pip install -r pc/requirements.txt \
+       pytest numpy Pillow
+   ```
+
+4. **Run the fleet from that clone.** For the VM fleet, with the board handed
+   round ([The VM fleet](#the-vm-fleet)):
+
+   ```bash
+   .venv-test/bin/python tools/fleet/run.py --inventory tools/fleet/fleet-vm.toml
+   ```
+
+   For the three desks, the same without `--inventory`.
+5. **Release from the same clone, inside the gate's window** -- twelve hours
+   from the moment the run finished (condition 3):
+
+   ```bash
+   BLINK_FLEET=vm BLINK_RELEASE_DRAFT=1 tools/release.sh
+   ```
+
+   Leave `BLINK_FLEET=vm` off to be gated on the three desks. The tag has to
+   be on the remote first (`release.sh` says so and stops if it is not), and
+   `BLINK_PYTHON` names an interpreter of 3.11 or newer if `python3` is not
+   one ([above](#the-release-gate)). `BLINK_RELEASE_DRAFT=1` builds and signs
+   everything, attaches it to a **draft** release, and stops before
+   publishing.
+6. **Watch a real update before undrafting.** The fleet's bundle scenarios
+   cannot be run on the VM fleet (the Ubuntu VM has no archive, and `--bundle`
+   names one file for every desk), and CI's self-update job swaps in a
+   stand-in script, so nothing above has had an installed daemon of the
+   previous release replace itself with this one. On one desk that has a real
+   install of the previous release, whose board runs the previous firmware,
+   fetch the draft's files and point that install at them
+   ([Where the bundles come from](#where-the-bundles-come-from) has the
+   `gh release download` line; use `-D feed` with no `-p` to take every file):
+
+   ```bash
+   gh release download v1.4.0 --repo KfirLevy258/Blink -D feed
+   ```
+
+   `BLINK_OTA_DIR` (`pc/ota.py`) makes the app read its manifest, archive and
+   firmware from that directory instead of GitHub. The manifest is still
+   verified against the shipped public key, so it has to be the real signed
+   one. Then one of two ways, each of which leaves the desk on the new
+   release, so a second try starts from a reinstall of the previous one:
+
+   - **The command-line half**, which replaces the app and restarts the
+     service:
+
+     ```bash
+     BLINK_OTA_DIR="$PWD/feed" ~/.blink/bin/blink update
+     ```
+
+   - **What a customer does**: tap **Update now** on the board, the old daemon
+     replaces itself, and the new one resumes the firmware half from
+     `pending_fw.json` and flashes it. The service does not carry the
+     variable, so stop it, run the installed daemon in the foreground with the
+     variable set, and start the service again afterwards:
+
+     ```bash
+     .venv-test/bin/python -m tests.fleet.service stop
+     BLINK_OTA_DIR="$PWD/feed" ~/.blink/bin/blink run
+     .venv-test/bin/python -m tests.fleet.service start
+     ```
+
+     (run from the clone; the last line once the foreground daemon has been
+     stopped.)
+7. **Only then publish:** `gh release edit v1.4.0 --repo KfirLevy258/Blink
+   --draft=false`. Boards pick the release up on their next check.
+
+A fleet pass is wasted by anything that changes the commit afterwards, a
+"just one more fix" included. A verdict that has aged out is not a reason to
+set `BLINK_SKIP_FLEET=1`; it is a reason to run the fleet again.
+
 ### Releasing on the VM fleet
 
 ```bash

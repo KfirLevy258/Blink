@@ -145,6 +145,12 @@ key recovers).
 tools/release.sh
 ```
 
+Run it from a fresh clone of `main`, after the fleet has passed on that same
+clone and inside its twelve-hour window: the gate compares commit SHAs, so a pass
+before the merge is refused after it. The order, and the draft release to watch a
+real update on before publishing, is in
+[docs/fleet-testing.md](../docs/fleet-testing.md#the-order-start-to-finish).
+
 `release.sh` builds from the committed tree (it refuses a dirty tree or a reused
 version), signs the image, and attaches `blink-fw.bin` + `manifest.json` to the
 `v<version>` release on **`KfirLevy258/Blink`** - which is the feed every board reads.
