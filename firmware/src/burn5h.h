@@ -169,4 +169,32 @@ int burn5h_bar_h(uint32_t v, uint32_t max, int tallest, int least);
  */
 int burn5h_hour(int64_t q, int i, int32_t off_min);
 
+/*
+ * The lines the board holds, one per provider: usage_view.c keeps
+ * RAIL_PAGES_MAX of these, so a daemon that one day sends a codex line beside
+ * the claude one cannot have the two take turns overwriting each other,
+ * which with one slot would blink the claude page's view off every other
+ * line. Here rather than there so tests/burn5h can reach the choice: it was
+ * LVGL-side and nothing exercised it (the /code-review max of 2026-11-01).
+ */
+struct burn5h_slot {
+	struct burn5h m;
+	int64_t at_ms;			/* the uptime it arrived at */
+	bool have;
+};
+
+/* The slot holding `tag`'s line, or -1. An empty or NULL tag -- a page
+ * with no name yet -- holds none, even beside a slot never filled. */
+int burn5h_slot_find(const struct burn5h_slot *s, int n, const char *tag);
+
+/*
+ * Where a line for `tag` goes: its own slot if it has one, else an empty
+ * one, else whichever was heard from longest ago. Always 0..n-1 for n > 0.
+ */
+int burn5h_slot_take(const struct burn5h_slot *s, int n, const char *tag);
+
+/* Whether slot `s` holds a line no older than `fresh_ms` at `now_ms`. */
+bool burn5h_slot_fresh(const struct burn5h_slot *s, int64_t now_ms,
+		       int64_t fresh_ms);
+
 #endif /* BURN5H_H */

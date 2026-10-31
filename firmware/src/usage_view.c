@@ -572,9 +572,11 @@ static void show_session_side(bool gauge)
 	show_obj(session.pct, gauge);
 	show_obj(session.name, gauge);
 	show_obj(session.countdown, gauge);
-	if (burn_obj) {
-		show_obj(burn_obj, !gauge);
-	}
+	/* No NULL test: this runs from layout_gauges() alone, which runs
+	 * once usage_view_init() has made the object (burn_build() comes
+	 * first) and otherwise only while `built`, which teardown clears
+	 * before it nulls burn_obj. */
+	show_obj(burn_obj, !gauge);
 }
 
 /* A gauge where the two-gauge screen keeps it: the geometry build_gauge()
@@ -1817,18 +1819,13 @@ void usage_view_page_step(int delta)
 #define BURN_IDLE_GLYPH		LV_SYMBOL_MINUS
 
 /*
- * One line per provider, which is what the wire's `p` leaves room for: a
- * daemon that one day sends a codex line beside the claude one must not have
- * the two take turns overwriting each other, which with one slot would
- * blink the claude page's view off every other line.
+ * One line per provider, which is what the wire's `p` leaves room for, and
+ * one provider per page; burn5h.h struct burn5h_slot says why, and
+ * tests/burn5h checks the choice.
  */
 #define BURN_SLOTS		RAIL_PAGES_MAX
 
-static struct {
-	struct burn5h m;
-	int64_t at_ms;			/* the uptime it arrived at */
-	bool have;
-} burn_slot[BURN_SLOTS];
+static struct burn5h_slot burn_slot[BURN_SLOTS];
 
 /* The board clock's UTC offset, for the hour axis; see usage_view.h. */
 static bool burn_off_known;
@@ -2024,21 +2021,13 @@ static void burn_build(lv_obj_t *parent)
 
 static int burn_slot_for(const char *tag)
 {
-	if (tag == NULL || tag[0] == '\0') {
-		return -1;
-	}
-	for (int i = 0; i < BURN_SLOTS; i++) {
-		if (burn_slot[i].have && strcmp(burn_slot[i].m.p, tag) == 0) {
-			return i;
-		}
-	}
-	return -1;
+	return burn5h_slot_find(burn_slot, BURN_SLOTS, tag);
 }
 
 static bool burn_fresh(int s)
 {
-	return burn_slot[s].have &&
-	       k_uptime_get() - burn_slot[s].at_ms <= BURN_FRESH_MS;
+	return burn5h_slot_fresh(&burn_slot[s], k_uptime_get(),
+				 BURN_FRESH_MS);
 }
 
 static void burn_compose(const struct burn5h *m, struct burn_drawn *d)
@@ -2103,7 +2092,9 @@ static void burn_sync(void)
 	struct burn_drawn d;
 	int s = -1;
 
-	if (!built || burn_obj == NULL) {
+	/* `built` is set after burn_build() and cleared before burn_obj is
+	 * nulled, so it alone says the object is there. */
+	if (!built) {
 		return;
 	}
 	/*
@@ -2188,22 +2179,10 @@ void usage_view_hold_half(bool hold)
 
 void usage_view_set_burn5h(const struct burn5h *m, int64_t at_ms)
 {
-	int s = burn_slot_for(m->p);
+	/* Its own slot, else an empty one, else whichever was heard from
+	 * longest ago. */
+	int s = burn5h_slot_take(burn_slot, BURN_SLOTS, m->p);
 
-	if (s < 0) {
-		/* A provider not seen before: an empty slot, else whichever
-		 * was heard from longest ago. */
-		s = 0;
-		for (int i = 0; i < BURN_SLOTS; i++) {
-			if (!burn_slot[i].have) {
-				s = i;
-				break;
-			}
-			if (burn_slot[i].at_ms < burn_slot[s].at_ms) {
-				s = i;
-			}
-		}
-	}
 	burn_slot[s].m = *m;
 	burn_slot[s].at_ms = at_ms;
 	burn_slot[s].have = true;
