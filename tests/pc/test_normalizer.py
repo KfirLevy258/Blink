@@ -663,3 +663,54 @@ def test_a_frame_that_carries_an_infinite_percentage_does_not_raise():
     assert normalizer.merge([bad, good]).session_pct == 30.0
     alone = normalizer.merge([bad])
     assert alone is None or alone.session_pct == base.UNKNOWN
+
+
+# The same crash through the field beside the percentage: "resets_at": 1e999.
+# The reset stamp was accepted as any int or float, two infinite stamps made
+# _same_window compare abs(inf - inf) <= 300, which is NaN and False, so even
+# the winning frame was not its own peer and max() of nothing raised -- the
+# NICE 1 symptom again, with a valid percentage beside it. The reviewer's six
+# cases (found 2026-10-31); -1e999 already passed, because a stamp in the past
+# reads as an ended window, and now reads as no stamp at all.
+
+
+@pytest.mark.parametrize("stamp", ["1e999", "NaN", "-1e999"])
+@pytest.mark.parametrize("window", ["five_hour", "seven_day"])
+def test_a_corrupt_reset_stamp_costs_only_its_own_provider(stamp, window):
+    import json
+    from pc import protocol
+    payload = json.loads('{"rate_limits":{"%s":{"used_percentage":40,'
+                         '"resets_at":%s}}}' % (window, stamp))
+    line = ss.map_statusline_frame(payload, NOW, NOW - 5)
+    codex = cli(NOW - 5, session=12.0, provider="codex")
+    primary, secondary = normalizer.select_pair([line, codex])
+    protocol.frame_to_usage(primary, NOW, secondary)
+    assert {primary.provider, secondary.provider} == {"claude", "codex"}
+
+
+@pytest.mark.parametrize("stamp", [float("inf"), float("nan"), 1e12, -1, True])
+def test_the_status_line_reads_an_impossible_reset_stamp_as_none(stamp):
+    f = ss.map_statusline_frame(
+        {"rate_limits": {"five_hour": {"used_percentage": 40,
+                                       "resets_at": stamp}}}, NOW, NOW - 5)
+    assert f.session_resets_at is None
+    assert f.session_pct == 40
+
+
+def test_a_real_reset_stamp_is_kept():
+    f = ss.map_statusline_frame(
+        {"rate_limits": {"five_hour": {"used_percentage": 40,
+                                       "resets_at": NOW + 3600}}}, NOW, NOW - 5)
+    assert f.session_resets_at == NOW + 3600
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan")])
+def test_merge_ignores_a_non_finite_reset_stamp_from_any_source(bad):
+    """The check in the status line is not the only door: a frame from a
+    source that skipped it must not take the merge down either."""
+    a = cli(NOW - 5, session=40.0, s_reset=bad, w_reset=bad)
+    b = cli(NOW - 9, session=40.0, s_reset=bad, w_reset=bad)
+    m = normalizer.merge([a, b])
+    assert m.session_pct == 40.0
+    assert m.session_resets_at is None and m.weekly_resets_at is None
+    assert normalizer.merge([a, desktop(NOW - 60, session=41.0)]) is not None

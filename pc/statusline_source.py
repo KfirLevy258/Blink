@@ -64,6 +64,15 @@ def payload_path() -> str:
 STALE_AFTER_S = 1800
 
 
+# Bounds for a reset stamp. The ceiling is codex_cli's and claude_desktop's
+# (2100-01-01; it would notice the unit changing to milliseconds). The floor is
+# 0 and not their 2020: a stamp in the past is how a window that has ended is
+# recognised (base.window_ended), so a long-past one is evidence and not noise,
+# and what is refused here is only what is not a time at all.
+RESET_EPOCH_MIN = 0
+RESET_EPOCH_MAX = 4_102_444_800
+
+
 def _window(rate_limits: dict, key: str):
     """(used_percentage, resets_at_epoch|None) for one window.
 
@@ -95,7 +104,16 @@ def _window(rate_limits: dict, key: str):
     if not (0 <= pct <= 1000):
         pct = -1.0
     resets = w.get("resets_at")
-    return pct, resets if isinstance(resets, (int, float)) else None
+    # A real reset stamp only, bounded like the Codex and Desktop readers'.
+    # json reads 1e999 as infinity and NaN as NaN, and two
+    # infinite stamps made the merge's same-window test false even for a
+    # frame against itself, which emptied max() and took every provider's
+    # usage down with a perfectly good percentage beside it. A bool is an int
+    # to isinstance and not a time. Unknown, like an absent stamp.
+    if (isinstance(resets, bool) or not isinstance(resets, (int, float))
+            or not (RESET_EPOCH_MIN <= resets <= RESET_EPOCH_MAX)):
+        resets = None
+    return pct, resets
 
 
 # _secs_until moved to protocol.secs_until when a second provider needed the
