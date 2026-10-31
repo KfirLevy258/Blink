@@ -1622,6 +1622,26 @@ def test_finding_8_a_full_fetch_table_does_not_re_date_the_dial(tmp_path):
     assert [f.first_seen_at for f in dial] == [T - 4 * 3600]
 
 
+def test_finding_14_a_refused_five_hour_does_not_replace_the_last_figure(
+        tmp_path):
+    """poll() decided "this payload has a figure" from the raw payload,
+    while the frame refuses a five_hour whose resets_at will not read once
+    it is older than a window. Such a payload overwrote the last payload
+    with a figure, and the weekly figure went with it."""
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+    write(p, status(seven=33.0), NOW - 60)
+    prov.poll(NOW - 59)
+    refused = {"session_id": "s",
+               "rate_limits": {"five_hour": {"used_percentage": 40.0,
+                                             "resets_at": None}}}
+    write(p, refused, NOW - BOUND - 60)
+
+    frames = prov.poll(NOW)
+    assert not frames[0].has_usage()
+    assert 33.0 in [f.weekly_pct for f in frames]
+
+
 def test_finding_7_a_failed_save_is_retried_and_leaves_no_temp(
         tmp_path, monkeypatch):
     """The verdict was written only on the poll where it flipped, through a

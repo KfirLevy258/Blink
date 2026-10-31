@@ -414,9 +414,12 @@ class ClaudeCliProvider(base.ProviderParser):
                 if reply is not None:
                     live.window_evidence = reply
                 frames.append(live)
-                limits = _limits(payload)
-                has_figure = (ss.window_usable(limits, "five_hour")
-                              or ss.window_usable(limits, "seven_day"))
+                # The frame's figures, not the payload's: a five_hour the
+                # frame refused (_frame) is no figure, and a payload with
+                # nothing else in it used to replace the last one that had
+                # one, weekly figure and all (the /code-review max of
+                # 2026-11-01, finding 14).
+                has_figure = live.has_usage()
                 seen = (payload, mtime)
                 if has_figure:
                     self._any = seen
