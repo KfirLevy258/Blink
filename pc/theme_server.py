@@ -60,6 +60,10 @@ MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
 # field because those bodies are the theme itself, which theme.validate
 # checks key by key; see _Handler.do_POST.
 TAB_HEADER = "X-Blink-Tab"
+# The requests BuilderServer.count tallies, for the line it logs when it
+# ends. Paths only: nothing a request carries is kept.
+_COUNTED = ("/api/ping", "/api/preview", "/api/save", "/api/cancel",
+            "/api/closed")
 # A builder heartbeat (/api/ping) arrives every 20 s from an open page. A page
 # heard within this long is "still open": the Launcher does not put a second
 # tab beside it. Chrome slows a hidden tab's timers to once a minute, hence
@@ -380,6 +384,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 and self._origin_ok()):
             return self._refuse()
         path = urllib.parse.urlsplit(self.path).path
+        self.builder.count(path)
         raw, err = self._body()
         if err:
             self.close_connection = True
@@ -543,6 +548,13 @@ class BuilderServer:
         self._files = threading.Lock()
         self._writing = True
         self.outcome = None
+        # What the daemon's log says when this builder ends, or None. Set by
+        # the Launcher, so `blink theme` prints nothing beyond its own words.
+        self.say = None
+        # What this builder was asked, counted by kind and never by content,
+        # and when it started; see _account.
+        self._born = now()
+        self._counts = dict.fromkeys(_COUNTED, 0)
         self._done = threading.Event()
         self.page_bytes = page().encode("utf-8")
         self._httpd = _HTTPServer(("127.0.0.1", 0), _Handler)
@@ -748,6 +760,26 @@ class BuilderServer:
         elif idle:
             self.finish("idle")
 
+    def count(self, path):
+        """One more request of this kind, for the line finish() says. Only
+        the paths named in _COUNTED are kept: a tally by kind can hold no
+        theme, no link and no cookie."""
+        if path in self._counts:
+            with self._lock:
+                self._counts[path] += 1
+
+    def _account(self, outcome):
+        """How this builder ended, as one line. The outcome is one of the
+        fixed words finish() is called with; the rest are whole numbers."""
+        with self._lock:
+            n = dict(self._counts)
+            tabs = len(self._order)
+            secs = int(self._now() - self._born)
+        return (f"[theme] builder ended: {outcome} after {secs} s"
+                f" (pings={n['/api/ping']} previews={n['/api/preview']}"
+                f" saves={n['/api/save']} cancels={n['/api/cancel']}"
+                f" closes={n['/api/closed']} tabs={tabs})")
+
     def finish(self, outcome, cancel=True):
         """Stop. Anything but a save also tells the board to drop the
         preview, through the same file every preview went through."""
@@ -755,6 +787,15 @@ class BuilderServer:
             if self.outcome is not None:
                 return
             self.outcome = outcome
+        # Said first, before anything below can fail: it is the one record
+        # of why the builder ended. On 2026-10-31 a builder ended 6 s after
+        # the board opened it and the log could not say a Save from a closed
+        # tab. A log that cannot be written must not stop the builder.
+        if self.say is not None:
+            try:
+                self.say(self._account(outcome))
+            except Exception:
+                pass
         try:
             theme.remove_builder(self.home, self.port)
         except OSError:
@@ -831,6 +872,12 @@ def running_builder(home):
     except OSError:
         pass
     return None
+
+
+def _say_ending(line):
+    # The daemon's stderr is bridge.log. The line is built by
+    # BuilderServer._account: a fixed outcome word and counts.
+    print(line, file=sys.stderr)
 
 
 class Launcher:
@@ -911,6 +958,7 @@ class Launcher:
                       file=sys.stderr)
                 self._server = None
                 return False, None
+            server.say = _say_ending
             server.start()
             self._server = server
         else:
