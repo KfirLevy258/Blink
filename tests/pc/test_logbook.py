@@ -603,6 +603,73 @@ def test_a_copy_that_fails_after_the_shift_costs_no_extra_generation(
         1: "x" * 7, 2: "gen1...", 3: "gen2...", 4: "gen3..."}
 
 
+def _files(tmp_path):
+    return sorted(p.name for p in tmp_path.iterdir())
+
+
+_CLEAN_FILES = ["bridge.log", "bridge.log.1", "bridge.log.2", "bridge.log.3",
+                "bridge.log.4"]
+
+
+def test_a_rotation_leaves_exactly_the_kept_files_and_nothing_else(tmp_path):
+    """No .5 past `keep`, and no staging file left behind."""
+    path, f = _full_log_with_generations(tmp_path, 4)
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is True
+    finally:
+        f.close()
+    assert _files(tmp_path) == _CLEAN_FILES
+
+
+def test_a_copy_that_dies_half_way_leaves_no_short_file_in_a_generation(
+        tmp_path, monkeypatch):
+    """A full disk: _copy writes some of the log and then raises. The short
+    piece must not sit in .1, where the retry would shift it up as if it were
+    a generation and push a real one off the end."""
+    path, f = _full_log_with_generations(tmp_path, 4)
+    real, calls = logbook._copy, []
+
+    def half(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            with open(dst, "wb") as w:
+                w.write(b"half")
+            raise OSError(28, "No space left on device")
+        return real(src, dst)
+
+    monkeypatch.setattr(logbook, "_copy", half)
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is False
+        assert (tmp_path / "bridge.log.1").read_text() == "gen1..."
+        assert os.path.getsize(path) == 2000
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is True
+    finally:
+        f.close()
+    assert _generations(tmp_path, 4) == {
+        1: "x" * 7, 2: "gen1...", 3: "gen2...", 4: "gen3..."}
+    assert _files(tmp_path) == _CLEAN_FILES
+
+
+def test_the_log_is_not_emptied_until_every_rename_has_gone_through(
+        tmp_path, monkeypatch):
+    """The truncate is the point of no return and comes last. If the final
+    rename into .1 is refused, the log still holds everything."""
+    path, f = _full_log_with_generations(tmp_path, 4)
+    real = os.replace
+
+    def refuse_last(src, dst):
+        if dst.endswith(".1"):
+            raise PermissionError(32, "being used by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(logbook.os, "replace", refuse_last)
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is False
+    finally:
+        f.close()
+    assert os.path.getsize(path) == 2000
+
+
 def test_a_hole_in_the_generations_is_not_shifted_over(tmp_path):
     """Someone deleted .2 by hand: .3 and .4 stay where they are."""
     path, f = _full_log_with_generations(tmp_path, 4)
