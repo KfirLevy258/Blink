@@ -632,8 +632,17 @@ class BuilderServer:
             now = self._now()
             self._tabs.pop(tab, None)
             self._prune_tabs(now)
-            if self._tabs:
-                return      # another tab is still showing this builder
+            # Only the newest tab is live (seen()). An older one that has
+            # not yet pinged since the newer arrived is still in the count,
+            # but it is not showing this builder: its next ping says it is
+            # superseded and drops it, and a retired tab sends no
+            # /api/closed, so nothing would ever set the close again. The
+            # builder then ran with no live tab until IDLE_S, 600 s after
+            # the last edit, and the board kept the closed tab's last
+            # preview all that time (review of 1.4.0, builder S1).
+            newest = len(self._order) - 1
+            if any(self._order.get(k) == newest for k in self._tabs):
+                return      # the live tab is still showing this builder
             self._closed_at = now
 
     def tick(self):
