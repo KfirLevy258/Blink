@@ -245,7 +245,7 @@ refused as a scenario that asserts nothing.
   whose message type is `usage` **and** which the daemon reported writing. The
   `time` message every poll also sends does not count, and neither does a frame
   the daemon refused: `send()` drops a line over the board's 512-byte limit, and
-  a loaded two-provider frame already measures 484, so a refused frame is a live
+  a loaded two-provider frame already measures 454 (2026-10-31), so a refused frame is a live
   failure mode. It never reached the board, and counting it would credit the
   board for work it was never given.
 - **`min_board_usage`** -- `[usage] session ` lines the **board** printed on its

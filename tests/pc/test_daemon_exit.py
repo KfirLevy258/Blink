@@ -164,3 +164,57 @@ def test_the_flash_is_wrapped_in_the_guard():
                encoding="utf-8").read()
     i = src.index("ota_mod.flash(port, blob)")
     assert "no_exit_while(" in src[i - 300:i]
+
+
+def test_the_flash_result_is_logged_inside_the_guard():
+    """no_exit_while's finally calls sys.exit when a stop arrived during the
+    block, so anything after the `with` never runs on that path. The result
+    line ("ota: flashed X" or "FAILED: ...") sat after it, and a stop that
+    waited for the firmware write left bridge.log ending at "stopping once
+    the firmware write has finished" with no outcome (found in review,
+    2026-10-31). Read as text and syntax only: the daemon module is never
+    imported to prove this.
+    """
+    import ast
+    src = open(os.path.join(ROOT, "claude_usage_bridge.py"),
+               encoding="utf-8").read()
+    guards = [
+        w for w in ast.walk(ast.parse(src)) if isinstance(w, ast.With)
+        and any(isinstance(i.context_expr, ast.Call)
+                and getattr(i.context_expr.func, "id", "") == "no_exit_while"
+                and i.context_expr.args
+                and getattr(i.context_expr.args[0], "value", "")
+                == "firmware write"
+                for i in w.items)]
+    assert len(guards) == 1
+    printed = [ast.get_source_segment(src, n) for n in ast.walk(guards[0])
+               if isinstance(n, ast.Call)
+               and getattr(n.func, "id", "") == "print"]
+    assert any("ota:" in p and "FAILED" in p for p in printed), printed
+
+
+def test_every_guarded_block_logs_its_result_inside_the_guard():
+    """The same defect in the two app-update guards: `print(f"[update]
+    {message}")` came after the `with`, so a stop that waited for the swap
+    left no line saying whether it had worked (review, 2026-10-31). Every
+    no_exit_while block in the daemon must print its own outcome, and the
+    outcome must be the very value the guarded call returned. Syntax only; the
+    daemon module is never imported to prove it."""
+    import ast
+    src = open(os.path.join(ROOT, "claude_usage_bridge.py"),
+               encoding="utf-8").read()
+    guards = [
+        w for w in ast.walk(ast.parse(src)) if isinstance(w, ast.With)
+        and any(isinstance(i.context_expr, ast.Call)
+                and getattr(i.context_expr.func, "id", "") == "no_exit_while"
+                for i in w.items)]
+    assert len(guards) >= 3
+    for g in guards:
+        what = g.items[0].context_expr.args[0].value
+        printed = [ast.get_source_segment(src, n) for n in ast.walk(g)
+                   if isinstance(n, ast.Call)
+                   and getattr(n.func, "id", "") == "print"]
+        assert printed, f"no_exit_while({what!r}) logs nothing inside itself"
+        if what == "app update":
+            assert any("[update]" in p and "message" in p for p in printed), \
+                printed

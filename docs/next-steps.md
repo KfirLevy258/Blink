@@ -235,7 +235,7 @@ Smaller, still open:
   (1s old)" is less than it could say.
 - **The wire carries float noise** — `session_pct: 14.000000000000002` was
   observed. Harmless to the panel, but they are bytes inside a 512-byte line,
-  and the fully loaded frame already measures 484 of it.
+  and the fully loaded frame already measures 454 of it (2026-10-31).
 - **`cfg_set_main_src()` has no callers** since the "Main source" row was
   removed from the settings screen. The board therefore always announces
   `pref: claude`, so a user running both cannot make Codex the primary dial.

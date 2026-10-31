@@ -23,6 +23,21 @@ LIVENESS_WINDOW_S = 30.0
 # fast tick instead.
 THEME_QUIET_S = 2.0
 
+# How long nothing else is written after a theme SAVE. The board answers it
+# with a flash erase and write on its main thread (ui_theme.c, THEME_OP_SAVE
+# -> cfg_set_theme -> persist), and an ESP32 flash erase masks the console
+# UART's interrupt: for its length only the 128-byte FIFO, about 11 ms of
+# line at 115200 baud, keeps what the daemon sends. A usage line written
+# right behind a save arrived with its middle missing -- page 2 dropped out,
+# the pips went wrong -- in 99 of 99 simulated cases with an erase of 30 ms
+# or more (firmware review, 2026-10-31). cfg_store.c puts the whole erase and
+# write at "tens of milliseconds", so 0.5 s is several times that, and it is
+# short beside the 2 s fast tick, the 60 s heartbeat and the 30 s the board is
+# given before it is called lost. The board's theme_now why=saved, which it
+# sends only after the store has finished, ends the hold early. Only a save
+# holds: preview and cancel write no flash.
+THEME_SAVE_HOLD_S = 0.5
+
 
 def _spawn(fn):
     threading.Thread(target=fn, name="blink-theme-open", daemon=True).start()
@@ -79,7 +94,7 @@ class Bridge:
                  fetch_signed_manifest=None, report_failure=None,
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
-                 edit_answers=None, builder_ended=None):
+                 edit_answers=None, builder_ended=None, sleep=time.sleep):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -171,6 +186,8 @@ class Bridge:
         self._edit_answers = (edit_answers if edit_answers is not None
                               else queue.SimpleQueue())
         self._theme_quiet_until = None
+        self._sleep = sleep
+        self._store_until = None         # see THEME_SAVE_HOLD_S
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -185,6 +202,7 @@ class Bridge:
         this existed.
         """
         self._write(protocol.welcome("blink-bridge", self._app_ver))
+        self._store_until = None         # a new conversation, a new board
         if self._theme is not None:
             # A greeting starts a new conversation: the board answers it with
             # theme_now why=boot, and nothing about themes is said until a
@@ -234,7 +252,10 @@ class Bridge:
         if self._board_proto is None:
             try:
                 self._board_proto = int(msg["v"])
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):
+                # OverflowError because json reads 1e400 as infinity and
+                # int(inf) raises it; uncaught, it left the read loop and
+                # ended the daemon.
                 pass
             else:
                 self._announce_if_ahead()
@@ -288,6 +309,8 @@ class Bridge:
         elif t == "theme_now":
             # Recorded, never answered here: whatever it makes owed goes out
             # on the next tick (see THEME_QUIET_S).
+            if msg.get("why") == "saved":
+                self._store_until = None     # the store has finished
             if self._theme is not None:
                 self._theme.board_now(msg, board_id=self._board_id)
         elif t == "theme_edit":
@@ -314,7 +337,7 @@ class Bridge:
         """
         try:
             self._board_proto = int(hello.get("v"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):    # 1e400 is inf
             self._board_proto = None
         self._board_fw = hello.get("fw")
         # A hello's word is final, an absent id included: a board that
@@ -667,21 +690,37 @@ class Bridge:
 
     def _send_theme(self):
         """The preview, cancel or save the files say is owed. Called on both
-        ticks; the fast one is what makes a preview follow the builder."""
+        ticks; the fast one is what makes a preview follow the builder.
+
+        True when a save was written, which the board stores to flash: the
+        caller must then write nothing more this tick (THEME_SAVE_HOLD_S).
+        """
         if self._theme is None:
-            return
+            return False
         if (self._theme_quiet_until is not None
                 and self._now() < self._theme_quiet_until):
-            return
+            return False
         try:
             lines = self._theme.outgoing(deliver=self._takes_theme())
         except Exception as e:
             # A theme is never worth the serial loop. Only the reason is
             # printed; theme.ThemeError's words never hold file contents.
             print(f"[bridge] theme not sent: {e}", file=sys.stderr)
-            return
+            return False
+        stored = False
         for m in lines:
             self._write(m)
+            stored = stored or m.get("op") == "save"
+        if stored:
+            self._store_until = self._now() + THEME_SAVE_HOLD_S
+        return stored
+
+    def _store_wait(self):
+        """Seconds left of the hold after a save: never more than
+        THEME_SAVE_HOLD_S, whatever the clock does."""
+        if self._store_until is None:
+            return 0.0
+        return max(0.0, min(THEME_SAVE_HOLD_S, self._store_until - self._now()))
 
     def _on_theme_edit(self):
         """Settings > Theme > "Edit on computer" on the board.
@@ -773,6 +812,18 @@ class Bridge:
     # cache, which that app refreshes every 5-15 minutes, so the arcs move no
     # sooner than they ever did. This is about state, not numbers.
     def poll_once(self):
+        # A heartbeat is not skipped for a save in flight, as the fast tick
+        # is: it waits out what is left of the hold, once, at most
+        # THEME_SAVE_HOLD_S. The theme goes LAST in a tick, so that the one
+        # tick that writes a save writes nothing behind it.
+        wait = self._store_wait()
+        if wait > 0:
+            self._sleep(wait)
+        self._store_until = None
+        self._heartbeat()
+        self._send_theme()
+
+    def _heartbeat(self):
         # Time rides along with every heartbeat so the board's clock re-anchors
         # at the same cadence as the data.
         epoch, off = self._wall()
@@ -788,7 +839,6 @@ class Bridge:
         # quarantine lasted. Pages are the last ones usage named.
         self._last_svc = {}
         self._send_svc_if_changed()
-        self._send_theme()
 
         try:
             usage = self._read_usage()
@@ -832,8 +882,9 @@ class Bridge:
         0.0004 s; a poll costs a stat per file plus a fresh parse of whatever
         Chromium actually rewrote -- ordinarily just the small .log.
 
-        Writing was never free either: the fully-loaded usage line runs to 509
-        of the 512 bytes the firmware will accept, and putting one on the wire
+        Writing was never free either: the fully-loaded usage line runs to 450
+        of the 512 bytes the firmware will accept (tests/pc/test_protocol.py
+        holds the figure), and putting one on the wire
         every two seconds when nothing changed is thirty times the traffic
         carrying no news.
 
@@ -843,9 +894,16 @@ class Bridge:
         a minute into thirty; poll_once already reports both at a cadence a
         person can actually read.
         """
+        # Inside the hold after a save, nothing is written: the next tick, two
+        # seconds on, finds the same news still owed.
+        if self._store_wait() > 0:
+            return
         # First, and before any return below: a preview is somebody watching
         # the board while they drag a colour, and it must not wait on usage.
-        self._send_theme()
+        # A save ends the tick instead (THEME_SAVE_HOLD_S): usage is still
+        # owed, since _last_pushed has not moved, and goes on the next one.
+        if self._send_theme():
+            return
         try:
             usage = self._read_usage()
         except Exception:

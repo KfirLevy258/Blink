@@ -142,7 +142,7 @@ class Tap:
 
         `sent` is not decoration. send() refuses any line over the board's
         512-byte limit -- and a fully loaded two-provider frame already
-        measures 484 -- so the refusal happens in exactly the boundary cases
+        measures 454 (2026-10-31) -- so the refusal happens in exactly the boundary cases
         this suite exists to catch. A transcript that recorded the refusal as
         a plain tx would say the host sent a frame the board ignored, and the
         hunt would start in the firmware for a bug that is in the host.
@@ -681,7 +681,11 @@ def _self_update_tick(target):
     # review, 2026-10-27, SHOULD 2). See no_exit_while below.
     with no_exit_while("app update"):
         ok, message = update.apply(blob, target, version)
-    print(f"[update] {message}", file=sys.stderr)
+        # Inside the guard: its exit runs the moment the block ends when a
+        # stop arrived during the swap, so a line printed after it never did
+        # and the log said nothing of whether the swap had worked (review,
+        # 2026-10-31; the firmware write had the same defect).
+        print(f"[update] {message}", file=sys.stderr)
     if ok:
         update.restart_from_daemon(target)
 
@@ -1177,7 +1181,7 @@ def main(argv=None):
             # line, it DROPS it whole (proto.c) with no error on either side:
             # the panel silently stops updating while this log keeps printing
             # the message as sent. A fully loaded two-provider frame already
-            # measures 484 of the 512 bytes.
+            # measures 454 of the 512 bytes (2026-10-31).
             raw, why = protocol.encode_checked(m)
             if raw is None:
                 print(f"[bridge] NOT SENT: {why}", file=sys.stderr)
@@ -1223,8 +1227,13 @@ def main(argv=None):
                 pass
             with no_exit_while("firmware write"):
                 ok, why = ota_mod.flash(port, blob)
-            print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
-                  file=sys.stderr)
+                # Inside the guard, not after it: when a stop arrived during
+                # the write, the guard's exit runs the moment this block ends
+                # and a line printed after it never did. The log then ended
+                # at "stopping once the firmware write has finished" with no
+                # word on whether it had (review, 2026-10-31).
+                print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
+                      file=sys.stderr)
             raise Reflashed(None if ok else why)
 
         def self_update(version, artifact):
@@ -1243,7 +1252,7 @@ def main(argv=None):
             # the login service pointing at half an install.
             with no_exit_while("app update"):
                 ok, message = update.apply(blob, self_bin, version)
-            print(f"[update] {message}", file=sys.stderr)
+                print(f"[update] {message}", file=sys.stderr)  # inside the guard, as in _self_update_tick
             if not ok:
                 return False
             try:

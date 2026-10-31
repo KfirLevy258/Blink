@@ -1128,3 +1128,76 @@ def test_a_small_step_back_keeps_the_incident():
     op.raises = OSError("network down")
     desk.t -= sp.CLOCK_SLACK_S - 1
     assert desk.shown() == ("major", "Claude Code")
+
+
+def _serve_summary(framing, body):
+    """A real http.server on loopback answering every GET with `body`.
+
+    framing is "length" (a Content-Length header and the whole body at once,
+    the way status.claude.com answers: content-length 2154 on 2026-10-31),
+    "chunked" (Transfer-Encoding: chunked, a chunk per 100 bytes) or "eof"
+    (neither header; the body ends when the server closes). Returns the
+    server; the caller shuts it down.
+    """
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            if framing == "length":
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif framing == "chunked":
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                for i in range(0, len(body), 100):
+                    part = body[i:i + 100]
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
+                self.wfile.write(b"0\r\n\r\n")
+            else:
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+                self.close_connection = True
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("framing", ["length", "chunked", "eof"])
+def test_a_real_server_reply_is_read_however_it_is_framed(monkeypatch,
+                                                          framing):
+    """The reader against the three ways a body can end, over a real socket.
+
+    Every other reader test uses a BytesIO with no socket, so none of them
+    could see this: since CPython 3.11.8 and 3.12.2, HTTPResponse.read1()
+    closes the connection inside the call that returns the last bytes of a
+    Content-Length body. _read_capped then went round again, called
+    settimeout on the closed socket and got OSError(9, 'Bad file
+    descriptor'), so on 3.11.9 -- the interpreter the release binaries are
+    built with -- every reply with a Content-Length read as (None,
+    "OSError") and a customer with the status page on never saw a Claude
+    incident. Chunked replies were unaffected, which is why the one
+    real-socket test above passed.
+    """
+    body = _incident("major_outage")
+    server = _serve_summary(framing, body)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/summary.json"
+        monkeypatch.setitem(sp.PAGES, "claude",
+                            sp.Page(url, sp.PAGES["claude"].components))
+        result, why = sp._read("claude")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert (result, why) == (("major", "Claude Code"), None)

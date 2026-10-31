@@ -33,6 +33,8 @@ keep the dial against a newer one that is at most HOLD_BAND below it, because
 within a window usage only ever rises and a fraction of a point between two
 sources is a disagreement, not a fall. See _pick_pct.
 """
+import math
+
 from pc.providers import base
 
 # How far below the dial a newer reading may land and still be taken for
@@ -57,8 +59,26 @@ SESSION_WINDOW_S = 5 * 3600
 WEEKLY_WINDOW_S = 7 * 86400
 
 
+def _stamp(f, attr):
+    """A frame's reset stamp, or None when it has none or it is not a finite
+    number. inf - inf is NaN and fails every comparison, so two infinite stamps
+    made _same_window false even for a frame against itself, and max() of no
+    peers raised -- one corrupt "resets_at": 1e999 took every provider's
+    usage down. Sources bound their own stamps (statusline_source._window);
+    this keeps the merge safe from one that does not."""
+    v = getattr(f, attr, None)
+    return v if v is not None and math.isfinite(v) else None
+
+
 def _known_pct(v):
-    return v is not None and v >= 0
+    # Finite, because a hold compares readings by subtracting them and
+    # inf - inf is NaN, which fails every comparison and left max() with
+    # nothing to choose from: one infinite percentage took the whole poll
+    # down, every provider's numbers with it. A reading that is not a number
+    # is no reading, for that frame alone. Sources check their own range
+    # (statusline_source._window); this keeps the merge safe from one that
+    # does not.
+    return v is not None and math.isfinite(v) and v >= 0
 
 
 def _pick(frames, has, get):
@@ -98,14 +118,14 @@ def _same_window(a, b, resets_attr, window_s):
 
     Neither stamped: nothing to compare, so yes.
     """
-    ra = getattr(a, resets_attr, None)
-    rb = getattr(b, resets_attr, None)
+    ra = _stamp(a, resets_attr)
+    rb = _stamp(b, resets_attr)
     if ra is not None and rb is not None:
         return abs(ra - rb) <= SAME_WINDOW_S
     if ra is None and rb is None:
         return True
     stamped, bare = (a, b) if ra is not None else (b, a)
-    opened = getattr(stamped, resets_attr) - window_s
+    opened = _stamp(stamped, resets_attr) - window_s
     return bare.observed_at >= opened
 
 
@@ -279,10 +299,10 @@ def merge(frames):
         ended_evidence = max(evidence, key=lambda f: f.observed_at)
 
     session_resets_at, _ = _pick(
-        frames, lambda f: f.session_resets_at is not None,
+        frames, lambda f: _stamp(f, "session_resets_at") is not None,
         lambda f: f.session_resets_at)
     weekly_resets_at, _ = _pick(
-        frames, lambda f: f.weekly_resets_at is not None,
+        frames, lambda f: _stamp(f, "weekly_resets_at") is not None,
         lambda f: f.weekly_resets_at)
     state, state_src = _pick(
         frames, lambda f: f.state != base.STATE_UNKNOWN, lambda f: f.state)
