@@ -56,10 +56,11 @@ export HOME
 # account's own, because launchd's label and systemd's unit name are global
 # and a scratch HOME otherwise boots out the real agent (the 2026-10-30
 # import, tests/test_import_is_inert.py). This script is the one place that
-# means to do exactly that, so it says so -- but only where CI is set, which
-# every GitHub runner does: run by hand on a desk, without
-# BLINK_SKIP_SERVICE=1 as the header asks, it is still refused.
-if [ -n "${CI:-}" ]; then
+# means to do exactly that, so it says so -- but only on GitHub Actions, which
+# sets GITHUB_ACTIONS=true on every runner. Not on CI: plenty of developers'
+# shells export that (npm, direnv), and then a run by hand on a desk, without
+# BLINK_SKIP_SERVICE=1 as the header asks, would not be refused after all.
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
 	BLINK_ALLOW_FOREIGN_HOME=1
 	export BLINK_ALLOW_FOREIGN_HOME
 fi

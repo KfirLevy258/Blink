@@ -117,7 +117,8 @@ around it. It:
   so a test that clears `BLINK_SKIP_SERVICE` to drive the backends with a
   faked `subprocess` sets `BLINK_ALLOW_FOREIGN_HOME=1` as well. That check is
   what `HOME=/tmp/x blink install` meets; the CI install script sets the
-  override only where `CI` is set;
+  override only where `GITHUB_ACTIONS` is `true` (not `CI`, which developers'
+  shells export);
 - refuses any socket off loopback, at name lookup and at `connect()`, and
   clears proxies so one on 127.0.0.1 cannot carry a request through. Four
   bridge tests had been fetching the release feed from github.com on every

@@ -148,14 +148,18 @@ def test_install_under_a_scratch_home_never_reaches_the_service_manager(
     assert "BLINK_ALLOW_FOREIGN_HOME=1" in out.stdout
 
 
-def test_ci_install_script_opts_in_only_under_ci():
+def test_ci_install_script_opts_in_only_on_github_actions():
     """tests/ci/check_install.sh must still be refused on a desk: it sets
-    the override only where CI is set."""
+    the override only on GitHub Actions. `CI` was the first key and many
+    developers' shells export it (npm, direnv), which made "run by hand on a
+    desk is still refused" untrue (review of fp/safety-guards, S2);
+    GITHUB_ACTIONS=true is set by the runner and by nobody's profile."""
     import pathlib
     text = (pathlib.Path(__file__).resolve().parents[2]
             / "tests" / "ci" / "check_install.sh").read_text()
-    assert 'if [ -n "${CI:-}" ]; then\n\tBLINK_ALLOW_FOREIGN_HOME=1' in text
-
+    assert ('if [ "${GITHUB_ACTIONS:-}" = "true" ]; then\n'
+            '\tBLINK_ALLOW_FOREIGN_HOME=1') in text
+    assert '${CI:-}' not in text
 
 
 
