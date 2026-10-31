@@ -2169,8 +2169,10 @@ def test_status_says_when_the_account_has_no_five_hour_window(
             " without one)") in capsys.readouterr().out
 
     with open(status, "w", encoding="utf-8") as f:
+        # A window that opened after the proof: a block nobody saw arrive
+        # is dated from its window's start (claude_cli._window_dated).
         f.write(json.dumps(payload(five_hour=27.0,
-                                   resets_at=time.time() + 3600)))
+                                   resets_at=time.time() - 30 + 5 * 3600)))
     assert cli.main(["status"]) == 0
     assert "Session     " not in capsys.readouterr().out
     assert open(session_verdict.verdict_path(), "rb").read() == before

@@ -54,8 +54,9 @@ persisted, but by pc/session_verdict, as a verdict and not as a payload.
 
 What this provider proves about that window goes on its frames as
 window_evidence, for pc/session_verdict to weigh. A payload with a
-five-hour window proves one, dated no later than the start of that window
-(_window_dated). A payload without one proves nothing on its own: that is
+five-hour window proves one, dated when its block arrived if this process
+watched it arrive with a reply, and otherwise no later than the start of
+that window (_window_dated). A payload without one proves nothing on its own: that is
 also every Pro and Max status line from a reset to the next reply. Proof of
 NO window is two replies of one session that came back without one, far
 enough apart that no reset can explain them (_reply_without_window).
@@ -186,6 +187,11 @@ class ClaudeCliProvider(base.ProviderParser):
         # Block keys _make_room may not drop during the current poll: the
         # payloads poll() is about to look up. See _make_room.
         self._keep = ()
+        # {session_id: (cost.total_cost_usd or None, mtime)} of that
+        # session's last payload of any shape, for telling a block that
+        # arrived with a reply this process watched from one it merely
+        # found (_arrived). Capped like _weekly_only.
+        self._costs = {}
         # {block key: [oldest mtime it appeared under, epoch its first
         # window ends]}. See the module docstring and FETCH_MEMORY_LIMIT.
         self._fetch_times = {}
@@ -367,13 +373,33 @@ class ClaudeCliProvider(base.ProviderParser):
         return session_verdict.evidence(
             False, session_verdict.KIND_STATUSLINE_REPLY, mtime)
 
-    def _frame(self, payload, mtime, now_epoch):
+    def _arrived(self, payload, mtime):
+        """Did this payload come with a reply this process watched?
+
+        True when the same session rendered at most REPLY_GAP_S before it
+        at a lower cost: its block was fetched between those two renders,
+        and first_seen_at is its fetch time to within that gap. Asked of
+        the live payload, once per read, before anything else updates.
+        """
+        sid = payload.get("session_id") if isinstance(payload, dict) else None
+        if not isinstance(sid, str) or not sid:
+            return False
+        cost = _number(_cost(payload))
+        before = self._costs.pop(sid, None)
+        self._costs[sid] = (cost, mtime)        # newest last, for the cap
+        while len(self._costs) > REPLY_MEMORY_LIMIT:
+            del self._costs[next(iter(self._costs))]
+        return (before is not None and cost is not None
+                and before[0] is not None and cost > before[0]
+                and 0 <= mtime - before[1] <= REPLY_GAP_S)
+
+    def _frame(self, payload, mtime, now_epoch, arrived=False):
         """The frame this payload maps to now, dated, bounded, and carrying
         the evidence its payload alone gives.
 
         One path for every frame poll() offers, the remembered ones
         included, so a payload is judged the same way whichever memory it
-        came out of.
+        came out of. `arrived`: _arrived said so of this payload.
         """
         frame = self.parse_cli_event(payload, now_epoch, mtime)
         if frame is None:
@@ -394,7 +420,8 @@ class ClaudeCliProvider(base.ProviderParser):
         if ss.window_present(limits, "five_hour"):
             frame.window_evidence = session_verdict.evidence(
                 True, session_verdict.KIND_STATUSLINE_WINDOW,
-                _window_dated(limits, frame.first_seen_at))
+                frame.first_seen_at if arrived
+                else _window_dated(limits, frame.first_seen_at))
         return frame
 
     def poll(self, now_epoch):
@@ -408,8 +435,9 @@ class ClaudeCliProvider(base.ProviderParser):
         if payload is not None:
             # Asked of the live payload only, and on every read of it: the
             # baseline it keeps is this file's history, not a memory's.
+            arrived = self._arrived(payload, mtime)
             reply = self._reply_without_window(payload, mtime)
-            live = self._frame(payload, mtime, now_epoch)
+            live = self._frame(payload, mtime, now_epoch, arrived)
             if live is not None:
                 if reply is not None:
                     live.window_evidence = reply
@@ -472,14 +500,19 @@ def _window_dated(limits, first_seen_at):
     2026-11-01, finding 4). The window's start does not depend on who was
     watching, and it is the moment the account certainly had a window.
 
-    Earlier is the safe side here. The only evidence it now loses to is a
-    no-window proof from inside the window itself, and on Pro or Max there
-    is none such (_reply_without_window); a change of plan to Ultra is the
-    one real case, and there the proof is right. A change back opens
-    windows that start after it. The min() with first_seen_at also keeps a
-    stamp in the wrong unit, or from a broken clock, from dating a window
-    in the future, where it would outrank every proof for as long as the
-    clock took to catch up.
+    Earlier is the safe side for a block nobody saw arrive. The only
+    evidence it loses to is a no-window proof from inside the window
+    itself, and on Pro or Max the reply rule makes none
+    (_reply_without_window); a change of plan to Ultra is the one real
+    case, and there the proof is right, while a change back opens windows
+    that start after it. But a mark that should never have been made would
+    then hold a Pro or Max dial until the next window, up to five hours, so
+    a block that arrived with a reply this process watched is not dated
+    here: it is dated by its arrival (_arrived), and the next reply lifts
+    such a mark. The min() with first_seen_at also keeps a stamp in the
+    wrong unit, or from a broken clock, from dating a window in the future,
+    where it would outrank every proof for as long as the clock took to
+    catch up.
     """
     resets_at = ss._window(limits, "five_hour")[1]
     if resets_at is None:

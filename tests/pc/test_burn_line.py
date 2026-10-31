@@ -117,8 +117,11 @@ def payload(tmp_path, five_hour=False, mtime=NOW - 1):
     limits = {"seven_day": {"used_percentage": 12.0,
                             "resets_at": NOW + 3 * 86400}}
     if five_hour:
+        # A window that opened after ultra()'s proof, as one that comes
+        # back would: an unwatched block is dated from its window's start
+        # (claude_cli._window_dated).
         limits["five_hour"] = {"used_percentage": 30.0,
-                               "resets_at": NOW + 3600}
+                               "resets_at": NOW - 30 + 5 * 3600}
     p = tmp_path / "statusline.json"
     p.write_text(json.dumps({"rate_limits": limits}), encoding="utf-8")
     os.utime(p, (mtime, mtime))

@@ -1706,3 +1706,28 @@ def test_a_cost_too_big_for_a_float_is_no_cost(tmp_path):
     frames = ClaudeCliProvider(path=str(p)).poll(NOW)
     assert frames[0].weekly_pct == 12.0
     assert frames[0].window_evidence is None
+
+
+def test_a_window_block_this_process_saw_arrive_is_dated_when_it_did(
+        tmp_path):
+    """The other side of finding 4's fix. Dated from its window's start, a
+    block on a Pro or Max desk loses to any no-window mark from inside that
+    window, so a mark that should never have been made would hold the dial
+    for up to five hours. A block that arrived with a reply this process
+    watched -- the same session, rendered minutes before at a lower cost --
+    was fetched between those two renders, and is dated by its arrival:
+    the next reply lifts such a mark."""
+    p = tmp_path / "statusline.json"
+    opened = NOW - 4 * 3600
+    proved(tmp_path, has_window=False, at=NOW - 600)
+    v = session_verdict.SessionVerdict()
+    prov = ClaudeCliProvider(path=str(p))
+    before = status(five=30.0, five_resets=opened + base.SESSION_WINDOW_S,
+                    seven=20.0, cost=2.0)
+    write(p, before, NOW - 120)
+    assert v.observe(prov.poll(NOW - 119), NOW - 119) is True   # a repaint
+
+    after = status(five=31.0, five_resets=opened + base.SESSION_WINDOW_S,
+                   seven=20.0, cost=2.25)
+    write(p, after, NOW - 1)
+    assert v.observe(prov.poll(NOW), NOW) is False
