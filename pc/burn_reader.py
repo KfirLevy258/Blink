@@ -142,10 +142,15 @@ def transcripts_root() -> str:
     DIR outranks HOME, as it does for Claude Code. A login service does not
     run in the shell that exported it, though, so on a desk that sets it in
     .zshrc the daemon still looks under ~/.claude.
+
+    Joined from the home directory rather than expanded from "~/.claude":
+    on Windows expanduser keeps the slash it was given, and the Windows VM
+    suite (2026-10-31) measured the root as "...\\dir0/.claude\\projects",
+    one forward slash among backslashes.
     """
     base = os.environ.get("CLAUDE_CONFIG_DIR")
-    base = os.path.expanduser(base) if base else os.path.expanduser(
-        "~/.claude")
+    base = (os.path.expanduser(base) if base
+            else os.path.join(os.path.expanduser("~"), ".claude"))
     return os.path.join(base, "projects")
 
 
