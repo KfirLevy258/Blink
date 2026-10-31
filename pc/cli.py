@@ -198,6 +198,32 @@ def _skip_service():
     return os.environ.get("BLINK_SKIP_SERVICE") == "1" or _foreign_home()
 
 
+def _home_refusal() -> bool:
+    """Is the service skipped because HOME is foreign, not because the caller
+    asked with BLINK_SKIP_SERVICE=1?
+
+    The two end alike in the code and must not end alike for the person: a
+    test or CI that set the variable chose to have no service and is told
+    "Done" as before, but a customer whose HOME tripped the check has no
+    service and has to be told so, and told how to get one (review of
+    fp/safety-guards, S1)."""
+    return os.environ.get("BLINK_SKIP_SERVICE") != "1" and _foreign_home()
+
+
+def _say_home_refused(what: str, consequence: str) -> None:
+    """The plain paragraph for a command that skipped the service because
+    HOME is foreign. `what` completes "The background service was NOT ...".
+    No serial data, only the two paths."""
+    print()
+    print(f"The background service was NOT {what}.")
+    print(f"HOME ({os.path.expanduser('~')}) is not this account's home"
+          f" ({_account_home()}), and the service manager is shared by every")
+    print("HOME on this machine, so acting on it from here could replace the")
+    print(f"real one. {consequence}")
+    print(f"If this really is where you want it, run this again with"
+          f" {_ALLOW_FOREIGN_HOME}=1.")
+
+
 def _skip_reason() -> str:
     """What the line that reports a skip puts in its brackets."""
     if os.environ.get("BLINK_SKIP_SERVICE") == "1":
@@ -3107,6 +3133,12 @@ def cmd_install(_args) -> int:
     service = _install_service()
     print(service)
 
+    if _home_refusal():
+        _say_home_refused(
+            "installed",
+            "The files above were written, but nothing starts them.")
+        return 1
+
     print()
     print("Done. Plug the board in over USB -- it picks it up on its own.")
     print(f"  Log:     {log_path()}")
@@ -3141,6 +3173,7 @@ def cmd_uninstall(_args) -> int:
     print()
     print("[1/5] Background service ... ", end="", flush=True)
     print(_remove_service())
+    refused = _home_refusal()
     _say_bye()
 
     print("[2/5] Claude Code setting:")
@@ -3200,6 +3233,12 @@ def cmd_uninstall(_args) -> int:
     _rm_state_dir()
     done, message = _remove_bin_dir()
     print(message)
+    if refused:
+        _say_home_refused(
+            "stopped or removed",
+            "Its files are gone, so a service that is registered still points"
+            " at a program that is not there.")
+        return 1
     print()
     if done:
         print("Done. Nothing of Blink's is left running.")
@@ -3995,6 +4034,12 @@ def cmd_update(_args) -> int:
     _refresh_shims()
     detail = restart_service()
     print("Background service ... " + detail)
+    if _home_refusal():
+        _say_home_refused(
+            "restarted",
+            "The new program is in place, and the old one may still be"
+            " running.")
+        return 1
     if restart_left_it_down(detail):
         # The program on disk is the new one; what is missing is a process.
         # Say which half worked, because "update failed" would send someone

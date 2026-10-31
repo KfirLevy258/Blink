@@ -139,9 +139,13 @@ def test_install_under_a_scratch_home_never_reaches_the_service_manager(
     out = subprocess.run(
         [sys.executable, "-s", str(ROOT / "blink_main.py"), "install"],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
-    assert out.returncode == 0, out.stderr
+    # Fails, and says so: "Done. Plug the board in" with exit 0 told a
+    # customer with no service that it worked.
+    assert out.returncode == 1, out.stdout + out.stderr
     assert not log.exists(), log.read_text()
     assert "HOME is not this account's home" in out.stdout
+    assert "NOT installed" in out.stdout and "Done." not in out.stdout
+    assert "BLINK_ALLOW_FOREIGN_HOME=1" in out.stdout
 
 
 def test_ci_install_script_opts_in_only_under_ci():
@@ -151,3 +155,58 @@ def test_ci_install_script_opts_in_only_under_ci():
     text = (pathlib.Path(__file__).resolve().parents[2]
             / "tests" / "ci" / "check_install.sh").read_text()
     assert 'if [ -n "${CI:-}" ]; then\n\tBLINK_ALLOW_FOREIGN_HOME=1' in text
+
+
+
+
+# --- the commands say so, and fail ----------------------------------------
+#
+# A skip that ends in "Done. Plug the board in -- it picks it up on its own"
+# and exit 0 is a customer with no service who was told it worked (review of
+# fp/safety-guards, S1). Asked for by BLINK_SKIP_SERVICE=1 the same ending is
+# fine -- that is the tests' and CI's own choice -- so only the HOME refusal
+# changes the outcome.
+
+
+def test_the_refusal_is_told_apart_from_the_variable(armed, monkeypatch):
+    assert cli._home_refusal() is True
+    monkeypatch.setenv("BLINK_SKIP_SERVICE", "1")
+    assert cli._home_refusal() is False         # the caller chose that
+    monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
+    assert cli._home_refusal() is False
+
+
+def _says_not_done(text, what):
+    assert f"NOT {what}" in text, text
+    assert "BLINK_ALLOW_FOREIGN_HOME=1" in text, text
+    assert "is not this account's home" in text, text
+
+
+def test_uninstall_says_the_service_was_not_stopped_and_fails(armed, capsys):
+    assert cli.cmd_uninstall(None) == 1
+    out = capsys.readouterr().out
+    _says_not_done(out, "stopped or removed")
+    assert "Nothing of Blink's is left running" not in out
+
+
+def test_uninstall_under_the_variable_is_as_before(
+        armed, monkeypatch, capsys):
+    monkeypatch.setenv("BLINK_SKIP_SERVICE", "1")
+    assert cli.cmd_uninstall(None) == 0
+    out = capsys.readouterr().out
+    assert "NOT" not in out and "Done." in out
+
+
+def test_update_says_the_service_was_not_restarted_and_fails(
+        armed, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_update_reaches_the_service", lambda: True)
+    monkeypatch.setattr(cli.update, "fetch_signed_manifest", lambda: {})
+    monkeypatch.setattr(cli.update, "available",
+                        lambda m: ("9.9.9", {"size": 0, "sha256": ""}))
+    monkeypatch.setattr(cli.update, "platform_key", lambda: "k")
+    monkeypatch.setattr(cli.update, "download", lambda *a, **k: b"")
+    monkeypatch.setattr(cli.update, "apply", lambda *a, **k: (True, "ok"))
+    monkeypatch.setattr(cli, "_refresh_shims", lambda: None)
+    assert cli.cmd_update(None) == 1
+    _says_not_done(capsys.readouterr().out, "restarted")
