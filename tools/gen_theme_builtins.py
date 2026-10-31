@@ -40,7 +40,7 @@ ROLES = ("bg", "text", "g1", "g2", "low", "mid", "high")
 # Two more palette roles a built-in has by table and a custom theme has by
 # derivation: the arc track and the grey. They are not part of a theme on the
 # wire, but the burn view's baseline and hour ticks are mixed from them
-# (firmware/src/usage_view.c burn_inks), and a built-in's are the table's own
+# (firmware/src/theme.c theme_burn_inks), and a built-in's are the table's own
 # values, not the 15% and 45% mixes a custom theme gets. Without them the
 # builder's preview would have to derive them for a built-in too, and show
 # the board a baseline a few steps of RGB off.

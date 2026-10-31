@@ -549,11 +549,12 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // 14:05 is inside it and the axis reads 10 to 14. (The page has no clock
   // of its own to hold and no offset to ask; both are as fixed as 14:05.)
   var BURN_Q = 1793455200, BURN_OFF_MIN = 0;
-  // Dark's four inks are the contract's own bytes, which burn_inks() keeps
-  // for THEME_DARK alone; every other theme gets the same relationships
-  // from its own palette. They are numbers here, not colour strings, so the
-  // check that this page types no palette of its own stays about theme.c;
-  // tests/pc/test_theme_page_burn.py reads them back out of usage_view.c.
+  // Dark's four inks start from the contract's own bytes, as
+  // theme_burn_inks() does for THEME_DARK alone, before the floor moves its
+  // older bars; every other theme gets the same relationships from its own
+  // palette. They are numbers here, not colour strings, so the check that
+  // this page types no palette of its own stays about theme.c;
+  // tests/pc/test_theme_page_burn.py reads them back out of theme.c.
   var BURN_DARK = { hot: 0x7FB2F0, cold: 0x2D5C99, base: 0x3A414B, tick: 0x5C636B };
   function hexOf(n) { return n.toString(16).padStart(6, '0').toUpperCase(); }
 
@@ -596,18 +597,56 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     var s = (((q - (BURN_N - 1 - i) * BURN_BUCKET_S + offMin * 60) % 86400) + 86400) % 86400;
     return s % 3600 ? -1 : s / 3600;
   }
-  // burn_inks(): the four colours no role describes. Dark keeps the
-  // contract's bytes. Any other theme: the last hour is g1 35% of the way to
-  // the text colour, the older bars g1 35% into the ground, the baseline and
-  // the ticks the track lifted 30% and 77% towards grey, each through the
-  // board's theme_mix (round half up, per channel). A built-in's track and
-  // grey are theme.c's own; a custom theme's are derived, 15% of the text
-  // into the ground and custom_grey(), as theme_derive() does.
+  // theme_burn_inks() (firmware/src/theme.c): the four colours no role
+  // describes. Dark starts from the contract's bytes. Any other theme: the
+  // last hour is g1 35% of the way to the text colour, the older bars g1 35%
+  // into the ground, the baseline and the ticks the track lifted 30% and 77%
+  // towards grey, each through the board's theme_mix (round half up, per
+  // channel). A built-in's track and grey are theme.c's own; a custom
+  // theme's are derived, 15% of the text into the ground and custom_grey(),
+  // as theme_derive() does.
+  // Then the floor, step for step as theme.c walks it: both bar inks read
+  // 3:1 on the ground as the panel shows it (or the text's own ratio, if a
+  // custom theme's is lower), the older bars walking back towards g1 and on
+  // to the text, the last hour on towards the text until it also stands
+  // 1.5:1 above the older bars; and where the text cannot give it that, the
+  // stronger of the text and g1, with the older bars stepped back towards
+  // the ground no further than the floor. pow() here and the board's table
+  // can disagree in the last digit, so on a hairline the two may stop a
+  // percent apart, as customDim() can.
+  var BURN_FLOOR = 3.0, BURN_STEP = 1.5;
+  function burnApart(hot, cold, bg) { return shown(hot, bg) > shown(cold, bg) && shown(hot, cold) >= BURN_STEP; }
+  function burnWalk(from, to, bg, floor, cold) {
+    for (var pct = 0; pct < 100; pct++) {
+      var c = boardMix(from, to, pct / 100);
+      if (shown(c, bg) >= floor && (cold == null || burnApart(c, cold, bg))) return c;
+    }
+    return to;
+  }
+  function burnFloor(k, bg, text, g1) {
+    var floor = Math.min(BURN_FLOOR, shown(text, bg));
+    k.cold = burnWalk(k.cold, g1, bg, floor, null);
+    if (shown(k.cold, bg) < floor) k.cold = burnWalk(g1, text, bg, floor, null);
+    k.hot = burnWalk(k.hot, text, bg, floor, k.cold);
+    if (burnApart(k.hot, k.cold, bg)) return k;
+    k.hot = shown(g1, bg) > shown(text, bg) ? g1 : text;
+    for (var pct = 1, from = k.cold; pct < 100; pct++) {
+      var c = boardMix(from, bg, pct / 100);
+      if (shown(c, bg) < floor) break;
+      k.cold = c;
+      if (burnApart(k.hot, c, bg)) break;
+    }
+    return k;
+  }
   function burnInks() {
     var tg = st.preset >= 0 ? BUILTIN_TG[st.preset] : { track: boardMix(st.bg, st.text, .15), grey: customGrey(st.text, st.bg) };
-    if (st.preset === DARK_ID) return { hot: hexOf(BURN_DARK.hot), cold: hexOf(BURN_DARK.cold), base: hexOf(BURN_DARK.base), tick: hexOf(BURN_DARK.tick), grey: tg.grey };
-    return { hot: boardMix(st.g1, st.text, .35), cold: boardMix(st.g1, st.bg, .35),
-             base: boardMix(tg.track, tg.grey, .30), tick: boardMix(tg.track, tg.grey, .77), grey: tg.grey };
+    var k = st.preset === DARK_ID
+      ? { hot: hexOf(BURN_DARK.hot), cold: hexOf(BURN_DARK.cold), base: hexOf(BURN_DARK.base), tick: hexOf(BURN_DARK.tick) }
+      : { hot: boardMix(st.g1, st.text, .35), cold: boardMix(st.g1, st.bg, .35),
+          base: boardMix(tg.track, tg.grey, .30), tick: boardMix(tg.track, tg.grey, .77) };
+    k = burnFloor(k, st.bg, st.text, st.g1);
+    k.grey = tg.grey;
+    return k;
   }
   // Montserrat 20's advances, as near as a table can: the total and its
   // arrow are centred as one group (burn_compose()), which the board

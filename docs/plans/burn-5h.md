@@ -99,6 +99,14 @@ every 15 seconds. When the flag clears it simply stops sending. There is no
   - caption `BURN 5h` where `SESSION 5h` sits (y = `GAUGE_NAME_Y`, 168), and
     under it, where the countdown sits (`GAUGE_CD_Y`, 186):
     `<last hour>/h · <word>`, for example `1.1M/h · rising`, in `COL_DIM`.
+  - Every bar reads at least 3:1 on the ground as the panel draws it (RGB565),
+    the 3:1 every graphic on the screen is held to (`tests/theme`), and the
+    newest 4 stay at least 1.5:1 stronger than the rest. On Dark that moves
+    the older bars from `0x2D5C99` (2.88:1) to `0x2F609F`, towards g1; on
+    every other theme the bars are mixed from its own roles and walked up
+    the same way (`theme_burn_inks()` in `firmware/src/theme.c`, which says
+    how). Added 2026-11-01, after the review measured 2.14 to 2.88:1 on five
+    built-ins and no floor at all on a custom theme.
 - Direction and the `/h` rate use **complete quarter-hours only**. The newest
   bucket (19) is the one the clock is in, still filling, and is drawn but not
   compared. The last hour is buckets 15-18 and the hour before is 11-14. Using

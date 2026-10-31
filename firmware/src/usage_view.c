@@ -1838,43 +1838,15 @@ struct burn_drawn {
 static struct burn_drawn bd;
 
 /*
- * The view's colours.
- *
- * Dark's are the contract's bytes, and Dark is the only theme the contract
- * names. Two of them are already Dark ROLES -- the arrow's #4387DF is g1 and
- * the hour numbers' #6B7280 is grey -- so those two are read from the theme
- * on every theme, like every other colour on this screen. The other four are
- * a kind of mark this screen never had and no role describes, so Dark keeps
- * the contract's exact values and every other theme gets the same
- * RELATIONSHIPS from its own roles. Those are what the contract's values
- * are, to within a few steps of RGB: the last hour is g1 a third of the way
- * to the text colour, the older bars g1 a third of the way into the ground,
- * the baseline and the ticks the track lifted 30% and 77% towards grey.
- * Expressed that way the last hour is still the stronger mark on a white
- * ground, where "brighter" would have made it the fainter one.
+ * The view's colours: theme_burn_inks() in theme.c, where the host tests can
+ * reach them (tests/theme checks every built-in's against its floor). Dark
+ * starts from the contract's bytes because it is the theme the contract
+ * names; THEME_CUSTOM made from Dark's colours is a custom theme and is
+ * derived, as the builder page draws it.
  */
-struct burn_inks {
-	uint32_t hot;			/* the newest hour's four bars */
-	uint32_t cold;			/* the sixteen before them */
-	uint32_t base;			/* the baseline */
-	uint32_t tick;			/* the hour ticks */
-};
-
-static void burn_inks(struct burn_inks *k)
+static void burn_inks(struct theme_burn_inks *k)
 {
-	const struct palette *p = theme_pal();
-
-	if (theme_active_id() == THEME_DARK) {
-		k->hot = 0x7FB2F0;
-		k->cold = 0x2D5C99;
-		k->base = 0x3A414B;
-		k->tick = 0x5C636B;
-		return;
-	}
-	k->hot = theme_mix(p->g1, p->text, 0.35);
-	k->cold = theme_mix(p->g1, p->bg, 0.35);
-	k->base = theme_mix(p->track, p->grey, 0.30);
-	k->tick = theme_mix(p->track, p->grey, 0.77);
+	theme_burn_inks(theme_pal(), theme_active_id() == THEME_DARK, k);
 }
 
 static void burn_fill(lv_layer_t *layer, uint32_t rgb, int32_t x1, int32_t y1,
@@ -1914,7 +1886,7 @@ static void burn_draw_cb(lv_event_t *e)
 {
 	lv_layer_t *layer = lv_event_get_layer(e);
 	const struct palette *p = theme_pal();
-	struct burn_inks k;
+	struct theme_burn_inks k;
 	int32_t x;
 
 	burn_inks(&k);
