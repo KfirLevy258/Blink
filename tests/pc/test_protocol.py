@@ -691,9 +691,14 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     three ages at INT32_MAX -- the bound proto.c's SECS_MAX permits, and
     reachable from a file stamped at the epoch.
 
-    509 of 512 bytes, measured. The board drops an over-long line whole with
-    no error, so this test is the guard: the next field, a longer provider or
-    source id, or a fourth age fails here rather than on a desk.
+    450 of 512 bytes, measured at 8d4ad2a, and the assert below holds it to
+    that figure instead of trusting this sentence. It read "509" until the
+    firmware review of 2026-10-31 rebuilt this exact construction and got 450
+    (the same on 1.3.4); the figure had gone stale when the absolute reset
+    stamps came off the wire, and a stale figure understates the headroom
+    when the next field is being weighed. The board drops an over-long line
+    whole with no error, so this test is the guard: the next field, a longer
+    provider or source id, or a fourth age fails here rather than on a desk.
 
     Three things here were NOT in the first version of this test, and each of
     them on its own put the line over the cap once active_age_s arrived:
@@ -735,6 +740,10 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     assert why is None
     assert msg["active_age_s"] == 2147483647
     assert len(raw) <= protocol.MAX_LINE_BYTES, len(raw)
+    # The measured width, asserted so the docstring cannot go stale again. A
+    # new field that moves it is a deliberate change: say the new figure here
+    # and above.
+    assert len(raw) == 450, len(raw)
 
 
 def test_a_countdown_beyond_any_real_window_is_clamped():
