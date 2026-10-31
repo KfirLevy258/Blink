@@ -414,6 +414,7 @@ def test_uninstall_removes_every_theme_file(tmp_path, monkeypatch, capsys):
               os.path.join(h, ".theme-k2j3h4.tmp")]
     for p in strays:
         open(p, "w").close()
+    theme.write_builder(h, 4321)      # a builder killed before it cleaned up
     for name in theme.FILES:
         assert os.path.exists(os.path.join(h, name)), name
     assert os.path.exists(theme.seen_path(h))
@@ -470,3 +471,44 @@ def test_a_board_that_takes_themes_gets_no_note_from_the_builder(
                         lambda self: "cancelled")
     assert cli.main(["theme"]) == 0
     assert "does not take themes" not in capsys.readouterr().out
+
+
+def test_a_second_builder_is_not_started_beside_a_running_one(monkeypatch,
+                                                              capsys):
+    """Review of 1.4.0 (builder), N1: `blink theme` beside the app's own
+    builder, or two of it, ended each other's previews through the one
+    preview file. The second says where the first is and starts nothing, and
+    leaves the first's preview alone."""
+    h = home()
+    first = theme_server.BuilderServer(h, tick_s=3600)
+    first.start()
+    try:
+        theme.write_preview(h, {"id": 4})
+
+        def never(*a, **k):
+            raise AssertionError("a second builder was made")
+        monkeypatch.setattr(theme_server, "BuilderServer", never)
+        monkeypatch.setattr(theme_server, "open_url", never)
+        assert cli.main(["theme"]) == 1
+        out = capsys.readouterr().out
+        assert "already open" in out
+        assert "Edit on computer" in out          # how to get its tab back
+        assert theme.take_preview(h) == ("preview", {"id": 4})
+    finally:
+        first.finish("test over")
+        first.wait(5)
+
+
+def test_a_record_left_by_a_killed_builder_does_not_stop_blink_theme(
+        monkeypatch, capsys):
+    import socket
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    theme.write_builder(home(), port)
+    monkeypatch.setattr(theme_server, "open_url", lambda u: False)
+    monkeypatch.setattr(theme_server.BuilderServer, "wait_interruptibly",
+                        lambda self: "cancelled")
+    assert cli.main(["theme"]) == 0
+    assert "already open" not in capsys.readouterr().out

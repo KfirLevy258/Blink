@@ -100,11 +100,14 @@ THEME_FILE = "theme.json"
 PREVIEW_FILE = "theme_preview.json"
 SENT_FILE = "theme_sent.json"
 SEEN_FILE = "theme_seen.json"
+# The port of the builder running on this home, if one is; see
+# theme_server.running_builder.
+BUILDER_FILE = "theme_builder.json"
 # Every file this module writes under ~/.blink, for `blink uninstall`, which
 # also takes their temp siblings. The ".taken" name is take_preview's claim,
 # left behind by a daemon killed between its rename and its unlink.
 FILES = (THEME_FILE, PREVIEW_FILE, PREVIEW_FILE + ".taken", SENT_FILE,
-         SEEN_FILE)
+         SEEN_FILE, BUILDER_FILE)
 
 # Why the board sent a theme_now (CONTRACT-theme, Addendum 2). "user" -- the
 # owner picking a theme in Settings on the board -- is a choice the computer
@@ -700,6 +703,35 @@ def drop_preview(home):
     try:
         os.unlink(preview_path(home))
     except FileNotFoundError:
+        pass
+
+
+def builder_path(home):
+    return os.path.join(home, BUILDER_FILE)
+
+
+def write_builder(home, port):
+    _write_json(builder_path(home), {"port": port})
+
+
+def read_builder(home):
+    """The port a builder recorded, or None."""
+    obj = _read_json(builder_path(home))
+    port = obj.get("port") if isinstance(obj, dict) else None
+    if isinstance(port, int) and not isinstance(port, bool) and \
+            0 < port < 65536:
+        return port
+    return None
+
+
+def remove_builder(home, port):
+    """Take the record away, but only a record of `port`: a builder that
+    ends after a newer one has written its own must not delete that one."""
+    if read_builder(home) != port:
+        return
+    try:
+        os.unlink(builder_path(home))
+    except OSError:
         pass
 
 

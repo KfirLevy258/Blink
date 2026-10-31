@@ -894,3 +894,87 @@ def test_the_state_says_how_long_a_preview_has_waited(server, home):
     assert 6.5 < _state(server, cookie)["waiting_s"] < 12
     theme.take_preview(home)                  # the daemon's tick
     assert _state(server, cookie)["waiting_s"] is None
+
+
+# ------------------------------------------------- one builder to a home
+#
+# Review of 1.4.0 (builder), N1. Two builders on one home write the same
+# theme_preview.json, so when one is cancelled, closed or goes idle, its
+# cancel ended the other's live preview on the board while the other's tab
+# went on saying "Preview sent: ... is on your board". Probe: the daemon took
+# ('cancel', None) while builder 1 was still live. A builder now records its
+# port in theme_builder.json, and `blink theme` will not start a second.
+
+def test_a_builder_records_its_port_and_removes_it_when_it_ends(home):
+    s = theme_server.BuilderServer(home, tick_s=3600)
+    s.start()
+    try:
+        assert theme.read_builder(home) == s.port
+    finally:
+        s.finish("test over")
+        s.wait(5)
+    assert theme.read_builder(home) is None
+    assert not os.path.exists(os.path.join(home, theme.BUILDER_FILE))
+
+
+def test_a_builder_ending_leaves_the_record_of_a_newer_one(home):
+    first = theme_server.BuilderServer(home, tick_s=3600)
+    second = theme_server.BuilderServer(home, tick_s=3600)
+    first.start()
+    second.start()
+    try:
+        first.finish("test over")
+        first.wait(5)
+        assert theme.read_builder(home) == second.port
+    finally:
+        second.finish("test over")
+        second.wait(5)
+
+
+def test_a_running_builder_is_found_by_its_record(home):
+    s = theme_server.BuilderServer(home, tick_s=3600)
+    s.start()
+    try:
+        assert theme_server.running_builder(home) == s.port
+    finally:
+        s.finish("test over")
+        s.wait(5)
+    assert theme_server.running_builder(home) is None
+
+
+def test_a_record_left_by_a_killed_builder_is_taken_away(home):
+    # Nothing listens on the port: the process was killed before it could
+    # remove its record.
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    theme.write_builder(home, port)
+    assert theme_server.running_builder(home) is None
+    assert theme.read_builder(home) is None
+
+
+def test_another_program_on_the_recorded_port_is_not_a_builder(home):
+    # The port was reused after a kill: something answers, but it is not
+    # this server, so the record is stale.
+    import http.server
+
+    class Other(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"hi")
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Other)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        theme.write_builder(home, httpd.server_address[1])
+        assert theme_server.running_builder(home) is None
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

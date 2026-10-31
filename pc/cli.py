@@ -4297,6 +4297,18 @@ def _signals_cancel():
 
 def _theme_builder(home) -> int:
     """`blink theme`: the builder, in the foreground, until it finishes."""
+    # One builder to a home. Two write the same preview file, and the end of
+    # one (a cancel, a closed tab, ten minutes idle) took the other's live
+    # preview off the board while its tab still said "Preview sent" (review
+    # of 1.4.0, builder N1). The app's own builder, opened from the board,
+    # counts, and so does another `blink theme`.
+    if theme_server.running_builder(home) is not None:
+        print("A theme builder is already open on this computer, from the"
+              " app or from another blink theme. Use its tab. To get the tab"
+              " back, press Edit on computer on the board, or close the"
+              " builder first; it stops by itself after ten minutes with no"
+              " change.")
+        return 1
     try:
         server = theme_server.BuilderServer(home)
     except FileNotFoundError:

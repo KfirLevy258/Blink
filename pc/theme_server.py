@@ -32,6 +32,7 @@ or IDLE_S with no edit, write a cancel for the daemon -- the board goes back
 to its stored theme -- and stop.
 """
 import hmac
+import http.client
 import http.server
 import json
 import os
@@ -535,6 +536,15 @@ class BuilderServer:
         return self._httpd.socket
 
     def start(self):
+        # Recorded so that `blink theme` does not start a second builder on
+        # this home: two write the same preview file, and one's cancel,
+        # close or idle end took the other's live preview off the board while
+        # its tab went on saying "Preview sent" (review of 1.4.0, builder
+        # N1). A failure to write it costs only that protection.
+        try:
+            theme.write_builder(self.home, self.port)
+        except OSError:
+            pass
         threading.Thread(target=self._httpd.serve_forever,
                          kwargs={"poll_interval": 0.2},
                          name="blink-theme-http", daemon=True).start()
@@ -674,6 +684,10 @@ class BuilderServer:
             if self.outcome is not None:
                 return
             self.outcome = outcome
+        try:
+            theme.remove_builder(self.home, self.port)
+        except OSError:
+            pass
         if cancel and outcome != "saved":
             try:
                 theme.write_cancel(self.home)
@@ -712,6 +726,38 @@ class BuilderServer:
         while not self._done.wait(WAIT_SLICE_S):
             pass
         return self.outcome
+
+
+def running_builder(home):
+    """The port of a builder running on `home`, or None.
+
+    From the record every builder keeps (theme.BUILDER_FILE), then asked: a
+    builder killed before it could remove its record leaves one behind, and
+    its port may since have gone to some other program. So the port must
+    answer the way this server does to a request with no session, 403 and
+    "Not allowed", and a record that fails that is stale and is taken
+    away."""
+    port = theme.read_builder(home)
+    if port is None:
+        return None
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            c.request("GET", "/api/state", headers={
+                "Host": f"127.0.0.1:{port}"})
+            r = c.getresponse()
+            alive = r.status == 403 and r.read(64).startswith(b"Not allowed")
+        finally:
+            c.close()
+    except (OSError, http.client.HTTPException):
+        alive = False
+    if alive:
+        return port
+    try:
+        theme.remove_builder(home, port)
+    except OSError:
+        pass
+    return None
 
 
 class Launcher:
