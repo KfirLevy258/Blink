@@ -4363,6 +4363,13 @@ def cmd_theme(args) -> int:
     values = list(getattr(args, "values", None) or [])
     if action is None:
         return _theme_builder(home)
+    if action != "set" and values:
+        # `reset ocean` set Dark and dropped the word, and `show ocean` and
+        # `list light` printed as if it had not been typed (review of 1.4.0,
+        # builder N6). Only `set` takes values.
+        print(f"blink theme {action} takes nothing after it."
+              " To change the theme: blink theme set ocean, for example.")
+        return 2
     if action == "list":
         # Three columns: the number and the typed name, which `set` both
         # takes, and the name the board's tile shows, so the list can be

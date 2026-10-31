@@ -512,3 +512,22 @@ def test_a_record_left_by_a_killed_builder_does_not_stop_blink_theme(
                         lambda self: "cancelled")
     assert cli.main(["theme"]) == 0
     assert "already open" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [
+    ["theme", "reset", "ocean"],
+    ["theme", "list", "light"],
+    ["theme", "show", "ocean"],
+])
+def test_reset_list_and_show_take_no_other_words(argv, capsys):
+    """Review of 1.4.0 (builder), N6: `blink theme reset ocean` set Dark and
+    said nothing of the word it dropped, and `show ocean` and `list light`
+    printed as if it had not been typed. Refused with exit 2, as `set`
+    refuses what it cannot take, and nothing is written."""
+    cli.main(["theme", "set", "neon"])
+    capsys.readouterr()
+    assert cli.main(argv) == 2
+    out = capsys.readouterr().out
+    assert f"blink theme {argv[1]} takes nothing after it" in out
+    assert "blink theme set ocean" in out      # what was probably meant
+    assert theme.load_saved(home()) == {"id": 1}
