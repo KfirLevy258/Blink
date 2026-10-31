@@ -86,10 +86,12 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**3281 passing, 1 skipped** (os.startfile, Windows only) as of 2026-10-31, on
+**3559 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-01, on
 macOS. The same tree on the other two platforms the same day, each its own
-count: Ubuntu (Docker, x86_64) 3133 passed and 149 skipped, Windows (ARM64 VM)
-2962 passed and 314 skipped, none failing. The skips are platform tests and,
+count: Ubuntu (Docker, x86_64) 3362 passed and 198 skipped, Windows (ARM64 VM)
+3191 passed and 363 skipped, none failing. One Ubuntu run that day failed
+`test_sandbox.py::test_ordinary_commands_are_untouched` once (the child
+Python printed nothing); it passed alone five times and on a full re-run. The skips are platform tests and,
 on Windows, the builder-page tests that need Node. Re-run Ubuntu and Windows
 before claiming them for a new number. Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though
