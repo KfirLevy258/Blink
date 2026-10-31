@@ -540,14 +540,18 @@ newest tab is live, and it opens on the changes you have made so far.
 Within about a minute the older tab stops: it tries to close itself if it
 has nothing you have not saved, and otherwise keeps your colours on screen.
 
-A tab that is no longer the live builder dims under a notice that names
-why: **Saved.** or **Cancelled.**, **This tab is no longer active.** when a
-newer tab took over, or **The builder stopped.** (ten minutes idle, or the
-app quit), each with a line on what follows and **You can close this tab.**
-Its controls stop working. If it still holds changes you have not saved, it
-offers **Copy share code**, so you can paste them into the newer tab or keep
-them. Most browsers will not let a page close a tab, so this notice is
-usually what you see. A preview the board never hears the end of - the
+A tab that is no longer the live builder says why in the line at the top, and
+its controls stop working. The page stays as it was, readable, with nothing
+over it. The line reads **Saved: <name>. Your board keeps it. You can close
+this tab.**, **Cancelled. Your board is back on its saved theme. You can
+close this tab.**, **This builder continued in a newer tab. You can close
+this one.** when a newer tab took over, or **The builder has stopped. Run
+blink theme on your computer to start it again.** (ten minutes idle, or the
+app quit). If the tab still holds changes you have not saved, the line says
+so and **Copy share code** at the top stays on, so you can paste them into
+the newer tab or keep them. It is the one control that does. Most browsers
+will not let a page close a tab, so this line is usually all an old tab
+says. A preview the board never hears the end of - the
 computer went to sleep mid-edit - drops by itself after 15 minutes.
 
 A custom theme has a **share code**, a line starting `BT1.`, that carries the

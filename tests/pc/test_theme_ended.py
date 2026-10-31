@@ -3,8 +3,8 @@
 2026-10-31, the owner's board: a builder opened from the board ended 6 s
 later, and the log said only "the builder ended; told the board". A Save, a
 closed tab, a Cancel and the idle limit all read the same there, and the
-installed page's one heading ("This tab is no longer active.") fit every
-one of them, so the report "it ends by itself" could not be told from a
+installed page's one heading, written for a tab a newer one had taken
+over, fit every one of them, so the report "it ends by itself" could not be told from a
 Save nobody remembered. The outcome and a count of each kind of request
 tell them apart: numbers and a fixed word, never a request's contents.
 """

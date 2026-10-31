@@ -701,9 +701,10 @@ class BuilderServer:
         older tab is told so on its next ping, or by a 409 on its next
         preview, save or cancel (superseded()), and stops. The page closes
         itself only when it holds nothing unsaved and the browser allows;
-        otherwise it keeps its colours on screen under a notice saying it
-        is no longer active, which offers the share code of any changes in
-        it (showNotice in the page), and the newer tab opens on the last
+        otherwise it keeps its colours on screen, its controls off, and
+        its status line says the builder continued in a newer tab and that
+        the share code of its changes can still be copied (retire() in the
+        page), and the newer tab opens on the last
         preview anyway (/api/state "draft"). A superseded tab's ping keeps
         nothing alive: it does not count as seen, and it leaves the tab
         count, so the newest tab's close still ends the builder."""

@@ -149,29 +149,26 @@ def test_every_control_rule_is_at_least_44_px_tall():
         assert heights and max(heights) >= 44, (control, heights)
 
 
-# --------------------------------------------------- the inactive-tab notice
+# ------------------------------------------------- how a tab that ended reads
 #
-# A tab that stopped being the live builder said so only in the status bar,
-# over controls that looked live, and most browsers refuse the
-# window.close() meant to take it away (the owner's report, 2026-10-29).
-# It shows a notice over an inert page now. Each test here reads the notice
-# itself, so a page without it fails every one.
+# A tab that stopped being the live builder used to put up a full-page
+# dialog over an inert page ("This tab is no longer active."). The owner met
+# it four times and read it as a failure each time, at least twice after a
+# save that had worked, and asked for it gone (2026-10-31). An ending is the
+# status bar's sentence now, the controls go off, and the page stays as it
+# was, readable and undimmed. The one control that stays on is the top bar's
+# Copy share code, and only when the tab holds changes nobody saved. Each
+# test here reads the page after an ending, so a page that brought the
+# dialog back would fail every one.
 
-NOTICE = """
-    const hid = (id) => $(id).getAttribute('hidden') !== null;
-    const d = $('notice-dialog');
+ENDED = """
     return {
-      shown: !hid('notice'),
-      title: $('notice-title').textContent, why: $('notice-why').textContent,
-      end: $('notice-end').textContent,
-      role: d.getAttribute('role'), modal: d.getAttribute('aria-modal'),
-      labelled: d.getAttribute('aria-labelledby'),
-      focused: document.activeElement === d,
-      inert: ['.top', '.studio'].map(s => document.querySelector(s).getAttribute('inert') !== null),
-      offer: !hid('notice-copy') && !hid('notice-keep-text'),
-      keep: $('notice-keep-text').textContent,
-      described: d.getAttribute('aria-describedby'),
       status: $('status-text').textContent,
+      notice: ['notice', 'notice-dialog', 'notice-copy', 'notice-code']
+                .some(id => $(id) !== null),
+      inert: ['.top', '.studio'].map(s => document.querySelector(s).getAttribute('inert') !== null),
+      off: $('cancel').disabled,
+      offer: !$('copy-code').disabled,
       live: document.querySelectorAll('header button, main button, main input')
               .filter(e => !e.disabled).map(e => e.id || e.tagName),
       closed: window.closed,
@@ -184,18 +181,21 @@ _NEWER = """answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: t
 # A ping missed, and its retry 3 s later missed too.
 _NO_ANSWER = "answer('/api/ping', () => 'fail'); await advance(23100);"
 
-# What each ending's notice says. The heading was fixed in the markup as
-# "This tab is no longer active." for every ending, so a save that worked
-# (daemon log "[theme] saved", the board on the new theme) put up a
-# full-page notice the owner read as an error (manual test on a board,
-# 2026-10-30). The heading names the ending now, and the sentence under it
-# says what follows from it rather than the heading again.
-SAVED = ("Saved.", "Your board keeps the theme you saved.")
-CANCELLED = ("Cancelled.", "Your board is back on its saved theme.")
-SUPERSEDED = ("This tab is no longer active.", "The builder continued in a newer tab.")
-STOPPED = ("The builder stopped.", "Run blink theme on your computer to start it again.")
+# What each ending's status line says, in full: the bar is the whole
+# message now. The page's heading was fixed in the markup as "This tab is no
+# longer active." for every ending, so a save that worked read as an error
+# (manual test on a board, 2026-10-30), and the next step was to have no
+# dialog at all.
+SAVED = "Saved: Dark. Your board keeps it. You can close this tab."
+CANCELLED = "Cancelled. Your board is back on its saved theme. You can close this tab."
+SUPERSEDED = "This builder continued in a newer tab. You can close this one."
+STOPPED = "The builder has stopped. Run blink theme on your computer to start it again."
+# What the bar adds when the tab holds changes nobody saved.
+KEEP_LINE = "Your changes here are not saved. Copy the share code to keep them."
+KEEP_AFTER_SAVE = ("Changes you made after saving are not on the board."
+                   " Copy the share code to keep them.")
 
-# reason: (what the tab does first, what ends it, (heading, sentence))
+# reason: (what the tab does first, what ends it, the bar's sentence)
 REASONS = {
     "saved": ("", "$('save').click(); await advance(10);", SAVED),
     "cancelled": ("", "$('cancel').click(); await advance(10);", CANCELLED),
@@ -207,7 +207,7 @@ REASONS = {
     # A failed preview asks a ping, and the ping and its retry fail too.
     "stopped, preview unanswered": (
         "answer('/api/preview', () => 'fail'); answer('/api/ping', () => 'fail');",
-        "preset('Ocean'); await advance(3500);", STOPPED),
+        "preset('Ocean'); await advance(3500);", STOPPED + " " + KEEP_LINE),
     # Save refused as superseded is the newer tab's ending, not a save.
     "save superseded": (
         "", "answer('/api/save', () => ({ status: 409, body: {} })); $('save').click(); await advance(10);",
@@ -235,39 +235,36 @@ REASONS = {
 
 
 @pytest.mark.parametrize("reason", REASONS)
-def test_every_ending_shows_the_notice_with_its_reason(reason):
-    before, ending, (title, sentence) = REASONS[reason]
+def test_every_ending_says_so_in_the_status_bar_and_turns_the_controls_off(reason):
+    before, ending, sentence = REASONS[reason]
     r = builder_page.run(f"""
     await advance(10);
     {before}
     {ending}
-    """ + NOTICE, SAVED_DARK)
-    assert r["shown"] is True
-    assert r["title"] == title
-    assert r["why"] == sentence
-    assert r["title"] != r["why"]
-    if (title, sentence) in (STOPPED, CANCELLED):
-        # The bar is the record under the notice and begins with the same
-        # words, tense included: it said "has stopped" under "stopped".
-        assert r["status"].startswith(f"{title} {sentence}")
-    assert r["end"] == "You can close this tab."
-    assert (r["role"], r["modal"]) == ("dialog", "true")
-    assert r["labelled"] == "notice-title"
-    assert r["focused"] is True
-    assert r["inert"] == [True, True]
-    assert r["live"] == []          # every control behind it, copy included
+    """ + ENDED, SAVED_DARK)
+    assert r["status"] == sentence
+    assert r["notice"] is False     # no dialog, hidden or shown
+    assert r["inert"] == [False, False]    # nothing is covered or made inert
+    assert r["off"] is True
+    # The one case here with a change in it (the preview that went
+    # unanswered) keeps the share code; every other ending has nothing to
+    # copy, so every control is off, the copy buttons too.
+    keeps = sentence.endswith(KEEP_LINE)
+    assert r["offer"] is keeps
+    assert r["live"] == (["copy-code"] if keeps else [])
 
 
-def test_a_tab_whose_builder_never_answered_shows_the_notice():
-    r = builder_page.run("await advance(10);" + NOTICE,
+def test_a_tab_whose_builder_never_answered_ends_in_the_bar():
+    r = builder_page.run("await advance(10);" + ENDED,
                          {"/api/state": {"status": 500, "body": {}}})
-    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
+    assert r["status"] == STOPPED and r["off"] is True
     assert r["offer"] is False      # it never had the owner's theme
 
 
-def test_a_live_tab_shows_no_notice():
-    r = builder_page.run("await advance(10);" + _OCEAN + NOTICE, SAVED_DARK)
-    assert r["shown"] is False
+def test_a_live_tab_is_not_ended():
+    r = builder_page.run("await advance(10);" + _OCEAN + ENDED, SAVED_DARK)
+    assert r["notice"] is False
+    assert r["off"] is False
     assert r["inert"] == [False, False]
     assert "save" in r["live"] and "copy-code" in r["live"]
 
@@ -283,94 +280,72 @@ def test_a_live_tab_shows_no_notice():
         "saved", "cancelled"])
 def test_the_copy_button_is_offered_only_with_a_draft(before, ending, offer):
     """Cancel throws the changes away on purpose and Save keeps them, so
-    only a tab taken over or stopped with changes in it offers them."""
+    only a tab taken over or stopped with changes in it offers them. It is
+    the top bar's own button that stays on, and the only control that does."""
     r = builder_page.run(f"""
     await advance(10);
     {before}
     {ending}
-    """ + NOTICE, SAVED_DARK)
-    assert r["shown"] is True
+    """ + ENDED, SAVED_DARK)
+    assert r["off"] is True
     assert r["offer"] is offer
+    assert r["live"] == (["copy-code"] if offer else [])
 
 
 def test_a_superseded_tab_with_nothing_unsaved_still_tries_to_close():
-    r = builder_page.run("await advance(10);" + _NEWER + NOTICE, SAVED_DARK)
+    r = builder_page.run("await advance(10);" + _NEWER + ENDED, SAVED_DARK)
     assert r["closed"] == 1
-    assert r["shown"] is True       # what stays when the browser refuses
+    assert r["status"] == SUPERSEDED   # what stays when the browser refuses
 
 
 def test_a_superseded_tab_with_a_draft_does_not_close():
-    r = builder_page.run("await advance(10);" + _OCEAN + _NEWER + NOTICE,
+    r = builder_page.run("await advance(10);" + _OCEAN + _NEWER + ENDED,
                          SAVED_DARK)
     assert r["closed"] == 0 and r["offer"] is True
+    assert r["status"] == "This builder continued in a newer tab. " + KEEP_LINE
 
 
-def test_the_notices_copy_button_copies_the_share_code():
+def test_the_top_bars_copy_button_copies_the_share_code_after_the_ending():
     r = builder_page.run("""
     await advance(10);
     pick('c-high', '#ff0000');
     await advance(300);
     """ + _NEWER + """
-    $('notice-copy').click();
+    $('copy-code').click();
     await flush();
     return { wrote: clipboard.writes, box: $('code').dataset.plain,
-             label: $('notice-copy').querySelector('.lbl').textContent };
+             label: $('copy-code').querySelector('.lbl').textContent };
     """, SAVED_DARK)
     assert r["box"].startswith("blink theme set BT1.")
     assert r["wrote"] == [r["box"]]
     assert r["label"] == "Copied"
 
 
-def test_focus_stays_inside_the_notice():
+def test_nothing_else_can_be_reached_or_sent_from_an_ended_tab():
+    """Every other control is disabled, and a click that arrives anyway,
+    past disabled, the way a script or an extension could, sends nothing."""
     r = builder_page.run("""
     await advance(10);
     """ + _OCEAN + _NEWER + """
-    const d = $('notice-dialog'), at = [];
-    for (let i = 0; i < 3; i++) {
-      const e = document.fire('keydown', { key: 'Tab' });
-      at.push([document.activeElement === d ? 'dialog' : document.activeElement.id, !!e.prevented]);
-    }
-    $('save').focus();
-    document.fire('focusin', { target: $('save') });
-    return { at, back: document.activeElement === d };
+    const before = requests.length;
+    ['save', 'cancel', 'load', 'copy-cmd'].forEach(id => $(id).fire('click'));
+    pick('c-high', '#00ff00');
+    preset('Forest');
+    await advance(400);
+    return { sent: requests.length - before, off: ['save', 'cancel', 'load',
+             'copy-cmd', 'paste'].every(id => $(id).disabled) };
     """, SAVED_DARK)
-    assert r["at"] == [["notice-copy", True], ["dialog", True],
-                       ["notice-copy", True]]
-    assert r["back"] is True
+    assert r["sent"] == 0 and r["off"] is True
 
 
 _SAVE = "$('save').click(); await advance(10);"
 _CANCEL = "$('cancel').click(); await advance(10);"
-_KEEP = "notice-why notice-keep-text notice-end"
-_PLAIN = "notice-why notice-end"
-
-
-@pytest.mark.parametrize("before, ending, described", [
-    ("", _SAVE, _PLAIN), (_OCEAN, _SAVE, _PLAIN),
-    (_OCEAN, _CANCEL, _PLAIN), ("", _NEWER, _PLAIN),
-    (_OCEAN, _NEWER, _KEEP), ("", _NO_ANSWER, _PLAIN),
-    (_OCEAN, _NO_ANSWER, _KEEP),
-], ids=["saved", "saved, after a change", "cancelled", "newer, none",
-        "newer, draft", "stopped, none", "stopped, draft"])
-def test_the_dialog_is_described_by_only_what_it_shows(before, ending,
-                                                       described):
-    """M1: the description named the "not saved" line in every case, and a
-    description reads an element it names even while it is hidden, so
-    Chromium's accessibility tree read a saved tab as the saved sentence
-    (then "The theme was saved.") followed by "Your changes here are not
-    saved." """
-    r = builder_page.run(f"""
-    await advance(10);
-    {before}
-    {ending}
-    """ + NOTICE, SAVED_DARK)
-    assert r["described"] == described
 
 
 def test_a_reply_landing_after_the_ending_does_not_replace_it():
     """S1: a ping's reply held back past Save's, then saying a newer tab
     took over, reaches superseded() after the tab has already ended as
-    saved. Only the guard in retire() keeps the notice saying saved."""
+    saved. Only the guard in retire() keeps the bar saying saved."""
     r = builder_page.run("""
     await advance(10);
     preset('Ocean'); await advance(300);
@@ -379,10 +354,9 @@ def test_a_reply_landing_after_the_ending_does_not_replace_it():
     await advance(19700);                       // the ping is out, held
     $('save').click(); await advance(10);       // saved
     h.release({ status: 200, body: { ok: true, newer: true } }); await advance(10);
-    """ + NOTICE, SAVED_DARK)
-    assert (r["title"], r["why"]) == SAVED
+    """ + ENDED, SAVED_DARK)
+    assert r["status"] == "Saved: Ocean. Your board keeps it. You can close this tab."
     assert r["offer"] is False
-    assert r["status"].startswith("Saved: Ocean.")
 
 
 # Save held from t = 19610, just before the 20 s ping. The ping and its
@@ -397,7 +371,7 @@ _OWED = """
     answer('/api/ping', () => 'fail');
     $('save').click(); await advance(10);
     await advance(3500);
-    const during = $('notice').getAttribute('hidden') !== null;
+    const during = !$('cancel').disabled;
 """
 
 
@@ -406,20 +380,21 @@ def test_a_save_in_flight_outranks_a_failure_that_lands_first():
     that the server had stored."""
     r = builder_page.run(_OWED + """
     s.release({ status: 200, body: { ok: true } }); await advance(10);
-    """ + NOTICE.replace("return {", "return { during,"), SAVED_DARK)
-    assert r["during"] is True                  # no notice while Save is out
-    assert (r["title"], r["why"]) == SAVED
+    """ + ENDED.replace("return {", "return { during,"), SAVED_DARK)
+    assert r["during"] is True                  # not ended while Save is out
+    assert r["status"] == "Saved: Ocean. Your board keeps it. You can close this tab."
 
 
 def test_a_save_that_never_answers_lets_a_held_stop_through():
     """R2-MUST: a Save stuck inside the server held every stop back for
     good. After the server's own handler timeout the stop shows."""
     r = builder_page.run(_OWED + """
-    const before = $('notice').getAttribute('hidden') !== null;
+    const before = !$('cancel').disabled;
     await advance(7000);                        // past t = 29610
-    """ + NOTICE.replace("return {", "return { during, before,"), SAVED_DARK)
+    """ + ENDED.replace("return {", "return { during, before,"), SAVED_DARK)
     assert r["during"] is True and r["before"] is True
-    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
+    assert r["off"] is True
+    assert r["status"] == STOPPED + " " + KEEP_LINE
     assert r["offer"] is True
 
 
@@ -432,7 +407,7 @@ def test_a_save_that_never_answers_with_nothing_owed_asks_a_ping():
     const pings = () => requests.filter(q => q.path === '/api/ping').length;
     const at = pings();
     await advance(10100);
-    return [at, pings(), $('save').disabled, $('notice').getAttribute('hidden') !== null];
+    return [at, pings(), $('save').disabled, !$('cancel').disabled];
     """, SAVED_DARK)
     assert r == [1, 2, False, True]   # asked; the builder is up; Save again
 
@@ -446,9 +421,9 @@ def test_a_save_refused_with_an_error_says_why_and_keeps_the_tab():
     s.release({ status: 500, body: { error: 'Not saved: this computer could not write the theme file.' } });
     await advance(10);
     await advance(3500);
-    """ + NOTICE.replace("return {", "return { during, save: $('save').disabled,"), SAVED_DARK)
+    """ + ENDED.replace("return {", "return { during, save: $('save').disabled,"), SAVED_DARK)
     assert r["during"] is True
-    assert r["shown"] is False
+    assert r["off"] is False
     assert r["status"] == "Not saved: this computer could not write the theme file."
     assert r["save"] is False and "paste" in r["live"]
 
@@ -459,9 +434,9 @@ def test_a_save_refused_with_an_error_then_a_dead_builder_stops():
     await advance(10);
     const said = $('status-text').textContent;
     await advance(3500);                        // the ping and its retry miss
-    """ + NOTICE.replace("return {", "return { said,"), SAVED_DARK)
+    """ + ENDED.replace("return {", "return { said,"), SAVED_DARK)
     assert r["said"] == "Not saved: no."
-    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
+    assert r["off"] is True and r["status"] == STOPPED + " " + KEEP_LINE
 
 
 def test_one_failed_preview_asks_a_ping_rather_than_stopping():
@@ -473,9 +448,9 @@ def test_one_failed_preview_asks_a_ping_rather_than_stopping():
     preset('Ocean'); await advance(300);
     const pings = requests.filter(q => q.path === '/api/ping').length;
     preset('Forest'); await advance(300);
-    """ + NOTICE.replace("return {", "return { pings,"), SAVED_DARK)
+    """ + ENDED.replace("return {", "return { pings,"), SAVED_DARK)
     assert r["pings"] == 2            # the one at load, and the one asked
-    assert r["shown"] is False
+    assert r["off"] is False
     assert r["status"].startswith("Preview sent: Forest")
 
 
@@ -505,13 +480,13 @@ def test_one_missed_ping_is_asked_again_before_the_tab_stops():
     let n = 0;
     answer('/api/ping', () => (++n === 1 ? 'fail' : { status: 200, body: { ok: true } }));
     await advance(20000);
-    const after1 = $('notice').getAttribute('hidden') !== null;
+    const after1 = !$('cancel').disabled;
     await advance(3100);
     const pings = requests.filter(q => q.path === '/api/ping').length;
-    """ + NOTICE.replace("return {", "return { after1, pings,"), SAVED_DARK)
+    """ + ENDED.replace("return {", "return { after1, pings,"), SAVED_DARK)
     assert r["after1"] is True
     assert r["pings"] == 3            # load, the miss, its retry
-    assert r["shown"] is False and r["live"]
+    assert r["off"] is False and r["live"]
 
 
 def test_two_missed_pings_stop_the_tab():
@@ -519,11 +494,11 @@ def test_two_missed_pings_stop_the_tab():
     await advance(10);
     answer('/api/ping', () => 'fail');
     await advance(20000);
-    const early = $('notice').getAttribute('hidden') === null;
+    const early = $('cancel').disabled;
     await advance(3100);
-    """ + NOTICE.replace("return {", "return { early,"), SAVED_DARK)
+    """ + ENDED.replace("return {", "return { early,"), SAVED_DARK)
     assert r["early"] is False
-    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
+    assert r["off"] is True and r["status"] == STOPPED
 
 
 def test_a_tab_back_from_the_back_forward_cache_asks_at_once():
@@ -543,30 +518,28 @@ def test_a_tab_back_from_the_back_forward_cache_asks_at_once():
     assert r == [1, 1, 2]
 
 
-def test_a_refused_clipboard_shows_the_code_in_the_notice_selected():
-    """S3: the code's own box is behind the notice and inert, so a refused
-    copy shows the code in the card and selects it there."""
+def test_a_refused_clipboard_selects_the_code_in_the_panel():
+    """S3: the share code box is in the panel, which an ended tab leaves
+    readable and undimmed, so a refused copy selects the code where it is
+    and no second copy of it is drawn."""
     r = builder_page.run("""
     await advance(10);
     """ + _OCEAN + _NEWER + """
     clipboard.refuse = true;
-    const before = $('notice-code').getAttribute('hidden') !== null;
-    $('notice-copy').click();
+    $('copy-code').click();
     await flush();
-    return { before, shown: $('notice-code').getAttribute('hidden') === null,
-             text: $('notice-code').textContent, box: $('code').dataset.plain,
-             selected: selection.node === $('notice-code'),
-             label: $('notice-copy').querySelector('.lbl').textContent };
+    return { box: $('code').dataset.plain,
+             selected: selection.node === $('code'),
+             label: $('copy-code').querySelector('.lbl').textContent };
     """, SAVED_DARK)
-    assert r["before"] is True and r["shown"] is True
-    assert r["text"] == r["box"] and r["text"].startswith("blink theme set")
+    assert r["box"].startswith("blink theme set")
     assert r["selected"] is True
     assert r["label"] == "Selected"
 
 
 def test_a_tab_with_nothing_to_copy_is_not_told_to_copy():
     """N1: a tab superseded before it heard its saved theme said "copy the
-    share code" in the bar while its notice offered none. It still does
+    share code" in the bar while nothing offered it. It still does
     not close, since it cannot know it holds nothing. The newer tab is
     heard from a ping asked on coming back into view, inside the 10 s that
     /api/state is now given (R4-N2); the 20 s timer's ping came after it,
@@ -575,14 +548,14 @@ def test_a_tab_with_nothing_to_copy_is_not_told_to_copy():
     await advance(10);
     answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
     document.fire('visibilitychange'); await advance(10);
-    """ + NOTICE, {"/api/state": "hold"})
-    assert r["status"] == "Continued in a newer tab. You can close this one."
+    """ + ENDED, {"/api/state": "hold"})
+    assert r["status"] == SUPERSEDED
     assert r["offer"] is False
     assert r["closed"] == 0
 
 
 def test_the_page_writes_no_markup_from_script():
-    """The notice's words, like every other word the script writes, go in
+    """The ending's words, like every other word the script writes, go in
     by textContent."""
     _, script = builder_page.page_parts()
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML",
@@ -590,11 +563,18 @@ def test_the_page_writes_no_markup_from_script():
         assert sink not in script, sink
 
 
-def test_the_notice_fades_only_for_those_who_allow_motion():
+def test_the_page_carries_no_notice_dialog_at_all():
+    """The full-page notice is gone for good: no markup, no styles, no
+    focus trap, no inert handling. A control that has to stay on is
+    the top bar's own, not a copy in a card."""
     page = theme_server.page()
+    for gone in ("id=\"notice", "class=\"notice", ".notice", "notice-in",
+                 "showNotice", "aria-modal", "setAttribute('inert'", "--scrim"):
+        assert gone not in page, gone
+    assert "This tab is no longer active" not in page
+    # Reduced motion still takes every animation away.
     css = re.sub(r"/\*.*?\*/", "",
                  page[page.index("<style>"):page.index("</style>")], flags=re.S)
-    assert re.search(r"\.notice\s*\{[^}]*animation:\s*notice-in", css)
     reduced = re.search(
         r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\}\s*\}", css,
         re.S)
@@ -612,12 +592,12 @@ def test_a_preview_that_fails_with_the_builder_up_says_so():
     const said = $('status-text').textContent, bad = $('status').classList.contains('err');
     answer('/api/preview', () => ({ status: 200, body: { ok: true } }));
     preset('Ocean'); await advance(300);
-    return { said, bad, notice: $('notice').getAttribute('hidden') === null,
+    return { said, bad, ended: $('cancel').disabled,
              previews: requests.filter(q => q.path === '/api/preview').length,
              now: $('status-text').textContent };
     """, SAVED_DARK)
     assert r["said"] == "The preview did not reach your board."
-    assert r["bad"] is True and r["notice"] is False
+    assert r["bad"] is True and r["ended"] is False
     assert r["previews"] == 2
     assert r["now"].startswith("Preview sent: Ocean")
 
@@ -634,17 +614,14 @@ def test_a_change_made_while_save_is_out_stays_unsaved():
     const sent = requests.filter(q => q.path === '/api/save')[0].body;
     pick('c-high', '#ff0000'); await advance(10);
     s.release({ status: 200, body: { ok: true } }); await advance(10);
-    $('notice-copy').click(); await flush();
-    """ + NOTICE.replace("return {", "return { sent, copied: clipboard.writes,"), SAVED_DARK)
+    $('copy-code').click(); await flush();
+    """ + ENDED.replace("return {", "return { sent, copied: clipboard.writes,"), SAVED_DARK)
     assert r["sent"]["id"] != 12      # Ocean, a built-in, went to the server
-    assert (r["title"], r["why"]) == SAVED
-    assert r["offer"] is True
-    assert r["described"] == _KEEP
-    # Under "Saved." the usual "Your changes here are not saved." read as a
+    # Under "Saved" the usual "Your changes here are not saved." read as a
     # contradiction at a glance (review of fp/notice-title, NICE-3): this
-    # line says which changes it means.
-    assert r["keep"] == ("Changes you made after saving are not on the board."
-                         " Copy the share code to keep them.")
+    # line says which changes it means, and says the share code is there.
+    assert r["status"] == "Saved: Ocean. Your board keeps it. " + KEEP_AFTER_SAVE
+    assert r["offer"] is True and r["live"] == ["copy-code"]
     assert len(r["copied"]) == 1 and r["copied"][0].startswith("blink theme set BT1.")
 
 
@@ -655,28 +632,27 @@ def test_changes_that_were_never_saved_are_offered_as_not_saved(ending):
     await advance(10);
     {_OCEAN}
     {ending}
-    """ + NOTICE, SAVED_DARK)
+    """ + ENDED, SAVED_DARK)
     assert r["offer"] is True
-    assert r["keep"] == ("Your changes here are not saved. Copy the share"
-                         " code to keep them.")
+    assert r["status"].endswith(" " + KEEP_LINE)
 
 
-def test_a_server_that_never_answers_ends_in_the_notice():
+def test_a_server_that_never_answers_ends_the_tab():
     """R3-N3: a server that takes the connection and never answers held
     every ping forever, so the tab looked live for good. Each ping is given
-    up on after 10 s, then its retry, then the notice."""
+    up on after 10 s, then its retry, then the end."""
     r = builder_page.run("""
     await advance(10);
     preset('Ocean'); await advance(300);
     answer('/api/ping', () => hold().p);
     await advance(29000);                       // the 20 s ping, 9 s in
-    const at29 = $('notice').getAttribute('hidden') !== null;
+    const at29 = !$('cancel').disabled;
     await advance(16000);                       // abort, retry, abort
     const limited = requests.filter(q => q.path === '/api/ping').every(q => q.limited);
-    """ + NOTICE.replace("return {", "return { at29, limited,"), SAVED_DARK)
+    """ + ENDED.replace("return {", "return { at29, limited,"), SAVED_DARK)
     assert r["at29"] is True
     assert r["limited"] is True
-    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
+    assert r["off"] is True and r["status"] == STOPPED + " " + KEEP_LINE
     assert r["offer"] is True
 
 
@@ -690,8 +666,8 @@ def test_a_save_is_not_given_up_on_by_the_request_limit():
     answer('/api/save', () => s.p);
     $('save').click(); await advance(15000);
     s.release({ status: 200, body: { ok: true } }); await advance(10);
-    """ + NOTICE, SAVED_DARK)
-    assert (r["title"], r["why"]) == SAVED
+    """ + ENDED, SAVED_DARK)
+    assert r["status"] == "Saved: Ocean. Your board keeps it. You can close this tab."
 
 
 def test_saving_shows_until_a_late_answer():
@@ -710,12 +686,14 @@ def test_saving_shows_until_a_late_answer():
     const late = [$('status-text').textContent, $('save').disabled];
     s.release({ status: 200, body: { ok: true } }); await advance(10);
     return { click, preview, late,
-             end: [$('notice-title').textContent, $('notice-why').textContent] };
+             end: $('status-text').textContent };
     """, SAVED_DARK)
     assert r["click"] == "Saving…"
     assert r["preview"].startswith("Preview sent: Forest")
     assert r["late"] == ["Saving…", False]
-    assert r["end"] == list(SAVED)
+    # Forest was chosen after the save went out, so it is a change the
+    # board does not have and the bar says where to take it from.
+    assert r["end"] == "Saved: Ocean. Your board keeps it. " + KEEP_AFTER_SAVE
 
 
 def test_a_late_ping_from_a_failed_preview_does_not_undo_a_newer_one():
@@ -757,22 +735,22 @@ def test_a_late_ping_still_says_unsent_when_nothing_newer_went_through():
     assert r == "The preview did not reach your board."
 
 
-def test_a_state_that_never_answers_ends_in_the_notice():
+def test_a_state_that_never_answers_ends_the_tab():
     """R4-N2, probe E: a GET /api/state that never answered left the bar at
     "Loading your current theme." for good. It is given up on after 10 s,
     the same limit the posts have, and ends as a refused one does."""
     r = builder_page.run("""
     await advance(9000);
-    const at9 = [$('notice').getAttribute('hidden') !== null,
+    const at9 = [!$('cancel').disabled,
                  $('status-text').textContent];
     await advance(1100);
     const limited = requests.filter(q => q.path === '/api/state').every(q => q.limited);
-    """ + NOTICE.replace("return {", "return { at9, limited,"),
+    """ + ENDED.replace("return {", "return { at9, limited,"),
                          {"/api/state": "hold"})
     assert r["at9"] == [True, "Loading your current theme. You can make"
                        " changes once it is here."]
     assert r["limited"] is True
-    assert r["shown"] is True and (r["title"], r["why"]) == STOPPED
+    assert r["off"] is True and r["status"] == STOPPED
     assert r["offer"] is False      # it never had the owner's theme
 
 
@@ -801,14 +779,13 @@ def test_save_is_off_until_the_state_answers():
     """ + _RELEASE_SYNTHWAVE + """
     const after = $('save').disabled;
     $('save').click(); await advance(10);
-    return { before, early, after, title: $('notice-title').textContent,
-             why: $('notice-why').textContent,
+    return { before, early, after, status: $('status-text').textContent,
              sent: requests.filter(q => q.path === '/api/save').map(q => q.body) };
     """, {"/api/state": "held"})
     assert r["before"] is True and r["early"] == 0
     assert r["after"] is False
     assert r["sent"] == [{"id": 5}]
-    assert (r["title"], r["why"]) == SAVED
+    assert r["status"] == "Saved: Synthwave. Your board keeps it. You can close this tab."
 
 
 def test_nothing_is_previewed_before_the_state_answers():
@@ -850,27 +827,26 @@ def test_a_tab_whose_state_never_came_never_turns_save_on(ending):
     const early = $('save').disabled;
     """ + ending + """
     $('save').fire('click'); await advance(10);
-    return { early, now: $('save').disabled, title: $('notice-title').textContent,
-             why: $('notice-why').textContent,
+    return { early, now: $('save').disabled, status: $('status-text').textContent,
              saves: requests.filter(q => q.path === '/api/save').length };
     """, {"/api/state": "held"})
     assert r["early"] is True and r["now"] is True
-    assert (r["title"], r["why"]) == STOPPED
+    assert r["status"] == STOPPED
     assert r["saves"] == 0
 
 
 def test_a_tab_taken_over_while_its_state_was_out_stays_off():
     """The state landing after the tab has ended does not turn its form
-    back on behind the notice."""
+    back on after it has ended."""
     r = builder_page.run("""
     await advance(10);
     const early = $('save').disabled;
     answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
     document.fire('visibilitychange'); await advance(10);
-    """ + _RELEASE_SYNTHWAVE + NOTICE.replace("return {", "return { early,"),
+    """ + _RELEASE_SYNTHWAVE + ENDED.replace("return {", "return { early,"),
                          {"/api/state": "held"})
     assert r["early"] is True
-    assert (r["title"], r["why"]) == SUPERSEDED
+    assert r["status"] == SUPERSEDED
     assert r["live"] == []
 
 
@@ -928,22 +904,22 @@ def test_the_controls_dim_only_once_a_state_is_slow():
 
 def test_a_tab_that_ends_before_the_dim_never_dims():
     """Review of fp/save-before-load r2, NICE 1: the 150 ms timer outlived
-    a state refused at 10 ms, and dimmed the controls behind the notice.
+    a state refused at 10 ms, and dimmed the controls of a tab that had ended.
     gone() ends it with the tab."""
     r = builder_page.run("""
     const cls = () => document.querySelector('main').classList.contains('waiting');
     await advance(10);
     held['/api/state'][0].release({ status: 500, body: {} }); await advance(10);
-    const shown = $('notice').getAttribute('hidden') === null;
+    const ended = $('cancel').disabled;
     await advance(300);
-    return { shown, dim: cls() };
+    return { ended, dim: cls() };
     """, {"/api/state": "held"})
-    assert r == {"shown": True, "dim": False}
+    assert r == {"ended": True, "dim": False}
 
 
 def test_a_tab_that_ends_after_the_dim_takes_it_off():
     """Review of fp/docs-pass, N8: a state slower than 150 ms and then
-    refused left the dim on, and main marked busy, behind the notice. The
+    refused left the dim on, and main marked busy, on a tab that had ended. The
     tab has ended rather than still loading, so gone() takes both off."""
     r = builder_page.run("""
     const main = document.querySelector('main');
@@ -952,10 +928,10 @@ def test_a_tab_that_ends_after_the_dim_takes_it_off():
     held['/api/state'][0].release({ status: 500, body: {} }); await advance(10);
     return { before, dim: main.classList.contains('waiting'),
              busy: main.getAttribute('aria-busy'),
-             shown: $('notice').getAttribute('hidden') === null };
+             ended: $('cancel').disabled };
     """, {"/api/state": "held"})
     assert r == {"before": [True, "true"], "dim": False, "busy": None,
-                 "shown": True}
+                 "ended": True}
 
 
 def test_the_loading_dim_leaves_the_words_readable():

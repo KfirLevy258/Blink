@@ -37,7 +37,7 @@
   --bg: #0E1116; --card: #161A20; --sunk: #12151A; --line: #272C34; --edge: #646C76;
   --text: #E6E8EB; --dim: #8A9199; --ok: #2ECC71; --ok-text: #2ECC71; --warn: #F1C40F; --on-warn: #0E1116;
   --bad: #E74C3C; --bad-text: #FF7A6E; --on-bad: #0E1116; --accent: #2ECC71; --on-accent: #0E1116; --focus: #2ECC71;
-  --shadow: rgba(0,0,0,.55); --scrim: rgba(5,6,8,.72); color-scheme: dark;
+  --shadow: rgba(0,0,0,.55); color-scheme: dark;
   --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -45,12 +45,12 @@
   --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
   --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
   --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
-  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; } }
+  --shadow: rgba(17,20,24,.16); color-scheme: light; } }
 :root[data-theme="light"] {
   --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
   --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
   --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
-  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; }
+  --shadow: rgba(17,20,24,.16); color-scheme: light; }
 
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
@@ -88,8 +88,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
    disabled look and is left to it. "waiting" comes 150 ms after the page
    runs and not with it, so a state answered on loopback in a few
    milliseconds does not flash the controls dim for a frame (N3). A class
-   set late and not an animation delay: the notice's fade is the one
-   motion here, and reduced motion takes every animation away. */
+   set late and not an animation delay: reduced motion takes every
+   animation away, and a delay would have been one. */
 .studio.waiting button:not(.btn), .studio.waiting input { opacity: .5; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
@@ -229,32 +229,6 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   .opt { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .slot { grid-template-columns: 44px minmax(0, 1fr) 100px; }
 }
-/* The notice a tab shows once it is no longer the live builder: saved,
-   cancelled, taken over by a newer tab, or the builder gone. A browser
-   refuses window.close() on most tabs it did not open by script, so the
-   status bar's last word was all an old tab said, in 15 px at the top of a
-   page that still looked live (the owner's report, 2026-10-29). The card
-   is drawn in the page's own tokens, so its words measure as the page's
-   do: --text on --card 14.2:1 dark and 18.5:1 light, --dim on --card 5.5:1
-   and 7.0:1, the primary button 9.0:1. The scrim only dims; nothing is
-   read through it. Its fade is the one motion here, and the reduced-motion
-   rule below takes it away. */
-.notice { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px; background: var(--scrim); animation: notice-in .2s ease; }
-.notice[hidden] { display: none; }
-.notice-card { width: 100%; max-width: 440px; display: grid; gap: 12px; padding: 28px; border-radius: 16px; border: 1px solid var(--line);
-  background: var(--card); color: var(--text); box-shadow: 0 24px 64px -24px var(--shadow); }
-/* Focus is put on the card itself, as the dialog, so that a screen reader
-   reads its heading and words; it is not a control, and a ring round the
-   whole card on opening read as a fault. Its button keeps the page's ring. */
-.notice-card:focus { outline: none; }
-.notice-card h2 { font-size: 20px; font-weight: 650; line-height: 1.3; letter-spacing: -.01em; }
-.notice-card p { margin: 0; }
-.notice-card .n-end { color: var(--dim); }
-.notice-card .btn { justify-self: start; }
-/* .btn sets its own display, which outranks the hidden attribute. */
-.notice-card [hidden] { display: none; }
-@keyframes notice-in { from { opacity: 0; } to { opacity: 1; } }
-@media (max-width: 640px) { .notice-card { padding: 22px 18px; } .notice-card .btn { justify-self: stretch; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
 </style>
 </head>
@@ -360,23 +334,6 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     </section>
   </aside>
 </main>
-
-<!--
-  Shown, and the page behind it made inert, when this tab stops being the
-  live builder. Its words are written by the script with textContent; the
-  heading and the reason sentence change with the ending, so the heading
-  is empty here (see showNotice).
--->
-<div class="notice" id="notice" hidden>
-  <div class="notice-card" id="notice-dialog" role="dialog" aria-modal="true" aria-labelledby="notice-title" aria-describedby="notice-why notice-end" tabindex="-1">
-    <h2 id="notice-title"></h2>
-    <p id="notice-why"></p>
-    <p id="notice-keep-text" hidden></p>
-    <button type="button" class="btn primary" id="notice-copy" hidden><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
-    <div class="code" id="notice-code" hidden></div>
-    <p class="n-end" id="notice-end">You can close this tab.</p>
-  </div>
-</div>
 
 <script>
 (function () {
@@ -677,14 +634,13 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // so a colour that changes here cannot look as if it reached the board.
   // The preview timer goes too: a change made in the 250 ms before the
   // answer still sent one preview after the tab had stopped (review of
-  // fp/edit-reset r2, NICE 1). The two copy buttons used to stay live, as
-  // the way a draft left here is carried anywhere else; the notice below
-  // has that button now, and everything behind it is still. The loading
-  // dim's timer ends with the tab as well: a state refused in 10 ms used
-  // to dim the controls behind the notice 140 ms later (review of
-  // fp/save-before-load r2, NICE 1). A dim already on, and the busy mark,
-  // come off too: the tab is not loading any more, it has ended (review of
-  // fp/docs-pass, N8).
+  // fp/edit-reset r2, NICE 1). The loading dim's timer ends with the tab
+  // as well: a state refused in 10 ms used to dim the controls 140 ms
+  // after the tab had ended (review of fp/save-before-load r2, NICE 1). A
+  // dim already on, and the busy mark, come off too: the tab is not
+  // loading any more, it has ended (review of fp/docs-pass, N8).
+  // Both copy buttons go still with the rest; retire() gives the share
+  // code's back when the tab holds something to carry away.
   function gone() {
     finished = true;
     clearTimeout(previewTimer);
@@ -693,62 +649,37 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     main.classList.remove('waiting'); main.removeAttribute('aria-busy');
     document.querySelectorAll('header button, main button, main input').forEach(function (e) { e.disabled = true; });
   }
-  // The notice, over a page made inert. A tab that had stopped said so
-  // only in the status bar, over controls that looked live, and most
-  // browsers refuse the window.close() meant to take it away (the owner's
-  // report, 2026-10-29). title: the heading, which names the ending. It
-  // was fixed in the markup as "This tab is no longer active." for every
-  // one, so a save that had worked (the daemon logged it, the board took
-  // the theme) put up a full-page notice the owner read as an error (the
-  // owner's manual test on a board, 2026-10-30). why: one sentence under
-  // it, saying what follows from the ending rather than the heading again.
-  // keep: the tab holds changes nobody saved, so the notice offers their
-  // share code. It is the line to show, or false for none: under "Saved."
-  // the usual "Your changes here are not saved." read as a contradiction at
-  // a glance (review of fp/notice-title, NICE-3), so a save says which
-  // changes it means.
-  // Focus stays in the card: inert does that where the browser has it (all
-  // current ones), and the two listeners after this where it does not.
-  var notice = document.getElementById('notice'), dialog = document.getElementById('notice-dialog');
-  var KEEP_LINE = 'Your changes here are not saved. Copy the share code to keep them.';
-  var KEEP_AFTER_SAVE = 'Changes you made after saving are not on the board. Copy the share code to keep them.';
-  function showNotice(title, why, keep) {
-    document.getElementById('notice-title').textContent = title;
-    document.getElementById('notice-why').textContent = why;
-    document.getElementById('notice-keep-text').textContent = keep || '';
-    ['notice-keep-text', 'notice-copy'].forEach(function (id) {
-      var e = document.getElementById(id);
-      if (keep) e.removeAttribute('hidden'); else e.setAttribute('hidden', '');
-    });
-    // Named here, not fixed in the markup: a description reads an element
-    // it names even while that element is hidden, so a saved tab told a
-    // screen reader "Your changes here are not saved", measured in
-    // Chromium's accessibility tree (review of fp/tab-notice, M1).
-    dialog.setAttribute('aria-describedby', keep ? 'notice-why notice-keep-text notice-end' : 'notice-why notice-end');
-    document.querySelectorAll('.top, .studio').forEach(function (e) { e.setAttribute('inert', ''); e.setAttribute('aria-hidden', 'true'); });
-    notice.removeAttribute('hidden');
-    dialog.focus();
-  }
-  function noticeOpen() { return notice.getAttribute('hidden') === null; }
-  document.addEventListener('focusin', function (e) { if (noticeOpen() && !dialog.contains(e.target)) dialog.focus(); });
-  // One button at most, so Tab and Shift+Tab both go between it and the
-  // card, and never out of it.
-  document.addEventListener('keydown', function (e) {
-    if (!noticeOpen() || e.key !== 'Tab') return;
-    var b = document.getElementById('notice-copy'), on = b.getAttribute('hidden') === null;
-    e.preventDefault();
-    (on && document.activeElement !== b ? b : dialog).focus();
-  });
-  // The last word of a tab: the status bar's sentence, which stays under
-  // the notice as the record, then the notice. Once only: a reply still in
-  // flight after a save must not turn "saved" into "stopped".
-  function retire(title, why, text, kind, keep) {
+  // The last word of a tab, and it is the status bar's and no more. Every
+  // ending used to put up a full-page dialog over a page made inert, with
+  // a heading, a reason, and "You can close this tab." (the owner's report,
+  // 2026-10-29: most browsers refuse the window.close() that was meant to
+  // take the tab away, and the bar's 15 px line sat over controls that
+  // looked live). It cost more than it gave: its heading was one fixed
+  // sentence, a stop, whatever the ending, so a save that had worked (the
+  // daemon logged it, the board took the theme) read as a failure, four times in the owner's own testing, and the owner
+  // asked for the dialog gone (2026-10-31). Now the controls go off, the
+  // page stays readable and undimmed, and the bar says what happened.
+  // keep: the tab holds changes nobody saved, so the bar says so and the
+  // top bar's Copy share code stays on. It is the only control that does:
+  // it writes nothing to the board, and it is the one way the owner's
+  // colours leave a tab that can no longer send them. Where the browser
+  // refuses the clipboard, copy() selects the share code box in the panel,
+  // which is readable as it always was.
+  // Once only: a reply still in flight after a save must not turn "saved"
+  // into "stopped".
+  function retire(text, kind, keep) {
     if (sealed) return false;
     gone();
     end(text, kind);
-    showNotice(title, why, keep);
+    if (keep) document.getElementById('copy-code').disabled = false;
     return true;
   }
+  // The bar's second sentence when the tab holds changes the board has not
+  // kept. Under "Saved" the usual "Your changes here are not saved" read as
+  // a contradiction at a glance (review of fp/notice-title, NICE-3), so a
+  // save says which changes it means.
+  var KEEP_LINE = 'Your changes here are not saved. Copy the share code to keep them.';
+  var KEEP_AFTER_SAVE = 'Changes you made after saving are not on the board. Copy the share code to keep them.';
   // Changes here the board has not kept. Unlike unsaved(), a tab that never
   // heard its saved theme holds none: it has nothing of the owner's to
   // copy, only the page's default colours.
@@ -774,8 +705,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
             function (e) { over(); throw e; });
   }
   // The idle timeout, the daemon exiting and a lost session all look the
-  // same from here, a ping refused or unanswered, so the notice says no
-  // more than that the builder stopped.
+  // same from here, a ping refused or unanswered, so the bar says no
+  // more than that the builder has stopped.
   // A Save still on its way outranks a failure that lands first: the
   // builder ends once a save is stored, and the reply to some request sent
   // just before can settle ahead of Save's own. "Stopped" over a save that
@@ -791,7 +722,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var saving = false, stopOwed = false;
   function stopped() {
     if (saving) { stopOwed = true; return; }
-    retire('The builder stopped.', 'Run blink theme on your computer to start it again.', 'The builder stopped. Run blink theme on your computer to start it again.', true, holdsDraft() && KEEP_LINE);
+    var keep = holdsDraft(), text = 'The builder has stopped. Run blink theme on your computer to start it again.';
+    retire(keep ? text + ' ' + KEEP_LINE : text, true, keep);
   }
   function schedulePreview() {
     if (finished) return;
@@ -936,15 +868,6 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // theme of the owner's (review of fp/save-before-load, S1).
   document.getElementById('copy-cmd').addEventListener('click', function () { if (loaded) copy('cmd', 'copy-cmd'); });
   document.getElementById('copy-code').addEventListener('click', function () { if (loaded) copy('code', 'copy-code'); });
-  // The notice's copy: the same text from the same box. When the clipboard
-  // is refused, the code is shown and selected in the card instead, since
-  // the box it comes from is behind the notice, and inert.
-  document.getElementById('notice-copy').addEventListener('click', function () {
-    var box = document.getElementById('notice-code');
-    box.textContent = box.dataset.plain = document.getElementById('code').dataset.plain;
-    copy('notice-code', 'notice-copy', function () { box.removeAttribute('hidden'); });
-  });
-
   // The dot is the number 0 or 1 or a bool, exactly what theme.validate
   // takes. It was tested with unary plus, which coerced null, "" and [] to
   // off and "1" and [1] to on, so a code the command line refuses loaded
@@ -1016,11 +939,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     // What was sent is what the server stored. savedKey took the page as
     // it was when the reply came, so a colour changed while Save was out
     // counted as saved and was never offered (review of fp/tab-notice r3,
-    // N2). Now it is a draft, and the notice offers it.
+    // N2). Now it is a draft, and the bar offers its share code.
     var sent = wireTheme();
     post('/api/save', sent).then(function (j) {
       var owed = settled();
-      if (j.status === 200) { savedKey = JSON.stringify(sent); retire('Saved.', 'Your board keeps the theme you saved.', 'Saved: ' + name + '. Your board keeps it. You can close this tab.', 'ok', holdsDraft() && KEEP_AFTER_SAVE); }
+      if (j.status === 200) {
+        savedKey = JSON.stringify(sent);
+        var keep = holdsDraft(), text = 'Saved: ' + name + '. Your board keeps it.';
+        retire(text + ' ' + (keep ? KEEP_AFTER_SAVE : 'You can close this tab.'), 'ok', keep);
+      }
       else if (j.status === 409) superseded();
       // An answer at all means the builder was up to give it, so a stop
       // held back meanwhile is not taken on trust: the owner reads why the
@@ -1037,7 +964,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     post('/api/cancel', null, true).then(function (j) {
       if (j.status === 409) return superseded();
       // No share code offered: Cancel is the owner throwing the changes away.
-      retire('Cancelled.', 'Your board is back on its saved theme.', 'Cancelled. Your board is back on its saved theme. You can close this tab.', undefined, false);
+      retire('Cancelled. Your board is back on its saved theme. You can close this tab.');
     }, stopped);
   });
   // Closing the tab cancels. A reload also fires pagehide, and the server
@@ -1057,26 +984,23 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // builder tab opened from the board is, so "closes itself" was the usual
   // ending, and it took an unsaved draft with it without a word (review of
   // fp/edit-reset r2, SHOULD-1). A tab with changes stays, still, with its
-  // colours on screen under the notice, which offers its share code; the
+  // colours on screen and the bar offering their share code; the
   // newer tab opens on the last preview this one sent (/api/state "draft").
   var savedKey = null;
   function unsaved() { return savedKey === null || JSON.stringify(wireTheme()) !== savedKey; }
   function superseded() {
-    // keep: not closed, since the tab may hold something unsaved, which
-    // includes a tab that never heard its saved theme. draft: it holds
-    // changes it can offer. The bar's words follow the offer, so a tab
-    // with nothing to copy is not told to copy (review of fp/tab-notice,
-    // N1).
-    var keep = unsaved(), draft = holdsDraft(), why = 'The builder continued in a newer tab.';
-    var ended = retire('This tab is no longer active.', why, draft ? 'Continued in a newer tab. Your changes are still here: copy the share code to take them across.'
-                                  : 'Continued in a newer tab. You can close this one.', undefined, draft && KEEP_LINE);
-    // The notice first: it is what stays when the browser refuses.
-    if (ended && !keep) { try { window.close(); } catch (e) {} }
+    // closes: only a tab that holds nothing unsaved, which includes a tab
+    // that never heard its saved theme. draft: it holds changes it can
+    // offer. The bar's words follow the offer, so a tab with nothing to
+    // copy is not told to copy (review of fp/tab-notice, N1).
+    var closes = !unsaved(), draft = holdsDraft();
+    var ended = retire(draft ? 'This builder continued in a newer tab. ' + KEEP_LINE
+                             : 'This builder continued in a newer tab. You can close this one.', undefined, draft);
+    if (ended && closes) { try { window.close(); } catch (e) {} }
   }
   // One miss is asked again before the tab calls the builder stopped. A
-  // single dropped request on loopback ended a live builder's tab for good,
-  // and behind a full-page notice since the notice came (review of
-  // fp/tab-notice, N2). Three seconds: the builder is either up again by
+  // single dropped request on loopback ended a live builder's tab for good
+  // (review of fp/tab-notice, N2). Three seconds: the builder is either up again by
   // then or gone.
   var RETRY_MS = 3000;
   // alive: called when the builder answers and this tab is still its live
