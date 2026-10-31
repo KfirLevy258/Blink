@@ -296,6 +296,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
           <button type="button" data-v="gauges" aria-pressed="true">Gauges</button>
           <button type="button" data-v="focus" aria-pressed="false">Focus mode</button>
         </div>
+        <div class="seg" role="group" aria-label="Focus window">
+          <button type="button" data-f="session" aria-pressed="true">Session</button>
+          <button type="button" data-f="weekly" aria-pressed="false">Weekly</button>
+        </div>
         <label class="slider" for="p1"><span>Session</span><input type="range" id="p1" min="0" max="100" value="42"><output id="o1">42%</output></label>
         <label class="slider" for="p2"><span>Weekly</span><input type="range" id="p2" min="0" max="100" value="91"><output id="o2">91%</output></label>
       </div>
@@ -406,7 +410,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var HEX = /^[0-9a-fA-F]{6}$/;
 
   // preset: the id of an untouched built-in, or -1 for the custom theme.
-  var st = Object.assign({ mode: 'level', view: 'gauges', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
+  var st = Object.assign({ mode: 'level', view: 'gauges', fw: 'session', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
   var finished = false, previewTimer = null, lastSent = null;
   // loaded: /api/state has answered and the page shows the owner's theme.
   // Until then the page holds only its own default, preset 0, and Save was
@@ -527,10 +531,24 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       svg.appendChild(el('path', { d: 'M9 114 L4 119 L9 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
       svg.appendChild(el('path', { d: 'M311 114 L316 119 L311 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
     } else {
-      var focusP = Math.max(st.p1, st.p2), isS = st.p1 >= st.p2;
-      gauge(svg, 160, 118, 210, Math.round(st.w * 1.35), focusP, arcCol(isS ? 1 : 2, focusP), track, st.text, 48);
-      svg.appendChild(el('text', { x: 160, y: 158, 'text-anchor': 'middle', 'font-family': F, 'font-size': 15, fill: '#' + dim }, isS ? 'SESSION  3h 40m' : 'WEEK  1d 1h'));
-      svg.appendChild(el('text', { x: 160, y: 228, 'text-anchor': 'middle', 'font-family': F, 'font-size': 13, fill: '#' + dim }, (isS ? 'week ' + st.p2 : 'session ' + st.p1) + '%'));
+      // Focus mode as usage_view.c draws it, not as it was guessed (review
+      // of 1.4.0, builder N9). The big window is the one Settings > Focus
+      // names, not the higher of the two. The other is one dim line, built
+      // by fmt_focus_line() as "Weekly 91% <bullet> 1d 1h", and
+      // countdown_colour() paints it in the theme's mid from 60 percent and
+      // its high from 90, the same thresholds as every ring, so those two
+      // colours are previewed as text where the board uses them most. The
+      // big gauge is captioned with its own name and countdown, in two
+      // lines, as in the two-gauge view. Sizes and rows are
+      // usage_layout.h's FOCUS_*: a 156 px ring from y 44, the caption at
+      // 140, the countdown at 158, the line at 184, each a 16 px row whose
+      // 12 px text sits 12 px down.
+      var wk = st.fw === 'weekly', bigP = wk ? st.p2 : st.p1, otherP = wk ? st.p1 : st.p2;
+      gauge(svg, 160, 122, 156, st.w, bigP, arcCol(wk ? 2 : 1, bigP), track, st.text, 40);
+      svg.appendChild(el('text', { x: 160, y: 152, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, wk ? 'WEEKLY 7d' : 'SESSION 5h'));
+      svg.appendChild(el('text', { x: 160, y: 170, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, wk ? '1d 1h' : '3h 40m'));
+      svg.appendChild(el('text', { x: 160, y: 196, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (otherP >= 90 ? st.high : otherP >= 60 ? st.mid : dim) },
+                         (wk ? 'Session ' : 'Weekly ') + Math.round(otherP) + '% \u2022 ' + (wk ? '3h 40m' : '1d 1h')));
     }
     paintControls(); checks(); output();
   }
@@ -546,7 +564,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     document.getElementById('modenote').textContent = st.mode === 'level'
       ? 'By level: both arcs take the colour of their own level. Gauge 1 and Gauge 2 are not used.'
       : 'Per gauge: each arc keeps its own colour, and switches to the 90%-and-above colour near the limit so a warning is never missed. The status dot uses the under-60% colour, or, when it and the 60%-to-90% colour are both greys, whichever stands out more.';
-    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view);
+    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view); press('[data-f]', 'f', st.fw);
     document.querySelectorAll('#presets button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.p === st.preset)); });
   }
   function press(sel, key, val) { document.querySelectorAll(sel).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset[key] === val)); }); }
@@ -898,6 +916,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The screen and the two sliders only move the drawing here; they are not
   // part of the theme and send nothing.
   document.querySelectorAll('[data-v]').forEach(function (b) { b.addEventListener('click', function () { st.view = b.dataset.v; render(); }); });
+  // Choosing a focus window shows the focus view, since it is the only view
+  // that window changes.
+  document.querySelectorAll('[data-f]').forEach(function (b) { b.addEventListener('click', function () { st.fw = b.dataset.f; st.view = 'focus'; render(); }); });
   [['p1','o1'],['p2','o2']].forEach(function (x) { var r = document.getElementById(x[0]); r.addEventListener('input', function () { st[x[0]] = +r.value; document.getElementById(x[1]).textContent = r.value + '%'; render(); }); });
 
   // shown: run before a refused copy selects the text, for a box that is

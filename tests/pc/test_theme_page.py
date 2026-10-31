@@ -1144,3 +1144,79 @@ def test_the_page_takes_the_share_codes_the_command_line_takes(dot):
     assert r["msg"].startswith("Loaded") == cli_takes
     if cli_takes:
         assert r["sent"][-1]["dot"] == (1 if dot in (1, True) else 0)
+
+
+# ------------------------------------------- the preview's Focus mode
+#
+# Review of 1.4.0 (builder), N9. The page's Focus preview made the higher of
+# the two windows big, drew the other as "week 91%" in the dim colour with no
+# countdown, and captioned the big gauge "WEEK  1d 1h". The board (usage_view.c
+# focus_big, countdown_colour, render_countdown, fmt_focus_line) makes big the
+# window Settings > Focus names, writes the other as one dim line, "Weekly 91%
+# <bullet> 1d 1h", in the theme's mid or high colour from 60 and 90 percent,
+# and captions the big gauge with its own name and countdown ("WEEKLY 7d" over
+# "1d 1h"). So a custom theme's mid and high, used as text, were never
+# previewed where the board uses them most.
+
+_FOCUS = """
+    await advance(10);
+    document.querySelectorAll('[data-v]').find(b => b.dataset.v === 'focus').click();
+    {more}
+    const t = $('scr').children.filter(n => n.tagName === 'TEXT')
+        .map(n => [n.textContent, n.attrs.fill, +n.attrs.y]);
+    return { t, f: document.querySelectorAll('[data-f]').map(b => [b.dataset.f, b.getAttribute('aria-pressed')]) };
+"""
+_BULLET = "•"
+
+
+def _focus(more=""):
+    return builder_page.run(_FOCUS.replace("{more}", more), SAVED_DARK)
+
+
+def _by_text(r):
+    return {t[0]: t for t in r["t"]}
+
+
+def test_focus_makes_big_the_window_chosen_and_not_the_higher():
+    r = _focus()
+    texts = _by_text(r)
+    # Session is the board's default, and it is the lower of 42 and 91.
+    assert "42%" in texts and "91%" not in texts
+    assert "SESSION 5h" in texts and "3h 40m" in texts
+    assert r["f"] == [["session", "true"], ["weekly", "false"]]
+
+
+def test_focus_weekly_swaps_which_window_is_big():
+    r = _focus("document.querySelectorAll('[data-f]').find(b => b.dataset.f === 'weekly').click();")
+    texts = _by_text(r)
+    assert "91%" in texts and "WEEKLY 7d" in texts and "1d 1h" in texts
+    assert f"Session 42% {_BULLET} 3h 40m" in texts
+    assert r["f"] == [["session", "false"], ["weekly", "true"]]
+
+
+def test_the_dim_line_is_the_boards_words():
+    r = _focus()
+    assert f"Weekly 91% {_BULLET} 1d 1h" in _by_text(r)
+    assert not [t for t in r["t"] if t[0].startswith("week ")]
+
+
+@pytest.mark.parametrize("pct, slot", [(91, "high"), (90, "high"),
+                                       (75, "mid"), (60, "mid"),
+                                       (59, "dim"), (0, "dim")])
+def test_the_dim_line_wears_the_severity_colour_from_60(pct, slot):
+    """countdown_colour(): the theme's high from 90, mid from 60, else dim."""
+    r = _focus(f"$('p2').value = '{pct}'; $('p2').fire('input');"
+               " await advance(10);")
+    line = _by_text(r)[f"Weekly {pct}% {_BULLET} 1d 1h"]
+    colours = builder_page.run("""
+    await advance(10);
+    document.querySelectorAll('[data-v]').find(b => b.dataset.v === 'focus').click();
+    const t = $('scr').children.filter(n => n.tagName === 'TEXT');
+    return { caption: t.find(n => n.textContent === 'SESSION 5h').attrs.fill,
+             high: document.getElementById('t-high').value };
+    """, SAVED_DARK)
+    if slot == "dim":
+        assert line[1] == "#" + colours["caption"].lstrip("#")  # the dim text
+    else:
+        assert line[1].lower() == {"high": "#ff1900", "mid": "#ba8107"}[slot]
+    assert colours["high"].lower() == "#ff1900"
