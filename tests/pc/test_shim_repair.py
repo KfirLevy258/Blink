@@ -255,6 +255,7 @@ def _rig_status(tmp_path, monkeypatch, *, bridge_running, marker,
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("BLINK_SKIP_SERVICE", raising=False)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     monkeypatch.delenv(install_statusline.WATCHDOG_DISABLE_ENV, raising=False)
     if watchdog_disabled:
         monkeypatch.setenv(install_statusline.WATCHDOG_DISABLE_ENV, "1")
@@ -305,7 +306,7 @@ def test_status_does_not_promise_repair_when_the_bridge_is_not_running(
 
     assert "the activity hook shim is out of date" in out
     assert "the daemon replaces it" not in out
-    assert f"run `{cli.installed_bin()} install` to fix it" in out
+    assert f"run `{cli.command_to_type()} install` to fix it" in out
 
 
 def test_status_does_not_promise_repair_when_never_installed(
@@ -455,3 +456,174 @@ def test_a_failed_shim_write_leaves_the_old_shim_intact(tmp_path, monkeypatch):
     assert "already working" in open(p, encoding="utf-8").read()
     leftovers = [n for n in os.listdir(str(tmp_path)) if "blink-tmp" in n]
     assert leftovers == [], "a failed write left its temp file behind: %s" % leftovers
+
+
+# ---------------------------------------------------- settings temp siblings
+
+
+def test_a_stale_settings_temp_is_swept_by_the_next_write(tmp_path):
+    """A write killed between mkstemp and the rename leaves a 0600 copy of
+    settings.json -- which can hold ANTHROPIC_API_KEY -- under a random name
+    that nothing would ever look for again."""
+    import time
+    p = str(tmp_path / "settings.json")
+    old = p + ".k1lled.blink-tmp"
+    fresh = p + ".inflight.blink-tmp"
+    for f in (old, fresh):
+        open(f, "w").close()
+    an_hour_ago = time.time() - 3600
+    os.utime(old, (an_hour_ago, an_hour_ago))
+    install_statusline._save(p, {"a": 1}, 2, True)
+    assert not os.path.exists(old)
+    assert os.path.exists(fresh)        # maybe another writer's, mid-write
+    assert install_statusline.temp_siblings(p) == [fresh]
+
+
+def test_a_locked_settings_file_fails_at_once_off_windows(tmp_path,
+                                                          monkeypatch):
+    """The Windows retry is for WinError 5/32. On POSIX EACCES is a real
+    refusal, and retrying it stalled every write for 2.8 s."""
+    import errno
+    slept = []
+    monkeypatch.setattr(install_statusline.time, "sleep", slept.append)
+
+    def locked(src, dst):
+        raise PermissionError(errno.EACCES, "locked")
+
+    monkeypatch.setattr(install_statusline.os, "replace", locked)
+    monkeypatch.setattr(install_statusline.sys, "platform", "linux")
+    with pytest.raises(PermissionError):
+        install_statusline._save(str(tmp_path / "s.json"), {}, 2, True)
+    assert slept == []
+
+
+def test_a_windows_sharing_violation_is_retried(tmp_path, monkeypatch):
+    slept = []
+    monkeypatch.setattr(install_statusline.time, "sleep", slept.append)
+    real = os.replace
+    tries = {"n": 0}
+
+    def busy_twice(src, dst):
+        tries["n"] += 1
+        if tries["n"] <= 2:
+            e = PermissionError(13, "in use")
+            e.winerror = 32
+            raise e
+        return real(src, dst)
+
+    monkeypatch.setattr(install_statusline.os, "replace", busy_twice)
+    monkeypatch.setattr(install_statusline.sys, "platform", "win32")
+    p = str(tmp_path / "s.json")
+    install_statusline._save(p, {"a": 1}, 2, True)
+    assert tries["n"] == 3 and len(slept) == 2
+    assert open(p).read().startswith("{")
+
+
+def test_a_folder_that_refuses_new_files_fails_at_once(tmp_path, monkeypatch):
+    """tempfile.mkstemp on Python 3.11 -- the shipped Windows build -- reads
+    PermissionError as "name taken" and retries about two billion times, so
+    a folder that refused new files hung install, uninstall, `blink config`
+    and the watchdog's repair on the serial loop."""
+    calls = []
+
+    def refuse(path, flags, mode=0o777):
+        calls.append(path)
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(install_statusline.os, "open", refuse)
+    # The hang is Windows-only (mkstemp retries PermissionError only when
+    # os.name == "nt"), so on this runner the proof is that mkstemp is not
+    # what is being called at all.
+    import tempfile
+
+    def no_mkstemp(*a, **k):
+        raise AssertionError("mkstemp retries PermissionError on Windows")
+
+    monkeypatch.setattr(tempfile, "mkstemp", no_mkstemp)
+    with pytest.raises(PermissionError):
+        install_statusline._save(str(tmp_path / "s.json"), {}, 2, True)
+    assert len(calls) == 1
+
+
+def test_a_taken_temp_name_is_retried_a_few_times_only(tmp_path,
+                                                       monkeypatch):
+    calls = []
+
+    def taken(path, flags, mode=0o777):
+        calls.append(path)
+        raise FileExistsError(17, "exists")
+
+    monkeypatch.setattr(install_statusline.os, "open", taken)
+    with pytest.raises(FileExistsError):
+        install_statusline._save(str(tmp_path / "s.json"), {}, 2, True)
+    assert len(calls) == 10
+    assert len(set(calls)) == 10            # a new random name each time
+
+
+def test_the_temp_file_is_private(tmp_path):
+    import stat
+    seen = {}
+    p = str(tmp_path / "s.json")
+    real_replace = os.replace
+
+    def look(src, dst):
+        seen["mode"] = stat.S_IMODE(os.stat(src).st_mode)
+        return real_replace(src, dst)
+
+    import unittest.mock
+    with unittest.mock.patch.object(install_statusline.os, "replace", look):
+        install_statusline._save(p, {"a": 1}, 2, True)
+    if sys.platform != "win32":
+        assert seen["mode"] == 0o600
+
+
+def test_the_legacy_fixed_temp_name_is_swept_whatever_its_age(tmp_path):
+    """Every release up to 1.3.4 wrote <path>.blink-tmp -- the oldest at the
+    umask, 0644, readable by every account on the machine -- and a killed
+    write left it holding the customer's settings, ANTHROPIC_API_KEY
+    included. No age gate: no writer of this version uses that name, so it
+    is never in flight."""
+    p = str(tmp_path / "settings.json")
+    legacy = p + ".blink-tmp"
+    open(legacy, "w").close()
+    assert install_statusline.temp_siblings(p) == [legacy]
+    install_statusline._save(p, {"a": 1}, 2, True)
+    assert not os.path.exists(legacy)
+
+
+def test_a_read_only_temp_file_is_still_removed(tmp_path, monkeypatch):
+    """Windows will not delete a read-only file; clear the bit and retry."""
+    import stat
+    p = str(tmp_path / "settings.json")
+    legacy = p + ".blink-tmp"
+    open(legacy, "w").close()
+    real_remove = os.remove
+    tries = []
+
+    def remove(path):
+        tries.append(path)
+        if len(tries) == 1:
+            raise PermissionError(13, "read-only")
+        return real_remove(path)
+
+    chmods = []
+    real_chmod = os.chmod
+
+    def chmod(path, mode):
+        chmods.append(mode)
+        return real_chmod(path, mode)
+
+    monkeypatch.setattr(install_statusline.os, "remove", remove)
+    monkeypatch.setattr(install_statusline.os, "chmod", chmod)
+    install_statusline._save(p, {"a": 1}, 2, True)
+    assert not os.path.exists(legacy)
+    assert chmods and chmods[0] & stat.S_IWRITE
+
+
+def test_one_replace_with_the_retry_policy_as_a_parameter():
+    """No second copy of the retry: install_statusline asks update's, with
+    the POSIX half switched off."""
+    import inspect
+    from pc import update
+    assert "posix_retry" in inspect.signature(update._replace).parameters
+    assert not hasattr(install_statusline, "_replace_file")

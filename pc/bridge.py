@@ -2,14 +2,45 @@
 liveness. I/O (serial) is injected so this is unit-testable without hardware."""
 import datetime
 import hashlib
+import queue
 import sys
+import threading
 import time
 
 from pc import ota as ota_mod
 from pc import protocol
+from pc import status_page
 from pc.version import PROTO_VERSION, RELEASE_VERSION
 
 LIVENESS_WINDOW_S = 30.0
+
+# How long after a greeting no theme line is sent: one fast tick
+# (claude_usage_bridge.FAST_POLL_INTERVAL_S). The reply to a hello is already
+# the largest thing the daemon sends without pausing (tests/pc/
+# test_hello_burst.py), and the board's theme_now answers that same welcome,
+# so a save decided inside the burst would be decided on a report not yet
+# heard. Addendum 2 of the theme contract: theme lines go out on the next
+# fast tick instead.
+THEME_QUIET_S = 2.0
+
+# How long nothing else is written after a theme SAVE. The board answers it
+# with a flash erase and write on its main thread (ui_theme.c, THEME_OP_SAVE
+# -> cfg_set_theme -> persist), and an ESP32 flash erase masks the console
+# UART's interrupt: for its length only the 128-byte FIFO, about 11 ms of
+# line at 115200 baud, keeps what the daemon sends. A usage line written
+# right behind a save arrived with its middle missing -- page 2 dropped out,
+# the pips went wrong -- in 99 of 99 simulated cases with an erase of 30 ms
+# or more (firmware review, 2026-10-31). cfg_store.c puts the whole erase and
+# write at "tens of milliseconds", so 0.5 s is several times that, and it is
+# short beside the 2 s fast tick, the 60 s heartbeat and the 30 s the board is
+# given before it is called lost. The board's theme_now why=saved, which it
+# sends only after the store has finished, ends the hold early. Only a save
+# holds: preview and cancel write no flash.
+THEME_SAVE_HOLD_S = 0.5
+
+
+def _spawn(fn):
+    threading.Thread(target=fn, name="blink-theme-open", daemon=True).start()
 
 # The 429 backoff that lived here is gone with the endpoint it was for.
 #
@@ -27,13 +58,44 @@ def _local_wall():
     return int(now.timestamp()), int(now.utcoffset().total_seconds() // 60)
 
 
+def _version_for_log(fw) -> str:
+    """A board's firmware version as a log line may say it: rebuilt from the
+    integers protocol._fw_tuple parsed, or "an unreadable version". Never the
+    string as it came off the wire -- see the ota "board has" line."""
+    parts = protocol._fw_tuple(fw)
+    # Bounded as well as parsed: int() takes any run of digits, so without a
+    # ceiling "1.2.<four thousand digits>" would still carry four thousand
+    # characters of whatever the board chose into the log.
+    if parts is None or not all(0 <= p <= 9999 for p in parts):
+        return "an unreadable version"
+    return "%d.%d.%d" % parts
+
+
+def _proto_for_log(proto) -> str:
+    """The board's protocol number as a log line may say it.
+
+    It is int(msg["v"]), so it cannot carry text, but it is still a value
+    off the wire with no length: review of this branch (2026-10-30) put a
+    ping with a 300-digit v through and got all 300 digits in bridge.log.
+    Bounded the way _version_for_log is. Only ever printed for a board ahead
+    of us, so anything out of range is still truthfully "a newer protocol".
+    """
+    if isinstance(proto, int) and 0 <= proto <= 9999:
+        return f"protocol {proto}"
+    return "a newer protocol"
+
+
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  set_preferred=None,
                  app_ver=RELEASE_VERSION,
                  wall=_local_wall, fetch_manifest=None, fetch_firmware=None,
                  flash_image=None, self_update=None, pending=None,
-                 fetch_signed_manifest=None, report_failure=None):
+                 fetch_signed_manifest=None, report_failure=None,
+                 status_watch=None, board_caps_hint=None,
+                 theme_sync=None, open_builder=None, run_async=_spawn,
+                 edit_answers=None, builder_ended=None, builder_open=None,
+                 sleep=time.sleep):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -52,6 +114,16 @@ class Bridge:
         # What the board says it is. Set from hello; None until it speaks.
         self._board_proto = None
         self._board_fw = None
+        # Which board this is, for the theme's "seen" record (theme contract
+        # Addendum 4), and only as the wire said it: a hello, or a pref,
+        # which names the board from firmware 1.4.0 on and answers every
+        # welcome (Addendum 5). Never board.json's id. A hot-plugged board's
+        # hello usually reaches nobody -- it is sent about a second after
+        # power-up, and the daemon polls for ports every 3 s -- so board.json
+        # can name the previous board for a whole connection, and a theme
+        # adopted on its say-so was the wrong board's (review of fp/fix-pc,
+        # S1, reproduced). None until the wire says.
+        self._board_id = None
         self._announced_ahead = False
         # Pair updates. self_update replaces this program and does not return
         # when it works; pending remembers the consent across that restart;
@@ -70,11 +142,61 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
         self._last_session = None        # (label, n) last sent; see poll_once
+        # The status-page watch (pc/status_page.StatusWatch), or None on a
+        # Bridge wired without one -- every test fake -- which then sends no
+        # svc message at all, exactly as a daemon from before it did.
+        self._svc = status_watch
+        # What the board can show (protocol.board_caps): None until its
+        # hello or its pref has said, then whatever the last of those
+        # listed. Every board that has caps puts them on both, so a pref
+        # that lists none is a board without them -- not one that forgot.
+        self._board_caps = None
+        # What board.json says the last board listed. Only a stand-in until
+        # this one speaks: a daemon that restarts under a running board gets
+        # no hello, and greet()'s first poll runs before the pref that
+        # answers its welcome has arrived.
+        self._board_caps_hint = (frozenset(board_caps_hint)
+                                 if isinstance(board_caps_hint, (list, tuple))
+                                 else None)
+        self._svc_pair = None            # (provider, p2) of the last usage
+        self._svc_pages = ()             # those with a status page, in order
+        self._last_svc = {}              # provider -> (level, what) last sent
         # The last usage message actually PUT ON THE WIRE, minus the fields
         # that move on their own (protocol.VOLATILE_USAGE_KEYS). This is what
         # poll_if_changed decides against: "sent", not "read", because the
         # capping on the way out is part of what the board received.
         self._last_pushed = None
+        # Themes (pc/theme.py). theme_sync owns the files and what the
+        # board is believed to hold; open_builder starts the builder and a
+        # browser on it, returning whether one opened, and is rate-limited
+        # itself (theme_server.Launcher). Both None on a Bridge wired without
+        # them -- every older test -- which then sends no theme line at all
+        # and answers theme_edit with ok 0.
+        self._theme = theme_sync
+        self._open_builder = open_builder
+        # callable() -> True once when the builder open_builder opened has
+        # ended (Launcher.ended); pump() then tells the board (Addendum 6).
+        self._builder_ended = builder_ended
+        # callable() -> True/False/None: is that builder open right now
+        # (Launcher.editing)? Said in every welcome greet() writes, so a
+        # board that rebooted or was away while it opened or ended holds or
+        # frees "Edit on computer" to match. None (not wired) leaves the
+        # field out, and the board as it is.
+        self._builder_open = builder_open
+        self._edit_said_at = None        # last edit_state; see _restate_edit
+        self._last_ping_wall = None      # see _edit_after_silence
+        # The open runs on run_async's thread: starting a browser can take a
+        # second or more, and this object lives on the serial thread. The
+        # answer comes back through the queue and pump() writes it, so only
+        # the serial thread ever writes to the port. The daemon hands in one
+        # queue for its whole life, so an open that returns after a
+        # reconnect is answered on the new connection.
+        self._run_async = run_async
+        self._edit_answers = (edit_answers if edit_answers is not None
+                              else queue.SimpleQueue())
+        self._theme_quiet_until = None
+        self._sleep = sleep
+        self._store_until = None         # see THEME_SAVE_HOLD_S
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -88,7 +210,24 @@ class Bridge:
         panel after every service restart. Measured doing exactly that before
         this existed.
         """
-        self._write(protocol.welcome("blink-bridge", self._app_ver))
+        editing = None
+        if self._builder_open is not None:
+            try:
+                editing = self._builder_open()
+            except Exception as e:
+                # A welcome must go out whatever this says; without the
+                # field the board keeps the slot as it is.
+                print(f"[bridge] builder state unknown: {e}",
+                      file=sys.stderr)
+        self._write(protocol.welcome("blink-bridge", self._app_ver,
+                                     editing=editing))
+        self._store_until = None         # a new conversation, a new board
+        if self._theme is not None:
+            # A greeting starts a new conversation: the board answers it with
+            # theme_now why=boot, and nothing about themes is said until a
+            # fast tick after that (THEME_QUIET_S).
+            self._theme.hello()
+            self._theme_quiet_until = self._now() + THEME_QUIET_S
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
@@ -98,6 +237,8 @@ class Bridge:
         # the same shape as offer_if_newer on every connect rather than once
         # per daemon lifetime.
         self._last_session = None
+        # The status level needs no reset here: poll_once re-states it on
+        # every heartbeat, and this is one (see protocol.svc's contract).
         self.poll_once()                 # push current data immediately
         # Only once the board has been heard. On the no-reset connect path
         # greet() runs before any message has reached on_message, so
@@ -130,7 +271,10 @@ class Bridge:
         if self._board_proto is None:
             try:
                 self._board_proto = int(msg["v"])
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):
+                # OverflowError because json reads 1e400 as infinity and
+                # int(inf) raises it; uncaught, it left the read loop and
+                # ended the daemon.
                 pass
             else:
                 self._announce_if_ahead()
@@ -140,7 +284,15 @@ class Bridge:
                 # so the board is greeted before it is asked to resume.
                 if t != "hello":
                     self._resume_pending()
+        if t in ("hello", "pref"):
+            self._board_caps = protocol.board_caps(msg)
         if t == "pref":
+            # The board's id, from firmware that puts it on pref (Addendum
+            # 5). One without it says nothing either way: older firmware
+            # named itself in the hello only, and that id stands.
+            bid = self._wire_id(msg)
+            if bid is not None:
+                self._board_id = bid
             # Which provider the user picked on the board's settings screen.
             # It arrives with every hello as well as on change, so a daemon
             # that restarts picks the choice back up without the user
@@ -155,14 +307,34 @@ class Bridge:
             self.greet()
             self.offer_if_newer(msg.get("fw"))
         elif t == "ping":
+            self._edit_after_silence()
             self._last_ping = self._now()
             # Free: never fetch here. The usage endpoint is aggressively
             # rate-limited and this fires every 10 s.
             self._write(protocol.pong())
         elif t == "ota_query":
-            self._on_ota_query(msg.get("cur", ""))
+            # The board's own word on what it runs ALWAYS wins. _on_ota_query
+            # only fills an empty _board_fw, which is right for the guesses
+            # that also reach it -- board.json's version via offer_if_newer,
+            # and the "0.0.0" fallback -- and wrong for this: on a reconnect
+            # without a reset, board.json's 1.3.4 was latched first, and a
+            # board that had just updated itself to 1.4.0 said so and was
+            # ignored until the next reconnect.
+            cur = msg.get("cur", "")
+            if protocol._fw_tuple(cur) is not None:
+                self._board_fw = cur
+            self._on_ota_query(cur)
         elif t == "ota_flash":
             self._on_ota_flash()
+        elif t == "theme_now":
+            # Recorded, never answered here: whatever it makes owed goes out
+            # on the next tick (see THEME_QUIET_S).
+            if msg.get("why") == "saved":
+                self._store_until = None     # the store has finished
+            if self._theme is not None:
+                self._theme.board_now(msg, board_id=self._board_id)
+        elif t == "theme_edit":
+            self._on_theme_edit()
         # unknown types ignored
 
     # --- OTA, for a board with no network of its own -------------------
@@ -185,14 +357,26 @@ class Bridge:
         """
         try:
             self._board_proto = int(hello.get("v"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):    # 1e400 is inf
             self._board_proto = None
         self._board_fw = hello.get("fw")
+        # A hello's word is final, an absent id included: a board that
+        # cannot read its own id is not one to compare with a record.
+        self._board_id = self._wire_id(hello)
         self._announce_if_ahead()
+
+    @staticmethod
+    def _wire_id(msg):
+        bid = msg.get("board_id")
+        # The firmware sends "unknown" when hwinfo has no id to give.
+        if not isinstance(bid, str) or not bid or bid == "unknown":
+            return None
+        return bid
 
     def _announce_if_ahead(self):
         if self._board_ahead() and not self._announced_ahead:
-            print(f"[bridge] the board speaks protocol {self._board_proto} and"
+            print(f"[bridge] the board speaks"
+                  f" {_proto_for_log(self._board_proto)} and"
                   f" this app speaks {PROTO_VERSION} -- update the app on this"
                   " computer; firmware updates are held until you do",
                   file=sys.stderr)
@@ -239,7 +423,8 @@ class Bridge:
         # not a good enough basis for the one operation that can leave a
         # customer holding a device that does not start.
         if self._board_ahead():
-            print(f"[bridge] ota: board speaks protocol {self._board_proto},"
+            print(f"[bridge] ota: board speaks"
+                  f" {_proto_for_log(self._board_proto)},"
                   f" this app speaks {PROTO_VERSION} -- not offering an update",
                   file=sys.stderr)
             self._ota_reset()
@@ -264,7 +449,15 @@ class Bridge:
             # update row tells the truth.
             self._app_update = self._app_available(m)
             app = self._app_update[0] if self._app_update else None
-            print(f"[bridge] ota: board has {cur}, release has {have}"
+            # The board's version as the three numbers this daemon parsed out
+            # of it, never the string itself: `cur` is the raw ota_query
+            # field (or board.json's copy of an earlier one), and CLAUDE.md
+            # keeps serial-buffer values out of the log. Re-formatting the
+            # parsed integers keeps the one thing support needs from this
+            # line -- which firmware the desk runs -- and nothing a board
+            # could put there that is not a version.
+            print(f"[bridge] ota: board has {_version_for_log(cur)},"
+                  f" release has {have}"
                   " -- nothing to do" + (f", app {app}" if app else ""),
                   file=sys.stderr)
             self._manifest = None
@@ -504,6 +697,184 @@ class Bridge:
         self._write(protocol.ota_begin(version))
         self._flash(blob, version)
 
+    # --- themes ---
+
+    def _board_can(self, cap):
+        caps = self._board_caps
+        if caps is None:
+            caps = self._board_caps_hint
+        return caps is not None and cap in caps
+
+    def _takes_theme(self):
+        return self._board_can(protocol.BOARD_CAP_THEME)
+
+    def _send_theme(self):
+        """The preview, cancel or save the files say is owed. Called on both
+        ticks; the fast one is what makes a preview follow the builder.
+
+        True when a save was written, which the board stores to flash: the
+        caller must then write nothing more this tick (THEME_SAVE_HOLD_S).
+        """
+        if self._theme is None:
+            return False
+        if (self._theme_quiet_until is not None
+                and self._now() < self._theme_quiet_until):
+            return False
+        try:
+            lines = self._theme.outgoing(deliver=self._takes_theme())
+        except Exception as e:
+            # A theme is never worth the serial loop. Only the reason is
+            # printed; theme.ThemeError's words never hold file contents.
+            print(f"[bridge] theme not sent: {e}", file=sys.stderr)
+            return False
+        stored = False
+        for m in lines:
+            self._write(m)
+            stored = stored or m.get("op") == "save"
+        if stored:
+            self._store_until = self._now() + THEME_SAVE_HOLD_S
+        return stored
+
+    def _store_wait(self):
+        """Seconds left of the hold after a save: never more than
+        THEME_SAVE_HOLD_S, whatever the clock does."""
+        if self._store_until is None:
+            return 0.0
+        return max(0.0, min(THEME_SAVE_HOLD_S, self._store_until - self._now()))
+
+    def _on_theme_edit(self):
+        """Settings > Theme > "Edit on computer" on the board.
+
+        Every tap is answered, because the board counts down 5 s to its own
+        "Run blink theme" fallback each time. The Launcher decides whether a
+        tap opens a new tab; its rate limit outlives a reconnect, which one
+        kept here would not.
+        """
+        opener = self._open_builder
+        answers = self._edit_answers
+        if not self._takes_theme():
+            # A board that did not say it takes themes would be sent none
+            # (_send_theme), so a builder opened for it could save nothing
+            # the panel ever shows. ok 0 puts "Run blink theme" on the board
+            # instead of "Opened on your computer" (Addendum 3). No firmware
+            # without the cap has the button; this is for one that does and
+            # lost its hello, until its next pref says otherwise.
+            answers.put(False)
+            self.pump()
+            return
+
+        def work():
+            ok = False
+            if opener is not None:
+                try:
+                    ok = bool(opener())
+                except Exception as e:
+                    print(f"[bridge] theme builder did not open: {e}",
+                          file=sys.stderr)
+            if not ok:
+                print("[bridge] theme builder: no browser to open here; the"
+                      " board says to run blink theme", file=sys.stderr)
+            answers.put(ok)
+        self._run_async(work)
+        self.pump()
+
+    def pump(self):
+        """Write any theme_edit answers that are ready. Called by the daemon
+        on every pass of its serial loop, so an answer goes out within one
+        read timeout of the browser opening -- well inside the board's 5 s."""
+        while True:
+            try:
+                ok = self._edit_answers.get_nowait()
+            except queue.Empty:
+                break
+            self._write(protocol.theme_edit_reply(ok))
+        # After any answer, so a board that asked again as the old builder
+        # ended hears "ok" for the new one before "done" for the old: its
+        # done is ignored while an ask is in flight, never the other way.
+        # The board's cap first, so a done for a board not yet heard from
+        # (a fresh connection before its hello) waits for it rather than
+        # being used up on nobody (review r2, NICE 3); and only to firmware
+        # that says it handles the line.
+        ended = self._builder_ended
+        if (ended is not None
+                and self._board_can(protocol.BOARD_CAP_EDIT_DONE)
+                and ended()):
+            self._write(protocol.theme_edit_done())
+            # One line, for windows-check 10c, which times the board's slot
+            # coming back against it. Says that it was sent, never anything
+            # read off the wire.
+            print("[theme] the builder ended; told the board",
+                  file=sys.stderr)
+        self._restate_edit()
+
+    def _edit_after_silence(self):
+        """On every ping, before it is counted: if the board was silent long
+        enough to have declared HOST LOST, it has let go of "Edit on
+        computer", so the next pump() says at once whether the builder is
+        still open (_restate_edit).
+
+        The silence is measured in wall time, not in self._now. That is
+        time.monotonic, which on macOS (mach_absolute_time) and Linux stops
+        while the computer sleeps -- 93.7 h of it against 193.6 h since
+        boot, measured on the desk Mac (review of fp/edit-held r2,
+        SHOULD-1; status_page.py moved to wall time for the same reason).
+        Across the owner's lunch the monotonic gap was the few awake seconds
+        either side, nothing was said until the next minute came round, and
+        for up to 60 s the slot read "Edit on computer" over the open
+        builder. Wall time sees that and a serial loop that stalled while
+        the computer stayed awake alike. A wall clock that steps back counts
+        as a silence too: it costs one 37-byte line, never a missed one."""
+        wall = self._wall()[0]
+        last, self._last_ping_wall = self._last_ping_wall, wall
+        if last is None:
+            return                       # the first ping: greet() just said
+        gap = wall - last
+        if gap > LIVENESS_WINDOW_S or gap < 0:
+            self._edit_said_at = None
+
+    def _restate_edit(self):
+        """protocol.edit_state, every EDIT_STATE_EVERY_S and at once when the
+        board is heard again after a silence (_edit_after_silence), so a
+        board that freed its hold on HOST LOST holds again when the same
+        connection wakes, and a hold over a builder that has gone lasts one
+        restatement at most. From pump(), after the answers and the done, so
+        a done is never contradicted by a state written before it. It can
+        say a builder is open just before that builder's ok reaches the
+        board -- launch() records the builder before work() queues the
+        answer -- which is harmless: the board holds on either line.
+
+        Never waits: Launcher.editing() answers None while launch() holds its
+        lock, and this tries again on the next pass. Only to a board that is
+        alive and lists BOARD_CAP_EDIT_DONE.
+
+        Not behind a theme save: fp/daemon-fixes holds every write for
+        THEME_SAVE_HOLD_S after one, because the board's flash erase masks
+        its UART, and exposes how long is left as self._store_wait(). Where
+        that exists this waits it out like the rest and is said on a later
+        pass; on a branch without it the lookup finds nothing and costs
+        nothing."""
+        state = self._builder_open
+        if (state is None or not self.board_alive()
+                or not self._board_can(protocol.BOARD_CAP_EDIT_DONE)):
+            return
+        store_wait = getattr(self, "_store_wait", None)
+        if store_wait is not None and store_wait() > 0:
+            return
+        now = self._now()
+        if (self._edit_said_at is not None
+                and now - self._edit_said_at < protocol.EDIT_STATE_EVERY_S):
+            return
+        try:
+            editing = state()
+        except Exception as e:
+            print(f"[bridge] builder state unknown: {e}", file=sys.stderr)
+            self._edit_said_at = now     # once a minute, not every pass
+            return
+        if editing is None:
+            return                       # a launch in progress; next pass
+        self._write(protocol.edit_state(editing))
+        self._edit_said_at = now
+
     def board_alive(self) -> bool:
         return (self._last_ping is not None
                 and self._now() - self._last_ping <= LIVENESS_WINDOW_S)
@@ -529,10 +900,33 @@ class Bridge:
     # cache, which that app refreshes every 5-15 minutes, so the arcs move no
     # sooner than they ever did. This is about state, not numbers.
     def poll_once(self):
+        # A heartbeat is not skipped for a save in flight, as the fast tick
+        # is: it waits out what is left of the hold, once, at most
+        # THEME_SAVE_HOLD_S. The theme goes LAST in a tick, so that the one
+        # tick that writes a save writes nothing behind it.
+        wait = self._store_wait()
+        if wait > 0:
+            self._sleep(wait)
+        self._store_until = None
+        self._heartbeat()
+        self._send_theme()
+
+    def _heartbeat(self):
         # Time rides along with every heartbeat so the board's clock re-anchors
         # at the same cadence as the data.
         epoch, off = self._wall()
         self._write(protocol.time_msg(epoch, off))
+
+        # The status level is re-stated with every heartbeat, and FIRST, so
+        # that nothing below can skip it. svc goes out on change, and the
+        # board drops a non-ok level it has not heard for 150 s (see
+        # protocol.svc) -- so this is both the repair for a line that was
+        # lost and the renewal that keeps a real incident up. It used to
+        # ride on the usage path, and a provider the bus had quarantined
+        # (usage None) left the last incident standing for as long as the
+        # quarantine lasted. Pages are the last ones usage named.
+        self._last_svc = {}
+        self._send_svc_if_changed()
 
         try:
             usage = self._read_usage()
@@ -576,8 +970,9 @@ class Bridge:
         0.0004 s; a poll costs a stat per file plus a fresh parse of whatever
         Chromium actually rewrote -- ordinarily just the small .log.
 
-        Writing was never free either: the fully-loaded usage line runs to 509
-        of the 512 bytes the firmware will accept, and putting one on the wire
+        Writing was never free either: the fully-loaded usage line runs to 454
+        of the 512 bytes the firmware will accept (tests/pc/test_protocol.py
+        holds the figure), and putting one on the wire
         every two seconds when nothing changed is thirty times the traffic
         carrying no news.
 
@@ -587,11 +982,24 @@ class Bridge:
         a minute into thirty; poll_once already reports both at a cadence a
         person can actually read.
         """
+        # Inside the hold after a save, nothing is written: the next tick, two
+        # seconds on, finds the same news still owed.
+        if self._store_wait() > 0:
+            return
+        # First, and before any return below: a preview is somebody watching
+        # the board while they drag a colour, and it must not wait on usage.
+        # A save ends the tick instead (THEME_SAVE_HOLD_S): usage is still
+        # owed, since _last_pushed has not moved, and goes on the next one.
+        if self._send_theme():
+            return
         try:
             usage = self._read_usage()
         except Exception:
-            return
+            usage = None
         if usage is None:
+            # Nothing to say about usage, but the status pages still have
+            # their own news, and want() still has to be renewed.
+            self._send_svc_if_changed()
             return
         if protocol.meaningful_usage(usage) != self._last_pushed:
             self._send_usage(usage)
@@ -612,6 +1020,9 @@ class Bridge:
         # line to carry it would spend the budget this comparison exists to
         # protect.
         self._send_session_if_changed()
+        # And the status level, which changes on the watch's own thread and
+        # would otherwise wait for the next usage change to be noticed.
+        self._send_svc_if_changed()
 
     def _read_usage(self):
         """The usage message as it would go out right now, or None if there is
@@ -637,6 +1048,27 @@ class Bridge:
         self._last_pushed = protocol.meaningful_usage(usage)
 
         self._send_session_if_changed()
+
+        # Which pages the board has is read off the line it was just sent:
+        # `provider` is the outer ring and `p2`, when present, the inner one
+        # and the second page. That is the only place the daemon knows it,
+        # and it is what keeps a Claude-only desk from ever asking
+        # status.openai.com anything.
+        #
+        # When that pair changes -- the second page drops out or comes back,
+        # or the owner swaps which provider is main -- everything sent so far
+        # is forgotten and each page is told again. The board does not keep a
+        # page's status while the page is gone, so "it was told an hour ago"
+        # is not something it still knows.
+        pair = (usage.get("provider"), usage.get("p2") or None)
+        if pair != self._svc_pair:
+            self._svc_pair = pair
+            self._last_svc = {}
+            # A provider with no status page (OpenCode) gets no message,
+            # rather than an "ok" that would claim somebody had checked.
+            self._svc_pages = tuple(p for p in status_page.PAGES
+                                    if p in pair)
+        self._send_svc_if_changed()
 
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
@@ -668,3 +1100,26 @@ class Bridge:
         if pair != self._last_session:
             self._write(protocol.session(*pair))
             self._last_session = pair
+
+    def _send_svc_if_changed(self):
+        """Put each page's status-page level on the wire, on change only.
+
+        Tells the watch which pages to fetch, then sends what it has for each.
+        The watch is never asked to fetch here -- this runs on the serial
+        loop, and the network belongs to the watch's own thread.
+        """
+        if self._svc is None:
+            return
+        # A board that has not listed "svc" drops it unread. Nothing is sent
+        # to it, and want() is not renewed either, so no vendor is asked on
+        # behalf of a board that could not show the answer.
+        if not self._board_can(protocol.BOARD_CAP_SVC):
+            return
+        # Renewed on every call: a want() runs out (status_page.WANT_TTL_S),
+        # and this is the call that stops being made when the board does.
+        self._svc.want(self._svc_pages)
+        for p in self._svc_pages:
+            cur = tuple(self._svc.shown(p))
+            if self._last_svc.get(p) != cur:
+                self._write(protocol.svc(p, *cur))
+                self._last_svc[p] = cur

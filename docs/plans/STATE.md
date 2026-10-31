@@ -766,10 +766,16 @@ owner's PC is. It asks `tasklist` for the recorded pid instead.
   boundary. `>` to `>=` survives because **nothing encodes a line of exactly
   512 bytes.** The one-byte margin that causes a silent panel freeze is
   defended by a comparison untested at the only value that matters.
+  **Done 2026-10-25** (the guard is now `protocol.py:87`): `tests/pc/test_protocol.py` sends a line of exactly 512
+  bytes and refuses 513, in ASCII and in UTF-8, and reads `LINE_MAX`, `line[]`
+  and drain_rx's store condition from proto.c. The `>=` mutant fails it.
+  The tests were written after gapietro's fork wrote tests for these survivors.
 - **`bridge.py:369`** — the OTA size-mismatch guard is unfalsifiable: delete it
   and everything stays green, because the one test reaching it uses a blob that
   ALSO fails its checksum and asserts only the message type. **Slot 0 has no
-  auto-revert.**
+  auto-revert.** **Done 2026-10-25** (the guard is now `bridge.py:473`): both size tests in `tests/pc/test_ota.py`
+  (blob shorter, blob longer) use a blob whose hash matches, and they assert
+  "size mismatch". Deleting the guard fails them.
 - **`fmt.c`** — four buffer-bound guards, all correct, none tested; loosening
   any by one byte writes past the caller's buffer unnoticed.
 - **`usage_state.c`** — three of four arms of the state aggregation are

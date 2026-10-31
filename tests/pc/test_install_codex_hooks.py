@@ -1,10 +1,10 @@
 """Registering Blink's shim with Codex, and never damaging its config.
 
 Nothing here may touch a real ~/.codex or a real ~/.blink. tests/conftest.py
-redirects HOME and USERPROFILE at every test, which covers the marker file;
-CODEX_HOME is an environment variable that fixture knows nothing about, so it
-is cleared below -- on a machine that sets it, codex_home() would otherwise
-resolve to the owner's live install.
+redirects HOME and USERPROFILE at every test, which covers the marker file,
+and clears CODEX_HOME, which on a machine that sets it would otherwise make
+codex_home() resolve to the owner's live install. This file used to clear it
+for itself; that moved to conftest so no other file can forget it.
 """
 import json
 import os
@@ -19,11 +19,6 @@ SHIM = "/home/k/.blink/blink-hook.sh"
 # "sh ...": on Windows it writes "bash <path>" (the reason is in
 # hook_command). Seven tests here spelled out the POSIX form and failed on
 # every Windows CI run from 2026-09-11 until a Windows VM reproduced it.
-
-
-@pytest.fixture(autouse=True)
-def _no_real_codex_home(monkeypatch):
-    monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
 def _events(data):

@@ -85,6 +85,124 @@ static int on_screen(struct box b)
 	((budget) >= (int)strlen(str) * CHAR_W_MIN && \
 	 (budget) <= (int)strlen(str) * CHAR_W_MAX)
 
+/*
+ * Does pixel (x, y) belong to Focus mode's big ring, drawn at its thickest?
+ *
+ * Integer arithmetic on squared distances, so no libm. The stroke is the
+ * annulus FOCUS_ARC_SZ / 2 wide by FOCUS_ARC_W_MAX, minus the open quarter at
+ * the bottom; both ends are rounded; and the ball rides anywhere on the
+ * stroke's centre line, GAUGE_BALL_PAD beyond the stroke on every side, so
+ * the whole annulus and both caps are grown by that much. Pessimistic on
+ * purpose: a theme with flat ends or no ball only draws less.
+ */
+static int on_focus_ring(int x, int y)
+{
+	const int r_out = FOCUS_ARC_SZ / 2 + GAUGE_BALL_PAD;
+	const int w = FOCUS_ARC_W_MAX;
+	const int r_in = FOCUS_ARC_SZ / 2 - w - GAUGE_BALL_PAD;
+	const int cap = w / 2 + GAUGE_BALL_PAD;
+	/* The caps' centres: on the stroke's centre line, 45 degrees down,
+	 * at (+-m, m) with m = r_mid / sqrt 2, rounded outwards. */
+	const int r_mid = FOCUS_ARC_SZ / 2 - w / 2;
+	const int m = (r_mid * 7072 + 9999) / 10000;
+	int dx = x - SCR_MID_X, dy = y - FOCUS_CY;
+	int d2 = dx * dx + dy * dy;
+	int adx = dx < 0 ? -dx : dx;
+	int in_gap = dy > 0 && adx < dy;
+
+	if (!in_gap && d2 >= r_in * r_in && d2 <= r_out * r_out) {
+		return 1;
+	}
+	for (int s = -1; s <= 1; s += 2) {
+		int cx = dx - s * m, cy = dy - m;
+
+		if (cx * cx + cy * cy <= cap * cap) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int clear_of_focus_ring(struct box b)
+{
+	for (int y = b.y0; y < b.y1; y++) {
+		for (int x = b.x0; x < b.x1; x++) {
+			if (on_focus_ring(x, y)) {
+				return 0;
+			}
+		}
+	}
+	return 1;
+}
+
+static void check_focus(void)
+{
+	/* Each text box at the width it actually draws, measured with
+	 * lv_text_get_size on host LVGL -- the hollow is round, so a budget
+	 * wider than the text would fail where the text itself does not. */
+	struct box pct = top_mid("focus figure", 0, FOCUS_PCT_Y, 103,
+				 FOCUS_PCT_FONT_H);
+	struct box name = top_mid("focus caption", 0, FOCUS_NAME_Y,
+				  FOCUS_NAME_W, FONT_LINE_H);
+	struct box cd = top_mid("focus countdown", 0, FOCUS_CD_Y, FOCUS_CD_W,
+				FONT_LINE_H);
+	struct box other = top_mid("focus other line", 0, FOCUS_OTHER_Y,
+				   FOCUS_OTHER_MAX_W, FONT_LINE_H);
+	struct box arc = top_mid("focus ring", 0, FOCUS_ARC_Y, FOCUS_ARC_SZ,
+				 FOCUS_ARC_SZ);
+	struct box pill = bottom_mid("provider pill", PILL_BOTTOM_OFF,
+				     PILL_MAX_W, PILL_H);
+	struct box status = top_mid("hint/clock row", 0, STATUS_Y,
+				    STATUS_MAX_W, FONT_LINE_H);
+	int ring_bottom = 0;
+
+	CHECK(FOCUS_ARC_W_MAX >= GAUGE_ARC_W && FOCUS_ARC_W_MAX == 22,
+	      "focus: clearances are taken at the thickest theme arc (22 px)");
+	CHECK(on_screen(arc) && on_screen(other),
+	      "focus: the ring and the other line are on the panel");
+	CHECK(status.y1 <= FOCUS_ARC_Y,
+	      "focus: the ring starts under the hint/clock row");
+	CHECK(FOCUS_PCT_MAX_W >= 103,
+	      "focus: the figure's box holds \"100%\" (103 px)");
+	CHECK(clear_of_focus_ring(pct),
+	      "focus: \"100%\" sits inside the thick ring's hollow");
+	CHECK(clear_of_focus_ring(name),
+	      "focus: the caption sits inside the thick ring's hollow");
+	CHECK(clear_of_focus_ring(cd),
+	      "focus: the countdown sits in the ring's open quarter");
+	CHECK(clear_of_focus_ring(other),
+	      "focus: the other window's line is clear of the ring");
+	CHECK(!overlaps(pct, name) && !overlaps(name, cd) &&
+	      !overlaps(cd, other),
+	      "focus: figure, caption, countdown and line do not touch");
+	/* Not overlapping is not enough: at 2 px the figure read as sitting
+	 * on the caption (audit, 2026-10-28). */
+	CHECK(name.y0 - pct.y1 >= 6,
+	      "focus: at least 6 px between the figure and its caption");
+	CHECK(FOCUS_OTHER_MAX_W >= FOCUS_OTHER_W_LONGEST,
+	      "focus: the line's box holds fmt_focus_line()'s longest");
+	CHECK(!overlaps(other, pill),
+	      "focus: the other line clears the provider pill");
+
+	/* Nothing of the ring reaches the line's row: the open quarter is
+	 * why the line can be as wide as it is. */
+	for (int y = 0; y < SCR_H; y++) {
+		for (int x = 0; x < SCR_W; x++) {
+			if (on_focus_ring(x, y) && y > ring_bottom) {
+				ring_bottom = y;
+			}
+		}
+	}
+	CHECK(ring_bottom < FOCUS_OTHER_Y,
+	      "focus: the lowest pixel of the ring is above the other line");
+	/* And the test can fail: a caption a few px lower than this lands on
+	 * the thick ring, so the sampler is not passing by accident. */
+	CHECK(!clear_of_focus_ring(top_mid("caption, too low", 0,
+					   FOCUS_NAME_Y + 12, FOCUS_NAME_W,
+					   FONT_LINE_H)),
+	      "focus: the ring sampler catches a caption pushed into the arc");
+}
+
 int main(void)
 {
 	/* The gauges. */
@@ -384,6 +502,8 @@ int main(void)
 	CHECK(!BUDGET_FITS(TOAST_MAX_W,
 			   "123456789012345678901234567 is waiting for you"),
 	      "a pathological label overruns the card, so it must ellipsize");
+
+	check_focus();
 
 	printf(failures ? "\n%d FAILED\n" : "\nall layout checks passed\n",
 	       failures);

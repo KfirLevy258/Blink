@@ -19,6 +19,7 @@ import sys
 import pytest
 
 from pc import cli, service_ctl
+from tests.support.home import inside
 
 
 class _RealCommandAttempted(BaseException):
@@ -44,7 +45,24 @@ class _Runs:
         # nothing makes every launchd path report "not running".
         self._running = running
 
+    _gone = False
+
     def __call__(self, argv, **kw):
+        # launchd forgets a job once a bootout it accepted has finished, and
+        # `print` then exits 113 until the next bootstrap. install() waits on
+        # exactly that before it bootstraps again (the old instance may be
+        # inside its stop grace), so the stand-in models it, without taking
+        # one of the exit codes a test queued for the commands it lists.
+        if len(argv) > 1 and argv[1] == "bootout":
+            self._gone = True
+        elif len(argv) > 1 and argv[1] == "bootstrap":
+            self._gone = False
+        elif len(argv) > 1 and argv[1] == "print" and self._gone:
+            self.calls.append(list(argv))
+            if hasattr(self, "kwargs"):
+                self.kwargs.append(kw)
+            return subprocess.CompletedProcess(argv, 113, stdout="",
+                                               stderr="")
         self.calls.append(list(argv))
         self.kwargs.append(kw)
         code = self._codes.pop(0) if self._codes else 0
@@ -131,13 +149,18 @@ def _write(path, text="x"):
         f.write(text)
 
 
-def _pretend_installed(monkeypatch):
-    """Put this machine's own service artifact in the sandbox HOME."""
+def _pretend_installed(home, monkeypatch):
+    """Put this machine's own service artifact in the sandbox HOME.
+
+    Only inside the caller's `home` (tests/support/home.py): from a script
+    with the real HOME this would overwrite the desk's own launchd plist or
+    systemd unit with a stub.
+    """
     if sys.platform == "darwin":
-        _write(cli.plist_path())
+        _write(inside(home, cli.plist_path()))
     elif sys.platform.startswith("linux"):
         monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
-        _write(cli.unit_path())
+        _write(inside(home, cli.unit_path()))
     # Windows keeps the state in the Scheduled Task, not in a file, so the
     # stubbed schtasks /query answering 0 is what "installed" means there.
 
@@ -238,9 +261,11 @@ def test_launchd_install_kickstarts_and_only_then_claims_it_is_running(
 
     # ...and then ASKS. A kickstart that returns zero is a request accepted,
     # not a process that exists, so the claim comes from launchctl print.
-    assert [c[1] for c in r.calls] == ["bootout", "bootstrap", "kickstart",
-                                       "print"]
-    assert r.ran("launchctl", "kickstart", "-k", "gui/501/com.blink.bridge")
+    # (The first print is the wait for the old instance to leave.)
+    assert [c[1] for c in r.calls] == ["bootout", "print", "bootstrap",
+                                       "kickstart", "print"]
+    assert r.ran("launchctl", "kickstart", "gui/501/com.blink.bridge")
+    assert not r.ran("kickstart", "-k")
     # The v1.2.1 rule reaches the new call site too: nothing Blink starts may
     # flash a console window. NO_WINDOW is empty off Windows, so a sentinel is
     # what actually pins a call site that dropped the spread.
@@ -267,7 +292,7 @@ def test_launchd_install_does_not_claim_running_when_the_kickstart_fails(
     assert "running (launchd)" != msg
     assert "not running" in msg
     # And a command someone can paste.
-    assert "launchctl kickstart -k gui/501/com.blink.bridge" in msg
+    assert "launchctl kickstart gui/501/com.blink.bridge" in msg
 
 
 def test_launchd_install_does_not_kickstart_a_bootstrap_that_never_took(
@@ -439,6 +464,7 @@ def test_a_launchd_job_that_was_not_loaded_counts_as_stopped(home, monkeypatch):
     probably still held", about a port nothing is holding.
     """
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     _platform(monkeypatch, "darwin")
     _write(cli.plist_path())
     out = service_ctl.stop_service(runner=_Runs(codes=[3]))
@@ -526,7 +552,8 @@ def test_a_skipped_stop_cannot_be_read_as_a_done_one(home, monkeypatch):
     """
     skipped = service_ctl.stop_service(runner=_Runs())
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
+    _pretend_installed(home, monkeypatch)
     done = service_ctl.stop_service(runner=_Runs())
     assert skipped.skipped and not done.skipped
     assert str(skipped) != str(done)
@@ -534,7 +561,8 @@ def test_a_skipped_stop_cannot_be_read_as_a_done_one(home, monkeypatch):
 
 def test_the_outcome_still_reads_as_the_line_it_replaced(home, monkeypatch):
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
+    _pretend_installed(home, monkeypatch)
     out = service_ctl.stop_service(runner=_Runs())
     assert str(out) == out.detail and isinstance(out.detail, str)
 
@@ -542,6 +570,7 @@ def test_the_outcome_still_reads_as_the_line_it_replaced(home, monkeypatch):
 def test_ok_tracks_what_the_backend_actually_did(home, monkeypatch, killer):
     """Pins service_ctl._WORKED to the phrases the backends really return."""
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     _platform(monkeypatch, "darwin")
     assert service_ctl.stop_service(runner=_Runs()).ok          # not installed
     _write(cli.plist_path())
@@ -572,6 +601,7 @@ def test_a_runner_less_call_uses_the_runner_the_suite_stubbed(home, monkeypatch)
     binding time is the part that bites, so that is the part pinned here.
     """
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     stub = _Runs()
     monkeypatch.setattr(cli.subprocess, "run", stub)
     b = _RecordingBackend()
@@ -584,7 +614,8 @@ def test_a_runner_less_call_uses_the_runner_the_suite_stubbed(home, monkeypatch)
 
 def test_stop_and_start_drive_this_machine_platform(home, monkeypatch):
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
+    _pretend_installed(home, monkeypatch)
     r = _Runs()
     service_ctl.stop_service(runner=r)
     service_ctl.start_service(runner=r)
@@ -600,7 +631,8 @@ def test_stop_and_start_drive_this_machine_platform(home, monkeypatch):
 
 def test_a_failing_command_is_reported_not_raised(home, monkeypatch):
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
+    _pretend_installed(home, monkeypatch)
     # The command that has to FAIL is the stop itself, and on Windows that is
     # the second call: schtasks /query decides whether anything is installed,
     # and a /query that fails means "not installed", which stop() answers
@@ -623,6 +655,7 @@ def test_a_backend_that_does_not_answer_in_prose_is_reported_not_raised(
     service and no explanation.
     """
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
 
     class _Terse:
         def stop(self, runner=None):
@@ -641,7 +674,8 @@ def test_a_missing_tool_is_reported_not_raised(home, monkeypatch):
     """The fleet agent calls start_service from a finally block: an exception
     raised there would replace the real test failure with this one."""
     monkeypatch.delenv("BLINK_SKIP_SERVICE")
-    _pretend_installed(monkeypatch)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
+    _pretend_installed(home, monkeypatch)
 
     def _absent(argv, **kw):
         raise FileNotFoundError(2, "No such file or directory", argv[0])
@@ -649,3 +683,124 @@ def test_a_missing_tool_is_reported_not_raised(home, monkeypatch):
     for out in (service_ctl.stop_service(runner=_absent),
                 service_ctl.start_service(runner=_absent)):
         assert out.ok is False and isinstance(out.detail, str)
+
+
+class _Lingering(_Runs):
+    """launchd still answering `print` for the old job for `polls` asks
+    after its bootout, as it does while a daemon inside a firmware write
+    holds its SIGTERM (measured with a throwaway agent, 2026-10-28)."""
+
+    def __init__(self, polls, **kw):
+        super().__init__(**kw)
+        self.polls = polls
+
+    def __call__(self, argv, **kw):
+        if (len(argv) > 1 and argv[1] == "print" and self._gone
+                and self.polls > 0):
+            self.polls -= 1
+            self.calls.append(list(argv))
+            self.kwargs.append(kw)
+            return subprocess.CompletedProcess(argv, 0, stdout="state = running",
+                                               stderr="")
+        return super().__call__(argv, **kw)
+
+
+def test_launchd_install_waits_for_the_old_instance_to_leave(
+        home, monkeypatch):
+    """A reinstall during an OTA write: the old instance holds its stop for
+    up to STOP_GRACE_S. bootstrap only once launchd has let it go, and never
+    with -k, which would kill whatever is running (review of fp/fix-tools,
+    NICE 3)."""
+    _platform(monkeypatch, "darwin")
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    r = _Lingering(polls=200)
+    monkeypatch.setattr(cli.subprocess, "run", r)
+
+    assert cli._LaunchdBackend().install() == "running (launchd)"
+    verbs = [c[1] for c in r.calls]
+    first_boot = verbs.index("bootstrap")
+    assert verbs[:first_boot].count("print") == 201
+    assert verbs.count("bootstrap") == 1
+    assert not r.ran("kickstart", "-k")
+
+
+def test_launchd_install_leaves_an_instance_that_never_leaves(
+        home, monkeypatch):
+    _platform(monkeypatch, "darwin")
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    r = _Lingering(polls=10 ** 6)
+    monkeypatch.setattr(cli.subprocess, "run", r)
+
+    msg = cli._LaunchdBackend().install()
+    assert "still stopping" in msg
+    assert "launchctl bootstrap gui/501" in msg
+    assert "launchctl kickstart gui/501/com.blink.bridge" in msg
+    assert not r.ran("bootstrap") and not r.ran("kickstart")
+    assert [c[1] for c in r.calls].count("print") == (cli.STOP_GRACE_S + 10) * 4
+
+
+class _Refused(_Runs):
+    """bootout exits `code` and leaves the job in `state`: launchd's own
+    answer, which install() reads instead of the code alone."""
+
+    def __init__(self, code, state, **kw):
+        super().__init__(codes=[code], **kw)
+        self.state = state
+        self.asked = 0
+
+    def __call__(self, argv, **kw):
+        if len(argv) > 1 and argv[1] == "bootout":
+            self.calls.append(list(argv))
+            self.kwargs.append(kw)
+            return subprocess.CompletedProcess(argv, self._codes.pop(0),
+                                               stdout="", stderr="")
+        if len(argv) > 1 and argv[1] == "bootstrap":
+            # The new job: from here launchd answers for it, not the old.
+            self.state = None
+        if (len(argv) > 1 and argv[1] == "print" and self.state
+                and not self._gone):
+            self.calls.append(list(argv))
+            self.kwargs.append(kw)
+            out = f"\tstate = {self.state}\n"
+            # A stop under way finishes after one more look.
+            if self.state != "running":
+                self.asked += 1
+                if self.asked > 1:
+                    self._gone = True
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+        return super().__call__(argv, **kw)
+
+
+def test_launchd_install_does_not_wait_after_a_refused_bootout(
+        home, monkeypatch):
+    """ESRCH (not loaded), or a refusal that leaves the job running: no old
+    instance is leaving, so there is nothing to wait for."""
+    _platform(monkeypatch, "darwin")
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    r = _Runs(codes=[3])
+    monkeypatch.setattr(cli.subprocess, "run", r)
+    cli._LaunchdBackend().install()
+    assert [c[1] for c in r.calls][:2] == ["bootout", "bootstrap"]
+
+    r = _Refused(5, "running")
+    monkeypatch.setattr(cli.subprocess, "run", r)
+    cli._LaunchdBackend().install()
+    # One look at launchd's state, then on: it is not leaving.
+    assert [c[1] for c in r.calls][:3] == ["bootout", "print", "bootstrap"]
+
+
+def test_launchd_install_waits_out_a_stop_an_older_macos_reports_as_a_code(
+        home, monkeypatch):
+    """An older macOS is reported to answer a stop under way with "36:
+    Operation now in progress". launchd's state says it is leaving
+    (SIGTERMed), so install waits for it like any other (re-review of
+    fp/fix-tools, SHOULD-2)."""
+    _platform(monkeypatch, "darwin")
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    r = _Refused(36, "SIGTERMed")
+    monkeypatch.setattr(cli.subprocess, "run", r)
+    assert cli._LaunchdBackend().install() == "running (launchd)"
+    verbs = [c[1] for c in r.calls]
+    assert verbs.index("bootstrap") > 2
+    assert verbs[:verbs.index("bootstrap")].count("print") >= 2
+    assert not r.ran("kickstart", "-k")

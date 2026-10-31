@@ -4,16 +4,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Sync the wall clock over SNTP. TLS certificate validation needs a correct
- * time, so this must succeed before the first HTTPS request. Returns 0 on
- * success. */
-int net_time_sync(int timeout_s);
-
 bool net_time_valid(void);
 
-/* Set the wall clock from a host-supplied epoch (USB mode: the PC sends a
- * `time` message, since SNTP is unreachable without WiFi). Same anchoring as
- * SNTP: epoch is pinned to the current uptime. */
+/* Take the wall clock from the daemon's `time` message, the only clock
+ * source this board has. The given epoch is tied to the uptime at the call,
+ * and later readings count forward from there. */
 void net_time_set_manual(int64_t unix_s);
 
 /* Local timezone, minutes east of UTC (e.g. UTC+3 = 180, UTC-5 = -300). */

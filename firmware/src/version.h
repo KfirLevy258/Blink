@@ -9,7 +9,7 @@
  * firmware/src, so a bump made early and then followed by more firmware work
  * fails the gate at the worst moment -- and the only honest way out is another
  * edit here. Bumping early feels tidy and buys nothing. */
-#define BLINK_FW_VERSION "1.3.4"
+#define BLINK_FW_VERSION "1.4.0"
 
 /* The wire protocol spoken over USB, and the daemon's own PROTO_VERSION in
  * pc/version.py. It is a floor, not a format selector: the protocol only ever

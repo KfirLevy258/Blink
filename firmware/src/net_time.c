@@ -1,15 +1,14 @@
 /*
- * SNTP wall-clock sync + ISO-8601 -> seconds-remaining.
+ * Wall-clock time on the board. The daemon's `time` message carries a Unix
+ * epoch, which is pinned to k_uptime here; the local UTC offset rides along
+ * with it, and ISO-8601 reset stamps are turned into seconds left.
  *
- * Two jobs, both needed only in standalone WiFi mode: give mbedTLS a real time
- * so certificate validity checks pass, and let the board turn the API's
- * absolute resets_at timestamps into live countdowns itself (over USB the PC
- * does this instead).
+ * The "net" in the name dates from the standalone WiFi mode, which set this
+ * clock over SNTP so mbedTLS could check certificate dates and the board
+ * could count down to the API's resets_at on its own. The mode was deleted
+ * on 2026-10-27; the name stayed, since a rename would only churn includes.
  */
 #include <zephyr/kernel.h>
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-#include <zephyr/net/sntp.h>
-#endif
 #include <zephyr/sys/timeutil.h>
 #include <zephyr/sys/printk.h>
 #include <string.h>
@@ -37,47 +36,14 @@ static int64_t sync_unix_s;
 static bool have_offset;
 static int32_t offset_min;
 
-/* The standalone net worker syncs/adjusts time while the UI thread reads the
- * clock every second. The base is a 64-bit pair -- not atomic on this core --
- * so reads and writes go through a spinlock (held for nanoseconds). */
+/* sync_uptime_ms and sync_unix_s are 64-bit each, and the Xtensa LX6 stores
+ * 32 bits at a time, so a reader on another thread could see half of an
+ * update. That other thread was the WiFi mode's SNTP worker, removed
+ * 2026-10-27. Today the daemon's `time` message is parsed in proto_service()
+ * and the clock read by the 1 s tick, both on the main loop, so the lock is
+ * not contended; it stays because it costs nanoseconds and keeps a future
+ * second caller safe without anyone having to remember this. */
 static struct k_spinlock time_lock;
-
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* The only part of this file that needs a network. The rest -- set_manual,
- * set_offset, local, secs_until -- is arithmetic on a clock the daemon sets
- * over USB, and is what a tethered board actually uses. */
-int net_time_sync(int timeout_s)
-{
-	struct sntp_time t;
-	const char *servers[] = { "pool.ntp.org", "time.google.com", "time.cloudflare.com" };
-
-	for (int i = 0; i < 3; i++) {
-		int rc = sntp_simple(servers[i], timeout_s * 1000, &t);
-
-		if (rc == 0 && !time_sane((int64_t)t.seconds)) {
-			/* A "successful" sync outside the sane window is
-			 * worse than none: TLS would then trust certificates
-			 * against a lie. Try the next server. */
-			printk("[time] %s answered insane time %lld; rejected\n",
-			       servers[i], (long long)t.seconds);
-			rc = -EINVAL;
-		}
-		if (rc == 0) {
-			k_spinlock_key_t key = k_spin_lock(&time_lock);
-
-			sync_unix_s = (int64_t)t.seconds;
-			sync_uptime_ms = k_uptime_get();
-			have_time = true;
-			k_spin_unlock(&time_lock, key);
-			printk("[time] synced via %s (unix %lld)\n", servers[i],
-			       (long long)sync_unix_s);
-			return 0;
-		}
-		printk("[time] %s failed: %d\n", servers[i], rc);
-	}
-	return -ETIMEDOUT;
-}
-#endif /* CONFIG_BLINK_WIFI_MODE */
 
 bool net_time_valid(void)
 {

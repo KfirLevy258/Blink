@@ -16,9 +16,14 @@
 #include "usage_view.h"
 #include "usage_state.h"
 #include "usage_freshness.h"
+#include "svc_state.h"
 #include "net_time.h"
 #include "version.h"
 #include "cfg_store.h"
+#include "theme.h"
+#include "ui_theme.h"
+#include "ui_settings.h"
+#include "touch_inject.h"
 
 #define PROTO_VERSION BLINK_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
@@ -31,7 +36,36 @@
  * has not said goodbye is taken to be asleep -- see proto_host_lost(). */
 #define HOST_TIMEOUT_MS 30000
 #define LINE_MAX 512
-#define RX_RING_SIZE 1024
+/*
+ * Sized to the largest thing the daemon sends without waiting for an answer,
+ * not to a line. That is its reply to a hello: welcome, a waiting ota_error,
+ * time, svc for both pages, usage, session and an update offer, back to back.
+ * tests/pc/test_hello_burst.py builds it through the real Bridge at its
+ * widest -- the usage line counted at its 512-byte cap -- and measures 1266
+ * bytes. The daemon review's figure was about 1095. Either is over 1024.
+ *
+ * Whether the old ring overflowed is a race and not a certainty: at 115200
+ * baud a byte lands every 87 us, so 1024 bytes is 89 ms of line, and the
+ * ring only fills if the main loop stops draining for that long while the
+ * burst is in flight -- and the burst is timed to find the one moment it
+ * plausibly does. The second boot hello goes out from main.c just before
+ * run_usb(); the reply's usage line makes the next lv_timer_handler() paint
+ * the first full gauge frame, and the rest of the burst arrives behind it.
+ * Nobody has timed that frame on a board. Whatever arrives while the ring is
+ * full the ISR drops, which at the tail of this burst is the update offer the
+ * Settings row is waiting on -- and if its newline goes too, the next line
+ * is glued onto what is left of it and lost as well.
+ *
+ * Draining harder was the alternative, and it has no single place to go: the
+ * stalls are frame renders inside LVGL, a TLS handshake, the boot clip. A
+ * ring that holds the whole burst makes the length of any stall irrelevant to
+ * it, up to the daemon's next fast poll two seconds later: the burst is
+ * finite, and nothing but a pong follows it. 2048 holds the measured worst
+ * case with 782 bytes over, and costs exactly the 1 KB it adds: the ring
+ * links into dram1_0_seg, which went from 54532 to 55556 of 98304 bytes
+ * between the develop build and this one (2026-10-27), 42 KB still free.
+ */
+#define RX_RING_SIZE 2048
 
 static const struct device *const console_dev =
 	DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
@@ -80,6 +114,9 @@ static bool host_bye;		/* the app said it is going, on purpose */
 static bool host_lost;		/* silence past the timeout, without a bye */
 static char host_ver[16];	/* the daemon's release version, from welcome */
 static int host_proto;		/* ...and the protocol it speaks */
+/* The last welcome listed "theme" in its caps: the daemon can open the theme
+ * builder, so Settings may offer "Edit on computer". */
+static bool host_can_theme;
 
 /*
  * RX is interrupt-driven, not polled. On a real UART at 115200 baud the 128-byte
@@ -118,42 +155,159 @@ static void emit(const char *json)
 	printk("%s\n", json);
 }
 
+/*
+ * What this board can show, on every hello and every pref (theme contract,
+ * Addendum 3). The daemon sends svc lines only to a board that lists "svc",
+ * and theme lines -- and an ok:1 to theme_edit -- only to one that lists
+ * "theme". It used to decide by version, fw >= 1.4.0, while this firmware
+ * was still numbered 1.3.4: a board built from it was sent neither, and a
+ * release bumped to anything short of 1.4.0 would have shipped both features
+ * dead (final review, 2026-10-27). A build says what it contains; a number
+ * only implies it.
+ *
+ * On pref as well as hello because hello goes out at boot and nowhere else,
+ * and pref is this board's answer to a welcome: a daemon that restarts
+ * under a running board hears no hello, only the pref. Older daemons read
+ * neither field. Append-only, like THEME_IDS.
+ */
+/* edit_done: this firmware handles theme_edit done:1 (theme contract
+ * Addendum 6). A cap of its own because the 1.4.0 builds before the handler
+ * already said "theme", and the daemon must not send them the line. */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\"]"
+
+/*
+ * The board's id, as hello and pref both say it: hwinfo's device id in hex,
+ * 12 digits on this ESP32 (its 6-byte MAC), 32 at most, "unknown" if the
+ * driver has none. Kept once read, since it cannot change while the board
+ * runs -- but only a real id is kept. "unknown" is asked again next time,
+ * so a read that failed once does not name the board "unknown" until the
+ * next reboot. The ESP32's eFuse MAC read cannot fail that way; another
+ * board's driver might.
+ */
+static const char *board_id_hex(void)
+{
+	static char idhex[33];
+
+	if (idhex[0] == '\0') {
+		uint8_t id[16];
+		ssize_t n = hwinfo_get_device_id(id, sizeof(id));
+
+		if (n <= 0) {
+			return "unknown";
+		}
+		for (ssize_t i = 0; i < n && i < 16; i++) {
+			snprintf(idhex + i * 2, 3, "%02x", id[i]);
+		}
+	}
+	return idhex;
+}
+
 void proto_send_pref(void)
 {
-	char buf[64];
+	/*
+	 * The board's id rides on every pref, not only on hello (theme
+	 * contract, Addendum 5). hello goes out at boot and nowhere else, so a
+	 * daemon that restarts under a running board heard only this pref and
+	 * had nothing but board.json's memory to say which board it was --
+	 * and a remembered id must never decide whose theme wins.
+	 *
+	 * 119 bytes at its widest ("claude", a 32-digit id and the three
+	 * caps; 99 with this board's 12 digits), measured by
+	 * tests/pc/test_board_caps.py, which fails if it outgrows this. It was
+	 * 96 B for the 61 B line before the id, and 107 before edit_done.
+	 * With the NUL that leaves 8 B of the 128. A cap costs its name's
+	 * length plus 3 B (the comma and two quotes), so a name of five
+	 * characters or fewer still fits and a longer one needs this buffer
+	 * made bigger first. Both stay far under the daemon's 512.
+	 */
+	char buf[128];
 
 	snprintf(buf, sizeof(buf),
-		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\"}",
+		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\","
+		 "\"board_id\":\"%s\"," BOARD_CAPS "}",
 		 PROTO_VERSION,
-		 cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "codex" : "claude");
+		 cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "codex" : "claude",
+		 board_id_hex());
 	emit(buf);
 }
 
 static void send_hello(void)
 {
-	uint8_t id[16];
-	char idhex[33] = "unknown";
-	ssize_t n = hwinfo_get_device_id(id, sizeof(id));
-
-	if (n > 0) {
-		for (ssize_t i = 0; i < n && i < 16; i++) {
-			snprintf(idhex + i * 2, 3, "%02x", id[i]);
-		}
-	}
+	const char *idhex = board_id_hex();
 
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
+	/* 148 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.4.0", the three caps), measured by tests/pc/test_board_caps.py,
+	 * which fails if it outgrows this; a truncated hello is not JSON. With
+	 * the NUL, 11 B of the 160 are spare. A cap costs its name's length
+	 * plus 3 B and a two-digit minor in fw 1 B, and whatever is added has
+	 * to sum to 11 or less. */
 	char buf[160];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
 		 "\"board_id\":\"%s\",\"fw\":\"" BLINK_FW_VERSION "\","
-		 "\"reset\":\"0x%x\"}",
+		 "\"reset\":\"0x%x\"," BOARD_CAPS "}",
 		 PROTO_VERSION, idhex, cause);
 	emit(buf);
 	/* Straight after hello: a daemon that starts later, or restarts, has
 	 * no other way to learn a preference the user set while it was gone. */
 	proto_send_pref();
+	proto_send_theme_now("boot");
+}
+
+/*
+ * Which theme this board has stored. The daemon compares it with the theme
+ * the user saved on the computer (~/.blink/theme.json) and sends that one if
+ * they differ, and the builder opens on it. A preview is deliberately not
+ * reported: it is the builder's own state, and reporting it would make the
+ * daemon "restore" an unsaved preview as if it were the saved theme.
+ *
+ * `why` (contract Addendum 2): "boot" answering a hello or welcome, "user"
+ * when the owner chose on the board, "saved" after storing the PC's save.
+ * The daemon adopts the board's theme ONLY on "user". Without the reason, a
+ * board answering hello with its stored theme looked exactly like an owner
+ * choosing it, and the daemon overwrote the theme saved on the computer.
+ *
+ * A custom theme adds "h", which says WHICH custom theme -- see
+ * theme_custom_hash().
+ */
+void proto_send_theme_now(const char *why)
+{
+	char buf[80];
+	int id = ui_theme_stored_id();
+	struct theme_custom t;
+
+	if (id == THEME_CUSTOM && ui_theme_custom_stored(&t)) {
+		char h[9];
+
+		theme_custom_hash(&t, h);
+		snprintf(buf, sizeof(buf),
+			 "{\"t\":\"theme_now\",\"v\":%d,\"id\":%d,"
+			 "\"why\":\"%s\",\"h\":\"%s\"}",
+			 PROTO_VERSION, id, why, h);
+	} else {
+		snprintf(buf, sizeof(buf),
+			 "{\"t\":\"theme_now\",\"v\":%d,\"id\":%d,"
+			 "\"why\":\"%s\"}",
+			 PROTO_VERSION, id, why);
+	}
+	emit(buf);
+}
+
+void proto_send_theme_edit(void)
+{
+	char buf[40];
+
+	snprintf(buf, sizeof(buf), "{\"t\":\"theme_edit\",\"v\":%d}",
+		 PROTO_VERSION);
+	emit(buf);
+}
+
+bool proto_host_can_theme(void)
+{
+	return host_can_theme;
 }
 
 static void send_ping(void)
@@ -168,11 +322,11 @@ static void send_ping(void)
 /*
  * --- OTA while tethered ---
  *
- * USB-bridge mode has no network of its own: run_usb() never starts
- * net_worker, so ota.c's HTTPS updater is unreachable and the update row did
- * nothing here. The daemon has both an internet connection and the board's
- * USB serial link, so the split is: the board asks and approves, the daemon
- * fetches and writes.
+ * The board has no network of its own (the standalone WiFi mode, which
+ * did, was removed on 2026-10-27), so ota.c's HTTPS updater is
+ * unreachable and the update row used to do nothing here. The daemon has
+ * both an internet connection and the board's USB serial link, so the split
+ * is: the board asks and approves, the daemon fetches and writes.
  *
  * The board does NOT receive the image. An earlier revision pushed it down
  * this protocol in base64 chunks and it was hopeless -- 33% encoding overhead
@@ -278,9 +432,19 @@ static void dispatch(const char *json)
 		 */
 		printk("[proto] host says bye\n");
 		host_bye = true;
+		/* The daemon is going, and its builder with it (Launcher.close
+		 * in pc/theme_server.py). */
+		ui_settings_theme_edit_host_gone();
 		return;
 	}
 	host_bye = false;
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	/* Bench images only: the PC's finger, and its question about what
+	 * the panel shows (touch_inject.h). */
+	if (touch_inject_dispatch(type, json)) {
+		return;
+	}
+#endif
 	if (strcmp(type, "usage") == 0) {
 		double sp = 0, wp = 0;
 		/* Remaining seconds, not the absolute resets_at timestamps: the
@@ -544,6 +708,15 @@ static void dispatch(const char *json)
 			host_ver[0] = '\0';
 		}
 		host_proto = msg_get_double(json, "v", &hv) ? (int)hv : 0;
+		/* Every welcome decides it afresh: an app downgraded to one
+		 * without the builder must stop being offered as having one. */
+		host_can_theme = theme_caps_has(json, "theme");
+		/* And whether "Edit on computer" is held: this daemon's caps
+		 * say whether it reports a builder's end, and greet()'s
+		 * welcome whether one it opened for us is open right now --
+		 * the only way a board that rebooted, or was unplugged, while
+		 * one opened can know (edit_hold.h). */
+		ui_settings_theme_edit_welcome(json);
 		printk("[proto] host connected: app %s, protocol %d\n",
 		       host_ver[0] ? host_ver : "?", host_proto);
 		/*
@@ -572,6 +745,58 @@ static void dispatch(const char *json)
 		 * hello for the same reason.
 		 */
 		proto_send_pref();
+		/* And the theme, for the same reason as the preference: a
+		 * daemon that restarted without resetting the board heard
+		 * the hello that carried it in a previous life. */
+		proto_send_theme_now("boot");
+	} else if (strcmp(type, "theme") == 0) {
+		/*
+		 * Validated whole before anything is applied: a line with one
+		 * bad value is refused entire, and the board keeps the theme
+		 * it has (contract 2026-10-27). Nothing from the line is
+		 * logged -- only that it was refused.
+		 */
+		struct theme_msg m;
+
+		if (!theme_msg_parse(json, &m)) {
+			printk("[theme] line refused\n");
+			return;
+		}
+		/* A preview or save is the builder at work, which answers an
+		 * "Edit on computer" that is still waiting as well as an
+		 * explicit reply would, and keeps a held slot held. Not an
+		 * explicit ok: the builder may be one `blink theme` opened,
+		 * whose end the board is never told. */
+		if (m.op != THEME_OP_CANCEL) {
+			ui_settings_theme_edit_builder_seen();
+		}
+		ui_theme_wire(&m);
+	} else if (strcmp(type, "theme_edit") == 0) {
+		/* The daemon's answer to ours: ok 1 once a browser is open,
+		 * ok 0 when it has no display to open one on. Absent reads as
+		 * 0, the answer that tells the user what to do instead.
+		 * done 1 is the other line it sends (Addendum 6): the builder
+		 * it opened has ended, so the next tap must ask again. */
+		double ok = 0, done = 0;
+
+		msg_get_double(json, "done", &done);
+		if (done == 1) {
+			ui_settings_theme_edit_done();
+			return;
+		}
+		msg_get_double(json, "ok", &ok);
+		ui_settings_theme_edit_reply(ok == 1);
+	} else if (strcmp(type, "edit_state") == 0) {
+		/* The daemon restating whether the builder it opened for "Edit
+		 * on computer" is open (pc/protocol.edit_state): every 60 s,
+		 * and at once when it hears this board after a silence, so a
+		 * hold freed on HOST LOST comes back on a connection that never
+		 * closed. Absent reads as 0: a line that says nothing must not
+		 * keep a button away. */
+		double editing = 0;
+
+		msg_get_double(json, "editing", &editing);
+		ui_settings_theme_edit_state(editing == 1);
 	} else if (strcmp(type, "ota_avail") == 0) {
 		double sz = 0;
 
@@ -682,6 +907,27 @@ static void dispatch(const char *json)
 		msg_get_str(json, "label", lbl, sizeof(lbl));
 		num(json, "n", &n, 0, 9999);
 		usage_view_set_session(lbl, (int)n);
+	} else if (strcmp(type, "svc") == 0) {
+		/*
+		 * What the provider's public status page says. The contract is
+		 * pc/protocol.py svc(); the decisions -- which levels exist,
+		 * how long one stands without being re-stated, what the line
+		 * says -- are in svc_state.c, where a host test reaches them.
+		 *
+		 * `level` gets 16 bytes for a word of at most 8: msg_get_str
+		 * truncates rather than failing, and a newer daemon's
+		 * "majority" cut to the 5 bytes of a tighter buffer would read
+		 * as "major". At 16 nothing truncates to a word this firmware
+		 * knows. `what` is absent at ok, which leaves it "".
+		 */
+		char prov[12] = "", lvl[16] = "", what[SVC_WHAT_MAX + 4] = "";
+
+		if (msg_get_str(json, "provider", prov, sizeof(prov))) {
+			msg_get_str(json, "level", lvl, sizeof(lvl));
+			msg_get_str(json, "what", what, sizeof(what));
+			svc_note(prov, lvl, what, k_uptime_get());
+			usage_view_svc_changed();
+		}
 	}
 	/* unknown types ignored */
 }
@@ -734,6 +980,9 @@ void proto_init(void)
 		uart_irq_rx_enable(console_dev);
 	}
 
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	touch_inject_init();
+#endif
 	send_hello();
 	last_ping_ms = k_uptime_get();
 }
@@ -780,6 +1029,9 @@ bool proto_host_seen(void)
 void proto_service(void)
 {
 	drain_rx();
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	touch_inject_service();
+#endif
 	int64_t now = k_uptime_get();
 
 	if (now - last_ping_ms >= PING_INTERVAL_MS) {
@@ -798,6 +1050,7 @@ void proto_service(void)
 		host_seen = false;
 		host_lost = !host_bye;
 		host_bye = false;
+		ui_settings_theme_edit_host_gone();
 	}
 }
 

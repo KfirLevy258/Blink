@@ -1,0 +1,210 @@
+# Every on-board interaction, with nobody at the panel.
+#
+#   tools/board_touch.py script tools/bench/full_touch.txt
+#
+# Needs a CONFIG_BLINK_TOUCH_INJECT board on its gauges (tools/board_touch.py
+# has the setup). Each `tap NAME` checks the screen it leads to; `mem` prints
+# the [mem] lines the board has printed since the last one, and the summary
+# at the end has each screen's peak against the 32680 B pool.
+#
+# It changes three settings and puts two of them back: it ends on Focus off
+# and Theme Dark. Brightness is left at 60% (level 3).
+#
+# Before every target the tool wakes a dozing board and takes down any
+# notice, saying "notice dismissed (KIND)"; `expect notice none` checks
+# that nothing put one up.
+
+expect ui_state scr=gauges modal=none slp=0
+expect notice none
+
+# --- Settings, first time: the edge zone in, the back button out
+tap settings.open
+mem
+tap settings.back
+mem
+
+# --- second time: a swipe in, a swipe out
+tap settings.swipe
+mem
+tap back.swipe
+mem
+
+# --- the back swipe begun on a tile, the way a thumb starts it: the four
+# tiles cover most of Settings, so their gestures bubble to the panel and
+# close it. Once from the Focus tile's middle, once from Update's. A raw
+# swipe has no settle of its own, so each waits out the close's slide and
+# gesture mute (settings.back's 1.6 s) before the next open.
+tap settings.open
+swipe 84 160 244 160
+expect ui_state scr=gauges modal=none
+wait 2
+tap settings.open
+swipe 236 160 316 160
+expect ui_state scr=gauges modal=none
+wait 2
+expect notice none
+
+# --- a stroke that starts AND ends on the Update tile: LVGL still sends the
+# tile its CLICKED on release, and only tile_was_a_tap() keeps that from
+# starting a check -- or, with an update offered, raising the install
+# confirm. Left, so nothing closes. On the host harness a check puts up an
+# "ota" notice (touch/stubs.c), so this fails there without the guard; on a
+# board it would show as the tile reading "Checking...", which `expect`
+# cannot see, so there it only proves the dialog stayed down.
+tap settings.open
+swipe 300 160 180 160
+wait 1
+expect ui_state scr=settings ov=none modal=none
+expect notice none
+tap settings.back
+
+# --- the eye clip: the left edge zone in, a short left swipe out (too
+# short for ui_swipe; see eye.exit_short). The full swipe is at the end.
+tap eye.tap
+wait 2
+tap eye.exit_short
+mem
+
+# --- third time, and everything inside it
+tap settings.open
+mem
+
+tap brightness.open
+tap brightness.level3
+expect ui_state ov=brightness bl=60
+# The back swipe begun on a stop, the 20% one. The stops are most of the
+# screen, so most back swipes start on one; they used to keep the gesture
+# and STORE the level under the thumb, leaving Brightness open at 20%.
+swipe 40 144 200 144
+wait 2
+expect ui_state scr=settings ov=none bl=60
+mem
+
+tap theme.open
+# A swipe begun on the page button ("1/3 >"). Left must not turn the page:
+# LVGL sends the button its CLICKED after a gesture too, and only
+# tile_was_a_tap() stops that (it already did before the button let
+# gestures through, so this half guards against a regression only).
+swipe 300 20 180 20
+wait 1
+expect ui_state ov=theme tp=0
+# Right, the back gesture, must close Theme. This half is the change: the
+# button used to keep gestures, so a back swipe begun on it did nothing.
+# 56 px, past LVGL's 50 px gesture limit.
+swipe 262 20 318 20
+wait 2
+expect ui_state scr=settings ov=none
+tap theme.open
+tap theme.light
+expect theme_now why=user id=9
+tap theme.edit_on_computer
+expect theme_edit
+# Held now, as with a real builder open; the builder "ends", so the rest of
+# the run, and the desk after it, find the button as it was.
+fake edit_done
+wait-widget "Edit on computer" 3
+tap settings.back
+mem
+
+# Each Focus choice is checked on the gauges themselves, not just in the
+# store: gf is the layout usage_view is drawing. Out to the gauges and back
+# in after each -- these opens are on top of the three above.
+tap focus.open
+tap focus.session
+tap settings.back
+tap settings.back
+expect ui_state scr=gauges focus=session gf=session
+tap settings.open
+tap focus.open
+tap focus.weekly
+tap back.swipe
+tap settings.back
+expect ui_state scr=gauges focus=weekly gf=weekly
+tap settings.open
+tap focus.open
+tap focus.off
+tap back.swipe
+expect ui_state focus=off gf=off
+mem
+
+tap theme.open
+tap theme.dark
+expect theme_now why=user id=0
+tap settings.back
+mem
+
+tap settings.back
+mem
+expect ui_state scr=gauges focus=off gf=off theme=0 stored=0
+expect notice none
+
+# --- once more, by the words on the controls. `click "LABEL"` lists the
+# panel's widgets and presses the one that says LABEL, through the same real
+# input path as every tap above (firmware/src/touch_widgets.h), at the point
+# LVGL's own hit test reaches it -- so these lines do not depend on the
+# coordinates mirrored in board_touch.py, and a control something covers
+# fails as "covered". tools/bench/popups_touch.txt does the same for every
+# popup.
+tap settings.open
+expect-widget "Update"
+click "Focus"
+expect ui_state ov=focus
+click "Session"
+expect ui_state focus=session
+click "Off"
+expect ui_state focus=off
+click "<"
+expect ui_state ov=none
+click "Theme"
+expect ui_state ov=theme tp=0
+click "Ocean"
+expect theme_now why=user id=4
+click "Edit on computer"
+expect theme_edit
+wait-widget "Editing on your computer" 3
+fake edit_done
+wait-widget "Edit on computer" 3
+click "Dark"
+expect theme_now why=user id=0
+click "<"
+expect ui_state ov=none
+click "Brightness"
+expect ui_state ov=brightness
+click "<"
+expect ui_state ov=none
+click "<"
+expect ui_state scr=gauges focus=off theme=0 stored=0
+# Closing Settings mutes gestures for UI_SLIDE_MS * 6 (ui_settings.c,
+# do_close). A named target waits that out in its settle; a click does not
+# know where it led, so the script does. Without this the eye swipe below
+# lands inside the mute and does nothing (seen on the host harness).
+wait 1.6
+mem
+
+# --- the eye swipe, in and out the way a finger does it. The full left
+# swipe out of the clip used to latch Settings too, whenever ui_swipe
+# decided it before LVGL's gesture ended the clip and the clip's entry mute
+# had run out (1.5 s from the start of the entry slide): Settings then
+# opened by itself as the gauges came back. The host harness hit that on
+# most runs; swipe_cb now ignores every stroke made while the clip is up.
+#
+# Both exits here are past the mute -- the first at about 1.9 s, since
+# eye.swipe's settle alone is 1.2 s, the second after 3 s more. An earlier
+# version of this comment called the first one "inside the mute", which it
+# was not (review of fp/audit-nice, SHOULD-2). The exit inside the mute
+# takes raw strokes with no settle, which a board's entry slide would
+# swallow, so it is host-only: tools/bench/eye_mute_touch.txt.
+tap eye.swipe
+wait 0.3
+tap eye.exit
+expect ui_state scr=gauges modal=none busy=0
+wait 1.6
+tap eye.swipe
+wait 3
+# An up stroke on the clip, which the clip ignores. It used to latch a page
+# change for the moment the clip was left, which held the board busy=1.
+swipe 160 200 160 60
+expect ui_state scr=eyes busy=0
+tap eye.exit
+mem
+expect ui_state scr=gauges modal=none busy=0

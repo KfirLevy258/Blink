@@ -16,12 +16,14 @@ VERSION = PROTO_VERSION
 
 # The firmware's inbound line buffer, mirrored here on purpose.
 #
-# proto.c:367-371 does not truncate an over-long line, it DROPS it: on
-# overflow it resets line_len to 0 and the whole message is gone. There is no
-# error, no partial parse and nothing on the panel to show for it -- the board
-# simply stops updating while the daemon reports success. Every field added to
-# a message spends this budget, so encode_checked() below refuses to put a
-# line on the wire that the board could not receive.
+# drain_rx() in proto.c does not truncate an over-long line, it DROPS it: on
+# overflow it discards to the next newline and the whole message is gone. It
+# keeps LINE_MAX - 1 bytes of text, and the newline ends the line without
+# being stored, so the limit below counts the newline. There is no error, no
+# partial parse and nothing on the panel to show for it -- the board simply
+# stops updating while the daemon reports success. Every field added to a
+# message spends this budget, so encode_checked() below refuses to put a line
+# on the wire that the board could not receive.
 MAX_LINE_BYTES = 512
 
 # The one variable-length field on the usage message. "Opus 5 (1M context)" is
@@ -150,8 +152,135 @@ class LineReader:
         return out
 
 
-def welcome(app: str, app_ver: str) -> dict:
-    return {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver}
+# Every message type either side puts on the wire, and the only text a log
+# line may say about a message (log_name below).
+#
+# bridge.log used to print each message whole, both ways: `<- {'t': 'hello',
+# 'board_id': ...}` for what the board sent and `-> usage claude/statusline
+# 41%/...` for what went back. That is the file README-full.md asks a
+# customer to email us, and CLAUDE.md forbids logging any value decoded off
+# the serial buffer at any level -- the board's id, the theme it reports,
+# the version it claims, the labels and numbers it is shown. The owner chose
+# to keep the arrow lines and drop their fields (2026-10-30): a support
+# reader still sees what was said in which order, and nothing it said.
+#
+# A fixed set, not "whatever t is": t is itself a value off the wire, and a
+# board that sent t="<anything>" would otherwise have that text written into
+# the log verbatim. Board-to-host types are the ones firmware/src sends;
+# touch_done, touch_refused, ui_state and widgets answer the bench touch
+# injector (firmware/src/touch_inject.h, tools/board_touch.py), listed so a
+# bench board on a desk daemon logs them by name too.
+WIRE_TYPES = frozenset({
+    # board -> host
+    "hello", "ping", "pref", "ota_query", "ota_flash", "theme_now",
+    "theme_edit", "touch_done", "touch_refused", "ui_state", "widgets",
+    # host -> board
+    "welcome", "bye", "pong", "time", "usage", "edition", "session",
+    "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
+    "ota_none", "ota_error", "edit_state",
+})
+
+UNKNOWN_TYPE = "(unknown type)"
+
+
+def log_name(msg) -> str:
+    """What a log line may say about `msg`: its type, from WIRE_TYPES, and
+    nothing else. Anything else -- a missing, non-string or unrecognised t --
+    is the fixed placeholder, never the raw value."""
+    t = msg.get("t") if isinstance(msg, dict) else None
+    if isinstance(t, str) and t in WIRE_TYPES:
+        return t
+    return UNKNOWN_TYPE
+
+
+# What this daemon can do for the board, carried in welcome.
+#
+# "theme": it answers theme_edit by opening the theme builder. The board shows
+# Settings > Theme > "Edit on computer" only when the last welcome said so,
+# because a button that sends a message nobody answers is a button that
+# appears to do nothing (plan, Answers 2026-10-25). The capability is
+# advertised rather than inferred from app_ver for the reason
+# FW_ACCEPTS_OVERAGE's comment gives: a version string is a guess about what
+# a build contains, and this is the daemon saying it outright. Additive --
+# firmware that predates it reads no field it does not know.
+#
+# "edit_done": a promise, two halves. This daemon sends theme_edit done:1
+# when a builder it opened for the board ends (Addendum 6), and the welcome
+# greet() writes says in "editing" whether one is open right now. A board
+# that hears it holds "Edit on computer" from an ok 1 until the done (owner,
+# 2026-10-30: "the edit on computer button should re-appear ... only once
+# the page is not active / closed"), and one that does not hear it keeps the
+# 3 s "Opened" note: a hold nobody promised to end is a button that never
+# comes back. Every daemon since Addendum 6 sends the done; the cap is what
+# the board can know that by. Additive both ways: firmware before the hold
+# reads only "theme" out of caps (theme_caps_has matches whole members).
+#
+# The same word is a cap in both directions, with two meanings. In the
+# board's hello and pref (BOARD_CAP_EDIT_DONE) it says "I handle done:1";
+# in this welcome it says "I send done:1, `editing`, and edit_state".
+CAPS = ("theme", "edit_done")
+
+# How often edit_state restates whether a builder is open (Bridge.pump), and
+# the board lets a hold go when it has heard no restatement, no ok 1 and no
+# preview for EDIT_HOLD_MS (150 s in firmware/src/ui_settings.c): two and a
+# half of these, the same margin svc lines have over SVC_HOLD_S.
+EDIT_STATE_EVERY_S = 60
+
+
+def welcome(app: str, app_ver: str, editing=None) -> dict:
+    """`editing`: whether the builder this daemon opened for the board's
+    "Edit on computer" is still open -- True, False, or None for "this
+    writer cannot say", which leaves the field out. The board holds or frees
+    its slot on 1 or 0 and keeps it as it is when the field is absent
+    (firmware/src/edit_hold.h). Only greet() knows: the probe's welcome
+    (claude_usage_bridge.probe_is_our_board) is asked before any Bridge
+    exists, and greet()'s follows it.
+
+    It is what puts a board right after it was away while the builder
+    opened or ended: one that rebooted (its hold is gone, the builder is
+    not), one whose cable was out (a new connection greets), and one under
+    a daemon that restarted (the builder lived in the old process). A host
+    that went quiet on a connection that stayed open is not greeted again;
+    edit_state below is what puts that board right. A number, not a JSON
+    boolean, like every flag this protocol
+    already carries (done, ok)."""
+    msg = {"t": "welcome", "v": VERSION, "app": app, "app_ver": app_ver,
+           "caps": list(CAPS)}
+    if editing is not None:
+        msg["editing"] = 1 if editing else 0
+    return msg
+
+
+def edit_state(editing: bool) -> dict:
+    """Whether the builder this daemon opened for the board's "Edit on
+    computer" is open right now: the welcome's `editing`, restated on its
+    own line.
+
+    Why a restatement, and why not the welcome. A welcome is written only
+    when a connection starts, and a board can lose its host without the
+    connection ending: the Mac sleeps over lunch with the builder open, or
+    the serial loop stalls past 30 s (the browser opener, measured stuck for
+    28.7 s, is one). The board frees its hold on HOST LOST, and nothing
+    would have held it again when the same connection woke -- a press then
+    opened a second tab on the builder still open (review of fp/edit-held,
+    SHOULD-1). Re-sending a welcome to say so would set the board answering
+    it with pref, theme_now and a firmware check each time.
+
+    So the board holds only while this keeps being said, as it shows an
+    svc incident only while that is restated: every EDIT_STATE_EVERY_S, and
+    at once when the board is heard again after a silence (Bridge.pump).
+    It also covers the two ways the builder's life and the board's bound
+    used to disagree: a page reload restarts the builder's idle clock with
+    nothing sent to the board, and a done that overtook its own ok (review
+    NICE-1) left a hold over no builder. Both now last at most one
+    restatement.
+
+    Its own type, not a field on theme_edit: firmware from before the hold
+    reads a theme_edit with neither done nor ok as an ok 0, which would put
+    "run blink theme" over an ask in flight. Unknown types are dropped
+    without a word by every firmware (proto.c's dispatch), and this goes
+    only to a board that lists BOARD_CAP_EDIT_DONE."""
+    return {"t": "edit_state", "v": VERSION, "editing": 1 if editing else 0}
 
 
 def bye() -> dict:
@@ -324,9 +453,9 @@ The firmware reads this field: proto.c's "usage" handler calls
     #
     # Unknown fields are OMITTED rather than sent as sentinels. That is the
     # MAX_LINE_BYTES budget talking: an over-long line is dropped whole by the
-    # board (proto.c:367-371), so every key that carries no information is
-    # spending a budget a future field will need. An absent key already means
-    # "unknown" on both sides.
+    # board (drain_rx() in proto.c), so every key that carries no information
+    # is spending a budget a future field will need. An absent key already
+    # means "unknown" on both sides.
     extra = {"provider": provider, "src": src}
     if state:
         extra["state"] = state
@@ -431,10 +560,11 @@ The firmware reads this field: proto.c's "usage" handler calls
     # Nothing has ever read them. proto.c's usage handler takes
     # session_resets_in_s and weekly_resets_in_s and says why in its own
     # comment: "the board has no wall clock when tethered over USB, so the
-    # daemon does the subtraction". usage_parse.c does read a "resets_at", but
-    # that is the standalone WiFi path parsing the API's own JSON body, not
-    # this message. A repo-wide search for a reader finds one hit, and it is a
-    # host test using the name as a sample key for the generic string parser.
+    # daemon does the subtraction". Firmware once did parse a "resets_at",
+    # in the WiFi build's own usage fetch, but out of the API's JSON and not
+    # out of this line, and that code was deleted on 2026-10-27. Searching
+    # the repo for a reader turns up a single hit: a host test that borrows
+    # the name as sample input for the generic string parser.
     #
     # They cost about 59 bytes together, on a line that measured 511 of 512.
     # A field no consumer reads is not "kept for readability" -- the docstring's
@@ -616,16 +746,176 @@ def session(label: str, n: int) -> dict:
     """
     msg = {"t": "session", "v": VERSION, "n": int(n)}
     if label:
-        # Truncate on a CHARACTER boundary that survives the byte bound --
-        # slicing bytes can halve a multibyte sequence and produce a field
-        # that cannot be decoded at the other end.
-        trimmed = label.encode("utf-8")[:SESSION_LABEL_MAX_BYTES]
-        msg["label"] = trimmed.decode("utf-8", "ignore")
+        msg["label"] = _clip_utf8(label, SESSION_LABEL_MAX_BYTES)
     return msg
+
+
+def _clip_utf8(s: str, max_bytes: int) -> str:
+    """`s` cut to at most `max_bytes` of UTF-8, on a CHARACTER boundary.
+
+    Slicing the bytes alone can halve a multibyte sequence and produce a
+    field that cannot be decoded at the other end; dropping the broken tail
+    keeps the bound and the encoding both.
+    """
+    return s.encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
 
 
 def status(state: str, detail: str = "") -> dict:
     return {"t": "status", "v": VERSION, "state": state, "detail": detail}
+
+
+# --- svc: an incident on the provider's public status page -----------------
+#
+# The five levels the board draws, mildest first. Statuspage's own names
+# (degraded_performance, partial_outage...) stay on this side: every string
+# the firmware compares against is flash it carries for good, and a vendor
+# adding a sixth status should be a daemon change, not a reflash. So the wire
+# speaks the short form and pc/status_page.py does the mapping. "ok" means "draw nothing" -- it is sent
+# for an operational page, but also for one we could not read, one whose last
+# good answer is over half an hour old, and for the feature being off,
+# because in every one of those cases the honest panel is a quiet one.
+SVC_LEVELS = ("ok", "maint", "degraded", "partial", "major")
+
+# A byte bound, like SESSION_LABEL_MAX_BYTES, for the same reason: it is the
+# only bound this side can enforce. The longest name status_page.py sends is
+# "Claude Code" (11); 24 leaves the firmware a fixed 28-byte buffer with room.
+SVC_WHAT_MAX_BYTES = 24
+
+# How long the board keeps a non-ok svc without hearing it again; see the
+# LIFETIME paragraph of svc(). The daemon does not use it -- it is here so
+# the number the firmware is built to is written down beside the message.
+SVC_HOLD_S = 150
+
+# What the board says it can show, from the "caps" list on its hello and on
+# its pref (theme contract, Addendum 3). Replaces the fw >= 1.4.0 gate that
+# both svc and theme lines had: the firmware that draws them was still
+# numbered 1.3.4, so a board built from it was sent neither, and a release
+# bumped to anything short of 1.4.0 would have shipped both features dead
+# with nothing in CI to notice (final review, 2026-10-27, MUST 2). A version
+# number is a guess about what a build contains; the board saying so is not.
+# No released firmware sends caps, so there is no version fallback to keep.
+BOARD_CAP_SVC = "svc"        # draws the status-page level (svc)
+BOARD_CAP_THEME = "theme"    # takes theme lines; answers theme_edit
+# Handles theme_edit done:1 (contract Addendum 6). Its own cap, not implied
+# by "theme": 1.4.0 boards built before the handler read a done that lands
+# while their ask is in flight as an ok 0, put up "run blink theme", and
+# then ignore the real ok 1 (review of fp/audit-nice r2, SHOULD-1).
+BOARD_CAP_EDIT_DONE = "edit_done"
+
+
+def board_caps(msg) -> frozenset:
+    """The capabilities a board message lists; empty when it lists none.
+
+    Anything that is not a list of strings counts as no caps at all rather
+    than a partial reading: a board that says something this daemon cannot
+    read is treated like one that said nothing, which is a board that is
+    sent only what every board understands.
+    """
+    caps = msg.get("caps") if isinstance(msg, dict) else None
+    if not isinstance(caps, list):
+        return frozenset()
+    return frozenset(c for c in caps if isinstance(c, str))
+
+
+def svc(provider: str, level: str, what: str = "") -> dict:
+    """The status-page level for ONE provider's page.
+
+    Its own message rather than fields on `usage`, which is measured at 454
+    of 512 bytes (2026-10-31) with two providers loaded and drops whole when it overflows.
+    This one is under 100 bytes at its widest, one per page shown, and goes
+    out on the occasions listed at the end of this docstring.
+
+    Additive like `session` and `edition`: proto.c's dispatch ends in
+    "unknown types ignored", so firmware that predates this drops it without
+    a word, and PROTO_VERSION does not move.
+
+    `what` is omitted at "ok" rather than sent empty: the all-clear names
+    nothing, and leaving it off means a stale component from the incident
+    before cannot travel with it.
+
+    The contract the firmware is built to:
+      provider  "claude" or "codex" -- the page it belongs to, the same id
+                `usage` carries in `provider` and `p2`. Never another value
+                today; a board should ignore one it has no page for.
+      level     one of SVC_LEVELS. Anything else should be read as "ok".
+      what      present for every level but "ok": "Claude Code",
+                "claude.ai" or "API" on the claude page; "Codex", "API" or
+                "Login" on the codex page. At most SVC_WHAT_MAX_BYTES.
+    The board keys what it holds by `provider`, never by page slot: the
+    pages can swap (the owner picks a different main provider) and the
+    second one comes and goes with `p2`, so a slot would put Claude's
+    incident on the Codex page.
+
+    Sent per provider, only for a page the board is showing:
+      - when that page's (level, what) changes;
+      - again after every hello, and whenever the pair of pages on the board
+        changes (`provider` or `p2` in `usage`), so a page that comes back
+        is told its status rather than assumed to remember it;
+      - again with every heartbeat (Bridge.poll_once, every 60 s), whether
+        or not there is a usage reading, so a line that was lost -- an
+        all-clear above all -- is repaired within a minute instead of
+        standing until the next change.
+    A board that has heard nothing for a page should draw it as "ok".
+
+    LIFETIME. A non-ok level is shown only while it keeps being re-stated:
+    if no svc for that provider arrives within SVC_HOLD_S (150 s, two and a
+    half heartbeats), the board treats the page as "ok". An incident must
+    never outlive the daemon that reported it -- a crashed or uninstalled
+    app, or a provider the bus has quarantined, would otherwise leave
+    "major outage" on a desk indefinitely.
+
+    Only to a board whose hello or pref listed BOARD_CAP_SVC (Bridge gates
+    it). Any other board would drop it unread, so it is not sent, and no
+    status page is asked on its behalf.
+    """
+    if level not in SVC_LEVELS:
+        raise ValueError(f"unknown svc level {level!r}; expected one of "
+                         + ", ".join(SVC_LEVELS))
+    msg = {"t": "svc", "v": VERSION, "provider": provider, "level": level}
+    if what and level != "ok":
+        msg["what"] = _clip_utf8(what, SVC_WHAT_MAX_BYTES)
+    return msg
+
+
+# --- Themes (pc/theme.py validates; these only shape the line) ----------
+
+def theme(op: str, t: dict = None) -> dict:
+    """{"t":"theme","op":..., "id":..., custom fields}. Not validated here:
+    call pc.theme.message, which validates first and measures after.
+
+    preview applies without storing (the board drops it after 15 min of
+    silence, or on cancel); save applies and stores; cancel goes back to the
+    stored theme. A bad value makes the board ignore the whole line.
+    """
+    msg = {"t": "theme", "v": VERSION, "op": op}
+    if t is not None:
+        msg.update(t)
+    return msg
+
+
+def theme_edit_reply(ok: bool) -> dict:
+    """The answer to the board's theme_edit: ok 1 once a browser has been
+    opened on the builder, 0 when there is nothing to open one on. The board
+    shows "On your computer, run: blink theme" for 0, and also after 5 s of
+    no answer at all, which is what a daemon from before this sends."""
+    return {"t": "theme_edit", "v": VERSION, "ok": 1 if ok else 0}
+
+
+def theme_edit_done() -> dict:
+    """The builder the daemon opened for the board's "Edit on computer" has
+    ended -- saved, cancelled, its tab closed, or timed out (contract
+    Addendum 6). The board clears whatever note its slot is showing on it.
+    It was the line that freed a 10 s lock-out, after a builder closed
+    inside those 10 s left a tap that sent nothing (board, 2026-10-29);
+    then the board gave its button back by itself 3 s after "Opened on
+    your computer" (owner, 2026-10-29), and a press opened a second tab on
+    the builder still open. Now it is the line that frees the hold an ok 1
+    puts on the slot (owner, 2026-10-30; CAPS "edit_done"); a done that
+    never arrives is made good by the next edit_state, within
+    EDIT_STATE_EVERY_S. Sent only to a board that lists
+    BOARD_CAP_EDIT_DONE: one from before reads it as an ok 0 whenever an ask
+    of its own is in flight."""
+    return {"t": "theme_edit", "v": VERSION, "done": 1}
 
 
 # --- OTA over the serial link (see pc/ota.py and the OTA block in proto.c) ---

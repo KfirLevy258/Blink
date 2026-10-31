@@ -1,11 +1,10 @@
 """Release fetch and serial push, for OTA while the board is tethered.
 
-USB-bridge mode has no network on the board -- run_usb() never starts
-net_worker, so the firmware's own HTTPS updater is unreachable and the update
-row did nothing there. We have both an internet connection and the board's
-serial link, so the split is: we fetch from the same GitHub release feed the
-WiFi path uses, and push the image down; the board writes and verifies it with
-exactly the same code either way.
+The board has no network of its own -- the firmware's standalone WiFi mode,
+which fetched updates itself over HTTPS, was removed on 2026-10-27 -- so the
+update row did nothing until this existed. We have both an internet connection
+and the board's serial link, so the split is: we fetch from the GitHub release
+feed that WiFi path used, and esptool writes the image.
 
 Nothing here trusts the transport, but note WHERE that check now lives. Over
 WiFi the board hashed what it received. Over USB the board is not part of the
@@ -196,22 +195,26 @@ def flash_encrypted_chip(port, run=subprocess.run):
     update was diagnosable only from a photograph of the screen. It is printed
     here instead.
     """
-    why = ""
     try:
         proc = run(_efuse_probe() + ["--port", port],
                    capture_output=True, text=True, timeout=60, **NO_WINDOW)
     except Exception as e:
-        why = str(e)
+        why = _why_it_failed(None, None, e)
     else:
         for line in (proc.stdout or "").splitlines():
             words = line.split()
             if len(words) == 2 and words[0] == "flash_encryption":
                 return words[1] == "enabled"
-        why = ((proc.stderr or proc.stdout or "").strip()
-               or f"exit {proc.returncode} and no answer")
+        why = _why_it_failed(proc.stderr or proc.stdout, proc.returncode)
 
+    # The KIND of failure, never the probe's text. That text is esptool's,
+    # and esptool quotes what it read off the port ("Invalid head of packet
+    # (0x41)") and prints the chip's MAC; the first version of this print
+    # sent up to 300 characters of it to bridge.log, the file customers send
+    # us, against the rule that no log line carries a value read off the
+    # serial port (found in review, 2026-10-31).
     print(f"[ota] could not read the chip's eFuses on {port}; not flashing."
-          f" The probe said: {why[-300:]}", file=sys.stderr)
+          f" {why}", file=sys.stderr)
     return None
 
 
@@ -230,16 +233,65 @@ def flash_encrypted_chip(port, run=subprocess.run):
 FLASH_BAUD = 115200
 
 
+# What a failed esptool or probe run is reported as: one fixed phrase, picked
+# by looking for these fragments (lower case) in the tool's output. First match
+# wins, so the order is deliberate: a failed connect that also mentions line
+# noise is a failed connect. Each phrase fits the 47 characters the board
+# keeps even beside a Windows exit code of ten digits (3221225477); the
+# longest, "Serial port busy or missing", is 45 with one. The output itself is looked at and thrown away -- see
+# _why_it_failed.
+_FAILURES = (
+    (("could not open port", "access is denied", "resource busy",
+      "permission denied", "no such file", "could not configure port",
+      "serial exception", "device disconnected", "device not configured"),
+     "Serial port busy or missing"),
+    (("failed to connect", "wrong boot mode", "no serial data received",
+      "timed out waiting for packet header"),
+     "Could not reach the chip"),
+    (("md5 of file does not match", "verify failed", "content mismatch"),
+     "Write did not verify"),
+    (("invalid head of packet", "possible serial noise", "packet content"),
+     "Transfer stopped part way"),
+)
+
+
+def _why_it_failed(text, returncode, exc=None):
+    """A fixed description of a failed esptool or probe run, and nothing of
+    what it printed.
+
+    Allowlisted on purpose. esptool's text quotes bytes it read off the port
+    ("Invalid head of packet (0x41)") and the chip's MAC, and this reason is
+    logged as "[bridge] ota: FAILED: ..." and sent to the board, so passing
+    any slice of it on put a value read off the wire into bridge.log (found
+    in review, 2026-10-31; the tail 200 characters it returned before were
+    the worst place to look for that). What may leave here: one of the
+    phrases above, an exit code, or an exception's class name -- never its
+    message, which can carry a path or the same text.
+    """
+    if exc is not None:
+        if isinstance(exc, subprocess.TimeoutExpired):
+            # Not "writing": the eFuse probe times out too, and only reads.
+            return "Timed out talking to the chip"
+        return f"Could not run esptool ({type(exc).__name__})"
+    low = (text or "").lower()
+    for fragments, phrase in _FAILURES:
+        if any(f in low for f in fragments):
+            return f"{phrase} (exit {returncode})"
+    # Sentence case: this reaches the board's screen.
+    return f"Flash failed (exit {returncode})"
+
+
 def _esptool_run(exe, port, baud, args, run, timeout=900):
-    """(ok, last 200 chars of output) for one esptool invocation."""
+    """(ok, why) for one esptool invocation. `why` is a fixed description of
+    the failure, never esptool's output: see _why_it_failed."""
     try:
         r = run(exe + ["--port", port, "--baud", str(baud)] + args,
                 capture_output=True, text=True, timeout=timeout, **NO_WINDOW)
     except Exception as e:
-        return False, str(e)[:200]
+        return False, _why_it_failed(None, None, e)
     if r.returncode == 0:
         return True, ""
-    return False, ((r.stderr or r.stdout or "") or "").strip()[-200:]
+    return False, _why_it_failed(r.stderr or r.stdout, r.returncode)
 
 
 def flash(port, blob, run=subprocess.run):
@@ -298,7 +350,7 @@ def flash(port, blob, run=subprocess.run):
             return True, "written and verified on the second try"
         return False, why
     except Exception as e:
-        return False, str(e)
+        return False, f"Flash failed ({type(e).__name__})"
     finally:
         try:
             os.unlink(img)

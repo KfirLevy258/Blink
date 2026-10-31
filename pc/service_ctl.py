@@ -81,7 +81,7 @@ def _safely(verb: str, runner) -> Outcome:
     # without this a test under a temporary HOME could still stop the agent
     # of whoever is logged in.
     if cli._skip_service():
-        return Outcome(False, True, "skipped (BLINK_SKIP_SERVICE=1)")
+        return Outcome(False, True, f"skipped ({cli._skip_reason()})")
     try:
         detail = getattr(cli.backend(), verb)(runner or cli.subprocess.run)
         # Inside the try, not after it: the backends answer in prose today,

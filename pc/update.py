@@ -575,7 +575,7 @@ _TRANSIENT_ERRNO = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY,
 _TRANSIENT_WINERROR = frozenset({5, 32, 145})
 
 
-def _replace(src, dst, sleep=time.sleep, tries=REPLACE_TRIES):
+def _replace(src, dst, sleep=None, tries=REPLACE_TRIES, posix_retry=True):
     """os.replace, retried while something still holds the old directory.
 
     POSIX renames a directory whatever is open inside it. WINDOWS DOES NOT:
@@ -591,14 +591,22 @@ def _replace(src, dst, sleep=time.sleep, tries=REPLACE_TRIES):
 
     Raises the LAST error if every attempt fails, so the message the caller
     prints still names what actually went wrong.
+
+    `posix_retry=False` keeps only the Windows half. A FILE has no POSIX
+    equivalent of a held handle -- EACCES or EPERM on one is a real refusal,
+    and retrying it only made install_statusline's failed writes wait three
+    seconds to say so. The errno set stays on for the directory swap, where
+    EBUSY and ENOTEMPTY do mean "try again".
     """
+    sleep = sleep or time.sleep          # at call time, so tests can stub it
     last = None
     for attempt in range(tries):
         try:
             os.replace(src, dst)
             return
         except OSError as e:
-            if (e.errno not in _TRANSIENT_ERRNO
+            posix_says_retry = posix_retry and e.errno in _TRANSIENT_ERRNO
+            if (not posix_says_retry
                     and getattr(e, "winerror", None) not in _TRANSIENT_WINERROR):
                 raise
             last = e

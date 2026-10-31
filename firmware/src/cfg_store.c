@@ -60,6 +60,29 @@ struct rec {
 	uint8_t main_src;		/* 0 unset -> claude; else enum cfg_main_src */
 	uint8_t edition;		/* 0 unset -> claude; else enum cfg_edition */
 	uint8_t edition_locked;		/* 1 once stamped; see cfg_set_edition */
+	/*
+	 * 1.3.4's seal, kept where 1.3.4 looks for it.
+	 *
+	 * Everything above this line is the 1.3.4 record, byte for byte, and
+	 * this is its CRC over exactly those bytes. Every earlier field
+	 * addition moved the CRC to the new end, which kept UPDATES working
+	 * (each layout got a reader below) but meant a DOWNGRADE found a
+	 * record whose CRC was in the wrong place and treated it as blank --
+	 * losing brightness, timezone and, worse, the edition latch, which a
+	 * blank record does not have. The theme fields are the first to be
+	 * appended with a downgrade promised (orch contract 2026-10-27), so
+	 * they are appended AFTER a still-valid 1.3.4 record instead of
+	 * inside one. tests/cfg_store plays both directions.
+	 */
+	uint32_t crc_134;
+	uint8_t theme_id;		/* 0 Dark; see struct cfg_theme */
+	uint8_t theme_rgb[21];
+	uint8_t theme_w;
+	uint8_t theme_ends;
+	uint8_t theme_dot;
+	uint8_t theme_by;
+	uint8_t focus_on;		/* Focus mode; see cfg_get_focus_on */
+	uint8_t focus_win;
 	uint32_t crc;		/* over everything above, always last */
 } __packed;
 
@@ -171,6 +194,30 @@ static bool slot_load(int off, struct rec *out)
 	memcpy(out, buf, sizeof(*out));
 	if (out->magic == REC_MAGIC && out->crc == rec_crc(out)) {
 		return true;
+	}
+
+	/*
+	 * The 1.3.4 layout: the front of the current one, sealed by crc_134.
+	 *
+	 * Read straight out of `buf` rather than through a struct of its own,
+	 * because it IS the current struct's prefix -- and because this
+	 * function already holds four record-sized locals on the main stack.
+	 * The theme and Focus fields after it are whatever was on flash (a
+	 * 1.3.4 record pads with zeros, the sector beyond reads erased), so
+	 * they are zeroed: Dark, Focus off.
+	 */
+	{
+		uint32_t seal;
+
+		memcpy(&seal, buf + offsetof(struct rec, crc_134), sizeof(seal));
+		if (out->magic == REC_MAGIC &&
+		    seal == crc32_ieee(buf, offsetof(struct rec, crc_134))) {
+			memset((uint8_t *)out + offsetof(struct rec, crc_134), 0,
+			       sizeof(*out) - offsetof(struct rec, crc_134));
+			out->crc = rec_crc(out);
+			printk("[cfg] migrated 1.3.4 record (seq %u)\n", out->seq);
+			return true;
+		}
 	}
 
 	/* Not a current record -- try the layout from before the edition latch. */
@@ -317,6 +364,9 @@ static int persist(void)
 
 	cfg.magic = REC_MAGIC;
 	cfg.seq++;
+	/* Both seals, inner first: the outer CRC covers the inner one. */
+	cfg.crc_134 = crc32_ieee((const uint8_t *)&cfg,
+				 offsetof(struct rec, crc_134));
 	cfg.crc = rec_crc(&cfg);
 
 	memset(buf, 0, sizeof(buf));
@@ -335,6 +385,25 @@ static int persist(void)
 	return rc;
 }
 
+/* Is this slot a whole record of THIS layout, outer seal and all -- not one
+ * slot_load() could only read by migrating it? */
+static bool slot_whole(int off)
+{
+	/* On the stack, not static: this runs once, at boot, after
+	 * slot_load()'s larger frames have returned, so it reuses their room
+	 * instead of holding 507 bytes of RAM for the life of the board. */
+	uint8_t buf[sizeof(struct rec)];
+	uint32_t magic, crc;
+
+	if (flash_area_read(fa, off, buf, sizeof(buf)) != 0) {
+		return false;
+	}
+	memcpy(&magic, buf + offsetof(struct rec, magic), sizeof(magic));
+	memcpy(&crc, buf + offsetof(struct rec, crc), sizeof(crc));
+	return magic == REC_MAGIC &&
+	       crc == crc32_ieee(buf, offsetof(struct rec, crc));
+}
+
 int cfg_init(void)
 {
 	int rc = flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa);
@@ -347,21 +416,80 @@ int cfg_init(void)
 	struct rec a, b;
 	bool va = slot_load(SLOT_A, &a);
 	bool vb = slot_load(SLOT_B, &b);
+	const struct rec *other = NULL;
 
 	if (va && (!vb || a.seq >= b.seq)) {
 		cfg = a;
 		cur_slot = SLOT_A;
+		other = vb ? &b : NULL;
 	} else if (vb) {
 		cfg = b;
 		cur_slot = SLOT_B;
+		other = va ? &a : NULL;
 	} else {
 		memset(&cfg, 0, sizeof(cfg));
 		cur_slot = -1;	/* first persist() lands in slot A */
 	}
 
-	/* Never log the token itself, only whether we have one. */
+	/*
+	 * The newer slot can be whole as 1.3.4 reads it and torn after that.
+	 *
+	 * A record is written front to back, and 1.3.4's seal sits 32 bytes
+	 * before the end. Power lost inside those 32 bytes leaves a slot that
+	 * passes the 1.3.4 check with the newer sequence -- so it wins, and on
+	 * its own it says Dark and Focus off. The same happens, by design,
+	 * after a downgrade: 1.3.4 writes its record and nothing after it.
+	 * Either way the other slot can still be a whole record of ours, and
+	 * the theme the owner had is sealed in it. Take the appended fields
+	 * from there; everything 1.3.4 knows about stays the newer slot's.
+	 * tests/cfg_store cuts a write at every one of its 513 byte counts.
+	 *
+	 * After a downgrade this rescue holds for ONE write by 1.3.4, not
+	 * two, and support should expect exactly that. 1.3.4 alternates slots
+	 * like this file does: its first write lands on the slot it did not
+	 * boot from and leaves our whole record in the other, so an update
+	 * back brings the theme and Focus with it ("re-update" in
+	 * tests/cfg_store). Its second write lands on that other slot, and
+	 * then neither holds our fields: the update comes back on Dark with
+	 * Focus off, every 1.3.4 setting intact ("re-update 2").
+	 *
+	 * What counts as a write, read off v1.3.4's call sites (USB mode; its
+	 * token and timezone writes are WiFi-mode only, and release.sh has
+	 * never shipped a WiFi build): a brightness step, a tap on the weekly
+	 * peek row, an edition stamp, cfg_set_ota_state(1) just before it
+	 * installs an OTA (proto.c:616), and cfg_set_ota_state(0) on the first
+	 * boot after one (main.c:278). So an OTA back to this firmware spends
+	 * the one write by itself:
+	 *   - downgraded by flashing, nothing touched, then OTA back: the
+	 *     theme returns;
+	 *   - downgraded by flashing, brightness or the weekly row changed
+	 *     once, then OTA back: Dark, Focus off;
+	 *   - downgraded by OTA: 1.3.4's first boot has already written once,
+	 *     so the OTA back loses them with nobody touching anything.
+	 * Found by the final review of the theme work (N4, 2026-10-27) and
+	 * corrected against the 1.3.4 source in its review; nothing 1.3.4
+	 * itself stores is lost in any of these.
+	 */
+	if (other != NULL && cur_slot >= 0 && !slot_whole(cur_slot) &&
+	    slot_whole(cur_slot == SLOT_A ? SLOT_B : SLOT_A)) {
+		size_t from = offsetof(struct rec, theme_id);
+
+		memcpy((uint8_t *)&cfg + from, (const uint8_t *)other + from,
+		       offsetof(struct rec, crc) - from);
+		cfg.crc = rec_crc(&cfg);	/* in RAM; resealed on next write */
+		printk("[cfg] theme and focus taken from the older slot\n");
+	}
+
+	/* Never log the token itself, only whether we have one -- and the
+	 * same for the SSID. This line used to print the stored network name
+	 * verbatim, and the daemon copies the boot lines into bridge.log,
+	 * which is the support file customers send us: a unit set up for
+	 * WiFi before 2026-10-27 still carries its owner's network name in
+	 * the record, and the name of somebody's home network is theirs, not
+	 * ours to collect. WiFi is gone from the image, so nothing reads it
+	 * now beyond whether it is there (review NICE-2, 2026-10-28). */
 	printk("[cfg] mode=%d ssid=%s token=%s\n", cfg.mode,
-	       cfg.ssid[0] ? cfg.ssid : "(none)",
+	       cfg.ssid[0] ? "present" : "(none)",
 	       cfg.token[0] ? "present" : "(none)");
 	return 0;
 }
@@ -691,4 +819,119 @@ int cfg_reset(void)
 	}
 	k_mutex_unlock(&cfg_lock);
 	return 0;
+}
+
+/* Called with cfg_lock held. */
+static void theme_put(const struct cfg_theme *t)
+{
+	cfg.theme_id = t->id;
+	memcpy(cfg.theme_rgb, t->rgb, sizeof(cfg.theme_rgb));
+	cfg.theme_w = t->w;
+	cfg.theme_ends = t->ends;
+	cfg.theme_dot = t->dot;
+	cfg.theme_by = t->by;
+}
+
+/* Called with cfg_lock held. */
+static void theme_take(struct cfg_theme *out)
+{
+	out->id = cfg.theme_id;
+	memcpy(out->rgb, cfg.theme_rgb, sizeof(out->rgb));
+	out->w = cfg.theme_w;
+	out->ends = cfg.theme_ends;
+	out->dot = cfg.theme_dot;
+	out->by = cfg.theme_by;
+}
+
+void cfg_get_theme(struct cfg_theme *out)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	theme_take(out);
+	k_mutex_unlock(&cfg_lock);
+}
+
+/*
+ * persist() writes the RAM record, so the new values go into it first -- and
+ * on a failed write they come back OUT. RAM is what everything else believes:
+ * theme_now reports it, ui_theme.c shows it as "stored", and the "nothing
+ * changed" check below compares against it. Left holding an unstored theme,
+ * the board told the daemon on its next greeting that it held a theme a
+ * reboot would take away, and a retry of the same theme hit the short-circuit
+ * and returned success with nothing written (review of 1cb4fd6, M1;
+ * tests/cfg_store plants a flash that refuses erases). cfg_set_focus does the
+ * same. seq is left advanced: a gap in it costs nothing.
+ */
+int cfg_set_theme(const struct cfg_theme *t)
+{
+	struct cfg_theme was;
+	int rc;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	/* Nothing changed, nothing written: a flash sector erased for the
+	 * same 26 bytes is wear and a power-cut window bought for nothing. */
+	if (cfg.theme_id == t->id &&
+	    memcmp(cfg.theme_rgb, t->rgb, sizeof(cfg.theme_rgb)) == 0 &&
+	    cfg.theme_w == t->w && cfg.theme_ends == t->ends &&
+	    cfg.theme_dot == t->dot && cfg.theme_by == t->by) {
+		k_mutex_unlock(&cfg_lock);
+		return 0;
+	}
+	theme_take(&was);
+	theme_put(t);
+	rc = persist();
+	if (rc != 0) {
+		theme_put(&was);
+	}
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
+/*
+ * Only 1 means on, and only 1 means weekly. Anything else on flash -- a value
+ * a later firmware gave a third window, read back after a downgrade, or a
+ * flipped bit -- reads as the default, because Settings can only show Off,
+ * Session and Weekly and a panel stuck in a mode its own menu cannot name has
+ * no way back. tests/cfg_store plants such bytes.
+ */
+uint8_t cfg_get_focus_on(void)
+{
+	return cfg.focus_on == 1 ? 1 : 0;
+}
+
+uint8_t cfg_get_focus_win(void)
+{
+	return cfg.focus_win == 1 ? 1 : 0;
+}
+
+int cfg_set_focus(uint8_t on, uint8_t win)
+{
+	uint8_t was_on, was_win;
+	int rc;
+
+	if (on > 1 || win > 1) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	/* The same short-circuit as cfg_set_theme: a tap on the Focus button
+	 * that is already lit used to erase a sector to store the two bytes
+	 * it already held (final review N2, 2026-10-27). The comparison is on
+	 * the RAW bytes, not cfg_get_focus_*(): a stray byte read back as the
+	 * default (see above) still differs from the 0 being chosen, so that
+	 * choice is written and the stray byte is cleaned off flash. */
+	if (cfg.focus_on == on && cfg.focus_win == win) {
+		k_mutex_unlock(&cfg_lock);
+		return 0;
+	}
+	was_on = cfg.focus_on;
+	was_win = cfg.focus_win;
+	cfg.focus_on = on;
+	cfg.focus_win = win;
+	rc = persist();
+	if (rc != 0) {
+		/* Put back, as cfg_set_theme does, and for the same reason. */
+		cfg.focus_on = was_on;
+		cfg.focus_win = was_win;
+	}
+	k_mutex_unlock(&cfg_lock);
+	return rc;
 }

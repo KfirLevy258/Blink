@@ -29,6 +29,7 @@
 #include "bootclip.h"
 #include "bootanim_dec.h"
 #include "ui_slide.h"
+#include "mem_stats.h"
 
 #define STRIP_BYTES 4096
 
@@ -39,6 +40,15 @@ static volatile bool pending;
 static int64_t mute_until;
 static int64_t enter_mute_until;
 static volatile bool leave;
+
+/* Written by the mode loop in ui_anim_run(), read by swipe_cb on the LVGL
+ * timer that ui_anim_run's own idle_until() drives -- the same thread. */
+static volatile bool showing;
+
+bool ui_anim_showing(void)
+{
+	return showing;
+}
 
 void ui_anim_request(void)
 {
@@ -206,6 +216,7 @@ void ui_anim_run(void (*pump)(void))
 
 	pending = false;
 	leave = false;
+	showing = true;
 
 	/*
 	 * Built frozen and already full size. Creating it would otherwise
@@ -296,6 +307,9 @@ void ui_anim_run(void (*pump)(void))
 		idle_until(k_uptime_get() + 600, pump, &last_tick);
 	}
 
+	/* While the 4 KB strip is still held: the clip's slide and every
+	 * frame since are this line's peak. */
+	mem_stats_report("eye-clip");
 	if (strip) {
 		lv_free(strip);
 	}
@@ -337,4 +351,5 @@ void ui_anim_run(void (*pump)(void))
 	 * again through ui_settings' handlers. The exit slide above blocks long
 	 * enough for those events to land, so clearing here is the last word. */
 	pending = false;
+	showing = false;
 }

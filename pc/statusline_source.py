@@ -10,7 +10,6 @@ as live is the one failure mode worth designing against.
 """
 import json
 import os
-import time
 
 from pc import protocol
 from pc.providers import base
@@ -20,7 +19,29 @@ from pc.providers import base
 PROVIDER_ID = "claude"
 SRC_ID = "cli"
 
-PAYLOAD_PATH = os.path.expanduser("~/.blink/statusline.json")
+
+def payload_path() -> str:
+    """Where the shim writes the payload, resolved now rather than at import.
+
+    This was a module constant, expanduser'd when the module was imported,
+    and the readers here took it as a default argument -- all of it
+    evaluated before tests/conftest.py redirects HOME. So in a test process
+    the no-argument readers named the developer's REAL
+    ~/.blink/statusline.json, which on a desk with Blink installed holds live
+    usage: the sandbox hole CLAUDE.md describes. ClaudeCliProvider had already
+    stopped using the constant for the same reason (2026-10-19);
+    gapietro's fork is where the readers' half turned up. The constant is
+    gone rather than kept beside this, so nothing can reach the
+    import-time value again, and tests/test_sandbox.py fails on any module-scope home lookup under pc/.
+
+    The ONE place the path is spelled in Python: the provider, `blink
+    status` and `blink uninstall` all ask here. Only the shell shim
+    (tools/blink-statusline.sh) writes it out separately, because it cannot
+    import this.
+    """
+    return os.path.expanduser("~/.blink/statusline.json")
+
+
 # How old the payload may get before we stop vouching for it.
 #
 # This was 120 s, and 120 s was wrong in kind, not just in value. Claude Code
@@ -34,13 +55,22 @@ PAYLOAD_PATH = os.path.expanduser("~/.blink/statusline.json")
 # both are checked below:
 #   - the window they describe resets, after which the reading is definitely
 #     wrong (usage went back to near zero and this file still says 47%).
-#     That is `_window_has_reset`, and it is exact rather than a guess.
+#     That is base.window_ended, and it is exact rather than a guess.
 #   - usage happens somewhere we cannot see -- claude.ai, the phone app --
 #     so an old reading can understate the truth. Nothing detects that, so
 #     this bound stays as the backstop. Half an hour is long enough that
 #     ordinary pauses are silent, short enough that a genuinely abandoned
 #     Claude Code is not presented as live.
 STALE_AFTER_S = 1800
+
+
+# Bounds for a reset stamp. The ceiling is codex_cli's and claude_desktop's
+# (2100-01-01; it would notice the unit changing to milliseconds). The floor is
+# 0 and not their 2020: a stamp in the past is how a window that has ended is
+# recognised (base.window_ended), so a long-past one is evidence and not noise,
+# and what is refused here is only what is not a time at all.
+RESET_EPOCH_MIN = 0
+RESET_EPOCH_MAX = 4_102_444_800
 
 
 def _window(rate_limits: dict, key: str):
@@ -65,8 +95,25 @@ def _window(rate_limits: dict, key: str):
         # object present but missing its percentage is the likeliest shape of
         # a payload change, so it is the case worth getting right.
         pct = -1.0
+    # Finite and 0..1000, as the Desktop and Codex readers already require
+    # (1000 and not 100: overage carries a window past its limit). json reads
+    # 1e999 as infinity, and an infinite percentage reached the merge, where
+    # inf - inf is NaN and max() of nothing raised, so one corrupt number in
+    # statusline.json took the whole poll -- the Codex page too -- down.
+    # NaN fails both comparisons, so it lands here as well.
+    if not (0 <= pct <= 1000):
+        pct = -1.0
     resets = w.get("resets_at")
-    return pct, resets if isinstance(resets, (int, float)) else None
+    # A real reset stamp only, bounded like the Codex and Desktop readers'.
+    # json reads 1e999 as infinity and NaN as NaN, and two
+    # infinite stamps made the merge's same-window test false even for a
+    # frame against itself, which emptied max() and took every provider's
+    # usage down with a perfectly good percentage beside it. A bool is an int
+    # to isinstance and not a time. Unknown, like an absent stamp.
+    if (isinstance(resets, bool) or not isinstance(resets, (int, float))
+            or not (RESET_EPOCH_MIN <= resets <= RESET_EPOCH_MAX)):
+        resets = None
+    return pct, resets
 
 
 # _secs_until moved to protocol.secs_until when a second provider needed the
@@ -75,73 +122,11 @@ def _window(rate_limits: dict, key: str):
 _secs_until = protocol.secs_until
 
 
-def _window_has_reset(resets_at, now_epoch: float) -> bool:
-    """True once the window this reading describes has rolled over.
-
-    At that moment the percentage is not merely old, it is wrong: usage went
-    back to near zero and the file still says whatever it said. Age cannot
-    detect this -- a reading taken one minute before a reset is stale the
-    moment the reset lands -- so it is checked directly.
-    """
-    return resets_at is not None and now_epoch >= resets_at
-
-
-def _rolled_over(pct: float, resets_at, now_epoch: float, stale: bool):
-    """Carry a window across its own reset instead of disowning the reading.
-
-    A window that has just reset is at 0%. That is not an estimate -- it is
-    what resetting means -- so there is a better answer available than "this
-    number may be wrong", which is what marking the message stale says.
-
-    It matters because the payload is only rewritten when Claude Code renders
-    its status line. Between a reset at 03:00 and its owner sitting down at
-    09:00, the old behaviour left the panel amber for six hours, announcing a
-    problem that did not exist. Observed 2026-08-22: a five-hour window rolled
-    over, the board flagged the whole message stale, and the weekly figure --
-    which was perfectly good -- was dragged down with it.
-
-    The reset time goes back to unknown rather than being guessed forward: the
-    next five-hour window does not start until the next message, so there is
-    no honest number to put there until Claude Code tells us one.
-
-    STALENESS CHANGES THE ANSWER BUT NOT THE QUESTION, and getting that
-    backwards was a field defect (reproduced 2026-09-02). This used to be
-    skipped entirely on an old payload, on the reasoning that a three-day-old
-    file has a long-past resets_at and any amount of usage may have happened
-    since, so 0% would be the lie. The first half of that is right and the
-    fallback it took was not: skipping the check did not fall back to
-    "unknown", it fell back to the PRE-RESET percentage, which is not merely
-    unvouched-for but definitely wrong -- and it threw away the rollover
-    evidence with it, so a Claude Desktop sample taken before the same reset
-    came back to the dial wearing its own stale=False. Two seconds either side
-    of STALE_AFTER_S the panel went from a correct 0% to a confident green 78%
-    for usage that had already been forgiven.
-
-    So all three outputs are decided separately now:
-
-      - The EPOCH the window emptied is reported either way. It is evidence
-        about the past, and evidence does not rot with the file's mtime: the
-        window ended when it ended, whatever age the reading has since
-        reached. pc/normalizer needs it to refuse a newer reading from a
-        source that cannot see reset times (this frame's own observed_at is
-        the payload's mtime and can be long before the reset, so nothing else
-        in the frame can carry that fact).
-      - The RESET TIME is discarded either way. A stamp the clock has already
-        passed is not a countdown -- protocol.secs_until refuses it -- and
-        merge() reads its mere presence as "a source supplied a reset time",
-        which silences the desktop burn rate. Neither is worth keeping for a
-        window that has ended.
-      - The PERCENTAGE is 0.0 only while the reading is fresh. On a stale one
-        it goes to UNKNOWN, which is the third option the old comment was
-        missing: it does not zero an old payload, and it does not re-offer a
-        number for a window that no longer exists. It is also the convention
-        _window() already sets two functions up -- an absent percentage reads
-        as -1 and not as a confident zero -- applied to a percentage we have
-        positive evidence against rather than merely none for.
-    """
-    if not _window_has_reset(resets_at, now_epoch):
-        return pct, resets_at, None
-    return (base.UNKNOWN if (stale or pct < 0) else 0.0), None, resets_at
+# What happens to a window once its reset has passed is decided in
+# pc/providers/base (window_ended, settle_window), along with the reasons.
+# It was written here first and moved on 2026-10-01, when a Codex rollout
+# turned out to hold a pre-reset figure in exactly the same way -- the
+# case DevOceanIT brought from their own desk.
 
 
 def map_statusline_frame(payload: dict, now_epoch: float,
@@ -164,22 +149,21 @@ def map_statusline_frame(payload: dict, now_epoch: float,
     # Staleness is age, and only age. A window resetting used to set this too,
     # which conflated two different facts: "we cannot vouch for this reading"
     # and "this reading has been superseded by a zero we can compute". The
-    # second has a real answer, so it gets one -- see _rolled_over().
+    # second has a real answer, so it gets one -- see base.settle_window().
     stale = (now_epoch - mtime_epoch) > STALE_AFTER_S
     # Unconditional, and `stale` is an INPUT to it rather than a gate on it:
     # whether a window has ended is a question about the clock, not about the
-    # file's age, and only the answer's third value depends on how old the
-    # reading is. See _rolled_over().
-    session_pct, session_resets, session_rolled = _rolled_over(
-        session_pct, session_resets, now_epoch, stale)
-    weekly_pct, weekly_resets, weekly_rolled = _rolled_over(
-        weekly_pct, weekly_resets, now_epoch, stale)
+    # file's age, and only the percentage it hands back depends on how old
+    # the reading is. See base.settle_window().
+    session = base.settle_window(session_pct, session_resets, now_epoch,
+                                 stale)
+    weekly = base.settle_window(weekly_pct, weekly_resets, now_epoch, stale)
 
     return base.NormalizedUsageFrame(
         provider=PROVIDER_ID, src=SRC_ID, observed_at=mtime_epoch,
-        session_rolled_at=session_rolled, weekly_rolled_at=weekly_rolled,
-        session_pct=session_pct, session_resets_at=session_resets,
-        weekly_pct=weekly_pct, weekly_resets_at=weekly_resets,
+        session_rolled_at=session.ended_at, weekly_rolled_at=weekly.ended_at,
+        session_pct=session.pct, session_resets_at=session.resets_at,
+        weekly_pct=weekly.pct, weekly_resets_at=weekly.resets_at,
         stale=stale,
     )
 
@@ -191,8 +175,12 @@ def map_statusline(payload: dict, now_epoch: float, mtime_epoch: float) -> dict:
         map_statusline_frame(payload, now_epoch, mtime_epoch), now_epoch)
 
 
-def read_payload(path: str = PAYLOAD_PATH):
-    """(payload, mtime) or (None, None) when absent/unreadable/malformed."""
+def read_payload(path):
+    """(payload, mtime) or (None, None) when absent/unreadable/malformed.
+
+    The path has no default. A default was where the import-time path hid
+    (see payload_path), so every caller names the file it means.
+    """
     try:
         mtime = os.path.getmtime(path)
         # UTF-8 by name. Without it Windows opens the file in the machine's
@@ -205,13 +193,3 @@ def read_payload(path: str = PAYLOAD_PATH):
             return json.load(f), mtime
     except (OSError, ValueError):
         return None, None
-
-
-def make_fetch(path: str = PAYLOAD_PATH):
-    """Zero-arg callable for Bridge(fetch_usage=...). None when no data yet."""
-    def fetch():
-        payload, mtime = read_payload(path)
-        if payload is None:
-            return None
-        return map_statusline(payload, time.time(), mtime)
-    return fetch

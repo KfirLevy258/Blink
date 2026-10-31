@@ -32,6 +32,7 @@
 #include <zephyr/sys/printk.h>
 #include <lvgl.h>
 
+#include "theme.h"
 #include "ui_boot.h"
 #include "proto.h"
 #include "bootclip.h"
@@ -49,7 +50,18 @@ static lv_obj_t *scr;
 #define STRIP_BYTES 4096
 static uint8_t *strip_buf;
 
-/* Survives a warm reset; the magic guards against power-on garbage. */
+/* Survives a warm reset; the magic guards against power-on garbage.
+ *
+ * Survives it only by placement, though. MCUboot runs between the two boots
+ * and its own RAM overwrites the first ~22 KB of the app's .dram0.noinit
+ * (MCUboot's _end is 0x3ffed708, the section starts at 0x3ffe8000); this
+ * word sits past it because the stacks and the LVGL pool are linked first.
+ * The address moves with them: 0x3fff3000 with the 30 KB pool (2026-10-27),
+ * 0x3fff3800 with the 32 KB one (2026-10-28, release and inject maps). Check
+ * the map, not this comment, after changing either. If it ever lands lower, an
+ * intentional reboot plays the full splash again -- cosmetic, which is why
+ * it stays here. fatal.c's streak could not afford that and lives in RTC
+ * slow memory instead. */
 static __noinit uint32_t skip_magic;
 #define SKIP_MAGIC 0xb007512bu
 
@@ -203,11 +215,13 @@ void ui_boot_splash(void)
 
 	scr = lv_obj_create(NULL);
 	lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-	/* Intentional reboots wear the UI background, not the clip's clay:
+	/* Intentional reboots wear the UI background -- the THEME's, since a
+	 * dark frame between two white screens is the same betrayal -- not the
+	 * clip's clay:
 	 * even 300 ms of brand orange between two dark screens betrayed the
 	 * restart (user feedback 2026-07-16). Cold boots keep the clay so
 	 * the clip has its stage. */
-	lv_obj_set_style_bg_color(scr, skip ? lv_color_hex(0x0E1116)
+	lv_obj_set_style_bg_color(scr, skip ? lv_color_hex(theme_pal()->bg)
 					    : lv_color_hex(clip->bg_rgb), 0);
 	lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 	lv_scr_load(scr);

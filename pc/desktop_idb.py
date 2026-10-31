@@ -25,10 +25,8 @@ IndexedDB KEY and by nothing else: not the value, not the filesystem around
 it.
 """
 import math
-import os
-import sys
 
-from pc import cowork_audit, leveldb, v8_clone
+from pc import cowork_audit, desktop_paths, leveldb, v8_clone
 
 SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
@@ -51,15 +49,9 @@ _KEY_MARKERS = (b"cowork", b"c\x00o\x00w\x00o\x00r\x00k")
 
 
 def store_path() -> str:
-    leaf = os.path.join("IndexedDB", "https_claude.ai_0.indexeddb.leveldb")
-    if sys.platform == "darwin":
-        return os.path.expanduser(
-            "~/Library/Application Support/Claude/" + leaf)
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA") or os.path.expanduser(
-            "~\\AppData\\Roaming")
-        return os.path.join(appdata, "Claude", leaf)
-    return os.path.expanduser("~/.config/Claude/" + leaf)
+    """Claude Desktop's claude.ai IndexedDB, under the data folder
+    pc/desktop_paths finds (the Store build moves it)."""
+    return desktop_paths.indexeddb_dir()
 
 
 def _wanted_key(key: bytes) -> bool:

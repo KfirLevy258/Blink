@@ -46,7 +46,7 @@ def test_a_live_reading_is_returned_alone(tmp_path):
 # the clock has passed is proof the window ended, and a reading of a window
 # that has ended is not a reading anyone should be offered -- see
 # test_a_remembered_window_that_has_since_ended_is_not_re_offered below, and
-# pc/statusline_source._rolled_over for the argument.
+# pc/providers/base.settle_window for the argument.
 
 
 def test_the_last_reading_with_a_percentage_is_offered_when_the_file_loses_one(tmp_path):

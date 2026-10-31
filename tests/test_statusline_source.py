@@ -2,6 +2,7 @@ import json
 import pathlib
 
 from pc import statusline_source as ss
+from pc.providers import base
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "statusline_payload.json"
 
@@ -72,7 +73,7 @@ def test_a_past_reset_reads_unknown_not_zero():
     "this window just rolled over" and zeroes the percentage with it. That is
     right for the firmware's own countdown running out and wrong coming from
     here, because the only payload that reaches _secs_until with a past reset
-    is a stale one -- the case _rolled_over() deliberately refuses to zero.
+    is a stale one -- the case base.settle_window() deliberately refuses to zero.
     """
     assert ss._secs_until(1_787_100_000, 1_787_200_000) == -1
     assert ss._secs_until(1_787_300_000, 1_787_200_000) == 100_000
@@ -131,14 +132,14 @@ NOW = 1_787_900_000.0
 
 # --- the rollover, and the epoch it now reports ------------------------------
 #
-# Six tests pinning _rolled_over were deleted from this file on this branch,
+# Six tests pinning the rollover rule (now base.settle_window) were deleted from this file on this branch,
 # which is how the normalizer came to be able to discard the very mechanism
 # they covered. These re-pin it, including the field that fixes that.
 
 
 def test_a_reset_window_reads_zero_and_reports_when_it_emptied():
     at = NOW - 60
-    pct, resets, rolled = ss._rolled_over(47.0, at, NOW, stale=False)
+    pct, resets, rolled = base.settle_window(47.0, at, NOW, stale=False)
     assert pct == 0.0
     assert resets is None
     assert rolled == at, "the epoch is the evidence the normalizer needs"
@@ -151,13 +152,38 @@ def test_a_stale_reading_reports_the_rollover_it_watched_but_claims_no_zero():
     whole check on an old payload kept neither -- it kept the pre-reset 47%,
     which is the one answer that is definitely wrong."""
     at = NOW - 60
-    assert ss._rolled_over(47.0, at, NOW, stale=True) == (-1.0, None, at)
+    assert base.settle_window(47.0, at, NOW, stale=True) == (-1.0, None, at)
 
 
 def test_a_window_that_has_not_reset_is_untouched():
     at = NOW + 3600
-    assert ss._rolled_over(47.0, at, NOW, stale=False) == (47.0, at, None)
-    assert ss._rolled_over(47.0, at, NOW, stale=True) == (47.0, at, None)
+    assert base.settle_window(47.0, at, NOW, stale=False) == (47.0, at, None)
+    assert base.settle_window(47.0, at, NOW, stale=True) == (47.0, at, None)
+
+
+def test_a_window_ends_at_its_reset_second_not_after_it():
+    """The boundary belongs to the new window, and no reset time is no end."""
+    assert base.window_ended(NOW, NOW) is True
+    assert base.window_ended(NOW + 1, NOW) is False
+    assert base.window_ended(None, NOW) is False
+
+
+def test_a_nan_percentage_settles_like_any_other_fresh_reading():
+    """NaN compares false both ways. The rule has always been "unknown only
+    if stale or negative", so a fresh NaN past its reset is 0.0, and a stale
+    one is unknown; a rewrite that asked "is it >= 0" flipped the first."""
+    nan = float("nan")
+    assert base.settle_window(nan, NOW - 60, NOW, stale=False) == (
+        0.0, None, NOW - 60)
+    assert base.settle_window(nan, NOW - 60, NOW, stale=True) == (
+        -1.0, None, NOW - 60)
+
+
+def test_a_settled_window_is_read_by_field_name():
+    """Callers (codex_cli, this module) read .pct / .resets_at / .ended_at,
+    so the order of the tuple and the names have to agree."""
+    w = base.settle_window(47.0, NOW - 60, NOW, stale=False)
+    assert (w.pct, w.resets_at, w.ended_at) == (0.0, None, NOW - 60)
 
 
 def test_an_unknown_percentage_is_never_zeroed():
@@ -165,19 +191,19 @@ def test_an_unknown_percentage_is_never_zeroed():
     would have described has ended. The stamp still goes -- it is past, so it
     is neither a countdown nor a reset time anyone has -- and the rollover is
     still reported, because that much IS known."""
-    assert ss._rolled_over(-1.0, NOW - 60, NOW, stale=False) == (
+    assert base.settle_window(-1.0, NOW - 60, NOW, stale=False) == (
         -1.0, None, NOW - 60)
 
 
 def test_no_reset_time_means_no_rollover_claim():
-    assert ss._rolled_over(47.0, None, NOW, stale=False) == (47.0, None, None)
-    assert ss._rolled_over(47.0, None, NOW, stale=True) == (47.0, None, None)
+    assert base.settle_window(47.0, None, NOW, stale=False) == (47.0, None, None)
+    assert base.settle_window(47.0, None, NOW, stale=True) == (47.0, None, None)
 
 
 # --- restored ---------------------------------------------------------------
 #
-# These were deleted on the multi-provider branch and only _rolled_over() was
-# re-pinned in their place, which left the freshness gate, the reset-to-zero
+# These were deleted on the multi-provider branch and only the rollover rule
+# was re-pinned in their place, which left the freshness gate, the reset-to-zero
 # rule, the real capture and the read paths untested. The assertions on a
 # `models` key are gone with the key itself.
 
@@ -208,11 +234,6 @@ def test_read_payload_malformed_json_returns_none_none(tmp_path):
     payload, mtime = ss.read_payload(str(bad))
     assert payload is None
     assert mtime is None
-
-
-def test_make_fetch_returns_none_with_no_payload(tmp_path):
-    fetch = ss.make_fetch(str(tmp_path / "does_not_exist.json"))
-    assert fetch() is None
 
 
 def test_a_short_pause_is_not_stale():
@@ -286,3 +307,52 @@ def test_a_payload_of_the_wrong_shape_is_silence_not_an_exception():
             else ss.map_statusline({"payload": bad}, now, now)
         assert msg["session_pct"] == -1.0, bad
         assert msg["weekly_pct"] == -1.0, bad
+
+
+# --- where the payload is read from -----------------------------------------
+#
+# The path used to be expanduser'd into a module constant, and the readers took
+# that constant as a default argument: both evaluated at import, before
+# tests/conftest.py moves HOME. So in a test process the no-argument readers
+# named the developer's real ~/.blink/statusline.json -- the sandbox hole
+# CLAUDE.md describes; gapietro's fork turned it up. tests/test_sandbox.py
+# now checks the whole of pc/ for that shape.
+
+
+def test_the_payload_path_is_resolved_when_asked_not_at_import(tmp_path,
+                                                               move_home):
+    first, second = tmp_path / "first", tmp_path / "second"
+    move_home(first)
+    assert pathlib.Path(ss.payload_path()) == first / ".blink" / "statusline.json"
+    move_home(second)
+    assert pathlib.Path(ss.payload_path()) == second / ".blink" / "statusline.json"
+
+
+def test_read_payload_has_no_default_path_to_fall_back_on():
+    """A default is where the import-time path hid. With none, every caller
+    names the file, and the one that wants the real file asks payload_path().
+    make_fetch, the other no-argument reader, had no production caller left
+    (pc/ingest builds the fetch) and is gone with it."""
+    import inspect
+    path = inspect.signature(ss.read_payload).parameters["path"]
+    assert path.default is inspect.Parameter.empty
+    assert not hasattr(ss, "make_fetch")
+
+
+def test_the_cli_provider_follows_home_on_every_poll(tmp_path, move_home):
+    """ClaudeCliProvider() as pc/ingest builds it -- no path given -- and
+    built BEFORE home moves. Resolving once at construction is the same hole
+    one step later, for an object that lives as long as the daemon does."""
+    from pc.providers import claude_cli
+    empty, planted = tmp_path / "empty", tmp_path / "planted"
+    move_home(empty)
+    prov = claude_cli.ClaudeCliProvider()
+    assert prov.poll(1_000_000) == []
+
+    (planted / ".blink").mkdir(parents=True)
+    (planted / ".blink" / "statusline.json").write_text(json.dumps({
+        "rate_limits": {"five_hour": {"used_percentage": 41.0}}}))
+    move_home(planted)
+    assert pathlib.Path(prov.path()) == planted / ".blink" / "statusline.json"
+    frame, = prov.poll(1_000_000)
+    assert frame.session_pct == 41.0

@@ -44,6 +44,11 @@ static const char *after_colon(const char *json, const char *key)
 	return NULL;
 }
 
+const char *msg_find_value(const char *json, const char *key)
+{
+	return after_colon(json, key);
+}
+
 bool msg_get_str(const char *json, const char *key, char *buf, size_t buflen)
 {
 	const char *p = after_colon(json, key);

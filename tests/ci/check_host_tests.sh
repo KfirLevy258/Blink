@@ -88,23 +88,39 @@ run_one() {
 echo "== firmware host tests"
 run_one backlight    ""                ""
 run_one bootanim     "bootanim_dec.c"  ""
+# cfg_store.c unchanged against a RAM flash; the stubs stand in for Zephyr.
+# CFG_STUB_CAPTURE keeps its log lines for the boot-line check.
+run_one cfg_store    "cfg_store.c"     "-I$ROOT/tests/cfg_store/stub -DCFG_STUB_CAPTURE"
+# "Edit on computer" held while its builder is open: every way out of it.
+run_one edit_hold    "edit_hold.c theme.c msg_parse.c" "-lm"
+run_one fatal_policy "fatal_policy.c"  ""
 run_one fmt          "fmt.c"           ""
 run_one logo         "logo_parse.c bootanim_dec.c" ""
 run_one msg_parse    "msg_parse.c"     ""
-run_one oauth        "oauth.c"         "-DOAUTH_HOST_TEST"
 run_one ota_parse    "ota_parse.c"     ""
 run_one sleep_gate   "sleep_gate.c usage_freshness.c" ""
+run_one theme        "theme.c msg_parse.c" "-lm"
+# ui_theme.c and cfg_store.c unchanged, on cfg_store's RAM flash; the test
+# file stands in for proto, the screens and LVGL's timer.
+run_one ui_theme     "ui_theme.c cfg_store.c theme.c msg_parse.c" \
+	"-I$ROOT/tests/ui_theme/stub -I$ROOT/tests/cfg_store/stub -lm"
 run_one ui_slide_geom ""               ""
 run_one ui_swipe_geom ""               ""
+# The bench touch injector (CONFIG_BLINK_TOUCH_INJECT): its transform against
+# the LVGL glue, and its strokes against ui_swipe's own rules.
+run_one touch_inject ""                ""
+# Its widget listing's wire format: the worst page fits, a label needs no
+# escaping, the aim grid finds a strip beside a popup.
+run_one touch_widgets ""               ""
 run_one upd_prompt  "upd_prompt.c"    ""
 run_one upd_row     "upd_row.c"       ""
 run_one upd_tap     "upd_tap.c"       ""
 run_one whatsnew    "whatsnew.c ota_parse.c" ""
-run_one usage_contrast ""              "-lm"
+run_one usage_contrast "theme.c msg_parse.c" "-lm"
 run_one usage_freshness "usage_freshness.c" ""
 run_one usage_layout ""                ""
-run_one usage_parse  "usage_parse.c"   ""
 run_one usage_state  "usage_state.c"   ""
+run_one svc_state    "svc_state.c fmt.c" ""
 
 if [ "$failures" -ne 0 ]; then
 	printf '\n%d host test(s) failed\n' "$failures" >&2

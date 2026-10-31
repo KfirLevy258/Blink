@@ -1,0 +1,1249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>BLINK theme builder</title>
+<!--
+  Served by pc/theme_server.py from 127.0.0.1 only. Self-contained on purpose:
+  no fonts, scripts or styles from anywhere else, so it works on a desk with no
+  network and the server's Content-Security-Policy can forbid every outside
+  request. Built from the published design (claude.ai artifact
+  WG9LpsFRVuL7R6JsbwDUhB, 2026-10-25); the share code is the wire contract's
+  JSON form, not the design's packed bytes.
+-->
+<style>
+/*
+  The page wears the board's own themes: Dark (firmware/src/theme.c, id 0)
+  first, because that is what a new board shows, and Light (id 9) when the
+  computer asks for light. --bad is the board's red, for borders. Words in
+  red take --bad-text: the board's #E74C3C measures 4.57:1 on the dark
+  card, a hair over the 4.5:1 small text needs, and 6.9:1 for the lighter
+  red. The marks in Checks are 11 px on a coloured chip, and white on the
+  board's red measured 3.8:1, so the NO chip is dark ink on --bad-text in
+  dark (7.4:1) and white on the board's light red in light (5.6:1). Dark
+  ink on the light scheme's amber measured 3.2:1, so --on-warn is white
+  there (5.9:1). --line is a hairline between parts of the page, at about
+  1.25:1; a box that takes typing is drawn in --edge instead, 3.3:1 on the
+  card and 3.4:1 on the sunk ground in dark, 3.6:1 and 3.4:1 in light,
+  since WCAG 1.4.11 asks 3:1 of the edge that says "this is a field" and
+  the empty paste box read as no box at all (review of fp/builder-look, N2).
+  The page's chrome sits under a header whose height is --top-h; the
+  script keeps it to the header as drawn (review, S4).
+*/
+:root {
+  --top-h: 80px;
+  --bg: #0E1116; --card: #161A20; --sunk: #12151A; --line: #272C34; --edge: #646C76;
+  --text: #E6E8EB; --dim: #8A9199; --ok: #2ECC71; --ok-text: #2ECC71; --warn: #F1C40F; --on-warn: #0E1116;
+  --bad: #E74C3C; --bad-text: #FF7A6E; --on-bad: #0E1116; --accent: #2ECC71; --on-accent: #0E1116; --focus: #2ECC71;
+  --shadow: rgba(0,0,0,.55); --scrim: rgba(5,6,8,.72); color-scheme: dark;
+  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {
+  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
+  --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
+  --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
+  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; } }
+:root[data-theme="light"] {
+  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
+  --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
+  --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
+  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; }
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+button, input { font: inherit; color: inherit; }
+h1, h2 { margin: 0; }
+code { font-family: var(--mono); font-size: .875em; background: var(--sunk); border: 1px solid var(--line); padding: 1px 6px; border-radius: 6px; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.icon { width: 18px; height: 18px; flex: none; }
+.eyebrow { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); }
+.lede { color: var(--dim); margin: 0; max-width: 68ch; }
+.desc { color: var(--dim); margin: 6px 0 0; font-size: 14px; }
+
+/* Every button, segment, swatch and box is at least 44 px tall: the page
+   is opened from the board, and as often as not on a touch laptop. The
+   segment buttons were 42 px and the claim was here regardless (review of
+   fp/builder-look, S6); tests/pc/test_theme_page.py reads each control's
+   rule now, rather than finding "44px" somewhere in the file. */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 18px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 15px; cursor: pointer; white-space: nowrap;
+  transition: background-color .2s ease, border-color .2s ease, color .2s ease, opacity .2s ease; }
+.btn:hover:not(:disabled) { border-color: var(--dim); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover:not(:disabled) { border-color: var(--text); }
+.btn.ghost { background: transparent; }
+.btn.small { padding: 0 12px; font-size: 14px; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+/* Until /api/state answers, the form is off (see "loaded" in the script),
+   and a preset or a segment button has no disabled look of its own, so the
+   controls dim -- the controls only. The whole studio at .6 put the dim
+   text (the lede, each .desc, the slot hints) at 2.6 to 2.9:1, from 5.5 to
+   7.0:1, in both schemes (review of fp/save-before-load, N2); the words
+   that say what the page is for stay as they are. .btn has its own
+   disabled look and is left to it. "waiting" comes 150 ms after the page
+   runs and not with it, so a state answered on loopback in a few
+   milliseconds does not flash the controls dim for a frame (N3). A class
+   set late and not an animation delay: the notice's fade is the one
+   motion here, and reduced motion takes every animation away. */
+.studio.waiting button:not(.btn), .studio.waiting input { opacity: .5; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* The status says how it went in its icon and colour as well as its words. */
+.status { display: flex; gap: 8px; align-items: flex-start; color: var(--dim); font-size: 15px; min-width: 0; transition: color .2s ease; }
+.status .icon { margin-top: 2px; display: none; }
+.status .s-info { display: block; }
+.status.ok { color: var(--text); } .status.ok .s-info { display: none; } .status.ok .s-ok { display: block; color: var(--ok); }
+.status.err { color: var(--bad-text); } .status.err .s-info { display: none; } .status.err .s-err { display: block; }
+
+/* The board, framed as a device so the preview reads as the panel on the
+   desk and not as one more picture on a page. */
+.device { margin: 0; position: relative; padding: clamp(12px, 2.4vw, 26px); border-radius: clamp(16px, 2.6vw, 30px);
+  background: linear-gradient(155deg, #2A2F37 0%, #16191E 55%, #0B0D10 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 0 0 1px rgba(255,255,255,.04), 0 40px 80px -40px var(--shadow), 0 12px 24px -12px var(--shadow); }
+.device::after { content: ""; position: absolute; right: -5px; top: 44%; width: 5px; height: 30px; border-radius: 0 3px 3px 0; background: #2A2F37; }
+.screen { border-radius: 4px; overflow: hidden; box-shadow: 0 0 0 2px #050608, 0 0 0 3px rgba(255,255,255,.05); }
+.screen svg { display: block; width: 100%; height: auto; }
+
+.view { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--sunk); }
+.seg button { min-height: 44px; min-width: 44px; padding: 0 14px; border: 0; background: transparent; color: var(--dim); font-size: 15px; font-weight: 500; cursor: pointer;
+  transition: background-color .2s ease, color .2s ease; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button:hover { color: var(--text); }
+.seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+.seg button:focus-visible { outline-offset: -3px; }
+.slider { display: flex; align-items: center; gap: 10px; font-size: 15px; color: var(--dim); min-width: 0; }
+.slider input { width: 120px; height: 44px; margin: 0; accent-color: var(--accent); }
+.slider output { font: 14px var(--mono); color: var(--text); min-width: 40px; font-variant-numeric: tabular-nums; }
+
+/* A built-in as a small board: its ground, a text line, and its three
+   level colours, drawn from the injected list (the script sets them). */
+.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
+.preset { display: flex; flex-direction: column; gap: 8px; padding: 8px 8px 10px; min-height: 44px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--card); text-align: left; cursor: pointer; transition: border-color .2s ease, box-shadow .2s ease; }
+.preset:hover { border-color: var(--dim); }
+/* --focus, not --accent: the board's green on a white card is 2.1:1, under
+   the 3:1 a state needs; the light focus green is 3.5:1 (review, N1). */
+.preset[aria-pressed="true"] { border-color: var(--focus); box-shadow: inset 0 0 0 1px var(--focus); }
+.preset .pn { font-size: 14px; font-weight: 600; line-height: 1.25; padding: 0 2px; }
+.sw { position: relative; display: block; height: 48px; border-radius: 7px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(128,128,128,.28); }
+.sw i { position: absolute; display: block; border-radius: 2px; }
+.sw .sw-text { top: 9px; left: 9px; width: 38%; height: 4px; }
+.sw .sw-low, .sw .sw-mid, .sw .sw-high { bottom: 9px; height: 7px; width: calc((100% - 30px) / 3); }
+.sw .sw-low { left: 9px; } .sw .sw-mid { left: calc(12px + (100% - 30px) / 3); } .sw .sw-high { left: calc(15px + 2 * (100% - 30px) / 3); }
+
+.slots { display: grid; }
+.slot { display: grid; grid-template-columns: 44px minmax(0, 1fr) 112px; column-gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); transition: opacity .2s ease; }
+.slot:last-child { border-bottom: 0; }
+.slot input[type=color] { width: 44px; height: 44px; padding: 0; border: 1px solid var(--edge); border-radius: 10px; background: none; cursor: pointer; }
+.slot input[type=color]::-webkit-color-swatch-wrapper { padding: 3px; }
+.slot input[type=color]::-webkit-color-swatch { border: 0; border-radius: 7px; }
+.slot input[type=color]::-moz-color-swatch { border: 0; border-radius: 7px; }
+.slot label { font-weight: 600; font-size: 15px; line-height: 1.3; }
+.slot small { display: block; color: var(--dim); font-size: 13px; font-weight: 400; margin-top: 2px; }
+.slot input[type=text], .paste input { font: 15px var(--mono); width: 100%; min-height: 44px; padding: 0 10px; border: 1px solid var(--edge); border-radius: 10px; background: var(--sunk); color: var(--text); transition: border-color .2s ease; }
+.slot input[type=text] { text-transform: uppercase; letter-spacing: .02em; }
+.slot input[type=text]:hover, .paste input:hover { border-color: var(--dim); }
+[aria-invalid="true"] { border-color: var(--bad) !important; }
+.slot.off { opacity: .45; }
+/* A field's own message sits under it, across the label and the box. */
+.slot .fmsg { grid-column: 2 / -1; }
+.fmsg { margin: 6px 0 0; font-size: 14px; line-height: 1.4; }
+.fmsg:empty { display: none; }
+.f-ok { color: var(--ok-text); } .f-warn { color: var(--warn); } .f-bad { color: var(--bad-text); }
+
+.band { display: grid; grid-template-columns: repeat(3, 1fr); height: 8px; border-radius: 4px; overflow: hidden; margin: 14px 0 4px; }
+.bandl { display: grid; grid-template-columns: repeat(3, 1fr); font: 12px var(--mono); color: var(--dim); }
+.bandl span:nth-child(2) { text-align: center; } .bandl span:last-child { text-align: right; }
+.note { font-size: 14px; color: var(--dim); margin: 10px 0 0; }
+
+.opts { display: grid; gap: 12px; }
+.opt { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 12px; align-items: center; }
+.opt .seg { justify-self: start; }
+.olabel { font-size: 15px; color: var(--dim); }
+
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 15px; }
+.checks li { display: flex; gap: 10px; align-items: baseline; }
+.mark { font: 700 11px/1 var(--mono); letter-spacing: .04em; padding: 4px 7px; border-radius: 5px; flex: none; color: var(--on-accent); }
+.m-ok { background: var(--ok); } .m-warn { background: var(--warn); color: var(--on-warn); } .m-bad { background: var(--bad-text); color: var(--on-bad); }
+
+.code, .cmd { font: 14px/1.6 var(--mono); background: var(--sunk); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+/* anywhere, not break-all: the built-in sentence breaks at its spaces and
+   only the share code itself, one long word, breaks inside. */
+.code { overflow-wrap: anywhere; }
+.cmd { white-space: pre; overflow-x: auto; }
+.cmd .k { color: var(--dim); } .cmd .v { color: var(--ok-text); }
+.paste { display: flex; gap: 8px; margin-top: 14px; }
+.paste input { flex: 1 1 auto; min-width: 0; }
+.termhead { display: flex; align-items: center; gap: 8px; margin: 22px 0 8px; font-weight: 600; font-size: 15px; }
+.termhead .btn { margin-left: auto; }
+
+/* ---------------------------------------------------------------- layout */
+.top { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px clamp(16px, 3vw, 40px);
+  background: var(--bg); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand .icon { width: 26px; height: 26px; color: var(--ok); }
+.brand h1 { font-size: 18px; font-weight: 650; letter-spacing: -.01em; }
+.top .status { flex: 1 1 280px; }
+.studio { display: grid; grid-template-columns: minmax(0, 1fr) 460px; align-items: start; }
+.stage { position: sticky; top: var(--top-h); min-height: calc(100vh - var(--top-h)); display: grid; place-items: center; padding: 32px clamp(16px, 4vw, 64px);
+  background: radial-gradient(60% 55% at 50% 42%, color-mix(in srgb, var(--text) 7%, transparent), transparent 70%); }
+/* The device is sized by the window's height as well as its width, so the
+   Checks under it are in view on a laptop. Sized by width alone, it was
+   967 px of stage in a 900 px window at 1440x900, and the Checks list sat
+   below the fold through the whole scroll (review of fp/builder-look, S3).
+   The 420 px is what stands beside the screen at 1440x900, measured: the
+   view row (98, on two lines), the lede (68), three checks (89), the gaps
+   (60), the stage's padding (64) and the frame round the screen (about
+   13 over 3/4 of its width), with some 20 px spare for a check that wraps.
+   4/3 is the panel's shape. The floor keeps a short window from shrinking
+   it to a stamp. The Checks come before the lede, so it is the lede and
+   not a check that a window too short for both leaves below the fold: with
+   every warning showing, the checks wrap to five lines. */
+.stage-inner { width: 100%; max-width: clamp(420px, calc((100vh - var(--top-h) - 420px) * 4 / 3), 780px); display: grid; gap: 20px; }
+.stage .view { justify-content: center; }
+.stage .lede { text-align: center; margin: 0 auto; font-size: 15px; }
+.stage .checks { max-width: 560px; margin: 0 auto; width: 100%; }
+.inspector { background: var(--card); border-left: 1px solid var(--line); min-height: calc(100vh - var(--top-h)); }
+.group { padding: 24px 28px; border-bottom: 1px solid var(--line); }
+.group h2 { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); margin-bottom: 16px; }
+.inspector .presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.colours .opt { margin-bottom: 6px; }
+@media (max-width: 1100px) {
+  .studio { grid-template-columns: minmax(0, 1fr); }
+  .stage { position: static; min-height: 0; padding: 32px 16px; }
+  .inspector { border-left: 0; border-top: 1px solid var(--line); min-height: 0; }
+  .inspector .presets { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
+}
+@media (max-width: 640px) {
+  .top { position: static; }
+  .top .actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .top .actions #copy-code { grid-column: 1 / -1; }
+  .group { padding: 20px 16px; }
+  .slider input { width: 100%; } .slider { flex: 1 1 100%; } .slider span { width: 64px; flex: none; }
+  .opt { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .slot { grid-template-columns: 44px minmax(0, 1fr) 100px; }
+}
+/* The popup a tab shows once it is no longer the live builder: saved,
+   cancelled, taken over by a newer tab, or the builder gone. A browser
+   refuses window.close() on most tabs it did not open by script, so the
+   status bar's last word was all an old tab said, in 15 px at the top of a
+   page that still looked live (the owner's report, 2026-10-29). It was
+   taken out for a status line on 2026-10-31 and put back the same day,
+   with the countdown inside it: the owner wanted the ending said where the
+   eye is, not at the top (2026-10-31, "lets do this in the popup"). The
+   card is drawn in the page's own tokens, so its words measure as the
+   page's do: --text on --card 14.2:1 dark and 18.5:1 light, --dim on
+   --card 5.5:1 and 7.0:1, the primary button 9.0:1. The scrim only dims;
+   nothing is read through it. Its fade is the one motion here, and the
+   reduced-motion rule below takes it away. */
+.notice { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px; background: var(--scrim); animation: notice-in .2s ease; }
+.notice[hidden] { display: none; }
+.notice-card { width: 100%; max-width: 440px; display: grid; gap: 12px; padding: 28px; border-radius: 16px; border: 1px solid var(--line);
+  background: var(--card); color: var(--text); box-shadow: 0 24px 64px -24px var(--shadow); }
+/* Focus is put on the card itself, as the dialog, so that a screen reader
+   reads its heading and words; it is not a control, and a ring round the
+   whole card on opening read as a fault. Its buttons keep the page's ring. */
+.notice-card:focus { outline: none; }
+.notice-card h2 { font-size: 20px; font-weight: 650; line-height: 1.3; letter-spacing: -.01em; }
+.notice-card p { margin: 0; }
+.notice-card .n-end { color: var(--dim); }
+.notice-card .btn { justify-self: start; }
+/* .btn sets its own display, which outranks the hidden attribute. */
+.notice-card [hidden] { display: none; }
+@keyframes notice-in { from { opacity: 0; } to { opacity: 1; } }
+@media (max-width: 640px) { .notice-card { padding: 22px 18px; } .notice-card .btn { justify-self: stretch; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<!--
+  Laid out as a product shot (the owner's pick of three directions,
+  2026-10-29): the board is the largest thing on the page and stays in view
+  while the panel beside it scrolls, because every control is judged by what
+  it does to the panel. Icons are inline and drawn in currentColor, so the
+  page fetches nothing and every icon follows the light or dark scheme.
+-->
+<header class="top">
+  <div class="brand">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M7 15a5 5 0 0 1 10 0"/></svg>
+    <div><span class="eyebrow">BLINK</span><h1>Theme builder</h1></div>
+  </div>
+  <div class="status" id="status" role="status" aria-live="polite">
+    <svg class="icon s-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/></svg>
+    <svg class="icon s-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>
+    <svg class="icon s-err" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
+    <span id="status-text">Loading your current theme. You can make changes once it is here.</span>
+  </div>
+  <div class="actions">
+    <button type="button" class="btn primary" id="save" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Save to board</span></button>
+    <button type="button" class="btn" id="cancel"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg><span>Cancel</span></button>
+    <button type="button" class="btn ghost" id="copy-code"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
+  </div>
+</header>
+
+<main class="studio" aria-busy="true">
+  <section class="stage" aria-label="Preview">
+    <div class="stage-inner">
+      <figure class="device">
+        <div class="screen"><svg id="scr" viewBox="0 0 320 240" role="img" aria-label="Preview of the board screen"></svg></div>
+        <figcaption class="visually-hidden">The board, 320 by 240</figcaption>
+      </figure>
+      <div class="view">
+        <div class="seg" role="group" aria-label="Screen">
+          <button type="button" data-v="gauges" aria-pressed="true">Gauges</button>
+          <button type="button" data-v="focus" aria-pressed="false">Focus mode</button>
+        </div>
+        <div class="seg" role="group" aria-label="Focus window">
+          <button type="button" data-f="session" aria-pressed="true">Session</button>
+          <button type="button" data-f="weekly" aria-pressed="false">Weekly</button>
+        </div>
+        <label class="slider" for="p1"><span>Session</span><input type="range" id="p1" min="0" max="100" value="42"><output id="o1">42%</output></label>
+        <label class="slider" for="p2"><span>Weekly</span><input type="range" id="p2" min="0" max="100" value="91"><output id="o2">91%</output></label>
+      </div>
+      <ul class="checks" id="checks" aria-label="Checks"></ul>
+      <p class="lede">Pick a theme or choose the seven colours. Your board shows each change as a preview, without keeping it. Save keeps it on the board; Cancel, closing this tab, or ten minutes without a change puts the board back as it was.</p>
+    </div>
+  </section>
+
+  <aside class="inspector" aria-label="Theme settings">
+    <section class="group">
+      <h2>Built-in themes</h2>
+      <div class="presets" id="presets"></div>
+    </section>
+
+    <section class="group colours">
+      <h2>Colours</h2>
+      <div class="opt"><span class="olabel">Arc colour</span>
+        <div class="seg" role="group" aria-label="Arc colour">
+          <button type="button" data-m="level" aria-pressed="true">By level</button>
+          <button type="button" data-m="gauge" aria-pressed="false">Per gauge</button>
+        </div>
+      </div>
+      <div class="slots" id="slots"></div>
+      <div class="band" id="band" aria-hidden="true"></div>
+      <div class="bandl" aria-hidden="true"><span>0</span><span>60%</span><span>90% · 100</span></div>
+      <p class="note" id="modenote"></p>
+    </section>
+
+    <section class="group">
+      <h2>Arcs and dot</h2>
+      <div class="opts">
+        <div class="opt"><span class="olabel">Arc thickness</span><div class="seg" role="group" aria-label="Arc thickness">
+          <button type="button" data-w="5" aria-pressed="false">Thin</button><button type="button" data-w="12" aria-pressed="true">Normal</button><button type="button" data-w="22" aria-pressed="false">Thick</button></div></div>
+        <div class="opt"><span class="olabel">Arc ends</span><div class="seg" role="group" aria-label="Arc ends">
+          <button type="button" data-e="round" aria-pressed="true">Round</button><button type="button" data-e="flat" aria-pressed="false">Flat</button></div></div>
+        <div class="opt"><span class="olabel">Moving dot</span><div class="seg" role="group" aria-label="Moving dot">
+          <button type="button" data-d="on" aria-pressed="true">Show</button><button type="button" data-d="off" aria-pressed="false">Hide</button></div></div>
+      </div>
+    </section>
+
+    <section class="group">
+      <h2>Share code</h2>
+      <div class="code" id="code"></div>
+      <p class="desc">The same theme as one code, for <code>blink theme set &lt;code&gt;</code> on another desk, or to post for other people.</p>
+      <div class="paste">
+        <label class="visually-hidden" for="paste">Share code to load</label>
+        <input type="text" id="paste" placeholder="Paste a share code (BT1.…)" spellcheck="false" autocomplete="off" aria-describedby="m-paste">
+        <button type="button" class="btn" id="load"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span>Load</span></button>
+      </div>
+      <p class="fmsg" id="m-paste" aria-live="polite"></p>
+      <div class="termhead">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+        <span>The same from a terminal</span>
+        <button type="button" class="btn small ghost" id="copy-cmd"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy</span></button>
+      </div>
+      <div class="cmd" id="cmd"></div>
+      <p class="desc">Runs on this computer and saves the theme exactly as Save does.</p>
+    </section>
+  </aside>
+</main>
+
+<!--
+  Shown, and the page behind it made inert, when this tab stops being the
+  live builder. Its words are written by the script with textContent; the
+  heading and the reason sentence change with the ending, so they are
+  empty here (see showNotice). The last line is the countdown after a save
+  or a cancel, and "You can close this tab." otherwise.
+-->
+<div class="notice" id="notice" hidden>
+  <div class="notice-card" id="notice-dialog" role="dialog" aria-modal="true" aria-labelledby="notice-title" aria-describedby="notice-why notice-end" tabindex="-1">
+    <h2 id="notice-title"></h2>
+    <p id="notice-why"></p>
+    <p id="notice-keep-text" hidden></p>
+    <button type="button" class="btn primary" id="notice-copy" hidden><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
+    <div class="code" id="notice-code" hidden></div>
+    <p class="n-end" id="notice-end" aria-live="polite">You can close this tab.</p>
+    <button type="button" class="btn primary" id="notice-close"><span class="lbl">Close tab</span></button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  // The order of the colours on the wire (contract "c"), and their keys here.
+  var SLOTS = [
+    { k: 'bg',   w: 'bg',     name: 'Background',     hint: 'Behind everything' },
+    { k: 'text', w: 'text',   name: 'Text',           hint: 'Numbers, labels, the dot' },
+    { k: 'g1',   w: 'gauge1', name: 'Gauge 1',        hint: 'Left arc (session), in per-gauge mode', mode: 'gauge' },
+    { k: 'g2',   w: 'gauge2', name: 'Gauge 2',        hint: 'Right arc (weekly), in per-gauge mode', mode: 'gauge' },
+    { k: 'low',  w: 'low',    name: 'Under 60%',      hint: 'Plenty left' },
+    { k: 'mid',  w: 'mid',    name: '60% to 90%',     hint: 'Getting there' },
+    { k: 'high', w: 'high',   name: '90% and above',  hint: 'Almost used up; also the warning line' }
+  ];
+  // THEME_IDS 0..11, in id order, written in by pc/theme_server.py from
+  // pc/theme_builtins.py, which is generated from the firmware's own table
+  // (firmware/src/theme.c). They were typed here once, and the board's
+  // palettes changed under them for a whole firmware round. These colours
+  // draw the preview; the board draws a built-in from its own table, so a
+  // built-in is sent as its id alone. The name is the one its tile shows.
+  var BUILTINS = /*@BUILTINS@*/null;
+  var PRESETS = BUILTINS.map(function (b) {
+    var c = b.c.map(function (h) { return h.toUpperCase(); });
+    return [b.name, { bg: c[0], text: c[1], g1: c[2], g2: c[3], low: c[4], mid: c[5], high: c[6],
+                      w: b.w, e: b.ends, d: b.dot ? 'on' : 'off', mode: b.by }];
+  });
+  var CLI_NAMES = BUILTINS.map(function (b) { return b.cli; });
+  // 3.05, the computer's floor (pc/theme.py MIN_CONTRAST): clear of the
+  // board's own 3:1 check, so nothing passed here is refused there.
+  var CUSTOM = 12, WIDTHS = [5, 12, 22], MIN_CONTRAST = 3.05;
+  var HEX = /^[0-9a-fA-F]{6}$/;
+
+  // preset: the id of an untouched built-in, or -1 for the custom theme.
+  var st = Object.assign({ mode: 'level', view: 'gauges', fw: 'session', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
+  var finished = false, previewTimer = null, lastSent = null;
+  // loaded: /api/state has answered and the page shows the owner's theme.
+  // Until then the page holds only its own default, preset 0, and Save was
+  // live over it: a tab whose state had not answered saved "Saved: Dark"
+  // over a theme it never read (review of fp/tab-notice-nice, NN-3, probe
+  // P5). So nothing that writes -- Save, or a preview, which reaches the
+  // board and becomes the builder's draft for the next tab -- goes out
+  // before it, and the form is off: an edit made then was thrown away when
+  // the state landed, under a bar that then said "This is the theme your
+  // board has now" while the board showed the edit's preview. A state that
+  // fails or never answers ends the tab, so loaded stays false for good.
+  // Each handler that changes the theme or copies it asks loaded itself,
+  // as Save's does, and does not lean on disabled alone: a click or input
+  // dispatched by script or an extension reaches a handler whatever
+  // disabled says. One on a hex box before a state of saved: null outlived
+  // the state, which leaves the page's colours as they are, and became
+  // what Save wrote (review of fp/save-before-load, N1, probe P7).
+  // The server takes no part: GET /api/state carries no tab id, and a save
+  // of any valid theme is one the owner may mean, so only the page knows
+  // whether it read the theme it is about to write over.
+  var loaded = false;
+  // delivered: previews the builder has taken, counted. See unsent().
+  var delivered = 0;
+  // This tab's id, so the server can tell two tabs on one builder apart:
+  // "Edit on computer" with a tab already open opens a second, and closing
+  // the first must not end the builder the second is showing.
+  var TAB = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+
+  function hex2rgb(h) { return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)]; }
+  function rgb2hex(c) { return c.map(function (v) { return Math.round(v).toString(16).padStart(2,'0'); }).join('').toUpperCase(); }
+  function mix(a, b, t) { var x = hex2rgb(a), y = hex2rgb(b); return rgb2hex([0,1,2].map(function (i) { return x[i] + (y[i]-x[i]) * t; })); }
+  function lum(h) { return hex2rgb(h).map(function (v) { v /= 255; return v <= .03928 ? v/12.92 : Math.pow((v+.055)/1.055, 2.4); }).reduce(function (s, v, i) { return s + v * [.2126,.7152,.0722][i]; }, 0); }
+  function contrast(a, b) { var l1 = lum(a), l2 = lum(b); return (Math.max(l1,l2)+.05)/(Math.min(l1,l2)+.05); }
+  // firmware/src/theme.c theme_dot_colours(): the header dot is low while a
+  // reading is sound and mid when it is old -- unless both are greys and mid
+  // is the stronger, when they swap, so the sound reading is the bolder mark
+  // (Mono's white dot, Light ink's black one). tests/pc/test_theme_builtins.py
+  // runs this and the C side by side on the same colours.
+  function dotColours(low, mid, bg) {
+    var grey = function (h) { var c = hex2rgb(h); return c[0] === c[1] && c[1] === c[2]; };
+    if (grey(low) && grey(mid) && contrast(mid, bg) > contrast(low, bg)) return [mid, low];
+    return [low, mid];
+  }
+  // firmware/src/theme.c custom_dim(), step for step: measured on the
+  // colours as the panel draws them (RGB565, widened back), against the
+  // settings card as well as the ground. The board's luminance table and
+  // this pow() can disagree in the last digit, so on a hairline the page
+  // and the board may pick neighbouring percentages.
+  function q565(h) { var c = hex2rgb(h); var r = c[0] >> 3 << 3 | c[0] >> 5, g = c[1] >> 2 << 2 | c[1] >> 6, b = c[2] >> 3 << 3 | c[2] >> 5; return rgb2hex([r, g, b]); }
+  function shown(a, b) { return contrast(q565(a), q565(b)); }
+  function boardMix(a, b, t) { var x = hex2rgb(a), y = hex2rgb(b); return rgb2hex([0,1,2].map(function (i) { return Math.min(255, Math.floor(x[i] + (y[i]-x[i]) * t + .5)); })); }
+  function customDim(tx, bg) {
+    var card = boardMix(bg, tx, .06);
+    var wantBg = Math.min(4.5, shown(tx, bg)), wantCard = Math.min(4.5, shown(tx, card));
+    for (var pct = 25; pct > 0; pct--) {
+      var d = boardMix(tx, bg, pct / 100);
+      if (shown(d, bg) >= wantBg && shown(d, card) >= wantCard) return d;
+    }
+    return tx;
+  }
+  function dist(a, b) { var x = hex2rgb(a), y = hex2rgb(b); return Math.sqrt(x.reduce(function (s, v, i) { return s + (v-y[i])*(v-y[i]); }, 0)); }
+  function levelCol(p) { return p >= 90 ? st.high : p >= 60 ? st.mid : st.low; }
+  function arcCol(which, p) {
+    if (st.mode === 'level') return levelCol(p);
+    return p >= 90 ? st.high : (which === 1 ? st.g1 : st.g2);
+  }
+  // The custom theme takes only the three widths the board has; a preset
+  // drawn at another width is moved to the nearest the moment it is edited.
+  function snapW(w) { return WIDTHS.reduce(function (b, x) { return Math.abs(x - w) < Math.abs(b - w) ? x : b; }, WIDTHS[0]); }
+  // Any edit here moves on from a loaded share code, so its "Loaded" goes
+  // (review of fp/builder-look, S2).
+  function markCustom() { st.preset = -1; st.w = snapW(st.w); fieldSay('paste', null); }
+  // The colours were set from outside the hex boxes -- a preset, a share
+  // code, the saved theme or a draft -- so a box's own typing error is
+  // about a value it no longer holds. It outlived it: "Use six hex digits"
+  // and aria-invalid stayed under a valid colour after a preset click
+  // (review of fp/builder-look, S1).
+  function fromOutside() { bad = {}; }
+
+  // ---------------------------------------------------------------- drawing
+  var NS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs, text) { var e = document.createElementNS(NS, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; }
+  function pt(cx, cy, r, deg) { var a = deg * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
+  function arcPath(cx, cy, r, a0, a1) {
+    var p0 = pt(cx, cy, r, a0), p1 = pt(cx, cy, r, a1), large = (a1 - a0) > 180 ? 1 : 0;
+    return 'M' + p0[0].toFixed(2) + ' ' + p0[1].toFixed(2) + ' A' + r + ' ' + r + ' 0 ' + large + ' 1 ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2);
+  }
+  function gauge(svg, cx, cy, size, w, p, col, track, txt, pctSize) {
+    var r = size / 2 - w / 2, cap = st.e === 'round' ? 'round' : 'butt';
+    svg.appendChild(el('path', { d: arcPath(cx, cy, r, 135, 405), fill: 'none', stroke: '#' + track, 'stroke-width': w, 'stroke-linecap': cap }));
+    var end = 135 + 270 * Math.max(0, Math.min(100, p)) / 100;
+    if (p > 0) svg.appendChild(el('path', { d: arcPath(cx, cy, r, 135, Math.max(end, 135.5)), fill: 'none', stroke: '#' + col, 'stroke-width': w, 'stroke-linecap': cap }));
+    if (st.d === 'on') { var k = pt(cx, cy, r, end); svg.appendChild(el('circle', { cx: k[0], cy: k[1], r: Math.max(5, w / 2 + 2), fill: '#' + txt, stroke: '#' + st.bg, 'stroke-width': 2 })); }
+    svg.appendChild(el('text', { x: cx, y: cy + pctSize * .36, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': pctSize, 'font-weight': 500, fill: '#' + txt }, Math.round(p) + '%'));
+  }
+  function render() {
+    var svg = document.getElementById('scr'); while (svg.firstChild) svg.removeChild(svg.firstChild);
+    // The board derives dim text and the arc track by mixing text and bg
+    // (contract: 25% bg into text, and 15% text into bg); so does this.
+    // Dim takes less of the ground when 25% would read under 4.5:1, as on
+    // the board (firmware/src/theme.c, custom_dim).
+    var dim = customDim(st.text, st.bg), track = mix(st.bg, st.text, .15), pill = mix(st.bg, st.text, .1);
+    svg.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: '#' + st.bg }));
+    var F = 'Montserrat, sans-serif';
+    if (st.view === 'gauges') {
+      svg.appendChild(el('text', { x: 160, y: 18, 'text-anchor': 'middle', 'font-family': F, 'font-size': 11.5, 'letter-spacing': 3, fill: '#' + dim }, 'BLINK'));
+      var warn = Math.max(st.p1, st.p2) >= 95;
+      svg.appendChild(el('text', { x: 160, y: 34, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (warn ? st.high : dim) }, warn ? (st.p1 >= st.p2 ? 'Session almost used up' : 'Weekly almost used up') : '14:05'));
+      svg.appendChild(el('circle', { cx: 302, cy: 14, r: 5, fill: '#' + dotColours(st.low, st.mid, st.bg)[0] }));
+      gauge(svg, 80, 104, 120, st.w, st.p1, arcCol(1, st.p1), track, st.text, 20);
+      gauge(svg, 240, 104, 120, st.w, st.p2, arcCol(2, st.p2), track, st.text, 20);
+      [['SESSION 5h', '3h 40m', 80], ['WEEKLY 7d', '1d 1h', 240]].forEach(function (g) {
+        svg.appendChild(el('text', { x: g[2], y: 180, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, g[0]));
+        svg.appendChild(el('text', { x: g[2], y: 196, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, g[1]));
+      });
+      svg.appendChild(el('rect', { x: 132, y: 205, width: 56, height: 18, rx: 9, fill: '#' + pill }));
+      svg.appendChild(el('text', { x: 160, y: 218, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + st.text }, 'Claude'));
+      svg.appendChild(el('path', { d: 'M9 114 L4 119 L9 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
+      svg.appendChild(el('path', { d: 'M311 114 L316 119 L311 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
+    } else {
+      // Focus mode as usage_view.c draws it, not as it was guessed (review
+      // of 1.4.0, builder N9). The big window is the one Settings > Focus
+      // names, not the higher of the two. The other is one dim line, built
+      // by fmt_focus_line() as "Weekly 91% <bullet> 1d 1h", and
+      // countdown_colour() paints it in the theme's mid from 60 percent and
+      // its high from 90, the same thresholds as every ring, so those two
+      // colours are previewed as text where the board uses them most. The
+      // big gauge is captioned with its own name and countdown, in two
+      // lines, as in the two-gauge view. Sizes and rows are
+      // usage_layout.h's FOCUS_*: a 156 px ring from y 44, the caption at
+      // 140, the countdown at 158, the line at 184, each a 16 px row whose
+      // 12 px text sits 12 px down.
+      var wk = st.fw === 'weekly', bigP = wk ? st.p2 : st.p1, otherP = wk ? st.p1 : st.p2;
+      gauge(svg, 160, 122, 156, st.w, bigP, arcCol(wk ? 2 : 1, bigP), track, st.text, 40);
+      svg.appendChild(el('text', { x: 160, y: 152, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, wk ? 'WEEKLY 7d' : 'SESSION 5h'));
+      svg.appendChild(el('text', { x: 160, y: 170, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, wk ? '1d 1h' : '3h 40m'));
+      svg.appendChild(el('text', { x: 160, y: 196, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (otherP >= 90 ? st.high : otherP >= 60 ? st.mid : dim) },
+                         (wk ? 'Session ' : 'Weekly ') + Math.round(otherP) + '% \u2022 ' + (wk ? '3h 40m' : '1d 1h')));
+    }
+    paintControls(); checks(); output();
+  }
+  function paintControls() {
+    SLOTS.forEach(function (s) {
+      var row = document.getElementById('row-' + s.k);
+      row.classList.toggle('off', !!s.mode && s.mode !== st.mode);
+      document.getElementById('c-' + s.k).value = '#' + st[s.k].toLowerCase();
+      var t = document.getElementById('t-' + s.k); if (document.activeElement !== t) t.value = '#' + st[s.k];
+    });
+    var band = document.getElementById('band'); while (band.firstChild) band.removeChild(band.firstChild);
+    ['low','mid','high'].forEach(function (k) { var d = document.createElement('span'); d.style.background = '#' + st[k]; band.appendChild(d); });
+    document.getElementById('modenote').textContent = st.mode === 'level'
+      ? 'By level: both arcs take the colour of their own level. Gauge 1 and Gauge 2 are not used.'
+      : 'Per gauge: each arc keeps its own colour, and switches to the 90%-and-above colour near the limit so a warning is never missed. The status dot uses the under-60% colour, or, when it and the 60%-to-90% colour are both greys, whichever stands out more.';
+    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view); press('[data-f]', 'f', st.fw);
+    document.querySelectorAll('#presets button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.p === st.preset)); });
+  }
+  function press(sel, key, val) { document.querySelectorAll(sel).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset[key] === val)); }); }
+  function textContrast() { return contrast(st.text, st.bg); }
+  // A ratio as the words give it: cut to two decimals, never rounded. One
+  // decimal, rounded, made 3.0335 read "3.0:1" under a floor named 3:1 and
+  // 4.478 read "4.5:1" under "4.5:1 or more is better"; a number rounded up
+  // to the one it fell short of contradicts the sentence it sits in (review
+  // of 1.4.0, builder N2).
+  function ratioText(c) { return (Math.floor(c * 100) / 100).toFixed(2); }
+  function checks() {
+    var out = [], c = textContrast();
+    out.push(c >= 4.5 ? ['ok', 'Text is readable: ' + ratioText(c) + ':1 against the background.'] : c >= MIN_CONTRAST ? ['warn', 'Text is faint: ' + ratioText(c) + ':1. Small labels will be hard to read on the panel; 4.5:1 or more is better.'] : ['bad', 'Text is unreadable: ' + ratioText(c) + ':1. It needs at least ' + MIN_CONTRAST.toFixed(2) + ':1 before it can go to the board.']);
+    var used = st.mode === 'level' ? ['low','mid','high'] : ['g1','g2','high'];
+    var names = { low: 'Under 60%', mid: '60% to 90%', high: '90% and above', g1: 'Gauge 1', g2: 'Gauge 2' };
+    var weak = used.filter(function (k) { return contrast(st[k], st.bg) < 2; });
+    out.push(weak.length ? ['warn', weak.map(function (k) { return names[k]; }).join(', ') + ' barely shows against the background.'] : ['ok', 'Every arc colour stands out from the background.']);
+    if (st.mode === 'level') {
+      var pairs = [['low','mid'],['mid','high'],['low','high']].filter(function (p) { return dist(st[p[0]], st[p[1]]) < 60; });
+      out.push(pairs.length ? ['warn', 'Two levels look almost the same (' + pairs.map(function (p) { return names[p[0]] + ' and ' + names[p[1]]; }).join('; ') + '). The arc will not tell you when you cross a threshold.'] : ['ok', 'The three levels are easy to tell apart.']);
+    }
+    // The same findings again, under the field they are about: a list at
+    // the side says what is wrong, but the owner fixing it is looking at
+    // the colour, not the list.
+    var at = {};
+    if (c < 4.5) at.text = at.bg = [c >= MIN_CONTRAST ? 'warn' : 'bad', (c >= MIN_CONTRAST ? 'Faint' : 'Unreadable') + ': text is ' + ratioText(c) + ':1 on the background.'];
+    weak.forEach(function (k) { at[k] = ['warn', 'Barely shows against the background.']; });
+    SLOTS.forEach(function (s) { if (!bad[s.k]) fieldSay(s.k, at[s.k]); });
+    var ul = document.getElementById('checks'); while (ul.firstChild) ul.removeChild(ul.firstChild);
+    out.forEach(function (o) {
+      var li = document.createElement('li'), m = document.createElement('span'), t = document.createElement('span');
+      m.className = 'mark m-' + o[0]; m.textContent = o[0] === 'ok' ? 'OK' : o[0] === 'warn' ? 'CHECK' : 'NO';
+      t.textContent = o[1]; li.appendChild(m); li.appendChild(t); ul.appendChild(li);
+    });
+    // Not while a Save is out, either; see the Save handler. Nor before the
+    // owner's theme is here; see loaded.
+    if (!finished) document.getElementById('save').disabled = !loaded || saving || c < MIN_CONTRAST;
+  }
+
+  // ---------------------------------------------------------------- the wire
+  function customFields() {
+    return { c: SLOTS.map(function (s) { return st[s.k].toLowerCase(); }), w: snapW(st.w),
+             ends: st.e, dot: st.d === 'on' ? 1 : 0, by: st.mode };
+  }
+  function wireTheme() {
+    if (st.preset >= 0) return { id: st.preset };
+    return Object.assign({ id: CUSTOM }, customFields());
+  }
+  function b64url(s) { return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  function shareCode() { return st.preset >= 0 ? null : 'BT1.' + b64url(JSON.stringify(customFields())); }
+  function cliArgs() {
+    if (st.preset >= 0) return [CLI_NAMES[st.preset]];
+    var f = customFields(), width = { 5: 'thin', 12: 'normal', 22: 'thick' }[f.w];
+    return SLOTS.map(function (s, i) { return s.w + '=' + f.c[i]; })
+      .concat(['width=' + width, 'ends=' + f.ends, 'dot=' + (f.dot ? 'on' : 'off'), 'arcs=' + (f.by === 'level' ? 'by-level' : 'per-gauge')]);
+  }
+  function output() {
+    var args = cliArgs(), cmd = document.getElementById('cmd');
+    while (cmd.firstChild) cmd.removeChild(cmd.firstChild);
+    function span(cls, text) { var s = document.createElement('span'); s.className = cls; s.textContent = text; cmd.appendChild(s); }
+    span('k', '$ '); cmd.appendChild(document.createTextNode('blink theme set' + (args.length > 1 ? ' \\\n' : ' ')));
+    args.forEach(function (a, i) {
+      var kv = a.split('=');
+      if (args.length > 1) cmd.appendChild(document.createTextNode('    '));
+      if (kv.length > 1) { span('k', kv[0] + '='); span('v', kv[1]); } else span('v', a);
+      if (i < args.length - 1) cmd.appendChild(document.createTextNode(' \\\n'));
+    });
+    cmd.dataset.plain = 'blink theme set ' + args.join(' ');
+    var code = shareCode(), box = document.getElementById('code');
+    box.textContent = code || 'Built-in themes share by name: blink theme set ' + args[0];
+    box.dataset.plain = code ? 'blink theme set ' + code : 'blink theme set ' + args[0];
+  }
+
+  // kind: true for an error (kept from when it was a flag), or 'ok' for a
+  // finished save or a preview the board has, so the bar can say which
+  // with its colour and icon as well as its words.
+  // sealed: the tab has said its last word (saved, cancelled, stopped, or
+  // continued in a newer tab), and nothing later -- a reply still in
+  // flight, a share-code error -- writes over it. A tab told it was
+  // superseded used to keep its controls live and lose that message to the
+  // next say() (review of fp/edit-reset r2, NICE 2).
+  var sealed = false;
+  function end(text, kind) { say(text, kind); sealed = true; }
+  function say(text, kind) {
+    if (sealed) return;
+    var s = document.getElementById('status'), t = document.getElementById('status-text');
+    // The bar is a live region too; see fieldSay.
+    if (t.textContent !== text) t.textContent = text;
+    s.classList.toggle('err', kind === true); s.classList.toggle('ok', kind === 'ok');
+  }
+  // A message under one field: the hex boxes, and the share code box.
+  // bad[k] holds a hex box's own typing error, which outranks a contrast
+  // note about the colour it last held.
+  var bad = {};
+  function fieldSay(k, m) {
+    var p = document.getElementById('m-' + k); if (!p) return;
+    // Only on a change. Every render() comes through here for all seven
+    // slots, and a replaced text node is re-announced by VoiceOver and NVDA
+    // even when its words are the same: ten ticks of the Session slider on
+    // a faint theme were twenty announcements (review of fp/builder-look,
+    // S5).
+    var text = m ? m[1] : '', cls = 'fmsg' + (m ? ' f-' + m[0] : '');
+    if (p.textContent === text && p.className === cls) return;
+    p.textContent = text; p.className = cls;
+    var box = document.getElementById(k === 'paste' ? 'paste' : 't-' + k);
+    if (box) box.setAttribute('aria-invalid', String(!!m && m[0] === 'bad'));
+  }
+  function themeName() { return st.preset >= 0 ? PRESETS[st.preset][0] : 'your custom theme'; }
+  // Nothing more is sent from this tab. The whole form goes still with it,
+  // so a colour that changes here cannot look as if it reached the board.
+  // The preview timer goes too: a change made in the 250 ms before the
+  // answer still sent one preview after the tab had stopped (review of
+  // fp/edit-reset r2, NICE 1). The loading dim's timer ends with the tab
+  // as well: a state refused in 10 ms used to dim the controls 140 ms
+  // after the tab had ended (review of fp/save-before-load r2, NICE 1). A
+  // dim already on, and the busy mark, come off too: the tab is not
+  // loading any more, it has ended (review of fp/docs-pass, N8).
+  // Both copy buttons go still with the rest, and so does everything behind
+  // the popup, which is inert; the popup's own buttons are not in these
+  // lists and stay live.
+  function gone() {
+    finished = true;
+    clearTimeout(previewTimer);
+    clearTimeout(waiting);
+    var main = document.querySelector('main');
+    main.classList.remove('waiting'); main.removeAttribute('aria-busy');
+    document.querySelectorAll('header button, main button, main input').forEach(function (e) { e.disabled = true; });
+  }
+  // The popup, over a page made inert. A tab that had stopped said so only
+  // in the status bar, over controls that looked live, and most browsers
+  // refuse the window.close() meant to take it away (the owner's report,
+  // 2026-10-29). title: the heading, which names the ending. It was one
+  // fixed sentence for every ending, so a save that had worked (the daemon
+  // logged it, the board took the theme) put up a full-page notice the
+  // owner read as an error (the owner's manual test on a board,
+  // 2026-10-30); each ending has its own now. why: one sentence under it,
+  // saying what follows from the ending rather than the heading again.
+  // keep: the tab holds changes nobody saved, so the popup says so and
+  // offers their share code, and then it neither counts down nor offers
+  // Close tab, since closing is what loses them. It is the line to show, or
+  // false for none. Under "Saved." the usual "Your changes here are not
+  // saved" read as a contradiction at a glance (review of fp/notice-title,
+  // NICE-3), so a save says which changes it means.
+  // last: the popup's final line, the countdown's first or "You can close
+  // this tab."
+  // Focus goes to the card, so a screen reader reads the heading and the
+  // words, and stays in it: inert does that where the browser has it (all
+  // current ones), and the two listeners after this where it does not.
+  var notice = document.getElementById('notice'), dialog = document.getElementById('notice-dialog');
+  var KEEP_LINE = 'Your changes here are not saved. Copy the share code to keep them.';
+  var KEEP_AFTER_SAVE = 'Changes you made after saving are not on the board. Copy the share code to keep them.';
+  var CAN_CLOSE = 'You can close this tab.';
+  function showNotice(title, why, keep, last) {
+    document.getElementById('notice-title').textContent = title;
+    document.getElementById('notice-why').textContent = why;
+    document.getElementById('notice-keep-text').textContent = keep || '';
+    document.getElementById('notice-end').textContent = last;
+    // Two sets, never both: a tab that can lose nothing is told it may be
+    // closed and offered the button; one that can is offered its share code.
+    [['notice-keep-text', keep], ['notice-copy', keep], ['notice-end', !keep], ['notice-close', !keep]].forEach(function (x) {
+      var e = document.getElementById(x[0]);
+      if (x[1]) e.removeAttribute('hidden'); else e.setAttribute('hidden', '');
+    });
+    // Named here, not fixed in the markup: a description reads an element
+    // it names even while that element is hidden, so a saved tab told a
+    // screen reader "Your changes here are not saved", measured in
+    // Chromium's accessibility tree (review of fp/tab-notice, M1).
+    dialog.setAttribute('aria-describedby', keep ? 'notice-why notice-keep-text' : 'notice-why notice-end');
+    document.querySelectorAll('.top, .studio').forEach(function (e) { e.setAttribute('inert', ''); e.setAttribute('aria-hidden', 'true'); });
+    notice.removeAttribute('hidden');
+    dialog.focus();
+  }
+  function noticeOpen() { return notice.getAttribute('hidden') === null; }
+  document.addEventListener('focusin', function (e) { if (noticeOpen() && !dialog.contains(e.target)) dialog.focus(); });
+  // Tab and Shift+Tab go round the card and its visible buttons, and never
+  // out of them.
+  document.addEventListener('keydown', function (e) {
+    if (!noticeOpen() || e.key !== 'Tab') return;
+    var ring = [dialog].concat(['notice-copy', 'notice-close'].map(function (id) { return document.getElementById(id); })
+      .filter(function (b) { return b.getAttribute('hidden') === null; }));
+    var at = ring.indexOf(document.activeElement);
+    e.preventDefault();
+    ring[(Math.max(at, 0) + (e.shiftKey ? ring.length - 1 : 1)) % ring.length].focus();
+  });
+  // The last word of a tab: the status bar's short sentence, which stays
+  // under the popup as the record, then the popup. Once only: a reply still
+  // in flight after a save must not turn "saved" into "stopped".
+  function retire(title, why, text, kind, keep, last) {
+    if (sealed) return false;
+    gone();
+    end(text, kind);
+    showNotice(title, why, keep, last || CAN_CLOSE);
+    return true;
+  }
+  // A tab that saved, or cancelled, closes itself after CLOSE_AFTER_S, with
+  // the seconds in the popup (the owner asked for it, 2026-10-31: "can we
+  // just close the tab after like 5 sec?"). After Save only when nothing was
+  // changed since; after Cancel whatever the tab holds, since Cancel is the
+  // owner throwing the changes away. A script may close a top-level tab
+  // whose session history holds one document (HTML Standard,
+  // "script-closable"), and the builder is opened at /open?k=..., which
+  // answers 303 to /: a redirect replaces the entry it came from and adds
+  // none, for the link the board opens and the one `blink theme` prints
+  // alike. A tab the owner pasted the link into after other pages has a
+  // longer history, and the browser refuses: window.closed is still false
+  // CLOSE_CHECK_MS later and the line says "You can close this tab." The
+  // countdown is the owner's to stop, so that nobody loses a tab they are
+  // reading: a key, a click or a touch, anywhere, the popup and its
+  // backdrop included. Not the mouse moving, and not the wheel: the first
+  // version stopped it for a mouse that had moved 12 px, and on the owner's
+  // desk (2026-10-31, real Chrome) every saved tab stayed open, because a
+  // hand moves the mouse away from Save as a matter of course. Everything
+  // behind the popup is inert and covered by its backdrop, so a click on
+  // what used to be a control (a disabled one may swallow the event, which
+  // a document listener would then never see) lands on the backdrop and
+  // reaches the document like any other. The one click that does not stop
+  // it is the one on Close tab, which closes the tab at once and falls
+  // back the same way when refused. aria-live is off for the ticks: one
+  // announcement a second is a stream, and the popup has already been read
+  // once; the line that ends the countdown is announced again.
+  var CLOSE_AFTER_S = 5, CLOSE_CHECK_MS = 600;
+  var closer = null;
+  var countEl = document.getElementById('notice-end'), closeBtn = document.getElementById('notice-close');
+  function settle() {
+    closer = null;
+    countEl.setAttribute('aria-live', 'polite');
+    countEl.textContent = CAN_CLOSE;
+  }
+  // Asks the browser, once, and falls back to the line if it will not.
+  function askClose() {
+    try { window.close(); } catch (e) {}
+    closer.timer = setTimeout(function () { if (!window.closed) settle(); else closer = null; }, CLOSE_CHECK_MS);
+  }
+  function closeLine(left) { return 'This tab closes in ' + left + ' s.'; }
+  // Starts the countdown whose first line the popup was opened with.
+  function closeSoon() {
+    var left = CLOSE_AFTER_S;
+    function tick() {
+      left--;
+      if (left > 0) { countEl.textContent = closeLine(left); closer.timer = setTimeout(tick, 1000); return; }
+      askClose();
+    }
+    closer = { timer: setTimeout(tick, 1000) };
+    countEl.setAttribute('aria-live', 'off');
+  }
+  closeBtn.addEventListener('click', function () {
+    if (closer) clearTimeout(closer.timer); else closer = {};
+    askClose();
+  });
+  function interrupt(e) {
+    if (!closer || (e && e.target && closeBtn.contains(e.target))) return;
+    clearTimeout(closer.timer);
+    settle();
+  }
+  ['mousedown', 'click', 'keydown', 'touchstart'].forEach(function (t) { document.addEventListener(t, interrupt); });
+  // Changes here the board has not kept. Unlike unsaved(), a tab that never
+  // heard its saved theme holds none: it has nothing of the owner's to
+  // copy, only the page's default colours.
+  function holdsDraft() { return savedKey !== null && JSON.stringify(wireTheme()) !== savedKey; }
+  // Every write carries this tab's id, so the server can refuse one from a
+  // tab a newer one has taken over (409, "newer") without waiting for that
+  // tab's next ping.
+  // limited: given up on, as a failed request, after REQUEST_MS. A server
+  // that takes the connection and never answers (a stopped process, whose
+  // backlog the kernel still accepts, or one paused in a debugger) held
+  // every ping forever, so no miss and no stop ever came and the tab
+  // looked live for good (review of fp/tab-notice r3, N3). 10 s is the
+  // server's own handler timeout. Save is not limited this way: it has its
+  // own deadline, and its answer still counts after that.
+  var REQUEST_MS = 10000;
+  function post(path, body, limited) {
+    var ctl = limited && typeof AbortController === 'function' ? new AbortController() : null;
+    var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
+    function over() { clearTimeout(limit); }
+    return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Blink-Tab': TAB },
+                         body: body == null ? '' : JSON.stringify(body), signal: ctl ? ctl.signal : undefined })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { over(); j.status = r.status; return j; }); },
+            function (e) { over(); throw e; });
+  }
+  // The idle timeout, the daemon exiting and a lost session all look the
+  // same from here, a ping refused or unanswered, so the popup says no
+  // more than that the builder stopped.
+  // A Save still on its way outranks a failure that lands first: the
+  // builder ends once a save is stored, and the reply to some request sent
+  // just before can settle ahead of Save's own. "Stopped" over a save that
+  // went through sends the owner to save again (review of fp/tab-notice,
+  // N3). So while Save is out, a stop waits for its answer -- for as long
+  // as the server would take to give one. A Save stuck inside the server
+  // (a theme file held by a virus scanner, a home on a network share)
+  // never answers, and with no deadline it held every later stop back for
+  // good: ten minutes of failed pings and 45 controls still live (review
+  // of fp/tab-notice r2, MUST). The server drops a request after its
+  // handler timeout, 10 s (_Handler.timeout in pc/theme_server.py).
+  var SAVE_WAIT_MS = 10000;
+  var saving = false, stopOwed = false;
+  function stopped() {
+    if (saving) { stopOwed = true; return; }
+    var keep = holdsDraft();
+    retire('The builder stopped.', 'Run blink theme on your computer to start it again.',
+           'The builder stopped. Run blink theme on your computer to start it again.', true, keep && KEEP_LINE);
+  }
+  function schedulePreview() {
+    if (finished) return;
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(function () {
+      if (finished) return;
+      if (textContrast() < MIN_CONTRAST) { say('Text is unreadable, so the board keeps the last preview.', true); return; }
+      // The name as it was when this preview was sent: a preset clicked
+      // while the reply is on its way must not take this reply's words
+      // (review of fp/builder-look, N3).
+      var t = wireTheme(), key = JSON.stringify(t), name = themeName();
+      if (key === lastSent) return;
+      post('/api/preview', t, true).then(function (j) {
+        if (j.status === 200) {
+          lastSent = key; delivered++;
+          if (oldBoard) say(OLD_BOARD_PREVIEW);
+          else { var said = 'Preview sent: ' + name + ' is on your board until you save or cancel.'; say(said, 'ok'); checkTaken(key, said); }
+        }
+        else if (j.status === 409) superseded();
+        else if (j.status === 400) say(j.error || 'The board would refuse that theme.', true);
+        // Any other ending is asked of a ping, with its one retry, rather
+        // than taken as the builder gone: a preview is the request sent
+        // most often, and one dropped on loopback retired a live tab
+        // (review of fp/tab-notice r2, N1).
+        else ping(false, unsent(delivered));
+      }, function () { ping(false, unsent(delivered)); });
+    }, 250);
+  }
+  // The builder answered the ping a failed preview asked, so it is up and
+  // the preview itself is what failed: a full disk or a read-only ~/.blink
+  // (the server has no message for it). The bar kept saying the board
+  // showed each change (review of fp/tab-notice r3, S1). lastSent stays as
+  // it was, so the next change is sent again.
+  // at: how many previews had gone through when this one failed, read at
+  // the failure and not when the ping answers. That ping can take up to
+  // REQUEST_MS, and its retry more, and a later preview can go through
+  // meanwhile: the bar said "Preview sent: Forest", then the late ping
+  // wrote "did not reach your board" over it while the board showed
+  // Forest (review of fp/tab-notice r4, N1, probe A). A preview that went
+  // through since is newer news, so it stands. A count rather than lastSent
+  // itself: lastSent can come back round to the value it had (on Ocean,
+  // Forest fails, then Sky and Ocean again go through), and a count only
+  // goes up.
+  // What /api/state says of the board: false when its firmware takes no
+  // theme line, so a preview is accepted here and never shown (the daemon
+  // sends one only to a board that lists "theme"). null or absent is
+  // unknown, and gets the words it always had (review of 1.4.0, builder S3).
+  var oldBoard = false;
+  var OLD_BOARD_LOAD = 'Your board\'s firmware does not show themes yet. Update it to see previews.';
+  var OLD_BOARD_PREVIEW = 'Your board\'s firmware does not show themes yet, so there is no preview. A saved theme is sent once the board is updated.';
+  // The other half: a preview waits in a file until BLINK's bridge takes it
+  // (every 2 s), so with the app not running, or the board not plugged in,
+  // "Preview sent" is not so. A few seconds after a preview went through,
+  // ask what the server sees; if the file is still waiting after 5 s, say
+  // so. Not over a newer message, a newer preview or a tab that has ended.
+  var TAKEN_MS = 6000, takenTimer = null;
+  function checkTaken(key, said) {
+    clearTimeout(takenTimer);
+    takenTimer = setTimeout(function () {
+      if (finished || lastSent !== key) return;
+      var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+      var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
+      fetch('/api/state', { credentials: 'same-origin', signal: ctl ? ctl.signal : undefined }).then(function (r) {
+        clearTimeout(limit);
+        return r.status === 200 ? r.json() : null;
+      }).then(function (j) {
+        if (!j || finished || lastSent !== key || typeof j.waiting_s !== 'number' || j.waiting_s < 5) return;
+        if (document.getElementById('status-text').textContent !== said) return;
+        say('Nothing has taken this preview yet. Is BLINK running and the board plugged in? blink status tells you.', true);
+      }, function () { clearTimeout(limit); });
+    }, TAKEN_MS);
+  }
+  function unsent(at) {
+    return function () { if (delivered === at) say('The preview did not reach your board.', true); };
+  }
+  function changed() { render(); schedulePreview(); }
+
+  // ---------------------------------------------------------------- controls
+  var pre = document.getElementById('presets');
+  PRESETS.forEach(function (entry, i) {
+    // A card: the theme's ground with its text and three level colours on
+    // it, as a small board would show them, then the name its tile shows.
+    var name = entry[0], p = entry[1], b = document.createElement('button'), sw = document.createElement('span');
+    b.type = 'button'; b.dataset.p = String(i); b.className = 'preset';
+    sw.className = 'sw'; sw.setAttribute('aria-hidden', 'true');
+    sw.style.background = '#' + p.bg;
+    ['text', 'low', 'mid', 'high'].forEach(function (k) { var d = document.createElement('i'); d.className = 'sw-' + k; d.style.background = '#' + p[k]; sw.appendChild(d); });
+    var n = document.createElement('span'); n.className = 'pn'; n.textContent = name;
+    b.appendChild(sw); b.appendChild(n);
+    b.addEventListener('click', function () { if (!loaded) return; Object.assign(st, PRESETS[i][1]); st.preset = i; fromOutside(); fieldSay('paste', null); changed(); });
+    pre.appendChild(b);
+  });
+  var slots = document.getElementById('slots');
+  SLOTS.forEach(function (s) {
+    var row = document.createElement('div'); row.className = 'slot'; row.id = 'row-' + s.k;
+    var c = document.createElement('input'); c.type = 'color'; c.id = 'c-' + s.k; c.setAttribute('aria-label', s.name);
+    var l = document.createElement('label'); l.htmlFor = c.id; l.textContent = s.name;
+    var sm = document.createElement('small'); sm.textContent = s.hint; l.appendChild(sm);
+    var t = document.createElement('input'); t.type = 'text'; t.id = 't-' + s.k; t.maxLength = 7; t.setAttribute('aria-label', s.name + ' hex');
+    t.spellcheck = false; t.autocomplete = 'off'; t.setAttribute('aria-describedby', 'm-' + s.k);
+    // Live, except the background's: its note is the text's, word for
+    // word, and a screen reader heard it twice (review, S5).
+    var m = document.createElement('p'); m.className = 'fmsg'; m.id = 'm-' + s.k; if (s.k !== 'bg') m.setAttribute('aria-live', 'polite');
+    row.appendChild(c); row.appendChild(l); row.appendChild(t); row.appendChild(m); slots.appendChild(row);
+    c.addEventListener('input', function (e) { if (!loaded) return; st[s.k] = e.target.value.slice(1).toUpperCase(); delete bad[s.k]; markCustom(); changed(); });
+    // Half-typed is not wrong, so a box is only told off once it has its
+    // seven characters, or when it is left with something it cannot use.
+    function typed() {
+      if (!loaded) return;
+      var v = t.value.replace('#', '');
+      if (HEX.test(v)) { delete bad[s.k]; st[s.k] = v.toUpperCase(); markCustom(); changed(); return; }
+      if (t.value.length >= 7) { bad[s.k] = 1; fieldSay(s.k, ['bad', 'Use six hex digits, 0 to 9 and A to F.']); }
+      else if (bad[s.k]) { delete bad[s.k]; fieldSay(s.k, null); }
+    }
+    t.addEventListener('input', function () { typed(); });
+    t.addEventListener('blur', function () { if (bad[s.k]) return; if (!HEX.test(t.value.replace('#', ''))) { t.value = '#' + st[s.k]; fieldSay(s.k, null); render(); } });
+  });
+  document.querySelectorAll('[data-m]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.mode = b.dataset.m; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-w]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.w = +b.dataset.w; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-e]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.e = b.dataset.e; markCustom(); changed(); }); });
+  document.querySelectorAll('[data-d]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.d = b.dataset.d; markCustom(); changed(); }); });
+  // The screen and the two sliders only move the drawing here; they are not
+  // part of the theme and send nothing.
+  document.querySelectorAll('[data-v]').forEach(function (b) { b.addEventListener('click', function () { st.view = b.dataset.v; render(); }); });
+  // Choosing a focus window shows the focus view, since it is the only view
+  // that window changes.
+  document.querySelectorAll('[data-f]').forEach(function (b) { b.addEventListener('click', function () { st.fw = b.dataset.f; st.view = 'focus'; render(); }); });
+  [['p1','o1'],['p2','o2']].forEach(function (x) { var r = document.getElementById(x[0]); r.addEventListener('input', function () { st[x[0]] = +r.value; document.getElementById(x[1]).textContent = r.value + '%'; render(); }); });
+
+  // shown: run before a refused copy selects the text, for a box that is
+  // hidden until then.
+  function copy(id, btn, shown) {
+    // Only the label changes: the button also holds its icon, which a
+    // textContent on the whole button would wipe.
+    var t = document.getElementById(id).dataset.plain, b = document.getElementById(btn);
+    var lbl = b.querySelector('.lbl') || b, was = lbl.dataset.was || (lbl.dataset.was = lbl.textContent);
+    function ok() { lbl.textContent = 'Copied'; setTimeout(function () { lbl.textContent = was; }, 1400); }
+    function fallback() { if (shown) shown(); var r = document.createRange(); r.selectNodeContents(document.getElementById(id)); var s = getSelection(); s.removeAllRanges(); s.addRange(r); lbl.textContent = 'Selected'; }
+    try { navigator.clipboard.writeText(t).then(ok, fallback); } catch (e) { fallback(); }
+  }
+  // Not before the state: both copy the page's own default, which is no
+  // theme of the owner's (review of fp/save-before-load, S1).
+  document.getElementById('copy-cmd').addEventListener('click', function () { if (loaded) copy('cmd', 'copy-cmd'); });
+  document.getElementById('copy-code').addEventListener('click', function () { if (loaded) copy('code', 'copy-code'); });
+  // The popup's copy: the same text from the same box. When the clipboard
+  // is refused, the code is shown and selected in the card instead, since
+  // the box it comes from is behind the popup, and inert.
+  document.getElementById('notice-copy').addEventListener('click', function () {
+    var box = document.getElementById('notice-code');
+    box.textContent = box.dataset.plain = document.getElementById('code').dataset.plain;
+    copy('notice-code', 'notice-copy', function () { box.removeAttribute('hidden'); });
+  });
+  // The dot is the number 0 or 1 or a bool, exactly what theme.validate
+  // takes. It was tested with unary plus, which coerced null, "" and [] to
+  // off and "1" and [1] to on, so a code the command line refuses loaded
+  // here (review of 1.4.0, builder N3).
+  function applyCustom(f) {
+    if (!f || !Array.isArray(f.c) || f.c.length !== 7 || !f.c.every(function (h) { return typeof h === 'string' && HEX.test(h); })) return false;
+    if (WIDTHS.indexOf(f.w) < 0 || ['round','flat'].indexOf(f.ends) < 0 || [0,1,true,false].indexOf(f.dot) < 0 || ['level','gauge'].indexOf(f.by) < 0) return false;
+    SLOTS.forEach(function (s, i) { st[s.k] = f.c[i].toUpperCase(); });
+    st.w = f.w; st.e = f.ends; st.d = f.dot ? 'on' : 'off'; st.mode = f.by; st.preset = -1;
+    fromOutside();
+    return true;
+  }
+  document.getElementById('paste').addEventListener('input', function () { fieldSay('paste', null); });
+  document.getElementById('paste').addEventListener('keydown', function (e) { if (e.key === 'Enter') document.getElementById('load').click(); });
+  document.getElementById('load').addEventListener('click', function () {
+    if (!loaded) return;
+    var code = document.getElementById('paste').value.trim().replace(/^blink theme set\s+/, ''), f = null;
+    // Said as what is wrong with it. "They start BT1." was the only answer,
+    // and it was also the answer to a code that did start BT1. but had
+    // lost its end in a copy (audit, 2026-10-28), which pointed at the one
+    // part of it that was right. pc/theme.py from_share_code says the same.
+    // Said under the box it is about, not in the bar at the top, which is
+    // a screen away from here on a phone.
+    if (code.indexOf('BT1.') !== 0) { fieldSay('paste', ['bad', 'That is not a theme share code. They start BT1.']); return; }
+    try {
+      var b = code.slice(4).replace(/-/g, '+').replace(/_/g, '/');
+      while (b.length % 4) b += '=';
+      f = JSON.parse(atob(b));
+    } catch (e) { f = null; }
+    if (f === null || typeof f !== 'object' || Array.isArray(f) || !['c','w','ends','dot','by'].some(function (k) { return k in f; })) fieldSay('paste', ['bad', 'That share code is damaged or cut short. Copy all of it again.']);
+    // Loaded, and nothing more unless it needs saying: the status bar
+    // reports the preview. It said "your board shows it now" over a code
+    // whose text was unreadable, while the bar said the board kept the
+    // last preview (review of fp/builder-look, S2).
+    else if (applyCustom(f)) {
+      document.getElementById('paste').value = ''; changed();
+      fieldSay('paste', textContrast() < MIN_CONTRAST ? ['warn', 'Loaded, but its text is unreadable, so the board keeps the last preview.'] : ['ok', 'Loaded.']);
+    }
+    else fieldSay('paste', ['bad', 'That share code holds a theme the board cannot use.']);
+  });
+
+  document.getElementById('save').addEventListener('click', function () {
+    // A click is ignored before the state, not only kept off by disabled:
+    // disabled is whatever the last render() left, and a click dispatched
+    // by script or an extension reaches this handler whatever it says.
+    if (finished || !loaded || textContrast() < MIN_CONTRAST) return;
+    clearTimeout(previewTimer);
+    if (saving) return;
+    var name = themeName(), save = document.getElementById('save');
+    // Save is off while one is out: a second click shared this one's
+    // state, and the first answer cleared it under the second (review of
+    // fp/tab-notice r2, N2). It also shows the click was taken.
+    saving = true; save.disabled = true;
+    // Said from the click, and again at the deadline: from then Save is
+    // back on while a late answer may still come, and the bar read as if
+    // the click had been lost (review of fp/tab-notice r3, N4).
+    say('Saving…');
+    // An owed stop shown here is not replaced by a late 200 (r3, N1).
+    var deadline = setTimeout(function () { var owed = settled(); say('Saving…'); if (owed) stopped(); else ping(); }, SAVE_WAIT_MS);
+    // Once per Save: by its answer, its failure or its deadline, whichever
+    // comes first. A late answer still counts when it is a 200.
+    var done = false;
+    function settled() {
+      if (done) return false;
+      done = true; clearTimeout(deadline); saving = false;
+      if (!finished) save.disabled = textContrast() < MIN_CONTRAST;
+      var owed = stopOwed; stopOwed = false; return owed;
+    }
+    // What was sent is what the server stored. savedKey took the page as
+    // it was when the reply came, so a colour changed while Save was out
+    // counted as saved and was never offered (review of fp/tab-notice r3,
+    // N2). Now it is a draft, and the popup offers its share code.
+    var sent = wireTheme();
+    post('/api/save', sent).then(function (j) {
+      var owed = settled();
+      if (j.status === 200) {
+        savedKey = JSON.stringify(sent);
+        var keep = holdsDraft();
+        if (retire('Saved.', 'Your board keeps ' + name + '.', 'Saved: ' + name + '. Your board keeps it.', 'ok',
+                   keep && KEEP_AFTER_SAVE, closeLine(CLOSE_AFTER_S)) && !keep) closeSoon();
+      }
+      else if (j.status === 409) superseded();
+      // An answer at all means the builder was up to give it, so a stop
+      // held back meanwhile is not taken on trust: the owner reads why the
+      // save failed, the tab stays usable, and a ping decides. It used to
+      // say "Run blink theme to start it again" over a builder still
+      // running (review of fp/tab-notice r2, S1).
+      else if (j.status === 400 || j.status === 500) { say(j.error || 'The board would refuse that theme.', true); if (owed) ping(); }
+      else stopped();
+    }, function () { settled(); stopped(); });
+  });
+  document.getElementById('cancel').addEventListener('click', function () {
+    if (finished) return;
+    clearTimeout(previewTimer);
+    post('/api/cancel', null, true).then(function (j) {
+      if (j.status === 409) return superseded();
+      // No share code offered, and the countdown runs whatever the tab
+      // holds: Cancel is the owner throwing the changes away.
+      if (retire('Cancelled.', 'Your board is back on its saved theme.',
+                 'Cancelled. Your board is back on its saved theme.', undefined, false, closeLine(CLOSE_AFTER_S))) closeSoon();
+    }, stopped);
+  });
+  // Closing the tab cancels. A reload also fires pagehide, and the server
+  // waits a few seconds for this page to load again before it gives up.
+  window.addEventListener('pagehide', function () {
+    if (finished) return;
+    try { fetch('/api/closed', { method: 'POST', credentials: 'same-origin', keepalive: true, body: JSON.stringify({ tab: TAB }) }); } catch (e) {}
+  });
+
+  // Tells the server this tab is still open, so "Edit on computer" on the
+  // board does not open a second one beside it. Not an edit: an open tab
+  // nobody touches still times out after ten minutes.
+  // One live tab per builder: when a newer tab has opened on it (another
+  // press of Edit on computer), this one stops sending. It closes itself
+  // only when it holds nothing the owner has not saved. Chrome, Edge and
+  // Firefox all let a script close a tab with one history entry, which a
+  // builder tab opened from the board is, so "closes itself" was the usual
+  // ending, and it took an unsaved draft with it without a word (review of
+  // fp/edit-reset r2, SHOULD-1). A tab with changes stays, still, with its
+  // colours on screen and the popup offering their share code; the
+  // newer tab opens on the last preview this one sent (/api/state "draft").
+  var savedKey = null;
+  function unsaved() { return savedKey === null || JSON.stringify(wireTheme()) !== savedKey; }
+  function superseded() {
+    // closes: only a tab that holds nothing unsaved, which includes a tab
+    // that never heard its saved theme. draft: it holds changes it can
+    // offer. The popup's words follow the offer, so a tab with nothing to
+    // copy is not told to copy (review of fp/tab-notice, N1).
+    var closes = !unsaved(), draft = holdsDraft();
+    var ended = retire('Continued in a newer tab.', 'This tab has handed over to the newer one.',
+                       'Continued in a newer tab.', undefined, draft && KEEP_LINE);
+    if (ended && closes) { try { window.close(); } catch (e) {} }
+  }
+  // One miss is asked again before the tab calls the builder stopped. A
+  // single dropped request on loopback ended a live builder's tab for good
+  // (review of fp/tab-notice, N2). Three seconds: the builder is either up again by
+  // then or gone.
+  var RETRY_MS = 3000;
+  // alive: called when the builder answers and this tab is still its live
+  // one; see unsent().
+  function ping(again, alive) {
+    if (finished) return;
+    function miss() { if (again) stopped(); else setTimeout(function () { ping(true, alive); }, RETRY_MS); }
+    post('/api/ping', { tab: TAB }, true).then(function (j) {
+      if (j.status !== 200) miss(); else if (j.newer) superseded(); else if (alive) alive();
+    }, miss);
+  }
+  setInterval(function () { ping(); }, 20000);
+  ping();     // counted as a tab at once, not 20 s from now
+  // And at once on coming back into view. A hidden tab's timer runs about
+  // once a minute, and longer when the browser has frozen it, so the owner
+  // returning to an older tab could act in it before it heard it had been
+  // taken over. The server refuses that action anyway (409); this makes
+  // the tab say so before the first click rather than after it.
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) ping(); });
+  // A tab brought back from the back-forward cache sent /api/closed on its
+  // way out, and the builder may have ended since: ask before it is used.
+  window.addEventListener('pageshow', function (e) { if (e.persisted) ping(); });
+
+  // --top-h follows the header: 80 px as a rule, more when a long status
+  // wraps it. It was 73 px, written in, with the header at 80 (review of
+  // fp/builder-look, S4).
+  (function () {
+    var top = document.querySelector('.top'), rootStyle = document.documentElement.style;
+    function fit() { if (top.offsetHeight) rootStyle.setProperty('--top-h', top.offsetHeight + 'px'); }
+    if (window.ResizeObserver) new ResizeObserver(fit).observe(top);
+    fit();
+  })();
+
+  // A theme as /api/state gives it, onto the page. False if it is neither a
+  // built-in nor a custom theme this page can show.
+  function applyTheme(t) {
+    if (t && t.id === CUSTOM) return applyCustom(t);
+    if (t && t.id >= 0 && t.id < PRESETS.length) { Object.assign(st, PRESETS[t.id][1]); st.preset = t.id; fromOutside(); return true; }
+    return false;
+  }
+  // Limited like the posts, and ending the same way as a refused one: the
+  // tab stops. With no limit, a builder that took the connection and never
+  // answered left the bar at "Loading your current theme." for good, over
+  // controls that showed a theme the page had never read (review of
+  // fp/tab-notice r4, N2, probe E). The pings did find a dead builder
+  // there, but nothing ever ended the wait itself. Without the theme the
+  // board has, the page has nothing true to start from, which is why a
+  // failed /api/state already ended the tab; one that never answers now
+  // ends it the same way, after REQUEST_MS, the same 10 s the posts get.
+  // The form is off until then; see loaded. Copy share code with it, which
+  // copied "blink theme set dark", a theme the page had never read, under
+  // a bar asking the owner to wait (review of fp/save-before-load, S1).
+  // Cancel stays on: it writes nothing of its own, only puts the board
+  // back on the theme it keeps.
+  var FORM = 'main button, main input, #copy-code';
+  document.querySelectorAll(FORM).forEach(function (e) { e.disabled = true; });
+  var studio = document.querySelector('main');
+  var waiting = setTimeout(function () { if (!loaded) studio.classList.add('waiting'); }, 150);
+  var stateCtl = typeof AbortController === 'function' ? new AbortController() : null;
+  var stateLimit = stateCtl ? setTimeout(function () { stateCtl.abort(); }, REQUEST_MS) : null;
+  fetch('/api/state', { credentials: 'same-origin', signal: stateCtl ? stateCtl.signal : undefined }).then(function (r) {
+    if (r.status !== 200) throw 0;
+    return r.json();
+  }).then(function (j) {
+    clearTimeout(stateLimit);
+    var t = j.saved;
+    oldBoard = !!j.board && j.board.themes === false;
+    applyTheme(t);
+    savedKey = JSON.stringify(wireTheme());
+    lastSent = savedKey;
+    // A draft: this builder was already showing a preview, from a tab this
+    // one has just taken over. Start from it, since it is what the board
+    // shows now; it is still unsaved, so Cancel puts the board back.
+    var draft = false;
+    if (j.draft && applyTheme(j.draft)) { lastSent = JSON.stringify(wireTheme()); draft = lastSent !== savedKey; }
+    // On only while the tab is live: a tab taken over or stopped while the
+    // state was on its way has its form off for good.
+    loaded = true;
+    clearTimeout(waiting); studio.classList.remove('waiting');
+    if (!finished) { document.querySelectorAll(FORM).forEach(function (e) { e.disabled = false; }); studio.removeAttribute('aria-busy'); }
+    say(oldBoard ? OLD_BOARD_LOAD : draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
+        : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
+    render();
+  }, function () { clearTimeout(stateLimit); render(); stopped(); });
+  render();
+})();
+</script>
+</body>
+</html>

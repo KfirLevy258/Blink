@@ -50,3 +50,10 @@ bridge.pid
 # clean tree look dirty -- which is exactly how a real uncommitted change goes
 # unnoticed.
 .DS_Store
+
+# The Playwright MCP browser's page snapshots and console logs, written into
+# whatever directory it was started from. They hold whatever pages it visited
+# (one was a chatgpt.com page), so one `git add -A` would put them in a public
+# repository (privacy review of PR #4, 2026-10-31). `logos/` is deliberately
+# NOT listed here: the owner keeps it unignored on main.
+.playwright-mcp/

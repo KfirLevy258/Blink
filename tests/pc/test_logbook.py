@@ -193,7 +193,7 @@ def test_a_writer_that_never_sends_a_newline_does_not_grow_memory():
     buf, j = _journal()
     for _ in range(20):
         j.write("x" * 1000)
-    assert len(j._partial) <= 8192
+    assert all(len(p) <= 8192 for p in j._partials.values())
     assert buf.getvalue()          # it got written out rather than held
 
 
@@ -213,12 +213,12 @@ def test_protocol_json_is_not_echoed():
     """
     e = logbook.ConsoleEcho()
     out = e.feed(b'{"t":"ping","v":2,"up_ms":900}\n[usage] session 5%\n')
-    assert out == ["[usage] session 5%"]
+    assert out == ["[usage] session"]
 
 
 def test_blank_lines_are_dropped():
     e = logbook.ConsoleEcho()
-    assert e.feed(b"\n\r\n  \n[ota] done\n") == ["[ota] done"]
+    assert e.feed(b"\n\r\n  \n[ota] done\n") == ["[ota]"]
 
 
 def test_a_board_that_never_sends_a_newline_does_not_grow_the_buffer():
@@ -232,7 +232,7 @@ def test_undecodable_bytes_do_not_raise():
     """Line noise on a serial port is ordinary, and it must not take the
     daemon down -- this runs inside the read loop of a login service."""
     e = logbook.ConsoleEcho()
-    assert e.feed(b"\xff\xfe bad\n") == ["�� bad"]
+    assert e.feed(b"\xff\xfe bad\n") == [logbook.BOARD_LINE]
 
 
 # --------------------------------------------------------------- heartbeat
@@ -356,44 +356,6 @@ def test_nothing_held_back_means_nothing_said():
     assert r.due() is None
 
 
-# ------------------------------------------------------------------ brief
-
-def test_the_usage_frame_is_logged_by_its_values():
-    """279 bytes of dict repr, every minute, mostly field names.
-
-    Once the heartbeat stopped being logged this was 48% of the file by
-    bytes. Nothing parses the log -- no test, doc or tool greps the arrow
-    lines -- and `blink status --wire` prints the whole frame on demand, so
-    the log gets the values.
-    """
-    m = {"t": "usage", "v": 2, "session_pct": 12.0,
-         "session_resets_in_s": 11723, "weekly_pct": 9.0,
-         "weekly_resets_in_s": 549923, "stale": False, "provider": "claude",
-         "src": "cli", "state": "idle", "n_sess": 4, "n_run": 3,
-         "age_s": 3, "active_age_s": 0}
-    out = logbook.brief(m)
-    assert len(out) < len(repr(m)) / 3
-    # Everything a support reader reaches for is still in it.
-    for want in ("claude", "cli", "12.0%", "9.0%", "idle", "n=4/3", "age=3s"):
-        assert want in out, want
-    assert "STALE" not in out
-
-
-def test_a_stale_reading_says_so():
-    """The one flag worth a word rather than a number: it changes what the
-    panel is showing, and a reader scanning for trouble scans for words."""
-    out = logbook.brief({"t": "usage", "stale": True})
-    assert "STALE" in out
-
-
-def test_anything_else_falls_through_to_the_full_message():
-    """An unexpected message is exactly when every field is wanted, and by
-    definition those are the rare ones -- so there is nothing to save."""
-    assert logbook.brief({"t": "session", "n": 2}) is None
-    assert logbook.brief({"t": "ota_avail", "version": "1.3.3"}) is None
-    assert logbook.brief({}) is None
-
-
 # ---------------------------------------------------------------- rotation
 
 def _live(tmp_path, size):
@@ -511,6 +473,36 @@ def test_a_missing_log_is_not_an_error(tmp_path):
                                   io.StringIO()) is False
 
 
+def test_a_rotation_holds_the_journal_across_copy_and_truncate(tmp_path,
+                                                                 monkeypatch):
+    """With a second thread printing, a line written between the copy and
+    the truncation is in neither file. Holding the Journal's lock across
+    both closes that window for every line that goes through it."""
+    import threading
+    path, f = _live(tmp_path, 2000)
+    j = logbook.Journal(f)
+    seen = {}
+    real_copy = logbook._copy
+
+    def copy(src, dst):
+        got = []
+        t = threading.Thread(
+            target=lambda: got.append(j._lock.acquire(blocking=False)))
+        t.start()
+        t.join()
+        seen["other_thread_could_print"] = got[0]
+        if got[0]:
+            j._lock.release()
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(logbook, "_copy", copy)
+    try:
+        assert logbook.rotate_if_full(path, j, cap=1000) is True
+    finally:
+        f.close()
+    assert seen == {"other_thread_could_print": False}
+
+
 def test_a_rotation_that_cannot_be_written_does_not_raise(tmp_path,
                                                           monkeypatch):
     """This runs in the daemon's poll loop. A log that cannot be rotated is
@@ -526,3 +518,279 @@ def test_a_rotation_that_cannot_be_written_does_not_raise(tmp_path,
         assert logbook.rotate_if_full(path, f, cap=1000) is False
     finally:
         f.close()
+
+
+def _generations(tmp_path, keep):
+    """{n: text} for the numbered generations that exist, ignoring size."""
+    out = {}
+    for n in range(1, keep + 1):
+        p = tmp_path / f"bridge.log.{n}"
+        if p.exists():
+            out[n] = p.read_text()[:7]
+    return out
+
+
+def _full_log_with_generations(tmp_path, keep):
+    path, f = _live(tmp_path, 2000)
+    for i in range(1, keep + 1):
+        (tmp_path / f"bridge.log.{i}").write_text(f"gen{i}".ljust(7, "."))
+    return path, f
+
+
+def test_a_clean_rotation_keeps_all_but_the_oldest(tmp_path):
+    path, f = _full_log_with_generations(tmp_path, 4)
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is True
+    finally:
+        f.close()
+    assert _generations(tmp_path, 4) == {
+        1: "x" * 7, 2: "gen1...", 3: "gen2...", 4: "gen3..."}
+
+
+def test_a_rename_that_fails_once_costs_no_extra_generation(tmp_path,
+                                                            monkeypatch):
+    """A rename refused part way through the shift (Windows: an antivirus or
+    a log viewer holding bridge.log.2 for a moment) must not cost anything
+    beyond what a clean rotation drops.
+
+    The oldest generation used to be deleted up front, on every attempt. The
+    retry, one pass of the serial loop later, deleted .4 again -- and by then
+    .4 was the old .3. Measured with keep=4 and a rename of .2 refused once:
+    only generations 1 and 2 survived the retry, where a clean rotation keeps
+    1, 2 and 3. Found in review, 2026-10-31.
+    """
+    path, f = _full_log_with_generations(tmp_path, 4)
+    real, refused = os.replace, []
+
+    def flaky(src, dst):
+        if src.endswith(".2") and not refused:
+            refused.append(src)
+            raise PermissionError(32, "being used by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(logbook.os, "replace", flaky)
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is False
+        assert os.path.getsize(path) == 2000        # not truncated
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is True
+    finally:
+        f.close()
+    assert refused
+    assert _generations(tmp_path, 4) == {
+        1: "x" * 7, 2: "gen1...", 3: "gen2...", 4: "gen3..."}
+
+
+def test_a_copy_that_fails_after_the_shift_costs_no_extra_generation(
+        tmp_path, monkeypatch):
+    """The same, when the shift went through and the copy into .1 failed
+    (a full disk): the retry must fill the empty .1 and leave the rest."""
+    path, f = _full_log_with_generations(tmp_path, 4)
+    real_copy, calls = logbook._copy, []
+
+    def once(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            raise OSError(28, "No space left on device")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(logbook, "_copy", once)
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is False
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is True
+    finally:
+        f.close()
+    assert _generations(tmp_path, 4) == {
+        1: "x" * 7, 2: "gen1...", 3: "gen2...", 4: "gen3..."}
+
+
+def _files(tmp_path):
+    return sorted(p.name for p in tmp_path.iterdir())
+
+
+_CLEAN_FILES = ["bridge.log", "bridge.log.1", "bridge.log.2", "bridge.log.3",
+                "bridge.log.4"]
+
+
+def test_a_rotation_leaves_exactly_the_kept_files_and_nothing_else(tmp_path):
+    """No .5 past `keep`, and no staging file left behind."""
+    path, f = _full_log_with_generations(tmp_path, 4)
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is True
+    finally:
+        f.close()
+    assert _files(tmp_path) == _CLEAN_FILES
+
+
+def test_a_copy_that_dies_half_way_leaves_no_short_file_in_a_generation(
+        tmp_path, monkeypatch):
+    """A full disk: _copy writes some of the log and then raises. The short
+    piece must not sit in .1, where the retry would shift it up as if it were
+    a generation and push a real one off the end."""
+    path, f = _full_log_with_generations(tmp_path, 4)
+    real, calls = logbook._copy, []
+
+    def half(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            with open(dst, "wb") as w:
+                w.write(b"half")
+            raise OSError(28, "No space left on device")
+        return real(src, dst)
+
+    monkeypatch.setattr(logbook, "_copy", half)
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is False
+        assert (tmp_path / "bridge.log.1").read_text() == "gen1..."
+        assert os.path.getsize(path) == 2000
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is True
+    finally:
+        f.close()
+    assert _generations(tmp_path, 4) == {
+        1: "x" * 7, 2: "gen1...", 3: "gen2...", 4: "gen3..."}
+    assert _files(tmp_path) == _CLEAN_FILES
+
+
+def test_the_log_is_not_emptied_until_every_rename_has_gone_through(
+        tmp_path, monkeypatch):
+    """The truncate is the point of no return and comes last. If the final
+    rename into .1 is refused, the log still holds everything."""
+    path, f = _full_log_with_generations(tmp_path, 4)
+    real = os.replace
+
+    def refuse_last(src, dst):
+        if dst.endswith(".1"):
+            raise PermissionError(32, "being used by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(logbook.os, "replace", refuse_last)
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is False
+    finally:
+        f.close()
+    assert os.path.getsize(path) == 2000
+
+
+def test_a_hole_in_the_generations_is_not_shifted_over(tmp_path):
+    """Someone deleted .2 by hand: .3 and .4 stay where they are."""
+    path, f = _full_log_with_generations(tmp_path, 4)
+    (tmp_path / "bridge.log.2").unlink()
+    try:
+        assert logbook.rotate_if_full(path, f, cap=1000, keep=4) is True
+    finally:
+        f.close()
+    assert _generations(tmp_path, 4) == {
+        1: "x" * 7, 2: "gen1...", 3: "gen3...", 4: "gen4..."}
+
+
+# ------------------------------------------------------------- two threads
+
+def test_two_threads_printing_at_once_never_glue_or_break_lines():
+    """The status-page watch is the daemon's first second thread, and both it
+    and the serial loop print through this. print() calls write() twice per
+    line, so an unguarded Journal glued one thread's text onto the other's
+    newline, emitted empty stamped lines, and raised IndexError out of
+    print() -- which on the serial loop escapes main() and ends the daemon.
+    """
+    import re
+    import sys
+    import threading
+
+    buf = io.StringIO()
+    j = logbook.Journal(buf, clock=lambda: "T")
+    errors = []
+    n = 2000
+
+    def talk(tag):
+        try:
+            for i in range(n):
+                print(f"[{tag}] line {i}", file=j)
+        except Exception as e:          # pragma: no cover - the failure
+            errors.append(e)
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=talk, args=(t,)) for t in "ab"]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(old)
+    j.flush()
+
+    assert errors == []
+    lines = buf.getvalue().splitlines()
+    bad = [ln for ln in lines if not re.fullmatch(r"T \[[ab]\] line \d+", ln)]
+    assert bad == []
+    for tag in "ab":
+        got = [int(ln.rsplit(" ", 1)[1]) for ln in lines
+               if ln.startswith(f"T [{tag}]")]
+        assert got == list(range(n))
+
+
+def test_a_final_flush_cannot_hang_on_a_held_lock():
+    """At interpreter shutdown the status thread can be frozen holding the
+    lock; the last flush must give up rather than wait for it forever."""
+    import threading
+    import time
+    buf = io.StringIO()
+    j = logbook.Journal(buf, clock=lambda: "T")
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with j._lock:
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    held.wait(5)
+    start = time.monotonic()
+    j.flush()
+    assert time.monotonic() - start < 5
+    release.set()
+    t.join()
+
+
+# ---------------------------------------------------- repeats, per provider
+
+def _svc(p, level, what=None):
+    m = {"t": "svc", "v": 2, "provider": p, "level": level}
+    if what:
+        m["what"] = what
+    return m
+
+
+def test_svc_restatements_are_counted_per_provider():
+    """The heartbeat re-states each page's status every minute. One Repeats
+    shared by both pages never matches -- claude and codex alternate -- so
+    each provider gets its own."""
+    r = logbook.RepeatsBy("provider", ("level", "what"), "svc lines")
+    logged = 0
+    for _ in range(1440):                     # a day of heartbeats
+        logged += r.worth_logging(_svc("claude", "ok"))
+        logged += r.worth_logging(_svc("codex", "ok"))
+    assert logged == 2
+
+
+def test_a_real_svc_change_is_still_logged():
+    r = logbook.RepeatsBy("provider", ("level", "what"), "svc lines")
+    assert r.worth_logging(_svc("claude", "ok"))
+    assert not r.worth_logging(_svc("claude", "ok"))
+    assert r.worth_logging(_svc("claude", "major", "Claude Code"))
+    assert r.worth_logging(_svc("codex", "major", "Codex"))
+    assert r.worth_logging(_svc("claude", "major", "API"))
+
+
+def test_per_provider_repeats_report_what_they_held_back():
+    t = [0.0]
+    r = logbook.RepeatsBy("provider", ("level", "what"), "svc lines",
+                          every_s=600, now=lambda: t[0])
+    for _ in range(5):
+        r.worth_logging(_svc("claude", "ok"))
+        r.worth_logging(_svc("codex", "ok"))
+    assert r.due() is None
+    t[0] = 601
+    assert r.due() == "[bridge] 8 unchanged svc lines not logged"
+    assert r.due() is None

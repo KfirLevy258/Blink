@@ -2,10 +2,6 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(claude_usage_display)
 
-# src/ on the global include path so the mbedTLS build can find
-# src/mbedtls_user_config.h (CONFIG_MBEDTLS_USER_CONFIG_FILE).
-zephyr_include_directories(src)
-
 target_sources(app PRIVATE
 	src/main.c
 	src/proto.c
@@ -26,6 +22,8 @@ target_sources(app PRIVATE
 	src/logo_parse.c
 	src/logo.c
 	src/ui_settings.c
+	src/edit_hold.c
+	src/settings_icons.c
 	src/ui_anim.c
 	src/ui_slide.c
 	src/ui_swipe.c
@@ -35,23 +33,27 @@ target_sources(app PRIVATE
 	src/ui_touchfx.c
 	src/usage_state.c
 	src/usage_freshness.c
-)
-
-# Standalone WiFi mode only. Not stubbed and not dead-stripped -- with
-# CONFIG_BLINK_WIFI_MODE off these are never handed to the compiler, so the
-# OAuth client id, the spoofed User-Agent and the token writer are absent from
-# the image rather than merely unreachable in it. See firmware/Kconfig.
-target_sources_ifdef(CONFIG_BLINK_WIFI_MODE app PRIVATE
-	src/net_wifi.c
-	src/portal.c
-	src/ui_setup.c
-	src/dns_hijack.c
-	src/oauth.c
-	src/usage_parse.c
-	src/usage_client.c
-	src/tz_fetch.c
+	src/fatal.c
+	src/fatal_policy.c
+	src/svc_state.c
+	src/theme.c
+	src/font_focus_40.c
+	src/ui_theme.c
 )
 
 # Diagnostic only; CONFIG_BLINK_TOUCH_TRACE is off in release builds.
 target_sources_ifdef(CONFIG_BLINK_TOUCH_TRACE app PRIVATE src/touch_trace.c)
 
+# Bench only; CONFIG_BLINK_TOUCH_INJECT is off in every release build, and
+# tools/lib_selftest.sh refuses an image that has it.
+target_sources_ifdef(CONFIG_BLINK_TOUCH_INJECT app PRIVATE src/touch_inject.c
+		     src/touch_widgets.c)
+
+
+# The [mem] lines (src/mem_stats.c), on whenever prj.conf keeps the heap
+# counters on. It reads the LVGL pool's free lists through Zephyr's private
+# lib/heap/heap.h, so ZEPHYR_BASE is on the path for this one file only and
+# the file includes "lib/heap/heap.h" by that full name.
+target_sources_ifdef(CONFIG_SYS_HEAP_RUNTIME_STATS app PRIVATE src/mem_stats.c)
+set_source_files_properties(src/mem_stats.c PROPERTIES
+	INCLUDE_DIRECTORIES ${ZEPHYR_BASE})

@@ -45,6 +45,13 @@ scripts: they install, uninstall and reinstall the service for real, so on a
 developer's own desk the board goes to HOST LOST while they are looking at it.
 CI runners are the only place they belong.
 
+**Importing a module of ours must do nothing.** `blink_main.py` once ran
+`blink install` on import (a bare `blink` is install) and a reviewer's import
+booted out the owner's real launchd job on 2026-10-30. Entry points run under
+`if __name__ == "__main__":`; `tests/test_import_is_inert.py` imports every
+module in a child whose PATH holds only recording launchctl/systemctl/schtasks
+stubs.
+
 Never create `.bak` files. Set `PYTHONDONTWRITEBYTECODE=1` on anything that
 mutates the tree.
 
@@ -52,8 +59,14 @@ mutates the tree.
 
 The board reads NDJSON lines and **drops an over-long line whole**, silently,
 with no error on either side — the panel just stops updating while the daemon's
-log keeps printing the message as sent. The budget is 512 bytes and a loaded
-two-provider frame already measures 484.
+log keeps saying it was sent (`-> usage`). The budget is 512 bytes and a loaded
+two-provider frame already measures 454 (the widest it can be, computed
+over every source id by `tests/pc/test_protocol.py`, 2026-10-31).
+
+That log line names the type and nothing else, in both directions, and the
+board's console is cut to a fixed allowlist (`protocol.log_name`,
+`logbook.console_line`). Until 2026-10-30 both printed whole messages and
+lines, ids and usage figures included, into the file customers send us.
 
 So: every production writer uses `protocol.encode_checked()`, never plain
 `encode()`. `encode_checked` was written for exactly this and once had no
@@ -63,8 +76,7 @@ production caller at all — only tests exercised it.
 
 ```sh
 python3 -m venv .venv-test          # 3.11+; a bare `python` may not exist
-.venv-test/bin/python -m pip install \
-    pyserial==3.5 esptool==5.3.1 ecdsa==0.19.1 certifi==2026.7.22 \
+.venv-test/bin/python -m pip install -r pc/requirements.txt \
     pytest numpy Pillow
 .venv-test/bin/python -m pytest tests/ -q
 ```
@@ -74,20 +86,77 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**1503 passing** as of 2026-10-19, on macOS, Ubuntu and Windows (ARM64 VM). The first four packages are pinned in
-`pc/requirements.txt` and are pinned on purpose; `numpy` and `Pillow` are only
+**3281 passing, 1 skipped** (os.startfile, Windows only) as of 2026-10-31, on
+macOS. The same tree on the other two platforms the same day, each its own
+count: Ubuntu (Docker, x86_64) 3133 passed and 149 skipped, Windows (ARM64 VM)
+2962 passed and 314 skipped, none failing. The skips are platform tests and,
+on Windows, the builder-page tests that need Node. Re-run Ubuntu and Windows
+before claiming them for a new number. Everything in
+`pc/requirements.txt` is pinned on purpose, bitstring included, though
+nothing in `pc/` imports it; `numpy` and `Pillow` are only
 needed by the logo and boot-animation encoder tests. CI runs the same
 `pytest tests/ -q`.
 
-`tests/conftest.py` redirects `HOME`, `USERPROFILE`, `APPDATA` and
-`LOCALAPPDATA` into `tmp_path` and sets `BLINK_SKIP_SERVICE=1`, autouse, for
-every test. Read its docstring before working around it — both fixtures exist
-because a test once booted out the launchd agent of the person logged in.
+`tests/conftest.py` sandboxes every test, autouse, because the failure it
+guards against is a test file that forgets. Read its docstring before working
+around it. It:
 
-**The sandbox has one hole:** a module-level constant computed with
-`os.path.expanduser("~")` is evaluated at import, before any fixture runs, so
-it points at the real home no matter what `conftest.py` does. Resolve paths
-inside functions, not at module scope.
+- points `HOME`, `USERPROFILE`, `APPDATA` and `LOCALAPPDATA` into `tmp_path`
+  (USERPROFILE because twelve tests once wrote into a real Windows profile;
+  APPDATA because a Windows VM's suite read a real Claude Desktop history) and
+  clears `CODEX_HOME`, which outranks HOME for Codex: a developer who exported
+  it had every Codex test reading their real rollouts. The environment half
+  is the plain function `sandbox_environment()`, so `tests/test_sandbox.py`
+  can set CODEX_HOME itself and prove it is cleared rather than rely on a
+  shell that CI never has. It clears the daemon's `BLINK_*` variables too
+  (`BLINK_STATUS_DIR` alone, exported, failed 31 tests), and
+  `tests/test_sandbox.py` fails on a new one it does not handle;
+- sets `BLINK_SKIP_SERVICE=1`, because a test once booted out the launchd
+  agent of the person logged in. The service code now also skips on its own
+  when `HOME` is not the account's home (`pwd`, POSIX), which is every test,
+  so a test that clears `BLINK_SKIP_SERVICE` to drive the backends with a
+  faked `subprocess` sets `BLINK_ALLOW_FOREIGN_HOME=1` as well. That check is
+  what `HOME=/tmp/x blink install` meets; the CI install script sets the
+  override only where `GITHUB_ACTIONS` is `true` (not `CI`, which developers'
+  shells export);
+- refuses any socket off loopback, at name lookup and at `connect()`, and
+  clears proxies so one on 127.0.0.1 cannot carry a request through. Four
+  bridge tests had been fetching the release feed from github.com on every
+  run. It raises a `BaseException`, because the status-page reader catches
+  `Exception` on purpose and would have swallowed an AssertionError. A test
+  that really needs the network says `@pytest.mark.allow_network`;
+- refuses to open a browser: `webbrowser.open`/`open_new`/`open_new_tab`/`get`,
+  `os.startfile`, `os.system`, and any subprocess launch of `open`,
+  `osascript`, `xdg-open`, `start` or `explorer`. On 2026-10-30 a test's
+  falsy stub opener made `theme_server.Launcher` fall back to the real one
+  and tabs opened in the owner's Chrome. It raises a `BaseException` and
+  also records the attempt, failing the test at teardown if the code under
+  test swallowed the refusal. A test that really needs it says
+  `@pytest.mark.allow_browser`.
+
+`move_home` (not autouse) moves home after import for tests that pin
+call-time path resolution, so the list of home variables lives in one place.
+The root `pytest.ini` exists so pytest started from inside `tests/pc` still
+loads this conftest; without it, the sandbox did not apply.
+
+**The sandbox has one hole:** a path computed with `os.path.expanduser("~")`
+at import (a module constant, a class attribute, a default argument) is
+evaluated before any fixture runs, so it points at the real home no matter
+what `conftest.py` does. It has been fallen into twice, both times reading
+this desk's live `statusline.json` from inside the suite. Resolve paths
+inside functions. `tests/test_sandbox.py` now enforces this: it parses every
+module under `pc/` and both entry points and fails on any home lookup that
+runs at import, including through one of our own functions that resolves
+home. If it flags your code, move the lookup into a function. Don't exempt
+it.
+
+**Test helpers take their home from the caller.** A helper that writes takes
+a `home` argument and passes our path through `tests/support/home.inside()`
+before writing. On 2026-10-27 a scratch script imported
+`tests.pc.test_hello_burst` and called its helper, which found `~/.blink` on
+its own and wrote a test theme into a real desk's `theme.json`.
+`tests/pc/__init__.py` now refuses a script import while HOME is the real
+one, but nothing else under `tests/` is guarded.
 
 ## Hardware
 
@@ -109,8 +178,21 @@ Firmware work is **not done when it builds** — done means flashed to a board
 and boot-verified.
 
 `tools/burn.sh` is the reference for stopping and restoring the daemon around a
-flash. Note that `launchctl bootstrap` registers a job without starting it; a
-restore also needs `launchctl kickstart -k`.
+flash. Whether `launchctl bootstrap` starts a RunAtLoad job depends on the
+macOS release: on 2026-09-04 it registered the job and left it idle five times
+out of five, and on macOS 27.0.1 (2026-10-28, a throwaway agent of the same
+shape) it started it five times out of five. So a restore also needs
+`launchctl kickstart`, and it must be plain, not `-k`. Plain starts an idle job
+and leaves a running one alone. `-k` kills whatever is running, which is the
+instance bootstrap just started or one still inside the 180 s stop grace of an
+OTA write. `burn.sh`, `dev.sh` (through `tools/lib_launchd.sh`) and `blink
+install` all wait out that grace before they bootstrap. Like `burn.sh`,
+`tools/dev.sh flash` also stops and restores the installed launchd agent around
+a flash. Before, it stopped only its own daemon, and the eFuse probe then
+refused a good board because the port was busy. It
+still writes with `west flash`, so its image is unconfirmed, as described
+above. Use it for bench iteration, and `burn.sh` for a board that is
+going on a desk.
 
 The board's auto-reset circuit is cross-coupled: EN is low only while RTS is
 asserted and DTR is not; IO0 is low only while DTR is asserted and RTS is not.
@@ -139,6 +221,7 @@ how it was found. No trailers (see the top of this file).
   flash.
 - `docs/windows-check.md` — the ten-minute manual pass, once per release.
 - `docs/fleet-testing.md` and `tools/fleet/fleet.toml` — the three desks a
-  release is proved on.
+  release is proved on; `tools/fleet/fleet-vm.toml` is this Mac and its two
+  UTM VMs with one board handed round, a narrower claim the gate keeps apart.
 - `docs/open-bugs/` — open faults with what has been measured, so nobody
   re-derives it.

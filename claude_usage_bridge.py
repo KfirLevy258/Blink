@@ -5,9 +5,12 @@ Run inside the Zephyr venv (has pyserial) or `pip install pyserial`:
     python3 claude_usage_bridge.py --port /dev/cu.usbmodemXXXX
 """
 import argparse
+import atexit
+import contextlib
 import json
-import math
 import os
+import queue
+import signal
 import sys
 import time
 
@@ -15,8 +18,9 @@ import serial  # pyserial
 from serial.tools import list_ports
 
 from pc import ota as ota_mod
-from pc import (ingest, install_statusline, logbook, protocol,
-                statusline_source, update, win_driver)
+from pc import (ingest, install_statusline, interval, logbook, protocol,
+                status_page, statusline_source, theme, theme_server, update,
+                win_driver)
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
@@ -138,7 +142,7 @@ class Tap:
 
         `sent` is not decoration. send() refuses any line over the board's
         512-byte limit -- and a fully loaded two-provider frame already
-        measures 484 -- so the refusal happens in exactly the boundary cases
+        measures 454 (2026-10-31) -- so the refusal happens in exactly the boundary cases
         this suite exists to catch. A transcript that recorded the refusal as
         a plain tx would say the host sent a frame the board ignored, and the
         hunt would start in the firmware for a bug that is in the host.
@@ -249,37 +253,12 @@ def poll_interval():
     the tap must count records whose msg["t"] == "usage" rather than counting
     tx records.
 
-    Malformed or non-positive is refused rather than obeyed: 0 or a negative
-    makes the poll gate true on every turn of the read loop, which would
-    hammer a rate-limited usage endpoint as fast as the loop spins. It falls
-    back to the default and says so -- once, because main() resolves this at
-    startup and never asks again.
-
-    Non-finite is refused for the opposite reason, and is the quieter hazard
-    of the two. "nan", "inf" and "1e400" all parse without raising, and a
-    positivity check alone lets them through -- every comparison against nan
-    is False, so `nan <= 0` is False. Either one poisons
-    `next_poll = monotonic() + interval`, after which `monotonic() >=
-    next_poll` is False for the rest of the run: polling stops dead, the
-    board never receives usage again, and nothing anywhere says why. Hence
-    isfinite FIRST, before any comparison that nan would win by default.
+    Malformed, non-positive and non-finite values are refused, with a line
+    saying so; pc/interval.py has why each of those is dangerous, and it is
+    shared with the status-page poll so the two cannot drift apart again.
     """
-    raw = os.environ.get("BLINK_POLL_INTERVAL_S")
-    if raw is None:
-        return POLL_INTERVAL_S
-    try:
-        seconds = float(raw)
-    except ValueError:
-        seconds = 0
-    if not math.isfinite(seconds) or seconds <= 0:
-        # "usable" rather than "positive": inf IS positive, and telling
-        # someone who typed it that it is not would send them looking in the
-        # wrong direction.
-        print(f"[bridge] BLINK_POLL_INTERVAL_S={raw!r} is not a usable"
-              f" number of seconds; polling every {POLL_INTERVAL_S} s.",
-              file=sys.stderr)
-        return POLL_INTERVAL_S
-    return seconds
+    return interval.seconds_from_env(os.environ, "BLINK_POLL_INTERVAL_S",
+                                     POLL_INTERVAL_S)
 
 
 def build_bus():
@@ -476,7 +455,7 @@ def remembered_board(home):
         return {}
 
 
-def remember_board(home, port, board_id, fw=None):
+def remember_board(home, port, board_id, fw=None, caps=None):
     """Write down which port worked, so the next start goes straight to it.
 
     This is what makes the polite-probe cheap in the case that matters: a
@@ -489,7 +468,8 @@ def remember_board(home, port, board_id, fw=None):
         os.makedirs(home, exist_ok=True)
         tmp = _known_path(home) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"port": port, "board_id": board_id, "fw": fw}, f)
+            json.dump({"port": port, "board_id": board_id, "fw": fw,
+                       "caps": caps}, f)
         os.replace(tmp, _known_path(home))
     except OSError:
         pass                    # a convenience, never a requirement
@@ -517,10 +497,21 @@ def learn_board(known, port, msg):
 
     bridge.py has always read `cur` for its in-memory _board_fw, which is why
     the overage cap gates correctly; only the persisted record missed it.
+
+    `caps` (what the board can show: protocol.board_caps) comes from a hello
+    or a pref and from nothing else, and from those it is taken whole, an
+    absent list included: a board that has caps lists them on both, so a
+    pref without any is a board that has none. It is what Bridge falls back
+    on before the board has spoken (board_caps_hint), and what `blink theme`
+    reads to say the board will not show one.
     """
+    caps = known.get("caps")
+    if msg.get("t") in ("hello", "pref"):
+        caps = sorted(protocol.board_caps(msg))
     return {"port": port,
             "board_id": msg.get("board_id") or known.get("board_id"),
-            "fw": msg.get("fw") or msg.get("cur") or known.get("fw")}
+            "fw": msg.get("fw") or msg.get("cur") or known.get("fw"),
+            "caps": caps}
 
 
 def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
@@ -552,10 +543,22 @@ def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
     woke it. Unset BLINK_TAP means tap is None and this path is exactly what
     it always was.
     """
+    # encode_checked, as every production writer is (CLAUDE.md). This
+    # welcome is the one that decides what the board offers when the daemon
+    # restarts under it, and its caps can grow; a line over the board's limit
+    # would be dropped whole without a word. The reason is printed, never the
+    # bytes. A refused welcome still listens for the whole window: False
+    # here means "silent", which for a known port means pulling the reset
+    # line, and a board that pings on its own schedule is ours whether or
+    # not it was asked (review of the caps change, 2026-10-27).
+    raw, why = protocol.encode_checked(protocol.welcome("blink-bridge",
+                                                        RELEASE_VERSION))
+    if raw is None:
+        print(f"[bridge] probe not sent: {why}", file=sys.stderr)
     try:
         ser.reset_input_buffer()
-        ser.write(protocol.encode(protocol.welcome("blink-bridge",
-                                                   RELEASE_VERSION)))
+        if raw is not None:
+            ser.write(raw)
         deadline = time.time() + timeout
         reader = protocol.LineReader()
         while time.time() < deadline:
@@ -650,6 +653,8 @@ def _self_update_tick(target):
     false, and turning it on is a decision made per release. Without a remote
     off switch, a bad build would keep installing itself on every machine that
     checked, and nothing here could stop it.
+
+    Only ever called by a frozen daemon: see `frozen` in main().
     """
     home = os.path.dirname(os.path.dirname(target))   # ~/.blink
     manifest = update.fetch_signed_manifest()
@@ -671,10 +676,64 @@ def _self_update_tick(target):
     except Exception as e:
         print(f"[update] download failed: {e}", file=sys.stderr)
         return
-    ok, message = update.apply(blob, target, version)
-    print(f"[update] {message}", file=sys.stderr)
+    # The same guard as the board-tapped path in main(): a stop during the
+    # renames left the login service pointing at half an install (final
+    # review, 2026-10-27, SHOULD 2). See no_exit_while below.
+    with no_exit_while("app update"):
+        ok, message = update.apply(blob, target, version)
+        # Inside the guard: its exit runs the moment the block ends when a
+        # stop arrived during the swap, so a line printed after it never did
+        # and the log said nothing of whether the swap had worked (review,
+        # 2026-10-31; the firmware write had the same defect).
+        print(f"[update] {message}", file=sys.stderr)
     if ok:
         update.restart_from_daemon(target)
+
+
+# SIGTERM, and what must not be interrupted by it.
+#
+# launchd and systemd stop the service with SIGTERM, and so do dev.sh down,
+# pkill and the fleet agent's terminate(). Python's default for it is to die
+# on the spot without running atexit, which left a theme preview standing on
+# the board, so exit_on_sigterm() turns it into an ordinary exit.
+#
+# An ordinary exit is a SystemExit raised wherever the main thread happens to
+# be -- and during an OTA that is inside subprocess.run waiting on esptool.
+# subprocess.run answers any exception there by KILLING its child, so a stop
+# mid write_flash left slot 0 half written, and slot 0 has no revert: a board
+# that will not boot until somebody reflashes it by hand (review,
+# 2026-10-27). So inside no_exit_while() the handler only notes the signal,
+# and the exit happens the moment the guarded work returns.
+_TERM = {"holding": None, "pending": False}
+
+
+def _on_sigterm(signum, frame):
+    if _TERM["holding"]:
+        if not _TERM["pending"]:
+            print(f"[bridge] stopping once the {_TERM['holding']} has"
+                  " finished", file=sys.stderr)
+        _TERM["pending"] = True
+        return
+    sys.exit(0)
+
+
+def exit_on_sigterm():
+    """POSIX only, and only where nothing else has claimed SIGTERM."""
+    if (sys.platform != "win32" and hasattr(signal, "SIGTERM")
+            and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL):
+        signal.signal(signal.SIGTERM, _on_sigterm)
+
+
+@contextlib.contextmanager
+def no_exit_while(what):
+    """A SIGTERM during the block waits for the block, then exits."""
+    _TERM["holding"] = what
+    try:
+        yield
+    finally:
+        _TERM["holding"] = None
+        if _TERM["pending"]:
+            sys.exit(0)
 
 
 def main(argv=None):
@@ -704,12 +763,46 @@ def main(argv=None):
     # binary aside and moving the new one in, the login service is pointing at
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
-    from pc.cli import (_self_path, blink_home as _blink_home,
+    from pc.cli import (_frozen, _self_path, blink_home as _blink_home,
                         hook_shim_path, installed_bin, settings_path,
                         shim_path)
     self_bin = installed_bin()
+    # Decided once, and everything that replaces this program keys off it:
+    # the daily check below and the board-tapped update the Bridge runs. The
+    # feed carries frozen builds for ~/.blink/bin, which a checkout's daemon
+    # is not: with `auto` on, a checkout daemon downloaded one, restarted,
+    # came back as the same checkout and did it again a minute later,
+    # forever, and a tap on the board did the same through the Bridge
+    # (review, 2026-10-25). The Bridge already reads self_update=None as
+    # "cannot replace itself" and offers the firmware alone.
+    frozen = _frozen()
+    if not frozen:
+        print("[update] running from a checkout: updates come from git",
+              file=sys.stderr)
     blink_home = _blink_home()
     update.recover(self_bin)
+    # Bring the login service's own file up to what this version would
+    # write -- today, the 180 s stop grace (cli.STOP_GRACE_S) -- because
+    # nothing else reaches an existing install: `blink update`, the daily
+    # update and the board-tapped one all replace the program and leave the
+    # plist or unit as the release before wrote it. Written only, never
+    # reloaded: see refresh_service_file.
+    try:
+        from pc import cli as _cli
+        done = _cli.refresh_service_file()
+        if done == "updated":
+            print("[bridge] login service file brought up to date; it takes"
+                  " effect at the next login or service reload",
+                  file=sys.stderr)
+        elif done == "edited":
+            # Somebody's edit, which is theirs to keep: say what it lacks.
+            print("[bridge] the login service file has been edited, so it was"
+                  " left as it is; run `blink install` to give it the"
+                  f" {_cli.STOP_GRACE_S} s stop grace a firmware write needs",
+                  file=sys.stderr)
+    except Exception as e:
+        print(f"[bridge] could not check the login service file: {e}",
+              file=sys.stderr)
 
     # Outside the reconnect loop, unlike next_poll. A board that comes and goes
     # -- a nudged cable, a laptop waking -- would otherwise re-arm the 60 s
@@ -749,7 +842,13 @@ def main(argv=None):
     # offset -- a customer travelling, or the twice-yearly DST step. Those
     # are worth a line each; the other 1439 a day are not.
     time_frames = logbook.Repeats(("utc_offset_min",), "clock syncs")
-    _REPEATED = {"usage": usage_frames, "time": time_frames}
+    # The status-page level is re-stated with every heartbeat, one line per
+    # page, so it is kept per provider -- see logbook.RepeatsBy for why one
+    # shared Repeats would suppress nothing.
+    svc_frames = logbook.RepeatsBy("provider", ("level", "what"),
+                                   "status-page lines")
+    _REPEATED = {"usage": usage_frames, "time": time_frames,
+                 "svc": svc_frames}
     watchdog = install_statusline.DriftWatchdog(
         settings_path(), shim_path(),
         shims=((shim_path(), "blink-statusline.sh"),
@@ -779,7 +878,7 @@ def main(argv=None):
     # Frozen: the executable is ~/.blink/bin/blink, two levels down. From a
     # checkout: the ordinary ~/.blink (a developer, not a login service).
     pid_file = (os.path.join(os.path.dirname(os.path.dirname(_self_path())),
-                             "bridge.pid") if getattr(sys, "frozen", False)
+                             "bridge.pid") if frozen
                 else os.path.join(blink_home, "bridge.pid"))
     try:
         with open(pid_file, "w", encoding="utf-8") as f:
@@ -801,7 +900,8 @@ def main(argv=None):
         drifted = watchdog.tick()
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
-        for line in (heartbeat.due(), usage_frames.due(), time_frames.due()):
+        for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
+                     svc_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):
@@ -829,6 +929,38 @@ def main(argv=None):
     # a property of this run, and the read loop turns often enough that an
     # environment lookup per pass would be a strange place to spend time.
     poll_every = poll_interval()
+
+    # The status-page watch, built once for the life of the process and NOT
+    # per connection: its debounce and its five-minute spacing describe the
+    # vendors' pages, not this cable, and a board nudged out and back in must
+    # neither forget a confirmed incident nor earn the pages an early fetch.
+    # Started unconditionally and costs nothing while the setting is off --
+    # it reads ~/.blink/config.json every few seconds and makes no request.
+    svc_watch = status_page.StatusWatch(
+        enabled=lambda: status_page.enabled(blink_home))
+    svc_watch.start()
+
+    # Themes, for the life of the process like the watch above: what the
+    # board is believed to hold outlives a reconnect, and the builder a
+    # board's "Edit on computer" opened must not close because the cable
+    # was nudged. The builder runs on its own threads (pc/theme_server.py);
+    # this loop only ever reads the files it writes.
+    theme_sync = theme.ThemeSync(blink_home)
+    theme_builder = theme_server.Launcher(blink_home)
+    # theme_edit answers, kept for the life of the process like the two
+    # above: an open that returns after a reconnect is answered on the new
+    # connection rather than into a Bridge that is gone.
+    theme_answers = queue.SimpleQueue()
+    # On the way out, a live builder writes a cancel. That does not reach
+    # the board from here -- the port is going too -- but the cancel waits
+    # in theme_preview.json, and the next daemon sends it on its first tick,
+    # so the board drops the preview then instead of holding it for its own
+    # 15 minutes; with no next daemon, those 15 minutes are the backstop.
+    # atexit covers a normal exit and Ctrl-C; SIGTERM, how launchd and
+    # systemd stop the service, is turned into an ordinary exit so that it
+    # runs (see no_exit_while for the one place that must not be cut short).
+    atexit.register(theme_builder.close)
+    exit_on_sigterm()
 
     last_err = None
     explicit_port = bool(args.port)
@@ -1022,19 +1154,25 @@ def main(argv=None):
             # payload of the whole product, so it is never dropped for being
             # routine -- only for being the same thing this log already said
             # a minute ago, which on an idle desk it is 1439 times a day.
+            #
+            # By type only: `-> usage`, never its fields. This printed the
+            # whole message (and the usage frame as a 60-byte digest of its
+            # numbers), which put the board's id, the session labels, the
+            # theme colours and every usage figure into the file a customer
+            # emails us -- the CLAUDE.md serial-buffer rule, broken on every
+            # line. `blink status --wire` still shows a frame whole, on the
+            # customer's own screen, when it is asked to. The suppression
+            # still compares the fields, so a `-> usage` line still means
+            # the reading moved.
             kind = m.get("t")
             if kind in _REPEATED:
                 if _REPEATED[kind].worth_logging(m):
-                    # Compact for the frame that repeats all day: 279 bytes
-                    # of dict repr against 60 of values, and once the
-                    # heartbeat was gone this was 48% of the file. Anything
-                    # logbook.brief does not recognise falls through to the
-                    # full repr, because an unexpected message is exactly
-                    # when every field is wanted.
-                    short = logbook.brief(m)
-                    print(f"[bridge] -> {short or m}", file=sys.stderr)
-            elif kind not in ("ota_data", "pong"):
-                print(f"[bridge] -> {m}", file=sys.stderr)
+                    print(f"[bridge] -> {protocol.log_name(m)}",
+                          file=sys.stderr)
+            # edit_state is a once-a-minute restatement (pc/bridge.py,
+            # _restate_edit), like pong a line that says nothing new.
+            elif kind not in ("ota_data", "pong", "edit_state"):
+                print(f"[bridge] -> {protocol.log_name(m)}", file=sys.stderr)
             # encode_CHECKED. This is the only writer, and it used to call
             # plain encode() -- so protocol.encode_checked, written precisely
             # to guard the board's 512-byte cliff and documented as the thing
@@ -1045,7 +1183,7 @@ def main(argv=None):
             # line, it DROPS it whole (proto.c) with no error on either side:
             # the panel silently stops updating while this log keeps printing
             # the message as sent. A fully loaded two-provider frame already
-            # measures 484 of the 512 bytes.
+            # measures 454 of the 512 bytes (2026-10-31).
             raw, why = protocol.encode_checked(m)
             if raw is None:
                 print(f"[bridge] NOT SENT: {why}", file=sys.stderr)
@@ -1075,6 +1213,13 @@ def main(argv=None):
             # image boots -- so the "the screen goes dark for about 2 minutes"
             # frame has to be on screen BEFORE we take the port away, or the
             # blackout arrives with no explanation.
+            #
+            # The board stops showing pages here, so the status pages stop
+            # being asked here -- before esptool's 75 s, not after it. The
+            # first usage line after it boots names them again; the serial-
+            # lost handler below does the same, and status_page.WANT_TTL_S
+            # covers the paths that cannot say so and run out instead.
+            svc_watch.want(())
             time.sleep(4)
             print(f"[bridge] ota: closing port to flash {version}",
                   file=sys.stderr)
@@ -1082,9 +1227,15 @@ def main(argv=None):
                 ser.close()
             except Exception:
                 pass
-            ok, why = ota_mod.flash(port, blob)
-            print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
-                  file=sys.stderr)
+            with no_exit_while("firmware write"):
+                ok, why = ota_mod.flash(port, blob)
+                # Inside the guard, not after it: when a stop arrived during
+                # the write, the guard's exit runs the moment this block ends
+                # and a line printed after it never did. The log then ended
+                # at "stopping once the firmware write has finished" with no
+                # word on whether it had (review, 2026-10-31).
+                print(f"[bridge] ota: {'flashed ' + version if ok else 'FAILED: ' + why}",
+                      file=sys.stderr)
             raise Reflashed(None if ok else why)
 
         def self_update(version, artifact):
@@ -1099,8 +1250,11 @@ def main(argv=None):
             except Exception as e:
                 print(f"[update] download failed: {e}", file=sys.stderr)
                 return False
-            ok, message = update.apply(blob, self_bin, version)
-            print(f"[update] {message}", file=sys.stderr)
+            # Replacing this program's own files: a stop half way would leave
+            # the login service pointing at half an install.
+            with no_exit_while("app update"):
+                ok, message = update.apply(blob, self_bin, version)
+                print(f"[update] {message}", file=sys.stderr)  # inside the guard, as in _self_update_tick
             if not ok:
                 return False
             try:
@@ -1125,7 +1279,15 @@ def main(argv=None):
                         flash_image=flash_image,
                         report_failure=report_failure,
                         set_preferred=bus.set_preferred,
-                        self_update=self_update,
+                        self_update=self_update if frozen else None,
+                        status_watch=svc_watch,
+                        theme_sync=theme_sync,
+                        open_builder=theme_builder.launch,
+                        builder_ended=theme_builder.ended,
+                        builder_open=theme_builder.editing,
+                        edit_answers=theme_answers,
+                        # What the board can show, until it says again.
+                        board_caps_hint=known.get("caps"),
                         pending=update.PendingFirmware(
                             os.path.join(blink_home, "pending_fw.json")))
         report_failure = None   # handed to the Bridge above; never repeated
@@ -1176,10 +1338,19 @@ def main(argv=None):
                         # The keepalive is counted, not printed. At one ping
                         # every 10 s it was 60% of the log by line count and
                         # says nothing the next real message does not.
+                        #
+                        # Everything else by type alone, `<- hello`. This
+                        # printed the decoded message whole -- the board's id,
+                        # its firmware version, the theme it reports -- into
+                        # bridge.log, which is a value off the serial buffer
+                        # in the one file we ask customers to send (CLAUDE.md).
+                        # A t outside protocol.WIRE_TYPES is logged as a fixed
+                        # placeholder, because t is off the wire too.
                         if msg.get("t") == "ping":
                             heartbeat.beat()
                         else:
-                            print(f"[bridge] <- {msg}", file=sys.stderr)
+                            print(f"[bridge] <- {protocol.log_name(msg)}",
+                                  file=sys.stderr)
                         dispatch(msg)
                         # A message of ours off this port is the only
                         # positive identification there is. Write it down:
@@ -1193,10 +1364,15 @@ def main(argv=None):
                             known = learned
                             remember_board(blink_home, known["port"],
                                            known.get("board_id"),
-                                           known.get("fw"))
+                                           known.get("fw"),
+                                           known.get("caps"))
                         if not proven:
                             update.cleanup(self_bin)
                             proven = True
+                # A theme_edit answer, ready once the browser has opened on
+                # its own thread. Every pass, so it goes out within one read
+                # timeout of the open returning.
+                bridge.pump()
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
                     # the liveness window): there is no point talking to a
@@ -1230,7 +1406,7 @@ def main(argv=None):
                 # wiped hook too -- the watchdog's own interval keeps either
                 # path from checking more often than it should.
                 _upkeep()
-                if time.monotonic() >= next_update:
+                if frozen and time.monotonic() >= next_update:
                     next_update = time.monotonic() + UPDATE_INTERVAL_S
                     try:
                         _self_update_tick(self_bin)
@@ -1265,6 +1441,11 @@ def main(argv=None):
             asked.clear()
             searched = None
             patient = False
+            # No board, no pages on show, so nothing to ask the status pages
+            # about while the cable is out. Only the wanted set is cleared;
+            # what the watch already knows is kept for the board's return,
+            # and the next usage line it is sent names the pages again.
+            svc_watch.want(())
             time.sleep(1)
             port = wait_for_port(args.port, on_wait=_upkeep)
 

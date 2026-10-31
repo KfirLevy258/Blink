@@ -1,4 +1,6 @@
 """Conflict and recency resolution across sources that each see a slice."""
+import pytest
+
 from pc import normalizer
 from pc import statusline_source as ss
 from pc.providers import base
@@ -494,3 +496,221 @@ def test_desktop_local_storage_supplies_a_reset_the_history_file_cannot():
     merged = normalizer.merge([history, local_storage])
     assert merged.session_resets_at == now + 3600
     assert merged.weekly_pct == 17.0
+
+
+# --- every window ended, and nothing has a number left ------------------------
+
+
+def _quiet_status_line_across_both_resets():
+    """A status line Claude Code last wrote three days ago, both of whose
+    windows have since ended: stale, so both read unknown (base.settle_window),
+    with the rollovers reported."""
+    payload = {"rate_limits": {
+        "five_hour": {"used_percentage": 80.0, "resets_at": NOW - 200_000},
+        "seven_day": {"used_percentage": 60.0, "resets_at": NOW - 100_000}}}
+    return ss.map_statusline_frame(payload, NOW, NOW - 3 * 86400)
+
+
+def test_a_provider_whose_every_window_ended_stays_on_the_wire_as_unknown():
+    """None here takes the provider off the wire, and the board then keeps
+    drawing the last figure it was sent -- the pre-reset one. Unknown and
+    stale is the truth, and it keeps the provider's state and place."""
+    f = _quiet_status_line_across_both_resets()
+    assert (f.session_pct, f.weekly_pct) == (base.UNKNOWN, base.UNKNOWN)
+
+    merged = normalizer.merge([f, cli(NOW, state="running")])
+    assert merged is not None
+    assert (merged.session_pct, merged.weekly_pct) == (base.UNKNOWN,
+                                                       base.UNKNOWN)
+    assert merged.stale is True
+    assert merged.state == "running"
+    assert (merged.session_rolled_at, merged.weekly_rolled_at) == (
+        NOW - 200_000, NOW - 100_000)
+
+
+def test_no_number_and_no_rollover_is_still_nothing():
+    """The evidence is what earns the place: a frame with only a state, or
+    with unknowns nobody has explained, still keeps the board's last reading."""
+    assert normalizer.merge([cli(NOW, state="running")]) is None
+
+
+def test_a_blank_preferred_provider_yields_the_main_dial_to_one_with_numbers():
+    """Preference ranks providers that have something to show, and a blank
+    one is not a second page: the provider with a number takes the main
+    dial and there is no inner ring."""
+    primary, secondary = normalizer.select_pair([
+        _quiet_status_line_across_both_resets(),
+        cli(NOW - 60, session=12.0, weekly=30.0, provider="codex"),
+    ], preferred="claude")
+    assert primary.provider == "codex"
+    assert primary.session_pct == 12.0
+    assert secondary is None
+
+
+def test_a_claude_code_unused_for_weeks_does_not_take_codex_s_dial():
+    """The desk this would otherwise break, every day, for good.
+
+    `preferred` is always "claude" (pc/ingest; the firmware announces it),
+    and an old statusline.json whose resets are both past is rollover
+    evidence that never expires. Ranked on preference alone, a blank Claude
+    sat on the main dial and pushed Codex in daily use to the inner ring --
+    where on 63f2386, before blank providers reached the wire, Codex had the
+    main dial.
+    """
+    payload = {"rate_limits": {
+        "five_hour": {"used_percentage": 30.0, "resets_at": NOW - 9 * 86400},
+        "seven_day": {"used_percentage": 50.0, "resets_at": NOW - 8 * 86400}}}
+    old_claude = ss.map_statusline_frame(payload, NOW, NOW - 10 * 86400)
+    codex = cli(NOW - 30, session=55.0, weekly=33.0, provider="codex")
+
+    primary, secondary = normalizer.select_pair([old_claude, codex],
+                                                preferred="claude")
+    assert (primary.provider, primary.session_pct, primary.weekly_pct) == (
+        "codex", 55.0, 33.0)
+    # And no second page. Any Codex desk that ever ran Claude Code has this
+    # file, so a blank Claude inner ring would be on it forever, where
+    # before blank providers reached the wire there was none.
+    assert secondary is None
+
+    chosen = normalizer.select([old_claude, codex], preferred="claude")
+    assert (chosen.provider, chosen.session_pct) == ("codex", 55.0)
+
+
+def test_a_preferred_provider_with_numbers_still_wins():
+    primary, secondary = normalizer.select_pair([
+        cli(NOW - 3600, session=10.0),
+        cli(NOW, session=90.0, provider="codex"),
+    ], preferred="claude")
+    assert (primary.provider, secondary.provider) == ("claude", "codex")
+
+
+def test_a_desk_with_only_a_blank_provider_still_shows_it():
+    """Nothing better to rank above it: a Codex-only desk whose windows all
+    ended gets -1/-1 on the main dial rather than the board's stale 98."""
+    ended = base.NormalizedUsageFrame(
+        provider="codex", src="cli", observed_at=NOW - 6 * 86400,
+        session_rolled_at=NOW - 600, weekly_rolled_at=NOW - 60, stale=True)
+    primary, secondary = normalizer.select_pair([ended], preferred="claude")
+    assert (primary.provider, primary.session_pct, primary.weekly_pct) == (
+        "codex", base.UNKNOWN, base.UNKNOWN)
+    assert secondary is None
+    assert normalizer.select([ended], preferred="claude").provider == "codex"
+
+
+def _local_storage_rolled(at, rolled_at):
+    """A Claude Desktop Local Storage reading whose window has ended: it
+    publishes no number and reports the rollover (claude_desktop_ls)."""
+    return base.NormalizedUsageFrame(
+        provider="claude", src="desktop_ls", observed_at=at,
+        session_rolled_at=rolled_at, stale=False)
+
+
+def test_a_fresh_rollover_is_not_called_stale():
+    """No number survives, but the reading that says so was taken a minute
+    ago: blank dials, and not an "old reading" warning on top of them."""
+    merged = normalizer.merge([_local_storage_rolled(NOW - 60, NOW - 120)])
+    assert merged.session_pct == base.UNKNOWN
+    assert merged.stale is False
+
+
+def test_the_newest_rollover_speaks_for_a_provider_with_no_number():
+    """Two sources both saw the window end. The frame on the wire is dated
+    and judged by the newest of them, not the oldest."""
+    merged = normalizer.merge([
+        _quiet_status_line_across_both_resets(),        # three days, stale
+        _local_storage_rolled(NOW - 60, NOW - 120),     # a minute, fresh
+    ])
+    assert merged.session_pct == base.UNKNOWN
+    assert (merged.src, merged.observed_at, merged.stale) == (
+        "desktop_ls", NOW - 60, False)
+
+
+# A percentage that is infinite or NaN. Claude Code does not write one, but a
+# hand-edited or half-corrupt statusline.json can (json.loads reads 1e999 as
+# inf), and it used to cost the whole poll: _pick_pct computes inf - inf,
+# which is NaN, both comparisons in the hold are false, and max() of an empty
+# sequence raises ValueError. select_pair merges every provider in one
+# expression, so the panel got `status error "max() iterable argument is
+# empty"` and no usage at all, the Codex page included. Main sent
+# "session_pct":Infinity and kept Codex. Found in review, 2026-10-31.
+
+
+def _status_line(pct, now=NOW):
+    return ss.map_statusline_frame(
+        {"rate_limits": {"five_hour": {"used_percentage": pct,
+                                       "resets_at": now + 3600}}},
+        now, now - 5)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"),
+                                 float("nan"), 1001, -5])
+def test_the_status_line_reads_an_impossible_percentage_as_unknown(bad):
+    assert _status_line(bad).session_pct == base.UNKNOWN
+
+
+def test_a_corrupt_status_line_costs_only_its_own_provider():
+    codex = cli(NOW - 5, session=12.0, provider="codex")
+    primary, secondary = normalizer.select_pair(
+        [_status_line(float("inf")), codex])
+    assert primary.provider == "codex" and primary.session_pct == 12.0
+
+
+def test_a_frame_that_carries_an_infinite_percentage_does_not_raise():
+    """The same, from a source that skipped the check above: merge() itself
+    treats a non-finite reading as no reading."""
+    bad = cli(NOW - 5, session=float("inf"), weekly=float("nan"))
+    good = desktop(NOW - 60, session=30.0)
+    assert normalizer.merge([bad, good]).session_pct == 30.0
+    alone = normalizer.merge([bad])
+    assert alone is None or alone.session_pct == base.UNKNOWN
+
+
+# The same crash through the field beside the percentage: "resets_at": 1e999.
+# The reset stamp was accepted as any int or float, two infinite stamps made
+# _same_window compare abs(inf - inf) <= 300, which is NaN and False, so even
+# the winning frame was not its own peer and max() of nothing raised -- the
+# NICE 1 symptom again, with a valid percentage beside it. The reviewer's six
+# cases (found 2026-10-31); -1e999 already passed, because a stamp in the past
+# reads as an ended window, and now reads as no stamp at all.
+
+
+@pytest.mark.parametrize("stamp", ["1e999", "NaN", "-1e999"])
+@pytest.mark.parametrize("window", ["five_hour", "seven_day"])
+def test_a_corrupt_reset_stamp_costs_only_its_own_provider(stamp, window):
+    import json
+    from pc import protocol
+    payload = json.loads('{"rate_limits":{"%s":{"used_percentage":40,'
+                         '"resets_at":%s}}}' % (window, stamp))
+    line = ss.map_statusline_frame(payload, NOW, NOW - 5)
+    codex = cli(NOW - 5, session=12.0, provider="codex")
+    primary, secondary = normalizer.select_pair([line, codex])
+    protocol.frame_to_usage(primary, NOW, secondary)
+    assert {primary.provider, secondary.provider} == {"claude", "codex"}
+
+
+@pytest.mark.parametrize("stamp", [float("inf"), float("nan"), 1e12, -1, True])
+def test_the_status_line_reads_an_impossible_reset_stamp_as_none(stamp):
+    f = ss.map_statusline_frame(
+        {"rate_limits": {"five_hour": {"used_percentage": 40,
+                                       "resets_at": stamp}}}, NOW, NOW - 5)
+    assert f.session_resets_at is None
+    assert f.session_pct == 40
+
+
+def test_a_real_reset_stamp_is_kept():
+    f = ss.map_statusline_frame(
+        {"rate_limits": {"five_hour": {"used_percentage": 40,
+                                       "resets_at": NOW + 3600}}}, NOW, NOW - 5)
+    assert f.session_resets_at == NOW + 3600
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan")])
+def test_merge_ignores_a_non_finite_reset_stamp_from_any_source(bad):
+    """The check in the status line is not the only door: a frame from a
+    source that skipped it must not take the merge down either."""
+    a = cli(NOW - 5, session=40.0, s_reset=bad, w_reset=bad)
+    b = cli(NOW - 9, session=40.0, s_reset=bad, w_reset=bad)
+    m = normalizer.merge([a, b])
+    assert m.session_pct == 40.0
+    assert m.session_resets_at is None and m.weekly_resets_at is None
+    assert normalizer.merge([a, desktop(NOW - 60, session=41.0)]) is not None

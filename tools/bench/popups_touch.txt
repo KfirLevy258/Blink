@@ -1,0 +1,276 @@
+# Every popup on the panel, pressed by the words on its buttons.
+#
+#   tools/board_touch.py script tools/bench/popups_touch.txt
+#   tools/panel_render/touch.sh OUTDIR tools/bench/popups_touch.txt
+#
+# `click "LABEL"` lists the panel's widgets (firmware/src/touch_widgets.h)
+# and taps the one with those words through the real input path, so a
+# button that something covers fails here as "covered" rather than being
+# pressed from underneath. `fake` raises what a run cannot otherwise reach:
+# ota_avail, ota_none and ota_error are the real protocol lines, the board's
+# own answer path; boot_notice and reverted_notice are the host harness's
+# only (a board raises them on the boot after an update), so on a board this
+# script stops at the last section, with everything before it run.
+#
+# Nothing here installs anything. "Update now" and "Yes, do it" send
+# ota_flash to the bench, which never answers it -- the daemon is what would
+# run esptool -- and the `fake ota_error` after each takes the download
+# screen down as a daemon that gave up would. It ends on ota_none, so the
+# board is left with nothing on offer.
+
+expect ui_state scr=gauges modal=none
+expect notice none
+
+# --- the update offer on the gauges: Later
+fake ota_avail 1.4.0
+wait-widget "Later" 3
+expect ui_state modal=prompt
+mem
+expect-widget "Version 1.4.0 is available."
+click "Later"
+expect ui_state modal=none
+
+# The offer is once a boot ("Later" means later, upd_prompt.h): a failure
+# lifts that latch. This one fails from AVAILABLE, which the board calls an
+# update, not a check -- and the notice it raises has an OK to press.
+fake ota_error
+wait-widget "Update failed" 3
+expect ui_state modal=notice nt=ota
+click "OK"
+expect ui_state modal=none
+
+# --- the offer again: Update now, the download screen, and its end
+fake ota_avail 1.4.0
+wait-widget "Update now" 3
+click "Update now"
+expect ui_state modal=download
+# Full-screen and swallowing every touch on purpose (ui_settings.c,
+# dl_overlay_show): nothing under it is reachable, which is what this says.
+widgets
+mem
+fake ota_error the computer stopped responding
+wait-widget "Update failed" 3
+click "OK"
+expect ui_state modal=none
+
+# --- an offer that changed under the box (full review #3, N2; final review,
+# NICE-1). A newer release offered while the box is up leaves the state
+# AVAILABLE, so nothing withdrew "Version 1.4.0 is available.": "Later" on
+# it latched the boot against 1.4.1, and "Update now" installed 1.4.1 under
+# the older text. The timer now swaps the box for the current offer on its
+# next tick, which is what this shows; the board logs "[ota] offer
+# withdrawn: a different version is on offer". A tap landing between the
+# offer and that tick is caught by upd_prompt_now_cb's own check, which is
+# too narrow a window to hit from here and is pinned in
+# tests/test_upd_confirm_source.py instead.
+fake ota_avail 1.4.0
+wait-widget "Update now" 3
+expect-widget "Version 1.4.0 is available."
+fake ota_avail 1.4.1
+wait-widget "Version 1.4.1 is available." 3
+expect ui_state modal=prompt
+click "Later"
+expect ui_state modal=none
+
+# --- a check that fails: the plain notice
+fake ota_none
+wait 3.5
+fake ota_error
+wait-widget "Couldn't check for updates." 3
+click "OK"
+expect notice none
+
+# --- the install confirm inside Settings
+tap settings.open
+fake ota_avail 1.4.0
+wait 0.5
+click "Update"
+expect ui_state ov=confirm
+mem
+expect-widget "Yes, do it"
+click "Cancel"
+expect ui_state ov=none
+click "Update"
+expect ui_state ov=confirm
+click "Yes, do it"
+expect ui_state modal=download
+fake ota_error
+wait-widget "Update failed" 3
+click "OK"
+expect ui_state modal=none
+click "<"
+expect ui_state scr=gauges
+fake ota_none
+wait 3.5
+
+# --- a failure landing while the install confirm is up (full review #2,
+# M1). On a desk: Settings left on "Install version X?", the app reconnects
+# and stops answering, and main.c's 30 s deadline raises FAILED. ota_error
+# is the same FAILED without the wait. The confirm used to stay up under the
+# notice, the deepest stack the LVGL pool can reach; it is now withdrawn as
+# soon as the state leaves "available", so the notice lands on Settings.
+#
+# What each `mem` step shows. A board reports on leaving a screen, never on
+# arriving, so on a board the first prints confirm-close (the withdrawal:
+# the confirm's peak) and the second settings-close, which covers the
+# notice over Settings. The host harness answers `mem` with a host-* line
+# for whatever is up at that moment instead, so there they are the notice
+# and the gauges.
+tap settings.open
+fake ota_avail 1.4.0
+wait 0.5
+click "Update"
+expect ui_state ov=confirm
+fake ota_error the computer stopped responding
+wait-widget "Update failed" 3
+expect ui_state ov=none modal=notice
+mem
+click "OK"
+expect ui_state ov=none modal=none
+click "<"
+expect ui_state scr=gauges
+mem
+fake ota_none
+wait 3.5
+
+# --- a failed check's notice landing over Theme (fp/pool review, N5). On a
+# desk: tap Update for a check, open Theme, and the check fails 30 s later;
+# nothing withdraws Theme. ota_error from no offer is that failure without
+# the wait. On a board, leaving Theme prints theme-close, Theme's peak with
+# the notice on top of it, and the `mem` after it shows that line.
+tap settings.open
+tap theme.open
+expect ui_state ov=theme
+fake ota_error
+wait-widget "Couldn't check for updates." 3
+expect ui_state ov=theme modal=notice
+click "OK"
+expect ui_state ov=theme modal=none
+click "<"
+expect ui_state scr=settings ov=none
+mem
+click "<"
+expect ui_state scr=gauges
+fake ota_none
+wait 3.5
+
+# --- "Edit on computer", held while its builder is open (owner, 2026-10-30:
+# "the edit on computer button should re-appear ... only once the page is
+# not active / closed"). This tool greets as a daemon that promises the
+# done (caps "edit_done", "editing":0), so an ok 1 holds the slot, reading
+# "Editing on your computer" and sending nothing when pressed, until `fake
+# edit_done`, the daemon's real line for a builder that ended. `fake welcome
+# open|shut|old` greets again as a daemon whose builder is still open, one
+# with none, and one from before the hold, which keeps the 3 s "Opened" note
+# of 2026-10-29. `edit-reply` sets how asks are answered (hold: not at all,
+# the in-flight case). A board runs all of it. HOST LOST, the bound and the
+# edit_state restatement are in edit_hold_bound.txt, on the harness. The
+# waits are
+# generous on purpose: the harness clock advances only as fast as its loop
+# runs, and on a loaded machine its 8 s fallback took longer than the 10 s
+# first allowed for it (2026-10-29). A board keeps real time.
+tap settings.open
+click "Theme"
+expect ui_state ov=theme tp=0
+# ok: held, and a press on the held slot sends nothing.
+click "Edit on computer"
+expect theme_edit
+wait-widget "Editing on your computer" 3
+expect ui_state edit=held
+click "Editing on your computer"
+expect no theme_edit
+# Leaving the page and coming back is no way round it.
+click "<"
+expect ui_state scr=settings ov=none
+click "Theme"
+expect ui_state ov=theme edit=held
+# The builder ended: the button is back at once, and asks again.
+fake edit_done
+wait-widget "Edit on computer" 3
+expect ui_state edit=name
+click "Edit on computer"
+expect theme_edit
+wait-widget "Editing on your computer" 3
+# Greeted again by a new daemon process: its builder went with the old one.
+fake welcome shut
+wait-widget "Edit on computer" 3
+expect ui_state edit=name
+# Greeted again with the builder still open, as after an unplug or a
+# reboot of the board: held again with no ask of its own.
+fake welcome open
+wait-widget "Editing on your computer" 3
+expect ui_state edit=held
+fake edit_done
+wait-widget "Edit on computer" 3
+# In flight: no answer yet, so a second press sends nothing, and after 5 s
+# the fallback; a press on the fallback asks again, and its ok holds.
+edit-reply hold
+click "Edit on computer"
+expect theme_edit
+click "Opening on your computer"
+expect no theme_edit
+wait-widget "On your computer, run: blink" 10
+expect ui_state edit=run
+edit-reply ok
+click "On your computer, run: blink"
+expect theme_edit
+wait-widget "Editing on your computer" 3
+fake edit_done
+wait-widget "Edit on computer" 3
+# A daemon from before the hold: "Opened" for 3 s, then the name, and a
+# press at any time asks again, as on 2026-10-29.
+fake welcome old
+click "Edit on computer"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+wait-widget "Edit on computer" 8
+expect ui_state edit=name
+click "Edit on computer"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+click "Opened on your computer"
+expect theme_edit
+wait-widget "Opened on your computer" 3
+fake edit_done
+wait-widget "Edit on computer" 3
+expect ui_state edit=name
+fake welcome shut
+# no: the fallback, read for 8 s, then the name on its own, never held.
+edit-reply no
+click "Edit on computer"
+expect theme_edit
+wait-widget "On your computer, run: blink" 3
+wait-widget "Edit on computer" 15
+expect ui_state edit=name
+# Back to answering ok for whatever follows. Note this overrides an
+# --edit-reply no given on the command line for every later step.
+edit-reply ok
+click "<"
+expect ui_state ov=none
+click "<"
+expect ui_state scr=gauges
+wait 1.6
+
+# --- the boot after an update (host harness only): the notice, What's new
+# behind it, its pager and its Back, then OK
+fake boot_notice 1.3.1
+wait-widget "What's new" 3
+expect ui_state modal=notice
+mem
+click "What's new"
+expect ui_state modal=whatsnew
+widgets
+mem
+click ">"
+click "<"
+click "Back"
+expect ui_state modal=notice
+click "OK"
+expect notice none
+
+fake reverted_notice
+wait-widget "Update failed, previous" 3
+click "OK"
+expect notice none
+expect ui_state scr=gauges modal=none
+mem

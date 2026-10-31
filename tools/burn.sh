@@ -23,15 +23,24 @@
 #   - flash without MCUboot (a plain `west flash` writes only the app and takes
 #     the bootloader with it, which silently removes OTA from the unit)
 #   - report success on a board that did not confirm the stamp
+#   - flash a CONFIG_BLINK_FATAL_SELFTEST build, which faults on every boot,
+#     unless --selftest says that is the point (the bench test in
+#     firmware/Kconfig); the unit it makes is never one to box
+#   - flash a CONFIG_BLINK_TOUCH_INJECT build, which lets the computer drive
+#     the touch panel, unless --bench says that is the point (the bench
+#     touch injector, tools/board_touch.py); never one to box either
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 # Sourced here rather than beside lib_efuse.sh below, because the Python this
 # script picks (a few lines down) may come from the Zephyr venv.
 . "$ROOT/tools/lib_zephyr.sh"
+. "$ROOT/tools/lib_launchd.sh"
 EDITION=""
 PORT="${BLINK_PORT:-}"
 SKIP_BUILD=0
+SELFTEST=0
+BENCH=0
 LOGO=""
 # Must match logo_partition in firmware/boards/esp32_devkitc_esp32_procpu.overlay.
 LOGO_OFF=0x330000
@@ -43,7 +52,9 @@ while [ $# -gt 0 ]; do
 	--port)    PORT="$2"; shift 2 ;;
 	--no-build) SKIP_BUILD=1; shift ;;
 	--logo)    LOGO="$2"; shift 2 ;;
-	*) echo "usage: $0 --edition claude|codex [--port DEV] [--no-build] [--logo FILE]" >&2
+	--selftest) SELFTEST=1; shift ;;
+	--bench)   BENCH=1; shift ;;
+	*) echo "usage: $0 --edition claude|codex [--port DEV] [--no-build] [--logo FILE] [--selftest] [--bench]" >&2
 	   exit 2 ;;
 	esac
 done
@@ -95,8 +106,14 @@ if ! command -v esptool.py >/dev/null 2>&1; then
 		fi
 	done
 fi
-command -v esptool.py >/dev/null 2>&1 ||
-	die "esptool.py not found on PATH, in $ETOOLS, or next to $PY (pip install esptool, or set BLINK_ETOOLS)"
+# The pip hint carries the pins, for the interpreter this script chose: a
+# bare `pip install esptool` resolves bitstring 5.0.0, which espefuse cannot
+# import (see pc/requirements.txt). Same line lib_zephyr.sh prints.
+if ! command -v esptool.py >/dev/null 2>&1; then
+	HINT=$(blink_zephyr_pip_hint "$PY") ||
+		HINT="install esptool and bitstring at the versions pc/requirements.txt pins"
+	die "esptool.py not found on PATH, in $ETOOLS, or next to $PY ($HINT, or set BLINK_ETOOLS)"
+fi
 
 BOARD="${BLINK_BOARD:-esp32_devkitc/esp32/procpu}"
 KEY="${BLINK_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
@@ -111,22 +128,17 @@ say "Finding the board"
 # on the way out, whatever happens -- including a Ctrl-C mid-flash.
 AGENT="gui/$(id -u)/com.blink.bridge"
 DAEMON_WAS_UP=0
-if launchctl print "$AGENT" >/dev/null 2>&1; then
-	DAEMON_WAS_UP=1
-	launchctl bootout "$AGENT" >/dev/null 2>&1 || true
-	# bootout RETURNS before the process is gone, and the process holds the
-	# port until it is. Probing straight afterwards read as "cannot tell
-	# whether this chip is fused -- is the port free?" and refused to flash
-	# a board that was perfectly fine (2026-09-06, this desk). Wait for the
-	# job to actually leave rather than racing it.
-	i=0
-	while [ $i -lt 20 ] && launchctl print "$AGENT" >/dev/null 2>&1; do
-		i=$((i + 1))
-		sleep 0.25
-	done
-fi
 restore_daemon() {
 	[ "$DAEMON_WAS_UP" = 1 ] || return 0
+	# Never over an instance that is still exiting: bootstrap fails against
+	# a job launchd still holds, and a kickstart could only reach the old
+	# instance. An interrupt during the wait below lands here with it still
+	# leaving, so wait for it again rather than act on it.
+	if ! blink_wait_agent_gone "$AGENT"; then
+		echo "warning: the installed daemon is still stopping." >&2
+		blink_restart_hint "$AGENT" "$HOME/Library/LaunchAgents/com.blink.bridge.plist"
+		return 0
+	fi
 	launchctl bootstrap "gui/$(id -u)" \
 		"$HOME/Library/LaunchAgents/com.blink.bridge.plist" >/dev/null 2>&1 || true
 	# BOOTSTRAP REGISTERS; IT DOES NOT START. RunAtLoad is honoured at login,
@@ -134,8 +146,16 @@ restore_daemon() {
 	# the next login -- the board silently unattended after a burn that
 	# printed PASS. Measured five times out of five on the install path
 	# (pc/cli.py _LaunchdBackend.install, 2026-09-04); this is the same
-	# defect in the same shape, and it bit here on 2026-09-06.
-	launchctl kickstart -k "$AGENT" >/dev/null 2>&1 || true
+	# defect in the same shape, and it bit here on 2026-09-06. On macOS
+	# 27.0.1 (re-measured 2026-10-28, pc/cli.py install) bootstrap DID start
+	# a RunAtLoad job, five times out of five: which one a desk does depends
+	# on its macOS release, so the kickstart stays.
+	#
+	# Plain kickstart, not -k: on the job just bootstrapped it starts it all
+	# the same (pc/cli.py _LaunchdBackend.start), and if anything else loaded
+	# it meanwhile, -k would kill whatever that instance is doing -- a
+	# firmware write included -- where plain kickstart leaves it be.
+	launchctl kickstart "$AGENT" >/dev/null 2>&1 || true
 }
 # EXIT restores; INT/TERM restore AND EXIT. A trap that only restored let a
 # Ctrl-C mid-flash carry straight on to the stamp step, with the daemon just
@@ -143,6 +163,43 @@ restore_daemon() {
 # over a torn image.
 trap restore_daemon EXIT
 trap 'restore_daemon; trap - EXIT; exit 130' INT TERM
+
+if launchctl print "$AGENT" >/dev/null 2>&1; then
+	DAEMON_WAS_UP=1
+	# A refused bootout is refused here, at once: the daemon is still
+	# running, nobody asked it to stop, and waiting three minutes for it
+	# would end in "still stopping", which is not what happened. It is left
+	# running, so there is nothing to restore.
+	if ! blink_bootout "$AGENT"; then
+		DAEMON_WAS_UP=0
+		die "could not stop the installed daemon (launchctl bootout exited $BLINK_BOOTOUT_RC).
+       Nothing was flashed, and the daemon is still running. Check it with:
+         launchctl print $AGENT"
+	fi
+	# bootout RETURNS before the process is gone, and the process holds the
+	# port until it is. Probing straight afterwards read as "cannot tell
+	# whether this chip is fused -- is the port free?" and refused to flash
+	# a board that was perfectly fine (2026-09-06, this desk). Wait for the
+	# job to actually leave rather than racing it -- for as long as the
+	# daemon's own stop grace, because a daemon inside an OTA write holds
+	# its SIGTERM for up to 180 s (tools/lib_launchd.sh). This used to give
+	# up after 5 s and carry on with the port still held.
+	#
+	# Under the traps, so a Ctrl-C during those minutes still puts the
+	# daemon back once it has gone. A job still there at the deadline is
+	# left alone, and so is the restore: waiting the same minutes again in
+	# the EXIT trap would tell the reader nothing new.
+	# The job WAS booted out, so once it does exit nothing brings it back
+	# before the next login: the way back is printed, as dev.sh prints it.
+	if ! blink_wait_agent_gone "$AGENT"; then
+		DAEMON_WAS_UP=0
+		printf '\nFAILED: the installed daemon is still stopping after %s s.\n' \
+			"$((BLINK_STOP_GRACE_S + BLINK_STOP_MARGIN_S))" >&2
+		echo "       Nothing was flashed. Check it with: launchctl print $AGENT" >&2
+		blink_restart_hint "$AGENT" "$HOME/Library/LaunchAgents/com.blink.bridge.plist"
+		exit 1
+	fi
+fi
 
 if [ -z "$PORT" ]; then
 	PORT=$("$PY" - <<'EOF'
@@ -182,11 +239,23 @@ if [ "$SKIP_BUILD" = 0 ]; then
 	[ -f "$KEY" ] || die "signing key not found at $KEY.
        Every unit must be signed with the SAME key or its OTA updates will be
        rejected in the field. See tools/backup_keys.sh."
-	blink_zephyr_activate || die "cannot build without a Zephyr workspace."
-	( cd "$ROOT/firmware" && west build --sysbuild -d build-sb -b "$BOARD" . -- \
+	# Both say why on stderr first; this line only stops the script. It used
+	# to read "cannot build without a Zephyr workspace", which was wrong
+	# whenever the workspace had been found and only a tool in it was missing.
+	blink_zephyr_activate || die "Zephyr environment not ready (see above)."
+	blink_zephyr_build_ready || die "Zephyr environment not ready (see above)."
+	# Kept, not thrown away: "run the west build by hand to see why" sent the
+	# operator to repeat a multi-minute build to read an error this one had
+	# already printed. Outside the build tree, which a pristine rebuild wipes.
+	BUILD_LOG=$(mktemp "${TMPDIR:-/tmp}/blink-burn-build.XXXXXX") ||
+		die "could not create a temp file for the build log"
+	if ! ( cd "$ROOT/firmware" && west build --sysbuild -d build-sb -b "$BOARD" . -- \
 		-DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
-		-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$KEY\"" ) >/dev/null 2>&1 \
-		|| die "build failed. Run the west build by hand to see why."
+		-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$KEY\"" ) >"$BUILD_LOG" 2>&1; then
+		tail -30 "$BUILD_LOG" >&2
+		die "build failed (last 30 lines above; full log at $BUILD_LOG)"
+	fi
+	rm -f "$BUILD_LOG"
 	echo "   built"
 else
 	echo "   (--no-build: using whatever is in $BUILD)"
@@ -196,6 +265,48 @@ MCUBOOT="$BUILD/mcuboot/zephyr/zephyr.bin"
 SIGNED="$BUILD/firmware/zephyr/zephyr.signed.bin"
 [ -f "$MCUBOOT" ] || die "no bootloader at $MCUBOOT"
 [ -f "$SIGNED" ]  || die "no signed app at $SIGNED"
+
+# A selftest image faults BLINK_FATAL_SELFTEST_AT_S seconds into every boot,
+# and the boot check below is over in less than that, so without this a burn
+# of one says PASS and the unit goes in a box. It gets into build-sb the way
+# the Kconfig help warns: one -D on the command line, kept in the CMake cache.
+# --selftest is the bench test that help describes, asked for by name. It is
+# a permission, not a label: the check runs either way, and only an image it
+# refuses is called a selftest unit.
+#
+# A build with no .config cannot be inspected at all, and is refused here
+# whatever the flags: under --selftest or --bench it used to fall into the
+# permitted branch and be flashed as the bench image it was never shown to
+# be (review of the injector, NICE-5). The image itself was checked above.
+. "$ROOT/tools/lib_selftest.sh"
+[ -f "$BUILD/firmware/zephyr/.config" ] ||
+	die "no $BUILD/firmware/zephyr/.config -- cannot tell what this build is"
+SELFTEST_IMAGE=0
+if [ "$SELFTEST" = 0 ]; then
+	blink_refuse_selftest "$BUILD/firmware/zephyr/.config" "$SIGNED" ||
+		die "this is a selftest build (above). Pass --selftest if that is the point."
+elif blink_refuse_selftest "$BUILD/firmware/zephyr/.config" "$SIGNED" 2>/dev/null; then
+	echo "   --selftest given, but this is not a selftest build: a normal unit"
+else
+	SELFTEST_IMAGE=1
+	echo "   --selftest: flashing a SELFTEST build that faults on every boot"
+fi
+
+# The touch injector the same way, with its own flag. Its image does not
+# fault: it boots, passes every check below and looks like a release, which
+# is why it must never reach a box -- it takes touches from the cable, so the
+# computer it is plugged into can operate the panel. --bench, like
+# --selftest, is a permission and not a label.
+INJECT_IMAGE=0
+if [ "$BENCH" = 0 ]; then
+	blink_refuse_inject "$BUILD/firmware/zephyr/.config" "$SIGNED" ||
+		die "this is a touch-inject build (above). Pass --bench if that is the point."
+elif blink_refuse_inject "$BUILD/firmware/zephyr/.config" "$SIGNED" 2>/dev/null; then
+	echo "   --bench given, but this is not a touch-inject build: a normal unit"
+else
+	INJECT_IMAGE=1
+	echo "   --bench: flashing a TOUCH INJECT build the computer can drive"
+fi
 
 # ------------------------------------------- 2a. a CONFIRMED image to flash
 # zephyr.signed.bin is signed but not confirmed: its trailer says "boot this
@@ -298,11 +409,18 @@ grep -E "Wrote|Hash of data" "$FLASH_LOG" || true
 
 # ------------------------------------------------- 4. boot, stamp, confirm
 say "Boot-verifying and stamping as $EDITION"
-"$PY" - "$PORT" "$EDITION" "$FW_VERSION" <<'EOF' || die "the board did not confirm the stamp"
+# PYTHONDONTWRITEBYTECODE: it imports pc/ from the tree (CLAUDE.md).
+PYTHONDONTWRITEBYTECODE=1 "$PY" - "$PORT" "$EDITION" "$FW_VERSION" "$ROOT" <<'EOF' || die "the board did not confirm the stamp"
 import json, sys, time
 import serial
 
 port, edition, want_fw = sys.argv[1], sys.argv[2], sys.argv[3]
+# pc/ is stdlib only, so the daemon's own encoder imports into any
+# interpreter that has pyserial. Its edition message, through the same
+# encode_checked every production writer uses (CLAUDE.md), rather than a
+# second hand-built copy of the line here.
+sys.path.insert(0, sys.argv[4])
+from pc import protocol
 s = serial.Serial(port, 115200, timeout=0.2)
 s.dtr = False; s.rts = True; time.sleep(0.15); s.rts = False
 
@@ -331,7 +449,11 @@ if hello.get("fw") != want_fw:
           file=sys.stderr)
     sys.exit(1)
 
-s.write((json.dumps({"t": "edition", "v": 2, "edition": edition}) + "\n").encode())
+raw, why = protocol.encode_checked(protocol.edition(edition))
+if raw is None:
+    print("   edition message not sent: %s" % why, file=sys.stderr)
+    sys.exit(1)
+s.write(raw)
 s.flush()
 
 # Wait for a COMPLETE line, not just the marker.
@@ -418,4 +540,10 @@ else
 	printf 'PASS -- this unit is a %s board (individual)\n' "$EDITION"
 fi
 printf '================================\n'
-printf 'Put it in a %s enclosure.\n' "$EDITION"
+if [ "$SELFTEST_IMAGE" = 1 ]; then
+	printf 'SELFTEST build: it faults on every boot -- never box this unit.\n'
+elif [ "$INJECT_IMAGE" = 1 ]; then
+	printf 'TOUCH INJECT build: the computer can drive its panel -- never box this unit.\n'
+else
+	printf 'Put it in a %s enclosure.\n' "$EDITION"
+fi

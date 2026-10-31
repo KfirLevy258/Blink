@@ -25,6 +25,8 @@ set -eu
 
 # shellcheck source=tests/ci/lib.sh
 . "$(dirname -- "$0")/lib.sh"
+# shellcheck source=tests/ci/lib_rust.sh
+. "$(dirname -- "$0")/lib_rust.sh"
 
 REF="${1:-main}"
 ci_label "$REF"
@@ -142,7 +144,7 @@ ok "task_complete still reports failure through error/codex_error_info"
 #    mirrors this exact arm; a variant leaving it would have the panel go red
 #    for something upstream does not call a failure, and a variant joining it
 #    would have us keep painting red for something that stopped being one.
-grep -A2 'pub fn affects_turn_status' "$FILE" |
+rust_item "$FILE" 'pub fn affects_turn_status' |
 	grep -q 'Self::ThreadRollbackFailed | Self::ActiveTurnNotSteerable { \.\. } => false,' ||
 	fail "affects_turn_status' not-a-failure arm changed -- see codex_cli._NOT_A_TURN_FAILURE"
 ok "thread_rollback_failed and active_turn_not_steerable are still not turn failures"
@@ -152,7 +154,7 @@ ok "thread_rollback_failed and active_turn_not_steerable are still not turn fail
 #     rather than to red.
 grep -q 'pub enum TurnAbortReason' "$FILE" || fail "TurnAbortReason is gone"
 for reason in Interrupted Replaced ReviewEnded BudgetLimited; do
-	grep -A5 'pub enum TurnAbortReason' "$FILE" |
+	rust_item "$FILE" 'pub enum TurnAbortReason' |
 		grep -q "^[[:space:]]*$reason,$" ||
 		fail "TurnAbortReason lost $reason -- re-read whether turn_aborted still means idle"
 done
@@ -162,7 +164,9 @@ ok "turn_aborted still means the person stopped the turn"
 #     cwd is the only place a Codex session's name can come from -- the
 #     filename carries a timestamp and a UUID and nothing else.
 grep -q 'pub struct SessionMeta' "$FILE" || fail "SessionMeta is gone"
-grep -A20 'pub struct SessionMeta' "$FILE" | grep -q 'pub cwd: PathBuf' ||
+# The whole struct, however long it grows: a 20-line window reported cwd
+# gone the day upstream pushed it to line 23 (tests/ci/lib_rust.sh).
+rust_item "$FILE" 'pub struct SessionMeta' | grep -q 'pub cwd: PathBuf' ||
 	fail "SessionMeta no longer carries cwd -- Codex sessions cannot be named"
 ok "session_meta still carries cwd"
 

@@ -533,7 +533,8 @@ panel is broken.
 
 ### The 512-byte cliff
 
-The fully loaded two-provider frame measures **484 of the 512 bytes**, and
+The fully loaded two-provider frame measures **454 of the 512 bytes** (2026-10-31; the widest it can
+be, computed over every source id), and
 `pc/protocol.encode_checked` is what stands between that and the cliff. Note
 that it was written, documented as the thing callers use, and then not used:
 the daemon's only writer called plain `encode()` until 2026-08-28, so the

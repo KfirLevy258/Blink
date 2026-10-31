@@ -150,8 +150,9 @@ fi
 # read the comment at the top of it before wondering why this is not
 # downloaded here. A build without it is supported and is what every machine
 # produces by default: pc/win_driver.py finds no package and says so.
-# A native C:\... path and a ";" separator, unlike every other --add-data
-# here. Both were arrived at the hard way on the release desk (2026-09-06):
+# A native C:\... path and a ";" separator, unlike the two scripts'
+# --add-data lines. Both were arrived at the hard way on the release desk
+# (2026-09-06):
 #
 #   - Handing Git Bash the /c/Users/... form produced
 #     \c\Users\...\vendor\ch341ser -- slashes flipped, drive letter never
@@ -162,8 +163,10 @@ fi
 #     relative source against the SPEC directory, which --specpath puts in
 #     $BUILD, not against the working directory.
 #
-# The lines above survive on ":" only because their destination is "." --
-# enough for Git Bash to recognise a path list and map the drive properly.
+# The two scripts' lines further down survive on ":" only because their
+# destination is "." -- enough for Git Bash to recognise a path list and map
+# the drive properly. Any other destination needs this treatment; see
+# THEME_DATA below.
 case "$(uname -s)" in
 MINGW* | MSYS* | CYGWIN*)
 	if [ -f "$ROOT/vendor/ch341ser/CH341SER.INF" ]; then
@@ -200,6 +203,23 @@ MINGW* | MSYS* | CYGWIN*)
 	;;
 esac
 
+# The theme builder goes into "pc", not ".", and so loses the escape the two
+# scripts rely on. Git Bash does not take "/d/a/.../pc/theme_builder.html:pc"
+# for a path list and passes it on untouched; PyInstaller then reads the
+# /d/a/... part as \d\a\... on the current drive -- the same flipped slashes
+# and unmapped drive as the driver above. The first Windows build after the
+# builder landed (CI run 41093831896) stopped there, and the Windows VM shows
+# the argument arriving unconverted beside the hook script's converted one.
+# So it gets the driver's treatment: cygpath's native form and a ";".
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+	THEME_DATA="$(cygpath -w "$ROOT/pc/theme_builder.html");pc"
+	;;
+*)
+	THEME_DATA="$ROOT/pc/theme_builder.html:pc"
+	;;
+esac
+
 cd "$ROOT"
 "$VBIN/pyinstaller" \
 	--onedir \
@@ -210,6 +230,7 @@ cd "$ROOT"
 	--specpath "$BUILD" \
 	--add-data "$ROOT/tools/blink-statusline.sh:." \
 	--add-data "$ROOT/tools/blink-hook.sh:." \
+	--add-data "$THEME_DATA" \
 	--collect-all esptool \
 	--collect-all bitstring \
 	--collect-all bitarray \
@@ -228,6 +249,14 @@ cd "$ROOT"
 
 BUILT="$OUT/blink/blink"
 [ -f "$BUILT" ] || BUILT="$OUT/blink/blink.exe"
+
+# The theme builder is a data file, invisible to PyInstaller's analysis. A
+# build without it runs, installs, and fails only when somebody taps "Edit on
+# computer" -- so the build fails here instead.
+test -f "$OUT/blink/_internal/pc/theme_builder.html" || {
+	echo "FATAL: pc/theme_builder.html is missing from the bundle" >&2
+	exit 1
+}
 [ -f "$BUILT" ] || { echo "FATAL: no executable under $OUT/blink" >&2; exit 1; }
 
 # --collect-all bitarray brings its own test suite and a C header along with

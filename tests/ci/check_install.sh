@@ -52,6 +52,19 @@ esac
 mkdir -p "$HOME"
 export HOME
 
+# The binary refuses to touch the login service while HOME is not the
+# account's own, because launchd's label and systemd's unit name are global
+# and a scratch HOME otherwise boots out the real agent (the 2026-10-30
+# import, tests/test_import_is_inert.py). This script is the one place that
+# means to do exactly that, so it says so -- but only on GitHub Actions, which
+# sets GITHUB_ACTIONS=true on every runner. Not on CI: plenty of developers'
+# shells export that (npm, direnv), and then a run by hand on a desk, without
+# BLINK_SKIP_SERVICE=1 as the header asks, would not be refused after all.
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+	BLINK_ALLOW_FOREIGN_HOME=1
+	export BLINK_ALLOW_FOREIGN_HOME
+fi
+
 # Windows resolves ~ from USERPROFILE, not HOME, so setting HOME alone left
 # the binary installing into the runner's REAL profile while this script
 # asserted against a temporary one -- six scenarios failed for that and
@@ -310,7 +323,15 @@ grep -q "statusLine.command" "$WORK/disclosure.txt" || fail "disclosure omits th
 # between us and silently editing a file the customer owns.
 grep -q "hooks" "$WORK/disclosure.txt" || fail "disclosure omits the hooks key"
 grep -qF "blink-hook.sh" "$WORK/disclosure.txt" || fail "disclosure omits the hook shim"
-grep -qF "$BINEXE uninstall" "$WORK/disclosure.txt" ||
+# The undo command is quoted when the path needs it -- the spaced-home
+# scenario's does -- so the binary's name may be followed by the closing
+# quote: 'blink' on POSIX (shlex), and on Windows PowerShell's form,
+# & "...\blink.exe" uninstall, whose tail the third pattern matches, or
+# & '...\blink.exe' uninstall for a profile with a $ in it. A bare
+# path is printed bare, as it always was (pc/cli.py _quote_line,
+# 2026-10-25).
+grep -qF -e "$BINEXE uninstall" -e "$BINEXE' uninstall" \
+	-e "$BINEXE\" uninstall" "$WORK/disclosure.txt" ||
 	fail "disclosure omits the undo"
 ok "disclosure precedes the first step and names file, key, undo"
 
@@ -437,7 +458,15 @@ all-sources)
 	[ "$(wire_get "$w" p2_session_pct)" = "52.0" ] || fail "p2_session_pct wrong: $w"
 	[ "$(wire_get "$w" p2_stale)" = "false" ] || fail "codex reading should be fresh: $w"
 	[ -z "$(wire_get "$w" burn_pph)" ] || fail "a burn rate must not be sent when a reset time exists: $w"
-	[ "${#w}" -le 512 ] || fail "wire message over the board's 512-byte line: ${#w}"
+	# MAX_LINE_BYTES - 1: $(wire) strips the newline, and the board's budget
+	# counts it (drain_rx() keeps LINE_MAX - 1 bytes of text, then the '\n').
+	# Read from protocol.py rather than written here as 511, so this check
+	# cannot keep the old number after the budget moves.
+	# write(), not print(): no newline, so no '\r' from a Windows python
+	# for the integer test below to choke on.
+	max=$(cd "$ROOT" && py -c 'import sys; from pc import protocol; sys.stdout.write(str(protocol.MAX_LINE_BYTES - 1))') || fail "could not read MAX_LINE_BYTES from pc/protocol.py"
+	[ -n "$max" ] || fail "could not read MAX_LINE_BYTES from pc/protocol.py"
+	[ "${#w}" -le "$max" ] || fail "wire message over the board's line budget: ${#w} + newline, at most $max + newline"
 	ok "wire: claude (status line) primary with state and counts, codex secondary, under budget"
 	;;
 desktop-only)

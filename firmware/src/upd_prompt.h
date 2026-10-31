@@ -65,4 +65,31 @@ struct upd_prompt_turn {
 struct upd_prompt_turn upd_prompt_step(enum ota_ui_state st, bool prompt_open,
 				       bool latched, bool busy);
 
+/*
+ * Whether the install confirm inside Settings ("Install version X?") must come
+ * down. It asserts the same thing the offer on the gauges does -- an update is
+ * available right now -- and it used to outlive that state: nothing but its
+ * two buttons and closing Settings removed it. A daemon that reconnected
+ * under it moved the board to CHECKING, and if nothing answered, main.c's
+ * 30 s deadline raised FAILED with a notice on top of the confirm. That stack
+ * was the deepest the LVGL pool can be driven to (+4632 B over Settings on
+ * the host harness, 0.65-1.3 KB left on the board; full review #2, M1), and
+ * a "Yes" pressed on the stale dialog answered "The app stopped answering".
+ *
+ * It also comes down when the version on offer is no longer the one it
+ * names. A welcome moves the board to CHECKING and a fast answer can bring it
+ * back to AVAILABLE inside one 250 ms tick, with a newer release staged: the
+ * state alone never changed, and "Install version 1.4.0?" stayed up over a
+ * 1.4.1 that "Yes" would have installed (fp/pool review, N2). `now_ver` is the
+ * version on offer, `shown_ver` the one the confirm was raised for.
+ *
+ * install_yes_cb asks the same question with confirm_open true before it
+ * spends the consent, which closes the window between two ticks (N1).
+ *
+ * No latch: the confirm is only raised by a tap, so there is nothing to
+ * re-arm.
+ */
+bool upd_confirm_withdraw(enum ota_ui_state st, bool confirm_open,
+			  const char *now_ver, const char *shown_ver);
+
 #endif /* UPD_PROMPT_H */

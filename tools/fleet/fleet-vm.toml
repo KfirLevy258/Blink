@@ -1,0 +1,96 @@
+# The VM fleet: this Mac, plus the Ubuntu and Windows VMs it runs in UTM,
+# proved ONE AFTER ANOTHER with the one board handed from desk to desk.
+#
+# It exists because the three desks in fleet.toml are not all reachable any
+# more, and the owner has this Mac, one board for the purpose, and the two VMs
+# in ~/Projects/Blink/test-machines. It is a different claim from fleet.toml,
+# not a cheaper copy of it, and the release gate knows which one it was given:
+# a run against this file records kind = "vm" in .fleet/last_run.json, and
+# the gate only accepts it when it was asked about THIS inventory
+# (BLINK_FLEET=vm tools/release.sh -- a name, never a path).
+#
+# What it does not prove, written here so nobody has to find out from the
+# docs: neither VM is the machine a customer has. Both are arm64 guests on
+# Apple silicon. The Windows one is Windows 11 on ARM, running x64 Python
+# under Windows' own emulation, with WCH's Arm64 CH340 driver -- the x64
+# driver and Windows 10 on an x86 PC, which the galit-win10 desk proved, are
+# not exercised at all. The Ubuntu one is aarch64, for which no release
+# archive is published, so the bundle scenarios cannot run there. And the
+# board reaches both through UTM's USB redirection, not a real port.
+
+[fleet]
+# Recorded in the run's result, and compared by the gate against the
+# inventory it is handed. fleet.toml has no [fleet] table, which reads as
+# "desks".
+kind = "vm"
+# One board: each desk has it in turn. run.py runs these in file order, so the
+# Mac -- where the board starts -- comes first.
+sequential = true
+# The board's USB bridge (CH340), as utmctl names a device and as the guest
+# looks for it before the agent is started. Same id the daemon autodetects
+# by (claude_usage_bridge.py, KNOWN_USB_SERIAL).
+board_usb = "1A86:7523"
+# An interpreter on THIS Mac with pyserial, for the steps around a handoff:
+# stopping this Mac's installed service so the port is free for UTM to take,
+# and waiting for the board to come back after each VM. Relative to this
+# checkout, like the local desk's `python`.
+host_python = ".venv-test/bin/python"
+
+[hosts.local-mac]
+ssh = ""
+os = "darwin"
+# The board set aside for this fleet: Claude edition, measured 2026-10-30 from
+# its hello. It is the same board on all three desks below, which is the point
+# of this file.
+board = "claude"   # VERIFY before the run
+python = ".venv-test/bin/python"
+workdir = "~/blink-fleet"
+has_claude_desktop = true
+note = "this Mac (Apple silicon, macOS) -- the real desk the board lives on"
+
+[hosts.ubuntu-vm]
+# {address} is filled in at run time, from the VM's guest agent or else from
+# macOS's DHCP lease for its hostname: UTM's shared network hands the VMs a
+# new address now and then, and a written-down one would fail as a dead desk.
+ssh = "tester@{address}"
+# The VM's own key and known_hosts, from test-machines/ssh. ssh expands the
+# tilde itself, so nothing here resolves a home directory.
+ssh_options = ["-o", "IdentityFile=~/Projects/Blink/test-machines/ssh/id_ed25519",
+               "-o", "UserKnownHostsFile=~/Projects/Blink/test-machines/ssh/known_hosts",
+               "-o", "StrictHostKeyChecking=accept-new"]
+os = "linux"
+board = "claude"   # VERIFY before the run -- the same board as local-mac
+# Ubuntu 26.04's own python3 (3.14). tester is in dialout (cloud-init seed).
+python = "/usr/bin/python3"
+workdir = "~/blink-fleet"
+has_claude_desktop = false
+note = "Ubuntu 26.04 arm64 VM in UTM, board by USB redirection"
+
+[hosts.ubuntu-vm.vm]
+# UTM registered this bundle three times (moving a .utm with UTM open does
+# that), and all three are called "Blink Ubuntu", so it is named by UUID: the
+# one test-machines/ubuntu-vm/ssh.sh picks, and the one that boots.
+utm = "F849B207-682B-4690-8608-6238AEB5783C"
+hostname = "blink-ubuntu"
+
+[hosts.windows-vm]
+ssh = "tester@{address}"
+ssh_options = ["-o", "IdentityFile=~/Projects/Blink/test-machines/ssh/id_ed25519",
+               "-o", "UserKnownHostsFile=~/Projects/Blink/test-machines/ssh/known_hosts",
+               "-o", "StrictHostKeyChecking=accept-new"]
+os = "windows"
+# This VM's sshd lands in PowerShell, not cmd.exe (test-machines/README.md),
+# and PowerShell hands stdin to a native program as text. So nothing is piped
+# to it: the snapshot and every command line travel by scp as files, and only
+# `cmd /d /c <file>` crosses the ssh command line.
+shell = "powershell"
+board = "claude"   # VERIFY before the run -- the same board as local-mac
+# x64 Python 3.11, emulated: the architecture the shipped blink.exe is.
+python = "C:\\Python311-x64\\python.exe"
+workdir = "%USERPROFILE%\\blink-fleet"
+has_claude_desktop = false
+note = "Windows 11 ARM64 VM in UTM, x64 Python emulated, Arm64 CH340 driver -- NOT Windows 10 on x86"
+
+[hosts.windows-vm.vm]
+utm = "12F81321-6844-4F03-BEE0-CB15BB69E885"
+hostname = "blink-win"

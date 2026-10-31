@@ -14,6 +14,18 @@ enum cfg_mode {
 	CFG_MODE_WIFI,		/* board fetches usage itself */
 };
 
+/*
+ * The mode, the WiFi credentials, the token, the setup AP's password, the
+ * weekly-gauge choice and the stored UTC offset all belong to the standalone
+ * WiFi mode, removed on 2026-10-27. Their fields stay in the record, at the
+ * same offsets and sizes, and so do these accessors: the record's layout is
+ * what boards in the field carry, and an OTA from 1.3.4 has to find every
+ * other setting exactly where it left it. Treat them as reserved. The only
+ * reader left is main.c's boot-time erase of a token an old WiFi build
+ * stored; an unused accessor costs nothing, because the linker drops it.
+ * Nothing clears the network or setup-AP passwords such a board still
+ * holds -- see the comment at that erase.
+ */
 #define CFG_SSID_MAX 33		/* 32 + NUL */
 #define CFG_PSK_MAX 65		/* 64 + NUL */
 #define CFG_TOKEN_MAX 320	/* OAuth refresh tokens are long */
@@ -97,6 +109,40 @@ int cfg_set_ota_state(uint8_t st, const char *ver);
 
 /* Wipe everything (factory reset). */
 int cfg_reset(void);
+
+/*
+ * The theme: which one, and the custom theme's own colours and style.
+ *
+ * Kept as raw bytes rather than as theme.h's struct, so this file stays a
+ * store and the meaning lives in one place (theme.c / ui_theme.c). The layout
+ * is the 26 bytes the orchestrator's contract fixed on 2026-10-27:
+ *   id     0..12, 0 = Dark. A record from before themes reads 0.
+ *   rgb    the custom theme's seven colours, RGB888 in order bg, text,
+ *          gauge1, gauge2, low, mid, high.
+ *   w      arc width in px (5/12/22); 0 means "no custom theme stored".
+ *   ends   0 round, 1 flat.   dot 0 hidden, 1 shown.   by 0 level, 1 gauge.
+ * The custom bytes survive choosing a built-in, so Custom stays in the list.
+ */
+struct cfg_theme {
+	uint8_t id;
+	uint8_t rgb[21];
+	uint8_t w;
+	uint8_t ends;
+	uint8_t dot;
+	uint8_t by;
+};
+
+void cfg_get_theme(struct cfg_theme *out);
+int cfg_set_theme(const struct cfg_theme *t);
+
+/* Focus mode: one big gauge instead of two. Its bytes landed with the theme's
+ * so the record changed shape once, not twice. on: 0 off, 1 on. win: 0
+ * session, 1 weekly. Both read 0 on a record from before them, and on any
+ * byte other than 1; the setter refuses anything but 0 and 1 (-EINVAL).
+ * Off keeps the window, so turning Focus back on lands where it was. */
+uint8_t cfg_get_focus_on(void);
+uint8_t cfg_get_focus_win(void);
+int cfg_set_focus(uint8_t on, uint8_t win);
 
 
 /*

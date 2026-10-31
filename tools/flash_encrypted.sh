@@ -58,6 +58,25 @@ ETOOLS="${BLINK_ETOOLS:-/Library/Frameworks/Python.framework/Versions/3.10/bin}"
 [ -f "$BUILD/mcuboot/zephyr/zephyr.bin" ] || { echo "FATAL: no sysbuild output in $BUILD -- build first (see header)"; exit 1; }
 [ -z "$LOGO" ] || [ -f "$LOGO" ] || { echo "FATAL: --logo $LOGO: no such file"; exit 1; }
 
+# Before the eFuse probe, not after it: the refusal reads only the build,
+# and the probe opens the port, which resets the board, and takes seconds of
+# a chip that was never going to be written (review of develop/fork-picks,
+# 2026-10-28). A refusal should cost nothing it does not need.
+#
+# Never a CONFIG_BLINK_FATAL_SELFTEST image: it faults on every boot, on
+# purpose, and a fused unit is the hardest one to take it back off. The
+# bench test the Kconfig help describes goes through tools/burn.sh
+# --selftest, on a plaintext board. See tools/lib_selftest.sh.
+# shellcheck source=lib_selftest.sh
+. "$HERE/lib_selftest.sh"
+blink_refuse_selftest "$BUILD/firmware/zephyr/.config" \
+	"$BUILD/firmware/zephyr/zephyr.signed.bin" || exit 1
+# Nor a CONFIG_BLINK_TOUCH_INJECT image, with no way through: the bench
+# injector belongs on a plaintext bench board (burn.sh --bench), and a fused
+# unit is the one most likely to be boxed.
+blink_refuse_inject "$BUILD/firmware/zephyr/.config" \
+	"$BUILD/firmware/zephyr/zephyr.signed.bin" || exit 1
+
 # Refuse a chip that cannot boot what we are about to write. Detection is
 # shared with tools/dev.sh, which needs the mirror check.
 if [ "${BLINK_SKIP_EFUSE_CHECK:-0}" != "1" ]; then
@@ -103,6 +122,7 @@ enc() { # address, plaintext-in, encrypted-out
 # no network at the bench, never becomes healthy, and reverts at 90 s. See
 # tools/sign_confirmed.py.
 APP_CONFIRMED="$BUILD/firmware/zephyr/zephyr.confirmed.bin"
+
 rm -f "$APP_CONFIRMED"
 "${BLINK_PYTHON:-python3}" "$HERE/sign_confirmed.py" \
 	--build-dir "$BUILD" --out "$APP_CONFIRMED" || {

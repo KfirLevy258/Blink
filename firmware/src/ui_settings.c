@@ -1,10 +1,11 @@
 /*
- * Settings panel: the recovery actions that used to require reflashing.
+ * The Settings panel: brightness, theme, Focus and the software update.
  *
- * Each action clears one persistence tier and reboots -- the boot path then
- * lands in the right flow by itself (no creds -> provisioning, no token ->
- * sign-in, nothing -> mode selection). Deliberately no in-place teardown of
- * the running mode: a cold reboot is simpler and reclaims all memory.
+ * Originally it existed for recovery without a reflash: drop the network,
+ * sign out, or reset everything, each one wiping a layer of saved state and
+ * rebooting. All three were part of the standalone WiFi mode and were
+ * removed with it on 2026-10-27 (the comment above `panel` explains why a
+ * USB unit has no use for them).
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
@@ -17,6 +18,7 @@
 #include <indev/lv_indev_private.h>
 #include <lvgl.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ui_settings.h"
 #include "cfg_store.h"
@@ -25,9 +27,6 @@
 #include "ui_anim.h"
 #include "ui_swipe.h"
 #include "ui_slide.h"
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-#include "net_wifi.h"
-#endif
 #include "fmt.h"
 #include "version.h"
 #include "backlight.h"
@@ -36,47 +35,64 @@
 #include "upd_prompt.h"
 #include "upd_row.h"
 #include "usage_view.h"
-
-#define COL_BG		lv_color_hex(0x0E1116)
-#define COL_TRACK	lv_color_hex(0x272C34)
-#define COL_TEXT	lv_color_hex(0xE6E8EB)
-#define COL_DIM		lv_color_hex(0x8A9199)
-#define COL_RED		lv_color_hex(0xE74C3C)
-#define COL_GREEN	lv_color_hex(0x2ECC71)
-#define COL_AMBER	lv_color_hex(0xF1C40F)
-#define COL_PANEL	lv_color_hex(0x161A20)	/* card fill, sits above COL_BG */
-#define COL_LINE	lv_color_hex(0x20252D)	/* the full-width section rules */
-#define COL_DANGER_BG	lv_color_hex(0x1E1412)	/* factory tile: red-tinted, not solid red */
-#define COL_DANGER_BD	lv_color_hex(0x7A2B23)
+#include "mem_stats.h"
+#include "theme.h"
+#include "ui_theme.h"
+#include "settings_icons.h"
+#include "edit_hold.h"
+#include "usage_layout.h"	/* FONT_LINE_H */
 
 /*
- * Destructive actions -- and the confirm-then-reboot machinery behind them --
- * are standalone-WiFi-only.
+ * Roles in the active theme (theme.c), read when drawn. The comments give
+ * Dark's value, which is what these were as constants in 1.3.4 -- this
+ * panel's green/amber/red were never the gauge's, and Dark keeps them apart.
+ */
+#define COL_BG		lv_color_hex(theme_pal()->bg)		/* #0E1116 */
+#define COL_TRACK	lv_color_hex(theme_pal()->track)	/* #272C34 */
+#define COL_TEXT	lv_color_hex(theme_pal()->text)		/* #E6E8EB */
+#define COL_DIM		lv_color_hex(theme_pal()->dim)		/* #8A9199 */
+#define COL_RED		lv_color_hex(theme_pal()->bad)		/* #E74C3C */
+#define COL_GREEN	lv_color_hex(theme_pal()->ok)		/* #2ECC71 */
+#define COL_AMBER	lv_color_hex(theme_pal()->warn)		/* #F1C40F */
+/* card fill, sits above COL_BG (#161A20) */
+#define COL_PANEL	lv_color_hex(theme_pal()->card)
+/* the full-width section rules (#20252D) */
+#define COL_LINE	lv_color_hex(theme_pal()->line)
+
+/*
+ * No destructive actions, and no confirm-then-reboot machinery behind them.
  *
- * Every one of them forgets something the device is holding: a network, a
- * token, or all of it. A USB unit holds none of that. The config record a
+ * The standalone WiFi mode had three -- drop the network, drop the sign-in
+ * token, drop both -- and they were removed with it on 2026-10-27. A unit on
+ * USB keeps neither a network nor a token, so none of them had anything
+ * left to erase. The config record a
  * reset would wipe contains a brightness level and an OTA breadcrumb the next
  * boot clears anyway, so the whole ceremony -- a confirm dialog, a cold
- * reboot -- bought a return to 100% brightness, which the Brightness row does
- * on the spot. See the layout note in the USB panel builder.
+ * reboot -- bought a return to 100% brightness, which the Brightness tile
+ * does on the spot.
  */
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-enum action {
-	ACT_WIFI,	/* forget network, keep token */
-	ACT_SIGNIN,	/* forget token, keep network */
-	ACT_FACTORY,	/* forget everything */
-};
-#endif
 
 static lv_obj_t *panel;		/* NULL when closed */
-/* Shared with the software-update install dialog, which is in both builds. */
+/* The software-update install dialog. */
 static lv_obj_t *confirm;	/* NULL when no dialog is up */
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-static enum action pending;
-#endif
 
 /* Software-update widgets (all NULL when their owner is closed/absent). */
 static lv_obj_t *notice;	/* outcome popup on the top layer */
+/*
+ * Bench builds: what the notice up now is about, for ui_state's nt. Set
+ * right after a notice is put up (ui_settings_bench_notice_is) and cleared
+ * wherever one is created or deleted, so the word belongs to that popup and
+ * no other. It used to be kept with the popup's address, and LVGL hands a
+ * freed block straight back to the next object of the same size: a later
+ * notice from anywhere read as the old kind (review of the injector,
+ * SHOULD-1). A no-op in every other build.
+ */
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+static const char *bench_nt;
+#define bench_nt_clear() (bench_nt = NULL)
+#else
+#define bench_nt_clear() ((void)0)
+#endif
 static lv_obj_t *upd_btn;
 static lv_obj_t *upd_lbl;
 static lv_timer_t *upd_timer;	/* whole session, not just the panel */
@@ -135,54 +151,37 @@ static int64_t upd_revert_at;	/* "Up to date" shows briefly, then idles */
 #define USB_DL_DEADLINE_MS 300000
 static int64_t usb_dl_deadline;
 
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* "Factory reset" is the honest name here and only here: this build's config
- * record really does hold the network credentials, the refresh token and the
- * AP password, so clearing it returns the device to the state it shipped in. */
-static const char *const act_label[] = {
-	[ACT_WIFI] = "Reset WiFi",
-	[ACT_SIGNIN] = "Re-sign-in",
-	[ACT_FACTORY] = "Factory reset",
-};
+/*
+ * A theme change that rebuild_cb() had to skip because the install confirm
+ * was up. It used to be skipped for good: Cancel uncovered a Settings panel
+ * still in the old colours, over gauges already in the new ones, until
+ * Settings was closed and opened again (2026-10-28 review, NICE-7). Now the
+ * rebuild is owed, and paid when the confirm goes.
+ */
+static bool rebuild_owed;
+static void rebuild_cb(void *unused);
+/* The top layer's repaint, owed when ui_settings_apply_theme() could not
+ * queue it. Paid, like a rebuild still owed, by ui_settings_service(). */
+static bool repaint_top_owed;
+static void repaint_top_cb(void *unused);
 
-/* Red is for the action that costs a full re-setup, and only that one;
- * painting every confirm red made them all look equally scary. */
-static inline bool act_is_danger(enum action a)
+static void confirm_gone(void)
 {
-	return a == ACT_FACTORY;
-}
-
-static void do_pending(void)
-{
-	printk("[settings] %s -> reboot\n", act_label[pending]);
-	switch (pending) {
-	case ACT_WIFI:
-		cfg_clear_wifi();
-		break;
-	case ACT_SIGNIN:
-		cfg_clear_token();
-		break;
-	case ACT_FACTORY:
-		cfg_reset();
-		break;
+	confirm = NULL;
+	/* Async for the reason rebuild_cb is: the caller is an event on a
+	 * button inside the panel this rebuilds. If the queue fails the
+	 * debt stays, and ui_settings_service() pays it from the mode loop. */
+	if (rebuild_owed && lv_async_call(rebuild_cb, NULL) == LV_RESULT_OK) {
+		rebuild_owed = false;
 	}
-	k_msleep(200);	/* let the NVS writes land */
-	ui_boot_mark_intentional_reboot();
-	sys_reboot(SYS_REBOOT_COLD);
 }
 
-static void confirm_yes_cb(lv_event_t *e)
-{
-	ARG_UNUSED(e);
-	do_pending();	/* never returns */
-}
-#endif /* CONFIG_BLINK_WIFI_MODE -- destructive actions */
+static void confirm_close(void);
 
 static void confirm_no_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	lv_obj_del(confirm);
-	confirm = NULL;
+	confirm_close();
 }
 
 static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
@@ -203,7 +202,16 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
 	lv_obj_t *l = lv_label_create(b);
 
 	lv_label_set_text(l, txt);
-	lv_obj_set_style_text_color(l, COL_TEXT, 0);
+	/*
+	 * On the green buttons ("Update now", "Yes, do it") the label wears the
+	 * theme's ok_ink. It was always COL_TEXT, which is right on Dark and
+	 * nowhere else: Mono's and Ink's text IS their ok colour (1.00:1), and
+	 * Neon measured 1.29, Retro 1.36. tests/theme holds every theme but Dark
+	 * to 4.5; Dark keeps the label it shipped with, which is 1.71:1.
+	 */
+	lv_obj_set_style_text_color(l, lv_color_eq(bg, COL_GREEN)
+				       ? lv_color_hex(theme_pal()->ok_ink)
+				       : COL_TEXT, 0);
 	lv_obj_center(l);
 	return b;
 }
@@ -221,30 +229,6 @@ static void mk_line(lv_obj_t *parent, int y)
 	lv_obj_set_style_radius(l, 0, 0);
 	lv_obj_clear_flag(l, LV_OBJ_FLAG_SCROLLABLE);
 }
-
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* A raised panel-coloured card (decoration only -- not clickable, so the
- * controls sitting on top of it still get every touch). */
-static lv_obj_t *mk_card(lv_obj_t *parent, int x, int y, int w, int h)
-{
-	lv_obj_t *c = lv_obj_create(parent);
-
-	lv_obj_set_size(c, w, h);
-	lv_obj_align(c, LV_ALIGN_TOP_LEFT, x, y);
-	lv_obj_set_style_bg_color(c, COL_PANEL, 0);
-	lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(c, COL_TRACK, 0);
-	lv_obj_set_style_border_width(c, 1, 0);
-	lv_obj_set_style_radius(c, 11, 0);
-	lv_obj_set_style_pad_all(c, 0, 0);
-	lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
-	/* The card is clickable-by-default and sits under the brightness gap;
-	 * without this a drift-press between the steppers would bubble up and
-	 * close the panel. Swallow the gesture here. */
-	lv_obj_clear_flag(c, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	return c;
-}
-#endif /* CONFIG_BLINK_WIFI_MODE */
 
 /*
  * Brightness is five discrete levels -- 20/40/60/80/100, see backlight.h -- so
@@ -273,6 +257,15 @@ static lv_obj_t *pct_lbl;	/* the brightness row's subtitle: "60%" */
  */
 static lv_obj_t *bright_big;	/* the big readout on the brightness screen */
 static lv_obj_t *bright_ov;	/* the brightness screen itself, or NULL */
+static lv_obj_t *theme_ov;	/* the theme screen, or NULL */
+static lv_obj_t *theme_grid;	/* its tiles' container */
+static lv_obj_t *theme_edit_lbl;	/* the "Edit on computer" row's words */
+static lv_obj_t *focus_ov;	/* the Focus screen, or NULL */
+static lv_obj_t *focus_sub;	/* the Focus row's subtitle: "Session" */
+static lv_obj_t *focus_note;	/* the Focus screen's line under its choices */
+#define FOCUS_CHOICES 3
+static lv_obj_t *focus_btn[FOCUS_CHOICES];
+static void focus_forget(void);
 static lv_obj_t *seg[BRIGHT_STOPS];
 
 static void bright_refresh(void)
@@ -307,65 +300,13 @@ static void bright_refresh(void)
 	}
 }
 
-/* user_data carries the step direction (+1 / -1). */
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* The +/- stepper, kept for the WiFi layout only. The shipped panel picks a
- * level directly -- see show_bright() -- because stepping needed four presses
- * to cross a range with five positions. */
-static void bright_step_cb(lv_event_t *e)
-{
-	backlight_step((int)(intptr_t)lv_event_get_user_data(e));
-	bright_refresh();
-}
-#endif /* CONFIG_BLINK_WIFI_MODE */
-
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-static void show_confirm(void)
-{
-	confirm = lv_obj_create(panel);
-	lv_obj_set_size(confirm, LV_PCT(100), LV_PCT(100));
-	lv_obj_set_style_bg_color(confirm, COL_BG, 0);
-	lv_obj_set_style_bg_opa(confirm, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_width(confirm, 0, 0);
-	lv_obj_set_style_pad_all(confirm, 0, 0);
-	lv_obj_clear_flag(confirm, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_center(confirm);
-
-	lv_obj_t *q = lv_label_create(confirm);
-
-	lv_label_set_text_fmt(q, "%s?\nThe device will reboot.",
-			      act_label[pending]);
-	lv_obj_set_style_text_color(q, COL_TEXT, 0);
-	lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(q, LV_ALIGN_TOP_MID, 0, 40);
-
-	/* Red is reserved for the one action that costs a full re-setup;
-	 * painting every confirm red made them all look equally scary. */
-	lv_obj_t *yes = mk_btn(confirm, "Yes, do it",
-			       act_is_danger(pending) ? COL_RED : COL_GREEN,
-			       confirm_yes_cb, NULL);
-
-	lv_obj_align(yes, LV_ALIGN_BOTTOM_MID, 0, -70);
-
-	lv_obj_t *no = mk_btn(confirm, "Cancel", COL_TRACK,
-			      confirm_no_cb, NULL);
-
-	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 0, -18);
-}
-
-static void act_cb(lv_event_t *e)
-{
-	pending = (enum action)(intptr_t)lv_event_get_user_data(e);
-	show_confirm();
-}
-#endif /* CONFIG_BLINK_WIFI_MODE */
-
 /* --- Software update: tile state machine, confirm, progress overlay --- */
 
 static void notice_ok_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	lv_obj_del(notice);
+	bench_nt_clear();
 	notice = NULL;
 }
 
@@ -373,6 +314,7 @@ void ui_settings_notice_dismiss(void)
 {
 	if (notice) {
 		lv_obj_del(notice);
+		bench_nt_clear();
 		notice = NULL;
 	}
 }
@@ -627,11 +569,13 @@ void ui_settings_notice_update(const char *version, const char *summary,
 {
 	if (notice) {
 		lv_obj_del(notice);
+		bench_nt_clear();
 	}
 	snprintf(wn_from, sizeof(wn_from), "%s", from ? from : "");
 	snprintf(wn_to, sizeof(wn_to), "%s", to ? to : "");
 
 	notice = lv_obj_create(lv_layer_top());
+	bench_nt_clear();
 	lv_obj_set_width(notice, 300);
 	lv_obj_set_height(notice, LV_SIZE_CONTENT);
 	lv_obj_set_style_min_height(notice, 110, 0);
@@ -734,6 +678,7 @@ void ui_settings_notice_titled(const char *title, const char *body)
 {
 	if (notice) {
 		lv_obj_del(notice);
+		bench_nt_clear();
 	}
 	/*
 	 * Sized by its text, not fixed. A 130 px box held three lines; the
@@ -743,6 +688,7 @@ void ui_settings_notice_titled(const char *title, const char *body)
 	 * screen, with the label scrolling inside in the absurd case.
 	 */
 	notice = lv_obj_create(lv_layer_top());
+	bench_nt_clear();
 	lv_obj_set_width(notice, 300);
 	lv_obj_set_height(notice, LV_SIZE_CONTENT);
 	lv_obj_set_style_min_height(notice, 110, 0);
@@ -817,6 +763,11 @@ void ui_settings_notice_titled(const char *title, const char *body)
  */
 static lv_obj_t *upd_prompt;
 static bool upd_prompt_done;
+/* The version the offer on the glass names, so "Update now" can be held to
+ * it the way the install confirm is held to confirm_ver. Written wherever the
+ * box is drawn, a theme repaint included, because that is the text the owner
+ * is agreeing to. */
+static char prompt_ver[sizeof(((struct ota_ui *)0)->version)];
 
 static void upd_prompt_close(void)
 {
@@ -834,11 +785,32 @@ static void upd_prompt_later_cb(lv_event_t *e)
 
 static void upd_prompt_now_cb(lv_event_t *e)
 {
+	struct ota_ui now;
+
 	ARG_UNUSED(e);
 	upd_prompt_close();
-	/* The download overlay is screen-level and upd_timer now runs whether
+	/* Asked again before the consent is spent, as install_yes_cb asks it.
+	 * upd_prompt_step withdraws the box only on the 250 ms ticks, and only
+	 * when the state leaves AVAILABLE, so a tap inside the tick after a
+	 * welcome's CHECKING answered "The app stopped answering", and a newer
+	 * release offered within one tick installed under "Version 1.4.0 is
+	 * available." (fp/pool review r2, NICE-1; full review #3, N2). The box
+	 * comes down either way: the offer it showed is not the one on offer.
+	 * A refusal lifts the once-a-boot latch, because the owner said yes to
+	 * an offer and got nothing: the next tick that finds AVAILABLE asks
+	 * again, naming what is on offer now, rather than leaving a newer
+	 * release unannounced until the next boot.
+	 *
+	 * The download overlay is screen-level and upd_timer now runs whether
 	 * or not the panel is open, so the bar appears without going through
 	 * settings. */
+	ota_ui_get(&now);
+	if (upd_confirm_withdraw(now.st, true, now.version, prompt_ver)) {
+		printk("[ota] install not started: the offer changed under the"
+		       " prompt\n");
+		upd_prompt_done = false;
+		return;
+	}
 	ota_request_install();
 }
 
@@ -848,6 +820,8 @@ static void upd_prompt_now_cb(lv_event_t *e)
  * -- is upd_prompt_step() in upd_prompt.h, so that all of it can be reached
  * from a host test instead of only from a finger on the panel.
  */
+static void upd_prompt_draw(const struct ota_ui *snap);
+
 static void upd_prompt_show(const struct ota_ui *snap)
 {
 	/* Called only for UPD_PROMPT_SHOW, which already answered every
@@ -855,7 +829,21 @@ static void upd_prompt_show(const struct ota_ui *snap)
 	 * moment the box is really put up rather than every service tick that
 	 * finds it already there. Pairs with the withdrawal line. */
 	printk("[ota] offer shown: %s\n", snap->version);
+	upd_prompt_draw(snap);
+}
 
+/*
+ * The box itself, without the log line. repaint_top_cb() redraws it in a
+ * new theme by taking it down and drawing it again, and it used to do that
+ * through upd_prompt_show(): every step of a builder preview, a few a
+ * second while the owner drags a colour, printed "[ota] offer shown" again
+ * for an offer shown once (2026-10-28 review, NICE-7). Under the log that
+ * now waits for room, each of those lines is also panel time.
+ */
+static void upd_prompt_draw(const struct ota_ui *snap)
+{
+	strncpy(prompt_ver, snap->version, sizeof(prompt_ver) - 1);
+	prompt_ver[sizeof(prompt_ver) - 1] = '\0';
 	upd_prompt = lv_obj_create(lv_layer_top());
 	lv_obj_set_size(upd_prompt, 300, 130);
 	lv_obj_set_style_bg_color(upd_prompt, COL_BG, 0);
@@ -913,16 +901,47 @@ static void upd_prompt_show(const struct ota_ui *snap)
 	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 70, -10);
 }
 
+/* The version the install confirm names, so it can be held to it. */
+static char confirm_ver[sizeof(((struct ota_ui *)0)->version)];
+
+/*
+ * Every way the confirm goes, but Settings closing under it. The [mem] line
+ * comes first, so it measures the confirm at its deepest -- whatever sat on
+ * top of it included -- the way theme-close measures Theme. The popups bench
+ * script reads it (tools/bench/popups_touch.txt).
+ */
+static void confirm_close(void)
+{
+	mem_stats_report("confirm-close");
+	lv_obj_del(confirm);
+	confirm_gone();
+}
+
 static void install_yes_cb(lv_event_t *e)
 {
+	struct ota_ui now;
+
 	ARG_UNUSED(e);
-	ota_request_install();
-	lv_obj_del(confirm);
-	confirm = NULL;
+	/* The confirm is held to the offer by upd_timer_cb, but only on its
+	 * 250 ms ticks. A "Yes" between the state leaving AVAILABLE -- or the
+	 * version changing -- and the next tick used to spend the consent on
+	 * whatever was there now: "The app stopped answering" after a check
+	 * had cleared the staged image, or an install of a version this dialog
+	 * never named (fp/pool review, N1). Asked again here, the same way. */
+	ota_ui_get(&now);
+	if (upd_confirm_withdraw(now.st, true, now.version, confirm_ver)) {
+		printk("[ota] install not started: the offer changed under the"
+		       " confirm\n");
+	} else {
+		ota_request_install();
+	}
+	confirm_close();
 }
 
 static void show_install_confirm(const struct ota_ui *snap)
 {
+	strncpy(confirm_ver, snap->version, sizeof(confirm_ver) - 1);
+	confirm_ver[sizeof(confirm_ver) - 1] = '\0';
 	confirm = lv_obj_create(panel);
 	lv_obj_set_size(confirm, LV_PCT(100), LV_PCT(100));
 	lv_obj_set_style_bg_color(confirm, COL_BG, 0);
@@ -951,11 +970,25 @@ static void show_install_confirm(const struct ota_ui *snap)
 	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 0, -18);
 }
 
+static void tile_fit(lv_obj_t *state);
+static bool tile_was_a_tap(void);
+static bool closing;	/* defined with the slide machinery below */
+
 static void upd_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	struct ota_ui snap;
 
+	/* As on the other three tiles: LVGL sends CLICKED on the release of a
+	 * swipe too, and the back swipe that starts on this tile must not
+	 * start a check -- or, with an update waiting, put up the install
+	 * confirm in the face of someone leaving. */
+	/* And not while Settings is on its way out: a tap between a close
+	 * latching and do_close running would start a check the panel is no
+	 * longer there to show. */
+	if (!tile_was_a_tap() || closing) {
+		return;
+	}
 	ota_ui_get(&snap);
 	if (snap.st == OTA_UI_IDLE || snap.st == OTA_UI_UP_TO_DATE) {
 		ota_request_check();
@@ -1011,7 +1044,10 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 		/* Which link this is arriving on. Serial tops out near 11 KB/s
 		 * against WiFi's hundreds, so a USB update legitimately takes
 		 * minutes -- saying so up front is the difference between
-		 * "slow" and "stuck" (user request 2026-08-20). */
+		 * "slow" and "stuck" (user request 2026-08-20). The WiFi
+		 * branch below is ota.c's HTTPS route, which no shipped build
+		 * reaches since the WiFi mode went (2026-10-27); it stays with
+		 * that half of ota.c. */
 		dl_src = lv_label_create(dl_overlay);
 		lv_obj_set_style_text_color(dl_src, COL_DIM, 0);
 		lv_obj_align(dl_src, LV_ALIGN_CENTER, 0, -8);
@@ -1189,7 +1225,7 @@ static void set_upd_row(lv_obj_t *lbl, enum upd_row row)
 {
 	switch (row) {
 	case UPD_ROW_READY:
-		lv_label_set_text(lbl, "Update ready");
+		lv_label_set_text(lbl, "Ready to install");
 		lv_obj_set_style_text_color(lbl, COL_GREEN, 0);
 		break;
 	case UPD_ROW_APP_OLD:
@@ -1256,7 +1292,25 @@ static void upd_timer_cb(lv_timer_t *t)
 	 * board withdrew was never answered at all, so the next genuine
 	 * AVAILABLE has to be allowed to ask again. Without that, a daemon
 	 * restart at the wrong moment would eat the offer for the whole boot.
+	 *
+	 * It also goes when the version on offer is no longer the one it names,
+	 * the rule the install confirm follows (upd_confirm_withdraw). A
+	 * welcome's check answered inside one tick brings the state back to
+	 * AVAILABLE with a newer release staged, so upd_prompt_step, which reads
+	 * the state alone, left "Version 1.4.0 is available." up over a staged
+	 * 1.4.1; "Later" on it then latched the prompt for the boot against an
+	 * offer the owner never saw (final review, NICE-1). The box was never
+	 * answered, so the latch is lifted with it, and the step below puts up
+	 * the current offer on this same tick when nothing is busy.
+	 * upd_prompt_now_cb's own check stays as the last guard, for a tap that
+	 * lands between two ticks.
 	 */
+	if (upd_prompt && snap.st == OTA_UI_AVAILABLE &&
+	    strcmp(snap.version, prompt_ver) != 0) {
+		upd_prompt_close();
+		upd_prompt_done = false;
+		printk("[ota] offer withdrawn: a different version is on offer\n");
+	}
 	{
 		struct upd_prompt_turn pt = upd_prompt_step(
 			snap.st, upd_prompt != NULL, upd_prompt_done,
@@ -1279,6 +1333,19 @@ static void upd_timer_cb(lv_timer_t *t)
 		if (pt.act == UPD_PROMPT_SHOW) {
 			upd_prompt_show(&snap);
 		}
+	}
+
+	/* The install confirm, by the same rule (upd_prompt.h,
+	 * upd_confirm_withdraw). Here, before the switch below raises a
+	 * FAILED notice, so the notice lands on Settings and never on top of
+	 * the confirm. A timer callback, not an event on the confirm, so it
+	 * can be deleted outright; confirm_gone() pays any rebuild a theme
+	 * change left owed while it was up. */
+	if (upd_confirm_withdraw(snap.st, confirm != NULL, snap.version,
+				 confirm_ver)) {
+		confirm_close();
+		printk("[ota] install confirm withdrawn: the offer it named is"
+		       " no longer available\n");
 	}
 
 	switch (snap.st) {
@@ -1360,6 +1427,9 @@ static void upd_timer_cb(lv_timer_t *t)
 			} else {
 				ui_settings_notice(base);
 			}
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+			ui_settings_bench_notice_is("ota");
+#endif
 			ota_ui_set(OTA_UI_IDLE, NULL, 0);
 		}
 		break;
@@ -1374,9 +1444,9 @@ static void upd_timer_cb(lv_timer_t *t)
 
 	switch (snap.st) {
 	case OTA_UI_IDLE:
-		/* Left label + chevron already say "Software update"; the right
-		 * side is a STATUS, blank until there's something to report, so
-		 * it can't crowd the title. A pending badge is the exception.
+		/* The icon and name already say "Update"; the state line
+		 * is a STATUS, blank until there's something to report.
+		 * A pending badge is the exception.
 		 *
 		 * So is an out-of-date app: the board can update itself from
 		 * here, but the half running on the customer's computer cannot
@@ -1401,11 +1471,11 @@ static void upd_timer_cb(lv_timer_t *t)
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	case OTA_UI_AVAILABLE:
-		/* Version only: this row shares 296 px with "Software update" on
-		 * the left, which leaves ~13 characters here before the two
-		 * collide (the size string made it 23 and they overlapped --
-		 * user-reported 2026-07-25). Keep any future state text within
-		 * the same budget as "Update ready". */
+		/* Version only. This is the tile's state line, 128 px under
+		 * "Update" (TILE_W - 16), and it ellipsizes past that. When it
+		 * sat beside the name in a 296 px row the size string made it
+		 * 23 characters and the two overlapped (user-reported
+		 * 2026-07-25). Keep any future state text within the 128. */
 		lv_label_set_text_fmt(upd_lbl, "Install %s", snap.version);
 		lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
@@ -1418,6 +1488,7 @@ static void upd_timer_cb(lv_timer_t *t)
 	default:
 		break;
 	}
+	tile_fit(upd_lbl);
 	upd_seen = snap.st;
 }
 
@@ -1467,11 +1538,8 @@ static volatile bool want_open;
 static volatile int want_page;
 static volatile bool want_close;
 
-#if !IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-/* The shipped panel's furniture: a back control, a list row, and the
- * brightness screen. The WiFi layout above predates all three and keeps
- * its own card-and-tiles arrangement, which is the only thing five
- * actions fit into. */
+/* What the panel is built from: the back control, list rows, and the
+ * brightness screen. */
 /*
  * The back control.
  *
@@ -1527,95 +1595,262 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
 }
 
 /*
- * A list row: 296 x 56, which is 52.7 x 10.0 mm on a 2.8" 320x240 panel
- * (5.62 px/mm). A fingertip covers about 9 mm, so this is the smallest a row
- * can be and still be pressed on purpose rather than on average.
+ * The Settings tiles: four equal 144 x 71 buttons, two by two, each an icon
+ * over its name over its state. 71 px is 12.6 mm against a ~9 mm fingertip
+ * (5.62 px/mm on this 2.8" panel).
  *
- * Two lines, because the height is there either way and each subtitle earns
- * it: the level without opening brightness, both version numbers without
- * opening the updater, and what a factory reset does before you commit to
- * finding out.
+ * They replaced two columns of 120 and 168 px rows with a chevron, which the
+ * owner found uneven on the board (2026-10-28): measured on host LVGL, the
+ * right-hand pair were 40% wider than the left, and the chevron sat 3 px
+ * from "Brightness" but 10 px from "Software update". The split was uneven
+ * because the right-hand titles were the long ones; stacking the lines
+ * instead of setting them beside an icon gives every line the tile's full
+ * 128 px, so "Software update" could become "Update" -- the icon says which
+ * tile it is -- and nothing needs a wider column.
+ *
+ * Stacked rather than icon-beside-text for the state's sake: a 28 px icon on
+ * the left of a 144 px tile leaves 92 px for words, and the update tile's
+ * state must hold "Ready to install" and "Install 1.10.0".
+ *
+ * Not smaller, whatever else wants the height: the rows before these were
+ * measured at 30 px once, 5.3 mm sitting 5 px apart, and one press covered
+ * two of them -- which fired came down to where the pressure centroid fell.
+ *
+ * Inside the tile's 1 px border, top to bottom: 2 px, the icon (28), 2, the
+ * name (16), 4, the state (16), 1 -- so 3 and 2 from the tile's edges. LVGL
+ * places children inside the border, which is why the offsets below are one
+ * short of those. The 4 above the state was 2 in the first draft and read as
+ * one line run into the next.
  */
-/* `h` is a parameter because the number of rows decides it: the panel's usable
- * height is shared out among however many there are, so a row is as tall as it
- * can afford to be rather than a fixed 56. See the layout note at the call
- * site. Labels align to the row's middle, so they follow whatever height it
- * is given. */
-static lv_obj_t *mk_row(lv_obj_t *parent, int y, int h, const char *title,
-			const char *sub, bool danger, lv_event_cb_t cb,
-			void *user, lv_obj_t **sub_out)
+#define TILE_W 144
+#define TILE_H 71
+#define TILE_GAP 8
+#define TILE_TOP 46		/* clear of the title rule at y=40 */
+#define TILE_ICON_Y 2
+#define TILE_NAME_Y 32
+#define TILE_STATE_Y 52
+#define TILE_INNER_H (TILE_H - 2)	/* inside the border */
+/* With no state to show, the icon and name are one 46 px block, and they
+ * sit on the tile's middle instead of over an empty line. */
+#define TILE_BARE_DY ((TILE_INNER_H - \
+		       (TILE_NAME_Y + FONT_LINE_H - TILE_ICON_Y)) / 2 - TILE_ICON_Y)
+
+BUILD_ASSERT(2 * TILE_W + TILE_GAP == 296,
+	     "the settings tiles no longer fill the 296 px between margins");
+BUILD_ASSERT(TILE_STATE_Y + FONT_LINE_H < TILE_INNER_H,
+	     "the tile's state line runs into its border");
+
+/*
+ * The tiles' shared styles. Each row used to carry its own copy of the same
+ * seven properties, and each of its labels a colour: measured on host LVGL
+ * with this file, the Focus row (a fourth row) put 1.5 KB on the settings
+ * panel, and sharing them took 240 B of that back with the panel rendering
+ * byte for byte the same. Re-set on every panel build, never while a tile
+ * exists: build_panel() only runs once the old panel is gone.
+ */
+static lv_style_t st_row;	/* the tile itself, and its name's colour */
+static lv_style_t st_row_dim;	/* its state line */
+static lv_style_t st_row_icon;	/* its icon */
+static bool st_row_ready;
+
+static void row_styles(void)
 {
-	lv_color_t fg = danger ? COL_RED : COL_TEXT;
-	lv_obj_t *row = lv_btn_create(parent);
-
-	lv_obj_set_size(row, 296, h);
-	lv_obj_align(row, LV_ALIGN_TOP_LEFT, 12, y);
-	lv_obj_set_style_bg_color(row, danger ? COL_DANGER_BG : COL_PANEL, 0);
-	lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(row, danger ? COL_DANGER_BD : COL_TRACK, 0);
-	lv_obj_set_style_border_width(row, 1, 0);
-	lv_obj_set_style_radius(row, 10, 0);
-	lv_obj_set_style_shadow_width(row, 0, 0);
-	lv_obj_set_style_pad_all(row, 0, 0);
-	/* Both flags off, as everywhere else on this panel: a horizontal drag
-	 * on a SCROLLABLE button is eaten as a scroll and the tap never fires,
-	 * and a press that drifts must not bubble into a panel close. */
-	lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(row, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, user);
-
-	lv_obj_t *t = lv_label_create(row);
-
-	lv_label_set_text(t, title);
-	lv_obj_set_style_text_color(t, fg, 0);
-	/* A NULL subtitle is a one-line row, and the title then sits on the
-	 * row's own middle rather than 11 px above a line that is not there.
-	 * The update row is the only one: its version line moved out to the
-	 * footer, where it belongs to the panel and not to a button. */
-	lv_obj_align(t, LV_ALIGN_LEFT_MID, 14, sub ? -11 : 0);
-
-	lv_obj_t *sl = NULL;
-
-	if (sub != NULL) {
-		sl = lv_label_create(row);
-		lv_label_set_text(sl, sub);
-		lv_obj_set_style_text_color(sl, COL_DIM, 0);
-		/* Width-bounded and dotted. A centred line escapes this 320 px
-		 * panel around 45 characters, and two overflow bugs have
-		 * shipped that way. */
-		lv_obj_set_width(sl, 236);
-		lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
-		lv_obj_align(sl, LV_ALIGN_LEFT_MID, 14, 11);
+	if (!st_row_ready) {
+		lv_style_init(&st_row);
+		lv_style_init(&st_row_dim);
+		lv_style_init(&st_row_icon);
+		st_row_ready = true;
 	}
+	lv_style_set_bg_color(&st_row, COL_PANEL);
+	lv_style_set_bg_opa(&st_row, LV_OPA_COVER);
+	lv_style_set_border_color(&st_row, COL_TRACK);
+	lv_style_set_border_width(&st_row, 1);
+	lv_style_set_radius(&st_row, 10);
+	lv_style_set_shadow_width(&st_row, 0);
+	lv_style_set_pad_all(&st_row, 0);
+	lv_style_set_text_color(&st_row, COL_TEXT);
+	lv_style_set_text_color(&st_row_dim, COL_DIM);
+	lv_style_set_text_align(&st_row_dim, LV_TEXT_ALIGN_CENTER);
+	/* The icons are A8 masks (settings_icons.c), which LVGL fills with
+	 * image_recolor: in the name's colour, they follow every theme and a
+	 * custom one with nothing stored per theme. On the image itself,
+	 * because image_recolor is not inherited: set on the tile, every icon
+	 * came out a dim grey on Dark (host render, 2026-10-28). */
+	lv_style_set_image_recolor(&st_row_icon, COL_TEXT);
+	lv_style_set_image_recolor_opa(&st_row_icon, LV_OPA_COVER);
+}
 
-	lv_obj_t *chev = lv_label_create(row);
+/*
+ * Lift the icon and name onto the tile's middle while its state line is
+ * empty, and back when it is not. Only the update tile's state is ever
+ * empty -- blank until a check has something to report, on purpose (see
+ * upd_timer_cb) -- and it changes on a timer, so this runs from there and
+ * does nothing on a tick where the answer has not changed: the state's own
+ * HIDDEN flag is the record of which way the tile is laid out.
+ */
+static void tile_fit(lv_obj_t *state)
+{
+	bool bare = lv_label_get_text(state)[0] == '\0';
 
-	lv_label_set_text(chev, LV_SYMBOL_RIGHT);
-	lv_obj_set_style_text_color(chev, danger ? COL_RED : COL_DIM, 0);
-	lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -12, 0);
-
-	if (sub_out) {
-		*sub_out = sl;
+	if (bare == lv_obj_has_flag(state, LV_OBJ_FLAG_HIDDEN)) {
+		return;
 	}
-	return row;
+	lv_obj_t *name = lv_obj_get_user_data(state);
+	lv_obj_t *icon = lv_obj_get_user_data(name);
+	int dy = bare ? TILE_BARE_DY : 0;
+
+	lv_obj_set_flag(state, LV_OBJ_FLAG_HIDDEN, bare);
+	lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, TILE_ICON_Y + dy);
+	lv_obj_align(name, LV_ALIGN_TOP_MID, 0, TILE_NAME_Y + dy);
+}
+
+/* Tile k of four, left to right and then down. */
+static lv_obj_t *mk_tile(lv_obj_t *parent, int k, const lv_image_dsc_t *icon,
+			 const char *name, const char *state,
+			 lv_event_cb_t cb, lv_obj_t **state_out)
+{
+	lv_obj_t *tile = lv_btn_create(parent);
+
+	lv_obj_set_size(tile, TILE_W, TILE_H);
+	lv_obj_align(tile, LV_ALIGN_TOP_LEFT, 12 + (k % 2) * (TILE_W + TILE_GAP),
+		     TILE_TOP + (k / 2) * (TILE_H + TILE_GAP));
+	lv_obj_add_style(tile, &st_row, 0);
+	/* Not scrollable: a horizontal drag on a SCROLLABLE button is eaten as
+	 * a scroll and the tap never fires. */
+	lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+	/*
+	 * Gestures BUBBLE from a tile, up to panel_gesture_cb, as they do from
+	 * the theme tiles and the Focus choices. Stopped here, a back swipe had
+	 * to start on bare panel, and the four tiles cover 296 x 150 of it:
+	 * that left y 40-46 and 196-240. tile_was_a_tap(), first in all four
+	 * callbacks, keeps the same swipe from opening the tile it began on.
+	 */
+	lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(tile, cb, LV_EVENT_CLICKED, NULL);
+
+	/* tile_fit() moves the icon and name. It finds them through
+	 * user_data -- the state line holds the name, the name the icon --
+	 * rather than by child index, which a fourth child added first would
+	 * silently shift. The pointer is in every lv_obj already. */
+	lv_obj_t *ic = lv_image_create(tile);
+
+	lv_image_set_src(ic, icon);
+	lv_obj_add_style(ic, &st_row_icon, 0);
+	lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, TILE_ICON_Y);
+
+	lv_obj_t *t = lv_label_create(tile);
+
+	lv_label_set_text(t, name);	/* its colour is the tile's, inherited */
+	lv_obj_align(t, LV_ALIGN_TOP_MID, 0, TILE_NAME_Y);
+	lv_obj_set_user_data(t, ic);
+
+	lv_obj_t *sl = lv_label_create(tile);
+
+	lv_label_set_text(sl, state);
+	lv_obj_add_style(sl, &st_row_dim, 0);
+	/* Width-bounded and dotted, and the HEIGHT fixed to one line: LVGL
+	 * only dots a label whose text is taller than the label, and a
+	 * content-sized one simply grows -- so an "Install 1.10.0-beta.2"
+	 * (15 version characters, ota.h) wrapped instead, its second line
+	 * drawn over the tile's bottom border. */
+	lv_obj_set_size(sl, TILE_W - 16, FONT_LINE_H);
+	lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
+	lv_obj_align(sl, LV_ALIGN_TOP_MID, 0, TILE_STATE_Y);
+	lv_obj_set_user_data(sl, t);
+	tile_fit(sl);
+
+	if (state_out) {
+		*state_out = sl;
+	}
+	return tile;
 }
 
 /* --- The brightness screen ------------------------------------------- */
 
-static void bright_close(void)
+/*
+ * Brightness and Focus free the settings panel's contents while they are up,
+ * the way the theme screen does (see MEMORY at the theme screen): on host
+ * LVGL with this file, Brightness drawn over the whole panel peaked at
+ * 30,632 B once the Focus row was on it, against a board pool of 30,632
+ * usable. Without the panel underneath it is gauges plus one screen: 25,496
+ * for either, which is the panel's own build peak -- the sub-screens are no
+ * longer the deepest thing Settings draws. (Host, Dark, two providers;
+ * pointers are twice the board's, so the [mem] lines are the real figure.)
+ *
+ * So opening one empties the panel object -- kept, so "is settings open"
+ * still answers yes and its gesture handler still runs -- and closing one
+ * deletes the panel and builds it again, which is also what brings the rows
+ * back showing the level and the choice just made. Both directions are
+ * deferred through lv_async_call, because every caller is an event on an
+ * object the change deletes: the row being tapped, or the back button.
+ *
+ * Every pointer into the panel is forgotten before it is emptied:
+ * bright_refresh() and focus_refresh() write through them.
+ */
+static bool sub_closing;	/* a close is queued; see sub_close() */
+static void build_panel(lv_obj_t *parent_scr);
+static void show_focus(lv_event_t *e);
+
+static void panel_empty(void)
 {
-	if (bright_ov == NULL) {
+	upd_btn = NULL;
+	upd_lbl = NULL;
+	pct_lbl = NULL;
+	focus_sub = NULL;
+	lv_obj_clean(panel);
+}
+
+static void sub_closed_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	sub_closing = false;
+	if (panel == NULL) {
+		return;		/* the whole panel went in the meantime */
+	}
+	if (bright_ov != NULL) {
+		/* Before the delete, so it still measures the screen at its
+		 * deepest: this one, the gauges, and an empty panel. */
+		mem_stats_report("brightness-close");
+		bright_big = NULL;
+		for (int i = 0; i < BRIGHT_STOPS; i++) {
+			seg[i] = NULL;
+		}
+		bright_ov = NULL;
+	} else if (focus_ov != NULL) {
+		mem_stats_report("focus-close");
+		focus_forget();
+	} else {
 		return;
 	}
-	/* Forget the children BEFORE deleting the parent: bright_refresh() can
-	 * be called from a step at any time and writes through both. */
-	bright_big = NULL;
-	for (int i = 0; i < BRIGHT_STOPS; i++) {
-		seg[i] = NULL;
+	lv_obj_t *scr = lv_obj_get_parent(panel);
+
+	lv_obj_del(panel);
+	panel = NULL;
+	build_panel(scr);
+}
+
+/* Taps that land while the close is queued -- a second press of the back
+ * button, a swipe after it -- find sub_closing set and do nothing more. */
+static void sub_close(void)
+{
+	if ((bright_ov == NULL && focus_ov == NULL) || sub_closing) {
+		return;
 	}
-	lv_obj_del(bright_ov);
-	bright_ov = NULL;
-	bright_refresh();	/* the row's subtitle survives and needs the number */
+	sub_closing = true;
+	/* lv_async_call allocates a timer from the LVGL pool and can fail.
+	 * The latch used to stay set when it did, and with it every later
+	 * back press and swipe was ignored until a reboot: the screen stuck
+	 * open with nothing that could shut it, and the bench's ui_state
+	 * reading busy for good (2026-10-28 review, NICE-7). Unlatched, the
+	 * next press simply asks again. */
+	if (lv_async_call(sub_closed_cb, NULL) != LV_RESULT_OK) {
+		sub_closing = false;
+	}
+}
+
+static void bright_close(void)
+{
+	sub_close();
 }
 
 static void bright_close_cb(lv_event_t *e)
@@ -1638,6 +1873,14 @@ static void bright_gesture_cb(lv_event_t *e)
 
 static void bright_stop_cb(lv_event_t *e)
 {
+	/* The five stops fill the middle of the screen, so a back swipe
+	 * usually starts on one, and LVGL 9 sends CLICKED on the release of
+	 * a press that became a gesture: the swipe that meant "go back" also
+	 * STORED the level under the thumb (2026-10-28 review, NICE-7). Same
+	 * guard as every other tile on these screens. */
+	if (!tile_was_a_tap()) {
+		return;
+	}
 	backlight_set((uint8_t)(intptr_t)lv_event_get_user_data(e));
 	bright_refresh();
 }
@@ -1645,9 +1888,10 @@ static void bright_stop_cb(lv_event_t *e)
 static void show_bright(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (bright_ov || confirm) {
+	if (bright_ov || focus_ov || theme_ov || confirm || panel == NULL) {
 		return;
 	}
+	panel_empty();		/* see sub_closed_cb() */
 	bright_ov = lv_obj_create(panel);
 	lv_obj_set_size(bright_ov, LV_PCT(100), LV_PCT(100));
 	lv_obj_set_style_bg_color(bright_ov, COL_BG, 0);
@@ -1691,7 +1935,11 @@ static void show_bright(lv_event_t *e)
 		lv_obj_set_style_shadow_width(seg[i], 0, 0);
 		lv_obj_set_style_pad_all(seg[i], 0, 0);
 		lv_obj_clear_flag(seg[i], LV_OBJ_FLAG_SCROLLABLE);
-		lv_obj_clear_flag(seg[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
+		/* Gestures BUBBLE, up to bright_gesture_cb, as from a theme
+		 * tile or a Focus button. They used to stop here, so a back
+		 * swipe begun on a stop -- most of them, the stops being most
+		 * of the screen -- did nothing but set a level. */
+		lv_obj_add_flag(seg[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
 		lv_obj_add_event_cb(seg[i], bright_stop_cb, LV_EVENT_CLICKED,
 				    (void *)(intptr_t)lvl);
 	}
@@ -1704,7 +1952,1063 @@ static void show_bright(lv_event_t *e)
 
 	bright_refresh();	/* paints the stops and the readout */
 }
-#endif /* !CONFIG_BLINK_WIFI_MODE */
+
+/* --- The theme screen ------------------------------------------------- */
+
+/*
+ * Six slots a page, two across and three down, 144 x 56 each: 25.6 x 10.0 mm,
+ * the same 10 mm height as every settings row, because that is the smallest a
+ * target can be on this resistive panel and still be pressed on purpose.
+ * Twelve built-ins and a custom one do not fit one screen at any size worth
+ * pressing, and the panel cannot scroll reliably (ui_swipe.h has the
+ * measurements: one physical swipe arrives as five or six short presses), so
+ * the list pages instead, from a button in the title bar. "Edit on computer"
+ * is the last slot of every page when the app can open the builder; it used
+ * to be a 36 px strip under the grid, the one target on the screen below the
+ * 10 mm line.
+ *
+ * Each tile is drawn IN its theme -- its ground, its name in its text, and a
+ * chip running from its plenty colour to its almost-gone one -- so the list
+ * is its own preview, and a theme that is wrong for the room is visible as
+ * wrong before it is chosen.
+ *
+ * MEMORY. This screen used to be built over the settings panel, and it was
+ * the deepest stack on the board: in the 2026-10-27 review's host harness,
+ * with a gauge screen carrying two providers (25,272 B), the three trees
+ * together came to 44,200 B, 5.9 KB more than Brightness -- in a 30 KB pool
+ * the board had already measured at 21 KB on the gauges alone. With asserts
+ * off a failed allocation is a NULL dereference, then a fault, then a reboot.
+ * So opening it frees the settings panel's contents first and closing it
+ * builds them again (rebuild_cb already did exactly that for a theme change),
+ * and the tiles and their chips share TWO static styles, one each, for
+ * everything they have in common, rather than every object carrying its own
+ * copy. A second harness, one provider and a lighter gauge screen (16,216 B),
+ * measures the same code in Dark at a 35,160 B peak before and 26,640 B
+ * after, against Brightness's 29,232: the theme screen is no longer the
+ * deepest one. Host pointers are twice the board's, so `[mem] theme-close`
+ * is the board's own figure and the one to trust.
+ */
+#define THEME_SLOTS 6
+#define THEME_TILE_W 144
+#define THEME_TILE_H 56
+#define THEME_TILE_GAP 6
+#define THEME_GRID_Y 46
+/* The name sits top-left and the chip under it, so a name has the tile's
+ * whole inner width rather than what a chip beside it leaves. "Colour-blind"
+ * once ended 2 px short of a chip on its right; widths are pixels, and the
+ * label is clipped to this many of them whatever its text. */
+#define THEME_NAME_W (THEME_TILE_W - 2 * 10)
+
+BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
+	     "the theme grid runs off the panel");
+
+/*
+ * "Edit on computer": the board asks, the daemon opens the builder in a
+ * browser and says so. Contract 2026-10-27: ok 1 means a browser opened;
+ * ok 0, or no answer inside 5 s, means the user has to start it themselves,
+ * and the slot says how.
+ *
+ * The slot is a button that comes back (owner, 2026-10-29). It used to hold
+ * "Opened on your computer" and refuse taps for 10 s, and then until the
+ * builder ended, which read as a button that had stopped working -- the
+ * board report behind Addendum 6. Now each answer is shown for a moment and
+ * the slot reads its name again, and a tap at any time sends an ask: the
+ * daemon opens the running builder in the browser once more (its reshow
+ * path), or a new one -- except within 2 s of its last open, a press on the
+ * "Opened" note included, which it folds into that open (OPEN_EVERY_S in
+ * pc/theme_server.py). The one guard here is the ask in flight, so a double
+ * tap cannot open two tabs: up to EDIT_WAIT_MS, until the answer.
+ *
+ * And then held after all, but only while the builder is open (owner,
+ * 2026-10-30, after a board run): "the edit on computer button should
+ * re-appear ... only once the page is not active / closed". A button back
+ * after 3 s with the builder still open took a press, opened a second tab
+ * on it, and left the first handed over to the newer one -- two
+ * tabs for one edit. The lock-out of before 2026-10-29 read as broken
+ * because it outlived the builder by a fixed 10 s and had no "why" on the
+ * slot; this one ends the moment the daemon says the builder has (done:1),
+ * and says what it is waiting for. Which line holds it and which frees it
+ * is edit_hold.c's to decide, host-tested; this file draws it. A daemon
+ * that does not promise the done (no "edit_done" in its welcome caps) never
+ * holds the slot, so with one the 3 s "Opened" note below stays as it was.
+ */
+#define EDIT_WAIT_MS 5000
+/* Long enough to read three words and look up at the computer. */
+#define EDIT_OPENED_MS 3000
+/*
+ * The hold lasts only while it keeps being said, as an svc incident does
+ * (SVC_HOLD_S). The daemon restates "editing" every 60 s in an edit_state
+ * line (pc/bridge.py, _restate_edit); this is two and a half of those,
+ * the svc margin, and an ok 1 or a preview line starts it again as well.
+ *
+ * It was 15 min, from the ok, with only previews to start it again
+ * (review of fp/edit-held). That was too long and too short at once: too
+ * long for a done lost on the wire, or one that overtook its own ok, which
+ * left the button gone for a quarter of an hour over no builder; too short
+ * for a page reloaded with no edit, which starts the builder's 10 min idle
+ * clock again (theme_server.py, BuilderServer.touch) with nothing reaching
+ * this board, so the slot came back with the page still open. A
+ * restatement answers both. Past this with nothing heard the slot is a
+ * button again, which costs at worst a second tab: the behaviour before
+ * the hold.
+ *
+ * Overridable at build time only for the touch harness's own run of it
+ * (tools/bench/edit_hold_bound.txt), which cannot wait 150 s per check.
+ */
+#ifndef EDIT_HOLD_MS
+#define EDIT_HOLD_MS (150 * 1000)
+#endif
+/*
+ * The fallback is an instruction, "On your computer, run: blink theme", over
+ * three lines, and it is only useful if it can be read and typed from: 3 s
+ * is too short for that, and a fallback that never left would hide the
+ * button under it. 8 s, then the name; and a tap before then asks again
+ * rather than waiting it out, since the reason (no browser, no daemon) may
+ * be gone by now.
+ */
+#define EDIT_RUN_MS 8000
+
+static const char *const edit_name = "Edit on computer";
+static const char *const edit_waiting = "Opening on your computer";
+static const char *const edit_opened = "Opened on your computer";
+/* The held slot. The same length and shape as the two above, so it wraps
+ * to the same two lines in the slot's 124 px; drawn dim, the way a control
+ * that is waiting on something else looks everywhere else in Settings. */
+static const char *const edit_holding = "Editing on your computer";
+/* The command comes last, after a colon, so it reads as the thing to type
+ * with nothing to mark it out. It was "Run `blink theme` on your computer",
+ * and the panel drew the backticks as backticks (audit, 2026-10-28):
+ * Markdown on a screen that has none. tests/test_panel_strings.py now
+ * refuses a backtick, or any character the built-in fonts lack, in any
+ * firmware string. */
+static const char *const edit_run = "On your computer, run: blink theme";
+
+static int theme_page;		/* survives a repaint, so the page stays put */
+static const char *edit_note;	/* what the slot says; NULL is its name */
+/* The slot's one pending change: the 5 s wait for an answer while
+ * edit_asking, or the return to the name after an answer was shown. */
+static lv_timer_t *edit_timer;
+static bool edit_asking;	/* an ask is in flight */
+/* Held while the builder is open (edit_hold.h). Survives leaving the theme
+ * screen and the settings panel, as the builder does; a reboot clears it,
+ * and the welcome that answers the board's hello puts it back if the
+ * builder is still open. While held, edit_timer is the upper bound. */
+static struct edit_hold edit_h;
+static bool theme_closing;	/* a close is queued; see theme_close() */
+
+/* Shared by every tile and every chip; see MEMORY above. Static, so they
+ * cost no pool beyond their property arrays, allocated once. */
+static lv_style_t st_tile, st_chip;
+
+static void show_theme(bool fresh);
+static void build_panel(lv_obj_t *parent_scr);
+
+/* Every theme that can be offered, Dark first. Custom only once a usable one
+ * has been saved -- an all-zero record would be a black-on-black tile. */
+static int theme_list(int ids[THEME_N])
+{
+	struct theme_custom t;
+	int n = 0;
+
+	for (int i = 0; i < THEME_BUILTIN_N; i++) {
+		ids[n++] = i;
+	}
+	if (ui_theme_custom_stored(&t)) {
+		ids[n++] = THEME_CUSTOM;
+	}
+	return n;
+}
+
+/* Theme tiles a page holds: all six, or five and the Edit slot. */
+static int theme_per_page(void)
+{
+	return proto_host_can_theme() ? THEME_SLOTS - 1 : THEME_SLOTS;
+}
+
+static int theme_pages(void)
+{
+	int ids[THEME_N];
+
+	return (theme_list(ids) + theme_per_page() - 1) / theme_per_page();
+}
+
+/*
+ * Was this release a tap? LVGL 9.3 sends CLICKED on release even when the
+ * press became a gesture, so the back swipe -- which most people start on
+ * whatever is under their thumb -- chose and STORED the theme under it on its
+ * way out. Same reasoning as zone_was_a_tap(), and the same two witnesses:
+ * ui_swipe, which reads the panel directly, and LVGL's own gesture.
+ */
+static bool tile_was_a_tap(void)
+{
+	return !ui_swipe_dragging() &&
+	       lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_NONE;
+}
+
+static void edit_paint(void)
+{
+	if (theme_edit_lbl) {
+		lv_label_set_text(theme_edit_lbl,
+				  edit_note ? edit_note : edit_name);
+		lv_obj_set_style_text_color(theme_edit_lbl, edit_h.held ?
+					    COL_DIM : COL_TEXT, 0);
+	}
+}
+
+static void edit_timer_cb(lv_timer_t *t);
+
+/* Show `note` now, and arm the slot's timer for `ms` from now. */
+static void edit_show(const char *note, uint32_t ms)
+{
+	edit_note = note;
+	edit_paint();
+	if (edit_timer != NULL) {
+		lv_timer_set_period(edit_timer, ms);
+		lv_timer_reset(edit_timer);
+		return;
+	}
+	edit_timer = lv_timer_create(edit_timer_cb, ms, NULL);
+	if (edit_timer != NULL) {
+		lv_timer_set_repeat_count(edit_timer, 1);
+	}
+	/* Out of pool: the note simply stays until the next tap, which is
+	 * never refused unless an ask is in flight -- and an ask with no
+	 * timer is not left in flight (theme_edit_cb), nor a hold with no
+	 * bound (edit_hold_show). */
+}
+
+/* edit_hold.c has just held the slot. Any ask in flight is answered by
+ * it, and the slot's one timer becomes the hold's upper bound. */
+static void edit_hold_show(void)
+{
+	edit_asking = false;
+	edit_show(edit_holding, EDIT_HOLD_MS);
+	if (edit_timer == NULL) {
+		/* Out of pool: a hold with nothing to bound it could outlive
+		 * a lost done for good. Drop it and say what the slot said
+		 * before there was one; the next tap asks as it always did. */
+		edit_hold_expired(&edit_h);
+		edit_note = edit_opened;
+		edit_paint();
+	}
+}
+
+/* edit_hold.c has just freed the slot: its name, and nothing pending. A
+ * hold is never set with an ask in flight (edit_hold_show ends it), so
+ * there is no ask here to keep. */
+static void edit_hold_free(void)
+{
+	if (edit_timer != NULL) {
+		lv_timer_delete(edit_timer);
+		edit_timer = NULL;
+	}
+	edit_note = NULL;
+	edit_paint();
+}
+
+static void edit_timer_cb(lv_timer_t *t)
+{
+	ARG_UNUSED(t);
+	edit_timer = NULL;	/* repeat count 1: LVGL frees it */
+	if (edit_h.held) {
+		/* EDIT_HOLD_MS with no restatement, ok 1 or preview: the
+		 * daemon has stopped saying the builder is open. Give the
+		 * button back. */
+		edit_hold_expired(&edit_h);
+		edit_note = NULL;
+		edit_paint();
+		return;
+	}
+	if (edit_asking) {
+		/* No answer in 5 s: an old daemon, or none. */
+		edit_asking = false;
+		edit_show(edit_run, EDIT_RUN_MS);
+		return;
+	}
+	edit_note = NULL;	/* back to "Edit on computer" */
+	edit_paint();
+}
+
+static void theme_edit_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (!tile_was_a_tap()) {
+		return;
+	}
+	if (edit_h.held) {
+		/* The builder is open on the computer, and a press here would
+		 * open a second tab on it and retire the first (owner,
+		 * 2026-10-30). The slot already says why. */
+		return;
+	}
+	if (edit_asking) {
+		/* The double tap: the first ask is still on its way, and a
+		 * second would open a second tab beside the first. */
+		return;
+	}
+	proto_send_theme_edit();
+	edit_asking = true;
+	edit_show(edit_waiting, EDIT_WAIT_MS);
+	if (edit_timer == NULL) {
+		/* Out of pool. Say the fallback now rather than wait for an
+		 * answer with nothing to time it out. */
+		edit_asking = false;
+		edit_note = edit_run;
+		edit_paint();
+	}
+}
+
+void ui_settings_theme_edit_reply(bool ok)
+{
+	if (edit_hold_reply(&edit_h, ok)) {
+		/* Held, from a daemon that will say when the builder ends --
+		 * late answers included: one whose browser took 28 s opened
+		 * the builder just the same. */
+		edit_hold_show();
+		return;
+	}
+	if (edit_h.held) {
+		/* Already held. An ok 1 is the builder still open, so the
+		 * bound starts again; an ok 0 is a browser that would not open
+		 * on a builder that is still running, and the hold stands. */
+		if (ok && edit_timer != NULL) {
+			lv_timer_reset(edit_timer);
+		}
+		return;
+	}
+	if (!edit_asking) {
+		return;		/* nobody asked, or the 5 s already ran out */
+	}
+	edit_asking = false;
+	edit_show(ok ? edit_opened : edit_run,
+		  ok ? EDIT_OPENED_MS : EDIT_RUN_MS);
+}
+
+void ui_settings_theme_edit_builder_seen(void)
+{
+	/*
+	 * A preview or save line: a builder is at work. While held it is the
+	 * evidence that the one held for is still open, so the bound starts
+	 * again, and a builder in use is never given up on. It does not hold
+	 * the slot by itself: it may come from one `blink theme` opened,
+	 * whose end the daemon never reports to the board. An ask in flight
+	 * takes it as its answer, as it always has, and the daemon's own ok,
+	 * a moment behind it, holds the slot.
+	 */
+	if (edit_h.held) {
+		if (edit_timer != NULL) {
+			lv_timer_reset(edit_timer);
+		}
+		return;
+	}
+	if (!edit_asking) {
+		return;
+	}
+	edit_asking = false;
+	edit_show(edit_opened, EDIT_OPENED_MS);
+}
+
+void ui_settings_theme_edit_done(void)
+{
+	/*
+	 * The builder the daemon opened has ended (contract Addendum 6): the
+	 * hold goes and the slot reads its name. Without a hold it still cuts
+	 * short a note on screen when the builder ends -- saved within 3 s,
+	 * or the fallback's 8 s. An ask still in flight keeps its answer: it
+	 * was made after the builder that ended was opened, so the daemon is
+	 * opening a new one for it (edit_hold_done).
+	 */
+	if (edit_asking) {
+		return;
+	}
+	edit_hold_done(&edit_h);
+	edit_hold_free();
+}
+
+/* A welcome or edit_state has just run edit_hold.c: `changed` is what it
+ * returned. Draw what it decided, and while held start the bound again,
+ * since the daemon has just said the builder is open. */
+static void edit_hold_said(bool was, bool changed)
+{
+	if (changed && edit_h.held) {
+		edit_hold_show();
+	} else if (changed && was) {
+		edit_hold_free();
+	} else if (edit_h.held && edit_timer != NULL) {
+		lv_timer_reset(edit_timer);
+	}
+}
+
+void ui_settings_theme_edit_welcome(const char *json)
+{
+	bool was = edit_h.held;
+
+	edit_hold_said(was, edit_hold_welcome(&edit_h, json));
+}
+
+void ui_settings_theme_edit_state(bool editing)
+{
+	bool was = edit_h.held;
+
+	edit_hold_said(was, edit_hold_state(&edit_h, editing));
+}
+
+void ui_settings_theme_edit_host_gone(void)
+{
+	/* Nothing can open, end or report a builder for this board while
+	 * its host is away; the first edit_state after the host's return
+	 * (sent at once when the daemon hears the board again) or its next
+	 * welcome says whether one is still open. Held meanwhile, the slot
+	 * would say "Editing" over a daemon that may never come back. */
+	if (edit_hold_host_gone(&edit_h)) {
+		edit_hold_free();
+	}
+}
+
+/*
+ * Leave the theme screen: delete it and build the settings panel back, both
+ * from lv_async_call because every caller is an event on a child of what gets
+ * deleted. Until it runs the theme screen stays up and inert.
+ */
+static void theme_closed_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	theme_closing = false;
+	if (panel == NULL || theme_ov == NULL) {
+		return;		/* the whole panel went in the meantime */
+	}
+	lv_obj_t *scr = lv_obj_get_parent(panel);
+
+	/* Measured the way brightness-close is, just before the delete. */
+	mem_stats_report("theme-close");
+	theme_ov = NULL;
+	theme_grid = NULL;
+	theme_edit_lbl = NULL;
+	lv_obj_del(panel);
+	panel = NULL;
+	build_panel(scr);
+}
+
+static void theme_close(void)
+{
+	if (theme_ov == NULL || theme_closing) {
+		return;
+	}
+	theme_closing = true;
+	/* As in sub_close(): a failed queue must not leave the latch set,
+	 * or the theme screen can never be closed again before a reboot. */
+	if (lv_async_call(theme_closed_cb, NULL) != LV_RESULT_OK) {
+		theme_closing = false;
+	}
+}
+
+static void theme_close_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	theme_close();
+}
+
+static void theme_gesture_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	/* As on the brightness screen: the closing swipe closes this first. */
+	if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
+		theme_close();
+	}
+}
+
+static void theme_pick_cb(lv_event_t *e)
+{
+	int id = (int)(intptr_t)lv_event_get_user_data(e);
+
+	if (!tile_was_a_tap() || theme_closing) {
+		return;
+	}
+	/* Choosing what is already stored and showing costs a flash write
+	 * and buys nothing. "Showing" has to mean the stored colours, not
+	 * only the stored id: with a Custom theme stored and the builder
+	 * previewing a different custom one, both ids read Custom, and a tap
+	 * on the Custom tile -- the one way back on the board -- did nothing
+	 * (2026-10-28 review, NICE-7). During a preview the tap goes through;
+	 * ui_theme_choose() ends the preview, and cfg_set_theme() writes
+	 * nothing for bytes it already holds. */
+	if (id == ui_theme_stored_id() && id == theme_active_id() &&
+	    !ui_theme_previewing()) {
+		return;
+	}
+	/* Repaints everything, this screen included -- see
+	 * ui_settings_apply_theme(), which rebuilds it after this returns. */
+	ui_theme_choose(id);
+}
+
+/* The shared styles, in the active theme. Re-set on every build: a style's
+ * colours are values, and the theme may have changed since the last one. */
+static void theme_styles(void)
+{
+	/* lv_style_init once only: a second init would drop the property
+	 * arrays the tiles of an earlier build were given, without freeing
+	 * them. The setters below overwrite values in place. */
+	static bool initialised;
+
+	if (!initialised) {
+		lv_style_init(&st_tile);
+		lv_style_init(&st_chip);
+		initialised = true;
+	}
+	lv_style_set_width(&st_tile, THEME_TILE_W);
+	lv_style_set_height(&st_tile, THEME_TILE_H);
+	lv_style_set_bg_opa(&st_tile, LV_OPA_COVER);
+	lv_style_set_border_color(&st_tile, COL_TRACK);
+	lv_style_set_border_width(&st_tile, 1);
+	lv_style_set_radius(&st_tile, 10);
+	lv_style_set_shadow_width(&st_tile, 0);
+	lv_style_set_pad_all(&st_tile, 0);
+
+	lv_style_set_width(&st_chip, 40);
+	lv_style_set_height(&st_chip, 8);
+	lv_style_set_radius(&st_chip, 4);
+	lv_style_set_border_width(&st_chip, 0);
+	lv_style_set_bg_opa(&st_chip, LV_OPA_COVER);
+	lv_style_set_bg_grad_dir(&st_chip, LV_GRAD_DIR_HOR);
+}
+
+static lv_obj_t *mk_slot(int k)
+{
+	lv_obj_t *tile = lv_btn_create(theme_grid);
+
+	lv_obj_add_style(tile, &st_tile, 0);
+	lv_obj_align(tile, LV_ALIGN_TOP_LEFT,
+		     12 + (k % 2) * (THEME_TILE_W + 8),
+		     (k / 2) * (THEME_TILE_H + THEME_TILE_GAP));
+	lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+	/*
+	 * Gestures BUBBLE from a tile, up to theme_gesture_cb. They used to
+	 * stop here, so a back swipe started on a tile -- six of them fill the
+	 * screen, so most back swipes -- did nothing. tile_was_a_tap() is what
+	 * keeps the same swipe from choosing the tile it started on.
+	 */
+	lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	return tile;
+}
+
+static void theme_fill(void)
+{
+	int ids[THEME_N];
+	int n = theme_list(ids);
+	int per = theme_per_page();
+	int first = theme_page * per;
+
+	theme_edit_lbl = NULL;
+	lv_obj_clean(theme_grid);
+	for (int k = 0; k < per && first + k < n; k++) {
+		int id = ids[first + k];
+		const struct palette *p = theme_builtin(id);
+		struct palette cp;
+
+		if (p == NULL) {
+			struct theme_custom t;
+
+			ui_theme_custom_stored(&t);
+			theme_derive(&t, &cp);
+			p = &cp;
+		}
+		lv_obj_t *tile = mk_slot(k);
+
+		lv_obj_set_style_bg_color(tile, lv_color_hex(p->bg), 0);
+		/* The chosen one is ringed in THIS screen's text colour: the
+		 * tile's own colours belong to its theme, and its ground can
+		 * be the same as the panel's. */
+		if (id == theme_active_id()) {
+			lv_obj_set_style_border_color(tile, COL_TEXT, 0);
+			lv_obj_set_style_border_width(tile, 2, 0);
+		}
+		lv_obj_add_event_cb(tile, theme_pick_cb, LV_EVENT_CLICKED,
+				    (void *)(intptr_t)id);
+
+		lv_obj_t *name = lv_label_create(tile);
+
+		lv_label_set_text(name, theme_name(id));
+		lv_obj_set_style_text_color(name, lv_color_hex(p->text), 0);
+		lv_obj_set_width(name, THEME_NAME_W);
+		lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+		lv_obj_align(name, LV_ALIGN_TOP_LEFT, 10, 10);
+
+		lv_obj_t *chip = lv_obj_create(tile);
+
+		lv_obj_add_style(chip, &st_chip, 0);
+		lv_obj_set_style_bg_color(chip, lv_color_hex(p->low), 0);
+		lv_obj_set_style_bg_grad_color(chip, lv_color_hex(p->high), 0);
+		/* Not clickable, or a press on the chip would stop there and
+		 * never reach the tile. */
+		lv_obj_clear_flag(chip, LV_OBJ_FLAG_CLICKABLE);
+		lv_obj_align(chip, LV_ALIGN_BOTTOM_LEFT, 10, -12);
+	}
+
+	/*
+	 * Only when the app on the other end said it can open the builder
+	 * ("caps":["theme"] in its welcome). A newer board talking to an
+	 * older app must not offer a button that sends a message nothing
+	 * will answer.
+	 */
+	if (proto_host_can_theme()) {
+		lv_obj_t *slot = mk_slot(THEME_SLOTS - 1);
+
+		lv_obj_set_style_bg_color(slot, COL_PANEL, 0);
+		lv_obj_add_event_cb(slot, theme_edit_cb, LV_EVENT_CLICKED, NULL);
+		theme_edit_lbl = lv_label_create(slot);
+		lv_obj_set_width(theme_edit_lbl, THEME_NAME_W);
+		lv_label_set_long_mode(theme_edit_lbl, LV_LABEL_LONG_WRAP);
+		lv_obj_set_style_text_align(theme_edit_lbl, LV_TEXT_ALIGN_CENTER,
+					    0);
+		lv_obj_set_style_text_color(theme_edit_lbl, COL_TEXT, 0);
+		lv_obj_center(theme_edit_lbl);
+		edit_paint();
+	}
+}
+
+static void theme_page_cb(lv_event_t *e)
+{
+	int pages = theme_pages();
+	lv_obj_t *lbl = lv_obj_get_child(lv_event_get_target(e), 0);
+	char buf[32];
+
+	if (!tile_was_a_tap()) {
+		return;		/* a swipe that began on the button */
+	}
+
+	theme_page = (theme_page + 1) % pages;
+	snprintf(buf, sizeof(buf), "%d/%d " LV_SYMBOL_RIGHT, theme_page + 1,
+		 pages);
+	lv_label_set_text(lbl, buf);
+	theme_fill();	/* the grid is a sibling of this button, not a parent */
+}
+
+/* `fresh`: a visit from the Theme row, as opposed to a repaint of one
+ * already open (rebuild_cb). */
+static void show_theme(bool fresh)
+{
+	int ids[THEME_N];
+	int n = theme_list(ids);
+	int pages = theme_pages();
+
+	if (theme_ov || bright_ov || focus_ov || confirm || panel == NULL) {
+		return;
+	}
+	if (fresh) {
+		/* A fresh visit, not a repaint: start from the active theme's
+		 * page and from the slot's own name -- unless an ask is still
+		 * in flight, whose answer is worth seeing, or the slot is held:
+		 * the builder is as open as it was before the visit, and
+		 * leaving the page and coming back must not be a way round the
+		 * hold (it was the way round the 10 s lock-out). */
+		for (int i = 0; i < n; i++) {
+			if (ids[i] == theme_active_id()) {
+				theme_page = i / theme_per_page();
+				break;
+			}
+		}
+		if (!edit_asking && !edit_h.held) {
+			if (edit_timer != NULL) {
+				lv_timer_delete(edit_timer);
+				edit_timer = NULL;
+			}
+			edit_note = NULL;
+		}
+	}
+	if (theme_page >= pages) {
+		theme_page = 0;
+	}
+
+	/* The settings panel's contents go first; see MEMORY above. The
+	 * panel object itself stays, so everything that asks "is settings
+	 * open" still gets yes, and its own gesture handler still runs. */
+	upd_btn = NULL;
+	upd_lbl = NULL;
+	pct_lbl = NULL;
+	focus_forget();		/* the Focus row's subtitle goes too */
+	lv_obj_clean(panel);
+	theme_styles();
+
+	theme_ov = lv_obj_create(panel);
+	lv_obj_set_size(theme_ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(theme_ov, COL_BG, 0);
+	lv_obj_set_style_bg_opa(theme_ov, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(theme_ov, 0, 0);
+	lv_obj_set_style_radius(theme_ov, 0, 0);
+	lv_obj_set_style_pad_all(theme_ov, 0, 0);
+	lv_obj_clear_flag(theme_ov, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(theme_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(theme_ov, theme_gesture_cb, LV_EVENT_GESTURE, NULL);
+	lv_obj_center(theme_ov);
+
+	mk_back(theme_ov, theme_close_cb);
+
+	lv_obj_t *title = lv_label_create(theme_ov);
+
+	lv_label_set_text(title, "Theme");
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+	if (pages > 1) {
+		/* The same 60 x 36 as the back control, in the opposite
+		 * corner, saying which page this is and that there is more. */
+		lv_obj_t *pg = lv_btn_create(theme_ov);
+		char buf[32];
+
+		lv_obj_set_size(pg, 60, 36);
+		lv_obj_align(pg, LV_ALIGN_TOP_RIGHT, -6, 2);
+		lv_obj_set_style_bg_color(pg, COL_PANEL, 0);
+		lv_obj_set_style_bg_opa(pg, LV_OPA_COVER, 0);
+		lv_obj_set_style_border_width(pg, 0, 0);
+		lv_obj_set_style_radius(pg, 9, 0);
+		lv_obj_set_style_shadow_width(pg, 0, 0);
+		lv_obj_set_style_pad_all(pg, 0, 0);
+		lv_obj_clear_flag(pg, LV_OBJ_FLAG_SCROLLABLE);
+		/* Gestures bubble to theme_gesture_cb; theme_page_cb's
+		 * tile_was_a_tap() keeps the swipe from turning the page. The
+		 * flag used to be cleared, so a back swipe begun on this
+		 * button was swallowed whole. */
+		lv_obj_add_flag(pg, LV_OBJ_FLAG_GESTURE_BUBBLE);
+		lv_obj_set_ext_click_area(pg, 10);
+		lv_obj_add_event_cb(pg, theme_page_cb, LV_EVENT_CLICKED, NULL);
+
+		lv_obj_t *l = lv_label_create(pg);
+
+		snprintf(buf, sizeof(buf), "%d/%d " LV_SYMBOL_RIGHT,
+			 theme_page + 1, pages);
+		lv_label_set_text(l, buf);
+		lv_obj_set_style_text_color(l, COL_DIM, 0);
+		lv_obj_center(l);
+	}
+
+	mk_line(theme_ov, 40);
+
+	theme_grid = lv_obj_create(theme_ov);
+	lv_obj_set_size(theme_grid, LV_HOR_RES,
+			3 * THEME_TILE_H + 2 * THEME_TILE_GAP);
+	lv_obj_align(theme_grid, LV_ALIGN_TOP_LEFT, 0, THEME_GRID_Y);
+	lv_obj_set_style_bg_opa(theme_grid, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(theme_grid, 0, 0);
+	lv_obj_set_style_pad_all(theme_grid, 0, 0);
+	lv_obj_clear_flag(theme_grid, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(theme_grid, LV_OBJ_FLAG_CLICKABLE);
+	theme_fill();
+}
+
+/*
+ * The Theme row's tap. Deferred, because opening the theme screen deletes the
+ * settings panel's contents -- the row this tap is still being delivered to
+ * among them.
+ */
+static void theme_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	show_theme(true);
+}
+
+static void theme_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	/* The row sits where a swipe to close Settings often begins. */
+	if (!tile_was_a_tap()) {
+		return;
+	}
+	if (theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
+	    confirm == NULL && !closing) {
+		lv_async_call(theme_open_cb, NULL);
+	}
+}
+
+/* --- The Focus screen ------------------------------------------------- */
+
+/*
+ * Off, Session or Weekly: three choices, because "on" alone is not a setting
+ * -- the owner picks which window goes big (user answer 2026-10-25: chosen in
+ * Settings, never automatically). Stored as the two bytes cfg_store reserved
+ * for it; Off keeps the window, so turning Focus back on lands where it was.
+ *
+ * Three 92 x 100 buttons, 16.4 x 17.8 mm, side by side so the choice reads as
+ * one control. They share two static styles instead of carrying a dozen
+ * local properties each, and the panel's contents are freed while this is
+ * up (see sub_closed_cb): the LVGL pool is shared with the gauge screen, and
+ * the theme screen was found running it out (orchestrator review,
+ * 2026-10-27).
+ */
+/* 92 and 10, not 93 and 8: three 93s and two 8s come to 295, which left
+ * 12 px of margin on the left and 13 on the right (measured on host LVGL,
+ * 2026-10-28). Three widths and two gaps have to make the 296 between the
+ * margins exactly, and with an 8 px gap no whole width does. */
+#define FOCUS_BTN_W 92
+#define FOCUS_BTN_GAP 10
+#define FOCUS_BTN_H 100
+#define FOCUS_BTN_Y 56
+#define FOCUS_NOTE_Y 176
+
+BUILD_ASSERT(FOCUS_CHOICES * FOCUS_BTN_W + (FOCUS_CHOICES - 1) * FOCUS_BTN_GAP ==
+	     296, "the Focus choices no longer fill the 296 px between margins");
+BUILD_ASSERT(FOCUS_BTN_Y + FOCUS_BTN_H < FOCUS_NOTE_Y,
+	     "the Focus note sits on the choices");
+
+static const char *const focus_words[FOCUS_CHOICES] = {
+	"Off", "Session", "Weekly"
+};
+/* What each choice does, in a line the panel can hold (the longest is
+ * 29 characters, about 200 px). */
+static const char *const focus_notes[FOCUS_CHOICES] = {
+	"Both windows, side by side",
+	"Session big, weekly as a line",
+	"Weekly big, session as a line",
+};
+
+static lv_style_t focus_st_btn;	/* every choice */
+static lv_style_t focus_st_on;	/* ...and the chosen one, as LV_STATE_CHECKED */
+static bool focus_styles_made;	/* both styles above hold properties */
+
+/* 0 off, 1 session, 2 weekly: what the store says now. */
+static int focus_choice(void)
+{
+	if (!cfg_get_focus_on()) {
+		return 0;
+	}
+	return cfg_get_focus_win() ? 2 : 1;
+}
+
+static const char *focus_name(void)
+{
+	return focus_words[focus_choice()];
+}
+
+static void focus_refresh(void)
+{
+	int c = focus_choice();
+
+	if (focus_sub) {
+		lv_label_set_text(focus_sub, focus_words[c]);
+	}
+	if (focus_note) {
+		lv_label_set_text(focus_note, focus_notes[c]);
+	}
+	for (int i = 0; i < FOCUS_CHOICES; i++) {
+		if (focus_btn[i] == NULL) {
+			continue;
+		}
+		if (i == c) {
+			lv_obj_add_state(focus_btn[i], LV_STATE_CHECKED);
+		} else {
+			lv_obj_clear_state(focus_btn[i], LV_STATE_CHECKED);
+		}
+	}
+}
+
+/*
+ * The styles are (re)filled each time the screen opens, never while it is
+ * open: a theme change rebuilds the whole panel (rebuild_cb), so by the time
+ * this runs again no object still points at them, and the colours are the
+ * new theme's roles. Reset first, so a property list never grows.
+ */
+static void focus_styles(void)
+{
+	if (focus_styles_made) {
+		lv_style_reset(&focus_st_btn);
+		lv_style_reset(&focus_st_on);
+	}
+	lv_style_init(&focus_st_btn);
+	lv_style_set_bg_color(&focus_st_btn, COL_PANEL);
+	lv_style_set_bg_opa(&focus_st_btn, LV_OPA_COVER);
+	lv_style_set_border_color(&focus_st_btn, COL_TRACK);
+	lv_style_set_border_width(&focus_st_btn, 1);
+	lv_style_set_radius(&focus_st_btn, 10);
+	lv_style_set_shadow_width(&focus_st_btn, 0);
+	lv_style_set_pad_all(&focus_st_btn, 0);
+	/* Inherited by the word inside, so it needs no style of its own. */
+	lv_style_set_text_color(&focus_st_btn, COL_DIM);
+
+	/* Ringed in the text colour, as the chosen theme tile is, and its
+	 * word brightened to match. */
+	lv_style_init(&focus_st_on);
+	lv_style_set_border_color(&focus_st_on, COL_TEXT);
+	lv_style_set_border_width(&focus_st_on, 2);
+	lv_style_set_text_color(&focus_st_on, COL_TEXT);
+	focus_styles_made = true;
+}
+
+/* Everything on the Focus screen, and its row's subtitle, die with the panel:
+ * forget them before it goes, so focus_refresh() never writes through a
+ * deleted object. */
+static void focus_forget(void)
+{
+	focus_ov = NULL;
+	focus_sub = NULL;
+	focus_note = NULL;
+	for (int i = 0; i < FOCUS_CHOICES; i++) {
+		focus_btn[i] = NULL;
+	}
+}
+
+/* Deferred, and the panel is built again behind it: see sub_closed_cb(),
+ * which also prints "focus-close" before anything is freed. */
+static void focus_close(void)
+{
+	sub_close();
+}
+
+static void focus_close_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	focus_close();
+}
+
+static void focus_gesture_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	/* As on the brightness screen: the closing swipe closes this first. */
+	if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
+		focus_close();
+	}
+}
+
+static void focus_pick_cb(lv_event_t *e)
+{
+	int c = (int)(intptr_t)lv_event_get_user_data(e);
+	uint8_t on = c != 0;
+	/* Off keeps whichever window was last chosen. */
+	uint8_t win = c == 0 ? cfg_get_focus_win() : (c == 2);
+
+	/* A back swipe that starts on a button is a swipe: without this it
+	 * stored that button's choice on the way out (review, 12 of 12 runs).
+	 * Nor does a press count once the close is queued. */
+	if (!tile_was_a_tap() || sub_closing) {
+		return;
+	}
+	if (c == focus_choice()) {
+		return;		/* a flash write that buys nothing */
+	}
+	if (cfg_set_focus(on, win) != 0) {
+		printk("[focus] could not store the choice\n");
+	}
+	/* The gauge screen is underneath this one and changes in place, so
+	 * the panel opens onto the new layout when it closes. Drawn from
+	 * what was stored, so the screen never shows a choice the next boot
+	 * would not. */
+	usage_view_set_focus(cfg_get_focus_on(), cfg_get_focus_win());
+	focus_refresh();
+}
+
+static void show_focus(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (focus_ov || bright_ov || theme_ov || confirm || panel == NULL) {
+		return;
+	}
+	/* The panel's contents go first, as for Brightness (sub_closed_cb).
+	 * Then the styles: nothing refers to them once the old screen and
+	 * panel are gone. */
+	panel_empty();
+	focus_styles();
+
+	focus_ov = lv_obj_create(panel);
+	lv_obj_set_size(focus_ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(focus_ov, COL_BG, 0);
+	lv_obj_set_style_bg_opa(focus_ov, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(focus_ov, 0, 0);
+	lv_obj_set_style_radius(focus_ov, 0, 0);
+	lv_obj_set_style_pad_all(focus_ov, 0, 0);
+	lv_obj_clear_flag(focus_ov, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(focus_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(focus_ov, focus_gesture_cb, LV_EVENT_GESTURE, NULL);
+	lv_obj_center(focus_ov);
+
+	mk_back(focus_ov, focus_close_cb);
+
+	lv_obj_t *title = lv_label_create(focus_ov);
+
+	lv_label_set_text(title, "Focus");
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+	mk_line(focus_ov, 40);
+
+	for (int i = 0; i < FOCUS_CHOICES; i++) {
+		lv_obj_t *b = lv_btn_create(focus_ov);
+
+		/* The LVGL theme's default button styles come off first, so
+		 * the shared pair is the whole look. */
+		lv_obj_remove_style_all(b);
+		lv_obj_add_style(b, &focus_st_btn, 0);
+		lv_obj_add_style(b, &focus_st_on, LV_STATE_CHECKED);
+		lv_obj_set_size(b, FOCUS_BTN_W, FOCUS_BTN_H);
+		lv_obj_align(b, LV_ALIGN_TOP_LEFT,
+			     12 + i * (FOCUS_BTN_W + FOCUS_BTN_GAP), FOCUS_BTN_Y);
+		/* Not scrollable, or a drag is eaten as a scroll and the tap
+		 * never fires. Gestures BUBBLE, as from a theme tile: the three
+		 * buttons fill the middle of the screen, so most back swipes
+		 * start on one, and they must reach focus_gesture_cb to close
+		 * it. tile_was_a_tap() in focus_pick_cb keeps that swipe from
+		 * also choosing the button it started on. */
+		lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+		lv_obj_add_flag(b, LV_OBJ_FLAG_GESTURE_BUBBLE);
+		lv_obj_add_event_cb(b, focus_pick_cb, LV_EVENT_CLICKED,
+				    (void *)(intptr_t)i);
+
+		lv_obj_t *l = lv_label_create(b);
+
+		lv_label_set_text(l, focus_words[i]);
+		lv_obj_center(l);
+		focus_btn[i] = b;
+	}
+
+	focus_note = lv_label_create(focus_ov);
+	lv_obj_set_style_text_color(focus_note, COL_DIM, 0);
+	lv_obj_align(focus_note, LV_ALIGN_TOP_MID, 0, FOCUS_NOTE_Y);
+
+	focus_refresh();
+}
+
+/*
+ * The Brightness and Focus rows' taps. Deferred, like the Theme row's,
+ * because opening either empties the panel, the tapped row among it. A
+ * second tap before it runs queues a second open, which finds the screen
+ * already up and returns.
+ */
+static void bright_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	show_bright(NULL);
+}
+
+static void focus_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	show_focus(NULL);
+}
+
+static bool sub_can_open(void)
+{
+	/* !closing: since the tiles pass gestures up, a close latched by a
+	 * swipe is the common case, and an open queued in the one loop pass
+	 * before do_close would run against a panel being torn down. */
+	return theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
+	       confirm == NULL && !sub_closing && !closing;
+}
+
+static void bright_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	/* As the Theme row: a swipe that starts here is a swipe, not a tap. */
+	if (tile_was_a_tap() && sub_can_open()) {
+		lv_async_call(bright_open_cb, NULL);
+	}
+}
+
+static void focus_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (tile_was_a_tap() && sub_can_open()) {
+		lv_async_call(focus_open_cb, NULL);
+	}
+}
 
 static void build_panel(lv_obj_t *parent_scr);
 
@@ -1713,10 +3017,14 @@ static void build_panel(lv_obj_t *parent_scr);
  * repaint over the very gauge pixels the scroll is about to move away. */
 static void do_open(void (*pump)(void))
 {
+	/* The gauge screen's stretch ends here; see mem_stats.h. */
+	mem_stats_report("gauges");
 	ui_slide_begin();
 	/* The live screen, not one cached when the gesture landed. The cached
-	 * pointer outlived its object on the failed-join path, where
-	 * usage_view_deinit() deletes the gauge screen before provisioning. */
+	 * pointer outlived its object on the WiFi mode's failed-join path,
+	 * where usage_view_deinit() deleted the gauge screen before
+	 * provisioning. That path is gone (2026-10-27); asking the live
+	 * screen costs nothing and keeps the next such path safe. */
 	build_panel(lv_screen_active());
 	lv_obj_update_layout(panel);
 	ui_slide_freeze(false);
@@ -1733,6 +3041,8 @@ static void do_open(void (*pump)(void))
 	/* Gauges exit left, settings enters from the right. */
 	ui_slide_run(UI_SLIDE_LEFT, pump);
 	ui_anim_gesture_mute(250);	/* short tail past the input burst */
+	/* Built, slid in and drawn: the panel's own peak. */
+	mem_stats_report("settings");
 }
 
 /*
@@ -1820,6 +3130,9 @@ static void do_close(void (*pump)(void))
 		return;
 	}
 
+	/* Everything shown since "settings", the brightness screen included
+	 * when it was opened and closed in between. */
+	mem_stats_report("settings-close");
 	ui_slide_begin();
 	/* upd_timer deliberately survives the panel -- see upd_timer_cb. It is
 	 * created once in ui_settings_attach(). */
@@ -1830,9 +3143,14 @@ static void do_close(void (*pump)(void))
 	for (int i = 0; i < BRIGHT_STOPS; i++) {
 		seg[i] = NULL;
 	}
+	theme_ov = NULL;	/* these die with the panel too */
+	theme_grid = NULL;
+	theme_edit_lbl = NULL;
+	focus_forget();
 	lv_obj_del(panel);	/* deletes confirm and any overlay with it */
 	panel = NULL;
 	confirm = NULL;
+	rebuild_owed = false;	/* the next open is built in the theme */
 	bright_ov = NULL;
 	lv_obj_update_layout(lv_screen_active());
 	ui_slide_freeze(false);
@@ -1880,6 +3198,27 @@ bool ui_settings_busy(void)
 
 void ui_settings_service(void (*pump)(void))
 {
+	/*
+	 * Theme work an lv_async_call could not queue (the call allocates a
+	 * timer from the LVGL pool). The mode loop is not inside any LVGL
+	 * event, so here the two callbacks can simply run. Before this a
+	 * failed queue was ignored, and a theme change silently missed the
+	 * open panel until it was closed and opened again (fp/fix-fwlog
+	 * review, NICE-8). A rebuild still waits for the install confirm,
+	 * as rebuild_cb does, and is forgotten once the panel is gone, since
+	 * the next open is built in the theme anyway.
+	 */
+	if (rebuild_owed && confirm == NULL) {
+		if (panel == NULL) {
+			rebuild_owed = false;
+		} else if (!closing) {
+			rebuild_cb(NULL);	/* clears rebuild_owed */
+		}
+	}
+	if (repaint_top_owed) {
+		repaint_top_owed = false;
+		repaint_top_cb(NULL);
+	}
 	if (want_open && panel == NULL) {
 		want_open = false;
 		do_open(pump);
@@ -1923,7 +3262,8 @@ static void back_cb(lv_event_t *e)
 	 * one is unreachable while it is up -- but the extended touch area
 	 * reaches past the overlay's edge, and a press landing there must not
 	 * close the panel out from under it. */
-	if (confirm == NULL && bright_ov == NULL) {
+	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL &&
+	    focus_ov == NULL) {
 		close_panel();
 	}
 }
@@ -1931,14 +3271,110 @@ static void back_cb(lv_event_t *e)
 static void panel_gesture_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (confirm == NULL && bright_ov == NULL &&
+	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL &&
+	    focus_ov == NULL &&
 	    lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
 		close_panel();
 	}
 }
 
+/*
+ * Rebuild the open panel in the active theme, on the screen it is open on.
+ *
+ * Rebuilt, not restyled: unlike the gauge screen this panel holds no readings
+ * -- every label on it is computed when it is built -- so building it again
+ * IS the restyle, with none of the bookkeeping. Asynchronous because the most
+ * common caller is a tap on a theme tile, i.e. an event handler running on an
+ * object this deletes.
+ *
+ * Put off while a confirm dialog is up (the install prompt would vanish under
+ * the user's finger) until confirm_gone(), and skipped while the panel is
+ * closing, since the next open is built in the new theme anyway.
+ */
+static void rebuild_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	if (confirm != NULL && panel != NULL && !closing) {
+		rebuild_owed = true;	/* paid by confirm_gone() */
+		return;
+	}
+	if (panel == NULL || closing) {
+		return;
+	}
+	rebuild_owed = false;
+	bool theme_was_open = theme_ov != NULL;
+	bool bright_was_open = bright_ov != NULL;
+	bool focus_was_open = focus_ov != NULL;
+	lv_obj_t *scr = lv_obj_get_parent(panel);
+
+	upd_btn = NULL;
+	upd_lbl = NULL;
+	pct_lbl = NULL;
+	bright_big = NULL;
+	for (int i = 0; i < BRIGHT_STOPS; i++) {
+		seg[i] = NULL;
+	}
+	theme_ov = NULL;
+	theme_grid = NULL;
+	theme_edit_lbl = NULL;
+	bright_ov = NULL;
+	focus_forget();
+	lv_obj_del(panel);
+	panel = NULL;
+	build_panel(scr);
+	if (theme_was_open) {
+		show_theme(false);
+	} else if (bright_was_open) {
+		show_bright(NULL);
+	} else if (focus_was_open) {
+		show_focus(NULL);
+	}
+}
+
+/*
+ * The top layer, which outlives the panel and so is not rebuilt with it.
+ *
+ * What's new redraws its page into the same screen; the update prompt and the
+ * download screen are taken down and put back from the live OTA state by the
+ * functions that always put them up. The plain notice keeps its colours until
+ * it is dismissed: it holds text nothing here kept a copy of, and it is the
+ * one that is dismissed in a tap.
+ */
+static void repaint_top_cb(void *unused)
+{
+	struct ota_ui snap;
+
+	ARG_UNUSED(unused);
+	if (wn) {
+		lv_obj_set_style_bg_color(wn, COL_BG, 0);
+		wn_draw();
+	}
+	if (upd_prompt) {
+		ota_ui_get(&snap);
+		upd_prompt_close();
+		upd_prompt_draw(&snap);	/* a repaint, not a new offer */
+	}
+	if (dl_overlay) {
+		dl_overlay_hide();
+		upd_timer_cb(NULL);	/* the state that showed it shows it again */
+	}
+}
+
+void ui_settings_apply_theme(void)
+{
+	/* A queue that fails leaves the work owed to ui_settings_service(). */
+	if (panel != NULL && lv_async_call(rebuild_cb, NULL) != LV_RESULT_OK) {
+		rebuild_owed = true;
+	}
+	if ((wn || upd_prompt || dl_overlay) &&
+	    lv_async_call(repaint_top_cb, NULL) != LV_RESULT_OK) {
+		repaint_top_owed = true;
+	}
+}
+
 static void build_panel(lv_obj_t *parent_scr)
 {
+	row_styles();
 	panel = lv_obj_create(parent_scr);
 	lv_obj_set_size(panel, LV_PCT(100), LV_PCT(100));
 	lv_obj_set_style_bg_color(panel, COL_BG, 0);
@@ -1960,323 +3396,24 @@ static void build_panel(lv_obj_t *parent_scr)
 	 * screen moves under it, in ui_slide_run(). */
 	lv_obj_set_pos(panel, 0, 0);
 
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-	/* --- Header: green edge seam + back chevron + title + rule. The
-	 * chevron used to be a full-height LEFT_MID button that the reset tiles
-	 * kept covering; it now lives in the top bar (still a left-edge cue via
-	 * the seam). Tap or swipe-right both go home. */
-	lv_obj_t *seam = lv_obj_create(panel);
-
-	lv_obj_set_size(seam, 3, 30);
-	lv_obj_align(seam, LV_ALIGN_TOP_LEFT, 0, 0);
-	lv_obj_set_style_bg_color(seam, COL_GREEN, 0);
-	lv_obj_set_style_bg_opa(seam, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_width(seam, 0, 0);
-	lv_obj_set_style_radius(seam, 0, 0);
-	lv_obj_clear_flag(seam, LV_OBJ_FLAG_SCROLLABLE);
-
-	lv_obj_t *back = lv_btn_create(panel);
-
-	/* Drawn narrow and short (x 2..42, y 2..28), no gesture-bubble: it used
-	 * to be 48 wide and sat right on top of the brightness "-" stepper, so a
-	 * high tap on "-" hit the chevron and bounced you home (user-reported
-	 * 2026-07-20). The steppers below start at y=39 -- an 11px gap. */
-	lv_obj_set_size(back, 40, 26);
-	lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_shadow_width(back, 0, 0);
-	lv_obj_align(back, LV_ALIGN_TOP_LEFT, 2, 2);
-	/* Gestures MUST bubble from here. The extended touch area below covers
-	 * the green seam and a strip of bare panel, and whatever the hit test
-	 * lands on becomes the gesture's origin -- so with bubbling off, a
-	 * swipe-right starting anywhere in that region died on this button
-	 * instead of reaching panel_gesture_cb, silently un-closing ~814 px of
-	 * a panel whose own seam comment promises the swipe works.
-	 * close_panel() is idempotent (its `closing` guard), so a release that
-	 * also fires back_cb costs nothing. */
-	lv_obj_add_flag(back, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	/*
-	 * 40x26 is too small to hit reliably on a resistive panel that already
-	 * needs 16 averaged reads per report -- reported as "not really
-	 * clickable" 2026-07-27. Grow the TOUCH area without growing the drawn
-	 * button: the chevron stays visually where it belongs in the top bar,
-	 * but answers to a region 12 px larger on every side. That is 64x50 nominally;
-	 * 10 px of it falls off the top and left edges of the screen, so the reachable
-	 * area is 54x40.
-	 *
-	 * Safe against the 2026-07-20 regression even though the extended area
-	 * now reaches into the stepper row: lv_indev hit-tests children last to
-	 * first and takes the first hit, and "minus" is created after this, so
-	 * it wins wherever the two overlap. Keep it that way -- moving this
-	 * button's creation below the steppers would silently restore the bug.
-	 */
-	lv_obj_set_ext_click_area(back, 12);
-	lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
-
-	lv_obj_t *bl = lv_label_create(back);
-
-	lv_label_set_text(bl, LV_SYMBOL_LEFT);
-	lv_obj_set_style_text_color(bl, COL_DIM, 0);
-	lv_obj_center(bl);
-
-	lv_obj_t *title = lv_label_create(panel);
-
-	lv_label_set_text(title, "Settings");
-	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
-	lv_obj_set_style_text_color(title, COL_TEXT, 0);
-	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
-
-	mk_line(panel, 30);
-
-	/* --- Brightness: card, big opposite-corner steppers, and a stacked
-	 * "Brightness / 70%" readout. The pips are gone -- the number already
-	 * says the level (user-reported the panel was too crowded). --- */
-	mk_card(panel, 12, 34, 296, 50);
-
-	/* Wide steppers filling the row to a 4px edge inset (minus x16..104, plus
-	 * x216..304), leaving ~112px in the centre for the value/label. Centred
-	 * in the 50px card (y39..79): the card runs y34..84, a 5px margin top and
-	 * bottom. The back chevron ends at y28, so the 11px gap keeps a high tap
-	 * on "-" off it even at the left edge. */
-	lv_obj_t *minus = mk_btn(panel, LV_SYMBOL_MINUS, COL_TRACK,
-				 bright_step_cb, (void *)(intptr_t)-1);
-	lv_obj_set_size(minus, 88, 40);
-	lv_obj_set_style_radius(minus, 8, 0);
-	lv_obj_align(minus, LV_ALIGN_TOP_LEFT, 16, 39);
-
-	lv_obj_t *plus = mk_btn(panel, LV_SYMBOL_PLUS, COL_TRACK,
-				bright_step_cb, (void *)(intptr_t)1);
-	lv_obj_set_size(plus, 88, 40);
-	lv_obj_set_style_radius(plus, 8, 0);
-	lv_obj_align(plus, LV_ALIGN_TOP_RIGHT, -16, 39);
-
-	lv_obj_t *blab = lv_label_create(panel);
-
-	lv_label_set_text(blab, "Brightness");
-	lv_obj_set_style_text_color(blab, COL_DIM, 0);
-	lv_obj_align(blab, LV_ALIGN_TOP_MID, 0, 40);
-
-	pct_lbl = lv_label_create(panel);
-	lv_obj_set_style_text_font(pct_lbl, &lv_font_montserrat_20, 0);
-	lv_obj_set_style_text_color(pct_lbl, COL_TEXT, 0);
-	lv_obj_align(pct_lbl, LV_ALIGN_TOP_MID, 0, 56);
-	bright_refresh();
-
-	/* --- Software update: its own row directly under brightness, fenced
-	 * by rules so it never reads as a fourth reset action --- */
-	mk_line(panel, 89);
-
-	upd_btn = lv_btn_create(panel);
-	lv_obj_set_size(upd_btn, 296, 30);
-	lv_obj_align(upd_btn, LV_ALIGN_TOP_LEFT, 12, 94);
-	lv_obj_set_style_bg_color(upd_btn, COL_PANEL, 0);
-	lv_obj_set_style_bg_opa(upd_btn, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(upd_btn, COL_TRACK, 0);
-	lv_obj_set_style_border_width(upd_btn, 1, 0);
-	lv_obj_set_style_radius(upd_btn, 9, 0);
-	lv_obj_set_style_shadow_width(upd_btn, 0, 0);
-	lv_obj_set_style_pad_all(upd_btn, 0, 0);
-	/* Same as the other controls: don't scroll its (wide) contents and don't
-	 * bubble drift-gestures into a close. A horizontal drag on a SCROLLABLE
-	 * button gets eaten as a scroll and the tap never fires -- that is why
-	 * this row felt dead (user-reported 2026-07-20). */
-	lv_obj_clear_flag(upd_btn, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(upd_btn, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	lv_obj_add_event_cb(upd_btn, upd_cb, LV_EVENT_CLICKED, NULL);
-
-	lv_obj_t *swl = lv_label_create(upd_btn);
-
-	lv_label_set_text(swl, "Software update");
-	lv_obj_set_style_text_color(swl, COL_TEXT, 0);
-	lv_obj_align(swl, LV_ALIGN_LEFT_MID, 12, 0);
-
-	lv_obj_t *swchev = lv_label_create(upd_btn);
-
-	lv_label_set_text(swchev, LV_SYMBOL_RIGHT);
-	lv_obj_set_style_text_color(swchev, COL_DIM, 0);
-	lv_obj_align(swchev, LV_ALIGN_RIGHT_MID, -10, 0);
-
-	/* The right-hand label IS the OTA state readout (driven by
-	 * upd_timer_cb); "Software update" on the left never changes. */
-	upd_lbl = lv_label_create(upd_btn);
-	lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
-	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -26, 0);
-
-	upd_timer_cb(NULL);	/* correct the row before the first tick */
-
-	/* --- Reset actions --- */
-	mk_line(panel, 129);
-
-	static const char *const acticon[] = {
-		[ACT_WIFI] = LV_SYMBOL_WIFI,
-		[ACT_SIGNIN] = LV_SYMBOL_REFRESH,
-		[ACT_FACTORY] = LV_SYMBOL_TRASH,
-	};
-
-	/* (already inside the WiFi-only branch that opens above) */
-	/* Three actions: a centred heading over a row of three tiles.
-	 *
-	 * The labels are one word each because three of them share 296 px; the
-	 * single-action layout below has the room to say "Factory reset" in
-	 * full, and does. */
-	static const char *const acttext[] = {
-		[ACT_WIFI] = "Wi-Fi",
-		[ACT_SIGNIN] = "Sign-in",
-		[ACT_FACTORY] = "Factory",
-	};
-
-	lv_obj_t *rlab = lv_label_create(panel);
-
-	lv_label_set_text(rlab, "RESET");
-	lv_obj_set_style_text_color(rlab, COL_DIM, 0);
-	lv_obj_set_style_text_letter_space(rlab, 2, 0);
-	lv_obj_align(rlab, LV_ALIGN_TOP_MID, 0, 134);
-
-	static const enum action acts[] = { ACT_WIFI, ACT_SIGNIN, ACT_FACTORY };
-	static const int tilex[] = { 12, 114, 216 };
-
-	/* ARRAY_SIZE, not a literal 3. It WAS a literal, and when this build
-	 * stopped shipping the radio the arrays shrank to one entry while the
-	 * loop kept running three times -- reading acts[1..2] and tilex[1..2]
-	 * off the end, using the garbage as an index into acticon/acttext, and
-	 * handing whatever pointer came back to lv_label_set_text. Two extra
-	 * tiles in junk positions with junk labels, which is what "the settings
-	 * page looks weird" turned out to be. */
-	for (unsigned int i = 0; i < ARRAY_SIZE(acts); i++) {
-		enum action a = acts[i];
-		bool danger = a == ACT_FACTORY;
-		lv_obj_t *tile = lv_btn_create(panel);
-		lv_color_t fg = danger ? COL_RED : COL_TEXT;
-
-		lv_obj_set_size(tile, 92, 58);
-		lv_obj_set_style_bg_color(tile,
-			danger ? COL_DANGER_BG : COL_PANEL, 0);
-		lv_obj_set_style_border_color(tile,
-			danger ? COL_DANGER_BD : COL_TRACK, 0);
-		lv_obj_set_style_border_width(tile, 1, 0);
-		lv_obj_set_style_radius(tile, 12, 0);
-		lv_obj_set_style_shadow_width(tile, 0, 0);
-		/* Zero the theme's button padding: it shrank the 58px content box
-		 * until the icon (top) and label (bottom) overprinted each other
-		 * (user-reported 2026-07-20). And no gesture-bubble -> a drift on
-		 * a tile can't close the panel. */
-		lv_obj_set_style_pad_all(tile, 0, 0);
-		lv_obj_clear_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
-		lv_obj_align(tile, LV_ALIGN_TOP_LEFT, tilex[i], 152);
-		lv_obj_add_event_cb(tile, act_cb, LV_EVENT_CLICKED,
-				    (void *)(intptr_t)a);
-
-		lv_obj_t *ic = lv_label_create(tile);
-
-		lv_label_set_text(ic, acticon[a]);
-		lv_obj_set_style_text_color(ic, fg, 0);
-		lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 8);
-
-		lv_obj_t *tx = lv_label_create(tile);
-
-		lv_label_set_text(tx, acttext[a]);
-		lv_obj_set_style_text_color(tx, fg, 0);
-		lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -8);
-	}
-
-	/* Debug-me line: build + network, answered without a serial cable
-	 * (which would reset the board). IP dropped at the user's request
-	 * (2026-07-20); the SSID gets more room, capped so it can't overrun. */
-	char line[56];
-	/* (already inside the WiFi-only branch that opens above) */
-	char ip[16], ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
-
-	/* (already inside the WiFi-only branch that opens above) */
-	if (net_wifi_sta_ip(ip, sizeof(ip)) &&
-	    cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk))) {
-		char ssid_a[CFG_SSID_MAX];
-
-		fmt_ascii(ssid, ssid_a, sizeof(ssid_a));
-		snprintf(line, sizeof(line), "Blink %s  |  %.20s",
-			 BLINK_FW_VERSION, ssid_a);
-	} else
-	{
-		/* Both halves when the daemon has introduced itself: they ship
-		 * from one tag, so the useful support question is which of the
-		 * two is behind -- and the version of the half running on the
-		 * customer's computer is otherwise invisible from here.
-		 *
-		 * Nested rather than chained onto the #if'd branch above: that
-		 * `else` only exists in a WiFi build, and an `else if` here
-		 * left the USB build with an else and no if. */
-		if (proto_host_version()[0]) {
-			snprintf(line, sizeof(line), "Blink %s  |  App %s",
-				 BLINK_FW_VERSION, proto_host_version());
-		} else {
-			snprintf(line, sizeof(line), "Blink %s",
-				 BLINK_FW_VERSION);
-		}
-	}
-
-	lv_obj_t *info = lv_label_create(panel);
-
-	lv_label_set_text(info, line);
-	lv_obj_set_style_text_color(info, COL_DIM, 0);
-	/* One line, dotted if it would run wider than the screen. Narrower than
-	 * the screen so the dots land inside the right edge, not on it. */
-	lv_obj_set_size(info, 296, 17);
-	lv_label_set_long_mode(info, LV_LABEL_LONG_DOT);
-	lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -2);
-#else
-	/*
-	 * Two rows and nothing else.
-	 *
-	 * The panel is 240 px tall and a fingertip covers about 9 mm, which is
-	 * 51 px at this panel's 5.62 px/mm. Take 40 for the title bar and 200
-	 * is left. There were three rows at 56 px (10.0 mm) while a "Reset to
-	 * defaults" row existed; it does not any more, because in this build
-	 * the only thing it reset was brightness -- and the row directly above
-	 * it sets brightness without a reboot.
-	 *
-	 * The freed height goes into the two that remain rather than being
-	 * left as a hole under them: 72 px each, 12.8 mm, with 24 px of margin
-	 * above and below the pair so it reads as centred instead of
-	 * top-aligned with something missing.
-	 *
-	 * What this replaces was measured and did not pass: 30 px rows are
-	 * 5.3 mm, sitting 5 px apart, so one press covered both and which one
-	 * fired came down to where the pressure centroid landed.
-	 */
 /*
- * 56 px is 10.0 mm against a ~9 mm fingertip -- the smallest a row can be and
- * still be pressed on purpose rather than on average.
- *
- * TWO rows now, brightness and software update: the main-source row went when
- * the providers got a page each. The height it freed is not redistributed. It
- * goes to the footer, which is the version pair and the one instruction this
- * device needs to give -- both of them things you read rather than press, and
- * neither of which belongs inside a button.
- */
-#define ROW_H 56
-#define ROW_TOP 56		/* first row, clear of the title rule at y=40 */
-#define ROW_GAP 8
-
-/*
- * The footer: two centred lines under the last row, on the panel itself.
+ * The footer: two centred lines under the tiles, on the panel itself.
  *
  * The version pair used to be the update row's subtitle, which put a fact
  * inside a control -- so reading the version meant looking at a button, and
- * the button's own state ("Update ready") had to be squeezed in beside it,
- * right-aligned and clear of a chevron. Separating them gives the button one
- * job and the footer room for the second line, which is the thing an update
- * actually needs someone to know.
+ * the button's own state ("Install 1.4.0") had to be squeezed in beside it.
+ * Separating them gives the button one job and the footer room for the
+ * second line, which is the thing an update actually needs someone to know.
  */
-#define FOOT_Y1 192
-#define FOOT_Y2 212
+#define FOOT_Y1 (TILE_TOP + 2 * TILE_H + TILE_GAP + 5)
+#define FOOT_Y2 (FOOT_Y1 + 18)
 
 /*
- * Two rows and a two-line footer, inside 240. Checked here rather than
- * eyeballed, because the last time these moved a row went off the bottom of a
- * 240 px screen and nobody noticed until it was flashed. FONT_LINE_H is 16 for
- * the default montserrat_14, so the second line ends at 228.
+ * Four tiles and a two-line footer, inside 240. Checked here rather than
+ * eyeballed, because a row once went off the bottom of a 240 px screen and
+ * nobody noticed until it was flashed. FONT_LINE_H is 16 for the default
+ * montserrat_14, so the second line ends at 235.
  */
-BUILD_ASSERT(ROW_TOP + 2 * ROW_H + ROW_GAP <= FOOT_Y1,
-	     "the settings rows now overlap the footer");
 BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 	     "the settings footer no longer fits on the panel");
 	/* No green edge seam here. It existed as a left-edge cue back when the
@@ -2297,30 +3434,24 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 
 	char sub[56];
 
-	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
-	mk_row(panel, ROW_TOP, ROW_H, "Brightness", sub, false, show_bright, NULL,
-	       &pct_lbl);
-
 	/*
-	 * Both versions live here, on the row that is already about versions.
+	 * Four tiles, two by two (see mk_tile). There is no room for a third
+	 * pair: the tiles and the two-line footer use the 240 px between them
+	 * (the BUILD_ASSERT above), and a fifth control would have to take
+	 * height from all four.
 	 *
-	 * There is no footer left to put them in -- the two rows and their
-	 * margins use the height -- and a footer was the wrong home anyway: someone
-	 * looking for a version number is already on their way to this row. It
-	 * is also the only place on the device that can say which HALF of the
-	 * pair is behind, since the app's version is otherwise invisible from
-	 * the panel.
+	 * The update tile's state is set by upd_timer_cb() at the end of this,
+	 * so it starts empty -- and laid out bare -- like the row before it.
 	 */
-	upd_btn = mk_row(panel, ROW_TOP + (ROW_H + ROW_GAP), ROW_H,
-			 "Software update", NULL,
-			 false, upd_cb, NULL, NULL);
-
-	/* The row's state, beside the row's name. Right-aligned clear of the
-	 * chevron so it can grow to "Install 0.6.1" without colliding, and on
-	 * the middle now that there is no second line to sit above. */
-	upd_lbl = lv_label_create(upd_btn);
-	lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
-	lv_obj_align(upd_lbl, LV_ALIGN_RIGHT_MID, -34, 0);
+	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
+	mk_tile(panel, 0, &settings_icon_bright, "Brightness", sub,
+		bright_row_cb, &pct_lbl);
+	mk_tile(panel, 1, &settings_icon_theme, "Theme",
+		theme_name(theme_active_id()), theme_row_cb, NULL);
+	mk_tile(panel, 2, &settings_icon_focus, "Focus", focus_name(),
+		focus_row_cb, &focus_sub);
+	upd_btn = mk_tile(panel, 3, &settings_icon_update, "Update", "",
+			  upd_cb, &upd_lbl);
 
 	/*
 	 * Both versions, on the panel rather than in the button.
@@ -2357,9 +3488,6 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 	lv_obj_align(keep, LV_ALIGN_TOP_MID, 0, FOOT_Y2);
 
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
-
-#endif
-
 }
 
 /*
@@ -2450,6 +3578,23 @@ static void swipe_cb(enum ui_swipe_dir dir)
 	}
 	if (ui_anim_gesture_muted()) {
 		return;	/* the swipe that just closed the clip, replayed */
+	}
+	/*
+	 * And nothing at all while the clip is up. ui_anim_run() holds the mode
+	 * loop but keeps LVGL's timers running, so this drain fires for strokes
+	 * made ON the clip, and the mute above covers only its first ~1.25 s.
+	 * After that, the left stroke that leaves the clip also latched
+	 * want_open here whenever ui_swipe decided it (at 36 px, on the input
+	 * thread) before LVGL's lagging gesture ended the clip, and Settings
+	 * opened by itself the moment the gauges came back. The host harness
+	 * hit it on most runs of full_touch's eye.exit (review of
+	 * fp/audit-fixes, SHOULD-2, 2026-10-28); a board run happened to win
+	 * the race. An up or down stroke on the clip, which the clip ignores,
+	 * latched a page change the same way, held until the clip was left.
+	 * The clip has its own exit, and owns every stroke made on it.
+	 */
+	if (ui_anim_showing()) {
+		return;
 	}
 	if (dir == UI_SWIPE_LEFT) {
 		/* Not off the CONNECTING screen. A swipe is the ACCIDENTAL
@@ -2543,12 +3688,15 @@ static void swipe_cb(enum ui_swipe_dir dir)
  * "the settings gesture is dead the whole time we're waiting for a host"
  * would not happen -- that is now the behaviour we want for swipes.
  *
- * This tap is NOT blocked, and that is deliberate. Blocking both would strand
- * the board: a WiFi join that succeeds while the fetch never does leaves the
+ * This tap is NOT blocked. It was kept as the escape hatch for the standalone
+ * WiFi mode: a WiFi join that succeeded while the fetch never did left the
  * bar up indefinitely with have_data false, and with no way into settings
- * there is no way to sign out or change network short of a power cycle. A tap
- * on the edge chevron is a deliberate act rather than an accidental one, so it
- * stays as the escape hatch.
+ * there was no way to sign out or change network short of a power cycle.
+ * That mode was removed on 2026-10-27, which leaves the tap with a weaker
+ * reason -- the software-update row and the version are still worth reaching
+ * from a board that is waiting -- and it was left alone rather than
+ * re-decided, because the removal was meant to change no shipped byte. A tap
+ * on the edge chevron is a deliberate act rather than an accidental one.
  */
 /*
  * A tap on an edge zone -- but only if it was a tap.
@@ -2752,3 +3900,29 @@ void ui_settings_attach(lv_obj_t *scr)
 		upd_timer = lv_timer_create(upd_timer_cb, 250, NULL);
 	}
 }
+
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+void ui_settings_bench_notice_is(const char *kind)
+{
+	bench_nt = notice ? kind : NULL;
+}
+
+/* The bench injector's view of this file; see ui_settings.h. The sub-screen
+ * and the modal are named in the order they cover each other. */
+void ui_settings_bench_state(struct ui_settings_bench *out)
+{
+	out->nt = notice == NULL ? "none" : bench_nt ? bench_nt : "other";
+	out->open = panel != NULL;
+	out->sub = confirm ? "confirm" : bright_ov ? "brightness" :
+		   theme_ov ? "theme" : focus_ov ? "focus" : "none";
+	out->modal = wn ? "whatsnew" : dl_overlay ? "download" :
+		     upd_prompt ? "prompt" : notice ? "notice" : "none";
+	out->busy = want_open || want_close || want_page != 0 || closing ||
+		    sub_closing || theme_closing;
+	out->theme_page = theme_page;
+	out->edit = edit_note == edit_holding ? "held" :
+		    edit_note == edit_waiting ? "waiting" :
+		    edit_note == edit_opened ? "opened" :
+		    edit_note == edit_run ? "run" : "name";
+}
+#endif

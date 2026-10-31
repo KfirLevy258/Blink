@@ -54,13 +54,26 @@ void usage_view_tick_1s(void);
  * shown wrong). */
 void usage_view_set_clock(int hh, int mm);
 
+/* Repaint the gauge screen in the active theme (theme.h), keeping every
+ * reading on it. A no-op before usage_view_init(). */
+void usage_view_apply_theme(void);
+
+/*
+ * Focus mode: one window as a big gauge (weekly = false: the session window)
+ * and the other as a dim line under it; off is the two-gauge screen. Takes
+ * effect in place, keeping every reading, and may be called before
+ * usage_view_init() -- the choice outlives the screen, so a rebuilt screen
+ * comes up in it. Storage is the caller's (cfg_store); this file only draws.
+ */
+void usage_view_set_focus(bool on, bool weekly);
+
 /*
  * Boot progress: one CONNECTING takeover with a segmented bar that fills
- * green, current step named below. Both modes wear the same screen -- only
- * the step list differs (USB: link daemon / first push; WiFi: join / sign
- * in / first fetch). Call _begin once with the mode's steps (max 3), then
- * _stage as the worker advances. Segments before `stage` render as done,
- * `stage` pulses, the rest stay dim; stage == n means "Ready".
+ * green, current step named below. Call _begin once with the steps (max 3;
+ * the USB list is link daemon / first push, and the three-step room was for
+ * the WiFi mode removed on 2026-10-27), then _stage as the worker advances.
+ * Segments before `stage` render as done, `stage` pulses, the rest stay dim;
+ * stage == n means "Ready".
  */
 void usage_view_boot_begin(const char *const *steps, int nsteps);
 void usage_view_boot_stage(int stage);
@@ -257,5 +270,19 @@ void usage_view_set_provider1_stale(bool stale);
 void usage_view_set_provider2(const char *tag, double session_pct,
 			      double weekly_pct, int32_t session_resets_in_s,
 			      int32_t weekly_resets_in_s, bool stale);
+
+/*
+ * svc_state.c has heard a new `svc` message; redraw the line under the brand.
+ * The level itself is read from svc_state for whichever provider the page on
+ * screen belongs to, so this takes no arguments -- the view never holds a
+ * copy that could disagree with it.
+ */
+void usage_view_svc_changed(void);
+
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+/* Bench builds only: the Focus layout the gauge screen is drawing,
+ * "off" | "session" | "weekly", from its own state rather than the store. */
+const char *usage_view_bench_focus(void);
+#endif
 
 #endif /* USAGE_VIEW_H */

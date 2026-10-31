@@ -66,7 +66,11 @@ this.
 - **A page per provider.** Claude and Codex each get their own screen. Swipe to switch; the needles move from one reading to the other.
 - **It sleeps when your computer does.** About thirty seconds after the computer stops answering, the screen closes its eyes and dozes; it opens them the moment the computer is back. A tap while it sleeps shows the last figures.
 - **Claude Desktop too.** With Desktop alone the dials show percentages, a five-hour countdown whenever Desktop is holding a reset time, and a weekly countdown once one has been learned. Desktop keeps that reset time only while a window is running and clears it in between, so the countdown comes and goes; the fill rate covers the gaps. The dials follow Desktop's own refresh - about every 5 minutes while you are using it, up to 15 when it sits idle - where Claude Code updates them live.
-- **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, no network, nothing sent anywhere.
+- **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, and nothing about you sent anywhere. The one optional extra, status-page alerts, reads the public status pages and is off until you turn it on.
+- **Themes.** Twelve built in, three of them light for a bright room, and one of your own: seven colours, arc width and ends, made in a builder that opens in your browser from the board's own Settings (or `blink theme`) and previews on the panel as you edit. A custom theme travels as a short share code.
+- **Focus.** One window big instead of two - session or weekly - with the other kept as a line under it.
+- **Settings on the board.** Brightness, Theme, Focus and Update, four tiles on the screen beside the dials.
+- **Status pages, per provider.** Optional: each provider's page says when that provider's own service is having trouble, so you know it is not your machine.
 - **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
 - **Cheap, open hardware.** An ESP32 "Cheap Yellow Display" (~$12) and a 3D-printed case.
 - **Company units.** A unit built for a company shows its logo - a still or a short clip - after the boot animation, written once at the factory.
@@ -159,7 +163,7 @@ For Claude Desktop, the app learns usage by reading Claude Desktop's own local f
 
 ## Privacy
 
-BLINK never sees a credential and never sends anything anywhere. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`. The device holds no token: nothing to leak, nothing to revoke if you lend it.
+BLINK never sees a credential and never sends your usage or your sessions anywhere. If you turn on status-page alerts (`blink config status-page on`), it reads status.claude.com, and status.openai.com for a Codex page, every 5 minutes, with nothing of yours attached. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`. The device holds no token: nothing to leak, nothing to revoke if you lend it.
 
 ## Building units
 
@@ -171,7 +175,7 @@ BLINK never sees a credential and never sends anything anywhere. It keeps the la
 - **[firmware/README.md](firmware/README.md)** - building, flashing and signing the firmware yourself
 - **[docs/multi-provider.md](docs/multi-provider.md)** - how two sources are merged into one reading
 - **[docs/windows-check.md](docs/windows-check.md)** - the ten-minute check a Windows release needs a person for
-- **[docs/fleet-testing.md](docs/fleet-testing.md)** - the one command that proves a release on three real desks and three real boards, and what a green run does and does not prove
+- **[docs/fleet-testing.md](docs/fleet-testing.md)** - the one command that proves a release on three real desks and three real boards, the narrower VM fleet that can stand in for them, and what a green run does and does not prove
 
 <div align="center">
 <sub>Firmware: Zephyr, C. App: Python, one binary.</sub>&nbsp;<br>

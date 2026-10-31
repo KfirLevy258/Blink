@@ -16,6 +16,8 @@ import subprocess
 import pytest
 
 from pc import cli
+from tests.support.home import inside
+from tests.support.process import as_checkout, as_frozen
 
 
 class _Runs:
@@ -40,7 +42,24 @@ class _Runs:
         self._running = running
         self._dump = dump
 
+    _gone = False
+
     def __call__(self, argv, **kw):
+        # launchd forgets a job once a bootout it accepted has finished, and
+        # `print` then exits 113 until the next bootstrap. install() waits on
+        # exactly that before it bootstraps again (the old instance may be
+        # inside its stop grace), so the stand-in models it, without taking
+        # one of the exit codes a test queued for the commands it lists.
+        if len(argv) > 1 and argv[1] == "bootout":
+            self._gone = True
+        elif len(argv) > 1 and argv[1] == "bootstrap":
+            self._gone = False
+        elif len(argv) > 1 and argv[1] == "print" and self._gone:
+            self.calls.append(list(argv))
+            if hasattr(self, "kwargs"):
+                self.kwargs.append(kw)
+            return subprocess.CompletedProcess(argv, 113, stdout="",
+                                               stderr="")
         self.calls.append(list(argv))
         code = self._codes.pop(0) if self._codes else 0
         out = ""
@@ -95,21 +114,34 @@ def _runs(monkeypatch, codes=None, stderr="", running=True, dump=None):
     return r
 
 
-def _recorded_pid(pid=4242):
+def _recorded_pid(home, pid=4242):
     """The pid the daemon writes for itself at startup, ~/.blink/bridge.pid.
 
     Windows health is read from this file (see _SchtasksBackend._is_running),
     so a test that wants a live daemon has to leave one the way a live daemon
     would -- and a test that wants a dead one simply does not.
+
+    `home` is the caller's, and the path must lie inside it
+    (tests/support/home.py): from a script with the real HOME this would
+    otherwise overwrite the live daemon's pid file, which on Windows is what
+    the health check and `taskkill /pid` act on.
     """
-    os.makedirs(cli.blink_home(), exist_ok=True)
-    with open(cli.pid_path(), "w", encoding="utf-8") as f:
+    path = inside(home, cli.pid_path())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         f.write(str(pid))
     return pid
 
 
 def _platform(monkeypatch, name):
     monkeypatch.setattr(cli.sys, "platform", name)
+    if name == "win32":
+        # Windows is the frozen binary or nothing: the task's launcher names
+        # ~\.blink\bin\blink.exe, so a checkout registers no task at all
+        # (_SchtasksBackend.checkout_refusal). These tests are about the
+        # task, so they run as the build that registers one; the checkout
+        # case has its own tests below.
+        as_frozen(monkeypatch)
 
 
 # ------------------------------------------------------------------ choice --
@@ -149,13 +181,16 @@ def test_launchd_install_writes_the_plist_and_bootstraps(home, monkeypatch):
     assert "<key>Label</key><string>com.blink.bridge</string>" in plist
     assert "<key>KeepAlive</key><true/>" in plist
     assert cli.log_path() in plist
-    # bootout must come first, or bootstrap fails on "already loaded".
+    # bootout must come first, or bootstrap fails on "already loaded";
+    # then the old job is seen to have gone before the bootstrap.
     assert r.calls[0][:2] == ["launchctl", "bootout"]
-    assert r.calls[1][:2] == ["launchctl", "bootstrap"]
-    assert r.calls[1][2] == "gui/501"
-    # And STARTED, not merely registered. bootstrap accepts the job; it does
-    # not run it, and on a bootout/bootstrap cycle it routinely does not.
+    assert r.calls[1][:2] == ["launchctl", "print"]
+    assert r.calls[2][:2] == ["launchctl", "bootstrap"]
+    assert r.calls[2][2] == "gui/501"
+    # And STARTED, not merely registered: a plain kickstart, which starts an
+    # idle job and leaves a running one be.
     assert r.ran("launchctl", "kickstart", "gui/501/com.blink.bridge")
+    assert not r.ran("kickstart", "-k")
 
 
 def test_launchd_install_retries_bootstrap(home, monkeypatch):
@@ -204,7 +239,7 @@ def test_launchd_install_will_not_claim_running_when_it_is_not(home, monkeypatch
     assert "running (launchd)" != msg
     assert "not running" in msg
     # And it has to be a command someone can paste, like its sibling above.
-    assert "launchctl kickstart -k gui/501/com.blink.bridge" in msg
+    assert "launchctl kickstart gui/501/com.blink.bridge" in msg
 
 
 def test_launchd_remove_boots_out_and_deletes_the_plist(home, monkeypatch):
@@ -312,7 +347,7 @@ def test_launchd_restart_reports_a_kickstart_that_failed(home, monkeypatch):
 def test_schtasks_install_registers_at_logon_then_starts_it(home, monkeypatch):
     _platform(monkeypatch, "win32")
     r = _runs(monkeypatch)
-    pid = _recorded_pid()
+    pid = _recorded_pid(home)
 
     assert cli.backend().install() == "running (Scheduled Task)"
     create = r.calls[0]
@@ -376,7 +411,7 @@ def test_schtasks_install_does_not_believe_a_dead_recorded_pid(home, monkeypatch
     corpse of the one before it as a success.
     """
     _platform(monkeypatch, "win32")
-    _recorded_pid(4242)
+    _recorded_pid(home, 4242)
     _runs(monkeypatch, running=False)      # tasklist finds no such process
 
     assert "not running" in cli.backend().install()
@@ -420,7 +455,7 @@ def test_schtasks_install_falls_back_when_windows_refuses_the_task(
     _platform(monkeypatch, "win32")
     _runs(monkeypatch, codes=[1], stderr="ERROR: Access is denied.\n")
     written = _autostart(monkeypatch)
-    _recorded_pid()
+    _recorded_pid(home)
 
     msg = cli.backend().install()
     assert msg == "running (starts when you log in)"
@@ -496,7 +531,7 @@ def test_schtasks_restart_starts_the_launcher_when_there_is_no_task(
     _runs(monkeypatch, codes=[0, 1])       # /end ok, /run fails: no such task
     written = _autostart(monkeypatch, present=True)
     monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda: None)
-    _recorded_pid()
+    _recorded_pid(home)
 
     assert cli.backend().restart() == "restarted"
     assert "start" in written
@@ -553,7 +588,7 @@ def test_schtasks_restart_kills_the_detached_successor(home, monkeypatch):
     killed = []
     monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda: killed.append("pid"))
 
-    _recorded_pid()
+    _recorded_pid(home)
 
     assert cli.backend().restart() == "restarted"
     assert killed == ["pid"]
@@ -760,7 +795,7 @@ class TestLinuxWithoutSystemd:
         r = _runs(monkeypatch)
         msg = cli.backend().install()
         assert "no systemd here" in msg
-        assert cli.installed_bin() in msg          # what to run by hand
+        assert cli.command_to_type() in msg           # what to run by hand
         assert os.path.exists(cli.unit_path())
         assert r.calls == []                       # nothing was invoked
 
@@ -780,6 +815,475 @@ class TestLinuxWithoutSystemd:
         _runs(monkeypatch)
         assert cli.backend().restart() == (
             "not running under a supervisor; restart it yourself")
+
+
+def _windows_checkout(monkeypatch):
+    _platform(monkeypatch, "win32")
+    as_checkout(monkeypatch)
+
+
+def _write_launcher(home):
+    """The launcher a frozen Windows install leaves, inside `home` only."""
+    path = inside(home, cli.launcher_path())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="ascii") as f:
+        f.write(cli.LAUNCHER_VBS)
+
+
+def _make_binary(home):
+    """An empty installed program, inside `home` only: from a real home this
+    would truncate the desk's own ~/.blink/bin/blink."""
+    path = inside(home, cli.installed_bin())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").close()
+
+
+def test_a_windows_checkout_registers_no_task(home, monkeypatch):
+    """The launcher runs ~\\.blink\\bin\\blink.exe, which a checkout never
+    copies: the task it registered ran a missing file at every logon, and
+    install then suggested `schtasks /run` on it (review, 2026-10-25)."""
+    _windows_checkout(monkeypatch)
+    r = _runs(monkeypatch)
+    msg = cli.backend().install()
+    assert msg.startswith("a checkout on Windows gets no login service;")
+    assert f"start it by hand with: {cli.command_to_type()} run" in msg
+    assert r.calls == []
+    assert not os.path.exists(cli.launcher_path())
+
+
+def test_a_windows_checkout_clears_the_task_an_old_checkout_left(
+        home, monkeypatch):
+    """Before the refusal existed, a checkout install registered a task and
+    a launcher for a blink.exe that was never copied. Re-running install
+    from the checkout takes that dead registration down (review,
+    2026-10-25)."""
+    _windows_checkout(monkeypatch)
+    _write_launcher(home)
+    cleared = []
+    monkeypatch.setattr(cli, "_autostart_clear", lambda: cleared.append(1))
+    r = _runs(monkeypatch)
+    assert cli.backend().install().startswith("a checkout on Windows gets")
+    assert r.ran("schtasks", "/delete", "/f", "/tn", cli.TASK_NAME)
+    assert cleared == [1]
+    assert not os.path.exists(cli.launcher_path())
+
+
+def test_a_windows_checkout_leaves_a_frozen_install_alone(home, monkeypatch):
+    """The fleet desk again: a frozen install's task, and a checkout running
+    install. Its blink.exe is there, so the registration is not stale."""
+    _windows_checkout(monkeypatch)
+    _write_launcher(home)
+    _make_binary(home)
+    monkeypatch.setattr(cli, "_autostart_clear",
+                        lambda: pytest.fail("cleared a frozen install"))
+    r = _runs(monkeypatch)
+    assert cli.backend().install().startswith("a checkout on Windows gets")
+    assert r.calls == []
+    assert os.path.exists(cli.launcher_path())
+
+
+def test_a_windows_checkout_discloses_no_task(home, monkeypatch):
+    _windows_checkout(monkeypatch)
+    b = cli.backend()
+    assert b.creates() is None
+    assert b.checkout_refusal().startswith("a checkout on Windows gets no login service")
+    assert b.runs_checkout() is False
+
+
+def test_the_frozen_windows_build_still_registers_its_task(home, monkeypatch):
+    _platform(monkeypatch, "win32")
+    assert cli.backend().checkout_refusal() is None
+    assert "Scheduled Task" in cli.backend().creates()
+
+
+# service_program(): what the REGISTERED service runs, and only if every path
+# in it is on disk. One rule for every backend; it used to be Windows alone
+# that checked, so a launchd plist naming a deleted checkout was offered as
+# the program to repair with (review, 2026-10-25).
+
+def test_a_windows_launcher_names_blink_exe_only_when_it_is_there(
+        home, monkeypatch):
+    _platform(monkeypatch, "win32")
+    _write_launcher(home)
+    assert cli.backend().registered_argv() == [cli.installed_bin()]
+    assert cli.service_program() is None
+    _make_binary(home)
+    assert cli.service_program() == [cli.installed_bin()]
+
+
+def test_a_plist_naming_a_missing_program_is_no_service_program(
+        home, monkeypatch):
+    _platform(monkeypatch, "darwin")
+    os.makedirs(os.path.dirname(cli.plist_path()), exist_ok=True)
+    with open(cli.plist_path(), "w", encoding="utf-8") as f:
+        f.write(cli._plist_text([cli.installed_bin(), "run"]))
+    assert cli.backend().registered_argv() == [cli.installed_bin()]
+    assert cli.service_program() is None
+    _make_binary(home)
+    assert cli.service_program() == [cli.installed_bin()]
+
+
+def test_a_unit_naming_a_deleted_checkout_is_no_service_program(
+        home, monkeypatch, tmp_path):
+    _platform(monkeypatch, "linux")
+    gone = str(tmp_path / "gone" / "blink_main.py")
+    os.makedirs(os.path.dirname(cli.unit_path()), exist_ok=True)
+    with open(cli.unit_path(), "w", encoding="utf-8") as f:
+        f.write(cli._unit_text([cli.sys.executable, gone, "run"]))
+    assert cli.service_program() is None
+
+
+def test_no_service_file_is_no_service_program(home, monkeypatch):
+    for platform in ("darwin", "linux", "win32", "sunos5"):
+        _platform(monkeypatch, platform)
+        assert cli.service_program() is None
+
+
+def test_a_service_file_we_did_not_write_is_no_service_program(
+        home, monkeypatch):
+    _platform(monkeypatch, "darwin")
+    os.makedirs(os.path.dirname(cli.plist_path()), exist_ok=True)
+    with open(cli.plist_path(), "w", encoding="utf-8") as f:
+        f.write("not a plist")
+    assert cli.service_program() is None
+    with open(cli.plist_path(), "w", encoding="utf-8") as f:
+        f.write(cli._plist_text(["/usr/bin/true"]))       # no trailing `run`
+    assert cli.service_program() is None
+
+
+# The unit file. systemd expands %-specifiers and $VARIABLES inside quoted
+# ExecStart words too, so a profile like /home/50%/ or a checkout under
+# /src/$work/ ran a different path from the one written (review, 2026-10-25).
+
+@pytest.mark.parametrize("word", ["/home/50%/.blink/bin/blink",
+                                  "/src/$work/python",
+                                  "/home/a b/\"q\"\\x/blink",
+                                  "/home/%%h/$$/blink"])
+def test_the_unit_reads_back_exactly_what_was_written(home, monkeypatch,
+                                                      word):
+    _platform(monkeypatch, "linux")
+    os.makedirs(os.path.dirname(cli.unit_path()), exist_ok=True)
+    with open(cli.unit_path(), "w", encoding="utf-8") as f:
+        f.write(cli._unit_text([word, "run"]))
+    assert cli.backend().registered_argv() == [word]
+
+
+def test_the_unit_escapes_percent_and_dollar_for_systemd():
+    line = cli._systemd_exec(["/home/50%/blink", "/src/$w", "run"])
+    assert line == '"/home/50%%/blink" "/src/$$w" "run"'
+
+
+def test_install_writes_the_unit_text_for_this_program(home, monkeypatch):
+    _platform(monkeypatch, "linux")
+    _runs(monkeypatch)
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
+    cli.backend().install()
+    with open(cli.unit_path(), encoding="utf-8") as f:
+        assert f.read() == cli._unit_text(cli._service_command())
+
+
+def test_no_systemd_names_the_program_the_unit_runs(home, monkeypatch):
+    _platform(monkeypatch, "linux")
+    _runs(monkeypatch)
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: None)
+    msg = cli.backend().install()
+    prog = cli.backend().registered_argv()
+    assert msg == ("no systemd here; run it yourself: "
+                   f"{cli._quote_line(prog)} run")
+
+
+@pytest.mark.parametrize("platform,systemctl,booted,expected", [
+    ("darwin", None, False, True),
+    ("linux", "/usr/bin/systemctl", True, True),
+    # WSL: systemctl installed, no systemd running as PID 1.
+    ("linux", "/usr/bin/systemctl", False, False),
+    ("linux", None, True, False),
+    ("freebsd14", None, False, False),
+])
+def test_each_backend_says_whether_it_runs_a_checkout(
+        monkeypatch, platform, systemctl, booted, expected):
+    _platform(monkeypatch, platform)
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: systemctl)
+    monkeypatch.setattr(cli._SystemdBackend, "_booted",
+                        staticmethod(lambda: booted))
+    assert cli.backend().runs_checkout() is expected
+
+
+# What counts as "the service is running" after install, for the lines that
+# then say so. Pinned words compared with `in`, never a prefix: see
+# _RESTART_OK for the time a prefix read a failure as success.
+
+@pytest.mark.parametrize("detail,started", [
+    ("running (launchd)", True),
+    ("running (systemd)", True),
+    ("running (Scheduled Task)", True),
+    ("running (starts when you log in)", True),
+    ("installed, but could not be started: launchctl bootstrap gui/501 x",
+     False),
+    ("enabled with systemd, but it is not running -- see: x", False),
+    ("no systemd here; run it yourself: x run", False),
+    ("skipped (BLINK_SKIP_SERVICE=1)", False),
+    ("running (launchd), but not really", False),
+])
+def test_only_the_backends_own_success_words_count_as_started(detail,
+                                                               started):
+    assert cli._service_started(detail) is started
+
+
+# Windows: start() and stop() for an install that fell back to the Run key
+# because Windows would not register the task. restart() already knew it;
+# start() answered "not installed" and provision then left it down.
+
+def _no_task(monkeypatch):
+    r = _Runs()
+    real = r.__call__
+
+    def run(argv, **kw):
+        out = real(argv, **kw)
+        if argv[:2] == ["schtasks", "/query"]:
+            out.returncode = 1
+        return out
+    run.calls = r.calls
+    run.ran = r.ran
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    return run
+
+
+def test_schtasks_start_falls_back_to_the_run_key(home, monkeypatch):
+    _platform(monkeypatch, "win32")
+    _no_task(monkeypatch)
+    started = []
+    monkeypatch.setattr(cli, "_autostart_present", lambda: True)
+    monkeypatch.setattr(cli, "_start_launcher", lambda: started.append(1))
+    assert cli.backend().start() == "started"
+    assert started == [1]
+
+
+def test_schtasks_stop_of_a_run_key_install_is_a_stop(home, monkeypatch):
+    _platform(monkeypatch, "win32")
+    _no_task(monkeypatch)
+    monkeypatch.setattr(cli, "_autostart_present", lambda: True)
+    monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda **kw: 1)
+    assert cli.backend().stop().startswith("stopped")
+
+
+# provision, against each real backend with subprocess faked. It stops the
+# service to borrow the port and starts it again, and must never rewrite or
+# delete the plist, unit or task on the way: remove() and install() did, and
+# put back whichever program was RUNNING provision rather than the one the
+# service ran -- on Windows from a checkout it deleted the frozen task and
+# never put it back (review, 2026-10-25).
+
+class _Port:
+    """A serial port: dead (open fails), or silent (opens, never says hello)."""
+
+    def __init__(self, dead):
+        self.dead = dead
+        self.written = []
+
+    def __call__(self, *a, **k):
+        return self
+
+    def open(self):
+        if self.dead:
+            raise OSError("no such port")
+
+    def reset_input_buffer(self):
+        pass
+
+    def readline(self):
+        return b""
+
+    def write(self, b):
+        self.written.append(b)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def _provision(monkeypatch, dead=True):
+    import serial
+    monkeypatch.delenv("BLINK_SKIP_SERVICE", raising=False)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
+    monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda **kw: 0)
+    monkeypatch.setattr(serial, "Serial", _Port(dead))
+    clock = [0.0]
+
+    def tick():
+        clock[0] += 1.0
+        return clock[0]
+    monkeypatch.setattr(cli.time, "monotonic", tick)
+    return cli.main(["provision", "--edition", "claude", "--port",
+                     "/dev/none"])
+
+
+def _starts(calls):
+    words = (("launchctl", "kickstart"), ("systemctl", "start"),
+             ("schtasks", "/run"))
+    return sum(1 for c in calls for w in words
+               if c[0] == w[0] and w[1] in c)
+
+
+def _service_bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+@pytest.mark.parametrize("dead", [True, False], ids=["dead port", "no hello"])
+def test_provision_leaves_the_launchd_plist_alone(home, monkeypatch, dead):
+    _platform(monkeypatch, "darwin")
+    as_frozen(monkeypatch)
+    _make_binary(home)
+    os.makedirs(os.path.dirname(cli.plist_path()), exist_ok=True)
+    with open(cli.plist_path(), "w", encoding="utf-8") as f:
+        f.write(cli._plist_text(cli._service_command()))
+    before = _service_bytes(cli.plist_path())
+    as_checkout(monkeypatch)                     # the fleet desk's CLI
+    r = _runs(monkeypatch)
+    assert _provision(monkeypatch, dead) == 1
+    assert _service_bytes(cli.plist_path()) == before
+    assert r.ran("launchctl", "bootout")
+    assert _starts(r.calls) == 1
+
+
+@pytest.mark.parametrize("dead", [True, False], ids=["dead port", "no hello"])
+def test_provision_leaves_the_systemd_unit_alone(home, monkeypatch, dead):
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: "/usr/bin/systemctl")
+    os.makedirs(os.path.dirname(cli.unit_path()), exist_ok=True)
+    with open(cli.unit_path(), "w", encoding="utf-8") as f:
+        f.write(cli._unit_text(cli._service_command()))
+    before = _service_bytes(cli.unit_path())
+    r = _runs(monkeypatch)
+    assert _provision(monkeypatch, dead) == 1
+    assert _service_bytes(cli.unit_path()) == before
+    assert r.ran("systemctl", "--user", "stop")
+    assert not r.ran("disable")
+    assert _starts(r.calls) == 1
+
+
+@pytest.mark.parametrize("dead", [True, False], ids=["dead port", "no hello"])
+def test_provision_from_a_windows_checkout_keeps_the_frozen_task(
+        home, monkeypatch, dead):
+    _windows_checkout(monkeypatch)
+    _write_launcher(home)
+    _make_binary(home)
+    before = _service_bytes(cli.launcher_path())
+    r = _runs(monkeypatch)
+    assert _provision(monkeypatch, dead) == 1
+    assert _service_bytes(cli.launcher_path()) == before
+    assert not r.ran("schtasks", "/delete")
+    assert not r.ran("schtasks", "/create")
+    assert _starts(r.calls) == 1
+
+
+def test_provision_brings_a_run_key_install_back(home, monkeypatch):
+    _platform(monkeypatch, "win32")
+    _write_launcher(home)
+    _make_binary(home)
+    run = _no_task(monkeypatch)
+    started = []
+    monkeypatch.setattr(cli, "_autostart_present", lambda: True)
+    monkeypatch.setattr(cli, "_autostart_clear",
+                        lambda: pytest.fail("provision cleared the Run key"))
+    monkeypatch.setattr(cli, "_start_launcher", lambda: started.append(1))
+    assert _provision(monkeypatch, dead=True) == 1
+    assert started == [1]
+    assert not run.ran("schtasks", "/delete")
+
+
+def test_windows_provision_also_ends_a_daemon_with_no_pid_file(
+        home, monkeypatch):
+    """stop() ends the task's instance and the recorded pid. A daemon with
+    no pid file -- one from before the file existed, or one that died
+    before writing it -- kept the COM port, and provision failed with
+    "Access is denied" (review, 2026-10-25). provision asks Windows for
+    anything running the installed binary, as uninstall does; stop() itself
+    does not, because the fleet suite and halt() share it."""
+    _windows_checkout(monkeypatch)
+    _write_launcher(home)
+    _make_binary(home)
+    r = _runs(monkeypatch)
+    assert _provision(monkeypatch) == 1
+    ps = [c for c in r.calls if c[0] == "powershell"]
+    assert len(ps) == 1
+    assert cli.installed_bin().replace("'", "''") in ps[0][-1]
+    # After the stop, before the port is opened.
+    stop = next(i for i, c in enumerate(r.calls) if "/end" in c)
+    assert r.calls.index(ps[0]) > stop
+
+
+def test_provision_kills_by_path_nowhere_but_windows(home, monkeypatch):
+    _platform(monkeypatch, "darwin")
+    os.makedirs(os.path.dirname(cli.plist_path()), exist_ok=True)
+    with open(cli.plist_path(), "w", encoding="utf-8") as f:
+        f.write(cli._plist_text(cli._service_command()))
+    r = _runs(monkeypatch)
+    _provision(monkeypatch)
+    assert not any(c[0] == "powershell" for c in r.calls)
+
+
+def test_a_ctrl_c_before_the_port_opens_still_restarts_the_service(
+        home, monkeypatch):
+    """The settle sleep sat between the stop and the try that restarts the
+    service, so an interrupt there left the desk with no daemon."""
+    _platform(monkeypatch, "darwin")
+    os.makedirs(os.path.dirname(cli.plist_path()), exist_ok=True)
+    with open(cli.plist_path(), "w", encoding="utf-8") as f:
+        f.write(cli._plist_text(cli._service_command()))
+    r = _runs(monkeypatch)
+
+    def interrupted(_s):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(cli.time, "sleep", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _provision(monkeypatch)
+    assert _starts(r.calls) == 1
+
+
+def test_provision_starts_nothing_where_nothing_was_installed(home,
+                                                              monkeypatch):
+    """The bench laptop running a downloaded binary: no service before, so
+    none after."""
+    _platform(monkeypatch, "darwin")
+    _make_binary(home)
+    r = _runs(monkeypatch)
+    assert _provision(monkeypatch) == 1
+    assert _starts(r.calls) == 0
+    assert not os.path.exists(cli.plist_path())
+
+
+def test_provision_checks_the_edition_line_before_writing_it(home,
+                                                             monkeypatch):
+    """Every production writer goes through encode_checked (CLAUDE.md): the
+    board drops an over-long line whole, with no error on either side."""
+    import serial
+    seen = []
+    real = cli.protocol.encode_checked
+
+    def spy(msg):
+        seen.append(msg.get("t"))
+        return real(msg)
+    monkeypatch.setattr(cli.protocol, "encode_checked", spy)
+
+    class _Hello(_Port):
+        def __init__(self):
+            super().__init__(dead=False)
+            self.lines = [b'{"t":"hello"}\n']
+
+        def readline(self):
+            return self.lines.pop(0) if self.lines else b""
+    _platform(monkeypatch, "darwin")
+    _runs(monkeypatch)
+    port = _Hello()
+    _provision(monkeypatch, dead=False)        # the clock and the stubs
+    monkeypatch.setattr(serial, "Serial", port)
+    cli.main(["provision", "--edition", "claude", "--port", "/dev/none"])
+    assert len(seen) == 1
+    assert port.written == [real(cli.protocol.edition("claude"))[0]]
 
 
 # ---------------------------------------------------------------- disclosure --
@@ -869,6 +1373,7 @@ def test_halt_service_never_raises(home, monkeypatch):
     _platform(monkeypatch, "win32")
 
     monkeypatch.delenv("BLINK_SKIP_SERVICE", raising=False)
+    monkeypatch.setenv("BLINK_ALLOW_FOREIGN_HOME", "1")
     reached = []
 
     class Boom:

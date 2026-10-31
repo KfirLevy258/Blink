@@ -1,0 +1,26 @@
+# The eye clip left INSIDE its entry mute. Host harness only:
+#
+#   tools/panel_render/touch.sh OUTDIR tools/bench/eye_mute_touch.txt
+#
+# full_touch.txt leaves the clip twice, and both exits come after the mute
+# has run out: `tap eye.swipe` settles 1.2 s on top of the entry slide, so
+# its first exit lands about 1.9 s after the slide began, past the 1.5 s
+# (UI_SLIDE_MS * 6) the mute holds (review of fp/audit-nice, SHOULD-2).
+# That is the case that used to open Settings, and the one worth pinning on
+# a board. The early exit -- the path the mute alone always covered -- needs
+# raw strokes with no settle between them, and on a board the second one
+# would arrive while the entry slide still holds input, inside the clip's
+# 250 ms entry tail, and be ignored; so it lives here, where the harness
+# clock puts it at about 1.05 s.
+#
+# Pinned both ways (2026-10-29): with swipe_cb's ui_anim_showing() guard
+# removed it still passes, because the mute stops the stroke; with the
+# guard AND the mute check removed it fails, Settings opening as the clip
+# returns. So the exit below really is decided inside the mute.
+
+harness-only
+expect ui_state scr=gauges modal=none busy=0
+# Into the clip and straight back out: SW_RIGHT, then SW_LEFT.
+swipe 60 120 220 120
+swipe 260 120 100 120
+expect ui_state scr=gauges modal=none busy=0

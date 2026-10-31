@@ -17,7 +17,8 @@ import datetime
 import math
 import json
 import os
-import sys
+
+from pc import desktop_paths
 
 SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
@@ -30,14 +31,9 @@ TAIL_BYTES = 262144
 
 
 def sessions_dir() -> str:
-    if sys.platform == "darwin":
-        return os.path.expanduser(
-            "~/Library/Application Support/Claude/local-agent-mode-sessions")
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA") or os.path.expanduser(
-            "~\\AppData\\Roaming")
-        return os.path.join(appdata, "Claude", "local-agent-mode-sessions")
-    return os.path.expanduser("~/.config/Claude/local-agent-mode-sessions")
+    """Claude Desktop's Cowork session folder, under the data folder
+    pc/desktop_paths finds (the Store build moves it)."""
+    return desktop_paths.cowork_sessions_dir()
 
 
 def _zone_seconds(zone):
