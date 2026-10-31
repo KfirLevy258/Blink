@@ -273,3 +273,41 @@ int burn5h_hour(int64_t q, int i, int32_t off_min)
 	}
 	return (int)(s / 3600);
 }
+
+int burn5h_slot_find(const struct burn5h_slot *s, int n, const char *tag)
+{
+	if (tag == NULL || tag[0] == '\0') {
+		return -1;
+	}
+	for (int i = 0; i < n; i++) {
+		if (s[i].have && strcmp(s[i].m.p, tag) == 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+int burn5h_slot_take(const struct burn5h_slot *s, int n, const char *tag)
+{
+	int at = burn5h_slot_find(s, n, tag);
+
+	if (at >= 0) {
+		return at;
+	}
+	at = 0;
+	for (int i = 0; i < n; i++) {
+		if (!s[i].have) {
+			return i;
+		}
+		if (s[i].at_ms < s[at].at_ms) {
+			at = i;
+		}
+	}
+	return at;
+}
+
+bool burn5h_slot_fresh(const struct burn5h_slot *s, int64_t now_ms,
+		       int64_t fresh_ms)
+{
+	return s->have && now_ms - s->at_ms <= fresh_ms;
+}

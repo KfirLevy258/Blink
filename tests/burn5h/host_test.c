@@ -62,6 +62,15 @@ static void test_parse_good(void)
 	}
 	CHECK(parses("{\"t\":\"burn\",\"p\":\"abcdefghijk\",\"q\":" Q
 		     ",\"b\":" B20 "}"), "an 11-character tag parses");
+	/* Every id a page can be named by in full: proto.c reads `provider`
+	 * into USAGE_TAG_MAX, and the page keeps that many. At 12 bytes a
+	 * 12-to-15-character id had its page named and every burn line
+	 * refused (the /code-review max of 2026-11-01). */
+	CHECK(BURN5H_TAG_MAX == USAGE_TAG_MAX,
+	      "the burn tag is the page tag's size");
+	CHECK(parses("{\"t\":\"burn\",\"p\":\"abcdefghijklmno\",\"q\":" Q
+		     ",\"b\":" B20 "}"),
+	      "a 15-character tag, the longest a page keeps, parses");
 	CHECK(parses("{\"t\":\"burn\",\"p\":\"b\",\"q\":" Q ",\"b\":" B20 "}"),
 	      "a tag spelled like a key is not taken for one");
 }
@@ -72,7 +81,8 @@ static void test_parse_refused(void)
 		/* p */
 		"{\"t\":\"burn\",\"q\":" Q ",\"b\":" B20 "}",
 		"{\"t\":\"burn\",\"p\":\"\",\"q\":" Q ",\"b\":" B20 "}",
-		"{\"t\":\"burn\",\"p\":\"abcdefghijkl\",\"q\":" Q ",\"b\":" B20 "}",
+		/* One past what a page keeps: refused, never cut to match. */
+		"{\"t\":\"burn\",\"p\":\"abcdefghijklmnop\",\"q\":" Q ",\"b\":" B20 "}",
 		"{\"t\":\"burn\",\"p\":\"Claude\",\"q\":" Q ",\"b\":" B20 "}",
 		"{\"t\":\"burn\",\"p\":7,\"x\":\"claude\",\"q\":" Q ",\"b\":" B20 "}",
 		"{\"t\":\"burn\",\"p\":\"cla\\\"ude\",\"q\":" Q ",\"b\":" B20 "}",
@@ -394,6 +404,76 @@ static void test_hours(void)
 	      "a q at the epoch with a western offset does not fault");
 }
 
+/*
+ * The slots: one line per provider, a line for a provider not seen before
+ * into an empty slot or over the one heard from longest ago, and a page with
+ * no name holding none. RAIL_PAGES_MAX is two; three checks the eviction
+ * picks the oldest and not merely "the other one".
+ */
+static struct burn5h_slot slot_line(const char *p, int64_t at)
+{
+	struct burn5h_slot s;
+
+	memset(&s, 0, sizeof(s));
+	snprintf(s.m.p, sizeof(s.m.p), "%s", p);
+	s.at_ms = at;
+	s.have = true;
+	return s;
+}
+
+static void test_slots(void)
+{
+	struct burn5h_slot s[3];
+	int i;
+
+	memset(s, 0, sizeof(s));
+	CHECK(burn5h_slot_find(s, 2, "claude") == -1,
+	      "no slot holds a line before one arrives");
+	CHECK(burn5h_slot_find(s, 2, "") == -1 &&
+	      burn5h_slot_find(s, 2, NULL) == -1,
+	      "an unnamed page matches no slot, not even an empty one");
+	i = burn5h_slot_take(s, 2, "claude");
+	CHECK(i == 0, "the first line takes the first empty slot");
+	s[i] = slot_line("claude", 1000);
+	i = burn5h_slot_take(s, 2, "codex");
+	CHECK(i == 1, "a second provider takes the other slot, not claude's");
+	s[i] = slot_line("codex", 2000);
+	CHECK(burn5h_slot_take(s, 2, "claude") == 0 &&
+	      burn5h_slot_take(s, 2, "codex") == 1,
+	      "each provider's next line goes back to its own slot");
+	CHECK(burn5h_slot_find(s, 2, "claude") == 0 &&
+	      burn5h_slot_find(s, 2, "codex") == 1,
+	      "two providers' lines are held side by side");
+	CHECK(burn5h_slot_find(s, 2, "claud") == -1 &&
+	      burn5h_slot_find(s, 2, "claudex") == -1,
+	      "a tag matches whole, not by prefix");
+	CHECK(burn5h_slot_take(s, 2, "gemini") == 0,
+	      "a third provider, with both full, takes the one heard from"
+	      " longest ago");
+	s[0] = slot_line("claude", 3000);
+	CHECK(burn5h_slot_take(s, 2, "gemini") == 1,
+	      "and that is the oldest, whichever slot it is in");
+	s[0] = slot_line("a", 500);
+	s[1] = slot_line("b", 100);
+	s[2] = slot_line("c", 300);
+	CHECK(burn5h_slot_take(s, 3, "d") == 1,
+	      "with three slots the oldest of three goes, not the next one");
+	s[1].have = false;
+	CHECK(burn5h_slot_take(s, 3, "d") == 1 &&
+	      burn5h_slot_find(s, 3, "b") == -1,
+	      "an emptied slot is taken before any is evicted, and holds no"
+	      " tag");
+
+	s[0] = slot_line("claude", 10000);
+	CHECK(burn5h_slot_fresh(&s[0], 10000 + 180000, 180000),
+	      "a line is fresh up to the window's last millisecond");
+	CHECK(!burn5h_slot_fresh(&s[0], 10000 + 180001, 180000),
+	      "and not one after");
+	s[0].have = false;
+	CHECK(!burn5h_slot_fresh(&s[0], 10000, 180000),
+	      "an empty slot is never fresh");
+}
+
 int main(void)
 {
 	test_parse_good();
@@ -404,6 +484,7 @@ int main(void)
 	test_totals_and_rate();
 	test_bars();
 	test_hours();
+	test_slots();
 	if (failures) {
 		printf("%d FAILED\n", failures);
 		return 1;

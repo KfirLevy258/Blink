@@ -1,16 +1,19 @@
 """The builder's board preview draws the five-hour burn view the way the
-firmware does (docs/plans/burn-5h.md; firmware/src/usage_view.c burn_inks()
-and burn_draw_cb(), firmware/src/burn5h.c).
+firmware does (docs/plans/burn-5h.md; firmware/src/theme.c theme_burn_inks(),
+firmware/src/usage_view.c burn_draw_cb(), firmware/src/burn5h.c).
 
 The burn view is the session gauge's half of the screen on an account with
 no five-hour window, and it follows every theme. Four of its six colours are
-a kind of mark no palette role describes, so usage_view.c derives them: Dark
-keeps the contract's bytes and every other theme gets the same relationships
-from its own palette through theme_mix(). The preview has to land on the same
-bytes, and the page types no palette of its own, so these tests read the
-weights and Dark's bytes out of usage_view.c, work the expected colours out
-from each theme's palette in theme.c, and compare them with the fills the
-page drew. A change to burn_inks() with no change to the page fails here.
+a kind of mark no palette role describes, so theme.c derives them: Dark
+starts from the contract's bytes and every other theme gets the same
+relationships from its own palette through theme_mix(), and then both bar
+inks are walked up to a 3:1 floor on the ground with the newest hour kept
+1.5:1 above the rest. The preview has to land on the same bytes, and the page
+types no palette of its own, so these tests read the weights and Dark's bytes
+out of theme.c, work the expected colours out from each theme's palette in
+theme.c with a port of the walk that is itself checked against the compiled
+C, and compare them with the fills the page drew. A change to
+theme_burn_inks() with no change to the page fails here.
 
 Run as a browser runs it: the page's own script in node against
 tests/support/builder_dom.js. The numbers and words the page ports from
@@ -46,6 +49,7 @@ const drawn = () => $('scr').children.map(n => ({
   y: n.attrs.y === undefined ? null : +n.attrs.y,
   w: n.attrs.width === undefined ? null : +n.attrs.width,
   h: n.attrs.height === undefined ? null : +n.attrs.height,
+  fs: n.attrs['font-size'] === undefined ? null : +n.attrs['font-size'],
   text: n.textContent === '' ? null : n.textContent }));
 const left = () => document.querySelectorAll('[data-l]');
 const pressed = () => Object.fromEntries(left().map(b => [b.dataset.l, b.getAttribute('aria-pressed')]));
@@ -185,10 +189,10 @@ def theme_mix(a, b, t):
 
 
 def _firmware_inks():
-    """What burn_inks() says, read from the C: Dark's four bytes, and the
-    roles and weight each of the others is mixed from."""
-    src = _c("usage_view.c")
-    start = src.index("static void burn_inks(")
+    """What theme_burn_inks() says, read from the C: Dark's four bytes, and
+    the roles and weight each of the others is mixed from."""
+    src = _c("theme.c")
+    start = src.index("void theme_burn_inks(")
     body = src[start:src.index("\n}\n", start)]
     dark = {k: v[2:].upper()
             for k, v in re.findall(r"k->(\w+) = (0x[0-9A-F]{6});", body)}
@@ -199,11 +203,62 @@ def _firmware_inks():
 
 
 def _expected(pal, dark=False):
-    """burn_inks() on a palette {bg, text, g1, track, grey}, uppercase hex."""
+    """theme_burn_inks() on a palette {bg, text, g1, track, grey}, uppercase
+    hex: the mix, or Dark's bytes, then the floor."""
     dark_bytes, mixes = _firmware_inks()
     if dark:
-        return dict(dark_bytes)
-    return {k: theme_mix(pal[a], pal[b], t) for k, (a, b, t) in mixes.items()}
+        k = dict(dark_bytes)
+    else:
+        k = {n: theme_mix(pal[a], pal[b], t)
+             for n, (a, b, t) in mixes.items()}
+    return _floor(k, pal["bg"], pal["text"], pal["g1"])
+
+
+def _floor_figures():
+    """THEME_BURN_INK_FLOOR and THEME_BURN_INK_STEP, read from theme.h."""
+    h = _c("theme.h")
+    got = dict(re.findall(r"#define THEME_BURN_INK_(FLOOR|STEP)\s+([0-9.]+)",
+                          h))
+    assert set(got) == {"FLOOR", "STEP"}, got
+    return float(got["FLOOR"]), float(got["STEP"])
+
+
+def _floor(k, bg, text, g1):
+    """theme.c theme_burn_inks()'s walk, step for step: both bar inks to
+    min(3:1, the text's own) on the ground as the panel shows it, the newest
+    hour 1.5:1 above the older bars, and where the text cannot give it that,
+    the stronger of text and g1 with the older bars stepped back towards the
+    ground no further than the floor."""
+    floor_cr, step = _floor_figures()
+    floor = min(floor_cr, _shown(text, bg))
+
+    def apart(hot, cold):
+        return _shown(hot, bg) > _shown(cold, bg) and _shown(hot, cold) >= step
+
+    def walk(frm, to, cold=None):
+        for pct in range(100):
+            c = theme_mix(frm, to, pct / 100.0)
+            if _shown(c, bg) >= floor and (cold is None or apart(c, cold)):
+                return c
+        return to
+
+    k = dict(k)
+    k["cold"] = walk(k["cold"], g1)
+    if _shown(k["cold"], bg) < floor:
+        k["cold"] = walk(g1, text)
+    k["hot"] = walk(k["hot"], text, k["cold"])
+    if apart(k["hot"], k["cold"]):
+        return k
+    k["hot"] = g1 if _shown(g1, bg) > _shown(text, bg) else text
+    frm = k["cold"]
+    for pct in range(1, 100):
+        c = theme_mix(frm, bg, pct / 100.0)
+        if _shown(c, bg) < floor:
+            break
+        k["cold"] = c
+        if apart(k["hot"], c):
+            break
+    return k
 
 
 def _palettes():
@@ -219,8 +274,8 @@ def _palettes():
 
 
 def _inks_drawn(nodes):
-    """The colours the page drew, by the role burn_inks() names them, and
-    the hour numbers' own, which are the palette's grey."""
+    """The colours the page drew, by the role theme_burn_inks() names them,
+    and the hour numbers' own, which are the palette's grey."""
     def fill(cls):
         got = {n["fill"] for n in nodes if n["cls"] == cls}
         assert len(got) == 1, (cls, got)
@@ -231,8 +286,8 @@ def _inks_drawn(nodes):
 
 
 def test_the_weights_the_tests_read_are_the_ones_in_the_firmware():
-    # If burn_inks() is rewritten so these patterns stop matching, this is
-    # the test that says so, rather than the colour tests passing on nothing.
+    # If theme_burn_inks() is rewritten so these patterns stop matching, this
+    # is the test that says so, rather than the colour tests passing on nothing.
     dark, mixes = _firmware_inks()
     assert dark == {"hot": "7FB2F0", "cold": "2D5C99", "base": "3A414B",
                     "tick": "5C636B"}
@@ -262,11 +317,16 @@ def test_every_built_ins_burn_colours_are_what_theme_mix_gives(name):
 def test_dark_and_light_are_checked_against_the_firmwares_own_mix():
     # The two a failure should read plainest on, spelled out as arithmetic.
     dark, light = _palettes()["Dark"], _palettes()["Light"]
-    assert _expected(dark, dark=True) == {"hot": "7FB2F0", "cold": "2D5C99",
+    # Dark keeps three of the contract's bytes; its older bars, #2D5C99,
+    # read 2.88:1 as drawn and are walked towards g1 to the 3:1 floor.
+    assert _expected(dark, dark=True) == {"hot": "7FB2F0", "cold": "2F609F",
                                           "base": "3A414B", "tick": "5C636B"}
     want = _expected(light)
     assert want["hot"] == theme_mix("2F6FCB", "111418", 0.35)
-    assert want["cold"] == theme_mix("2F6FCB", "FFFFFF", 0.35)
+    # Light's plain mix, #78A1DD, read 2.60:1; the floor walks it back
+    # towards g1.
+    assert theme_mix("2F6FCB", "FFFFFF", 0.35) == "78A1DD"
+    assert want["cold"] == "6796D9"
     assert want["base"] == theme_mix("DBDCDC", "898A8D", 0.30)
     assert want["tick"] == theme_mix("DBDCDC", "898A8D", 0.77)
     # On a white ground the last hour must still be the stronger mark,
@@ -339,9 +399,13 @@ def _custom_expected(bg, text, g1):
 
 
 # A dark ground, a light one, and a mid grey one, where the grey has to walk
-# back from 45% to keep its 3:1.
+# back from 45% to keep its 3:1. Then the floor's own cases: a g1 that reads
+# stronger than the text, which takes the walk's second stage (one of the
+# themes tests/theme found short of the step before it existed), and text
+# too faint, at about 3.6:1, to leave room for the step at all.
 _CUSTOMS = [("101820", "F0E6D8", "E8A33D"), ("F4EFE6", "1A2B3C", "C0392B"),
-            ("808080", "FFFFFF", "00AA55")]
+            ("808080", "FFFFFF", "00AA55"), ("0C1439", "E91FFC", "C2FC17"),
+            ("101820", "6E6E6E", "3050A0")]
 
 
 @pytest.mark.parametrize("bg,text,g1", _CUSTOMS)
@@ -526,3 +590,140 @@ process.stdout.write(out.join('\\n') + '\\n');
                             encoding="utf-8").stdout.splitlines()
     assert len(c_out) == len(_FMT_KS) + len(vectors)
     assert js_out == c_out
+
+
+# ------------------------------------------------- the floor, as drawn
+
+def _check_floor(got, bg, text):
+    """Both bars at min(3:1, text) on the ground, as the panel shows them;
+    and, where the text reads 5:1 or more, the newest hour the stronger by
+    1.5:1 (tests/theme measured 4.8 as where the step always holds)."""
+    floor_cr, step = _floor_figures()
+    floor = min(floor_cr, _shown(text, bg))
+    assert _shown(got["hot"], bg) >= floor, got
+    assert _shown(got["cold"], bg) >= floor, got
+    if _shown(text, bg) >= 5.0:
+        assert _shown(got["hot"], bg) > _shown(got["cold"], bg), got
+        assert _shown(got["hot"], got["cold"]) >= step, got
+
+
+@pytest.mark.parametrize("name", [b["name"] for b in theme_builtins.BUILTINS])
+def test_every_built_ins_burn_bars_meet_the_floor_as_drawn(name):
+    # The /code-review max of 2026-11-01 measured the older bars at 2.14:1
+    # (Retro LCD) to 2.88 (Dark) on five built-ins with the plain mix.
+    pal = _palettes()[name]
+    r = _run(f"""
+    preset({json.dumps(name)});
+    left()[1].click();
+    return drawn();
+    """)
+    got = _inks_drawn(r)
+    _check_floor(got, pal["bg"], pal["text"])
+    # Every built-in has room for the step, whatever its text.
+    floor_cr, step = _floor_figures()
+    assert _shown(got["hot"], got["cold"]) >= step, (name, got)
+
+
+@pytest.mark.parametrize("bg,text,g1", _CUSTOMS)
+def test_a_custom_themes_burn_bars_meet_the_floor_as_drawn(bg, text, g1):
+    r = _run(f"""
+    type('t-bg', '#{bg}'); type('t-text', '#{text}'); type('t-g1', '#{g1}');
+    left()[1].click();
+    return drawn();
+    """)
+    _check_floor(_inks_drawn(r), bg, text)
+
+
+def test_the_floor_moves_only_the_themes_it_has_to():
+    # Five built-ins were under it; the other seven draw as before.
+    _, mixes = _firmware_inks()
+    moved = set()
+    for name, pal in _palettes().items():
+        if name == "Dark":
+            plain = dict(_firmware_inks()[0])
+        else:
+            plain = {k: theme_mix(pal[a], pal[b], t)
+                     for k, (a, b, t) in mixes.items()}
+        if _expected(pal, dark=(name == "Dark")) != plain:
+            moved.add(name)
+    assert moved == {"Dark", "Retro LCD", "Colour-blind", "Light",
+                     "Light soft"}
+
+
+def test_the_ported_floor_is_the_firmwares_own(tmp_path):
+    """theme_burn_inks() compiled from theme.c, on every built-in and on
+    each custom theme above, against this file's port of it -- the oracle
+    every colour test here uses -- so a walk changed on one side only fails
+    here, not as a page that is wrong the same way the port is."""
+    cc = shutil.which("cc")
+    if cc is None:
+        pytest.skip("needs a C compiler")
+    body = ["\tfor (int id = 0; id < THEME_BUILTIN_N; id++) {",
+            "\t\ttheme_burn_inks(theme_builtin(id), id == THEME_DARK, &k);",
+            '\t\tprintf("%06X %06X %06X %06X\\n", (unsigned)k.hot,'
+            " (unsigned)k.cold, (unsigned)k.base, (unsigned)k.tick);",
+            "\t}"]
+    for bg, tx, g1 in _CUSTOMS:
+        body += [f"\tt.c[0] = 0x{bg}; t.c[1] = 0x{tx}; t.c[2] = 0x{g1};",
+                 "\ttheme_derive(&t, &p);",
+                 "\ttheme_burn_inks(&p, false, &k);",
+                 '\tprintf("%06X %06X %06X %06X\\n", (unsigned)k.hot,'
+                 " (unsigned)k.cold, (unsigned)k.base, (unsigned)k.tick);"]
+    src = tmp_path / "inks.c"
+    src.write_text('#include <stdio.h>\n#include "theme.h"\n'
+                   "int main(void)\n{\n\tstruct theme_custom t = {{0}};\n"
+                   "\tstruct palette p;\n\tstruct theme_burn_inks k;\n\n"
+                   + "\n".join(body) + "\n\treturn 0;\n}\n",
+                   encoding="utf-8")
+    exe = tmp_path / "inks"
+    subprocess.run([cc, "-I", str(SRC), str(src), str(SRC / "theme.c"),
+                    str(SRC / "msg_parse.c"), "-lm", "-o", str(exe)],
+                   check=True)
+    out = subprocess.run([str(exe)], check=True, capture_output=True,
+                         text=True).stdout.splitlines()
+    pals = _palettes()
+    order = [b["name"] for b in sorted(theme_builtins.BUILTINS,
+                                       key=lambda b: b["id"])]
+    want = []
+    for name in order:
+        k = _expected(pals[name], dark=(name == "Dark"))
+        want.append(" ".join(k[n] for n in ("hot", "cold", "base", "tick")))
+    for bg, tx, g1 in _CUSTOMS:
+        k = _custom_expected(bg, tx, g1)
+        want.append(" ".join(k[n] for n in ("hot", "cold", "base", "tick")))
+    assert out == want
+
+
+# --------------------------------------------- the rows beside the view
+
+def _layout(name):
+    m = re.search(rf"#define {name}\s+(\d+)", _c("usage_layout.h"))
+    assert m, name
+    return int(m.group(1))
+
+
+def test_the_burn_views_caption_rows_are_the_weekly_gauges_rows():
+    """On the board "BURN 5h" sits where "SESSION 5h" does and the rate line
+    where the countdown does: default-font labels, Montserrat 14 in 16 px
+    rows from GAUGE_NAME_Y and GAUGE_CD_Y. The page drew the burn rows that
+    way and the weekly gauge's at 12 px, 1 and 3 px higher, so the two
+    halves of one row did not match (the /code-review max of 2026-11-01).
+    Both follow the board now."""
+    r = _run("""
+    const gauge = drawn();
+    left()[1].click();
+    return { gauge, burn: drawn() };
+    """)
+    name_y, cd_y = _layout("GAUGE_NAME_Y") + 13, _layout("GAUGE_CD_Y") + 13
+
+    def rows(nodes, cls):
+        return [(n["text"], n["y"], n["fs"]) for n in nodes
+                if n["cls"] == cls]
+    assert rows(r["gauge"], "gauge-name") == [("SESSION 5h", name_y, 14),
+                                              ("WEEKLY 7d", name_y, 14)]
+    assert rows(r["gauge"], "gauge-cd") == [("3h 40m", cd_y, 14),
+                                            ("1d 1h", cd_y, 14)]
+    assert rows(r["burn"], "gauge-name") == [("WEEKLY 7d", name_y, 14)]
+    assert rows(r["burn"], "burn-name") == [("BURN 5h", name_y, 14)]
+    assert [(y, fs) for _, y, fs in rows(r["burn"], "burn-rate")] == \
+        [(cd_y, 14)]

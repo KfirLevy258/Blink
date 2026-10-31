@@ -199,9 +199,16 @@ static bool toast_have_prev;
 static bool sleeping;
 /* Filled by usage_view_set_session() from the daemon; see proto.c. */
 static char session_label[28] = "";
-static char provider1_tag[12];	/* whichever provider the daemon made primary */
+static char provider1_tag[USAGE_TAG_MAX];	/* whichever provider the daemon made primary */
 static lv_obj_t *provider_lbl;	/* the tag, spelled out under the brand */
-static char provider2_tag[12];	/* "" when there is only one provider */
+static char provider2_tag[USAGE_TAG_MAX];	/* "" when there is only one provider */
+/*
+ * The pill's text, NUL included: eleven characters, what PILL_MAX_W is
+ * measured for (tests/usage_layout, "claude code"). It was the tags' own
+ * size until those grew to USAGE_TAG_MAX for matching; the pill keeps the
+ * eleven it always showed rather than learning to draw a longer name.
+ */
+#define PILL_TAG_BUF		12
 
 /*
  * PAGES. One provider per screen, reached by swiping vertically.
@@ -259,7 +266,15 @@ static const char *page_tag(int i)
  */
 static void tag_cased(char *dst, size_t n, const char *tag)
 {
-	snprintf(dst, n, "%s", tag);
+	size_t i = 0;
+
+	/* By hand, not snprintf: the pill's buffer (PILL_TAG_BUF) is smaller
+	 * than a tag's on purpose, and GCC warns of the cut snprintf would
+	 * make, which here is the point. */
+	for (; i + 1 < n && tag[i] != '\0'; i++) {
+		dst[i] = tag[i];
+	}
+	dst[i] = '\0';
 	if (dst[0] >= 'a' && dst[0] <= 'z') {
 		dst[0] = (char)(dst[0] - 'a' + 'A');
 	}
@@ -557,9 +572,11 @@ static void show_session_side(bool gauge)
 	show_obj(session.pct, gauge);
 	show_obj(session.name, gauge);
 	show_obj(session.countdown, gauge);
-	if (burn_obj) {
-		show_obj(burn_obj, !gauge);
-	}
+	/* No NULL test: this runs from layout_gauges() alone, which runs
+	 * once usage_view_init() has made the object (burn_build() comes
+	 * first) and otherwise only while `built`, which teardown clears
+	 * before it nulls burn_obj. */
+	show_obj(burn_obj, !gauge);
 }
 
 /* A gauge where the two-gauge screen keeps it: the geometry build_gauge()
@@ -1802,18 +1819,13 @@ void usage_view_page_step(int delta)
 #define BURN_IDLE_GLYPH		LV_SYMBOL_MINUS
 
 /*
- * One line per provider, which is what the wire's `p` leaves room for: a
- * daemon that one day sends a codex line beside the claude one must not have
- * the two take turns overwriting each other, which with one slot would
- * blink the claude page's view off every other line.
+ * One line per provider, which is what the wire's `p` leaves room for, and
+ * one provider per page; burn5h.h struct burn5h_slot says why, and
+ * tests/burn5h checks the choice.
  */
 #define BURN_SLOTS		RAIL_PAGES_MAX
 
-static struct {
-	struct burn5h m;
-	int64_t at_ms;			/* the uptime it arrived at */
-	bool have;
-} burn_slot[BURN_SLOTS];
+static struct burn5h_slot burn_slot[BURN_SLOTS];
 
 /* The board clock's UTC offset, for the hour axis; see usage_view.h. */
 static bool burn_off_known;
@@ -1838,43 +1850,15 @@ struct burn_drawn {
 static struct burn_drawn bd;
 
 /*
- * The view's colours.
- *
- * Dark's are the contract's bytes, and Dark is the only theme the contract
- * names. Two of them are already Dark ROLES -- the arrow's #4387DF is g1 and
- * the hour numbers' #6B7280 is grey -- so those two are read from the theme
- * on every theme, like every other colour on this screen. The other four are
- * a kind of mark this screen never had and no role describes, so Dark keeps
- * the contract's exact values and every other theme gets the same
- * RELATIONSHIPS from its own roles. Those are what the contract's values
- * are, to within a few steps of RGB: the last hour is g1 a third of the way
- * to the text colour, the older bars g1 a third of the way into the ground,
- * the baseline and the ticks the track lifted 30% and 77% towards grey.
- * Expressed that way the last hour is still the stronger mark on a white
- * ground, where "brighter" would have made it the fainter one.
+ * The view's colours: theme_burn_inks() in theme.c, where the host tests can
+ * reach them (tests/theme checks every built-in's against its floor). Dark
+ * starts from the contract's bytes because it is the theme the contract
+ * names; THEME_CUSTOM made from Dark's colours is a custom theme and is
+ * derived, as the builder page draws it.
  */
-struct burn_inks {
-	uint32_t hot;			/* the newest hour's four bars */
-	uint32_t cold;			/* the sixteen before them */
-	uint32_t base;			/* the baseline */
-	uint32_t tick;			/* the hour ticks */
-};
-
-static void burn_inks(struct burn_inks *k)
+static void burn_inks(struct theme_burn_inks *k)
 {
-	const struct palette *p = theme_pal();
-
-	if (theme_active_id() == THEME_DARK) {
-		k->hot = 0x7FB2F0;
-		k->cold = 0x2D5C99;
-		k->base = 0x3A414B;
-		k->tick = 0x5C636B;
-		return;
-	}
-	k->hot = theme_mix(p->g1, p->text, 0.35);
-	k->cold = theme_mix(p->g1, p->bg, 0.35);
-	k->base = theme_mix(p->track, p->grey, 0.30);
-	k->tick = theme_mix(p->track, p->grey, 0.77);
+	theme_burn_inks(theme_pal(), theme_active_id() == THEME_DARK, k);
 }
 
 static void burn_fill(lv_layer_t *layer, uint32_t rgb, int32_t x1, int32_t y1,
@@ -1914,7 +1898,7 @@ static void burn_draw_cb(lv_event_t *e)
 {
 	lv_layer_t *layer = lv_event_get_layer(e);
 	const struct palette *p = theme_pal();
-	struct burn_inks k;
+	struct theme_burn_inks k;
 	int32_t x;
 
 	burn_inks(&k);
@@ -2037,21 +2021,13 @@ static void burn_build(lv_obj_t *parent)
 
 static int burn_slot_for(const char *tag)
 {
-	if (tag == NULL || tag[0] == '\0') {
-		return -1;
-	}
-	for (int i = 0; i < BURN_SLOTS; i++) {
-		if (burn_slot[i].have && strcmp(burn_slot[i].m.p, tag) == 0) {
-			return i;
-		}
-	}
-	return -1;
+	return burn5h_slot_find(burn_slot, BURN_SLOTS, tag);
 }
 
 static bool burn_fresh(int s)
 {
-	return burn_slot[s].have &&
-	       k_uptime_get() - burn_slot[s].at_ms <= BURN_FRESH_MS;
+	return burn5h_slot_fresh(&burn_slot[s], k_uptime_get(),
+				 BURN_FRESH_MS);
 }
 
 static void burn_compose(const struct burn5h *m, struct burn_drawn *d)
@@ -2116,7 +2092,9 @@ static void burn_sync(void)
 	struct burn_drawn d;
 	int s = -1;
 
-	if (!built || burn_obj == NULL) {
+	/* `built` is set after burn_build() and cleared before burn_obj is
+	 * nulled, so it alone says the object is there. */
+	if (!built) {
 		return;
 	}
 	/*
@@ -2201,22 +2179,10 @@ void usage_view_hold_half(bool hold)
 
 void usage_view_set_burn5h(const struct burn5h *m, int64_t at_ms)
 {
-	int s = burn_slot_for(m->p);
+	/* Its own slot, else an empty one, else whichever was heard from
+	 * longest ago. */
+	int s = burn5h_slot_take(burn_slot, BURN_SLOTS, m->p);
 
-	if (s < 0) {
-		/* A provider not seen before: an empty slot, else whichever
-		 * was heard from longest ago. */
-		s = 0;
-		for (int i = 0; i < BURN_SLOTS; i++) {
-			if (!burn_slot[i].have) {
-				s = i;
-				break;
-			}
-			if (burn_slot[i].at_ms < burn_slot[s].at_ms) {
-				s = i;
-			}
-		}
-	}
 	burn_slot[s].m = *m;
 	burn_slot[s].at_ms = at_ms;
 	burn_slot[s].have = true;
@@ -2921,7 +2887,7 @@ static void refresh_provider1(void)
 	lv_obj_set_style_text_color(weekly.countdown,
 				    countdown_colour(&weekly), 0);
 	if (provider_lbl) {
-		char t[sizeof(provider1_tag)];
+		char t[PILL_TAG_BUF];
 
 		tag_cased(t, sizeof(t), tag);
 		lv_label_set_text(provider_lbl, t);

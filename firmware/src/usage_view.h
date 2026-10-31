@@ -4,6 +4,25 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/*
+ * A provider id as the board keeps it, NUL included: what proto.c reads
+ * `provider` and `p2` into, what a page is named by, and so what a burn line's
+ * `p` is matched against (burn5h.h BURN5H_TAG_MAX is this). Fifteen
+ * characters; the daemon's ids are "claude" and "codex" today.
+ *
+ * One figure for all three on purpose. The page tags were 12 bytes and
+ * proto.c read into 16, so an id of 12 to 15 characters named its page by
+ * its first eleven, while burn5h_parse(), which refuses a tag it would have
+ * to cut, refused every burn line for it (the /code-review max of
+ * 2026-11-01). An id longer than this still has its page named by the
+ * first fifteen (msg_get_str() truncates) and its burn lines refused, so it
+ * shows the session gauge and never another page's view -- the safe way to
+ * be wrong. The daemon sends nothing that long; if it ever needs to, this is
+ * the figure to move, and the pill, which shows the first eleven
+ * (usage_view.c PILL_TAG_BUF), does not move with it.
+ */
+#define USAGE_TAG_MAX		16
+
 /* Connection state, shown as a coloured dot. Mirrors the web UI's convention. */
 enum usage_status {
 	USAGE_STATUS_DISCONNECTED = 0,	/* grey  */
