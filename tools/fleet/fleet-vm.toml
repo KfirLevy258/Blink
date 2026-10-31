@@ -39,9 +39,9 @@ host_python = ".venv-test/bin/python"
 [hosts.local-mac]
 ssh = ""
 os = "darwin"
-# The board set aside for this fleet: 20500d3340dc on /dev/cu.usbserial-21430,
-# Claude edition, measured 2026-10-30 from its hello. It is the same board on
-# all three desks below, which is the point of this file.
+# The board set aside for this fleet: Claude edition, measured 2026-10-30 from
+# its hello. It is the same board on all three desks below, which is the point
+# of this file.
 board = "claude"   # VERIFY before the run
 python = ".venv-test/bin/python"
 workdir = "~/blink-fleet"
