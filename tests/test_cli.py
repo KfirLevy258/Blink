@@ -2160,22 +2160,48 @@ def test_status_says_when_the_account_has_no_five_hour_window(
     assert "Session     " not in capsys.readouterr().out
 
 
-def _ultra_desk_with_an_open_desktop_window(tmp_path, monkeypatch):
+def _ultra_desk_with_an_open_desktop_window(home, monkeypatch):
     """A weekly-only status line beside a Claude Desktop Local Storage
     record whose window is still open: the shape a Pro or Max desk has when
     a fresh process reads its status line just after a reset. The record is
-    generated and handed over where the LevelDB reader would return it."""
-    from pc import desktop_local_storage
+    generated and handed over where the LevelDB reader would return it.
+
+    `blink install` and the status line land inside the caller's `home` or
+    not at all (tests/support/home.py): from a script with the real HOME,
+    install would rewrite the desk's own Claude Code settings and the file
+    write would replace its live statusline.json. Both paths are asked of
+    the code, and checked, before anything is written."""
+    from pc import desktop_local_storage, statusline_source
     from tests.pc.test_claude_cli import payload
-    _settings(tmp_path, {})
+    status = inside(home, statusline_source.payload_path())
+    inside(home, cli.settings_path())
+    _settings(home, {})
     cli.main(["install"])
-    status = tmp_path / ".blink" / "statusline.json"
-    status.write_text(json.dumps(payload(five_hour=None, seven_day=2.0)))
+    with open(status, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload(five_hour=None, seven_day=2.0)))
     now = time.time()
     record = {"resetsAt": now + 4 * 3600, "utilization": 0.08,
               "observedAt": now - 300}
     monkeypatch.setattr(desktop_local_storage, "newest_record",
                         lambda path: dict(record))
+
+
+def test_the_ultra_desk_helper_writes_nothing_outside_the_callers_home(
+        tmp_path, monkeypatch):
+    """Handed a home that is not the one the code resolves -- a script
+    importing it with the real HOME -- it stops before `blink install`
+    runs, and before the status line is written."""
+    elsewhere = tmp_path / "not-home"
+    elsewhere.mkdir()
+    ran = []
+    monkeypatch.setattr(cli, "main", lambda argv: ran.append(argv))
+
+    with pytest.raises(AssertionError, match="outside the caller's home"):
+        _ultra_desk_with_an_open_desktop_window(elsewhere, monkeypatch)
+
+    assert ran == []
+    assert not (tmp_path / ".blink" / "statusline.json").exists()
+    assert list(elsewhere.iterdir()) == []
 
 
 def test_the_session_row_follows_the_merge_not_one_provider(
