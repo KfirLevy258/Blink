@@ -220,3 +220,23 @@ def test_update_says_the_service_was_not_restarted_and_fails(
     monkeypatch.setattr(cli, "_refresh_shims", lambda: None)
     assert cli.cmd_update(None) == 1
     _says_not_done(capsys.readouterr().out, "restarted")
+
+
+def test_every_ci_script_that_runs_the_binary_says_what_it_wants_of_the_service():
+    """A CI script runs the binary under a throwaway HOME. Since the binary
+    refuses the service from such a HOME, a script that says nothing gets
+    "the background service was NOT installed" and exit 1 -- every
+    check_claude_version.sh job failed that way in CI run 41192997263 -- and,
+    before that check existed, a real service registered on the runner. So a
+    script that runs "$BIN" or "$INSTALLED" has to ask for one or the other.
+    Read as text; these scripts are never run on a developer's machine."""
+    import pathlib
+    ci = pathlib.Path(__file__).resolve().parents[2] / "tests" / "ci"
+    runs = [p for p in sorted(ci.glob("check_*.sh"))
+            if '"$BIN"' in p.read_text() or '"$INSTALLED"' in p.read_text()]
+    assert {p.name for p in runs} >= {
+        "check_install.sh", "check_update.sh", "check_claude_version.sh"}
+    for p in runs:
+        text = p.read_text()
+        assert ("BLINK_SKIP_SERVICE" in text
+                or "BLINK_ALLOW_FOREIGN_HOME" in text), p.name
