@@ -198,6 +198,13 @@ void theme_burn_inks(const struct palette *p, bool contract,
 		     struct theme_burn_inks *k);
 
 /*
+ * theme_burn_inks() for the active palette, computed when it was selected
+ * (the walk is milliseconds of soft float; see theme.c). Dark is the
+ * contract theme, so the contract flag is cur_id == THEME_DARK.
+ */
+const struct theme_burn_inks *theme_cur_burn_inks(void);
+
+/*
  * A `{"t":"theme",...}` line, parsed and validated as a whole.
  *
  * Returns false -- and leaves *out unspecified -- for ANY bad value: an

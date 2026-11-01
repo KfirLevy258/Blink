@@ -216,9 +216,30 @@ static void check_palette(const char *name, const struct palette *p,
 	CHECK(p->arc_w >= 4 && p->arc_w <= THEME_ARC_W_MAX, m);
 }
 
+/*
+ * The burn view's cached inks (theme_cur_burn_inks) are what a fresh
+ * theme_burn_inks() of the active palette would give. The cache exists
+ * because the walk is milliseconds of soft float on the board and the draw
+ * callback used to run it on every draw (2026-11-01 re-review); a stale
+ * cache would paint one theme's bars on another's ground.
+ */
+static bool inks_cached_right(void)
+{
+	struct theme_burn_inks k;
+	const struct theme_burn_inks *c = theme_cur_burn_inks();
+
+	theme_burn_inks(theme_pal(), theme_active_id() == THEME_DARK, &k);
+	return c->hot == k.hot && c->cold == k.cold && c->base == k.base &&
+	       c->tick == k.tick;
+}
+
 int main(void)
 {
 	char m[160];
+
+	/* Boot: nothing selected yet, Dark is showing, and its inks with it. */
+	CHECK(theme_active_id() == THEME_DARK && inks_cached_right(),
+	      "burn inks before any select are Dark's");
 
 	/* --- Every built-in --- */
 	for (int id = 0; id < THEME_BUILTIN_N; id++) {
@@ -541,7 +562,25 @@ int main(void)
 	}
 	CHECK(theme_select_custom(&t) && theme_active_id() == THEME_CUSTOM &&
 	      theme_pal()->bg == 0x101418, "select a custom theme");
+	CHECK(inks_cached_right(), "burn inks follow a custom theme");
+	{
+		/* A refused custom theme leaves the custom one's inks. */
+		struct theme_custom bad = t;
+
+		bad.c[1] = bad.c[0];
+		CHECK(!theme_select_custom(&bad) && inks_cached_right(),
+		      "a refused custom theme keeps the burn inks it had");
+	}
+	for (int id = 0; id < THEME_BUILTIN_N; id++) {
+		theme_select(id);
+		snprintf(m, sizeof(m), "burn inks follow a select of %s",
+			 theme_name(id));
+		CHECK(inks_cached_right(), m);
+	}
+	CHECK(!theme_select(13) && inks_cached_right(),
+	      "a bad id keeps the burn inks it had");
 	theme_select(THEME_DARK);
+	CHECK(inks_cached_right(), "burn inks back on Dark");
 
 	/* --- Arc colour --- */
 	{

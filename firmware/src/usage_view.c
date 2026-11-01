@@ -1854,12 +1854,10 @@ static struct burn_drawn bd;
  * reach them (tests/theme checks every built-in's against its floor). Dark
  * starts from the contract's bytes because it is the theme the contract
  * names; THEME_CUSTOM made from Dark's colours is a custom theme and is
- * derived, as the builder page draws it.
+ * derived, as the builder page draws it. Read from theme.c's cache, filled
+ * when the theme is selected: the walk is soft float and cost 2-10 ms per
+ * draw when this callback ran it itself (2026-11-01 re-review).
  */
-static void burn_inks(struct theme_burn_inks *k)
-{
-	theme_burn_inks(theme_pal(), theme_active_id() == THEME_DARK, k);
-}
 
 static void burn_fill(lv_layer_t *layer, uint32_t rgb, int32_t x1, int32_t y1,
 		      int32_t x2, int32_t y2)
@@ -1898,10 +1896,8 @@ static void burn_draw_cb(lv_event_t *e)
 {
 	lv_layer_t *layer = lv_event_get_layer(e);
 	const struct palette *p = theme_pal();
-	struct theme_burn_inks k;
+	const struct theme_burn_inks *k = theme_cur_burn_inks();
 	int32_t x;
-
-	burn_inks(&k);
 
 	/* Bars first, then the baseline they stand on. An empty bucket draws
 	 * nothing at all: the baseline under it is the zero.
@@ -1919,11 +1915,11 @@ static void burn_draw_cb(lv_event_t *e)
 		}
 		x = BURN_BAR_X0 + i * BURN_BAR_PITCH;
 		burn_fill(layer,
-			  i >= BURN5H_N - BURN5H_HOUR_N ? k.hot : k.cold,
+			  i >= BURN5H_N - BURN5H_HOUR_N ? k->hot : k->cold,
 			  x, BURN_BASE_Y - bd.bar_h[i],
 			  x + BURN_BAR_W - 1, BURN_BASE_Y - 1);
 	}
-	burn_fill(layer, k.base, BURN_BAR_X0, BURN_BASE_Y,
+	burn_fill(layer, k->base, BURN_BAR_X0, BURN_BASE_Y,
 		  BURN_BAR_X0 + BURN5H_N * BURN_BAR_PITCH - 1, BURN_BASE_Y);
 
 	/* The hour axis: a tick at the left edge of each bucket that starts
@@ -1933,7 +1929,7 @@ static void burn_draw_cb(lv_event_t *e)
 			continue;
 		}
 		x = BURN_BAR_X0 + i * BURN_BAR_PITCH;
-		burn_fill(layer, k.tick, x, BURN_BASE_Y + 1, x,
+		burn_fill(layer, k->tick, x, BURN_BASE_Y + 1, x,
 			  BURN_BASE_Y + BURN_TICK_H);
 		burn_text(layer, bd.hour[i], &lv_font_montserrat_14,
 			  lv_color_hex(p->grey), x - BURN_HOUR_W / 2,
