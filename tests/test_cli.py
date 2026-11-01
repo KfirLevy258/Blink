@@ -2393,3 +2393,136 @@ def test_the_disclosure_names_every_usage_source_the_daemon_reads(capsys):
     said = " ".join(l.strip() for l in capsys.readouterr().out.splitlines())
     assert ("The usage figures come from Claude Code, Claude Desktop's usage"
             " cache and Local Storage, or the Codex session log") in said
+
+
+# The burn view's folder in the install disclosure. It printed
+# burn_reader.transcripts_root() as the installing shell resolves it, which
+# honours CLAUDE_CONFIG_DIR -- but the launchd and systemd services carry
+# only PYTHONUNBUFFERED, and the Windows task gets the account's registry
+# environment, not this window's. So on a desk that exports the variable in
+# .zshrc the note named a folder the daemon never reads (2026-11-01
+# re-review). It names the service's folder now, and says so when the shell
+# would have named another.
+
+SHELL_ONLY = "  CLAUDE_CONFIG_DIR is set in this shell, but the background"
+
+
+def _burn_folder(out):
+    lines = out.splitlines()
+    i = lines.index("  output-token count of each reply from Claude Code's"
+                    " transcripts:")
+    return lines[i + 1].strip(), lines[i + 2:]
+
+
+def _with_a_service(monkeypatch, service_sees=None):
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli._Backend, "creates", lambda self: "a service")
+    monkeypatch.setattr(cli._Backend, "service_claude_config_dir",
+                        lambda self: service_sees)
+
+
+def test_the_burn_folder_is_the_one_the_service_reads(tmp_path, capsys,
+                                                      monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    assert folder == str(tmp_path / ".claude" / "projects")
+    assert any(l.startswith(SHELL_ONLY) for l in after), after
+
+
+def test_without_claude_config_dir_nothing_more_is_said(tmp_path, capsys,
+                                                         monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / ".claude" / "projects")
+    assert "CLAUDE_CONFIG_DIR" not in out
+
+
+def test_a_service_that_sees_claude_config_dir_reads_it(tmp_path, capsys,
+                                                         monkeypatch):
+    """Windows, where it is a user environment variable (setx): the task
+    starts with it, so the folder is the shell's and nothing more is said."""
+    as_checkout(monkeypatch)
+    work = str(tmp_path / "work-config")
+    _with_a_service(monkeypatch, service_sees=work)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", work)
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == os.path.join(work, "projects")
+    assert "CLAUDE_CONFIG_DIR" not in out
+
+
+def test_with_no_service_the_folder_is_this_shells(tmp_path, capsys,
+                                                   monkeypatch):
+    """No service is registered (conftest's BLINK_SKIP_SERVICE, a Windows
+    checkout): the daemon is started by hand from a shell, which does see
+    the variable."""
+    as_checkout(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / "work-config" / "projects")
+    assert SHELL_ONLY not in out
+
+
+def test_launchd_and_systemd_hand_the_service_no_claude_config_dir(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    assert cli._LaunchdBackend().service_claude_config_dir() is None
+    assert cli._SystemdBackend().service_claude_config_dir() is None
+
+
+class _FakeWinreg:
+    """Just enough of winreg for the environment keys."""
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE = "HKCU", "HKLM"
+    REG_SZ, REG_EXPAND_SZ = 1, 2
+
+    def __init__(self, values):
+        self.values = values            # {(hive, name): (value, type)}
+
+    def OpenKey(self, hive, path):
+        assert path in ("Environment", cli.SYSTEM_ENV_KEY)
+        fake = self
+
+        class _Key:
+            def __enter__(self):
+                return hive
+
+            def __exit__(self, *a):
+                return False
+        if not any(h == hive for h, _ in fake.values):
+            raise FileNotFoundError(2, "no key")
+        return _Key()
+
+    def QueryValueEx(self, hive, name):
+        try:
+            return self.values[(hive, name)]
+        except KeyError:
+            raise FileNotFoundError(2, "no value") from None
+
+    @staticmethod
+    def ExpandEnvironmentStrings(s):
+        return s.replace("%USERPROFILE%", r"C:\Users\k")
+
+
+@pytest.mark.parametrize("values, want", [
+    ({}, None),
+    ({("HKLM", "CLAUDE_CONFIG_DIR"): (r"D:\cc", 1)}, r"D:\cc"),
+    ({("HKCU", "CLAUDE_CONFIG_DIR"): (r"E:\mine", 1),
+      ("HKLM", "CLAUDE_CONFIG_DIR"): (r"D:\cc", 1)}, r"E:\mine"),
+    ({("HKCU", "CLAUDE_CONFIG_DIR"): (r"%USERPROFILE%\cc", 2)},
+     r"C:\Users\k\cc"),
+    ({("HKCU", "CLAUDE_CONFIG_DIR"): ("", 1)}, None),
+])
+def test_the_windows_task_sees_the_accounts_environment(monkeypatch, values,
+                                                        want):
+    """Task Scheduler (and the Run key's Explorer) start the daemon with the
+    account's environment from the registry -- the user's variable over the
+    machine's -- and never with the installing window's."""
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(values))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", r"F:\only-in-this-window")
+    assert cli._SchtasksBackend().service_claude_config_dir() == want

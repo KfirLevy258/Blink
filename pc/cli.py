@@ -1405,6 +1405,17 @@ class _Backend:
         """Whether install(), run from a checkout, starts the checkout."""
         return False
 
+    def service_claude_config_dir(self):
+        """CLAUDE_CONFIG_DIR as the installed service will see it, or None.
+
+        None here, for launchd and systemd: the plist and the unit hand the
+        daemon PYTHONUNBUFFERED and nothing else, and neither starts it from
+        the shell that exported anything. (A desk that put the variable in
+        `launchctl setenv` or ~/.config/environment.d would be seen; that is
+        not where anyone is told to put it, and Claude Code's own docs say
+        to export it in the shell.)"""
+        return None
+
     def registered_argv(self):
         """What the registered service runs, minus `run`, as its file says;
         None if nothing is registered or the file is not one we wrote.
@@ -1806,6 +1817,10 @@ class _LaunchdBackend(_Backend):
 # _SchtasksBackend._install_without_a_task for what it is a fallback FROM.
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = TASK_NAME
+# Where the machine-wide environment variables live, under HKLM. The
+# account's own are HKCU\Environment.
+SYSTEM_ENV_KEY = (r"SYSTEM\CurrentControlSet\Control\Session Manager"
+                  r"\Environment")
 
 
 def _winreg():
@@ -1893,6 +1908,29 @@ class _SchtasksBackend(_Backend):
         if not _frozen():
             return ("a checkout on Windows gets no login service; start it"
                     f" by hand with: {command_to_type()} run")
+        return None
+
+    def service_claude_config_dir(self):
+        # Task Scheduler starts the task, and Explorer the Run key's entry,
+        # with the account's environment as the registry holds it -- the
+        # user's variable over the machine's, as Windows itself resolves
+        # them -- and never with the window `blink install` was typed in.
+        # So a `setx CLAUDE_CONFIG_DIR` is seen and a `set` or `$env:` is
+        # not.
+        winreg = _winreg()
+        if winreg is None:
+            return None
+        for hive, path in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                           (winreg.HKEY_LOCAL_MACHINE, SYSTEM_ENV_KEY)):
+            try:
+                with winreg.OpenKey(hive, path) as key:
+                    value, kind = winreg.QueryValueEx(key,
+                                                      "CLAUDE_CONFIG_DIR")
+            except OSError:
+                continue
+            if kind == winreg.REG_EXPAND_SZ:
+                value = winreg.ExpandEnvironmentStrings(value)
+            return value or None
         return None
 
     def registered_argv(self):
@@ -2950,16 +2988,33 @@ def _announce():
     # the customer's whole working sessions -- so the one place that tells
     # them what is read has to say so. Conditional in fact, not in print:
     # install cannot know the verdict yet, so it says when it happens.
-    # The folder is the reader's own, so CLAUDE_CONFIG_DIR is honoured here
-    # exactly as it is there.
+    #
+    # The folder is the one the daemon will read, which is not always the
+    # one this shell would: the reader honours CLAUDE_CONFIG_DIR, but a
+    # login service does not start from this shell. launchd and systemd
+    # hand it none of the variable, and the Windows task gets the account's
+    # registry environment (service_claude_config_dir). Printed as this
+    # shell resolved it, the note named a folder the daemon never reads on
+    # any desk that exports the variable in its shell profile (2026-11-01
+    # re-review). Where no service is registered, the daemon is started by
+    # hand from a shell, and the shell's folder is the true one.
     from pc import burn_reader
+    shell_root = burn_reader.transcripts_root()
+    root = shell_root
+    if backend().creates() and not _skip_service():
+        env = {"CLAUDE_CONFIG_DIR":
+               backend().service_claude_config_dir() or ""}
+        root = burn_reader.transcripts_root(env)
     # On a line of its own, like the paths above: a home folder's length is
     # unbounded, and inline it ran the paragraph off its margin.
     print("  On an account with no five-hour limit, it also reads the")
     print("  output-token count of each reply from Claude Code's transcripts:")
-    print(f"    {burn_reader.transcripts_root()}")
+    print(f"    {root}")
     print("  It holds those counts in memory and sends the board only a total")
     print("  per quarter-hour, never the conversation.")
+    if os.environ.get("CLAUDE_CONFIG_DIR") and root != shell_root:
+        print("  CLAUDE_CONFIG_DIR is set in this shell, but the background")
+        print("  service does not see it, so it reads the folder above.")
     print()
     print(f"  To undo all of it:  {command_to_type()} uninstall")
     print()
