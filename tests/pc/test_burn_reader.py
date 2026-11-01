@@ -7,6 +7,10 @@ boundaries, output tokens only, read incrementally, de-duplicated on
 tests/support/transcripts.py; none is captured from a machine.
 """
 import os
+import stat
+import sys
+
+import pytest
 
 from pc import burn_reader as br
 from tests.support import transcripts as tx
@@ -843,6 +847,52 @@ def test_a_project_that_never_lists_stops_holding_the_view_back(
     assert sum(r.poll(NOW + (br.READ_TRIES + 1) * LATER)[1]) == 13
     out, err = capsys.readouterr()
     assert err.count("\n") == 1 and "locked" not in err, err
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0,
+                    reason="chmod does not refuse a listing on Windows or "
+                           "to root")
+def test_a_root_refused_after_a_project_was_left_out_leaves_it_left_out(
+        tmp_path, capsys):
+    """A walk whose projects folder cannot be listed lists nothing under
+    it, so it says nothing about the projects in it. The bookkeeping used to
+    be rebuilt from that walk's refusals alone, which held only the root:
+    the project already left out was dropped from it, bridge.log was told
+    "every project directory lists again" when none had, and once the root
+    listed again the project was waited for READ_TRIES walks more, as if
+    it had never been refused (2026-11-01 re-review). Real permissions
+    here, not a faked scandir, because the failure is the shape of a real
+    walk under a folder chmod has closed."""
+    tx.write(tmp_path, session(tmp_path), [a(1, start(19), 8)], mtime=NOW)
+    other = projects(tmp_path) / "-work-locked"
+    tx.write(tmp_path, other / "s.jsonl", [a(2, start(19), 5)], mtime=NOW)
+    root = projects(tmp_path)
+    r = reader(tmp_path)
+    t = NOW
+    try:
+        other.chmod(0)
+        got = [r.poll(t + k * LATER) for k in range(br.READ_TRIES)]
+        t += br.READ_TRIES * LATER
+        assert sum(got[-1][1]) == 8
+        assert capsys.readouterr().err == br.SAID_LEFT_OUT + "\n"
+
+        root.chmod(0)
+        assert r.poll(t) is None
+        t += LATER
+        assert capsys.readouterr().err == br.SAID_ROOT_REFUSED + "\n"
+
+        # The root lists again; the project still does not, and it is still
+        # left out -- no wait, no second "cannot be listed", no "whole".
+        root.chmod(stat.S_IRWXU)
+        assert sum(r.poll(t)[1]) == 8
+        t += LATER
+        assert capsys.readouterr().err == br.SAID_ROOT_LISTS + "\n"
+    finally:
+        root.chmod(stat.S_IRWXU)
+        other.chmod(stat.S_IRWXU)
+    # And now it does list, which is the one time to say so.
+    assert sum(r.poll(t)[1]) == 13
+    assert capsys.readouterr().err == br.SAID_WHOLE + "\n"
 
 
 def test_a_project_given_up_on_does_not_keep_deleted_files(tmp_path,

@@ -186,21 +186,24 @@ _NEEDLE = b'"output_tokens"'
 _GONE = (FileNotFoundError, NotADirectoryError)
 
 
-def transcripts_root() -> str:
+def transcripts_root(environ=None) -> str:
     """Where Claude Code keeps its transcripts, worked out now.
 
     Inside a function and never at import, so tests/conftest.py's sandbox
     applies (tests/test_sandbox.py fails on the other shape). CLAUDE_CONFIG_
     DIR outranks HOME, as it does for Claude Code. A login service does not
     run in the shell that exported it, though, so on a desk that sets it in
-    .zshrc the daemon still looks under ~/.claude.
+    .zshrc the daemon still looks under ~/.claude. `environ` (os.environ when
+    None) is for the install disclosure, which has to name the folder as the
+    service will see it rather than as its own shell does.
 
     Joined from the home directory rather than expanded from "~/.claude":
     on Windows expanduser keeps the slash it was given, and the Windows VM
     suite (2026-10-31) measured the root as "...\\dir0/.claude\\projects",
     one forward slash among backslashes.
     """
-    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = (os.environ if environ is None else environ).get(
+        "CLAUDE_CONFIG_DIR")
     base = (os.path.expanduser(base) if base
             else os.path.join(os.path.expanduser("~"), ".claude"))
     return os.path.join(base, "projects")
@@ -404,12 +407,24 @@ class BurnReader:
         # directory holds; it is still listed on every walk, and counted the
         # moment it lists. The projects directory itself is never given up
         # on: without it there is no sum at all to send short.
-        self._refusals = {d: self._refusals.get(d, 0) + 1 for d in refused}
-        waiting = [d for d in refused
-                   if d == root or self._refusals[d] < READ_TRIES]
-        self._listed = not waiting
-        left_out = any(d != root and self._refusals[d] >= READ_TRIES
-                       for d in refused)
+        #
+        # A walk whose root was refused (or vanished) listed nothing under
+        # it, so it is no news about any project: the projects' counts and
+        # SAID_LEFT_OUT are left as they were. Rebuilt from this walk alone,
+        # a project already left out was dropped from the counts, bridge.log
+        # was told SAID_WHOLE when nothing had listed, and once the root came
+        # back the project was waited for READ_TRIES walks over again
+        # (2026-11-01 re-review, reproduced with chmod).
+        if root in refused:
+            self._refusals[root] = self._refusals.get(root, 0) + 1
+            self._listed = False
+        else:
+            self._refusals = {d: self._refusals.get(d, 0) + 1
+                              for d in refused}
+            self._listed = all(self._refusals[d] >= READ_TRIES
+                               for d in refused)
+        left_out = any(d != root and n >= READ_TRIES
+                       for d, n in self._refusals.items())
         if left_out != self._left_out_said:
             self._left_out_said = left_out
             print(SAID_LEFT_OUT if left_out else SAID_WHOLE, file=sys.stderr)
