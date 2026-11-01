@@ -325,7 +325,13 @@ class BurnReader:
         self._chunk = chunk_bytes
         self._max_line = max_line_bytes
         self._files = {}            # path -> _File
-        # (message.id, requestId) -> [bucket, tokens counted for it]
+        # (message.id, requestId) -> [bucket it is counted in, tokens
+        # counted for it, the latest bucket it was seen stamped in]. Two
+        # buckets, because a copy can be counted in an earlier quarter-hour
+        # than it is stamped in (_count_line), and the key must outlive the
+        # LATER one: forgotten with the earlier, a copy still inside the
+        # window was counted again when its file was read from the start
+        # (3rd review, 2026-11-01).
         self._seen = {}
         self._buckets = {}          # bucket start, epoch s -> output tokens
         self._walked_at = None
@@ -435,21 +441,24 @@ class BurnReader:
         # moment it lists. The projects directory itself is never given up
         # on: without it there is no sum at all to send short.
         #
-        # A walk whose root was refused (or vanished) listed nothing under
-        # it, so it is no news about any project: the projects' counts and
-        # SAID_LEFT_OUT are left as they were. Rebuilt from this walk alone,
-        # a project already left out was dropped from the counts, bridge.log
-        # was told SAID_WHOLE when nothing had listed, and once the root came
-        # back the project was waited for READ_TRIES walks over again
-        # (2026-11-01 re-review, reproduced with chmod).
-        if root in refused:
-            self._refusals[root] = self._refusals.get(root, 0) + 1
-            self._listed = False
-        else:
-            self._refusals = {d: self._refusals.get(d, 0) + 1
-                              for d in refused}
-            self._listed = all(self._refusals[d] >= READ_TRIES
-                               for d in refused)
+        # A refused directory hides everything under it, so this walk is no
+        # news about any directory below one: its count is kept as it was,
+        # neither raised nor dropped. Rebuilt from this walk alone, a
+        # directory already left out was dropped from the counts, bridge.log
+        # was told SAID_WHOLE when nothing had listed, and once its parent
+        # listed again it was waited for READ_TRIES walks over and said left
+        # out a second time. Found first for the root (2026-11-01 re-review,
+        # reproduced with chmod), then for any directory between the root
+        # and a refused one (3rd review): Codex's sessions/YYYY/MM/DD makes
+        # that the normal shape, and Claude's <project>/<session>/subagents
+        # has it too. The root is the outermost case of the same rule.
+        hidden_by = tuple(os.path.join(d, "") for d in refused)
+        refusals = {d: self._refusals.get(d, 0) + 1 for d in refused}
+        refusals.update((d, n) for d, n in self._refusals.items()
+                        if d not in refusals and d.startswith(hidden_by))
+        self._refusals = refusals
+        self._listed = root not in refused and all(
+            refusals[d] >= READ_TRIES for d in refused)
         left_out = any(d != root and n >= READ_TRIES
                        for d, n in self._refusals.items())
         if left_out != self._left_out_said:
@@ -485,7 +494,7 @@ class BurnReader:
         self._kept_from = oldest
         for b in [b for b in self._buckets if b < oldest]:
             del self._buckets[b]
-        for k in [k for k, v in self._seen.items() if v[0] < oldest]:
+        for k in [k for k, v in self._seen.items() if v[2] < oldest]:
             del self._seen[k]
 
     def _drain(self, oldest, budget):
@@ -617,8 +626,14 @@ class BurnReader:
             return
         had = self._seen.get(key)
         if had is None:
-            self._seen[key] = [bucket, out]
+            self._seen[key] = [bucket, out, bucket]
             self._buckets[bucket] = self._buckets.get(bucket, 0) + out
+            return
+        had[2] = max(had[2], bucket)
+        if had[0] < oldest:
+            # Counted in a quarter-hour that has left the window, and kept
+            # only so that this copy, stamped later, is recognised. Nothing
+            # to move and no bar to add to.
             return
         if bucket < had[0]:
             # The same message, stamped earlier than where it was counted:

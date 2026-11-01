@@ -304,6 +304,40 @@ def test_an_event_copied_into_another_rollout_counts_once(tmp_path):
     assert (b[15], b[16], b[19]) == (1000, 500, 300)
 
 
+@pytest.mark.parametrize("parent_mtime", [NOW - 5, NOW - 3],
+                         ids=["copy-read-first", "original-read-first"])
+def test_a_copy_read_again_after_its_original_left_the_window_counts_once(
+        tmp_path, parent_mtime):
+    """3rd review (burn_reader:623): a copy read first is counted at its own
+    stamp, then moved to its original's earlier bucket when the original is
+    found. _prune forgot the key when that earlier quarter-hour left the
+    window, though the copy was still inside it, so the fork read again
+    from its start (a new inode here) counted the copy a second time, in
+    its own bar. A key is kept until the latest stamp it was seen with
+    leaves the window. Either file read first: with the original first,
+    the copy's later stamp was never recorded at all."""
+    ro.write(tmp_path, rollout(tmp_path, "rollout-parent.jsonl"),
+             [ro.token_count(start(0) + 10, 777)], mtime=parent_mtime)
+    fork_lines = [ro.token_count(start(10) + 10, 777),       # re-stamped
+                  ro.token_count(start(10) + 20, 782, 5)]    # its own
+    fork = ro.write(tmp_path, rollout(tmp_path, "rollout-fork.jsonl"),
+                    fork_lines, mtime=NOW - 4)
+    r = reader(tmp_path)
+    _, b = r.poll(NOW)
+    assert (b[0], b[10], sum(b)) == (777, 5, 782)
+
+    later = NOW + 900                  # bucket 0 leaves the window
+    _, b = r.poll(later)
+    assert sum(b) == 5
+
+    fresh = ro.write(tmp_path, str(tmp_path / "fork-rewritten.jsonl"),
+                     fork_lines, mtime=later - 4)
+    os.replace(fresh, fork)
+    _, b = r.poll(later + LATER)
+
+    assert sum(b) == 5 and b[9] == 5
+
+
 def test_no_codex_sessions_folder_says_nothing(tmp_path):
     assert reader(tmp_path).poll(NOW) is None
 
@@ -339,6 +373,52 @@ def test_a_refused_sessions_folder_is_told_in_codexs_words(tmp_path, capsys):
     finally:
         root.chmod(0o755)
     assert capsys.readouterr().err == br.CODEX_SAID_ROOT_REFUSED + "\n"
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid")
+                                        and os.geteuid() == 0),
+                    reason="POSIX permissions; root lists everything")
+def test_a_refused_month_keeps_a_day_already_left_out_left_out(
+        tmp_path, capsys):
+    """3rd review (burn_reader:445): the root's special case did not cover
+    a refused intermediate directory, which hides what is under it the same
+    way, and in sessions/YYYY/MM/DD nesting is the normal case. With the
+    day already left out, refusing its month rebuilt the counts from that
+    walk alone: the day was dropped, bridge.log was told every directory
+    lists again when nothing had, and once the month listed the day was
+    waited for READ_TRIES walks over and said left out a second time. Real
+    permissions on a generated tree."""
+    ro.write(tmp_path, ro.rollout_path(sessions(tmp_path), "2026/10/31"),
+             [ro.token_count(start(19), 11)], mtime=NOW)
+    ro.write(tmp_path, ro.rollout_path(sessions(tmp_path), "2026/11/01"),
+             [ro.token_count(start(19), 5)], mtime=NOW)
+    month = sessions(tmp_path) / "2026" / "11"
+    day = month / "01"
+    r = reader(tmp_path)
+    t = NOW
+    try:
+        day.chmod(0)
+        got = [r.poll(t + k * LATER) for k in range(br.READ_TRIES)]
+        t += br.READ_TRIES * LATER
+        assert sum(got[-1][1]) == 11
+        assert capsys.readouterr().err == br.CODEX_SAID_LEFT_OUT + "\n"
+
+        month.chmod(0)
+        r.poll(t)
+        t += LATER
+        assert capsys.readouterr().err == ""
+
+        # The month lists again, the day still does not: still left out,
+        # no wait, nothing said.
+        month.chmod(0o755)
+        assert sum(r.poll(t)[1]) == 11
+        t += LATER
+        assert capsys.readouterr().err == ""
+    finally:
+        month.chmod(0o755)
+        day.chmod(0o755)
+    assert sum(r.poll(t)[1]) == 16
+    assert capsys.readouterr().err == br.CODEX_SAID_WHOLE + "\n"
 
 
 # ------------------------------------------------------------- the mark
