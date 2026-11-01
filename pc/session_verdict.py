@@ -206,8 +206,13 @@ class SessionVerdict:
         self._persist = persist
         self._current = None
         self._loaded = False
-        # The state on disk as this process last knew it (True, False, or
-        # None for no file), and when a write last failed (None: it has not).
+        # The state on disk as this process last knew it, (has_window,
+        # kind), or None for no file; and when a write last failed (None:
+        # it has not). The kind as well as the state: an Ultra desk marked
+        # first on its plan file (KIND_STATUSLINE_ULTRA) and then by the
+        # sustained chain is the same state on a different proof, and
+        # `blink status`, which reads the file, names the proof (the
+        # review of PR #6, 2026-11-01).
         self._on_disk = None
         self._failed_at = None
 
@@ -220,7 +225,7 @@ class SessionVerdict:
             self._loaded = True
             self._current = load(self.path())
             self._on_disk = (None if self._current is None
-                             else self._current[0])
+                             else self._current[:2])
         return self._current
 
     def observe(self, frames, now_epoch):
@@ -237,8 +242,10 @@ class SessionVerdict:
         if ev is not None and (cur is None
                                or (ev[2], ev[0]) > (cur[2], cur[0])):
             self._current = cur = ev
-        # Written when the verdict differs from what is on disk, which on a
-        # desk is once and then never. Not only on the poll where it flips:
+        # Written when the verdict or the kind of its proof differs from
+        # what is on disk, which on a desk is once or twice and then never;
+        # a newer proof of the same kind is not written. Not only on the
+        # poll where it changes:
         # a write that failed then is tried again, at most once a
         # SAVE_RETRY_S, until it lands -- or at once if the clock has gone
         # back past the failure, the arm ingest._cooldown_over and
@@ -246,11 +253,11 @@ class SessionVerdict:
         # step back of an hour held the retry off for that hour, and a
         # restart in it read the superseded verdict (the re-review of
         # 2026-11-01, finding 15).
-        if (self._persist and cur is not None and cur[0] != self._on_disk
+        if (self._persist and cur is not None and cur[:2] != self._on_disk
                 and (self._failed_at is None
                      or not 0 <= now_epoch - self._failed_at < SAVE_RETRY_S)):
             if save(self.path(), cur):
-                self._on_disk = cur[0]
+                self._on_disk = cur[:2]
                 self._failed_at = None
             else:
                 self._failed_at = now_epoch

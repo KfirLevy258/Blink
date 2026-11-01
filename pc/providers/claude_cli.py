@@ -247,6 +247,12 @@ class ClaudeCliProvider(base.ProviderParser):
         # claude_plan.config_path(), asked at each look, for the reason
         # self._path is.
         self._plan = claude_plan.PlanReader(path=plan_path)
+        # The mtime of the newest five_hour this process has seen rendered,
+        # from any session, or None. The fast path is refused within
+        # base.SESSION_WINDOW_S of it (_reply_without_window). Never
+        # cleared, not even when the clock goes back: an Ultra desk never
+        # renders five_hour, so on one it is always None and costs nothing.
+        self._five_seen = None
 
     def _note_fetch(self, payload, mtime, now_epoch):
         """Record this sighting of the payload's block; return its fetch time.
@@ -353,16 +359,19 @@ class ClaudeCliProvider(base.ProviderParser):
 
         THE FAST PATH, on the Ultra plan (owner's request, 2026-11-01:
         Ultra desks switch on the first reply again). When Claude Code's
-        .claude.json names the Ultra plan (pc/claude_plan: planDisplayName
-        "Ultra", or with no planDisplayName a rate-limit tier ending in
-        max_20x), ONE reply -- recognised exactly as below, cost risen
+        config names the Ultra plan (pc/claude_plan: a rate-limit tier ending
+        in max_20x, and a planDisplayName of "Ultra" or none), ONE reply -- recognised exactly as below, cost risen
         against a baseline at most BASELINE_MAX_S old -- that rendered a
         usable seven_day and no five_hour is proof, kind
         KIND_STATUSLINE_ULTRA. The sustained rule below exists because one
         such reply happens on Pro and Max as well, around a reset; a plan
         that is not Ultra never takes this path, and neither does a desk
         whose file is missing, unreadable, corrupt, too big or of any other
-        shape. Each of those keeps the sustained rule. The window evidence
+        shape. Each of those keeps the sustained rule. Nor does a desk that
+        has rendered five_hour within a window of the reply (self.
+        _five_seen): an account with a window lately is exactly where one
+        weekly-only reply happens without proving anything, and the plan
+        name in the file can be a day behind a downgrade. The window evidence
         is unchanged: an Ultra account Anthropic has not yet verified still
         has a temporary five-hour limit, and its next reply renders
         five_hour, which is newer than the mark and lifts it (_frame). So
@@ -485,6 +494,8 @@ class ClaudeCliProvider(base.ProviderParser):
                 del self._costs[next(iter(self._costs))]
         if ss.window_present(limits, "five_hour"):
             self._chain = None
+            if self._five_seen is None or mtime > self._five_seen:
+                self._five_seen = mtime
             return None
         if before is None or cost is None or before[0] is None:
             return None
@@ -509,9 +520,26 @@ class ClaudeCliProvider(base.ProviderParser):
         self._chain = chain
         if chain[1] - chain[0] >= CHAIN_SPAN_S:
             # Said as the sustained proof even on Ultra: it does not rest on
-            # a file Claude Code may rewrite, and `blink status` names it.
+            # a file Claude Code may rewrite. It is newer than an Ultra
+            # mark made earlier in the day, and of another kind, so the
+            # verdict file is rewritten with it (session_verdict.observe)
+            # and `blink status` names it from then on.
             return session_verdict.evidence(
                 False, session_verdict.KIND_STATUSLINE_SUSTAINED, mtime)
+        # Refused while a five_hour has been rendered within a window of
+        # this reply, or after it (a clock gone back): this desk's account
+        # has had a window lately, and the plan file may be a day behind
+        # (pc/claude_plan). Every way one weekly-only reply happens on a
+        # plan with windows -- a request streaming across a reset, two
+        # processes on one session, an old terminal's repaint, a clock
+        # running fast -- happens on a desk that renders five_hour around
+        # it, so on such a desk only the sustained rule above can mark
+        # (the review of PR #6, 2026-11-01: 27 of the 169 tests in
+        # test_no_session_window.py marked a Pro desk under an Ultra file).
+        # A verified Ultra desk never renders one, and loses nothing.
+        if (self._five_seen is not None
+                and mtime - self._five_seen < base.SESSION_WINDOW_S):
+            return None
         # Asked last, only of a reply that already qualifies, so a desk
         # with a window stats the file only around a reset.
         if self._plan.ultra(mtime if now_epoch is None else now_epoch):

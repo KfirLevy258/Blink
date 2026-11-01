@@ -120,8 +120,8 @@ def test_the_bus_marks_the_page_and_saves_the_kind(tmp_path):
 
 @pytest.mark.parametrize("name,tier", [
     ("Ultra", "default_claude_max_20x"),
-    ("  ultra ", MISSING),
-    ("ULTRA", "default_claude_pro"),        # the name decides when present
+    ("  ultra ", "default_claude_max_20x"),
+    ("ULTRA", "max_20x"),
     (MISSING, "default_claude_max_20x"),
     (None, "default_claude_max_20x"),
     ("", "default_claude_max_20x"),
@@ -140,7 +140,16 @@ def test_these_read_as_ultra(tmp_path, name, tier):
     ("Max", "default_claude_max_5x"),
     ("Pro", "default_claude_pro"),
     ("Max 5x", MISSING),
-    ("Ultra Plus", MISSING),
+    ("Ultra Plus", "default_claude_max_20x"),
+    # A stale name beside a current tier: Claude Code refreshes the tier on
+    # nearly every launch and the name only with a profile over a day old,
+    # never under CLAUDE_CODE_OAUTH_TOKEN (the review of PR #6, 2026-11-01).
+    ("Ultra", "default_claude_pro"),
+    ("Ultra", "default_claude_max_5x"),
+    ("ULTRA", "default_claude_pro"),
+    ("Ultra", MISSING),
+    ("Ultra", None),
+    ("Ultra", 20),
     (MISSING, "default_claude_max_5x"),
     (MISSING, "default_claude_pro"),
     (MISSING, "max_20x_but_not_at_the_end"),
@@ -148,6 +157,8 @@ def test_these_read_as_ultra(tmp_path, name, tier):
     (7, "default_claude_max_20x"),          # a name of another type
     (MISSING, 20),
 ], ids=["max over a 20x tier", "max", "pro", "max 5x", "ultra plus",
+        "ultra over pro tier", "ultra over 5x tier", "upper over pro tier",
+        "ultra no tier", "ultra null tier", "ultra number tier",
         "5x tier", "pro tier", "20x not at the end", "neither",
         "number name", "number tier"])
 def test_pro_and_max_never_take_the_fast_path(tmp_path, name, tier):
@@ -188,6 +199,42 @@ def test_a_five_hour_after_the_mark_clears_it_at_once(tmp_path):
     assert bus.claude_page().no_session_window is False
     assert msg["session_pct"] == 12.0
     assert session_verdict.load(session_verdict.verdict_path())[0] is True
+
+
+def test_a_five_hour_lately_refuses_the_fast_path_for_a_window(tmp_path):
+    """The review of PR #6, 2026-11-01: under an Ultra file, 27 of the 169
+    tests in test_no_session_window.py marked desks that render five_hour
+    -- a stream across a reset, a fast clock, an old terminal's repaint. A
+    five_hour seen from any session refuses the fast path for
+    SESSION_WINDOW_S after its render; a verified Ultra desk renders none."""
+    put_config(tmp_path, plan_doc())
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+    five_at = NOW - 6 * 3600
+    write(p, status(cost=5.0, session="other", five=40.0,
+                    five_resets=five_at + 600), five_at)
+    prov.poll(five_at + 1)
+
+    inside_window = five_at + claude_cli.base.SESSION_WINDOW_S - 1
+    assert one_reply(prov, p, inside_window) is None
+    after = five_at + claude_cli.base.SESSION_WINDOW_S + 300
+    assert one_reply(prov, p, after) == (False, ULTRA, float(after))
+
+
+def test_a_five_hour_dated_after_the_reply_refuses_it_too(tmp_path):
+    """A clock gone back between renders, the polls' own clock running on:
+    the five_hour is newer than the reply, and still refuses it."""
+    put_config(tmp_path, plan_doc())
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+    write(p, status(cost=5.0, session="other", five=40.0,
+                    five_resets=NOW + 3600), NOW)
+    prov.poll(NOW + 1)
+    t = NOW - 3 * 3600
+    write(p, status(cost=1.0), t - 120)
+    prov.poll(NOW + 2)
+    write(p, status(cost=1.25), t)
+    assert prov.poll(NOW + 3)[0].window_evidence is None
 
 
 def test_a_repaint_on_ultra_is_no_reply(tmp_path):
@@ -244,24 +291,51 @@ BAD = {
 }
 
 
+def falls_back(prov, p):
+    """One qualifying reply proves nothing, and the sustained chain then
+    proves no window with every reply in it weighed again: each of the
+    chain's replies qualifies for the fast path on its own, so a file
+    misread as Ultra shows as an Ultra mark on the first of them, not only
+    on the lone reply. Until the review of PR #6 (2026-11-01) only the
+    chain's last frame was looked at, and that is SUSTAINED whatever the
+    plan reads, because the chain is asked first."""
+    assert one_reply(prov, p, NOW - 9 * 3600) is None
+    kinds = []
+
+    def poll(now):
+        frames = prov.poll(now)
+        kinds.extend(f.window_evidence[1] for f in frames
+                     if f.window_evidence is not None
+                     and f.window_evidence[0] is False)
+        return frames
+
+    got = replied(poll, p, NOW - 1)
+    assert got[0].window_evidence == (False, SUSTAINED, float(NOW - 1))
+    assert kinds == [SUSTAINED]
+
+
 @pytest.mark.parametrize("raw", list(BAD.values()), ids=list(BAD))
 def test_a_file_that_will_not_read_falls_back_to_the_sustained_rule(
         tmp_path, raw):
     put_config(tmp_path, raw=raw)
     p = tmp_path / "statusline.json"
-    prov = ClaudeCliProvider(path=str(p))
-    assert one_reply(prov, p, NOW - 9 * 3600) is None
-    got = replied(lambda now: prov.poll(now), p, NOW - 1)
-    assert got[0].window_evidence == (False, SUSTAINED, float(NOW - 1))
+    falls_back(ClaudeCliProvider(path=str(p)), p)
 
 
 def test_a_missing_file_falls_back_to_the_sustained_rule(tmp_path):
     assert not os.path.exists(claude_plan.config_path())
     p = tmp_path / "statusline.json"
-    prov = ClaudeCliProvider(path=str(p))
-    assert one_reply(prov, p, NOW - 9 * 3600) is None
-    got = replied(lambda now: prov.poll(now), p, NOW - 1)
-    assert got[0].window_evidence == (False, SUSTAINED, float(NOW - 1))
+    falls_back(ClaudeCliProvider(path=str(p)), p)
+
+
+def test_the_fallback_check_fails_on_a_misread_file(tmp_path, monkeypatch):
+    """falls_back() must be able to fail: with the plan read as Ultra,
+    the chain's first reply is an Ultra mark."""
+    put_config(tmp_path, raw=b"{")
+    monkeypatch.setattr(claude_plan, "read", lambda p, st=None: True)
+    p = tmp_path / "statusline.json"
+    with pytest.raises(AssertionError):
+        falls_back(ClaudeCliProvider(path=str(p)), p)
 
 
 def test_an_unreadable_file_is_not_ultra(tmp_path):
@@ -272,15 +346,75 @@ def test_an_unreadable_file_is_not_ultra(tmp_path):
     assert one_reply(ClaudeCliProvider(path=str(p)), p, NOW - 60) is None
 
 
-def test_a_file_over_the_cap_is_not_read(tmp_path):
+def test_a_file_over_the_cap_is_not_read(tmp_path, monkeypatch):
     """Ultra in the first bytes, and too big to parse on the serial
-    thread: not read, so not Ultra."""
+    thread: not even opened, its size being the stat's, so not Ultra."""
     head = json.dumps(plan_doc())[:-1] + ', "pad": "'
     raw = (head + "x" * claude_plan.MAX_BYTES + '"}').encode()
     put_config(tmp_path, raw=raw)
-    assert claude_plan.read(claude_plan.config_path()) is None
+    opened = []
+    real_open = claude_plan.os.open
+    monkeypatch.setattr(claude_plan.os, "open",
+                        lambda *a, **k: opened.append(1) or real_open(*a, **k))
+    assert claude_plan.read(claude_plan.config_path()) is False
     p = tmp_path / "statusline.json"
     assert one_reply(ClaudeCliProvider(path=str(p)), p, NOW - 60) is None
+    assert opened == []
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+def test_a_fifo_is_not_opened(tmp_path):
+    """A FIFO where the file should be blocked open() forever, and the
+    serial thread with it: the board went to HOST LOST (the review of
+    PR #6, 2026-11-01). Anything but a regular file is not opened."""
+    path = inside(tmp_path, claude_plan.config_path())
+    os.mkfifo(path)
+    assert claude_plan.read(path) is False
+    assert claude_plan.PlanReader().ultra(NOW) is False
+    p = tmp_path / "statusline.json"
+    assert one_reply(ClaudeCliProvider(path=str(p)), p, NOW - 60) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+def test_a_fifo_that_takes_the_files_place_after_the_stat_is_refused(
+        tmp_path):
+    """The stat said a regular file; by the open it is a FIFO. The open
+    does not block, and the read is tried again at the next look."""
+    path = put_config(tmp_path, plan_doc())
+    st = os.stat(path)
+    os.remove(path)
+    os.mkfifo(path)
+    assert claude_plan.read(path, st) is None
+
+
+def test_a_file_written_while_it_is_read_is_tried_again(tmp_path):
+    path = put_config(tmp_path, plan_doc())
+    st = os.stat(path)
+    put_config(tmp_path, plan_doc(name="Max", tier="default_claude_max_5x"))
+    os.utime(path, ns=(st.st_mtime_ns + 10**9, st.st_mtime_ns + 10**9))
+    assert claude_plan.read(path, st) is None
+
+
+def test_a_refused_file_is_not_parsed_again_until_it_changes(
+        tmp_path, monkeypatch):
+    """Corrupt, refused or misshapen is an answer, kept against the file's
+    signature: re-parsing an 8 MB file once a minute on the serial thread
+    to learn the same thing was the cost the cap was meant to bound."""
+    path = put_config(tmp_path, raw=b"{" + b" " * 1000)
+    reads = []
+    real = claude_plan.read
+    monkeypatch.setattr(claude_plan, "read",
+                        lambda p, st=None: reads.append(1) or real(p, st))
+    reader = claude_plan.PlanReader()
+    assert reader.ultra(NOW) is False
+    assert reader.ultra(NOW + claude_plan.RECHECK_S) is False
+    assert reader.ultra(NOW + 2 * claude_plan.RECHECK_S) is False
+    assert len(reads) == 1
+
+    put_config(tmp_path, plan_doc())
+    os.utime(path, (NOW + 500, NOW + 500))
+    assert reader.ultra(NOW + 3 * claude_plan.RECHECK_S) is True
+    assert len(reads) == 2
 
 
 def test_a_file_just_under_the_cap_is_read(tmp_path):
@@ -325,6 +459,44 @@ def test_claude_config_dir_moves_the_file(tmp_path, monkeypatch):
         False, ULTRA, float(NOW - 60))
 
 
+@pytest.mark.parametrize("with_dir", [False, True],
+                         ids=["home", "CLAUDE_CONFIG_DIR"])
+def test_a_non_empty_legacy_config_json_wins(tmp_path, monkeypatch,
+                                             with_dir):
+    """Claude Code 2.1.316's y_(): a regular, non-empty .config.json in
+    $CLAUDE_CONFIG_DIR, or in ~/.claude, is the global config, ahead of
+    .claude.json (the review of PR #6, 2026-11-01)."""
+    if with_dir:
+        cfg = str(tmp_path / "work-config")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", cfg)
+        legacy_dir = cfg
+    else:
+        legacy_dir = os.path.join(str(tmp_path), ".claude")
+    legacy = inside(tmp_path, os.path.join(legacy_dir, ".config.json"))
+    put_config(tmp_path, plan_doc(name="Pro", tier="default_claude_pro"))
+    assert claude_plan.config_path().endswith(".claude.json")
+
+    os.makedirs(legacy_dir, exist_ok=True)
+    with open(legacy, "w", encoding="utf-8") as f:
+        json.dump(plan_doc(), f)
+    assert claude_plan.config_path() == legacy
+    p = tmp_path / "statusline.json"
+    assert one_reply(ClaudeCliProvider(path=str(p)), p, NOW - 60) == (
+        False, ULTRA, float(NOW - 60))
+
+
+def test_an_empty_or_odd_legacy_config_json_is_passed_over(tmp_path):
+    legacy = inside(tmp_path, os.path.join(str(tmp_path), ".claude",
+                                           ".config.json"))
+    os.makedirs(os.path.dirname(legacy))
+    open(legacy, "wb").close()
+    want = os.path.join(str(tmp_path), ".claude.json")
+    assert claude_plan.config_path() == want        # empty
+    os.remove(legacy)
+    os.makedirs(legacy)
+    assert claude_plan.config_path() == want        # a directory
+
+
 def test_claude_config_dir_without_a_file_is_not_the_home_one(
         tmp_path, monkeypatch):
     put_config(tmp_path, plan_doc())
@@ -342,7 +514,7 @@ def test_the_file_is_looked_at_once_a_minute_and_read_on_change(
     reads = []
     real = claude_plan.read
     monkeypatch.setattr(claude_plan, "read",
-                        lambda p: reads.append(1) or real(p))
+                        lambda p, st=None: reads.append(1) or real(p, st))
     reader = claude_plan.PlanReader()
 
     assert reader.ultra(NOW) is True
@@ -370,7 +542,8 @@ def test_a_failed_read_is_tried_again_at_the_next_look(tmp_path,
                                                        monkeypatch):
     put_config(tmp_path, plan_doc())
     results = [None, True]
-    monkeypatch.setattr(claude_plan, "read", lambda p: results.pop(0))
+    monkeypatch.setattr(claude_plan, "read",
+                        lambda p, st=None: results.pop(0))
     reader = claude_plan.PlanReader()
     assert reader.ultra(NOW) is False
     assert reader.ultra(NOW + claude_plan.RECHECK_S) is True
@@ -410,6 +583,26 @@ def test_the_saved_kind_loads(tmp_path):
     assert v.observe([], NOW) is True
 
 
+def test_the_saved_kind_follows_the_proof(tmp_path):
+    """Marked first on the plan, then proved by the chain: the file names
+    the chain, so `blink status` says the proof the daemon holds (the
+    review of PR #6, 2026-11-01). Before, only a change of state was
+    written, and the file said "Ultra plan" for good."""
+    put_config(tmp_path, plan_doc())
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+    v = session_verdict.SessionVerdict()
+
+    def poll(now):
+        frames = prov.poll(now)
+        v.observe(frames, now)
+        return frames
+
+    replied(poll, p, NOW - 1)
+    assert session_verdict.load(session_verdict.verdict_path()) == (
+        False, SUSTAINED, float(NOW - 1))
+
+
 def test_the_kind_has_its_own_wording():
     assert session_verdict.DESCRIBE[ULTRA] == (
         "Claude Code reports an Ultra plan, and its replies come back"
@@ -440,9 +633,23 @@ def _doc(name):
 
 
 def test_the_readme_privacy_paragraph_names_the_plan_read():
-    assert ("it reads the plan name (`planDisplayName`, or the rate-limit"
-            " tier when that is absent) from Claude Code's `~/.claude.json`"
-            " and nothing else from it") in _doc("README.md")
+    """Exactly true (the review of PR #6, 2026-11-01): the whole file is
+    parsed, it can hold tokens, and only a boolean is kept. "Never sees a
+    credential" and "nothing else from it" were not true of a whole-file
+    parse, nor "verified Ultra" of a desk the fast path marked."""
+    readme = _doc("README.md")
+    for said in ("it reads Claude Code's config, `~/.claude.json`: the whole"
+                 " file is parsed in memory, and it can hold your MCP"
+                 " servers' tokens",
+                 "only the plan name (`planDisplayName`) and rate-limit tier"
+                 " (`organizationRateLimitTier`) are looked at, only whether"
+                 " they say Ultra is kept",
+                 "While the account is marked as having no five-hour limit"
+                 " it also reads",
+                 "the next five-hour figure Claude Code shows lifts the mark"):
+        assert said in readme, said
+    assert "never sees a credential" not in readme
+    assert "and nothing else from it" not in readme
 
 
 def test_the_full_readme_has_a_reads_row_for_the_plan():
@@ -451,7 +658,16 @@ def test_the_full_readme_has_a_reads_row_for_the_plan():
            if l.startswith("| Reads |") and ".claude.json" in l]
     assert len(row) == 1, row
     for said in ("`$CLAUDE_CONFIG_DIR/.claude.json`", "`planDisplayName`",
-                 "`organizationRateLimitTier`", "and nothing else",
-                 "kept, logged, printed or saved"):
-        assert said in row[0]
-    assert "Ultra plan, the first Claude Code reply" in full
+                 "`organizationRateLimitTier`", "legacy `.config.json`",
+                 "The whole file is read and parsed in memory",
+                 "which can include their tokens",
+                 "kept, logged, printed or saved",
+                 "anything but a regular file, is not opened",
+                 "is not parsed again until it changes"):
+        assert said in row[0], said
+    assert ("the first Claude Code reply with no five-hour figure is that"
+            " proof") in full
+    assert "never sees a credential" not in full
+    assert "the transcripts are never opened" not in full
+    assert ("The transcripts are read only while the account is marked as"
+            " having no five-hour window") in full
