@@ -46,6 +46,17 @@ from pc.providers.weekly_anchor import DesktopHistoryProvider, WeeklyAnchorProvi
 FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
+# How long one pass of the serial loop holds the burn read budget
+# (burn_reader.READ_BUDGET_BYTES). The heartbeat and the fast tick can both
+# run in one pass, and each asks for the burn pages, so the budget is filled
+# again only once this has gone by since it last was -- not on every
+# burn_pages() call, which handed a pass two budgets (3rd review,
+# 2026-11-01). Under the fast tick's 2 s, so every tick is a pass of its
+# own; over the 1 s the bridge leaves between asks of one page
+# (bridge.BURN_ASK_GAP_S), and over what a pass's second bus.poll() was
+# measured to take against a large Desktop store (0.47 s, bridge.py).
+BURN_PASS_S = 1.5
+
 
 def default_providers():
     """Every provider shipped today, in preference order.
@@ -113,9 +124,14 @@ class IngestionBus:
         self._pages = {}
         # What is left of the read budget for this pass's burn lines, shared
         # by every reader (burn_reader.READ_BUDGET_BYTES, or a reader's own
-        # when it was given less); None for a full one. Reset by burn_pages(), which Bridge asks once per pass before
-        # it asks any page.
+        # when it was given less); None for a full one. Filled by
+        # _burn_pass(), at most once a BURN_PASS_S, and when it is, the page
+        # asked first moves on by one (_burn_turn): pages always asked in
+        # the same order left a Codex page owed 10 KB with nothing for 55
+        # passes behind a 430 KB Claude cold start (3rd review, 2026-11-01).
         self._burn_budget = None
+        self._burn_filled_at = None
+        self._burn_turn = 0
         # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
         # out after a failure. Keyed by IDENTITY, not by class: two instances
         # of the same provider class are two sources -- two Codex homes, the
@@ -393,11 +409,36 @@ class IngestionBus:
         window and that have a reader: the pages a burn line is for. Asks
         no reader; Bridge decides from this which to ask, and when.
 
-        Also the start of a pass: the read budget burn() hands the readers
-        is filled again here, once, and shared by every page asked after."""
+        Also where a pass starts (_burn_pass): the read budget burn() hands
+        the readers is filled again, at most once a BURN_PASS_S, and shared
+        by every page asked after. The pages come back in turn order, the
+        one asked first moving on by one with each fill, so each page has
+        the whole budget every other pass whatever the other is owed."""
+        self._burn_pass()
+        pages = [p for p, f in self._pages.items()
+                 if f.no_session_window and p in self._burn]
+        if not pages:
+            return pages
+        k = self._burn_turn % len(pages)
+        return pages[k:] + pages[:k]
+
+    def _burn_pass(self):
+        """Fill the read budget if no pass has filled it in BURN_PASS_S.
+
+        Asked by burn_pages() and burn() both, so a caller that only ever
+        asks burn() -- tests do -- still has a budget a pass rather than
+        the first pass's leftover for ever. A clock gone back starts a pass
+        too, the arm _cooldown_over has: gated on the gap alone, an NTP
+        step back of an hour would hold the budget at the last pass's
+        leftover for that hour."""
+        now = self._now()
+        at = self._burn_filled_at
+        if at is not None and 0 <= now - at < BURN_PASS_S:
+            return
+        if at is not None:
+            self._burn_turn += 1
+        self._burn_filled_at = now
         self._burn_budget = None
-        return [p for p, f in self._pages.items()
-                if f.no_session_window and p in self._burn]
 
     def session_pair(self):
         """(label, n) for the state the last poll() put on the panel.
@@ -436,8 +477,10 @@ class IngestionBus:
             # given READ_BUDGET_BYTES read twice what the serial loop was
             # promised (burn_reader.READ_BUDGET_BYTES; /code-review max,
             # 2026-11-01). The page asked first can spend all of it; the
-            # other is then behind, says None, and reads on the next pass.
-            # A scenario's replay reads nothing and is asked as before.
+            # other is then behind, says None, and is asked first on the
+            # next pass (burn_pages). A scenario's replay reads nothing and
+            # is asked as before.
+            self._burn_pass()
             left = (reader.read_budget if self._burn_budget is None
                     else min(reader.read_budget, self._burn_budget))
             got = reader.poll(self._now(), budget=left)

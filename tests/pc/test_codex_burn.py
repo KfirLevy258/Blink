@@ -776,16 +776,18 @@ def test_two_readers_share_one_read_budget_per_pass(tmp_path):
                "codex": br.CodexBurnReader(root=str(sessions(tmp_path)),
                                            read_budget=budget,
                                            chunk_bytes=chunk)}
+    clock = [NOW]
     bus = ingest.IngestionBus(
         providers=[Fixed(claude_frame(True)),
                    Fixed(_codex_frame(True))],
-        preferred_provider="claude", now=lambda: NOW, burn=readers,
+        preferred_provider="claude", now=lambda: clock[0], burn=readers,
         verdict=None)
     fetch = bus.fetch()
     fetch()
 
     passes = []
     for _ in range(40):
+        clock[0] += 2.0                 # the fast tick: one pass each
         pages = fetch.burn_pages()
         got = [fetch.burn(p) for p in pages]
         passes.append(sum(r.last.read_bytes for r in readers.values()))
@@ -799,6 +801,94 @@ def test_two_readers_share_one_read_budget_per_pass(tmp_path):
     # finishing the line it is in -- never a budget per reader.
     assert max(passes) <= budget + chunk + br.ANCHOR_BYTES
     assert max(passes) > budget // 2       # and it did spend it
+
+
+def _two_backlogs(tmp_path, claude_lines, codex_lines, budget, chunk):
+    """A Claude page and a Codex page, both marked, each owed a backlog of
+    generated lines, on a clock the caller moves."""
+    from tests.support import transcripts as tr
+    proj = tmp_path / ".claude" / "projects"
+    tr.write(tmp_path, str(proj / "p" / "s.jsonl"),
+             [tr.assistant("m%d" % i, "r%d" % i, start(19), 10, text="x" * 200)
+              for i in range(claude_lines)], mtime=NOW - 5)
+    ro.write(tmp_path, rollout(tmp_path),
+             [ro.token_count(start(19), 10 * (i + 1), 10)
+              for i in range(codex_lines)], mtime=NOW - 5)
+    readers = {"claude": br.BurnReader(root=str(proj), read_budget=budget,
+                                       chunk_bytes=chunk),
+               "codex": br.CodexBurnReader(root=str(sessions(tmp_path)),
+                                           read_budget=budget,
+                                           chunk_bytes=chunk)}
+    clock = [NOW]
+    bus = ingest.IngestionBus(
+        providers=[Fixed(claude_frame(True)), Fixed(_codex_frame(True))],
+        preferred_provider="claude", now=lambda: clock[0], burn=readers,
+        verdict=None)
+    fetch = bus.fetch()
+    fetch()
+    return fetch, readers, clock
+
+
+def _spent(readers):
+    n = sum(r.last.read_bytes for r in readers.values())
+    for r in readers.values():
+        r.last = r.last._replace(read_bytes=0)
+    return n
+
+
+def test_one_budget_however_many_times_a_pass_asks_for_the_pages(
+        tmp_path):
+    """3rd review (ingest:398): burn_pages() refilled the budget on every
+    call, and the heartbeat and the fast tick each call it in a pass where
+    both run. The budget is filled once a pass, keyed by time, so the
+    second call inside the pass hands out only what the first left."""
+    budget, chunk = 8192, 1024
+    fetch, readers, clock = _two_backlogs(tmp_path, 400, 400, budget, chunk)
+    clock[0] += 2.0
+    first = [fetch.burn(p) for p in fetch.burn_pages()]
+    clock[0] += ingest.BURN_PASS_S / 2     # still the same pass
+    second = [fetch.burn(p) for p in fetch.burn_pages()]
+
+    assert not any(first + second)
+    assert _spent(readers) <= budget + 2 * (chunk + br.ANCHOR_BYTES)
+
+
+def test_the_page_asked_first_takes_turns(tmp_path):
+    """3rd review (ingest:398): the pages were always asked in the same
+    order, so a Codex page owed 10 KB behind a Claude cold start of
+    430 KB was handed nothing for 55 passes. The page asked first
+    alternates, so the second has its line within a few passes."""
+    budget, chunk = 8192, 1024
+    fetch, readers, clock = _two_backlogs(tmp_path, 2000, 20, budget, chunk)
+    orders = []
+    for n in range(1, 8):
+        clock[0] += 2.0
+        pages = fetch.burn_pages()
+        orders.append(pages)
+        got = {p: fetch.burn(p) for p in pages}
+        _spent(readers)
+        if got["codex"] is not None:
+            break
+
+    assert got["codex"] is not None and got["claude"] is None
+    assert n <= 4
+    assert orders[0] != orders[1] and sorted(orders[0]) == sorted(orders[1])
+
+
+def test_burn_asked_without_burn_pages_still_has_a_budget(tmp_path):
+    """A caller that asks burn() and never burn_pages() -- tests, a future
+    caller -- was handed the first pass's leftover for ever. burn() starts
+    a pass of its own when none has been started in BURN_PASS_S."""
+    budget, chunk = 8192, 1024
+    fetch, readers, clock = _two_backlogs(tmp_path, 0, 400, budget, chunk)
+    for _ in range(40):
+        clock[0] += 2.0
+        got = fetch.burn("codex")
+        assert _spent(readers) > 0 or got is not None
+        if got is not None:
+            break
+
+    assert got is not None
 
 
 def test_a_single_reader_is_still_the_claude_pages():
