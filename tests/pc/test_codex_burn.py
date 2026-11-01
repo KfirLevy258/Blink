@@ -304,6 +304,40 @@ def test_an_event_copied_into_another_rollout_counts_once(tmp_path):
     assert (b[15], b[16], b[19]) == (1000, 500, 300)
 
 
+@pytest.mark.parametrize("parent_mtime", [NOW - 5, NOW - 3],
+                         ids=["copy-read-first", "original-read-first"])
+def test_a_copy_read_again_after_its_original_left_the_window_counts_once(
+        tmp_path, parent_mtime):
+    """3rd review (burn_reader:623): a copy read first is counted at its own
+    stamp, then moved to its original's earlier bucket when the original is
+    found. _prune forgot the key when that earlier quarter-hour left the
+    window, though the copy was still inside it, so the fork read again
+    from its start (a new inode here) counted the copy a second time, in
+    its own bar. A key is kept until the latest stamp it was seen with
+    leaves the window. Either file read first: with the original first,
+    the copy's later stamp was never recorded at all."""
+    ro.write(tmp_path, rollout(tmp_path, "rollout-parent.jsonl"),
+             [ro.token_count(start(0) + 10, 777)], mtime=parent_mtime)
+    fork_lines = [ro.token_count(start(10) + 10, 777),       # re-stamped
+                  ro.token_count(start(10) + 20, 782, 5)]    # its own
+    fork = ro.write(tmp_path, rollout(tmp_path, "rollout-fork.jsonl"),
+                    fork_lines, mtime=NOW - 4)
+    r = reader(tmp_path)
+    _, b = r.poll(NOW)
+    assert (b[0], b[10], sum(b)) == (777, 5, 782)
+
+    later = NOW + 900                  # bucket 0 leaves the window
+    _, b = r.poll(later)
+    assert sum(b) == 5
+
+    fresh = ro.write(tmp_path, str(tmp_path / "fork-rewritten.jsonl"),
+                     fork_lines, mtime=later - 4)
+    os.replace(fresh, fork)
+    _, b = r.poll(later + LATER)
+
+    assert sum(b) == 5 and b[9] == 5
+
+
 def test_no_codex_sessions_folder_says_nothing(tmp_path):
     assert reader(tmp_path).poll(NOW) is None
 
@@ -339,6 +373,52 @@ def test_a_refused_sessions_folder_is_told_in_codexs_words(tmp_path, capsys):
     finally:
         root.chmod(0o755)
     assert capsys.readouterr().err == br.CODEX_SAID_ROOT_REFUSED + "\n"
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid")
+                                        and os.geteuid() == 0),
+                    reason="POSIX permissions; root lists everything")
+def test_a_refused_month_keeps_a_day_already_left_out_left_out(
+        tmp_path, capsys):
+    """3rd review (burn_reader:445): the root's special case did not cover
+    a refused intermediate directory, which hides what is under it the same
+    way, and in sessions/YYYY/MM/DD nesting is the normal case. With the
+    day already left out, refusing its month rebuilt the counts from that
+    walk alone: the day was dropped, bridge.log was told every directory
+    lists again when nothing had, and once the month listed the day was
+    waited for READ_TRIES walks over and said left out a second time. Real
+    permissions on a generated tree."""
+    ro.write(tmp_path, ro.rollout_path(sessions(tmp_path), "2026/10/31"),
+             [ro.token_count(start(19), 11)], mtime=NOW)
+    ro.write(tmp_path, ro.rollout_path(sessions(tmp_path), "2026/11/01"),
+             [ro.token_count(start(19), 5)], mtime=NOW)
+    month = sessions(tmp_path) / "2026" / "11"
+    day = month / "01"
+    r = reader(tmp_path)
+    t = NOW
+    try:
+        day.chmod(0)
+        got = [r.poll(t + k * LATER) for k in range(br.READ_TRIES)]
+        t += br.READ_TRIES * LATER
+        assert sum(got[-1][1]) == 11
+        assert capsys.readouterr().err == br.CODEX_SAID_LEFT_OUT + "\n"
+
+        month.chmod(0)
+        r.poll(t)
+        t += LATER
+        assert capsys.readouterr().err == ""
+
+        # The month lists again, the day still does not: still left out,
+        # no wait, nothing said.
+        month.chmod(0o755)
+        assert sum(r.poll(t)[1]) == 11
+        t += LATER
+        assert capsys.readouterr().err == ""
+    finally:
+        month.chmod(0o755)
+        day.chmod(0o755)
+    assert sum(r.poll(t)[1]) == 16
+    assert capsys.readouterr().err == br.CODEX_SAID_WHOLE + "\n"
 
 
 # ------------------------------------------------------------- the mark
@@ -447,12 +527,32 @@ def test_a_newer_reading_that_says_nothing_keeps_the_mark(tmp_path):
 
 
 def test_an_older_reading_cannot_take_the_word_back(tmp_path):
-    """The word is the newest reading's: a file that comes back into view
+    """The remembered word is the newest reading's: a file still in view
     with an older weekly-only reading does not re-mark a page a newer
-    five-hour reading cleared."""
-    provider = codex_cli.CodexCliProvider(
-        root=str(sessions(tmp_path)), state_dir=str(tmp_path / "state"),
-        sweep=False)
+    five-hour reading cleared, when the frame sent says nothing itself."""
+    provider = provider_at(tmp_path)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-old.jsonl"), [
+        ro.token_count(NOW - 600, 100, limits=ro.weekly_only())],
+        mtime=NOW - 600)
+    new = ro.write(tmp_path, rollout(tmp_path, "rollout-new.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=ro.with_five_hour())],
+        mtime=NOW - 30)
+    assert not any(f.no_session_window for f in provider.poll(NOW))
+    os.remove(new)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-quiet.jsonl"), [
+        ro.token_count(NOW - 10, 100, limits=_says_nothing())],
+        mtime=NOW - 10)
+
+    assert not any(f.no_session_window for f in provider.poll(NOW))
+
+
+def test_a_frame_that_says_true_itself_is_marked_whatever_came_before(
+        tmp_path):
+    """3rd review: a frame's mark is its own reading's word when it has one,
+    so a running provider and a fresh one on the same files agree. The
+    older weekly-only file coming back alone into view marks its frame,
+    as it would for a daemon started now."""
+    provider = provider_at(tmp_path)
     new = ro.write(tmp_path, rollout(tmp_path, "rollout-new.jsonl"), [
         ro.token_count(NOW - 30, 100, limits=ro.with_five_hour())],
         mtime=NOW - 30)
@@ -462,7 +562,164 @@ def test_an_older_reading_cannot_take_the_word_back(tmp_path):
         ro.token_count(NOW - 600, 100, limits=ro.weekly_only())],
         mtime=NOW - 600)
 
-    assert not any(f.no_session_window for f in provider.poll(NOW))
+    for p in (provider, provider_at(tmp_path)):
+        assert all(f.no_session_window for f in usage_frames(p.poll(NOW)))
+
+
+def provider_at(home):
+    return codex_cli.CodexCliProvider(
+        root=str(sessions(home)), state_dir=str(home / "state"), sweep=False)
+
+
+def _undeclared_primary(pct=22.0):
+    """An upstream shape not seen yet: a primary that no longer declares
+    its length, no secondary. _classify puts it on the session dial by
+    position, so the reading itself says nothing about the mark."""
+    return {"limit_id": "codex", "primary": {"used_percent": pct,
+                                             "resets_at": 1_793_440_000},
+            "secondary": None}
+
+
+def test_the_word_never_marks_a_reading_with_a_session_figure(tmp_path):
+    """3rd review (codex_cli:955): the latch copied an old True onto a newer
+    reading that put 22 on the session dial; merge() then dropped every
+    session figure, and with no weekly one the Codex page left the board
+    while a fresh process showed 22. The latch fills only frames that carry
+    no session figure, so the running provider and a fresh one agree."""
+    from pc import normalizer
+    path = ro.write(tmp_path, rollout(tmp_path), [
+        ro.token_count(NOW - 600, 100, limits=ro.weekly_only())],
+        mtime=NOW - 600)
+    running = provider_at(tmp_path)
+    assert all(f.no_session_window for f in usage_frames(running.poll(NOW)))
+    ro.write(tmp_path, path, [ro.token_count(
+        NOW - 30, 200, 100, limits=_undeclared_primary())],
+        mtime=NOW - 30, append=True)
+
+    for provider in (running, provider_at(tmp_path)):
+        frames = provider.poll(NOW)
+        assert not any(f.no_session_window for f in frames)
+        merged = normalizer.merge(frames)
+        assert merged is not None and merged.session_pct == 22.0
+
+
+def test_a_reading_dated_ahead_of_the_clock_does_not_pin_the_word(tmp_path):
+    """3rd review (codex_cli:952): a weekly-only line stamped an hour ahead
+    latched, and no honest reading after it could lift the mark. A reading
+    more than CLOCK_SLACK_S ahead of now is not the latch's to take."""
+    ahead = ro.write(tmp_path, rollout(tmp_path, "rollout-ahead.jsonl"), [
+        ro.token_count(NOW + 3600, 100, limits=ro.weekly_only())],
+        mtime=NOW - 600)
+    running = provider_at(tmp_path)
+    running.poll(NOW)
+    os.remove(ahead)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-now.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=_says_nothing())],
+        mtime=NOW - 30)
+
+    for provider in (running, provider_at(tmp_path)):
+        assert not any(f.no_session_window for f in provider.poll(NOW))
+
+
+def test_a_word_left_ahead_by_a_clock_stepped_back_yields(tmp_path):
+    """The clock goes back an hour after a weekly-only reading latched:
+    every reading after that is dated before it. As SessionVerdict.observe
+    has it, the old word keeps its say only until new evidence arrives."""
+    old = ro.write(tmp_path, rollout(tmp_path, "rollout-old.jsonl"), [
+        ro.token_count(NOW - 10, 100, limits=ro.weekly_only())],
+        mtime=NOW - 10)
+    running = provider_at(tmp_path)
+    assert all(f.no_session_window for f in usage_frames(running.poll(NOW)))
+    os.remove(old)
+    back = NOW - 3600
+    path = ro.write(tmp_path, rollout(tmp_path, "rollout-new.jsonl"), [
+        ro.token_count(back - 60, 100, limits=ro.with_five_hour())],
+        mtime=back - 60)
+    assert not any(f.no_session_window for f in running.poll(back))
+    ro.write(tmp_path, path, [ro.token_count(
+        back - 30, 200, 100, limits=_says_nothing())],
+        mtime=back - 30, append=True)
+
+    assert not any(f.no_session_window for f in running.poll(back))
+
+
+@pytest.mark.parametrize("names", [("rollout-a.jsonl", "rollout-b.jsonl"),
+                                   ("rollout-b.jsonl", "rollout-a.jsonl")])
+def test_on_equal_stamps_a_window_wins_the_word(tmp_path, names):
+    """Two readings at the same instant, one weekly-only and one with a
+    five-hour window, whichever file is walked first: the word is that
+    there is a window, as SessionVerdict lets a window win a tie."""
+    weekly = ro.write(tmp_path, rollout(tmp_path, names[0]), [
+        ro.token_count(NOW - 60, 100, limits=ro.weekly_only())],
+        mtime=NOW - 60)
+    window = ro.write(tmp_path, rollout(tmp_path, names[1]), [
+        ro.token_count(NOW - 60, 100, limits=ro.with_five_hour())],
+        mtime=NOW - 60)
+    running = provider_at(tmp_path)
+    running.poll(NOW)
+    os.remove(weekly)
+    os.remove(window)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-c.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=_says_nothing())],
+        mtime=NOW - 30)
+
+    assert not any(f.no_session_window for f in running.poll(NOW))
+
+
+def test_the_word_comes_from_every_rollout_not_only_the_sent_frames(
+        tmp_path):
+    """A restarted daemon has only the files in view. The word is folded
+    from every rollout's reading, not only the frames poll() sends, so a
+    fresh provider and a running one agree whenever the reading that last
+    decided is still in view."""
+    ro.write(tmp_path, rollout(tmp_path, "rollout-a.jsonl"), [
+        ro.token_count(NOW - 60, 100, limits=ro.weekly_only())],
+        mtime=NOW - 60)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-b.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=_says_nothing())],
+        mtime=NOW - 30)
+
+    frames = usage_frames(provider_at(tmp_path).poll(NOW))
+
+    assert frames and all(f.no_session_window for f in frames)
+
+
+def test_an_older_weekly_only_ended_frame_cannot_mark_a_newer_window(
+        tmp_path):
+    """poll() sends the newest ended reading beside the winner, and merge()
+    reads the mark as any(): the ended weekly-only frame's own True must
+    not drop the newer 300's session figure."""
+    from pc import normalizer
+    ro.write(tmp_path, rollout(tmp_path, "rollout-old.jsonl"), [
+        ro.token_count(NOW - 2 * codex_cli.STALE_AFTER_S, 100,
+                       limits=ro.weekly_only(resets_at=NOW - 100))],
+        mtime=NOW - 2 * codex_cli.STALE_AFTER_S)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-new.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=ro.with_five_hour())],
+        mtime=NOW - 30)
+
+    frames = provider_at(tmp_path).poll(NOW)
+
+    assert len(usage_frames(frames)) == 2
+    assert not any(f.no_session_window for f in frames)
+    assert normalizer.merge(frames).session_pct == 40.0
+
+
+def test_a_window_length_too_big_for_a_float_does_not_raise(tmp_path):
+    """3rd review (codex_cli:467): math.isfinite on an int of 310 digits
+    or more raised OverflowError, and the bus benched the whole provider.
+    An int is finite; only a float needs the check."""
+    huge = int("9" * 401)
+    limits = {"limit_id": "codex",
+              "primary": {"used_percent": 21.0, "window_minutes": huge},
+              "secondary": None}
+    assert codex_cli._no_short_window(limits) is None
+    ro.write(tmp_path, rollout(tmp_path), [
+        ro.token_count(NOW - 60, 100, limits=limits)], mtime=NOW - 60)
+
+    frames = usage_frames(provider_at(tmp_path).poll(NOW))
+
+    assert [f.weekly_pct for f in frames] == [21.0]
 
 
 @pytest.mark.parametrize("limits", [
@@ -599,16 +856,18 @@ def test_two_readers_share_one_read_budget_per_pass(tmp_path):
                "codex": br.CodexBurnReader(root=str(sessions(tmp_path)),
                                            read_budget=budget,
                                            chunk_bytes=chunk)}
+    clock = [NOW]
     bus = ingest.IngestionBus(
         providers=[Fixed(claude_frame(True)),
                    Fixed(_codex_frame(True))],
-        preferred_provider="claude", now=lambda: NOW, burn=readers,
+        preferred_provider="claude", now=lambda: clock[0], burn=readers,
         verdict=None)
     fetch = bus.fetch()
     fetch()
 
     passes = []
     for _ in range(40):
+        clock[0] += 2.0                 # the fast tick: one pass each
         pages = fetch.burn_pages()
         got = [fetch.burn(p) for p in pages]
         passes.append(sum(r.last.read_bytes for r in readers.values()))
@@ -622,6 +881,94 @@ def test_two_readers_share_one_read_budget_per_pass(tmp_path):
     # finishing the line it is in -- never a budget per reader.
     assert max(passes) <= budget + chunk + br.ANCHOR_BYTES
     assert max(passes) > budget // 2       # and it did spend it
+
+
+def _two_backlogs(tmp_path, claude_lines, codex_lines, budget, chunk):
+    """A Claude page and a Codex page, both marked, each owed a backlog of
+    generated lines, on a clock the caller moves."""
+    from tests.support import transcripts as tr
+    proj = tmp_path / ".claude" / "projects"
+    tr.write(tmp_path, str(proj / "p" / "s.jsonl"),
+             [tr.assistant("m%d" % i, "r%d" % i, start(19), 10, text="x" * 200)
+              for i in range(claude_lines)], mtime=NOW - 5)
+    ro.write(tmp_path, rollout(tmp_path),
+             [ro.token_count(start(19), 10 * (i + 1), 10)
+              for i in range(codex_lines)], mtime=NOW - 5)
+    readers = {"claude": br.BurnReader(root=str(proj), read_budget=budget,
+                                       chunk_bytes=chunk),
+               "codex": br.CodexBurnReader(root=str(sessions(tmp_path)),
+                                           read_budget=budget,
+                                           chunk_bytes=chunk)}
+    clock = [NOW]
+    bus = ingest.IngestionBus(
+        providers=[Fixed(claude_frame(True)), Fixed(_codex_frame(True))],
+        preferred_provider="claude", now=lambda: clock[0], burn=readers,
+        verdict=None)
+    fetch = bus.fetch()
+    fetch()
+    return fetch, readers, clock
+
+
+def _spent(readers):
+    n = sum(r.last.read_bytes for r in readers.values())
+    for r in readers.values():
+        r.last = r.last._replace(read_bytes=0)
+    return n
+
+
+def test_one_budget_however_many_times_a_pass_asks_for_the_pages(
+        tmp_path):
+    """3rd review (ingest:398): burn_pages() refilled the budget on every
+    call, and the heartbeat and the fast tick each call it in a pass where
+    both run. The budget is filled once a pass, keyed by time, so the
+    second call inside the pass hands out only what the first left."""
+    budget, chunk = 8192, 1024
+    fetch, readers, clock = _two_backlogs(tmp_path, 400, 400, budget, chunk)
+    clock[0] += 2.0
+    first = [fetch.burn(p) for p in fetch.burn_pages()]
+    clock[0] += ingest.BURN_PASS_S / 2     # still the same pass
+    second = [fetch.burn(p) for p in fetch.burn_pages()]
+
+    assert not any(first + second)
+    assert _spent(readers) <= budget + 2 * (chunk + br.ANCHOR_BYTES)
+
+
+def test_the_page_asked_first_takes_turns(tmp_path):
+    """3rd review (ingest:398): the pages were always asked in the same
+    order, so a Codex page owed 10 KB behind a Claude cold start of
+    430 KB was handed nothing for 55 passes. The page asked first
+    alternates, so the second has its line within a few passes."""
+    budget, chunk = 8192, 1024
+    fetch, readers, clock = _two_backlogs(tmp_path, 2000, 20, budget, chunk)
+    orders = []
+    for n in range(1, 8):
+        clock[0] += 2.0
+        pages = fetch.burn_pages()
+        orders.append(pages)
+        got = {p: fetch.burn(p) for p in pages}
+        _spent(readers)
+        if got["codex"] is not None:
+            break
+
+    assert got["codex"] is not None and got["claude"] is None
+    assert n <= 4
+    assert orders[0] != orders[1] and sorted(orders[0]) == sorted(orders[1])
+
+
+def test_burn_asked_without_burn_pages_still_has_a_budget(tmp_path):
+    """A caller that asks burn() and never burn_pages() -- tests, a future
+    caller -- was handed the first pass's leftover for ever. burn() starts
+    a pass of its own when none has been started in BURN_PASS_S."""
+    budget, chunk = 8192, 1024
+    fetch, readers, clock = _two_backlogs(tmp_path, 0, 400, budget, chunk)
+    for _ in range(40):
+        clock[0] += 2.0
+        got = fetch.burn("codex")
+        assert _spent(readers) > 0 or got is not None
+        if got is not None:
+            break
+
+    assert got is not None
 
 
 def test_a_single_reader_is_still_the_claude_pages():
@@ -966,6 +1313,37 @@ def test_the_reads_row_names_exactly_the_fields_the_codex_reader_reads():
                   "`turn_aborted`"):
         assert field in gauges, field
     assert 'CODEX_NEEDLE = b\'"token_count"\'' in src
-    assert ("on a Codex account with none (such as Codex Pro) the"
-            " output-token count of each turn from Codex's session log"
-            in short)
+
+
+CODEX_SHORT = ("on a Codex account with none (such as Codex Pro) every"
+               " token count of each turn from Codex's session log, held in"
+               " memory for up to five hours, of which only the output"
+               " tokens are added up")
+CODEX_FULL_48 = ("or, for a Codex account with none, every token count of"
+                 " each turn in Codex's session log, held in memory for up"
+                 " to five hours with only the output tokens added up")
+CODEX_FULL_78 = ("on an account with no five-hour limit, every token count"
+                 " of each turn, held in memory for up to five hours, with"
+                 " only the output tokens added up for the burn view")
+
+
+def test_the_codex_summaries_say_every_figure_is_read_and_kept():
+    """3rd review (README.md:183, README-full.md:48 and :78): the short
+    summaries said only the output-token count of each turn was read.
+    CodexBurnReader reads all six figures of both usage objects and keeps
+    them as the turn's key for as long as the turn is inside the window,
+    which the install note and the Reads row already said. The summaries
+    say it too, and none still says only the output count."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    with open(os.path.join(root, "docs", "README-full.md"),
+              encoding="utf-8") as f:
+        full = f.read()
+    with open(os.path.join(root, "README.md"), encoding="utf-8") as f:
+        short = f.read()
+    assert CODEX_SHORT in short
+    assert CODEX_FULL_48 in full and CODEX_FULL_78 in full
+    for text in (short, full):
+        assert "output-token count of each turn" not in text
+        assert "output-token counts in Claude Code's transcripts, or in" \
+            " Codex's" not in text
