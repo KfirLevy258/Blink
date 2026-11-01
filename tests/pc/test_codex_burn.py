@@ -447,12 +447,32 @@ def test_a_newer_reading_that_says_nothing_keeps_the_mark(tmp_path):
 
 
 def test_an_older_reading_cannot_take_the_word_back(tmp_path):
-    """The word is the newest reading's: a file that comes back into view
+    """The remembered word is the newest reading's: a file still in view
     with an older weekly-only reading does not re-mark a page a newer
-    five-hour reading cleared."""
-    provider = codex_cli.CodexCliProvider(
-        root=str(sessions(tmp_path)), state_dir=str(tmp_path / "state"),
-        sweep=False)
+    five-hour reading cleared, when the frame sent says nothing itself."""
+    provider = provider_at(tmp_path)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-old.jsonl"), [
+        ro.token_count(NOW - 600, 100, limits=ro.weekly_only())],
+        mtime=NOW - 600)
+    new = ro.write(tmp_path, rollout(tmp_path, "rollout-new.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=ro.with_five_hour())],
+        mtime=NOW - 30)
+    assert not any(f.no_session_window for f in provider.poll(NOW))
+    os.remove(new)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-quiet.jsonl"), [
+        ro.token_count(NOW - 10, 100, limits=_says_nothing())],
+        mtime=NOW - 10)
+
+    assert not any(f.no_session_window for f in provider.poll(NOW))
+
+
+def test_a_frame_that_says_true_itself_is_marked_whatever_came_before(
+        tmp_path):
+    """3rd review: a frame's mark is its own reading's word when it has one,
+    so a running provider and a fresh one on the same files agree. The
+    older weekly-only file coming back alone into view marks its frame,
+    as it would for a daemon started now."""
+    provider = provider_at(tmp_path)
     new = ro.write(tmp_path, rollout(tmp_path, "rollout-new.jsonl"), [
         ro.token_count(NOW - 30, 100, limits=ro.with_five_hour())],
         mtime=NOW - 30)
@@ -462,7 +482,164 @@ def test_an_older_reading_cannot_take_the_word_back(tmp_path):
         ro.token_count(NOW - 600, 100, limits=ro.weekly_only())],
         mtime=NOW - 600)
 
-    assert not any(f.no_session_window for f in provider.poll(NOW))
+    for p in (provider, provider_at(tmp_path)):
+        assert all(f.no_session_window for f in usage_frames(p.poll(NOW)))
+
+
+def provider_at(home):
+    return codex_cli.CodexCliProvider(
+        root=str(sessions(home)), state_dir=str(home / "state"), sweep=False)
+
+
+def _undeclared_primary(pct=22.0):
+    """An upstream shape not seen yet: a primary that no longer declares
+    its length, no secondary. _classify puts it on the session dial by
+    position, so the reading itself says nothing about the mark."""
+    return {"limit_id": "codex", "primary": {"used_percent": pct,
+                                             "resets_at": 1_793_440_000},
+            "secondary": None}
+
+
+def test_the_word_never_marks_a_reading_with_a_session_figure(tmp_path):
+    """3rd review (codex_cli:955): the latch copied an old True onto a newer
+    reading that put 22 on the session dial; merge() then dropped every
+    session figure, and with no weekly one the Codex page left the board
+    while a fresh process showed 22. The latch fills only frames that carry
+    no session figure, so the running provider and a fresh one agree."""
+    from pc import normalizer
+    path = ro.write(tmp_path, rollout(tmp_path), [
+        ro.token_count(NOW - 600, 100, limits=ro.weekly_only())],
+        mtime=NOW - 600)
+    running = provider_at(tmp_path)
+    assert all(f.no_session_window for f in usage_frames(running.poll(NOW)))
+    ro.write(tmp_path, path, [ro.token_count(
+        NOW - 30, 200, 100, limits=_undeclared_primary())],
+        mtime=NOW - 30, append=True)
+
+    for provider in (running, provider_at(tmp_path)):
+        frames = provider.poll(NOW)
+        assert not any(f.no_session_window for f in frames)
+        merged = normalizer.merge(frames)
+        assert merged is not None and merged.session_pct == 22.0
+
+
+def test_a_reading_dated_ahead_of_the_clock_does_not_pin_the_word(tmp_path):
+    """3rd review (codex_cli:952): a weekly-only line stamped an hour ahead
+    latched, and no honest reading after it could lift the mark. A reading
+    more than CLOCK_SLACK_S ahead of now is not the latch's to take."""
+    ahead = ro.write(tmp_path, rollout(tmp_path, "rollout-ahead.jsonl"), [
+        ro.token_count(NOW + 3600, 100, limits=ro.weekly_only())],
+        mtime=NOW - 600)
+    running = provider_at(tmp_path)
+    running.poll(NOW)
+    os.remove(ahead)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-now.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=_says_nothing())],
+        mtime=NOW - 30)
+
+    for provider in (running, provider_at(tmp_path)):
+        assert not any(f.no_session_window for f in provider.poll(NOW))
+
+
+def test_a_word_left_ahead_by_a_clock_stepped_back_yields(tmp_path):
+    """The clock goes back an hour after a weekly-only reading latched:
+    every reading after that is dated before it. As SessionVerdict.observe
+    has it, the old word keeps its say only until new evidence arrives."""
+    old = ro.write(tmp_path, rollout(tmp_path, "rollout-old.jsonl"), [
+        ro.token_count(NOW - 10, 100, limits=ro.weekly_only())],
+        mtime=NOW - 10)
+    running = provider_at(tmp_path)
+    assert all(f.no_session_window for f in usage_frames(running.poll(NOW)))
+    os.remove(old)
+    back = NOW - 3600
+    path = ro.write(tmp_path, rollout(tmp_path, "rollout-new.jsonl"), [
+        ro.token_count(back - 60, 100, limits=ro.with_five_hour())],
+        mtime=back - 60)
+    assert not any(f.no_session_window for f in running.poll(back))
+    ro.write(tmp_path, path, [ro.token_count(
+        back - 30, 200, 100, limits=_says_nothing())],
+        mtime=back - 30, append=True)
+
+    assert not any(f.no_session_window for f in running.poll(back))
+
+
+@pytest.mark.parametrize("names", [("rollout-a.jsonl", "rollout-b.jsonl"),
+                                   ("rollout-b.jsonl", "rollout-a.jsonl")])
+def test_on_equal_stamps_a_window_wins_the_word(tmp_path, names):
+    """Two readings at the same instant, one weekly-only and one with a
+    five-hour window, whichever file is walked first: the word is that
+    there is a window, as SessionVerdict lets a window win a tie."""
+    weekly = ro.write(tmp_path, rollout(tmp_path, names[0]), [
+        ro.token_count(NOW - 60, 100, limits=ro.weekly_only())],
+        mtime=NOW - 60)
+    window = ro.write(tmp_path, rollout(tmp_path, names[1]), [
+        ro.token_count(NOW - 60, 100, limits=ro.with_five_hour())],
+        mtime=NOW - 60)
+    running = provider_at(tmp_path)
+    running.poll(NOW)
+    os.remove(weekly)
+    os.remove(window)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-c.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=_says_nothing())],
+        mtime=NOW - 30)
+
+    assert not any(f.no_session_window for f in running.poll(NOW))
+
+
+def test_the_word_comes_from_every_rollout_not_only_the_sent_frames(
+        tmp_path):
+    """A restarted daemon has only the files in view. The word is folded
+    from every rollout's reading, not only the frames poll() sends, so a
+    fresh provider and a running one agree whenever the reading that last
+    decided is still in view."""
+    ro.write(tmp_path, rollout(tmp_path, "rollout-a.jsonl"), [
+        ro.token_count(NOW - 60, 100, limits=ro.weekly_only())],
+        mtime=NOW - 60)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-b.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=_says_nothing())],
+        mtime=NOW - 30)
+
+    frames = usage_frames(provider_at(tmp_path).poll(NOW))
+
+    assert frames and all(f.no_session_window for f in frames)
+
+
+def test_an_older_weekly_only_ended_frame_cannot_mark_a_newer_window(
+        tmp_path):
+    """poll() sends the newest ended reading beside the winner, and merge()
+    reads the mark as any(): the ended weekly-only frame's own True must
+    not drop the newer 300's session figure."""
+    from pc import normalizer
+    ro.write(tmp_path, rollout(tmp_path, "rollout-old.jsonl"), [
+        ro.token_count(NOW - 2 * codex_cli.STALE_AFTER_S, 100,
+                       limits=ro.weekly_only(resets_at=NOW - 100))],
+        mtime=NOW - 2 * codex_cli.STALE_AFTER_S)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-new.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=ro.with_five_hour())],
+        mtime=NOW - 30)
+
+    frames = provider_at(tmp_path).poll(NOW)
+
+    assert len(usage_frames(frames)) == 2
+    assert not any(f.no_session_window for f in frames)
+    assert normalizer.merge(frames).session_pct == 40.0
+
+
+def test_a_window_length_too_big_for_a_float_does_not_raise(tmp_path):
+    """3rd review (codex_cli:467): math.isfinite on an int of 310 digits
+    or more raised OverflowError, and the bus benched the whole provider.
+    An int is finite; only a float needs the check."""
+    huge = int("9" * 401)
+    limits = {"limit_id": "codex",
+              "primary": {"used_percent": 21.0, "window_minutes": huge},
+              "secondary": None}
+    assert codex_cli._no_short_window(limits) is None
+    ro.write(tmp_path, rollout(tmp_path), [
+        ro.token_count(NOW - 60, 100, limits=limits)], mtime=NOW - 60)
+
+    frames = usage_frames(provider_at(tmp_path).poll(NOW))
+
+    assert [f.weekly_pct for f in frames] == [21.0]
 
 
 @pytest.mark.parametrize("limits", [
