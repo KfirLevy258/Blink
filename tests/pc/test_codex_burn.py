@@ -1313,6 +1313,37 @@ def test_the_reads_row_names_exactly_the_fields_the_codex_reader_reads():
                   "`turn_aborted`"):
         assert field in gauges, field
     assert 'CODEX_NEEDLE = b\'"token_count"\'' in src
-    assert ("on a Codex account with none (such as Codex Pro) the"
-            " output-token count of each turn from Codex's session log"
-            in short)
+
+
+CODEX_SHORT = ("on a Codex account with none (such as Codex Pro) every"
+               " token count of each turn from Codex's session log, held in"
+               " memory for up to five hours, of which only the output"
+               " tokens are added up")
+CODEX_FULL_48 = ("or, for a Codex account with none, every token count of"
+                 " each turn in Codex's session log, held in memory for up"
+                 " to five hours with only the output tokens added up")
+CODEX_FULL_78 = ("on an account with no five-hour limit, every token count"
+                 " of each turn, held in memory for up to five hours, with"
+                 " only the output tokens added up for the burn view")
+
+
+def test_the_codex_summaries_say_every_figure_is_read_and_kept():
+    """3rd review (README.md:183, README-full.md:48 and :78): the short
+    summaries said only the output-token count of each turn was read.
+    CodexBurnReader reads all six figures of both usage objects and keeps
+    them as the turn's key for as long as the turn is inside the window,
+    which the install note and the Reads row already said. The summaries
+    say it too, and none still says only the output count."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    with open(os.path.join(root, "docs", "README-full.md"),
+              encoding="utf-8") as f:
+        full = f.read()
+    with open(os.path.join(root, "README.md"), encoding="utf-8") as f:
+        short = f.read()
+    assert CODEX_SHORT in short
+    assert CODEX_FULL_48 in full and CODEX_FULL_78 in full
+    for text in (short, full):
+        assert "output-token count of each turn" not in text
+        assert "output-token counts in Claude Code's transcripts, or in" \
+            " Codex's" not in text
