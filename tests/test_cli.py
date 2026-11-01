@@ -2206,6 +2206,24 @@ def test_status_says_when_the_account_has_no_five_hour_window(
     assert open(session_verdict.verdict_path(), "rb").read() == before
 
 
+def test_status_names_the_ultra_fast_path(tmp_path, capsys):
+    """A verdict the Ultra fast path saved (pc/claude_plan; owner's
+    request, 2026-11-01) is said as such, not as five hours of replies."""
+    from tests.pc.test_claude_cli import payload
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    with open(inside(tmp_path, statusline_source_path()), "w",
+              encoding="utf-8") as f:
+        f.write(json.dumps(payload(five_hour=None, seven_day=2.0)))
+    _verdict(tmp_path, False, time.time() - 60, kind="statusline_ultra")
+    capsys.readouterr()
+
+    assert cli.main(["status"]) == 0
+    assert ("Session     no five-hour window (Claude Code reports an Ultra"
+            " plan, and its replies come back without one)"
+            ) in capsys.readouterr().out
+
+
 def test_status_on_a_marked_desk_with_no_reading_yet_still_prints_the_row(
         tmp_path, capsys):
     """A Claude Code-only Ultra desk, its verdict saved, in a session that
@@ -2525,6 +2543,52 @@ def test_a_service_that_sees_what_this_shell_does_not_says_so(
     assert folder == os.path.join(work, "projects")
     assert ("CLAUDE_CONFIG_DIR is set for the background service but not in"
             " this shell, so it reads the folder above.") in said
+
+
+def _plan_file(out):
+    lines = out.splitlines()
+    i = lines.index("  one, it reads the plan name from Claude Code's config:")
+    return lines[i + 1].strip(), lines[i + 2:]
+
+
+def test_the_install_note_says_what_is_taken_from_claude_json(
+        tmp_path, capsys, monkeypatch):
+    """pc/claude_plan parses Claude Code's config, which also holds the
+    account's email address and name, to take two fields. The note says
+    which, and that nothing else is."""
+    as_checkout(monkeypatch)
+    cli._announce()
+    out = capsys.readouterr().out
+    folder, after = _plan_file(out)
+    assert folder == str(tmp_path / ".claude.json")
+    said = " ".join(l.strip() for l in out.splitlines())
+    assert ("It takes oauthAccount.planDisplayName, or the rate-limit tier"
+            " when that is absent, and nothing else from the file; nothing"
+            " in it is logged, printed or saved.") in said
+    assert ("On the Ultra plan one such reply switches on the burn view;"
+            " other plans need five hours of them.") in said
+
+
+def test_the_plan_file_is_the_one_the_service_reads(tmp_path, capsys,
+                                                    monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    folder, after = _plan_file(capsys.readouterr().out)
+    assert folder == str(tmp_path / ".claude.json")
+    said = " ".join(l.strip() for l in after)
+    assert ("CLAUDE_CONFIG_DIR is set in this shell, but the background"
+            " service does not see it, so it reads the file above.") in said
+
+
+def test_with_no_service_the_plan_file_follows_claude_config_dir(
+        tmp_path, capsys, monkeypatch):
+    as_checkout(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    folder, _ = _plan_file(capsys.readouterr().out)
+    assert folder == str(tmp_path / "work-config" / ".claude.json")
 
 
 # The same for CODEX_HOME, which codex_cli honours and a login service does

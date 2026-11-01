@@ -35,6 +35,9 @@ Evidence of NO window, measured on this desk's verified Ultra account on
     or a local clock running fast, does that on Pro and Max (the
     re-review of 2026-11-01). (pc/providers/claude_cli,
     _reply_without_window)
+  - on an account whose Claude Code config (.claude.json) names the Ultra
+    plan, ONE such reply: Pro and Max never take this path, since their
+    plan is not Ultra (owner's request, 2026-11-01; pc/claude_plan).
 
 Evidence of a window, any of which clears the mark:
 
@@ -71,6 +74,11 @@ KIND_STATUSLINE_WINDOW = "statusline_window"
 # and the account is decided again, by the rules below. Never reuse a name
 # for a different rule: the name on disk is what says which rule made it.
 KIND_STATUSLINE_SUSTAINED = "statusline_sustained"
+# One weekly-only reply on an account whose Claude Code config names the
+# Ultra plan (pc/claude_plan; owner's request, 2026-11-01). A name of its
+# own, not statusline_sustained's: the rules differ, and the name on disk
+# is what says which rule made the verdict.
+KIND_STATUSLINE_ULTRA = "statusline_ultra"
 KIND_DESKTOP_FH = "desktop_fh"
 KIND_DESKTOP_RISE = "desktop_rise"
 KIND_LOCAL_STORAGE = "local_storage"
@@ -84,6 +92,8 @@ DESCRIBE = {
     KIND_STATUSLINE_WINDOW: "Claude Code reported a five-hour window",
     KIND_STATUSLINE_SUSTAINED: ("Claude Code replied for over five hours"
                                 " without one"),
+    KIND_STATUSLINE_ULTRA: ("Claude Code reports an Ultra plan, and its"
+                            " replies come back without one"),
     KIND_DESKTOP_FH: "Claude Desktop reported a five-hour figure",
     KIND_DESKTOP_RISE: ("Claude Desktop's weekly usage rose with no"
                         " five-hour figure before or after"),

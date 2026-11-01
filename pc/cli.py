@@ -3074,6 +3074,28 @@ def _announce():
     print("  per quarter-hour, never the conversation.")
     for line in caveat:
         print(line)
+    # The plan (pc/claude_plan), read since 2026-11-01 so that an Ultra
+    # desk switches to the burn view on its first reply with no five-hour
+    # figure instead of after five and a quarter hours of them. The file is
+    # Claude Code's own config, which also holds the account's email
+    # address and name and every project path, so this says exactly what
+    # is taken from it. Its folder follows CLAUDE_CONFIG_DIR as the
+    # transcripts' does, and is the service's for the same reason.
+    from pc import claude_plan
+    plan_file, caveat = _service_folder(
+        "CLAUDE_CONFIG_DIR",
+        lambda v: claude_plan.config_path(
+            {"CLAUDE_CONFIG_DIR": v} if v else {}),
+        "so it reads the file above.")
+    print("  When a Claude Code reply shows a weekly figure and no five-hour")
+    print("  one, it reads the plan name from Claude Code's config:")
+    print(f"    {plan_file}")
+    print("  It takes oauthAccount.planDisplayName, or the rate-limit tier")
+    print("  when that is absent, and nothing else from the file; nothing in")
+    print("  it is logged, printed or saved. On the Ultra plan one such reply")
+    print("  switches on the burn view; other plans need five hours of them.")
+    for line in caveat:
+        print(line)
     # The same for Codex (CodexBurnReader): an account whose Codex log
     # reports a weekly limit and no five-hour one -- Codex Pro on the
     # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
