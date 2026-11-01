@@ -492,6 +492,172 @@ def test_the_serial_threads_record_writes_take_one_try(home, monkeypatch):
     assert all(t == 1 for _, t in seen), seen
 
 
+class _HeldRecord:
+    """os.replace onto theme_seen.json refused with WinError 32, an
+    antivirus or the indexer holding the fresh file on a Windows desk, on
+    any runner; and every sleep recorded instead of slept."""
+
+    def __init__(self, monkeypatch, on=True):
+        self.on = on
+        self.attempts = 0
+        self.sleeps = []
+        real = os.replace
+
+        def replace(src, dst):
+            if self.on and os.path.basename(str(dst)) == theme.SEEN_FILE:
+                self.attempts += 1
+                e = PermissionError(13, "The process cannot access the file")
+                e.winerror = 32
+                raise e
+            return real(src, dst)
+        monkeypatch.setattr(os, "replace", replace)
+        monkeypatch.setattr(time, "sleep", self.sleeps.append)
+
+
+def _clocked(home):
+    clock = [1000.0]
+    s = theme.ThemeSync(home, clock=lambda: clock[0])
+    s.hello()
+    return s, clock
+
+
+def test_a_refused_record_of_a_board_pick_lands_once_the_hold_clears(
+        home, monkeypatch, capsys):
+    """Fourth review, 2026-11-01: with one try and no retry, a single
+    refusal left theme_seen.json at Neon after the owner picked Ocean on
+    the board, for good."""
+    theme.save(home, {"id": 1})
+    s, clock = _clocked(home)
+    s.board_now(now_msg(1, "boot"), board_id=BOARD)
+    held = _HeldRecord(monkeypatch)
+    s.board_now(now_msg(4, "user"), board_id=BOARD)
+    assert theme.load_saved(home) == {"id": 4}
+    assert theme.load_seen(home)["fp"] == {"id": 1}        # refused
+    for _ in range(5):                   # fast ticks, no time passing
+        assert s.outgoing() == []
+    assert held.attempts == 1            # backing off, not every tick
+    for _ in range(40):                  # half a minute of half-second ticks
+        clock[0] += 0.5
+        assert s.outgoing() == []
+    assert 1 < held.attempts <= 6
+    held.on = False
+    clock[0] += theme.ThemeSync.ADOPT_RETRY_MAX_S
+    assert s.outgoing() == []
+    assert theme.load_seen(home)["fp"] == {"id": 4}
+    assert held.sleeps == []
+    assert capsys.readouterr().err.count("could not record") == 1
+
+
+def test_the_reviews_ocean_then_forest_ends_on_forest(home, monkeypatch):
+    """The fourth review's scenario: record Neon; Ocean picked on the board
+    with the record's write refused once; unplugged; `blink theme set`
+    Forest; plugged back in with a boot report of Ocean. Ocean is what was
+    last seen on that board, so Forest is this computer's change and goes
+    out. With the record left at Neon, Ocean was adopted over Forest."""
+    NEON, OCEAN, FOREST = 1, 4, 7
+    theme.save(home, {"id": NEON})
+    s, clock = _clocked(home)
+    s.board_now(now_msg(NEON, "boot"), board_id=BOARD)
+    held = _HeldRecord(monkeypatch)
+    s.board_now(now_msg(OCEAN, "user"), board_id=BOARD)
+    held.on = False                      # the hold clears
+    for _ in range(10):
+        clock[0] += 0.5
+        s.outgoing()
+    assert theme.load_seen(home)["fp"] == {"id": OCEAN}
+    theme.save(home, {"id": FOREST})     # unplugged: set on the computer
+    s.hello()
+    s.board_now(now_msg(OCEAN, "boot"), board_id=BOARD)
+    assert saves(s.outgoing()) == [theme.message("save", {"id": FOREST})]
+    assert theme.load_saved(home) == {"id": FOREST}
+    assert theme.board_kept(home) is None
+    assert held.sleeps == []
+
+
+def test_a_record_still_refused_at_the_replug_is_judged_as_written(
+        home, monkeypatch):
+    """The hold outlasts the unplug: the record this daemon owes is the one
+    it compares against, not the stale file."""
+    theme.save(home, {"id": 1})
+    s, clock = _clocked(home)
+    s.board_now(now_msg(1, "boot"), board_id=BOARD)
+    held = _HeldRecord(monkeypatch)
+    s.board_now(now_msg(4, "user"), board_id=BOARD)
+    theme.save(home, {"id": 7})
+    s.hello()
+    s.board_now(now_msg(4, "boot"), board_id=BOARD)
+    assert saves(s.outgoing()) == [theme.message("save", {"id": 7})]
+    assert theme.load_saved(home) == {"id": 7}
+    held.on = False
+    clock[0] += theme.ThemeSync.ADOPT_RETRY_MAX_S
+    s.outgoing()
+    rec = theme.load_seen(home)
+    assert rec["fp"] == {"id": 4} and rec["asked"] == {"id": 7}
+
+
+def test_a_refused_record_of_the_save_sent_lands_and_keeps_n1(
+        home, monkeypatch):
+    """_note_asked refused once: `asked` was lost, and after a restart the
+    board's boot report of our own earlier save was adopted as its choice
+    over the computer's later one (N1)."""
+    theme.save(home, {"id": 1})
+    s, clock = _clocked(home)
+    s.board_now(now_msg(1, "boot"), board_id=BOARD)
+    theme.save(home, {"id": 4})
+    held = _HeldRecord(monkeypatch)
+    assert saves(s.outgoing()) == [theme.message("save", {"id": 4})]
+    assert theme.load_seen(home)["asked"] is None          # refused
+    held.on = False
+    clock[0] += theme.ThemeSync.ADOPT_RETRY_FIRST_S
+    assert saves(s.outgoing()) == []
+    assert theme.load_seen(home)["asked"] == {"id": 4}
+    # The save landed but its why=saved was lost; the daemon restarts after
+    # the owner sets another theme here.
+    theme.save(home, {"id": 7})
+    s = connect(home)
+    s.board_now(now_msg(4, "boot"), board_id=BOARD)
+    assert saves(s.outgoing()) == [theme.message("save", {"id": 7})]
+    assert theme.load_saved(home) == {"id": 7}
+    assert held.sleeps == []
+
+
+def test_a_newer_record_supersedes_an_older_pending_one(home, monkeypatch):
+    theme.save(home, {"id": 1})
+    s, clock = _clocked(home)
+    s.board_now(now_msg(1, "boot"), board_id=BOARD)
+    held = _HeldRecord(monkeypatch)
+    s.board_now(now_msg(4, "user"), board_id=BOARD)
+    s.board_now(now_msg(6, "user"), board_id=BOARD)        # refused too
+    assert held.attempts == 2            # a new record is tried at once
+    held.on = False
+    clock[0] += theme.ThemeSync.ADOPT_RETRY_MAX_S
+    s.outgoing()
+    assert theme.load_seen(home)["fp"] == {"id": 6}
+    for _ in range(5):                   # and the older one never follows
+        clock[0] += theme.ThemeSync.ADOPT_RETRY_MAX_S
+        s.outgoing()
+    assert theme.load_seen(home)["fp"] == {"id": 6}
+    assert theme.load_saved(home) == {"id": 6}
+
+
+def test_a_record_that_lands_on_the_next_write_is_no_longer_owed(
+        home, monkeypatch):
+    theme.save(home, {"id": 1})
+    s, clock = _clocked(home)
+    s.board_now(now_msg(1, "boot"), board_id=BOARD)
+    held = _HeldRecord(monkeypatch)
+    s.board_now(now_msg(4, "user"), board_id=BOARD)
+    held.on = False
+    s.board_now(now_msg(6, "user"), board_id=BOARD)        # lands at once
+    assert theme.load_seen(home)["fp"] == {"id": 6}
+    before = held.attempts
+    held.on = True
+    for _ in range(5):
+        clock[0] += theme.ThemeSync.ADOPT_RETRY_MAX_S
+        s.outgoing()
+    assert held.attempts == before       # nothing left to retry
+
+
 def test_a_new_pick_on_the_board_clears_the_kept_note(home):
     # Round-2 review, R4: the note was carried past a why=user, so picking
     # the kept theme again later brought a stale "kept over" back.

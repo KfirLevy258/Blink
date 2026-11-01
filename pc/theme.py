@@ -887,6 +887,8 @@ class ThemeSync:
 
     Every write here runs on the daemon's serial thread, so each is one
     try (_SERIAL_TRIES), never _write_json's ten with 0.3 s between them.
+    A refused write of theme.json or theme_seen.json is owed instead, and
+    retried from outgoing() on the backoff below.
     """
 
     # A refused WRITE of theme.json (WinError 5 or 32: read-only, or held)
@@ -928,6 +930,22 @@ class ThemeSync:
         self._pending = None
         self._pending_note = None
         self._pending_mtime = None
+        # A refused write of theme_seen.json: the record it should hold.
+        # One try on the serial thread (af95ae5) and no retry left the
+        # record wrong for good after a single WinError 32, an antivirus or
+        # the indexer holding the fresh file: a pick on the board stayed
+        # recorded as the theme before it, and the next boot report read as
+        # the board's own change and was adopted over a theme the owner set
+        # here in between (fourth review, 2026-11-01, reproduced). A refused
+        # `asked` lost N1 the same way. So the record is owed: this daemon
+        # judges by the record it owes, not by the stale file, retries it
+        # on the adopt's backoff, and a newer record replaces an older one
+        # still owed. It outlives a hello, since the file is what the next
+        # boot report is judged against; a restart starts from the file.
+        self._record_owed = False
+        self._record_want = None
+        self._record_retry_at = None
+        self._record_retry_wait = None
         sent = _read_json(sent_path(home))
         self._sent = _reported(sent)
 
@@ -939,9 +957,16 @@ class ThemeSync:
         self._pending_note = None
         self._retry_at = self._retry_wait = None
 
+    def _load_record(self):
+        """theme_seen.json's record, or the one owed to it if a write was
+        refused: that is what the file would hold."""
+        if self._record_owed:
+            return self._record_want
+        return load_seen(self._home)
+
     def _record_for(self, board_id):
         """theme_seen.json's record when it is about `board_id`, else None."""
-        rec = load_seen(self._home)
+        rec = self._load_record()
         if rec is None or board_id is None or rec["board_id"] != board_id:
             return None
         return rec
@@ -1017,7 +1042,7 @@ class ThemeSync:
         if board_id is None:
             return
         if _fp_of(fp) is None:
-            new = None if rec is not None else load_seen(self._home)
+            new = None if rec is not None else self._load_record()
         else:
             new = {"board_id": board_id, "fp": fp, "asked": None,
                    "kept": kept, "lost": lost}
@@ -1032,11 +1057,7 @@ class ThemeSync:
                 # kept theme again (round-2 review, R4).
                 if kept is None and why not in ("saved", WHY_ADOPT):
                     new["kept"], new["lost"] = rec["kept"], rec["lost"]
-        try:
-            _write_seen(self._home, new, tries=_SERIAL_TRIES)
-        except OSError as e:
-            print(f"[theme] could not record the board's theme: {e}",
-                  file=sys.stderr)
+        self._write_record(new, "the board's theme")
 
     def _note_asked(self, fp):
         """A save just went to the board: remember it until it is confirmed,
@@ -1050,11 +1071,37 @@ class ThemeSync:
             if _fp_of(self._board) is None:
                 return
         rec = dict(rec, asked=fp)
+        self._write_record(rec, "the save sent")
+
+    def _write_record(self, rec, what):
+        """Write theme_seen.json once; refused, the record is owed and
+        retried from outgoing() on the adopt's backoff. A new record is
+        tried at once and starts the backoff over; logged once a refusal,
+        not once a retry."""
+        fresh = not self._record_owed or rec != self._record_want
         try:
             _write_seen(self._home, rec, tries=_SERIAL_TRIES)
         except OSError as e:
-            print(f"[theme] could not record the save sent: {e}",
-                  file=sys.stderr)
+            if fresh:
+                print(f"[theme] could not record {what}: {e}",
+                      file=sys.stderr)
+            wait = (self.ADOPT_RETRY_FIRST_S
+                    if fresh or self._record_retry_wait is None
+                    else min(self._record_retry_wait * 2,
+                             self.ADOPT_RETRY_MAX_S))
+            self._record_owed = True
+            self._record_want = rec
+            self._record_retry_wait = wait
+            self._record_retry_at = self._now() + wait
+        else:
+            self._record_owed = False
+            self._record_want = None
+            self._record_retry_at = self._record_retry_wait = None
+
+    def _retry_record(self):
+        if self._now() < self._record_retry_at:
+            return                       # backing off
+        self._write_record(self._record_want, "the board's theme")
 
     def _now(self):
         return (self._clock or time.monotonic)()
@@ -1142,6 +1189,8 @@ class ThemeSync:
         taken = take_preview(self._home)
         if self._pending is not None:
             self._retry_pending()
+        if self._record_owed:
+            self._retry_record()
         if not deliver:
             return out
         save = None
