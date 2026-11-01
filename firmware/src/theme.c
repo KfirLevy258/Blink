@@ -307,6 +307,19 @@ static struct palette custom;
 static const struct palette *cur = &builtin[THEME_DARK];
 static int cur_id = THEME_DARK;
 
+/*
+ * The burn view's inks for `cur`, worked out once when the palette changes
+ * rather than on every draw. theme_burn_inks() is a soft-float contrast walk
+ * (no FPU doubles on the ESP32): the 2026-11-01 re-review measured it at
+ * about 2.2 ms on Retro LCD and up to about 9.5 ms on a garish custom theme,
+ * and burn_draw_cb() ran it on every LV_EVENT_DRAW_MAIN -- each strip of the
+ * 80-strip wipe and every redraw after. The inks depend on the palette alone,
+ * so theme_select() and theme_select_custom() set them, and the boot default
+ * (Dark, before anything is selected) is filled on the first read. 16 bytes.
+ */
+static struct theme_burn_inks cur_inks;
+static bool cur_inks_ok;
+
 const struct palette *theme_builtin(int id)
 {
 	if (id < 0 || id >= THEME_BUILTIN_N) {
@@ -584,6 +597,8 @@ bool theme_select(int id)
 	}
 	cur = p;
 	cur_id = id;
+	theme_burn_inks(cur, cur_id == THEME_DARK, &cur_inks);
+	cur_inks_ok = true;
 	return true;
 }
 
@@ -595,7 +610,18 @@ bool theme_select_custom(const struct theme_custom *t)
 	theme_derive(t, &custom);
 	cur = &custom;
 	cur_id = THEME_CUSTOM;
+	theme_burn_inks(cur, false, &cur_inks);
+	cur_inks_ok = true;
 	return true;
+}
+
+const struct theme_burn_inks *theme_cur_burn_inks(void)
+{
+	if (!cur_inks_ok) {
+		theme_burn_inks(cur, cur_id == THEME_DARK, &cur_inks);
+		cur_inks_ok = true;
+	}
+	return &cur_inks;
 }
 
 static bool neutral(uint32_t c)
