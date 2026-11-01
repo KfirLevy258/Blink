@@ -2662,6 +2662,55 @@ def test_the_windows_run_key_start_is_said_to_keep_this_window(
             + os.path.join(window, "projects")) in said
 
 
+@pytest.mark.parametrize("make, frozen, systemctl", [
+    (cli._Backend, False, None),
+    (cli._LaunchdBackend, False, None),
+    (cli._SchtasksBackend, False, None),
+    (cli._SchtasksBackend, True, None),
+    (cli._SystemdBackend, False, False),
+    (cli._SystemdBackend, False, True),
+])
+def test_a_backend_that_creates_nothing_is_started_from_a_shell(
+        monkeypatch, make, frozen, systemctl):
+    """_service_folder asks only started_from_shell(): it used to ask
+    `not creates()` as well, which every backend already answers through
+    started_from_shell(). Pinned, so a backend that breaks that is seen."""
+    (as_frozen if frozen else as_checkout)(monkeypatch)
+    if systemctl is not None:
+        monkeypatch.setattr(cli._SystemdBackend, "_has_systemctl",
+                            staticmethod(lambda: systemctl))
+        monkeypatch.setattr(cli._SystemdBackend, "_booted",
+                            staticmethod(lambda: True))
+    b = make()
+    assert b.creates() or b.started_from_shell()
+
+
+def test_a_window_without_the_variable_is_not_said_to_keep_it(
+        tmp_path, capsys, monkeypatch):
+    """`setx CODEX_HOME D:\\codex`, then install from a window opened before
+    it. The Run-key paragraph said the bridge "keeps this window's
+    CODEX_HOME" right under a line saying this window has none (fourth
+    review, 2026-11-01). The folder was right: _start_launcher inherits a
+    window without the variable, so the bridge reads the default."""
+    as_frozen(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
+    reg = str(tmp_path / "reg-codex")
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CODEX_HOME"): (reg, 1)}))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    cli._announce()
+    folder, said = _codex_folder(capsys.readouterr().out)
+    assert folder == os.path.join(reg, "sessions")
+    assert "CODEX_HOME is set for the background service but not in this" \
+        " shell" in said
+    assert "keeps this window's" not in said
+    assert ("If Windows refuses the task and the Run key is used instead,"
+            " this window has no CODEX_HOME, so until you next log in the"
+            " bridge started now reads this folder: "
+            + str(tmp_path / ".codex" / "sessions")) in said
+
+
 class _FakeWinreg:
     """Just enough of winreg for the environment keys."""
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE = "HKCU", "HKLM"

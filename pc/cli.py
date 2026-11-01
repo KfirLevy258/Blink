@@ -3132,7 +3132,10 @@ def _service_folder(name, folder, consequence):
     shell_value = os.environ.get(name) or None
     shell_root = folder(shell_value)
     b = backend()
-    if not b.creates() or _skip_service() or b.started_from_shell():
+    # started_from_shell() covers a backend that creates nothing: the base
+    # class has no supervisor, and schtasks creates nothing exactly when its
+    # checkout_refusal() says the daemon is started by hand.
+    if _skip_service() or b.started_from_shell():
         return shell_root, []
     seen = b.service_environ(name) or None
     root = folder(seen)
@@ -3149,10 +3152,20 @@ def _service_folder(name, folder, consequence):
                f" shell, {consequence}")
     lines = ["  " + l for l in textwrap.wrap(why, 66)]
     if b.shell_until_logon():
+        # The bridge _start_launcher starts inherits this window. With the
+        # variable unset here it was still said to keep "this window's
+        # {name}", under a line saying this window has none (fourth review,
+        # 2026-11-01); the folder below was right all along.
+        if shell_value:
+            keeps = (f"the bridge started now keeps this window's {name}"
+                     " until you next log in, and reads this folder until"
+                     " then:")
+        else:
+            keeps = (f"this window has no {name}, so until you next log in"
+                     " the bridge started now reads this folder:")
         lines += ["  " + l for l in textwrap.wrap(
-            "If Windows refuses the task and the Run key is used instead,"
-            f" the bridge started now keeps this window's {name} until you"
-            " next log in, and reads this folder until then:", 66)]
+            "If Windows refuses the task and the Run key is used instead, "
+            + keeps, 66)]
         lines.append(f"    {shell_root}")
     return root, lines
 
