@@ -2422,9 +2422,15 @@ def _burn_folder(out):
 
 
 def _with_a_service(monkeypatch, service_sees=None):
+    # Patched on the class backend() actually returns, not on _Backend: the
+    # launchd and schtasks backends override creates(), and schtasks also
+    # overrides service_claude_config_dir() to read the registry, so a patch
+    # on the base class was silently shadowed on Windows (windows VM run,
+    # 2026-11-01: the folder came out as the shell's).
+    kind = type(cli.backend())
     monkeypatch.setattr(cli, "_skip_service", lambda: False)
-    monkeypatch.setattr(cli._Backend, "creates", lambda self: "a service")
-    monkeypatch.setattr(cli._Backend, "service_claude_config_dir",
+    monkeypatch.setattr(kind, "creates", lambda self: "a service")
+    monkeypatch.setattr(kind, "service_claude_config_dir",
                         lambda self: service_sees)
 
 
