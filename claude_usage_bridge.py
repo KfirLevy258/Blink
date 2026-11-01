@@ -926,6 +926,11 @@ def main(argv=None):
     _log_file = os.path.join(blink_home, "bridge.log")
 
     def _upkeep():
+        # The burn readers forget what has left their five hours whether or
+        # not anything polls them: an unplugged board polls nothing, and an
+        # unmarked page is never read (IngestionBus.prune_burn, README
+        # "Privacy"). `bus` is built below, before the first call.
+        bus.prune_burn()
         drifted = watchdog.tick()
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
@@ -1337,6 +1342,10 @@ def main(argv=None):
         proven = False
         try:
             while True:
+                # One pass of the loop: whatever the heartbeat and the fast
+                # tick ask for the burn line below is asked once, from one
+                # read budget, however long a read takes (Bridge.begin_pass).
+                bridge.begin_pass()
                 # in_waiting first, then a blocking read(1) as the idle wait.
                 #
                 # ser.read(n) does NOT return early on partial data: it waits

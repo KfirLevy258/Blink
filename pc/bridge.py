@@ -47,10 +47,6 @@ THEME_SAVE_HOLD_S = 0.5
 # last line, three heartbeats.
 BURN_MIN_GAP_S = 15.0
 BURN_HEARTBEAT_S = 60.0
-# And no page is ASKED twice inside this, whatever it answered: less than the
-# 2 s fast tick, so a cold start is still read on every tick, and more than
-# the moment between the heartbeat and a fast tick run in the same pass.
-BURN_ASK_GAP_S = 1.0
 
 
 def _spawn(fn):
@@ -224,10 +220,23 @@ class Bridge:
         # was always "a change" and always within 15 s of the first's, so
         # it would never have gone out.
         self._burn_sent = {}
-        # Pages whose last ask raised (see _burn_trouble), and when each page
-        # was last asked at all (BURN_ASK_GAP_S).
+        # Pages whose last ask raised (see _burn_trouble).
         self._burn_failed = set()
-        self._burn_asked = {}
+        # Passes of the serial loop (begin_pass). A page is asked at most
+        # once a pass, and the bus's read budget is filled once a pass, by
+        # count rather than by the clock: _burn_asked holds the pages asked
+        # in pass _burn_pass. _loop_passes is False until the loop first
+        # says where a pass starts; until then every ask is a pass of its
+        # own, which is what a Bridge driven by hand -- a test, a bench --
+        # has always had. Until the 4th review of 2026-11-01 a page asked
+        # inside the last second (BURN_ASK_GAP_S) was not asked again,
+        # stamped even when the bus had nothing left to hand it: on a desk
+        # whose budget took 1.0-1.5 s to read, the second page was then
+        # skipped on its own turn, pass after pass (ingest.burn_pass).
+        self._pass = 0
+        self._loop_passes = False
+        self._burn_pass = None
+        self._burn_asked = set()
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -1150,6 +1159,17 @@ class Bridge:
             self._write(protocol.session(*pair))
             self._last_session = pair
 
+    def begin_pass(self):
+        """A new pass of the serial loop starts here.
+
+        claude_usage_bridge calls it at the top of every turn of its read
+        loop, before the heartbeat or the fast tick can run. Everything the
+        burn line asks for between two calls -- the heartbeat and the fast
+        tick both, however long a read inside them takes -- is one pass:
+        each marked page asked once, from one read budget."""
+        self._loop_passes = True
+        self._pass += 1
+
     def _send_burn_if_due(self):
         """Put the burn line on the wire when its cadence says so.
 
@@ -1179,7 +1199,17 @@ class Bridge:
             return
         if self._in_quiet_window():
             return
+        if not self._loop_passes:
+            self._pass += 1             # driven by hand: each ask a pass
         try:
+            if self._burn_pass != self._pass:
+                self._burn_pass = self._pass
+                self._burn_asked = set()
+                # The bus's read budget, filled once for the pass and
+                # shared by every page asked in it (ingest.burn_pass).
+                fill = getattr(self._fetch, "burn_pass", None)
+                if fill is not None:
+                    fill()
             marked = list(pages())
         except Exception as e:
             self._burn_trouble(None, e)
@@ -1225,11 +1255,12 @@ class Bridge:
         # both run in one pass of the serial loop, and each used to ask a
         # page whose reader was behind -- the answer None leaves no trace in
         # _burn_sent -- so a cold start was read twice per pass, beside the
-        # budget the bus shares (/code-review max, 2026-11-01).
-        asked = self._burn_asked.get(p)
-        if asked is not None and 0 <= now - asked < BURN_ASK_GAP_S:
+        # budget the bus shares (/code-review max, 2026-11-01). Counted in
+        # passes (begin_pass), so a slow read cannot stretch a pass, and a
+        # page asked with nothing left to read is asked again next pass.
+        if p in self._burn_asked:
             return
-        self._burn_asked[p] = now
+        self._burn_asked.add(p)
         try:
             msg = burn(p)
         except Exception as e:

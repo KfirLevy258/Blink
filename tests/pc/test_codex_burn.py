@@ -841,7 +841,7 @@ def test_both_pages_marked_are_both_burn_pages(tmp_path):
 def test_two_readers_share_one_read_budget_per_pass(tmp_path):
     """Finding 6: each reader was handed READ_BUDGET_BYTES, so two pages
     read twice what the serial loop was promised. One budget per pass,
-    from burn_pages(), spent by the pages in turn."""
+    from burn_pass(), spent by the pages in turn."""
     from tests.support import transcripts as tr
     budget, chunk = 8192, 1024
     proj = tmp_path / ".claude" / "projects"
@@ -868,6 +868,7 @@ def test_two_readers_share_one_read_budget_per_pass(tmp_path):
     passes = []
     for _ in range(40):
         clock[0] += 2.0                 # the fast tick: one pass each
+        fetch.burn_pass()
         pages = fetch.burn_pages()
         got = [fetch.burn(p) for p in pages]
         passes.append(sum(r.last.read_bytes for r in readers.values()))
@@ -909,6 +910,21 @@ def _two_backlogs(tmp_path, claude_lines, codex_lines, budget, chunk):
     return fetch, readers, clock
 
 
+def _metered(readers):
+    """Every byte each reader reads from here on, summed across polls:
+    {"bytes": n}. reader.last is overwritten by every poll, so a sum of
+    it sees only the latest round, and the test that once used it passed
+    with the bug it is named for put back (4th review, 2026-11-01)."""
+    meter = {"bytes": 0}
+    for r in readers.values():
+        def poll(now, budget=None, _r=r, _poll=r.poll):
+            got = _poll(now, budget=budget)
+            meter["bytes"] += _r.last.read_bytes
+            return got
+        r.poll = poll
+    return meter
+
+
 def _spent(readers):
     n = sum(r.last.read_bytes for r in readers.values())
     for r in readers.values():
@@ -916,21 +932,48 @@ def _spent(readers):
     return n
 
 
+def _heartbeat_and_tick_in_one_pass(tmp_path, refill_on_every_ask=False):
+    """Bytes read by one pass in which both the heartbeat and the fast
+    tick ask for the pages; `refill_on_every_ask` puts back the 3rd
+    review's bug, a fresh budget from every burn_pages() call."""
+    budget, chunk = 8192, 1024
+    fetch, readers, clock = _two_backlogs(tmp_path, 400, 400, budget, chunk)
+    bus = fetch._bus
+    if refill_on_every_ask:
+        pages = bus.burn_pages
+
+        def burn_pages():
+            bus.burn_pass()
+            return pages()
+        bus.burn_pages = burn_pages
+    meter = _metered(readers)
+    clock[0] += 2.0
+    fetch.burn_pass()
+    first = [fetch.burn(p) for p in fetch.burn_pages()]     # the heartbeat
+    second = [fetch.burn(p) for p in fetch.burn_pages()]    # the fast tick
+    assert not any(first + second)
+    return meter["bytes"], budget + chunk + br.ANCHOR_BYTES
+
+
 def test_one_budget_however_many_times_a_pass_asks_for_the_pages(
         tmp_path):
     """3rd review (ingest:398): burn_pages() refilled the budget on every
     call, and the heartbeat and the fast tick each call it in a pass where
-    both run. The budget is filled once a pass, keyed by time, so the
-    second call inside the pass hands out only what the first left."""
-    budget, chunk = 8192, 1024
-    fetch, readers, clock = _two_backlogs(tmp_path, 400, 400, budget, chunk)
-    clock[0] += 2.0
-    first = [fetch.burn(p) for p in fetch.burn_pages()]
-    clock[0] += ingest.BURN_PASS_S / 2     # still the same pass
-    second = [fetch.burn(p) for p in fetch.burn_pages()]
+    both run. The budget is filled once a pass, by burn_pass(), so the
+    second ask inside the pass hands out only what the first left. Every
+    byte of the pass is counted, not the last poll's."""
+    spent, bound = _heartbeat_and_tick_in_one_pass(tmp_path)
+    assert 0 < spent <= bound
 
-    assert not any(first + second)
-    assert _spent(readers) <= budget + 2 * (chunk + br.ANCHOR_BYTES)
+
+def test_the_one_budget_test_sees_the_bug_it_is_named_for(tmp_path):
+    """The meter above, against the bug put back: two budgets in one pass
+    read more than the bound allows. Until the 4th review of 2026-11-01
+    the test measured reader.last, which the second round overwrites, and
+    this case passed."""
+    spent, bound = _heartbeat_and_tick_in_one_pass(
+        tmp_path, refill_on_every_ask=True)
+    assert spent > bound
 
 
 def test_the_page_asked_first_takes_turns(tmp_path):
@@ -943,6 +986,7 @@ def test_the_page_asked_first_takes_turns(tmp_path):
     orders = []
     for n in range(1, 8):
         clock[0] += 2.0
+        fetch.burn_pass()
         pages = fetch.burn_pages()
         orders.append(pages)
         got = {p: fetch.burn(p) for p in pages}
@@ -955,25 +999,260 @@ def test_the_page_asked_first_takes_turns(tmp_path):
     assert orders[0] != orders[1] and sorted(orders[0]) == sorted(orders[1])
 
 
-def test_burn_asked_without_burn_pages_still_has_a_budget(tmp_path):
-    """A caller that asks burn() and never burn_pages() -- tests, a future
-    caller -- was handed the first pass's leftover for ever. burn() starts
-    a pass of its own when none has been started in BURN_PASS_S."""
+def test_no_pass_opened_is_one_budget_and_no_more(tmp_path):
+    """The budget is the pass's, and only burn_pass() opens a pass: a
+    caller that asks burn() and never opens one has the first budget and
+    what is left of it, however much the clock moves. Until the 4th review
+    of 2026-11-01 a pass was any 1.5 s of the clock (BURN_PASS_S), which a
+    slow read could outlast inside one pass."""
     budget, chunk = 8192, 1024
     fetch, readers, clock = _two_backlogs(tmp_path, 0, 400, budget, chunk)
-    for _ in range(40):
+    meter = _metered(readers)
+    for _ in range(10):
         clock[0] += 2.0
-        got = fetch.burn("codex")
-        assert _spent(readers) > 0 or got is not None
-        if got is not None:
-            break
+        assert fetch.burn("codex") is None
+    assert 0 < meter["bytes"] <= budget + chunk + br.ANCHOR_BYTES
 
-    assert got is not None
+    fetch.burn_pass()
+    fetch.burn("codex")
+    assert meter["bytes"] > budget + chunk + br.ANCHOR_BYTES
+
+
+class _SlowReader(br.BurnReader):
+    """A reader owed `owed` bytes that reads all of whatever it is handed
+    and moves the shared clock while it does: a full budget costs
+    `cost_s`. Records each budget it was handed against the pass the
+    loop is in (pass_no[0])."""
+
+    def __init__(self, clock, pass_no, cost_s, owed):
+        super().__init__(root="unused")
+        self.clock, self.pass_no, self.cost_s = clock, pass_no, cost_s
+        self.owed = owed
+        self.handed = []            # (pass, bytes handed, bytes read)
+
+    def poll(self, now, budget=None):
+        budget = self.read_budget if budget is None else budget
+        got = min(budget, self.owed)
+        self.handed.append((self.pass_no[0], budget, got))
+        self.owed -= got
+        self.clock[0] += self.cost_s * got / self.read_budget
+        self.last = br.PollCost(False, 1, got, self.owed, 0)
+        if self.owed:
+            return None
+        return protocol.burn_quarter(now), [0] * 19 + [1]
+
+
+class _Live(base.ProviderParser):
+    """A marked frame for `provider`, read now, every poll."""
+
+    def __init__(self, provider):
+        self._p = provider
+
+    def get_provider_id(self):
+        return self._p
+
+    def poll(self, now_epoch):
+        return [base.NormalizedUsageFrame(
+            provider=self._p, src="cli" if self._p == "claude"
+            else codex_cli.SRC_ID, observed_at=now_epoch - 1,
+            session_pct=-1.0, weekly_pct=12.0, no_session_window=True)]
+
+
+@pytest.mark.parametrize("cost_s", [0.3, 0.9, 1.1, 1.3, 1.45, 1.6, 3.0])
+def test_a_read_that_moves_the_clock_starves_no_page_and_doubles_no_budget(
+        cost_s):
+    """4th review (ingest:483): the pass was the clock's, 1.5 s of it, and
+    each page's ask was gated by 1.0 s more (bridge.BURN_ASK_GAP_S),
+    stamped even when the ask was handed nothing. With a full budget's
+    read taking 1.0 to 1.5 s the second page was asked with nothing left,
+    then skipped on its own turn the pass after, and starved behind the
+    whole Claude backlog; at 1.5 s or more the gate ran out inside the
+    pass and the second page was handed a second budget. Here the
+    reader moves the clock as the real one does, through the real Bridge
+    and bus, the heartbeat joining the fast tick every fifth pass,
+    and the loop opening each pass as claude_usage_bridge's does."""
+    clock, pass_no = [1000.0], [0]
+    full = br.READ_BUDGET_BYTES
+    claude = _SlowReader(clock, pass_no, cost_s, owed=full * 12)
+    codex = _SlowReader(clock, pass_no, cost_s, owed=full // 4)
+    bus = ingest.IngestionBus(
+        providers=[_Live("claude"), _Live("codex")],
+        preferred_provider="claude", now=lambda: clock[0],
+        burn={"claude": claude, "codex": codex}, verdict=None)
+    b = Bridge(write_msg=lambda m: None, fetch_usage=bus.fetch(),
+               now=lambda: clock[0], wall=lambda: (1752444000, 0),
+               **_NO_FEED)
+    b.on_message({"t": "hello", "v": 2, "board_id": "ab", "fw": "1.4.0",
+                  "caps": CAPS})
+    clock[0] += THEME_QUIET_S
+
+    for n in range(1, 40):
+        # The fast tick is due two seconds after the last one STARTED
+        # (next_fast_poll in claude_usage_bridge), so a slow pass leaves
+        # less than two seconds before the next.
+        due = clock[0] + 2.0
+        pass_no[0] = n
+        b.begin_pass()
+        if n % 5 == 0:
+            b.poll_once()
+        b.poll_if_changed()
+        clock[0] = max(clock[0], due)
+
+    read = {}
+    for n, _, got in claude.handed + codex.handed:
+        read[n] = read.get(n, 0) + got
+    # Never more than one budget read in a pass, the heartbeat's included.
+    assert read and max(read.values()) <= full, read
+    # Codex, owed a quarter of a budget, has it read by the second pass
+    # that asks: it is first every other pass whatever Claude is owed.
+    first = min(read)
+    assert codex.owed == 0, codex.handed
+    assert min(n for n, _, got in codex.handed if got) <= first + 1
+    # And Claude, owed twelve budgets, is never left out of two passes
+    # running while it is owed.
+    fed = sorted({n for n, _, got in claude.handed if got})
+    assert all(b2 - b1 <= 2 for b1, b2 in zip(fed, fed[1:])), fed
+    assert len(fed) >= 12 and claude.owed == 0
 
 
 def test_a_single_reader_is_still_the_claude_pages():
     bus = ingest.IngestionBus(providers=[], burn=Counting(None), verdict=None)
     assert set(bus._burn) == {"claude"}
+
+
+# ------------------------------------------- what is held, and how long
+
+
+FIVE_H = protocol.BURN_BUCKETS * protocol.BURN_BUCKET_S
+
+
+def _ten_turns(tmp_path):
+    """Ten generated turns in the newest quarter-hour, latest stamped at
+    start(19) + 90 s."""
+    ro.write(tmp_path, rollout(tmp_path), [
+        ro.token_count(start(19) + 10 * (i - 1), 100 * i, 100)
+        for i in range(1, 11)], mtime=NOW - 5)
+    return start(19) + 90
+
+
+def test_prune_forgets_every_turn_five_hours_after_its_stamp(tmp_path):
+    """README "Privacy": the token counts of a turn are held in memory for
+    up to five hours. prune() is that promise, asked without a read."""
+    latest = _ten_turns(tmp_path)
+    r = reader(tmp_path)
+    assert sum(r.poll(NOW)[1]) == 1000 and len(r._seen) == 10
+
+    r.prune(latest + FIVE_H - 900)
+    assert len(r._seen) == 10               # still inside the window
+    r.prune(latest + FIVE_H)
+    assert r._seen == {} and r._buckets == {}
+
+
+def _codex_page_bus(tmp_path, marked):
+    """A bus whose Codex page is marked while marked[0] holds, read by a
+    real CodexBurnReader, on a clock the test moves."""
+    clock = [NOW]
+
+    class Page(base.ProviderParser):
+        def get_provider_id(self):
+            return "codex"
+
+        def poll(self, now_epoch):
+            return [base.NormalizedUsageFrame(
+                provider="codex", src=codex_cli.SRC_ID,
+                observed_at=now_epoch - 5,
+                session_pct=-1.0 if marked[0] else 30.0, weekly_pct=21.0,
+                no_session_window=marked[0])]
+
+    r = reader(tmp_path)
+    bus = ingest.IngestionBus(providers=[Page()], preferred_provider="codex",
+                              now=lambda: clock[0], burn={"codex": r},
+                              verdict=None)
+    return bus, r, clock
+
+
+def test_an_unmarked_page_holds_no_turn_past_five_hours(tmp_path):
+    """4th review (README.md:183): prune ran only inside poll(), and burn()
+    stops polling a page the moment it is unmarked, so ten turns were
+    still held 8.4 h after the newest. The bus prunes every reader on its
+    own poll, marked or not."""
+    latest = _ten_turns(tmp_path)
+    marked = [True]
+    bus, r, clock = _codex_page_bus(tmp_path, marked)
+    fetch = bus.fetch()
+    fetch()
+    assert fetch.burn("codex") is not None and len(r._seen) == 10
+
+    marked[0] = False                       # the window is back
+    for _ in range(8 * 60):                 # eight hours of heartbeats
+        clock[0] += 60
+        fetch()
+        assert fetch.burn("codex") is None
+        if clock[0] >= latest + FIVE_H:
+            assert r._seen == {}, (clock[0] - latest) / 3600
+    assert r._seen == {} and r._buckets == {}
+
+
+def test_an_unplugged_board_holds_no_turn_past_five_hours(tmp_path):
+    """The same, with nothing polled at all: the board unplugged, so the
+    daemon never asks the bus for a usage line. prune_burn() is what the
+    daemon's upkeep asks every pass, cable or no cable."""
+    latest = _ten_turns(tmp_path)
+    bus, r, clock = _codex_page_bus(tmp_path, [True])
+    fetch = bus.fetch()
+    fetch()
+    assert fetch.burn("codex") is not None and len(r._seen) == 10
+
+    clock[0] = latest + FIVE_H - 900
+    bus.prune_burn()
+    assert len(r._seen) == 10
+    clock[0] = latest + FIVE_H
+    bus.prune_burn()
+    assert r._seen == {} and r._buckets == {}
+
+
+def test_the_claude_reader_is_pruned_when_the_ultra_mark_lifts(tmp_path):
+    """And the Claude page's reader, the Ultra mark lifted by a five_hour
+    figure: nothing polls it after that either."""
+    from tests.support import transcripts as tr
+    proj = tmp_path / ".claude" / "projects"
+    tr.write(tmp_path, str(proj / "p" / "s.jsonl"),
+             [tr.assistant("m%d" % i, "r%d" % i, start(19) + i, 10)
+              for i in range(10)], mtime=NOW - 5)
+    marked = [True]
+
+    class Page(base.ProviderParser):
+        def get_provider_id(self):
+            return "claude"
+
+        def poll(self, now_epoch):
+            return [claude_frame(marked[0])]
+
+    clock = [NOW]
+    r = br.BurnReader(root=str(proj))
+    bus = ingest.IngestionBus(providers=[Page()], now=lambda: clock[0],
+                              burn={"claude": r}, verdict=None)
+    fetch = bus.fetch()
+    fetch()
+    assert fetch.burn("claude") is not None and len(r._seen) == 10
+
+    marked[0] = False
+    clock[0] = start(19) + 9 + FIVE_H
+    fetch()
+    assert r._seen == {} and r._buckets == {}
+
+
+def test_the_daemon_prunes_the_readers_in_its_upkeep():
+    """claude_usage_bridge's _upkeep runs on every pass of the serial loop
+    and while it waits for a board, and is where the bus's readers are
+    pruned with no board to poll for."""
+    import ast
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "claude_usage_bridge.py").read_text(encoding="utf-8")
+    upkeep = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_upkeep")
+    assert "bus.prune_burn()" in ast.unparse(upkeep)
 
 
 # ------------------------------------------------------------- the bridge
@@ -1091,11 +1370,14 @@ def test_a_behind_page_is_asked_once_when_the_heartbeat_and_tick_meet():
     fetch.asked = {"claude": 0, "codex": 0}
     ticks.clock[0] += 2.0               # the next pass
 
-    ticks.bridge.poll_once()            # the same instant, as in one pass
+    ticks.bridge.begin_pass()           # as the serial loop opens one
+    ticks.bridge.poll_once()
+    ticks.clock[0] += 1.6               # a slow read: the clock is no gate
     ticks.bridge.poll_if_changed()
 
     assert fetch.asked == {"claude": 1, "codex": 1}
-    ticks(2)                            # and the next tick asks again
+    ticks.bridge.begin_pass()           # and the next pass asks again
+    ticks(2)
     assert fetch.asked == {"claude": 2, "codex": 2}
 
 
@@ -1315,16 +1597,23 @@ def test_the_reads_row_names_exactly_the_fields_the_codex_reader_reads():
     assert 'CODEX_NEEDLE = b\'"token_count"\'' in src
 
 
+# "Until five hours after Codex last wrote that turn": what prune() keeps
+# (a key outlives its latest copy's quarter-hour by no more), whether or not
+# anything polls the reader (IngestionBus.prune_burn; 4th review,
+# 2026-11-01, when an unmarked page or an unplugged board held them on).
 CODEX_SHORT = ("on a Codex account with none (such as Codex Pro) every"
                " token count of each turn from Codex's session log, held in"
-               " memory for up to five hours, of which only the output"
+               " memory until five hours after Codex last wrote that turn"
+               " (board plugged in or not), of which only the output"
                " tokens are added up")
 CODEX_FULL_48 = ("or, for a Codex account with none, every token count of"
-                 " each turn in Codex's session log, held in memory for up"
-                 " to five hours with only the output tokens added up")
+                 " each turn in Codex's session log, held in memory until"
+                 " five hours after Codex last wrote that turn (board"
+                 " plugged in or not) with only the output tokens added up")
 CODEX_FULL_78 = ("on an account with no five-hour limit, every token count"
-                 " of each turn, held in memory for up to five hours, with"
-                 " only the output tokens added up for the burn view")
+                 " of each turn, held in memory until five hours after Codex"
+                 " last wrote that turn, with only the output tokens added"
+                 " up for the burn view")
 
 
 def test_the_codex_summaries_say_every_figure_is_read_and_kept():

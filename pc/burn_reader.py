@@ -382,8 +382,7 @@ class BurnReader:
         if walked:
             self._walk(now)
         q = protocol.burn_quarter(now)
-        oldest = q - (protocol.BURN_BUCKETS - 1) * protocol.BURN_BUCKET_S
-        self._prune(oldest)
+        oldest = self.prune(now)
         read = self._drain(oldest, self._budget if budget is None
                            else budget)
         behind = sum(f.size - f.looked for f in self._files.values()
@@ -484,6 +483,20 @@ class BurnReader:
         for gone in [p for p in self._files
                      if p not in present and not p.startswith(under)]:
             del self._files[gone]
+
+    def prune(self, now):
+        """Forget what has left the window at wall-clock `now`, reading
+        nothing; the oldest bucket still in it.
+
+        poll() asks it first, and IngestionBus.prune_burn asks it when
+        nothing polls: a page no longer marked, a board unplugged. A key is
+        kept while the quarter-hour its latest copy is stamped in is one
+        of the twenty, so nothing read is held past five hours after that
+        stamp (README "Privacy")."""
+        oldest = (protocol.burn_quarter(now)
+                  - (protocol.BURN_BUCKETS - 1) * protocol.BURN_BUCKET_S)
+        self._prune(oldest)
+        return oldest
 
     def _prune(self, oldest):
         """Forget what has slid out of the window -- its bucket, and the ids
