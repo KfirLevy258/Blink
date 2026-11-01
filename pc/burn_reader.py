@@ -328,7 +328,7 @@ class BurnReader:
         # (message.id, requestId) -> [bucket it is counted in, tokens
         # counted for it, the latest bucket it was seen stamped in]. Two
         # buckets, because a copy can be counted in an earlier quarter-hour
-        # than it is stamped in (_count_line), and the key must outlive the
+        # than it is stamped in (_take), and the key must outlive the
         # LATER one: forgotten with the earlier, a copy still inside the
         # window was counted again when its file was read from the start
         # (3rd review, 2026-11-01).

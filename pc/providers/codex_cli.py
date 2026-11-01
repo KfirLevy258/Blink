@@ -451,10 +451,13 @@ def _no_short_window(limits):
     windows, a weekly with no figure. Positive evidence only, as for Claude
     (pc/session_verdict): quiet data proves nothing.
 
-    This judges the object it is given. poll() makes the newest reading
-    that says True or False the word on every frame it sends, so the mark
-    and the dial never describe different limits; a newer reading that
-    says None leaves that word as it was.
+    This judges the object it is given. poll() marks each frame by its
+    own reading's word when it has one, and fills in the remembered word
+    (the newest reading that said True or False, _fold_word) only on a
+    frame whose reading says nothing and puts no figure on the session
+    dial. A True beside a newer frame sent with it that keeps a window
+    goes out unmarked. A newer reading that says None leaves the
+    remembered word as it was.
     """
     if not isinstance(limits, dict):
         return None
@@ -868,8 +871,9 @@ class CodexCliProvider(base.ProviderParser):
             src=SRC_ID,
             observed_at=observed_at,
             # This reading's own word, True only on positive evidence.
-            # poll() replaces it on every frame it sends with the word of
-            # the newest reading that said anything (self._no_window).
+            # poll() keeps it, and gives a frame the remembered word
+            # (self._no_window) only when this reading says nothing and
+            # puts no figure on the session dial.
             no_session_window=_no_short_window(raw_payload) is True,
             session_pct=s_win.pct,
             session_resets_at=s_win.resets_at,
