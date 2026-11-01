@@ -2206,6 +2206,24 @@ def test_status_says_when_the_account_has_no_five_hour_window(
     assert open(session_verdict.verdict_path(), "rb").read() == before
 
 
+def test_status_names_the_ultra_fast_path(tmp_path, capsys):
+    """A verdict the Ultra fast path saved (pc/claude_plan; owner's
+    request, 2026-11-01) is said as such, not as five hours of replies."""
+    from tests.pc.test_claude_cli import payload
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    with open(inside(tmp_path, statusline_source_path()), "w",
+              encoding="utf-8") as f:
+        f.write(json.dumps(payload(five_hour=None, seven_day=2.0)))
+    _verdict(tmp_path, False, time.time() - 60, kind="statusline_ultra")
+    capsys.readouterr()
+
+    assert cli.main(["status"]) == 0
+    assert ("Session     no five-hour window (Claude Code reports an Ultra"
+            " plan, and its replies come back without one)"
+            ) in capsys.readouterr().out
+
+
 def test_status_on_a_marked_desk_with_no_reading_yet_still_prints_the_row(
         tmp_path, capsys):
     """A Claude Code-only Ultra desk, its verdict saved, in a session that
@@ -2421,6 +2439,21 @@ def _burn_folder(out):
     return lines[i + 1].strip(), lines[i + 2:]
 
 
+def _caveat(after):
+    """The CLAUDE_CONFIG_DIR caveat's lines among `after`: the lines from
+    the plan paragraph's last up to the Codex paragraph. It is said once,
+    after both the transcripts' folder and the plan file (the review of
+    PR #6, 2026-11-01: said twice, a test of the first was satisfied by
+    the second, and deleting the first print failed nothing)."""
+    end = after.index("  break of over an hour.")
+    out = []
+    for l in after[end + 1:]:
+        if l.startswith("  If Codex") or not l.startswith("  "):
+            break
+        out.append(l)
+    return out
+
+
 def _with_a_service(monkeypatch, service_sees=None, codex_sees=None):
     # Patched on the class backend() actually returns, not on _Backend: the
     # launchd and schtasks backends override creates(), and schtasks also
@@ -2445,9 +2478,14 @@ def test_the_burn_folder_is_the_one_the_service_reads(tmp_path, capsys,
     _with_a_service(monkeypatch)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
     cli._announce()
-    folder, after = _burn_folder(capsys.readouterr().out)
+    out = capsys.readouterr().out
+    folder, after = _burn_folder(out)
     assert folder == str(tmp_path / ".claude" / "projects")
-    assert any(l.startswith(SHELL_ONLY) for l in after), after
+    caveat = _caveat(after)
+    assert caveat and caveat[0].startswith(SHELL_ONLY), after
+    assert ("so it reads the folder and the file above."
+            in " ".join(l.strip() for l in caveat))
+    assert out.count(SHELL_ONLY) == 1
 
 
 def test_without_claude_config_dir_nothing_more_is_said(tmp_path, capsys,
@@ -2510,7 +2548,8 @@ def test_a_service_that_sees_another_value_is_not_said_to_miss_it(
     said = " ".join(l.strip() for l in after)
     assert folder == os.path.join(new, "projects")
     assert ("The background service sees a different CLAUDE_CONFIG_DIR"
-            " from this shell's, so it reads the folder above.") in said
+            " from this shell's, so it reads the folder and the file"
+            " above.") in said
     assert "does not see it" not in said
 
 
@@ -2524,7 +2563,66 @@ def test_a_service_that_sees_what_this_shell_does_not_says_so(
     said = " ".join(l.strip() for l in after)
     assert folder == os.path.join(work, "projects")
     assert ("CLAUDE_CONFIG_DIR is set for the background service but not in"
-            " this shell, so it reads the folder above.") in said
+            " this shell, so it reads the folder and the file above.") in said
+
+
+def _plan_file(out):
+    lines = out.splitlines()
+    i = lines.index("  one, it reads Claude Code's config to learn the plan:")
+    return lines[i + 1].strip(), lines[i + 2:]
+
+
+def test_the_install_note_says_what_is_taken_from_claude_json(
+        tmp_path, capsys, monkeypatch):
+    """pc/claude_plan parses all of Claude Code's config, which also holds
+    the account's email address and name and can hold MCP servers' tokens,
+    to look at two fields. The note says so: "nothing else from the file"
+    and "reads no token" were not true of a whole-file parse (the review
+    of PR #6, 2026-11-01). Five and a quarter hours is CHAIN_SPAN_S."""
+    as_checkout(monkeypatch)
+    cli._announce()
+    out = capsys.readouterr().out
+    folder, after = _plan_file(out)
+    assert folder == str(tmp_path / ".claude.json")
+    said = " ".join(l.strip() for l in out.splitlines())
+    assert ("The whole file is parsed in memory. It can hold your MCP"
+            " servers' tokens and, on Linux and Windows, an API key; only the"
+            " plan name and rate-limit tier in it are looked at, only whether"
+            " they say Ultra is kept, and nothing from it is logged, printed"
+            " or saved.") in said
+    assert ("On the Ultra plan one such reply switches on the burn view;"
+            " other plans need five and a quarter hours of them, longer"
+            " after a break of over an hour.") in said
+    from pc.providers import claude_cli
+    assert claude_cli.CHAIN_SPAN_S == 5 * 3600 + 15 * 60
+    assert claude_cli.CHAIN_MAX_GAP_S == 3600
+    assert "reads no credential" not in said
+    assert "It keeps no credential and no token" in said
+
+
+def test_the_plan_file_is_the_one_the_service_reads(tmp_path, capsys,
+                                                    monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    out = capsys.readouterr().out
+    folder, after = _plan_file(out)
+    assert folder == str(tmp_path / ".claude.json")
+    said = " ".join(l.strip() for l in _caveat(after))
+    assert ("CLAUDE_CONFIG_DIR is set in this shell, but the background"
+            " service does not see it, so it reads the folder and the file"
+            " above.") in said
+    assert out.count(SHELL_ONLY) == 1
+
+
+def test_with_no_service_the_plan_file_follows_claude_config_dir(
+        tmp_path, capsys, monkeypatch):
+    as_checkout(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    folder, _ = _plan_file(capsys.readouterr().out)
+    assert folder == str(tmp_path / "work-config" / ".claude.json")
 
 
 # The same for CODEX_HOME, which codex_cli honours and a login service does
@@ -2617,9 +2715,12 @@ def test_linux_with_systemd_names_the_units_folders(tmp_path, capsys,
                         staticmethod(lambda: True))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
     cli._announce()
-    folder, after = _burn_folder(capsys.readouterr().out)
+    out = capsys.readouterr().out
+    folder, after = _burn_folder(out)
     assert folder == str(tmp_path / ".claude" / "projects")
-    assert any(l.startswith(SHELL_ONLY) for l in after), after
+    caveat = _caveat(after)
+    assert caveat and caveat[0].startswith(SHELL_ONLY), after
+    assert out.count(SHELL_ONLY) == 1
     assert not any("Run key" in l for l in after)
 
 
@@ -2658,8 +2759,10 @@ def test_the_windows_run_key_start_is_said_to_keep_this_window(
     assert folder == os.path.join(reg, "projects")
     assert ("If Windows refuses the task and the Run key is used instead,"
             " the bridge started now keeps this window's CLAUDE_CONFIG_DIR"
-            " until you next log in, and reads this folder until then: "
-            + os.path.join(window, "projects")) in said
+            " until you next log in, and reads this folder and this file"
+            " until then: " + os.path.join(window, "projects") + " "
+            + os.path.join(window, ".claude.json")) in said
+    assert said.count("Run key") == 1
 
 
 @pytest.mark.parametrize("make, frozen, systemctl", [

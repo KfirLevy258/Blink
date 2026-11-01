@@ -3020,7 +3020,10 @@ def _announce():
     # Said to match the setting, not as a blanket promise: a reinstall over
     # an install with status-page alerts on keeps them on, and "sends
     # nothing anywhere" would then be false on the screen that says it.
-    print("  It reads no credential and no token, and sends nothing of yours"
+    # "Reads no credential and no token" until the review of PR #6
+    # (2026-11-01): the plan read below parses all of Claude Code's config,
+    # which can hold MCP servers' tokens. What stays true is what is kept.
+    print("  It keeps no credential and no token, and sends nothing of yours"
           " anywhere.")
     if status_page.enabled(blink_home()) is True:
         print("  Status-page alerts are on: it reads status.claude.com, and")
@@ -3059,12 +3062,26 @@ def _announce():
     # desk that exports the variable in its shell profile (2026-11-01
     # re-review). Where the daemon is started by hand from a shell, the
     # shell's folder is the true one: see _service_folder.
-    from pc import burn_reader
-    root, caveat = _service_folder(
+    #
+    # The plan (pc/claude_plan), read since 2026-11-01 so that an Ultra
+    # desk switches to the burn view on its first reply with no five-hour
+    # figure instead of after five and a quarter hours of them. The file is
+    # Claude Code's own config, which also holds the account's email
+    # address and name, every project path and the MCP servers' settings,
+    # tokens included, so this says exactly what happens to it. It follows
+    # CLAUDE_CONFIG_DIR as the transcripts' folder does, and is the
+    # service's for the same reason, so one caveat covers both: asked
+    # twice, the note printed the caveat and the Windows Run-key paragraph
+    # twice, the second "this folder" above a file (the review of PR #6,
+    # 2026-11-01).
+    from pc import burn_reader, claude_plan
+    (root, plan_file), caveat = _service_folder(
         "CLAUDE_CONFIG_DIR",
-        lambda v: burn_reader.transcripts_root(
+        lambda v: (burn_reader.transcripts_root(
             {"CLAUDE_CONFIG_DIR": v} if v else {}),
-        "so it reads the folder above.")
+            claude_plan.config_path({"CLAUDE_CONFIG_DIR": v} if v else {})),
+        "so it reads the folder and the file above.",
+        "this folder and this file")
     # On a line of its own, like the paths above: a home folder's length is
     # unbounded, and inline it ran the paragraph off its margin.
     print("  On an account with no five-hour limit, it also reads the")
@@ -3072,6 +3089,19 @@ def _announce():
     print(f"    {root}")
     print("  It holds those counts in memory and sends the board only a total")
     print("  per quarter-hour, never the conversation.")
+    # Five and a quarter hours is claude_cli.CHAIN_SPAN_S, and a break of
+    # over an hour (CHAIN_MAX_GAP_S) starts the count again; "five hours"
+    # until the review of PR #6.
+    print("  When a Claude Code reply shows a weekly figure and no five-hour")
+    print("  one, it reads Claude Code's config to learn the plan:")
+    print(f"    {plan_file}")
+    print("  The whole file is parsed in memory. It can hold your MCP servers'")
+    print("  tokens and, on Linux and Windows, an API key; only the plan name")
+    print("  and rate-limit tier in it are looked at, only whether they say")
+    print("  Ultra is kept, and nothing from it is logged, printed or saved.")
+    print("  On the Ultra plan one such reply switches on the burn view; other")
+    print("  plans need five and a quarter hours of them, longer after a")
+    print("  break of over an hour.")
     for line in caveat:
         print(line)
     # The same for Codex (CodexBurnReader): an account whose Codex log
@@ -3112,7 +3142,7 @@ def _codex_sessions_root(codex_home):
     return os.path.join(home, "sessions")
 
 
-def _service_folder(name, folder, consequence):
+def _service_folder(name, folder, consequence, these="this folder"):
     """(the folder the daemon will read, the lines to print under it).
 
     folder(value) is the reader's folder with environment variable `name`
@@ -3126,7 +3156,9 @@ def _service_folder(name, folder, consequence):
     say it exactly (2026-11-01 third review): "does not see it" was printed
     whenever the two differed, also when the service sees the variable with
     a different value, as a Windows `setx` followed by an old window gives.
-    `consequence` ends the sentence.
+    `consequence` ends the sentence. folder() may return a tuple of
+    paths, one caveat covering them all; `these` names them in the Windows
+    Run-key paragraph, which prints each on a line of its own.
     """
     import textwrap
     shell_value = os.environ.get(name) or None
@@ -3158,15 +3190,16 @@ def _service_folder(name, folder, consequence):
         # 2026-11-01); the folder below was right all along.
         if shell_value:
             keeps = (f"the bridge started now keeps this window's {name}"
-                     " until you next log in, and reads this folder until"
+                     f" until you next log in, and reads {these} until"
                      " then:")
         else:
             keeps = (f"this window has no {name}, so until you next log in"
-                     " the bridge started now reads this folder:")
+                     f" the bridge started now reads {these}:")
         lines += ["  " + l for l in textwrap.wrap(
             "If Windows refuses the task and the Run key is used instead, "
             + keeps, 66)]
-        lines.append(f"    {shell_root}")
+        lines += [f"    {r}" for r in (
+            shell_root if isinstance(shell_root, tuple) else (shell_root,))]
     return root, lines
 
 

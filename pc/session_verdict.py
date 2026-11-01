@@ -35,6 +35,9 @@ Evidence of NO window, measured on this desk's verified Ultra account on
     or a local clock running fast, does that on Pro and Max (the
     re-review of 2026-11-01). (pc/providers/claude_cli,
     _reply_without_window)
+  - on an account whose Claude Code config (.claude.json) names the Ultra
+    plan, ONE such reply: Pro and Max never take this path, since their
+    plan is not Ultra (owner's request, 2026-11-01; pc/claude_plan).
 
 Evidence of a window, any of which clears the mark:
 
@@ -71,6 +74,11 @@ KIND_STATUSLINE_WINDOW = "statusline_window"
 # and the account is decided again, by the rules below. Never reuse a name
 # for a different rule: the name on disk is what says which rule made it.
 KIND_STATUSLINE_SUSTAINED = "statusline_sustained"
+# One weekly-only reply on an account whose Claude Code config names the
+# Ultra plan (pc/claude_plan; owner's request, 2026-11-01). A name of its
+# own, not statusline_sustained's: the rules differ, and the name on disk
+# is what says which rule made the verdict.
+KIND_STATUSLINE_ULTRA = "statusline_ultra"
 KIND_DESKTOP_FH = "desktop_fh"
 KIND_DESKTOP_RISE = "desktop_rise"
 KIND_LOCAL_STORAGE = "local_storage"
@@ -84,6 +92,8 @@ DESCRIBE = {
     KIND_STATUSLINE_WINDOW: "Claude Code reported a five-hour window",
     KIND_STATUSLINE_SUSTAINED: ("Claude Code replied for over five hours"
                                 " without one"),
+    KIND_STATUSLINE_ULTRA: ("Claude Code reports an Ultra plan, and its"
+                            " replies come back without one"),
     KIND_DESKTOP_FH: "Claude Desktop reported a five-hour figure",
     KIND_DESKTOP_RISE: ("Claude Desktop's weekly usage rose with no"
                         " five-hour figure before or after"),
@@ -196,8 +206,13 @@ class SessionVerdict:
         self._persist = persist
         self._current = None
         self._loaded = False
-        # The state on disk as this process last knew it (True, False, or
-        # None for no file), and when a write last failed (None: it has not).
+        # The state on disk as this process last knew it, (has_window,
+        # kind), or None for no file; and when a write last failed (None:
+        # it has not). The kind as well as the state: an Ultra desk marked
+        # first on its plan file (KIND_STATUSLINE_ULTRA) and then by the
+        # sustained chain is the same state on a different proof, and
+        # `blink status`, which reads the file, names the proof (the
+        # review of PR #6, 2026-11-01).
         self._on_disk = None
         self._failed_at = None
 
@@ -210,7 +225,7 @@ class SessionVerdict:
             self._loaded = True
             self._current = load(self.path())
             self._on_disk = (None if self._current is None
-                             else self._current[0])
+                             else self._current[:2])
         return self._current
 
     def observe(self, frames, now_epoch):
@@ -227,8 +242,10 @@ class SessionVerdict:
         if ev is not None and (cur is None
                                or (ev[2], ev[0]) > (cur[2], cur[0])):
             self._current = cur = ev
-        # Written when the verdict differs from what is on disk, which on a
-        # desk is once and then never. Not only on the poll where it flips:
+        # Written when the verdict or the kind of its proof differs from
+        # what is on disk, which on a desk is once or twice and then never;
+        # a newer proof of the same kind is not written. Not only on the
+        # poll where it changes:
         # a write that failed then is tried again, at most once a
         # SAVE_RETRY_S, until it lands -- or at once if the clock has gone
         # back past the failure, the arm ingest._cooldown_over and
@@ -236,11 +253,11 @@ class SessionVerdict:
         # step back of an hour held the retry off for that hour, and a
         # restart in it read the superseded verdict (the re-review of
         # 2026-11-01, finding 15).
-        if (self._persist and cur is not None and cur[0] != self._on_disk
+        if (self._persist and cur is not None and cur[:2] != self._on_disk
                 and (self._failed_at is None
                      or not 0 <= now_epoch - self._failed_at < SAVE_RETRY_S)):
             if save(self.path(), cur):
-                self._on_disk = cur[0]
+                self._on_disk = cur[:2]
                 self._failed_at = None
             else:
                 self._failed_at = now_epoch

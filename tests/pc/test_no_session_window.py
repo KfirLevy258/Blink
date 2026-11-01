@@ -37,7 +37,7 @@ import os
 
 import pytest
 
-from pc import ingest, normalizer, protocol, session_verdict
+from pc import claude_plan, ingest, normalizer, protocol, session_verdict
 from pc.bridge import THEME_QUIET_S, Bridge
 from pc.providers import base, claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
@@ -107,6 +107,35 @@ def replied(poll, p, at, seven=2.0, session="s", limits=None):
         write(p, doc, when)
         got = poll(when + 1)
     return got
+
+
+# The plans an adversarial test below is run under (the review of PR #6,
+# 2026-11-01: under an Ultra file, 27 of this file's 169 tests marked a desk
+# with a window). "ultra" is the file a verified Ultra desk has; the fast
+# path must still not fire, because each of these desks renders five_hour
+# within a window of the replies that would take it (claude_cli refuses the
+# fast path there). "stale ultra" is a desk downgraded from Ultra whose
+# plan name is a day behind its tier (pc/claude_plan): for the tests whose
+# desk never renders five_hour near the replies, only the tier can say no.
+PLANS = {
+    None: None,
+    "ultra": ("Ultra", "default_claude_max_20x"),
+    "stale ultra": ("Ultra", "default_claude_pro"),
+}
+
+
+def put_plan(home, plan):
+    """Write Claude Code's config naming `plan` (a PLANS key) where
+    claude_plan.config_path() looks, inside the caller's `home`; nothing
+    for None. Invented account fields only."""
+    if PLANS[plan] is None:
+        return
+    name, tier = PLANS[plan]
+    path = inside(home, claude_plan.config_path())
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"oauthAccount": {
+            "emailAddress": "nobody-test@example.invalid",
+            "planDisplayName": name, "organizationRateLimitTier": tier}}, f)
 
 
 def no_mark_on_disk():
@@ -807,9 +836,22 @@ def test_the_verdict_is_written_when_it_changes_and_only_then(tmp_path):
                                  "at": NOW - 60}
 
     os.utime(path, (NOW - 9999, NOW - 9999))
+    v.observe([framed(no(NOW - 30))], NOW)
+    assert os.path.getmtime(path) == NOW - 9999     # same verdict, same kind
+
+    # Same verdict on another proof: written, so `blink status`, which
+    # reads the file, names the proof the daemon holds now (the review of
+    # PR #6, 2026-11-01: an Ultra-plan mark later proved by the chain kept
+    # saying "Claude Code reports an Ultra plan").
     v.observe([framed(no(NOW - 10, session_verdict.KIND_DESKTOP_RISE))],
               NOW)
-    assert os.path.getmtime(path) == NOW - 9999         # same verdict
+    assert json.loads(path.read_text()) == {"state": "no_window",
+                                            "evidence": "desktop_rise",
+                                            "at": NOW - 10}
+    os.utime(path, (NOW - 9999, NOW - 9999))
+    v.observe([framed(no(NOW - 8, session_verdict.KIND_DESKTOP_RISE))],
+              NOW)
+    assert os.path.getmtime(path) == NOW - 9999
 
     v.observe([framed(yes(NOW - 5))], NOW)
     assert json.loads(path.read_text())["state"] == "window"
@@ -889,12 +931,14 @@ def test_a_scenario_bus_is_not_marked_by_the_desk_verdict(tmp_path,
 # --- the findings the evidence rule closes (2, 3, 5, 10) -------------------
 
 
-def test_finding_2_a_laptop_asleep_across_a_reset(tmp_path):
+@pytest.mark.parametrize("plan", [None, "ultra"])
+def test_finding_2_a_laptop_asleep_across_a_reset(tmp_path, plan):
     """Pro or Max. Claude Code repaints 23:00-23:30 with a window, the lid
     closes, the reset passes at 02:00, and at 08:00 Claude Code repaints the
     expired block weekly-only and Claude Desktop has a fresh post-reset
     sample with fh 5. The time rule read nine hours without a window as
     Ultra and blanked the 5%."""
+    put_plan(tmp_path, plan)
     reset = NOW - 6 * 3600
     p = tmp_path / "statusline.json"
     desk = tmp_path / "plan-usage-history.json"
@@ -1698,14 +1742,19 @@ def watched(prov, verdict, p, renders):
     return proofs
 
 
-def test_finding_1_a_reply_streaming_across_a_reset_proves_nothing(tmp_path):
+@pytest.mark.parametrize("plan", list(PLANS))
+def test_finding_1_a_reply_streaming_across_a_reset_proves_nothing(tmp_path,
+                                                                   plan):
     """Pro or Max. A request accepted before the reset at R still streams
     after it. Claude Code re-renders at R+1 s and drops the expired
     five_hour; when the stream ends it credits the cost and applies headers
     whose five_hour resets at R, which the render filter drops again. So the
     session's cost rises between two weekly-only renders, and that read as
     proof: the desk was marked and the verdict saved. Two parallel
-    subagents straddling the same reset rise it twice."""
+    subagents straddling the same reset rise it twice. Under an Ultra
+    file too: the five_hour rendered a minute before the reset refuses the
+    fast path."""
+    put_plan(tmp_path, plan)
     R = NOW - 3600
     p = tmp_path / "statusline.json"
     v = session_verdict.SessionVerdict()
@@ -1720,12 +1769,17 @@ def test_finding_1_a_reply_streaming_across_a_reset_proves_nothing(tmp_path):
     assert no_mark_on_disk()
 
 
-def test_finding_1_two_processes_on_one_session_prove_nothing(tmp_path):
+@pytest.mark.parametrize("plan", [None, "stale ultra"])
+def test_finding_1_two_processes_on_one_session_prove_nothing(tmp_path,
+                                                              plan):
     """`claude --continue` in two terminals: one session_id, two running
     costs, each repainted on its own events -- the earliest reset, the
     prompt cache expiring. Alternating, every other render is a rise, and
     over a day of an idle Pro desk the rises spanned more than a window.
-    A fall starts the whole proof over."""
+    A fall starts the whole proof over. An idle desk renders no five_hour,
+    so on a desk downgraded from Ultra it is the current tier that keeps
+    the plan name, a day stale, from vouching for the rises."""
+    put_plan(tmp_path, plan)
     p = tmp_path / "statusline.json"
     v = session_verdict.SessionVerdict()
     renders = [(status(cost=(1.0, 1.30)[i % 2]), NOW - 8 * 3600 + i * 120)
@@ -1735,12 +1789,15 @@ def test_finding_1_two_processes_on_one_session_prove_nothing(tmp_path):
     assert no_mark_on_disk()
 
 
-def test_finding_2_a_baseline_from_before_a_gap_proves_nothing(tmp_path):
+@pytest.mark.parametrize("plan", [None, "stale ultra"])
+def test_finding_2_a_baseline_from_before_a_gap_proves_nothing(tmp_path,
+                                                               plan):
     """Pro or Max. Polls run only while the board is alive. At 09:00, just
     after a reset, a weekly-only render at cost 3.00 was the baseline; the
     board was unplugged, the session replied all morning with five_hour
     (none of it polled), the window ended, and Claude Code re-rendered
     weekly-only at 4.00. On reconnect 3.00 < 4.00 read as a reply."""
+    put_plan(tmp_path, plan)
     p = tmp_path / "statusline.json"
     v = session_verdict.SessionVerdict()
     t9 = NOW - 6 * 3600
@@ -1987,12 +2044,16 @@ def ss_five(doc):
     return isinstance(doc.get("rate_limits", {}).get("five_hour"), dict)
 
 
-@pytest.mark.parametrize("unseen", [False, True],
-                         ids=["polled throughout", "five_hour never seen"])
+@pytest.mark.parametrize("plan,unseen", [
+    (None, False), (None, True), ("ultra", False), ("stale ultra", False),
+    ("stale ultra", True)],
+    ids=["polled throughout", "five_hour never seen",
+         "ultra file, polled throughout", "stale ultra, polled throughout",
+         "stale ultra, five_hour never seen"])
 @pytest.mark.parametrize("skew_s", [0, 30 * 60, 3 * HOUR],
                          ids=["true clock", "30 min fast", "3 h fast"])
 def test_a_pro_desk_with_a_fast_clock_is_never_marked(tmp_path, skew_s,
-                                                      unseen):
+                                                      plan, unseen):
     """The re-review's finding 3. Claude Code drops five_hour once its
     resets_at is behind the LOCAL clock, so on a desk 30 minutes fast every
     reply in the last half hour of each window renders weekly-only, and two
@@ -2002,7 +2063,12 @@ def test_a_pro_desk_with_a_fast_clock_is_never_marked(tmp_path, skew_s,
     window's first replies render five_hour and start the chain over; with
     every one of those unseen, what holds is that the weekly-only stretches
     are an hour and a quarter apart at the least (3 h fast, a 45-minute
-    stream), more than claude_cli.CHAIN_MAX_GAP_S."""
+    stream), more than claude_cli.CHAIN_MAX_GAP_S. Under an Ultra file,
+    polled throughout, the five_hour every window opens with refuses the
+    fast path; with none of them seen, only the tier can (an Ultra file
+    with a 20x tier on a desk whose five_hour is never seen is a desk this
+    code cannot tell from Ultra)."""
+    put_plan(tmp_path, plan)
     start = NOW - 24 * HOUR
     proofs, on_disk = desk_run(tmp_path, pro_desk(skew_s, 21, start),
                                polled=weekly_only_seen if unseen else None)
@@ -2011,9 +2077,11 @@ def test_a_pro_desk_with_a_fast_clock_is_never_marked(tmp_path, skew_s,
     assert on_disk is None or on_disk[0] is True
 
 
+@pytest.mark.parametrize("plan", [None, "stale ultra"])
 @pytest.mark.parametrize("unplugged", [False, True],
                          ids=["polled throughout", "unplugged between"])
-def test_a_long_stream_across_each_reset_never_marks(tmp_path, unplugged):
+def test_a_long_stream_across_each_reset_never_marks(tmp_path, unplugged,
+                                                     plan):
     """The re-review's finding 4. API_TIMEOUT_MS bounds only the wait for
     headers, so a reply accepted before a reset can render weekly-only for
     half an hour after it, each content block a render. Here the desk uses
@@ -2022,7 +2090,9 @@ def test_a_long_stream_across_each_reset_never_marks(tmp_path, unplugged):
     ending 5 h 20 min after the last, three times over. No five_hour is
     ever rendered after the first, and each stretch is a chain of its own;
     what keeps them from joining is claude_cli.CHAIN_MAX_GAP_S, polled or
-    not in between."""
+    not in between. The stretches are more than a window after the only
+    five_hour rendered, so under a stale Ultra name the tier says no."""
+    put_plan(tmp_path, plan)
     R = NOW - 20 * HOUR
     renders = [(R - 120, R, "s")]
     stretches = []

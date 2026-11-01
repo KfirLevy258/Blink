@@ -49,6 +49,22 @@ burn view on an account that has a five-hour limit, until Codex writes a later
 stamp. The frame contest is older than the branch; the fix is to cap stamps at
 now plus a slack in `_observed_at` for the contest too.
 
+## One .claude.json vouches for every session in the status line
+
+From the review of PR #6 (the Ultra fast path, 2026-11-01), found plausible
+and left. `statusline.json` is shared by every Claude Code process on the
+desk, but `pc/claude_plan` reads one config: the daemon's
+(`$CLAUDE_CONFIG_DIR` as the service sees it, else `~/.claude.json`). A
+second account used in one terminal under its own `CLAUDE_CONFIG_DIR` -- a
+Pro account beside the owner's Ultra one -- renders into the same file, and
+its weekly-only replies around a reset take the fast path on the Ultra
+account's word. What bounds it: that terminal's next reply mid-window renders
+five_hour, which lifts the mark, and `claude_cli` then refuses the fast path
+for a window after any five_hour it has seen. Fixing it properly needs the
+status line to say which config each session ran under, which it does not
+(Claude Code 2.1.316). Not reproduced on a real desk; it needs two accounts
+on one machine, one of them Ultra.
+
 ## Smaller
 
 - `SessionVerdict.observe` lets ahead-dated evidence win when a source re-sends

@@ -58,8 +58,9 @@ five-hour window proves one, dated by its mtime: when it was rendered, so
 any five_hour rendered after a no-window mark lifts it (_frame). A payload
 without one proves nothing on its own: that is also every Pro and Max
 status line from a reset to the next reply. Proof of NO window is Claude
-Code replying for more than five hours with no five_hour rendered at all
-(_reply_without_window).
+Code replying for more than five hours with no five_hour rendered at all,
+or, on an account whose Claude Code config names the Ultra plan
+(pc/claude_plan), one reply with none (_reply_without_window).
 
 There is one more memory, and it answers a different question: not which
 payload to fall back on, but how long ago the figures in the current one
@@ -78,6 +79,7 @@ restart.
 import json
 import math
 
+from pc import claude_plan
 from pc import session_verdict
 from pc import statusline_source as ss
 from pc.providers import base
@@ -191,7 +193,7 @@ def _block_key(payload):
 
 
 class ClaudeCliProvider(base.ProviderParser):
-    def __init__(self, path=None):
+    def __init__(self, path=None, plan_path=None):
         # None means "wherever ss.payload_path() says", asked on every poll
         # rather than once here. The default used to be a module constant in
         # statusline_source, expanduser'd at import before tests/conftest.py
@@ -240,6 +242,17 @@ class ClaudeCliProvider(base.ProviderParser):
         # {block key: [oldest mtime it appeared under, epoch its first
         # window ends]}. See the module docstring and FETCH_MEMORY_LIMIT.
         self._fetch_times = {}
+        # The account's plan, from Claude Code's .claude.json, for the fast
+        # path of _reply_without_window. `plan_path` None is
+        # claude_plan.config_path(), asked at each look, for the reason
+        # self._path is.
+        self._plan = claude_plan.PlanReader(path=plan_path)
+        # The mtime of the newest five_hour this process has seen rendered,
+        # from any session, or None. The fast path is refused within
+        # base.SESSION_WINDOW_S of it (_reply_without_window). Never
+        # cleared, not even when the clock goes back: an Ultra desk never
+        # renders five_hour, so on one it is always None and costs nothing.
+        self._five_seen = None
 
     def _note_fetch(self, payload, mtime, now_epoch):
         """Record this sighting of the payload's block; return its fetch time.
@@ -339,9 +352,32 @@ class ClaudeCliProvider(base.ProviderParser):
         self._stale = mtime
         self._stale_owed = mtime is None
 
-    def _reply_without_window(self, payload, mtime):
+    def _reply_without_window(self, payload, mtime, now_epoch=None):
         """Evidence of no five-hour window, when this payload completes the
-        proof; otherwise None.
+        proof; otherwise None. `now_epoch` (the poll's clock; the mtime when
+        None) only paces the plan's look (claude_plan.RECHECK_S).
+
+        THE FAST PATH, on the Ultra plan (owner's request, 2026-11-01:
+        Ultra desks switch on the first reply again). When Claude Code's
+        config names the Ultra plan (pc/claude_plan: a rate-limit tier ending
+        in max_20x, and a planDisplayName of "Ultra" or none), ONE reply -- recognised exactly as below, cost risen
+        against a baseline at most BASELINE_MAX_S old -- that rendered a
+        usable seven_day and no five_hour is proof, kind
+        KIND_STATUSLINE_ULTRA. The sustained rule below exists because one
+        such reply happens on Pro and Max as well, around a reset; a plan
+        that is not Ultra never takes this path, and neither does a desk
+        whose file is missing, unreadable, corrupt, too big or of any other
+        shape. Each of those keeps the sustained rule. Nor does a desk that
+        has rendered five_hour within a window of the reply (self.
+        _five_seen): an account with a window lately is exactly where one
+        weekly-only reply happens without proving anything, and the plan
+        name in the file can be a day behind a downgrade. The window evidence
+        is unchanged: an Ultra account Anthropic has not yet verified still
+        has a temporary five-hour limit, and its next reply renders
+        five_hour, which is newer than the mark and lifts it (_frame). So
+        on that account a reply streaming across a reset can mark it until
+        its next reply, minutes later at work; that is what the fast path
+        costs, and only on Ultra.
 
         THE RULE. Claude Code has replied with no five_hour in the status
         line, the first such reply and the latest at least CHAIN_SPAN_S
@@ -377,8 +413,8 @@ class ClaudeCliProvider(base.ProviderParser):
         in between starts the chain over too (a desk that uses Claude Code
         mid-window shows one), but nothing above depends on seeing it, so a
         poll gap -- the board unplugged, the lid closed -- costs the safety
-        nothing. On Ultra a desk at work makes the chain in five and a
-        quarter hours, breaks in its use of up to an hour included and poll
+        nothing. On Ultra, where the fast path cannot read the plan, a desk
+        at work makes the chain in five and a quarter hours, breaks in its use of up to an hour included and poll
         gaps of up to an hour less two reply intervals (above), and the
         verdict is kept from then on.
 
@@ -397,7 +433,8 @@ class ClaudeCliProvider(base.ProviderParser):
         window, with the clock fast as above. None has been seen. Short of
         those, a desk is marked late, never early: slow is the safe side.
         A restarted daemon has lost the chain, which is in memory only, and
-        an Ultra desk is then marked five and a quarter hours later.
+        a desk the fast path cannot vouch for is then marked five and a
+        quarter hours later; on the Ultra plan, at its next reply.
 
         A REPLY is recognised in the status line itself, per session: this
         session's cost.total_cost_usd went up since its previous render,
@@ -457,6 +494,8 @@ class ClaudeCliProvider(base.ProviderParser):
                 del self._costs[next(iter(self._costs))]
         if ss.window_present(limits, "five_hour"):
             self._chain = None
+            if self._five_seen is None or mtime > self._five_seen:
+                self._five_seen = mtime
             return None
         if before is None or cost is None or before[0] is None:
             return None
@@ -479,10 +518,34 @@ class ClaudeCliProvider(base.ProviderParser):
         else:
             chain[1] = mtime
         self._chain = chain
-        if chain[1] - chain[0] < CHAIN_SPAN_S:
+        if chain[1] - chain[0] >= CHAIN_SPAN_S:
+            # Said as the sustained proof even on Ultra: it does not rest on
+            # a file Claude Code may rewrite. It is newer than an Ultra
+            # mark made earlier in the day, and of another kind, so the
+            # verdict file is rewritten with it (session_verdict.observe)
+            # and `blink status` names it from then on.
+            return session_verdict.evidence(
+                False, session_verdict.KIND_STATUSLINE_SUSTAINED, mtime)
+        # Refused while a five_hour has been rendered within a window of
+        # this reply, or after it (a clock gone back): this desk's account
+        # has had a window lately, and the plan file may be a day behind
+        # (pc/claude_plan). Every way one weekly-only reply happens on a
+        # plan with windows -- a request streaming across a reset, two
+        # processes on one session, an old terminal's repaint, a clock
+        # running fast -- happens on a desk that renders five_hour around
+        # it, so on such a desk only the sustained rule above can mark
+        # (the review of PR #6, 2026-11-01: 27 of the 169 tests in
+        # test_no_session_window.py marked a Pro desk under an Ultra file).
+        # A verified Ultra desk never renders one, and loses nothing.
+        if (self._five_seen is not None
+                and mtime - self._five_seen < base.SESSION_WINDOW_S):
             return None
-        return session_verdict.evidence(
-            False, session_verdict.KIND_STATUSLINE_SUSTAINED, mtime)
+        # Asked last, only of a reply that already qualifies, so a desk
+        # with a window stats the file only around a reset.
+        if self._plan.ultra(mtime if now_epoch is None else now_epoch):
+            return session_verdict.evidence(
+                False, session_verdict.KIND_STATUSLINE_ULTRA, mtime)
+        return None
 
     def _frame(self, payload, mtime, now_epoch):
         """The frame this payload maps to now, dated, bounded, and carrying
@@ -554,7 +617,7 @@ class ClaudeCliProvider(base.ProviderParser):
         if payload is not None:
             # Asked of the live payload only, and on every read of it: the
             # baseline it keeps is this file's history, not a memory's.
-            reply = self._reply_without_window(payload, mtime)
+            reply = self._reply_without_window(payload, mtime, now_epoch)
             live = self._frame(payload, mtime, now_epoch)
             if live is not None:
                 if reply is not None:

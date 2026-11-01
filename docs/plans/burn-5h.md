@@ -9,7 +9,7 @@ the research branch, and the artifact linked from it).
 Only when the account has no session window. The daemon already decides that:
 `NormalizedUsageFrame.no_session_window` on the merged claude frame, set by
 `pc/session_verdict` on positive evidence only, never because data is quiet.
-Proof of no window is one of two things. Claude Desktop: two consecutive
+Proof of no window is one of three things. Claude Desktop: two consecutive
 history samples less than one idle poll apart (`DESKTOP_RISE_MAX_GAP_S`,
 1000 s) where `sd` rose strictly and NEITHER sample has an `fh` key. Claude
 Code: sustained absence, replies (a session's `cost.total_cost_usd` rose
@@ -29,7 +29,15 @@ two minutes was proved on time after 57 minutes unplugged and three hours
 late after 58; replying every ten, the edge is about 50. Nor is the hour counted from the last reply a tally kept
 any more (there were three replies, 25 minutes apart, which the span
 already implied): a 36-minute silence broke the chain. The chain is in
-memory, so a restarted daemon starts it again.
+memory, so a restarted daemon starts it again. Claude Code on the Ultra
+plan (owner's request, 2026-11-01: Ultra desks switch on the first reply
+again): when Claude Code's `.claude.json` names the plan -- `oauthAccount.
+planDisplayName` "Ultra", or with no `planDisplayName` an
+`organizationRateLimitTier` ending in `max_20x`, the plan's name before the
+rename -- ONE such reply is proof (`statusline_ultra`, `pc/claude_plan`).
+Only those two fields are taken from the file, at most once a minute and
+only when it has changed. Pro, Max 5x, any other plan, and a file missing,
+unreadable, corrupt or over 8 MB keep the sustained rule.
 
 That replaced, on 2026-11-01, two replies 25 minutes to 4 h 35 min apart,
 after a re-review read Claude Code 2.1.316's bundle: the status line renders
@@ -49,9 +57,11 @@ if its Claude Code use mid-window goes unseen (used only late in windows
 opened elsewhere, or the board unplugged whenever it is) and some reply's
 own render is written over before a poll, four less it if every reply's
 render is seen; four and three-quarters less it to span one stretch; five
-or more in any case. The cost is on Ultra: a desk is
-marked after about 5 h 15 min of Claude Code use, later if it pauses for
-over an hour. The
+or more in any case. The cost is on Ultra where the plan cannot be read: a
+desk is marked after about 5 h 15 min of Claude Code use, later if it
+pauses for over an hour. Where it reads Ultra, the first reply marks it,
+and the price is an unverified Ultra account (temporary window) marked by
+a reply streaming across its reset until its next reply lifts it. The
 earlier Desktop rule checked only the later sample, and a window closing
 between two polls passed it. A single Desktop sample with no `fh` proved it
 until the owner's first decision of 2026-11-01: it had been measured on Ultra
@@ -65,7 +75,7 @@ replies are. Proof of a window, which clears the mark: a status line with
 mark lifts it, even an old terminal's repaint (the safe direction); a Desktop
 sample whose `fh` is a number; a Local Storage reading or reset stamp. The
 evidence kinds were renamed with the rules (`statusline_sustained`,
-`desktop_rise`), so a verdict saved under the old ones is read as none and
+`desktop_rise`; `statusline_ultra` is the fast path's own), so a verdict saved under the old ones is read as none and
 decided again. The newest evidence wins. With none either way there is no mark, so Pro and Max never see this
 view at a reset, a laptop asleep across one, or a fresh process. The verdict
 is persisted in `~/.blink/session-window.json`, so a restarted daemon shows
