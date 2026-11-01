@@ -142,7 +142,8 @@ CHAIN_MAX_GAP_S = 3600
 # eleven minutes broke every proof (finding 2 of the re-review). Half an
 # hour is a reading pause.
 #
-# It is also what makes a gap in the polling harmless. A rise says the
+# It is also what makes a gap in the polling harmless to the safety (a long
+# one still restarts the chain: see _reply_without_window). A rise says the
 # session replied some time after its baseline; the render that shows it may
 # be a repaint long after that reply, whose own render (a five_hour one, on
 # Pro or Max) was never seen -- the board unplugged, the lid closed, the
@@ -229,8 +230,10 @@ class ClaudeCliProvider(base.ProviderParser):
         self._polled_at = None
         # The mtime of the render the file held when the clock last went
         # back, which is no baseline however often it is read again; or
-        # None. See _forget_replies.
+        # None. See _forget_replies. _stale_owed: the clock went back on a
+        # poll whose read failed, and the next read that succeeds names it.
         self._stale = None
+        self._stale_owed = False
         # Block keys _make_room may not drop during the current poll: the
         # payloads poll() is about to look up. See _make_room.
         self._keep = ()
@@ -322,10 +325,19 @@ class ClaudeCliProvider(base.ProviderParser):
         it with its age short by the step
         (test_a_clock_gone_back_leaves_no_baseline_before_it). Every other
         render from before the step is gone, written over in the file.
+
+        `mtime` is None when that poll's read failed (an antivirus or
+        backup hold on Windows, EMFILE), and the stale render is then the
+        one the next successful read finds (self._stale_owed): taken as
+        None, the next poll took the pre-step render back in as a baseline
+        all the same (4th review, 2026-11-01). That read may instead find a
+        render made after the step, which is then no baseline either: one
+        reply later to be counted, the safe side.
         """
         self._chain = None
         self._costs.clear()
         self._stale = mtime
+        self._stale_owed = mtime is None
 
     def _reply_without_window(self, payload, mtime):
         """Evidence of no five-hour window, when this payload completes the
@@ -336,8 +348,14 @@ class ClaudeCliProvider(base.ProviderParser):
         apart (a window and a quarter of an hour), each no more than
         CHAIN_MAX_GAP_S after the one before, and no five_hour seen from any
         session in that time. The replies may come from any session on the
-        desk; the account is one. A gap in the polling does not break the
-        chain: see BASELINE_MAX_S.
+        desk; the account is one. A short gap in the polling does not break
+        the chain: see BASELINE_MAX_S. One of about an hour, less two reply
+        intervals, does: a reply rendered while nothing polls is never seen,
+        and the first rise after the gap is against a baseline older than
+        BASELINE_MAX_S and not counted, so the next counted reply is more
+        than CHAIN_MAX_GAP_S after the last one before the gap (4th review,
+        2026-11-01: unplugged 57 min, replies every two minutes, proved on
+        time; 58 min, three hours late).
 
         WHY IT HOLDS ON PRO AND MAX. It rests on the replies themselves,
         not on seeing anything between them: every one the chain takes
@@ -358,10 +376,11 @@ class ClaudeCliProvider(base.ProviderParser):
         S = 0 that is a stream of three and a half hours. A five_hour seen
         in between starts the chain over too (a desk that uses Claude Code
         mid-window shows one), but nothing above depends on seeing it, so a
-        poll gap -- the board unplugged, the lid closed -- costs nothing.
-        On Ultra a desk at work makes the chain in five and a quarter
-        hours, breaks of up to an hour included, and the verdict is kept
-        from then on.
+        poll gap -- the board unplugged, the lid closed -- costs the safety
+        nothing. On Ultra a desk at work makes the chain in five and a
+        quarter hours, breaks in its use of up to an hour included and poll
+        gaps of up to an hour less two reply intervals (above), and the
+        verdict is kept from then on.
 
         THE RESIDUAL. A Pro or Max desk is still marked if its clock runs
         fast by five hours or more (it never renders five_hour at all), or
@@ -408,8 +427,14 @@ class ClaudeCliProvider(base.ProviderParser):
           - an mtime going backwards, against the session's previous render
             or the chain's latest reply: a clock stepped back, or a file
             restored, and the intervals mean nothing;
-          - the polls' own clock going backwards, after which no render
-            from before the step is a baseline (poll(), _forget_replies).
+          - the polls' own clock going backwards between two polls, after
+            which the render the file holds is no baseline, nor any other
+            session's earlier one (poll(), _forget_replies). A step back
+            smaller than the time since the last poll -- the clock set right
+            while the lid was closed -- is not seen there, and is caught
+            only as an mtime going backwards, above, if one does; otherwise
+            the render from before it reads as one by a clock that was fast,
+            which THE RESIDUAL already prices.
         A rise against a baseline older than BASELINE_MAX_S is not counted
         and changes nothing else: not even CHAIN_MAX_GAP_S's measure, since
         the render may be long after the reply it shows.
@@ -505,17 +530,21 @@ class ClaudeCliProvider(base.ProviderParser):
     def poll(self, now_epoch):
         # A clock gone back: every interval measured across the step is
         # short by it, the unsafe direction for CHAIN_MAX_GAP_S, so the
-        # proof starts over. A gap going FORWARD is no reason to: until the
-        # 3rd review of 2026-11-01 (finding 1) any gap over five minutes
-        # threw the chain away, and the daemon polls only while the board
-        # is alive, so an Ultra desk whose lid closed for ten minutes was
-        # not marked that day. What a gap can hide is BASELINE_MAX_S's
-        # business.
+        # proof starts over. Seen here only when this poll is dated before
+        # the last one: a step back hidden inside a longer gap is left to
+        # the mtime checks and the residual (_reply_without_window). A gap
+        # going FORWARD is no reason to: until the 3rd review of 2026-11-01
+        # (finding 1) any gap over five minutes threw the chain away, and
+        # the daemon polls only while the board is alive, so an Ultra desk
+        # whose lid closed for ten minutes was not marked that day. What a
+        # gap can hide is BASELINE_MAX_S's business.
         back = self._polled_at is not None and now_epoch < self._polled_at
         self._polled_at = now_epoch
         payload, mtime = ss.read_payload(self.path())
         if back:
             self._forget_replies(mtime)
+        elif self._stale_owed and mtime is not None:
+            self._stale, self._stale_owed = mtime, False
         self._keep = tuple(
             _block_key(p)[0] for p in (
                 payload, *(m[0] for m in (self._remembered, self._any)

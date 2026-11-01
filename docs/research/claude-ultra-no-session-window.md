@@ -49,8 +49,10 @@ quiet data proves nothing. Proof of no window is either of these:
   against a render of that session at most half an hour old) with a usable
   `seven_day` and no `five_hour`, each at most an hour after the one
   before, the first and the latest at least 5 h 15 min apart, with no
-  `five_hour` seen from any session in between. A gap in the polling does
-  not break it (the third review of 2026-11-01).
+  `five_hour` seen from any session in between. A short gap in the polling
+  does not break it (the third review of 2026-11-01); one of about an hour,
+  less two reply intervals, does, because replies rendered while nothing
+  polls are not seen (the fourth).
 - **Claude Desktop.** Two consecutive samples in `plan-usage-history.json`,
   less than `DESKTOP_RISE_MAX_GAP_S` (1000 s, one idle poll) apart, where
   `sd` rose strictly and neither sample has an `fh` key.
@@ -71,7 +73,7 @@ in the last half hour of every window, and was marked every window. On Pro
 and Max those stretches are the only place a weekly-only reply happens, and
 a chain inside one spans less than five hours; the one-hour cap keeps two
 from joining. That rests on the replies alone, not on seeing anything
-between them, so a gap in the polling breaks nothing. A Pro or Max desk is
+between them, so a gap in the polling costs the safety nothing. A Pro or Max desk is
 still marked if its clock is hours fast (about three and a half less its
 longest stream, with unusual use; five or more in any case). A verdict saved under the rejected rules is read as none, because the
 evidence kinds were renamed.

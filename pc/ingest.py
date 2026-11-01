@@ -46,17 +46,6 @@ from pc.providers.weekly_anchor import DesktopHistoryProvider, WeeklyAnchorProvi
 FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
-# How long one pass of the serial loop holds the burn read budget
-# (burn_reader.READ_BUDGET_BYTES). The heartbeat and the fast tick can both
-# run in one pass, and each asks for the burn pages, so the budget is filled
-# again only once this has gone by since it last was -- not on every
-# burn_pages() call, which handed a pass two budgets (3rd review,
-# 2026-11-01). Under the fast tick's 2 s, so every tick is a pass of its
-# own; over the 1 s the bridge leaves between asks of one page
-# (bridge.BURN_ASK_GAP_S), and over what a pass's second bus.poll() was
-# measured to take against a large Desktop store (0.47 s, bridge.py).
-BURN_PASS_S = 1.5
-
 
 def default_providers():
     """Every provider shipped today, in preference order.
@@ -125,12 +114,24 @@ class IngestionBus:
         # What is left of the read budget for this pass's burn lines, shared
         # by every reader (burn_reader.READ_BUDGET_BYTES, or a reader's own
         # when it was given less); None for a full one. Filled by
-        # _burn_pass(), at most once a BURN_PASS_S, and when it is, the page
-        # asked first moves on by one (_burn_turn): pages always asked in
-        # the same order left a Codex page owed 10 KB with nothing for 55
-        # passes behind a 430 KB Claude cold start (3rd review, 2026-11-01).
+        # burn_pass(), which the bridge asks once a pass of the serial loop,
+        # and when it is, the page asked first moves on by one (_burn_turn):
+        # pages always asked in the same order left a Codex page owed 10 KB
+        # with nothing for 55 passes behind a 430 KB Claude cold start (3rd
+        # review, 2026-11-01).
+        #
+        # The pass is the bridge's to say, not the clock's. Until the 4th
+        # review of 2026-11-01 a pass was any 1.5 s since the last fill
+        # (BURN_PASS_S), re-checked by every burn(), beside a 1.0 s gate on
+        # asking a page again (bridge.BURN_ASK_GAP_S). On a desk where a
+        # budget's read takes a second or more neither held: at 1.0-1.5 s
+        # the second page was asked with nothing left, its ask stamped, and
+        # skipped on its own turn the pass after, so a Codex page waited out
+        # the whole Claude backlog (the review's repro: pass 7 behind
+        # 200 MiB); at 1.5 s or more the gate ran out inside the pass and
+        # the second page was handed a budget of its own, two a pass and
+        # four with the heartbeat in it.
         self._burn_budget = None
-        self._burn_filled_at = None
         self._burn_turn = 0
         # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
         # out after a failure. Keyed by IDENTITY, not by class: two instances
@@ -375,6 +376,7 @@ class IngestionBus:
         # board's two pages has no page to draw a burn view on.
         self._pages = {f.provider: f for f in (primary, secondary)
                        if f is not None}
+        self.prune_burn()
         if primary is None:
             return None
         msg = protocol.frame_to_usage(primary, self._now(), secondary)
@@ -409,12 +411,9 @@ class IngestionBus:
         window and that have a reader: the pages a burn line is for. Asks
         no reader; Bridge decides from this which to ask, and when.
 
-        Also where a pass starts (_burn_pass): the read budget burn() hands
-        the readers is filled again, at most once a BURN_PASS_S, and shared
-        by every page asked after. The pages come back in turn order, the
-        one asked first moving on by one with each fill, so each page has
-        the whole budget every other pass whatever the other is owed."""
-        self._burn_pass()
+        In turn order: the page asked first moves on by one with each
+        burn_pass(), so each page has the whole budget every other pass
+        whatever the other is owed."""
         pages = [p for p, f in self._pages.items()
                  if f.no_session_window and p in self._burn]
         if not pages:
@@ -422,23 +421,38 @@ class IngestionBus:
         k = self._burn_turn % len(pages)
         return pages[k:] + pages[:k]
 
-    def _burn_pass(self):
-        """Fill the read budget if no pass has filled it in BURN_PASS_S.
+    def burn_pass(self):
+        """Start a pass: the read budget burn() hands the readers is full
+        again, shared by every page asked until the next call, and the
+        page asked first moves on by one.
 
-        Asked by burn_pages() and burn() both, so a caller that only ever
-        asks burn() -- tests do -- still has a budget a pass rather than
-        the first pass's leftover for ever. A clock gone back starts a pass
-        too, the arm _cooldown_over has: gated on the gap alone, an NTP
-        step back of an hour would hold the budget at the last pass's
-        leftover for that hour."""
-        now = self._now()
-        at = self._burn_filled_at
-        if at is not None and 0 <= now - at < BURN_PASS_S:
-            return
-        if at is not None:
-            self._burn_turn += 1
-        self._burn_filled_at = now
+        Asked by Bridge once a pass of the serial loop, before the pass's
+        first ask, however many times in it the heartbeat and the fast tick
+        go on to ask. Nothing else fills the budget: a caller that never
+        starts a pass has the first budget and what is left of it."""
         self._burn_budget = None
+        self._burn_turn += 1
+
+    def prune_burn(self):
+        """Have every reader forget what has left its window by now,
+        reading nothing.
+
+        README "Privacy" says a turn's token counts are held in memory for
+        up to five hours. A reader forgets inside its own poll(), and burn()
+        polls only a marked page, while the daemon polls the bus only while
+        a board answers: so a page unmarked (a window back, an Ultra mark
+        lifted) or a board unplugged left every turn read so far in memory
+        until the daemon stopped -- ten Codex turns 8.4 h after the newest,
+        through this bus (4th review, 2026-11-01). Asked at the end of every
+        poll() and by the daemon's upkeep on every pass of its loop, cable
+        or no cable; a quarter-hour's arithmetic per reader when nothing
+        has left the window. A scenario's replay holds nothing and has no
+        prune()."""
+        now = self._now()
+        for reader in self._burn.values():
+            prune = getattr(reader, "prune", None)
+            if prune is not None:
+                prune(now)
 
     def session_pair(self):
         """(label, n) for the state the last poll() put on the panel.
@@ -478,9 +492,9 @@ class IngestionBus:
             # promised (burn_reader.READ_BUDGET_BYTES; /code-review max,
             # 2026-11-01). The page asked first can spend all of it; the
             # other is then behind, says None, and is asked first on the
-            # next pass (burn_pages). A scenario's replay reads nothing and
-            # is asked as before.
-            self._burn_pass()
+            # next pass (burn_pages). Asked with nothing left it still
+            # answers, reading nothing: a page caught up says its line. A
+            # scenario's replay reads nothing and is asked as before.
             left = (reader.read_budget if self._burn_budget is None
                     else min(reader.read_budget, self._burn_budget))
             got = reader.poll(self._now(), budget=left)
@@ -531,6 +545,9 @@ class _BusFetch:
 
     def burn_pages(self):
         return self._bus.burn_pages()
+
+    def burn_pass(self):
+        return self._bus.burn_pass()
 
     def burn(self, provider=claude_cli.PROVIDER_ID):
         return self._bus.burn(provider)

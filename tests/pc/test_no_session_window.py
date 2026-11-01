@@ -2342,6 +2342,39 @@ def test_a_clock_gone_back_leaves_no_baseline_before_it(tmp_path, who):
     assert proofs[0] - restart >= claude_cli.CHAIN_SPAN_S
 
 
+
+def test_a_failed_read_on_the_clock_back_poll_still_leaves_no_baseline(
+        tmp_path, monkeypatch):
+    """_forget_replies takes its stale mark from the poll that saw the
+    clock go back. When that poll's read failed (an antivirus hold, EMFILE)
+    it took None, and the next poll took the pre-step render straight back
+    in as a baseline (4th review, 2026-11-01). The mark now comes from the
+    next read that succeeds. The desk is the one above, the file's case."""
+    p = tmp_path / "statusline.json"
+    a, b = Desk("a"), Desk("b")
+    L = T0 + 2 * HOUR
+    steps = a.replies(T0, L + 1)
+    steps.insert(-2, b.reply(L - 3 * 60))
+    steps.append((None, None, L - 9 * 60))           # the clock back
+    failing = len(steps)                            # ... and its read fails
+    steps.append((None, None, L - 9 * 60 + 2))       # the same render, read
+    steps.append(a.reply(L + 120))
+    restart = L + 120 + 42 * 60
+    steps += a.replies(restart - 120, restart + claude_cli.CHAIN_SPAN_S
+                       + 10 * 60)
+    real = claude_cli.ss.read_payload
+    polls = [0]
+
+    def read_payload(path):
+        polls[0] += 1
+        return (None, None) if polls[0] == failing else real(path)
+    monkeypatch.setattr(claude_cli.ss, "read_payload", read_payload)
+    proofs = fed(p, ClaudeCliProvider(path=str(p)), steps)
+
+    assert polls[0] == len(steps)
+    assert proofs
+    assert proofs[0] - restart >= claude_cli.CHAIN_SPAN_S
+
 def test_a_repaint_of_a_block_seen_hours_ago_is_dated_by_its_render(
         tmp_path):
     """Five_hour evidence is dated by the payload's mtime, the render, not

@@ -327,3 +327,36 @@ def test_the_daemon_logs_burn_by_type_about_once_a_quarter_hour():
 
     assert len(burns(sent)) > 400
     assert logged == ["burn"] * 8
+
+
+def test_the_daemon_opens_a_pass_at_the_top_of_its_loop():
+    """Bridge.begin_pass is what makes the heartbeat and the fast tick one
+    pass, one read budget and one ask a page (4th review, 2026-11-01). A
+    loop that forgot it would leave every ask a pass of its own: two
+    budgets whenever the two meet. So the read loop that runs both opens
+    one first thing, on every turn."""
+    tree = ast.parse((ROOT / "claude_usage_bridge.py").read_text(
+        encoding="utf-8"))
+    loops = [n for n in ast.walk(tree) if isinstance(n, ast.While)
+             and "bridge.poll_if_changed()" in ast.unparse(n)]
+    inner = [n for n in loops
+             if not any(m is not n and m in loops for m in ast.walk(n))]
+    assert len(inner) == 1
+    assert ast.unparse(inner[0].body[0]) == "bridge.begin_pass()"
+
+
+def test_a_bridge_driven_by_hand_asks_on_every_poll():
+    """Until the loop first says where a pass starts, each ask is a pass of
+    its own, as it always was for a Bridge driven by hand: a reader still
+    behind is asked by the heartbeat and again by the tick beside it."""
+    b, sent, clock, fetch = make()
+    fetch.line = None                           # behind: nothing sent
+    b.on_message(hello())
+    clock.t += 60
+    b.poll_once()
+    b.poll_if_changed()
+    assert fetch.asked == 2
+    b.begin_pass()                              # the loop takes over
+    b.poll_once()
+    b.poll_if_changed()
+    assert fetch.asked == 3
