@@ -5,7 +5,8 @@
 #
 # pc/providers/codex_cli.py reads `rate_limits` out of Codex's token_count
 # event: primary/secondary windows, each with used_percent, window_minutes and
-# resets_at. Codex is open source, and those are Rust struct fields in
+# resets_at. pc/burn_reader.CodexBurnReader reads the same event's `info`:
+# the token figures of total_token_usage and last_token_usage (check 12). Codex is open source, and those are Rust struct fields in
 # codex-rs/protocol/src/protocol.rs, serialised under their own names. So the
 # contract can be checked at the ref that ships, without an account.
 #
@@ -180,5 +181,36 @@ POLICY=$(fetch codex-rs/rollout/src/policy.rs)
 grep -q -E 'RolloutItem::SessionMeta\(_\) => (true|Some\(Cow::Borrowed\(item\)\))' "$POLICY" ||
 	fail "session_meta is no longer persisted unconditionally"
 ok "session_meta is still written to every rollout"
+
+# 12. The burn view's figures. pc/burn_reader.CodexBurnReader counts the
+#     output_tokens of each token_count event's info.last_token_usage, and
+#     recognises an event written twice by every figure of total_token_usage
+#     and last_token_usage (CODEX_USAGE_FIELDS). Renamed, the reader would
+#     find nothing to count and the page would draw twenty empty bars, a
+#     confident "idle", with every Python test green -- they feed it events
+#     this repo wrote (/code-review max, 2026-11-01).
+rust_item "$FILE" 'pub enum EventMsg' | grep -q '^[[:space:]]*TokenCount(TokenCountEvent),' ||
+	fail "EventMsg lost TokenCount(TokenCountEvent) -- token_count events are gone"
+grep -B4 'pub enum EventMsg' "$FILE" | grep -q 'rename_all = "snake_case"' ||
+	fail "EventMsg is no longer snake_case -- the event is not called token_count"
+rust_item "$FILE" 'pub struct TokenCountEvent' | grep -q 'pub info: Option<TokenUsageInfo>,' ||
+	fail "TokenCountEvent no longer carries info: Option<TokenUsageInfo>"
+INFO=$(rust_item "$FILE" 'pub struct TokenUsageInfo')
+for field in 'pub total_token_usage: TokenUsage,' 'pub last_token_usage: TokenUsage,'; do
+	printf '%s\n' "$INFO" | grep -q "$field" || fail "TokenUsageInfo lost '$field'"
+done
+USAGE=$(rust_item "$FILE" 'pub struct TokenUsage')
+for field in input_tokens cached_input_tokens cache_write_input_tokens output_tokens reasoning_output_tokens total_tokens; do
+	printf '%s\n' "$USAGE" | grep -q "pub $field: i64," || fail "TokenUsage lost '$field: i64'"
+done
+for st in TokenCountEvent TokenUsageInfo TokenUsage; do
+	if grep -B4 "pub struct $st\b" "$FILE" | grep -q 'rename_all'; then
+		fail "$st is serialised with rename_all -- the JSON keys have moved"
+	fi
+done
+if printf '%s\n%s\n' "$INFO" "$USAGE" | grep -q 'serde(rename\b\|serde(rename ='; then
+	fail "a token usage field is serialised under another name"
+fi
+ok "token_count still carries info.total_token_usage and last_token_usage, output_tokens and all"
 
 printf 'PASS [codex contract at %s]\n' "$REF"

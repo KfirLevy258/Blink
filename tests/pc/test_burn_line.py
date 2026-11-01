@@ -267,8 +267,9 @@ def test_the_daemon_reads_transcripts_and_a_scenario_never_does(
     say 9000 tokens; the scenario says its own preset."""
     import claude_usage_bridge     # here, under the sandbox's BLINK_SKIP_SERVICE
     monkeypatch.delenv("BLINK_SCENARIO", raising=False)
-    assert isinstance(claude_usage_bridge.build_bus()._burn,
-                      burn_reader.BurnReader)
+    readers = claude_usage_bridge.build_bus()._burn
+    assert type(readers["claude"]) is burn_reader.BurnReader
+    assert type(readers["codex"]) is burn_reader.CodexBurnReader
 
     transcripts(tmp_path, [0] * 19 + [9000])
     scenario = tmp_path / "scenario.json"

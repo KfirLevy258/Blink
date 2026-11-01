@@ -7,7 +7,8 @@ have worked instead: output tokens in twenty quarter-hours. Output tokens and
 nothing else. On the desk this was built on, cache reads ran to hundreds of
 millions against a couple of million output tokens, and a number that size
 means nothing to anyone. Claude Code only: Desktop and claude.ai chats leave
-no usage on disk.
+no usage on disk. The Codex page's twin, CodexBurnReader, is at the end of
+this module and reuses all of the machinery below.
 
 WHAT IS READ. Claude Code appends one JSON line per event to a transcript per
 session, under ~/.claude/projects, or $CLAUDE_CONFIG_DIR/projects when that
@@ -107,6 +108,11 @@ SCAN_EVERY_S = 15.0
 # took 205 ms, so this is about 30 ms of the serial loop. The generated tree
 # in the module docstring cleared its cold start in seven polls -- twelve
 # seconds of fast ticks -- the slowest 54 ms.
+#
+# It is a budget per pass of the serial loop, not per reader: with a Claude
+# and a Codex page both marked, the bus hands the two readers ONE budget
+# between them (ingest.IngestionBus.burn), so the 30 ms holds with two. Each
+# reader asked for its own was twice that (/code-review max, 2026-11-01).
 READ_BUDGET_BYTES = 32 * 1024 * 1024
 
 # One read() call. Lines are cut out of each chunk, so memory follows this
@@ -295,7 +301,17 @@ class _File:
 
 class BurnReader:
     """Twenty quarter-hours of Claude Code output tokens, kept up to date by
-    reading only what the transcripts have gained since the last poll."""
+    reading only what the transcripts have gained since the last poll.
+
+    The walk, the offsets, the anchors, READ_TRIES and the budget are not
+    Claude's: CodexBurnReader below is this class with another root, another
+    needle, other sentences and its own _entry."""
+
+    NEEDLE = _NEEDLE
+    SAID_LEFT_OUT = SAID_LEFT_OUT
+    SAID_WHOLE = SAID_WHOLE
+    SAID_ROOT_REFUSED = SAID_ROOT_REFUSED
+    SAID_ROOT_LISTS = SAID_ROOT_LISTS
 
     def __init__(self, root=None, read_budget=READ_BUDGET_BYTES,
                  scan_every_s=SCAN_EVERY_S, chunk_bytes=CHUNK_BYTES,
@@ -325,12 +341,22 @@ class BurnReader:
         self._kept_from = None      # the oldest bucket the last prune kept
         self.last = PollCost(False, 0, 0, 0, 0)
 
-    def root(self):
-        return self._root if self._root is not None else transcripts_root()
+    @property
+    def read_budget(self):
+        """The most one poll reads when it is not told less."""
+        return self._budget
 
-    def poll(self, now):
+    def root(self):
+        return self._root if self._root is not None else self.default_root()
+
+    def default_root(self):
+        return transcripts_root()
+
+    def poll(self, now, budget=None):
         """(q, tokens) for wall-clock `now`, or None when there is nothing
-        honest to say yet.
+        honest to say yet. `budget` is the most this poll may read, the
+        reader's own (READ_BUDGET_BYTES) when None; self.last.read_bytes
+        says what it did read.
 
         q is the start of the quarter-hour `now` is in, and tokens the twenty
         buckets oldest first: bucket i covers q - (19 - i) * 900 onwards, in
@@ -352,7 +378,8 @@ class BurnReader:
         q = protocol.burn_quarter(now)
         oldest = q - (protocol.BURN_BUCKETS - 1) * protocol.BURN_BUCKET_S
         self._prune(oldest)
-        read = self._drain(oldest)
+        read = self._drain(oldest, self._budget if budget is None
+                           else budget)
         behind = sum(f.size - f.looked for f in self._files.values()
                      if f.size > f.looked and f.failures < READ_TRIES)
         self.last = PollCost(walked, len(self._files), read, behind,
@@ -427,7 +454,8 @@ class BurnReader:
                        for d, n in self._refusals.items())
         if left_out != self._left_out_said:
             self._left_out_said = left_out
-            print(SAID_LEFT_OUT if left_out else SAID_WHOLE, file=sys.stderr)
+            print(self.SAID_LEFT_OUT if left_out else self.SAID_WHOLE,
+                  file=sys.stderr)
         # A root that vanished between the isdir() above and its listing is
         # in `refused` too (_transcripts' _GONE case), and is a missing
         # folder, not a refused one: asked again so that race says nothing.
@@ -437,8 +465,8 @@ class BurnReader:
         if root_refused != self._root_refused_said and (
                 root_refused or root not in refused):
             self._root_refused_said = root_refused
-            print(SAID_ROOT_REFUSED if root_refused else SAID_ROOT_LISTS,
-                  file=sys.stderr)
+            print(self.SAID_ROOT_REFUSED if root_refused
+                  else self.SAID_ROOT_LISTS, file=sys.stderr)
         # What a refused directory holds was not listed, which is not the
         # same as gone: forgotten, every file in it touched inside the
         # window would be read again from its start once it lists. The
@@ -460,15 +488,15 @@ class BurnReader:
         for k in [k for k, v in self._seen.items() if v[0] < oldest]:
             del self._seen[k]
 
-    def _drain(self, oldest):
-        """Read what is owed, newest file first, up to the budget."""
+    def _drain(self, oldest, budget):
+        """Read what is owed, newest file first, up to `budget`."""
         owed = sorted(((f.mtime, p) for p, f in self._files.items()
                        if f.size > f.looked), reverse=True)
         read = 0
         for _, path in owed:
-            if read >= self._budget:
+            if read >= budget:
                 break
-            read += self._read(path, self._files[path], self._budget - read,
+            read += self._read(path, self._files[path], budget - read,
                                oldest)
         return read
 
@@ -556,27 +584,25 @@ class BurnReader:
         return read
 
     def _take(self, line, oldest):
-        """Count one line, if it is an assistant message inside the window
-        that has not been counted already."""
-        if _NEEDLE not in line:
+        """Count one line, if _entry() makes a message of it, it is inside
+        the window, and it has not been counted already.
+
+        Shared by both readers: what a line is worth -- the key that
+        recognises it again and the output tokens it carries -- is _entry's,
+        and everything after that, the stamp, the bucket and the de-dup, is
+        the same for Claude and Codex."""
+        if self.NEEDLE not in line:
             return
         try:
             obj = json.loads(line)
         except (ValueError, RecursionError):
             return
-        if not isinstance(obj, dict) or obj.get("type") != "assistant":
+        if not isinstance(obj, dict):
             return
-        msg = obj.get("message")
-        if not isinstance(msg, dict) or msg.get("model") == SYNTHETIC_MODEL:
+        got = self._entry(obj)
+        if got is None:
             return
-        usage = msg.get("usage")
-        out = usage.get("output_tokens") if isinstance(usage, dict) else None
-        # type() and not isinstance(): True is an int to isinstance.
-        if type(out) is not int or out < 0:
-            return
-        mid = msg.get("id")
-        if not isinstance(mid, str) or not mid:
-            return                      # nothing to recognise a repeat by
+        key, out = got
         # cowork_audit's parser, the codebase's one: UTC with Z is what
         # Claude Code writes, an explicit offset is honoured, and no zone at
         # all is refused rather than guessed at, since a guess is an hour in
@@ -589,18 +615,197 @@ class BurnReader:
         bucket = protocol.burn_quarter(at)
         if bucket < oldest:
             return
-        rid = obj.get("requestId")
-        key = (mid, rid if isinstance(rid, str) else None)
         had = self._seen.get(key)
         if had is None:
             self._seen[key] = [bucket, out]
             self._buckets[bucket] = self._buckets.get(bucket, 0) + out
-        elif out > had[1]:
+            return
+        if bucket < had[0]:
+            # The same message, stamped earlier than where it was counted:
+            # it belongs to the earlier quarter-hour. Files are read newest
+            # first, so a Codex event copied into a newer rollout, re-stamped
+            # (FORKS, at the Codex reader below), was counted at the copy's
+            # time and its original found after; left there, a fork drew
+            # the parent's whole history as a spike in the current bar.
+            self._buckets[had[0]] = self._buckets.get(had[0], 0) - had[1]
+            self._buckets[bucket] = self._buckets.get(bucket, 0) + had[1]
+            had[0] = bucket
+        if out > had[1]:
             # A repeat carrying a larger figure is the same message, further
-            # on: the count becomes that figure, where it was first seen. Not
+            # on: the count becomes that figure, in its bucket above. Not
             # once measured -- every repeat on the dev desk carried the same
             # figure -- but keeping the first would undercount the day one
             # did not, and keeping the sum would double count every day.
+            # (Never for Codex, whose figure is part of its key.)
             self._buckets[had[0]] = (self._buckets.get(had[0], 0)
                                      + out - had[1])
             had[1] = out
+
+    def _entry(self, obj):
+        """(key, output tokens) for an assistant message, or None.
+
+        The key is (message.id, requestId), which streaming repeats with the
+        same figure (the module docstring) and which a transcript read again
+        from its start repeats too."""
+        if obj.get("type") != "assistant":
+            return None
+        msg = obj.get("message")
+        if not isinstance(msg, dict) or msg.get("model") == SYNTHETIC_MODEL:
+            return None
+        out = _count(msg.get("usage"))
+        if out is None:
+            return None
+        mid = msg.get("id")
+        if not isinstance(mid, str) or not mid:
+            return None                 # nothing to recognise a repeat by
+        rid = obj.get("requestId")
+        return (mid, rid if isinstance(rid, str) else None), out
+
+
+def _count(usage):
+    """`output_tokens` out of one usage object, or None."""
+    out = usage.get("output_tokens") if isinstance(usage, dict) else None
+    # type() and not isinstance(): True is an int to isinstance.
+    return out if type(out) is int and out >= 0 else None
+
+
+# --- Codex --------------------------------------------------------------------
+#
+# The same view for a Codex account with no five-hour window (Codex Pro
+# measured weekly-only on the owner's desk, 2026-11-01:
+# pc/providers/codex_cli._no_short_window). Codex writes no transcript of
+# replies with usage on them; it writes, after each turn, an `event_msg`
+# whose payload type is `token_count` into its rollout,
+# ~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl ($CODEX_HOME/sessions
+# when that is set), the same file and the same record the Codex gauges come
+# from. Of each line this reads `type`, `timestamp`, `payload.type` and the
+# token figures of `payload.info.total_token_usage` and
+# `payload.info.last_token_usage` (CODEX_USAGE_FIELDS), and nothing else --
+# not the rate limits, which pc/providers/codex_cli reads, and never the
+# conversation. The output_tokens of last_token_usage is what is counted;
+# the rest is only what recognises an event seen before.
+#
+# WHICH FIGURE, measured over the owner's 195 rollouts on 2026-11-01, counts
+# and comparisons only, no value printed: 8097 token_count events, 8061 of
+# them with an `info`. In every one of those 8061, total_token_usage's
+# total_tokens was input_tokens + output_tokens exactly, and
+# reasoning_output_tokens was no more than output_tokens; where reasoning was
+# above zero, total_tokens never equalled input + output + reasoning. So
+# reasoning is already inside output_tokens -- OpenAI's usage model, where
+# output_tokens_details.reasoning_tokens is a breakdown of output_tokens --
+# and output_tokens alone counts it once.
+#
+# WHY last_token_usage, ONCE PER CONTENT. The first cut took differences of
+# the running total, de-duplicated by (path, total). The /code-review max of
+# 2026-11-01 found what that misses: the same event written into a second
+# rollout (counted again, since the path differs), two counters interleaved
+# in one file (each difference across them a phantom rise), a total that
+# resets and later passes a figure it had before (dropped as a repeat), and
+# a cold file followed from its end losing its baseline. Each event now
+# counts its own last_token_usage.output_tokens, once per CONTENT key: every
+# figure of total_token_usage beside every figure of last_token_usage. A
+# copy of an event carries all of them unchanged, whatever file it is in or
+# however often its file is read again; a different turn changes at least
+# the cumulative ones. Measured, counts only, over those 8061 events:
+#
+#   - 228 repeated the previous event's cumulative output total (a
+#     token_count written again with no turn between, as a rate-limit
+#     refresh is). 159 were the previous event's figures exactly, so one
+#     key; the other 69 differed in some other figure and carried a
+#     last_token_usage.output_tokens of 0, so count nothing either way.
+#   - Of the 7833 rises of the running total, 7832 equalled the event's own
+#     last output_tokens; the one that did not was the first event of a
+#     file that opened with a total above its own last, where a difference
+#     from zero counted everything before that event as if it were one
+#     turn.
+#   - 2 content keys were in two files: in both pairs the two files had the
+#     same session_id and the copies different stamps -- the copy above,
+#     which (path, total) counted twice.
+#   - The sum over distinct keys came to 0.017% less than the differences,
+#     which is exactly those copies and that opening.
+#
+# FORKS. 27 of the 195 were forks: their first session_meta names
+# `forked_from_id`, and a second session_meta, the parent's, follows it.
+# None of them carried a token_count from before the fork (all 507 are
+# stamped after the fork's own session_meta), and no fork shared a content
+# key with its parent, so on this desk a fork copies no usage. Should a
+# Codex version copy it, the copies carry the parent's figures and are
+# recognised as long as the parent's events are still inside the window
+# (self._seen is pruned with it). A fork of a conversation whose turns are
+# all older than the window would count its re-stamped copies once, in the
+# quarter-hour it was made: the residual, unmeasured.
+#
+# THE OTHER RESIDUAL. Two different turns carrying the same figures in all
+# twelve places would be counted once. The cumulative six make that a
+# matter of two sessions' FIRST turns coinciding to the token in input,
+# cache and output alike.
+
+CODEX_NEEDLE = b'"token_count"'
+
+# The figures a token-usage object carries, the owner's logs measured
+# (2026-11-01: these six in every one of 16 122 usage objects). A field
+# missing or not an int is None in the key, the same None in a copy.
+CODEX_USAGE_FIELDS = ("input_tokens", "cached_input_tokens",
+                      "cache_write_input_tokens", "output_tokens",
+                      "reasoning_output_tokens", "total_tokens")
+
+CODEX_SAID_LEFT_OUT = ("[burn] a Codex sessions directory cannot be listed; "
+                       "the burn view goes on without it")
+CODEX_SAID_WHOLE = "[burn] every Codex sessions directory lists again"
+CODEX_SAID_ROOT_REFUSED = ("[burn] the Codex sessions folder cannot be "
+                           "listed; no burn view until it can")
+CODEX_SAID_ROOT_LISTS = "[burn] the Codex sessions folder lists again"
+
+
+def _figures(usage):
+    """A token-usage object's figures, in CODEX_USAGE_FIELDS order."""
+    return tuple(v if type(v) is int else None
+                 for v in (usage.get(k) for k in CODEX_USAGE_FIELDS))
+
+
+class CodexBurnReader(BurnReader):
+    """Twenty quarter-hours of Codex output tokens, from its rollouts.
+
+    BurnReader's walk, offsets, anchors, cold-file cutoff (FOLLOW_S),
+    READ_TRIES, budget and de-dup, unchanged: the rollouts sit three
+    directories down (<YYYY>/<MM>/<DD>), which is MAX_DEPTH, and a
+    compressed `.jsonl.zst` (a week old, codex_cli's docstring) is not a
+    `.jsonl` and is never opened. What differs is what a line is worth,
+    _entry below, and the comment above it says why.
+    """
+
+    NEEDLE = CODEX_NEEDLE
+    SAID_LEFT_OUT = CODEX_SAID_LEFT_OUT
+    SAID_WHOLE = CODEX_SAID_WHOLE
+    SAID_ROOT_REFUSED = CODEX_SAID_ROOT_REFUSED
+    SAID_ROOT_LISTS = CODEX_SAID_ROOT_LISTS
+
+    def default_root(self):
+        # Codex's own answer, the one its gauges read from; resolved now,
+        # never at import (tests/test_sandbox.py).
+        from pc.providers import codex_cli
+        return codex_cli.sessions_root()
+
+    def _entry(self, obj):
+        """(content key, last output tokens) for a token_count event, or
+        None. An event of 0 output tokens is None too: there is nothing to
+        count, and nothing worth remembering it by."""
+        if obj.get("type") != "event_msg":
+            return None
+        payload = obj.get("payload")
+        if not isinstance(payload, dict) or payload.get(
+                "type") != "token_count":
+            return None
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return None     # a rate-limit-only event: 36 of 8097 measured
+        total = info.get("total_token_usage")
+        last = info.get("last_token_usage")
+        # The cumulative figures are what tell two turns apart; without a
+        # readable total the event has no identity worth trusting.
+        if _count(total) is None:
+            return None
+        out = _count(last)
+        if not out:
+            return None
+        return ("codex", _figures(total), _figures(last)), out

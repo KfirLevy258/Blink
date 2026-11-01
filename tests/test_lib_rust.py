@@ -106,4 +106,4 @@ def test_the_contract_check_has_no_fixed_window_left():
         encoding="utf-8")
     code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
     assert not [l for l in code if "grep -A" in l]
-    assert sum("rust_item " in l for l in code) == 3
+    assert sum("rust_item " in l for l in code) == 7
