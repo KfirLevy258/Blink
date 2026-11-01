@@ -41,6 +41,14 @@ None of these says "ultra", and even after a rename a tier string cannot tell
 a verified Ultra account (no window) from an unverified one (temporary
 window). Reading the keychain also means asking for a secret we do not need.
 
+**Update, 2026-11-01.** The same desk's `~/.claude.json` now also has
+`oauthAccount.planDisplayName` = `"Ultra"` (Claude Code 2.1.316, which writes
+it from the account profile; field names and these values only, the rest of
+the file not read into any note). The tier and `organizationType` are as
+above. So the plan *can* be read, though it still cannot say whether the
+account is verified. It is used for one thing only (below): it rules Pro and
+Max out of a fast path, and the window is still what is detected.
+
 **So detect the window, not the plan.** The rule now in the code
 (`pc/session_verdict`) marks the account on positive evidence only, and
 quiet data proves nothing. Proof of no window is either of these:
@@ -53,6 +61,17 @@ quiet data proves nothing. Proof of no window is either of these:
   does not break it (the third review of 2026-11-01); one of about an hour,
   less two reply intervals, does, because replies rendered while nothing
   polls are not seen (the fourth).
+- **Claude Code, on the Ultra plan** (owner's request, 2026-11-01: Ultra
+  desks switch on the first reply again). When `.claude.json`
+  (`$CLAUDE_CONFIG_DIR/.claude.json` when that is set) names the Ultra plan
+  -- `planDisplayName` "Ultra", trimmed and in any case, or, with no
+  `planDisplayName`, an `organizationRateLimitTier` ending in `max_20x` --
+  ONE such reply is proof (`statusline_ultra`). Only those two fields are
+  taken from the file (`pc/claude_plan`). A plan that is not Ultra, or a
+  file that is missing, unreadable, corrupt or over 8 MB, keeps the
+  sustained rule above. An unverified Ultra account still has a temporary
+  window, and one reply streaming across its reset can mark it; its next
+  reply renders `five_hour`, which lifts the mark.
 - **Claude Desktop.** Two consecutive samples in `plan-usage-history.json`,
   less than `DESKTOP_RISE_MAX_GAP_S` (1000 s, one idle poll) apart, where
   `sd` rose strictly and neither sample has an `fh` key.
