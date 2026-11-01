@@ -465,7 +465,7 @@ def sent_path(home):
     return os.path.join(home, SENT_FILE)
 
 
-def _write_json(path, obj):
+def _write_json(path, obj, tries=None):
     """Whole or not at all. The daemon reads these files on a two-second
     tick while the builder writes them on every keystroke, so a reader must
     never see half of one: temp file, then os.replace.
@@ -480,6 +480,9 @@ def _write_json(path, obj):
     a name that is really taken, ten times. The sweep removes what a killed
     write left, and the names are the ones install_statusline.temp_siblings
     finds, which is how `blink uninstall` takes them too.
+
+    `tries` caps the os.replace attempts; None is update's own default.
+    pc/session_verdict passes 1, because it writes from the serial thread.
     """
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
@@ -494,7 +497,9 @@ def _write_json(path, obj):
         # save. Imported here because pc.update is the heavier module and
         # the CLI's other paths do not need it.
         from pc import update
-        update._replace(tmp, path, posix_retry=False)
+        update._replace(tmp, path, posix_retry=False,
+                        tries=update.REPLACE_TRIES if tries is None
+                        else tries)
     except BaseException:
         try:
             install_statusline._remove(tmp)

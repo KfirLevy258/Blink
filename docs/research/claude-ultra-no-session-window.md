@@ -22,8 +22,11 @@ secondary coverage so far; the Anthropic post itself has not been read:
 On a desk with an Ultra account, the status line payload Claude Code writes
 to `~/.blink/statusline.json` carries `rate_limits.seven_day`
 (`used_percentage`, `resets_at`) and **no `five_hour` key at all**. It was
-rendering every few seconds at the time, so this is not the old "window
-expired while nobody rendered" absence.
+rendering as the session replied, so this is not the old "window expired
+while nobody rendered" absence. (Claude Code renders the status line on
+events -- token usage, a new assistant message, a mode change, the earliest
+reset, prompt-cache expiry -- not on a timer: read from 2.1.316's bundle in
+the re-review of 2026-11-01.)
 
 ## The plan cannot be read from local files
 
@@ -42,15 +45,34 @@ window). Reading the keychain also means asking for a secret we do not need.
 (`pc/session_verdict`) marks the account on positive evidence only, and
 quiet data proves nothing. Proof of no window is either of these:
 
-- **Claude Code.** One session that replied twice without `five_hour`, with
-  the replies far enough apart that no single reset explains both.
+- **Claude Code.** Sustained absence: at least three replies (a session's
+  cost rose) with a usable `seven_day` and no `five_hour`, consecutive ones
+  25 minutes to an hour apart, the first and last at least 5 h 15 min
+  apart, with no `five_hour` rendered by any session in between and no gap
+  in the polling over five minutes.
 - **Claude Desktop.** Two consecutive samples in `plan-usage-history.json`,
   less than `DESKTOP_RISE_MAX_GAP_S` (1000 s, one idle poll) apart, where
-  `sd` rose strictly and the later sample has no `fh` key.
+  `sd` rose strictly and neither sample has an `fh` key.
 
-Proof of a window clears the mark: a status line with `five_hour`, a Desktop
-sample whose `fh` is a number (0 included), or a Local Storage reading or
-reset stamp. The newest evidence wins.
+Proof of a window clears the mark: a status line with `five_hour` rendered
+after the mark, a Desktop sample whose `fh` is a number (0 included), or a
+Local Storage reading or reset stamp. The newest evidence wins.
+
+The Claude Code half was two replies 25 minutes to 4 h 35 min apart until the
+re-review of 2026-11-01, which read Claude Code 2.1.316's bundle and found
+three premises false. The status line renders on events, so a ten-minute
+silence was a pause, not a gap, and an Ultra user who read between turns was
+never marked. `API_TIMEOUT_MS` bounds only the wait for headers, so one
+stream across a Pro or Max reset rendered weekly-only rises half an hour
+apart. And `five_hour` leaves the line when its `resets_at` passes the
+*local* clock, so a desk running 30 minutes fast rendered weekly-only replies
+in the last half hour of every window, and was marked every window. On Pro
+and Max those stretches are the only place a weekly-only reply happens, and
+a chain inside one spans less than five hours; the one-hour cap keeps two
+from joining. A Pro or Max desk is still marked if its clock is hours fast
+(about four less its longest stream, with unusual use; five or more in any
+case). A verdict saved under the rejected rules is read as none, because the
+evidence kinds were renamed.
 
 The Desktop half was first a single sample with `sd` and no `fh`, which is
 what the measured Ultra desk wrote. But that was measured on Ultra only. A
@@ -70,7 +92,12 @@ being used.
 
 The measured owner desk had `{fh: 1, sd: 23}` on 10-29 at 21:29 and `{sd: 19}`
 on 10-31 at 18:29. That pair is 45 hours apart and falling, so it is not
-Desktop evidence. Claude Code's two-reply proof is what marks that desk.
+Desktop evidence. Claude Code's sustained replies are what mark that desk.
+
+The Desktop rise first checked only the later sample's `fh`. A Pro window
+closing between two polls passed it: `{fh: 85, sd: 40}` four minutes before
+the reset, the window's last usage, then `{sd: 41}` a minute after. So the
+earlier sample must have no `fh` either (re-review, 2026-11-01).
 
 Three earlier rules got this wrong, and review caught each one:
 
