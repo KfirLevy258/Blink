@@ -16,6 +16,7 @@ over.
 import builtins
 import json
 import os
+import time
 
 import pytest
 
@@ -397,6 +398,100 @@ def test_a_pending_adopt_ends_on_a_hello_or_the_next_report(home,
     assert theme.load_saved(home) == {"id": 6}
 
 
+class _HeldThemeJson:
+    """os.replace onto theme.json refused with WinError 5, as a read-only or
+    held file on a Windows desk gives (finding 14's scenario), on any
+    runner; and every sleep recorded instead of slept."""
+
+    def __init__(self, monkeypatch):
+        self.on = True
+        self.attempts = 0
+        self.sleeps = []
+        real = os.replace
+
+        def replace(src, dst):
+            if self.on and os.path.basename(str(dst)) == "theme.json":
+                self.attempts += 1
+                e = PermissionError(13, "Access is denied")
+                e.winerror = 5
+                raise e
+            return real(src, dst)
+        monkeypatch.setattr(os, "replace", replace)
+        monkeypatch.setattr(time, "sleep", self.sleeps.append)
+
+
+def test_a_refused_adopt_write_never_sleeps_and_backs_off(home, monkeypatch,
+                                                          capsys):
+    """The serial thread reaches theme.json through a pending adopt on every
+    fast tick. With _write_json's default ten tries it slept 2.7 s each
+    time, holding pongs and usage lines (2026-11-01 third review). One try
+    from the serial thread, and a refused write retried on a backoff."""
+    theme.save(home, {"id": 4})
+    clock = [1000.0]
+    s = theme.ThemeSync(home, clock=lambda: clock[0])
+    s.hello()
+    s.board_now(now_msg(4, "boot"), board_id=BOARD)
+    held = _HeldThemeJson(monkeypatch)
+    s.board_now(now_msg(1, "user"), board_id=BOARD)
+    assert held.attempts == 1
+    for _ in range(5):                   # fast ticks, no time passing
+        assert s.outgoing() == []
+    assert held.attempts == 1
+    attempts = []
+    for _ in range(40):                  # half a minute of half-second ticks
+        clock[0] += 0.5
+        s.outgoing()
+        attempts.append(held.attempts)
+    assert 1 < held.attempts <= 6, attempts
+    assert held.sleeps == []
+    held.on = False
+    clock[0] += theme.ThemeSync.ADOPT_RETRY_MAX_S
+    assert s.outgoing() == []
+    assert theme.load_saved(home) == {"id": 1}
+    assert capsys.readouterr().err.count("could not keep") == 1
+    assert held.sleeps == []
+
+
+def test_a_new_refusal_is_tried_at_once_and_the_backoff_starts_over(
+        home, monkeypatch):
+    theme.save(home, {"id": 4})
+    clock = [1000.0]
+    s = theme.ThemeSync(home, clock=lambda: clock[0])
+    s.hello()
+    s.board_now(now_msg(4, "boot"), board_id=BOARD)
+    held = _HeldThemeJson(monkeypatch)
+    s.board_now(now_msg(1, "user"), board_id=BOARD)
+    for _ in range(200):
+        clock[0] += 0.5
+        s.outgoing()
+    before = held.attempts
+    s.board_now(now_msg(6, "user"), board_id=BOARD)     # a newer pick
+    assert held.attempts == before + 1
+    clock[0] += theme.ThemeSync.ADOPT_RETRY_FIRST_S
+    s.outgoing()
+    assert held.attempts == before + 2
+
+
+def test_the_serial_threads_record_writes_take_one_try(home, monkeypatch):
+    """theme_sent.json and theme_seen.json are written from board_now, on
+    the serial thread, too."""
+    seen = []
+    real = theme._write_json
+
+    def spy(path, obj, tries=None):
+        seen.append((os.path.basename(path), tries))
+        return real(path, obj, tries=tries)
+    monkeypatch.setattr(theme, "_write_json", spy)
+    s = theme.ThemeSync(home)
+    s.hello()
+    s.board_now(now_msg(4, "boot"), board_id=BOARD)
+    s.board_now(now_msg(1, "user"), board_id=BOARD)
+    s.board_now(now_msg(1, "saved"), board_id=BOARD)
+    assert {n for n, _ in seen} >= {"theme.json", "theme_seen.json",
+                                    "theme_sent.json"}
+    assert all(t == 1 for _, t in seen), seen
+
+
 def test_a_new_pick_on_the_board_clears_the_kept_note(home):
     # Round-2 review, R4: the note was carried past a why=user, so picking
     # the kept theme again later brought a stale "kept over" back.
@@ -534,7 +629,7 @@ def test_a_failed_record_write_is_reported_and_the_sync_goes_on(
     theme.save(home, {"id": 4})
     s = connect(home)
 
-    def refuse(p, o):
+    def refuse(p, o, tries=None):
         raise PermissionError(13, "denied")
     monkeypatch.setattr(theme, "_write_json", refuse)
     s.board_now(now_msg(1, "boot"), board_id=BOARD)

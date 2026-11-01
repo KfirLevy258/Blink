@@ -2421,17 +2421,22 @@ def _burn_folder(out):
     return lines[i + 1].strip(), lines[i + 2:]
 
 
-def _with_a_service(monkeypatch, service_sees=None):
+def _with_a_service(monkeypatch, service_sees=None, codex_sees=None):
     # Patched on the class backend() actually returns, not on _Backend: the
     # launchd and schtasks backends override creates(), and schtasks also
-    # overrides service_claude_config_dir() to read the registry, so a patch
-    # on the base class was silently shadowed on Windows (windows VM run,
-    # 2026-11-01: the folder came out as the shell's).
+    # overrides service_environ() to read the registry, so a patch on the
+    # base class was silently shadowed on Windows (windows VM run,
+    # 2026-11-01: the folder came out as the shell's). started_from_shell
+    # and shell_until_logon too, or a Linux runner with no systemctl, or
+    # Windows, would answer for itself.
     kind = type(cli.backend())
+    sees = {"CLAUDE_CONFIG_DIR": service_sees, "CODEX_HOME": codex_sees}
     monkeypatch.setattr(cli, "_skip_service", lambda: False)
     monkeypatch.setattr(kind, "creates", lambda self: "a service")
-    monkeypatch.setattr(kind, "service_claude_config_dir",
-                        lambda self: service_sees)
+    monkeypatch.setattr(kind, "service_environ",
+                        lambda self, name: sees[name])
+    monkeypatch.setattr(kind, "started_from_shell", lambda self: False)
+    monkeypatch.setattr(kind, "shell_until_logon", lambda self: False)
 
 
 def test_the_burn_folder_is_the_one_the_service_reads(tmp_path, capsys,
@@ -2485,8 +2490,176 @@ def test_with_no_service_the_folder_is_this_shells(tmp_path, capsys,
 def test_launchd_and_systemd_hand_the_service_no_claude_config_dir(
         tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
-    assert cli._LaunchdBackend().service_claude_config_dir() is None
-    assert cli._SystemdBackend().service_claude_config_dir() is None
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work-codex"))
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        assert cli._LaunchdBackend().service_environ(name) is None
+        assert cli._SystemdBackend().service_environ(name) is None
+
+
+def test_a_service_that_sees_another_value_is_not_said_to_miss_it(
+        tmp_path, capsys, monkeypatch):
+    """A `setx` to a new folder, typed in a window that still has the old
+    one: the service sees the variable, just not this window's value, and
+    "does not see it" was false (2026-11-01 third review)."""
+    as_checkout(monkeypatch)
+    new = str(tmp_path / "new")
+    _with_a_service(monkeypatch, service_sees=new)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "old"))
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    said = " ".join(l.strip() for l in after)
+    assert folder == os.path.join(new, "projects")
+    assert ("The background service sees a different CLAUDE_CONFIG_DIR"
+            " from this shell's, so it reads the folder above.") in said
+    assert "does not see it" not in said
+
+
+def test_a_service_that_sees_what_this_shell_does_not_says_so(
+        tmp_path, capsys, monkeypatch):
+    as_checkout(monkeypatch)
+    work = str(tmp_path / "work-config")
+    _with_a_service(monkeypatch, service_sees=work)
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    said = " ".join(l.strip() for l in after)
+    assert folder == os.path.join(work, "projects")
+    assert ("CLAUDE_CONFIG_DIR is set for the background service but not in"
+            " this shell, so it reads the folder above.") in said
+
+
+# The same for CODEX_HOME, which codex_cli honours and a login service does
+# not carry either: the note printed codex_cli.sessions_root() as this shell
+# resolves it (2026-11-01 third review).
+
+def _codex_folder(out):
+    lines = out.splitlines()
+    i = lines.index("  output tokens:")
+    return lines[i + 1].strip(), " ".join(l.strip() for l in lines[i + 2:])
+
+
+def test_the_codex_folder_is_the_one_the_service_reads(tmp_path, capsys,
+                                                       monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work-codex"))
+    cli._announce()
+    folder, said = _codex_folder(capsys.readouterr().out)
+    assert folder == str(tmp_path / ".codex" / "sessions")
+    assert ("CODEX_HOME is set in this shell, but the background service"
+            " does not see it, so every Codex figure, the rate limits"
+            " included, comes from the folder above.") in said
+
+
+def test_without_codex_home_nothing_more_is_said(tmp_path, capsys,
+                                                  monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _codex_folder(out)[0] == str(tmp_path / ".codex" / "sessions")
+    assert "CODEX_HOME" not in out
+
+
+def test_a_service_that_sees_codex_home_reads_it(tmp_path, capsys,
+                                                 monkeypatch):
+    as_checkout(monkeypatch)
+    work = str(tmp_path / "work-codex")
+    _with_a_service(monkeypatch, codex_sees=work)
+    monkeypatch.setenv("CODEX_HOME", work)
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _codex_folder(out)[0] == os.path.join(work, "sessions")
+    assert "CODEX_HOME" not in out
+
+
+@pytest.mark.parametrize("codex_home", [None, "work-codex"])
+def test_the_disclosures_codex_folder_is_codex_clis(tmp_path, monkeypatch,
+                                                    codex_home):
+    """_codex_sessions_root repeats codex_cli.sessions_root's two lines
+    with the variable as an argument; this keeps them the same."""
+    from pc.providers import codex_cli
+    value = str(tmp_path / codex_home) if codex_home else None
+    if value:
+        monkeypatch.setenv("CODEX_HOME", value)
+    assert cli._codex_sessions_root(value) == codex_cli.sessions_root()
+
+
+# Who actually starts the daemon. A truthy creates() was read as "a service
+# with its own environment runs it", which is false on two desks (2026-11-01
+# third review).
+
+def test_linux_without_systemctl_names_this_shells_folders(tmp_path, capsys,
+                                                           monkeypatch):
+    """install writes the unit and says "no systemd here; run it yourself",
+    and a daemon started by hand reads this shell's folders."""
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SystemdBackend())
+    monkeypatch.setattr(cli._SystemdBackend, "_has_systemctl",
+                        staticmethod(lambda: False))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work-codex"))
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / "work-config" / "projects")
+    assert _codex_folder(out)[0] == str(tmp_path / "work-codex" / "sessions")
+    assert "background service" not in out
+
+
+def test_linux_with_systemd_names_the_units_folders(tmp_path, capsys,
+                                                    monkeypatch):
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SystemdBackend())
+    monkeypatch.setattr(cli._SystemdBackend, "_has_systemctl",
+                        staticmethod(lambda: True))
+    monkeypatch.setattr(cli._SystemdBackend, "_booted",
+                        staticmethod(lambda: True))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    assert folder == str(tmp_path / ".claude" / "projects")
+    assert any(l.startswith(SHELL_ONLY) for l in after), after
+    assert not any("Run key" in l for l in after)
+
+
+def test_a_windows_checkout_names_this_shells_folders(tmp_path, capsys,
+                                                      monkeypatch):
+    """A checkout on Windows registers nothing and is told to start the
+    daemon by hand."""
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg({}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / "work-config" / "projects")
+    assert "background service" not in out
+
+
+def test_the_windows_run_key_start_is_said_to_keep_this_window(
+        tmp_path, capsys, monkeypatch):
+    """When schtasks refuses the task, install starts the launcher itself
+    (_start_launcher's Popen has no env=), so until the next logon the
+    daemon has this window's variable, not the registry's. Install cannot
+    know beforehand which way Windows goes, so it says both."""
+    as_frozen(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
+    reg = str(tmp_path / "reg")
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CLAUDE_CONFIG_DIR"): (reg, 1)}))
+    window = str(tmp_path / "window")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", window)
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    said = " ".join(l.strip() for l in after)
+    assert folder == os.path.join(reg, "projects")
+    assert ("If Windows refuses the task and the Run key is used instead,"
+            " the bridge started now keeps this window's CLAUDE_CONFIG_DIR"
+            " until you next log in, and reads this folder until then: "
+            + os.path.join(window, "projects")) in said
 
 
 class _FakeWinreg:
@@ -2538,4 +2711,42 @@ def test_the_windows_task_sees_the_accounts_environment(monkeypatch, values,
     machine's -- and never with the installing window's."""
     monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(values))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", r"F:\only-in-this-window")
-    assert cli._SchtasksBackend().service_claude_config_dir() == want
+    assert cli._SchtasksBackend().service_environ("CLAUDE_CONFIG_DIR") == want
+
+
+def test_the_windows_task_sees_codex_home_the_same_way(monkeypatch):
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CODEX_HOME"): (r"%USERPROFILE%\cx", 2),
+         ("HKLM", "CODEX_HOME"): (r"D:\cx", 1)}))
+    monkeypatch.setenv("CODEX_HOME", r"F:\only-in-this-window")
+    assert cli._SchtasksBackend().service_environ("CODEX_HOME") == \
+        r"C:\Users\k\cx"
+
+
+@pytest.mark.parametrize("value, kind", [
+    (7, 4),                         # REG_DWORD reads back an int
+    ([r"D:\a", r"D:\b"], 7),        # REG_MULTI_SZ, a list
+    (b"D:\\x", 3),                  # REG_BINARY, bytes
+])
+def test_a_registry_value_that_is_not_a_string_is_unset(
+        tmp_path, capsys, monkeypatch, value, kind):
+    """It crashed install in expanduser() (2026-11-01 third review). Read as
+    unset at that hive, so the machine's value, here none, applies."""
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CLAUDE_CONFIG_DIR"): (value, kind),
+         ("HKCU", "CODEX_HOME"): (value, kind)}))
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        assert cli._SchtasksBackend().service_environ(name) is None
+    as_frozen(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / ".claude" / "projects")
+    assert _codex_folder(out)[0] == str(tmp_path / ".codex" / "sessions")
+
+
+def test_a_non_string_user_value_leaves_the_machines_in_force(monkeypatch):
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CODEX_HOME"): (1, 4), ("HKLM", "CODEX_HOME"): (r"D:\cx", 1)}))
+    assert cli._SchtasksBackend().service_environ("CODEX_HOME") == r"D:\cx"

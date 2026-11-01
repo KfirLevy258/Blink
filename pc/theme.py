@@ -482,7 +482,9 @@ def _write_json(path, obj, tries=None):
     finds, which is how `blink uninstall` takes them too.
 
     `tries` caps the os.replace attempts; None is update's own default.
-    pc/session_verdict passes 1, because it writes from the serial thread.
+    pc/session_verdict and ThemeSync pass 1, because they write from the
+    serial thread, where nine retry sleeps of 0.3 s held pongs and usage
+    lines for 2.7 s on every tick that wrote.
     """
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
@@ -596,27 +598,27 @@ def _kept_keys(obj):
     return {k: v for k, v in obj.items() if k not in theme_keys}
 
 
-def save(home, t, keep_custom=None):
+def save(home, t, keep_custom=None, tries=None):
     """Write theme.json. `keep_custom` (a custom theme) is stored beside a
     built-in id; a custom `t` is its own. Keys that are not a theme's are
     carried over. Unreadable (an OSError) when the file is there and cannot
-    be read: it is never written over."""
+    be read: it is never written over. `tries` is _write_json's."""
     t = validate(t)
     obj = _kept_keys(_read_existing(theme_path(home)))
     obj.update(t)
     if t["id"] != CUSTOM and keep_custom is not None:
         for k in CUSTOM_FIELDS:
             obj[k] = keep_custom[k]
-    _write_json(theme_path(home), obj)
+    _write_json(theme_path(home), obj, tries=tries)
     return t
 
 
-def forget(home):
+def forget(home, tries=None):
     """Stop holding a theme. Keys that are not a theme's stay; with none,
     the file goes. Unreadable when it is there and cannot be read."""
     kept = _kept_keys(_read_existing(theme_path(home)))
     if kept:
-        _write_json(theme_path(home), kept)
+        _write_json(theme_path(home), kept, tries=tries)
         return
     try:
         os.unlink(theme_path(home))
@@ -682,7 +684,7 @@ def _seen_obj(rec):
     return obj
 
 
-def _write_seen(home, rec):
+def _write_seen(home, rec, tries=None):
     """Write theme_seen.json, or remove it when rec is None. Only when it
     changes: the daemon calls this on every theme_now."""
     old = load_seen(home)
@@ -694,7 +696,7 @@ def _write_seen(home, rec):
         except FileNotFoundError:
             pass
         return
-    _write_json(seen_path(home), _seen_obj(rec))
+    _write_json(seen_path(home), _seen_obj(rec), tries=tries)
 
 
 def board_kept(home):
@@ -823,6 +825,12 @@ def take_preview(home):
 
 # ------------------------------------------------------------- the daemon
 
+# One os.replace attempt for a write on the daemon's serial thread: see
+# ThemeSync. update.REPLACE_TRIES (10, 0.3 s apart) stays for the CLI and
+# the builder, where a person is waiting for the write and not for a pong.
+_SERIAL_TRIES = 1
+
+
 class ThemeSync:
     """What the daemon owes the board, theme-wise.
 
@@ -876,10 +884,28 @@ class ThemeSync:
     Nothing here sends in reply to a message: Bridge sends what outgoing()
     returns on its ticks, and holds them off for one fast tick after a
     hello, so no theme line ever joins the hello burst (Addendum 2).
+
+    Every write here runs on the daemon's serial thread, so each is one
+    try (_SERIAL_TRIES), never _write_json's ten with 0.3 s between them.
     """
 
-    def __init__(self, home):
+    # A refused WRITE of theme.json (WinError 5 or 32: read-only, or held)
+    # is retried on a backoff rather than on every fast tick: each try is a
+    # temp file made and removed in ~/.blink, and on a file that stays
+    # refused the 2026-11-01 third review measured the serial loop paying
+    # 2.7 s per tick for it, indefinitely. A refused READ (Unreadable) is
+    # still retried every tick: it costs one failed open, and R1's file
+    # that reads again should be adopted on the next tick, not a minute on.
+    ADOPT_RETRY_FIRST_S = 2.0
+    ADOPT_RETRY_MAX_S = 60.0
+
+    def __init__(self, home, clock=None):
         self._home = home
+        # time.monotonic unless a test gives a clock; resolved at call time
+        # (see _now) so a test that stubs time is still in charge.
+        self._clock = clock
+        self._retry_at = None        # a refused write: not before this
+        self._retry_wait = None      # and the wait after that
         self._board = None
         self._board_id = None
         self._asked = None
@@ -911,6 +937,7 @@ class ThemeSync:
         self._asked = None
         self._pending = None
         self._pending_note = None
+        self._retry_at = self._retry_wait = None
 
     def _record_for(self, board_id):
         """theme_seen.json's record when it is about `board_id`, else None."""
@@ -948,7 +975,7 @@ class ThemeSync:
         if why == "saved":
             self._sent = fp
             try:
-                _write_json(sent_path(self._home), fp)
+                _write_json(sent_path(self._home), fp, tries=_SERIAL_TRIES)
             except OSError as e:
                 print(f"[theme] could not record the board's theme: {e}",
                       file=sys.stderr)
@@ -1006,7 +1033,7 @@ class ThemeSync:
                 if kept is None and why not in ("saved", WHY_ADOPT):
                     new["kept"], new["lost"] = rec["kept"], rec["lost"]
         try:
-            _write_seen(self._home, new)
+            _write_seen(self._home, new, tries=_SERIAL_TRIES)
         except OSError as e:
             print(f"[theme] could not record the board's theme: {e}",
                   file=sys.stderr)
@@ -1024,32 +1051,48 @@ class ThemeSync:
                 return
         rec = dict(rec, asked=fp)
         try:
-            _write_seen(self._home, rec)
+            _write_seen(self._home, rec, tries=_SERIAL_TRIES)
         except OSError as e:
             print(f"[theme] could not record the save sent: {e}",
                   file=sys.stderr)
+
+    def _now(self):
+        return (self._clock or time.monotonic)()
 
     def _adopt(self, fp):
         kept = saved_custom(self._home)
         try:
             if fp["id"] != CUSTOM:
-                save(self._home, fp, keep_custom=kept)
+                save(self._home, fp, keep_custom=kept, tries=_SERIAL_TRIES)
             elif kept is not None and theme_hash(kept) == fp["h"]:
-                save(self._home, kept)
+                save(self._home, kept, tries=_SERIAL_TRIES)
             else:
                 # Custom colours this computer never had -- set from another
                 # desk. They cannot be named here, so this computer stops
                 # holding a theme that would overwrite them.
-                forget(self._home)
+                forget(self._home, tries=_SERIAL_TRIES)
         except OSError as e:
-            if self._pending != fp:
+            fresh = self._pending != fp
+            if fresh:
                 # Once per refusal, not once per retry tick.
                 print(f"[theme] could not keep the board's choice: {e}",
                       file=sys.stderr)
                 self._pending_mtime = self._theme_mtime()
             self._pending = fp
+            if isinstance(e, Unreadable):
+                self._retry_at = self._retry_wait = None
+            else:
+                # The write itself was refused: back off, doubling, and
+                # start over for a new refusal.
+                wait = (self.ADOPT_RETRY_FIRST_S
+                        if fresh or self._retry_wait is None
+                        else min(self._retry_wait * 2,
+                                 self.ADOPT_RETRY_MAX_S))
+                self._retry_wait = wait
+                self._retry_at = self._now() + wait
         else:
             self._pending = None
+            self._retry_at = self._retry_wait = None
         self._asked = None
 
     def _theme_mtime(self):
@@ -1075,6 +1118,9 @@ class ThemeSync:
                 rewritten = False
         if rewritten:
             self._pending = None
+            self._retry_at = self._retry_wait = None
+        elif self._retry_at is not None and self._now() < self._retry_at:
+            return                       # a refused write, backing off
         else:
             self._adopt(fp)
         if self._pending is None and note is not None:

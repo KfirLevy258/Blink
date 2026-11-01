@@ -1405,16 +1405,38 @@ class _Backend:
         """Whether install(), run from a checkout, starts the checkout."""
         return False
 
-    def service_claude_config_dir(self):
-        """CLAUDE_CONFIG_DIR as the installed service will see it, or None.
+    def service_environ(self, name):
+        """Environment variable `name` as the installed service will see it,
+        or None. Asked for CLAUDE_CONFIG_DIR and CODEX_HOME, the two that
+        move a folder the daemon reads, by the install disclosure.
 
         None here, for launchd and systemd: the plist and the unit hand the
         daemon PYTHONUNBUFFERED and nothing else, and neither starts it from
         the shell that exported anything. (A desk that put the variable in
         `launchctl setenv` or ~/.config/environment.d would be seen; that is
-        not where anyone is told to put it, and Claude Code's own docs say
-        to export it in the shell.)"""
+        not where anyone is told to put it, and Claude Code's and Codex's
+        own docs say to export it in the shell.)"""
         return None
+
+    def started_from_shell(self) -> bool:
+        """Whether the daemon this install leaves is one a person starts by
+        hand, from a shell, so that it sees that shell's environment.
+
+        True here, where there is no supervisor at all. Each backend says
+        when it is true for it too: the 2026-11-01 third review found the
+        disclosure taking any truthy creates() to mean "a service with its
+        own environment runs the daemon", while a Linux box with no
+        systemctl writes the unit, says "run it yourself", and the daemon
+        started that way reads $CLAUDE_CONFIG_DIR -- not the folder the note
+        named."""
+        return True
+
+    def shell_until_logon(self) -> bool:
+        """Whether install may start the daemon from this very process, so
+        that until the next logon it carries this shell's environment rather
+        than the service's. Only the Windows Run-key fallback does: see
+        _SchtasksBackend."""
+        return False
 
     def registered_argv(self):
         """What the registered service runs, minus `run`, as its file says;
@@ -1501,6 +1523,10 @@ def _plist_text(argv) -> str:
 class _LaunchdBackend(_Backend):
     def creates(self):
         return plist_path()
+
+    def started_from_shell(self) -> bool:
+        # bootstrap starts it, from launchd, with the plist's environment.
+        return False
 
     def runs_checkout(self) -> bool:
         return True
@@ -1910,13 +1936,14 @@ class _SchtasksBackend(_Backend):
                     f" by hand with: {command_to_type()} run")
         return None
 
-    def service_claude_config_dir(self):
+    def service_environ(self, name):
         # Task Scheduler starts the task, and Explorer the Run key's entry,
         # with the account's environment as the registry holds it -- the
         # user's variable over the machine's, as Windows itself resolves
         # them -- and never with the window `blink install` was typed in.
         # So a `setx CLAUDE_CONFIG_DIR` is seen and a `set` or `$env:` is
-        # not.
+        # not. (The one exception, the Run key's first start, is
+        # shell_until_logon below.)
         winreg = _winreg()
         if winreg is None:
             return None
@@ -1924,14 +1951,34 @@ class _SchtasksBackend(_Backend):
                            (winreg.HKEY_LOCAL_MACHINE, SYSTEM_ENV_KEY)):
             try:
                 with winreg.OpenKey(hive, path) as key:
-                    value, kind = winreg.QueryValueEx(key,
-                                                      "CLAUDE_CONFIG_DIR")
+                    value, kind = winreg.QueryValueEx(key, name)
             except OSError:
+                continue
+            # A value of any other type -- REG_DWORD comes back an int,
+            # REG_MULTI_SZ a list, REG_BINARY bytes -- is not something
+            # Windows puts into a process's environment as a string, and
+            # handed on it crashed install in expanduser() and os.path.join
+            # (2026-11-01 third review). Read as unset at this hive.
+            if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) \
+                    or not isinstance(value, str):
                 continue
             if kind == winreg.REG_EXPAND_SZ:
                 value = winreg.ExpandEnvironmentStrings(value)
             return value or None
         return None
+
+    def started_from_shell(self) -> bool:
+        # A checkout registers nothing (checkout_refusal) and is told to
+        # start the daemon by hand.
+        return bool(self.checkout_refusal())
+
+    def shell_until_logon(self) -> bool:
+        # When schtasks refuses the task, _install_without_a_task starts the
+        # launcher itself (_start_launcher, a Popen with no env=), so the
+        # daemon running after install inherits this window's environment;
+        # only the next logon's start, from Explorer, has the registry's.
+        # Install cannot know beforehand which way Windows will go.
+        return not self.checkout_refusal()
 
     def registered_argv(self):
         # The launcher runs blink.exe whatever wrote it (LAUNCHER_VBS). An
@@ -2269,6 +2316,12 @@ class _SystemdBackend(_Backend):
     def runs_checkout(self) -> bool:
         # Without systemctl the unit is written but nothing runs it.
         return self._has_systemctl() and self._booted()
+
+    def started_from_shell(self) -> bool:
+        # The same question: without systemctl, or with systemctl and no
+        # systemd running it (WSL), install writes the unit and the daemon
+        # is started by hand.
+        return not self.runs_checkout()
 
     def registered_argv(self):
         if not os.path.exists(unit_path()):
@@ -3001,18 +3054,17 @@ def _announce():
     # one this shell would: the reader honours CLAUDE_CONFIG_DIR, but a
     # login service does not start from this shell. launchd and systemd
     # hand it none of the variable, and the Windows task gets the account's
-    # registry environment (service_claude_config_dir). Printed as this
-    # shell resolved it, the note named a folder the daemon never reads on
-    # any desk that exports the variable in its shell profile (2026-11-01
-    # re-review). Where no service is registered, the daemon is started by
-    # hand from a shell, and the shell's folder is the true one.
+    # registry environment (service_environ). Printed as this shell
+    # resolved it, the note named a folder the daemon never reads on any
+    # desk that exports the variable in its shell profile (2026-11-01
+    # re-review). Where the daemon is started by hand from a shell, the
+    # shell's folder is the true one: see _service_folder.
     from pc import burn_reader
-    shell_root = burn_reader.transcripts_root()
-    root = shell_root
-    if backend().creates() and not _skip_service():
-        env = {"CLAUDE_CONFIG_DIR":
-               backend().service_claude_config_dir() or ""}
-        root = burn_reader.transcripts_root(env)
+    root, caveat = _service_folder(
+        "CLAUDE_CONFIG_DIR",
+        lambda v: burn_reader.transcripts_root(
+            {"CLAUDE_CONFIG_DIR": v} if v else {}),
+        "so it reads the folder above.")
     # On a line of its own, like the paths above: a home folder's length is
     # unbounded, and inline it ran the paragraph off its margin.
     print("  On an account with no five-hour limit, it also reads the")
@@ -3020,9 +3072,8 @@ def _announce():
     print(f"    {root}")
     print("  It holds those counts in memory and sends the board only a total")
     print("  per quarter-hour, never the conversation.")
-    if os.environ.get("CLAUDE_CONFIG_DIR") and root != shell_root:
-        print("  CLAUDE_CONFIG_DIR is set in this shell, but the background")
-        print("  service does not see it, so it reads the folder above.")
+    for line in caveat:
+        print(line)
     # The same for Codex (CodexBurnReader): an account whose Codex log
     # reports a weekly limit and no five-hour one -- Codex Pro on the
     # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
@@ -3030,16 +3081,80 @@ def _announce():
     # input and cache ones too, because together they are what recognises
     # a turn written twice (burn_reader, "WHY last_token_usage"); only the
     # output tokens are added up.
-    from pc.providers import codex_cli
+    #
+    # Its folder is the service's for the same reason as Claude Code's:
+    # codex_cli honours CODEX_HOME, which a login service does not carry
+    # either (2026-11-01 third review). That folder is where the gauges,
+    # the project name and the activity light come from as well, so the
+    # caveat says so rather than "the folder above" for the token counts.
+    root, caveat = _service_folder(
+        "CODEX_HOME", _codex_sessions_root,
+        "so every Codex figure, the rate limits included, comes from the"
+        " folder above.")
     print("  If Codex reports no five-hour limit, it also reads the token")
     print("  counts of each Codex turn from its session log, and adds up the")
     print("  output tokens:")
-    print(f"    {codex_cli.sessions_root()}")
+    print(f"    {root}")
     print("  It holds those counts in memory and sends the board only a total")
     print("  per quarter-hour, never the conversation.")
+    for line in caveat:
+        print(line)
     print()
     print(f"  To undo all of it:  {command_to_type()} uninstall")
     print()
+
+
+def _codex_sessions_root(codex_home):
+    """codex_cli.sessions_root() for CODEX_HOME set to `codex_home` (None
+    for unset), rather than as this process's environment has it. The same
+    two lines; tests/test_cli.py pins the two together, both ways."""
+    home = codex_home or os.path.join(os.path.expanduser("~"), ".codex")
+    return os.path.join(home, "sessions")
+
+
+def _service_folder(name, folder, consequence):
+    """(the folder the daemon will read, the lines to print under it).
+
+    folder(value) is the reader's folder with environment variable `name`
+    set to value, None meaning unset. The folder is the service's, worked
+    out from what backend().service_environ() says the service will see --
+    except where no service will run the daemon at all (nothing registered,
+    BLINK_SKIP_SERVICE, or a backend that leaves the daemon to be started
+    by hand), where this shell's environment is the one it will have.
+
+    The lines say why the folder is not the one this shell would name, and
+    say it exactly (2026-11-01 third review): "does not see it" was printed
+    whenever the two differed, also when the service sees the variable with
+    a different value, as a Windows `setx` followed by an old window gives.
+    `consequence` ends the sentence.
+    """
+    import textwrap
+    shell_value = os.environ.get(name) or None
+    shell_root = folder(shell_value)
+    b = backend()
+    if not b.creates() or _skip_service() or b.started_from_shell():
+        return shell_root, []
+    seen = b.service_environ(name) or None
+    root = folder(seen)
+    if root == shell_root:
+        return root, []
+    if shell_value and seen:
+        why = (f"The background service sees a different {name} from this"
+               f" shell's, {consequence}")
+    elif shell_value:
+        why = (f"{name} is set in this shell, but the background service"
+               f" does not see it, {consequence}")
+    else:
+        why = (f"{name} is set for the background service but not in this"
+               f" shell, {consequence}")
+    lines = ["  " + l for l in textwrap.wrap(why, 66)]
+    if b.shell_until_logon():
+        lines += ["  " + l for l in textwrap.wrap(
+            "If Windows refuses the task and the Run key is used instead,"
+            f" the bridge started now keeps this window's {name} until you"
+            " next log in, and reads this folder until then:", 66)]
+        lines.append(f"    {shell_root}")
+    return root, lines
 
 
 def _install_steps() -> int:
