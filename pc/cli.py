@@ -2942,8 +2942,9 @@ def _announce():
     # countdown out of it since Desktop started keeping one there.
     print("  The usage figures come from Claude Code, Claude Desktop's usage")
     print("  cache and Local Storage, or the Codex session log -- each of")
-    print("  which has already worked them out. From the Codex log it keeps")
-    print("  only the rate-limit line, never the conversation.")
+    print("  which has already worked them out. From the Codex log it reads")
+    print("  the rate limits, and the token counts below, never the")
+    print("  conversation.")
     # The burn view's source (pc/burn_reader), missing from this note until
     # the /code-review max of 2026-11-01: on a desk whose account has no
     # five-hour window, the daemon reads Claude Code's own transcripts --
@@ -2958,6 +2959,16 @@ def _announce():
     print("  On an account with no five-hour limit, it also reads the")
     print("  output-token count of each reply from Claude Code's transcripts:")
     print(f"    {burn_reader.transcripts_root()}")
+    print("  It holds those counts in memory and sends the board only a total")
+    print("  per quarter-hour, never the conversation.")
+    # The same for Codex (CodexBurnReader): an account whose Codex log
+    # reports a weekly limit and no five-hour one -- Codex Pro on the
+    # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
+    # the gauges come from, and this is the field it reads there.
+    from pc.providers import codex_cli
+    print("  If Codex reports no five-hour limit, it also reads the")
+    print("  output-token count of each Codex turn from its session log:")
+    print(f"    {codex_cli.sessions_root()}")
     print("  It holds those counts in memory and sends the board only a total")
     print("  per quarter-hour, never the conversation.")
     print()
@@ -4089,6 +4100,15 @@ def _source_lines_codex(now):
         if frames:
             print(f"Codex       session log parsed, reading"
                   f" {_age(now - frames[0].observed_at)} old")
+            # The Claude row's wording (_session_window_line), for the
+            # Codex page: marked when its newest reading has a weekly limit
+            # and no five-hour one (codex_cli._no_short_window), which is
+            # when the daemon sends that page the burn view. The frames
+            # are the provider's own, the ones the daemon merges, and the
+            # merge marks the page when any of them is marked.
+            if any(f.no_session_window for f in frames):
+                print("Session     no five-hour window on Codex (Codex"
+                      " reported a weekly limit only)")
         else:
             print(f"Codex       {len(logs)} recent session log(s), none with a"
                   " rate-limit line -- finish one turn in Codex; if that does"

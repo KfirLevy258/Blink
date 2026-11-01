@@ -275,15 +275,17 @@ def build_bus():
     scenario and the assertion would depend on whose desk it ran on.
 
     The burn line's source follows the same rule. The real bus reads this
-    machine's Claude Code transcripts (pc/burn_reader); a scenario's bus
+    machine's Claude Code transcripts and Codex rollouts (pc/burn_reader),
+    one reader for each page; a scenario's bus
     replays the scenario's own buckets instead, which is also how a bench
     puts every state of the burn view on a board without spending anybody's
     quota.
     """
     scenario = os.environ.get("BLINK_SCENARIO")
     if not scenario:
-        from pc.burn_reader import BurnReader
-        return ingest.IngestionBus(burn=BurnReader())
+        from pc.burn_reader import BurnReader, CodexBurnReader
+        return ingest.IngestionBus(burn={"claude": BurnReader(),
+                                         "codex": CodexBurnReader()})
     from pc.providers.scripted import ScriptedProvider
     scripted = ScriptedProvider(scenario)
     # verdict=None: a step says itself whether the account has a five-hour
@@ -291,8 +293,11 @@ def build_bus():
     # (pc/session_verdict) must not say it for the scenario. On this Ultra
     # desk it would hold "no window" over the bench step that gives the
     # account its window back.
+    # One replay for both pages: a step marks whichever provider it names.
+    replay = scripted.burn_source()
     return ingest.IngestionBus(providers=[scripted],
-                               burn=scripted.burn_source(), verdict=None)
+                               burn={"claude": replay, "codex": replay},
+                               verdict=None)
 
 
 def describe_ports():
@@ -868,8 +873,9 @@ def main(argv=None):
     # time_frames is compared on the offset and not the epoch: `b` moves
     # with every reply by construction, and the reader of bridge.log needs
     # to see that the line is flowing, not each number in it. A line per
-    # quarter-hour, and the rest counted.
-    burn_frames = logbook.Repeats(("p", "q"), "burn lines")
+    # quarter-hour, and the rest counted. Per page, like svc_frames: with a
+    # claude and a codex line alternating, one Repeats would log them all.
+    burn_frames = logbook.RepeatsBy("p", ("q",), "burn lines")
     _REPEATED = {"usage": usage_frames, "time": time_frames,
                  "svc": svc_frames, "burn": burn_frames}
     watchdog = install_statusline.DriftWatchdog(

@@ -99,14 +99,21 @@ class IngestionBus:
         # at all. It is handed in rather than built here so that a bus made
         # of scripted providers can never read the machine's real
         # transcripts: claude_usage_bridge.build_bus decides, the way it
-        # decides the providers.
-        self._burn = burn
+        # decides the providers. One reader is the claude page's; a dict
+        # gives each provider's page its own ({"claude": BurnReader(),
+        # "codex": CodexBurnReader()} on a desk).
+        if burn is not None and not isinstance(burn, dict):
+            burn = {claude_cli.PROVIDER_ID: burn}
+        self._burn = burn or {}
         # The merged claude frame of the last poll(), when it was on one of
         # the board's two pages. See claude_page(). Its no_session_window is
         # the one condition under which a burn line is sent, read off this
         # frame rather than copied into a flag of its own, so that it answers
         # for the same poll the usage line came from.
         self._claude_page = None
+        # Every merged frame the last poll() put on a page, by provider: the
+        # burn line is sent for each of them that is marked.
+        self._pages = {}
         # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
         # out after a failure. Keyed by IDENTITY, not by class: two instances
         # of the same provider class are two sources -- two Codex homes, the
@@ -348,9 +355,9 @@ class IngestionBus:
         # The claude page wherever it sits: the main one, or the second when
         # the owner made another provider main. A provider left off the
         # board's two pages has no page to draw a burn view on.
-        self._claude_page = next(
-            (f for f in (primary, secondary)
-             if f is not None and f.provider == claude_cli.PROVIDER_ID), None)
+        self._pages = {f.provider: f for f in (primary, secondary)
+                       if f is not None}
+        self._claude_page = self._pages.get(claude_cli.PROVIDER_ID)
         if primary is None:
             return None
         msg = protocol.frame_to_usage(primary, self._now(), secondary)
@@ -372,6 +379,18 @@ class IngestionBus:
         """
         return self._claude_page
 
+    def page(self, provider):
+        """The merged frame the last poll() put on `provider`'s page, or
+        None: claude_page() for any provider, for `blink status --wire`."""
+        return self._pages.get(provider)
+
+    def burn_pages(self):
+        """The providers whose page the last poll() found without a session
+        window and that have a reader: the pages a burn line is for. Asks
+        no reader; Bridge decides from this which to ask, and when."""
+        return [p for p, f in self._pages.items()
+                if f.no_session_window and p in self._burn]
+
     def session_pair(self):
         """(label, n) for the state the last poll() put on the panel.
 
@@ -382,10 +401,11 @@ class IngestionBus:
         """
         return self._session_pair
 
-    def burn(self):
-        """The burn line for the board, or None when there is none to send.
+    def burn(self, provider=claude_cli.PROVIDER_ID):
+        """`provider`'s burn line for the board, or None when there is none
+        to send.
 
-        None unless the last poll() found the claude page without a session
+        None unless the last poll() found that page without a session
         window, so on a Pro or Max desk the transcripts are never read at
         all, and None while the reader has nothing honest to say yet (no
         transcripts directory, or a cold start still being read). The reader
@@ -399,14 +419,15 @@ class IngestionBus:
         log-once flag of its own, so one failure had two handlers (review,
         2026-10-31).
         """
-        page = self._claude_page
-        if self._burn is None or page is None or not page.no_session_window:
+        page = self._pages.get(provider)
+        reader = self._burn.get(provider)
+        if reader is None or page is None or not page.no_session_window:
             return None
-        got = self._burn.poll(self._now())
+        got = reader.poll(self._now())
         if got is None:
             return None
         q, tokens = got
-        return protocol.burn(claude_cli.PROVIDER_ID, q, tokens)
+        return protocol.burn(provider, q, tokens)
 
     def fetch(self):
         """The callable to hand Bridge(fetch_usage=...).
@@ -445,8 +466,11 @@ class _BusFetch:
     def session_pair(self):
         return self._bus.session_pair()
 
-    def burn(self):
-        return self._bus.burn()
+    def burn_pages(self):
+        return self._bus.burn_pages()
+
+    def burn(self, provider=claude_cli.PROVIDER_ID):
+        return self._bus.burn(provider)
 
 
 # Which count describes which state. STATE_FAILED reads n_stuck because that

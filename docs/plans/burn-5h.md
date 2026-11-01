@@ -65,8 +65,8 @@ hour falls on a bucket's left edge, and the board can label hours.
   2026-10-31 review showed the rounding deciding the arrow at light use:
   2001 then 1999 tokens per quarter read "easing", and 1000 then 4 read
   "steady". The widest line is about 240 bytes.
-- `p`: the provider the page belongs to. Always `"claude"` for now; it leaves
-  room for Codex. Lowercase letters, digits, `_` and `-`, at most 15
+- `p`: the provider the page belongs to: `"claude"`, or `"codex"` for a
+  Codex account with no five-hour window (see "Codex" below). Lowercase letters, digits, `_` and `-`, at most 15
   characters: the board names a page by the first 15 of `usage`'s
   `provider` (`USAGE_TAG_MAX` in `firmware/src/usage_view.h`) and refuses a
   longer `p` whole rather than cutting it, so a longer id gets the session
@@ -78,8 +78,10 @@ hour falls on a bucket's left edge, and the board can label hours.
 
 **Sent only to a board whose caps list `"burn"`** (`protocol.board_caps`,
 the same gate `svc` and `theme` use). A 1.3.4 board never lists it, so it never
-gets the line. The daemon sends it while the claude page's frame has
-`no_session_window`. It stays out of the hello burst. It goes out on the first
+gets the line. The daemon sends it for each page whose merged frame has
+`no_session_window`, claude and codex each on a cadence of its own
+(`Bridge._burn_sent`, per provider), so one page's line never holds the
+other's back. It stays out of the hello burst. It goes out on the first
 tick after the 2 s quiet window, the way themes do, then whenever
 `q` or `b` changes, and at least every 60 seconds as a heartbeat, at most once
 every 15 seconds. When the flag clears it simply stops sending. There is no
@@ -137,6 +139,51 @@ every 15 seconds. When the flag clears it simply stops sending. There is no
 - Swipes, page morphs and the focus window must not leave a half-drawn mix of
   gauge and burn view. The session gauge's morph is the part most likely to
   fight this.
+
+## Codex
+
+Added 2026-11-01, for the owner's Codex Pro account, which has no
+five-hour window either. Daemon only: the board already keeps a slot per
+`p` (`firmware/src/burn5h.c`) and draws the view on the page whose provider
+matches.
+
+**The evidence is Codex's own, on every reading.** Each `token_count` event
+in a rollout carries `rate_limits`. Measured over the owner's 195 rollouts
+(counts only): 7969 readings had a `primary` of `window_minutes` 10080 and a
+null `secondary`; the 122 before them, from when the account had a window,
+had a 300-minute primary beside a 10080 secondary. `individual_limit` was
+null in all of them, and the only `limit_id` other than `"codex"` was on
+the null envelopes of an exhausted limit. `codex_cli._no_short_window`
+marks a reading that has a usable 10080-minute window and no window of
+`SESSION_WINDOW_MAX_MIN` (a day) or less, every window declaring its
+length; any short window clears it; a reading with no `rate_limits` or only
+nulls says nothing. It judges the reading the gauges show (the newest
+usable one, `parse_rollout_tail`), and the newest reading's word is the
+word of every Codex frame sent. Nothing is persisted: every reading carries
+the evidence, and a restarted daemon reads the same rollout.
+
+**What it measures.** Output tokens per turn from those same `token_count`
+events: the difference of `payload.info.total_token_usage.output_tokens`
+from the file's previous event, so a repeated event (228 measured, the same
+cumulative total again) adds nothing. A total that goes down counts that
+event's `last_token_usage.output_tokens`, as does the first event read in a
+file followed from its end. Reasoning is counted once: in all 8061 events
+with usage, `total_tokens` was `input_tokens + output_tokens` exactly and
+`reasoning_output_tokens` never exceeded `output_tokens`, so reasoning is
+already inside `output_tokens`. Bucketed on the same 20 epoch
+quarter-hours.
+
+**How it reads.** `burn_reader.CodexBurnReader`, the Claude reader's
+machinery with another root (`codex_cli.sessions_root()`, honouring
+`CODEX_HOME`), needle (`"token_count"`), bridge.log sentences and line
+parser: offsets, held-back partial lines, the 5 h 15 min cold-file cutoff,
+anchors, `READ_TRIES`, the budget. A repeat is recognised by (path, running
+total), which also keeps a file read again from its start from counting
+twice. Of each line it reads `type`, `timestamp`, `payload.type` and the
+two `output_tokens`, nothing else.
+
+`blink status` prints `Session     no five-hour window on Codex (Codex
+reported a weekly limit only)` under the Codex row when the page is marked.
 
 ## Privacy and safety (CLAUDE.md)
 

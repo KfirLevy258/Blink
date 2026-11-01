@@ -409,6 +409,57 @@ def _observed_at(line: dict, mtime: float) -> float:
     return mtime
 
 
+# The weekly window's declared length, and the longest a five-hour window
+# can declare and still be one. 300 is the five-hour window Codex writes;
+# anything up to SESSION_WINDOW_MAX_MIN is what _classify puts on the session
+# dial, so that is the bound a "no window" claim must clear.
+WEEKLY_WINDOW_MIN = 10080
+FIVE_HOUR_WINDOW_MIN = 300
+
+
+def _no_short_window(limits):
+    """Does this `rate_limits` object say the account has no five-hour
+    window? True, False, or None for a reading that says nothing.
+
+    Codex states it outright. On the owner's Codex Pro account, measured
+    2026-11-01 over 195 rollouts (counts only): 7969 readings carried a
+    `primary` of window_minutes 10080 and a `secondary` of null, the account
+    the board showed "--%" for on the left half; the 122 before them, from
+    when it had one, carried a 300-minute primary beside a 10080 secondary.
+    `individual_limit` was null in all 8094, and the only `limit_id` other
+    than "codex" was the 3 null envelopes of an exhausted limit
+    (parse_rollout_tail), which carry no window and so say nothing here.
+
+    So: True for a usable weekly window (10080 minutes, a percentage) beside
+    no window short enough for the session dial -- every window present must
+    declare its length, because one that does not is where _classify would
+    fall back to position, and could be the five-hour window under a renamed
+    field. False when any window is SESSION_WINDOW_MAX_MIN or shorter, which
+    the 300-minute one is. None for anything else: no `rate_limits`, null
+    windows, a weekly with no figure. Positive evidence only, as for Claude
+    (pc/session_verdict): quiet data proves nothing.
+
+    This judges the object it is given, which poll() makes the reading the
+    gauges show, so the mark and the dial never describe different limits.
+    """
+    if not isinstance(limits, dict):
+        return None
+    windows = [w for w in (limits.get("primary"), limits.get("secondary"))
+               if w is not None]
+    weekly = False
+    for w in windows:
+        if not isinstance(w, dict):
+            return None
+        minutes = w.get("window_minutes")
+        if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+            return None
+        if minutes <= SESSION_WINDOW_MAX_MIN:
+            return False
+        if minutes == WEEKLY_WINDOW_MIN and _pct(w) >= 0:
+            weekly = True
+    return True if weekly else None
+
+
 def _has_window(limits) -> bool:
     """Does this `rate_limits` object yield a percentage for either window?"""
     session, weekly = _classify(limits)
@@ -771,6 +822,9 @@ class CodexCliProvider(base.ProviderParser):
             provider=PROVIDER_ID,
             src=SRC_ID,
             observed_at=observed_at,
+            # Only ever True here; poll() makes the newest reading's word
+            # the word of every frame it sends.
+            no_session_window=_no_short_window(raw_payload) is True,
             session_pct=s_win.pct,
             session_resets_at=s_win.resets_at,
             weekly_pct=w_win.pct,
@@ -858,6 +912,16 @@ class CodexCliProvider(base.ProviderParser):
         # its own, can still predate the reset the ended one saw (found in
         # review: a fresh 40/20 for a window that had ended).
         frames = [f for f in (best, ended) if f is not None]
+        # Whether the account has a five-hour window is the NEWEST reading's
+        # to say, and every reading carries it, so nothing is persisted: a
+        # restarted daemon reads the same rollout and says the same. The
+        # mark goes the moment a reading with a five-hour window is newer
+        # (pc/normalizer then drops the session figure of a marked frame, so
+        # an older weekly-only `ended` must not keep it on a newer 300).
+        if frames:
+            newest = max(frames, key=lambda f: f.observed_at)
+            for f in frames:
+                f.no_session_window = newest.no_session_window
 
         # The hooks' answer, and where it wins.
         #

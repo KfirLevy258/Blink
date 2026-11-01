@@ -44,7 +44,11 @@ class Fetch:
     def __call__(self):
         return None if self.usage is None else dict(self.usage)
 
-    def burn(self):
+    def burn_pages(self):
+        return ["claude"]
+
+    def burn(self, provider="claude"):
+        assert provider == "claude"
         self.asked += 1
         return None if self.line is None else json.loads(json.dumps(self.line))
 
@@ -242,10 +246,10 @@ def test_a_burn_source_that_raises_is_not_worth_the_serial_loop(capsys):
     broken = [True]
     real = fetch.burn
 
-    def flaky():
+    def flaky(provider="claude"):
         if broken[0]:
             raise RuntimeError("MARKER /home/someone/.claude/projects/x.jsonl")
-        return real()
+        return real(provider)
     fetch.burn = flaky
     b, sent, clock, _ = make(fetch)
     b.on_message(hello())
@@ -303,12 +307,12 @@ def test_the_daemon_logs_burn_by_type_about_once_a_quarter_hour():
         encoding="utf-8"))
     src = ast.unparse(tree)
     assert "'burn': burn_frames" in src
-    assert "logbook.Repeats(('p', 'q'), 'burn lines')" in src
+    assert "logbook.RepeatsBy('p', ('q',), 'burn lines')" in src
     assert "burn_frames.due()" in src
 
     # Two hours of a desk producing tokens on every tick, through the same
     # Repeats the daemon builds: one line per quarter-hour, not one per send.
-    r = logbook.Repeats(("p", "q"), "burn lines")
+    r = logbook.RepeatsBy("p", ("q",), "burn lines")
     logged = []
     b, sent, clock, fetch = make()
     b.on_message(hello())

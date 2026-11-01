@@ -211,11 +211,15 @@ class Bridge:
         self._quiet_until = None
         self._sleep = sleep
         self._store_until = None         # see THEME_SAVE_HOLD_S
-        # The burn line (see BURN_MIN_GAP_S). What was last put on the wire,
-        # as (p, q, b), and when by self._now; None for nothing since the
-        # last greeting or since the line stopped.
-        self._burn_sent = None
-        self._burn_sent_at = None
+        # The burn line (see BURN_MIN_GAP_S), kept per page: provider ->
+        # ((p, q, b) last put on the wire, when by self._now). A page with
+        # nothing since the last greeting, or since its line stopped, has no
+        # entry. Per page because two pages can each be sending one -- a
+        # Claude Ultra account beside a weekly-only Codex one -- and with
+        # one shared gap and one shared "last sent" the second page's line
+        # was always "a change" and always within 15 s of the first's, so
+        # it would never have gone out.
+        self._burn_sent = {}
         self._burn_failed = False
 
     def greet(self):
@@ -256,8 +260,7 @@ class Bridge:
         # A board that has just booted holds no burn line, so whatever went
         # to the last connection is forgotten and the first tick after the
         # window sends one, unchanged or not.
-        self._burn_sent = None
-        self._burn_sent_at = None
+        self._burn_sent = {}
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
@@ -1144,55 +1147,78 @@ class Bridge:
         """Put the burn line on the wire when its cadence says so.
 
         Read off the fetch callable, like session_pair: the bus's fetch has
-        `burn`, every test fake and older fetch has not and sends nothing.
+        `burn_pages` and `burn`, every test fake and older fetch has not and
+        sends nothing. Each marked page -- claude, codex -- has its line on
+        a cadence of its own (self._burn_sent), so one never holds the
+        other back.
         Asked only for a board that lists BOARD_CAP_BURN, and not inside the
         quiet window or the minimum gap, so the transcripts behind it are
         read only when a line could actually go out.
 
-        None from the fetch means "do not send": the claude page has a
-        session window again, or the reader has nothing honest yet. The
+        None from the fetch means "do not send": the page has a session
+        window again, or the reader has nothing honest yet. The
         line then simply stops -- there is no "off" message; the board
         restores the gauge from the usage line itself -- and what was sent
         is forgotten, so the next line goes out as soon as the gap allows.
         """
         burn = getattr(self._fetch, "burn", None)
-        if burn is None:
+        pages = getattr(self._fetch, "burn_pages", None)
+        if burn is None or pages is None:
             return
         if not self._board_can(protocol.BOARD_CAP_BURN):
             # A board that says it can again (its next pref) holds nothing
             # from before, so it is sent the line as if new.
-            self._burn_sent = None
+            self._burn_sent = {}
             return
         if self._in_quiet_window():
             return
+        try:
+            marked = list(pages())
+        except Exception as e:
+            self._burn_trouble(e)
+            return
+        # A page that is no longer marked has stopped; what it was sent is
+        # forgotten, so its next line goes out as soon as its gap allows.
+        for p in self._burn_sent:
+            if p not in marked:
+                self._burn_sent[p] = (None, self._burn_sent[p][1])
+        for p in marked:
+            self._send_burn_for(burn, p)
+
+    def _burn_trouble(self, e):
+        """Never worth the serial loop, and the only place a failure of the
+        line, a reader's included, is caught. Said once, and the type only:
+        the text of an exception from a reader can be a transcript's path or
+        a value read out of one."""
+        if not self._burn_failed:
+            self._burn_failed = True
+            print(f"[bridge] burn not sent: {type(e).__name__}",
+                  file=sys.stderr)
+
+    def _send_burn_for(self, burn, p):
+        """One page's burn line, on its own cadence."""
         now = self._now()
-        if (self._burn_sent_at is not None
-                and now - self._burn_sent_at < BURN_MIN_GAP_S):
+        sent = self._burn_sent.get(p)
+        if sent is not None and now - sent[1] < BURN_MIN_GAP_S:
             return
         try:
-            msg = burn()
+            msg = burn(p)
         except Exception as e:
-            # Never worth the serial loop, and the only place a failure of
-            # the line, the transcript reader's included, is caught. Said
-            # once, and the type only: the text of an exception from the
-            # reader can be a transcript's path or a value read out of one.
-            if not self._burn_failed:
-                self._burn_failed = True
-                print(f"[bridge] burn not sent: {type(e).__name__}",
-                      file=sys.stderr)
+            self._burn_trouble(e)
             return
         if self._burn_failed:
             self._burn_failed = False
             print("[bridge] burn line working again", file=sys.stderr)
         if msg is None:
-            self._burn_sent = None
+            if sent is not None:
+                self._burn_sent[p] = (None, sent[1])
             return
         key = (msg.get("p"), msg.get("q"), tuple(msg.get("b") or ()))
-        if (key == self._burn_sent
-                and now - self._burn_sent_at < BURN_HEARTBEAT_S):
+        if (sent is not None and key == sent[0]
+                and now - sent[1] < BURN_HEARTBEAT_S):
             return
         self._write(msg)
-        self._burn_sent, self._burn_sent_at = key, now
+        self._burn_sent[p] = (key, now)
 
     def _send_svc_if_changed(self):
         """Put each page's status-page level on the wire, on change only.
