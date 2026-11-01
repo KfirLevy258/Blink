@@ -106,4 +106,6 @@ def test_the_contract_check_has_no_fixed_window_left():
         encoding="utf-8")
     code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
     assert not [l for l in code if "grep -A" in l]
-    assert sum("rust_item " in l for l in code) == 7
+    # Seven checks, and field_attrs, which reads each field's attributes
+    # inside its own item for checks 4 and 12 (3rd review, 2026-11-01).
+    assert sum("rust_item " in l for l in code) == 8

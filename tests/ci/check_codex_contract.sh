@@ -52,6 +52,57 @@ fetch() {
 	printf '%s' "$WORK/$name"
 }
 
+# field_attrs FILE ITEM FIELD -> the attributes written on FIELD inside ITEM,
+# on one line. FIELD is the start of the field's (or variant's) own line,
+# `pub output_tokens:` or `TokenCount(`. Everything between the line that
+# ended the field before it and the field itself is its block: attributes,
+# doc comments and the continuation lines of an attribute split over
+# several. Prints nothing for a field with none, or none found.
+field_attrs() {
+	rust_item "$1" "$2" | awk -v fld="$3" '
+	{ line = $0; sub(/^[ \t]+/, "", line) }
+	inattr {
+		block = block " " line
+		if (line ~ /\][ \t]*$/) inattr = 0
+		next
+	}
+	index(line, fld) == 1 { print block; exit }
+	line ~ /^#\[/ {
+		block = block " " line
+		if (line !~ /\][ \t]*$/) inattr = 1
+		next
+	}
+	line ~ /^\/\// { next }
+	{ block = "" }'
+}
+
+# serialised_elsewhere ATTRS -> true when a #[serde(...)] in ATTRS moves the
+# field's JSON key or leaves it out: rename (rename = "..." and
+# rename(serialize = ...) alike), skip, skip_serializing or
+# skip_serializing_if, wherever in the attribute it is written. Upstream
+# puts `default` first as a habit (TokenUsage.cache_write_input_tokens), and
+# a check that only caught a rename written first missed
+# `#[serde(default, rename = "completion_tokens")]` (3rd review,
+# 2026-11-01). Only serde's own attribute: #[ts(skip)] and
+# #[schemars(skip)] are about generated TypeScript and JSON Schema, not the
+# JSON Codex writes. rename_all and alias do not match, and are not this.
+serialised_elsewhere() {
+	printf '%s\n' "$1" | grep -Eq \
+		'serde[(]([^]]*[^A-Za-z0-9_])?(rename|skip|skip_serializing|skip_serializing_if)([^A-Za-z0-9_]|$)'
+}
+
+# check_fields FILE ITEM LABEL FIELD... -> fail on the first FIELD of ITEM
+# that serialised_elsewhere says is not written under its own name.
+check_fields() {
+	cf_file=$1 cf_item=$2 cf_label=$3
+	shift 3
+	for cf_field in "$@"; do
+		if serialised_elsewhere "$(field_attrs "$cf_file" "$cf_item" "$cf_field")"; then
+			fail "$cf_label '$cf_field' is renamed or skipped by serde -- the JSON key has moved or gone"
+		fi
+	done
+}
+
 printf '== Codex protocol at %s\n' "$REF"
 FILE=$(fetch codex-rs/protocol/src/protocol.rs)
 
@@ -81,12 +132,14 @@ for st in RateLimitSnapshot RateLimitWindow; do
 		fail "$st is serialised with rename_all -- the JSON keys have moved"
 	fi
 done
-for field in 'pub rate_limits:' 'pub primary:' 'pub secondary:' 'pub used_percent:' 'pub window_minutes:' 'pub resets_at: Option'; do
-	if grep -B2 "$field" "$FILE" | grep -q 'serde(rename\b\|serde(rename ='; then
-		fail "'$field' is serialised under another name"
-	fi
-done
-ok "no serde renames on the fields we read"
+#    Read off each field's own attributes, inside its own struct
+#    (field_attrs): a `grep -B2` for 'serde(rename' caught a rename only
+#    when it was written first, and nothing caught skip (3rd review,
+#    2026-11-01).
+check_fields "$FILE" 'pub struct TokenCountEvent' TokenCountEvent 'pub rate_limits:'
+check_fields "$FILE" 'pub struct RateLimitSnapshot' RateLimitSnapshot 'pub primary:' 'pub secondary:'
+check_fields "$FILE" 'pub struct RateLimitWindow' RateLimitWindow 'pub used_percent:' 'pub window_minutes:' 'pub resets_at:'
+ok "no serde renames or skips on the fields we read"
 
 # 5. Where the log lives. pc/providers/codex_cli.py: $CODEX_HOME, else
 #    ~/.codex; then sessions/<year>/<month>/<day>/rollout-*.jsonl.
@@ -191,8 +244,21 @@ ok "session_meta is still written to every rollout"
 #     this repo wrote (/code-review max, 2026-11-01).
 rust_item "$FILE" 'pub enum EventMsg' | grep -q '^[[:space:]]*TokenCount(TokenCountEvent),' ||
 	fail "EventMsg lost TokenCount(TokenCountEvent) -- token_count events are gone"
-grep -B4 'pub enum EventMsg' "$FILE" | grep -q 'rename_all = "snake_case"' ||
+EVENT_ATTRS=$(grep -B4 'pub enum EventMsg' "$FILE" | grep 'serde(' || true)
+printf '%s\n' "$EVENT_ATTRS" | grep -q 'rename_all = "snake_case"' ||
 	fail "EventMsg is no longer snake_case -- the event is not called token_count"
+# The reader matches payload.type == "token_count": EventMsg must still be
+# internally tagged by `type`, with the variant's fields beside the tag. A
+# tag of another name, an adjacent `content`, or no tag at all moves both.
+printf '%s\n' "$EVENT_ATTRS" | grep -q 'tag = "type"' ||
+	fail "EventMsg is no longer tagged by \"type\" -- payload.type is not the event name"
+if printf '%s\n' "$EVENT_ATTRS" | grep -Eq 'content *=|untagged'; then
+	fail "EventMsg's fields no longer sit beside its tag -- payload.info has moved"
+fi
+# And the variant itself keeps the snake_case name: a per-variant rename
+# (EventMsg already renames task_started that way) or skip on TokenCount
+# changes payload.type with the line above still true.
+check_fields "$FILE" 'pub enum EventMsg' 'EventMsg variant' 'TokenCount('
 rust_item "$FILE" 'pub struct TokenCountEvent' | grep -q 'pub info: Option<TokenUsageInfo>,' ||
 	fail "TokenCountEvent no longer carries info: Option<TokenUsageInfo>"
 INFO=$(rust_item "$FILE" 'pub struct TokenUsageInfo')
@@ -208,9 +274,10 @@ for st in TokenCountEvent TokenUsageInfo TokenUsage; do
 		fail "$st is serialised with rename_all -- the JSON keys have moved"
 	fi
 done
-if printf '%s\n%s\n' "$INFO" "$USAGE" | grep -q 'serde(rename\b\|serde(rename ='; then
-	fail "a token usage field is serialised under another name"
-fi
+check_fields "$FILE" 'pub struct TokenCountEvent' TokenCountEvent 'pub info:'
+check_fields "$FILE" 'pub struct TokenUsageInfo' TokenUsageInfo 'pub total_token_usage:' 'pub last_token_usage:'
+check_fields "$FILE" 'pub struct TokenUsage' TokenUsage 'pub input_tokens:' 'pub cached_input_tokens:' \
+	'pub cache_write_input_tokens:' 'pub output_tokens:' 'pub reasoning_output_tokens:' 'pub total_tokens:'
 ok "token_count still carries info.total_token_usage and last_token_usage, output_tokens and all"
 
 printf 'PASS [codex contract at %s]\n' "$REF"
