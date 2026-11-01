@@ -14,9 +14,10 @@ able to stop it.
 import sys
 import time
 
-from pc import (cowork_audit, desktop_idb, desktop_paths, normalizer, protocol,
-                weekly_anchor)
+from pc import (burn_reader, cowork_audit, desktop_idb, desktop_paths,
+                normalizer, protocol, session_verdict, weekly_anchor)
 from pc.providers import base
+from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
@@ -70,13 +71,68 @@ def default_providers():
             WeeklyAnchorProvider(history_provider=DesktopHistoryProvider())]
 
 
+# IngestionBus(verdict=...)'s default: a persisted SessionVerdict, built per
+# bus. A sentinel and not None, because None means "mark nothing".
+DEFAULT_VERDICT = object()
+
+
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
-                 now=time.time):
+                 now=time.time, burn=None, verdict=DEFAULT_VERDICT):
         self._providers = (default_providers() if providers is None
                            else list(providers))
         self._preferred = preferred_provider
         self._now = now
+        # Weighs what the claude sources prove about the account's
+        # five-hour window and marks their frames before the merge
+        # (pc/session_verdict). The default is the persisted one under
+        # ~/.blink. None marks nothing, and a bus that replays a scenario
+        # is built with None (claude_usage_bridge.build_bus): its steps say
+        # for themselves whether the account has a window, and the desk's
+        # own verdict -- an Ultra desk's "no window", say -- must not decide
+        # it for them on a bench.
+        self._verdict = (session_verdict.SessionVerdict()
+                         if verdict is DEFAULT_VERDICT else verdict)
+        # What answers burn() below: anything with poll(now) -> (q, tokens)
+        # or None -- pc/burn_reader.BurnReader on a desk, the scenario's
+        # replay under BLINK_SCENARIO. None, the default, means no burn line
+        # at all. It is handed in rather than built here so that a bus made
+        # of scripted providers can never read the machine's real
+        # transcripts: claude_usage_bridge.build_bus decides, the way it
+        # decides the providers. One reader is the claude page's; a dict
+        # gives each provider's page its own ({"claude": BurnReader(),
+        # "codex": CodexBurnReader()} on a desk).
+        if burn is not None and not isinstance(burn, dict):
+            burn = {claude_cli.PROVIDER_ID: burn}
+        self._burn = burn or {}
+        # Every merged frame the last poll() put on one of the board's two
+        # pages, by provider. A page's no_session_window is the one
+        # condition under which its burn line is sent, read off this frame
+        # rather than copied into a flag of its own, so that it answers for
+        # the same poll the usage line came from. See page().
+        self._pages = {}
+        # What is left of the read budget for this pass's burn lines, shared
+        # by every reader (burn_reader.READ_BUDGET_BYTES, or a reader's own
+        # when it was given less); None for a full one. Filled by
+        # burn_pass(), which the bridge asks once a pass of the serial loop,
+        # and when it is, the page asked first moves on by one (_burn_turn):
+        # pages always asked in the same order left a Codex page owed 10 KB
+        # with nothing for 55 passes behind a 430 KB Claude cold start (3rd
+        # review, 2026-11-01).
+        #
+        # The pass is the bridge's to say, not the clock's. Until the 4th
+        # review of 2026-11-01 a pass was any 1.5 s since the last fill
+        # (BURN_PASS_S), re-checked by every burn(), beside a 1.0 s gate on
+        # asking a page again (bridge.BURN_ASK_GAP_S). On a desk where a
+        # budget's read takes a second or more neither held: at 1.0-1.5 s
+        # the second page was asked with nothing left, its ask stamped, and
+        # skipped on its own turn the pass after, so a Codex page waited out
+        # the whole Claude backlog (the review's repro: pass 7 behind
+        # 200 MiB); at 1.5 s or more the gate ran out inside the pass and
+        # the second page was handed a budget of its own, two a pass and
+        # four with the heartbeat in it.
+        self._burn_budget = None
+        self._burn_turn = 0
         # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
         # out after a failure. Keyed by IDENTITY, not by class: two instances
         # of the same provider class are two sources -- two Codex homes, the
@@ -281,7 +337,21 @@ class IngestionBus:
         # the first poll of every process, to learn a boundary the status line
         # was about to hand over for free.
         self._seed_anchor_once()
+        if self._verdict is not None:
+            # Before any merge, so every claude frame -- the status line's,
+            # or Claude Desktop's alone on a desk that runs no Claude Code --
+            # carries the account's verdict into it. Contained like a
+            # provider: the verdict is a bonus on the poll, never its cost.
+            try:
+                self._verdict.mark(frames, now)
+            except Exception:
+                pass
         return frames
+
+    def verdict(self):
+        """The bus's SessionVerdict, or None: for `blink status`, which says
+        what the verdict rests on."""
+        return self._verdict
 
     @staticmethod
     def _cooldown_over(sitting_out, now) -> bool:
@@ -301,6 +371,12 @@ class IngestionBus:
         """The usage message for the board, or None when nothing is known."""
         primary, secondary = normalizer.select_pair(
             self.poll_frames(), preferred=self._preferred)
+        # The claude page wherever it sits: the main one, or the second when
+        # the owner made another provider main. A provider left off the
+        # board's two pages has no page to draw a burn view on.
+        self._pages = {f.provider: f for f in (primary, secondary)
+                       if f is not None}
+        self.prune_burn()
         if primary is None:
             return None
         msg = protocol.frame_to_usage(primary, self._now(), secondary)
@@ -309,6 +385,74 @@ class IngestionBus:
         self._session_pair = _pair_from(
             primary, secondary, msg.get("state", base.STATE_UNKNOWN))
         return msg
+
+    def claude_page(self):
+        """The merged claude frame the last poll() put on a page, or None.
+
+        For `blink status --wire`, whose "Session" row says whether the
+        account is being treated as having no five-hour window. It used to
+        build a provider of its own and ask that, which disagreed with the
+        line printed under it: a Local Storage window lifts the rule in the
+        merge, and a fresh provider never saw it (review, 2026-10-31). This
+        is the frame the usage line was made from.
+        """
+        return self.page(claude_cli.PROVIDER_ID)
+
+    def page(self, provider):
+        """The merged frame the last poll() put on `provider`'s page, or
+        None: claude_page() for any provider. `blink status --wire` prints
+        the Codex Session row from page("codex"), so the row is about the
+        page the wire line carries, and says nothing of a Codex reading
+        that select_pair left off the board."""
+        return self._pages.get(provider)
+
+    def burn_pages(self):
+        """The providers whose page the last poll() found without a session
+        window and that have a reader: the pages a burn line is for. Asks
+        no reader; Bridge decides from this which to ask, and when.
+
+        In turn order: the page asked first moves on by one with each
+        burn_pass(), so each page has the whole budget every other pass
+        whatever the other is owed."""
+        pages = [p for p, f in self._pages.items()
+                 if f.no_session_window and p in self._burn]
+        if not pages:
+            return pages
+        k = self._burn_turn % len(pages)
+        return pages[k:] + pages[:k]
+
+    def burn_pass(self):
+        """Start a pass: the read budget burn() hands the readers is full
+        again, shared by every page asked until the next call, and the
+        page asked first moves on by one.
+
+        Asked by Bridge once a pass of the serial loop, before the pass's
+        first ask, however many times in it the heartbeat and the fast tick
+        go on to ask. Nothing else fills the budget: a caller that never
+        starts a pass has the first budget and what is left of it."""
+        self._burn_budget = None
+        self._burn_turn += 1
+
+    def prune_burn(self):
+        """Have every reader forget what has left its window by now,
+        reading nothing.
+
+        README "Privacy" says a turn's token counts are held in memory for
+        up to five hours. A reader forgets inside its own poll(), and burn()
+        polls only a marked page, while the daemon polls the bus only while
+        a board answers: so a page unmarked (a window back, an Ultra mark
+        lifted) or a board unplugged left every turn read so far in memory
+        until the daemon stopped -- ten Codex turns 8.4 h after the newest,
+        through this bus (4th review, 2026-11-01). Asked at the end of every
+        poll() and by the daemon's upkeep on every pass of its loop, cable
+        or no cable; a quarter-hour's arithmetic per reader when nothing
+        has left the window. A scenario's replay holds nothing and has no
+        prune()."""
+        now = self._now()
+        for reader in self._burn.values():
+            prune = getattr(reader, "prune", None)
+            if prune is not None:
+                prune(now)
 
     def session_pair(self):
         """(label, n) for the state the last poll() put on the panel.
@@ -319,6 +463,48 @@ class IngestionBus:
         (protocol.session) and this is where the daemon reads it.
         """
         return self._session_pair
+
+    def burn(self, provider=claude_cli.PROVIDER_ID):
+        """`provider`'s burn line for the board, or None when there is none
+        to send.
+
+        None unless the last poll() found that page without a session
+        window, so on a Pro or Max desk the transcripts are never read at
+        all, and None while the reader has nothing honest to say yet (no
+        transcripts directory, or a cold start still being read). The reader
+        is asked only from here, and this only from Bridge, after the
+        board's caps have been checked: a board that cannot draw the view
+        costs nothing.
+
+        A reader that raises is not caught here. Bridge._send_burn_if_due,
+        the only caller, contains it -- it costs the burn line, never the
+        poll -- and logs it once, by type. It was caught here too, with a
+        log-once flag of its own, so one failure had two handlers (review,
+        2026-10-31).
+        """
+        page = self._pages.get(provider)
+        reader = self._burn.get(provider)
+        if reader is None or page is None or not page.no_session_window:
+            return None
+        if isinstance(reader, burn_reader.BurnReader):
+            # One budget for the pass, not one per reader: two pages each
+            # given READ_BUDGET_BYTES read twice what the serial loop was
+            # promised (burn_reader.READ_BUDGET_BYTES; /code-review max,
+            # 2026-11-01). The page asked first can spend all of it; the
+            # other is then behind, says None, and is asked first on the
+            # next pass (burn_pages). Asked with nothing left it still
+            # answers, reading nothing: a page caught up says its line. A
+            # scenario's replay reads nothing and is asked as before.
+            left = (reader.read_budget if self._burn_budget is None
+                    else min(reader.read_budget, self._burn_budget))
+            got = reader.poll(self._now(), budget=left)
+            self._burn_budget = max(0, left - reader.last.read_bytes)
+        else:
+            got = reader.poll(self._now())
+        if got is None:
+            return None
+        q, tokens = got
+        return protocol.burn(provider, q, tokens)
 
     def fetch(self):
         """The callable to hand Bridge(fetch_usage=...).
@@ -336,7 +522,8 @@ class IngestionBus:
 
 
 class _BusFetch:
-    """A zero-arg callable that also knows the project name.
+    """A zero-arg callable that also knows the project name, and the burn
+    line (IngestionBus.burn) for the same poll.
 
     An object rather than a function with an attribute bolted on: the Bridge
     is handed a zero-arg callable returning a finished usage dict and never
@@ -355,6 +542,15 @@ class _BusFetch:
 
     def session_pair(self):
         return self._bus.session_pair()
+
+    def burn_pages(self):
+        return self._bus.burn_pages()
+
+    def burn_pass(self):
+        return self._bus.burn_pass()
+
+    def burn(self, provider=claude_cli.PROVIDER_ID):
+        return self._bus.burn(provider)
 
 
 # Which count describes which state. STATE_FAILED reads n_stuck because that

@@ -4,6 +4,25 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/*
+ * A provider id as the board keeps it, NUL included: what proto.c reads
+ * `provider` and `p2` into, what a page is named by, and so what a burn line's
+ * `p` is matched against (burn5h.h BURN5H_TAG_MAX is this). Fifteen
+ * characters; the daemon's ids are "claude" and "codex" today.
+ *
+ * One figure for all three on purpose. The page tags were 12 bytes and
+ * proto.c read into 16, so an id of 12 to 15 characters named its page by
+ * its first eleven, while burn5h_parse(), which refuses a tag it would have
+ * to cut, refused every burn line for it (the /code-review max of
+ * 2026-11-01). An id longer than this still has its page named by the
+ * first fifteen (msg_get_str() truncates) and its burn lines refused, so it
+ * shows the session gauge and never another page's view -- the safe way to
+ * be wrong. The daemon sends nothing that long; if it ever needs to, this is
+ * the figure to move, and the pill, which shows the first eleven
+ * (usage_view.c PILL_TAG_BUF), does not move with it.
+ */
+#define USAGE_TAG_MAX		16
+
 /* Connection state, shown as a coloured dot. Mirrors the web UI's convention. */
 enum usage_status {
 	USAGE_STATUS_DISCONNECTED = 0,	/* grey  */
@@ -98,6 +117,19 @@ bool usage_view_takeover_active(void);
  * stale decision back on screen; see the definition.
  */
 void usage_view_sync_takeover(void);
+
+/*
+ * Keep the burn view and the session gauge from changing hands, or let
+ * them again. For code that puts this screen on the panel in pieces with
+ * the protocol still running: the eye clip (ui_anim.c), which hides every
+ * child for the show and restores them from a record taken as it began,
+ * and a wipe (ui_slide.c), which paints one strip at a time. A change of
+ * hands inside either left the left half part ring, part bar chart.
+ *
+ * Nests. The last release applies whatever the decision is by then, at
+ * once. Every hold must be released; see the definition.
+ */
+void usage_view_hold_half(bool hold);
 
 /* Fable's weekly utilization for the long-press card (Claude's windows
  * today are all-models + fable); -1 = unknown. Fed by either data source
@@ -231,6 +263,36 @@ void usage_view_page_preview(int delta, int pct);
  * choose (pc/normalizer).
  */
 void usage_view_set_burn(double pph);
+
+struct burn5h;
+
+/*
+ * One `burn` line, already validated by burn5h_parse(), and the uptime it
+ * arrived at (k_uptime_get(), from the caller, so a harness can hand over
+ * an old one). docs/plans/burn-5h.md is the contract.
+ *
+ * Kept per provider, and drawn on the page whose tag matches its `p` --
+ * where it takes the session gauge's half of the screen, but only while
+ * that page's session reading is unknown (the usage line's session_pct -1:
+ * an account with no five-hour window) and only for 180 s after the line
+ * arrived. The daemon re-sends at least once a minute while the account
+ * has no window, and simply stops when one comes back, so a view that
+ * outlives its data reverts to "--%" on its own, in a doze's peek as much
+ * as on the dashboard. Not the same "burn" as usage_view_set_burn() above,
+ * which is percent per hour.
+ *
+ * Recorded before the built guard, like the counts: it is data, and the
+ * line may land before the screen exists.
+ */
+void usage_view_set_burn5h(const struct burn5h *m, int64_t at_ms);
+
+/*
+ * The board clock's offset from UTC, minutes east, as the `time` message
+ * gave it. The burn view labels its hours in local time and draws no hour
+ * axis at all until this has arrived: no labels beats wrong ones, the rule
+ * the clock already follows.
+ */
+void usage_view_set_utc_offset(int32_t off_min);
 
 /*
  * How old each provider's READING is, in seconds, as measured by the daemon

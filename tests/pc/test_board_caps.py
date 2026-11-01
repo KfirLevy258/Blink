@@ -277,31 +277,48 @@ def _fw_line(name, buf_name="buf"):
     return line, size
 
 
-def test_the_boards_hello_carries_both_caps_and_fits_its_buffer():
+# Every cap this firmware lists. "burn" is the five-hour burn view
+# (docs/plans/burn-5h.md): the daemon sends a board `burn` lines only when its
+# caps say so, so a board built without the view must never claim it, and
+# one built with it must never forget to.
+FW_CAPS = {"svc", "theme", "edit_done", "burn"}
+
+
+def test_the_boards_hello_carries_its_caps_and_fits_its_buffer():
     line, size = _fw_line("send_hello")
     msg = json.loads(line)
     assert msg["t"] == "hello"
-    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done"}
+    assert protocol.board_caps(msg) == FW_CAPS
     # snprintf truncates silently, and a truncated hello is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
 
 
-def test_the_boards_pref_carries_both_caps_and_fits_its_buffer():
+def test_the_boards_pref_carries_its_caps_and_fits_its_buffer():
     line, size = _fw_line("proto_send_pref")
     # The first %s is the provider, at its widest "claude"; the second is
     # the board id at hwinfo's widest, 32 hex digits.
     line = line.replace("f" * 32, "claude", 1)
     msg = json.loads(line)
     assert msg["t"] == "pref"
-    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done"}
+    assert protocol.board_caps(msg) == FW_CAPS
     # snprintf truncates silently, and a truncated pref is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
-    # Measured 119 B in the 128 B buffer (hello: 148 in 160). A cap costs
-    # its name's length plus 3 B, so one named in more than five characters
+    # Measured 126 B in the 128 B buffer (hello: 155 in 160), with "burn".
+    # A cap costs its name's length plus 3 B, so the next one, of any name,
     # needs proto_send_pref's buffer made bigger first. The daemon reads
     # 512 and the board itself drops a longer inbound line whole; a pref
     # anywhere near that is a mistake.
     assert len(line) <= 160, len(line)
+
+
+def test_the_caps_are_appended_never_reordered():
+    """Append-only, like THEME_IDS: a new cap goes at the end, and the ones
+    already shipped keep their places."""
+    src = (ROOT / "firmware" / "src" / "proto.c").read_text()
+    caps = re.search(r'#define BOARD_CAPS "\\"caps\\":\[(.*?)\]"', src)
+    assert caps, "BOARD_CAPS is gone from proto.c"
+    names = re.findall(r'\\"([a-z_]+)\\"', caps.group(1))
+    assert names == ["svc", "theme", "edit_done", "burn"], names
 
 
 def test_the_boards_pref_names_the_board_as_hello_does():

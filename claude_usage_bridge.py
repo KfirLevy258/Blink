@@ -273,12 +273,31 @@ def build_bus():
     It replaces rather than joins the set on purpose: a real Claude install
     on the test machine would otherwise merge its own readings into the
     scenario and the assertion would depend on whose desk it ran on.
+
+    The burn line's source follows the same rule. The real bus reads this
+    machine's Claude Code transcripts and Codex rollouts (pc/burn_reader),
+    one reader for each page; a scenario's bus
+    replays the scenario's own buckets instead, which is also how a bench
+    puts every state of the burn view on a board without spending anybody's
+    quota.
     """
     scenario = os.environ.get("BLINK_SCENARIO")
     if not scenario:
-        return ingest.IngestionBus()
+        from pc.burn_reader import BurnReader, CodexBurnReader
+        return ingest.IngestionBus(burn={"claude": BurnReader(),
+                                         "codex": CodexBurnReader()})
     from pc.providers.scripted import ScriptedProvider
-    return ingest.IngestionBus(providers=[ScriptedProvider(scenario)])
+    scripted = ScriptedProvider(scenario)
+    # verdict=None: a step says itself whether the account has a five-hour
+    # window ("no_session_window"), and this desk's persisted verdict
+    # (pc/session_verdict) must not say it for the scenario. On this Ultra
+    # desk it would hold "no window" over the bench step that gives the
+    # account its window back.
+    # One replay for both pages: a step marks whichever provider it names.
+    replay = scripted.burn_source()
+    return ingest.IngestionBus(providers=[scripted],
+                               burn={"claude": replay, "codex": replay},
+                               verdict=None)
 
 
 def describe_ports():
@@ -847,8 +866,18 @@ def main(argv=None):
     # shared Repeats would suppress nothing.
     svc_frames = logbook.RepeatsBy("provider", ("level", "what"),
                                    "status-page lines")
+    # The burn line goes out every 15 s while Claude Code is producing and
+    # every minute while it is not, so logged in full it would be some 1900
+    # lines a day on a working desk -- the growth svc_frames above was
+    # written to undo. Compared on the page and the quarter-hour, the way
+    # time_frames is compared on the offset and not the epoch: `b` moves
+    # with every reply by construction, and the reader of bridge.log needs
+    # to see that the line is flowing, not each number in it. A line per
+    # quarter-hour, and the rest counted. Per page, like svc_frames: with a
+    # claude and a codex line alternating, one Repeats would log them all.
+    burn_frames = logbook.RepeatsBy("p", ("q",), "burn lines")
     _REPEATED = {"usage": usage_frames, "time": time_frames,
-                 "svc": svc_frames}
+                 "svc": svc_frames, "burn": burn_frames}
     watchdog = install_statusline.DriftWatchdog(
         settings_path(), shim_path(),
         shims=((shim_path(), "blink-statusline.sh"),
@@ -897,11 +926,16 @@ def main(argv=None):
     _log_file = os.path.join(blink_home, "bridge.log")
 
     def _upkeep():
+        # The burn readers forget what has left their five hours whether or
+        # not anything polls them: an unplugged board polls nothing, and an
+        # unmarked page is never read (IngestionBus.prune_burn, README
+        # "Privacy"). `bus` is built below, before the first call.
+        bus.prune_burn()
         drifted = watchdog.tick()
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
         for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
-                     svc_frames.due()):
+                     svc_frames.due(), burn_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):
@@ -1308,6 +1342,10 @@ def main(argv=None):
         proven = False
         try:
             while True:
+                # One pass of the loop: whatever the heartbeat and the fast
+                # tick ask for the burn line below is asked once, from one
+                # read budget, however long a read takes (Bridge.begin_pass).
+                bridge.begin_pass()
                 # in_waiting first, then a blocking read(1) as the idle wait.
                 #
                 # ser.read(n) does NOT return early on partial data: it waits

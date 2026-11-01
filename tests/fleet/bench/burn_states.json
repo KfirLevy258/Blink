@@ -1,0 +1,14 @@
+{
+  "name": "burn_states",
+  "note": "Bench only: walks a board through every state of the five-hour burn view (docs/plans/burn-5h.md) without spending quota. Kept out of tests/fleet/scenarios, which the fleet agent runs as release scenarios. Each state holds for a minute; the burn line follows a change within about 17 s (15 s floor plus a fast tick). At 360 s the account gets a session window back, the gauge returns and the burn line stops; at 420 s it goes away again and the view comes back. Run it: BLINK_SCENARIO=tests/fleet/bench/burn_states.json python3 claude_usage_bridge.py --port PORT",
+  "steps": [
+    {"at": 0,   "provider": "claude", "weekly_pct": 12.0, "no_session_window": true, "state": "running", "burn": "rising"},
+    {"at": 60,  "provider": "claude", "weekly_pct": 12.0, "no_session_window": true, "state": "running", "burn": "steady"},
+    {"at": 120, "provider": "claude", "weekly_pct": 12.0, "no_session_window": true, "state": "running", "burn": "easing"},
+    {"at": 180, "provider": "claude", "weekly_pct": 12.0, "no_session_window": true, "state": "running", "burn": "spike"},
+    {"at": 240, "provider": "claude", "weekly_pct": 12.0, "no_session_window": true, "state": "idle", "burn": "idle"},
+    {"at": 300, "provider": "claude", "weekly_pct": 12.0, "no_session_window": true, "state": "running", "burn": "heavy"},
+    {"at": 360, "provider": "claude", "session_pct": 37.0, "weekly_pct": 12.0, "state": "running"},
+    {"at": 420, "provider": "claude", "weekly_pct": 12.0, "no_session_window": true, "state": "running", "burn": "rising"}
+  ]
+}

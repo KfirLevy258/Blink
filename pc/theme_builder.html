@@ -299,6 +299,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
           <button type="button" data-v="gauges" aria-pressed="true">Gauges</button>
           <button type="button" data-v="focus" aria-pressed="false">Focus mode</button>
         </div>
+        <div class="seg" role="group" aria-label="Left half">
+          <button type="button" data-l="gauge" aria-pressed="true">Session gauge</button>
+          <button type="button" data-l="burn" aria-pressed="false">Burn view</button>
+        </div>
         <div class="seg" role="group" aria-label="Focus window">
           <button type="button" data-f="session" aria-pressed="true">Session</button>
           <button type="button" data-f="weekly" aria-pressed="false">Weekly</button>
@@ -415,7 +419,13 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var HEX = /^[0-9a-fA-F]{6}$/;
 
   // preset: the id of an untouched built-in, or -1 for the custom theme.
-  var st = Object.assign({ mode: 'level', view: 'gauges', fw: 'session', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
+  // The table's own track and grey for each built-in, by id; see burnInks().
+  var BUILTIN_TG = BUILTINS.map(function (b) { return { track: b.track.toUpperCase(), grey: b.grey.toUpperCase() }; });
+  var DARK_ID = BUILTINS.map(function (b) { return b.key; }).indexOf('dark');
+  // left: what the two-gauge screen shows in its left half, the session
+  // gauge or, on an account with no five-hour window, the burn view.
+  // Preview only, like view and the sliders: it is not part of a theme.
+  var st = Object.assign({ mode: 'level', view: 'gauges', left: 'gauge', fw: 'session', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
   var finished = false, previewTimer = null, lastSent = null;
   // loaded: /api/state has answered and the page shows the owner's theme.
   // Until then the page holds only its own default, preset 0, and Save was
@@ -467,15 +477,21 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   function q565(h) { var c = hex2rgb(h); var r = c[0] >> 3 << 3 | c[0] >> 5, g = c[1] >> 2 << 2 | c[1] >> 6, b = c[2] >> 3 << 3 | c[2] >> 5; return rgb2hex([r, g, b]); }
   function shown(a, b) { return contrast(q565(a), q565(b)); }
   function boardMix(a, b, t) { var x = hex2rgb(a), y = hex2rgb(b); return rgb2hex([0,1,2].map(function (i) { return Math.min(255, Math.floor(x[i] + (y[i]-x[i]) * t + .5)); })); }
-  function customDim(tx, bg) {
-    var card = boardMix(bg, tx, .06);
-    var wantBg = Math.min(4.5, shown(tx, bg)), wantCard = Math.min(4.5, shown(tx, card));
-    for (var pct = 25; pct > 0; pct--) {
+  // readable_mix(): the text mixed `pct` percent into the ground, stepped
+  // back a percent at a time until it reads `floor` or better, or as well
+  // as the text itself if that is lower, on both the ground and `on`.
+  function readableMix(tx, bg, on, pct, floor) {
+    var wantBg = Math.min(floor, shown(tx, bg)), wantOn = Math.min(floor, shown(tx, on));
+    for (; pct > 0; pct--) {
       var d = boardMix(tx, bg, pct / 100);
-      if (shown(d, bg) >= wantBg && shown(d, card) >= wantCard) return d;
+      if (shown(d, bg) >= wantBg && shown(d, on) >= wantOn) return d;
     }
     return tx;
   }
+  function customDim(tx, bg) { return readableMix(tx, bg, boardMix(bg, tx, .06), 25, 4.5); }
+  // custom_grey(): 45% of the way into the ground, walked back to 3:1 on it.
+  // Only the burn view's hour numbers and ticks use it; see burnInks().
+  function customGrey(tx, bg) { return readableMix(tx, bg, bg, 45, 3.0); }
   function dist(a, b) { var x = hex2rgb(a), y = hex2rgb(b); return Math.sqrt(x.reduce(function (s, v, i) { return s + (v-y[i])*(v-y[i]); }, 0)); }
   function levelCol(p) { return p >= 90 ? st.high : p >= 60 ? st.mid : st.low; }
   function arcCol(which, p) {
@@ -511,6 +527,158 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     if (st.d === 'on') { var k = pt(cx, cy, r, end); svg.appendChild(el('circle', { cx: k[0], cy: k[1], r: Math.max(5, w / 2 + 2), fill: '#' + txt, stroke: '#' + st.bg, 'stroke-width': 2 })); }
     svg.appendChild(el('text', { x: cx, y: cy + pctSize * .36, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': pctSize, 'font-weight': 500, fill: '#' + txt }, Math.round(p) + '%'));
   }
+  // ------------------------------------------------- the five-hour burn view
+  // The left half on an account with no five-hour window, drawn as
+  // firmware/src/usage_view.c burn_draw_cb() does (rows and columns from
+  // usage_layout.h's BURN_*) with burn5h.c's decisions ported line for line:
+  // the direction, the number format, the bar heights, the hour of a bucket.
+  // docs/plans/burn-5h.md is the contract.
+  //
+  // The sample is BURN_PRESETS["rising"] of pc/providers/scripted.py, in
+  // output tokens, exact, as the wire carries them (pc/protocol.burn): the
+  // same twenty buckets a bench board is given.
+  var BURN_B = [0, 0, 0, 0, 4000, 9000, 6000, 12000, 18000, 15000, 22000, 30000,
+                26000, 34000, 41000, 38000, 95000, 140000, 210000, 265000];
+  // burn5h.h: four buckets to an hour, and the two hours that are compared
+  // by their first bucket. Complete quarter-hours only: the newest bucket
+  // is the one the daemon's clock is in, still filling, so it is drawn and
+  // never compared. The last hour is 15-18 and the hour before it 11-14.
+  var BURN_N = 20, BURN_HOUR_N = 4, BURN_BUCKET_S = 900,
+      BURN_LAST_FROM = BURN_N - 1 - BURN_HOUR_N, BURN_PREV_FROM = BURN_LAST_FROM - BURN_HOUR_N;
+  // The newest bucket starts at 14:00 on a board told UTC+0, so the page's
+  // 14:05 is inside it and the axis reads 10 to 14. (The page has no clock
+  // of its own to hold and no offset to ask; both are as fixed as 14:05.)
+  var BURN_Q = 1793455200, BURN_OFF_MIN = 0;
+  // Dark's four inks start from the contract's own bytes, as
+  // theme_burn_inks() does for THEME_DARK alone, before the floor moves its
+  // older bars; every other theme gets the same relationships from its own
+  // palette. They are numbers here, not colour strings, so the check that
+  // this page types no palette of its own stays about theme.c;
+  // tests/pc/test_theme_page_burn.py reads them back out of theme.c.
+  var BURN_DARK = { hot: 0x7FB2F0, cold: 0x2D5C99, base: 0x3A414B, tick: 0x5C636B };
+  function hexOf(n) { return n.toString(16).padStart(6, '0').toUpperCase(); }
+
+  // burn5h_total(), burn5h_last_hour() and burn5h_direction(): the last
+  // complete hour against the one before it, 64-bit on the board and plain
+  // numbers here, where twenty buckets of at most 99,999,999 tokens are
+  // nowhere near 2^53.
+  function burnSum(b, from, n) { var s = 0; for (var i = from; i < from + n; i++) s += b[i]; return s; }
+  function burnLastHour(b) { return burnSum(b, BURN_LAST_FROM, BURN_HOUR_N); }
+  function burnDir(b) {
+    var now = burnLastHour(b), before = burnSum(b, BURN_PREV_FROM, BURN_HOUR_N);
+    if (now === 0 && before === 0) return 'idle';
+    if (before === 0) return 'rising';
+    if (now * 10 > before * 11) return 'rising';
+    if (now * 10 < before * 9) return 'easing';
+    return 'steady';
+  }
+  // burn5h_fmt_tokens(): under a thousand as they are, then rounded to the
+  // nearest in integers, a tenth of the unit while that is under ten units,
+  // whole units from there, the check on the ROUNDED figure so 9,960 is
+  // "10k" and never "10.0k".
+  function burnTokens(t) {
+    var scale = [[1000, 'k'], [1000000, 'M'], [1000000000, 'B']];
+    if (t < 1000) return String(t);
+    for (var i = 0; i < scale.length; i++) {
+      var per = scale[i][0], tenths = Math.floor((t + per / 20) / (per / 10));
+      if (tenths < 100) return Math.floor(tenths / 10) + '.' + (tenths % 10) + scale[i][1];
+      var whole = Math.floor((t + per / 2) / per);
+      if (whole < 1000 || i + 1 === scale.length) return whole + scale[i][1];
+    }
+  }
+  // burn5h_bar_h(): scaled to the largest bucket, a non-zero one at least 2.
+  function burnBarH(v, max, tallest, least) {
+    if (v === 0 || max === 0) return 0;
+    var h = Math.floor((Math.min(v, max) * tallest + Math.floor(max / 2)) / max);
+    return Math.min(tallest, Math.max(least, h));
+  }
+  // burn5h_hour(): the local hour a bucket starts, or -1 if it starts none.
+  function burnHour(q, i, offMin) {
+    var s = (((q - (BURN_N - 1 - i) * BURN_BUCKET_S + offMin * 60) % 86400) + 86400) % 86400;
+    return s % 3600 ? -1 : s / 3600;
+  }
+  // theme_burn_inks() (firmware/src/theme.c): the four colours no role
+  // describes. Dark starts from the contract's bytes. Any other theme: the
+  // last hour is g1 35% of the way to the text colour, the older bars g1 35%
+  // into the ground, the baseline and the ticks the track lifted 30% and 77%
+  // towards grey, each through the board's theme_mix (round half up, per
+  // channel). A built-in's track and grey are theme.c's own; a custom
+  // theme's are derived, 15% of the text into the ground and custom_grey(),
+  // as theme_derive() does.
+  // Then the floor, step for step as theme.c walks it: both bar inks read
+  // 3:1 on the ground as the panel shows it (or the text's own ratio, if a
+  // custom theme's is lower), the older bars walking back towards g1 and on
+  // to the text, the last hour on towards the text until it also stands
+  // 1.5:1 above the older bars; and where the text cannot give it that, the
+  // stronger of the text and g1, with the older bars stepped back towards
+  // the ground no further than the floor. pow() here and the board's table
+  // can disagree in the last digit, so on a hairline the two may stop a
+  // percent apart, as customDim() can.
+  var BURN_FLOOR = 3.0, BURN_STEP = 1.5;
+  function burnApart(hot, cold, bg) { return shown(hot, bg) > shown(cold, bg) && shown(hot, cold) >= BURN_STEP; }
+  function burnWalk(from, to, bg, floor, cold) {
+    for (var pct = 0; pct < 100; pct++) {
+      var c = boardMix(from, to, pct / 100);
+      if (shown(c, bg) >= floor && (cold == null || burnApart(c, cold, bg))) return c;
+    }
+    return to;
+  }
+  function burnFloor(k, bg, text, g1) {
+    var floor = Math.min(BURN_FLOOR, shown(text, bg));
+    k.cold = burnWalk(k.cold, g1, bg, floor, null);
+    if (shown(k.cold, bg) < floor) k.cold = burnWalk(g1, text, bg, floor, null);
+    k.hot = burnWalk(k.hot, text, bg, floor, k.cold);
+    if (burnApart(k.hot, k.cold, bg)) return k;
+    k.hot = shown(g1, bg) > shown(text, bg) ? g1 : text;
+    for (var pct = 1, from = k.cold; pct < 100; pct++) {
+      var c = boardMix(from, bg, pct / 100);
+      if (shown(c, bg) < floor) break;
+      k.cold = c;
+      if (burnApart(k.hot, c, bg)) break;
+    }
+    return k;
+  }
+  function burnInks() {
+    var tg = st.preset >= 0 ? BUILTIN_TG[st.preset] : { track: boardMix(st.bg, st.text, .15), grey: customGrey(st.text, st.bg) };
+    var k = st.preset === DARK_ID
+      ? { hot: hexOf(BURN_DARK.hot), cold: hexOf(BURN_DARK.cold), base: hexOf(BURN_DARK.base), tick: hexOf(BURN_DARK.tick) }
+      : { hot: boardMix(st.g1, st.text, .35), cold: boardMix(st.g1, st.bg, .35),
+          base: boardMix(tg.track, tg.grey, .30), tick: boardMix(tg.track, tg.grey, .77) };
+    k = burnFloor(k, st.bg, st.text, st.g1);
+    k.grey = tg.grey;
+    return k;
+  }
+  // Montserrat 20's advances, as near as a table can: the total and its
+  // arrow are centred as one group (burn_compose()), which the board
+  // measures with LVGL and a page cannot.
+  var BURN_ADV20 = { '.': 5.6, 'k': 11, 'M': 17.6, 'B': 13.8 };
+  function burnView(svg, F, dim) {
+    var k = burnInks(), b = BURN_B, dir = burnDir(b), max = Math.max.apply(null, b);
+    var total = burnTokens(burnSum(b, 0, BURN_N)), rate = burnTokens(burnLastHour(b)) + '/h • ' + dir;
+    var BASE_Y = 148, X0 = 20, PITCH = 6, i, x;
+    for (i = 0; i < BURN_N; i++) {
+      var h = burnBarH(b[i], max, 56, 2), hot = i >= BURN_N - BURN_HOUR_N; x = X0 + i * PITCH;
+      if (h) svg.appendChild(el('rect', { 'class': hot ? 'burn-hot' : 'burn-cold', x: x, y: BASE_Y - h, width: 5, height: h, fill: '#' + (hot ? k.hot : k.cold) }));
+    }
+    svg.appendChild(el('rect', { 'class': 'burn-base', x: X0, y: BASE_Y, width: BURN_N * PITCH, height: 1, fill: '#' + k.base }));
+    for (i = 0; i < BURN_N; i++) {
+      var hr = burnHour(BURN_Q, i, BURN_OFF_MIN); if (hr < 0) continue;
+      x = X0 + i * PITCH;
+      svg.appendChild(el('rect', { 'class': 'burn-tick', x: x, y: BASE_Y + 1, width: 1, height: 3, fill: '#' + k.tick }));
+      svg.appendChild(el('text', { 'class': 'burn-hour', x: x, y: 165, 'text-anchor': 'middle', 'font-family': F, 'font-size': 14, fill: '#' + k.grey }, String(hr)));
+    }
+    // The pair, centred on x 80 a 6 px gap apart; the arrow is 14 px wide.
+    var tw = 0; for (i = 0; i < total.length; i++) tw += BURN_ADV20[total[i]] || 12.4;
+    var tx = 80 - (tw + 6 + 14) / 2, gx = tx + tw + 6 + 7, gy = 57.5, accent = dir === 'rising' || dir === 'easing';
+    svg.appendChild(el('text', { 'class': 'burn-total', x: tx, y: 56 + 20 * .36, 'font-family': F, 'font-size': 20, 'font-weight': 500, fill: '#' + st.text }, total));
+    var pts = { rising: [[-6.5, 3.5], [0, -3.5], [6.5, 3.5]], easing: [[-6.5, -3.5], [0, 3.5], [6.5, -3.5]], steady: [[-3.5, -6.5], [3.5, 0], [-3.5, 6.5]], idle: [[-5, 0], [5, 0]] }[dir];
+    svg.appendChild(el('path', { 'class': 'burn-glyph', d: pts.map(function (p, n) { return (n ? 'L' : 'M') + (gx + p[0]).toFixed(1) + ' ' + (gy + p[1]).toFixed(1); }).join(' '),
+                                 fill: 'none', stroke: '#' + (accent ? st.g1 : dim), 'stroke-width': 2.2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    // Montserrat 14 in a 16 px row: the text sits 13 px below the row's top.
+    [['tokens • 5h', 68, 'burn-unit'], ['BURN 5h', 168, 'burn-name'], [rate, 186, 'burn-rate']].forEach(function (r) {
+      svg.appendChild(el('text', { 'class': r[2], x: 80, y: r[1] + 13, 'text-anchor': 'middle', 'font-family': F, 'font-size': 14, fill: '#' + dim }, r[0]));
+    });
+  }
   function render() {
     var svg = document.getElementById('scr'); while (svg.firstChild) svg.removeChild(svg.firstChild);
     // The board derives dim text and the arc track by mixing text and bg
@@ -522,14 +690,23 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     var F = 'Montserrat, sans-serif';
     if (st.view === 'gauges') {
       svg.appendChild(el('text', { x: 160, y: 18, 'text-anchor': 'middle', 'font-family': F, 'font-size': 11.5, 'letter-spacing': 3, fill: '#' + dim }, 'BLINK'));
-      var warn = Math.max(st.p1, st.p2) >= 95;
-      svg.appendChild(el('text', { x: 160, y: 34, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (warn ? st.high : dim) }, warn ? (st.p1 >= st.p2 ? 'Session almost used up' : 'Weekly almost used up') : '14:05'));
+      // With the burn view up the session reading is unknown, as on the
+      // board (s_pct -1), so it cannot be the one almost used up.
+      var burn = st.left === 'burn', warn = Math.max(burn ? 0 : st.p1, st.p2) >= 95;
+      svg.appendChild(el('text', { x: 160, y: 34, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (warn ? st.high : dim) }, warn ? (!burn && st.p1 >= st.p2 ? 'Session almost used up' : 'Weekly almost used up') : '14:05'));
       svg.appendChild(el('circle', { cx: 302, cy: 14, r: 5, fill: '#' + dotColours(st.low, st.mid, st.bg)[0] }));
-      gauge(svg, 80, 104, 120, st.w, st.p1, arcCol(1, st.p1), track, st.text, 20);
+      if (burn) burnView(svg, F, dim); else gauge(svg, 80, 104, 120, st.w, st.p1, arcCol(1, st.p1), track, st.text, 20);
       gauge(svg, 240, 104, 120, st.w, st.p2, arcCol(2, st.p2), track, st.text, 20);
-      [['SESSION 5h', '3h 40m', 80], ['WEEKLY 7d', '1d 1h', 240]].forEach(function (g) {
-        svg.appendChild(el('text', { x: g[2], y: 180, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, g[0]));
-        svg.appendChild(el('text', { x: g[2], y: 196, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + dim }, g[1]));
+      // The window name and its countdown: on the board two default-font
+      // labels, Montserrat 14 in 16 px rows from GAUGE_NAME_Y (168) and
+      // GAUGE_CD_Y (186), so the text sits 13 px below each row's top, as
+      // the burn view's own "BURN 5h" and rate line do. They were 12 px at
+      // 180 and 196 here, which put the burn view's rows, drawn the
+      // board's way, visibly larger and lower than the weekly gauge's
+      // beside them (the /code-review max of 2026-11-01).
+      [['SESSION 5h', '3h 40m', 80], ['WEEKLY 7d', '1d 1h', 240]].slice(burn ? 1 : 0).forEach(function (g) {
+        svg.appendChild(el('text', { 'class': 'gauge-name', x: g[2], y: 168 + 13, 'text-anchor': 'middle', 'font-family': F, 'font-size': 14, fill: '#' + dim }, g[0]));
+        svg.appendChild(el('text', { 'class': 'gauge-cd', x: g[2], y: 186 + 13, 'text-anchor': 'middle', 'font-family': F, 'font-size': 14, fill: '#' + dim }, g[1]));
       });
       svg.appendChild(el('rect', { x: 132, y: 205, width: 56, height: 18, rx: 9, fill: '#' + pill }));
       svg.appendChild(el('text', { x: 160, y: 218, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + st.text }, 'Claude'));
@@ -569,7 +746,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     document.getElementById('modenote').textContent = st.mode === 'level'
       ? 'By level: both arcs take the colour of their own level. Gauge 1 and Gauge 2 are not used.'
       : 'Per gauge: each arc keeps its own colour, and switches to the 90%-and-above colour near the limit so a warning is never missed. The status dot uses the under-60% colour, or, when it and the 60%-to-90% colour are both greys, whichever stands out more.';
-    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view); press('[data-f]', 'f', st.fw);
+    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view); press('[data-l]', 'l', st.left); press('[data-f]', 'f', st.fw);
     document.querySelectorAll('#presets button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.p === st.preset)); });
   }
   function press(sel, key, val) { document.querySelectorAll(sel).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset[key] === val)); }); }
@@ -994,6 +1171,11 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The screen and the two sliders only move the drawing here; they are not
   // part of the theme and send nothing.
   document.querySelectorAll('[data-v]').forEach(function (b) { b.addEventListener('click', function () { st.view = b.dataset.v; render(); }); });
+  // The left half is the two-gauge screen's, so choosing either shows that
+  // screen: Focus keeps today's screen on the board, burn view or not
+  // (docs/plans/burn-5h.md), and a choice that changed nothing visible would
+  // look broken.
+  document.querySelectorAll('[data-l]').forEach(function (b) { b.addEventListener('click', function () { st.left = b.dataset.l; st.view = 'gauges'; render(); }); });
   // Choosing a focus window shows the focus view, since it is the only view
   // that window changes.
   document.querySelectorAll('[data-f]').forEach(function (b) { b.addEventListener('click', function () { st.fw = b.dataset.f; st.view = 'focus'; render(); }); });

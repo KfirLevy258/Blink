@@ -14,9 +14,14 @@ sed -e 's|#if 0 /\* Set this to "1" to enable content \*/|#if 1|' \
     -e 's|^ *#define LV_FONT_MONTSERRAT_28 .*|#define LV_FONT_MONTSERRAT_28 1|' \
     -e 's|^ *#define LV_FONT_MONTSERRAT_48 .*|#define LV_FONT_MONTSERRAT_48 1|' \
     "$LVGL_DIR/lv_conf_template.h" > "$BUILD/lv_conf.h"
+# usage_view.c's own dependencies, the same list render.sh links. This had
+# lost font_focus_40.c when Focus mode arrived and stopped linking at all
+# (found 2026-10-31, adding burn5h.c for the five-hour burn view).
 cc -O1 -w -DLV_CONF_INCLUDE_SIMPLE=1 -I"$BUILD" -I"$HERE" -I"$ROOT/firmware/src" -I"$LVGL_DIR" -I"$LVGL_DIR/src" \
    "$HERE/$1" "$ROOT/firmware/src/usage_view.c" "$ROOT/firmware/src/fmt.c" \
    "$ROOT/firmware/src/usage_state.c" "$ROOT/firmware/src/svc_state.c" \
-   "$ROOT/firmware/src/theme.c" "$ROOT/firmware/src/msg_parse.c" @"$BUILD/srcs.txt" -lm -o "$BUILD/proto"
+   "$ROOT/firmware/src/theme.c" "$ROOT/firmware/src/msg_parse.c" \
+   "$ROOT/firmware/src/burn5h.c" "$ROOT/firmware/src/font_focus_40.c" \
+   @"$BUILD/srcs.txt" -lm -o "$BUILD/proto"
 shift
 "$BUILD/proto" "$@"

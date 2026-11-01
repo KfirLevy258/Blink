@@ -1405,6 +1405,39 @@ class _Backend:
         """Whether install(), run from a checkout, starts the checkout."""
         return False
 
+    def service_environ(self, name):
+        """Environment variable `name` as the installed service will see it,
+        or None. Asked for CLAUDE_CONFIG_DIR and CODEX_HOME, the two that
+        move a folder the daemon reads, by the install disclosure.
+
+        None here, for launchd and systemd: the plist and the unit hand the
+        daemon PYTHONUNBUFFERED and nothing else, and neither starts it from
+        the shell that exported anything. (A desk that put the variable in
+        `launchctl setenv` or ~/.config/environment.d would be seen; that is
+        not where anyone is told to put it, and Claude Code's and Codex's
+        own docs say to export it in the shell.)"""
+        return None
+
+    def started_from_shell(self) -> bool:
+        """Whether the daemon this install leaves is one a person starts by
+        hand, from a shell, so that it sees that shell's environment.
+
+        True here, where there is no supervisor at all. Each backend says
+        when it is true for it too: the 2026-11-01 third review found the
+        disclosure taking any truthy creates() to mean "a service with its
+        own environment runs the daemon", while a Linux box with no
+        systemctl writes the unit, says "run it yourself", and the daemon
+        started that way reads $CLAUDE_CONFIG_DIR -- not the folder the note
+        named."""
+        return True
+
+    def shell_until_logon(self) -> bool:
+        """Whether install may start the daemon from this very process, so
+        that until the next logon it carries this shell's environment rather
+        than the service's. Only the Windows Run-key fallback does: see
+        _SchtasksBackend."""
+        return False
+
     def registered_argv(self):
         """What the registered service runs, minus `run`, as its file says;
         None if nothing is registered or the file is not one we wrote.
@@ -1490,6 +1523,10 @@ def _plist_text(argv) -> str:
 class _LaunchdBackend(_Backend):
     def creates(self):
         return plist_path()
+
+    def started_from_shell(self) -> bool:
+        # bootstrap starts it, from launchd, with the plist's environment.
+        return False
 
     def runs_checkout(self) -> bool:
         return True
@@ -1806,6 +1843,10 @@ class _LaunchdBackend(_Backend):
 # _SchtasksBackend._install_without_a_task for what it is a fallback FROM.
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = TASK_NAME
+# Where the machine-wide environment variables live, under HKLM. The
+# account's own are HKCU\Environment.
+SYSTEM_ENV_KEY = (r"SYSTEM\CurrentControlSet\Control\Session Manager"
+                  r"\Environment")
 
 
 def _winreg():
@@ -1894,6 +1935,50 @@ class _SchtasksBackend(_Backend):
             return ("a checkout on Windows gets no login service; start it"
                     f" by hand with: {command_to_type()} run")
         return None
+
+    def service_environ(self, name):
+        # Task Scheduler starts the task, and Explorer the Run key's entry,
+        # with the account's environment as the registry holds it -- the
+        # user's variable over the machine's, as Windows itself resolves
+        # them -- and never with the window `blink install` was typed in.
+        # So a `setx CLAUDE_CONFIG_DIR` is seen and a `set` or `$env:` is
+        # not. (The one exception, the Run key's first start, is
+        # shell_until_logon below.)
+        winreg = _winreg()
+        if winreg is None:
+            return None
+        for hive, path in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                           (winreg.HKEY_LOCAL_MACHINE, SYSTEM_ENV_KEY)):
+            try:
+                with winreg.OpenKey(hive, path) as key:
+                    value, kind = winreg.QueryValueEx(key, name)
+            except OSError:
+                continue
+            # A value of any other type -- REG_DWORD comes back an int,
+            # REG_MULTI_SZ a list, REG_BINARY bytes -- is not something
+            # Windows puts into a process's environment as a string, and
+            # handed on it crashed install in expanduser() and os.path.join
+            # (2026-11-01 third review). Read as unset at this hive.
+            if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) \
+                    or not isinstance(value, str):
+                continue
+            if kind == winreg.REG_EXPAND_SZ:
+                value = winreg.ExpandEnvironmentStrings(value)
+            return value or None
+        return None
+
+    def started_from_shell(self) -> bool:
+        # A checkout registers nothing (checkout_refusal) and is told to
+        # start the daemon by hand.
+        return bool(self.checkout_refusal())
+
+    def shell_until_logon(self) -> bool:
+        # When schtasks refuses the task, _install_without_a_task starts the
+        # launcher itself (_start_launcher, a Popen with no env=), so the
+        # daemon running after install inherits this window's environment;
+        # only the next logon's start, from Explorer, has the registry's.
+        # Install cannot know beforehand which way Windows will go.
+        return not self.checkout_refusal()
 
     def registered_argv(self):
         # The launcher runs blink.exe whatever wrote it (LAUNCHER_VBS). An
@@ -2231,6 +2316,12 @@ class _SystemdBackend(_Backend):
     def runs_checkout(self) -> bool:
         # Without systemctl the unit is written but nothing runs it.
         return self._has_systemctl() and self._booted()
+
+    def started_from_shell(self) -> bool:
+        # The same question: without systemctl, or with systemctl and no
+        # systemd running it (WSL), install writes the unit and the daemon
+        # is started by hand.
+        return not self.runs_checkout()
 
     def registered_argv(self):
         if not os.path.exists(unit_path()):
@@ -2868,11 +2959,23 @@ def _announce():
             print(pad + "folder, so leave it where it is.")
     print(f"  Creates    {shim_path()}")
     print("             the small script Claude Code runs to hand over the")
+    # What the daemon reads out of that payload, said field by field. This
+    # said "Only the usage figures are read out of it" for the whole of
+    # feat/ultra-burn while pc/providers/claude_cli read session_id and
+    # cost.total_cost_usd on every poll, to tell a reply that came back
+    # without a five-hour window (pc/session_verdict) -- the /code-review max
+    # of 2026-11-01 found it. Both stay in the daemon's memory, 64 sessions
+    # at most, and are never logged, saved or sent.
     print("             usage figures. It keeps the last status line payload")
     print("             Claude Code sent, which also names the session, the")
-    print("             working directory and the transcript file. Only the")
-    print("             usage figures are read out of it, and nothing in it")
-    print("             leaves this machine. It is readable by you alone.")
+    print("             working directory and the transcript file. The bridge")
+    print("             reads three things from it: the usage figures, the")
+    print("             session id and the session's running cost. The last")
+    print("             two only tell it whether Claude Code's replies keep")
+    print("             coming back without a five-hour limit, and are never")
+    print("             logged or saved.")
+    print("             Nothing in it leaves this machine, and it is readable")
+    print("             by you alone.")
     print(f"  Creates    {hook_shim_path()}")
     print("             a second small script, run when Claude Code starts and")
     print("             finishes work, so the panel can show whether it is busy.")
@@ -2925,13 +3028,146 @@ def _announce():
               f" {status_page.POLL_S // 60} minutes.")
     else:
         print("  Status-page alerts are off (blink config status-page on).")
+    # Every source the daemon reads usage from, and only those. Local
+    # Storage was missing until the review follow-up of 2026-11-01, though
+    # pc/desktop_local_storage.py has read the five-hour figure and its
+    # countdown out of it since Desktop started keeping one there.
     print("  The usage figures come from Claude Code, Claude Desktop's usage")
-    print("  cache, or the Codex session log -- each of which has already")
-    print("  worked them out. From the Codex log it keeps only the rate-limit")
-    print("  line, never the conversation.")
+    print("  cache and Local Storage, or the Codex session log -- each of")
+    # Exactly what pc/providers/codex_cli reads, said in full since the
+    # /code-review max of 2026-11-01: the rate limits, session_meta's cwd
+    # (the project name on the panel) and the task_*/turn_aborted events
+    # (the activity light). The token counts are read only on a weekly-only
+    # account, and are said below with that condition on them.
+    print("  which has already worked them out. From the Codex log it reads")
+    print("  the rate limits, the folder each session runs in (to name the")
+    print("  project), and when each turn starts and ends, never the")
+    print("  conversation.")
+    # The burn view's source (pc/burn_reader), missing from this note until
+    # the /code-review max of 2026-11-01: on a desk whose account has no
+    # five-hour window, the daemon reads Claude Code's own transcripts --
+    # the customer's whole working sessions -- so the one place that tells
+    # them what is read has to say so. Conditional in fact, not in print:
+    # install cannot know the verdict yet, so it says when it happens.
+    #
+    # The folder is the one the daemon will read, which is not always the
+    # one this shell would: the reader honours CLAUDE_CONFIG_DIR, but a
+    # login service does not start from this shell. launchd and systemd
+    # hand it none of the variable, and the Windows task gets the account's
+    # registry environment (service_environ). Printed as this shell
+    # resolved it, the note named a folder the daemon never reads on any
+    # desk that exports the variable in its shell profile (2026-11-01
+    # re-review). Where the daemon is started by hand from a shell, the
+    # shell's folder is the true one: see _service_folder.
+    from pc import burn_reader
+    root, caveat = _service_folder(
+        "CLAUDE_CONFIG_DIR",
+        lambda v: burn_reader.transcripts_root(
+            {"CLAUDE_CONFIG_DIR": v} if v else {}),
+        "so it reads the folder above.")
+    # On a line of its own, like the paths above: a home folder's length is
+    # unbounded, and inline it ran the paragraph off its margin.
+    print("  On an account with no five-hour limit, it also reads the")
+    print("  output-token count of each reply from Claude Code's transcripts:")
+    print(f"    {root}")
+    print("  It holds those counts in memory and sends the board only a total")
+    print("  per quarter-hour, never the conversation.")
+    for line in caveat:
+        print(line)
+    # The same for Codex (CodexBurnReader): an account whose Codex log
+    # reports a weekly limit and no five-hour one -- Codex Pro on the
+    # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
+    # the gauges come from. It reads every token figure of a turn, the
+    # input and cache ones too, because together they are what recognises
+    # a turn written twice (burn_reader, "WHY last_token_usage"); only the
+    # output tokens are added up.
+    #
+    # Its folder is the service's for the same reason as Claude Code's:
+    # codex_cli honours CODEX_HOME, which a login service does not carry
+    # either (2026-11-01 third review). That folder is where the gauges,
+    # the project name and the activity light come from as well, so the
+    # caveat says so rather than "the folder above" for the token counts.
+    root, caveat = _service_folder(
+        "CODEX_HOME", _codex_sessions_root,
+        "so every Codex figure, the rate limits included, comes from the"
+        " folder above.")
+    print("  If Codex reports no five-hour limit, it also reads the token")
+    print("  counts of each Codex turn from its session log, and adds up the")
+    print("  output tokens:")
+    print(f"    {root}")
+    print("  It holds those counts in memory and sends the board only a total")
+    print("  per quarter-hour, never the conversation.")
+    for line in caveat:
+        print(line)
     print()
     print(f"  To undo all of it:  {command_to_type()} uninstall")
     print()
+
+
+def _codex_sessions_root(codex_home):
+    """codex_cli.sessions_root() for CODEX_HOME set to `codex_home` (None
+    for unset), rather than as this process's environment has it. The same
+    two lines; tests/test_cli.py pins the two together, both ways."""
+    home = codex_home or os.path.join(os.path.expanduser("~"), ".codex")
+    return os.path.join(home, "sessions")
+
+
+def _service_folder(name, folder, consequence):
+    """(the folder the daemon will read, the lines to print under it).
+
+    folder(value) is the reader's folder with environment variable `name`
+    set to value, None meaning unset. The folder is the service's, worked
+    out from what backend().service_environ() says the service will see --
+    except where no service will run the daemon at all (nothing registered,
+    BLINK_SKIP_SERVICE, or a backend that leaves the daemon to be started
+    by hand), where this shell's environment is the one it will have.
+
+    The lines say why the folder is not the one this shell would name, and
+    say it exactly (2026-11-01 third review): "does not see it" was printed
+    whenever the two differed, also when the service sees the variable with
+    a different value, as a Windows `setx` followed by an old window gives.
+    `consequence` ends the sentence.
+    """
+    import textwrap
+    shell_value = os.environ.get(name) or None
+    shell_root = folder(shell_value)
+    b = backend()
+    # started_from_shell() covers a backend that creates nothing: the base
+    # class has no supervisor, and schtasks creates nothing exactly when its
+    # checkout_refusal() says the daemon is started by hand.
+    if _skip_service() or b.started_from_shell():
+        return shell_root, []
+    seen = b.service_environ(name) or None
+    root = folder(seen)
+    if root == shell_root:
+        return root, []
+    if shell_value and seen:
+        why = (f"The background service sees a different {name} from this"
+               f" shell's, {consequence}")
+    elif shell_value:
+        why = (f"{name} is set in this shell, but the background service"
+               f" does not see it, {consequence}")
+    else:
+        why = (f"{name} is set for the background service but not in this"
+               f" shell, {consequence}")
+    lines = ["  " + l for l in textwrap.wrap(why, 66)]
+    if b.shell_until_logon():
+        # The bridge _start_launcher starts inherits this window. With the
+        # variable unset here it was still said to keep "this window's
+        # {name}", under a line saying this window has none (fourth review,
+        # 2026-11-01); the folder below was right all along.
+        if shell_value:
+            keeps = (f"the bridge started now keeps this window's {name}"
+                     " until you next log in, and reads this folder until"
+                     " then:")
+        else:
+            keeps = (f"this window has no {name}, so until you next log in"
+                     " the bridge started now reads this folder:")
+        lines += ["  " + l for l in textwrap.wrap(
+            "If Windows refuses the task and the Run key is used instead, "
+            + keeps, 66)]
+        lines.append(f"    {shell_root}")
+    return root, lines
 
 
 def _install_steps() -> int:
@@ -3227,7 +3463,16 @@ def cmd_uninstall(_args) -> int:
               # confirmed theme. Kept, a reinstall sent the old theme to the
               # board on its first connect, which is not what starting over
               # means (review S7, 2026-10-28).
-              *_theme_files(blink_home())):
+              *_theme_files(blink_home()),
+              # Whether the account has a five-hour window
+              # (pc/session_verdict), and the temp names its writer,
+              # theme._write_json, leaves after a killed write; `.tmp` is the
+              # fixed name the writer used before the /code-review max of
+              # 2026-11-01. Owner's decision that day: a reinstall starts
+              # fresh. Kept, an old "no window" verdict -- a misread one
+              # included -- put the next install straight into the burn view
+              # before it had seen any evidence of its own.
+              *_verdict_files()):
         _rm(p)
     # The per-session state directory, and everything under it. state.json
     # above is the single-slot file this replaced; it is still on the list so
@@ -3265,6 +3510,15 @@ def _theme_files(home: str) -> list:
         out.extend(install_statusline.temp_siblings(p))
     out.extend(glob.glob(os.path.join(glob.escape(home), ".theme-*.tmp")))
     return out
+
+
+def _verdict_files() -> list:
+    """The session-window verdict and every temp file its writer may have
+    left. The path is session_verdict's, resolved now, never at import
+    (tests/test_sandbox.py)."""
+    from pc import session_verdict
+    p = session_verdict.verdict_path()
+    return [p, p + ".tmp", *install_statusline.temp_siblings(p)]
 
 
 def _uninstall_codex_hooks() -> None:
@@ -3644,14 +3898,116 @@ def cmd_status(args) -> int:
     else:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
-    _source_lines(desk)
+    codex = _source_lines(desk)
     if getattr(args, "wire", False):
+        # The Session rows come out of the same poll as the wire line.
         _wire_line()
+    else:
+        from pc import normalizer
+        _session_window_line(*_claude_page(desk))
+        _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
 
 
+def _session_window_line(page, verdict):
+    """Say so when the claude page is being treated as having no five-hour
+    window, and what proved it.
+
+    The mark rests on evidence (pc/session_verdict), and evidence can be
+    misread: a vendor rename of five_hour, a Desktop history whose `fh` key
+    went away for some other reason. This line is how support tells a real
+    Ultra account from that, and it is what support asks for first.
+
+    `page` is the merged claude frame, so the row says what the merge
+    decided, never what one provider thought: it used to poll a provider of
+    its own, and printed "no five-hour window" above a wire line carrying a
+    session figure (review, 2026-10-31). `verdict` is the SessionVerdict that
+    marked it, the persisted one the daemon writes, so a fresh `blink
+    status` says what the running daemon says (finding 5).
+
+    No page at all is a different case: no source has a reading, so there
+    is no figure the row could contradict, and the saved verdict alone
+    decides. A Claude Code-only Ultra desk in a session before its first
+    reply has a status line with no rate_limits; the daemon, which
+    remembers its last reading, is marked and sending the burn line, and
+    the row went missing here because a fresh process has nothing to
+    merge (/code-review max, 2026-11-01).
+    """
+    from pc import session_verdict
+    current = verdict.current() if verdict is not None else None
+    if page is None:
+        if current is None or current[0]:
+            return
+    elif not page.no_session_window:
+        return
+    why = session_verdict.DESCRIBE.get(current[1]) if current else None
+    print("Session     no five-hour window"
+          + (f" ({why})" if why else ""))
+
+
+def _codex_session_line(page):
+    """The Claude row's wording (_session_window_line), for the Codex page:
+    said when the merged codex frame is marked -- its newest reading had a
+    weekly limit and no five-hour one (codex_cli._no_short_window) -- which
+    is when the daemon sends that page the burn view.
+
+    `page` is a merged frame, as the Claude row's is: under `--wire` the
+    bus's own page("codex"), so the row is never printed for a Codex
+    reading that select_pair left off the board; for a plain status the
+    merge of the Codex provider's frames, the rows above it."""
+    if page is not None and page.no_session_window:
+        print("Session     no five-hour window on Codex (Codex reported a"
+              " weekly limit only)")
+
+
+def _claude_page(desk):
+    """(merged claude frame, its SessionVerdict) for plain `blink status`;
+    the frame is None when no source has a reading.
+
+    The merge the daemon runs, over the sources that can say anything about
+    a session window: the status line and Claude Desktop's usage cache
+    (desk's one reading of it, the same one the Desktop row prints from),
+    weighed by the verdict the daemon persists. Read-only: a status command
+    reports the verdict and never writes it. Claude Desktop's Local Storage,
+    whose LevelDB this used to parse on every run, is read only when the
+    account is marked, because the only thing it can prove is a window
+    (pc/providers/claude_desktop_ls), which can only lift a mark. Not a whole
+    IngestionBus poll, which `--wire` does: that also writes the weekly
+    anchor and, on a desk that has none, seeds it by walking Claude
+    Desktop's IndexedDB, which holds the customer's conversations -- not
+    something a plain status should do to print one row. The sources left
+    out carry no session figure (activity state, Codex, the weekly
+    projection), so they cannot change the answer.
+    """
+    from pc import normalizer, session_verdict
+    from pc.providers import claude_desktop
+    from pc.providers.claude_cli import ClaudeCliProvider
+    from pc.providers.claude_desktop_ls import (
+        ClaudeDesktopLocalStorageProvider)
+    now = time.time()
+    verdict = session_verdict.SessionVerdict(persist=False)
+
+    def polled(provider):
+        try:
+            return list(provider.poll(now) or [])
+        except Exception:
+            # As the bus contains a provider: a source that cannot be read
+            # costs its own say, not the status report.
+            return []
+
+    frames = polled(ClaudeCliProvider())
+    reading = desk.desktop_reading if desk is not None else None
+    if reading is not None and reading[0] == claude_desktop.VERDICT_FRAME:
+        frames.append(reading[1])
+    if verdict.observe(frames, now):
+        frames.extend(polled(ClaudeDesktopLocalStorageProvider()))
+    verdict.mark(frames, now)
+    return (normalizer.merge(frames) if frames else None), verdict
+
+
 def _wire_line():
-    """The usage message the bridge would put on the cable right now.
+    """The Session row and the usage message the bridge would put on the
+    cable right now, from one poll.
 
     The last thing that can be checked without a board: every source read,
     merged and encoded exactly as the daemon does it (pc/ingest -> normalizer
@@ -3659,8 +4015,14 @@ def _wire_line():
     would have and asserts on this line; a person can paste it into a report.
     """
     import json as _json
-    from pc import ingest
-    msg = ingest.IngestionBus().poll()
+    from pc import ingest, session_verdict
+    # The persisted verdict, read and never written: the daemon writes it.
+    bus = ingest.IngestionBus(
+        verdict=session_verdict.SessionVerdict(persist=False))
+    msg = bus.poll()
+    _session_window_line(bus.claude_page(), bus.verdict())
+    from pc.providers import codex_cli
+    _codex_session_line(bus.page(codex_cli.PROVIDER_ID))
     print()
     if msg is None:
         print("Wire        nothing to send -- no source has a reading")
@@ -3857,7 +4219,7 @@ def _source_lines(desk=None):
     held = desk.desktop_paths if desk is not None else None
     with desktop_paths.one_answer(held) as folder:
         _source_lines_desktop(desk, folder, now)
-    _source_lines_codex(now)
+    return _source_lines_codex(now)
 
 
 def _source_lines_desktop(desk, folder, now):
@@ -3937,7 +4299,8 @@ def _source_lines_desktop(desk, folder, now):
 
 
 def _source_lines_codex(now):
-    """_source_lines' Codex rows."""
+    """_source_lines' Codex rows; returns the Codex frames they were printed
+    from, for the Session row (_codex_session_line), or [] for none."""
     from pc.providers import codex_cli
     logs = codex_cli.recent_rollouts()
     if logs:
@@ -3956,6 +4319,7 @@ def _source_lines_codex(now):
                   " rate-limit line -- finish one turn in Codex; if that does"
                   " not help, its log format may have changed; please report it")
     else:
+        frames = []
         print("Codex       no session logs (Codex not installed, or never run)")
         print(f"            looked under {codex_cli.sessions_root()}")
 
@@ -3967,6 +4331,7 @@ def _source_lines_codex(now):
     if logs or install_codex_hooks._read_marker():
         for line in _codex_hook_status():
             print(line)
+    return list(frames or [])
 
 
 def _update_reaches_the_service() -> bool:

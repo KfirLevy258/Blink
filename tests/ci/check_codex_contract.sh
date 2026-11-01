@@ -5,7 +5,8 @@
 #
 # pc/providers/codex_cli.py reads `rate_limits` out of Codex's token_count
 # event: primary/secondary windows, each with used_percent, window_minutes and
-# resets_at. Codex is open source, and those are Rust struct fields in
+# resets_at. pc/burn_reader.CodexBurnReader reads the same event's `info`:
+# the token figures of total_token_usage and last_token_usage (check 12). Codex is open source, and those are Rust struct fields in
 # codex-rs/protocol/src/protocol.rs, serialised under their own names. So the
 # contract can be checked at the ref that ships, without an account.
 #
@@ -51,6 +52,87 @@ fetch() {
 	printf '%s' "$WORK/$name"
 }
 
+# field_attrs FILE ITEM FIELD -> the attributes written on FIELD inside ITEM,
+# one per line (rust_attrs, tests/ci/lib_rust.sh). FIELD is the start of the
+# field's (or variant's) own line, `pub output_tokens:` or `TokenCount(`.
+# field_decl prints that line itself, which is where the field's type is.
+field_attrs() {
+	rust_item "$1" "$2" | rust_attrs "$3"
+}
+field_decl() {
+	rust_item "$1" "$2" | rust_attrs "$3" decl
+}
+
+# item_attrs FILE ITEM -> the serde attributes written on ITEM itself, one
+# per line, however many attributes sit above it and however rustfmt split
+# them. The derive, ts and strum attributes are left out: EventMsg carries
+# `#[ts(tag = "type")]` too, and a check for `tag = "type"` that read it
+# would pass the day serde's own tag changed.
+item_attrs() {
+	rust_attrs "$2" <"$1" | grep 'serde[(]' || true
+}
+
+# serialised_elsewhere ATTRS [DECL] -> true when a #[serde(...)] in ATTRS
+# moves the field's JSON key or leaves it out, wherever in the attribute it
+# is written: rename (rename = "..." and rename(serialize = ...) alike),
+# skip, skip_serializing, flatten (the field's own key is gone and its
+# fields are spliced into the parent: protocol.rs already flattens
+# SessionMetaLine.meta that way), or untagged on a variant (no `type` left
+# to match). Upstream puts `default` first as a habit
+# (TokenUsage.cache_write_input_tokens), and a check that only caught a
+# rename written first missed `#[serde(default, rename = "completion_tokens")]`
+# (3rd review, 2026-11-01).
+#
+# skip_serializing_if counts only when DECL, the field's own line, is not an
+# Option. On an Option it leaves the key out exactly when the value is None,
+# and every reader here takes these keys with .get(), so absent reads as
+# null: the frame, _no_short_window and CodexBurnReader._entry come out the
+# same for both (8 cases compared, 4th review, 2026-11-01). It is upstream's
+# most common serde attribute, 148 uses in protocol.rs, one of them on
+# normal_model_slug right beside primary and secondary, so failing on it
+# would turn the release leg red the day it lands on a field we read. On
+# used_percent, an f64, or last_token_usage, a TokenUsage, it means a value
+# can vanish, and that still fails.
+#
+# Only serde's own attribute: #[ts(skip)] and #[schemars(skip)] are about
+# generated TypeScript and JSON Schema, not the JSON Codex writes. rename_all
+# and alias do not match, and are not this.
+serialised_elsewhere() {
+	se_words='rename|skip|skip_serializing|flatten|untagged'
+	if ! printf '%s\n' "${2:-}" | grep -Eq ':[[:space:]]*(std::option::|core::option::)?Option<'; then
+		se_words="$se_words|skip_serializing_if"
+	fi
+	printf '%s\n' "$1" | grep -Eq \
+		"serde[(]([^]]*[^A-Za-z0-9_])?($se_words)([^A-Za-z0-9_]|\$)"
+}
+
+# check_fields FILE ITEM LABEL FIELD... -> fail on the first FIELD of ITEM
+# that serialised_elsewhere says is not written under its own name, naming
+# the attribute that moved it.
+check_fields() {
+	cf_file=$1 cf_item=$2 cf_label=$3
+	shift 3
+	for cf_field in "$@"; do
+		cf_attrs=$(field_attrs "$cf_file" "$cf_item" "$cf_field")
+		if serialised_elsewhere "$cf_attrs" "$(field_decl "$cf_file" "$cf_item" "$cf_field")"; then
+			fail "$cf_label '$cf_field' is renamed, skipped or flattened by serde -- the JSON key has moved or gone: $(printf '%s\n' "$cf_attrs" | grep 'serde[(]' | tr '\n' ' ')"
+		fi
+	done
+}
+
+# check_no_rename_all FILE STRUCT... -> fail when a struct's own serde
+# attributes carry rename_all, which moves every key at once without
+# touching a Rust field name.
+check_no_rename_all() {
+	cr_file=$1
+	shift
+	for cr_st in "$@"; do
+		if item_attrs "$cr_file" "pub struct $cr_st" | grep -q 'rename_all'; then
+			fail "$cr_st is serialised with rename_all -- the JSON keys have moved"
+		fi
+	done
+}
+
 printf '== Codex protocol at %s\n' "$REF"
 FILE=$(fetch codex-rs/protocol/src/protocol.rs)
 
@@ -75,17 +157,17 @@ ok "used_percent, window_minutes and resets_at are still there"
 # 4. And none of them is serialised under another name. A #[serde(rename)]
 #    on the field, or rename_all on the struct, changes the JSON without
 #    touching the Rust name the greps above look for.
-for st in RateLimitSnapshot RateLimitWindow; do
-	if grep -B4 "pub struct $st" "$FILE" | grep -q 'rename_all'; then
-		fail "$st is serialised with rename_all -- the JSON keys have moved"
-	fi
-done
-for field in 'pub rate_limits:' 'pub primary:' 'pub secondary:' 'pub used_percent:' 'pub window_minutes:' 'pub resets_at: Option'; do
-	if grep -B2 "$field" "$FILE" | grep -q 'serde(rename\b\|serde(rename ='; then
-		fail "'$field' is serialised under another name"
-	fi
-done
-ok "no serde renames on the fields we read"
+#    The struct's whole attribute block (item_attrs), not a grep -B4
+#    window: a rename_all five attributes up was outside it (4th review).
+check_no_rename_all "$FILE" RateLimitSnapshot RateLimitWindow
+#    Read off each field's own attributes, inside its own struct
+#    (field_attrs): a `grep -B2` for 'serde(rename' caught a rename only
+#    when it was written first, and nothing caught skip (3rd review,
+#    2026-11-01).
+check_fields "$FILE" 'pub struct TokenCountEvent' TokenCountEvent 'pub rate_limits:'
+check_fields "$FILE" 'pub struct RateLimitSnapshot' RateLimitSnapshot 'pub primary:' 'pub secondary:'
+check_fields "$FILE" 'pub struct RateLimitWindow' RateLimitWindow 'pub used_percent:' 'pub window_minutes:' 'pub resets_at:'
+ok "no serde renames, skips or flattens on the fields we read"
 
 # 5. Where the log lives. pc/providers/codex_cli.py: $CODEX_HOME, else
 #    ~/.codex; then sessions/<year>/<month>/<day>/rollout-*.jsonl.
@@ -180,5 +262,53 @@ POLICY=$(fetch codex-rs/rollout/src/policy.rs)
 grep -q -E 'RolloutItem::SessionMeta\(_\) => (true|Some\(Cow::Borrowed\(item\)\))' "$POLICY" ||
 	fail "session_meta is no longer persisted unconditionally"
 ok "session_meta is still written to every rollout"
+
+# 12. The burn view's figures. pc/burn_reader.CodexBurnReader counts the
+#     output_tokens of each token_count event's info.last_token_usage, and
+#     recognises an event written twice by every figure of total_token_usage
+#     and last_token_usage (CODEX_USAGE_FIELDS). Renamed, the reader would
+#     find nothing to count and the page would draw twenty empty bars, a
+#     confident "idle", with every Python test green -- they feed it events
+#     this repo wrote (/code-review max, 2026-11-01).
+rust_item "$FILE" 'pub enum EventMsg' | grep -q '^[[:space:]]*TokenCount(TokenCountEvent),' ||
+	fail "EventMsg lost TokenCount(TokenCountEvent) -- token_count events are gone"
+# EventMsg's own serde attributes, read whole (item_attrs). A fixed
+# `grep -B4` with a `serde(` filter failed a rustfmt split of this very
+# attribute as "no longer snake_case", and missed a `content` one attribute
+# further up (4th review, 2026-11-01).
+EVENT_ATTRS=$(item_attrs "$FILE" 'pub enum EventMsg')
+printf '%s\n' "$EVENT_ATTRS" | grep -q 'rename_all *= *"snake_case"' ||
+	fail "EventMsg is no longer snake_case -- the event is not called token_count"
+# The reader matches payload.type == "token_count": EventMsg must still be
+# internally tagged by `type`, with the variant's fields beside the tag. A
+# tag of another name, an adjacent `content`, or no tag at all moves both.
+printf '%s\n' "$EVENT_ATTRS" | grep -Eq '(^|[^A-Za-z0-9_])tag *= *"type"' ||
+	fail "EventMsg is no longer tagged by \"type\" -- payload.type is not the event name"
+if printf '%s\n' "$EVENT_ATTRS" | grep -Eq '(^|[^A-Za-z0-9_])content *='; then
+	fail "EventMsg is adjacently tagged (content) -- payload.info has moved under the content key"
+fi
+if printf '%s\n' "$EVENT_ATTRS" | grep -Eq '(^|[^A-Za-z0-9_])untagged([^A-Za-z0-9_]|$)'; then
+	fail "EventMsg is untagged -- payload.type is gone"
+fi
+# And the variant itself keeps the snake_case name: a per-variant rename
+# (EventMsg already renames task_started that way) or skip on TokenCount
+# changes payload.type with the line above still true.
+check_fields "$FILE" 'pub enum EventMsg' 'EventMsg variant' 'TokenCount('
+rust_item "$FILE" 'pub struct TokenCountEvent' | grep -q 'pub info: Option<TokenUsageInfo>,' ||
+	fail "TokenCountEvent no longer carries info: Option<TokenUsageInfo>"
+INFO=$(rust_item "$FILE" 'pub struct TokenUsageInfo')
+for field in 'pub total_token_usage: TokenUsage,' 'pub last_token_usage: TokenUsage,'; do
+	printf '%s\n' "$INFO" | grep -q "$field" || fail "TokenUsageInfo lost '$field'"
+done
+USAGE=$(rust_item "$FILE" 'pub struct TokenUsage')
+for field in input_tokens cached_input_tokens cache_write_input_tokens output_tokens reasoning_output_tokens total_tokens; do
+	printf '%s\n' "$USAGE" | grep -q "pub $field: i64," || fail "TokenUsage lost '$field: i64'"
+done
+check_no_rename_all "$FILE" TokenCountEvent TokenUsageInfo TokenUsage
+check_fields "$FILE" 'pub struct TokenCountEvent' TokenCountEvent 'pub info:'
+check_fields "$FILE" 'pub struct TokenUsageInfo' TokenUsageInfo 'pub total_token_usage:' 'pub last_token_usage:'
+check_fields "$FILE" 'pub struct TokenUsage' TokenUsage 'pub input_tokens:' 'pub cached_input_tokens:' \
+	'pub cache_write_input_tokens:' 'pub output_tokens:' 'pub reasoning_output_tokens:' 'pub total_tokens:'
+ok "token_count still carries info.total_token_usage and last_token_usage, output_tokens and all"
 
 printf 'PASS [codex contract at %s]\n' "$REF"

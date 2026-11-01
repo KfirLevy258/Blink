@@ -216,9 +216,30 @@ static void check_palette(const char *name, const struct palette *p,
 	CHECK(p->arc_w >= 4 && p->arc_w <= THEME_ARC_W_MAX, m);
 }
 
+/*
+ * The burn view's cached inks (theme_cur_burn_inks) are what a fresh
+ * theme_burn_inks() of the active palette would give. The cache exists
+ * because the walk is milliseconds of soft float on the board and the draw
+ * callback used to run it on every draw (2026-11-01 re-review); a stale
+ * cache would paint one theme's bars on another's ground.
+ */
+static bool inks_cached_right(void)
+{
+	struct theme_burn_inks k;
+	const struct theme_burn_inks *c = theme_cur_burn_inks();
+
+	theme_burn_inks(theme_pal(), theme_active_id() == THEME_DARK, &k);
+	return c->hot == k.hot && c->cold == k.cold && c->base == k.base &&
+	       c->tick == k.tick;
+}
+
 int main(void)
 {
 	char m[160];
+
+	/* Boot: nothing selected yet, Dark is showing, and its inks with it. */
+	CHECK(theme_active_id() == THEME_DARK && inks_cached_right(),
+	      "burn inks before any select are Dark's");
 
 	/* --- Every built-in --- */
 	for (int id = 0; id < THEME_BUILTIN_N; id++) {
@@ -541,7 +562,25 @@ int main(void)
 	}
 	CHECK(theme_select_custom(&t) && theme_active_id() == THEME_CUSTOM &&
 	      theme_pal()->bg == 0x101418, "select a custom theme");
+	CHECK(inks_cached_right(), "burn inks follow a custom theme");
+	{
+		/* A refused custom theme leaves the custom one's inks. */
+		struct theme_custom bad = t;
+
+		bad.c[1] = bad.c[0];
+		CHECK(!theme_select_custom(&bad) && inks_cached_right(),
+		      "a refused custom theme keeps the burn inks it had");
+	}
+	for (int id = 0; id < THEME_BUILTIN_N; id++) {
+		theme_select(id);
+		snprintf(m, sizeof(m), "burn inks follow a select of %s",
+			 theme_name(id));
+		CHECK(inks_cached_right(), m);
+	}
+	CHECK(!theme_select(13) && inks_cached_right(),
+	      "a bad id keeps the burn inks it had");
 	theme_select(THEME_DARK);
+	CHECK(inks_cached_right(), "burn inks back on Dark");
 
 	/* --- Arc colour --- */
 	{
@@ -771,6 +810,131 @@ int main(void)
 		theme_dot_colours(&d, &live, &stale);
 		CHECK(live == 0x22C55E && stale == 0xFFFFFF,
 		      "custom: a hued low keeps low and mid");
+	}
+
+	/*
+	 * --- The burn view's bars: a floor on every theme ---
+	 *
+	 * The older bars were g1 mixed 35% into the ground with no floor, and
+	 * the /code-review max of 2026-11-01 measured them, as drawn, at 2.14
+	 * (Retro LCD) to 2.88 (Dark, the contract's own byte) on five
+	 * built-ins. Both bar inks must read THEME_BURN_INK_FLOOR on the
+	 * ground, and the newest hour must stay the stronger mark, a
+	 * THEME_BURN_INK_STEP apart from the rest. Printed with the plain mix's
+	 * figure beside it, so the log is the before and after.
+	 */
+	for (int id = 0; id < THEME_BUILTIN_N; id++) {
+		const struct palette *p = theme_builtin(id);
+		struct theme_burn_inks k;
+		uint32_t hot0 = id == THEME_DARK ? 0x7FB2F0 :
+				theme_mix(p->g1, p->text, 0.35);
+		uint32_t cold0 = id == THEME_DARK ? 0x2D5C99 :
+				 theme_mix(p->g1, p->bg, 0.35);
+
+		theme_burn_inks(p, id == THEME_DARK, &k);
+		snprintf(m, sizeof(m), "%s: burn bars on the ground, newest"
+			 " %.2f:1 (was %.2f), older %.2f:1 (was %.2f) >= 3",
+			 theme_name(id), cr(k.hot, p->bg), cr(hot0, p->bg),
+			 cr(k.cold, p->bg), cr(cold0, p->bg));
+		CHECK(cr(k.hot, p->bg) >= THEME_BURN_INK_FLOOR &&
+		      cr(k.cold, p->bg) >= THEME_BURN_INK_FLOOR, m);
+		snprintf(m, sizeof(m), "%s: the newest hour is the stronger"
+			 " mark, %.2f:1 from the older bars (was %.2f) >= 1.5",
+			 theme_name(id), cr(k.hot, k.cold), cr(hot0, cold0));
+		CHECK(cr(k.hot, p->bg) > cr(k.cold, p->bg) &&
+		      cr(k.hot, k.cold) >= THEME_BURN_INK_STEP, m);
+		/* A theme the plain mix already served is drawn as before. */
+		if (cr(cold0, p->bg) >= THEME_BURN_INK_FLOOR &&
+		    cr(hot0, p->bg) >= THEME_BURN_INK_FLOOR &&
+		    cr(hot0, cold0) >= THEME_BURN_INK_STEP) {
+			snprintf(m, sizeof(m), "%s: already readable, so the"
+				 " burn bars keep the plain mix",
+				 theme_name(id));
+			CHECK(k.hot == hot0 && k.cold == cold0, m);
+		}
+	}
+	{
+		/* Dark keeps every contract byte but the one under the floor,
+		 * and that one only moves towards g1, the arrow's own blue. */
+		struct theme_burn_inks k;
+		const struct palette *d = theme_builtin(THEME_DARK);
+
+		theme_burn_inks(d, true, &k);
+		CHECK(k.hot == 0x7FB2F0 && k.base == 0x3A414B &&
+		      k.tick == 0x5C636B,
+		      "Dark: the burn view keeps the contract's newest-hour,"
+		      " baseline and tick bytes");
+		snprintf(m, sizeof(m), "Dark: the older bars are %06X, a step"
+			 " from #2D5C99 towards g1", (unsigned)k.cold);
+		CHECK(k.cold != 0x2D5C99 &&
+		      ((k.cold >> 16) & 0xFF) >= 0x2D &&
+		      ((k.cold >> 8) & 0xFF) >= 0x5C && (k.cold & 0xFF) >= 0x99 &&
+		      ((k.cold >> 16) & 0xFF) <= 0x43 &&
+		      ((k.cold >> 8) & 0xFF) <= 0x87 && (k.cold & 0xFF) <= 0xDF,
+		      m);
+	}
+	{
+		/*
+		 * Custom themes: the floor is min(3:1, the text's own), as for
+		 * grey, and the step holds wherever the text leaves room for
+		 * it -- two marks 3:1 and 1.5 apart need about 4.5:1 on one
+		 * side of the ground. g1 drawn at random too, since it is the
+		 * owner's and nothing checks it against the ground. Measured
+		 * 2026-11-01 on this seed: the step holds for every theme
+		 * whose text reads 4.8:1 or more; 5 is the check, with room.
+		 */
+		uint32_t x = 0x9E3779B9u;
+		int kept = 0, tried = 0, no_room = 0, step_short = 0;
+		double worst = 99.0;
+
+		while (kept < 20000 && tried < 2000000) {
+			struct theme_custom r = t;
+			struct palette rp;
+			struct theme_burn_inks k;
+
+			tried++;
+			for (int i = 0; i < 3; i++) {
+				x ^= x << 13;
+				x ^= x >> 17;
+				x ^= x << 5;
+				r.c[i] = x & 0xFFFFFF;
+			}
+			if (!theme_custom_valid(&r)) {
+				continue;
+			}
+			kept++;
+			theme_derive(&r, &rp);
+			theme_burn_inks(&rp, false, &k);
+
+			double tx = cr(rp.text, rp.bg);
+			double want = tx < 3.0 ? tx : 3.0;
+			double got = cr(k.hot, rp.bg) < cr(k.cold, rp.bg) ?
+				     cr(k.hot, rp.bg) : cr(k.cold, rp.bg);
+
+			if (got / want < worst) {
+				worst = got / want;
+			}
+			if (cr(k.hot, k.cold) < THEME_BURN_INK_STEP ||
+			    cr(k.hot, rp.bg) <= cr(k.cold, rp.bg)) {
+				if (tx >= 5.0) {
+					step_short++;
+					printf("  short: %06X on %06X, g1 %06X\n",
+					       (unsigned)rp.text, (unsigned)rp.bg,
+					       (unsigned)rp.g1);
+				} else {
+					no_room++;
+				}
+			}
+		}
+		snprintf(m, sizeof(m), "every custom theme's burn bars meet"
+			 " min(3.0, text) on the ground (%d themes, worst %.4f"
+			 " of the target)", kept, worst);
+		CHECK(kept == 20000 && worst >= 1.0, m);
+		snprintf(m, sizeof(m), "and the newest hour is 1.5:1 the"
+			 " stronger wherever the text reads 5:1 or more (%d"
+			 " short; %d with text under 5:1 went without)",
+			 step_short, no_room);
+		CHECK(step_short == 0, m);
 	}
 
 	printf(failures ? "\n%d FAILED\n" : "\nall theme checks passed\n",

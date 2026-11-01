@@ -24,6 +24,7 @@
 #include "ui_theme.h"
 #include "ui_settings.h"
 #include "touch_inject.h"
+#include "burn5h.h"
 
 #define PROTO_VERSION BLINK_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
@@ -173,7 +174,10 @@ static void emit(const char *json)
 /* edit_done: this firmware handles theme_edit done:1 (theme contract
  * Addendum 6). A cap of its own because the 1.4.0 builds before the handler
  * already said "theme", and the daemon must not send them the line. */
-#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\"]"
+/* burn: this firmware draws the five-hour burn view (docs/plans/burn-5h.md),
+ * so the daemon may send it `burn` lines. A board that does not list it --
+ * every 1.3.4 in the field -- never receives one. */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\"]"
 
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,
@@ -211,14 +215,14 @@ void proto_send_pref(void)
 	 * had nothing but board.json's memory to say which board it was --
 	 * and a remembered id must never decide whose theme wins.
 	 *
-	 * 119 bytes at its widest ("claude", a 32-digit id and the three
-	 * caps; 99 with this board's 12 digits), measured by
+	 * 126 bytes at its widest ("claude", a 32-digit id and the four
+	 * caps; 106 with this board's 12 digits), measured by
 	 * tests/pc/test_board_caps.py, which fails if it outgrows this. It was
-	 * 96 B for the 61 B line before the id, and 107 before edit_done.
-	 * With the NUL that leaves 8 B of the 128. A cap costs its name's
-	 * length plus 3 B (the comma and two quotes), so a name of five
-	 * characters or fewer still fits and a longer one needs this buffer
-	 * made bigger first. Both stay far under the daemon's 512.
+	 * 96 B for the 61 B line before the id, 107 before edit_done and 119
+	 * before burn. With the NUL that leaves 1 B of the 128: a cap costs
+	 * its name's length plus 3 B (the comma and two quotes), so the NEXT
+	 * cap of any name needs this buffer made bigger first. Both stay far
+	 * under the daemon's 512.
 	 */
 	char buf[128];
 
@@ -238,12 +242,12 @@ static void send_hello(void)
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
-	/* 148 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
-	 * "1.4.0", the three caps), measured by tests/pc/test_board_caps.py,
+	/* 155 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.4.0", the four caps), measured by tests/pc/test_board_caps.py,
 	 * which fails if it outgrows this; a truncated hello is not JSON. With
-	 * the NUL, 11 B of the 160 are spare. A cap costs its name's length
+	 * the NUL, 4 B of the 160 are spare. A cap costs its name's length
 	 * plus 3 B and a two-digit minor in fw 1 B, and whatever is added has
-	 * to sum to 11 or less. */
+	 * to sum to 4 or less. */
 	char buf[160];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
@@ -531,7 +535,7 @@ static void dispatch(const char *json)
 		num(json, "n_stuck", &nst, 0, 9999);
 		usage_view_set_counts((int)ns, (int)nr, (int)nw, (int)nst);
 
-		char p1[16];
+		char p1[USAGE_TAG_MAX];
 
 		if (msg_get_str(json, "provider", p1, sizeof(p1))) {
 			usage_view_set_provider1(p1);
@@ -552,7 +556,7 @@ static void dispatch(const char *json)
 		num(json, "burn_pph", &burn, 0, 9999);
 		usage_view_set_burn(burn);
 
-		char p2[16];
+		char p2[USAGE_TAG_MAX];
 		double p2s = -1, p2w = -1, p2si = -1, p2wi = -1;
 
 		if (msg_get_str(json, "p2", p2, sizeof(p2))) {
@@ -632,6 +636,9 @@ static void dispatch(const char *json)
 		    off >= -840 && off <= 840) {
 			net_time_set_manual((int64_t)epoch);
 			net_time_set_offset((int32_t)off);
+			/* The burn view's hour axis is local time; this is the
+			 * only place the offset ever changes. */
+			usage_view_set_utc_offset((int32_t)off);
 			printk("[proto] host time synced\n");
 		}
 	} else if (strcmp(type, "pong") == 0) {
@@ -928,6 +935,30 @@ static void dispatch(const char *json)
 			svc_note(prov, lvl, what, k_uptime_get());
 			usage_view_svc_changed();
 		}
+	} else if (strcmp(type, "burn") == 0) {
+		/*
+		 * Output tokens over the trailing five hours, for a page whose
+		 * account has no session window (docs/plans/burn-5h.md). Its
+		 * own line because `usage` has no room for twenty more numbers.
+		 * Sent only to a board whose caps say "burn", while the claude
+		 * page has no session window; when the window comes back the
+		 * daemon just stops, and the view lets go after 180 s of
+		 * silence -- or at once, on a usage line with a real
+		 * session_pct.
+		 *
+		 * Validated whole before anything is kept, the theme line's
+		 * rule: one bad bucket and the line is refused entire, and the
+		 * view goes on showing the last good one. Nothing from it is
+		 * logged -- usage figures are exactly what the console must not
+		 * carry -- only that it was refused.
+		 */
+		struct burn5h m;
+
+		if (!burn5h_parse(json, &m)) {
+			printk("[proto] burn line refused\n");
+			return;
+		}
+		usage_view_set_burn5h(&m, k_uptime_get());
 	}
 	/* unknown types ignored */
 }

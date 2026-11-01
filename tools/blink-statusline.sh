@@ -10,8 +10,12 @@
 # the install disclosure repeats it: this stores Claude Code's whole status
 # line payload, which alongside the two usage percentages carries the session
 # id, the working directory, the transcript path, the workspace directories
-# and the session's cost. The daemon reads only `rate_limits` out of it and
-# nothing else leaves this file -- but the file exists, so it is written
+# and the session's cost. The daemon reads `rate_limits`, `session_id` and
+# `cost.total_cost_usd` out of it -- the last two, held in memory and never
+# logged or saved, only to tell a reply that came back without a five-hour
+# window (pc/session_verdict). This said "only `rate_limits`" after the
+# other two started being read, until the /code-review max of 2026-11-01.
+# Nothing leaves this file -- but the file exists, so it is written
 # readable by this user alone (the umask below), and the disclosure says what
 # is in it rather than claiming it holds two numbers. POSIX sh has no JSON
 # parser, and a sed that tried to cut the payload down would be a second

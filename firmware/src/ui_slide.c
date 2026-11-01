@@ -9,6 +9,7 @@
 #include "ui_slide.h"
 #include "ui_slide_geom.h"
 #include "ui_touchfx.h"
+#include "usage_view.h"
 
 /* The panel's scroll axis is its native vertical: 320 lines, which rotation=90
  * presents as the landscape screen's horizontal. So a "line" here is a screen
@@ -270,6 +271,21 @@ void ui_slide_run(int dir, void (*pump)(void))
 	 * list by other routes.)
 	 */
 	ui_slide_freeze(true);
+	/*
+	 * And the gauge screen's left half stays whichever it is for the whole
+	 * run. The freeze drops what a change paints, not the change itself:
+	 * the strips still to come draw the tree as it is when they are
+	 * painted, so a burn line or a session reading that changed hands
+	 * between strips left the ones already painted showing the session
+	 * gauge and the rest the burn view, or the other way round, for what
+	 * was left of the wipe: as much as SLIDE_MIN_MS of a half made of both
+	 * (review of 2026-10-31). Let go after the settle, where a change of
+	 * hands is an ordinary redraw. Every wipe takes it, the ones that cover
+	 * the gauge screen as well as the ones that reveal it: holding costs
+	 * nothing, and a rule with exceptions is one the next caller has to
+	 * know about.
+	 */
+	usage_view_hold_half(true);
 
 	const int travel = ui_slide_travel(dir, LV_HOR_RES, LV_VER_RES);
 	/*
@@ -396,6 +412,8 @@ void ui_slide_run(int dir, void (*pump)(void))
 	ui_slide_freeze(false);
 	lv_obj_invalidate(scr);
 	lv_refr_now(disp);
+	/* Whatever arrived during the run takes the half now, in one redraw. */
+	usage_view_hold_half(false);
 
 	/*
 	 * What it actually cost, on the actual board.

@@ -37,6 +37,15 @@ OUT = os.path.join(ROOT, "pc", "theme_builtins.py")
 # (pc/theme.py SLOTS), named by the struct palette roles they come from.
 ROLES = ("bg", "text", "g1", "g2", "low", "mid", "high")
 
+# Two more palette roles a built-in has by table and a custom theme has by
+# derivation: the arc track and the grey. They are not part of a theme on the
+# wire, but the burn view's baseline and hour ticks are mixed from them
+# (firmware/src/theme.c theme_burn_inks), and a built-in's are the table's own
+# values, not the 15% and 45% mixes a custom theme gets. Without them the
+# builder's preview would have to derive them for a built-in too, and show
+# the board a baseline a few steps of RGB off.
+EXTRA_ROLES = ("track", "grey")
+
 
 def _read(path):
     with open(path, encoding="utf-8") as f:
@@ -174,12 +183,13 @@ def builtins(h_src=None, c_src=None):
         p = pals.get(key)
         if p is None:
             raise ValueError(f"theme.c: no palette for THEME_{key}")
-        missing = [r for r in ROLES + ("arc_w",) if r not in p]
+        missing = [r for r in ROLES + EXTRA_ROLES + ("arc_w",) if r not in p]
         if missing:
             raise ValueError(f"theme.c: THEME_{key} lacks {missing}")
         out.append({
             "id": tid, "key": key.lower(), "name": names[key],
             "c": [p[r] for r in ROLES], "w": p["arc_w"],
+            "track": p["track"], "grey": p["grey"],
             # Omitted from a palette means false, as C initialisers do.
             "ends": "flat" if p.get("flat", False) else "round",
             "dot": 1 if p.get("dot", False) else 0,
@@ -202,6 +212,8 @@ def source():
         "Each built-in is its id, its key (the enum name), the name its tile",
         "shows, and the seven colours and style a custom theme is made of,",
         "in the wire's field names and order (pc/theme.py CUSTOM_FIELDS).",
+        "Its track and grey are the table's own, which the builder's burn",
+        "view mixes from; they are not part of a theme on the wire.",
         "The board needs none of this -- a built-in travels by id alone --",
         "but the builder's preview, and a custom theme started from a",
         'built-in, need the colours the board really draws."""',
@@ -218,6 +230,8 @@ def source():
             f' "name": {q(r["name"])},')
         lines.append(
             '     "c": [' + ", ".join(q(c) for c in r["c"]) + "],")
+        lines.append(
+            f'     "track": {q(r["track"])}, "grey": {q(r["grey"])},')
         lines.append(
             f'     "w": {r["w"]}, "ends": {q(r["ends"])}, "dot": {r["dot"]},'
             f' "by": {q(r["by"])}}},')

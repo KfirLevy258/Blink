@@ -182,6 +182,30 @@ class NormalizedUsageFrame:
     # after observed_at. observed_at itself, and every age derived from it
     # (the wire's age_s, staleness), mean what they always meant.
     first_seen_at: object = None
+    # The claude page has NO session window: this account, as of this
+    # frame, has no five-hour limit to show. Verified Ultra accounts
+    # (2026-10-30) look like this, and Claude Code's status line then
+    # carries rate_limits.seven_day and no five_hour at all.
+    #
+    # The frame says it rather than leaving pc/normalizer to infer it from
+    # session_pct == UNKNOWN, because that value also means "the window
+    # expired while nobody rendered", and the two want opposite answers: the
+    # second borrows a session figure from the bus, the first must not, since
+    # whatever it borrowed (a remembered payload, a Claude Desktop sample two
+    # days old) describes a window the account does not have. No single
+    # provider can tell them apart: pc/session_verdict weighs the evidence
+    # every claude source reports (window_evidence, below) and marks the
+    # frames before they are merged, on positive evidence only.
+    # pc/normalizer.merge owns what the decision means; on a merged frame
+    # the field is True exactly when merge() reported the session unknown
+    # because of it, which is what the burn view (pc/ingest) keys on.
+    no_session_window: bool = False
+    # What this frame's source proves about the account's five-hour window,
+    # or None when it proves nothing: (has_window, kind, at), built by
+    # pc/session_verdict.evidence, `at` being when the figure it rests on
+    # was taken. See pc/session_verdict for each kind and why quiet data is
+    # never one.
+    window_evidence: object = None
 
     def __post_init__(self):
         if self.active_at is None:
@@ -202,6 +226,39 @@ class NormalizedUsageFrame:
         field by field for exactly this reason.
         """
         return self.session_pct >= 0 or self.weekly_pct >= 0
+
+
+# How long a five-hour window lasts, and the slack on any judgement made
+# from it. ONE spelling: pc/normalizer places a stampless reading against a
+# stamped one with SESSION_WINDOW_S, and two sources retire a session figure
+# by session_outlived() below. Claude Desktop's retire used to spell
+# 5 * 3600 + 600 out on its own beside the normalizer's 5 * 3600 (review,
+# 2026-10-31).
+#
+# Ten minutes of slack, because the clocks a window is judged by are not the
+# server's: Claude Desktop samples every five minutes, so a sample can be up
+# to that late for the moment it describes, and Claude Code re-renders a
+# second after a reset and on its own idle cadence after that. Ten minutes
+# covers both with room; a different five-hour window is hours away.
+SESSION_WINDOW_S = 5 * 3600
+SESSION_SLACK_S = 600
+
+
+def session_outlived(fetched_at, now_epoch: float) -> bool:
+    """Has a five-hour window that was open when this reading was fetched
+    certainly ended by now?
+
+    For a reading with no reset stamp to say so itself. Claude Desktop's
+    usage cache has none at all, and a status-line five_hour can carry one
+    that will not read (null, a string, milliseconds): without a bound, such
+    a figure stayed on the bus for as long as its file did, and on
+    2026-10-30 a Desktop sample 37 hours old was still filling the session
+    dial of an account that no longer had a window. Measured from when the
+    figure was FETCHED, not from when its file was last written: Claude Code
+    repaints an unchanged block with a new mtime every time it renders, so
+    an mtime would never let it age out.
+    """
+    return now_epoch - fetched_at > SESSION_WINDOW_S + SESSION_SLACK_S
 
 
 def window_ended(resets_at, now_epoch: float) -> bool:

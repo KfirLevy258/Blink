@@ -88,6 +88,7 @@ run_one() {
 echo "== firmware host tests"
 run_one backlight    ""                ""
 run_one bootanim     "bootanim_dec.c"  ""
+run_one burn5h       "burn5h.c msg_parse.c" ""
 # cfg_store.c unchanged against a RAM flash; the stubs stand in for Zephyr.
 # CFG_STUB_CAPTURE keeps its log lines for the boot-line check.
 run_one cfg_store    "cfg_store.c"     "-I$ROOT/tests/cfg_store/stub -DCFG_STUB_CAPTURE"

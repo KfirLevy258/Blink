@@ -69,6 +69,7 @@ this.
 - **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, and nothing about you sent anywhere. The one optional extra, status-page alerts, reads the public status pages and is off until you turn it on.
 - **Themes.** Twelve built in, three of them light for a bright room, and one of your own: seven colours, arc width and ends, made in a builder that opens in your browser from the board's own Settings (or `blink theme`) and previews on the panel as you edit. A custom theme travels as a short share code.
 - **Focus.** One window big instead of two - session or weekly - with the other kept as a line under it.
+- **A burn view where there is no five-hour limit.** Claude Ultra accounts have no five-hour window (from 2026-10-30), so a session dial would have nothing to show. There, BLINK draws the last five hours of Claude Code output instead: the total, an arrow for whether you are speeding up or easing off, and a bar for every quarter-hour, labelled with the hour. Pro and Max keep the session dial, and the weekly dial is the same on every plan.
 - **Settings on the board.** Brightness, Theme, Focus and Update, four tiles on the screen beside the dials.
 - **Status pages, per provider.** Optional: each provider's page says when that provider's own service is having trouble, so you know it is not your machine.
 - **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
@@ -79,14 +80,16 @@ this.
 
 <table>
   <tr>
-    <td width="33%"><img src="docs/img/screen-claude.png" alt="The Claude page: six coloured marks in the top-left corner, one per live session, the clock under the BLINK wordmark, and the session and weekly dials."></td>
-    <td width="33%"><img src="docs/img/screen-codex.png" alt="The Codex page, with its own session and weekly dials."></td>
-    <td width="33%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop alone: the session dial shows a fill rate where a countdown would otherwise be."></td>
+    <td width="25%"><img src="docs/img/screen-claude.png" alt="The Claude page: six coloured marks in the top-left corner, one per live session, the clock under the BLINK wordmark, and the session and weekly dials."></td>
+    <td width="25%"><img src="docs/img/screen-codex.png" alt="The Codex page, with its own session and weekly dials."></td>
+    <td width="25%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop alone: the session dial shows a fill rate where a countdown would otherwise be."></td>
+    <td width="25%"><img src="docs/img/screen-burn.png" alt="An account with no five-hour window: the left half shows 2.9M tokens in five hours with an up arrow, a bar per quarter-hour labelled 10 to 14, and 940k/h rising; the weekly dial stays on the right."></td>
   </tr>
   <tr>
     <td align="center"><sub><b>Claude</b></sub>&nbsp;</td>
     <td align="center"><sub><b>Codex</b></sub>&nbsp;</td>
     <td align="center"><sub><b>Desktop alone</b></sub>&nbsp;</td>
+    <td align="center"><sub><b>No five-hour window</b></sub>&nbsp;</td>
   </tr>
 </table>
 
@@ -95,8 +98,22 @@ The marks in the top-left corner are your live sessions - one per session,
 coloured by what each is doing. Claude and Codex each get a page of their own,
 and a swipe moves between them. With Claude Desktop alone there is often no reset
 time to count down to, so the session dial shows how fast it is filling instead.
+On an account with no five-hour window, such as Claude Ultra, the session dial
+gives way to the burn view: Claude Code's output over the last five hours, a
+bar per quarter-hour, and an arrow comparing this hour with the one before.
 
 *Rendered by the shipping firmware's own drawing code, not mocked up.*
+
+### The theme builder
+
+<img src="docs/img/theme-builder.png" alt="The theme builder in a browser: a preview of the board on the left, here showing the burn view, with switches for Gauges or Focus mode and for the session gauge or the burn view; the twelve built-in themes and the colour pickers on the right; Save to board, Cancel and Copy share code along the top.">
+
+Tap *Edit on computer* in the board's Theme settings, or run `blink theme`, and
+the builder opens in your browser. Pick a built-in theme or choose the seven
+colours yourself; every change shows on the board as a preview until you save
+or cancel. The preview beside it can show either left half, the session gauge
+or the burn view, so a theme can be judged on both. Readability checks under
+the preview flag text or arcs that would be hard to see.
 
 ## Setup
 
@@ -163,7 +180,7 @@ For Claude Desktop, the app learns usage by reading Claude Desktop's own local f
 
 ## Privacy
 
-BLINK never sees a credential and never sends your usage or your sessions anywhere. If you turn on status-page alerts (`blink config status-page on`), it reads status.claude.com, and status.openai.com for a Codex page, every 5 minutes, with nothing of yours attached. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`. The device holds no token: nothing to leak, nothing to revoke if you lend it.
+BLINK never sees a credential and never sends your usage or your sessions anywhere. If you turn on status-page alerts (`blink config status-page on`), it reads status.claude.com, and status.openai.com for a Codex page, every 5 minutes, with nothing of yours attached. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`, and reads the usage figures, the session id and the session's cost from it. On an account with no five-hour limit (verified Ultra) it also reads the output-token count of each reply from Claude Code's transcripts, and on a Codex account with none (such as Codex Pro) every token count of each turn from Codex's session log, held in memory until five hours after Codex last wrote that turn (board plugged in or not), of which only the output tokens are added up. It sends the board only a total per quarter-hour, never the conversation. [docs/README-full.md](docs/README-full.md#what-the-installer-changes) lists exactly what is read and kept. The device holds no token: nothing to leak, nothing to revoke if you lend it.
 
 ## Building units
 

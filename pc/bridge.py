@@ -38,6 +38,16 @@ THEME_QUIET_S = 2.0
 # holds: preview and cancel write no flash.
 THEME_SAVE_HOLD_S = 0.5
 
+# The burn line's cadence (docs/plans/burn-5h.md): after the quiet window
+# that follows a greeting -- THEME_QUIET_S, for the same reason, since it is
+# not part of the hello burst -- then whenever q or b changes, never sooner
+# than BURN_MIN_GAP_S after the last one, and at least every BURN_HEARTBEAT_S
+# so a board that lost a line, or rebooted without a hello reaching us, has
+# it back within a minute. The board keeps the view up for 180 s after the
+# last line, three heartbeats.
+BURN_MIN_GAP_S = 15.0
+BURN_HEARTBEAT_S = 60.0
+
 
 def _spawn(fn):
     threading.Thread(target=fn, name="blink-theme-open", daemon=True).start()
@@ -194,9 +204,39 @@ class Bridge:
         self._run_async = run_async
         self._edit_answers = (edit_answers if edit_answers is not None
                               else queue.SimpleQueue())
-        self._theme_quiet_until = None
+        # The end of the quiet window after a greeting (THEME_QUIET_S), in
+        # which neither a theme line nor the burn line is written. One field
+        # for both: the burn line kept a copy of its own, set at the same
+        # moment to the same value (review, 2026-10-31).
+        self._quiet_until = None
         self._sleep = sleep
         self._store_until = None         # see THEME_SAVE_HOLD_S
+        # The burn line (see BURN_MIN_GAP_S), kept per page: provider ->
+        # ((p, q, b) last put on the wire, when by self._now). A page with
+        # nothing since the last greeting, or since its line stopped, has no
+        # entry. Per page because two pages can each be sending one -- a
+        # Claude Ultra account beside a weekly-only Codex one -- and with
+        # one shared gap and one shared "last sent" the second page's line
+        # was always "a change" and always within 15 s of the first's, so
+        # it would never have gone out.
+        self._burn_sent = {}
+        # Pages whose last ask raised (see _burn_trouble).
+        self._burn_failed = set()
+        # Passes of the serial loop (begin_pass). A page is asked at most
+        # once a pass, and the bus's read budget is filled once a pass, by
+        # count rather than by the clock: _burn_asked holds the pages asked
+        # in pass _burn_pass. _loop_passes is False until the loop first
+        # says where a pass starts; until then every ask is a pass of its
+        # own, which is what a Bridge driven by hand -- a test, a bench --
+        # has always had. Until the 4th review of 2026-11-01 a page asked
+        # inside the last second (BURN_ASK_GAP_S) was not asked again,
+        # stamped even when the bus had nothing left to hand it: on a desk
+        # whose budget took 1.0-1.5 s to read, the second page was then
+        # skipped on its own turn, pass after pass (ingest.burn_pass).
+        self._pass = 0
+        self._loop_passes = False
+        self._burn_pass = None
+        self._burn_asked = set()
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -222,12 +262,21 @@ class Bridge:
         self._write(protocol.welcome("blink-bridge", self._app_ver,
                                      editing=editing))
         self._store_until = None         # a new conversation, a new board
+        # A greeting starts a new conversation: the board answers it with
+        # theme_now why=boot, and nothing about themes is said until a fast
+        # tick after that (THEME_QUIET_S). The burn line waits out the same
+        # window, which starts BEFORE the poll below: it is not part of the
+        # hello burst, which is measured against the board's receive ring
+        # (tests/pc/test_hello_burst.py), and the pref that answers this
+        # welcome may still be on its way with the caps that decide whether
+        # the line goes at all.
+        self._quiet_until = self._now() + THEME_QUIET_S
         if self._theme is not None:
-            # A greeting starts a new conversation: the board answers it with
-            # theme_now why=boot, and nothing about themes is said until a
-            # fast tick after that (THEME_QUIET_S).
             self._theme.hello()
-            self._theme_quiet_until = self._now() + THEME_QUIET_S
+        # A board that has just booted holds no burn line, so whatever went
+        # to the last connection is forgotten and the first tick after the
+        # window sends one, unchanged or not.
+        self._burn_sent = {}
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
@@ -708,6 +757,9 @@ class Bridge:
     def _takes_theme(self):
         return self._board_can(protocol.BOARD_CAP_THEME)
 
+    def _in_quiet_window(self):
+        return self._quiet_until is not None and self._now() < self._quiet_until
+
     def _send_theme(self):
         """The preview, cancel or save the files say is owed. Called on both
         ticks; the fast one is what makes a preview follow the builder.
@@ -717,8 +769,7 @@ class Bridge:
         """
         if self._theme is None:
             return False
-        if (self._theme_quiet_until is not None
-                and self._now() < self._theme_quiet_until):
+        if self._in_quiet_window():
             return False
         try:
             lines = self._theme.outgoing(deliver=self._takes_theme())
@@ -1023,6 +1074,9 @@ class Bridge:
         # And the status level, which changes on the watch's own thread and
         # would otherwise wait for the next usage change to be noticed.
         self._send_svc_if_changed()
+        # And the burn view, whose numbers move while the usage line holds
+        # still: an Ultra desk's session dial says "--%" all day.
+        self._send_burn_if_due()
 
     def _read_usage(self):
         """The usage message as it would go out right now, or None if there is
@@ -1069,6 +1123,10 @@ class Bridge:
             self._svc_pages = tuple(p for p in status_page.PAGES
                                     if p in pair)
         self._send_svc_if_changed()
+        # After the usage line it belongs beside: both come from the same
+        # poll, and the board draws the view only while that line says the
+        # session is unknown.
+        self._send_burn_if_due()
 
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
@@ -1100,6 +1158,125 @@ class Bridge:
         if pair != self._last_session:
             self._write(protocol.session(*pair))
             self._last_session = pair
+
+    def begin_pass(self):
+        """A new pass of the serial loop starts here.
+
+        claude_usage_bridge calls it at the top of every turn of its read
+        loop, before the heartbeat or the fast tick can run. Everything the
+        burn line asks for between two calls -- the heartbeat and the fast
+        tick both, however long a read inside them takes -- is one pass:
+        each marked page asked once, from one read budget."""
+        self._loop_passes = True
+        self._pass += 1
+
+    def _send_burn_if_due(self):
+        """Put the burn line on the wire when its cadence says so.
+
+        Read off the fetch callable, like session_pair: the bus's fetch has
+        `burn_pages` and `burn`, every test fake and older fetch has not and
+        sends nothing. Each marked page -- claude, codex -- has its line on
+        a cadence of its own (self._burn_sent), so one never holds the
+        other back.
+        Asked only for a board that lists BOARD_CAP_BURN, and not inside the
+        quiet window or the minimum gap, so the transcripts behind it are
+        read only when a line could actually go out.
+
+        None from the fetch means "do not send": the page has a session
+        window again, or the reader has nothing honest yet. The
+        line then simply stops -- there is no "off" message; the board
+        restores the gauge from the usage line itself -- and what was sent
+        is forgotten, so the next line goes out as soon as the gap allows.
+        """
+        burn = getattr(self._fetch, "burn", None)
+        pages = getattr(self._fetch, "burn_pages", None)
+        if burn is None or pages is None:
+            return
+        if not self._board_can(protocol.BOARD_CAP_BURN):
+            # A board that says it can again (its next pref) holds nothing
+            # from before, so it is sent the line as if new.
+            self._burn_sent = {}
+            return
+        if self._in_quiet_window():
+            return
+        if not self._loop_passes:
+            self._pass += 1             # driven by hand: each ask a pass
+        try:
+            if self._burn_pass != self._pass:
+                self._burn_pass = self._pass
+                self._burn_asked = set()
+                # The bus's read budget, filled once for the pass and
+                # shared by every page asked in it (ingest.burn_pass).
+                fill = getattr(self._fetch, "burn_pass", None)
+                if fill is not None:
+                    fill()
+            marked = list(pages())
+        except Exception as e:
+            self._burn_trouble(None, e)
+            return
+        self._burn_fine(None)
+        # A page that is no longer marked has stopped; what it was sent is
+        # forgotten, so its next line goes out as soon as its gap allows.
+        for p in self._burn_sent:
+            if p not in marked:
+                self._burn_sent[p] = (None, self._burn_sent[p][1])
+        for p in marked:
+            self._send_burn_for(burn, p)
+
+    def _burn_trouble(self, p, e):
+        """Never worth the serial loop, and the only place a failure of the
+        line, a reader's included, is caught. Said once per page (`p`; None
+        for the list of pages itself), and the type only: the text of an
+        exception from a reader can be a transcript's path or a value read
+        out of one. Per page because one flag for both let a Codex reader
+        that raised on every pass hide a Claude one's first failure, and
+        the Claude page's next good line say "working again" about the
+        Codex one (/code-review max, 2026-11-01)."""
+        if p not in self._burn_failed:
+            self._burn_failed.add(p)
+            print(f"[bridge] {p + ' ' if p else ''}burn not sent:"
+                  f" {type(e).__name__}", file=sys.stderr)
+
+    def _burn_fine(self, p):
+        """`p` answered without raising: say so once, if it had not."""
+        if p in self._burn_failed:
+            self._burn_failed.discard(p)
+            if p is not None:
+                print(f"[bridge] {p} burn line working again",
+                      file=sys.stderr)
+
+    def _send_burn_for(self, burn, p):
+        """One page's burn line, on its own cadence."""
+        now = self._now()
+        sent = self._burn_sent.get(p)
+        if sent is not None and now - sent[1] < BURN_MIN_GAP_S:
+            return
+        # Asked once a pass at most. The heartbeat and the fast tick can
+        # both run in one pass of the serial loop, and each used to ask a
+        # page whose reader was behind -- the answer None leaves no trace in
+        # _burn_sent -- so a cold start was read twice per pass, beside the
+        # budget the bus shares (/code-review max, 2026-11-01). Counted in
+        # passes (begin_pass), so a slow read cannot stretch a pass, and a
+        # page asked with nothing left to read is asked again next pass.
+        if p in self._burn_asked:
+            return
+        self._burn_asked.add(p)
+        try:
+            msg = burn(p)
+        except Exception as e:
+            self._burn_trouble(p, e)
+            return
+        self._burn_fine(p)
+        if msg is None:
+            if sent is not None:
+                self._burn_sent[p] = (None, sent[1])
+            return
+        key = (msg.get("p"), msg.get("q"), tuple(msg.get("b") or ()))
+        if (sent is not None and key == sent[0]
+                and now - sent[1] < BURN_HEARTBEAT_S):
+            return
+        self._write(msg)
+        self._burn_sent[p] = (key, now)
 
     def _send_svc_if_changed(self):
         """Put each page's status-page level on the wire, on change only.

@@ -54,8 +54,10 @@ HOLD_BAND = 1.0
 SAME_WINDOW_S = 300
 
 # How long each window lasts, which is what lets a reading with no reset
-# stamp be placed against one that has a stamp: see _same_window.
-SESSION_WINDOW_S = 5 * 3600
+# stamp be placed against one that has a stamp: see _same_window. The
+# five-hour figure is base's, where the sources that retire a stampless
+# session reading read it too.
+SESSION_WINDOW_S = base.SESSION_WINDOW_S
 WEEKLY_WINDOW_S = 7 * 86400
 
 
@@ -258,8 +260,34 @@ def merge(frames):
     s_rolled = _rolled_at(frames, "session_rolled_at")
     w_rolled = _rolled_at(frames, "weekly_rolled_at")
 
+    # An account with no session window has no session figure to pick.
+    #
+    # pc/session_verdict marks the frames of an account proved to have none
+    # (see there for the evidence). Without this, a remembered payload
+    # or a Claude Desktop sample two days old filled the dial, won `primary`
+    # below, and the board was told live data was 37 hours old (measured
+    # 2026-10-30, a verified Ultra account). The mark applies whatever the
+    # age of the frame that carries it: a stale payload still says what the
+    # account had, and its own staleness is reported honestly through
+    # `primary` below. Nothing is borrowed then -- not Claude Desktop's
+    # history, not its Local Storage, not the remembered payload -- and the
+    # countdown and the burn rate go with the figure.
+    #
+    # Nothing here voids the mark. It used to be lifted by an unmarked
+    # source carrying a session reset time, back when the mark was inferred
+    # from quiet data and needed a way out. Now it is a verdict on evidence
+    # that already weighed that source: a Local Storage window, a status
+    # line with five_hour, a Desktop fh figure each clear it at once when
+    # they are newer than the proof against them (pc/session_verdict).
+    #
+    # So `no_window` on the merged frame is True exactly when the session
+    # below is unknown because of this rule, and pc/ingest's burn view keys
+    # on that.
+    no_window = any(f.no_session_window for f in frames)
+    session_frames = [] if no_window else frames
+
     session_pct, session_src, session_dated = _pick_pct(
-        frames,
+        session_frames,
         lambda f: (_known_pct(f.session_pct)
                    and _survives_rollover(f, s_rolled, "session_rolled_at")),
         "session_pct", "session_resets_at", SESSION_WINDOW_S)
@@ -298,8 +326,11 @@ def merge(frames):
             return None
         ended_evidence = max(evidence, key=lambda f: f.observed_at)
 
+    # Nor a countdown or a rate for it: a remembered window's reset stamp
+    # would otherwise ride along on a dial that is drawn "--%". Picked from
+    # session_frames, so there is none to pick under the rule above.
     session_resets_at, _ = _pick(
-        frames, lambda f: _stamp(f, "session_resets_at") is not None,
+        session_frames, lambda f: _stamp(f, "session_resets_at") is not None,
         lambda f: f.session_resets_at)
     weekly_resets_at, _ = _pick(
         frames, lambda f: _stamp(f, "weekly_resets_at") is not None,
@@ -322,7 +353,7 @@ def merge(frames):
         # a reset leaves session_resets_at None, which is precisely the state
         # that lets a rate through at all.
         session_burn_pph, _ = _pick(
-            frames,
+            session_frames,
             lambda f: (f.session_burn_pph is not None
                        and _survives_rollover(f, s_rolled, "session_rolled_at")),
             lambda f: f.session_burn_pph)
@@ -377,6 +408,7 @@ def merge(frames):
         # Carried so a merged frame is still a valid input to another merge.
         session_rolled_at=s_rolled,
         weekly_rolled_at=w_rolled,
+        no_session_window=no_window,
         # The counts travel with the state they describe. Taking them
         # field-by-field like everything else would let a session count from
         # one source sit beside a state from another, which is a panel saying

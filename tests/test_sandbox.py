@@ -251,6 +251,7 @@ def test_the_guard_catches_every_shape_the_hole_has_taken():
         'import pathlib\nclass P:\n    root = pathlib.Path.home()\n',
         'import os\nHOME = os.environ["HOME"]\n',
         'import os\nC = os.environ.get("CODEX_HOME")\n',
+        'import os\nC = os.environ.get("CLAUDE_CONFIG_DIR")\n',
         'import os\nU = os.getenv("USERPROFILE")\n',
         'import os\nif True:\n    H = os.path.expanduser("~")\n',
         'import os\nf = lambda p=os.path.expanduser("~"): p\n',
@@ -392,6 +393,20 @@ def test_the_sandbox_clears_codex_home_even_when_it_is_exported(
     assert "CODEX_HOME" not in os.environ
     assert pathlib.Path(codex_cli.sessions_root()) == (
         tmp_path / ".codex" / "sessions")
+
+
+def test_the_sandbox_clears_claude_config_dir_even_when_it_is_exported(
+        tmp_path, monkeypatch):
+    """CLAUDE_CONFIG_DIR outranks HOME in burn_reader.transcripts_root, the
+    same hole as CODEX_HOME one tool over: a developer who exports it would
+    have the burn tests reading their real Claude Code sessions."""
+    from pc import burn_reader
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "real-claude"))
+    conftest.sandbox_environment(monkeypatch, tmp_path)
+
+    assert "CLAUDE_CONFIG_DIR" not in os.environ
+    assert pathlib.Path(burn_reader.transcripts_root()) == (
+        tmp_path / ".claude" / "projects")
 
 
 def test_move_home_moves_every_home_variable(tmp_path, move_home):

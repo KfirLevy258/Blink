@@ -36,17 +36,110 @@ that are not part of the frame itself:
     is this" captions are themselves scenarios under test, not just an
     artifact of when the script happens to run -- a step can claim to be
     four hours old the instant it fires.
+
+  - `burn` (optional): the five-hour burn view's twenty buckets while this
+    step is on show (docs/plans/burn-5h.md) -- a name from BURN_PRESETS, or
+    a list of twenty output-token counts, oldest first. It stands in for
+    pc/burn_reader, which would otherwise read this machine's real
+    transcripts into a scenario that is meant to be the same on every desk,
+    and it is the bench's way to put each state on a board without spending
+    anybody's quota (CLAUDE.md). It holds like the frame does until a later
+    step says otherwise, and `"burn": null` clears it. It only reaches the
+    board while the step also says `"no_session_window": true`, as on a
+    real desk: the line is for an account with no session window.
+    tests/fleet/bench/burn_states.json walks through every preset.
 """
 import json
+import math
 import sys
 import time
 
+from pc import protocol
 from pc.providers.base import NormalizedUsageFrame, ProviderParser
+
+# Bucket sets for the burn view, in output tokens, oldest first: one for each
+# thing the board draws differently. They go on the wire as they are, since
+# the line carries exact tokens (protocol.burn). The board's direction
+# compares complete quarter-hours only: the last hour is buckets 15-18 and
+# the hour before it 11-14, and bucket 19, the quarter-hour still filling, is
+# drawn but not compared. Both zero is idle, otherwise more than +10% is
+# rising and less than -10% easing (docs/plans/burn-5h.md).
+BURN_PRESETS = {
+    # Nothing in five hours: "0", an en dash, no bars.
+    "idle": [0] * 20,
+    # The last hour within a point of the one before (+0.8%).
+    "steady": [84_000, 92_000, 88_000, 95_000, 90_000, 86_000, 93_000,
+               89_000, 91_000, 87_000, 94_000, 90_000, 88_000, 92_000,
+               90_000, 91_000, 89_000, 93_000, 90_000, 90_000],
+    # Quiet early, then nearly four times the hour before.
+    "rising": [0, 0, 0, 0, 4_000, 9_000, 6_000, 12_000, 18_000, 15_000,
+               22_000, 30_000, 26_000, 34_000, 41_000, 38_000, 95_000,
+               140_000, 210_000, 265_000],
+    # A busy hour tailing off to half of itself, and the quarter-hour in
+    # progress down to a trickle.
+    "easing": [40_000, 55_000, 70_000, 62_000, 80_000, 96_000, 110_000,
+               120_000, 135_000, 150_000, 160_000, 170_000, 240_000,
+               260_000, 230_000, 210_000, 120_000, 70_000, 35_000, 12_000],
+    # One quarter-hour dwarfs the rest: every other bar sits on the board's
+    # two-pixel floor for a non-zero bucket, and the total is in millions.
+    "spike": [2_000] * 9 + [1_600_000] + [2_000] * 10,
+    # The widest total there is to format: about a million a bucket.
+    "heavy": [999_000 - 2_500 * i for i in range(20)],
+}
 
 
 def _is_number(v):
     # bool is an int subclass; a step should never mean "at": true.
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _burn_of(value):
+    """A step's `burn` as twenty token counts; None for an explicit null.
+
+    Raises ValueError for anything else, which the caller reports and skips:
+    a typo in a hand-written scenario must not take the daemon down (see
+    _build_frame).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value not in BURN_PRESETS:
+            raise ValueError("unknown burn preset; expected one of "
+                             + ", ".join(sorted(BURN_PRESETS)))
+        return list(BURN_PRESETS[value])
+    # isfinite: a scenario is JSON, and Python's json reads the bare literal
+    # Infinity, which passed `v >= 0` and then raised OverflowError out of
+    # int(), uncaught, taking the provider's poll down with it (review,
+    # 2026-10-31). NaN already failed `v >= 0`; this says so for both. An
+    # int is finite by definition and is not asked: isfinite() converts it
+    # to a float first, and one past a float's range raised OverflowError,
+    # which the caller does not catch either (/code-review max,
+    # 2026-11-01). protocol.burn caps it at BURN_MAX like any other count.
+    if (isinstance(value, list) and len(value) == protocol.BURN_BUCKETS
+            and all(_is_number(v)
+                    and (isinstance(v, int) or math.isfinite(v)) and v >= 0
+                    for v in value)):
+        return [int(v) for v in value]
+    raise ValueError("burn is a preset name or twenty finite counts of zero"
+                     " or more")
+
+
+class ScriptedBurn:
+    """pc/burn_reader.BurnReader's stand-in under BLINK_SCENARIO.
+
+    The same poll(now) -> (q, tokens) | None, answered from the step the
+    provider has on show rather than from transcripts. q is the real
+    quarter-hour, so the board labels the hours its own clock is in.
+    """
+
+    def __init__(self, provider):
+        self._provider = provider
+
+    def poll(self, now):
+        tokens = self._provider.burn_tokens()
+        if tokens is None:
+            return None
+        return protocol.burn_quarter(now), list(tokens)
 
 
 class ScriptedProvider(ProviderParser):
@@ -60,6 +153,8 @@ class ScriptedProvider(ProviderParser):
         # The most recent step's frame, re-reported until the next one is
         # due, the way a real source's current reading is. See poll().
         self._held = None
+        # The burn buckets the steps so far have set, held the same way.
+        self._burn = None
         self._now = now
         self._t0 = now()
 
@@ -142,8 +237,28 @@ class ScriptedProvider(ProviderParser):
             frame = self._build_frame(step)
             if frame is not None:
                 self._held = frame
+                self._take_burn(step, i)
                 return [frame]
         return [self._held] if self._held is not None else []
+
+    def _take_burn(self, step, i):
+        """Hold this step's burn buckets, when it names any. A bad value
+        keeps the ones before it, reported like a bad step."""
+        if "burn" not in step:
+            return
+        try:
+            self._burn = _burn_of(step["burn"])
+        except ValueError as e:
+            print(f"scripted: step {i} burn ignored ({e})", file=sys.stderr)
+
+    def burn_tokens(self):
+        """The twenty buckets on show, or None when no step has set any."""
+        return None if self._burn is None else list(self._burn)
+
+    def burn_source(self):
+        """What claude_usage_bridge.build_bus hands the bus in place of the
+        transcript reader."""
+        return ScriptedBurn(self)
 
     def _build_frame(self, step):
         """One step as a frame, or None when the step doesn't fit.
@@ -158,8 +273,10 @@ class ScriptedProvider(ProviderParser):
         """
         try:
             age = step.get("age_s", 0)
+            # `burn` is the stand-in reader's (see _take_burn), not a frame
+            # field, and would otherwise drop the step as a typo.
             fields = {k: v for k, v in step.items()
-                      if k not in ("at", "age_s", "provider")}
+                      if k not in ("at", "age_s", "provider", "burn")}
             return NormalizedUsageFrame(
                 provider=step.get("provider", "claude"),
                 src="scripted",

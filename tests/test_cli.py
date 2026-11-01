@@ -306,6 +306,34 @@ def test_uninstall_reports_removed_when_it_worked(tmp_path, capsys):
     assert not os.path.exists(cli.bin_dir())
 
 
+def test_uninstall_forgets_whether_the_account_has_a_window(tmp_path):
+    """Owner's decision after the /code-review max of 2026-11-01: a
+    reinstall starts fresh. Kept, an old "no window" verdict -- a misread
+    one included -- put the next install straight into the burn view before
+    any evidence had been seen. The verdict, the temp names theme._write_json
+    writes it through, and the fixed `.tmp` an earlier writer used all go.
+    Paths are asked of the code and checked against the caller's home
+    (tests/support/home.py) before anything is written."""
+    from pc import session_verdict
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    _verdict(tmp_path, False, time.time() - 60)
+    path = inside(tmp_path, session_verdict.verdict_path())
+    leftovers = [path + ".tmp", path + ".1234.0.blink-tmp",
+                 path + install_statusline._TEMP_SUFFIX]
+    for p in leftovers:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("{")
+    assert set(leftovers) <= set(
+        install_statusline.temp_siblings(path) + [path + ".tmp"])
+
+    cli.main(["uninstall"])
+
+    for p in [path] + leftovers:
+        assert not os.path.exists(p), p
+    assert session_verdict.SessionVerdict().current() is None
+
+
 def test_install_refuses_to_touch_a_settings_file_that_will_not_parse(
         tmp_path, capsys, monkeypatch):
     """Treating unparseable JSON as {} would write a fresh settings.json over
@@ -2135,3 +2163,639 @@ def test_launchd_not_loaded_names_the_frozen_service_from_a_checkout(
     line = cli._LaunchdBackend().status()
     assert line == (f"installed but not loaded -- run "
                     f"`{cli._quote_line(want)} install` to start it")
+
+
+def _verdict(home, has_window, at, kind="statusline_sustained"):
+    """The verdict the daemon leaves in ~/.blink (pc/session_verdict),
+    inside the caller's `home` or not at all (tests/support/home.py)."""
+    from pc import session_verdict
+    session_verdict.save(inside(home, session_verdict.verdict_path()),
+                         session_verdict.evidence(has_window, kind, at))
+
+
+def test_status_says_when_the_account_has_no_five_hour_window(
+        tmp_path, capsys):
+    """The mark rests on evidence that can be misread -- a vendor rename of
+    five_hour, a Desktop history whose fh key went for another reason -- so
+    this row says it and what proved it. It is how support tells a real
+    Ultra account from a misread one (review, 2026-10-31). The row reads
+    the verdict the running daemon persisted, and a fresh `blink status`
+    writes nothing."""
+    from pc import session_verdict
+    from tests.pc.test_claude_cli import payload
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    status = inside(tmp_path, statusline_source_path())
+    with open(status, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload(five_hour=None, seven_day=2.0)))
+    _verdict(tmp_path, False, time.time() - 60)
+    before = open(session_verdict.verdict_path(), "rb").read()
+    capsys.readouterr()
+
+    assert cli.main(["status"]) == 0
+    assert ("Session     no five-hour window (Claude Code replied for over"
+            " five hours without one)") in capsys.readouterr().out
+
+    with open(status, "w", encoding="utf-8") as f:
+        # Rendered after the proof, so it lifts it, whenever its window
+        # opened: here three hours before (claude_cli._frame).
+        f.write(json.dumps(payload(five_hour=27.0,
+                                   resets_at=time.time() + 2 * 3600)))
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+    assert open(session_verdict.verdict_path(), "rb").read() == before
+
+
+def test_status_on_a_marked_desk_with_no_reading_yet_still_prints_the_row(
+        tmp_path, capsys):
+    """A Claude Code-only Ultra desk, its verdict saved, in a session that
+    has not had its first reply: the status line carries no rate_limits.
+    The daemon remembers its last reading and is marked and sending the
+    burn line; a fresh `blink status` has nothing to merge, and the row
+    went missing with the page (/code-review max, 2026-11-01). With no
+    reading at all there is no figure the row could contradict, so it
+    says what the saved verdict says, for `--wire` too."""
+    from pc import session_verdict
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    with open(inside(tmp_path, statusline_source_path()), "w",
+              encoding="utf-8") as f:
+        f.write(json.dumps({"session_id": "s1",
+                            "cost": {"total_cost_usd": 0.0}}))
+    _verdict(tmp_path, False, time.time() - 60)
+    before = open(session_verdict.verdict_path(), "rb").read()
+    capsys.readouterr()
+
+    row = ("Session     no five-hour window (Claude Code replied for over"
+           " five hours without one)")
+    assert cli.main(["status"]) == 0
+    assert row in capsys.readouterr().out
+    assert cli.main(["status", "--wire"]) == 0
+    assert capsys.readouterr().out.count(row) == 1
+    assert open(session_verdict.verdict_path(), "rb").read() == before
+
+    # A window on disk, or no verdict at all, and the row stays away.
+    _verdict(tmp_path, True, time.time() - 30, kind="statusline_window")
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+    os.remove(session_verdict.verdict_path())
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+
+
+def statusline_source_path():
+    from pc import statusline_source
+    return statusline_source.payload_path()
+
+
+def test_status_on_a_pro_desk_after_a_reset_says_nothing(tmp_path, capsys):
+    """Finding 5. `blink status` is a fresh process, and it read a Pro or
+    Max status line rendered after a reset -- weekly-only, byte for byte an
+    Ultra one -- as no window, while the daemon beside it was drawing the
+    session. Quiet proves nothing now, and the daemon's verdict, a window,
+    is on disk."""
+    from tests.pc.test_claude_cli import payload
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    with open(inside(tmp_path, statusline_source_path()), "w",
+              encoding="utf-8") as f:
+        f.write(json.dumps(payload(five_hour=None, seven_day=30.0)))
+    capsys.readouterr()
+
+    for verdict in (None, (True, time.time() - 3 * 3600)):
+        if verdict is not None:
+            _verdict(tmp_path, *verdict, kind="statusline_window")
+        assert cli.main(["status"]) == 0
+        assert "Session     " not in capsys.readouterr().out, verdict
+        assert cli.main(["status", "--wire"]) == 0
+        out = capsys.readouterr().out
+        assert "Session     " not in out, verdict
+
+
+def test_status_on_a_desktop_only_ultra_desk_prints_the_row(tmp_path,
+                                                           capsys):
+    """Claude Desktop's Code tab never runs the status line, so a desk with
+    Desktop alone has its proof in Desktop's history: weekly usage risen
+    between two samples one poll apart, neither with an fh key (owner's
+    decision and the re-review, 2026-11-01). A single such sample is not
+    proof, and nor is a rise from a sample that had fh."""
+    now_ms = int(time.time() * 1000)
+    rows = []
+    for t_ms, sd in ((now_ms - 1_200_000, 11), (now_ms - 300_000, 12)):
+        s = _dc.sample(t_ms, sd=sd)
+        del s["u"]["fh"]
+        rows.append(s)
+
+    _desktop_cache(tmp_path, _dc.doc(rows[1:]))
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+
+    _desktop_cache(tmp_path, _dc.doc(rows))
+    assert cli.main(["status"]) == 0
+    assert ("Session     no five-hour window (Claude Desktop's weekly usage"
+            " rose with no five-hour figure before or after)"
+            ) in capsys.readouterr().out
+
+    had_fh = _dc.sample(now_ms - 1_200_000, fh=3, sd=11)
+    _desktop_cache(tmp_path, _dc.doc([had_fh, rows[1]]))
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+
+    pro = _dc.sample(now_ms - 300_000, fh=4, sd=12)
+    _desktop_cache(tmp_path, _dc.doc([pro]))
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+
+
+def _ultra_desk_with_an_open_desktop_window(home, monkeypatch):
+    """A weekly-only status line and an hour-old "no window" verdict beside
+    a Claude Desktop Local Storage record, written since, whose window is
+    still open: proof newer than the verdict that the account has a window.
+    The record is generated and handed over where the LevelDB reader would
+    return it.
+
+    `blink install` and the status line land inside the caller's `home` or
+    not at all (tests/support/home.py): from a script with the real HOME,
+    install would rewrite the desk's own Claude Code settings and the file
+    write would replace its live statusline.json. Both paths are asked of
+    the code, and checked, before anything is written."""
+    from pc import desktop_local_storage, statusline_source
+    from tests.pc.test_claude_cli import payload
+    status = inside(home, statusline_source.payload_path())
+    inside(home, cli.settings_path())
+    _settings(home, {})
+    cli.main(["install"])
+    with open(status, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload(five_hour=None, seven_day=2.0)))
+    now = time.time()
+    # An hour-old verdict that the account has no window, which the record
+    # below, written since, overrules (pc/session_verdict).
+    _verdict(home, False, now - 3600)
+    record = {"resetsAt": now + 4 * 3600, "utilization": 0.08,
+              "observedAt": now - 300}
+    monkeypatch.setattr(desktop_local_storage, "newest_record",
+                        lambda path: dict(record))
+
+
+def test_the_ultra_desk_helper_writes_nothing_outside_the_callers_home(
+        tmp_path, monkeypatch):
+    """Handed a home that is not the one the code resolves -- a script
+    importing it with the real HOME -- it stops before `blink install`
+    runs, and before the status line is written."""
+    elsewhere = tmp_path / "not-home"
+    elsewhere.mkdir()
+    ran = []
+    monkeypatch.setattr(cli, "main", lambda argv: ran.append(argv))
+
+    with pytest.raises(AssertionError, match="outside the caller's home"):
+        _ultra_desk_with_an_open_desktop_window(elsewhere, monkeypatch)
+
+    assert ran == []
+    assert not (tmp_path / ".blink" / "statusline.json").exists()
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_the_session_row_follows_the_merge_not_one_provider(
+        tmp_path, capsys, monkeypatch):
+    """The row used to come from a provider of its own, which knew nothing
+    of a Local Storage window that lifts the rule in the merge: it printed
+    "no five-hour window" for a desk whose daemon was drawing 8% (review,
+    2026-10-31)."""
+    _ultra_desk_with_an_open_desktop_window(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
+
+
+def test_status_wire_prints_the_row_and_the_line_from_one_poll(
+        tmp_path, capsys, monkeypatch):
+    _ultra_desk_with_an_open_desktop_window(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    assert cli.main(["status", "--wire"]) == 0
+    out = capsys.readouterr().out
+    wire = json.loads(out.strip().splitlines()[-1])
+    assert wire["session_pct"] == 8.0 and wire["src"] == "desktop_ls"
+    assert "Session     " not in out
+
+    from pc import desktop_local_storage
+    monkeypatch.setattr(desktop_local_storage, "newest_record",
+                        lambda path: None)        # the window closes
+    assert cli.main(["status", "--wire"]) == 0
+    out = capsys.readouterr().out
+    wire = json.loads(out.strip().splitlines()[-1])
+    assert wire["session_pct"] == -1 and wire["src"] == "cli"
+    assert out.count("Session     no five-hour window") == 1
+
+
+def test_the_disclosure_names_every_usage_source_the_daemon_reads(capsys):
+    """The install note said the figures come from "Claude Code, Claude
+    Desktop's usage cache, or the Codex session log", and left out Desktop's
+    Local Storage, which pc/desktop_local_storage.py reads for the five-hour
+    figure and its countdown (review follow-up, 2026-11-01). Install asks
+    nothing, so this sentence is the disclosure; it has to be the whole
+    list."""
+    cli._announce()
+    said = " ".join(l.strip() for l in capsys.readouterr().out.splitlines())
+    assert ("The usage figures come from Claude Code, Claude Desktop's usage"
+            " cache and Local Storage, or the Codex session log") in said
+
+
+# The burn view's folder in the install disclosure. It printed
+# burn_reader.transcripts_root() as the installing shell resolves it, which
+# honours CLAUDE_CONFIG_DIR -- but the launchd and systemd services carry
+# only PYTHONUNBUFFERED, and the Windows task gets the account's registry
+# environment, not this window's. So on a desk that exports the variable in
+# .zshrc the note named a folder the daemon never reads (2026-11-01
+# re-review). It names the service's folder now, and says so when the shell
+# would have named another.
+
+SHELL_ONLY = "  CLAUDE_CONFIG_DIR is set in this shell, but the background"
+
+
+def _burn_folder(out):
+    lines = out.splitlines()
+    i = lines.index("  output-token count of each reply from Claude Code's"
+                    " transcripts:")
+    return lines[i + 1].strip(), lines[i + 2:]
+
+
+def _with_a_service(monkeypatch, service_sees=None, codex_sees=None):
+    # Patched on the class backend() actually returns, not on _Backend: the
+    # launchd and schtasks backends override creates(), and schtasks also
+    # overrides service_environ() to read the registry, so a patch on the
+    # base class was silently shadowed on Windows (windows VM run,
+    # 2026-11-01: the folder came out as the shell's). started_from_shell
+    # and shell_until_logon too, or a Linux runner with no systemctl, or
+    # Windows, would answer for itself.
+    kind = type(cli.backend())
+    sees = {"CLAUDE_CONFIG_DIR": service_sees, "CODEX_HOME": codex_sees}
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(kind, "creates", lambda self: "a service")
+    monkeypatch.setattr(kind, "service_environ",
+                        lambda self, name: sees[name])
+    monkeypatch.setattr(kind, "started_from_shell", lambda self: False)
+    monkeypatch.setattr(kind, "shell_until_logon", lambda self: False)
+
+
+def test_the_burn_folder_is_the_one_the_service_reads(tmp_path, capsys,
+                                                      monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    assert folder == str(tmp_path / ".claude" / "projects")
+    assert any(l.startswith(SHELL_ONLY) for l in after), after
+
+
+def test_without_claude_config_dir_nothing_more_is_said(tmp_path, capsys,
+                                                         monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / ".claude" / "projects")
+    assert "CLAUDE_CONFIG_DIR" not in out
+
+
+def test_a_service_that_sees_claude_config_dir_reads_it(tmp_path, capsys,
+                                                         monkeypatch):
+    """Windows, where it is a user environment variable (setx): the task
+    starts with it, so the folder is the shell's and nothing more is said."""
+    as_checkout(monkeypatch)
+    work = str(tmp_path / "work-config")
+    _with_a_service(monkeypatch, service_sees=work)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", work)
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == os.path.join(work, "projects")
+    assert "CLAUDE_CONFIG_DIR" not in out
+
+
+def test_with_no_service_the_folder_is_this_shells(tmp_path, capsys,
+                                                   monkeypatch):
+    """No service is registered (conftest's BLINK_SKIP_SERVICE, a Windows
+    checkout): the daemon is started by hand from a shell, which does see
+    the variable."""
+    as_checkout(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / "work-config" / "projects")
+    assert SHELL_ONLY not in out
+
+
+def test_launchd_and_systemd_hand_the_service_no_claude_config_dir(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work-codex"))
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        assert cli._LaunchdBackend().service_environ(name) is None
+        assert cli._SystemdBackend().service_environ(name) is None
+
+
+def test_a_service_that_sees_another_value_is_not_said_to_miss_it(
+        tmp_path, capsys, monkeypatch):
+    """A `setx` to a new folder, typed in a window that still has the old
+    one: the service sees the variable, just not this window's value, and
+    "does not see it" was false (2026-11-01 third review)."""
+    as_checkout(monkeypatch)
+    new = str(tmp_path / "new")
+    _with_a_service(monkeypatch, service_sees=new)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "old"))
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    said = " ".join(l.strip() for l in after)
+    assert folder == os.path.join(new, "projects")
+    assert ("The background service sees a different CLAUDE_CONFIG_DIR"
+            " from this shell's, so it reads the folder above.") in said
+    assert "does not see it" not in said
+
+
+def test_a_service_that_sees_what_this_shell_does_not_says_so(
+        tmp_path, capsys, monkeypatch):
+    as_checkout(monkeypatch)
+    work = str(tmp_path / "work-config")
+    _with_a_service(monkeypatch, service_sees=work)
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    said = " ".join(l.strip() for l in after)
+    assert folder == os.path.join(work, "projects")
+    assert ("CLAUDE_CONFIG_DIR is set for the background service but not in"
+            " this shell, so it reads the folder above.") in said
+
+
+# The same for CODEX_HOME, which codex_cli honours and a login service does
+# not carry either: the note printed codex_cli.sessions_root() as this shell
+# resolves it (2026-11-01 third review).
+
+def _codex_folder(out):
+    lines = out.splitlines()
+    i = lines.index("  output tokens:")
+    return lines[i + 1].strip(), " ".join(l.strip() for l in lines[i + 2:])
+
+
+def test_the_codex_folder_is_the_one_the_service_reads(tmp_path, capsys,
+                                                       monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work-codex"))
+    cli._announce()
+    folder, said = _codex_folder(capsys.readouterr().out)
+    assert folder == str(tmp_path / ".codex" / "sessions")
+    assert ("CODEX_HOME is set in this shell, but the background service"
+            " does not see it, so every Codex figure, the rate limits"
+            " included, comes from the folder above.") in said
+
+
+def test_without_codex_home_nothing_more_is_said(tmp_path, capsys,
+                                                  monkeypatch):
+    as_checkout(monkeypatch)
+    _with_a_service(monkeypatch)
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _codex_folder(out)[0] == str(tmp_path / ".codex" / "sessions")
+    assert "CODEX_HOME" not in out
+
+
+def test_a_service_that_sees_codex_home_reads_it(tmp_path, capsys,
+                                                 monkeypatch):
+    as_checkout(monkeypatch)
+    work = str(tmp_path / "work-codex")
+    _with_a_service(monkeypatch, codex_sees=work)
+    monkeypatch.setenv("CODEX_HOME", work)
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _codex_folder(out)[0] == os.path.join(work, "sessions")
+    assert "CODEX_HOME" not in out
+
+
+@pytest.mark.parametrize("codex_home", [None, "work-codex"])
+def test_the_disclosures_codex_folder_is_codex_clis(tmp_path, monkeypatch,
+                                                    codex_home):
+    """_codex_sessions_root repeats codex_cli.sessions_root's two lines
+    with the variable as an argument; this keeps them the same."""
+    from pc.providers import codex_cli
+    value = str(tmp_path / codex_home) if codex_home else None
+    if value:
+        monkeypatch.setenv("CODEX_HOME", value)
+    assert cli._codex_sessions_root(value) == codex_cli.sessions_root()
+
+
+# Who actually starts the daemon. A truthy creates() was read as "a service
+# with its own environment runs it", which is false on two desks (2026-11-01
+# third review).
+
+def test_linux_without_systemctl_names_this_shells_folders(tmp_path, capsys,
+                                                           monkeypatch):
+    """install writes the unit and says "no systemd here; run it yourself",
+    and a daemon started by hand reads this shell's folders."""
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SystemdBackend())
+    monkeypatch.setattr(cli._SystemdBackend, "_has_systemctl",
+                        staticmethod(lambda: False))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work-codex"))
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / "work-config" / "projects")
+    assert _codex_folder(out)[0] == str(tmp_path / "work-codex" / "sessions")
+    assert "background service" not in out
+
+
+def test_linux_with_systemd_names_the_units_folders(tmp_path, capsys,
+                                                    monkeypatch):
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SystemdBackend())
+    monkeypatch.setattr(cli._SystemdBackend, "_has_systemctl",
+                        staticmethod(lambda: True))
+    monkeypatch.setattr(cli._SystemdBackend, "_booted",
+                        staticmethod(lambda: True))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    assert folder == str(tmp_path / ".claude" / "projects")
+    assert any(l.startswith(SHELL_ONLY) for l in after), after
+    assert not any("Run key" in l for l in after)
+
+
+def test_a_windows_checkout_names_this_shells_folders(tmp_path, capsys,
+                                                      monkeypatch):
+    """A checkout on Windows registers nothing and is told to start the
+    daemon by hand."""
+    as_checkout(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg({}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / "work-config" / "projects")
+    assert "background service" not in out
+
+
+def test_the_windows_run_key_start_is_said_to_keep_this_window(
+        tmp_path, capsys, monkeypatch):
+    """When schtasks refuses the task, install starts the launcher itself
+    (_start_launcher's Popen has no env=), so until the next logon the
+    daemon has this window's variable, not the registry's. Install cannot
+    know beforehand which way Windows goes, so it says both."""
+    as_frozen(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
+    reg = str(tmp_path / "reg")
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CLAUDE_CONFIG_DIR"): (reg, 1)}))
+    window = str(tmp_path / "window")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", window)
+    cli._announce()
+    folder, after = _burn_folder(capsys.readouterr().out)
+    said = " ".join(l.strip() for l in after)
+    assert folder == os.path.join(reg, "projects")
+    assert ("If Windows refuses the task and the Run key is used instead,"
+            " the bridge started now keeps this window's CLAUDE_CONFIG_DIR"
+            " until you next log in, and reads this folder until then: "
+            + os.path.join(window, "projects")) in said
+
+
+@pytest.mark.parametrize("make, frozen, systemctl", [
+    (cli._Backend, False, None),
+    (cli._LaunchdBackend, False, None),
+    (cli._SchtasksBackend, False, None),
+    (cli._SchtasksBackend, True, None),
+    (cli._SystemdBackend, False, False),
+    (cli._SystemdBackend, False, True),
+])
+def test_a_backend_that_creates_nothing_is_started_from_a_shell(
+        monkeypatch, make, frozen, systemctl):
+    """_service_folder asks only started_from_shell(): it used to ask
+    `not creates()` as well, which every backend already answers through
+    started_from_shell(). Pinned, so a backend that breaks that is seen."""
+    (as_frozen if frozen else as_checkout)(monkeypatch)
+    if systemctl is not None:
+        monkeypatch.setattr(cli._SystemdBackend, "_has_systemctl",
+                            staticmethod(lambda: systemctl))
+        monkeypatch.setattr(cli._SystemdBackend, "_booted",
+                            staticmethod(lambda: True))
+    b = make()
+    assert b.creates() or b.started_from_shell()
+
+
+def test_a_window_without_the_variable_is_not_said_to_keep_it(
+        tmp_path, capsys, monkeypatch):
+    """`setx CODEX_HOME D:\\codex`, then install from a window opened before
+    it. The Run-key paragraph said the bridge "keeps this window's
+    CODEX_HOME" right under a line saying this window has none (fourth
+    review, 2026-11-01). The folder was right: _start_launcher inherits a
+    window without the variable, so the bridge reads the default."""
+    as_frozen(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
+    reg = str(tmp_path / "reg-codex")
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CODEX_HOME"): (reg, 1)}))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    cli._announce()
+    folder, said = _codex_folder(capsys.readouterr().out)
+    assert folder == os.path.join(reg, "sessions")
+    assert "CODEX_HOME is set for the background service but not in this" \
+        " shell" in said
+    assert "keeps this window's" not in said
+    assert ("If Windows refuses the task and the Run key is used instead,"
+            " this window has no CODEX_HOME, so until you next log in the"
+            " bridge started now reads this folder: "
+            + str(tmp_path / ".codex" / "sessions")) in said
+
+
+class _FakeWinreg:
+    """Just enough of winreg for the environment keys."""
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE = "HKCU", "HKLM"
+    REG_SZ, REG_EXPAND_SZ = 1, 2
+
+    def __init__(self, values):
+        self.values = values            # {(hive, name): (value, type)}
+
+    def OpenKey(self, hive, path):
+        assert path in ("Environment", cli.SYSTEM_ENV_KEY)
+        fake = self
+
+        class _Key:
+            def __enter__(self):
+                return hive
+
+            def __exit__(self, *a):
+                return False
+        if not any(h == hive for h, _ in fake.values):
+            raise FileNotFoundError(2, "no key")
+        return _Key()
+
+    def QueryValueEx(self, hive, name):
+        try:
+            return self.values[(hive, name)]
+        except KeyError:
+            raise FileNotFoundError(2, "no value") from None
+
+    @staticmethod
+    def ExpandEnvironmentStrings(s):
+        return s.replace("%USERPROFILE%", r"C:\Users\k")
+
+
+@pytest.mark.parametrize("values, want", [
+    ({}, None),
+    ({("HKLM", "CLAUDE_CONFIG_DIR"): (r"D:\cc", 1)}, r"D:\cc"),
+    ({("HKCU", "CLAUDE_CONFIG_DIR"): (r"E:\mine", 1),
+      ("HKLM", "CLAUDE_CONFIG_DIR"): (r"D:\cc", 1)}, r"E:\mine"),
+    ({("HKCU", "CLAUDE_CONFIG_DIR"): (r"%USERPROFILE%\cc", 2)},
+     r"C:\Users\k\cc"),
+    ({("HKCU", "CLAUDE_CONFIG_DIR"): ("", 1)}, None),
+])
+def test_the_windows_task_sees_the_accounts_environment(monkeypatch, values,
+                                                        want):
+    """Task Scheduler (and the Run key's Explorer) start the daemon with the
+    account's environment from the registry -- the user's variable over the
+    machine's -- and never with the installing window's."""
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(values))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", r"F:\only-in-this-window")
+    assert cli._SchtasksBackend().service_environ("CLAUDE_CONFIG_DIR") == want
+
+
+def test_the_windows_task_sees_codex_home_the_same_way(monkeypatch):
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CODEX_HOME"): (r"%USERPROFILE%\cx", 2),
+         ("HKLM", "CODEX_HOME"): (r"D:\cx", 1)}))
+    monkeypatch.setenv("CODEX_HOME", r"F:\only-in-this-window")
+    assert cli._SchtasksBackend().service_environ("CODEX_HOME") == \
+        r"C:\Users\k\cx"
+
+
+@pytest.mark.parametrize("value, kind", [
+    (7, 4),                         # REG_DWORD reads back an int
+    ([r"D:\a", r"D:\b"], 7),        # REG_MULTI_SZ, a list
+    (b"D:\\x", 3),                  # REG_BINARY, bytes
+])
+def test_a_registry_value_that_is_not_a_string_is_unset(
+        tmp_path, capsys, monkeypatch, value, kind):
+    """It crashed install in expanduser() (2026-11-01 third review). Read as
+    unset at that hive, so the machine's value, here none, applies."""
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CLAUDE_CONFIG_DIR"): (value, kind),
+         ("HKCU", "CODEX_HOME"): (value, kind)}))
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        assert cli._SchtasksBackend().service_environ(name) is None
+    as_frozen(monkeypatch)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
+    cli._announce()
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / ".claude" / "projects")
+    assert _codex_folder(out)[0] == str(tmp_path / ".codex" / "sessions")
+
+
+def test_a_non_string_user_value_leaves_the_machines_in_force(monkeypatch):
+    monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
+        {("HKCU", "CODEX_HOME"): (1, 4), ("HKLM", "CODEX_HOME"): (r"D:\cx", 1)}))
+    assert cli._SchtasksBackend().service_environ("CODEX_HOME") == r"D:\cx"

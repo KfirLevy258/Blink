@@ -87,6 +87,7 @@ def test_every_type_the_daemon_builds_is_one_the_log_can_name():
              protocol.status("ok"), protocol.theme("cancel"),
              protocol.theme_edit_reply(True), protocol.theme_edit_done(),
              protocol.svc("claude", "ok"),
+             protocol.burn("claude", 1_793_430_000, [0] * 20),
              protocol.ota_avail("1.4.0", 1, "0" * 64),
              protocol.ota_begin("1.4.0"), protocol.ota_resume("1.4.0"),
              protocol.ota_none(), protocol.ota_error("x")]

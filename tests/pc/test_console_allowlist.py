@@ -29,7 +29,7 @@ SRC = ROOT / "firmware" / "src"
 # (line as the board prints it, what the log may say, values that must not
 # appear). The formats are the firmware's, cited by file:line.
 LINES = [
-    # proto.c:620 -- the usage the board applied
+    # proto.c:627 -- the usage the board applied
     ("[usage] session 41% (11723s)  weekly 9% (549923s)  STALE",
      "[usage] session", ["41", "11723", "549923", "STALE"]),
     # ota.c:412
@@ -48,10 +48,10 @@ LINES = [
      "[ota] test boot of", ["7.7.7", "must confirm"]),
     # main.c:160, a fixed message, kept whole
     ("[ota] image confirmed", "[ota] image confirmed", []),
-    # proto.c:711
+    # proto.c:727
     ("[proto] host connected: app 7.7.7, protocol 9", "[proto] host connected",
      ["7.7.7", "protocol 9"]),
-    # proto.c:860 -- the why is the daemon's text echoed back
+    # proto.c:889 -- the why is the daemon's text echoed back
     ("[proto] ota failed: download failed: HTTP 503 at cdn.example",
      "[proto] ota failed", ["503", "cdn.example"]),
     # fatal.c:68
@@ -65,7 +65,7 @@ LINES = [
     # cfg_store.c:491 -- older firmware printed the network name here
     ("[cfg] mode=1 ssid=home-net-SECRET token=present", "[cfg]",
      ["home-net-SECRET", "ssid", "token"]),
-    # proto.c:688
+    # proto.c:698
     ("[cfg] edition set to codex (applies on next boot)",
      "[cfg] edition set to", ["codex"]),
     # mem_stats.c:131
@@ -96,6 +96,16 @@ def test_a_board_line_is_logged_as_its_constant_text(line, want, secrets):
     assert out == [want]
     for s in secrets:
         assert s not in out[0], s
+
+
+@pytest.mark.parametrize("line", ["[proto] burn line refused",   # proto.c:958
+                                  "[theme] line refused"])       # proto.c:769
+def test_a_refused_line_is_named_in_the_log(line):
+    """The board refusing a line the daemon sent is the one piece of
+    evidence of a contract that moved, and it carries no value, so it is
+    kept whole. The burn view's refusal was left off the list when the burn
+    line was added, and reached bridge.log as a bare "[proto]"."""
+    assert logbook.ConsoleEcho().feed((line + "\r\n").encode()) == [line]
 
 
 def test_no_figure_from_a_boot_reaches_the_log():

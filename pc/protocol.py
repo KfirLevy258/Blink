@@ -177,7 +177,7 @@ WIRE_TYPES = frozenset({
     # host -> board
     "welcome", "bye", "pong", "time", "usage", "edition", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
-    "ota_none", "ota_error", "edit_state",
+    "ota_none", "ota_error", "edit_state", "burn",
 })
 
 UNKNOWN_TYPE = "(unknown type)"
@@ -801,6 +801,8 @@ BOARD_CAP_THEME = "theme"    # takes theme lines; answers theme_edit
 # while their ask is in flight as an ok 0, put up "run blink theme", and
 # then ignore the real ok 1 (review of fp/audit-nice r2, SHOULD-1).
 BOARD_CAP_EDIT_DONE = "edit_done"
+# Draws the five-hour burn view from burn lines (docs/plans/burn-5h.md).
+BOARD_CAP_BURN = "burn"
 
 
 def board_caps(msg) -> frozenset:
@@ -875,6 +877,71 @@ def svc(provider: str, level: str, what: str = "") -> dict:
     if what and level != "ok":
         msg["what"] = _clip_utf8(what, SVC_WHAT_MAX_BYTES)
     return msg
+
+
+# --- burn: the five-hour view for an account with no session window -------
+#
+# docs/plans/burn-5h.md is the contract; pc/burn_reader reads the numbers and
+# pc/bridge decides when they go out.
+#
+# The buckets: twenty quarter-hours on epoch boundaries, floor(ts / 900) *
+# 900. Named here, once, for the reader that fills them, the scenario that
+# stands in for it and this encoder. A quarter-hour of epoch time is a
+# wall-clock quarter-hour in every time zone, since every UTC offset in use
+# is a multiple of fifteen minutes (+5:30 and +5:45 included), so each full
+# local hour is some bucket's left edge and the board can label the hours.
+BURN_BUCKETS = 20
+BURN_BUCKET_S = 900
+
+# A bucket's ceiling on the wire, in output tokens: a hundred million in a
+# quarter-hour, which nothing produces -- the heaviest bucket on the dev desk
+# was under a million. It is there so the line has a widest case to measure
+# (tests/pc/test_burn_line.py, 233 bytes) instead of growing with whatever a
+# transcript claims, and so the board's sum of all twenty, at most
+# 1,999,999,980, fits a signed 32-bit int.
+BURN_MAX = 99_999_999
+
+
+def burn_quarter(now) -> int:
+    """The start of the quarter-hour `now` is in: the line's `q`."""
+    return int(now // BURN_BUCKET_S) * BURN_BUCKET_S
+
+
+def burn(provider: str, q: int, tokens) -> dict:
+    """The burn line: twenty quarter-hours of output tokens for one page.
+
+        {"t":"burn","v":2,"p":"claude","q":1793430000,"b":[0,0,4120,...]}
+
+    `q` is the epoch second the NEWEST bucket starts, the quarter-hour the
+    daemon's clock is in now, so bucket i (0 = oldest) starts at
+    q - (19 - i) * 900. `b` is exactly twenty non-negative integers, oldest
+    first: output TOKENS, exact, each capped at BURN_MAX. They were
+    thousands rounded up until the review of 2026-10-31 showed the rounding
+    deciding the board's arrow at light use -- 2001 then 1999 tokens a
+    quarter-hour went out as 3 then 2 and read "easing", 1000 then 4 as 1
+    and 1 and read "steady". `p` names the page it belongs to, the id `usage`
+    carries in `provider`; always "claude" for now.
+
+    Its own line, not fields on `usage`, which measures 454 of 512 bytes at
+    its widest with two providers loaded (computed over every source id by
+    tests/pc/test_protocol.py, 2026-10-31; this said 484, a figure from
+    before) and has no room for twenty numbers. Additive like
+    `svc`: firmware that predates it ignores an unknown type, and it is sent
+    only to a board whose caps list BOARD_CAP_BURN anyway. `v` is
+    PROTO_VERSION like every other line; the board reads `v` only on welcome.
+
+    `tokens` are whole output tokens, in the same order; the ceiling and
+    the floor of zero are applied here so the line has one home for both.
+    """
+    tokens = list(tokens)
+    if len(tokens) != BURN_BUCKETS:
+        raise ValueError(f"a burn line has {BURN_BUCKETS} buckets, not "
+                         f"{len(tokens)}")
+    q = int(q)
+    if q % BURN_BUCKET_S:
+        raise ValueError("q must start a quarter-hour")
+    b = [min(BURN_MAX, max(0, int(t))) for t in tokens]
+    return {"t": "burn", "v": VERSION, "p": provider, "q": q, "b": b}
 
 
 # --- Themes (pc/theme.py validates; these only shape the line) ----------

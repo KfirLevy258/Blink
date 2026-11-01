@@ -217,6 +217,16 @@ void ui_anim_run(void (*pump)(void))
 	pending = false;
 	leave = false;
 	showing = true;
+	/*
+	 * The left half stays whichever it is -- session gauge or burn view --
+	 * until the restore below lets go. peers_set_hidden() records what is
+	 * visible now and puts exactly that back on the way out, and the
+	 * protocol keeps running all the while, so a change of hands mid-clip
+	 * showed its objects under the overlay and then had the restore show
+	 * the ones it had hidden: both halves at once (review of 2026-10-31,
+	 * tools/panel_render/clip.sh).
+	 */
+	usage_view_hold_half(true);
 
 	/*
 	 * Built frozen and already full size. Creating it would otherwise
@@ -330,10 +340,15 @@ void ui_anim_run(void (*pump)(void))
 	ui_slide_begin();
 	peers_set_hidden(ov, false);
 	/* The restore above replays what was visible when the clip STARTED. Let
-	 * the view re-decide the one piece of that which can legitimately have
-	 * changed since: the first data can arrive mid-clip, and putting the
-	 * CONNECTING bar back over live gauges is the 2026-08-18 report. */
+	 * the view re-decide what can legitimately have changed since: the
+	 * first data can arrive mid-clip, and putting the CONNECTING bar back
+	 * over live gauges is the 2026-08-18 report. */
 	usage_view_sync_takeover();
+	/* And the left half, held since the clip began: whatever a burn line,
+	 * a session reading or the view's 180 s decided meanwhile lands now,
+	 * still frozen, so the wipe below paints it whole. The wipe holds the
+	 * half again for its own length. */
+	usage_view_hold_half(false);
 	lv_obj_del(ov);
 	lv_obj_update_layout(lv_screen_active());
 	ui_slide_freeze(false);
