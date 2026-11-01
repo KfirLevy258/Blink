@@ -158,32 +158,54 @@ marks a reading that has a usable 10080-minute window and no window of
 `SESSION_WINDOW_MAX_MIN` (a day) or less, every window declaring its
 length; any short window clears it; a reading with no `rate_limits` or only
 nulls says nothing. It judges the reading the gauges show (the newest
-usable one, `parse_rollout_tail`), and the newest reading's word is the
-word of every Codex frame sent. Nothing is persisted: every reading carries
-the evidence, and a restarted daemon reads the same rollout.
+usable one, `parse_rollout_tail`), and the word of the newest reading that
+said True or False is the word of every Codex frame sent; a newer reading
+that says nothing leaves it as it was, and a NaN or infinite window length
+says nothing. The word is held in the provider's memory and never persisted:
+every reading carries the evidence, and a restarted daemon reads the same
+rollout.
 
 **What it measures.** Output tokens per turn from those same `token_count`
-events: the difference of `payload.info.total_token_usage.output_tokens`
-from the file's previous event, so a repeated event (228 measured, the same
-cumulative total again) adds nothing. A total that goes down counts that
-event's `last_token_usage.output_tokens`, as does the first event read in a
-file followed from its end. Reasoning is counted once: in all 8061 events
-with usage, `total_tokens` was `input_tokens + output_tokens` exactly and
+events: each event's own `payload.info.last_token_usage.output_tokens`,
+counted once per content key -- every figure of `total_token_usage` beside
+every figure of `last_token_usage`. A copy of an event carries all twelve
+unchanged, so a repeat in the same file (228 measured: 159 figure for
+figure, 69 with another figure moved and a last output of 0), a file read
+again from its start, and the same event in another rollout (2 measured,
+the same session in two files) each count once, in the earliest
+quarter-hour it is stamped in. The first cut took differences of the
+running total, keyed by (path, total); the 2026-11-01 review found it
+counted cross-file copies twice, made phantom rises of two interleaved
+counters, and dropped a turn whose total came back to an earlier figure
+after a reset. Reasoning is counted once: in all 8061 events with usage,
+`total_tokens` was `input_tokens + output_tokens` exactly and
 `reasoning_output_tokens` never exceeded `output_tokens`, so reasoning is
 already inside `output_tokens`. Bucketed on the same 20 epoch
 quarter-hours.
 
+**Forks.** 27 of the owner's 195 rollouts were forks (`forked_from_id` on
+the first `session_meta`, the parent's `session_meta` after it), and none
+carried a `token_count` from before the fork or shared a content key with
+its parent: a fork copies no usage on this desk. If a Codex version does,
+the copies are recognised while the parent's events are inside the window;
+a fork of a conversation older than the window would count its re-stamped
+copies once. That, and two turns coinciding in all twelve figures, are the
+residuals.
+
 **How it reads.** `burn_reader.CodexBurnReader`, the Claude reader's
 machinery with another root (`codex_cli.sessions_root()`, honouring
-`CODEX_HOME`), needle (`"token_count"`), bridge.log sentences and line
-parser: offsets, held-back partial lines, the 5 h 15 min cold-file cutoff,
-anchors, `READ_TRIES`, the budget. A repeat is recognised by (path, running
-total), which also keeps a file read again from its start from counting
-twice. Of each line it reads `type`, `timestamp`, `payload.type` and the
-two `output_tokens`, nothing else.
+`CODEX_HOME`), needle (`"token_count"`), bridge.log sentences and `_entry`:
+offsets, held-back partial lines, the 5 h 15 min cold-file cutoff,
+anchors, `READ_TRIES`, the budget -- one budget per pass shared by both
+readers -- and the de-dup. Of each line it reads `type`, `timestamp`,
+`payload.type` and the token figures of `payload.info.total_token_usage`
+and `payload.info.last_token_usage`, nothing else.
+`tests/ci/check_codex_contract.sh` checks those fields upstream.
 
 `blink status` prints `Session     no five-hour window on Codex (Codex
-reported a weekly limit only)` under the Codex row when the page is marked.
+reported a weekly limit only)` when the merged Codex page is marked
+(`blink status --wire`: the bus's own Codex page, so not for a Codex
+reading the board was not given a page for).
 
 ## Privacy and safety (CLAUDE.md)
 

@@ -2942,8 +2942,14 @@ def _announce():
     # countdown out of it since Desktop started keeping one there.
     print("  The usage figures come from Claude Code, Claude Desktop's usage")
     print("  cache and Local Storage, or the Codex session log -- each of")
+    # Exactly what pc/providers/codex_cli reads, said in full since the
+    # /code-review max of 2026-11-01: the rate limits, session_meta's cwd
+    # (the project name on the panel) and the task_*/turn_aborted events
+    # (the activity light). The token counts are read only on a weekly-only
+    # account, and are said below with that condition on them.
     print("  which has already worked them out. From the Codex log it reads")
-    print("  the rate limits, and the token counts below, never the")
+    print("  the rate limits, the folder each session runs in (to name the")
+    print("  project), and when each turn starts and ends, never the")
     print("  conversation.")
     # The burn view's source (pc/burn_reader), missing from this note until
     # the /code-review max of 2026-11-01: on a desk whose account has no
@@ -2964,10 +2970,14 @@ def _announce():
     # The same for Codex (CodexBurnReader): an account whose Codex log
     # reports a weekly limit and no five-hour one -- Codex Pro on the
     # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
-    # the gauges come from, and this is the field it reads there.
+    # the gauges come from. It reads every token figure of a turn, the
+    # input and cache ones too, because together they are what recognises
+    # a turn written twice (burn_reader, "WHY last_token_usage"); only the
+    # output tokens are added up.
     from pc.providers import codex_cli
-    print("  If Codex reports no five-hour limit, it also reads the")
-    print("  output-token count of each Codex turn from its session log:")
+    print("  If Codex reports no five-hour limit, it also reads the token")
+    print("  counts of each Codex turn from its session log, and adds up the")
+    print("  output tokens:")
     print(f"    {codex_cli.sessions_root()}")
     print("  It holds those counts in memory and sends the board only a total")
     print("  per quarter-hour, never the conversation.")
@@ -3704,12 +3714,14 @@ def cmd_status(args) -> int:
     else:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
-    _source_lines(desk)
+    codex = _source_lines(desk)
     if getattr(args, "wire", False):
-        # The Session row comes out of the same poll as the wire line.
+        # The Session rows come out of the same poll as the wire line.
         _wire_line()
     else:
+        from pc import normalizer
         _session_window_line(*_claude_page(desk))
+        _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
 
 
@@ -3747,6 +3759,21 @@ def _session_window_line(page, verdict):
     why = session_verdict.DESCRIBE.get(current[1]) if current else None
     print("Session     no five-hour window"
           + (f" ({why})" if why else ""))
+
+
+def _codex_session_line(page):
+    """The Claude row's wording (_session_window_line), for the Codex page:
+    said when the merged codex frame is marked -- its newest reading had a
+    weekly limit and no five-hour one (codex_cli._no_short_window) -- which
+    is when the daemon sends that page the burn view.
+
+    `page` is a merged frame, as the Claude row's is: under `--wire` the
+    bus's own page("codex"), so the row is never printed for a Codex
+    reading that select_pair left off the board; for a plain status the
+    merge of the Codex provider's frames, the rows above it."""
+    if page is not None and page.no_session_window:
+        print("Session     no five-hour window on Codex (Codex reported a"
+              " weekly limit only)")
 
 
 def _claude_page(desk):
@@ -3810,6 +3837,8 @@ def _wire_line():
         verdict=session_verdict.SessionVerdict(persist=False))
     msg = bus.poll()
     _session_window_line(bus.claude_page(), bus.verdict())
+    from pc.providers import codex_cli
+    _codex_session_line(bus.page(codex_cli.PROVIDER_ID))
     print()
     if msg is None:
         print("Wire        nothing to send -- no source has a reading")
@@ -4006,7 +4035,7 @@ def _source_lines(desk=None):
     held = desk.desktop_paths if desk is not None else None
     with desktop_paths.one_answer(held) as folder:
         _source_lines_desktop(desk, folder, now)
-    _source_lines_codex(now)
+    return _source_lines_codex(now)
 
 
 def _source_lines_desktop(desk, folder, now):
@@ -4086,7 +4115,8 @@ def _source_lines_desktop(desk, folder, now):
 
 
 def _source_lines_codex(now):
-    """_source_lines' Codex rows."""
+    """_source_lines' Codex rows; returns the Codex frames they were printed
+    from, for the Session row (_codex_session_line), or [] for none."""
     from pc.providers import codex_cli
     logs = codex_cli.recent_rollouts()
     if logs:
@@ -4100,20 +4130,12 @@ def _source_lines_codex(now):
         if frames:
             print(f"Codex       session log parsed, reading"
                   f" {_age(now - frames[0].observed_at)} old")
-            # The Claude row's wording (_session_window_line), for the
-            # Codex page: marked when its newest reading has a weekly limit
-            # and no five-hour one (codex_cli._no_short_window), which is
-            # when the daemon sends that page the burn view. The frames
-            # are the provider's own, the ones the daemon merges, and the
-            # merge marks the page when any of them is marked.
-            if any(f.no_session_window for f in frames):
-                print("Session     no five-hour window on Codex (Codex"
-                      " reported a weekly limit only)")
         else:
             print(f"Codex       {len(logs)} recent session log(s), none with a"
                   " rate-limit line -- finish one turn in Codex; if that does"
                   " not help, its log format may have changed; please report it")
     else:
+        frames = []
         print("Codex       no session logs (Codex not installed, or never run)")
         print(f"            looked under {codex_cli.sessions_root()}")
 
@@ -4125,6 +4147,7 @@ def _source_lines_codex(now):
     if logs or install_codex_hooks._read_marker():
         for line in _codex_hook_status():
             print(line)
+    return list(frames or [])
 
 
 def _update_reaches_the_service() -> bool:

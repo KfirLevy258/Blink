@@ -58,7 +58,7 @@ def test_a_turn_lands_in_its_epoch_quarter_hour_once_and_without_reasoning(
     assert sum(b) == 1507
 
 
-def test_a_turn_before_the_window_is_not_counted_but_sets_the_total(tmp_path):
+def test_a_turn_before_the_window_is_not_counted(tmp_path):
     ro.write(tmp_path, rollout(tmp_path), [
         ro.token_count(start(0) - 1, 5000),             # outside the window
         ro.token_count(start(10), 5400, 400),
@@ -71,7 +71,7 @@ def test_a_turn_before_the_window_is_not_counted_but_sets_the_total(tmp_path):
 
 def test_a_repeated_token_count_is_not_counted_twice(tmp_path):
     """228 events on the owner's desk repeated the previous cumulative
-    total; summing last_token_usage would count each turn twice."""
+    total, 159 of them figure for figure: one content key, one count."""
     turn = ro.token_count(start(19), 900, 900)
     ro.write(tmp_path, rollout(tmp_path), [
         turn, turn, ro.token_count(start(19) + 30, 900, 900,
@@ -83,9 +83,19 @@ def test_a_repeated_token_count_is_not_counted_twice(tmp_path):
     assert sum(b) == 900
 
 
-def test_a_total_that_goes_down_counts_that_turn_and_carries_on(tmp_path):
-    """A new count in the same file (a compaction, a new session): that
-    event's own last_token_usage, then differences from it."""
+def test_a_repeat_with_other_figures_and_no_output_counts_nothing(tmp_path):
+    """The other 69 repeats: some figure moved, last output 0."""
+    again = ro.token_count(start(19) + 30, 900, 0)
+    again["payload"]["info"]["total_token_usage"]["input_tokens"] += 7
+    ro.write(tmp_path, rollout(tmp_path),
+             [ro.token_count(start(19), 900, 900), again], mtime=NOW - 5)
+
+    assert sum(reader(tmp_path).poll(NOW)[1]) == 900
+
+
+def test_a_total_that_goes_down_counts_each_turn_as_it_says(tmp_path):
+    """A new count in the same file (a compaction, a new session): each
+    event's own last_token_usage, whatever the total did."""
     ro.write(tmp_path, rollout(tmp_path), [
         ro.token_count(start(5), 1000),
         ro.token_count(start(6), 120, 120),              # counted afresh
@@ -98,7 +108,46 @@ def test_a_total_that_goes_down_counts_that_turn_and_carries_on(tmp_path):
     assert sum(b) == 1200
 
 
+def test_a_reset_total_that_comes_back_to_an_old_figure_still_counts(
+        tmp_path):
+    """Finding 4 of the 2026-11-01 review: keyed by (path, total), the
+    third turn here had the first one's total and was dropped as a repeat.
+    Its last_token_usage differs, so it is another turn."""
+    ro.write(tmp_path, rollout(tmp_path), [
+        ro.token_count(start(5), 1000),
+        ro.token_count(start(6), 300, 300),             # the count resets
+        ro.token_count(start(7), 1000, 700),            # back to 1000
+    ], mtime=NOW - 5)
+
+    _, b = reader(tmp_path).poll(NOW)
+
+    assert (b[5], b[6], b[7]) == (1000, 300, 700)
+
+
+def test_two_counters_interleaved_in_one_file_count_only_their_turns(
+        tmp_path):
+    """Finding 2: differences across two running totals in one file made a
+    phantom rise every time the larger came after the smaller (2350 here,
+    for 1550 of turns). Each event counts its own last output."""
+    ro.write(tmp_path, rollout(tmp_path), [
+        ro.token_count(start(10), 1000, 1000),
+        ro.token_count(start(11), 200, 200),
+        ro.token_count(start(12), 1300, 300),
+        ro.token_count(start(13), 250, 50),
+    ], mtime=NOW - 5)
+
+    _, b = reader(tmp_path).poll(NOW)
+
+    assert (b[10], b[11], b[12], b[13]) == (1000, 200, 300, 50)
+
+
 def test_events_without_usage_and_other_lines_are_passed_over(tmp_path):
+    no_last = ro.token_count(start(19), 70)
+    del no_last["payload"]["info"]["last_token_usage"]
+    no_total = ro.token_count(start(19), 80)
+    no_total["payload"]["info"]["total_token_usage"] = None
+    a_bool = ro.token_count(start(19), 90)
+    a_bool["payload"]["info"]["last_token_usage"]["output_tokens"] = True
     ro.write(tmp_path, rollout(tmp_path), [
         ro.agent_message(start(19), text='mentions "token_count" in text'),
         ro.token_count(start(19), 0, info=False, limits=ro.weekly_only()),
@@ -106,14 +155,13 @@ def test_events_without_usage_and_other_lines_are_passed_over(tmp_path):
          "payload": {"type": "token_count", "info": {
              "total_token_usage": ro.usage(50),
              "last_token_usage": ro.usage(50)}}},
+        no_last, no_total, a_bool,
         ro.token_count(start(19), 600),
     ], mtime=NOW - 5)
 
     _, b = reader(tmp_path).poll(NOW)
 
-    # The stampless line is not counted, but its total (50) is the
-    # baseline the next difference is taken from.
-    assert sum(b) == 550
+    assert sum(b) == 600
 
 
 def test_only_what_was_appended_is_read_and_counted(tmp_path):
@@ -143,29 +191,56 @@ def test_a_partial_last_line_waits_for_its_newline(tmp_path):
     assert sum(r.poll(NOW + LATER)[1]) == 400
 
 
-def test_a_file_read_again_from_its_start_counts_nothing_twice(tmp_path):
-    lines = [ro.token_count(start(17), 500), ro.token_count(start(18), 800,
-                                                            300)]
+class _Forgetful(dict):
+    """A _seen that never recognises anything: de-dup switched off."""
+
+    def get(self, key, default=None):
+        return default
+
+
+def _shrink_and_regrow(tmp_path, r):
+    """Read a rollout, truncate it shorter, let a walk see it shrink and
+    read it again from 0, then grow it past its old length."""
+    lines = [ro.token_count(start(17), 500),
+             ro.token_count(start(18), 800, 300)]
     path = ro.write(tmp_path, rollout(tmp_path), lines, mtime=NOW - 5)
-    r = reader(tmp_path)
     assert sum(r.poll(NOW)[1]) == 800
 
-    # Rewritten shorter and then grown past the old length: read from 0.
-    ro.write(tmp_path, path, [lines[0]], mtime=NOW - 2)
+    short = ro.write(tmp_path, path, [lines[0]], mtime=NOW - 2)
+    size = os.path.getsize(short)
+    _, b = r.poll(NOW + LATER)          # the walk that sees it shorter
+    assert r.last.walked and r.last.read_bytes == size   # from its start
+    first = sum(b)
+
     ro.write(tmp_path, path, [lines[1], ro.token_count(start(19), 1000, 200),
                               ro.agent_message(start(19))],
              mtime=NOW - 1, append=True)
-    r.poll(NOW + LATER - 1)             # the walk that sees it shorter, maybe
     _, b = r.poll(NOW + 2 * LATER)
+    return first, b
 
+
+def test_a_file_read_again_from_its_start_counts_nothing_twice(tmp_path):
+    first, b = _shrink_and_regrow(tmp_path, reader(tmp_path))
+
+    assert first == 800                 # its first line, already counted
     assert (b[17], b[18], b[19]) == (500, 300, 200)
+
+
+def test_the_restart_test_fails_without_de_dup(tmp_path):
+    """The test above, with nothing recognised: proof that it exercises the
+    de-dup and is not passing for some other reason."""
+    r = reader(tmp_path)
+    r._seen = _Forgetful()
+
+    first, b = _shrink_and_regrow(tmp_path, r)
+
+    assert first == 1300 and b[17] == 1000
 
 
 def test_a_cold_file_is_followed_from_its_end_and_its_next_turn_counted(
         tmp_path):
-    """A session untouched past 5 h 15 min is not read; when it resumes the
-    first event read has no known total before it, and counts its own
-    last_token_usage."""
+    """A session untouched past 5 h 15 min is not read; when it resumes,
+    the turn it adds counts its own last_token_usage."""
     cold = NOW - br.FOLLOW_S - 60
     path = ro.write(tmp_path, rollout(tmp_path),
                     [ro.token_count(cold - 100, 90_000)], mtime=cold)
@@ -179,15 +254,54 @@ def test_a_cold_file_is_followed_from_its_end_and_its_next_turn_counted(
     assert sum(r.poll(NOW + LATER)[1]) == 700
 
 
-def test_two_rollouts_each_keep_their_own_running_total(tmp_path):
+def test_a_file_that_goes_cold_where_it_was_read_loses_nothing(tmp_path):
+    """Finding 3: a file read to its end and then gone cold is restarted
+    from its end, which is where the reader already was. Nothing it
+    counted is lost or counted again, and its next turn counts."""
+    path = ro.write(tmp_path, rollout(tmp_path),
+                    [ro.token_count(start(18), 500)], mtime=NOW - 5)
+    r = reader(tmp_path)
+    assert sum(r.poll(NOW)[1]) == 500
+    cold = NOW + LATER - br.FOLLOW_S - 1
+    os.utime(path, (cold, cold))
+    assert sum(r.poll(NOW + LATER)[1]) == 500
+
+    ro.write(tmp_path, path, [ro.token_count(start(19), 800, 300)],
+             mtime=NOW + LATER + 1, append=True)
+
+    _, b = r.poll(NOW + 2 * LATER)
+    assert (b[18], b[19]) == (500, 300)
+
+
+def test_two_rollouts_with_their_own_turns_both_count(tmp_path):
     ro.write(tmp_path, rollout(tmp_path, "rollout-a.jsonl"),
              [ro.token_count(start(19), 1000)], mtime=NOW - 5)
     ro.write(tmp_path, rollout(tmp_path, "rollout-b.jsonl"),
-             [ro.token_count(start(19), 1000), ro.token_count(start(19) + 5,
-                                                              1500, 500)],
+             [ro.token_count(start(19), 400), ro.token_count(start(19) + 5,
+                                                             900, 500)],
              mtime=NOW - 5)
 
-    assert sum(reader(tmp_path).poll(NOW)[1]) == 2500
+    assert sum(reader(tmp_path).poll(NOW)[1]) == 1900
+
+
+def test_an_event_copied_into_another_rollout_counts_once(tmp_path):
+    """Finding 1: the same event in a second file -- the owner's rollouts
+    held 2, the same session in two files at different stamps, and a fork
+    could make more -- was counted again, its path being another. The copy
+    carries every figure of the original, which is the key."""
+    turns = [ro.token_count(start(15), 1000),
+             ro.token_count(start(16), 1500, 500)]
+    ro.write(tmp_path, rollout(tmp_path, "rollout-parent.jsonl"), turns,
+             mtime=NOW - 5)
+    copies = [ro.token_count(start(19), 1000),           # re-stamped
+              ro.token_count(start(19) + 1, 1500, 500),
+              ro.token_count(start(19) + 2, 1800, 300)]  # the fork's own
+    ro.write(tmp_path, rollout(tmp_path, "rollout-fork.jsonl"), copies,
+             mtime=NOW - 4)
+
+    _, b = reader(tmp_path).poll(NOW)
+
+    assert (b[15], b[16], b[19]) == (1000, 500, 300)
 
 
 def test_no_codex_sessions_folder_says_nothing(tmp_path):
@@ -296,8 +410,69 @@ def test_a_reading_with_no_rate_limits_says_nothing(tmp_path):
         poll_codex(tmp_path)))
 
 
+def _says_nothing():
+    """A reading _no_short_window has no word on, that still has a figure
+    for the gauges: one window, of a length that is neither."""
+    return {"limit_id": "codex", "primary": {
+        "used_percent": 23.0, "window_minutes": 43200,
+        "resets_at": 1_793_900_000}, "secondary": None}
+
+
+def test_a_newer_reading_that_says_nothing_keeps_the_mark(tmp_path):
+    """Finding 7: the newest reading decided, even when it said None, so a
+    reading that proved nothing took the page's burn view away. The word
+    stands until a reading says otherwise -- in this provider's memory, not
+    on disk: a restarted daemon has only the newest reading to go on."""
+    assert codex_cli._no_short_window(_says_nothing()) is None
+    path = ro.write(tmp_path, rollout(tmp_path), [
+        ro.token_count(NOW - 600, 100, limits=ro.weekly_only())],
+        mtime=NOW - 600)
+    provider = codex_cli.CodexCliProvider(
+        root=str(sessions(tmp_path)), state_dir=str(tmp_path / "state"),
+        sweep=False)
+    assert all(f.no_session_window for f in usage_frames(
+        provider.poll(NOW)))
+
+    ro.write(tmp_path, path, [ro.token_count(NOW - 30, 200, 100,
+                                             limits=_says_nothing())],
+             mtime=NOW - 30, append=True)
+    frames = usage_frames(provider.poll(NOW))
+
+    assert frames and all(f.no_session_window for f in frames)
+
+    ro.write(tmp_path, path, [ro.token_count(NOW - 10, 300, 100,
+                                             limits=ro.with_five_hour())],
+             mtime=NOW - 10, append=True)
+    assert not any(f.no_session_window for f in provider.poll(NOW))
+
+
+def test_an_older_reading_cannot_take_the_word_back(tmp_path):
+    """The word is the newest reading's: a file that comes back into view
+    with an older weekly-only reading does not re-mark a page a newer
+    five-hour reading cleared."""
+    provider = codex_cli.CodexCliProvider(
+        root=str(sessions(tmp_path)), state_dir=str(tmp_path / "state"),
+        sweep=False)
+    new = ro.write(tmp_path, rollout(tmp_path, "rollout-new.jsonl"), [
+        ro.token_count(NOW - 30, 100, limits=ro.with_five_hour())],
+        mtime=NOW - 30)
+    assert not any(f.no_session_window for f in provider.poll(NOW))
+    os.remove(new)
+    ro.write(tmp_path, rollout(tmp_path, "rollout-old.jsonl"), [
+        ro.token_count(NOW - 600, 100, limits=ro.weekly_only())],
+        mtime=NOW - 600)
+
+    assert not any(f.no_session_window for f in provider.poll(NOW))
+
+
 @pytest.mark.parametrize("limits", [
     {"limit_id": "premium", "primary": None, "secondary": None},
+    {"primary": {"used_percent": 21.0, "window_minutes": 10080},
+     "secondary": {"used_percent": 3.0,
+                   "window_minutes": float("nan")}},   # NaN: finding 7
+    {"primary": {"used_percent": 21.0, "window_minutes": 10080},
+     "secondary": {"used_percent": 3.0,
+                   "window_minutes": float("inf")}},
     {"primary": {"used_percent": 21.0, "window_minutes": 10080},
      "secondary": {"used_percent": 40.0}},          # undeclared length
     {"primary": {"used_percent": None, "window_minutes": 10080},
@@ -406,6 +581,49 @@ def test_both_pages_marked_are_both_burn_pages(tmp_path):
     assert fetch.burn("codex")["p"] == "codex"
 
 
+def test_two_readers_share_one_read_budget_per_pass(tmp_path):
+    """Finding 6: each reader was handed READ_BUDGET_BYTES, so two pages
+    read twice what the serial loop was promised. One budget per pass,
+    from burn_pages(), spent by the pages in turn."""
+    from tests.support import transcripts as tr
+    budget, chunk = 8192, 1024
+    proj = tmp_path / ".claude" / "projects"
+    tr.write(tmp_path, str(proj / "p" / "s.jsonl"),
+             [tr.assistant("m%d" % i, "r%d" % i, start(19), 10, text="x" * 200)
+              for i in range(200)], mtime=NOW - 5)
+    ro.write(tmp_path, rollout(tmp_path),
+             [ro.token_count(start(19), 10 * (i + 1), 10) for i in range(200)],
+             mtime=NOW - 5)
+    readers = {"claude": br.BurnReader(root=str(proj), read_budget=budget,
+                                       chunk_bytes=chunk),
+               "codex": br.CodexBurnReader(root=str(sessions(tmp_path)),
+                                           read_budget=budget,
+                                           chunk_bytes=chunk)}
+    bus = ingest.IngestionBus(
+        providers=[Fixed(claude_frame(True)),
+                   Fixed(_codex_frame(True))],
+        preferred_provider="claude", now=lambda: NOW, burn=readers,
+        verdict=None)
+    fetch = bus.fetch()
+    fetch()
+
+    passes = []
+    for _ in range(40):
+        pages = fetch.burn_pages()
+        got = [fetch.burn(p) for p in pages]
+        passes.append(sum(r.last.read_bytes for r in readers.values()))
+        for r in readers.values():
+            r.last = r.last._replace(read_bytes=0)
+        if all(got):
+            break
+
+    assert all(got), "both pages caught up"
+    # A pass reads its budget and at most a chunk and an anchor past it,
+    # finishing the line it is in -- never a budget per reader.
+    assert max(passes) <= budget + chunk + br.ANCHOR_BYTES
+    assert max(passes) > budget // 2       # and it did spend it
+
+
 def test_a_single_reader_is_still_the_claude_pages():
     bus = ingest.IngestionBus(providers=[], burn=Counting(None), verdict=None)
     assert set(bus._burn) == {"claude"}
@@ -457,6 +675,7 @@ def bridge(fetch, caps=CAPS):
         while clock[0] + every <= end + 1e-9:
             clock[0] += every
             b.poll_if_changed()
+    ticks.bridge, ticks.clock = b, clock
     return sent, ticks
 
 
@@ -513,6 +732,76 @@ def test_a_page_that_loses_its_mark_stops_alone():
     assert len(burns(sent, "codex")) == before + 1
 
 
+def test_a_behind_page_is_asked_once_when_the_heartbeat_and_tick_meet():
+    """Finding 6: the heartbeat and the fast tick can run in one pass of
+    the serial loop, and a reader still behind answers None, which left no
+    trace -- so it was asked, and read, twice in that pass."""
+    fetch = TwoPages()
+    sent, ticks = bridge(fetch)
+    ticks(THEME_QUIET_S)
+    fetch.lines = {"claude": None, "codex": None}       # both behind
+    ticks(BURN_MIN_GAP_S + 2)
+    fetch.asked = {"claude": 0, "codex": 0}
+    ticks.clock[0] += 2.0               # the next pass
+
+    ticks.bridge.poll_once()            # the same instant, as in one pass
+    ticks.bridge.poll_if_changed()
+
+    assert fetch.asked == {"claude": 1, "codex": 1}
+    ticks(2)                            # and the next tick asks again
+    assert fetch.asked == {"claude": 2, "codex": 2}
+
+
+class Raising(TwoPages):
+    """TwoPages whose pages raise on demand. Records every call; the test
+    asserts on the record, outside any except the bridge might hold."""
+
+    def __init__(self):
+        super().__init__()
+        self.raising = set()
+        self.calls = []
+
+    def burn(self, provider="claude"):
+        self.calls.append(provider)
+        if provider in self.raising:
+            raise RuntimeError("a reader's own message, never to be said")
+        return super().burn(provider)
+
+
+def test_a_failing_page_is_said_once_and_never_hides_the_other(capsys):
+    """Finding 5: one latch for both pages. A Codex reader raising every
+    pass hid the Claude one's first failure, and the Claude page's next
+    good line said "working again" about Codex."""
+    fetch = Raising()
+    fetch.raising = {"codex"}
+    sent, ticks = bridge(fetch)
+    ticks(THEME_QUIET_S + 60)
+    err = capsys.readouterr().err
+    assert err.count("[bridge] codex burn not sent: RuntimeError") == 1
+    assert "claude burn not sent" not in err and "working again" not in err
+    assert "never to be said" not in err
+    assert fetch.calls.count("codex") > 1       # still asked every time
+    assert burns(sent, "claude") and not burns(sent, "codex")
+
+    fetch.raising = {"codex", "claude"}
+    fetch.lines["claude"] = protocol.burn("claude", Q, [0] * 19 + [11])
+    ticks(BURN_MIN_GAP_S + 2)
+    err = capsys.readouterr().err
+    assert err.count("[bridge] claude burn not sent: RuntimeError") == 1
+    assert "codex burn not sent" not in err
+
+    fetch.raising = {"codex"}
+    ticks(BURN_MIN_GAP_S + 2)
+    err = capsys.readouterr().err
+    assert err.count("[bridge] claude burn line working again") == 1
+    assert "codex burn line working again" not in err
+
+    fetch.raising = set()
+    ticks(BURN_MIN_GAP_S + 2)
+    assert capsys.readouterr().err.count(
+        "[bridge] codex burn line working again") == 1
+
+
 def test_a_board_without_the_cap_is_sent_neither_and_nothing_is_read():
     for caps in (["svc", "theme", "edit_done"], None):
         fetch = TwoPages()
@@ -547,9 +836,16 @@ def test_the_daemon_gives_each_page_its_reader_and_logs_them_apart(
 # ------------------------------------------------------------- status
 
 
+def _codex_rows(now):
+    """The Codex source rows and the Session row, as plain status prints
+    them: the row from the merge of the frames the source rows came from."""
+    from pc import cli, normalizer
+    frames = cli._source_lines_codex(now)
+    cli._codex_session_line(normalizer.merge(frames) if frames else None)
+
+
 def test_blink_status_says_when_codex_has_no_five_hour_window(
         tmp_path, monkeypatch, capsys):
-    from pc import cli
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
     import time
     now = time.time()
@@ -557,7 +853,7 @@ def test_blink_status_says_when_codex_has_no_five_hour_window(
         ro.token_count(now - 60, 100, limits=ro.weekly_only())],
         mtime=now - 60)
 
-    cli._source_lines_codex(now)
+    _codex_rows(now)
     out = capsys.readouterr().out
     assert ("Session     no five-hour window on Codex (Codex reported a"
             " weekly limit only)") in out
@@ -567,8 +863,57 @@ def test_blink_status_says_when_codex_has_no_five_hour_window(
                                                  s_reset=now + 3600,
                                                  w_reset=now + 86400))],
              mtime=now - 1, append=True)
-    cli._source_lines_codex(now)
+    _codex_rows(now)
     assert "no five-hour window" not in capsys.readouterr().out
+
+
+def test_no_codex_logs_is_no_codex_session_row(tmp_path, capsys):
+    import time
+    _codex_rows(time.time())
+    out = capsys.readouterr().out
+    assert "no session logs" in out and "Session" not in out
+
+
+class _WireBus:
+    """IngestionBus for _wire_line, with the pages a test gives it."""
+    pages = {}
+
+    def __init__(self, **kw):
+        pass
+
+    def poll(self):
+        return None
+
+    def claude_page(self):
+        return None
+
+    def verdict(self):
+        return None
+
+    def page(self, provider):
+        return self.pages.get(provider)
+
+
+def _codex_frame(marked):
+    return base.NormalizedUsageFrame(
+        provider="codex", src=codex_cli.SRC_ID, observed_at=NOW - 5,
+        session_pct=-1.0, weekly_pct=21.0, no_session_window=marked)
+
+
+@pytest.mark.parametrize("pages,said", [
+    ({"codex": _codex_frame(True)}, True),
+    ({"codex": _codex_frame(False)}, False),
+    ({}, False),            # a Codex reading select_pair left off the board
+])
+def test_status_wire_takes_the_codex_row_from_the_bus_page(
+        monkeypatch, capsys, pages, said):
+    from pc import cli
+    monkeypatch.setattr(ingest, "IngestionBus",
+                        type("Bus", (_WireBus,), {"pages": pages}))
+
+    cli._wire_line()
+
+    assert ("no five-hour window on Codex" in capsys.readouterr().out) is said
 
 
 # ------------------------------------------------------------- disclosure
@@ -582,11 +927,14 @@ def _said(capsys):
 
 def test_the_install_note_says_codex_token_counts_are_read_and_where(capsys):
     said = _said(capsys)
-    assert ("If Codex reports no five-hour limit, it also reads the"
-            " output-token count of each Codex turn from its session log: "
-            + codex_cli.sessions_root()) in said
-    assert ("From the Codex log it reads the rate limits, and the token"
-            " counts below, never the conversation.") in said
+    assert ("If Codex reports no five-hour limit, it also reads the token"
+            " counts of each Codex turn from its session log, and adds up the"
+            " output tokens: " + codex_cli.sessions_root()) in said
+    # Everything else the Codex provider reads, said: the rate limits,
+    # session_meta's cwd and the turn events (finding 10).
+    assert ("From the Codex log it reads the rate limits, the folder each"
+            " session runs in (to name the project), and when each turn"
+            " starts and ends, never the conversation.") in said
     assert "keeps only the rate-limit line" not in said
 
 
@@ -604,10 +952,19 @@ def test_the_reads_row_names_exactly_the_fields_the_codex_reader_reads():
                if l.startswith("| Reads | only on a Codex account"))
     for field in ("`type`", "`timestamp`", "`payload.type`",
                   "`payload.info.total_token_usage`",
-                  "`payload.info.last_token_usage`", "`output_tokens`",
+                  "`payload.info.last_token_usage`",
                   "`~/.codex/sessions`", "`$CODEX_HOME/sessions`",
                   '`"token_count"`'):
         assert field in row, field
+    # Every figure the content key reads, named in the row.
+    for field in br.CODEX_USAGE_FIELDS:
+        assert "`%s`" % field in row, field
+    # And the provider's own reads, in the row above it.
+    gauges = next(l for l in full.splitlines()
+                  if l.startswith("| Reads | Claude Desktop's usage cache"))
+    for field in ("`cwd`", "`task_started`", "`task_complete`",
+                  "`turn_aborted`"):
+        assert field in gauges, field
     assert 'CODEX_NEEDLE = b\'"token_count"\'' in src
     assert ("on a Codex account with none (such as Codex Pro) the"
             " output-token count of each turn from Codex's session log"

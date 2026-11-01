@@ -47,6 +47,10 @@ THEME_SAVE_HOLD_S = 0.5
 # last line, three heartbeats.
 BURN_MIN_GAP_S = 15.0
 BURN_HEARTBEAT_S = 60.0
+# And no page is ASKED twice inside this, whatever it answered: less than the
+# 2 s fast tick, so a cold start is still read on every tick, and more than
+# the moment between the heartbeat and a fast tick run in the same pass.
+BURN_ASK_GAP_S = 1.0
 
 
 def _spawn(fn):
@@ -220,7 +224,10 @@ class Bridge:
         # was always "a change" and always within 15 s of the first's, so
         # it would never have gone out.
         self._burn_sent = {}
-        self._burn_failed = False
+        # Pages whose last ask raised (see _burn_trouble), and when each page
+        # was last asked at all (BURN_ASK_GAP_S).
+        self._burn_failed = set()
+        self._burn_asked = {}
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -1175,8 +1182,9 @@ class Bridge:
         try:
             marked = list(pages())
         except Exception as e:
-            self._burn_trouble(e)
+            self._burn_trouble(None, e)
             return
+        self._burn_fine(None)
         # A page that is no longer marked has stopped; what it was sent is
         # forgotten, so its next line goes out as soon as its gap allows.
         for p in self._burn_sent:
@@ -1185,15 +1193,27 @@ class Bridge:
         for p in marked:
             self._send_burn_for(burn, p)
 
-    def _burn_trouble(self, e):
+    def _burn_trouble(self, p, e):
         """Never worth the serial loop, and the only place a failure of the
-        line, a reader's included, is caught. Said once, and the type only:
-        the text of an exception from a reader can be a transcript's path or
-        a value read out of one."""
-        if not self._burn_failed:
-            self._burn_failed = True
-            print(f"[bridge] burn not sent: {type(e).__name__}",
-                  file=sys.stderr)
+        line, a reader's included, is caught. Said once per page (`p`; None
+        for the list of pages itself), and the type only: the text of an
+        exception from a reader can be a transcript's path or a value read
+        out of one. Per page because one flag for both let a Codex reader
+        that raised on every pass hide a Claude one's first failure, and
+        the Claude page's next good line say "working again" about the
+        Codex one (/code-review max, 2026-11-01)."""
+        if p not in self._burn_failed:
+            self._burn_failed.add(p)
+            print(f"[bridge] {p + ' ' if p else ''}burn not sent:"
+                  f" {type(e).__name__}", file=sys.stderr)
+
+    def _burn_fine(self, p):
+        """`p` answered without raising: say so once, if it had not."""
+        if p in self._burn_failed:
+            self._burn_failed.discard(p)
+            if p is not None:
+                print(f"[bridge] {p} burn line working again",
+                      file=sys.stderr)
 
     def _send_burn_for(self, burn, p):
         """One page's burn line, on its own cadence."""
@@ -1201,14 +1221,21 @@ class Bridge:
         sent = self._burn_sent.get(p)
         if sent is not None and now - sent[1] < BURN_MIN_GAP_S:
             return
+        # Asked once a pass at most. The heartbeat and the fast tick can
+        # both run in one pass of the serial loop, and each used to ask a
+        # page whose reader was behind -- the answer None leaves no trace in
+        # _burn_sent -- so a cold start was read twice per pass, beside the
+        # budget the bus shares (/code-review max, 2026-11-01).
+        asked = self._burn_asked.get(p)
+        if asked is not None and 0 <= now - asked < BURN_ASK_GAP_S:
+            return
+        self._burn_asked[p] = now
         try:
             msg = burn(p)
         except Exception as e:
-            self._burn_trouble(e)
+            self._burn_trouble(p, e)
             return
-        if self._burn_failed:
-            self._burn_failed = False
-            print("[bridge] burn line working again", file=sys.stderr)
+        self._burn_fine(p)
         if msg is None:
             if sent is not None:
                 self._burn_sent[p] = (None, sent[1])

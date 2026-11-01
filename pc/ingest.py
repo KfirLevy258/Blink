@@ -14,8 +14,8 @@ able to stop it.
 import sys
 import time
 
-from pc import (cowork_audit, desktop_idb, desktop_paths, normalizer, protocol,
-                session_verdict, weekly_anchor)
+from pc import (burn_reader, cowork_audit, desktop_idb, desktop_paths,
+                normalizer, protocol, session_verdict, weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
@@ -105,15 +105,17 @@ class IngestionBus:
         if burn is not None and not isinstance(burn, dict):
             burn = {claude_cli.PROVIDER_ID: burn}
         self._burn = burn or {}
-        # The merged claude frame of the last poll(), when it was on one of
-        # the board's two pages. See claude_page(). Its no_session_window is
-        # the one condition under which a burn line is sent, read off this
-        # frame rather than copied into a flag of its own, so that it answers
-        # for the same poll the usage line came from.
-        self._claude_page = None
-        # Every merged frame the last poll() put on a page, by provider: the
-        # burn line is sent for each of them that is marked.
+        # Every merged frame the last poll() put on one of the board's two
+        # pages, by provider. A page's no_session_window is the one
+        # condition under which its burn line is sent, read off this frame
+        # rather than copied into a flag of its own, so that it answers for
+        # the same poll the usage line came from. See page().
         self._pages = {}
+        # What is left of the read budget for this pass's burn lines, shared
+        # by every reader (burn_reader.READ_BUDGET_BYTES, or a reader's own
+        # when it was given less); None for a full one. Reset by burn_pages(), which Bridge asks once per pass before
+        # it asks any page.
+        self._burn_budget = None
         # {id(provider): {"since", "retry_at", "wait"}} for providers sitting
         # out after a failure. Keyed by IDENTITY, not by class: two instances
         # of the same provider class are two sources -- two Codex homes, the
@@ -357,7 +359,6 @@ class IngestionBus:
         # board's two pages has no page to draw a burn view on.
         self._pages = {f.provider: f for f in (primary, secondary)
                        if f is not None}
-        self._claude_page = self._pages.get(claude_cli.PROVIDER_ID)
         if primary is None:
             return None
         msg = protocol.frame_to_usage(primary, self._now(), secondary)
@@ -377,17 +378,24 @@ class IngestionBus:
         merge, and a fresh provider never saw it (review, 2026-10-31). This
         is the frame the usage line was made from.
         """
-        return self._claude_page
+        return self.page(claude_cli.PROVIDER_ID)
 
     def page(self, provider):
         """The merged frame the last poll() put on `provider`'s page, or
-        None: claude_page() for any provider, for `blink status --wire`."""
+        None: claude_page() for any provider. `blink status --wire` prints
+        the Codex Session row from page("codex"), so the row is about the
+        page the wire line carries, and says nothing of a Codex reading
+        that select_pair left off the board."""
         return self._pages.get(provider)
 
     def burn_pages(self):
         """The providers whose page the last poll() found without a session
         window and that have a reader: the pages a burn line is for. Asks
-        no reader; Bridge decides from this which to ask, and when."""
+        no reader; Bridge decides from this which to ask, and when.
+
+        Also the start of a pass: the read budget burn() hands the readers
+        is filled again here, once, and shared by every page asked after."""
+        self._burn_budget = None
         return [p for p, f in self._pages.items()
                 if f.no_session_window and p in self._burn]
 
@@ -423,7 +431,19 @@ class IngestionBus:
         reader = self._burn.get(provider)
         if reader is None or page is None or not page.no_session_window:
             return None
-        got = reader.poll(self._now())
+        if isinstance(reader, burn_reader.BurnReader):
+            # One budget for the pass, not one per reader: two pages each
+            # given READ_BUDGET_BYTES read twice what the serial loop was
+            # promised (burn_reader.READ_BUDGET_BYTES; /code-review max,
+            # 2026-11-01). The page asked first can spend all of it; the
+            # other is then behind, says None, and reads on the next pass.
+            # A scenario's replay reads nothing and is asked as before.
+            left = (reader.read_budget if self._burn_budget is None
+                    else min(reader.read_budget, self._burn_budget))
+            got = reader.poll(self._now(), budget=left)
+            self._burn_budget = max(0, left - reader.last.read_bytes)
+        else:
+            got = reader.poll(self._now())
         if got is None:
             return None
         q, tokens = got

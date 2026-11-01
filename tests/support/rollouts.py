@@ -9,14 +9,15 @@ beside them, set the way the owner's logs measured (2026-11-01, counts
 only): total_tokens is input + output, and reasoning is part of output, so a
 reader that added reasoning on top would be caught out.
 
-A writing helper takes its home from the caller and checks the path with
-tests/support/home.inside before it writes.
+write() is tests/support/transcripts.write, which takes its home from the
+caller and checks the path with tests/support/home.inside before it writes.
 """
-import json
 import os
 
-from tests.support.home import inside
-from tests.support.transcripts import stamp
+# write() is the transcripts helper, unchanged: a rollout is a .jsonl of
+# compact JSON lines too, and it already takes its home from the caller and
+# checks the path with tests/support/home.inside.
+from tests.support.transcripts import stamp, write  # noqa: F401
 
 
 def usage(output, reasoning=None, inp=4000):
@@ -72,20 +73,3 @@ def agent_message(at, text="filler reply text"):
 
 def rollout_path(sessions, day="2026/11/01", name="rollout-a.jsonl"):
     return os.path.join(str(sessions), *day.split("/"), name)
-
-
-def write(home, path, lines, mtime=None, append=False):
-    """Write `lines` to the rollout at `path`, which must lie under `home`.
-    Bytes pass through, so a test can write a partial line on purpose."""
-    path = inside(home, path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "ab" if append else "wb") as f:
-        for line in lines:
-            if isinstance(line, (bytes, bytearray)):
-                f.write(bytes(line))
-            else:
-                f.write((json.dumps(line, separators=(",", ":"))
-                         + "\n").encode("utf-8"))
-    if mtime is not None:
-        os.utime(path, (mtime, mtime))
-    return path

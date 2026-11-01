@@ -50,6 +50,7 @@ be confidently wrong rather than to fail:
 """
 import glob
 import json
+import math
 import os
 from datetime import datetime, timezone
 
@@ -93,8 +94,15 @@ def sessions_root() -> str:
     Returns the path whether or not it exists: not having Codex installed is
     an ordinary state, handled by the reader rather than by pretending we do
     not know where to look. CODEX_HOME is honoured because Codex itself does.
+
+    Joined from the home directory rather than expanded from "~/.codex", as
+    burn_reader.transcripts_root() is and for its reason: on Windows
+    expanduser keeps the slash it was given, and the root came out with one
+    forward slash among backslashes -- in the install note a customer reads
+    and in a test on windows-latest (/code-review max, 2026-11-01).
     """
-    home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    home = (os.environ.get("CODEX_HOME")
+            or os.path.join(os.path.expanduser("~"), ".codex"))
     return os.path.join(home, "sessions")
 
 
@@ -409,12 +417,10 @@ def _observed_at(line: dict, mtime: float) -> float:
     return mtime
 
 
-# The weekly window's declared length, and the longest a five-hour window
-# can declare and still be one. 300 is the five-hour window Codex writes;
-# anything up to SESSION_WINDOW_MAX_MIN is what _classify puts on the session
-# dial, so that is the bound a "no window" claim must clear.
+# The weekly window's declared length. The five-hour window Codex writes
+# declares 300; anything up to SESSION_WINDOW_MAX_MIN is what _classify puts
+# on the session dial, so that is the bound a "no window" claim must clear.
 WEEKLY_WINDOW_MIN = 10080
-FIVE_HOUR_WINDOW_MIN = 300
 
 
 def _no_short_window(limits):
@@ -439,8 +445,10 @@ def _no_short_window(limits):
     windows, a weekly with no figure. Positive evidence only, as for Claude
     (pc/session_verdict): quiet data proves nothing.
 
-    This judges the object it is given, which poll() makes the reading the
-    gauges show, so the mark and the dial never describe different limits.
+    This judges the object it is given. poll() makes the newest reading
+    that says True or False the word on every frame it sends, so the mark
+    and the dial never describe different limits; a newer reading that
+    says None leaves that word as it was.
     """
     if not isinstance(limits, dict):
         return None
@@ -451,7 +459,12 @@ def _no_short_window(limits):
         if not isinstance(w, dict):
             return None
         minutes = w.get("window_minutes")
-        if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+        # Finite, as cowork_audit._finite_num has it: json.loads takes a bare
+        # NaN, which is neither <= the session bound nor == 10080, so a NaN
+        # beside a weekly window used to say True (/code-review max,
+        # 2026-11-01). A window of unreadable length says nothing.
+        if (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
+                or not math.isfinite(minutes)):
             return None
         if minutes <= SESSION_WINDOW_MAX_MIN:
             return False
@@ -694,6 +707,17 @@ class CodexCliProvider(base.ProviderParser):
         # Per instance, not per class: a mutable default here would make the
         # cache shared by every provider in the process.
         self._names = {}
+        # Whether the account has a five-hour window, as the newest reading
+        # that said so either way put it (_no_short_window True or False),
+        # and that reading's observed_at; None until one has. Held for the
+        # life of the provider and never persisted: every reading carries
+        # the word, so a restarted daemon reads the same rollout and says
+        # the same. Held at all because a newer reading that says nothing
+        # -- its windows undeclared, say -- used to clear the mark, and the
+        # page lost its burn view for a reading that proved nothing
+        # (/code-review max, 2026-11-01).
+        self._no_window = None
+        self._no_window_at = None
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -822,8 +846,9 @@ class CodexCliProvider(base.ProviderParser):
             provider=PROVIDER_ID,
             src=SRC_ID,
             observed_at=observed_at,
-            # Only ever True here; poll() makes the newest reading's word
-            # the word of every frame it sends.
+            # This reading's own word, True only on positive evidence.
+            # poll() replaces it on every frame it sends with the word of
+            # the newest reading that said anything (self._no_window).
             no_session_window=_no_short_window(raw_payload) is True,
             session_pct=s_win.pct,
             session_resets_at=s_win.resets_at,
@@ -851,6 +876,7 @@ class CodexCliProvider(base.ProviderParser):
         # the session id is the only thing the two sources share.
         rollout_states = {}
         rollout_names = {}
+        said = {}           # id(frame) -> _no_short_window of its reading
         paths = recent_rollouts(self._root)
         self._prune_names(set(paths))
         for path in paths:
@@ -885,6 +911,7 @@ class CodexCliProvider(base.ProviderParser):
                                          limit_reached, read_at)
             if frame is None:
                 continue
+            said[id(frame)] = _no_short_window(limits)
             # A frame with no percentage is not a candidate: this contest is
             # on recency alone, and the newest frame would otherwise win it
             # for numbers it does not have and hide another file's reading.
@@ -912,16 +939,20 @@ class CodexCliProvider(base.ProviderParser):
         # its own, can still predate the reset the ended one saw (found in
         # review: a fresh 40/20 for a window that had ended).
         frames = [f for f in (best, ended) if f is not None]
-        # Whether the account has a five-hour window is the NEWEST reading's
-        # to say, and every reading carries it, so nothing is persisted: a
-        # restarted daemon reads the same rollout and says the same. The
-        # mark goes the moment a reading with a five-hour window is newer
+        # Whether the account has a five-hour window is the newest reading's
+        # to say -- of those that say anything (self._no_window). The mark
+        # goes the moment a reading with a five-hour window is newer
         # (pc/normalizer then drops the session figure of a marked frame, so
-        # an older weekly-only `ended` must not keep it on a newer 300).
-        if frames:
-            newest = max(frames, key=lambda f: f.observed_at)
-            for f in frames:
-                f.no_session_window = newest.no_session_window
+        # an older weekly-only `ended` must not keep it on a newer 300); a
+        # reading that says None changes nothing, and one older than the
+        # reading that last decided cannot take the decision back.
+        for f in sorted(frames, key=lambda f: f.observed_at):
+            word = said.get(id(f))
+            if word is not None and (self._no_window_at is None
+                                     or f.observed_at >= self._no_window_at):
+                self._no_window, self._no_window_at = word, f.observed_at
+        for f in frames:
+            f.no_session_window = self._no_window is True
 
         # The hooks' answer, and where it wins.
         #
