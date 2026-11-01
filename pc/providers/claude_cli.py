@@ -142,7 +142,8 @@ CHAIN_MAX_GAP_S = 3600
 # eleven minutes broke every proof (finding 2 of the re-review). Half an
 # hour is a reading pause.
 #
-# It is also what makes a gap in the polling harmless. A rise says the
+# It is also what makes a gap in the polling harmless to the safety (a long
+# one still restarts the chain: see _reply_without_window). A rise says the
 # session replied some time after its baseline; the render that shows it may
 # be a repaint long after that reply, whose own render (a five_hour one, on
 # Pro or Max) was never seen -- the board unplugged, the lid closed, the
@@ -347,8 +348,14 @@ class ClaudeCliProvider(base.ProviderParser):
         apart (a window and a quarter of an hour), each no more than
         CHAIN_MAX_GAP_S after the one before, and no five_hour seen from any
         session in that time. The replies may come from any session on the
-        desk; the account is one. A gap in the polling does not break the
-        chain: see BASELINE_MAX_S.
+        desk; the account is one. A short gap in the polling does not break
+        the chain: see BASELINE_MAX_S. One of about an hour, less two reply
+        intervals, does: a reply rendered while nothing polls is never seen,
+        and the first rise after the gap is against a baseline older than
+        BASELINE_MAX_S and not counted, so the next counted reply is more
+        than CHAIN_MAX_GAP_S after the last one before the gap (4th review,
+        2026-11-01: unplugged 57 min, replies every two minutes, proved on
+        time; 58 min, three hours late).
 
         WHY IT HOLDS ON PRO AND MAX. It rests on the replies themselves,
         not on seeing anything between them: every one the chain takes
@@ -369,10 +376,11 @@ class ClaudeCliProvider(base.ProviderParser):
         S = 0 that is a stream of three and a half hours. A five_hour seen
         in between starts the chain over too (a desk that uses Claude Code
         mid-window shows one), but nothing above depends on seeing it, so a
-        poll gap -- the board unplugged, the lid closed -- costs nothing.
-        On Ultra a desk at work makes the chain in five and a quarter
-        hours, breaks of up to an hour included, and the verdict is kept
-        from then on.
+        poll gap -- the board unplugged, the lid closed -- costs the safety
+        nothing. On Ultra a desk at work makes the chain in five and a
+        quarter hours, breaks in its use of up to an hour included and poll
+        gaps of up to an hour less two reply intervals (above), and the
+        verdict is kept from then on.
 
         THE RESIDUAL. A Pro or Max desk is still marked if its clock runs
         fast by five hours or more (it never renders five_hour at all), or

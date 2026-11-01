@@ -18,10 +18,15 @@ lines carried a usable `seven_day` and no `five_hour`, each at most an hour
 after the one before, the first and the latest at least 5 h 15 min apart,
 with no `five_hour` seen from any session in that span
 (`claude_cli._reply_without_window`). A session's cost falling, an mtime or
-the daemon's clock going backwards starts the chain over. A gap in the
-polling does not: until the third review of 2026-11-01 one over five
+the daemon's clock going backwards starts the chain over. A short gap in
+the polling does not: until the third review of 2026-11-01 one over five
 minutes did, and an Ultra desk with its lid closed for ten minutes was not
-marked that day. Nor is the hour counted from the last reply a tally kept
+marked that day. A long one still does (the fourth review): replies
+rendered while nothing polls are not seen, and the first rise after the gap
+is against a baseline older than `BASELINE_MAX_S` and not counted, so the
+next counted reply comes over an hour after the last. A desk replying every
+two minutes was proved on time after 57 minutes unplugged and three hours
+late after 58; replying every ten, the edge is about 50. Nor is the hour counted from the last reply a tally kept
 any more (there were three replies, 25 minutes apart, which the span
 already implied): a 36-minute silence broke the chain. The chain is in
 memory, so a restarted daemon starts it again.
@@ -35,7 +40,8 @@ running fast renders weekly-only replies at the end of every window. On Pro
 and Max a weekly-only reply happens only in those stretches: within S before
 a reset on a clock S fast, and the longest stream plus the half-hour
 baseline after it. The proof rests on the replies themselves, not on seeing
-the `five_hour` renders between them, which is why a poll gap costs nothing.
+the `five_hour` renders between them, which is why a poll gap costs the
+safety nothing.
 A chain inside one stretch spans less than 5 h 15 min, and the one-hour cap
 keeps two stretches from joining. What is left marks a Pro or Max desk only
 with its clock fast by hours: by three and a half less its longest stream
