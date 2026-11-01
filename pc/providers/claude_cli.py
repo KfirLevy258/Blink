@@ -229,8 +229,10 @@ class ClaudeCliProvider(base.ProviderParser):
         self._polled_at = None
         # The mtime of the render the file held when the clock last went
         # back, which is no baseline however often it is read again; or
-        # None. See _forget_replies.
+        # None. See _forget_replies. _stale_owed: the clock went back on a
+        # poll whose read failed, and the next read that succeeds names it.
         self._stale = None
+        self._stale_owed = False
         # Block keys _make_room may not drop during the current poll: the
         # payloads poll() is about to look up. See _make_room.
         self._keep = ()
@@ -322,10 +324,19 @@ class ClaudeCliProvider(base.ProviderParser):
         it with its age short by the step
         (test_a_clock_gone_back_leaves_no_baseline_before_it). Every other
         render from before the step is gone, written over in the file.
+
+        `mtime` is None when that poll's read failed (an antivirus or
+        backup hold on Windows, EMFILE), and the stale render is then the
+        one the next successful read finds (self._stale_owed): taken as
+        None, the next poll took the pre-step render back in as a baseline
+        all the same (4th review, 2026-11-01). That read may instead find a
+        render made after the step, which is then no baseline either: one
+        reply later to be counted, the safe side.
         """
         self._chain = None
         self._costs.clear()
         self._stale = mtime
+        self._stale_owed = mtime is None
 
     def _reply_without_window(self, payload, mtime):
         """Evidence of no five-hour window, when this payload completes the
@@ -408,8 +419,14 @@ class ClaudeCliProvider(base.ProviderParser):
           - an mtime going backwards, against the session's previous render
             or the chain's latest reply: a clock stepped back, or a file
             restored, and the intervals mean nothing;
-          - the polls' own clock going backwards, after which no render
-            from before the step is a baseline (poll(), _forget_replies).
+          - the polls' own clock going backwards between two polls, after
+            which the render the file holds is no baseline, nor any other
+            session's earlier one (poll(), _forget_replies). A step back
+            smaller than the time since the last poll -- the clock set right
+            while the lid was closed -- is not seen there, and is caught
+            only as an mtime going backwards, above, if one does; otherwise
+            the render from before it reads as one by a clock that was fast,
+            which THE RESIDUAL already prices.
         A rise against a baseline older than BASELINE_MAX_S is not counted
         and changes nothing else: not even CHAIN_MAX_GAP_S's measure, since
         the render may be long after the reply it shows.
@@ -505,17 +522,21 @@ class ClaudeCliProvider(base.ProviderParser):
     def poll(self, now_epoch):
         # A clock gone back: every interval measured across the step is
         # short by it, the unsafe direction for CHAIN_MAX_GAP_S, so the
-        # proof starts over. A gap going FORWARD is no reason to: until the
-        # 3rd review of 2026-11-01 (finding 1) any gap over five minutes
-        # threw the chain away, and the daemon polls only while the board
-        # is alive, so an Ultra desk whose lid closed for ten minutes was
-        # not marked that day. What a gap can hide is BASELINE_MAX_S's
-        # business.
+        # proof starts over. Seen here only when this poll is dated before
+        # the last one: a step back hidden inside a longer gap is left to
+        # the mtime checks and the residual (_reply_without_window). A gap
+        # going FORWARD is no reason to: until the 3rd review of 2026-11-01
+        # (finding 1) any gap over five minutes threw the chain away, and
+        # the daemon polls only while the board is alive, so an Ultra desk
+        # whose lid closed for ten minutes was not marked that day. What a
+        # gap can hide is BASELINE_MAX_S's business.
         back = self._polled_at is not None and now_epoch < self._polled_at
         self._polled_at = now_epoch
         payload, mtime = ss.read_payload(self.path())
         if back:
             self._forget_replies(mtime)
+        elif self._stale_owed and mtime is not None:
+            self._stale, self._stale_owed = mtime, False
         self._keep = tuple(
             _block_key(p)[0] for p in (
                 payload, *(m[0] for m in (self._remembered, self._any)
