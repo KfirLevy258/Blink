@@ -12,13 +12,19 @@ Only when the account has no session window. The daemon already decides that:
 Proof of no window is one of two things. Claude Desktop: two consecutive
 history samples less than one idle poll apart (`DESKTOP_RISE_MAX_GAP_S`,
 1000 s) where `sd` rose strictly and NEITHER sample has an `fh` key. Claude
-Code: sustained absence, at least three replies (a session's
-`cost.total_cost_usd` rose) whose status lines carried a usable `seven_day`
-and no `five_hour`, consecutive ones at least 25 minutes and at most an hour
-apart, the first and last at least 5 h 15 min apart, with no `five_hour`
-rendered by any session in that span and no poll gap over five minutes
-(`claude_cli._reply_without_window`). A session's cost falling, an mtime
-going backwards or a poll gap starts the chain over.
+Code: sustained absence, replies (a session's `cost.total_cost_usd` rose
+against a render of that session at most half an hour old) whose status
+lines carried a usable `seven_day` and no `five_hour`, each at most an hour
+after the one before, the first and the latest at least 5 h 15 min apart,
+with no `five_hour` seen from any session in that span
+(`claude_cli._reply_without_window`). A session's cost falling, an mtime or
+the daemon's clock going backwards starts the chain over. A gap in the
+polling does not: until the third review of 2026-11-01 one over five
+minutes did, and an Ultra desk with its lid closed for ten minutes was not
+marked that day. Nor is the hour counted from the last reply a tally kept
+any more (there were three replies, 25 minutes apart, which the span
+already implied): a 36-minute silence broke the chain. The chain is in
+memory, so a restarted daemon starts it again.
 
 That replaced, on 2026-11-01, two replies 25 minutes to 4 h 35 min apart,
 after a re-review read Claude Code 2.1.316's bundle: the status line renders
@@ -26,15 +32,20 @@ on events, not every few seconds; `API_TIMEOUT_MS` bounds only the wait for
 headers, so one stream across a reset can render weekly-only rises half an
 hour apart; and `five_hour` leaves the line by the local clock, so a desk
 running fast renders weekly-only replies at the end of every window. On Pro
-and Max a weekly-only reply happens only in those stretches, each followed by
-a reply that renders `five_hour`, or by no Claude Code use at all, and a
-chain inside one stretch spans less than 5 h 15 min; the one-hour cap keeps
-two stretches from joining. What is left marks a Pro or Max desk only with
-its clock fast by hours (about four less its longest stream, and then only if
-it uses Claude Code solely late in windows opened elsewhere; five or more in
-any case), or if another terminal overwrites every `five_hour` render before
-a poll sees it. The cost is on Ultra: a desk is marked after about 5 h 15 min
-of Claude Code use, later if it pauses for over an hour. The
+and Max a weekly-only reply happens only in those stretches: within S before
+a reset on a clock S fast, and the longest stream plus the half-hour
+baseline after it. The proof rests on the replies themselves, not on seeing
+the `five_hour` renders between them, which is why a poll gap costs nothing.
+A chain inside one stretch spans less than 5 h 15 min, and the one-hour cap
+keeps two stretches from joining. What is left marks a Pro or Max desk only
+with its clock fast by hours: by three and a half less its longest stream
+if its Claude Code use mid-window goes unseen (used only late in windows
+opened elsewhere, or the board unplugged whenever it is) and some reply's
+own render is written over before a poll, four less it if every reply's
+render is seen; four and three-quarters less it to span one stretch; five
+or more in any case. The cost is on Ultra: a desk is
+marked after about 5 h 15 min of Claude Code use, later if it pauses for
+over an hour. The
 earlier Desktop rule checked only the later sample, and a window closing
 between two polls passed it. A single Desktop sample with no `fh` proved it
 until the owner's first decision of 2026-11-01: it had been measured on Ultra

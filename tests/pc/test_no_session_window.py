@@ -78,12 +78,11 @@ def status(five=None, five_resets=None, seven=2.0, seven_resets=WEEK_END,
 
 def sustained(at):
     """(cost, mtime) of the renders of one Ultra session that prove no
-    window, the last written at `at`: a reply every claude_cli
-    .REPLY_SPACING_S, the first more than claude_cli.CHAIN_SPAN_S before
-    the last, and a repaint every four minutes in between, so that polling
-    after each render never leaves claude_cli.POLL_GAP_S unwatched. Two
-    replies, or one, are not proof (claude_cli._reply_without_window)."""
-    spacing = claude_cli.REPLY_SPACING_S
+    window, the last written at `at`: a reply every twenty minutes, the
+    first more than claude_cli.CHAIN_SPAN_S before the last, and a repaint
+    every four minutes in between. Two replies, or one, are not proof
+    (claude_cli._reply_without_window)."""
+    spacing = 20 * 60
     n = -(-claude_cli.CHAIN_SPAN_S // spacing)          # ceil
     first = at - n * spacing
     renders, cost = [(1.0, first - 60)], 1.0
@@ -1900,12 +1899,15 @@ def test_a_cost_too_big_for_a_float_is_no_cost(tmp_path):
 HOUR = 3600
 
 
-def desk_run(tmp_path, renders, poll_every=60, start=None, end=None):
+def desk_run(tmp_path, renders, poll_every=60, start=None, end=None,
+             polled=None):
     """Drive a real provider and a real verdict over `renders`, [(local
     mtime, doc)] in any order, as the daemon would: a poll every
     `poll_every` seconds of the desk's clock and one a second after each
-    render, each poll seeing whatever was rendered last. Returns
-    (the times of the no-window proofs, the verdict on disk)."""
+    render, each poll seeing whatever was rendered last. `polled(now, doc)`,
+    given the clock and the render in the file, says whether that poll
+    happens at all: the board unplugged, the lid closed. Returns (the times
+    of the no-window proofs, the verdict on disk)."""
     renders = sorted(renders, key=lambda r: r[0])
     start = renders[0][0] if start is None else start
     end = renders[-1][0] + 2 if end is None else end
@@ -1915,7 +1917,7 @@ def desk_run(tmp_path, renders, poll_every=60, start=None, end=None):
         path=inside(tmp_path, session_verdict.verdict_path()))
     ticks = sorted({t + 1 for t, _ in renders}
                    | set(range(int(start), int(end), poll_every)))
-    proofs, i = [], 0
+    proofs, i, shown = [], 0, None
     for now in ticks:
         latest = None
         while i < len(renders) and renders[i][0] <= now:
@@ -1923,6 +1925,9 @@ def desk_run(tmp_path, renders, poll_every=60, start=None, end=None):
             i += 1
         if latest is not None:
             write(p, latest[1], latest[0])
+            shown = latest[1]
+        if polled is not None and not polled(now, shown):
+            continue
         frames = prov.poll(now)
         v.observe(frames, now)
         proofs += [f.window_evidence[2] for f in frames
@@ -1969,38 +1974,68 @@ def pro_desk(skew_s, hours, start, stream_s=45 * 60, every_s=120):
                    for srv, r in renders])
 
 
+def weekly_only_seen(now, doc):
+    """A `polled` for desk_run under which no five_hour is ever seen: the
+    board is unplugged whenever the file holds one. Since a poll gap no
+    longer starts the chain over (the 3rd review of 2026-11-01, finding 1),
+    a Pro or Max desk must stay unmarked with no five_hour sighting to
+    reset it."""
+    return doc is None or not ss_five(doc)
+
+
+def ss_five(doc):
+    return isinstance(doc.get("rate_limits", {}).get("five_hour"), dict)
+
+
+@pytest.mark.parametrize("unseen", [False, True],
+                         ids=["polled throughout", "five_hour never seen"])
 @pytest.mark.parametrize("skew_s", [0, 30 * 60, 3 * HOUR],
                          ids=["true clock", "30 min fast", "3 h fast"])
-def test_a_pro_desk_with_a_fast_clock_is_never_marked(tmp_path, skew_s):
+def test_a_pro_desk_with_a_fast_clock_is_never_marked(tmp_path, skew_s,
+                                                      unseen):
     """The re-review's finding 3. Claude Code drops five_hour once its
     resets_at is behind the LOCAL clock, so on a desk 30 minutes fast every
     reply in the last half hour of each window renders weekly-only, and two
     of them 25 minutes apart were proof; three hours fast, the last three
     hours of every window. In use through four window ends, with a long
-    stream across each one, nothing is proved: each window's first replies
-    render five_hour and start the chain over."""
+    stream across each one, nothing is proved. Polled throughout, each
+    window's first replies render five_hour and start the chain over; with
+    every one of those unseen, what holds is that the weekly-only stretches
+    are an hour and a quarter apart at the least (3 h fast, a 45-minute
+    stream), more than claude_cli.CHAIN_MAX_GAP_S."""
     start = NOW - 24 * HOUR
-    proofs, on_disk = desk_run(tmp_path, pro_desk(skew_s, 21, start))
+    proofs, on_disk = desk_run(tmp_path, pro_desk(skew_s, 21, start),
+                               polled=weekly_only_seen if unseen else None)
 
     assert proofs == []
     assert on_disk is None or on_disk[0] is True
 
 
-def test_a_long_stream_across_each_reset_never_marks(tmp_path):
+@pytest.mark.parametrize("unplugged", [False, True],
+                         ids=["polled throughout", "unplugged between"])
+def test_a_long_stream_across_each_reset_never_marks(tmp_path, unplugged):
     """The re-review's finding 4. API_TIMEOUT_MS bounds only the wait for
     headers, so a reply accepted before a reset can render weekly-only for
     half an hour after it, each content block a render. Here the desk uses
     Claude Code only across resets -- the windows between are opened from
     claude.ai -- with one 50-minute stream straddling each, the next window
     ending 5 h 20 min after the last, three times over. No five_hour is
-    ever rendered after the first, and each stretch is a chain of two;
-    what keeps them from joining is claude_cli.CHAIN_MAX_GAP_S."""
+    ever rendered after the first, and each stretch is a chain of its own;
+    what keeps them from joining is claude_cli.CHAIN_MAX_GAP_S, polled or
+    not in between."""
     R = NOW - 20 * HOUR
     renders = [(R - 120, R, "s")]
+    stretches = []
     for k in range(3):
         r = R + k * (base.SESSION_WINDOW_S + 20 * 60)
+        stretches.append((r, r + 50 * 60))
         renders += [(r + d, None, "s") for d in range(60, 50 * 60, 240)]
-    proofs, on_disk = desk_run(tmp_path, costed(renders), end=NOW)
+    polled = None
+    if unplugged:
+        def polled(now, doc):
+            return any(a <= now <= b + 60 for a, b in stretches)
+    proofs, on_disk = desk_run(tmp_path, costed(renders), end=NOW,
+                               polled=polled)
 
     assert proofs == []
     assert on_disk is None or on_disk[0] is True
@@ -2064,27 +2099,274 @@ def test_a_five_hour_anywhere_starts_the_chain_over(tmp_path):
     assert on_disk == (True, session_verdict.KIND_STATUSLINE_WINDOW, mid)
 
 
-def test_a_poll_gap_starts_the_chain_over(tmp_path):
-    """Polls run only while the board is alive. With the board unplugged
-    for longer than claude_cli.POLL_GAP_S in the middle, nothing is known
-    of what was rendered then, and the chain starts again."""
-    start = NOW - 6 * HOUR
-    gap = (start + 3 * HOUR, start + 3 * HOUR + claude_cli.POLL_GAP_S + 60)
-    renders = [r for r in ultra_desk(start, 6)
-               if not gap[0] <= r[0] < gap[1]]
+def workday(start, end, every_s=120, silent=()):
+    """An Ultra desk replying every `every_s` from `start` to `end`, one
+    session, nothing rendered inside any (from, to) of `silent`."""
+    return costed([(t, None, "s") for t in range(int(start), int(end), every_s)
+                   if not any(a <= t < b for a, b in silent)])
+
+
+NINE = NOW - 10 * HOUR          # "09:00" of a desk's day, 17:30 in the past
+
+
+def at(hh, mm):
+    """The desk's clock at hh:mm on the day that starts at NINE."""
+    return NINE + (hh - 9) * HOUR + mm * 60
+
+
+@pytest.mark.parametrize("dark", [None, "lid", "unplugged"],
+                         ids=["no break", "lid closed 13:00-13:10",
+                              "unplugged 13:00-13:10"])
+def test_an_ultra_workday_with_a_break_in_polling_is_marked_that_day(
+        tmp_path, dark):
+    """The 3rd review of 2026-11-01, finding 1. Polls run only while the
+    board is alive, and any gap in them over five minutes used to throw the
+    chain away: an Ultra desk replying every two minutes from 09:00 to 17:30
+    was never marked with the lid closed from 13:00 to 13:10 (nothing
+    rendered, nothing polled) or the board unplugged for those ten minutes
+    while Claude Code kept replying. A poll gap is no longer a reset: the
+    first rise after it is measured against a baseline twelve minutes old,
+    inside claude_cli.BASELINE_MAX_S, and the chain goes on. Marked at
+    14:17, five and a quarter hours after the first reply that rose
+    against a baseline (09:02), all three ways."""
+    lid = (at(13, 0), at(13, 10))
+    renders = workday(at(9, 0), at(17, 30),
+                      silent=(lid,) if dark == "lid" else ())
+    polled = None
+    if dark is not None:
+        def polled(now, doc):
+            return not lid[0] <= now < lid[1]
+    proofs, on_disk = desk_run(tmp_path, renders, polled=polled)
+
+    assert proofs
+    assert at(14, 17) <= proofs[0] <= at(14, 18)
+    assert on_disk[0] is False
+
+
+def test_an_ultra_workday_with_a_36_minute_silence_is_marked_that_day(
+        tmp_path):
+    """The 3rd review's finding 2. The longest gap, CHAIN_MAX_GAP_S, was
+    measured from the last reply the chain had TALLIED, and replies within
+    25 minutes of it were not tallied, so a 36-minute silence from 12:02 to
+    12:38 left the reply at 12:40 more than an hour after the tally's 11:38
+    and the chain started over: not marked that day. It is measured from
+    the latest weekly-only reply. The reply at 12:40 rises against a
+    baseline 38 minutes old and is not counted (BASELINE_MAX_S); the one at
+    12:42 is, 40 minutes after 12:02, and the day is marked at 14:17."""
+    renders = workday(at(9, 0), at(17, 30), silent=((at(12, 3), at(12, 40)),))
+    proofs, on_disk = desk_run(tmp_path, renders)
+
+    assert proofs
+    assert at(14, 17) <= proofs[0] <= at(14, 18)
+
+
+def test_random_ultra_days_with_breaks_of_up_to_55_minutes_are_marked(
+        tmp_path):
+    """The 3rd review's finding 2, at random: forty generated ten-hour days
+    of turns of 5 to 40 minutes, a reply every 20 s to 2 min, and breaks of
+    5 to 55 minutes with nothing rendered. With the gap measured from the
+    last tallied reply, 38% of such days with breaks of 20 to 55 minutes
+    were marked; from the latest reply, all of them, and none sooner than
+    CHAIN_SPAN_S after the first reply. Fed straight to the provider, one
+    poll a second after each render, since gaps in polling decide nothing."""
+    import random
+    rng = random.Random(20261101)
+    p = tmp_path / "statusline.json"
+    for day in range(40):
+        prov = ClaudeCliProvider(path=str(p))
+        t0 = NOW - 11 * HOUR
+        t, cost, first, proof = t0, 1.0, None, None
+        while t < t0 + 10 * HOUR and proof is None:
+            turn_end = t + rng.uniform(5, 40) * 60
+            while t < turn_end and proof is None:
+                cost += 0.05
+                write(p, status(seven=30.0, cost=cost), t)
+                first = t if first is None else first
+                if any(f.window_evidence and f.window_evidence[0] is False
+                       for f in prov.poll(t + 1)):
+                    proof = t
+                t += rng.uniform(20, 120)
+            t += rng.uniform(5, 55) * 60
+        assert proof is not None, "day %d not marked" % day
+        assert proof - first >= claude_cli.CHAIN_SPAN_S
+
+
+# --- the guards, each pinned (the 3rd review of 2026-11-01, finding 8) ------
+#
+# Five mutations of claude_cli.py, each shown to change behavior, had left
+# every test green. Each test below fails with its guard deleted.
+
+
+def fed(p, prov, steps):
+    """Drive `prov` by hand: for each (doc or None, mtime, now) write the doc
+    at that mtime if there is one, then poll at `now`. Returns the times
+    of the no-window proofs. The poll clock and the file's mtime are given
+    apart, so either can be made to go back without the other."""
+    proofs = []
+    for doc, mtime, now in steps:
+        if doc is not None:
+            write(p, doc, mtime)
+        proofs += [f.window_evidence[2] for f in prov.poll(now)
+                   if f.window_evidence is not None
+                   and f.window_evidence[0] is False]
+    return proofs
+
+
+class Desk:
+    """One Ultra session's replies, every two minutes, each polled a
+    second after it is written; `cost` runs on across calls."""
+
+    def __init__(self, session="a"):
+        self.session, self.cost = session, 1.0
+
+    def reply(self, t, now=None, rise=0.05):
+        self.cost += rise
+        return (status(seven=30.0, session=self.session, cost=self.cost), t,
+                t + 1 if now is None else now)
+
+    def replies(self, start, end, every_s=120):
+        return [self.reply(t) for t in range(int(start), int(end), every_s)]
+
+
+T0 = NOW - 12 * HOUR
+# Five hours and ten minutes into a chain: one more short stretch of
+# replies would complete it.
+ALMOST = T0 + claude_cli.CHAIN_SPAN_S - 5 * 60
+
+
+def test_a_rise_against_a_baseline_older_than_the_bound_is_no_reply(
+        tmp_path):
+    """BASELINE_MAX_S. Pro or Max: eight terminals render a window that
+    resets at R, the board is unplugged, each replies inside the window
+    (rendering five_hour, none of it seen), and after R each repaints
+    weekly-only on its own event -- the earliest reset, the prompt cache
+    expiring -- fifty minutes apart. Each repaint is a cost rise against
+    that terminal's last render seen, hours before, and with no bound on
+    that baseline's age the eight make a chain of six hours with no
+    five_hour seen in it: a Pro desk marked. A rise may be a reply long
+    before the render that shows it, so it counts only against a baseline
+    at most half an hour old. Since a poll gap no longer starts the chain
+    over, this bound is what stands between an unwatched window and the
+    proof."""
     p = tmp_path / "statusline.json"
     prov = ClaudeCliProvider(path=str(p))
-    proofs, ticks = [], sorted(
-        {t + 1 for t, _ in renders} | set(range(int(start), int(NOW), 60)))
-    i = 0
-    for now in (t for t in ticks if not gap[0] <= t < gap[1]):
-        while i < len(renders) and renders[i][0] <= now:
-            write(p, renders[i][1], renders[i][0])
-            i += 1
-        proofs += [f for f in prov.poll(now) if f.window_evidence
-                   and f.window_evidence[0] is False]
+    R = T0 + 4 * HOUR
+    steps = [(status(five=20.0, five_resets=R, seven=30.0, session="t%d" % i,
+                     cost=1.0), T0 + 10 * i, T0 + 10 * i + 1)
+             for i in range(8)]
+    steps += [(status(seven=30.0, session="t%d" % i, cost=2.0),
+               R + 60 + i * 50 * 60, R + 61 + i * 50 * 60) for i in range(8)]
 
-    assert proofs == []
+    assert fed(p, prov, steps) == []
+
+
+def test_a_session_whose_mtime_goes_back_starts_the_chain_over(tmp_path):
+    """The per-session mtime check. Session a's last render was a repaint
+    at L+5 min; then the file carries a rise from a dated L+3 min -- a file
+    restored, a clock stepped back with the polls' clock running on. It is
+    after the chain's latest reply, so only the session's own baseline
+    shows the clock went back, and the spacing means nothing. The chain
+    starts over; without the check it went on and was proved at L+15."""
+    p = tmp_path / "statusline.json"
+    a = Desk()
+    L = ALMOST
+    steps = a.replies(T0, L + 1)
+    steps.append((status(seven=30.0, session="a", cost=a.cost), L + 300,
+                  L + 301))
+    steps.append(a.reply(L + 180, now=L + 303))
+    steps += a.replies(L + 600, L + 30 * 60)
+
+    assert fed(p, ClaudeCliProvider(path=str(p)), steps) == []
+
+
+def test_a_reply_dated_before_the_chains_latest_starts_it_over(tmp_path):
+    """The chain's own mtime check. Session b's rise is dated two minutes
+    before session a's latest reply, against a baseline of b's from before
+    that, so b's own history looks in order; the desk's does not. Without
+    the check the chain went on and was proved at L+15."""
+    p = tmp_path / "statusline.json"
+    a, b = Desk("a"), Desk("b")
+    L = ALMOST
+    steps = [s for s in a.replies(T0, L + 1) if s[1] != L - 300]
+    steps.insert(-3, (status(seven=30.0, session="b", cost=b.cost), L - 300,
+                      L - 299))
+    steps.append(b.reply(L - 120, now=L + 3))
+    steps += a.replies(L + 120, L + 30 * 60)
+
+    assert fed(p, ClaudeCliProvider(path=str(p)), steps) == []
+
+
+def test_the_polls_clock_going_back_starts_the_proof_over(tmp_path):
+    """The `0 <=` arm of poll(). The desk's clock steps back ten minutes
+    between two polls. The next render is dated after the last one seen,
+    so no mtime goes backwards, but every interval measured across the
+    step is short by ten minutes, which is the unsafe direction for
+    CHAIN_MAX_GAP_S. Without the arm the chain went on and was proved at
+    L+15."""
+    p = tmp_path / "statusline.json"
+    a = Desk()
+    L = ALMOST
+    steps = a.replies(T0, L + 1)
+    steps.append((None, None, L - 9 * 60))           # the clock back
+    steps += a.replies(L + 120, L + 30 * 60)
+
+    assert fed(p, ClaudeCliProvider(path=str(p)), steps) == []
+
+
+@pytest.mark.parametrize("who", ["the file's", "another session's"])
+def test_a_clock_gone_back_leaves_no_baseline_before_it(tmp_path, who):
+    """_forget_replies. A baseline taken by a clock that has since gone back
+    is no baseline: neither the render the file holds at the step, which
+    every poll reads again, nor any other session's last render. After the
+    step, one reply, forty minutes of silence, then replies every two
+    minutes. Against a pre-step baseline that first reply began a new chain
+    at once, which the silence (under CHAIN_MAX_GAP_S) did not break:
+    proved 42 minutes early. Clearing the baselines, as the code did until
+    the 3rd review of 2026-11-01, stopped it for the other session only:
+    the poll that saw the clock go back read the file's render straight
+    back in as one."""
+    p = tmp_path / "statusline.json"
+    a, b = Desk("a"), Desk("b")
+    L = T0 + 2 * HOUR
+    steps = a.replies(T0, L + 1)
+    steps.insert(-2, b.reply(L - 3 * 60))
+    steps.append((None, None, L - 9 * 60))           # the clock back
+    d = a if who == "the file's" else b
+    steps.append(d.reply(L + 120))
+    restart = L + 120 + 42 * 60
+    steps += d.replies(restart - 120, restart + claude_cli.CHAIN_SPAN_S
+                       + 10 * 60)
+    proofs = fed(p, ClaudeCliProvider(path=str(p)), steps)
+
+    assert proofs
+    assert proofs[0] - restart >= claude_cli.CHAIN_SPAN_S
+
+
+def test_a_repaint_of_a_block_seen_hours_ago_is_dated_by_its_render(
+        tmp_path):
+    """Five_hour evidence is dated by the payload's mtime, the render, not
+    by the block's first sighting (first_seen_at). Terminal X's block was
+    first seen three hours ago, before the account was proved to have no
+    window at T-1000; X repaints it at T-30. That is a five_hour rendered
+    after the mark, and lifts it. finding 4's test sees its block once,
+    where the two dates agree and cannot tell which one was used."""
+    T = NOW
+    proved(tmp_path, has_window=False, at=T - 1000)
+    p = tmp_path / "statusline.json"
+    prov = ClaudeCliProvider(path=str(p))
+    x = status(five=40.0, five_resets=T - 2 * 3600 + base.SESSION_WINDOW_S,
+               seven=20.0, session="x", cost=7.0)
+    write(p, x, T - 3 * 3600)
+    first = prov.poll(T - 3 * 3600 + 1)
+    assert [f.first_seen_at for f in first] == [T - 3 * 3600]
+    write(p, x, T - 30)
+    v = session_verdict.SessionVerdict()
+    frames = prov.poll(T)
+
+    assert [f.first_seen_at for f in frames] == [T - 3 * 3600]
+    assert v.observe(frames, T) is False
+    assert session_verdict.load(session_verdict.verdict_path()) == (
+        True, session_verdict.KIND_STATUSLINE_WINDOW, T - 30)
 
 
 def test_a_break_longer_than_the_chain_gap_starts_it_over(tmp_path):

@@ -28,11 +28,12 @@ Evidence of NO window, measured on this desk's verified Ultra account on
     and null is not this evidence: absent is the claim.
     (pc/providers/claude_desktop, _no_window_rise)
   - Claude Code replying, over more than five hours, without a five-hour
-    window ever being rendered: at least three replies, spaced, the first
-    and last more than a window apart, and no five_hour in the status line
-    in between. One reply or two is not proof -- a request streaming
-    across a reset, or a local clock running fast, does that on Pro and
-    Max (the re-review of 2026-11-01). (pc/providers/claude_cli,
+    window ever being rendered: replies with no five_hour, none more than
+    an hour after the one before, the first and the latest more than a
+    window apart, and no five_hour seen in the status line in between.
+    One reply or two is not proof -- a request streaming across a reset,
+    or a local clock running fast, does that on Pro and Max (the
+    re-review of 2026-11-01). (pc/providers/claude_cli,
     _reply_without_window)
 
 Evidence of a window, any of which clears the mark:
