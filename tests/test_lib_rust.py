@@ -105,7 +105,10 @@ def test_the_contract_check_has_no_fixed_window_left():
     text = (ROOT / "tests" / "ci" / "check_codex_contract.sh").read_text(
         encoding="utf-8")
     code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
-    assert not [l for l in code if "grep -A" in l]
-    # Seven checks, and field_attrs, which reads each field's attributes
-    # inside its own item for checks 4 and 12 (3rd review, 2026-11-01).
-    assert sum("rust_item " in l for l in code) == 8
+    # Nor one above an item: the container checks read the item's whole
+    # attribute block through rust_attrs (4th review, 2026-11-01).
+    assert not [l for l in code if "grep -A" in l or "grep -B" in l]
+    # Seven checks, and field_attrs and field_decl, which read each field's
+    # attributes and its own line inside its own item for checks 4 and 12
+    # (3rd and 4th reviews, 2026-11-01).
+    assert sum("rust_item " in l for l in code) == 9
