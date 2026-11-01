@@ -124,13 +124,13 @@ def test_the_board_keeps_the_view_for_three_heartbeats():
 
 def ultra(home, at=NOW - 60):
     """The verdict a daemon leaves on an Ultra desk (pc/session_verdict),
-    where it leaves it, under `home`: proof, a minute old, that a reply came
-    back without a five-hour window. A weekly-only status line alone proves
-    nothing."""
+    where it leaves it, under `home`: proof, a minute old, that Claude Code
+    replied for over five hours without a five-hour window. A weekly-only
+    status line alone proves nothing."""
     session_verdict.save(
         inside(home, session_verdict.verdict_path()),
         session_verdict.evidence(
-            False, session_verdict.KIND_STATUSLINE_REPLY, at))
+            False, session_verdict.KIND_STATUSLINE_SUSTAINED, at))
 
 
 def payload(tmp_path, five_hour=False, mtime=NOW - 1):
@@ -139,11 +139,10 @@ def payload(tmp_path, five_hour=False, mtime=NOW - 1):
     limits = {"seven_day": {"used_percentage": 12.0,
                             "resets_at": NOW + 3 * 86400}}
     if five_hour:
-        # A window that opened after ultra()'s proof, as one that comes
-        # back would: an unwatched block is dated from its window's start
-        # (claude_cli._window_dated).
+        # Rendered after ultra()'s proof, which is what lifts it, whenever
+        # the window opened (claude_cli._frame).
         limits["five_hour"] = {"used_percentage": 30.0,
-                               "resets_at": NOW - 30 + 5 * 3600}
+                               "resets_at": NOW + 2 * 3600}
     p = tmp_path / "statusline.json"
     p.write_text(json.dumps({"rate_limits": limits}), encoding="utf-8")
     os.utime(p, (mtime, mtime))

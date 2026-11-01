@@ -2165,7 +2165,7 @@ def test_launchd_not_loaded_names_the_frozen_service_from_a_checkout(
                     f"`{cli._quote_line(want)} install` to start it")
 
 
-def _verdict(home, has_window, at, kind="statusline_reply"):
+def _verdict(home, has_window, at, kind="statusline_sustained"):
     """The verdict the daemon leaves in ~/.blink (pc/session_verdict),
     inside the caller's `home` or not at all (tests/support/home.py)."""
     from pc import session_verdict
@@ -2193,14 +2193,14 @@ def test_status_says_when_the_account_has_no_five_hour_window(
     capsys.readouterr()
 
     assert cli.main(["status"]) == 0
-    assert ("Session     no five-hour window (a Claude Code reply came back"
-            " without one)") in capsys.readouterr().out
+    assert ("Session     no five-hour window (Claude Code replied for over"
+            " five hours without one)") in capsys.readouterr().out
 
     with open(status, "w", encoding="utf-8") as f:
-        # A window that opened after the proof: a block nobody saw arrive
-        # is dated from its window's start (claude_cli._window_dated).
+        # Rendered after the proof, so it lifts it, whenever its window
+        # opened: here three hours before (claude_cli._frame).
         f.write(json.dumps(payload(five_hour=27.0,
-                                   resets_at=time.time() - 30 + 5 * 3600)))
+                                   resets_at=time.time() + 2 * 3600)))
     assert cli.main(["status"]) == 0
     assert "Session     " not in capsys.readouterr().out
     assert open(session_verdict.verdict_path(), "rb").read() == before
@@ -2226,8 +2226,8 @@ def test_status_on_a_marked_desk_with_no_reading_yet_still_prints_the_row(
     before = open(session_verdict.verdict_path(), "rb").read()
     capsys.readouterr()
 
-    row = ("Session     no five-hour window (a Claude Code reply came back"
-           " without one)")
+    row = ("Session     no five-hour window (Claude Code replied for over"
+           " five hours without one)")
     assert cli.main(["status"]) == 0
     assert row in capsys.readouterr().out
     assert cli.main(["status", "--wire"]) == 0
@@ -2276,8 +2276,9 @@ def test_status_on_a_desktop_only_ultra_desk_prints_the_row(tmp_path,
                                                            capsys):
     """Claude Desktop's Code tab never runs the status line, so a desk with
     Desktop alone has its proof in Desktop's history: weekly usage risen
-    between two samples one poll apart, the later with no fh key (owner's
-    decision, 2026-11-01). A single such sample is not proof."""
+    between two samples one poll apart, neither with an fh key (owner's
+    decision and the re-review, 2026-11-01). A single such sample is not
+    proof, and nor is a rise from a sample that had fh."""
     now_ms = int(time.time() * 1000)
     rows = []
     for t_ms, sd in ((now_ms - 1_200_000, 11), (now_ms - 300_000, 12)):
@@ -2292,7 +2293,13 @@ def test_status_on_a_desktop_only_ultra_desk_prints_the_row(tmp_path,
     _desktop_cache(tmp_path, _dc.doc(rows))
     assert cli.main(["status"]) == 0
     assert ("Session     no five-hour window (Claude Desktop's weekly usage"
-            " rose with no five-hour figure)") in capsys.readouterr().out
+            " rose with no five-hour figure before or after)"
+            ) in capsys.readouterr().out
+
+    had_fh = _dc.sample(now_ms - 1_200_000, fh=3, sd=11)
+    _desktop_cache(tmp_path, _dc.doc([had_fh, rows[1]]))
+    assert cli.main(["status"]) == 0
+    assert "Session     " not in capsys.readouterr().out
 
     pro = _dc.sample(now_ms - 300_000, fh=4, sd=12)
     _desktop_cache(tmp_path, _dc.doc([pro]))

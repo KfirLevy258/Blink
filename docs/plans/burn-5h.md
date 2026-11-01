@@ -9,28 +9,52 @@ the research branch, and the artifact linked from it).
 Only when the account has no session window. The daemon already decides that:
 `NormalizedUsageFrame.no_session_window` on the merged claude frame, set by
 `pc/session_verdict` on positive evidence only, never because data is quiet.
-Proof of no window: two consecutive Claude Desktop history samples less
-than one idle poll apart (`DESKTOP_RISE_MAX_GAP_S`, 1000 s) where `sd` rose
-strictly and the later sample has no `fh` key, or a Claude Code session that replied twice without `five_hour` (its
-`cost.total_cost_usd` rose between weekly-only status lines, at two replies
-25 minutes to 4 h 35 min apart, so that no single reset explains both: one
-request streaming across a Pro or Max reset does it once). A single Desktop
-sample with no `fh` proved it until the owner's decision of 2026-11-01. It
-had been measured on Ultra only, and a Pro or Max account idle for over five
-hours may write the same sample, so a rise is required. Usage that recent
-sits inside an open window on any plan that has one. The samples must be one
-poll apart, not five hours, because usage can land at the end of a window
-that then closes (`claude_desktop._no_window_rise` has the example). The
-measured owner desk's pair (`{fh: 1, sd: 23}` on 10-29, `{sd: 19}` on 10-31)
-is not Desktop proof under this rule; its Claude Code replies are. Proof of
-a window, which clears the mark: a status line with `five_hour`, a Desktop sample whose
-`fh` is a number, a Local Storage reading or reset stamp. The newest evidence
-wins. With none either way there is no mark, so Pro and Max never see this
+Proof of no window is one of two things. Claude Desktop: two consecutive
+history samples less than one idle poll apart (`DESKTOP_RISE_MAX_GAP_S`,
+1000 s) where `sd` rose strictly and NEITHER sample has an `fh` key. Claude
+Code: sustained absence, at least three replies (a session's
+`cost.total_cost_usd` rose) whose status lines carried a usable `seven_day`
+and no `five_hour`, consecutive ones at least 25 minutes and at most an hour
+apart, the first and last at least 5 h 15 min apart, with no `five_hour`
+rendered by any session in that span and no poll gap over five minutes
+(`claude_cli._reply_without_window`). A session's cost falling, an mtime
+going backwards or a poll gap starts the chain over.
+
+That replaced, on 2026-11-01, two replies 25 minutes to 4 h 35 min apart,
+after a re-review read Claude Code 2.1.316's bundle: the status line renders
+on events, not every few seconds; `API_TIMEOUT_MS` bounds only the wait for
+headers, so one stream across a reset can render weekly-only rises half an
+hour apart; and `five_hour` leaves the line by the local clock, so a desk
+running fast renders weekly-only replies at the end of every window. On Pro
+and Max a weekly-only reply happens only in those stretches, each followed by
+a reply that renders `five_hour`, or by no Claude Code use at all, and a
+chain inside one stretch spans less than 5 h 15 min; the one-hour cap keeps
+two stretches from joining. What is left marks a Pro or Max desk only with
+its clock fast by hours (about four less its longest stream, and then only if
+it uses Claude Code solely late in windows opened elsewhere; five or more in
+any case), or if another terminal overwrites every `five_hour` render before
+a poll sees it. The cost is on Ultra: a desk is marked after about 5 h 15 min
+of Claude Code use, later if it pauses for over an hour. The
+earlier Desktop rule checked only the later sample, and a window closing
+between two polls passed it. A single Desktop sample with no `fh` proved it
+until the owner's first decision of 2026-11-01: it had been measured on Ultra
+only, and a Pro or Max account idle for over five hours may write the same
+sample. The samples must be one poll apart, not five hours, because usage can
+land at the end of a window that then closes (`claude_desktop._no_window_rise`
+has the example). The measured owner desk's pair (`{fh: 1, sd: 23}` on 10-29,
+`{sd: 19}` on 10-31) is not Desktop proof under this rule; its Claude Code
+replies are. Proof of a window, which clears the mark: a status line with
+`five_hour`, dated when it was rendered, so any `five_hour` rendered after the
+mark lifts it, even an old terminal's repaint (the safe direction); a Desktop
+sample whose `fh` is a number; a Local Storage reading or reset stamp. The
+evidence kinds were renamed with the rules (`statusline_sustained`,
+`desktop_rise`), so a verdict saved under the old ones is read as none and
+decided again. The newest evidence wins. With none either way there is no mark, so Pro and Max never see this
 view at a reset, a laptop asleep across one, or a fresh process. The verdict
 is persisted in `~/.blink/session-window.json`, so a restarted daemon shows
 the view at once and `blink status` agrees with the daemon. A Desktop-only
-Ultra desk gets the view too, from its history alone, once a rise is seen; its Code tab writes
-transcripts, and with none there is no burn line. On that page the usage
+Ultra desk gets the view too, from its history alone, once a rise is seen;
+its Code tab writes transcripts, and with none there is no burn line. On that page the usage
 frame carries `session_pct` -1. If a window comes back, the mark goes and the
 board goes back to the session gauge.
 

@@ -116,7 +116,10 @@ def _window(rate_limits: dict, key: str):
     w = rate_limits[key]
     try:
         pct = float(w["used_percentage"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
+        # OverflowError: an int of 309 digits or more, which json reads and
+        # float() refuses. It raised out of every poll and the source was
+        # benched with backoff (the re-review of 2026-11-01, finding 12).
         # Absent, null, or not a number -- all three are "we don't have it",
         # and all three used to land on 0.0 here, which is the confident zero
         # the paragraph above says this function exists to avoid. A window

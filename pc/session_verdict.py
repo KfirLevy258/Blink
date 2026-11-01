@@ -16,22 +16,24 @@ start, a fresh `blink status`, two terminals painting different blocks --
 each read as Ultra (review, 2026-10-31, findings 2, 3, 5 and 10).
 
 Evidence of NO window, measured on this desk's verified Ultra account on
-2026-10-31, read-only:
+2026-10-31, read-only, and argued against Pro and Max:
 
   - a Claude Desktop usage-history sample with NO `fh` key whose `sd`
     rose strictly since the sample just before it, the two one poll apart
-    (DESKTOP_RISE_MAX_GAP_S). The newest sample after the change had `sd`
-    and no `fh`, and the samples before it (10-28, 10-29) had `fh` 0 and 1;
-    that alone was proof until the owner's decision of 2026-11-01, since a
-    Pro or Max account idle past its window may write the same. A key that
-    is present and null is not this evidence: absent is the claim.
+    (DESKTOP_RISE_MAX_GAP_S), and that earlier sample with no `fh` key
+    either. The newest sample after the change had `sd` and no `fh`, and
+    the samples before it (10-28, 10-29) had `fh` 0 and 1; that alone was
+    proof until the owner's decision of 2026-11-01, since a Pro or Max
+    account idle past its window may write the same. A key that is present
+    and null is not this evidence: absent is the claim.
     (pc/providers/claude_desktop, _no_window_rise)
-  - Claude Code replies that came back without a five-hour window. On Pro
-    and Max every API response carries the five-hour headers, so a reply
-    brings five_hour back into the status line. One reply after which it is
-    still absent is not enough -- a request in flight across a reset does
-    that on Pro and Max -- but two in one session, far enough apart that no
-    single reset explains both, are proof. (pc/providers/claude_cli)
+  - Claude Code replying, over more than five hours, without a five-hour
+    window ever being rendered: at least three replies, spaced, the first
+    and last more than a window apart, and no five_hour in the status line
+    in between. One reply or two is not proof -- a request streaming
+    across a reset, or a local clock running fast, does that on Pro and
+    Max (the re-review of 2026-11-01). (pc/providers/claude_cli,
+    _reply_without_window)
 
 Evidence of a window, any of which clears the mark:
 
@@ -41,13 +43,14 @@ Evidence of a window, any of which clears the mark:
     stamp.
 
 Each piece of evidence is dated -- the moment the figure it rests on was
-taken -- and the newest wins, a window on a tie. A provider puts it on its
+taken, or for a status line the moment it was rendered -- and the newest
+wins, a window on a tie. A provider puts it on its
 frame as `window_evidence`; this module only weighs it.
 
 THE VERDICT IS PERSISTED (~/.blink/session-window.json), so a restarted
 daemon and `blink status` say what the running daemon says (finding 5): with
 nothing on disk a fresh process has no evidence, and an Ultra desk would
-show its session dial until the next reply. Written atomically, and only
+show its session dial until it had replied for five more hours. Written atomically, and only
 when the verdict changes, which on a desk is once and then never. Read once
 per process, on first use, from a path resolved then: tests/conftest.py's
 sandbox moves HOME before that, and tests/test_sandbox.py fails on a home
@@ -58,9 +61,17 @@ import math
 import os
 
 KIND_STATUSLINE_WINDOW = "statusline_window"
-KIND_STATUSLINE_REPLY = "statusline_reply"
+# The two no-window kinds were renamed when their rules were (the re-review
+# of 2026-11-01): "statusline_reply" was one reply, then two, and
+# "desktop_no_fh" one sample with no `fh`, and a Pro or Max desk could earn
+# either. A verdict saved under an old name -- the owner's own desk had
+# {"evidence": "desktop_no_fh"} on disk, and builds of 592efa7 wrote
+# statusline_reply -- is no longer a kind, so load() reads it as no verdict
+# and the account is decided again, by the rules below. Never reuse a name
+# for a different rule: the name on disk is what says which rule made it.
+KIND_STATUSLINE_SUSTAINED = "statusline_sustained"
 KIND_DESKTOP_FH = "desktop_fh"
-KIND_DESKTOP_NO_FH = "desktop_no_fh"
+KIND_DESKTOP_RISE = "desktop_rise"
 KIND_LOCAL_STORAGE = "local_storage"
 
 STATE_WINDOW = "window"
@@ -70,10 +81,11 @@ STATE_NO_WINDOW = "no_window"
 # case, like everything else a customer reads.
 DESCRIBE = {
     KIND_STATUSLINE_WINDOW: "Claude Code reported a five-hour window",
-    KIND_STATUSLINE_REPLY: "a Claude Code reply came back without one",
+    KIND_STATUSLINE_SUSTAINED: ("Claude Code replied for over five hours"
+                                " without one"),
     KIND_DESKTOP_FH: "Claude Desktop reported a five-hour figure",
-    KIND_DESKTOP_NO_FH: ("Claude Desktop's weekly usage rose with no"
-                         " five-hour figure"),
+    KIND_DESKTOP_RISE: ("Claude Desktop's weekly usage rose with no"
+                        " five-hour figure before or after"),
     KIND_LOCAL_STORAGE: "Claude Desktop holds an open five-hour window",
 }
 # Every kind evidence can carry. Taken from DESCRIBE rather than restated
@@ -135,21 +147,25 @@ def load(path):
 def save(path, ev) -> bool:
     """Persist a verdict; True when it is on disk.
 
-    Through pc/theme's _write_json: a unique temp name, os.replace retried
-    on Windows' WinError 5 and 32, and the temp removed when the write
-    fails. This used a fixed `.tmp` name and one os.replace, so a single
-    refusal -- `blink status` holding the file on Windows -- left the temp
-    beside it, and the caller never asked again (the /code-review max of
-    2026-11-01, finding 7). A failure is not worth an exception: it costs
-    the next restart its memory and nothing else, and observe() tries
-    again.
+    Through pc/theme's _write_json: a unique temp name, and the temp removed
+    when the write fails. This used a fixed `.tmp` name, so a refusal left
+    the temp beside it (the /code-review max of 2026-11-01, finding 7).
+
+    ONE attempt at the os.replace, not _write_json's ten on Windows' WinError
+    5 and 32 with 0.3 s between them. observe() runs on the bridge's serial
+    thread, and on a Windows desk whose session-window.json carried the
+    read-only attribute every retry slept 2.7 s there, once a minute, with
+    pongs and usage lines waiting behind it (the re-review of 2026-11-01,
+    finding 14). A failure is not worth an exception or a wait: it costs the
+    next restart its memory and nothing else, and observe() tries again a
+    SAVE_RETRY_S later.
     """
     has_window, kind, at = ev
     from pc import theme        # here: the daemon's tick does not need it
     try:
         theme._write_json(path, {"state": STATE_WINDOW if has_window
                                  else STATE_NO_WINDOW,
-                                 "evidence": kind, "at": at})
+                                 "evidence": kind, "at": at}, tries=1)
     except OSError:
         return False
     return True
@@ -180,9 +196,9 @@ class SessionVerdict:
         self._current = None
         self._loaded = False
         # The state on disk as this process last knew it (True, False, or
-        # None for no file), and when a failed write may next be retried.
+        # None for no file), and when a write last failed (None: it has not).
         self._on_disk = None
-        self._retry_at = 0.0
+        self._failed_at = None
 
     def path(self):
         return self._path if self._path is not None else verdict_path()
@@ -213,13 +229,20 @@ class SessionVerdict:
         # Written when the verdict differs from what is on disk, which on a
         # desk is once and then never. Not only on the poll where it flips:
         # a write that failed then is tried again, at most once a
-        # SAVE_RETRY_S, until it lands.
+        # SAVE_RETRY_S, until it lands -- or at once if the clock has gone
+        # back past the failure, the arm ingest._cooldown_over and
+        # BurnReader.poll have: gated on `now >= failed + 60` alone, an NTP
+        # step back of an hour held the retry off for that hour, and a
+        # restart in it read the superseded verdict (the re-review of
+        # 2026-11-01, finding 15).
         if (self._persist and cur is not None and cur[0] != self._on_disk
-                and now_epoch >= self._retry_at):
+                and (self._failed_at is None
+                     or not 0 <= now_epoch - self._failed_at < SAVE_RETRY_S)):
             if save(self.path(), cur):
                 self._on_disk = cur[0]
+                self._failed_at = None
             else:
-                self._retry_at = now_epoch + SAVE_RETRY_S
+                self._failed_at = now_epoch
         return cur is not None and not cur[0]
 
     def mark(self, frames, now_epoch):
