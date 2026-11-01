@@ -111,38 +111,52 @@ REPLY_MEMORY_LIMIT = 64
 # LOCAL clock (resets_at > Date.now()/1000), so on a desk whose clock runs
 # fast it goes before the window does.
 #
-# CHAIN_REPLIES, REPLY_SPACING_S, CHAIN_SPAN_S: at least three replies with
-# no five_hour, consecutive ones at least 25 minutes apart, the first and
-# last more than a window and a quarter of an hour apart.
-CHAIN_REPLIES = 3
-REPLY_SPACING_S = 25 * 60
+# CHAIN_SPAN_S: replies with no five_hour, the first and the latest more than
+# a window and a quarter of an hour apart at the least.
 CHAIN_SPAN_S = base.SESSION_WINDOW_S + 15 * 60
-# CHAIN_MAX_GAP_S: the longest two consecutive replies of a chain may be
-# apart; past it the chain starts again at the later one. Not a pause rule --
-# an Ultra desk that breaks for over an hour is marked later, which is the
-# side to be wrong on -- but what keeps two resets from joining. On Pro or
-# Max a weekly-only reply happens only while a request accepted before a
-# reset is still finishing after it, or in the last S of a window on a
-# clock S fast, and the next such stretch starts most of a window later:
-# five hours less S less the stream. Two such stretches on a desk that did
-# not use Claude Code in between (the window opened from claude.ai) and
-# rendered no five_hour would otherwise join into one chain.
+# CHAIN_MAX_GAP_S: the longest a chain may go from one weekly-only reply to
+# the next; past it the chain starts again at the later one. Measured from
+# the LATEST such reply, not from the last one a tally kept: until the 3rd
+# review of 2026-11-01 (finding 2) replies within 25 minutes of the tallied
+# one neither counted nor moved it, so a 36-minute silence broke a chain
+# that the rule said an hour's would. Not a pause rule -- an Ultra desk that
+# breaks for over an hour is marked later, which is the side to be wrong
+# on -- but what keeps two resets from joining. On Pro or Max a weekly-only
+# reply happens only around a reset, while a request accepted before it is
+# still finishing after it, or in the last S of a window on a clock S fast,
+# and the next such stretch starts most of a window later: five hours less
+# S, the stream and BASELINE_MAX_S. Two such stretches on a desk that did
+# not use Claude Code in between (the window opened from claude.ai), or
+# whose use in between went unseen, would otherwise join into one chain.
+#
+# There was a CHAIN_REPLIES of three and a REPLY_SPACING_S of 25 minutes
+# until that review. The span already implied more than three (the review
+# counted seven), and once the gap was taken from the latest reply the
+# spacing decided nothing but which replies the tally kept: the proof is
+# the span and the gap.
 CHAIN_MAX_GAP_S = 3600
 # BASELINE_MAX_S: the oldest a session's previous render may be for a cost
 # rise since then to count as a reply. A rise against an older one is not
 # counted, the chain is left as it is, and the render is the new baseline.
 # Not 600 s, which assumed renders every few seconds: a user reading for
 # eleven minutes broke every proof (finding 2 of the re-review). Half an
-# hour is a reading pause; the gaps that hide what happened are
-# POLL_GAP_S's.
+# hour is a reading pause.
+#
+# It is also what makes a gap in the polling harmless. A rise says the
+# session replied some time after its baseline; the render that shows it may
+# be a repaint long after that reply, whose own render (a five_hour one, on
+# Pro or Max) was never seen -- the board unplugged, the lid closed, the
+# daemon restarting, another terminal writing over it within a poll.
+# Bounding the baseline's age bounds how far after its window's reset a
+# counted render can be: the stream plus half an hour. Without it, eight
+# terminals that replied inside one unwatched window and repainted after
+# its reset, fifty minutes apart, proved a Pro desk had no window
+# (test_a_rise_against_a_baseline_older_than_the_bound_is_no_reply). Until
+# the 3rd review a poll gap over five minutes threw the chain away as
+# well; an Ultra desk then had to stay awake and plugged in for five and a
+# quarter hours straight to be marked (its finding 1), and the safety never
+# rested on it: see _reply_without_window.
 BASELINE_MAX_S = 30 * 60
-# POLL_GAP_S: the longest this provider may go unpolled before what it
-# remembers of the replies is thrown away. Polls run every 2 s while the
-# board is alive and a minute at most otherwise; a longer gap is the board
-# unplugged, the daemon down, the source sitting out a cooldown, a laptop
-# asleep -- time in which a five_hour may have been rendered and
-# overwritten unseen. Not knowing, the chain starts again: the safe side.
-POLL_GAP_S = 5 * 60
 
 
 def _block_key(payload):
@@ -207,12 +221,16 @@ class ClaudeCliProvider(base.ProviderParser):
         # REPLY_MEMORY_LIMIT.
         self._costs = {}
         # The replies without a window so far, for the whole desk: [first
-        # reply's mtime, last one's, how many], or None. See
-        # _reply_without_window.
+        # reply's mtime, latest one's], or None. See _reply_without_window.
+        # In memory only, so a restarted daemon starts the chain again.
         self._chain = None
-        # The clock of the last poll(), for POLL_GAP_S; None before the
+        # The clock of the last poll(), to see it go back; None before the
         # first.
         self._polled_at = None
+        # The mtime of the render the file held when the clock last went
+        # back, which is no baseline however often it is read again; or
+        # None. See _forget_replies.
+        self._stale = None
         # Block keys _make_room may not drop during the current poll: the
         # payloads poll() is about to look up. See _make_room.
         self._keep = ()
@@ -291,49 +309,76 @@ class ClaudeCliProvider(base.ProviderParser):
             return None
         return ss.map_statusline_frame(raw_payload, now_epoch, observed_at)
 
-    def _forget_replies(self):
-        """Start the proof over: no chain, and no baseline to count a rise
-        against, so the next render of every session is a new baseline."""
+    def _forget_replies(self, mtime):
+        """Start the proof over, the clock having gone back: no chain, and
+        no baseline to count a rise against, so the next render of every
+        session is a new baseline. `mtime` is the render the file holds now,
+        written by the clock from before the step: it is not that next
+        render, and is never a baseline (self._stale).
+
+        Until the 3rd review of 2026-11-01 the baselines were cleared and
+        nothing more, and the same poll then read the file and took its
+        render straight back in as a baseline: the next reply rose against
+        it with its age short by the step
+        (test_a_clock_gone_back_leaves_no_baseline_before_it). Every other
+        render from before the step is gone, written over in the file.
+        """
         self._chain = None
         self._costs.clear()
+        self._stale = mtime
 
     def _reply_without_window(self, payload, mtime):
         """Evidence of no five-hour window, when this payload completes the
         proof; otherwise None.
 
-        THE RULE. Claude Code has replied at least CHAIN_REPLIES times with
-        no five_hour in the status line, consecutive replies at least
-        REPLY_SPACING_S apart and at most CHAIN_MAX_GAP_S, the first and
-        last at least CHAIN_SPAN_S apart (a window and a quarter of an
-        hour), and in all that time no five_hour was rendered by any
-        session, as far as the polls saw, with no poll gap over POLL_GAP_S.
-        The replies may come from any session on the desk; the account is
-        one.
+        THE RULE. Claude Code has replied with no five_hour in the status
+        line, the first such reply and the latest at least CHAIN_SPAN_S
+        apart (a window and a quarter of an hour), each no more than
+        CHAIN_MAX_GAP_S after the one before, and no five_hour seen from any
+        session in that time. The replies may come from any session on the
+        desk; the account is one. A gap in the polling does not break the
+        chain: see BASELINE_MAX_S.
 
-        WHY IT HOLDS ON PRO AND MAX. Every API response carries the
-        five-hour headers, and Claude Code shows five_hour while its
+        WHY IT HOLDS ON PRO AND MAX. It rests on the replies themselves,
+        not on seeing anything between them: every one the chain takes
+        rendered seven_day with no five_hour. Every API response carries
+        the five-hour headers, and Claude Code shows five_hour while its
         resets_at is ahead of the local clock. So on a plan with windows a
         reply renders weekly-only in only two ways: a request accepted
         before a reset and still streaming after it (the body is not
         bounded: API_TIMEOUT_MS covers only the headers), and, on a clock
-        running fast by S, the last S of every window. Each such stretch is
-        followed by a request that opens the next window and renders
-        five_hour, which resets the chain, or by no Claude Code use at all,
-        in which the stretches are most of a window apart and CHAIN_MAX_GAP_S
-        will not join them. A chain inside one stretch spans no more than S
-        plus the longest stream, which is less than CHAIN_SPAN_S. On Ultra
-        a desk at work makes the chain in five and a quarter hours, and the
-        verdict is kept from then on.
+        running fast by S, the last S of every window. A rise is a response
+        no earlier than its baseline, at most BASELINE_MAX_S (B) before the
+        render; so with L the longest stream, a counted render lies within
+        S before a reset and L + B after it. Windows are five hours apart at
+        the least, so those stretches are separated by 5 h - (S + L + B)
+        or more. The chain needs every step within CHAIN_MAX_GAP_S and a
+        span of CHAIN_SPAN_S: inside one stretch that takes S + L + B of
+        5 h 15 min, and to join two it takes S + L + B of four hours. With
+        S = 0 that is a stream of three and a half hours. A five_hour seen
+        in between starts the chain over too (a desk that uses Claude Code
+        mid-window shows one), but nothing above depends on seeing it, so a
+        poll gap -- the board unplugged, the lid closed -- costs nothing.
+        On Ultra a desk at work makes the chain in five and a quarter
+        hours, breaks of up to an hour included, and the verdict is kept
+        from then on.
 
         THE RESIDUAL. A Pro or Max desk is still marked if its clock runs
         fast by five hours or more (it never renders five_hour at all), or
-        by five and a quarter hours less its longest stream (one stretch
-        spans the chain), or by four hours less its longest stream while it
-        uses Claude Code only in the last hours of windows opened elsewhere
-        (two stretches an hour apart join); or if every five_hour it renders
-        is overwritten by another terminal before a poll sees it, window
-        after window. None has been seen. Short of those, a desk is marked
-        late, never early: slow is the safe side.
+        by four and three-quarter hours less its longest stream (one
+        stretch spans the chain), or by three and a half hours less its
+        longest stream while its Claude Code use in the middle of windows
+        goes unseen -- it uses Claude Code only late in windows opened
+        elsewhere, or the board is unplugged whenever it does (two
+        stretches an hour apart join). The half hour of B in the last two
+        needs a reply whose own render was never seen and a later render
+        that showed it; without that each is half an hour more (5 h 15 min
+        and 4 h less the stream). Or if every five_hour it renders is
+        overwritten by another terminal before a poll sees it, window after
+        window, with the clock fast as above. None has been seen. Short of
+        those, a desk is marked late, never early: slow is the safe side.
+        A restarted daemon has lost the chain, which is in memory only, and
+        an Ultra desk is then marked five and a quarter hours later.
 
         A REPLY is recognised in the status line itself, per session: this
         session's cost.total_cost_usd went up since its previous render,
@@ -360,11 +405,14 @@ class ClaudeCliProvider(base.ProviderParser):
             that no reply made; resetting only that session's baseline let
             the rises through one at a time (the review of 2026-11-01,
             finding 1's second trigger);
-          - an mtime going backwards: a clock stepped back, or a file
-            restored, and the spacing means nothing;
-          - a poll gap over POLL_GAP_S (poll(), _forget_replies).
+          - an mtime going backwards, against the session's previous render
+            or the chain's latest reply: a clock stepped back, or a file
+            restored, and the intervals mean nothing;
+          - the polls' own clock going backwards, after which no render
+            from before the step is a baseline (poll(), _forget_replies).
         A rise against a baseline older than BASELINE_MAX_S is not counted
-        and changes nothing else.
+        and changes nothing else: not even CHAIN_MAX_GAP_S's measure, since
+        the render may be long after the reply it shows.
 
         Dated by the payload's mtime, the render of the reply that completed
         the chain -- and every reply after it renews the evidence.
@@ -375,6 +423,8 @@ class ClaudeCliProvider(base.ProviderParser):
             sid = None
         cost = _number(_cost(payload))
         before = None
+        if mtime == self._stale:
+            sid = None                      # from before the clock went back
         if sid is not None:
             before = self._costs.pop(sid, None)
             self._costs[sid] = (cost, mtime)        # newest last, for the cap
@@ -400,12 +450,11 @@ class ClaudeCliProvider(base.ProviderParser):
                                   or mtime - chain[1] > CHAIN_MAX_GAP_S):
             chain = None
         if chain is None:
-            chain = [mtime, mtime, 1]
-        elif mtime - chain[1] >= REPLY_SPACING_S:
+            chain = [mtime, mtime]
+        else:
             chain[1] = mtime
-            chain[2] += 1
         self._chain = chain
-        if chain[2] < CHAIN_REPLIES or chain[1] - chain[0] < CHAIN_SPAN_S:
+        if chain[1] - chain[0] < CHAIN_SPAN_S:
             return None
         return session_verdict.evidence(
             False, session_verdict.KIND_STATUSLINE_SUSTAINED, mtime)
@@ -454,13 +503,19 @@ class ClaudeCliProvider(base.ProviderParser):
         return frame
 
     def poll(self, now_epoch):
-        # Not watched for longer than POLL_GAP_S, or a clock gone back: what
-        # happened in between is unknown, so the proof starts over.
-        if (self._polled_at is not None
-                and not 0 <= now_epoch - self._polled_at <= POLL_GAP_S):
-            self._forget_replies()
+        # A clock gone back: every interval measured across the step is
+        # short by it, the unsafe direction for CHAIN_MAX_GAP_S, so the
+        # proof starts over. A gap going FORWARD is no reason to: until the
+        # 3rd review of 2026-11-01 (finding 1) any gap over five minutes
+        # threw the chain away, and the daemon polls only while the board
+        # is alive, so an Ultra desk whose lid closed for ten minutes was
+        # not marked that day. What a gap can hide is BASELINE_MAX_S's
+        # business.
+        back = self._polled_at is not None and now_epoch < self._polled_at
         self._polled_at = now_epoch
         payload, mtime = ss.read_payload(self.path())
+        if back:
+            self._forget_replies(mtime)
         self._keep = tuple(
             _block_key(p)[0] for p in (
                 payload, *(m[0] for m in (self._remembered, self._any)
