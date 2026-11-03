@@ -403,7 +403,9 @@ def test_a_refused_file_is_not_parsed_again_until_it_changes(
     """Corrupt, refused or misshapen is an answer, kept against the file's
     signature: re-parsing an 8 MB file once a minute on the serial thread
     to learn the same thing was the cost the cap was meant to bound."""
-    path = put_config(tmp_path, raw=b"{" + b" " * 1000)
+    # Valid JSON of the wrong shape: undecodable text is no longer an
+    # answer to cache but a retry (test_half_written_config_keeps_the_last_view).
+    path = put_config(tmp_path, raw=b"[1, 2" + b"]" + b" " * 1000)
     reads = []
     real = claude_plan.parse
     monkeypatch.setattr(claude_plan, "parse",

@@ -91,12 +91,13 @@ def test_no_profile_is_no_news(tmp_path):
                      "organizationType": "claude_enterprise"}}),
                  "[1, 2]"):
         p.write_text(text, encoding="utf-8")
-        assert claude_plan.parse(str(p)).account_fp == "", text
+        assert (claude_plan.parse(str(p))
+                or claude_plan.EMPTY_VIEW).account_fp == "", text
         w = watch_of(p)
         w.poll(NOW)
         assert w.kind == "" and w.since is None
     p.write_bytes(b"\xff\xfe{}")
-    assert claude_plan.parse(str(p)).account_fp == ""
+    assert claude_plan.parse(str(p)) is None        # retry, not an answer
     w = watch_of(tmp_path / "missing.json")
     w.poll(NOW)
     assert w.kind == "" and w.touched_at is None

@@ -65,8 +65,10 @@ class AccountWatch:
 
     The file's mtime is no clue to a login: Claude Code rewrites it for its
     own bookkeeping all day. So a switch is dated by the poll on which this
-    watch first sees a different fingerprint, which on the daemon's two-second
-    tick is at most a tick after /login.
+    watch first sees a different fingerprint. The view comes from
+    pc/claude_plan's PlanReader, which looks at the file at most once every
+    RECHECK_S (60 s), so a switch is seen within about a minute of /login,
+    not on the next two-second tick.
 
     The fingerprint found on the first readable poll is a starting point, not
     a switch. A watch that has only just started has no idea when that login

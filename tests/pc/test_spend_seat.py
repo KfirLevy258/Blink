@@ -191,3 +191,22 @@ def test_account_watch_reads_no_file(monkeypatch):
     w.poll(NOW)
     assert w.kind == "enterprise" and w.touched_at == NOW - 10
     assert w.since is None
+
+
+def test_half_written_config_keeps_the_last_view(tmp_path):
+    p = tmp_path / ".claude.json"
+    full = json.dumps(doc())
+    p.write_text(full, encoding="utf-8")
+    r = claude_plan.PlanReader(path=str(p))
+    good = r.look(NOW)
+    assert good.spend_seat is True and good.anchor is not None
+    # Claude Code mid-rewrite: the text stops part-way, or is not UTF-8.
+    for i, raw in enumerate((full[:len(full) // 2].encode(), b"\xff\xfe{")):
+        p.write_bytes(raw)
+        os.utime(p, (NOW + 10 + i, NOW + 10 + i))
+        assert claude_plan.parse(str(p)) is None
+        assert r.look(NOW + 100 * (i + 1)) == good
+    # Valid JSON of the wrong shape is an answer, kept: not a seat.
+    p.write_text("[1, 2]", encoding="utf-8")
+    os.utime(p, (NOW + 50, NOW + 50))
+    assert r.look(NOW + 300).spend_seat is False

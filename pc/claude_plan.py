@@ -288,8 +288,9 @@ def parse(path, st=None):
     """The ConfigView of the file at `path`, or None when it is worth
     trying again: an OSError, or the file changed between the stat and the
     read. A file this reader refuses -- not a regular file, over MAX_BYTES
-    -- or one that does not parse or has the wrong shape gives a view with
+    -- or one that parses as JSON but is not an object, gives a view with
     nothing in it but the mtime; that answer holds until the file changes.
+    Text that will not decode is None, like a half-written read.
     `st` is a stat of `path` already taken (PlanReader's), or None to take
     one. Never raises, and says nothing."""
     try:
@@ -321,8 +322,12 @@ def parse(path, st=None):
     except (ValueError, RecursionError):
         # ValueError covers UnicodeDecodeError and JSONDecodeError;
         # RecursionError is json's answer to an array nested thousands
-        # deep, as in session_verdict.load.
-        return bare
+        # deep, as in session_verdict.load. Not an answer: Claude Code
+        # rewrites this file all day, so text that will not decode is most
+        # often a write caught half-done, and reading it as "no seat, not
+        # Ultra" would flip the page until the file next changed. Retry
+        # at the next look and keep the last good view meanwhile.
+        return None
     view = _view(doc, st.st_mtime)
     del doc         # the rest of the file is not kept, not even here
     return view

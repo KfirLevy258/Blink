@@ -15,8 +15,8 @@ import sys
 import time
 
 from pc import (burn_reader, claude_account, claude_plan, cowork_audit,
-                desktop_idb, desktop_paths, normalizer, protocol, session_verdict,
-                weekly_anchor)
+                desktop_idb, desktop_paths, normalizer, protocol,
+                session_verdict, weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
