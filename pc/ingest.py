@@ -89,6 +89,11 @@ class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
                  now=time.time, burn=None, verdict=DEFAULT_VERDICT,
                  account=None, counter=None):
+        """`counter` (a pc/spend_count.SpendCounter) is used only when the
+        bus builds its own providers (`providers` None): it is handed to
+        the status-line provider there. With `providers` given it is
+        ignored -- those providers were built by the caller, who gives a
+        ClaudeCliProvider its counter directly."""
         # The login watch (pc/claude_account), made here only for the
         # shipped providers. A bus built from a scenario exists to replay the
         # same timeline on any desk, and whoever happens to be signed in to

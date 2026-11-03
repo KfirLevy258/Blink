@@ -305,6 +305,9 @@ class ClaudeCliProvider(base.ProviderParser):
         # The mtime of the newest status-line render this process has read,
         # or None: what a spend frame is dated by (_spend_frame).
         self._render_at = None
+        # The frame the file in front of us mapped to this poll, or None:
+        # what decides whether a gateway figure is live (_spend_or_none).
+        self._live = None
         # The mtime of the newest five_hour this process has seen rendered,
         # from any session, or None. The fast path is refused within
         # base.SESSION_WINDOW_S of it (_reply_without_window). Never
@@ -689,8 +692,12 @@ class ClaudeCliProvider(base.ProviderParser):
         counter.save()
         # A gateway's own dollar figure (statusline_source._spend_frame) is
         # the page when the status line carries one: it is the gateway's
-        # count, where this one is an estimate.
-        if any(f.plan == base.PLAN_SPEND for f in frames):
+        # count, where this one is an estimate. The file in front of us
+        # only, never a remembered payload: a gateway figure from hours ago,
+        # offered as the last payload with a figure, would otherwise take
+        # the config's page off the bus for as long as it was remembered.
+        live = self._live
+        if live is not None and live.plan == base.PLAN_SPEND:
             return None
         return _spend_frame(view.anchor, counter, now_epoch, self._render_at)
 
@@ -709,6 +716,7 @@ class ClaudeCliProvider(base.ProviderParser):
         # gap can hide is BASELINE_MAX_S's business.
         back = self._polled_at is not None and now_epoch < self._polled_at
         self._polled_at = now_epoch
+        self._live = None
         payload, mtime = ss.read_payload(self.path())
         self._read = (payload, mtime)
         if mtime is not None and (self._render_at is None
@@ -729,6 +737,7 @@ class ClaudeCliProvider(base.ProviderParser):
             # baseline it keeps is this file's history, not a memory's.
             reply = self._reply_without_window(payload, mtime, now_epoch)
             live = self._frame(payload, mtime, now_epoch)
+            self._live = live
             if live is not None:
                 if reply is not None:
                     live.window_evidence = reply
@@ -794,8 +803,11 @@ def _spend_frame(anchor, counter, now_epoch, render_at):
     too, not a division. With no cap the share is UNKNOWN and the dollars
     are the page (base.has_usage).
 
-    Dated by the newest status-line render, which is when Claude Code last
-    spoke; else by the /usage; else now. Never after now.
+    Dated by the newer of the last status-line render and the /usage,
+    whichever Claude Code did last; now when there is neither. Never after
+    now. A /usage run after the last render is the newest word on the
+    figure, and dating the page by the render would show it older than it
+    is.
     """
     period = claude_plan.month_start_utc(now_epoch)
     a = anchor
@@ -815,13 +827,9 @@ def _spend_frame(anchor, counter, now_epoch, render_at):
         if not a.enabled:
             pct = max(pct, 100.0)
     age = None if a is None else now_epoch - a.fetched_at
-    if render_at is not None:
-        seen = render_at
-    elif a is not None:
-        seen = a.fetched_at
-    else:
-        seen = now_epoch
-    seen = min(seen, now_epoch)
+    stamps = [t for t in (render_at, None if a is None else a.fetched_at)
+              if t is not None]
+    seen = min(max(stamps), now_epoch) if stamps else now_epoch
     return base.NormalizedUsageFrame(
         provider=PROVIDER_ID, src=SPEND_SRC_ID, observed_at=seen,
         active_at=seen, plan=base.PLAN_SPEND, spend_period="monthly",

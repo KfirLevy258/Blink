@@ -212,19 +212,29 @@ def test_running_daemon_rolls_over_on_the_first(tmp_path):
 
 
 def _desktop(at):
-    frame = base.NormalizedUsageFrame(
+    """Claude Desktop's usage cache: two percentages, no reset stamps."""
+    return base.NormalizedUsageFrame(
         provider="claude", src="desktop", observed_at=at, session_pct=41.0,
         weekly_pct=12.0)
-    return types.SimpleNamespace(get_provider_id=lambda: "claude",
-                                 poll=lambda now: [frame])
 
 
-def test_fresher_desktop_sample_does_not_flip_the_page(tmp_path):
+def _local_storage(at):
+    """Claude Desktop's Local Storage: a session window with its reset."""
+    return base.NormalizedUsageFrame(
+        provider="claude", src="desktop_ls", observed_at=at,
+        session_pct=41.0, session_resets_at=NOW + 3600)
+
+
+@pytest.mark.parametrize("sample", [_desktop, _local_storage],
+                         ids=["desktop", "local_storage"])
+def test_fresher_desktop_sample_does_not_flip_the_page(tmp_path, sample):
     clock = Clock(NOW)
     config(tmp_path, NOW - 600, fetched=NOW - 600)
     render(tmp_path, NOW - 300, 1.00, rate_limits=WINDOWS)
     bus = bus_on(clock)
-    bus.add_provider(_desktop(NOW))
+    frame = sample(NOW)
+    bus.add_provider(types.SimpleNamespace(get_provider_id=lambda: "claude",
+                                           poll=lambda now: [frame]))
     msg = bus.poll()
     assert bus.plan_msg()["plan"] == "spend"
     assert bus.plan_msg()["usd"] == 12.34
@@ -368,6 +378,37 @@ def test_a_gateway_spend_frame_wins(tmp_path):
     assert msg["session_pct"] == 62.8
     assert bus.plan_msg()["usd"] == 314.12
     assert bus.claude_page().src == ss.SRC_ID
+
+
+def test_a_usage_newer_than_the_last_render_dates_the_page(tmp_path):
+    clock = Clock(NOW)
+    render(tmp_path, NOW - 3600, 1.00)
+    config(tmp_path, NOW - 60, fetched=NOW - 120)
+    bus = bus_on(clock)
+    bus.poll()
+    assert bus.claude_page().observed_at == NOW - 120
+
+
+def test_a_remembered_gateway_figure_does_not_hide_the_config_page(tmp_path):
+    """Only the file in front of us can carry a live gateway figure. One
+    remembered from hours ago (the last payload with a figure) must not
+    take the config's spend page off the bus."""
+    clock = Clock(NOW - 7200)
+    config(tmp_path, NOW - 7300, fetched=NOW - 7300)
+    gateway = {"spend_limit": {"used_percentage": 62.8,
+                               "resets_at": NEXT_MONTH, "used_usd": 314.12,
+                               "limit_usd": 500, "period": "monthly"}}
+    render(tmp_path, NOW - 7200, 1.00, rate_limits=gateway)
+    bus = bus_on(clock)
+    bus.poll()
+    assert bus.claude_page().src == ss.SRC_ID
+    # Hours later the file holds a render with no rate_limits at all.
+    config(tmp_path, NOW - 60, fetched=NOW - 60)
+    render(tmp_path, NOW - 30, 1.20)
+    clock.t = NOW
+    bus.poll()
+    assert bus.claude_page().src == claude_cli.SPEND_SRC_ID
+    assert bus.plan_msg()["usd"] == 12.34
 
 
 def test_status_wire_does_not_save_the_count(tmp_path, capsys):
