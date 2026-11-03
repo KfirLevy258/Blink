@@ -31,7 +31,7 @@ limit is hit, and for this seat the only limit is dollars.
 ## Goals, non-goals, anti-goals
 
 Goals:
-- A spend page: "$X of $Y, resets in 27d", exact right after `/usage`,
+- A spend page: "$X of $Y • 27d 5h" (the reset countdown), exact right after `/usage`,
   estimated in between, never frozen.
 - Amber and red as the cap nears, red when it is reached.
 - The five-hour burn view in dollars on a spend page.
@@ -77,12 +77,12 @@ field descriptions Anthropic publishes for the same data
   `cost.total_cost_usd`, at each render. It carries no spend limit on such
   a seat (Anthropic's status-line docs: `spend_limit` appears only behind a
   Claude apps gateway).
-- **Claude Desktop:** nothing it writes to disk was found to hold the
-  figure. Typing `/usage` in Desktop's Code tab does not write the cache
-  above.
-- **The period** is the calendar month. Anthropic's spend-limit
-  documentation gives 00:00 UTC on the 1st; whether seats follow it exactly
-  is an owed measurement.
+- **Claude Desktop:** BLINK has no source for the figure from Desktop;
+  `/usage` typed in its Code tab does not update the saved figure above.
+- **The period** is the calendar month. The Claude apps gateway's
+  spend-limit documentation resets monthly caps at 00:00 UTC on the 1st;
+  whether a seat's usage credits use the same boundary is an owed
+  measurement.
 
 ## Design
 
@@ -111,9 +111,11 @@ the cap is reached (draw it red, at or over 100%), not "not a spend seat".
 
 1. **The anchor:** `used_credits` and `monthly_limit` from the cache, at
    `fetchedAtMs`. Exact at that moment. If it was fetched before the current
-   period began, it counts as $0 at the period start. This is applied when
-   the figure is built, so a daemon running across the 1st rolls over.
-   A currency other than USD is no anchor.
+   period began, it is treated as no anchor (count since the 1st, no
+   limit, the hint). This is applied when the figure is built, so a daemon
+   running across the 1st rolls over. A currency other than USD is no
+   anchor; an absent currency is taken as USD (Anthropic's type allows it
+   to be null), which is an owed measurement.
 2. **The running count:** spend since the anchor, from the status line,
    kept only on a spend seat.
    - A session's first sighting sets its high-water mark; nothing is added
@@ -131,7 +133,8 @@ the cap is reached (draw it red, at or over 100%), not "not a spend seat".
 3. **Shown:** anchor + count. Exact when the anchor is under 15 minutes old
    and nothing has been added; estimated otherwise. No anchor this month:
    the count alone, estimated, with no limit (never "unlimited") and a hint
-   to run `/usage` in Claude Code.
+   to run `/usage` in Claude Code. The hint also shows when the anchor is more than a
+   day old.
 
 Known gaps, stated in the install note and the README:
 - The status line is one file shared by all sessions and sampled every 2 s;
@@ -148,15 +151,18 @@ Known gaps, stated in the install note and the README:
 Built on `fp/enterprise`'s firmware, announced by a `plan` capability.
 
 - **Right half:** the month: a ring with the share, the dollars in the ring
-  ("$314"), and "of $500 • 27d" under it (bullet U+2022, which the fonts
-  have). Estimated figures carry a "~" before the dollars. The ring uses
+  ("$314", in montserrat_20 when it fits the 76 px hollow, else
+  montserrat_16), and "of $500 • 27d 5h" under it in a label widened to
+  144 px on a spend page (bullet U+2022, which the fonts have). Estimated
+  figures carry a "~" before the dollars. The ring uses
   the theme's arc colour; the rail uses severity.
 - **Left half:** the dollar burn view: twenty quarter-hour bars of dollars,
   a total, an arrow, and the rate over the last hour. It travels on its own
   message (`sburn`), gated on a `spendburn` capability, never on the `burn`
   line.
 - **Focus mode:** on a spend page the big gauge is always the share
-  ("62%", or "--%" with no limit); the dim line reads "Spent $314 of $500".
+  ("62%", or "--%" with no limit); the dim line reads "Spent $314 of $500"
+  ("Spent ~$314 of $500" when estimated, "Spent ~$12" with no limit).
 - **Status line on the board**, one at a time, in this order: "Spend limit
   used up" / "Spend limit almost used up", then the service status, then
   "Run /usage in Claude Code".
@@ -217,5 +223,6 @@ On a real usage-based seat (read-only, nothing spent):
 3. `is_enabled` once the cap is reached.
 4. Whether the status line on such a seat ever carries `rate_limits`.
 5. The real period boundary: the cache before and after 00:00 UTC on 1 Dec.
+6. Whether `currency` is ever absent in the saved usage.
 
 On Windows with WSL, from the real logon task: listed in Plan B, Task 7.
