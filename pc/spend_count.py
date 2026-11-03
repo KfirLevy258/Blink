@@ -23,6 +23,7 @@ Integer cents throughout. State is per session UUID (a per-session total is
 all the spec allows) and is never printed or logged.
 """
 import json
+import math
 import os
 import tempfile
 
@@ -31,6 +32,11 @@ import protocol
 _BUCKETS = 20
 _KEEP_S = 32 * 86400
 _VERSION = 1
+
+
+def _num(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) \
+        and math.isfinite(x)
 
 
 def _default_path() -> str:
@@ -71,18 +77,20 @@ class SpendCounter:
                 return
             if period is not None and not isinstance(period, (int, float)):
                 return
+            if not isinstance(d["sessions"], dict) \
+                    or not isinstance(d["adds"], list):
+                return
             sessions = {}
             for sid, v in d["sessions"].items():
                 hw, seen = v
                 if not isinstance(sid, str) or isinstance(hw, bool) \
-                        or not isinstance(hw, int) \
-                        or not isinstance(seen, (int, float)):
+                        or not isinstance(hw, int) or not _num(seen):
                     return
                 sessions[sid] = [hw, seen]
             adds = []
             for prev, at, cents in d["adds"]:
-                if not all(isinstance(x, (int, float)) and
-                           not isinstance(x, bool) for x in (prev, at, cents)):
+                # json accepts Infinity and NaN; int(inf) would raise.
+                if not all(_num(x) for x in (prev, at, cents)):
                     return
                 adds.append([prev, at, int(cents)])
         except (OSError, ValueError, KeyError, TypeError):
@@ -103,6 +111,10 @@ class SpendCounter:
 
     # -- counting --------------------------------------------------------
     def observe(self, session_id, cost_usd, at) -> bool:
+        # The counter owns the guard: a NaN, infinity, string or bool from
+        # a damaged payload must not touch the state.
+        if not _num(cost_usd) or not _num(at):
+            return False
         cents = int(round(cost_usd * 100))
         s = self._sessions.get(session_id)
         if s is None:

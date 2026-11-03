@@ -66,7 +66,6 @@ def test_rise_straddling_the_anchor_is_dropped():
 
 def test_buckets():
     now = 1_800_000_000 + 600
-    q = protocol.burn_quarter(now)
     c = SpendCounter(persist=False)
     c.observe("a", 1.00, now - 1300)
     c.observe("a", 1.30, now - 1200)
@@ -75,7 +74,6 @@ def test_buckets():
     assert b[18] == 30 and sum(b) == 30
     c.observe("a", 1.40, now)
     assert c.buckets(now)[19] == 10
-    assert q == protocol.burn_quarter(now)
 
 
 def test_old_additions_leave_the_buckets():
@@ -158,3 +156,40 @@ def test_default_path_resolves_at_call_time(tmp_path, monkeypatch):
     c.observe("a", 1.00, 100)
     c.save()
     assert (tmp_path / ".blink" / "spend-count.json").exists()
+
+
+def test_damaged_shapes_load_empty(tmp_path):
+    f = tmp_path / "spend-count.json"
+    for body in ('{"v":1,"fp":"fp","period":0,"sessions":[],"adds":[]}',
+                 '{"v":1,"fp":"fp","period":0,"sessions":null,"adds":[]}',
+                 '{"v":1,"fp":"fp","period":0,"sessions":{},"adds":{}}',
+                 '{"v":1,"fp":"fp","period":0,"sessions":{},'
+                 '"adds":[[1,2,Infinity]]}',
+                 '{"v":1,"fp":"fp","period":0,'
+                 '"sessions":{"a":[NaN,1]},"adds":[]}'):
+        f.write_text(body)
+        c = mk(tmp_path)
+        assert c.since(0) == 0
+        assert c.observe("a", 1.0, 5) is True
+
+
+def test_bad_cost_changes_nothing():
+    c = SpendCounter(persist=False)
+    c.observe("a", 1.00, 100)
+    for bad in (float("nan"), float("inf"), "2.0", True, None):
+        assert c.observe("a", bad, 200) is False
+    assert c.observe("a", 2.0, float("nan")) is False
+    assert c.since(0) == 0
+    c.observe("a", 1.10, 300)
+    assert c.since(0) == 10
+
+
+def test_additions_older_than_32_days_are_dropped():
+    day = 86400
+    t = 1_800_000_000
+    c = SpendCounter(persist=False)
+    c.observe("a", 1.00, t)
+    c.observe("a", 1.10, t + day)
+    assert c.since(0) == 10
+    c.observe("a", 1.25, t + 34 * day)
+    assert c.since(0) == 15
