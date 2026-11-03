@@ -40,7 +40,7 @@ only when it has changed. Pro, Max 5x, any other plan, and a file missing,
 unreadable, corrupt or over 8 MB keep the sustained rule.
 
 That replaced, on 2026-11-01, two replies 25 minutes to 4 h 35 min apart,
-after a re-review read Claude Code 2.1.316's bundle: the status line renders
+after a re-review found three things about Claude Code 2.1.316: the status line renders
 on events, not every few seconds; `API_TIMEOUT_MS` bounds only the wait for
 headers, so one stream across a reset can render weekly-only rises half an
 hour apart; and `five_hour` leaves the line by the local clock, so a desk

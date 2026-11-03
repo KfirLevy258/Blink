@@ -25,7 +25,7 @@ to `~/.blink/statusline.json` carries `rate_limits.seven_day`
 rendering as the session replied, so this is not the old "window expired
 while nobody rendered" absence. (Claude Code renders the status line on
 events -- token usage, a new assistant message, a mode change, the earliest
-reset, prompt-cache expiry -- not on a timer: read from 2.1.316's bundle in
+reset, prompt-cache expiry -- not on a timer: established for 2.1.316 in
 the re-review of 2026-11-01.)
 
 ## The plan cannot be read from local files
@@ -81,8 +81,8 @@ after the mark, a Desktop sample whose `fh` is a number (0 included), or a
 Local Storage reading or reset stamp. The newest evidence wins.
 
 The Claude Code half was two replies 25 minutes to 4 h 35 min apart until the
-re-review of 2026-11-01, which read Claude Code 2.1.316's bundle and found
-three premises false. The status line renders on events, so a ten-minute
+re-review of 2026-11-01, which found three premises false for Claude Code
+2.1.316. The status line renders on events, so a ten-minute
 silence was a pause, not a gap, and an Ultra user who read between turns was
 never marked. `API_TIMEOUT_MS` bounds only the wait for headers, so one
 stream across a Pro or Max reset rendered weekly-only rises half an hour

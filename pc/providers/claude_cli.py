@@ -104,8 +104,8 @@ REPLY_MEMORY_LIMIT = 64
 
 # What proves no window, from the status line. See _reply_without_window for
 # the argument; these are its inputs. Replaced on 2026-11-01, after the
-# re-review of that day measured three premises of the two-reply rule
-# false in Claude Code 2.1.316's bundle (read, not run): the status line
+# re-review of that day found three premises of the two-reply rule
+# false for Claude Code 2.1.316: the status line
 # renders on events -- token usage, a mode change, a new assistant message,
 # the earliest reset, prompt-cache expiry at about an hour -- not every few
 # seconds; API_TIMEOUT_MS bounds only the wait for headers, so a body can

@@ -405,12 +405,12 @@ BURN_WINDOW_S = 3600.0
 # refuses the case the guard exists for: an app closed and reopened leaves a
 # gap of hours, not of sixteen minutes.
 #
-# Read out of Claude.app 1.37937.3's own bundle and then confirmed against it
-# (re-read in 1.40609.0 on 2026-08-31: the cadence had already changed once,
-# see BURN_WINDOW_S below -- which is why no interval here is load-bearing)
-# running, 2026-08-30. Both intervals belong to an application we do not
-# control -- if the rate disappears again, measure the gaps in
-# plan-usage-history.json before touching anything else.
+# Seen in Claude.app 1.37937.3 running, 2026-08-30 (checked again in
+# 1.40609.0 on 2026-08-31: the cadence had already changed once, see
+# BURN_WINDOW_S below -- which is why no interval here is load-bearing).
+# Both intervals belong to an application we do not control -- if the rate
+# disappears again, measure the gaps in plan-usage-history.json before
+# touching anything else.
 BURN_MAX_GAP_S = 1000.0
 
 # How far apart two samples may be for a rise in weekly usage between them,

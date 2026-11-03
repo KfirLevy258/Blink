@@ -463,7 +463,7 @@ def test_claude_config_dir_moves_the_file(tmp_path, monkeypatch):
                          ids=["home", "CLAUDE_CONFIG_DIR"])
 def test_a_non_empty_legacy_config_json_wins(tmp_path, monkeypatch,
                                              with_dir):
-    """Claude Code 2.1.316's y_(): a regular, non-empty .config.json in
+    """Claude Code's rule (2.1.316): a regular, non-empty .config.json in
     $CLAUDE_CONFIG_DIR, or in ~/.claude, is the global config, ahead of
     .claude.json (the review of PR #6, 2026-11-01)."""
     if with_dir:
