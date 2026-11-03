@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from pc import claude_account, ingest, normalizer
+from pc import claude_account, claude_plan, ingest, normalizer
 from pc.providers import base
 
 NOW = 1_790_000_000.0
@@ -57,6 +57,19 @@ def state_only(at):
         state=base.STATE_RUNNING, n_run=1)
 
 
+def view_of(path):
+    """A view source over one file with no pacing: every poll parses, so a
+    test sees each change at once. The cached, paced one is PlanReader's
+    (tests/pc/test_ultra_plan.py, test_spend_seat.py)."""
+    def source(now):
+        return claude_plan.parse(str(path)) or claude_plan.EMPTY_VIEW
+    return source
+
+
+def watch_of(path):
+    return claude_account.AccountWatch(view_of(path))
+
+
 def test_profile_kinds(tmp_path):
     p = tmp_path / ".claude.json"
     for org_type, want in (("claude_enterprise", "enterprise"),
@@ -67,76 +80,58 @@ def test_profile_kinds(tmp_path):
                            (None, "consumer"),
                            (17, "consumer")):
         save_login(p, org_type=org_type)
-        assert claude_account.profile_kind(str(p)) == want, org_type
+        assert claude_plan.parse(str(p)).org_kind == want, org_type
 
 
-def test_no_profile_is_no_answer(tmp_path):
+def test_no_profile_is_no_news(tmp_path):
     p = tmp_path / ".claude.json"
-    assert claude_account.read_profile(str(p)) is None
-    p.write_text(json.dumps({"oauthAccount": {}})[:-3], encoding="utf-8")
-    assert claude_account.read_profile(str(p)) is None
-    p.write_text(json.dumps({"editorMode": "emacs"}), encoding="utf-8")
-    assert claude_account.read_profile(str(p)) is None      # API-key login
-    p.write_text(json.dumps({"oauthAccount": {"organizationType":
-                                              "claude_enterprise"}}),
-                 encoding="utf-8")
-    assert claude_account.read_profile(str(p)) is None      # no identity
+    for text in (json.dumps({"oauthAccount": {}})[:-3],
+                 json.dumps({"editorMode": "emacs"}),      # API-key login
+                 json.dumps({"oauthAccount": {
+                     "organizationType": "claude_enterprise"}}),
+                 "[1, 2]"):
+        p.write_text(text, encoding="utf-8")
+        assert claude_plan.parse(str(p)).account_fp == "", text
+        w = watch_of(p)
+        w.poll(NOW)
+        assert w.kind == "" and w.since is None
     p.write_bytes(b"\xff\xfe{}")
-    assert claude_account.read_profile(str(p)) is None
-    p.write_text("[1, 2]", encoding="utf-8")
-    assert claude_account.read_profile(str(p)) is None
-
-
-def test_the_profile_follows_claude_config_dir(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    assert claude_account.profile_path() == str(home / ".claude.json")
-    moved = tmp_path / "elsewhere"
-    moved.mkdir()
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(moved))
-    save_login(moved / ".claude.json", org_type="claude_enterprise")
-    assert claude_account.profile_path() == str(moved / ".claude.json")
-    assert claude_account.profile_kind() == "enterprise"
+    assert claude_plan.parse(str(p)).account_fp == ""
+    w = watch_of(tmp_path / "missing.json")
+    w.poll(NOW)
+    assert w.kind == "" and w.touched_at is None
 
 
 def test_an_oversized_profile_is_not_read(tmp_path, monkeypatch):
     p = save_login(tmp_path / ".claude.json",
-                      org_type="claude_enterprise",
-                      more={"pad": "x" * 2000})
-    monkeypatch.setattr(claude_account, "PROFILE_MAX_BYTES", 1000)
-    assert claude_account.read_profile(str(p)) is None
-    monkeypatch.setattr(claude_account, "PROFILE_MAX_BYTES", 10_000)
-    assert claude_account.read_profile(str(p))[0] == "enterprise"
-
-
-def test_the_shipped_bound_is_five_megabytes():
-    assert claude_account.PROFILE_MAX_BYTES == 5 * 1024 * 1024
+                   org_type="claude_enterprise", more={"pad": "x" * 2000})
+    monkeypatch.setattr(claude_plan, "MAX_BYTES", 1000)
+    assert claude_plan.parse(str(p)).account_fp == ""
+    monkeypatch.setattr(claude_plan, "MAX_BYTES", 10_000)
+    assert claude_plan.parse(str(p)).org_kind == "enterprise"
 
 
 def test_the_account_ids_are_never_held_only_a_digest_of_them(tmp_path):
     p = save_login(tmp_path / ".claude.json", account="RAW-ACCOUNT-ID",
-                      org="RAW-ORG-ID")
-    prof = claude_account.read_profile(str(p))
-    w = claude_account.AccountWatch(str(p))
+                   org="RAW-ORG-ID")
+    view = claude_plan.parse(str(p))
+    w = watch_of(p)
     w.poll(NOW)
-    held = repr(prof) + repr(vars(w))
+    held = repr(view) + repr(vars(w))
     assert "RAW-ACCOUNT-ID" not in held and "RAW-ORG-ID" not in held
     # Still a different digest for a different account, and the same one
     # for the same account read twice.
     other = save_login(tmp_path / "b.json", account="RAW-ACCOUNT-ID-2",
-                          org="RAW-ORG-ID")
-    assert claude_account.read_profile(str(other)).fingerprint \
-        != prof.fingerprint
-    assert claude_account.read_profile(str(p)) == prof
+                       org="RAW-ORG-ID")
+    assert claude_plan.parse(str(other)).account_fp != view.account_fp
+    assert claude_plan.parse(str(p)) == view
 
 
 def test_nothing_from_the_profile_is_ever_printed(tmp_path, capsys):
     p = save_login(tmp_path / ".claude.json",
-                      org_type="claude_enterprise",
-                      account="SECRET-ACCOUNT", org="SECRET-ORG")
-    w = claude_account.AccountWatch(str(p))
+                   org_type="claude_enterprise",
+                   account="SECRET-ACCOUNT", org="SECRET-ORG")
+    w = watch_of(p)
     w.poll(NOW)
     save_login(p, org_type="claude_max", account="OTHER-SECRET")
     bump(p)
@@ -153,19 +148,19 @@ def test_nothing_from_the_profile_is_ever_printed(tmp_path, capsys):
 
 def test_a_switch_is_dated_when_seen_and_startup_is_not_a_switch(tmp_path):
     p = save_login(tmp_path / ".claude.json", org_type="claude_max")
-    w = claude_account.AccountWatch(str(p))
+    w = watch_of(p)
     w.poll(NOW)
     assert w.kind == "consumer"
     assert w.since is None          # the account found at startup
     save_login(p, org_type="claude_enterprise", account="acct-2",
-                  org="org-2")
+               org="org-2")
     bump(p)
     w.poll(NOW + 2)
     assert w.kind == "enterprise"
     assert w.since == NOW + 2
     # A rewrite of the same account (project history) is no switch.
     save_login(p, org_type="claude_enterprise", account="acct-2",
-                  org="org-2", more={"lastSeenNotice": 5})
+               org="org-2", more={"lastSeenNotice": 5})
     bump(p, 10)
     w.poll(NOW + 4)
     assert w.since == NOW + 2
@@ -173,8 +168,8 @@ def test_a_switch_is_dated_when_seen_and_startup_is_not_a_switch(tmp_path):
 
 def test_an_unreadable_moment_changes_nothing(tmp_path):
     p = save_login(tmp_path / ".claude.json",
-                      org_type="claude_enterprise")
-    w = claude_account.AccountWatch(str(p))
+                   org_type="claude_enterprise")
+    w = watch_of(p)
     w.poll(NOW)
     p.write_text('{"oauthAccount": {"accountU', encoding="utf-8")
     bump(p)
@@ -188,10 +183,12 @@ def test_an_unreadable_moment_changes_nothing(tmp_path):
 def test_the_profile_is_read_once_per_change(tmp_path, monkeypatch):
     p = save_login(tmp_path / ".claude.json")
     reads = []
-    real = claude_account.read_profile
-    monkeypatch.setattr(claude_account, "read_profile",
-                        lambda path=None: reads.append(path) or real(path))
-    w = claude_account.AccountWatch(str(p))
+    real = claude_plan.parse
+    monkeypatch.setattr(claude_plan, "parse",
+                        lambda path, st=None: reads.append(path)
+                        or real(path, st))
+    reader = claude_plan.PlanReader(path=str(p))
+    w = claude_account.AccountWatch(reader.look)
     for i in range(30):
         w.poll(NOW + 2 * i)
     assert len(reads) == 1
@@ -354,8 +351,8 @@ def test_a_bus_that_never_saw_a_spend_cap_never_asks_about_the_account():
 def test_the_default_bus_does_not_open_the_profile_on_a_windows_desk(
         tmp_path, monkeypatch):
     opened = []
-    monkeypatch.setattr(claude_account, "read_profile",
-                        lambda path=None: opened.append(path))
+    monkeypatch.setattr(claude_plan, "parse",
+                        lambda path, st=None: opened.append(path))
     bus = ingest.IngestionBus()
     bus.poll()
     bus.poll()

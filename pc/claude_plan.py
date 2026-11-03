@@ -71,9 +71,15 @@ and lifts the mark, after which claude_cli refuses the fast path for a
 window. Not redesigned: it needs two accounts on one desk, one of them
 Ultra; docs/open-bugs/ultra-burn-followups.md keeps it.
 """
+import calendar
+import dataclasses
 import json
+import math
 import os
 import stat
+import time
+
+from pc import claude_account
 
 # How often the file is looked at, at most. The plan changes only on an
 # upgrade or a downgrade, and a minute late on either is nothing against
@@ -161,19 +167,137 @@ def signature(st):
     return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
-def read(path, st=None):
-    """True or False for the file at `path`, or None when it is worth
+# What the extra_usage cache is read for, and the seat fields that decide
+# the page (docs/plans/enterprise-spend.md, "Recognising a spend seat").
+SPEND_SEAT_TIER = "enterprise_usage_based"
+SPEND_BILLING_TYPE = "usage_based"
+
+
+@dataclasses.dataclass(frozen=True)
+class SpendAnchor:
+    """The spend Claude Code saved at the last /usage, in cents. Raw: not
+    adjusted for the month it was fetched in (the caller does that)."""
+    used_cents: int
+    limit_cents: "int | None"
+    enabled: bool
+    fetched_at: float
+
+
+@dataclasses.dataclass(frozen=True)
+class ConfigView:
+    """Everything this daemon takes from Claude Code's config, from one
+    parse. No raw id is held: account_fp is a one-way digest, and org_kind
+    is one of claude_account's own words, never the file's string."""
+    ultra: bool
+    spend_seat: bool
+    account_fp: str
+    org_kind: str
+    mtime: float
+    anchor: "SpendAnchor | None"
+
+
+# No file, or nothing in it that was asked for. account_fp "" is "no
+# login to follow" (claude_account.AccountWatch takes it as no news).
+EMPTY_VIEW = ConfigView(False, False, "", "consumer", 0.0, None)
+
+
+def is_spend_seat(doc) -> bool:
+    """Whether the login is billed by usage: oauthAccount.seatTier is
+    "enterprise_usage_based" or billingType is "usage_based". Only these
+    decide the mode; the cache decides the figure, never the mode."""
+    acct = doc.get("oauthAccount") if isinstance(doc, dict) else None
+    if not isinstance(acct, dict):
+        return False
+    return (acct.get("seatTier") == SPEND_SEAT_TIER
+            or acct.get("billingType") == SPEND_BILLING_TYPE)
+
+
+def _number(v):
+    """A finite int or float that is not a bool, else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _anchor(doc):
+    """The SpendAnchor in the config's cachedUsageUtilization, or None
+    (module docstring of the plan: USD only, finite non-negative amounts,
+    a boolean is_enabled, and the cache is this login's when it names one).
+    The account comparison happens here and neither id leaves."""
+    cache = doc.get("cachedUsageUtilization") if isinstance(doc, dict) \
+        else None
+    if not isinstance(cache, dict):
+        return None
+    acct = doc.get("oauthAccount")
+    acct = acct if isinstance(acct, dict) else {}
+    cached_id = cache.get("accountUuid")
+    if cached_id is not None and str(cached_id) != str(
+            acct.get("accountUuid")):
+        return None
+    fetched_ms = _number(cache.get("fetchedAtMs"))
+    util = cache.get("utilization")
+    extra = util.get("extra_usage") if isinstance(util, dict) else None
+    if fetched_ms is None or fetched_ms < 0 or not isinstance(extra, dict):
+        return None
+    currency = extra.get("currency")
+    if currency is None:
+        currency = "usd"
+    if not isinstance(currency, str) or currency.strip().casefold() != "usd":
+        return None
+    used = _number(extra.get("used_credits"))
+    enabled = extra.get("is_enabled")
+    if used is None or used < 0 or not isinstance(enabled, bool):
+        return None
+    limit = extra.get("monthly_limit")
+    if limit is not None:
+        limit = _number(limit)
+        if limit is None or limit < 0:
+            return None
+        limit = int(round(limit))
+    return SpendAnchor(int(round(used)), limit, enabled, fetched_ms / 1000.0)
+
+
+def month_start_utc(now) -> float:
+    """Epoch seconds of 00:00 UTC on the 1st of the month `now` is in."""
+    t = time.gmtime(now)
+    return float(calendar.timegm((t.tm_year, t.tm_mon, 1, 0, 0, 0)))
+
+
+def next_month_start_utc(now) -> float:
+    """Epoch seconds of 00:00 UTC on the 1st of the month after `now`'s."""
+    t = time.gmtime(now)
+    y, m = (t.tm_year + 1, 1) if t.tm_mon == 12 else (t.tm_year,
+                                                      t.tm_mon + 1)
+    return float(calendar.timegm((y, m, 1, 0, 0, 0)))
+
+
+def _view(doc, mtime):
+    acct = doc.get("oauthAccount") if isinstance(doc, dict) else None
+    acct = acct if isinstance(acct, dict) else {}
+    fp = claude_account._fingerprint((acct.get("accountUuid"),
+                                      acct.get("organizationUuid")))
+    org = acct.get("organizationType")
+    kind = (claude_account.ACCOUNT_KINDS.get(org, claude_account.CONSUMER)
+            if isinstance(org, str) else claude_account.CONSUMER)
+    return ConfigView(ultra=is_ultra(doc), spend_seat=is_spend_seat(doc),
+                      account_fp=fp or "", org_kind=kind, mtime=mtime,
+                      anchor=_anchor(doc))
+
+
+def parse(path, st=None):
+    """The ConfigView of the file at `path`, or None when it is worth
     trying again: an OSError, or the file changed between the stat and the
-    read. False for a file this reader refuses -- not a regular file, over
-    MAX_BYTES -- or one that does not parse or has the wrong shape; that
-    answer holds until the file changes. `st` is a stat of `path` already
-    taken (PlanReader's), or None to take one. Never raises, and says
-    nothing."""
+    read. A file this reader refuses -- not a regular file, over MAX_BYTES
+    -- or one that does not parse or has the wrong shape gives a view with
+    nothing in it but the mtime; that answer holds until the file changes.
+    `st` is a stat of `path` already taken (PlanReader's), or None to take
+    one. Never raises, and says nothing."""
     try:
         if st is None:
             st = os.stat(path)
+        bare = dataclasses.replace(EMPTY_VIEW, mtime=st.st_mtime)
         if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_BYTES:
-            return False                # not opened: a FIFO would block
+            return bare                 # not opened: a FIFO would block
         # O_NONBLOCK in case a FIFO took the file's place since the stat:
         # the open then returns at once, and the fstat below refuses it.
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
@@ -198,49 +322,69 @@ def read(path, st=None):
         # ValueError covers UnicodeDecodeError and JSONDecodeError;
         # RecursionError is json's answer to an array nested thousands
         # deep, as in session_verdict.load.
-        return False
-    ultra = is_ultra(doc)
+        return bare
+    view = _view(doc, st.st_mtime)
     del doc         # the rest of the file is not kept, not even here
-    return ultra
+    return view
+
+
+def read(path, st=None):
+    """True or False for Ultra, or None to try again (see parse)."""
+    v = parse(path, st)
+    return None if v is None else v.ultra
 
 
 class PlanReader:
-    """The plan, for one process: stat-throttled, cached against the
-    file's signature."""
+    """The config's view, for one process: stat-throttled, cached against
+    the file's signature. `source`, when given, is a callable returning a
+    ConfigView or None, used instead of the file; None from it keeps the
+    last good view."""
 
-    def __init__(self, path=None):
+    def __init__(self, path=None, source=None):
         # None: config_path(), asked on every look, so a HOME moved after
         # construction (tests/conftest.py) is followed.
         self._path = path
+        self._source = source
         self._looked_at = None
         self._sig = None
-        self._ultra = False
+        self._view = EMPTY_VIEW
 
     def path(self):
         return self._path if self._path is not None else config_path()
 
-    def ultra(self, now_epoch) -> bool:
-        """Whether the account is on Ultra, as of the last look. A look is
-        due RECHECK_S after the last one, or at once if the clock has gone
-        back past it."""
+    def look(self, now_epoch) -> ConfigView:
+        """The view as of the last look. A look is due RECHECK_S after the
+        last one, or at once if the clock has gone back past it."""
         if (self._looked_at is not None
                 and 0 <= now_epoch - self._looked_at < RECHECK_S):
-            return self._ultra
+            return self._view
         self._looked_at = now_epoch
+        if self._source is not None:
+            got = self._source()
+            if got is not None:
+                self._view = got
+            return self._view
         try:
             p = self.path()
             st = os.stat(p)
+        except FileNotFoundError:
+            self._sig, self._view = None, EMPTY_VIEW
+            return self._view
         except (OSError, ValueError):
-            self._sig, self._ultra = None, False
-            return False
+            return self._view           # not knowing is not "no seat"
         sig = (p, stat.S_IFMT(st.st_mode)) + signature(st)
         if sig == self._sig:
-            return self._ultra
-        got = read(p, st)
+            return self._view
+        got = parse(p, st)
         # Only a read worth trying again is not cached against the stamp:
         # a Windows lock, or a write caught half-done. A refused, corrupt
-        # or misshapen file is kept as "not Ultra" until it changes, so it
-        # is not parsed again once a minute.
-        self._sig = sig if got is not None else None
-        self._ultra = bool(got)
-        return self._ultra
+        # or misshapen file is kept as an empty view until it changes, so
+        # it is not parsed again once a minute.
+        if got is None:
+            self._sig = None
+            return self._view
+        self._sig, self._view = sig, got
+        return self._view
+
+    def ultra(self, now_epoch) -> bool:
+        return self.look(now_epoch).ultra

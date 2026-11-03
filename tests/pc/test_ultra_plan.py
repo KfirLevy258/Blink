@@ -16,6 +16,7 @@ address and name standing in for the fields the real file also holds, so
 a test can see they are not kept. Nothing is captured from a machine. The
 writing helpers take their home from the caller (tests/support/home.py).
 """
+import dataclasses
 import json
 import logging
 import os
@@ -332,7 +333,9 @@ def test_the_fallback_check_fails_on_a_misread_file(tmp_path, monkeypatch):
     """falls_back() must be able to fail: with the plan read as Ultra,
     the chain's first reply is an Ultra mark."""
     put_config(tmp_path, raw=b"{")
-    monkeypatch.setattr(claude_plan, "read", lambda p, st=None: True)
+    monkeypatch.setattr(claude_plan, "parse", lambda p, st=None:
+                        dataclasses.replace(claude_plan.EMPTY_VIEW,
+                                            ultra=True))
     p = tmp_path / "statusline.json"
     with pytest.raises(AssertionError):
         falls_back(ClaudeCliProvider(path=str(p)), p)
@@ -402,8 +405,8 @@ def test_a_refused_file_is_not_parsed_again_until_it_changes(
     to learn the same thing was the cost the cap was meant to bound."""
     path = put_config(tmp_path, raw=b"{" + b" " * 1000)
     reads = []
-    real = claude_plan.read
-    monkeypatch.setattr(claude_plan, "read",
+    real = claude_plan.parse
+    monkeypatch.setattr(claude_plan, "parse",
                         lambda p, st=None: reads.append(1) or real(p, st))
     reader = claude_plan.PlanReader()
     assert reader.ultra(NOW) is False
@@ -512,8 +515,8 @@ def test_the_file_is_looked_at_once_a_minute_and_read_on_change(
         tmp_path, monkeypatch):
     path = put_config(tmp_path, plan_doc())
     reads = []
-    real = claude_plan.read
-    monkeypatch.setattr(claude_plan, "read",
+    real = claude_plan.parse
+    monkeypatch.setattr(claude_plan, "parse",
                         lambda p, st=None: reads.append(1) or real(p, st))
     reader = claude_plan.PlanReader()
 
@@ -541,8 +544,9 @@ def test_a_clock_gone_back_looks_again(tmp_path):
 def test_a_failed_read_is_tried_again_at_the_next_look(tmp_path,
                                                        monkeypatch):
     put_config(tmp_path, plan_doc())
-    results = [None, True]
-    monkeypatch.setattr(claude_plan, "read",
+    results = [None, dataclasses.replace(claude_plan.EMPTY_VIEW,
+                                         ultra=True)]
+    monkeypatch.setattr(claude_plan, "parse",
                         lambda p, st=None: results.pop(0))
     reader = claude_plan.PlanReader()
     assert reader.ultra(NOW) is False

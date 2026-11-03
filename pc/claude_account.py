@@ -13,8 +13,8 @@ account's figures until something writes over them, and the normalizer would
 happily merge a Max session window into the page of a login that has none.
 
 What is read, and from where: the `oauthAccount` object Claude Code keeps in
-~/.claude.json (or under CLAUDE_CONFIG_DIR), and from it only the
-organisation type and the two account ids. That object describes the login;
+its config, parsed once by pc/claude_plan (which knows where the file is),
+and from it only the organisation type and the two account ids. That object describes the login;
 it is not a credential, which Claude Code keeps in the Keychain or in
 ~/.claude/.credentials.json and which nothing here opens. The ids are hashed
 on the way in and only the hash is kept, so this process never holds them.
@@ -29,10 +29,7 @@ appeared on the bus, so on a desk whose status line has never carried a
 dollar cap the file is never opened. The organisation-type strings below are
 Claude Code's as documented; nobody has read them off an Enterprise profile.
 """
-import collections
 import hashlib
-import json
-import os
 
 from pc.providers import base
 
@@ -49,32 +46,6 @@ ACCOUNT_KINDS = {
 }
 CONSUMER = "consumer"
 
-# The most of the file that is ever read. Measured on the development Mac on
-# 2026-10-27 the file was 114 KB, after months of use; five megabytes is far
-# past any honest profile and still a parse nobody would notice on the 2 s
-# tick. A larger file is not read at all.
-PROFILE_MAX_BYTES = 5 * 1024 * 1024
-
-# What a readable profile yields. `fingerprint` changes when the account does
-# and says nothing about which account it is.
-Profile = collections.namedtuple("Profile", "kind fingerprint")
-
-
-def profile_path() -> str:
-    """The profile's location, worked out at the call.
-
-    At the call because tests/conftest.py moves HOME after import, and a path
-    computed at import would point every test at the real file -- the one gap
-    in the sandbox that CLAUDE.md warns about. CLAUDE_CONFIG_DIR is honoured
-    because Claude Code honours it, and a desk that uses it would otherwise
-    never be seen to log in at all.
-    """
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    folder = os.path.expanduser(config_dir) if config_dir else \
-        os.path.expanduser("~")
-    return os.path.join(folder, ".claude.json")
-
-
 def _fingerprint(ids):
     """A stable digest of the account ids, or None when there are none.
 
@@ -87,48 +58,6 @@ def _fingerprint(ids):
         return None
     joined = "\x1f".join(i if isinstance(i, str) else "" for i in ids)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
-
-
-def read_profile(path=None):
-    """The signed-in account as a Profile, or None if it cannot be told.
-
-    None covers a missing file, one over PROFILE_MAX_BYTES, one half-written,
-    one that is not UTF-8 or not JSON, and an API-key login with no
-    oauthAccount. Callers take None to mean "no news", which is the right
-    reading of a file that Claude Code is in the middle of rewriting.
-
-    The bound is enforced on what is actually read -- one byte past the
-    limit is requested, and getting it means the file is too big -- rather
-    than on a stat taken a moment earlier of a file that may since have
-    grown.
-    """
-    try:
-        with open(path or profile_path(), "rb") as f:
-            raw = f.read(PROFILE_MAX_BYTES + 1)
-    except OSError:
-        return None
-    if len(raw) > PROFILE_MAX_BYTES:
-        return None
-    try:
-        doc = json.loads(raw.decode("utf-8"))
-    except ValueError:      # UnicodeDecodeError is a ValueError too
-        return None
-    oauth = doc.get("oauthAccount") if isinstance(doc, dict) else None
-    if not isinstance(oauth, dict):
-        return None
-    fp = _fingerprint((oauth.get("accountUuid"),
-                       oauth.get("organizationUuid")))
-    if fp is None:
-        return None
-    org = oauth.get("organizationType")
-    return Profile(ACCOUNT_KINDS.get(org, CONSUMER) if isinstance(org, str)
-                   else CONSUMER, fp)
-
-
-def profile_kind(path=None):
-    """"enterprise", "team", "consumer", or None when unreadable."""
-    prof = read_profile(path)
-    return None if prof is None else prof.kind
 
 
 class AccountWatch:
@@ -147,50 +76,35 @@ class AccountWatch:
     lets the freshest reading choose the plan, so the page comes right as
     soon as the new account is used.
 
-    Parsing happens only when the file's (size, mtime) has moved since the
-    last look. At 1800 polls an hour against a file of a hundred kilobytes
-    and more, re-reading every time would be almost all waste.
+    The file is not read here. pc/claude_plan parses Claude Code's config
+    once, paced and cached against its signature, and `view_source(now)`
+    returns that parse's ConfigView; the fingerprint, the organisation kind
+    and the file's mtime come from it. A view with no fingerprint (no file,
+    no login, a file that would not parse) is no news.
     """
 
-    def __init__(self, path=None):
-        self._path = path
-        self._seen_stat = None
+    def __init__(self, view_source):
+        self._view_source = view_source
         self._fingerprint = None
+        self._seen_mtime = None
         self.kind = ""
         self.since = None
         # When Claude Code last touched the file, which is evidence that it
         # was running then. Used as the active_at of an unreported frame.
         self.touched_at = None
 
-    def _fresh_stat(self, path):
-        """The file's stat when it differs from the last one looked at."""
-        try:
-            st = os.stat(path)
-        except OSError:
-            return None
-        key = (st.st_size, st.st_mtime_ns)
-        if key == self._seen_stat:
-            return None
-        self._seen_stat = key
-        return st
-
-    def _adopt(self, prof, now_epoch):
-        switched = (self._fingerprint is not None
-                    and prof.fingerprint != self._fingerprint)
-        if switched:
-            self.since = now_epoch
-        self._fingerprint = prof.fingerprint
-        self.kind = prof.kind
-
     def poll(self, now_epoch):
-        path = self._path or profile_path()
-        st = self._fresh_stat(path)
-        if st is None:
+        view = self._view_source(now_epoch)
+        if view.mtime and view.mtime != self._seen_mtime:
+            self._seen_mtime = view.mtime
+            self.touched_at = view.mtime
+        fp = view.account_fp
+        if not fp:
             return
-        self.touched_at = st.st_mtime
-        prof = read_profile(path)
-        if prof is not None:
-            self._adopt(prof, now_epoch)
+        if self._fingerprint is not None and fp != self._fingerprint:
+            self.since = now_epoch
+        self._fingerprint = fp
+        self.kind = view.org_kind
 
 
 def _speaks_for_account(f):

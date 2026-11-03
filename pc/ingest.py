@@ -14,8 +14,8 @@ able to stop it.
 import sys
 import time
 
-from pc import (burn_reader, claude_account, cowork_audit, desktop_idb,
-                desktop_paths, normalizer, protocol, session_verdict,
+from pc import (burn_reader, claude_account, claude_plan, cowork_audit,
+                desktop_idb, desktop_paths, normalizer, protocol, session_verdict,
                 weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
@@ -86,7 +86,8 @@ class IngestionBus:
         # same timeline on any desk, and whoever happens to be signed in to
         # Claude on that desk is exactly what it must not depend on.
         if account is None and providers is None:
-            account = claude_account.AccountWatch()
+            reader = claude_plan.PlanReader()
+            account = claude_account.AccountWatch(reader.look)
         self._account = account
         # False until a frame on this bus has had a plan other than windows
         # -- in practice, until Claude Code's status line has carried a
