@@ -25,8 +25,11 @@ parse. The rest of the file -- Claude Code's per-project history -- is parsed
 because JSON must be, and dropped with the document.
 
 HELD FROM RELEASE. pc/ingest consults this only after a spend reading has
-appeared on the bus, so on a desk whose status line has never carried a
-dollar cap the file is never opened. The organisation-type strings below are
+appeared on the bus -- a gateway's dollar cap on the status line, or the
+spend page claude_cli builds on a seat billed by usage. The config itself
+is looked at on every desk now, once a claude_plan.RECHECK_S, for the plan
+and the seat (docs/plans/enterprise-spend.md, 1); until a spend reading
+appears no frame is filtered here. The organisation-type strings below are
 Claude Code's as documented; nobody has read them off an Enterprise profile.
 """
 import hashlib
@@ -154,12 +157,16 @@ def select(frames, now, kind="", since=None, touched_at=None):
     returned as they came. Of the rest:
 
       - a reading observed before `since` is from the previous login, and
-        goes;
+        goes -- except the spend page claude_cli builds from the config
+        (base.SPEND_SRC_ID), which is computed for the login the config
+        names now, at every poll, and is dated by the last render, which
+        can well be older than the switch;
       - of what is left, only readings on the newest one's plan stay;
       - and if that leaves nothing with a figure on an Enterprise or Team
         login, one unreported frame is added so the page can say so. A Team
         login that does report windows keeps them: a frame with figures is
-        never swapped for one that says there are none.
+        never swapped for one that says there are none, and a spend page
+        with dollars is such a frame even with no share (base.has_usage).
     """
     passing = [f for f in frames
                if f is not None and (f.provider != PROVIDER_ID
@@ -167,7 +174,9 @@ def select(frames, now, kind="", since=None, touched_at=None):
     readings = [f for f in frames
                 if f is not None and f.provider == PROVIDER_ID
                 and _speaks_for_account(f)
-                and (since is None or f.observed_at >= since)]
+                and (since is None or f.observed_at >= since
+                     or (f.plan == base.PLAN_SPEND
+                         and f.src == base.SPEND_SRC_ID))]
     readings = _same_plan_as_newest(readings)
     has_figure = any(f.has_usage() for f in readings)
     if not has_figure and kind in ("enterprise", "team"):

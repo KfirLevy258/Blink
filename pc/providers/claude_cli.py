@@ -78,14 +78,52 @@ restart.
 """
 import json
 import math
+import sys
 
 from pc import claude_plan
+from pc import protocol
 from pc import session_verdict
+from pc import spend_count
 from pc import statusline_source as ss
 from pc.providers import base
 
 PROVIDER_ID = ss.PROVIDER_ID
 SRC_ID = ss.SRC_ID
+# The spend page this provider builds on a seat billed by usage (_spend):
+# docs/plans/enterprise-spend.md, sections 1-2.
+SPEND_SRC_ID = base.SPEND_SRC_ID
+
+# How old Claude Code's saved /usage figure may be and still be drawn as
+# exact, when nothing has been counted since: fifteen minutes (the spec's
+# "The figure", 3). Past a day the board asks for a new /usage (the hint).
+SPEND_EXACT_S = 900
+SPEND_HINT_S = 86400
+# A saved /usage stamped later than this past the poll's clock is no
+# anchor. Claude Code and this daemon read one clock, so a fetch from the
+# future is a clock stepped back or a damaged file; believed, a stamp years
+# ahead would draw "exact" for good and date the page in the future. Taken
+# as no anchor, the page shows the count with the hint, which a /usage
+# puts right. The same fifteen minutes as SPEND_EXACT_S, so a small step
+# back costs nothing.
+SPEND_FUTURE_S = SPEND_EXACT_S
+
+# The one line the spend path says when it fails, and it says it once per
+# process. Fixed words and nothing else: the figures, the seat fields and
+# the account ids are all within reach of that code, and an exception's
+# text could carry any of them into bridge.log, which customers send us
+# (CLAUDE.md). A failure costs the spend frame for that poll, never the
+# provider: the bus benches a provider that raises, and prints its error.
+SPEND_FAILED_MSG = "[spend] reading failed"
+_spend_failed_said = False
+
+
+def spend_failed():
+    """Say SPEND_FAILED_MSG on stderr, the first time only."""
+    global _spend_failed_said
+    if _spend_failed_said:
+        return
+    _spend_failed_said = True
+    print(SPEND_FAILED_MSG, file=sys.stderr)
 
 # The cap on the fetch-time memory, in blocks.
 #
@@ -193,7 +231,7 @@ def _block_key(payload):
 
 
 class ClaudeCliProvider(base.ProviderParser):
-    def __init__(self, path=None, plan_path=None):
+    def __init__(self, path=None, plan_path=None, counter=None, plan=None):
         # None means "wherever ss.payload_path() says", asked on every poll
         # rather than once here. The default used to be a module constant in
         # statusline_source, expanduser'd at import before tests/conftest.py
@@ -246,7 +284,27 @@ class ClaudeCliProvider(base.ProviderParser):
         # path of _reply_without_window. `plan_path` None is
         # claude_plan.config_path(), asked at each look, for the reason
         # self._path is.
-        self._plan = claude_plan.PlanReader(path=plan_path)
+        #
+        # `plan`, when given, is that reader already made: pc/ingest hands
+        # every one of its users the same one (this provider, the login
+        # watch and the bus's own spend-seat check), so the file is looked
+        # at once a RECHECK_S for all of them, and they cannot disagree
+        # about the seat within a poll.
+        self._plan = (plan if plan is not None
+                      else claude_plan.PlanReader(path=plan_path))
+        # The running count of spend between /usage runs (pc/spend_count),
+        # fed and saved only while the config names a spend seat. The bus
+        # hands in the one it owns, persisted; built here, for `blink
+        # status`, it counts in memory and writes nothing.
+        self._counter = (counter if counter is not None
+                         else spend_count.SpendCounter(persist=False))
+        # The status-line payload the last poll read, as (payload, mtime);
+        # (None, None) when it read nothing. For _spend, which counts the
+        # render's cost.
+        self._read = (None, None)
+        # The mtime of the newest status-line render this process has read,
+        # or None: what a spend frame is dated by (_spend_frame).
+        self._render_at = None
         # The mtime of the newest five_hour this process has seen rendered,
         # from any session, or None. The fast path is refused within
         # base.SESSION_WINDOW_S of it (_reply_without_window). Never
@@ -540,8 +598,10 @@ class ClaudeCliProvider(base.ProviderParser):
         if (self._five_seen is not None
                 and mtime - self._five_seen < base.SESSION_WINDOW_S):
             return None
-        # Asked last, only of a reply that already qualifies, so a desk
-        # with a window stats the file only around a reset.
+        # Asked last, only of a reply that already qualifies. The file is
+        # looked at once a claude_plan.RECHECK_S on every desk all the same,
+        # for the spend seat (_spend_or_none); this look is the same
+        # reader's, so it costs nothing more.
         if self._plan.ultra(mtime if now_epoch is None else now_epoch):
             return session_verdict.evidence(
                 False, session_verdict.KIND_STATUSLINE_ULTRA, mtime)
@@ -591,6 +651,52 @@ class ClaudeCliProvider(base.ProviderParser):
         return frame
 
     def poll(self, now_epoch):
+        """The status line's frames, and on a spend seat the spend page."""
+        frames = self._status_frames(now_epoch)
+        spend = self._spend(now_epoch, frames)
+        if spend is not None:
+            frames.append(spend)
+        return frames
+
+    def _spend(self, now_epoch, frames):
+        """The spend frame for this poll, or None: not a spend seat, a
+        gateway figure already on the status line, or a failure, which is
+        said once in fixed words (spend_failed) and costs this frame only.
+        """
+        try:
+            return self._spend_or_none(now_epoch, frames)
+        except Exception:
+            spend_failed()
+            return None
+
+    def _spend_or_none(self, now_epoch, frames):
+        """See _spend. The config is looked at on every poll (paced by
+        claude_plan.RECHECK_S), so a /usage or a /login shows within about
+        a minute; on a seat that is not billed by usage nothing below the
+        look runs, and the count is neither touched nor saved."""
+        view = self._plan.look(now_epoch)
+        if not view.spend_seat:
+            return None
+        counter = self._counter
+        # Before the render is counted, so the 1st of the month or another
+        # login empties the count first and the render starts it again.
+        counter.bind(view.account_fp, claude_plan.month_start_utc(now_epoch))
+        payload, mtime = self._read
+        if isinstance(payload, dict) and mtime is not None:
+            sid = payload.get("session_id")
+            if isinstance(sid, str) and sid:
+                counter.observe(sid, _cost(payload), mtime)
+        counter.save()
+        # A gateway's own dollar figure (statusline_source._spend_frame) is
+        # the page when the status line carries one: it is the gateway's
+        # count, where this one is an estimate.
+        if any(f.plan == base.PLAN_SPEND for f in frames):
+            return None
+        return _spend_frame(view.anchor, counter, now_epoch, self._render_at)
+
+    def _status_frames(self, now_epoch):
+        """The frames the status line gives this poll; see the module
+        docstring."""
         # A clock gone back: every interval measured across the step is
         # short by it, the unsafe direction for CHAIN_MAX_GAP_S, so the
         # proof starts over. Seen here only when this poll is dated before
@@ -604,6 +710,10 @@ class ClaudeCliProvider(base.ProviderParser):
         back = self._polled_at is not None and now_epoch < self._polled_at
         self._polled_at = now_epoch
         payload, mtime = ss.read_payload(self.path())
+        self._read = (payload, mtime)
+        if mtime is not None and (self._render_at is None
+                                  or mtime > self._render_at):
+            self._render_at = mtime
         if back:
             self._forget_replies(mtime)
         elif self._stale_owed and mtime is not None:
@@ -665,6 +775,63 @@ class ClaudeCliProvider(base.ProviderParser):
             if last is not None:
                 frames.append(last)
         return frames
+
+
+def _spend_frame(anchor, counter, now_epoch, render_at):
+    """The spend page: the /usage figure plus what was counted since it.
+
+    docs/plans/enterprise-spend.md, "The figure". The anchor is the cents
+    Claude Code saved at the last /usage (claude_plan.SpendAnchor). One
+    fetched before this month began is no anchor, decided here at every
+    poll and not when the file was read, so a daemon running across 00:00
+    UTC on the 1st rolls over with the config untouched; so is one from
+    the future (SPEND_FUTURE_S). Without an anchor the page is the count
+    since the 1st, with no cap -- never "unlimited" -- and the hint.
+
+    The share is of the cap, and at least 100 when Claude Code says the
+    usage credits cannot pay for requests (is_enabled false) beside a cap:
+    the cap is reached, whatever the cents say. A cap of zero is reached
+    too, not a division. With no cap the share is UNKNOWN and the dollars
+    are the page (base.has_usage).
+
+    Dated by the newest status-line render, which is when Claude Code last
+    spoke; else by the /usage; else now. Never after now.
+    """
+    period = claude_plan.month_start_utc(now_epoch)
+    a = anchor
+    if a is not None and (a.fetched_at < period
+                          or a.fetched_at > now_epoch + SPEND_FUTURE_S):
+        a = None
+    if a is None:
+        added = counter.since(period)
+        cents, limit = added, None
+    else:
+        added = counter.since(a.fetched_at)
+        cents, limit = a.used_cents + added, a.limit_cents
+    pct = base.UNKNOWN
+    if limit is not None:
+        pct = (100.0 if limit <= 0
+               else protocol._round_pct(100.0 * cents / limit))
+        if not a.enabled:
+            pct = max(pct, 100.0)
+    age = None if a is None else now_epoch - a.fetched_at
+    if render_at is not None:
+        seen = render_at
+    elif a is not None:
+        seen = a.fetched_at
+    else:
+        seen = now_epoch
+    seen = min(seen, now_epoch)
+    return base.NormalizedUsageFrame(
+        provider=PROVIDER_ID, src=SPEND_SRC_ID, observed_at=seen,
+        active_at=seen, plan=base.PLAN_SPEND, spend_period="monthly",
+        spend_usd=cents / 100.0,
+        spend_limit_usd=None if limit is None else limit / 100.0,
+        session_pct=pct,
+        session_resets_at=claude_plan.next_month_start_utc(now_epoch),
+        weekly_pct=base.UNKNOWN, weekly_resets_at=None,
+        spend_exact=age is not None and age < SPEND_EXACT_S and added == 0,
+        spend_hint=age is None or age > SPEND_HINT_S)
 
 
 def _limits(payload):

@@ -64,6 +64,8 @@ import json
 import math
 import os
 
+from pc.providers import base
+
 KIND_STATUSLINE_WINDOW = "statusline_window"
 # The two no-window kinds were renamed when their rules were (the re-review
 # of 2026-11-01): "statusline_reply" was one reply, then two, and
@@ -270,5 +272,10 @@ class SessionVerdict:
         claude = [f for f in frames if f.provider == "claude"]
         if self.observe(claude, now_epoch):
             for f in claude:
-                f.no_session_window = True
+                # Never a spend page (docs/plans/enterprise-spend.md, 1): a
+                # seat billed by usage has no five-hour window to lack, and
+                # a verdict saved on a Max or Ultra login before /login
+                # must not turn its page into a burn view of tokens.
+                if f.plan != base.PLAN_SPEND:
+                    f.no_session_window = True
         return frames

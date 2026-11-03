@@ -16,7 +16,7 @@ import time
 
 from pc import (burn_reader, claude_account, claude_plan, cowork_audit,
                 desktop_idb, desktop_paths, normalizer, protocol,
-                session_verdict, weekly_anchor)
+                session_verdict, spend_count, weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
@@ -25,6 +25,7 @@ from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
 from pc.providers.claude_state import ClaudeStateProvider
 from pc.providers.codex_cli import CodexCliProvider
 from pc.providers.weekly_anchor import DesktopHistoryProvider, WeeklyAnchorProvider
+from pc.providers.weekly_anchor import SRC_ID as WEEKLY_ANCHOR_SRC_ID
 
 
 # How long a provider that raised sits out before it is tried again, and how
@@ -48,14 +49,21 @@ FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
 
-def default_providers():
+def default_providers(counter=None, plan=None):
     """Every provider shipped today, in preference order.
 
     Order is not the merge rule -- pc/normalizer merges by recency per field,
     not by position -- but it does decide which source is polled first and so
     which one a tie resolves toward.
+
+    `counter` is the bus's pc/spend_count.SpendCounter and `plan` its
+    claude_plan.PlanReader, both handed to the status-line provider: the
+    count is the bus's to keep, and one reader serves every user of the
+    config. None for either gives that provider its own (a count in memory
+    only, a reader of its own), which is what `blink status` wants.
     """
-    return [ClaudeCliProvider(), ClaudeDesktopProvider(),
+    return [ClaudeCliProvider(counter=counter, plan=plan),
+            ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
             ClaudeStateProvider(), CodexCliProvider(),
             # LAST: it only ever offers a remembered projection, and every
@@ -80,25 +88,44 @@ DEFAULT_VERDICT = object()
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
                  now=time.time, burn=None, verdict=DEFAULT_VERDICT,
-                 account=None):
+                 account=None, counter=None):
         # The login watch (pc/claude_account), made here only for the
         # shipped providers. A bus built from a scenario exists to replay the
         # same timeline on any desk, and whoever happens to be signed in to
         # Claude on that desk is exactly what it must not depend on.
-        if account is None and providers is None:
-            reader = claude_plan.PlanReader()
-            account = claude_account.AccountWatch(reader.look)
+        #
+        # One reader of Claude Code's config for the whole bus: the login
+        # watch, the status-line provider (the Ultra plan, the spend seat
+        # and its saved /usage) and the spend-seat check in _collect_frames
+        # below all take their view from it, so the file is looked at once a
+        # claude_plan.RECHECK_S and all three agree on what it said. None on
+        # a scenario's bus, for the reason above: it never asks.
+        self._plan_reader = None
+        if providers is None:
+            self._plan_reader = claude_plan.PlanReader()
+            if account is None:
+                account = claude_account.AccountWatch(self._plan_reader.look)
         self._account = account
         # False until a frame on this bus has had a plan other than windows
         # -- in practice, until Claude Code's status line has carried a
-        # spend cap. Until then the account is never read and no frame is
-        # filtered for it, so a desk that has never seen a spend cap runs
-        # exactly the code it ran before any of this existed. Once true it
+        # spend cap, or the config has named a seat billed by usage. Until
+        # then the login watch is never polled and no frame is filtered for
+        # it, so a desk that has never seen a spend reading merges exactly
+        # as it did before any of this existed (the config is still looked
+        # at once a minute, for the seat: _spend_seat). Once true it
         # stays true for the life of the process: the guard matters most
         # straight AFTER the spend page goes away, at the switch back.
         self._plans_seen = False
-        self._providers = (default_providers() if providers is None
-                           else list(providers))
+        # The running spend count (pc/spend_count), the bus's to own:
+        # persisted in ~/.blink/spend-count.json, and fed and saved only
+        # while the config names a spend seat. `counter` replaces it --
+        # `blink status --wire` passes one that writes nothing.
+        if providers is None:
+            if counter is None:
+                counter = spend_count.SpendCounter()
+            self._providers = default_providers(counter, self._plan_reader)
+        else:
+            self._providers = list(providers)
         self._preferred = preferred_provider
         self._now = now
         # Weighs what the claude sources prove about the account's
@@ -296,6 +323,34 @@ class IngestionBus:
         with desktop_paths.one_answer():
             return self._collect_frames()
 
+    def _spend_seat(self, now):
+        """Whether Claude Code's config names a seat billed by usage, from
+        the bus's one reader; False on a scenario's bus, which has none.
+        Contained like the rest of the spend path: a failure is said in
+        fixed words, once (claude_cli.spend_failed), and is "no"."""
+        if self._plan_reader is None:
+            return False
+        try:
+            return bool(self._plan_reader.look(now).spend_seat)
+        except Exception:
+            claude_cli.spend_failed()
+            return False
+
+    @staticmethod
+    def _off_the_spend_page(f):
+        """A claude frame a spend page does not show
+        (docs/plans/enterprise-spend.md, 1): any reading of windows -- the
+        status line's, Claude Desktop's, its Local Storage's, a remembered
+        payload -- and the weekly anchor's projection, which carries a
+        weekly reset and no figure. Frames that speak only for a terminal
+        (the hook's state and counts) stay."""
+        if f.provider != claude_cli.PROVIDER_ID:
+            return False
+        if f.src == WEEKLY_ANCHOR_SRC_ID:
+            return True
+        return (claude_account._speaks_for_account(f)
+                and f.plan != base.PLAN_SPEND)
+
     def _collect_frames(self):
         """poll_frames()'s body, run under one Desktop folder answer."""
         frames = []
@@ -328,6 +383,16 @@ class IngestionBus:
                     del self._broken[key]
                     print(f"[ingest] {name} is working again",
                           file=sys.stderr)
+        # On a spend seat the config is authoritative for the Claude page,
+        # and windows readings are not shown on it. Dropped here, before the
+        # weekly anchor learns from them and before the verdict marks them:
+        # a seat billed by usage has no seven-day reset to remember and no
+        # five-hour window to lack, and a Max status line still in the file
+        # from before /login, or a Claude Desktop sample a minute newer than
+        # the spend frame, would otherwise take the page back to windows
+        # (claude_account._same_plan_as_newest keeps the newest plan).
+        if self._spend_seat(now):
+            frames = [f for f in frames if not self._off_the_spend_page(f)]
         try:
             # Bonus learning, never a poll cost: whatever just carried a real
             # weekly reset becomes tomorrow's WeeklyAnchorProvider projection.

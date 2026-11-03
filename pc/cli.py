@@ -4048,10 +4048,13 @@ def _wire_line():
     would have and asserts on this line; a person can paste it into a report.
     """
     import json as _json
-    from pc import ingest, session_verdict
+    from pc import ingest, session_verdict, spend_count
     # The persisted verdict, read and never written: the daemon writes it.
+    # The spend count likewise: one in memory, so a status run neither
+    # writes the daemon's ~/.blink/spend-count.json nor races its save.
     bus = ingest.IngestionBus(
-        verdict=session_verdict.SessionVerdict(persist=False))
+        verdict=session_verdict.SessionVerdict(persist=False),
+        counter=spend_count.SpendCounter(persist=False))
     msg = bus.poll()
     _session_window_line(bus.claude_page(), bus.verdict())
     from pc.providers import codex_cli

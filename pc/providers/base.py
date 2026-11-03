@@ -54,6 +54,13 @@ PLAN_UNREPORTED = "unreported"
 # field is dropped rather than relayed: the firmware has a caption for each
 # of these three and none for a fourth.
 SPEND_PERIODS = ("daily", "weekly", "monthly")
+# The src of the spend page pc/providers/claude_cli builds from Claude
+# Code's saved usage and the running count (pc/spend_count), on a seat
+# billed by usage that has no gateway figure. Spelled here, not only in
+# claude_cli, because pc/claude_account keeps such a frame whatever a login
+# switch says and cannot import claude_cli: claude_cli reaches it again
+# through pc/claude_plan. claude_cli.SPEND_SRC_ID is this value.
+SPEND_SRC_ID = "claude_spend"
 
 # Worst-first. This is the order the single scalar `state` collapses to when
 # several sessions -- of one provider or of both -- disagree, and the order is
@@ -254,6 +261,15 @@ class NormalizedUsageFrame:
     # It is the word the board shows, and the only fact about the account
     # that ever leaves pc/claude_account.
     account: str = ""
+    # How far a spend page's dollars can be trusted, on a SPEND_SRC_ID
+    # frame (docs/plans/enterprise-spend.md, "The figure"). spend_exact: the
+    # figure is the one /usage saved less than fifteen minutes ago, with
+    # nothing counted since. spend_hint: there is no /usage figure for this
+    # month, or it is more than a day old, so the board asks for one. Both
+    # False on every other frame, and pc/normalizer.merge copies them from
+    # the frame that names the page, with the dollars they describe.
+    spend_exact: bool = False
+    spend_hint: bool = False
 
     def __post_init__(self):
         if self.active_at is None:
@@ -272,8 +288,15 @@ class NormalizedUsageFrame:
         model name or an execution state -- but it must not be allowed to win
         a recency contest for numbers it does not have. The normalizer merges
         field by field for exactly this reason.
+
+        A spend frame with dollars counts as a figure even with no
+        percentage: a seat billed by usage with no monthly cap known (no
+        /usage this month, or a cap Claude Code did not save) has only the
+        dollars, and they are the page. Without this, pc/claude_account put
+        "Not reported" over a running count and pc/normalizer dropped it.
         """
-        return self.session_pct >= 0 or self.weekly_pct >= 0
+        return (self.session_pct >= 0 or self.weekly_pct >= 0
+                or (self.plan == PLAN_SPEND and self.spend_usd is not None))
 
 
 # How long a five-hour window lasts, and the slack on any judgement made

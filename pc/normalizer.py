@@ -283,8 +283,15 @@ def merge(frames):
     # So `no_window` on the merged frame is True exactly when the session
     # below is unknown because of this rule, and pc/ingest's burn view keys
     # on that.
-    no_window = any(f.no_session_window for f in frames)
-    session_frames = [] if no_window else frames
+    #
+    # Of the frames that are not a spend page's. A spend share is not a
+    # five-hour figure, and pc/session_verdict never marks one; a spend
+    # frame that came here marked (a merged frame merged again, a scenario)
+    # must not take the share off its own page, nor turn on the burn view.
+    no_window = any(f.no_session_window for f in frames
+                    if f.plan != base.PLAN_SPEND)
+    session_frames = ([f for f in frames if f.plan == base.PLAN_SPEND]
+                      if no_window else frames)
 
     session_pct, session_src, session_dated = _pick_pct(
         session_frames,
@@ -306,7 +313,16 @@ def merge(frames):
     # when nothing carries a number -- and select() only makes it then.
     stand_in = next((f for f in frames
                        if f.plan == base.PLAN_UNREPORTED), None)
-    if session_src is None and weekly_src is None and stand_in is None:
+    # A spend page with dollars and no share: a seat billed by usage whose
+    # cap is not known (no /usage this month). Its dollars are the reading,
+    # so it names the page where a share would have; the newest, if there
+    # are several.
+    spend_stand_in = max((f for f in frames
+                          if f.plan == base.PLAN_SPEND
+                          and f.spend_usd is not None),
+                         key=lambda f: f.observed_at, default=None)
+    if (session_src is None and weekly_src is None and stand_in is None
+            and spend_stand_in is None):
         # Nothing here carries a usage percentage. A frame with only a model
         # name would render as two blank dials, which is worse than the
         # board keeping the last reading it already has.
@@ -380,7 +396,8 @@ def merge(frames):
     # the number drawn to within HOLD_BAND (_pick_pct, rule 3). Still a
     # source that vouches for the figure next to it, which is the point of
     # the paragraph above, and never a stale one while a fresh one agrees.
-    primary = session_dated or weekly_dated or stand_in or ended_evidence
+    primary = (session_dated or weekly_dated or spend_stand_in or stand_in
+               or ended_evidence)
 
     # And the fact `primary` cannot carry: when this provider last said
     # anything at all.
@@ -436,6 +453,8 @@ def merge(frames):
         spend_limit_usd=primary.spend_limit_usd,
         spend_period=primary.spend_period,
         account=primary.account,
+        spend_exact=primary.spend_exact,
+        spend_hint=primary.spend_hint,
     )
 
 

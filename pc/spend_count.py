@@ -27,7 +27,11 @@ import math
 import os
 import tempfile
 
-import protocol
+# As a package import, like every other module under pc/. A bare
+# `import protocol` worked only where pc/ itself was on sys.path (its own
+# test put it there), and `from pc import spend_count` -- the bus's import,
+# and the daemon's -- raised ModuleNotFoundError.
+from pc import protocol
 
 _BUCKETS = 20
 _KEEP_S = 32 * 86400
