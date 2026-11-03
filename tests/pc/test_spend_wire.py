@@ -195,7 +195,7 @@ def test_the_bus_shows_spend_and_says_so():
     assert msg["session_pct"] == 62.8
     assert msg["session_resets_in_s"] == 18 * 86400 + 4 * 3600
     assert bus.plan_msg() == protocol.plan(
-        "claude", "spend", "monthly", 314.12, 500.0)
+        "claude", "spend", "monthly", 314.12, 500.0, est=True)
     assert bus.fetch().plan_msg() == bus.plan_msg()
 
 
@@ -417,3 +417,227 @@ def test_plan_console_line_is_allowed():
     from pc import logbook
     for line in ("[plan] claude spend monthly", "[plan] claude windows"):
         assert logbook.console_line(line) == "[plan]"
+
+
+# ---------------------------------------------------- est/hint and sburn
+
+
+def test_plan_flags_only_when_true():
+    m = protocol.plan("claude", base.PLAN_SPEND, "monthly", 1, 2)
+    assert "est" not in m and "hint" not in m
+    m = protocol.plan("claude", base.PLAN_SPEND, "monthly", 1, 2,
+                      est=True, hint=True)
+    assert m["est"] == 1 and m["hint"] == 1
+    # Windows and unreported plans never carry them.
+    m = protocol.plan("claude", base.PLAN_WINDOWS, est=True, hint=True)
+    assert set(m) == {"t", "v", "p", "plan"}
+    m = protocol.plan("claude", base.PLAN_UNREPORTED, account="team",
+                      est=True, hint=True)
+    assert "est" not in m and "hint" not in m
+    # plan_for reads them off the spend primary.
+    f = spend()
+    assert "est" in protocol.plan_for(f) and "hint" not in protocol.plan_for(f)
+    f.spend_exact = True
+    assert "est" not in protocol.plan_for(f)
+    f.spend_hint = True
+    assert protocol.plan_for(f)["hint"] == 1
+    assert "est" not in protocol.plan_for(windows())
+
+
+def test_plan_resent_when_estimate_starts():
+    """The anchor turning old flips spend_exact; the whole plan dict is
+    compared, so the flag goes out on its own."""
+    sent = []
+    exact = spend()
+    exact.spend_exact = True
+    f = _Fetch(protocol.frame_to_usage(exact, NOW), protocol.plan_for(exact))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    assert [m["t"] for m in sent].count("plan") == 1
+    assert "est" not in [m for m in sent if m["t"] == "plan"][0]
+    b.poll_if_changed()
+    assert [m["t"] for m in sent].count("plan") == 1
+    old = spend()                       # anchor 900 s old: not exact now
+    f.plan = protocol.plan_for(old)
+    b.poll_if_changed()
+    plans = [m for m in sent if m["t"] == "plan"]
+    assert len(plans) == 2 and plans[-1]["est"] == 1
+    old.spend_hint = True
+    f.plan = protocol.plan_for(old)
+    b.poll_if_changed()
+    assert [m for m in sent if m["t"] == "plan"][-1]["hint"] == 1
+
+
+def test_spend_burn_shape():
+    q = protocol.burn_quarter(NOW)
+    cents = list(range(20))
+    m = protocol.spend_burn("claude", q, cents)
+    assert m == {"t": "sburn", "v": protocol.VERSION, "p": "claude",
+                 "q": q, "b": cents}
+    assert "sburn" in protocol.WIRE_TYPES
+    assert protocol.log_name(m) == "sburn"
+    try:
+        protocol.spend_burn("claude", q + 1, cents)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("q must be a whole quarter")
+    try:
+        protocol.spend_burn("claude", q, cents[:19])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("twenty buckets")
+
+
+def test_spend_burn_clamps():
+    q = protocol.burn_quarter(NOW)
+    m = protocol.spend_burn("claude", q, [-5, 10**12] + [7] * 18)
+    assert m["b"][:3] == [0, protocol.SBURN_MAX_CENTS, 7]
+    assert protocol.SBURN_MAX_CENTS == 99_999_999
+
+
+class _SFetch(_Fetch):
+    def __init__(self, line):
+        super().__init__(protocol.frame_to_usage(spend(), NOW),
+                         protocol.plan_for(spend()))
+        self.line = line
+
+    def spend_burn(self, provider="claude"):
+        if isinstance(self.line, Exception):
+            raise self.line
+        return self.line
+
+
+def _timed(fetch, sent, clock):
+    return Bridge(write_msg=sent.append, fetch_usage=fetch,
+                  now=lambda: clock[0], wall=lambda: (1752444000, 0),
+                  **_NO_FEED)
+
+
+def _sburns(sent):
+    return [m for m in sent if m["t"] == "sburn"]
+
+
+def test_no_sburn_without_the_cap():
+    q = protocol.burn_quarter(NOW)
+    sent, clock = [], [1000.0]
+    f = _SFetch(protocol.spend_burn("claude", q, [1] * 20))
+    b = _timed(f, sent, clock)
+    _hello(b, "1.4.0")                      # plan only, no spendburn
+    clock[0] += 100
+    b.poll_if_changed()
+    assert _sburns(sent) == []
+    b.on_message({"t": "pref", "v": protocol.VERSION, "caps": [
+        protocol.BOARD_CAP_PLAN, protocol.BOARD_CAP_SPENDBURN]})
+    clock[0] += 100
+    b.poll_if_changed()
+    assert len(_sburns(sent)) == 1
+
+
+def test_sburn_cadence_and_greet_reset(capsys):
+    q = protocol.burn_quarter(NOW)
+    line = protocol.spend_burn("claude", q, [1] * 20)
+    sent, clock = [], [1000.0]
+    f = _SFetch(line)
+    b = _timed(f, sent, clock)
+    _hello(b, "1.4.0", caps=[protocol.BOARD_CAP_PLAN,
+                             protocol.BOARD_CAP_SPENDBURN])
+    clock[0] += 100
+    b.poll_if_changed()
+    b.poll_if_changed()
+    assert len(_sburns(sent)) == 1                  # unchanged: held
+    clock[0] += 20
+    b.poll_if_changed()
+    assert len(_sburns(sent)) == 1                  # inside the heartbeat
+    clock[0] += 60
+    b.poll_if_changed()
+    assert len(_sburns(sent)) == 2                  # heartbeat
+    f.line = protocol.spend_burn("claude", q, [1] * 19 + [9])
+    clock[0] += 16
+    b.poll_if_changed()
+    assert len(_sburns(sent)) == 3                  # changed, gap over
+    _hello(b, "1.4.0", caps=[protocol.BOARD_CAP_PLAN,
+                             protocol.BOARD_CAP_SPENDBURN])
+    clock[0] += 100
+    b.poll_if_changed()
+    assert len(_sburns(sent)) == 4                  # new connection
+    f.line = None                                   # spend page gone
+    clock[0] += 100
+    b.poll_if_changed()
+    assert len(_sburns(sent)) == 4
+
+
+def test_a_failing_sburn_is_said_once_by_type(capsys):
+    sent, clock = [], [1000.0]
+    f = _SFetch(RuntimeError("secret path /x/y"))
+    b = _timed(f, sent, clock)
+    _hello(b, "1.4.0", caps=[protocol.BOARD_CAP_PLAN,
+                             protocol.BOARD_CAP_SPENDBURN])
+    for _ in range(3):
+        clock[0] += 100
+        b.poll_if_changed()
+    err = capsys.readouterr().err
+    assert err.count("spend burn not sent: RuntimeError") == 1
+    assert "secret" not in err and _sburns(sent) == []
+
+
+def test_the_bus_builds_sburn_only_for_a_spend_page():
+    from pc import spend_count
+    counter = spend_count.SpendCounter(persist=False)
+    held = [spend()]
+    bus = ingest.IngestionBus(providers=[_source(held)], now=lambda: NOW,
+                              account=_Watch("enterprise"), counter=counter)
+    bus.poll()
+    m = bus.fetch().spend_burn()
+    assert m["t"] == "sburn" and m["q"] == protocol.burn_quarter(NOW)
+    assert m["b"] == counter.buckets(NOW) and len(m["b"]) == 20
+    held[:] = [windows()]
+    bus.poll()
+    assert bus.fetch().spend_burn() is None
+
+
+def test_widest_usage_line_with_spend():
+    """Every declared source id, spend frames on both pages, a seven-digit
+    countdown (a monthly reset can be 31 days = 2,678,400 s)."""
+    from tests.pc.test_protocol import _declared_source_ids
+
+    def widest(provider, src):
+        f = spend(provider=provider, pct=102.33333333333333,
+                  resets_in=9_999_999)
+        f.src = src
+        f.observed_at = f.active_at = NOW - 2147483647
+        f.state = "running"
+        f.stale = False
+        f.session_burn_pph = 999.93333
+        for k in ("n_run", "n_wait", "n_stuck", "n_idle", "n_agents"):
+            setattr(f, k, 99)
+        return f
+
+    widths = {}
+    for src in _declared_source_ids():
+        assert base.SPEND_SRC_ID in _declared_source_ids()
+        raw, why = protocol.encode_checked(protocol.frame_to_usage(
+            widest("claude", src), NOW, secondary=widest("codex", src)))
+        assert why is None and len(raw) <= protocol.MAX_LINE_BYTES, src
+        widths[src] = len(raw)
+    top = max(widths, key=widths.get)
+    assert (top, widths[top]) == MEASURED_WIDEST_SPEND, widths
+    # And the widest plan, flags and all.
+    raw, why = protocol.encode_checked(protocol.plan(
+        "claude" * 10, base.PLAN_SPEND, "monthly", 999_999_999.99,
+        999_999_999.99, "enterprise", est=True, hint=True))
+    assert why is None and len(raw) < 200
+
+
+# Measured 2026-11-04: narrower than the windows line (454, in
+# test_protocol.py) because a spend page sends no weekly window.
+MEASURED_WIDEST_SPEND = ("weekly_anchor", 410)
+
+
+def test_widest_sburn_line():
+    q = protocol.burn_quarter(NOW)
+    raw, why = protocol.encode_checked(protocol.spend_burn(
+        "claude", q, [protocol.SBURN_MAX_CENTS] * 20))
+    assert why is None and len(raw) <= protocol.MAX_LINE_BYTES
+    assert len(raw) == 234, len(raw)

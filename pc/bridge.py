@@ -221,6 +221,10 @@ class Bridge:
         # was always "a change" and always within 15 s of the first's, so
         # it would never have gone out.
         self._burn_sent = {}
+        # The dollar burn line (`sburn`): (key, at) of the last one sent,
+        # key = (q, tuple(b)); and whether its failure has been said.
+        self._sburn_sent = None
+        self._sburn_failed = False
         # Pages whose last ask raised (see _burn_trouble).
         self._burn_failed = set()
         # Passes of the serial loop (begin_pass). A page is asked at most
@@ -278,6 +282,8 @@ class Bridge:
         # to the last connection is forgotten and the first tick after the
         # window sends one, unchanged or not.
         self._burn_sent = {}
+        self._sburn_sent = None
+        self._sburn_failed = False
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
@@ -1091,6 +1097,7 @@ class Bridge:
         # And the burn view, whose numbers move while the usage line holds
         # still: an Ultra desk's session dial says "--%" all day.
         self._send_burn_if_due()
+        self._send_sburn_if_due()
 
     def _read_usage(self):
         """The usage message as it would go out right now, or None if there is
@@ -1156,6 +1163,7 @@ class Bridge:
         # poll, and the board draws the view only while that line says the
         # session is unknown.
         self._send_burn_if_due()
+        self._send_sburn_if_due()
 
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
@@ -1251,6 +1259,50 @@ class Bridge:
                 self._burn_sent[p] = (None, self._burn_sent[p][1])
         for p in marked:
             self._send_burn_for(burn, p)
+
+    def _send_sburn_if_due(self):
+        """The dollar burn line, on the token burn line's cadence.
+
+        Only to a board listing BOARD_CAP_SPENDBURN, and only when the fetch
+        has spend_burn() and says there is a line (a spend page is on the
+        claude page). Same quiet window, BURN_MIN_GAP_S and BURN_HEARTBEAT_S
+        as `burn`, from a clock of its own: the two lines are never on one
+        page, but neither should hold the other back across a switch of seat.
+        A raise costs this line and nothing else, said once by type.
+        """
+        ask = getattr(self._fetch, "spend_burn", None)
+        if ask is None:
+            return
+        if not self._board_can(protocol.BOARD_CAP_SPENDBURN):
+            self._sburn_sent = None
+            return
+        if self._in_quiet_window():
+            return
+        now = self._now()
+        sent = self._sburn_sent
+        if sent is not None and now - sent[1] < BURN_MIN_GAP_S:
+            return
+        try:
+            msg = ask()
+        except Exception as e:
+            if not self._sburn_failed:
+                self._sburn_failed = True
+                print(f"[bridge] spend burn not sent: {type(e).__name__}",
+                      file=sys.stderr)
+            return
+        if self._sburn_failed:
+            self._sburn_failed = False
+            print("[bridge] spend burn line working again", file=sys.stderr)
+        if msg is None:
+            if sent is not None:
+                self._sburn_sent = (None, sent[1])
+            return
+        key = (msg.get("q"), tuple(msg.get("b") or ()))
+        if (sent is not None and key == sent[0]
+                and now - sent[1] < BURN_HEARTBEAT_S):
+            return
+        self._write(msg)
+        self._sburn_sent = (key, now)
 
     def _burn_trouble(self, p, e):
         """Never worth the serial loop, and the only place a failure of the

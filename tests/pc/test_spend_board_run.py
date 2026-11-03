@@ -68,8 +68,10 @@ def test_the_daemon_sends_each_plan_once_and_in_order(tmp_path):
     plans = [m["plan"] for m in sent if m["t"] == "plan"]
     assert plans == ["spend", "spend", "unreported", "windows"]
     monthly = [m for m in sent if m["t"] == "plan"][0]
+    # The scripted frame carries no /usage anchor, so its dollars are an
+    # estimate and the plan says so.
     assert monthly == protocol.plan("claude", "spend", "monthly", 314.12,
-                                    500)
+                                    500, est=True)
     for m in sent:
         assert protocol.encode_checked(m)[1] is None
     # Every plan goes out before the usage line that follows it.

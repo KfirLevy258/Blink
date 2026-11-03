@@ -125,9 +125,11 @@ class IngestionBus:
         # persisted in ~/.blink/spend-count.json, and fed and saved only
         # while the config names a spend seat. `counter` replaces it --
         # `blink status --wire` passes one that writes nothing.
+        self._counter = counter
         if providers is None:
             if counter is None:
                 counter = spend_count.SpendCounter()
+            self._counter = counter
             self._providers = default_providers(counter, self._plan_reader)
         else:
             self._providers = list(providers)
@@ -651,6 +653,22 @@ class IngestionBus:
         q, tokens = got
         return protocol.burn(provider, q, tokens)
 
+    def spend_burn(self, provider=claude_cli.PROVIDER_ID):
+        """The dollar burn line for the board, or None when there is none.
+
+        None unless the last poll() put a spend page on `provider`'s page
+        (its primary frame's plan is PLAN_SPEND) and the bus holds a count,
+        so a Max desk or a scenario's bus never builds one. Pure arithmetic
+        on the in-memory count: no file is read here.
+        """
+        page = self._pages.get(provider)
+        if (self._counter is None or page is None
+                or getattr(page, "plan", base.PLAN_WINDOWS) != base.PLAN_SPEND):
+            return None
+        now = self._now()
+        return protocol.spend_burn(provider, protocol.burn_quarter(now),
+                                   self._counter.buckets(now))
+
     def fetch(self):
         """The callable to hand Bridge(fetch_usage=...).
 
@@ -696,6 +714,9 @@ class _BusFetch:
 
     def burn(self, provider=claude_cli.PROVIDER_ID):
         return self._bus.burn(provider)
+
+    def spend_burn(self, provider=claude_cli.PROVIDER_ID):
+        return self._bus.spend_burn(provider)
 
     def plan_msg(self):
         return self._bus.plan_msg()

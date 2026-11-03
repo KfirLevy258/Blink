@@ -191,7 +191,7 @@ WIRE_TYPES = frozenset({
     # host -> board
     "welcome", "bye", "pong", "time", "usage", "edition", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
-    "ota_none", "ota_error", "edit_state", "burn", "plan",
+    "ota_none", "ota_error", "edit_state", "burn", "plan", "sburn",
 })
 
 UNKNOWN_TYPE = "(unknown type)"
@@ -735,7 +735,8 @@ def _dollars(v):
     return round(min(float(v), USD_MAX), _USD_PLACES)
 
 
-def plan(provider, kind, period="", usd=None, limit=None, account=""):
+def plan(provider, kind, period="", usd=None, limit=None, account="",
+         est=False, hint=False):
     """Which allowance one provider's page shows -- the `plan` message.
 
     {"t":"plan","v":2,"p":"claude","plan":"spend","period":"monthly",
@@ -757,6 +758,12 @@ def plan(provider, kind, period="", usd=None, limit=None, account=""):
       lim     unknown -- Claude Code sends them minutes after the share, or
               never.
       acct    unreported only: "enterprise" or "team", the word shown.
+      est     spend only, 1 when the dollars are an estimate: the last
+              /usage figure plus what the status line has counted since, or
+              the anchor is old. Omitted when exact, so the common line
+              does not grow.
+      hint    spend only, 1 when there is no /usage figure at all and the
+              page should say where to get one. Omitted otherwise.
 
     Additive: proto.c's dispatch ends in "unknown types ignored", so older
     firmware drops it, and PROTO_VERSION does not move.
@@ -770,6 +777,10 @@ def plan(provider, kind, period="", usd=None, limit=None, account=""):
             val = _dollars(val)
             if val is not None:
                 msg[key] = val
+        if est:
+            msg["est"] = 1
+        if hint:
+            msg["hint"] = 1
     elif kind == PLAN_UNREPORTED and account:
         msg["acct"] = account
     return msg
@@ -786,8 +797,11 @@ def plan_for(primary, secondary=None) -> dict:
             continue
         kind = getattr(f, "plan", PLAN_WINDOWS)
         if kind != PLAN_WINDOWS:
+            spend = kind == PLAN_SPEND
             return plan(f.provider, kind, f.spend_period, f.spend_usd,
-                        f.spend_limit_usd, f.account)
+                        f.spend_limit_usd, f.account,
+                        est=spend and not f.spend_exact,
+                        hint=spend and bool(f.spend_hint))
     return plan(PLAN_PROVIDER, PLAN_WINDOWS)
 
 
@@ -954,6 +968,10 @@ BOARD_CAP_BURN = "burn"
 # (docs/plans/enterprise-spend.md). A board without it is sent no plan, and
 # a spend share on its usage line is blanked -- see hide_plan_for_board.
 BOARD_CAP_PLAN = "plan"
+# Draws the dollar burn line (`sburn`) on a spend page's burn view. Its own
+# cap, not implied by "burn": a board that draws token burn lines has no
+# parser for cents, and the cap is how a build that has one says so.
+BOARD_CAP_SPENDBURN = "spendburn"
 
 
 def board_caps(msg) -> frozenset:
@@ -1093,6 +1111,37 @@ def burn(provider: str, q: int, tokens) -> dict:
         raise ValueError("q must start a quarter-hour")
     b = [min(BURN_MAX, max(0, int(t))) for t in tokens]
     return {"t": "burn", "v": VERSION, "p": provider, "q": q, "b": b}
+
+
+# A dollar bucket's ceiling on the wire, in whole cents: $999,999.99 in a
+# quarter-hour, which no seat spends. Like BURN_MAX it gives the line a
+# widest case (tests/pc/test_spend_wire.py) and keeps the board's sum of
+# twenty inside a signed 32-bit int (1,999,999,980).
+SBURN_MAX_CENTS = 99_999_999
+
+
+def spend_burn(provider: str, q: int, cents) -> dict:
+    """The dollar burn line, for a spend page: the burn line's twin in cents.
+
+        {"t":"sburn","v":2,"p":"claude","q":1793430000,"b":[0,0,412,...]}
+
+    Same shape and the same `q` rule as burn(): twenty quarter-hours, oldest
+    first, `q` the start of the newest. `b` is whole CENTS, each clamped to
+    0..SBURN_MAX_CENTS, counted by the daemon from the status line's session
+    cost (pc/spend_count). Its own type rather than a flag on `burn`, so a
+    board that has only the token parser never mistakes cents for tokens;
+    the board reads it with the burn parser on key "b". Sent only to a board
+    whose caps list BOARD_CAP_SPENDBURN.
+    """
+    cents = list(cents)
+    if len(cents) != BURN_BUCKETS:
+        raise ValueError(f"a spend burn line has {BURN_BUCKETS} buckets, "
+                         f"not {len(cents)}")
+    q = int(q)
+    if q % BURN_BUCKET_S:
+        raise ValueError("q must start a quarter-hour")
+    b = [min(SBURN_MAX_CENTS, max(0, int(c))) for c in cents]
+    return {"t": "sburn", "v": VERSION, "p": provider, "q": q, "b": b}
 
 
 # --- Themes (pc/theme.py validates; these only shape the line) ----------
