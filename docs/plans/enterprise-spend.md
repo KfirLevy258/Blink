@@ -118,20 +118,35 @@ the cap is reached (draw it red, at or over 100%), not "not a spend seat".
    to be null), which is an owed measurement.
 2. **The running count:** spend since the anchor, from the status line,
    kept only on a spend seat.
-   - A session's first sighting sets its high-water mark; nothing is added
-     (a resumed session restores an earlier total).
-   - Later, only a rise above the session's high-water mark is added (two
-     processes on one session alternate their totals). Since round 2 of
-     the 2026-11-04 review (K1) a session keeps a mark per cost ledger,
-     up to eight: a figure below every mark (a /login, which restarts the
-     cost from zero under the same session id, or a process resumed at an
-     older total) opens a new mark and adds nothing, and each later figure
-     is counted against the highest mark at or below it.
-     `pc/spend_count.py` gives the argument and its residuals.
-   - Each addition is stamped with the previous sighting's time and the
-     current one; an addition counts toward an anchor only if the previous
-     sighting was at or after the anchor. A rise that straddles a `/usage`
-     is dropped rather than counted twice.
+   - A session keeps a high-water mark per cost ledger, up to eight. Each
+     Claude Code process keeps its own ledger, and one session id can
+     carry several: `claude --continue` in a second terminal (a second
+     process, restored to an earlier total), and `/login`, which starts a
+     process's cost again from zero under the same id (K1, round 2 of the
+     2026-11-04 review; until then a session had one mark, and a sign-out
+     and sign-in to the same seat counted nothing until the session passed
+     its old total).
+   - A session's first sighting sets its mark; nothing is added (a resumed
+     session restores an earlier total). A figure below every mark is a
+     new ledger: it opens a mark and adds nothing, the same way.
+   - Any other figure is counted against the highest mark at or below
+     it, the smallest rise it could be, and that mark moves up to it. Two
+     processes taking turns then add only their own rises, never the gap
+     between their totals.
+   - Each addition is stamped with the oldest previous sighting among the
+     marks at or below the figure, and the marks it passes keep the oldest
+     stamp they could stand for, since which ledger the figure came from
+     is not known (R1, round 2's review). An addition counts toward an
+     anchor only if that stamp is at or after the anchor. A rise that
+     straddles a `/usage` is dropped rather than counted twice; the price
+     is that a mark no ledger returns to (a process that exited, the old
+     total a `/login` left behind once the new ledger passed it) holds
+     back the count toward the next `/usage` for the rest of the session.
+   - The count never exceeds the spend, since the 1st or since an anchor,
+     except in the cases `pc/spend_count.py` names with figures: two
+     processes resumed from one saved total in a session that already
+     holds a lower ledger, and a damaged payload's figure. Its undercounts
+     are named there too.
    - Marks are kept until the period ends. The count and the marks are
      saved in `~/.blink/spend-count.json` with the account fingerprint; a
      different fingerprint at load starts from zero.
