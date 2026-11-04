@@ -37,6 +37,17 @@
 # number is any of them. With them gone the two remaining figures are
 # account-wide and identical in every terminal, so the last render is as good
 # as any.
+# BLINK'S OWN `claude -p /usage` RUN is not a render and not a session.
+# The daemon starts it with BLINK_REFRESH=1 and --settings disableAllHooks, and
+# that setting already stops hooks and the status line. This is the second
+# lock, in case a future Claude Code ignores the setting: a refresh payload
+# saved here would be read back as the person's own activity. Drain stdin so
+# the writer never gets SIGPIPE, then leave without writing or printing.
+if [ "${BLINK_REFRESH:-}" = 1 ]; then
+	cat >/dev/null
+	exit 0
+fi
+
 input=$(cat)
 umask 077
 
