@@ -3341,15 +3341,14 @@ def _announce_spend_later() -> None:
     print("  On a Claude seat billed by usage -- this one now, or one you")
     print("  /login to later -- it also keeps, in")
     print(f"    {spend_count._default_path()}")
-    # Up to eight estimates a session, not one: spend_count keeps one per
-    # cost ledger since round 2 of the review (K1), and the text said "its
-    # highest cost estimate" until D4.
+    # One estimate a session, and its time: spend_count kept one per cost
+    # ledger for a while in the 2026-11-04 review (K1, said here as "up to
+    # eight" by D4) and went back to one mark, stamped only when it rises
+    # (fix/spend-r2core 0b3a8fa). The time is said because it is kept.
     print("  a one-way fingerprint of the account and organisation ids, each")
-    print("  session's id with the highest cost estimate and its time for")
-    print("  each of its cost ledgers (up to eight: a /login or a second")
-    print("  terminal can start one), and the rises it counted, so the")
-    print("  month's spend survives a restart. Nothing in it leaves this")
-    print("  computer.")
+    print("  session's id with its highest cost estimate and when that last")
+    print("  rose, and the rises it counted, so the month's spend survives a")
+    print("  restart. Nothing in it leaves this computer.")
 
 def _announce_wsl_files(home, name) -> None:
     """_announce's Claude Code lines for a WSL desk being set up again:
@@ -3411,11 +3410,10 @@ def _announce_spend_seat(home=None, seat=None) -> None:
         "This Claude seat is billed by usage. BLINK reads the seat type, and the",
         "month's spend and limit that Claude Code saved the last time /usage ran",
         "in a terminal. Between /usage runs it adds the cost Claude Code's status",
-        "line estimates for each session, and keeps each session's id with,",
-        "for each of its cost ledgers (up to eight: a /login or a second",
-        "terminal can start one), the highest estimate and when it was seen;",
-        "what it counted in the last five hours, the month's total and a",
-        "one-way fingerprint of the account, in",
+        "line estimates for each session, and keeps each session's id with",
+        "its highest estimate and when that last rose, what it counted in the",
+        "last five hours, the month's total and a one-way fingerprint of the",
+        "account in",
         f"{spend_count._default_path()}. Spend in",
         "Claude Desktop (chat and its Code tab), Cowork, claude.ai, claude -p,",
         "the Agent SDK or on other computers appears only after the next",
