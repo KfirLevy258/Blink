@@ -109,6 +109,15 @@ def _page_shares(usage, page):
     return None
 
 
+def _observed(usage, slot, now):
+    """When the reading behind a page of `usage` was observed, on the
+    clock `now` is read from: now less its age. None without an age."""
+    age = usage.get("age_s" if slot == "main" else "p2_age_s")
+    if isinstance(age, bool) or not isinstance(age, (int, float)) or age < 0:
+        return None
+    return now - age
+
+
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  set_preferred=None,
@@ -197,8 +206,8 @@ class Bridge:
         # And the line itself, whole: what _take_down_spend blanks a page
         # out of, so the other page keeps what the board was last told.
         self._last_usage = None
-        # (page, its shares) of a spend page taken down, while the reading
-        # still carries those shares: see _hide_taken_down.
+        # The reading a spend page was taken down from, while the bus
+        # still offers it: see _hide_taken_down.
         self._taken_down = None
         # Themes (pc/theme.py). theme_sync owns the files and what the
         # board is believed to hold; open_builder starts the builder and a
@@ -1164,24 +1173,57 @@ class Bridge:
         last reading -- the payload it remembers, until the new login
         renders -- and every fast tick found it different from the blank
         and sent it again, share and all, under the new plan's captions
-        (K3 in round 2 of the 2026-11-04 review). While that page's shares
-        on the reading are still the ones taken down, they go out blank.
-        The first reading with other shares is the new login's and ends
-        it, and so does the page becoming a spend page again, on which
-        those shares are right."""
+        (K3 in round 2 of the 2026-11-04 review). While the reading is
+        still that one, the page goes out blank.
+
+        "That one" is decided by when it was observed as well as by what
+        it says. The first cut ended the hiding only when the page's
+        shares changed, and a new login whose page carried the same ones
+        -- 0.0 and no weekly on a fresh seat -- stayed "--" for as long as
+        nothing moved (R5, round 2's review). A reading observed later
+        than the one taken down, by its age against this clock, is a new
+        one whatever it says; so is one with other shares, the page
+        moving slot or source, and any plan other than the one that took
+        the page down (back to spend included, where the shares are
+        right). Without an age on either reading, the shares are all
+        there is to go on."""
         held = self._taken_down
         if held is None or not isinstance(usage, dict):
             return usage
-        page, shares = held
-        plan = self._last_plan
-        if (isinstance(plan, dict) and plan.get("p") == page
-                and plan.get("plan") == protocol.PLAN_SPEND):
-            self._taken_down = None
-            return usage
-        if _page_shares(usage, page) != shares:
-            self._taken_down = None
-            return usage
-        return protocol.blank_page(usage, page)
+        if self._taken_down_still(usage, held):
+            return protocol.blank_page(usage, held["page"])
+        self._taken_down = None
+        return usage
+
+    def _note_taken_down(self, page, usage):
+        """Remember the reading `usage` as the one `page` was taken down
+        from, for _hide_taken_down."""
+        shares = _page_shares(usage, page)
+        if shares is None:
+            return
+        self._taken_down = {
+            "page": page, "shares": shares, "src": usage.get("src"),
+            "seen": _observed(usage, shares[0], self._now()),
+            "plan": self._plan_msg()}
+
+    def _taken_down_still(self, usage, held):
+        page = held["page"]
+        # The plan the fetch states now, not _last_plan: greet() forgets
+        # that one on every connect so the board hears it again, and the
+        # reading is no newer for it.
+        if self._plan_msg() != held["plan"]:
+            return False
+        shares = _page_shares(usage, page)
+        if shares != held["shares"]:
+            return False                 # other figures, or another slot
+        if shares[0] == "main" and usage.get("src") != held["src"]:
+            return False
+        seen = _observed(usage, shares[0], self._now())
+        if seen is None or held["seen"] is None:
+            return True
+        # Ages are whole seconds, so one reading's estimate can move by
+        # one between two lines; a new render is at least a poll later.
+        return seen <= held["seen"] + 1
 
     def _plan_msg(self):
         """Asked of the fetch when it can answer; None otherwise. A plain
@@ -1201,10 +1243,12 @@ class Bridge:
         replaced = self._send_plan_if_changed()
         page = self._spend_page_gone(replaced)
         if page is not None:
-            shares = _page_shares(self._last_usage, page)
-            if shares is not None and _page_shares(usage, page) == shares:
+            self._note_taken_down(page, self._last_usage)
+            held = self._taken_down
+            if held is not None and self._taken_down_still(usage, held):
                 usage = protocol.blank_page(usage, page)
-                self._taken_down = (page, shares)
+            else:
+                self._taken_down = None
         self._write(usage)
         # Recorded here, once, so that no path can push without moving the
         # baseline -- a push that forgot to would leave the fast tick
@@ -1478,11 +1522,9 @@ class Bridge:
         page = self._spend_page_gone(replaced)
         if page is None:
             return
-        shares = _page_shares(self._last_usage, page)
-        if shares is not None:
-            # Kept down while the reading still carries them
-            # (_hide_taken_down).
-            self._taken_down = (page, shares)
+        # Kept down while the bus offers the same reading
+        # (_hide_taken_down).
+        self._note_taken_down(page, self._last_usage)
         blank = protocol.blank_page(self._last_usage, page)
         self._write(blank)
         self._last_pushed = protocol.meaningful_usage(blank)
