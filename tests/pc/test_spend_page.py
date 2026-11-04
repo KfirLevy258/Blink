@@ -894,7 +894,9 @@ def test_a_future_dated_render_and_a_clock_step_do_not_hide_a_login(tmp_path):
     clock.t = NOW - 600                                     # a step back
     bus.poll()
     _other_login(tmp_path, clock.t + 1)
-    _polls(bus, clock, clock.t + 4)
+    # Seen once the config may be parsed again: FIRST_ANSWER_RETRY_S on
+    # the clock as it now reads (claude_plan.ConfigFile).
+    _polls(bus, clock, clock.t + claude_plan.FIRST_ANSWER_RETRY_S + 2)
     five = {"five_hour": {"used_percentage": 3.0, "resets_at": NOW + 3600}}
     render(tmp_path, clock.t + 1, 0.10, rate_limits=five)
     got = _polls(bus, clock, clock.t + 4)

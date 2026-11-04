@@ -425,9 +425,19 @@ class ConfigFile:
         sig = (path, stat.S_IFMT(st.st_mode)) + signature(st)
         if sig == self._sig:
             return None
-        if (self._parsed_at is not None
-                and 0 <= now_epoch - self._parsed_at < FIRST_ANSWER_RETRY_S):
-            return None
+        if self._parsed_at is not None:
+            since = now_epoch - self._parsed_at
+            if since < 0:
+                # A time before the last parse: the clock went back. Read
+                # as due until the final review of round 7 (F4), so a
+                # clock gone back parsed at once. Not due now, and due
+                # FIRST_ANSWER_RETRY_S later on the clock as it now reads:
+                # waiting for it to catch up with the old reading would
+                # hide a /login for as long as the step was.
+                self._parsed_at = now_epoch
+                return None
+            if since < FIRST_ANSWER_RETRY_S:
+                return None
         self._parsed_at = now_epoch
         got = parse(path, st)
         if got is not None:

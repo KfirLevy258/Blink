@@ -435,3 +435,27 @@ def test_a_config_deleted_and_written_again_is_read_at_once(tmp_path,
     got = r.look(str(p), NOW + 2)
     assert got is not None and got.spend_seat
 
+
+
+def test_a_time_before_the_last_parse_is_not_due(tmp_path, monkeypatch):
+    """F4: the spacing read a time before the last parse as due, so a clock
+    gone back parsed at once and every look after it could. Such a look
+    is not due; the parse comes FIRST_ANSWER_RETRY_S later on the clock
+    as it now reads, not when the clock catches up with the old one."""
+    p = tmp_path / ".claude.json"
+    p.write_text(json.dumps(doc()), encoding="utf-8")
+    real = claude_plan.parse
+    n = []
+    monkeypatch.setattr(claude_plan, "parse", lambda path, st=None:
+                        n.append(1) or real(path, st))
+    r = claude_plan.ConfigFile()
+    r.look(str(p), NOW)
+    d = doc()
+    d["oauthAccount"]["accountUuid"] = "ACCT-OTHER-0c0c0c"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    os.utime(p, (NOW + 9, NOW + 9))
+    assert r.look(str(p), NOW - 3600) is None          # the clock went back
+    assert r.look(str(p), NOW - 3598) is None
+    assert len(n) == 1
+    got = r.look(str(p), NOW - 3600 + claude_plan.FIRST_ANSWER_RETRY_S)
+    assert got is not None and len(n) == 2
