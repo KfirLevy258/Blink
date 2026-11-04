@@ -81,6 +81,9 @@ TICK_S = 5
 # ends, and the VM a minute after that.
 IDLE_REPAIR_EVERY_S = 300
 
+# ERROR_BAD_NETPATH, ERROR_BAD_NET_NAME: the share, not the file, is gone.
+_NET_UNREACHABLE = (53, 67)
+
 # How often the shims' abandoned temps are swept from the drop folder. On
 # NTFS, so not gated: a killed render's temp holds a payload either way.
 SWEEP_EVERY_S = 300
@@ -334,7 +337,15 @@ class WslWatch:
         try:
             path = claude_plan.config_path(self._home)
             st = os.stat(path)
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            # CPython maps ERROR_BAD_NETPATH and ERROR_BAD_NET_NAME to
+            # ENOENT, so a \\wsl.localhost share that drops for a moment
+            # arrives here looking exactly like a config that is not there;
+            # taken for one, it published EMPTY_VIEW -- no seat -- and the
+            # spend page went until the file next changed (review of
+            # feat/enterprise-spend, W4). The Windows error tells them apart.
+            if getattr(e, "winerror", None) in _NET_UNREACHABLE:
+                return None
             self._sig = None
             return claude_plan.EMPTY_VIEW
         except (OSError, ValueError):

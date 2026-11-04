@@ -731,3 +731,56 @@ def test_a_wsl_bus_keeps_its_own_drop_folder(tmp_path, monkeypatch):
         "/home/zoe", wsl.unc("Debian", "/home/zoe/.claude"), False))
     cli_p, = [p for p in bus._providers if isinstance(p, ClaudeCliProvider)]
     assert cli_p.path() == os.path.join(first.drop_dir, "statusline.json")
+
+
+# --- review of feat/enterprise-spend, W4 ---------------------------------
+
+@pytest.mark.parametrize("winerror", [53, 67])
+def test_an_unreachable_share_is_not_a_missing_config(tmp_path, monkeypatch,
+                                                      winerror):
+    """CPython maps ERROR_BAD_NETPATH (53) and ERROR_BAD_NET_NAME (67) to
+    ENOENT, so a \\\\wsl.localhost share that drops for a moment raised
+    FileNotFoundError like a config that is not there, and the watch
+    published EMPTY_VIEW: no seat, the spend page gone until the file
+    next changed. Not knowing keeps the last view."""
+    home, _ = _home(tmp_path)
+    _write_config(home, seat=True)
+    clock = _Clock(time.time())
+    _touch_drop(home, clock.t)
+    w = _watch(home, clock, _Running(True))
+    w.tick()
+    assert w.view().spend_seat
+    _write_config(home, seat=True, extra={"x": 1})     # a new signature
+    real = os.stat
+    path = claude_plan.config_path(home)
+
+    def stat(p, *a, **k):
+        if os.fspath(p) == path:
+            e = FileNotFoundError(2, "The network path was not found")
+            e.winerror = winerror
+            raise e
+        return real(p, *a, **k)
+    monkeypatch.setattr(os, "stat", stat)
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert w.view().spend_seat
+    monkeypatch.setattr(os, "stat", real)
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert w.view().spend_seat
+
+
+def test_a_config_really_gone_is_still_no_seat(tmp_path):
+    home, _ = _home(tmp_path)
+    path = _write_config(home, seat=True)
+    clock = _Clock(time.time())
+    _touch_drop(home, clock.t)
+    w = _watch(home, clock, _Running(True))
+    w.tick()
+    os.remove(path)
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert w.view() is claude_plan.EMPTY_VIEW
