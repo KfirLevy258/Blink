@@ -89,15 +89,96 @@ SAVE_EVERY_S = 60
 _VERSION = 2
 
 
+# The largest figure the counter believes, in cents: ten million dollars.
+# Every bound below is this one. No Claude Code session costs that much, and
+# without a bound a status-line total of 10**307 passed observe(), was saved
+# as a 309-digit cent figure a minute later, and every start after it died in
+# _load, where math.isfinite raises OverflowError on an int that large (the
+# final review of 2026-11-04, U1). 1.8e306 dollars did not get as far:
+# times 100 it rounds to infinity, and round() raised out of observe().
+# A carried total sums many sessions' rises, so it is allowed a thousand
+# times more; that is still exact as a float and as a cent figure on the
+# page.
+MAX_CENTS = 10 ** 9
+_MAX_FOLDED_CENTS = MAX_CENTS * 1000
+# A time is a render's mtime: the epoch up to 2100-01-01, the ceiling
+# statusline_source puts on a reset stamp. Anything past it is not a time.
+_MAX_TIME = 4_102_444_800
+
+
 def _num(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) \
-        and math.isfinite(x)
+    """A finite int or float that is not a bool.
+
+    The try: math.isfinite converts to float, and an int of 309 digits or
+    more raises OverflowError there instead of answering False."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return False
+    try:
+        return math.isfinite(x)
+    except OverflowError:
+        return False
+
+
+def _time(x) -> bool:
+    return _num(x) and 0 <= x <= _MAX_TIME
+
+
+def _cents(x, ceiling=MAX_CENTS) -> bool:
+    return _num(x) and 0 <= x <= ceiling
 
 
 def _default_path() -> str:
     # Resolved when called: a module constant would read the real home at
     # import, before the test sandbox runs.
     return os.path.join(os.path.expanduser("~"), ".blink", "spend-count.json")
+
+
+def _parse(d):
+    """(fp, period, sessions, adds, fold, anchor) from a loaded file, or
+    None for one not to believe. Every figure must be finite, at or above
+    zero and within its bound: json reads Infinity, NaN and ints of any
+    length, and a high-water mark below zero would count the next real
+    figure on top of it (-100000 then $1.00 counted $1001)."""
+    if not isinstance(d, dict) or d.get("v") != _VERSION:
+        return None
+    fp, period = d.get("fp"), d.get("period")
+    if fp is not None and not isinstance(fp, str):
+        return None
+    if period is not None and not _time(period):
+        return None
+    if not isinstance(d["sessions"], dict) or not isinstance(d["adds"], list):
+        return None
+    sessions = {}
+    for sid, v in d["sessions"].items():
+        if not isinstance(v, list) or len(v) != 2:
+            return None
+        hw, seen = v
+        if isinstance(hw, bool) or not isinstance(hw, int) \
+                or not _cents(hw) or not _time(seen):
+            return None
+        sessions[sid] = [hw, seen]
+    adds = []
+    for a in d["adds"]:
+        if not isinstance(a, list) or len(a) != 3:
+            return None
+        prev, at, cents = a
+        if not (_time(prev) and _time(at) and _cents(cents)):
+            return None
+        adds.append([prev, at, int(cents)])
+    fold = d.get("fold")
+    if fold is not None:
+        if not isinstance(fold, list) or len(fold) != 5:
+            return None
+        b, after, total, first, last = fold
+        if not (_time(b) and _time(first) and _time(last)
+                and _cents(after, _MAX_FOLDED_CENTS)
+                and _cents(total, _MAX_FOLDED_CENTS)):
+            return None
+        fold = [b, int(after), int(total), first, last]
+    anchor = d.get("anchor")
+    if anchor is not None and not _time(anchor):
+        return None
+    return fp, period, sessions, adds, fold, anchor
 
 
 class SpendCounter:
@@ -134,44 +215,24 @@ class SpendCounter:
         self._dirty = self._urgent = True
 
     def _load(self):
+        """The saved state, or nothing: any file this cannot read whole and
+        believe is read as empty, as the module docstring promises. It held
+        an estimate, which the next /usage makes exact; a daemon that will
+        not start because of it (a raise here comes out of SpendCounter(),
+        and so out of build_bus(), at every start) shows nothing at all."""
         try:
             with open(self._file(), "r", encoding="utf-8") as f:
                 d = json.load(f)
-            if not isinstance(d, dict) or d.get("v") != _VERSION:
-                return
-            fp, period = d.get("fp"), d.get("period")
-            if fp is not None and not isinstance(fp, str):
-                return
-            if period is not None and not isinstance(period, (int, float)):
-                return
-            if not isinstance(d["sessions"], dict) \
-                    or not isinstance(d["adds"], list):
-                return
-            sessions = {}
-            for sid, v in d["sessions"].items():
-                hw, seen = v
-                if not isinstance(sid, str) or isinstance(hw, bool) \
-                        or not isinstance(hw, int) or not _num(seen):
-                    return
-                sessions[sid] = [hw, seen]
-            adds = []
-            for prev, at, cents in d["adds"]:
-                # json accepts Infinity and NaN; int(inf) would raise.
-                if not all(_num(x) for x in (prev, at, cents)):
-                    return
-                adds.append([prev, at, int(cents)])
-            fold = d.get("fold")
-            if fold is not None:
-                if not isinstance(fold, list) or len(fold) != 5 \
-                        or not all(_num(x) for x in fold):
-                    return
-                b, after, total, first, last = fold
-                fold = [b, int(after), int(total), first, last]
-            anchor = d.get("anchor")
-            if anchor is not None and not _num(anchor):
-                return
-        except (OSError, ValueError, KeyError, TypeError):
+            got = _parse(d)
+        except (OSError, ValueError, KeyError, TypeError, OverflowError,
+                RecursionError):
+            # RecursionError: json's answer to an array nested thousands
+            # deep, as in session_verdict.load. OverflowError: a number
+            # too large for a float, met by any arithmetic on it.
             return
+        if got is None:
+            return
+        fp, period, sessions, adds, fold, anchor = got
         self._fp, self._period = fp, period
         self._sessions, self._adds = sessions, adds
         self._fold, self._anchor = fold, anchor
@@ -195,7 +256,9 @@ class SpendCounter:
     def observe(self, session_id, cost_usd, at) -> bool:
         # The counter owns the guard: a NaN, infinity, string or bool from
         # a damaged payload must not touch the state.
-        if not _num(cost_usd) or not _num(at) or cost_usd < 0:
+        # And a cost past MAX_CENTS or a time that is not one: see there.
+        if (not _num(cost_usd) or not _time(at) or cost_usd < 0
+                or cost_usd > MAX_CENTS / 100):
             return False
         cents = int(round(cost_usd * 100))
         s = self._sessions.get(session_id)
