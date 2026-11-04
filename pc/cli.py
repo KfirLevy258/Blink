@@ -3219,10 +3219,11 @@ def _announce(home=None, wsl_name=None, named=False):
     # On a WSL desk the seat is not known yet: the setup step says the
     # full paragraph, from the distribution's config, once the probe has
     # started it (_setup_wsl).
-    seat = wsl_name is None and _spend_seat(home)
-    _announce_claude_reads(home, wsl_name, spend_seat=seat)
-    if seat:
-        _announce_spend_seat(home, seat=True)
+    _announce_claude_reads(home, wsl_name)
+    if wsl_name is None:
+        # The one place that picks the paragraph, here and after a WSL
+        # probe alike (round 4: this made the same choice inline).
+        _say_spend_kept(home)
     # The same for Codex (CodexBurnReader): an account whose Codex log
     # reports a weekly limit and no five-hour one -- Codex Pro on the
     # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
@@ -3253,7 +3254,7 @@ def _announce(home=None, wsl_name=None, named=False):
     print()
 
 
-def _announce_claude_reads(home, wsl_name=None, spend_seat=False) -> None:
+def _announce_claude_reads(home, wsl_name=None) -> None:
     """_announce's paragraph on what is read out of Claude Code: the
     transcripts on an account with no five-hour limit, and the config for
     the plan and seat. With `wsl_name`, the folders are named by the
@@ -3261,12 +3262,10 @@ def _announce_claude_reads(home, wsl_name=None, spend_seat=False) -> None:
     and config_path would stat over UNC. Its own function so `blink install
     --wsl` can say it before its probe starts the distribution.
 
-    `spend_seat` is a config already known to name a seat billed by
-    usage: _announce_spend_seat follows with the full paragraph, so the
-    short one every other desk gets is left out. Both were printed until
-    the second review round (C5), saying twice what spend-count.json
-    keeps. On WSL neither is said here: _setup_wsl says one, once the
-    probe lets it read the seat (D1)."""
+    What spend-count.json keeps is not said here: _say_spend_kept says
+    one paragraph, the full or the short (both were printed until the
+    second review round, C5), from _announce on this computer and from
+    _setup_wsl once the probe lets it read the seat (D1)."""
     from pc import claude_plan
     if wsl_name is not None:
         # Named, not spelled out: the folders are Linux paths inside the
@@ -3320,8 +3319,6 @@ def _announce_claude_reads(home, wsl_name=None, spend_seat=False) -> None:
         print(f"  setup has read the seat type inside {wsl_name}. If setup")
         print("  stops first, Blink goes on reading, and keeping, what it did")
         print("  before.")
-    elif not spend_seat:
-        _announce_spend_later()
 
 
 def _announce_spend_later() -> None:
@@ -4545,16 +4542,19 @@ def _setup_wsl(d):
 
 
 def _say_spend_kept(home) -> None:
-    """The spend paragraph the WSL disclosure left to _setup_wsl (D1), for
-    `home`, the one the service is about to read: the full one on a seat
-    billed by usage and the short one on any other, before the service
-    that would keep the count starts. Every path of _setup_wsl that
-    leaves the record on `home` says it, the C4 stop included (round 3)."""
+    """The one spend paragraph for `home`, the one the service is about to
+    read: the full one on a seat billed by usage and the short one on any
+    other, before the service that would keep the count starts, and set
+    off by a blank line either side whichever it is. _announce says it on
+    this computer; on WSL the disclosure leaves it to _setup_wsl (D1),
+    every path of which that leaves the record on `home` says it, the C4
+    stop included (round 3). The config is read once (D2)."""
     if _spend_seat(home):
         _announce_spend_seat(home, seat=True)
     else:
         print()
         _announce_spend_later()
+        print()
 
 
 def _take_blink_out_of_previous(old, new) -> bool:
