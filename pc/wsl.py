@@ -35,7 +35,6 @@ tests run on every platform.
 import os
 import re
 import subprocess
-import sys
 from dataclasses import dataclass
 from typing import Optional
 
@@ -231,7 +230,7 @@ def _passwd(out):
     for line in reversed(out.decode("utf-8", "replace").splitlines()):
         f = line.strip().split(":")
         if len(f) >= 7 and f[0] and f[5].startswith("/"):
-            return f[0], f[5], f[6]
+            return f[0], f[5], f[6].strip() or "/bin/sh"
     return None
 
 
@@ -256,18 +255,21 @@ def probe(name, exe=None, runner=subprocess.run):
     # The user's own login shell, interactive so ~/.zshrc and nvm-style
     # additions to PATH count; stdin is closed so nothing waits for a tty.
     # `exec env -0` works in bash, zsh and fish, and zsh has no `type -P`.
-    rc, out, _ = run(name, [shell, "-lic", "exec env -0"], user=user,
-                     timeout=20, **kw)
+    rc, out, _ = run(name, [shell, "-lic", "exec env -0"],
+                     user=user, timeout=20, **kw)
     captured = _parse_env0(out) if rc == 0 else {}
     path = captured.get("PATH")
     if not path:
         return None
     config = captured.get("CLAUDE_CONFIG_DIR") or home + "/.claude"
+    # A Windows claude on the mounted drive, early in PATH, would hide a real
+    # Linux one later in it; drop those entries before looking.
+    path = ":".join(d for d in path.split(":") if not _DRIVE_MOUNT.match(d + "/"))
 
     # Non-login sh with the captured PATH: the rc files already did their work.
     claude = None
-    rc, out, _ = run(name, ["sh", "-c", "command -v claude"], user=user,
-                     env={"PATH": path}, **kw)
+    rc, out, _ = run(name, ["sh", "-c", "command -v claude"],
+                     user=user, env={"PATH": path}, **kw)
     if rc == 0:
         lines = [l.strip() for l in out.decode("utf-8", "replace").splitlines()]
         found = [l for l in lines if l.startswith("/")]

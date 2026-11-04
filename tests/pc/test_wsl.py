@@ -3,7 +3,6 @@ registry. The real wsl.exe and claude are never started (conftest refuses)."""
 import os
 import shutil
 import subprocess
-import sys
 
 import pytest
 
@@ -114,9 +113,10 @@ def test_running_decodes_utf16():
     assert not wsl.running("Ubuntu", exe=EXE, runner=Rec(lambda a: (1, b"", b"")))
 
 
-def _linux(tmp_path, *, passwd=b"bob:x:1000:1000:,,,:/home/bob:/bin/zsh\n",
+def _linux(*, passwd=b"bob:x:1000:1000:,,,:/home/bob:/bin/zsh\n",
            env=b"\nPATH=/n/bin:/usr/bin\0CLAUDE_CONFIG_DIR=/c\0",
-           found=b"/home/bob/.nvm/bin/claude\n", executable=()):
+           found=b"/home/bob/.nvm/bin/claude\n", executable=(),
+           want_path="/n/bin:/usr/bin"):
     """A fake distribution answering the four probe steps."""
     def ans(argv):
         tail = argv[argv.index("-k") + 3:]
@@ -125,7 +125,7 @@ def _linux(tmp_path, *, passwd=b"bob:x:1000:1000:,,,:/home/bob:/bin/zsh\n",
         if tail[1:] == ["-lic", "exec env -0"]:
             return 0, b"Welcome to a banner\nline 2\n" + env, b""
         if tail[0] == "sh" and "command -v" in tail[2]:
-            assert "PATH=/n/bin:/usr/bin" in argv
+            assert f"PATH={want_path}" in argv
             return (0, found, b"") if found else (1, b"", b"")
         if tail[0] == "test":
             return (0 if tail[2] in executable else 1), b"", b""
@@ -133,13 +133,48 @@ def _linux(tmp_path, *, passwd=b"bob:x:1000:1000:,,,:/home/bob:/bin/zsh\n",
     return Rec(ans)
 
 
-def test_probe_ignores_banner_noise(tmp_path):
-    p = wsl.probe("U", exe=EXE, runner=_linux(tmp_path))
+def test_probe_ignores_banner_noise():
+    p = wsl.probe("U", exe=EXE, runner=_linux())
     assert p == wsl.Probe("bob", "/home/bob", "/bin/zsh", "/c",
                           "/home/bob/.nvm/bin/claude")
 
 
-def test_probe_default_config_dir(tmp_path):
+def _user_of(argv):
+    return argv[argv.index("-u") + 1] if "-u" in argv else None
+
+
+def test_probe_runs_steps_as_the_user_with_a_timeout():
+    r = _linux()
+    wsl.probe("U", exe=EXE, runner=r)
+    by = {}
+    for argv, kw in r.calls:
+        tail = argv[argv.index("-k") + 3:]
+        by["env" if "-lic" in tail else "which" if "command -v claude" in tail[-1]
+           else "other"] = (argv, kw)
+    for step in ("env", "which"):
+        assert _user_of(by[step][0]) == "bob", step
+    # 20 s on the Linux timeout(1), and the Windows side waits longer.
+    env_argv = by["env"][0]
+    assert env_argv[env_argv.index("-k") + 2] == "20"
+    assert by["env"][1]["timeout"] > 20
+    assert by["env"][1]["stdin"] is subprocess.DEVNULL
+
+
+def test_probe_drops_mounted_drive_entries_from_path():
+    r = _linux(env=b"PATH=/mnt/c/Users/b/npm:/mnt/d/x:/home/bob/.nvm/bin:/usr/bin\0",
+               want_path="/home/bob/.nvm/bin:/usr/bin")
+    p = wsl.probe("U", exe=EXE, runner=r)
+    assert p.claude_exe == "/home/bob/.nvm/bin/claude"
+
+
+def test_probe_empty_shell_defaults_to_sh():
+    r = _linux(passwd=b"bob:x:1000:1000::/home/bob:\n")
+    p = wsl.probe("U", exe=EXE, runner=r)
+    assert p.shell == "/bin/sh"
+    assert any("/bin/sh" in a and "-lic" in a for a, _ in r.calls)
+
+
+def test_probe_default_config_dir():
     # PATH differs from _linux's assertion, so build this case directly.
     def ans(argv):
         tail = argv[argv.index("-k") + 3:]
@@ -152,22 +187,22 @@ def test_probe_default_config_dir(tmp_path):
     assert p.config_dir == "/home/bob/.claude" and p.claude_exe is None
 
 
-def test_probe_rejects_windows_claude(tmp_path):
-    r = _linux(tmp_path, found=b"/mnt/c/Users/b/AppData/Roaming/npm/claude\n")
+def test_probe_rejects_windows_claude():
+    r = _linux(found=b"/mnt/c/Users/b/AppData/Roaming/npm/claude\n")
     p = wsl.probe("U", exe=EXE, runner=r)
     assert p.claude_exe is None
 
 
-def test_probe_falls_back_to_local_bin(tmp_path):
-    r = _linux(tmp_path, found=b"", executable=("/home/bob/.local/bin/claude",))
+def test_probe_falls_back_to_local_bin():
+    r = _linux(found=b"", executable=("/home/bob/.local/bin/claude",))
     assert wsl.probe("U", exe=EXE, runner=r).claude_exe == \
         "/home/bob/.local/bin/claude"
-    r = _linux(tmp_path, found=b"", executable=("/home/bob/.claude/local/claude",))
+    r = _linux(found=b"", executable=("/home/bob/.claude/local/claude",))
     assert wsl.probe("U", exe=EXE, runner=r).claude_exe == \
         "/home/bob/.claude/local/claude"
 
 
-def test_probe_none_when_unreadable(tmp_path):
+def test_probe_none_when_unreadable():
     assert wsl.probe("U", exe=EXE, runner=Rec(lambda a: (1, b"", b""))) is None
 
 
