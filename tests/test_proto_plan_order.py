@@ -33,3 +33,28 @@ def test_a_usage_line_names_its_page_before_drawing_it():
     body = _arm("usage")
     assert body.index("usage_view_set_provider1(p1)") < \
         body.index("usage_view_update(sp,")
+
+
+def test_a_welcome_leaves_the_plan_on_screen():
+    # A reconnect that does not reset the board sends welcome more than
+    # once -- the probe's, then greet()'s -- before greet() restates the
+    # plan. Reset there, a spend page flashed as "SESSION 5h" with a red
+    # "Session almost used up" on every such reconnect (FW3).
+    body = _arm("welcome")
+    assert "usage_view_set_plan(" not in body
+    assert "plan_unconfirmed = true;" in body
+
+
+def test_a_plan_confirms_and_a_usage_line_without_one_resets():
+    plan = _arm("plan")
+    assert "plan_unconfirmed = false;" in plan
+    usage = _arm("usage")
+    # The reset happens before anything of the line is drawn, so the
+    # figures it carries are not dropped by it (usage_view_set_plan clears
+    # a page whose kind changes).
+    reset = re.search(r"if \(plan_unconfirmed\) \{\s*plan_unconfirmed = "
+                      r"false;\s*usage_view_set_plan\(NULL, NULL, NULL, "
+                      r"NULL, -1, -1, false,\s*false\);", usage)
+    assert reset, "the usage arm does not reset an unconfirmed plan"
+    assert reset.start() < usage.index("usage_view_set_provider1(p1)")
+    assert reset.start() < usage.index("usage_view_update(sp,")

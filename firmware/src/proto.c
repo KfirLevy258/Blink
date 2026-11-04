@@ -118,6 +118,9 @@ static int64_t last_ping_ms;
 static int64_t last_host_ms;
 static bool host_seen;
 static bool host_bye;		/* the app said it is going, on purpose */
+/* A welcome came and no plan since: the plan on screen is the last host's,
+ * reset at this host's first usage line if it never states one (dispatch). */
+static bool plan_unconfirmed;
 static bool host_lost;		/* silence past the timeout, without a bye */
 static char host_ver[16];	/* the daemon's release version, from welcome */
 static int host_proto;		/* ...and the protocol it speaks */
@@ -478,6 +481,16 @@ static void dispatch(const char *json)
 		num(json, "session_resets_in_s", &ss, -1, SECS_MAX);
 		num(json, "weekly_resets_in_s", &ws, -1, SECS_MAX);
 
+		/* A host that welcomed us and stated no plan before its first
+		 * figures has none: windows (see the welcome arm). Before the
+		 * figures, because a page whose plan changes kind drops what
+		 * it holds, and these are the figures it should keep. */
+		if (plan_unconfirmed) {
+			plan_unconfirmed = false;
+			usage_view_set_plan(NULL, NULL, NULL, NULL, -1, -1, false,
+					    false);
+		}
+
 		/*
 		 * Whose figures these are, BEFORE they are drawn. The plan
 		 * record names a provider (usage_view_set_plan), so whether
@@ -767,14 +780,24 @@ static void dispatch(const char *json)
 		 */
 		ota_request_check();
 		/*
-		 * Every page back to windows until this host says otherwise.
-		 * A daemon with a spend page states it again right after its
+		 * Every page back to windows unless this host says otherwise:
+		 * a daemon with a spend page states it again right after its
 		 * welcome (pc/bridge.greet), and one from before plans never
 		 * will -- so a spend page must not outlive the daemon that
 		 * described it, captioning another app's figures.
+		 *
+		 * Decided at the first usage line, not here. A daemon that
+		 * reconnects without resetting the board sends welcome twice
+		 * before its plan -- the probe's (probe_is_our_board), then
+		 * greet()'s after the 0.2 s read and the bridge's build -- and
+		 * a reset here put a live spend page back on the five-hour
+		 * layout for that gap, red "Session almost used up" and burn
+		 * view blink included, on every such reconnect (review of
+		 * feat/enterprise-spend, 2026-11-04, FW3). The daemon sends
+		 * the plan ahead of the usage line it explains, so a usage
+		 * line that arrives first is a host that has no plan to state.
 		 */
-		usage_view_set_plan(NULL, NULL, NULL, NULL, -1, -1, false,
-				    false);
+		plan_unconfirmed = true;
 		/*
 		 * Answer. The daemon sends `welcome` as a question -- "is a
 		 * Blink board on this port?" -- and decides whether to pull
@@ -1033,6 +1056,7 @@ static void dispatch(const char *json)
 		char period[12] = "", acct[12] = "";
 		double usd = -1, lim = -1, est = 0, hint = 0;
 
+		plan_unconfirmed = false;	/* this host has stated it */
 		msg_get_str(json, "p", who, sizeof(who));
 		msg_get_str(json, "plan", kind, sizeof(kind));
 		msg_get_str(json, "period", period, sizeof(period));
