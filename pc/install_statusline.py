@@ -1031,6 +1031,13 @@ def install_into(home, wsl_run, *, hooks=True, files=True) -> str:
     return " ".join(lines)
 
 
+# How long uninstall_from waits between taking the hooks out of
+# settings.json and removing the shims they call. Claude Code 2.1.316 and
+# .318 were seen to re-capture hooks 1 to 1.5 s after the file changed;
+# two seconds covers that, once, on an interactive uninstall.
+HOOK_RECAPTURE_S = 2.0
+
+
 def uninstall_from(home, wsl_run) -> str:
     """uninstall() and install_hooks.uninstall() for a WSL home, and the
     shims and out file taken out of the distribution, as a native uninstall
@@ -1070,6 +1077,12 @@ def uninstall_from(home, wsl_run) -> str:
         _remove_marker(home)
     install_hooks._remove_marker(home)
     lines = [msg, install_hooks.uninstall_message(removed)]
+    if removed and HOOK_RECAPTURE_S > 0:
+        # Claude Code re-reads its hooks a second or so after settings.json
+        # changes and runs the old ones until then; a hook shim removed at
+        # once is a missing file for that second, and dash's exit 2 for it
+        # is "block" to Claude Code (review of feat/enterprise-spend, U29).
+        time.sleep(HOOK_RECAPTURE_S)
     if not _wsl_rm(wsl_run,
                    *(wsl_shim_path(home, n) for n in WSL_SHIMS + ("out",))):
         lines.append("Could not remove Blink's shims inside WSL; they do"

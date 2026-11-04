@@ -35,6 +35,13 @@ posix_only = pytest.mark.skipif(sys.platform == "win32",
                                 reason="runs the WSL scripts under real sh")
 
 
+@pytest.fixture(autouse=True)
+def _no_recapture_wait(monkeypatch):
+    """uninstall_from waits HOOK_RECAPTURE_S between taking the hooks out
+    and removing the shims they call; the tests that care say so."""
+    monkeypatch.setattr(install_statusline, "HOOK_RECAPTURE_S", 0)
+
+
 def _home(lin, name="Ubuntu"):
     """A WSL home whose Linux home is the tmp folder `lin`. Its config_dir
     is the UNC spelling of lin/.claude, exactly as install would record it;
@@ -819,3 +826,38 @@ def test_a_dangling_link_into_a_missing_folder_stays_a_link(tmp_path, shell):
     assert link.is_symlink()
     assert json.loads(target.read_text())["statusLine"]["command"] == \
         _sl_cmd(lin)
+
+
+# ------------------------------------ review of feat/enterprise-spend, U29
+
+@posix_only
+def test_uninstall_waits_for_claude_code_to_drop_the_hooks(tmp_path,
+                                                            monkeypatch):
+    """Claude Code re-reads its hooks a second or so after settings.json
+    changes, and until then runs the old ones. Removing the hook shim at
+    once left that second's hook calling a missing file: dash exits 2,
+    which Claude Code takes as "block". The shims go after a short wait,
+    and only when hooks were taken out."""
+    lin = _tree(tmp_path, {}, link=False)
+    home = _home(lin)
+    order = []
+    real = _runner(lin, _fake_bin(tmp_path))
+
+    def run(argv, stdin=None):
+        if len(argv) > 2:
+            order.append("rm" if argv[2] == install_statusline._RM
+                         else "write" if argv[2] == install_statusline._WRITE
+                         else "read")
+        return real(argv, stdin)
+    install_statusline.install_into(home, real)
+    monkeypatch.setattr(install_statusline, "HOOK_RECAPTURE_S", 2.0)
+    monkeypatch.setattr(install_statusline.time, "sleep",
+                        lambda s: order.append(("sleep", s)))
+    install_statusline.uninstall_from(home, run)
+    assert order.index(("sleep", 2.0)) > order.index("write")
+    # The last rm is the shims' (the first may be the chain file's).
+    assert order[-1] == "rm" and order[-2] == ("sleep", 2.0)
+    # Nothing of ours in settings: nothing to wait for.
+    order.clear()
+    install_statusline.uninstall_from(home, run)
+    assert ("sleep", 2.0) not in order
