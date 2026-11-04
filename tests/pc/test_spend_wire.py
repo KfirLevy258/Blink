@@ -813,3 +813,19 @@ def test_a_benched_provider_is_logged_by_type_only(capsys):
     err = capsys.readouterr().err
     assert "Broken failed and will be skipped (ValueError)" in err
     assert "secret" not in err and "31412" not in err
+
+
+def test_a_share_over_the_boards_range_is_clamped_not_refused():
+    """/code-review max of 2026-11-04, U3: $300 spent against a cap cut to
+    $20 is 1500%, and proto.c refuses a percentage over PCT_MAX (1000) and
+    keeps its default, so the board drew 0% and no "used up". A spend share
+    goes out at most PCT_MAX: far over the cap still reads as over it."""
+    assert protocol.PCT_MAX == 1000.0
+    msg = protocol.frame_to_usage(spend(pct=1500.0), NOW)
+    assert msg["session_pct"] == protocol.PCT_MAX
+    msg = protocol.frame_to_usage(windows(provider="codex"), NOW,
+                                  secondary=spend(pct=1e300))
+    assert msg["p2_session_pct"] == protocol.PCT_MAX
+    # Under it, untouched.
+    assert protocol.frame_to_usage(spend(pct=102.3), NOW)["session_pct"] \
+        == 102.3

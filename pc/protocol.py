@@ -632,6 +632,25 @@ def meaningful_usage(msg: dict) -> dict:
     return {k: v for k, v in msg.items() if k not in VOLATILE_USAGE_KEYS}
 
 
+# The largest percentage the board takes (proto.c PCT_MAX). One over it is
+# refused whole and the board keeps its default: 0%, no "used up".
+PCT_MAX = 1000.0
+
+
+def _share(frame):
+    """A frame's session figure as it goes on the wire. A spend share is
+    held at PCT_MAX: $300 against a cap cut to $20 is 1500%, which the
+    board refused, drawing 0% for a page far over its cap (/code-review max
+    of 2026-11-04, U3). A window's figure is left as it is: its sources
+    already refuse one past PCT_MAX."""
+    pct = frame.session_pct
+    if (getattr(frame, "plan", PLAN_WINDOWS) == PLAN_SPEND
+            and isinstance(pct, (int, float)) and not isinstance(pct, bool)
+            and pct > PCT_MAX):
+        return PCT_MAX
+    return pct
+
+
 def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     """Turn a NormalizedUsageFrame into the usage message for the board.
 
@@ -642,7 +661,7 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     only thing that decides what a frame looks like on the wire.
     """
     return usage(
-        frame.session_pct, frame.session_resets_at,
+        _share(frame), frame.session_resets_at,
         frame.weekly_pct, frame.weekly_resets_at,
         [],
         session_resets_in_s=secs_until(frame.session_resets_at, now_epoch,
@@ -664,7 +683,7 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         n_stuck=frame.n_stuck + (secondary.n_stuck if secondary else 0),
         n_agents=frame.n_agents + (secondary.n_agents if secondary else 0),
         p2=(secondary.provider if secondary else ""),
-        p2_session_pct=(secondary.session_pct if secondary else UNKNOWN),
+        p2_session_pct=(_share(secondary) if secondary else UNKNOWN),
         p2_weekly_pct=(secondary.weekly_pct if secondary else UNKNOWN),
         p2_session_resets_in_s=(secs_until(secondary.session_resets_at,
                                            now_epoch,
