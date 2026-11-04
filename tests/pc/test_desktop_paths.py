@@ -671,3 +671,507 @@ def test_an_old_indexeddb_does_not_beat_a_newer_cache(win, tmp_path):
     idb = _mkdir(tmp_path, os.path.join(_target(tmp_path, NAME), "IndexedDB"))
     os.utime(idb, (1_000_000, 1_000_000))
     assert dp.windows_data_dir()[0] == _target(tmp_path, OTHER)
+
+
+# --- 2026-11-04: the Store build that keeps its data in the package ----------
+#
+# A friend's Windows PC, Blink 1.4.1, Claude Desktop from the Microsoft Store
+# (Get-AppxPackage: Claude 4.16336.0.0):
+#   - %APPDATA%\Claude does not exist at all;
+#   - %LOCALAPPDATA%\Claude-Data exists and holds ONE FILE, README.txt of
+#     1111 bytes (2026-11-01 08:27:45), and no data folder -- for days
+#     before any data moved there;
+#   - the live data is in
+#     %LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude,
+#     with no .user-data-left marker anywhere.
+# `blink status` said "not installed" and looked only at Roaming.
+#
+# The same evening the Store build migrated live: at 23:23:27 the marker
+# .user-data-left.claude_pzs8sxrjxfjjc appeared in the package's
+# LocalCache\Roaming\Claude, and at 23:23:38 plan-usage-history.json was
+# written under Claude-Data\claude_pzs8sxrjxfjjc. A recursive search found
+# only that copy afterwards: the package copy was MOVED, not left behind.
+# Blink 1.4.1 sent its first `-> usage` at 23:24:01, the next poll. So the
+# states a desk passes through are: before (package data, no marker,
+# Claude-Data holding a README), the instant of the move (marker, both
+# copies), and after (marker, Claude-Data only). All three are tests below.
+#
+# The layouts are built here, from the sizes and names that were measured;
+# none of it is a copy of anything on that machine.
+#
+# Precedence, which the table below pins row by row. Candidates are: a
+# marker's target folder (M), each package's LocalCache\Roaming\Claude that
+# holds Desktop data (P), and plain Roaming\Claude (R). The freshest
+# usage-cache / Local Storage / IndexedDB mtime wins. Ties: M, then P, then R
+# (R must be strictly fresher to beat anything, as it always had to beat M).
+# Between M's the name decides; between P's the package name decides.
+# Nothing holding data at all: R, the default.
+
+PKG_A = "Claude_pzs8sxrjxfjjc"   # the shape measured
+PKG_B = "Claude_0000000000000"   # sorts before PKG_A
+PKG_SOURCE_A = "package:" + PKG_A
+PKG_SOURCE_B = "package:" + PKG_B
+
+
+def _pkg_roaming(home, pkg=PKG_A):
+    return inside(home, os.path.join(_local(home), "Packages", pkg,
+                                     "LocalCache", "Roaming", "Claude"))
+
+
+def _friends_layout(home, mtime=None):
+    """The measured machine before the move: no Roaming\\Claude, Claude-Data
+    holding only a 1111-byte README.txt, data in the package's virtualised
+    Roaming, no marker."""
+    readme = inside(home, os.path.join(_local(home), "Claude-Data",
+                                       "README.txt"))
+    os.makedirs(os.path.dirname(readme), exist_ok=True)
+    with open(readme, "wb") as f:
+        f.write(b"\0" * 1111)
+    folder = _pkg_roaming(home)
+    _cache(home, folder, mtime=mtime)
+    return folder
+
+
+def test_the_friends_layout_reads_the_package_folder(win, tmp_path):
+    folder = _friends_layout(tmp_path)
+    assert not os.path.exists(_roaming(tmp_path))
+    readme = os.path.join(_local(tmp_path), "Claude-Data", "README.txt")
+    assert os.path.getsize(readme) == 1111
+    assert os.listdir(os.path.join(_local(tmp_path), "Claude-Data")) == [
+        "README.txt"]
+    assert dp.windows_data_dir() == (folder, PKG_SOURCE_A)
+    assert not dp.marker_without_data()
+    assert dp.resolve().in_package
+    assert not dp.resolve().moved
+
+
+def test_every_reader_follows_the_package_folder(win, tmp_path):
+    """All four readers, and the providers that wrap them, through the one
+    answer: the usage cache, Local Storage, IndexedDB and Cowork."""
+    folder = _friends_layout(tmp_path)
+    paths = [claude_desktop.cache_path(),
+             desktop_local_storage.store_path(),
+             desktop_idb.store_path(),
+             cowork_audit.sessions_dir(),
+             claude_desktop.ClaudeDesktopProvider().path(),
+             ClaudeDesktopLocalStorageProvider().path()]
+    for p in paths:
+        assert os.path.commonpath([p, folder]) == folder, p
+
+
+def test_the_package_answer_is_held_for_a_whole_poll(win, tmp_path):
+    """one_answer() pins the package folder too: Roaming turning fresher
+    mid-poll must not move any of the four readers."""
+    folder = _friends_layout(tmp_path, mtime=1_000_000)
+    with dp.one_answer() as held:
+        assert held.path == folder
+        _cache(tmp_path, _roaming(tmp_path), mtime=4_000_000_000)
+        for p in (claude_desktop.cache_path(),
+                  desktop_local_storage.store_path(),
+                  desktop_idb.store_path(),
+                  cowork_audit.sessions_dir()):
+            assert os.path.commonpath([p, folder]) == folder, p
+    # Outside the hold the fresher Roaming is read, as it should be.
+    assert dp.data_dir() == _roaming(tmp_path)
+
+
+def test_desktop_reading_finds_a_cache_in_the_package_folder(win, tmp_path):
+    import time
+    folder = _pkg_roaming(tmp_path)
+    _cache(tmp_path, folder,
+           content=_dc.doc([_dc.sample(int(time.time() * 1000))]))
+    reading = cli.desktop_reading()
+    assert reading is not None
+    assert reading[0] == claude_desktop.VERDICT_FRAME
+
+
+def test_desktop_history_reads_the_package_folder(win, tmp_path):
+    _cache(tmp_path, _pkg_roaming(tmp_path), content=_dc.doc(
+        [_dc.sample(_dc.T_MS - 60_000, sd=20), _dc.sample(_dc.T_MS, sd=30)]))
+    samples = DesktopHistoryProvider().samples(_dc.NOW)
+    assert [s["u"]["sd"] for s in samples] == [20, 30]
+
+
+def test_desktop_app_installed_sees_local_storage_in_the_package(win,
+                                                                  tmp_path):
+    assert not cli.desktop_app_installed()
+    _mkdir(tmp_path, os.path.join(_pkg_roaming(tmp_path), "Local Storage",
+                                  "leveldb"))
+    assert cli.desktop_app_installed()
+
+
+# What counts as "holds Desktop data": the usage cache FILE, or a Local
+# Storage or IndexedDB folder. A config file, a marker or an empty folder
+# does not -- a package folder the Store creates on install is not Desktop's
+# data.
+
+def _make_data(home, folder, form):
+    if form == "usage cache":
+        _cache(home, folder)
+    elif form == "local storage":
+        _mkdir(home, os.path.join(folder, "Local Storage", "leveldb"))
+    elif form == "local storage dir only":
+        _mkdir(home, os.path.join(folder, "Local Storage"))
+    else:
+        _mkdir(home, os.path.join(folder, "IndexedDB"))
+
+
+@pytest.mark.parametrize("form", ["usage cache", "local storage",
+                                  "local storage dir only", "indexeddb"])
+def test_each_form_of_desktop_data_counts(win, tmp_path, form):
+    _make_data(tmp_path, _pkg_roaming(tmp_path), form)
+    assert dp.windows_data_dir() == (_pkg_roaming(tmp_path), PKG_SOURCE_A)
+
+
+@pytest.mark.parametrize("junk", ["config.json", "claude_desktop_config.json",
+                                  "Preferences", dp.MARKER_PREFIX + "x"])
+def test_a_package_folder_with_only_config_is_not_data(win, tmp_path, junk):
+    _touch(tmp_path, os.path.join(_pkg_roaming(tmp_path), junk))
+    assert dp.windows_data_dir() == (_roaming(tmp_path), "roaming")
+
+
+def test_an_empty_package_folder_is_not_data(win, tmp_path):
+    _mkdir(tmp_path, _pkg_roaming(tmp_path))
+    assert dp.windows_data_dir() == (_roaming(tmp_path), "roaming")
+
+
+def test_a_usage_cache_that_is_a_folder_is_not_data(win, tmp_path):
+    _mkdir(tmp_path, os.path.join(_pkg_roaming(tmp_path),
+                                  "plan-usage-history.json"))
+    assert dp.windows_data_dir() == (_roaming(tmp_path), "roaming")
+
+
+# The contest table. Each row gives an mtime (in millions of seconds) for
+# the layers that hold data (None: the layer is absent). Layers: R is plain
+# Roaming, M the target of a marker, A and B two packages. `want` is "R",
+# "M", "A" or "B".
+
+ROWS = [
+    # id,                          R,    M,    A,    B,    want
+    ("package alone",              None, None, 5,    None, "A"),
+    ("roaming alone",              5,    None, None, None, "R"),
+    ("nothing at all",             None, None, None, None, "R"),
+    ("package fresher than R",     1,    None, 2,    None, "A"),
+    ("package stale beside R",     2,    None, 1,    None, "R"),
+    ("package ties R",             3,    None, 3,    None, "A"),
+    ("two packages, B fresher",    None, None, 1,    2,    "B"),
+    ("two packages, A fresher",    None, None, 2,    1,    "A"),
+    ("two packages tie",           None, None, 2,    2,    "B"),
+    ("M fresher than package",     None, 2,    1,    None, "M"),
+    ("package fresher than M",     None, 1,    2,    None, "A"),
+    ("M ties package",             None, 2,    2,    None, "M"),
+    ("M stale, R fresher",         3,    1,    None, None, "R"),
+    ("M fresh, R stale",           1,    3,    None, None, "M"),
+    ("M ties R",                   2,    2,    None, None, "M"),
+    ("R freshest of all three",    9,    2,    3,    None, "R"),
+    ("M freshest of all three",    1,    9,    3,    None, "M"),
+    ("package freshest of three",  1,    2,    9,    None, "A"),
+    ("R ties the best package",    4,    2,    4,    None, "A"),
+    ("B beats A beats M beats R",  1,    2,    3,    4,    "B"),
+]
+
+
+def _scene(home, r, m, a, b, marker_in="roaming"):
+    if r is not None:
+        _cache(home, _roaming(home), mtime=r * 1_000_000)
+    if m is not None:
+        _marker(home, _roaming(home) if marker_in == "roaming"
+                else _pkg_roaming(home))
+        _cache(home, _target(home), mtime=m * 1_000_000)
+    if a is not None:
+        _cache(home, _pkg_roaming(home, PKG_A), mtime=a * 1_000_000)
+    if b is not None:
+        _cache(home, _pkg_roaming(home, PKG_B), mtime=b * 1_000_000)
+
+
+def _expected(want, home):
+    return {"R": (_roaming(home), "roaming"),
+            "M": (_target(home), "marker:" + NAME),
+            "A": (_pkg_roaming(home, PKG_A), PKG_SOURCE_A),
+            "B": (_pkg_roaming(home, PKG_B), PKG_SOURCE_B)}[want]
+
+
+@pytest.mark.parametrize("row", ROWS, ids=[r[0] for r in ROWS])
+def test_the_freshest_candidate_wins(win, tmp_path, row):
+    _, r, m, a, b, want = row
+    _scene(tmp_path, r, m, a, b)
+    assert dp.windows_data_dir() == _expected(want, tmp_path)
+
+
+@pytest.mark.parametrize("row", ROWS, ids=[r[0] for r in ROWS])
+def test_the_same_contest_with_the_marker_in_the_package(win, tmp_path, row):
+    """A marker may sit in the package's Roaming instead (Mor Gal's layout
+    had it in both). Where it sits does not change who wins -- and a package
+    folder holding data AND the marker competes as a package too."""
+    _, r, m, a, b, want = row
+    _scene(tmp_path, r, m, a, b, marker_in="package")
+    assert dp.windows_data_dir() == _expected(want, tmp_path)
+
+
+# --- the four states the friend's PC passed through (2026-11-04) -------------
+
+def test_before_the_move_the_package_folder_is_read(win, tmp_path):
+    """(a) Package data, no marker, Claude-Data holding only README.txt."""
+    folder = _friends_layout(tmp_path)
+    answer = dp.resolve()
+    assert (answer.path, answer.source) == (folder, PKG_SOURCE_A)
+    assert not answer.dangling
+
+
+def test_after_the_move_the_marker_still_leads_to_claude_data(win, tmp_path):
+    """(b) What 1.4.1 already handled: the marker in the package folder, the
+    data under Claude-Data\\<name>, the package copy gone (it was moved)."""
+    _friends_layout(tmp_path)
+    os.remove(os.path.join(_pkg_roaming(tmp_path), "plan-usage-history.json"))
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path))
+    assert os.path.exists(os.path.join(_local(tmp_path), "Claude-Data",
+                                       "README.txt"))
+    assert dp.windows_data_dir() == (_target(tmp_path), "marker:" + NAME)
+
+
+def test_the_marker_alone_before_the_data_lands_keeps_the_package(win,
+                                                                   tmp_path):
+    """The 11 seconds between 23:23:27 (marker) and 23:23:38 (data): the
+    marker names a folder that is not there yet, and the package still holds
+    the data. 1.4.1 fell back to an absent Roaming here."""
+    folder = _friends_layout(tmp_path)
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    answer = dp.resolve()
+    assert (answer.path, answer.source) == (folder, PKG_SOURCE_A)
+    assert answer.dangling and not answer.ignored
+
+
+@pytest.mark.parametrize("package_mtime,target_mtime,want", [
+    (1_000_000, 2_000_000, "M"),    # copied: the target is the newer write
+    (2_000_000, 2_000_000, "M"),    # moved with its mtime kept: a tie
+    (2_000_000, 1_000_000, "A"),    # a package copy written after the move
+], ids=["target newer", "tie", "package newer"])
+def test_both_copies_at_once_pick_the_fresher(win, tmp_path, package_mtime,
+                                              target_mtime, want):
+    """(c) The instant of the move, both copies on disk: the fresher one
+    wins, and a tie goes to the folder the app pointed at."""
+    _friends_layout(tmp_path, mtime=package_mtime)
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path), mtime=target_mtime)
+    assert dp.windows_data_dir() == _expected(want, tmp_path)
+
+
+def test_readme_in_claude_data_is_not_a_data_folder(win, tmp_path):
+    """(d) Claude-Data\\README.txt is a file with no marker naming it. It is
+    not a candidate, and it does not disturb the package answer."""
+    folder = _friends_layout(tmp_path)
+    assert not dp.marker_names(os.path.join(_local(tmp_path), "Claude-Data"))
+    assert dp.windows_data_dir() == (folder, PKG_SOURCE_A)
+    assert dp.resolve().looked.count(
+        os.path.join(_local(tmp_path), "Claude-Data", "README.txt")) == 0
+
+
+@pytest.mark.parametrize("where", ["roaming", "package", "claude-data"])
+def test_a_readme_is_never_mistaken_for_a_marker(win, tmp_path, where):
+    """README.txt in any of the three folders is not a `.user-data-left.`
+    file, so no name is taken from it."""
+    folder = {"roaming": _roaming(tmp_path),
+              "package": _pkg_roaming(tmp_path),
+              "claude-data": os.path.join(_local(tmp_path), "Claude-Data"),
+              }[where]
+    _touch(tmp_path, os.path.join(folder, "README.txt"))
+    assert dp.marker_names(folder) == []
+    assert dp.windows_data_dir() == (_roaming(tmp_path), "roaming")
+
+
+def test_a_marker_naming_the_readme_follows_nothing(win, tmp_path):
+    """A marker called .user-data-left.README.txt would point at
+    Claude-Data\\README.txt, which is a file: isdir fails, the target is
+    dangling, and the package data answers."""
+    _friends_layout(tmp_path)
+    _marker(tmp_path, _pkg_roaming(tmp_path), name="README.txt")
+    answer = dp.resolve()
+    assert answer.source == PKG_SOURCE_A
+    assert answer.dangling
+
+
+def test_a_dangling_marker_does_not_hide_package_data(win, tmp_path):
+    _marker(tmp_path, _roaming(tmp_path))
+    _cache(tmp_path, _pkg_roaming(tmp_path))
+    answer = dp.resolve()
+    assert answer.source == PKG_SOURCE_A
+    assert answer.dangling and not answer.ignored
+
+
+def test_a_package_that_lost_to_roaming_is_flagged(win, tmp_path):
+    _cache(tmp_path, _pkg_roaming(tmp_path), mtime=1_000_000)
+    _cache(tmp_path, _roaming(tmp_path), mtime=2_000_000)
+    answer = dp.resolve()
+    assert answer.source == "roaming"
+    assert answer.package_ignored and not answer.ignored
+
+
+def test_a_marker_that_lost_to_roaming_is_flagged_as_before(win, tmp_path):
+    _marker(tmp_path, _roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path), mtime=1_000_000)
+    _cache(tmp_path, _roaming(tmp_path), mtime=2_000_000)
+    answer = dp.resolve()
+    assert answer.ignored and not answer.package_ignored
+
+
+def test_a_stale_package_leftover_never_beats_a_live_target(win, tmp_path):
+    """The migration: the old build's data is still in the package's
+    Roaming, and the marker's target is where the app writes now."""
+    _marker(tmp_path, _roaming(tmp_path))
+    _cache(tmp_path, _pkg_roaming(tmp_path), mtime=1_000_000)
+    _cache(tmp_path, _target(tmp_path), mtime=2_000_000)
+    assert dp.windows_data_dir() == (_target(tmp_path), "marker:" + NAME)
+
+
+def test_a_stale_package_leftover_never_beats_a_live_roaming(win, tmp_path):
+    """Back on the exe build, Store package left behind."""
+    _cache(tmp_path, _pkg_roaming(tmp_path), mtime=1_000_000)
+    _cache(tmp_path, _roaming(tmp_path), mtime=2_000_000)
+    assert dp.windows_data_dir() == (_roaming(tmp_path), "roaming")
+
+
+def test_a_package_with_a_live_indexeddb_beats_a_stale_cache(win, tmp_path):
+    """Freshness is the same three things for a package as for a target."""
+    _cache(tmp_path, _roaming(tmp_path), mtime=1_000_000)
+    idb = _mkdir(tmp_path, os.path.join(_pkg_roaming(tmp_path), "IndexedDB"))
+    os.utime(idb, (2_000_000, 2_000_000))
+    assert dp.windows_data_dir()[0] == _pkg_roaming(tmp_path)
+
+
+def test_the_package_source_is_one_path_component(win, tmp_path):
+    """The source string carries the package folder's name, from a listing
+    of Packages. It is a label, never joined into a path."""
+    _cache(tmp_path, _pkg_roaming(tmp_path))
+    source = dp.resolve().source
+    assert source == PKG_SOURCE_A
+    assert "/" not in source and "\\" not in source
+
+
+# --- glob metacharacters in LOCALAPPDATA ------------------------------------
+
+def _glob_hostile_names():
+    names = ["a[b]", "a[!x]", "u[ab]"]
+    if os.name != "nt":      # Windows refuses these in a file name
+        names += ["a*b", "a?b"]
+    return names
+
+
+@pytest.mark.parametrize("profile", _glob_hostile_names())
+def test_glob_metacharacters_in_localappdata_still_find_the_package(
+        win, tmp_path, monkeypatch, profile):
+    local = tmp_path / profile / "AppData" / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    folder = _pkg_roaming(tmp_path)
+    assert profile in folder
+    _cache(tmp_path, folder)
+    assert dp.windows_data_dir() == (folder, PKG_SOURCE_A)
+
+
+def test_a_glob_pattern_in_localappdata_does_not_reach_a_neighbour(
+        win, tmp_path, monkeypatch):
+    """`u[ab]` read as a character class would match the neighbour `ua`, so
+    a desk whose profile folder is named that would read somebody else's
+    data. The decoy is fresher on purpose."""
+    monkeypatch.setenv("LOCALAPPDATA",
+                       str(tmp_path / "u[ab]" / "AppData" / "Local"))
+    mine = _pkg_roaming(tmp_path)
+    _cache(tmp_path, mine, mtime=1_000_000)
+    decoy = inside(tmp_path, os.path.join(
+        str(tmp_path), "ua", "AppData", "Local", "Packages", PKG_A,
+        "LocalCache", "Roaming", "Claude"))
+    _cache(tmp_path, decoy, mtime=2_000_000)
+    assert dp.windows_data_dir() == (mine, PKG_SOURCE_A)
+
+
+# --- what `blink status` says ----------------------------------------------
+
+def test_status_says_the_data_is_in_the_package_folder(win, tmp_path, capsys):
+    import time
+    folder = _pkg_roaming(tmp_path)
+    _cache(tmp_path, folder,
+           content=_dc.doc([_dc.sample(int(time.time() * 1000))]))
+    row = _desktop_row(capsys)
+    assert row[0].startswith("Desktop     usage cache parsed")
+    assert ("            data found in the Store package folder: " + folder
+            ) in row
+    assert not any("moved by the Store build" in l for l in row)
+    assert not any("looked at" in l for l in row)
+
+
+def test_status_for_the_friends_layout(win, tmp_path, capsys):
+    import time
+    folder = _friends_layout(tmp_path)
+    _cache(tmp_path, folder,
+           content=_dc.doc([_dc.sample(int(time.time() * 1000))]))
+    row = _desktop_row(capsys)
+    assert row[0].startswith("Desktop     usage cache parsed")
+    assert ("            data found in the Store package folder: " + folder
+            ) in row
+
+
+def test_status_for_a_package_with_no_cache_yet(win, tmp_path, capsys):
+    """Local Storage but no usage cache: signed out. The row must still name
+    the folder it is reading, beside `looked at` for the file it wants."""
+    folder = _pkg_roaming(tmp_path)
+    _mkdir(tmp_path, os.path.join(folder, "Local Storage", "leveldb"))
+    row = _desktop_row(capsys)
+    assert row[0].startswith("Desktop     no usage cache")
+    assert "            looked at " + os.path.join(
+        folder, "plan-usage-history.json") in row
+    assert ("            data found in the Store package folder: " + folder
+            ) in row
+
+
+def test_status_says_when_roaming_beat_a_package(win, tmp_path, capsys):
+    _cache(tmp_path, _pkg_roaming(tmp_path), mtime=1_000_000)
+    _cache(tmp_path, _roaming(tmp_path), mtime=2_000_000)
+    row = _desktop_row(capsys)
+    assert "            Store package folder ignored, Roaming is newer" in row
+    assert not any("data found in" in l for l in row)
+
+
+def test_status_lists_every_place_it_looked(win, tmp_path, capsys):
+    """The friend's output named Roaming and nothing else, which sent us
+    looking in the wrong place. Two packages, one marker name: every folder
+    that was tried is on the screen."""
+    _marker(tmp_path, _roaming(tmp_path), NAME)
+    _mkdir(tmp_path, _pkg_roaming(tmp_path, PKG_A))
+    _mkdir(tmp_path, _pkg_roaming(tmp_path, PKG_B))
+    row = _desktop_row(capsys)
+    cache = "plan-usage-history.json"
+    assert row[0].startswith("Desktop     no usage cache")
+    assert ("            looked at "
+            + os.path.join(_roaming(tmp_path), cache)) in row
+    for folder in (_pkg_roaming(tmp_path, PKG_A),
+                   _pkg_roaming(tmp_path, PKG_B),
+                   _target(tmp_path)):
+        assert ("            also looked at "
+                + os.path.join(folder, cache)) in row, folder
+
+
+def test_status_says_when_there_is_no_package_folder_at_all(win, tmp_path,
+                                                            capsys):
+    row = _desktop_row(capsys)
+    assert row[0].startswith("Desktop     no usage cache")
+    packages = os.path.join(_local(tmp_path), "Packages")
+    assert ("            no Store package folder under " + packages
+            + " (looked for Claude_*)") in row
+
+
+def test_status_does_not_claim_a_missing_package_when_one_exists(
+        win, tmp_path, capsys):
+    _mkdir(tmp_path, _pkg_roaming(tmp_path))
+    row = _desktop_row(capsys)
+    assert not any("no Store package folder" in l for l in row)
+    assert ("            also looked at " + os.path.join(
+        _pkg_roaming(tmp_path), "plan-usage-history.json")) in row
+
+
+def test_status_is_unchanged_off_windows(monkeypatch, tmp_path, capsys):
+    """macOS has one place; no `also looked at` and no package line."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    row = _desktop_row(capsys)
+    assert row[0].startswith("Desktop     no usage cache")
+    assert sum(l.startswith("            looked at ") for l in row) == 1
+    assert not any("also looked" in l or "package" in l for l in row)

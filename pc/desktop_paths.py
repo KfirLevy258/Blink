@@ -24,23 +24,59 @@ So the marker is the app's own record of where its data went, and that is
 what this follows. It does not guess at Claude-Data: a Claude-Data folder
 with no marker pointing at it is ignored.
 
+The second Store layout, measured 2026-11-04 on a friend's Windows PC running
+Blink 1.4.1 beside Claude Desktop from the Store: no %APPDATA%\\Claude at
+all; %LOCALAPPDATA%\\Claude-Data present but holding only a 1111-byte
+README.txt (2026-11-01), no data folder; and the live usage history in
+%LOCALAPPDATA%\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude,
+with no `.user-data-left` marker anywhere. This is the Store's own
+virtualised Roaming used as the data folder, which is what older Store
+builds did (anthropics/claude-code issues #26073 and #48362, and the 1.4.0
+review that flagged the gap). Until then this module only ever looked INSIDE
+a package folder for a marker, never at it as the data folder, so `blink
+status` said Desktop was not installed and looked at Roaming alone.
+
+The same evening that Store build (Claude 4.16336.0.0) migrated while watched:
+a `.user-data-left.<name>` marker appeared in the package's Roaming at
+23:23:27, plan-usage-history.json was written under Claude-Data\\<name> at
+23:23:38, and a search of %LOCALAPPDATA% then found only that copy -- the
+package copy was moved, not left behind. So one desk passes through all three
+states this module reads: package data with no marker, marker plus a data
+folder (briefly both copies), and marker plus Claude-Data only.
+
 This is not the only Store layout. On 2026-09-30 an ARM64 Windows 11 VM ran
 an MSIX build that wrote straight into the real %APPDATA%\\Claude, with no
 marker (docs/README-full.md). That is an older build, but a desk that has not
 updated still has it, so plain Roaming stays the default and the answer
 whenever nothing better is found.
 
-How the folder is chosen:
+How the folder is chosen. Three kinds of candidate compete: the target of
+a marker (M), each package's LocalCache\\Roaming\\Claude that holds Desktop
+data (P), and plain %APPDATA%\\Claude (R). "Holds Desktop data" is the usage
+cache FILE, or a Local Storage or IndexedDB folder: a package folder the
+Store made on install and the app never wrote to is not a candidate, and a
+config file or a marker alone does not make it one. The rules:
 
-  - Freshest wins. Two markers with both targets present are possible (an
-    install, an uninstall, a reinstall under a new name), and sorted order
-    would pick one for no reason. The one written to most recently -- usage
-    cache, Local Storage or IndexedDB -- is the one the app is using. Equal
+  - Freshest wins, among all three kinds, by one measure (_freshness: the
+    newest mtime of the usage cache, Local Storage and IndexedDB). A stale
+    leftover therefore never beats live data, whichever kind it is.
+  - Ties go M, then P, then R: R has always had to be strictly fresher, and
+    the app's own marker is a stronger statement than a folder that merely
+    holds files. Among several M the name breaks a tie; among several P the
+    package folder name does.
+  - Nothing holds data: R, the default, which is also what the old code
+    answered when a marker named a folder that was gone (`dangling`).
+  - A marker whose target is gone does not hide a package that holds data.
+  - Two markers with both targets present are possible (an install, an
+    uninstall, a reinstall under a new name), and sorted order would pick
+    one for no reason. The one written to most recently -- usage cache,
+    Local Storage or IndexedDB -- is the one the app is using. Equal
     freshness falls back to the name, so one tree always gives one answer.
   - A stale marker does not win for ever. Someone who went back to the exe
     build has a marker and an old Claude-Data left behind while the app
     writes Roaming again. When Roaming is strictly fresher than the best
-    target, Roaming is read, and `blink status` says the marker was ignored.
+    candidate, Roaming is read, and `blink status` says the marker (or the
+    package folder) was ignored.
   - Two live installs (the exe and the Store build both in use, in turn)
     therefore alternate: the reading follows whichever wrote last. That is
     by design -- both report the same account, and the last one written
@@ -94,6 +130,10 @@ COWORK_SESSIONS_NAME = "local-agent-mode-sessions"
 SOURCE_ROAMING = "roaming"
 SOURCE_DEFAULT = "default"
 SOURCE_MARKER_PREFIX = "marker:"
+# "package:<folder>": the package folder's own name, e.g.
+# "package:Claude_pzs8sxrjxfjjc". A label for `blink status` and for logs of
+# which folder was read; it is never joined into a path.
+SOURCE_PACKAGE_PREFIX = "package:"
 
 # Characters no marker name may hold. "/" and "\\" would leave Claude-Data;
 # ":" resets the drive under ntpath, and also names an NTFS alternate data
@@ -180,8 +220,7 @@ def _packages(local):
 def _marker_folders(roaming_claude, packages):
     """Where markers are looked for: real Roaming first, then each Store
     package's virtualised Roaming."""
-    return [roaming_claude] + [
-        os.path.join(p, "LocalCache", "Roaming", "Claude") for p in packages]
+    return [roaming_claude] + [_package_roaming(p) for p in packages]
 
 
 def _candidate_targets(names, local, packages):
@@ -210,6 +249,27 @@ def _candidate_targets(names, local, packages):
     return out
 
 
+def _package_roaming(package):
+    return os.path.join(package, "LocalCache", "Roaming", "Claude")
+
+
+def _holds_data(folder):
+    """Does `folder` hold Desktop data: the usage cache as a file, or a Local
+    Storage or IndexedDB folder?
+
+    The bar for a package folder to count as a data folder at all. Stricter
+    than "exists": the Store creates the package's LocalCache on install, and
+    a folder that only ever held a marker or a config file is not where the
+    app writes. Looser than _freshness on purpose: a Local Storage folder
+    with no leveldb in it yet (signed out, first launch) is still the app's
+    folder, and `blink status` should read "installed, never signed in"
+    from it. Stats only, never opens a file.
+    """
+    return (os.path.isfile(os.path.join(folder, USAGE_CACHE_NAME))
+            or os.path.isdir(os.path.join(folder, LOCAL_STORAGE_LEAF[0]))
+            or os.path.isdir(os.path.join(folder, INDEXEDDB_LEAF[0])))
+
+
 def _freshness(folder):
     """The newest mtime among the things the app rewrites as it runs: the
     usage cache, the Local Storage leveldb and the IndexedDB folder.
@@ -226,18 +286,35 @@ def _freshness(folder):
 class Answer(NamedTuple):
     """One resolve, with what `blink status` needs to explain it.
 
-    source: "default" off Windows, else "roaming" or "marker:<name>".
+    source: "default" off Windows, else "roaming", "marker:<name>" or
+        "package:<package folder name>".
     dangling: a marker was found, and none of its data folders exists.
     ignored: a marker's data folder exists, but Roaming is fresher and won.
+    package_ignored: a package folder holds data, but Roaming is fresher
+        and won.
+    looked: every data folder tried, the answer's included, in the order
+        tried; empty off Windows. `blink status` lists them when nothing is
+        found, because naming Roaming alone sent us to the wrong place.
+    packages: the Claude_* package folders found, whether or not they hold
+        data.
+    packages_root: where packages were looked for; "" off Windows.
     """
     path: str
     source: str
     dangling: bool = False
     ignored: bool = False
+    package_ignored: bool = False
+    looked: tuple = ()
+    packages: tuple = ()
+    packages_root: str = ""
 
     @property
     def moved(self) -> bool:
         return self.source.startswith(SOURCE_MARKER_PREFIX)
+
+    @property
+    def in_package(self) -> bool:
+        return self.source.startswith(SOURCE_PACKAGE_PREFIX)
 
 
 def _resolve_windows():
@@ -250,18 +327,42 @@ def _resolve_windows():
             if name.lower() not in seen:
                 seen.add(name.lower())
                 names.append(name)
-    if not names:
-        return Answer(roaming, SOURCE_ROAMING)
-    targets = _candidate_targets(names, local, packages)
-    if not targets:
-        return Answer(roaming, SOURCE_ROAMING, dangling=True)
-    # Freshest first; equal freshness falls back to name, then path.
-    scored = sorted((-_freshness(f), n, f) for n, f in targets)
-    neg_fresh, name, folder = scored[0]
+    targets = _candidate_targets(names, local, packages) if names else []
+    # Every place a data folder was looked for, for `blink status`: Roaming,
+    # each package's Roaming, and each place a marker name could point.
+    looked = [roaming] + [_package_roaming(p) for p in packages]
+    for name in names:
+        for root in [os.path.join(local, RELOCATED_DIRNAME)] + [
+                os.path.join(p, "LocalCache", "Local", RELOCATED_DIRNAME)
+                for p in packages]:
+            if _safe_component(name, root):
+                looked.append(os.path.join(root, name))
+    where = dict(looked=tuple(looked), packages=tuple(packages),
+                 packages_root=os.path.join(local, "Packages"))
+    # (-freshness, kind, name, folder, source): freshest first; on a tie a
+    # marker's target (kind 0) before a package (kind 1); then name, then
+    # path, so one tree always gives one answer.
+    ranked = [(-_freshness(f), 0, n, f, SOURCE_MARKER_PREFIX + n)
+              for n, f in targets]
+    for p in packages:
+        folder = _package_roaming(p)
+        if _holds_data(folder):
+            name = os.path.basename(p)
+            ranked.append((-_freshness(folder), 1, name, folder,
+                           SOURCE_PACKAGE_PREFIX + name))
+    ranked.sort()
+    dangling = bool(names) and not targets
+    if not ranked:
+        return Answer(roaming, SOURCE_ROAMING, dangling=dangling, **where)
+    neg_fresh, kind, _, folder, source = ranked[0]
     if _freshness(roaming) > -neg_fresh:
-        # The exe build writing Roaming again beside a marker it left behind.
-        return Answer(roaming, SOURCE_ROAMING, ignored=True)
-    return Answer(folder, SOURCE_MARKER_PREFIX + name)
+        # The exe build writing Roaming again beside a marker (or a package
+        # folder) it left behind.
+        return Answer(roaming, SOURCE_ROAMING, dangling=dangling,
+                      ignored=bool(targets),
+                      package_ignored=any(r[1] == 1 for r in ranked),
+                      **where)
+    return Answer(folder, source, dangling=dangling, **where)
 
 
 def _resolve():
@@ -275,7 +376,8 @@ def _resolve():
     except Exception:
         # Never into the daemon. Roaming is where every build before the
         # relocation wrote, so it is the least surprising wrong answer.
-        return Answer(_windows_roots()[0], SOURCE_ROAMING)
+        roaming = _windows_roots()[0]
+        return Answer(roaming, SOURCE_ROAMING, looked=(roaming,))
 
 
 _held = threading.local()
@@ -310,7 +412,8 @@ def resolve():
 
 
 def windows_data_dir():
-    """(path, source): source is "roaming" or "marker:<name>" on Windows."""
+    """(path, source): source is "roaming", "marker:<name>" or
+    "package:<folder>" on Windows."""
     answer = resolve()
     return answer.path, answer.source
 
@@ -322,8 +425,8 @@ def data_dir():
 
 
 def data_dir_source():
-    """How data_dir() was chosen: "roaming", "marker:<name>", or "default"
-    off Windows."""
+    """How data_dir() was chosen: "roaming", "marker:<name>",
+    "package:<folder>", or "default" off Windows."""
     return resolve().source
 
 

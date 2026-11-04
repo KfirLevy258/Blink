@@ -4311,6 +4311,7 @@ def _source_lines_desktop(desk, folder, now):
             print("Desktop     no usage cache (Claude Desktop not installed,"
                   " or never signed in)")
         print(f"            looked at {desktop.path()}")
+        _print_other_places_looked(folder)
         if folder.dangling:
             # The app left a note saying where its data went, and that
             # folder is gone. Reading Roaming instead is the right fallback,
@@ -4323,12 +4324,49 @@ def _source_lines_desktop(desk, folder, now):
         # actually read leaves the reader guessing which of two layouts
         # this desk has. See pc/desktop_paths.
         print(f"            data moved by the Store build: {folder.path}")
-    elif folder.ignored:
+    elif folder.in_package:
+        # Windows only, the Store build that keeps its data in the package's
+        # own virtualised Roaming with no marker (a friend's PC, 2026-11-04:
+        # no %APPDATA%\\Claude at all, and this row used to say "not
+        # installed" and name Roaming alone). Same reason as the line above:
+        # a report has to name the folder actually read.
+        print(f"            data found in the Store package folder:"
+              f" {folder.path}")
+    if folder.ignored:
         # A marker and its folder are there, but Roaming was written more
         # recently -- the exe build back in use. Without this line the
         # report reads like a plain install, and "why is it reading Roaming
         # when I have Claude-Data?" has no answer in it.
         print("            Store build marker ignored, Roaming is newer")
+    if folder.package_ignored:
+        # The same for a package folder with no marker: it holds data, but
+        # Roaming is fresher, so Roaming is read.
+        print("            Store package folder ignored, Roaming is newer")
+
+
+def _print_other_places_looked(folder):
+    """The Desktop row's "nothing found" lines for every place beyond the
+    one `looked at` already named.
+
+    The friend's output on 2026-11-04 named Roaming and nothing else, and
+    that sent us looking at Roaming. Every data folder the resolver tried is
+    listed, as the usage-cache path it wanted, and when no Store package
+    folder exists at all that is said too, with where it looked. Off Windows
+    `folder.looked` is empty and nothing prints.
+    """
+    from pc import desktop_paths
+    cache = desktop_paths.USAGE_CACHE_NAME
+    first = os.path.normcase(os.path.normpath(folder.path))
+    seen = {first}
+    for where in folder.looked:
+        key = os.path.normcase(os.path.normpath(where))
+        if key in seen:
+            continue
+        seen.add(key)
+        print(f"            also looked at {os.path.join(where, cache)}")
+    if folder.packages_root and not folder.packages:
+        print(f"            no Store package folder under"
+              f" {folder.packages_root} (looked for Claude_*)")
 
 
 def _source_lines_codex(now):
