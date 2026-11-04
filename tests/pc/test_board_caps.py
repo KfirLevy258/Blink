@@ -357,3 +357,93 @@ def test_a_pref_with_a_board_id_is_read_as_before(tmp_path):
                                      "board_id": "a1b2c3d4e5f6",
                                      "caps": BOTH})
     assert set(known["caps"]) == {"svc", "theme"}
+
+
+# ----------------------------------------- the hint, keyed to this board
+
+
+class _ProbePort:
+    """A port for the probe: the chunks the board says, then silence."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+
+    def reset_input_buffer(self):
+        pass
+
+    def write(self, raw):
+        pass
+
+    def read(self, n):
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+def _line(msg):
+    return (json.dumps(msg) + "\n").encode()
+
+
+def test_the_probe_hands_back_the_pref_that_answered_it():
+    """The pref that answers the probe's welcome is THIS board's word on
+    what it draws, and it used to be read and thrown away. A ping that
+    lands first does not end the listening: the pref follows it."""
+    pref = {"t": "pref", "v": 2, "provider": "claude",
+            "caps": ["plan", "svc"]}
+    heard = []
+    port = _ProbePort([_line({"t": "ping", "v": 2}), _line(pref)])
+    assert claude_usage_bridge.probe_is_our_board(port, 0.3, heard=heard)
+    assert pref in heard
+    # Without a list, the probe is what it always was.
+    port = _ProbePort([_line(pref)])
+    assert claude_usage_bridge.probe_is_our_board(port, 0.3) is True
+
+
+def test_the_hint_is_the_boards_own_when_it_answered():
+    """/code-review max of 2026-11-04, U17: board.json's caps are the LAST
+    board's. A board swapped for an older one, or reflashed down, on the
+    same port was handed the spend share as "SESSION 5h" until its own pref
+    reached the bridge. The probe heard that pref already; it wins."""
+    hint = claude_usage_bridge.board_caps_hint
+    known = {"caps": ["plan", "spendburn", "svc", "theme"]}
+    old = {"t": "pref", "v": 2, "provider": "claude", "caps": ["svc"]}
+    assert hint([old], known) == ["svc"]
+    bare = {"t": "pref", "v": 2, "provider": "claude"}
+    assert hint([{"t": "ping"}, bare], known) == []
+    # Unheard -- a reset board, a ping and nothing else -- board.json
+    # stands for what a wrong guess cannot hurt, and never for the plan:
+    # every board that draws plans answers a welcome with its pref, and a
+    # plan-less board handed a spend share draws dollars as a session.
+    assert hint([], known) == ["svc", "theme"]
+    assert hint([{"t": "ping"}], known) == ["svc", "theme"]
+    assert hint([], {}) is None
+    assert hint([], {"caps": "junk"}) is None
+
+
+def test_a_hint_without_the_plan_blanks_the_share_until_the_board_says():
+    from pc.providers import base
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="claude_spend", observed_at=1.0,
+        session_pct=62.8, plan=base.PLAN_SPEND, spend_usd=314.0,
+        spend_limit_usd=500.0, spend_period="monthly")
+
+    class Fetch:
+        def __call__(self):
+            return protocol.frame_to_usage(f, 2.0)
+
+        def plan_msg(self):
+            return protocol.plan_for(f)
+
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=Fetch(),
+               now=lambda: 1000.0, wall=lambda: (1752444000, 0),
+               board_caps_hint=claude_usage_bridge.board_caps_hint(
+                   [], {"caps": ["plan", "svc"]}), **_NO_FEED)
+    b.greet()
+    assert [m for m in sent if m["t"] == "usage"][-1]["session_pct"] == -1
+
+
+def test_the_daemon_keys_the_hint_to_what_the_probe_heard():
+    src = ast.unparse(ast.parse(
+        pathlib.Path(claude_usage_bridge.__file__).read_text(
+            encoding="utf-8")))
+    assert "board_caps_hint=board_caps_hint(heard, known)" in src
+    assert "heard=heard" in src
