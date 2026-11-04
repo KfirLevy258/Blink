@@ -91,9 +91,11 @@ class IngestionBus:
                  account=None, counter=None):
         """`counter` (a pc/spend_count.SpendCounter) is used only when the
         bus builds its own providers (`providers` None): it is handed to
-        the status-line provider there. With `providers` given it is
-        ignored -- those providers were built by the caller, who gives a
-        ClaudeCliProvider its counter directly."""
+        the status-line provider there. With `providers` given it feeds
+        nothing -- those providers were built by the caller, who gives a
+        ClaudeCliProvider its counter directly -- and is asked only for
+        spend_burn()'s buckets: a scenario's bus passes the scenario's
+        stand-in (scripted.ScriptedSpendCount) for exactly that."""
         # The login watch (pc/claude_account), made here only for the
         # shipped providers. A bus built from a scenario exists to replay the
         # same timeline on any desk, and whoever happens to be signed in to
@@ -658,7 +660,9 @@ class IngestionBus:
 
         None unless the last poll() put a spend page on `provider`'s page
         (its primary frame's plan is PLAN_SPEND) and the bus holds a count,
-        so a Max desk or a scenario's bus never builds one. Pure arithmetic
+        so a Max desk never builds one. A scenario's bus holds the
+        scenario's stand-in (scripted.ScriptedSpendCount), whose buckets are
+        None until a step names some: that is no line too. Pure arithmetic
         on the in-memory count: no file is read here.
         """
         page = self._pages.get(provider)
@@ -666,8 +670,11 @@ class IngestionBus:
                 or getattr(page, "plan", base.PLAN_WINDOWS) != base.PLAN_SPEND):
             return None
         now = self._now()
+        cents = self._counter.buckets(now)
+        if cents is None:
+            return None
         return protocol.spend_burn(provider, protocol.burn_quarter(now),
-                                   self._counter.buckets(now))
+                                   cents)
 
     def fetch(self):
         """The callable to hand Bridge(fetch_usage=...).

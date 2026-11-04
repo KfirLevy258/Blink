@@ -9,20 +9,29 @@ release, and the spend pages are held from release. This runs only when
 somebody asks for it, against the board on this desk.
 
 The timeline, generated below rather than kept as a file (fixtures in this
-repository are made by committed code, never captured):
+repository are made by committed code, never captured), is the life of one
+usage-billed seat through a month (docs/plans/2026-11-04-spend-page-plan.md,
+task 8):
 
     windows      41% / 12%, the page as every desk has it today
-    spend        a $500 monthly cap, 62.8% used, $314.12, 16 days to go
-    spend        a daily cap at 96.4%, before the dollars have arrived
-    unreported   an Enterprise login with nothing to read
-    windows      back to Max
+    exact        $314.12 of $500 just after /usage            dollars: steady
+    estimated    $318.40, counted from the status line since  dollars: rising
+    hint         $331.80 on a /usage figure over a day old    dollars: easing
+    near cap     $482.00, 96.4%: "almost used up"             dollars: heavy
+    reached      $500.00 of $500, exact: "used up"            dollars: rising
+    rollover     the 1st: $0.40 counted, no cap known, hint   dollars: idle
+    Max          /login to Max: windows again                 (no dollar line)
+    back         /login back, /usage run: $12.34 of $500      dollars: steady
 
 On a board whose hello announces protocol.BOARD_CAP_PLAN, the daemon sends
-a plan message per change, the board prints one `[plan]` line for each, and
-the panel should match panel_render scenes 0, 45, 46 and 47 in turn. A board
-that does not announce it -- 1.3.4, or any build without the handler -- is
-sent no plan message, and the usage lines on the two spend steps carry
-dashes instead of the share: the review's first focus, proved on hardware.
+a plan message per change, and the board prints one `[plan]` line for each
+message it is sent; a board that also announces BOARD_CAP_SPENDBURN is sent
+the dollar burn line (`sburn`) on every spend step. The panel should match
+panel_render scenes 45-61 along the way. A board that does not announce
+plans -- 1.4.1, 1.3.4 -- is sent no plan message and no `sburn`, and the
+usage lines on the spend steps carry dashes instead of the share: the
+review's first focus, proved on hardware. No step has a token burn line, so
+no `burn` line goes to either.
 
 What it needs and what it does, so nobody is surprised:
   - The installed service is stopped for the run and started again after,
@@ -46,52 +55,96 @@ from pc import protocol
 from tests.fleet import agent
 
 # Seconds between steps. Long enough for a 3 s poll to land each step at
-# least twice, and for a person watching the panel to compare it with the
-# matching render.
-STEP_S = 15
+# least twice, for the dollar burn line's 15 s minimum gap
+# (bridge.BURN_MIN_GAP_S) to let one line out per step, and for a person
+# watching the panel to compare it with the matching render.
+STEP_S = 20
 POLL_S = 3.0
 
-# (expected [plan] words on new firmware, the step itself)
+_MONTHLY = 16 * 86400 + 9 * 3600
+_WINDOWS = {"session_pct": 41.0, "weekly_pct": 12.0,
+            "session_resets_in_s": 3 * 3600 + 40 * 60,
+            "weekly_resets_in_s": 6 * 86400 + 22 * 3600, "state": "running"}
+
+
+def _spend(pct, usd, lim, est, *, hint=False, resets=_MONTHLY, sburn):
+    step = {"plan": "spend", "period": "monthly", "session_pct": pct,
+            "usd": usd, "est": est, "hint": hint,
+            "session_resets_in_s": resets, "sburn": sburn,
+            "state": "running"}
+    if lim is not None:
+        step["lim"] = lim
+    return step
+
+
+# (name, the step itself)
 TIMELINE = (
-    ("windows", {"session_pct": 41.0, "weekly_pct": 12.0,
-                 "session_resets_in_s": 3 * 3600 + 40 * 60,
-                 "weekly_resets_in_s": 6 * 86400 + 22 * 3600,
-                 "state": "running"}),
-    ("spend monthly", {"plan": "spend", "session_pct": 62.8,
-                       "usd": 314.12, "lim": 500, "period": "monthly",
-                       "session_resets_in_s": 16 * 86400 + 9 * 3600,
-                       "state": "running"}),
-    ("spend daily", {"plan": "spend", "session_pct": 96.4,
-                     "period": "daily",
-                     "session_resets_in_s": 3 * 3600 + 20 * 60}),
-    ("unreported", {"plan": "unreported", "acct": "enterprise",
-                    "state": "running"}),
-    ("windows", {"session_pct": 41.0, "weekly_pct": 12.0,
-                 "session_resets_in_s": 3 * 3600 + 40 * 60,
-                 "weekly_resets_in_s": 6 * 86400 + 22 * 3600}),
+    ("windows", dict(_WINDOWS)),
+    ("exact", _spend(62.8, 314.12, 500, False, sburn="steady")),
+    ("estimated", _spend(63.7, 318.40, 500, True, sburn="rising")),
+    ("hint", _spend(66.4, 331.80, 500, True, hint=True, sburn="easing")),
+    ("near cap", _spend(96.4, 482.00, 500, True, sburn="heavy")),
+    ("reached", _spend(100.0, 500.00, 500, False, sburn="rising")),
+    # Past 00:00 UTC on the 1st: the anchor is last month's, so the figure
+    # is the count since midnight, no cap is known and the hint shows. The
+    # five-hour dollar history was cleared with the period.
+    ("rollover", _spend(-1.0, 0.40, None, True, hint=True,
+                        resets=30 * 86400 + 23 * 3600, sburn="idle")),
+    ("Max", dict(_WINDOWS, sburn=None)),
+    ("back", _spend(2.5, 12.34, 500, False,
+                    resets=30 * 86400 + 22 * 3600, sburn="steady")),
 )
+
+# Every share a spend step shows. None of them may reach a board that does
+# not draw plans: there it would read as the five-hour window.
+SPEND_SHARES = tuple(step["session_pct"] for _, step in TIMELINE
+                     if step.get("plan") == "spend"
+                     and step["session_pct"] >= 0)
 
 
 def scenario_doc():
     steps = [dict(step, at=i * STEP_S, provider="claude")
              for i, (_, step) in enumerate(TIMELINE)]
     return {"name": "spend_pages",
-            "note": "Task 15e: windows, monthly spend, daily spend near the "
-                    "cap, unreported, windows. Generated by "
+            "note": "Task 8: windows, then a usage-billed seat exact, "
+                    "estimated, hinted, near and at its cap, across a month "
+                    "rollover, to Max and back. Generated by "
                     "tests/fleet/spend_board_run.py.",
             "steps": steps,
             "duration_s": len(TIMELINE) * STEP_S}
 
 
+def _plan_of(step):
+    if step.get("plan") != "spend":
+        return protocol.plan("claude", protocol.PLAN_WINDOWS)
+    return protocol.plan("claude", "spend", step["period"], step["usd"],
+                         step.get("lim"), est=step["est"],
+                         hint=step["hint"])
+
+
 def expected_plans():
-    """The [plan] words a new board prints, one per change. The first
-    windows step prints nothing: the bus has no plan message until it has
-    seen a spend reading, which is the release gate."""
+    """The plan messages a board that draws plans is sent, one per change.
+    The first windows step sends none: the bus has no plan message until it
+    has seen a spend reading, which is the release gate."""
     out = []
-    for words, _ in TIMELINE[1:]:
-        if not out or out[-1] != words:
-            out.append(words)
+    for _, step in TIMELINE[1:]:
+        msg = _plan_of(step)
+        if not out or out[-1] != msg:
+            out.append(msg)
     return out
+
+
+def expected_sburns():
+    """The dollar buckets each spend step puts on the wire."""
+    from pc.providers.scripted import SBURN_PRESETS
+    return [tuple(SBURN_PRESETS[step["sburn"]]) for _, step in TIMELINE
+            if step.get("plan") == "spend"]
+
+
+def _words(msg):
+    """What the board's `[plan]` line says for one plan message, after the
+    page: proto.c prints kind and period, never the dollars."""
+    return " ".join(w for w in (msg.get("plan"), msg.get("period")) if w)
 
 
 def board_plans(records):
@@ -133,43 +186,84 @@ def sent(records, t):
             and isinstance(r.get("msg"), dict) and r["msg"].get("t") == t]
 
 
+# Console lines that end a run's claim to be clean, by what they mean. A
+# refused line is a message the board parsed and threw away; a boot line in
+# the middle of a run is a reboot.
+_REFUSED = ("line refused", "rx ring overflow")
+_REBOOTED = ("[usage] firmware boot OK", "[fatal]", "not healthy within 90 s")
+
+
+def _console(records):
+    return [str(r.get("line", "")) for r in records
+            if r.get("dir") == "console"]
+
+
 def judge(records):
-    """(ok, lines) for one run's transcript. Pure, so it is tested."""
+    """(ok, lines) for one run's transcript. Pure, so it is tested.
+
+    The lines name message types, page kinds and counts -- never a raw
+    serial line or a dollar figure."""
     lines = []
     hello = board_hello(records)
-    new = protocol.BOARD_CAP_PLAN in protocol.board_caps(hello)
+    caps = protocol.board_caps(hello)
+    new = protocol.BOARD_CAP_PLAN in caps
+    dollars = protocol.BOARD_CAP_SPENDBURN in caps
     lines.append(f"board firmware: {hello.get('fw') or 'not heard'}"
-                 f" ({'announces' if new else 'does not announce'} plans)")
-    want = expected_plans() if new else []
-    # By message, then by kind: a reconnect re-sends the plan it had, and
-    # the two spend steps are two different messages of the same kind.
-    plans_sent = [m.get("plan") for m in _dedupe(sent(records, "plan"))]
-    want_kinds = [w.split()[0] for w in want]
+                 f" ({'announces' if new else 'does not announce'} plans,"
+                 f" {'announces' if dollars else 'does not announce'}"
+                 f" spendburn)")
     ok = True
-    if plans_sent != want_kinds:
-        ok = False
-        lines.append(f"FAIL daemon sent plans {plans_sent}, wanted"
-                     f" {want_kinds}")
+
+    def check(good, ok_line, fail_line):
+        nonlocal ok
+        ok = ok and good
+        lines.append(("ok   " + ok_line) if good else ("FAIL " + fail_line))
+
+    plans = sent(records, "plan")
+    want = expected_plans() if new else []
+    # By message: a reconnect re-sends the plan it had, which is a repeat,
+    # not a step.
+    got = _dedupe(plans)
+    check(got == want,
+          f"daemon sent {len(got)} plan messages, as the timeline says",
+          f"daemon sent plans {[_words(m) for m in got]}"
+          f" {[(m.get('est', 0), m.get('hint', 0)) for m in got]},"
+          f" wanted {[_words(m) for m in want]}"
+          f" {[(m.get('est', 0), m.get('hint', 0)) for m in want]}")
+    # One [plan] line for every plan message sent, in order: the board
+    # prints one per message received, the same page or not.
+    board = board_plans(records)
+    want_board = [_words(m) for m in plans]
+    check(board == want_board,
+          f"board printed {len(board)} [plan] lines, one per message",
+          f"board printed {board}, wanted {want_board}")
+
+    sburns = sent(records, "sburn")
+    if dollars:
+        shown = {tuple(m.get("b") or ()) for m in sburns}
+        missing = [b for b in expected_sburns() if b not in shown]
+        check(not missing,
+              f"daemon sent {len(sburns)} sburn lines, every spend step's",
+              f"{len(missing)} spend steps' dollar buckets never sent")
     else:
-        lines.append(f"ok   daemon sent plans {plans_sent}")
-    got = _dedupe(board_plans(records))
-    if new:
-        if got != want:
-            ok = False
-            lines.append(f"FAIL board reported {got}, wanted {want}")
-        else:
-            lines.append(f"ok   board reported {got}")
-    else:
-        if got:
-            ok = False
-            lines.append(f"FAIL an old board printed [plan] lines: {got}")
+        check(not sburns, "no sburn line sent",
+              f"{len(sburns)} sburn lines sent to a board without the cap")
+    burns = sent(records, "burn")
+    check(not burns, "no token burn line sent",
+          f"{len(burns)} token burn lines sent")
+    if not new:
         shares = [m.get("session_pct") for m in sent(records, "usage")]
-        if 62.8 in shares or 96.4 in shares:
-            ok = False
-            lines.append("FAIL an old board was sent a spend share as its"
-                         " session figure")
-        else:
-            lines.append("ok   no spend share reached the old board")
+        check(not any(s in shares for s in SPEND_SHARES),
+              "no spend share reached the board",
+              "a board without plans was sent a spend share as its session"
+              " figure")
+
+    console = _console(records)
+    refused = [x for x in console if any(k in x for k in _REFUSED)]
+    check(not refused, "no refused line",
+          f"{len(refused)} refused lines")
+    reboots = [x for x in console if any(k in x for k in _REBOOTED)]
+    check(not reboots, "no reboot", f"{len(reboots)} boot or fault lines")
     return ok, lines
 
 

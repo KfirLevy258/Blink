@@ -295,8 +295,11 @@ def build_bus():
     # account its window back.
     # One replay for both pages: a step marks whichever provider it names.
     replay = scripted.burn_source()
+    # The dollar burn view's count likewise: the scenario's `sburn` steps,
+    # never ~/.blink/spend-count.json, which is the desk's own.
     return ingest.IngestionBus(providers=[scripted],
                                burn={"claude": replay, "codex": replay},
+                               counter=scripted.spend_count(),
                                verdict=None)
 
 
