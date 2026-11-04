@@ -805,6 +805,12 @@ def plan(provider, kind, period="", usd=None, limit=None, account="",
     return msg
 
 
+# The status line's src (statusline_source.SRC_ID, which imports this
+# module, so it is spelled here and a test holds the two together). A spend
+# frame from it is a gateway's own spend_limit figure.
+GATEWAY_SRC_ID = "cli"
+
+
 def plan_for(primary, secondary=None) -> dict:
     """Build `plan` from the (primary, secondary) frames on the panel.
 
@@ -817,9 +823,18 @@ def plan_for(primary, secondary=None) -> dict:
         kind = getattr(f, "plan", PLAN_WINDOWS)
         if kind != PLAN_WINDOWS:
             spend = kind == PLAN_SPEND
+            # A gateway's figure is the gateway's own count, not this
+            # side's estimate; it is marked only when the reading itself is
+            # old. spend_exact is set on the config's page alone, and until
+            # the /code-review max of 2026-11-04 (U4) every gateway seat
+            # read "~$314" for it.
+            if getattr(f, "src", "") == GATEWAY_SRC_ID:
+                est = bool(getattr(f, "stale", False))
+            else:
+                est = not f.spend_exact
             return plan(f.provider, kind, f.spend_period, f.spend_usd,
                         f.spend_limit_usd, f.account,
-                        est=spend and not f.spend_exact,
+                        est=spend and est,
                         hint=spend and bool(f.spend_hint))
     return plan(PLAN_PROVIDER, PLAN_WINDOWS)
 

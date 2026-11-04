@@ -194,8 +194,9 @@ def test_the_bus_shows_spend_and_says_so():
     msg = bus.poll()
     assert msg["session_pct"] == 62.8
     assert msg["session_resets_in_s"] == 18 * 86400 + 4 * 3600
+    # A status-line (gateway) frame: the gateway's own figure, exact (U4).
     assert bus.plan_msg() == protocol.plan(
-        "claude", "spend", "monthly", 314.12, 500.0, est=True)
+        "claude", "spend", "monthly", 314.12, 500.0)
     assert bus.fetch().plan_msg() == bus.plan_msg()
 
 
@@ -526,8 +527,9 @@ def test_plan_flags_only_when_true():
     m = protocol.plan("claude", base.PLAN_UNREPORTED, account="team",
                       est=True, hint=True)
     assert "est" not in m and "hint" not in m
-    # plan_for reads them off the spend primary.
+    # plan_for reads them off the spend primary: the config's page.
     f = spend()
+    f.src = base.SPEND_SRC_ID
     assert "est" in protocol.plan_for(f) and "hint" not in protocol.plan_for(f)
     f.spend_exact = True
     assert "est" not in protocol.plan_for(f)
@@ -541,6 +543,7 @@ def test_plan_resent_when_estimate_starts():
     compared, so the flag goes out on its own."""
     sent = []
     exact = spend()
+    exact.src = base.SPEND_SRC_ID
     exact.spend_exact = True
     f = _Fetch(protocol.frame_to_usage(exact, NOW), protocol.plan_for(exact))
     b = _bridge(f, sent)
@@ -550,6 +553,7 @@ def test_plan_resent_when_estimate_starts():
     b.poll_if_changed()
     assert [m["t"] for m in sent].count("plan") == 1
     old = spend()                       # anchor 900 s old: not exact now
+    old.src = base.SPEND_SRC_ID
     f.plan = protocol.plan_for(old)
     b.poll_if_changed()
     plans = [m for m in sent if m["t"] == "plan"]
@@ -829,3 +833,22 @@ def test_a_share_over_the_boards_range_is_clamped_not_refused():
     # Under it, untouched.
     assert protocol.frame_to_usage(spend(pct=102.3), NOW)["session_pct"] \
         == 102.3
+
+
+def test_a_gateway_figure_is_not_an_estimate():
+    """/code-review max of 2026-11-04, U4: est was "not spend_exact", and
+    spend_exact is set only on the config's page, so every gateway seat's
+    figure -- the gateway's own count, off the status line -- went out as
+    an estimate: "~$314", "Spent ~$314 of $500". It is marked only when
+    the reading itself is stale."""
+    from pc import statusline_source as ss
+    assert protocol.GATEWAY_SRC_ID == ss.SRC_ID
+    f = spend()
+    assert f.src == ss.SRC_ID
+    assert "est" not in protocol.plan_for(f)
+    f.stale = True
+    assert protocol.plan_for(f)["est"] == 1
+    # A scenario's step says for itself.
+    g = spend()
+    g.src = "scripted"
+    assert protocol.plan_for(g)["est"] == 1
