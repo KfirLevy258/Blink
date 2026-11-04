@@ -14,8 +14,8 @@ happily merge a Max session window into the page of a login that has none.
 
 What is read, and from where: the `oauthAccount` object Claude Code keeps in
 its config, parsed once by pc/claude_plan (which knows where the file is),
-and from it only the organisation type and the two account ids. That object describes the login;
-it is not a credential, which Claude Code keeps in the Keychain or in
+and from it only the organisation type and the two account ids. That
+object describes the login; it is not a credential, which Claude Code keeps in the Keychain or in
 ~/.claude/.credentials.json and which nothing here opens. The ids are hashed
 on the way in and only the hash is kept, so this process never holds them.
 
@@ -75,9 +75,10 @@ class AccountWatch:
     The file's mtime alone is no clue to a login: Claude Code rewrites it
     for its own bookkeeping all day. So a switch is noticed by the poll on
     which this watch first sees a different fingerprint. The view comes from
-    pc/claude_plan's PlanReader, which stats the file at every look (round
-    5 of the 2026-11-04 review; once a RECHECK_S before), so a switch is
-    seen on the poll after /login writes it.
+    pc/claude_plan's PlanReader, which stats the file once a poll and
+    parses a change at most once a FIRST_ANSWER_RETRY_S (rounds 5 and 6 of
+    the 2026-11-04 review; once a RECHECK_S before), so a switch is seen
+    within seconds of /login writing it.
 
     But it is DATED by the file. /login writes the file, so the switch
     happened no later than the mtime of the view that first carries the new

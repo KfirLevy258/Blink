@@ -48,11 +48,13 @@ from the file -- no value, no key, no path, no exception text -- is logged,
 printed, raised or saved, at any level (CLAUDE.md), and the parsed document
 is dropped before read() returns.
 
-WHAT IT COSTS. A stat at every look (every poll, two seconds; once a
-RECHECK_S until round 5 of the 2026-11-04 review, which needed a /login
-seen within a poll), and a read only when the file's signature -- inode,
-mtime and size -- has changed since the last look that got an answer. The file was 120 KB on the owner's desk. One over
-MAX_BYTES is not opened at all, and anything but a regular file (a FIFO
+WHAT IT COSTS. A stat once a poll (every two seconds; once a RECHECK_S
+until round 5 of the 2026-11-04 review, which needed a /login seen within
+seconds), and a read only when the file's signature -- inode, mtime and
+size -- has changed since the last answer, at most once a
+FIRST_ANSWER_RETRY_S (ConfigFile). The file was 120 KB on the owner's
+desk; a generated 5.6 MB one parses in 11 ms there. One over MAX_BYTES is
+not opened at all, and anything but a regular file (a FIFO
 would block the open, and the serial thread with it) is not opened either.
 Each of those, and JSON that is not an object, reads as "not Ultra", and
 that answer is kept against the signature like any other, so it is not
@@ -61,9 +63,9 @@ not an answer at all (since 9aba323): Claude Code rewrites the file all
 day, so it is most often a write caught half-done, and reading it as "not
 Ultra, no seat" flipped the page until the file next changed. It is
 treated like an OSError or a file that changed between the stat and the
-read: the last view is kept and the file is tried again RECHECK_S later,
-or as soon as it changes. Not Ultra is the safe answer: it leaves the desk to the
-sustained rule, which is slower and was all there was before.
+read: the last view is kept and the file is tried again
+FIRST_ANSWER_RETRY_S later. Not Ultra is the safe answer: it leaves the
+desk to the sustained rule, which is slower and was all there was before.
 
 THE RESIDUAL. One .claude.json vouches for every session in the shared
 statusline.json (the review of PR #6, 2026-11-01). The status line is
@@ -86,28 +88,34 @@ import time
 
 from pc import claude_account, claude_home
 
-# How soon a read that failed is tried again, the file unchanged
-# (PlanReader.look). Until round 5 of the 2026-11-04 review this was how
-# often the file was looked at at all, which put a /login up to a minute
-# behind the status line. Lateness of another kind remains: the plan name in the file can be a day stale, or
-# stale for good under CLAUDE_CODE_OAUTH_TOKEN, because Claude Code
-# refreshes it only with a profile over a day old (the review of PR #6,
-# 2026-11-01). The tier, refreshed on nearly every launch, is what keeps a
-# stale name from vouching for a downgraded desk (is_ultra).
+# A minute: how often the file was looked at until round 5 of the
+# 2026-11-04 review, which put a /login up to a minute behind the status
+# line, and how soon a failed read was tried again until round 6. Nothing
+# here is paced by it now (ConfigFile); it names "a minute" where the
+# tests and older comments speak of that pacing. Lateness of another kind
+# remains: the plan name in the file can be a day stale, or stale for good
+# under CLAUDE_CODE_OAUTH_TOKEN, because Claude Code refreshes it only with
+# a profile over a day old (the review of PR #6, 2026-11-01). The tier,
+# refreshed on nearly every launch, is what keeps a stale name from
+# vouching for a downgraded desk (is_ultra).
 RECHECK_S = 60
 
-# Before the first answer (PlanReader.look), how soon the file is tried
-# again. Not every poll: a config that never parses would then be read
-# whole every two seconds on the serial thread. A source answers from
-# memory and is asked at every look until it answers.
+# The shortest gap between two parses of the file (ConfigFile.look): a
+# change that comes sooner, and a read that failed, wait for it. Not every
+# poll: a config Claude Code rewrites every poll, or one that never parses,
+# would then be read whole every two seconds on the serial thread. Five
+# seconds is how late a /login can be seen for it (round 6 of the
+# 2026-11-04 review, items 3 and 4). A source answers from memory and is
+# asked at every poll.
 FIRST_ANSWER_RETRY_S = 5
 
 # The largest file read. Claude Code's config grows with every project it
 # has been run in (a history and settings per folder); 120 KB on the owner's
 # desk after months of use. Eight megabytes is sixty times that, and bounds
-# what a poll on the serial thread can be made to parse: tens of
-# milliseconds, and only when the file changed. A
-# file over it is not opened: its size is the stat's.
+# what a poll on the serial thread can be made to parse: 11 ms measured for
+# 5.6 MB on the owner's Mac (ConfigFile), and only when the file changed,
+# at most once a FIRST_ANSWER_RETRY_S. A file over it is not opened: its
+# size is the stat's.
 MAX_BYTES = 8 * 1024 * 1024
 
 # The plan's name, as planDisplayName gives it, and the tail of the
@@ -359,7 +367,7 @@ def parse(path, st=None):
         # checked for its type, but this is a file anyone can write, and a
         # value no check foresaw must cost the view, not the poll. An
         # answer, like JSON that is not an object: held until the file
-        # changes, not read again once a minute.
+        # changes, not read again.
         view = bare
     del doc         # the rest of the file is not kept, not even here
     return view

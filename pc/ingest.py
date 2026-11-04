@@ -125,7 +125,7 @@ class IngestionBus:
         # watch, the status-line provider (the Ultra plan, the spend seat
         # and its saved /usage) and the spend-seat check in _collect_frames
         # below all take their view from it, so the file is looked at once a
-        # claude_plan.RECHECK_S and all three agree on what it said. None on
+        # poll (PlanReader.look) and all three agree on what it said. None on
         # a scenario's bus, for the reason above: it never asks.
         self._plan_reader = None
         if providers is None:
@@ -140,7 +140,7 @@ class IngestionBus:
         # then the login watch is never polled and no frame is filtered for
         # it, so a desk that has never seen a spend reading merges exactly
         # as it did before any of this existed (the config is still looked
-        # at once a minute, for the seat: _spend_seat). Once true it
+        # at once a poll, for the seat: _spend_seat). Once true it
         # stays true for the life of the process: the guard matters most
         # straight AFTER the spend page goes away, at the switch back.
         self._plans_seen = False

@@ -294,8 +294,8 @@ class ClaudeCliProvider(base.ProviderParser):
         # `plan`, when given, is that reader already made: pc/ingest hands
         # every one of its users the same one (this provider, the login
         # watch and the bus's own spend-seat check), so the file is looked
-        # at once a RECHECK_S for all of them, and they cannot disagree
-        # about the seat within a poll.
+        # at once a poll for all of them (PlanReader.look), and they cannot
+        # disagree about the seat within a poll.
         self._plan = (plan if plan is not None
                       else claude_plan.PlanReader(path=plan_path))
         # The login the config named at the last look, as its fingerprint,
@@ -438,12 +438,14 @@ class ClaudeCliProvider(base.ProviderParser):
     def _reply_without_window(self, payload, mtime, now_epoch=None):
         """Evidence of no five-hour window, when this payload completes the
         proof; otherwise None. `now_epoch` (the poll's clock; the mtime when
-        None) only paces the plan's look (claude_plan.RECHECK_S).
+        None) is the time the plan's look is asked at, so it shares the
+        poll's (claude_plan.PlanReader.look).
 
         THE FAST PATH, on the Ultra plan (owner's request, 2026-11-01:
         Ultra desks switch on the first reply again). When Claude Code's
         config names the Ultra plan (pc/claude_plan: a rate-limit tier ending
-        in max_20x, and a planDisplayName of "Ultra" or none), ONE reply -- recognised exactly as below, cost risen
+        in max_20x, and a planDisplayName of "Ultra" or none), ONE reply --
+        recognised exactly as below, cost risen
         against a baseline at most BASELINE_MAX_S old -- that rendered a
         usable seven_day and no five_hour is proof, kind
         KIND_STATUSLINE_ULTRA. The sustained rule below exists because one
@@ -497,9 +499,9 @@ class ClaudeCliProvider(base.ProviderParser):
         mid-window shows one), but nothing above depends on seeing it, so a
         poll gap -- the board unplugged, the lid closed -- costs the safety
         nothing. On Ultra, where the fast path cannot read the plan, a desk
-        at work makes the chain in five and a quarter hours, breaks in its use of up to an hour included and poll
-        gaps of up to an hour less two reply intervals (above), and the
-        verdict is kept from then on.
+        at work makes the chain in five and a quarter hours, breaks in its
+        use of up to an hour included and poll gaps of up to an hour less
+        two reply intervals (above), and the verdict is kept from then on.
 
         THE RESIDUAL. A Pro or Max desk is still marked if its clock runs
         fast by five hours or more (it never renders five_hour at all), or
@@ -624,9 +626,9 @@ class ClaudeCliProvider(base.ProviderParser):
                 and mtime - self._five_seen < base.SESSION_WINDOW_S):
             return None
         # Asked last, only of a reply that already qualifies. The file is
-        # looked at once a claude_plan.RECHECK_S on every desk all the same,
-        # for the spend seat (_spend_or_none); this look is the same
-        # reader's, so it costs nothing more.
+        # looked at once a poll on every desk all the same, for the spend
+        # seat and the login (_look); this look is the same reader's at
+        # the same poll, so it costs nothing more.
         if self._plan.ultra(mtime if now_epoch is None else now_epoch):
             return session_verdict.evidence(
                 False, session_verdict.KIND_STATUSLINE_ULTRA, mtime)
@@ -703,9 +705,10 @@ class ClaudeCliProvider(base.ProviderParser):
         """The config's view this poll, with its login noted, or None when
         looking failed -- said once in fixed words (spend_failed), as a
         failure of the spend page it is for, and costing this poll's spend
-        page only. The config is looked at on every poll (paced by
-        claude_plan.RECHECK_S), so a /usage or a /login shows within about
-        a minute."""
+        page only. The config is stat'ed on every poll and parsed when it
+        changed, at most once a claude_plan.FIRST_ANSWER_RETRY_S
+        (claude_plan.ConfigFile), so a /usage or a /login shows within
+        seconds."""
         try:
             view = self._plan.look(now_epoch)
             # Whatever the seat: a login away and back is two switches, and

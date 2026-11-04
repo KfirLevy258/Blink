@@ -674,11 +674,12 @@ def test_the_full_readme_has_a_reads_row_for_the_plan():
                  "kept, logged or printed",
                  "anything but a regular file, is not opened",
                  "is read again until it changes",
-                 "the last reading is kept and the file is tried again a"
-                 " minute later"):
+                 "the last reading is kept and the file is tried again"
+                 " five seconds later"):
         assert said in row[0], said
-    # Untrue since 9aba323: text that does not parse is retried every
-    # RECHECK_S, keeping the last view (final review of 2026-11-04).
+    # Untrue since 9aba323: text that does not parse is retried, keeping
+    # the last view (final review of 2026-11-04; five seconds later since
+    # round 6).
     assert "does not parse is not parsed again" not in row[0]
     assert ("the first Claude Code reply with no five-hour figure is that"
             " proof") in full
