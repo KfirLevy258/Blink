@@ -65,7 +65,13 @@ all month and was rewritten on nearly every render. Now:
   forward within a login and a month, and bind() empties everything when
   either changes.
 * Each session's highest estimate, so a resumed session's past cost is
-  never counted as new.
+  never counted as new. These are kept until the month turns or the login
+  changes, and they are what the file's size follows: about 70 bytes a
+  session, so 2 KB a day at thirty sessions a day and 66 KB by the 31st
+  (tests/pc/test_spend_count.py's busy month, U13b in the final review of
+  2026-11-04, which found the README's "a few kilobytes" untrue). Not
+  pruned: a session dropped while its terminal stood idle would take its
+  next render for a first sighting and count nothing from it.
 * A save writes a rise on a session already in the file at most once a
   minute (SAVE_EVERY_S). A rise not yet written is counted again after a
   restart, from the saved high-water mark and stamped with the saved

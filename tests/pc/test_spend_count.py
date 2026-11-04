@@ -493,3 +493,31 @@ def test_the_exit_flush_writes_only_where_the_counter_wrote(tmp_path,
     spend_count._flush_at_exit()
     assert not (tmp_path / ".blink").exists()
 
+
+
+def test_the_file_at_the_end_of_a_busy_month(tmp_path):
+    """docs/README-full.md said the file "stays a few kilobytes all month".
+    The rises do, but every session's high-water mark is kept until the
+    month turns, so it grows by about 2 KB a day at thirty sessions a day:
+    66 KB on the 31st, measured with this generator (U13b, final review of
+    2026-11-04). The README now gives that figure; this keeps it true."""
+    import random
+    import uuid
+    r = random.Random(1)
+    t0 = 1_800_000_000.0
+    c = mk(tmp_path)
+    c.bind("f" * 64, t0)
+    t, sizes = t0, []
+    for day in range(31):
+        for _s in range(30):
+            sid = str(uuid.UUID(int=r.getrandbits(128)))
+            for k in range(20):
+                t += r.uniform(10, 200) + 0.123456
+                c.observe(sid, 0.37 * (k + 1), t)
+                c.since(t0)
+        c._urgent = True
+        c.save()
+        sizes.append((tmp_path / "spend-count.json").stat().st_size)
+    assert 50_000 < sizes[-1] < 72_000
+    # Roughly linear: a day's sessions, not the month's rises.
+    assert 1_500 < (sizes[-1] - sizes[0]) / 30 < 2_500
