@@ -572,3 +572,61 @@ def test_an_unreadable_out_file_prints_nothing(tmp_path, shim):
         out.chmod(0o600)
     assert done.returncode == 0
     assert done.stderr == b""
+
+
+# ------------------------------------- the shims after `blink update` (finding 3)
+
+@posix_only
+def test_wsl_watchdog_refreshes_stale_shims_and_the_out_file(tmp_path,
+                                                            monkeypatch):
+    """`blink update` swaps the program and never rewrites a shim; natively
+    shim_content_check catches that, and inside WSL nothing did. The WSL
+    watchdog now reads each shim through wsl_run, rewrites one that is not
+    the bundle's, and puts back an out file that is gone -- saying so with
+    no path in it, since this goes into bridge.log."""
+    lin = _tree(tmp_path, {}, link=False)
+    home = _home(lin)
+    run = _runner(lin, _fake_bin(tmp_path))
+    install_statusline.install_into(home, run)
+    hook = lin / ".blink" / "blink-hook.sh"
+    hook.write_text("#!/bin/sh\n# an older release\nexit 0\n")
+    (lin / ".blink" / "out").unlink()
+
+    dog = install_statusline.wsl_drift_watchdog(home, run)
+    msg = dog.tick()
+    assert msg and "blink-hook.sh" in msg and "out file" in msg
+    assert "blink-statusline.sh" not in msg
+    for secret in (str(tmp_path), home.drop_dir, "wsl.localhost"):
+        assert secret not in msg
+    assert hook.read_bytes() == cli._shim_source("blink-hook.sh").encode()
+    assert os.access(hook, os.X_OK)
+    assert (lin / ".blink" / "out").read_bytes() == \
+        (home.drop_dir + "\n").encode("utf-8")
+    # Current now: a check that is due again finds nothing to do.
+    assert install_statusline.wsl_drift_watchdog(home, run).tick() is None
+
+
+@posix_only
+def test_wsl_shim_refresh_respects_an_uninstall(tmp_path):
+    """No marker means the user uninstalled: nothing is put back."""
+    lin = _tree(tmp_path, {}, link=False)
+    home = _home(lin)
+    calls = []
+    run = _runner(lin, _fake_bin(tmp_path), calls=calls)
+    assert install_statusline.wsl_drift_watchdog(home, run).tick() is None
+    assert calls == []
+    assert not (lin / ".blink" / "blink-hook.sh").exists()
+
+
+def test_wsl_shim_refresh_does_not_rewrite_what_it_could_not_read(tmp_path):
+    """wsl.exe failing is "cannot tell", not "stale": no write follows."""
+    home = _home("/home/zoe")
+    install_statusline._write_marker(_sl_cmd("/home/zoe"), home)
+    calls = []
+
+    def run(argv, stdin=None):
+        calls.append(argv)
+        return -1, b"", b""
+    assert install_statusline.wsl_shim_check(home, run) is None
+    assert all(stdin_less[2] != install_statusline._WRITE
+               for stdin_less in calls)

@@ -1142,6 +1142,67 @@ def _wsl_drift(home, marker, wsl_run):
     return what
 
 
+def wsl_shim_check(home, wsl_run):
+    """shim_content_check for a WSL home: each shim inside the distribution
+    read through `wsl_run` and rewritten when it is not the bundle's, and
+    $HOME/.blink/out put back when it is gone.
+
+    Not shim_content_check with other paths: that one writes through
+    cli._write_shim's os.replace on the path it is given, which for this
+    home is a UNC path (wsl_drift_watchdog's docstring). Without this, a
+    WSL desk ran every later release's daemon against the shims its first
+    install wrote, since `blink update` rewrites none (final branch review,
+    finding 3). The shims are cat'ed rather than hashed inside: cat is in
+    every distribution, sha256sum need not be.
+
+    A read that fails (wsl.exe down, a timeout) is "cannot tell" and writes
+    nothing. The text goes into bridge.log, so it names the shim and no
+    path. Never raises; None when there was nothing to do."""
+    if os.environ.get(WATCHDOG_DISABLE_ENV):
+        return None
+    # The marker rule, as natively: no marker is an uninstall, never undone.
+    if not _read_marker(home):
+        return None
+    from pc import cli
+    said = []
+    try:
+        for name in WSL_SHIMS:
+            try:
+                want = cli._shim_source(name).encode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue            # nothing to compare against
+            path = wsl_shim_path(home, name)
+            rc, out, _ = wsl_run(["sh", "-c", _CAT_OR_NOTHING, "sh", path])
+            if rc != 0 or out == want:
+                continue
+            try:
+                _wsl_write(wsl_run, path, "-", "755", want, "a Blink shim")
+            except WslInstallError:
+                said.append(f"{name} inside WSL is out of date and could not"
+                            " be replaced")
+            else:
+                said.append(f"{name} inside WSL was out of date; replaced it")
+        out_file = wsl_shim_path(home, "out")
+        rc, out, _ = wsl_run(["sh", "-c", _CAT_OR_NOTHING, "sh", out_file])
+        if rc == 0 and not out.strip():
+            # Without it the shims write into the Linux home, where the
+            # daemon never looks, and the panel stops with no error.
+            try:
+                out_dir = _wsl_out_dir(home, wsl_run)
+                _wsl_write(wsl_run, out_file, "-", "600",
+                           (out_dir + "\n").encode("utf-8"),
+                           "Blink's out file")
+            except WslInstallError:
+                said.append("Blink's out file inside WSL is missing and could"
+                            " not be put back")
+            else:
+                said.append("Blink's out file inside WSL was missing; put it"
+                            " back")
+    except Exception:
+        pass
+    return "; ".join(said) if said else None
+
+
 def shim_content_check(shims, home=None):
     """Rewrite any installed shim whose CONTENTS have fallen behind.
 
@@ -1194,7 +1255,8 @@ class DriftWatchdog:
     """
 
     def __init__(self, settings_path, shim_path, interval_s=300.0,
-                 now=None, check=drift_check, *, shims=(), home=None):
+                 now=None, check=drift_check, *, shims=(), home=None,
+                 shim_check=None):
         import time as _time
         self._settings = settings_path
         self._shim = shim_path
@@ -1209,6 +1271,10 @@ class DriftWatchdog:
         # until the hook shim turned out to go stale -- keeps working and
         # keeps its ticks free of any filesystem read it did not ask for.
         self._shims = tuple(shims)
+        # Or a callable doing that check its own way, () -> message or
+        # None: a WSL home's, which reads and writes the shims inside the
+        # distribution (wsl_shim_check). Outside the give-up cap, as above.
+        self._shim_check = shim_check
         self._next = self._now()
         self._reinstatements = 0
         self._gave_up = False
@@ -1244,7 +1310,11 @@ class DriftWatchdog:
                            " the conflict is resolved.")
                 found.append(msg)
 
-        if self._shims:
+        if self._shim_check is not None:
+            stale = self._shim_check()
+            if stale:
+                found.append(stale)
+        elif self._shims:
             stale = shim_content_check(self._shims, self._home)
             if stale:
                 found.append(stale)
@@ -1262,11 +1332,13 @@ def wsl_drift_watchdog(home, wsl_run=None):
     `shims`: shim_content_check rewrites a stale shim through cli._write_shim
     at the path it is given, which for this home is a UNC path, and an
     os.replace there writes over whatever is at that path inside Linux
-    (_wsl_drift's docstring). The settings and shim paths are unused on
-    this path -- _wsl_drift finds both inside the distribution -- and are
-    left empty so nothing can open them by mistake."""
+    (_wsl_drift's docstring). wsl_shim_check does that job through wsl_run
+    instead. The settings and shim paths are unused on this path --
+    _wsl_drift finds both inside the distribution -- and are left empty so
+    nothing can open them by mistake."""
     run = wsl_run or default_wsl_run(home)
 
     def check(settings_path, shim_path, h):
         return drift_check(settings_path, shim_path, h, wsl_run=run)
-    return DriftWatchdog("", "", check=check, home=home)
+    return DriftWatchdog("", "", check=check, home=home,
+                         shim_check=lambda: wsl_shim_check(home, run))
