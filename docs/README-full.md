@@ -244,7 +244,8 @@ Blink has to change.
 | Reads | only while the account is marked as having no five-hour window (see the row above and "Claude Code in a terminal"), and only for a board that can show the burn view: Claude Code's transcripts, under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`). Only lines containing `"output_tokens"` are decoded, and of each only `type`, `timestamp`, `message.id`, `requestId`, `message.model` and `message.usage.output_tokens` are looked at. It holds in memory, and nowhere else, each transcript's path, size, read position and a hash of the last 256 bytes it read (to notice a file rewritten in place), and for each reply still inside the last five hours its message and request ids and output-token count. What goes to the board is twenty quarter-hour totals. Nothing from a transcript - no line, no value, no path - is logged, printed or saved. The transcripts are read only while the account is marked as having no five-hour window; on the Ultra plan a mark can come from a single reply, and the next five-hour figure Claude Code shows lifts it and stops the reading |
 | Reads | only on a Codex account whose session log reports a weekly limit and no five-hour one (such as Codex Pro), and only for a board that can show the burn view: Codex's session logs, under `~/.codex/sessions` (or `$CODEX_HOME/sessions`). Only lines containing `"token_count"` are decoded, and of each only `type`, `timestamp`, `payload.type` and the token figures of `payload.info.total_token_usage` and `payload.info.last_token_usage` (`input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens`) are looked at; the `output_tokens` of `last_token_usage` is what is added up, and the rest only recognises a turn written twice. It holds in memory, and nowhere else, each log's path, size, read position and a hash of the last 256 bytes it read, and for each turn still inside the last five hours those figures and its quarter-hour. What goes to the board is twenty quarter-hour totals. Nothing from a session log - no line, no value, no path - is logged, printed or saved, and on an account with a five-hour limit this reading never happens |
 
-**Claude Code inside WSL.** A plain install never looks into WSL. `blink
+**Claude Code inside WSL.** A plain install never looks into WSL on a desk
+that has not been set up for it. `blink
 install --wsl` lists the distributions (from the Windows registry; nothing is
 started), and `blink install --wsl <name>` sets one up. That starts the
 distribution if it is not running and runs your login shell there once, to
@@ -258,6 +259,13 @@ is kept. Then:
 | Creates, on Windows | `%USERPROFILE%\.blink\wsl-<guid>` (`<guid>` is the distribution's registry id, which survives a rename): where those scripts write the status line payload and the per-session `state/` files, and Blink's record of what it installed. The app reads only this folder every 2 seconds |
 | Keeps | in `~/.blink/config.json`, the distribution's id and name, your Linux user name and home folder, and Claude Code's config folder there, so the background service, which never sees your shell, reads the same one |
 | Reads | Claude Code's config and transcripts inside the distribution, as listed above for a native install, and checks the status line is still in place: only while the distribution is running and the Windows folder changed in the last ten minutes, and never on the thread that talks to the board. With a WSL distribution set up, Claude Code on Windows itself is not read |
+
+Once a distribution is set up, running the installer again (a new download,
+a repair) sets the same distribution up again rather than moving back to
+Claude Code on Windows; if that distribution has been removed, it says so and
+sets up Claude Code on Windows instead. Setting up a second distribution, or
+one after Claude Code on Windows, first takes Blink out of the one set up
+before.
 
 `blink status` names the distribution and says whether it is running, asking
 `wsl -l --running` only: it never opens a file inside one that is not

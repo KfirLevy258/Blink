@@ -661,6 +661,10 @@ class ClaudeHooks(NamedTuple):
     readable: bool
     disabled: bool      # "disableAllHooks": true -- Claude Code runs none
     shim: bool          # the file the hooks run exists
+    # Not readable because the read itself failed (an OSError), rather
+    # than because the file does not parse: a WSL home's settings.json over
+    # \\wsl.localhost, from a distribution stopping under the read.
+    unreachable: bool = False
 
     @property
     def light(self) -> bool:
@@ -690,11 +694,13 @@ def claude_hooks(home=None):
     shim = os.path.exists(hook_shim_path(home))
     try:
         data = install_statusline._load(settings_path(home))
-    except (install_statusline.SettingsUnreadable, OSError):
-        # OSError too: a WSL home's settings.json is read over \\wsl.localhost,
-        # where a distribution stopping between `wsl -l --running` and the
-        # read raises one, and status must not die of it.
+    except install_statusline.SettingsUnreadable:
         return ClaudeHooks(0, total, False, False, shim)
+    except OSError:
+        # A WSL home's settings.json is read over \\wsl.localhost, where a
+        # distribution stopping between `wsl -l --running` and the read
+        # raises one, and status must not die of it.
+        return ClaudeHooks(0, total, False, False, shim, unreachable=True)
     hooks = data.get("hooks")
     # isinstance at every level, not `or {}` / `or []`: only None and empty
     # containers take the `or` branch, so a string under "hooks" crashed
@@ -3534,12 +3540,29 @@ def cmd_install(args) -> int:
     # the one the person installing means, and which is recorded below so
     # the background service reads it too (pc/claude_home).
     home = claude_home.from_environ()
+    # A desk set up for Claude Code inside WSL stays so: re-running the
+    # installer (a new download, a repair) must not quietly move it back to
+    # a Windows Claude Code it was told not to read. Found by GUID; one that
+    # is gone falls through to this computer's own, with its drop folder
+    # removed and its record replaced by the native one below.
+    kept_wsl = None
+    rec = claude_home.recorded()
+    if rec is not None and rec.kind == claude_home.WSL:
+        kept_wsl = _wsl_distro(rec)
+        if kept_wsl is None:
+            print(f"Claude Code inside WSL ({rec.distro_name}): that"
+                  " distribution is no longer on this computer, so Blink is"
+                  " set up for Claude Code on Windows instead.")
+            print()
+            _rm_wsl_drop(rec)
     # Before anything is written, and before the disclosure: if the file we are
     # about to edit does not parse, the honest move is to change nothing at all
     # and say why. The alternative -- treating it as empty -- writes a fresh
     # settings.json over whatever the customer was halfway through editing.
+    # Not on a WSL desk, which does not edit it.
     try:
-        install_statusline._load(settings_path(home))
+        if kept_wsl is None:
+            install_statusline._load(settings_path(home))
     except install_statusline.SettingsUnreadable as e:
         print(f"Blink setup stopped. {e}")
         print()
@@ -3593,47 +3616,15 @@ def cmd_install(args) -> int:
 
     step("Status line")
     os.makedirs(blink_home(), exist_ok=True)
-    # Private to the user. The shims write the status line payload -- which
-    # names the working directory and the session -- and the per-session
-    # state files in here. Both shims create with umask 077, but a directory
-    # from an earlier install was made at the default umask, so this
-    # tightens it once rather than leaving it to the next mkdir.
-    for d in (blink_home(), home.state_dir):
-        try:
-            os.chmod(d, 0o700)
-        except OSError:
-            pass          # absent (state/ appears on the first hook), or Windows
-    # Before settings.json, so a daemon that restarts in between already
-    # reads the folder the entries are going into. A config.json that does
-    # not parse is not ours to overwrite (user_config.put refuses), and
-    # costs only the record: the daemon then reads the folder its own
-    # environment names, as every release before this did.
-    # The files to take our entries out of, asked before the save: one of
-    # them is the folder recorded until now.
-    olds = _old_settings(home)
-    try:
-        claude_home.save(home)
-    except (user_config.Unreadable, OSError) as e:
-        print(f"      Could not record the Claude Code folder: {e}")
-    for old in olds:
-        for line in _take_out_of(old, home):
-            print(f"      {old}: {line}")
-    _write_shim(shim_path(home), "blink-statusline.sh")
-    install_statusline._announce(settings_path(home), shim_path(home),
-                                 undo_hint=f"{command_to_type()} uninstall")
-    print("      " + install_statusline.install(settings_path(home),
-                                                shim_path(home), home))
-
-    step("Activity hooks")
-    _write_shim(hook_shim_path(home), "blink-hook.sh")
-    try:
-        print(install_hooks.install(settings_path(home), hook_shim_path(home),
-                                    home))
-    except install_statusline.SettingsUnreadable as e:
-        # The status line is the product; the activity light is a nicety. A
-        # hooks section we cannot safely edit costs the user a pulsing dot,
-        # and is not worth failing an install that has otherwise worked.
-        print(f"skipped ({e})")
+    wsl_failed = False
+    if kept_wsl is not None:
+        print(f"Claude Code inside WSL ({kept_wsl.name}), kept")
+        wsl_failed = _setup_wsl(kept_wsl) is None
+        step("Activity hooks")
+        print("inside WSL, with the status line" if not wsl_failed
+              else "skipped, with the status line")
+    else:
+        _install_native_claude(home, step)
 
     # The disclosure for this step is here rather than up in _announce(),
     # because it is the only step that is conditional on what is already on
@@ -3685,11 +3676,61 @@ def cmd_install(args) -> int:
     # One read for both: each used to run `claude --version` itself, and a
     # hanging `claude` cost its 30 s timeout twice after "Done." (review,
     # 2026-10-19).
+    if kept_wsl is not None:
+        # The notes below are about Claude Code on Windows, which this desk
+        # does not read; the WSL step said its own.
+        return 1 if wsl_failed else 0
     desk = read_desk(home=home)
     _note_if_no_claude_code(desk)
     _warn_if_claude_too_old(desk)
     _hint_wsl(desk)
     return 0
+
+
+def _install_native_claude(home, step) -> None:
+    """cmd_install's status line and activity hook steps for a native
+    `home`: record it, write the shims and edit its settings.json."""
+    # Private to the user. The shims write the status line payload -- which
+    # names the working directory and the session -- and the per-session
+    # state files in here. Both shims create with umask 077, but a directory
+    # from an earlier install was made at the default umask, so this
+    # tightens it once rather than leaving it to the next mkdir.
+    for d in (blink_home(), home.state_dir):
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass          # absent (state/ appears on the first hook), or Windows
+    # Before settings.json, so a daemon that restarts in between already
+    # reads the folder the entries are going into. A config.json that does
+    # not parse is not ours to overwrite (user_config.put refuses), and
+    # costs only the record: the daemon then reads the folder its own
+    # environment names, as every release before this did.
+    # The files to take our entries out of, asked before the save: one of
+    # them is the folder recorded until now.
+    olds = _old_settings(home)
+    try:
+        claude_home.save(home)
+    except (user_config.Unreadable, OSError) as e:
+        print(f"      Could not record the Claude Code folder: {e}")
+    for old in olds:
+        for line in _take_out_of(old, home):
+            print(f"      {old}: {line}")
+    _write_shim(shim_path(home), "blink-statusline.sh")
+    install_statusline._announce(settings_path(home), shim_path(home),
+                                 undo_hint=f"{command_to_type()} uninstall")
+    print("      " + install_statusline.install(settings_path(home),
+                                                shim_path(home), home))
+
+    step("Activity hooks")
+    _write_shim(hook_shim_path(home), "blink-hook.sh")
+    try:
+        print(install_hooks.install(settings_path(home), hook_shim_path(home),
+                                    home))
+    except install_statusline.SettingsUnreadable as e:
+        # The status line is the product; the activity light is a nicety. A
+        # hooks section we cannot safely edit costs the user a pulsing dot,
+        # and is not worth failing an install that has otherwise worked.
+        print(f"skipped ({e})")
 
 
 def _windows() -> bool:
@@ -3784,6 +3825,40 @@ def cmd_install_wsl(name) -> int:
         return 1
 
     print(f"Blink setup for Claude Code inside WSL ({d.name}).")
+    home = _setup_wsl(d)
+    if home is None:
+        return 1
+    detail = restart_service()
+    print()
+    print("Background service ... " + detail)
+    if _home_refusal():
+        _say_home_refused(
+            "restarted",
+            f"The settings inside {d.name} are written, but a service that"
+            " is running still reads the folder it read before.")
+        return 1
+    if restart_left_it_down(detail):
+        print()
+        print(f"The settings inside {d.name} are written, but the background")
+        print("service is not running, so the board will stay on \"Link the PC")
+        print(f"daemon\". Run `{_repair_command()} install` to finish.")
+        return 1
+    print()
+    print(f"Done. Blink now reads Claude Code inside {d.name} only, while it")
+    print("is in use; Claude Code on Windows itself is not read.")
+    print(f"  Check:   {command_to_type()} status")
+    print(f"  Undo:    {command_to_type()} uninstall")
+    return 0
+
+
+def _setup_wsl(d):
+    """The body of `blink install --wsl <name>` for the distribution `d`,
+    shared with a plain `blink install` on a desk whose record is a WSL
+    home (which keeps it, rather than moving the desk back to Windows):
+    probe, write inside, take Blink out of the home recorded before, record,
+    and say what was written where. The home on success; None, with the
+    reason printed and the record unchanged, on failure. Starts nothing
+    on Windows; the caller restarts or installs the service."""
     print()
     print(f"  This starts {d.name} if it is not running, and runs your login")
     print("  shell there once to find Claude Code and its folder. Nothing")
@@ -3794,12 +3869,12 @@ def cmd_install_wsl(name) -> int:
         print(f"Could not read your account inside {d.name}. Check that it")
         print(f"starts (`wsl -d {d.name}`), then run this again.")
         print("Nothing was changed.")
-        return 1
+        return None
     if not probe.config_dir.startswith("/"):
         print()
         print(f"CLAUDE_CONFIG_DIR inside {d.name} is not a full path, so Blink")
         print("cannot tell which folder Claude Code reads. Nothing was changed.")
-        return 1
+        return None
     home = claude_home.wsl(
         distro_guid=d.guid, distro_name=d.name, linux_user=probe.user,
         linux_home=probe.home,
@@ -3814,7 +3889,12 @@ def cmd_install_wsl(name) -> int:
         print()
         print(f"Blink setup stopped. {e}")
         print("Claude Code's settings inside WSL were not changed.")
-        return 1
+        return None
+    # The home recorded until now loses its record below, and uninstall
+    # reads only the record: left in place, its entries would point at
+    # shims nobody removes, and a second distribution's would go on
+    # feeding the panel's drop folder nobody reads.
+    _take_blink_out_of_previous(claude_home.recorded(), home)
     try:
         claude_home.save(home)
     except (user_config.Unreadable, OSError) as e:
@@ -3822,7 +3902,7 @@ def cmd_install_wsl(name) -> int:
         print(f"The settings inside {d.name} were written, but Blink could not")
         print(f"record them: {e}")
         print("Fix that file and run this again.")
-        return 1
+        return None
 
     blink_dir = probe.home.rstrip("/") + "/.blink"
     print()
@@ -3838,14 +3918,35 @@ def cmd_install_wsl(name) -> int:
         print(f"  !  Claude Code was not found in {d.name}. What was written")
         print("     starts working by itself once it is installed there.")
     _announce_spend_seat(home)
-    print()
-    print("Background service ... " + restart_service())
-    print()
-    print(f"Done. Blink now reads Claude Code inside {d.name} only, while it")
-    print("is in use; Claude Code on Windows itself is not read.")
-    print(f"  Check:   {command_to_type()} status")
-    print(f"  Undo:    {command_to_type()} uninstall")
-    return 0
+    return home
+
+
+def _take_blink_out_of_previous(old, new) -> None:
+    """Undo the install `old` (the record `new` replaces) left behind. A
+    different distribution (another GUID): out of it, as uninstall would,
+    and its drop folder removed. A recorded native home: out of its
+    settings.json, and the legacy ~/.claude one if that holds ours too,
+    as _old_settings finds them; uninstall would otherwise look for it
+    only where this shell's environment points. The same distribution, or
+    no record, is left alone: install_into has just rewritten the first,
+    and with no record uninstall still finds the native one."""
+    if old is None:
+        return
+    if old.kind == claude_home.WSL:
+        if (old.distro_guid or "").lower() == (new.distro_guid or "").lower():
+            return
+        _uninstall_wsl(old)
+        _rm_wsl_drop(old)
+        return
+    paths = []
+    own = settings_path(old)
+    if _holds_ours(own, old):
+        paths.append(own)
+    paths += [p for p in _old_settings(old)
+              if not any(_same_file(p, q) for q in paths)]
+    for p in paths:
+        for line in _take_out_of(p, old):
+            print(f"      {p}: {line}")
 
 
 def cmd_uninstall(_args) -> int:
@@ -4373,6 +4474,8 @@ def cmd_status(args) -> int:
     hooks = desk.hooks
     if not reachable:
         print(f"Activity    not checked -- {wsl_name} is not running")
+    elif not hooks.readable and hooks.unreachable:
+        print("Activity    unknown -- settings.json could not be read")
     elif not hooks.readable:
         print("Activity    unknown -- settings.json does not parse")
     else:
