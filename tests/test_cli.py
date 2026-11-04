@@ -4499,6 +4499,35 @@ def test_a_previous_record_that_cannot_be_put_back_is_said(
     assert "Done." not in out
 
 
+def test_setup_wsl_says_when_it_stopped_with_the_record_moved(
+        tmp_path, monkeypatch, capsys):
+    """Review of round 2, D5: _setup_wsl's contract was "None on failure,
+    with the record as it was", and C4's stop returned None with the
+    record moved onto the new distribution; cmd_install had to compare
+    records to tell. That stop has its own result now, naming the home
+    the record holds."""
+    from pc import claude_home, wsl
+    calls = _wsl_desk(monkeypatch, _FakeReg(
+        [(WSL_GUID, "Ubuntu"), (OTHER_GUID, "Debian")]), probe=_probe())
+    _recorded_wsl(tmp_path)
+
+    def from_(home, wsl_run, **k):
+        calls.append(("uninstall_from", home))
+        raise install_statusline.WslInstallError("nope")
+    monkeypatch.setattr(install_statusline, "uninstall_from", from_)
+    real = claude_home.save
+
+    def save(home):
+        if home.distro_guid == WSL_GUID:
+            raise PermissionError(13, "Permission denied")
+        return real(home)
+    monkeypatch.setattr(claude_home, "save", save)
+    got = cli._setup_wsl(wsl.Distro(OTHER_GUID, "Debian", 2, False))
+    assert isinstance(got, cli._StoppedOnto)
+    assert got.home == claude_home.recorded()
+    assert got.home.distro_guid == OTHER_GUID
+
+
 def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
                                                          capsys):
     """Finding 4: what `install --wsl` writes, and what it reads, is said

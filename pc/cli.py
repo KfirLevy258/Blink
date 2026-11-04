@@ -3865,24 +3865,22 @@ def cmd_install(args) -> int:
             halt_service()
         print(f"Claude Code inside WSL ({kept_wsl.name})"
               + ("" if named is not None else ", kept"))
-        before = claude_home.recorded()
-        if _setup_wsl(kept_wsl) is None:
+        got = _setup_wsl(kept_wsl)
+        if got is None or isinstance(got, _StoppedOnto):
             # Stopped, rather than going on to the Codex hooks and the
-            # service and a "Done." after "Blink setup stopped" (U27). The
-            # record is nearly always the one from before, so the service
-            # reads what it read before; the one stop that leaves the new
+            # service and a "Done." after "Blink setup stopped" (U27). On
+            # None the record is the one from before, so the service reads
+            # what it read before; the one stop that leaves the new
             # distribution recorded (a previous one whose record could not
-            # be put back, C4) is said as what it is.
+            # be put back, C4) says so by its result (D5).
             if restart_service() == _RESTART_OK:
-                now = claude_home.recorded()
                 print()
-                if now is not None and now != before \
-                        and now.kind == claude_home.WSL:
-                    print("The background service is running again, reading"
-                          f" Claude Code inside {now.distro_name}.")
-                else:
+                if got is None:
                     print("The background service is running again, reading"
                           " what it read before.")
+                else:
+                    print("The background service is running again, reading"
+                          f" Claude Code inside {got.home.distro_name}.")
             return 1
         step("Activity hooks")
         print("inside WSL, with the status line")
@@ -4357,15 +4355,27 @@ def _undo_wsl_setup(home, name) -> None:
     _rm_wsl_drop(home)
 
 
+class _StoppedOnto:
+    """_setup_wsl stopped, but with the record moved onto `home`: the
+    previous distribution could not be undone and its record could not be
+    put back either (review round 2, C4). Its own result rather than None,
+    whose contract is the record as it was; C4 returned None and
+    cmd_install compared records to tell the two apart (D5)."""
+
+    def __init__(self, home):
+        self.home = home
+
+
 def _setup_wsl(d):
     """cmd_install's status line and activity hook steps for the WSL
     distribution `d`, named by `install --wsl` or kept by a plain install
     on a desk whose record is a WSL home: probe, take Blink out of a folder
     it used there before, write inside, record, take Blink out of the home
     recorded before, and say what was written where. The home on success;
-    None on failure, with the reason printed and the record as it was.
-    Starts nothing on Windows; the caller has stopped the service and
-    installs it afterwards.
+    None on failure, with the reason printed and the record as it was;
+    _StoppedOnto(home) on the one failure that leaves the record moved
+    onto `d` (C4), said as such. Starts nothing on Windows; the caller has
+    stopped the service and installs it afterwards.
 
     The record is written only after the write inside succeeded: recorded
     first, a failure would have moved the daemon onto a folder nothing
@@ -4502,7 +4512,7 @@ def _setup_wsl(d):
             print("which nothing reads. To take Blink out of it by hand,")
             _say_wsl_manual_steps(prev.distro_name)
             print(f"      and remove {prev.drop_dir}.")
-            return None
+            return _StoppedOnto(home)
         _undo_wsl_setup(home, d.name)
         print()
         print(f"Blink setup stopped, so Blink still reads"
