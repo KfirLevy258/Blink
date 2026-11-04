@@ -35,6 +35,7 @@ tests run on every platform.
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -195,6 +196,57 @@ def distros(reg=None):
         return []
 
 
+# How long a killed wsl.exe is given to hand back its pipes before they are
+# abandoned. Short: by then the call has already failed.
+_REAP_SECONDS = 2.0
+
+
+def _feed(pipe, data):
+    try:
+        pipe.write(data)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _bounded_run(argv, *, input=None, timeout=None, **kwargs):
+    """subprocess.run whose timeout bounds the whole call, on every platform.
+
+    CPython 3.11's run() on Windows, once the timeout fires, kills wsl.exe
+    and then calls communicate() with no timeout at all; a WSL relay
+    process still holding the pipes (wslhost, a hung wslservice) keeps that
+    wait going for ever, and WslWatch's thread with it, so the burn view
+    froze on its last snapshot. 3.11's Windows communicate() also writes
+    `input` on the calling thread before the timeout starts, so a child
+    that never reads blocks there once the pipe buffer is full. Here the
+    input goes in on a thread of its own, the reap after the kill is
+    bounded, and a call that still will not end is abandoned: its pipes are
+    left open rather than closed, because closing a buffered pipe another
+    thread is reading takes that reader's lock and would block the same
+    way. Raises TimeoutExpired like run(); the caller maps it to FAILED."""
+    if input is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    p = subprocess.Popen(argv, **kwargs)
+    if input is not None:
+        feed, p.stdin = p.stdin, None
+        threading.Thread(target=_feed, args=(feed, input), daemon=True,
+                         name="blink-wsl-stdin").start()
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            p.communicate(timeout=_REAP_SECONDS)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
 def _call(argv, wsl_utf8, stdin, timeout, runner):
     """One wsl.exe launch. Returns (rc, out, err) or FAILED on a timeout or
     when wsl.exe cannot start."""
@@ -213,7 +265,7 @@ def _call(argv, wsl_utf8, stdin, timeout, runner):
     return done.returncode, done.stdout or b"", done.stderr or b""
 
 
-def running(name, exe=None, timeout=5, runner=subprocess.run):
+def running(name, exe=None, timeout=5, runner=_bounded_run):
     """Is the named distribution running right now? Never starts it."""
     rc, out, _ = _call([*(exe or wsl_exe()), "-l", "--running", "-q"],
                        "0", None, timeout, runner)
@@ -225,7 +277,7 @@ def running(name, exe=None, timeout=5, runner=subprocess.run):
 
 
 def run(name, argv, user=None, env=None, exe=None, stdin=None, timeout=30,
-        runner=subprocess.run):
+        runner=_bounded_run):
     """Run argv inside the distribution as `user`: (rc, stdout, stderr), or
     (-1, b"", b"") on a timeout.
 
@@ -284,7 +336,7 @@ def _usable(path):
             and not path.lower().endswith((".exe", ".cmd", ".bat")))
 
 
-def probe(name, exe=None, runner=subprocess.run):
+def probe(name, exe=None, runner=_bounded_run):
     """Find the Linux user, home, shell, Claude config folder and claude
     binary of a distribution, or None if it cannot be read. Starts the
     distribution; callers only reach this after the user named it."""

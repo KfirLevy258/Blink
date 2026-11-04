@@ -318,3 +318,64 @@ def test_policy_unreadable_means_allowed():
 ])
 def test_usable_rejects_windows_claudes(path, ok):
     assert wsl._usable(path) is ok
+
+
+# --- review of feat/enterprise-spend, W3 ----------------------------------
+
+import sys
+import time
+
+
+def test_default_runner_is_the_bounded_one():
+    """subprocess.run under CPython 3.11 on Windows, after a timeout, kills
+    wsl.exe and then waits on communicate() with no timeout at all, while a
+    grandchild can still hold the pipes; that wedges WslWatch for good. Every
+    entry point must default to the runner that bounds the whole call."""
+    import inspect
+    for fn in (wsl.running, wsl.run, wsl.probe):
+        assert inspect.signature(fn).parameters["runner"].default \
+            is wsl._bounded_run, fn.__name__
+
+
+def test_bounded_run_returns_while_a_grandchild_holds_the_pipes(monkeypatch):
+    # The child starts a grandchild that inherits stdout and outlives it:
+    # the shape of wsl.exe killed while its relay still holds the handle.
+    monkeypatch.setattr(wsl, "_REAP_SECONDS", 0.3)
+    code = ("import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(4)'])\n"
+            "time.sleep(4)\n")
+    t0 = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        wsl._bounded_run([sys.executable, "-c", code],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         stdin=subprocess.DEVNULL, timeout=0.5)
+    assert time.monotonic() - t0 < 3
+
+
+def test_bounded_run_returns_when_the_child_never_reads_its_input(monkeypatch):
+    # 3.11's Windows communicate() writes input on the calling thread before
+    # its timeout starts; a child that never reads blocks that write once
+    # the pipe buffer is full. Far more than any pipe buffer here.
+    monkeypatch.setattr(wsl, "_REAP_SECONDS", 0.3)
+    t0 = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        wsl._bounded_run([sys.executable, "-c", "import time; time.sleep(4)"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         input=b"x" * (4 << 20), timeout=0.5)
+    assert time.monotonic() - t0 < 3
+
+
+def test_bounded_run_round_trips():
+    done = wsl._bounded_run(
+        [sys.executable, "-c",
+         "import sys; d = sys.stdin.buffer.read(); "
+         "sys.stdout.buffer.write(d[::-1]); sys.stderr.write('e'); "
+         "sys.exit(3)"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=b"abc",
+        timeout=20)
+    assert (done.returncode, done.stdout, done.stderr) == (3, b"cba", b"e")
+    done = wsl._bounded_run([sys.executable, "-c", "print(1)"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, timeout=20)
+    assert done.returncode == 0 and done.stdout.strip() == b"1"
