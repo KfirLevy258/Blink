@@ -19,6 +19,48 @@ Rules, each from a way the raw number misleads:
 * `at` is the render's own time (the payload's mtime), so reading the same
   render again moves nothing.
 
+* A cost below zero is no cost. Claude Code does not write one; a damaged
+  payload can, and a negative "high-water mark" would count the next real
+  figure twice over.
+
+What the file keeps, and why it stays small. Until the final review of
+2026-11-04 every rise of the month was kept one by one, so the file grew
+all month and was rewritten on nearly every render. Now:
+
+* Rises from the last five hours (the burn view's twenty quarter-hours,
+  measured back from the newest render seen) are kept one by one, because
+  `buckets()` needs each one's quarter-hour.
+* Older rises are folded into one carried entry: their total, the total of
+  those stamped at or after the fold's boundary, the earliest previous
+  sighting among them and the newest render. The boundary is the newest
+  anchor `since()` has been asked about -- claude_cli._spend_frame asks
+  with the /usage time or, with none this month, the period start.
+* `since(anchor)` is exact for the anchors the page can ask: the period
+  start and any anchor at or before the earliest folded sighting (every
+  folded rise counts), the boundary itself (the carried total at or after
+  it), and an anchor newer than the newest folded render (none counts,
+  since a rise is stamped no later than its render). An anchor between
+  the boundary and the newest folded render -- a /usage first seen more
+  than five hours after it ran, while rises were being counted -- counts
+  no folded rise: dropped, never counted twice, the same direction as the
+  straddling rule above. One between the earliest folded sighting and
+  the boundary (an anchor older than one already asked) counts the
+  carried total at the boundary, a figure no higher than the truth.
+  Neither arises from Claude Code's config, whose /usage time only moves
+  forward within a login and a month, and bind() empties everything when
+  either changes.
+* Each session's highest estimate, so a resumed session's past cost is
+  never counted as new.
+* A save writes a rise on a session already in the file at most once a
+  minute (SAVE_EVERY_S). Nothing is lost by that: a rise not yet written is
+  counted again after a restart, from the saved high-water mark, stamped
+  with the saved sighting before it. A session's first sighting and an
+  emptied count (bind()) are written at once. A restart that missed the
+  first sighting would take the session's next render for its first and
+  count nothing from it, and one that missed the emptying would carry the
+  last login's count into this one (tests/pc/test_spend_page.py's login
+  round trip caught that in the first cut of the pacing).
+
 Integer cents throughout. State is per session UUID (a per-session total is
 all the spec allows) and is never printed or logged.
 """
@@ -26,6 +68,7 @@ import json
 import math
 import os
 import tempfile
+import time
 
 # As a package import, like every other module under pc/. A bare
 # `import protocol` worked only where pc/ itself was on sys.path (its own
@@ -34,8 +77,16 @@ import tempfile
 from pc import protocol
 
 _BUCKETS = 20
-_KEEP_S = 32 * 86400
-_VERSION = 1
+# Rises newer than this, measured back from the newest render, are kept one
+# by one; the burn view's twenty quarter-hours are exactly this long.
+_RECENT_S = _BUCKETS * 900
+# The shortest gap between two writes of the file, on the monotonic clock.
+SAVE_EVERY_S = 60
+# 2: the carried entry and the newest anchor asked about. A version-1 file
+# (every rise one by one, from before 2026-11-04) is read as empty, as any
+# file this cannot read is: it held an estimate, which the next /usage
+# makes exact.
+_VERSION = 2
 
 
 def _num(x) -> bool:
@@ -50,14 +101,23 @@ def _default_path() -> str:
 
 
 class SpendCounter:
-    def __init__(self, path=None, persist=True):
+    def __init__(self, path=None, persist=True, clock=time.monotonic):
         self._path = path
         self._persist = persist
+        self._clock = clock
+        self._saved_at = None  # self._clock() at the last write
         self._fp = None
         self._period = None
         self._sessions = {}   # sid -> [high_water_cents, last_seen]
-        self._adds = []       # [prev_seen, at, cents]
+        self._adds = []       # [prev_seen, at, cents], the last _RECENT_S
+        # [boundary, cents_from_boundary, cents, first_prev, last_at], or
+        # None: every rise folded out of _adds (see the module docstring).
+        self._fold = None
+        self._anchor = None   # the newest anchor since() was asked about
+        self._latest = None   # the newest render seen
         self._dirty = False
+        # Written at the next save whatever the pacing: see the docstring.
+        self._urgent = False
         if persist:
             self._load()
 
@@ -68,7 +128,10 @@ class SpendCounter:
     def _clear(self):
         self._sessions = {}
         self._adds = []
-        self._dirty = True
+        self._fold = None
+        self._anchor = None
+        self._latest = None
+        self._dirty = self._urgent = True
 
     def _load(self):
         try:
@@ -97,17 +160,32 @@ class SpendCounter:
                 if not all(_num(x) for x in (prev, at, cents)):
                     return
                 adds.append([prev, at, int(cents)])
+            fold = d.get("fold")
+            if fold is not None:
+                if not isinstance(fold, list) or len(fold) != 5 \
+                        or not all(_num(x) for x in fold):
+                    return
+                b, after, total, first, last = fold
+                fold = [b, int(after), int(total), first, last]
+            anchor = d.get("anchor")
+            if anchor is not None and not _num(anchor):
+                return
         except (OSError, ValueError, KeyError, TypeError):
             return
         self._fp, self._period = fp, period
         self._sessions, self._adds = sessions, adds
+        self._fold, self._anchor = fold, anchor
+        stamps = [a[1] for a in adds] + [v[1] for v in sessions.values()]
+        if fold is not None:
+            stamps.append(fold[4])
+        self._latest = max(stamps, default=None)
 
     def bind(self, account_fp, period_start) -> None:
         if self._fp is None and self._period is None:
             # Nothing stored or loaded: adopt without discarding what was
             # observed before the first look.
             self._fp, self._period = account_fp, period_start
-            self._dirty = True
+            self._dirty = self._urgent = True
             return
         if account_fp != self._fp or period_start != self._period:
             self._fp, self._period = account_fp, period_start
@@ -117,13 +195,15 @@ class SpendCounter:
     def observe(self, session_id, cost_usd, at) -> bool:
         # The counter owns the guard: a NaN, infinity, string or bool from
         # a damaged payload must not touch the state.
-        if not _num(cost_usd) or not _num(at):
+        if not _num(cost_usd) or not _num(at) or cost_usd < 0:
             return False
         cents = int(round(cost_usd * 100))
         s = self._sessions.get(session_id)
         if s is None:
             self._sessions[session_id] = [cents, at]
-            self._dirty = True
+            if self._latest is None or at > self._latest:
+                self._latest = at
+            self._dirty = self._urgent = True
             return True
         hw, last = s
         changed = False
@@ -135,13 +215,58 @@ class SpendCounter:
             s[1] = at
             changed = True
         if changed:
-            cutoff = at - _KEEP_S
-            self._adds = [a for a in self._adds if a[1] >= cutoff]
+            if self._latest is None or at > self._latest:
+                self._latest = at
+            self._compact()
             self._dirty = True
         return changed
 
+    def _compact(self):
+        """Fold every rise older than _RECENT_S into the carried entry."""
+        cutoff = self._latest - _RECENT_S
+        old = [a for a in self._adds if a[1] < cutoff]
+        if not old:
+            return
+        self._adds = [a for a in self._adds if a[1] >= cutoff]
+        fold = self._fold
+        candidates = [x for x in (self._anchor, self._period,
+                                  None if fold is None else fold[0])
+                      if x is not None]
+        boundary = (max(candidates) if candidates
+                    else min(prev for prev, _at, _c in old))
+        if fold is None:
+            fold = [boundary, 0, 0, math.inf, -math.inf]
+        elif boundary != fold[0]:
+            # What was carried from the old boundary, re-read at the new
+            # one: since() answers that question, so it decides here too.
+            fold = [boundary, self._folded_since(boundary), fold[2],
+                    fold[3], fold[4]]
+        for prev, at, c in old:
+            if prev >= boundary:
+                fold[1] += c
+            fold[2] += c
+            fold[3] = min(fold[3], prev)
+            fold[4] = max(fold[4], at)
+        self._fold = fold
+
+    def _folded_since(self, anchor_at) -> int:
+        """The carried cents an anchor counts; see the module docstring."""
+        if self._fold is None:
+            return 0
+        boundary, from_boundary, total, first, last = self._fold
+        if anchor_at <= first:
+            return total
+        if anchor_at <= boundary:
+            return from_boundary
+        return 0
+
     def since(self, anchor_at) -> int:
-        return sum(c for prev, _at, c in self._adds if prev >= anchor_at)
+        if self._anchor is None or anchor_at > self._anchor:
+            # Not dirty: the anchor is written with the next rise, and
+            # until then nothing has been folded against it.
+            self._anchor = anchor_at
+        return (self._folded_since(anchor_at)
+                + sum(c for prev, _at, c in self._adds if prev >= anchor_at))
 
     def buckets(self, now) -> list:
         out = [0] * _BUCKETS
@@ -154,10 +279,19 @@ class SpendCounter:
 
     # -- persistence -----------------------------------------------------
     def save(self) -> None:
+        """Write the file if anything changed: a rise at most once a
+        minute (SAVE_EVERY_S), a new session or an emptied count at once,
+        and the first save of a process at once."""
         if not self._persist or not self._dirty:
             return
+        tick = self._clock()
+        if (not self._urgent and self._saved_at is not None
+                and tick >= self._saved_at
+                and tick - self._saved_at < SAVE_EVERY_S):
+            return
         doc = {"v": _VERSION, "fp": self._fp, "period": self._period,
-               "sessions": self._sessions, "adds": self._adds}
+               "sessions": self._sessions, "adds": self._adds,
+               "fold": self._fold, "anchor": self._anchor}
         target = self._file()
         tmp = None
         try:
@@ -168,7 +302,8 @@ class SpendCounter:
                 json.dump(doc, f, separators=(",", ":"))
             os.replace(tmp, target)
             tmp = None
-            self._dirty = False
+            self._dirty = self._urgent = False
+            self._saved_at = tick
         except OSError:
             # Keep the count in memory and try again at the next save.
             if tmp:
