@@ -4227,10 +4227,19 @@ def _undo_said(e) -> str:
     return type(e).__name__ if isinstance(e, OSError) else str(e)
 
 
-def _take_out_of_moved(prev, probe, name) -> bool:
+_MOVED_OUT = "out"
+_MOVED_LEFT = "left"
+
+
+def _take_out_of_moved(prev, probe, name):
     """_setup_wsl's moved-inside step: take Blink out of the folder `prev`
     recorded inside distribution `name`, before the folder `probe` found
-    is written. True to go on; False when it stopped, said why.
+    is written. _MOVED_OUT when Blink was taken out of it; _MOVED_LEFT
+    when the install goes on with that folder as it was (below); None
+    when it stopped, said why. Two ways to go on, because what a later
+    failure says depends on which: C1's message said the old folder had
+    been taken out on both, and on _MOVED_LEFT nothing had (review of
+    round 2, D3).
 
     Run as the account Blink was set up for, since the folder is its. If
     that account is gone (deleted, or renamed with usermod -l), wsl.exe -u
@@ -4250,7 +4259,7 @@ def _take_out_of_moved(prev, probe, name) -> bool:
         first = e
     else:
         print(f"      The folder Blink used before inside {name}: {said}")
-        return True
+        return _MOVED_OUT
     norm = claude_home.linux_norm
     if not prev.linux_user or prev.linux_user == probe.user:
         return _stop_over_moved(name, first, None)
@@ -4278,10 +4287,10 @@ def _take_out_of_moved(prev, probe, name) -> bool:
               f" {norm(prev.linux_home or '/')}/.blink/blink-*.sh")
         print("      and the statusLine and hooks entries in its settings.json")
         print("      that name them.")
-        return True
+        return _MOVED_LEFT
     print(f"      The folder Blink used before inside {name}, taken out as"
           f" {probe.user}: {said}")
-    return True
+    return _MOVED_OUT
 
 
 def _account_gone(home, user) -> bool:
@@ -4299,7 +4308,7 @@ def _account_gone(home, user) -> bool:
     return rc == 2
 
 
-def _stop_over_moved(name, e, as_user) -> bool:
+def _stop_over_moved(name, e, as_user):
     """The moved-inside step's stop: nothing was written inside `name`
     and the record stays. `as_user` is the account to take it out by
     hand as, when the one Blink was set up for is gone; None for that
@@ -4315,7 +4324,7 @@ def _stop_over_moved(name, e, as_user) -> bool:
     _say_wsl_manual_steps(name)
     print(f"      Then move {user_config.path(blink_home())} aside")
     print("      and run this again.")
-    return False
+    return None
 
 
 def _say_wsl_manual_steps(name) -> None:
@@ -4383,6 +4392,7 @@ def _setup_wsl(d):
     same = (prev is not None and prev.kind == claude_home.WSL
             and (prev.distro_guid or "").lower() == d.guid.lower())
     moved = same and _moved_inside(prev, home, probe.config_dir)
+    old_folder = None
     if moved:
         # The same distribution, another folder or Linux account: Claude
         # Code's folder there or the default user changed since Blink was
@@ -4395,7 +4405,8 @@ def _setup_wsl(d):
         # was left with Blink's status line and ten hooks, which ran
         # deleted shims after an uninstall -- an exit 2 that blocks every
         # prompt.
-        if not _take_out_of_moved(prev, probe, d.name):
+        old_folder = _take_out_of_moved(prev, probe, d.name)
+        if old_folder is None:
             return None
 
     try:
@@ -4433,16 +4444,20 @@ def _setup_wsl(d):
                   " folder, so they stay, and uninstall will find them.")
         else:
             # Unrecorded, the new folder would be wired with nothing to
-            # find it. Moved inside, the old folder has just been taken
-            # out as well, so leaving this one used to mean an uninstall
-            # later deleted the shims its hooks run (C1).
+            # find it. Moved inside, the old folder has usually just been
+            # taken out as well, so leaving this one used to mean an
+            # uninstall later deleted the shims its hooks run (C1). What is
+            # said of the old folder is what _take_out_of_moved did (D3).
             print(f"Blink setup stopped. The settings inside {d.name} were"
                   " written, but Blink could not record them"
                   f" ({type(e).__name__}), so they are being taken back out.")
-            if moved:
+            if old_folder == _MOVED_OUT:
                 print(f"Blink was already taken out of the folder it used"
                       f" before inside {d.name}, so Claude Code there runs"
                       " without it until this runs again.")
+            elif old_folder == _MOVED_LEFT:
+                print(f"The folder Blink used before inside {d.name} was"
+                      " left as it was, and Blink's record still names it.")
             _undo_wsl_setup(home, d.name)
         print(f"Fix {user_config.path(blink_home())} and run this again.")
         return None

@@ -3890,6 +3890,30 @@ def test_a_deleted_account_with_its_folder_out_of_reach_does_not_block(
     assert "Done." in out
 
 
+def test_a_save_that_fails_after_an_untouched_old_folder_says_so(
+        tmp_path, monkeypatch, capsys):
+    """Review of round 2, D3: a move inside the distribution whose old
+    folder was left as it was (its account gone, the folder out of reach
+    as the new one), then a record save that fails. C1's message said
+    Blink "was already taken out of the folder it used before", which
+    nothing had done. The new folder still comes back out, and the old
+    one is said to be as it was."""
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(user="amy", home="/home/amy",
+                                   config_dir="/home/amy/.claude"))
+    _recorded_wsl(tmp_path)
+    _old_account_gone(monkeypatch, calls)
+    _save_fails(monkeypatch)
+    assert cli.main(["install"]) == 1
+    out = " ".join(capsys.readouterr().out.split())
+    assert "already taken out" not in out
+    assert "being taken back out" in out
+    assert "The folder Blink used before inside Ubuntu was left as it was" \
+        in out
+    assert [h.linux_user for h in (c[1] for c in calls
+                                   if c[0] == "uninstall_from")][-1] == "amy"
+
+
 def test_a_gone_account_whose_home_is_the_new_one_still_stops(
         tmp_path, monkeypatch, capsys):
     """C3, but the new account has the old one's home and the folder
