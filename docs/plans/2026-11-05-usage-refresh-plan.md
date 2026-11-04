@@ -4,7 +4,7 @@
 
 **Goal:** When Claude Code is not keeping the figures fresh, BLINK runs the person's own `claude -p /usage` (opt-in, zero cost) and shows the 5-hour, weekly and spend figures it caches.
 
-**Architecture:** A read side and a run side. The read side teaches `claude_plan` to read `five_hour`/`seven_day` from `cachedUsageUtilization` and the Claude provider to emit one more frame from it. The run side is a new `pc/usage_refresh.py` (find Claude Code, run it, judge the answer, keep state), a stdlib idle probe `pc/idle.py`, and a `RefreshWatch` thread in the daemon modelled on `status_page.StatusWatch`. The CLI asks once at install and exposes `blink config usage-refresh on|off`.
+**Architecture:** A read side, a run side and an asking side. The read side teaches `claude_plan` to read `five_hour`/`seven_day` from `cachedUsageUtilization` and the Claude provider to emit one more frame from it. The run side is a new `pc/usage_refresh.py` (find Claude Code, run it, judge the answer, keep state), a stdlib idle probe `pc/idle.py`, and a `RefreshWatch` thread in the daemon modelled on `status_page.StatusWatch`. The CLI asks once at install or update and exposes `blink config usage-refresh on|off`; people updated automatically are asked once on the board's touch screen (new `ask` capability).
 
 **Tech Stack:** Python 3.11 standard library only (`subprocess`, `ctypes` on Windows, `json`, `threading`), pytest.
 
@@ -17,7 +17,7 @@
 - BLINK never reads, stores or sends a login token or cookie, and never calls Anthropic itself.
 - The command is exactly: `[exe, "-p", "/usage", "--output-format", "json", "--no-session-persistence", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--settings", '{"disableAllHooks":true}']`, cwd `<blink_home>/refresh`, stdin `subprocess.DEVNULL`, stderr `subprocess.DEVNULL`, env = os.environ plus `BLINK_REFRESH=1`, `**ota.NO_WINDOW` on Windows, through `wsl._bounded_run(..., timeout=60)`.
 - Never `--bare` (it drops the subscription login).
-- Timing constants (in `pc/usage_refresh.py`): `REFRESH_AFTER_S = 25 * 60`, `IDLE_LIMIT_S = 30 * 60`, `RUN_TIMEOUT_S = 60`, `BACKOFF_AFTER = 3`, `BACKOFF_S = 3600`, `GIVE_UP_S = 24 * 3600`, `TICK_S = 60`.
+- Timing constants (in `pc/usage_refresh.py`): `FRESH_SOURCE_S = 15 * 60`, `REFRESH_AFTER_S = 25 * 60`, `ASK_EVERY_S = 24 * 3600`, `ASK_AT_MOST = 3`, `IDLE_LIMIT_S = 30 * 60`, `RUN_TIMEOUT_S = 60`, `BACKOFF_AFTER = 3`, `BACKOFF_S = 3600`, `GIVE_UP_S = 24 * 3600`, `TICK_S = 60`.
 - Never for a WSL Claude home in this version (`claude_home` record kind `wsl`).
 - Install copy, verbatim: `BLINK can keep your figures current when Claude Code isn't running, by asking Claude Code's /usage now and then. It sends no messages and uses no quota. Turn on? [Y/n] ` (work login: `[y/N] `). On-screen and CLI copy is sentence case.
 - Paths resolve at call time, never at import (`tests/test_sandbox.py` enforces it). Importing any new module does nothing.
@@ -27,10 +27,11 @@
 ## Review Focus
 
 1. **`five_hour` null or missing** (seen on the owner's Max login): the session dial stays unknown (`--`), never 0%, and the weekly dial still shows. Test in Task 1.
-2. **Cache written by another login** (`accountUuid` differs from `oauthAccount.accountUuid`): no frame. Test in Task 1.
-3. **Claude Code hangs or the computer sleeps mid-run:** the run is killed at 60 s, the thread keeps ticking, the serial loop never waits on it. Test in Task 4.
-4. **A Claude Code release makes `/usage` reach the model:** first such answer turns the refresh off with reason `cost`, and `blink status` says so. Test in Task 2 and Task 6.
-5. **Windows:** no console window flashes (`NO_WINDOW` passed) and `claude.exe` under `%USERPROFILE%\.local\bin` is found. Test in Task 2.
+2. **Existing sources first:** a terminal or Desktop reading in the last 15 minutes means no run, and a Desktop source that later goes quiet lets the refresh take over within one tick. Test in Task 4.
+3. **Cache written by another login** (`accountUuid` differs from `oauthAccount.accountUuid`): no frame. Test in Task 1.
+4. **Claude Code hangs or the computer sleeps mid-run:** the run is killed at 60 s, the thread keeps ticking, the serial loop never waits on it. Test in Task 4.
+5. **A Claude Code release makes `/usage` reach the model:** first such answer turns the refresh off with reason `cost`, and `blink status` says so. Test in Task 2 and Task 6.
+6. **Windows:** no console window flashes (`NO_WINDOW` passed) and `claude.exe` under `%USERPROFILE%\.local\bin` is found. Test in Task 2.
 
 ---
 
@@ -199,19 +200,21 @@ def test_state_round_trip_and_corrupt_file(tmp_path): ...
 
 **Files:**
 - Modify: `pc/usage_refresh.py` (add `due` and `RefreshWatch`)
+- Modify: `pc/ingest.py` (`IngestionBus.poll` :531; add `claude_fresh_at`)
 - Modify: `claude_usage_bridge.py` (start it next to `status_page.StatusWatch`, :1071-1073)
 - Test: `tests/pc/test_usage_refresh.py`, `tests/test_bridge_main.py` (or wherever `StatusWatch` startup is tested)
 
 **Interfaces:**
 - Consumes: Task 1 `ConfigView.windows`, `ConfigView.spend_seat`; Task 2 `State`, `run_once`, `record`, `spacing`, `find_claude`; Task 3 `seconds_idle`; `bridge.board_alive()`; `claude_home` record kind.
 - Produces:
-  - `due(now, *, enabled, native, board_alive, idle_s, cache_at, status_at, spend_seat, state) -> bool` (all keyword, pure). True only when: `enabled`; `native`; `board_alive`; `state.off_reason == ""`; `idle_s is None or idle_s < IDLE_LIMIT_S`; `cache_at is None or now - cache_at >= REFRESH_AFTER_S`; `spend_seat or status_at is None or now - status_at >= REFRESH_AFTER_S`; `now - state.last_run_at >= spacing(state)`.
-  - `class RefreshWatch(blink_home, home, enabled, board_alive, view, status_mtime, now=time.time, idle=idle.seconds_idle, runner=wsl._bounded_run)` with `start()` (daemon thread named `blink-refresh`, ticks every `TICK_S`) and `tick_once()` (one decision and at most one run; saves state; logs one event line). `view(now_epoch) -> ConfigView` is the `look` of a `claude_plan.PlanReader(home=home)` that RefreshWatch owns (not the bus's shared reader: that one is used from the poll loop, and PlanReader is not thread-safe); `status_mtime() -> float|None` returns the status-line payload's mtime.
+  - `due(now, *, enabled, native, board_alive, idle_s, cache_at, other_at, state) -> bool` (all keyword, pure). `other_at` is the newest time any other Claude source gave a figure (status-line mtime, or the newest `observed_at` of a Claude frame with `has_usage()` whose `src` is not `USAGE_SRC_ID`), or None. True only when: `enabled`; `native`; `board_alive`; `state.off_reason == ""`; `idle_s is None or idle_s < IDLE_LIMIT_S`; `other_at is None or now - other_at >= FRESH_SOURCE_S`; `cache_at is None or now - cache_at >= REFRESH_AFTER_S`; `now - state.last_run_at >= spacing(state)`. No spend-seat exception: the running count covers terminal use.
+  - `IngestionBus.claude_fresh_at() -> float|None` in `pc/ingest.py`: set at the end of each `poll()` to the newest `observed_at` among this poll's Claude frames that have a figure and are not `USAGE_SRC_ID` (Claude Code status line, Desktop Code tab, chat, Cowork). A plain float attribute written by the poll loop and read by the refresh thread; say in a comment that a float read is atomic in CPython and a one-tick-old value is harmless.
+  - `class RefreshWatch(blink_home, home, enabled, board_alive, view, other_at, now=time.time, idle=idle.seconds_idle, runner=wsl._bounded_run)` with `start()` (daemon thread named `blink-refresh`, ticks every `TICK_S`) and `tick_once()` (one decision and at most one run; saves state; logs one event line). `view(now_epoch) -> ConfigView` is the `look` of a `claude_plan.PlanReader(home=home)` that RefreshWatch owns (not the bus's shared reader: that one is used from the poll loop, and PlanReader is not thread-safe); `other_at() -> float|None` is the newer of the status-line payload's mtime and `bus.claude_fresh_at()`.
   - On a run that turns it off (`off_reason` newly set), `tick_once` also writes `user_config.put(blink_home, SETTING, False)` so `blink status` and `blink config` agree.
 
-- [ ] **Step 1: Failing tests:** a table test for `due` with one row per condition flipping it to False, and the all-true row giving True; spend seat with a fresh status line still due; Linux (`idle_s=None`) due. `tick_once` tests with injected fakes: runs once when due and records `last_run_at`; does not run when not due; a COST verdict sets the setting False and logs `usage refresh off (cost)` only; a runner that raises any exception leaves the thread alive (the next `tick_once` still runs) and logs the exception type only; `find_claude` returning None logs nothing per tick (one line per streak, like `WslWatch._tick_once`). Main-wiring test: with the setting on and a native home, `main` starts a thread named `blink-refresh`; with a WSL record it does not.
+- [ ] **Step 1: Failing tests:** a table test for `due` with one row per condition flipping it to False, and the all-true row giving True; a terminal used 14 minutes ago (status-line mtime) blocks it and 16 minutes ago does not; a Desktop chat frame 10 minutes old blocks it; a spend seat with a fresh status line is NOT due; Linux (`idle_s=None`) due. `claude_fresh_at` tests: a poll with a Desktop frame sets it, a poll with only a `USAGE_SRC_ID` frame leaves it unchanged, a frame with no figure is ignored. `tick_once` tests with injected fakes: runs once when due and records `last_run_at`; does not run when not due; a COST verdict sets the setting False and logs `usage refresh off (cost)` only; a runner that raises any exception leaves the thread alive (the next `tick_once` still runs) and logs the exception type only; `find_claude` returning None logs nothing per tick (one line per streak, like `WslWatch._tick_once`). Main-wiring test: with the setting on and a native home, `main` starts a thread named `blink-refresh`; with a WSL record it does not.
 - [ ] **Step 2: Run, expect FAIL.**
-- [ ] **Step 3: Implement.** In `claude_usage_bridge.main`, build `RefreshWatch` with `enabled=lambda: user_config.load(blink_home).get(usage_refresh.SETTING) is True` (catching `OSError`/`user_config.Unreadable` as False), `board_alive=bridge.board_alive`, `view=claude_plan.PlanReader(home=home).look` (its own reader), and `status_mtime=` the stat of the provider's status-line path (None on `OSError`). `board_alive` only reads a timestamp, so calling it from this thread is safe; say so in a comment. Never call it from the serial thread.
+- [ ] **Step 3: Implement.** In `claude_usage_bridge.main`, build `RefreshWatch` with `enabled=lambda: user_config.load(blink_home).get(usage_refresh.SETTING) is True` (catching `OSError`/`user_config.Unreadable` as False), `board_alive=bridge.board_alive`, `view=claude_plan.PlanReader(home=home).look` (its own reader), and `other_at=` the newer of the provider's status-line mtime (None on `OSError`) and `bus.claude_fresh_at()`. `board_alive` only reads a timestamp, so calling it from this thread is safe; say so in a comment. Never call it from the serial thread.
 - [ ] **Step 4: Run, expect PASS**, full suite.
 - [ ] **Step 5: Commit** "RefreshWatch: ask /usage only when nothing fresher exists and someone is at the computer".
 
@@ -235,7 +238,7 @@ def test_state_round_trip_and_corrupt_file(tmp_path): ...
 ### Task 6: CLI — the install question, the setting, status, uninstall
 
 **Files:**
-- Modify: `pc/cli.py`: `_CONFIG` (:6107) gains `"usage-refresh"`; new `_ask_yes(question: str, default: bool) -> bool|None` and `_install_refresh_step(home) -> str`; `cmd_install` (:3716) calls it after the service step (its own `step("Usage refresh")`, so `_install_steps()` (:3497) returns 7 on win32, 6 elsewhere); `cmd_status` (:5096) gains a `Usage refresh` row; uninstall's file list (:4681-4720) gains `usage-refresh.json` and the `refresh/` folder.
+- Modify: `pc/cli.py`: `_CONFIG` (:6107) gains `"usage-refresh"`; `cmd_update` (:5842) calls `_install_refresh_step` after a successful interactive update when the setting is absent; new `_ask_yes(question: str, default: bool) -> bool|None` and `_install_refresh_step(home) -> str`; `cmd_install` (:3716) calls it after the service step (its own `step("Usage refresh")`, so `_install_steps()` (:3497) returns 7 on win32, 6 elsewhere); `cmd_status` (:5096) gains a `Usage refresh` row; uninstall's file list (:4681-4720) gains `usage-refresh.json` and the `refresh/` folder.
 - Test: `tests/test_cli.py` (or the install/status/uninstall test files already there)
 
 **Interfaces:**
@@ -260,7 +263,32 @@ Status row values: `on`, `on, last ran 12 min ago`, `off`, `off: Claude Code's /
 
 ---
 
-### Task 7: Docs and the house rules
+### Task 7: Asking people who already have BLINK, on the board
+
+**Files:**
+- Modify: `firmware/src/proto.c` (`BOARD_CAPS` :222 gains `"ask"`; parse `{"t":"ask","id":"refresh"}`; send `{"t":"answer","id":"refresh","a":"on"|"no"|"later"}`)
+- Create: `firmware/src/ask_prompt.c`, `firmware/src/ask_prompt.h` (pure decision logic, like `upd_prompt.c`) and the LVGL box in the file that draws `upd_prompt`'s box
+- Modify: `tests/pc/test_board_caps.py` (welcome width with the new cap)
+- Modify: `pc/usage_refresh.py` (`AskState` and `should_ask`), `pc/bridge.py` (send `ask`, receive `answer`), `claude_usage_bridge.py` (wire it)
+- Test: firmware host tests for `ask_prompt.c` (`tests/ci/check_host_tests.sh`), `tests/pc/test_usage_refresh.py`, `tests/pc/test_bridge.py`
+
+**Interfaces:**
+- Produces: `should_ask(now, *, setting_absent, native, claude_found, work_login, board_caps, idle_s, ask_state) -> bool`: True only when the setting is absent, native, Claude Code found, not a work login, `"ask" in board_caps`, someone at the computer (`idle_s is None or idle_s < IDLE_LIMIT_S`), `ask_state.times < ASK_AT_MOST`, `not ask_state.declined` and `now - ask_state.last_at >= ASK_EVERY_S`.
+- Produces: `AskState(times: int = 0, last_at: float = 0.0, declined: bool = False)` kept in `usage-refresh.json` beside `State`.
+- Answers: `"on"` -> `user_config.put(blink_home, SETTING, True)`; `"no"` -> `put(..., False)` and `declined=True`; `"later"` or no answer before the board closes the box -> counts as one ask.
+- On-screen copy (sentence case, each line within the box width): title `Keep figures fresh?`; body `Blink can ask Claude Code's /usage now and then. No messages, no quota.`; buttons `Turn on`, `No thanks`; the box closes itself after 60 s as `later`.
+
+- [ ] **Step 1: Failing tests:** `should_ask` table (each condition flips it; a board without `ask` never asked; a work login never asked; three `later`s then never); bridge test: `ask` is sent once and `answer` writes the setting; the `ask` line goes through `protocol.encode_checked`; the log names `ask`/`answer` only. Firmware host tests: the prompt never stacks on the update offer or on any open box (`busy`), withdraws on host loss, and `later` is sent when it times out.
+- [ ] **Step 2: Run, expect FAIL** (`pytest -q tests/pc/test_usage_refresh.py tests/pc/test_bridge.py tests/pc/test_board_caps.py`, `sh tests/ci/check_host_tests.sh`).
+- [ ] **Step 3: Implement**, firmware first. Keep the welcome within its measured budget; `test_board_caps.py` fails if it grows past it.
+- [ ] **Step 4: Run, expect PASS**; build the firmware (`west build`, Zephyr 4.3.x).
+- [ ] **Step 5: Commit** "Ask people who already have BLINK, once, on the board".
+
+Firmware is not done until Task 9 has flashed it with `tools/burn.sh` and seen it boot.
+
+---
+
+### Task 8: Docs and the house rules
 
 **Files:**
 - Modify: `docs/README-full.md`: a new `### Keeping figures fresh` under "Where the numbers come from" (:46) (what runs, when, the exact command, zero cost as measured, how to turn it off, that it is the person's own Claude Code and login); a row in "What the installer changes" (:220) for `usage-refresh.json` and `refresh/`; a bullet in "Security & privacy" (:446): BLINK still holds no credential; the refresh is opt-in and runs the person's own Claude Code; Anthropic's terms restrict automated use and the person decides.
@@ -274,11 +302,12 @@ Status row values: `on`, `on, last ran 12 min ago`, `off`, `off: Claude Code's /
 
 ---
 
-### Task 8: Verify on the desk (owner present)
+### Task 9: Verify on the desk (owner present)
 
 - [ ] **Step 1:** Full suite on macOS; record the count. Re-run Ubuntu (Docker) and Windows (VM) suites; record each.
 - [ ] **Step 2:** `blink install` from this tree on this Mac; answer the question; `blink status` shows `Usage refresh  on`.
 - [ ] **Step 3:** With no Claude Code session open for 25+ minutes and the owner at the computer, watch `bridge.log` for exactly one `usage refresh ran`, `cachedUsageUtilization.fetchedAtMs` moving, and the board's weekly dial matching `/usage`. Check `~/.claude/projects` gained no transcript.
-- [ ] **Step 4:** Lock the screen for 35 minutes; no run during it.
+- [ ] **Step 4:** Lock the screen for 35 minutes; no run during it. With a Claude Code terminal or a Desktop chat in use, no run either.
+- [ ] **Step 4b:** Remove the setting from `config.json`, restart the service, and check the board asks once; tap "No thanks"; it never asks again. Repeat with "Turn on". Flash with `tools/burn.sh` first (company logo kept) and boot-verify.
 - [ ] **Step 5:** `blink config usage-refresh off`; no further runs. Uninstall on a VM removes `usage-refresh.json` and `refresh/`.
 - [ ] **Step 6:** Note results in the spec and memory. No push, no PR: ships with the next version when the owner says so.

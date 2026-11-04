@@ -87,25 +87,50 @@ home in this version):
    and `blink status` shows it. A re-install does not ask again once there is
    an answer.
 
+### 1b. People who already have BLINK
+
+Someone updated automatically never sees `blink install`, and BLINK never
+runs the refresh without a yes, so an update leaves it off (the setting is
+absent) and asks:
+
+- **On the board**, for a board that lists the `ask` capability: a touch
+  prompt like the update offer. "Keep figures fresh?" / "Blink can ask
+  Claude Code's /usage now and then. No messages, no quota." Buttons
+  "Turn on" and "No thanks". "Turn on" saves yes; "No thanks" saves no and
+  it never asks again. Closed without an answer, it asks again the next
+  day, at most 3 times, then stops. It asks only while someone is at the
+  computer, only when Claude Code is installed, never on a work login
+  (those are asked only in the terminal, default No), and never on a WSL
+  home.
+- **In the terminal**: `blink update` and `blink install` ask the install
+  question when the setting is absent; `blink status` shows "not set up"
+  with the command to turn it on.
+- An older board without `ask` gets the terminal paths only.
+
 ### 2. Daemon: when it runs (fallback only)
 
-It runs only when all of these hold:
+BLINK's existing sources come first. If any of them has given a figure for
+this Claude login in the last 15 minutes -- the Claude Code status line in a
+terminal, or Claude Desktop's sources (the Code tab, chat, Cowork) -- the
+refresh does not run. It runs only when all of these hold:
 
 - the setting is on and the Claude home is native (not WSL);
 - the board is answering (`board_alive()`);
 - the computer is in use: input within the last 30 minutes where the OS
   reports it (macOS, Windows); Linux has no stdlib source and counts as in
   use;
-- the `/usage` cache (`fetchedAtMs`) is older than 25 minutes, and either
-  no status-line window reading is younger than 25 minutes or the login is
-  a spend seat (the status line never carries exact dollars). 25, not 30,
-  so the figure is refreshed before the dial calls it stale at 30;
+- no other Claude source has a reading younger than 15 minutes (the status
+  line file's mtime, or the newest `observed_at` of any other Claude frame
+  with a figure);
+- the `/usage` cache (`fetchedAtMs`) is older than 25 minutes, so the dial
+  is refreshed before it calls the figure stale at 30;
 - BLINK's own last run started more than 25 minutes ago.
 
-So a person who lives in the Claude Code terminal never triggers it, and a
-Desktop- or browser-only person gets one check about every half hour while
-they are at the computer. After 3 failures in a row it waits an hour between
-tries; after 24 hours of nothing but failures it turns itself off.
+A spend seat follows the same rule: while Claude Code is in use the running
+count already adds what each session costs, and the refresh only makes the
+figure exact again once nothing else is moving it. After 3 failures in a row
+it waits an hour between tries; after 24 hours of nothing but failures it
+turns itself off.
 
 ### 3. Daemon: how it runs
 
