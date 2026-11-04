@@ -952,7 +952,8 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
         added = counter.since(period)
         cents, limit = added, None
     else:
-        added = counter.since(a.fetched_at)
+        # From SKEW_S after the /usage: its time is not the renders' clock.
+        added = counter.since_usage(a.fetched_at)
         cents, limit = a.used_cents + added, a.limit_cents
     pct = base.UNKNOWN
     if limit is not None:
