@@ -171,7 +171,7 @@ def test_config_off_keeps_state(monkeypatch):
 
 
 @pytest.mark.parametrize("setup,row", [
-    ({}, "not set up"),
+    ({}, "not set up (turn on with: blink config usage-refresh on)"),
     ({"set": False}, "off"),
     ({"set": True}, "on"),
     ({"set": True, "ago": 12 * 60}, "on, last ran 12 min ago"),

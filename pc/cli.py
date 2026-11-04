@@ -5487,7 +5487,7 @@ def _refresh_status(wsl_home) -> str:
         return ("off: /usage kept failing; run claude and /login, then turn"
                 " it on again")
     if have is None:
-        return "not set up"
+        return "not set up (turn on with: blink config usage-refresh on)"
     if not have:
         return "off"
     if state.last_run_at > 0:
