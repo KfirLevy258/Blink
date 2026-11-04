@@ -347,9 +347,14 @@ def test_login_round_trip_restarts_the_count(tmp_path):
         bus.poll()
     assert bus.plan_msg()["usd"] == 0.30
 
-    # /login to Max: the page goes back to windows.
+    # /login to Max: the page goes back to windows. Each switch is seen
+    # on the poll after it (claude_plan.PlanReader.look), and the render
+    # in the file then is the old login's (claude_cli._note_login), so
+    # the new login renders after that poll.
     t = NOW + 100
     max_config(tmp_path, t)
+    clock.t = t
+    bus.poll()
     render(tmp_path, t, 4.00, session="sess-m", rate_limits=WINDOWS)
     clock.t = t + 1
     bus.poll()
@@ -358,6 +363,8 @@ def test_login_round_trip_restarts_the_count(tmp_path):
     # /login to another Enterprise seat: the count starts again.
     t = NOW + 200
     config(tmp_path, t, cache=False, acct=ACCT_B, org=ORG_B)
+    clock.t = t
+    bus.poll()
     for at, cost in ((t, 5.00), (t + 10, 5.10)):
         render(tmp_path, at, cost, session="sess-b")
         clock.t = at + 1
@@ -399,14 +406,20 @@ def test_a_login_away_and_back_takes_new_baselines(tmp_path):
         clock.t = at + 1
         bus.poll()
     assert bus.plan_msg()["usd"] == 0.30
+    # Each switch seen on the poll after it, before the new login renders
+    # (test_login_round_trip_restarts_the_count).
     t = NOW + 100
     max_config(tmp_path, t)
+    clock.t = t
+    bus.poll()
     render(tmp_path, t, 0.00, session="sess-a", rate_limits=WINDOWS)
     clock.t = t + 1
     bus.poll()
     assert bus.plan_msg()["plan"] == "windows"
     t = NOW + 200
     config(tmp_path, t, cache=False)
+    clock.t = t
+    bus.poll()
     for at, cost in ((t, 0.20), (t + 10, 0.50), (t + 20, 0.75)):
         render(tmp_path, at, cost, session="sess-a")
         clock.t = at + 1
@@ -830,3 +843,90 @@ def test_a_config_spend_page_goes_blank_after_a_login_to_max(tmp_path):
     after = _drawn(sent[n:])
     assert ("windows", 4.9) not in after
     assert after[-1] == ("windows", -1)
+
+
+def _other_login(home, at):
+    config(home, at, seat="max", billing="subscription", cache=False,
+           acct="ACCT-OTHER-0c0c0c", org="ORG-OTHER-0d0d0d",
+           org_type="claude_max")
+
+
+def _polls(bus, clock, until, step=2):
+    out = []
+    while clock.t < until:
+        clock.t += step
+        out.append(bus.poll())
+    return out
+
+
+def test_the_new_logins_first_render_is_shown(tmp_path):
+    """Round 5 of the 2026-11-04 review, (1), reproduced: Max A at 41%,
+    /login to B at T+71, B renders at T+75. The config was looked at once
+    a minute (T+135), by when B's render had been read and was dropped
+    with A's: None through T+4000. The switch is seen on the next poll now
+    (claude_plan.PlanReader.look), and what is dropped is the render in
+    the file at that moment, by its identity, not by any time."""
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    render(tmp_path, NOW - 30, 1.00, rate_limits=WINDOWS)
+    bus = bus_on(clock)
+    assert bus.poll()["session_pct"] == 41.0
+    _polls(bus, clock, NOW + 70)
+    _other_login(tmp_path, NOW + 71)
+    after_login = _polls(bus, clock, NOW + 74)
+    assert all(m is None for m in after_login)
+    seven = {"seven_day": {"used_percentage": 7.0,
+                           "resets_at": NOW + 3 * 86400},
+             "five_hour": {"used_percentage": 3.0,
+                           "resets_at": NOW + 3600}}
+    render(tmp_path, NOW + 75, 0.10, rate_limits=seven)
+    got = _polls(bus, clock, NOW + 78)
+    assert got[-1] is not None and got[-1]["session_pct"] == 3.0
+
+
+def test_a_future_dated_render_and_a_clock_step_do_not_hide_a_login(tmp_path):
+    """(2): a floor kept as a time survived clock steps, so one render
+    dated an hour ahead hid the next login's renders for that hour."""
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    render(tmp_path, NOW + 3600, 1.00, rate_limits=WINDOWS)  # an hour ahead
+    bus = bus_on(clock)
+    assert bus.poll()["session_pct"] == 41.0
+    clock.t = NOW - 600                                     # a step back
+    bus.poll()
+    _other_login(tmp_path, clock.t + 1)
+    _polls(bus, clock, clock.t + 4)
+    five = {"five_hour": {"used_percentage": 3.0, "resets_at": NOW + 3600}}
+    render(tmp_path, clock.t + 1, 0.10, rate_limits=five)
+    got = _polls(bus, clock, clock.t + 4)
+    assert got[-1] is not None and got[-1]["session_pct"] == 3.0
+
+
+def test_a_config_rewrite_without_a_login_change_drops_nothing(tmp_path):
+    """(3): Claude Code rewrites its config all day for its own
+    bookkeeping; only a different fingerprint is a /login."""
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    render(tmp_path, NOW - 30, 1.00, rate_limits=WINDOWS)
+    bus = bus_on(clock)
+    assert bus.poll()["session_pct"] == 41.0
+    max_config(tmp_path, NOW + 5)                           # same login
+    got = _polls(bus, clock, NOW + 10)
+    assert all(m is not None and m["session_pct"] == 41.0 for m in got)
+
+
+def test_a_switch_forgets_what_the_old_logins_renders_taught(tmp_path):
+    """(7): the newest render's time, the last five_hour seen and the
+    reply baselines were the old login's, and outlived the switch."""
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    render(tmp_path, NOW - 30, 1.00, rate_limits=WINDOWS)
+    p = claude_cli.ClaudeCliProvider()
+    p.poll(NOW)
+    assert p._render_at is not None and p._five_seen is not None
+    assert p._costs
+    _other_login(tmp_path, NOW + 1)
+    p.poll(NOW + 2)
+    assert p._render_at is None and p._five_seen is None
+    assert p._costs == {} and p._chain is None
+    assert p._remembered is None and p._any is None

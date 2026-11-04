@@ -78,6 +78,7 @@ restart.
 """
 import json
 import math
+import os
 import sys
 
 from pc import claude_plan
@@ -305,11 +306,11 @@ class ClaudeCliProvider(base.ProviderParser):
         # A /usage fetched at or before this belongs to an earlier login
         # (_note_login); None while no switch has been seen.
         self._anchor_floor = None
-        # (config mtime, newest render read) at the last login switch: a
-        # render dated before the first or no later than the second is an
-        # earlier login's, and is neither offered nor counted
-        # (_note_login, _old_login); None while no switch has been seen.
-        self._render_floor = None
+        # The status-line file's signature when a login switch was seen,
+        # while the file still holds that render: the old login's, neither
+        # offered nor counted (_note_login, _status_frames). None when the
+        # file has moved on since, or no switch has been seen.
+        self._old_render = None
         # The running count of spend between /usage runs (pc/spend_count),
         # fed and saved only while the config names a spend seat. The bus
         # hands in the one it owns, persisted; built here, for `blink
@@ -799,34 +800,29 @@ class ClaudeCliProvider(base.ProviderParser):
                 forget()
             if self._login_mtime is not None:
                 self._anchor_floor = self._login_mtime
-            # The renders: every one read before this poll, and every one
-            # dated before the config that names the new login, is the old
-            # login's. Dropped here, at the source, and not offered again
-            # -- not the file in front of us, not either memory -- so the
-            # bus has nothing of the old login to put under the new one's
-            # plan (round 4 of the 2026-11-04 review). Four rounds of
-            # hiding the old reading in the Bridge each broke: it kept the
-            # old gateway's 62.8% under "SESSION 5h", or blanked the new
-            # login's page for good. The newest render read counts as well
-            # as the config's time because a render can be dated ahead of
-            # this clock (a 9P mount's), and the bus holds such a reading's
-            # time at now, past any switch: a render ten minutes ahead kept
-            # the old gateway's spend page after a /login to another
-            # account. A new login's render read before the switch was
-            # seen -- the config is looked at once a RECHECK_S -- goes with
-            # them; its next render is shown.
-            self._render_floor = (view.mtime or None, self._render_at)
+            # The renders. The one in the file now, and both memories,
+            # are the old login's; dropped here, at the source, so the bus
+            # has nothing of the old login to put under the new one's plan
+            # (round 4 of the 2026-11-04 review: four rounds of hiding the
+            # old reading in the Bridge each broke). Told by READ ORDER:
+            # the file as it stands is marked, and the first render that
+            # differs from it is the new login's, whatever it is dated.
+            # Round 5 found the first cut, which kept time floors for the
+            # life of the process, hiding a new login for an hour behind
+            # one render dated an hour ahead, and dropping new renders
+            # dated before an unrelated rewrite of the config. The switch
+            # is seen on the poll after /login (claude_plan.PlanReader
+            # .look), so a new render read before it is at most one poll's.
+            self._old_render = _file_sig(self.path())
             self._remembered = self._any = None
+            # And what the old login's renders taught: the newest render's
+            # time, the last five_hour seen, the reply baselines
+            # (_reply_without_window) and their chain.
+            self._render_at = None
+            self._five_seen = None
+            self._costs = {}
+            self._chain = None
         self._login_fp, self._login_mtime = fp, (view.mtime or None)
-
-    def _old_login(self, mtime):
-        """Whether a render dated `mtime` is from before the last login
-        switch (_note_login)."""
-        if mtime is None or self._render_floor is None:
-            return False
-        config_at, read_at = self._render_floor
-        return ((config_at is not None and mtime < config_at)
-                or (read_at is not None and mtime <= read_at))
 
     def _status_frames(self, now_epoch):
         """The frames the status line gives this poll; see the module
@@ -844,9 +840,13 @@ class ClaudeCliProvider(base.ProviderParser):
         back = self._polled_at is not None and now_epoch < self._polled_at
         self._polled_at = now_epoch
         self._live = None
-        payload, mtime = ss.read_payload(self.path())
-        if self._old_login(mtime):
-            payload, mtime = None, None  # see _note_login
+        if self._old_render is not None:
+            if _file_sig(self.path()) == self._old_render:
+                payload, mtime = None, None     # the old login's: _note_login
+            else:
+                self._old_render = None
+        if self._old_render is None:
+            payload, mtime = ss.read_payload(self.path())
         self._read = (payload, mtime)
         if mtime is not None and (self._render_at is None
                                   or mtime > self._render_at):
@@ -913,6 +913,15 @@ class ClaudeCliProvider(base.ProviderParser):
             if last is not None:
                 frames.append(last)
         return frames
+
+
+def _file_sig(path):
+    """The status-line file's identity as a stat gives it -- inode, mtime,
+    size, claude_plan.signature -- or None when it cannot be stat'ed."""
+    try:
+        return claude_plan.signature(os.stat(path))
+    except (OSError, ValueError):
+        return None
 
 
 def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
