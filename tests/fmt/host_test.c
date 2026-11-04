@@ -543,9 +543,12 @@ static void test_fmt_spend_page(void)
 	EXPECT_STR(b, "--");
 	fmt_spend_under(44.4e6, 32 * 86400 + 23 * 3600, b, sizeof(b));
 	EXPECT_STR(b, "of $44.4M " FMT_BULLET " 32d 23h");
+	/* The widest line under the ring, as the formatter writes it, with
+	 * room left in the buffer: a full buffer would mean a cut line. */
+	fmt_spend_under(44.0e6, 20 * 3600 + 48 * 60, b, sizeof(b));
+	EXPECT_STR(b, "of $44.0M " FMT_BULLET " 20h 48m");
 	check_true("the widest line under the ring fits FMT_FOCUS_MAX",
-		   strlen("of $44.4M " FMT_BULLET " 20h 48m") <
-			   FMT_FOCUS_MAX);
+		   strlen(b) + 1 < sizeof(b));
 
 	/* Focus mode's dim line, under the share. */
 	fmt_focus_spend_line(314.12, false, 500, b, sizeof(b));
@@ -579,8 +582,13 @@ static void test_fmt_spend_page(void)
 	EXPECT_STR(b, "$0/h " FMT_BULLET " idle");
 	fmt_usd_burn_line(4440000, "steady", b, sizeof(b));
 	EXPECT_STR(b, "+$44.4k/h " FMT_BULLET " steady");
+	fmt_usd_burn_line(4400000u, "steady", b, sizeof(b));
+	EXPECT_STR(b, "+$44.0k/h " FMT_BULLET " steady");
 	check_true("the widest dollar rate line fits FMT_FOCUS_MAX",
-		   strlen("+$44.4k/h " FMT_BULLET " steady") < FMT_FOCUS_MAX);
+		   strlen(b) + 1 < sizeof(b));
+	/* ...and the burn view's own buffer, BURN5H_RATE_MAX (24). */
+	check_true("the widest dollar rate line fits the burn view's buffer",
+		   strlen(b) + 1 <= 24);
 
 	/* The row's last resort on a page with no /usage figure. */
 	EXPECT_STR(FMT_SPEND_USAGE_HINT, "Run /usage in Claude Code");

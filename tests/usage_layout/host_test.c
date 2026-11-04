@@ -249,21 +249,49 @@ static const struct measured *spend_measured(const char *s)
 	return NULL;
 }
 
-/* Montserrat 14, the countdowns' and the status row's font: measured the
- * same way. The sweep's widest line under the ring is a cap in the tens of
- * millions on the last day of its period -- hours and minutes are wider
- * than days and hours -- and under $100k it is 144. */
-#define W14_UNDER_32D		139	/* "of $44.4M <b> 32d 23h" */
-#define W14_UNDER_WIDEST	148	/* "of $44.0M <b> 20h 48m" */
-#define W14_FOCUS_WIDEST	184	/* "Spent ~$44.0M of $44.0M" */
-#define W14_RATE_WIDEST		131	/* "+$44.0k/h <b> steady" */
-#define W14_USAGE_HINT		198	/* "Run /usage in Claude Code" */
-#define W14_SPEND_HINT		202	/* "Spend limit almost used up" */
-#define W14_FOCUS_CAPTION	51	/* "SPEND" */
-#define W14_SPEND_MONTH		105	/* "SPEND month" */
-/* Montserrat 20, the burn view's total: twenty buckets at the ceiling,
- * $19,999,999.80, "$20.0M", is the sweep's widest under $20M. */
-#define W20_BURN_TOTAL		72
+/*
+ * Whole lines, measured the same way, by the font they are drawn in. The
+ * sweep's widest line under the ring is a cap in the tens of millions on the
+ * last day of its period -- hours and minutes are wider than days and hours
+ * -- and under $100k it is 144. The checks below never type a width in:
+ * they run the formatter on its worst inputs and look the output up here,
+ * so a changed spelling fails the lookup rather than passing on a stale
+ * number.
+ */
+static const struct line_w {
+	int font;			/* 14 or 20: montserrat_N */
+	const char *s;
+	int w;
+} line_w[] = {
+	{ 14, "of $44.4M " FMT_BULLET " 32d 23h", 139 },
+	{ 14, "of $44.0M " FMT_BULLET " 20h 48m", 148 },
+	{ 14, "Spent ~$44.0M of $44.0M", 184 },
+	{ 14, "+$44.0k/h " FMT_BULLET " steady", 131 },
+	{ 14, "Run /usage in Claude Code", 198 },
+	{ 14, "Spend limit almost used up", 202 },
+	{ 14, "SPEND", 51 },
+	{ 14, "SPEND month", 105 },
+	/* The burn view's total: twenty buckets at the ceiling,
+	 * $19,999,999.80, the sweep's widest under $20M. */
+	{ 20, "$20.0M", 72 },
+};
+
+/* The measured width of `s` at montserrat_`font`; a FAIL and a width no
+ * box holds when the spelling has not been measured. */
+static int measured_w(int font, const char *s)
+{
+	char msg[96];
+
+	for (size_t i = 0; i < sizeof(line_w) / sizeof(line_w[0]); i++) {
+		if (line_w[i].font == font && strcmp(line_w[i].s, s) == 0) {
+			return line_w[i].w;
+		}
+	}
+	snprintf(msg, sizeof(msg), "\"%s\" at montserrat_%d is measured",
+		 s, font);
+	CHECK(0, msg);
+	return 9999;
+}
 
 static void test_spend_page(void)
 {
@@ -276,8 +304,28 @@ static void test_spend_page(void)
 	};
 	char msg[96];
 
+	/* The widths below come from the formatters' own output on their
+	 * worst inputs, looked up in line_w. */
+	char line[FMT_FOCUS_MAX];
+	int w_under_32d, w_under_widest, w_focus_line, w_rate, w_total;
+	int w_usage_hint, w_spend_hint, w_focus_caption, w_spend_month;
+
 	printf("\n-- the spend page --\n");
 	EXPECT_EQ(hollow, 76);
+	fmt_spend_under(44.4e6, 32 * 86400 + 23 * 3600, line, sizeof(line));
+	w_under_32d = measured_w(14, line);
+	fmt_spend_under(44.0e6, 20 * 3600 + 48 * 60, line, sizeof(line));
+	w_under_widest = measured_w(14, line);
+	fmt_focus_spend_line(44.0e6, true, 44.0e6, line, sizeof(line));
+	w_focus_line = measured_w(14, line);
+	fmt_usd_burn_line(4400000u, "steady", line, sizeof(line));
+	w_rate = measured_w(14, line);
+	fmt_usd(20u * 99999999u / 100.0, line, sizeof(line));
+	w_total = measured_w(20, line);
+	w_usage_hint = measured_w(14, FMT_SPEND_USAGE_HINT);
+	w_spend_hint = measured_w(14, fmt_spend_hint(96));
+	w_focus_caption = measured_w(14, fmt_spend_caption(NULL));
+	w_spend_month = measured_w(14, fmt_spend_caption("monthly"));
 	for (size_t i = 0; i < sizeof(fours) / sizeof(fours[0]); i++) {
 		for (int est = 0; est <= 1; est++) {
 			char b[FMT_USD_MAX];
@@ -333,9 +381,9 @@ static void test_spend_page(void)
 					     PILL_MAX_W, PILL_H);
 
 		EXPECT_EQ(SCR_MID_X + GAUGE_CX, 240);
-		CHECK(W14_UNDER_32D <= SPEND_CD_MAX_W,
+		CHECK(w_under_32d <= SPEND_CD_MAX_W,
 		      "\"of $44.4M <b> 32d 23h\" fits under the ring");
-		CHECK(W14_UNDER_WIDEST <= SPEND_CD_MAX_W,
+		CHECK(w_under_widest <= SPEND_CD_MAX_W,
 		      "the widest line under the ring, measured, fits it");
 		CHECK(under.x1 <= SCR_W - SCR_RIGHT_MARGIN_MIN,
 		      "the line under the ring clears the right bezel");
@@ -344,9 +392,9 @@ static void test_spend_page(void)
 		CHECK(!overlaps(under, rate),
 		      "it clears the dollar burn view's rate line");
 		CHECK(!overlaps(under, pill), "it clears the provider pill");
-		CHECK(W14_RATE_WIDEST <= BURN_TEXT_W,
+		CHECK(w_rate <= BURN_TEXT_W,
 		      "the widest dollar rate line fits the burn view's row");
-		CHECK(W20_BURN_TOTAL + BURN_GLYPH_GAP + BURN_GLYPH_FONT_H <=
+		CHECK(w_total + BURN_GLYPH_GAP + BURN_GLYPH_FONT_H <=
 			      BURN_TEXT_W,
 		      "the widest dollar total and its arrow fit the half");
 	}
@@ -354,21 +402,19 @@ static void test_spend_page(void)
 	/* Focus mode's caption in the big ring: "SPEND month" (105 px),
 	 * "SPEND today" (96) and "SPEND week" (94) all overrun the 85 px the
 	 * thick ring's hollow holds there, so Focus writes "SPEND" (51). */
-	CHECK(W14_FOCUS_CAPTION <= FOCUS_NAME_W,
+	CHECK(w_focus_caption <= FOCUS_NAME_W,
 	      "Focus's spend caption fits inside the thick ring");
-	CHECK(W14_SPEND_MONTH > FOCUS_NAME_W,
+	CHECK(w_spend_month > FOCUS_NAME_W,
 	      "and the period's caption would not, which is why it is cut");
 
 	/* Focus mode's dim line, and the status row's two spend sentences. */
-	CHECK(W14_FOCUS_WIDEST <= FOCUS_OTHER_MAX_W,
+	CHECK(w_focus_line <= FOCUS_OTHER_MAX_W,
 	      "\"Spent ~$44.0M of $44.0M\" fits Focus mode's dim line");
-	CHECK(W14_USAGE_HINT <= STATUS_MAX_W,
+	CHECK(w_usage_hint <= STATUS_MAX_W,
 	      "\"Run /usage in Claude Code\" fits the status row");
 	CHECK(strlen(FMT_SPEND_USAGE_HINT) <= 47,
 	      "\"Run /usage in Claude Code\" fits the 47 characters kept");
-	CHECK(strcmp(FMT_SPEND_USAGE_HINT, "Run /usage in Claude Code") == 0,
-	      "the hint measured is the hint shown");
-	CHECK(W14_SPEND_HINT <= STATUS_MAX_W,
+	CHECK(w_spend_hint <= STATUS_MAX_W,
 	      "\"Spend limit almost used up\" fits the status row");
 }
 

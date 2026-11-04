@@ -153,7 +153,7 @@ Built on `fp/enterprise`'s firmware, announced by a `plan` capability.
 - **Right half:** the month: a ring with the share, the dollars in the ring
   ("$314", in montserrat_20 when it fits the 76 px hollow, else
   montserrat_16), and "of $500 • 27d 5h" under it in a label widened to
-  144 px on a spend page (bullet U+2022, which the fonts have). Estimated
+  148 px on a spend page (bullet U+2022, which the fonts have). Estimated
   figures carry a "~" before the dollars. The ring uses
   the theme's arc colour; the rail uses severity.
 - **Left half:** the dollar burn view: twenty quarter-hour bars of dollars,

@@ -130,7 +130,8 @@ int main(void)
 	 * The plan's two flags (pc/protocol.plan): "est" when the dollars are
 	 * an estimate, "hint" when there is no /usage figure at all. Each is
 	 * omitted when false, so the common line does not grow; proto.c reads
-	 * each as a number with -1 left standing for "absent".
+	 * each as a number starting at 0, so an absent flag is false and only an
+ * exact 1 sets it.
 	 */
 	{
 		printf("\n-- the plan's estimate and hint --\n");
