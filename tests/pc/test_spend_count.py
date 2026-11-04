@@ -763,40 +763,104 @@ def test_one_process_is_counted_exactly():
 class _ExitAfterAppend(list):
     """The rise list, raising the daemon's SIGTERM exit (SystemExit, from
     claude_usage_bridge._on_sigterm, which can land between any two
-    bytecodes of the main thread) right after a rise is appended and
-    before its mark moves."""
+    bytecodes of the main thread) right after a rise is appended."""
 
     def append(self, x):
         super().append(x)
         raise SystemExit(0)
 
 
-def test_an_exit_inside_observe_does_not_save_a_torn_count(tmp_path):
-    """The exit flush wrote whatever was in memory. A SIGTERM between the
-    rise's append and the mark's update left a rise of 50 cents counted
-    against the old mark of 1.00, and the restart counted it again from
-    that mark: a dollar on the page for 50 cents spent. It needs the count
-    dirty already, which is every render after a paced save. Skipped, the
-    flush leaves the file as last written, mark 1.00, and the restart
-    counts the whole 50 cents from it at the session's next render -- the
-    pre-U12 recovery, for the one exit that lands mid-update."""
-    import spend_count
+class _ExitBeforeAppend(list):
+    """The same, landing just before the rise is appended."""
+
+    def append(self, x):
+        raise SystemExit(0)
+
+
+def _paced(tmp_path):
+    """A counter whose file holds a at 1.00 and b at 2.00, with a rise on
+    each since -- a to 1.20, b to 2.40 -- held back by the pacing."""
     tick = Tick()
     c = mk(tmp_path, clock=tick)
     c.bind("fp", 0)
     c.observe("a", 1.00, 100)
+    c.observe("b", 2.00, 101)
     c.save()
-    c.observe("a", 1.20, 105)           # held back by the pacing
+    c.observe("a", 1.20, 105)
+    c.observe("b", 2.40, 106)
     tick.t += 5
     c.save()
-    c._adds = _ExitAfterAppend(c._adds)
-    with pytest.raises(SystemExit):
-        c.observe("a", 1.50, 110)
+    return c
+
+
+def _restart(tmp_path):
+    import spend_count
     spend_count._flush_at_exit()
     d = mk(tmp_path)
     d.bind("fp", 0)
+    return d
+
+
+def test_an_exit_inside_observe_does_not_save_a_torn_count(tmp_path):
+    """K4, round 2 of the 2026-11-04 review: the exit flush wrote whatever
+    was in memory, and a SIGTERM between a rise's append and its mark's
+    move saved a rise of 30 cents against the old mark; the restart
+    counted it again from there. The mark now moves first, in one store,
+    and the rise is appended after it, so wherever the exit lands the
+    flush saves no rise its mark does not cover: here the whole update."""
+    c = _paced(tmp_path)
+    c._adds = _ExitAfterAppend(c._adds)
+    with pytest.raises(SystemExit):
+        c.observe("a", 1.50, 110)
+    d = _restart(tmp_path)
     d.observe("a", 1.50, 110)
-    assert d.since(0) == 50
+    assert d.since(0) == 50 + 40
+
+
+def test_an_exit_before_the_rise_is_appended_loses_only_that_rise(tmp_path):
+    """Landing between the mark's move and the rise: the 30 cents are lost,
+    the safe direction, and nothing else is."""
+    c = _paced(tmp_path)
+    c._adds = _ExitBeforeAppend(c._adds)
+    with pytest.raises(SystemExit):
+        c.observe("a", 1.50, 110)
+    d = _restart(tmp_path)
+    d.observe("a", 1.50, 110)
+    assert d.since(0) == 20 + 40
+
+
+def test_an_exit_inside_observe_still_writes_the_rest(tmp_path):
+    """R3, round 2's review of K4's first cut: it skipped the flush whole
+    while an update was in flight, so b's 40 cents, held back by the
+    pacing and untouched by the update, were lost with it."""
+    c = _paced(tmp_path)
+    c._adds = _ExitAfterAppend(c._adds)
+    with pytest.raises(SystemExit):
+        c.observe("a", 1.50, 110)
+    d = _restart(tmp_path)
+    # b has closed and does not render again.
+    d.observe("a", 1.50, 110)
+    assert d.since(0) == 50 + 40
+
+
+def test_an_error_inside_observe_does_not_stop_the_exit_flush(tmp_path):
+    """R2, the same review: K4's first cut set a flag around observe() and
+    cleared it after, not in a finally, so an ordinary exception -- one
+    the provider catches and goes on from -- left it set, and every exit
+    flush after it was skipped without a word. There is no flag now."""
+    c = _paced(tmp_path)
+
+    def boom():
+        raise RuntimeError("x")
+    c._compact = boom
+    with pytest.raises(RuntimeError):
+        c.observe("a", 1.50, 110)
+    del c._compact
+    d = _restart(tmp_path)
+    # b has closed and does not render again: its 40 cents are in the
+    # file or nowhere.
+    d.observe("a", 1.50, 110)
+    assert d.since(0) == 50 + 40
 
 
 def test_an_exit_inside_bind_does_not_save_a_torn_count(tmp_path):
