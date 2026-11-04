@@ -3712,10 +3712,11 @@ def test_reinstall_into_a_moved_folder_takes_blink_out_of_the_old(
 
 def test_a_moved_folder_that_will_not_undo_stops_the_install(
         tmp_path, monkeypatch, capsys):
-    """U21, when the old folder cannot be reached (its Linux account gone,
-    say): nothing is written inside, the record stays, and the way out is
-    said, rather than overwriting the chain file the old folder's own
-    status line is kept in."""
+    """U21, when the old folder cannot be undone and its Linux account is
+    still there (a settings.json that does not parse, say): nothing is
+    written inside, the record stays, and the way out is said, rather
+    than overwriting the chain file the old folder's own status line is
+    kept in. An account that is gone is C3's, below."""
     from pc import claude_home
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe(user="amy", home="/home/amy",
@@ -3733,6 +3734,91 @@ def test_a_moved_folder_that_will_not_undo_stops_the_install(
     assert "another folder inside Ubuntu" in out
     assert "inside Ubuntu remove ~/.blink/out" in out
     assert "Done." not in out
+
+
+def _old_account_gone(monkeypatch, calls, gone="zoe", undo_ok=()):
+    """A distribution where Linux account `gone` no longer exists:
+    getent says so (exit 2) and wsl.exe -u for it fails, so uninstall_from
+    as that account raises. As anyone else it succeeds when that account
+    is in `undo_ok`, and raises otherwise."""
+    def run_in(home):
+        def run(argv, stdin=None):
+            calls.append(("wsl_run", home.linux_user, argv[0]))
+            if argv[:2] == ["getent", "passwd"]:
+                return (2, b"", b"") if argv[2] == gone else (0, b"x", b"")
+            return 0, b"", b""
+        return run
+
+    def from_(home, wsl_run, **k):
+        calls.append(("uninstall_from", home))
+        if home.linux_user in undo_ok:
+            return "Statusline removed. Activity hooks removed."
+        raise install_statusline.WslInstallError("nope")
+    monkeypatch.setattr(install_statusline, "default_wsl_run", run_in)
+    monkeypatch.setattr(install_statusline, "uninstall_from", from_)
+
+
+def test_a_renamed_account_is_taken_out_as_the_one_there_now(
+        tmp_path, monkeypatch, capsys):
+    """Round 2, C3: the moved-inside step ran as the account Blink was set
+    up for. Renamed (usermod -l, same home), that account no longer
+    exists, every wsl.exe -u for it fails, and install stopped for good
+    with advice to act as a user nobody can be. The folder is taken out
+    as the account the distribution has now."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(user="zoey"))
+    old = _recorded_wsl(tmp_path)
+    _old_account_gone(monkeypatch, calls, undo_ok=("zoey",))
+    assert cli.main(["install"]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    undone = [c[1] for c in calls if c[0] == "uninstall_from"]
+    assert [h.linux_user for h in undone] == ["zoe", "zoey"]
+    assert undone[1].config_dir == old.config_dir
+    assert _inside(calls)[-1] == "install_into"
+    assert claude_home.recorded().linux_user == "zoey"
+    assert "Linux account Blink was set up for inside Ubuntu (zoe)" in out
+    assert "no longer there" in out
+
+
+def test_a_deleted_account_with_its_folder_out_of_reach_does_not_block(
+        tmp_path, monkeypatch, capsys):
+    """C3, the account deleted and its home elsewhere: nobody signs in as
+    it, so its folder is said to still hold Blink's entries, with how to
+    take them out, and the install goes on rather than stopping forever."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(user="amy", home="/home/amy",
+                                   config_dir="/home/amy/.claude"))
+    _recorded_wsl(tmp_path)
+    _old_account_gone(monkeypatch, calls)
+    assert cli.main(["install"]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert _inside(calls)[-1] == "install_into"
+    assert claude_home.recorded().linux_user == "amy"
+    assert "no longer there" in out
+    assert "could not be taken out of /home/zoe/.claude as amy" in out
+    assert "Done." in out
+
+
+def test_a_gone_account_whose_home_is_the_new_one_still_stops(
+        tmp_path, monkeypatch, capsys):
+    """C3, but the new account has the old one's home and the folder
+    still could not be undone: writing now would overwrite the chain file
+    holding the old folder's own status line (U21), so it stops, and the
+    advice names the account there is now."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(user="zoey",
+                                   config_dir="/home/zoe/work-claude"))
+    old = _recorded_wsl(tmp_path)
+    _old_account_gone(monkeypatch, calls)
+    assert cli.main(["install"]) == 1
+    out = " ".join(capsys.readouterr().out.split())
+    assert "install_into" not in _inside(calls)
+    assert claude_home.recorded() == old
+    assert "as zoey" in out
+    assert "as the Linux account Blink was set up for" not in out
 
 
 def test_reinstall_into_the_same_folder_undoes_nothing(tmp_path,

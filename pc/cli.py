@@ -4178,6 +4178,107 @@ def _moved_inside(prev, home, config_dir) -> bool:
             or norm(prev.linux_home or "") != norm(home.linux_home or ""))
 
 
+_UNDO_FAILED = (install_statusline.WslInstallError,
+                install_statusline.SettingsUnreadable, OSError)
+
+
+def _undo_said(e) -> str:
+    """An undo's failure, said: an OSError by type, since its text names
+    a folder under the user's profile."""
+    return type(e).__name__ if isinstance(e, OSError) else str(e)
+
+
+def _take_out_of_moved(prev, probe, name) -> bool:
+    """_setup_wsl's moved-inside step: take Blink out of the folder `prev`
+    recorded inside distribution `name`, before the folder `probe` found
+    is written. True to go on; False when it stopped, said why.
+
+    Run as the account Blink was set up for, since the folder is its. If
+    that account is gone (deleted, or renamed with usermod -l), wsl.exe -u
+    for it fails every time, and until the second review round (C3) the
+    install stopped for good with advice to act as a user nobody could be.
+    Then it is tried as the account there now: a rename keeps the uid and
+    the home, so that works. Failing that too, the old account's folder is
+    left -- nobody signs in as it -- and the install goes on, unless the
+    new account lives in the same home: there the chain file still holds
+    the old folder's own status line, and writing now would overwrite it
+    (U21), so it stops."""
+    try:
+        old = _wsl_under(prev, name)
+        said = install_statusline.uninstall_from(
+            old, install_statusline.default_wsl_run(old))
+    except _UNDO_FAILED as e:
+        first = e
+    else:
+        print(f"      The folder Blink used before inside {name}: {said}")
+        return True
+    norm = claude_home.linux_norm
+    if not prev.linux_user or prev.linux_user == probe.user:
+        return _stop_over_moved(name, first, None)
+    try:
+        linux = install_statusline._linux_path(prev, prev.config_dir)
+        now = claude_home.wsl(prev.distro_guid, name, probe.user,
+                              prev.linux_home, wsl.unc(name, linux),
+                              prev.config_dir_set)
+    except install_statusline.WslInstallError:
+        return _stop_over_moved(name, first, None)
+    if not _account_gone(now, prev.linux_user):
+        return _stop_over_moved(name, first, None)
+    print(f"      The Linux account Blink was set up for inside {name}"
+          f" ({prev.linux_user}) is no longer there.")
+    try:
+        said = install_statusline.uninstall_from(
+            now, install_statusline.default_wsl_run(now))
+    except _UNDO_FAILED as e:
+        if norm(prev.linux_home or "") == norm(probe.home):
+            return _stop_over_moved(name, e, probe.user)
+        print(f"      Blink could not be taken out of {norm(linux)} as"
+              f" {probe.user} ({_undo_said(e)}). Claude Code reads that")
+        print("      folder only when started with it; to take Blink out by")
+        print(f"      hand, as an account that can edit it, remove"
+              f" {norm(prev.linux_home or '/')}/.blink/blink-*.sh")
+        print("      and the statusLine and hooks entries in its settings.json")
+        print("      that name them.")
+        return True
+    print(f"      The folder Blink used before inside {name}, taken out as"
+          f" {probe.user}: {said}")
+    return True
+
+
+def _account_gone(home, user) -> bool:
+    """Is Linux account `user` no longer in `home`'s distribution? Asked
+    as `home`'s own account, which the probe has just run as, and True
+    only on getent's own "no such key", exit 2: a timeout or wsl.exe
+    failing proves nothing, and is taken as the account still there.
+    The output is not read, so nothing of /etc/passwd is printed or
+    kept."""
+    try:
+        rc, _, _ = install_statusline.default_wsl_run(home)(
+            ["getent", "passwd", user])
+    except OSError:
+        return False
+    return rc == 2
+
+
+def _stop_over_moved(name, e, as_user) -> bool:
+    """The moved-inside step's stop: nothing was written inside `name`
+    and the record stays. `as_user` is the account to take it out by
+    hand as, when the one Blink was set up for is gone; None for that
+    one."""
+    print()
+    print(f"Blink setup stopped. Blink is set up in another folder"
+          f" inside {name}, and could not be taken out of it:"
+          f" {_undo_said(e)}")
+    who = (f"as {as_user}," if as_user
+           else "as the Linux account Blink was set up for,")
+    print(f"Claude Code inside {name} was not changed. To take it"
+          f" out by hand, {who}")
+    _say_wsl_manual_steps(name)
+    print(f"      Then move {user_config.path(blink_home())} aside")
+    print("      and run this again.")
+    return False
+
+
 def _say_wsl_manual_steps(name) -> None:
     print(f"      inside {name} remove ~/.blink/out and ~/.blink/blink-*.sh,")
     print("      and the statusLine and hooks entries in Claude Code's")
@@ -4255,24 +4356,8 @@ def _setup_wsl(d):
         # was left with Blink's status line and ten hooks, which ran
         # deleted shims after an uninstall -- an exit 2 that blocks every
         # prompt.
-        try:
-            old = _wsl_under(prev, d.name)
-            said = install_statusline.uninstall_from(
-                old, install_statusline.default_wsl_run(old))
-        except (install_statusline.WslInstallError,
-                install_statusline.SettingsUnreadable, OSError) as e:
-            what = (type(e).__name__ if isinstance(e, OSError) else str(e))
-            print()
-            print(f"Blink setup stopped. Blink is set up in another folder"
-                  f" inside {d.name}, and could not be taken out of it:"
-                  f" {what}")
-            print(f"Claude Code inside {d.name} was not changed. To take it"
-                  " out by hand, as the Linux account Blink was set up for,")
-            _say_wsl_manual_steps(d.name)
-            print(f"      Then move {user_config.path(blink_home())} aside")
-            print("      and run this again.")
+        if not _take_out_of_moved(prev, probe, d.name):
             return None
-        print(f"      The folder Blink used before inside {d.name}: {said}")
 
     try:
         said = install_statusline.install_into(
