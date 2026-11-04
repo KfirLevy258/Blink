@@ -3128,8 +3128,10 @@ def test_status_wire_counts_what_the_daemon_counted(tmp_path, capsys,
     import json as _json
     from pc import claude_plan, spend_count
     now = time.time()
+    # The /usage ten minutes back: a rise counts toward it only from
+    # spend_count.SKEW_S after it.
     _claude_json(tmp_path, "enterprise_usage_based", used=4321,
-                 fetched_ms=int((now - 60) * 1000))
+                 fetched_ms=int((now - 600) * 1000))
     view = claude_plan.PlanReader().look(now)
     path = inside(tmp_path, spend_count._default_path())
     daemon = spend_count.SpendCounter(path=path)

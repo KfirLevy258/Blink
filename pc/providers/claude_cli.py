@@ -991,16 +991,10 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
         added = counter.since(period)
         cents, limit = added, None
     else:
-        # An owed measurement: on a WSL desk the renders are dated by the
-        # drop file's mtime (the Windows clock) and the /usage by
-        # Date.now() inside the distribution, and the two can disagree; a
-        # render made before the /usage but dated after it has its rise
-        # counted whole. Round 4 of the 2026-11-04 review guessed 30 s and
-        # added a two-minute margin, round 5 took it out: the correction
-        # is chosen from the measurement (Plan B, task 7, in
-        # docs/plans/2026-11-04-wsl-plan.md: the owner's checklist item
-        # comparing Windows' time with `date -u` in WSL), not before it.
-        added = counter.since(a.fetched_at)
+        # From SKEW_S after the /usage: its time is not the renders' clock,
+        # and how far the two disagree on a WSL desk is an owed
+        # measurement (spend_count.SKEW_S).
+        added = counter.since_usage(a.fetched_at)
         cents, limit = a.used_cents + added, a.limit_cents
     pct = base.UNKNOWN
     if limit is not None:
@@ -1022,7 +1016,11 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
         session_pct=pct,
         session_resets_at=claude_plan.next_month_start_utc(now_epoch),
         weekly_pct=base.UNKNOWN, weekly_resets_at=None,
-        spend_exact=age is not None and age < SPEND_EXACT_S and added == 0,
+        # Exact only while no rise has been seen since the /usage at all,
+        # counted or not: one inside the margin, or one straddling the
+        # /usage, is spend the figure does not have (round 6, item 6).
+        spend_exact=(age is not None and age < SPEND_EXACT_S and added == 0
+                     and not counter.rose_after(a.fetched_at)),
         spend_hint=age is None or age > SPEND_HINT_S)
 
 

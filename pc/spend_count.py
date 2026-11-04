@@ -18,8 +18,8 @@ Rules, each from a way the raw number misleads:
   against. `since(anchor)` counts only rises stamped at or after the
   anchor: a rise from a mark set before the anchor may have happened
   partly before /usage measured, so it is dropped rather than counted
-  twice. On a WSL desk the two times come from different clocks, an owed
-  measurement (claude_cli._spend_frame).
+  twice. For a /usage the anchor is moved SKEW_S later (since_usage),
+  because its time and a render's come from clocks that can disagree.
 * `at` is the render's own time (the payload's mtime), so reading the same
   render again moves nothing.
 
@@ -141,6 +141,24 @@ _BUCKETS = 20
 _RECENT_S = _BUCKETS * 900
 # The shortest gap between two writes of the file, on the monotonic clock.
 SAVE_EVERY_S = 60
+# How far after a /usage a rise's previous sighting must be for the rise to
+# count toward it (since). The two times come from different clocks: a
+# render's is the status-line file's mtime, and on a WSL desk that file is
+# written to the Windows side and dated by the Windows clock, while the
+# /usage time is Date.now() inside the distribution, and the two can
+# disagree. A render made before the /usage but dated after it has its rise
+# counted whole although part of it is in the /usage figure. How far they
+# disagree is an owed measurement (Plan B, task 7, in
+# docs/plans/2026-11-04-wsl-plan.md: the owner's checklist item comparing
+# Windows' time with `date -u` in WSL), and the correction will be chosen
+# from it. Until then two minutes, in the direction the count is allowed
+# to err: what it costs is the rises whose previous sighting falls in the
+# two minutes after a /usage, left to the next one, and the page says it
+# is an estimate while there are any (rose_after). Round 5 of the review
+# took the margin out for claiming "exact" over those rises; round 6 put
+# it back with that fixed. Applied by since_usage, which claude_cli asks
+# with a /usage time.
+SKEW_S = 120
 # 2: the carried entry and the newest anchor asked about. A version-1 file
 # (every rise one by one, from before 2026-11-04) is read as empty, as any
 # file this cannot read is: it held an estimate, which the next /usage
@@ -459,6 +477,23 @@ class SpendCounter:
             self._anchor = anchor_at
         return (self._folded_since(anchor_at)
                 + sum(c for prev, _at, c in self._adds if prev >= anchor_at))
+
+    def rose_after(self, t) -> bool:
+        """Whether any rise was seen in a render after `t`, counted toward
+        an anchor or not: a page that says "exact" with one, dropped by
+        the straddling rule or SKEW_S, would be claiming what it did not
+        count (round 6 of the 2026-11-04 review, item 6)."""
+        if self._fold is not None and self._fold[4] > t:
+            return True
+        return any(at > t for _prev, at, _c in self._adds)
+
+    def since_usage(self, fetched_at) -> int:
+        """since() for a /usage made at `fetched_at`: counted from SKEW_S
+        after it, for the clocks the two times come from. The period start
+        needs no such margin -- bind() empties the count there, so a rise
+        dated into the month that was made before it is counted once, in
+        the month it is dated to."""
+        return self.since(fetched_at + SKEW_S)
 
     def buckets(self, now) -> list:
         out = [0] * _BUCKETS

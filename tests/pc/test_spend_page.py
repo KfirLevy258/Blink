@@ -121,10 +121,11 @@ def test_spend_seat_gives_a_spend_plan_message(tmp_path):
 
 
 def test_rises_after_the_anchor_add_up(tmp_path):
-    clock = Clock(NOW - 499)
+    clock = Clock(NOW - 449)
     config(tmp_path, NOW - 600, used=1000, fetched=NOW - 600)
     bus = bus_on(clock)
-    for at, cost in ((NOW - 500, 1.00), (NOW - 400, 1.50),
+    # The first sighting more than spend_count.SKEW_S after the /usage.
+    for at, cost in ((NOW - 450, 1.00), (NOW - 400, 1.50),
                      (NOW - 300, 1.75)):
         render(tmp_path, at, cost)
         clock.t = at + 1
@@ -998,3 +999,18 @@ def test_no_status_file_at_the_switch_marks_nothing(tmp_path):
     five = {"five_hour": {"used_percentage": 3.0, "resets_at": NOW + 3600}}
     render(tmp_path, NOW + 7, 0.10, rate_limits=five)
     assert any(f.session_pct == 3.0 for f in p.poll(NOW + 8))
+
+
+def test_a_rise_inside_the_usage_margin_is_not_exact(tmp_path):
+    """Round 6, item 6: a /usage a minute ago and a rise since, inside the
+    two minutes the count leaves to the next /usage: the figure is the
+    /usage alone, and it is an estimate, not exact."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 60, used=1000, fetched=NOW - 60)
+    bus = bus_on(clock)
+    for at, cost in ((NOW - 50, 1.00), (NOW - 40, 1.50)):
+        render(tmp_path, at, cost)
+        clock.t = at + 1
+        bus.poll()
+    assert bus.plan_msg()["usd"] == 10.00
+    assert bus.claude_page().spend_exact is False

@@ -66,6 +66,27 @@ def test_rise_straddling_the_anchor_is_dropped():
     assert c.since(150) == 20
 
 
+def test_a_render_clock_ahead_of_the_usage_clock_does_not_count_twice():
+    """Round 4 of the 2026-11-04 review. On a WSL desk the render's time is
+    the drop file's mtime, from the Windows clock, and the /usage time is
+    Date.now() inside the distribution, a clock that runs behind it: 30
+    seconds measured, more after the host sleeps. A render made before the
+    /usage then carries a time after it, and the rise from it was counted
+    whole although part of it was in the /usage figure. A rise counts
+    toward a /usage only from a sighting SKEW_S or more after it
+    (since_usage, which claude_cli asks with the /usage time)."""
+    import spend_count
+    skew = spend_count.SKEW_S
+    assert 60 <= skew <= 120
+    c = SpendCounter(persist=False)
+    c.observe("a", 1.00, 1030)          # before the /usage, 30 s ahead
+    c.observe("a", 1.50, 1100)
+    assert c.since_usage(1000) == 0
+    c.observe("a", 1.70, 1000 + skew + 50)
+    c.observe("a", 2.00, 1000 + skew + 100)
+    assert c.since_usage(1000) == 30
+
+
 def test_buckets():
     now = 1_800_000_000 + 600
     c = SpendCounter(persist=False)
@@ -868,3 +889,47 @@ def test_an_exit_inside_bind_does_not_save_a_torn_count(tmp_path):
     d.bind("other", 0)
     assert d.since(0) == 0
 
+
+
+def test_a_rise_after_the_usage_is_seen_even_inside_the_margin():
+    """Round 6 of the 2026-11-04 review, item 6: the /usage margin is back,
+    and the page said "exact" while a rise inside it went uncounted, since
+    exact was "nothing added". rose_after() says whether any rise was
+    seen after a time, counted or not."""
+    c = SpendCounter(persist=False)
+    c.observe("a", 1.00, 1010)
+    assert c.rose_after(1000) is False
+    c.observe("a", 1.50, 1030)                  # inside the margin
+    assert c.since_usage(1000) == 0
+    assert c.rose_after(1000) is True
+    assert c.rose_after(1030) is False
+
+
+def test_the_margin_and_the_fold_agree_on_a_file_this_build_writes(
+        tmp_path):
+    """Item 6: since_usage moves the anchor the fold is keyed on. On a file
+    written by this build the boundary is the anchor since_usage asks, so
+    rises folded out of the five hours still count toward it, before and
+    after a restart: ten hours of renders after a /usage at t."""
+    t = 1_800_000_000
+    c = mk(tmp_path)
+    c.bind("fp", 0)
+    c.observe("a", 0.0, t + 10)
+    want = 0
+    for i in range(1, 121):
+        at = t + 10 + i * 300
+        c.observe("a", i * 5 / 100.0, at)
+        if at - 300 >= t + SKEW():
+            want += 5
+        c.since_usage(t)
+    c.save()
+    assert c._fold is not None and c._fold[0] == t + SKEW()
+    assert c.since_usage(t) == want
+    d = mk(tmp_path)
+    d.bind("fp", 0)
+    assert d.since_usage(t) == want
+
+
+def SKEW():
+    import spend_count
+    return spend_count.SKEW_S
