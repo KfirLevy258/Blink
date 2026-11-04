@@ -29,6 +29,7 @@ out when it is asked for, so tests/conftest.py's HOME applies.
 """
 import dataclasses
 import os
+import posixpath
 import stat
 from typing import Optional
 
@@ -97,8 +98,18 @@ def unc(name, linux_path, long_paths=True):
     """The Windows path of `linux_path` inside distribution `name`. The one
     builder: pc/wsl's unc is this function, since two had drifted on a
     trailing slash. `long_paths` False is the short \\\\wsl$\\ form, which
-    a path longer than MAX_PATH cannot use."""
-    rest = linux_path.strip("/").replace("/", "\\")
+    a path longer than MAX_PATH cannot use.
+
+    Normalised first, lexically: Windows hands a \\\\?\\ path to the
+    filesystem as it is, with no collapsing of `..`, `.` or an empty
+    component, so a CLAUDE_CONFIG_DIR of /home/a//.claude or
+    /home/a/x/../.claude, which Linux reads happily, named nothing from
+    Windows (review of feat/enterprise-spend, U34). Lexical, so `x/..`
+    with x a symlink goes where the text says rather than where Linux
+    would; a config folder reached that way is not worth a wsl.exe call
+    to resolve on every path built."""
+    rest = posixpath.normpath("/" + linux_path.strip("/")).strip("/")
+    rest = rest.replace("/", "\\")
     base = (_UNC_ROOT if long_paths else "\\\\wsl$\\") + name
     return base + ("\\" + rest if rest else "")
 

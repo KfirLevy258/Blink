@@ -412,3 +412,21 @@ def test_probe_works_for_a_tcsh_user():
         return 1, b"", b""
     p = wsl.probe("U", exe=EXE, runner=Rec(ans))
     assert p is not None and p.claude_exe == "/home/bob/.nvm/bin/claude"
+
+
+# --- review of feat/enterprise-spend, U34 ---------------------------------
+
+@pytest.mark.parametrize("linux,want", [
+    ("/home/a//.claude", "\\home\\a\\.claude"),
+    ("/home/a/x/../.claude", "\\home\\a\\.claude"),
+    ("/home/a/./.claude/", "\\home\\a\\.claude"),
+    ("//home/a/.claude", "\\home\\a\\.claude"),
+    ("/..", ""),
+])
+def test_unc_normalises_what_a_long_path_will_not(linux, want):
+    """A \\\\?\\ path is handed to the filesystem as it is: Windows does
+    not collapse `..`, `.` or an empty component in one, so a
+    CLAUDE_CONFIG_DIR of /home/a//.claude or /home/a/x/../.claude, which
+    Linux reads happily, named nothing from Windows."""
+    assert wsl.unc("U", linux) == "\\\\?\\UNC\\wsl.localhost\\U" + want
+    assert wsl.unc("U", linux, long_paths=False) == "\\\\wsl$\\U" + want
