@@ -36,6 +36,13 @@ weekly window and monthly dollars, each with its reset time.
   `five_hour` either: this account has no 5-hour window right now. A login
   with one is still to be seen (Task 0).
 
+- Logged out (2026-11-05, `CLAUDE_CONFIG_DIR` pointed at an empty
+  folder): exit 0, `type "result"`, `subtype "success"`, `is_error` false,
+  `num_turns 0`, `total_cost_usd 0`, empty `modelUsage` -- but the `result`
+  is a session-cost summary, not usage, and no cache is written. So a
+  zero-cost "success" does not prove a refresh: a run counts only if
+  `fetchedAtMs` moved past the run's start.
+
 ## Goals
 
 - Fresh 5-hour, weekly and spend figures for people who never open a
@@ -155,7 +162,7 @@ itself off at once, saves the reason `cost`, logs one line and stays off
 until the person turns it on again. `blink status` says
 "off: Claude Code's /usage used the model".
 
-Failure guard: an answer that is not that JSON, `is_error` true, a non-zero
+Failure guard: an answer that is not that JSON, a zero-cost success after which `fetchedAtMs` did not move past the run's start (what a logged-out Claude Code gives), `is_error` true, a non-zero
 exit, or the 60-second limit is a failure. 3 in a row stretch the spacing to
 an hour; failures only, for 24 hours, turn it off with the reason `failing`
 ("off: /usage kept failing; run claude and /login, then turn it on again").
