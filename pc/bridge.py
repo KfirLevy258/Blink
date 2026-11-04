@@ -177,6 +177,9 @@ class Bridge:
         # poll_if_changed decides against: "sent", not "read", because the
         # capping on the way out is part of what the board received.
         self._last_pushed = None
+        # And the line itself, whole: what _take_down_spend blanks a page
+        # out of, so the other page keeps what the board was last told.
+        self._last_usage = None
         # Themes (pc/theme.py). theme_sync owns the files and what the
         # board is believed to hold; open_builder starts the builder and a
         # browser on it, returning whether one opened, and is rate-limited
@@ -1001,8 +1004,9 @@ class Bridge:
         if usage is None:
             # Nothing to draw, but perhaps something to take down: straight
             # after a switch back from a spend login there may be no reading
-            # at all, and the board still holds the old account's plan.
-            self._send_plan_if_changed()
+            # at all, and the board still holds the old account's plan --
+            # and its share (_take_down_spend).
+            self._take_down_spend(self._send_plan_if_changed())
             # No statusline payload yet. The board keeps its last values and
             # its own dot, which is right -- but the daemon used to say nothing
             # at all, so a machine where Claude Code has simply never rendered
@@ -1063,8 +1067,9 @@ class Bridge:
             usage = None
         if usage is None:
             # Nothing to say about usage, but the status pages still have
-            # their own news, and want() still has to be renewed.
-            self._send_plan_if_changed()
+            # their own news, and want() still has to be renewed. And a
+            # spend page that has just gone takes its share with it.
+            self._take_down_spend(self._send_plan_if_changed())
             self._send_svc_if_changed()
             return
         if protocol.meaningful_usage(usage) != self._last_pushed:
@@ -1136,6 +1141,7 @@ class Bridge:
         # baseline -- a push that forgot to would leave the fast tick
         # re-sending the same message every two seconds forever.
         self._last_pushed = protocol.meaningful_usage(usage)
+        self._last_usage = usage
 
         self._send_session_if_changed()
 
@@ -1370,11 +1376,44 @@ class Bridge:
         starts by stating it.
         """
         if not self._board_can(protocol.BOARD_CAP_PLAN):
-            return
+            return None
         current = self._plan_msg()
         if current is not None and current != self._last_plan:
-            self._last_plan = current
+            replaced, self._last_plan = self._last_plan, current
             self._write(current)
+            return replaced
+        return None
+
+    def _take_down_spend(self, replaced):
+        """After a plan change with no usage line to follow it, blank the
+        page that was a spend page.
+
+        `replaced` is the plan _send_plan_if_changed just took off the
+        wire, or None when it sent nothing. Only a spend plan leaving
+        matters: /login back to Max (or to a seat that reports nothing)
+        before the new login has rendered leaves bus.poll() with nothing to
+        say, and the plan alone took the caption down but not the figure.
+        The board then repainted its stored share of dollars under
+        "SESSION 5h" with the month's countdown -- red "Session almost used
+        up" near the cap -- until the new login next rendered, which on an
+        idle desk is hours (/code-review max of 2026-11-04, U15; the
+        firmware also clears figures on a plan change from its side). With
+        a reading in hand none of this runs: the usage line that follows
+        the plan carries the new figures.
+        """
+        if not isinstance(replaced, dict):
+            return
+        if replaced.get("plan") != protocol.PLAN_SPEND:
+            return
+        page = replaced.get("p")
+        if self._last_plan is not None and \
+                self._last_plan.get("plan") == protocol.PLAN_SPEND and \
+                self._last_plan.get("p") == page:
+            return                       # still a spend page: dollars moved
+        blank = protocol.blank_page(self._last_usage, page)
+        self._write(blank)
+        self._last_pushed = protocol.meaningful_usage(blank)
+        self._last_usage = blank
 
     def _send_svc_if_changed(self):
         """Put each page's status-page level on the wire, on change only.

@@ -344,17 +344,73 @@ def test_a_desk_without_plans_sends_nothing_new():
 
 
 def test_switching_back_clears_the_plan_before_max_has_said_anything():
+    """/login back to Max with no Max reading yet: the plan goes back to
+    windows, and the spend share the board holds goes with it. The plan
+    alone (what this test asserted until the /code-review max of
+    2026-11-04, U15) left the board repainting 62.8 -- a share of dollars --
+    under "SESSION 5h" beside a 26-day countdown, and "Session almost used
+    up" near the cap, until Max next rendered: hours on an idle desk."""
     sent = []
     f = _Fetch(protocol.frame_to_usage(spend(), NOW),
                protocol.plan_for(spend()))
     b = _bridge(f, sent)
     _hello(b, "1.4.0")
     f.usage, f.plan = None, protocol.plan("claude", "windows")
+    n = len(sent)
     b.poll_if_changed()
-    assert sent[-1] == protocol.plan("claude", "windows")
+    new = sent[n:]
+    assert [m["t"] for m in new] == ["plan", "usage"]
+    assert new[0] == protocol.plan("claude", "windows")
+    blank = new[1]
+    assert blank["provider"] == "claude"
+    assert blank["session_pct"] == -1 and blank["weekly_pct"] == -1
+    assert blank["session_resets_in_s"] == -1
+    assert blank["weekly_resets_in_s"] == -1
+    raw, why = protocol.encode_checked(blank)
+    assert why is None
+    # Said once: the next ticks have nothing new to take down.
+    n = len(sent)
+    b.poll_if_changed()
+    b.poll_once()
+    assert "usage" not in [m["t"] for m in sent[n:]]
     f.plan = protocol.plan("claude", "unreported", account="enterprise")
     b.poll_once()
     assert [m for m in sent if m["t"] == "plan"][-1]["plan"] == "unreported"
+
+
+def test_the_blank_keeps_the_other_page():
+    """A spend page on the second slot, Codex main: only the spend page's
+    figures are taken down, from the line the board last had."""
+    sent = []
+    codex = windows(provider="codex", s=33.0, w=7.0)
+    f = _Fetch(protocol.frame_to_usage(codex, NOW, secondary=spend()),
+               protocol.plan_for(codex, spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    f.usage, f.plan = None, protocol.plan("claude", "windows")
+    b.poll_once()
+    blank = [m for m in sent if m["t"] == "usage"][-1]
+    assert blank["provider"] == "codex" and blank["p2"] == "claude"
+    assert blank["session_pct"] == 33.0 and blank["weekly_pct"] == 7.0
+    # Absent is -1 to proto.c, and how usage() says unknown on page two.
+    for k in ("p2_session_pct", "p2_s_in_s", "p2_weekly_pct", "p2_w_in_s"):
+        assert k not in blank
+
+
+def test_no_blank_when_a_reading_comes_with_the_switch():
+    """With a Max reading in hand, the usage line itself replaces the share:
+    no second line."""
+    sent = []
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    f.usage = protocol.frame_to_usage(windows(), NOW)
+    f.plan = protocol.plan("claude", "windows")
+    n = len(sent)
+    b.poll_if_changed()
+    usages = [m for m in sent[n:] if m["t"] == "usage"]
+    assert len(usages) == 1 and usages[0]["session_pct"] == 41.0
 
 
 def test_every_message_the_bridge_writes_fits_the_line():

@@ -830,6 +830,37 @@ def hide_plan_for_board(msg, plan_msg, can_plan: bool):
     return blanked
 
 
+def blank_page(last_usage, page) -> dict:
+    """A usage line that takes `page`'s figures down and leaves the rest.
+
+    For the switch away from a spend login with nothing yet to replace it
+    (Bridge._take_down_spend): the plan goes back to windows, and the share
+    the board holds must go with it, or the board repaints that share of
+    dollars under "SESSION 5h" until the new login first renders -- hours on
+    an idle desk (/code-review max of 2026-11-04, U15).
+
+    Built from `last_usage`, the line the board last had, so the other page
+    and the light keep what they showed; with none, a line that knows
+    nothing, naming `page`. The message passed in is never changed.
+    """
+    if not isinstance(last_usage, dict) or last_usage.get("t") != "usage":
+        return usage(UNKNOWN, None, UNKNOWN, None, [], provider=page)
+    out = dict(last_usage)
+    if out.get("provider") == page:
+        out.update(session_pct=UNKNOWN, session_resets_in_s=-1,
+                   weekly_pct=UNKNOWN, weekly_resets_in_s=-1)
+        # The burn rate and the per-model figures belong to the share.
+        for k in ("burn_pph", "fable_pct", "sonnet_pct", "opus_pct"):
+            out.pop(k, None)
+    if out.get("p2") == page:
+        # Dropped, not set to -1: usage() omits an unknown second-page
+        # figure, and proto.c reads an absent one as -1.
+        for k in ("p2_session_pct", "p2_weekly_pct", "p2_s_in_s",
+                  "p2_w_in_s"):
+            out.pop(k, None)
+    return out
+
+
 def _active_age(frame, secondary, now_epoch: float) -> int:
     """The age of the freshest contact on the bus, or -1 when nothing says.
 
