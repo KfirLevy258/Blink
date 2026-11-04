@@ -822,11 +822,17 @@ class ClaudeCliProvider(base.ProviderParser):
             self._remembered = self._any = None
             # And what the old login's renders taught: the newest render's
             # time, the last five_hour seen, the reply baselines
-            # (_reply_without_window) and their chain.
+            # (_reply_without_window) and their chain, the fetch times of
+            # its blocks (_note_fetch) and the clock-back marks
+            # (_forget_replies) -- round 6 of the review, item 5, found
+            # the last two left behind.
             self._render_at = None
             self._five_seen = None
             self._costs = {}
             self._chain = None
+            self._fetch_times = {}
+            self._stale = None
+            self._stale_owed = False
         self._login_fp, self._login_mtime = fp, (view.mtime or None)
 
     def _status_frames(self, now_epoch):

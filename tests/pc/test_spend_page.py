@@ -930,6 +930,25 @@ def test_a_switch_forgets_what_the_old_logins_renders_taught(tmp_path):
     assert p._render_at is None and p._five_seen is None
     assert p._costs == {} and p._chain is None
     assert p._remembered is None and p._any is None
+    # Round 6, item 5: the fetch times of the old login's blocks and the
+    # clock-back marks went with them.
+    assert p._fetch_times == {}
+    assert p._stale is None and p._stale_owed is False
+
+
+def test_a_switch_forgets_the_fetch_times_and_clock_marks(tmp_path):
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    render(tmp_path, NOW - 30, 1.00, rate_limits=WINDOWS)
+    p = claude_cli.ClaudeCliProvider()
+    p.poll(NOW)
+    p.poll(NOW - 100)                            # the clock goes back
+    assert p._fetch_times
+    p._stale, p._stale_owed = NOW - 30, True
+    _other_login(tmp_path, NOW + 1)
+    p.poll(NOW + 10)
+    assert p._fetch_times == {}
+    assert p._stale is None and p._stale_owed is False
 
 
 def test_a_failed_stat_never_lifts_the_old_logins_mark(tmp_path,
