@@ -52,9 +52,15 @@ all month and was rewritten on nearly every render. Now:
 * Each session's highest estimate, so a resumed session's past cost is
   never counted as new.
 * A save writes a rise on a session already in the file at most once a
-  minute (SAVE_EVERY_S). Nothing is lost by that: a rise not yet written is
-  counted again after a restart, from the saved high-water mark, stamped
-  with the saved sighting before it. A session's first sighting and an
+  minute (SAVE_EVERY_S). A rise not yet written is counted again after a
+  restart, from the saved high-water mark and stamped with the saved
+  sighting before it -- but only when that session renders again. One that
+  had closed never does, so until the final review of 2026-11-04 (U12) a
+  restart lost the last minute of a closed session's rises ($10.70 on the
+  page fell to $10.20). An ordinary exit now writes whatever the pacing
+  held back (_flush_at_exit; the daemon's SIGTERM is an ordinary exit).
+  What a crash or a kill -9 loses is still at most the last minute of rises
+  on sessions that do not render again. A session's first sighting and an
   emptied count (bind()) are written at once. A restart that missed the
   first sighting would take the session's next render for its first and
   count nothing from it, and one that missed the emptying would carry the
@@ -64,17 +70,18 @@ all month and was rewritten on nearly every render. Now:
 Integer cents throughout. State is per session UUID (a per-session total is
 all the spec allows) and is never printed or logged.
 """
+import atexit
 import json
 import math
 import os
-import tempfile
 import time
+import weakref
 
 # As a package import, like every other module under pc/. A bare
 # `import protocol` worked only where pc/ itself was on sys.path (its own
 # test put it there), and `from pc import spend_count` -- the bus's import,
 # and the daemon's -- raised ModuleNotFoundError.
-from pc import protocol
+from pc import protocol, theme
 
 _BUCKETS = 20
 # Rises newer than this, measured back from the newest render, are kept one
@@ -125,6 +132,31 @@ def _time(x) -> bool:
 
 def _cents(x, ceiling=MAX_CENTS) -> bool:
     return _num(x) and 0 <= x <= ceiling
+
+
+# Every counter that has written its file, for the exit flush (U12 in the
+# final review of 2026-11-04). A WeakSet, so a counter dropped by its owner
+# (a test's, a bus replaced) is not kept alive by this, and registered with
+# atexit on the first one rather than at import: importing a module of ours
+# does nothing (CLAUDE.md).
+_WRITTEN = weakref.WeakSet()
+_HOOKED = []
+
+
+def _flush_at_exit():
+    """Write what the pacing held back, at an ordinary exit.
+
+    The daemon's SIGTERM is an ordinary exit (claude_usage_bridge's
+    exit_on_sigterm), so this runs when launchd or systemd stops it. Each
+    counter writes to the file it last wrote and nowhere else: by exit the
+    test sandbox has handed HOME back, and resolving the default path again
+    then would name the real ~/.blink. A failure is ignored; there is no
+    later save to hand it to."""
+    for counter in list(_WRITTEN):
+        try:
+            counter._flush()
+        except Exception:
+            pass
 
 
 def _default_path() -> str:
@@ -187,6 +219,8 @@ class SpendCounter:
         self._persist = persist
         self._clock = clock
         self._saved_at = None  # self._clock() at the last write
+        self._failed_at = None  # self._clock() at the last refused write
+        self._written_to = None  # the file the last write went to
         self._fp = None
         self._period = None
         self._sessions = {}   # sid -> [high_water_cents, last_seen]
@@ -344,33 +378,61 @@ class SpendCounter:
     def save(self) -> None:
         """Write the file if anything changed: a rise at most once a
         minute (SAVE_EVERY_S), a new session or an emptied count at once,
-        and the first save of a process at once."""
+        and the first save of a process at once.
+
+        After a refused write, nothing is tried again for SAVE_EVERY_S,
+        urgent or not. This runs on every poll, every two seconds, and a
+        folder that refuses the file refused it each time: a temp created,
+        the whole document dumped into it and the temp removed, forever
+        (the final review of 2026-11-04, U8). The count stays in memory
+        meanwhile; what a restart in that minute loses is what any unsaved
+        rise loses (the module docstring)."""
         if not self._persist or not self._dirty:
             return
         tick = self._clock()
+        if (self._failed_at is not None and tick >= self._failed_at
+                and tick - self._failed_at < SAVE_EVERY_S):
+            return
         if (not self._urgent and self._saved_at is not None
                 and tick >= self._saved_at
                 and tick - self._saved_at < SAVE_EVERY_S):
             return
+        self._write(self._file(), tick)
+
+    def _flush(self):
+        """The exit flush (_flush_at_exit): whatever is unwritten, to the
+        file the last write went to, pacing and back-off aside."""
+        if self._persist and self._dirty and self._written_to is not None:
+            self._write(self._written_to, self._clock())
+
+    def _write(self, target, tick):
         doc = {"v": _VERSION, "fp": self._fp, "period": self._period,
                "sessions": self._sessions, "adds": self._adds,
                "fold": self._fold, "anchor": self._anchor}
-        target = self._file()
-        tmp = None
         try:
-            d = os.path.dirname(target) or "."
-            os.makedirs(d, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(prefix=".spend-count.", dir=d)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(doc, f, separators=(",", ":"))
-            os.replace(tmp, target)
-            tmp = None
-            self._dirty = self._urgent = False
-            self._saved_at = tick
+            # theme._write_json and not tempfile.mkstemp. On Python 3.11,
+            # the interpreter the Windows build ships, mkstemp takes a
+            # PermissionError for "that name is taken" and tries the next,
+            # up to os.TMP_MAX, about two billion on Windows; a ~/.blink
+            # that refuses new files (antivirus, a folder policy) held the
+            # serial thread inside this save, pongs stopped and the board
+            # went to HOST LOST (the final review of 2026-11-04, U7; the
+            # same fault theme._write_json documents from review S4). One
+            # os.replace attempt, as session_verdict.save makes, for the
+            # same reason: Windows' nine retry sleeps of 0.3 s would hold
+            # the serial thread 2.7 s. Its temps are named the way
+            # install_statusline.temp_siblings finds them, so a killed
+            # write is swept by the next one.
+            theme._write_json(target, doc, tries=1)
         except OSError:
-            # Keep the count in memory and try again at the next save.
-            if tmp:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+            # Kept in memory and tried again after the back-off (save).
+            self._failed_at = tick
+            return
+        self._dirty = self._urgent = False
+        self._saved_at = tick
+        self._failed_at = None
+        self._written_to = target
+        _WRITTEN.add(self)
+        if not _HOOKED:
+            _HOOKED.append(True)
+            atexit.register(_flush_at_exit)

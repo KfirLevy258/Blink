@@ -331,6 +331,59 @@ def test_a_negative_cost_changes_nothing():
     assert c.since(0) == 10
 
 
+# -- the save on the serial thread (review of 2026-11-04, U7 and U8) ----------
+
+def test_save_does_not_use_mkstemp(tmp_path, monkeypatch):
+    """tempfile.mkstemp on Python 3.11, the Windows build's interpreter,
+    takes a PermissionError for a taken name and tries the next, up to
+    os.TMP_MAX (about two billion): a ~/.blink that refuses new files held
+    the serial thread inside the first save and the board went to HOST
+    LOST. The temp comes from install_statusline's _open_temp instead."""
+    import tempfile
+
+    def no_mkstemp(*a, **k):
+        raise AssertionError("mkstemp on the serial thread")
+    monkeypatch.setattr(tempfile, "mkstemp", no_mkstemp)
+    c = mk(tmp_path)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    assert json.loads((tmp_path / "spend-count.json").read_text())["fp"] \
+        == "fp"
+    assert os.listdir(tmp_path) == ["spend-count.json"]
+
+
+def test_a_refused_save_tries_once_and_backs_off(tmp_path, monkeypatch):
+    """A folder that refuses the write costs one attempt, not a retry on
+    every two-second poll; the count stays in memory and is written once
+    the back-off has passed."""
+    from pc import install_statusline
+    calls = []
+    real = install_statusline._open_temp
+
+    def refuse(path):
+        calls.append(path)
+        raise PermissionError(13, "refused")
+    monkeypatch.setattr(install_statusline, "_open_temp", refuse)
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    assert len(calls) == 1
+    for i in range(20):                  # forty seconds of polls
+        tick.t += 2
+        c.observe("b", 1.00, 200 + i)    # a new session is urgent
+        c.save()
+    assert len(calls) == 1
+    monkeypatch.setattr(install_statusline, "_open_temp", real)
+    tick.t += 30
+    c.save()
+    doc = json.loads((tmp_path / "spend-count.json").read_text())
+    assert set(doc["sessions"]) == {"a", "b"}
+    assert [n for n in os.listdir(tmp_path)] == ["spend-count.json"]
+
+
 # -- what _load survives (review of 2026-11-04, U1) ---------------------------
 
 def _v2(**kw):
@@ -404,3 +457,39 @@ def test_an_absurd_cost_is_refused_not_saved(tmp_path, cost):
     d.bind("fp", 0)
     assert d.observe("a", 1.25, 300) is True
     assert d.since(0) == 25
+
+
+# -- a restart after a closed session (U12) -----------------------------------
+
+def test_a_paced_rise_is_written_at_exit(tmp_path):
+    """A rise held back by the one-a-minute pacing used to be recovered
+    only from the session's next render after a restart; a session that
+    had closed never renders again, so it was lost. The exit flush writes
+    it, to the file this counter last wrote and nowhere else."""
+    import spend_count
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    c.observe("a", 1.70, 110)
+    tick.t += 5
+    c.save()                                 # paced: not written
+    spend_count._flush_at_exit()
+    d = mk(tmp_path)
+    d.bind("fp", 0)
+    assert d.since(0) == 70
+
+
+def test_the_exit_flush_writes_only_where_the_counter_wrote(tmp_path,
+                                                            monkeypatch):
+    """One that never saved writes nothing at exit: by then the test
+    sandbox has handed HOME back, and the default path would name the real
+    ~/.blink."""
+    import spend_count
+    monkeypatch.setenv("HOME", str(tmp_path))
+    c = SpendCounter()
+    c.observe("a", 1.00, 100)
+    spend_count._flush_at_exit()
+    assert not (tmp_path / ".blink").exists()
+
