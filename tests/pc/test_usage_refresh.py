@@ -652,3 +652,112 @@ def test_the_daemon_starts_no_refresh_under_a_scenario(monkeypatch):
     from pc import claude_home
     monkeypatch.setenv("BLINK_SCENARIO", "x.json")
     assert _wire(monkeypatch, claude_home.NATIVE) is None
+
+
+# --- review round 1 --------------------------------------------------------
+
+def test_a_spend_frame_alone_leaves_claude_fresh_at_unchanged():
+    from pc.providers import base
+    held = [_frame("desktop", NOW - 900, weekly_pct=10.0)]
+    bus = _bus(held)
+    bus.poll()
+    held[:] = [_frame(base.SPEND_SRC_ID, NOW - 5, plan=base.PLAN_SPEND,
+                      spend_usd=12.0, spend_period="monthly")]
+    assert held[0].has_usage()
+    bus.poll()
+    assert bus.claude_fresh_at() == NOW - 900
+
+
+def _unwritable(monkeypatch):
+    def refuse(blink_home, state):
+        raise OSError("disk full")
+    monkeypatch.setattr(ur, "save_state", refuse)
+
+
+def test_a_state_that_cannot_be_saved_still_holds_the_spacing(
+        tmp_path, monkeypatch, capsys):
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    ran = []
+    t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
+               ran.append(1) or subprocess.CompletedProcess(argv, 1, b"",
+                                                            None))
+    _unwritable(monkeypatch)
+    for i in range(5):
+        t.clock[0] = NOW + 60 * i
+        t.w.tick_once()
+    assert ran == [1]
+    t.clock[0] = NOW + ur.REFRESH_AFTER_S
+    t.w.tick_once()
+    assert ran == [1, 1]
+    err = capsys.readouterr().err.splitlines()
+    assert err[:2] == ["usage refresh failed (exit 1)",
+                       "usage refresh failed (OSError)"]
+    assert all("disk" not in line for line in err)
+
+
+@pytest.mark.allow_claude_launch
+def test_cost_with_an_unsaveable_state_still_turns_it_off(tmp_path,
+                                                         monkeypatch):
+    from pc import user_config
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    costly = json.loads(ZERO)
+    costly.update(num_turns=1, total_cost_usd=0.02)
+    exe, rec = _moving_claude(tmp_path, json.dumps(costly), NOW)
+    _on_path(monkeypatch, exe)
+    t = _Watch(tmp_path, monkeypatch)
+    user_config.put(str(t.blink), ur.SETTING, True)
+    _unwritable(monkeypatch)
+    t.w.tick_once()
+    assert user_config.load(str(t.blink))[ur.SETTING] is False
+    rec.unlink()
+    t.clock[0] = NOW + 7200
+    t.w.tick_once()
+    assert not rec.exists()
+
+
+@pytest.mark.allow_claude_launch
+def test_cost_with_neither_write_still_holds_it_off(tmp_path, monkeypatch):
+    # Setting and state both unwritable: the watch's own copy holds it.
+    from pc import user_config
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    costly = json.loads(ZERO)
+    costly.update(num_turns=1, total_cost_usd=0.02)
+    exe, rec = _moving_claude(tmp_path, json.dumps(costly), NOW)
+    _on_path(monkeypatch, exe)
+    t = _Watch(tmp_path, monkeypatch)
+    _unwritable(monkeypatch)
+
+    def no_put(*a, **k):
+        raise OSError("read-only")
+    monkeypatch.setattr(user_config, "put", no_put)
+    t.w.tick_once()
+    rec.unlink()
+    for h in (2, 30):
+        t.clock[0] = NOW + 3600 * h
+        t.w.tick_once()
+    assert not rec.exists()
+
+
+def test_a_post_run_view_that_raises_is_a_failure(tmp_path, monkeypatch):
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    ran = []
+    t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
+               ran.append(1) or subprocess.CompletedProcess(
+                   argv, 0, ZERO.encode(), None))
+    look = t.w._view
+
+    def view(now):
+        if ran:
+            raise ValueError("unreadable")
+        return look(now)
+    t.w._view = view
+    t.w.tick_once()
+    s = t.state()
+    assert ran == [1] and s.fails == 1 and s.last_run_at == NOW
+    ran.clear()
+    t.w._view = look
+    t.clock[0] = NOW + 60
+    t.w.tick_once()
+    assert ran == []

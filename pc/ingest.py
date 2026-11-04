@@ -567,10 +567,16 @@ class IngestionBus:
     def _note_claude_fresh(self, frames):
         # After the login guard, so a reading from another login does not
         # count as this one's. USAGE_SRC_ID is the refresh's own cache: if
-        # it counted, every refresh would hold off the next.
+        # it counted, every refresh would hold off the next. SPEND_SRC_ID is
+        # worked out from the config and dated by the last render or the
+        # /usage, or by .claude.json's mtime when it has neither, which
+        # Claude Code and Claude Desktop rewrite all day: on a spend seat
+        # it would hold the refresh off for good. A render already counts
+        # through the status line's own mtime (start_usage_refresh).
         fresh = [f.observed_at for f in frames
                  if f is not None and f.provider == claude_cli.PROVIDER_ID
-                 and f.src != base.USAGE_SRC_ID and f.has_usage()]
+                 and f.src not in (base.USAGE_SRC_ID, base.SPEND_SRC_ID)
+                 and f.has_usage()]
         if fresh:
             self._claude_fresh_at = max(fresh)
 

@@ -267,6 +267,13 @@ class RefreshWatch:
         self._runner = runner if runner is not None else wsl._bounded_run
         self._said = None          # the exception type said for this streak
         self._missing = False      # "no claude" said for this streak
+        # The state as this watch last left it: the floor under what the
+        # file says. The throttle and the cost guard must not rest on one
+        # write: save_state is a single try, and a failed write (a full
+        # disk, a lock, a folder made read-only) left the file's old
+        # last_run_at, so Claude Code ran at every tick, and after a cost
+        # verdict nothing held it off (review of Task 4, round 1).
+        self._mem = None
 
     def tick_once(self):
         """One decision and at most one run. Never raises: a refresh is
@@ -286,20 +293,27 @@ class RefreshWatch:
     def _tick(self):
         now = self._now()
         if self._enabled() is not True:
+            # Off in config.json, which is where the person turns it back
+            # on (the cost guard writes it off first). From here the file
+            # decides whether it was turned off for a reason; only the
+            # throttle stays held.
+            if self._mem is not None and self._mem.off_reason:
+                self._mem = State(self._mem.last_run_at, self._mem.fails,
+                                  self._mem.failing_since, "")
             return
         h = self._home()
         if h.kind != claude_home.NATIVE:
             # Before the config is read: a WSL home's is a UNC path, and
             # nothing here may stat one.
             return
-        state = load_state(self._blink_home)
+        state = self._floor(load_state(self._blink_home))
         if state.last_run_at > now:
             # The clock went back past the last run. Counted as run just
             # now, as StatusWatch does, so the next is a spacing from here
             # rather than whenever the clock catches up with the old reading.
             state = State(now, state.fails, state.failing_since,
                           state.off_reason)
-            save_state(self._blink_home, state)
+            self._keep(state)
         ask = dict(enabled=True, native=True,
                    board_alive=bool(self._board_alive()),
                    cache_at=_cache_at(self._view(now)),
@@ -318,6 +332,27 @@ class RefreshWatch:
             return
         self._missing = False
         self._ask(exe, state, now)
+
+    def _floor(self, read):
+        """`read` (the file) under this watch's own copy: a reload never
+        moves last_run_at back or clears an off_reason held here."""
+        mem = self._mem
+        if mem is None:
+            return read
+        base = mem if mem.last_run_at >= read.last_run_at else read
+        return State(max(mem.last_run_at, read.last_run_at), base.fails,
+                     base.failing_since, mem.off_reason or read.off_reason)
+
+    def _keep(self, state):
+        """Hold `state` here, then write it. The type of a failed write is
+        returned for the caller to say; the copy held here is the floor
+        either way."""
+        self._mem = state
+        try:
+            save_state(self._blink_home, state)
+        except Exception as e:
+            return type(e).__name__
+        return None
 
     def _ask(self, exe, state, started):
         codes, raised = [], []
@@ -344,19 +379,32 @@ class RefreshWatch:
             # A logged-out Claude Code answers -p /usage with a zero-cost
             # success too, and writes no cache (measured 2026-11-05). Only a
             # cache fetched by this run makes it a refresh.
-            moved = _cache_at(self._view(self._now()))
+            try:
+                moved = _cache_at(self._view(self._now()))
+            except Exception:
+                moved = None        # a cache not seen to move is not one
             if moved is None or moved < started - MOVED_SLACK_S:
                 verdict = Verdict.FAILED
         new = record(state, verdict, started)
-        save_state(self._blink_home, new)
+        self._mem = new
         if new.off_reason and not state.off_reason:
-            # So `blink status` and `blink config` say off as well.
+            # The setting first, each write in its own try: either one
+            # holds it off, and this watch's copy holds it until the
+            # setting is seen off. So `blink status` and `blink config`
+            # say off as well.
             try:
                 user_config.put(self._blink_home, SETTING, False)
-            except (OSError, user_config.Unreadable):
-                pass                # the state file's off_reason holds it off
+            except Exception:
+                pass
+            unsaved = self._keep(new)
             print(f"usage refresh off ({new.off_reason})", file=sys.stderr)
-        elif raised or (verdict is Verdict.FAILED and not codes):
+            self._said = None
+            if unsaved:
+                self._say_failure(unsaved)
+            return
+        # A failed write is said after the run's own line, by type.
+        unsaved = self._keep(new)
+        if raised or (verdict is Verdict.FAILED and not codes):
             # No exit code: the runner raised (run_once maps an OSError to
             # FAILED, and so does the except above), or the run folder could
             # not be made, which is an OSError too.
@@ -370,6 +418,8 @@ class RefreshWatch:
             print(f"usage refresh failed (exit {codes[-1]})",
                   file=sys.stderr)
         self._said = None
+        if unsaved:
+            self._say_failure(unsaved)
 
     def start(self):
         """Run tick_once() every TICK_S on a daemon thread, for the
