@@ -3099,6 +3099,24 @@ def test_a_usage_seat_is_told_what_is_kept_once(tmp_path, capsys,
     assert said.count(spend_count._default_path()) == 1
 
 
+def test_the_disclosure_reads_the_seat_once(tmp_path, capsys, monkeypatch):
+    """D2: C5 asked the config whether the seat is billed by usage, and
+    _announce_spend_seat then asked it again. The answer is passed in."""
+    from pc import claude_plan
+    as_checkout(monkeypatch)
+    _claude_json(tmp_path, "enterprise_usage_based")
+    looks = []
+    real = claude_plan.PlanReader.look
+
+    def look(self, now):
+        looks.append(now)
+        return real(self, now)
+    monkeypatch.setattr(claude_plan.PlanReader, "look", look)
+    cli._announce()
+    assert "This Claude seat is billed by usage" in capsys.readouterr().out
+    assert len(looks) == 1
+
+
 def test_status_wire_counts_what_the_daemon_counted(tmp_path, capsys,
                                                     monkeypatch):
     """U19: on a seat billed by usage between /usage runs, `--wire` built

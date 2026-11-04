@@ -3222,7 +3222,7 @@ def _announce(home=None, wsl_name=None, named=False):
     seat = wsl_name is None and _spend_seat(home)
     _announce_claude_reads(home, wsl_name, spend_seat=seat)
     if seat:
-        _announce_spend_seat(home)
+        _announce_spend_seat(home, seat=True)
     # The same for Codex (CodexBurnReader): an account whose Codex log
     # reports a weekly limit and no five-hour one -- Codex Pro on the
     # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
@@ -3373,7 +3373,7 @@ def _spend_seat(home=None) -> bool:
         return False
 
 
-def _announce_spend_seat(home=None) -> None:
+def _announce_spend_seat(home=None, seat=None) -> None:
     """The extra paragraph a usage-billed Claude seat gets. Install asks the
     config now, rather than saying "if" for a thing it can see: on a seat
     billed by usage BLINK keeps per-session cost estimates in a file, and
@@ -3382,7 +3382,10 @@ def _announce_spend_seat(home=None) -> None:
     would not show the page either. The config is that of `home`, the one
     being installed (claude_home.from_environ() when None)."""
     from pc import spend_count
-    if not _spend_seat(home):
+    # `seat` is _spend_seat's answer when the caller already has it: the
+    # config is a whole file parsed, and C5 had it parsed twice in a row
+    # (review round 2, D2).
+    if not (_spend_seat(home) if seat is None else seat):
         return
     print()
     for line in (
