@@ -653,7 +653,12 @@ class ClaudeCliProvider(base.ProviderParser):
         if frame is None:
             return None
         frame.first_seen_at = self._note_fetch(payload, mtime, now_epoch)
+        # Not a spend share: a gateway's spend_limit carries the month's
+        # share in session_pct, and one without resets_at was blanked after
+        # 5h10m like a stampless window (/code-review max of 2026-11-04,
+        # U39). A monthly cap has no five-hour window to have ended.
         if (frame.session_pct >= 0 and frame.session_resets_at is None
+                and frame.plan != base.PLAN_SPEND
                 and frame.session_rolled_at is None
                 and base.session_outlived(frame.first_seen_at, now_epoch)):
             # A five_hour whose resets_at will not read (null, a string,

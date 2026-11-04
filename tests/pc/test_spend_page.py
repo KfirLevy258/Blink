@@ -449,6 +449,24 @@ def test_a_remembered_gateway_share_does_not_name_the_config_page(tmp_path):
         assert bus.plan_msg()["usd"] != 200.0
 
 
+def test_a_gateway_share_without_a_reset_is_not_blanked_after_5h(tmp_path):
+    """/code-review max of 2026-11-04, U39: a five_hour figure whose
+    resets_at will not read is blanked five hours and ten minutes after it
+    was fetched, because a window open then has ended. A spend_limit
+    without resets_at went through the same bound and the month's share
+    went to "--" after 5h10m. A monthly cap is no five-hour window."""
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    gateway = {"spend_limit": {"used_percentage": 62.8, "used_usd": 314.12,
+                               "limit_usd": 500, "period": "monthly"}}
+    render(tmp_path, NOW - 30, 1.00, rate_limits=gateway)
+    bus = bus_on(clock)
+    assert bus.poll()["session_pct"] == 62.8
+    clock.t = NOW + 6 * 3600
+    render(tmp_path, NOW + 6 * 3600 - 30, 1.00, rate_limits=gateway)
+    assert bus.poll()["session_pct"] == 62.8
+
+
 def test_no_weekly_on_a_spend_page(tmp_path):
     weekly_anchor.save(inside(tmp_path, weekly_anchor.anchor_path()),
                        NOW + 3 * 86400, NOW - 86400)
