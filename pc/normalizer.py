@@ -288,8 +288,19 @@ def merge(frames):
     # five-hour figure, and pc/session_verdict never marks one; a spend
     # frame that came here marked (a merged frame merged again, a scenario)
     # must not take the share off its own page, nor turn on the burn view.
-    no_window = any(f.no_session_window for f in frames
-                    if f.plan != base.PLAN_SPEND)
+    #
+    # And never on a group that holds a spend page with a figure, whatever
+    # the other frames say. A seat billed by usage has no five-hour window
+    # to lack. The status line of a real usage-billed seat carries no
+    # rate_limits at all, and the hook's frames carry no figure, so both
+    # pass pc/ingest's spend-page filter. A verdict saved by an earlier
+    # Ultra login marked them, and until the final review of 2026-11-04
+    # the merged spend page came out with no_session_window=True and the
+    # token burn view on (tests/pc/test_spend_page.py).
+    no_window = (not any(f.plan == base.PLAN_SPEND and f.has_usage()
+                         for f in frames)
+                 and any(f.no_session_window for f in frames
+                         if f.plan != base.PLAN_SPEND))
     session_frames = ([f for f in frames if f.plan == base.PLAN_SPEND]
                       if no_window else frames)
 

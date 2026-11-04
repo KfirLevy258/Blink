@@ -250,17 +250,55 @@ def _proved_no_window(home):
             False, session_verdict.KIND_STATUSLINE_SUSTAINED, NOW - 600))
 
 
+def _hook_state(at):
+    """A frame that speaks only for a terminal: the hook's state and
+    counts, no figure. It survives the spend page's filter
+    (IngestionBus._off_the_spend_page) on purpose."""
+    return base.NormalizedUsageFrame(
+        provider="claude", src="hooks", observed_at=at,
+        state=base.STATE_RUNNING, n_run=1)
+
+
+def _with_hook_state(bus, at):
+    frame = _hook_state(at)
+    bus.add_provider(types.SimpleNamespace(get_provider_id=lambda: "claude",
+                                           poll=lambda now: [frame]))
+
+
+# A real usage-billed seat's status line has no rate_limits at all, and the
+# hook's frames carry no figure: neither is a windows reading, so both pass
+# the spend page's filter. Until the final review of 2026-11-04 the verdict
+# saved by an earlier Ultra login still marked them, merge() read
+# no_window off them, and the spend page went out with
+# no_session_window=True and a token burn line. A WEEKLY_ONLY render here
+# hid that: it is dropped by the filter before the verdict sees it.
 def test_saved_no_window_verdict_never_marks_a_spend_page(tmp_path):
     _proved_no_window(tmp_path)
     clock = Clock(NOW)
     config(tmp_path, NOW - 60)
-    render(tmp_path, NOW - 30, 1.00, rate_limits=WEEKLY_ONLY)
+    render(tmp_path, NOW - 30, 1.00, rate_limits=None)
     bus = bus_on(clock)
+    _with_hook_state(bus, NOW - 10)
     bus.poll()
     page = bus.claude_page()
     assert page.plan == base.PLAN_SPEND
     assert page.no_session_window is False
     assert bus.burn_pages() == []
+
+
+def test_merge_never_marks_a_group_with_a_spend_figure():
+    """The merge's half of the rule above, without the bus: a marked frame
+    with no figure beside a spend page leaves the page unmarked."""
+    from pc import normalizer
+    spend = base.NormalizedUsageFrame(
+        provider="claude", src=claude_cli.SPEND_SRC_ID, observed_at=NOW,
+        plan=base.PLAN_SPEND, spend_usd=12.34, spend_limit_usd=250.0,
+        session_pct=4.9)
+    marked = _hook_state(NOW)
+    marked.no_session_window = True
+    page = normalizer.merge([spend, marked])
+    assert page.plan == base.PLAN_SPEND
+    assert page.no_session_window is False
 
 
 def test_no_token_burn_on_a_spend_page(tmp_path):
@@ -271,9 +309,11 @@ def test_no_token_burn_on_a_spend_page(tmp_path):
                                                  [7] * 20))
     clock = Clock(NOW)
     config(tmp_path, NOW - 60)
-    render(tmp_path, NOW - 30, 1.00, rate_limits=WEEKLY_ONLY)
+    render(tmp_path, NOW - 30, 1.00, rate_limits=None)
     bus = bus_on(clock, burn={"claude": reader})
+    _with_hook_state(bus, NOW - 10)
     bus.poll()
+    assert bus.claude_page().plan == base.PLAN_SPEND
     assert bus.burn() is None
     assert bus.burn_pages() == []
     assert asked == []

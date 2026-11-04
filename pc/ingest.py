@@ -432,7 +432,13 @@ class IngestionBus:
         # the first poll of every process, to learn a boundary the status line
         # was about to hand over for free.
         self._seed_anchor_once()
-        if self._verdict is not None:
+        # Not on a spend seat: the frames left there are the spend page and
+        # frames with no figure (a status line without rate_limits, the
+        # hook's), and a verdict that an earlier Ultra login saved would mark
+        # those, turning the token burn view on over a page of dollars.
+        # pc/normalizer.merge refuses the mark beside a spend figure as well;
+        # this keeps it off the frames in the first place.
+        if self._verdict is not None and not self._spend_seat(now):
             # Before any merge, so every claude frame -- the status line's,
             # or Claude Desktop's alone on a desk that runs no Claude Code --
             # carries the account's verdict into it. Contained like a
