@@ -897,6 +897,10 @@ def _announce_codex_hooks() -> None:
     print("Blink is about to add a hook to Codex as well.")
     print()
     print(f"  File     {install_codex_hooks.hooks_file()}")
+    # Named here because on a desk set up for Claude Code inside WSL no
+    # other paragraph creates it (_install_codex_hooks, U24).
+    print(f"  Script   {hook_shim_path()}")
+    print("           the small script the hook runs, written by this install.")
     print("  Why      Codex does not record permission prompts in its session")
     print("           log, so without this a Codex session waiting on you")
     print("           looks idle on the panel.")
@@ -934,8 +938,18 @@ def _install_codex_hooks() -> str:
     except OSError:
         pass                 # Windows, where the mode does not apply
     try:
+        # The script the hooks run, written here as well as in the Claude
+        # hooks step: Codex runs on this computer, so its hooks name the
+        # native ~/.blink/blink-hook.sh, and on a desk set up for Claude
+        # Code inside WSL nothing else writes that one. Until the review of
+        # feat/enterprise-spend (U24) every Codex hook there ran a missing
+        # script. The same file either way, so a native desk loses nothing
+        # by the second write.
+        _write_shim(hook_shim_path(), "blink-hook.sh")
         return install_codex_hooks.install(install_codex_hooks.hooks_file(),
                                            hook_shim_path())
+    except OSError as e:
+        return f"skipped (could not write {hook_shim_path()}: {e})"
     except install_statusline.SettingsUnreadable as e:
         # Same judgement as the Claude hooks step: the status line is the
         # product and the activity light is a nicety. A hooks file we cannot

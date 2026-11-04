@@ -3776,6 +3776,26 @@ def test_the_wsl_helpers_write_only_under_the_callers_home(tmp_path):
     assert not os.path.exists(h.drop_dir)
 
 
+def test_codex_hooks_on_a_wsl_desk_have_a_script_to_run(tmp_path,
+                                                        monkeypatch, capsys):
+    """U24: Codex runs on Windows, and its hooks name ~/.blink/blink-hook.sh,
+    but a plain install on a WSL desk writes its shims inside the
+    distribution and never wrote that one: all ten Codex hooks ran a
+    missing script, and the Codex waiting state was never shown. The
+    Codex step writes the script it registers."""
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
+    _recorded_wsl(tmp_path)
+    monkeypatch.setattr(cli, "codex_present", lambda: True)
+    registered = []
+    monkeypatch.setattr(
+        cli.install_codex_hooks, "install",
+        lambda p, s: registered.append(s) or "installed (10 events).")
+    assert cli.main(["install"]) == 0
+    shim = inside(tmp_path, cli.hook_shim_path())
+    assert registered == [shim]
+    assert os.path.isfile(shim) and os.access(shim, os.X_OK)
+
+
 def test_a_failed_wsl_uninstall_keeps_what_can_undo_it(tmp_path,
                                                        monkeypatch, capsys):
     """Finding 2: the shims inside are still live and write into the drop
