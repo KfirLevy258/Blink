@@ -674,6 +674,14 @@ class ClaudeCliProvider(base.ProviderParser):
         frames = self._status_frames(now_epoch)
         spend = self._spend(now_epoch, frames)
         if spend is not None:
+            # The config's page is built only when the live render carries
+            # no gateway figure (_spend_or_none), so any gateway spend frame
+            # left here is a remembered payload's: hours old, and offered
+            # for its session figure. Beside a config page with no share --
+            # no /usage this month -- it won the dial and named the page,
+            # $200 of $500 at 40% for as long as it was remembered
+            # (/code-review max of 2026-11-04, U14).
+            frames = [f for f in frames if f.plan != base.PLAN_SPEND]
             frames.append(spend)
         return frames
 

@@ -423,6 +423,32 @@ def test_another_organisation_does_not_take_the_old_usage(tmp_path):
     assert bus.plan_msg()["usd"] == 12.34 and bus.plan_msg()["lim"] == 250.0
 
 
+def test_a_remembered_gateway_share_does_not_name_the_config_page(tmp_path):
+    """/code-review max of 2026-11-04, U14: a gateway figure remembered from
+    an earlier render (the last payload with a session figure) was offered
+    beside the config's page, and with no /usage this month the config's
+    page has no share, so the remembered $200 of $500 at 40% won the dial
+    for as long as it was remembered. On a seat billed by usage the page is
+    the config's; only the live render's gateway figure takes it."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 3600, cache=False)
+    gateway = {"spend_limit": {"used_percentage": 40.0,
+                               "resets_at": NEXT_MONTH, "used_usd": 200.0,
+                               "limit_usd": 500, "period": "monthly"}}
+    render(tmp_path, NOW - 30, 1.00, rate_limits=gateway)
+    bus = bus_on(clock)
+    bus.poll()
+    assert bus.claude_page().src == ss.SRC_ID
+    for step in (60, 600, 3000):
+        render(tmp_path, NOW + step - 1, 1.20)
+        clock.t = NOW + step
+        msg = bus.poll()
+        page = bus.claude_page()
+        assert page.src == claude_cli.SPEND_SRC_ID
+        assert msg["session_pct"] == -1
+        assert bus.plan_msg()["usd"] != 200.0
+
+
 def test_no_weekly_on_a_spend_page(tmp_path):
     weekly_anchor.save(inside(tmp_path, weekly_anchor.anchor_path()),
                        NOW + 3 * 86400, NOW - 86400)
