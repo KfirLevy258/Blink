@@ -32,7 +32,9 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="the stubs are sh scripts; Windows has no launchctl to protect")
 
-SERVICE_TOOLS = ("launchctl", "systemctl", "schtasks")
+# claude and wsl.exe are not service tools but an import must not start them
+# either (claude --version, a WSL distro boot); the stubs record the call.
+SERVICE_TOOLS = ("launchctl", "systemctl", "schtasks", "claude", "wsl.exe")
 
 # What the child does: import each module on its own and say what came of it.
 # SystemExit is caught per module -- an import that ENDS the process is the
