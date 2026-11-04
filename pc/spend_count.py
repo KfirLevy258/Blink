@@ -317,6 +317,8 @@ class SpendCounter:
         self._dirty = False
         # Written at the next save whatever the pacing: see the docstring.
         self._urgent = False
+        # True while observe() or bind() is changing the state: see _flush.
+        self._busy = False
         if persist:
             self._load()
 
@@ -361,6 +363,13 @@ class SpendCounter:
         self._latest = max(stamps, default=None)
 
     def bind(self, account_fp, period_start) -> None:
+        # Mid-update for the exit flush, as in observe(): the new login is
+        # named before the old one's count is emptied.
+        self._busy = True
+        self._bind(account_fp, period_start)
+        self._busy = False
+
+    def _bind(self, account_fp, period_start) -> None:
         if self._fp is None and self._period is None:
             # Nothing stored or loaded: adopt without discarding what was
             # observed before the first look.
@@ -388,6 +397,16 @@ class SpendCounter:
 
     # -- counting --------------------------------------------------------
     def observe(self, session_id, cost_usd, at) -> bool:
+        """Count one render's figure; True when the state changed."""
+        # Marked mid-update for the exit flush (_flush; K4 in round 2 of
+        # the 2026-11-04 review). Not a try/finally: an exit raised in the
+        # middle must leave the mark set.
+        self._busy = True
+        changed = self._observe(session_id, cost_usd, at)
+        self._busy = False
+        return changed
+
+    def _observe(self, session_id, cost_usd, at) -> bool:
         # The counter owns the guard: a NaN, infinity, string or bool from
         # a damaged payload must not touch the state.
         # And a cost past MAX_CENTS or a time that is not one: see there.
@@ -518,7 +537,19 @@ class SpendCounter:
 
     def _flush(self):
         """The exit flush (_flush_at_exit): whatever is unwritten, to the
-        file the last write went to, pacing and back-off aside."""
+        file the last write went to, pacing and back-off aside.
+
+        Not while an update is in flight. The daemon's SIGTERM raises
+        SystemExit between any two bytecodes of the main thread, the one
+        that polls, so it can land inside observe() after a rise is
+        appended and before its mark moves; that state saved, the restart
+        counted the rise again from the old mark (a dollar shown for 50
+        cents, K4 in round 2 of the 2026-11-04 review). Skipped, the file
+        keeps what was last written, which is whole, and the rise is
+        counted from its saved mark at the session's next render, as
+        before U12."""
+        if self._busy:
+            return
         if self._persist and self._dirty and self._written_to is not None:
             self._write(self._written_to, self._clock())
 

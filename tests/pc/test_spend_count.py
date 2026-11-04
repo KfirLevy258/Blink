@@ -723,3 +723,69 @@ def test_one_process_is_counted_exactly():
         t += 1
         c.observe("a", v / 100.0, t)
     assert c.since(0) == v
+
+
+# -- an exit inside observe() (round 2 of 2026-11-04, K4) ---------------------
+
+class _ExitAfterAppend(list):
+    """The rise list, raising the daemon's SIGTERM exit (SystemExit, from
+    claude_usage_bridge._on_sigterm, which can land between any two
+    bytecodes of the main thread) right after a rise is appended and
+    before its mark moves."""
+
+    def append(self, x):
+        super().append(x)
+        raise SystemExit(0)
+
+
+def test_an_exit_inside_observe_does_not_save_a_torn_count(tmp_path):
+    """The exit flush wrote whatever was in memory. A SIGTERM between the
+    rise's append and the mark's update left a rise of 50 cents counted
+    against the old mark of 1.00, and the restart counted it again from
+    that mark: a dollar on the page for 50 cents spent. It needs the count
+    dirty already, which is every render after a paced save. Skipped, the
+    flush leaves the file as last written, mark 1.00, and the restart
+    counts the whole 50 cents from it at the session's next render -- the
+    pre-U12 recovery, for the one exit that lands mid-update."""
+    import spend_count
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    c.observe("a", 1.20, 105)           # held back by the pacing
+    tick.t += 5
+    c.save()
+    c._adds = _ExitAfterAppend(c._adds)
+    with pytest.raises(SystemExit):
+        c.observe("a", 1.50, 110)
+    spend_count._flush_at_exit()
+    d = mk(tmp_path)
+    d.bind("fp", 0)
+    d.observe("a", 1.50, 110)
+    assert d.since(0) == 50
+
+
+def test_an_exit_inside_bind_does_not_save_a_torn_count(tmp_path):
+    """bind() names the new login before it empties the count; an exit
+    between the two would save the old login's count under the new one."""
+    import spend_count
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    c.observe("a", 1.50, 110)           # held back by the pacing
+    tick.t += 5
+    c.save()
+
+    def boom():
+        raise SystemExit(0)
+    c._clear = boom
+    with pytest.raises(SystemExit):
+        c.bind("other", 0)
+    spend_count._flush_at_exit()
+    d = mk(tmp_path)
+    d.bind("other", 0)
+    assert d.since(0) == 0
+
