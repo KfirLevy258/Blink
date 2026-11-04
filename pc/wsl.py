@@ -23,8 +23,8 @@ Facts this module is built on, each checked against the microsoft/WSL source:
 
 Nothing the probe reads from a distribution -- the environment above all, which
 can hold tokens and proxy credentials -- is printed or logged, and no
-proxy or certificate variable is kept: Probe holds five strings and the
-captured PATH is used once and dropped.
+proxy or certificate variable is kept: Probe holds five strings and whether
+CLAUDE_CONFIG_DIR was set, and the captured PATH is used once and dropped.
 
 `winreg` is imported inside the default registry reader, so importing this
 module does nothing and works on macOS and Linux (tests/test_import_is_inert.py
@@ -74,6 +74,10 @@ class Probe:
     shell: str
     config_dir: str
     claude_exe: Optional[str]
+    # Whether CLAUDE_CONFIG_DIR chose config_dir, which decides where
+    # .claude.json is (claude_home.ClaudeHome.config_dir_set). Not "differs
+    # from ~/.claude": the variable set to ~/.claude still moves the file.
+    config_dir_set: bool = False
 
 
 class _WinReg:
@@ -281,4 +285,5 @@ def probe(name, exe=None, runner=subprocess.run):
                 claude = cand
                 break
     return Probe(user=user, home=home, shell=shell, config_dir=config,
-                 claude_exe=claude)
+                 claude_exe=claude,
+                 config_dir_set=bool(captured.get("CLAUDE_CONFIG_DIR")))

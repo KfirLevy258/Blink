@@ -244,6 +244,27 @@ Blink has to change.
 | Reads | only while the account is marked as having no five-hour window (see the row above and "Claude Code in a terminal"), and only for a board that can show the burn view: Claude Code's transcripts, under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`). Only lines containing `"output_tokens"` are decoded, and of each only `type`, `timestamp`, `message.id`, `requestId`, `message.model` and `message.usage.output_tokens` are looked at. It holds in memory, and nowhere else, each transcript's path, size, read position and a hash of the last 256 bytes it read (to notice a file rewritten in place), and for each reply still inside the last five hours its message and request ids and output-token count. What goes to the board is twenty quarter-hour totals. Nothing from a transcript - no line, no value, no path - is logged, printed or saved. The transcripts are read only while the account is marked as having no five-hour window; on the Ultra plan a mark can come from a single reply, and the next five-hour figure Claude Code shows lifts it and stops the reading |
 | Reads | only on a Codex account whose session log reports a weekly limit and no five-hour one (such as Codex Pro), and only for a board that can show the burn view: Codex's session logs, under `~/.codex/sessions` (or `$CODEX_HOME/sessions`). Only lines containing `"token_count"` are decoded, and of each only `type`, `timestamp`, `payload.type` and the token figures of `payload.info.total_token_usage` and `payload.info.last_token_usage` (`input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens`) are looked at; the `output_tokens` of `last_token_usage` is what is added up, and the rest only recognises a turn written twice. It holds in memory, and nowhere else, each log's path, size, read position and a hash of the last 256 bytes it read, and for each turn still inside the last five hours those figures and its quarter-hour. What goes to the board is twenty quarter-hour totals. Nothing from a session log - no line, no value, no path - is logged, printed or saved, and on an account with a five-hour limit this reading never happens |
 
+**Claude Code inside WSL.** A plain install never looks into WSL. `blink
+install --wsl` lists the distributions (from the Windows registry; nothing is
+started), and `blink install --wsl <name>` sets one up. That starts the
+distribution if it is not running and runs your login shell there once, to
+find `claude` and `CLAUDE_CONFIG_DIR`; nothing from that shell's environment
+is kept. Then:
+
+| | |
+|---|---|
+| Changes, inside the distribution | the same two keys as above, in Claude Code's `settings.json` there (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`), written as your Linux user, following a symlink to the real file, and refused if the file changed while Blink was writing it |
+| Creates, inside the distribution | `~/.blink/blink-statusline.sh` and `~/.blink/blink-hook.sh`, the same scripts as above, and `~/.blink/out`, which names the Windows folder below in the form Linux sees it; `~/.blink/statusline-chain` too, if you had a status line of your own |
+| Creates, on Windows | `%USERPROFILE%\.blink\wsl-<guid>` (`<guid>` is the distribution's registry id, which survives a rename): where those scripts write the status line payload and the per-session `state/` files, and Blink's record of what it installed. The app reads only this folder every 2 seconds |
+| Keeps | in `~/.blink/config.json`, the distribution's id and name, your Linux user name and home folder, and Claude Code's config folder there, so the background service, which never sees your shell, reads the same one |
+| Reads | Claude Code's config and transcripts inside the distribution, as listed above for a native install, and checks the status line is still in place: only while the distribution is running and the Windows folder changed in the last ten minutes, and never on the thread that talks to the board. With a WSL distribution set up, Claude Code on Windows itself is not read |
+
+`blink status` names the distribution and says whether it is running, asking
+`wsl -l --running` only: it never opens a file inside one that is not
+running, since that would start it. `blink uninstall` takes the settings and
+scripts out of the distribution the same way and removes the Windows folder;
+a distribution that has since been removed is said so and skipped.
+
 **It does this without asking**, so that plugging the board in is the whole
 setup. It prints all of the above before it changes anything, and every part
 of it is reversible:

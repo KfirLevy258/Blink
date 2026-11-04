@@ -175,6 +175,7 @@ For Claude Desktop, the app learns usage by reading Claude Desktop's own local f
 | Claude Code, in a terminal or an IDE | Everything |
 | Codex CLI | Everything, on its own page |
 | Claude Code on a usage-billed seat | The month's spend against the seat's cap: exact after `/usage` in a terminal, estimated between runs; no five-hour or weekly window |
+| Claude Code inside WSL on Windows | Everything, once you run `blink install --wsl <name>` with the distribution's name (`blink install --wsl` alone lists them). Blink stays on Windows with the board; it never looks into WSL unless you name a distribution, reads Claude Code's files there only while you are using it, and then reads that Claude Code and not one on Windows |
 | Claude Code in Claude Desktop's Code tab | The same as Desktop below, plus the activity light: the Code tab runs Claude Code's hooks, though not its status line, so the figures are Desktop's rather than Claude Code's |
 | Claude Desktop, without Claude Code | Five-hour percentage and countdown, refreshed within seconds of a turn; weekly percentage on Desktop's own schedule (about 5 min in use, up to 15 idle); a weekly countdown too, once one has been learned, published only while nothing contradicts it; no activity light |
 | claude.ai in a browser | Nothing - there is no usage data to read |

@@ -32,7 +32,7 @@ from typing import NamedTuple
 
 from pc import (claude_home, install_codex_hooks, install_hooks,
                 install_statusline, ota, protocol, status_page,
-                statusline_source, update, user_config, win_driver)
+                statusline_source, update, user_config, win_driver, wsl)
 from pc import theme as theme_mod
 from pc import theme_server
 # Eagerly, unlike the other providers, which are imported inside the functions
@@ -690,7 +690,10 @@ def claude_hooks(home=None):
     shim = os.path.exists(hook_shim_path(home))
     try:
         data = install_statusline._load(settings_path(home))
-    except install_statusline.SettingsUnreadable:
+    except (install_statusline.SettingsUnreadable, OSError):
+        # OSError too: a WSL home's settings.json is read over \\wsl.localhost,
+        # where a distribution stopping between `wsl -l --running` and the
+        # read raises one, and status must not die of it.
         return ClaudeHooks(0, total, False, False, shim)
     hooks = data.get("hooks")
     # isinstance at every level, not `or {}` / `or []`: only None and empty
@@ -702,7 +705,13 @@ def claude_hooks(home=None):
         hooks = {}
 
     def wired(event):
-        command = install_hooks.hook_command(hook_shim_path(home), event)
+        # The command install wrote for this home: a WSL install writes the
+        # form Linux runs (install_hooks.wsl_hook_command), which the UNC
+        # path of the shim is not.
+        command = (install_hooks.wsl_hook_command(home, event)
+                   if home.kind == claude_home.WSL
+                   else install_hooks.hook_command(hook_shim_path(home),
+                                                   event))
         groups = hooks.get(event)
         for group in groups if isinstance(groups, list) else []:
             inner = group.get("hooks") if isinstance(group, dict) else None
@@ -826,14 +835,17 @@ class Desk(NamedTuple):
                 and not self.desktop_waiting)
 
 
-def read_desk(version=None, home=None) -> Desk:
+def read_desk(version=None, home=None, hooks=None) -> Desk:
     """Read the machine once. `version` is a claude_version() result the
     caller already has: `blink install` used to ask twice, and a `claude`
     that hangs costs its 30 s timeout per ask (measured 60.0 s, review
     2026-10-19). The weekly question is only asked where a desk can need it
     -- it may read Desktop's IndexedDB, and a CLI desk has no use for it.
     The Claude Code questions are asked of `home`, claude_home.current()
-    when None, read once here so that every answer describes one home."""
+    when None, read once here so that every answer describes one home.
+    `hooks`, when given, stands in for claude_hooks(home): `blink status`
+    passes one for a WSL home whose distribution is not running, since
+    reading its settings.json would start it."""
     from pc import desktop_paths
     from pc.providers import claude_desktop
     home = home or claude_home.current()
@@ -855,7 +867,7 @@ def read_desk(version=None, home=None) -> Desk:
                 desktop_installed=installed,
                 desktop_reading=reading,
                 codex=codex_present(),
-                hooks=claude_hooks(home),
+                hooks=hooks if hooks is not None else claude_hooks(home),
                 weekly=weekly,
                 desktop_paths=folder,
                 home=home)
@@ -3514,7 +3526,10 @@ def drift_watchdog(home=None):
         home=home)
 
 
-def cmd_install(_args) -> int:
+def cmd_install(args) -> int:
+    name = getattr(args, "wsl", None)
+    if name is not None:
+        return cmd_install_wsl(name)
     # The Claude Code folder this install is for: this shell's, which is
     # the one the person installing means, and which is recorded below so
     # the background service reads it too (pc/claude_home).
@@ -3673,6 +3688,163 @@ def cmd_install(_args) -> int:
     desk = read_desk(home=home)
     _note_if_no_claude_code(desk)
     _warn_if_claude_too_old(desk)
+    _hint_wsl(desk)
+    return 0
+
+
+def _windows() -> bool:
+    """This computer is Windows: the only one WSL can be on. A function
+    so the WSL tests can stand in for a Windows desk on any platform."""
+    return sys.platform == "win32"
+
+
+def _hint_wsl(desk) -> None:
+    """The one line a plain install says about WSL, on a Windows desk with
+    no Claude Code of its own. Decided from `desk` alone: a plain install
+    reads no registry and starts no wsl.exe, because nothing about WSL is
+    looked at until the person names a distribution
+    (docs/plans/enterprise-spend.md, section 4, "never automatic")."""
+    if not _windows() or desk.on_path:
+        return
+    print()
+    print(f"  Using Claude Code inside WSL? Run `{command_to_type()} install"
+          " --wsl <name>`.")
+
+
+def _wsl_registry():
+    """The registry reader pc/wsl lists distributions with, or None off
+    Windows, where there is no registry and no WSL. Asked only by the
+    commands that name WSL, never by a plain install."""
+    return wsl._WinReg() if _windows() else None
+
+
+def _wsl_distro(home):
+    """The distribution a WSL home was recorded for, found by its GUID
+    (which survives a rename, the name does not), or None when it is no
+    longer installed. Reads the registry only: nothing is started."""
+    reg = _wsl_registry()
+    if reg is None:
+        return None
+    want = (home.distro_guid or "").lower()
+    for d in wsl.distros(reg):
+        if d.guid.lower() == want:
+            return d
+    return None
+
+
+def _wsl_list(found) -> None:
+    for d in found:
+        print(f"  {d.name}" + (" (default)" if d.default else ""))
+
+
+def cmd_install_wsl(name) -> int:
+    """`blink install --wsl [<name>]`: Claude Code inside a WSL
+    distribution, with the daemon staying on Windows with the board
+    (docs/plans/enterprise-spend.md, section 4).
+
+    Without a name it lists the distributions and starts nothing. With
+    one, it probes the user's login shell there, writes the status line,
+    hooks and shims inside it (install_statusline.install_into), records
+    the home and restarts the service, whose bus is built once at start.
+    The record is written only after the write inside succeeded: recorded
+    first, a failure would have moved the daemon onto a folder nothing
+    writes into.
+
+    Everything here is said to the person at the keyboard and nothing is
+    logged: the Linux user, home and folders, and install_into's text,
+    which quotes their previous status line command, stay on this screen."""
+    reg = _wsl_registry()
+    if reg is None:
+        print("WSL is only on Windows; there is nothing to install into here.")
+        return 1
+    if wsl.policy_blocks(reg):
+        print("WSL is turned off on this computer by policy.")
+        return 1
+    found = wsl.distros(reg)
+    if not found:
+        print("Could not list WSL distributions.")
+        print("Check that WSL is installed: `wsl --list` shows them.")
+        return 1
+    if not name:
+        print("WSL distributions on this computer:")
+        _wsl_list(found)
+        print()
+        print(f"Run `{command_to_type()} install --wsl <name>` with the one"
+              " Claude Code is in.")
+        return 0
+    # Windows matches a distribution's name blind to case; an exact match
+    # first, so two names differing only in case are still told apart.
+    d = (next((x for x in found if x.name == name), None)
+         or next((x for x in found
+                  if x.name.casefold() == name.casefold()), None))
+    if d is None:
+        print(f"There is no WSL distribution called {name}. These are"
+              " installed:")
+        _wsl_list(found)
+        return 1
+
+    print(f"Blink setup for Claude Code inside WSL ({d.name}).")
+    print()
+    print(f"  This starts {d.name} if it is not running, and runs your login")
+    print("  shell there once to find Claude Code and its folder. Nothing")
+    print("  from that shell's environment is kept.")
+    probe = wsl.probe(d.name)
+    if probe is None:
+        print()
+        print(f"Could not read your account inside {d.name}. Check that it")
+        print(f"starts (`wsl -d {d.name}`), then run this again.")
+        print("Nothing was changed.")
+        return 1
+    if not probe.config_dir.startswith("/"):
+        print()
+        print(f"CLAUDE_CONFIG_DIR inside {d.name} is not a full path, so Blink")
+        print("cannot tell which folder Claude Code reads. Nothing was changed.")
+        return 1
+    home = claude_home.wsl(
+        distro_guid=d.guid, distro_name=d.name, linux_user=probe.user,
+        linux_home=probe.home,
+        config_dir=wsl.unc(d.name, probe.config_dir),
+        config_dir_set=probe.config_dir_set)
+
+    try:
+        said = install_statusline.install_into(
+            home, install_statusline.default_wsl_run(home))
+    except (install_statusline.WslInstallError,
+            install_statusline.SettingsUnreadable) as e:
+        print()
+        print(f"Blink setup stopped. {e}")
+        print("Claude Code's settings inside WSL were not changed.")
+        return 1
+    try:
+        claude_home.save(home)
+    except (user_config.Unreadable, OSError) as e:
+        print()
+        print(f"The settings inside {d.name} were written, but Blink could not")
+        print(f"record them: {e}")
+        print("Fix that file and run this again.")
+        return 1
+
+    blink_dir = probe.home.rstrip("/") + "/.blink"
+    print()
+    print(f"  Written inside {d.name}, as {probe.user}:")
+    print(f"    {probe.config_dir.rstrip('/')}/settings.json"
+          "  (status line and activity hooks)")
+    print(f"    {blink_dir}/  (blink-statusline.sh, blink-hook.sh, out)")
+    print("  And on this computer, where those hand Blink their usage:")
+    print(f"    {home.drop_dir}")
+    print("      " + said)
+    if probe.claude_exe is None:
+        print()
+        print(f"  !  Claude Code was not found in {d.name}. What was written")
+        print("     starts working by itself once it is installed there.")
+    _announce_spend_seat(home)
+    print()
+    print("Background service ... " + restart_service())
+    print()
+    print(f"Done. Blink now reads Claude Code inside {d.name} only, while it")
+    print("is in use; Claude Code on Windows itself is not read.")
+    print(f"  Check:   {command_to_type()} status")
+    print(f"  Undo:    {command_to_type()} uninstall")
     return 0
 
 
@@ -3680,6 +3852,10 @@ def cmd_uninstall(_args) -> int:
     # The home install recorded, read before step 5 deletes the record;
     # with none, this environment's, as before the record existed.
     home = claude_home.native()
+    # A WSL home, when that is what was recorded: taken out of the
+    # distribution as well as the native one, which install left alone.
+    rec = claude_home.recorded()
+    wsl_home = rec if rec is not None and rec.kind == claude_home.WSL else None
     # And ~/.claude/settings.json, when the recorded folder is elsewhere and
     # that file still holds an entry of ours. Asked now, while the markers
     # that help recognise them are still there.
@@ -3716,6 +3892,8 @@ def cmd_uninstall(_args) -> int:
     for old in olds:
         for line in _take_out_of(old, home):
             print(f"      {old}: {line}")
+    if wsl_home is not None:
+        _uninstall_wsl(wsl_home)
 
     print("[4/5] Codex hooks:")
     _uninstall_codex_hooks()
@@ -3761,6 +3939,8 @@ def cmd_uninstall(_args) -> int:
     # above is the single-slot file this replaced; it is still on the list so
     # an install that predates the directory leaves nothing behind.
     _rm_state_dir()
+    if wsl_home is not None:
+        _rm_wsl_drop(wsl_home)
     done, message = _remove_bin_dir()
     print(message)
     if refused:
@@ -3897,30 +4077,79 @@ def _rm_state_dir():
     loop cannot be talked into deleting more than it was told.
     """
     for sub in ("state", "state-codex"):
-        root = os.path.join(blink_home(), sub)
-        try:
-            names = os.listdir(root)
-        except OSError:
-            # Absent, which is the normal case for state-codex on a machine
-            # that never ran Codex. `continue`, not `return`: the old single
-            # directory could give up here, but giving up on the first of two
-            # would leave the second untouched on exactly those machines.
-            continue
-        for name in names:
-            p = os.path.join(root, name)
-            if os.path.isdir(p):
-                for inner in (os.listdir(p) if os.path.isdir(p) else []):
-                    _rm(os.path.join(p, inner))
-                try:
-                    os.rmdir(p)
-                except OSError:
-                    pass
-            else:
-                _rm(p)
-        try:
-            os.rmdir(root)
-        except OSError:
-            pass
+        # Each on its own: absent is the normal case for state-codex on a
+        # machine that never ran Codex, and giving up on the first of two
+        # would leave the second untouched on exactly those machines.
+        _rm_two_levels(os.path.join(blink_home(), sub))
+
+
+def _rm_two_levels(root):
+    """Remove `root`, its files, and its subfolders' files, and no
+    deeper: the shape the shims write (<session>.state and
+    <session>/<agent>). Nothing when `root` is absent."""
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        p = os.path.join(root, name)
+        if os.path.isdir(p):
+            for inner in (os.listdir(p) if os.path.isdir(p) else []):
+                _rm(os.path.join(p, inner))
+            try:
+                os.rmdir(p)
+            except OSError:
+                pass
+        else:
+            _rm(p)
+    try:
+        os.rmdir(root)
+    except OSError:
+        pass
+
+
+def _rm_wsl_drop(home):
+    """A WSL home's drop folder, %USERPROFILE%\\.blink\\wsl-<guid>: the
+    payload, the markers and state/ beneath it, all the shims and install
+    put there."""
+    _rm_two_levels(home.state_dir)
+    _rm_two_levels(home.drop_dir)
+
+
+def _wsl_under(home, name):
+    """`home` as the distribution is called now. The GUID finds it after a
+    rename, but the config folder's UNC path names it, and install_into
+    and uninstall_from reach it by that name."""
+    if name == home.distro_name:
+        return home
+    linux = install_statusline._linux_path(home, home.config_dir)
+    return claude_home.wsl(home.distro_guid, name, home.linux_user,
+                           home.linux_home, wsl.unc(name, linux),
+                           home.config_dir_set)
+
+
+def _uninstall_wsl(home) -> None:
+    """Take the status line, hooks and shims out of a recorded WSL
+    distribution, the same way install put them in. A distribution that is
+    gone is said so and skipped: there is nothing left to edit, and asking
+    wsl.exe for it would only fail. Started if it is not running, since the
+    person is here. The text is for them and never logged: it can quote
+    their own status line command."""
+    d = _wsl_distro(home)
+    if d is None:
+        print(f"      Claude Code inside WSL ({home.distro_name}): that"
+              " distribution is no longer on this computer, so there is"
+              " nothing to take out of it.")
+        return
+    try:
+        home = _wsl_under(home, d.name)
+        said = install_statusline.uninstall_from(
+            home, install_statusline.default_wsl_run(home))
+    except (install_statusline.WslInstallError,
+            install_statusline.SettingsUnreadable) as e:
+        print(f"      Claude Code inside WSL ({d.name}), left alone: {e}")
+        return
+    print(f"      Claude Code inside WSL ({d.name}): {said}")
 
 
 def hook_shim_status_note():
@@ -4026,9 +4255,31 @@ def cmd_status(args) -> int:
     for line in _board_lines():
         print(line)
 
-    desk = read_desk()
+    home = claude_home.current()
+    # A WSL home: its distribution's state, from the registry and
+    # `wsl -l --running` alone. Nothing under \\wsl.localhost is opened
+    # unless it is running, because opening one starts it -- a status run
+    # would undo the person's `wsl --shutdown` (section 4).
+    wsl_name, wsl_state = None, None
+    if home.kind == claude_home.WSL:
+        d = _wsl_distro(home)
+        wsl_name = d.name if d is not None else home.distro_name
+        wsl_state = ("gone" if d is None
+                     else "running" if wsl.running(d.name) else "stopped")
+    reachable = wsl_state in (None, "running")
+    desk = read_desk(home=home, hooks=None if reachable else ClaudeHooks(
+        0, len(install_hooks.HOOK_EVENTS), False, False, False))
     text, ver = desk.claude_text, desk.claude_ver
-    if desk.cli_silent:
+    if wsl_state is not None:
+        print(f"Claude Code WSL ({wsl_name}), " + {
+            "running": "running",
+            "stopped": "not running",
+            "gone": "not found -- removed or reinstalled?"}[wsl_state])
+        # One home per page: with the WSL one recorded, the native one is
+        # not read at all, which someone with both needs to be told.
+        if claude_on_path(claude_home.native()):
+            print("            Claude Code on Windows itself is not read")
+    elif desk.cli_silent:
         # claude_version() fails the same way for "absent" and "present but
         # not answering"; only the second is on PATH. The `elif ver is None`
         # branch below was unreachable for it.
@@ -4090,13 +4341,27 @@ def cmd_status(args) -> int:
     else:
         print(f"Claude Code {text}")
 
-    print("Status line " + (f"installed at {shim_path()}" if os.path.exists(shim_path())
-                            else "not installed"))
-    # Same blind spot the Activity row had: the path existing does not mean
-    # its contents are current, and this shim gets the identical repair from
-    # DriftWatchdog (see claude_usage_bridge.py's shims= list), so it earns
-    # the identical disclosure.
-    stale_statusline = statusline_shim_status_note()
+    if wsl_state is not None:
+        # The shims are inside the distribution, so only a running one is
+        # asked; their contents are the WSL drift check's (pc/wsl_watch),
+        # and the native shim notes below say nothing about them.
+        if not reachable:
+            print(f"Status line inside {wsl_name}, not checked while it is"
+                  " not running")
+        elif os.path.exists(shim_path(home)):
+            print(f"Status line installed inside {wsl_name}")
+        else:
+            print(f"Status line not installed inside {wsl_name}")
+        stale_statusline = None
+    else:
+        print("Status line " + (f"installed at {shim_path()}"
+                                if os.path.exists(shim_path())
+                                else "not installed"))
+        # Same blind spot the Activity row had: the path existing does not
+        # mean its contents are current, and this shim gets the identical
+        # repair from DriftWatchdog (see claude_usage_bridge.py's shims=
+        # list), so it earns the identical disclosure.
+        stale_statusline = statusline_shim_status_note()
     if stale_statusline:
         print(f"            {_shim_repair_line(stale_statusline, bridge_running)}")
 
@@ -4106,7 +4371,9 @@ def cmd_status(args) -> int:
     # see whether the hooks are actually there, and "Status line installed"
     # answers a different question.
     hooks = desk.hooks
-    if not hooks.readable:
+    if not reachable:
+        print(f"Activity    not checked -- {wsl_name} is not running")
+    elif not hooks.readable:
         print("Activity    unknown -- settings.json does not parse")
     else:
         ours, total = hooks.wired, hooks.total
@@ -4133,7 +4400,7 @@ def cmd_status(args) -> int:
         # stale is not the actionable fact -- "hooks not installed" above
         # already covers it, and a note about a file nothing points at is
         # noise, not disclosure.
-        if ours:
+        if ours and wsl_state is None:
             stale = hook_shim_status_note()
             if stale:
                 print(f"            {_shim_repair_line(stale, bridge_running)}")
@@ -4160,6 +4427,12 @@ def cmd_status(args) -> int:
     # as live.
     if age is not None and age < statusline_source.STALE_AFTER_S:
         print(f"Usage data  fresh ({age}s old)")
+    elif wsl_state is not None and age is not None:
+        print(f"Usage data  {age}s old -- open Claude Code in {wsl_name} to"
+              " refresh it")
+    elif wsl_state is not None:
+        print(f"Usage data  none yet -- open Claude Code in {wsl_name} once"
+              " so it renders its status line")
     elif desk.desktop and not desk.on_path:
         # "Open Claude Code once so it renders its status line" can never
         # clear on this desk: Desktop's Code tab runs Claude Code headless and
@@ -4184,10 +4457,12 @@ def cmd_status(args) -> int:
     codex = _source_lines(desk)
     if getattr(args, "wire", False):
         # The Session rows come out of the same poll as the wire line.
-        _wire_line()
+        _wire_line(home, reachable)
     else:
-        from pc import normalizer
-        _session_window_line(*_claude_page(desk))
+        from pc import claude_plan, normalizer
+        _session_window_line(*_claude_page(
+            desk, None if reachable
+            else claude_plan.PlanReader(source=lambda: None)))
         _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
 
@@ -4243,7 +4518,7 @@ def _codex_session_line(page):
               " weekly limit only)")
 
 
-def _claude_page(desk):
+def _claude_page(desk, plan=None):
     """(merged claude frame, its SessionVerdict) for plain `blink status`;
     the frame is None when no source has a reading.
 
@@ -4261,6 +4536,10 @@ def _claude_page(desk):
     something a plain status should do to print one row. The sources left
     out carry no session figure (activity state, Codex, the weekly
     projection), so they cannot change the answer.
+
+    `plan` is the status-line provider's claude_plan.PlanReader, None for
+    its own: status hands in one that reads nothing for a WSL home whose
+    distribution is not running.
     """
     from pc import normalizer, session_verdict
     from pc.providers import claude_desktop
@@ -4278,7 +4557,7 @@ def _claude_page(desk):
             # costs its own say, not the status report.
             return []
 
-    frames = polled(ClaudeCliProvider())
+    frames = polled(ClaudeCliProvider(plan=plan))
     reading = desk.desktop_reading if desk is not None else None
     if reading is not None and reading[0] == claude_desktop.VERDICT_FRAME:
         frames.append(reading[1])
@@ -4288,7 +4567,7 @@ def _claude_page(desk):
     return (normalizer.merge(frames) if frames else None), verdict
 
 
-def _wire_line():
+def _wire_line(home=None, reachable=True):
     """The Session row and the usage message the bridge would put on the
     cable right now, from one poll.
 
@@ -4296,15 +4575,29 @@ def _wire_line():
     merged and encoded exactly as the daemon does it (pc/ingest -> normalizer
     -> protocol). CI feeds the installed binary the files a customer's machine
     would have and asserts on this line; a person can paste it into a report.
+
+    For a WSL `home` whose distribution is not `reachable` (not running),
+    the bus is the daemon's WSL bus with its watch never started: the
+    config and the transcripts are then not read at all, since opening a
+    path into the distribution would start it, and the line is built from
+    the Windows drop folder alone.
     """
     import json as _json
     from pc import ingest, session_verdict, spend_count
     # The persisted verdict, read and never written: the daemon writes it.
     # The spend count likewise: one in memory, so a status run neither
     # writes the daemon's ~/.blink/spend-count.json nor races its save.
+    extra = {}
+    if home is not None and home.kind == claude_home.WSL and not reachable:
+        from pc import wsl_watch
+        from pc.burn_reader import CodexBurnReader
+        watch = wsl_watch.WslWatch(home)
+        extra = dict(burn={"claude": watch.burn_source(),
+                           "codex": CodexBurnReader()},
+                     plan_source=watch.view)
     bus = ingest.IngestionBus(
         verdict=session_verdict.SessionVerdict(persist=False),
-        counter=spend_count.SpendCounter(persist=False))
+        counter=spend_count.SpendCounter(persist=False), **extra)
     msg = bus.poll()
     _session_window_line(bus.claude_page(), bus.verdict())
     from pc.providers import codex_cli
@@ -5217,7 +5510,12 @@ def main(argv=None) -> int:
     parser.add_argument("--version", action="version",
                         version=f"blink {RELEASE_VERSION}")
     sub = parser.add_subparsers(dest="cmd")
-    sub.add_parser("install", help="Set everything up (this is the default)")
+    install_p = sub.add_parser(
+        "install", help="Set everything up (this is the default)")
+    install_p.add_argument(
+        "--wsl", nargs="?", const="", default=None, metavar="NAME",
+        help="For Claude Code inside a WSL distribution: omit NAME to list"
+             " them")
     sub.add_parser("uninstall", help="Put it all back")
     status_p = sub.add_parser("status", help="Is the panel getting data?")
     status_p.add_argument(

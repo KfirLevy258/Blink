@@ -136,7 +136,7 @@ def _linux(*, passwd=b"bob:x:1000:1000:,,,:/home/bob:/bin/zsh\n",
 def test_probe_ignores_banner_noise():
     p = wsl.probe("U", exe=EXE, runner=_linux())
     assert p == wsl.Probe("bob", "/home/bob", "/bin/zsh", "/c",
-                          "/home/bob/.nvm/bin/claude")
+                          "/home/bob/.nvm/bin/claude", config_dir_set=True)
 
 
 def _user_of(argv):
@@ -185,6 +185,8 @@ def test_probe_default_config_dir():
         return 1, b"", b""
     p = wsl.probe("U", exe=EXE, runner=Rec(ans))
     assert p.config_dir == "/home/bob/.claude" and p.claude_exe is None
+    # Not set: .claude.json is then in the Linux home, not in config_dir.
+    assert p.config_dir_set is False
 
 
 def test_probe_rejects_windows_claude():
