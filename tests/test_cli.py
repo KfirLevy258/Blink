@@ -2921,10 +2921,10 @@ SPEND_NOTE = (
     " Nothing about it leaves this computer except the figure on the board.")
 
 
-def _claude_json(tmp_path, seat, used=4321):
+def _claude_json(tmp_path, seat, used=4321, fetched_ms=1_793_500_000_000):
     d = {"oauthAccount": {"accountUuid": "A-1", "organizationUuid": "O-1"},
          "cachedUsageUtilization": {
-             "accountUuid": "A-1", "fetchedAtMs": 1_793_500_000_000,
+             "accountUuid": "A-1", "fetchedAtMs": fetched_ms,
              "utilization": {"extra_usage": {
                  "is_enabled": True, "monthly_limit": 25000,
                  "used_credits": used, "currency": "usd"}}}}
@@ -2950,18 +2950,41 @@ def test_no_spend_note_on_max(tmp_path, capsys, monkeypatch):
 
 
 def test_status_never_prints_amounts(tmp_path, capsys, monkeypatch):
-    """No status path reads the config today (cmd_status never asks
-    claude_plan, and there is no wire view), so there is nothing that could
-    carry the figure; this pins that. It proves the fixture is one the
-    reader really sees as a spend seat with the figure in it, so the test
-    cannot pass merely because the file was never found."""
+    """`blink status` never prints the spend figure's dollars, and nor
+    does `blink status --wire`. The wire view runs a whole bus over the
+    config, so it does carry the page: it prints the usage message exactly
+    as the board gets it, and on a spend page that holds the share of the
+    cap as the session figure. That is ruled acceptable (a Max desk's
+    percentages print the same way); the dollars and the cents travel only
+    in the plan message, which the wire view does not print, and this pins
+    that. The fixture is one the reader really sees as a spend seat with
+    the figure in it, with a /usage from a minute ago so the page is built
+    on it, so the test cannot pass merely because the file was never found
+    or the figure was last month's. This docstring used to say there was
+    no wire view (final review of 2026-11-04)."""
+    import json as _json
     from pc import claude_plan
-    _claude_json(tmp_path, "enterprise_usage_based", used=4321)
-    seen = claude_plan.PlanReader().look(time.time())
+    now = time.time()
+    _claude_json(tmp_path, "enterprise_usage_based", used=4321,
+                 fetched_ms=int((now - 60) * 1000))
+    seen = claude_plan.PlanReader().look(now)
     assert seen.spend_seat and seen.anchor.used_cents == 4321
     cli.main(["status"])
     out = capsys.readouterr().out
     assert "4321" not in out and "43.21" not in out
+    cli.main(["status", "--wire"])
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    i = lines.index("Wire        the next usage message, exactly as the"
+                    " board gets it:")
+    wire = _json.loads(lines[i + 1])
+    # The page is the spend page, its share 4321 / 25000 of the cap.
+    assert wire["src"] == "claude_spend" and wire["session_pct"] == 17.3
+    assert not {"usd", "lim"} & set(wire)
+    assert not {43.21, 4321, 250.0, 25000} & set(wire.values())
+    rest = "\n".join(lines[:i + 1] + lines[i + 2:])
+    for amount in ("4321", "43.21", "250.00", "25000"):
+        assert amount not in rest, amount
 
 
 def test_config_disclosure_names_seat_fields(tmp_path, capsys, monkeypatch):
