@@ -868,7 +868,7 @@ def blank_page(last_usage, page) -> dict:
     """A usage line that takes `page`'s figures down and leaves the rest.
 
     For the switch away from a spend login with nothing yet to replace it
-    (Bridge._take_down_spend): the plan goes back to windows, and the share
+    (Bridge._outgoing): the plan goes back to windows, and the share
     the board holds must go with it, or the board repaints that share of
     dollars under "SESSION 5h" until the new login first renders -- hours on
     an idle desk (/code-review max of 2026-11-04, U15).
