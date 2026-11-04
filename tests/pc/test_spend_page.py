@@ -1053,3 +1053,56 @@ def test_a_wsl_page_is_not_exact_over_a_windows_clock_behind():
     # Natively one clock: a rise dated before the /usage is in it.
     assert claude_cli._spend_frame(a, c, NOW, NOW - 90).spend_exact is True
 
+
+
+# --- the windows frame from the saved /usage ---------------------------
+
+def _usage_config(home, at, seat="max", billing="subscription",
+                  org_type="claude_max"):
+    oauth = {"accountUuid": ACCT, "organizationUuid": ORG,
+             "organizationType": org_type, "seatTier": seat,
+             "billingType": billing}
+    doc = {"oauthAccount": oauth,
+           "cachedUsageUtilization": {
+               "fetchedAtMs": int((at - 60) * 1000), "accountUuid": ACCT,
+               "utilization": {
+                   "five_hour": None,
+                   "seven_day": {"utilization": 15,
+                                 "resets_at": "2026-11-18T12:00:00+00:00"},
+                   "extra_usage": {"is_enabled": True,
+                                   "monthly_limit": 25000,
+                                   "used_credits": 1234,
+                                   "currency": "usd"}}}}
+    return config(home, at, raw=json.dumps(doc))
+
+
+def test_usage_frame_from_cache():
+    w = claude_plan.CacheWindows(None, None, 15.0, 1794376799.0, 1793828166.0)
+    f = claude_cli._usage_frame(w, now_epoch=1793828200.0)
+    assert f.src == base.USAGE_SRC_ID and f.plan == base.PLAN_WINDOWS
+    assert f.session_pct == base.UNKNOWN and f.weekly_pct == 15.0
+    assert f.observed_at == 1793828166.0
+    assert f.weekly_resets_at == 1794376799.0
+
+
+def test_usage_frame_settles_a_window_that_has_ended():
+    w = claude_plan.CacheWindows(40.0, 1000.0, 15.0, 9e9 - 1, 900.0)
+    f = claude_cli._usage_frame(w, now_epoch=2000.0)
+    assert f.session_pct == 0.0 and f.session_rolled_at == 1000.0
+
+
+def test_poll_adds_usage_frame_on_a_windows_login(tmp_path):
+    _usage_config(tmp_path, NOW - 30)
+    p = claude_cli.ClaudeCliProvider()
+    frames = p.poll(NOW)
+    usage = [f for f in frames if f.src == base.USAGE_SRC_ID]
+    assert len(usage) == 1 and usage[0].weekly_pct == 15.0
+    assert usage[0].session_pct == base.UNKNOWN
+
+
+def test_poll_adds_no_usage_frame_on_a_spend_seat(tmp_path):
+    _usage_config(tmp_path, NOW - 30, seat="enterprise_usage_based",
+                  billing="usage_based", org_type="claude_enterprise")
+    p = claude_cli.ClaudeCliProvider()
+    frames = p.poll(NOW)
+    assert not [f for f in frames if f.src == base.USAGE_SRC_ID]

@@ -80,6 +80,7 @@ Ultra; docs/open-bugs/ultra-burn-followups.md keeps it.
 """
 import calendar
 import dataclasses
+import datetime
 import json
 import math
 import os
@@ -189,6 +190,19 @@ class SpendAnchor:
 
 
 @dataclasses.dataclass(frozen=True)
+class CacheWindows:
+    """The 5-hour and weekly figures Claude Code saved at the last /usage:
+    percent used and the reset as an epoch, each None when the cache has no
+    such window (a Max login showed a null five_hour on 2026-11-04, and the
+    week beside it was good). fetched_at is when /usage ran, epoch seconds."""
+    five_pct: "float | None"
+    five_resets_at: "float | None"
+    week_pct: "float | None"
+    week_resets_at: "float | None"
+    fetched_at: float
+
+
+@dataclasses.dataclass(frozen=True)
 class ConfigView:
     """Everything this daemon takes from Claude Code's config, from one
     parse. No raw id is held: account_fp is a one-way digest, and org_kind
@@ -199,6 +213,8 @@ class ConfigView:
     org_kind: str
     mtime: float
     anchor: "SpendAnchor | None"
+    # The 5-hour and weekly figures the same /usage saved, or None.
+    windows: "CacheWindows | None" = None
 
 
 # No file, or nothing in it that was asked for. account_fp "" is "no
@@ -243,11 +259,11 @@ def _number(v):
         return None
 
 
-def _anchor(doc):
-    """The SpendAnchor in the config's cachedUsageUtilization, or None
-    (module docstring of the plan: USD only, finite non-negative amounts,
-    a boolean is_enabled, and the cache is this login's when it names one).
-    The account comparison happens here and neither id leaves."""
+def _cache(doc):
+    """(utilization dict, fetched_at epoch) of this login's saved /usage, or
+    None: no cache, one that names another login, a fetch time out of
+    bounds, or no utilization object. Shared by _anchor and _cache_windows
+    so both believe the same cache."""
     cache = doc.get("cachedUsageUtilization") if isinstance(doc, dict) \
         else None
     if not isinstance(cache, dict):
@@ -260,9 +276,23 @@ def _anchor(doc):
         return None
     fetched_ms = _number(cache.get("fetchedAtMs"))
     util = cache.get("utilization")
-    extra = util.get("extra_usage") if isinstance(util, dict) else None
     if (fetched_ms is None or not 0 <= fetched_ms <= MAX_FETCHED_MS
-            or not isinstance(extra, dict)):
+            or not isinstance(util, dict)):
+        return None
+    return util, fetched_ms / 1000.0
+
+
+def _anchor(doc):
+    """The SpendAnchor in the config's cachedUsageUtilization, or None
+    (module docstring of the plan: USD only, finite non-negative amounts,
+    a boolean is_enabled, and the cache is this login's when it names one).
+    The account comparison happens here and neither id leaves."""
+    got = _cache(doc)
+    if got is None:
+        return None
+    util, fetched_at = got
+    extra = util.get("extra_usage")
+    if not isinstance(extra, dict):
         return None
     currency = extra.get("currency")
     if currency is None:
@@ -280,7 +310,53 @@ def _anchor(doc):
         if limit is None or not 0 <= limit <= MAX_CENTS:
             return None
         limit = int(round(limit))
-    return SpendAnchor(int(round(used)), limit, enabled, fetched_ms / 1000.0)
+    return SpendAnchor(int(round(used)), limit, enabled, fetched_at)
+
+
+# A window's percent is believed from 0 to 1000, the board's PCT_MAX; past
+# that, or not a finite number, it is no figure rather than a clamped one.
+MAX_PCT = 1000
+
+
+def _window_pair(w):
+    """(percent, reset epoch) of one saved window; each None when it does
+    not read. A non-object, a null window and a bad number are all "not
+    there"; a reset that will not parse costs only the reset."""
+    if not isinstance(w, dict):
+        return None, None
+    pct = _number(w.get("utilization"))
+    if pct is None or not 0 <= pct <= MAX_PCT:
+        return None, None
+    resets = w.get("resets_at")
+    at = None
+    if isinstance(resets, str):
+        try:
+            when = datetime.datetime.fromisoformat(resets.strip())
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=datetime.timezone.utc)
+            at = when.timestamp()
+        except (ValueError, TypeError, OverflowError, OSError):
+            at = None
+        if at is not None and not 0 <= at <= MAX_FETCHED_MS / 1000:
+            at = None
+    return float(pct), at
+
+
+def _cache_windows(doc):
+    """The CacheWindows in the config's cachedUsageUtilization, or None when
+    the cache is not this login's or holds neither window. Never raises."""
+    try:
+        got = _cache(doc)
+        if got is None:
+            return None
+        util, fetched_at = got
+        five_pct, five_at = _window_pair(util.get("five_hour"))
+        week_pct, week_at = _window_pair(util.get("seven_day"))
+        if five_pct is None and week_pct is None:
+            return None
+        return CacheWindows(five_pct, five_at, week_pct, week_at, fetched_at)
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def month_start_utc(now) -> float:
@@ -307,7 +383,8 @@ def _view(doc, mtime):
             if isinstance(org, str) else claude_account.CONSUMER)
     return ConfigView(ultra=is_ultra(doc), spend_seat=is_spend_seat(doc),
                       account_fp=fp or "", org_kind=kind, mtime=mtime,
-                      anchor=_anchor(doc))
+                      anchor=_anchor(doc),
+                      windows=_cache_windows(doc))
 
 
 def parse(path, st=None):

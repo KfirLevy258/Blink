@@ -61,6 +61,11 @@ SPEND_PERIODS = ("daily", "weekly", "monthly")
 # switch says and cannot import claude_cli: claude_cli reaches it again
 # through pc/claude_plan. claude_cli.SPEND_SRC_ID is this value.
 SPEND_SRC_ID = "claude_spend"
+# The src of the frame built from the 5-hour and weekly figures in the same
+# saved /usage (claude_cli._usage_frame). Account-wide like the spend page,
+# so claude_account keeps it across a terminal's quiet and reads it by this
+# name.
+USAGE_SRC_ID = "claude_usage"
 
 # Worst-first. This is the order the single scalar `state` collapses to when
 # several sessions -- of one provider or of both -- disagree, and the order is

@@ -700,7 +700,22 @@ class ClaudeCliProvider(base.ProviderParser):
             # (/code-review max of 2026-11-04, U14).
             frames = [f for f in frames if f.plan != base.PLAN_SPEND]
             frames.append(spend)
+        usage = self._usage(now_epoch, view)
+        if usage is not None:
+            frames.append(usage)
         return frames
+
+    def _usage(self, now_epoch, view):
+        """The frame of the 5-hour and weekly figures in the saved /usage,
+        or None: no config, none saved, or a spend seat, whose page the
+        spend frame owns. A failure costs this frame only, said once."""
+        if view is None or view.windows is None or view.spend_seat:
+            return None
+        try:
+            return _usage_frame(view.windows, now_epoch)
+        except Exception:
+            spend_failed()
+            return None
 
     def _look(self, now_epoch):
         """The config's view this poll, with its login noted, or None when
@@ -979,6 +994,34 @@ def _file_sig(path):
         return _ABSENT
     except (OSError, ValueError):
         return None
+
+
+def _usage_frame(windows, now_epoch):
+    """The frame of the 5-hour and weekly figures Claude Code saved at the
+    last /usage (claude_plan.CacheWindows), dated by that fetch. Each window
+    goes through base.settle_window as the status line's do, so one whose
+    reset has passed reads 0% and not the figure from before it. A window
+    the cache lacked stays base.UNKNOWN: a null five_hour (a Max login,
+    2026-11-04) leaves the session dial unknown beside a good week.
+    Returns None when neither window has a figure."""
+    stale = (now_epoch - windows.fetched_at) > ss.STALE_AFTER_S
+
+    def settle(pct, resets_at):
+        if pct is None:
+            return base.UNKNOWN, None, None
+        w = base.settle_window(pct, resets_at, now_epoch, stale)
+        return w.pct, w.resets_at, w.ended_at
+
+    s_pct, s_reset, s_ended = settle(windows.five_pct, windows.five_resets_at)
+    w_pct, w_reset, w_ended = settle(windows.week_pct, windows.week_resets_at)
+    if s_pct == base.UNKNOWN and w_pct == base.UNKNOWN:
+        return None
+    return base.NormalizedUsageFrame(
+        provider=PROVIDER_ID, src=base.USAGE_SRC_ID,
+        observed_at=windows.fetched_at, active_at=None,
+        session_rolled_at=s_ended, weekly_rolled_at=w_ended,
+        session_pct=s_pct, session_resets_at=s_reset,
+        weekly_pct=w_pct, weekly_resets_at=w_reset, stale=stale)
 
 
 def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None,

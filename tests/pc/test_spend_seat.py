@@ -459,3 +459,67 @@ def test_a_time_before_the_last_parse_is_not_due(tmp_path, monkeypatch):
     assert len(n) == 1
     got = r.look(str(p), NOW - 3600 + claude_plan.FIRST_ANSWER_RETRY_S)
     assert got is not None and len(n) == 2
+
+
+# --- the 5-hour and weekly figures in the same cache -------------------
+
+def _wdoc(five=None, week=None, uuid="u1", cache_uuid="u1",
+          fetched_ms=1_793_828_166_919):
+    util = {"five_hour": five, "seven_day": week}
+    return {"oauthAccount": {"accountUuid": uuid},
+            "cachedUsageUtilization": {"accountUuid": cache_uuid,
+                                       "fetchedAtMs": fetched_ms,
+                                       "utilization": util}}
+
+
+def test_cache_windows_reads_both_windows():
+    w = claude_plan._cache_windows(_wdoc(
+        five={"utilization": 42, "resets_at": "2026-11-05T10:00:00+00:00"},
+        week={"utilization": 15,
+              "resets_at": "2026-11-11T05:59:59.801815+00:00"}))
+    assert (w.five_pct, w.week_pct) == (42.0, 15.0)
+    assert w.five_resets_at == 1793872800.0
+    assert w.week_resets_at == pytest.approx(1794376799.8018, abs=1e-3)
+    assert w.fetched_at == pytest.approx(1793828166.919)
+
+
+def test_cache_windows_null_five_hour_keeps_week():
+    w = claude_plan._cache_windows(_wdoc(
+        five=None, week={"utilization": 15,
+                         "resets_at": "2026-11-11T05:59:59+00:00"}))
+    assert w.five_pct is None and w.five_resets_at is None
+    assert w.week_pct == 15.0
+
+
+def test_cache_windows_other_login_is_ignored():
+    assert claude_plan._cache_windows(_wdoc(
+        week={"utilization": 15, "resets_at": "2026-11-11T05:59:59+00:00"},
+        cache_uuid="someone-else")) is None
+
+
+@pytest.mark.parametrize("bad", [
+    {"utilization": "x"}, {"utilization": -1}, {"utilization": 1e309},
+    {"utilization": 5, "resets_at": "not a date"}, [], "15"])
+def test_cache_windows_bad_values_never_raise(bad):
+    w = claude_plan._cache_windows(_wdoc(week=bad))
+    assert w is None or w.week_pct is None or 0 <= w.week_pct <= 1000
+
+
+def test_cache_windows_bad_reset_costs_only_the_reset():
+    w = claude_plan._cache_windows(_wdoc(
+        week={"utilization": 5, "resets_at": "not a date"}))
+    assert w.week_pct == 5.0 and w.week_resets_at is None
+
+
+def test_cache_windows_none_without_any_window():
+    assert claude_plan._cache_windows(_wdoc()) is None
+
+
+def test_view_carries_windows_and_empty_view_has_none(tmp_path):
+    d = doc(seat="max", cache=False)
+    d["cachedUsageUtilization"] = _wdoc(
+        week={"utilization": 15, "resets_at": "2026-11-11T05:59:59+00:00"}
+    )["cachedUsageUtilization"]
+    d["cachedUsageUtilization"]["accountUuid"] = ACCT
+    assert view(tmp_path, d).windows.week_pct == 15.0
+    assert claude_plan.EMPTY_VIEW.windows is None
