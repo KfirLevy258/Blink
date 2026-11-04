@@ -118,15 +118,25 @@ class _WinReg:
 
 
 def policy_blocks(reg=None):
-    """Does group policy forbid WSL? AllowWSL or AllowInboxWSL equal to 0.
+    """Does group policy forbid WSL? AllowWSL equal to 0, and nothing else.
     Missing means allowed; so does an unreadable registry, because the
-    policy key is absent on almost every machine."""
+    policy key is absent on almost every machine.
+
+    AllowInboxWSL is not read on purpose. Microsoft's WSL settings policy
+    ("Allow the Inbox version of WSL") turns off only the WSL component that
+    ships inside Windows; the Store WSL, which is what `wsl --install` puts
+    on any current Windows, keeps running, and Microsoft's Intune
+    recommended settings set AllowInboxWSL=0 to steer desks onto it. The
+    first cut refused on that value too, and so told exactly the managed
+    enterprise desks this feature is for that WSL was turned off. A desk
+    left with only the inbox WSL under that policy fails at the first
+    wsl.exe call instead, and the probe's own message covers it."""
     reg = reg or _WinReg()
     try:
         values = reg.values(HKLM, POLICY)
     except OSError:
         return False
-    return any(values.get(k) == 0 for k in ("AllowWSL", "AllowInboxWSL"))
+    return values.get("AllowWSL") == 0
 
 
 class Unreadable(Exception):

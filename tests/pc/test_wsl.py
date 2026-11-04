@@ -46,7 +46,11 @@ def test_policy_blocks():
     assert not wsl.policy_blocks(FakeReg({}))
     assert not wsl.policy_blocks(FakeReg({p: {"AllowWSL": 1}}))
     assert wsl.policy_blocks(FakeReg({p: {"AllowWSL": 0}}))
-    assert wsl.policy_blocks(FakeReg({p: {"AllowInboxWSL": 0}}))
+    # AllowInboxWSL=0 turns off only the WSL that ships inside Windows; the
+    # Store WSL that `wsl --install` gives still runs, and Microsoft's own
+    # Intune recommended settings set it. Only AllowWSL=0 is "WSL off".
+    assert not wsl.policy_blocks(FakeReg({p: {"AllowInboxWSL": 0}}))
+    assert wsl.policy_blocks(FakeReg({p: {"AllowWSL": 0, "AllowInboxWSL": 1}}))
 
 
 def test_unc_paths():
