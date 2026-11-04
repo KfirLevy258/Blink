@@ -365,6 +365,64 @@ def test_login_round_trip_restarts_the_count(tmp_path):
     assert bus3.plan_msg()["usd"] == 0.0
 
 
+def test_a_login_away_and_back_takes_new_baselines(tmp_path):
+    """/code-review max of 2026-11-04, U9: Claude Code keeps a session's id
+    across /login but starts its cost again from zero. Back on the same
+    seat, bind() keeps the count (same fingerprint) and the high-water
+    marks with it, so every render under the old mark counted nothing:
+    $0.30 of new spend shown as none. A login switch seen by the provider
+    now drops the per-session marks (SpendCounter.forget_sessions), so the
+    next sighting is a first one and the rises after it count."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 3600, cache=False)
+    bus = bus_on(clock)
+    for at, cost in ((NOW, 1.00), (NOW + 10, 1.30)):
+        render(tmp_path, at, cost, session="sess-a")
+        clock.t = at + 1
+        bus.poll()
+    assert bus.plan_msg()["usd"] == 0.30
+    t = NOW + 100
+    max_config(tmp_path, t)
+    render(tmp_path, t, 0.00, session="sess-a", rate_limits=WINDOWS)
+    clock.t = t + 1
+    bus.poll()
+    assert bus.plan_msg()["plan"] == "windows"
+    t = NOW + 200
+    config(tmp_path, t, cache=False)
+    for at, cost in ((t, 0.20), (t + 10, 0.50), (t + 20, 0.75)):
+        render(tmp_path, at, cost, session="sess-a")
+        clock.t = at + 1
+        bus.poll()
+    assert bus.plan_msg()["plan"] == "spend"
+    assert bus.plan_msg()["usd"] == 0.85
+
+
+def test_another_organisation_does_not_take_the_old_usage(tmp_path):
+    """/code-review max of 2026-11-04, U11: the saved /usage is matched to
+    the login by accountUuid alone, so /login to another organisation as
+    the same person kept the old organisation's $300 of $500 on the page.
+    The fingerprint covers both ids: a /usage fetched no later than the
+    last config that still carried the old fingerprint is that login's."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 50, used=30000, limit=50000, fetched=NOW - 60)
+    bus = bus_on(clock)
+    bus.poll()
+    assert bus.plan_msg()["usd"] == 300.0
+    t = NOW + 100
+    config(tmp_path, t, used=30000, limit=50000, fetched=NOW - 60, org=ORG_B)
+    clock.t = t + 1
+    bus.poll()
+    plan = bus.plan_msg()
+    assert plan["plan"] == "spend"
+    assert plan["usd"] == 0.0 and "lim" not in plan and plan["hint"] == 1
+    # A /usage under the new login is its own, and is used.
+    t = NOW + 200
+    config(tmp_path, t, used=1234, limit=25000, fetched=t - 5, org=ORG_B)
+    clock.t = t + 1
+    bus.poll()
+    assert bus.plan_msg()["usd"] == 12.34 and bus.plan_msg()["lim"] == 250.0
+
+
 def test_no_weekly_on_a_spend_page(tmp_path):
     weekly_anchor.save(inside(tmp_path, weekly_anchor.anchor_path()),
                        NOW + 3 * 86400, NOW - 86400)

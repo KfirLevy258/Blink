@@ -297,6 +297,14 @@ class ClaudeCliProvider(base.ProviderParser):
         # about the seat within a poll.
         self._plan = (plan if plan is not None
                       else claude_plan.PlanReader(path=plan_path))
+        # The login the config named at the last look, as its fingerprint,
+        # and that view's mtime; "" and None before the first. See
+        # _note_login.
+        self._login_fp = ""
+        self._login_mtime = None
+        # A /usage fetched at or before this belongs to an earlier login
+        # (_note_login); None while no switch has been seen.
+        self._anchor_floor = None
         # The running count of spend between /usage runs (pc/spend_count),
         # fed and saved only while the config names a spend seat. The bus
         # hands in the one it owns, persisted; built here, for `blink
@@ -686,6 +694,9 @@ class ClaudeCliProvider(base.ProviderParser):
         a minute; on a seat that is not billed by usage nothing below the
         look runs, and the count is neither touched nor saved."""
         view = self._plan.look(now_epoch)
+        # Whatever the seat: a login away and back is two switches, and the
+        # one away is seen on a Max view.
+        self._note_login(view)
         if not view.spend_seat:
             return None
         counter = self._counter
@@ -707,8 +718,49 @@ class ClaudeCliProvider(base.ProviderParser):
         live = self._live
         if live is not None and live.plan == base.PLAN_SPEND:
             return None
-        return _spend_frame(view.anchor, counter, now_epoch, self._render_at,
+        anchor = view.anchor
+        if (anchor is not None and self._anchor_floor is not None
+                and anchor.fetched_at <= self._anchor_floor):
+            anchor = None
+        return _spend_frame(anchor, counter, now_epoch, self._render_at,
                             view.mtime)
+
+    def _note_login(self, view):
+        """Follow the config's login across switches, for the count and
+        the saved /usage.
+
+        The count: Claude Code keeps a session's id across /login and
+        starts its cost again from zero (2.1.318's costLedger.reset, read
+        in the bundle). bind() empties the count only when the fingerprint
+        differs from the one it holds, so a login away and back to the same
+        seat kept the high-water marks, and every render under the old mark
+        counted nothing until the session passed it (/code-review max of
+        2026-11-04, U9: $14.34 shown for $16.84). A switch seen here drops
+        the marks (SpendCounter.forget_sessions), so each session's next
+        sighting is a first one; what was counted stays. The sighting that
+        takes the new baseline adds nothing, which loses what was spent
+        between /login and it: the safe direction, as for a resumed
+        session.
+
+        The /usage: the cache is matched to the login by accountUuid only,
+        so another organisation as the same person kept the old one's
+        figure (U11). /usage and /login both write the config, so a cache
+        fetched no later than the last view that carried the old
+        fingerprint is that login's, and is no anchor for this one. Held
+        in memory: a daemon restarted after the switch cannot tell.
+
+        A same-seat re-login without a switch in between (sign out, sign
+        in) leaves the fingerprint as it was, and is not seen here."""
+        fp = view.account_fp
+        if not fp:
+            return
+        if self._login_fp and fp != self._login_fp:
+            forget = getattr(self._counter, "forget_sessions", None)
+            if forget is not None:
+                forget()
+            if self._login_mtime is not None:
+                self._anchor_floor = self._login_mtime
+        self._login_fp, self._login_mtime = fp, (view.mtime or None)
 
     def _status_frames(self, now_epoch):
         """The frames the status line gives this poll; see the module

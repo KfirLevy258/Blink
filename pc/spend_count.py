@@ -191,6 +191,19 @@ class SpendCounter:
             self._fp, self._period = account_fp, period_start
             self._clear()
 
+    def forget_sessions(self) -> None:
+        """Drop every session's high-water mark, keeping what was counted.
+
+        For a login switch (claude_cli's _note_login): Claude Code keeps a
+        session's id across /login and starts its cost from zero, so a mark
+        from before the switch would swallow every rise after it. Each
+        session's next sighting is then a first one and adds nothing.
+        Written at once, like an emptied count: a restart that reloaded
+        the old marks would undercount again."""
+        if self._sessions:
+            self._sessions = {}
+            self._dirty = self._urgent = True
+
     # -- counting --------------------------------------------------------
     def observe(self, session_id, cost_usd, at) -> bool:
         # The counter owns the guard: a NaN, infinity, string or bool from
