@@ -414,7 +414,11 @@ class ConfigFile:
         except FileNotFoundError as e:
             if unreachable is not None and unreachable(e):
                 return None
-            self._sig = None
+            # And the next file to appear is parsed at once: a rewrite by
+            # delete and create otherwise waited out the spacing after
+            # this "no file", polls of no seat (final review of round 7,
+            # F3).
+            self._sig = self._parsed_at = None
             return EMPTY_VIEW
         except (OSError, ValueError):
             return None                 # not knowing is not "no seat"

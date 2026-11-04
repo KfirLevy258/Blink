@@ -416,3 +416,22 @@ def test_one_look_a_poll_whoever_asks(tmp_path, monkeypatch):
     assert len(stats) == 1
     r.look(NOW + 2)
     assert len(stats) == 2
+
+
+def test_a_config_deleted_and_written_again_is_read_at_once(tmp_path,
+                                                            monkeypatch):
+    """Final review of round 7, F3: a rewrite by delete and create answered
+    "no file" between the two, and the new file then waited out the five
+    seconds since the last parse: polls of "no seat", the spend page gone.
+    After a "no file" answer the next file is parsed at once."""
+    p = tmp_path / ".claude.json"
+    p.write_text(json.dumps(doc()), encoding="utf-8")
+    r = claude_plan.ConfigFile()
+    first = r.look(str(p), NOW)
+    assert first is not None and first.spend_seat
+    os.remove(p)
+    assert r.look(str(p), NOW + 1) == claude_plan.EMPTY_VIEW
+    p.write_text(json.dumps(doc()), encoding="utf-8")
+    got = r.look(str(p), NOW + 2)
+    assert got is not None and got.spend_seat
+
