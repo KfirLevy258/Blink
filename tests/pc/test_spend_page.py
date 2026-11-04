@@ -925,7 +925,8 @@ def test_a_switch_forgets_what_the_old_logins_renders_taught(tmp_path):
     assert p._render_at is not None and p._five_seen is not None
     assert p._costs
     _other_login(tmp_path, NOW + 1)
-    p.poll(NOW + 2)
+    # Seen once the config may be parsed again (claude_plan.ConfigFile).
+    p.poll(NOW + claude_plan.FIRST_ANSWER_RETRY_S + 1)
     assert p._render_at is None and p._five_seen is None
     assert p._costs == {} and p._chain is None
     assert p._remembered is None and p._any is None
@@ -950,17 +951,19 @@ def test_a_failed_stat_never_lifts_the_old_logins_mark(tmp_path,
     monkeypatch.setattr(cc, "_file_sig",
                         lambda path: None if failing[0] else real(path))
     _other_login(tmp_path, NOW + 1)
-    for t in (NOW + 2, NOW + 4):                 # stat fails at the switch
+    # The switch is seen at NOW + 6, once the config may be parsed again
+    # (claude_plan.ConfigFile).
+    for t in (NOW + 6, NOW + 8):                 # stat fails at the switch
         assert not any(f.session_pct == 41.0 for f in p.poll(t))
     failing[0] = False
-    assert not any(f.session_pct == 41.0 for f in p.poll(NOW + 6))
-    failing[0] = True                            # and while it stands
-    assert not any(f.session_pct == 41.0 for f in p.poll(NOW + 8))
-    failing[0] = False
     assert not any(f.session_pct == 41.0 for f in p.poll(NOW + 10))
+    failing[0] = True                            # and while it stands
+    assert not any(f.session_pct == 41.0 for f in p.poll(NOW + 12))
+    failing[0] = False
+    assert not any(f.session_pct == 41.0 for f in p.poll(NOW + 14))
     five = {"five_hour": {"used_percentage": 3.0, "resets_at": NOW + 3600}}
-    render(tmp_path, NOW + 11, 0.10, rate_limits=five)
-    assert any(f.session_pct == 3.0 for f in p.poll(NOW + 12))
+    render(tmp_path, NOW + 15, 0.10, rate_limits=five)
+    assert any(f.session_pct == 3.0 for f in p.poll(NOW + 16))
 
 
 def test_no_status_file_at_the_switch_marks_nothing(tmp_path):
@@ -971,7 +974,8 @@ def test_no_status_file_at_the_switch_marks_nothing(tmp_path):
     p = cc.ClaudeCliProvider()
     p.poll(NOW)
     _other_login(tmp_path, NOW + 1)
-    p.poll(NOW + 2)
+    p.poll(NOW + 6)                               # the switch is seen
+    assert p._old_render is None
     five = {"five_hour": {"used_percentage": 3.0, "resets_at": NOW + 3600}}
-    render(tmp_path, NOW + 3, 0.10, rate_limits=five)
-    assert any(f.session_pct == 3.0 for f in p.poll(NOW + 4))
+    render(tmp_path, NOW + 7, 0.10, rate_limits=five)
+    assert any(f.session_pct == 3.0 for f in p.poll(NOW + 8))

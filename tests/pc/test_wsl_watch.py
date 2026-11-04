@@ -784,3 +784,37 @@ def test_a_config_really_gone_is_still_no_seat(tmp_path):
     _touch_drop(home, clock.t)
     w.tick()
     assert w.view() is claude_plan.EMPTY_VIEW
+
+
+def test_the_watch_reads_the_config_as_plan_reader_does(tmp_path,
+                                                        monkeypatch):
+    """Round 6 of the 2026-11-04 review, item 7: WslWatch._look was a copy
+    of PlanReader.look's stat, compare and parse, and the two had drifted
+    (a failed read retried at every tick here, a minute later there). Both
+    go through one claude_plan.ConfigFile now: a failed read is retried
+    FIRST_ANSWER_RETRY_S later, a change parsed at most that often."""
+    home, _unc = _home(tmp_path)
+    path = _write_config(home)
+    t0 = time.time()
+    clock = _Clock(t0)
+    w = _watch(home, clock, _Running(True))
+    assert isinstance(w._config, claude_plan.ConfigFile)
+    real = claude_plan.parse
+    calls = []
+
+    def flaky(p, st=None):
+        calls.append(1)
+        return None if len(calls) == 1 else real(p, st)
+    monkeypatch.setattr(claude_plan, "parse", flaky)
+    assert w._look() is None                          # failed: nothing new
+    clock.t = t0 + 2
+    assert w._look() is None and len(calls) == 1      # not yet
+    clock.t = t0 + claude_plan.FIRST_ANSWER_RETRY_S
+    assert w._look() is not None and len(calls) == 2
+    clock.t += 1
+    assert w._look() is None and len(calls) == 2      # unchanged
+    _write_config(home, seat=True)
+    os.utime(path, (t0 + 100, t0 + 100))
+    assert w._look() is None and len(calls) == 2      # parsed 1 s ago
+    clock.t += claude_plan.FIRST_ANSWER_RETRY_S
+    assert w._look().spend_seat and len(calls) == 3

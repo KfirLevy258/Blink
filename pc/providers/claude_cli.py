@@ -816,7 +816,9 @@ class ClaudeCliProvider(base.ProviderParser):
             # A stat that fails here marks the file as the first one that
             # succeeds finds it (_UNSTATED): unmarked, the old render was
             # offered again (round 6 of the review, item 2).
-            self._old_render = _file_sig(self.path()) or _UNSTATED
+            sig = _file_sig(self.path())
+            self._old_render = (None if sig is _ABSENT
+                                else sig or _UNSTATED)
             self._remembered = self._any = None
             # And what the old login's renders taught: the newest render's
             # time, the last five_hour seen, the reply baselines

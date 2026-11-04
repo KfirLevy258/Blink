@@ -211,7 +211,7 @@ class WslWatch:
         # The tick's own; only its thread touches these.
         self._ran_at = None
         self._ran = False
-        self._sig = None
+        self._config = claude_plan.ConfigFile()
         self._swept_at = None
         self._idle_at = None
         self._said = None
@@ -331,33 +331,16 @@ class WslWatch:
             print(line, file=sys.stderr)
 
     def _look(self):
-        """A new ConfigView if the config changed, else None. Resolved
-        here, by claude_plan.config_path's rule, on every look: which file
-        wins is never stored (claude_plan.config_path)."""
+        """A new ConfigView if the config changed, else None: the stat,
+        compare, back off and parse are claude_plan.ConfigFile's, shared
+        with PlanReader (round 6 of the 2026-11-04 review, item 7).
+        Resolved here, by claude_plan.config_path's rule, on every look:
+        which file wins is never stored (claude_plan.config_path)."""
         try:
             path = claude_plan.config_path(self._home)
-            st = os.stat(path)
-        except FileNotFoundError as e:
-            # CPython maps ERROR_BAD_NETPATH and ERROR_BAD_NET_NAME to
-            # ENOENT, so a \\wsl.localhost share that drops for a moment
-            # arrives here looking exactly like a config that is not there;
-            # taken for one, it published EMPTY_VIEW -- no seat -- and the
-            # spend page went until the file next changed (review of
-            # feat/enterprise-spend, W4). The Windows error tells them apart.
-            if getattr(e, "winerror", None) in _NET_UNREACHABLE:
-                return None
-            self._sig = None
-            return claude_plan.EMPTY_VIEW
         except (OSError, ValueError):
             return None                 # not knowing is not "no seat"
-        sig = (path, stat.S_IFMT(st.st_mode)) + claude_plan.signature(st)
-        if sig == self._sig:
-            return None
-        got = claude_plan.parse(path, st)
-        # As PlanReader.look: a read worth trying again is not cached
-        # against the stamp, and the last good view stands meanwhile.
-        self._sig = None if got is None else sig
-        return got
+        return self._config.look(path, self._clock(), _unreachable)
 
     def resolve_name(self):
         """Follow a rename: find the distribution by its GUID and, when it
@@ -383,7 +366,7 @@ class WslWatch:
         if self._own_reader:
             self._reader = _burn_reader_for(home)
         # The last look was of the old path.
-        self._sig = None
+        self._config = claude_plan.ConfigFile()
 
     def _tick_once(self):
         try:
@@ -426,6 +409,17 @@ class _BurnSource:
 
     def poll(self, now, budget=None):
         return self._watch._asked()
+
+
+def _unreachable(e):
+    """Whether a FileNotFoundError is a share that dropped. CPython maps
+    ERROR_BAD_NETPATH and ERROR_BAD_NET_NAME to ENOENT, so a
+    \\wsl.localhost share that drops for a moment arrives looking exactly
+    like a config that is not there; taken for one, it published
+    EMPTY_VIEW -- no seat -- and the spend page went until the file next
+    changed (review of feat/enterprise-spend, W4). The Windows error
+    tells them apart."""
+    return getattr(e, "winerror", None) in _NET_UNREACHABLE
 
 
 def _registry_distros():

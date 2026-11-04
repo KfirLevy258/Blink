@@ -347,3 +347,72 @@ def test_a_source_is_asked_at_every_look(tmp_path):
                                source=lambda: answers.pop(0))
     assert r.look(NOW) == seat
     assert r.look(NOW + 2) == other
+
+
+def test_a_changed_file_that_fails_is_retried_within_seconds(tmp_path,
+                                                             monkeypatch):
+    """Round 6 of the 2026-11-04 review, item 3: after a first answer, a
+    file that changed and then failed to read (a write caught half done)
+    was tried again only RECHECK_S later, so a /login caught mid-write was
+    seen a minute late. It is tried again FIRST_ANSWER_RETRY_S later."""
+    p = tmp_path / ".claude.json"
+    p.write_text(json.dumps(doc()), encoding="utf-8")
+    r = claude_plan.PlanReader(path=str(p))
+    first = r.look(NOW)
+    d = doc()
+    d["oauthAccount"]["accountUuid"] = "ACCT-OTHER-0c0c0c"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    os.utime(p, (NOW + 9, NOW + 9))
+    real = claude_plan.parse
+    fails = [1]
+    monkeypatch.setattr(claude_plan, "parse", lambda path, st=None:
+                        None if fails and fails.pop() else real(path, st))
+    assert r.look(NOW + 10) == first                  # failed: kept
+    assert r.look(NOW + 10 + claude_plan.FIRST_ANSWER_RETRY_S) \
+        .account_fp != first.account_fp
+
+
+def test_a_changing_file_is_parsed_at_most_once_in_five_seconds(tmp_path,
+                                                                 monkeypatch):
+    """Item 4: the file is stat'ed at every look, but a file Claude Code
+    rewrites every poll was parsed every poll -- the whole of it, up to
+    MAX_BYTES, on the serial thread. A change is parsed at most once a
+    FIRST_ANSWER_RETRY_S; one that comes sooner waits for it."""
+    p = tmp_path / ".claude.json"
+    p.write_text(json.dumps(doc()), encoding="utf-8")
+    real = claude_plan.parse
+    n = []
+    monkeypatch.setattr(claude_plan, "parse", lambda path, st=None:
+                        n.append(1) or real(path, st))
+    r = claude_plan.PlanReader(path=str(p))
+    r.look(NOW)
+    for k in range(1, 6):                             # a rewrite a poll
+        os.utime(p, (NOW + 2 * k, NOW + 2 * k))
+        r.look(NOW + 2 * k)
+    # Parsed at NOW and NOW + 6; the changes at +2, +4, +8 and +10 wait.
+    assert claude_plan.FIRST_ANSWER_RETRY_S == 5
+    assert len(n) == 2
+    r.look(NOW + 11)                                  # the one owed
+    assert len(n) == 3
+
+
+def test_one_look_a_poll_whoever_asks(tmp_path, monkeypatch):
+    """Item 4: the provider, the login watch, the bus's spend check and
+    ultra() each looked, a stat each; looks at one poll's time share one."""
+    p = tmp_path / ".claude.json"
+    p.write_text(json.dumps(doc()), encoding="utf-8")
+    real = os.stat
+    stats = []
+
+    def counting(path, *a, **k):
+        if str(path) == str(p):
+            stats.append(1)
+        return real(path, *a, **k)
+    r = claude_plan.PlanReader(path=str(p))
+    monkeypatch.setattr(os, "stat", counting)
+    for _ in range(4):
+        r.look(NOW)
+    r.ultra(NOW)
+    assert len(stats) == 1
+    r.look(NOW + 2)
+    assert len(stats) == 2

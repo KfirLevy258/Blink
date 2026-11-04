@@ -371,9 +371,61 @@ def read(path, st=None):
     return None if v is None else v.ultra
 
 
+class ConfigFile:
+    """One config file's stat, compare, back off and parse, shared by
+    PlanReader.look and wsl_watch.WslWatch._look (round 6 of the
+    2026-11-04 review, item 7: the watch kept a copy, and the two had
+    drifted -- a failed read retried at every tick there, a minute later
+    here).
+
+    look() stats the file every time it is asked (under a microsecond on
+    the owner's Mac) and parses it when its signature differs from the
+    one the last answer came from, at most once a FIRST_ANSWER_RETRY_S: a
+    change that comes sooner waits for it, and so does a read that failed
+    (a Windows lock, a write caught half done, a file that changed
+    between the stat and the read). A parse reads the whole file, and
+    Claude Code rewrites it all day; a generated 5.6 MB config parsed in
+    11 ms here (median of ten, 2026-11-04), which once a poll on the
+    serial thread would be a fifth of a core on a slower machine for
+    nothing. A refused file, or JSON that is not an object, is an answer
+    (an empty view) and is not read again until it changes."""
+
+    def __init__(self):
+        self._sig = None          # the signature the last answer came from
+        self._parsed_at = None    # when parse() last ran, for the spacing
+
+    def look(self, path, now_epoch, unreachable=None):
+        """A ConfigView when there is a new answer: the file parsed, or
+        EMPTY_VIEW when it is not there. None when there is nothing new --
+        unchanged, a change or a retry not yet due, a read that failed, a
+        stat that failed. `unreachable`, given a FileNotFoundError, says
+        whether it is really a share that dropped (wsl_watch), which is
+        not knowing, not "no file"."""
+        try:
+            st = os.stat(path)
+        except FileNotFoundError as e:
+            if unreachable is not None and unreachable(e):
+                return None
+            self._sig = None
+            return EMPTY_VIEW
+        except (OSError, ValueError):
+            return None                 # not knowing is not "no seat"
+        sig = (path, stat.S_IFMT(st.st_mode)) + signature(st)
+        if sig == self._sig:
+            return None
+        if (self._parsed_at is not None
+                and 0 <= now_epoch - self._parsed_at < FIRST_ANSWER_RETRY_S):
+            return None
+        self._parsed_at = now_epoch
+        got = parse(path, st)
+        if got is not None:
+            self._sig = sig
+        return got
+
+
 class PlanReader:
-    """The config's view, for one process: stat-throttled, cached against
-    the file's signature. `source`, when given, is a callable returning a
+    """The config's view, for one process: the file looked at once a poll
+    through a ConfigFile, or `source`, when given, a callable returning a
     ConfigView or None, used instead of the file; None from it keeps the
     last good view."""
 
@@ -385,14 +437,11 @@ class PlanReader:
         self._path = path
         self._home = home
         self._source = source
-        self._sig = None                 # of the last file parsed
-        # (signature, when) of the last read that failed, or None: it is
-        # tried again RECHECK_S later unless the file changes (look).
-        self._failed = None
+        self._file = ConfigFile()
         self._view = EMPTY_VIEW
-        # False until a look has had an answer: a view from the source, or
-        # the file read (or found missing). See look().
-        self._answered = False
+        # The time of the last look: another at the same time is the same
+        # poll, and is answered from it (look).
+        self._looked_at = None
 
     def path(self):
         if self._path is not None:
@@ -400,64 +449,36 @@ class PlanReader:
         return config_path(self._home() if self._home is not None else None)
 
     def look(self, now_epoch) -> ConfigView:
-        """The view now. The file is stat'ed at every look and parsed when
-        its signature differs from the last one parsed; a source, which
-        answers from memory, is asked at every look.
+        """The view now.
 
-        Every look, and not once a RECHECK_S as until round 5 of the
-        2026-11-04 review (ruling A): the status line is read every two
-        seconds, and a /login seen up to a minute late left the new
+        Looked at once a poll, and not once a RECHECK_S as until round 5
+        of the 2026-11-04 review (ruling A): the status line is read every
+        two seconds, and a /login seen up to a minute late left the new
         login's renders counted on the old one and its first render taken
-        for the old login's (claude_cli._note_login). A stat is cheap; a
-        parse, which reads the whole file (120 KB on the owner's desk, up
-        to MAX_BYTES), still happens once per change.
+        for the old login's (claude_cli._note_login). Once a poll: the
+        provider, the login watch, the bus's spend check and ultra() each
+        ask, and looks at one poll's time share the first (round 6, item
+        4). The file's spacing and retries are ConfigFile's. A source
+        answers from memory and is asked at every poll.
 
-        A read worth trying again -- a Windows lock, a write caught
-        half-done, a file that changed between the stat and the read --
-        keeps the last view and is tried again RECHECK_S later, or at
-        once if the file changes meanwhile; before a first answer at all
-        it is FIRST_ANSWER_RETRY_S, not RECHECK_S, because the view held
-        then is EMPTY_VIEW, which says "no seat, not Ultra" (/code-review
-        max of 2026-11-04, U18: a minute of Claude Desktop's windows on a
-        spend desk after every daemon start)."""
+        Before a first answer the view held is EMPTY_VIEW, "no seat, not
+        Ultra"; a read that fails then is tried again FIRST_ANSWER_RETRY_S
+        later like any other (/code-review max of 2026-11-04, U18: a
+        minute of Claude Desktop's windows on a spend desk after every
+        daemon start)."""
+        if self._looked_at is not None and now_epoch == self._looked_at:
+            return self._view
+        self._looked_at = now_epoch
         if self._source is not None:
             got = self._source()
-            if got is not None:
-                self._view = got
-                self._answered = True
-            return self._view
-        try:
-            p = self.path()
-            st = os.stat(p)
-        except FileNotFoundError:
-            self._sig, self._view = None, EMPTY_VIEW
-            self._failed = None
-            self._answered = True
-            return self._view
-        except (OSError, ValueError):
-            return self._view           # not knowing is not "no seat"
-        sig = (p, stat.S_IFMT(st.st_mode)) + signature(st)
-        if sig == self._sig:
-            return self._view
-        if self._failed is not None:
-            failed_sig, failed_at = self._failed
-            wait = RECHECK_S if self._answered else FIRST_ANSWER_RETRY_S
-            if (sig == failed_sig
-                    and 0 <= now_epoch - failed_at < wait):
-                return self._view
-        got = parse(p, st)
-        # Only a read worth trying again is not cached against the stamp:
-        # a Windows lock, or a write caught half-done -- which includes
-        # text that does not decode or parse (parse), retried as above
-        # with the last good view kept. A refused file, or JSON that is
-        # not an object, is kept as an empty view until it changes, so it
-        # is not read again at all.
-        if got is None:
-            self._failed = (sig, now_epoch)
-            return self._view
-        self._sig, self._view = sig, got
-        self._failed = None
-        self._answered = True
+        else:
+            try:
+                p = self.path()
+            except (OSError, ValueError):
+                return self._view       # not knowing is not "no seat"
+            got = self._file.look(p, now_epoch)
+        if got is not None:
+            self._view = got
         return self._view
 
     def ultra(self, now_epoch) -> bool:
