@@ -146,14 +146,9 @@ SAVE_EVERY_S = 60
 # file this cannot read is: it held an estimate, which the next /usage
 # makes exact.
 _VERSION = 2
-# Round 2 of the 2026-11-04 review's builds wrote a session as a flat list
-# of [mark, seen] pairs, one a cost ledger, up to eight (_parse). Read as
-# the highest mark, stamped with the oldest of the pairs' times: in those
-# builds an equal figure from another process restamped a mark, so the
-# highest mark's own time may be later than the sighting that set it, and
-# a rise counted from it would be taken in toward a /usage it straddled
-# (round 4). The oldest time can only drop such a rise, never add one.
-_LEGACY_PAIRS_MAX = 8
+# A session is [mark, seen]. Round 2 of the 2026-11-04 review's builds,
+# never released, wrote several pairs, one a cost ledger; such a file is
+# read as empty, like any other this cannot believe (round 5, ruling D).
 
 
 # The largest figure the counter believes, in cents: ten million dollars.
@@ -242,17 +237,13 @@ def _parse(d):
         return None
     sessions = {}
     for sid, v in d["sessions"].items():
-        if (not isinstance(v, list) or not v or len(v) % 2
-                or len(v) > 2 * _LEGACY_PAIRS_MAX):
+        if not isinstance(v, list) or len(v) != 2:
             return None
-        pairs = list(zip(v[::2], v[1::2]))
-        for hw, seen in pairs:
-            if isinstance(hw, bool) or not isinstance(hw, int) \
-                    or not _cents(hw) or not _time(seen):
-                return None
-        # One pair is today's [mark, seen]; several, see _LEGACY_PAIRS_MAX.
-        sessions[sid] = [max(hw for hw, _s in pairs),
-                         min(seen for _h, seen in pairs)]
+        hw, seen = v
+        if isinstance(hw, bool) or not isinstance(hw, int) \
+                or not _cents(hw) or not _time(seen):
+            return None
+        sessions[sid] = [hw, seen]
     adds = []
     for a in d["adds"]:
         if not isinstance(a, list) or len(a) != 3:

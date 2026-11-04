@@ -725,23 +725,19 @@ def test_a_same_seat_relogin_is_counted_once_past_its_old_total():
     assert c.since(0) == 16 + 20
 
 
-def test_a_file_from_the_per_ledger_builds_reads_as_one_mark(tmp_path):
-    """Round 2's builds wrote a session as [mark, seen, mark, seen, ...].
-    Read as the highest mark, stamped with the OLDEST of the pairs' times
-    (round 4 of the review): in those builds an equal figure from another
-    process restamped a mark, so the highest mark's own time may be later
-    than the sighting that set it, and a rise from it would be counted
-    toward a /usage it straddled. Here 12.00's stamp of 150 came from such
-    an equal figure; the oldest time, 95, keeps the rise after a /usage
-    at 100 out of it."""
-    d = _v2(sessions={"a": [400, 96, 1200, 150]}, adds=[])
+def test_a_file_from_the_per_ledger_builds_loads_empty(tmp_path):
+    """Round 2's builds, never released, wrote a session as [mark, seen,
+    mark, seen, ...]. Round 5's ruling D: such a file is not converted but
+    read as empty, as any file this cannot believe is; the next /usage
+    makes the figure exact again. A conversion had to guess which time
+    went with the mark, and guessed wrong once already (round 4)."""
+    d = _v2(sessions={"a": [400, 96, 1200, 150]}, adds=[[10, 20, 5]])
     (tmp_path / "spend-count.json").write_text(json.dumps(d))
     c = mk(tmp_path)
     c.bind("fp", 0)
-    c.observe("a", 4.60, 160)
-    c.observe("a", 12.30, 170)
-    assert c.since(0) == 30
-    assert c.since(100) == 0
+    assert c.since(0) == 0
+    assert c.observe("a", 12.30, 170) is True       # a first sighting
+    assert c.since(0) == 0
 
 
 # -- an exit inside observe() (round 2 of 2026-11-04, K4) ---------------------
