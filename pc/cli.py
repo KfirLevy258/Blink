@@ -3265,7 +3265,8 @@ def _announce_claude_reads(home, wsl_name=None, spend_seat=False) -> None:
     usage: _announce_spend_seat follows with the full paragraph, so the
     short one every other desk gets is left out. Both were printed until
     the second review round (C5), saying twice what spend-count.json
-    keeps."""
+    keeps. On WSL neither is said here: _setup_wsl says one, once the
+    probe lets it read the seat (D1)."""
     from pc import claude_plan
     if wsl_name is not None:
         # Named, not spelled out: the folders are Linux paths inside the
@@ -3306,7 +3307,14 @@ def _announce_claude_reads(home, wsl_name=None, spend_seat=False) -> None:
         print("  CLAUDE_CONFIG_DIR is set in this shell, and install records")
         print("  its folder, so the background service reads the folder and")
         print("  the file above too.")
-    if not spend_seat:
+    if wsl_name is not None:
+        # The seat is in the distribution's config, which is read only once
+        # the probe has started it, so _setup_wsl says the one paragraph
+        # that fits then. Said here as well, both paragraphs reached a seat
+        # billed by usage on WSL (review of round 2, D1).
+        print("  What it keeps on a Claude seat billed by usage is said once")
+        print(f"  setup has read the seat type inside {wsl_name}.")
+    elif not spend_seat:
         _announce_spend_later()
 
 
@@ -4492,7 +4500,14 @@ def _setup_wsl(d):
         print()
         print(f"  !  Claude Code was not found in {d.name}. What was written")
         print("     starts working by itself once it is installed there.")
-    _announce_spend_seat(home)
+    # The disclosure left this to now (D1): one paragraph, the full one on
+    # a seat billed by usage and the short one on any other, before the
+    # service that would keep the count starts.
+    if _spend_seat(home):
+        _announce_spend_seat(home, seat=True)
+    else:
+        print()
+        _announce_spend_later()
     return home
 
 

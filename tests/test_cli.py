@@ -3460,6 +3460,61 @@ def test_install_wsl_prints_the_spend_note(tmp_path, monkeypatch, capsys):
     assert seen == [wsl.unc("Ubuntu", "/home/zoe/.claude")]
 
 
+def _wsl_seat(monkeypatch, tmp_path, seat):
+    from pc import claude_plan
+    (tmp_path / "linux").mkdir()
+    _claude_json(tmp_path / "linux", seat)
+    real = claude_plan.config_path
+
+    def config_path(home=None):
+        if home is not None and home.kind == "wsl":
+            return str(tmp_path / "linux" / ".claude.json")
+        return real(home)
+    monkeypatch.setattr(claude_plan, "config_path", config_path)
+
+
+def _flat(out):
+    return " ".join(l.strip() for l in out.splitlines())
+
+
+@pytest.mark.parametrize("argv", [["install", "--wsl", "Ubuntu"],
+                                  ["install"]])
+def test_a_wsl_usage_seat_is_told_what_is_kept_once(
+        tmp_path, monkeypatch, capsys, argv):
+    """Review of round 2, D1: C5 left WSL alone, so `install --wsl` on a
+    seat billed by usage printed the short paragraph in the disclosure and
+    the full one after the probe. The seat is known only after the probe,
+    so the one paragraph waits for it; the disclosure says it will."""
+    from pc import spend_count
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
+    if argv == ["install"]:
+        _recorded_wsl(tmp_path)
+    _wsl_seat(monkeypatch, tmp_path, "enterprise_usage_based")
+    assert cli.main(argv) == 0
+    said = _flat(capsys.readouterr().out)
+    path = spend_count._default_path()
+    assert SPEND_NOTE.format(path=path) in said
+    assert SPEND_LATER.format(path=path) not in said
+    assert said.count(path) == 1
+
+
+def test_a_wsl_desk_on_another_seat_gets_the_short_paragraph_once(
+        tmp_path, monkeypatch, capsys):
+    """D1, the other seat: the short paragraph, said once and after the
+    probe, where it used to be said in the disclosure."""
+    from pc import spend_count
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
+    _wsl_seat(monkeypatch, tmp_path, "max_5x")
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 0
+    said = _flat(capsys.readouterr().out)
+    path = spend_count._default_path()
+    assert SPEND_LATER.format(path=path) in said
+    assert said.count(path) == 1
+    assert said.index(SPEND_LATER.format(path=path)) > said.index(
+        "Written inside Ubuntu")
+    assert "said once setup has read the seat type inside Ubuntu" in said
+
+
 def test_install_wsl_no_spend_note_on_max(tmp_path, monkeypatch, capsys):
     from pc import claude_plan
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
@@ -4448,7 +4503,12 @@ def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
     assert "zoe" not in before and "wsl.localhost" not in before
     from pc import spend_count
     flat = " ".join(l.strip() for l in before.splitlines())
-    assert SPEND_LATER.format(path=spend_count._default_path()) in flat
+    # What spend-count.json keeps waits for the probe, which is what tells
+    # the seat (D1); the disclosure says it will be said. Nothing writes
+    # that file until the service, which starts after it has been said.
+    assert spend_count._default_path() not in flat
+    assert ("What it keeps on a Claude seat billed by usage is said once"
+            " setup has read the seat type inside Ubuntu.") in flat
     assert "saved only on a seat billed by usage" in flat
     # Nothing of it waited for the write.
     assert "Changes    Claude Code's settings.json" not in \
