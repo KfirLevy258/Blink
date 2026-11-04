@@ -515,8 +515,10 @@ def test_claude_config_dir_without_a_file_is_not_the_home_one(
 # --- how often, and what is kept ----------------------------------------------
 
 
-def test_the_file_is_looked_at_once_a_minute_and_read_on_change(
+def test_the_file_is_looked_at_every_time_and_read_on_change(
         tmp_path, monkeypatch):
+    """Stat'ed at every look since round 5 of the 2026-11-04 review
+    (ruling A), parsed only when it changed."""
     path = put_config(tmp_path, plan_doc())
     reads = []
     real = claude_plan.parse
@@ -530,8 +532,7 @@ def test_the_file_is_looked_at_once_a_minute_and_read_on_change(
 
     put_config(tmp_path, plan_doc(name="Max", tier="default_claude_max_5x"))
     os.utime(path, (NOW + 40, NOW + 40))
-    assert reader.ultra(NOW + 59) is True       # not looked at yet
-    assert reader.ultra(NOW + 60) is False      # looked at, changed, read
+    assert reader.ultra(NOW + 41) is False      # looked at, changed, read
     assert len(reads) == 2
     assert reader.ultra(NOW + 200) is False     # looked at, unchanged
     assert len(reads) == 2

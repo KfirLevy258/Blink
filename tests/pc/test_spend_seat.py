@@ -175,8 +175,9 @@ def test_no_answer_yet_is_not_held_for_a_minute(tmp_path):
     all the same, so EMPTY_VIEW -- "no seat" -- was held for RECHECK_S
     after every daemon start. A spend desk then showed Claude Desktop's
     windows figures, the saved Ultra verdict's mark and the token burn
-    view for most of a minute. Until a first answer the source is asked on
-    every look; after one, a None keeps it and the pacing, as before."""
+    view for most of a minute. The source is asked on every look (since
+    round 5's ruling A, after a first answer too), and a None keeps the
+    last answer."""
     seat = dataclasses.replace(claude_plan.EMPTY_VIEW, spend_seat=True)
     answers = [None, None, seat]
     asked = []
@@ -189,8 +190,7 @@ def test_no_answer_yet_is_not_held_for_a_minute(tmp_path):
     assert r.look(NOW) == claude_plan.EMPTY_VIEW
     assert r.look(NOW + 2) == claude_plan.EMPTY_VIEW
     assert r.look(NOW + 4) == seat
-    assert r.look(NOW + 6) == seat and len(asked) == 3     # paced again
-    assert r.look(NOW + 4 + claude_plan.RECHECK_S) == seat  # None: kept
+    assert r.look(NOW + 6) == seat and len(asked) == 4     # None: kept
 
 
 def test_a_file_not_read_yet_is_tried_again_at_the_next_look(tmp_path,
@@ -310,3 +310,40 @@ def test_a_cache_id_nested_deep_does_not_raise(tmp_path):
     p.write_text(json.dumps(d), encoding="utf-8")
     v = claude_plan.parse(str(p))
     assert v is not None and v.anchor is None
+
+
+def test_a_changed_config_is_read_at_the_next_look(tmp_path, monkeypatch):
+    """Round 5 of the 2026-11-04 review, ruling A: the config was looked at
+    once a RECHECK_S while the status line is read every two seconds, so a
+    /login was seen up to a minute late -- the new login's renders counted
+    on the old one, and its first render taken for the old login's. The
+    file is stat'ed at every look and parsed when its signature changes;
+    an unchanged file is still parsed once."""
+    p = tmp_path / ".claude.json"
+    p.write_text(json.dumps(doc()), encoding="utf-8")
+    real = claude_plan.parse
+    n = []
+    monkeypatch.setattr(claude_plan, "parse", lambda path, st=None:
+                        n.append(1) or real(path, st))
+    r = claude_plan.PlanReader(path=str(p))
+    first = r.look(NOW)
+    for k in range(1, 10):
+        assert r.look(NOW + 2 * k) == first
+    assert len(n) == 1
+    d = doc()
+    d["oauthAccount"]["accountUuid"] = "ACCT-OTHER-0c0c0c"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    os.utime(p, (NOW + 21, NOW + 21))
+    assert r.look(NOW + 22).account_fp != first.account_fp
+    assert len(n) == 2
+
+
+def test_a_source_is_asked_at_every_look(tmp_path):
+    """The same for a WSL home's source, which answers from memory."""
+    seat = dataclasses.replace(claude_plan.EMPTY_VIEW, spend_seat=True)
+    other = dataclasses.replace(seat, account_fp="other")
+    answers = [seat, other]
+    r = claude_plan.PlanReader(path=str(tmp_path / "nope"),
+                               source=lambda: answers.pop(0))
+    assert r.look(NOW) == seat
+    assert r.look(NOW + 2) == other

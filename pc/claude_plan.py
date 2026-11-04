@@ -48,9 +48,10 @@ from the file -- no value, no key, no path, no exception text -- is logged,
 printed, raised or saved, at any level (CLAUDE.md), and the parsed document
 is dropped before read() returns.
 
-WHAT IT COSTS. A stat at most once every RECHECK_S, and a read only when
-the file's signature -- inode, mtime and size -- has changed since the last
-look that got an answer. The file was 120 KB on the owner's desk. One over
+WHAT IT COSTS. A stat at every look (every poll, two seconds; once a
+RECHECK_S until round 5 of the 2026-11-04 review, which needed a /login
+seen within a poll), and a read only when the file's signature -- inode,
+mtime and size -- has changed since the last look that got an answer. The file was 120 KB on the owner's desk. One over
 MAX_BYTES is not opened at all, and anything but a regular file (a FIFO
 would block the open, and the serial thread with it) is not opened either.
 Each of those, and JSON that is not an object, reads as "not Ultra", and
@@ -60,8 +61,8 @@ not an answer at all (since 9aba323): Claude Code rewrites the file all
 day, so it is most often a write caught half-done, and reading it as "not
 Ultra, no seat" flipped the page until the file next changed. It is
 treated like an OSError or a file that changed between the stat and the
-read: the last view is kept and the file is tried again at the next look,
-RECHECK_S later. Not Ultra is the safe answer: it leaves the desk to the
+read: the last view is kept and the file is tried again RECHECK_S later,
+or as soon as it changes. Not Ultra is the safe answer: it leaves the desk to the
 sustained rule, which is slower and was all there was before.
 
 THE RESIDUAL. One .claude.json vouches for every session in the shared
@@ -85,10 +86,10 @@ import time
 
 from pc import claude_account, claude_home
 
-# How often the file is looked at, at most. The plan changes only on an
-# upgrade or a downgrade, and a minute late on either is nothing against
-# the five and a quarter hours this path saves. A minute late is not the
-# only lateness, though: the plan name in the file can be a day stale, or
+# How soon a read that failed is tried again, the file unchanged
+# (PlanReader.look). Until round 5 of the 2026-11-04 review this was how
+# often the file was looked at at all, which put a /login up to a minute
+# behind the status line. Lateness of another kind remains: the plan name in the file can be a day stale, or
 # stale for good under CLAUDE_CODE_OAUTH_TOKEN, because Claude Code
 # refreshes it only with a profile over a day old (the review of PR #6,
 # 2026-11-01). The tier, refreshed on nearly every launch, is what keeps a
@@ -105,7 +106,7 @@ FIRST_ANSWER_RETRY_S = 5
 # has been run in (a history and settings per folder); 120 KB on the owner's
 # desk after months of use. Eight megabytes is sixty times that, and bounds
 # what a poll on the serial thread can be made to parse: tens of
-# milliseconds, at most once a RECHECK_S and only when the file changed. A
+# milliseconds, and only when the file changed. A
 # file over it is not opened: its size is the stat's.
 MAX_BYTES = 8 * 1024 * 1024
 
@@ -384,8 +385,10 @@ class PlanReader:
         self._path = path
         self._home = home
         self._source = source
-        self._looked_at = None
-        self._sig = None
+        self._sig = None                 # of the last file parsed
+        # (signature, when) of the last read that failed, or None: it is
+        # tried again RECHECK_S later unless the file changes (look).
+        self._failed = None
         self._view = EMPTY_VIEW
         # False until a look has had an answer: a view from the source, or
         # the file read (or found missing). See look().
@@ -397,29 +400,26 @@ class PlanReader:
         return config_path(self._home() if self._home is not None else None)
 
     def look(self, now_epoch) -> ConfigView:
-        """The view as of the last look. A look is due RECHECK_S after the
-        last one, or at once if the clock has gone back past it.
+        """The view now. The file is stat'ed at every look and parsed when
+        its signature differs from the last one parsed; a source, which
+        answers from memory, is asked at every look.
 
-        And at once until a look has had an answer at all. The view held
-        before then is EMPTY_VIEW, which says "no seat, not Ultra", and a
-        first look that got nothing -- a WSL watch that has not ticked yet
-        (its source answers None), a config locked or caught mid-write --
-        used to hold it for RECHECK_S all the same. A spend desk then
-        showed Claude Desktop's windows figures, a saved Ultra verdict's
-        mark and the token burn view for most of a minute after every
-        daemon start (/code-review max of 2026-11-04, U18). Until then the
-        source, which is memory, is asked at every look, and the file
-        every FIRST_ANSWER_RETRY_S."""
-        if self._answered:
-            wait = RECHECK_S
-        elif self._source is not None:
-            wait = 0
-        else:
-            wait = FIRST_ANSWER_RETRY_S
-        if (self._looked_at is not None
-                and 0 <= now_epoch - self._looked_at < wait):
-            return self._view
-        self._looked_at = now_epoch
+        Every look, and not once a RECHECK_S as until round 5 of the
+        2026-11-04 review (ruling A): the status line is read every two
+        seconds, and a /login seen up to a minute late left the new
+        login's renders counted on the old one and its first render taken
+        for the old login's (claude_cli._note_login). A stat is cheap; a
+        parse, which reads the whole file (120 KB on the owner's desk, up
+        to MAX_BYTES), still happens once per change.
+
+        A read worth trying again -- a Windows lock, a write caught
+        half-done, a file that changed between the stat and the read --
+        keeps the last view and is tried again RECHECK_S later, or at
+        once if the file changes meanwhile; before a first answer at all
+        it is FIRST_ANSWER_RETRY_S, not RECHECK_S, because the view held
+        then is EMPTY_VIEW, which says "no seat, not Ultra" (/code-review
+        max of 2026-11-04, U18: a minute of Claude Desktop's windows on a
+        spend desk after every daemon start)."""
         if self._source is not None:
             got = self._source()
             if got is not None:
@@ -431,6 +431,7 @@ class PlanReader:
             st = os.stat(p)
         except FileNotFoundError:
             self._sig, self._view = None, EMPTY_VIEW
+            self._failed = None
             self._answered = True
             return self._view
         except (OSError, ValueError):
@@ -438,17 +439,24 @@ class PlanReader:
         sig = (p, stat.S_IFMT(st.st_mode)) + signature(st)
         if sig == self._sig:
             return self._view
+        if self._failed is not None:
+            failed_sig, failed_at = self._failed
+            wait = RECHECK_S if self._answered else FIRST_ANSWER_RETRY_S
+            if (sig == failed_sig
+                    and 0 <= now_epoch - failed_at < wait):
+                return self._view
         got = parse(p, st)
         # Only a read worth trying again is not cached against the stamp:
         # a Windows lock, or a write caught half-done -- which includes
-        # text that does not decode or parse (parse), retried at the next
-        # look with the last good view kept. A refused file, or JSON that
-        # is not an object, is kept as an empty view until it changes, so
-        # it is not read again once a minute.
+        # text that does not decode or parse (parse), retried as above
+        # with the last good view kept. A refused file, or JSON that is
+        # not an object, is kept as an empty view until it changes, so it
+        # is not read again at all.
         if got is None:
-            self._sig = None
+            self._failed = (sig, now_epoch)
             return self._view
         self._sig, self._view = sig, got
+        self._failed = None
         self._answered = True
         return self._view
 
