@@ -4237,7 +4237,8 @@ def _setup_wsl(d):
     prev = claude_home.recorded()
     same = (prev is not None and prev.kind == claude_home.WSL
             and (prev.distro_guid or "").lower() == d.guid.lower())
-    if same and _moved_inside(prev, home, probe.config_dir):
+    moved = same and _moved_inside(prev, home, probe.config_dir)
+    if moved:
         # The same distribution, another folder or Linux account: Claude
         # Code's folder there or the default user changed since Blink was
         # set up. Taken out FIRST, while its chain file still holds that
@@ -4292,10 +4293,27 @@ def _setup_wsl(d):
         claude_home.save(home)
     except (user_config.Unreadable, OSError) as e:
         print()
-        print(f"Blink setup stopped. The settings inside {d.name} were"
-              " written, but Blink could not record them"
-              f" ({type(e).__name__}), so they are being taken back out.")
-        if not same:
+        if same and not moved:
+            # The folder the record already names, written again: what
+            # uninstall will look for is what is there, so it stays. The
+            # message said "being taken back out" over this case, and
+            # nothing was (review round 2, C1).
+            print(f"Blink setup stopped. The settings inside {d.name} were"
+                  " written again, but Blink could not record them"
+                  f" ({type(e).__name__}). Its record still names that"
+                  " folder, so they stay, and uninstall will find them.")
+        else:
+            # Unrecorded, the new folder would be wired with nothing to
+            # find it. Moved inside, the old folder has just been taken
+            # out as well, so leaving this one used to mean an uninstall
+            # later deleted the shims its hooks run (C1).
+            print(f"Blink setup stopped. The settings inside {d.name} were"
+                  " written, but Blink could not record them"
+                  f" ({type(e).__name__}), so they are being taken back out.")
+            if moved:
+                print(f"Blink was already taken out of the folder it used"
+                      f" before inside {d.name}, so Claude Code there runs"
+                      " without it until this runs again.")
             _undo_wsl_setup(home, d.name)
         print(f"Fix {user_config.path(blink_home())} and run this again.")
         return None

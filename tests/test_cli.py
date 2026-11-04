@@ -3849,6 +3849,61 @@ def test_install_wsl_takes_back_what_it_could_not_record(
     assert undone == ["Debian"]
 
 
+def _save_fails(monkeypatch):
+    from pc import claude_home
+
+    def fails(home):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(claude_home, "save", fails)
+
+
+def test_a_same_folder_save_that_fails_keeps_what_the_record_names(
+        tmp_path, monkeypatch, capsys):
+    """Round 2, C1: the same distribution and folder, set up again, and
+    the save fails. The record still names that folder, so what was
+    written again is what uninstall will find: it stays, and is said to,
+    where the message used to say "they are being taken back out" over
+    a step that never ran."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe())
+    old = _recorded_wsl(tmp_path)
+    _save_fails(monkeypatch)
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
+    out = " ".join(capsys.readouterr().out.split())
+    assert _inside(calls) == ["probe", "install_into"]
+    assert claude_home.recorded() == old
+    assert "taken back out" not in out
+    assert "still names that folder" in out
+    assert "Done." not in out
+
+
+def test_a_moved_folder_save_that_fails_takes_the_new_one_back_out(
+        tmp_path, monkeypatch, capsys):
+    """C1, moved inside: the old folder was already taken out, so a new
+    one left written but unrecorded would be wired with nothing to find
+    it, and an uninstall after would delete the shims its hooks run --
+    the exit 2 that blocks every prompt. It is taken back out, and the
+    message says Blink is now in neither folder."""
+    from pc import claude_home, wsl
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(config_dir="/home/zoe/work-claude",
+                                   config_dir_set=True))
+    old = _recorded_wsl(tmp_path)
+    _save_fails(monkeypatch)
+    assert cli.main(["install"]) == 1
+    out = " ".join(capsys.readouterr().out.split())
+    assert _inside(calls) == ["probe", "uninstall_from", "install_into",
+                              "uninstall_from"]
+    undone = [c[1] for c in calls if c[0] == "uninstall_from"]
+    assert undone[0] == old
+    assert undone[1].config_dir == wsl.unc("Ubuntu", "/home/zoe/work-claude")
+    assert claude_home.recorded() == old
+    assert "being taken back out" in out
+    assert "already taken out of the folder it used before" in out
+    assert "Done." not in out
+
+
 def test_install_wsl_says_when_the_service_did_not_come_back(monkeypatch,
                                                              capsys):
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
