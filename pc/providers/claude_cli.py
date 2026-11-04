@@ -961,8 +961,16 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
         added = counter.since(period)
         cents, limit = added, None
     else:
-        # From SKEW_S after the /usage: its time is not the renders' clock.
-        added = counter.since_usage(a.fetched_at)
+        # An owed measurement: on a WSL desk the renders are dated by the
+        # drop file's mtime (the Windows clock) and the /usage by
+        # Date.now() inside the distribution, and the two can disagree; a
+        # render made before the /usage but dated after it has its rise
+        # counted whole. Round 4 of the 2026-11-04 review guessed 30 s and
+        # added a two-minute margin, round 5 took it out: the correction
+        # is chosen from the measurement (Plan B, task 7, in
+        # docs/plans/2026-11-04-wsl-plan.md: the owner's checklist item
+        # comparing Windows' time with `date -u` in WSL), not before it.
+        added = counter.since(a.fetched_at)
         cents, limit = a.used_cents + added, a.limit_cents
     pct = base.UNKNOWN
     if limit is not None:

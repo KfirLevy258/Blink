@@ -66,27 +66,6 @@ def test_rise_straddling_the_anchor_is_dropped():
     assert c.since(150) == 20
 
 
-def test_a_render_clock_ahead_of_the_usage_clock_does_not_count_twice():
-    """Round 4 of the 2026-11-04 review. On a WSL desk the render's time is
-    the drop file's mtime, from the Windows clock, and the /usage time is
-    Date.now() inside the distribution, a clock that runs behind it: 30
-    seconds measured, more after the host sleeps. A render made before the
-    /usage then carries a time after it, and the rise from it was counted
-    whole although part of it was in the /usage figure. A rise counts
-    toward a /usage only from a sighting SKEW_S or more after it
-    (since_usage, which claude_cli asks with the /usage time)."""
-    import spend_count
-    skew = spend_count.SKEW_S
-    assert 60 <= skew <= 120
-    c = SpendCounter(persist=False)
-    c.observe("a", 1.00, 1030)          # before the /usage, 30 s ahead
-    c.observe("a", 1.50, 1100)
-    assert c.since_usage(1000) == 0
-    c.observe("a", 1.70, 1000 + skew + 50)
-    c.observe("a", 2.00, 1000 + skew + 100)
-    assert c.since_usage(1000) == 30
-
-
 def test_buckets():
     now = 1_800_000_000 + 600
     c = SpendCounter(persist=False)

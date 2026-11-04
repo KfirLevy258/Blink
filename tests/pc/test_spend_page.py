@@ -121,11 +121,10 @@ def test_spend_seat_gives_a_spend_plan_message(tmp_path):
 
 
 def test_rises_after_the_anchor_add_up(tmp_path):
-    clock = Clock(NOW - 449)
+    clock = Clock(NOW - 499)
     config(tmp_path, NOW - 600, used=1000, fetched=NOW - 600)
     bus = bus_on(clock)
-    # The first sighting more than spend_count.SKEW_S after the /usage.
-    for at, cost in ((NOW - 450, 1.00), (NOW - 400, 1.50),
+    for at, cost in ((NOW - 500, 1.00), (NOW - 400, 1.50),
                      (NOW - 300, 1.75)):
         render(tmp_path, at, cost)
         clock.t = at + 1
