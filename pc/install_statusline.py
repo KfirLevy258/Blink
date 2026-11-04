@@ -1184,20 +1184,37 @@ def wsl_shim_check(home, wsl_run):
                 said.append(f"{name} inside WSL was out of date; replaced it")
         out_file = wsl_shim_path(home, "out")
         rc, out, _ = wsl_run(["sh", "-c", _CAT_OR_NOTHING, "sh", out_file])
-        if rc == 0 and not out.strip():
-            # Without it the shims write into the Linux home, where the
-            # daemon never looks, and the panel stops with no error.
+        if rc == 0:
+            # Without the right one the shims write into the Linux home, or
+            # into a folder the daemon never reads, and the panel stops
+            # with no error. Not only an empty file is wrong: one saved with
+            # a CR names a folder ending in \r, and one left from an older
+            # Windows profile names a folder nobody reads (review of
+            # feat/enterprise-spend, U30). An unreadable one reads as empty
+            # here, as it is absent to the shims. So the file is compared
+            # with what install would write, which costs one more wsl.exe
+            # on a check that runs every five minutes at most.
+            missing = not out.strip()
             try:
                 out_dir = _wsl_out_dir(home, wsl_run)
-                _wsl_write(wsl_run, out_file, "-", "600",
-                           (out_dir + "\n").encode("utf-8"),
-                           "Blink's out file")
             except WslInstallError:
-                said.append("Blink's out file inside WSL is missing and could"
-                            " not be put back")
-            else:
-                said.append("Blink's out file inside WSL was missing; put it"
-                            " back")
+                out_dir = None
+                if missing:
+                    said.append("Blink's out file inside WSL is missing and"
+                                " could not be put back")
+            want = None if out_dir is None else (out_dir + "\n").encode(
+                "utf-8")
+            if want is not None and out != want:
+                what = "missing" if missing else "named the wrong folder"
+                try:
+                    _wsl_write(wsl_run, out_file, "-", "600", want,
+                               "Blink's out file")
+                except WslInstallError:
+                    said.append(f"Blink's out file inside WSL is {what} and"
+                                " could not be put right")
+                else:
+                    said.append(f"Blink's out file inside WSL was {what};"
+                                " put it right")
     except Exception:
         pass
     return "; ".join(said) if said else None

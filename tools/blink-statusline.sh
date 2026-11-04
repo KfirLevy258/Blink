@@ -57,6 +57,10 @@ if [ -f "$HOME/.blink/out" ]; then
   # 2>/dev/null before the `<`: an unreadable out file must not print on
   # every render, and the shell reports a failed open on the stderr in
   # effect when it reaches that redirection (see the write below).
+  # Cleared first: a failed read leaves the variable as it was, and an
+  # out_dir exported in the user's environment then became the folder
+  # every payload went to (review of feat/enterprise-spend, U30).
+  out_dir=
   IFS= read -r out_dir 2>/dev/null < "$HOME/.blink/out"
   [ -n "$out_dir" ] && OUT=$out_dir
 fi

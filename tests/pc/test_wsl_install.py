@@ -630,3 +630,79 @@ def test_wsl_shim_refresh_does_not_rewrite_what_it_could_not_read(tmp_path):
     assert install_statusline.wsl_shim_check(home, run) is None
     assert all(stdin_less[2] != install_statusline._WRITE
                for stdin_less in calls)
+
+
+# ------------------------------- review of feat/enterprise-spend, U30 (b, c)
+
+@posix_only
+@pytest.mark.parametrize("bad", ["crlf", "stale", "unreadable"])
+def test_wsl_watchdog_rewrites_an_out_file_that_names_the_wrong_folder(
+        tmp_path, bad):
+    """The repair put back only an empty out file. One saved with a CR
+    (an editor on the Windows side) names a folder that ends in \\r, and
+    one left from an older Windows profile names a folder the daemon never
+    reads: either way the panel stops with no error. Both are rewritten,
+    and so is one the user cannot read, which the shim treats as absent."""
+    lin = _tree(tmp_path, {}, link=False)
+    home = _home(lin)
+    run = _runner(lin, _fake_bin(tmp_path))
+    install_statusline.install_into(home, run)
+    out = lin / ".blink" / "out"
+    good = out.read_bytes()
+    if bad == "crlf":
+        out.write_bytes(good.rstrip(b"\n") + b"\r\n")
+    elif bad == "stale":
+        out.write_bytes(b"/mnt/c/Users/zoe-old-profile/.blink/wsl-x\n")
+    else:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root reads a mode-000 file")
+        out.chmod(0o000)
+    msg = install_statusline.wsl_shim_check(home, run)
+    assert msg and "out file" in msg
+    for secret in (str(tmp_path), home.drop_dir, "zoe-old-profile"):
+        assert secret not in msg
+    assert out.read_bytes() == good
+    assert install_statusline.wsl_shim_check(home, run) is None
+
+
+@posix_only
+def test_wsl_watchdog_leaves_an_out_file_it_cannot_check(tmp_path):
+    """wslpath failing (automount turned off since) is "cannot tell" for
+    an out file that is there: it is left as it is, and nothing is said."""
+    lin = _tree(tmp_path, {}, link=False)
+    home = _home(lin)
+    install_statusline.install_into(home, _runner(lin, _fake_bin(tmp_path)))
+    out = lin / ".blink" / "out"
+    out.write_bytes(b"/somewhere/else\n")
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    run = _runner(lin, _fake_bin(broken, "exit 1\n"))
+    assert install_statusline.wsl_shim_check(home, run) is None
+    assert out.read_bytes() == b"/somewhere/else\n"
+
+
+@posix_only
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads a mode-000 file")
+@pytest.mark.parametrize("shim", ["blink-statusline.sh", "blink-hook.sh"])
+def test_an_unreadable_out_file_ignores_an_exported_out_dir(tmp_path, shim):
+    """U30(c): `read` fails on an unreadable out file and leaves out_dir as
+    it was, so an `out_dir` exported in the user's environment became the
+    folder the payload was written into. The shims clear it first."""
+    home = tmp_path / "home"
+    (home / ".blink").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    out = home / ".blink" / "out"
+    out.write_text("/nowhere\n")
+    out.chmod(0o000)
+    try:
+        subprocess.run(["sh", os.path.join(REPO, "tools", shim),
+                        "UserPromptSubmit"],
+                       input=b'{"session_id":"a","cwd":"/p"}',
+                       capture_output=True, timeout=30,
+                       env={"HOME": str(home), "PATH": "/usr/bin:/bin",
+                            "out_dir": str(elsewhere)})
+    finally:
+        out.chmod(0o600)
+    assert list(elsewhere.iterdir()) == []
