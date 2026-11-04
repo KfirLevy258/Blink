@@ -312,6 +312,84 @@ def test_an_unparseable_config_json_is_not_said_to_be_changed(tmp_path,
     assert "does not parse" in out
 
 
+def _legacy_desk(tmp_path, monkeypatch):
+    """An earlier release's install in ~/.claude, and a shell whose
+    CLAUDE_CONFIG_DIR names another folder Y with a status line of its
+    own: (legacy settings text, Y's settings path, Y's text)."""
+    from pc import install_hooks, install_statusline
+    legacy = claude_home.legacy_settings_path()
+    os.makedirs(os.path.dirname(legacy), exist_ok=True)
+    with open(legacy, "w") as f:
+        json.dump({"statusLine": {"type": "command",
+                                  "command": "legacy-bar"}}, f)
+    os.makedirs(cli.blink_home(), exist_ok=True)
+    install_statusline.install(legacy, cli.shim_path())
+    install_hooks.install(legacy, cli.hook_shim_path())
+    y = _j(tmp_path, "work-claude")
+    os.makedirs(y)
+    ys = os.path.join(y, "settings.json")
+    with open(ys, "w") as f:
+        json.dump({"statusLine": {"type": "command", "command": "y-bar"}}, f)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", y)
+    with open(legacy) as f, open(ys) as g:
+        return f.read(), ys, g.read()
+
+
+def test_install_stops_when_the_folder_it_needs_to_record_cannot_be(
+        tmp_path, monkeypatch, capsys):
+    """U23: with no record, the service guards ~/.claude, and only a
+    record moves it to Y. A config.json that does not parse cannot take
+    one, and install used to go on: it moved Blink out of ~/.claude into
+    Y, exited 0, and the service's first watchdog tick reinstalled into
+    ~/.claude over the chain file, losing Y's own status line. It stops
+    before anything is written now, and says why."""
+    legacy_text, ys, y_text = _legacy_desk(tmp_path, monkeypatch)
+    config = user_config.path(cli.blink_home())
+    with open(config, "w") as f:
+        f.write('{"status_page": tru')
+    assert cli.main(["install"]) == 1
+    out = capsys.readouterr().out
+    assert "Blink setup stopped." in out and config in out
+    assert "Nothing was changed." in out
+    with open(claude_home.legacy_settings_path()) as f:
+        assert f.read() == legacy_text
+    with open(ys) as f:
+        assert f.read() == y_text
+
+
+def test_an_unparseable_config_json_does_not_stop_a_default_install(
+        tmp_path, capsys):
+    """With no CLAUDE_CONFIG_DIR the folder is the one an unrecorded
+    service reads anyway, so the record costs nothing and install goes on,
+    as the disclosure's "Leaves" paragraph says."""
+    os.makedirs(cli.blink_home())
+    with open(user_config.path(cli.blink_home()), "w") as f:
+        f.write("{half an edit")
+    assert cli.main(["install"]) == 0
+    with open(claude_home.legacy_settings_path()) as f:
+        assert "blink-statusline.sh" in f.read()
+
+
+def test_install_stops_when_the_record_will_not_save(tmp_path, monkeypatch,
+                                                     capsys):
+    """U23's other half: a save that fails at the write (an OSError) is
+    not foreseen by the parse check, and stops the install there, before
+    Blink is moved out of the folder the service still reads."""
+    legacy_text, ys, y_text = _legacy_desk(tmp_path, monkeypatch)
+
+    def fails(home):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(claude_home, "save", fails)
+    assert cli.main(["install"]) == 1
+    out = capsys.readouterr().out
+    assert "Blink setup stopped." in out
+    assert "Done." not in out
+    with open(claude_home.legacy_settings_path()) as f:
+        assert f.read() == legacy_text
+    with open(ys) as f:
+        assert f.read() == y_text
+
+
 def test_one_unc_builder():
     """pc/wsl and pc/claude_home spell a path into a distribution the same
     way, because they are the same function: two builders had drifted on a

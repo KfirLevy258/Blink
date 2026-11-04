@@ -3671,6 +3671,24 @@ def cmd_install(args) -> int:
         print("Nothing was changed. Fix the file, or move it aside, and run")
         print("this again.")
         return 1
+    if kept_wsl is None and _record_unsaveable(home):
+        # Before the disclosure and the first write, for the reason the
+        # settings check above gives. U23 of the review of
+        # feat/enterprise-spend: this went on, moved Blink into the
+        # CLAUDE_CONFIG_DIR folder and exited 0, while the service, with
+        # no record, guarded ~/.claude and on its first tick reinstalled
+        # there over the one chain file -- the folder's own status line
+        # was lost. Only when the record matters: a desk installing into
+        # the folder an unrecorded service reads anyway loses nothing, and
+        # the disclosure's "Leaves" paragraph says so.
+        config = user_config.path(blink_home())
+        print(f"Blink setup stopped. {config} does not parse, and this")
+        print("install has to record in it which Claude Code folder it is")
+        print("for, or the background service would read another one.")
+        print()
+        print("Nothing was changed. Fix the file, or move it aside, and run")
+        print("this again.")
+        return 1
     if rec is not None and rec.kind == claude_home.WSL and kept_wsl is None:
         # After the check above, so a stop there leaves the record and its
         # drop folder as they were, together; the native save below then
@@ -3694,6 +3712,7 @@ def cmd_install(args) -> int:
     step = _stepper(steps)
 
     step("Program")
+    halted = False
     if _frozen():
         # Only here: a checkout copies nothing, and creating the directory
         # anyway left an empty ~/.blink/bin the disclosure never mentioned.
@@ -3715,6 +3734,7 @@ def cmd_install(args) -> int:
             # Windows rename refusal that `blink update` did; the service is
             # (re)installed and started further down either way.
             halt_service()
+            halted = True
             ok, message = update.swap_in(staged, installed_bin(),
                                          RELEASE_VERSION)
             if not ok:
@@ -3738,7 +3758,18 @@ def cmd_install(args) -> int:
         print("inside WSL, with the status line" if not wsl_failed
               else "skipped, with the status line")
     else:
-        _install_native_claude(home, step)
+        try:
+            _install_native_claude(home, step)
+        except _RecordFailed as e:
+            print()
+            print("Blink setup stopped. It could not record which Claude Code")
+            print(f"folder this is for ({e}), and without that the")
+            print("background service would read another one. Claude Code's")
+            print("settings were not changed. Fix that, then run this again.")
+            if halted:
+                # The program swap stopped it; it reads what it read before.
+                restart_service()
+            return 1
 
     # The disclosure for this step is here rather than up in _announce(),
     # because it is the only step that is conditional on what is already on
@@ -3801,6 +3832,34 @@ def cmd_install(args) -> int:
     return 0
 
 
+class _RecordFailed(Exception):
+    """_install_native_claude could not save a record the service needs;
+    the text is the error's type, the path being in the message above."""
+
+
+def _record_matters(home) -> bool:
+    """Would the service read another Claude Code folder than `home`
+    without a record of it? Yes when the record names another one, and
+    with no record unless `home` is ~/.claude: a desk with no record
+    guards that file (drift_watchdog), whatever CLAUDE_CONFIG_DIR says."""
+    rec = claude_home.recorded()
+    if rec is not None:
+        return rec != home
+    return not _same_file(settings_path(home),
+                          claude_home.legacy_settings_path())
+
+
+def _record_unsaveable(home) -> bool:
+    """A native install that needs its record (_record_matters) over a
+    config.json that does not parse, which user_config.put refuses to
+    write over. Asked before anything is written."""
+    try:
+        user_config.load(blink_home())
+    except (user_config.Unreadable, OSError):
+        return _record_matters(home)
+    return False
+
+
 def _install_native_claude(home, step) -> None:
     """cmd_install's status line and activity hook steps for a native
     `home`: record it, write the shims and edit its settings.json."""
@@ -3822,9 +3881,15 @@ def _install_native_claude(home, step) -> None:
     # The files to take our entries out of, asked before the save: one of
     # them is the folder recorded until now.
     olds = _old_settings(home)
+    matters = _record_matters(home)
     try:
         claude_home.save(home)
     except (user_config.Unreadable, OSError) as e:
+        if matters:
+            # Nothing of Claude Code's has been touched yet: stop here
+            # rather than move Blink into a folder the service, reading
+            # the old record or none, does not guard (U23).
+            raise _RecordFailed(type(e).__name__)
         print(f"      Could not record the Claude Code folder: {e}")
     for old in olds:
         for line in _take_out_of(old, home):
