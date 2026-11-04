@@ -3784,3 +3784,42 @@ def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
     # Nothing of it waited for the write.
     assert "Changes    Claude Code's settings.json" not in \
         said["install_into"]
+
+
+def test_install_wsl_says_a_drop_folder_it_cannot_make(tmp_path,
+                                                       monkeypatch, capsys):
+    """Finding 9: an OSError from making the drop folder or writing a
+    marker is said as a sentence, with no traceback and no path."""
+    from pc import claude_home
+    real_into = install_statusline.install_into
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
+    monkeypatch.setattr(install_statusline, "install_into", real_into)
+    monkeypatch.setattr(install_statusline, "default_wsl_run",
+                        lambda home: (lambda argv, stdin=None:
+                                      pytest.fail("reached Linux")))
+    drop = claude_home.wsl(WSL_GUID, "Ubuntu", "", "", "", False).drop_dir
+    os.makedirs(os.path.dirname(drop), exist_ok=True)
+    with open(drop, "w") as f:          # a file where the folder goes
+        f.write("x")
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
+    out = capsys.readouterr().out
+    after = out.split("To undo all of it:")[1]
+    assert "Blink setup stopped." in after
+    assert "Traceback" not in out
+    assert drop not in after and str(tmp_path) not in after
+    assert claude_home.recorded() is None
+
+
+def test_install_wsl_says_a_marker_it_cannot_write(monkeypatch, capsys):
+    from pc import claude_home
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
+
+    def fails(home, wsl_run, **k):
+        raise PermissionError(13, "Permission denied",
+                              os.path.join(home.drop_dir, "marker"))
+    monkeypatch.setattr(install_statusline, "install_into", fails)
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
+    after = capsys.readouterr().out.split("To undo all of it:")[1]
+    assert "Blink setup stopped." in after and "PermissionError" in after
+    assert "wsl-" not in after
+    assert claude_home.recorded() is None

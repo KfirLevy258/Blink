@@ -4007,6 +4007,17 @@ def _setup_wsl(d):
         print(f"Blink setup stopped. {e}")
         print("Claude Code's settings inside WSL were not changed.")
         return None
+    except OSError as e:
+        # Making the drop folder or writing a marker, on this computer.
+        # Said by type: the text names the folder, under the user's
+        # profile. The settings inside may already have been written, so
+        # this does not say they were not; the record is not, and the
+        # next run writes them again.
+        print()
+        print("Blink setup stopped. It could not write its own folder on")
+        print(f"this computer ({type(e).__name__}). Check that your user")
+        print("folder's .blink can be written, then run this again.")
+        return None
     # The home recorded until now loses its record below, and uninstall
     # reads only the record: left in place, its entries would point at
     # shims nobody removes, and a second distribution's would go on
