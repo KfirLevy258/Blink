@@ -3896,14 +3896,14 @@ def test_status_follows_a_symlinked_settings_json_inside_wsl(
     asked = []
 
     def run(argv, stdin=None):
-        asked.append(argv[-1])
+        asked.append(argv[-2:])
         return (0, b"/home/zoe/dotfiles/claude-settings.json\npresent\n"
                 + json.dumps(doc).encode(), b"")
     monkeypatch.setattr(install_statusline, "default_wsl_run",
                         lambda h: run)
     hooks = cli.claude_hooks(home)
     assert hooks.readable and hooks.wired == hooks.total
-    assert asked == ["/home/zoe/.claude/settings.json"]
+    assert asked == [["/home/zoe/.claude/settings.json", "any"]]
 
 
 def test_plain_install_on_a_wsl_desk_discloses_the_wsl_files(

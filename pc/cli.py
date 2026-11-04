@@ -702,8 +702,11 @@ def claude_hooks(home=None):
             # the real file (review of feat/enterprise-spend, U45). Only
             # asked while the distribution runs (cmd_status), so it starts
             # nothing.
+            # "any": status only reports, so a settings.json on a Windows
+            # drive is read like any other; refusing it is install's job.
             data = install_statusline._wsl_read_settings(
-                home, install_statusline.default_wsl_run(home)).doc
+                home, install_statusline.default_wsl_run(home),
+                purpose="any").doc
         else:
             data = install_statusline._load(settings_path(home))
     except install_statusline.SettingsUnreadable:
