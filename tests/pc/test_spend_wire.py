@@ -305,7 +305,6 @@ def test_the_plan_is_sent_on_change_and_again_on_every_connect():
     _hello(b, "1.4.0")
     for _ in range(5):
         b.poll_if_changed()
-        b.poll_once()
     assert [m["t"] for m in sent].count("plan") == 1
 
     # The dollars move on their own schedule; the usage line does not.
@@ -411,6 +410,43 @@ def test_no_blank_when_a_reading_comes_with_the_switch():
     b.poll_if_changed()
     usages = [m for m in sent[n:] if m["t"] == "usage"]
     assert len(usages) == 1 and usages[0]["session_pct"] == 41.0
+
+
+def test_the_heartbeat_restates_the_plan():
+    """One plan line lost on the wire -- dropped whole, as any line can be
+    -- was repaired only when the dollars next moved, which on an idle desk
+    is hours: the board drew the spend share under "SESSION 5h" all that
+    time (/code-review max of 2026-11-04, U16). The heartbeat restates the
+    plan, as it restates svc and the usage line, and always before the
+    usage line it describes; the fast tick still sends it on change only."""
+    sent = []
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    n = len(sent)
+    for _ in range(3):
+        b.poll_once()
+    types_ = [m["t"] for m in sent[n:]]
+    assert types_.count("plan") == 3
+    for i, t in enumerate(types_):
+        if t == "usage":
+            assert types_[i - 1] == "plan"
+    n = len(sent)
+    for _ in range(3):
+        b.poll_if_changed()
+    assert "plan" not in [m["t"] for m in sent[n:]]
+    # With no reading at all the heartbeat still restates it.
+    f.usage = None
+    n = len(sent)
+    b.poll_once()
+    assert [m["t"] for m in sent[n:]].count("plan") == 1
+    # And a desk that has never seen a plan still sends none.
+    sent2 = []
+    b2 = _bridge(_Fetch(protocol.frame_to_usage(windows(), NOW), None), sent2)
+    _hello(b2, "1.4.0")
+    b2.poll_once()
+    assert "plan" not in [m["t"] for m in sent2]
 
 
 def test_every_message_the_bridge_writes_fits_the_line():

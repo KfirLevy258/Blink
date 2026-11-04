@@ -153,6 +153,9 @@ class Bridge:
         self._app_update = None          # (version, artifact) from last query
         self._last_session = None        # (label, n) last sent; see poll_once
         self._last_plan = None           # plan message last sent; see _send_plan_if_changed
+        # True from the start of a heartbeat until its plan has gone out:
+        # see _heartbeat.
+        self._restate_plan = False
         # The status-page watch (pc/status_page.StatusWatch), or None on a
         # Bridge wired without one -- every test fake -- which then sends no
         # svc message at all, exactly as a daemon from before it did.
@@ -991,6 +994,14 @@ class Bridge:
         # quarantine lasted. Pages are the last ones usage named.
         self._last_svc = {}
         self._send_svc_if_changed()
+        # The plan likewise, once a heartbeat. It went out on change only,
+        # so one plan line lost on the wire -- dropped whole, as any line
+        # can be -- was repaired only when the dollars next moved: hours
+        # on an idle desk, with the board drawing the spend share under
+        # "SESSION 5h" all that time (/code-review max of 2026-11-04, U16).
+        # A flag and not a cleared _last_plan: _take_down_spend needs to
+        # know which plan the board held before this one.
+        self._restate_plan = True
 
         try:
             usage = self._read_usage()
@@ -1378,10 +1389,15 @@ class Bridge:
         if not self._board_can(protocol.BOARD_CAP_PLAN):
             return None
         current = self._plan_msg()
-        if current is not None and current != self._last_plan:
+        restate, self._restate_plan = self._restate_plan, False
+        if current is None:
+            return None
+        if current != self._last_plan:
             replaced, self._last_plan = self._last_plan, current
             self._write(current)
             return replaced
+        if restate:
+            self._write(current)
         return None
 
     def _take_down_spend(self, replaced):
