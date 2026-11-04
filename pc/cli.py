@@ -3584,8 +3584,18 @@ def drift_watchdog(home=None):
     home = home or claude_home.native()
     if home.kind == claude_home.WSL:
         return _NoWatchdog()
+    # A desk with no record was installed by a release that wrote
+    # ~/.claude/settings.json whatever CLAUDE_CONFIG_DIR said, and that is
+    # the file to guard until `blink install` records another. Not the one
+    # the service's own CLAUDE_CONFIG_DIR names: the Windows task does carry
+    # the account's variables, and this followed them there on a desk whose
+    # status line was still in ~/.claude (final branch review, finding 12).
+    if claude_home.recorded() is None:
+        settings = claude_home.legacy_settings_path()
+    else:
+        settings = settings_path(home)
     return install_statusline.DriftWatchdog(
-        settings_path(home), shim_path(home),
+        settings, shim_path(home),
         shims=((shim_path(home), "blink-statusline.sh"),
                (hook_shim_path(home), "blink-hook.sh")),
         home=home)

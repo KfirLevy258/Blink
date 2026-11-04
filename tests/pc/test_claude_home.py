@@ -322,3 +322,24 @@ def test_one_unc_builder():
         "\\\\?\\UNC\\wsl.localhost\\U\\home\\a"
     assert claude_home.unc("U", "/") == "\\\\?\\UNC\\wsl.localhost\\U"
     assert claude_home.unc("U", "/x", long_paths=False) == "\\\\wsl$\\U\\x"
+
+
+def test_a_desk_with_no_record_guards_the_legacy_settings(tmp_path,
+                                                          monkeypatch):
+    """Finding 12: a desk installed by an earlier release has no record,
+    and its install wrote ~/.claude/settings.json whatever
+    CLAUDE_CONFIG_DIR said. The daemon's watchdog guards that file, not
+    the one the service's own CLAUDE_CONFIG_DIR would name (the Windows
+    task does carry the account's environment); only a record moves it."""
+    from pc import cli, install_statusline
+    elsewhere = str(tmp_path / "service-env")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", elsewhere)
+    assert claude_home.recorded() is None
+    dog = cli.drift_watchdog(claude_home.current())
+    assert dog._settings == claude_home.legacy_settings_path()
+    assert dog._home.kind == claude_home.NATIVE
+
+    # A record does move it.
+    claude_home.save(claude_home.from_environ())
+    dog = cli.drift_watchdog(claude_home.current())
+    assert dog._settings == os.path.join(elsewhere, "settings.json")
