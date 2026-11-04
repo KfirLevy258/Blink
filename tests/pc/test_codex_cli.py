@@ -1595,3 +1595,298 @@ def test_the_real_exhaustion_rollout_reports_a_spent_window(tmp_path):
     assert f.session_resets_at == 1788611397
     # Dated by the exhaustion, so it is not buried as stale.
     assert f.stale is False
+
+
+# --- resets that happen while Codex is closed --------------------------------
+#
+# Codex appends to its rollout only while it is running, and the daemon only
+# reads. A reset that lands while nobody has Codex open therefore leaves the
+# old window's last reading as the newest thing on disk. DevOceanIT saw it
+# on their desk on 2026-10-01: 98% on the panel, used=98.0 in the
+# rollout, and a resets_at four minutes gone; nothing changed until a Codex session was resumed.
+# Every reading carries its own reset time, so the fix needs no new sample:
+# base.settle_window, the same rule as the Claude status line.
+
+STALE = codex_cli.STALE_AFTER_S
+
+
+def _rollout(tmp_path, *readings, name="rollout-a.jsonl"):
+    """One rollout file of (limits, read_at) pairs, oldest first."""
+    write_rollout(tmp_path, name=name, lines=[
+        token_count_line(limits, stamp=_stamp(at)) for limits, at in readings])
+
+
+def _only_frame(tmp_path, now=NOW):
+    frames = poll(tmp_path, now)
+    assert len(frames) == 1, frames
+    return frames[0]
+
+
+def _pcts(obj):
+    return obj.session_pct, obj.weekly_pct
+
+
+def test_a_passed_session_reset_turns_a_recent_98_into_0(tmp_path):
+    """The desk's numbers: read 982 s ago, window over for the last 240 s."""
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=NOW - 240,
+                                    w_pct=62.0), NOW - 982))
+    f = _only_frame(tmp_path)
+
+    assert f.session_pct == 0.0
+    assert f.session_rolled_at == NOW - 240
+    # No countdown to a moment already gone; merge() would also read a
+    # present reset time as "someone supplied one".
+    assert f.session_resets_at is None
+    # The weekly window is still running, and is passed through untouched.
+    assert (f.weekly_pct, f.weekly_resets_at, f.weekly_rolled_at) == (
+        62.0, NOW + 86400, None)
+
+
+def test_a_stale_reading_of_a_finished_window_has_no_number(tmp_path):
+    """Too old to promise nothing was used after the reset (a Codex run on
+    another machine writes nothing here), and the 98 is plainly over:
+    unknown, with the reset still recorded."""
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=NOW - 60),
+                        NOW - STALE - 600))
+    f = _only_frame(tmp_path)
+
+    assert f.stale
+    assert (f.session_pct, f.session_resets_at, f.session_rolled_at) == (
+        base.UNKNOWN, None, NOW - 60)
+
+
+def test_only_the_clock_moves_and_the_reading_settles(tmp_path):
+    """No write between the polls: the same file reads 98 before its reset
+    time and 0 one second after."""
+    reset = NOW + 120
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=reset), NOW - 600))
+    provider = codex_cli.CodexCliProvider(root=str(tmp_path))
+
+    early, = provider.poll(NOW)
+    late, = provider.poll(reset + 1)
+
+    assert (early.session_pct, early.session_resets_at,
+            early.session_rolled_at) == (98.0, reset, None)
+    assert (late.session_pct, late.session_resets_at,
+            late.session_rolled_at) == (0.0, None, reset)
+
+
+def test_an_exhausted_session_is_released_by_its_reset(tmp_path):
+    """limit_reached pins the session at 100. That pin must not survive the
+    reset, which is why settling runs after the override."""
+    _rollout(tmp_path,
+             (rate_limits(s_pct=98.0, s_reset=NOW - 30), NOW - 900),
+             (exhausted_limits(), NOW - 899))
+    f = _only_frame(tmp_path)
+
+    assert (f.session_pct, f.session_rolled_at) == (0.0, NOW - 30)
+
+
+def test_a_reading_from_after_the_reset_beats_one_from_before(tmp_path):
+    """One terminal on each side of the reset. Recency still decides, and
+    the post-reset 3% with its live countdown is what goes out."""
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=NOW - 240),
+                        NOW - 982), name="rollout-before.jsonl")
+    _rollout(tmp_path, (rate_limits(s_pct=3.0, s_reset=NOW + 4 * 3600),
+                        NOW - 6), name="rollout-after.jsonl")
+    f = _only_frame(tmp_path)
+
+    assert (f.session_pct, f.session_resets_at, f.session_rolled_at) == (
+        3.0, NOW + 4 * 3600, None)
+
+
+def test_the_encoded_line_says_0_for_the_finished_window(tmp_path):
+    """End to end, merge and encode_checked included: what the board gets."""
+    from pc import normalizer
+
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=NOW - 240),
+                        NOW - 982))
+    usage = protocol.frame_to_usage(normalizer.merge(poll(tmp_path)), NOW)
+    line, why = protocol.encode_checked(usage)
+
+    assert why is None
+    sent = json.loads(line)
+    assert (sent["session_pct"], sent["session_resets_in_s"]) == (0, -1)
+
+
+def test_each_window_settles_on_its_own_reset_time(tmp_path):
+    """The seven-day window ended; the five-hour one beside it did not, and
+    keeps its figure and countdown."""
+    _rollout(tmp_path, (rate_limits(s_pct=12.0, s_reset=NOW + 3600,
+                                    w_pct=91.0, w_reset=NOW - 300),
+                        NOW - 600))
+    f = _only_frame(tmp_path)
+
+    assert (f.weekly_pct, f.weekly_resets_at, f.weekly_rolled_at) == (
+        0.0, None, NOW - 300)
+    assert (f.session_pct, f.session_resets_at, f.session_rolled_at) == (
+        12.0, NOW + 3600, None)
+
+
+def test_a_reading_left_with_no_number_is_still_sent_as_unknown(tmp_path):
+    """Six days old, both windows over: both unknown. The provider must go
+    out as unknown and stale all the same -- if it were dropped, the board
+    would keep drawing the pre-reset 98 it was last sent."""
+    from pc import normalizer
+
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=NOW - 600,
+                                    w_pct=70.0, w_reset=NOW - 60),
+                        NOW - 6 * 86400))
+    f = _only_frame(tmp_path)
+    assert _pcts(f) == (base.UNKNOWN, base.UNKNOWN)
+    assert (f.session_rolled_at, f.weekly_rolled_at) == (NOW - 600, NOW - 60)
+    assert f.stale
+
+    merged = normalizer.merge([f])
+    assert merged is not None and merged.stale
+    assert _pcts(merged) == (base.UNKNOWN, base.UNKNOWN)
+    sent = protocol.frame_to_usage(merged, NOW)
+    assert (sent["session_pct"], sent["weekly_pct"], sent["stale"]) == (
+        -1, -1, True)
+
+
+@pytest.mark.parametrize("now", [NOW, NOW + 61])
+def test_an_unread_window_is_never_settled_to_zero(tmp_path, now):
+    """Codex wrote no weekly percentage, only a reset time. Neither that
+    time passing (at NOW + 61) nor the session's earlier reset may turn an
+    unknown into a 0."""
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=NOW - 600,
+                                    w_pct=None, w_reset=NOW + 60),
+                        NOW - STALE - 600))
+    f = _only_frame(tmp_path, now)
+
+    assert _pcts(f) == (base.UNKNOWN, base.UNKNOWN)
+    assert f.stale
+
+
+def test_an_unread_window_whose_reset_already_passed_stays_unknown(tmp_path):
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=NOW - 600,
+                                    w_pct=None, w_reset=NOW - 60),
+                        NOW - STALE - 600))
+    assert _only_frame(tmp_path).weekly_pct == base.UNKNOWN
+
+
+def _spent_after(tmp_path, limits, read_at, name="rollout-a.jsonl"):
+    """`limits` read at `read_at`, then Codex refusing the account 30 s ago."""
+    _rollout(tmp_path, (limits, read_at), (exhausted_limits(), NOW - 30),
+             name=name)
+
+
+def test_once_the_100_is_gone_the_frame_takes_its_figures_age(tmp_path):
+    """The refusal's date was there to keep the 100 from looking stale.
+    Reset past, no 100 is left to protect: the frame is as old as its
+    98/16, four hours, and the board is told so."""
+    _spent_after(tmp_path, rate_limits(s_pct=98.0, s_reset=NOW - 10,
+                                       w_pct=16.0), NOW - 4 * 3600)
+    f = _only_frame(tmp_path)
+
+    assert _pcts(f) == (base.UNKNOWN, 16.0)
+    assert (f.observed_at, f.stale) == (NOW - 4 * 3600, True)
+    assert protocol.frame_to_usage(f, NOW)["age_s"] == 4 * 3600
+
+
+def test_an_old_spent_reading_loses_to_newer_figures_after_a_reset(
+        tmp_path):
+    """File a: refused 30 s ago but read four hours ago. File b: 70/41 read
+    ten minutes ago, before the same reset, so 0/41 now. b's figures are
+    the newer ones and win."""
+    _spent_after(tmp_path, rate_limits(s_pct=98.0, s_reset=NOW - 10,
+                                       w_pct=16.0), NOW - 4 * 3600)
+    _rollout(tmp_path, (rate_limits(s_pct=70.0, s_reset=NOW - 10,
+                                    w_pct=41.0), NOW - 600),
+             name="rollout-b.jsonl")
+
+    assert _pcts(_only_frame(tmp_path)) == (0.0, 41.0)
+
+
+def test_a_recent_refusal_cannot_make_an_old_figure_a_fresh_zero(tmp_path):
+    """The refusal dates when the account was turned away, not when 98 was
+    read. Past its reset, the 98's own age (beyond stale here) decides, so
+    the session is unknown rather than a confident 0."""
+    _spent_after(tmp_path, rate_limits(s_pct=98.0, s_reset=NOW - 10,
+                                       w_pct=16.0), NOW - STALE - 600)
+    f = _only_frame(tmp_path)
+
+    assert (f.session_pct, f.session_rolled_at, f.weekly_pct) == (
+        base.UNKNOWN, NOW - 10, 16.0)
+
+
+def test_poll_never_prefers_a_frame_without_figures(tmp_path):
+    """Recency picks between files, so a newer frame emptied of both
+    percentages must drop out of the contest rather than win it."""
+    _rollout(tmp_path, (rate_limits(s_pct=40.0, w_pct=20.0), NOW - 300),
+             name="rollout-old.jsonl")
+    _rollout(tmp_path, (rate_limits(s_pct=50.0, w_pct=25.0), NOW - 5),
+             name="rollout-new.jsonl")
+
+    class EmptiesRecentFrames(codex_cli.CodexCliProvider):
+        def parse_cli_event(self, raw_payload, now_epoch, observed_at,
+                            *rest, **named):
+            got = super().parse_cli_event(raw_payload, now_epoch,
+                                          observed_at, *rest, **named)
+            if got is not None and observed_at > NOW - 60:
+                got.session_pct = got.weekly_pct = base.UNKNOWN
+            return got
+
+    f, = EmptiesRecentFrames(root=str(tmp_path)).poll(NOW)
+    assert _pcts(f) == (40.0, 20.0)
+
+
+def test_a_finished_reading_is_sent_beside_the_winner_and_vetoes_it(
+        tmp_path):
+    """Three files, all stale. "ended" saw both windows finish; "older" has
+    live 40/20 read a minute before "ended"; "ended-earlier" finished before
+    40/20 was read, so it proves nothing about it. The 40/20 wins the dial
+    contest, but the newest finished reading must reach merge() with it,
+    and merge() then refuses the 40/20. If poll() forwarded the OLDEST
+    finished reading instead, 40/20 would wrongly survive."""
+    from pc import normalizer
+
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=NOW - 600,
+                                    w_pct=70.0, w_reset=NOW - 60),
+                        NOW - STALE - 600), name="rollout-ended.jsonl")
+    _rollout(tmp_path, (rate_limits(s_pct=40.0, s_reset=NOW + 3600,
+                                    w_pct=20.0, w_reset=NOW + 86400),
+                        NOW - STALE - 660), name="rollout-older.jsonl")
+    _rollout(tmp_path, (rate_limits(s_pct=90.0, s_reset=NOW - STALE - 700,
+                                    w_pct=60.0, w_reset=NOW - STALE - 690),
+                        NOW - STALE - 720),
+             name="rollout-ended-earlier.jsonl")
+    frames = poll(tmp_path)
+
+    codex = sorted(f.session_pct for f in frames
+                   if f.src == codex_cli.SRC_ID)
+    assert codex == [base.UNKNOWN, 40.0]
+    assert _pcts(normalizer.merge(frames)) == (base.UNKNOWN, base.UNKNOWN)
+
+
+def test_the_finished_reading_is_sent_even_when_it_is_older_than_the_winner(
+        tmp_path):
+    """a (read 2000 s ago) watched the session end at NOW - 600. b (read
+    1500 s ago) is newer, so it wins, but its 40/20 carries no reset times
+    and cannot show it predates that reset. Only a can, so a has to be sent
+    too, and the provider then goes out unknown and stale."""
+    from pc import normalizer
+
+    _rollout(tmp_path, (rate_limits(s_pct=98.0, s_reset=NOW - 600,
+                                    w_pct=70.0, w_reset=NOW - 300),
+                        NOW - 2000), name="rollout-a.jsonl")
+    _rollout(tmp_path, (rate_limits(s_pct=40.0, s_reset=None,
+                                    w_pct=20.0, w_reset=None),
+                        NOW - 1500), name="rollout-b.jsonl")
+    merged = normalizer.merge(poll(tmp_path))
+
+    assert _pcts(merged) == (base.UNKNOWN, base.UNKNOWN)
+    assert merged.stale
+
+
+def test_only_the_session_reset_ends_the_refusals_date(tmp_path):
+    """The re-dating protects the session's 100, so a weekly reset alone
+    leaves it in place: still 100, still dated by the refusal, still fresh."""
+    _spent_after(tmp_path, rate_limits(s_pct=98.0, s_reset=NOW + 3600,
+                                       w_pct=16.0, w_reset=NOW - 10),
+                 NOW - STALE - 600)
+    f = _only_frame(tmp_path)
+
+    assert (f.session_pct, f.observed_at, f.stale) == (100.0, NOW - 30, False)
+    assert f.weekly_rolled_at == NOW - 10

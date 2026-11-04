@@ -6,19 +6,17 @@ visibly silent, a lying one is not.
 """
 import json
 
+import pytest
+
 from pc.providers import base
 from pc.providers import claude_desktop
+from pc.providers import weekly_anchor
 from pc.providers.claude_desktop import ClaudeDesktopProvider
-
-NOW = 1_787_700_000.0
-
-
-def _doc(samples, version=2):
-    return json.dumps({"version": version, "samples": samples})
-
-
-def _sample(t_ms, fh=10, sd=20):
-    return {"t": t_ms, "org": "org-1", "u": {"fh": fh, "sd": sd}}
+from tests.support import desktop_cache as dc
+from tests.support.desktop_cache import GARBLED, NOT_UNFILLED, UNFILLED
+from tests.support.desktop_cache import NOW, T_MS
+from tests.support.desktop_cache import doc as _doc
+from tests.support.desktop_cache import sample as _sample
 
 
 def test_parses_the_observed_v2_shape():
@@ -295,3 +293,152 @@ def test_the_real_cache_file_has_no_reset_time_anywhere():
     for s in doc["samples"]:
         keys |= set(s) | set(s["u"])
     assert keys == {"t", "org", "u", "fh", "sd", "xu"}
+
+
+# `blink status` used to say "did not parse ... please report it" for any file
+# poll() could not turn into a frame, which includes a file the app has written
+# but not yet put a sample in. Telling those apart must not swallow real format
+# changes: the app always writes JSON, so "it parses" is no evidence that the
+# layout is the one we know (review, 2026-10-25). Only the two empty shapes
+# count as "not filled yet"; everything else stays reportable. The shapes live
+# in tests/support/desktop_cache.py, shared with the status tests.
+
+
+def _verdict(tmp_path, content):
+    p = tmp_path / "plan-usage-history.json"
+    p.write_bytes(dc.as_bytes(content))
+    return ClaudeDesktopProvider(path=str(p)).verdict(dc.NOW)
+
+
+@pytest.mark.parametrize("content", list(UNFILLED.values()),
+                          ids=list(UNFILLED))
+def test_the_known_empty_shapes_are_not_filled_yet(tmp_path, content):
+    assert _verdict(tmp_path, content) == (claude_desktop.VERDICT_UNFILLED,
+                                           None)
+
+
+@pytest.mark.parametrize("content", list(NOT_UNFILLED.values()),
+                          ids=list(NOT_UNFILLED))
+def test_json_that_is_not_our_layout_is_not_called_empty(tmp_path, content):
+    assert _verdict(tmp_path, content) == (claude_desktop.VERDICT_NOT_OURS,
+                                           None)
+
+
+@pytest.mark.parametrize("content", list(GARBLED.values()),
+                          ids=list(GARBLED))
+def test_bytes_that_are_not_json_are_garbled(tmp_path, content):
+    assert _verdict(tmp_path, content) == (claude_desktop.VERDICT_GARBLED,
+                                           None)
+
+
+def test_a_working_file_gives_its_frame(tmp_path):
+    verdict, frame = _verdict(tmp_path, _doc([_sample(T_MS, 7, 9)]))
+    assert verdict == claude_desktop.VERDICT_FRAME
+    assert (frame.session_pct, frame.weekly_pct) == (7.0, 9.0)
+
+
+def test_a_missing_file_or_a_directory_is_unreadable_not_a_format_change(
+        tmp_path):
+    for path in (tmp_path / "nope.json", tmp_path):
+        assert ClaudeDesktopProvider(path=str(path)).verdict(NOW) == (
+            claude_desktop.VERDICT_UNREADABLE, None)
+
+
+def test_the_verdict_says_nothing_on_stderr(tmp_path, capsys):
+    """poll()'s once-per-path complaint is for the daemon's log. The verdict
+    is for `blink status`, which prints its own row and must not have a
+    contradicting line land above it (review, 2026-10-25)."""
+    for content in (*UNFILLED.values(), *NOT_UNFILLED.values(),
+                    *GARBLED.values()):
+        _verdict(tmp_path, content)
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("content", list(GARBLED.values()),
+                          ids=list(GARBLED))
+def test_poll_survives_a_cache_that_is_not_text(tmp_path, capsys, content):
+    """open(encoding="utf-8").read() raises UnicodeDecodeError, which is a
+    ValueError and not an OSError, so it went straight out of poll() --
+    and out of `blink status`, losing every row after Desktop (review,
+    2026-10-25). It is an unparseable file like any other."""
+    p = tmp_path / "plan-usage-history.json"
+    p.write_bytes(dc.as_bytes(content))
+    assert ClaudeDesktopProvider(path=str(p)).poll(NOW) == []
+    err = capsys.readouterr().err
+    assert "did not parse" in err
+    # The complaint names the file and nothing out of it.
+    assert "garbage" not in err and "version" not in err
+
+
+@pytest.mark.parametrize("content", list(GARBLED.values()),
+                          ids=list(GARBLED))
+def test_the_weekly_anchor_reader_survives_a_cache_that_is_not_text(
+        tmp_path, content):
+    """The second reader of this file had its own utf-8 open(), so the same
+    bytes raised out of a method documented to return None on every failure
+    (review, 2026-10-25). It reads through claude_desktop.read_text now."""
+    p = tmp_path / "plan-usage-history.json"
+    p.write_bytes(dc.as_bytes(content))
+    assert weekly_anchor.DesktopHistoryProvider(path=str(p)).samples(
+        NOW) is None
+
+
+def test_a_version_that_gains_a_parser_is_empty_too_while_unsampled(
+        tmp_path, monkeypatch):
+    """Keyed off _PARSERS, not a literal 2: the release that adds a version 3
+    parser must not call an empty version 3 file a format change."""
+    v3 = json.dumps({"version": 3, "samples": []})
+    assert _verdict(tmp_path, v3)[0] == claude_desktop.VERDICT_NOT_OURS
+    monkeypatch.setitem(claude_desktop._PARSERS, 3,
+                        claude_desktop._PARSERS[2])
+    assert _verdict(tmp_path, v3) == (claude_desktop.VERDICT_UNFILLED, None)
+
+
+def test_raw_samples_dispatches_on_the_parsers_too(monkeypatch):
+    series = [dc.sample(T_MS)]
+    doc = {"version": 3, "samples": series}
+    monkeypatch.setitem(claude_desktop._PARSERS, 3,
+                        claude_desktop._PARSERS[2])
+    assert claude_desktop.raw_samples(doc) == series
+
+
+@pytest.mark.parametrize("version", [True, False, [2], {"v": 2}, None])
+def test_a_version_that_is_not_a_scalar_is_never_dispatched(version):
+    assert claude_desktop._version({"version": version}) is None
+
+
+def test_the_version_reader_passes_a_real_one_through():
+    assert claude_desktop._version({"version": 2}) == 2
+    assert claude_desktop._version([]) is None
+
+
+@pytest.mark.parametrize("content", list(UNFILLED.values()),
+                          ids=list(UNFILLED))
+def test_poll_says_nothing_about_a_cache_not_filled_yet(tmp_path, capsys,
+                                                       content):
+    """The daemon's once-per-path complaint fired for the app's own empty
+    file too, so bridge.log said "did not parse" on every start of a desk
+    that had just signed in, and `status --wire` printed it above a Desktop
+    row saying the opposite (review, 2026-10-25). Same verdict as status."""
+    p = tmp_path / "plan-usage-history.json"
+    p.write_bytes(dc.as_bytes(content))
+    assert ClaudeDesktopProvider(path=str(p)).poll(NOW) == []
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("content", list(NOT_UNFILLED.values()),
+                          ids=list(NOT_UNFILLED))
+def test_poll_still_complains_about_json_that_is_not_our_layout(
+        tmp_path, capsys, content):
+    p = tmp_path / "plan-usage-history.json"
+    p.write_bytes(dc.as_bytes(content))
+    assert ClaudeDesktopProvider(path=str(p)).poll(NOW) == []
+    assert "did not parse" in capsys.readouterr().err
+
+
+def test_parse_cache_file_survives_absurd_nesting():
+    """RecursionError is not a ValueError, and parse_cache_file caught only
+    ValueError and TypeError around json.loads (review, 2026-10-25)."""
+    deep = dc.GARBLED["nested a million deep"]
+    assert ClaudeDesktopProvider(path="unused").parse_cache_file(
+        deep, NOW) is None

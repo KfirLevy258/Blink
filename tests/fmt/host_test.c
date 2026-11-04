@@ -361,6 +361,62 @@ static void test_fmt_toast(void)
 	}
 }
 
+/*
+ * Focus mode's dim line, for the window it is NOT showing big. It has to say
+ * the three things the small gauge said -- which window, how full, when it
+ * rolls -- in one row of the default font, and never with the "--" a missing
+ * countdown would otherwise bolt onto the end.
+ */
+static void focus_line(const char *name, double pct, const char *when,
+		       const char *want)
+{
+	char got[FMT_FOCUS_MAX];
+
+	fmt_focus_line(name, pct, when, got, sizeof(got));
+	if (strcmp(got, want) == 0) {
+		printf("PASS: focus line -> \"%s\"\n", got);
+	} else {
+		printf("FAIL: focus line -> \"%s\" (want \"%s\")\n", got, want);
+		failures++;
+	}
+}
+
+static void test_fmt_focus_line(void)
+{
+	char big[FMT_FOCUS_MAX];
+	char tiny[8];
+	double zero = 0.0;
+
+	focus_line("Weekly", 42.0, "5d 6h", "Weekly 42% " FMT_BULLET " 5d 6h");
+	focus_line("Session", 41.6, "2h 14m",
+		   "Session 42% " FMT_BULLET " 2h 14m");
+	focus_line("Session", 7.0, "+14%/h", "Session 7% " FMT_BULLET " +14%/h");
+	/* Rounds the way the gauge's own number does, so the dim line and the
+	 * big gauge on the other setting can never disagree by one. */
+	focus_line("Weekly", 89.5, "1d 2h", "Weekly 90% " FMT_BULLET " 1d 2h");
+	focus_line("Weekly", 0.0, "now", "Weekly 0% " FMT_BULLET " now");
+	/* No countdown is no clause, not a "--" hanging off the end. */
+	focus_line("Weekly", 42.0, "--", "Weekly 42%");
+	focus_line("Weekly", 42.0, "", "Weekly 42%");
+	focus_line("Weekly", 42.0, NULL, "Weekly 42%");
+	/* The daemon's "no number" sentinel, and a nan, read as unknown. */
+	focus_line("Weekly", -1.0, "5d 6h", "Weekly --% " FMT_BULLET " 5d 6h");
+	focus_line("Weekly", zero / zero, NULL, "Weekly --%");
+	/* Extra usage goes past 100 and is said; the clamp is the gauge's. */
+	focus_line("Session", 140.0, "8m 05s",
+		   "Session 140% " FMT_BULLET " 8m 05s");
+	focus_line("Session", 1e9, NULL, "Session 1000%");
+
+	/* The longest thing the panel can produce fits the buffer whole. */
+	fmt_focus_line("Session", 1000.0, "999d 23h", big, sizeof(big));
+	check_true("the longest focus line is not truncated",
+		   strcmp(big, "Session 1000% " FMT_BULLET " 999d 23h") == 0);
+	/* And a short buffer is terminated, never overrun. */
+	fmt_focus_line("Session", 42.0, "2h 14m", tiny, sizeof(tiny));
+	check_true("a short buffer still ends in NUL",
+		   strlen(tiny) == sizeof(tiny) - 1);
+}
+
 int main(void)
 {
 	check("unknown", -1, "--");
@@ -434,6 +490,7 @@ int main(void)
 	test_fmt_pips();
 	test_fmt_tone();
 	test_fmt_toast();
+	test_fmt_focus_line();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");

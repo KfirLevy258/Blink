@@ -21,7 +21,7 @@
  *
  *   2. THE WIRE. Notes fetched from the daemon would cross a link that
  *      drops any line over 512 bytes whole and silently, where a loaded
- *      usage frame already measures 484 -- and they would arrive only on a
+ *      usage frame already measures 454 -- and they would arrive only on a
  *      machine whose daemon is alive, which is exactly the machine that
  *      does not need help. So the text is compiled in. It costs flash it
  *      would be dishonest to call free, and it is correct with no cable.

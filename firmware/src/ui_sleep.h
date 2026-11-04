@@ -21,4 +21,12 @@
  */
 void ui_sleep_run(bool (*awake)(void), const char *peek_note);
 
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+/* Bench builds only (touch_inject.h). Whether ui_sleep_run() holds the
+ * board -- dozing, or in a tap's peek -- and a request to end it, taken as
+ * one more wake reason on the doze's next look. */
+bool ui_sleep_bench_dozing(void);
+void ui_sleep_bench_wake(void);
+#endif
+
 #endif /* UI_SLEEP_H */

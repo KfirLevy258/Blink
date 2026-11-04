@@ -48,6 +48,12 @@ MAX_DEPTH = 16
 _KEY_MARKERS = (b"cowork", b"c\x00o\x00w\x00o\x00r\x00k")
 
 
+def store_path() -> str:
+    """Claude Desktop's claude.ai IndexedDB, under the data folder
+    pc/desktop_paths finds (the Store build moves it)."""
+    return desktop_paths.indexeddb_dir()
+
+
 def _wanted_key(key: bytes) -> bool:
     """Cowork sessions only, decided by the key alone.
 
@@ -128,7 +134,7 @@ def seven_day_reset(dir_path=None):
     None means absent, never zero, and absence is the normal answer: most
     machines have never run a Cowork session at all. Never raises.
     """
-    path = dir_path if dir_path is not None else desktop_paths.indexeddb_path()
+    path = dir_path if dir_path is not None else store_path()
     try:
         rows = leveldb.scan(path, _wanted_key)
     except Exception:

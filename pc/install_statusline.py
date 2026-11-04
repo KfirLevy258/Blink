@@ -5,11 +5,15 @@ key. Two rules follow: never lose their existing statusline command (it goes in
 the chain file, and uninstall puts it back verbatim), and never rewrite any key
 but `statusLine`.
 """
+import glob
 import json
 import os
 import shlex
+import secrets
 import shutil
+import stat
 import sys
+import time
 
 CHAIN_PATH = "~/.blink/statusline-chain"
 
@@ -138,12 +142,22 @@ def _load(settings_path: str) -> dict:
     try:
         # utf-8 explicitly: Windows would otherwise decode with the ANSI code
         # page and die on any non-ASCII character anywhere in the file.
-        with open(settings_path, encoding="utf-8") as f:
+        # utf-8-SIG, because Windows PowerShell 5's Set-Content -Encoding utf8
+        # writes a byte-order mark, json.load refuses a document that starts
+        # with one, and a file someone fixed by hand that way would read as
+        # unparseable. Identical to utf-8 for every file without a BOM.
+        with open(settings_path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except FileNotFoundError:
         return {}
     except (ValueError, UnicodeDecodeError) as e:
         raise SettingsUnreadable(f"{settings_path} is not valid JSON ({e})")
+    except RecursionError:
+        # Arrays nested deeper than the parser's stack: not a ValueError,
+        # and it used to escape every caller that promised to handle a bad
+        # file -- `blink config` among them.
+        raise SettingsUnreadable(f"{settings_path} is not valid JSON"
+                                 " (nested too deeply)")
     if not isinstance(data, dict):
         # Valid JSON, wrong shape: `[]`, `null`, a bare string. Everything
         # downstream does data.get(...), so this used to surface as an
@@ -185,6 +199,91 @@ def _sniff_format(settings_path: str):
     return indent, trailing_newline
 
 
+# How old a temp sibling must be before a write may sweep it. A write takes
+# milliseconds, so ten minutes cannot be one still in flight -- it is one
+# that was killed between creating the temp file and renaming it.
+STALE_TEMP_S = 10 * 60
+
+_TEMP_SUFFIX = ".blink-tmp"
+
+
+def temp_siblings(path: str):
+    """Every temp file _save may have left beside `path`, sorted.
+
+    The one place that knows the naming, so the sweep below and uninstall's
+    file list cannot drift apart from what _save actually creates. That
+    includes the fixed name every release up to 1.3.4 used,
+    `<path>.blink-tmp`, which no writer of this version creates.
+    """
+    found = glob.glob(glob.escape(path) + ".*" + _TEMP_SUFFIX)
+    legacy = path + _TEMP_SUFFIX
+    if os.path.lexists(legacy):
+        found.append(legacy)
+    return sorted(found)
+
+
+def _remove(path: str) -> None:
+    """os.remove, and on a refusal clear the read-only bit and try once more.
+
+    Windows will not delete a read-only file at all -- a copy carried over
+    from a synced folder, or one an editor marked -- and these temp files
+    are copies of somebody's settings, which is the reason to get rid of
+    them rather than shrug.
+    """
+    try:
+        os.remove(path)
+    except PermissionError:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        os.remove(path)
+
+
+def _sweep_stale_temps(path: str, now=None) -> None:
+    """Remove temp siblings a killed write left behind.
+
+    They matter more than their size: each is a copy of settings.json, which
+    can hold ANTHROPIC_API_KEY, under a name nothing would ever look for
+    again. The random names only once they are stale -- a fresh one may be
+    another writer's, mid-write. The legacy fixed name always: nothing of
+    this version writes it, so it is never in flight, and the oldest
+    releases created it at the umask, readable by every account.
+    """
+    now = time.time() if now is None else now
+    legacy = path + _TEMP_SUFFIX
+    for t in temp_siblings(path):
+        try:
+            if t == legacy or now - os.path.getmtime(t) > STALE_TEMP_S:
+                _remove(t)
+        except OSError:
+            pass
+
+
+# How many random names to try before giving up. A collision on 64 random
+# bits is a once-in-the-universe event; ten is for a directory full of
+# leftovers, not for odds.
+_TEMP_TRIES = 10
+
+
+def _open_temp(path: str):
+    """(fd, name) for a new private temp file beside `path`.
+
+    Not tempfile.mkstemp. On Python 3.11 -- the interpreter the Windows build
+    ships -- mkstemp reads PermissionError as "that name is taken" and tries
+    the next one, up to os.TMP_MAX, which on Windows is about two billion:
+    a folder that refuses new files hung install, uninstall, `blink config`
+    and the drift watchdog's repair on the daemon's serial loop. Here only a
+    taken name is retried, and only a few times; anything else is the answer.
+    """
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+             | getattr(os, "O_BINARY", 0))
+    for attempt in range(_TEMP_TRIES):
+        name = f"{path}.{secrets.token_hex(8)}{_TEMP_SUFFIX}"
+        try:
+            return os.open(name, flags, 0o600), name
+        except FileExistsError:
+            if attempt + 1 == _TEMP_TRIES:
+                raise
+
+
 def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> None:
     """Write via a temp file so a crash cannot truncate the user's settings."""
     # Follow a symlink to its target before writing.
@@ -201,7 +300,6 @@ def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> Non
     if os.path.islink(settings_path):
         settings_path = os.path.realpath(settings_path)
 
-    tmp = settings_path + ".blink-tmp"
     # The temp file is a sibling of the target (it has to be, for os.replace to
     # be atomic), so an absent parent directory fails the write rather than the
     # read that came before it. ~/.claude is absent on a machine where Claude
@@ -216,22 +314,36 @@ def _save(settings_path: str, data: dict, indent, trailing_newline: bool) -> Non
     # open(tmp, "w") created it at the process umask -- typically 0644 -- and
     # copymode narrowed it afterwards, which left the secrets world-readable
     # for the length of the write, and permanently if the process died between
-    # the two (the daemon's drift watchdog runs this unattended). A stale temp
-    # from such a death is removed first, so O_EXCL cannot refuse forever.
+    # the two (the daemon's drift watchdog runs this unattended).
+    #
+    # _open_temp creates it 0600 under a name nobody else holds. The fixed
+    # name this used to use let two writers -- `blink config` and the
+    # daemon's watchdog, or two shells -- share one temp file, and a write
+    # that failed left it behind for the next one to trip on; now a failure
+    # removes its own temp file on the way out.
+    _sweep_stale_temps(settings_path)
+    fd, tmp = _open_temp(settings_path)
     try:
-        os.remove(tmp)
-    except OSError:
-        pass
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=indent)
-        if trailing_newline:
-            f.write("\n")
-    # A customer who chmod'd it 0600 gets 0600 back; one who left it at the
-    # default gets the default back, not a silently narrowed copy either.
-    if os.path.exists(settings_path):
-        shutil.copymode(settings_path, tmp)
-    os.replace(tmp, settings_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent)
+            if trailing_newline:
+                f.write("\n")
+        # A customer who chmod'd it 0600 gets 0600 back; one who left it at
+        # the default gets the default back, not a silently narrowed copy.
+        if os.path.exists(settings_path):
+            shutil.copymode(settings_path, tmp)
+        # Retried on Windows' WinError 5 / 32 only: an editor or an
+        # antivirus scan holding the target for a moment is not a failed
+        # write. POSIX has no such state -- EACCES there is a real refusal,
+        # and retrying it only made a failed write wait three seconds.
+        from pc import update
+        update._replace(tmp, settings_path, posix_retry=False)
+    except BaseException:
+        try:
+            _remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _current_command(data: dict) -> str:

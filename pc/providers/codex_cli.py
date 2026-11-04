@@ -50,6 +50,7 @@ be confidently wrong rather than to fail:
 """
 import glob
 import json
+import math
 import os
 from datetime import datetime, timezone
 
@@ -93,8 +94,15 @@ def sessions_root() -> str:
     Returns the path whether or not it exists: not having Codex installed is
     an ordinary state, handled by the reader rather than by pretending we do
     not know where to look. CODEX_HOME is honoured because Codex itself does.
+
+    Joined from the home directory rather than expanded from "~/.codex", as
+    burn_reader.transcripts_root() is and for its reason: on Windows
+    expanduser keeps the slash it was given, and the root came out with one
+    forward slash among backslashes -- in the install note a customer reads
+    and in a test on windows-latest (/code-review max, 2026-11-01).
     """
-    home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    home = (os.environ.get("CODEX_HOME")
+            or os.path.join(os.path.expanduser("~"), ".codex"))
     return os.path.join(home, "sessions")
 
 
@@ -409,6 +417,78 @@ def _observed_at(line: dict, mtime: float) -> float:
     return mtime
 
 
+# The weekly window's declared length. The five-hour window Codex writes
+# declares 300; anything up to SESSION_WINDOW_MAX_MIN is what _classify puts
+# on the session dial, so that is the bound a "no window" claim must clear.
+WEEKLY_WINDOW_MIN = 10080
+
+# How far ahead of the clock a reading may be dated and still decide the
+# remembered no-window word (CodexCliProvider._fold_word). Codex stamps its
+# lines from the clock this daemon reads, so a minute covers a write racing
+# the poll; anything further ahead is a clock that was wrong.
+CLOCK_SLACK_S = 60
+
+
+def _no_short_window(limits):
+    """Does this `rate_limits` object say the account has no five-hour
+    window? True, False, or None for a reading that says nothing.
+
+    Codex states it outright. On the owner's Codex Pro account, measured
+    2026-11-01 over 195 rollouts (counts only): 7969 readings carried a
+    `primary` of window_minutes 10080 and a `secondary` of null, the account
+    the board showed "--%" for on the left half; the 122 before them, from
+    when it had one, carried a 300-minute primary beside a 10080 secondary.
+    `individual_limit` was null in all 8094, and the only `limit_id` other
+    than "codex" was the 3 null envelopes of an exhausted limit
+    (parse_rollout_tail), which carry no window and so say nothing here.
+
+    So: True for a usable weekly window (10080 minutes, a percentage) beside
+    no window short enough for the session dial -- every window present must
+    declare its length, because one that does not is where _classify would
+    fall back to position, and could be the five-hour window under a renamed
+    field. False when any window is SESSION_WINDOW_MAX_MIN or shorter, which
+    the 300-minute one is. None for anything else: no `rate_limits`, null
+    windows, a weekly with no figure. Positive evidence only, as for Claude
+    (pc/session_verdict): quiet data proves nothing.
+
+    This judges the object it is given. poll() marks each frame by its
+    own reading's word when it has one, and fills in the remembered word
+    (the newest reading that said True or False, _fold_word) only on a
+    frame whose reading says nothing and puts no figure on the session
+    dial. A True beside a newer frame sent with it that keeps a window
+    goes out unmarked. A newer reading that says None leaves the
+    remembered word as it was.
+    """
+    if not isinstance(limits, dict):
+        return None
+    windows = [w for w in (limits.get("primary"), limits.get("secondary"))
+               if w is not None]
+    weekly = False
+    for w in windows:
+        if not isinstance(w, dict):
+            return None
+        minutes = w.get("window_minutes")
+        # Finite, as cowork_audit._finite_num has it: json.loads takes a bare
+        # NaN, which is neither <= the session bound nor == 10080, so a NaN
+        # beside a weekly window used to say True (/code-review max,
+        # 2026-11-01). A window of unreadable length says nothing.
+        #
+        # Floats only. An int is always finite, and math.isfinite converts
+        # it to a float first: json.loads takes an int of up to 4300 digits,
+        # and one of 310 or more raised OverflowError here, out of poll(),
+        # and the bus benched the whole provider -- gauges, state and burn
+        # view -- for one corrupt line (3rd review, 2026-11-01).
+        if (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
+                or (isinstance(minutes, float)
+                    and not math.isfinite(minutes))):
+            return None
+        if minutes <= SESSION_WINDOW_MAX_MIN:
+            return False
+        if minutes == WEEKLY_WINDOW_MIN and _pct(w) >= 0:
+            weekly = True
+    return True if weekly else None
+
+
 def _has_window(limits) -> bool:
     """Does this `rate_limits` object yield a percentage for either window?"""
     session, weekly = _classify(limits)
@@ -416,7 +496,12 @@ def _has_window(limits) -> bool:
 
 
 def parse_rollout_tail(lines, mtime: float):
-    """The newest USABLE (rate_limits, observed_at, limit_reached), or Nones.
+    """The newest USABLE (rate_limits, observed_at, limit_reached, read_at).
+
+    (None, None, False, None) when the tail holds no envelope at all.
+    `read_at` is when the NUMBERS were written; it differs from
+    `observed_at` only when the account has run out, and the next
+    paragraphs say why that matters.
 
     Scanned backwards: the answer is at the end of the file, and a long
     session has thousands of lines that are not it.
@@ -468,19 +553,25 @@ def parse_rollout_tail(lines, mtime: float):
             top, top_observed = limits, observed
         if _has_window(limits):
             if limits is top:
-                return limits, observed, False
+                return limits, observed, False, observed
             # An older reading, reached only because everything newer was
             # window-less. Report it as observed WHEN THE ACCOUNT RAN OUT,
             # not when this older line was written: the fact being reported
             # is current even though the number carrying it is not, and
             # dating it backwards would make the panel call it stale and
             # hide it.
+            #
+            # Only the frame is re-dated, though, never the numbers: `read_at`
+            # stays the older line's own time, because the refusal is
+            # evidence that the account was spent and none at all about what
+            # was used after a reset (see parse_cli_event).
             reached = _limit_id(top) != _limit_id(limits)
-            return limits, (top_observed if reached else observed), reached
+            return (limits, (top_observed if reached else observed), reached,
+                    observed)
     # Either no envelope at all, or every one of them window-less. Hand the
     # newest back regardless: `parse_cli_event` refuses it, which keeps a
     # file with nothing to say from winning a contest about numbers.
-    return top, top_observed, False
+    return top, top_observed, False, top_observed
 
 
 def _limit_id(limits):
@@ -632,6 +723,25 @@ class CodexCliProvider(base.ProviderParser):
         # Per instance, not per class: a mutable default here would make the
         # cache shared by every provider in the process.
         self._names = {}
+        # Whether the account has a five-hour window, as the newest reading
+        # that said so either way put it (_no_short_window True or False),
+        # and (that reading's observed_at, whether it said False); None
+        # until one has. Held at all because a newer reading that says
+        # nothing -- its windows undeclared, say -- used to clear the mark,
+        # and the page lost its burn view for a reading that proved nothing
+        # (/code-review max, 2026-11-01).
+        #
+        # Never persisted, and folded from every rollout in view on every
+        # poll, so a restarted daemon's first poll holds the word of the
+        # newest reading still in view, which is what a running one holds
+        # too. They part only when the reading that last decided has left
+        # the six most recent rollouts (or its file's tail) and nothing in
+        # view says anything: the running daemon still remembers it. Even
+        # then the word only fills a frame that says nothing itself AND
+        # carries no session figure (poll()), so what they disagree on is
+        # the burn view of a page with a blank left dial, never a figure.
+        self._no_window = None
+        self._no_window_key = None
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -690,7 +800,7 @@ class CodexCliProvider(base.ProviderParser):
         self._names = {p: n for p, n in self._names.items() if p in known}
 
     def parse_cli_event(self, raw_payload, now_epoch, observed_at,
-                        limit_reached=False):
+                        limit_reached=False, read_at=None):
         """One `rate_limits` object, already read, as a frame.
 
         Returns None when neither window yields a percentage: a frame with no
@@ -703,6 +813,9 @@ class CodexCliProvider(base.ProviderParser):
         anything" are the same fact to the person looking at the panel, and
         the second one is what they need to know. Only the session window:
         the weekly one was at 16 when this fired and is genuinely not spent.
+
+        `read_at` is when the percentages themselves were written, if that
+        is earlier than `observed_at`; parse_rollout_tail says when it is.
         """
         session, weekly = _classify(raw_payload)
         s_pct, w_pct = _pct(session), _pct(weekly)
@@ -710,16 +823,91 @@ class CodexCliProvider(base.ProviderParser):
             return None
         if limit_reached and s_pct >= 0:
             s_pct = 100.0
+        stale = (now_epoch - observed_at) > STALE_AFTER_S
+        # The frame's date and the figures' date part ways in one case: a
+        # refusal (limit_reached) re-dates the frame so the spent 100 stays
+        # on screen. The refusal says the account was turned away; it says
+        # nothing about usage after a later reset. So whether an ended
+        # window may claim a fresh 0 is judged on the OLDER of the two
+        # dates. Judged on the refusal's, a 98 read hours earlier came back
+        # as a fresh 0 the moment its window rolled (found in review).
+        figures_at = observed_at if read_at is None else min(observed_at,
+                                                             read_at)
+        figures_stale = (now_epoch - figures_at) > STALE_AFTER_S
+
+        # Codex writes this log only while it runs, and nothing else ever
+        # refreshes it. Close Codex before a reset and the last pre-reset
+        # reading stays the newest one on disk indefinitely: on 2026-10-01
+        # DevOceanIT's desk held 98% after its window's resets_at had
+        # passed by four minutes, until someone resumed a Codex session. The expired stamp
+        # is in the reading itself, so the fix needs no new sample --
+        # base.settle_window, the rule the Claude status line uses, once per
+        # window. poll() compares these settled readings across rollout
+        # files on recency alone, and one left with no number at all is sent
+        # only when no file has one (see poll()).
+        #
+        # Deliberately after the limit_reached override: a session pinned at
+        # 100 by an exhausted account is the reading that most needs to drop
+        # when its window resets, and settling first would let the override
+        # pin it straight back.
+        def settle(window, pct):
+            resets = _epoch((window or {}).get("resets_at"))
+            return base.settle_window(pct, resets, now_epoch, figures_stale)
+
+        s_win, w_win = settle(session, s_pct), settle(weekly, w_pct)
+
+        # The refusal only lent the frame its date so the 100 would not be
+        # buried as stale. With the session window rolled, the 100 is gone
+        # and the date goes back: left in place it kept setting the stale
+        # flag, the age the board shows, and poll()'s pick between files,
+        # and a 98/16 from four hours earlier went out as a fresh -1/16, 30 s
+        # old, beating another rollout's newer 0/41 (found in review).
+        if (limit_reached and read_at is not None
+                and s_win.ended_at is not None):
+            observed_at, stale = read_at, figures_stale
+
         return base.NormalizedUsageFrame(
             provider=PROVIDER_ID,
             src=SRC_ID,
             observed_at=observed_at,
-            session_pct=s_pct,
-            session_resets_at=_epoch((session or {}).get("resets_at")),
-            weekly_pct=w_pct,
-            weekly_resets_at=_epoch((weekly or {}).get("resets_at")),
-            stale=(now_epoch - observed_at) > STALE_AFTER_S,
+            # This reading's own word, True only on positive evidence.
+            # poll() keeps it, and gives a frame the remembered word
+            # (self._no_window) only when this reading says nothing and
+            # puts no figure on the session dial.
+            no_session_window=_no_short_window(raw_payload) is True,
+            session_pct=s_win.pct,
+            session_resets_at=s_win.resets_at,
+            weekly_pct=w_win.pct,
+            weekly_resets_at=w_win.resets_at,
+            stale=stale,
+            session_rolled_at=s_win.ended_at,
+            weekly_rolled_at=w_win.ended_at,
         )
+
+    def _fold_word(self, words, now_epoch):
+        """Fold this poll's (observed_at, word) readings into the remembered
+        word: the newest wins, and on equal stamps a window (False) wins, as
+        SessionVerdict.observe lets it.
+
+        A reading dated more than CLOCK_SLACK_S ahead of the clock is not
+        taken. _observed_at accepts stamps up to 2100, and a weekly-only
+        line from a fast clock later stepped back, or a synced rollout,
+        latched and outranked every honest reading after it -- one near
+        2100 until restart, after its file had left view (3rd review,
+        2026-11-01). Its own frame still says what it says; only the memory
+        refuses it. A word already held that the clock has since fallen
+        behind keeps its say until any reading arrives, and no longer,
+        which is SessionVerdict.observe's arm for the same case.
+        """
+        if (self._no_window_key is not None
+                and self._no_window_key[0] > now_epoch + CLOCK_SLACK_S):
+            self._no_window_key = (float("-inf"), self._no_window_key[1])
+        for at, word in words:
+            if at > now_epoch + CLOCK_SLACK_S:
+                continue
+            key = (at, word is False)
+            if self._no_window_key is None or key >= self._no_window_key:
+                self._no_window, self._no_window_key = word, key
 
     def poll(self, now_epoch):
         """The freshest reading Codex has written, as a one-frame list.
@@ -730,6 +918,7 @@ class CodexCliProvider(base.ProviderParser):
         the freshest one win a contest it has already won here.
         """
         best = None
+        ended = None
         # Keyed by session, not counted, because a hook slot below may be
         # describing one of these same sessions and has to REPLACE its entry
         # rather than land beside it. Counting first would make that
@@ -737,6 +926,8 @@ class CodexCliProvider(base.ProviderParser):
         # the session id is the only thing the two sources share.
         rollout_states = {}
         rollout_names = {}
+        said = {}           # id(frame) -> _no_short_window of its reading
+        words = []          # (observed_at, word) of every reading with one
         paths = recent_rollouts(self._root)
         self._prune_names(set(paths))
         for path in paths:
@@ -763,17 +954,76 @@ class CodexCliProvider(base.ProviderParser):
                 # and letting it lend its name would rename the panel after
                 # the session that is actually doing something.
                 rollout_names[key] = self._name_for(path)
-            limits, observed_at, limit_reached = parse_rollout_tail(lines,
-                                                                    mtime)
+            limits, observed_at, limit_reached, read_at = parse_rollout_tail(
+                lines, mtime)
             if limits is None:
                 continue
             frame = self.parse_cli_event(limits, now_epoch, observed_at,
-                                         limit_reached)
+                                         limit_reached, read_at)
+            word = _no_short_window(limits)
+            if word is not None:
+                words.append((observed_at if frame is None
+                              else frame.observed_at, word))
             if frame is None:
+                continue
+            said[id(frame)] = word
+            # A frame with no percentage is not a candidate: this contest is
+            # on recency alone, and the newest frame would otherwise win it
+            # for numbers it does not have and hide another file's reading.
+            # One whose windows ended is kept aside instead: it is the only
+            # thing that can still say so. Without rollover evidence it says
+            # nothing, and is dropped.
+            if not frame.has_usage():
+                saw_reset = (frame.session_rolled_at is not None
+                             or frame.weekly_rolled_at is not None)
+                if saw_reset and (ended is None
+                                  or frame.observed_at > ended.observed_at):
+                    ended = frame
                 continue
             if best is None or frame.observed_at > best.observed_at:
                 best = frame
-        frames = [best] if best is not None else []
+        # The newest ended reading is always sent, beside the winner if
+        # there is one. With no winner it reaches the normalizer as rollover
+        # evidence and goes out as unknown; dropped, the board would go on
+        # showing the pre-reset figure (see merge()). Beside a winner it is
+        # the only thing that can tell merge() the winner was read before a
+        # reset somebody watched happen -- losing the dial must not also lose
+        # the veto. Whether it vetoes is merge()'s to decide, not this
+        # loop's: being the newer READING says nothing about when the RESET
+        # was, and a winner read after the ended one, with no resets_at of
+        # its own, can still predate the reset the ended one saw (found in
+        # review: a fresh 40/20 for a window that had ended).
+        frames = [f for f in (best, ended) if f is not None]
+        # Whether the account has a five-hour window is the newest reading's
+        # to say -- of those that say anything, in every rollout in view
+        # (_fold_word). A reading that says None changes nothing, and one
+        # older than the reading that last decided cannot take the decision
+        # back.
+        self._fold_word(words, now_epoch)
+        # Each frame's mark is its own reading's word when it has one. The
+        # remembered word fills only a frame whose reading says nothing AND
+        # put no number on the session dial: merge() drops every session
+        # figure when any frame is marked, so a newer reading with 22 on the
+        # dial and an undeclared window, marked from an older True, took
+        # the Codex page off the board while a fresh process showed 22 (3rd
+        # review, 2026-11-01).
+        #
+        # And a frame that says True itself still goes unmarked beside a
+        # newer frame sent with it that says there is a window or carries a
+        # session figure. merge() reads the mark as any(), so an older
+        # weekly-only `ended` marked beside a newer 300 would have dropped
+        # the 300.
+        def keeps_window(f):
+            return said.get(id(f)) is False or f.session_pct >= 0
+        for f in frames:
+            word = said.get(id(f))
+            if word is None:
+                word = self._no_window is True and f.session_pct < 0
+            if word is True and any(
+                    keeps_window(g) and g.observed_at >= f.observed_at
+                    for g in frames if g is not f):
+                word = False
+            f.no_session_window = word is True
 
         # The hooks' answer, and where it wins.
         #

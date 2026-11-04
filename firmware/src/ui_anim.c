@@ -29,6 +29,7 @@
 #include "bootclip.h"
 #include "bootanim_dec.h"
 #include "ui_slide.h"
+#include "mem_stats.h"
 
 #define STRIP_BYTES 4096
 
@@ -39,6 +40,15 @@ static volatile bool pending;
 static int64_t mute_until;
 static int64_t enter_mute_until;
 static volatile bool leave;
+
+/* Written by the mode loop in ui_anim_run(), read by swipe_cb on the LVGL
+ * timer that ui_anim_run's own idle_until() drives -- the same thread. */
+static volatile bool showing;
+
+bool ui_anim_showing(void)
+{
+	return showing;
+}
 
 void ui_anim_request(void)
 {
@@ -206,6 +216,17 @@ void ui_anim_run(void (*pump)(void))
 
 	pending = false;
 	leave = false;
+	showing = true;
+	/*
+	 * The left half stays whichever it is -- session gauge or burn view --
+	 * until the restore below lets go. peers_set_hidden() records what is
+	 * visible now and puts exactly that back on the way out, and the
+	 * protocol keeps running all the while, so a change of hands mid-clip
+	 * showed its objects under the overlay and then had the restore show
+	 * the ones it had hidden: both halves at once (review of 2026-10-31,
+	 * tools/panel_render/clip.sh).
+	 */
+	usage_view_hold_half(true);
 
 	/*
 	 * Built frozen and already full size. Creating it would otherwise
@@ -296,6 +317,9 @@ void ui_anim_run(void (*pump)(void))
 		idle_until(k_uptime_get() + 600, pump, &last_tick);
 	}
 
+	/* While the 4 KB strip is still held: the clip's slide and every
+	 * frame since are this line's peak. */
+	mem_stats_report("eye-clip");
 	if (strip) {
 		lv_free(strip);
 	}
@@ -316,10 +340,15 @@ void ui_anim_run(void (*pump)(void))
 	ui_slide_begin();
 	peers_set_hidden(ov, false);
 	/* The restore above replays what was visible when the clip STARTED. Let
-	 * the view re-decide the one piece of that which can legitimately have
-	 * changed since: the first data can arrive mid-clip, and putting the
-	 * CONNECTING bar back over live gauges is the 2026-08-18 report. */
+	 * the view re-decide what can legitimately have changed since: the
+	 * first data can arrive mid-clip, and putting the CONNECTING bar back
+	 * over live gauges is the 2026-08-18 report. */
 	usage_view_sync_takeover();
+	/* And the left half, held since the clip began: whatever a burn line,
+	 * a session reading or the view's 180 s decided meanwhile lands now,
+	 * still frozen, so the wipe below paints it whole. The wipe holds the
+	 * half again for its own length. */
+	usage_view_hold_half(false);
 	lv_obj_del(ov);
 	lv_obj_update_layout(lv_screen_active());
 	ui_slide_freeze(false);
@@ -337,4 +366,5 @@ void ui_anim_run(void (*pump)(void))
 	 * again through ui_settings' handlers. The exit slide above blocks long
 	 * enough for those events to land, so clearing here is the last word. */
 	pending = false;
+	showing = false;
 }

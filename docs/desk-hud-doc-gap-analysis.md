@@ -12,6 +12,12 @@
 > built, measured against the real site, found to have nothing to forward, and
 > removed along with its localhost listener. This file is a dated audit and is
 > left as it was written; `next-steps.md` section A carries the finding.
+>
+> **Superseded again, 2026-10-27.** The WiFi build this audit describes as
+> present -- `firmware/wifi.conf`, `CONFIG_BLINK_WIFI_MODE`, `net_wifi.c`,
+> `oauth.c` and `usage_client.c` -- was deleted from the tree, and no release
+> ever included it. Every mention of it below describes the tree as audited,
+> not as it is; README-full's "Security & privacy" has the current account.
 
 Audit of the "Desk HUD — Universal Architecture, Multi-Provider Design & Technical
 Handoff" document against this repository.
@@ -161,8 +167,10 @@ reasoned than the doc:
   non-numeric window rather than `0.0`, precisely because `0.0` reads as a confident
   "0% used" — a stronger claim than "we don't have this number".
 - `read_payload()` (line 150) turns every `OSError`/`ValueError` into `(None, None)`.
-- `_window_has_reset()` / `_rolled_over()` (lines 86-121) carry a window across its own
-  reset instead of disowning the reading, which is a case §4B does not contemplate at all.
+- `window_ended()` / `settle_window()` in `pc/providers/base.py` (first written in
+  `statusline_source`, moved out once Codex needed the same rule) update a reading
+  whose window has already reset, rather than marking it untrustworthy -- a case
+  §4B never considers.
 - The freshness bound is 1800 s with a documented argument for why age is the wrong
   primary signal (lines 18-37).
 

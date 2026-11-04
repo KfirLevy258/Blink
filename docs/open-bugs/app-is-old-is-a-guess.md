@@ -8,7 +8,7 @@ to ask. Move it out of open-bugs/ whenever that stops being useful.
 
 ## What it says, and what it knows
 
-The settings screen's update row reads **"App is old"** whenever
+The settings screen's Update tile reads **"App is old"** whenever
 `proto_host_outdated()` is true, and that function is this
 (`firmware/src/proto.c:732`):
 

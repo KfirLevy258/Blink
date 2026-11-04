@@ -1,3 +1,4 @@
+#include <string.h>
 #include "upd_prompt.h"
 
 struct upd_prompt_turn upd_prompt_step(enum ota_ui_state st, bool prompt_open,
@@ -33,4 +34,13 @@ struct upd_prompt_turn upd_prompt_step(enum ota_ui_state st, bool prompt_open,
 	}
 
 	return t;
+}
+
+bool upd_confirm_withdraw(enum ota_ui_state st, bool confirm_open,
+			  const char *now_ver, const char *shown_ver)
+{
+	if (!confirm_open) {
+		return false;
+	}
+	return st != OTA_UI_AVAILABLE || strcmp(now_ver, shown_ver) != 0;
 }

@@ -429,4 +429,147 @@
  */
 #define TOAST_TTL_S		5
 
+/*
+ * Focus mode: one window as a big gauge, the other as a dim line under it.
+ *
+ * The SAME objects as the two-gauge screen, moved and resized, never a second
+ * set: the LVGL pool is 30 KB and the gauge screen already used 19.3 KB of it
+ * on the desk board (mem_stats "gauges", 2026-10-27), so a second layout of
+ * objects -- Lite mode's original plan -- would have been 7 KB the settings
+ * panel no longer had. The focused gauge's arc, figure, caption and countdown
+ * take the middle; the other gauge's arc, figure and caption hide, and its
+ * countdown label becomes the dim line.
+ *
+ * Everything below the header is laid out around ONE fact: a 270-degree ring
+ * is open at the bottom. Its two ends sit at 45 degrees below the horizontal,
+ * so the quarter between them is empty and the caption and countdown can go
+ * there, and nothing of the ring reaches below its ends -- which is what lets
+ * the dim line run the full width under it.
+ *
+ * Every clearance is checked against the THICKEST arc a theme can draw
+ * (FOCUS_ARC_W_MAX, Bold's and a custom theme's 22 px, theme.h's
+ * THEME_ARC_W_MAX), with round ends and the ball on, because that is the
+ * stroke that eats the hollow. tests/usage_layout samples every pixel of each
+ * text box against that stroke.
+ */
+#define FOCUS_ARC_SZ		156
+#define FOCUS_ARC_Y		GAUGE_ARC_Y
+#define FOCUS_ARC_W_MAX		22
+#define FOCUS_CY		(FOCUS_ARC_Y + FOCUS_ARC_SZ / 2)
+/* font_focus_40.c's .line_height. Digits only, so no descender: the box is
+ * the glyphs. */
+#define FOCUS_PCT_FONT_H	29
+/*
+ * Raised 3 px off the centre line, and the caption below given a 6 px gap
+ * where it had 2: at 2 the big figure all but sat on "SESSION 5h" (audit,
+ * 2026-10-28, seen in the harness). Raising the figure costs it nothing --
+ * the hollow is still 106 px wide at its top edge, against 103 for "100%"
+ * -- and the caption gives up only 1 px of the depth it had, which the
+ * hollow still holds. tests/usage_layout checks both, and the gap.
+ */
+#define FOCUS_PCT_RAISE		3
+#define FOCUS_PCT_GAP		6
+#define FOCUS_PCT_Y		(FOCUS_CY - FOCUS_PCT_FONT_H / 2 - \
+				 FOCUS_PCT_RAISE)
+/*
+ * The hollow inside the thickest stroke. "100%" measures 103 px in
+ * font_focus_40 (lv_text_get_size on host, 2026-10-27), and the hollow is
+ * widest exactly at the centre line the figure sits on. Every reading under
+ * 200% fits ("100%" is the widest of them, measured over 0..199); "200%" is
+ * 111 px and touches a 22 px ring, so from 200 paint_pct() draws the figure
+ * in the 20 px font, where even the display clamp's "1000%" is 63.
+ */
+#define FOCUS_PCT_MAX_W		(FOCUS_ARC_SZ - 2 * FOCUS_ARC_W_MAX)
+/* "SESSION 5h" under the figure: 85 px measured, which the thick ring's
+ * hollow still holds at this depth -- it is 90 px wide at the label's lower
+ * edge. */
+#define FOCUS_NAME_Y		(FOCUS_PCT_Y + FOCUS_PCT_FONT_H + FOCUS_PCT_GAP)
+#define FOCUS_NAME_W		85
+/* The countdown in the open quarter. "999d 23h" is the widest it gets, 67 px
+ * measured; "00m 00s" and "+999%/h" are 62. */
+#define FOCUS_CD_Y		(FOCUS_NAME_Y + FONT_LINE_H + 2)
+#define FOCUS_CD_W		67
+/*
+ * The other window. "Session 1000% <bullet> 999d 23h" -- fmt_focus_line()'s
+ * longest -- measures 182 px; an ordinary "Weekly 42% <bullet> 5d 6h" is
+ * about 140. Under the ring's ends and above the provider pill.
+ */
+#define FOCUS_OTHER_Y		184
+#define FOCUS_OTHER_MAX_W	200
+#define FOCUS_OTHER_W_LONGEST	182
+
+/*
+ * The five-hour burn view: the session gauge's half of the screen, on an
+ * account that has no session window (docs/plans/burn-5h.md).
+ *
+ * ABSOLUTE screen coordinates, unlike everything above. The view is one
+ * object that draws itself (usage_view.c, burn_draw_cb) rather than thirty
+ * aligned widgets, so these are where pixels land, not offsets from an
+ * anchor. That one object spans BURN_OBJ_*, and nothing it draws may leave
+ * that box: LVGL clips a draw callback to its own object.
+ *
+ * Top to bottom, every row clear of the next:
+ *
+ *   total + glyph   45..66    the Montserrat 20 line, centred on 56
+ *   tokens <b> 5h   68..83    Montserrat 14, centred on 76
+ *   bars            92..147   56 px tall at most, standing on...
+ *   baseline        148
+ *   hour ticks      149..151  3 px, hanging under it
+ *   hour numbers    152..167  Montserrat 14, centred on 160
+ *   BURN 5h         168..183  where "SESSION 5h" sits (GAUGE_NAME_Y)
+ *   rate <b> word   186..201  where the countdown sits (GAUGE_CD_Y)
+ *
+ * (<b> is U+2022, FMT_BULLET: the fonts this board links have no U+00B7.)
+ *
+ * and inside the arc's own rows: the ring is 44..164, so nothing here
+ * reaches the hint row above (STATUS_Y + FONT_LINE_H = 40) or the pill below
+ * (PILL_BOTTOM_OFF puts it at 204).
+ */
+#define BURN_OBJ_X		0
+#define BURN_OBJ_W		SCR_MID_X
+#define BURN_OBJ_Y		GAUGE_ARC_Y
+#define BURN_OBJ_H		(GAUGE_CD_Y + FONT_LINE_H - GAUGE_ARC_Y)
+/* The left half's centre line, which is the session gauge's: 80. */
+#define BURN_CX			(SCR_MID_X - GAUGE_CX)
+
+/*
+ * The total and the arrow beside it, centred together as one group on
+ * BURN_CX, a gap apart. Centring the number alone and pinning the arrow
+ * would leave "0" with its arrow thirty pixels away and "412k" with it
+ * close; as a group, the pair sits over the bars whatever the width.
+ */
+#define BURN_TOTAL_CY		56
+#define BURN_TOTAL_FONT_H	GAUGE_PCT_FONT_H	/* Montserrat 20: 22 */
+#define BURN_GLYPH_CY		57
+#define BURN_GLYPH_FONT_H	18	/* lv_font_montserrat_16 .line_height */
+#define BURN_GLYPH_GAP		6
+#define BURN_UNIT_CY		76
+
+/* The bars: 5 px wide on a 6 px pitch from x = 20, so twenty of them span
+ * 20..139, centred on BURN_CX. */
+#define BURN_BAR_X0		20
+#define BURN_BAR_W		5
+#define BURN_BAR_PITCH		6
+#define BURN_BASE_Y		148
+#define BURN_BAR_MAX_H		56
+#define BURN_BAR_MIN_H		2
+
+/* The hour axis under the baseline. A tick sits at the left edge of the
+ * bucket that starts an hour, and its number is centred under it -- 30 px
+ * holds "23" with room, and from x = 20 the first box still starts at 5. */
+#define BURN_TICK_H		3
+#define BURN_HOUR_CY		160
+#define BURN_HOUR_W		30
+
+/*
+ * The text rows, as wide as the half they sit in less a bezel each side.
+ * "999M/h <bullet> steady", the longest rate line, measures 114 px in
+ * Montserrat 14 (lv_text_get_size on host, 2026-10-31) -- more than the
+ * countdown's 96 px box it replaces, which is why it is not given that box.
+ * Centred on BURN_CX it spans 23..137, clear of the weekly countdown's box
+ * (192..287). The widest total and its arrow, "888M" and an arrow, are a
+ * 78 px group.
+ */
+#define BURN_TEXT_W		(SCR_MID_X - 2 * 5)
+
 #endif /* USAGE_LAYOUT_H */

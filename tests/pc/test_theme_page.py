@@ -1,0 +1,1289 @@
+"""The theme builder page's behaviour, run as a browser runs it.
+
+The review of fp/builder-look found three behaviour bugs in its field
+messages, each in a real browser, beside tests that checked the markup's
+structure: a hex box's typing error outlived the value it was about, the
+share box said "your board shows it now" over a code the board refused, and
+every render rewrote the live regions, so a screen reader heard the same
+warning over and over. These run the page's own script in node against
+tests/support/builder_dom.js, and each was checked to fail on the code the
+review read.
+"""
+import re
+
+import pytest
+
+from pc import theme_server
+from tests.support import builder_page
+
+SAVED_DARK = {"/api/state": {"status": 200,
+                             "body": {"saved": {"id": 0}, "draft": None}}}
+# A faint theme: text 3.4:1 on its ground, readable enough to send and
+# faint enough to earn a note under Text and Background.
+FAINT = {"/api/state": {"status": 200, "body": {"saved": {
+    "id": 12, "c": ["202020", "7a7a7a", "4387df", "0da243",
+                    "0da243", "ba8107", "ff1900"],
+    "w": 12, "ends": "round", "dot": 1, "by": "level"}, "draft": None}}}
+
+
+def _code(c, text="111111", bg="121212"):
+    import base64
+    import json
+    body = {"c": [bg, text] + c, "w": 12, "ends": "round", "dot": 1,
+            "by": "level"}
+    raw = json.dumps(body, separators=(",", ":")).encode()
+    return "BT1." + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def test_a_hex_boxs_error_goes_when_a_preset_replaces_its_value():
+    """S1: type #12345G, click away, pick Ocean. The box showed Ocean's
+    colour under "Use six hex digits", still aria-invalid."""
+    r = builder_page.run("""
+    await advance(10);
+    type('t-low', '#12345G');
+    const before = [$('m-low').textContent, $('t-low').getAttribute('aria-invalid')];
+    preset('Ocean');
+    await advance(10);
+    return { before, after: [$('m-low').textContent, $('t-low').getAttribute('aria-invalid'), $('t-low').value] };
+    """, SAVED_DARK)
+    assert r["before"] == ["Use six hex digits, 0 to 9 and A to F.", "true"]
+    msg, invalid, value = r["after"]
+    assert msg == "" and invalid == "false"
+    assert re.fullmatch(r"#[0-9A-F]{6}", value)
+
+
+def test_a_hex_boxs_error_goes_when_a_share_code_replaces_its_value():
+    r = builder_page.run(f"""
+    await advance(10);
+    type('t-mid', '#ZZZZZZ');
+    $('paste').focus(); $('paste').value = '{_code(["4387df", "0da243", "0da243", "ba8107", "ff1900"], text="e6e8eb", bg="0e1116")}';
+    $('load').click();
+    await advance(10);
+    return [$('m-mid').textContent, $('t-mid').getAttribute('aria-invalid')];
+    """, SAVED_DARK)
+    assert r == ["", "false"]
+
+
+def test_loaded_never_says_the_board_shows_a_code_it_refused():
+    """S2: a valid code with unreadable text said "Loaded. The preview and
+    your board show it now." while the bar said the board kept the last
+    preview."""
+    r = builder_page.run(f"""
+    await advance(10);
+    $('paste').focus(); $('paste').value = '{_code(["4387df", "0da243", "0da243", "ba8107", "ff1900"])}';
+    $('load').click();
+    await advance(300);
+    return {{ field: $('m-paste').textContent, bar: $('status-text').textContent,
+             previews: requests.filter(q => q.path === '/api/preview').length }};
+    """, SAVED_DARK)
+    assert r["previews"] == 0
+    assert "unreadable" in r["field"] and "board keeps the last preview" in r["field"]
+    assert "show it now" not in r["field"]
+
+
+def test_loaded_goes_once_the_owner_moves_on():
+    r = builder_page.run(f"""
+    await advance(10);
+    $('paste').focus(); $('paste').value = '{_code(["4387df", "0da243", "0da243", "ba8107", "ff1900"], text="e6e8eb", bg="0e1116")}';
+    $('load').click();
+    await advance(300);
+    const loaded = $('m-paste').textContent;
+    preset('Ocean');
+    const afterPreset = $('m-paste').textContent;
+    $('load').click();          // nothing pasted now: an error, then
+    pick('c-high', '#ff0000');  // a colour picked by hand clears it too
+    return [loaded, afterPreset, $('m-paste').textContent];
+    """, SAVED_DARK)
+    assert r == ["Loaded.", "", ""]
+
+
+def test_a_live_region_is_written_only_when_its_words_change():
+    """S5: ten ticks of the Session slider on a faint theme were twenty
+    rewrites of the two live notes, each one announced again."""
+    r = builder_page.run("""
+    await advance(300);
+    const at = liveWrites();
+    const note = $('m-text').textContent;
+    for (let i = 0; i < 10; i++) { $('p1').value = String(40 + i); $('p1').fire('input'); }
+    const after = liveWrites();
+    const grew = Object.keys(after).filter(k => after[k] !== at[k]);
+    return { note, grew, bgLive: $('m-bg').getAttribute('aria-live') };
+    """, FAINT)
+    assert r["note"].startswith("Faint: text is")
+    assert r["grew"] == []
+    assert r["bgLive"] is None        # it repeats m-text word for word
+
+
+# ------------------------------------------------------------- the CSS
+
+def _rules(css):
+    """(selector list, declarations) for each plain rule, @media bodies
+    included, comments dropped."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    out = []
+    for sel, body in re.findall(r"([^{}@]+)\{([^{}]*)\}", css):
+        decls = dict(
+            (k.strip(), v.strip()) for k, v in
+            (d.split(":", 1) for d in body.split(";") if ":" in d))
+        out.append(([s.strip() for s in sel.split(",")], decls))
+    return out
+
+
+def _px(v):
+    m = re.fullmatch(r"(\d+)px", v or "")
+    return int(m.group(1)) if m else None
+
+
+def test_every_control_rule_is_at_least_44_px_tall():
+    """S6: the segment buttons were 42 px, and the old check only found the
+    string "min-height: 44px" somewhere in the file. This reads the rule
+    each kind of control actually gets."""
+    page = theme_server.page()
+    css = page[page.index("<style>"):page.index("</style>")]
+    rules = _rules(css)
+    for control in (".btn", ".seg button", ".slot input[type=color]",
+                    ".slot input[type=text]", ".paste input",
+                    ".slider input", ".preset"):
+        heights = [max(_px(d.get("min-height")) or 0, _px(d.get("height")) or 0)
+                   for sels, d in rules if control in sels]
+        assert heights and max(heights) >= 44, (control, heights)
+
+
+# ------------------------------------------------- how a tab that ended reads
+#
+# A tab that stopped being the live builder says so in a popup over an inert
+# page, with the status bar's short sentence kept under it as the record.
+# The popup went once, for a status line (the owner met a fixed "no longer
+# active" heading four times and read it as a failure, at least twice after
+# a save that had worked, 2026-10-31), and came back the same day with the
+# countdown inside it and a heading of each ending's own ("lets do this in
+# the popup"). Each test here reads the popup itself, so a page without it
+# fails every one. The countdown has its own file: test_theme_close.py.
+
+ENDED = """
+    const hid = (id) => $(id).getAttribute('hidden') !== null;
+    const d = $('notice-dialog');
+    return {
+      shown: !hid('notice'),
+      title: $('notice-title').textContent, why: $('notice-why').textContent,
+      end: $('notice-end').textContent, endShown: !hid('notice-end'),
+      closeShown: !hid('notice-close'),
+      role: d.getAttribute('role'), modal: d.getAttribute('aria-modal'),
+      labelled: d.getAttribute('aria-labelledby'),
+      focused: document.activeElement === d,
+      inert: ['.top', '.studio'].map(s => document.querySelector(s).getAttribute('inert') !== null),
+      offer: !hid('notice-copy') && !hid('notice-keep-text'),
+      keep: $('notice-keep-text').textContent,
+      described: d.getAttribute('aria-describedby'),
+      status: $('status-text').textContent,
+      off: $('cancel').disabled,
+      live: document.querySelectorAll('header button, main button, main input')
+              .filter(e => !e.disabled).map(e => e.id || e.tagName),
+      closed: window.closed,
+    };
+"""
+
+_OCEAN = "preset('Ocean'); await advance(300);"
+_NEWER = """answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
+    await advance(20000);"""
+# A ping missed, and its retry 3 s later missed too.
+_NO_ANSWER = "answer('/api/ping', () => 'fail'); await advance(23100);"
+
+# What each ending's popup says: a heading of its own, and under it what
+# follows from the ending rather than the heading again. No ending says the
+# tab is inactive in so many words, the owner's dislike of 2026-10-31: the
+# phrase is built in two halves below so that the repo holds it nowhere.
+_DISLIKED = "no longer " + "active"
+SAVED = ("Saved.", "Your board keeps Dark.")
+CANCELLED = ("Cancelled.", "Your board is back on its saved theme.")
+SUPERSEDED_POPUP = ("Continued in a newer tab.",
+                    "This tab has handed over to the newer one.")
+STOPPED_POPUP = ("The builder stopped.",
+                 "Run blink theme on your computer to start it again.")
+# The status bar keeps a short version under the popup.
+SAVED_BAR = "Saved: Dark. Your board keeps it."
+CANCELLED_BAR = "Cancelled. Your board is back on its saved theme."
+SUPERSEDED = "Continued in a newer tab."
+STOPPED = "The builder stopped. Run blink theme on your computer to start it again."
+# The last line of a popup that closes itself, and of one that does not.
+COUNTING = "This tab closes in 5 s."
+CAN_CLOSE = "You can close this tab."
+# What the popup says when the tab holds changes nobody saved.
+KEEP_LINE = "Your changes here are not saved. Copy the share code to keep them."
+KEEP_AFTER_SAVE = ("Changes you made after saving are not on the board."
+                   " Copy the share code to keep them.")
+
+# reason: (what the tab does first, what ends it, (heading, sentence),
+#          the bar's sentence, the popup's last line, whether it holds a draft)
+REASONS = {
+    "saved": ("", "$('save').click(); await advance(10);", SAVED, SAVED_BAR,
+              COUNTING, False),
+    "cancelled": ("", "$('cancel').click(); await advance(10);", CANCELLED,
+                  CANCELLED_BAR, COUNTING, False),
+    "superseded": ("", _NEWER, SUPERSEDED_POPUP, SUPERSEDED, CAN_CLOSE, False),
+    "stopped, no answer": ("", _NO_ANSWER, STOPPED_POPUP, STOPPED, CAN_CLOSE,
+                           False),
+    "stopped, refused": (
+        "", "answer('/api/ping', () => ({ status: 403, body: {} })); await advance(23100);",
+        STOPPED_POPUP, STOPPED, CAN_CLOSE, False),
+    # A failed preview asks a ping, and the ping and its retry fail too.
+    "stopped, preview unanswered": (
+        "answer('/api/preview', () => 'fail'); answer('/api/ping', () => 'fail');",
+        "preset('Ocean'); await advance(3500);", STOPPED_POPUP, STOPPED,
+        None, True),
+    # Save refused as superseded is the newer tab's ending, not a save.
+    "save superseded": (
+        "", "answer('/api/save', () => ({ status: 409, body: {} })); $('save').click(); await advance(10);",
+        SUPERSEDED_POPUP, SUPERSEDED, CAN_CLOSE, False),
+    # Save unanswered is a stop, whatever the owner pressed.
+    "save unanswered": (
+        "", "answer('/api/save', () => 'fail'); $('save').click(); await advance(10);",
+        STOPPED_POPUP, STOPPED, CAN_CLOSE, False),
+    "cancel superseded": (
+        "", "answer('/api/cancel', () => ({ status: 409, body: {} })); $('cancel').click(); await advance(10);",
+        SUPERSEDED_POPUP, SUPERSEDED, CAN_CLOSE, False),
+    # Cancel unanswered is a stop too: the builder that was to be cancelled
+    # is not there, and "Cancelled." would say the board was put back when
+    # nothing was heard to have done it (review of fp/notice-title, SHOULD-1).
+    "cancel unanswered": (
+        "", "answer('/api/cancel', () => 'fail'); $('cancel').click(); await advance(10);",
+        STOPPED_POPUP, STOPPED, CAN_CLOSE, False),
+    # Save answered with something it does not expect (a proxy's 502, a
+    # 403 from a builder that is no longer this session's) is a stop as well,
+    # not a superseded tab and not a tab left live under "Saving...".
+    "save refused, not 400/409/500": (
+        "", "answer('/api/save', () => ({ status: 403, body: {} })); $('save').click(); await advance(10);",
+        STOPPED_POPUP, STOPPED, CAN_CLOSE, False),
+}
+
+
+@pytest.mark.parametrize("reason", REASONS)
+def test_every_ending_shows_the_popup_with_its_own_heading(reason):
+    before, ending, (title, sentence), bar, last, draft = REASONS[reason]
+    r = builder_page.run(f"""
+    await advance(10);
+    {before}
+    {ending}
+    """ + ENDED, SAVED_DARK)
+    assert r["shown"] is True
+    assert r["title"] == title
+    assert r["why"] == sentence
+    assert r["title"] != r["why"]
+    assert r["status"] == bar       # the short version, under the popup
+    assert (r["role"], r["modal"]) == ("dialog", "true")
+    assert r["labelled"] == "notice-title"
+    assert r["focused"] is True
+    assert r["inert"] == [True, True]
+    assert r["off"] is True
+    assert r["live"] == []          # every control behind it, copy included
+    # Nothing unsaved: the last line and the Close tab button. Something
+    # unsaved: the share code instead, and neither of those.
+    assert r["offer"] is draft
+    assert r["endShown"] is not draft and r["closeShown"] is not draft
+    if draft:
+        assert r["keep"] == KEEP_LINE
+    else:
+        assert r["end"] == last
+    for words in (r["title"], r["why"], r["end"], r["status"], r["keep"]):
+        assert _DISLIKED not in words.lower()
+
+
+def test_a_tab_whose_builder_never_answered_shows_the_popup():
+    r = builder_page.run("await advance(10);" + ENDED,
+                         {"/api/state": {"status": 500, "body": {}}})
+    assert r["shown"] is True
+    assert (r["title"], r["why"]) == STOPPED_POPUP
+    assert r["status"] == STOPPED and r["off"] is True
+    assert r["offer"] is False      # it never had the owner's theme
+
+
+def test_a_live_tab_shows_no_popup():
+    r = builder_page.run("await advance(10);" + _OCEAN + ENDED, SAVED_DARK)
+    assert r["shown"] is False
+    assert r["off"] is False
+    assert r["inert"] == [False, False]
+    assert "save" in r["live"] and "copy-code" in r["live"]
+
+
+@pytest.mark.parametrize("before, ending, offer", [
+    (_OCEAN, _NEWER, True),
+    ("", _NEWER, False),
+    (_OCEAN, _NO_ANSWER, True),
+    ("", _NO_ANSWER, False),
+    (_OCEAN, "$('save').click(); await advance(10);", False),
+    (_OCEAN, "$('cancel').click(); await advance(10);", False),
+], ids=["newer, draft", "newer, none", "stopped, draft", "stopped, none",
+        "saved", "cancelled"])
+def test_the_copy_button_is_offered_only_with_a_draft(before, ending, offer):
+    """Cancel throws the changes away on purpose and Save keeps them, so
+    only a tab taken over or stopped with changes in it offers them. The
+    popup's button is the only one that can; everything behind is off."""
+    r = builder_page.run(f"""
+    await advance(10);
+    {before}
+    {ending}
+    """ + ENDED, SAVED_DARK)
+    assert r["off"] is True
+    assert r["offer"] is offer
+    assert r["live"] == []
+
+
+def test_a_superseded_tab_with_nothing_unsaved_still_tries_to_close():
+    r = builder_page.run("await advance(10);" + _NEWER + ENDED, SAVED_DARK)
+    assert r["closed"] == 1
+    assert r["end"] == CAN_CLOSE       # what stays when the browser refuses
+
+
+def test_a_superseded_tab_with_a_draft_does_not_close():
+    r = builder_page.run("await advance(10);" + _OCEAN + _NEWER + ENDED,
+                         SAVED_DARK)
+    assert r["closed"] == 0 and r["offer"] is True
+    assert r["keep"] == KEEP_LINE
+    assert r["status"] == SUPERSEDED
+
+
+def test_the_popups_copy_button_copies_the_share_code():
+    r = builder_page.run("""
+    await advance(10);
+    pick('c-high', '#ff0000');
+    await advance(300);
+    """ + _NEWER + """
+    $('notice-copy').click();
+    await flush();
+    return { wrote: clipboard.writes, box: $('code').dataset.plain,
+             label: $('notice-copy').querySelector('.lbl').textContent };
+    """, SAVED_DARK)
+    assert r["box"].startswith("blink theme set BT1.")
+    assert r["wrote"] == [r["box"]]
+    assert r["label"] == "Copied"
+
+
+def test_nothing_else_can_be_reached_or_sent_from_an_ended_tab():
+    """Every other control is disabled, and a click that arrives anyway,
+    past disabled, the way a script or an extension could, sends nothing."""
+    r = builder_page.run("""
+    await advance(10);
+    """ + _OCEAN + _NEWER + """
+    const before = requests.length;
+    ['save', 'cancel', 'load', 'copy-cmd', 'copy-code'].forEach(id => $(id).fire('click'));
+    pick('c-high', '#00ff00');
+    preset('Forest');
+    await advance(400);
+    return { sent: requests.length - before, off: ['save', 'cancel', 'load',
+             'copy-cmd', 'copy-code', 'paste'].every(id => $(id).disabled) };
+    """, SAVED_DARK)
+    assert r["sent"] == 0 and r["off"] is True
+
+
+def test_focus_stays_inside_the_popup():
+    """With a share code to copy, the ring is the card and that button;
+    with nothing unsaved it is the card and Close tab. Shift+Tab goes round
+    the other way, and focus pulled out is put back."""
+    for before, button in ((_OCEAN, "notice-copy"), ("", "notice-close")):
+        r = builder_page.run("""
+    await advance(10);
+    """ + before + _NEWER + """
+    const d = $('notice-dialog'), at = [];
+    const name = () => document.activeElement === d ? 'dialog' : document.activeElement.id;
+    for (let i = 0; i < 3; i++) {
+      const e = document.fire('keydown', { key: 'Tab' });
+      at.push([name(), !!e.prevented]);
+    }
+    const back = [];
+    for (let i = 0; i < 2; i++) { document.fire('keydown', { key: 'Tab', shiftKey: true }); back.push(name()); }
+    $('save').focus();
+    document.fire('focusin', { target: $('save') });
+    return { at, back, pulled: document.activeElement === d };
+    """, SAVED_DARK)
+        assert r["at"] == [[button, True], ["dialog", True], [button, True]]
+        assert r["back"] == ["dialog", button]
+        assert r["pulled"] is True
+
+
+_SAVE = "$('save').click(); await advance(10);"
+_CANCEL = "$('cancel').click(); await advance(10);"
+_KEEP = "notice-why notice-keep-text"
+_PLAIN = "notice-why notice-end"
+
+
+@pytest.mark.parametrize("before, ending, described", [
+    ("", _SAVE, _PLAIN), (_OCEAN, _SAVE, _PLAIN),
+    (_OCEAN, _CANCEL, _PLAIN), ("", _NEWER, _PLAIN),
+    (_OCEAN, _NEWER, _KEEP), ("", _NO_ANSWER, _PLAIN),
+    (_OCEAN, _NO_ANSWER, _KEEP),
+], ids=["saved", "saved, after a change", "cancelled", "newer, none",
+        "newer, draft", "stopped, none", "stopped, draft"])
+def test_the_dialog_is_described_by_only_what_it_shows(before, ending,
+                                                       described):
+    """M1: the description named the "not saved" line in every case, and a
+    description reads an element it names even while it is hidden, so
+    Chromium's accessibility tree read a saved tab as the saved sentence
+    followed by "Your changes here are not saved." """
+    r = builder_page.run(f"""
+    await advance(10);
+    {before}
+    {ending}
+    """ + ENDED, SAVED_DARK)
+    assert r["described"] == described
+
+
+def test_a_reply_landing_after_the_ending_does_not_replace_it():
+    """S1: a ping's reply held back past Save's, then saying a newer tab
+    took over, reaches superseded() after the tab has already ended as
+    saved. Only the guard in retire() keeps the bar saying saved."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const h = hold();
+    answer('/api/ping', () => h.p);
+    await advance(19700);                       // the ping is out, held
+    $('save').click(); await advance(10);       // saved
+    h.release({ status: 200, body: { ok: true, newer: true } }); await advance(10);
+    """ + ENDED, SAVED_DARK)
+    assert r["status"] == "Saved: Ocean. Your board keeps it."
+    assert r["offer"] is False
+
+
+# Save held from t = 19610, just before the 20 s ping. The ping and its
+# retry 3 s later both miss, so a stop is owed while Save is still out,
+# well inside Save's 10 s deadline.
+_OWED = """
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    await advance(19300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    answer('/api/ping', () => 'fail');
+    $('save').click(); await advance(10);
+    await advance(3500);
+    const during = !$('cancel').disabled;
+"""
+
+
+def test_a_save_in_flight_outranks_a_failure_that_lands_first():
+    """N3: a failure settling before Save's reply said "stopped" over a save
+    that the server had stored."""
+    r = builder_page.run(_OWED + """
+    s.release({ status: 200, body: { ok: true } }); await advance(10);
+    """ + ENDED.replace("return {", "return { during,"), SAVED_DARK)
+    assert r["during"] is True                  # not ended while Save is out
+    assert r["status"] == "Saved: Ocean. Your board keeps it."
+
+
+def test_a_save_that_never_answers_lets_a_held_stop_through():
+    """R2-MUST: a Save stuck inside the server held every stop back for
+    good. After the server's own handler timeout the stop shows."""
+    r = builder_page.run(_OWED + """
+    const before = !$('cancel').disabled;
+    await advance(7000);                        // past t = 29610
+    """ + ENDED.replace("return {", "return { during, before,"), SAVED_DARK)
+    assert r["during"] is True and r["before"] is True
+    assert r["off"] is True
+    assert r["status"] == STOPPED and r["keep"] == KEEP_LINE
+    assert r["offer"] is True
+
+
+def test_a_save_that_never_answers_with_nothing_owed_asks_a_ping():
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    answer('/api/save', () => hold().p);
+    $('save').click(); await advance(10);
+    const pings = () => requests.filter(q => q.path === '/api/ping').length;
+    const at = pings();
+    await advance(10100);
+    return [at, pings(), $('save').disabled, !$('cancel').disabled];
+    """, SAVED_DARK)
+    assert r == [1, 2, False, True]   # asked; the builder is up; Save again
+
+
+def test_a_save_refused_with_an_error_says_why_and_keeps_the_tab():
+    """R2-S1: Save answering 500 proves the builder is up, but a stop owed
+    from before still won, sending the owner to restart a builder that was
+    running and never saying why the save failed."""
+    r = builder_page.run(_OWED + """
+    answer('/api/ping', () => ({ status: 200, body: { ok: true } }));
+    s.release({ status: 500, body: { error: 'Not saved: this computer could not write the theme file.' } });
+    await advance(10);
+    await advance(3500);
+    """ + ENDED.replace("return {", "return { during, save: $('save').disabled,"), SAVED_DARK)
+    assert r["during"] is True
+    assert r["off"] is False
+    assert r["status"] == "Not saved: this computer could not write the theme file."
+    assert r["save"] is False and "paste" in r["live"]
+
+
+def test_a_save_refused_with_an_error_then_a_dead_builder_stops():
+    r = builder_page.run(_OWED + """
+    s.release({ status: 500, body: { error: 'Not saved: no.' } });
+    await advance(10);
+    const said = $('status-text').textContent;
+    await advance(3500);                        // the ping and its retry miss
+    """ + ENDED.replace("return {", "return { said,"), SAVED_DARK)
+    assert r["said"] == "Not saved: no."
+    assert r["off"] is True and r["status"] == STOPPED and r["keep"] == KEEP_LINE
+
+
+def test_one_failed_preview_asks_a_ping_rather_than_stopping():
+    """R2-N1: one dropped preview retired a live tab at once."""
+    r = builder_page.run("""
+    await advance(10);
+    let n = 0;
+    answer('/api/preview', () => (++n === 1 ? 'fail' : { status: 200, body: { ok: true } }));
+    preset('Ocean'); await advance(300);
+    const pings = requests.filter(q => q.path === '/api/ping').length;
+    preset('Forest'); await advance(300);
+    """ + ENDED.replace("return {", "return { pings,"), SAVED_DARK)
+    assert r["pings"] == 2            # the one at load, and the one asked
+    assert r["off"] is False
+    assert r["status"].startswith("Preview sent: Forest")
+
+
+def test_save_is_off_while_one_is_out():
+    """R2-N2: a second click shared the first's state."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    $('save').click(); await advance(10);
+    const during = $('save').disabled;
+    pick('c-high', '#ff0000'); await advance(10);   // a render: still off
+    const rendered = $('save').disabled;
+    $('save').click(); await advance(10);
+    const saves = requests.filter(q => q.path === '/api/save').length;
+    s.release({ status: 400, body: { error: 'Refused.' } }); await advance(10);
+    return [during, rendered, saves, $('save').disabled];
+    """, SAVED_DARK)
+    assert r == [True, True, 1, False]
+
+
+def test_one_missed_ping_is_asked_again_before_the_tab_stops():
+    """N2: one dropped request on loopback ended a live tab for good."""
+    r = builder_page.run("""
+    await advance(10);
+    let n = 0;
+    answer('/api/ping', () => (++n === 1 ? 'fail' : { status: 200, body: { ok: true } }));
+    await advance(20000);
+    const after1 = !$('cancel').disabled;
+    await advance(3100);
+    const pings = requests.filter(q => q.path === '/api/ping').length;
+    """ + ENDED.replace("return {", "return { after1, pings,"), SAVED_DARK)
+    assert r["after1"] is True
+    assert r["pings"] == 3            # load, the miss, its retry
+    assert r["off"] is False and r["live"]
+
+
+def test_two_missed_pings_stop_the_tab():
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/ping', () => 'fail');
+    await advance(20000);
+    const early = $('cancel').disabled;
+    await advance(3100);
+    """ + ENDED.replace("return {", "return { early,"), SAVED_DARK)
+    assert r["early"] is False
+    assert r["off"] is True and r["status"] == STOPPED
+
+
+def test_a_tab_back_from_the_back_forward_cache_asks_at_once():
+    """S2: such a tab sent /api/closed as it left, and the builder may have
+    ended since."""
+    r = builder_page.run("""
+    await advance(10);
+    const count = () => requests.filter(q => q.path === '/api/ping').length;
+    const at = count();
+    (window.listeners.pageshow || []).forEach(f => f({ persisted: false }));
+    await flush();
+    const fresh = count();
+    (window.listeners.pageshow || []).forEach(f => f({ persisted: true }));
+    await flush();
+    return [at, fresh, count()];
+    """, SAVED_DARK)
+    assert r == [1, 1, 2]
+
+
+def test_a_refused_clipboard_shows_the_code_in_the_popup_selected():
+    """S3: the code's own box is behind the popup and inert, so a refused
+    copy shows the code in the card and selects it there."""
+    r = builder_page.run("""
+    await advance(10);
+    """ + _OCEAN + _NEWER + """
+    clipboard.refuse = true;
+    const before = $('notice-code').getAttribute('hidden') !== null;
+    $('notice-copy').click();
+    await flush();
+    return { before, shown: $('notice-code').getAttribute('hidden') === null,
+             text: $('notice-code').textContent, box: $('code').dataset.plain,
+             selected: selection.node === $('notice-code'),
+             label: $('notice-copy').querySelector('.lbl').textContent };
+    """, SAVED_DARK)
+    assert r["before"] is True and r["shown"] is True
+    assert r["text"] == r["box"] and r["text"].startswith("blink theme set")
+    assert r["selected"] is True
+    assert r["label"] == "Selected"
+
+
+def test_a_tab_with_nothing_to_copy_is_not_told_to_copy():
+    """N1: a tab superseded before it heard its saved theme said "copy the
+    share code" in the bar while nothing offered it. It still does
+    not close, since it cannot know it holds nothing. The newer tab is
+    heard from a ping asked on coming back into view, inside the 10 s that
+    /api/state is now given (R4-N2); the 20 s timer's ping came after it,
+    when the unanswered state had already ended the tab."""
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
+    document.fire('visibilitychange'); await advance(10);
+    """ + ENDED, {"/api/state": "hold"})
+    assert r["status"] == SUPERSEDED
+    assert r["offer"] is False
+    assert r["closed"] == 0
+
+
+def test_the_page_writes_no_markup_from_script():
+    """The ending's words, like every other word the script writes, go in
+    by textContent."""
+    _, script = builder_page.page_parts()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML",
+                 "document.write"):
+        assert sink not in script, sink
+
+
+def test_the_popup_fades_only_for_those_who_allow_motion():
+    page = theme_server.page()
+    css = re.sub(r"/\*.*?\*/", "",
+                 page[page.index("<style>"):page.index("</style>")], flags=re.S)
+    assert re.search(r"\.notice\s*\{[^}]*animation:\s*notice-in", css)
+    # Nothing in the page, markup, style or script, uses the phrase the
+    # owner disliked (2026-10-31).
+    assert _DISLIKED not in page.lower()
+    assert "id=\"notice-close\"" in page and "Close tab" in page
+    # Reduced motion still takes every animation away.
+    css = re.sub(r"/\*.*?\*/", "",
+                 page[page.index("<style>"):page.index("</style>")], flags=re.S)
+    reduced = re.search(
+        r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\}\s*\}", css,
+        re.S)
+    assert reduced and "animation: none !important" in reduced.group(1)
+
+
+def test_a_preview_that_fails_with_the_builder_up_says_so():
+    """R3-S1: a preview failing on a full disk asked a ping, the ping came
+    back alive, and the bar went on saying the board showed each change.
+    The theme is still unsent, so choosing it again sends it again."""
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/preview', () => 'fail');
+    preset('Ocean'); await advance(300);
+    const said = $('status-text').textContent, bad = $('status').classList.contains('err');
+    answer('/api/preview', () => ({ status: 200, body: { ok: true } }));
+    preset('Ocean'); await advance(300);
+    return { said, bad, ended: $('cancel').disabled,
+             previews: requests.filter(q => q.path === '/api/preview').length,
+             now: $('status-text').textContent };
+    """, SAVED_DARK)
+    assert r["said"] == "The preview did not reach your board."
+    assert r["bad"] is True and r["ended"] is False
+    assert r["previews"] == 2
+    assert r["now"].startswith("Preview sent: Ocean")
+
+
+def test_a_change_made_while_save_is_out_stays_unsaved():
+    """R3-N2: savedKey took the page as it was when Save's reply came, so
+    a colour changed in between counted as saved, and was never offered."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    $('save').click(); await advance(10);
+    const sent = requests.filter(q => q.path === '/api/save')[0].body;
+    pick('c-high', '#ff0000'); await advance(10);
+    s.release({ status: 200, body: { ok: true } }); await advance(10);
+    $('notice-copy').click(); await flush();
+    """ + ENDED.replace("return {", "return { sent, copied: clipboard.writes,"), SAVED_DARK)
+    assert r["sent"]["id"] != 12      # Ocean, a built-in, went to the server
+    # Under "Saved" the usual "Your changes here are not saved." read as a
+    # contradiction at a glance (review of fp/notice-title, NICE-3): this
+    # line says which changes it means, and says the share code is there.
+    assert r["status"] == "Saved: Ocean. Your board keeps it."
+    assert r["keep"] == KEEP_AFTER_SAVE
+    assert r["offer"] is True and r["live"] == []
+    assert r["endShown"] is False and r["closeShown"] is False
+    assert len(r["copied"]) == 1 and r["copied"][0].startswith("blink theme set BT1.")
+
+
+@pytest.mark.parametrize("ending", [_NEWER, _NO_ANSWER],
+                         ids=["newer", "stopped"])
+def test_changes_that_were_never_saved_are_offered_as_not_saved(ending):
+    r = builder_page.run(f"""
+    await advance(10);
+    {_OCEAN}
+    {ending}
+    """ + ENDED, SAVED_DARK)
+    assert r["offer"] is True
+    assert r["keep"] == KEEP_LINE
+
+
+def test_a_server_that_never_answers_ends_the_tab():
+    """R3-N3: a server that takes the connection and never answers held
+    every ping forever, so the tab looked live for good. Each ping is given
+    up on after 10 s, then its retry, then the end."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    answer('/api/ping', () => hold().p);
+    await advance(29000);                       // the 20 s ping, 9 s in
+    const at29 = !$('cancel').disabled;
+    await advance(16000);                       // abort, retry, abort
+    const limited = requests.filter(q => q.path === '/api/ping').every(q => q.limited);
+    """ + ENDED.replace("return {", "return { at29, limited,"), SAVED_DARK)
+    assert r["at29"] is True
+    assert r["limited"] is True
+    assert r["off"] is True and r["status"] == STOPPED and r["keep"] == KEEP_LINE
+    assert r["offer"] is True
+
+
+def test_a_save_is_not_given_up_on_by_the_request_limit():
+    """Save keeps its own deadline, and its answer still counts after it:
+    one stuck 15 s in the server still saved, in Chromium."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    $('save').click(); await advance(15000);
+    s.release({ status: 200, body: { ok: true } }); await advance(10);
+    """ + ENDED, SAVED_DARK)
+    assert r["status"] == "Saved: Ocean. Your board keeps it."
+
+
+def test_saving_shows_until_a_late_answer():
+    """R3-N4: between Save's deadline and a late answer, Save was back on
+    and the bar said something else, as if the click had been lost."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const s = hold();
+    answer('/api/save', () => s.p);
+    $('save').click(); await advance(10);
+    const click = $('status-text').textContent;
+    preset('Forest'); await advance(300);       // a preview says its piece
+    const preview = $('status-text').textContent;
+    await advance(10000);                       // past the deadline
+    const late = [$('status-text').textContent, $('save').disabled];
+    s.release({ status: 200, body: { ok: true } }); await advance(10);
+    return { click, preview, late,
+             end: $('status-text').textContent,
+             keep: $('notice-keep-text').textContent };
+    """, SAVED_DARK)
+    assert r["click"] == "Saving…"
+    assert r["preview"].startswith("Preview sent: Forest")
+    assert r["late"] == ["Saving…", False]
+    # Forest was chosen after the save went out, so it is a change the
+    # board does not have and the popup says where to take it from.
+    assert r["end"] == "Saved: Ocean. Your board keeps it."
+    assert r["keep"] == KEEP_AFTER_SAVE
+
+
+def test_a_late_ping_from_a_failed_preview_does_not_undo_a_newer_one():
+    """R4-N1, probe A: preview A failed and the ping it asked was slow;
+    preview B went through; then A's ping came back alive and wrote "did
+    not reach your board" over B's "Preview sent", though the board showed
+    B. A's news is older than B's, so B's stands."""
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/preview', () => 'fail');
+    const slow = hold();
+    answer('/api/ping', () => slow.p);
+    preset('Ocean'); await advance(300);        // A fails, its ping is out
+    answer('/api/preview', () => ({ status: 200, body: { ok: true } }));
+    preset('Forest'); await advance(300);       // B goes through
+    const sent = $('status-text').textContent;
+    slow.release({ status: 200, body: { ok: true } }); await advance(10);
+    return { sent, now: $('status-text').textContent,
+             bad: $('status').classList.contains('err') };
+    """, SAVED_DARK)
+    assert r["sent"].startswith("Preview sent: Forest")
+    assert r["now"] == r["sent"]
+    assert r["bad"] is False
+
+
+def test_a_late_ping_still_says_unsent_when_nothing_newer_went_through():
+    """The other side of R4-N1: a slow ping with no preview through since
+    still says the failed one did not reach the board."""
+    r = builder_page.run("""
+    await advance(10);
+    answer('/api/preview', () => 'fail');
+    const slow = hold();
+    answer('/api/ping', () => slow.p);
+    preset('Ocean'); await advance(300);
+    preset('Forest'); await advance(300);       // fails too, no newer news
+    slow.release({ status: 200, body: { ok: true } }); await advance(10);
+    return $('status-text').textContent;
+    """, SAVED_DARK)
+    assert r == "The preview did not reach your board."
+
+
+def test_a_state_that_never_answers_ends_the_tab():
+    """R4-N2, probe E: a GET /api/state that never answered left the bar at
+    "Loading your current theme." for good. It is given up on after 10 s,
+    the same limit the posts have, and ends as a refused one does."""
+    r = builder_page.run("""
+    await advance(9000);
+    const at9 = [!$('cancel').disabled,
+                 $('status-text').textContent];
+    await advance(1100);
+    const limited = requests.filter(q => q.path === '/api/state').every(q => q.limited);
+    """ + ENDED.replace("return {", "return { at9, limited,"),
+                         {"/api/state": "hold"})
+    assert r["at9"] == [True, "Loading your current theme. You can make"
+                       " changes once it is here."]
+    assert r["limited"] is True
+    assert r["off"] is True and r["status"] == STOPPED
+    assert r["offer"] is False      # it never had the owner's theme
+
+
+# ------------------------------------------- nothing is sent before the state
+#
+# NN-3 of the review of fp/tab-notice-nice, probe P5: Save was live before
+# GET /api/state answered, and a tab that never read the owner's theme saved
+# the page's own default over it ("Saved: Dark"). A preview from then reached
+# the board too, and the state landing next threw the edit away under a bar
+# that said the board showed the saved theme. The state here is "held", so
+# it answers when the test says, and the owner's theme is Synthwave, so a
+# save of Dark, the page's default, cannot pass for it.
+
+_RELEASE_SYNTHWAVE = ("held['/api/state'][0].release({ status: 200, body: "
+                      "{ saved: { id: 5 }, draft: null } }); await advance(10);")
+_FORM = "document.querySelectorAll('main button, main input, #copy-code')"
+
+
+def test_save_is_off_until_the_state_answers():
+    r = builder_page.run("""
+    await advance(10);
+    const before = $('save').disabled;
+    $('save').fire('click');     // a click that arrives anyway is ignored
+    await advance(10);
+    const early = requests.filter(q => q.path === '/api/save').length;
+    """ + _RELEASE_SYNTHWAVE + """
+    const after = $('save').disabled;
+    $('save').click(); await advance(10);
+    return { before, early, after, status: $('status-text').textContent,
+             sent: requests.filter(q => q.path === '/api/save').map(q => q.body) };
+    """, {"/api/state": "held"})
+    assert r["before"] is True and r["early"] == 0
+    assert r["after"] is False
+    assert r["sent"] == [{"id": 5}]
+    assert r["status"] == "Saved: Synthwave. Your board keeps it."
+
+
+def test_nothing_is_previewed_before_the_state_answers():
+    """A preset click and a typed colour before the state are not sent, and
+    the form is off and says it is waiting until the state is here."""
+    r = builder_page.run("""
+    await advance(10);
+    const off = """ + _FORM + """.every(e => e.disabled);
+    const busy = document.querySelector('main').getAttribute('aria-busy');
+    const ocean = document.querySelectorAll('#presets button').find(b => b.querySelector('.pn').textContent === 'Ocean');
+    ocean.fire('click');         // arriving past disabled, as Save's does
+    $('t-low').value = '#123456'; $('t-low').fire('input');
+    await advance(300);
+    const early = requests.filter(q => q.path === '/api/preview').length;
+    """ + _RELEASE_SYNTHWAVE + """
+    const on = """ + _FORM + """.every(e => !e.disabled);
+    const busyAfter = document.querySelector('main').getAttribute('aria-busy');
+    const bar = $('status-text').textContent;
+    preset('Ocean'); await advance(300);
+    return { off, busy, early, on, busyAfter, bar,
+             previews: requests.filter(q => q.path === '/api/preview').map(q => q.body) };
+    """, {"/api/state": "held"})
+    assert r["off"] is True and r["busy"] == "true"
+    assert r["early"] == 0
+    assert r["on"] is True and r["busyAfter"] is None
+    assert r["bar"] == ("This is the theme your board has now. Changes show"
+                        " on it as a preview.")
+    assert r["previews"] == [{"id": 4}]
+
+
+@pytest.mark.parametrize("ending", [
+    "held['/api/state'][0].release({ status: 500, body: {} }); await advance(10);",
+    "await advance(10100);"], ids=["refused", "never answers"])
+def test_a_tab_whose_state_never_came_never_turns_save_on(ending):
+    """Stopped before the owner's theme was here: Save stays off, and a
+    click that arrives anyway sends nothing."""
+    r = builder_page.run("""
+    await advance(10);
+    const early = $('save').disabled;
+    """ + ending + """
+    $('save').fire('click'); await advance(10);
+    return { early, now: $('save').disabled, status: $('status-text').textContent,
+             saves: requests.filter(q => q.path === '/api/save').length };
+    """, {"/api/state": "held"})
+    assert r["early"] is True and r["now"] is True
+    assert r["status"] == STOPPED
+    assert r["saves"] == 0
+
+
+def test_a_tab_taken_over_while_its_state_was_out_stays_off():
+    """The state landing after the tab has ended does not turn its form
+    back on after it has ended."""
+    r = builder_page.run("""
+    await advance(10);
+    const early = $('save').disabled;
+    answer('/api/ping', () => ({ status: 200, body: { ok: true, newer: true } }));
+    document.fire('visibilitychange'); await advance(10);
+    """ + _RELEASE_SYNTHWAVE + ENDED.replace("return {", "return { early,"),
+                         {"/api/state": "held"})
+    assert r["early"] is True
+    assert r["status"] == SUPERSEDED
+    assert r["live"] == []
+
+
+def test_a_handler_dispatched_past_disabled_before_the_state_does_nothing():
+    """Review of fp/save-before-load, N1 and S1: every control that
+    changes the theme or copies it is fired by script before the state,
+    past its disabled, the way an extension could. With saved: null the
+    state leaves the page's colours as they are, so any change that got in
+    would survive it and be what Save writes (probe P7), and a share code
+    loaded then kept its "Loaded." over a page that no longer showed it
+    (P6). Each handler is fired alone in effect: all the others are
+    guarded, so any one unguarded changes what Save sends, the message
+    under the share box, or the clipboard."""
+    r = builder_page.run(f"""
+    await advance(10);
+    const by = (sel, key, v) => document.querySelectorAll(sel).find(b => b.dataset[key] === v);
+    document.querySelectorAll('#presets button').find(b => b.querySelector('.pn').textContent === 'Ocean').fire('click');
+    $('c-low').value = '#123456'; $('c-low').fire('input');
+    $('t-mid').value = '#654321'; $('t-mid').fire('input');
+    by('[data-m]', 'm', 'gauge').fire('click');
+    by('[data-w]', 'w', '22').fire('click');
+    by('[data-e]', 'e', 'flat').fire('click');
+    by('[data-d]', 'd', 'off').fire('click');
+    $('paste').value = '{_code(["4387df", "0da243", "0da243", "ba8107", "ff1900"], text="e6e8eb", bg="0e1116")}';
+    $('load').fire('click');
+    $('copy-cmd').fire('click'); $('copy-code').fire('click');
+    await advance(300);
+    held['/api/state'][0].release({{ status: 200, body: {{ saved: null, draft: null }} }}); await advance(10);
+    const paste = $('m-paste').textContent, copied = clipboard.writes.slice();
+    $('save').click(); await advance(10);
+    return {{ paste, copied, sent: requests.filter(q => q.path === '/api/save').map(q => q.body),
+             previews: requests.filter(q => q.path === '/api/preview').length }};
+    """, {"/api/state": "held"})
+    assert r["sent"] == [{"id": 0}]    # the page's default, untouched
+    assert r["paste"] == ""
+    assert r["copied"] == []
+    assert r["previews"] == 0
+
+
+def test_the_controls_dim_only_once_a_state_is_slow():
+    """N3: dimmed from the first frame, a state answered on loopback in a
+    few milliseconds flashed the controls dim. They dim at 150 ms, and
+    come back when the state lands."""
+    r = builder_page.run("""
+    const cls = () => document.querySelector('main').classList.contains('waiting');
+    await advance(100);
+    const at100 = cls();
+    await advance(100);
+    const at200 = cls();
+    """ + _RELEASE_SYNTHWAVE + """
+    return { at100, at200, after: cls() };
+    """, {"/api/state": "held"})
+    assert r == {"at100": False, "at200": True, "after": False}
+
+
+def test_a_tab_that_ends_before_the_dim_never_dims():
+    """Review of fp/save-before-load r2, NICE 1: the 150 ms timer outlived
+    a state refused at 10 ms, and dimmed the controls of a tab that had ended.
+    gone() ends it with the tab."""
+    r = builder_page.run("""
+    const cls = () => document.querySelector('main').classList.contains('waiting');
+    await advance(10);
+    held['/api/state'][0].release({ status: 500, body: {} }); await advance(10);
+    const ended = $('cancel').disabled;
+    await advance(300);
+    return { ended, dim: cls() };
+    """, {"/api/state": "held"})
+    assert r == {"ended": True, "dim": False}
+
+
+def test_a_tab_that_ends_after_the_dim_takes_it_off():
+    """Review of fp/docs-pass, N8: a state slower than 150 ms and then
+    refused left the dim on, and main marked busy, on a tab that had ended. The
+    tab has ended rather than still loading, so gone() takes both off."""
+    r = builder_page.run("""
+    const main = document.querySelector('main');
+    await advance(200);
+    const before = [main.classList.contains('waiting'), main.getAttribute('aria-busy')];
+    held['/api/state'][0].release({ status: 500, body: {} }); await advance(10);
+    return { before, dim: main.classList.contains('waiting'),
+             busy: main.getAttribute('aria-busy'),
+             ended: $('cancel').disabled };
+    """, {"/api/state": "held"})
+    assert r == {"before": [True, "true"], "dim": False, "busy": None,
+                 "ended": True}
+
+
+def test_the_loading_dim_leaves_the_words_readable():
+    """N2: opacity .6 on the whole studio put the dim text, the lede and
+    each description, at 2.6 to 2.9:1 in both schemes. The dim is on the
+    controls alone, and never on .btn, which has its own disabled look."""
+    page = theme_server.page()
+    css = page[page.index("<style>"):page.index("</style>")]
+    busy = [(sels, d) for sels, d in _rules(css)
+            if any("waiting" in s or "aria-busy" in s for s in sels)]
+    assert busy
+    for sels, d in busy:
+        for s in sels:
+            assert re.search(r"(button:not\(\.btn\)|input)$", s), s
+
+
+# ------------------------------------- a preview nothing is going to show
+#
+# Review of 1.4.0 (builder), S3. The daemon sends theme lines only to a board
+# whose caps list "theme", and a preview waits in theme_preview.json for the
+# daemon to take it. With a 1.3.4 board, or with no bridge running, every
+# preview was accepted (200) and the bar still said "Preview sent: Ocean is
+# on your board until you save or cancel", over a board that was never going
+# to show it. This release is exactly that window: the notes say to run
+# `blink update` and then tap to install the firmware, and advertise `blink
+# theme` with "Every change shows on the board as you make it."
+
+def _state(**more):
+    body = {"saved": {"id": 0}, "draft": None}
+    body.update(more)
+    return {"/api/state": {"status": 200, "body": body}}
+
+
+OLD_BOARD = _state(board={"themes": False})
+
+
+def test_a_board_that_takes_no_themes_is_said_so_on_load():
+    r = builder_page.run("""
+    await advance(10);
+    return $('status-text').textContent;
+    """, OLD_BOARD)
+    assert r == ("Your board's firmware does not show themes yet. Update it"
+                 " to see previews.")
+
+
+def test_a_preview_is_not_called_sent_to_a_board_that_takes_no_themes():
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    return { said: $('status-text').textContent,
+             ok: $('status').classList.contains('ok'),
+             sent: requests.filter(q => q.path === '/api/preview').length };
+    """, OLD_BOARD)
+    assert r["sent"] == 1                  # kept: a save is sent later
+    assert r["ok"] is False
+    assert r["said"] == ("Your board's firmware does not show themes yet, so"
+                         " there is no preview. A saved theme is sent once"
+                         " the board is updated.")
+
+
+@pytest.mark.parametrize("board", [None, {"themes": None}, {"themes": True}],
+                         ids=["no board key", "unknown", "takes themes"])
+def test_a_board_that_may_take_themes_keeps_the_old_words(board):
+    more = {} if board is None else {"board": board}
+    r = builder_page.run("""
+    await advance(10);
+    const load = $('status-text').textContent;
+    preset('Ocean'); await advance(300);
+    return [load, $('status-text').textContent];
+    """, _state(**more))
+    assert r[0] == ("This is the theme your board has now. Changes show on it"
+                    " as a preview.")
+    assert r[1] == "Preview sent: Ocean is on your board until you save or cancel."
+
+
+_TAKEN = """
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    const sent = $('status-text').textContent;
+    answer('/api/state', () => ({ status: 200, body: { saved: { id: 0 }, draft: null, waiting_s: %s } }));
+    await advance(6500);
+    return [sent, $('status-text').textContent, $('status').classList.contains('err'),
+            requests.filter(q => q.path === '/api/state').length];
+"""
+
+
+def test_a_preview_nothing_has_taken_is_said_not_to_be_on_the_board():
+    sent, now, err, asked = builder_page.run(_TAKEN % "7", SAVED_DARK)
+    assert sent.startswith("Preview sent: Ocean")
+    assert now == ("Nothing has taken this preview yet. Is BLINK running and"
+                   " the board plugged in? blink status tells you.")
+    assert err is True
+    assert asked == 2                      # the load, and this one
+
+
+def test_a_preview_the_daemon_took_keeps_its_words():
+    sent, now, err, asked = builder_page.run(_TAKEN % "null", SAVED_DARK)
+    assert now == sent and err is False
+    assert asked == 2
+
+
+def test_the_check_does_not_write_over_a_newer_message():
+    """The bar said something else by the time the answer came (the text
+    went unreadable, say): that stands."""
+    r = builder_page.run("""
+    await advance(10);
+    preset('Ocean'); await advance(300);
+    answer('/api/state', () => ({ status: 200, body: { saved: { id: 0 }, draft: null, waiting_s: 9 } }));
+    type('t-text', '#0e1116'); await advance(400);        // text on its ground
+    const mid = $('status-text').textContent;
+    await advance(6500);
+    return [mid, $('status-text').textContent];
+    """, SAVED_DARK)
+    assert r[0] == r[1] and "Preview sent" not in r[1]
+
+
+# ------------------------------- the contrast words match the floor enforced
+#
+# Review of 1.4.0 (builder), N2. The page rounded to one decimal and named a
+# floor of 3:1, so 949494 on white (3.0335) read "Text is unreadable: 3.0:1.
+# It needs at least 3:1" with Save off, and 777777 (4.478) read "Text is
+# faint: 4.5:1 ... 4.5:1 or more is better". The floor is 3.05
+# (MIN_CONTRAST), and a ratio is cut to two decimals, never rounded up to
+# the number it fell short of.
+
+def _text_on_white(colour):
+    return builder_page.run(f"""
+    await advance(10);
+    type('t-text', '#{colour}');
+    await advance(400);
+    return {{ checks: document.querySelectorAll('#checks li').map(li => li.textContent)[0],
+             field: $('m-text').textContent, save: $('save').disabled }};
+    """, {"/api/state": {"status": 200, "body": {"saved": {
+        "id": 12, "c": ["ffffff", "202020", "4387df", "0da243", "0da243",
+                        "ba8107", "ff1900"],
+        "w": 12, "ends": "round", "dot": 1, "by": "level"}, "draft": None}}})
+
+
+@pytest.mark.parametrize("colour, shown", [("949494", "3.03"),
+                                           ("8787fb", "3.04")])
+def test_unreadable_text_names_the_floor_and_a_ratio_under_it(colour, shown):
+    r = _text_on_white(colour)
+    assert (f"Text is unreadable: {shown}:1. It needs at least 3.05:1"
+            " before it can go to the board.") in r["checks"]
+    assert r["field"] == f"Unreadable: text is {shown}:1 on the background."
+    assert r["save"] is True
+
+
+def test_faint_text_is_not_rounded_up_to_the_readable_mark():
+    r = _text_on_white("777777")
+    assert "Text is faint: 4.47:1." in r["checks"]
+    assert r["field"] == "Faint: text is 4.47:1 on the background."
+    assert r["save"] is False
+
+
+@pytest.mark.parametrize("dot", [None, "1", "", [], [1], "0", False, True,
+                                 0, 1])
+def test_the_page_takes_the_share_codes_the_command_line_takes(dot):
+    """Review of 1.4.0 (builder), N3. The page tested the dot with
+    [0, 1].indexOf(+f.dot), and unary plus coerces: null, "" and [] loaded
+    as off, "1" and [1] as on, where `blink theme set` refuses all five with
+    "dot must be on or off". The board was never at risk, the page sends a
+    clean 0 or 1, but a hand-made code worked in the builder and not in a
+    terminal. Probe: five of six disagreed."""
+    import base64
+    import json
+    from pc import theme
+    fields = {"c": ["0e1116", "e6e8eb", "4387df", "0da243", "0da243",
+                    "ba8107", "ff1900"], "w": 12, "ends": "round",
+              "dot": dot, "by": "level"}
+    raw = json.dumps(fields, separators=(",", ":")).encode()
+    code = "BT1." + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    try:
+        theme.from_share_code(code)
+        cli_takes = True
+    except theme.ThemeError:
+        cli_takes = False
+    r = builder_page.run(f"""
+    await advance(10);
+    $('paste').focus(); $('paste').value = '{code}';
+    $('load').click();
+    await advance(400);
+    return {{ msg: $('m-paste').textContent,
+             sent: requests.filter(q => q.path === '/api/preview').map(q => q.body) }};
+    """, SAVED_DARK)
+    assert r["msg"].startswith("Loaded") == cli_takes
+    if cli_takes:
+        assert r["sent"][-1]["dot"] == (1 if dot in (1, True) else 0)
+
+
+# ------------------------------------------- the preview's Focus mode
+#
+# Review of 1.4.0 (builder), N9. The page's Focus preview made the higher of
+# the two windows big, drew the other as "week 91%" in the dim colour with no
+# countdown, and captioned the big gauge "WEEK  1d 1h". The board (usage_view.c
+# focus_big, countdown_colour, render_countdown, fmt_focus_line) makes big the
+# window Settings > Focus names, writes the other as one dim line, "Weekly 91%
+# <bullet> 1d 1h", in the theme's mid or high colour from 60 and 90 percent,
+# and captions the big gauge with its own name and countdown ("WEEKLY 7d" over
+# "1d 1h"). So a custom theme's mid and high, used as text, were never
+# previewed where the board uses them most.
+
+_FOCUS = """
+    await advance(10);
+    document.querySelectorAll('[data-v]').find(b => b.dataset.v === 'focus').click();
+    {more}
+    const t = $('scr').children.filter(n => n.tagName === 'TEXT')
+        .map(n => [n.textContent, n.attrs.fill, +n.attrs.y]);
+    return { t, f: document.querySelectorAll('[data-f]').map(b => [b.dataset.f, b.getAttribute('aria-pressed')]) };
+"""
+_BULLET = "•"
+
+
+def _focus(more=""):
+    return builder_page.run(_FOCUS.replace("{more}", more), SAVED_DARK)
+
+
+def _by_text(r):
+    return {t[0]: t for t in r["t"]}
+
+
+def test_focus_makes_big_the_window_chosen_and_not_the_higher():
+    r = _focus()
+    texts = _by_text(r)
+    # Session is the board's default, and it is the lower of 42 and 91.
+    assert "42%" in texts and "91%" not in texts
+    assert "SESSION 5h" in texts and "3h 40m" in texts
+    assert r["f"] == [["session", "true"], ["weekly", "false"]]
+
+
+def test_focus_weekly_swaps_which_window_is_big():
+    r = _focus("document.querySelectorAll('[data-f]').find(b => b.dataset.f === 'weekly').click();")
+    texts = _by_text(r)
+    assert "91%" in texts and "WEEKLY 7d" in texts and "1d 1h" in texts
+    assert f"Session 42% {_BULLET} 3h 40m" in texts
+    assert r["f"] == [["session", "false"], ["weekly", "true"]]
+
+
+def test_the_dim_line_is_the_boards_words():
+    r = _focus()
+    assert f"Weekly 91% {_BULLET} 1d 1h" in _by_text(r)
+    assert not [t for t in r["t"] if t[0].startswith("week ")]
+
+
+@pytest.mark.parametrize("pct, slot", [(91, "high"), (90, "high"),
+                                       (75, "mid"), (60, "mid"),
+                                       (59, "dim"), (0, "dim")])
+def test_the_dim_line_wears_the_severity_colour_from_60(pct, slot):
+    """countdown_colour(): the theme's high from 90, mid from 60, else dim."""
+    r = _focus(f"$('p2').value = '{pct}'; $('p2').fire('input');"
+               " await advance(10);")
+    line = _by_text(r)[f"Weekly {pct}% {_BULLET} 1d 1h"]
+    colours = builder_page.run("""
+    await advance(10);
+    document.querySelectorAll('[data-v]').find(b => b.dataset.v === 'focus').click();
+    const t = $('scr').children.filter(n => n.tagName === 'TEXT');
+    return { caption: t.find(n => n.textContent === 'SESSION 5h').attrs.fill,
+             high: document.getElementById('t-high').value };
+    """, SAVED_DARK)
+    if slot == "dim":
+        assert line[1] == "#" + colours["caption"].lstrip("#")  # the dim text
+    else:
+        assert line[1].lower() == {"high": "#ff1900", "mid": "#ba8107"}[slot]
+    assert colours["high"].lower() == "#ff1900"

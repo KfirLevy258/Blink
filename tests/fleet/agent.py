@@ -1340,9 +1340,10 @@ def run(args, deps=None):
         # still holds the port, and every scenario below would fail as though
         # the board were broken.
         result["problems"].append(
-            "BLINK_SKIP_SERVICE is set in this shell, so the installed"
-            " service was never stopped and it still holds the serial port."
-            " Nothing was run. Unset it and start again.")
+            f"The service code skipped the stop ({stopped}), so the"
+            " installed service was never stopped and it still holds the"
+            " serial port. Nothing was run. Unset BLINK_SKIP_SERVICE, or"
+            " run from the account's own HOME, and start again.")
         return _finish(result)
     if not stopped.ok:
         result["problems"].append(

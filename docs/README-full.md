@@ -6,7 +6,7 @@
 Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 <p>
-  <img src="https://img.shields.io/badge/firmware-v0.6.0-D97757?style=flat-square&labelColor=171B22">
+  <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=flat-square&labelColor=171B22&color=D97757&label=release"></a>
   <img src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-8A8F98?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/RTOS-Zephyr-6FBF8B?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/updates-over--the--air-E8A05C?style=flat-square&labelColor=171B22">
@@ -45,13 +45,13 @@ It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the
 
 ### Where the numbers come from
 
-Blink never sees a credential and never sends anything anywhere. It reads figures other programs have already worked out, from files they already write, and keeps only the figures: from Codex's session log it takes the one rate-limit line and nothing of the conversation; from Claude Code's status line it keeps the last payload (which also names your working directory and session), readable by you alone.
+Blink keeps no credential and never sends your usage or your sessions anywhere. (If you turn on status-page alerts, it reads the public status pages every 5 minutes; see "Security & privacy".) It reads figures other programs have already worked out, from files they already write: from Codex's session log it takes the rate-limit line, the folder each session runs in and when each turn starts and ends, and on an account with no five-hour limit the token counts, and nothing of the conversation; from Claude Code's status line it keeps the last payload (which also names your working directory and session), readable by you alone, and reads the usage figures, the session id and the session's cost out of it; Claude Code's config (`~/.claude.json`) it parses whole in memory, though it can hold your MCP servers' tokens and, on Linux and Windows, an API key, and looks only at the plan name and rate-limit tier, keeping only whether they say Ultra. While the account is marked as having no five-hour window it also reads the output-token counts in Claude Code's transcripts, or, for a Codex account with none, every token count of each turn in Codex's session log, held in memory until five hours after Codex last wrote that turn (board plugged in or not) with only the output tokens added up, and sends the board only a total per quarter-hour; see "What the installer changes" for exactly what is read.
 
 ### What it supports, and how well
 
 | You use | What the panel shows | |
 |---|---|---|
-| **Claude Code in a terminal** | Everything: both limits, both countdowns, the activity light | **Full** |
+| **Claude Code in a terminal** | Everything: both limits, both countdowns, the activity light. An account with no five-hour window (verified Ultra, from 2026-10-30) has no session dial to show, so the left half becomes the burn view: Claude Code's output tokens over the last five hours, a bar per quarter-hour labelled with the hour, and an arrow for whether the last hour ran faster or slower than the one before. `blink status` says when the account has no window. BLINK decides that only on proof. On a desk whose Claude Code config names the Ultra plan (its rate-limit tier as well as its plan name), the first Claude Code reply with no five-hour figure is that proof, and the burn view comes up within a poll of it, unless Claude Code has shown a five-hour figure in the five hours before that reply. Any other account, or one whose config cannot be read, keeps `--%` for its first five and a quarter hours or so of Claude Code use (a break of over an hour, or a restart of the daemon, starts that count again. So does closing the lid or unplugging the board for most of an hour, because replies made while it is closed or unplugged are not seen: about 58 minutes if Claude Code replies every two minutes, 50 if every ten. A shorter gap does not), and any five-hour figure Claude Code shows after that brings the session dial back. The weekly limit is unchanged. Until the first burn line arrives, the dial reads `--%`. The view counts Claude Code only: Desktop and claude.ai chats leave no token counts on disk. | **Full** |
 | **Claude Code in the VS Code / JetBrains extension** | The same. The extension runs the same CLI and reads the same `~/.claude/settings.json`, so the status line and hooks work identically | **Full** |
 | **Claude Code in Claude Desktop's Code tab** | What Desktop chat gets (below), plus the activity light: the Code tab runs its own copy of Claude Code, which reads `~/.claude/settings.json`, so the hooks fire. It runs headless, so the status line never does, and the figures come from Desktop's files rather than from Claude Code. Measured on macOS (2026-09-26) and Windows 11 ARM64 (2026-09-30) | **Partial** |
 | **Claude Desktop chat, without Claude Code** | Both percentages and the five-hour countdown whenever Desktop holds a reset time (the fill rate covers the gaps). The five-hour figure and its countdown come from Desktop's Local Storage, refreshed within seconds of a turn; the weekly percentage follows Desktop's own refresh: about every 5 minutes while it is in use, every 15 (occasionally 30) when it sits idle, and at once when its usage panel is opened. The weekly countdown once learned, `--` until then. **No activity light** | **Partial** |
@@ -75,7 +75,7 @@ Blink never sees a credential and never sends anything anywhere. It reads figure
 | Claude Desktop's usage cache | both limits, and the burn rate derived from its history | nothing - read if the app is installed |
 | Claude Desktop's Local Storage | a five-hour reset time, refreshed within seconds of a turn | nothing - read if the app is installed |
 | A remembered weekly boundary | a weekly reset time, once one has been learned from any of the sources above; published only while nothing contradicts it | nothing - learned automatically, never configured |
-| Codex CLI's own session log | both limits and reset times, for Codex | nothing - read if Codex is installed |
+| Codex CLI's own session log | both limits and reset times, for Codex; on an account with no five-hour limit, every token count of each turn, held in memory until five hours after Codex last wrote that turn, with only the output tokens added up for the burn view | nothing - read if Codex is installed |
 
 **How each source is tested.** Claude Code: CI installs real releases (oldest supported, stable, latest, next) and checks the status-line contract is still there. Codex: CI reads the struct that defines `rate_limits` in Codex's own source at the latest release, and fails the day a field is renamed - Codex will not write a log without an account, so the parser is pinned to a real captured log instead. Claude Desktop: a closed app no runner can launch; the parser is pinned to a real captured cache file, and `blink status` reports on the customer's machine whether today's file still parses.
 
@@ -101,7 +101,7 @@ Blink runs on the **ESP32-2432S028 "Cheap Yellow Display" (CYD)** - a popular al
 
 ### Enclosure
 
-A 3D-printable case gives the bare board a home on your desk. **[Download the CAD files](#)** *(coming soon)*
+A 3D-printable case gives the bare board a home on your desk. The files are on **[MakerWorld](https://makerworld.com/en/models/3294736-blink-claude-code-codex-usage-monitor)**.
 
 ## Connecting it
 
@@ -230,8 +230,18 @@ Blink has to change.
 | Creates | `~/.blink/` (readable by you alone) - a copy of the program, the status line script, the hook script, and a `state/` directory holding one small file per open session (event name, time, and the session and agent ids Claude Code generates - nothing else) |
 | Creates | a login item, so the bridge starts with your session (a LaunchAgent on macOS, a user systemd unit on Linux, a Scheduled Task on Windows) |
 | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
-| Keeps | the last status line payload Claude Code sent, in `~/.blink/statusline.json`. Alongside the two usage figures it carries the session id, working directory and transcript path; only the figures are read, and nothing in it leaves the machine |
-| Reads | Claude Desktop's usage cache and the tail of Codex's session log, when present; from each only the usage figures are kept. No credential, no token |
+| Keeps | the last status line payload Claude Code sent, in `~/.blink/statusline.json`. Alongside the two usage figures it carries the session id, working directory, transcript path and the session's cost. Three things are read from it: the usage figures (`rate_limits`), the session id and the session's running cost (`cost.total_cost_usd`). The last two only tell whether Claude Code's replies keep coming back without a five-hour window; the app holds them in memory for up to 64 sessions and never logs or saves them. Nothing in the file leaves the machine |
+| Keeps | whether the account has a five-hour window, in `~/.blink/session-window.json`: that verdict, the kind of evidence it rests on and when that evidence was taken - nothing else. Written when the verdict changes, so a restarted app and `blink status` agree with the running one. Removed by `blink uninstall`, so a reinstall decides afresh from its own evidence |
+| Only if you ask | `~/.blink/config.json`, written by `blink config` (today the one setting is `status-page`). Removed by `blink uninstall`, so a reinstall starts with status-page alerts off |
+| Keeps | the board's theme, for a board that can show one (firmware 1.4.0 and later). `~/.blink/theme.json` holds the theme you set here or picked on the board. `theme_seen.json`, written by the app alone, holds the last theme it knew the board had, so a theme picked on the board while the app was off is kept rather than overwritten. `theme_sent.json` records the last theme the board confirmed storing, and `theme_preview.json` holds a builder preview or a cancel briefly, until the app next sends it to the board. All four are removed by `blink uninstall`, so a reinstall does not send an old theme back to the board |
+| Keeps | a remembered weekly boundary, in `~/.blink/weekly-anchor.json`: one weekly reset time and when it was seen - two timestamps, nothing else. It is learned from the first source that reports one: the Claude Code status line or, on a machine with none remembered yet, once per start from a Cowork session record Claude Desktop wrote, of which only that reset time is taken. `blink uninstall` leaves it |
+| Keeps | the board last connected, in `~/.blink/board.json`: the serial port it answered on, the id it reports (made from its chip's own hardware id), its firmware version and what it can show. It lets the next start open that port without scanning, and lets `blink status` and `blink theme` say what the board can do. `blink uninstall` leaves it |
+| Keeps | the app's own log, `~/.blink/bridge.log`, with the four before it as `bridge.log.1` to `bridge.log.4` (4 MB each). A line per event, stamped with the local date and time: which port it connected on, the kind of each message to and from the board but never what it carried, the board's console cut to a fixed list of lines, a source failing or working again, updates, and errors. No credential, no message text, nothing read from a transcript. `blink uninstall` leaves it |
+| Reads | Claude Desktop's usage cache, the five-hour usage record in its Local Storage, and the tail of Codex's session log, when present; from each only the usage figures are kept, and from Codex's log also the folder each session runs in (its `session_meta` `cwd`, for the project name) and the `task_started`, `task_complete` and `turn_aborted` events (for the activity light). No credential, no token |
+| Reads | only when no weekly reset time is remembered yet, at most once per start: Claude Desktop's Cowork session records, first from its audit files and, if they have none, from its IndexedDB store. That store also holds your conversations; the app walks it by record key and field name to the one weekly reset time a Cowork record carries, takes that single timestamp and nothing else, and never logs, prints or saves anything else from it |
+| Reads | only when a Claude Code reply shows a weekly figure and no five-hour one, at most once a minute and only when the file has changed: Claude Code's config, `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`; a non-empty legacy `.config.json` in `~/.claude` or `$CLAUDE_CONFIG_DIR` comes first, as it does for Claude Code). The whole file is read and parsed in memory to reach two fields of `oauthAccount`, the rate-limit tier, `organizationRateLimitTier`, and the plan name, `planDisplayName`, and of those the app keeps only whether they say Ultra, in memory. The file also holds your email address, your name, your project folders and your MCP servers' settings, which can include their tokens, and on Linux and Windows it can hold an API key; none of it, nor anything else from the file, is kept, logged, printed or saved. A file over 8 MB, or anything but a regular file, is not opened, and a file that does not parse is not parsed again until it changes |
+| Reads | only while the account is marked as having no five-hour window (see the row above and "Claude Code in a terminal"), and only for a board that can show the burn view: Claude Code's transcripts, under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`). Only lines containing `"output_tokens"` are decoded, and of each only `type`, `timestamp`, `message.id`, `requestId`, `message.model` and `message.usage.output_tokens` are looked at. It holds in memory, and nowhere else, each transcript's path, size, read position and a hash of the last 256 bytes it read (to notice a file rewritten in place), and for each reply still inside the last five hours its message and request ids and output-token count. What goes to the board is twenty quarter-hour totals. Nothing from a transcript - no line, no value, no path - is logged, printed or saved. The transcripts are read only while the account is marked as having no five-hour window; on the Ultra plan a mark can come from a single reply, and the next five-hour figure Claude Code shows lifts it and stops the reading |
+| Reads | only on a Codex account whose session log reports a weekly limit and no five-hour one (such as Codex Pro), and only for a board that can show the burn view: Codex's session logs, under `~/.codex/sessions` (or `$CODEX_HOME/sessions`). Only lines containing `"token_count"` are decoded, and of each only `type`, `timestamp`, `payload.type` and the token figures of `payload.info.total_token_usage` and `payload.info.last_token_usage` (`input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens`) are looked at; the `output_tokens` of `last_token_usage` is what is added up, and the rest only recognises a turn written twice. It holds in memory, and nowhere else, each log's path, size, read position and a hash of the last 256 bytes it read, and for each turn still inside the last five hours those figures and its quarter-hour. What goes to the board is twenty quarter-hour totals. Nothing from a session log - no line, no value, no path - is logged, printed or saved, and on an account with a five-hour limit this reading never happens |
 
 **It does this without asking**, so that plugging the board in is the whole
 setup. It prints all of the above before it changes anything, and every part
@@ -334,7 +344,7 @@ in `FAILED` rather than a boxed unit. Run it locally with
 
 You only need this to put firmware on a board yourself (after that, it updates over the air). It uses the [Zephyr](https://zephyrproject.org/) toolchain.
 
-The default build is what ships: USB only, with no radio, no sign-in and no token store compiled in. The on-device Wi-Fi path is still here and still builds - add `-DEXTRA_CONF_FILE=wifi.conf` to the command below - it is simply not in anything released.
+There is one shipped build: USB only. It has no radio, no sign-in and nowhere to keep a token.
 
 ```bash
 . tools/lib_zephyr.sh && blink_zephyr_activate   # finds the workspace itself
@@ -394,17 +404,18 @@ The things that were open before the first release, and how each was settled.
 | **Company units** | The same image plays a company logo (a still or a short clip) after the boot animation when the factory wrote one to the `logo` partition (`tools/burn.sh --logo`). No logo partition, no logo: individuals are the default, and a re-burn without `--logo` erases it. |
 | **Windows on Arm** | Supported, with WCH's Arm64 driver (`vendor/ch341ser-arm64`). The package bundled for x64 lacks the Arm64 file its own `.INF` names, so on a Windows 11 ARM64 VM (2026-09-30) `pnputil` failed with exit 2 and a release told Arm customers no driver exists. WCH's current package carries one, and `blink install` stages it on Arm. Measured 2026-10-19 on a Windows 11 ARM64 VM with the board passed through: the driver installed Microsoft-signed, the board came up as `USB-SERIAL CH340 (COM3)`, and the daemon and board completed the handshake and exchanged usage. Not yet measured: the undriven case (`docs/windows-check.md`, A2) on Arm. |
 | **One board per computer** | The app drives one BLINK. A second one attached is ignored; `--port` picks one deterministically. |
-| **What is supported** | Claude Code in a terminal or IDE extension: everything. Codex CLI: everything, on its own page. Claude Desktop alone: a five-hour countdown whenever Desktop is holding a reset time - it keeps one only while a window is running and clears it in between, so the countdown comes and goes and the fill rate covers the gaps - a weekly countdown once one has been learned, and the activity light only in Desktop's Code tab. claude.ai in a browser: nothing. |
+| **What is supported** | Claude Code in a terminal or IDE extension: everything (on an account with no five-hour window, such as Ultra, the session dial gives way to a five-hour burn view of Claude Code's output). Codex CLI: everything, on its own page (on an account with no five-hour limit, such as Codex Pro, the session dial gives way to the same burn view, of Codex's output). Claude Desktop alone: a five-hour countdown whenever Desktop is holding a reset time - it keeps one only while a window is running and clears it in between, so the countdown comes and goes and the fill rate covers the gaps - a weekly countdown once one has been learned, and the activity light only in Desktop's Code tab. claude.ai in a browser: nothing. |
 | **Automatic app updates** | **Off** for the first release. The signed manifest carries the switch (`daemon.auto`), so it can be turned on for a later release - and off again within minutes - without touching any installed machine. |
 | **What the app keeps on disk** | Exactly what the table under "What the installer changes" says, readable by the user alone, sent nowhere. |
-| **Not yet** | macOS notarisation (the binary is unsigned; Gatekeeper asks once). Apple Silicon runs the full suite and the real installer in CI, but has not yet been watched by a person. (Windows has: a real Windows 10 PC with a Hebrew user name, 2026-08-29 - which found four things that CI's ASCII English runners could not, fixed in 1.0.3 and 1.0.4.) Claude Desktop's cache location has been seen on macOS and on Windows 11 ARM64 (`%APPDATA%\Claude\`, written there despite the MSIX package, 2026-09-30); on Linux (`~/.config/Claude/`) it is the Electron convention, unconfirmed because there is no Linux Desktop to run. |
+| **Not yet** | macOS notarisation (the binary is unsigned; Gatekeeper asks once). Apple silicon runs the full suite and the real installer in CI, and is the desk BLINK is developed and released on (the fleet's `local-mac`). (Windows has been watched too: a real Windows 10 PC with a Hebrew user name, 2026-08-29 - which found four things that CI's ASCII English runners could not, fixed in 1.0.3 and 1.0.4.) Claude Desktop's cache location has been seen on macOS and on Windows 11 ARM64 (`%APPDATA%\Claude\`, written there despite the MSIX package, 2026-09-30). A later Store build, 3.6556.2.0 on Windows 11 (measured by Mor Gal, 2026-10-29), moves it to `%LOCALAPPDATA%\Claude-Data\<name>` and leaves a `.user-data-left.<name>` marker in `%APPDATA%\Claude\`; BLINK follows the marker, and `blink status` names the folder. On Linux (`~/.config/Claude/`) it is the Electron convention, unconfirmed because there is no Linux Desktop to run. |
 
 ## Security &amp; privacy
 
 - **Only you can update your device.** Firmware must be signed with your private key (kept off this repo, at `~/.blink/…`); the bootloader rejects anything else. App updates must be signed with a second key of yours, or the app will not install them. The public repo only lets people read and download the firmware, which holds no secrets.
 - **The device holds no credential.** It never signs in and never talks to Anthropic. The figures come from the Claude Code on your own machine, which has already worked them out, and reach the board over the cable. There is no token on the device to leak, and nothing to revoke if you sell or lend it.
+- **Status-page alerts are off unless you turn them on.** `blink config status-page on` lets the app on your computer read the public status pages (status.claude.com, and status.openai.com when the board shows a Codex page) every 5 minutes, so the panel can say when the service, not your machine, is having trouble. Board firmware 1.3.4 and earlier does not show it; update the board to see it. These are plain public requests: no account, token or usage goes with them. Off, the app makes no such request at all.
 - **The setup touches one file.** `~/.claude/settings.json`: its `statusLine.command`, and a hook entry per lifecycle event - see "What the installer changes" above for exactly what is written and what is kept. All of it is reversible with one command.
-- The on-device Wi-Fi and sign-in path still exists in this repository, behind `CONFIG_BLINK_WIFI_MODE`, but is **not built into shipped firmware** - the release script refuses to publish an image containing it.
+- Earlier versions of this repository also held an on-device Wi-Fi and sign-in path, which no release ever included. It used Claude Code's OAuth client id to sign the board in to Anthropic, and it was deleted on 2026-10-27. If its strings ever reappear in an image, the release script refuses to publish it.
 
 ## The status dot
 
@@ -433,6 +444,191 @@ no hook interface, so its state comes from its own session log: a turn that
 started, finished or was interrupted. Codex permission prompts are not in that
 log, so a prompt shows as "working" until you answer it.
 
+## Settings on the board
+
+Settings is the screen beside the dials: swipe across from them to reach it,
+and back to return. It is four tiles, each with an icon:
+
+| Tile | What it does |
+|---|---|
+| **Brightness** | Tap a level. It is kept across a power cycle |
+| **Theme** | The panel's colours: twelve built-in themes and one of your own (below) |
+| **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Off remembers which window was big |
+| **Update** | The software update: **Up to date**, an offer to install, or **App is old** when the half on your computer is behind (see "Updates") |
+
+Theme and Focus need board firmware 1.4.0 or later. A board on 1.3.4 or
+earlier shows its old settings screen; update it to see these.
+
+### Themes
+
+Twelve themes are built in: **Dark** (the default), **Neon**, **Bold**,
+**Mono**, **Ocean**, **Synthwave**, **Forest**, **Retro LCD**,
+**Colour-blind** (blue, orange and yellow, getting brighter as a dial
+fills, so the levels part for someone who sees no hue at all), and three
+light ones for a bright room - **Light**, **Light soft** and **Light ink**.
+Each sets every colour on the panel, the width of the dials' arcs, round or
+flat arc ends, and whether a dot rides the tip of each arc. Those are the
+names on the board's tiles, and the theme builder and `blink theme show`
+use them too. On the command line a few are spelt differently
+(`cvd-safe`, `retro-lcd`, `light-soft`, `light-ink`); `blink theme set`
+takes that spelling in any capitals, with `-` or `_`, and also the tile's
+own name in quotes (`"Colour-blind"`) or the theme's number.
+`blink theme list` shows all three:
+
+```bash
+~/.blink/bin/blink theme list       # number, name to type, name on the board
+~/.blink/bin/blink theme set 8      # the same as: blink theme set cvd-safe
+```
+
+**Custom**, a thirteenth tile, is a theme you make on your computer. The
+tile appears on the board only once a custom theme has been saved, from the
+builder or with `blink theme set`; until then the picker shows the twelve
+built-ins. A custom theme has:
+
+- seven colours - background, text, the two gauges, and the low, middle and
+  high levels a dial turns as it fills;
+- arcs thin, normal or thick, with round or flat ends;
+- the dot at the tip of each arc, on or off;
+- arcs coloured by how full they are, or one colour per gauge. Per gauge, a
+  dial still turns to your high colour from 90 %.
+
+Text has to stand out from the background by at least 3.05:1: about 3:1 is
+the point below which the small labels stop being readable at arm's length,
+and the last 0.05 keeps a theme this side accepts clear of the board's own
+rounding. A theme under that is refused with the measured ratio, before it
+reaches the board, because a panel nobody can read is one you would have to
+find Settings on through that same text.
+
+A theme lives on the board and on your computer at once. One picked on the
+board is taken up by the computer; one set on the computer goes to the
+board within a few seconds. A theme picked on the board while the app was
+off or asleep is kept when it comes back. If both sides changed while they
+were apart, the board's choice wins - it is the one in front of you - and
+`blink theme show` says so, naming the theme that was set here. A board
+other than the last one the computer talked to is sent the computer's
+theme.
+
+### Making a theme on your computer
+
+On the board, **Settings > Theme > Edit on computer** opens the theme builder
+in your computer's browser. While the builder is open the button reads
+**Editing on your computer**, dimmed, and does nothing when pressed, so one
+edit stays in one tab; it reads **Edit on computer** again, ready to press,
+a moment after the builder closes (about 2 s after its tab does). It
+also comes back while the board has lost its connection to the computer,
+and is held again when the connection returns with the builder still
+open. (With an app from before this, the board says
+**Opened on your computer** for a few seconds and the button comes straight
+back.) On a computer with no browser to open (a server, or an SSH session),
+it says **On your computer, run: blink theme** instead, for 8 seconds.
+Running that yourself does the same thing:
+
+```bash
+~/.blink/bin/blink theme
+```
+
+The builder is a page served by the app to your own browser and nobody else:
+it listens on 127.0.0.1 only, on a link that works once, and fetches nothing
+from the internet. It opens on the theme your board has now, and until it
+has read that (usually at once) it says **Loading your current theme.** and
+its controls, all but **Cancel**, stay off, so nothing can be saved over a
+theme it has not seen. Every change shows on the board as you make it, as a
+preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
+without a change puts the board back on the theme it had. When it cannot
+be so, it says that instead of "Preview sent": a board still on firmware
+1.3.4 shows no preview (the builder and `blink theme` say so, and a saved
+theme is sent once the board is updated), and a preview that nothing has
+picked up after a few seconds, because the app is not running or the board
+is not plugged in, is named as not on the board. Once it has
+closed, **Edit on computer** opens a new one. On Windows, and on some Linux
+desktops, the builder's tab may open behind your other windows, with only
+the browser's taskbar button flashing. If a second tab does open on the same
+builder - from a board whose firmware predates the held button - only the
+newest tab is live, and it opens on the changes you have made so far.
+Within about a minute the older tab stops: it tries to close itself if it
+has nothing you have not saved, and otherwise keeps your colours on screen.
+
+When a builder tab ends, a popup appears over the page, which is dimmed and
+stops working behind it. Its heading says what happened and the line under it
+says what follows:
+
+| Ending | Heading | Under it |
+|---|---|---|
+| You pressed Save to board | **Saved.** | Your board keeps *name*. |
+| You pressed Cancel | **Cancelled.** | Your board is back on its saved theme. |
+| The builder stopped (ten minutes idle, or the app quit) | **The builder stopped.** | Run blink theme on your computer to start it again. |
+| A newer tab took over | **Continued in a newer tab.** | This tab has handed over to the newer one. |
+
+After **Save to board** or **Cancel** the popup counts down (**This tab closes
+in 5 s.**) and then closes the tab. A **Close tab** button closes it at once.
+Press a key, click or touch anywhere, the popup and the dimmed page behind it
+included, and the count stops and the line reads **You can close this tab.**
+(moving the mouse and scrolling do not count; clicking **Close tab** does not
+stop the count, it closes the tab). After Save the countdown runs only if you
+have changed nothing since; after Cancel it runs whatever the tab held,
+because Cancel throws the changes away. A browser that will not let a page
+close a tab (one you pasted the link into after other pages) gets the same
+**You can close this tab.** when the count ends or **Close tab** is pressed.
+A stopped builder and a tab a newer one took over show that line and
+**Close tab** at once, with no countdown.
+
+If the tab holds changes you have not saved (a stopped builder, a tab a newer
+one took over, or changes made after you saved), there is no countdown and no
+**Close tab**. The popup says **Your changes here are not saved. Copy the
+share code to keep them.** (after a save: **Changes you made after saving are
+not on the board. Copy the share code to keep them.**) and offers **Copy share
+code**, so you can paste them into the newer tab or keep them. The status line
+at the top keeps a short version of the ending under the popup. A preview the
+board never hears the end of - the computer went to sleep mid-edit - drops by
+itself after 15 minutes.
+
+A custom theme has a **share code**, a line starting `BT1.`, that carries the
+whole theme. Copy it from the builder to send to somebody; paste one in to
+load theirs. A built-in theme shares by its name.
+
+The same, from a terminal:
+
+```bash
+blink theme list                    # every theme, and which one is set
+blink theme show                    # the theme set now, and how to set it elsewhere
+blink theme set ocean               # a built-in, by name
+blink theme set BT1.eyJjIjpb...     # a shared custom theme
+blink theme set bg=000000 text=ffffff width=thick ends=flat dot=off arcs=per-gauge
+blink theme reset                   # back to Dark
+```
+
+`set` with colours edits your custom theme, starting from the one you have
+(or from Dark's colours, the first time), so one setting changes one thing.
+The settings are `bg`, `text`, `gauge1`, `gauge2`, `low`, `mid`, `high`,
+`width` (thin, normal, thick), `ends` (round, flat), `dot` (on, off) and
+`arcs` (by-level, per-gauge). `blink theme show` prints the command, and
+for a custom theme the share code, that sets the same theme on another desk.
+
+### Status-page alerts, per provider
+
+With `blink config status-page on`, each provider's page on the board says
+when that provider's own service is having trouble: the Claude page reads
+status.claude.com, and the Codex page, when the board shows one, reads
+status.openai.com. An incident appears on the page it belongs to, so a Codex
+outage never sits over live Claude numbers. Only confirmed incidents are
+shown - one has to be reported on two checks in a row, at least five
+minutes apart -
+and a check that fails changes nothing: the last good answer stands for up to half an hour, then the panel goes back to showing nothing, and a page that cannot be read never shows an incident. It is off until you
+turn it on; see "Security & privacy" for what it asks and of whom.
+
+## Third-party notices
+
+The panel's text is drawn in **Montserrat**, Copyright 2011 The Montserrat
+Project Authors (https://github.com/JulietaUla/Montserrat), used under the
+SIL Open Font License 1.1: the sizes LVGL builds in, and Focus mode's large
+figure, a subset in `firmware/src/font_focus_40.c`. The licence is in
+`firmware/src/fonts/OFL.txt`. The arrows and the check mark on the panel
+are from **Font Awesome Free**, by Fonticons, Inc.
+(https://fontawesome.com), which LVGL merges into those same built-in fonts;
+the font is also under the SIL Open Font License 1.1. That font data is
+under the OFL, not under the PolyForm licence that covers the rest of this
+repository.
+
 ## Support
 
 `~/.blink/bin/blink status` first: it names the service state, every source it
@@ -453,3 +649,17 @@ The daemon does not write a line for every message it sends. The board's
 repeats what the previous one said is held back; both are reported as a count
 every ten minutes. So a quiet stretch in the log means a quiet desk, not a
 daemon that stopped.
+
+A message to or from the board is logged by its type alone - `-> usage`,
+`<- hello` - never by what it carries: no usage figures, project names,
+theme colours or the board's id. `blink status --wire` shows the next usage
+message in full on your own screen when you want to see it. The one thing
+the board reports that the log does repeat is which firmware it runs, in
+the update check (`ota: board has 1.4.0, release has 1.4.0`), and that is
+rebuilt from the numbers the app read rather than copied as sent. The
+board's own console lines are copied in the same spirit: a known message as
+its fixed words (`[ota] image confirmed`, `[ota] downloading`), a known tag
+on anything else as the tag alone (`[mem]`), and a line from anything other
+than BLINK's own firmware code - the bootloader, the operating system, the
+graphics library - as `(board line)`. Nothing the board printed after those
+words is kept.

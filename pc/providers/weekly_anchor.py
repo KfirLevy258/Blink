@@ -12,10 +12,9 @@ nothing contradicts this anchor -- needs the percentage-drop check too, or a
 refuted anchor keeps appearing on the panel for up to eight weeks after
 something proved it wrong.
 """
-import json
 import math
 
-from pc import desktop_paths, weekly_anchor
+from pc import weekly_anchor
 from pc.providers import base
 from pc.providers import claude_desktop
 
@@ -28,12 +27,12 @@ class DesktopHistoryProvider:
     sample series `weekly_anchor.refuted_by` needs.
 
     There is exactly one parser for plan-usage-history.json in this
-    codebase, in pc.providers.claude_desktop -- this borrows its
-    raw_samples(), on the file at pc.desktop_paths.cache_path(), rather than
-    growing a second reader for the same file. refuted_by wants the whole
-    series (to notice a drop), not the single newest reading
-    ClaudeDesktopProvider itself hands the normalizer, which is why this goes
-    to raw_samples() instead of duplicating that provider outright.
+    codebase, in pc.providers.claude_desktop -- this borrows its cache_path()
+    and its raw_samples() rather than growing a second reader for the same
+    file. refuted_by wants the whole series (to notice a drop), not the
+    single newest reading ClaudeDesktopProvider itself hands the normalizer,
+    which is why this goes to raw_samples() instead of duplicating that
+    provider outright.
 
     Lazy on purpose: the file is opened fresh inside samples(), never at
     construction, so a machine with no Claude Desktop installed -- a normal,
@@ -48,15 +47,20 @@ class DesktopHistoryProvider:
 
     def samples(self, now_epoch):
         path = (self._path if self._path is not None
-                else desktop_paths.cache_path())
+                else claude_desktop.cache_path())
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                content = fh.read()
+            # claude_desktop's reader, not a second open(): it decodes the
+            # bytes itself, so a torn write or a UTF-16 file is None here
+            # rather than a UnicodeDecodeError out of a method documented
+            # never to raise (review, 2026-10-25).
+            content = claude_desktop.read_text(path)
         except OSError:
             return None
-        try:
-            doc = json.loads(content)
-        except (TypeError, ValueError):
+        # parse_json, not json.loads: it also refuses absurd nesting, whose
+        # RecursionError escaped the ValueError this caught (review,
+        # 2026-10-25). None from read_text comes back NOT_JSON too.
+        doc = claude_desktop.parse_json(content)
+        if doc is claude_desktop.NOT_JSON:
             return None
         return _in_time_order(claude_desktop.raw_samples(doc))
 

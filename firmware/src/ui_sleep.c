@@ -33,6 +33,23 @@ static void tap_cb(lv_event_t *e)
 
 static bool (*wake_when)(void);
 
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+static bool bench_dozing;
+static volatile bool bench_wake;
+
+bool ui_sleep_bench_dozing(void)
+{
+	return bench_dozing;
+}
+
+void ui_sleep_bench_wake(void)
+{
+	if (bench_dozing) {
+		bench_wake = true;
+	}
+}
+#endif
+
 /*
  * Every reason to stop dozing, asked in one place.
  *
@@ -66,6 +83,11 @@ static bool (*wake_when)(void);
  */
 static bool woken(void)
 {
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	if (bench_wake) {
+		return true;
+	}
+#endif
 	return wake_when() || ui_settings_busy();
 }
 
@@ -94,6 +116,9 @@ static void peek(lv_obj_t *prev, lv_obj_t *sleep_scr, const char *note)
 
 	lv_scr_load(prev);
 	ui_settings_notice(note);
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	ui_settings_bench_notice_is("sleep");
+#endif
 	lv_refr_now(NULL);
 	while (k_uptime_get() < until && !woken()) {
 		service();
@@ -114,6 +139,10 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 	lv_obj_t *scr = lv_obj_create(NULL);
 
 	wake_when = awake;
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	bench_dozing = true;
+	bench_wake = false;
+#endif
 	/*
 	 * Tell the dashboard it is asleep, before anything else.
 	 *
@@ -206,6 +235,10 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 	 * this does not release a backlog -- waking shows what is true now.
 	 */
 	usage_view_set_sleeping(false);
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	bench_dozing = false;
+	bench_wake = false;
+#endif
 	if (usage_view_have_data() &&
 	    sleep_reading_is_stale(usage_freshness_age_s(k_uptime_get()))) {
 		usage_view_set_status(USAGE_STATUS_STALE);

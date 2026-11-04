@@ -204,11 +204,11 @@ def _write_hooks_file(hooks_path, data, indent, trailing_newline) -> None:
     """Write the file back, with a failed write reported the same way a failed
     read is.
 
-    _save's only `except OSError` wraps the removal of a stale temp file; the
-    os.open / os.fdopen / os.replace that do the actual work are bare. So a
+    _save cleans up its temp file on a failure but lets the OSError itself
+    out (it did not even do the cleanup when this was written). So a
     CODEX_HOME that is readable but not WRITABLE -- a hooks.json laid down
     under sudo, a read-only dotfiles mount, a full volume -- came back out of
-    here as a raw PermissionError naming hooks.json.blink-tmp, a temp file the
+    here as a raw PermissionError naming a hooks.json.*.blink-tmp temp file the
     user has never heard of, from the middle of two functions that promise
     otherwise: install says it raises SettingsUnreadable, and uninstall says it
     never raises at all.

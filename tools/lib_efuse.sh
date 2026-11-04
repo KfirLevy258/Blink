@@ -80,6 +80,39 @@ efuse_probe() {
 	# Assign separately from `local` so the exit status is the command's, not
 	# local's (which is always 0 and would swallow the failure).
 	summary="$("$etools/espefuse.py" --port "$port" summary 2>&1)" || {
+		# Before blaming the port, ask whether the tool runs at all. On a freshly
+		# set-up bench Mac (2026-10-12) bitstring 5.0.0 had dropped BitStream,
+		# espefuse died on import, and this read "is the port free?" over a port
+		# nothing held -- so burn.sh refused to flash for a reason that was not
+		# true. --help loads the same modules summary does and opens no port.
+		# Asked only after a failure, so a working probe costs one call, not two.
+		# Found by gapietro in their fork.
+		#
+		# Its output goes nowhere, like summary's above. Whatever espefuse prints
+		# may carry bytes it read from a serial port, so the reason names the
+		# command that shows the failure instead of quoting it.
+		if ! "$etools/espefuse.py" --help >/dev/null 2>&1; then
+			EFUSE_REASON="espefuse.py in $etools does not start, so it never reached the port. '$etools/espefuse.py --help' shows why; check its bitstring against pc/requirements.txt."
+			return 0
+		fi
+		# Nothing can hold a port that is not there, so don't send anyone
+		# looking for a logger or a daemon: an unplugged board, or a name
+		# that changed when it was plugged into another socket, is the
+		# likely story. Only a path can be tested that way: a Windows COM3
+		# never exists as a file, and calling it missing would be wrong
+		# every time, so any other name keeps the reason below.
+		case "$port" in
+		"")
+			EFUSE_REASON="no port given (is the board plugged in?)"
+			return 0
+			;;
+		/*)
+			if [ ! -e "$port" ]; then
+				EFUSE_REASON="no such port: $port (is the board plugged in?)"
+				return 0
+			fi
+			;;
+		esac
 		EFUSE_REASON="espefuse.py could not read $port -- is the port free? A logger or the usage daemon may hold it."
 		return 0
 	}

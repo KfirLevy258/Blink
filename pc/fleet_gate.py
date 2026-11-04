@@ -21,6 +21,15 @@ green and honest and still not a licence to ship:
     completeness. The desks are read from tools/fleet/fleet.toml instead, and
     every one of them has to be present with ok exactly True.
 
+  - A VM run is not a desk run. tools/fleet/fleet-vm.toml proves this Mac
+    and its UTM guests with one board handed round, which is honest evidence
+    of something narrower: no x86 Windows, no Windows 10, arm64 guests, the
+    board through USB redirection. run.py records the inventory's `kind` in
+    the result, and the gate insists it matches the kind of the inventory it
+    was handed -- so a VM run cannot license a release checked against
+    fleet.toml, and the VM inventory has to be asked for by name
+    (BLINK_FLEET=vm in release.sh), where the operator can see it was.
+
   - `ok: 1` is not `ok: True`, and a `finished_at` of `NaN` is not a time.
     Nothing this repository writes produces either, so a stand-in that merely
     passes a type check means something else wrote the file, and a gate that
@@ -31,9 +40,10 @@ green and honest and still not a licence to ship:
 Failing closed is the whole design. A missing file, an unreadable one, a
 damaged one, a missing inventory, or an interpreter with no tomllib are all
 refusals -- never a pass and, from main(), never a bare traceback either.
-That last case is real rather than theoretical: release.sh runs plain
-`python3`, and on this Mac /usr/bin/python3 is 3.9.6 with no tomllib while the
-homebrew python3 on PATH has it.
+That last case is real rather than theoretical: release.sh runs this under
+BLINK_PYTHON, else `python3`, and on this Mac /usr/bin/python3 is 3.9.6 with
+no tomllib while the homebrew python3 on PATH has it. release.sh now refuses
+anything below 3.11 before it gets here, but this module is also run by hand.
 
 Stdlib only, and nothing from the rest of pc/. This module runs under whatever
 interpreter a release shell happens to have, which is not the one the daemon's
@@ -45,7 +55,7 @@ import sys
 import time
 from pathlib import Path
 
-try:                                  # 3.11+; release.sh runs plain `python3`
+try:                                  # 3.11+; release.sh checks, by hand may not
     import tomllib
 except ModuleNotFoundError:           # pragma: no cover - exercised by a stub
     tomllib = None
@@ -108,8 +118,29 @@ def _failing_desks(doc):
                           and result.get("ok") is True))
 
 
+# The checkout this module sits in. run.py records the inventory it was given
+# relative to the checkout when it lies inside it, so that is what a relative
+# recorded path is resolved against.
+_CHECKOUT = Path(__file__).resolve().parents[1]
+
+# The two scenarios that prove the customer path, by the names the agent
+# gives them (tests/fleet/agent.py). Named here only to say, on a VM pass,
+# whether they ran.
+CUSTOMER_PATH = ("fresh_install", "update_path")
+
+# What an inventory with no [fleet] table is: the desk fleet, as fleet.toml
+# always was. Mirrors tools/fleet/run.py, which records the same default.
+DEFAULT_KIND = "desks"
+KNOWN_KINDS = ("desks", "vm")
+
+
 def _inventory_names(inventory_path):
-    """The desks a full fleet run must cover, from fleet.toml.
+    """The desks a full fleet run must cover, from fleet.toml."""
+    return _inventory(inventory_path)[0]
+
+
+def _inventory(inventory_path):
+    """(desk names, kind) for a fleet inventory.
 
     Deliberately a second, much simpler reader than run.py's load_inventory:
     importing that would drag the orchestrator (and argparse, subprocess, and
@@ -140,14 +171,69 @@ def _inventory_names(inventory_path):
             f"The fleet inventory at {path} names no desks, so 'every desk"
             f" passed' would be true of a run that touched nothing. Restore"
             f" the [hosts.<name>] tables before releasing.")
-    return sorted(hosts)
+    fleet = doc.get("fleet", {})
+    kind = fleet.get("kind", DEFAULT_KIND) if isinstance(fleet, dict) \
+        else None
+    if kind not in KNOWN_KINDS:
+        raise ValueError(
+            f"The fleet inventory at {path} has a [fleet] kind of {kind!r},"
+            f" which is none of {', '.join(KNOWN_KINDS)}. The gate cannot"
+            f" say what a run against it proved.")
+    return sorted(hosts), kind
+
+
+def run_kind(doc):
+    """The kind of fleet a result document says it ran, or None if it says
+    something unreadable. A document with no `fleet` key predates the VM
+    fleet and was a desk run."""
+    fleet = doc.get("fleet")
+    if fleet is None:
+        return DEFAULT_KIND
+    if not isinstance(fleet, dict):
+        return None
+    kind = fleet.get("kind", DEFAULT_KIND)
+    return kind if kind in KNOWN_KINDS else None
+
+
+def _same_inventory(recorded, inventory_path):
+    """Whether the inventory a run recorded is the one the gate was given."""
+    if not isinstance(recorded, str) or not recorded.strip():
+        return False
+    path = Path(recorded)
+    if not path.is_absolute():
+        path = _CHECKOUT / path
+    try:
+        return path.resolve() == Path(inventory_path).resolve()
+    except OSError:
+        return False
+
+
+def vm_caveats(doc):
+    """What a passing VM run did NOT contain, as sentences for the pass line.
+
+    The narrower claim belongs on the line that licenses the release, not
+    only in the docs: a VM run can pass with no customer-path scenario on
+    any desk (Ubuntu aarch64 has no release archive, and --bundle names one
+    file for every desk) and, since neither VM is signed in, with no
+    real-account pass either.
+    """
+    lines = ["Windows was a Windows 11 ARM64 VM, not Windows 10 on x86."]
+    if doc.get("real_account") is False:
+        lines.append("It ran with --no-real-account: no desk was asked to"
+                     " read its own account.")
+    hosts = doc.get("hosts") if isinstance(doc.get("hosts"), dict) else {}
+    ran = {name for result in hosts.values() if isinstance(result, dict)
+           for name in (result.get("scenarios") or {})}
+    if not ran.intersection(CUSTOMER_PATH):
+        lines.append("No install or update scenario ran on any desk.")
+    return lines
 
 
 def gate(path, head_sha, inventory_path, now=time.time, max_age_s=MAX_AGE_S):
     """None if this commit may be released; otherwise the reason it may not.
 
     The reason is returned rather than raised because it is prose for an
-    operator whose release just stopped: it says which of the six conditions
+    operator whose release just stopped: it says which of the seven conditions
     failed and what to do about it. Every path out of here is either None or
     such a sentence -- there is no third answer meaning "probably fine".
     """
@@ -278,9 +364,39 @@ def gate(path, head_sha, inventory_path, now=time.time, max_age_s=MAX_AGE_S):
                 f" (hosts = {type(hosts).__name__}), so its pass is about"
                 f" nothing. Run the fleet again.")
     try:
-        wanted = _inventory_names(inventory_path)
+        wanted, kind = _inventory(inventory_path)
     except ValueError as e:
         return str(e)
+    # 7. The same KIND of fleet as the inventory. Checked before the desk
+    #    names, so a mismatch is reported as what it is rather than as a
+    #    list of desks that "say nothing".
+    ran = run_kind(doc)
+    if ran is None:
+        return (f"The fleet run at {path} records a fleet of a kind nothing"
+                f" here knows ({doc.get('fleet')!r}), so the gate cannot say"
+                f" what it proved. Run the fleet again.")
+    if ran != kind:
+        if ran == "vm":
+            return (f"That run was a VM fleet run -- this Mac and its UTM"
+                    f" guests, one board handed round -- and {inventory_path}"
+                    f" is the desk fleet. A VM run proves less than the"
+                    f" desks, so it does not stand in for them silently. To"
+                    f" release on it, say so: BLINK_FLEET=vm"
+                    f" tools/release.sh.")
+        return (f"That run was a desk fleet run, and {inventory_path} is a"
+                f" {kind} inventory. Check the run against the inventory it"
+                f" was made with.")
+    # 7b. And the same FILE. The kind alone would let a hand-written
+    #     inventory that happened to reuse these desk names vouch for the
+    #     shipped one. A result from before this was recorded has no
+    #     inventory, and is judged on the rest.
+    fleet = doc.get("fleet")
+    if isinstance(fleet, dict) and "inventory" in fleet \
+            and not _same_inventory(fleet["inventory"], inventory_path):
+        return (f"That run was made with the inventory"
+                f" {fleet['inventory']!r}, and the gate was asked about"
+                f" {inventory_path}. A run proves the desks it was given."
+                f" Run the fleet with that inventory.")
     missing = [name for name in wanted if name not in hosts]
     if missing:
         return (f"The fleet run says nothing about {', '.join(missing)},"
@@ -328,6 +444,18 @@ def main(argv=None):
         return 1
     print(f"Fleet gate: {head_sha.strip()[:12]} passed on every desk in"
           f" {inventory}.")
+    try:
+        if _inventory(inventory)[1] == "vm":
+            # On stdout with the pass, so the line that licenses the release
+            # is never read without it.
+            doc = json.loads(Path(state).read_text(encoding="utf-8"))
+            print("Fleet gate: that was a VM fleet run -- this Mac and its"
+                  " UTM guests, one board handed round. Say so in the"
+                  " release notes:")
+            for line in vm_caveats(doc):
+                print(f"  {line}")
+    except (ValueError, OSError):  # pragma: no cover - gate() just read both
+        pass
     return 0
 
 

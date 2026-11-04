@@ -16,6 +16,10 @@
 #include <lvgl.h>
 #include "usage_view.h"
 #include "usage_layout.h"
+#include "svc_state.h"
+#include "theme.h"
+#include "burn5h.h"
+#include <zephyr/kernel.h>
 
 static uint16_t fb[SCR_W * SCR_H];
 
@@ -53,6 +57,61 @@ static void write_ppm(const char *path)
 	fclose(f);
 }
 
+/*
+ * The two-provider desk the status-page scenes share: Claude main, Codex on
+ * page 2, nothing else on the line under the brand that would outrank an
+ * incident -- both windows under 95 %, a session RUNNING (which leaves the
+ * row to the clock), 14:05 on the clock so its absence is visible.
+ */
+static void svc_desk(int page)
+{
+	usage_view_set_provider1("claude");
+	usage_view_update(27.0, 13231, 42.0, 598831);
+	usage_view_set_provider2("codex", 34.0, 61.0, 4320, 259200, false);
+	usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+	usage_view_set_sessions(1, 0);
+	usage_view_set_counts(1, 1, 0, 0);
+	usage_view_set_clock(14, 5);
+	if (page) {
+		usage_view_page_step(1);
+	}
+}
+
+/* One svc message, as proto.c's dispatch hands it on. */
+static void svc(const char *provider, const char *level, const char *what)
+{
+	svc_note(provider, level, what, k_uptime_get());
+	usage_view_svc_changed();
+}
+
+/*
+ * The Focus scenes' desk: both providers, at one of three levels, on one of
+ * the two pages. The session and weekly windows sit in DIFFERENT bands at
+ * the middle level so a single picture shows the big gauge and the dim line
+ * disagreeing in colour, which is the case where one of them could be wrong.
+ */
+static void focus_desk(int level, int page)
+{
+	static const double lv[3][4] = {
+		/* claude s, w     codex s, w */
+		{ 27.0, 42.0,      12.0, 20.0 },	/* low: all green */
+		{ 72.0, 41.0,      66.0, 83.0 },	/* mid: amber and green */
+		{ 96.0, 91.0,      93.0, 100.0 },	/* high: all red */
+	};
+
+	usage_view_set_provider1("claude");
+	usage_view_update(lv[level][0], 13231, lv[level][1], 598831);
+	usage_view_set_provider2("codex", lv[level][2], lv[level][3], 4320,
+				 259200, false);
+	usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+	usage_view_set_sessions(1, 0);
+	usage_view_set_counts(1, 1, 0, 0);
+	usage_view_set_clock(14, 5);
+	if (page) {
+		usage_view_page_step(1);
+	}
+}
+
 static void settle(void)
 {
 	/* LVGL needs a few passes: one to lay out, one to draw, and the
@@ -63,11 +122,80 @@ static void settle(void)
 	}
 }
 
+/*
+ * The five-hour burn view's desk (docs/plans/burn-5h.md): an account with
+ * no session window -- session_pct -1, the way the daemon sends it -- and a
+ * weekly one, at 14:52 local on a board told UTC+2.
+ *
+ * The `q` below is 12:45 UTC, so the newest bucket starts 14:45 local and
+ * the axis reads 10..14, with a two-digit label on the leftmost tick.
+ */
+#define BURN_Q "1793450700"
+
+static void ultra_desk(void)
+{
+	usage_view_set_provider1("claude");
+	usage_view_update(-1.0, -1, 42.0, 598831);
+	usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+	usage_view_set_sessions(1, 0);
+	usage_view_set_counts(1, 1, 0, 0);
+	usage_view_set_clock(14, 52);
+	usage_view_set_utc_offset(120);
+}
+
+/*
+ * One burn line, through the real parser, the way proto.c hands it over,
+ * stamped `age_ms` before now. A line the parser refuses stops the render:
+ * a scene that silently drew nothing would look like a passing one.
+ */
+static void burn_line(const char *json, int64_t age_ms)
+{
+	struct burn5h m;
+
+	if (!burn5h_parse(json, &m)) {
+		fprintf(stderr, "burn line refused: the scene is wrong\n");
+		exit(1);
+	}
+	usage_view_set_burn5h(&m, k_uptime_get() - age_ms);
+}
+
+/*
+ * The lines carry exact output tokens. These are the bars the scenes drew
+ * when the wire carried thousands, multiplied out, so the pictures differ
+ * from those only where the contract does: the rate is the last COMPLETE
+ * hour, buckets 15-18 against 11-14, and the quarter-hour still filling is
+ * drawn but not compared.
+ *
+ * The last complete hour 940k against 580k before it: rising.
+ */
+static const char burn_rising[] =
+	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[90000,120000,80000,0,0,40000,110000,150000,130000,160000,140000,"
+	"120000,150000,140000,170000,160000,230000,260000,290000,320000]}";
+/* 830k against 780k: inside the 10% band. */
+static const char burn_steady[] =
+	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[60000,90000,120000,150000,170000,160000,140000,180000,175000,"
+	"190000,185000,200000,180000,210000,190000,220000,200000,195000,"
+	"215000,205000]}";
+/* 300k against 740k: easing, a session winding down. */
+static const char burn_easing[] =
+	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[20000,40000,90000,160000,180000,210000,190000,230000,200000,180000,"
+	"170000,190000,200000,180000,170000,150000,90000,40000,20000,10000]}";
+/* Nothing for five hours. */
+static const char burn_idle[] =
+	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}";
+
 int main(int argc, char **argv)
 {
 	static uint8_t buf[SCR_W * 40 * 2];
 	const char *out = argc > 1 ? argv[1] : "panel.ppm";
 	int scene = argc > 2 ? atoi(argv[2]) : 0;
+	int theme = argc > 3 ? atoi(argv[3]) : THEME_DARK;
+	/* 0 two gauges, 1 Focus on the session window, 2 on the weekly. */
+	int focus = argc > 4 ? atoi(argv[4]) : 0;
 
 	lv_init();
 	lv_display_t *disp = lv_display_create(SCR_W, SCR_H);
@@ -76,6 +204,32 @@ int main(int argc, char **argv)
 	lv_display_set_buffers(disp, buf, NULL, sizeof(buf),
 			       LV_DISPLAY_RENDER_MODE_PARTIAL);
 
+	/*
+	 * The theme before the screen is built, the way the board does it
+	 * (ui_theme_init() runs before usage_view_init()). 12 is a sample
+	 * custom theme in per-gauge mode with thick flat arcs, so the one
+	 * style path no built-in exercises is rendered too.
+	 */
+	if (theme == THEME_CUSTOM) {
+		struct theme_custom t = {
+			.c = { 0x14121C, 0xF2EEF8, 0x7C9CFF, 0x5ED6A0,
+			       0x5ED6A0, 0xF0B04A, 0xFF5A5A },
+			.w = THEME_W_THICK, .flat = true, .dot = false,
+			.by_gauge = true,
+		};
+
+		if (!theme_select_custom(&t)) {
+			fprintf(stderr, "sample custom theme refused\n");
+			return 1;
+		}
+	} else if (!theme_select(theme)) {
+		fprintf(stderr, "no theme %d\n", theme);
+		return 1;
+	}
+
+	/* Before the screen, as main.c does from cfg_store, so the screen is
+	 * born in its mode. */
+	usage_view_set_focus(focus != 0, focus == 2);
 	usage_view_init();
 	settle();
 
@@ -201,6 +355,157 @@ int main(int argc, char **argv)
 		usage_view_set_sessions(9999, 0);
 		usage_view_set_counts(29997, 9999, 9999, 9999);
 		usage_view_set_clock(20, 48);
+		break;
+	case 12: /* svc, Claude page: maintenance (amber) */
+		svc_desk(0);
+		svc("claude", "maint", "claude.ai");
+		break;
+	case 13: /* svc, Claude page: degraded (amber) */
+		svc_desk(0);
+		svc("claude", "degraded", "API");
+		break;
+	case 14: /* svc, Claude page: partial outage (amber) */
+		svc_desk(0);
+		svc("claude", "partial", "Claude Code");
+		break;
+	case 15: /* svc, Claude page: major outage (red) */
+		svc_desk(0);
+		svc("claude", "major", "Claude Code");
+		break;
+	case 16: /* svc, Codex page: maintenance (amber) */
+		svc_desk(1);
+		svc("codex", "maint", "Login");
+		break;
+	case 17: /* svc, Codex page: degraded (amber) */
+		svc_desk(1);
+		svc("codex", "degraded", "API");
+		break;
+	case 18: /* svc, Codex page: partial outage (amber) */
+		svc_desk(1);
+		svc("codex", "partial", "Codex");
+		break;
+	case 19: /* svc, Codex page: major outage (red) */
+		svc_desk(1);
+		svc("codex", "major", "Codex");
+		break;
+	case 20: /* Claude is down and the CODEX page is on screen: nothing
+		  * here, the clock keeps the row. Keyed by provider. */
+		svc_desk(1);
+		svc("claude", "major", "Claude Code");
+		break;
+	case 21: /* ...and the same incident with the Claude page brought
+		  * back: it is there, because it was held for the provider. */
+		svc_desk(1);
+		svc("claude", "major", "Claude Code");
+		usage_view_page_step(-1);
+		break;
+	case 22: /* A prompt is waiting AND Claude is down: the person at the
+		  * desk comes first, the outage yields the row. */
+		svc_desk(0);
+		svc("claude", "major", "Claude Code");
+		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
+		break;
+	case 23: /* The worst case for width: the longest level and a
+		  * component at the wire's 24-byte bound. */
+		svc_desk(0);
+		svc("claude", "partial", "abcdefghijklmnopqrstuvwx");
+		break;
+	case 24: /* Major outage, then the all-clear: back to the clock. */
+		svc_desk(0);
+		svc("claude", "major", "Claude Code");
+		settle();
+		svc("claude", "ok", NULL);
+		break;
+	case 25: case 26: case 27: case 28: case 29: case 30:
+		/* The Focus desk: low, mid, high, each on the Claude page and
+		 * then the Codex one. Meant to be run with a focus argument;
+		 * without one it is an ordinary two-provider desk. */
+		focus_desk((scene - 25) / 2, (scene - 25) % 2);
+		break;
+	case 31: /* CONNECTING: no host has ever spoken, the takeover is up */
+		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+		break;
+	case 32: /* HOST LOST: readings held, then the daemon went away */
+		focus_desk(1, 0);
+		settle();
+		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+		break;
+	case 33: /* An old reading on the Codex page: the age caption and the
+		  * "Reading is old" line. */
+		focus_desk(1, 1);
+		usage_view_set_ages(60, 1500);
+		usage_view_set_provider2("codex", 66.0, 83.0, 4320, 259200,
+					 true);
+		usage_view_set_status(USAGE_STATUS_STALE);
+		break;
+	case 34: /* Focus at its widest figure: both windows at "100%", the
+		  * reading that measures 103 px and sits nearest the ring and
+		  * the caption under it (audit, 2026-10-28). */
+		usage_view_set_provider1("claude");
+		usage_view_update(100.0, 13231, 100.0, 598831);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_counts(1, 1, 0, 0);
+		usage_view_set_clock(14, 5);
+		break;
+	/*
+	 * The five-hour burn view. 35..38 are the four directions; 39 is the
+	 * same account before any burn line has arrived, which must be
+	 * today's "--%" and nothing else; 40 a line that arrived 181 s ago,
+	 * past the 180 s the view holds for; 41 the session window coming
+	 * back, which takes the half back at once; 42 a board that has not
+	 * been told its UTC offset, which draws no hour axis rather than a
+	 * wrong one. 43 and 44 swipe from the burn page to a Codex page and
+	 * back, through the real morph, and land on each page whole.
+	 */
+	case 35:
+		ultra_desk();
+		burn_line(burn_rising, 0);
+		break;
+	case 36:
+		ultra_desk();
+		burn_line(burn_steady, 0);
+		break;
+	case 37:
+		ultra_desk();
+		burn_line(burn_idle, 0);
+		break;
+	case 38:
+		ultra_desk();
+		burn_line(burn_easing, 0);
+		break;
+	case 39:
+		ultra_desk();
+		break;
+	case 40:
+		ultra_desk();
+		burn_line(burn_rising, 181 * 1000);
+		break;
+	case 41:
+		ultra_desk();
+		burn_line(burn_rising, 0);
+		settle();
+		usage_view_update(37.0, 9000, 42.0, 598831);
+		break;
+	case 42:
+		usage_view_set_provider1("claude");
+		usage_view_update(-1.0, -1, 42.0, 598831);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_counts(1, 1, 0, 0);
+		burn_line(burn_rising, 0);
+		break;
+	case 43: case 44:
+		ultra_desk();
+		usage_view_set_provider2("codex", 34.0, 61.0, 4320, 259200,
+					 false);
+		burn_line(burn_rising, 0);
+		settle();
+		usage_view_page_step(1);
+		if (scene == 44) {
+			settle();
+			usage_view_page_step(-1);
+		}
 		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_set_provider1("");

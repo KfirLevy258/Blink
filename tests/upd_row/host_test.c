@@ -1,4 +1,4 @@
-/* What the "Software update" row says, pinned.
+/* What the Update tile on Settings says, pinned.
  *
  *   cc -Wall -Werror -I firmware/src tests/upd_row/host_test.c \
  *      firmware/src/upd_row.c -o /tmp/upd_row

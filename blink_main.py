@@ -12,17 +12,35 @@ THIS program. Without this branch that command was an argparse error, and
 every over-the-air firmware update from an installed daemon failed with
 "could not read the chip's eFuses" (found on the first real customer-path
 test, 2026-08-29; the flow had only ever run from source before).
+
+Nothing here runs on import. This file used to end in a bare
+`raise SystemExit(main())`, and a bare `blink` is `blink install`, so on
+2026-10-30 (22:25-22:27 IST) a reviewer who imported every module to check
+they still loaded on Python 3.9 installed the service: HOME was a scratch
+folder, but launchctl acts on the gui/<uid> domain whatever HOME says, so it
+booted out the owner's real com.blink.bridge job and bootstrapped a stray
+daemon, which ran for a minute against the real ~/.blink and the real board.
+PyInstaller runs the entry script as __main__, as does `python blink_main.py`
+(the login service, the fleet agent), so the guard costs the launcher nothing.
+tests/test_import_is_inert.py imports it in a child with the service tools
+stubbed.
 """
 import sys
 
-if len(sys.argv) > 2 and sys.argv[1] == "-m":
-    import runpy
 
-    module = sys.argv[2]
-    sys.argv = [module] + sys.argv[3:]
-    runpy.run_module(module, run_name="__main__", alter_sys=True)
-    raise SystemExit(0)
+def _run():
+    if len(sys.argv) > 2 and sys.argv[1] == "-m":
+        import runpy
 
-from pc.cli import main  # noqa: E402
+        module = sys.argv[2]
+        sys.argv = [module] + sys.argv[3:]
+        runpy.run_module(module, run_name="__main__", alter_sys=True)
+        raise SystemExit(0)
 
-raise SystemExit(main())
+    from pc.cli import main
+
+    raise SystemExit(main())
+
+
+if __name__ == "__main__":
+    _run()

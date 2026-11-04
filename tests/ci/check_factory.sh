@@ -34,6 +34,10 @@ head -c 20000 /dev/zero | tr '\0' 'M' >"$WORK/build/mcuboot/zephyr/zephyr.bin"
 head -c 90000 /dev/zero | tr '\0' 'A' >"$WORK/build/firmware/zephyr/zephyr.bin"
 head -c 90000 /dev/zero | tr '\0' 'A' >"$WORK/build/firmware/zephyr/zephyr.signed.bin"
 head -c 32 /dev/zero >"$WORK/home/flash_key.bin"
+# Both flashers refuse a build with no .config to read (tools/lib_selftest.sh),
+# so the fake build has one: a plain build's, the selftest symbol unset.
+printf '%s\n' 'CONFIG_BLINK_PANEL_SCALE=60' \
+	'# CONFIG_BLINK_FATAL_SELFTEST is not set' >"$WORK/build/firmware/zephyr/.config"
 
 # tools/sign_confirmed.py reads the signing parameters out of the build's own
 # build.ninja rather than hard-coding them, so the fake build needs one. The
@@ -142,7 +146,8 @@ called "esptool .*write_flash 0x1000 $WORK/build/mcuboot/zephyr/zephyr.bin 0x200
 never "write_flash.*zephyr.signed.bin"
 called "imgtool sign .*--pad --confirm "
 never "write_flash.*0x330000"
-called 'host -> {"t": "edition", "v": 2, "edition": "claude"}'
+# protocol.encode_checked's compact form: burn.sh sends the daemon's own line.
+called 'host -> {"t":"edition","v":2,"edition":"claude"}'
 # The erase comes BEFORE the firmware is written: a failure there must stop
 # the burn while the board still runs what it ran before.
 [ "$(grep -n 'erase_region' "$FAKE_TOOL_LOG" | cut -d: -f1)" -lt \
@@ -218,6 +223,74 @@ unset FAKE_ESPTOOL_FAIL
 saw "flash failed"
 never "host -> "
 ok "no stamp is attempted over a torn image"
+
+echo "== burn.sh: a selftest build"
+# CONFIG_BLINK_FATAL_SELFTEST faults on every boot, on purpose -- after the
+# boot check here is long over, so a burn of one would say PASS and the unit
+# would be boxed. A -D value in build-sb's CMake cache is all it takes.
+CFG="$WORK/build/firmware/zephyr/.config"
+cp "$CFG" "$WORK/plain.config"
+printf '%s\n' 'CONFIG_BLINK_FATAL_SELFTEST=y' >>"$CFG"
+board claude none
+export FAKE_BOARD_EDITION_REPLY='[cfg] edition stamped as claude'
+run 1 "$BURN" --edition claude --port $PORT --no-build
+saw "CONFIG_BLINK_FATAL_SELFTEST=y"
+never "esptool.*write_flash"
+never "imgtool sign"
+# The bench test the Kconfig help describes still has a way through, by name.
+run 0 "$BURN" --edition claude --port $PORT --no-build --selftest
+saw "SELFTEST build"
+called "esptool .*write_flash"
+saw "never box this unit"
+export FAKE_EFUSE_BITS=0000001
+run 1 "$ENC" $PORT
+export FAKE_EFUSE_BITS=0000000
+saw "CONFIG_BLINK_FATAL_SELFTEST=y"
+never "esptool.*write_flash"
+# Refused from the build alone, before the probe opens the port.
+never "espefuse"
+cp "$WORK/plain.config" "$CFG"
+# --selftest is a permission, not a label: on a plain build the unit is a
+# normal one, and the burn says so rather than "never box this unit".
+run 0 "$BURN" --edition claude --port $PORT --no-build --selftest
+saw "not a selftest build"
+saw "Put it in a claude enclosure"
+! grep -q "never box this unit" "$OUT" || fail "a plain build was called a selftest unit"
+ok "a selftest build is refused unless --selftest names it; the fused path refuses it too"
+
+echo "== burn.sh: a touch-inject build"
+# CONFIG_BLINK_TOUCH_INJECT boots like a release and passes every check here,
+# so nothing but this refusal stands between it and a box -- and it takes
+# touches from the cable. Same shape as the selftest case, its own flag.
+cp "$WORK/plain.config" "$CFG"
+printf '%s\n' 'CONFIG_BLINK_TOUCH_INJECT=y' >>"$CFG"
+board claude none
+export FAKE_BOARD_EDITION_REPLY='[cfg] edition stamped as claude'
+run 1 "$BURN" --edition claude --port $PORT --no-build
+saw "CONFIG_BLINK_TOUCH_INJECT=y"
+never "esptool.*write_flash"
+never "imgtool sign"
+# --selftest is not the way through for this one.
+run 1 "$BURN" --edition claude --port $PORT --no-build --selftest
+saw "CONFIG_BLINK_TOUCH_INJECT=y"
+never "esptool.*write_flash"
+run 0 "$BURN" --edition claude --port $PORT --no-build --bench
+saw "TOUCH INJECT build"
+called "esptool .*write_flash"
+saw "never box this unit"
+export FAKE_EFUSE_BITS=0000001
+run 1 "$ENC" $PORT
+export FAKE_EFUSE_BITS=0000000
+saw "CONFIG_BLINK_TOUCH_INJECT=y"
+never "esptool.*write_flash"
+# Refused from the build alone, before the probe opens the port.
+never "espefuse"
+cp "$WORK/plain.config" "$CFG"
+run 0 "$BURN" --edition claude --port $PORT --no-build --bench
+saw "not a touch-inject build"
+saw "Put it in a claude enclosure"
+! grep -q "never box this unit" "$OUT" || fail "a plain build was called a bench unit"
+ok "a touch-inject build is refused unless --bench names it; the fused path refuses it outright"
 
 echo "== flash_encrypted.sh"
 run 1 "$ENC" $PORT

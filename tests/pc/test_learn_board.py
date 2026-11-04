@@ -5,16 +5,21 @@ from claude_usage_bridge import learn_board
 
 
 def test_a_pref_first_keeps_what_was_known():
+    # Everything but caps, which a pref states whole (tests/pc/
+    # test_board_caps.py): this one lists none, so the board has none.
     known = {"port": "COM3", "board_id": "abc", "fw": "1.2.0"}
-    assert learn_board(known, "COM3", {"t": "pref", "provider": "codex"}) == known
+    assert learn_board(known, "COM3", {"t": "pref", "provider": "codex"}) == \
+        dict(known, caps=[])
 
 
 def test_a_hello_after_a_pref_fills_in_the_nulls():
     known = learn_board({}, "COM3", {"t": "pref", "provider": "codex"})
-    assert known == {"port": "COM3", "board_id": None, "fw": None}
-    hello = {"t": "hello", "board_id": "20500d342b68", "fw": "1.2.1"}
+    assert known == {"port": "COM3", "board_id": None, "fw": None, "caps": []}
+    hello = {"t": "hello", "board_id": "20500d342b68", "fw": "1.2.1",
+             "caps": ["svc", "theme"]}
     assert learn_board(known, "COM3", hello) == \
-        {"port": "COM3", "board_id": "20500d342b68", "fw": "1.2.1"}
+        {"port": "COM3", "board_id": "20500d342b68", "fw": "1.2.1",
+         "caps": ["svc", "theme"]}
 
 
 def test_a_new_firmware_replaces_the_old_one():

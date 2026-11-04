@@ -38,7 +38,7 @@ And two traps in how the streams overlap:
 
   - `sent` is false when the daemon refused to write the frame. send() drops
     any line over the board's 512-byte limit and a loaded two-provider frame
-    already measures 484 of 512, so this is a live failure mode, not a
+    already measures 454 of 512, so this is a live failure mode, not a
     theoretical one. A refused frame never reached the board; counting it
     would credit the board for work it was never given.
 
@@ -239,7 +239,7 @@ def check(tap_lines, expect, name=None):
              f" sent {sent}.")
     if refused:
         # send() refuses a line over 512 bytes, which is nearly always what
-        # this is: a loaded two-provider frame already measures 484. The
+        # this is: a loaded two-provider frame already measures 454. The
         # frame never reached the board, so without naming the host-side drop
         # this reads as a firmware fault and the hunt starts at the wrong end.
         # The one other way to land here is the link dropping mid-write, and

@@ -17,4 +17,9 @@ bool msg_get_double(const char *json, const char *key, double *out);
  * booleans, and accepting the string form would let a typo read as valid. */
 bool msg_get_bool(const char *json, const char *key, bool *out);
 
+/* The raw text just after `"key":`, for values the getters above do not
+ * cover -- arrays, mostly. NULL if `key` is not present as a key. The caller
+ * parses from there and must stop at the end of its own value. */
+const char *msg_find_value(const char *json, const char *key);
+
 #endif /* MSG_PARSE_H */

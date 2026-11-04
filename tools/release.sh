@@ -1,10 +1,39 @@
 #!/bin/bash
-# Build, sign, and publish a Blink firmware release the board can install
-# over WiFi. The version comes from firmware/src/version.h -- bump it FIRST.
+# Build, sign, and publish a Blink firmware release the daemon can install
+# over USB. The version comes from firmware/src/version.h -- bump it LAST,
+# after every firmware commit for the release; check_versions.sh --release
+# refuses otherwise. "FIRST" stood here, and following it put 1.4.0's bump
+# ahead of nine firmware commits that every 1.4.0 board would never have
+# been offered (full review #3, M1).
 # Requires: zephyr env NOT needed here (script sources it), `gh auth status` ok.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
+# The interpreter for the three Python steps below: the fleet gate, the
+# manifest, and the check that its signature verifies. A bare python3 is
+# Apple's 3.9.6 in /usr/bin on a Mac with nothing else in front of it, which
+# has no tomllib for the gate, so a release from such a shell was refused
+# before any result was read, with no way to name a better interpreter.
+# BLINK_PYTHON is the override burn.sh and flash_encrypted.sh already take.
+# Found by gapietro in their fork (2026-10-13). Left unset it is python3,
+# looked up on PATH at each step -- and after blink_zephyr_activate below,
+# that lookup finds the Zephyr venv's, as it always has.
+PY="${BLINK_PYTHON:-python3}"
+# Asked before the interpreter is first used, because a wrong one otherwise
+# surfaced late and under the wrong name: as "the fleet gate refused" when the
+# gate had never run, or, with BLINK_SKIP_FLEET=1, only after the build and
+# the draft release. The same probe build_binary.sh makes, with a floor given
+# by the caller. Called below, where each path actually needs $PY.
+py_refuse_unless() {	# <major.minor floor> <what needs it>
+	PY_VER=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null) || PY_VER=""
+	"$PY" -c "import sys; sys.exit(0 if sys.version_info >= (${1%.*}, ${1#*.}) else 1)" \
+		>/dev/null 2>&1 && return 0
+	if [ -n "$PY_VER" ]; then PY_WHAT="Python $PY_VER"; else PY_WHAT="not an interpreter that runs"; fi
+	echo "FATAL: release.sh needs Python $1 or newer ($2)," >&2
+	echo "       and $PY is $PY_WHAT." >&2
+	echo "       Set BLINK_PYTHON to one that is, e.g. BLINK_PYTHON=python3.13." >&2
+	exit 1
+}
 REPO="${OTA_REPO:-KfirLevy258/Blink}"
 REPO_URL="${OTA_REPO_URL:-https://github.com/$REPO.git}"
 TAG="v$(sed -n 's/#define BLINK_FW_VERSION "\(.*\)"/\1/p' "$ROOT/firmware/src/version.h")"
@@ -13,9 +42,18 @@ VER="${TAG#v}"
 [ -n "$VER" ] || { echo "FATAL: no version in version.h"; exit 1; }
 # A release nobody put on a board is a guess. tools/fleet/run.py drives a real
 # board on all three desks and writes .fleet/last_run.json; pc/fleet_gate.py
-# re-reads that file here and insists on all six of: green, for THIS commit,
+# re-reads that file here and insists on all seven of: green, for THIS commit,
 # finished within twelve hours, not narrowed by --only, not narrowed by
-# --scenarios, and one clean pass from every desk in tools/fleet/fleet.toml.
+# --scenarios, one clean pass from every desk in tools/fleet/fleet.toml, and
+# the same kind of fleet as that inventory.
+#
+# BLINK_FLEET=vm checks the run against tools/fleet/fleet-vm.toml instead:
+# this Mac and its two UTM VMs, one board handed round, for when the desks
+# are out of reach. It is a narrower claim -- the Windows desk is a Windows
+# 11 ARM64 VM, not Windows 10 on x86 -- so it is a name typed on purpose,
+# never a fallback, and a VM run is refused under the default. Only the two
+# committed inventories can be named: a path here would let any file with
+# one desk in it vouch for a release.
 #
 # The last two are why the gate is not simply `grep ok`. `run.py --only
 # kfir-ubuntu` exits 0 with ok: true and is RIGHT to -- that run passed -- so
@@ -25,21 +63,40 @@ VER="${TAG#v}"
 #
 # It refuses whenever it cannot check: no file, an unreadable one, a missing
 # inventory, or a python3 too old for tomllib (/usr/bin/python3 is still 3.9
-# on macOS, and this script calls plain `python3`). Silence from a gate must
-# never read as approval.
+# on macOS; set BLINK_PYTHON to run this under a newer one -- see PY at the
+# top). Silence from a gate must never read as approval.
 #
 # PYTHONPATH because -m adds the CALLER's directory to sys.path, not this
 # checkout, and a release may be started from anywhere.
 if [ "${BLINK_SKIP_FLEET:-}" = "1" ]; then
 	echo "WARNING: BLINK_SKIP_FLEET=1 -- $TAG is being built with no proof" >&2
 	echo "         that it runs on any board. Nothing below checks that." >&2
+	# No gate, so no tomllib floor. Left unset, python3 is looked up again
+	# after blink_zephyr_activate and may well be a different interpreter
+	# from the one on PATH now, so there is nothing true to ask of it here.
+	# A BLINK_PYTHON that was named is the one the manifest steps will run:
+	# make sure it runs at all (pc/ supports 3.9), before the build.
+	if [ -n "${BLINK_PYTHON:-}" ]; then
+		py_refuse_unless 3.9 "the manifest and signature steps"
+	fi
 else
-	PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m pc.fleet_gate \
+	case "${BLINK_FLEET:-desks}" in
+	desks)	FLEET_TOML="$ROOT/tools/fleet/fleet.toml"; FLEET_RUN_ARGS="" ;;
+	vm)	FLEET_TOML="$ROOT/tools/fleet/fleet-vm.toml"
+		FLEET_RUN_ARGS=" --inventory tools/fleet/fleet-vm.toml"
+		echo "NOTE: BLINK_FLEET=vm -- $TAG is gated on the VM fleet: this Mac" >&2
+		echo "      and its UTM guests, one board handed round. Windows there" >&2
+		echo "      is an ARM64 VM, not Windows 10 on x86." >&2 ;;
+	*)	echo "FATAL: BLINK_FLEET is \"$BLINK_FLEET\"; it is desks or vm." >&2
+		exit 1 ;;
+	esac
+	py_refuse_unless 3.11 "tomllib, for the fleet gate"
+	PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m pc.fleet_gate \
 		"$ROOT/.fleet/last_run.json" "$(git -C "$ROOT" rev-parse HEAD)" \
-		"$ROOT/tools/fleet/fleet.toml" || {
+		"$FLEET_TOML" || {
 		echo "FATAL: the fleet gate refused $TAG for the reason above." >&2
-		echo "       Prove this commit on all three desks first:" >&2
-		echo "         python3 tools/fleet/run.py" >&2
+		echo "       Prove this commit on every desk in $FLEET_TOML first:" >&2
+		echo "         $PY tools/fleet/run.py$FLEET_RUN_ARGS" >&2
 		echo "       BLINK_SKIP_FLEET=1 releases without it." >&2
 		exit 1; }
 fi
@@ -107,6 +164,7 @@ KEY="${OTA_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
 # Note this is a RELEASE-path fix: a plain `west build` still produces 0.0.0+0,
 # which is fine and even desirable -- a dev image should never out-rank a
 # released one under direct-XIP.
+blink_zephyr_build_ready || exit 1
 ( cd "$ROOT/firmware" && west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
 	-- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
 	-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$KEY\"" \
@@ -114,10 +172,12 @@ KEY="${OTA_SIGNING_KEY:-$HOME/.blink/ota_signing_key_p256.pem}"
 
 BIN="$ROOT/firmware/build-sb/firmware/zephyr/zephyr.signed.bin"
 
-# A release must not carry the on-device network path. CONFIG_BLINK_WIFI_MODE
-# defaults to n, but a default is not a guarantee: a stray EXTRA_CONF_FILE or a
-# sticky build directory flips it silently, and nobody would find out until a
-# customer's board signed itself in to Anthropic as Claude Code.
+# A release must not carry the on-device network path. The code and its
+# CONFIG_BLINK_WIFI_MODE switch were deleted on 2026-10-27, so on this tree
+# neither check below can fire. They stay as tripwires: the path could
+# return through an old build directory, an undone commit or a merge from
+# a fork, and the first anyone would hear of it is a customer's board
+# signing in to Anthropic as Claude Code.
 #
 # Checks the ARTIFACT, not only the config, because the artifact is what ships.
 # If the OAuth path were ever linked in, these strings would be in the image.
@@ -143,18 +203,38 @@ for pat in "/api/oauth/usage" "refresh_token" "claude-code/"; do
 	fi
 done
 
+# Nor a selftest image, which faults on every boot on purpose. One -D in
+# build-sb's CMake cache from a bench test and this build carries it without a
+# word; shipped, every desk that took the update would fault and halt. Checks
+# the .config and the artifact both -- see tools/lib_selftest.sh.
+source "$ROOT/tools/lib_selftest.sh"
+blink_refuse_selftest "$CFG" "$BIN" || exit 1
+# Nor a touch-inject image, which boots like a release and takes touches from
+# the cable: every desk that took it could be operated from the computer.
+blink_refuse_inject "$CFG" "$BIN" || exit 1
+# Nor a touch-trace image, which prints every touch on the cable, nor a
+# pilot-panel one, which on a production panel is mirrored and colour-swapped.
+# Both get into build-sb the same way, one EXTRA_CONF_FILE kept in the cache.
+blink_refuse_trace "$CFG" "$BIN" || exit 1
+blink_refuse_pilot "$CFG" "$BIN" || exit 1
+
 SIZE=$(stat -f%z "$BIN")
 SHA=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
 SLOT=$((0x150000))
 [ "$SIZE" -le "$SLOT" ] || { echo "FATAL: image $SIZE > slot $SLOT"; exit 1; }
 
-# The OTA artifact must stay UNCONFIRMED -- the opposite of what the factory
-# scripts flash (tools/sign_confirmed.py). It lands in slot 1, boots once, and
-# firmware/src/main.c confirms it only after WiFi+TLS or the daemon proves the
-# image works. A pre-confirmed artifact would take that safety net away: a bad
-# release would then be permanent on every board that accepted it, with no
-# revert. The size check above already catches --pad, which pads to the full
-# slot -- this names the reason, so nobody "fixes" it by padding here too.
+# The OTA artifact must stay UNCONFIRMED and unpadded -- the opposite of what
+# the factory scripts flash (tools/sign_confirmed.py). The daemon writes it
+# into slot 0 with esptool (pc/ota.py, APP_OFFSET), in place: there is no
+# swap and no older image behind it to revert to, so what keeps a bad release
+# off a board is the daemon's own checking, the manifest sha256 before the
+# write and esptool's MD5 read-back after it. This comment used to say the
+# image lands in slot 1, boots once, and is confirmed by main.c with a revert
+# behind it. That was the WiFi path's MCUboot swap, which went with the radio
+# on 2026-10-27; what an unconfirmed image does at boot now is
+# firmware/src/main.c, ota_boot_begin(). The size check above already
+# catches --pad, which pads to the full slot -- this names the reason, so
+# nobody "fixes" it by padding here too.
 [ "$SIZE" -lt "$SLOT" ] || {
 	echo "FATAL: $BIN is exactly the slot size -- it looks padded, and a"
 	echo "       padded image carries a trailer. The OTA artifact must be"
@@ -246,7 +326,7 @@ done
 # It used to be a second definition inline here, free to drift from the one the
 # daemon reads.
 ROOT="$ROOT" VER="$VER" PROTO="$PROTO" SIZE="$SIZE" SHA="$SHA" TMP="$TMP" \
-	ARTIFACTS="$ARTIFACTS" python3 - <<'PYEOF' > "$TMP/manifest.json"
+	ARTIFACTS="$ARTIFACTS" "$PY" - <<'PYEOF' > "$TMP/manifest.json"
 import hashlib, json, os, sys
 
 sys.path.insert(0, os.environ["ROOT"])
@@ -275,7 +355,7 @@ openssl dgst -sha256 -sign "$RELKEY" -out "$TMP/manifest.json.sig" \
 	"$TMP/manifest.json"
 # Prove the signature verifies with the public half that is compiled into the
 # binaries we just built, before anyone can download it.
-python3 - "$ROOT" "$TMP/manifest.json" "$TMP/manifest.json.sig" <<'PYEOF'
+"$PY" - "$ROOT" "$TMP/manifest.json" "$TMP/manifest.json.sig" <<'PYEOF'
 import sys
 # Explicit root: the firmware build left us in a different directory, and
 # picking pc/ up from the cwd would work here and nowhere else.

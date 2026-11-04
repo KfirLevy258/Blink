@@ -12,8 +12,8 @@ void proto_init(void);
  * periodic ping. Call repeatedly from the main loop. */
 void proto_service(void);
 
-/* True once any protocol message has arrived from a PC daemon -- used at boot
- * to choose USB mode over WiFi. */
+/* True once any protocol message has arrived from a PC daemon -- read at boot
+ * to know whether a daemon spoke during the splash. */
 bool proto_host_seen(void);
 
 /* True from the moment the host has been silent past the timeout without
@@ -61,5 +61,16 @@ bool proto_ota_staged(void);
  * the user having to touch the setting again.
  */
 void proto_send_pref(void);
+
+/* {"t":"theme_now","v":2,"id":N,"why":W[,"h":H]}: the STORED theme. Sent
+ * after hello and every welcome (why "boot"), and whenever the stored theme
+ * changes: "user" from Settings, "saved" from the PC's own save. */
+void proto_send_theme_now(const char *why);
+
+/* {"t":"theme_edit","v":2}: Settings > Theme > "Edit on computer". */
+void proto_send_theme_edit(void);
+
+/* Did the last welcome advertise the theme builder ("caps":["theme"])? */
+bool proto_host_can_theme(void);
 
 #endif /* PROTO_H */

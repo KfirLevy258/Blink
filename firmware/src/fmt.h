@@ -186,4 +186,32 @@ int fmt_pips(int n_run, int n_wait, int n_fail, int n_fin,
 void fmt_toast(enum fmt_pip_kind kind, const char *label, int count,
 	       char *buf, size_t buflen);
 
+/*
+ * U+2022, which every built-in Montserrat carries (LVGL generates them with
+ * -r 0x20-0x7F,0xB0,0x2022). Spelled as bytes so this header stays ASCII, and
+ * the same bytes as LVGL's LV_SYMBOL_BULLET without pulling in lvgl.h.
+ */
+#define FMT_BULLET "\xE2\x80\xA2"
+
+/* "Session 1000% <bullet> 999d 23h" -- the longest name, figure and
+ * countdown the panel can produce -- is 26 bytes with the bullet's three,
+ * plus NUL. Rounded up for headroom. */
+#define FMT_FOCUS_MAX 40
+
+/*
+ * Focus mode's dim line: the window that is not on the big gauge, in one row.
+ *
+ *   ("Weekly", 42, "5d 6h")   -> "Weekly 42% <bullet> 5d 6h"
+ *   ("Weekly", 42, "--")      -> "Weekly 42%"     no countdown, no clause
+ *   ("Weekly", -1, "5d 6h")   -> "Weekly --% <bullet> 5d 6h"
+ *
+ * `pct` rounds and clamps exactly as the gauge's own figure does (0..1000,
+ * half up, negative or nan unknown), so the line and the big number on the
+ * other setting can never disagree by one. `when` is whatever already went in
+ * the countdown slot -- a countdown or a burn rate -- so this never decides
+ * between them; render_countdown() did.
+ */
+void fmt_focus_line(const char *name, double pct, const char *when,
+		    char *buf, size_t buflen);
+
 #endif /* FMT_H */

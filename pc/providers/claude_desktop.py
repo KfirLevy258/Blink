@@ -24,7 +24,7 @@ mistake that produces a confidently wrong panel rather than an error:
 import json
 import sys
 
-from pc import desktop_paths
+from pc import desktop_paths, session_verdict
 from pc.providers import base
 
 PROVIDER_ID = "claude"
@@ -36,6 +36,21 @@ SRC_ID = "desktop"
 # Half an hour keeps ordinary pauses silent without presenting an abandoned
 # app as live.
 STALE_AFTER_S = 1800
+
+# A session reading older than a window is not offered: base.session_outlived.
+#
+# A five-hour window that was open when the sample was taken has certainly
+# ended five hours later, and this source has no reset stamps to say so
+# itself, so without a bound the figure stayed on the bus for as long as the
+# file did: on 2026-10-30 a sample from 37 hours before a verified Ultra
+# account stopped having a window was still filling the session dial, and it
+# is the same shape on a restarted daemon, which has no memory of the
+# account. Past the bound the session is UNKNOWN (and rateless: the rate is
+# refused past BURN_MAX_GAP_S anyway), and the weekly figure, which lasts
+# seven days, is kept. `stale` is a separate and earlier judgement (half an
+# hour): between the two the number is shown, honestly aged. The bound and
+# its slack are base's, where the normalizer's window length lives too; this
+# module spelled them out on its own until review (2026-10-31).
 
 # Milliseconds, per the module docstring. Named rather than inlined so the
 # unit is stated at every use.
@@ -53,6 +68,111 @@ SAMPLE_EPOCH_MIN = 1_577_836_800
 SAMPLE_EPOCH_MAX = 4_102_444_800
 
 
+def cache_path():
+    """Where the desktop app keeps its usage history on this platform.
+
+    Returns the path whether or not it exists -- absence is a normal state
+    (the app may simply not be installed) and is handled by the reader, not
+    by pretending we do not know where to look. The folder it sits in is
+    pc/desktop_paths's to find, because the Store build moves it.
+    """
+    return desktop_paths.usage_cache_path()
+
+
+# What `blink status` can say about the cache file, from ClaudeDesktopProvider
+# .verdict(). poll() collapses all but the first into "no frame", which is
+# right for the daemon and was wrong for status: it printed "did not parse --
+# please report it" for a cache the app simply had not filled yet, and people
+# reported a fault that was not there (found by destaben in their fork,
+# 2026-10-19). Each of these is a different thing for the reader to do.
+VERDICT_FRAME = "frame"            # a reading: the normal case
+VERDICT_UNFILLED = "unfilled"      # the app's own empty shape: wait for it
+VERDICT_NOT_OURS = "not-ours"      # JSON, but no layout we know: report it
+VERDICT_GARBLED = "garbled"        # not JSON, or not UTF-8: report it
+VERDICT_UNREADABLE = "unreadable"  # could not be opened or read at all
+
+
+def read_text(path):
+    """The cache file's text, or None when its bytes are not UTF-8.
+
+    The one reader for this file: the provider and the weekly anchor's
+    DesktopHistoryProvider both come through here. Read as bytes and decoded
+    here, not with open(encoding="utf-8"): that raises UnicodeDecodeError, a
+    ValueError rather than an OSError, and it went straight out of poll() --
+    a torn write or a UTF-16 file took `blink status` down with a traceback,
+    losing every row after Desktop (review, 2026-10-25). OSError still
+    propagates; the callers each have their own answer to it.
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+# What parse_json returns for content that is not a JSON document. A
+# sentinel, not None: `null` is valid JSON, and it is a format change to
+# report rather than a garbled file.
+NOT_JSON = object()
+
+
+def parse_json(content):
+    """The document in `content`, or NOT_JSON. Never raises.
+
+    The one place this file's text becomes a document, for the provider and
+    the weekly anchor alike. RecursionError is caught with ValueError: deep
+    enough nesting (how deep depends on the interpreter) makes json.loads
+    raise it, it is neither a
+    ValueError nor an OSError, and it went out of every except clause that
+    read this file, taking `blink status` down at the Desktop row (review,
+    2026-10-25). TypeError is None from read_text, bytes that were not UTF-8.
+    """
+    try:
+        return json.loads(content)
+    except (TypeError, ValueError, RecursionError):
+        return NOT_JSON
+
+
+def _version(doc):
+    """The file's own `version`, when it is a scalar we could dispatch on,
+    else None. The one place that decides it, for parse_cache_file,
+    raw_samples and _is_unfilled_doc alike.
+
+    bool is refused first: True == 1 in Python, so `"version": true` would
+    otherwise be looked up as version 1. And only a scalar: a list or object
+    here once raised TypeError from the dict lookup -- outside every try in
+    parse_cache_file -- and the bus marked the whole source broken over one
+    odd field.
+    """
+    version = doc.get("version") if isinstance(doc, dict) else None
+    if isinstance(version, bool) or not isinstance(version, (int, str)):
+        return None
+    return version
+
+
+def _is_unfilled_doc(doc) -> bool:
+    """The two shapes of a cache the app has created but not yet sampled
+    into: an empty object, or a version we have a parser for with an empty
+    `samples` list and no other key. Nothing else qualifies. Keyed off
+    _PARSERS rather than a literal 2, so the version that adds a parser is
+    not reported as a format change while it is still empty.
+
+    Exact on purpose. The first version of this check asked only "is it
+    valid JSON", and the app always writes JSON, so renamed sample keys, a
+    `t` that moved to seconds, a version 3 with a new array and a bare
+    `null` all came out as "not filled yet" (review, 2026-10-25). A false
+    report costs one issue; a false all-clear hides a broken source.
+    """
+    if doc == {}:
+        return True
+    if not isinstance(doc, dict) or set(doc) != {"version", "samples"}:
+        return False
+    if _version(doc) not in _PARSERS:
+        return False
+    return isinstance(doc["samples"], list) and not doc["samples"]
+
+
 def _pct(u: dict, key: str) -> float:
     """One percentage out of a sample's `u` object, or UNKNOWN.
 
@@ -62,7 +182,11 @@ def _pct(u: dict, key: str) -> float:
     """
     try:
         v = float(u[key])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
+        # OverflowError: an int too big for a float, which json reads from
+        # up to 4300 digits. One such sample raised out of the parser and
+        # the whole file was dropped as a changed format (the re-review of
+        # 2026-11-01, finding 12). Not a number, like any other.
         return base.UNKNOWN
     # Upper bound is 1000, not 100: extra usage carries a window past its
     # limit and 102 is a real reading, not a changed field. Clamping it to
@@ -70,8 +194,15 @@ def _pct(u: dict, key: str) -> float:
     return v if 0 <= v <= 1000 else base.UNKNOWN
 
 
-def _sample_to_frame(sample: dict):
-    """(frame-shaped dict, observed_at) from one sample, or (None, None)."""
+def _sample_to_frame(sample: dict, now_epoch=None):
+    """(frame-shaped dict, observed_at) from one sample, or (None, None).
+
+    With `now_epoch`, a session figure older than a window is retired
+    (base.session_outlived): it comes back UNKNOWN. A sample whose only
+    figure has retired is still returned, with both figures unknown, and
+    _newest_sample ranks it below any sample that says more. The rate's
+    series reads samples without a clock, since it judges age its own way.
+    """
     if not isinstance(sample, dict):
         return None, None
     u = sample.get("u")
@@ -79,7 +210,8 @@ def _sample_to_frame(sample: dict):
         return None, None
     try:
         observed_at = float(sample["t"]) / MS_PER_S
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
+        # OverflowError: see _pct.
         return None, None
     if not (SAMPLE_EPOCH_MIN <= observed_at <= SAMPLE_EPOCH_MAX):
         # Out of range means the field was misread or changed units upstream
@@ -94,10 +226,80 @@ def _sample_to_frame(sample: dict):
         # purely by being newer, which is how a fresh empty source blanks a
         # good stale one.
         return None, None
-    return {"session_pct": fh, "weekly_pct": sd}, observed_at
+    window = (session_verdict.evidence(
+        True, session_verdict.KIND_DESKTOP_FH, observed_at) if fh >= 0
+        else None)
+    # Absent, not null or out of range: _pct reads all three as UNKNOWN, so
+    # the test is on the key itself. Only a candidate: see _no_window_rise.
+    weekly_only = "fh" not in u and sd >= 0
+    if now_epoch is not None and base.session_outlived(observed_at, now_epoch):
+        fh = base.UNKNOWN
+    return {"session_pct": fh, "weekly_pct": sd, "window": window,
+            "weekly_only": weekly_only}, observed_at
 
 
-def _newest_sample(samples):
+def _no_window_rise(fields, observed_at, previous):
+    """Evidence that the account has no five-hour window
+    (pc/session_verdict), or None: from a sample with a usable `sd` and no
+    `fh` key, judged against `previous`, the (observed_at, sd, weekly_only)
+    of the sample Desktop took just before it, or None when there is none.
+    Dated by the later sample.
+
+    An `fh` holding a number, 0 included, is proof of a window, and
+    _sample_to_frame says so on its own. Its absence is not, on its own,
+    proof of none. Measured 2026-10-31 on this desk's verified Ultra
+    account, read-only: the newest sample after the change had `sd` and no
+    `fh` key, and the samples before it, 10-28 and 10-29, had `fh` 0 and 1.
+    That was taken as proof until the 2026-11-01 review, which pointed out
+    it was measured on Ultra alone: a Pro or Max account idle for over five
+    hours has no window open, may well write the same sample, and would
+    have been marked and shown the burn view -- the worst outcome.
+
+    So the owner decided: the sample proves no window only when weekly
+    usage ROSE since the sample before it, strictly, and NEITHER sample has
+    an `fh` key. With no window open at the earlier sample, usage after it
+    opens one on any plan that has them, and a window lasts five hours, so
+    the later sample would carry `fh`; only an account with no window shows
+    a rise between two samples without it.
+
+    The earlier sample's `fh` was not checked until the re-review of
+    2026-11-01 (finding 1), and the rule's own premise -- Desktop leaves
+    `fh` out while no window is open -- made it unsound: a Pro sample
+    {fh: 85, sd: 40} four minutes before a reset, the last usage of that
+    window lifting sd to 41, the window closing, and the next sample {sd: 41}
+    a minute after the reset. The rise happened INSIDE a window, which then
+    closed between the polls. Requiring the earlier sample to have no `fh`
+    costs a verified Ultra desk nothing: none of its samples since the
+    change has one.
+
+    The two must be consecutive polls, DESKTOP_RISE_MAX_GAP_S apart at
+    most, not the five hours first proposed. Found while writing the rule:
+    usage need not open a window, it can land at the end of one already
+    open, which then closes. A Pro window opened at T-4h, Desktop sampled
+    at T-0.1h, the user chatted at T and closed the app, the window closed
+    at T+1h, and the app reopened at T+4h: sd rose within five hours and
+    there is no window now. The earlier sample's own `fh` closes that case
+    too, but only one poll apart is the earlier sample a statement about
+    the moment just before the usage. The cost runs the safe way: a
+    Desktop-only Ultra desk proves it rarely (only while its owner is using
+    it), and the owner's own desk, whose measured pair was {fh: 1, sd: 23}
+    on 10-29 and {sd: 19} on 10-31, is not proved by Desktop at all. Claude
+    Code's sustained replies mark it (pc/providers/claude_cli).
+    """
+    if not fields["weekly_only"] or previous is None:
+        return None
+    prev_at, prev_sd, prev_weekly_only = previous
+    if not prev_weekly_only or prev_sd < 0:
+        return None
+    if observed_at - prev_at >= DESKTOP_RISE_MAX_GAP_S:
+        return None
+    if not fields["weekly_pct"] > prev_sd:
+        return None
+    return session_verdict.evidence(
+        False, session_verdict.KIND_DESKTOP_RISE, observed_at)
+
+
+def _newest_sample(samples, now_epoch=None):
     """The most recent usable sample.
 
     Chosen by MAXIMUM timestamp rather than by taking samples[-1]. The real
@@ -106,15 +308,42 @@ def _newest_sample(samples):
     not control, and the cost of being wrong is silently showing an old
     reading as current. max() costs one pass over a list that is a few
     thousand entries at most.
+
+    A sample with a figure still standing outranks every sample whose only
+    figure has retired (_sample_to_frame), however much newer: retired, a
+    newest sample with fh and no sd says nothing, and the weekly figure in
+    the samples before it must still be offered (review, 2026-10-31). When
+    every sample is retired, the newest of them is the answer, with both
+    figures unknown: the file is still the app's and still read -- `blink
+    status` must not call it a changed format -- so it stands with nothing
+    to offer but its age. Alone on the bus that sends nothing, after five
+    hours and ten minutes with no sample, which means Claude Desktop has
+    been closed that long: the board went to sleep at four hours without
+    contact (firmware SLEEP_ABSENT_AFTER_S), so the reading it last drew is
+    not on screen. That answer used to come from a second pass over the
+    file without the clock, which could only ever find the same.
     """
-    best, best_t = None, None
+    best, best_rank, seen = None, None, []
     for s in samples:
-        fields, observed_at = _sample_to_frame(s)
+        fields, observed_at = _sample_to_frame(s, now_epoch)
         if fields is None:
             continue
-        if best_t is None or observed_at > best_t:
-            best, best_t = fields, observed_at
-    return best, best_t
+        # sd is never retired, so this is the raw weekly figure.
+        seen.append((observed_at, fields["weekly_pct"],
+                     fields["weekly_only"]))
+        rank = (fields["session_pct"] >= 0 or fields["weekly_pct"] >= 0,
+                observed_at)
+        if best_rank is None or rank > best_rank:
+            best, best_rank = fields, rank
+    if best is None:
+        return None, None
+    at = best_rank[1]
+    if best["window"] is None:
+        # The sample before it in time, not in the list (see above).
+        before = [p for p in seen if p[0] < at]
+        best["window"] = _no_window_rise(
+            best, at, max(before) if before else None)
+    return best, at
 
 
 # --- burn rate -----------------------------------------------------------
@@ -183,6 +412,13 @@ BURN_WINDOW_S = 3600.0
 # control -- if the rate disappears again, measure the gaps in
 # plan-usage-history.json before touching anything else.
 BURN_MAX_GAP_S = 1000.0
+
+# How far apart two samples may be for a rise in weekly usage between them,
+# neither with an `fh` key, to prove the account has no five-hour window:
+# consecutive polls and no more. The same bound as above, for the same
+# reason -- past it the app was closed in between -- and see
+# _no_window_rise for why a longer gap is a Pro or Max desk wrongly marked.
+DESKTOP_RISE_MAX_GAP_S = BURN_MAX_GAP_S
 
 # Below this the two endpoints are too close together for the slope to mean
 # anything: a single 5-minute step would swing it by the whole window.
@@ -263,20 +499,20 @@ def _samples_array_by_shape(doc):
     return None
 
 
-def _parse_v2(doc):
+def _parse_v2(doc, now_epoch=None):
     """The layout observed in the wild: {"version": 2, "samples": [...]}."""
     samples = doc.get("samples")
     if not isinstance(samples, list) or not samples:
         return None, None
-    return _newest_sample(samples)
+    return _newest_sample(samples, now_epoch)
 
 
-def _parse_by_shape(doc):
+def _parse_by_shape(doc, now_epoch=None):
     """Last resort for a version we have never seen."""
     samples = _samples_array_by_shape(doc)
     if samples is None:
         return None, None
-    return _newest_sample(samples)
+    return _newest_sample(samples, now_epoch)
 
 
 # Versioned adapters, dispatched on the file's own `version` field. The file
@@ -297,10 +533,11 @@ def raw_samples(doc):
     is exactly one parser for plan-usage-history.json in this codebase; this
     is that parser's other exit, not a second one.
     """
-    version = doc.get("version") if isinstance(doc, dict) else None
-    if not isinstance(version, (int, str)) or isinstance(version, bool):
-        version = None
-    if version == 2:
+    # Keyed off _PARSERS, as parse_cache_file and _is_unfilled_doc are, so a
+    # new version's parser is not dispatched differently here. Every parser
+    # so far keeps its series under `samples`; one that does not must say
+    # so here too.
+    if _version(doc) in _PARSERS:
         samples = doc.get("samples")
         return samples if isinstance(samples, list) and samples else None
     return _samples_array_by_shape(doc)
@@ -318,9 +555,7 @@ class ClaudeDesktopProvider(base.ProviderParser):
         return PROVIDER_ID
 
     def path(self):
-        if self._path is not None:
-            return self._path
-        return desktop_paths.cache_path()
+        return self._path if self._path is not None else cache_path()
 
     def parse_cache_file(self, file_content, now_epoch, observed_at=None):
         """A NormalizedUsageFrame from the cache's contents, or None.
@@ -332,18 +567,16 @@ class ClaudeDesktopProvider(base.ProviderParser):
         taken. They agree in the normal case and diverge in exactly the case
         that matters -- a file rewritten with no new sample in it.
         """
-        try:
-            doc = json.loads(file_content)
-        except (TypeError, ValueError):
+        doc = parse_json(file_content)
+        if doc is NOT_JSON:
             return None
+        return self._frame_from_doc(doc, now_epoch, observed_at)
 
-        version = doc.get("version") if isinstance(doc, dict) else None
-        # Only a scalar can be looked up. A list or object here raised
-        # TypeError from dict.get -- outside every try in this function, so
-        # the bus marked the whole source broken over one odd field.
-        if not isinstance(version, (int, str)) or isinstance(version, bool):
-            version = None
-        parser = _PARSERS.get(version, _parse_by_shape)
+    def _frame_from_doc(self, doc, now_epoch, observed_at=None):
+        """parse_cache_file's work on a document already loaded, so the
+        verdict can decide from one json.loads rather than two."""
+        # _version refuses non-scalars and bools; see there for the incident.
+        parser = _PARSERS.get(_version(doc), _parse_by_shape)
         # The rate needs the whole series, not the newest point. Read off the
         # same document the parser is about to reduce, and never let a failure
         # here cost the reading itself -- the percentages are the product and
@@ -354,7 +587,10 @@ class ClaudeDesktopProvider(base.ProviderParser):
         except Exception:
             burn = None
         try:
-            fields, sample_at = parser(doc)
+            # Every sample's only figure a retired session still comes back,
+            # both figures unknown, at the newest sample's time: see
+            # _newest_sample.
+            fields, sample_at = parser(doc, now_epoch)
         except Exception:
             # A parser is not allowed to take the daemon down over an
             # upstream layout change. This is the graceful-degradation path:
@@ -367,6 +603,10 @@ class ClaudeDesktopProvider(base.ProviderParser):
             sample_at = observed_at if observed_at is not None else now_epoch
 
         stale = (now_epoch - sample_at) > self._stale_after
+        # A retired session figure (_sample_to_frame) has no rate to retire
+        # with it: session_burn_pph refuses any series whose newest sample
+        # is over BURN_MAX_GAP_S old, so by that age `burn` is already None
+        # (pinned in test_no_session_window).
         return base.NormalizedUsageFrame(
             provider=PROVIDER_ID, src=SRC_ID, observed_at=sample_at,
             session_pct=fields["session_pct"],
@@ -376,23 +616,64 @@ class ClaudeDesktopProvider(base.ProviderParser):
             session_resets_at=None, weekly_resets_at=None,
             stale=stale,
             session_burn_pph=burn,
+            window_evidence=fields.get("window"),
         )
+
+    def _classify(self, content, now_epoch):
+        """(VERDICT_*, frame or None) for text read_text returned, with no
+        side effect at all. The one decision behind both verdict() and
+        poll(), so the daemon's log and `blink status` cannot disagree about
+        the same bytes."""
+        doc = parse_json(content)
+        if doc is NOT_JSON:
+            return VERDICT_GARBLED, None
+        frame = self._frame_from_doc(doc, now_epoch)
+        if frame is not None:
+            return VERDICT_FRAME, frame
+        if _is_unfilled_doc(doc):
+            return VERDICT_UNFILLED, None
+        return VERDICT_NOT_OURS, None
+
+    def verdict(self, now_epoch):
+        """(one of the VERDICT_* constants, frame or None), from ONE read.
+
+        For `blink status`. One read rather than poll() followed by a second
+        look: the app rewrites the file every few minutes, so two reads can
+        see two different files and describe neither. Side-effect free --
+        never prints, which poll()'s once-per-path complaint did, right above
+        the status row it contradicted -- and never raises.
+        """
+        try:
+            content = read_text(self.path())
+        except OSError:
+            return VERDICT_UNREADABLE, None
+        except Exception:
+            return VERDICT_GARBLED, None
+        return self._classify(content, now_epoch)
 
     def poll(self, now_epoch):
         path = self.path()
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
+            content = read_text(path)
         except OSError:
             # Not installed, not readable, not running. All normal, all
             # silent: this is an ambient source and its absence is not news.
             return []
-        frame = self.parse_cache_file(content, now_epoch)
-        if frame is None:
-            if self._complained_about != path:
-                print(f"[desktop] {path} did not parse as a usage cache;"
-                      " ignoring this source", file=sys.stderr)
-                self._complained_about = path
+        verdict, frame = self._classify(content, now_epoch)
+        if verdict == VERDICT_FRAME:
+            self._complained_about = None
+            return [frame]
+        if verdict == VERDICT_UNFILLED:
+            # The app before its first sample: nothing to read and nothing
+            # wrong. Complaining here put "did not parse" in bridge.log on
+            # every start of a freshly signed-in desk, and under the status
+            # row that called the same file not filled yet (review,
+            # 2026-10-25). Reset, so a later real format change is still
+            # said once.
+            self._complained_about = None
             return []
-        self._complained_about = None
-        return [frame]
+        if self._complained_about != path:
+            print(f"[desktop] {path} did not parse as a usage cache;"
+                  " ignoring this source", file=sys.stderr)
+            self._complained_about = path
+        return []

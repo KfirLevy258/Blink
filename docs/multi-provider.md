@@ -533,7 +533,8 @@ panel is broken.
 
 ### The 512-byte cliff
 
-The fully loaded two-provider frame measures **484 of the 512 bytes**, and
+The fully loaded two-provider frame measures **454 of the 512 bytes** (2026-10-31; the widest it can
+be, computed over every source id), and
 `pc/protocol.encode_checked` is what stands between that and the cliff. Note
 that it was written, documented as the thing callers use, and then not used:
 the daemon's only writer called plain `encode()` until 2026-08-28, so the
@@ -672,8 +673,10 @@ Both removals bought space for the gauges, which are what the panel is for. A
 consequence worth stating precisely: the status line shim keeps one file, not
 one per session — but that file is the **whole payload** Claude Code sends,
 which carries the session id, working directory and transcript path alongside
-the two figures. The daemon reads only `rate_limits` out of it; the file is
-written readable by its owner alone; and the install disclosure and README say
+the two figures. The daemon reads `rate_limits` out of it, and since the
+burn view (docs/plans/burn-5h.md) `session_id` and `cost.total_cost_usd` too,
+in memory only, to tell a reply that came back without a five-hour window;
+the file is written readable by its owner alone; and the install disclosure and README say
 what is in it. (An earlier version of this paragraph claimed the shim captured
 no session id. It did not, and the claim has been corrected everywhere it was
 repeated.) The hook shim records session and agent ids by design —

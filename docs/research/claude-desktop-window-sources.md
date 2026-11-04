@@ -252,7 +252,11 @@ names, and the mtimes of `~/.blink/state/*`.
   real `%APPDATA%\Claude`: `plan-usage-history.json`, `Local Storage`,
   `claude-code`, `claude-code-sessions`. The first write came within a minute
   of signing in, and `blink status` read it ("usage cache parsed, reading
-  15s old").
+  15s old"). A later Store build does not: on Windows 11 with Desktop
+  3.6556.2.0, 2026-10-29 (measured by Mor Gal), `%APPDATA%\Claude` held only a
+  `.user-data-left.<name>` marker and the data was in
+  `%LOCALAPPDATA%\Claude-Data\<name>`. pc/desktop_paths.py follows the marker
+  and still reads this layout when there is none.
 - **Bundled Claude Code 2.1.284**, at
   `%APPDATA%\Claude\claude-code\2.1.284\claude.exe`, not on `PATH`.
 - **Desktop pre-starts helper processes** when a folder is chosen or a new

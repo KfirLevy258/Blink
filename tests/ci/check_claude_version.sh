@@ -94,6 +94,17 @@ MINGW* | MSYS* | CYGWIN*)
 esac
 printf '%s\n' '{"model": "opus"}' >"$HOME/.claude/settings.json"
 
+# This script asserts about settings.json and nothing about the login service,
+# and its HOME is a throwaway: the service manager is global, so without this
+# the install below registered (and the uninstall removed) a real service on
+# the runner, and since the binary refuses to touch the service from a HOME
+# that is not the account's, it now reports "the background service was NOT
+# installed" and exits 1 (CI run 41192997263, every claude-version job).
+# Like check_update.sh and the smoke test, it asks for no service. And it is
+# not run on a desk: see the header of check_install.sh.
+BLINK_SKIP_SERVICE=1
+export BLINK_SKIP_SERVICE
+
 "$BIN" >"$WORK/out.txt" 2>&1 || {
 	cat "$WORK/out.txt" >&2
 	fail "the installer failed alongside $VERSION"

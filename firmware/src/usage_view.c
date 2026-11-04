@@ -1,8 +1,9 @@
 /*
  * The gauge screen: Session (5h) and Weekly (7d) as arcs, with live countdowns.
  *
- * This is the one sink both data sources feed -- the USB bridge today, direct
- * WiFi fetching later -- so both modes render through identical code.
+ * Everything on it comes from the daemon over USB. The board once had a
+ * second source, its own WiFi fetch, which rendered through this same code;
+ * that mode was removed on 2026-10-27 and the daemon is the only feed.
  */
 #include <zephyr/kernel.h>
 #include <lvgl.h>
@@ -13,14 +14,22 @@
 #include "usage_layout.h"
 #include "fmt.h"
 #include "usage_state.h"
+#include "svc_state.h"
 #include "cfg_store.h"
+#include "theme.h"
+#include "burn5h.h"
 
-/* Severity colours: green under 60%, amber approaching, red near the limit. */
-#define COL_BG		lv_color_hex(0x0E1116)
-#define COL_PANEL	lv_color_hex(0x05070A)
-#define COL_TRACK	lv_color_hex(0x272C34)
-#define COL_TEXT	lv_color_hex(0xE6E8EB)
-#define COL_DIM		lv_color_hex(0x8A9199)
+/*
+ * Every colour on this screen is a ROLE in the active theme (theme.c), read
+ * when it is drawn. The values the notes below argue for are Dark's, which
+ * is the 1.3.4 palette unchanged -- tests/theme pins that byte for byte, and
+ * tests/usage_contrast still holds Dark to the rules these notes record.
+ */
+#define COL_BG		lv_color_hex(theme_pal()->bg)
+#define COL_PANEL	lv_color_hex(theme_pal()->panel)
+#define COL_TRACK	lv_color_hex(theme_pal()->track)
+#define COL_TEXT	lv_color_hex(theme_pal()->text)
+#define COL_DIM		lv_color_hex(theme_pal()->dim)
 /*
  * The severity ramp: green, amber, red -- and all three sit inside a 1.16x
  * luminance band on purpose.
@@ -58,36 +67,19 @@
  * panel actually shows -- see tests/usage_contrast, where computing contrast
  * for a colour the hardware cannot display was the gap that let this ship.
  */
-#define COL_GREEN	lv_color_hex(0x0DA243)
-#define COL_GREEN_INK	lv_color_hex(0x06210F)
-#define COL_AMBER	lv_color_hex(0xBA8107)
-#define COL_RED		lv_color_hex(0xFF1900)
+#define COL_GREEN	lv_color_hex(theme_pal()->low)	/* Dark: #0DA243 */
+#define COL_AMBER	lv_color_hex(theme_pal()->mid)	/* Dark: #BA8107 */
+#define COL_RED		lv_color_hex(theme_pal()->high)	/* Dark: #FF1900 */
 /* 3.91:1 against the background. Was #555B63 at 2.76:1, which is under the
  * 3:1 minimum for a graphic element -- and these are the swipe chevrons, which
  * exist only because nobody discovered the gestures without them. An
  * affordance too dim to notice is not an affordance. */
-#define COL_GREY	lv_color_hex(0x6B7280)
+#define COL_GREY	lv_color_hex(theme_pal()->grey)	/* Dark: #6B7280 */
 
-/*
- * Provider identity colours.
- *
- * Colour now says WHICH TOOL a ring belongs to, which means it is no longer
- * saying how close that tool is to its limit. Severity moved to the numerals
- * instead -- the percentage in the middle of each gauge still runs
- * green/amber/red -- so the warning is still there, just carried by the text
- * rather than the ring. Worth knowing when reading this file: the ring tells
- * you whose, the number tells you how bad.
- */
-/*
- * Identity colours, and they sit BELOW the severity ramp deliberately.
- *
- * The teal used to measure 10.16:1 -- brighter than every severity colour, so
- * a codex ball at 5% pulled more attention than a Claude arc at 95%. Identity
- * outranking urgency is exactly backwards. Both now sit inside the severity
- * band, still 1.56:1 apart from each other so the pair survives for anyone who
- * cannot resolve the hue difference.
- */
-#define COL_OTHER	lv_color_hex(0x4387DF)	/* anything else: a cool blue */
+/* The old provider-identity blue (#4387DF) is Dark's `g1` now: the identity
+ * colours went when each provider got a page of its own, and a per-gauge
+ * custom theme is the one place a gauge colour that is not a severity still
+ * means something. */
 
 struct gauge {
 	lv_obj_t *arc;
@@ -106,9 +98,41 @@ struct gauge {
 	 * countdown and falls back.
 	 */
 	double burn;
+	/*
+	 * The figure this gauge is showing right now, -1 for "--%" -- which
+	 * mid-swipe is neither page's reading but a number on its way between
+	 * them. Kept because in Focus mode the gauge that is not big has no
+	 * figure label to read it back from: its number lives inside the dim
+	 * line, and the line is rebuilt whenever either half of it moves.
+	 */
+	double shown;
 };
 
 static struct gauge session, weekly;
+
+/*
+ * Focus mode, and which window it puts in the middle.
+ *
+ * Kept here rather than read from cfg_store when drawing, so this file keeps
+ * drawing and nothing else -- panel_render builds it with no store at all --
+ * and so the choice survives usage_view_deinit(): a screen rebuilt in Focus
+ * comes back in Focus. Set by usage_view_set_focus().
+ */
+static bool focus_on;
+static bool focus_weekly;
+
+LV_FONT_DECLARE(font_focus_40);
+
+static struct gauge *focus_big(void)
+{
+	return focus_weekly ? &weekly : &session;
+}
+
+/* The gauge whose countdown label is carrying the dim line. */
+static bool is_focus_line(const struct gauge *g)
+{
+	return focus_on && g != focus_big();
+}
 /*
  * Two attention indicators -- but not the two 6540287 removed.
  *
@@ -175,9 +199,16 @@ static bool toast_have_prev;
 static bool sleeping;
 /* Filled by usage_view_set_session() from the daemon; see proto.c. */
 static char session_label[28] = "";
-static char provider1_tag[12];	/* whichever provider the daemon made primary */
+static char provider1_tag[USAGE_TAG_MAX];	/* whichever provider the daemon made primary */
 static lv_obj_t *provider_lbl;	/* the tag, spelled out under the brand */
-static char provider2_tag[12];	/* "" when there is only one provider */
+static char provider2_tag[USAGE_TAG_MAX];	/* "" when there is only one provider */
+/*
+ * The pill's text, NUL included: eleven characters, what PILL_MAX_W is
+ * measured for (tests/usage_layout, "claude code"). It was the tags' own
+ * size until those grew to USAGE_TAG_MAX for matching; the pill keeps the
+ * eleven it always showed rather than learning to draw a longer name.
+ */
+#define PILL_TAG_BUF		12
 
 /*
  * PAGES. One provider per screen, reached by swiping vertically.
@@ -235,7 +266,15 @@ static const char *page_tag(int i)
  */
 static void tag_cased(char *dst, size_t n, const char *tag)
 {
-	snprintf(dst, n, "%s", tag);
+	size_t i = 0;
+
+	/* By hand, not snprintf: the pill's buffer (PILL_TAG_BUF) is smaller
+	 * than a tag's on purpose, and GCC warns of the cut snprintf would
+	 * make, which here is the point. */
+	for (; i + 1 < n && tag[i] != '\0'; i++) {
+		dst[i] = tag[i];
+	}
+	dst[i] = '\0';
 	if (dst[0] >= 'a' && dst[0] <= 'z') {
 		dst[0] = (char)(dst[0] - 'a' + 'A');
 	}
@@ -258,91 +297,55 @@ static int32_t age_s = -1;	/* seconds since the last usage message */
 static double last_s_pct = -1;	/* latest numbers, for the near-limit hint */
 static double last_w_pct = -1;
 static enum usage_status last_status = USAGE_STATUS_DISCONNECTED;
+/*
+ * The provider's own status page, for the page on screen and no other.
+ *
+ * svc_seen is the level set_status last worked out for this page, drawn or
+ * not, so usage_view_tick_1s can notice the hold running out and give the
+ * row back without waiting for some other message to arrive. svc_buf is
+ * static for the reason activity_hint's is: lv_label_set_text copies it.
+ */
+static enum svc_level svc_seen;
+static char svc_buf[FMT_HINT_MAX];
 
 /*
- * Per-model weekly windows -- and the long-press card that picks between
- * them -- exist only in standalone WiFi mode. That mode reads Claude's usage
- * endpoint directly and gets a per-model breakdown with it. The USB path
- * gets its numbers from Claude Code's status line, and that payload carries
- * the two overall windows and nothing else; pc/statusline_source.py sends an
- * empty models list because there is nothing to put in one.
+ * There are no per-model weekly windows, and no long-press card to pick
+ * between them. Both belonged to the standalone WiFi mode, which read
+ * Claude's usage endpoint directly and got a per-model breakdown with it;
+ * they went with that mode on 2026-10-27. The daemon gets its numbers from
+ * Claude Code's status line, and that payload carries the two overall
+ * windows and nothing else; pc/statusline_source.py sends an empty models
+ * list because there is nothing to put in one.
  *
- * So on a USB unit the card offered a choice between a real number and a
- * permanent "--%" -- and because the choice is kept in NVS, choosing the
- * empty one stuck across reboots, leaving a gauge reading "--%" for good
- * with no route back that anyone would find. Compiled out rather than
- * disabled: a control that cannot do anything is worse than no control.
+ * Over USB the card had offered a choice between a real number and a
+ * permanent "--%" -- and because the choice is kept in the config store,
+ * choosing the empty one stuck across reboots, leaving a gauge reading
+ * "--%" for good with no route back that anyone would find. cfg_store keeps
+ * the weekly_sel byte, unread, so the record layout boards carry is unchanged.
  */
-#if IS_ENABLED(CONFIG_BLINK_WIFI_MODE)
-#define HAVE_PER_MODEL 1
-
-/* Long-press peek: a card of per-model weekly numbers that STAYS up -- tap
- * a row to point the weekly gauge at that model, tap anywhere else (or wait
- * out the timer) to dismiss. v1 hid it on finger-up, which on this jittery
- * panel meant it vanished before it could be read, let alone used
- * (hardware 2026-07-17). */
-#define PEEK_ROWS 2			/* Claude's windows today: all + fable */
-static lv_obj_t *peek;
-static lv_obj_t *peek_row[PEEK_ROWS];
-static lv_obj_t *peek_row_lbl[PEEK_ROWS];
-static int weekly_sel;			/* 0 all models, 1 fable */
-static int peek_ttl;			/* auto-hide countdown, 0 = idle */
-static int64_t peek_shown_ms;
-static double model_fable = -1;
-#else
-#define HAVE_PER_MODEL 0
-#endif
 
 static void render_weekly(void);
 static void render_age(void);
+static void morph_exec(void *unused, int32_t t);
+/* The burn view's one decision point, and its one object; defined with the
+ * view, after the page change it has to wait for. */
+static void burn_sync(void);
+static void burn_build(lv_obj_t *parent);
 /* Defined beside pip_colour(), which it borrows; called from the 1 s tick,
  * which runs earlier in this file. */
 static void toast_hide(void);
-#if HAVE_PER_MODEL
-static void peek_fill(void);
-#endif
 
 void usage_view_set_models(double fable_pct)
 {
-#if !HAVE_PER_MODEL
-	/* Nothing on this build produces a per-model number: the daemon sends
-	 * no such key and proto.c passes its -1 default straight through.
-	 * Kept as a symbol so both data paths still share one header. */
+	/* A no-op on purpose. The status line has no per-model figure, so the
+	 * daemon never sends one and proto.c hands over its -1 default; the
+	 * function survives only so the models handler still has a target. */
 	ARG_UNUSED(fable_pct);
 }
-#else
-	/* Per-model windows reset with the overall weekly, so a zero weekly
-	 * means the fable number is stale too. Derive that from the weekly
-	 * state itself (last_w_pct) rather than a flag set by an earlier call,
-	 * so BOTH ways the weekly can empty are covered: an update reporting
-	 * the reset, AND the local countdown ticking to zero via
-	 * expire_weekly(). fable is a component of the weekly, so weekly 0%
-	 * always implies fable 0%. */
-	if (last_w_pct == 0 && fable_pct >= 0) {
-		fable_pct = 0;
-	}
-	model_fable = fable_pct;
-	if (built) {
-		render_weekly();
-		if (peek && !lv_obj_has_flag(peek, LV_OBJ_FLAG_HIDDEN)) {
-			peek_fill();
-		}
-		/* The near-limit hint is computed in set_status from model_fable,
-		 * but the models event usually lands right AFTER the usage update
-		 * that ran it -- so re-run it here or the Fable warning lags a
-		 * whole poll and is missing on the first frames after a reboot
-		 * (user-reported 2026-07-20). */
-		if (last_status == USAGE_STATUS_OK) {
-			usage_view_set_status(USAGE_STATUS_OK);
-		}
-	}
-}
-#endif /* HAVE_PER_MODEL */
 
-/* One CONNECTING screen for every boot, USB and standalone alike: a segmented
- * bar that fills green as the worker gets through it, current step named
- * below (option D of the mockups, user-picked 2026-07-15; unified across
- * modes per user request 2026-07-16). The mode passes its own step list to
+/* One CONNECTING screen for every boot: a segmented bar that fills green as
+ * the worker gets through it, current step named below (option D of the
+ * mockups, user-picked 2026-07-15). The caller passes its step list to
  * usage_view_boot_begin(). */
 #define BOOT_STEPS_MAX 3
 static lv_obj_t *boot_seg[BOOT_STEPS_MAX];
@@ -356,12 +359,14 @@ static const char *const *boot_txt;
 static int boot_n;
 
 /*
- * Bound before the cast, never after. usage_view_update has a second caller
- * besides the serial path: main.c's on-device OAuth client, whose figures come
- * from a bare strtod in usage_parse.c with no range check at all, so nan, inf
- * and 1e300 all arrive here. Converting an out-of-range double to int32_t is
- * undefined behaviour -- the very defect proto.c's num() exists to avoid --
- * and `pct < 0` does not catch nan, because nothing compares true to nan.
+ * Bound before the cast, never after. The rule was written for the WiFi
+ * build, whose own usage client parsed the API body with a bare strtod and
+ * called usage_view_update with whatever came out -- nan, inf, 1e300. That
+ * client went on 2026-10-27, leaving the serial path as the only caller,
+ * but the bound is a comparison or two and one caller does not make the
+ * cast safe: converting an out-of-range double to int32_t is undefined
+ * behaviour -- the very defect proto.c's num() exists to avoid -- and
+ * `pct < 0` does not catch nan, because nothing compares true to nan.
  */
 #define PCT_DISPLAY_MAX 1000
 
@@ -400,10 +405,65 @@ static lv_color_t severity(double pct)
 	return COL_GREEN;
 }
 
+/*
+ * An arc's own colour: severity, unless a custom theme gives each gauge a
+ * colour of its own -- and even then 90% and above turns `high`, because a
+ * per-gauge theme that hid the warning would be a theme that hid the one
+ * thing this panel is for. The rail keeps severity() either way: it ranks
+ * pages, and a page has no gauge colour.
+ */
+static lv_color_t arc_tint(const struct gauge *g, double pct);
+
+/*
+ * Everything about a gauge that the theme decides: width, ends, whether the
+ * ball is drawn, and the colours that are not the indicator's. Called when
+ * the gauge is built and again on every theme change, so a theme can never
+ * reach one gauge and not the other.
+ */
+/*
+ * A countdown is dim, always -- except when it is Focus mode's dim line, the
+ * only place the small window's number is on screen at all. Then it wears
+ * the severity of that number from 60% up, the same thresholds as every
+ * ring: a line that stayed grey at 95% would be the panel hiding a warning
+ * because it was drawn small. Its amber and red are the theme's mid and high,
+ * which tests/theme already holds to 4.5:1 as text on every theme because the
+ * hint line wears them.
+ */
+static lv_color_t countdown_colour(const struct gauge *g)
+{
+	if (is_focus_line(g) && g->shown >= 60.0) {
+		return severity(g->shown);
+	}
+	return COL_DIM;
+}
+
+static void style_gauge(struct gauge *g)
+{
+	const struct palette *p = theme_pal();
+	/* Hidden by opacity, not by dropping the part: the knob is what tracks
+	 * the end of the indicator, and a theme change back to one with a dot
+	 * must find it where the arc ends. */
+	lv_opa_t knob = p->dot ? LV_OPA_COVER : LV_OPA_TRANSP;
+
+	lv_obj_set_style_arc_width(g->arc, p->arc_w, LV_PART_MAIN);
+	lv_obj_set_style_arc_width(g->arc, p->arc_w, LV_PART_INDICATOR);
+	lv_obj_set_style_arc_rounded(g->arc, !p->flat, LV_PART_MAIN);
+	lv_obj_set_style_arc_rounded(g->arc, !p->flat, LV_PART_INDICATOR);
+	lv_obj_set_style_arc_color(g->arc, COL_TRACK, LV_PART_MAIN);
+	lv_obj_set_style_bg_color(g->arc, COL_TEXT, LV_PART_KNOB);
+	lv_obj_set_style_border_color(g->arc, COL_BG, LV_PART_KNOB);
+	lv_obj_set_style_bg_opa(g->arc, knob, LV_PART_KNOB);
+	lv_obj_set_style_border_opa(g->arc, knob, LV_PART_KNOB);
+	lv_obj_set_style_text_color(g->pct, COL_TEXT, 0);
+	lv_obj_set_style_text_color(g->name, COL_DIM, 0);
+	lv_obj_set_style_text_color(g->countdown, countdown_colour(g), 0);
+}
+
 static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 			const char *title)
 {
 	g->resets_in_s = -1;
+	g->shown = -1;
 
 	g->arc = lv_arc_create(parent);
 	lv_obj_set_size(g->arc, GAUGE_ARC_SZ, GAUGE_ARC_SZ);
@@ -417,22 +477,15 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	 * arc stays unclickable -- this is still a readout. */
 	lv_obj_clear_flag(g->arc, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_set_style_pad_all(g->arc, GAUGE_BALL_PAD, LV_PART_KNOB);
-	lv_obj_set_style_bg_color(g->arc, COL_TEXT, LV_PART_KNOB);
-	lv_obj_set_style_bg_opa(g->arc, LV_OPA_COVER, LV_PART_KNOB);
 	/*
 	 * A ring of the panel's own ground, so the ball separates from the arc
 	 * it sits on whatever colour that arc happens to be. Without it the
 	 * ball measured 1.24:1 against a red arc and 1.07:1 against a green one
 	 * -- it vanished into the track at exactly the moments the track was
-	 * saying something.
+	 * saying something. Its colour, the ball's, the arc's width and ends
+	 * are the theme's, set in style_gauge() below.
 	 */
-	lv_obj_set_style_border_color(g->arc, COL_BG, LV_PART_KNOB);
 	lv_obj_set_style_border_width(g->arc, GAUGE_BALL_RING, LV_PART_KNOB);
-	lv_obj_set_style_border_opa(g->arc, LV_OPA_COVER, LV_PART_KNOB);
-	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_MAIN);
-	lv_obj_set_style_arc_width(g->arc, GAUGE_ARC_W, LV_PART_INDICATOR);
-	lv_obj_set_style_arc_color(g->arc, COL_TRACK, LV_PART_MAIN);
-	lv_obj_set_style_arc_color(g->arc, COL_GREEN, LV_PART_INDICATOR);
 
 	/* The second provider's ring, hidden until one exists. Created before
 	 * the labels so the text draws over it, not under. */
@@ -474,6 +527,138 @@ static void build_gauge(struct gauge *g, lv_obj_t *parent, lv_coord_t cx,
 	lv_obj_set_style_text_align(g->countdown, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
 
+	style_gauge(g);
+}
+
+/* Show or hide one object without caring which it was. */
+static void show_obj(lv_obj_t *o, bool on)
+{
+	if (on) {
+		lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+	} else {
+		lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+	}
+}
+
+/*
+ * The five-hour burn view's object, and whether it holds the left half.
+ *
+ * Declared up here because layout_gauges() below is the one place that
+ * shows and hides it, the same as every other object on the session side.
+ * burn_on is DECIDED in exactly one place, burn_sync(), with the view's own
+ * code further down; everything here only obeys it.
+ */
+static lv_obj_t *burn_obj;
+static bool burn_on;
+/*
+ * How many hands are on the half (usage_view_hold_half): ui_anim_run() for
+ * the eye clip, ui_slide_run() for a wipe, the clip's wipes inside the
+ * clip's own hold. While any is, burn_sync() decides nothing.
+ */
+static int half_holds;
+
+/*
+ * The session side is the gauge OR the burn view, never a mix: one call
+ * flips all five objects, and nothing is drawn between two flags -- LVGL
+ * renders from lv_timer_handler(), never from inside this function -- so
+ * no frame can catch the left half halfway from one to the other.
+ *
+ * The countdown goes with the gauge here, which it never had to before:
+ * the burn view writes its own line where the countdown sits.
+ */
+static void show_session_side(bool gauge)
+{
+	show_obj(session.arc, gauge);
+	show_obj(session.pct, gauge);
+	show_obj(session.name, gauge);
+	show_obj(session.countdown, gauge);
+	/* No NULL test: this runs from layout_gauges() alone, which runs
+	 * once usage_view_init() has made the object (burn_build() comes
+	 * first) and otherwise only while `built`, which teardown clears
+	 * before it nulls burn_obj. */
+	show_obj(burn_obj, !gauge);
+}
+
+/* A gauge where the two-gauge screen keeps it: the geometry build_gauge()
+ * gave it, restated so leaving Focus puts back exactly that. */
+static void place_side(struct gauge *g, lv_coord_t cx)
+{
+	lv_obj_set_size(g->arc, GAUGE_ARC_SZ, GAUGE_ARC_SZ);
+	lv_obj_align(g->arc, LV_ALIGN_TOP_MID, cx, GAUGE_ARC_Y);
+	lv_obj_set_style_text_font(g->pct, &lv_font_montserrat_20, 0);
+	lv_obj_set_width(g->pct, GAUGE_PCT_MAX_W);
+	lv_label_set_long_mode(g->pct, LV_LABEL_LONG_WRAP);
+	lv_obj_align(g->pct, LV_ALIGN_TOP_MID, cx, GAUGE_PCT_Y);
+	lv_obj_align(g->name, LV_ALIGN_TOP_MID, cx, GAUGE_NAME_Y);
+	lv_obj_set_width(g->countdown, GAUGE_CD_MAX_W);
+	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
+	show_obj(g->arc, true);
+	show_obj(g->pct, true);
+	show_obj(g->name, true);
+}
+
+/*
+ * Put the gauges where the current mode wants them. Geometry and visibility
+ * only; the words are render_gauges()'s.
+ *
+ * Every call here changes a style property build_gauge() already set -- size,
+ * alignment, font, width -- or a flag, so LVGL rewrites values it holds and
+ * the pool does not grow by switching. Measured on host LVGL (2026-10-27,
+ * two providers, a status line, both pages visited): the screen holds
+ * 16,288 B in either mode and after any sequence of switches. What does move
+ * is the drawing peak, +608 B in Focus: LVGL draws a label's glyphs through
+ * one A8 buffer sized to its largest glyph, and the 40 px '%' is 32 x 29.
+ * It lives only while the gauge screen is being drawn, so it never stacks
+ * with Settings, which covers that screen.
+ */
+static void layout_gauges(void)
+{
+	struct gauge *big = focus_big();
+	struct gauge *small = big == &session ? &weekly : &session;
+
+	if (!focus_on) {
+		place_side(&session, -GAUGE_CX);
+		place_side(&weekly, GAUGE_CX);
+		show_session_side(!burn_on);
+		return;
+	}
+	/*
+	 * Focus keeps exactly today's screen, burn view or not. The view is
+	 * laid out for the left half, and Focus has no left half -- its big
+	 * ring is centred and 156 px across -- so a session window that is
+	 * not there reads "--%" here, as it always has. Cleared HERE rather
+	 * than left for burn_sync() to notice, so that "the view is showing"
+	 * can never be true of a Focus screen even for the length of a call.
+	 */
+	burn_on = false;
+	show_session_side(true);
+	lv_obj_set_size(big->arc, FOCUS_ARC_SZ, FOCUS_ARC_SZ);
+	lv_obj_align(big->arc, LV_ALIGN_TOP_MID, 0, FOCUS_ARC_Y);
+	lv_obj_set_style_text_font(big->pct, &font_focus_40, 0);
+	lv_obj_set_width(big->pct, FOCUS_PCT_MAX_W);
+	/* Clipped, not wrapped, as a last resort: paint_pct() already drops
+	 * to the 20 px font from 200% (see FOCUS_PCT_MAX_W), and a wrapped
+	 * figure would fall onto the caption. paint_pct() also picks the
+	 * font; this sets the usual one before the first reading. */
+	lv_label_set_long_mode(big->pct, LV_LABEL_LONG_CLIP);
+	lv_obj_align(big->pct, LV_ALIGN_TOP_MID, 0, FOCUS_PCT_Y);
+	lv_obj_align(big->name, LV_ALIGN_TOP_MID, 0, FOCUS_NAME_Y);
+	lv_obj_set_width(big->countdown, GAUGE_CD_MAX_W);
+	lv_obj_align(big->countdown, LV_ALIGN_TOP_MID, 0, FOCUS_CD_Y);
+	show_obj(big->arc, true);
+	show_obj(big->pct, true);
+	show_obj(big->name, true);
+
+	show_obj(small->arc, false);
+	show_obj(small->pct, false);
+	show_obj(small->name, false);
+	lv_obj_set_width(small->countdown, FOCUS_OTHER_MAX_W);
+	lv_obj_align(small->countdown, LV_ALIGN_TOP_MID, 0, FOCUS_OTHER_Y);
+}
+
+static lv_color_t arc_tint(const struct gauge *g, double pct)
+{
+	return lv_color_hex(theme_arc_colour(theme_pal(), g == &weekly, pct));
 }
 
 static void render_countdown(struct gauge *g)
@@ -487,14 +672,30 @@ static void render_countdown(struct gauge *g)
 	 * never mixed with one: either a time or a rate, never both, never one
 	 * standing in for the other while the other exists.
 	 */
+	buf[0] = '\0';
 	if (g->resets_in_s < 0 && g->burn > 0) {
 		fmt_burn(g->burn, buf, sizeof(buf));
-		if (buf[0] != '\0') {
-			lv_label_set_text(g->countdown, buf);
-			return;
-		}
 	}
-	fmt_countdown(g->resets_in_s, buf, sizeof(buf));
+	if (buf[0] == '\0') {
+		fmt_countdown(g->resets_in_s, buf, sizeof(buf));
+	}
+	/*
+	 * In Focus mode the small gauge has no ring, no figure and no caption
+	 * on screen, so its countdown line says all three: the dim line under
+	 * the big gauge. It is rebuilt from here, the one place that already
+	 * runs whenever the time moves -- every second, at a reset, at a page
+	 * change -- and from paint_pct() when the number does.
+	 */
+	if (is_focus_line(g)) {
+		char line[FMT_FOCUS_MAX];
+
+		fmt_focus_line(g == &weekly ? "Weekly" : "Session", g->shown,
+			       buf, line, sizeof(line));
+		lv_label_set_text(g->countdown, line);
+		lv_obj_set_style_text_color(g->countdown, countdown_colour(g),
+					    0);
+		return;
+	}
 	/*
 	 * A duration, and nothing else. The name used to ride with the number
 	 * because the panel showed two providers at once and a bare figure had
@@ -502,116 +703,75 @@ static void render_countdown(struct gauge *g)
 	 * question, so the answer stops being worth a line under both gauges.
 	 */
 	lv_label_set_text(g->countdown, buf);
-
 }
 
-#if HAVE_PER_MODEL
-static const char *const sel_name[PEEK_ROWS] = {
-	"WEEKLY 7d", "WEEKLY FABLE",
-};
-static const char *const sel_label[PEEK_ROWS] = { "All models", "Fable" };
-
-static double sel_pct(int sel)
+/*
+ * One gauge's figure and ring, from a percentage (negative: "--%").
+ *
+ * Four copies of this lived in render_gauges(), render_weekly(), morph_arc()
+ * and expire_session(), identical but for which gauge they named. Focus mode
+ * gave them a fifth thing to do -- the small gauge's number is in the dim
+ * line, not in its own label -- and one function is how all four learn it.
+ */
+static void paint_pct(struct gauge *g, double pct)
 {
-	return sel == 1 ? model_fable : last_w_pct;
-}
-#endif
+	char buf[8];
 
-/* The weekly arc shows whichever source the peek card selected. The
- * countdown stays the overall weekly reset -- the per-model windows reset
- * with it. */
+	g->shown = pct;
+	if (focus_on && g == focus_big()) {
+		/*
+		 * The 40 px figure holds every reading up to 199% inside the
+		 * thickest ring ("100%" is the widest, 103 px of the 112 the
+		 * hollow has). From 200 it does not: "200%" is 111 px and its
+		 * ends touch a 22 px arc (review, 2026-10-27). A reading that
+		 * far past its limit is rare and needs saying, not size, so
+		 * it drops to the two-gauge screen's 20 px figure.
+		 */
+		const lv_font_t *f = pct_int(pct) >= 200
+					     ? &lv_font_montserrat_20
+					     : &font_focus_40;
+
+		/* Only on a change: a style write re-lays the label out, and
+		 * a page swipe calls this every frame. */
+		if (lv_obj_get_style_text_font(g->pct, 0) != f) {
+			lv_obj_set_style_text_font(g->pct, f, 0);
+		}
+	}
+	if (pct < 0) {
+		lv_label_set_text(g->pct, "--%");
+		lv_arc_set_value(g->arc, 0);
+	} else {
+		snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(pct));
+		lv_label_set_text(g->pct, buf);
+		lv_arc_set_value(g->arc, arc_value(pct));
+		lv_obj_set_style_arc_color(g->arc, arc_tint(g, pct),
+					   LV_PART_INDICATOR);
+	}
+	if (is_focus_line(g)) {
+		render_countdown(g);
+	}
+}
+
+/* The weekly arc and its countdown: the overall weekly window. */
 static void render_weekly(void)
 {
-#if HAVE_PER_MODEL
-	double pct = sel_pct(weekly_sel);
-
-	lv_label_set_text(weekly.name, sel_name[weekly_sel]);
-#else
 	/* One window, so the gauge never needs to say which one it is showing
 	 * -- but it still says it, because "WEEKLY 7d" is the honest name for
 	 * the number under it. */
-	double pct = last_w_pct;
-
 	lv_label_set_text(weekly.name, "WEEKLY 7d");
-#endif
-	if (pct < 0) {
-		lv_label_set_text(weekly.pct, "--%");
-		lv_arc_set_value(weekly.arc, 0);
-		return;
-	}
-
-	char buf[8];
-
-	snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(pct));
-	lv_label_set_text(weekly.pct, buf);
-	lv_arc_set_value(weekly.arc, arc_value(pct));
-	lv_obj_set_style_arc_color(weekly.arc, severity(pct), LV_PART_INDICATOR);
+	paint_pct(&weekly, last_w_pct);
 }
-
-#if HAVE_PER_MODEL
-static void peek_fill(void)
-{
-	for (int i = 0; i < PEEK_ROWS; i++) {
-		double pct = sel_pct(i);
-		char val[8] = "--";
-		char buf[24];
-
-		if (pct >= 0) {
-			snprintf(val, sizeof(val), "%d%%", (int)pct_int(pct));
-		}
-		snprintf(buf, sizeof(buf), "%s  %s", sel_label[i], val);
-		lv_label_set_text(peek_row_lbl[i], buf);
-		/* The selected row wears green, like a done checklist step. */
-		lv_obj_set_style_bg_color(peek_row[i],
-			i == weekly_sel ? COL_GREEN : COL_TRACK, 0);
-		lv_obj_set_style_text_color(peek_row_lbl[i],
-			i == weekly_sel ? COL_GREEN_INK : COL_TEXT, 0);
-	}
-}
-
-static void peek_hide(void)
-{
-	peek_ttl = 0;
-	lv_obj_add_flag(peek, LV_OBJ_FLAG_HIDDEN);
-}
-
-static void peek_row_cb(lv_event_t *e)
-{
-	weekly_sel = (int)(intptr_t)lv_event_get_user_data(e);
-	cfg_set_weekly_sel((uint8_t)weekly_sel);	/* survives reboots */
-	render_weekly();
-	peek_hide();
-}
-
-/* LONG_PRESSED on the screen. */
-static void peek_open_cb(lv_event_t *e)
-{
-	ARG_UNUSED(e);
-	peek_fill();
-	lv_obj_clear_flag(peek, LV_OBJ_FLAG_HIDDEN);
-	peek_ttl = 8;
-	peek_shown_ms = k_uptime_get();
-}
-
-/* CLICKED on the screen: dismiss -- but the release of the opening
- * long-press itself arrives as a click, so only later taps count. */
-static void peek_scrim_cb(lv_event_t *e)
-{
-	ARG_UNUSED(e);
-	if (peek && !lv_obj_has_flag(peek, LV_OBJ_FLAG_HIDDEN) &&
-	    k_uptime_get() - peek_shown_ms > 600) {
-		peek_hide();
-	}
-}
-#endif /* HAVE_PER_MODEL */
-
 
 static lv_obj_t *gauge_scr;
+/* Kept only so a theme change can reach them; nothing else touches these. */
+static lv_obj_t *title_lbl, *chev_r, *chev_l;
 
 void usage_view_deinit(void)
 {
-	/* Free the gauge screen so it never coexists with the setup screen --
-	 * with no PSRAM the LVGL heap cannot hold both. */
+	/* Free the gauge screen so it never coexists with another full screen
+	 * -- with no PSRAM the LVGL heap cannot hold both. Its firmware caller
+	 * was the WiFi mode's setup screen, removed 2026-10-27; panel_render
+	 * still uses it to rebuild the screen between scenes. */
 	built = false;
 	boot_n = 0;
 	boot_active = -1;
@@ -637,6 +797,11 @@ void usage_view_deinit(void)
 	 * set_status, the same way the health dot does.
 	 */
 	dot = NULL;
+	title_lbl = chev_r = chev_l = NULL;
+	/* The burn view's object dies with the screen too; its lines do not,
+	 * they are data (usage_view_set_burn5h). */
+	burn_obj = NULL;
+	burn_on = false;
 	for (int i = 0; i < PIP_MAX; i++) {
 		pip[i] = NULL;
 		pip_num[i] = NULL;
@@ -648,15 +813,11 @@ void usage_view_deinit(void)
 	toast_ttl = 0;
 	/*
 	 * The comparison baseline goes too. The screen being torn down means
-	 * the setup screen is coming up, and whatever the counts are when the
+	 * another screen is coming up, and whatever the counts are when the
 	 * gauges return, they are a first reading again -- not a change from
 	 * whatever was true before the user went into settings.
 	 */
 	toast_have_prev = false;
-#if HAVE_PER_MODEL
-	peek = NULL;
-	peek_ttl = 0;
-#endif
 	if (gauge_scr) {
 		lv_obj_del(gauge_scr);
 		gauge_scr = NULL;
@@ -680,6 +841,7 @@ void usage_view_init(void)
 	 * shouted over the gauges; user feedback 2026-07-16). */
 	lv_obj_t *title = lv_label_create(scr);
 
+	title_lbl = title;
 	lv_label_set_text(title, BRAND_TEXT);
 	lv_obj_set_style_text_color(title, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(title, 2, 0);
@@ -824,9 +986,9 @@ void usage_view_init(void)
 		 * zone was moved to the background -- won the hit and swallowed
 		 * the tap. The dots carry no click handler, so nothing
 		 * happened at all: a dead spot sitting exactly on the marks
-		 * that advertise the page change. The arc (:325) and the peek
-		 * card (:678) were cleared for the same reason; these were
-		 * missed.
+		 * that advertise the page change. The arc (:325) and the
+		 * long-press card of the old WiFi build were cleared for the
+		 * same reason; these were missed.
 		 */
 		lv_obj_clear_flag(rail_dot[i], LV_OBJ_FLAG_CLICKABLE);
 	}
@@ -858,6 +1020,10 @@ void usage_view_init(void)
 
 	build_gauge(&session, scr, -GAUGE_CX, "SESSION 5h");
 	build_gauge(&weekly, scr, GAUGE_CX, "WEEKLY 7d");
+	/* Hidden until an account with no session window has a burn line to
+	 * show; layout_gauges() below is what decides. Before the chevrons,
+	 * the toast and the takeover, so all three still draw over it. */
+	burn_build(scr);
 
 
 	/* Edge affordances: without them nobody discovers the swipes (user
@@ -866,64 +1032,17 @@ void usage_view_init(void)
 	 * on them still reach the screen. */
 	lv_obj_t *chev = lv_label_create(scr);
 
+	chev_r = chev;
 	lv_label_set_text(chev, LV_SYMBOL_RIGHT);
 	lv_obj_set_style_text_color(chev, COL_GREY, 0);
 	lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -3, 0);
 
 	chev = lv_label_create(scr);
+	chev_l = chev;
 	lv_label_set_text(chev, LV_SYMBOL_LEFT);
 	lv_obj_set_style_text_color(chev, COL_GREY, 0);
 	lv_obj_align(chev, LV_ALIGN_LEFT_MID, 3, 0);
 
-#if HAVE_PER_MODEL
-	/* The peek card, hidden until a long press. Created before the
-	 * takeover overlay, which therefore keeps it unreachable while there
-	 * is no data to peek at. */
-	peek = lv_obj_create(scr);
-	lv_obj_set_size(peek, 240, 152);
-	lv_obj_set_style_radius(peek, 12, 0);
-	lv_obj_set_style_bg_color(peek, COL_PANEL, 0);
-	lv_obj_set_style_bg_opa(peek, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_color(peek, COL_TRACK, 0);
-	lv_obj_set_style_border_width(peek, 1, 0);
-	lv_obj_set_style_pad_all(peek, 0, 0);
-	lv_obj_clear_flag(peek, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(peek, LV_OBJ_FLAG_CLICKABLE);
-	lv_obj_center(peek);
-	lv_obj_add_flag(peek, LV_OBJ_FLAG_HIDDEN);
-
-	lv_obj_t *pt = lv_label_create(peek);
-
-	lv_label_set_text(pt, "WEEKLY GAUGE SHOWS");
-	lv_obj_set_style_text_color(pt, COL_DIM, 0);
-	lv_obj_set_style_text_letter_space(pt, 1, 0);
-	lv_obj_align(pt, LV_ALIGN_TOP_MID, 0, 12);
-
-	/* 46 px rows, nearly card-wide: the 30 px originals were a miss-tap
-	 * lottery on this panel (user feedback 2026-07-17). */
-	for (int i = 0; i < PEEK_ROWS; i++) {
-		peek_row[i] = lv_btn_create(peek);
-		lv_obj_set_size(peek_row[i], 208, 46);
-		lv_obj_set_style_shadow_width(peek_row[i], 0, 0);
-		lv_obj_align(peek_row[i], LV_ALIGN_TOP_MID, 0, 40 + i * 54);
-		lv_obj_add_event_cb(peek_row[i], peek_row_cb,
-				    LV_EVENT_CLICKED, (void *)(intptr_t)i);
-
-		peek_row_lbl[i] = lv_label_create(peek_row[i]);
-		lv_label_set_text(peek_row_lbl[i], "");
-		lv_obj_center(peek_row_lbl[i]);
-	}
-
-	lv_obj_add_event_cb(scr, peek_open_cb, LV_EVENT_LONG_PRESSED, NULL);
-	lv_obj_add_event_cb(scr, peek_scrim_cb, LV_EVENT_CLICKED, NULL);
-
-	/* The peek-card choice from last boot; render so the gauge's name
-	 * says which window it shows from the very first frame. */
-	weekly_sel = cfg_get_weekly_sel();
-	if (weekly_sel >= PEEK_ROWS) {
-		weekly_sel = 0;		/* stale NVS from an older layout */
-	}
-#endif /* HAVE_PER_MODEL */
 	render_weekly();
 
 	/*
@@ -935,8 +1054,9 @@ void usage_view_init(void)
 	 *
 	 * No CLICKABLE and no event handler. It cannot be dismissed by hand
 	 * and does not want to be -- five seconds is shorter than the reach --
-	 * and a 288 px clickable strip across the bottom would swallow the tap
-	 * that dismisses the peek card and the swipe that opens settings, the
+	 * and a 288 px clickable strip across the bottom would swallow the
+	 * swipe that opens settings (and once the tap that dismissed the WiFi
+	 * build's long-press card), the
 	 * same way the pip row would have. It keeps its gestures bubbling for
 	 * exactly that reason.
 	 */
@@ -1026,7 +1146,41 @@ void usage_view_init(void)
 	lv_obj_set_style_text_color(boot_hint, COL_DIM, 0);
 	lv_obj_align(boot_hint, LV_ALIGN_TOP_MID, 0, 178);
 
+	/* Born in whichever mode the owner left it in, with the dim line
+	 * already saying "Weekly --%" rather than a bare "--". */
+	layout_gauges();
+	render_countdown(&session);
+	render_countdown(&weekly);
 	built = true;
+}
+
+void usage_view_set_focus(bool on, bool weekly_big)
+{
+	focus_on = on;
+	focus_weekly = weekly_big;
+	if (!built) {
+		return;		/* usage_view_init() lays it out */
+	}
+	/*
+	 * In place, the way a theme change is, and for the same reason: a
+	 * rebuild drops the readings until the daemon re-sends them, and this
+	 * is a setting the owner flips while looking at the result.
+	 *
+	 * A swipe in flight is finished first. Its animation interpolates both
+	 * rings and fades both countdowns, and one of them is about to become
+	 * the dim line; landing it on the page's real numbers before moving
+	 * anything is what keeps a half-faded line from being left behind.
+	 */
+	lv_anim_delete(NULL, morph_exec);
+	lv_obj_set_style_text_opa(session.countdown, LV_OPA_COVER, 0);
+	lv_obj_set_style_text_opa(weekly.countdown, LV_OPA_COVER, 0);
+	if (provider_lbl) {
+		lv_obj_set_style_text_opa(provider_lbl, LV_OPA_COVER, 0);
+	}
+	layout_gauges();
+	render_gauges();
+	usage_view_set_status(last_status);	/* what morph_done() would do */
+	lv_obj_invalidate(gauge_scr);
 }
 
 void usage_view_boot_begin(const char *const *steps, int nsteps)
@@ -1060,7 +1214,6 @@ bool usage_view_have_data(void)
 static void render_gauges(void)
 {
 	struct page_data *p = &pg[cur_page];
-	char buf[8];
 
 	if (!built) {
 		return;
@@ -1071,17 +1224,8 @@ static void render_gauges(void)
 	 * Claude Code's payload entirely. render_weekly() has always honoured
 	 * that; this side did not, so an absent five_hour window rendered as a
 	 * confident green 0%, which is the frozen-meter reading the sentinel
-	 * exists to prevent. */
-	if (p->s_pct < 0) {
-		lv_label_set_text(session.pct, "--%");
-		lv_arc_set_value(session.arc, 0);
-	} else {
-		snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(p->s_pct));
-		lv_label_set_text(session.pct, buf);
-		lv_arc_set_value(session.arc, arc_value(p->s_pct));
-		lv_obj_set_style_arc_color(session.arc, severity(p->s_pct),
-					   LV_PART_INDICATOR);
-	}
+	 * exists to prevent. paint_pct() draws "--%" for it. */
+	paint_pct(&session, p->s_pct);
 	session.resets_in_s = p->s_in_s;
 	session.burn = p->burn;
 	render_countdown(&session);
@@ -1095,6 +1239,13 @@ static void render_gauges(void)
 	last_w_pct = p->w_pct;
 	render_weekly();
 	refresh_provider1();	/* the name under the brand follows the page */
+	/*
+	 * Last, after the gauge holds this page's numbers: a session reading
+	 * that has just come back takes the half from the burn view at once,
+	 * and one that has just gone hands it over -- and the gauge it hands
+	 * back to is already painted.
+	 */
+	burn_sync();
 }
 
 /*
@@ -1347,24 +1498,15 @@ static void morph_text_opa(int32_t t)
 /* One ring: where it is now, on the way from one reading to the other. */
 static void morph_arc(struct gauge *g, double pct)
 {
-	char buf[8];
-
-	if (pct < 0) {
-		lv_label_set_text(g->pct, "--%");
-		lv_arc_set_value(g->arc, 0);
-		return;
-	}
-	snprintf(buf, sizeof(buf), "%d%%", (int)pct_int(pct));
-	lv_label_set_text(g->pct, buf);
-	lv_arc_set_value(g->arc, arc_value(pct));
 	/*
 	 * Severity follows the value it is describing, so the ring changes
 	 * colour where it crosses the threshold rather than at either end.
 	 * Interpolating the colours themselves would put the ring through hues
 	 * that mean nothing -- olive between green and amber -- and this
-	 * palette's whole job is that a colour means one thing.
+	 * palette's whole job is that a colour means one thing. In Focus mode
+	 * the dim line's number travels too, inside the line.
 	 */
-	lv_obj_set_style_arc_color(g->arc, severity(pct), LV_PART_INDICATOR);
+	paint_pct(g, pct);
 }
 
 static void morph_exec(void *unused, int32_t t)
@@ -1386,6 +1528,17 @@ static void morph_exec(void *unused, int32_t t)
 		weekly.resets_in_s = pg[cur_page].w_in_s;
 		render_countdown(&session);
 		render_countdown(&weekly);
+		/*
+		 * The burn view is the other thing on this panel that has no
+		 * midpoint: a bar chart does not travel into a ring. So the
+		 * left half changes hands here, with the words, and only here
+		 * -- burn_sync() refuses to move it before this point, which
+		 * is what keeps a usage line landing mid-swipe from flipping
+		 * it early. Any morph that involves the view is a `jump`
+		 * (its page's session reading is -1), so the rings snap at
+		 * this same moment: the whole half changes in one frame.
+		 */
+		burn_sync();
 	}
 	morph_text_opa(t);
 
@@ -1606,6 +1759,447 @@ void usage_view_page_step(int delta)
 	lv_anim_start(&a);
 }
 
+/*
+ * THE FIVE-HOUR BURN VIEW (docs/plans/burn-5h.md).
+ *
+ * An account with no five-hour window -- Anthropic dropped it for verified
+ * Ultra accounts -- has nothing for the session gauge to say but "--%". On
+ * that page, while the daemon is sending `burn` lines, the left half shows
+ * what the account has been doing instead: output tokens over the trailing
+ * five hours, in twenty quarter-hour bars, with the total, which way the
+ * last hour is heading, and an hour axis in local time. The weekly gauge,
+ * the header, the pips, the pill and the rail do not change.
+ *
+ * ONE OBJECT THAT DRAWS ITSELF, not a widget per mark. Twenty bars, a
+ * baseline, five ticks, five hour numbers and five lines of text as LVGL
+ * objects would be about forty, and every one of them costs pool for its
+ * own struct and its local styles for as long as the screen exists. That
+ * pool is the budget the settings panel lives in on top of this screen,
+ * and it has been measured near empty with a popup stacked over Settings
+ * (prj.conf, CONFIG_LV_Z_MEM_POOL_SIZE). One object with no styles, drawn
+ * from burn_draw_cb() out of numbers worked out when the data changed,
+ * costs one struct. Created once, hidden or shown; nothing is allocated
+ * per frame by this file -- the draw tasks LVGL makes for each mark are
+ * the same ones forty widgets would make, and each is dispatched and freed
+ * as it is made (lv_draw_finalize_task_creation, no draw thread here).
+ *
+ * Measured on host LVGL (64-bit, so pointers count double; 2026-10-31):
+ * the gauge screen held 16,216 B before the view and 16,496 B with it,
+ * +280 B, the same whether the view is showing or not, and showing it
+ * leaves the screen's drawing peak where it was. The touch harness's
+ * Settings-over-gauges peak went from 37,728 to 38,032 B. The 180 s's own
+ * timer (burn_timer) added 72 B more on the same harness, the gauge
+ * screen's "used" going from 27,592 to 27,664 B in full_touch.txt; it is
+ * made once, with the view's object. The board's own figure is the
+ * "[mem] lvgl gauges" line (mem_stats.c).
+ *
+ * WHO HOLDS THE HALF is decided in burn_sync() and nowhere else, and only
+ * shown and hidden by layout_gauges(). The rule, from the contract: the
+ * page's session reading is unknown (s_pct < 0), a burn line for that
+ * page's provider arrived within the last 180 s, and the screen is the
+ * two-gauge one. A session reading coming back takes the half back at
+ * once -- render_gauges() asks on every usage line. Nothing is decided
+ * while the eye clip or a wipe has the screen in its hands
+ * (usage_view_hold_half), and the 180 s runs on LVGL's clock, so it holds
+ * through a doze's peek as well (burn_timer).
+ */
+
+/* The contract's window: the daemon re-sends at least every 60 s, so 180 is
+ * three missed lines before the view gives up. */
+#define BURN_FRESH_MS		(180 * 1000)
+
+/*
+ * The idle mark, in the glyph's place. The contract asks for an en dash,
+ * and no font this board links has one: LVGL's Montserrat carries ASCII,
+ * the degree sign, the bullet and its symbols, and anything else draws as
+ * an empty box (tests/test_panel_strings.py holds every string to that).
+ * The minus from the same symbol set as the three arrows is the mark that
+ * reads as "flat" at the arrows' own size and weight.
+ */
+#define BURN_IDLE_GLYPH		LV_SYMBOL_MINUS
+
+/*
+ * One line per provider, which is what the wire's `p` leaves room for, and
+ * one provider per page; burn5h.h struct burn5h_slot says why, and
+ * tests/burn5h checks the choice.
+ */
+#define BURN_SLOTS		RAIL_PAGES_MAX
+
+static struct burn5h_slot burn_slot[BURN_SLOTS];
+
+/* The board clock's UTC offset, for the hour axis; see usage_view.h. */
+static bool burn_off_known;
+static int32_t burn_off_min;
+
+/*
+ * What the draw callback paints, worked out once per change rather than per
+ * frame. Compared byte for byte in burn_sync() to decide whether anything
+ * needs redrawing, which is why burn_compose() zeroes it first: the padding
+ * has to agree as well as the fields.
+ */
+struct burn_drawn {
+	char total[BURN5H_TOKENS_MAX];
+	char rate[BURN5H_RATE_MAX];
+	const char *glyph;
+	bool accent;			/* the glyph in g1 rather than dim */
+	int16_t total_x, glyph_x;	/* the pair, centred as one group */
+	uint8_t bar_h[BURN5H_N];
+	char hour[BURN5H_N][3];		/* "" where a bucket starts no hour */
+};
+
+static struct burn_drawn bd;
+
+/*
+ * The view's colours: theme_burn_inks() in theme.c, where the host tests can
+ * reach them (tests/theme checks every built-in's against its floor). Dark
+ * starts from the contract's bytes because it is the theme the contract
+ * names; THEME_CUSTOM made from Dark's colours is a custom theme and is
+ * derived, as the builder page draws it. Read from theme.c's cache, filled
+ * when the theme is selected: the walk is soft float and cost 2-10 ms per
+ * draw when this callback ran it itself (2026-11-01 re-review).
+ */
+
+static void burn_fill(lv_layer_t *layer, uint32_t rgb, int32_t x1, int32_t y1,
+		      int32_t x2, int32_t y2)
+{
+	lv_draw_fill_dsc_t f;
+	lv_area_t a = { .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2 };
+
+	lv_draw_fill_dsc_init(&f);
+	f.color = lv_color_hex(rgb);
+	f.opa = LV_OPA_COVER;
+	lv_draw_fill(layer, &f, &a);
+}
+
+/*
+ * One line of text in a box `w` wide and one line of `font` tall. Every
+ * string handed here is static -- bd's buffers or a literal -- so LVGL may
+ * keep the pointer until the task runs (text_local stays 0, no copy).
+ */
+static void burn_text(lv_layer_t *layer, const char *s, const lv_font_t *font,
+		      lv_color_t c, int32_t x1, int32_t y1, int32_t w,
+		      lv_text_align_t align)
+{
+	lv_draw_label_dsc_t t;
+	lv_area_t a = { .x1 = x1, .y1 = y1, .x2 = x1 + w - 1,
+			.y2 = y1 + lv_font_get_line_height(font) - 1 };
+
+	lv_draw_label_dsc_init(&t);
+	t.text = s;
+	t.font = font;
+	t.color = c;
+	t.align = align;
+	lv_draw_label(layer, &t, &a);
+}
+
+static void burn_draw_cb(lv_event_t *e)
+{
+	lv_layer_t *layer = lv_event_get_layer(e);
+	const struct palette *p = theme_pal();
+	const struct theme_burn_inks *k = theme_cur_burn_inks();
+	int32_t x;
+
+	/* Bars first, then the baseline they stand on. An empty bucket draws
+	 * nothing at all: the baseline under it is the zero.
+	 *
+	 * The bright bars are the newest four (16-19), the one still filling
+	 * included, while the "/h" rate and the arrow use the four complete
+	 * quarter-hours (15-18). That is one bucket apart on purpose. The
+	 * 2026-11-01 review flagged it (for up to 15 minutes after a burst the
+	 * panel can say "rising" with no bright bar under the burst), and the
+	 * owner compared panel renders of three ways to line them up and kept
+	 * this one: the newest activity should look newest. Don't "fix" it. */
+	for (int i = 0; i < BURN5H_N; i++) {
+		if (bd.bar_h[i] == 0) {
+			continue;
+		}
+		x = BURN_BAR_X0 + i * BURN_BAR_PITCH;
+		burn_fill(layer,
+			  i >= BURN5H_N - BURN5H_HOUR_N ? k->hot : k->cold,
+			  x, BURN_BASE_Y - bd.bar_h[i],
+			  x + BURN_BAR_W - 1, BURN_BASE_Y - 1);
+	}
+	burn_fill(layer, k->base, BURN_BAR_X0, BURN_BASE_Y,
+		  BURN_BAR_X0 + BURN5H_N * BURN_BAR_PITCH - 1, BURN_BASE_Y);
+
+	/* The hour axis: a tick at the left edge of each bucket that starts
+	 * a full local hour, its number centred under it. */
+	for (int i = 0; i < BURN5H_N; i++) {
+		if (bd.hour[i][0] == '\0') {
+			continue;
+		}
+		x = BURN_BAR_X0 + i * BURN_BAR_PITCH;
+		burn_fill(layer, k->tick, x, BURN_BASE_Y + 1, x,
+			  BURN_BASE_Y + BURN_TICK_H);
+		burn_text(layer, bd.hour[i], &lv_font_montserrat_14,
+			  lv_color_hex(p->grey), x - BURN_HOUR_W / 2,
+			  BURN_HOUR_CY - FONT_LINE_H / 2, BURN_HOUR_W,
+			  LV_TEXT_ALIGN_CENTER);
+	}
+
+	/*
+	 * The total and its arrow, from the positions burn_compose() measured.
+	 * Their boxes are wider than the text on purpose: a box exactly as
+	 * wide as its measured text is one rounding away from LVGL wrapping
+	 * the last glyph onto a line nobody sees.
+	 */
+	burn_text(layer, bd.total, &lv_font_montserrat_20, COL_TEXT,
+		  bd.total_x, BURN_TOTAL_CY - BURN_TOTAL_FONT_H / 2,
+		  BURN_TEXT_W, LV_TEXT_ALIGN_LEFT);
+	burn_text(layer, bd.glyph, &lv_font_montserrat_16,
+		  bd.accent ? lv_color_hex(p->g1) : COL_DIM,
+		  bd.glyph_x, BURN_GLYPH_CY - BURN_GLYPH_FONT_H / 2,
+		  BURN_GLYPH_FONT_H * 2, LV_TEXT_ALIGN_LEFT);
+	burn_text(layer, "tokens " FMT_BULLET " 5h", &lv_font_montserrat_14,
+		  COL_DIM, BURN_CX - BURN_TEXT_W / 2,
+		  BURN_UNIT_CY - FONT_LINE_H / 2, BURN_TEXT_W,
+		  LV_TEXT_ALIGN_CENTER);
+
+	/* Where "SESSION 5h" and its countdown sit on the gauge. */
+	burn_text(layer, "BURN 5h", &lv_font_montserrat_14, COL_DIM,
+		  BURN_CX - BURN_TEXT_W / 2, GAUGE_NAME_Y, BURN_TEXT_W,
+		  LV_TEXT_ALIGN_CENTER);
+	burn_text(layer, bd.rate, &lv_font_montserrat_14, COL_DIM,
+		  BURN_CX - BURN_TEXT_W / 2, GAUGE_CD_Y, BURN_TEXT_W,
+		  LV_TEXT_ALIGN_CENTER);
+}
+
+/*
+ * The view's 180 s, kept on LVGL's clock rather than the mode loop's.
+ *
+ * It used to run from usage_view_tick_1s(), which only the mode loop and
+ * the eye clip call. A doze blocks the mode loop for as long as it lasts
+ * (ui_sleep_run) and never ticks, so a board that dozed when its host went
+ * away kept the view, and a peek hours later drew a chart whose line had
+ * stopped long before, as though it were live (review of 2026-10-31). The
+ * status popup had the same fault, and is taken down as the eyes close
+ * (usage_view_set_sleeping). The view cannot be: a doze can begin a minute
+ * after the last line, and a peek in the two minutes after that must still
+ * show it. So it asks on a timer instead. lv_timer_handler() runs in every
+ * loop that can put this screen on the panel -- the mode loop, the eye
+ * clip, the doze's clips and its peek -- which is what "whenever the
+ * screen is shown" comes to.
+ *
+ * Every second whether or not the view is up: deciding costs a few
+ * comparisons when it is not wanted, and asking regardless means a path
+ * that forgets to ask cannot leave the half wrong for longer than that.
+ * Created once, with the view's object, and kept for the life of the
+ * board, as ui_settings.c keeps upd_timer.
+ */
+static lv_timer_t *burn_timer;
+
+static void burn_timer_cb(lv_timer_t *t)
+{
+	ARG_UNUSED(t);
+	burn_sync();
+}
+
+static void burn_build(lv_obj_t *parent)
+{
+	burn_obj = lv_obj_create(parent);
+	/*
+	 * No styles at all, the theme's included: a plain object would wear
+	 * the default theme's card -- a fill, a border, padding -- and each of
+	 * those is pool. With none, it draws nothing of its own and is
+	 * transparent over the screen's ground.
+	 */
+	lv_obj_remove_style_all(burn_obj);
+	lv_obj_set_pos(burn_obj, BURN_OBJ_X, BURN_OBJ_Y);
+	lv_obj_set_size(burn_obj, BURN_OBJ_W, BURN_OBJ_H);
+	/*
+	 * Not clickable, and gestures bubble: lv_obj_create() sets CLICKABLE,
+	 * and LVGL's hit test walks children back to front, so a clickable box
+	 * over the left half would swallow the swipes this screen is driven by
+	 * -- the lesson the rail dots and the pip row both record.
+	 */
+	lv_obj_clear_flag(burn_obj, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_clear_flag(burn_obj, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_add_flag(burn_obj, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_flag(burn_obj, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_add_event_cb(burn_obj, burn_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
+	/* The 180 s's own clock; see burn_timer. Once, not per screen. */
+	if (burn_timer == NULL) {
+		burn_timer = lv_timer_create(burn_timer_cb, 1000, NULL);
+	}
+}
+
+static int burn_slot_for(const char *tag)
+{
+	return burn5h_slot_find(burn_slot, BURN_SLOTS, tag);
+}
+
+static bool burn_fresh(int s)
+{
+	return burn5h_slot_fresh(&burn_slot[s], k_uptime_get(),
+				 BURN_FRESH_MS);
+}
+
+static void burn_compose(const struct burn5h *m, struct burn_drawn *d)
+{
+	enum burn5h_dir dir = burn5h_direction(m);
+	uint32_t max = 0;
+	lv_point_t tw, gw;
+	int32_t group;
+
+	memset(d, 0, sizeof(*d));
+	burn5h_fmt_tokens(burn5h_total(m), d->total, sizeof(d->total));
+	burn5h_fmt_rate(m, d->rate, sizeof(d->rate));
+	d->glyph = dir == BURN5H_RISING   ? LV_SYMBOL_UP
+		 : dir == BURN5H_EASING   ? LV_SYMBOL_DOWN
+		 : dir == BURN5H_STEADY   ? LV_SYMBOL_RIGHT
+					  : BURN_IDLE_GLYPH;
+	d->accent = dir == BURN5H_RISING || dir == BURN5H_EASING;
+
+	for (int i = 0; i < BURN5H_N; i++) {
+		max = MAX(max, m->b[i]);
+	}
+	for (int i = 0; i < BURN5H_N; i++) {
+		int h = burn_off_known ? burn5h_hour(m->q, i, burn_off_min)
+				       : -1;
+
+		d->bar_h[i] = (uint8_t)burn5h_bar_h(m->b[i], max,
+						    BURN_BAR_MAX_H,
+						    BURN_BAR_MIN_H);
+		/* By hand rather than snprintf: two digits at most, and
+		 * that is plainer than a format the compiler has to be
+		 * persuaded fits in three bytes. */
+		if (h >= 10) {
+			d->hour[i][0] = (char)('0' + h / 10);
+			d->hour[i][1] = (char)('0' + h % 10);
+		} else if (h >= 0) {
+			d->hour[i][0] = (char)('0' + h);
+		}
+	}
+
+	/* The pair is centred as one group; see BURN_GLYPH_GAP. Measured, as
+	 * refresh_dots() measures its tallies: Montserrat's digits are
+	 * proportional, so "111k" and "444k" are different widths. */
+	lv_text_get_size(&tw, d->total, &lv_font_montserrat_20, 0, 0,
+			 LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+	lv_text_get_size(&gw, d->glyph, &lv_font_montserrat_16, 0, 0,
+			 LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+	group = tw.x + BURN_GLYPH_GAP + gw.x;
+	d->total_x = (int16_t)(BURN_CX - group / 2);
+	d->glyph_x = (int16_t)(d->total_x + tw.x + BURN_GLYPH_GAP);
+}
+
+/*
+ * Who holds the left half, decided from the current state, and redrawn only
+ * if what it shows has changed. Safe to call from anywhere, any number of
+ * times: every path that could change the answer -- a usage reading, a burn
+ * line, a page change reaching its midpoint, Focus, a provider's name, the
+ * UTC offset, the 180 s running out, a hold let go -- calls this, and none
+ * of them decides anything for itself.
+ */
+static void burn_sync(void)
+{
+	struct burn_drawn d;
+	int s = -1;
+
+	/* `built` is set after burn_build() and cleared before burn_obj is
+	 * nulled, so it alone says the object is there. */
+	if (!built) {
+		return;
+	}
+	/*
+	 * Not while the eye clip or a wipe has the screen in its hands: the
+	 * half stays as it is until the last of them lets go, and that release
+	 * asks again (usage_view_hold_half says why).
+	 */
+	if (half_holds > 0) {
+		return;
+	}
+	/*
+	 * Not while a page change is short of its midpoint. Until then the
+	 * screen is still showing the page being LEFT -- its words are fading
+	 * out and, in a jump, its rings have not moved -- and cur_page has
+	 * already advanced, so answering now would put the arriving page's
+	 * left half beside the departing page's everything else. morph_exec
+	 * asks again at the midpoint and morph_done at the end.
+	 */
+	if (!morph.swapped && lv_anim_get(NULL, morph_exec) != NULL) {
+		return;
+	}
+
+	if (!focus_on && pg[cur_page].have && pg[cur_page].s_pct < 0) {
+		s = burn_slot_for(page_tag(cur_page));
+		if (s >= 0 && !burn_fresh(s)) {
+			s = -1;
+		}
+	}
+	if (s >= 0) {
+		burn_compose(&burn_slot[s].m, &d);
+		if (!burn_on || memcmp(&d, &bd, sizeof(d)) != 0) {
+			bd = d;
+			lv_obj_invalidate(burn_obj);
+		}
+	}
+	if ((s >= 0) != burn_on) {
+		burn_on = s >= 0;
+		layout_gauges();
+	}
+}
+
+/*
+ * Hold the half where it is, or let it go.
+ *
+ * Two things put this screen on the panel in a way a change of hands
+ * cannot survive, and both keep the protocol running while they do it.
+ *
+ * The eye clip hides every child of this screen for the length of the show
+ * and, on its way out, unhides exactly the set it hid: a record taken when
+ * the clip STARTED (ui_anim.c, peers_set_hidden). A burn line, a session
+ * reading or the view's 180 s running out mid-clip used to change hands
+ * underneath it. The flip showed its objects under the clip's overlay,
+ * where any repaint punches a hole in the streamed eyes, and on the way
+ * out the restore put back what the flip had hidden, so the session gauge
+ * and the burn view were drawn over each other until the next change of
+ * hands -- which on a steady desk is never (review of 2026-10-31,
+ * reproduced by tools/panel_render/clip.sh). The CONNECTING bar had the
+ * same fault, and usage_view_sync_takeover() re-decides it on the way out.
+ * The half is held instead, because a change mid-clip is not only stale on
+ * the way out: it also draws on the way in.
+ *
+ * And a wipe (ui_slide_run) paints the incoming screen one strip at a time
+ * with invalidation frozen and the protocol serviced between strips, so a
+ * change of hands mid-wipe left the strips already painted showing one
+ * half and the rest the other until the wipe ended: up to 650 ms of part
+ * ring, part bar chart.
+ *
+ * Holds nest -- the clip's two wipes run inside its own hold -- and the last
+ * release asks burn_sync() at once, so whatever arrived while the screen
+ * was held lands then, in one piece.
+ */
+void usage_view_hold_half(bool hold)
+{
+	if (hold) {
+		half_holds++;
+		return;
+	}
+	if (half_holds > 0 && --half_holds == 0) {
+		burn_sync();
+	}
+}
+
+void usage_view_set_burn5h(const struct burn5h *m, int64_t at_ms)
+{
+	/* Its own slot, else an empty one, else whichever was heard from
+	 * longest ago. */
+	int s = burn5h_slot_take(burn_slot, BURN_SLOTS, m->p);
+
+	burn_slot[s].m = *m;
+	burn_slot[s].at_ms = at_ms;
+	burn_slot[s].have = true;
+	burn_sync();
+}
+
+void usage_view_set_utc_offset(int32_t off_min)
+{
+	burn_off_min = off_min;
+	burn_off_known = true;
+	burn_sync();
+}
+
 
 /*
  * A window whose reset moment has passed is over, whatever percentage came
@@ -1700,11 +2294,9 @@ static void expire_session(void)
 	pg[cur_page].s_in_s = -1;
 	pg[cur_page].s_pct = 0;
 	session.resets_in_s = -1;
-	render_countdown(&session);
 	last_s_pct = 0;
-	lv_label_set_text(session.pct, "0%");
-	lv_arc_set_value(session.arc, 0);
-	lv_obj_set_style_arc_color(session.arc, severity(0), LV_PART_INDICATOR);
+	paint_pct(&session, 0);
+	render_countdown(&session);
 }
 
 static void expire_weekly(void)
@@ -1714,17 +2306,7 @@ static void expire_weekly(void)
 	weekly.resets_in_s = -1;
 	render_countdown(&weekly);
 	last_w_pct = 0;
-#if HAVE_PER_MODEL
-	if (model_fable >= 0) {
-		model_fable = 0;	/* per-model windows reset with the weekly */
-	}
-#endif
 	render_weekly();
-#if HAVE_PER_MODEL
-	if (peek && !lv_obj_has_flag(peek, LV_OBJ_FLAG_HIDDEN)) {
-		peek_fill();
-	}
-#endif
 }
 
 void usage_view_tick_1s(void)
@@ -1786,6 +2368,26 @@ void usage_view_tick_1s(void)
 	}
 	refresh_rail();
 
+	/*
+	 * Not the burn view's 180 s, which this tick used to run. Nothing
+	 * arrives to end it -- the daemon simply stops sending -- and this
+	 * tick does not run while the board dozes, so the view kept a chart
+	 * through a doze for a peek to show hours later. It runs on LVGL's
+	 * clock now; see burn_timer.
+	 */
+
+	/*
+	 * A status-page incident clears by itself: the daemon re-states it
+	 * every minute, and once SVC_HOLD_MS passes without that, the level
+	 * reads OK. Nothing arrives to say so -- the silence IS the message,
+	 * from a daemon that has crashed or been uninstalled -- so this tick is
+	 * the only thing that can notice. One comparison a second, and the
+	 * status switch re-runs only on the second it changes.
+	 */
+	if (svc_hint(page_tag(cur_page), k_uptime_get(), NULL, 0) != svc_seen) {
+		usage_view_set_status(last_status);
+	}
+
 	if (age_s >= 0) {
 		age_s++;
 		render_age();
@@ -1803,12 +2405,6 @@ void usage_view_tick_1s(void)
 	if (toast_ttl > 0 && --toast_ttl == 0) {
 		toast_hide();
 	}
-
-#if HAVE_PER_MODEL
-	if (peek_ttl > 0 && --peek_ttl == 0) {
-		peek_hide();
-	}
-#endif
 }
 
 /*
@@ -1860,6 +2456,20 @@ static lv_color_t pip_colour(enum fmt_pip_kind k)
 	}
 }
 
+/*
+ * The same tone as TEXT: the tally digits and the toast. Green needs a text
+ * version because a pip is a 3:1 graphic and a numeral is 4.5:1 text, and on
+ * the light themes, Retro and colour-blind the arc green is only the first
+ * (theme.c, low_text; tests/theme measures both). Amber and red already
+ * clear 4.5 everywhere, because the hint line wears them.
+ */
+static lv_color_t pip_text_colour(enum fmt_pip_kind k)
+{
+	return fmt_pip_tone(k) == FMT_TONE_RED || fmt_pip_tone(k) == FMT_TONE_AMBER
+		       ? pip_colour(k)
+		       : lv_color_hex(theme_pal()->low_text);
+}
+
 static void toast_hide(void)
 {
 	toast_ttl = 0;
@@ -1882,13 +2492,16 @@ static void toast_hide(void)
  * and the timer restarts from it. The alternative is a card that keeps
  * talking after the news is stale, which is how a popup earns being ignored.
  */
+static enum fmt_pip_kind toast_kind;	/* the toast's tone, for a repaint */
+
 static void toast_show(enum fmt_pip_kind kind, const char *text)
 {
 	if (!toast || !toast_lbl) {
 		return;
 	}
 	lv_label_set_text(toast_lbl, text);
-	lv_obj_set_style_text_color(toast_lbl, pip_colour(kind), 0);
+	toast_kind = kind;	/* so a theme change can repaint it */
+	lv_obj_set_style_text_color(toast_lbl, pip_text_colour(kind), 0);
 	lv_obj_clear_flag(toast, LV_OBJ_FLAG_HIDDEN);
 	toast_ttl = TOAST_TTL_S;
 }
@@ -1960,6 +2573,10 @@ static void refresh_dots(void)
 	int x;
 
 	if (dot) {
+		uint32_t live, stale;
+
+		/* Low and mid, unless both are neutral: theme.h says why. */
+		theme_dot_colours(theme_pal(), &live, &stale);
 		switch (data_health) {
 		case USAGE_STATUS_ERROR:
 			hc = COL_RED;
@@ -1974,14 +2591,14 @@ static void refresh_dots(void)
 			 * this page's numbers really are sound. What the tool
 			 * is doing is the other dot's business now.
 			 */
-			hc = stale_here() ? COL_AMBER : COL_GREEN;
+			hc = lv_color_hex(stale_here() ? stale : live);
 			break;
 		case USAGE_STATUS_DISCONNECTED:
 			hc = COL_GREY;
 			break;
 		case USAGE_STATUS_OK:
 		default:
-			hc = COL_GREEN;
+			hc = lv_color_hex(live);
 			break;
 		}
 		lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
@@ -2123,7 +2740,8 @@ static void refresh_dots(void)
 
 		if (tally) {
 			lv_label_set_text(pip_num[i], b);
-			lv_obj_set_style_text_color(pip_num[i], c, 0);
+			lv_obj_set_style_text_color(pip_num[i],
+				lost ? COL_GREY : pip_text_colour(want[i].kind), 0);
 			lv_obj_align(pip_num[i], LV_ALIGN_TOP_LEFT,
 				     x + PIP_SZ + PIP_NUM_GAP, PIP_NUM_Y);
 			lv_obj_clear_flag(pip_num[i], LV_OBJ_FLAG_HIDDEN);
@@ -2268,10 +2886,12 @@ static void refresh_provider1(void)
 	lv_obj_set_style_bg_color(weekly.arc, COL_TEXT, LV_PART_KNOB);
 	/* The countdown is a bare duration now, so there is no name on that
 	 * line for an identity hue to mark. It stays quiet. */
-	lv_obj_set_style_text_color(session.countdown, COL_DIM, 0);
-	lv_obj_set_style_text_color(weekly.countdown, COL_DIM, 0);
+	lv_obj_set_style_text_color(session.countdown,
+				    countdown_colour(&session), 0);
+	lv_obj_set_style_text_color(weekly.countdown,
+				    countdown_colour(&weekly), 0);
 	if (provider_lbl) {
-		char t[sizeof(provider1_tag)];
+		char t[PILL_TAG_BUF];
 
 		tag_cased(t, sizeof(t), tag);
 		lv_label_set_text(provider_lbl, t);
@@ -2346,6 +2966,13 @@ void usage_view_set_provider1(const char *tag)
 	 * not the ring position. */
 	snprintf(provider1_tag, sizeof(provider1_tag), "%s", tag ? tag : "");
 	refresh_provider1();
+	/*
+	 * The burn view finds its page by this tag, and proto.c sets it AFTER
+	 * usage_view_update() has already rendered the page -- so on the
+	 * first usage line of a connection the page had no name yet when it
+	 * was asked whether a burn line was its own.
+	 */
+	burn_sync();
 }
 
 void usage_view_set_provider2(const char *tag, double session_pct,
@@ -2448,6 +3075,35 @@ static const char *activity_hint(void)
 	return hbuf;
 }
 
+/*
+ * Should the status-page sentence take the row from what is there?
+ *
+ * Called only where data health has nothing to say -- a used-up window,
+ * an old reading, an error or a lost host each outrank it, because those are
+ * about the numbers on THIS screen and the vendor's page is not. Below them
+ * it yields to an execution-state sentence already holding the row (a
+ * prompt waiting, a turn that died): that wants the person at the desk now,
+ * and an outage elsewhere does not. Above everything else, including the
+ * clock -- which it replaces on this row exactly as those sentences do,
+ * hidden rather than drawn over. An early preview put this text on the hint
+ * label with the clock still visible on the same row and the clock, created
+ * later, painted over it.
+ */
+static void svc_take_row(const char **text, lv_color_t *tc, bool *urgent)
+{
+	if (svc_seen == SVC_OK || (*urgent && (*text)[0])) {
+		return;
+	}
+	*text = svc_buf;
+	*tc = svc_tone(svc_seen) == FMT_TONE_RED ? COL_RED : COL_AMBER;
+	*urgent = true;
+}
+
+void usage_view_svc_changed(void)
+{
+	usage_view_set_status(last_status);
+}
+
 void usage_view_set_status(enum usage_status status)
 {
 	if (!built) {
@@ -2470,6 +3126,9 @@ void usage_view_set_status(enum usage_status status)
 	 */
 	bool urgent = true;
 
+	svc_seen = svc_hint(page_tag(cur_page), k_uptime_get(),
+			    svc_buf, sizeof(svc_buf));
+
 	switch (status) {
 	case USAGE_STATUS_OK:
 		/* Near-limit call-out: the whole point of a glanceable
@@ -2490,16 +3149,6 @@ void usage_view_set_status(enum usage_status status)
 		} else if (last_w_pct >= 95.0) {
 			text = "Weekly almost used up";
 			tc = COL_RED;
-#if HAVE_PER_MODEL
-		} else if (model_fable >= 99.5) {
-			text = "Fable weekly used up";
-			tc = COL_RED;
-		} else if (model_fable >= 95.0) {
-			/* Fable's window is a real limit of its own; it can
-			 * run dry while the overall weekly still looks calm. */
-			text = "Fable weekly almost used up";
-			tc = COL_RED;
-#endif
 		} else {
 			/*
 			 * Data health has nothing to say, so the line reports
@@ -2512,6 +3161,7 @@ void usage_view_set_status(enum usage_status status)
 			text = activity_hint();
 			tc = COL_DIM;
 			urgent = usage_activity_needs_row(activity);
+			svc_take_row(&text, &tc, &urgent);
 		}
 		break;
 	case USAGE_STATUS_STALE:
@@ -2550,6 +3200,7 @@ void usage_view_set_status(enum usage_status status)
 			tc = COL_DIM;
 			text = activity_hint();
 			urgent = usage_activity_needs_row(activity);
+			svc_take_row(&text, &tc, &urgent);
 		}
 		break;
 	case USAGE_STATUS_ERROR:
@@ -2722,3 +3373,64 @@ void usage_view_set_clock(int hh, int mm)
 	snprintf(buf, sizeof(buf), "%02d:%02d", hh, mm);
 	lv_label_set_text(clock_lbl, buf);
 }
+
+/*
+ * Repaint every widget on this screen in the active theme, in place.
+ *
+ * In place rather than by rebuilding the screen, which is what
+ * usage_view_deinit() + init() would do, because a rebuild loses the
+ * readings: they come back only when the daemon re-pushes, so every preview
+ * step from the theme builder would blank both gauges to "--" for a round
+ * trip. Instead the static styles are re-set here, and everything coloured
+ * by STATE -- the arcs, the pips, the rail, the hint line -- is re-rendered
+ * through the same functions that drew it, so it lands in the new theme by
+ * the route it always takes.
+ */
+void usage_view_apply_theme(void)
+{
+	if (!built) {
+		return;
+	}
+	lv_obj_set_style_bg_color(gauge_scr, COL_BG, 0);
+	lv_obj_set_style_text_color(title_lbl, COL_DIM, 0);
+	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
+	lv_obj_set_style_text_color(clock_lbl, COL_DIM, 0);
+	lv_obj_set_style_text_color(chev_r, COL_GREY, 0);
+	lv_obj_set_style_text_color(chev_l, COL_GREY, 0);
+	if (provider_lbl) {
+		lv_obj_set_style_text_color(provider_lbl, COL_TEXT, 0);
+		lv_obj_set_style_bg_color(provider_lbl, COL_PANEL, 0);
+	}
+	style_gauge(&session);
+	style_gauge(&weekly);
+	lv_obj_set_style_bg_color(toast, COL_PANEL, 0);
+	lv_obj_set_style_border_color(toast, COL_TRACK, 0);
+	lv_obj_set_style_text_color(toast_lbl, pip_text_colour(toast_kind), 0);
+
+	lv_obj_set_style_bg_color(overlay, COL_BG, 0);
+	lv_obj_set_style_text_color(wait_big, COL_TEXT, 0);
+	lv_obj_set_style_text_color(boot_cnt, COL_DIM, 0);
+	lv_obj_set_style_text_color(boot_step, COL_DIM, 0);
+	lv_obj_set_style_text_color(boot_hint, COL_DIM, 0);
+	for (int i = 0; i < BOOT_STEPS_MAX; i++) {
+		lv_obj_set_style_bg_color(boot_seg[i], COL_TRACK, 0);
+	}
+	if (boot_n > 0) {
+		/* Same stage again: recolours the bar and leaves the pulse
+		 * running, since the stage did not change. */
+		usage_view_boot_stage(boot_active >= 0 ? boot_active : boot_n);
+	}
+
+	render_gauges();	/* arcs, and refresh_provider1() with them */
+	refresh_rail();
+	usage_view_set_status(last_status);	/* hint, dot, pips */
+	lv_obj_invalidate(gauge_scr);
+}
+
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+/* The gauge screen's own idea of its layout, for the bench's ui_state. */
+const char *usage_view_bench_focus(void)
+{
+	return !focus_on ? "off" : focus_weekly ? "weekly" : "session";
+}
+#endif

@@ -1,8 +1,12 @@
+import ast
 import json
+import pathlib
+import re
 import unittest
 
 from pc import protocol
 from pc.providers import base
+from tests.pc.test_text_encoding import FILES
 
 
 class TestProtocol(unittest.TestCase):
@@ -29,7 +33,8 @@ class TestProtocol(unittest.TestCase):
 
     def test_builders(self):
         self.assertEqual(protocol.welcome("app", "0.2.0"),
-                         {"t": "welcome", "v": 2, "app": "app", "app_ver": "0.2.0"})
+                         {"t": "welcome", "v": 2, "app": "app", "app_ver": "0.2.0",
+                          "caps": ["theme", "edit_done"]})
         u = protocol.usage(61.0, "R1", 26.0, "R2", [{"name": "sonnet", "weekly_pct": 2.0}])
         self.assertEqual(u["t"], "usage")
         self.assertEqual(u["session_pct"], 61.0)
@@ -80,9 +85,37 @@ class TestProtocol(unittest.TestCase):
 
 
 
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+# Every board shipped so far was built with LINE_MAX 512, and a board in the
+# field keeps its buffer until its owner takes an update. So a firmware that
+# grows the buffer does not let the daemon grow its budget: the daemon talks to
+# old boards and new ones alike, and it has to fit the smallest.
+FLEET_LINE_MAX = 512
+
+
+def _proto_c():
+    return (ROOT / "firmware" / "src" / "proto.c").read_text(encoding="utf-8")
+
+
+def _line_max():
+    """LINE_MAX as proto.c defines it, or None if it is no longer a plain
+    #define of a number."""
+    m = re.search(r"^#define\s+LINE_MAX\s+(\d+)\s*$", _proto_c(), re.M)
+    return int(m.group(1)) if m else None
+
+
+def _drain_rx_body():
+    """drain_rx() alone, so a pattern cannot match in some other function."""
+    m = re.search(r"^static void drain_rx\(void\)\n\{\n(.*?)^\}$", _proto_c(),
+                  re.M | re.S)
+    assert m, "drain_rx() not found in proto.c"
+    return m.group(1)
+
+
 class WireBudget(unittest.TestCase):
     """The board drops an over-long line whole rather than truncating it
-    (proto.c:367-371), so the daemon must never write one."""
+    (drain_rx() in proto.c), so the daemon must never write one."""
 
     def test_a_normal_usage_message_fits(self):
         raw, why = protocol.encode_checked(
@@ -91,16 +124,376 @@ class WireBudget(unittest.TestCase):
         self.assertIsNone(why)
         self.assertLessEqual(len(raw), protocol.MAX_LINE_BYTES)
 
-    def test_an_over_long_line_is_refused_with_a_reason(self):
-        # Built by hand rather than through usage(): every field usage() can
-        # emit is now either bounded or omitted when empty, which is the point
-        # of the budget. encode_checked still has to refuse anything that
-        # somehow gets past that.
-        fat = protocol.usage(1.0, "R", 2.0, "R", [])
-        fat["pad"] = "x" * 600
-        raw, why = protocol.encode_checked(fat)
+    @staticmethod
+    def _line_of(nbytes, fill="x"):
+        """A message whose encoded line, newline included, is nbytes long.
+
+        Built by hand rather than through usage(): every field usage() can
+        emit is now either bounded or omitted when empty, which is the point
+        of the budget, so usage() cannot be made to reach the limit.
+        encode_checked still has to refuse anything that somehow gets past
+        that.
+
+        `fill` may be a multibyte character. Whatever it does not divide is
+        made up in ASCII, and the length is checked rather than trusted.
+        """
+        msg = {"t": "usage", "v": protocol.VERSION, "pad": ""}
+        room = nbytes - len(protocol.encode(msg))
+        width = len(fill.encode("utf-8"))
+        msg["pad"] = fill * (room // width) + "x" * (room % width)
+        assert len(protocol.encode(msg)) == nbytes
+        return msg
+
+    def test_a_line_of_exactly_the_limit_is_sent_and_one_more_is_not(self):
+        """Both edges, because nothing used to encode a line of exactly 512.
+
+        The mutation survey of 2026-09-05 (docs/plans/STATE.md) turned
+        encode_checked's `>` into `>=` and every test stayed green: the only
+        lines tested were comfortably short or 759 bytes long, 247 over, so
+        the one boundary where a single byte freezes the panel was never
+        exercised.
+
+        The edges are run at FLEET_LINE_MAX, not at MAX_LINE_BYTES. Taken
+        from the constant under test, they move with it: set it to 511 or 480
+        and this test still found the edge exactly where the constant said,
+        while the daemon refused lines every board in the field accepts.
+
+        The limit counts the trailing newline, and that is the firmware's
+        arithmetic, not this module's. drain_rx() in proto.c stores a byte
+        only while line_len < LINE_MAX - 1 -- one slot is kept for the NUL --
+        so 511 bytes of JSON are kept and the 512th starts discarding. The
+        '\\n' is consumed as the terminator and never stored. 511 + 1 = 512
+        bytes on the wire is the longest line the board dispatches.
+        """
+        at = FLEET_LINE_MAX
+        raw, why = protocol.encode_checked(self._line_of(at))
+        self.assertIsNone(why)
+        self.assertEqual(len(raw), at)
+        self.assertTrue(raw.endswith(b"\n"))
+
+        raw, why = protocol.encode_checked(self._line_of(at + 1))
         self.assertIsNone(raw)
         self.assertIn("line limit", why)
+
+    def test_the_limit_is_bytes_not_characters(self):
+        """The board counts bytes. A project called "café" costs five.
+
+        encode() sends UTF-8 unescaped (see its docstring), so a line can be
+        under the limit in characters and over it in bytes. A check written
+        as len(text) instead of len(raw) would pass every ASCII test above.
+        """
+        at = FLEET_LINE_MAX
+        raw, why = protocol.encode_checked(self._line_of(at, fill="é"))
+        self.assertIsNone(why)
+        self.assertEqual(len(raw), at)
+        self.assertLess(len(raw.decode("utf-8")), at)
+
+        over = self._line_of(at + 1, fill="é")
+        self.assertLess(len(protocol.encode(over).decode("utf-8")), at)
+        raw, why = protocol.encode_checked(over)
+        self.assertIsNone(raw)
+        self.assertIn("line limit", why)
+
+
+class FirmwareLineBuffer(unittest.TestCase):
+    """MAX_LINE_BYTES is a copy of a number in C, and a copy can drift.
+
+    Shrink the board's buffer and the daemon goes on writing lines the board
+    drops whole, with every Python test still green and the log still printing
+    each message as sent. These read proto.c itself, so a change to either
+    number, or to the store condition the budget is derived from, fails here
+    before it reaches a board.
+    """
+
+    def test_the_budget_is_the_smallest_buffer_a_board_has(self):
+        """Exactly min(LINE_MAX, FLEET_LINE_MAX): no more, and no less.
+
+        Not more than LINE_MAX, or this firmware drops what the daemon sends.
+        Not more than FLEET_LINE_MAX either: a firmware with a bigger buffer
+        is not wrong, but the boards already on desks still have 512, and
+        raising the budget to match would send them lines they drop. That
+        floor is raised on purpose or not at all.
+
+        And not less. A budget of 480 is safe for every board and was
+        accepted by the less-or-equal version of this test, but it refuses a
+        loaded two-provider frame (484 bytes when this was written, 454 now)
+        that every board would have shown. The panel freezes all the same, only from this end.
+        """
+        line_max = _line_max()
+        self.assertIsNotNone(line_max, "proto.c no longer has a plain "
+                                       "#define LINE_MAX <n>; re-derive the "
+                                       "budget")
+        self.assertEqual(protocol.MAX_LINE_BYTES,
+                         min(line_max, FLEET_LINE_MAX))
+
+    def test_the_line_buffer_is_line_max_bytes(self):
+        """LINE_MAX is only the budget while it sizes the buffer itself."""
+        self.assertIsNotNone(
+            re.search(r"^static\s+char\s+line\s*\[\s*LINE_MAX\s*\]\s*;",
+                      _proto_c(), re.M),
+            "proto.c no longer declares static char line[LINE_MAX]")
+
+    def test_the_newline_is_counted_because_the_nul_takes_its_slot(self):
+        """The budget equals LINE_MAX only while drain_rx keeps one byte back.
+
+        The edge test above was derived from this store condition, so pin it.
+        If it became `line_len < LINE_MAX`, the board would accept a 513-byte
+        line, but it would also write the terminating NUL one byte past the
+        end of line[] (an ASan build of drain_rx shows the write). If it
+        became `LINE_MAX - 2`, the board would drop a line encode_checked
+        passed. Neither one is harmless.
+        """
+        m = re.search(
+            r"if\s*\(\s*line_len\s*<\s*\(?\s*LINE_MAX\s*-\s*1\s*\)?\s*\)"
+            r"\s*\{?\s*line\s*\[\s*line_len\s*\+\+\s*\]",
+            _drain_rx_body())
+        # assertIsNotNone, not assertRegex: on failure that would print the
+        # whole function back.
+        self.assertIsNotNone(
+            m, "drain_rx() no longer stores while line_len < LINE_MAX - 1")
+
+
+def _protocol_call(node):
+    """The protocol.<name> a Call node calls, or None."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "protocol"):
+        return node.func.attr
+    return None
+
+
+def _is_json_dumps(node):
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "dumps"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "json")
+
+
+def _write_calls(tree):
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute) and n.func.attr == "write"]
+
+
+def _assigned_names(node):
+    """Every name a statement binds, tuple targets included."""
+    targets = []
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+        targets = [node.target]
+    elif isinstance(node, (ast.NamedExpr, ast.For, ast.AsyncFor,
+                           ast.comprehension)):
+        targets = [node.target]
+    elif isinstance(node, (ast.With, ast.AsyncWith)):
+        targets = [i.optional_vars for i in node.items if i.optional_vars]
+    names = []
+    for t in targets:
+        names += [n.id for n in ast.walk(t) if isinstance(n, ast.Name)]
+    return names
+
+
+def _unchecked_writes(tree):
+    """(enclosing scope, line) of each .write() that encodes by itself.
+
+    Anything that calls protocol.encode() or json.dumps() inside the argument
+    of a write is building a frame and putting it on the wire without asking
+    encode_checked. The enclosing function, not the message type, is what is
+    recorded: a writer handed a message built elsewhere has no builder name
+    in its argument to find, which is the shape the first version of this
+    test missed. The scope is Class.method or a top-level function; a
+    function nested inside another is counted against the outer one, which
+    is what a reader of the allowlist would look for.
+    """
+    found = []
+
+    def builds_a_frame(n):
+        return _protocol_call(n) == "encode" or _is_json_dumps(n)
+
+    def frame_names(func):
+        """Names bound anywhere in `func` to something that builds a frame:
+        `raw = protocol.encode(m)`, then `ser.write(raw)` later. The scan
+        used to look only inside the write's own argument, and the two-step
+        form walked past it: the review of PR #4 (2026-10-31) mutated
+        `blink uninstall`'s bye to that shape and the whole suite stayed
+        green."""
+        names = set()
+        for n in ast.walk(func):
+            value = getattr(n, "value", None)
+            if (isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign,
+                               ast.NamedExpr)) and value is not None
+                    and any(builds_a_frame(m) for m in ast.walk(value))):
+                names.update(_assigned_names(n))
+        return names
+
+    def visit(node, scope, in_func, frames):
+        for child in ast.iter_child_nodes(node):
+            if (isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                   ast.ClassDef)) and not in_func):
+                inner = child.name if scope == "<module>" \
+                    else f"{scope}.{child.name}"
+                is_func = not isinstance(child, ast.ClassDef)
+                visit(child, inner, is_func,
+                      frame_names(child) if is_func else frames)
+                continue
+            if (isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "write"
+                    and any(builds_a_frame(n)
+                            or (isinstance(n, ast.Name) and n.id in frames)
+                            for a in child.args for n in ast.walk(a))):
+                found.append((scope, child.lineno))
+            visit(child, scope, in_func, frames)
+
+    visit(tree, "<module>", False, set())
+    return found
+
+
+class EveryFrameIsChecked(unittest.TestCase):
+    """encode_checked is only a guard if the writers call it.
+
+    It once had no production caller at all: the daemon's one writer called
+    plain encode(), and only tests exercised the check (CLAUDE.md, "The wire
+    protocol").
+    """
+
+    def test_the_daemons_writer_sends_only_what_encode_checked_returned(self):
+        """send() writes `raw`, `raw` comes only from encode_checked, and a
+        None `raw` returns before the write.
+
+        Each clause closes a way round the check that the clauses before it
+        left open. Writing anything but `raw` is the obvious one. Rebinding
+        `raw` after the check -- `if raw is None: raw = json.dumps(m)...` --
+        and deleting the None guard, so None reaches ser.write(), both passed
+        a version of this test that only asked where `raw` was first bound.
+        """
+        tree = ast.parse((ROOT / "claude_usage_bridge.py").read_text(
+            encoding="utf-8"))
+        sends = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "send"]
+        self.assertEqual(len(sends), 1, "expected one send() writer")
+        send = sends[0]
+
+        calls = [_protocol_call(n) for n in ast.walk(send)]
+        self.assertIn("encode_checked", calls)
+        self.assertNotIn("encode", calls)
+
+        binds = [n for n in ast.walk(send) if "raw" in _assigned_names(n)]
+        self.assertEqual(len(binds), 1, "send() binds `raw` more than once")
+        bind = binds[0]
+        self.assertIsInstance(bind, ast.Assign)
+        self.assertEqual(_protocol_call(bind.value), "encode_checked")
+
+        writes = _write_calls(send)
+        self.assertEqual(len(writes), 1, "send() should write exactly once")
+        write = writes[0]
+        self.assertEqual(len(write.args), 1)
+        self.assertIsInstance(write.args[0], ast.Name)
+        self.assertEqual(write.args[0].id, "raw")
+
+        def is_none_guard(n):
+            return (isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
+                    and isinstance(n.test.left, ast.Name)
+                    and n.test.left.id == "raw"
+                    and len(n.test.ops) == 1
+                    and isinstance(n.test.ops[0], ast.Is)
+                    and isinstance(n.test.comparators[0], ast.Constant)
+                    and n.test.comparators[0].value is None
+                    and isinstance(n.body[-1], ast.Return))
+
+        guards = [n for n in ast.walk(send) if is_none_guard(n)]
+        self.assertTrue(guards, "send() has no `if raw is None: ... return`")
+        self.assertTrue(
+            any(bind.lineno < g.lineno < write.lineno for g in guards),
+            "the None guard must sit between encode_checked and the write")
+
+    def test_the_writers_that_skip_the_check_are_known(self):
+        """Nothing that reaches a board goes out unchecked any more.
+
+        The probe's welcome and `blink uninstall`'s bye were the last two,
+        each a short message written straight to a port it had just opened,
+        outside send(). They were listed here and left alone as fixed-shape,
+        until the welcome grew "caps" on the fork-picks branch -- the one
+        welcome that decides what a board offers when the daemon restarts
+        under it -- and the final review asked for the rule to hold without
+        exceptions (2026-10-27). `blink provision`'s edition line moved
+        first (2026-10-25).
+
+        The scan covers every .write() whose argument calls protocol.encode()
+        or json.dumps(), in pc/, claude_usage_bridge.py and blink_main.py,
+        and keys each by file and enclosing function, once per write. A new
+        writer anywhere is a new entry, and a second write inside one of the
+        allowed functions is a second copy of its entry, so neither hides
+        behind the ones already here.
+
+        Tap._append is the one entry that is not a frame at all: it writes
+        the BLINK_TAP transcript to a file, one json.dumps per record. It is
+        listed rather than filtered out, because the scan cannot tell a file
+        from a port and should not be taught to guess.
+
+        A new entry here needs the same argument the two removed ones
+        lost: say why it cannot go through encode_checked.
+        """
+        found = []
+        for path in FILES:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for scope, _ in _unchecked_writes(tree):
+                found.append((path.relative_to(ROOT).as_posix(), scope))
+        self.assertEqual(sorted(found), sorted([
+            ("claude_usage_bridge.py", "Tap._append"),  # tap file, no frame
+        ]))
+
+
+class TheScanSeesATwoStepEncode(unittest.TestCase):
+    """_unchecked_writes follows a frame through a variable.
+
+    Found by mutating `blink uninstall`'s bye (pc/cli.py, _say_bye) to
+    `raw = protocol.encode(protocol.bye())` then `s.write(raw)`: the scan
+    looked only inside the write's argument and the whole suite stayed green.
+    """
+
+    def scan(self, src):
+        return [scope for scope, _ in _unchecked_writes(ast.parse(src))]
+
+    def test_inline_and_two_step_are_both_caught(self):
+        inline = "def w(s, m):\n    s.write(protocol.encode(m))\n"
+        two = "def w(s, m):\n    raw = protocol.encode(m)\n    s.write(raw)\n"
+        dumps = ("def w(s, m):\n    data = json.dumps(m).encode()\n"
+                 "    s.write(data)\n")
+        method = ("class C:\n    def w(self, m):\n"
+                  "        raw, extra = protocol.encode(m), 1\n"
+                  "        self.s.write(raw + b'\\n')\n")
+        self.assertEqual(self.scan(inline), ["w"])
+        self.assertEqual(self.scan(two), ["w"])
+        self.assertEqual(self.scan(dumps), ["w"])
+        self.assertEqual(self.scan(method), ["C.w"])
+
+    def test_the_checked_form_and_unrelated_writes_are_not_flagged(self):
+        checked = ("def w(s, m):\n"
+                   "    raw, why = protocol.encode_checked(m)\n"
+                   "    s.write(raw)\n")
+        other = "def w(f, text):\n    out = text.strip()\n    f.write(out)\n"
+        self.assertEqual(self.scan(checked), [])
+        self.assertEqual(self.scan(other), [])
+
+    def test_a_name_bound_in_another_function_is_not_followed(self):
+        src = ("def a(m):\n    raw = protocol.encode(m)\n    return raw\n"
+               "def b(s, raw):\n    s.write(raw)\n")
+        self.assertEqual(self.scan(src), [])
+
+    def test_no_production_module_calls_protocol_encode_at_all(self):
+        """Simpler than any scan of writers, and with no blind spot: the
+        only caller of encode() is encode_checked, inside protocol.py."""
+        for path in FILES:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            bad = [n.lineno for n in ast.walk(tree)
+                   if _protocol_call(n) == "encode"]
+            self.assertEqual(bad, [], f"{path.name} calls protocol.encode()")
+            imported = [n.lineno for n in ast.walk(tree)
+                        if isinstance(n, ast.ImportFrom)
+                        and (n.module or "").endswith("protocol")
+                        and any(a.name == "encode" for a in n.names)]
+            self.assertEqual(imported, [],
+                             f"{path.name} imports protocol.encode")
 
 
 class AdditiveFields(unittest.TestCase):
@@ -361,6 +754,21 @@ def test_a_frame_with_no_epoch_at_all_says_so():
     assert "age_s" not in msg
 
 
+def _declared_source_ids():
+    """Every `src` a provider module or the status line declares, found by
+    reading their SRC_ID and *_SRC_ID constants rather than from a list that
+    could miss a new one."""
+    import importlib
+    import pkgutil
+    from pc import providers, statusline_source
+    mods = [statusline_source] + [
+        importlib.import_module("pc.providers." + m.name)
+        for m in pkgutil.iter_modules(providers.__path__)]
+    return sorted({v for m in mods for k, v in vars(m).items()
+                   if (k == "SRC_ID" or k.endswith("_SRC_ID"))
+                   and isinstance(v, str)})
+
+
 def test_the_widest_line_the_daemon_can_build_still_fits():
     """The measurement that decides whether this field was affordable.
 
@@ -373,9 +781,19 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     three ages at INT32_MAX -- the bound proto.c's SECS_MAX permits, and
     reachable from a file stamped at the epoch.
 
-    509 of 512 bytes, measured. The board drops an over-long line whole with
-    no error, so this test is the guard: the next field, a longer provider or
-    source id, or a fourth age fails here rather than on a desk.
+    454 of 512 bytes, measured at 8d4ad2a (2026-10-31), and the assert below
+    holds it to that figure instead of trusting this sentence. The width is
+    COMPUTED over every source id the providers declare (a SRC_ID or
+    *_SRC_ID constant in pc/providers/ or the status-line source), and the
+    widest is "weekly_anchor": merge() takes the source of the frame that
+    dates the dial, so it can reach the wire. The first version of this test
+    used "cli-state" and measured 450, four bytes short of the real widest.
+    The docstring read "509" until the firmware review of 2026-10-31 got 450;
+    the figure had gone stale when the absolute reset stamps came off the
+    wire, and a stale figure understates the headroom when the next field is
+    being weighed. The board drops an over-long line
+    whole with no error, so this test is the guard: the next field, a longer
+    provider or source id, or a fourth age fails here rather than on a desk.
 
     Three things here were NOT in the first version of this test, and each of
     them on its own put the line over the cap once active_age_s arrived:
@@ -396,9 +814,9 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     """
     now = 1_787_700_000.0
 
-    def widest(provider):
+    def widest(provider, src):
         return base.NormalizedUsageFrame(
-            provider=provider, src="cli-state",   # codex_cli.STATE_SRC_ID
+            provider=provider, src=src,
             observed_at=now - 2147483647, active_at=now - 2147483647,
             session_pct=102.33333333333333,
             # Fractional, and far past any real window: both are shapes a
@@ -411,12 +829,23 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
             n_run=99, n_wait=99, n_stuck=99, n_idle=99, n_agents=99,
             label="a-project-with-a-long-name")
 
-    msg = protocol.frame_to_usage(widest("claude"), now,
-                                  secondary=widest("codex"))
-    raw, why = protocol.encode_checked(msg)
-    assert why is None
-    assert msg["active_age_s"] == 2147483647
-    assert len(raw) <= protocol.MAX_LINE_BYTES, len(raw)
+    widths = {}
+    for src in _declared_source_ids():
+        msg = protocol.frame_to_usage(widest("claude", src), now,
+                                      secondary=widest("codex", src))
+        raw, why = protocol.encode_checked(msg)
+        assert why is None, (src, why)
+        assert msg["active_age_s"] == 2147483647
+        assert len(raw) <= protocol.MAX_LINE_BYTES, (src, len(raw))
+        widths[src] = len(raw)
+    # The sources that matter are in the set, so the maximum is the real one.
+    assert {"cli", "cli-state", "desktop", "desktop_ls",
+            "weekly_anchor"} <= set(widths), widths
+    widest_src = max(widths, key=widths.get)
+    # The measured width, asserted so the docstring cannot go stale again. A
+    # new field or source id that moves it is a deliberate change: say the new
+    # figure here and above.
+    assert (widest_src, widths[widest_src]) == ("weekly_anchor", 454), widths
 
 
 def test_a_countdown_beyond_any_real_window_is_clamped():
@@ -927,3 +1356,58 @@ class VolatileUsageKeys(unittest.TestCase):
         msg = dict(self._loaded(), some_field_from_2027=7)
         self.assertEqual(
             protocol.meaningful_usage(msg)["some_field_from_2027"], 7)
+
+
+# --------------------------------------------------------------- svc message
+
+
+def test_svc_message_shape():
+    assert protocol.svc("claude", "major", "Claude Code") == {
+        "t": "svc", "v": 2, "provider": "claude", "level": "major",
+        "what": "Claude Code"}
+
+
+def test_svc_ok_carries_no_component():
+    """Omitted rather than sentinelled, like session's label: "ok" names
+    nothing, so a `what` left over from the incident before cannot ride
+    along with the all-clear."""
+    assert protocol.svc("codex", "ok", "Login") == {
+        "t": "svc", "v": 2, "provider": "codex", "level": "ok"}
+
+
+def test_svc_refuses_a_level_the_board_does_not_know():
+    import pytest
+    with pytest.raises(ValueError):
+        protocol.svc("claude", "major_outage", "Claude Code")
+
+
+def test_svc_levels_are_the_contract():
+    # The firmware is built to this list; changing it is a wire change.
+    assert protocol.SVC_LEVELS == ("ok", "maint", "degraded", "partial",
+                                   "major")
+
+
+def test_svc_caps_the_component_on_a_character_boundary():
+    m = protocol.svc("claude", "partial", "é" * 40)
+    assert protocol.SVC_WHAT_MAX_BYTES == 24
+    assert len(m["what"].encode("utf-8")) <= protocol.SVC_WHAT_MAX_BYTES
+    assert m["what"] == "é" * 12
+
+
+def test_the_longest_svc_line_fits_with_room_to_spare():
+    m = protocol.svc("x" * protocol.MODEL_MAX_CHARS, "degraded", "W" * 100)
+    raw, why = protocol.encode_checked(m)
+    assert why is None
+    assert len(raw) < 128, len(raw)
+
+
+def test_svc_keys_never_collide_with_its_values():
+    """msg_parse.c once read `"edition":"codex"` as the literal "edition"
+    because a value matched a key name (tests/msg_parse/host_test.c). No
+    value this message can carry may equal one of its own keys."""
+    from pc import status_page
+    keys = {"t", "v", "provider", "level", "what"}
+    values = set(protocol.SVC_LEVELS) | set(status_page.PAGES) | {
+        short for page in status_page.PAGES.values()
+        for _, short in page.components} | {"svc"}
+    assert not keys & values

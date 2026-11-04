@@ -209,19 +209,24 @@ implementation:
    Still open: the Claude Desktop cache path on Linux -- an Electron
    convention, never observed, and there is no Linux Desktop to observe it
    with (Windows was settled 2026-09-30: `%APPDATA%\Claude`, written there
-   despite the MSIX package -- docs/research/claude-desktop-window-sources.md);
+   despite the MSIX package -- docs/research/claude-desktop-window-sources.md;
+   a later Store build moves it to `%LOCALAPPDATA%\Claude-Data\<name>`
+   behind a `.user-data-left.<name>` marker, measured 2026-10-29 and followed
+   by pc/desktop_paths.py);
    macOS
    notarisation (needs an Apple developer account); a board
    id on the settings screen; the disclosure question on the five known
-   concerns -- four of which are WiFi-build only and are not compiled into
-   the shipping image, but whose code is public; and whether the Codex clip,
-   which mirrors the Claude clip and lands on a `>_` glyph on Codex blue,
-   trades on a second company's mark.
-2. **Merge and cut a release.** The published v0.6.0 predates the second page,
-   the swipe detector, Codex as a provider, the Codex edition, per-page
-   freshness, the burn rate and every fix from the August review.
-3. **Two things nobody has watched run**: Windows, and an M-series Mac. CI
-   exercises the installer on both; no human has seen the product work there.
+   concerns -- four of which were WiFi-build only, never compiled into a
+   shipping image, and whose code was deleted on 2026-10-27; and whether
+   the Codex clip, which mirrors the Claude clip and lands on a `>_` glyph
+   on Codex blue, trades on a second company's mark.
+2. **Merge and cut a release.** Done: 1.0.0 carried the second page, the
+   swipe detector, Codex as a provider, the Codex edition, per-page
+   freshness, the burn rate and every fix from the August review, and
+   releases have followed since (docs/releases/).
+3. **Two things nobody had watched run**: Windows, and an M-series Mac. Both
+   have now: a real Windows 10 PC on 2026-08-29 (docs/windows-check.md), and
+   an Apple-silicon Mac is the desk BLINK is developed and proved on.
 
 Smaller, still open:
 
@@ -230,7 +235,7 @@ Smaller, still open:
   (1s old)" is less than it could say.
 - **The wire carries float noise** — `session_pct: 14.000000000000002` was
   observed. Harmless to the panel, but they are bytes inside a 512-byte line,
-  and the fully loaded frame already measures 484 of it.
+  and the fully loaded frame already measures 454 of it (2026-10-31).
 - **`cfg_set_main_src()` has no callers** since the "Main source" row was
   removed from the settings screen. The board therefore always announces
   `pref: claude`, so a user running both cannot make Codex the primary dial.
@@ -240,7 +245,9 @@ Smaller, still open:
 - **A state-only frame is dropped by the normalizer.** On a machine with the
   hooks installed but no statusline payload and no desktop app, the activity
   light has nothing to ride on: `merge()` returns None for a provider group
-  carrying no percentage, and sending one would blank the dials instead. The
+  carrying no percentage and no rollover evidence, and sending one would blank
+  the dials instead. (A group whose windows have all ENDED is sent, as unknown
+  -- blank is the truth there, and keeping the pre-reset figure is not.) The
   real answer is a `state`-only wire message that does not touch them.
 
 **The pip row (2026-09-02).** The header's single execution-state dot became a

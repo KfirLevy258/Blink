@@ -10,7 +10,7 @@ rate. This gives them a real countdown. The burn rate stays: it answers a
 different question and it survives this source being absent.
 """
 from pc import desktop_local_storage as ls
-from pc import desktop_paths
+from pc import session_verdict
 from pc.providers import base
 
 PROVIDER_ID = "claude"
@@ -31,9 +31,7 @@ class ClaudeDesktopLocalStorageProvider(base.ProviderParser):
         return PROVIDER_ID
 
     def path(self):
-        if self._dir is not None:
-            return self._dir
-        return desktop_paths.local_storage_path()
+        return self._dir if self._dir is not None else ls.store_path()
 
     def record_to_frame(self, rec, now_epoch):
         """A NormalizedUsageFrame from one record, or None."""
@@ -58,11 +56,22 @@ class ClaudeDesktopLocalStorageProvider(base.ProviderParser):
         elif not (ls.SAMPLE_EPOCH_MIN <= resets_at <= ls.SAMPLE_EPOCH_MAX):
             resets_at = None
 
+        # A session reading or a reset stamp is a five-hour window, as of
+        # when the record was written: evidence for pc/session_verdict, and
+        # still evidence once the window has rolled. Measured 2026-10-31 on
+        # a verified Ultra account, read-only: this store gave no frame at
+        # all, so it only ever proves a window.
+        evidence = None
+        if pct >= 0 or resets_at is not None:
+            evidence = session_verdict.evidence(
+                True, session_verdict.KIND_LOCAL_STORAGE, observed_at)
+
         rolled_at = None
-        if resets_at is not None and now_epoch >= resets_at:
-            # The window has rolled. The stored percentage describes a window
-            # that no longer exists, and the record will not be rewritten
-            # until the app next acts. Report the rollover as evidence and
+        if base.window_ended(resets_at, now_epoch):
+            # The window has rolled -- by the same test every source uses,
+            # base.window_ended, rather than a copy of it here. The
+            # stored percentage describes a window that no longer exists,
+            # and the record will not be rewritten until the app next acts. Report the rollover as evidence and
             # publish no number -- see this module's tests.
             rolled_at = resets_at
             resets_at = None
@@ -72,7 +81,8 @@ class ClaudeDesktopLocalStorageProvider(base.ProviderParser):
             provider=PROVIDER_ID, src=SRC_ID, observed_at=observed_at,
             session_pct=pct, session_resets_at=resets_at,
             session_rolled_at=rolled_at,
-            stale=(now_epoch - observed_at) > self._stale_after)
+            stale=(now_epoch - observed_at) > self._stale_after,
+            window_evidence=evidence)
 
     def poll(self, now_epoch):
         try:

@@ -20,9 +20,11 @@ Three of those ways are specific to this fleet and worth naming.
     desk named there reported a pass, so a shrunken run cannot vouch for
     itself.
 
-  - The gate cannot verify without tomllib, and release.sh calls plain
-    `python3`. On this Mac /usr/bin/python3 is 3.9.6 and has none, while the
-    homebrew python3 on PATH does. An interpreter that cannot read the
+  - The gate cannot verify without tomllib, and release.sh runs it under
+    `python3` unless BLINK_PYTHON names another. On this Mac
+    /usr/bin/python3 is 3.9.6 and has none, while the homebrew python3 on
+    PATH does. release.sh now refuses an interpreter below 3.11 itself, but
+    the gate must not rely on that. An interpreter that cannot read the
     inventory has nothing to say about the release, and that silence must
     refuse rather than pass.
 
@@ -408,9 +410,10 @@ def test_the_real_inventory_names_the_three_desks(tmp_path):
 # --- a gate that cannot verify --------------------------------------------
 
 def test_no_tomllib_refuses(tmp_path, monkeypatch):
-    # release.sh calls plain `python3`. On this Mac /usr/bin/python3 is 3.9.6
-    # and has no tomllib, so this is the difference between a refusal and a
-    # traceback in front of somebody publishing a release.
+    # release.sh runs the gate under BLINK_PYTHON, else `python3`. On this Mac
+    # /usr/bin/python3 is 3.9.6 and has no tomllib, so this is the difference
+    # between a refusal and a traceback in front of somebody publishing a
+    # release -- or running the gate by hand, past release.sh's own check.
     monkeypatch.setattr(fleet_gate, "tomllib", None)
     reason = gate(_state(tmp_path), SHA, _inventory(tmp_path),
                   now=lambda: 2000.0)
@@ -452,7 +455,7 @@ def test_main_refuses_the_wrong_number_of_arguments(tmp_path):
 
 
 def test_run_as_a_module_refuses_with_status_one(tmp_path):
-    # The whole path release.sh takes: `python3 -m pc.fleet_gate`, non-zero
+    # The whole path release.sh takes: `"$PY" -m pc.fleet_gate`, non-zero
     # status, reason on stderr beside the FATAL block that follows it.
     done = subprocess.run(
         [sys.executable, "-m", "pc.fleet_gate",
@@ -460,3 +463,136 @@ def test_run_as_a_module_refuses_with_status_one(tmp_path):
         cwd=str(ROOT), capture_output=True, text=True)
     assert done.returncode == 1
     assert "commit" in done.stderr
+
+
+# --- the VM fleet ---------------------------------------------------------
+#
+# tools/fleet/fleet-vm.toml proves this Mac and its UTM guests with one board
+# handed round. That is honest evidence of something narrower than the
+# desks, so the gate reads it only when asked about that inventory by name,
+# and a VM run never stands in for the desk fleet.
+
+VM_DESKS = ("local-mac", "ubuntu-vm", "windows-vm")
+
+
+def _vm_inventory(tmp_path, kind="vm"):
+    body = f'[fleet]\nkind = "{kind}"\nsequential = true\n' + "".join(
+        f'[hosts.{name}]\nos = "linux"\nssh = ""\n' for name in VM_DESKS)
+    p = tmp_path / "fleet-vm.toml"
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def _vm_state(tmp_path, kind="vm", **kw):
+    """A VM run made with the inventory _vm_inventory writes."""
+    return _state(tmp_path, hosts=_hosts(*VM_DESKS),
+                  fleet={"kind": kind, "sequential": True,
+                         "inventory": str(tmp_path / "fleet-vm.toml")},
+                  **kw)
+
+
+def test_a_vm_run_passes_against_the_vm_inventory(tmp_path):
+    assert gate(_vm_state(tmp_path), SHA, _vm_inventory(tmp_path),
+                now=lambda: 2000.0) is None
+
+
+def test_a_vm_run_does_not_stand_in_for_the_desks(tmp_path):
+    """Even with the desk names: the kind is what the run proved."""
+    state = _state(tmp_path, fleet={"kind": "vm", "sequential": True})
+    reason = gate(state, SHA, _inventory(tmp_path), now=lambda: 2000.0)
+    assert reason and "VM fleet run" in reason
+    assert "BLINK_FLEET=vm" in reason
+
+
+def test_a_desk_run_is_not_a_vm_run_either(tmp_path):
+    """A result from before the VM fleet existed has no `fleet` key, and
+    reads as the desks -- which is what it was."""
+    state = _state(tmp_path, hosts=_hosts(*VM_DESKS))
+    reason = gate(state, SHA, _vm_inventory(tmp_path), now=lambda: 2000.0)
+    assert reason and "desk fleet run" in reason
+
+
+def test_a_fleet_kind_nothing_knows_is_refused(tmp_path):
+    reason = _refuse(tmp_path, fleet={"kind": "cloud"})
+    assert "kind" in reason
+    reason = _refuse(tmp_path, fleet="vm")
+    assert "kind" in reason
+    # Pinned to its own sentence: refused as an unknown kind, not merely as
+    # some other kind of run.
+    assert "kind nothing here knows" in _refuse(tmp_path,
+                                                fleet={"kind": "cloud"})
+
+
+def test_a_run_made_with_another_inventory_file_is_refused(tmp_path):
+    """Same kind, same desk names, different file. (Review N1)"""
+    state = _vm_state(tmp_path)
+    doc = json.loads(state.read_text(encoding="utf-8"))
+    doc["fleet"]["inventory"] = str(tmp_path / "my-own.toml")
+    state.write_text(json.dumps(doc), encoding="utf-8")
+    reason = gate(state, SHA, _vm_inventory(tmp_path), now=lambda: 2000.0)
+    assert reason and "my-own.toml" in reason
+
+
+def test_a_recorded_relative_inventory_is_read_against_the_checkout():
+    assert fleet_gate._same_inventory(
+        "tools/fleet/fleet-vm.toml", ROOT / "tools" / "fleet"
+        / "fleet-vm.toml")
+    assert not fleet_gate._same_inventory(
+        "tools/fleet/fleet-vm.toml", ROOT / "tools" / "fleet" / "fleet.toml")
+    assert not fleet_gate._same_inventory(None, ROOT / "x")
+
+
+def test_the_recorded_inventory_is_not_read_against_where_the_gate_runs(
+        tmp_path, monkeypatch):
+    """Review of fp/fleet-vms r2, N-a: every other test runs from the repo
+    root, where the checkout and the working directory are one folder, so
+    a later "simplification" that resolved the recorded path against the
+    cwd survived them all. From outside the checkout -- with a decoy
+    inventory at the same relative path in the cwd -- the recorded path
+    still means the checkout's file, and only that one."""
+    decoy = tmp_path / "tools" / "fleet" / "fleet-vm.toml"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("[hosts]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert fleet_gate._same_inventory(
+        "tools/fleet/fleet-vm.toml", ROOT / "tools" / "fleet"
+        / "fleet-vm.toml")
+    assert not fleet_gate._same_inventory("tools/fleet/fleet-vm.toml", decoy)
+
+
+def test_an_inventory_kind_nothing_knows_is_refused(tmp_path):
+    reason = gate(_vm_state(tmp_path), SHA,
+                  _vm_inventory(tmp_path, kind="cloud"), now=lambda: 2000.0)
+    assert reason and "cloud" in reason
+
+
+def test_a_vm_pass_says_it_was_vms_on_the_line_that_licenses_it(
+        tmp_path, capsys):
+    p = _vm_state(tmp_path)
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    doc["finished_at"] = time.time()
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    assert fleet_gate.main([str(p), SHA, str(_vm_inventory(tmp_path))]) == 0
+    out = capsys.readouterr().out
+    assert "VM fleet run" in out and "not Windows 10 on x86" in out
+
+
+def test_the_vm_pass_line_says_what_the_run_did_not_contain():
+    """The narrower claim on the line that licenses the release. (S4)"""
+    bare = {"real_account": False,
+            "hosts": {"a": {"scenarios": {"overage": {"ok": True}}}}}
+    said = " ".join(fleet_gate.vm_caveats(bare))
+    assert "--no-real-account" in said
+    assert "No install or update scenario" in said
+    full = {"real_account": True,
+            "hosts": {"a": {"scenarios": {"fresh_install": {"ok": True}}}}}
+    said = " ".join(fleet_gate.vm_caveats(full))
+    assert "--no-real-account" not in said and "No install" not in said
+
+
+def test_the_shipped_vm_inventory_reads_as_vm():
+    names, kind = fleet_gate._inventory(ROOT / "tools" / "fleet"
+                                        / "fleet-vm.toml")
+    assert kind == "vm" and names == sorted(VM_DESKS)
+    assert fleet_gate._inventory(ROOT / "tools" / "fleet"
+                                 / "fleet.toml")[1] == "desks"
