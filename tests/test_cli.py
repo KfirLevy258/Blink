@@ -3445,6 +3445,30 @@ def test_status_says_a_removed_distro_is_gone(tmp_path, monkeypatch, capsys):
     assert calls == []
 
 
+def test_uninstall_leaves_a_config_json_it_cannot_read(tmp_path,
+                                                       monkeypatch, capsys):
+    """U26: with config.json not parsing, the WSL record in it could not
+    be read, so uninstall never looked inside the distribution, deleted
+    the file -- the only record of where Blink was set up -- and said
+    "Done. Nothing left". It leaves the file now, says why, and does not
+    say done."""
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]))
+    _recorded_wsl(tmp_path)
+    config = inside(tmp_path, cli.user_config.path(cli.blink_home()))
+    with open(config, "w") as f:
+        f.write('{"claude_home": {"kind": "wsl"')
+    # A fresh process, as `blink uninstall` is: no last good answer kept.
+    from pc import claude_home
+    claude_home._last.clear()
+    assert cli.main(["uninstall"]) == 1
+    out = capsys.readouterr().out
+    with open(config) as f:
+        assert f.read() == '{"claude_home": {"kind": "wsl"'
+    assert config in out and "does not parse" in out
+    assert "Done." not in out
+    assert "uninstall_from" not in [c[0] for c in calls]
+
+
 def test_uninstall_skips_a_removed_distro(tmp_path, monkeypatch, capsys):
     calls = _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Debian")]))
     home = _recorded_wsl(tmp_path)

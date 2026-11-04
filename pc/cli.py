@@ -3598,13 +3598,18 @@ def _old_settings(home):
     return out
 
 
-def _take_out_of(path, home):
+def _take_out_of(path, home, statusline=True, hooks=True):
     """Remove our status line and hooks from `path`, restoring a kept
     status line; one line of report for each. Never raises: the file was
-    readable a moment ago, and if it no longer is it is left alone."""
+    readable a moment ago, and if it no longer is it is left alone.
+    `statusline` and `hooks` pick the halves, for uninstall, which needs
+    them at different moments."""
     lines = []
-    for undo, shim in ((install_statusline.uninstall, shim_path(home)),
-                       (install_hooks.uninstall, hook_shim_path(home))):
+    for undo, shim, want in (
+            (install_statusline.uninstall, shim_path(home), statusline),
+            (install_hooks.uninstall, hook_shim_path(home), hooks)):
+        if not want:
+            continue
         try:
             lines.append(undo(path, shim))
         except (install_statusline.SettingsUnreadable, OSError) as e:
@@ -4361,6 +4366,13 @@ def cmd_uninstall(_args) -> int:
     # that file still holds an entry of ours. Asked now, while the markers
     # that help recognise them are still there.
     olds = _old_settings(home)
+    # A config.json that does not parse is kept, not deleted with the rest
+    # in step 5: it may be the only record of a WSL distribution or a
+    # Claude Code folder Blink is set up in, which uninstall could not
+    # read and so did not undo. Deleted, nothing could ever find them
+    # again; that is what uninstall did, and then said "Done", until the
+    # review of feat/enterprise-spend (U26).
+    config_bad = _config_unreadable()
     print("Blink uninstall.")
     print()
     print("[1/5] Background service ... ", end="", flush=True)
@@ -4381,6 +4393,14 @@ def cmd_uninstall(_args) -> int:
         print("      Remove the statusLine.command line by hand once it parses.")
 
     print("[3/5] Activity hooks:")
+    # An old file's hooks first, while the marker step 3 removes is still
+    # there: it is the only thing that knows the spellings early releases
+    # wrote (Windows 1.0.0 to 1.0.2), and taken out after it, those were
+    # left behind running a deleted script (U37). No chain file to get
+    # wrong here, unlike the status line, which waits for step 2's.
+    for old in olds:
+        for line in _take_out_of(old, home, statusline=False):
+            print(f"      {old}: {line}")
     try:
         print("      " + install_hooks.uninstall(settings_path(home),
                                                  hook_shim_path(home), home))
@@ -4390,8 +4410,9 @@ def cmd_uninstall(_args) -> int:
         print(f"      Left alone: {e}")
     # After the recorded file, whose chain file is the one uninstall
     # restores from; an old file's own was put back when install moved.
+    # The hooks of an old file went before step 3, above.
     for old in olds:
-        for line in _take_out_of(old, home):
+        for line in _take_out_of(old, home, hooks=False):
             print(f"      {old}: {line}")
     wsl_left = False
     if wsl_home is not None:
@@ -4418,7 +4439,7 @@ def cmd_uninstall(_args) -> int:
               # `blink config`'s settings, and any temp file a write left.
               # Not install's, but the status-page opt-in is a choice about
               # the network, and a reinstall must not find it already on.
-              user_config.path(blink_home()),
+              *([] if config_bad else [user_config.path(blink_home())]),
               *install_statusline.temp_siblings(
                   user_config.path(blink_home())),
               # The theme's files (pc/theme.FILES): the saved theme, the
@@ -4467,6 +4488,13 @@ def cmd_uninstall(_args) -> int:
             " at a program that is not there.")
         return 1
     print()
+    if config_bad:
+        print(f"Left alone: {user_config.path(blink_home())}")
+        print("It does not parse, so which Claude Code folder or WSL")
+        print("distribution Blink was set up for could not be read, and that")
+        print("one may still hold Blink's status line and hooks. Fix the")
+        print(f"file, then run `{command_to_type()} uninstall` again.")
+        return 1
     if wsl_left:
         print(f"Blink is still set up inside {wsl_home.distro_name}: see"
               " above.")

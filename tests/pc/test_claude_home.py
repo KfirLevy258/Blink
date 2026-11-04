@@ -390,6 +390,36 @@ def test_install_stops_when_the_record_will_not_save(tmp_path, monkeypatch,
         assert f.read() == y_text
 
 
+def test_uninstall_takes_old_hook_spellings_out_of_the_legacy_file(
+        tmp_path, monkeypatch):
+    """U37: no record, CLAUDE_CONFIG_DIR naming Y, and ~/.claude holding
+    hooks an early release wrote, in a spelling only the marker knows
+    (Windows 1.0.0 to 1.0.2). Step 3 took Y's hooks out and removed the
+    marker, and only then was ~/.claude looked at -- by then nothing said
+    those ten were ours, and they stayed, running a deleted script."""
+    from pc import install_hooks
+    legacy = claude_home.legacy_settings_path()
+    os.makedirs(os.path.dirname(legacy), exist_ok=True)
+    old = {ev: f"sh /old/blink-hook.sh {ev}"
+           for ev, _ in install_hooks.HOOK_EVENTS}
+    with open(legacy, "w") as f:
+        json.dump({"hooks": {ev: [{"hooks": [{"type": "command",
+                                              "command": c}]}]
+                             for ev, c in old.items()}}, f)
+    marker = install_hooks._marker_path()
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("\n".join(old.values()) + "\n")
+    y = _j(tmp_path, "work-claude")
+    os.makedirs(y)
+    with open(os.path.join(y, "settings.json"), "w") as f:
+        f.write("{}")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", y)
+    cli.main(["uninstall"])
+    with open(legacy) as f:
+        assert "blink-hook.sh" not in f.read()
+
+
 def test_one_unc_builder():
     """pc/wsl and pc/claude_home spell a path into a distribution the same
     way, because they are the same function: two builders had drifted on a
