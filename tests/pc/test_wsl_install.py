@@ -706,3 +706,34 @@ def test_an_unreadable_out_file_ignores_an_exported_out_dir(tmp_path, shim):
     finally:
         out.chmod(0o600)
     assert list(elsewhere.iterdir()) == []
+
+
+# ------------------------------------ review of feat/enterprise-spend, U32
+
+@posix_only
+@pytest.mark.parametrize("hooks", [
+    "not an object",
+    {"UserPromptSubmit": [], "Stop": {"hooks": [{"type": "command",
+                                                 "command": "x"}]}},
+])
+def test_a_hooks_section_it_cannot_edit_still_gets_the_status_line(
+        tmp_path, hooks):
+    """Natively a hooks section Blink cannot safely edit costs the activity
+    light and nothing else (cli: "Activity hooks ... skipped"). Inside WSL
+    the same SettingsUnreadable stopped the whole install, status line and
+    all. Now it installs the status line, leaves "hooks" exactly as it was
+    -- an event merged before the bad one is not kept either -- and says
+    the hooks were skipped."""
+    lin = _tree(tmp_path, {"statusLine": {"type": "command",
+                                          "command": "echo MINE"},
+                           "hooks": hooks}, link=False)
+    home = _home(lin)
+    msg = install_statusline.install_into(home,
+                                          _runner(lin, _fake_bin(tmp_path)))
+    assert "skipped" in msg
+    doc = json.loads((lin / ".claude" / "settings.json").read_text())
+    assert doc["statusLine"]["command"] == _sl_cmd(lin)
+    assert doc["hooks"] == hooks
+    assert install_hooks._read_marker(home) == set()
+    assert (lin / ".blink" / "statusline-chain").read_text().strip() == \
+        "echo MINE"

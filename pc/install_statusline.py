@@ -5,6 +5,7 @@ key. Two rules follow: never lose their existing statusline command (it goes in
 the chain file, and uninstall puts it back verbatim), and never rewrite any key
 but `statusLine`.
 """
+import copy
 import glob
 import hashlib
 import json
@@ -965,10 +966,22 @@ def install_into(home, wsl_run, *, hooks=True, files=True) -> str:
         st.doc, _read_marker(home), None, wsl_statusline_command(home))
     lines = [msg]
     if hooks:
-        doc, hk_marker, added, repointed = install_hooks.merge_install(
-            doc, install_hooks._read_marker(home),
-            lambda ev: install_hooks.wsl_hook_command(home, ev))
-        lines.append(install_hooks.install_message(added, repointed))
+        # As natively (cli's "Activity hooks" step): a hooks section Blink
+        # cannot safely edit costs the activity light, not the status line,
+        # which is the product. Until the review of feat/enterprise-spend
+        # (U32) it stopped the whole WSL install. Merged on a copy, because
+        # merge_install has added the events before the bad one by the time
+        # it raises, and those must not be written either.
+        try:
+            merged, hk_marker, added, repointed = install_hooks.merge_install(
+                copy.deepcopy(doc), install_hooks._read_marker(home),
+                lambda ev: install_hooks.wsl_hook_command(home, ev))
+        except SettingsUnreadable as e:
+            hooks = False
+            lines.append(f"Activity hooks skipped ({e}).")
+        else:
+            doc = merged
+            lines.append(install_hooks.install_message(added, repointed))
 
     _wsl_apply_chain(home, wsl_run, action)
     _wsl_write(wsl_run, st.path, st.sha, "keep",
